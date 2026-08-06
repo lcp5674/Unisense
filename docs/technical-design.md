@@ -10,7 +10,7 @@
 | 项 | 决策（最小粒度） |
 |----|------|
 | 交付形态 | Web 浏览器（React 19 + TypeScript 5 + Ant Design 5），桌面大屏优先（≥1280px 断点），无移动端；构建产物经 Nginx 静态托管 + CDN（私有化内网可省） |
-| 前端框架细节 | Vite 5 构建；React Router 6 路由；TanStack Query（缓存/重试/降级态）、Zustand（轻态）；血缘图 Cytoscape.js / AntV G6；ECharts 看板；Axios 拦截统一 `code`/`degraded` |
+| 前端框架细节 | Vite 5 构建；React Router 6 路由；TanStack Query（缓存/重试/降级态）、Zustand（轻态）；血缘图 Cytoscape.js / AntV G6；ECharts 看板；Axios 拦截统一 `error_code`/`retry_after` |
 | 后端 | Python 3.11 + FastAPI（Pydantic v2 强校验、OpenAPI 自动文档）；ASGI 运行于 `uvicorn` + `gunicorn`（多 worker，`--workers=N`，N=CPU×2+1） |
 | 后端并发模型 | 纯 I/O（HTTP/DB/Redis）全异步 `async def`；Neo4j 用官方驱动**异步 session（async Bolt）**，事件循环内直接 await；若环境强制同步驱动则包 `run_in_threadpool` 隔离（避免阻塞事件循环）；CPU 密集（口径 AST 翻译）走进程池 |
 | 关系存储 | MySQL 8.0（业务/配置/审计主库），InnoDB；连接池 `SQLAlchemy async` `pool_size=20`/`max_overflow=10`/`pool_pre_ping=true` |
@@ -97,7 +97,7 @@
 │ 冲突服务     │─────────▶│ 权限合规服务   │ 授权/PII  │ 质量服务         │
 │ (FR-09)      │ 同名/粒度 │ (FR-11)       │ 门禁/分级 │ (FR-10)          │
 │ +版本+跨域   │ /跨域/版本│               │ 维度映射  │ Tier1/2/3 SLA    │
-│ +PII→423路由 │          │               │ 同源对账  │                  │
+│ +PII→403 FORBIDDEN_PII 路由 │          │               │ 同源对账  │                  │
 └──────────────┘          └───────┬────────┘          └──────────────────┘
                                   │ 合规复核留痕
                                   ▼
@@ -124,9 +124,9 @@
   (3) 采集通道: A=直连 information_schema 取库表字段(MySQL兼容库含 Doris 归此通道); B=ETL SQL+字段注释+数据示例(供LLM解析);
       分区感知增量采集(dt/event_month), 只读连接不改动生产
   (4) 状态机门禁: DRAFT→PENDING_REVIEW→PUBLISHED→DEPRECATED; F2无Owner不可发布; F11废弃前下游级联校验;
-      PII口径 approve 前须 governance.pii_review(423路由,非普通仲裁); 变更走 PENDING_VERSION+灰度+回滚
+      PII口径 approve 前须 governance.pii_review(403 FORBIDDEN_PII 路由,非普通仲裁); 变更走 PENDING_VERSION+灰度+回滚
   降级边界(舱壁): LLM✗→取消AI预填 | Neo4j✗→血缘标stale | ES✗→退MySQL LIKE | OLAP✗→503 | Cube✗→回退自研引擎 | 分级引擎✗→标UNKNOWN(§5.5)
-  鉴权: 用户态JWT / 消费方X-Api-Key换短效JWT(scope/白名单); 越权→403+审计; PII跨域→423+转交合规
+  鉴权: 用户态JWT / 消费方X-Api-Key换短效JWT(scope/白名单); 越权→403+审计; PII跨域→403 FORBIDDEN_PII+转交合规
   性能预算: 查询P95<3s(小表) / 血缘P95<500ms(≤5跳) / 图渲染>2s降级表级 / Tier-1指标SLA与质量最严
 ```
 
@@ -244,7 +244,7 @@ llm:
 | `semantic` | FR-05/06/07 | 指标定义（原子/派生/复合）、状态机（口径真相源，含灰度 EXPERIMENTAL / PENDING_VERSION 版本确认）、版本化（change_type 破坏性判定 + diff + 消费方确认 + 回滚）、执行引擎编排（一期自研轻量下推；二期评估引入 Cube 作预聚合/缓存/多消费方 API 层）、口径 AST→方言 SQL 翻译层、注册审核待办、模板、驾驶舱、SLA 例外日历、结果快照存证触发 |
 | `conflict` | FR-09 | 四类冲突检测（同名不同义/同义不同名/粒度单位/跨域异源 + 口径版本 + PII 路由）、仲裁工作流、裁决记录（ruling_record 知识库）、**口径漂移巡检（drift detection）** |
 | `quality` | FR-10 | 异常分级、告警、SLA（含 SLA 例外日历豁免）、质量规则配置（quality_rule，按 tier/dw_layer 差异化）、**外部基准对账（benchmark 导入比对）** |
-| `governance` | FR-11 | RBAC/域授权（grants）、PII 合规门禁（423 路由）、分级分类（落 `classification`）、维度映射与同源对账编排、权限申请/回收/TTL |
+| `governance` | FR-11 | RBAC/域授权（grants）、PII 合规门禁（403 FORBIDDEN_PII 路由）、分级分类（落 `classification`）、维度映射与同源对账编排、权限申请/回收/TTL |
 | `consume` | FR-12/13 | QuickBI 嵌入、Semantic API（鉴权/token 模型/限流/降级/meta 标注/dry-run/运行时冲突检测/血缘反填）、**结果快照落库**、**口径版本消费方确认回调** |
 | `ai` | FR-14/15 | NL2SQL 管线（语义锚定后复用 consume 执行）、DataAgent MCP 工具集（四期） |
 | `notify` | FR-16/17 | 通知中心（站内/邮件/Webhook，订阅偏好）、埋点、事件总线消费 |
@@ -265,8 +265,8 @@ llm:
 
 ## 3. 接口设计（REST + OpenAPI）
 
-> 统一约定：所有响应包 `{code, message, data, trace_id, degraded}`；`code` 为业务码（见 §5.4）；`degraded=true` 表示命中降级。
-> 统一前缀：`/api/v1`。鉴权：`Authorization: Bearer <JWT>`（用户态）或 `X-Api-Key` + JWT（消费方 `api_client`）。
+> 统一约定：所有响应包 `{error_code, message, retry_after, trace_id}`；`error_code` 为业务码（见 §5.4 对齐 PRD 附录 A.2）；`degraded=true` 表示命中降级。
+> 统一前缀：`/api/v1`。鉴权：`Authorization: Bearer <JWT>`（用户态）或 `X-Api-Key` + JWT（消费方 `api_client`）。响应必含 `X-Request-ID` + `X-Trace-ID`。
 
 ### 3.1 采集（collector）
 ```
@@ -294,7 +294,9 @@ POST   /metrics/{code}/rollback      # 灰度回滚（EXPERIMENTAL → 上一 PU
 GET    /metrics/{code}/versions      # 版本历史（溯源，呼应 US-DA-2）
 GET    /metrics/templates            # 模板库（NEW-2）
 GET    /metrics/dashboard            # 治理驾驶舱聚合（MO-1）
+POST   /metrics/compare              # 指标对比工具（PRD 4.5：两指标并排 diff，同名不同义排查）
 GET/POST /sla-calendar               # SLA 例外日历查询/配置（PRD 4.5，domain_admin 维护）
+GET    /help                         # 帮助中心内容（静态 + 术语库概念卡关联，PRD 4.5）
 ```
 
 ### 3.3 血缘与资产地图（lineage / assetmap）
@@ -321,35 +323,55 @@ POST   /drift-scans/{id}/confirm     # Owner 处置：CONFIRMED_INTENT(走4.5变
 ```
 POST   /roles                        # 角色（platform_admin/domain_admin/metric_owner/reviewer/compliance_officer/viewer，对齐 PRD 4.9.2）
 POST   /grants                       # 域授权 + 指标白名单
+POST   /grants/batch                 # 批量授权/回收（R3-07：dry-run+逐条审计+失败回滚）
+POST   /grants/batch/dry-run         # 批量操作影响预览（受影响用户数/指标数）
 POST   /pii/review                   # 合规官复核（COMP-1，留痕）
-POST   /classification/rescan        # 分级重扫（COMP-2）
+POST   /classification/rescan        # 分级重扫（COMP-2，频率 ≥ 每周1次，R12-09）
 GET    /me/permissions               # 当前用户权限快照
 ```
 
 ### 3.6 消费（consume · Semantic API）
+
+> **通用请求/响应规范（R13-12 对齐 PRD 4.11.2）**：请求必带 `Authorization: Bearer <JWT>` + `Content-Type: application/json`；响应必含 `X-Request-ID` + `X-Trace-ID`（审计关联）；API 版本响应 Header `X-API-Version: v1`。
+
 ```
-POST   /query                       # 口径查询（metrics/dimensions/filters/dateRange/comparison）
+POST   /query                       # 口径查询（metrics/dimensions/filters/dateRange/comparison/orderBy/idempotency_key）
 POST   /query/dry-run               # 试算沙箱（不计费/不写生产/不进缓存）
 GET    /query/{query_id}/cancel     # 取消在途查询
+GET    /metrics?domain=&status=&q=&sort=&tier=&dw_layer=&owner=&has_pii=&page=&page_size=  # 指标检索（ES 驱动，R13-01/02 补 sort/filter 参数）
+GET    /metrics/{code}               # 指标详情（含口径版本/维度/血缘入口/quality_score/serving_mode）
+POST   /metrics/batch                # 批量指标详情（metric_codes 上限 20，R13-13）
+GET    /metric-sets                  # 指标集检索（复用分页规范，R13-04）
+GET    /metric-sets/{id}             # 指标集详情
+GET    /metrics/{code}/snapshots     # 指标结果快照（分页，R13-05）
+GET    /lineage/{metric_code}?depth=&direction=&confidence_min=  # 血缘查询（R13-10 补深度/方向/置信度参数）
 GET    /metrics/{code}/semantic     # 只读语义拉取（api_client 用，受 scope 约束）
 POST   /embed/quickbi               # 获取嵌入令牌（FR-12）
+GET    /embed/quickbi/card          # 口径卡片拉取（QuickBI 侧边栏嵌入，PRD 4.11.1：不离开报表查看口径）
 POST   /versions/{id}/confirm       # 破坏性变更消费方确认（PENDING_VERSION → CURRENT，PRD 5.5.1）
 POST   /versions/{id}/reject        # 消费方拒绝破坏性变更（带理由，PENDING_VERSION 驳回）
 GET    /snapshots?metric_code=&date_range=  # 指标结果快照查询（WORM 存证，PRD 4.5，受 4.9 权限）
+GET    /me/favorites                # 我的收藏（user_preference pinned_metrics，PRD 4.5）
+POST   /me/favorites/{code}         # 收藏指标
+DELETE /me/favorites/{code}         # 取消收藏
+GET    /me/recent                   # 最近浏览（前 20，前端记录指标详情点击）
 ```
-**查询请求体（核心 schema）**
+**查询请求体（核心 schema，对齐 PRD 4.11.2 R13-06/07/08）**
 ```json
 {
   "metrics": ["gmv","order_cnt"],
   "dimensions": ["region","date"],
   "filters": [{"field":"channel","op":"in","value":["app","web"]}],
   "dateRange": {"from":"2026-07-01","to":"2026-07-31","granularity":"day"},
-  "comparison": {"type":"yoy"},
+  "comparison": {"type":"yoy","offset":1,"base_date":null},
+  "orderBy": {"field":"gmv","direction":"desc"},
   "accept_stale": false,
+  "accept_deprecated": false,
+  "idempotency_key": "uuid-v4",
   "client_version": "1.0"
 }
 ```
-**统一响应 `meta`（呼应 4.11.7）**：`metric_version` / `freshness` / `granularity_bound` / `sample` / `stale` / `source_trace` / `quality_flag`。
+**统一响应 `meta`（呼应 4.11.7 + R13-14 serving_mode）**：`metric_version` / `freshness` / `granularity_bound` / `sample` / `stale` / `source_trace` / `quality_flag` / `serving_mode`(batch|realtime)。
 
 ### 3.7 AI（ai · 四期）
 ```
@@ -452,11 +474,15 @@ CREATE TABLE metric (
   non_additive_dimensions JSON NULL,                -- SEMI/NON_ADDITIVE 时的不可加维度列表
   definition_json JSON,  -- 口径：表达式/依赖指标/来源字段/分区键
   version INT DEFAULT 1,
-  status ENUM('DRAFT','REVIEW','PUBLISHED','EXPERIMENTAL','DEPRECATED'),  -- EXPERIMENTAL=灰度（PRD 5.5.1）
+  status ENUM('DRAFT','REVIEW','PUBLISHED','EXPERIMENTAL','DEPRECATED','DATA_SOURCE_DROPPED'),  -- EXPERIMENTAL=灰度; DATA_SOURCE_DROPPED=PUBLISHED异常子态(源表DROP/不可达, PRD 5.5.1/R5-01)
   owner_id BIGINT, backup_owner_id BIGINT NULL,   -- 主/副 Owner（离职交接兜底，PRD 4.9.6）
   approver_id BIGINT NULL,
   pii_flag BOOLEAN, compliance_reviewed BOOLEAN DEFAULT FALSE,
   effective_version INT NULL,      -- 当前生效版本（PENDING_VERSION 场景下默认查询命中的版本）
+  consumption_guide JSON NULL,    -- 消费指南（Owner维护：applicable/not_applicable/common_misuse/recommended_usage，PRD R3-20）
+  successor_code VARCHAR(64) NULL,-- 替代指标码（DEPRECATED 时必填，PRD 4.5 废弃与替代；消费方请求已废弃指标时返回 successor 迁移指引，E6）
+  deprecated_at DATETIME NULL,   -- 废弃时间（DEPRECATED 状态切换时间，用于 Sunset 30d 倒计时，E7/E8）
+  sunset_until DATE NULL,        -- Sunset 截止日期（DEPRECATED 后 30 天，期满返回 410 GONE，E7）
   created_at DATETIME, updated_at DATETIME,
   INDEX idx_status (status), INDEX idx_domain (domain), INDEX idx_tier (metric_tier)
 );
@@ -477,6 +503,46 @@ CREATE TABLE metric_version (
 CREATE TABLE metric_lineage_source (
   id BIGINT PK, metric_id BIGINT, source_table VARCHAR(256), source_field VARCHAR(128),
   CONSTRAINT uk_mls UNIQUE(metric_id, source_table, source_field)
+);
+
+-- 血缘边变更快照（PRD 4.4/R10-04/R11-04：血缘边本身变更触发旧边快照，供事后回溯）
+CREATE TABLE lineage_edge_history (
+  id BIGINT PK,
+  edge_id VARCHAR(128),            -- Neo4j 边 ID
+  before_source VARCHAR(256),      -- 旧源节点
+  before_target VARCHAR(256),      -- 旧目标节点
+  before_transform_expr TEXT NULL, -- 旧变换表达式
+  before_confidence FLOAT NULL,    -- 旧置信度
+  after_source VARCHAR(256),       -- 新源节点
+  after_target VARCHAR(256),       -- 新目标节点
+  after_transform_expr TEXT NULL,  -- 新变换表达式
+  after_confidence FLOAT NULL,     -- 新置信度
+  change_reason VARCHAR(128),      -- schema_drift / reparse / manual / rename
+  trigger_event VARCHAR(128),      -- 触发事件类型
+  changed_at DATETIME,
+  changed_by BIGINT NULL,          -- 人工变更时为操作者ID
+  retention_until DATETIME,        -- 热存保留到期（≥180天，对齐审计保留期）
+  INDEX idx_edge (edge_id), INDEX idx_changed_at (changed_at)
+);
+
+-- 指标集（PRD 4.5/R3-15/R11-05：指标集定义与消费，版本化）
+CREATE TABLE metric_set (
+  id BIGINT PK, set_code VARCHAR(64) UNIQUE,
+  name VARCHAR(128), domain VARCHAR(64),
+  description VARCHAR(512),
+  version INT DEFAULT 1,           -- 指标集版本（R11-05）
+  default_dimensions JSON,         -- 默认共享维度集
+  owner_id BIGINT, status ENUM('DRAFT','PUBLISHED','DEPRECATED'),
+  created_at DATETIME, updated_at DATETIME,
+  INDEX idx_domain (domain)
+);
+CREATE TABLE metric_set_item (
+  id BIGINT PK, set_id BIGINT,
+  metric_code VARCHAR(64),         -- 指标集内指标码
+  added_version INT,               -- 加入时的指标集版本（R11-05）
+  removed_version INT NULL,        -- 移除时的指标集版本（NULL=仍在集内）
+  sort_order INT DEFAULT 0,
+  CONSTRAINT uk_msi UNIQUE(set_id, metric_code)
 );
 
 -- 逻辑表↔物理表绑定（PRD 3.4b/4.5：批流双路、DataSet 版本、结构变更触发重算的唯一桥）
@@ -528,7 +594,16 @@ CREATE TABLE grants (
 
 -- 待办/通知
 CREATE TABLE todo (id BIGINT PK, user_id BIGINT, type VARCHAR(32), ref_id BIGINT, status ENUM('PENDING','DONE'));
-CREATE TABLE notification (id BIGINT PK, user_id BIGINT, channel ENUM('inapp','email','webhook'), payload JSON, read_at DATETIME NULL);
+CREATE TABLE notification (
+  id BIGINT PK, user_id BIGINT, channel ENUM('inapp','email','webhook'),
+  payload JSON, read_at DATETIME NULL,
+  status ENUM('PENDING','SENT','READ','ESCALATED','DONE') DEFAULT 'PENDING',  -- 通知状态机（对齐 §4.2/§12.9 已读回执与升级）
+  event_type VARCHAR(64),      -- 关联事件类型（订阅偏好匹配用，§12.9）
+  ref_id BIGINT NULL,          -- 关联业务实体（todo/metric/conflict）
+  escalated_at DATETIME NULL,  -- 超时升级时间（SLA_UNREAD 后替补 Owner/上级）
+  sent_at DATETIME NULL,
+  INDEX idx_user_status (user_id, status), INDEX idx_event (event_type)
+);
 
 -- 审计（强留痕，呼应 4.10；WORM 只写不删；含结构化 before/after diff）
 CREATE TABLE audit_log (
@@ -668,17 +743,28 @@ CREATE TABLE partition_rewrite_event (
   affected_metrics JSON, status ENUM('OPEN','DISPATCHED','DONE'), created_at DATETIME
 );
 
--- 成本核算（PRD 4.10：按域/消费方聚合 LLM 与查询成本）
+-- 成本核算（PRD 4.10：按域/消费方聚合 LLM 与查询成本；R10-02 补字段结构）
 CREATE TABLE ops_cost (
   id BIGINT PK, cost_date DATE, domain VARCHAR(64), consumer_id VARCHAR(64) NULL,
-  category ENUM('LLM','QUERY','STORAGE'), amount_usd DECIMAL(12,2), detail JSON, created_at DATETIME
+  category ENUM('LLM','QUERY','STORAGE','API_CALL'),    -- R10-02 补 API_CALL
+  amount_usd DECIMAL(12,2), amount_cny DECIMAL(12,2) NULL,  -- R10-02 补人民币
+  query_count INT DEFAULT 0, llm_token_in INT DEFAULT 0, llm_token_out INT DEFAULT 0,  -- R10-02 补用量
+  scan_rows BIGINT DEFAULT 0, compute_seconds INT DEFAULT 0,  -- R10-02 补计算资源
+  budget_monthly_usd DECIMAL(12,2) NULL,             -- 月度预算
+  budget_alert_pct FLOAT DEFAULT 0.8,                -- 预算预警阈值(R11-17)
+  budget_hard_limit_pct FLOAT DEFAULT 1.0,           -- 预算硬限阈值(R11-17)
+  detail JSON, created_at DATETIME,
+  INDEX idx_domain_date (domain, cost_date), INDEX idx_consumer (consumer_id)
 );
 
--- 消费方凭证（FR-13 token 模型）
+-- 消费方凭证（FR-13 token 模型；R10-01/R11-15 补免费额度字段）
 CREATE TABLE api_client (
   id BIGINT PK, client_id VARCHAR(64) UNIQUE, client_secret_ref VARCHAR(255),
   scope_domain VARCHAR(64), metric_whitelist JSON, qps INT DEFAULT 20,
   daily_quota INT DEFAULT 100000, scan_row_limit BIGINT,
+  free_quota_monthly INT DEFAULT 10000,   -- API 免费额度（次/月，R10-01/R11-15）
+  llm_free_quota_monthly INT DEFAULT 1000, -- LLM 免费额度（次/月/域，R11-15）
+  budget_reset_at DATE NULL,              -- 预算/额度重置日期（R11-07/R11-09）
   status ENUM('ACTIVE','REVOKED'), created_at DATETIME
 );
 
@@ -732,6 +818,235 @@ CREATE TABLE metric_delivery (
   receiver_scope VARCHAR(64),      -- 接收方须有该指标可见权限（RBAC 对齐）
   enabled BOOLEAN DEFAULT TRUE, created_by BIGINT, created_at DATETIME
 );
+
+-- 依赖健康状态（PRD 4.13.6：每依赖独立健康探测，状态机 HEALTHY→DEGRADED→UNAVAILABLE）
+CREATE TABLE dependency_health (
+  id BIGINT PK, dependency_type ENUM('LLM','OLAP','GRAPH','ES','DATASOURCE','NOTIFICATION'),
+  dependency_id VARCHAR(128),          -- 具体实例标识（如 llm_config_id / data_source_id）
+  status ENUM('HEALTHY','DEGRADED','UNAVAILABLE') DEFAULT 'HEALTHY',
+  last_check_at DATETIME,              -- 最近一次探测时间
+  consecutive_failures INT DEFAULT 0,  -- 连续失败次数（达阈值→UNAVAILABLE）
+  latency_p95_ms INT NULL,             -- 最近5分钟 P95 延迟
+  error_rate_pct FLOAT DEFAULT 0,      -- 最近5分钟错误率
+  circuit_state ENUM('CLOSED','OPEN','HALF_OPEN') DEFAULT 'CLOSED',  -- 熔断器状态
+  circuit_opened_at DATETIME NULL,     -- 熔断开启时间
+  metadata JSON,                       -- 扩展信息（如 LLM 可用模型列表、OLAP 活跃连接数）
+  INDEX idx_dep_type (dependency_type), INDEX idx_dep_id (dependency_id)
+);
+
+-- 降级事件记录（PRD 4.13.6：降级开始/恢复事件入审计与看板）
+CREATE TABLE degradation_event (
+  id BIGINT PK, dependency_type ENUM('LLM','OLAP','GRAPH','ES','DATASOURCE','NOTIFICATION'),
+  dependency_id VARCHAR(128),
+  event_type ENUM('DEGRADED','UNAVAILABLE','RECOVERED','CIRCUIT_OPENED','CIRCUIT_HALF_OPEN','CIRCUIT_CLOSED'),
+  severity ENUM('LIGHT','HEAVY'),      -- 轻降级(功能减退)/重降级(能力关停)
+  affected_capabilities JSON,          -- 受影响的能力列表（如 ["ai_prefill","nl2sql"]）
+  affected_user_count INT DEFAULT 0,   -- 预估受影响用户数
+  started_at DATETIME,                 -- 降级开始时间
+  recovered_at DATETIME NULL,          -- 恢复时间（NULL=仍在降级中）
+  duration_seconds INT NULL,           -- 降级持续秒数（恢复后回填）
+  trigger_reason VARCHAR(512),         -- 触发原因（如 "LLM 连续5次超时 > 30s"）
+  resolution_action VARCHAR(512) NULL, -- 恢复动作（如 "自动探测恢复" / "人工重启"）
+  INDEX idx_dep (dependency_type, dependency_id), INDEX idx_started (started_at)
+);
+
+-- ABAC 策略定义（PRD 4.9.1/4.9.8：RBAC×ABAC 融合，PDP 策略表达式）
+CREATE TABLE policy (
+  id BIGINT PK, policy_code VARCHAR(64) UNIQUE,
+  name VARCHAR(128),
+  role_id BIGINT,                       -- 关联 RBAC 角色（role 表 FK）
+  resource_type ENUM('DOMAIN','METRIC','DIMENSION','EXPORT','ALL'),
+  action ENUM('READ','WRITE','APPROVE','EXPORT','QUERY','ALL'),
+  abac_condition JSON NULL,             -- ABAC 属性条件表达式（见下方 PDP 引擎规格）
+  decision ENUM('ALLOW','DENY','ALLOW_WITH_MASK','ALLOW_SCOPED'),
+  mask_strategy ENUM('MASK','HASH','GENERALIZE','NULLIFY') NULL,  -- 脱敏策略（ALLOW_WITH_MASK 时必填）
+  scope_dimensions JSON NULL,           -- ALLOW_SCOPED 时限定可见维度值集
+  priority INT DEFAULT 0,               -- 策略优先级（高优先先生效，冲突时按 priority + specificity 裁决）
+  enabled BOOLEAN DEFAULT TRUE,
+  created_by BIGINT, created_at DATETIME, updated_at DATETIME,
+  INDEX idx_role_resource (role_id, resource_type)
+);
+
+-- 数据分级标签（PRD 4.9.3/4.9.8：四级分类 + PII 自动传播）
+CREATE TABLE data_classification (
+  id BIGINT PK,
+  resource_type ENUM('TABLE','FIELD','METRIC','DIMENSION_VALUE'),
+  resource_id BIGINT,                   -- 对应实体 ID
+  sensitivity_level ENUM('PUBLIC','INTERNAL','CONFIDENTIAL','PII'),
+  pii_columns JSON NULL,                -- PII 字段列表（仅 TABLE/FIELD 级）
+  inherited_from BIGINT NULL,           -- 继承来源 ID（PII 沿血缘传播，NULL=直接标注非继承）
+  classified_by VARCHAR(32),            -- 标注来源：regex / type_heuristic / llm / manual / inherited
+  model_version VARCHAR(32) NULL,       -- LLM 分级模型版本
+  verified_by BIGINT NULL,              -- compliance_officer 复核者 ID
+  verified_at DATETIME NULL,            -- 复核时间
+  created_at DATETIME, updated_at DATETIME,
+  CONSTRAINT uk_dc UNIQUE(resource_type, resource_id),
+  INDEX idx_sensitivity (sensitivity_level)
+);
+
+-- 合规复核记录（PRD 4.9.5/4.9.8：PII/CONFIDENTIAL 指标发布前合规官复核留痕）
+CREATE TABLE compliance_review (
+  id BIGINT PK,
+  metric_id BIGINT NOT NULL,
+  reviewer_id BIGINT NOT NULL,          -- compliance_officer ID
+  review_type ENUM('PRE_PUBLISH','RESCAN','DOWNGRADE_REQUEST','PII_ANONYMIZATION'),
+  decision ENUM('APPROVED','REJECTED','CONDITIONALLY_APPROVED'),
+  conditions JSON NULL,                 -- 条件批准条件（如"脱敏后可降级为 INTERNAL"）
+  reject_reason VARCHAR(512) NULL,
+  classification_before ENUM('PUBLIC','INTERNAL','CONFIDENTIAL','PII') NULL,
+  classification_after ENUM('PUBLIC','INTERNAL','CONFIDENTIAL','PII') NULL,
+  pii_handling ENUM('NONE','MASK','HASH','GENERALIZE','NULLIFY') NULL,  -- PII 处理方式
+  minimum_necessity_check BOOLEAN DEFAULT FALSE,  -- 最小可用校验是否通过
+  reviewed_at DATETIME,
+  INDEX idx_metric (metric_id), INDEX idx_reviewer (reviewer_id)
+);
+
+-- 用户订阅偏好（PRD 4.14.7：事件类型×渠道偏好矩阵）
+CREATE TABLE subscription_pref (
+  id BIGINT PK, user_id BIGINT NOT NULL,
+  event_type VARCHAR(64) NOT NULL,      -- 事件类型（metric.published / quality.alert / conflict.arbitrated ...）
+  channel ENUM('INAPP','EMAIL','WEBHOOK','SMS') NOT NULL,
+  enabled BOOLEAN DEFAULT TRUE,
+  quiet_hours_start TIME NULL,          -- 免打扰开始时间
+  quiet_hours_end TIME NULL,            -- 免打扰结束时间
+  digest_mode ENUM('REALTIME','HOURLY','DAILY') DEFAULT 'REALTIME',  -- 汇总模式
+  webhook_url VARCHAR(512) NULL,        -- Webhook 回调地址
+  CONSTRAINT uk_sub UNIQUE(user_id, event_type, channel)
+);
+
+-- 指标间业务关系（PRD 4.6/R3-13：LEADS/CAUSES/BELONGS_TO_PROCESS，与血缘 DERIVED_FROM 正交）
+CREATE TABLE metric_business_relation (
+  id BIGINT PK,
+  source_metric_code VARCHAR(64) NOT NULL,
+  target_metric_code VARCHAR(64) NOT NULL,
+  relation_type ENUM('LEADS','CAUSES','BELONGS_TO_PROCESS') NOT NULL,
+  lag_period VARCHAR(32) NULL,          -- LEADS: 滞后周期（如"1-2周"）
+  causal_strength ENUM('HIGH','MEDIUM','LOW') NULL,  -- CAUSES: 因果强度
+  process_name VARCHAR(128) NULL,       -- BELONGS_TO_PROCESS: 流程名
+  step_order INT NULL,                  -- 流程内步骤序号
+  declared_by BIGINT NOT NULL,          -- 声明者 ID
+  source_type ENUM('MANUAL','LLM_SUGGESTED') DEFAULT 'MANUAL',  -- 人工声明 / LLM 候选建议
+  confirmed_at DATETIME NULL,           -- LLM 建议待人确认时间
+  created_at DATETIME,
+  CONSTRAINT uk_mbr UNIQUE(source_metric_code, target_metric_code, relation_type),
+  INDEX idx_source (source_metric_code), INDEX idx_target (target_metric_code)
+);
+
+-- 用户（E3：ER 图与服务引用均依赖，原 DDL 缺失）
+CREATE TABLE user (
+  id BIGINT PK, emp_id VARCHAR(64) UNIQUE,       -- 工号（HR 系统唯一标识）
+  name VARCHAR(128), email VARCHAR(255),
+  department VARCHAR(128), domain VARCHAR(64) NULL,  -- 归属域
+  status ENUM('ACTIVE','OFFBOARDED') DEFAULT 'ACTIVE',
+  offboarded_at DATETIME NULL,                   -- HR 离职时间（触发权限回收）
+  created_at DATETIME, updated_at DATETIME,
+  INDEX idx_emp (emp_id), INDEX idx_domain (domain)
+);
+
+-- 操作审计日志（E1：PRD 4.10/4.11/R11-01 统一消费管线审计，与 audit_log 互补）
+-- audit_log = 治理操作审计（WORM）；operation_audit = 消费侧操作审计（API/QuickBI/MCP 调用留痕）
+CREATE TABLE operation_audit (
+  id BIGINT PK,
+  trace_id VARCHAR(64),                          -- 全链路追踪 ID
+  client_id VARCHAR(64) NULL,                    -- API 消费方 client_id（api_client FK）
+  user_id BIGINT NULL,                           -- 操作用户 ID（UI 操作时）
+  channel ENUM('api','quickbi','mcp','ui'),      -- 消费管线来源（R11-01）
+  action VARCHAR(64),                            -- 操作：QUERY / EXPORT / METADATA / SCHEMA / EMBED
+  resource_type VARCHAR(32),                     -- 资源：metric / metric_set / domain
+  resource_id VARCHAR(128),                      -- 资源标识（metric_code / set_code / domain）
+  request_params JSON NULL,                      -- 请求参数摘要（脱敏后）
+  response_status INT,                           -- HTTP 状态码
+  latency_ms INT NULL,                           -- 响应耗时
+  llm_tokens_in INT DEFAULT 0,                   -- LLM token 消耗（NL2SQL/MCP 场景）
+  llm_tokens_out INT DEFAULT 0,
+  scan_rows BIGINT DEFAULT 0,                    -- OLAP 扫描行数
+  ip VARCHAR(64), user_agent VARCHAR(512) NULL,
+  created_at DATETIME,
+  INDEX idx_client (client_id), INDEX idx_user (user_id),
+  INDEX idx_channel_time (channel, created_at), INDEX idx_trace (trace_id)
+);
+
+-- Schema 变更检测事件（E2：PRD 4.4/R3-04 Schema Drift 检测，B6 PENDING_VERSION 联动）
+CREATE TABLE schema_drift_event (
+  id BIGINT PK,
+  data_source_id BIGINT,                         -- 检测到的数据源 FK
+  metric_version_id BIGINT NULL,                 -- 受影响的指标版本 FK
+  table_name VARCHAR(256),                       -- 变更表名
+  change_type ENUM('COLUMN_ADDED','COLUMN_REMOVED','COLUMN_TYPE_CHANGED','COLUMN_RENAMED','TABLE_RENAMED','TABLE_DROPPED'),
+  before_schema JSON NULL,                       -- 变更前 schema 快照
+  after_schema JSON NULL,                        -- 变更后 schema 快照
+  diff_json JSON,                                -- 结构化差异 [{field, change_type, before, after}]
+  severity ENUM('BREAKING','NON_BREAKING','INFO'),  -- 对指标的影响严重度
+  affected_metrics JSON,                         -- 受影响指标列表 [{metric_code, version, impact}]
+  status ENUM('DETECTED','PENDING_CONFIRMATION','CONFIRMED_INTENT','CONFIRMED_UNINTENT','ROLLBACK_TRIGGERED','IGNORED'],
+  confirmed_by BIGINT NULL,                      -- 确认人 ID
+  confirmed_at DATETIME NULL,
+  detected_at DATETIME,
+  INDEX idx_source (data_source_id), INDEX idx_metric_version (metric_version_id),
+  INDEX idx_status (status), INDEX idx_detected (detected_at)
+);
+
+-- 血缘边主表（E4：PRD 4.4 指标级/字段级血缘主表，lineage_edge_history 为其变更快照）
+CREATE TABLE lineage_edge (
+  id BIGINT PK,
+  edge_id VARCHAR(128) UNIQUE,                   -- Neo4j 边 ID 映射
+  source_type ENUM('TABLE','FIELD','METRIC'),    -- 源节点类型
+  source_id VARCHAR(256),                        -- 源节点标识（表名/字段全路径/指标码）
+  target_type ENUM('TABLE','FIELD','METRIC'),    -- 目标节点类型
+  target_id VARCHAR(256),                        -- 目标节点标识
+  edge_type ENUM('LINEAGE_UP','LINEAGE_DOWN','DERIVED_FROM','DEFINED_BY','HAS','MAPPED_TO'),
+  transform_expr TEXT NULL,                      -- 变换表达式
+  confidence FLOAT DEFAULT 1.0,                  -- 置信度（1.0=Parser确认/人工，<1.0=LLM推断）
+  source_enum ENUM('PARSER','MANUAL','LLM_SUGGESTED') DEFAULT 'PARSER',
+  confirmed BOOLEAN DEFAULT TRUE,                -- 是否已确认（未确认边不参与影响面计算）
+  active BOOLEAN DEFAULT TRUE,                   -- 软删除标记
+  created_at DATETIME, updated_at DATETIME,
+  CONSTRAINT uk_edge UNIQUE(source_type, source_id, target_type, target_id, edge_type),
+  INDEX idx_source (source_type, source_id), INDEX idx_target (target_type, target_id)
+);
+
+-- 采集任务（E5：PRD 3.4b 采集调度，data_source 下周期性元数据采集任务）
+CREATE TABLE collector_job (
+  id BIGINT PK,
+  data_source_id BIGINT NOT NULL,                -- 关联数据源 FK
+  job_type ENUM('SCHEMA_SCAN','SAMPLE_FETCH','LINEAGE_PARSE','SENSITIVITY_SCAN'),  -- 采集类型
+  schedule_cron VARCHAR(64),                     -- 调度周期（NULL=手动触发）
+  last_run_at DATETIME NULL,                     -- 最近执行时间
+  last_status ENUM('SUCCESS','PARTIAL','FAILED','RUNNING') NULL,
+  last_duration_ms INT NULL,                     -- 执行耗时
+  next_run_at DATETIME NULL,                     -- 下次计划执行时间
+  enabled BOOLEAN DEFAULT TRUE,
+  config_json JSON NULL,                         -- 采集参数（采样行数/并发度等）
+  created_by BIGINT, created_at DATETIME, updated_at DATETIME,
+  INDEX idx_source (data_source_id), INDEX idx_next_run (next_run_at)
+);
+
+-- 用户偏好（E22：PRD 前端设计引用——导航/域上下文/收藏/⌘K 搜索缓存）
+CREATE TABLE user_preference (
+  id BIGINT PK, user_id BIGINT NOT NULL,
+  preference_key VARCHAR(64) NOT NULL,           -- 偏好键：default_domain / pinned_metrics / search_scope / theme / kbd_shortcuts
+  preference_value JSON NOT NULL,                -- 偏好值（JSON，结构由 key 决定）
+  updated_at DATETIME,
+  CONSTRAINT uk_pref UNIQUE(user_id, preference_key),
+  INDEX idx_user (user_id)
+);
+
+-- 反馈/NPS（E23：PRD OP-04 / POST /feedback，用户满意度与建议收集）
+CREATE TABLE feedback (
+  id BIGINT PK,
+  user_id BIGINT NOT NULL,
+  type ENUM('NPS','BUG','SUGGESTION','RATING'),  -- 反馈类型
+  metric_code VARCHAR(64) NULL,                  -- 关联指标（NPS/评分场景）
+  score INT NULL,                                -- NPS 分数 / 1-5 星评分
+  content TEXT NULL,                             -- 文字反馈
+  context JSON NULL,                             -- 上下文（页面/操作/trace_id）
+  status ENUM('SUBMITTED','ACKNOWLEDGED','ADOPTED','REJECTED') DEFAULT 'SUBMITTED',
+  handler_id BIGINT NULL,                        -- 处理人 ID
+  handler_note VARCHAR(512) NULL,                -- 处理备注
+  handled_at DATETIME NULL,
+  created_at DATETIME,
+  INDEX idx_user (user_id), INDEX idx_type_status (type, status), INDEX idx_metric (metric_code)
+);
 ```
 
 ### 4.2 Neo4j 血缘图
@@ -741,6 +1056,12 @@ CREATE TABLE metric_delivery (
 (:Metric {code, version, status, tier, domain})
 (:Dimension {code, standard_name})       -- 维度节点（PRD 4.4 USES_DIMENSION）
 (:Report {id, name})   -- 消费方（QuickBI/API）
+(:APIClient {id, client_id, status})   -- API 消费方（R11-06 ops_cost 归属）
+(:OpsCost {id, cost_date, category, amount})  -- 成本节点（R11-06）
+(:Dependency {id, type, status})       -- 依赖健康节点（PRD 4.13.6）
+(:DegradationEvent {id, type, severity, started_at})  -- 降级事件（PRD 4.13.6）
+(:Policy {id, code, decision})         -- ABAC 策略节点（PRD 4.9.8）
+(:DataClassification {id, level})      -- 分级标签节点（PRD 4.9.8）
 关系：
   (Field)-[:LINEAGE_UP]->(Field)          -- 字段级血缘（L2）
   (Field)-[:LINEAGE_DOWN]->(Field)
@@ -752,6 +1073,22 @@ CREATE TABLE metric_delivery (
   (Dimension)-[:PARENT]->(Dimension)      -- 维度层级（上滚/下钻）
   (Report)-[:CONSUMED_BY]->(:Metric)      -- 运行时反填（消费方下游）
   (Field)-[:MAPPED_TO]->(:Dimension)      -- 源字段→标准维度映射（conformed dimension）
+  (Metric)-[:COST_OF]->(:OpsCost)         -- 指标级成本归属（R11-06）
+  (APIClient)-[:COST_OF]->(:OpsCost)      -- 消费方成本归属（R11-06）
+  (:Role)-[:COST_OF]->(:OpsCost)          -- 域级成本归属（R11-06）
+  (Metric)-[:LEADS]->(:Metric)            -- 先行指标关系（R3-13）
+  (Metric)-[:CAUSES]->(:Metric)           -- 因果关系（R3-13）
+  (Metric)-[:BELONGS_TO_PROCESS]->(:Process) -- 同流程关系（R3-13）
+  (Metric)-[:INHERITS_CLASSIFICATION]->(:Table|:Field) -- PII 沿血缘自动传播（PRD 4.15.2）
+  (Metric)-[:REQUIRES_COMPLIANCE]->(:Policy) -- PII 指标关联合规策略（PRD 4.9.8）
+  (Dependency)-[:AFFECTS]->(:Metric|:Capability) -- 依赖降级影响（PRD 4.13.6）
+  (DegradationEvent)-[:TRIGGERS]->(:Notification) -- 降级事件触发通知
+  (:Notification {id, type, status, created_at})   -- 通知节点（PRD 4.14.7，状态机 PENDING→SENT→READ/ESCALATED→DONE）
+  (:Event {id, type, payload})                     -- 事件节点（PRD 4.14.7）
+  (:SubscriptionPref {user_id, event_type, channel}) -- 订阅偏好节点（PRD 4.14.7）
+  (:Notification)-[:NOTIFIES]->(:User)             -- 通知→用户（PRD 4.14.7）
+  (:User)-[:SUBSCRIBES]->(:Metric|:Event)          -- 用户订阅（PRD 4.14.7）
+  (:Notification)-[:ESCALATES_TO]->(:User)         -- 升级通知（PRD 4.14.7）
 ```
 **影响面查询（表级 + 指标级双通道，PRD 4.4 关键）**：
 - 表/字段影响面：`MATCH (f:Field {id:$id})<-[:LINEAGE_UP*..5]-(up) RETURN up` + 反向 `LINEAGE_DOWN*`
@@ -783,33 +1120,133 @@ term_idx：{term, alias, definition}  -- 术语检索（FR-08）
 
 **降级中间件**：统一 `DegradationMiddleware` 拦截各能力异常，转 `degraded=true` + 友好文案，相邻能力不受影响（舱壁隔离）。
 
+### 5.2a 依赖健康状态机与 Circuit Breaker（PRD 4.13.1/4.13.2）
+
+**依赖健康状态机（每个依赖独立实例）**
+
+```
+HEALTHY ──超时/错误率超阈──▶ DEGRADED ──连续失败达阈值──▶ UNAVAILABLE
+   ▲                            │                              │
+   │        自动恢复探测通过      │         冷却期后探测恢复       │
+   └────────────────────────────┘──────────────────────────────┘
+```
+
+| 状态 | 进入条件 | 行为 | 退出条件 |
+|------|----------|------|----------|
+| `HEALTHY` | 初始 / 探测恢复 | 正常服务 | — |
+| `DEGRADED` | 单次超时 > 2×阈值 **或** 5min 错误率 > 5% | 轻降级：能力减弱但可用（如 LLM 不可用→AI 预填充禁用，人工通道正常） | 连续 3 次探测成功 → `HEALTHY` |
+| `UNAVAILABLE` | 连续 N 次失败（N 由依赖类型决定，见下表）**或** Circuit Breaker `OPEN` | 重降级：返回明确错误（503 + `error_code=DEPENDENCY_DEGRADED_*`）而非超时 | Circuit Breaker `HALF_OPEN` 探测成功 → `DEGRADED` → 再 3 次成功 → `HEALTHY` |
+
+**各依赖类型阈值参数（对齐附录 B）**：
+
+| 依赖 | 超时阈值 | 错误率阈值 | 连续失败阈值(N) | 熔断冷却期 | 半开探测数 |
+|------|----------|-----------|----------------|-----------|-----------|
+| LLM | 30s | 5% | 5 | 60s | 1 |
+| OLAP | 10s | 5% | 3 | 30s | 1 |
+| Neo4j | 3s | 5% | 5 | 30s | 1 |
+| ES | 2s | 10% | 5 | 30s | 1 |
+| DataSource | 连接超时5s | 10% | 3 | 60s | 1 |
+| Notification | 投递超时5s | 10% | 5 | 120s | 1 |
+
+**Circuit Breaker 三态（PRD 4.13.2，防雪崩）**
+
+```
+CLOSED ──错误率超阈──▶ OPEN ──冷却期满──▶ HALF_OPEN ──探测成功──▶ CLOSED
+                                          │  探测失败
+                                          └──▶ OPEN（重置冷却计时）
+```
+
+| 熔断状态 | 语义 | 行为 |
+|----------|------|------|
+| `CLOSED` | 正常 | 请求正常通过，统计滑动窗口内错误率 |
+| `OPEN` | 熔断 | 请求直接快速失败（返回 503 + `retry_after`），**不等待超时**，避免积压击穿 |
+| `HALF_OPEN` | 半开探测 | 放行 1 个探测请求；成功 → 关闭熔断(`CLOSED`)；失败 → 重新开启(`OPEN`，重置冷却计时） |
+
+**实现要点**：
+- **滑动窗口统计**：每依赖独立 Redis 滑动窗口 key `cb:{dep_type}:{dep_id}:errors` / `cb:{dep_type}:{dep_id}:total`，窗口 60s
+- **状态存储**：Redis key `cb:{dep_type}:{dep_id}:state` = `CLOSED|OPEN|HALF_OPEN`，`cb:{dep_type}:{dep_id}:opened_at` = timestamp
+- **退避策略**：调用方收到 503 后指数退避 + 抖动（避免惊群），公式 `delay = base_delay * 2^attempt + random(0, base_delay)`，`base_delay=1s`，最大重试次数 3 次，超限入死信队列
+- **429 vs 503 分场景**：429=调用方速率超限（可重试） / 503=依赖降级/熔断（须等待恢复）
+- **降级度量**：`degradation_event` 记录每次状态变更 + 持续时长 + 影响用户数 → 入 4.10 运营看板（度量降级频次/时长/影响用户）
+
+**舱壁与 6.4 服务划分映射（PRD 4.13.7/R8-09）**：
+- LLM 池 = 独立 Worker 实例组（消费 Redis 队列 LLM 通道），与物化 Worker 隔离
+- 计算池 = API 内 DataSource 连接池（受 `data_source.quota` 约束，每 DataSource 独立配额）
+- 图库池 = 图库同步器实例 + Neo4j 只读连接池（查询走只读副本，同步器走 Leader 写入）
+- 三池资源互不争抢，单池打满不影响其他池可用性
+
 ### 5.3 资源隔离（防 AI 打挂 OLAP，呼应 4.13.6）
 - 查询路由：AI/DataAgent 流量 → 独立 OLAP 实例/队列；人工流量 → 主实例。
 - 限流：消费方 `QPS=20`、`日调用=10万`、`单查询扫描行数上限`；超限 `429` + `retry_after`。
 - 超大扫描：`scan_rows > quota` 直接 `422`，不裸跑。
 
-### 5.4 业务错误码（统一语义表，C2）
-所有服务返回体 `{code, message, data, trace_id, degraded}` 中的 `code` 取自下表，跨服务一致，禁止自定义数字码：
+### 5.4 业务错误码（统一语义表，C2；对齐 PRD 附录 A.2）
+所有服务返回体 `{error_code, message, retry_after, trace_id}` 中的 `error_code` 取自下表，跨服务一致，禁止自定义数字码。**消费方按 `error_code`（非 HTTP 状态码）路由处理逻辑**——同一 HTTP 状态码可对应多个 `error_code`（如 410 同时用于 API 版本废弃、口径版本过期、指标退役、数据源断连，四者语义不同处理方式不同，R13-11/A.1）。
+
 ```
-200  OK                        正常
-400  PARAM_INVALID             入参校验失败（维度非法/粒度越界/分页错）
-401  UNAUTH                    未携带有效 JWT / api_client token
+────────── 鉴权与权限 ──────────
+401  AUTH_TOKEN_MISSING        请求未携带 Bearer Token
+401  AUTH_TOKEN_EXPIRED        Token 已过期（用 refresh_token/client_secret 重新签发）
+401  AUTH_TOKEN_INVALID        Token 签名/格式错误
 403  FORBIDDEN                 越权（域/白名单不匹配，必入审计）
-404  NOT_FOUND                 资源不存在（metric/source/term 等）
+403  FORBIDDEN_DOMAIN          无权访问目标域（申请 domain_grant）
+403  FORBIDDEN_METRIC          无权访问目标指标（申请指标权限）
+403  FORBIDDEN_DIMENSION       无权访问敏感维度（申请维度权限或接受脱敏）
+403  FORBIDDEN_PII             未获 PIPL 单独授权访问 PII 指标（走合规门禁）
+403  FORBIDDEN_DEPRECATED      访问已废弃指标且未带 accept_deprecated=true
+     └─ R13-11: 与 METRIC_DEPRECATED(410) 区分——403=权限策略拒绝/Sunset期内加头仍可用；410=彻底退役GONE
+403  INJECTION_DETECTED        检测到提示词注入攻击（NL2SQL）
+
+────────── 请求校验 ──────────
+404  METRIC_NOT_FOUND          指标码不存在（检查 metric_code 拼写）
+404  NOT_FOUND                 其他资源不存在（source/term 等）
 409  CONFLICT                  同名待仲裁 / 术语冲突 / 口径版本冲突
-409  COMPLIANCE_BLOCKED         PII 指标 approve 被合规门禁拒绝，回 REVIEW 记拒因（PRD 4.9.5）
-409  DRIFT_DETECTED             口径漂移高等级检出，已进 Owner 待办（PRD 4.7.8）
-409  RECONCILIATION_ALERT       外部基准对账差异超阈值（PRD 4.8.8）
-422  SCAN_OVER_QUOTA           单查询扫描行数超配额（不裸跑）
-422  GRANULARITY_FORBIDDEN     下钻细于粒度的硬约束拒绝（4.5）
-422  ADDITIVITY_VIOLATION      上卷违反指标可加性（NON_ADDITIVE/SEMI_ADDITIVE 跨不可加维度，须走重算，PRD 4.5）
-429  RATE_LIMITED              限流（带 Retry-After，消费方 QPS/日配额）
-503  AI_UNAVAILABLE            LLM 全供应商不可用
-503  OLAP_DOWN                 下推引擎不可达（不返缓存错数，除非 accept_stale）
-504  QUERY_TIMEOUT             下推超时（带预计恢复时间）
-423  PII_BLOCKED               PII 口径在无权域被引用，转交 governance（4.7/4.9）
+409  VERSION_CONFLICT          消费方绑定的 metric_version 已不是当前生效版本（乐观锁CAS，R9-01）
+409  COMPLIANCE_BLOCKED        PII 指标 approve 被合规门禁拒绝，回 REVIEW 记拒因
+409  DRIFT_DETECTED            口径漂移高等级检出，已进 Owner 待办
+409  RECONCILIATION_ALERT      外部基准对账差异超阈值
+422  EXPRESSION_INVALID        指标表达式语法/类型错误（MEL 语法）
+422  GRANULARITY_VIOLATION     下钻粒度细于指标 granularity 硬约束（4.5，PRD名 GRANULARITY_VIOLATION）
+422  ADDITIVITY_VIOLATION      上卷违反指标可加性（须走重算）
+422  DIMENSION_INVALID         请求维度不在指标合法维度集
+422  DATE_RANGE_INVALID        时间范围不合法
+422  FILTER_INVALID            过滤条件引用不存在的维度值
+422  QUOTA_EXCEEDED_SCAN       单查询扫描行数超 data_source.quota（不裸跑）
+422  QUOTA_EXCEEDED_EXPORT     导出行数超限
+422  BATCH_QUOTA_EXCEEDED      批量操作超上限（20个/批次）
+207  BATCH_PARTIAL_FAILURE     批量操作部分成功部分失败（检查响应体每条结果）
+
+────────── 限流与降级 ──────────
+429  RATE_LIMITED              调用速率超 QPS/RPM/TPM 配额（带 retry_after）
+429  FREE_QUOTA_EXCEEDED       月度免费额度已用尽（响应含 budget_reset_at）
+429  BUDGET_EXCEEDED           月度预算已超 100% 自动限流（响应含 budget_reset_at）
+503  DEPENDENCY_DEGRADED_LLM   LLM 服务降级/熔断（AI辅助不可用，退回手动）
+503  DEPENDENCY_DEGRADED_ENGINE 计算引擎降级/熔断（按 retry_after 重试或 accept_stale）
+503  DEPENDENCY_DEGRADED_GRAPH 图库降级/熔断（血缘查询降级为表级概览）
+503  DATA_SOURCE_UNAVAILABLE   绑定 DataSource 不可达（可选 accept_stale）
+503  SERVICE_OVERLOADED        平台整体过载（按 retry_after 退避，避免重试风暴）
+
+────────── 质量与新鲜度（非错误，HTTP 200 但 meta 标注） ──────────
+200  QUALITY_DOWNGRADED        质量分低于阈值，结果标注 quality_downgraded（审慎使用）
+200  STALE_DATA                返回陈旧缓存，标注 stale=true（仅显式 accept_stale=true 时返回）
+200  FRESHNESS_DELAYED         SLA 级联延迟，数据非最新（检查 meta.freshness）
+
+────────── 版本与迁移 ──────────
+410  METRIC_DEPRECATED         指标已彻底退役（GONE，须使用 successor）
+410  METRIC_SOURCE_DROPPED     指标数据源已断连（源表 DROP/不可达，R5-01）
+410  METRIC_VERSION_SUNSET     指标口径钉住版本已过 Sunset 期（默认30天）
+410  API_VERSION_SUNSET        API 版本已废弃（迁移至新版本文档指引）
+
+────────── LLM 与 AI（四期） ──────────
+422  NL_INTENT_UNRECOGNIZED    NL2SQL 无法识别意图（重新表述或使用结构化 API）
+422  NL_AMBIGUOUS              自然语言歧义（回应澄清反问）
+422  NL_MAPPING_FAILED         无法将自然语言映射到已注册指标
+
+────────── 系统级 ──────────
+500  INTERNAL_ERROR            未预期内部错误（附 trace_id 联系运维）
+504  QUERY_TIMEOUT             下推查询超时（用 query_id 取消在途查询后重试）
 ```
-> `degraded=true` 仅出现在降级态（ES→LIKE、Neo4j→stale、推荐→榜单），不出现在 `403/409/422/429` 等错误态。消费方据 `code` 决定重试/`retry_after`/人工介入。
+>  degraded=true 仅出现在降级态（ES→LIKE、Neo4j→stale、推荐→榜单），不出现在 `403/409/422/429` 等错误态。消费方据 code 决定重试/retry_after/人工介入。
 
 ### 5.5 新增降级：分级分类引擎
 | 能力故障 | 降级行为 | 用户态 |
@@ -823,11 +1260,22 @@ term_idx：{term, alias, definition}  -- 术语检索（FR-08）
 | 场景 | 目标 | 手段 |
 |------|------|------|
 | 指标检索（ES） | P95 < 200ms | ES 索引 + 中文分词；列表分页游标 |
+| 指标详情加载 | P95 < 500ms（R12-14） | MySQL 主键查 + ES 补充 + 缓存 |
 | 血缘影响面（Neo4j） | 千节点 P95 < 500ms | 图索引 + 深度限制（默认 ≤5 跳） |
+| 血缘图 L1→L2 展开渲染 | P95 < 3s（R12-14） | 按需加载字段级，超时降级表级概览 |
 | 语义查询（下推） | P95 < 3s（小表）/ < 10s（大跨期） | 分区裁剪 + 预聚合命中 + 查询计划路由 |
+| 语义查询（缓存命中） | P95 < 1s | Redis `metric_version+params` 哈希，TTL 随新鲜度 |
+| LLM 解析单任务 | P95 < 30s（R12-14） | 批量合并 + SQL 指纹缓存复用 |
+| 物化任务产出延迟 | P95 ≤ 2× 源 ETL 延迟（上限 1h，R12-14） | 分区就绪触发 + 优先级调度 |
 | 查询缓存 | 命中 P95 < 50ms | Redis `metric_version+params` 哈希，TTL 随新鲜度 |
 | 采集增量 | 单源 < 5min | 监听 DDL/新增表，增量而非全量 |
 | 限流计数 | < 1ms | Redis `INCR` + 滑动窗口 |
+| 批量注册 | 单批 20 指标 < 10s | 异步 LLM 解析队列 + 进度轮询 |
+| 审计写入 | P99 < 100ms | 异步入库 + 批量 INSERT |
+| PDP 决策（缓存命中） | P99 < 5ms | Redis 缓存 60s TTL |
+| PDP 决策（缓存未命中） | P99 < 50ms | MySQL policy 表查询 + ABAC 条件求值 |
+| 通知投递（站内） | P99 < 500ms | Redis Stream → 写 MySQL → 前端轮询/WS |
+| 双写异步同步延迟 | P99 < 5s | Redis Stream → Worker 消费 → Neo4j/ES |
 
 **预聚合**：高频查询经语义层物化为聚合表（4.5），API 优先命中，降 MPP 压力（命中率入运营看板）。二期引入 Cube 后，预聚合交由 Cube 的 pre-aggregations 托管（物化到 OLAP/Redis），平台不再自研物化调度，仅负责口径同步与命中率观测。
 **容量基线**：一期按"核心指标数千、日查询数十万"设计；二/三/四期随埋点复核（见 PRD 7.1/OP-09）。
@@ -857,7 +1305,7 @@ term_idx：{term, alias, definition}  -- 术语检索（FR-08）
 ### 7.3 三态反馈规范（PRD 5.4 核心）
 - **加载态**：骨架屏 + 操作按钮 loading 禁用，不白屏。
 - **成功态**：轻提示（toast 3s）+ 关键操作结果摘要（如"指标 gmv v3 已发布"）。
-- **错误/降级态**：错误码→人话文案（如 `503 OLAP_DOWN` → "计算引擎暂不可用，预计 X 恢复，可稍后重试或联系管理员"）；降级能力灰显 + 角标"降级中"。
+- **错误/降级态**：错误码→人话文案（如 `503 DEPENDENCY_DEGRADED_ENGINE` → "计算引擎暂不可用，预计 X 恢复，可稍后重试或联系管理员"）；降级能力灰显 + 角标"降级中"。
 
 ### 7.4 溯源优先（PRD 5.4 强调）
 - 任何指标值/口径展示必带 `metric_version` 角标，点击展开版本历史与变更人。
@@ -871,6 +1319,39 @@ term_idx：{term, alias, definition}  -- 术语检索（FR-08）
 4. 响应式断点无横向滚动、无元素重叠。
 5. 颜色对比度达 WCAG AA；PII 标记醒目且不误导。
 6. 操作有确认（删/废弃/权限变更，呼应 OP-01/05）。
+
+### 7.6 核心页面清单与交互映射（对齐 PRD 5.3/5.4）
+
+**页面清单（一期 MVP/完整须交付，各页路由与数据源如下）**：
+
+| 页面 | 路由 | 数据来源 | 交付期 |
+|------|------|----------|--------|
+| 指标目录（列表/搜索） | `/metrics` | consume `GET /metrics`（ES）+ 筛选 | MVP |
+| 指标详情 | `/metrics/:code` | consume `GET /metrics/{code}` + lineage | MVP |
+| 指标注册向导 | `/metrics/new` | semantic（LLM 预填 + 试算 + 冲突预检） | MVP |
+| 审核工作台 | `/review` | semantic `GET /metrics?status=REVIEW` + conflict | MVP |
+| 待办中心 | `/todos` | notify `GET /notifications` | MVP |
+| 血缘视图 | `/lineage/:id` | lineage `GET /lineage/*`（G6 + 降级表级） | MVP |
+| 资产地图/热力 | `/assets` | assetmap `GET /asset-map/*` | 一期完整 |
+| 治理驾驶舱 | `/governance` | semantic `GET /metrics/dashboard` + observability | 一期完整 |
+| 术语库 | `/glossary` | glossary `GET /terms` | 一期完整 |
+| 我的收藏/最近浏览 | `/favorites` | consume user_preference | MVP |
+| 指标对比 | `/compare` | semantic `POST /metrics/compare` | 一期完整 |
+| 帮助中心 | `/help` | 静态 + glossary 概念卡 | 一期完整 |
+
+**PRD 5.4 交互规格 → 组件映射（逐条落地）**：
+
+| PRD 5.4 交互规格 | 前端实现（组件/状态） |
+|------------------|---------------------|
+| 5.4.2 搜索与找数 | 顶栏搜索框（防抖 300ms）→ `/metrics?q=`；结果卡含状态徽标/健康度/口径摘要；空结果空态引导 |
+| 5.4.3 指标详情与可读口径 | 详情页三栏；"口径速查"折叠卡（先给结论，展开见 formula）；`metric_version` 角标点击弹版本时间线（US-DA-2） |
+| 5.4.4 注册引导（ETL/模板） | 注册向导分 5 步（§12.3）；LLM 预填字段带"AI 推断"徽标可覆盖；试算按钮 → dry-run |
+| 5.4.5 试算与口径校验 | 详情/注册页"试算"→ `POST /query/dry-run`，并排"试算结果 vs 预期值"，偏差>5% 高亮 |
+| 5.4.6 审核与灰度发布 | 审核卡含"通过→PUBLISHED / 通过→EXPERIMENTAL(灰度)"双按钮 + 驳回理由必填；灰度指标蓝徽标"实验中" |
+| 5.4.7 权限申请与续期 | 无权限页"申请权限"→ 表单（域/指标/用途）→ `POST /grants`；到期前待办"一键续期"（OP-02） |
+| 5.4.8 冲突协商与仲裁 | 协商面板（双方面板并排 diff + 时间线）；升级/裁决按钮（GOV-1/2） |
+| 5.4.9 待办与通知联动 | 待办卡含 SLA 倒计时（剩 Xh 升级）；铃铛角标与待办中心同源 |
+| 5.4.10 降级与错误恢复 | 统一 ErrorBoundary + 错误码→人话文案映射表（§5.4）；降级能力灰显 + "降级中"角标 |
 
 ---
 
@@ -899,7 +1380,7 @@ term_idx：{term, alias, definition}  -- 术语检索（FR-08）
 - [ ] 指标注册→审核→发布状态机闭环，PII 指标触发合规门禁前无法 PUBLISHED；门禁拒绝时状态正确回退 REVIEW 且记拒因。
 - [ ] **灰度与版本确认**：审核通过可选 EXPERIMENTAL 灰度（白名单可见 + meta 标 experimental）；破坏性变更生成 PENDING_VERSION 且默认查询仍命中旧版本；消费方 confirm/reject/超时(14d 默认接受) 三条路径均正确升/驳版本；灰度 promote/rollback 一键可达（PRD 5.5.1）。
 - [ ] 语义查询下推 OLAP 返回带 `meta` 的可信结果，P95<3s（小表）；口径 `metric_version` 变更后旧缓存键主动失效（不返旧数）。
-- [ ] 四类冲突（同名/同义不同名/粒度单位/跨域异源 + 口径版本 + PII 路由）检测触发正确：硬冲突阻断发布、软冲突仅提示、PII 冲突转交 governance（423）。
+- [ ] 四类冲突（同名/同义不同名/粒度单位/跨域异源 + 口径版本 + PII 路由）检测触发正确：硬冲突阻断发布、软冲突仅提示、PII 冲突转交 governance（403 FORBIDDEN_PII）。
 - [ ] Semantic API token 模型（api_client 换短效 JWT + scope/白名单）+ 限流（QPS/日配额/扫描行）+ 降级可用，越权返 403 并审计。
 - [ ] 双写最终一致：MySQL/Neo4j/ES 三方数据最终对齐（重试队列验证）；服务间事件总线至少一次投递 + 消费幂等（同事件不重复建冲突/待办）。
 
@@ -1010,7 +1491,7 @@ PUBLISHED --废弃--> DEPRECATED --缓存失效--> consume(下线) [旅程三待
 | 九·DataAgent消费 | 外部 Agent | `api_client` 申请→`governance` 换 JWT(token scope/白名单)→`consume`(限流/降级)→`ai`(MCP tool) | 受控程序化消费；审计留痕；429 按 retry_after |
 | 十·QuickBI嵌入 | 分析师 | QuickBI 选指标→`consume.POST /embed/quickbi`→回传 metric_code+口径版本+维度约束→出图(标来源) | 报表可溯源；超界拖拽前端拦截粒度 |
 | 十一·反馈迭代 | 用户 | `notify.POST /feedback`→`observability`(状态:采纳/拒绝)→路线图滚动输入 | 反哺采纳率；高频主题进 PRD 开放问题 |
-| 十二·PII合规 | 数据开发 | 注册含 PII→`semantic` 触发 `governance.pii_review`(423 路由,非普通仲裁)→合规官复核→`classification` 落库→通过方进发布 | `metric.compliance_reviewed=true`；定期 `rescan`(COMPL-2) |
+| 十二·PII合规 | 数据开发 | 注册含 PII→`semantic` 触发 `governance.pii_review`(403 FORBIDDEN_PII 路由,非普通仲裁)→合规官复核→`classification` 落库→通过方进发布 | `metric.compliance_reviewed=true`；定期 `rescan`(COMPL-2) |
 
 **C. 全局角色 × 数据流矩阵（谁经手什么数据）**
 ```
@@ -1034,7 +1515,7 @@ Owner       ·    ·   审/写  裁   读    管     ·    ·   处    读   管
      time_semantics / source_table_field / confidence / infer_basis
 ③ 注册审核期（semantic → 双写 + 门禁）
    metric.submit ──> REVIEW
-     ├─ PII? ──是──> governance.pii_review(423) ──拒绝──> REVIEW(回退,reject_reason) ；通过──> 继续
+     ├─ PII? ──是──> governance.pii_review(403 FORBIDDEN_PII) ──拒绝──> REVIEW(回退,reject_reason) ；通过──> 继续
      └─ 同名/相似? ──> conflict.OPEN(待仲裁)
    approve ──> PUBLISHED ──> 双写事件: Neo4j(metric节点+血缘) + ES(metric_idx) [+Cube 二期]
 ④ 消费期（consume → OLAP/Redis → 调用方）
@@ -1061,7 +1542,7 @@ Owner       ·    ·   审/写  裁   读    管     ·    ·   处    读   管
 | 聚合/预聚合（二期） | semantic | Cube | consume | 同步失败回退自研 |
 | 冲突记录 | conflict | MySQL.conflict | notify, governance | 仲裁留痕 |
 | 分级分类结果 | governance | classification / db_catalog | assetmap, consume | 落库 |
-| 权限/授权 | governance | MySQL.grant / audit_log | consume, observability | 鉴权依据 |
+| 权限/授权 | governance | MySQL.grants / audit_log | consume, observability | 鉴权依据 |
 | 质量事件 | quality | MySQL.quality_event | notify, observability | 告警 |
 | 通知/待办 | notify | MySQL.notification / event_log | 前端, recommend | 事件驱动 |
 | 审计 | 网关中间件 | MySQL.audit_log | observability | 全写操作 |
@@ -1122,7 +1603,17 @@ Owner       ·    ·   审/写  裁   读    管     ·    ·   处    读   管
   | `metric.version_confirmed` | consume | semantic(升CURRENT), notify | 消费方确认/超时后版本生效 + 物化重建 |
   | `drift.detected` | conflict | notify | 口径漂移高等级告警进 Owner 待办（PRD 4.7.8） |
   | `reconciliation.alert` | quality | notify, conflict | 外部基准对账差异超阈值（PRD 4.8.8） |
-  | `benchmark.imported` | quality | notify | 外部基准导入完成 + 绑定确认 |
+   | `benchmark.imported` | quality | notify | 外部基准导入完成 + 绑定确认 |
+   | `classification.changed` | governance | notify, assetmap, semantic | 数据分级变更（PII 升级/降级，R7-01），触发下游指标继承刷新 + 热力更新 + 合规告警 |
+   | `config.changed` | governance / semantic | notify, observability | 平台配置变更（限流/配额/阈值/SLA，R9-07），通知管理员 + 审计 |
+   | `grant.changed` | governance | notify, observability | 权限变更（授权/回收/过期，4.9.6），通知受影响用户 + 审计 |
+   | `degradation.state_changed` | DegradationMiddleware | notify, observability | 依赖降级/恢复事件（4.13.5），通知管理员 + 入运维看板 |
+   | `user.offboarded` | HR 回调 | governance | HR 离职事件 → 批量回收权限 + 吊销 token（4.9.6） |
+   | `pii.anonymized` | governance | observability, notify | 被遗忘权执行完成通知（4.15.7） |
+   | `snapshot.generated` | consume | observability | 指标结果快照落库事件（4.5，Tier-1 自动触发） |
+   | `delivery.triggered` | notify | — | 指标投递事件（定时/阈值触发推送，4.5），走通知渠道投递 |
+   | `export.requested` | consume | governance, observability | 数据导出请求（受权限+行数上限+脱敏管控，4.11.12） |
+   | `auth.violation` | API 网关 | governance, observability | 越权尝试 / token 异常 / 批量授权异常（4.9.10 UEBA） |
 - **幂等**：消费者以 `event + ref_id` 去重，重复事件安全忽略；`conflict.opened` 同 `metric_a/metric_b` 不重复建。
 - **降级**：Stream 不可用 → 生产者落本地落盘队列，恢复后补发；不影响主链路写 MySQL。
 
@@ -1133,7 +1624,7 @@ Owner       ·    ·   审/写  裁   读    管     ·    ·   处    读   管
 - **双写对账**：定时任务比对 MySQL.metric_version 与 ES/Neo4j/Cube 的 `version` 字段，不一致标 `stale` 并触发补写（呼应 §5.1）。
 
 #### 12.0.3 统一错误码应用（C2）
-所有服务返回体 `{code, message, data, trace_id, degraded}`，`code` 取 §5.4 语义表；网关中间件在 `403/409/422/423/429/503/504` 统一包装，越权(`403`)/PII(`423`)必写审计。消费方据 `code` 决策：
+所有服务返回体 `{error_code, message, retry_after, trace_id}`，`error_code` 取 §5.4 语义表；网关中间件在 `403/409/422/429/503/504` 统一包装，越权(`403`)/PII(`FORBIDDEN_PII`)必写审计。消费方据 `error_code` 决策：
 - `429` → 读 `Retry-After` 退避（US-EXT-2）；
 - `503/504` → 提示 + `retry_after`，不静默返回缓存错数（除非 `accept_stale=true`）；
 - `422` → 参数错误，前端拦截不改重试。
@@ -1187,8 +1678,17 @@ Owner       ·    ·   审/写  裁   读    管     ·    ·   处    读   管
 5. **运行时反填**：消费方查询日志（`consume` 回传）建 `(:Report)-[:CONSUMED_BY]->(:Metric)`，比静态推测更准。
 
 **接口调用链**：
-- 入：`GET /lineage/table/{id}`、`GET /lineage/field/{id}`、`GET /lineage/impact/{id}`（同步查 Neo4j）
+- 入：`GET /lineage/table/{id}`、`GET /lineage/field/{id}`、`GET /lineage/impact/{id}`（同步查 Neo4j）；`GET /lineage/{metric_code}?depth=&direction=&confidence_min=`（R13-10：按指标码查血缘，depth 默认 3/最大 10，direction=upstream|downstream|both，confidence_min 过滤低置信度边）
 - 出：消费查询日志 → lineage 反填 `CONSUMED_BY`
+
+**血缘查询响应结构（R13-10）**：
+```json
+{
+  "nodes": [{"id":"table:sales_gmv_day","label":"Table","tier":"DWS"}, ...],
+  "edges": [{"source":"field:gmv","target":"metric:sales_gmv_day","type":"DEFINED_BY","confidence":0.95}, ...],
+  "meta": {"depth":3, "direction":"upstream", "total_nodes":12, "total_edges":15, "truncated":false}
+}
+```
 
 **数据流转**：
 ```
@@ -1222,6 +1722,9 @@ DRAFT --submit--> REVIEW --approve--> PUBLISHED 或 EXPERIMENTAL(灰度)
                     灰度回滚(rollback)                 PUBLISHED
 PUBLISHED --改口径(PUT)--> 新版本: 非破坏性→CURRENT 直接生效 /
                            破坏性→PENDING_VERSION(消费方确认14天, 超时默认接受) → CURRENT
+PUBLISHED --源表DROP/不可达--> DATA_SOURCE_DROPPED(异常子态, R5-01)
+  DATA_SOURCE_DROPPED --源恢复/重绑定--> PUBLISHED
+  DATA_SOURCE_DROPPED --确认废弃--> DEPRECATED
 ```
 1. `POST /metrics`（DRAFT）：校验 `definition_json`（原子=表达式；派生=依赖指标+公式；复合=多指标聚合）+ 一等治理字段（granularity/unit/aggregation/time_semantics/freshness/sla/dw_layer/tier/serving_mode/additivity 必填，缺则门禁拦截）。
 2. **冲突预检**：发 `conflict.check(metric_code, definition)` → 若命中同名/相似，挂 `pending_conflict` 标记（不阻塞注册，但审核时提示）。
@@ -1260,6 +1763,30 @@ PUBLISHED --改口径(PUT)--> 新版本: 非破坏性→CURRENT 直接生效 /
 - **命名规范校验（PRD 4.5 `naming`）**：注册/更新时校验 `metric_code` 符合 `域_业务对象_度量_统计周期`（如 `sales_gmv_day`），命中保留词或不合规 → 提示修正（软提醒）；同域重名 → 阻断（硬约束，联动 §12.4）。
 - **数仓分层驱动差异化（PRD 4.5 `dw_layer`）**：采集（collector）按库名前缀（`dws_`/`ads_`/`dwd_`）自动推断 `dw_layer`，人工可覆盖。分层驱动：① 质量 SLA——DWS/ADS 严于 DWD（如 DWS 06:30 前就绪、DWD 宽限 08:00）；② 审核流——DWS/ADS 注册/变更须 `reviewer` 审核，DWD 走"自动门禁 + Owner 确认"简化流；③ 血缘精度——DWS/ADS 要求字段级（L2），DWD 允许表级（L1）；④ 治理驾驶舱按层聚合，DWS 权重最高。
 
+**紧急发布快通道（PRD 5.5.1/R6-04）**
+- **逻辑**：`domain_admin` 可跳过常规审核环节直接发布，但须满足：(1) 填写紧急原因（监管要求/生产事故/数据泄露）；(2) 24 小时内补审并留 `EMERGENCY_PUBLISH` 审计标记；(3) 补审未通过须立即回滚。紧急发布的指标在详情页标"⚠ 紧急发布待补审"，补审通过后标记清除。
+- **合规门禁不可跳过**：含 PII 的指标紧急发布仍须 `compliance_officer` 复核通过——合规门禁是安全硬线，不可因紧急而豁免；若合规官不可达，该指标仅可按 `INTERNAL` 分级发布（PII 维度值全脱敏），合规复核补审后方可放开 PII 维度可见范围。
+- **状态机扩展**：`DRAFT ──紧急发布──▶ PUBLISHED`（带 `emergency_publish=true` + `reason`），跳过 REVIEW 但不跳过 PII 门禁。
+
+**PENDING_VERSION 期间 Schema Drift 处理（PRD 5.5.1/R9-02）**
+- 版本待生效期间若 4.2 Schema Drift 检测到源表结构变更（如字段删除/类型变更），新版本口径可能已失效：
+  1. 自动暂停版本切换并通知 Owner："源表结构已变更，请复核新版本口径是否仍有效"
+  2. Owner 须在 7 天内确认或重走口径修改→重新提交审核
+  3. 逾期未处理则自动回退到旧版本（PENDING_VERSION→取消），避免失效口径静默生效
+  4. Schema Drift 检测事件写入 `schema_drift_event`，关联 `metric_version.id`
+
+**指标消费指南（PRD R3-20，Owner 维护的消费方指导）**
+- 指标详情页"消费指南"Tab：Owner 可编写适用/不适用场景、常见误用、推荐用法示例
+- 存储于 `metric` 表 `consumption_guide` JSON 字段：`{applicable: [...], not_applicable: [...], common_misuse: [...], recommended_usage: [...]}`
+- 消费指南修改为 `non_breaking` 变更，直接升 CURRENT 不走 PENDING_VERSION
+
+**存量迁移质量校验（PRD 6.7/R8-05）**
+- **迁移策略**：
+  1. 迁移后指标默认标 `DRAFT`（非直接 PUBLISHED），须 Owner 确认口径 + 绑定数据源后走审核发布
+  2. 存量指标无 Owner → 由 `domain_admin` 指定临时 Owner（30 天内须认领，逾期标"待认领"告警）
+  3. 迁移批次策略：按域分批（每批 ≤ 200 指标），每批完成后跑 4.8 质量规则抽样校验（校验通过率 ≥ 90% 方可继续下批）
+  4. 迁移进度与质量在运营看板可见（`migration_batch` 记录批号/域/指标数/成功数/失败数/质量通过率）
+
 **指标健康度评分（PRD 5.5.3，治理驾驶舱数据源）**
 - **模型**：单指标 0–100 分，五维加权（权重可配，默认：口径完整度 25% / 活跃度 20% / 质量 25% / Owner 响应 15% / 血缘覆盖 15%）。
 - **口径完整度**：一等字段（granularity/unit/aggregation/time_semantics/freshness/sla/source/dimensions）齐全率。
@@ -1269,6 +1796,14 @@ PUBLISHED --改口径(PUT)--> 新版本: 非破坏性→CURRENT 直接生效 /
 - **血缘覆盖**：上游解析率（物理表→字段覆盖，源：lineage）。
 - **刷新与分级**：每日凌晨批量重算 + 关键事件（质量异常/状态变更）实时增量；≥85 优（绿）/ 70–84 良（蓝）/ 55–69 警（橙）/ <55 危（红）；红橙指标自动进整改待办（notify.todo）。某维度数据缺失（如埋点未覆盖）→ 该维记 0 并标"数据不足"，不臆造分数。
 - **用途**：`GET /metrics/dashboard` 驾驶舱、治理红黑榜、指标退役建议（长期低活跃 + 低消费自动建议 DEPRECATED）。
+
+**指标对比工具（PRD 4.5）**
+- `POST /metrics/compare`：入参 `{metric_codes: [code_a, code_b]}`（上限 2，一期；二期可扩多指标对比），返回两指标关键字段并排差异：
+  - `definition`（measure/formula 表达式 diff）、`granularity`、`dimensions`（维度集差集/交集）、`unit`/`currency`、`source_tables`（来源表差异）、`time_semantics`、`additivity`、`usage_notes`
+  - 差异字段高亮标记（`difference_level: identical|similar|different`）
+- **触发入口**：指标目录勾选两个指标 → "对比"（§7.6 `/compare` 页）；冲突仲裁面板也可复用此接口（§12.4 协商面板展示 diff）
+- **实现**：读 `metric` 表两行定义 + `metric_lineage_source` 来源表对比 + `metric_dimension` 维度集对比，纯读聚合，不走下推
+- **权限**：须同时有 A/B 两指标的查看权限，否则 403
 
 ---
 
@@ -1283,7 +1818,7 @@ PUBLISHED --改口径(PUT)--> 新版本: 非破坏性→CURRENT 直接生效 /
    - **③ 粒度/单位冲突（软冲突）**：同名但统计周期（`_day`/`_month`）或单位（`yuan`/`cent`）不同 → 不阻断，仅提示消费方绑定正确粒度/单位（PRD 4.7.1）。
    - **④ 跨域同口径异源**：同一业务含义指标指向不同物理表 → 提示合并或明确"权威源"。
    - **口径版本冲突**：同一指标新旧版本并存，消费方绑错版本 → 提示升级。
-   - **PII 冲突（特殊路由，C4）**：含 PII 口径在无权域被引用 → **不进普通仲裁**，转交 `governance.pii_review`（423 PII_BLOCKED），由合规裁决而非业务仲裁。
+   - **PII 冲突（特殊路由，C4）**：含 PII 口径在无权域被引用 → **不进普通仲裁**，转交 `governance.pii_review`（403 FORBIDDEN_PII），由合规裁决而非业务仲裁。
 2. 命中 → 建 `conflict`(OPEN) + 发 `notify.todo`（给治理角色 GOV-1）。
 3. 仲裁 `POST /conflicts/{id}/arbitrate`：
    - 选唯一口径 / 合并 / 保留差异（标 `canonical`）。
@@ -1323,8 +1858,8 @@ conflict --裁决--> MySQL.conflict(ARBITRATED) + notify + semantic(canonical标
 
 **核心流程**
 1. 角色模型（**对齐 PRD 4.9.2**）：`platform_admin`（跨域运维）/ `domain_admin`（本域管理+审批本域提交）/ `metric_owner`（本指标编辑/下线）/ `reviewer`（审批 PENDING_REVIEW）/ `compliance_officer`（PII/合规复核门禁）/ `viewer`（只读浏览，含被授予的跨域只读引用）。权限 = 角色 × 主题域；跨域只读经 `grants.grant_type=READ`（授权模型非复制，源域保留 WRITE）。
-2. 授权：`POST /grants`（域 + 指标白名单 + 行级开关），写入 `grant`。
-3. **PII 门禁**：`POST /pii/review`（COMPL-1）复核分级与脱敏策略，写 `metric.compliance_reviewed=true`；semantic.approve 前查此标志。门禁拒绝时 conflict 服务收到 `423 PII_BLOCKED` 路由（C4），不进普通仲裁。
+2. 授权：`POST /grants`（域 + 指标白名单 + 行级开关），写入 `grants`。
+3. **PII 门禁**：`POST /pii/review`（COMPL-1）复核分级与脱敏策略，写 `metric.compliance_reviewed=true`；semantic.approve 前查此标志。门禁拒绝时 conflict 服务收到 `403 FORBIDDEN_PII` 路由（C4），不进普通仲裁。
 4. **分级重扫**：`POST /classification/rescan`（COMPL-2）→ 调分级引擎重算 `db_catalog.sensitivity_level` + 写 `classification` 表（sensitivity_level/pii_columns/model_version）+ 触发 assetmap 热力刷新事件 `classification.done`。引擎不可用时降级（§5.5），标 `UNKNOWN` 不阻断。
 5. 鉴权查询：`GET /me/permissions` → 返回当前用户域/指标权限快照，供 consume 与前端按钮级控制。
 6. **维度映射维护**：维护 `dimension` / `dimension_mapping` / `metric_dimension`（L2 落库）；消费侧 `POST /query` 校验维度合法性时反查此表。
@@ -1336,8 +1871,8 @@ conflict --裁决--> MySQL.conflict(ARBITRATED) + notify + semantic(canonical标
 
 **数据流转**：
 ```
-用户/合规官 --授权/复核--> governance --写--> MySQL.grant / metric.compliance_reviewed / classification
-governance --门禁--> semantic(approve拦截) / conflict(423 PII路由)
+用户/合规官 --授权/复核--> governance --写--> MySQL.grants / metric.compliance_reviewed / classification
+governance --门禁--> semantic(approve拦截) / conflict(403 FORBIDDEN_PII 路由)
 governance --权限快照--> consume(查询鉴权)
 governance --分级结果--> assetmap(热力) + classification(落库)
 ```
@@ -1346,6 +1881,135 @@ governance --分级结果--> assetmap(热力) + classification(落库)
 - 越权访问 → `403 FORBIDDEN` + 审计（observability）。
 - 行级权限一期为骨架（域级），二期深化（行级表达式）。
 - 分级引擎降级见 §5.5，不影响注册/发布主链路。
+
+**PII 识别三路融合（PRD 4.15.3，字段级敏感判定核心）**
+
+PII 字段判定由三路信号取并集，任一路命中即标 `PII`（宁误标可人工纠正，不漏标致泄露）：
+
+1. **字段名/注释正则匹配**：按 `pii.identification.regex_list` 配置（默认含 id_card/phone/email/name），匹配字段名或注释关键词
+2. **类型启发式**：字符串类型 + 长度/格式特征（如 `VARCHAR(18)` 且含数字→疑似身份证号），启发规则硬编码可配
+3. **LLM 样本推断**：collector 采集时送字段名+注释+脱敏样本（受 4.9 约束不泄露敏感值）给 LLM，LLM 返回 PII 概率
+
+**融合规则**：① 三路结果取并集（任一路标 PII → 字段标 PII）；② 正则匹配为硬规则不可覆盖；③ LLM 推断降级时不自动标 PII（防误标误拦），留"待人工复核"标记；④ 误标可由 `compliance_officer` 在复核时纠正（写 `data_classification.verified_by/verified_at`）；⑤ schema 变更后触发 §4.2 重扫防漏标
+
+**PEP→PDP 决策引擎（PRD 4.9.1/4.15.5，RBAC×ABAC 融合核心）**
+
+所有鉴权请求（API/页面/AI）经统一决策管线，PEP 提取属性、PDP 匹配策略、输出决策，全链路入审计：
+
+```
+请求 → PEP(提取属性) → PDP(策略匹配) → 决策 → 执行 → 审计
+```
+
+1. **PEP（Policy Enforcement Point，策略执行点）**：
+   - 提取主体属性：`user_id` / `role` / `domain_grants` / `metric_whitelist`
+   - 提取资源属性：`resource_type`（domain/metric/dimension/export） / `sensitivity_level` / `metric_status`
+   - 提取环境属性：`time_of_day`（是否工作时间） / `network_zone`（内网/VPN/外网） / `client_type`（browser/api_client/mcp_agent）
+   - 提取动作属性：`action`（read/write/approve/export/query）
+   - 属性缺失时按最严策略处理（Deny 或 Mask），不默认放行。
+
+2. **PDP（Policy Decision Point，策略决策点）**：
+   - **策略匹配算法**：
+     - 按 `role_id` + `resource_type` + `action` 三元组从 `policy` 表加载候选策略集
+     - 按 `priority` 降序排列，逐条评估 `abac_condition`
+     - 首条匹配的策略即为决策结果；无匹配策略 → 默认 Deny（fail-closed）
+   - **ABAC 条件表达式求值**（`abac_condition` JSON 结构）：
+     ```json
+     {
+       "operator": "AND",
+       "conditions": [
+         {"attr": "env.time_of_day", "op": "in_work_hours", "value": true},
+         {"attr": "env.network_zone", "op": "in", "value": ["intranet","vpn"]},
+         {"attr": "resource.sensitivity_level", "op": "not_equals", "value": "PII"}
+       ]
+     }
+     ```
+     支持算子：`equals` / `not_equals` / `in` / `not_in` / `greater_than` / `less_than` / `in_work_hours` / `contains_any`
+   - **决策输出**（对齐 PRD 4.15.5）：
+     | 决策 | 语义 | 后续动作 |
+     |------|------|----------|
+     | `ALLOW` | 完全允许 | 正常返回数据 |
+     | `DENY` | 拒绝 | 返回对应 403 错误码 + 审计 |
+     | `ALLOW_WITH_MASK` | 允许但须脱敏 | 调脱敏引擎处理 PII/敏感维度值 |
+     | `ALLOW_SCOPED` | 允许但限定维度值范围 | 按维度值 RLS 过滤结果集 |
+   - **PDP 决策缓存**（PRD 4.9.9 ABAC 性能边界）：
+     - 缓存 key = `hash(user_id + role + resource_type + resource_id + action + abac_condition_hash)`
+     - 缓存 value = 决策结果 + 过期时间
+     - TTL = 60s（短 TTL，策略变更 1 分钟内生效）
+     - 存储：Redis，`pdp:decision:{hash}` 前缀
+     - 失效：策略变更（`POST /policy` / `PUT /policy`）时主动清除该 role 相关所有缓存键（按 `role_id` 前缀 SCAN + DEL）
+     - 极端策略数（>1000 条/角色）评估：超过阈值告警 `platform_admin`，建议拆分策略或合并条件
+
+3. **PII 沿血缘自动传播（PRD 4.15.2）**：
+   - 上游表/字段标 PII → 沿 Neo4j `INHERITS_CLASSIFICATION` 边传播到下游指标
+   - 传播规则：`sensitivity_level` 取上游最大值（PII > CONFIDENTIAL > INTERNAL > PUBLIC）
+   - 写 `data_classification` 记录，`inherited_from` 指向上游实体 ID
+   - 传播触发时机：① 采集分级结果更新时；② 合规官复核后分级变更时；③ 指标新绑 PII 源字段时
+   - 推断降级时**不自动标 PII**（防误标误拦），留"待人工复核"标记
+
+**脱敏策略引擎（PRD 4.15.4，PDP ALLOW_WITH_MASK 的执行层）**
+
+PDP 输出 `ALLOW_WITH_MASK` 时，由脱敏引擎按策略对查询结果执行脱敏处理：
+
+1. **四种脱敏策略**（按角色/环境/字段敏感度选择）：
+   | 策略 | 实现 | 适用场景 | 示例 |
+   |------|------|----------|------|
+   | `MASK` | 保留首尾，中间用 `*` 填充 | 手机号/身份证号展示 | `138****8000` |
+   | `HASH` | SHA-256 取前 8 位十六进制 | 须唯一标识但不可逆 | `a3f2c1b8` |
+   | `GENERALIZE` | 映射到更粗粒度区间 | 年龄/金额/位置 | `年龄 30-40` / `金额 1万-5万` |
+   | `NULLIFY` | 直接置空不返回 | 极高敏字段对无权角色 | `null` |
+
+2. **脱敏策略选择算法**：
+   ```
+   输入: role, sensitivity_level, field_name, env
+   规则优先级: policy.mask_strategy > 字段级默认 > 分级默认
+   分级默认:
+     PII + viewer/external_agent → MASK
+     PII + analyst(in_work_hours+intranet) → 明文（ALLOW，不进脱敏引擎）
+     PII + analyst(off_hours/VPN) → MASK
+     CONFIDENTIAL + viewer → GENERALIZE
+     CONFIDENTIAL + external_agent → NULLIFY
+   兜底: 策略缺失 → 默认 NULLIFY（最严，Deny 语义的数据层等价）
+   ```
+
+3. **维度值 RLS 过滤（ALLOW_SCOPED 的执行层）**：
+   - PDP 输出 `ALLOW_SCOPED` + `scope_dimensions` → 查询结果按维度值过滤
+   - 例如：`scope_dimensions = {"region": ["华东","华北"]}` → 查询 WHERE 子句追加 `region IN ('华东','华北')`
+   - 与 SQL 方言翻译层联动：追加的过滤条件经适配器生成方言 SQL
+
+4. **脱敏不阻断查询链路**：脱敏在结果集后处理（非 SQL 层），不影响查询执行计划与缓存键；脱敏后结果不写入缓存（避免脱敏结果被其他请求复用导致泄露）。
+
+**被遗忘权实现（PRD 4.15.7/R7-06，WORM 与 PIPL 协调）**
+
+PIPL 撤回同意/销户时，审计中个人标识**覆写脱敏**而非物理删除（WORM 约束行不可删改）：
+
+1. **覆写脱敏管线**：
+   - 触发：用户销户/撤回同意事件（HR 系统回调或用户自助操作）
+   - 定位：扫描 `audit_log` 中 `actor.user_id = :target_uid` 的所有行
+   - 覆写：将 PII 字段替换为不可逆标识
+     - `actor.name` → `ANONYMIZED_<SHA256(uid)[:8]>`
+     - `context.IP` → `ANONYMIZED_<hash>`
+     - `context.UA` → `ANONYMIZED`
+     - 非个人标识字段（`action`/`resource_type`/`resource_id`/`before`/`after`/`result`）保留不变
+   - 覆写操作本身入审计：`action=PII_ANONYMIZED`, `resource_type=user`, `resource_id=:target_uid`, `after={"fields_anonymized": ["actor.name","context.IP"]}`
+   - 覆写完成后标记用户记录 `anonymized_at = NOW()`
+
+2. **禁止物理删除审计行**：WORM 约束优先于 PIPL 删除权——保留事件行但使个人不可识别，两者不矛盾。
+
+3. **批量覆写性能**：按用户 ID 批量 UPDATE，每批 1000 行；大用户（>10 万审计行）异步执行+进度看板。
+
+4. **能力边界**：仅作用于平台审计侧标识；源库数据清除归源端负责。
+
+**临时授权 TTL 与权限回收（PRD 4.9.6）**
+
+1. **临时授权**：`POST /grants` 时可传 `expires_at` 字段（DATETIME），写入 `grants.expires_at`
+2. **自动回收**：Worker 定时扫描 `grants WHERE expires_at < NOW() AND status = 'ACTIVE'`（每 5 分钟），批量置 `status=EXPIRED` + 发通知 + 审计
+3. **HR 离职事件联动**：HR 系统发 `user.offboarded` 事件 → governance 接收 → 批量回收该用户所有 `grants` + 角色绑定 + API token 吊销 + 审计
+4. **权限影响预览（what-if）**：`POST /grants/batch/dry-run` 返回受影响用户数/指标数/权限变更类型，管理员确认后执行
+
+**审批回避与交叉审批（PRD 4.9）**
+- **规则**：审批人（`reviewer`/`domain_admin`）若是指标 Owner 或创建者，系统自动检测并重定向——同域另一 `domain_admin` 或 `platform_admin` 执行审批；本域无其他 `domain_admin` 则升级至 `platform_admin`。**不允许自审通过**。
+- **实现**：`semantic` 的 approve 端点校验 `approver_id != metric.owner_id` 且 `approver_id != metric.creator_id`；命中则返 `409 CONFLICT（自审不允许，已重定向）`，前端提示改用可审批人。
+- **审计**：重定向事件写 `operation_audit`（action=APPROVE_REDIRECTED, reason=self_review_blocked），供治理复盘。
 
 ---
 
@@ -1356,25 +2020,36 @@ governance --分级结果--> assetmap(热力) + classification(落库)
 **核心流程（查询主链路）**
 1. `POST /query`（前端 / api_client）：
    - **鉴权（token 模型，D3）**：用户态 `Bearer JWT` → governance.permissions 校验域/白名单；消费方 `X-Api-Key` → 换短效 `Bearer JWT`（含 `client_id/scope/tenant_id/metric_whitelist/TTL`），密钥经 Secret Manager，可吊销可轮换；越权 `403`+审计。
-   - **限流（D3）**：按 client 维度 Redis 滑动窗口（`QPS=20`、日调用 `10万`、单查询扫描行上限 `scan_row_limit`）；超限 `429`+`Retry-After`；热点驱动 semantic 预聚合。
+   - **限流（D3）**：按 client 维度 Redis 滑动窗口（`QPS=20`、日调用 `10万`、单查询扫描行上限 `scan_row_limit`）；超限 `429`+`Retry-After`；**免费额度超限 → `429 FREE_QUOTA_EXCEEDED`（响应含 `budget_reset_at`，R10-01/R11-07）；月度预算超 100% → `429 BUDGET_EXCEEDED`（响应含 `budget_reset_at`，R10-01/R11-09）**。热点驱动 semantic 预聚合。
    - **口径解析（语义锚定）**：用 `metric_code`+`version` 从 MySQL 取 `definition_json`（AST），**绝不接受裸 SQL**，降 NL 幻觉。
-   - **维度/粒度校验**：反查 `metric_dimension`+`dimension` 验证 `dimensions` 合法性；细于 `granularity_bound` → `422 GRANULARITY_FORBIDDEN`（硬约束，呼应 4.5）。
-   - **可加性校验（additivity，PRD 4.5）**：请求按维度上卷时，若指标 `additivity=NON_ADDITIVE` 或 `SEMI_ADDITIVE` 且目标维度落在 `non_additive_dimensions` → `422 ADDITIVITY_VIOLATION`，引导走重算路径（COUNT(DISTINCT)/AVG 上卷重算而非汇总，避近似误差）。
-   - **缓存查询（C3）**：`key = metric:{code}:v{version}:{dim}:{dateRange}`；命中且未过期 → 返（带 `freshness`）；口径版本变更时旧键主动失效。
+   - **维度/粒度校验**：反查 `metric_dimension`+`dimension` 验证 `dimensions` 合法性；细于 `granularity_bound` → `422 GRANULARITY_VIOLATION`（硬约束，呼应 4.5）。
+   - **批量指标维度交集自动求取（R13-09）**：`POST /query` 请求含多个 `metrics` 时，平台自动求取各指标合法维度集的交集作为查询维度——交集为空则返回 `422 DIMENSION_INVALID`（提示哪些指标无可共享维度）；消费方也可显式指定维度子集（须为交集子集）。
+   - **可加性校验（additivity，PRD 4.5）**：请求按维度上卷时，若指标 `additivity=NON_ADDITIVE` 或 `SEMI_ADDITIVE` 且目标维度落在 `non_additive_dimensions` → `422 ADDITIVITY_VIOLATION`，引导走重算路径（COUNT(DISTINCT)/AVG 上卷重算而非汇总，避近似误差）。`orderBy` 引用字段受 ADDITIVE 约束——NON_ADDITIVE 字段仅允许按其非可加维度分组后排序（R13-08）。
+   - **缓存查询（C3）**：`key = metric:{code}:v{version}:{dim}:{dateRange}:{comparison_hash}`；命中且未过期 → 返（带 `freshness`）；口径版本变更时旧键主动失效。
    - **方言翻译（D1）**：`definition_json` AST → 调 semantic 的"口径→方言 SQL 翻译层"生成目标引擎 SQL（MySQL/PG/Doris/Hive 适配器），统一处理维表 JOIN / 时区 / 币种 / 分区裁剪。
+   - **comparison 结构化参数（R13-07）**：`{"type":"yoy|mom|wow|custom","offset":1,"base_date":null}`——`type=yoy` 默认 offset=1（上年同月），`custom` 须显式传 offset+base_date；翻译层将 comparison 展开为 UNION ALL 子查询（当期 vs 对照期）。
+   - **orderBy 结构化参数（R13-08）**：`{"field":"gmv","direction":"asc|desc"}`——field 须为请求 metrics 中合法指标码或维度，direction 默认 desc。
+   - **幂等性（R13-06）**：请求可含 `idempotency_key`（UUID），24h 内相同 key → 直接返缓存结果（不重复下推），key 与 `client_id` 绑定隔离；无 key 请求不保证幂等（正常多提交由消费方去重）。
    - **批流双路路由（serving_mode，PRD 4.5）**：指标为 `BATCH_REALTIME_DUAL` 时，默认取实时路径（经 `data_set.serving_path=REALTIME` 解析），消费方可显式 `serving_mode=batch` 走批路径；响应 `meta.freshness` 返回双路径就绪态（`{batch:"T+1 08:30", realtime:"5min"}`）。质量规则按路径分别配置。
    - **路由决策**：命中物化/聚合表 → 直查（最快）；否则按 serving_mode 路径实时下推 OLAP（一期自研 / 二期 Cube `/cubejs-api/v1/load`）。
-   - **执行保护**：扫描行 > `quota` → `422 SCAN_OVER_QUOTA`；超时 → `504 QUERY_TIMEOUT`+预计恢复；可 `query_id` 取消在途（§3.6 `GET /query/{id}/cancel`）。
-   - **OLAP 不可达**：`503 OLAP_DOWN`+`retry_after`；仅当 `accept_stale=true` 返陈旧缓存（§5.2 舱壁）。
-   - **meta 标注**：`metric_version / freshness / granularity_bound / sample / stale / source_trace / quality_flag`（低于阈值标 `quality_downgraded`）。
+   - **执行保护**：扫描行 > `quota` → `422 QUOTA_EXCEEDED_SCAN`；超时 → `504 QUERY_TIMEOUT`+预计恢复；可 `query_id` 取消在途（§3.6 `GET /query/{id}/cancel`）。
+   - **OLAP 不可达**：`503 DEPENDENCY_DEGRADED_ENGINE`+`retry_after`；仅当 `accept_stale=true` 返陈旧缓存（§5.2 舱壁）。
+   - **DEPRECATED 指标访问控制（R13-11）**：默认拒绝访问 DEPRECATED 指标（`403 FORBIDDEN_DEPRECATED`）；消费方显式传 `accept_deprecated=true` 可在 Sunset 期内继续查询（口径钉住旧版本）；Sunset 期满后返回 `410 METRIC_VERSION_SUNSET`。彻底退役指标（GONE）返回 `410 METRIC_DEPRECATED` 须转 successor。
+   - **meta 标注（对齐 PRD 4.11.7 + R13-14 serving_mode）**：`metric_version / freshness / granularity_bound / sample / stale / source_trace / quality_flag / serving_mode(batch|realtime)`（低于阈值标 `quality_downgraded`）。
    - **结果回写**：写缓存 + 发 `consume.queried` 事件 → lineage(CONSUMED_BY 反填)/observability(度量)/recommend(埋点)。
 2. `POST /query/dry-run`（L3，4.11.6）：对样本分区跑口径，返样例结果+耗时+扫描行数；**不计费/不写生产/不进缓存**，用于注册/改口径 Owner 比对、质量规则预校验。
 3. `POST /embed/quickbi`（FR-12）：取嵌入令牌（含 scope 约束），回传 `metric_code`+口径版本+合法维度/粒度边界；超界拖拽前端拦截"已聚合至 X 粒度"。
+4. `GET /embed/quickbi/card`（口径卡片，PRD 4.11.1）：QuickBI 报表侧边栏嵌入——按 `metric_code` 返回口径摘要卡（业务描述 / formula 摘要 / 口径版本角标 / 新鲜度 / 质量分 / 关联术语链接），不离开报表即可查看口径；卡片数据与 `GET /metrics/{code}` 同源（同一语义层），受嵌入令牌 scope 约束。
 4. `/metrics/{code}/semantic`：只读语义拉取（api_client），受 scope + `metric_whitelist`。
 5. **消费侧运行时冲突检测（L3，4.11.8）**：从 `consume.queried` 日志提取"指标名/口径版本/消费方"三元组；发现两报表以不同口径版本调用同一指标名 → 触发运行时告警 + 生成 `Conflict` 候选（走 12.4 仲裁闭环），防"线上已出俩数"。
 6. **查询血缘反填（L3，4.11.10）**：实际查询日志回灌 `lineage`，补全 `Report -[CONSUMED_BY]-> Metric` 下游边（比静态推测更准），支撑 conflict 运行时冲突 / observability 度量 / assetmap 热度。
-7. **结果快照存证（L3，PRD 4.5，P1）**：对 Tier-1 及涉财务/合规指标，查询结果（即时查询或物化）落 `metric_value_snapshot`（WORM，只写不删）——含 `metric_code`/`version`/`dims`/`date_range`/`value`/`quality_flag`/`generated_at`；供 4.7 争议仲裁证据回溯、外部审计佐证、跨期对账（"上月报财务的数 vs 本月口径"）。`GET /snapshots` 查询受 governance 权限 + 行数上限 + PII 脱敏。快照生成对 Tier-1 全量、Tier-2/3 可配（默认不落，控制存储）。
+ 7. **结果快照存证（L3，PRD 4.5，P1）**：对 Tier-1 及涉财务/合规指标，查询结果（即时查询或物化）落 `metric_value_snapshot`（WORM，只写不删）——含 `metric_code`/`version`/`dims`/`date_range`/`value`/`quality_flag`/`generated_at`；供 4.7 争议仲裁证据回溯、外部审计佐证、跨期对账（"上月报财务的数 vs 本月口径"）。`GET /snapshots` 查询受 governance 权限 + 行数上限 + PII 脱敏。快照生成对 Tier-1 全量、Tier-2/3 可配（默认不落，控制存储）。
+    - **触发时机（R3-09）**：Tier-1 指标分区产出就绪 + 4.8 质量校验通过后自动触发快照落库（校验未通过仍落库但标 `quality_downgraded`，保留"当时实际值"）；非 Tier-1 但涉财务/合规指标由 Owner 手动开启快照。
+    - **快照粒度**：默认全维度组合落库；维度基数过大（如 UV 按 UID 维度）时仅存核心维度组合（Owner 配置，默认为指标默认下钻维度集 + 时间维度）。
+    - **存储策略**：热存 180 天（MySQL 分区表按月分区），之后自动冷归档至对象存储，归档后查询走异步导出（T+1）；冷归档策略与 4.10 审计归档一致。
+    - **与 /query 的关系（R4-03）**：快照接口为独立端点 `GET /metrics/{code}/snapshots`，不复用 `/query + as_of_date`——快照为 WORM 存证，/query 为即时计算，两者存储路径与权限模型不同；消费方需"某版本口径下的历史值"而非"存证值"应走 /query + `metric_version` 参数。
 8. **口径版本消费方确认回调（L3，PRD 5.5.1）**：收到 `metric.pending_version` 通知的消费方经 `POST /versions/{id}/confirm|reject` 回执（14 天超时默认接受，一次延期 +7 天）；confirm 后 semantic 将 `PENDING_VERSION` 升为 `CURRENT` 并触发物化重建；reject 带理由驳回变更。
+9. **收藏/最近浏览（PRD 4.5，用户侧本地数据）**：读写入 `user_preference`（`pinned_metrics` 收藏 / `recent_metrics` 最近浏览）——收藏与最近浏览仅用户侧视图，不影响指标治理；收藏指标发生破坏性变更/废弃时随 `metric.pending_version` 事件进入"关注"通知（与 §12.3 watch 语义一致）。最近浏览由前端在指标详情点击时记录（限 20 条，LRU 淘汰）。
 
 **接口调用链**：
 - 入：§3.6 全部端点
@@ -1393,6 +2068,7 @@ governance --分级结果--> assetmap(热力) + classification(落库)
 - 降级矩阵（§5.2）：OLAP✗→503 / ES✗→MySQL LIKE / Cube✗→回退自研。
 - 舱壁：AI 流量独立 OLAP 实例/队列（§5.3）。
 - 缓存一致性：口径版本变更主动失效旧键（§12.0.2）。
+- **消费口径统一入审计（R11-01/R11-02）**：三条消费管线——Semantic API（`POST /query`）、QuickBI 嵌入（`POST /embed/quickbi`）、MCP 工具调用（`/mcp/tools/call`）——统一写入 `operation_audit`（`channel=api|quickbi|mcp`），确保全渠道消费可溯、可计量、可限流。
 
 ---
 
@@ -1459,9 +2135,30 @@ governance --分级结果--> assetmap(热力) + classification(落库)
    - 站内：`notification`(inapp) 写入，前端轮询/WS 拉取（标记 `read_at`）。
    - 外部：邮件（SMTP）/Webhook（按用户订阅 channel）；Webhook 带 HMAC 签名 + 重试（失败入 DLQ）。
    - **幂等**：以 `event + ref_id` 去重，重复事件安全忽略。
-2. **埋点**：所有消费/查询事件写 `event_log`（user_id, event, target_metric, ctx_json）→ 供 recommend 协同计算（共查频次）。
+2. **埋点（PRD 4.14.5/4.14.6，产品行为采集与价值证伪）**：
+   - **埋点事件枚举（围绕 1.4 北极星）**：
+     | 事件 | 字段 | 用途 |
+     |------|------|------|
+     | `metric.search` | `query`/`result_count`/`clicked_code`/`is_no_result` | 搜索效率分析 |
+     | `metric.detail_view` | `metric_code`/`duration_ms`/`active_tab` | 口径确认耗时 |
+     | `metric.register_start` | `source`(manual/etl/template) | 注册转化漏斗 |
+     | `metric.register_submit` | `metric_code`/`llm_adopted_fields`/`duration_ms` | LLM 采纳率 |
+     | `quality.alert_received` | `metric_code`/`severity`/`action_taken` | 告警触达→处理闭环 |
+     | `ai.assist_used` | `metric_code`/`field`/`adopted`(bool) | AI 辅助采纳率 |
+     | `api.call` | `client_id`/`endpoint`/`status_code`/`duration_ms` | API 鉴权成功率/限流率 |
+     | `conflict.participated` | `conflict_id`/`role`/`decision` | 冲突仲裁参与 |
+     | `term.search` | `query`/`result_count` | 术语检索活跃度 |
+   - **埋点字段规范**：`uid`（脱敏ID）/ `role` / `metric_code` / `duration_ms` / `trace_id` / `channel` / `ts`，与 4.10 审计字段对齐便于关联。
+   - **采集管线**：前端 SDK 批量上报 + 后端日志双路，异步批量入 OLAP 分区表；失败不阻断主流程（埋点丢失降级告警，不阻塞业务）。
+   - **隐私边界**：埋点不含 PII 明文（用户标识走脱敏 id，呼应 4.9/4.10 被遗忘权），PII 维度值不进埋点。
+   - **埋点反哺**：① `metric.search`+`metric.detail_view` → 计算确认口径耗时（1.4 北极星）；② `metric.register_start`+`metric.register_submit` → 首注时长 + LLM 采纳率；③ `api.call` → API 鉴权成功率；④ 高频搜索/停留行为 → recommend 协同信号。
 3. **订阅中心**：用户可配置 channel 偏好（inapp/email/webhook）+ 免打扰（避免告警风暴，呼应 quality 去重）。
 4. **指标结果主动投递（PRD 4.5 `metric_delivery`）**：① 定时投递——按 `schedule_cron`（每日/每周）拉取指标值（转调 consume `/query`）推送到钉钉/邮件/Webhook；② 阈值触发——指标值突破 `trigger_rule` 即时推送。投递配置与 governance 对齐（`receiver_scope` 接收方须有该指标可见权限），投递结果入 observability 度量。
+5. **投递逻辑与防骚扰（PRD 4.14.2）**：
+   - **同根因聚合**：同源多事件（如一张上游表缺失引发下游 N 个指标质量告警）归并单条摘要，附受影响清单，防告警风暴。
+   - **沉默期与分级**：P0/P1 实时触达；P2/P3 进沉默期（工作时间外或非紧急）汇总为每日摘要，降打扰。
+   - **渠道降级**：IM/邮件/短信网关不可达 → 自动降级为站内信（保证"至少站内可达"），渠道健康度纳入 §5.2a 降级监测。
+6. **已读回执与升级（PRD 4.14.4）**：通知带 `read` 状态；关键待办类（审核/冲突裁决/权限申请）未读超 `SLA_UNREAD`（默认 24h）自动升级——通知替补 Owner 或上级；升级动作本身入 4.10 审计（防"升而不理"）。
 
 **接口调用链**：
 - 入：Redis Stream（事件总线，消费者组）
@@ -1544,7 +2241,7 @@ governance --分级结果--> assetmap(热力) + classification(落库)
 | 审计全覆盖 | 网关中间件对所有写操作留痕，不可删 |
 | 事件总线契约 | 服务间异步事件统一信封 + 至少一次投递 + 消费幂等，杜绝级联故障（§12.0.1） |
 | 缓存/Cube 一致性 | 缓存键含 `metric_version`，口径变更主动失效；Cube 重建期路由回自研（§12.0.2） |
-| PII 冲突路由 | PII 口径在无权域被引用 → 转交 governance.pii_review（423），不进普通仲裁闭环（C4） |
+| PII 冲突路由 | PII 口径在无权域被引用 → 转交 governance.pii_review（403 FORBIDDEN_PII），不进普通仲裁闭环（C4） |
 | Cube 同步 | PUBLISHED→cube 定义生成（二期），失败回退自研引擎 |
 
 ---
@@ -1577,6 +2274,8 @@ glossary --term.updated事件--> notify(引用方) + collector(LLM上下文) + r
 - 废弃须填替代术语，避免引用悬空（DEPRECATED 后新指标不可引用，旧引用保留可追溯）。
 - 孤儿术语/低检索术语定期清理建议入 observability 看板。
 
+**帮助中心内容供给（PRD 4.5）**：`GET /help` 返回操作指引（静态 Markdown，版本化）+ 术语概念卡关联——每篇指引可内嵌 `glossary_term` 概念卡（"什么是派生指标""口径变更如何影响下游"），新用户边用边学；内容变更走术语审核流（DRAFT→REVIEW→APPROVED），与术语库同源治理。
+
 ---
 
 ### 12.15 dimension & reconciliation（维度映射与同源对账服务，L2 补齐）
@@ -1605,3 +2304,329 @@ semantic --跨域指标--> 共享dimension(对齐汇总)
 **关键算法/容错**：
 - 映射规则失败（源值无对应标准值）→ 标 `UNMAPPED` 提示 Steward 补规则，不静默归并。
 - 跨域对齐以"标准维度"为准，源字段名差异不阻断（呼应 PRD 4.5 字段名不同≠维度不同）。
+
+---
+
+## 13. 平台配置参数清单（对齐 PRD 附录 B）
+
+所有参数变更入 4.10 审计（R9-07）。平台级由 `platform_admin` 变更；域级由 `domain_admin` 变更；合规约束类参数变更须经 `compliance_officer` 复核。变更前可 what-if 预览影响范围。
+
+| 参数 | 默认值 | 可调范围 | 影响模块 | 作用域 |
+|------|--------|----------|----------|--------|
+| **指标生命周期** | | | | |
+| `metric_version.sunset_days` | 30 | 7–90 | semantic 口径版本钉住 Sunset（4.5） | 域级配置 |
+| `metric.recycle_bin_days` | 30 | 7–90 | semantic 回收站保留期（4.5） | 域级配置 |
+| `metric.deprecate_notice_days` | 30 | 7–180 | semantic 退役通知期（4.5） | 域级配置 |
+| `metric.emergency_review_deadline_h` | 24 | 4–72 | semantic 紧急发布补审时限（4.5） | 平台级 |
+| `metric.batch_register_limit` | 20 | 5–50 | semantic 批量注册上限（4.5） | 平台级 |
+| **质量监控** | | | | |
+| `quality.dynamic_baseline.window_days` | 28 | 14–90 | quality 动态基线历史窗口（4.8） | 指标级覆盖 |
+| `quality.dynamic_baseline.sigma` | 3 | 1–5 | quality 动态基线 σ 倍数（4.8） | 指标级覆盖 |
+| `drift_detection.schedule_days` | 7 | 1–30 | conflict 口径漂移巡检周期（4.7.8） | 域级配置 |
+| **权限与合规** | | | | |
+| `grant.temp_ttl_days` | 7 | 1–30 | governance 临时授权有效期（4.9） | 域级配置 |
+| `grant.review_cycle_days` | 90 | 30–365 | governance 长期权限复审周期（4.9） | 平台级 |
+| `pii.identification.regex_list` | id_card/phone/email/name | — | governance PII 正则匹配模式（4.15.3） | 平台级 |
+| `pii.rescan_interval_days` | 7 | 1–30 | governance PII 字段定期重扫（R12-09/R12-17） | 平台级 |
+| **审计与留存** | | | | |
+| `audit.hot_retention_days` | 180 | 90–365 | observability 审计热存天数（4.10，合规约束） | 平台级 |
+| `audit.cold_archive_enabled` | true | — | observability 冷归档开关（4.10） | 平台级 |
+| `snapshot.hot_retention_days` | 180 | 90–365 | consume 快照热存天数（4.5，合规约束） | 平台级 |
+| `lineage.edge_history_retention_days` | 180 | 90–365 | lineage 边变更快照保留（R10-04/R11-16） | 平台级 |
+| **消费层** | | | | |
+| `api.client_qps_limit` | 20 | 5–200 | consume 限流（4.11.9） | 客户端级 |
+| `api.client_daily_limit` | 100000 | 10000–∞ | consume 日调用上限（4.11.9） | 客户端级 |
+| `api.query_timeout_seconds` | 30 | 5–120 | consume 下推超时（4.11.4） | DataSource 级 |
+| `cache.ttl_default_hours` | 24 | 1–168 | consume 缓存默认 TTL（4.11.5） | 指标级覆盖 |
+| `search.page_size_default` | 20 | 10–100 | consume/ES 分页默认（4.11.2） | 平台级 |
+| `search.page_size_max` | 100 | 50–500 | consume/ES 分页上限（4.11.2） | 平台级 |
+| **成本与额度** | | | | |
+| `api.free_quota_monthly` | 10000 | 0–∞ | consume API 免费额度/月/client（R10-01/R11-15） | 客户端级 |
+| `llm.free_quota_monthly` | 1000 | 0–∞ | LLM 解析免费额度/月/域（R10-01/R11-15） | 域级配置 |
+| `cost.budget_alert_threshold_pct` | 80 | 50–95 | ops_cost 预算预警阈值%（R10-01/R11-17） | 域级/客户端级 |
+| `cost.budget_hard_limit_pct` | 100 | 80–200 | ops_cost 预算自动限流阈值%（R10-01/R11-17） | 域级/客户端级 |
+| `export.row_limit` | 100000 | 10000–1000000 | consume 导出行数上限（4.11.12） | 平台级 |
+| **备份与运维** | | | | |
+| `backup.mysql_full_daily` | true | — | MySQL 每日全量备份（6.7） | 平台级 |
+| `backup.mysql_binlog_enabled` | true | — | MySQL binlog 归档（6.7） | 平台级 |
+| `backup.neo4j_dump_daily` | true | — | Neo4j 每日 dump（6.7） | 平台级 |
+| `backup.retention_days` | 7(MySQL)/3(Neo4j/ES) | 1–30 | 备份保留天数（6.7） | 平台级 |
+| `consistency.check_daily` | true | — | 每日对账开关（R8-01） | 平台级 |
+| `consistency.alert_threshold_pct` | 0.1 | 0.01–1.0 | 对账差异告警阈值%（R8-01） | 平台级 |
+| **降级与韧性** | | | | |
+| `circuit_breaker.error_rate_pct` | 50 | 10–80 | 熔断错误率阈值（4.13.2） | 依赖级 |
+| `circuit_breaker.half_open_timeout_s` | 30 | 10–120 | 半开探测间隔（4.13.2） | 依赖级 |
+| `sync.queue_backlog_alert` | 10000 | 1000–100000 | 同步器积压告警阈值（R8-03） | 平台级 |
+| `sync.queue_backlog_timeout_min` | 30 | 5–120 | 积压超时告警（R8-03） | 平台级 |
+
+---
+
+## 14. 部署架构（PRD 6.7/R8-01）
+
+### 14.1 双写一致性模型
+
+MySQL 为权威源（Authority），Neo4j/ES 为异步衍生副本。写操作路径：
+
+```
+API → MySQL(同步写) → Redis Stream(XADD) → [Neo4j Sync Worker / ES Sync Worker](异步消费)
+```
+
+- **一致性级别**：最终一致（Eventual Consistency），延迟 ≤ 5s（P99）；写 MySQL 成功即返回，衍生副本异步更新
+- **写失败补偿**：Redis Stream 写入失败 → 生产者落本地磁盘队列，后台 Worker 补发；衍生副本消费失败 → 重试 3 次后入 Dead Letter Stream，告警 + 人工/定时重试
+- **读侧补偿**：读 Neo4j/ES 时若数据缺失（`stale` 标记或版本号不一致），API 层主动读 MySQL 回填（§5.1 stale 读策略）
+
+### 14.2 每日对账修复（R8-01）
+
+- **触发**：`consistency.check_daily=true` 时每日 03:00 对账任务
+- **对账逻辑**：
+  1. 扫描 MySQL 全量 `metric`/`metric_version`，提取 `{id, version, updated_at}`
+  2. 批量比对 Neo4j/ES 对应节点，不一致则标 `stale` + 触发补写
+  3. 血缘边：MySQL `lineage_edge` vs Neo4j `DERIVED_FROM` 边，不一致补写
+- **差异告警**：差异率 > `consistency.alert_threshold_pct`(默认 0.1%) → 发 `consistency.alert` 事件入 notify
+- **修复策略**：以 MySQL 为准单向修复（MySQL→Neo4j/ES），不反向；修复操作入审计
+
+### 14.3 高可用规格
+
+| 组件 | 部署模式 | 最小实例数 | 故障切换 | RPO | RTO |
+|------|----------|-----------|----------|-----|-----|
+| MySQL | 主从半同步复制 | 1 主 + 2 从 | VIP 漂移 + 半同步从自动提升 | 0（binlog 无损） | ≤ 30s |
+| Redis | Sentinel 哨兵 | 3 节点（1 主 2 从 + 3 Sentinel） | Sentinel 自动故障转移 | ≤ 1s | ≤ 15s |
+| Neo4j | 因果集群 | 1 Leader + 2 Follower | 自动 Leader 选举 | ≤ 1s | ≤ 30s |
+| ES | 3 节点集群 | 3（各含 Master+Data） | 分片自动重分配 | ≤ 5s | ≤ 30s |
+| API 服务 | K8s Deployment | 2 Pods（跨节点反亲和） | K8s 自动重建 + 就绪探针 | 0（无状态） | ≤ 10s |
+| Sync Worker | K8s Deployment | 2 Pods | 消费者组自动 Rebalance | 0（Stream 可重放） | ≤ 15s |
+| OLAP 引擎 | 独立集群 | 3 FE + 3 BE | FE 选举 + BE 副本 | ≤ 5min | ≤ 5min |
+
+### 14.4 资源表（最小生产规格）
+
+| 组件 | 规格 | 数量 | 存储 | 扩容触发 |
+|------|------|------|------|----------|
+| MySQL | 8C/32G/SSD | 3 | 500GB | 连接数>80% / 慢查询>P5 / 磁盘>70% |
+| Redis | 8C/16G | 6 (3 Sentinel) | 32GB 内存 | 内存>80% / 延迟>P99>50ms |
+| Neo4j | 8C/32G/SSD | 3 | 200GB | 查询P99>3s / 磁盘>70% |
+| ES | 8C/16G/SSD | 3 | 300GB | 搜索P95>500ms / 磁盘>70% |
+| API Pod | 4C/8G | 2+ | — | CPU>70% / QPS>限流80% |
+| Sync Worker | 4C/8G | 2+ | — | 积压>backlog_alert阈值 |
+| OLAP | 8C/32G | 3 FE+3 BE | 1TB | 查询P95>10s / 并发>80% |
+
+**扩容增长预估公式**：
+- 指标数增长 10× → MySQL 存储 ×5（版本历史非等比）+ Neo4j 节点 ×10 + ES 索引 ×3（搜索优化压缩）
+- DAU 增长 5× → API Pod ×3（缓存命中率提升抵消部分）+ Redis 内存 ×4
+- 消费量增长 10× → OLAP BE ×3 + Sync Worker ×2
+
+---
+
+## 15. 安全合规（PRD 4.9/4.15/6.6）
+
+### 15.1 传输安全
+- 所有外部流量 TLS 1.3 强制（API 网关层终止 TLS，内部服务间 mTLS）
+- WebSocket 升级走 WSS（禁止 WS 明文）
+- 内部服务间调用：Service Mesh mTLS 或 Redis Stream 加密传输
+
+### 15.2 存储安全
+- PII 明文仅存 MySQL（加密表空间 `encryption='Y'`），Neo4j/ES 仅存 PII 标记（`pii_flag`/`sensitivity_level`），不存 PII 值
+- 密钥管理：JWT 签名密钥 / HMAC 密钥 / 加密密钥 → KMS 托管，轮转周期 90 天
+- 备份加密：MySQL 全量备份 + binlog 归档 → AES-256 加密存储
+
+### 15.3 访问控制
+- 外部 API：JWT Bearer Token（短期 access_token 15min + refresh_token 7天）或 api_client secret 签发 token
+- 内部服务：Service Account + RBAC，服务间调用鉴权 token 透传 `trace_id`/`actor_id`
+- 数据库：应用账号按最小权限（MySQL 只读/读写分离；Neo4j 读副本/写 Leader 分离）
+- 运维：跳板机 + 审计，禁止直连数据库
+
+### 15.4 审计与合规
+- 全写操作审计（§12.10 observability）：actor/action/entity/detail/ip/trace_id，不可删除
+- 合规约束参数变更须 `compliance_officer` 复核（§13 配置变更原则）
+- PII 指标访问审计独立标记（`pii_access=true`），按 PIPL 要求保留 ≥ 3 年
+- 被遗忘权执行审计（A6）：记录 anonymize 操作时间/范围/SHA256 前缀
+
+### 15.5 注入防护
+- NL2SQL（四期 AI 服务）：LLM 输出 SQL 沙箱校验——禁止 DDL/DML（仅 SELECT）、禁止 `INTO OUTFILE`/`LOAD DATA`、查询深度 ≤ 3 层子查询、扫描行数上限强制
+- 口径表达式沙箱：AST 校验防注入/无限递归依赖
+- API 参数：统一入参校验中间件（防 SQL 注入/XSS/路径穿越），`INJECTION_DETECTED` 返回 403
+
+---
+
+## 16. 可观测性（PRD 4.14/4.13/6.7）
+
+### 16.1 指标（Metrics）
+- **业务指标**（北极星）：口径确认耗时 / 首注时长 / LLM 采纳率 / API 鉴权成功率 / 告警触达→处理闭环率 / 降级频次·时长·影响用户数
+- **技术指标**：各服务 P50/P95/P99 延迟 / QPS / 错误率 / Redis 命中率 / Neo4j 查询耗时 / ES 搜索延迟 / OLAP 查询耗时
+- **资源指标**：CPU / 内存 / 磁盘 / 连接池 / 队列深度
+- 采集：Prometheus + Grafana 仪表盘；告警规则按 §5.2a 降级阈值配置
+
+### 16.2 日志（Logging）
+- 统一结构化日志格式：`{ts, level, service, trace_id, span_id, msg, ctx_json}`
+- 日志级别：ERROR（必告警）/ WARN（降级/重试）/ INFO（审计/关键操作）/ DEBUG（开发调试，生产默认关）
+- 审计日志独立通道（§12.10），不走通用日志管道
+- 日志保留：热存 30 天 / 冷归档 180 天（与 `audit.hot_retention_days` 对齐）
+
+### 16.3 分布式追踪（Tracing）
+- `trace_id` 全链路透传：API 网关生成 → 各服务 → Redis Stream → 消费者组 → 下游服务
+- OpenTelemetry SDK 集成；Span 覆盖：API 入口 / MySQL 写 / Neo4j 写 / ES 写 / OLAP 查询 / LLM 调用
+- 采样率：生产 1%（P99 慢查询 100% 采样）；调试模式 100%
+
+### 16.4 降级告警
+- 告警分级：P0（平台不可用/数据丢失）/ P1（单域降级/PII 泄露风险）/ P2（质量异常/延迟）/ P3（容量预警）
+- 告警去重：5min 内同 `metric_code+severity` 仅首次告警，避免风暴
+- 告警渠道：按 §12.9 订阅偏好分发（站内 + 邮件 + Webhook + 钉钉）
+- 告警恢复：自动恢复时发 `degradation.state_changed(HA→HEALTHY)` 通知
+
+### 16.5 灰度上线与回滚
+- **灰度策略**：新版本按 `domain` → `tenant` → `全量` 逐步放量；灰度期间双版本并行（金丝雀发布）
+- **回滚**：K8s Deployment `rollback` + MySQL migration `down` 脚本；口径版本回滚走 `metric_version` 降级（§12.3 状态机）
+- **回滚判定**：错误率 > 5%（5min 窗口）自动回滚；P0 事故人工决策回滚
+
+### 16.6 备份恢复与 RTO/RPO
+| 场景 | RPO | RTO | 恢复方式 |
+|------|-----|-----|----------|
+| MySQL 主库故障 | 0（半同步） | ≤ 30s | 从库提升 |
+| MySQL 误删数据 | ≤ 5min（binlog） | ≤ 1h | binlog 闪回 + 全量恢复 |
+| Neo4j Leader 故障 | ≤ 1s | ≤ 30s | Follower 选举 |
+| Redis 主故障 | ≤ 1s | ≤ 15s | Sentinel 故障转移 |
+| ES 节点故障 | ≤ 5s | ≤ 30s | 分片重分配 |
+| 全机房故障 | ≤ 24h（异地冷备） | ≤ 4h | 异地备份恢复 |
+
+---
+
+## 17. ER 整合图（Mermaid）
+
+> 命名对齐规则：ER 实体名 = DDL 表名（唯一权威源），消除历史不一致（E9-E21 修复）。
+
+```mermaid
+erDiagram
+    %% ===== 用户与域 =====
+    user ||--o{ grants : receives
+    user ||--o{ subscription_pref : prefers
+    user ||--o{ user_preference : customizes
+    user ||--o{ feedback : submits
+    user ||--o{ operation_audit : triggers
+    user ||--o{ event_log : records
+    role ||--o{ grants : authorizes
+    policy ||--o{ grants : governed_by
+
+    %% ===== 指标核心 =====
+    metric ||--o{ metric_version : versions
+    metric ||--o{ metric_value_snapshot : snapshots
+    metric ||--o{ metric_set_item : included_in
+    metric ||--o{ metric_tree : navigates
+    metric ||--o{ metric_dimension : cuts_by
+    metric ||--o{ metric_business_relation : relates_to
+    metric ||--o{ metric_code_alias : renamed_from
+    metric ||--o{ metric_delivery : delivers_to
+    metric ||--o{ quality_rule : governed_by
+    metric ||--o{ quality_event : alerts
+    metric ||--o{ data_classification : classified_as
+    metric ||--o{ compliance_review : reviewed_by
+    metric ||--o{ sla_calendar_exception : excepts
+    metric }o--|| user : owned_by
+
+    %% ===== 指标集 =====
+    metric_set ||--o{ metric_set_item : contains
+
+    %% ===== 指标版本与血缘 =====
+    metric_version ||--o{ metric_lineage_source : sourced_from
+    metric_version ||--o{ lineage_edge : derives
+    metric_version ||--o{ schema_drift_event : affected_by
+    metric_version ||--o{ drift_scan_result : scanned_by
+    metric_version ||--o{ operation_audit : audited_in
+
+    %% ===== 血缘边 =====
+    lineage_edge ||--o{ lineage_edge_history : history
+
+    %% ===== 数据源与采集 =====
+    data_source ||--o{ db_catalog : catalogs
+    data_source ||--o{ data_set : binds
+    data_source ||--o{ collector_job : schedules
+    data_source ||--o{ lineage_edge : traces
+    data_source ||--o{ quality_rule : monitors
+    data_source ||--o{ schema_drift_event : detects
+    data_source ||--o{ dependency_health : health_tracked
+
+    %% ===== 逻辑表/物理表 =====
+    data_set ||--o{ partition_rewrite_event : rewrites
+
+    %% ===== 物化 =====
+    metric_version ||--o{ materialized : materialized_as
+
+    %% ===== 术语 =====
+    glossary_term ||--o{ glossary_conflict : conflicts_with
+    glossary_term ||--o{ term_version : versions
+
+    %% ===== 冲突 =====
+    conflict ||--o{ ruling_record : ruled_by
+    conflict }o--|| metric : metric_a
+    conflict }o--|| metric : metric_b
+
+    %% ===== 质量 =====
+    quality_rule ||--o{ quality_event : triggers
+    external_benchmark ||--o{ reconciliation_record : compares
+    reconciliation }o--|| metric : checks
+
+    %% ===== 分级分类 =====
+    data_classification ||--o{ compliance_review : requires
+
+    %% ===== 依赖健康 =====
+    dependency_health ||--o{ degradation_event : records
+    dependency_health }o--o{ data_source : tracks
+
+    %% ===== 消费 =====
+    api_client ||--o{ operation_audit : calls
+    api_client }o--|| ops_cost : charged
+    role ||--o{ ops_cost : domain_bears
+
+    %% ===== LLM =====
+    llm_model_config ||--o{ llm_test_report : tested_by
+    llm_model_config ||--o{ prompt_template : uses
+    prompt_template ||--o{ prompt_template_version : versions
+    golden_set ||--o{ calibration_result : calibrates
+
+    %% ===== 通知 =====
+    notification }o--|| user : targets
+
+    %% ===== 维度 =====
+    dimension ||--o{ dimension_member : has_members
+    dimension ||--o{ dimension_mapping : mapped_from
+```
+
+---
+
+## 18. 测试计划（生产级，对齐 PRD 第 9 章 DoD）
+
+### 18.1 测试分层与覆盖目标
+
+| 层 | 工具 | 覆盖目标 | 重点 |
+|----|------|----------|------|
+| 单元测试 | pytest / Vitest | 核心算法与门禁逻辑 ≥ 80% | 口径 AST 翻译、冲突相似度、PEP→PDP 判定、脱敏策略、状态机非法跃迁 |
+| 集成测试 | pytest + testcontainers（MySQL/Neo4j/ES/Redis 临时实例） | 服务间接口与存储读写 | 双写最终一致、事件总线幂等、缓存版本失效、质量规则触发 |
+| E2E 测试 | Playwright（前端）+ httpx（API 全链路） | 核心旅程 100% 可达 | §18.3 四旅程 + 降级场景 |
+| 性能测试 | k6 / JMeter | §6 性能目标 | 搜索 P95<200ms、血缘影响面<500ms、下推<3s、审计写入 P99<100ms |
+| 安全测试 | OWASP ZAP + 手工 | 0 高危漏洞 | 注入防护（NL2SQL/口径表达式）、越权 403、PII 访问审计、渗透测试 |
+
+### 18.2 测试数据与环境
+
+- **测试环境**：dev（本地容器）/ staging（与生产同构，数据脱敏）/ prod（只读验证）。
+- **测试数据**：构造 3 域 × 200 指标（含原子/派生/复合、Tier-1/2/3、批流双路、PII/非 PII）+ 1,000 条 ETL SQL（Parser 可解析 + 动态 SQL 混合）+ golden set 500 条校准样本。
+- **质量门槛**：CI 中 lint + 单测 + 集成阻断合并；E2E 每日跑一次。
+
+### 18.3 核心 E2E 旅程（对齐 §12.0.4 四旅程）
+
+| 旅程 | 步骤（UI + API） | 验收点 |
+|------|------------------|--------|
+| 一·溯源确认 | 搜索指标→详情→版本时间线→反馈纠错 | 口径确认≤10 分钟；版本 diff 可展示 |
+| 二·开发注册 | ETL 一键注册→LLM 预填→试算→提交审核→批准 | LLM 采纳字段高亮；试算偏差高亮；PII 门禁拦截 |
+| 三·Owner 治理 | 待办中心→审核/裁决/确认→SLA 倒计时 | 待办聚合正确；破坏性变更消费方确认闭环 |
+| 四·程序化消费 | api_client 换 token→/query→限流→meta 校验 | 越权 403；429 retry_after；meta 全字段 |
+| 五·降级韧性 | 依次断 LLM/Neo4j/ES/OLAP→验证降级 | 单能力故障不阻断相邻；降级文案可读 |
+
+### 18.4 验收标准（对接 §9 + PRD 9.x）
+
+- 单元测试覆盖率 ≥ 80%（核心门禁/翻译/判定模块）；CI 阻断。
+- 四类冲突（含 PII 路由 403 FORBIDDEN_PII）触发正确。
+- 破坏性变更：消费方 confirm/reject/超时(14d 默认接受) 三路径均验证。
+- 灰度 promote/rollback 一键可达，EXPERIMENTAL 仅白名单可见。
+- 口径漂移巡检：Tier-1 源头 SQL 变更后 24h 内检出；闭环率 ≥ 90%。
+- 外部基准对账：导入幂等；差异确认闭环率 ≥ 90%。
+- 双写对账：注入 Neo4j 写入失败，重试队列补偿后三方一致；差异率告警阈值生效。
+- 性能达标（§6 全项 P95）+ 安全渗透 0 高危漏洞。
+- 所有验收结果留痕（测试报告入库 `audit_log`，可追溯）。
