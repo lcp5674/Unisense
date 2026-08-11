@@ -32,10 +32,12 @@ from app.api.notify import router as notify_router
 from app.api.observability import router as observability_router
 from app.api.quality import router as quality_router
 from app.api.recommend import router as recommend_router
-from app.core.config import settings
+from app.core.config import ConfigurationError, settings
 from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
 from app.core.middleware import ErrorHandlerMiddleware, SecurityHeadersMiddleware, TraceIdMiddleware
+from app.db.redis import close_redis_pool, init_redis_pool
+from app.core.eventbus import init_eventbus, get_eventbus
 
 logger = structlog.get_logger("unisense.main")
 
@@ -44,15 +46,68 @@ logger = structlog.get_logger("unisense.main")
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期管理。
 
-    初始化全局状态（如通知服务 URL）。
+    初始化全局状态：
+    1. 日志配置
+    2. Redis 连接池初始化
+    3. EventBus 初始化（注入 Redis）
+    4. 启动时配置校验（生产环境强制校验）
+    5. 通知服务 URL 配置
     """
     configure_logging()
+
+    # ---- 启动时配置校验 ----
+    try:
+        _validate_config()
+    except ConfigurationError as exc:
+        logger.error("config_validation_failed", error=str(exc))
+        raise SystemExit(1) from exc
+
+    # ---- Redis 连接池初始化 ----
+    try:
+        redis_pool = await init_redis_pool()
+        logger.info("redis_pool_initialized")
+    except Exception:
+        logger.warning("redis_pool_init_failed", exc_info=True)
+        redis_pool = None
+
+    # ---- EventBus 初始化 ----
+    init_eventbus(redis_pool)
+    logger.info("eventbus_initialized")
+
     # 配置通知服务 URL（供 conflict/governance 事件发布使用）
     if settings.notify_webhook_url:
         app.state.notify_url = settings.notify_webhook_url
+
     logger.info("app_starting", env=settings.env, version="0.1.0")
     yield
+
+    # ---- 关闭 ----
+    await close_redis_pool()
     logger.info("app_shutting_down")
+
+
+def _validate_config() -> None:
+    """启动时配置校验（生产环境强制）。"""
+    if settings.env == "prod":
+        if len(settings.jwt_secret) < 32:
+            raise ConfigurationError(
+                f"生产环境 UNISENSE_JWT_SECRET 必须≥32字符，当前长度={len(settings.jwt_secret)}"
+            )
+        if not settings.fernet_key:
+            raise ConfigurationError(
+                "生产环境 UNISENSE_FERNET_KEY 必须独立配置，禁止从 JWT_SECRET 派生降级"
+            )
+        if not settings.olap_url:
+            raise ConfigurationError(
+                "生产环境 UNISENSE_OLAP_URL 必须非空，consume 查询需要 OLAP 执行引擎"
+            )
+        # CORS 严格校验：allow_credentials=True 时禁止通配符
+        origins = settings.cors_origins_list
+        if "*" in origins:
+            raise ConfigurationError(
+                "生产环境 CORS 不允许通配符与 credentials=True 组合，请配置具体 Origin"
+            )
+    logger.info("config_validation_passed", env=settings.env)
 
 
 def create_app() -> FastAPI:
@@ -72,6 +127,7 @@ def create_app() -> FastAPI:
     )
 
     # ---- 中间件（顺序：后添加的先执行）----
+    # CORS 严格读取 settings.cors_origins_list，禁止通配符+凭证组合
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,

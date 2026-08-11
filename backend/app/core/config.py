@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ConfigurationError(Exception):
+    """配置校验失败时抛出（拒绝启动）。"""
 
 
 class Settings(BaseSettings):
@@ -38,6 +43,28 @@ class Settings(BaseSettings):
     # ---- OLAP（StarRocks / Doris，可选依赖）----
     olap_url: str = ""
 
+    # ---- Doris（OLAP 引擎直连配置）----
+    doris_host: str = "localhost"
+    doris_port: int = 8030
+    doris_database: str = "unisense"
+
+    # ---- MinIO（S3 兼容对象存储）----
+    minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = ""
+    minio_secret_key: str = ""
+    minio_bucket: str = "unisense-archive"
+
+    # ---- 埋点 ----
+    tracking_enabled: bool = False
+
+    # ---- 通知渠道 ----
+    notify_webhook_url: str = ""
+    notify_dingtalk_webhook: str = ""
+    notify_smtp_host: str = ""
+    notify_smtp_port: int = 587
+    notify_smtp_user: str = ""
+    notify_smtp_password: str = ""
+
     # ---- JWT ----
     jwt_secret: str
     jwt_algorithm: str = "HS256"
@@ -61,14 +88,35 @@ class Settings(BaseSettings):
     # ---- KMS ----
     kms_key_id: str = ""
 
-    # ---- 通知渠道 ----
-    notify_webhook_url: str = ""
+    # ---- Fernet 密钥 ----
+    fernet_key: str = ""
 
     model_config = SettingsConfigDict(
         env_prefix="UNISENSE_",
         env_file=".env",
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def validate_production_config(self) -> Settings:
+        """生产环境校验：jwt_secret≥32字符、Fernet密钥必须独立、olap_url必须非空。"""
+        if self.env == "prod":
+            if len(self.jwt_secret) < 32:
+                raise ConfigurationError(
+                    "生产环境 UNISENSE_JWT_SECRET 必须≥32字符，当前长度="
+                    f"{len(self.jwt_secret)}。请设置强密钥后重启。"
+                )
+            if not self.fernet_key:
+                raise ConfigurationError(
+                    "生产环境 UNISENSE_FERNET_KEY 必须独立配置，"
+                    "禁止从 JWT_SECRET 派生降级。请设置独立的 Fernet 密钥后重启。"
+                )
+            if not self.olap_url:
+                raise ConfigurationError(
+                    "生产环境 UNISENSE_OLAP_URL 必须非空，"
+                    "consume 查询需要 OLAP 执行引擎。请配置 Doris/StarRocks 地址后重启。"
+                )
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

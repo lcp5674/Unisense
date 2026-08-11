@@ -56,6 +56,9 @@ async_session_factory = async_sessionmaker(
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI 依赖：提供异步数据库会话。
 
+    不自动 commit——由 API 层统一控制提交时机。
+    异常时自动 rollback，finally 关闭会话。
+
     Yields:
         异步数据库会话。
 
@@ -68,7 +71,6 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
             await session.rollback()
             raise
