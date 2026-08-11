@@ -1,0 +1,63 @@
+# Unisense .dockerignore（避免将不必要文件打入镜像，加速构建）
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python 虚拟环境与缓存
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+htmlcov
+coverage.xml
+report-*.xml
+
+# Node
+node_modules
+frontend/node_modules
+frontend/dist
+.npm
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# 工具配置
+.codebuddy
+.workbuddy
+.claude
+.pre-commit-config.yaml
+
+# 文档（不需要打入镜像）
+docs
+*.md
+!backend/README.md
+!frontend/README.md
+
+# 测试报告
+backend/tests/reports
+
+# 环境变量（禁止入镜像）
+.env
+.env.local
+.env.production
+backend/.env
+
+# Docker
+docker-compose.yml
+Dockerfile
+**/Dockerfile
+.dockerignore
+
+# 其他
+.DS_Store
+*.log

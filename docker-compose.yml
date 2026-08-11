@@ -1,0 +1,144 @@
+# Unisense 完整开发环境（依赖 + 后端 + 前端）
+# 使用：docker compose up -d
+# 停止：docker compose down
+# 查看：docker compose ps
+# 后端日志：docker compose logs -f backend
+# 前端日志：docker compose logs -f frontend
+#
+# 访问地址：
+#   前端：http://localhost:8080
+#   后端 API 文档：http://localhost:8000/docs
+#   后端健康检查：http://localhost:8000/health
+#   Prometheus 指标：http://localhost:8000/metrics
+#
+# 端口避让说明（避免与本机已有 Docker 服务冲突）：
+#   MySQL 偏移至 3307，ES 偏移至 19200，Redis 偏移至 16379
+#   后端 8000，前端 8080
+
+services:
+  # ============ 基础设施（依赖服务）============
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${UNISENSE_MYSQL_ROOT_PASSWORD:-test}
+      MYSQL_DATABASE: ${UNISENSE_MYSQL_DATABASE:-unisense}
+      MYSQL_USER: ${UNISENSE_MYSQL_USER:-unisense}
+      MYSQL_PASSWORD: ${UNISENSE_MYSQL_PASSWORD:-test}
+    ports: ["3307:3306"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --default-authentication-plugin=caching_sha2_password --character-set-server=utf8mb4
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: ${UNISENSE_NEO4J_USER:-neo4j}/${UNISENSE_NEO4J_PASSWORD:-test1234}
+    ports: ["7474:7474", "7687:7687"]
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: elasticsearch:8.15.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports: ["19200:9200"]
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports: ["16379:6379"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ============ 应用服务 ============
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: unisense-backend
+    ports: ["8000:8000"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    environment:
+      UNISENSE_ENV: ${UNISENSE_ENV:-dev}
+      # Docker 网络内用服务名 mysql，而非 localhost
+      UNISENSE_DB_URL: mysql+pymysql://${UNISENSE_MYSQL_USER:-unisense}:${UNISENSE_MYSQL_PASSWORD:-test}@mysql:3306/${UNISENSE_MYSQL_DATABASE:-unisense}
+      UNISENSE_REDIS_URL: redis://redis:6379/0
+      UNISENSE_NEO4J_URL: bolt://neo4j:7687
+      UNISENSE_NEO4J_USER: ${UNISENSE_NEO4J_USER:-neo4j}
+      UNISENSE_NEO4J_PASSWORD: ${UNISENSE_NEO4J_PASSWORD:-test1234}
+      UNISENSE_ES_URL: http://elasticsearch:9200
+      # OLAP 可选，默认空（consume 查询会降级 503）
+      UNISENSE_OLAP_URL: ${UNISENSE_OLAP_URL:-}
+      # JWT 密钥（生产必须通过环境变量注入强密钥）
+      UNISENSE_JWT_SECRET: ${UNISENSE_JWT_SECRET:-dev-jwt-secret-change-in-production-32bytes}
+      UNISENSE_JWT_ALGORITHM: HS256
+      UNISENSE_JWT_EXPIRE_MINUTES: 60
+      # CORS：前端容器访问
+      UNISENSE_CORS_ORIGINS: http://localhost:8080,http://frontend:80
+      UNISENSE_LOG_LEVEL: INFO
+      UNISENSE_LOG_FORMAT: json
+      # LLM 配置（OpenAI 协议兼容）
+      UNISENSE_LLM_BASE_URL: ${UNISENSE_LLM_BASE_URL:-}
+      UNISENSE_LLM_API_KEY: ${UNISENSE_LLM_API_KEY:-}
+      UNISENSE_LLM_DEFAULT_MODEL: ${UNISENSE_LLM_DEFAULT_MODEL:-deepseek-chat}
+      # 通知 webhook（可选）
+      UNISENSE_NOTIFY_WEBHOOK_URL: ${UNISENSE_NOTIFY_WEBHOOK_URL:-}
+      # Fernet 密钥（生产必须注入独立密钥）
+      UNISENSE_FERNET_KEY: ${UNISENSE_FERNET_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # 构建时 API 基础地址留空，运行时通过 nginx 反代 /api 到 backend
+        VITE_API_BASE_URL: ""
+        VITE_SEMANTIC_API_KEY: ${VITE_SEMANTIC_API_KEY:-dev-semantic-key}
+    container_name: unisense-frontend
+    ports: ["8080:80"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  neo4j_data:
+  es_data:
+  redis_data:
