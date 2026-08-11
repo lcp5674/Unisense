@@ -1,0 +1,132 @@
+"""notify 服务 Repository 单测（补齐覆盖率）。
+
+针对 notify/repository.py 的 39% 覆盖率，补充以下场景：
+- save_event / save_notification / get_notification
+- list_notifications (with/without status filter)
+- find_subscription / list_subscriptions
+- list_enabled_subscriptions
+- list_event_logs (with/without event_type filter)
+- commit
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.models.notify import EventLog, Notification, SubscriptionPref
+from app.services.notify.repository import NotifyRepository
+
+
+@pytest.fixture
+def repo() -> NotifyRepository:
+    session = MagicMock()
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    session.execute = AsyncMock()
+    return NotifyRepository(session)
+
+
+class TestNotifyRepository:
+    async def test_save_event(self, repo: NotifyRepository) -> None:
+        event = EventLog(event_type="test", source="api", payload={})
+        result = await repo.save_event(event)
+        assert result is event
+        repo._session.add.assert_called_once_with(event)
+        repo._session.flush.assert_called_once()
+
+    async def test_save_notification(self, repo: NotifyRepository) -> None:
+        notif = Notification(subscriber_id=1, channel="email", payload={})
+        result = await repo.save_notification(notif)
+        assert result is notif
+        repo._session.add.assert_called_once_with(notif)
+
+    async def test_get_notification_found(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = Notification(id=1)
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        result = await repo.get_notification(1)
+        assert result is not None
+        assert result.id == 1
+
+    async def test_get_notification_not_found(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        result = await repo.get_notification(999)
+        assert result is None
+
+    async def test_list_notifications_no_status(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [
+            Notification(id=1, subscriber_id=1),
+            Notification(id=2, subscriber_id=1),
+        ]
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        results = await repo.list_notifications(subscriber_id=1, status=None)
+        assert len(results) == 2
+
+    async def test_list_notifications_with_status(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [Notification(id=1, status="SENT")]
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        results = await repo.list_notifications(subscriber_id=1, status="SENT")
+        assert len(results) == 1
+
+    async def test_find_subscription_found(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = SubscriptionPref(user_id=1, channel="email")
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        result = await repo.find_subscription(user_id=1, channel="email", event_type="alert")
+        assert result is not None
+
+    async def test_find_subscription_not_found(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        result = await repo.find_subscription(user_id=999, channel="email", event_type="alert")
+        assert result is None
+
+    async def test_list_subscriptions(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [
+            SubscriptionPref(user_id=1, channel="email"),
+        ]
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        results = await repo.list_subscriptions(user_id=1)
+        assert len(results) == 1
+
+    async def test_list_enabled_subscriptions(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [
+            SubscriptionPref(user_id=1, enabled=True),
+        ]
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        results = await repo.list_enabled_subscriptions(event_type="alert")
+        assert len(results) == 1
+
+    async def test_save_subscription(self, repo: NotifyRepository) -> None:
+        sub = SubscriptionPref(user_id=1, channel="email", event_type="alert")
+        result = await repo.save_subscription(sub)
+        assert result is sub
+        repo._session.add.assert_called_once_with(sub)
+
+    async def test_list_event_logs_no_filter(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [EventLog(event_type="alert")]
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        results = await repo.list_event_logs(event_type=None, limit=10)
+        assert len(results) == 1
+
+    async def test_list_event_logs_with_filter(self, repo: NotifyRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [EventLog(event_type="alert")]
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        results = await repo.list_event_logs(event_type="alert", limit=10)
+        assert len(results) == 1
+
+    async def test_commit(self, repo: NotifyRepository) -> None:
+        await repo.commit()
+        repo._session.commit.assert_called_once()
