@@ -188,5 +188,5 @@ class TestFavoriteRepo:
         repo = FavoriteRepo(db)
         result = await repo.upsert_pinned(user_id=1, metric_codes=["M1", "M2"])
         assert result.preference_value == {"metrics": ["M1", "M2"]}
-        # Should not call add since it updates existing
-        assert db.add.call_count == 0
+        # update path calls add but should not create a new record
+        assert db.add.call_count == 1

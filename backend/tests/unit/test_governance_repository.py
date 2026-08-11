@@ -4,7 +4,7 @@
 - get_role_by_name, create_role
 - create_grant, get_grant
 - list_grants (with/without filters)
-- revoke_grant
+- set_grant_status (revoke)
 - classification_rescan helpers
 """
 
@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.models.governance import Grant, Role, RoleName
+from app.models.governance import Grant, Role, RoleName, GrantStatus
 from app.services.governance.repository import GovernanceRepository
 
 
@@ -46,11 +46,11 @@ class TestGovernanceRepository:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         repo._db.execute = AsyncMock(return_value=mock_result)
-        result = await repo.get_role_by_name(RoleName.ANALYST)
+        result = await repo.get_role_by_name(RoleName.VIEWER)
         assert result is None
 
     async def test_create_role(self, repo: GovernanceRepository) -> None:
-        role = Role(name=RoleName.ANALYST)
+        role = Role(name=RoleName.VIEWER)
         result = await repo.create_role(role)
         assert result is role
         repo._db.add.assert_called_once_with(role)
@@ -79,23 +79,33 @@ class TestGovernanceRepository:
         assert result is None
 
     async def test_list_grants_no_filters(self, repo: GovernanceRepository) -> None:
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [Grant(id=1), Grant(id=2)]
-        repo._db.execute = AsyncMock(return_value=mock_result)
-        results, total = await repo.list_grants(page=1, page_size=10)
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 5
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = [Grant(id=1), Grant(id=2)]
+        repo._db.execute = AsyncMock(side_effect=[mock_count, mock_rows])
+        results, total = await repo.list_grants(
+            user_id=None, domain=None, status=None, page=1, page_size=10
+        )
         assert len(results) == 2
+        assert total == 5
 
     async def test_list_grants_with_user_id(self, repo: GovernanceRepository) -> None:
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [Grant(id=1, user_id=5)]
-        repo._db.execute = AsyncMock(return_value=mock_result)
-        results, total = await repo.list_grants(user_id=5, page=1, page_size=10)
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 1
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = [Grant(id=1, user_id=5)]
+        repo._db.execute = AsyncMock(side_effect=[mock_count, mock_rows])
+        results, total = await repo.list_grants(
+            user_id=5, domain=None, status=None, page=1, page_size=10
+        )
         assert len(results) == 1
+        assert total == 1
 
     async def test_revoke_grant(self, repo: GovernanceRepository) -> None:
-        grant = Grant(id=1, user_id=1)
+        grant = Grant(id=1, user_id=1, status=GrantStatus.ACTIVE)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = grant
         repo._db.execute = AsyncMock(return_value=mock_result)
-        result = await repo.revoke_grant(grant_id=1, actor_id=1)
-        assert result is not None
+        result = await repo.set_grant_status(grant, GrantStatus.REVOKED, reason="revoked")
+        assert result.status == GrantStatus.REVOKED
