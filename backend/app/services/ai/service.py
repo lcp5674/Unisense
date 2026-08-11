@@ -62,6 +62,7 @@ class AiService:
         """将自然语言查询转换为 SQL。
 
         优先使用 LLM 生成 SQL，失败时降级为关键词匹配。
+        返回结果包含参数化 SQL + params 字典。
         """
         if self._is_unsafe(nl_query):
             raise UnisenseError(
@@ -76,10 +77,11 @@ class AiService:
 
         # 尝试使用 LLM 生成 SQL
         sql = await self._generate_sql_with_llm(nl_query, vocab)
+        params: dict[str, Any] = {}
 
         if sql is None or sql.strip() == "":
-            # 降级为关键词匹配
-            sql = await self._generate_sql_with_keywords(nl_query, vocab)
+            # 降级为关键词匹配（参数化）
+            sql, params = await self._generate_sql_with_keywords(nl_query, vocab)
 
         # 安全校验
         if self._is_unsafe(sql):
@@ -96,6 +98,7 @@ class AiService:
             return {
                 "anchored": [],
                 "sql": "",
+                "params": {},
                 "safe": False,
                 "notes": ["未锚定到已知指标/术语，请使用已注册的名称"],
                 "method": "none",
@@ -104,6 +107,7 @@ class AiService:
         return {
             "anchored": anchors,
             "sql": sql,
+            "params": params,
             "safe": True,
             "notes": [],
             "method": "llm" if sql != "" else "keyword",
@@ -162,20 +166,30 @@ WHERE metric_code = 'sales_gmv_daily' AND dt = '2024-01-01'
 
     async def _generate_sql_with_keywords(
         self, nl_query: str, vocab: set[str]
-    ) -> str:
-        """使用关键词匹配生成 SQL（降级方案）。"""
+    ) -> tuple[str, dict[str, Any]]:
+        """使用关键词匹配生成参数化 SQL（降级方案）。
+
+        Returns:
+            (sql, params) 元组：参数化 SQL 和参数字典。
+        """
         anchors = [v for v in vocab if v.lower() in nl_query.lower()]
         if not anchors:
-            return ""
+            return "", {}
 
-        # 简单的 SQL 模板
+        # 参数化 SQL 模板：使用 :param 占位符而非 f-string 拼接
         columns = ", ".join(anchors[:5])  # 限制列数
         where_conditions = " AND ".join(
-            [f"metric_code = '{a}'" for a in anchors[:3]]
+            [f"metric_code = :metric_code_{i}" for i in range(min(len(anchors), 3))]
         )
         sql = f"SELECT {columns} FROM unified_metric WHERE {where_conditions}"
-        logger.info("关键词匹配 SQL 生成，锚定词=%d", len(anchors))
-        return sql
+
+        # 构建参数字典
+        params: dict[str, Any] = {}
+        for i, anchor in enumerate(anchors[:3]):
+            params[f"metric_code_{i}"] = anchor
+
+        logger.info("关键词匹配 SQL 生成（参数化），锚定词=%d", len(anchors))
+        return sql, params
 
     async def ask(
         self,
@@ -187,18 +201,31 @@ WHERE metric_code = 'sales_gmv_daily' AND dt = '2024-01-01'
 
         Args:
             nl_query: 自然语言查询
-            execute: 是否执行生成的 SQL（当前仅返回 SQL，不执行）
+            execute: 是否执行生成的 SQL
             metric_scope: 指标范围限制
 
         Returns:
-            包含 SQL、锚定词、安全状态的结果
+            包含 SQL、锚定词、安全状态的结果；execute=True 时含执行结果
         """
         result = await self.nl2sql(nl_query, metric_scope)
         result["execute"] = execute
-        if execute:
-            result["notes"].append(
-                "SQL 已生成，委托 consume 服务执行（/api/v1/consume/query）"
-            )
+        if execute and result.get("sql"):
+            # 委托 consume 服务执行 SQL
+            try:
+                from app.services.consume.olap_executor import OLAPExecutor
+
+                executor = OLAPExecutor()
+                sql = result["sql"]
+                params = result.get("params", {})
+                olap_result = await executor.execute(sql, params)
+                result["execute_result"] = {
+                    "rows": olap_result.rows,
+                    "total": olap_result.total,
+                    "elapsed_ms": olap_result.elapsed_ms,
+                }
+            except Exception as exc:
+                result["execute_error"] = str(exc)
+                logger.warning("ai_ask_execute_failed", error=str(exc), exc_info=True)
         return result
 
     async def close(self) -> None:
