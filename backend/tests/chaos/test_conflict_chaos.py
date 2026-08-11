@@ -106,5 +106,5 @@ async def test_arbitrate_returns_503_on_external_failure(owner_client, monkeypat
         "/api/v1/conflicts/CF-X/arbitrate",
         json={"decision": "merge", "arbitrator_id": 11, "reason": "x"},
     )
-    # 外部依赖失败时返回 500（而非 503），因为 _BoomService 抛的不是 ExternalDependencyError
-    assert resp.status_code == 500
+    # 外部依赖失败时返回 503（ErrorHandlerMiddleware 将 ExternalDependencyError 映射到 503）
+    assert resp.status_code == 503

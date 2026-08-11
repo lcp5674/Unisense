@@ -51,11 +51,9 @@ def _patch_client_store(monkeypatch: pytest.MonkeyPatch) -> None:
         return _FAKE_CLIENT
 
     monkeypatch.setattr(ApiClientRepo, "get_by_client_id", staticmethod(_fake_get_by_client_id))
-    monkeypatch.setattr(
-        consume_svc,
-        "verify_password",
-        lambda secret, ref: secret == "secret",  # noqa: ANN001
-    )
+    async def _fake_verify_password(secret, ref):  # noqa: ANN001
+        return secret == "secret"
+    monkeypatch.setattr(consume_svc, "verify_password", _fake_verify_password)
     consume_svc.rate_limiter._buckets.clear()
 
 
