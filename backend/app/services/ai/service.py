@@ -91,6 +91,16 @@ class AiService:
         # 提取锚定词
         anchors = [v for v in vocab if v.lower() in nl_query.lower()]
 
+        # 没有锚定词且未生成 SQL：明确标记不安全（未知指标）
+        if not anchors and not sql.strip():
+            return {
+                "anchored": [],
+                "sql": "",
+                "safe": False,
+                "notes": ["未锚定到已知指标/术语，请使用已注册的名称"],
+                "method": "none",
+            }
+
         return {
             "anchored": anchors,
             "sql": sql,

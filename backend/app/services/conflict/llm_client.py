@@ -31,7 +31,9 @@ class UnifiedConflictLlmClient:
     """基于统一 LlmClient 的语义判定客户端。"""
 
     def __init__(self, llm: LlmClient | None = None) -> None:
-        self._llm = llm or build_llm_client()
+        # 从统一 LLM 工厂构建，避免与本模块的 build_llm_client 递归
+        from app.services.llm.client import build_llm_client as _build_unified_llm
+        self._llm = llm or _build_unified_llm()
 
     @property
     def enabled(self) -> bool:

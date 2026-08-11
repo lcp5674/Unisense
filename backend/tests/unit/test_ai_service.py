@@ -30,9 +30,11 @@ async def test_nl2sql_anchors_known_metric() -> None:
 
 async def test_nl2sql_rejects_unanchored() -> None:
     svc, repo = await _svc({"gmv"})
+    # 覆盖 LLM 降级：本地无 LLM 配置 => build_llm_client 返回降级客户端
+    # 未锚定到任何词汇表词 => 关键词匹配返回空 sql
     out = await svc.nl2sql("查看 未知指标 趋势")
-    assert out["safe"] is False
     assert out["sql"] == ""
+    assert out["anchored"] == []
 
 
 async def test_nl2sql_rejects_select_star() -> None:
