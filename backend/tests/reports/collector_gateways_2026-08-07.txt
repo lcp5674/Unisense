@@ -1,0 +1,13 @@
+=== collector gate suite @ 2026-08-07T09:51:55Z ===
+Found 1 error.
+[*] 1 fixable with the `--fix` option.
+Success: no issues found in 57 source files
+..............................                                           [100%]
+30 passed in 2.84s
+[contract] TD 接口路径 9 个，代码命中 1 个
+=== 校验失败 ===
+ - [status] lineage 为 implemented 但 evidence_path 为空（禁止空口声明）
+=== 校验失败 ===
+ - [status] lineage 为 implemented 但 evidence_path 为空（禁止空口声明）
+=== 校验失败 ===
+ - [status] lineage 为 implemented 但 evidence_path 为空（禁止空口声明）

@@ -1,0 +1,47 @@
+================================================================
+ Unisense governance 模块门禁证据报告
+ 生成时间: 2026-08-07
+ 数据来源: 本地执行 (Python 3.11.9 / Poetry / MySQL localhost:3307 已就绪)
+================================================================
+
+--- [1] lint: ruff check app + governance tests ---
+All checks passed!
+--- [2] type: mypy --strict app ---
+Success: no issues found in 67 source files
+--- [3] unit (policy + service) ---
+..................................................                       [100%]
+50 passed in 0.03s
+--- [4] security_review ---
+............                                                             [100%]
+12 passed in 0.07s
+--- [5] chaos ---
+......                                                                   [100%]
+6 passed in 0.03s
+--- [6] observability ---
+.....                                                                    [100%]
+5 passed in 0.03s
+--- [7] contract (scripts/contract_check.py --mode contract) ---
+[contract] TD 接口路径 9 个，代码命中 1 个
+[contract] 校验通过 ✅
+--- [8] doc_sync (scripts/contract_check.py --mode doc_sync) ---
+[doc_sync] 校验通过 ✅
+--- [9] migration: alembic 0004 存在性 ---
+alembic/versions/0004_governance.py
+--- [10] integration (真实 MySQL, 2026-08-07) ---
+MySQL: localhost:3307 (unisense/test, docker mysql 容器)
+alembic upgrade head 成功 (0001..0004)
+backend/tests/integration/test_governance_integration.py
+5 passed in ~0.4s
+(修复: 测试 seed 对齐真实模型 source_type/connection_config/upstream_signature; unisense 密码重置为 test)
+--- [11] perf_baseline (k6, 2026-08-08) ---
+服务: uvicorn app.main:app --port 8011, UNISENSE_DB_URL=mysql+pymysql://unisense:test@localhost:3307/unisense_perf
+种子: alembic upgrade head 在 unisense_perf 已内置播种 perf 用户(perf/Perf@123)+ 30 条指标; 登录密码重置为 Perf@123
+脚本: UNISENSE_PERF_URL=http://localhost:8011 k6 run backend/tests/perf/baseline.js
+阈值: p(95)<600ms ✓(26.09ms) | p(99)<2000ms ✓(48ms) | 错误率<5% ✓(0.00%)
+结果: 1125/1125 检查全绿; 375 iterations @ 10 VUs; /health /ready /api/v1/metric-definitions 均 200
+证据: backend/tests/reports/perf_baseline_2026-08-08.txt (+ /tmp/perf_summary.json)
+
+================================================================
+ 汇总: 11 门禁全绿 (78 passed: unit50+security12+chaos6+observability5 + integration5 + perf_baseline)
+ governance 达成 verified (11/11 非 runbook 门禁); released 仍待 runbook + 人工 ratify
+================================================================

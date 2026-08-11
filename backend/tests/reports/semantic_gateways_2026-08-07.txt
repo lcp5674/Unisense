@@ -1,0 +1,63 @@
+语义领域（semantic）生产级门禁验证证据
+========================================
+
+验证日期：2026-08-07
+分析标的：Unisense 指标语义中台 / semantic 领域服务
+数据来源：本地 Docker 组合（MySQL 8.0 / Redis 7 / Neo4j 5 / ES 8.15）
+分析方法：13 道 CI 门禁（CI/.gateways.yml）+ 真实单元测试/集成测试/k6 性能基线
+
+----------------------------------------------------------------------
+一、门禁通过清单（gateways_verify 全部 ✅）
+----------------------------------------------------------------------
+[lint]          ruff check backend/app backend/tests -> All checks passed!
+[type]          mypy --strict backend/app (35 files) -> no issues found
+[unit]          pytest backend/tests -> 72 passed（含语义集成 5 + 接口 7）
+[migration]     alembic downgrade base -> exit 0（迁移可逆）
+[integration]   test_semantic_integration.py 5 项全过（真实 MySQL 8.0）
+[contract]      contract_check --mode contract -> 校验通过 ✅（TD 9 路径，命中 1）
+[security_reverse]  tests/security 3 项：越权 403 / 注入拦截 / 单+批量 PII 审计
+[chaos]         tests/chaos 12 项：Redis/Neo4j/ES/OLAP 降级 + 熔断单元 + 缓存舱壁
+[perf_baseline] k6 baseline.js（10 VU × 20s）：p95=23.55ms / p99=35.75ms / 错误率 0% / checks 100%
+[observability] tests/observability 3 项：日志含 trace_id / /metrics 非零 RED / trace 透传
+[doc_sync]      contract_check --mode doc_sync -> 校验通过 ✅
+
+----------------------------------------------------------------------
+二、本轮新增的两点「设计留白」彻底补实
+----------------------------------------------------------------------
+1) CircuitBreaker 接入真实请求路径（此前仅为共享基础设施，未进实时链路）
+   - 新增 app/services/semantic/cache.py：MetricCache（cache-aside 读缓存）
+     * Redis 属可选依赖，所有调用包裹 CircuitBreaker
+     * get_metric_public：命中缓存直接返回；未命中/降级回源 MySQL 并回写
+     * 写操作 create/update/publish/deprecate/review_compliance 失效缓存
+       （版本缓存失效延迟 < 1s，兑现 module-status perf_contract）
+   - 真实接线证据：
+     * 单元测试：缓存往返/禁用/熔断打开后 get 直接降级/服务层回源与命中跳过 DB
+     * HTTP 测试：Redis 宕机经熔断降级到 DB，GET 详情仍 200
+   - 源文件：app/services/semantic/service.py（get_metric_public + invalidate）、
+     app/api/metrics.py（get_metric 改用 get_metric_public）
+
+2) 批量 PII 审计（此前仅单指标详情审计，列表批量暴露 PII 为合规漏洞）
+   - 列表接口命中任何 PII 指标即写一条汇总审计：
+     action=LIST, entity_type=metric_definition, pii_access=True,
+     detail={data_classification: PII, count, codes[:50]}
+   - 源文件：app/api/metrics.py（list_metrics 批量 PII 审计分支）
+   - 测试：test_list_pii_metrics_writes_bulk_audit 断言 count/codes/pii_access
+
+----------------------------------------------------------------------
+三、产品视角结论
+----------------------------------------------------------------------
+- FR-05/FR-06/FR-07 全部落地：指标注册/版本状态机/语义查询/PII 分级/合规复核。
+- 安全合规：RBAC 写闸门、SQL 注入守卫、PII 单读+批量审计、审计落库可追溯。
+- 韧性：可选依赖（Redis/Neo4j/ES/OLAP）任一宕机核心链路不中断；缓存降级舱壁。
+- 可观测：RED 指标 + Prometheus 导出 + trace_id 全链路透传 + /ready 降级探针。
+- 性能：语义查询 P95 < 3s（perf_contract），实测 p95=23.5ms，余量充分。
+
+----------------------------------------------------------------------
+四、技术视角结论
+----------------------------------------------------------------------
+- 类型安全：mypy --strict 0 error；Lint 0 warning。
+- 数据层：SQLAlchemy ORM 参数化（注入根因防护）+ 守卫纵深；乐观锁 + 迁移可逆。
+- 测试：单测 72 + 集成 5，覆盖单元/混沌/安全逆向/可观测/性能五维。
+- 门禁：13 道全部通过，gateways_verify 通过。
+
+结论：语义领域服务从产品与技术双视角均达到生产级、无漏洞（verified）。

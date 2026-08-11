@@ -1,0 +1,118 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: backend/tests/perf/baseline.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 10 max VUs, 50s max duration (incl. graceful stop):
+              * default: 10 looping VUs for 20s (gracefulStop: 30s)
+
+
+running (01.0s), 10/10 VUs, 10 complete and 0 interrupted iterations
+default   [   4% ] 10 VUs  00.8s/20s
+
+running (02.0s), 10/10 VUs, 30 complete and 0 interrupted iterations
+default   [   9% ] 10 VUs  01.8s/20s
+
+running (03.0s), 10/10 VUs, 50 complete and 0 interrupted iterations
+default   [  14% ] 10 VUs  02.8s/20s
+
+running (04.0s), 10/10 VUs, 61 complete and 0 interrupted iterations
+default   [  19% ] 10 VUs  03.8s/20s
+
+running (05.0s), 10/10 VUs, 81 complete and 0 interrupted iterations
+default   [  24% ] 10 VUs  04.8s/20s
+
+running (06.0s), 10/10 VUs, 101 complete and 0 interrupted iterations
+default   [  29% ] 10 VUs  05.8s/20s
+
+running (07.0s), 10/10 VUs, 120 complete and 0 interrupted iterations
+default   [  34% ] 10 VUs  06.8s/20s
+
+running (08.0s), 10/10 VUs, 140 complete and 0 interrupted iterations
+default   [  39% ] 10 VUs  07.8s/20s
+
+running (09.0s), 10/10 VUs, 160 complete and 0 interrupted iterations
+default   [  44% ] 10 VUs  08.8s/20s
+
+running (10.0s), 10/10 VUs, 173 complete and 0 interrupted iterations
+default   [  49% ] 10 VUs  09.8s/20s
+
+running (11.0s), 10/10 VUs, 193 complete and 0 interrupted iterations
+default   [  54% ] 10 VUs  10.8s/20s
+
+running (12.0s), 10/10 VUs, 213 complete and 0 interrupted iterations
+default   [  59% ] 10 VUs  11.8s/20s
+
+running (13.0s), 10/10 VUs, 233 complete and 0 interrupted iterations
+default   [  64% ] 10 VUs  12.8s/20s
+
+running (14.0s), 10/10 VUs, 253 complete and 0 interrupted iterations
+default   [  69% ] 10 VUs  13.8s/20s
+
+running (15.0s), 10/10 VUs, 273 complete and 0 interrupted iterations
+default   [  74% ] 10 VUs  14.8s/20s
+
+running (16.0s), 10/10 VUs, 291 complete and 0 interrupted iterations
+default   [  79% ] 10 VUs  15.8s/20s
+
+running (17.0s), 10/10 VUs, 307 complete and 0 interrupted iterations
+default   [  84% ] 10 VUs  16.8s/20s
+
+running (18.0s), 10/10 VUs, 325 complete and 0 interrupted iterations
+default   [  89% ] 10 VUs  17.8s/20s
+
+running (19.0s), 10/10 VUs, 343 complete and 0 interrupted iterations
+default   [  94% ] 10 VUs  18.8s/20s
+
+running (20.0s), 10/10 VUs, 363 complete and 0 interrupted iterations
+default   [  99% ] 10 VUs  19.8s/20s
+
+
+  █ THRESHOLDS 
+
+    http_req_duration
+    ✓ 'p(95)<600' p(95)=26.62ms
+    ✓ 'p(99)<2000' p(99)=41.25ms
+
+    http_req_failed
+    ✓ 'rate<0.05' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 1131    54.929751/s
+    checks_succeeded...: 100.00% 1131 out of 1131
+    checks_failed......: 0.00%   0 out of 1131
+
+    ✓ health 200
+    ✓ ready 200
+    ✓ list 200
+
+    HTTP
+    http_req_duration..............: avg=11.58ms  min=986µs    med=8.34ms   max=184.59ms p(90)=22.21ms  p(95)=26.62ms 
+      { expected_response:true }...: avg=11.58ms  min=986µs    med=8.34ms   max=184.59ms p(90)=22.21ms  p(95)=26.62ms 
+    http_req_failed................: 0.00%  0 out of 1132
+    http_reqs......................: 1132   54.978318/s
+
+    EXECUTION
+    iteration_duration.............: avg=535.15ms min=512.69ms med=537.89ms max=565.89ms p(90)=553.02ms p(95)=562.97ms
+    iterations.....................: 377    18.309917/s
+    vus............................: 10     min=10        max=10
+    vus_max........................: 10     min=10        max=10
+
+    NETWORK
+    data_received..................: 6.2 MB 303 kB/s
+    data_sent......................: 193 kB 9.3 kB/s
+
+
+
+
+running (20.6s), 00/10 VUs, 377 complete and 0 interrupted iterations
+default ✓ [ 100% ] 10 VUs  20s

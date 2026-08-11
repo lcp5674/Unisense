@@ -1,0 +1,21 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /System/Volumes/Data/data/GitCode/Unisense/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /System/Volumes/Data/data/GitCode/Unisense
+configfile: pyproject.toml
+plugins: mock-3.15.1, cov-7.1.0, asyncio-1.4.0, anyio-4.14.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 10 items
+
+tests/integration/test_glossary_integration.py::test_term_lifecycle_draft_published_deprecated PASSED [ 10%]
+tests/integration/test_glossary_integration.py::test_alias_overlap_triggers_conflict PASSED [ 20%]
+tests/integration/test_glossary_integration.py::test_term_relation_create PASSED [ 30%]
+tests/integration/test_dimension_integration.py::test_dimension_lifecycle_and_members PASSED [ 40%]
+tests/integration/test_dimension_integration.py::test_mapping_and_metric_binding PASSED [ 50%]
+tests/integration/test_dimension_integration.py::test_reconciliation_review_closure PASSED [ 60%]
+tests/integration/test_notify_integration.py::test_publish_event_fans_out_notifications PASSED [ 70%]
+tests/integration/test_notify_integration.py::test_publish_without_subscription_no_fanout PASSED [ 80%]
+tests/integration/test_observability_integration.py::test_submit_feedback_and_stats PASSED [ 90%]
+tests/integration/test_observability_integration.py::test_rating_out_of_range_rejected PASSED [100%]
+
+============================= 10 passed in 10.91s ==============================

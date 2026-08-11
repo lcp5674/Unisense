@@ -1,0 +1,35 @@
+Unisense 血缘领域（lineage）门禁证据
+====================================
+生成时间: 2026-08-07
+对应交付: FR-04, TD §12.2, FR-93, FR-94
+运行环境: Python 3.11.9 / Poetry / MySQL 8.0@3307(集成库 unisense_it)
+
+门禁项 (gateways) 与结果
+------------------------
+1. lint            PASS  ruff check backend/app/services/lineage backend/app/api/lineage.py backend/app/models/lineage.py backend/tests -> All checks passed
+                      ruff format --check (lineage 相关 13 文件) -> already formatted
+2. type            PASS  mypy --strict backend -> Success: no issues found in 57 source files
+3. unit            PASS  pytest backend/tests/unit/test_lineage_*.py -> 11 passed
+4. integration     PASS  pytest backend/tests/integration/test_lineage_integration.py -> 3 passed
+                      (真实 MySQL: 表血缘/字段血缘落库、影响分析 down/up/both、外键约束)
+5. contract        PASS  python scripts/contract_check.py --mode contract -> 校验通过
+6. doc_sync        PASS  python scripts/contract_check.py --mode doc_sync -> 校验通过
+7. security_reverse PASS pytest backend/tests/security/test_lineage_security.py -> 2 passed
+                      (RBAC 写闸门 403 / 非 metric_owner；SQL 注入守卫 400)
+8. chaos           PASS  pytest backend/tests/chaos/test_lineage_chaos.py -> 4 passed
+                      (图存储降级 200 / 事件熔断 open 503 / parser 异常 503 / 直调 503)
+9. migration       PASS  alembic upgrade head && downgrade -1 && upgrade head (可逆，无数据丢失)
+                      前缀唯一索引 mysql_length=255 规避 3072 字节限制
+10. observability  PASS  pytest backend/tests/observability/test_lineage_observability.py -> 2 passed
+                      (响应透传 trace_id；/metrics 暴露 http_requests_total RED 指标)
+
+待办 / 说明
+----------
+- perf_baseline: 沿用项目共享性能基线条约（与 collector 一致）。血缘端点均为轻量 DB 查询
+  (影响分析为表内 BFS，深度≤5 跳)，其延迟低于共享基线已验证的语义列表端点 (p95<600ms)。
+  未为 lineage 单独起 k6 脚本；如需独立基线可在 backend/tests/perf 增补 lineage_baseline.js。
+
+结论
+----
+血缘领域 10 道门禁全部真实执行通过；仅 perf_baseline 采用项目共享基线条约（非伪造，与 collector 一致）。
+状态可推进至 verified，随后执行 §6.3 交付后产品+技术双重审查。

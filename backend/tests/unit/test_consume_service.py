@@ -1,0 +1,209 @@
+"""consume 服务单元测试（TD §12.6 / FR-12,13）。
+
+聚焦纯逻辑：接入方鉴权、dry-run 口径校验、查询 OLAP 降级、限流闸门。
+DB / 仓库以 MagicMock 隔离（对齐 DEV_GUIDE §8b 单元标准），不连真实依赖。
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.core.error_codes import ErrorCode
+from app.core.exceptions import BusinessError
+from app.core.security import hash_password
+from app.models.consume import ApiClient, ApiClientStatus
+from app.models.metric import Metric
+from app.services.consume.schemas import QueryRequest
+from app.services.consume.service import ConsumeService, rate_limiter
+
+
+def _client(
+    secret: str = "s3cr3t",
+    whitelist=None,
+    qps: int = 2,
+    status=ApiClientStatus.ACTIVE,
+    scope_domain: str | None = None,
+    daily_quota: int = 100,
+) -> ApiClient:
+    c = ApiClient()
+    c.client_id = "acme"
+    c.client_secret_ref = hash_password(secret)
+    c.status = status
+    c.metric_whitelist = whitelist
+    c.scope_domain = scope_domain
+    c.qps = qps
+    c.daily_quota = daily_quota
+    c.created_by = 1
+    return c
+
+
+def _metric(
+    status="PUBLISHED",
+    code: str = "gmv",
+    dims=("region",),
+    expr="SUM(x)",
+    grain="day",
+    domain: str | None = "sales",
+    pii: bool = False,
+) -> Metric:
+    m = Metric()
+    m.metric_code = code
+    m.status = status
+    m.owner_org = 1
+    m.domain = domain
+    m.definition_json = {
+        "expression": expr,
+        "dependencies": ["fct_order"],
+        "dimensions": list(dims),
+        "grain": grain,
+        "unit": "yuan",
+        "pii": pii,
+    }
+    return m
+
+
+@pytest.fixture(autouse=True)
+def reset_limiter():
+    rate_limiter._buckets.clear()
+    rate_limiter._daily.clear()
+    yield
+
+
+def _svc(client: ApiClient) -> ConsumeService:
+    svc = ConsumeService(MagicMock())
+    svc._clients = MagicMock()
+    svc._clients.get_by_client_id = AsyncMock(return_value=client)
+    return svc
+
+
+# ---- 接入方鉴权 ----
+async def test_authenticate_ok() -> None:
+    svc = _svc(_client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    assert client.client_id == "acme"
+
+
+async def test_authenticate_bad_secret() -> None:
+    svc = _svc(_client())
+    with pytest.raises(BusinessError):
+        await svc.authenticate_client("acme:wrong")
+
+
+async def test_authenticate_revoked() -> None:
+    svc = _svc(_client(status=ApiClientStatus.REVOKED))
+    with pytest.raises(BusinessError):
+        await svc.authenticate_client("acme:s3cr3t")
+
+
+async def test_authenticate_bad_format() -> None:
+    svc = _svc(_client())
+    with pytest.raises(BusinessError):
+        await svc.authenticate_client("acme_no_colon")
+
+
+# ---- dry-run ----
+async def test_dry_run_ok() -> None:
+    svc = _svc(_client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric())
+    res = await svc.dry_run_query(
+        QueryRequest(metric_code="gmv", date_range="2026-01~2026-03"), client
+    )
+    assert res.status == "ok"
+    assert res.meta["grain"] == "day"
+    assert res.meta["unit"] == "yuan"
+    assert res.execution_plan["expression_ast"]["raw"] == "SUM(x)"
+
+
+async def test_dry_run_deprecated() -> None:
+    svc = _svc(_client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric(status="DEPRECATED"))
+    with pytest.raises(BusinessError):
+        await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
+
+
+async def test_dry_run_scope_denied() -> None:
+    svc = _svc(_client(whitelist=["other_metric"]))
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric())
+    with pytest.raises(BusinessError):
+        await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
+
+
+async def test_dry_run_cross_domain_denied() -> None:
+    """scope_domain 限定域外指标必须拒绝（FORBIDDEN_DOMAIN，fail-closed 越权闸门）。"""
+    svc = _svc(_client(scope_domain="finance"))
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric(domain="sales"))
+    with pytest.raises(BusinessError) as exc:
+        await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_DOMAIN
+
+
+async def test_dry_run_pii_requires_explicit_whitelist() -> None:
+    """PII 指标在"域内全量"授权下不可隐式访问（FORBIDDEN_PII）。"""
+    svc = _svc(_client(whitelist=None))
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric(pii=True))
+    with pytest.raises(BusinessError) as exc:
+        await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_PII
+
+
+async def test_dry_run_pii_allowed_when_whitelisted() -> None:
+    """PII 指标被白名单显式列出时放行，且 meta 标注 pii=True 供上层审计分级。"""
+    svc = _svc(_client(whitelist=["gmv"]))
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric(pii=True))
+    res = await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
+    assert res.meta["pii"] is True
+
+
+async def test_dry_run_dimension_violation() -> None:
+    svc = _svc(_client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric(dims=("region",)))
+    with pytest.raises(BusinessError):
+        await svc.dry_run_query(
+            QueryRequest(
+                metric_code="gmv", date_range="", dimensions=[{"name": "city", "value": "BJ"}]
+            ),
+            client,
+        )
+
+
+# ---- 查询降级 ----
+async def test_execute_degraded(monkeypatch) -> None:
+    svc = _svc(_client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric())
+    monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
+    with pytest.raises(BusinessError):
+        await svc.execute_query(
+            QueryRequest(metric_code="gmv", date_range="2026-01~2026-03"), client
+        )
+
+
+# ---- 限流 ----
+async def test_rate_limit() -> None:
+    svc = _svc(_client(qps=2))
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc.check_rate_limit(client)  # 1
+    svc.check_rate_limit(client)  # 2
+    with pytest.raises(BusinessError):
+        svc.check_rate_limit(client)  # 第 3 次超限
+
+
+async def test_daily_quota_exhausted() -> None:
+    """日配额耗尽后拒绝（RATE_LIMITED + retry_after），避免 QPS 内的长时间刷量。"""
+    svc = _svc(_client(qps=100, daily_quota=2))
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc.check_rate_limit(client)
+    svc.check_rate_limit(client)
+    with pytest.raises(BusinessError) as exc:
+        svc.check_rate_limit(client)
+    assert exc.value.error_code == ErrorCode.RATE_LIMITED
+    assert exc.value.ctx["daily_quota"] == 2

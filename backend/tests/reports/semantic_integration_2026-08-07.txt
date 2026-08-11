@@ -1,0 +1,16 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /System/Volumes/Data/data/GitCode/Unisense/backend/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /System/Volumes/Data/data/GitCode/Unisense
+configfile: pyproject.toml
+plugins: mock-3.15.1, cov-7.1.0, asyncio-1.4.0, anyio-4.14.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 5 items
+
+backend/tests/test_semantic_integration.py::test_create_then_publish_promotes_version PASSED [ 20%]
+backend/tests/test_semantic_integration.py::test_optimistic_lock_conflict PASSED [ 40%]
+backend/tests/test_semantic_integration.py::test_pii_flow_deadlock_resolved PASSED [ 60%]
+backend/tests/test_semantic_integration.py::test_invalid_enum_rejected_at_db_layer PASSED [ 80%]
+backend/tests/test_semantic_integration.py::test_migration_is_reversible PASSED [100%]
+
+============================== 5 passed in 3.32s ===============================

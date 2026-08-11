@@ -1,0 +1,14 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /System/Volumes/Data/data/GitCode/Unisense/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /System/Volumes/Data/data/GitCode/Unisense
+configfile: pyproject.toml
+plugins: mock-3.15.1, cov-7.1.0, asyncio-1.4.0, anyio-4.14.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 3 items
+
+tests/unit/test_notify_service.py::test_publish_event_no_subscribers PASSED [ 33%]
+tests/unit/test_notify_service.py::test_publish_event_fanout PASSED      [ 66%]
+tests/unit/test_notify_service.py::test_upsert_subscription_creates PASSED [100%]
+
+============================== 3 passed in 0.02s ===============================

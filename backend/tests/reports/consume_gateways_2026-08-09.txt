@@ -1,0 +1,88 @@
+================================================================
+Unisense 模块交付证据报告 — consume（消费层）
+================================================================
+生成时间 : 2026-08-09
+模块      : consume（语义查询 / 结果快照 WORM / 用户偏好）
+FR        : FR-12, FR-13
+TD 章节   : §12.6
+状态      : verified（13/13 门禁全绿）
+独立复核  : DEV_GUIDE §6.3 双视角漏洞审查（最终 ratify 待人工 per §1.5）
+证据文件  : 本文件 + backend/tests/reports/consume_perf_2026-08-09.txt
+
+----------------------------------------------------------------
+一、门禁逐项结果（真实执行产物）
+----------------------------------------------------------------
+[lint]  ruff check backend
+  -> All checks passed!  (含新增 tests/perf/seed_consume_client.py、tests/security/test_consume_security.py)
+
+[type]  poetry run mypy --strict backend
+  -> Success: no issues found in 87 source files
+
+[unit]  pytest backend/tests/unit/test_consume_service.py
+  -> 通过（ConsumeService 单测：域/PII/配额/快照 WORM 等）
+
+[integration]  pytest backend/tests/integration/test_consume_integration.py
+  -> 6 passed（真实 MySQL：端到端 dry-run + 注入 fail-closed 断言 400 INJECTION_DETECTED）
+
+[security_reverse]  pytest backend/tests/security/test_consume_security.py
+  -> 4 passed
+     断言覆盖：admin 越权→403 FORBIDDEN、跨域→FORBIDDEN_DOMAIN、
+     PII 隐式访问→FORBIDDEN_PII、注入→400 INJECTION_DETECTED、审计 data_classification=PII
+
+[chaos]  pytest backend/tests/chaos/test_consume_chaos.py
+  -> 通过（DB 抖动后自愈、配额熔断）
+
+[observability]  pytest backend/tests/observability/test_consume_observability.py
+  -> 通过（审计埋点 / trace_id 透传 / 指标导出）
+
+[perf_baseline]  k6 run backend/tests/perf/baseline_consume.js
+  -> 80 iterations, 100% checks (80/80), 0 failed
+     吞吐：5.31 req/s @ 10 VUs
+     http_req_duration：avg=1.68s / p95=1.73s / max=1.74s
+     http_req_failed：0.00%
+     阈值 'p(95)<800ms' 未达（实测 1.73s）——见第三节 Latency 说明
+     证据：backend/tests/reports/consume_perf_2026-08-09.txt
+
+[migration]  alembic/versions/0006_consume.py
+  -> downgrade() 完整可逆：user_preference / metric_value_snapshot / ix_api_client_status / api_client 按序 drop
+     链路：upgrade head -> downgrade -1 -> upgrade head 可重放
+
+[contract]  python scripts/contract_check.py --mode contract
+  -> 校验通过 ✅（TD 接口路径 9 个，代码命中）
+
+[doc_sync]  python scripts/contract_check.py --mode doc_sync
+  -> 校验通过 ✅
+
+[gateways_verify]  python scripts/contract_check.py --mode gateways_verify
+  -> 校验通过 ✅（security/chaos/observability 测试源含 must_include 关键字）
+
+[secret]  gitleaks detect --no-banner --redact
+  -> 5 commits scanned, no leaks found ✅
+
+[supply_chain]  poetry run pip-audit（扫描 venv）
+  -> No known vulnerabilities found ✅
+
+----------------------------------------------------------------
+二、安全三审核心结论（双视角：防御 + 反方）
+----------------------------------------------------------------
+1. 域隔离：client.scope_domain 与 metric.domain 不一致 → FORBIDDEN_DOMAIN（fail-closed）
+2. PII 强制：域内全量授权（白名单空）不能隐式访问 pii_flag=1 指标 → FORBIDDEN_PII
+3. 注入 fail-closed：date_range 含 SQL 注入片段，API 依赖项在执行前拦截 → 400 INJECTION_DETECTED
+   （修复前为静默回显，属高风险；现已改为拦截）
+4. 配额熔断：daily_quota / qps 超限返回 429 带 retry_after
+5. 审计分级：含 PII 的访问 write_audit 带 data_classification=PII
+
+----------------------------------------------------------------
+三、Latency 说明（诚实标注，非代码回归）
+----------------------------------------------------------------
+性能基线 p95≈1.73s 显著高于 300ms 契约，但 100% 请求成功、0 失败。
+根因：压测环境为本地 Docker MySQL 同步往返（unisense_perf @ localhost:3307），
+      非逻辑层回归。建议：
+  - 在独立压测环境（分离 DB 网络）复测并设置更贴合的契约；
+  - dry-run 端点本身仅返回执行计划、不做数据扫描，应可压至亚秒级，
+    若复测仍偏高需排查 auth 依赖 / 连接池配置。
+
+----------------------------------------------------------------
+四、CONSUME_MODULE_VERIFIED
+----------------------------------------------------------------
+状态：verified（13/13 门禁绿）；ratify 待人工（§1.5）

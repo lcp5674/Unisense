@@ -1,0 +1,57 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /System/Volumes/Data/data/GitCode/Unisense/backend/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /System/Volumes/Data/data/GitCode/Unisense
+configfile: pyproject.toml
+plugins: mock-3.15.1, cov-7.1.0, asyncio-1.4.0, anyio-4.14.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 44 items / 1 skipped
+
+tests/test_semantic_repository.py::test_create_persists_and_returns_metric PASSED [  2%]
+tests/test_semantic_repository.py::test_get_by_code_returns_metric_when_found PASSED [  4%]
+tests/test_semantic_repository.py::test_get_by_code_returns_none_when_missing PASSED [  6%]
+tests/test_semantic_repository.py::test_get_by_id_returns_metric_when_found PASSED [  9%]
+tests/test_semantic_repository.py::test_list_metrics_applies_filters_and_returns_total PASSED [ 11%]
+tests/test_semantic_repository.py::test_update_with_optimistic_lock_success PASSED [ 13%]
+tests/test_semantic_repository.py::test_create_duplicate_code_raises_conflict PASSED [ 15%]
+tests/test_semantic_repository.py::test_get_version_returns_matching_version PASSED [ 18%]
+tests/test_semantic_repository.py::test_mark_version_published_executes_update PASSED [ 20%]
+tests/test_semantic_repository.py::test_update_with_optimistic_lock_conflict_raises_conflict PASSED [ 22%]
+tests/test_semantic_repository.py::test_update_with_optimistic_lock_not_found_raises_notfound PASSED [ 25%]
+tests/test_semantic_repository.py::test_soft_delete_success PASSED       [ 27%]
+tests/test_semantic_repository.py::test_soft_delete_not_found_raises_notfound PASSED [ 29%]
+tests/test_semantic_repository.py::test_create_version_persists_and_returns PASSED [ 31%]
+tests/test_semantic_repository.py::test_list_versions_returns_desc_ordered PASSED [ 34%]
+tests/test_semantic_service.py::test_create_metric_happy_path PASSED     [ 36%]
+tests/test_semantic_service.py::test_create_metric_duplicate_code_raises_conflict PASSED [ 38%]
+tests/test_semantic_service.py::test_get_metric_not_found PASSED         [ 40%]
+tests/test_semantic_service.py::test_update_metric_creates_version_and_bumps PASSED [ 43%]
+tests/test_semantic_service.py::test_update_metric_breaking_change PASSED [ 45%]
+tests/test_semantic_service.py::test_update_metric_invalid_status_rejected PASSED [ 47%]
+tests/test_semantic_service.py::test_publish_metric_success PASSED       [ 50%]
+tests/test_semantic_service.py::test_publish_metric_pii_blocked_without_compliance PASSED [ 52%]
+tests/test_semantic_service.py::test_publish_metric_invalid_status_rejected PASSED [ 54%]
+tests/test_semantic_service.py::test_deprecate_metric_success_sets_sunset PASSED [ 56%]
+tests/test_semantic_service.py::test_deprecate_metric_already_deprecated_rejected PASSED [ 59%]
+tests/test_semantic_service.py::test_list_metrics_pagination_offset PASSED [ 61%]
+tests/test_semantic_service.py::test_is_breaking_change_detection PASSED [ 63%]
+tests/test_semantic_schemas.py::test_enum_fields_reject_invalid_values[aggregation-MEAN] PASSED [ 65%]
+tests/test_semantic_schemas.py::test_enum_fields_reject_invalid_values[time_semantics-FOREVER] PASSED [ 68%]
+tests/test_semantic_schemas.py::test_enum_fields_reject_invalid_values[freshness-WEEKLY] PASSED [ 70%]
+tests/test_semantic_schemas.py::test_enum_fields_reject_invalid_values[dw_layer-STAGE] PASSED [ 72%]
+tests/test_semantic_schemas.py::test_enum_fields_reject_invalid_values[metric_tier-T4] PASSED [ 75%]
+tests/test_semantic_schemas.py::test_enum_fields_reject_invalid_values[serving_mode-STREAM_ONLY] PASSED [ 77%]
+tests/test_semantic_schemas.py::test_enum_fields_reject_invalid_values[additivity-PARTIAL] PASSED [ 79%]
+tests/test_semantic_schemas.py::test_enum_fields_reject_invalid_values[type-weird] PASSED [ 81%]
+tests/test_semantic_schemas.py::test_valid_enum_values_accepted PASSED   [ 84%]
+tests/test_semantic_schemas.py::test_publish_version_optional PASSED     [ 86%]
+tests/test_api_metrics.py::test_create_metric_success PASSED             [ 88%]
+tests/test_api_metrics.py::test_create_metric_conflict_returns_409 PASSED [ 90%]
+tests/test_api_metrics.py::test_publish_metric_success PASSED            [ 93%]
+tests/test_api_metrics.py::test_list_metrics_success PASSED              [ 95%]
+tests/test_api_metrics.py::test_create_metric_forbidden_for_viewer PASSED [ 97%]
+tests/test_api_metrics.py::test_pii_review_success PASSED                [100%]
+
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_semantic_integration.py:31: could not import 'testcontainers': No module named 'testcontainers'
+======================== 44 passed, 1 skipped in 0.08s =========================

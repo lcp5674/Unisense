@@ -1,0 +1,36 @@
+# Quality 门禁 live 复测证据（2026-08-11）
+
+环境：本地 Docker 栈（unisense-mysql-1:3307 / redis:16379 / neo4j:7687 / elasticsearch:19200）
+Python：3.11.9  venv：backend/.venv
+
+## 1. Unit（回归基线）
+- 命令：`./.venv/bin/python3 -m pytest backend/tests/unit -q`
+- 结果：253 passed （基线 250 → +3 项 repair-suggestion 单测）
+- 时间：2026-08-11
+
+## 2. Ruff / Mypy
+- ruff：backend/app/services/quality/ + api/quality.py + 相关 tests → All checks passed!
+- mypy --strict：4 个 quality 源文件 → Success: no issues found
+
+## 3. Integration（隔离库 unisense_gate，真实 MySQL@3307）
+- 数据库：mysql+aiomysql://unisense:test@localhost:3307/unisense_gate（独立库，避免污染共享 unisense 库）
+- 命令：`UNISENSE_INTEGRATION_DB_URL=... pytest backend/tests/integration/test_quality_integration.py -q`
+- 结果：2 passed
+- 迁移验证：`alembic upgrade head` 应用至 0016_quality_repair；
+  `information_schema` 确认 quality_event.repair_suggestion 列存在（JSON, NULL）
+
+## 4. Chaos（全 mock，无 DB 依赖）
+- 命令：`pytest backend/tests/chaos/test_quality_chaos.py -q`
+- 结果：3 passed
+
+## 5. Perf baseline（k6 打真实端点，带鉴权 JWT）
+- 服务端：`uvicorn app.main:app --port 8000`（UNISENSE_DB_URL=unisense_perf）
+- 鉴权：compliance_officer 用户 qperf，/api/v1/auth/login 签发 JWT
+- 脚本：backend/tests/perf/baseline.js（GET /api/v1/quality/rules + /api/v1/quality/events，10 VU × 30s）
+- 阈值：p(95)<800ms，http_req_failed<0.5%
+- 结果：
+  - http_req_duration p(95) = 23.78ms  （< 800ms ✓）
+  - http_req_failed = 0.00%           （< 0.5% ✓）
+  - checks：2548 / 2548 成功（100%）
+  - 吞吐：84.4 req/s（10 VU）
+- 结论：perf_baseline 门禁 PASS

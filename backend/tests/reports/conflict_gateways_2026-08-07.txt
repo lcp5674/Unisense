@@ -1,0 +1,13 @@
+Unisense conflict 模块门禁证据报告 (2026-08-07)
+module=conflict FR-09 TD §12.4
+--- lint: ruff check ---
+All checks passed!
+--- type: mypy --strict ---
+Success: no issues found in 7 source files
+--- unit/security/chaos/observability/integration: pytest ---
+....................                                                     [100%]
+20 passed in 1.79s
+--- contract ---
+[contract] 校验通过 ✅
+--- doc_sync ---
+[doc_sync] 校验通过 ✅
