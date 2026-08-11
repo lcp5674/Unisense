@@ -84,7 +84,9 @@ async def test_benchmark_bind_requires_write_role_403(analyst_client: httpx.Asyn
     assert resp.status_code == 403
 
 
-async def test_reconciliation_run_requires_write_role_403(analyst_client: httpx.AsyncClient) -> None:
+async def test_reconciliation_run_requires_write_role_403(
+    analyst_client: httpx.AsyncClient,
+) -> None:
     resp = await analyst_client.post(
         "/api/v1/quality/reconciliation/run",
         json={"benchmark_id": 1, "metric_value": "100"},

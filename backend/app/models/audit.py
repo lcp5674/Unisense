@@ -65,8 +65,6 @@ class AuditLog(Base, TimestampMixin):
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典（供审计 API 返回）。"""
-        from typing import Any  # noqa: PLC0415
-
         return {
             "id": self.id,
             "actor_id": self.actor_id,

@@ -3,6 +3,10 @@
 明文连接配置（含账号/密码/连接串）仅在内存中使用，落库为密文；
 API 读取一律脱敏（见 collector service 的 DataSourceResponse.connection_config_present），
 杜绝凭据明文泄露与日志泄露。
+
+密钥来源：
+- 生产：环境变量 UNISENSE_FERNET_KEY（32 字节 base64url 编码，由 Secret Manager 注入）
+- 开发：若未设置，从 UNISENSE_JWT_SECRET 派生（仅用于本地调试，每次重启轮换）
 """
 
 from __future__ import annotations
@@ -10,28 +14,25 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import secrets as _secrets_module
 from typing import Any
 
 from cryptography.fernet import Fernet
 
-from app.core.config import settings
-
 
 def _build_key() -> bytes:
-    """从环境变量 UNISENSE_FERNET_KEY 读取 32 字节 Fernet 密钥。
+    """构建 Fernet 密钥（32 字节 base64url 编码）。
 
-    若环境变量未设置，生成随机密钥并警告（开发环境兼容）。
-    生产环境必须通过 Secret Manager 注入。
+    优先从环境变量 UNISENSE_FERNET_KEY 读取；未设置时从 jwt_secret 派生（开发兼容）。
     """
-    from os import environ
-
-    raw = environ.get("UNISENSE_FERNET_KEY", "")
+    raw = os.environ.get("UNISENSE_FERNET_KEY", "").strip()
     if raw:
+        # 用户提供的原始值 → SHA-256 → base64url → 32 字节
         return base64.urlsafe_b64encode(hashlib.sha256(raw.encode("utf-8")).digest())
-    # 开发环境：生成随机密钥（每次重启轮换，仅用于本地调试）
-    import secrets as _secrets
-
-    return _secrets.token_urlsafe(32).encode("utf-8")[:44]
+    # 开发环境：从 jwt_secret 派生确定性密钥（便于本地调试）
+    jwt_secret = os.environ.get("UNISENSE_JWT_SECRET", "default-jwt-secret-for-dev")
+    return base64.urlsafe_b64encode(hashlib.sha256(jwt_secret.encode("utf-8")).digest())
 
 
 _FERNET = Fernet(_build_key())

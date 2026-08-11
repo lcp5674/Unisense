@@ -38,7 +38,7 @@ async def list_audit_logs(
 ) -> Any:
     """查询审计日志（支持按 actor/entity/trace_id/PII 过滤，分页）。"""
     offset = (page - 1) * page_size
-    stmt = select(AuditLog).where(AuditLog.deleted_at.is_(None))
+    stmt = select(AuditLog)
 
     if actor_id is not None:
         stmt = stmt.where(AuditLog.actor_id == actor_id)

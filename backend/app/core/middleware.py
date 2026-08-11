@@ -13,7 +13,7 @@ import uuid
 
 import structlog
 from fastapi import Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from app.core.exceptions import UnisenseError
