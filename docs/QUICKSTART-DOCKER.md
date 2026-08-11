@@ -20,17 +20,23 @@ docker compose down
 docker compose down -v
 
 # 访问地址
-# 前端：      http://localhost:8080
-# 后端 API：  http://localhost:8000/api/v1
-# API 文档：  http://localhost:8000/docs
-# 健康检查：  http://localhost:8000/health
-# 指标：      http://localhost:8000/metrics
+# 前端：      http://localhost:8180
+# 后端 API：  http://localhost:8100/api/v1
+# API 文档：  http://localhost:8100/docs
+# 健康检查：  http://localhost:8100/health
+# 指标：      http://localhost:8100/metrics
+# MinIO 控制台：http://localhost:19001（minioadmin/minioadmin）
 
 # 数据库连接（宿主机）
 # MySQL:    localhost:3307  (user: unisense, pass: test)
 # Redis:    localhost:16379
 # Neo4j:    http://localhost:7474 (neo4j/test1234)
 # ES:       http://localhost:19200
+
+# 端口避让说明（避开本机已运行的 patent-exam/multica 等服务）：
+#   后端 8100（8000 被 patent-exam-backend 占用）
+#   前端 8180（8080 被 multica-backend-1 占用）
+#   MinIO 19000/19001（9000 被 patent-exam-minio 占用）
 
 # 配置 LLM（在 .env 中设置，或启动时传入）
 UNISENSE_LLM_BASE_URL=https://api.kilo.ai/api/gateway \

@@ -113,7 +113,8 @@ services:
   minio:
     image: minio/minio:latest
     container_name: unisense-minio
-    ports: ["9000:9000", "9001:9001"]
+    # 宿主 19000/19001 → 容器 9000/9001（9000 已被 patent-exam-minio 占用）
+    ports: ["19000:9000", "19001:9001"]
     environment:
       MINIO_ROOT_USER: ${UNISENSE_MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${UNISENSE_MINIO_SECRET_KEY:-minioadmin}
@@ -132,7 +133,8 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     container_name: unisense-backend
-    ports: ["8000:8000"]
+    # 宿主 8100 → 容器 8000（8000 已被 patent-exam-backend 占用，做端口避让）
+    ports: ["8100:8000"]
     depends_on:
       mysql:
         condition: service_healthy
@@ -155,8 +157,8 @@ services:
       UNISENSE_JWT_SECRET: ${UNISENSE_JWT_SECRET:-dev-jwt-secret-change-in-production-32bytes}
       UNISENSE_JWT_ALGORITHM: HS256
       UNISENSE_JWT_EXPIRE_MINUTES: 60
-      # CORS：前端容器访问
-      UNISENSE_CORS_ORIGINS: http://localhost:8080,http://frontend:80
+      # CORS：前端容器访问（宿主 8180 → nginx 80）
+      UNISENSE_CORS_ORIGINS: http://localhost:8180,http://frontend:80
       UNISENSE_LOG_LEVEL: INFO
       UNISENSE_LOG_FORMAT: json
       # LLM 配置（OpenAI 协议兼容）
@@ -184,7 +186,8 @@ services:
         VITE_API_BASE_URL: ""
         VITE_SEMANTIC_API_KEY: ${VITE_SEMANTIC_API_KEY:-dev-semantic-key}
     container_name: unisense-frontend
-    ports: ["8080:80"]
+    # 宿主 8180 → nginx 80（8080 已被 multica-backend-1 占用，做端口避让）
+    ports: ["8180:80"]
     depends_on:
       backend:
         condition: service_healthy
