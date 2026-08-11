@@ -134,7 +134,8 @@ class AiService:
 5. 仅返回 SQL，不要解释
 
 示例输出：
-SELECT metric_code, value FROM unified_metric WHERE metric_code = 'sales_gmv_daily' AND dt = '2024-01-01'
+SELECT metric_code, value FROM unified_metric
+WHERE metric_code = 'sales_gmv_daily' AND dt = '2024-01-01'
 """
 
         try:
@@ -145,6 +146,7 @@ SELECT metric_code, value FROM unified_metric WHERE metric_code = 'sales_gmv_dai
             )
             content = result.get("content", "").strip()
             # 提取 SQL（去除可能的 markdown 代码块）
+            content = str(result.get("content", "")).strip()
             if "```sql" in content:
                 content = content.split("```sql")[1].split("```")[0].strip()
             elif "```" in content:

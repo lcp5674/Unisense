@@ -161,7 +161,9 @@ class TestQualityEventRepo:
 
     async def test_transition_event_ack(self, repo: QualityRepository) -> None:
         event = QualityEvent(id=1, status=QualityEventStatus.OPEN)
-        result = await repo.transition_event(event, QualityEventStatus.ACK, operator_id=5, ack_note="处理中")
+        result = await repo.transition_event(
+            event, QualityEventStatus.ACK, operator_id=5, ack_note="处理中"
+        )
         assert result.status == QualityEventStatus.ACK
         assert result.ack_by == 5
         assert result.ack_at is not None
@@ -239,7 +241,10 @@ class TestExternalBenchmarkRepo:
         ]
         repo._db.execute = AsyncMock(return_value=mock_result)
         result = await repo.find_benchmark(
-            source_id="S1", metric_code="M1", bench_date=__import__("datetime").date(2024, 1, 1), dims=None
+            source_id="S1",
+            metric_code="M1",
+            bench_date=__import__("datetime").date(2024, 1, 1),
+            dims=None,
         )
         assert result is not None
 

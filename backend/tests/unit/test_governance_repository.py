@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.models.governance import Grant, Role, RoleName, GrantStatus
+from app.models.governance import Grant, GrantStatus, Role, RoleName
 from app.services.governance.repository import GovernanceRepository
 
 

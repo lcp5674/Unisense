@@ -1,0 +1,240 @@
+"""governance 服务契约（TD §3.5 / §12.5，FR-11）。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.models.governance import GrantType, RoleName, SensitivityLevel
+
+
+class RoleCreate(BaseModel):
+    """``POST /roles`` 请求体。"""
+
+    name: RoleName = Field(description="角色名（六角色枚举）")
+    description: str | None = Field(default=None, max_length=256, description="角色说明")
+
+
+class RoleResponse(BaseModel):
+    """角色响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None = None
+
+
+class GrantCreate(BaseModel):
+    """``POST /grants`` 请求体（对齐 TD §3.5 Schema 示例）。"""
+
+    user_id: int = Field(gt=0, description="被授权用户 ID")
+    role_id: int | None = Field(default=None, gt=0, description="关联角色 ID")
+    domain: str | None = Field(default=None, max_length=64, description="授权主题域")
+    metric_whitelist: list[str] | None = Field(default=None, description="指标白名单")
+    grant_type: GrantType = Field(default=GrantType.READ, description="授权类型")
+    row_level: bool = Field(default=False, description="行级权限开关")
+    expires_at: datetime | None = Field(default=None, description="临时授权到期时间（UTC）")
+    reason: str | None = Field(default=None, max_length=512, description="授权事由")
+
+    @field_validator("metric_whitelist")
+    @classmethod
+    def _dedup_whitelist(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        cleaned = sorted({item.strip() for item in v if item and item.strip()})
+        return cleaned or None
+
+    @field_validator("domain")
+    @classmethod
+    def _strip_domain(cls, v: str | None) -> str | None:
+        return v.strip() if v and v.strip() else None
+
+
+class GrantResponse(BaseModel):
+    """授权响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    role_id: int | None = None
+    domain: str | None = None
+    metric_whitelist: list[Any] | None = None
+    grant_type: str
+    status: str
+    row_level: bool
+    expires_at: datetime | None = None
+    granted_by: int | None = None
+    reason: str | None = None
+
+
+class GrantBatchRequest(BaseModel):
+    """``POST /grants/batch`` 请求体（R3-07：dry-run + 逐条审计 + 失败回滚）。"""
+
+    operation: Literal["grant", "revoke"] = Field(default="grant", description="批量操作类型")
+    items: Annotated[list[GrantCreate], Field(min_length=1, max_length=200)] = Field(
+        description="批量条目（上限 200，防止一次性放权面过大）"
+    )
+
+
+class GrantBatchItemResult(BaseModel):
+    """批量单条结果。"""
+
+    user_id: int
+    domain: str | None = None
+    action: str
+    ok: bool
+    detail: str = ""
+
+
+class GrantBatchResult(BaseModel):
+    """批量操作/预览结果。"""
+
+    dry_run: bool
+    operation: str
+    affected_users: int
+    affected_metrics: int
+    succeeded: int
+    failed: int
+    items: list[GrantBatchItemResult]
+
+
+class GrantListParams(BaseModel):
+    """``GET /grants`` 查询参数。"""
+
+    user_id: int | None = Field(default=None, gt=0)
+    domain: str | None = Field(default=None, max_length=64)
+    status: str | None = Field(default=None, max_length=16)
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=200)
+
+
+class PiiReviewRequest(BaseModel):
+    """``POST /pii/review`` 请求体（COMPL-1 合规官复核，留痕）。"""
+
+    metric_code: str = Field(min_length=1, max_length=128, description="待复核指标编码")
+    decision: Literal["APPROVE", "REJECT"] = Field(description="复核结论")
+    sensitivity_level: SensitivityLevel = Field(
+        default=SensitivityLevel.PII, description="复核后敏感级别"
+    )
+    pii_columns: list[str] | None = Field(default=None, description="确认的 PII 字段")
+    masking_policy: Literal["none", "mask", "hash", "deny"] | None = Field(
+        default=None, description="脱敏策略；缺省按敏感级推导"
+    )
+    comment: str = Field(min_length=1, max_length=512, description="复核意见（必填，留痕）")
+
+
+class PiiReviewResult(BaseModel):
+    """复核结果。"""
+
+    metric_code: str
+    decision: str
+    compliance_reviewed: bool
+    sensitivity_level: str
+    masking_policy: str
+    reviewer_id: int
+    reviewed_at: datetime
+    secondary_validation: PiiSecondaryValidationResult | None = None
+
+
+class PiiSecondaryValidationResult(BaseModel):
+    """PII 字段级脱敏二次校验结果（落库外 / 查询侧补强校验，依赖 governance）。
+
+    在 DB 落库脱敏之外，再次核验：① 是否通过合规复核；② 字段级脱敏策略是否已
+    生效；③ 口径定义中是否存在 PII 字段明文暴露。任一不通过则 ``passed=False``
+    并列出 ``findings``。
+    """
+
+    metric_code: str
+    passed: bool
+    masking_policy: str
+    checked_columns: list[str] = Field(default_factory=list)
+    findings: list[str] = Field(default_factory=list)
+
+
+class ClassificationRescanRequest(BaseModel):
+    """``POST /classification/rescan`` 请求体（COMPL-2 分级重扫）。"""
+
+    source_id: str | None = Field(default=None, max_length=64, description="按数据源重扫")
+    catalog_ids: list[int] | None = Field(default=None, description="按资产 ID 重扫")
+    limit: int = Field(default=200, ge=1, le=1000, description="单次扫描上限")
+
+    @field_validator("catalog_ids")
+    @classmethod
+    def _dedup_ids(cls, v: list[int] | None) -> list[int] | None:
+        return sorted(set(v)) if v else None
+
+
+class ClassificationItem(BaseModel):
+    """单个资产的分级结果。"""
+
+    catalog_id: int
+    entity_name: str
+    sensitivity_before: str
+    sensitivity_after: str
+    pii_columns: list[dict[str, Any]]
+    degraded: bool = False
+
+
+class ClassificationRescanResult(BaseModel):
+    """重扫汇总。"""
+
+    scanned: int
+    changed: int
+    pii_found: int
+    degraded: int
+    model_version: str
+    items: list[ClassificationItem]
+
+
+class PermissionSnapshot(BaseModel):
+    """``GET /me/permissions`` 响应：当前用户权限快照。"""
+
+    user_id: int
+    role: str
+    home_domain: str | None = None
+    allowed_actions: list[str]
+    granted_domains: list[str]
+    metric_whitelist: list[str]
+    row_level_restricted: bool
+    grants: list[GrantResponse]
+    expiring_soon: list[GrantResponse]
+
+
+class PermissionCheckRequest(BaseModel):
+    """内部 PDP 校验入参（供 consume/semantic 调用）。"""
+
+    user_id: int = Field(gt=0)
+    action: Literal["read", "write", "approve", "export", "review"]
+    domain: str | None = None
+    metric_code: str | None = None
+
+
+class PermissionCheckResult(BaseModel):
+    """PDP 校验结果。"""
+
+    allow: bool
+    reason: str
+    error_code: str = ""
+    restricted: bool = False
+    masking: str = "none"
+
+
+class ErasureRequestCreate(BaseModel):
+    """``POST /erasure`` 请求体（D9 被遗忘权执行，R7-09③）。"""
+
+    subject_user_id: int = Field(gt=0, description="数据主体（被遗忘）用户 ID")
+    reason: str | None = Field(default=None, max_length=512, description="执行事由")
+
+
+class ErasureResult(BaseModel):
+    """被遗忘权执行结果。"""
+
+    subject_user_id: int
+    status: str
+    token_prefix: str = Field(description="脱敏令牌前缀（前 12 位，用于合规复核去标识化）")
+    affected_rows: int
+    requested_at: datetime

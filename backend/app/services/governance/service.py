@@ -1,0 +1,762 @@
+"""governance 服务编排（TD §12.5 / FR-11）。
+
+职责：
+
+1. 角色与授权（域 + 指标白名单 + 行级开关 + 临时授权 TTL 自动回收）
+2. PII 合规门禁（COMPL-1）：合规官复核后方可置 ``metric.compliance_reviewed=true``
+3. 分级重扫（COMPL-2）：规则引擎重算敏感级 → 落 ``classification`` + 回写 ``db_catalog``
+4. 权限快照与 PDP 决策入口（供 consume/semantic 调用）
+
+安全基线：授权范围不得为空（防越权全量放权）、复核禁止自审、批量操作有上限且失败即回滚。
+"""
+
+from __future__ import annotations
+
+import enum
+import hashlib
+import json
+import logging
+import re
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.audit import write_audit
+from app.core.exceptions import AuthError, NotFoundError, ValidationError
+from app.models.audit import AuditLog
+from app.models.erasure import ErasureRequest, ErasureStatus
+from app.models.governance import (
+    Grant,
+    GrantStatus,
+    Role,
+    RoleName,
+    SensitivityLevel,
+)
+from app.models.user import User
+from app.services.governance import policy
+from app.services.governance.events import GovernanceEventPublisher
+from app.services.governance.repository import GovernanceRepository
+from app.services.governance.schemas import (
+    ClassificationItem,
+    ClassificationRescanRequest,
+    ClassificationRescanResult,
+    GrantBatchItemResult,
+    GrantBatchRequest,
+    GrantBatchResult,
+    GrantCreate,
+    GrantListParams,
+    GrantResponse,
+    PermissionCheckRequest,
+    PermissionCheckResult,
+    PermissionSnapshot,
+    PiiReviewRequest,
+    PiiReviewResult,
+    PiiSecondaryValidationResult,
+    RoleCreate,
+)
+
+logger = logging.getLogger("unisense.governance.service")
+
+
+def _role_to_str(role: Any) -> str:
+    """将 user.role（DB 枚举成员或字符串）统一为字符串值。
+
+    说明：User.role 列是 SQLAlchemy 字符串 Enum，从真实 MySQL 加载后为普通 enum.Enum
+    成员（非 StrEnum）。若直接用于 ``RoleName(...)`` 会抛 ValueError，用
+    ``ROLE_ACTIONS.get(...)`` 会命中空集合；统一转为字符串值以保证 PDP 与角色网关
+    在真实 DB 下正确工作。StrEnum 成员也会被正确取出其 .value。
+    """
+    value = role.value if isinstance(role, enum.Enum) else role
+    return str(value)
+
+
+#: 授权到期提醒窗口（天）——快照中标记 expiring_soon，驱动「一键续期」待办（OP-02）。
+EXPIRING_WINDOW_DAYS = 7
+
+
+class GovernanceService:
+    """权限与合规治理编排。"""
+
+    def __init__(self, db: AsyncSession, events: GovernanceEventPublisher | None = None) -> None:
+        self._db = db
+        self._repo = GovernanceRepository(db)
+        self._events = events or GovernanceEventPublisher()
+
+    async def _safe_publish(self, event: dict[str, Any]) -> None:
+        """事件发布为 best-effort：通知服务不可达时静默降级，不阻断主流程。"""
+        try:
+            await self._events.publish(event)
+        except Exception as exc:  # noqa: BLE001 - 事件降级，不向上抛
+            logger.warning("governance 事件发布失败（best-effort 跳过）：%s", exc)
+
+    # ------------------------------------------------------------------ role
+
+    async def create_role(self, payload: RoleCreate) -> Role:
+        """创建角色；同名角色幂等返回既有记录。"""
+        existing = await self._repo.get_role_by_name(payload.name)
+        if existing is not None:
+            return existing
+        return await self._repo.create_role(
+            Role(name=payload.name, description=payload.description)
+        )
+
+    # ----------------------------------------------------------------- grant
+
+    async def grant(self, payload: GrantCreate, actor_id: int) -> Grant:
+        """新增/续期授权。
+
+        Raises:
+            ValidationError: 授权范围为空、TTL 已过期或被授权人不存在。
+        """
+        self._validate_grant_scope(payload)
+        await self._ensure_user_exists(payload.user_id)
+
+        existing = await self._repo.find_active_grant(
+            payload.user_id, payload.role_id, payload.domain, payload.grant_type
+        )
+        if existing is not None:
+            merged = sorted(
+                {str(x) for x in (existing.metric_whitelist or [])}
+                | set(payload.metric_whitelist or [])
+            )
+            existing.metric_whitelist = merged or None
+            existing.row_level = existing.row_level or payload.row_level
+            existing.expires_at = _later(existing.expires_at, payload.expires_at)
+            existing.granted_by = actor_id
+            if payload.reason:
+                existing.reason = payload.reason
+            await self._db.flush()
+            row = existing
+        else:
+            row = await self._repo.create_grant(
+                Grant(
+                    user_id=payload.user_id,
+                    role_id=payload.role_id,
+                    domain=payload.domain,
+                    metric_whitelist=payload.metric_whitelist,
+                    row_level=payload.row_level,
+                    grant_type=payload.grant_type,
+                    status=GrantStatus.ACTIVE,
+                    expires_at=payload.expires_at,
+                    granted_by=actor_id,
+                    reason=payload.reason,
+                )
+            )
+
+        await self._safe_publish(
+            {
+                "event_type": "grant.granted",
+                "grant_id": row.id,
+                "user_id": row.user_id,
+                "domain": row.domain,
+                "grant_type": str(row.grant_type),
+                "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+            }
+        )
+        return row
+
+    def _validate_grant_scope(self, payload: GrantCreate) -> None:
+        """授权范围必须收敛：域与白名单不可同时为空（否则等价于全量放权）。"""
+        if not payload.domain and not payload.metric_whitelist:
+            raise ValidationError(
+                "授权范围不能为空：domain 与 metric_whitelist 至少提供一项",
+                ctx={"user_id": payload.user_id},
+            )
+        if payload.expires_at is not None:
+            expires = payload.expires_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=UTC)
+            if expires <= datetime.now(UTC):
+                raise ValidationError(
+                    "expires_at 必须晚于当前时间", ctx={"expires_at": expires.isoformat()}
+                )
+
+    async def _ensure_user_exists(self, user_id: int) -> User:
+        stmt = select(User).where(User.id == user_id, User.deleted_at.is_(None))
+        user = (await self._db.execute(stmt)).scalar_one_or_none()
+        if user is None:
+            raise NotFoundError("被授权用户不存在", ctx={"user_id": user_id})
+        return user
+
+    async def batch(
+        self, payload: GrantBatchRequest, actor_id: int, dry_run: bool
+    ) -> GrantBatchResult:
+        """批量授权/回收（R3-07）。
+
+        ``dry_run=True`` 仅计算影响面不落库；``dry_run=False`` 逐条执行，
+        任一条目失败即抛出异常，由 API 层回滚整批（全成功或全不生效）。
+        """
+        items: list[GrantBatchItemResult] = []
+        affected_users: set[int] = set()
+        affected_metrics: set[str] = set()
+        succeeded = 0
+        failed = 0
+
+        for item in payload.items:
+            affected_users.add(item.user_id)
+            affected_metrics.update(item.metric_whitelist or [])
+            if dry_run:
+                ok, detail = await self._preview_item(payload.operation, item)
+                succeeded += int(ok)
+                failed += int(not ok)
+                items.append(
+                    GrantBatchItemResult(
+                        user_id=item.user_id,
+                        domain=item.domain,
+                        action=payload.operation,
+                        ok=ok,
+                        detail=detail,
+                    )
+                )
+                continue
+
+            if payload.operation == "grant":
+                row = await self.grant(item, actor_id)
+                detail = f"grant#{row.id}"
+            else:
+                revoked = await self._revoke_matching(item, actor_id)
+                detail = f"revoked={revoked}"
+            succeeded += 1
+            items.append(
+                GrantBatchItemResult(
+                    user_id=item.user_id,
+                    domain=item.domain,
+                    action=payload.operation,
+                    ok=True,
+                    detail=detail,
+                )
+            )
+
+        return GrantBatchResult(
+            dry_run=dry_run,
+            operation=payload.operation,
+            affected_users=len(affected_users),
+            affected_metrics=len(affected_metrics),
+            succeeded=succeeded,
+            failed=failed,
+            items=items,
+        )
+
+    async def _preview_item(self, operation: str, item: GrantCreate) -> tuple[bool, str]:
+        """dry-run 单条预检：不写库，返回 (是否可执行, 说明)。"""
+        try:
+            self._validate_grant_scope(item)
+            await self._ensure_user_exists(item.user_id)
+        except (ValidationError, NotFoundError) as exc:
+            return False, exc.message
+        if operation == "revoke":
+            existing = await self._repo.find_active_grant(
+                item.user_id, item.role_id, item.domain, item.grant_type
+            )
+            if existing is None:
+                return False, "无匹配的 ACTIVE 授权可回收"
+            return True, f"将回收 grant#{existing.id}"
+        existing = await self._repo.find_active_grant(
+            item.user_id, item.role_id, item.domain, item.grant_type
+        )
+        return True, ("将续期/合并既有授权" if existing else "将新建授权")
+
+    async def _revoke_matching(self, item: GrantCreate, actor_id: int) -> int:
+        existing = await self._repo.find_active_grant(
+            item.user_id, item.role_id, item.domain, item.grant_type
+        )
+        if existing is None:
+            raise NotFoundError(
+                "无匹配的 ACTIVE 授权可回收",
+                ctx={"user_id": item.user_id, "domain": item.domain},
+            )
+        actor = await self._ensure_user_exists(actor_id)
+        self._assert_revoke_scope(actor, existing)
+        await self._repo.set_grant_status(existing, GrantStatus.REVOKED, item.reason)
+        await self._safe_publish(
+            {
+                "event_type": "grant.revoked",
+                "grant_id": existing.id,
+                "user_id": existing.user_id,
+                "operator_id": actor_id,
+            }
+        )
+        return 1
+
+    def _assert_revoke_scope(self, actor: User, grant: Grant) -> None:
+        """回收授权范围校验（D10 §3.5 缺口补齐）。
+
+        回收权限须收敛到授权目标归属/域，防止越权回收：
+
+        - ``platform_admin``：全局可回收；
+        - ``domain_admin``：仅可回收 **本域** 授权（``grant.domain == actor.domain``）；
+          无域归属的授权（``domain is None``）视为跨域，须由平台管理员回收（fail-closed）；
+        - 其它角色（analyst / metric_owner / reviewer / compliance_officer / viewer）：
+          仅可回收 **本人** 授权（``grant.user_id == actor.id``）。
+
+        默认 fail-closed：任何不满足上述条件的回收一律 ``FORBIDDEN``。
+        """
+        role = _role_to_str(actor.role)
+        if role == "platform_admin":
+            return
+        if role == "domain_admin":
+            if grant.domain and grant.domain == actor.domain:
+                return
+            raise AuthError(
+                "域管理员仅可回收本域授权",
+                error_code="FORBIDDEN",
+                ctx={"grant_domain": grant.domain, "actor_domain": actor.domain},
+            )
+        # 非管理员：仅可回收本人授权
+        if grant.user_id == actor.id:
+            return
+        raise AuthError(
+            "无权回收该授权（仅平台管理员/本域管理员/授权本人可操作）",
+            error_code="FORBIDDEN",
+            ctx={"grant_user_id": grant.user_id, "actor_id": actor.id},
+        )
+
+    async def revoke(self, grant_id: int, actor_id: int, reason: str | None = None) -> Grant:
+        """按 ID 回收授权。"""
+        row = await self._repo.get_grant(grant_id)
+        if row is None:
+            raise NotFoundError("授权不存在", ctx={"grant_id": grant_id})
+        if row.status is not GrantStatus.ACTIVE:
+            raise ValidationError(
+                f"仅 ACTIVE 授权可回收，当前状态 {row.status}", ctx={"grant_id": grant_id}
+            )
+        actor = await self._ensure_user_exists(actor_id)
+        self._assert_revoke_scope(actor, row)
+        await self._repo.set_grant_status(row, GrantStatus.REVOKED, reason)
+        await self._safe_publish(
+            {
+                "event_type": "grant.revoked",
+                "grant_id": row.id,
+                "user_id": row.user_id,
+                "operator_id": actor_id,
+            }
+        )
+        return row
+
+    async def list_grants(self, params: GrantListParams) -> tuple[list[Grant], int]:
+        return await self._repo.list_grants(
+            params.user_id, params.domain, params.status, params.page, params.page_size
+        )
+
+    async def expire_due_grants(self) -> int:
+        """到期授权自动回收（TD §12.5 定时 Worker，每 5 分钟）。"""
+        rows = await self._repo.expire_due_grants()
+        for row in rows:
+            await self._safe_publish(
+                {
+                    "event_type": "grant.expired",
+                    "grant_id": row.id,
+                    "user_id": row.user_id,
+                    "domain": row.domain,
+                }
+            )
+        return len(rows)
+
+    # ----------------------------------------------------------- permissions
+
+    async def my_permissions(self, user: User) -> PermissionSnapshot:
+        """当前用户权限快照（``GET /me/permissions``）。"""
+        grants = await self._repo.active_grants_for_user(user.id)
+        effective = [g for g in grants if policy.is_grant_effective(g.expires_at)]
+        deadline = datetime.now(UTC) + timedelta(days=EXPIRING_WINDOW_DAYS)
+        expiring = [
+            g for g in effective if g.expires_at is not None and _as_utc(g.expires_at) <= deadline
+        ]
+        whitelist: set[str] = set()
+        domains: set[str] = set()
+        for g in effective:
+            whitelist.update(str(x) for x in (g.metric_whitelist or []))
+            if g.domain:
+                domains.add(g.domain)
+        role_s = _role_to_str(user.role)
+        return PermissionSnapshot(
+            user_id=user.id,
+            role=role_s,
+            home_domain=user.domain,
+            allowed_actions=sorted(policy.ROLE_ACTIONS.get(role_s, frozenset())),
+            granted_domains=sorted(domains),
+            metric_whitelist=sorted(whitelist),
+            row_level_restricted=any(g.row_level for g in effective),
+            grants=[GrantResponse.model_validate(g) for g in effective],
+            expiring_soon=[GrantResponse.model_validate(g) for g in expiring],
+        )
+
+    async def check_permission(self, req: PermissionCheckRequest) -> PermissionCheckResult:
+        """PDP 决策入口（默认拒绝）。"""
+        user = await self._ensure_user_exists(req.user_id)
+        grants = await self._repo.active_grants_for_user(user.id)
+        subject = policy.Subject(
+            user_id=user.id,
+            role=_role_to_str(user.role),
+            domain=user.domain,
+            grants=tuple(
+                {
+                    "id": g.id,
+                    "domain": g.domain,
+                    "metric_whitelist": [str(x) for x in (g.metric_whitelist or [])],
+                    "grant_type": str(g.grant_type),
+                    "status": str(g.status),
+                    "row_level": g.row_level,
+                    "expires_at": g.expires_at,
+                }
+                for g in grants
+            ),
+        )
+        resource = policy.Resource(domain=req.domain, metric_code=req.metric_code)
+        if req.metric_code:
+            metric = await self._repo.get_metric_by_code(req.metric_code)
+            if metric is None:
+                raise NotFoundError("指标不存在", ctx={"metric_code": req.metric_code})
+            resource = policy.Resource(
+                domain=req.domain or metric.domain,
+                metric_code=metric.metric_code,
+                sensitivity=(
+                    SensitivityLevel.PII.value
+                    if metric.pii_flag
+                    else SensitivityLevel.INTERNAL.value
+                ),
+                compliance_reviewed=bool(metric.compliance_reviewed),
+                owner_id=metric.owner_id,
+            )
+        decision = policy.decide(subject, req.action, resource)
+        return PermissionCheckResult(
+            allow=decision.allow,
+            reason=decision.reason,
+            error_code=decision.error_code,
+            restricted=decision.restricted,
+            masking=decision.masking,
+        )
+
+    # ------------------------------------------------------------ PII review
+
+    async def pii_review(self, payload: PiiReviewRequest, reviewer: User) -> PiiReviewResult:
+        """合规官复核（COMPL-1）。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            ValidationError: 复核人自审（职责分离）。
+        """
+        metric = await self._repo.get_metric_by_code(payload.metric_code)
+        if metric is None:
+            raise NotFoundError("指标不存在", ctx={"metric_code": payload.metric_code})
+        if metric.owner_id == reviewer.id:
+            raise ValidationError(
+                "职责分离：合规复核人不得为指标 Owner",
+                ctx={"metric_code": payload.metric_code, "reviewer_id": reviewer.id},
+            )
+
+        approved = payload.decision == "APPROVE"
+        masking = payload.masking_policy or policy.masking_for(payload.sensitivity_level)
+        metric.pii_flag = payload.sensitivity_level is SensitivityLevel.PII
+        await self._repo.set_compliance_reviewed(metric, approved)
+        reviewed_at = datetime.now(UTC)
+
+        await self._safe_publish(
+            {
+                "event_type": "pii.reviewed",
+                "metric_code": metric.metric_code,
+                "decision": payload.decision,
+                "sensitivity_level": payload.sensitivity_level.value,
+                "masking_policy": masking,
+                "reviewer_id": reviewer.id,
+                "comment": payload.comment,
+            }
+        )
+        return PiiReviewResult(
+            metric_code=metric.metric_code,
+            decision=payload.decision,
+            compliance_reviewed=approved,
+            sensitivity_level=payload.sensitivity_level.value,
+            masking_policy=masking,
+            reviewer_id=reviewer.id,
+            reviewed_at=reviewed_at,
+            secondary_validation=await self.validate_pii_masking(
+                metric.metric_code, pii_columns=payload.pii_columns
+            ),
+        )
+
+    async def validate_pii_masking(
+        self, metric_code: str, pii_columns: list[str] | None = None
+    ) -> PiiSecondaryValidationResult:
+        """PII 字段级脱敏二次校验（落库外 / 查询侧补强）。
+
+        在 DB 落库脱敏之外，再次核验：
+        1. 指标须通过合规复核（``compliance_reviewed``）；
+        2. 字段级脱敏策略须已生效（PII 对应策略非 ``none``）；
+        3. 口径定义中不得出现 PII 字段明文暴露。
+
+        非 PII 指标直接判定通过（无字段级脱敏义务）。
+
+        Raises:
+            NotFoundError: 指标不存在。
+        """
+        from app.services.governance.schemas import PiiSecondaryValidationResult
+
+        metric = await self._repo.get_metric_by_code(metric_code)
+        if metric is None:
+            raise NotFoundError("指标不存在", ctx={"metric_code": metric_code})
+
+        # 非 PII 指标：无字段级脱敏义务，二次校验直接通过
+        if not metric.pii_flag:
+            return PiiSecondaryValidationResult(
+                metric_code=metric_code,
+                passed=True,
+                masking_policy=policy.masking_for(SensitivityLevel.INTERNAL),
+                checked_columns=[],
+                findings=[],
+            )
+
+        findings: list[str] = []
+        masking = policy.masking_for(SensitivityLevel.PII)
+
+        # ① 合规复核门禁（COMPL-1）
+        if not metric.compliance_reviewed:
+            findings.append(
+                "PII 指标未通过合规复核(compliance_reviewed=False)，禁止对外服务"
+            )
+        # ② 字段级脱敏策略须生效
+        if masking in ("none", "NONE"):
+            findings.append("PII 指标未配置字段级脱敏策略(mask_policy=none)")
+
+        # ③ 口径定义明文暴露校验：先剔除脱敏函数调用（hash/mask/...）内的引用，
+        # 剩余文本若仍含 PII 字段名，视为明文暴露。
+        columns = list(pii_columns or (metric.definition_json or {}).get("pii_fields") or [])
+        definition_text = json.dumps(metric.definition_json or {}, ensure_ascii=False)
+        exposed_text = _strip_masking_calls(definition_text)
+        for col in columns:
+            if col and re.search(rf"\b{re.escape(col)}\b", exposed_text):
+                findings.append(
+                    f"PII 字段 {col} 在口径定义中明文暴露，字段级脱敏二次校验未通过"
+                )
+
+        return PiiSecondaryValidationResult(
+            metric_code=metric_code,
+            passed=len(findings) == 0,
+            masking_policy=masking,
+            checked_columns=columns,
+            findings=findings,
+        )
+
+    # -------------------------------------------------------- classification
+
+    async def classification_rescan(
+        self, payload: ClassificationRescanRequest
+    ) -> ClassificationRescanResult:
+        """分级重扫（COMPL-2）。
+
+        规则引擎对单个资产失败时按 TD §5.5 降级：标记 ``UNKNOWN`` 并继续，不阻断整批。
+        """
+        catalogs = await self._repo.list_catalog(
+            payload.source_id, payload.catalog_ids, payload.limit
+        )
+        items: list[ClassificationItem] = []
+        changed = 0
+        pii_found = 0
+        degraded_cnt = 0
+
+        for cat in catalogs:
+            before = str(cat.sensitivity_level)
+            try:
+                hits = policy.detect_pii_columns(cat.schema_json or {})
+                after = policy.infer_sensitivity(hits, current=before)
+                degraded = False
+            except Exception as exc:  # noqa: BLE001 - 单资产失败降级，不阻断整批
+                logger.warning("分级引擎失败，资产 %s 标记 UNKNOWN：%s", cat.id, exc)
+                hits = []
+                after = SensitivityLevel.UNKNOWN
+                degraded = True
+                degraded_cnt += 1
+
+            pii_cols = [
+                {
+                    "column": h.column,
+                    "rule": h.rule,
+                    "confidence": h.confidence,
+                    "matched_by": h.matched_by,
+                }
+                for h in hits
+            ]
+            await self._repo.upsert_classification(
+                catalog_id=cat.id,
+                level=after,
+                pii_columns=pii_cols,
+                classified_by="rule_engine",
+                model_version=policy.RULES_VERSION,
+            )
+            if after is SensitivityLevel.PII:
+                pii_found += 1
+            if after is not SensitivityLevel.UNKNOWN and after.value != before:
+                await self._repo.update_catalog_sensitivity(cat.id, after)
+                changed += 1
+                await self._safe_publish(
+                    {
+                        "event_type": "classification.changed",
+                        "catalog_id": cat.id,
+                        "entity_name": cat.entity_name,
+                        "before": before,
+                        "after": after.value,
+                    }
+                )
+            items.append(
+                ClassificationItem(
+                    catalog_id=cat.id,
+                    entity_name=cat.entity_name,
+                    sensitivity_before=before,
+                    sensitivity_after=after.value,
+                    pii_columns=pii_cols,
+                    degraded=degraded,
+                )
+            )
+
+        await self._safe_publish(
+            {
+                "event_type": "classification.done",
+                "scanned": len(catalogs),
+                "changed": changed,
+                "pii_found": pii_found,
+                "degraded": degraded_cnt,
+                "model_version": policy.RULES_VERSION,
+            }
+        )
+        return ClassificationRescanResult(
+            scanned=len(catalogs),
+            changed=changed,
+            pii_found=pii_found,
+            degraded=degraded_cnt,
+            model_version=policy.RULES_VERSION,
+            items=items,
+        )
+
+
+    # ---------------------------------------------------------- right to erasure
+
+    async def execute_erasure(
+        self, subject_user_id: int, operator_id: int, reason: str | None = None
+    ) -> ErasureRequest:
+        """执行被遗忘权（R7-09③）：覆写脱敏命中主体的审计行 PII。
+
+        WORM 约束下审计行**物理删除被禁止**，本方法以覆写实现去标识化：
+
+        - 将 ``actor_id == subject_user_id`` 的审计行 ``ip`` 置为脱敏令牌；
+        - 将 ``detail_json`` 中出现的主体标识（user id / 邮箱 / IPv4）替换为令牌；
+        - 写入一条 ``action=PII_ANONYMIZED`` 审计留存（操作本身可追溯）；
+        - 落一条 ``erasure_request`` 台账。
+
+        事务由调用方（API）在方法返回后 ``commit``；审计与台账同会话、同事务。
+        """
+        token = "ANONYMIZED_" + hashlib.sha256(str(subject_user_id).encode()).hexdigest()[:16]
+
+        rows = (
+            await self._db.execute(select(AuditLog).where(AuditLog.actor_id == subject_user_id))
+        ).scalars().all()
+
+        affected = 0
+        for row in rows:
+            row.ip = token
+            if row.detail_json:
+                row.detail_json = _scrub_pii(row.detail_json, subject_user_id, token)
+            affected += 1
+
+        erasure = ErasureRequest(
+            subject_user_id=subject_user_id,
+            requested_by=operator_id,
+            status=ErasureStatus.COMPLETED,
+            token=token,
+            affected_rows=affected,
+            reason=reason,
+        )
+        self._db.add(erasure)
+        await write_audit(
+            self._db,
+            actor_id=operator_id,
+            action="PII_ANONYMIZED",
+            entity_type="audit_log",
+            entity_id=str(subject_user_id),
+            detail={"token_prefix": token[:12], "affected_rows": affected},
+            trace_id="",
+        )
+        return erasure
+
+
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _scrub_text(value: str, subject_user_id: int, token: str) -> str:
+    """对单个字符串值做标识替换（主体 id / 邮箱 / IPv4）。"""
+    text = value.replace(str(subject_user_id), token)
+    text = _EMAIL_RE.sub(token, text)
+    text = _IPV4_RE.sub(token, text)
+    return text
+
+
+def _scrub_pii(detail: Any, subject_user_id: int, token: str) -> Any:
+    """递归抹除 detail_json 中的个人标识（主体 user id / 邮箱 / IPv4）。
+
+    在已解析的 JSON 结构上遍历替换，**避免对数值型 user id 做裸字符串替换**
+    破坏 JSON 结构（如 ``{"uid": 42}`` → ``{"uid": "<token>"}``）。
+
+    返回去标识化后的对象；结构保持 JSON 合法（token 仅含字母数字与下划线）。
+    """
+    if detail is None:
+        return None
+    if isinstance(detail, dict):
+        return {k: _scrub_pii(v, subject_user_id, token) for k, v in detail.items()}
+    if isinstance(detail, list):
+        return [_scrub_pii(v, subject_user_id, token) for v in detail]
+    if isinstance(detail, bool):
+        return detail
+    if isinstance(detail, int):
+        # 数值型主体 id 直接命中 → 以 token 字符串替换（保持 JSON 合法）
+        return token if detail == subject_user_id else detail
+    if isinstance(detail, float):
+        return detail
+    if isinstance(detail, str):
+        return _scrub_text(detail, subject_user_id, token)
+    # 其它类型（datetime 等）原样保留
+    return detail
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+# 字段级脱敏函数名（用于 PII 二次校验时剔除已脱敏引用）
+_MASKING_FNS = (
+    "hash",
+    "sha256",
+    "sha1",
+    "md5",
+    "mask",
+    "substr",
+    "substring",
+    "regexp_replace",
+    "left",
+    "right",
+    "encrypt",
+    "desensitize",
+    "aes_encrypt",
+)
+
+
+def _strip_masking_calls(text: str) -> str:
+    """剔除脱敏函数调用 ``fn(...)``，返回剩余文本用于明文暴露判定。
+
+    仅处理非嵌套的简单调用；嵌套脱敏场景由治理复核人工兜底。
+    """
+    cleaned = text
+    for fn in _MASKING_FNS:
+        cleaned = re.sub(rf"\b{fn}\s*\([^()]*\)", " ", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def _later(a: datetime | None, b: datetime | None) -> datetime | None:
+    """取更晚的到期时间；任一为 ``None``（永久）则结果为 ``None``。"""
+    if a is None or b is None:
+        return None
+    return max(_as_utc(a), _as_utc(b))
+
+
+__all__ = ["EXPIRING_WINDOW_DAYS", "GovernanceService", "RoleName"]

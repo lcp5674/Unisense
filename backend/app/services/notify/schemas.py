@@ -1,0 +1,109 @@
+"""通知服务 Schemas（TD §12.9 / FR-16 / FR-17）。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, field_validator
+
+# PLAT-5: 限制 source/level 取值，防止 client 伪造异常来源或告警级别
+_ALLOWED_SOURCES = {"metric", "lineage", "quality", "governance", "semantic", "system", "scheduler"}
+_ALLOWED_LEVELS = {"INFO", "WARN", "ERROR", "CRITICAL"}
+
+
+class EventPublish(BaseModel):
+    event_type: str
+    source: str | None = None
+    payload: dict[str, Any] | None = None
+    level: str = "INFO"
+
+    @field_validator("source")
+    @classmethod
+    def _validate_source(cls, v: str | None) -> str | None:
+        if v is not None and v not in _ALLOWED_SOURCES:
+            raise ValueError(f"非法的事件来源: {v}")
+        return v
+
+    @field_validator("level")
+    @classmethod
+    def _validate_level(cls, v: str) -> str:
+        if v not in _ALLOWED_LEVELS:
+            raise ValueError(f"非法的事件级别: {v}")
+        return v
+
+
+class NotificationResponse(BaseModel):
+    id: int
+    subscriber_id: int
+    channel: str
+    template_code: str | None = None
+    title: str
+    body: str | None = None
+    status: str
+    ref_type: str | None = None
+    ref_id: int | None = None
+
+    @classmethod
+    def from_model(cls, m: Any) -> NotificationResponse:
+        return cls(
+            id=m.id,
+            subscriber_id=m.subscriber_id,
+            channel=m.channel,
+            template_code=getattr(m, "template_code", None),
+            title=m.title,
+            body=getattr(m, "body", None),
+            status=m.status,
+            ref_type=getattr(m, "ref_type", None),
+            ref_id=getattr(m, "ref_id", None),
+        )
+
+
+class EventLogResponse(BaseModel):
+    id: int
+    event_type: str
+    source: str | None = None
+    payload: dict[str, Any] | None = None
+    level: str
+    notified: bool
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_model(cls, m: Any) -> EventLogResponse:
+        return cls(
+            id=m.id,
+            event_type=m.event_type,
+            source=getattr(m, "source", None),
+            payload=getattr(m, "payload", None),
+            level=m.level,
+            notified=getattr(m, "notified", False),
+            created_at=getattr(m, "created_at", None),
+        )
+
+
+class SubscriptionUpsert(BaseModel):
+    user_id: int
+    channel: str
+    event_type: str
+    enabled: bool = True
+    threshold: int | None = None
+
+
+class SubscriptionResponse(BaseModel):
+    id: int
+    user_id: int
+    channel: str
+    event_type: str
+    enabled: bool
+    threshold: int | None = None
+
+    @classmethod
+    def from_model(cls, m: Any) -> SubscriptionResponse:
+        return cls(
+            id=m.id,
+            user_id=m.user_id,
+            channel=m.channel,
+            event_type=m.event_type,
+            enabled=getattr(m, "enabled", True),
+            threshold=getattr(m, "threshold", None),
+        )

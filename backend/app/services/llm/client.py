@@ -146,7 +146,12 @@ class DeterministicFallbackLlmClient:
         response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """降级：返回弃权信号。"""
-        return {"content": "", "model": "deterministic-fallback", "finish_reason": "length", "usage": {}}
+        return {
+            "content": "",
+            "model": "deterministic-fallback",
+            "finish_reason": "length",
+            "usage": {},
+        }
 
     @property
     def enabled(self) -> bool:

@@ -1,0 +1,259 @@
+"""指标模型（语义层核心，状态机）。
+
+对齐 TD §4.1 metric / metric_version 表。
+这是整个系统的核心数据模型。
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Any
+
+from sqlalchemy import (
+    Boolean,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.mysql import JSON
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.mysql import Base
+from app.models.base import BaseModel
+
+
+class Metric(Base, BaseModel):
+    """指标实体（语义层核心，状态机）。
+
+    对齐 TD §4.1 metric 表，包含完整的治理一等字段结构化字段。
+
+    Attributes:
+        metric_code: 指标编码（唯一），格式: 域_业务对象_度量_统计周期。
+        name: 指标名称。
+        domain: 所属域。
+        type: 指标类型（atomic/derived/composite）。
+        granularity: 粒度（一行代表什么）。
+        unit: 单位。
+        currency: 币种（可空）。
+        aggregation: 聚合方式。
+        time_semantics: 时间语义。
+        freshness: 数据新鲜度。
+        sla: 产出 SLA 契约。
+        dw_layer: 数仓分层。
+        metric_tier: 指标分级（T1/T2/T3）。
+        serving_mode: 服务模式（批/流/双路）。
+        additivity: 可加性。
+        non_additive_dimensions: 不可加维度列表（JSON）。
+        definition_json: 口径定义（表达式/依赖/来源字段/分区键）。
+        version: 当前版本号。
+        row_version: 乐观锁行版本。
+        term_id: 关联术语 ID（可空）。
+        status: 指标状态机。
+        owner_id: 主 Owner ID。
+        backup_owner_id: 副 Owner ID（可空）。
+        approver_id: 审批人 ID（可空）。
+        pii_flag: 是否含 PII。
+        compliance_reviewed: 是否已合规审核。
+        effective_version: 当前生效版本（可空）。
+        consumption_guide: 消费指南（JSON，可空）。
+        batch_id: 批量注册批次 ID（可空）。
+        successor_code: 替代指标码（DEPRECATED 时必填，可空）。
+        deprecated_at: 废弃时间（可空）。
+        sunset_until: Sunset 截止日期（可空）。
+    """
+
+    __tablename__ = "metric"
+
+    # ---- 基本信息字段 ----
+    metric_code: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, comment="指标编码（唯一）"
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False, comment="指标名称")
+    domain: Mapped[str] = mapped_column(String(64), nullable=False, comment="所属域")
+    type: Mapped[str] = mapped_column(
+        Enum("atomic", "derived", "composite", name="metric_type"),
+        nullable=False,
+        comment="指标类型",
+    )
+
+    # ---- 治理一等字段 ----
+    granularity: Mapped[str] = mapped_column(String(64), nullable=False, comment="粒度")
+    unit: Mapped[str] = mapped_column(String(32), nullable=False, comment="单位")
+    currency: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="币种")
+    aggregation: Mapped[str] = mapped_column(
+        Enum("SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", name="agg_type"),
+        nullable=False,
+        comment="聚合方式",
+    )
+    time_semantics: Mapped[str] = mapped_column(
+        Enum("PERIOD", "YTD", "TTM", "AVG", name="time_sem"),
+        nullable=False,
+        comment="时间语义",
+    )
+    freshness: Mapped[str] = mapped_column(
+        Enum("REALTIME", "T1", "HOURLY", name="freshness_type"),
+        nullable=False,
+        comment="数据新鲜度",
+    )
+    sla: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="SLA 契约")
+    dw_layer: Mapped[str] = mapped_column(
+        Enum("ODS", "DWD", "DWS", "ADS", "DM", name="dw_layer_type"),
+        nullable=False,
+        comment="数仓分层",
+    )
+    metric_tier: Mapped[str] = mapped_column(
+        Enum("T1", "T2", "T3", name="metric_tier_type"),
+        nullable=False,
+        default="T3",
+        comment="指标分级",
+    )
+    serving_mode: Mapped[str] = mapped_column(
+        Enum("BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL", name="serving_mode_type"),
+        nullable=False,
+        comment="服务模式",
+    )
+    additivity: Mapped[str] = mapped_column(
+        Enum("ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE", name="additivity_type"),
+        nullable=False,
+        comment="可加性",
+    )
+    non_additive_dimensions: Mapped[list[Any] | None] = mapped_column(
+        JSON, nullable=True, comment="不可加维度列表"
+    )
+
+    # ---- 口径与版本 ----
+    definition_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="口径定义（表达式/依赖/来源字段/分区键）"
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, comment="当前版本号")
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, comment="乐观锁行版本"
+    )
+    term_id: Mapped[int | None] = mapped_column(
+        ForeignKey("term.id", name="fk_metric_term"),
+        nullable=True,
+        comment="关联术语 ID",
+    )
+
+    # ---- 状态机 ----
+    status: Mapped[str] = mapped_column(
+        Enum(
+            "DRAFT",
+            "REVIEW",
+            "PUBLISHED",
+            "EXPERIMENTAL",
+            "DEPRECATED",
+            "DATA_SOURCE_DROPPED",
+            name="metric_status",
+        ),
+        nullable=False,
+        default="DRAFT",
+        comment="指标状态",
+    )
+
+    # ---- 治理字段 ----
+    owner_id: Mapped[int] = mapped_column(
+        ForeignKey("user.id", name="fk_metric_owner"), nullable=False, comment="主 Owner ID"
+    )
+    backup_owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", name="fk_metric_backup_owner"),
+        nullable=True,
+        comment="副 Owner ID",
+    )
+    approver_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", name="fk_metric_approver"),
+        nullable=True,
+        comment="审批人 ID",
+    )
+    pii_flag: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="是否含 PII"
+    )
+    compliance_reviewed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="是否已合规审核"
+    )
+    effective_version: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="当前生效版本"
+    )
+    consumption_guide: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="消费指南"
+    )
+    batch_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="批量注册批次 ID"
+    )
+
+    # ---- 废弃与替代 ----
+    successor_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="替代指标码（DEPRECATED 时必填）"
+    )
+    deprecated_at: Mapped[datetime | None] = mapped_column(nullable=True, comment="废弃时间")
+    sunset_until: Mapped[date | None] = mapped_column(nullable=True, comment="Sunset 截止日期")
+
+    # ---- 关系 ----
+    versions: Mapped[list[MetricVersion]] = relationship(
+        "MetricVersion", back_populates="metric", lazy="selectin"
+    )
+
+    __table_args__ = (
+        Index("idx_metric_status", "status"),
+        Index("idx_metric_domain", "domain"),
+        Index("idx_metric_tier", "metric_tier"),
+        Index("idx_metric_batch", "batch_id"),
+    )
+
+
+class MetricVersion(Base, BaseModel):
+    """指标版本（溯源）。
+
+    对齐 TD §4.1 metric_version 表。
+    含破坏性判定与结构化 diff。
+
+    Attributes:
+        metric_id: 指标 ID。
+        version: 版本号。
+        change_type: 变更类型。
+        definition_json: 口径快照。
+        diff_json: 结构化 diff（可空）。
+        status: 版本状态。
+        change_reason: 变更原因。
+        created_by: 创建人 ID。
+        published_at: 发布时间（可空）。
+    """
+
+    __tablename__ = "metric_version"
+
+    metric_id: Mapped[int] = mapped_column(
+        ForeignKey("metric.id", name="fk_metric_version_metric"),
+        nullable=False,
+        comment="指标 ID",
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, comment="版本号")
+    change_type: Mapped[str] = mapped_column(
+        Enum("CREATE", "UPDATE", "BREAKING", "DEPRECATE", "RESTORE", name="change_type_enum"),
+        nullable=False,
+        comment="变更类型",
+    )
+    definition_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, comment="口径快照"
+    )
+    diff_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="结构化 diff"
+    )
+    status: Mapped[str] = mapped_column(
+        Enum("DRAFT", "PENDING_REVIEW", "PUBLISHED", "ARCHIVED", name="version_status"),
+        nullable=False,
+        default="DRAFT",
+        comment="版本状态",
+    )
+    change_reason: Mapped[str] = mapped_column(Text, nullable=False, comment="变更原因")
+    created_by: Mapped[int] = mapped_column(
+        ForeignKey("user.id", name="fk_metric_version_user"), nullable=False
+    )
+    published_at: Mapped[datetime | None] = mapped_column(nullable=True, comment="发布时间")
+
+    metric: Mapped[Metric] = relationship("Metric", back_populates="versions")
+
+    __table_args__ = (UniqueConstraint("metric_id", "version", name="uk_metric_version"),)

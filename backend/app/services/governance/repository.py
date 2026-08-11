@@ -1,0 +1,213 @@
+"""governance 仓储（TD §12.5 / FR-11）。
+
+仅负责数据存取，不含业务判定；事务提交由 API 层负责（与 conflict 模块一致）。
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.data_source import DBCatalog
+from app.models.governance import (
+    Classification,
+    Grant,
+    GrantStatus,
+    GrantType,
+    Role,
+    RoleName,
+    SensitivityLevel,
+)
+from app.models.metric import Metric
+
+
+class GovernanceRepository:
+    """权限与合规数据访问层。"""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self._db = db
+
+    # ------------------------------------------------------------------ role
+
+    async def get_role_by_name(self, name: RoleName) -> Role | None:
+        stmt = select(Role).where(Role.name == name, Role.deleted_at.is_(None))
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
+    async def create_role(self, role: Role) -> Role:
+        self._db.add(role)
+        await self._db.flush()
+        await self._db.refresh(role)
+        return role
+
+    # ----------------------------------------------------------------- grant
+
+    async def create_grant(self, grant: Grant) -> Grant:
+        self._db.add(grant)
+        await self._db.flush()
+        await self._db.refresh(grant)
+        return grant
+
+    async def get_grant(self, grant_id: int) -> Grant | None:
+        stmt = select(Grant).where(Grant.id == grant_id, Grant.deleted_at.is_(None))
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
+    async def find_active_grant(
+        self,
+        user_id: int,
+        role_id: int | None,
+        domain: str | None,
+        grant_type: GrantType,
+    ) -> Grant | None:
+        """查找同一 (user, role, domain, grant_type) 的 ACTIVE 授权（服务层幂等依据）。"""
+        conditions: list[Any] = [
+            Grant.user_id == user_id,
+            Grant.grant_type == grant_type,
+            Grant.status == GrantStatus.ACTIVE,
+            Grant.deleted_at.is_(None),
+        ]
+        conditions.append(Grant.role_id.is_(None) if role_id is None else Grant.role_id == role_id)
+        conditions.append(Grant.domain.is_(None) if domain is None else Grant.domain == domain)
+        stmt = select(Grant).where(*conditions).limit(1)
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
+    async def list_grants(
+        self,
+        user_id: int | None,
+        domain: str | None,
+        status: str | None,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[Grant], int]:
+        conditions: list[Any] = [Grant.deleted_at.is_(None)]
+        if user_id is not None:
+            conditions.append(Grant.user_id == user_id)
+        if domain is not None:
+            conditions.append(Grant.domain == domain)
+        if status is not None:
+            conditions.append(Grant.status == GrantStatus(status))
+        count_stmt = select(func.count()).select_from(Grant).where(*conditions)
+        total = int((await self._db.execute(count_stmt)).scalar() or 0)
+        stmt = (
+            select(Grant)
+            .where(*conditions)
+            .order_by(Grant.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        rows = (await self._db.execute(stmt)).scalars().all()
+        return list(rows), total
+
+    async def active_grants_for_user(self, user_id: int) -> list[Grant]:
+        stmt = (
+            select(Grant)
+            .where(
+                Grant.user_id == user_id,
+                Grant.status == GrantStatus.ACTIVE,
+                Grant.deleted_at.is_(None),
+            )
+            .order_by(Grant.created_at.desc())
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def set_grant_status(
+        self, grant: Grant, status: GrantStatus, reason: str | None = None
+    ) -> Grant:
+        grant.status = status
+        if reason:
+            grant.reason = reason
+        await self._db.flush()
+        return grant
+
+    async def expire_due_grants(self, now: datetime | None = None) -> list[Grant]:
+        """扫描到期授权并置为 EXPIRED（TD §12.5 自动回收 Worker）。"""
+        ref = now or datetime.now(UTC)
+        stmt = select(Grant).where(
+            Grant.status == GrantStatus.ACTIVE,
+            Grant.expires_at.is_not(None),
+            Grant.expires_at < ref,
+            Grant.deleted_at.is_(None),
+        )
+        rows = list((await self._db.execute(stmt)).scalars().all())
+        for row in rows:
+            row.status = GrantStatus.EXPIRED
+        if rows:
+            await self._db.flush()
+        return rows
+
+    # ---------------------------------------------------------------- metric
+
+    async def get_metric_by_code(self, metric_code: str) -> Metric | None:
+        stmt = select(Metric).where(Metric.metric_code == metric_code, Metric.deleted_at.is_(None))
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
+    async def set_compliance_reviewed(self, metric: Metric, reviewed: bool) -> Metric:
+        metric.compliance_reviewed = reviewed
+        await self._db.flush()
+        return metric
+
+    # --------------------------------------------------------------- catalog
+
+    async def list_catalog(
+        self,
+        source_id: str | None,
+        catalog_ids: list[int] | None,
+        limit: int,
+    ) -> list[DBCatalog]:
+        conditions: list[Any] = [DBCatalog.deleted_at.is_(None)]
+        if source_id is not None:
+            conditions.append(DBCatalog.source_id == source_id)
+        if catalog_ids:
+            conditions.append(DBCatalog.id.in_(catalog_ids))
+        stmt = select(DBCatalog).where(*conditions).order_by(DBCatalog.id).limit(limit)
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def update_catalog_sensitivity(self, catalog_id: int, level: SensitivityLevel) -> None:
+        # db_catalog.sensitivity_level 枚举不含 UNKNOWN（降级标记仅落 classification 表）
+        stmt = (
+            update(DBCatalog)
+            .where(DBCatalog.id == catalog_id)
+            .values(sensitivity_level=level.value)
+        )
+        await self._db.execute(stmt)
+
+    # -------------------------------------------------------- classification
+
+    async def get_classification(self, catalog_id: int) -> Classification | None:
+        stmt = (
+            select(Classification)
+            .where(Classification.catalog_id == catalog_id, Classification.deleted_at.is_(None))
+            .order_by(Classification.created_at.desc())
+            .limit(1)
+        )
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
+    async def upsert_classification(
+        self,
+        catalog_id: int,
+        level: SensitivityLevel,
+        pii_columns: list[dict[str, Any]],
+        classified_by: str,
+        model_version: str,
+    ) -> Classification:
+        existing = await self.get_classification(catalog_id)
+        if existing is not None:
+            existing.sensitivity_level = level
+            existing.pii_columns = pii_columns
+            existing.classified_by = classified_by
+            existing.model_version = model_version
+            await self._db.flush()
+            return existing
+        row = Classification(
+            catalog_id=catalog_id,
+            sensitivity_level=level,
+            pii_columns=pii_columns,
+            classified_by=classified_by,
+            model_version=model_version,
+        )
+        self._db.add(row)
+        await self._db.flush()
+        await self._db.refresh(row)
+        return row

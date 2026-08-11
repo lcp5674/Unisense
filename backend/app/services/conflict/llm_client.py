@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Protocol, runtime_checkable
 
-from app.services.llm.client import LlmClient, LlmError, build_llm_client
+from app.services.llm.client import LlmClient, LlmError
 
 logger = logging.getLogger("unisense.conflict.llm")
 
@@ -77,6 +77,6 @@ DeterministicFallbackLlmClient = UnifiedConflictLlmClient
 HttpLlmClient = UnifiedConflictLlmClient
 
 
-def build_llm_client() -> ConflictLlmClient:
+def build_conflict_llm_client() -> ConflictLlmClient:
     """构建冲突检测 LLM 客户端。"""
     return UnifiedConflictLlmClient()

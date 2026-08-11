@@ -1,0 +1,385 @@
+"""权限与合规 API（TD §3.5 / §12.5，FR-11）。
+
+端点：
+
+- POST   /roles                    角色登记（六角色，PRD 4.9.2）
+- POST   /grants                   域授权 + 指标白名单
+- GET    /grants                   授权列表（过滤 + 分页）
+- POST   /grants/batch             批量授权/回收（R3-07：逐条审计 + 失败回滚）
+- POST   /grants/batch/dry-run     批量影响预览（不落库）
+- DELETE /grants/{grant_id}        单条回收
+- POST   /pii/review               合规官复核（COMPL-1，留痕）
+- POST   /classification/rescan    分级重扫（COMPL-2）
+- GET    /me/permissions           当前用户权限快照
+- POST   /permissions/check        PDP 决策（内部：consume/semantic 鉴权）
+
+审计：所有写操作落 ``audit_log``；PII 复核额外置 ``pii_access=True``。
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import ALL_ROLES, CurrentUser, require_roles
+from app.api.responses import ApiResponse, get_trace_id, ok
+from app.core.audit import client_ip, write_audit
+from app.core.guard import guard_against_injection
+from app.db.mysql import get_db_session
+from app.services.governance.events import GovernanceEventPublisher
+from app.services.governance.schemas import (
+    ClassificationRescanRequest,
+    ErasureRequestCreate,
+    ErasureResult,
+    GrantBatchRequest,
+    GrantCreate,
+    GrantListParams,
+    GrantResponse,
+    PermissionCheckRequest,
+    PiiReviewRequest,
+    RoleCreate,
+    RoleResponse,
+)
+from app.services.governance.service import GovernanceService
+
+router = APIRouter(tags=["governance"])
+
+#: 授权管理角色（跨域运维 / 本域管理）。
+_GRANT_ADMIN_ROLES = ("platform_admin", "domain_admin")
+#: 合规复核角色（PII 门禁必须由合规官执行）。
+_COMPLIANCE_ROLES = ("compliance_officer", "platform_admin")
+_READ_ROLES = ALL_ROLES
+_READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+
+
+def _svc(db: AsyncSession, request: Request) -> GovernanceService:
+    notify_url = getattr(request.app.state, "notify_url", None)
+    return GovernanceService(db, events=GovernanceEventPublisher(notify_url))
+
+
+@router.post("/roles", dependencies=[Depends(require_roles("platform_admin"))])
+async def create_role(
+    payload: RoleCreate,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """登记角色（幂等：同名角色返回既有记录）。"""
+    svc = _svc(db, request)
+    role = await svc.create_role(payload)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ROLE_CREATE",
+        entity_type="role",
+        entity_id=str(role.id),
+        detail={"name": str(role.name)},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=RoleResponse.model_validate(role).model_dump(), trace_id=trace_id)
+
+
+@router.post("/grants", dependencies=[Depends(require_roles(*_GRANT_ADMIN_ROLES))])
+async def create_grant(
+    payload: GrantCreate,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """域授权 + 指标白名单（支持临时授权 TTL）。"""
+    svc = _svc(db, request)
+    row = await svc.grant(payload, actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="GRANT_CREATE",
+        entity_type="grants",
+        entity_id=str(row.id),
+        detail={
+            "user_id": row.user_id,
+            "domain": row.domain,
+            "grant_type": str(row.grant_type),
+            "metric_whitelist": row.metric_whitelist,
+            "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=GrantResponse.model_validate(row).model_dump(), trace_id=trace_id)
+
+
+@router.get("/grants", dependencies=_READ_DEPS)
+async def list_grants(
+    params: Annotated[GrantListParams, Depends()],
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """授权列表；非管理员仅可查看自己的授权。"""
+    svc = _svc(db, request)
+    if user.role not in _GRANT_ADMIN_ROLES:
+        params = params.model_copy(update={"user_id": user.id})
+    rows, total = await svc.list_grants(params)
+    return ok(
+        data={
+            "items": [GrantResponse.model_validate(r).model_dump() for r in rows],
+            "total": total,
+            "page": params.page,
+            "page_size": params.page_size,
+        },
+        trace_id=trace_id,
+    )
+
+
+@router.post("/grants/batch", dependencies=[Depends(require_roles(*_GRANT_ADMIN_ROLES))])
+async def batch_grants(
+    payload: GrantBatchRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """批量授权/回收：逐条审计，任一失败整批回滚（R3-07）。"""
+    svc = _svc(db, request)
+    try:
+        result = await svc.batch(payload, actor_id=user.id, dry_run=False)
+    except Exception:
+        await db.rollback()
+        raise
+    for item in result.items:
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action=f"GRANT_BATCH_{payload.operation.upper()}",
+            entity_type="grants",
+            entity_id=str(item.user_id),
+            detail={"domain": item.domain, "detail": item.detail},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
+    await db.commit()
+    return ok(data=result.model_dump(), trace_id=trace_id)
+
+
+@router.post("/grants/batch/dry-run", dependencies=[Depends(require_roles(*_GRANT_ADMIN_ROLES))])
+async def dry_run_batch_grants(
+    payload: GrantBatchRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """批量操作影响预览：只读，不产生任何写入。"""
+    svc = _svc(db, request)
+    result = await svc.batch(payload, actor_id=user.id, dry_run=True)
+    await db.rollback()
+    return ok(data=result.model_dump(), trace_id=trace_id)
+
+
+@router.delete("/grants/{grant_id}", dependencies=[Depends(require_roles(*_READ_ROLES))])
+async def revoke_grant(
+    grant_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    reason: str | None = None,
+) -> ApiResponse[Any]:
+    """回收单条授权。
+
+    范围由服务层 ``_assert_revoke_scope`` 收敛：平台管理员全局可回收；域管理员仅本域；
+    其它角色仅可回收本人授权（owner 自管）。越权一律 403。
+    """
+    svc = _svc(db, request)
+    row = await svc.revoke(grant_id, actor_id=user.id, reason=reason)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="GRANT_REVOKE",
+        entity_type="grants",
+        entity_id=str(grant_id),
+        detail={"user_id": row.user_id, "reason": reason},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=GrantResponse.model_validate(row).model_dump(), trace_id=trace_id)
+
+
+@router.post("/pii/review", dependencies=[Depends(require_roles(*_COMPLIANCE_ROLES))])
+async def pii_review(
+    payload: PiiReviewRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """合规官 PII 复核（COMPL-1）；通过后 semantic 方可发布。"""
+    svc = _svc(db, request)
+    result = await svc.pii_review(payload, reviewer=user)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="PII_REVIEW",
+        entity_type="metric",
+        entity_id=payload.metric_code,
+        detail={
+            "decision": payload.decision,
+            "sensitivity_level": payload.sensitivity_level.value,
+            "masking_policy": result.masking_policy,
+            "comment": payload.comment,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+        pii_access=True,
+    )
+    await db.commit()
+    return ok(data=result.model_dump(), trace_id=trace_id)
+
+
+class PiiValidationRequest(BaseModel):
+    """PII 字段级脱敏二次校验请求体。"""
+
+    metric_code: str = Field(min_length=1, max_length=128, description="待校验指标编码")
+    pii_columns: list[str] | None = Field(default=None, description="待校验 PII 字段（可选）")
+
+
+@router.post(
+    "/pii/validate",
+    dependencies=[Depends(require_roles(*_COMPLIANCE_ROLES))],
+)
+async def pii_validate(
+    payload: PiiValidationRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """PII 字段级脱敏二次校验（落库外 / 查询侧补强，依赖 governance）。"""
+
+    svc = _svc(db, request)
+    result = await svc.validate_pii_masking(payload.metric_code, pii_columns=payload.pii_columns)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="PII_SECONDARY_VALIDATION",
+        entity_type="metric",
+        entity_id=payload.metric_code,
+        detail={"passed": result.passed, "findings": result.findings},
+        ip=client_ip(request),
+        trace_id=trace_id,
+        pii_access=True,
+    )
+    await db.commit()
+    return ok(data=result.model_dump(), trace_id=trace_id)
+
+
+@router.post("/classification/rescan", dependencies=[Depends(require_roles(*_COMPLIANCE_ROLES))])
+async def classification_rescan(
+    payload: ClassificationRescanRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """分级重扫（COMPL-2）；引擎异常时标 UNKNOWN 降级，不阻断整批。"""
+    svc = _svc(db, request)
+    result = await svc.classification_rescan(payload)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="CLASSIFICATION_RESCAN",
+        entity_type="db_catalog",
+        entity_id=payload.source_id or "batch",
+        detail={
+            "scanned": result.scanned,
+            "changed": result.changed,
+            "pii_found": result.pii_found,
+            "degraded": result.degraded,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result.model_dump(), trace_id=trace_id)
+
+
+@router.get("/me/permissions")
+async def my_permissions(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """当前用户权限快照（域授权 / 指标白名单 / 临期提醒）。"""
+    svc = _svc(db, request)
+    snapshot = await svc.my_permissions(user)
+    return ok(data=snapshot.model_dump(), trace_id=trace_id)
+
+
+@router.post("/permissions/check")
+async def check_permission(
+    payload: PermissionCheckRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """PDP 决策（默认拒绝）；非管理员只能查询自己的权限。"""
+    svc = _svc(db, request)
+    if user.role not in _GRANT_ADMIN_ROLES:
+        payload = payload.model_copy(update={"user_id": user.id})
+    result = await svc.check_permission(payload)
+    return ok(data=result.model_dump(), trace_id=trace_id)
+
+
+@router.post(
+    "/erasure",
+    dependencies=[Depends(require_roles(*_COMPLIANCE_ROLES)), Depends(guard_against_injection)],
+    summary="执行被遗忘权（D9 / R7-09③）",
+)
+async def erasure_execute(
+    payload: ErasureRequestCreate,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[ErasureResult]:
+    """执行被遗忘权（数据主体删除请求）。
+
+    仅合规官或平台管理员可对被指定数据主体执行审计去标识化。
+    WORM 约束下审计行**物理删除被禁止**，本接口以覆写脱敏实现——
+    命中主体的审计行 ``ip`` / ``detail_json`` 个人标识覆写为 ``ANONYMIZED_<hash>``，
+    并写入 ``PII_ANONYMIZED`` 审计留存与 ``erasure_request`` 台账。
+    """
+    svc = _svc(db, request)
+    erasure = await svc.execute_erasure(payload.subject_user_id, user.id, payload.reason)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="erasure.execute",
+        entity_type="erasure_request",
+        entity_id=str(erasure.id),
+        detail={"subject_user_id": payload.subject_user_id, "affected_rows": erasure.affected_rows},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=ErasureResult(
+            subject_user_id=erasure.subject_user_id,
+            status=erasure.status.value,
+            token_prefix=erasure.token[:12],
+            affected_rows=erasure.affected_rows,
+            requested_at=erasure.created_at,
+        ),
+        trace_id=trace_id,
+    )
