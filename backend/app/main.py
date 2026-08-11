@@ -44,10 +44,12 @@ logger = structlog.get_logger("unisense.main")
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期管理。
 
-    Args:
-        app: FastAPI 应用实例。
+    初始化全局状态（如通知服务 URL）。
     """
     configure_logging()
+    # 配置通知服务 URL（供 conflict/governance 事件发布使用）
+    if settings.notify_webhook_url:
+        app.state.notify_url = settings.notify_webhook_url
     logger.info("app_starting", env=settings.env, version="0.1.0")
     yield
     logger.info("app_shutting_down")
