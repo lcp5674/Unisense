@@ -1,0 +1,88 @@
+"""公共依赖（deps.py）单测。
+
+覆盖 get_current_user 的各类分支与 require_roles 角色校验。
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
+
+import jwt
+import pytest
+
+from app.api import deps
+from app.core.config import settings
+from app.core.exceptions import AuthError
+from app.models.user import User
+
+
+def _make_user(uid: int = 1, role: str = "metric_owner") -> User:
+    u = User(id=uid, username="u1", role=role, status="active", org_id=1)
+    return u
+
+
+def _valid_token(uid: int = 1, role: str = "metric_owner", expired: bool = False) -> str:
+    now = datetime.now(UTC)
+    exp = now - timedelta(minutes=5) if expired else now + timedelta(minutes=30)
+    payload = {
+        "sub": str(uid),
+        "role": role,
+        "org_id": 1,
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+class TestGetCurrentUser:
+    async def test_missing_credentials_raises(self) -> None:
+        db = MagicMock()
+        with pytest.raises(AuthError):
+            await deps.get_current_user(db, None)
+
+    async def test_expired_token_raises(self) -> None:
+        db = MagicMock()
+        creds = MagicMock(credentials=_valid_token(expired=True))
+        with pytest.raises(AuthError):
+            await deps.get_current_user(db, creds)
+
+    async def test_invalid_token_raises(self) -> None:
+        db = MagicMock()
+        creds = MagicMock(credentials="not-a-jwt")
+        with pytest.raises(AuthError):
+            await deps.get_current_user(db, creds)
+
+    async def test_user_not_found_raises(self) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=mock_result)
+        creds = MagicMock(credentials=_valid_token(uid=999))
+        with pytest.raises(AuthError):
+            await deps.get_current_user(db, creds)
+
+    async def test_valid_user_returns(self) -> None:
+        user = _make_user()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = user
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=mock_result)
+        creds = MagicMock(credentials=_valid_token())
+        result = await deps.get_current_user(db, creds)
+        assert result.id == 1
+        assert result.role == "metric_owner"
+
+
+class TestRequireRoles:
+    async def test_allowed_role_passes(self) -> None:
+        user = _make_user(role="platform_admin")
+        check = deps.require_roles("platform_admin", "domain_admin")
+        result = await check(user)
+        assert result is user
+
+    async def test_denied_role_raises(self) -> None:
+        user = _make_user(role="viewer")
+        check = deps.require_roles("platform_admin", "domain_admin")
+        with pytest.raises(AuthError):
+            await check(user)
