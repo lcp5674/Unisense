@@ -1,13 +1,13 @@
 import { useState } from "react";
-import { Button, Card, Input, Select, Space, Table, Tag, message } from "antd";
-import { SearchOutlined } from "@ant-design/icons";
-import { lineageImpact, lineageEdges, lineageImpactPreview, UnisenseApiError } from "../api";
+import { Button, Card, Input, Select, Space, Table, Tag, message, Tabs, Alert } from "antd";
+import { SearchOutlined, CodeOutlined, ApartmentOutlined } from "@ant-design/icons";
+import { lineageImpact, lineageEdges, lineageImpactPreview, parseLineage, UnisenseApiError } from "../api";
 import type { LineageEdge } from "../types";
 import { useTracking } from "../hooks/useTracking";
 
 type Direction = "upstream" | "downstream" | "both";
 
-export function LineageView() {
+function ImpactTab() {
   const [node, setNode] = useState("");
   const [direction, setDirection] = useState<Direction>("downstream");
   const [edges, setEdges] = useState<LineageEdge[]>([]);
@@ -31,9 +31,7 @@ export function LineageView() {
       setTotal(data.total ?? (Array.isArray(data) ? data.length : 0));
       track("lineage_query", node.trim(), "node");
     } catch (err) {
-      message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "查询失败",
-      );
+      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "查询失败");
       setEdges([]);
       setTotal(0);
     } finally {
@@ -50,40 +48,27 @@ export function LineageView() {
     try {
       const p = await lineageImpactPreview(node.trim(), "schema_drift");
       setRisk(
-        `受影响指标 ${p.affected_metrics.length} · 表 ${p.affected_reports.length} · 消费方 ${p.affected_consumers.length} · 风险 ${p.risk_level}`,
+        `受影响指标 ${p.affected_metrics.length} · 报表 ${p.affected_reports.length} · 消费方 ${p.affected_consumers.length} · 风险等级 ${p.risk_level}`,
       );
       track("lineage_preview", node.trim(), "node");
     } catch (err) {
-      message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "预览失败",
-      );
+      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "预览失败");
     } finally {
       setLoading(false);
     }
   }
 
   const columns = [
-    { title: "源", dataIndex: "source_node", key: "source" },
-    { title: "目标", dataIndex: "target_node", key: "target" },
-    { title: "类型", dataIndex: "edge_type", key: "type" },
-    { title: "粒度", dataIndex: "granularity", key: "granularity" },
-    {
-      title: "置信度",
-      dataIndex: "confidence",
-      key: "confidence",
-      render: (v: number) => `${(v * 100).toFixed(0)}%`,
-    },
-    {
-      title: "PII",
-      dataIndex: "pii_inherited",
-      key: "pii",
-      render: (v?: boolean) =>
-        v ? <Tag color="red">PII</Tag> : null,
-    },
+    { title: "源", dataIndex: "source_node", key: "source", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "目标", dataIndex: "target_node", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "类型", dataIndex: "edge_type", key: "type", render: (v: string) => <Tag>{v}</Tag> },
+    { title: "粒度", dataIndex: "granularity", key: "granularity", width: 100 },
+    { title: "置信度", dataIndex: "confidence", key: "confidence", width: 90, render: (v: number) => `${(v * 100).toFixed(0)}%` },
+    { title: "PII", dataIndex: "pii_inherited", key: "pii", width: 70, render: (v?: boolean) => (v ? <Tag color="red">PII</Tag> : null) },
   ];
 
   return (
-    <Card title="血缘视图">
+    <div>
       <Space style={{ marginBottom: 16 }} wrap>
         <Input
           placeholder="节点（指标编码 / 表名）"
@@ -91,6 +76,7 @@ export function LineageView() {
           onChange={(e) => setNode(e.target.value)}
           onPressEnter={loadImpact}
           prefix={<SearchOutlined />}
+          className="mono"
           style={{ width: 300 }}
         />
         <Select
@@ -112,12 +98,13 @@ export function LineageView() {
       </Space>
 
       {risk && (
-        <p style={{ marginBottom: 12 }}>
-          <Tag color={risk.includes("high") ? "red" : risk.includes("medium") ? "orange" : "green"}>
-            影响预览
-          </Tag>{" "}
-          {risk}
-        </p>
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="变更影响预览（what-if）"
+          description={risk}
+        />
       )}
 
       {edges.length > 0 ? (
@@ -131,9 +118,92 @@ export function LineageView() {
         />
       ) : (
         !loading && (
-          <p style={{ color: "#999", textAlign: "center" }}>输入节点后查询血缘关系</p>
+          <p className="muted" style={{ textAlign: "center", padding: 24 }}>
+            输入节点后查询血缘关系
+          </p>
         )
       )}
-    </Card>
+    </div>
+  );
+}
+
+function ParseTab() {
+  const [sql, setSql] = useState("");
+  const [dialect, setDialect] = useState("mysql");
+  const [result, setResult] = useState<{ table_edges: number; field_edges: number; graph_written: boolean } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const { track } = useTracking();
+
+  async function handleParse() {
+    if (!sql.trim()) {
+      message.warning("请输入 SQL");
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await parseLineage(sql, dialect);
+      setResult(res);
+      message.success("血缘解析完成");
+      track("lineage_parse", undefined, "sql", { dialect });
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "解析失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Select
+          value={dialect}
+          onChange={setDialect}
+          style={{ width: 160 }}
+          options={["mysql", "postgres", "hive", "spark", "clickhouse", "duckdb"].map((v) => ({ value: v, label: v }))}
+        />
+        <Button type="primary" icon={<CodeOutlined />} onClick={handleParse} loading={loading}>
+          解析血缘
+        </Button>
+      </Space>
+      <Input.TextArea
+        rows={10}
+        className="mono"
+        value={sql}
+        onChange={(e) => setSql(e.target.value)}
+        placeholder="-- 粘贴 SQL，解析表级/字段级血缘并写入图谱&#10;SELECT order_id, user_id, amount FROM dwd_finance_order WHERE dt = '2026-08-01'"
+        style={{ fontSize: 13 }}
+      />
+      {result && (
+        <Alert
+          type="success"
+          showIcon
+          style={{ marginTop: 12 }}
+          message="解析结果"
+          description={`表级边 ${result.table_edges} · 字段级边 ${result.field_edges} · 图谱写入 ${result.graph_written ? "成功" : "未写入"}`}
+        />
+      )}
+    </div>
+  );
+}
+
+export function LineageView() {
+  const tabItems = [
+    { key: "impact", label: <span><ApartmentOutlined /> 血缘查询 / 影响分析</span>, children: <ImpactTab /> },
+    { key: "parse", label: <span><CodeOutlined /> SQL 血缘解析</span>, children: <ParseTab /> },
+  ];
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <div className="page-kicker">Lineage / Impact</div>
+          <h2>血缘视图</h2>
+          <p>上下游血缘查询、what-if 变更影响预览、SQL 血缘解析入库。</p>
+        </div>
+      </div>
+      <Card styles={{ body: { paddingTop: 16 } }}>
+        <Tabs items={tabItems} />
+      </Card>
+    </div>
   );
 }

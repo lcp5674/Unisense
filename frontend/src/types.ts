@@ -9,7 +9,7 @@ export interface ApiError {
 }
 
 export type MetricType = "atomic" | "derived" | "composite";
-export type MetricStatus = "DRAFT" | "EXPERIMENTAL" | "PUBLISHED" | "DEPRECATED";
+export type MetricStatus = "DRAFT" | "EXPERIMENTAL" | "REVIEW" | "PUBLISHED" | "DEPRECATED";
 export type MetricTier = "T1" | "T2" | "T3";
 
 export interface MetricResponse {
@@ -174,6 +174,660 @@ export interface CurrentUser {
   role: string;
   domain: string | null;
   org_id: number;
+}
+
+// ============================================================================
+// 语义服务（backend /api/v1/semantics/*）
+// ============================================================================
+
+export interface DashboardData {
+  total: number;
+  by_status: Record<string, number>;
+  by_tier: Record<string, number>;
+  by_domain: Record<string, number>;
+  pii_count: number;
+  pii_ratio: number;
+}
+
+export interface MetricTemplate {
+  id: number;
+  code: string;
+  name: string;
+  domain: string;
+  description: string | null;
+  defaults_json: Record<string, unknown>;
+  required_fields: string[] | null;
+  type: string;
+  granularity: string;
+  unit: string;
+  aggregation: string;
+  time_semantics: string;
+  freshness: string;
+  dw_layer: string;
+  serving_mode: string;
+  additivity: string;
+  metric_tier: string;
+  is_active: boolean;
+  created_by: number;
+}
+
+export interface ConsumptionGuideResponse {
+  metric_code: string;
+  name: string;
+  domain: string;
+  type: string;
+  granularity: string;
+  unit: string;
+  aggregation: string;
+  time_semantics: string;
+  serving_mode: string;
+  recommended_usage: string[];
+  cautions: string[];
+  related_metrics: string[];
+}
+
+// ============================================================================
+// 消费服务（backend /api/v1/consume/*）
+// ============================================================================
+
+export interface DimensionExpr {
+  name: string;
+  value: string | number;
+}
+
+export interface QueryRequest {
+  metric_code: string;
+  dimensions?: DimensionExpr[];
+  date_range: string;
+  granularity?: string | null;
+  comparison?: string | null;
+  accept_stale?: boolean;
+  params?: Record<string, unknown>;
+}
+
+export interface DryRunResponse {
+  metric_code: string;
+  status: string;
+  checks: Array<Record<string, unknown>>;
+  execution_plan: Record<string, unknown>;
+  meta: Record<string, unknown>;
+}
+
+export interface QueryResponse {
+  metric_code: string;
+  degraded: boolean;
+  data: Record<string, unknown> | null;
+  execution_plan: Record<string, unknown>;
+  meta: Record<string, unknown>;
+}
+
+export interface ClientCreateRequest {
+  client_id: string;
+  secret: string;
+  scope_domain?: string | null;
+  metric_whitelist?: string[] | null;
+  qps?: number;
+  daily_quota?: number;
+}
+
+export interface ClientCreatedResponse {
+  client_id: string;
+  scope_domain: string | null;
+  metric_whitelist: string[] | null;
+  qps: number;
+  daily_quota: number;
+  status: string;
+  secret: string;
+}
+
+export interface ClientResponse {
+  client_id: string;
+  scope_domain: string | null;
+  metric_whitelist: string[] | null;
+  qps: number;
+  daily_quota: number;
+  status: string;
+}
+
+export interface SnapshotResponse {
+  id: number;
+  metric_code: string;
+  version: number;
+  dims: Record<string, unknown>;
+  date_range: string;
+  value_json: Record<string, unknown>;
+  quality_flag: string | null;
+  generated_at: string;
+  generated_by: string;
+}
+
+// ============================================================================
+// 维度服务（backend /api/v1/dimensions/*）
+// ============================================================================
+
+export interface Dimension {
+  id: number;
+  dim_code: string;
+  name: string;
+  domain: string;
+  type: string;
+  description: string | null;
+  owner_id: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DimensionMapping {
+  id: number;
+  source_dim_code: string;
+  target_dim_code: string;
+  mapping_type: string;
+  expression: string | null;
+  created_by: number;
+  created_at: string;
+}
+
+export interface Reconciliation {
+  id: number;
+  metric_id: number;
+  dim_code: string | null;
+  expected_expr: string;
+  actual_expr: string;
+  status: string;
+  diff_summary: string | null;
+  reviewed_by: number | null;
+  created_at: string;
+  reviewed_at: string | null;
+}
+
+export interface DimensionMember {
+  id: number;
+  dim_code: string;
+  member_code: string;
+  member_name: string;
+  parent_code: string | null;
+  path: string | null;
+  attributes: Record<string, unknown> | null;
+  status: string;
+  created_at: string;
+}
+
+// ============================================================================
+// 术语表（backend /api/v1/terms/*）
+// ============================================================================
+
+export interface GlossaryTerm {
+  id: number;
+  term_code: string;
+  name: string;
+  definition: string;
+  domain: string;
+  synonyms: unknown[];
+  boundary: string | null;
+  status: string;
+  owner_id: number;
+  version: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface GlossaryConflict {
+  id: number;
+  term_id: number;
+  conflict_type: string;
+  ref_term_id: number | null;
+  ref_metric_id: number | null;
+  status: string;
+  resolver: number | null;
+  created_at: string | null;
+}
+
+// ============================================================================
+// 治理（backend /api/v1/governance + grants + roles + pii + erasure）
+// ============================================================================
+
+export interface RoleResponse {
+  id: number;
+  name: string;
+  description: string | null;
+}
+
+export interface GrantResponse {
+  id: number;
+  user_id: number;
+  role_id: number | null;
+  domain: string | null;
+  metric_whitelist: string[] | null;
+  grant_type: string;
+  status: string;
+  row_level: boolean;
+  expires_at: string | null;
+  granted_by: number | null;
+  reason: string | null;
+}
+
+export interface GrantCreate {
+  user_id: number;
+  role_id?: number | null;
+  domain?: string | null;
+  metric_whitelist?: string[] | null;
+  grant_type?: string;
+  row_level?: boolean;
+  expires_at?: string | null;
+  reason?: string | null;
+}
+
+export interface GrantBatchItem {
+  user_id: number;
+  domain: string | null;
+  action: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface GrantBatchResult {
+  dry_run: boolean;
+  operation: string;
+  affected_users: number;
+  affected_metrics: number;
+  succeeded: number;
+  failed: number;
+  items: GrantBatchItem[];
+}
+
+export interface PiiReviewResult {
+  metric_code: string;
+  decision: string;
+  compliance_reviewed: boolean;
+  sensitivity_level: string;
+  masking_policy: string;
+  reviewer_id: number;
+  reviewed_at: string;
+  secondary_validation: Record<string, unknown> | null;
+}
+
+export interface PermissionSnapshot {
+  user_id: number;
+  role: string;
+  home_domain: string | null;
+  allowed_actions: string[];
+  granted_domains: string[];
+  metric_whitelist: string[];
+  row_level_restricted: boolean;
+  grants: GrantResponse[];
+  expiring_soon: GrantResponse[];
+}
+
+export interface PermissionCheckResult {
+  allow: boolean;
+  reason: string;
+  error_code: string;
+  restricted: boolean;
+  masking: string;
+}
+
+export interface ClassificationRescanResult {
+  scanned: number;
+  changed: number;
+  pii_found: number;
+  degraded: number;
+  model_version: string;
+  items: Array<{
+    catalog_id: number;
+    entity_name: string;
+    sensitivity_before: string;
+    sensitivity_after: string;
+    pii_columns: unknown[];
+    degraded: boolean;
+  }>;
+}
+
+export interface ErasureResult {
+  subject_user_id: number;
+  status: string;
+  token_prefix: string;
+  affected_rows: number;
+  requested_at: string;
+}
+
+// ============================================================================
+// 质量（backend /api/v1/quality/*）
+// ============================================================================
+
+export interface QualityRule {
+  id: number;
+  metric_id: number;
+  rule_type: string;
+  threshold: Record<string, unknown>;
+  rule_mode: string;
+  severity: string;
+  enabled: boolean;
+  notify_targets: Record<string, unknown> | null;
+  created_by: number;
+  created_at: string | null;
+}
+
+export interface QualityRuleCreate {
+  metric_id: number;
+  rule_type: string;
+  threshold: Record<string, unknown>;
+  rule_mode?: string;
+  severity?: string;
+  enabled?: boolean;
+  notify_targets?: Record<string, unknown> | null;
+}
+
+export interface QualityEvent {
+  id: number;
+  metric_id: number;
+  level: string;
+  rule_type: string;
+  obs_value: number | null;
+  threshold: number | null;
+  status: string;
+  created_at: string | null;
+  ack_note: string | null;
+  ack_by: number | null;
+  ack_at: string | null;
+  resolved_by: number | null;
+  resolved_at: string | null;
+  closed_by: number | null;
+  closed_at: string | null;
+  repair_suggestion: Record<string, unknown> | null;
+}
+
+export interface QualityObservation {
+  id: number;
+  metric_id: number;
+  metric_code: string;
+  source_id: string | null;
+  obs_time: string;
+  value: number;
+  dims: Record<string, unknown> | null;
+}
+
+export interface QualityBenchmark {
+  id: number;
+  source_id: string;
+  metric_code: string;
+  bench_date: string;
+  dims: Record<string, unknown> | null;
+  bench_value: number;
+  provider: string;
+  tolerance_pct: number | null;
+  imported_by: number;
+  created_at: string | null;
+}
+
+export interface ReconciliationRecord {
+  id: number;
+  benchmark_id: number;
+  metric_code: string;
+  metric_value: number;
+  bench_value: number;
+  diff_pct: number;
+  window: string | null;
+  status: string;
+  owner_note: string | null;
+  decision: string | null;
+  confirmed_by: number | null;
+  checked_at: string | null;
+  created_at: string | null;
+}
+
+// ============================================================================
+// 通知（backend /api/v1/notify/*）
+// ============================================================================
+
+export interface Notification {
+  id: number;
+  subscriber_id: number;
+  channel: string;
+  template_code: string | null;
+  title: string;
+  body: string | null;
+  payload: Record<string, unknown> | null;
+  status: string;
+  send_at: string | null;
+  sent_at: string | null;
+  ref_type: string | null;
+  ref_id: number | null;
+  created_at: string;
+}
+
+export interface NotifyEventLog {
+  id: number;
+  event_type: string;
+  source: string | null;
+  payload: Record<string, unknown> | null;
+  level: string;
+  notified: boolean;
+  created_at: string;
+}
+
+export interface SubscriptionPref {
+  id: number;
+  user_id: number;
+  channel: string;
+  event_type: string;
+  enabled: boolean;
+  threshold: number | null;
+  created_at: string;
+}
+
+// ============================================================================
+// 可观测（backend /api/v1/observability/*）
+// ============================================================================
+
+export interface Feedback {
+  id: number;
+  user_id: number;
+  target_type: string;
+  target_id: string | null;
+  rating: number | null;
+  comment: string | null;
+  created_at: string;
+}
+
+export interface ObsMetricsQuality {
+  by_level: Record<string, number>;
+  by_status: Record<string, number>;
+  total: number;
+}
+
+export interface ObsMetricsNotifications {
+  by_status: Record<string, number>;
+  event_total: number;
+  event_notified: number;
+}
+
+// ============================================================================
+// 推荐（backend /api/v1/recommend/*）
+// ============================================================================
+
+export interface RecommendItem {
+  metric_id: string;
+  via?: string;
+  score?: number;
+  edge_type: string;
+  from?: string;
+}
+
+export interface RecommendTermsResponse {
+  items: GlossaryTerm[];
+  total: number;
+}
+
+// ============================================================================
+// AI 助手（backend /api/v1/ai/*）
+// ============================================================================
+
+export interface NL2SQLResult {
+  anchored: string[];
+  sql: string;
+  params: Record<string, unknown>;
+  safe: boolean;
+  notes: string[];
+  method: string;
+  execute: boolean;
+  execute_result?: { rows: unknown[]; total: number; elapsed_ms: number };
+  execute_error?: string;
+}
+
+// ============================================================================
+// 审计日志（backend /api/v1/audit）
+// ============================================================================
+
+export interface AuditEntry {
+  id: number;
+  actor_id: number;
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  detail_json: Record<string, unknown> | null;
+  ip: string;
+  trace_id: string;
+  pii_access: boolean;
+  archived: boolean;
+  created_at: string;
+}
+
+// ============================================================================
+// 采集器（backend /api/v1/data-sources + /api/v1/catalogs）
+// ============================================================================
+
+export type SourceType =
+  | "mysql"
+  | "postgres"
+  | "hive"
+  | "doris"
+  | "clickhouse"
+  | "kafka"
+  | "starrocks";
+
+export interface DataSource {
+  source_id: string;
+  name: string;
+  source_type: SourceType;
+  domain: string;
+  cluster_id: string | null;
+  coverage: number;
+  health_status: string;
+  connection_config_present: boolean;
+  schedule_cron: string | null;
+  collection_mode: string;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DataSourceCreateRequest {
+  source_id: string;
+  name: string;
+  source_type: SourceType;
+  connection_config: Record<string, unknown>;
+  domain: string;
+  cluster_id?: string | null;
+}
+
+export interface DBCatalog {
+  source_id: string;
+  entity_name: string;
+  entity_type: string;
+  schema_def: Record<string, unknown>;
+  etl_sql: string | null;
+  sensitivity_level: string;
+  owner_id: number | null;
+  upstream_signature: string;
+  content_signature: string | null;
+  schema_incomplete: boolean;
+}
+
+export interface CollectResult {
+  source_id: string;
+  scanned: number;
+  registered: number;
+  pii_registered: number;
+  failed_count: number;
+  failed_specs: Array<{ entity_name: string; error: string }>;
+  coverage: number;
+  mode: string;
+  drift_count: number;
+  drift_events: Array<{ entity_name: string; change_type: string }>;
+}
+
+export interface ScheduleResult {
+  job_id: string;
+  status: string;
+  cron: string;
+  mode: string;
+}
+
+export interface JobStatus {
+  job_id: string;
+  source_id?: string;
+  actor_id?: number;
+  status: string;
+  detail: Record<string, unknown>;
+}
+
+export interface Watermark {
+  source_id: string;
+  last_collected_at: string | null;
+  mode: string;
+  scanned_count: number;
+  failed_count: number;
+}
+
+export interface SourceHealth {
+  source_id: string;
+  health_status: string;
+  last_collected_at: string | null;
+  last_error: string | null;
+  uptime_check: boolean;
+}
+
+// ============================================================================
+// 资产地图（backend /api/v1/assetmap/*）
+// ============================================================================
+
+export interface AssetCatalogSummary {
+  total: number;
+  by_entity_type: Record<string, number>;
+  by_sensitivity: Record<string, number>;
+  orphan_assets: number;
+}
+
+export interface AssetClassificationSummary {
+  by_sensitivity: Record<string, number>;
+}
+
+export interface AssetMetricSummary {
+  by_domain: Record<string, number>;
+  by_status: Record<string, number>;
+}
+
+export interface AssetTableItem {
+  source_id: string;
+  entity_name: string;
+  entity_type: string;
+  sensitivity_level: string;
+  owner_id: number | null;
+  schema_incomplete: boolean;
+  etl_sql?: string | null;
+}
+
+export interface AssetOwnerView {
+  owner_id: number;
+  metrics: {
+    total: number;
+    published: number;
+    draft: number;
+    pii_count: number;
+    by_domain: Record<string, number>;
+  };
+  catalogs: { total: number };
 }
 
 export const API_BASE = "/api/v1";

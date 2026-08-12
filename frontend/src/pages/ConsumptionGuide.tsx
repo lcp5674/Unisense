@@ -1,24 +1,18 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
-import { Tabs, Card, Spin, Alert, Descriptions, Typography, Tag } from "antd";
-import { fetchConsumptionGuide } from "../api";
+import { useParams, useNavigate } from "react-router-dom";
+import { Card, Spin, Alert, Descriptions, Typography, Tag, Empty, Space } from "antd";
+import { InfoCircleOutlined, WarningOutlined, LinkOutlined } from "@ant-design/icons";
+import { fetchConsumptionGuide, getMetric } from "../api";
+import type { ConsumptionGuideResponse, MetricResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
 
-const { Paragraph, Title } = Typography;
-
-interface ConsumptionGuideData {
-  metric_code: string;
-  definition: string;
-  calculation_logic: string;
-  dimensions: Array<{ name: string; description: string; type: string }>;
-  usage_examples: Array<{ title: string; sql: string; description: string }>;
-  related_metrics: string[];
-  faq: Array<{ question: string; answer: string }>;
-}
+const { Paragraph } = Typography;
 
 export function ConsumptionGuide() {
   const { metricCode } = useParams<{ metricCode: string }>();
-  const [guide, setGuide] = useState<ConsumptionGuideData | null>(null);
+  const navigate = useNavigate();
+  const [guide, setGuide] = useState<ConsumptionGuideResponse | null>(null);
+  const [metric, setMetric] = useState<MetricResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { track } = useTracking();
@@ -30,8 +24,12 @@ export function ConsumptionGuide() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetchConsumptionGuide(metricCode!);
-        setGuide(res);
+        const [g, m] = await Promise.all([
+          fetchConsumptionGuide(metricCode!),
+          getMetric(metricCode!).catch(() => null),
+        ]);
+        setGuide(g);
+        setMetric(m);
         track("consumption_guide_view", metricCode, "metric");
       } catch (err) {
         setError(err instanceof Error ? err.message : "加载消费指南失败");
@@ -45,120 +43,106 @@ export function ConsumptionGuide() {
   if (loading) {
     return (
       <div style={{ textAlign: "center", padding: 48 }}>
-        <Spin size="large" tip="加载消费指南..." />
+        <Spin size="large" tip="加载消费指南…" />
       </div>
     );
   }
 
-  if (error) {
-    return <Alert type="error" message="加载失败" description={error} showIcon />;
-  }
-
+  if (error) return <Alert type="error" message="加载失败" description={error} showIcon />;
   if (!guide || !metricCode) return null;
 
-  const tabItems = [
-    {
-      key: "definition",
-      label: "口径定义",
-      children: (
-        <Card>
-          <Descriptions column={1} bordered>
-            <Descriptions.Item label="指标编码">{guide.metric_code}</Descriptions.Item>
-            <Descriptions.Item label="口径定义">
-              <Paragraph>{guide.definition}</Paragraph>
-            </Descriptions.Item>
-          </Descriptions>
-        </Card>
-      ),
-    },
-    {
-      key: "calculation",
-      label: "计算逻辑",
-      children: (
-        <Card>
-          <Paragraph>{guide.calculation_logic}</Paragraph>
-        </Card>
-      ),
-    },
-    {
-      key: "dimensions",
-      label: "维度说明",
-      children: (
-        <Card>
-          {guide.dimensions && guide.dimensions.length > 0 ? (
-            <Descriptions column={1} bordered>
-              {guide.dimensions.map((d) => (
-                <Descriptions.Item key={d.name} label={d.name}>
-                  <Tag>{d.type}</Tag> {d.description}
-                </Descriptions.Item>
-              ))}
-            </Descriptions>
-          ) : (
-            <Paragraph type="secondary">暂无维度信息</Paragraph>
-          )}
-        </Card>
-      ),
-    },
-    {
-      key: "examples",
-      label: "使用示例",
-      children: (
-        <Card>
-          {guide.usage_examples && guide.usage_examples.length > 0 ? (
-            guide.usage_examples.map((ex, i) => (
-              <Card.Grid key={i} style={{ width: "100%", padding: 16 }}>
-                <Title level={5}>{ex.title}</Title>
-                <Paragraph>{ex.description}</Paragraph>
-                <pre style={{ background: "#f5f5f5", padding: 12, borderRadius: 4, overflow: "auto" }}>
-                  {ex.sql}
-                </pre>
-              </Card.Grid>
-            ))
-          ) : (
-            <Paragraph type="secondary">暂无使用示例</Paragraph>
-          )}
-        </Card>
-      ),
-    },
-    {
-      key: "related",
-      label: "关联指标",
-      children: (
-        <Card>
-          {guide.related_metrics && guide.related_metrics.length > 0 ? (
-            guide.related_metrics.map((code) => (
-              <Tag key={code} style={{ marginBottom: 8 }}>{code}</Tag>
-            ))
-          ) : (
-            <Paragraph type="secondary">暂无关联指标</Paragraph>
-          )}
-        </Card>
-      ),
-    },
-    {
-      key: "faq",
-      label: "FAQ",
-      children: (
-        <Card>
-          {guide.faq && guide.faq.length > 0 ? (
-            guide.faq.map((item, i) => (
-              <div key={i} style={{ marginBottom: 16 }}>
-                <Title level={5}>Q: {item.question}</Title>
-                <Paragraph>A: {item.answer}</Paragraph>
-              </div>
-            ))
-          ) : (
-            <Paragraph type="secondary">暂无常见问题</Paragraph>
-          )}
-        </Card>
-      ),
-    },
-  ];
+  const metricFields = metric ?? {
+    metric_code: guide.metric_code,
+    name: guide.name,
+    domain: guide.domain,
+    type: guide.type,
+    granularity: guide.granularity,
+    unit: guide.unit,
+    aggregation: guide.aggregation,
+    time_semantics: guide.time_semantics,
+    serving_mode: guide.serving_mode,
+  };
 
   return (
     <div>
-      <Title level={3}>消费指南 — {metricCode}</Title>
-      <Tabs items={tabItems} />
+      <div className="page-head">
+        <div>
+          <div className="page-kicker">Consumption / Guide</div>
+          <h2>消费指南 — <span className="mono">{metricCode}</span></h2>
+          <p>推荐的查询方式、注意事项与关联指标——基于指标语义自动生成。</p>
+        </div>
+        <Space>
+          <Tag color="orange">{guide.domain}</Tag>
+          <Tag>{guide.type}</Tag>
+          <Tag>{guide.serving_mode}</Tag>
+        </Space>
+      </div>
+
+      <Card title="指标基本信息" style={{ marginBottom: 20 }}>
+        <Descriptions column={3} bordered size="small">
+          <Descriptions.Item label="编码">{metricFields.metric_code}</Descriptions.Item>
+          <Descriptions.Item label="名称">{metricFields.name}</Descriptions.Item>
+          <Descriptions.Item label="域">{metricFields.domain}</Descriptions.Item>
+          <Descriptions.Item label="类型">{metricFields.type}</Descriptions.Item>
+          <Descriptions.Item label="粒度">{metricFields.granularity}</Descriptions.Item>
+          <Descriptions.Item label="单位">{metricFields.unit}</Descriptions.Item>
+          <Descriptions.Item label="聚合">{metricFields.aggregation}</Descriptions.Item>
+          <Descriptions.Item label="时间语义">{metricFields.time_semantics}</Descriptions.Item>
+          <Descriptions.Item label="服务模式">{metricFields.serving_mode}</Descriptions.Item>
+        </Descriptions>
+      </Card>
+
+      <div className="grid-2" style={{ marginBottom: 20 }}>
+        <Card title={<span><InfoCircleOutlined /> 推荐使用方式</span>}>
+          {guide.recommended_usage && guide.recommended_usage.length > 0 ? (
+            <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 2 }}>
+              {guide.recommended_usage.map((u, i) => (
+                <li key={i}>{u}</li>
+              ))}
+            </ul>
+          ) : (
+            <Empty description="暂无推荐用法" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          )}
+        </Card>
+        <Card title={<span><WarningOutlined /> 注意事项</span>}>
+          {guide.cautions && guide.cautions.length > 0 ? (
+            <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 2 }}>
+              {guide.cautions.map((c, i) => (
+                <li key={i}>{c}</li>
+              ))}
+            </ul>
+          ) : (
+            <Empty description="无特殊注意事项" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          )}
+        </Card>
+      </div>
+
+      <Card
+        title={<span><LinkOutlined /> 关联指标</span>}
+        extra={<a onClick={() => navigate(`/detail/${metricCode}`)}>查看完整定义</a>}
+      >
+        {guide.related_metrics && guide.related_metrics.length > 0 ? (
+          <Space wrap>
+            {guide.related_metrics.map((code) => (
+              <Tag key={code} style={{ cursor: "pointer", padding: "4px 12px" }} onClick={() => navigate(`/detail/${code}`)}>
+                {code}
+              </Tag>
+            ))}
+          </Space>
+        ) : (
+          <Empty description="暂无关联指标" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        )}
+      </Card>
+
+      {metric && metric.definition_json && Object.keys(metric.definition_json).length > 0 && (
+        <Card title="口径定义（JSON）" style={{ marginTop: 20 }}>
+          <pre className="code-block">{JSON.stringify(metric.definition_json, null, 2)}</pre>
+        </Card>
+      )}
+      <div style={{ height: 8 }} />
+      <Paragraph type="secondary" style={{ fontSize: 12 }}>
+        数据源：/semantics/consumption-guide/{metric?.id ?? "?"}（按指标 ID）+ /metric-definitions/{metricCode}
+      </Paragraph>
     </div>
   );
 }

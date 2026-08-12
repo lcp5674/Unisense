@@ -1,20 +1,74 @@
 // Unisense 前端 API 客户端 — 对接真实后端（backend FastAPI，前缀 /api/v1）
-// 统一信封：{ code, message, data, trace_id }。鉴权：Bearer token + X-Api-Key（Semantic API）。
+// 统一信封：{ code, message, data, trace_id }。鉴权：Bearer token + X-Api-Key（Semantic/Consume API）。
+// 注意：语义服务后端路由为 /semantics（复数），前端统一调用此处封装。
 
 import {
   ApiError,
+  AssetCatalogSummary,
+  AssetClassificationSummary,
+  AssetMetricSummary,
+  AssetOwnerView,
+  AssetTableItem,
+  AuditEntry,
+  ClientCreateRequest,
+  ClientCreatedResponse,
+  ClientResponse,
+  CollectResult,
   ConflictListResponse,
   ConflictResponse,
+  ConsumptionGuideResponse,
   CurrentUser,
+  DashboardData,
+  DataSource,
+  DataSourceCreateRequest,
+  DBCatalog,
+  Dimension,
+  DimensionMapping,
+  DimensionMember,
+  DimensionExpr,
+  DryRunResponse,
+  ErasureResult,
   FavoriteResponse,
+  Feedback,
+  GlossaryConflict,
+  GlossaryTerm,
+  GrantBatchResult,
+  GrantCreate,
+  GrantResponse,
   ImpactPreview,
   LineageEdgePage,
   MetricCreateRequest,
   MetricListResponse,
   MetricPublishRequest,
   MetricResponse,
+  MetricTemplate,
   MetricUpdateRequest,
   MetricVersionResponse,
+  NL2SQLResult,
+  Notification,
+  NotifyEventLog,
+  ObsMetricsNotifications,
+  ObsMetricsQuality,
+  PermissionCheckResult,
+  PermissionSnapshot,
+  PiiReviewResult,
+  QualityBenchmark,
+  QualityEvent,
+  QualityObservation,
+  QualityRule,
+  QualityRuleCreate,
+  QueryRequest,
+  QueryResponse,
+  RecommendItem,
+  Reconciliation,
+  ReconciliationRecord,
+  RoleResponse,
+  ScheduleResult,
+  SnapshotResponse,
+  SourceHealth,
+  SourceType,
+  SubscriptionPref,
+  Watermark,
   API_BASE,
 } from "./types";
 
@@ -36,6 +90,18 @@ export function setToken(token: string): void {
 }
 export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
+}
+
+// 消费服务客户端访问令牌（role=consume 的 JWT），由 /consume/api-clients/{id}/token 签发
+const CONSUME_TOKEN_KEY = "unisense_consume_token";
+export function getConsumeToken(): string | null {
+  return localStorage.getItem(CONSUME_TOKEN_KEY);
+}
+export function setConsumeToken(token: string): void {
+  localStorage.setItem(CONSUME_TOKEN_KEY, token);
+}
+export function clearConsumeToken(): void {
+  localStorage.removeItem(CONSUME_TOKEN_KEY);
 }
 
 export class UnisenseApiError extends Error {
@@ -60,23 +126,39 @@ interface ApiEnvelope<T> {
   trace_id: string;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+interface RequestOptions extends RequestInit {
+  /** 消费服务调用：使用 API 客户端令牌而非用户 JWT */
+  consumeAuth?: boolean;
+}
+
+async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Api-Key": SEMANTIC_API_KEY,
     ...(init?.headers as Record<string, string> | undefined),
   };
-  const token = getToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (init?.consumeAuth) {
+    const consumeToken = getConsumeToken();
+    if (consumeToken) headers["Authorization"] = `Bearer ${consumeToken}`;
+  } else {
+    const token = getToken();
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const { consumeAuth: _consumeAuth, ...restInit } = init ?? {};
 
   const res = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
+    ...restInit,
     headers,
   });
 
   if (res.status === 401 || res.status === 403) {
-    // 鉴权失效：清 token，交由上层跳登录
-    clearToken();
+    // 鉴权失效：清 token，交由上层跳登录（消费令牌失效仅清除消费令牌）
+    if (init?.consumeAuth) {
+      clearConsumeToken();
+    } else {
+      clearToken();
+    }
   }
 
   // 尝试解析统一信封；非 2xx 抛出 UnisenseApiError
@@ -103,6 +185,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (body as ApiEnvelope<T>).data;
 }
 
+function pageQs(params: Record<string, string | number | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+  }
+  return qs.toString();
+}
+
 // ---- 鉴权 ----
 export async function apiLogin(username: string, password: string): Promise<string> {
   const data = await request<{ access_token: string; token_type: string }>(`${API_BASE}/auth/login`, {
@@ -126,14 +216,15 @@ export async function listMetrics(params: {
   page?: number;
   page_size?: number;
 }): Promise<MetricListResponse> {
-  const qs = new URLSearchParams();
-  if (params.domain) qs.set("domain", params.domain);
-  if (params.status) qs.set("status", params.status);
-  if (params.metric_tier) qs.set("metric_tier", params.metric_tier);
-  if (params.keyword) qs.set("keyword", params.keyword);
-  qs.set("page", String(params.page ?? 1));
-  qs.set("page_size", String(params.page_size ?? 20));
-  return request<MetricListResponse>(`${API_BASE}/metric-definitions?${qs.toString()}`);
+  const qs = pageQs({
+    domain: params.domain,
+    status: params.status,
+    metric_tier: params.metric_tier,
+    keyword: params.keyword,
+    page: params.page ?? 1,
+    page_size: params.page_size ?? 20,
+  });
+  return request<MetricListResponse>(`${API_BASE}/metric-definitions?${qs}`);
 }
 
 export async function getMetric(code: string): Promise<MetricResponse> {
@@ -180,17 +271,44 @@ export async function piiReview(code: string): Promise<MetricResponse> {
   );
 }
 
+// 提交评审：DRAFT → REVIEW；change_reason 可选，缺省"提交评审"
+export async function submitReview(metricCode: string, changeReason = "提交评审"): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(metricCode)}/submit-review`,
+    {
+      method: "POST",
+      body: JSON.stringify({ change_reason: changeReason }),
+    },
+  );
+}
+
+// 评审：approved=true → REVIEW→PUBLISHED（PII 未过合规会被 409 拒绝）；false → REVIEW→DRAFT
+export async function reviewMetric(
+  metricCode: string,
+  approved: boolean,
+  changeReason: string,
+): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(metricCode)}/review`,
+    {
+      method: "POST",
+      body: JSON.stringify({ approved, change_reason: changeReason }),
+    },
+  );
+}
+
 // ---- 冲突 ----
 export async function listConflicts(params: {
   status?: string;
   page?: number;
   page_size?: number;
 }): Promise<ConflictListResponse> {
-  const qs = new URLSearchParams();
-  if (params.status) qs.set("status", params.status);
-  qs.set("page", String(params.page ?? 1));
-  qs.set("page_size", String(params.page_size ?? 20));
-  return request<ConflictListResponse>(`${API_BASE}/conflicts?${qs.toString()}`);
+  const qs = pageQs({
+    status: params.status,
+    page: params.page ?? 1,
+    page_size: params.page_size ?? 20,
+  });
+  return request<ConflictListResponse>(`${API_BASE}/conflicts?${qs}`);
 }
 
 export async function arbitrateConflict(
@@ -211,6 +329,19 @@ export async function escalateConflict(conflictId: string, note: string): Promis
   });
 }
 
+// 主动冲突检测：创建指标前的口径冲突扫描
+export async function checkConflict(body: {
+  metric_code?: string;
+  name?: string;
+  domain?: string;
+  definition?: Record<string, unknown>;
+}): Promise<ConflictListResponse> {
+  return request<ConflictListResponse>(`${API_BASE}/conflicts/check`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 // ---- 血缘 ----
 export async function lineageImpact(params: {
   node: string;
@@ -219,13 +350,14 @@ export async function lineageImpact(params: {
   page?: number;
   page_size?: number;
 }): Promise<LineageEdgePage> {
-  const qs = new URLSearchParams();
-  qs.set("node", params.node);
-  qs.set("direction", params.direction ?? "downstream");
-  qs.set("max_hops", String(params.max_hops ?? 5));
-  if (params.page) qs.set("page", String(params.page));
-  if (params.page_size) qs.set("page_size", String(params.page_size));
-  return request<LineageEdgePage>(`${API_BASE}/lineage/impact?${qs.toString()}`);
+  const qs = pageQs({
+    node: params.node,
+    direction: params.direction ?? "downstream",
+    max_hops: params.max_hops ?? 5,
+    page: params.page,
+    page_size: params.page_size,
+  });
+  return request<LineageEdgePage>(`${API_BASE}/lineage/impact?${qs}`);
 }
 
 export async function lineageEdges(params: {
@@ -234,12 +366,13 @@ export async function lineageEdges(params: {
   page?: number;
   page_size?: number;
 }): Promise<LineageEdgePage> {
-  const qs = new URLSearchParams();
-  qs.set("node", params.node);
-  qs.set("direction", params.direction ?? "both");
-  if (params.page) qs.set("page", String(params.page));
-  if (params.page_size) qs.set("page_size", String(params.page_size));
-  return request<LineageEdgePage>(`${API_BASE}/lineage/edges?${qs.toString()}`);
+  const qs = pageQs({
+    node: params.node,
+    direction: params.direction ?? "both",
+    page: params.page,
+    page_size: params.page_size,
+  });
+  return request<LineageEdgePage>(`${API_BASE}/lineage/edges?${qs}`);
 }
 
 export async function parseLineage(sql: string, dialect?: string): Promise<{ table_edges: number; field_edges: number; graph_written: boolean }> {
@@ -278,34 +411,35 @@ export async function removeFavorite(metricCode: string): Promise<FavoriteRespon
   });
 }
 
-// ---- 驾驶舱 ----
-export async function fetchDashboard(): Promise<{
-  total_metrics: number;
-  published_count: number;
-  draft_count: number;
-  deprecated_count: number;
-  conflict_count: number;
-  review_pending_count: number;
-  avg_review_hours: number;
-  pii_metric_count: number;
-  quality_anomaly_count: number;
-  top_domains: Array<{ domain: string; count: number }>;
-}> {
-  return request(`${API_BASE}/semantic/dashboard`);
+// ---- 语义服务（后端为 /semantics，复数）----
+
+// 消费者仪表盘
+export async function fetchDashboard(domain?: string): Promise<DashboardData> {
+  const qs = domain ? `?domain=${encodeURIComponent(domain)}` : "";
+  return request<DashboardData>(`${API_BASE}/semantics/dashboard${qs}`);
 }
 
-// ---- 消费指南 ----
-export async function fetchConsumptionGuide(metricCode: string): Promise<{
-  metric_code: string;
-  definition: string;
-  calculation_logic: string;
-  dimensions: Array<{ name: string; description: string; type: string }>;
-  usage_examples: Array<{ title: string; sql: string; description: string }>;
-  related_metrics: string[];
-  faq: Array<{ question: string; answer: string }>;
-}> {
-  return request(
-    `${API_BASE}/semantic/metrics/${encodeURIComponent(metricCode)}/consumption-guide`,
+// 指标模板
+export async function listTemplates(params?: {
+  domain?: string;
+  is_active?: boolean;
+}): Promise<MetricTemplate[]> {
+  const qs = pageQs({
+    domain: params?.domain,
+    is_active: params?.is_active === undefined ? undefined : params.is_active ? "true" : "false",
+  });
+  return request<MetricTemplate[]>(`${API_BASE}/semantics/templates?${qs}`);
+}
+
+export async function getTemplate(templateId: number): Promise<MetricTemplate> {
+  return request<MetricTemplate>(`${API_BASE}/semantics/templates/${templateId}`);
+}
+
+// 消费指南：后端按 metric_id，前端按 code 使用 → 先解析 id 再取指南
+export async function fetchConsumptionGuide(metricCode: string): Promise<ConsumptionGuideResponse> {
+  const metric = await getMetric(metricCode);
+  return request<ConsumptionGuideResponse>(
+    `${API_BASE}/semantics/consumption-guide/${metric.id}`,
   );
 }
 
@@ -321,6 +455,626 @@ export async function fetchQuickBITicket(params: {
   });
 }
 
+// ---- 消费服务 ----
+export async function consumeDryRun(req: QueryRequest): Promise<DryRunResponse> {
+  return request<DryRunResponse>(`${API_BASE}/consume/query/dry-run`, {
+    method: "POST",
+    body: JSON.stringify(req),
+    consumeAuth: true,
+  });
+}
+
+export async function consumeQuery(req: QueryRequest): Promise<QueryResponse> {
+  return request<QueryResponse>(`${API_BASE}/consume/query`, {
+    method: "POST",
+    body: JSON.stringify(req),
+    consumeAuth: true,
+  });
+}
+
+export async function listSnapshots(
+  code: string,
+  limit = 50,
+): Promise<SnapshotResponse[]> {
+  return request<SnapshotResponse[]>(
+    `${API_BASE}/consume/metrics/${encodeURIComponent(code)}/snapshots?limit=${limit}`,
+    { consumeAuth: true },
+  );
+}
+
+export async function createApiClient(req: ClientCreateRequest): Promise<ClientCreatedResponse> {
+  return request<ClientCreatedResponse>(`${API_BASE}/consume/api-clients`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function listApiClients(domain?: string): Promise<ClientResponse[]> {
+  const qs = domain ? `?domain=${encodeURIComponent(domain)}` : "";
+  return request<ClientResponse[]>(`${API_BASE}/consume/api-clients${qs}`);
+}
+
+export async function mintClientToken(clientId: string): Promise<{ access_token: string }> {
+  return request<{ access_token: string }>(
+    `${API_BASE}/consume/api-clients/${encodeURIComponent(clientId)}/token`,
+    { method: "POST" },
+  );
+}
+
+export async function confirmVersion(versionId: number): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`${API_BASE}/consume/versions/${versionId}/confirm`, {
+    method: "POST",
+  });
+}
+
+export async function rejectVersion(versionId: number, reason?: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`${API_BASE}/consume/versions/${versionId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason ?? null }),
+  });
+}
+
+// ---- 维度 ----
+export async function listDimensions(params?: {
+  domain?: string;
+  status?: string;
+}): Promise<{ items: Dimension[]; total: number }> {
+  const qs = pageQs({ domain: params?.domain, status: params?.status });
+  return request(`${API_BASE}/dimensions?${qs}`);
+}
+
+export async function createDimension(body: {
+  dim_code: string;
+  name: string;
+  domain: string;
+  type?: string;
+  description?: string | null;
+  owner_id?: number;
+}): Promise<Dimension> {
+  return request<Dimension>(`${API_BASE}/dimensions`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function publishDimension(dimCode: string): Promise<Dimension> {
+  return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/publish`, {
+    method: "POST",
+  });
+}
+
+export async function deprecateDimension(dimCode: string): Promise<Dimension> {
+  return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/deprecate`, {
+    method: "POST",
+  });
+}
+
+export async function listDimensionMappings(sourceDimCode?: string): Promise<{ items: DimensionMapping[]; total: number }> {
+  const qs = sourceDimCode ? `?source_dim_code=${encodeURIComponent(sourceDimCode)}` : "";
+  return request(`${API_BASE}/dimensions/mappings${qs}`);
+}
+
+export async function createDimensionMapping(body: {
+  source_dim_code: string;
+  target_dim_code: string;
+  mapping_type: string;
+  expression?: string | null;
+}): Promise<DimensionMapping> {
+  return request<DimensionMapping>(`${API_BASE}/dimensions/mappings`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listReconciliations(status?: string): Promise<{ items: Reconciliation[]; total: number }> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request(`${API_BASE}/dimensions/reconciliations${qs}`);
+}
+
+export async function submitReconciliation(body: {
+  metric_id: number;
+  dim_code?: string | null;
+  expected_expr: string;
+  actual_expr: string;
+  diff_summary?: string | null;
+}): Promise<Reconciliation> {
+  return request<Reconciliation>(`${API_BASE}/dimensions/reconciliations`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function reviewReconciliation(recId: number, decision: string): Promise<Reconciliation> {
+  return request<Reconciliation>(`${API_BASE}/dimensions/reconciliations/${recId}/review`, {
+    method: "POST",
+    body: JSON.stringify({ decision }),
+  });
+}
+
+export async function listDimensionMembers(dimCode: string): Promise<{ items: DimensionMember[]; total: number }> {
+  return request(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members`);
+}
+
+export async function createDimensionMember(body: {
+  dim_code: string;
+  member_code: string;
+  member_name: string;
+  parent_code?: string | null;
+  path?: string | null;
+  attributes?: Record<string, unknown> | null;
+}): Promise<DimensionMember> {
+  return request<DimensionMember>(`${API_BASE}/dimensions/${encodeURIComponent(body.dim_code)}/members`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ---- 术语表 ----
+export async function listTerms(params?: {
+  domain?: string;
+  status?: string;
+  search?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: GlossaryTerm[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    domain: params?.domain,
+    status: params?.status,
+    search: params?.search,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/terms?${qs}`);
+}
+
+export async function createTerm(body: {
+  term_code: string;
+  name: string;
+  definition: string;
+  domain: string;
+  synonyms?: string[];
+  boundary?: string | null;
+  owner_id?: number;
+}): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function submitTerm(termCode: string): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/submit`, {
+    method: "POST",
+  });
+}
+
+export async function deprecateTerm(termCode: string): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/deprecate`, {
+    method: "POST",
+  });
+}
+
+export async function listTermConflicts(status?: string): Promise<{ items: GlossaryConflict[]; total: number }> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request(`${API_BASE}/terms/conflicts${qs}`);
+}
+
+export async function resolveTermConflict(conflictId: number, decision: string): Promise<GlossaryConflict> {
+  return request<GlossaryConflict>(`${API_BASE}/terms/conflicts/${conflictId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ decision }),
+  });
+}
+
+// ---- 治理 ----
+export async function createRole(body: { name: string; description?: string | null }): Promise<RoleResponse> {
+  return request<RoleResponse>(`${API_BASE}/roles`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listGrants(params?: {
+  user_id?: number;
+  domain?: string;
+  status?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: GrantResponse[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    user_id: params?.user_id,
+    domain: params?.domain,
+    status: params?.status,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/grants?${qs}`);
+}
+
+export async function createGrant(req: GrantCreate): Promise<GrantResponse> {
+  return request<GrantResponse>(`${API_BASE}/grants`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function revokeGrant(grantId: number, reason?: string): Promise<GrantResponse> {
+  const qs = reason ? `?reason=${encodeURIComponent(reason)}` : "";
+  return request<GrantResponse>(`${API_BASE}/grants/${grantId}${qs}`, { method: "DELETE" });
+}
+
+export async function batchGrant(
+  items: GrantCreate[],
+  operation: "grant" | "revoke" = "grant",
+  dryRun = false,
+): Promise<GrantBatchResult> {
+  const path = dryRun ? `${API_BASE}/grants/batch/dry-run` : `${API_BASE}/grants/batch`;
+  return request<GrantBatchResult>(path, {
+    method: "POST",
+    body: JSON.stringify({ operation, items }),
+  });
+}
+
+export async function fetchMyPermissions(): Promise<PermissionSnapshot> {
+  return request<PermissionSnapshot>(`${API_BASE}/me/permissions`);
+}
+
+export async function checkPermission(body: {
+  user_id: number;
+  action: string;
+  domain?: string | null;
+  metric_code?: string | null;
+}): Promise<PermissionCheckResult> {
+  return request<PermissionCheckResult>(`${API_BASE}/permissions/check`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function piiReviewAction(body: {
+  metric_code: string;
+  decision: "APPROVE" | "REJECT";
+  sensitivity_level?: string;
+  pii_columns?: string[] | null;
+  masking_policy?: string | null;
+  comment: string;
+}): Promise<PiiReviewResult> {
+  return request<PiiReviewResult>(`${API_BASE}/pii/review`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function classificationRescan(body: {
+  source_id?: string | null;
+  catalog_ids?: number[] | null;
+  limit?: number;
+}): Promise<unknown> {
+  return request(`${API_BASE}/classification/rescan`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function requestErasure(body: {
+  subject_user_id: number;
+  reason?: string | null;
+}): Promise<ErasureResult> {
+  return request<ErasureResult>(`${API_BASE}/erasure`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ---- 质量 ----
+export async function listQualityRules(params?: {
+  metric_id?: number;
+  rule_type?: string;
+  severity?: string;
+  enabled?: boolean;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: QualityRule[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    metric_id: params?.metric_id,
+    rule_type: params?.rule_type,
+    severity: params?.severity,
+    enabled: params?.enabled === undefined ? undefined : params.enabled ? "true" : "false",
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/quality/rules?${qs}`);
+}
+
+export async function createQualityRule(req: QualityRuleCreate): Promise<QualityRule> {
+  return request<QualityRule>(`${API_BASE}/quality/rules`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function updateQualityRule(
+  ruleId: number,
+  body: {
+    threshold?: Record<string, unknown> | null;
+    rule_mode?: string | null;
+    severity?: string | null;
+    enabled?: boolean | null;
+    notify_targets?: Record<string, unknown> | null;
+  },
+): Promise<QualityRule> {
+  return request<QualityRule>(`${API_BASE}/quality/rules/${ruleId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteQualityRule(ruleId: number): Promise<{ deleted: number }> {
+  return request<{ deleted: number }>(`${API_BASE}/quality/rules/${ruleId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listQualityEvents(params?: {
+  metric_id?: number;
+  status?: string;
+  level?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: QualityEvent[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    metric_id: params?.metric_id,
+    status: params?.status,
+    level: params?.level,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/quality/events?${qs}`);
+}
+
+export async function qualityEventAck(eventId: number, note = ""): Promise<QualityEvent> {
+  return request<QualityEvent>(`${API_BASE}/quality/events/${eventId}/ack`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+export async function qualityEventResolve(eventId: number): Promise<QualityEvent> {
+  return request<QualityEvent>(`${API_BASE}/quality/events/${eventId}/resolve`, { method: "POST" });
+}
+
+export async function qualityEventClose(eventId: number): Promise<QualityEvent> {
+  return request<QualityEvent>(`${API_BASE}/quality/events/${eventId}/close`, { method: "POST" });
+}
+
+export async function submitQualityObservation(body: {
+  metric_id: number;
+  metric_code: string;
+  value: number;
+  obs_time: string;
+  source_id?: string | null;
+  dims?: Record<string, unknown> | null;
+}): Promise<QualityObservation> {
+  return request<QualityObservation>(`${API_BASE}/quality/observe`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function importBenchmark(body: {
+  source_id: string;
+  metric_code: string;
+  bench_date: string;
+  dims?: Record<string, unknown> | null;
+  bench_value: number;
+  provider: string;
+  tolerance_pct?: number | null;
+}): Promise<QualityBenchmark> {
+  return request<QualityBenchmark>(`${API_BASE}/quality/benchmarks/import`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listBenchmarks(params?: {
+  metric_code?: string;
+  source_id?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: QualityBenchmark[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    metric_code: params?.metric_code,
+    source_id: params?.source_id,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/quality/benchmarks?${qs}`);
+}
+
+export async function runReconciliation(body: {
+  benchmark_id: number;
+  metric_value: number;
+  window?: string | null;
+}): Promise<ReconciliationRecord> {
+  return request<ReconciliationRecord>(`${API_BASE}/quality/reconciliation/run`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listReconciliationRecords(params?: {
+  status?: string;
+  metric_code?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: ReconciliationRecord[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    status: params?.status,
+    metric_code: params?.metric_code,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/quality/reconciliation-records?${qs}`);
+}
+
+export async function confirmReconciliation(
+  recordId: number,
+  decision: string,
+  ownerNote?: string | null,
+): Promise<ReconciliationRecord> {
+  return request<ReconciliationRecord>(`${API_BASE}/quality/reconciliation-records/${recordId}/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ decision, owner_note: ownerNote ?? null }),
+  });
+}
+
+// ---- 通知 ----
+export async function listNotifications(status?: string): Promise<{ items: Notification[]; total: number }> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request(`${API_BASE}/notify/notifications${qs}`);
+}
+
+export async function listNotifyEvents(eventType?: string): Promise<{ items: NotifyEventLog[]; total: number }> {
+  const qs = eventType ? `?event_type=${encodeURIComponent(eventType)}` : "";
+  return request(`${API_BASE}/notify/events${qs}`);
+}
+
+export async function publishNotifyEvent(body: {
+  event_type: string;
+  source?: string | null;
+  payload?: Record<string, unknown> | null;
+  level?: string;
+}): Promise<{ event_id: number; notifications: number; delivered: number }> {
+  return request(`${API_BASE}/notify/events`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listSubscriptions(): Promise<{ items: SubscriptionPref[]; total: number }> {
+  return request(`${API_BASE}/notify/subscriptions`);
+}
+
+export async function upsertSubscription(body: {
+  channel: string;
+  event_type: string;
+  enabled?: boolean;
+  threshold?: number | null;
+}): Promise<SubscriptionPref> {
+  return request<SubscriptionPref>(`${API_BASE}/notify/subscriptions`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+// ---- 可观测 ----
+export async function listFeedback(targetType?: string): Promise<{ items: Feedback[]; total: number }> {
+  const qs = targetType ? `?target_type=${encodeURIComponent(targetType)}` : "";
+  return request(`${API_BASE}/observability/feedback${qs}`);
+}
+
+export async function submitFeedback(body: {
+  target_type: string;
+  target_id?: string | null;
+  rating?: number | null;
+  comment?: string | null;
+}): Promise<Feedback> {
+  return request<Feedback>(`${API_BASE}/observability/feedback`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateFeedbackStatus(
+  feedbackId: number,
+  status: string,
+  resolutionNote?: string | null,
+): Promise<Feedback> {
+  return request<Feedback>(`${API_BASE}/observability/feedback/${feedbackId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status, resolution_note: resolutionNote ?? null }),
+  });
+}
+
+export async function submitNps(body: {
+  score: number;
+  comment?: string | null;
+  target_type?: string;
+  target_id?: string | null;
+}): Promise<Feedback> {
+  return request<Feedback>(`${API_BASE}/observability/nps`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchObsMetricsQuality(): Promise<ObsMetricsQuality> {
+  return request<ObsMetricsQuality>(`${API_BASE}/observability/metrics/quality`);
+}
+
+export async function fetchObsMetricsApi(): Promise<Record<string, number>> {
+  return request<Record<string, number>>(`${API_BASE}/observability/metrics/api`);
+}
+
+export async function fetchObsMetricsNotifications(): Promise<ObsMetricsNotifications> {
+  return request<ObsMetricsNotifications>(`${API_BASE}/observability/metrics/notifications`);
+}
+
+export async function fetchObsMetricsLineage(): Promise<{ edges: number }> {
+  return request<{ edges: number }>(`${API_BASE}/observability/metrics/lineage`);
+}
+
+// ---- 推荐 ----
+export async function fetchRecommendedMetrics(limit = 20): Promise<RecommendItem[]> {
+  return request<{ items: RecommendItem[]; total: number }>(
+    `${API_BASE}/recommend/metrics?limit=${limit}`,
+  ).then((r) => r.items);
+}
+
+export async function fetchRelatedMetrics(metricId: number | string, limit = 20): Promise<RecommendItem[]> {
+  return request<{ items: RecommendItem[]; total: number }>(
+    `${API_BASE}/recommend/metrics/${encodeURIComponent(String(metricId))}/related?limit=${limit}`,
+  ).then((r) => r.items);
+}
+
+export async function fetchRecommendedTerms(limit = 20): Promise<GlossaryTerm[]> {
+  return request<{ items: GlossaryTerm[]; total: number }>(
+    `${API_BASE}/recommend/terms?limit=${limit}`,
+  ).then((r) => r.items);
+}
+
+// ---- AI 助手 ----
+export async function aiNl2Sql(body: {
+  nl_query: string;
+  metric_scope?: string[] | null;
+  execute?: boolean;
+}): Promise<NL2SQLResult> {
+  return request<NL2SQLResult>(`${API_BASE}/ai/nl2sql`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ---- 审计 ----
+export async function listAudit(params?: {
+  actor_id?: number;
+  entity_type?: string;
+  trace_id?: string;
+  pii_access?: boolean;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: AuditEntry[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    actor_id: params?.actor_id,
+    entity_type: params?.entity_type,
+    trace_id_filter: params?.trace_id,
+    pii_access: params?.pii_access === undefined ? undefined : params.pii_access ? "true" : "false",
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/audit?${qs}`);
+}
+
 // ---- 埋点事件 ----
 export async function trackEvent(event: {
   event_type: string;
@@ -334,7 +1088,149 @@ export async function trackEvent(event: {
   });
 }
 
+// ---- 采集器 ----
+export async function listDataSources(params?: {
+  domain?: string;
+  source_type?: SourceType;
+  keyword?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<DataSource[]> {
+  const qs = pageQs({
+    domain: params?.domain,
+    source_type: params?.source_type,
+    keyword: params?.keyword,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 100,
+  });
+  return request<DataSource[]>(`${API_BASE}/data-sources?${qs}`);
+}
+
+export async function createDataSource(req: DataSourceCreateRequest): Promise<DataSource> {
+  return request<DataSource>(`${API_BASE}/data-sources`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function getDataSource(sourceId: string): Promise<DataSource> {
+  return request<DataSource>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}`);
+}
+
+export async function collectSource(
+  sourceId: string,
+  mode = "FULL",
+): Promise<CollectResult> {
+  return request<CollectResult>(
+    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/collect`,
+    {
+      method: "POST",
+      body: JSON.stringify({ collector_type: "information_schema", mode }),
+    },
+  );
+}
+
+export async function scheduleSource(
+  sourceId: string,
+  cron: string,
+  mode = "FULL",
+): Promise<ScheduleResult> {
+  return request<ScheduleResult>(
+    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/schedule`,
+    {
+      method: "POST",
+      body: JSON.stringify({ cron, mode }),
+    },
+  );
+}
+
+export async function getSourceHealth(sourceId: string): Promise<SourceHealth> {
+  return request<SourceHealth>(
+    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/health`,
+  );
+}
+
+export async function getSourceWatermark(sourceId: string): Promise<Watermark> {
+  return request<Watermark>(
+    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/watermark`,
+  );
+}
+
+export async function listCatalogs(params?: {
+  source_id?: string;
+  entity_type?: string;
+  sensitivity_level?: string;
+  keyword?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: DBCatalog[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    source_id: params?.source_id,
+    entity_type: params?.entity_type,
+    sensitivity_level: params?.sensitivity_level,
+    keyword: params?.keyword,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/catalogs?${qs}`);
+}
+
+export async function registerCatalog(
+  sourceId: string,
+  body: {
+    source_id: string;
+    entity_name: string;
+    entity_type?: string;
+    schema_def: Record<string, unknown>;
+    etl_sql?: string | null;
+    owner_id?: number | null;
+  },
+): Promise<DBCatalog> {
+  return request<DBCatalog>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/catalogs`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function bulkDeprecateCatalogs(
+  items: Array<{ source_id: string; entity_name: string }>,
+): Promise<{ succeeded: Array<{ source_id: string; entity_name: string }>; failed: Array<Record<string, unknown>> }> {
+  return request(`${API_BASE}/catalogs/bulk-deprecate`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
 // ---- 资产地图 ----
+export async function fetchAssetSummary(): Promise<AssetCatalogSummary> {
+  return request<AssetCatalogSummary>(`${API_BASE}/assetmap/summary`);
+}
+
+export async function fetchAssetClassification(): Promise<AssetClassificationSummary> {
+  return request<AssetClassificationSummary>(`${API_BASE}/assetmap/classification`);
+}
+
+export async function fetchAssetMetricSummary(): Promise<AssetMetricSummary> {
+  return request<AssetMetricSummary>(`${API_BASE}/assetmap/metrics`);
+}
+
+export async function fetchAssetTables(params?: {
+  source_id?: string;
+  sensitivity?: string;
+  limit?: number;
+}): Promise<{ items: AssetTableItem[]; total: number }> {
+  const qs = pageQs({
+    source_id: params?.source_id,
+    sensitivity: params?.sensitivity,
+    limit: params?.limit ?? 100,
+  });
+  return request(`${API_BASE}/assetmap/tables?${qs}`);
+}
+
+export async function fetchAssetOrphans(): Promise<{ items: AssetTableItem[]; total: number }> {
+  return request(`${API_BASE}/assetmap/orphans`);
+}
+
 export async function fetchAssetGraph(params?: {
   domain?: string;
   depth?: number;
@@ -350,37 +1246,25 @@ export async function fetchAssetGraph(params?: {
   }>;
   edges: Array<{ source: string; target: string; type: string }>;
 }> {
-  const qs = new URLSearchParams();
-  if (params?.domain) qs.set("domain", params.domain);
-  if (params?.depth) qs.set("depth", String(params.depth));
-  if (params?.pii_only) qs.set("pii_only", String(params.pii_only));
-  return request(`${API_BASE}/assetmap/graph?${qs.toString()}`);
+  const qs = pageQs({
+    domain: params?.domain,
+    depth: params?.depth,
+    pii_only: params?.pii_only === undefined ? undefined : params.pii_only ? "true" : "false",
+  });
+  return request(`${API_BASE}/assetmap/graph?${qs}`);
 }
 
-export async function fetchAssetHeatmap(dimension?: string): Promise<{
-  buckets: Array<{
-    domain: string;
-    pii_count: number;
-    total: number;
-    pii_ratio: number;
-  }>;
+export async function fetchAssetHeatmap(dimension = "domain"): Promise<{
+  dimension: string;
+  buckets: Array<Record<string, unknown>>;
 }> {
-  const qs = new URLSearchParams();
-  if (dimension) qs.set("dimension", dimension);
-  return request(`${API_BASE}/assetmap/heatmap?${qs.toString()}`);
+  return request(`${API_BASE}/assetmap/heatmap?dimension=${encodeURIComponent(dimension)}`);
 }
 
-export async function fetchAssetOwnerView(ownerId?: number): Promise<{
-  owners: Array<{
-    owner_id: number;
-    owner_name: string;
-    metric_count: number;
-    pii_count: number;
-  }>;
-}> {
-  const qs = new URLSearchParams();
-  if (ownerId) qs.set("owner_id", String(ownerId));
-  return request(`${API_BASE}/assetmap/owner-view?${qs.toString()}`);
+export async function fetchAssetOwnerView(ownerId: number): Promise<AssetOwnerView> {
+  return request<AssetOwnerView>(
+    `${API_BASE}/assetmap/owner-view?owner_id=${ownerId}`,
+  );
 }
 
-export type { ApiError };
+export type { ApiError, DimensionExpr };

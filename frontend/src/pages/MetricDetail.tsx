@@ -12,22 +12,32 @@ import {
   Popconfirm,
 } from "antd";
 import {
+  HeartOutlined,
+  ReadOutlined,
+  SendOutlined,
+} from "@ant-design/icons";
+import {
   deprecateMetric,
   getMetric,
   listVersions,
   piiReview,
   publishMetric,
+  submitReview,
+  addFavorite,
+  removeFavorite,
+  listFavorites,
   UnisenseApiError,
   fetchCurrentUser,
 } from "../api";
 import type { MetricResponse, MetricVersionResponse, CurrentUser } from "../types";
 import { useTracking } from "../hooks/useTracking";
 
-const { Title, Paragraph } = Typography;
+const { Paragraph } = Typography;
 
 const STATUS_COLOR: Record<string, string> = {
   DRAFT: "default",
   EXPERIMENTAL: "processing",
+  REVIEW: "warning",
   PUBLISHED: "success",
   DEPRECATED: "error",
 };
@@ -35,6 +45,7 @@ const STATUS_COLOR: Record<string, string> = {
 const STATUS_LABEL: Record<string, string> = {
   DRAFT: "草稿",
   EXPERIMENTAL: "实验",
+  REVIEW: "审核",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",
 };
@@ -45,6 +56,7 @@ export function MetricDetail() {
   const [metric, setMetric] = useState<MetricResponse | null>(null);
   const [versions, setVersions] = useState<MetricVersionResponse[]>([]);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [favorited, setFavorited] = useState(false);
   const [loading, setLoading] = useState(true);
   const { track } = useTracking();
 
@@ -52,15 +64,16 @@ export function MetricDetail() {
     if (!code) return;
     setLoading(true);
     try {
-      const [m, vs, me] = await Promise.all([
+      const [m, vs, me, favs] = await Promise.all([
         getMetric(code),
         listVersions(code),
         fetchCurrentUser(),
+        listFavorites().catch(() => [] as string[]),
       ]);
       setMetric(m);
       setVersions(vs);
       setCurrentUser(me);
-      track("metric_detail_view", code, "metric");
+      setFavorited(favs.includes(code));      track("metric_detail_view", code, "metric");
     } catch (err) {
       message.error(
         err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败",
@@ -113,6 +126,38 @@ export function MetricDetail() {
     }
   }
 
+  async function handleSubmitReview() {
+    if (!code) return;
+    try {
+      await submitReview(code, "提交评审");
+      message.success("已提交评审");
+      load();
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "提交失败",
+      );
+    }
+  }
+
+  async function handleToggleFavorite() {
+    if (!code) return;
+    try {
+      if (favorited) {
+        await removeFavorite(code);
+        setFavorited(false);
+        message.success("已取消收藏");
+      } else {
+        await addFavorite(code);
+        setFavorited(true);
+        message.success("已收藏");
+      }
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "操作失败",
+      );
+    }
+  }
+
   if (!metric) {
     return loading ? <Card loading /> : <Card><Paragraph type="secondary">指标不存在</Paragraph></Card>;
   }
@@ -131,14 +176,39 @@ export function MetricDetail() {
 
   return (
     <div>
-      <Button type="link" onClick={() => navigate("/catalog")} style={{ marginBottom: 16 }}>
-        ← 返回
-      </Button>
-
-      <Title level={3}>
-        {metric.name}{" "}
-        <Tag color={STATUS_COLOR[metric.status]}>{STATUS_LABEL[metric.status]}</Tag>
-      </Title>
+      <div className="page-head">
+        <div>
+          <div className="page-kicker">Assets / Detail</div>
+          <h2>
+            {metric.name}{" "}
+            <Tag color={STATUS_COLOR[metric.status]}>{STATUS_LABEL[metric.status]}</Tag>
+            {metric.metric_tier && <Tag>{metric.metric_tier}</Tag>}
+          </h2>
+          <p>
+            <span className="mono">{metric.metric_code}</span>
+            <span style={{ margin: "0 8px" }}>·</span>
+            {metric.domain}
+            <span style={{ margin: "0 8px" }}>·</span>
+            v{metric.version}
+            {metric.pii_flag && <span style={{ marginLeft: 8 }}><Tag color="red">PII</Tag></span>}
+          </p>
+        </div>
+        <Space>
+          <Button
+            type={favorited ? "primary" : "default"}
+            icon={<HeartOutlined />}
+            onClick={handleToggleFavorite}
+          >
+            {favorited ? "已收藏" : "收藏"}
+          </Button>
+          <Button icon={<ReadOutlined />} onClick={() => navigate(`/guide/${metric.metric_code}`)}>
+            消费指南
+          </Button>
+          <Button type="link" onClick={() => navigate("/catalog")}>
+            ← 返回目录
+          </Button>
+        </Space>
+      </div>
 
       <Card style={{ marginBottom: 16 }}>
         <Descriptions column={3} bordered size="small">
@@ -169,6 +239,11 @@ export function MetricDetail() {
       </Card>
 
       <Space style={{ marginBottom: 16 }}>
+        {(metric.status === "DRAFT" || metric.status === "EXPERIMENTAL") && (
+          <Button icon={<SendOutlined />} onClick={handleSubmitReview}>
+            提交评审
+          </Button>
+        )}
         {canPublish && (
           <Button
             type="primary"

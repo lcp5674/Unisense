@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
-import { Layout as AntLayout, Menu, Breadcrumb, Button, Avatar, Dropdown } from "antd";
+import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme } from "antd";
 import {
   AppstoreOutlined,
   PlusCircleOutlined,
@@ -11,48 +11,123 @@ import {
   DashboardOutlined,
   LogoutOutlined,
   UserOutlined,
+  BellOutlined,
+  SearchOutlined,
+  DeploymentUnitOutlined,
+  ExperimentOutlined,
+  PartitionOutlined,
+  BookOutlined,
+  SafetyCertificateOutlined,
+  FileSearchOutlined,
+  ConsoleSqlOutlined,
+  KeyOutlined,
+  RobotOutlined,
+  LineChartOutlined,
+  CloudServerOutlined,
+  DatabaseOutlined,
+  FileTextOutlined,
+  GlobalOutlined,
 } from "@ant-design/icons";
 import type { CurrentUser } from "../types";
-import { clearToken } from "../api";
+import { clearToken, listNotifications } from "../api";
 
 const { Header, Sider, Content } = AntLayout;
 
-const NAV_ITEMS = [
-  { key: "/catalog", label: "指标目录", icon: <AppstoreOutlined /> },
-  { key: "/create", label: "注册指标", icon: <PlusCircleOutlined /> },
-  { key: "/review", label: "审核工作台", icon: <AuditOutlined /> },
-  { key: "/todo", label: "待办中心", icon: <CheckSquareOutlined /> },
-  { key: "/lineage", label: "血缘视图", icon: <ApartmentOutlined /> },
-  { key: "/favorites", label: "我的收藏", icon: <HeartOutlined /> },
-  { key: "/dashboard", label: "治理驾驶舱", icon: <DashboardOutlined /> },
+// 分组导航：覆盖后端全部功能域
+const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: string; icon: React.ReactNode }> }> = [
+  {
+    label: "工作台",
+    children: [
+      { key: "/dashboard", label: "总览仪表", icon: <DashboardOutlined /> },
+      { key: "/todo", label: "待办中心", icon: <CheckSquareOutlined /> },
+      { key: "/notifications", label: "通知中心", icon: <BellOutlined /> },
+    ],
+  },
+  {
+    label: "指标资产",
+    children: [
+      { key: "/catalog", label: "指标目录", icon: <AppstoreOutlined /> },
+      { key: "/templates", label: "指标模板", icon: <FileTextOutlined /> },
+      { key: "/create", label: "注册指标", icon: <PlusCircleOutlined /> },
+      { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
+      { key: "/favorites", label: "我的收藏", icon: <HeartOutlined /> },
+      { key: "/assetmap", label: "资产地图", icon: <GlobalOutlined /> },
+    ],
+  },
+  {
+    label: "血缘与影响",
+    children: [
+      { key: "/lineage", label: "血缘视图", icon: <ApartmentOutlined /> },
+    ],
+  },
+  {
+    label: "治理合规",
+    children: [
+      { key: "/review", label: "冲突仲裁", icon: <DeploymentUnitOutlined /> },
+      { key: "/quality", label: "质量中心", icon: <ExperimentOutlined /> },
+      { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
+      { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
+      { key: "/governance", label: "权限治理", icon: <SafetyCertificateOutlined /> },
+      { key: "/audit", label: "审计日志", icon: <FileSearchOutlined /> },
+    ],
+  },
+  {
+    label: "消费接入",
+    children: [
+      { key: "/query", label: "查询工作台", icon: <ConsoleSqlOutlined /> },
+      { key: "/api-clients", label: "API 客户端", icon: <KeyOutlined /> },
+    ],
+  },
+  {
+    label: "智能与可观测",
+    children: [
+      { key: "/ai", label: "AI 助手", icon: <RobotOutlined /> },
+      { key: "/observability", label: "可观测中心", icon: <LineChartOutlined /> },
+    ],
+  },
+  {
+    label: "数据采集",
+    children: [
+      { key: "/data-sources", label: "数据源管理", icon: <CloudServerOutlined /> },
+      { key: "/catalogs", label: "采集目录", icon: <DatabaseOutlined /> },
+    ],
+  },
 ];
 
-const BREADCRUMB_MAP: Record<string, string> = {
-  catalog: "指标目录",
-  create: "注册指标",
-  review: "审核工作台",
-  todo: "待办中心",
-  lineage: "血缘视图",
-  favorites: "我的收藏",
-  dashboard: "治理驾驶舱",
-  detail: "指标详情",
-  guide: "消费指南",
-};
+const ALL_NAV_KEYS = NAV_GROUPS.flatMap((g) => g.children.map((c) => c.key));
 
 export function Layout({ user }: { user: CurrentUser }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [searchKw, setSearchKw] = useState("");
+  const [notifCount, setNotifCount] = useState(0);
   const navigate = useNavigate();
   const location = useLocation();
+  const { token } = theme.useToken();
 
-  const selectedKey = "/" + location.pathname.split("/").filter(Boolean)[0];
+  // 选中项：最长前缀匹配
+  const selectedKey = useMemo(() => {
+    const path = location.pathname;
+    const matched = ALL_NAV_KEYS.filter((k) => path === k || path.startsWith(`${k}/`));
+    if (matched.length === 0) return "";
+    return matched.sort((a, b) => b.length - a.length)[0];
+  }, [location.pathname]);
 
-  const pathSegments = location.pathname.split("/").filter(Boolean);
-  const breadcrumbItems = [
-    { title: "Unisense" },
-    ...pathSegments.map((seg) => ({
-      title: BREADCRUMB_MAP[seg] || seg,
-    })),
-  ];
+  useEffect(() => {
+    let cancelled = false;
+    listNotifications()
+      .then((res) => {
+        if (!cancelled) setNotifCount(res.items.filter((n) => n.status !== "SENT").length);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [location.pathname]);
+
+  function handleSearch() {
+    if (!searchKw.trim()) return;
+    navigate(`/catalog?kw=${encodeURIComponent(searchKw.trim())}`);
+  }
 
   const userMenuItems = [
     {
@@ -69,64 +144,123 @@ export function Layout({ user }: { user: CurrentUser }) {
     },
   ];
 
-  function handleMenuClick({ key }: { key: string }) {
+  function handleUserMenu({ key }: { key: string }) {
     if (key === "logout") {
       clearToken();
       window.location.reload();
     }
   }
 
-  function handleNav({ key }: { key: string }) {
-    navigate(key);
-  }
+  const menuItems = NAV_GROUPS.map((g) => ({
+    type: "group" as const,
+    label: g.label,
+    children: g.children.map((c) => ({ key: c.key, icon: c.icon, label: c.label })),
+  }));
 
   return (
     <AntLayout style={{ minHeight: "100vh" }}>
-      <Sider collapsible collapsed={collapsed} onCollapse={setCollapsed}>
+      <Sider
+        collapsible
+        collapsed={collapsed}
+        onCollapse={setCollapsed}
+        width={232}
+        theme="dark"
+        style={{ borderRight: "1px solid rgba(255,255,255,0.06)" }}
+      >
         <div
           style={{
-            height: 32,
-            margin: 16,
-            color: "#fff",
-            fontWeight: 700,
-            fontSize: collapsed ? 14 : 18,
-            textAlign: "center",
-            lineHeight: "32px",
+            height: 56,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: collapsed ? "center" : "flex-start",
+            gap: 12,
+            padding: collapsed ? 0 : "0 20px",
+            borderBottom: "1px solid rgba(255,255,255,0.08)",
           }}
         >
-          {collapsed ? "U" : "Unisense"}
+          <div className="brand-mark" style={{ width: 32, height: 32, borderRadius: 9, fontSize: 15 }}>
+            U
+          </div>
+          {!collapsed && (
+            <div>
+              <div className="brand-name" style={{ color: "#fff", fontSize: 15 }}>
+                Unisense
+              </div>
+              <div className="brand-sub" style={{ fontSize: 10, color: "rgba(235,240,247,0.5)" }}>
+                Metric Semantics Hub
+              </div>
+            </div>
+          )}
         </div>
         <Menu
           theme="dark"
           mode="inline"
-          selectedKeys={[selectedKey]}
-          items={NAV_ITEMS.map((item) => ({
-            key: item.key,
-            icon: item.icon,
-            label: item.label,
-          }))}
-          onClick={handleNav}
+          selectedKeys={selectedKey ? [selectedKey] : []}
+          items={menuItems}
+          onClick={({ key }) => navigate(key)}
+          style={{ borderInlineEnd: "none", paddingBottom: 24 }}
         />
       </Sider>
+
       <AntLayout>
         <Header
           style={{
             padding: "0 24px",
-            background: "#fff",
+            background: token.colorBgContainer,
             display: "flex",
             alignItems: "center",
-            justifyContent: "space-between",
-            boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
+            gap: 16,
+            boxShadow: "0 1px 4px rgba(12,22,38,0.06)",
+            position: "sticky",
+            top: 0,
+            zIndex: 10,
           }}
         >
-          <Breadcrumb items={breadcrumbItems} />
-          <Dropdown menu={{ items: userMenuItems, onClick: handleMenuClick }} placement="bottomRight">
-            <Button type="text" icon={<Avatar size="small" icon={<UserOutlined />} />}>
-              {user.display_name}
+          <div className="header-brand" style={{ flex: "0 0 auto" }}>
+            {!collapsed && (
+              <>
+                <div className="brand-mark" style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14 }}>
+                  U
+                </div>
+                <div>
+                  <div className="brand-name" style={{ fontSize: 15 }}>Unisense</div>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="header-search">
+            <Input
+              prefix={<SearchOutlined style={{ color: token.colorTextSecondary }} />}
+              placeholder="搜索指标名 / 编码，回车直达目录"
+              value={searchKw}
+              onChange={(e) => setSearchKw(e.target.value)}
+              onPressEnter={handleSearch}
+              allowClear
+            />
+          </div>
+
+          <div style={{ flex: 1 }} />
+
+          <Tooltip title="通知中心">
+            <Badge count={notifCount} size="small" offset={[-2, 2]}>
+              <Button
+                type="text"
+                icon={<BellOutlined style={{ fontSize: 16 }} />}
+                onClick={() => navigate("/notifications")}
+              />
+            </Badge>
+          </Tooltip>
+
+          <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenu }} placement="bottomRight">
+            <Button type="text" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Avatar size="small" style={{ background: token.colorPrimary }} icon={<UserOutlined />} />
+              <span>{user.display_name}</span>
             </Button>
           </Dropdown>
         </Header>
-        <Content style={{ margin: 24, padding: 24, background: "#fff", borderRadius: 8, minHeight: 280 }}>
+
+        <Content style={{ padding: 24, overflow: "auto" }} className="app-content">
           <Outlet />
         </Content>
       </AntLayout>

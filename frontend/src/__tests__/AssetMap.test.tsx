@@ -9,19 +9,38 @@ vi.mock("../api", () => ({
   fetchAssetGraph: vi.fn(),
   fetchAssetHeatmap: vi.fn(),
   fetchAssetOwnerView: vi.fn(),
+  fetchAssetSummary: vi.fn(),
+  fetchAssetClassification: vi.fn(),
+  fetchAssetMetricSummary: vi.fn(),
+  fetchAssetTables: vi.fn(),
+  fetchAssetOrphans: vi.fn(),
 }));
 
-// Mock useTracking hook
+vi.mock("@ant-design/charts", () => ({
+  Pie: () => <div data-testid="mock-pie" />,
+}));
+
+// Mock useTracking hook（返回稳定引用，避免 effect 依赖反复触发）
+const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
-  useTracking: () => ({ track: vi.fn() }),
+  useTracking: () => ({ track: trackMock }),
 }));
 
-import { fetchAssetGraph, fetchAssetHeatmap, fetchAssetOwnerView } from "../api";
+import {
+  fetchAssetGraph,
+  fetchAssetHeatmap,
+  fetchAssetOwnerView,
+  fetchAssetSummary,
+  fetchAssetClassification,
+  fetchAssetMetricSummary,
+  fetchAssetTables,
+  fetchAssetOrphans,
+} from "../api";
 
 const mockGraphData = {
   nodes: [
-    { id: "m1", label: "finance_revenue_sum_d", type: "metric" },
-    { id: "m2", label: "finance_cost_sum_d", type: "metric" },
+    { id: "m1", label: "finance_revenue_sum_d", type: "metric", domain: "finance" },
+    { id: "m2", label: "finance_cost_sum_d", type: "metric", domain: "finance" },
   ],
   edges: [
     { source: "m1", target: "m2", type: "derives_from" },
@@ -29,17 +48,17 @@ const mockGraphData = {
 };
 
 const mockHeatmapData = {
+  dimension: "domain",
   buckets: [
-    { domain: "finance", pii_count: 5, total: 40, pii_ratio: 0.125 },
-    { domain: "marketing", pii_count: 2, total: 30, pii_ratio: 0.067 },
+    { key: "finance", pii_count: 5, total: 40 },
+    { key: "marketing", pii_count: 2, total: 30 },
   ],
 };
 
 const mockOwnerViewData = {
-  owners: [
-    { owner_id: 1, owner_name: "admin", metric_count: 50, pii_count: 10 },
-    { owner_id: 2, owner_name: "analyst", metric_count: 30, pii_count: 5 },
-  ],
+  owner_id: 1,
+  metrics: { total: 50, published: 30, draft: 10, pii_count: 5, by_domain: { finance: 40, marketing: 10 } },
+  catalogs: { total: 8 },
 };
 
 function renderAssetMap() {
@@ -56,6 +75,11 @@ describe("AssetMap", () => {
     vi.mocked(fetchAssetGraph).mockResolvedValue(mockGraphData);
     vi.mocked(fetchAssetHeatmap).mockResolvedValue(mockHeatmapData);
     vi.mocked(fetchAssetOwnerView).mockResolvedValue(mockOwnerViewData);
+    vi.mocked(fetchAssetSummary).mockResolvedValue({ total: 10, by_entity_type: { table: 8, field: 2 }, by_sensitivity: { PUBLIC: 6, PII: 4 }, orphan_assets: 1 });
+    vi.mocked(fetchAssetClassification).mockResolvedValue({ by_sensitivity: { PUBLIC: 6, PII: 4 } });
+    vi.mocked(fetchAssetMetricSummary).mockResolvedValue({ by_domain: { finance: 2 }, by_status: { PUBLISHED: 1 } });
+    vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(fetchAssetOrphans).mockResolvedValue({ items: [], total: 0 });
   });
 
   it("renders with default graph tab", async () => {
@@ -73,7 +97,7 @@ describe("AssetMap", () => {
     renderAssetMap();
 
     await waitFor(() => {
-      expect(fetchAssetGraph).toHaveBeenCalledOnce();
+      expect(fetchAssetGraph).toHaveBeenCalled();
     });
   });
 

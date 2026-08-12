@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Table, Input, Select, Button, Space, Tag, message } from "antd";
 import { SearchOutlined } from "@ant-design/icons";
 import { listMetrics, UnisenseApiError } from "../api";
@@ -9,6 +9,7 @@ import { useTracking } from "../hooks/useTracking";
 const STATUS_COLOR: Record<string, string> = {
   DRAFT: "default",
   EXPERIMENTAL: "processing",
+  REVIEW: "warning",
   PUBLISHED: "success",
   DEPRECATED: "error",
 };
@@ -16,6 +17,7 @@ const STATUS_COLOR: Record<string, string> = {
 const STATUS_LABEL: Record<string, string> = {
   DRAFT: "草稿",
   EXPERIMENTAL: "实验",
+  REVIEW: "审核",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",
 };
@@ -28,7 +30,23 @@ export function MetricCatalog() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { track } = useTracking();
+
+  // 支持从全局搜索 / 生命周期信号条经 URL 直达（?kw= 或 ?status=）
+  useEffect(() => {
+    const kw = searchParams.get("kw");
+    const st = searchParams.get("status");
+    if (kw) {
+      setKeyword(kw);
+      setPage(1);
+    }
+    if (st) {
+      setStatus(st);
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   async function load() {
     setLoading(true);
@@ -103,6 +121,14 @@ export function MetricCatalog() {
 
   return (
     <div>
+      <div className="page-head">
+        <div>
+          <div className="page-kicker">Assets / Catalog</div>
+          <h2>指标目录</h2>
+          <p>全量指标定义——按状态/域/关键词检索，点击进入详情。</p>
+        </div>
+      </div>
+
       <Space style={{ marginBottom: 16 }} wrap>
         <Input
           placeholder="搜索指标名/编码"
@@ -127,11 +153,12 @@ export function MetricCatalog() {
           options={[
             { value: "DRAFT", label: "草稿" },
             { value: "EXPERIMENTAL", label: "实验" },
+            { value: "REVIEW", label: "审核" },
             { value: "PUBLISHED", label: "已发布" },
             { value: "DEPRECATED", label: "已废弃" },
           ]}
         />
-        <span style={{ color: "#999" }}>共 {total} 条</span>
+        <span className="muted">共 {total} 条</span>
       </Space>
 
       <Table

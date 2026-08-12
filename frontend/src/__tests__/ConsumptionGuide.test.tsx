@@ -1,39 +1,44 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ConsumptionGuide } from "../pages/ConsumptionGuide";
 
 // Mock API
 vi.mock("../api", () => ({
   fetchConsumptionGuide: vi.fn(),
+  getMetric: vi.fn(),
 }));
 
-// Mock useTracking hook
+// Mock useTracking hook（返回稳定引用，避免 effect 依赖反复触发）
+const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
-  useTracking: () => ({ track: vi.fn() }),
+  useTracking: () => ({ track: trackMock }),
 }));
 
-import { fetchConsumptionGuide } from "../api";
+import { fetchConsumptionGuide, getMetric } from "../api";
 const mockedFetchGuide = vi.mocked(fetchConsumptionGuide);
 
 const mockGuideData = {
   metric_code: "finance_revenue_sum_d",
-  definition: "财务域收入汇总指标",
-  calculation_logic: "SUM(revenue) GROUP BY date",
-  dimensions: [
-    { name: "date", description: "统计日期", type: "PARTITION" },
-  ],
-  usage_examples: [
-    { title: "按日查询", sql: "SELECT * FROM finance_revenue WHERE date = '2026-01-01'", description: "按日查询收入" },
-  ],
+  name: "财务域收入汇总",
+  domain: "finance",
+  type: "atomic",
+  granularity: "day",
+  unit: "元",
+  aggregation: "SUM",
+  time_semantics: "PERIOD",
+  serving_mode: "BATCH_ONLY",
+  recommended_usage: ["适用 finance 域 day 粒度分析", "聚合方式为 SUM，可以跨维度聚合"],
+  cautions: ["该指标包含 PII 数据，使用时需遵守数据合规要求"],
   related_metrics: ["finance_cost_sum_d"],
-  faq: [{ question: "是否含税？", answer: "不含税" }],
 };
 
 function renderGuide(metricCode = "finance_revenue_sum_d") {
   return render(
     <MemoryRouter initialEntries={[`/guide/${metricCode}`]}>
-      <ConsumptionGuide />
+      <Routes>
+        <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
+      </Routes>
     </MemoryRouter>,
   );
 }
@@ -41,12 +46,46 @@ function renderGuide(metricCode = "finance_revenue_sum_d") {
 describe("ConsumptionGuide", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getMetric).mockResolvedValue({
+      id: 1,
+      metric_code: "finance_revenue_sum_d",
+      name: "财务域收入汇总",
+      domain: "finance",
+      type: "atomic",
+      granularity: "day",
+      unit: "元",
+      currency: null,
+      aggregation: "SUM",
+      time_semantics: "PERIOD",
+      freshness: "T1",
+      dw_layer: "DWS",
+      sla: null,
+      metric_tier: "T1",
+      serving_mode: "BATCH_ONLY",
+      additivity: "ADDITIVE",
+      non_additive_dimensions: null,
+      definition_json: { expr: "sum(amount)" },
+      version: 1,
+      row_version: 1,
+      status: "PUBLISHED",
+      owner_id: 1,
+      backup_owner_id: null,
+      pii_flag: true,
+      compliance_reviewed: true,
+      effective_version: 1,
+      consumption_guide: null,
+      successor_code: null,
+      deprecated_at: null,
+      sunset_until: null,
+      created_at: "2026-08-01T00:00:00",
+      updated_at: "2026-08-01T00:00:00",
+    });
   });
 
   it("shows loading state initially", () => {
     mockedFetchGuide.mockReturnValue(new Promise(() => {}));
-    renderGuide();
-    expect(screen.getByText(/加载消费指南/)).toBeInTheDocument();
+    const { container } = renderGuide();
+    expect(container.querySelector(".ant-spin-spinning")).toBeTruthy();
   });
 
   it("renders guide data after successful fetch", async () => {
@@ -54,7 +93,7 @@ describe("ConsumptionGuide", () => {
     renderGuide();
 
     await waitFor(() => {
-      expect(screen.getByText("finance_revenue_sum_d")).toBeInTheDocument();
+      expect(screen.getAllByText("finance_revenue_sum_d").length).toBeGreaterThan(0);
     });
   });
 
@@ -67,18 +106,15 @@ describe("ConsumptionGuide", () => {
     });
   });
 
-  it("renders tabs for definition, calculation, dimensions, examples, related, faq", async () => {
+  it("renders recommended usage, cautions and related metrics sections", async () => {
     mockedFetchGuide.mockResolvedValue(mockGuideData);
     renderGuide();
 
     await waitFor(() => {
-      expect(screen.getByText("口径定义")).toBeInTheDocument();
+      expect(screen.getByText("推荐使用方式")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("计算逻辑")).toBeInTheDocument();
-    expect(screen.getByText("维度说明")).toBeInTheDocument();
-    expect(screen.getByText("使用示例")).toBeInTheDocument();
+    expect(screen.getByText("注意事项")).toBeInTheDocument();
     expect(screen.getByText("关联指标")).toBeInTheDocument();
-    expect(screen.getByText("FAQ")).toBeInTheDocument();
   });
 });
