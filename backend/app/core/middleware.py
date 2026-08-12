@@ -108,6 +108,10 @@ class ErrorHandlerMiddleware(BaseHTTPMiddleware):
                 trace_id=trace_id,
                 ctx=exc.ctx,
             )
+            headers: dict[str, str] = {}
+            retry_after = exc.ctx.get("retry_after")
+            if retry_after is not None:
+                headers["Retry-After"] = str(int(retry_after))
             return JSONResponse(
                 status_code=_ERROR_CODE_HTTP_STATUS.get(exc.error_code, exc.http_status),
                 content={
@@ -116,6 +120,7 @@ class ErrorHandlerMiddleware(BaseHTTPMiddleware):
                     "trace_id": trace_id,
                     "detail": exc.ctx or None,
                 },
+                headers=headers,
             )
         except Exception as exc:
             logger.error(
@@ -138,9 +143,7 @@ class ErrorHandlerMiddleware(BaseHTTPMiddleware):
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """安全响应头中间件（对齐 DEV_GUIDE §13.4）。"""
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
             response.headers[key] = value

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
+from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.models.metric import Metric
@@ -116,6 +117,16 @@ async def create_template(
         created_by=user.id,
     )
     db.add(template)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="template.create",
+        entity_type="metric_template",
+        entity_id=str(template.code),
+        detail={"name": template.name, "domain": template.domain},
+        ip=client_ip(request),
+        trace_id=get_trace_id(request),
+    )
     await db.commit()
     await db.refresh(template)
     return ok(data=template.to_dict(), trace_id=get_trace_id(request))
@@ -154,8 +165,18 @@ async def instantiate_template(
     # 2. 合并默认值 + 用户覆盖
     defaults = dict(template.defaults_json or {})
     # 模板预设字段作为默认
-    for field in ("type", "granularity", "unit", "aggregation", "time_semantics",
-                  "freshness", "dw_layer", "serving_mode", "additivity", "metric_tier"):
+    for field in (
+        "type",
+        "granularity",
+        "unit",
+        "aggregation",
+        "time_semantics",
+        "freshness",
+        "dw_layer",
+        "serving_mode",
+        "additivity",
+        "metric_tier",
+    ):
         val = getattr(template, field, None)
         if val is not None and field not in defaults:
             defaults[field] = val
@@ -178,6 +199,18 @@ async def instantiate_template(
     create_req = MetricCreateRequest(**merged)
     svc = MetricService(db)
     metric = await svc.create_metric(create_req, owner_id=user.id)
+    # PLAT-3: create_metric 仅 flush，补 commit 才算数；PLAT-1: 记模板实例化审计
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="template.instantiate",
+        entity_type="metric_definition",
+        entity_id=str(getattr(metric, "metric_code", "")),
+        detail={"template_id": template_id},
+        ip=client_ip(request),
+        trace_id=get_trace_id(request),
+    )
+    await db.commit()
 
     data = metric.to_dict() if hasattr(metric, "to_dict") else metric
     return ok(data=data, trace_id=get_trace_id(request))
@@ -313,9 +346,7 @@ async def get_consumption_guide(
             "related_metrics": [],
         }
         if metric.pii_flag:
-            guide["cautions"].append(
-                "该指标包含 PII 数据，使用时需遵守数据合规要求"
-            )
+            guide["cautions"].append("该指标包含 PII 数据，使用时需遵守数据合规要求")
         if metric.additivity == "SEMI_ADDITIVE":
             dims = metric.non_additive_dimensions or "未指定"
             guide["cautions"].append(f"半可加指标，不可加维度: {dims}")

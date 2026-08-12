@@ -42,6 +42,8 @@ async def nl2sql(
             detail={"safe": result["safe"]},
             trace_id=trace_id,
         )
+        # PLAT-3: 审计须提交持久化，否则随会话关闭被回滚（合规审计静默丢失）
+        await db.commit()
         return ok(data=result, trace_id=trace_id)
     finally:
         await svc.close()

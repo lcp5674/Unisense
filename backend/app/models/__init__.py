@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from app.models.audit import AuditLog
 from app.models.base import BaseModel, SoftDeleteMixin, TimestampMixin
+from app.models.collector_models import CollectionWatermark, SchemaDriftLog
 from app.models.consume import (
     ApiClient,
     ApiClientStatus,
@@ -22,6 +23,7 @@ from app.models.dimension import (
     MetricDimension,
     Reconciliation,
 )
+from app.models.enums import EntityTypeEnum, SensitivityLevelEnum, SourceTypeEnum
 from app.models.erasure import ErasureRequest, ErasureStatus
 from app.models.feedback import Feedback
 from app.models.glossary import GlossaryConflict, TermRelation, TermVersion
@@ -42,11 +44,13 @@ __all__ = [
     "ApiClientStatus",
     "AuditLog",
     "BaseModel",
+    "CollectionWatermark",
     "DBCatalog",
     "DataSource",
     "Dimension",
     "DimensionMapping",
     "DimensionMember",
+    "EntityTypeEnum",
     "ErasureRequest",
     "ErasureStatus",
     "EventLog",
@@ -64,8 +68,11 @@ __all__ = [
     "Reconciliation",
     "ReconciliationRecord",
     "ReconciliationStatus",
+    "SchemaDriftLog",
+    "SensitivityLevelEnum",
     "SnapshotGeneratedBy",
     "SoftDeleteMixin",
+    "SourceTypeEnum",
     "SubscriptionPref",
     "Term",
     "TermRelation",

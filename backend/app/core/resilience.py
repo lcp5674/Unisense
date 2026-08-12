@@ -26,6 +26,8 @@ class CircuitBreaker:
         self._failures = 0
         self._opened_at: float | None = None
         self._open = False
+        # 半开窗口内是否已放行一次探测（同 loop 内无 await，判定+置位原子，避免恢复期雪崩）
+        self._probing = False
 
     @property
     def state(self) -> str:
@@ -45,15 +47,25 @@ class CircuitBreaker:
             self._opened_at is not None
             and (time.monotonic() - self._opened_at) >= self._reset_timeout
         )
-        return half_open  # 半开窗口允许一次探测
+        if not half_open:
+            return False
+        # 半开窗口每次仅放行一个探测；其余请求保持拒绝，待探测结果复位
+        if self._probing:
+            return False
+        self._probing = True
+        return True
 
     def record_failure(self) -> None:
+        was_probe = self._probing
+        self._probing = False
         self._failures += 1
-        if self._failures >= self._failure_threshold:
+        # 半开探测失败或连续失败达到阈值 -> 打开熔断并重置计时
+        if was_probe or self._failures >= self._failure_threshold:
             self._open = True
             self._opened_at = time.monotonic()
 
     def record_success(self) -> None:
+        self._probing = False
         self._failures = 0
         self._open = False
         self._opened_at = None

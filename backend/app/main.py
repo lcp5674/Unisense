@@ -40,6 +40,7 @@ from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
 from app.core.middleware import ErrorHandlerMiddleware, SecurityHeadersMiddleware, TraceIdMiddleware
 from app.db.redis import close_redis_pool, init_redis_pool
+from app.services.consume.rate_limiter import init_rate_limiter
 
 logger = structlog.get_logger("unisense.main")
 
@@ -75,6 +76,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ---- EventBus 初始化 ----
     init_eventbus(redis_pool)
     logger.info("eventbus_initialized")
+
+    # ---- 限流器初始化（Redis 可用时启用分布式限流，否则 InMemory 降级）----
+    init_rate_limiter(redis_pool)
+    logger.info("rate_limiter_initialized")
 
     # 配置通知服务 URL（供 conflict/governance 事件发布使用）
     if settings.notify_webhook_url:
