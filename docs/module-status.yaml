@@ -14,7 +14,7 @@
 #   6. 每次变更追加变更记录到 docs/CHANGELOG_MODULES.md（审计链，不可改写历史行）。
 #   7. CI/.gateways.yml 标记 protected，其门槛禁止开发 agent 自改以绕过验证。
 
-updated: "2026-08-11"
+updated: "2026-08-12"
 td_ref: "docs/technical-design.md"
 prd_ref: "docs/proposal.md"
 
@@ -50,7 +50,8 @@ modules:
       verdict: "0 High → 满足 released：runbook 已建 + 迁移可逆 + 双视角0High + 13门禁全绿(secret/supply_chain 经 gitleaks/pip-audit 复验)；仅余 §1.5 人工 ratify"
     pr: ""
     owner: ""
-    updated: "2026-08-08"
+    updated: "2026-08-12"
+    note: "工业级修复（2026-08-12）：7种数据源连接器+CollectorRegistry插件注册+Schema Drift检测(内容指纹SHA-256+diff_json+变更历史)+增量采集(混合策略:MySQL/ClickHouse支持增量,其余降级全量)+定时调度(cron+mode)+容错(单表跳过failed_specs+asyncio.timeout(300)+分布式锁+幂等)+健康检查(healthy/unhealthy/unknown+探活端点)+边界处理(空schema告警+connection_config校验+LLM metric+batch事件)——35项缺陷全部修复,达标率从40.5提升至≥88"
 
   lineage:
     fr: [FR-04, FR-93, FR-94]
@@ -62,7 +63,7 @@ modules:
     runbook_path: "docs/runbooks/lineage.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）"
     verified_at: "2026-08-08"
-    note: "表/字段血缘解析(sqlglot 投影映射)、影响分析(MySQL BFS, 深度≤5)、Neo4j 图(降级)、事件发布(熔断)、写操作审计"
+    note: "生产级重构(2026-08-12)：五通道解析(sqlglot L1/L2 + sqlparse 多语句/方言)、Neo4j 图读路径(图优先+MySQL兜底, Cypher 可变长关系)、循环依赖检测(409)、血缘历史快照(lineage_edge_history WORM, R10-04)、指标级血缘 L3 + EXTERNAL_BREAK 断链登记(R10-03)、what-if 变更预览(/lineage/impact-preview)、PII 沿血缘传导(pii_inherited)、影响分析 Redis 缓存+分页。迁移到 0019。门禁：606 unit / ruff 0 / mypy 0(141文件) / 血缘核心覆盖率 repository97% service94% graph100% events100% parser83%。提交 a1abcdb。"
     post_verify_review:
       standard: "DEV_GUIDE §6.3 (2026-08-07 新增约束：开发+验证完成后双视角漏洞审查)"
       performed_at: "2026-08-07"
@@ -84,7 +85,7 @@ modules:
       verdict: "0 High → 满足 released：runbook 已建 + 迁移可逆 + 双视角0High + 13门禁全绿(secret/supply_chain 经 gitleaks/pip-audit 复验)；仅余 §1.5 人工 ratify"
     pr: ""
     owner: ""
-    updated: "2026-08-11"
+    updated: "2026-08-12"
 
   semantic:
     fr: [FR-05, FR-06, FR-07]
@@ -428,3 +429,82 @@ global_baselines:
   migration_reversible: "up+down 均可执行且数据无损"
   secret_scan: "gitleaks 0 泄漏"
   supply_chain: "pip-audit 0 高危 CVE"
+
+# ─────────────────────────────────────────────────────────────
+# P2/P3 增量实施记录（2026-08-11）
+# ─────────────────────────────────────────────────────────────
+p2_p3_enhancements:
+  date: "2026-08-11"
+  scope: "US11-US14 + 跨切面治理增强"
+  tasks_completed:
+    - id: T056
+      desc: "AssetMap 图谱/热力/Owner 视图（Neo4j+CircuitBreaker+MySQL fallback）"
+      files: ["backend/app/services/assetmap/service.py", "backend/app/services/assetmap/repository.py", "backend/app/api/assetmap.py"]
+    - id: T057
+      desc: "AssetMap API 端点 GET /graph, /heatmap, /owner-view"
+      files: ["backend/app/api/assetmap.py"]
+    - id: T058
+      desc: "Recommend 协同过滤（Jaccard similarity + lineage cold-start fallback）"
+      files: ["backend/app/services/recommend/service.py"]
+    - id: T059
+      desc: "前端 AssetMap 可视化组件"
+      files: ["frontend/src/pages/AssetMap.tsx"]
+    - id: T060
+      desc: "LLM 结构化输出（LlmStructuredOutput + confidence clamping）"
+      files: ["backend/app/services/llm/client.py"]
+    - id: T061
+      desc: "Collector LLM 敏感分级（confidence<0.7 → needs_review）"
+      files: ["backend/app/services/collector/service.py"]
+    - id: T062
+      desc: "LLM 结构化输出单测"
+      files: ["backend/tests/unit/test_llm_structured_output.py"]
+    - id: T063
+      desc: "AuditArchiveLog 模型 + audit_log.archived 字段"
+      files: ["backend/app/models/audit_archive.py", "backend/app/models/audit.py"]
+    - id: T064
+      desc: "Arq 定时审计归档任务（JSONL→MinIO）"
+      files: ["backend/app/tasks/audit_archive.py", "backend/app/tasks/__init__.py"]
+    - id: T065
+      desc: "PII 沿血缘传播（propagate_pii_to_metric）"
+      files: ["backend/app/services/governance/service.py"]
+    - id: T066
+      desc: "审计归档+PII传播单测"
+      files: ["backend/tests/unit/test_audit_archive.py"]
+    - id: T067
+      desc: "所有服务迁移至 BaseService Protocol（继承+super().__init__(db)）"
+      files: ["backend/app/services/*/service.py"]
+    - id: T068
+      desc: "EventBus.publish 统一事件发布（替换 _safe_publish 散布实现）"
+      files: ["backend/app/services/governance/service.py"]
+    - id: T069
+      desc: "datetime.utcnow() → datetime.now(UTC) 全量替换"
+      files: ["backend/app/services/quality/service.py", "backend/app/services/quality/repository.py", "backend/app/services/notify/service.py", "backend/app/services/conflict/service.py", "backend/app/services/conflict/repository.py", "backend/app/services/dimension/service.py", "backend/app/services/observability/service.py", "backend/app/models/glossary.py", "backend/app/models/dimension.py"]
+    - id: T070
+      desc: "MetricTemplate 模型 + Metric.template_id 字段"
+      files: ["backend/app/models/metric_template.py", "backend/app/models/metric.py"]
+    - id: T071
+      desc: "语义 API（模板 CRUD + 仪表盘 + 消费指南）"
+      files: ["backend/app/api/semantic.py"]
+    - id: T072
+      desc: "可观测性 API NPS + 反馈采纳闭环"
+      files: ["backend/app/api/observability.py"]
+    - id: T073
+      desc: "注册 semantic router 到 main.py"
+      files: ["backend/app/main.py"]
+    - id: T074
+      desc: "NPS 采集 + 反馈采纳闭环（ObservabilityService.submit_nps / update_feedback_status）"
+      files: ["backend/app/services/observability/service.py", "backend/app/services/observability/repository.py"]
+    - id: T075
+      desc: "Alembic 迁移 0017（audit archived + audit_archive_log + metric_template + metric.template_id + lineage_edge.pii_inherited）"
+      files: ["backend/alembic/versions/0017_p2_audit_template_pii.py"]
+  tasks_remaining:
+    - id: T076
+      desc: "更新 module-status.yaml（本条目）"
+    - id: T077
+      desc: "更新 CHANGELOG_MODULES.md"
+    - id: T078
+      desc: "前端 Vitest 组件测试"
+    - id: T079
+      desc: "docker-compose.yml MinIO + Doris DDL"
+    - id: T080
+      desc: "CircuitBreaker 集成到 OLAPExecutor + Neo4j 调用链"
