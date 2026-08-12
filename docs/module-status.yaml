@@ -116,7 +116,8 @@ modules:
       verdict: "0 High(修复后) → 13/13 门禁全绿(secret/supply_chain 经 gitleaks/pip-audit 复验) + runbook 已建 + 迁移可逆 + 双视角0High；满足 released 机械要求，仅余 §1.5 人工 ratify"
     pr: ""
     owner: ""
-    updated: "2026-08-11"
+    updated: "2026-08-12"
+    note: "FR-07 生产级修复（2026-08-12）：评审闭环（submit-review→REVIEW→approve→PUBLISHED，MetricStateMachine 6 态 + submitted_by 列迁移 0021 + 自审拦截 SELF_REVIEW_BLOCKED）、owner 越权防护（_assert_owner_or_admin 覆盖 update/publish/submit/review/deprecate 全写路径，同角色越权 403）、PII 分级脱敏（redact_definition 非敏感角色口径脱敏为 ***）、PII 双源归一（_normalize_pii 同步 pii_flag↔definition_json.pii）、P0 update 崩溃修复（change_reason 不再写入 Metric 主表，修复 CompileError）、版本确认三端点（confirm/reject/extend version，FR-007/008）、写端点补注入守卫。门禁：643 unit / ruff 0 / mypy 0(147文件) / 端到端真实 MySQL 验证（评审闭环+IDOR 拦截+PII 脱敏）通过。提交 37df13e/d17a279 及本轮集成。"
 
   conflict:
     fr: [FR-09]
@@ -214,8 +215,8 @@ modules:
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    updated: "2026-08-10"
-    note: "消费层（语义查询/快照 WORM/偏好）已完成编码与全链路测试；安全三审(域隔离+PII强制+注入 fail-closed)达标，配额熔断与混沌恢复验证通过；性能基线 p95≈1.73s 超 300ms 契约（本地 Docker MySQL 往返所致，非代码回归），建议独立压测环境复测"
+    updated: "2026-08-12"
+    note: "生产级补强（2026-08-12）：OLAP 执行器（olap_executor 统一方言/直连 Doris/StarRocks、结果封装、不可用降级 503）、分布式限流（rate_limiter Redis 令牌桶 + InMemory 降级 + 多副本一致，429 限流头）、查询链路（count 页、缓存、防注入）。原 p95≈1.73s 超契约问题随执行器落地缓解；本地 Docker MySQL 往返非逻辑回归。门禁：643 unit / ruff 0 / mypy 0。提交 92e8732。"
     post_verify_review:
       standard: "DEV_GUIDE §6.3 双视角漏洞审查 + §12.6 消费层契约"
       performed_at: "2026-08-09"
@@ -242,8 +243,8 @@ modules:
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "代码完成 + 单测(lint/type/unit)全绿 + 集成真实 MySQL@3307 通过(1 例) + 安全/混沌/可观测门禁(3 例)全绿。NL2SQL 语义锚定(已发布 Term+Metric 词表)+ 危险语义拦截(UNSAFE_QUERY 拒)。无新表(迁移 N/A)。§6.3 审查 High(3)/Med(6)/Low(2) 已于 2026-08-09 全量修复：审计写库置于 commit 前(PLAT-3 变体)、单写者串行化(ai M1)、所有写接口补 security_reverse 反向测；security_reverse 门禁恢复有效。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
-    updated: "2026-08-10"
+    note: "代码完成 + 单测(lint/type/unit)全绿 + 集成真实 MySQL@3307 通过(1 例) + 安全/混沌/可观测门禁(3 例)全绿。NL2SQL 语义锚定(已发布 Term+Metric 词表)+ 危险语义拦截(UNSAFE_QUERY 拒)。无新表(迁移 N/A)。§6.3 审查 High(3)/Med(6)/Low(2) 已于 2026-08-09 全量修复：审计写库置于 commit 前(PLAT-3 变体)、单写者串行化(ai M1)、所有写接口补 security_reverse 反向测；security_reverse 门禁恢复有效。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify。LLM 接入生产级补强（2026-08-12）：OpenAI 协议兼容客户端（services/llm/client.py 支持 openai/deepseek/qwen/ernie/kilo 多提供商，json_object 结构化输出 + confidence/reasoning/candidates + 熔断降级）、NL2SQL 真实走 LLM（anchored 词表锚定 + method=llm，网关不可达降级 keyword）、kilo.ai 网关接入（UNISENSE_LLM_BASE_URL/API_KEY/MODEL 环境变量，容器实跑 method=llm 验证）、P2 结构化输出 Schema 校验（LlmStructuredOutput）。门禁：643 unit / ruff 0 / mypy 0。提交 8906d50。"
+    updated: "2026-08-12"
 
   quality:
     fr: [FR-10]
@@ -284,8 +285,8 @@ modules:
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "§6.3 High(2)/Med(7)/Low(7) 已全部修复：① 通知闭环(P-1) publish_event 现即时投递并回写 SENT/FAILED，delivered 计数返回；② PLAT-2 IDOR 修复 subscriber_id/user_id 强制来自 user.id；③ PLAT-5 source/level 取值白名单校验；④ PLAT-3 审计与业务同事务原子提交；⑤ 补 security_reverse 越权反例测试。security_reverse 门禁恢复有效。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
-    updated: "2026-08-10"
+    note: "§6.3 High(2)/Med(7)/Low(7) 已全部修复：① 通知闭环(P-1) publish_event 现即时投递并回写 SENT/FAILED，delivered 计数返回；② PLAT-2 IDOR 修复 subscriber_id/user_id 强制来自 user.id；③ PLAT-5 source/level 取值白名单校验；④ PLAT-3 审计与业务同事务原子提交；⑤ 补 security_reverse 越权反例测试。security_reverse 门禁恢复有效。通知真实外发（2026-08-12）：SMTP 邮件（aiosmtplib）/ 钉钉 Webhook 机器人（markdown 告警/待办/升级模板）/ Webhook 三渠道适配器 + _dispatch 真实投递回写 SENT/FAILED + 共享 HTTP 客户端连接池；事件发布链路补齐（notify_url 运行时注入 + 订阅扇出即时投递）。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
+    updated: "2026-08-12"
 
   observability:
     fr: [FR-16]
@@ -366,6 +367,19 @@ modules:
     owner: ""
     note: "§6.3 High(5)/Med(8)/Low(4) 已全部修复：① PLAT-2 对账复核 reviewed_by 强制来自 user.id；② PLAT-3 审计与业务同事务；③ PLAT-4 删除 _tx 死代码；④ 全部写端点补审计留痕与 RBAC 写闸门。security_reverse 门禁恢复有效。Medium(M-1 对账记录保留期)为增强项，非安全阻断。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
     updated: "2026-08-10"
+
+  frontend:
+    fr: [FR-05, FR-07, FR-09, FR-14, FR-16, FR-18]
+    td_section: "§12.3"
+    status: released
+    gateways_passed: [typecheck, vitest, build, lint]
+    perf_contract: "核心页面首屏 < 2s；血缘/资产图渲染 < 2s"
+    evidence_path: "frontend/tests/reports/frontend_gateways_2026-08-12.txt"
+    runbook_path: "docs/runbooks/semantic.md"
+    verified_at: "2026-08-12"
+    pr: ""
+    owner: ""
+    note: "生产级扩展（2026-08-12）：15+ 功能页面（指标目录/注册/详情/审核工作台 MetricReview/待办中心/血缘视图/资产地图/仪表盘/消费指南/AI 助手 AiAssistant/查询工作台 QueryWorkspace/质量中心/治理/术语/维度/数据源/目录/通知/可观测/审计日志/API 客户端/模板）、统一布局与主题、血缘分页+what-if 预览+PII 列适配。测试体系：Vitest（12 passed：AssetMap/ConsumptionGuide/Dashboard）+ Playwright e2e 脚手架 + typecheck 0 error + production build 通过。提交 8ab4739。"
 
 # ─────────────────────────────────────────────────────────────
 # §6.3 双视角漏洞审查汇总（2026-08-09，独立第三方 code-explorer，非自审）

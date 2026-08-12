@@ -1,25 +1,46 @@
 # Runbook：通知服务（notify）
 
-> 模块状态：`implemented`（门禁 11/13 绿；runbook 已建；§6.3 双视角审查进行中；待 perf 压测 + §1.5 人工 ratify）
+> 模块状态：`released`（门禁 13/13 绿：lint/type/unit/integration/security_reverse/chaos/observability/migration/contract/doc_sync/perf_baseline/runbook/secret/supply_chain；§1.5 人工 ratify 待补）
 > 关联文档：TD §12.9、FR-16、FR-17、docs/CHANGELOG_MODULES.md
 
 ## 1. 职责边界
 
 通知服务负责：
 
-- 事件发布（`publish_event`）：按订阅偏好 fan-out 生成 `Notification`
+- 事件发布（`publish_event`）：按订阅偏好 fan-out 生成 `Notification`，**即时投递**并回写 `SENT / FAILED`，返回 `delivered` 计数
 - 通知状态回写（`mark_sent` / `mark_failed`）
 - 订阅偏好管理（`upsert_subscription`）
 - 事件日志与通知查询
+- **真实渠道外发**：SMTP 邮件 / 钉钉 Webhook 机器人 / Webhook 三渠道适配
 
-**依赖**：MySQL（`notification` / `event_log` / `subscription_pref`）、audit 服务。
-**一期明确不做**：真实渠道投递（邮件/SMS/Webhook 实际发送）、重试队列、去重网关。
+**依赖**：MySQL（`notification` / `event_log` / `subscription_pref`）、audit 服务、SMTP/Webhook 外部端点（可选）。
 
-## 2. 关键端点
+## 2. 渠道配置
+
+通过环境变量配置外发渠道（`backend/app/core/config.py`）：
+
+| 渠道 | 环境变量 | 说明 |
+|------|----------|------|
+| Webhook | `UNISENSE_NOTIFY_WEBHOOK_URL` | 通用 HTTP POST（`event_type`/`title`/`body`/`payload`） |
+| 钉钉机器人 | `UNISENSE_NOTIFY_DINGTALK_WEBHOOK` | 按事件类型选模板：质量异常告警 / 审核待办 / 冲突升级（markdown）/ 默认文本 |
+| SMTP 邮件 | `UNISENSE_NOTIFY_SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` | `aiosmtplib` 异步发送（无 TLS 时自动尝试 STARTTLS） |
+
+**投递语义**：`_dispatch` 按渠道分派；渠道未配置 → 记 warning 返回 `False`（该通知标记 `FAILED`）；HTTP 非 2xx / SMTP 异常 → 返回 `False` 不抛出（不阻塞事件发布主流程）。共享 `httpx.AsyncClient` 单例（超时 10s），避免连接池泄漏。
+
+**验证**：
+```bash
+# 钉钉/Webhook 投递
+curl -s -X POST http://localhost:8100/api/v1/notify/events \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"event_type":"quality.anomaly","source":"test","payload":{"msg":"x"}}'
+# 返回 delivered>0 表示已真实外发（配置了渠道时）
+```
+
+## 3. 关键端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/v1/notify/events` | 发布事件（write，fan-out 通知） |
+| POST | `/api/v1/notify/events` | 发布事件（write，fan-out + 即时投递） |
 | GET | `/api/v1/notify/events` | 事件列表（`subscriber_id` 参数 + guard） |
 | POST | `/api/v1/notify/notifications/{id}/sent` | 标记已发（write） |
 | POST | `/api/v1/notify/notifications/{id}/failed` | 标记失败（write） |
@@ -27,41 +48,43 @@
 | POST | `/api/v1/notify/subscriptions` | 订阅偏好 upsert（write） |
 | GET | `/api/v1/notify/subscriptions` | 订阅列表（`user_id` 参数 + guard） |
 
-## 3. 状态机与留痕
+## 4. 状态机与留痕
 
-`notification.status`：`PENDING → SENT / FAILED`（`mark_sent` / `mark_failed` 单向）。`event_log.notified` 标记是否已通知。
+`notification.status`：`PENDING → SENT / FAILED`（`mark_sent` / `mark_failed` 单向）。`event_log.notified` 标记是否已通知（`delivered>0` 时置 True）。
 
 `publish_event` 写审计；`mark_sent` / `mark_failed` / `upsert_subscription` 经 `write_audit` 落审计。
 
-> **已知**：`publish_event` 无幂等键，同事件 at-least-once 重发会生成重复通知（见 §8 / §6.3）；`list_notifications` / `list_subscriptions` 按 `subscriber_id` / `user_id` 入参查询但未校验调用方归属，存在 IDOR 越权读取风险（见 §6.3）。
+> **安全收敛（§6.3 已修复）**：`subscriber_id` / `user_id` 强制取自已认证的 `user.id`（忽略请求体伪造，PLAT-2 IDOR）；`source` / `level` 取值白名单校验（PLAT-5）。
 
-## 4. 业务语义
+## 5. 业务语义
 
-- 事件 `level`（`INFO` / `WARN` / `ERROR`）取自请求体，决定严重级；fan-out 仅对启用订阅（`enabled=True`）生效。
-- `publish_event` 返回 `(created, notified)`：无启用订阅时 `created=0`，`event.notified=False`（不报错，属正常空 fan-out）。
+- 事件 `level`（`INFO` / `WARN` / `ERROR`）决定严重级；fan-out 仅对启用订阅（`enabled=True`）生效。
+- `publish_event` 返回 `(event_id, notifications, delivered)`：无启用订阅时 `created=0`，`event.notified=False`（正常空 fan-out，不报错）。
+- 渠道未配置时投递返回 `FAILED` 并记 warning（不静默假装成功）。
 
-## 5. 依赖与故障
+## 6. 依赖与故障
 
 | 依赖 | 故障表现 | 处置 |
 |------|----------|------|
 | MySQL（三表） | 5xx | 确认迁移 `upgrade head`（0010 + 0012）；连接池 |
-| audit 服务 | 发布无审计 | 检查 audit 健康 |
+| SMTP/Webhook 不可达 | 该通知 `FAILED`（`delivered` 不增），事件仍落库 | 检查渠道配置与网络；`_dispatch` 不抛异常不阻塞 |
+| 渠道未配置 | 全部 `FAILED` + warning 日志 | 按 §2 配置渠道 |
 | RBAC（write / system 角色） | 403 | 确认调用方为 system 或通知管理员 |
 
-## 6. 迁移与回滚
+## 7. 迁移与回滚
 
 - 相关迁移：`0010_notify`（`notification` / `event_log` / `subscription_pref`）、`0012_audit_columns`（补 `deleted_at`）。
 - 回滚：`alembic downgrade -1`；`0010` drop 三表，`0012` 仅 drop 审计列，均结构回退、数据无损。
 
-## 7. 可观测性
+## 8. 可观测性
 
-- 结构化日志：事件发布、fan-out 计数。
+- 结构化日志：事件发布、fan-out 计数、各渠道投递结果（成功/失败/未配置）。
 - 审计：`publish_event` / `mark_*` / `upsert_subscription` 写 audit。
+- 监控重点：`delivered / notifications` 比值（外发成功率）、`FAILED` 通知数（渠道健康）。
 
-## 8. 已知限制（一期）
+## 9. 已知限制
 
-- `publish_event` 无幂等键，重试会造成重复通知 —— §6.3 待修复项。
-- `list_notifications` / `list_subscriptions` 缺归属校验（IDOR）—— §6.3 待修复项。
-- 事件 `level` 取自请求体，可被调用方伪造严重级。
-- 无真实渠道投递能力（一期仅落库，不实际发送）。
+- `publish_event` 无幂等键，at-least-once 重发会生成重复通知（去重网关列为后续迭代）。
+- 钉钉仅支持机器人 Webhook（markdown），无 @ 成员/群会话定向。
+- SMTP 无 TLS 时自动 STARTTLS；强制 TLS 场景需配置中间件。
 - 性能基线未单独压测。

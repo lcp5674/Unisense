@@ -4,7 +4,7 @@
 > 状态门槛：released（verified + runbook + migration 可逆，§1.5 人工 ratify 待补）
 
 ## 1. 服务概述
-- **职责**：指标语义查询（下推）、口径版本管理、缓存（cache-aside）、PII 访问审计、RED 指标采集、熔断与可选依赖探活。
+- **职责**：指标语义查询（下推）、口径版本管理、缓存（cache-aside）、PII 访问审计、RED 指标采集、熔断与可选依赖探活。**2026-08-12 补强（FR-07）**：发布评审闭环（`submit-review` → REVIEW → `review(approve/reject)` → PUBLISHED，`MetricStateMachine` 6 态，自审拦截 `SELF_REVIEW_BLOCKED`）、owner 越权防护（`_assert_owner_or_admin` 覆盖 update/publish/submit/review/deprecate 全写路径）、PII 分级脱敏（非敏感角色读取口径脱敏为 `***`）、版本确认三端点（`confirm-version` / `reject-version` / `extend-version`，FR-007/008）。
 - **依赖**：
   - MySQL（指标定义主存储）
   - Redis（可选缓存；不可达时经 `CircuitBreaker` 降级到 MySQL，舱壁隔离）
@@ -15,7 +15,7 @@
   - 列表批量 PII 暴露 → 写一条汇总审计（`action=LIST`, `pii_access=True`）
 
 ## 2. 部署步骤
-- **前置条件**：MySQL 可达；Redis 可选；`alembic upgrade head`；`/metrics` 端点暴露给 Prometheus。
+- **前置条件**：MySQL 可达；Redis 可选；`alembic upgrade head`（**至 0021**，含 `metric.submitted_by` 列）；`/metrics` 端点暴露给 Prometheus。
 - **部署命令**：
   ```bash
   UNISENSE_DB_URL=... UNISENSE_JWT_SECRET=... alembic upgrade head
@@ -25,6 +25,8 @@
   - `GET /health`、`GET /ready` → 200（`/ready` 可选依赖降级返回 `degraded` 仍可服务）
   - `GET /metrics` → 200 返回非零 RED 指标
   - `GET /api/v1/metric-definitions` 命中 PII → 审计落库 `data_classification=PII`
+  - **评审闭环**：POST `/metric-definitions/{code}/submit-review`（DRAFT→REVIEW）→ 提交人自审 `review` → 400 `SELF_REVIEW_BLOCKED` → 他人 `review(approved=true)` → PUBLISHED
+  - **越权**：非 owner 的 `metric_owner` 调 PUT/PUBLISH/DEPRECATE 他人指标 → 403 `FORBIDDEN`
 
 ## 3. 监控指标
 - **Prometheus 指标**：请求延迟（RED）、缓存命中率、缓存回源次数、熔断打开次数、PII 审计计数。

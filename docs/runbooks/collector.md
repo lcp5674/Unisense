@@ -4,10 +4,10 @@
 > 状态门槛：released（verified + runbook + migration 可逆，§1.5 人工 ratify 待补）
 
 ## 1. 服务概述
-- **职责**：数据源（DataSource）注册与连通性校验；库表目录（DBCatalog）采集、敏感分级（PII/CONFIDENTIAL/INTERNAL）、幂等废弃；批量自动采集编排；采集事件发布。
+- **职责**：数据源（DataSource）注册与连通性校验；库表目录（DBCatalog）采集、敏感分级（PII/CONFIDENTIAL/INTERNAL）、幂等废弃；批量自动采集编排；采集事件发布。**2026-08-12 补强**：7 种数据源连接器 + `CollectorRegistry` 插件注册（mysql/postgres/clickhouse/doris/starrocks/hive）、Schema Drift 检测（内容指纹 SHA-256 + diff_json + 变更历史，迁移 0018）、增量采集（MySQL/ClickHouse 支持增量，其余降级全量）、定时调度（cron + mode）、容错（单表跳过 failed_specs + `asyncio.timeout(300)` + 分布式锁 + 幂等）、采集健康检查（healthy/unhealthy/unknown + 探活端点）。
 - **依赖**：
   - MySQL（unisense 库，主存储）
-  - Redis（可选，缓存；不可达时经熔断降级，不影响主流程）
+  - Redis（可选，缓存/异步队列；不可达时经熔断降级，不影响主流程）
   - 外部源连接器（JDBC/HTTP/API，凭据经 Fernet 加密存储）
   - 事件总线（MQ，发布经 `CircuitBreaker` best-effort 降级）
 - **关键指标**：
@@ -16,7 +16,7 @@
   - `pii_registered`（本次采集发现的 PII 表计数，写入 COLLECT 审计 `pii_access`）
 
 ## 2. 部署步骤
-- **前置条件**：MySQL 可达；`UNISENSE_DB_URL`、`UNISENSE_JWT_SECRET` 已通过 Secret Manager 注入；alembic 迁移已 `upgrade head`。
+- **前置条件**：MySQL 可达；`UNISENSE_DB_URL`、`UNISENSE_JWT_SECRET` 已通过 Secret Manager 注入；alembic 迁移已 `upgrade head`（含 0018_collector_drift_watermark）。
 - **部署命令**：
   ```bash
   # 迁移
@@ -28,6 +28,7 @@
   - `GET /health` → 200
   - `GET /ready` → 200（依赖缺失时返回 `degraded` 仍可服务）
   - `POST /api/v1/data-sources` 建源 → 200；`POST /api/v1/data-sources/{id}/collect` → 200/503（源不可达降级）
+  - 采集健康检查端点 → `healthy/unhealthy/unknown`（含探活）
 
 ## 3. 监控指标
 - **Prometheus 指标**：采集耗时直方图、PII 注册计数、连接池使用率、事件发布失败计数、外部源失败计数。
@@ -39,7 +40,7 @@
 ## 4. 告警处置
 | 告警 | 原因 | 处置步骤 |
 |------|------|----------|
-| 采集延迟超标 | 外部源慢/网络抖动 | 检查源连通性；确认 `/collect` 为请求内同步（一期未接 arq 队列），大批量拆小批次 |
+| 采集延迟超标 | 外部源慢/网络抖动 | 检查源连通性；`/collect` 已支持异步队列（InMemory 默认 / Arq 生产），大批量拆小批次或走定时调度 |
 | 事件发布失败 | MQ 不可达 | 无需干预，已 best-effort 降级；恢复后补发由下游幂等消费 |
 | 连接池耗尽 | 连接器未释放 | 已修复 `finally` 释放；复现时查日志 `trace_id` 定位长事务 |
 | PII 审计缺失 | 批量采集未触发审计 | 确认 `pii_registered>0` 时 COLLECT 审计 `pii_access=true` |

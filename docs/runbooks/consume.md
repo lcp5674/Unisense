@@ -4,16 +4,16 @@
 > 状态门槛：released（verified + runbook + migration 可逆，§1.5 人工 ratify 待补）
 
 ## 1. 服务概述
-- **职责**：对外提供语义查询（dry-run 口径校验 + 执行计划 + 元信息标注 / 真实下推执行）、结果快照（WORM 一次写不可改）、用户偏好与收藏（user_preference CRUD + 版本确认/驳回回调）。
+- **职责**：对外提供语义查询（dry-run 口径校验 + 执行计划 + 元信息标注 / 真实下推执行）、结果快照（WORM 一次写不可改）、用户偏好与收藏（user_preference CRUD + 版本确认/驳回回调）。**2026-08-12 补强**：OLAP 执行器（`services/consume/olap_executor.py` 统一方言/直连 Doris/StarRocks、结果封装、不可用降级 503）+ 分布式限流（`services/consume/rate_limiter.py` Redis 令牌桶 + InMemory 降级，多副本一致）。
 - **依赖**：
   - MySQL（主存储：api_client / metric_value_snapshot / user_preference）
   - OLAP（可选，查询执行依赖；不可用时查询端点降级 503 非阻塞）
-  - Redis（可选，限流计数）
+  - Redis（可选，分布式限流计数；不可用降级 InMemory）
 - **关键指标**：
   - Semantic API P95 < 300ms
   - 限流 429 带 `retry_after`
   - 含 PII 的访问审计 `data_classification=PII`
-- **安全控制**（双视角审查 0 High）：域隔离（`scope_domain` vs `metric.domain` → `FORBIDDEN_DOMAIN`）、PII 强制（域内全量授权不能隐式访问 `pii_flag=1` → `FORBIDDEN_PII`）、注入 fail-closed（400 `INJECTION_DETECTED`）、配额熔断（429 + `retry_after`）、审计分级（`data_classification=PII`）。
+- **安全控制**（双视角审查 0 High）：域隔离（`scope_domain` vs `metric.domain` → `FORBIDDEN_DOMAIN`）、PII 强制（域内全量授权不能隐式访问 `pii_flag=1` → `FORBIDDEN_PII`）、注入 fail-closed（400 `INJECTION_DETECTED`）、配额熔断（429 + `retry_after`）、审计分级（`data_classification=PII`）。限流参数：`UNISENSE_CONSUME_QPS`（默认 20/s）/ `UNISENSE_CONSUME_DAILY_QUOTA`（默认 100000/日）。
 
 ## 2. 部署步骤
 - **前置条件**：MySQL 可达；`alembic upgrade head`；可选 OLAP / Redis（`/metrics` 暴露给 Prometheus）。

@@ -1,0 +1,6 @@
+=== Unisense 前端门禁证据（2026-08-12）===
+1. typecheck: tsc --noEmit 通过（0 error）
+2. vitest: 3 个测试文件 12 passed（AssetMap 4 / ConsumptionGuide 4 / Dashboard 4）
+3. production build: vite build 通过（gzip JS 52.15 kB）
+4. 页面清单：15+ 功能页（指标目录/注册/详情/审核工作台/待办/血缘/资产地图/仪表盘/消费指南/AI 助手/查询工作台/质量中心/治理/术语/维度/数据源/目录/通知/可观测/审计日志/API 客户端/模板）
+5. e2e: Playwright 脚手架（frontend/e2e/ + playwright.config.ts）
