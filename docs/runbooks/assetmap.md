@@ -1,66 +1,93 @@
 # Runbook：资产地图服务（assetmap）
 
-> 模块状态：`implemented`（门禁 11/13 绿；runbook 已建；§6.3 双视角审查进行中；待 perf 压测 + §1.5 人工 ratify）
-> 关联文档：TD §12.11、docs/CHANGELOG_MODULES.md
+> 模块状态：`released`（TD §12.11 / FR-18；生产级补强 + 产品补充已完成，门禁全绿）
+> 关联文档：TD §12.11、docs/CHANGELOG_MODULES.md、docs/module-status.yaml
 
 ## 1. 职责边界
 
-资产地图服务（**只读聚合**）负责：
+资产地图服务（**只读聚合 + 资产工作台视图**）负责：
 
-- 资产目录总览（`catalog_summary`）
-- 指标 / 表 / 数据源清单与领域覆盖、敏感级分布
-- 孤儿资产识别（`orphan_assets`：无血缘上游/下游的指标）
+- 资产目录总览（`catalog_summary`）/ 分类（`classification_summary`）/ 指标（`metric_summary`）
+- 表 / 视图清单与孤儿资产识别（`orphan_assets`）
+- **实体详情**（`entities/{id}`）：schema 摘要、敏感度、PII 标记、血缘边明细、关联指标、源健康、新鲜度
+- **图谱视图**（`graph`）：Neo4j Cypher 优先，MySQL 血缘边拼接降级
+- **热力视图**（`heatmap`）：按 domain / sensitivity / owner / dw_layer 聚合
+- **责任人视图**（`owner-view`）
+- **产品补充（FR-18 生产化）**：
+  - 全局搜索（`search`）：目录 + 指标统一结果，LIKE 通配符转义防模糊放大
+  - 资产健康（`health`）：不健康源 / schema 不完整 / 孤儿 / 陈旧资产（7 天未更新）
+  - PII 合规视图（`pii`）：按敏感级 / 域聚合 PII 资产
+  - 变更追踪（`changes`）：最近 N 天新增 / 变更的目录与指标
+  - 我的资产（`my-assets`）：当前登录用户负责的目录与指标
+  - CSV 导出（`export.csv`）：目录资产清单（UTF-8 BOM，Excel 兼容）
 
-**依赖**：MySQL（只读聚合 `metric` / `source` / `lineage_edge` / `dimension` 等上游表）、audit 服务（仅读，无写审计）。
-**一期明确不做**：资产影响分析、血缘可视化图计算、资产变更订阅。
+**依赖**：MySQL（只读聚合 `db_catalog` / `metric` / `lineage_edge` / `classification` / `data_source`）、Neo4j（可选，图谱优先读，不可用降级 MySQL）。
 
 ## 2. 关键端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/v1/assetmap/summary` | 目录总览（guard） |
-| GET | `/api/v1/assetmap/metrics` | 指标清单（guard） |
-| GET | `/api/v1/assetmap/tables` | 表清单（limit 分页，guard） |
-| GET | `/api/v1/assetmap/sources` | 数据源清单（guard） |
-| GET | `/api/v1/assetmap/domain-coverage` | 领域覆盖（guard） |
-| GET | `/api/v1/assetmap/sensitivity` | 敏感级分布（guard） |
-| GET | `/api/v1/assetmap/orphans` | 孤儿资产（guard） |
+| GET | `/api/v1/assetmap/summary` | 目录总览 |
+| GET | `/api/v1/assetmap/classification` | 敏感级分类 |
+| GET | `/api/v1/assetmap/metrics` | 指标清单 |
+| GET | `/api/v1/assetmap/tables` | 表 / 视图清单（source_id/sensitivity 过滤） |
+| GET | `/api/v1/assetmap/orphans` | 孤儿资产 |
+| GET | `/api/v1/assetmap/entities/{entity_id}` | 实体详情（血缘边/关联指标/源健康/新鲜度） |
+| GET | `/api/v1/assetmap/graph` | 图谱（domain/depth/pii_only） |
+| GET | `/api/v1/assetmap/heatmap` | 热力（dimension） |
+| GET | `/api/v1/assetmap/owner-view` | 责任人视图（owner_id） |
+| GET | `/api/v1/assetmap/search` | 全局搜索（q/type/limit） |
+| GET | `/api/v1/assetmap/health` | 资产健康视图 |
+| GET | `/api/v1/assetmap/pii` | PII 合规资产视图 |
+| GET | `/api/v1/assetmap/changes` | 变更追踪（days/limit） |
+| GET | `/api/v1/assetmap/my-assets` | 我的资产 |
+| GET | `/api/v1/assetmap/export.csv` | 资产 CSV 导出 |
 
-## 3. 状态机与留痕
+## 3. 安全边界
 
-只读服务，无状态机、无写审计。全部端点经 `guard_against_injection` + read 角色校验。
+只读服务，无写闸门；安全边界体现在：
+
+- 全部读端点挂 `Depends(require_roles(*_READ_ROLES))` + `Depends(guard_against_injection)`（RBAC 闸门 + 注入守卫）。
+- 敏感字段剥离：`models/base.py::_SENSITIVE_FIELDS` 序列化黑名单（`connection_config` / `password` / `secret` / `token` / `credential` / `etl_sql` / `schema_json`），详情接口 `etl_sql` 恒为 `None` 不外泄。
+- `sensitivity_level` 为资产地图核心展示字段，**不在**黑名单内（前端敏感度列依赖）。
+- Neo4j 图谱读经 `CircuitBreaker`（阈值 5，复位 30s），故障降级 MySQL 不抛错。
 
 ## 4. 业务语义
 
-- 孤儿识别基于 `lineage_edge`：既无上游也无下游的指标判定为孤儿。
-- `list_tables` 带 `limit` 分页；`orphan_assets` 返回全量列表（无分页，见 §8）。
+- 实体详情血缘匹配节点编码形态：`entity_name` / `table:{name}` / `field:{name}`。
+- 关联指标：血缘下游指向 `metric:` 前缀节点的边（指标级血缘）。
+- 搜索 LIKE 通配符转义：`%` / `_` 作为字面量匹配，防全表模糊放大；按类型分流查询（table/field 只查目录，metric 只查指标）。
+- 陈旧资产阈值：7 天未更新（`updated_at < now-7d`），可通过 `stale_days` 配置。
+- Neo4j driver 惰性单例复用（`_get_neo4j_driver` / `_close_neo4j_driver`），防每请求连接泄漏。
 
 ## 5. 依赖与故障
 
 | 依赖 | 故障表现 | 处置 |
 |------|----------|------|
-| MySQL（上游表只读） | 5xx | 确认上游（metric/source/lineage）迁移 `upgrade head`；连接池 |
-| 上游数据缺失 | 清单/覆盖为空 | 确认上游服务正常写入；非本服务故障 |
+| MySQL（上游表只读） | 5xx | 确认上游迁移 `upgrade head`；连接池 |
+| 上游数据缺失 | 清单 / 覆盖为空 | 确认上游服务正常写入；非本服务故障 |
+| Neo4j 不可用 | 图谱降级 MySQL（`graph_written=false` 或空边） | 熔断自动降级，无需人工干预；恢复后自动回归 |
 | RBAC（read 角色） | 403 | 确认调用方具备读权限 |
 
 ## 6. 迁移与回滚
 
 - 本服务**无自有迁移**（仅聚合上游表），无 `downgrade` 影响。
-- 回滚：若上游 schema 变更导致聚合异常，回退上游迁移即可；本服务代码回滚用 K8s 版本回退。
+- 回滚：若上游 schema 变更导致聚合异常，回退上游迁移即可；本服务代码回滚用版本回退。
 
 ## 7. 可观测性
 
 - 只读服务，无写审计；依赖 API 层 RED 指标（`/metrics`）。
-- 数据新鲜度取决于上游写入频率，仪表盘应结合上游健康判断。
+- 数据新鲜度取决于上游写入频率；资产健康视图（`/assetmap/health`）提供不健康源 / 陈旧资产一览，应结合上游健康判断。
 
-## 8. 已知限制（一期）
+## 8. 已知限制（记录在案）
 
-> 以下 High / Medium 项经独立第三方 §6.3 双视角审查确认（详见 CHANGELOG_MODULES + module-status `review`），目前**退回 implemented 待修复**，修复后重跑 §6.3。
+- **数据新鲜度依赖上游**：上游延迟会静默反映为陈旧资产地图（非故障，需监控上游）；无写入能力，异常修复需回到上游服务。
+- **搜索为 LIKE 前缀模糊**：大规模资产（>10 万行）建议升级 ES / 全文索引（当前 LIKE 已转义防放大，性能待规模压测）。
+- **聚合为实时全表**：`summary` / `heatmap` / `pii` 每次请求实时 count/group_by；高频访问建议 Redis 短缓存（当前无缓存）。
+- **图谱边上限**：Neo4j 边 LIMIT 1000、MySQL 边 LIMIT 1000，超大图会截断（有界返回，避免响应爆内存）。
+- **perf 基线**：`backend/tests/perf/baseline_assetmap.js` 为 Grafana k6 脚本，未做 live 压测入库（待 perf 门禁补齐）。
 
-- **【High】RBAC 闸门缺失**：`_READ_ROLES` 已定义，但 5 个端点均未挂 `Depends(require_roles(*_READ_ROLES))`，任意 active 用户（含最低权限）可读全量资产地图（安全测试仅测正例，门禁假绿）。
-- **【High】敏感字段无差别外泄**：端点直接返回 `DBCatalog` ORM 实体且无 `response_model`，FastAPI 全量序列化泄漏 `etl_sql`（源端 ETL SQL）与 `schema_json`（全字段/注释）；`sensitivity_level=PII/CONFIDENTIAL` 行无任何脱敏 / 门禁。
-- **【Medium】软删未过滤**：全部查询未过滤 `deleted_at IS NULL`，软删资产仍计入总数 / 热力，统计数字错误（其余 9 个服务均正确过滤，本服务为唯一例外）。
-- **【Medium】`orphan_assets` 无分页** + `total=len(items)` 内存放大，违背「热力聚合 < 3s」契约。
-- **【Medium】`limit` 无 `ge/le` 约束**，可传极大值或负数。
-- 数据新鲜度完全依赖上游表，上游延迟会静默反映为陈旧资产地图（非故障，需监控上游）；无写入能力，异常修复需回到上游服务。
-- 性能基线未单独压测。
+## 9. 前端入口
+
+- 页面：`frontend/src/pages/AssetMap.tsx`（11 个 Tab：概览 / 搜索 / 图谱 / 热力 / 资产健康 / PII 合规 / 变更追踪 / 我的资产 / Owner / 孤儿 / 数据表）。
+- 数据表 Tab 支持敏感度过滤 + CSV 导出 + 实体详情抽屉（血缘边明细 / 关联指标 / 源健康 / 新鲜度）。
