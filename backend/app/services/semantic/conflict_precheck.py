@@ -31,14 +31,17 @@ class ConflictPrechecker:
     用法::
 
         checker = ConflictPrechecker()
-        valid, error = checker.validate_code_format("sales_gmv_day")
+        valid, error = checker.validate_code_format("sales_gmv_amount_day")
         if not valid:
             raise ValidationError(error)
 
-        conflict = await checker.precheck("sales_gmv_day", definition_json)
+        conflict = await checker.precheck("sales_gmv_amount_day", definition_json)
         if conflict:
             # 挂 pending_conflict 标记
     """
+
+    #: 保留词集合（类级暴露，供命名规范校验与外部断言引用）
+    RESERVED_WORDS: frozenset[str] = RESERVED_WORDS
 
     @staticmethod
     def validate_code_format(code: str) -> tuple[bool, str | None]:
