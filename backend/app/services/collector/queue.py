@@ -132,3 +132,34 @@ def get_default_queue() -> InMemoryCollectionQueue:
     if _default_queue is None:
         _default_queue = InMemoryCollectionQueue()
     return _default_queue
+
+
+def create_collection_queue(
+    redis_url: str | None = None, redis: Any | None = None
+) -> CollectionQueue:
+    """创建采集队列实例（生产环境优先 Arq，无 Redis 时降级 InMemory）。
+
+    当 ``redis_url`` 非空时，使用 ``ArqCollectionQueue``（Redis 持久化队列）；
+    当 ``redis_url`` 为空时，降级使用 ``InMemoryCollectionQueue``（进程内队列），
+    并记录告警日志提示生产环境应配置 Redis。
+
+    Args:
+        redis_url: Redis 连接 URL；为 None 或空字符串时降级到内存队列。
+        redis: 已有的 Redis 客户端（可选，优先于 redis_url）。
+
+    Returns:
+        采集队列实例。
+    """
+    from app.core.logging import get_logger
+
+    logger = get_logger(__name__)
+
+    if redis_url:
+        logger.info("collection_queue_using_arq", redis_url_prefix=redis_url[:20])
+        return ArqCollectionQueue(redis_url=redis_url, redis=redis)
+    else:
+        logger.warning(
+            "collection_queue_fallback_inmemory: Redis URL 未配置，"
+            "采集队列降级为内存实现。生产环境请设置 UNISENSE_REDIS_URL。"
+        )
+        return InMemoryCollectionQueue()

@@ -6,15 +6,15 @@
 
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import redis.asyncio as aioredis
 
-from app.core.config import settings
+from app.core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # 订阅者回调类型
 Handler = Callable[[dict[str, Any]], Any]

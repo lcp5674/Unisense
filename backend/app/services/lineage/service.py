@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.parser import (
@@ -25,7 +26,7 @@ from app.services.lineage.schemas import (
 )
 
 
-class LineageService:
+class LineageService(BaseService):
     """血缘解析与影响分析服务。"""
 
     def __init__(
@@ -35,6 +36,7 @@ class LineageService:
         graph: LineageGraphClient | None = None,
         events: LineageEventPublisher | None = None,
     ) -> None:
+        super().__init__(db)
         self._repo = LineageRepository(db)
         self._graph = graph
         self._events = events

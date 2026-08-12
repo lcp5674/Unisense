@@ -5,19 +5,22 @@
 2. 通知查询与状态回写（SENT / FAILED）。
 3. 订阅偏好 upsert 与查询。
 4. 通知外发渠道：SMTP / Webhook（可配置）。
+
+P3: datetime.utcnow() → datetime.now(UTC)。
 """
 
 from __future__ import annotations
 
 import json
-import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.models.notify import (
     EventLevel,
     EventLog,
@@ -28,11 +31,12 @@ from app.models.notify import (
 from app.services.notify.repository import NotifyRepository
 from app.services.notify.schemas import EventPublish, SubscriptionUpsert
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
-class NotifyService:
+class NotifyService(BaseService):
     def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session)
         self._session = session
         self._repo = NotifyRepository(session)
         self._http_client = httpx.AsyncClient(timeout=10.0)
@@ -67,7 +71,7 @@ class NotifyService:
             ok = await self._dispatch(notif, sub.channel)
             notif.status = NotifyStatus.SENT.value if ok else NotifyStatus.FAILED.value
             if ok:
-                notif.sent_at = datetime.utcnow()
+                notif.sent_at = datetime.now(UTC)
                 delivered += 1
         event.notified = delivered > 0
         await self._repo.commit()
@@ -78,7 +82,8 @@ class NotifyService:
 
         支持渠道：
         - webhook: HTTP POST 到配置的 URL
-        - email: SMTP 发送（待实现）
+        - email: SMTP 发送
+        - dingtalk: 钉钉 Webhook 机器人
         - console: 日志输出（开发环境）
         """
         try:
@@ -86,6 +91,8 @@ class NotifyService:
                 return await self._dispatch_webhook(notif)
             elif channel == "email":
                 return await self._dispatch_email(notif)
+            elif channel == "dingtalk":
+                return await self._dispatch_dingtalk(notif)
             elif channel == "console":
                 logger.info("通知（console）: %s", notif.body)
                 return True
@@ -111,7 +118,7 @@ class NotifyService:
                     "body": notif.body,
                     "payload": notif.payload,
                     "subscriber_id": notif.subscriber_id,
-                    "sent_at": datetime.utcnow().isoformat(),
+                    "sent_at": datetime.now(UTC).isoformat(),
                 },
                 headers={"Content-Type": "application/json"},
             )
@@ -120,10 +127,171 @@ class NotifyService:
             logger.error("Webhook 投递失败: %s", exc)
             return False
 
+    async def _dispatch_dingtalk(self, notif: Notification) -> bool:
+        """钉钉 Webhook 投递：POST 到配置的钉钉机器人 Webhook URL。
+
+        消息模板根据事件类型选择：
+        - 质量异常：告警卡片样式
+        - 审核待办：待办提醒样式
+        - 冲突升级：紧急提醒样式
+        - 默认：文本消息
+        """
+        webhook_url = settings.notify_dingtalk_webhook
+        if not webhook_url:
+            logger.warning("未配置 UNISENSE_NOTIFY_DINGTALK_WEBHOOK，跳过钉钉投递")
+            return False
+
+        # 构建钉钉消息体
+        event_type = notif.template_code or ""
+        title = notif.title or "Unisense 通知"
+
+        if "quality" in event_type or "anomaly" in event_type:
+            # 质量异常告警
+            message_body: dict[str, Any] = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": f"【质量异常告警】{title}",
+                    "text": (
+                        f"### 质量异常告警\n\n"
+                        f"**事件类型**：{event_type}\n\n"
+                        f"**详情**：{notif.body or '无'}\n\n"
+                    f"**时间**：{datetime.now(UTC).isoformat()}\n\n"
+                    f"> 请及时处理"
+                    ),
+                },
+            }
+        elif "review" in event_type or "pending" in event_type:
+            # 审核待办
+            message_body = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": f"【审核待办】{title}",
+                    "text": (
+                        f"### 审核待办提醒\n\n"
+                        f"**事件类型**：{event_type}\n\n"
+                        f"**详情**：{notif.body or '无'}\n\n"
+                        f"**时间**：{datetime.now(UTC).isoformat()}\n\n"
+                        f"> 请尽快审核"
+                    ),
+                },
+            }
+        elif "conflict" in event_type or "escalate" in event_type:
+            # 冲突升级
+            message_body = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": f"【冲突升级】{title}",
+                    "text": (
+                        f"### 冲突升级紧急提醒\n\n"
+                        f"**事件类型**：{event_type}\n\n"
+                        f"**详情**：{notif.body or '无'}\n\n"
+                        f"**时间**：{datetime.now(UTC).isoformat()}\n\n"
+                        f"> 需要立即处理"
+                    ),
+                },
+            }
+        else:
+            # 默认文本消息
+            message_body = {
+                "msgtype": "text",
+                "text": {
+                    "content": f"【Unisense通知】{title}\n{notif.body or ''}",
+                },
+            }
+
+        try:
+            resp = await self._http_client.post(
+                webhook_url,
+                json=message_body,
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code < 300:
+                logger.info("dingtalk_dispatch_ok", notif_id=notif.id, status=resp.status_code)
+                return True
+            else:
+                logger.error(
+                    "dingtalk_dispatch_failed",
+                    notif_id=notif.id,
+                    status=resp.status_code,
+                    body=resp.text[:500],
+                )
+                return False
+        except Exception as exc:
+            logger.error("钉钉 Webhook 投递失败: %s", exc)
+            return False
+
     async def _dispatch_email(self, notif: Notification) -> bool:
-        """邮件投递（待实现 SMTP）。"""
-        logger.warning("邮件通知暂未实现，请配置 SMTP 服务端")
-        return False
+        """邮件投递：通过 aiosmtplib 发送 SMTP 邮件。
+
+        使用 settings.notify_smtp_* 配置，发送 HTML 格式邮件。
+        """
+        smtp_host = settings.notify_smtp_host
+        if not smtp_host:
+            logger.warning("未配置 UNISENSE_NOTIFY_SMTP_HOST，跳过邮件投递")
+            return False
+
+        try:
+            from email.mime.multipart import MIMEMultipart
+            from email.mime.text import MIMEText
+
+            import aiosmtplib
+
+            smtp_port = settings.notify_smtp_port
+            smtp_user = settings.notify_smtp_user
+            smtp_password = settings.notify_smtp_password
+
+            # 构建邮件
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"[Unisense] {notif.title or '通知'}"
+            msg["From"] = smtp_user or "unisense-noreply@unisense.local"
+            msg["To"] = (
+                smtp_user or "admin@unisense.local"
+            )  # Placeholder; real impl uses subscriber email
+
+            event_type = notif.template_code or ""
+            # HTML 邮件模板
+            html_body = (
+                "<div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;'>"
+                "<div style='background: #1890ff; color: white;"
+                " padding: 16px; border-radius: 8px 8px 0 0;'>"
+                f"<h2 style='margin: 0;'>{notif.title or 'Unisense 通知'}</h2>"
+                "</div>"
+                "<div style='padding: 16px; border: 1px solid #e8e8e8; border-top: none;'>"
+                f"<p><strong>事件类型：</strong>{event_type}</p>"
+                f"<p><strong>详情：</strong>{notif.body or '无'}</p>"
+                f"<p><strong>时间：</strong>{datetime.now(UTC).isoformat()}</p>"
+                "<hr style='border: none; border-top: 1px solid #e8e8e8; margin: 16px 0;'/>"
+                "<p style='color: #999; font-size: 12px;'>"
+                "此邮件由 Unisense 指标语义中台自动发送</p>"
+                "</div></div>"
+            )
+            text_body = (
+                f"{notif.title or 'Unisense 通知'}\n\n"
+                f"事件类型: {event_type}\n"
+                f"详情: {notif.body or '无'}\n"
+                f"时间: {datetime.now(UTC).isoformat()}"
+            )
+
+            msg.attach(MIMEText(text_body, "plain", "utf-8"))
+            msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+            # SMTP 发送
+            await aiosmtplib.send(
+                msg,
+                hostname=smtp_host,
+                port=smtp_port,
+                username=smtp_user or None,
+                password=smtp_password or None,
+                use_tls=smtp_port == 587,
+            )
+            logger.info("email_dispatch_ok", notif_id=notif.id)
+            return True
+        except ImportError:
+            logger.warning("aiosmtplib 未安装，跳过邮件投递")
+            return False
+        except Exception as exc:
+            logger.error("邮件投递失败: %s", exc)
+            return False
 
     async def list_notifications(
         self, subscriber_id: int, status: str | None
@@ -147,7 +315,7 @@ class NotifyService:
         notif = await self.get_notification(notif_id)
         notif.status = status
         if status == NotifyStatus.SENT.value:
-            notif.sent_at = datetime.utcnow()
+            notif.sent_at = datetime.now(UTC)
         await self._repo.commit()
         return notif
 

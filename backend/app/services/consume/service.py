@@ -7,13 +7,13 @@
 
 from __future__ import annotations
 
-import time
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.core.config import settings
 from app.core.error_codes import ErrorCode
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
@@ -25,6 +25,9 @@ from app.models.consume import (
     SnapshotGeneratedBy,
 )
 from app.models.metric import Metric, MetricVersion
+from app.services.consume.rate_limiter import (
+    get_rate_limiter,
+)
 from app.services.consume.repository import ApiClientRepo, FavoriteRepo, SnapshotRepo
 from app.services.consume.schemas import (
     DryRunResponse,
@@ -34,40 +37,13 @@ from app.services.consume.schemas import (
     SnapshotResponse,
 )
 
-
-class InMemoryRateLimiter:
-    """进程内令牌桶 + 日配额计数（一期；Redis 可用时升级为滑动窗口，对齐 TD §5.3）。"""
-
-    def __init__(self) -> None:
-        self._buckets: dict[str, list[float]] = {}
-        self._daily: dict[str, tuple[str, int]] = {}
-
-    def allow(self, key: str, qps: int) -> bool:
-        now = time.monotonic()
-        window = self._buckets.setdefault(key, [])
-        window[:] = [t for t in window if now - t < 1.0]
-        if len(window) >= qps:
-            return False
-        window.append(now)
-        return True
-
-    def allow_daily(self, key: str, quota: int, today: str) -> bool:
-        """日配额闸门：按自然日计数，跨日自动重置（对齐 api_client.daily_quota）。"""
-        day, used = self._daily.get(key, (today, 0))
-        if day != today:
-            day, used = today, 0
-        if used >= quota:
-            self._daily[key] = (day, used)
-            return False
-        self._daily[key] = (day, used + 1)
-        return True
+# 模块级限流器（从 rate_limiter 模块获取，Redis 优先，InMemory 降级）
+rate_limiter = get_rate_limiter()
 
 
-rate_limiter = InMemoryRateLimiter()
-
-
-class ConsumeService:
+class ConsumeService(BaseService):
     def __init__(self, db: AsyncSession) -> None:
+        super().__init__(db)
         self._db = db
         self._clients = ApiClientRepo(db)
         self._snapshots = SnapshotRepo(db)
@@ -159,18 +135,42 @@ class ConsumeService:
                 error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,
                 ctx={"retry_after": 30, "accept_stale": req.accept_stale},
             )
-        plan = {
-            "metric_code": req.metric_code,
-            "dimensions": [d.model_dump() for d in req.dimensions],
-            "date_range": req.date_range,
-        }
-        return QueryResponse(
-            metric_code=req.metric_code,
-            degraded=False,
-            data={"rows": []},
-            execution_plan=plan,
-            meta=self._build_meta(metric),
-        )
+
+        # 构建执行 SQL
+        sql = "SELECT * FROM unified_metric WHERE metric_code = :metric_code"
+        params: dict[str, Any] = {"metric_code": req.metric_code}
+
+        # 通过 OLAPExecutor 执行真实查询
+        from app.services.consume.olap_executor import OLAPExecutor
+
+        executor = OLAPExecutor()
+        try:
+            olap_result = await executor.execute(sql, params)
+            plan = {
+                "metric_code": req.metric_code,
+                "dimensions": [d.model_dump() for d in req.dimensions],
+                "date_range": req.date_range,
+            }
+            return QueryResponse(
+                metric_code=req.metric_code,
+                degraded=False,
+                data={
+                    "rows": olap_result.rows,
+                    "total": olap_result.total,
+                    "elapsed_ms": olap_result.elapsed_ms,
+                    "from_cache": olap_result.from_cache,
+                },
+                execution_plan=plan,
+                meta=self._build_meta(metric),
+            )
+        except BusinessError:
+            raise  # 降级错误直接抛出
+        except Exception as exc:
+            raise BusinessError(
+                f"OLAP 查询执行失败: {exc}",
+                error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,
+                ctx={"retry_after": 30},
+            ) from exc
 
     # ---- 快照 WORM ----
     async def save_snapshot(

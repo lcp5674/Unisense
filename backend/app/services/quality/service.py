@@ -8,13 +8,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.quality import (
     ExternalBenchmark,
@@ -174,14 +175,15 @@ def _build_repair_suggestion(
         "suggested_sql": sql,
         "obs_value": str(obs),
         "baseline": str(bound) if bound is not None else None,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "confirmed_by": None,
         "confirmed_at": None,
     }
 
 
-class QualityService:
+class QualityService(BaseService):
     def __init__(self, db: AsyncSession, publisher: QualityEventPublisher | None = None) -> None:
+        super().__init__(db)
         self._repo = QualityRepository(db)
         self._publisher = publisher or QualityEventPublisher()
 
@@ -352,7 +354,7 @@ class QualityService:
         window_days = int(thr.get("window_days", 28))
         sigma = Decimal(str(thr.get("sigma", 3)))
         min_samples = int(thr.get("min_samples", 3))
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         since = now - timedelta(days=window_days)
         history = await self._repo.list_recent_observations(metric_id, since=since)
         values = [Decimal(str(o.value)) for o in history]
@@ -379,7 +381,7 @@ class QualityService:
         tolerance = Decimal(str(thr.get("tolerance_pct", 20)))
         window_hours = int(thr.get("window_hours", 12))
         offset = timedelta(weeks=52) if period == "yoy" else timedelta(weeks=1)
-        target_time = datetime.utcnow() - offset
+        target_time = datetime.now(UTC) - offset
         base_obs = await self._repo.get_same_period_observation(
             metric_id, target_time, window_hours=window_hours
         )
@@ -499,7 +501,7 @@ class QualityService:
             suggestion = {}
         suggestion = dict(suggestion)
         suggestion["confirmed_by"] = user_id
-        suggestion["confirmed_at"] = datetime.utcnow().isoformat()
+        suggestion["confirmed_at"] = datetime.now(UTC).isoformat()
         event.repair_suggestion = suggestion
         event = await self._repo.save_event(event)
         return QualityEventResponse.from_model(event)
@@ -635,6 +637,6 @@ class QualityService:
         rec.owner_note = payload.owner_note
         rec.decision = payload.decision
         rec.confirmed_by = user_id
-        rec.checked_at = datetime.utcnow()
+        rec.checked_at = datetime.now(UTC)
         rec = await self._repo.save_reconciliation(rec)
         return ReconciliationRecordResponse.from_model(rec)

@@ -27,6 +27,12 @@ class ObservabilityRepository:
         await self._session.flush()
         return obj
 
+    async def get_feedback(self, feedback_id: int) -> Feedback | None:
+        """获取单条反馈。"""
+        stmt = select(Feedback).where(Feedback.id == feedback_id)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def list_feedback(self, target_type: str | None, limit: int) -> list[Feedback]:
         stmt = select(Feedback)
         if target_type:

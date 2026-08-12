@@ -8,14 +8,14 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from datetime import UTC, datetime
-from typing import Any
 
 import redis.asyncio as aioredis
 
-logger = logging.getLogger(__name__)
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class InMemoryRateLimiter:
@@ -100,9 +100,7 @@ class RedisRateLimiter:
                 results = await pipe.execute()
 
             current_count = results[1]
-            if current_count >= qps:
-                return False
-            return True
+            return not current_count >= qps
 
         except Exception:
             logger.warning(
@@ -141,9 +139,7 @@ class RedisRateLimiter:
                 # 首次写入，设置过期时间（2 天后自动清理）
                 await self._redis.expire(daily_key, 172800)
 
-            if current > quota:
-                return False
-            return True
+            return not current > quota
 
         except Exception:
             logger.warning(

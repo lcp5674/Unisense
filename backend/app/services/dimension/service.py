@@ -10,10 +10,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.core.exceptions import ConflictError, NotFoundError, UnisenseError
 from app.models.dimension import (
     Dimension,
@@ -36,8 +37,9 @@ from app.services.dimension.schemas import (
 )
 
 
-class DimensionService:
+class DimensionService(BaseService):
     def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session)
         self._session = session
         self._repo = DimensionRepository(session)
 
@@ -154,7 +156,7 @@ class DimensionService:
         rec.status = data.decision
         # PLAT-2: 以服务端认证身份 reviewer_id 落库，忽略 client 伪造的 reviewer_id
         rec.reviewed_by = reviewer_id if reviewer_id is not None else data.reviewer_id
-        rec.reviewed_at = datetime.utcnow()
+        rec.reviewed_at = datetime.now(UTC)
         await self._repo.commit()
         return rec
 

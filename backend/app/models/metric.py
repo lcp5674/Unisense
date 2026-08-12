@@ -184,6 +184,11 @@ class Metric(Base, BaseModel):
     batch_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="批量注册批次 ID"
     )
+    template_id: Mapped[int | None] = mapped_column(
+        ForeignKey("metric_template.id", name="fk_metric_template"),
+        nullable=True,
+        comment="关联模板 ID（从模板创建时记录）",
+    )
 
     # ---- 废弃与替代 ----
     successor_code: Mapped[str | None] = mapped_column(

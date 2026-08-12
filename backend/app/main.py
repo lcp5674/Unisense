@@ -32,12 +32,14 @@ from app.api.notify import router as notify_router
 from app.api.observability import router as observability_router
 from app.api.quality import router as quality_router
 from app.api.recommend import router as recommend_router
+from app.api.semantic import router as semantic_router
+from app.api.tracking import router as tracking_router
 from app.core.config import ConfigurationError, settings
+from app.core.eventbus import init_eventbus
 from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
 from app.core.middleware import ErrorHandlerMiddleware, SecurityHeadersMiddleware, TraceIdMiddleware
 from app.db.redis import close_redis_pool, init_redis_pool
-from app.core.eventbus import init_eventbus, get_eventbus
 
 logger = structlog.get_logger("unisense.main")
 
@@ -127,10 +129,18 @@ def create_app() -> FastAPI:
     )
 
     # ---- 中间件（顺序：后添加的先执行）----
-    # CORS 严格读取 settings.cors_origins_list，禁止通配符+凭证组合
+    # CORS 严格读取 settings.cors_origins_list，allow_credentials=True 时禁止通配符
+    origins = settings.cors_origins_list
+    if "*" in origins and settings.env != "local":
+        # 非本地开发环境不允许通配符 + credentials 组合
+        logger.warning(
+            "cors_wildcard_with_credentials",
+            msg="CORS 通配符与 credentials=True 组合不安全，已移除通配符",
+        )
+        origins = [o for o in origins if o != "*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins_list,
+        allow_origins=origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-API-Version", "X-Trace-Id"],
@@ -159,6 +169,8 @@ def create_app() -> FastAPI:
     app.include_router(assetmap_router, prefix="/api/v1")
     app.include_router(recommend_router, prefix="/api/v1")
     app.include_router(ai_router, prefix="/api/v1")
+    app.include_router(tracking_router, prefix="/api/v1")
+    app.include_router(semantic_router, prefix="/api/v1")
 
     return app
 

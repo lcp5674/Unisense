@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -69,7 +69,7 @@ class ConflictRepository:
         if decision_json is not None:
             conflict.decision_json = decision_json
         if resolved:
-            conflict.resolved_at = datetime.utcnow()
+            conflict.resolved_at = datetime.now(UTC)
         await self._db.flush()
         return conflict
 

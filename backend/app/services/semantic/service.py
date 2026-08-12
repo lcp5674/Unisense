@@ -2,6 +2,8 @@
 
 对齐 DEV_GUIDE §8b.2（Service 层：编排 repository + 调用其他 service）。
 包含指标 CRUD、状态机流转、版本管理。
+
+P3: 继承 BaseService Protocol，统一 db+eventbus+settings 注入模式。
 """
 
 from __future__ import annotations
@@ -12,12 +14,13 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.core.exceptions import (
     BusinessError,
     ConflictError,
     NotFoundError,
 )
-from app.db.redis import redis_client
+from app.db.redis import get_redis
 from app.models.metric import Metric, MetricVersion
 from app.services.semantic.cache import MetricCache
 from app.services.semantic.repository import MetricRepository
@@ -31,16 +34,26 @@ from app.services.semantic.schemas import (
 
 logger = structlog.get_logger("unisense.semantic.service")
 
+
+def _redis_available() -> bool:
+    """检查 Redis 连接池是否已初始化。"""
+    try:
+        get_redis()
+        return True
+    except RuntimeError:
+        return False
+
 # 口径层破坏性变更字段：这些字段变更会破坏下游消费方
 # 同时用于 _is_breaking_change 与 _compute_diff，保证判定一致（修复原实现中二者对
 # dependencies 的判定互相矛盾的问题）。
 BREAKING_DEF_FIELDS = ("expression", "aggregation", "granularity", "dependencies")
 
 
-class MetricService:
+class MetricService(BaseService):
     """指标服务。
 
     封装指标的业务逻辑：CRUD、状态流转、版本管理。
+    继承 BaseService 获得统一的 _write_audit / _publish_event 辅助方法。
     """
 
     def __init__(self, db: AsyncSession, cache: MetricCache | None = None) -> None:
@@ -50,9 +63,11 @@ class MetricService:
             db: 异步数据库会话。
             cache: 指标读缓存；缺省使用默认 Redis 客户端（不可用时自动降级 DB）。
         """
-        self._db = db
+        super().__init__(db)
         self._repo = MetricRepository(db)
-        self._cache = cache if cache is not None else MetricCache.from_defaults(redis_client)
+        self._cache = cache if cache is not None else MetricCache.from_defaults(
+            get_redis() if _redis_available() else None
+        )
 
     async def create_metric(self, request: MetricCreateRequest, owner_id: int) -> Metric:
         """创建指标（初始状态 DRAFT）。

@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.conflict import Conflict, ConflictStatus, ConflictType, RulingRecord
 from app.services.conflict.events import ConflictEventPublisher
@@ -38,13 +39,14 @@ def _new_conflict_id() -> str:
     return f"CF-{uuid.uuid4().hex[:12].upper()}"
 
 
-class ConflictService:
+class ConflictService(BaseService):
     def __init__(
         self,
         db: AsyncSession,
         events: ConflictEventPublisher | None = None,
         llm: ConflictLlmClient | None = None,
     ) -> None:
+        super().__init__(db)
         self._db = db
         self._repo = ConflictRepository(db)
         self._events = events or ConflictEventPublisher()
@@ -170,7 +172,7 @@ class ConflictService:
                 decision=req.decision,
                 reason=req.reason,
                 arbitrator_id=req.arbitrator_id,
-                decided_at=datetime.utcnow(),
+                decided_at=datetime.now(UTC),
             )
         )
         await self._safe_publish(

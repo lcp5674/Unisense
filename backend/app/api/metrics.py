@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ALL_ROLES, CurrentUser, get_current_user, require_roles
+from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
@@ -46,7 +46,7 @@ _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_inject
 async def create_metric(
     request: MetricCreateRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
@@ -79,7 +79,7 @@ async def list_metrics(
     params: Annotated[MetricListParams, Depends()],
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[MetricListResponse]:
     """支持域/状态/分级/关键词过滤与分页。"""
@@ -123,7 +123,7 @@ async def get_metric(
     metric_code: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[MetricResponse]:
     service = MetricService(db)
@@ -154,7 +154,7 @@ async def update_metric(
     metric_code: str,
     request: MetricUpdateRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
@@ -187,7 +187,7 @@ async def publish_metric(
     metric_code: str,
     request: MetricPublishRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
@@ -220,7 +220,7 @@ async def deprecate_metric(
     metric_code: str,
     successor_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
@@ -252,7 +252,7 @@ async def deprecate_metric(
 async def get_metric_versions(
     metric_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[list[MetricVersionResponse]]:
     service = MetricService(db)
@@ -270,7 +270,7 @@ async def get_metric_versions(
 async def review_metric_compliance(
     metric_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:

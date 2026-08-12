@@ -3,21 +3,27 @@
 核心能力：
 1. 用户反馈提交与查询。
 2. 运营大盘聚合：质量事件、API 调用、通知、血缘等统计。
+3. NPS 采集与反馈采纳闭环（P2: US14）。
+
+P3: 继承 BaseService Protocol。
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.models.feedback import Feedback
 from app.services.observability.repository import ObservabilityRepository
 from app.services.observability.schemas import FeedbackCreate
 
 
-class ObservabilityService:
+class ObservabilityService(BaseService):
     def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session)
         self._session = session
         self._repo = ObservabilityRepository(session)
 
@@ -52,3 +58,89 @@ class ObservabilityService:
 
     async def lineage_stats(self) -> dict[str, int]:
         return await self._repo.lineage_stats()
+
+    # ----------------------------------------------------------------
+    # P2 Enhancement: NPS 采集 + 反馈采纳闭环
+    # ----------------------------------------------------------------
+
+    async def submit_nps(
+        self,
+        user_id: int,
+        score: int,
+        comment: str | None = None,
+        target_type: str = "platform",
+        target_id: str | None = None,
+    ) -> Feedback:
+        """NPS 采集：用户提交 0-10 推荐度评分。
+
+        Args:
+            user_id: 评分用户 ID。
+            score: NPS 分数（0-10）。
+            comment: 可选评论。
+            target_type: 目标类型。
+            target_id: 目标 ID。
+
+        Raises:
+            UnisenseError: 分数不在 0-10 范围内。
+        """
+        if not (0 <= score <= 10):
+            from app.core.exceptions import UnisenseError
+            raise UnisenseError("NPS 分数需在 0-10 之间", error_code="INVALID_NPS_SCORE")
+
+        feedback = Feedback(
+            user_id=user_id,
+            target_type=target_type,
+            target_id=target_id,
+            rating=score,
+            comment=comment or f"NPS: {score}/10",
+        )
+        result = await self._repo.save_feedback(feedback)
+        await self._repo.commit()
+
+        await self._publish_event(
+            "nps.submitted",
+            {"user_id": user_id, "score": score},
+            actor_id=str(user_id),
+        )
+
+        return result
+
+    async def update_feedback_status(
+        self,
+        feedback_id: int,
+        status: str,
+        resolver_id: int | None = None,
+        resolution_note: str | None = None,
+    ) -> Feedback:
+        """反馈采纳闭环：更新反馈状态。
+
+        Args:
+            feedback_id: 反馈 ID。
+            status: 新状态（adopted/rejected/in_progress）。
+            resolver_id: 处理人 ID。
+            resolution_note: 处理说明。
+        """
+        feedback = await self._repo.get_feedback(feedback_id)
+        if feedback is None:
+            from app.core.exceptions import NotFoundError
+            raise NotFoundError(f"反馈不存在: {feedback_id}")
+
+        # 更新状态（通过 comment 字段追加状态变更记录）
+        existing_comment = feedback.comment or ""
+        status_note = f"\n[{datetime.now(UTC).isoformat()}] status={status}"
+        if resolution_note:
+            status_note += f" note={resolution_note}"
+        if resolver_id:
+            status_note += f" by={resolver_id}"
+        feedback.comment = existing_comment + status_note
+
+        await self._repo.save_feedback(feedback)
+        await self._repo.commit()
+
+        await self._publish_event(
+            "feedback.status_updated",
+            {"feedback_id": feedback_id, "status": status, "resolver_id": resolver_id},
+            actor_id=str(resolver_id or ""),
+        )
+
+        return feedback

@@ -10,14 +10,15 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.core.secrets import SecretManager
-from app.db.redis import redis_client
+from app.db.redis import get_redis
 from app.models.data_source import DataSource
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.events import CatalogEventPublisher
-from app.services.collector.queue import CollectionQueue, get_default_queue
+from app.services.collector.queue import CollectionQueue, create_collection_queue
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.schemas import (
     BulkDeprecateRequest,
@@ -34,7 +35,16 @@ from app.services.collector.spi import BaseCollector
 logger = get_logger("unisense.collector.service")
 
 
-class CollectorService:
+def _redis_available() -> bool:
+    """检查 Redis 连接池是否已初始化。"""
+    try:
+        get_redis()
+        return True
+    except RuntimeError:
+        return False
+
+
+class CollectorService(BaseService):
     """采集领域服务。"""
 
     def __init__(
@@ -45,11 +55,14 @@ class CollectorService:
         events: CatalogEventPublisher | None = None,
         classifier: SensitivityClassifier | None = None,
     ) -> None:
+        super().__init__(db)
         self._db = db
         self._repo = CollectorRepository(db)
         # secrets 作为工具类使用（静态方法），缺省用 SecretManager
         self._secrets = secrets or SecretManager
-        self._events = events or CatalogEventPublisher(redis_client)
+        self._events = events or CatalogEventPublisher(
+            get_redis() if _redis_available() else None
+        )
         self._classifier = classifier or SensitivityClassifier()
 
     @staticmethod
@@ -128,6 +141,19 @@ class CollectorService:
         self, req: DBCatalogCreateRequest, actor_id: int
     ) -> DBCatalogResponse:
         sensitivity = self._classifier.classify(req.entity_name, req.schema_def)
+
+        # P2 增强：使用结构化 LLM 输出进行置信度分流
+        # 当 LLM 可用且 confidence < 0.7 时，标记为 "needs_review"
+        llm_sensitivity = await self._llm_classify_sensitivity(req.entity_name, req.schema_def)
+        if llm_sensitivity is not None and llm_sensitivity.get("confidence", 1.0) < 0.7:
+                sensitivity = "needs_review"
+                logger.info(
+                    "catalog_llm_low_confidence",
+                    entity_name=req.entity_name,
+                    confidence=llm_sensitivity.get("confidence"),
+                    original_sensitivity=self._classifier.classify(req.entity_name, req.schema_def),
+                )
+
         cat, _created = await self._repo.upsert_catalog(
             source_id=req.source_id,
             entity_name=req.entity_name,
@@ -147,6 +173,54 @@ class CollectorService:
             },
         )
         return DBCatalogResponse.model_validate(cat)
+
+    async def _llm_classify_sensitivity(
+        self, entity_name: str, schema_def: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """使用 LLM 辅助分类敏感级别，返回结构化结果。
+
+        LLM 不可用时返回 None（不阻断主流程）。
+        """
+        try:
+            from app.services.llm.client import build_llm_client
+
+            client = build_llm_client()
+            if not client.enabled:
+                return None
+
+            # 构建分类 prompt
+            schema_str = str(schema_def)[:2000] if schema_def else "无 schema 信息"
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是数据敏感分类专家。根据表名和 schema 判断敏感级别。\n"
+                        "返回 JSON 格式：{\n"
+                        '  "content": "PII|CONFIDENTIAL|INTERNAL|PUBLIC",\n'
+                        '  "confidence": 0.0-1.0,\n'
+                        '  "reasoning": "判断依据",\n'
+                        '  "candidates": [{"level": "...", "score": 0.0}]\n'
+                        "}\n"
+                        "confidence < 0.7 表示不确定，需要人工审核。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"表名: {entity_name}\nSchema: {schema_str}",
+                },
+            ]
+
+            result = await client.chat(
+                messages,
+                temperature=0.0,
+                max_tokens=500,
+                response_format={"type": "json_object"},
+            )
+            await client.close()
+            return result
+        except Exception as exc:  # noqa: BLE001 - LLM 失败不阻断主流程
+            logger.warning("llm_classify_failed: %s", exc)
+            return None
 
     async def list_catalogs(self, params: DBCatalogListParams) -> DBCatalogListResponse:
         cats, total = await self._repo.list_catalogs(params)
@@ -211,22 +285,27 @@ class CollectorService:
     ) -> str:
         """将全量采集任务投递到异步队列，立即返回 job_id（请求内不再同步执行）。
 
-        默认使用进程内内存队列（``get_default_queue``），生产环境可注入
-        ``ArqCollectionQueue`` 将任务交由独立 worker 执行。
+        当 ``queue`` 未提供时，根据配置自动选择：
+        - ``settings.redis_url`` 非空 → ArqCollectionQueue（Redis 持久化）
+        - ``settings.redis_url`` 为空 → InMemoryCollectionQueue（降级）
 
         Raises:
             NotFoundError: 数据源不存在。
         """
         if await self._repo.get_source(source_id) is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
-        q = queue or get_default_queue()
+        from app.core.config import settings as _settings
+
+        q = queue or create_collection_queue(redis_url=_settings.redis_url)
         return await q.enqueue(source_id, actor_id)
 
     async def get_job_status(
         self, job_id: str, queue: CollectionQueue | None = None
     ) -> dict[str, Any] | None:
         """查询采集任务状态（队列自带状态存储时直接读取）。"""
-        q = queue or get_default_queue()
+        from app.core.config import settings as _settings
+
+        q = queue or create_collection_queue(redis_url=_settings.redis_url)
         getter = getattr(q, "get", None)
         if getter is None:
             return None

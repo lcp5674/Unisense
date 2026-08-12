@@ -15,16 +15,17 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.core.exceptions import UnisenseError
+from app.core.logging import get_logger
 from app.services.ai.repository import AiRepository
 from app.services.llm.client import LlmClient, LlmError, build_llm_client
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # 安全约束：禁止的 SQL 模式
 _BANNED_PATTERNS = (
@@ -45,10 +46,11 @@ _BANNED_PATTERNS = (
 )
 
 
-class AiService:
+class AiService(BaseService):
     """AI 问数服务：NL2SQL + 安全约束 + 执行委托。"""
 
     def __init__(self, session: AsyncSession, llm: LlmClient | None = None) -> None:
+        super().__init__(session)
         self._session = session
         self._repo = AiRepository(session)
         self._llm = llm or build_llm_client()

@@ -92,3 +92,32 @@ def optional_dependency_status() -> dict[str, bool]:
         hp = _parse_host_port(url)
         result[name] = _tcp_alive(*hp) if hp else False
     return result
+
+
+# ---- P2/P3: 预构建熔断器实例（OLAP / Neo4j / ES）----
+
+# OLAP 熔断器：consume 语义查询下推，连续 5 次失败后熔断，30s 后半开探测
+olap_breaker = CircuitBreaker(failure_threshold=5, reset_timeout=30.0)
+
+# Neo4j 熔断器：血缘图查询，连续 3 次失败后熔断（图查询更脆弱），20s 后半开探测
+neo4j_breaker = CircuitBreaker(failure_threshold=3, reset_timeout=20.0)
+
+# ES 熔断器：全文检索，连续 5 次失败后熔断，30s 后半开探测
+es_breaker = CircuitBreaker(failure_threshold=5, reset_timeout=30.0)
+
+
+def get_circuit_breaker(service: str) -> CircuitBreaker:
+    """获取指定服务的熔断器实例。
+
+    Args:
+        service: 服务名（olap / neo4j / es）。
+
+    Returns:
+        对应的 CircuitBreaker 实例；未知服务返回新实例。
+    """
+    breakers = {
+        "olap": olap_breaker,
+        "neo4j": neo4j_breaker,
+        "es": es_breaker,
+    }
+    return breakers.get(service, CircuitBreaker())

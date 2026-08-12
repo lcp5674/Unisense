@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
@@ -16,7 +17,7 @@ from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.core.resilience import CircuitBreaker
 from app.db.mysql import get_db_session
-from app.db.redis import redis_client
+from app.db.redis import get_redis
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.schemas import (
@@ -34,10 +35,13 @@ _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_inject
 
 
 def _svc(db: Any) -> LineageService:
+    redis = None
+    with contextlib.suppress(RuntimeError):
+        redis = get_redis()
     return LineageService(
         db,
         graph=LineageGraphClient(),
-        events=LineageEventPublisher(redis_client, CircuitBreaker()),
+        events=LineageEventPublisher(redis, CircuitBreaker()),
     )
 
 

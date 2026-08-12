@@ -59,6 +59,8 @@ async def test_ready_db_failure(client: httpx.AsyncClient) -> None:
         yield db
 
     app.dependency_overrides[deps.get_db_session] = fake_db
+    # Redis 依赖：模拟可用，聚焦 DB 故障路径
+    app.dependency_overrides[deps.get_redis] = lambda: MagicMock()
     try:
         resp = await client.get("/ready")
         assert resp.status_code == 200

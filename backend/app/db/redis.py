@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from typing import cast
 
 import redis.asyncio as aioredis
 
@@ -23,10 +24,13 @@ def create_redis_pool() -> aioredis.Redis:
     Returns:
         Redis 异步客户端。
     """
-    return aioredis.from_url(
-        settings.redis_url,
-        decode_responses=True,
-        max_connections=20,
+    return cast(
+        aioredis.Redis,
+        aioredis.from_url(  # type: ignore[no-untyped-call]
+            settings.redis_url,
+            decode_responses=True,
+            max_connections=20,
+        ),
     )
 
 

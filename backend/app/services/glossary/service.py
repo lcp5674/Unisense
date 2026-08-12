@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_service import BaseService
 from app.core.exceptions import ConflictError, NotFoundError, UnisenseError
 from app.models.glossary import (
     GlossaryConflict,
@@ -47,8 +48,9 @@ def _overlap_ratio(a: list[str], b: list[str]) -> float:
     return len(set_a & set_b) / len(set_a | set_b)
 
 
-class GlossaryService:
+class GlossaryService(BaseService):
     def __init__(self, session: AsyncSession) -> None:
+        super().__init__(session)
         self._session = session
         self._repo = GlossaryRepository(session)
 

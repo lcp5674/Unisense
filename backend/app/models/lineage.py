@@ -55,6 +55,9 @@ class LineageEdge(Base, BaseModel):
     provenance: Mapped[str] = mapped_column(
         String(32), default="sqlglot", nullable=False, comment="来源通道"
     )
+    pii_inherited: Mapped[bool] = mapped_column(
+        default=False, nullable=False, comment="PII 是否沿血缘继承"
+    )
     # created_at / updated_at / deleted_at 由 BaseModel 提供，不重复声明
 
     __table_args__ = (

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -158,7 +158,7 @@ class Reconciliation(Base, BaseModel):
     diff_summary: Mapped[str | None] = mapped_column(Text, nullable=True, comment="差异摘要")
     reviewed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="复核人 ID")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=lambda: datetime.utcnow()
+        DateTime, nullable=False, default=lambda: datetime.now(UTC)
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, comment="复核时间"

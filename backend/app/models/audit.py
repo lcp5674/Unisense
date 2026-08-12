@@ -56,11 +56,15 @@ class AuditLog(Base, TimestampMixin):
     pii_access: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, comment="是否涉及 PII 访问"
     )
+    archived: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="是否已归档（冷热分离）"
+    )
 
     __table_args__ = (
         Index("idx_audit_log_actor", "actor_id"),
         Index("idx_audit_log_entity", "entity_type", "entity_id"),
         Index("idx_audit_log_trace", "trace_id"),
+        Index("idx_audit_log_archived", "archived", "created_at"),
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -75,5 +79,6 @@ class AuditLog(Base, TimestampMixin):
             "ip": self.ip,
             "trace_id": self.trace_id,
             "pii_access": self.pii_access,
+            "archived": self.archived,
             "created_at": self.created_at,
         }

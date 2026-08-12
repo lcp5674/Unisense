@@ -2,6 +2,8 @@
 
 Neo4j 用于影响分析的可视化与图遍历；MySQL 为权威边存储。
 当 Neo4j 未配置或不可达时，写图静默降级（返回 False），不影响主流程。
+
+P2: 集成全局 neo4j_breaker 熔断器，连续失败后自动熔断，半开窗口探测恢复。
 """
 
 from __future__ import annotations
@@ -11,12 +13,13 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.resilience import neo4j_breaker
 
 logger = get_logger("unisense.lineage.graph")
 
 
 class LineageGraphClient:
-    """Neo4j 血缘图客户端（惰性连接，可降级）。"""
+    """Neo4j 血缘图客户端（惰性连接，可降级，带熔断保护）。"""
 
     def __init__(
         self,
@@ -30,16 +33,22 @@ class LineageGraphClient:
         self._driver: Any = None
 
     async def write_edges(self, edges: list[tuple[str, str, str]]) -> bool:
-        """将血缘边写入 Neo4j（MERGE 节点与关系）。
+        """将血缘边写入 Neo4j（MERGE 节点与关系），带熔断保护。
 
         Args:
             edges: ``(source_node, target_node, edge_type)`` 三元组列表。
 
         Returns:
-            写入成功返回 True；未配置/不可达/异常时返回 False（降级）。
+            写入成功返回 True；未配置/不可达/熔断时返回 False（降级）。
         """
         if not self._uri:
             return False
+
+        # 熔断检查
+        if not neo4j_breaker.allow():
+            logger.warning("lineage_graph_breaker_open")
+            return False
+
         try:
             from neo4j import AsyncGraphDatabase
         except Exception:  # pragma: no cover - 依赖缺失时降级
@@ -59,8 +68,10 @@ class LineageGraphClient:
                         t=tgt,
                         e=etype,
                     )
+            neo4j_breaker.record_success()
             return True
         except Exception as exc:  # 图存储不可达，降级
+            neo4j_breaker.record_failure()
             logger.warning("lineage_graph_write_failed", error=str(exc))
             return False
 

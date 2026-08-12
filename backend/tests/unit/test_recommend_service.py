@@ -39,6 +39,11 @@ async def _svc() -> tuple[RecommendService, MagicMock]:
         ]
     )
     svc._repo = repo  # noqa: SLF001
+    # 协同过滤依赖 _session 查询 tracking_events：mock 为空 → 走血缘兜底
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = []
+    svc._session = MagicMock()
+    svc._session.execute = AsyncMock(return_value=mock_result)
     return svc, repo
 
 

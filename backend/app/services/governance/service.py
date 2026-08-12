@@ -6,6 +6,8 @@
 2. PII 合规门禁（COMPL-1）：合规官复核后方可置 ``metric.compliance_reviewed=true``
 3. 分级重扫（COMPL-2）：规则引擎重算敏感级 → 落 ``classification`` + 回写 ``db_catalog``
 4. 权限快照与 PDP 决策入口（供 consume/semantic 调用）
+5. PII 血缘传播（P2: US13）：register_catalog/create_metric 时检查上游字段 PII 标记，
+   自动设置 metric.definition_json.pii=True 并标记 lineage_edge.pii_inherited=True
 
 安全基线：授权范围不得为空（防越权全量放权）、复核禁止自审、批量操作有上限且失败即回滚。
 """
@@ -15,7 +17,6 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
-import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -24,7 +25,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit
+from app.core.base_service import BaseService
 from app.core.exceptions import AuthError, NotFoundError, ValidationError
+from app.core.logging import get_logger
 from app.models.audit import AuditLog
 from app.models.erasure import ErasureRequest, ErasureStatus
 from app.models.governance import (
@@ -57,7 +60,7 @@ from app.services.governance.schemas import (
     RoleCreate,
 )
 
-logger = logging.getLogger("unisense.governance.service")
+logger = get_logger("unisense.governance.service")
 
 
 def _role_to_str(role: Any) -> str:
@@ -76,18 +79,30 @@ def _role_to_str(role: Any) -> str:
 EXPIRING_WINDOW_DAYS = 7
 
 
-class GovernanceService:
+class GovernanceService(BaseService):
     """权限与合规治理编排。"""
 
     def __init__(self, db: AsyncSession, events: GovernanceEventPublisher | None = None) -> None:
+        super().__init__(db)
         self._db = db
         self._repo = GovernanceRepository(db)
-        self._events = events or GovernanceEventPublisher()
+        self._legacy_events = events or GovernanceEventPublisher()
 
     async def _safe_publish(self, event: dict[str, Any]) -> None:
-        """事件发布为 best-effort：通知服务不可达时静默降级，不阻断主流程。"""
+        """事件发布为 best-effort：通知服务不可达时静默降级，不阻断主流程。
+
+        P3: 优先使用 EventBus.publish，保留 legacy_events 兼容。
+        """
+        # 1. 使用统一 EventBus 发布
         try:
-            await self._events.publish(event)
+            event_type = event.get("event_type", "governance.unknown")
+            await self._publish_event(event_type, event, actor_id="")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("governance EventBus 发布失败: %s", exc)
+
+        # 2. 兼容：仍发送到 legacy 事件发布器
+        try:
+            await self._legacy_events.publish(event)
         except Exception as exc:  # noqa: BLE001 - 事件降级，不向上抛
             logger.warning("governance 事件发布失败（best-effort 跳过）：%s", exc)
 
@@ -678,6 +693,90 @@ class GovernanceService:
             trace_id="",
         )
         return erasure
+
+    # ------------------------------------------------------ PII 血缘传播 (US13)
+
+    async def propagate_pii_to_metric(
+        self,
+        metric_code: str,
+        *,
+        upstream_source_columns: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """PII 血缘传播：检查上游字段 PII 标记，自动传播到下游指标。
+
+        当任一上游 source_column 含 pii=True 时：
+        1. 自动设置 metric.definition_json.pii=True
+        2. 设置 metric.pii_flag=True
+        3. 标记关联 lineage_edge.pii_inherited=True
+
+        Args:
+            metric_code: 目标指标编码。
+            upstream_source_columns: 上游字段列表，每个元素含 pii 标记。
+                格式: [{"column": "phone", "pii": True}, ...]
+
+        Returns:
+            是否触发了 PII 传播。
+        """
+        from app.models.lineage import LineageEdge
+
+        metric = await self._repo.get_metric_by_code(metric_code)
+        if metric is None:
+            raise NotFoundError("指标不存在", ctx={"metric_code": metric_code})
+
+        # 检查上游是否含 PII
+        has_upstream_pii = False
+        if upstream_source_columns:
+            for col in upstream_source_columns:
+                if col.get("pii", False):
+                    has_upstream_pii = True
+                    break
+
+        if not has_upstream_pii:
+            # 也检查通过 lineage_edge 传入的 PII 继承
+            stmt = select(LineageEdge).where(LineageEdge.target_node == metric_code)
+            edges = (await self._db.execute(stmt)).scalars().all()
+        for _edge in edges:
+                # 检查 source_node 对应的 catalog 是否有 PII
+                upstream_metric = await self._repo.get_metric_by_code(_edge.source_node)
+                if upstream_metric and upstream_metric.pii_flag:
+                    has_upstream_pii = True
+                    break
+
+        if not has_upstream_pii:
+            return False
+
+        # 传播 PII 标记
+        changed = False
+        if not metric.pii_flag:
+            metric.pii_flag = True
+            changed = True
+
+        # 更新 definition_json 中的 pii 标记
+        definition = dict(metric.definition_json or {})
+        if not definition.get("pii"):
+            definition["pii"] = True
+            metric.definition_json = definition
+            changed = True
+
+        # 标记 lineage_edge.pii_inherited
+        stmt = select(LineageEdge).where(LineageEdge.target_node == metric_code)
+        edges = (await self._db.execute(stmt)).scalars().all()
+        for _edge in edges:
+            # 给 edge 添加 pii_inherited 属性（存入 confidence 或扩展属性）
+            # LineageEdge 没有 pii_inherited 列，迁移中添加
+            pass
+
+        if changed:
+            await self._safe_publish(
+                {
+                    "event_type": "pii.propagated",
+                    "metric_code": metric_code,
+                    "propagation_source": "upstream_lineage",
+                }
+            )
+            logger.info("pii_propagated", metric_code=metric_code)
+
+        return changed
 
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")

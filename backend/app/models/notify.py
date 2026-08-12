@@ -31,6 +31,8 @@ class NotifyChannel(enum.StrEnum):
     SMS = "SMS"
     WEBHOOK = "WEBHOOK"
     IN_APP = "IN_APP"
+    DINGTALK = "DINGTALK"
+    CONSOLE = "console"
 
 
 class NotifyStatus(enum.StrEnum):

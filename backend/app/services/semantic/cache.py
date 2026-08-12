@@ -22,7 +22,7 @@ from app.services.semantic.schemas import MetricResponse
 
 logger = get_logger("unisense.semantic.cache")
 
-_TTL_SECONDS = 300
+_TTL_SECONDS = 600  # 10 分钟（对齐 US10 / FR-5 消费性能基线）
 _PREFIX = "metric:def:"
 
 
@@ -106,3 +106,45 @@ class MetricCache:
             await self._redis.delete(key)  # type: ignore[union-attr]
         except Exception:
             logger.warning("metric_cache_invalidate_failed", metric_code=metric_code)
+
+    async def invalidate_batch(self, metric_codes: list[str]) -> None:
+        """批量失效缓存。失败不影响写路径。
+
+        Args:
+            metric_codes: 指标编码列表。
+        """
+        if not self._enabled or not metric_codes:
+            return
+        keys = [_PREFIX + code for code in metric_codes]
+        try:
+            await self._redis.delete(*keys)  # type: ignore[union-attr]
+        except Exception:
+            logger.warning("metric_cache_invalidate_batch_failed", count=len(metric_codes))
+
+    async def warm_up(self, metrics: list[Metric]) -> int:
+        """预热缓存：批量写入指标定义。
+
+        Args:
+            metrics: 指标 ORM 对象列表。
+
+        Returns:
+            成功写入的数量。
+        """
+        if not self._enabled:
+            return 0
+        count = 0
+        for metric in metrics:
+            if not self._breaker.allow():
+                break
+            key = _PREFIX + metric.metric_code
+            try:
+                payload = json.dumps(
+                    MetricResponse.model_validate(metric).model_dump(mode="json"),
+                    ensure_ascii=False,
+                )
+                await self._redis.set(key, payload, ex=_TTL_SECONDS)  # type: ignore[union-attr]
+                count += 1
+            except Exception:
+                self._breaker.record_failure()
+                logger.warning("metric_cache_warmup_failed", metric_code=metric.metric_code)
+        return count

@@ -39,6 +39,8 @@ class Settings(BaseSettings):
 
     # ---- Elasticsearch ----
     es_url: str = "http://localhost:9200"
+    es_username: str = ""
+    es_password: str = ""
 
     # ---- OLAP（StarRocks / Doris，可选依赖）----
     olap_url: str = ""
@@ -99,7 +101,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_config(self) -> Settings:
-        """生产环境校验：jwt_secret≥32字符、Fernet密钥必须独立、olap_url必须非空。"""
+        """生产环境校验：jwt_secret≥32字符、Fernet密钥必须独立、olap_url必须非空、CORS 禁通配符。"""
         if self.env == "prod":
             if len(self.jwt_secret) < 32:
                 raise ConfigurationError(
@@ -115,6 +117,11 @@ class Settings(BaseSettings):
                 raise ConfigurationError(
                     "生产环境 UNISENSE_OLAP_URL 必须非空，"
                     "consume 查询需要 OLAP 执行引擎。请配置 Doris/StarRocks 地址后重启。"
+                )
+            # CORS 严格校验：allow_credentials=True 时禁止通配符
+            if "*" in self.cors_origins_list:
+                raise ConfigurationError(
+                    "生产环境 CORS 不允许通配符与 credentials=True 组合，请配置具体 Origin"
                 )
         return self
 

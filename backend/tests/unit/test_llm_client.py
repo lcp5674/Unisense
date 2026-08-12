@@ -21,9 +21,13 @@ class TestLlmClient:
         await client.close()
 
     async def test_disabled_when_no_config(self) -> None:
-        client = LlmClient()
-        assert client.enabled is False
-        await client.close()
+        # 隔离 settings：无 base_url / api_key 时 disabled
+        with patch("app.services.llm.client.settings") as mock_settings:
+            mock_settings.llm_base_url = ""
+            mock_settings.llm_api_key = ""
+            client = LlmClient()
+            assert client.enabled is False
+            await client.close()
 
     @pytest.mark.asyncio
     async def test_chat_success(self) -> None:

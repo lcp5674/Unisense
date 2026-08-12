@@ -149,7 +149,7 @@ async def test_get_metric_public_cache_hit_skips_db():
 
 async def test_get_metric_detail_degrades_via_breaker_when_redis_down(monkeypatch):
     # 真实 HTTP 路径：Redis 宕机经熔断降级到 DB，详情接口仍 200
-    monkeypatch.setattr("app.db.redis.redis_client", _DownRedis())
+    monkeypatch.setattr("app.db.redis.get_redis", lambda: _DownRedis())
 
     async def fake_get_by_code(self, code: str) -> Metric:
         return _make_metric(code=code, pii=True)

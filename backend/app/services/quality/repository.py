@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -78,7 +78,7 @@ class QualityRepository:
         return rule
 
     async def delete_rule(self, rule: QualityRule) -> None:
-        rule.deleted_at = datetime.utcnow()
+        rule.deleted_at = datetime.now(UTC)
         await self._db.flush()
 
     async def list_enabled_rules_for(
@@ -221,7 +221,7 @@ class QualityRepository:
         ACK 时附 ack_note（运营处理说明）。operator_id 必填，消除 user_id 死参数。
         """
         event.status = status
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         if status == QualityEventStatus.ACK:
             event.ack_by = operator_id
             event.ack_at = now

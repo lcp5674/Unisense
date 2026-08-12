@@ -44,7 +44,6 @@ async def create_rule(
 ) -> Any:
     """注册质量规则（随指标 PUBLISHED 注册，按 tier/dw_layer 差异化）。"""
     resp = await QualityService(db).create_rule(payload, user.id)
-    await db.commit()
     await write_audit(
         db,
         actor_id=user.id,
@@ -54,6 +53,7 @@ async def create_rule(
         detail={},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
@@ -97,7 +97,6 @@ async def update_rule(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await QualityService(db).update_rule(rule_id, payload)
-    await db.commit()
     await write_audit(
         db,
         actor_id=user.id,
@@ -107,6 +106,7 @@ async def update_rule(
         detail={},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
@@ -118,7 +118,6 @@ async def delete_rule(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     await QualityService(db).delete_rule(rule_id)
-    await db.commit()
     await write_audit(
         db,
         actor_id=user.id,
@@ -128,6 +127,7 @@ async def delete_rule(
         detail={},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data={"deleted": rule_id}, trace_id=trace_id)
 
 
@@ -144,7 +144,6 @@ async def record_observation(
 ) -> Any:
     """写入一次质量观测样本（采集 / 产出分区就绪时调用），供动态基线 / 同环比 / 跨源检测复用。"""
     resp = await QualityService(db).record_observation(payload)
-    await db.commit()
     await write_audit(
         db,
         actor_id=user.id,
@@ -154,6 +153,7 @@ async def record_observation(
         detail={"metric_code": resp.metric_code, "source_id": resp.source_id},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 

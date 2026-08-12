@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -69,7 +69,7 @@ class GlossaryConflict(Base, BaseModel):
     )
     resolver: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=lambda: datetime.utcnow()
+        DateTime, nullable=False, default=lambda: datetime.now(UTC)
     )
 
 
@@ -85,7 +85,7 @@ class TermVersion(Base, BaseModel):
     changed_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
     change_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=lambda: datetime.utcnow()
+        DateTime, nullable=False, default=lambda: datetime.now(UTC)
     )
 
 
@@ -109,7 +109,7 @@ class TermRelation(Base, BaseModel):
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=lambda: datetime.utcnow()
+        DateTime, nullable=False, default=lambda: datetime.now(UTC)
     )
 
     __table_args__ = (

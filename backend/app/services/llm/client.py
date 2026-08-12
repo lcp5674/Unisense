@@ -17,14 +17,20 @@
   UNISENSE_LLM_BASE_URL=https://api.kilo.ai/api/gateway
   UNISENSE_LLM_API_KEY=eyJhbGciOiJIUzI1NiIs...  # 测试密钥
   UNISENSE_LLM_MODEL=poolside/laguna-m.1:free
+
+P2 增强：
+  chat 方法返回结构化结果（dict 含 content+confidence+reasoning+candidates），
+  通过 Pydantic Schema 校验确保输出格式一致。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import settings
 
@@ -39,10 +45,43 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
 }
 
 
+# ---- P2: 结构化输出 Schema ----
+
+class LlmStructuredOutput(BaseModel):
+    """LLM 结构化输出 Schema（P2 置信度分流）。
+
+    所有 LLM chat 调用统一返回此结构，下游服务依据 confidence 做分流决策。
+    """
+
+    content: str = Field(..., description="主内容文本")
+    confidence: float = Field(
+        0.5,
+        ge=0.0,
+        le=1.0,
+        description="置信度 [0,1]，<0.7 标记 needs_review",
+    )
+    reasoning: str = Field(
+        "",
+        description="推理过程/依据说明",
+    )
+    candidates: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="候选结果列表（多选题/多分类场景）",
+    )
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clamp_confidence(cls, v: Any) -> float:
+        """将置信度钳制到 [0, 1] 区间。"""
+        val = float(v) if v is not None else 0.5
+        return max(0.0, min(1.0, val))
+
+
 class LlmClient:
     """OpenAI 协议兼容的 LLM 客户端。
 
     支持流式和非流式调用，自动处理超时和重试。
+    chat 方法返回结构化结果（LlmStructuredOutput）。
     """
 
     def __init__(
@@ -75,7 +114,7 @@ class LlmClient:
         max_tokens: int = 1000,
         response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """发送聊天请求，返回完整响应。
+        """发送聊天请求，返回结构化结果。
 
         Args:
             messages: 消息列表，格式 [{"role": "user/assistant/system", "content": "..."}]
@@ -84,7 +123,14 @@ class LlmClient:
             response_format: 响应格式约束，如 {"type": "json_object"}
 
         Returns:
-            {"content": "...", "model": "...", "finish_reason": "..."}
+            结构化结果 dict，包含:
+            - content: 主内容文本
+            - confidence: 置信度 [0,1]
+            - reasoning: 推理过程说明
+            - candidates: 候选结果列表
+            - model: 模型名称
+            - finish_reason: 完成原因
+            - usage: token 使用量
 
         Raises:
             LlmError: 请求失败时抛出
@@ -92,22 +138,32 @@ class LlmClient:
         if not self.enabled:
             raise LlmError("LLM 未配置，请设置 UNISENSE_LLM_BASE_URL 和 UNISENSE_LLM_API_KEY")
 
+        # 使用 json_object 格式引导 LLM 输出结构化 JSON
+        effective_format = response_format or {"type": "json_object"}
+
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "response_format": effective_format,
         }
-        if response_format:
-            payload["response_format"] = response_format
 
         try:
             resp = await self._client.post("/v1/chat/completions", json=payload)
             resp.raise_for_status()
             data = resp.json()
             choice = data["choices"][0]["message"]
+            raw_content = choice.get("content", "")
+
+            # 解析结构化输出
+            structured = self._parse_structured_output(raw_content)
+
             return {
-                "content": choice["content"],
+                "content": structured.content,
+                "confidence": structured.confidence,
+                "reasoning": structured.reasoning,
+                "candidates": structured.candidates,
                 "model": data.get("model", self._model),
                 "finish_reason": choice.get("finish_reason", "stop"),
                 "usage": data.get("usage", {}),
@@ -122,6 +178,38 @@ class LlmClient:
             logger.error("LLM 网络错误: %s", exc)
             raise LlmError(f"LLM 请求失败: {exc}") from exc
 
+    def _parse_structured_output(self, raw_content: str) -> LlmStructuredOutput:
+        """解析 LLM 输出为结构化结果。
+
+        如果 LLM 输出为合法 JSON，尝试解析为 LlmStructuredOutput；
+        否则包装为默认结构（confidence=0.5, reasoning="非结构化输出"）。
+        """
+        if not raw_content:
+            return LlmStructuredOutput(
+                content="",
+                confidence=0.0,
+                reasoning="LLM 返回空内容",
+            )
+
+        try:
+            parsed = json.loads(raw_content)
+            if isinstance(parsed, dict):
+                return LlmStructuredOutput(
+                    content=str(parsed.get("content", raw_content)),
+                    confidence=float(parsed.get("confidence", 0.5)),
+                    reasoning=str(parsed.get("reasoning", "")),
+                    candidates=parsed.get("candidates", []),
+                )
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+        # 非结构化输出：包装为默认结构
+        return LlmStructuredOutput(
+            content=raw_content,
+            confidence=0.5,
+            reasoning="非结构化输出，默认置信度 0.5",
+        )
+
     async def close(self) -> None:
         """关闭客户端连接。"""
         await self._client.aclose()
@@ -135,6 +223,7 @@ class DeterministicFallbackLlmClient:
     """确定性降级客户端：不调用外部服务，直接弃权。
 
     用于 LLM 不可用时的回退场景。
+    P2 增强：返回结构化结果，confidence=0.0 标记为需人工审核。
     """
 
     async def chat(
@@ -145,9 +234,12 @@ class DeterministicFallbackLlmClient:
         max_tokens: int = 1000,
         response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """降级：返回弃权信号。"""
+        """降级：返回弃权信号（结构化格式）。"""
         return {
             "content": "",
+            "confidence": 0.0,
+            "reasoning": "LLM 不可用，确定性降级客户端返回",
+            "candidates": [],
             "model": "deterministic-fallback",
             "finish_reason": "length",
             "usage": {},
