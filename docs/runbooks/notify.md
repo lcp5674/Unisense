@@ -73,8 +73,29 @@ curl -s -X POST http://localhost:8100/api/v1/notify/events \
 
 ## 7. 迁移与回滚
 
-- 相关迁移：`0010_notify`（`notification` / `event_log` / `subscription_pref`）、`0012_audit_columns`（补 `deleted_at`）。
+- 相关迁移：`0010_notify`（`notification` / `event_log` / `subscription_pref`）、`0012_audit_columns`（补 `deleted_at`）、`0022_notify_channel_enum`（channel 枚举扩展为 6 值：EMAIL/SMS/WEBHOOK/IN_APP/DINGTALK/console）。
 - 回滚：`alembic downgrade -1`；`0010` drop 三表，`0012` 仅 drop 审计列，均结构回退、数据无损。
+
+## 7.1 端到端验证（2026-08-12 实跑通过）
+
+```bash
+# 订阅（channel 自动规范化到枚举 value）
+curl -X PUT $BASE/notify/subscriptions -H "Authorization: Bearer $TOKEN" \
+  -d '{"user_id":1,"channel":"console","event_type":"quality.anomaly","enabled":true}'
+# 发布事件 → 扇出 + 即时投递
+curl -X POST $BASE/notify/events -H "Authorization: Bearer $TOKEN" \
+  -d '{"event_type":"quality.anomaly","source":"quality","level":"WARN","payload":{...}}'
+# 返回 {"event_id":1,"notifications":1,"delivered":1}
+
+# 查询通知/事件/订阅（返回序列化 JSON 而非 ORM）
+curl "$BASE/notify/notifications?status=SENT" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/notify/events" -H "Authorization: Bearer $TOKEN"
+# 状态流转
+curl -X POST $BASE/notify/notifications/2/sent -H "Authorization: Bearer $TOKEN"
+curl -X POST $BASE/notify/notifications/2/failed -H "Authorization: Bearer $TOKEN"
+```
+
+验证要点：① console 渠道 `delivered=1`（SENT）；② 配置 `UNISENSE_NOTIFY_WEBHOOK_URL` 后 webhook 订阅真实 POST 到外部端点（本地接收器实测收到）；③ 历史修复（2026-08-12 端到端暴露并修复）：channel 枚举漂移（迁移 0022）、API ORM 序列化 500（改 from_model）、渠道大小写漂移（_dispatch 归一化 + SubscriptionUpsert validator），均有防回归单测。
 
 ## 8. 可观测性
 

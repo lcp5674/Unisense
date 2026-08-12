@@ -117,3 +117,5 @@
 
 | 2026-08-12 | — | (db) | **Alembic 迁移链收敛**：0019_lineage_edge_history（血缘历史快照）+ 0019_semantic_state_machine 顺延为 0020（消除多头）+ 0021_metric_submitted_by（metric.submitted_by）；0018_collector_drift_watermark 先行；单链升级 0017→0021 在真实 MySQL 验证通过 | — | released（迁移收敛） |
 
+
+| 2026-08-12 | — | consume / notify | **consume/notify 端到端联调修复（docker 容器实跑）**：端到端验证暴露并修复 3 个单测覆盖不到的 bug——① notify channel 枚举漂移（模型 6 值 vs 迁移 4 值 → 写入 DINGTALK/console 报 Data truncated 1265）→ 新增迁移 0022 扩展；② notify API 直接返回 ORM 对象（Unable to serialize 500）→ 全端点 from_model 序列化；③ _dispatch 渠道大小写漂移（DB 存大写枚举值但比较小写 → 除 console 外全部渠道投递失败）→ 归一化比较 + SubscriptionUpsert channel validator。consume 实跑验证：dry-run 真实参数化 SQL / OLAP 未配置 503 降级 / 越权三层拦截（FORBIDDEN_METRIC/DOMAIN/401）/ QPS 限流 429 retry_after / 收藏 CRUD / 审计留痕；维度标识符纵深防御（FORBIDDEN_DIMENSION）。补充防回归单测 43 notify 用例全绿。提交 9603002 | POST /api/v1/notify/events、/consume/query | released（端到端实跑验证通过） |

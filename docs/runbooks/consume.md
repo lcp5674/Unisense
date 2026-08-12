@@ -49,6 +49,24 @@
 - **K8s 回滚**：`kubectl rollout undo deploy/unisense-api`
 - **快照 WORM 不可改**：误写须业务补偿（新快照覆盖 + 审计说明）
 
+## 5.1 端到端验证（2026-08-12 实跑通过）
+
+```bash
+# 1) platform_admin 创建接入方（secret 仅此一次明文返回）
+curl -X POST $BASE/consume/api-clients -H "Authorization: Bearer $TOKEN" \
+  -d '{"client_id":"e2e_consumer","secret":"e2e_secret_123","scope_domain":"sales","metric_whitelist":["sales_order_gmv_daily"],"qps":2,"daily_quota":100}'
+# 2) dry-run（口径校验 + 真实物理口径 SQL 下发）
+curl -X POST $BASE/consume/query/dry-run -H "X-Api-Key: e2e_consumer:e2e_secret_123" \
+  -d '{"metric_code":"sales_order_gmv_daily","date_range":"2026-08-01~2026-08-07"}'
+# 3) 真实查询：OLAP 未配置 → 503 DEPENDENCY_DEGRADED_ENGINE（降级非阻塞）；OLAP 可用 → 返回 rows/total/elapsed_ms
+# 4) 越权拦截（fail-closed）：白名单外→403 FORBIDDEN_METRIC；跨域→403 FORBIDDEN_DOMAIN；非法密钥→401
+# 5) 限流：qps=2 连发 3 次 → 前 2 次 200、第 3 次 429 RATE_LIMITED + retry_after
+# 6) 维度标识符纵深防御：请求未声明维度 → 403 FORBIDDEN_DIMENSION（dry-run 与 execute 双路径）
+# 7) 收藏：POST/GET/DELETE /consume/me/favorites；审计 consume.api_client.create / consume.query 落库
+```
+
+验证要点：① dry-run 返回真实参数化 SQL（`sql_params`）而非占位；② OLAP 未配置时降级 503 不阻塞主流程；③ 三层越权闸门 + PII 显式授权 + 维度收敛全部 fail-closed。
+
 ## 6. 联系人
 - **Owner / Backup**：见 `docs/module-status.yaml` consume.owner（空缺，platform_admin 指派）
 - **升级路径**：On-call → platform_admin → 架构委员会

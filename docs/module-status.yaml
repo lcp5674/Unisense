@@ -216,7 +216,7 @@ modules:
     pr: ""
     owner: ""
     updated: "2026-08-12"
-    note: "生产级补强（2026-08-12）：OLAP 执行器（olap_executor 统一方言/直连 Doris/StarRocks、结果封装、不可用降级 503）、分布式限流（rate_limiter Redis 令牌桶 + InMemory 降级 + 多副本一致，429 限流头）、查询链路（count 页、缓存、防注入）。原 p95≈1.73s 超契约问题随执行器落地缓解；本地 Docker MySQL 往返非逻辑回归。门禁：643 unit / ruff 0 / mypy 0。提交 92e8732。"
+    note: "生产级补强（2026-08-12）：OLAP 执行器（olap_executor 统一方言/直连 Doris/StarRocks、结果封装、不可用降级 503）、分布式限流（rate_limiter Redis 令牌桶 + InMemory 降级 + 多副本一致，429 限流头）、查询链路（count 页、缓存、防注入）。端到端实跑（2026-08-12，docker 容器）：dry-run 200 / OLAP 未配置降级 503 DEPENDENCY_DEGRADED_ENGINE / 越权三层拦截（白名单外 FORBIDDEN_METRIC、跨域 FORBIDDEN_DOMAIN、非法密钥 401）/ QPS 滑动窗口限流 429 retry_after / 收藏增删查 / consume.api_client.create 审计留痕全部验证通过；维度标识符纵深防御（未声明维度拒绝 FORBIDDEN_DIMENSION，execute_query 与 dry-run 双路径）。原 p95≈1.73s 超契约问题随执行器落地缓解；本地 Docker MySQL 往返非逻辑回归。门禁：667 unit / ruff 0 / mypy 0(147 文件)。提交 9603002。"
     post_verify_review:
       standard: "DEV_GUIDE §6.3 双视角漏洞审查 + §12.6 消费层契约"
       performed_at: "2026-08-09"
@@ -285,7 +285,7 @@ modules:
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "§6.3 High(2)/Med(7)/Low(7) 已全部修复：① 通知闭环(P-1) publish_event 现即时投递并回写 SENT/FAILED，delivered 计数返回；② PLAT-2 IDOR 修复 subscriber_id/user_id 强制来自 user.id；③ PLAT-5 source/level 取值白名单校验；④ PLAT-3 审计与业务同事务原子提交；⑤ 补 security_reverse 越权反例测试。security_reverse 门禁恢复有效。通知真实外发（2026-08-12）：SMTP 邮件（aiosmtplib）/ 钉钉 Webhook 机器人（markdown 告警/待办/升级模板）/ Webhook 三渠道适配器 + _dispatch 真实投递回写 SENT/FAILED + 共享 HTTP 客户端连接池；事件发布链路补齐（notify_url 运行时注入 + 订阅扇出即时投递）。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
+    note: "§6.3 High(2)/Med(7)/Low(7) 已全部修复：① 通知闭环(P-1) publish_event 现即时投递并回写 SENT/FAILED，delivered 计数返回；② PLAT-2 IDOR 修复 subscriber_id/user_id 强制来自 user.id；③ PLAT-5 source/level 取值白名单校验；④ PLAT-3 审计与业务同事务原子提交；⑤ 补 security_reverse 越权反例测试。security_reverse 门禁恢复有效。通知真实外发（2026-08-12）：SMTP 邮件（aiosmtplib）/ 钉钉 Webhook 机器人（markdown 告警/待办/升级模板）/ Webhook 三渠道适配器 + _dispatch 真实投递回写 SENT/FAILED + 共享 HTTP 客户端连接池；事件发布链路补齐（notify_url 运行时注入 + 订阅扇出即时投递）。端到端实跑联调（2026-08-12）修复 3 个单测覆盖不到的 bug：① channel 枚举漂移（模型 6 值 vs 迁移 4 值 → 写入 DINGTALK/console 报 Data truncated 1265）→ 迁移 0022 扩展；② API 直接返回 ORM 对象（Unable to serialize 500）→ 全端点 from_model 序列化；③ _dispatch 渠道大小写漂移（DB 存大写枚举值但比较小写 → 除 console 外全部渠道投递失败）→ 归一化比较 + SubscriptionUpsert channel validator。实跑验证：订阅/扇出/console SENT/webhook 真实 POST 外发（本地接收器收到）/事件日志 notified/状态流转 mark_sent-failed 全部通过。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
     updated: "2026-08-12"
 
   observability:
