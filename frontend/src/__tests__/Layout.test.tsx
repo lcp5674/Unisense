@@ -1,17 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Layout } from "../components/Layout";
 
-// Mock API：Layout 挂载时拉取未读通知数
+// Mock API：Layout 挂载时拉取未读通知数与用户偏好（折叠态服务端持久化）
 vi.mock("../api", () => ({
   listNotifications: vi.fn(),
   clearToken: vi.fn(),
+  fetchPreferences: vi.fn(),
+  setPreference: vi.fn(),
 }));
-import { listNotifications } from "../api";
+import { listNotifications, fetchPreferences, setPreference } from "../api";
 vi.mocked(listNotifications).mockResolvedValue({ items: [], total: 0 });
+vi.mocked(fetchPreferences).mockResolvedValue({});
+vi.mocked(setPreference).mockResolvedValue(undefined);
 
-const SIDER_KEY = "unisense.sider.collapsed";
+// 折叠状态按用户隔离存储：key 带 user.id
+const SIDER_KEY = "unisense.sider.collapsed.1";
 
 const mockUser = {
   id: 1,
@@ -22,18 +27,21 @@ const mockUser = {
   org_id: 1,
 };
 
-function renderLayout() {
+function renderLayout(user = mockUser) {
   return render(
     <MemoryRouter initialEntries={["/dashboard"]}>
-      <Layout user={mockUser} />
+      <Layout user={user} />
     </MemoryRouter>,
   );
 }
 
-describe("Layout 侧边栏伸缩", () => {
+describe("Layout 侧边栏伸缩（按用户持久化）", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    vi.mocked(listNotifications).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(fetchPreferences).mockResolvedValue({});
+    vi.mocked(setPreference).mockResolvedValue(undefined);
   });
 
   it("渲染分组导航与头部功能区", () => {
@@ -45,7 +53,7 @@ describe("Layout 侧边栏伸缩", () => {
     expect(screen.getAllByText("Unisense").length).toBeGreaterThan(0);
   });
 
-  it("默认展开；点击收起按钮后侧边栏折叠并持久化", () => {
+  it("默认展开；点击收起按钮后侧边栏折叠并持久化到该用户", () => {
     const { container } = renderLayout();
     expect(container.querySelector(".ant-layout-sider-collapsed")).toBeFalsy();
 
@@ -67,13 +75,41 @@ describe("Layout 侧边栏伸缩", () => {
     expect(localStorage.getItem(SIDER_KEY)).toBe("0");
   });
 
-  it("刷新后从 localStorage 恢复折叠偏好", () => {
+  it("刷新后从该用户的 localStorage 恢复折叠偏好", () => {
     localStorage.setItem(SIDER_KEY, "1");
     const { container } = renderLayout();
     expect(container.querySelector(".ant-layout-sider-collapsed")).toBeTruthy();
 
     const collapsedBtn = screen.getByRole("button", { name: "展开侧边栏" });
     expect(collapsedBtn).toBeInTheDocument();
+  });
+
+  it("折叠偏好按用户隔离：user.id=1 折叠不影响 user.id=2", () => {
+    localStorage.setItem("unisense.sider.collapsed.1", "1");
+    localStorage.setItem("unisense.sider.collapsed.2", "0");
+    const { container } = renderLayout({ ...mockUser, id: 2 });
+    expect(container.querySelector(".ant-layout-sider-collapsed")).toBeFalsy();
+  });
+
+  it("服务端偏好覆盖本地缓存（服务端为准）", async () => {
+    vi.mocked(fetchPreferences).mockResolvedValue({ ui: { sider_collapsed: true } });
+    const { container } = renderLayout();
+    await waitFor(() => {
+      expect(container.querySelector(".ant-layout-sider-collapsed")).toBeTruthy();
+    });
+    expect(localStorage.getItem(SIDER_KEY)).toBe("1");
+  });
+
+  it("点击折叠后防抖写入服务端偏好", async () => {
+    const { container } = renderLayout();
+    fireEvent.click(screen.getByRole("button", { name: "收起侧边栏" }));
+    await waitFor(
+      () => {
+        expect(setPreference).toHaveBeenCalledWith("ui", { sider_collapsed: true });
+      },
+      { timeout: 1500 },
+    );
+    expect(container.querySelector(".ant-layout-sider-collapsed")).toBeTruthy();
   });
 
   it("折叠后导航项仍可点击跳转", () => {

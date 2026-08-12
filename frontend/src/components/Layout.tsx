@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme } from "antd";
 import {
@@ -31,12 +31,17 @@ import {
   MenuUnfoldOutlined,
 } from "@ant-design/icons";
 import type { CurrentUser } from "../types";
-import { clearToken, listNotifications } from "../api";
+import { clearToken, fetchPreferences, listNotifications, setPreference } from "../api";
 
 const { Header, Sider, Content } = AntLayout;
 
-// 侧边栏折叠状态持久化键：刷新/重登后仍保留用户偏好
-const SIDER_STORAGE_KEY = "unisense.sider.collapsed";
+// 侧边栏折叠状态：按用户持久化（服务端 user_preference 为准 + 本地 per-user 缓存加速，跨用户隔离）
+const SIDER_UI_KEY = "ui"; // user_preference.preference_key
+const SIDER_FIELD = "sider_collapsed"; // ui.value 内的字段
+
+function siderStorageKey(userId: number): string {
+  return `unisense.sider.collapsed.${userId}`;
+}
 
 // 分组导航：覆盖后端全部功能域
 const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: string; icon: React.ReactNode }> }> = [
@@ -102,10 +107,10 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
 const ALL_NAV_KEYS = NAV_GROUPS.flatMap((g) => g.children.map((c) => c.key));
 
 export function Layout({ user }: { user: CurrentUser }) {
-  // 折叠状态从 localStorage 恢复；隐私模式等异常场景回退为展开
+  // 折叠状态从「该用户的本地缓存」恢复（跨用户隔离）；隐私模式等异常场景回退为展开
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
-      return localStorage.getItem(SIDER_STORAGE_KEY) === "1";
+      return localStorage.getItem(siderStorageKey(user.id)) === "1";
     } catch {
       return false;
     }
@@ -115,14 +120,57 @@ export function Layout({ user }: { user: CurrentUser }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = theme.useToken();
+  const saveTimer = useRef<number | null>(null);
+  // 用户手动切换过折叠后，避免迟到的服务端响应覆盖用户意图
+  const userToggled = useRef(false);
+
+  // 用户切换/首次挂载：先取该用户本地缓存（避免闪烁），再以服务端偏好为准并回写缓存
+  useEffect(() => {
+    userToggled.current = false;
+    let cancelled = false;
+    try {
+      const stored = localStorage.getItem(siderStorageKey(user.id));
+      if (stored !== null) setCollapsed(stored === "1");
+    } catch {
+      /* 隐私模式等场景忽略 */
+    }
+    fetchPreferences()
+      .then((prefs) => {
+        if (cancelled || userToggled.current) return;
+        const ui = (prefs[SIDER_UI_KEY] ?? {}) as Record<string, unknown>;
+        if (typeof ui[SIDER_FIELD] === "boolean") {
+          const serverCollapsed = ui[SIDER_FIELD] as boolean;
+          setCollapsed(serverCollapsed);
+          try {
+            localStorage.setItem(siderStorageKey(user.id), serverCollapsed ? "1" : "0");
+          } catch {
+            /* 忽略 */
+          }
+        }
+      })
+      .catch(() => {
+        /* 服务端不可达时保留本地偏好 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user.id]);
 
   function handleCollapse(value: boolean) {
+    userToggled.current = true;
     setCollapsed(value);
     try {
-      localStorage.setItem(SIDER_STORAGE_KEY, value ? "1" : "0");
+      localStorage.setItem(siderStorageKey(user.id), value ? "1" : "0");
     } catch {
       /* 隐私模式等场景忽略持久化失败 */
     }
+    // 服务端持久化（防抖，避免快速连点产生冗余写）
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      setPreference(SIDER_UI_KEY, { [SIDER_FIELD]: value }).catch(() => {
+        /* 离线/失败时保留本地偏好，下次挂载以服务端为准 */
+      });
+    }, 400);
   }
 
   // 选中项：最长前缀匹配

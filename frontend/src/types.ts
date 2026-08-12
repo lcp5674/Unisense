@@ -176,6 +176,16 @@ export interface CurrentUser {
   org_id: number;
 }
 
+// 用户偏好（backend /api/v1/me/preferences，key → JSON value，按用户持久化）
+export interface UserPreferenceItem {
+  key: string;
+  value: unknown;
+}
+export interface UserPreferenceList {
+  items: UserPreferenceItem[];
+  total: number;
+}
+
 // ============================================================================
 // 语义服务（backend /api/v1/semantics/*）
 // ============================================================================
@@ -809,12 +819,34 @@ export interface AssetMetricSummary {
 }
 
 export interface AssetTableItem {
+  /** 目录主键（db_catalog.id），用于实体详情下钻；后端 to_dict 保留 id */
+  id?: number;
   source_id: string;
   entity_name: string;
   entity_type: string;
-  sensitivity_level: string;
+  /** 敏感级别；历史 to_dict 曾剥离该字段，按可空处理（渲染端防御） */
+  sensitivity_level?: string | null;
   owner_id: number | null;
   schema_incomplete: boolean;
+  etl_sql?: string | null;
+}
+
+// 实体详情（GET /api/v1/assetmap/entities/{entity_id}，A1 新增端点）
+export interface AssetEntityDetail {
+  id: number;
+  entity_name: string;
+  entity_type: string;
+  source_id: string;
+  sensitivity_level: string | null;
+  owner_id: number | null;
+  schema_incomplete: boolean;
+  content_signature: string | null;
+  /** schema 摘要：后端可能返回字符串摘要或结构化对象 */
+  schema_summary?: string | Record<string, unknown> | null;
+  /** 血缘相关边数（表/字段级别） */
+  lineage_count?: number;
+  /** 是否含 PII */
+  pii_flag?: boolean;
   etl_sql?: string | null;
 }
 

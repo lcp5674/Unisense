@@ -6,6 +6,7 @@ import {
   ApiError,
   AssetCatalogSummary,
   AssetClassificationSummary,
+  AssetEntityDetail,
   AssetMetricSummary,
   AssetOwnerView,
   AssetTableItem,
@@ -68,6 +69,8 @@ import {
   SourceHealth,
   SourceType,
   SubscriptionPref,
+  UserPreferenceItem,
+  UserPreferenceList,
   Watermark,
   API_BASE,
 } from "./types";
@@ -205,6 +208,27 @@ export async function apiLogin(username: string, password: string): Promise<stri
 
 export async function fetchCurrentUser(): Promise<CurrentUser> {
   return request<CurrentUser>(`${API_BASE}/auth/me`);
+}
+
+// ---- 用户偏好（按用户持久化，如侧边栏折叠态）----
+export async function fetchPreferences(): Promise<Record<string, unknown>> {
+  const data = await request<UserPreferenceList>(`${API_BASE}/me/preferences`);
+  const map: Record<string, unknown> = {};
+  for (const item of data.items) map[item.key] = item.value;
+  return map;
+}
+
+export async function setPreference(key: string, value: unknown): Promise<void> {
+  await request<UserPreferenceItem>(`${API_BASE}/me/preferences/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    body: JSON.stringify({ value }),
+  });
+}
+
+export async function deletePreference(key: string): Promise<void> {
+  await request<UserPreferenceItem>(`${API_BASE}/me/preferences/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
 }
 
 // ---- 指标定义 ----
@@ -1265,6 +1289,11 @@ export async function fetchAssetOwnerView(ownerId: number): Promise<AssetOwnerVi
   return request<AssetOwnerView>(
     `${API_BASE}/assetmap/owner-view?owner_id=${ownerId}`,
   );
+}
+
+// 实体详情：返回表/字段详情（schema 摘要/敏感度/PII/Owner/血缘边数）
+export async function fetchAssetEntityDetail(entityId: number): Promise<AssetEntityDetail> {
+  return request<AssetEntityDetail>(`${API_BASE}/assetmap/entities/${entityId}`);
 }
 
 export type { ApiError, DimensionExpr };
