@@ -1,0 +1,93 @@
+import { useEffect, useState } from "react";
+import { Button, Empty, Segmented, Table, Tag } from "antd";
+import { lineageImpact } from "../../api";
+import type { LineageEdge } from "../../types";
+
+const EDGE_COLOR: Record<string, string> = {
+  METRIC_DERIVES: "blue",
+  METRIC_DEPENDS_ON: "purple",
+  TABLE_TO_FIELD: "cyan",
+  FIELD_TO_TABLE: "geekblue",
+  SQL_PARSE: "default",
+};
+
+export function LineageImpact({ metricCode }: { metricCode: string }) {
+  const [edges, setEdges] = useState<LineageEdge[]>([]);
+  const [direction, setDirection] = useState<"upstream" | "downstream">("downstream");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function load(dir: "upstream" | "downstream") {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await lineageImpact({ node: metricCode, direction: dir, max_hops: 5, page_size: 50 });
+      setEdges(res.items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "血缘加载失败");
+      setEdges([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load(direction);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [metricCode, direction]);
+
+  const columns = [
+    {
+      title: direction === "downstream" ? "下游节点" : "上游节点",
+      key: "node",
+      render: (_: unknown, e: LineageEdge) => (
+        <span className="mono">{direction === "downstream" ? e.target_node : e.source_node}</span>
+      ),
+    },
+    {
+      title: "关系",
+      dataIndex: "edge_type",
+      key: "edge_type",
+      width: 160,
+      render: (v: string) => <Tag color={EDGE_COLOR[v] ?? "default"}>{v}</Tag>,
+    },
+    { title: "置信度", dataIndex: "confidence", key: "conf", width: 100, render: (v: number) => `${Math.round(v * 100)}%` },
+    { title: "来源", dataIndex: "provenance", key: "prov", width: 110, render: (v: string) => v },
+    { title: "PII 传导", dataIndex: "pii_inherited", key: "pii", width: 100, render: (v?: boolean) => v ? <Tag color="red">PII</Tag> : <span className="muted">—</span> },
+  ];
+
+  return (
+    <div>
+      <div style={{ marginBottom: 12 }}>
+        <Segmented
+          value={direction}
+          onChange={(v) => setDirection(v as "upstream" | "downstream")}
+          options={[
+            { label: "下游影响（被谁消费）", value: "downstream" },
+            { label: "上游依赖（来自哪里）", value: "upstream" },
+          ]}
+        />
+        <Button
+          type="link"
+          size="small"
+          onClick={() => window.open(`/lineage?node=${encodeURIComponent(metricCode)}`, "_blank")}
+        >
+          在图谱中查看 →
+        </Button>
+      </div>
+      {error ? (
+        <Empty description={error} />
+      ) : (
+        <Table
+          dataSource={edges}
+          columns={columns}
+          rowKey="id"
+          size="small"
+          pagination={{ pageSize: 8, hideOnSinglePage: true }}
+          loading={loading}
+          locale={{ emptyText: "暂无血缘关系（可在血缘视图解析 SQL 建立）" }}
+        />
+      )}
+    </div>
+  );
+}

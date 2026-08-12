@@ -6,6 +6,7 @@ import type { CurrentUser } from "./types";
 import { Layout } from "./components/Layout";
 import { MetricCatalog } from "./pages/MetricCatalog";
 import { MetricDetail } from "./pages/MetricDetail";
+import { MetricCompare } from "./pages/MetricCompare";
 import { MetricCreate } from "./pages/MetricCreate";
 import { ReviewWorkbench } from "./pages/ReviewWorkbench";
 import { MetricReview } from "./pages/MetricReview";
@@ -184,6 +185,7 @@ export default function App() {
             <Route path="/catalog" element={<MetricCatalog />} />
             <Route path="/templates" element={<Templates />} />
             <Route path="/detail/:code" element={<MetricDetail />} />
+            <Route path="/compare" element={<MetricCompare />} />
             <Route path="/create" element={<MetricCreate />} />
             <Route path="/metrics/review" element={<MetricReview />} />
             <Route path="/favorites" element={<Favorites />} />

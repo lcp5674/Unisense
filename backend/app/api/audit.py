@@ -31,6 +31,7 @@ async def list_audit_logs(
     trace_id: Annotated[str, Depends(get_trace_id)],
     actor_id: int | None = Query(None, description="操作人 ID"),
     entity_type: str | None = Query(None, description="实体类型"),
+    entity_id: str | None = Query(None, description="实体 ID（精确匹配，如指标编码）"),
     trace_id_filter: str | None = Query(None, description="链路追踪 ID"),
     pii_access: bool | None = Query(None, description="是否 PII 访问"),
     page: int = Query(1, ge=1),
@@ -44,6 +45,8 @@ async def list_audit_logs(
         stmt = stmt.where(AuditLog.actor_id == actor_id)
     if entity_type is not None:
         stmt = stmt.where(AuditLog.entity_type == entity_type)
+    if entity_id is not None:
+        stmt = stmt.where(AuditLog.entity_id == entity_id)
     if trace_id_filter is not None:
         stmt = stmt.where(AuditLog.trace_id == trace_id_filter)
     if pii_access is not None:

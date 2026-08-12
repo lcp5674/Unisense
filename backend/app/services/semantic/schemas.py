@@ -212,6 +212,8 @@ class MetricListParams(BaseModel):
     status: str | None = None
     metric_tier: str | None = None
     keyword: str | None = None
+    sort_by: Literal["updated_at", "created_at", "version", "metric_code", "name"] = "updated_at"
+    sort_order: Literal["asc", "desc"] = "desc"
     page: int = Field(1, ge=1, le=1000)
     page_size: int = Field(20, ge=1, le=100)
 
@@ -297,3 +299,20 @@ class ErrorResponse(BaseModel):
     message: str
     trace_id: str
     detail: dict[str, Any] | None = None
+
+
+class MetricHealthResponse(BaseModel):
+    """指标健康度响应（五维评分）。"""
+
+    metric_id: int
+    score: int
+    level: str
+    completeness_score: int
+    activity_score: int
+    quality_score: int
+    owner_response_score: int
+    lineage_coverage_score: int
+    missing_dimensions: list[str] | None
+    calculated_at: datetime
+
+    model_config = {"from_attributes": True}

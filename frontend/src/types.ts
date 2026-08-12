@@ -43,8 +43,56 @@ export interface MetricResponse {
   successor_code: string | null;
   deprecated_at: string | null;
   sunset_until: string | null;
+  emergency_publish: boolean;
+  emergency_reason: string | null;
+  gray_tenant_ids: number[] | null;
+  pending_conflict: boolean;
+  pending_conflict_detail: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+}
+
+// 指标健康度（backend health_scorer.py：五维加权，>=85 EXCELLENT / >=70 GOOD / >=55 WARNING / <55 CRITICAL）
+export interface MetricHealth {
+  metric_id: number;
+  score: number;
+  level: "EXCELLENT" | "GOOD" | "WARNING" | "CRITICAL";
+  completeness_score: number;
+  activity_score: number;
+  quality_score: number;
+  owner_response_score: number;
+  lineage_coverage_score: number;
+  missing_dimensions: string[] | null;
+  calculated_at: string;
+}
+
+// 两指标并排对比（backend compare_metrics：fields.difference_level ∈ identical/similar/different）
+export interface MetricCompareField {
+  a: unknown;
+  b: unknown;
+  difference_level: "identical" | "similar" | "different";
+}
+export interface MetricCompareDeps {
+  a: string[];
+  b: string[];
+  intersection: string[];
+  only_a: string[];
+  only_b: string[];
+  difference_level: "identical" | "different";
+}
+export interface MetricCompareResult {
+  metrics: [string, string];
+  fields: Record<string, MetricCompareField | MetricCompareDeps | undefined>;
+}
+
+// 只读用户摘要（backend GET /auth/users，Owner 责任链渲染用）
+export interface UserBrief {
+  id: number;
+  username: string;
+  display_name: string;
+  role: string;
+  domain: string | null;
+  status: string;
 }
 
 export interface MetricListResponse {
@@ -829,6 +877,9 @@ export interface AssetTableItem {
   owner_id: number | null;
   schema_incomplete: boolean;
   etl_sql?: string | null;
+  /** 新鲜度字段（后端 to_dict 透传 created_at/updated_at） */
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 // 实体详情（GET /api/v1/assetmap/entities/{entity_id}，A1 新增端点）
@@ -845,9 +896,28 @@ export interface AssetEntityDetail {
   schema_summary?: string | Record<string, unknown> | null;
   /** 血缘相关边数（表/字段级别） */
   lineage_count?: number;
+  /** 血缘边明细列表（生产化增强） */
+  lineage_edges?: Array<{
+    source: string;
+    target: string;
+    edge_type: string;
+    granularity?: string;
+    confidence?: number;
+    provenance?: string;
+  }>;
+  /** 关联指标（血缘下游 metric: 节点） */
+  related_metrics?: Array<{ metric_node: string; edge_type: string }>;
+  /** 源健康状态（生产化增强） */
+  source_health?: {
+    health_status: string;
+    last_health_check: string | null;
+    source_name: string | null;
+  };
   /** 是否含 PII */
   pii_flag?: boolean;
   etl_sql?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface AssetOwnerView {
@@ -860,6 +930,80 @@ export interface AssetOwnerView {
     by_domain: Record<string, number>;
   };
   catalogs: { total: number };
+}
+
+// ---- 产品补充（FR-18 生产化）：搜索 / 健康 / PII / 变更 / 我的资产 ----
+
+// 全局搜索（GET /assetmap/search）
+export interface AssetSearchItem {
+  type: "catalog" | "metric";
+  id: number;
+  name: string;
+  entity_type: string;
+  sensitivity_level: string | null;
+  domain: string | null;
+  owner_id: number | null;
+  status: string | null;
+}
+
+// 资产健康视图（GET /assetmap/health）
+export interface AssetHealthSummary {
+  unhealthy_sources: Array<{ source_id: string; name: string; health_status: string }>;
+  schema_incomplete: Array<{ id: number; entity_name: string; source_id: string }>;
+  orphan_assets: number;
+  stale_assets: Array<{ id: number; entity_name: string; updated_at: string }>;
+  stale_days: number;
+}
+
+// PII 合规视图（GET /assetmap/pii）
+export interface AssetPiiOverview {
+  by_sensitivity: Record<string, number>;
+  by_domain: Record<string, number>;
+  pii_metric_count: number;
+  pii_catalog_count: number;
+}
+
+// 变更追踪（GET /assetmap/changes）
+export interface AssetChangeItem {
+  id: number;
+  entity_name: string;
+  entity_type: string;
+  sensitivity_level: string;
+  owner_id: number | null;
+  source_id: string;
+  updated_at: string;
+}
+export interface AssetChangeMetric {
+  metric_code: string;
+  name: string;
+  status: string;
+  domain: string;
+  pii_flag: boolean;
+  updated_at: string;
+}
+export interface AssetChanges {
+  catalogs: AssetChangeItem[];
+  metrics: AssetChangeMetric[];
+  days: number;
+}
+
+// 我的资产（GET /assetmap/my-assets）
+export interface AssetMyAssets {
+  owner_id: number;
+  catalogs: Array<{
+    id: number;
+    entity_name: string;
+    entity_type: string;
+    sensitivity_level: string;
+    source_id: string;
+  }>;
+  metrics: Array<{
+    metric_code: string;
+    name: string;
+    status: string;
+    domain: string;
+    pii_flag: boolean;
+  }>;
 }
 
 export const API_BASE = "/api/v1";

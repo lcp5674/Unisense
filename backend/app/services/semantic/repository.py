@@ -98,6 +98,8 @@ class MetricRepository:
         status: str | None = None,
         metric_tier: str | None = None,
         keyword: str | None = None,
+        sort_by: str = "updated_at",
+        sort_order: str = "desc",
         offset: int = 0,
         limit: int = 20,
     ) -> tuple[list[Metric], int]:
@@ -108,6 +110,8 @@ class MetricRepository:
             status: 状态过滤。
             metric_tier: 分级过滤。
             keyword: 关键词搜索（metric_code/name）。
+            sort_by: 排序字段（白名单映射，防注入）。
+            sort_order: 排序方向（asc/desc）。
             offset: 偏移量。
             limit: 每页数量。
 
@@ -132,11 +136,22 @@ class MetricRepository:
         count_stmt = select(func.count()).select_from(Metric).where(*conditions)
         total = (await self._db.execute(count_stmt)).scalar() or 0
 
+        # 排序字段白名单（防 SQL 注入）
+        sort_columns: dict[str, Any] = {
+            "updated_at": Metric.updated_at,
+            "created_at": Metric.created_at,
+            "version": Metric.version,
+            "metric_code": Metric.metric_code,
+            "name": Metric.name,
+        }
+        sort_col = sort_columns.get(sort_by, Metric.updated_at)
+        sort_order_clause = sort_col.asc() if sort_order == "asc" else sort_col.desc()
+
         # 列表
         stmt = (
             select(Metric)
             .where(*conditions)
-            .order_by(Metric.updated_at.desc())
+            .order_by(sort_order_clause)
             .offset(offset)
             .limit(limit)
         )
@@ -270,16 +285,16 @@ class MetricRepository:
         return result.scalar_one_or_none()
 
     async def mark_version_published(
-        self, metric_id: int, version: int, published_at: datetime
+        self, metric_id: int, version: int, published_at: datetime, *, status: str = "PUBLISHED"
     ) -> None:
-        """将指定版本标记为 PUBLISHED 并记录发布时间（发布时版本转正）。"""
+        """将指定版本标记为指定状态（默认 PUBLISHED）并记录发布时间（发布时版本转正）。"""
         stmt = (
             update(MetricVersion)
             .where(
                 MetricVersion.metric_id == metric_id,
                 MetricVersion.version == version,
             )
-            .values(status="PUBLISHED", published_at=published_at, effective_at=published_at)
+            .values(status=status, published_at=published_at, effective_at=published_at)
         )
         await self._db.execute(stmt)
 

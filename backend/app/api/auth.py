@@ -9,12 +9,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser
+from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, ok
 from app.core.exceptions import AuthError
 from app.core.security import create_access_token, verify_password
@@ -47,6 +47,17 @@ class UserInfo(BaseModel):
     role: str
     domain: str | None
     org_id: int
+
+
+class UserBrief(BaseModel):
+    """只读用户摘要（Owner 责任链渲染用，绝不暴露 email/password_hash）。"""
+
+    id: int
+    username: str
+    display_name: str
+    role: str
+    domain: str | None
+    status: str
 
 
 @router.post("/login")
@@ -94,4 +105,25 @@ async def me(user: CurrentUser) -> ApiResponse[UserInfo]:
             domain=user.domain,
             org_id=user.org_id,
         )
+    )
+
+
+@router.get("/users")
+async def list_users(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    role: str | None = Query(None, description="按角色过滤（可选）"),
+    _: None = Depends(require_roles(*ALL_ROLES)),
+) -> ApiResponse[list[UserBrief]]:
+    """只读用户列表（Owner 责任链渲染用）。
+
+    任意登录角色可读，仅返回基础字段（id/username/display_name/role/domain/status），
+    不暴露 email 与 password_hash，避免敏感信息扩散。
+    """
+    stmt = select(User).order_by(User.id)
+    if role:
+        stmt = stmt.where(User.role == role)
+    rows = (await db.execute(stmt)).scalars().all()
+    return ok(
+        [UserBrief(id=u.id, username=u.username, display_name=u.display_name, role=u.role, domain=u.domain, status=u.status) for u in rows]
     )

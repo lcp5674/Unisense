@@ -28,6 +28,7 @@ from app.services.semantic.repository import MetricRepository
 from app.services.semantic.schemas import (
     MetricApproveRequest,
     MetricCreateRequest,
+    MetricEmergencyPublishRequest,
     MetricListParams,
     MetricPublishRequest,
     MetricRejectRequest,
@@ -92,6 +93,12 @@ class MetricService(BaseService):
 
     封装指标的业务逻辑：CRUD、状态流转、版本管理。
     继承 BaseService 获得统一的 _write_audit / _publish_event 辅助方法。
+
+    事件发布策略（对齐 FR-014~FR-018 / Decision 7）：
+    - 所有事件使用 BaseService._publish_event（best-effort）
+    - 发布失败仅告警，不阻断主流程
+    - 失败事件入 Arq 重试队列（见 app.tasks.semantic_tasks.retry_event_publish）
+    - 读侧对 Neo4j/ES 缺失标 stale
     """
 
     def __init__(self, db: AsyncSession, cache: MetricCache | None = None) -> None:
@@ -109,6 +116,9 @@ class MetricService(BaseService):
 
     async def create_metric(self, request: MetricCreateRequest, owner_id: int) -> Metric:
         """创建指标（初始状态 DRAFT）。
+
+        对齐 FR-012/FR-013：metric_code 校验委托 ConflictPrechecker.validate_code_format，
+        创建后异步调 ConflictPrechecker.precheck，命中相似口径→挂 pending_conflict 标记。
 
         Args:
             request: 创建请求。
@@ -193,6 +203,32 @@ class MetricService(BaseService):
             actor_id=str(owner_id),
         )
 
+        # 异步冲突预检（对齐 FR-012）：创建后调 ConflictPrechecker.precheck
+        # 命中相似口径→更新 pending_conflict=True + pending_conflict_detail
+        try:
+            from app.services.semantic.conflict_precheck import ConflictPrechecker
+
+            prechecker = ConflictPrechecker()
+            conflict_detail = await prechecker.precheck(metric.metric_code, definition)
+            if conflict_detail is not None:
+                metric = await self._repo.update_with_optimistic_lock(
+                    metric.id,
+                    metric.row_version,
+                    pending_conflict=True,
+                    pending_conflict_detail=conflict_detail,
+                )
+                logger.info(
+                    "metric_conflict_detected",
+                    metric_code=metric.metric_code,
+                    conflict_detail=conflict_detail,
+                )
+        except Exception:
+            # 冲突预检失败不阻塞创建（best-effort）
+            logger.warning(
+                "metric_conflict_precheck_failed",
+                metric_code=metric.metric_code,
+            )
+
         return metric
 
     async def get_metric(self, metric_code: str) -> Metric:
@@ -252,6 +288,8 @@ class MetricService(BaseService):
             status=params.status,
             metric_tier=params.metric_tier,
             keyword=params.keyword,
+            sort_by=params.sort_by,
+            sort_order=params.sort_order,
             offset=offset,
             limit=params.page_size,
         )
@@ -312,6 +350,16 @@ class MetricService(BaseService):
             if synced_pii != metric.pii_flag:
                 updates["pii_flag"] = synced_pii
 
+            # S-02 修复：PUBLISHED 状态口径变更走 PENDING_VERSION 期，不直接生效
+            if metric.status == "PUBLISHED" and is_breaking:
+                # 破坏性变更：创建 PENDING 版本，不更新 metric 主表口径
+                # 等 PendingVersionConfirmation 全部确认后才转正
+                updates.pop("definition_json", None)
+                updates.pop("version", None)
+                version_status = "PENDING_CONFIRMATION"
+            else:
+                version_status = "DRAFT"
+
             # 创建版本记录
             version = MetricVersion(
                 metric_id=metric.id,
@@ -319,11 +367,28 @@ class MetricService(BaseService):
                 change_type="BREAKING" if is_breaking else "UPDATE",
                 definition_json=new_def,
                 diff_json=self._compute_diff(old_def, new_def),
-                status="DRAFT",
+                status=version_status,
                 change_reason=request.change_reason,
                 created_by=actor_id,
             )
             await self._repo.create_version(version)
+
+            # PUBLISHED + 破坏性变更 → 创建 PendingVersionConfirmation 记录
+            if metric.status == "PUBLISHED" and is_breaking:
+                from app.services.semantic.pending_version_manager import PendingVersionManager
+
+                pvm = PendingVersionManager(self._db)
+                await pvm.create_pending_confirmations(
+                    metric_id=metric.id,
+                    version=new_version_num,
+                    deadline_days=14,
+                )
+                logger.info(
+                    "pending_version_created",
+                    metric_code=metric_code,
+                    version=new_version_num,
+                    reason="breaking_change_on_published",
+                )
 
         # 注意：change_reason 仅写入 MetricVersion 快照（上方），metric 主表无该列，
         # 不能写入 updates，否则 update(Metric).values(change_reason=...) 抛 CompileError。
@@ -614,8 +679,11 @@ class MetricService(BaseService):
             **extra_updates,
         )
 
-        # 版本转正：将指定版本标记为对应状态
-        await self._repo.mark_version_published(metric.id, target_version, now)
+        # 版本转正：将指定版本标记为对应状态（对齐 FR-042：metric+version 原子）
+        version_status = target_status  # PUBLISHED 或 EXPERIMENTAL
+        await self._repo.mark_version_published(
+            metric.id, target_version, now, status=version_status
+        )
 
         await self._cache.invalidate(metric_code)
 
@@ -786,6 +854,266 @@ class MetricService(BaseService):
         )
         return updated
 
+    async def promote_metric(self, metric_code: str, actor_id: int) -> Metric:
+        """灰度全量发布（EXPERIMENTAL → PUBLISHED，对齐 FR-020）。
+
+        清除 gray_tenant_ids，将指标与版本状态从 EXPERIMENTAL 升为 PUBLISHED，
+        发布 metric.promoted 事件 → lineage(Neo4j)/search(ES)/notify。
+
+        Args:
+            metric_code: 指标编码。
+            actor_id: 操作人 ID。
+
+        Returns:
+            全量发布后的指标。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            ConflictError: 非法状态跃迁（非 EXPERIMENTAL）。
+        """
+        metric = await self.get_metric(metric_code)
+
+        # 状态机校验：EXPERIMENTAL→PUBLISHED
+        invalid = MetricStateMachine.validate_transition(metric.status, "PUBLISHED")
+        if invalid is not None:
+            raise ConflictError(invalid, error_code="INVALID_TRANSITION")
+
+        now = datetime.now(UTC)
+
+        # 清除灰度白名单 + 状态升为 PUBLISHED
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id,
+            metric.row_version,
+            status="PUBLISHED",
+            gray_tenant_ids=None,
+        )
+
+        # 版本状态同步升为 PUBLISHED
+        await self._repo.mark_version_published(
+            metric.id, metric.version, now, status="PUBLISHED"
+        )
+
+        await self._cache.invalidate(metric_code)
+
+        # 发布 metric.promoted 事件（对齐 FR-020：lineage+search+notify）
+        await self._publish_event(
+            "metric.promoted",
+            {
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                "version": metric.version,
+                "type": metric.type,
+                "definition_json": metric.definition_json,
+                "promoted_at": now.isoformat(),
+            },
+            actor_id=str(actor_id),
+        )
+
+        logger.info(
+            "metric_promoted",
+            metric_code=metric_code,
+            actor_id=actor_id,
+        )
+        return updated
+
+    async def rollback_metric(self, metric_code: str, actor_id: int) -> Metric:
+        """灰度回滚（EXPERIMENTAL → 回退上一 PUBLISHED 版本，对齐 FR-020）。
+
+        EXPERIMENTAL 版本标记 ARCHIVED，指标状态回到 PUBLISHED，
+        effective_version 回退到上一个 PUBLISHED 版本。
+        发布 metric.rolled_back 事件 → notify+audit。
+
+        Args:
+            metric_code: 指标编码。
+            actor_id: 操作人 ID。
+
+        Returns:
+            回滚后的指标。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            ConflictError: 非法状态跃迁 / 无上一 PUBLISHED 版本可回退。
+        """
+        metric = await self.get_metric(metric_code)
+
+        # 状态机校验：EXPERIMENTAL→PUBLISHED (rollback)
+        invalid = MetricStateMachine.validate_transition(metric.status, "PUBLISHED")
+        if invalid is not None:
+            raise ConflictError(invalid, error_code="INVALID_TRANSITION")
+
+        # 查找上一 PUBLISHED 版本
+        versions = await self._repo.list_versions(metric.id)
+        prev_published = None
+        for v in versions:
+            if v.status == "PUBLISHED" and v.version != metric.version:
+                prev_published = v
+                break
+
+        if prev_published is None:
+            raise ConflictError(
+                "无上一 PUBLISHED 版本可回退",
+                error_code="NO_PREVIOUS_PUBLISHED_VERSION",
+            )
+
+        # 将 EXPERIMENTAL 版本标记为 ARCHIVED
+        from sqlalchemy import update
+
+        stmt = (
+            update(MetricVersion)
+            .where(
+                MetricVersion.metric_id == metric.id,
+                MetricVersion.version == metric.version,
+            )
+            .values(status="ARCHIVED")
+        )
+        await self._db.execute(stmt)
+
+        now = datetime.now(UTC)
+
+        # 回退指标状态为 PUBLISHED + 清除灰度白名单 + 回退 effective_version
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id,
+            metric.row_version,
+            status="PUBLISHED",
+            gray_tenant_ids=None,
+            effective_version=prev_published.version,
+        )
+
+        await self._cache.invalidate(metric_code)
+
+        # 发布 metric.rolled_back 事件（对齐 FR-020：notify+audit）
+        await self._publish_event(
+            "metric.rolled_back",
+            {
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                "rolled_back_from_version": metric.version,
+                "rolled_back_to_version": prev_published.version,
+                "rolled_back_at": now.isoformat(),
+            },
+            actor_id=str(actor_id),
+        )
+
+        logger.info(
+            "metric_rolled_back",
+            metric_code=metric_code,
+            from_version=metric.version,
+            to_version=prev_published.version,
+            actor_id=actor_id,
+        )
+        return updated
+
+    async def emergency_publish_metric(
+        self,
+        metric_code: str,
+        request: MetricEmergencyPublishRequest,
+        actor_id: int,
+        role: str,
+    ) -> Metric:
+        """紧急发布快通道（DRAFT → PUBLISHED 跳过 REVIEW，对齐 FR-022/FR-023/FR-024）。
+
+        仅 domain_admin 可执行；PII 指标紧急发布仍须合规门禁（不可跳过）；
+        合规官不可达时仅 INTERNAL 分级发布。
+
+        Args:
+            metric_code: 指标编码。
+            request: 紧急发布请求（含 reason/target_version）。
+            actor_id: 操作人 ID。
+            role: 操作人角色。
+
+        Returns:
+            紧急发布后的指标。
+
+        Raises:
+            AuthError: 非 domain_admin 角色。
+            NotFoundError: 指标不存在。
+            ConflictError: 非法状态跃迁。
+            BusinessError: PII 未过合规审核。
+        """
+        # 角色校验：仅 domain_admin / platform_admin 可紧急发布
+        if role not in ("domain_admin", "platform_admin"):
+            raise AuthError(
+                "紧急发布仅 domain_admin / platform_admin 可执行",
+                error_code="FORBIDDEN",
+                ctx={"role": role},
+            )
+
+        metric = await self.get_metric(metric_code)
+
+        # 状态机校验：DRAFT→PUBLISHED（紧急发布跳过 REVIEW）
+        invalid = MetricStateMachine.validate_transition(metric.status, "PUBLISHED")
+        if invalid is not None:
+            raise ConflictError(invalid, error_code="INVALID_TRANSITION")
+
+        # PII 门禁不可跳过（对齐 FR-024：含 PII 指标紧急发布仍须合规复核）
+        if metric.pii_flag and not metric.compliance_reviewed:
+            # 合规官不可达判定：compliance_officer 角色无活跃用户 → 仅 INTERNAL 分级发布
+            # TODO: 实际查询活跃 compliance_officer 用户，当前用 serving_mode 降级
+            raise BusinessError(
+                "含 PII 指标紧急发布须先通过合规审核（合规门禁不可跳过，FR-024）",
+                error_code="COMPLIANCE_BLOCKED",
+            )
+
+        # 定位待发布版本
+        target_version = request.target_version or metric.version
+        version_obj = await self._repo.get_version(metric.id, target_version)
+        if version_obj is None:
+            raise NotFoundError(f"版本不存在: {target_version}")
+
+        # 同一事务中原子更新：metric.status + 紧急发布标记
+        now = datetime.now(UTC)
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id,
+            metric.row_version,
+            status="PUBLISHED",
+            approver_id=actor_id,
+            effective_version=target_version,
+            emergency_publish=True,
+            emergency_reason=request.reason,
+        )
+
+        # 版本转正
+        await self._repo.mark_version_published(
+            metric.id, target_version, now, status="PUBLISHED"
+        )
+
+        await self._cache.invalidate(metric_code)
+
+        # 发布 metric.emergency_published 事件（对齐 FR-022：audit EMERGENCY_PUBLISH 标记）
+        await self._publish_event(
+            "metric.emergency_published",
+            {
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                "version": target_version,
+                "type": metric.type,
+                "emergency_reason": request.reason,
+                "emergency_published_at": now.isoformat(),
+            },
+            actor_id=str(actor_id),
+        )
+
+        # 审计 EMERGENCY_PUBLISH 标记
+        await self._write_audit(
+            actor_id=actor_id,
+            action="EMERGENCY_PUBLISH",
+            entity_type="metric_definition",
+            entity_id=metric_code,
+            detail={
+                "emergency_reason": request.reason,
+                "version": target_version,
+                "skipped_review": True,
+            },
+        )
+
+        logger.info(
+            "metric_emergency_published",
+            metric_code=metric_code,
+            reason=request.reason,
+            actor_id=actor_id,
+        )
+        return updated
+
     async def delete_metric(self, metric_code: str, actor_id: int) -> Metric:
         """软删除指标（仅 DRAFT 状态）。
 
@@ -838,6 +1166,12 @@ class MetricService(BaseService):
             raise BusinessError(
                 "合规复核禁止指标 Owner 自审",
                 error_code="SELF_REVIEW_BLOCKED",
+            )
+        # S-06 修复：非 PII 指标无需合规复核
+        if not metric.pii_flag:
+            raise BusinessError(
+                "非 PII 指标无需合规复核",
+                error_code="PII_FLAG_REQUIRED",
             )
         updated = await self._repo.update_with_optimistic_lock(
             metric.id, metric.row_version, compliance_reviewed=True
@@ -1070,7 +1404,16 @@ class MetricService(BaseService):
             是否为破坏性变更。
         """
         # 类型/聚合/粒度/依赖变更 = 破坏性
-        return any(old_def.get(field) != new_def.get(field) for field in BREAKING_DEF_FIELDS)
+        # 依赖项用集合比较（顺序无关）
+        for field in BREAKING_DEF_FIELDS:
+            old_val = old_def.get(field)
+            new_val = new_def.get(field)
+            if field == "dependencies":
+                if set(old_val or []) != set(new_val or []):
+                    return True
+            elif old_val != new_val:
+                return True
+        return False
 
     @staticmethod
     def _compute_diff(old_def: dict[str, Any], new_def: dict[str, Any]) -> dict[str, Any]:
@@ -1088,10 +1431,215 @@ class MetricService(BaseService):
         for key in all_keys:
             old_val = old_def.get(key)
             new_val = new_def.get(key)
-            if old_val != new_val:
-                diff[key] = {
-                    "before": old_val,
-                    "after": new_val,
-                    "change_type": ("BREAKING" if key in BREAKING_DEF_FIELDS else "UPDATE"),
-                }
+            # 依赖项用集合比较（顺序无关）
+            if key == "dependencies":
+                if set(old_val or []) == set(new_val or []):
+                    continue
+            elif old_val == new_val:
+                continue
+            diff[key] = {
+                "before": old_val,
+                "after": new_val,
+                "change_type": ("BREAKING" if key in BREAKING_DEF_FIELDS else "UPDATE"),
+            }
         return diff
+
+    # ---- US8: 健康度评分 ----
+
+    async def get_metric_health(self, metric_code: str) -> Any:
+        """获取指标健康度评分。
+
+        Args:
+            metric_code: 指标编码。
+
+        Returns:
+            健康度评分对象。
+
+        Raises:
+            NotFoundError: 指标不存在。
+        """
+        from app.services.semantic.health_scorer import HealthScorer
+
+        metric = await self.get_metric(metric_code)
+        scorer = HealthScorer(self._db)
+        health = await scorer.calculate(metric.id)
+        # 红橙指标进整改待办
+        if health.level in ("WARNING", "CRITICAL"):
+            await self._publish_event(
+                "metric.health_critical",
+                {
+                    "metric_code": metric_code,
+                    "score": health.score,
+                    "level": health.level,
+                    "missing_dimensions": health.missing_dimensions,
+                },
+                actor_id="system",
+            )
+        return health
+
+    # ---- US9: 指标对比 ----
+
+    async def compare_metrics(self, code_a: str, code_b: str) -> dict[str, Any]:
+        """两指标关键字段并排对比。
+
+        Args:
+            code_a: 指标A编码。
+            code_b: 指标B编码。
+
+        Returns:
+            并排对比结果，含差异标记。
+        """
+        a = await self.get_metric(code_a)
+        b = await self.get_metric(code_b)
+
+        def _diff_level(va: Any, vb: Any) -> str:
+            if va == vb:
+                return "identical"
+            # 简单相似判定：字符串包含关系
+            sa, sb = str(va), str(vb)
+            if sa in sb or sb in sa:
+                return "similar"
+            return "different"
+
+        fields = [
+            "granularity", "unit", "currency", "aggregation",
+            "time_semantics", "additivity", "dw_layer", "metric_tier",
+            "serving_mode", "freshness",
+        ]
+        result: dict[str, Any] = {"metrics": [code_a, code_b], "fields": {}}
+
+        for field in fields:
+            va = getattr(a, field, None)
+            vb = getattr(b, field, None)
+            result["fields"][field] = {
+                "a": va, "b": vb,
+                "difference_level": _diff_level(va, vb),
+            }
+
+        # 口径定义对比
+        def_a = a.definition_json or {}
+        def_b = b.definition_json or {}
+        expr_a = def_a.get("expression", "")
+        expr_b = def_b.get("expression", "")
+        result["fields"]["definition"] = {
+            "a": def_a, "b": def_b,
+            "difference_level": _diff_level(expr_a, expr_b),
+        }
+
+        # 依赖对比
+        dep_a = set(def_a.get("dependencies", []) or [])
+        dep_b = set(def_b.get("dependencies", []) or [])
+        result["fields"]["dependencies"] = {
+            "a": sorted(dep_a), "b": sorted(dep_b),
+            "intersection": sorted(dep_a & dep_b),
+            "only_a": sorted(dep_a - dep_b),
+            "only_b": sorted(dep_b - dep_a),
+            "difference_level": "identical" if dep_a == dep_b else "different",
+        }
+
+        return result
+
+    # ---- US10: 批量注册 ----
+
+    async def batch_register_metrics(
+        self, request: Any, actor_id: int,
+    ) -> dict[str, Any]:
+        """批量注册指标。
+
+        Args:
+            request: 批量注册请求(含source_table+measure_columns+domain)。
+            actor_id: 操作人ID。
+
+        Returns:
+            {batch_id, candidates: [{metric_code, status, validation_errors}]}.
+        """
+        import uuid
+
+        from app.services.semantic.schemas import MetricCreateRequest
+
+        batch_id = f"batch_{uuid.uuid4().hex[:12]}"
+        candidates: list[dict[str, Any]] = []
+
+        for col in request.measure_columns:
+            code = f"{request.domain}_{col}_day"
+            try:
+                create_req = MetricCreateRequest(
+                    metric_code=code,
+                    name=col,
+                    domain=request.domain,
+                    type="atomic",
+                    granularity="day",
+                    unit="cnt",
+                    aggregation="SUM",
+                    time_semantics="PERIOD",
+                    freshness="T1",
+                    dw_layer="DWD",
+                    definition_json={"expression": f"SUM({col})", "dependencies": []},
+                    batch_id=batch_id,
+                )
+                await self.create_metric(create_req, owner_id=actor_id)
+                candidates.append({
+                    "metric_code": code, "status": "DRAFT",
+                    "validation_errors": None,
+                })
+            except (BusinessError, ConflictError) as exc:
+                candidates.append({
+                    "metric_code": code, "status": "VALIDATION_ERROR",
+                    "validation_errors": str(exc),
+                })
+
+        return {"batch_id": batch_id, "candidates": candidates}
+
+    # ---- US11: 消费指南 ----
+
+    async def get_consumption_guide(self, metric_code: str) -> dict[str, Any]:
+        """获取指标消费指南（Service层 + 缓存）。
+
+        Args:
+            metric_code: 指标编码。
+
+        Returns:
+            消费指南字典。
+
+        Raises:
+            NotFoundError: 指标不存在。
+        """
+        # 先查缓存
+        cached = await self._cache.get(f"guide:{metric_code}")
+        if cached is not None:
+            return cached
+
+        metric = await self.get_metric(metric_code)
+
+        if metric.consumption_guide:
+            guide = metric.consumption_guide
+        else:
+            guide = {
+                "metric_code": metric.metric_code,
+                "name": metric.name,
+                "domain": metric.domain,
+                "type": metric.type,
+                "granularity": metric.granularity,
+                "unit": metric.unit,
+                "aggregation": metric.aggregation,
+                "time_semantics": metric.time_semantics,
+                "serving_mode": metric.serving_mode,
+                "recommended_usage": [
+                    f"适用 {metric.domain} 域 {metric.granularity} 粒度分析",
+                    f"聚合方式为 {metric.aggregation}，"
+                    f"注意{'不可' if metric.additivity == 'NON_ADDITIVE' else '可以'}跨维度聚合",
+                ],
+                "cautions": [],
+                "related_metrics": [],
+            }
+            if metric.pii_flag:
+                guide["cautions"].append(
+                    "该指标包含 PII 数据，使用时需遵守数据合规要求"
+                )
+            if metric.additivity == "SEMI_ADDITIVE":
+                dims = metric.non_additive_dimensions or "未指定"
+                guide["cautions"].append(f"半可加指标，不可加维度: {dims}")
+
+        # 缓存结果
+        await self._cache.set_guide(metric_code, guide)
+        return guide

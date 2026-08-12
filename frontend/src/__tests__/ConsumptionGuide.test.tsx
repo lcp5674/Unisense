@@ -77,6 +77,11 @@ describe("ConsumptionGuide", () => {
       successor_code: null,
       deprecated_at: null,
       sunset_until: null,
+      emergency_publish: false,
+      emergency_reason: null,
+      gray_tenant_ids: null,
+      pending_conflict: false,
+      pending_conflict_detail: null,
       created_at: "2026-08-01T00:00:00",
       updated_at: "2026-08-01T00:00:00",
     });

@@ -5,10 +5,15 @@
 import {
   ApiError,
   AssetCatalogSummary,
+  AssetChanges,
   AssetClassificationSummary,
   AssetEntityDetail,
+  AssetHealthSummary,
   AssetMetricSummary,
+  AssetMyAssets,
   AssetOwnerView,
+  AssetPiiOverview,
+  AssetSearchItem,
   AssetTableItem,
   AuditEntry,
   ClientCreateRequest,
@@ -40,6 +45,8 @@ import {
   LineageEdgePage,
   MetricCreateRequest,
   MetricListResponse,
+  MetricCompareResult,
+  MetricHealth,
   MetricPublishRequest,
   MetricResponse,
   MetricTemplate,
@@ -69,6 +76,7 @@ import {
   SourceHealth,
   SourceType,
   SubscriptionPref,
+  UserBrief,
   UserPreferenceItem,
   UserPreferenceList,
   Watermark,
@@ -237,6 +245,8 @@ export async function listMetrics(params: {
   status?: string;
   metric_tier?: string;
   keyword?: string;
+  sort_by?: "updated_at" | "created_at" | "version" | "metric_code" | "name";
+  sort_order?: "asc" | "desc";
   page?: number;
   page_size?: number;
 }): Promise<MetricListResponse> {
@@ -245,6 +255,8 @@ export async function listMetrics(params: {
     status: params.status,
     metric_tier: params.metric_tier,
     keyword: params.keyword,
+    sort_by: params.sort_by,
+    sort_order: params.sort_order,
     page: params.page ?? 1,
     page_size: params.page_size ?? 20,
   });
@@ -319,6 +331,111 @@ export async function reviewMetric(
       body: JSON.stringify({ approved, change_reason: changeReason }),
     },
   );
+}
+
+// ---- 指标可信度：健康度/对比/灰度/紧急发布/版本确认（backend /metric-definitions）----
+
+export async function getMetricHealth(code: string): Promise<MetricHealth> {
+  return request<MetricHealth>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/health`,
+  );
+}
+
+// 审核通过：mode=standard 全量发布 / experimental 灰度发布（灰度可带 gray_tenant_ids）
+export async function approveMetric(
+  code: string,
+  opts: { mode?: "standard" | "experimental"; gray_tenant_ids?: number[]; target_version?: number } = {},
+): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        mode: opts.mode ?? "standard",
+        gray_tenant_ids: opts.gray_tenant_ids ?? null,
+        target_version: opts.target_version ?? null,
+      }),
+    },
+  );
+}
+
+export async function compareMetrics(
+  codeA: string,
+  codeB: string,
+): Promise<MetricCompareResult> {
+  return request<MetricCompareResult>(`${API_BASE}/metric-definitions/compare`, {
+    method: "POST",
+    body: JSON.stringify({ metric_codes: [codeA, codeB] }),
+  });
+}
+
+export async function emergencyPublishMetric(
+  code: string,
+  reason: string,
+  targetVersion?: number,
+): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/emergency-publish`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason, target_version: targetVersion ?? null }),
+    },
+  );
+}
+
+export async function promoteMetric(code: string): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/promote`,
+    { method: "POST" },
+  );
+}
+
+export async function rollbackMetric(code: string): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/rollback`,
+    { method: "POST" },
+  );
+}
+
+// 版本确认闭环：消费方确认/拒绝、Owner 延期（PENDING_VERSION 状态版本）
+export async function confirmMetricVersion(code: string, version: number): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/confirm-version`,
+    {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    },
+  );
+}
+
+export async function rejectMetricVersion(
+  code: string,
+  version: number,
+  reason: string,
+): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/reject-version`,
+    {
+      method: "POST",
+      body: JSON.stringify({ version, reason }),
+    },
+  );
+}
+
+export async function extendMetricVersion(code: string, version: number): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/extend-version`,
+    {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    },
+  );
+}
+
+// ---- 用户（backend /auth/users，Owner 责任链渲染）----
+export async function listUsers(role?: string): Promise<UserBrief[]> {
+  const qs = role ? `?role=${encodeURIComponent(role)}` : "";
+  return request<UserBrief[]>(`${API_BASE}/auth/users${qs}`);
 }
 
 // ---- 冲突 ----
@@ -1083,6 +1200,7 @@ export async function aiNl2Sql(body: {
 export async function listAudit(params?: {
   actor_id?: number;
   entity_type?: string;
+  entity_id?: string;
   trace_id?: string;
   pii_access?: boolean;
   page?: number;
@@ -1091,6 +1209,7 @@ export async function listAudit(params?: {
   const qs = pageQs({
     actor_id: params?.actor_id,
     entity_type: params?.entity_type,
+    entity_id: params?.entity_id,
     trace_id_filter: params?.trace_id,
     pii_access: params?.pii_access === undefined ? undefined : params.pii_access ? "true" : "false",
     page: params?.page ?? 1,
@@ -1294,6 +1413,73 @@ export async function fetchAssetOwnerView(ownerId: number): Promise<AssetOwnerVi
 // 实体详情：返回表/字段详情（schema 摘要/敏感度/PII/Owner/血缘边数）
 export async function fetchAssetEntityDetail(entityId: number): Promise<AssetEntityDetail> {
   return request<AssetEntityDetail>(`${API_BASE}/assetmap/entities/${entityId}`);
+}
+
+// ---- 产品补充（FR-18 生产化）：搜索 / 健康 / PII / 变更 / 我的资产 / 导出 ----
+
+// 全局资产搜索
+export async function fetchAssetSearch(params: {
+  q: string;
+  type?: string;
+  limit?: number;
+}): Promise<{ items: AssetSearchItem[]; total: number }> {
+  const qs = pageQs({ q: params.q, type: params.type, limit: params.limit ?? 20 });
+  return request(`${API_BASE}/assetmap/search?${qs}`);
+}
+
+// 资产健康视图
+export async function fetchAssetHealth(): Promise<AssetHealthSummary> {
+  return request<AssetHealthSummary>(`${API_BASE}/assetmap/health`);
+}
+
+// PII 合规资产视图
+export async function fetchAssetPiiOverview(): Promise<AssetPiiOverview> {
+  return request<AssetPiiOverview>(`${API_BASE}/assetmap/pii`);
+}
+
+// 变更追踪流
+export async function fetchAssetChanges(params?: {
+  days?: number;
+  limit?: number;
+}): Promise<AssetChanges> {
+  const qs = pageQs({ days: params?.days ?? 7, limit: params?.limit ?? 50 });
+  return request<AssetChanges>(`${API_BASE}/assetmap/changes?${qs}`);
+}
+
+// 我的资产（当前登录用户负责的目录与指标）
+export async function fetchAssetMyAssets(limit = 50): Promise<AssetMyAssets> {
+  return request<AssetMyAssets>(`${API_BASE}/assetmap/my-assets?limit=${limit}`);
+}
+
+// 资产 CSV 导出（下载文件）
+export async function downloadAssetExport(params?: {
+  source_id?: string;
+  sensitivity?: string;
+}): Promise<void> {
+  const qs = pageQs({
+    source_id: params?.source_id,
+    sensitivity: params?.sensitivity,
+  });
+  const headers: Record<string, string> = {
+    "X-Api-Key": SEMANTIC_API_KEY,
+  };
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE_URL}${API_BASE}/assetmap/export.csv${qs ? `?${qs}` : ""}`, {
+    headers,
+  });
+  if (!res.ok) {
+    throw new UnisenseApiError(`导出失败 (HTTP ${res.status})`, "HTTP_ERROR", res.status, "");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "assetmap_export.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export type { ApiError, DimensionExpr };

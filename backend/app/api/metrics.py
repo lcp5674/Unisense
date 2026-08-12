@@ -17,8 +17,12 @@ from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.semantic.schemas import (
     MetricApproveRequest,
+    MetricBatchRegisterRequest,
+    MetricCompareRequest,
     MetricCreateRequest,
     MetricDeprecateRequest,
+    MetricEmergencyPublishRequest,
+    MetricHealthResponse,
     MetricListParams,
     MetricListResponse,
     MetricPublishRequest,
@@ -528,6 +532,72 @@ async def delete_metric(
     return ok(data=None, trace_id=trace_id)
 
 
+@router.post(
+    "/{metric_code}/promote",
+    response_model=ApiResponse[MetricResponse],
+    summary="灰度全量发布（FR-020，EXPERIMENTAL → PUBLISHED）",
+    dependencies=_WRITE_DEPS,
+)
+async def promote_metric(
+    metric_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """灰度指标全量发布：清除灰度白名单，状态升为 PUBLISHED。"""
+    service = MetricService(db)
+    metric = await service.promote_metric(metric_code, actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="PROMOTE",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={"from_status": "EXPERIMENTAL", "to_status": "PUBLISHED"},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/{metric_code}/rollback",
+    response_model=ApiResponse[MetricResponse],
+    summary="灰度回滚（FR-020，EXPERIMENTAL → 回退上一 PUBLISHED 版本）",
+    dependencies=_WRITE_DEPS,
+)
+async def rollback_metric(
+    metric_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """灰度指标回滚：EXPERIMENTAL 版本标记 ARCHIVED，回退到上一 PUBLISHED 版本。"""
+    service = MetricService(db)
+    metric = await service.rollback_metric(metric_code, actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ROLLBACK",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={"from_status": "EXPERIMENTAL", "action": "rollback_to_previous_published"},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
 @router.get(
     "/{metric_code}/versions",
     response_model=ApiResponse[list[MetricVersionResponse]],
@@ -578,3 +648,130 @@ async def review_metric_compliance(
         data=MetricResponse.model_validate(metric),
         trace_id=trace_id,
     )
+
+
+# ----------------------------------------------------------------
+# 紧急发布
+# ----------------------------------------------------------------
+
+
+@router.post(
+    "/{metric_code}/emergency-publish",
+    response_model=ApiResponse[MetricResponse],
+    summary="紧急发布指标（跳过REVIEW，须填紧急原因，PII门禁不可跳）",
+    dependencies=[Depends(require_roles("platform_admin", "domain_admin"))],
+)
+async def emergency_publish_metric(
+    metric_code: str,
+    request: MetricEmergencyPublishRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """domain_admin 紧急发布：跳过 REVIEW 但不跳 PII 门禁。"""
+    service = MetricService(db)
+    metric = await service.emergency_publish_metric(
+        metric_code, request, actor_id=user.id,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="EMERGENCY_PUBLISH",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={
+            "reason": request.reason,
+            "emergency_publish": True,
+            "pii_flag": metric.pii_flag,
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+# ----------------------------------------------------------------
+# 健康度评分
+# ----------------------------------------------------------------
+
+
+@router.get(
+    "/{metric_code}/health",
+    response_model=ApiResponse[MetricHealthResponse],
+    summary="获取指标健康度评分（五维加权）",
+    dependencies=_READ_DEPS,
+)
+async def get_metric_health(
+    metric_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[MetricHealthResponse]:
+    """五维加权健康度评分：口径完整度/活跃度/质量/Owner响应/血缘覆盖。"""
+    service = MetricService(db)
+    health = await service.get_metric_health(metric_code)
+    await db.commit()
+    return ok(data=MetricHealthResponse.model_validate(health), trace_id=trace_id)
+
+
+# ----------------------------------------------------------------
+# 指标对比
+# ----------------------------------------------------------------
+
+
+@router.post(
+    "/compare",
+    response_model=ApiResponse,
+    summary="两指标关键字段并排对比",
+    dependencies=_READ_DEPS,
+)
+async def compare_metrics(
+    request: MetricCompareRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse:
+    """两指标关键字段并排 diff + 差异标记。"""
+    service = MetricService(db)
+    result = await service.compare_metrics(
+        request.metric_codes[0], request.metric_codes[1],
+    )
+    return ok(data=result, trace_id=trace_id)
+
+
+# ----------------------------------------------------------------
+# 批量注册
+# ----------------------------------------------------------------
+
+
+@router.post(
+    "/batch-register",
+    response_model=ApiResponse,
+    summary="批量注册指标（从宽表度量列批量创建 DRAFT）",
+    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+)
+async def batch_register_metrics(
+    request: MetricBatchRegisterRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse:
+    """批量注册：LLM 预填 + 逐条校验 + 共享 batch_id。"""
+    service = MetricService(db)
+    result = await service.batch_register_metrics(request, actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="BATCH_REGISTER",
+        entity_type="metric_definition",
+        entity_id=f"batch:{result['batch_id']}",
+        detail={"count": len(result["candidates"]), "domain": request.domain},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
