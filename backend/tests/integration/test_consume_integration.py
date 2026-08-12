@@ -224,9 +224,9 @@ async def test_authenticate_and_rate_limit(db_env) -> None:
         svc = ConsumeService(session)
         client = await svc.authenticate_client("cli_a:secret_a")
         assert client.client_id == "cli_a"
-        svc.check_rate_limit(client)
+        await svc.check_rate_limit(client)
         with pytest.raises(BusinessError):
-            svc.check_rate_limit(client)
+            await svc.check_rate_limit(client)
         client.status = ApiClientStatus.REVOKED
         await session.flush()
         await session.commit()

@@ -191,19 +191,68 @@ async def test_execute_degraded(monkeypatch) -> None:
 async def test_rate_limit() -> None:
     svc = _svc(_client(qps=2))
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc.check_rate_limit(client)  # 1
-    svc.check_rate_limit(client)  # 2
+    await svc.check_rate_limit(client)  # 1
+    await svc.check_rate_limit(client)  # 2
     with pytest.raises(BusinessError):
-        svc.check_rate_limit(client)  # 第 3 次超限
+        await svc.check_rate_limit(client)  # 第 3 次超限
 
 
 async def test_daily_quota_exhausted() -> None:
     """日配额耗尽后拒绝（RATE_LIMITED + retry_after），避免 QPS 内的长时间刷量。"""
     svc = _svc(_client(qps=100, daily_quota=2))
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc.check_rate_limit(client)
-    svc.check_rate_limit(client)
+    await svc.check_rate_limit(client)
+    await svc.check_rate_limit(client)
     with pytest.raises(BusinessError) as exc:
-        svc.check_rate_limit(client)
+        await svc.check_rate_limit(client)
     assert exc.value.error_code == ErrorCode.RATE_LIMITED
     assert exc.value.ctx["daily_quota"] == 2
+
+
+# ---- FR-06 执行引擎复审回归：真实物理口径 SQL 构建 ----
+def _metric_with_source() -> Metric:
+    m = _metric()
+    m.definition_json = {
+        **m.definition_json,
+        "source_table": "dws_gmv_daily",
+    }
+    return m
+
+
+def test_build_query_sql_parameterized_no_injection() -> None:
+    """SQL 构建必须参数化（杜绝拼串注入），基于 source_table 而非伪表名。"""
+    svc = _svc(_client())
+    req = QueryRequest(
+        metric_code="gmv",
+        date_range="2026-01~2026-03",
+        dimensions=[{"name": "city", "value": "BJ' OR 1=1 --"}],
+    )
+    sql, params = svc._build_query_sql(req, _metric_with_source())
+    assert "dws_gmv_daily" in sql  # 使用口径来源表
+    assert "unified_metric" not in sql  # 不再是占位伪表
+    # 维度值进入参数，绝不拼进 SQL
+    assert "OR 1=1" not in sql
+    assert "city" in sql and params["dim_0"] == "BJ' OR 1=1 --"
+
+
+def test_build_query_sql_falls_back_to_metric_table() -> None:
+    """缺省 source_table 时以指标编码推导表名，仍参数化日期与维度。"""
+    svc = _svc(_client())
+    req = QueryRequest(metric_code="gmv", date_range="2026-01~2026-03")
+    sql, params = svc._build_query_sql(req, _metric())
+    assert "dws_metric_gmv" in sql
+    assert params["date_from"] == "2026-01"
+    assert params["date_to"] == "2026-03"
+
+
+def test_build_query_sql_multi_value_dimension() -> None:
+    """多值维度走 IN 绑定，仍参数化。"""
+    svc = _svc(_client())
+    req = QueryRequest(
+        metric_code="gmv",
+        date_range="",
+        dimensions=[{"name": "region", "value": ["EAST", "WEST"]}],
+    )
+    sql, params = svc._build_query_sql(req, _metric())
+    assert "IN" in sql and ":dim_0" in sql
+    assert params["dim_0"] == ["EAST", "WEST"]

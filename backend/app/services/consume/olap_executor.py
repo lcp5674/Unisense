@@ -82,7 +82,7 @@ class OLAPExecutor:
         return f"{_CACHE_PREFIX}{digest}"
 
     async def _get_cache(self, key: str) -> OLAPResult | None:
-        """从 Redis 读取缓存。"""
+        """从 Redis 读取缓存并校验反序列化结果（损坏即按未命中处理，防下游崩溃）。"""
         if self._redis is None:
             return None
         try:
@@ -90,10 +90,21 @@ class OLAPExecutor:
             if raw is None:
                 return None
             data = json.loads(raw)
+            rows = data.get("rows")
+            if not isinstance(rows, list):
+                logger.warning("olap_cache_corrupt_rows", key=key)
+                await self._redis.delete(key)
+                return None
+            total = data.get("total", 0)
+            if not isinstance(total, int):
+                try:
+                    total = int(total)
+                except (TypeError, ValueError):
+                    total = len(rows)
             return OLAPResult(
-                rows=data.get("rows", []),
-                total=data.get("total", 0),
-                elapsed_ms=data.get("elapsed_ms", 0.0),
+                rows=rows,
+                total=total,
+                elapsed_ms=float(data.get("elapsed_ms") or 0.0),
                 from_cache=True,
             )
         except Exception:
@@ -205,9 +216,7 @@ class OLAPExecutor:
                 status_code=response.status_code,
                 body=response.text[:500],
             )
-            raise _make_degraded_error(
-                f"Doris 返回 HTTP {response.status_code}"
-            )
+            raise _make_degraded_error(f"Doris 返回 HTTP {response.status_code}")
 
         return self._parse_response(response.text)
 
@@ -224,12 +233,16 @@ class OLAPExecutor:
                 "rows": [...]
             }
         }
+        校验严格：列缺失、行列不匹配、空行按错误处理（防静默截断产生脏数据）。
         """
         try:
             data = json.loads(body)
         except json.JSONDecodeError:
             logger.error("doris_response_parse_error", body_preview=body[:500])
             raise _make_degraded_error("Doris 响应解析失败") from None
+        if not isinstance(data, dict):
+            logger.error("doris_response_shape_invalid", body_preview=body[:500])
+            raise _make_degraded_error("Doris 响应格式错误") from None
 
         # Doris 可能返回不同格式的响应
         code = data.get("code", -1)
@@ -237,34 +250,51 @@ class OLAPExecutor:
             message = data.get("message", "未知错误")
             raise _make_degraded_error(f"Doris 查询错误: {message}")
 
-        result_data = data.get("data", data)
+        result_data = data.get("data")
+        if not isinstance(result_data, dict):
+            # 兼容无 data 包裹、行即字典数组的扁平响应
+            result_data = data
+        elif result_data.get("data") is not None and isinstance(result_data.get("data"), dict):
+            # Doris 偶发双层 data 包裹
+            result_data = result_data["data"]
 
-        # 解析列和行
         columns = result_data.get("columns", [])
         raw_rows = result_data.get("rows", [])
+        if not isinstance(raw_rows, list):
+            logger.error("doris_response_rows_not_list", body_preview=body[:500])
+            raise _make_degraded_error("Doris 响应 rows 缺失") from None
 
-        if not columns and isinstance(raw_rows, list):
-            # 行已经是字典格式
-            rows = raw_rows if raw_rows and isinstance(raw_rows[0], dict) else []
-            if not rows and raw_rows:
-                # 列名 + 行值分开格式
-                col_names = [
-                    c.get("name", f"col_{i}") for i, c in enumerate(columns)
-                ]
-                rows = [dict(zip(col_names, row, strict=False)) for row in raw_rows]
-        elif columns and raw_rows:
-            col_names = [
-                c.get("name", f"col_{i}") if isinstance(c, dict) else str(c)
-                for i, c in enumerate(columns)
-            ]
-            rows = [dict(zip(col_names, row, strict=False)) for row in raw_rows]
-        else:
-            rows = []
+        # 行已为字典格式：直接复用（无列时无需列映射）
+        if raw_rows and isinstance(raw_rows[0], dict):
+            return OLAPResult(rows=raw_rows, total=len(raw_rows))
 
-        return OLAPResult(
-            rows=rows,
-            total=len(rows),
-        )
+        # 列 + 行值数组格式：严格校验列数与每行宽度，防止静默截断
+        col_names = [
+            c.get("name", f"col_{i}") if isinstance(c, dict) else str(c)
+            for i, c in enumerate(columns)
+        ]
+        if not col_names:
+            if raw_rows:
+                logger.error("doris_response_no_columns", body_preview=body[:500])
+                raise _make_degraded_error("Doris 响应缺失列定义") from None
+            return OLAPResult(rows=[], total=0)
+
+        rows: list[dict[str, Any]] = []
+        for idx, row in enumerate(raw_rows):
+            if not isinstance(row, (list, tuple)):
+                logger.error("doris_response_row_invalid", row_idx=idx, body_preview=body[:500])
+                raise _make_degraded_error("Doris 响应行格式错误") from None
+            if len(row) != len(col_names):
+                logger.error(
+                    "doris_response_width_mismatch",
+                    row_idx=idx,
+                    expected=len(col_names),
+                    actual=len(row),
+                    body_preview=body[:500],
+                )
+                raise _make_degraded_error("Doris 响应列数与行宽不匹配") from None
+            rows.append(dict(zip(col_names, row, strict=True)))
+        return OLAPResult(rows=rows, total=len(rows))
 
     async def close(self) -> None:
         """关闭 HTTP 客户端连接池。"""

@@ -53,7 +53,7 @@ async def get_consume_client(
         raise BusinessError("缺少 X-Api-Key 头", error_code=ErrorCode.AUTH_APIKEY_MISSING)
     svc = ConsumeService(db)
     client = await svc.authenticate_client(api_key)
-    svc.check_rate_limit(client)
+    await svc.check_rate_limit(client)
     return client
 
 

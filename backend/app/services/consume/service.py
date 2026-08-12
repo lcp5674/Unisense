@@ -40,6 +40,18 @@ from app.services.consume.schemas import (
 # 模块级限流器（从 rate_limiter 模块获取，Redis 优先，InMemory 降级）
 rate_limiter = get_rate_limiter()
 
+_executor: Any | None = None
+
+
+def _get_olap_executor() -> Any:
+    """返回进程内共享的 OLAPExecutor 单例（复用连接池，避免每请求新建客户端泄漏）。"""
+    global _executor
+    if _executor is None:
+        from app.services.consume.olap_executor import OLAPExecutor
+
+        _executor = OLAPExecutor()
+    return _executor
+
 
 class ConsumeService(BaseService):
     def __init__(self, db: AsyncSession) -> None:
@@ -48,6 +60,42 @@ class ConsumeService(BaseService):
         self._clients = ApiClientRepo(db)
         self._snapshots = SnapshotRepo(db)
         self._fav = FavoriteRepo(db)
+
+    # ---- 真实物理口径 SQL 构建 ----
+    def _build_query_sql(self, req: QueryRequest, metric: Any) -> tuple[str, dict[str, Any]]:
+        """将查询请求编译为参数化的 OLAP SQL。
+
+        基于指标口径来源字段（definition_json.source_table，缺省用指标编码做表名），
+        叠加日期区间与维度过滤，杜绝拼串注入（全部参数化）。
+        """
+        table = (
+            metric.definition_json.get("source_table")
+            if getattr(metric, "definition_json", None)
+            else None
+        )
+        if not table:
+            table = f"dws_metric_{req.metric_code}"
+
+        where: list[str] = ["metric_code = :metric_code"]
+        params: dict[str, Any] = {"metric_code": req.metric_code}
+
+        if req.date_range:
+            where.append("dt >= :date_from AND dt <= :date_to")
+            parts = req.date_range.split("~")
+            params["date_from"] = parts[0].strip()
+            params["date_to"] = parts[1].strip() if len(parts) > 1 else parts[0].strip()
+
+        for i, dim in enumerate(req.dimensions):
+            key = f"dim_{i}"
+            if isinstance(dim.value, (list, tuple)):
+                where.append(f"{dim.name} IN :{key}")
+                params[key] = list(dim.value)
+            else:
+                where.append(f"{dim.name} = :{key}")
+                params[key] = dim.value
+
+        sql = f"SELECT * FROM `{table}` WHERE {' AND '.join(where)}"
+        return sql, params
 
     # ---- 接入方鉴权 ----
     async def authenticate_client(self, api_key: str) -> ApiClient:
@@ -63,13 +111,14 @@ class ConsumeService(BaseService):
             raise BusinessError("密钥校验失败", error_code=ErrorCode.AUTH_APIKEY_INVALID)
         return client
 
-    def check_rate_limit(self, client: ApiClient) -> None:
-        if not rate_limiter.allow(client.client_id, client.qps):
+    async def check_rate_limit(self, client: ApiClient) -> None:
+        limiter = get_rate_limiter()  # 动态获取：lifespan 初始化后 Redis 优先
+        if not await limiter.allow(client.client_id, client.qps):
             raise BusinessError(
                 "QPS 超限", error_code=ErrorCode.RATE_LIMITED, ctx={"retry_after": 1}
             )
         today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-        if not rate_limiter.allow_daily(client.client_id, client.daily_quota, today):
+        if not await limiter.allow_daily(client.client_id, client.daily_quota, today):
             raise BusinessError(
                 "日查询配额已耗尽",
                 error_code=ErrorCode.RATE_LIMITED,
@@ -136,14 +185,11 @@ class ConsumeService(BaseService):
                 ctx={"retry_after": 30, "accept_stale": req.accept_stale},
             )
 
-        # 构建执行 SQL
-        sql = "SELECT * FROM unified_metric WHERE metric_code = :metric_code"
-        params: dict[str, Any] = {"metric_code": req.metric_code}
+        # 构建执行 SQL（真实物理口径，而非占位查询）
+        sql, params = self._build_query_sql(req, metric)
 
-        # 通过 OLAPExecutor 执行真实查询
-        from app.services.consume.olap_executor import OLAPExecutor
-
-        executor = OLAPExecutor()
+        # 通过共享 OLAPExecutor 执行真实查询（复用连接池，避免每请求新建客户端泄漏）
+        executor = _get_olap_executor()
         try:
             olap_result = await executor.execute(sql, params)
             plan = {

@@ -28,7 +28,7 @@ class InMemoryRateLimiter:
         self._buckets: dict[str, list[float]] = {}
         self._daily: dict[str, tuple[str, int]] = {}
 
-    def allow(self, key: str, qps: int) -> bool:
+    async def allow(self, key: str, qps: int) -> bool:
         """QPS 限流（滑动窗口，1秒内请求数）。"""
         now = time.monotonic()
         window = self._buckets.setdefault(key, [])
@@ -38,7 +38,7 @@ class InMemoryRateLimiter:
         window.append(now)
         return True
 
-    def allow_daily(self, key: str, quota: int, today: str) -> bool:
+    async def allow_daily(self, key: str, quota: int, today: str) -> bool:
         """日配额闸门：按自然日计数，跨日自动重置。"""
         day, used = self._daily.get(key, (today, 0))
         if day != today:
@@ -80,7 +80,7 @@ class RedisRateLimiter:
         """
         if self._redis is None:
             logger.warning("rate_limiter.redis_unavailable_fallback", key=key)
-            return self._fallback.allow(key, qps)
+            return await self._fallback.allow(key, qps)
 
         try:
             now = time.time()
@@ -108,7 +108,7 @@ class RedisRateLimiter:
                 key=key,
                 exc_info=True,
             )
-            return self._fallback.allow(key, qps)
+            return await self._fallback.allow(key, qps)
 
     async def allow_daily(self, key: str, quota: int, today: str | None = None) -> bool:
         """日配额限流。
@@ -128,7 +128,7 @@ class RedisRateLimiter:
 
         if self._redis is None:
             logger.warning("rate_limiter.redis_unavailable_fallback_daily", key=key)
-            return self._fallback.allow_daily(key, quota, today)
+            return await self._fallback.allow_daily(key, quota, today)
 
         try:
             daily_key = f"unisense:rate:daily:{key}:{today}"
@@ -147,7 +147,7 @@ class RedisRateLimiter:
                 key=key,
                 exc_info=True,
             )
-            return self._fallback.allow_daily(key, quota, today)
+            return await self._fallback.allow_daily(key, quota, today)
 
 
 # 模块级限流器（lifespan 中替换为 Redis 版本）
