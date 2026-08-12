@@ -8,7 +8,7 @@ P3: 继承 BaseService Protocol，统一 db+eventbus+settings 注入模式。
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import structlog
@@ -26,9 +26,11 @@ from app.models.metric import Metric, MetricVersion
 from app.services.semantic.cache import MetricCache
 from app.services.semantic.repository import MetricRepository
 from app.services.semantic.schemas import (
+    MetricApproveRequest,
     MetricCreateRequest,
     MetricListParams,
     MetricPublishRequest,
+    MetricRejectRequest,
     MetricResponse,
     MetricSubmitRequest,
     MetricUpdateRequest,
@@ -399,7 +401,7 @@ class MetricService(BaseService):
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
 
         updated = await self._repo.update_with_optimistic_lock(
-            metric.id, metric.row_version, status="REVIEW"
+            metric.id, metric.row_version, status="REVIEW", submitted_by=actor_id
         )
         await self._cache.invalidate(metric_code)
 
@@ -431,7 +433,7 @@ class MetricService(BaseService):
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
 
         updated = await self._repo.update_with_optimistic_lock(
-            metric.id, metric.row_version, status="REVIEW"
+            metric.id, metric.row_version, status="REVIEW", submitted_by=actor_id
         )
         await self._cache.invalidate(metric_code)
 
@@ -546,14 +548,20 @@ class MetricService(BaseService):
         """
         metric = await self.get_metric(metric_code)
 
+        # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人
+        if metric.submitted_by is not None and metric.submitted_by == actor_id:
+            raise BusinessError(
+                "提交人与审核人不得为同一人（禁止自审）",
+                error_code="SELF_REVIEW_BLOCKED",
+                ctx={"metric_code": metric_code, "submitted_by": metric.submitted_by},
+            )
+
         # 确定目标状态
         target_status = "PUBLISHED"
-        version_status = "PUBLISHED"
         extra_updates: dict[str, Any] = {}
 
         if request.mode == "experimental":
             target_status = "EXPERIMENTAL"
-            version_status = "EXPERIMENTAL"
             if request.gray_tenant_ids:
                 extra_updates["gray_tenant_ids"] = request.gray_tenant_ids
 
@@ -656,6 +664,14 @@ class MetricService(BaseService):
             ConflictError: 非法状态跃迁。
         """
         metric = await self.get_metric(metric_code)
+
+        # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人
+        if metric.submitted_by is not None and metric.submitted_by == actor_id:
+            raise BusinessError(
+                "提交人与审核人不得为同一人（禁止自审）",
+                error_code="SELF_REVIEW_BLOCKED",
+                ctx={"metric_code": metric_code, "submitted_by": metric.submitted_by},
+            )
 
         # 状态机校验：REVIEW→DRAFT
         invalid = MetricStateMachine.validate_transition(metric.status, "DRAFT")
@@ -845,6 +861,119 @@ class MetricService(BaseService):
         """
         metric = await self.get_metric(metric_code)
         return await self._repo.list_versions(metric.id)
+
+    # ---- PENDING_VERSION 版本确认期（FR-007/FR-008）----
+
+    async def confirm_version(
+        self, metric_code: str, version: int, consumer_id: int
+    ) -> Metric:
+        """消费方确认版本（FR-007）。
+
+        将当前消费方的 PENDING 记录置为 CONFIRMED；当该版本全部消费方确认后，
+        版本转正（mark_version_published）并更新 metric.effective_version。
+
+        Args:
+            metric_code: 指标编码。
+            version: 待确认版本号。
+            consumer_id: 消费方用户 ID。
+
+        Returns:
+            更新后的指标。
+
+        Raises:
+            ConflictError: 无待确认记录或已确认。
+        """
+        metric = await self.get_metric(metric_code)
+        confirmations = await self._repo.get_pending_confirmations(metric.id, version)
+        if not confirmations:
+            raise ConflictError(
+                f"该版本 {version} 无待确认记录", error_code="NO_PENDING_CONFIRMATION"
+            )
+        mine = next(
+            (c for c in confirmations if c.consumer_id == consumer_id), None
+        )
+        if mine is None:
+            raise ConflictError(
+                "当前用户无该版本的待确认记录", error_code="NO_PENDING_CONFIRMATION"
+            )
+        if mine.status == "CONFIRMED":
+            return metric  # 幂等：已确认直接返回
+        await self._repo.update_confirmation_status(mine.id, "CONFIRMED")
+
+        # 全部确认后版本转正
+        if all(c.status == "CONFIRMED" or c.id == mine.id for c in confirmations):
+            updated = await self._repo.update_with_optimistic_lock(
+                metric.id,
+                metric.row_version,
+                effective_version=version,
+            )
+            await self._repo.mark_version_published(metric.id, version, datetime.now(UTC))
+            await self._cache.invalidate(metric_code)
+            return updated
+        return metric
+
+    async def reject_version(
+        self, metric_code: str, version: int, reason: str, consumer_id: int
+    ) -> Metric:
+        """消费方拒绝版本（FR-007）。
+
+        任一消费方拒绝则版本取消（REJECTED），旧版本保持 CURRENT，不转正。
+
+        Args:
+            metric_code: 指标编码。
+            version: 被拒版本号。
+            reason: 拒绝原因。
+            consumer_id: 消费方用户 ID。
+
+        Returns:
+            更新后的指标（保持原有效版本）。
+
+        Raises:
+            ConflictError: 无待确认记录。
+        """
+        metric = await self.get_metric(metric_code)
+        confirmations = await self._repo.get_pending_confirmations(metric.id, version)
+        if not confirmations:
+            raise ConflictError(
+                f"该版本 {version} 无待确认记录", error_code="NO_PENDING_CONFIRMATION"
+            )
+        mine = next(
+            (c for c in confirmations if c.consumer_id == consumer_id), None
+        )
+        if mine is None:
+            raise ConflictError(
+                "当前用户无该版本的待确认记录", error_code="NO_PENDING_CONFIRMATION"
+            )
+        await self._repo.update_confirmation_status(mine.id, "REJECTED", reason=reason)
+        return metric
+
+    async def extend_version(self, metric_code: str, version: int) -> Metric:
+        """Owner 请求版本确认延期（FR-008，+7 天，最多延期 1 次）。
+
+        Args:
+            metric_code: 指标编码。
+            version: 待延期版本号。
+
+        Returns:
+            更新后的指标。
+
+        Raises:
+            ConflictError: 无待确认记录或已延期满 1 次。
+        """
+        metric = await self.get_metric(metric_code)
+        confirmations = await self._repo.get_pending_confirmations(metric.id, version)
+        if not confirmations:
+            raise ConflictError(
+                f"该版本 {version} 无待确认记录", error_code="NO_PENDING_CONFIRMATION"
+            )
+        if any(c.extension_count >= 1 for c in confirmations):
+            raise ConflictError(
+                "版本确认已延期满 1 次，不可再延期", error_code="EXTEND_LIMIT_REACHED"
+            )
+        for c in confirmations:
+            new_deadline = (c.deadline or datetime.now(UTC)) + timedelta(days=7)
+            await self._repo.extend_confirmation_deadline(c.id, new_deadline)
+        return metric
 
     # ---- 内部方法 ----
 

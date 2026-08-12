@@ -16,16 +16,20 @@ from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.semantic.schemas import (
+    MetricApproveRequest,
     MetricCreateRequest,
     MetricDeprecateRequest,
     MetricListParams,
     MetricListResponse,
     MetricPublishRequest,
+    MetricRejectRequest,
     MetricResponse,
-    MetricReviewRequest,
-    MetricSubmitReviewRequest,
+    MetricSubmitRequest,
     MetricUpdateRequest,
     MetricVersionResponse,
+    VersionConfirmRequest,
+    VersionExtendRequest,
+    VersionRejectRequest,
 )
 from app.services.semantic.service import MetricService, redact_definition
 
@@ -213,7 +217,7 @@ async def update_metric(
 @router.post(
     "/{metric_code}/publish",
     response_model=ApiResponse[MetricResponse],
-    summary="发布指标（FR-07，PII 合规闸门）",
+    summary="发布指标（FR-07，路由到 approve_metric）",
     dependencies=_WRITE_DEPS,
 )
 async def publish_metric(
@@ -224,11 +228,13 @@ async def publish_metric(
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
-    """REVIEW 状态可发布（状态机校验）；含 PII 且未过合规审核则拒绝。"""
+    """发布指标（内部路由到 approve_metric，推荐直接使用 submit+approve）。"""
     service = MetricService(db)
-    metric = await service.publish_metric(
-        metric_code, request, actor_id=user.id, role=user.role
+    approve_req = MetricApproveRequest(
+        mode="standard",
+        target_version=request.version,
     )
+    metric = await service.approve_metric(metric_code, approve_req, actor_id=user.id)
     await write_audit(
         db,
         actor_id=user.id,
@@ -239,7 +245,6 @@ async def publish_metric(
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
-    # PLAT-3: 业务写入 + 审计同事务原子提交
     await db.commit()
     return ok(
         data=MetricResponse.model_validate(metric),
@@ -250,7 +255,7 @@ async def publish_metric(
 @router.post(
     "/{metric_code}/deprecate",
     response_model=ApiResponse[MetricResponse],
-    summary="废弃指标（FR-07，标记替代指标与 Sunset 截止日）",
+    summary="废弃指标（FR-07，successor_code 必填）",
     dependencies=_WRITE_DEPS,
 )
 async def deprecate_metric(
@@ -261,7 +266,7 @@ async def deprecate_metric(
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
-    """仅非 DEPRECATED 状态可废弃，并写入 sunset_until 与 successor_code（可选）。"""
+    """仅 PUBLISHED 状态可废弃，successor_code 必填且须为已发布指标。"""
     service = MetricService(db)
     metric = await service.deprecate_metric(
         metric_code,
@@ -279,7 +284,6 @@ async def deprecate_metric(
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
-    # PLAT-3: 业务写入 + 审计同事务原子提交
     await db.commit()
     return ok(
         data=MetricResponse.model_validate(metric),
@@ -288,33 +292,32 @@ async def deprecate_metric(
 
 
 @router.post(
-    "/{metric_code}/submit-review",
+    "/{metric_code}/submit",
     response_model=ApiResponse[MetricResponse],
-    summary="提交评审（FR-07，DRAFT → REVIEW）",
+    summary="提交指标审核（FR-003，DRAFT → REVIEW）",
     dependencies=_WRITE_DEPS,
 )
-async def submit_metric_review(
+async def submit_metric(
     metric_code: str,
-    request: MetricSubmitReviewRequest,
+    request: MetricSubmitRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
-    """DRAFT 状态提交评审，进入 REVIEW 待审。"""
+    """DRAFT → REVIEW，提交审核。状态机校验，非法跃迁返回 409。"""
     service = MetricService(db)
-    metric = await service.submit_review(metric_code, actor_id=user.id, role=user.role)
+    metric = await service.submit_metric(metric_code, request, actor_id=user.id)
     await write_audit(
         db,
         actor_id=user.id,
-        action="SUBMIT_REVIEW",
+        action="SUBMIT",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"change_reason": request.change_reason},
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
-    # PLAT-3: 业务写入 + 审计同事务原子提交
     await db.commit()
     return ok(
         data=MetricResponse.model_validate(metric),
@@ -323,39 +326,170 @@ async def submit_metric_review(
 
 
 @router.post(
-    "/{metric_code}/review",
+    "/{metric_code}/approve",
     response_model=ApiResponse[MetricResponse],
-    summary="评审指标（FR-07，approve → PUBLISHED / reject → DRAFT）",
+    summary="审核通过指标（FR-004，REVIEW → PUBLISHED/EXPERIMENTAL）",
     dependencies=[Depends(require_roles(*_PII_REVIEW_ROLES)), Depends(guard_against_injection)],
 )
-async def review_metric(
+async def approve_metric(
     metric_code: str,
-    request: MetricReviewRequest,
+    request: MetricApproveRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
-    """评审者（非 Owner）评审：通过则发布（含 PII 合规闸门），拒绝则打回 DRAFT。"""
+    """REVIEW → PUBLISHED(standard) / EXPERIMENTAL(experimental)。含 PII 门禁 + 依赖校验。"""
     service = MetricService(db)
-    metric = await service.review_metric(
-        metric_code,
-        approved=request.approved,
+    metric = await service.approve_metric(metric_code, request, actor_id=user.id)
+    await write_audit(
+        db,
         actor_id=user.id,
-        role=user.role,
-        change_reason=request.change_reason or "",
+        action="APPROVE",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={"mode": request.mode, "target_version": request.target_version},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/{metric_code}/reject",
+    response_model=ApiResponse[MetricResponse],
+    summary="审核驳回指标（FR-005，REVIEW → DRAFT）",
+    dependencies=[Depends(require_roles(*_PII_REVIEW_ROLES)), Depends(guard_against_injection)],
+)
+async def reject_metric(
+    metric_code: str,
+    request: MetricRejectRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """REVIEW → DRAFT，驳回审核。须填驳回原因，通知 Owner。"""
+    service = MetricService(db)
+    metric = await service.reject_metric(metric_code, request, actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="REJECT",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={"reason": request.reason},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/{metric_code}/confirm-version",
+    response_model=ApiResponse[MetricResponse],
+    summary="消费方确认版本（FR-007）",
+    dependencies=_WRITE_DEPS,
+)
+async def confirm_version(
+    metric_code: str,
+    request: VersionConfirmRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """消费方确认 PENDING_VERSION：全部确认后新版本升 CURRENT。"""
+    service = MetricService(db)
+    metric = await service.confirm_version(metric_code, request.version, consumer_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="CONFIRM_VERSION",
+        entity_type="metric_definition",
+        entity_id=metric_code,
+        detail={"version": request.version},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/{metric_code}/reject-version",
+    response_model=ApiResponse[MetricResponse],
+    summary="消费方拒绝版本（FR-007）",
+    dependencies=_WRITE_DEPS,
+)
+async def reject_version(
+    metric_code: str,
+    request: VersionRejectRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """消费方拒绝 PENDING_VERSION：任一拒绝则版本取消，旧版本保持 CURRENT。"""
+    service = MetricService(db)
+    metric = await service.reject_version(
+        metric_code, request.version, reason=request.reason, consumer_id=user.id
     )
     await write_audit(
         db,
         actor_id=user.id,
-        action="REVIEW_APPROVE" if request.approved else "REVIEW_REJECT",
+        action="REJECT_VERSION",
         entity_type="metric_definition",
-        entity_id=metric.metric_code,
-        detail={"approved": request.approved, "change_reason": request.change_reason},
+        entity_id=metric_code,
+        detail={"version": request.version, "reason": request.reason},
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
-    # PLAT-3: 业务写入 + 审计同事务原子提交
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/{metric_code}/extend-version",
+    response_model=ApiResponse[MetricResponse],
+    summary="版本确认延期（FR-008，+7 天，最多延期 1 次）",
+    dependencies=_WRITE_DEPS,
+)
+async def extend_version(
+    metric_code: str,
+    request: VersionExtendRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """Owner 请求延期确认：+7 天，最多延期 1 次。"""
+    service = MetricService(db)
+    metric = await service.extend_version(metric_code, request.version)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="EXTEND_VERSION",
+        entity_type="metric_definition",
+        entity_id=metric_code,
+        detail={"version": request.version},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(
         data=MetricResponse.model_validate(metric),

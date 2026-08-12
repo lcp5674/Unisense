@@ -10,6 +10,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Enum,
     ForeignKey,
@@ -169,6 +170,11 @@ class Metric(Base, BaseModel):
         nullable=True,
         comment="审批人 ID",
     )
+    submitted_by: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment="提交评审人 ID（approve/reject 时禁止自审）",
+    )
     pii_flag: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, comment="是否含 PII"
     )
@@ -196,6 +202,26 @@ class Metric(Base, BaseModel):
     )
     deprecated_at: Mapped[datetime | None] = mapped_column(nullable=True, comment="废弃时间")
     sunset_until: Mapped[date | None] = mapped_column(nullable=True, comment="Sunset 截止日期")
+
+    # ---- 紧急发布 + 灰度 + 冲突预检（对齐 TD §12.3 / FR-022/FR-019/FR-012）----
+    emergency_publish: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="紧急发布标记"
+    )
+    emergency_reason: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="紧急发布原因"
+    )
+    emergency_reviewed_at: Mapped[datetime | None] = mapped_column(
+        nullable=True, comment="紧急发布补审时间"
+    )
+    gray_tenant_ids: Mapped[list[Any] | None] = mapped_column(
+        JSON, nullable=True, comment="灰度白名单租户 ID 列表"
+    )
+    pending_conflict: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="冲突预检标记"
+    )
+    pending_conflict_detail: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="冲突详情"
+    )
 
     # ---- 关系 ----
     versions: Mapped[list[MetricVersion]] = relationship(
@@ -248,7 +274,15 @@ class MetricVersion(Base, BaseModel):
         JSON, nullable=True, comment="结构化 diff"
     )
     status: Mapped[str] = mapped_column(
-        Enum("DRAFT", "PENDING_REVIEW", "PUBLISHED", "ARCHIVED", name="version_status"),
+        Enum(
+            "DRAFT",
+            "PENDING_CONFIRMATION",
+            "PUBLISHED",
+            "EXPERIMENTAL",
+            "ARCHIVED",
+            "CANCELLED",
+            name="version_status",
+        ),
         nullable=False,
         default="DRAFT",
         comment="版本状态",
@@ -258,6 +292,17 @@ class MetricVersion(Base, BaseModel):
         ForeignKey("user.id", name="fk_metric_version_user"), nullable=False
     )
     published_at: Mapped[datetime | None] = mapped_column(nullable=True, comment="发布时间")
+
+    # ---- PENDING_VERSION 机制字段（对齐 TD §12.3 / FR-006~FR-009）----
+    pending_deadline: Mapped[datetime | None] = mapped_column(
+        nullable=True, comment="PENDING_VERSION 确认截止时间"
+    )
+    extension_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="延期次数（最多 1 次）"
+    )
+    effective_at: Mapped[datetime | None] = mapped_column(
+        nullable=True, comment="实际生效时间（confirm 后记录）"
+    )
 
     metric: Mapped[Metric] = relationship("Metric", back_populates="versions")
 

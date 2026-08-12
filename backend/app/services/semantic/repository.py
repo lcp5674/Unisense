@@ -338,6 +338,34 @@ class MetricRepository:
         )
         await self._db.execute(stmt)
 
+    async def get_pending_confirmation(
+        self, metric_id: int, version: int, consumer_id: int
+    ) -> PendingVersionConfirmation | None:
+        """获取指定消费方的单条 PENDING 确认记录（供确认/拒绝/延期）。"""
+        result = await self._db.execute(
+            select(PendingVersionConfirmation).where(
+                PendingVersionConfirmation.metric_id == metric_id,
+                PendingVersionConfirmation.version == version,
+                PendingVersionConfirmation.consumer_id == consumer_id,
+                PendingVersionConfirmation.deleted_at.is_(None),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def extend_confirmation_deadline(
+        self, confirmation_id: int, new_deadline: datetime
+    ) -> None:
+        """将确认记录延期至新截止时间（extension_count + 1）。"""
+        stmt = (
+            update(PendingVersionConfirmation)
+            .where(PendingVersionConfirmation.id == confirmation_id)
+            .values(
+                deadline=new_deadline,
+                extension_count=PendingVersionConfirmation.extension_count + 1,
+            )
+        )
+        await self._db.execute(stmt)
+
     async def get_timeout_pending_confirmations(self) -> list[PendingVersionConfirmation]:
         """获取超时未确认的 PENDING 确认记录。"""
         from datetime import UTC
