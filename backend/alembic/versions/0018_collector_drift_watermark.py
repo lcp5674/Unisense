@@ -16,6 +16,10 @@ depends_on = None
 
 def upgrade() -> None:
     # 1. 创建 schema_drift_log 表
+    # 注意：必须显式 mysql_charset="utf8mb4"（与 0001 的 _TABLE_OPTS 对齐）。
+    #       若省略，表会继承数据库默认 collation，而 data_source 是 utf8mb4_0900_ai_ci，
+    #       当库默认 collation 为 utf8mb4_unicode_ci 时 FK fk_drift_log_source 会报
+    #       MySQL 3780（排序规则不兼容），导致全新环境 alembic upgrade head 失败。
     op.create_table(
         "schema_drift_log",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
@@ -36,11 +40,12 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), comment="创建时间"),
         sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now(), comment="更新时间"),
         sa.Column("deleted_at", sa.DateTime(), nullable=True, comment="软删除时间"),
+        mysql_charset="utf8mb4",
     )
     op.create_index("idx_drift_source_entity", "schema_drift_log", ["source_id", "entity_name"])
     op.create_index("idx_drift_detected_at", "schema_drift_log", ["detected_at"])
 
-    # 2. 创建 collection_watermark 表
+    # 2. 创建 collection_watermark 表（同样显式 charset，见步骤 1 注释）
     op.create_table(
         "collection_watermark",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
@@ -59,6 +64,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), comment="创建时间"),
         sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now(), comment="更新时间"),
         sa.Column("deleted_at", sa.DateTime(), nullable=True, comment="软删除时间"),
+        mysql_charset="utf8mb4",
     )
     op.create_index("idx_watermark_source", "collection_watermark", ["source_id"])
 
