@@ -6,15 +6,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.core.secrets import SecretManager
 from app.db.redis import get_redis
+from app.models.collector_models import SchemaDriftLog
 from app.models.data_source import DataSource
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.events import CatalogEventPublisher
@@ -30,9 +32,27 @@ from app.services.collector.schemas import (
     DBCatalogListResponse,
     DBCatalogResponse,
 )
-from app.services.collector.spi import BaseCollector
+from app.services.collector.spi import BaseCollector, CollectResult
 
 logger = get_logger("unisense.collector.service")
+
+# FR-023: LLM 分类错误 metric 计数器（进程内，非 Redis/Statsd）
+_llm_classify_error_counts: dict[str, int] = {}
+
+
+def _record_llm_error_metric(error_type: str) -> None:
+    """记录 llm_classify_error_total metric。
+
+    Args:
+        error_type: 错误类型（timeout/format_error/runtime_error）。
+    """
+    global _llm_classify_error_counts
+    _llm_classify_error_counts[error_type] = _llm_classify_error_counts.get(error_type, 0) + 1
+
+
+def get_llm_classify_error_total() -> dict[str, int]:
+    """获取 LLM 分类错误计数（供测试与可观测性使用）。"""
+    return dict(_llm_classify_error_counts)
 
 
 def _redis_available() -> bool:
@@ -76,6 +96,8 @@ class CollectorService(BaseService):
             coverage=float(src.coverage or 0.0),
             health_status=src.health_status or "UNKNOWN",
             connection_config_present=bool(src.connection_config),
+            schedule_cron=src.schedule_cron,
+            collection_mode=src.collection_mode or "FULL",
             created_by=src.created_by,
             created_at=src.created_at,
             updated_at=src.updated_at,
@@ -84,13 +106,27 @@ class CollectorService(BaseService):
     async def create_source(
         self, req: DataSourceCreateRequest, actor_id: int
     ) -> DataSourceResponse:
+        # 验证 source_type 在 CollectorRegistry 中已注册
+        from app.services.collector.connectors import registry
+        available_types = registry.list_types()
+        source_type_value = (
+            req.source_type.value
+            if hasattr(req.source_type, "value")
+            else str(req.source_type)
+        )
+        if source_type_value not in available_types:
+            raise BusinessError(
+                f"不支持的采集器类型: {source_type_value}，已注册类型: {available_types}",
+                error_code="UNSUPPORTED_COLLECTOR",
+            )
+
         if await self._repo.get_source(req.source_id) is not None:
             raise ConflictError(f"数据源已存在: {req.source_id}")
         encrypted = self._secrets.encrypt(req.connection_config)
         src = DataSource(
             source_id=req.source_id,
             name=req.name,
-            source_type=req.source_type,
+            source_type=source_type_value,
             connection_config=encrypted,
             domain=req.domain,
             cluster_id=req.cluster_id,
@@ -142,6 +178,14 @@ class CollectorService(BaseService):
     ) -> DBCatalogResponse:
         sensitivity = self._classifier.classify(req.entity_name, req.schema_def)
 
+        # US6: 空 schema 告警
+        if not req.schema_def.get("columns"):
+            logger.warning(
+                "register_catalog_schema_incomplete: source=%s entity=%s",
+                req.source_id,
+                req.entity_name,
+            )
+
         # P2 增强：使用结构化 LLM 输出进行置信度分流
         # 当 LLM 可用且 confidence < 0.7 时，标记为 "needs_review"
         llm_sensitivity = await self._llm_classify_sensitivity(req.entity_name, req.schema_def)
@@ -154,7 +198,7 @@ class CollectorService(BaseService):
                     original_sensitivity=self._classifier.classify(req.entity_name, req.schema_def),
                 )
 
-        cat, _created = await self._repo.upsert_catalog(
+        cat, _created, drift_info = await self._repo.upsert_catalog(
             source_id=req.source_id,
             entity_name=req.entity_name,
             entity_type=req.entity_type,
@@ -172,6 +216,11 @@ class CollectorService(BaseService):
                 "sensitivity": sensitivity,
             },
         )
+
+        # US2: 检测到 Schema Drift 时发布事件 + 记录变更历史
+        if drift_info is not None:
+            await self._handle_drift(req.source_id, req.entity_name, drift_info)
+
         return DBCatalogResponse.model_validate(cat)
 
     async def _llm_classify_sensitivity(
@@ -218,9 +267,51 @@ class CollectorService(BaseService):
             )
             await client.close()
             return result
-        except Exception as exc:  # noqa: BLE001 - LLM 失败不阻断主流程
-            logger.warning("llm_classify_failed: %s", exc)
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            # FR-023: 具体异常类型替代 BLE001 + metric 计数
+            logger.warning("llm_classify_timeout_error: %s", exc)
+            _record_llm_error_metric("timeout")
             return None
+        except (ValueError, KeyError, TypeError) as exc:
+            # LLM 返回格式异常
+            logger.warning("llm_classify_format_error: %s", exc)
+            _record_llm_error_metric("format_error")
+            return None
+        except RuntimeError as exc:
+            # LLM 客户端初始化失败等
+            logger.warning("llm_classify_runtime_error: %s", exc)
+            _record_llm_error_metric("runtime_error")
+            return None
+
+    async def _handle_drift(
+        self, source_id: str, entity_name: str, drift_info: dict[str, Any]
+    ) -> None:
+        """处理 Schema Drift：发布事件 + 记录变更历史（US2）。"""
+        from datetime import UTC, datetime
+
+        # 发布 catalog_schema_drifted 事件
+        await self._events.publish(
+            "catalog_schema_drifted",
+            {
+                "source_id": source_id,
+                "entity_name": entity_name,
+                "change_type": drift_info["change_type"],
+                "diff_json": drift_info.get("diff_json", {}),
+            },
+        )
+        # 记录变更历史到 SchemaDriftLog
+        drift_log = SchemaDriftLog(
+            source_id=source_id,
+            entity_name=entity_name,
+            change_type=drift_info["change_type"],
+            before_signature=drift_info.get("before_signature"),
+            after_signature=drift_info["after_signature"],
+            before_schema=drift_info.get("before_schema"),
+            after_schema=drift_info.get("after_schema"),
+            diff_json=drift_info.get("diff_json"),
+            detected_at=datetime.now(UTC),
+        )
+        await self._repo.save_drift_log(drift_log)
 
     async def list_catalogs(self, params: DBCatalogListParams) -> DBCatalogListResponse:
         cats, total = await self._repo.list_catalogs(params)
@@ -241,19 +332,61 @@ class CollectorService(BaseService):
         return BulkDeprecateResult(succeeded=succeeded, failed=failed)
 
     async def collect_and_register(
-        self, source_id: str, collector: BaseCollector, actor_id: int
+        self, source_id: str, collector: BaseCollector, actor_id: int, *, mode: str = "FULL"
     ) -> dict[str, Any]:
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
-        specs = await collector.collect(src)
+
+        # US3: 增量采集逻辑 —— 读取水位，不支持时降级为全量
+        effective_mode = mode
+        watermark_ts: datetime | None = None
+        if mode == "INCREMENTAL":
+            from app.services.collector.incremental import should_degrade_to_full
+            watermark = await self._repo.get_watermark(source_id)
+            if watermark is not None:
+                watermark_ts = watermark.last_collected_at
+            if should_degrade_to_full(src.source_type, watermark_ts):
+                logger.info(
+                    "collect_incremental_degrade_to_full: source=%s type=%s watermark=%s",
+                    source_id,
+                    src.source_type,
+                    watermark_ts,
+                )
+                effective_mode = "FULL"
+            else:
+                logger.info(
+                    "collect_incremental: source=%s watermark=%s",
+                    source_id,
+                    watermark_ts,
+                )
+
+        # US5: 采集成功后更新健康状态
+        try:
+            result: CollectResult = await collector.collect(src)
+        except Exception:
+            await self._repo.update_health_status(source_id, "unhealthy")
+            raise
+
         registered = 0
         pii_registered = 0
-        for spec in specs:
+        batch_payloads: list[dict[str, Any]] = []
+        drift_events: list[dict[str, Any]] = []
+        for spec in result.specs:
             sensitivity = self._classifier.classify(spec.entity_name, spec.schema_json)
             if sensitivity == "PII":
                 pii_registered += 1
-            await self._repo.upsert_catalog(
+
+            # US6: 空 schema 告警 + schema_incomplete 标记
+            schema_incomplete = not spec.schema_json.get("columns")
+            if schema_incomplete:
+                logger.warning(
+                    "collect_schema_incomplete: source=%s entity=%s",
+                    source_id,
+                    spec.entity_name,
+                )
+
+            _cat, _created, drift_info = await self._repo.upsert_catalog(
                 source_id=source_id,
                 entity_name=spec.entity_name,
                 entity_type=spec.entity_type,
@@ -263,21 +396,48 @@ class CollectorService(BaseService):
                 owner_id=None,
             )
             registered += 1
-            await self._events.publish(
-                "catalog_registered",
-                {
-                    "source_id": source_id,
+            batch_payloads.append({
+                "source_id": source_id,
+                "entity_name": spec.entity_name,
+                "sensitivity": sensitivity,
+            })
+            # US2: 检测到 Schema Drift 时处理
+            if drift_info is not None:
+                await self._handle_drift(source_id, spec.entity_name, drift_info)
+                drift_events.append({
                     "entity_name": spec.entity_name,
-                    "sensitivity": sensitivity,
-                },
-            )
+                    "change_type": drift_info["change_type"],
+                })
+        # FR-024: 发布1次batch事件而非逐条publish
+        if batch_payloads:
+            await self._events.publish_batch("catalog_registered", batch_payloads)
         coverage = await self._repo.recompute_coverage(source_id)
+
+        # US5: 采集成功 → 更新健康状态
+        await self._repo.update_health_status(source_id, "healthy")
+
+        # US3: 更新采集水位
+        await self._repo.update_watermark_after_collection(
+            source_id=source_id,
+            mode=effective_mode,
+            scanned_count=len(result.specs),
+            failed_count=len(result.failed_specs),
+        )
+
         return {
             "source_id": source_id,
-            "scanned": len(specs),
+            "scanned": len(result.specs),
             "registered": registered,
             "pii_registered": pii_registered,
+            "failed_count": len(result.failed_specs),
+            "failed_specs": [
+                {"entity_name": f.entity_name, "error": f.error}
+                for f in result.failed_specs
+            ],
             "coverage": coverage,
+            "mode": effective_mode,
+            "drift_count": len(drift_events),
+            "drift_events": drift_events,
         }
 
     async def schedule_collection(
@@ -311,3 +471,47 @@ class CollectorService(BaseService):
             return None
         result: dict[str, Any] | None = await getter(job_id)
         return result
+
+    async def update_schedule(self, source_id: str, cron: str, mode: str) -> None:
+        """US3: 更新数据源的定时调度配置（schedule_cron + collection_mode）。"""
+        src = await self._repo.get_source(source_id)
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+        src.schedule_cron = cron
+        src.collection_mode = mode
+        await self._db.flush()
+
+    async def get_watermark(self, source_id: str) -> dict[str, Any] | None:
+        """US3: 获取数据源采集水位（FR-014）。"""
+        watermark = await self._repo.get_watermark(source_id)
+        if watermark is None:
+            return None
+        return {
+            "source_id": watermark.source_id,
+            "last_collected_at": (
+                watermark.last_collected_at.isoformat()
+                if watermark.last_collected_at
+                else None
+            ),
+            "mode": watermark.mode,
+            "scanned_count": watermark.scanned_count,
+            "failed_count": watermark.failed_count,
+        }
+
+    async def get_health(self, source_id: str) -> dict[str, Any]:
+        """US5: 获取数据源健康状态（FR-016）。"""
+        src = await self._repo.get_source(source_id)
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+        watermark = await self._repo.get_watermark(source_id)
+        return {
+            "source_id": source_id,
+            "health_status": src.health_status or "unknown",
+            "last_collected_at": (
+                watermark.last_collected_at.isoformat()
+                if watermark and watermark.last_collected_at
+                else None
+            ),
+            "last_error": None,
+            "uptime_check": src.health_status == "healthy",
+        }

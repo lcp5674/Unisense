@@ -2,6 +2,8 @@
 
 全部查询走 SQLAlchemy ORM 参数化（注入根因防护）；批量废弃逐条 try，
 部分失败不影响已成功项（返回 207 语义由 service 层组装）。
+
+增强：内容指纹(SHA-256) + Schema Drift 检测 + 变更历史记录。
 """
 
 from __future__ import annotations
@@ -14,8 +16,13 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
+from app.models.collector_models import CollectionWatermark, SchemaDriftLog
 from app.models.data_source import DataSource, DBCatalog
+from app.services.collector.drift_detector import DriftDetector, compute_content_signature
 from app.services.collector.schemas import BulkDeprecateItem
+
+logger = get_logger("unisense.collector.repository")
 
 
 def _signature(source_id: str, entity_name: str) -> str:
@@ -92,10 +99,23 @@ class CollectorRepository:
         etl_sql: str | None,
         sensitivity_level: str,
         owner_id: int | None,
-    ) -> tuple[DBCatalog, bool]:
-        """幂等 upsert（按 source_id+entity_name）。返回 (实体, 是否新建)。"""
+    ) -> tuple[DBCatalog, bool, dict[str, Any] | None]:
+        """幂等 upsert（按 source_id+entity_name）。
+
+        Returns:
+            (实体, 是否新建, drift_info)。
+            drift_info 为 None 表示无 Drift 或首次采集；
+            非 None 时含 change_type/diff_json/before_schema/after_schema。
+        """
+        # 计算内容指纹
+        new_signature = compute_content_signature(schema_json)
+
         existing = await self.get_catalog(source_id, entity_name)
+        drift_info: dict[str, Any] | None = None
+
         if existing is None:
+            # 首次采集，检查空 schema
+            schema_incomplete = not schema_json.get("columns")
             cat = DBCatalog(
                 source_id=source_id,
                 entity_name=entity_name,
@@ -105,17 +125,54 @@ class CollectorRepository:
                 sensitivity_level=sensitivity_level,
                 owner_id=owner_id,
                 upstream_signature=_signature(source_id, entity_name),
+                content_signature=new_signature,
+                schema_incomplete=schema_incomplete,
             )
+            if schema_incomplete:
+                logger.warning("catalog_schema_incomplete: %s/%s", source_id, entity_name)
             self._db.add(cat)
             await self._db.flush()
-            return cat, True
+            return cat, True, None
+
+        # 比对内容指纹检测 Drift
+        old_signature = existing.content_signature
+        old_schema = existing.schema_json
+
+        drift_result = DriftDetector.detect(
+            source_id=source_id,
+            entity_name=entity_name,
+            old_signature=old_signature,
+            new_signature=new_signature,
+            old_schema=old_schema,
+            new_schema=schema_json,
+        )
+
+        if drift_result is not None:
+            drift_info = {
+                "change_type": drift_result.change_type,
+                "diff_json": drift_result.diff_json,
+                "before_schema": drift_result.before_schema,
+                "after_schema": drift_result.after_schema,
+                "before_signature": old_signature,
+                "after_signature": new_signature,
+            }
+            logger.info(
+                "catalog_schema_drifted: %s/%s change_type=%s",
+                source_id,
+                entity_name,
+                drift_result.change_type,
+            )
+
+        # 更新 catalog
         existing.schema_json = schema_json
         existing.etl_sql = etl_sql
         existing.sensitivity_level = sensitivity_level
+        existing.content_signature = new_signature
+        existing.schema_incomplete = not schema_json.get("columns")
         if owner_id is not None:
             existing.owner_id = owner_id
         await self._db.flush()
-        return existing, False
+        return existing, False, drift_info
 
     async def list_catalogs(self, params: Any) -> tuple[Sequence[DBCatalog], int]:
         base = select(DBCatalog).where(DBCatalog.deleted_at.is_(None))
@@ -174,8 +231,103 @@ class CollectorRepository:
             expected = int(quota.get("max_scan_rows", 0) or 0)
         elif isinstance(quota, int):
             expected = quota
-        coverage = 1.0 if total else 0.0 if expected <= 0 else min(1.0, total / expected)
+        coverage = 1.0 if expected <= 0 else min(1.0, total / expected)
         if src is not None:
             src.coverage = coverage
             await self._db.flush()
         return float(coverage)
+
+    # ---- Schema Drift 相关方法 ----
+
+    async def save_drift_log(self, drift_log: SchemaDriftLog) -> SchemaDriftLog:
+        """保存 Schema 变更日志。"""
+        self._db.add(drift_log)
+        await self._db.flush()
+        return drift_log
+
+    async def list_drift_logs(
+        self,
+        source_id: str,
+        entity_name: str | None = None,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[Sequence[SchemaDriftLog], int]:
+        """查询 Schema 变更日志。"""
+        base = select(SchemaDriftLog).where(SchemaDriftLog.source_id == source_id)
+        if entity_name:
+            base = base.where(SchemaDriftLog.entity_name == entity_name)
+        count = await self._db.scalar(select(func.count()).select_from(base.subquery()))
+        total = int(count) if count is not None else 0
+        stmt = (
+            base.order_by(SchemaDriftLog.detected_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        res = await self._db.execute(stmt)
+        return res.scalars().all(), total
+
+    # ---- 采集水位相关方法 ----
+
+    async def get_watermark(self, source_id: str) -> CollectionWatermark | None:
+        """获取数据源的采集水位。"""
+        res = await self._db.execute(
+            select(CollectionWatermark).where(CollectionWatermark.source_id == source_id)
+        )
+        return res.scalar_one_or_none()
+
+    async def save_watermark(self, watermark: CollectionWatermark) -> CollectionWatermark:
+        """保存/更新采集水位。"""
+        self._db.add(watermark)
+        await self._db.flush()
+        return watermark
+
+    async def update_watermark_after_collection(
+        self,
+        source_id: str,
+        mode: str,
+        scanned_count: int,
+        failed_count: int,
+    ) -> CollectionWatermark:
+        """采集完成后更新采集水位。
+
+        首次采集时创建新记录，后续更新已有记录。
+
+        Args:
+            source_id: 数据源标识。
+            mode: 采集模式（FULL/INCREMENTAL）。
+            scanned_count: 采集表数。
+            failed_count: 失败表数。
+
+        Returns:
+            更新后的采集水位记录。
+        """
+        existing = await self.get_watermark(source_id)
+        now = datetime.now(UTC)
+        if existing is not None:
+            existing.last_collected_at = now
+            existing.mode = mode
+            existing.scanned_count = scanned_count
+            existing.failed_count = failed_count
+            await self._db.flush()
+            return existing
+
+        watermark = CollectionWatermark(
+            source_id=source_id,
+            last_collected_at=now,
+            mode=mode,
+            scanned_count=scanned_count,
+            failed_count=failed_count,
+            content_fingerprints={},
+        )
+        self._db.add(watermark)
+        await self._db.flush()
+        return watermark
+
+    async def update_health_status(self, source_id: str, status: str) -> None:
+        """更新数据源健康状态。"""
+        src = await self.get_source(source_id)
+        if src is not None:
+            src.health_status = status
+            src.last_health_check = datetime.now(UTC)
+            await self._db.flush()

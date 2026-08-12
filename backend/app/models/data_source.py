@@ -9,11 +9,12 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Enum, ForeignKey, Index, String, Text, UniqueConstraint
-from sqlalchemy.dialects.mysql import JSON
+from sqlalchemy.dialects.mysql import BOOLEAN, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
 from app.models.base import BaseModel
+from app.models.enums import EntityTypeEnum, SensitivityLevelEnum, SourceTypeEnum
 
 
 class DataSource(Base, BaseModel):
@@ -31,6 +32,8 @@ class DataSource(Base, BaseModel):
         cluster_id: 物理集群标识。
         last_health_check: 最后健康检查时间。
         created_by: 创建人 ID。
+        schedule_cron: 定时调度 cron 表达式。
+        collection_mode: 采集模式（FULL/INCREMENTAL）。
     """
 
     __tablename__ = "data_source"
@@ -41,13 +44,7 @@ class DataSource(Base, BaseModel):
     name: Mapped[str] = mapped_column(String(128), nullable=False, comment="数据源名称")
     source_type: Mapped[str] = mapped_column(
         Enum(
-            "mysql",
-            "postgres",
-            "hive",
-            "doris",
-            "starrocks",
-            "clickhouse",
-            "maxcompute",
+            *[e.value for e in SourceTypeEnum],
             name="source_type_enum",
         ),
         nullable=False,
@@ -76,6 +73,12 @@ class DataSource(Base, BaseModel):
     created_by: Mapped[int] = mapped_column(
         ForeignKey("user.id", name="fk_data_source_user"), nullable=False
     )
+    schedule_cron: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, comment="定时调度 cron 表达式"
+    )
+    collection_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="FULL", comment="采集模式（FULL/INCREMENTAL）"
+    )
 
     __table_args__ = (Index("idx_data_source_domain", "domain"),)
 
@@ -88,12 +91,14 @@ class DBCatalog(Base, BaseModel):
     Attributes:
         source_id: 数据源标识。
         entity_name: 实体名（库.表）。
-        entity_type: 实体类型（table/field）。
+        entity_type: 实体类型（TABLE/VIEW/FIELD）。
         schema_json: 字段/类型/注释/索引（JSON）。
         etl_sql: 源端 ETL SQL（可空）。
-        sensitivity_level: 敏感级别。
+        sensitivity_level: 敏感级别（含 NEEDS_REVIEW）。
         owner_id: Owner ID（可空，孤儿资产=NULL）。
         upstream_signature: 幂等键（source_id+entity_name）。
+        content_signature: 内容指纹 SHA-256(canonical_schema_json)。
+        schema_incomplete: 空 schema 标记。
     """
 
     __tablename__ = "db_catalog"
@@ -105,7 +110,10 @@ class DBCatalog(Base, BaseModel):
     )
     entity_name: Mapped[str] = mapped_column(String(256), nullable=False, comment="实体名（库.表）")
     entity_type: Mapped[str] = mapped_column(
-        Enum("table", "field", name="entity_type_enum"),
+        Enum(
+            *[e.value for e in EntityTypeEnum],
+            name="entity_type_enum",
+        ),
         nullable=False,
         comment="实体类型",
     )
@@ -114,7 +122,10 @@ class DBCatalog(Base, BaseModel):
     )
     etl_sql: Mapped[str | None] = mapped_column(Text, nullable=True, comment="源端 ETL SQL")
     sensitivity_level: Mapped[str] = mapped_column(
-        Enum("PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", name="sensitivity_enum"),
+        Enum(
+            *[e.value for e in SensitivityLevelEnum],
+            name="sensitivity_enum",
+        ),
         nullable=False,
         default="INTERNAL",
         comment="敏感级别",
@@ -126,6 +137,15 @@ class DBCatalog(Base, BaseModel):
     )
     upstream_signature: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="幂等键（source_id+entity_name）"
+    )
+    content_signature: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="内容指纹 SHA-256(canonical_schema_json)"
+    )
+    schema_incomplete: Mapped[bool] = mapped_column(
+        BOOLEAN,
+        nullable=False,
+        default=False,
+        comment="空 schema 标记",
     )
 
     __table_args__ = (

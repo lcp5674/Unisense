@@ -1,8 +1,13 @@
-"""采集领域真实 MySQL 集成测试（对齐 gateways integration）。
+"""采集领域真实 MySQL 集成测试（对齐 gateways integration + 工业级修复）。
 
 用真实数据库验证：数据源加密落库、元数据注册敏感分级（PII）、批量废弃部分失败、
-覆盖率重算。schema 由 Alembic 迁移（与生产一致）建表；外部 MySQL 不可用时回退
-testcontainers，二者皆不可用则跳过。
+覆盖率重算、增量采集、健康状态更新。schema 由 Alembic 迁移（与生产一致）建表；
+外部 MySQL 不可用时回退 testcontainers，二者皆不可用则跳过。
+
+增强（工业级修复）：
+- US3: 增量采集水位记录
+- US5: 健康状态更新
+- 多数据源连接器 mock 测试
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ import asyncio
 import os
 import subprocess
 import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -28,6 +34,7 @@ from app.services.collector.schemas import (
     DBCatalogListParams,
 )
 from app.services.collector.service import CollectorService
+from app.services.collector.spi import CatalogSpec, CollectResult
 
 EXT_DB_URL = os.getenv("UNISENSE_INTEGRATION_DB_URL") or os.getenv("UNISENSE_DB_URL")
 _USE_EXT = bool(EXT_DB_URL) and "localhost" in EXT_DB_URL
@@ -226,3 +233,198 @@ async def test_delete_missing_source_raises(db_env):
         svc = CollectorService(session)
         with pytest.raises(NotFoundError):
             await svc.delete_source("ghost")
+
+
+async def test_health_status_updates_on_collect(db_env):
+    """US5: 采集成功后 health_status 更新为 healthy。"""
+    session_factory = db_env["session_factory"]
+    owner_id = db_env["owner_id"]
+    async with session_factory() as session:
+        svc = CollectorService(session)
+        await svc.create_source(
+            DataSourceCreateRequest(
+                source_id="src_health",
+                name="HealthTest",
+                source_type="mysql",
+                connection_config={"host": "h"},
+                domain="db_health",
+            ),
+            actor_id=owner_id,
+        )
+        await session.commit()
+
+        # 模拟采集成功
+        class StubCollector:
+            async def collect(self, source: object) -> CollectResult:
+                return CollectResult(
+                    specs=[
+                        CatalogSpec(
+                            entity_name="t1",
+                            entity_type="TABLE",
+                            schema_json={"columns": ["a"]},
+                        )
+                    ],
+                    failed_specs=[],
+                    source_id="src_health",
+                )
+
+        await svc.collect_and_register("src_health", StubCollector(), actor_id=owner_id)
+        await session.commit()
+
+        # 验证健康状态更新
+        health = await svc.get_health("src_health")
+        assert health["health_status"] == "healthy"
+
+
+async def test_watermark_created_after_collection(db_env):
+    """US3: 采集完成后创建采集水位记录。"""
+    session_factory = db_env["session_factory"]
+    owner_id = db_env["owner_id"]
+    async with session_factory() as session:
+        svc = CollectorService(session)
+        await svc.create_source(
+            DataSourceCreateRequest(
+                source_id="src_watermark",
+                name="WatermarkTest",
+                source_type="mysql",
+                connection_config={"host": "h"},
+                domain="db_wm",
+            ),
+            actor_id=owner_id,
+        )
+        await session.commit()
+
+        class StubCollector:
+            async def collect(self, source: object) -> CollectResult:
+                return CollectResult(
+                    specs=[
+                        CatalogSpec(
+                            entity_name="t1",
+                            entity_type="TABLE",
+                            schema_json={"columns": ["a"]},
+                        )
+                    ],
+                    failed_specs=[],
+                    source_id="src_watermark",
+                )
+
+        await svc.collect_and_register("src_watermark", StubCollector(), actor_id=owner_id)
+        await session.commit()
+
+        # 验证水位记录
+        watermark = await svc.get_watermark("src_watermark")
+        assert watermark is not None
+        assert watermark["mode"] == "FULL"
+        assert watermark["scanned_count"] == 1
+
+
+# ---------- 多数据源连接器 Mock 测试 ----------
+
+
+async def test_postgres_collector_mock():
+    """PostgreSQL 连接器 mock 采集测试。"""
+    from app.services.collector.connectors.mysql import SqlalchemyConnector
+    from app.services.collector.connectors.postgres import PostgresCollector
+
+    mock_connector = MagicMock(spec=SqlalchemyConnector)
+    mock_connector.query = AsyncMock(side_effect=[
+        [{"table_name": "users"}, {"table_name": "orders"}],
+        [
+            {"column_name": "id", "data_type": "integer"},
+            {"column_name": "name", "data_type": "varchar"},
+        ],
+        [{"column_name": "order_id", "data_type": "integer"}],
+    ])
+    mock_connector.dispose = AsyncMock()
+
+    collector = PostgresCollector(mock_connector)
+    source = MagicMock(source_id="pg_src", domain="public")
+    result = await collector.collect(source)
+
+    assert result.source_id == "pg_src"
+    assert len(result.specs) == 2
+    assert result.specs[0].entity_name == "users"
+    assert result.failed_specs == []
+
+
+async def test_clickhouse_collector_mock():
+    """ClickHouse 连接器 mock 采集测试。"""
+    from app.services.collector.connectors.clickhouse import ClickHouseCollector
+
+    collector = ClickHouseCollector(host="ch-host", port=8123, database="analytics")
+
+    # Mock _query method
+    collector._query = AsyncMock(side_effect=[
+        "events\nsessions\n",  # tables
+        "event_id\tString\ntimestamp\tDateTime\n",  # events columns
+        "session_id\tUInt64\n",  # sessions columns
+    ])
+
+    source = MagicMock(source_id="ch_src", domain="analytics")
+    result = await collector.collect(source)
+
+    assert result.source_id == "ch_src"
+    assert len(result.specs) == 2
+    assert result.specs[0].entity_name == "events"
+    assert result.failed_specs == []
+
+
+async def test_kafka_collector_mock():
+    """Kafka 连接器 mock 采集测试。"""
+    from app.services.collector.connectors.kafka import KafkaCollector
+
+    collector = KafkaCollector(
+        bootstrap_servers="kafka:9092",
+        registry_url="http://schema-registry:8081",
+    )
+
+    # Mock _get_topics
+    collector._get_topics = AsyncMock(return_value=[
+        {"name": "user-events", "partition_count": 3, "replication_factor": 2},
+        {"name": "order-events", "partition_count": 6, "replication_factor": 3},
+    ])
+    # Mock _get_subject_schemas
+    collector._get_subject_schemas = AsyncMock(return_value={})
+
+    source = MagicMock(source_id="kafka_src")
+    result = await collector.collect(source)
+
+    assert result.source_id == "kafka_src"
+    assert len(result.specs) == 2
+    assert result.specs[0].entity_name == "user-events"
+
+
+async def test_doris_collector_uses_information_schema():
+    """Doris 连接器复用 InformationSchemaCollector。"""
+    from app.services.collector.connectors.doris import create_doris_collector
+
+    cfg = {
+        "host": "doris-host",
+        "port": 9030,
+        "user": "root",
+        "password": "",
+        "database": "test_db",
+    }
+    # 仅验证工厂函数不报错，返回类型正确
+    # 实际连接需要真实 Doris 实例
+    with patch("app.services.collector.connectors.doris.SqlalchemyConnector") as mock_cls:
+        mock_instance = MagicMock()
+        mock_instance.query = AsyncMock(return_value=[])
+        mock_instance.dispose = AsyncMock()
+        mock_cls.return_value = mock_instance
+        collector = create_doris_collector(cfg)
+        assert collector is not None
+
+
+async def test_starrocks_collector_uses_information_schema():
+    """StarRocks 连接器复用 InformationSchemaCollector。"""
+    from app.services.collector.connectors.starrocks import create_starrocks_collector
+
+    cfg = {"host": "sr-host", "port": 9030, "user": "root", "password": "", "database": "test_db"}
+    with patch("app.services.collector.connectors.starrocks.SqlalchemyConnector") as mock_cls:
+        mock_instance = MagicMock()
+        mock_instance.query = AsyncMock(return_value=[])
+        mock_instance.dispose = AsyncMock()
+        mock_cls.return_value = mock_instance
+        collector = create_starrocks_collector(cfg)
+        assert collector is not None

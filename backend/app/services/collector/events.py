@@ -40,3 +40,35 @@ class CatalogEventPublisher:
             self._breaker.record_failure()
             logger.warning("catalog_event_publish_failed", event_type=event_type)
             return False
+
+    async def publish_batch(self, event_type: str, payloads: list[dict[str, Any]]) -> bool:
+        """批量发布事件（单次 Redis publish 含多个事件，FR-024）。
+
+        将多个事件打包为一条 Redis 消息发布，减少网络往返。
+
+        Args:
+            event_type: 事件类型。
+            payloads: 事件负载列表。
+
+        Returns:
+            True 如果发布成功；False 如果 Redis 不可用或熔断。
+        """
+        if not self._enabled or not self._breaker.allow():
+            return False
+        if not payloads:
+            return True
+        message = json.dumps(
+            {
+                "event_type": event_type,
+                "batch": True,
+                "items": payloads,
+            },
+            ensure_ascii=False,
+        )
+        try:
+            await self._redis.publish(_CHANNEL, message)  # type: ignore[union-attr]
+            return True
+        except Exception:
+            self._breaker.record_failure()
+            logger.warning("catalog_event_publish_batch_failed", event_type=event_type)
+            return False

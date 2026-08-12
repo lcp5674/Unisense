@@ -5,16 +5,19 @@
   ``connection_config_present`` 标记是否存在，满足凭据脱敏（TD §13）。
 - ``schema_json`` 与 Pydantic ``BaseModel.schema_json()`` 冲突，字段名用
   ``schema_def``，并以 alias="schema_json" 与模型列对齐（populate_by_name）。
+- ``SourceType`` / ``EntityType`` 引用共享枚举（FR-003/FR-007）。
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SourceType = Literal["mysql", "postgres", "hive", "doris", "starrocks", "kafka"]
-EntityType = Literal["TABLE", "VIEW"]
+from app.models.enums import EntityTypeEnum, SourceTypeEnum
+
+SourceType = SourceTypeEnum
+EntityType = EntityTypeEnum
 
 
 class DataSourceCreateRequest(BaseModel):
@@ -26,6 +29,14 @@ class DataSourceCreateRequest(BaseModel):
     connection_config: dict[str, Any]
     domain: str = Field(max_length=64)
     cluster_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_connection_config(self) -> DataSourceCreateRequest:
+        """FR-020: connection_config 必须包含 host 字段。"""
+        cfg = self.connection_config
+        if not isinstance(cfg, dict) or "host" not in cfg:
+            raise ValueError("connection_config 必须包含 host 字段")
+        return self
 
 
 class DataSourceResponse(BaseModel):
@@ -39,6 +50,8 @@ class DataSourceResponse(BaseModel):
     coverage: float
     health_status: str
     connection_config_present: bool
+    schedule_cron: str | None = None
+    collection_mode: str = "FULL"
     created_by: int | None = None
     created_at: Any = None
     updated_at: Any = None
@@ -51,7 +64,7 @@ class DBCatalogCreateRequest(BaseModel):
 
     source_id: str = Field(max_length=64)
     entity_name: str = Field(max_length=255)
-    entity_type: EntityType = "TABLE"
+    entity_type: EntityType = EntityTypeEnum.TABLE
     schema_def: dict[str, Any] = Field(alias="schema_json")
     etl_sql: str | None = None
     owner_id: int | None = None
@@ -70,6 +83,8 @@ class DBCatalogResponse(BaseModel):
     sensitivity_level: str
     owner_id: int | None = None
     upstream_signature: str
+    content_signature: str | None = None
+    schema_incomplete: bool = False
 
 
 class DBCatalogListParams(BaseModel):
@@ -116,3 +131,11 @@ class CollectRequest(BaseModel):
     """触发自动采集请求。"""
 
     collector_type: str = Field(default="information_schema", max_length=32)
+    mode: str = Field(default="FULL", max_length=16, pattern=r"^(FULL|INCREMENTAL)$")
+
+
+class ScheduleRequest(BaseModel):
+    """定时调度配置请求（US3）。"""
+
+    cron: str = Field(max_length=100, description="定时调度 cron 表达式")
+    mode: str = Field(default="FULL", max_length=16, pattern=r"^(FULL|INCREMENTAL)$")

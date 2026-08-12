@@ -8,10 +8,19 @@
   GET /api/v1/catalogs（注入守卫）、POST /api/v1/catalogs/bulk-deprecate（写闸门，207）
 
 凭据脱敏：响应一律不含 connection_config 明文（见 DataSourceResponse）。
+
+增强（工业级修复）：
+- FR-017: 采集 API 添加 asyncio.timeout(300) 保护
+- FR-018: 分布式锁 CollectionLock.acquire/release 采集并发保护
+- US3: 定时调度 cron+mode 参数
+- US5: 健康探活端点
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
@@ -20,9 +29,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.exceptions import BusinessError, NotFoundError
+from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.core.guard import guard_against_injection
+from app.core.logging import get_logger
 from app.db.mysql import get_db_session
+from app.db.redis import get_redis
+from app.services.collector.distributed_lock import CollectionLock
 from app.services.collector.schemas import (
     BulkDeprecateRequest,
     BulkDeprecateResult,
@@ -33,9 +45,12 @@ from app.services.collector.schemas import (
     DBCatalogListParams,
     DBCatalogListResponse,
     DBCatalogResponse,
+    ScheduleRequest,
 )
 from app.services.collector.service import CollectorService
 from app.services.collector.spi import build_collector
+
+logger = get_logger("unisense.collector.api")
 
 source_router = APIRouter(prefix="/data-sources", tags=["collector-source"])
 catalog_router = APIRouter(prefix="/catalogs", tags=["collector-catalog"])
@@ -169,12 +184,41 @@ async def collect_source(
 ) -> ApiResponse[dict[str, Any]]:
     svc = _svc(db)
     src = await svc.get_source_orm(source_id)
-    collector = build_collector(body.collector_type, src.connection_config)
+    # 根据 source_type 从 CollectorRegistry 构建采集器
+    collector = build_collector(src.source_type, src.connection_config)
+
+    # FR-018: 分布式锁采集并发保护
+    owner_id = f"api-{user.id}-{uuid.uuid4().hex[:8]}"
+    redis = None
+    with contextlib.suppress(RuntimeError):
+        redis = get_redis()  # Redis 不可用时降级为无锁
+
+    lock = CollectionLock(redis)
+    acquired = await lock.acquire(source_id, owner_id)
+    if not acquired:
+        raise ConflictError(
+            f"数据源 {source_id} 采集正在进行中，请稍后重试",
+            error_code="COLLECTION_IN_PROGRESS",
+        )
+
     try:
-        result = await svc.collect_and_register(source_id, collector, user.id)
+        # FR-017: asyncio.timeout(300) 保护
+        result = await asyncio.wait_for(
+            svc.collect_and_register(
+                source_id, collector, user.id, mode=body.mode
+            ),
+            timeout=300.0,
+        )
+    except TimeoutError:
+        raise BusinessError(
+            f"数据源 {source_id} 采集超时（300秒），请使用异步调度",
+            error_code="COLLECTION_TIMEOUT",
+        ) from None
     finally:
+        await lock.release(source_id, owner_id)
         await collector.dispose()
     pii_registered = result.get("pii_registered", 0)
+    failed_count = result.get("failed_count", 0)
     await write_audit(
         db,
         actor_id=user.id,
@@ -185,6 +229,7 @@ async def collect_source(
             "scanned": result["scanned"],
             "registered": result["registered"],
             "pii_registered": pii_registered,
+            "failed_count": failed_count,
         },
         ip=client_ip(request),
         trace_id=trace_id,
@@ -199,13 +244,20 @@ async def collect_source(
 )
 async def schedule_collection(
     source_id: str,
+    body: ScheduleRequest,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[dict[str, Any]]:
-    """全量采集接入异步队列：立即返回 job_id，采集在后台 worker 执行（TD §12.1）。"""
+    """全量采集接入异步队列：立即返回 job_id，采集在后台 worker 执行（TD §12.1）。
+
+    支持配置 cron 表达式和采集模式（FULL/INCREMENTAL），
+    保存到 DataSource.schedule_cron / collection_mode。
+    """
     svc = _svc(db)
+    # US3: 保存 cron+mode 到 DataSource
+    await svc.update_schedule(source_id, body.cron, body.mode)
     job_id = await svc.schedule_collection(source_id, user.id)
     await write_audit(
         db,
@@ -213,12 +265,15 @@ async def schedule_collection(
         action="COLLECT_SCHEDULE",
         entity_type="data_source",
         entity_id=source_id,
-        detail={"job_id": job_id},
+        detail={"job_id": job_id, "cron": body.cron, "mode": body.mode},
         ip=client_ip(request),
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data={"job_id": job_id, "status": "QUEUED"}, trace_id=trace_id)
+    return ok(
+        data={"job_id": job_id, "status": "QUEUED", "cron": body.cron, "mode": body.mode},
+        trace_id=trace_id,
+    )
 
 
 @source_router.get("/jobs/{job_id}", dependencies=_READ_DEPS)
@@ -234,6 +289,34 @@ async def get_collection_job(
     if status is None:
         raise NotFoundError(f"采集任务不存在: {job_id}", ctx={"job_id": job_id})
     return ok(data=status, trace_id=trace_id)
+
+
+@source_router.get("/{source_id}/watermark", dependencies=_READ_DEPS)
+async def get_watermark(
+    source_id: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """US3: 获取数据源采集水位（FR-014）。"""
+    svc = _svc(db)
+    watermark = await svc.get_watermark(source_id)
+    if watermark is None:
+        raise NotFoundError(f"采集水位不存在: {source_id}", ctx={"source_id": source_id})
+    return ok(data=watermark, trace_id=trace_id)
+
+
+@source_router.get("/{source_id}/health", dependencies=_READ_DEPS)
+async def get_health(
+    source_id: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """US5: 数据源健康探活端点（FR-016）。"""
+    svc = _svc(db)
+    health_info = await svc.get_health(source_id)
+    return ok(data=health_info, trace_id=trace_id)
 
 
 @catalog_router.get("", dependencies=_READ_DEPS)

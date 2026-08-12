@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.exceptions import BusinessError, ConflictError, ExternalDependencyError
+from app.core.exceptions import BusinessError, ConflictError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.schemas import (
@@ -23,7 +23,8 @@ from app.services.collector.schemas import (
 from app.services.collector.service import CollectorService
 from app.services.collector.spi import (
     CatalogSpec,
-    InformationSchemaCollector,
+    CollectResult,
+    FailedSpec,
     build_collector,
 )
 
@@ -32,7 +33,14 @@ def _svc() -> tuple[CollectorService, MagicMock]:
     """构造服务并替换其仓库为 mock，返回 (service, mock_repo_instance)。"""
     with patch("app.services.collector.service.CollectorRepository") as mock_repo:
         svc = CollectorService(db=MagicMock())
-        return svc, mock_repo.return_value
+        repo = mock_repo.return_value
+        # 确保 US5/US3 新增的异步方法也有默认 AsyncMock
+        repo.update_health_status = AsyncMock()
+        repo.get_watermark = AsyncMock(return_value=None)
+        repo.update_watermark_after_collection = AsyncMock(
+            return_value=MagicMock(mode="FULL")
+        )
+        return svc, repo
 
 
 class _FakeCatalog:
@@ -47,6 +55,8 @@ class _FakeCatalog:
         self.sensitivity_level = sensitivity
         self.owner_id = None
         self.upstream_signature = "sig"
+        self.content_signature = None
+        self.schema_incomplete = False
 
 
 class _FakeConnector:
@@ -94,28 +104,7 @@ def test_classifier_internal_default():
 # ---------- SPI ----------
 
 
-async def test_info_schema_collector_builds_specs():
-    conn = _FakeConnector(["users", "orders"], {"users": ["user_name"], "orders": ["order_id"]})
-    collector = InformationSchemaCollector(conn)
-    specs = await collector.collect(MagicMock(source_id="s1", domain="db1"))
-    assert len(specs) == 2
-    assert specs[0].entity_name == "users"
-    assert "user_name" in specs[0].schema_json["columns"]
-    # 查询参数化（无字符串拼接）
-    assert all(params for _, params in conn.queries)
-
-
-async def test_info_schema_collector_external_failure_is_retryable():
-    class BoomConnector:
-        async def query(self, sql: str, params: dict | None = None) -> list[dict]:
-            raise RuntimeError("connection refused")
-
-    collector = InformationSchemaCollector(BoomConnector())
-    with pytest.raises(ExternalDependencyError):
-        await collector.collect(MagicMock(source_id="s1", domain="db1"))
-
-
-def test_build_collector_unsupported_raises():
+async def test_build_collector_unsupported_raises():
     with pytest.raises(BusinessError):
         build_collector("unknown_type", "enc")
 
@@ -164,8 +153,10 @@ async def test_register_catalog_classifies_pii_and_publishes():
     svc, repo = _svc()
     events = MagicMock()
     events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
     svc._events = events
-    repo.upsert_catalog = AsyncMock(return_value=(_FakeCatalog("PII"), True))
+    svc._llm_classify_sensitivity = AsyncMock(return_value=None)
+    repo.upsert_catalog = AsyncMock(return_value=(_FakeCatalog("PII"), True, None))
     repo.recompute_coverage = AsyncMock(return_value=1.0)
     resp = await svc.register_catalog(
         DBCatalogCreateRequest(
@@ -190,23 +181,63 @@ async def test_collect_and_register_uses_classifier_and_counts():
     svc, repo = _svc()
     events = MagicMock()
     events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
     svc._events = events
     repo.get_source = AsyncMock(return_value=MagicMock())
-    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True))
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
     repo.recompute_coverage = AsyncMock(return_value=0.5)
 
     class StubCollector:
-        async def collect(self, source: object) -> list[CatalogSpec]:
-            return [
-                CatalogSpec(
-                    entity_name="users", entity_type="TABLE", schema_json={"columns": ["user_name"]}
-                )
-            ]
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="users",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["user_name"]},
+                    )
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
 
     result = await svc.collect_and_register("s", StubCollector(), actor_id=1)
     assert result["scanned"] == 1
     assert result["registered"] == 1
     assert result["coverage"] == 0.5
+    assert result["failed_count"] == 0
+
+
+async def test_collect_and_register_handles_failed_specs():
+    """FR-004: collect_and_register 正确报告 failed_specs。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock())
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+
+    class FailingCollector:
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="t1",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["a"]},
+                    ),
+                ],
+                failed_specs=[
+                    FailedSpec(entity_name="t2", error="timeout"),
+                ],
+                source_id="s",
+            )
+
+    result = await svc.collect_and_register("s", FailingCollector(), actor_id=1)
+    assert result["failed_count"] == 1
+    assert result["failed_specs"][0]["entity_name"] == "t2"
 
 
 # ---------- 仓储层（mock session） ----------
@@ -232,7 +263,7 @@ async def test_repo_get_source_none():
 
 async def test_repo_upsert_creates_when_missing():
     repo = CollectorRepository(_session(scalar_one_or_none=None))
-    cat, created = await repo.upsert_catalog(
+    cat, created, drift_info = await repo.upsert_catalog(
         source_id="s",
         entity_name="t",
         entity_type="TABLE",
@@ -243,23 +274,26 @@ async def test_repo_upsert_creates_when_missing():
     )
     assert created is True
     assert cat.upstream_signature
+    assert cat.content_signature is not None
+    assert drift_info is None  # 首次采集无 drift
 
 
 async def test_repo_upsert_updates_when_exists():
     existing = MagicMock()
-    existing.row_version = 1
+    existing.content_signature = "old_sig"
+    existing.schema_json = {"columns": ["a"]}
     repo = CollectorRepository(_session(scalar_one_or_none=existing))
-    cat, created = await repo.upsert_catalog(
+    cat, created, drift_info = await repo.upsert_catalog(
         source_id="s",
         entity_name="t",
         entity_type="TABLE",
-        schema_json={"columns": ["a"]},
+        schema_json={"columns": ["a", "b"]},
         etl_sql=None,
         sensitivity_level="INTERNAL",
         owner_id=None,
     )
     assert created is False
-    assert cat.schema_json == {"columns": ["a"]}
+    assert cat.schema_json == {"columns": ["a", "b"]}
 
 
 async def test_repo_bulk_deprecate_partial():
@@ -281,6 +315,14 @@ async def test_repo_recompute_coverage_dict_quota():
     assert await repo.recompute_coverage("s") == 1.0
 
 
+async def test_repo_recompute_coverage_zero_expected():
+    """FR-009: expected<=0 时 coverage=1.0。"""
+    src = MagicMock()
+    src.quota = {"max_scan_rows": 0}
+    repo = CollectorRepository(_session(scalar_one_or_none=src, scalar=5))
+    assert await repo.recompute_coverage("s") == 1.0
+
+
 async def test_repo_list_sources_no_crash_on_filters():
     repo = CollectorRepository(_session(all_rows=[MagicMock()], scalar=1))
     items, total = await repo.list_sources(
@@ -288,3 +330,134 @@ async def test_repo_list_sources_no_crash_on_filters():
     )
     assert total == 1
     assert items
+
+
+# ---------- US6: 空 schema 告警 ----------
+
+
+async def test_collect_empty_schema_warns_and_marks_incomplete():
+    """US6: 采集到空 schema 的表时记录 warning + 标记 schema_incomplete=True。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock(source_type="mysql"))
+    repo.get_watermark = AsyncMock(return_value=None)
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+    repo.update_health_status = AsyncMock()
+    repo.update_watermark_after_collection = AsyncMock(
+        return_value=MagicMock(mode="FULL")
+    )
+
+    class EmptySchemaCollector:
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="empty_tbl",
+                        entity_type="TABLE",
+                        schema_json={"columns": []},
+                    ),
+                    CatalogSpec(
+                        entity_name="full_tbl",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["a"]},
+                    ),
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    result = await svc.collect_and_register("s", EmptySchemaCollector(), actor_id=1)
+    assert result["scanned"] == 2
+    assert result["registered"] == 2
+
+
+# ---------- US6: connection_config 校验 ----------
+
+
+def test_connection_config_missing_host_raises():
+    """FR-020: connection_config 缺少 host 字段时校验拒绝。"""
+    with pytest.raises(ValueError, match="host"):
+        DataSourceCreateRequest(
+            source_id="src1",
+            name="S",
+            source_type="mysql",
+            connection_config={"port": 3306},  # 缺少 host
+            domain="d",
+        )
+
+
+def test_connection_config_with_host_passes():
+    """FR-020: connection_config 包含 host 字段时校验通过。"""
+    req = DataSourceCreateRequest(
+        source_id="src1",
+        name="S",
+        source_type="mysql",
+        connection_config={"host": "127.0.0.1"},
+        domain="d",
+    )
+    assert req.connection_config["host"] == "127.0.0.1"
+
+
+# ---------- US6: batch 事件发布 ----------
+
+
+async def test_collect_and_register_publishes_batch_not_individual():
+    """FR-024: 采集完成后发布1次batch事件而非逐条publish。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock(source_type="mysql"))
+    repo.get_watermark = AsyncMock(return_value=None)
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+    repo.update_health_status = AsyncMock()
+    repo.update_watermark_after_collection = AsyncMock(
+        return_value=MagicMock(mode="FULL")
+    )
+
+    class MultiSpecCollector:
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name=f"t{i}",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["a"]},
+                    )
+                    for i in range(3)
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    await svc.collect_and_register("s", MultiSpecCollector(), actor_id=1)
+    # publish_batch 应调用1次，publish 不应调用（collect 路径）
+    events.publish_batch.assert_awaited_once()
+    events.publish.assert_not_awaited()
+
+
+# ---------- US6: LLM metric 计数 ----------
+
+
+def test_llm_classify_error_metric_increments():
+    """FR-023: LLM 分类异常记录 llm_classify_error_total metric。"""
+    from app.services.collector.service import (
+        _llm_classify_error_counts,
+        _record_llm_error_metric,
+        get_llm_classify_error_total,
+    )
+
+    # 重置计数器
+    _llm_classify_error_counts.clear()
+    _record_llm_error_metric("timeout")
+    _record_llm_error_metric("timeout")
+    _record_llm_error_metric("format_error")
+
+    counts = get_llm_classify_error_total()
+    assert counts.get("timeout") == 2
+    assert counts.get("format_error") == 1

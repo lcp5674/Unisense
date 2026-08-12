@@ -117,9 +117,15 @@ class ArqCollectionQueue:
         from app.core.config import settings
 
         redis = self._redis or ArqRedis.from_url(self._redis_url or settings.redis_url)
-        job = await redis.enqueue_job("run_collection_task", source_id, actor_id)
+        job = await redis.enqueue_job(
+            "run_collection_task",
+            source_id,
+            actor_id,
+            _max_tries=3,
+            _timeout=600,
+        )
         job_id: str = job.job_id
-        await redis.close()
+        # FR-019: 不再调用 redis.close()，复用连接池
         return job_id
 
 

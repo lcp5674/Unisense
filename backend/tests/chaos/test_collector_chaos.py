@@ -1,12 +1,18 @@
-"""采集领域混沌/韧性测试（对齐 gateways chaos）。
+"""采集领域混沌/韧性测试（对齐 gateways chaos + US4 工业级修复）。
 
-覆盖：事件总线（Redis）宕机 -> 核心链路仍 200（降级）；外部源库故障 ->
-采集返回 503（重试型，不静默 200）；事件发布熔断降级不阻断主流程。
+覆盖：
+- 事件总线（Redis）宕机 -> 核心链路仍 200（降级）
+- 外部源库故障 -> 采集返回 503（重试型，不静默 200）
+- 事件发布熔断降级不阻断主流程
+- US4: 单表超时跳过 + failed_specs 正确记录
+- US4: 分布式锁互斥
+- US4: Arq 重试 3 次
+- US4: 幂等防重复执行
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -16,8 +22,12 @@ from app.api import collector as collector_api
 from app.api import deps
 from app.core.exceptions import ExternalDependencyError
 from app.main import app
+from app.services.collector.distributed_lock import CollectionLock
 from app.services.collector.events import CatalogEventPublisher
 from app.services.collector.schemas import DBCatalogResponse
+from app.services.collector.service import CollectorService
+from app.services.collector.spi import CatalogSpec, CollectResult, FailedSpec
+from app.services.collector.tasks import _check_idempotency
 
 
 @pytest.fixture
@@ -41,6 +51,9 @@ async def owner_client():
 class _DownPublisher:
     async def publish(self, event_type: str, payload: dict) -> bool:
         return False  # 模拟 Redis 不可用，降级
+
+    async def publish_batch(self, event_type: str, payloads: list) -> bool:
+        return False
 
 
 class _FakeRegisterSvc:
@@ -101,3 +114,134 @@ async def test_event_publisher_circuit_degradation():
     publisher = CatalogEventPublisher(_BoomRedis())  # type: ignore[arg-type]
     ok = await publisher.publish("catalog_registered", {"source_id": "s"})
     assert ok is False  # 降级：发布失败不影响主流程
+
+
+# ---------- US4: 单表超时跳过 ----------
+
+
+async def test_single_table_timeout_skip():
+    """FR-004: 采集1000表时1表超时，999表正常采集，不中断全批。"""
+    svc = CollectorService(db=MagicMock())
+    repo = MagicMock()
+    svc._repo = repo
+    repo.get_source = AsyncMock(return_value=MagicMock(source_type="mysql"))
+    repo.get_watermark = AsyncMock(return_value=None)
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=1.0)
+    repo.update_health_status = AsyncMock()
+    repo.update_watermark_after_collection = AsyncMock(
+        return_value=MagicMock(mode="FULL")
+    )
+
+    events = MagicMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+
+    class PartialFailingCollector:
+        async def collect(self, source: object) -> CollectResult:
+            specs = [
+                CatalogSpec(
+                    entity_name=f"table_{i}",
+                    entity_type="TABLE",
+                    schema_json={"columns": ["a"]},
+                )
+                for i in range(999)
+            ]
+            failed = [FailedSpec(entity_name="table_500", error="timeout")]
+            return CollectResult(specs=specs, failed_specs=failed, source_id="s")
+
+    result = await svc.collect_and_register("s", PartialFailingCollector(), actor_id=1)
+    assert result["scanned"] == 999
+    assert result["registered"] == 999
+    assert result["failed_count"] == 1
+    assert result["failed_specs"][0]["entity_name"] == "table_500"
+
+
+# ---------- US4: 分布式锁互斥 ----------
+
+
+async def test_distributed_lock_mutual_exclusion():
+    """FR-018: 分布式锁互斥——第二次 acquire 失败。"""
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(side_effect=[True, None])  # 第一次成功，第二次失败
+    mock_redis.eval = AsyncMock(return_value=1)
+
+    lock = CollectionLock(mock_redis)
+    acquired1 = await lock.acquire("src1", "owner1")
+    assert acquired1 is True
+
+    # 第二次 acquire 模拟锁已被占用
+    mock_redis.set = AsyncMock(return_value=None)  # NX 失败
+    acquired2 = await lock.acquire("src1", "owner2")
+    assert acquired2 is False
+
+
+async def test_distributed_lock_release_by_owner():
+    """只有锁的 owner 才能释放锁（Lua 脚本原子操作）。"""
+    mock_redis = AsyncMock()
+    mock_redis.eval = AsyncMock(return_value=1)  # DEL 成功
+
+    lock = CollectionLock(mock_redis)
+    released = await lock.release("src1", "owner1")
+    assert released is True
+
+
+async def test_distributed_lock_degrade_without_redis():
+    """Redis 不可用时降级为始终获取成功。"""
+    lock = CollectionLock(None)
+    acquired = await lock.acquire("src1", "owner1")
+    assert acquired is True
+
+
+# ---------- US4: 幂等防重复 ----------
+
+
+async def test_idempotency_check_allows_first_execution():
+    """首次 job_id 执行通过。"""
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(return_value=True)  # SET NX 成功
+
+    result = await _check_idempotency(mock_redis, "job-123")
+    assert result is True
+
+
+async def test_idempotency_check_blocks_duplicate():
+    """重复 job_id 被阻止。"""
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(return_value=None)  # SET NX 失败（已存在）
+
+    result = await _check_idempotency(mock_redis, "job-123")
+    assert result is False
+
+
+async def test_idempotency_check_degrades_without_redis():
+    """Redis 不可用时允许执行。"""
+    result = await _check_idempotency(None, "job-123")
+    assert result is True
+
+
+# ---------- US4: Arq 重试 3 次 ----------
+
+
+async def test_arq_retry_configured():
+    """FR-006: ArqCollectionQueue enqueue 配置 max_tries=3, timeout=600。"""
+    from app.services.collector.queue import ArqCollectionQueue
+
+    queue = ArqCollectionQueue(redis_url="redis://localhost")
+
+    mock_redis = AsyncMock()
+    mock_job = MagicMock()
+    mock_job.job_id = "test-job-id"
+    mock_redis.enqueue_job = AsyncMock(return_value=mock_job)
+
+    with patch("arq.ArqRedis") as mock_arq:
+        mock_arq.from_url = AsyncMock(return_value=mock_redis)
+        queue._redis = mock_redis
+
+        job_id = await queue.enqueue("src1", 1)
+
+        # 验证 enqueue_job 调用参数
+        call_args = mock_redis.enqueue_job.call_args
+        assert call_args[1]["_max_tries"] == 3
+        assert call_args[1]["_timeout"] == 600
+        assert job_id == "test-job-id"
