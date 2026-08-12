@@ -1,6 +1,6 @@
 # Unisense 前端 Dockerfile
 # 多阶段构建：node 构建 → nginx 运行
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /build
 
