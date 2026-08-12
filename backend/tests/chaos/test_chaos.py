@@ -140,3 +140,42 @@ def test_circuit_breaker_opens_after_failures():
     cb.record_success()
     assert cb.state == "closed"
     assert cb.allow() is True
+
+
+def test_circuit_breaker_half_open_single_flight():
+    """半开窗口每次仅放行一个探测请求，其余拒绝 —— 避免恢复期请求雪崩（thundering herd）。
+
+    突破半开探测阈值即复位电路；探测在位时其它请求一律拒绝，直到成功/失败收敛。
+    """
+    cb = CircuitBreaker(failure_threshold=2, reset_timeout=0.05)
+    # 打满失败阈值 -> open
+    cb.record_failure()
+    cb.record_failure()
+    assert cb.state == "open"
+    assert cb.allow() is False
+
+    # 手动把 opened_at 拨到过去，进入半开：仅第一个 allow 放行
+    import time as _time
+
+    cb._opened_at = _time.monotonic() - 1.0
+    cb._failures = 2
+    cb._open = True
+    assert cb.state == "half-open"
+    assert cb.allow() is True  # 首个探测放行
+    assert cb.allow() is False  # 探测在位，其余拒绝
+    assert cb.allow() is False
+
+    # 探测成功 -> 复位关闭
+    cb.record_success()
+    assert cb.state == "closed"
+    assert cb.allow() is True
+
+    # 再次打满并半开，探测失败 -> 重新打开且不再放行
+    cb.record_failure()
+    cb.record_failure()
+    cb._opened_at = _time.monotonic() - 1.0
+    assert cb.state == "half-open"
+    assert cb.allow() is True
+    cb.record_failure()  # 探测失败
+    assert cb.state == "open"
+    assert cb.allow() is False
