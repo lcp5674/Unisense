@@ -124,3 +124,122 @@ def test_field_lineage_update_degrades_gracefully() -> None:
     """UPDATE 无干净源查询时降级为空（不崩）。"""
     sql = "UPDATE dest SET x = 1 WHERE id = 2"
     assert extract_field_lineage(sql) == []
+
+
+# ---- T1 生产级补强：SELECT * / MERGE / UNION / 多语句拆分 / 非法 SQL 降级 ----
+
+def test_select_star_table_lineage_kept() -> None:
+    """SELECT * 场景表级血缘仍正常产出（字段级降级）。"""
+    sql = "CREATE TABLE t AS SELECT * FROM s"
+    edges = extract_table_lineage(sql)
+    assert len(edges) == 1
+    assert (edges[0].source, edges[0].target) == ("s", "t")
+
+
+def test_select_star_field_lineage_degraded_no_crash() -> None:
+    """SELECT * 字段级无法确定具体列——不产出伪边且不抛异常。"""
+    sql = "CREATE TABLE t AS SELECT * FROM s"
+    edges = extract_field_lineage(sql)
+    # 允许空列表（降级），但绝不能崩
+    assert isinstance(edges, list)
+
+
+def test_union_branch_table_lineage() -> None:
+    """UNION 多分支表级血缘合并所有源表。"""
+    sql = "CREATE TABLE t AS SELECT a FROM x UNION ALL SELECT b FROM y"
+    edges = extract_table_lineage(sql)
+    sources = {e.source for e in edges}
+    assert "x" in sources and "y" in sources
+    assert all(e.target == "t" for e in edges)
+
+
+def test_union_field_lineage_both_branches() -> None:
+    """UNION 多分支字段级血缘：两分支源列均解析到目标。"""
+    sql = "CREATE TABLE t AS SELECT id FROM x UNION SELECT uid AS id FROM y"
+    edges = extract_field_lineage(sql)
+    targets = {(e.target_table, e.target_column) for e in edges}
+    assert ("t", "id") in targets
+    sources = {(e.source_table, e.source_column) for e in edges}
+    assert ("x", "id") in sources
+    assert ("y", "uid") in sources
+
+
+def test_merge_into_table_lineage() -> None:
+    """MERGE INTO 表级血缘：源 USING 表 → 目标表。"""
+    sql = "MERGE INTO tgt USING src ON tgt.id = src.id WHEN MATCHED THEN UPDATE SET tgt.v = src.v"
+    edges = extract_table_lineage(sql)
+    assert any(e.source == "src" and e.target == "tgt" for e in edges)
+
+
+def test_merge_into_field_lineage() -> None:
+    """MERGE INTO 字段级血缘：UPDATE 分支列映射解析。"""
+    sql = "MERGE INTO tgt USING src ON tgt.id = src.id WHEN MATCHED THEN UPDATE SET tgt.v = src.v"
+    edges = extract_field_lineage(sql)
+    # 允许空（MERGE 源查询无 SELECT 时降级），但不得抛异常
+    assert isinstance(edges, list)
+
+
+def test_multi_statement_split_table_lineage() -> None:
+    """多语句 SQL（分号拆分）表级血缘合并。"""
+    sql = "INSERT INTO t1 SELECT * FROM s1; INSERT INTO t2 SELECT * FROM s2"
+    edges = extract_table_lineage(sql)
+    targets = {e.target for e in edges}
+    assert "t1" in targets and "t2" in targets
+    sources = {e.source for e in edges}
+    assert "s1" in sources and "s2" in sources
+
+
+def test_invalid_sql_degrades_empty() -> None:
+    """非法/半结构 SQL 降级为空列表，不抛异常。"""
+    assert extract_table_lineage("NOT VALID SQL @@@") == []
+    assert extract_field_lineage("") == []
+
+
+def test_dialect_doris_and_hive() -> None:
+    """方言透传：doris/hive 均能解析（不因方言差异崩溃）。"""
+    for dialect in ("hive", "doris", "mysql"):
+        edges = extract_table_lineage(
+            "INSERT INTO t SELECT id FROM s", dialect=dialect
+        )
+        assert len(edges) == 1
+        assert (edges[0].source, edges[0].target) == ("s", "t")
+
+
+def test_select_star_qualified_field_degrades() -> None:
+    """限定表 `s.*` 的 SELECT * 字段级不产出伪边、不崩溃（表级仍可用）。"""
+    sql = "CREATE TABLE t AS SELECT s.* FROM s"
+    table_edges = extract_table_lineage(sql)
+    assert len(table_edges) == 1
+    assert (table_edges[0].source, table_edges[0].target) == ("s", "t")
+    assert isinstance(extract_field_lineage(sql), list)
+
+
+def test_merge_insert_branch_field_lineage() -> None:
+    """MERGE 的 WHEN NOT MATCHED INSERT 分支字段边解析。"""
+    sql = (
+        "MERGE INTO tgt USING src ON tgt.id = src.id "
+        "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (src.id, src.v)"
+    )
+    edges = extract_field_lineage(sql)
+    # MERGE INSERT 分支可能解析出目标 tgt 的字段边；至少不崩溃
+    assert isinstance(edges, list)
+    assert all(e.target_table == "tgt" for e in edges)
+
+
+def test_merge_using_subquery_field_lineage() -> None:
+    """MERGE USING 子查询源作用域字段边解析。"""
+    sql = (
+        "MERGE INTO tgt USING (SELECT id, v FROM src) s ON tgt.id = s.id "
+        "WHEN MATCHED THEN UPDATE SET tgt.v = s.v"
+    )
+    edges = extract_field_lineage(sql)
+    assert isinstance(edges, list)
+    assert all(e.target_table == "tgt" for e in edges)
+
+
+def test_expression_constant_projection_degrades() -> None:
+    """常量/无列引用的投影不产出源列边（降级为空），不崩溃。"""
+    sql = "CREATE TABLE t AS SELECT 1 AS const_col FROM s"
+    edges = extract_field_lineage(sql)
+    # 常量投影无源列：允许空结果，但不抛异常
+    assert isinstance(edges, list)

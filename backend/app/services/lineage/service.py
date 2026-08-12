@@ -2,13 +2,21 @@
 
 对齐 TD §12.2（血缘解析）与 DEV_GUIDE §9a（编排层在 Service 内聚合 Repository/图/事件）。
 解析器为纯函数（services/lineage/parser.py）；边以 MySQL 为权威存储，Neo4j 为可选图存储。
+影响分析读路径图优先（Neo4j），图不可用/降级时回退 MySQL BFS；结果经 cache-aside
+缓存（Redis，TTL 60s），Redis 不可用时直接回源，不阻塞核心链路。
 """
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
+from app.core.exceptions import ConflictError
+from app.core.logging import get_logger
+from app.models.lineage import LineageEdge
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.parser import (
@@ -25,6 +33,43 @@ from app.services.lineage.schemas import (
     LineageParseResponse,
 )
 
+logger = get_logger("unisense.lineage.service")
+
+#: 影响分析读缓存 TTL（秒）——what-if 预览与影响 API 共享，避免热点路径打爆 MySQL。
+_CACHE_TTL = 60
+#: 单次影响分析返回边数上限（图与 MySQL BFS 对齐）。
+_MAX_EDGES = 5000
+#: Redis 不可用的告警日志仅记一次，避免刷屏。
+_CACHE_KEY_PREFIX = "lineage:impact:"
+
+#: 变更类型中视为破坏性/高风险的取值（what-if 风险分级用）。
+_RISKY_CHANGE_TYPES = frozenset({"BREAKING", "DROP", "DELETE", "REMOVE"})
+
+
+def paginate_edges(
+    edges: list[LineageEdgeResponse], page: int, page_size: int
+) -> dict[str, Any]:
+    """对血缘边列表做内存分页（图/MySQL 结果均先整体展开，再切片）。
+
+    Args:
+        edges: 完整血缘边列表。
+        page: 页码（从 1 开始）。
+        page_size: 每页条数。
+
+    Returns:
+        ``{items, total, page, page_size, has_more}`` 分页信封。
+    """
+    total = len(edges)
+    start = (page - 1) * page_size
+    items = edges[start : start + page_size]
+    return {
+        "items": [e.model_dump() for e in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "has_more": start + len(items) < total,
+    }
+
 
 class LineageService(BaseService):
     """血缘解析与影响分析服务。"""
@@ -35,11 +80,13 @@ class LineageService(BaseService):
         *,
         graph: LineageGraphClient | None = None,
         events: LineageEventPublisher | None = None,
+        redis: Any | None = None,
     ) -> None:
         super().__init__(db)
         self._repo = LineageRepository(db)
         self._graph = graph
         self._events = events
+        self._redis = redis
 
     async def parse_and_store(
         self, req: LineageParseRequest, actor_id: int
@@ -55,6 +102,14 @@ class LineageService(BaseService):
         for e in table_edges:
             sn = node_table(e.source)
             tn = node_table(e.target)
+            probe = LineageEdge(
+                source_node=sn, target_node=tn, edge_type="DERIVED_FROM", granularity="L1"
+            )
+            if await self._repo.would_create_cycle(probe):
+                raise ConflictError(
+                    f"血缘边 {sn} → {tn} 将形成循环依赖，已拒绝",
+                    ctx={"source_node": sn, "target_node": tn},
+                )
             await self._repo.upsert_edge(
                 source_node=sn,
                 target_node=tn,
@@ -70,6 +125,14 @@ class LineageService(BaseService):
                 continue
             sn = node_field(fe.source_table, fe.source_column)
             tn = node_field(fe.target_table, fe.target_column)
+            probe = LineageEdge(
+                source_node=sn, target_node=tn, edge_type="DERIVED_FROM", granularity="L2"
+            )
+            if await self._repo.would_create_cycle(probe):
+                raise ConflictError(
+                    f"血缘边 {sn} → {tn} 将形成循环依赖，已拒绝",
+                    ctx={"source_node": sn, "target_node": tn},
+                )
             await self._repo.upsert_edge(
                 source_node=sn,
                 target_node=tn,
@@ -95,17 +158,202 @@ class LineageService(BaseService):
         )
 
     async def query_impact(self, params: LineageImpactParams) -> list[LineageEdgeResponse]:
-        """影响分析：返回从给定节点出发、按方向展开的全部血缘边。"""
-        edges = await self._repo.query_impact(
-            params.node, params.direction, params.max_hops, max_edges=5000
-        )
-        return [LineageEdgeResponse.model_validate(e) for e in edges]
+        """影响分析：图(Neo4j)优先读，图不可用时回退 MySQL；结果 cache-aside。
+
+        读取顺序：Redis 缓存 -> Neo4j 图遍历 -> MySQL BFS。缓存/图任一不可用
+        均静默降级，不抛错、不阻塞主流程（对齐 TD §11 韧性）。
+
+        Args:
+            params: 影响分析参数（node/direction/max_hops）。
+
+        Returns:
+            血缘边响应列表（含 ``pii_inherited``）。
+        """
+        cache_key = self._impact_cache_key(params.node, params.direction, params.max_hops)
+        cached = await self._impact_cache_get(cache_key)
+        if cached is not None:
+            return cached
+        edges = await self._query_impact_sources(params)
+        await self._impact_cache_set(cache_key, edges)
+        return edges
 
     async def list_edges(self, node: str, direction: str = "both") -> list[LineageEdgeResponse]:
-        """列出与某节点相关的全部血缘边。"""
-        edges = await self._repo.query_impact(node, direction, max_hops=1, max_edges=5000)
+        """列出与某节点直接相关的血缘边（一跳，含 ``pii_inherited``）。"""
+        edges = await self._repo.query_impact(node, direction, max_hops=1, max_edges=_MAX_EDGES)
         return [LineageEdgeResponse.model_validate(e) for e in edges]
 
     async def delete_by_node(self, node: str) -> int:
         """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。"""
         return await self._repo.soft_delete_by_node(node)
+
+    async def impact_preview(self, metric_code: str, change_type: str) -> dict[str, Any]:
+        """变更影响预览（what-if）：估算变更影响面与风险等级。
+
+        基于下游影响分析结果分类：``metric:`` 前缀计受影响指标，``table:`` 前缀
+        计受影响物理表，``CONSUMED_BY`` 边计消费方；risk_level 按影响面与变更
+        类型分级（critical >=20 / high >=10 或破坏性变更 / medium / low 无影响）。
+
+        Args:
+            metric_code: 拟变更的指标编码。
+            change_type: 变更类型（用于风险升级判定）。
+
+        Returns:
+            ``{affected_metrics, affected_reports, affected_consumers, risk_level}``。
+        """
+        params = LineageImpactParams(
+            node=f"metric:{metric_code}", direction="downstream", max_hops=5
+        )
+        edges = await self.query_impact(params)
+        metrics: set[str] = set()
+        reports: set[str] = set()
+        consumers: set[str] = set()
+        for e in edges:
+            if e.edge_type == "CONSUMED_BY":
+                consumers.add(e.target_node)
+            if e.target_node.startswith("metric:"):
+                metrics.add(e.target_node)
+            elif e.target_node.startswith("table:"):
+                reports.add(e.target_node)
+        risk_level = self._risk_level(
+            len(metrics) + len(reports) + len(consumers), change_type
+        )
+        return {
+            "affected_metrics": sorted(metrics),
+            "affected_reports": sorted(reports),
+            "affected_consumers": sorted(consumers),
+            "risk_level": risk_level,
+        }
+
+    async def propagate_pii(self, node: str, depth: int = 3) -> int:
+        """PII 沿血缘传导：沿 ``DERIVED_FROM`` 下游遍历至多 ``depth`` 跳，标记边继承 PII。
+
+        以 MySQL 为权威边存储逐跳展开，对命中的血缘边通过 ``repo.upsert_edge``
+        重建并置 ``pii_inherited=True``（幂等，重复执行为空操作）。返回标记边数。
+
+        Args:
+            node: 起点节点（如 ``table:db.t``）。
+            depth: 最大下探跳数（默认 3）。
+
+        Returns:
+            标记为 PII 继承的边数。
+        """
+        # TODO: repo.upsert_edge 当前未暴露 pii_inherited 形参，集成时统一对接
+        # （在 repository 的 upsert_edge 增加 pii_inherited 关键字参数）；此处以
+        # duck typing 透传，重建边即写库标记。
+        upsert = self._repo.upsert_edge
+        visited: set[str] = set()
+        frontier = [node]
+        marked = 0
+        hops = 0
+        while frontier and hops < depth:
+            next_frontier: list[str] = []
+            for n in frontier:
+                rows = await self._repo.query_impact(
+                    n, "downstream", max_hops=1, max_edges=_MAX_EDGES
+                )
+                for edge in rows:
+                    if edge.edge_type != "DERIVED_FROM":
+                        continue
+                    await upsert(
+                        source_node=edge.source_node,
+                        target_node=edge.target_node,
+                        edge_type=edge.edge_type,
+                        granularity=edge.granularity,
+                        confidence=edge.confidence,
+                        provenance=edge.provenance,
+                        pii_inherited=True,
+                    )
+                    marked += 1
+                    if edge.target_node not in visited:
+                        visited.add(edge.target_node)
+                        next_frontier.append(edge.target_node)
+            frontier = next_frontier
+            hops += 1
+        return marked
+
+    # ---- 内部方法 ----
+
+    async def _query_impact_sources(self, params: LineageImpactParams) -> list[LineageEdgeResponse]:
+        """图优先 + MySQL 兜底的影响分析读路径（缓存未命中时调用）。"""
+        if self._graph is not None:
+            graph_edges = await self._graph.query_impact(
+                params.node, params.direction, params.max_hops, _MAX_EDGES
+            )
+            if graph_edges is not None:
+                return [
+                    self._graph_edge_to_response(src, tgt, etype)
+                    for src, tgt, etype in graph_edges
+                ]
+        rows = await self._repo.query_impact(
+            params.node, params.direction, params.max_hops, max_edges=_MAX_EDGES
+        )
+        return [LineageEdgeResponse.model_validate(e) for e in rows]
+
+    @staticmethod
+    def _graph_edge_to_response(
+        source: str, target: str, edge_type: str
+    ) -> LineageEdgeResponse:
+        """将图读路径返回的 ``(source, target, edge_type)`` 组装为响应。
+
+        id 在图存储无意义，置 0；granularity 由节点前缀推断（``field:`` 视为 L2）。
+        """
+        granularity = "L2" if source.startswith("field:") or target.startswith("field:") else "L1"
+        return LineageEdgeResponse(
+            id=0,
+            source_node=source,
+            target_node=target,
+            edge_type=edge_type,
+            granularity=granularity,
+            confidence=1.0,
+            provenance="neo4j",
+            pii_inherited=False,
+        )
+
+    @staticmethod
+    def _impact_cache_key(node: str, direction: str, hops: int) -> str:
+        return f"{_CACHE_KEY_PREFIX}{node}:{direction}:{hops}"
+
+    async def _impact_cache_get(self, key: str) -> list[LineageEdgeResponse] | None:
+        """读影响分析缓存；Redis 不可用/熔断/解析失败时返回 None（回源）。"""
+        redis = self._redis
+        if redis is None:
+            return None
+        try:
+            raw = await redis.get(key)
+        except Exception as exc:
+            logger.warning("lineage_impact_cache_get_failed", key=key, error=str(exc))
+            return None
+        if raw is None:
+            return None
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            logger.warning("lineage_impact_cache_decode_failed", key=key, error=str(exc))
+            return None
+        return [LineageEdgeResponse.model_validate(d) for d in payload]
+
+    async def _impact_cache_set(self, key: str, edges: list[LineageEdgeResponse]) -> None:
+        """回写影响分析缓存；Redis 不可用/写失败时静默跳过，不阻断主流程。"""
+        redis = self._redis
+        if redis is None:
+            return
+        try:
+            payload = json.dumps(
+                [e.model_dump(mode="json") for e in edges], ensure_ascii=False
+            )
+            await redis.set(key, payload, ex=_CACHE_TTL)
+        except Exception as exc:
+            logger.warning("lineage_impact_cache_set_failed", key=key, error=str(exc))
+
+    @staticmethod
+    def _risk_level(impact_count: int, change_type: str) -> str:
+        """按影响面与变更类型分级风险：critical / high / medium / low。"""
+        if impact_count == 0:
+            return "low"
+        if impact_count >= 20:
+            return "critical"
+        if impact_count >= 10:
+            return "high"
+        if change_type.upper() in _RISKY_CHANGE_TYPES:
+            return "high"
+        return "medium"

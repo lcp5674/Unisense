@@ -28,6 +28,7 @@ class LineageEdgeResponse(BaseModel):
     granularity: str
     confidence: float
     provenance: str
+    pii_inherited: bool = Field(default=False, description="PII 是否沿血缘继承")
 
 
 class LineageParseResponse(BaseModel):
@@ -44,6 +45,8 @@ class LineageImpactParams(BaseModel):
     node: str = Field(..., min_length=1, max_length=512)
     direction: Literal["upstream", "downstream", "both"] = "downstream"
     max_hops: int = Field(default=5, ge=1, le=10)
+    page: int = Field(default=1, ge=1, description="分页页码（从 1 开始）")
+    page_size: int = Field(default=50, ge=1, le=200, description="每页条数")
 
 
 class LineageEdgeListParams(BaseModel):
@@ -53,6 +56,17 @@ class LineageEdgeListParams(BaseModel):
     direction: Literal["upstream", "downstream", "both"] = "both"
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=50, ge=1, le=200)
+
+
+class ImpactPreviewRequest(BaseModel):
+    """变更影响预览（what-if）请求。"""
+
+    metric_code: str = Field(..., min_length=1, max_length=512, description="拟变更的指标编码")
+    change_type: str = Field(
+        default="UPDATE",
+        max_length=32,
+        description="变更类型，如 UPDATE/BREAKING/DROP/ADD，用于风险分级",
+    )
 
 
 def impact_to_dict(edges: list[Any]) -> list[dict[str, Any]]:

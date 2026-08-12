@@ -1,6 +1,7 @@
 """血缘 API 路由。
 
 对齐 TD §12.2 与 DEV_GUIDE §8b：RBAC 写闸门、SQL 注入守卫、审计、trace_id 可观测。
+影响分析读路径图优先 + MySQL 兜底，结果分页返回；what-if 预览走写闸门 + 审计。
 """
 
 from __future__ import annotations
@@ -21,11 +22,12 @@ from app.db.redis import get_redis
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.schemas import (
+    ImpactPreviewRequest,
     LineageEdgeListParams,
     LineageImpactParams,
     LineageParseRequest,
 )
-from app.services.lineage.service import LineageService
+from app.services.lineage.service import LineageService, paginate_edges
 
 router = APIRouter(prefix="/lineage", tags=["lineage"])
 
@@ -42,6 +44,7 @@ def _svc(db: Any) -> LineageService:
         db,
         graph=LineageGraphClient(),
         events=LineageEventPublisher(redis, CircuitBreaker()),
+        redis=redis,
     )
 
 
@@ -74,6 +77,37 @@ async def parse_lineage(
     return ok(data=result.model_dump(), trace_id=trace_id)
 
 
+@router.post(
+    "/impact-preview",
+    dependencies=[
+        Depends(require_roles(*_WRITE_ROLES)),
+        Depends(guard_against_injection),
+    ],
+)
+async def impact_preview(
+    body: ImpactPreviewRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """变更影响预览 what-if：估算影响面（指标/物理表/消费方）与风险等级。"""
+    svc = _svc(db)
+    result = await svc.impact_preview(body.metric_code, body.change_type)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="LINEAGE_IMPACT_PREVIEW",
+        entity_type="lineage",
+        entity_id=f"metric:{body.metric_code}",
+        detail=result,
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
 @router.get("/impact", dependencies=_READ_DEPS)
 async def impact(
     params: Annotated[LineageImpactParams, Depends()],
@@ -81,10 +115,10 @@ async def impact(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
-    """影响分析：给定节点向上/向下/双向展开血缘。"""
+    """影响分析：给定节点向上/向下/双向展开血缘（分页返回）。"""
     svc = _svc(db)
     edges = await svc.query_impact(params)
-    return ok(data=[e.model_dump() for e in edges], trace_id=trace_id)
+    return ok(data=paginate_edges(edges, params.page, params.page_size), trace_id=trace_id)
 
 
 @router.get("/edges", dependencies=_READ_DEPS)
@@ -94,10 +128,10 @@ async def list_edges(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
-    """列出与节点相关的血缘边。"""
+    """列出与节点相关的血缘边（分页返回，含 total）。"""
     svc = _svc(db)
     edges = await svc.list_edges(params.node, params.direction)
-    return ok(data=[e.model_dump() for e in edges], trace_id=trace_id)
+    return ok(data=paginate_edges(edges, params.page, params.page_size), trace_id=trace_id)
 
 
 @router.delete(
