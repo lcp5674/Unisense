@@ -1,0 +1,131 @@
+name: gateways
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# 最小权限原则：仅读取内容
+permissions:
+  contents: read
+
+jobs:
+  # ---- pre-commit（含 ruff/mypy/gitleaks/提交信息校验）----
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+
+  # ---- 独立密钥扫描门禁（secret，对齐 CI/.gateways.yml）----
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---- 契约 + 文档同步门禁（contract + doc_sync）----
+  contract-and-docsync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install pyyaml
+      - name: Contract check
+        run: python scripts/contract_check.py --mode contract
+      - name: Doc sync check
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python scripts/contract_check.py --mode doc_sync
+
+  # ---- 后端全量门禁（backend/ 存在后启用）----
+  backend-gateways:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('backend/**') != '' }}
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: unisense
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping" --health-interval=10s
+          --health-timeout=5s --health-retries=5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # 依赖安装（Poetry，对齐 DEV_GUIDE §18.1）
+      - name: Install Poetry
+        run: pipx install poetry
+      - name: Install backend deps
+        run: poetry install --with dev
+      # ---- lint + type ----
+      - name: Lint (ruff)
+        run: poetry run ruff check backend && poetry run ruff format --check backend
+      - name: Type (mypy --strict)
+        run: poetry run mypy --strict backend
+      # ---- secret（backend-gateways 内冗余执行，确保后端代码无密钥泄漏）----
+      - name: Secret scan (gitleaks)
+        run: poetry run gitleaks detect --source . --no-banner
+      # ---- supply_chain ----
+      - name: Export requirements for pip-audit
+        run: poetry export --without-hashes -f requirements.txt -o /tmp/requirements.txt
+      - name: Supply chain (pip-audit)
+        run: poetry run pip-audit -r /tmp/requirements.txt
+      # ---- unit ----
+      - name: Unit tests (overall coverage gate 80%)
+        run: poetry run pytest backend/tests/unit --cov=backend --cov-fail-under=80
+      - name: Core module coverage gate (>=90%)
+        run: poetry run pytest backend/tests/unit --cov=backend.app.core --cov-report=term-missing --cov-fail-under=90
+      # ---- integration ----
+      - name: Integration tests
+        run: poetry run pytest backend/tests/integration
+      # ---- contract（后端存在时也校验）----
+      - name: Contract check
+        run: poetry run python scripts/contract_check.py --mode contract
+      # ---- security_reverse ----
+      - name: Security reverse tests
+        run: poetry run pytest backend/tests/security
+      # ---- chaos ----
+      - name: Chaos tests
+        run: poetry run pytest backend/tests/chaos
+      # ---- observability ----
+      - name: Observability tests
+        run: poetry run pytest backend/tests/observability
+      # ---- gateways_verify ----
+      - name: Gateways verify (evidence + 测试非空壳)
+        run: poetry run python scripts/contract_check.py --mode gateways_verify
+      # ---- migration ----
+      - name: Migration reversible
+        run: |
+          poetry run alembic upgrade head
+          poetry run alembic downgrade -1
+          poetry run alembic upgrade head
+      # ---- perf_baseline ----
+      - name: Perf baseline
+        run: poetry run k6 run backend/tests/perf/baseline.js
+      # ---- doc_sync（后端存在时也校验）----
+      - name: Doc sync check
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: poetry run python scripts/contract_check.py --mode doc_sync

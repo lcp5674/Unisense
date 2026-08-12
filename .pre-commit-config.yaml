@@ -1,0 +1,58 @@
+# Unisense 预提交门禁（本地 + CI 共用）
+# 目的：在 agent/开发者提交前拦截低级违规，保证交付物达生产级底线。
+# 安装：pre-commit install（CI 中 pre-commit run --all-files）
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+  # ---- Python 质量 ----
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        additional_dependencies: [pydantic, sqlalchemy, types-redis, types-requests]
+        args: [--strict, --ignore-missing-imports]
+        files: ^backend/
+
+  # ---- 密钥扫描（防 Secret 落地）----
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  # ---- 通用：尾随空格/文件结尾/UTF-8 ----
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        files: ^(docs/|CI/).*\.ya?ml$
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-merge-conflict
+
+  # ---- 提交信息规范：[服务] 动作：简述 (TD§x.y, FR-xx) ----
+  - repo: local
+    hooks:
+      - id: commit-msg-convention
+        name: commit-msg-convention
+        entry: scripts/check_commit_msg.py
+        language: system
+        stages: [commit-msg]
+
+  # ---- 文档同步校验：改代码须附带 TD 影响章节声明（在 PR 体，pre-commit 仅提示）----
+  - repo: local
+    hooks:
+      - id: doc-sync-reminder
+        name: doc-sync-reminder
+        entry: echo "[doc-sync] 若改动接口/表/状态机，请同步更新 docs/technical-design.md 对应 §3/§4/§12.x，并在 PR 描述填写 TD 影响章节
+        language: system
+        pass_filenames: false
+        always_run: false

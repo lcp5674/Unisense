@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment variables (NEVER commit secrets)
+.env
+.env.local
+.env.production
+
+# Test / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+report-*.xml
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# Database
+*.db
+*.sqlite3
+
+# Alembic
+alembic/versions/__pycache__/
+
+# Node / Frontend (编码启动后生效)
+node_modules/
+.next/
+out/
+.turbo/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (gitleaks 也扫描)
+*.pem
+*.key
+*.p12
+credentials.json
+service-account*.json
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+backend/reports/
+
+# AI 协作工具运行时目录（本地状态，不入库）
+.codebuddy/
+.deveco/
+.workbuddy/

@@ -48,6 +48,8 @@ dependencies = [
     "cryptography>=43.0",
     # HTTP 客户端
     "httpx~=0.27.0",
+    # 通知邮件外发（SMTP）
+    "aiosmtplib~=3.0.1",
     # 工具
     "python-dateutil~=2.9.0",
     "pyyaml~=6.0",
@@ -122,3 +124,16 @@ addopts = "-ra --strict-markers"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+# ---- 可选依赖组 ----
+[tool.poetry.group.collectors]
+optional = true
+
+[tool.poetry.group.collectors.dependencies]
+# PostgreSQL 异步驱动
+asyncpg = ">=0.29.0"
+# Kafka 客户端
+confluent-kafka = ">=2.3.0"
+# ClickHouse HTTP API 无需额外驱动（已由 httpx 覆盖）
+# Hive beeline CLI 无需 Python 驱动（通过 subprocess 调用）
+# Doris/StarRocks 使用 MySQL 协议兼容（已由 aiomysql 覆盖）

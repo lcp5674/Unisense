@@ -1,0 +1,124 @@
+# Unisense CI 质量门禁定义（机器可校验，单一权威）
+# 用途：agent 声明某模块 verified/released 前，必须本文件全部 required 门禁在 CI 跑绿。
+# 与 docs/module-status.yaml 的 gateways_passed 字段联动；CI 校验脚本读取本文件。
+
+version: 1
+block_on_failure: true
+
+stages:
+  - lint          # ruff + black
+  - type          # mypy --strict
+  - secret        # gitleaks
+  - supply_chain  # pip-audit
+  - unit          # pytest 单测 + 覆盖率门槛
+  - integration   # pytest + testcontainers 集成
+  - contract      # TD §3/§4 schema 契约校验
+  - security_reverse  # 越权/注入反向测试
+  - chaos         # 故障注入降级测试
+  - perf_baseline # k6 性能基线
+  - migration     # up+down 可逆
+  - observability # trace_id/指标断言
+  - doc_sync      # TD/状态文件一致性
+
+gateways:
+  lint:
+    required: true
+    cmd: "ruff check backend && ruff format --check backend"
+    fail_msg: "Lint/格式未通过，禁止合并"
+
+  type:
+    required: true
+    cmd: "mypy --strict backend"
+    fail_msg: "类型检查未通过（mypy --strict）"
+
+  secret:
+    required: true
+    cmd: "gitleaks detect --source . --no-banner"
+    fail_msg: "检测到密钥/敏感串，禁止提交"
+
+  supply_chain:
+    required: true
+    cmd: "pip-audit -r backend/requirements.txt"
+    threshold: "0 高危 CVE"
+    fail_msg: "依赖含高危漏洞"
+
+  unit:
+    required: true
+    cmd: "pytest backend/tests/unit --cov=backend --cov-report=term-missing --junitxml=report-unit.xml"
+    coverage:
+      core_modules: ">=90%"   # 口径翻译/冲突/PEP-PDP/脱敏/状态机
+      crud_modules: ">=70%"
+    fail_msg: "单元测试或覆盖率未达标"
+
+  integration:
+    required: true
+    cmd: "pytest backend/tests/integration --junitxml=report-integration.xml"
+    deps: [mysql, neo4j, es, redis]   # testcontainers 临时实例
+    fail_msg: "集成测试失败（双写/事件总线/幂等）"
+
+  contract:
+    required: true
+    cmd: "python scripts/contract_check.py --mode contract"
+    fail_msg: "TD §3/§4 契约与代码/状态文件偏离"
+
+  security_reverse:
+    required: true
+    cmd: "pytest backend/tests/security --junitxml=report-sec.xml"
+    must_include:
+      - "普通用户 token 调管理员接口 -> 403"
+      - "SQL 注入 fuzz -> 被拦截"
+      - "PII 访问 -> 审计含 data_classification=PII"
+    keywords: ["403", "FORBIDDEN", "注入", "INJECTION_DETECTED", "data_classification=PII"]
+    fail_msg: "安全反向用例缺失或未通过"
+
+  chaos:
+    required: true
+    cmd: "pytest backend/tests/chaos --junitxml=report-chaos.xml"
+    must_include:
+      - "Redis 宕机 -> 核心链路 200"
+      - "Neo4j 宕机 -> 降级生效"
+      - "ES 宕机 -> 搜索降级返回"
+      - "OLAP 宕机 -> 查询舱壁隔离"
+    keywords: ["降级", "degradation", "200", "circuit", "503", "fallback"]
+    fail_msg: "混沌/韧性测试未覆盖或未通过"
+
+  perf_baseline:
+    required: true
+    cmd: "k6 run backend/tests/perf/baseline.js"
+    thresholds:
+      http_req_duration_p95: "<= 对齐对应 module.perf_contract"
+      error_rate: "<= 0.5%"
+    fail_msg: "性能基线超标（对照 module-status.yaml perf_contract）"
+
+  migration:
+    required: true
+    cmd: "alembic upgrade head && alembic downgrade -1 && alembic upgrade head"
+    verify: "数据无损断言（行数/校验和一致）"
+    fail_msg: "migration 不可逆或回滚丢数据"
+
+  observability:
+    required: true
+    cmd: "pytest backend/tests/observability --junitxml=report-obs.xml"
+    must_include:
+      - "日志含 trace_id"
+      - "指标 endpoint 返回非零 RED"
+      - "trace 跨服务透传"
+    keywords: ["trace_id", "RED", "prometheus", "span"]
+    fail_msg: "可观测埋点未生效"
+
+  doc_sync:
+    required: true
+    cmd: "python scripts/contract_check.py --mode doc_sync"
+    fail_msg: "TD 接口/表/状态文件不一致，或 PR 未填 TD 影响章节"
+
+# 门禁配置保护（防 agent 自降门槛）
+protected: true   # 本文件阈值/required 不可被开发 agent 修改以绕过；改门槛须经 PR + 独立复核 + CHANGELOG 记录
+evidence_required: true   # verified/released 必须 evidence_path 指向真实非空测试报告（contract_check 校验）
+
+# 状态晋升规则（agent 必须遵守）
+promotion:
+  implemented: "unit 全绿 + evidence_path 填写测试报告"
+  verified: "implemented + integration + contract + security_reverse + chaos + perf_baseline + migration + observability 全绿"
+  released: "verified + runbook 存在 + migration 可逆验证通过"
+  blocked: "必须写 blocker 原因，禁止无理由停留"
+  rollback: "verified->dev 必须写 rollback_reason"
