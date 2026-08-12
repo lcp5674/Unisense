@@ -320,6 +320,14 @@ body {
   margin: 0 24px;
 }
 
+/* 折叠态侧边栏：隐藏分组标题，避免文字被侧边栏宽度截断 */
+.ant-layout-sider-collapsed .ant-menu-item-group-title {
+  display: none;
+}
+.ant-layout-sider-collapsed .ant-menu-item-group {
+  margin-bottom: 8px;
+}
+
 /* ==========================================================================
    仪表盘 — 生命周期信号条 + KPI 读数格
    ========================================================================== */

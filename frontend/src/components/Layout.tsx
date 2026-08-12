@@ -27,11 +27,16 @@ import {
   DatabaseOutlined,
   FileTextOutlined,
   GlobalOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
 } from "@ant-design/icons";
 import type { CurrentUser } from "../types";
 import { clearToken, listNotifications } from "../api";
 
 const { Header, Sider, Content } = AntLayout;
+
+// 侧边栏折叠状态持久化键：刷新/重登后仍保留用户偏好
+const SIDER_STORAGE_KEY = "unisense.sider.collapsed";
 
 // 分组导航：覆盖后端全部功能域
 const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: string; icon: React.ReactNode }> }> = [
@@ -97,12 +102,28 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
 const ALL_NAV_KEYS = NAV_GROUPS.flatMap((g) => g.children.map((c) => c.key));
 
 export function Layout({ user }: { user: CurrentUser }) {
-  const [collapsed, setCollapsed] = useState(false);
+  // 折叠状态从 localStorage 恢复；隐私模式等异常场景回退为展开
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SIDER_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const [searchKw, setSearchKw] = useState("");
   const [notifCount, setNotifCount] = useState(0);
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = theme.useToken();
+
+  function handleCollapse(value: boolean) {
+    setCollapsed(value);
+    try {
+      localStorage.setItem(SIDER_STORAGE_KEY, value ? "1" : "0");
+    } catch {
+      /* 隐私模式等场景忽略持久化失败 */
+    }
+  }
 
   // 选中项：最长前缀匹配
   const selectedKey = useMemo(() => {
@@ -162,7 +183,8 @@ export function Layout({ user }: { user: CurrentUser }) {
       <Sider
         collapsible
         collapsed={collapsed}
-        onCollapse={setCollapsed}
+        onCollapse={handleCollapse}
+        trigger={null}
         width={232}
         theme="dark"
         style={{ borderRight: "1px solid rgba(255,255,255,0.06)" }}
@@ -216,7 +238,25 @@ export function Layout({ user }: { user: CurrentUser }) {
             zIndex: 10,
           }}
         >
-          <div className="header-brand" style={{ flex: "0 0 auto" }}>
+          <div
+            className="header-brand"
+            style={{
+              flex: "0 0 auto",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              minWidth: collapsed ? "auto" : 200,
+            }}
+          >
+            <Tooltip title={collapsed ? "展开侧边栏" : "收起侧边栏"}>
+              <Button
+                type="text"
+                aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}
+                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                onClick={() => handleCollapse(!collapsed)}
+                style={{ color: token.colorTextSecondary, fontSize: 16 }}
+              />
+            </Tooltip>
             {!collapsed && (
               <>
                 <div className="brand-mark" style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14 }}>
