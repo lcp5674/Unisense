@@ -72,6 +72,15 @@ async def create_mapping(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await DimensionService(db).create_mapping(payload)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.mapping.create",
+        entity_type="dimension_mapping",
+        entity_id=f"{payload.source_dim_code}:{payload.target_dim_code}",
+        detail={},
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
@@ -95,6 +104,15 @@ async def submit_reconciliation(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await DimensionService(db).submit_reconciliation(payload)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="reconciliation.submit",
+        entity_type="reconciliation",
+        entity_id=f"metric:{payload.metric_id}:{payload.dim_code}",
+        detail={},
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
@@ -188,6 +206,27 @@ async def deprecate_dimension(
     return ok(data=resp, trace_id=trace_id)
 
 
+@router.post("/{dim_code}/publish", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+async def publish_dimension(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    resp = await DimensionService(db).publish_dimension(dim_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.publish",
+        entity_type="dimension",
+        entity_id=dim_code,
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=resp, trace_id=trace_id)
+
+
 @router.post("/{dim_code}/members", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
 async def create_member(
     dim_code: str,
@@ -197,6 +236,15 @@ async def create_member(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await DimensionService(db).create_member(payload)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.member.create",
+        entity_type="dimension_member",
+        entity_id=f"{payload.dim_code}:{payload.member_code}",
+        detail={},
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
@@ -224,6 +272,15 @@ async def bind_metric_dimension(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await DimensionService(db).bind_metric_dimension(payload)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.metric.bind",
+        entity_type="metric_dimension",
+        entity_id=f"{payload.metric_id}:{payload.dim_code}",
+        detail={},
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)
 

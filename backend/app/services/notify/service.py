@@ -33,13 +33,23 @@ from app.services.notify.schemas import EventPublish, SubscriptionUpsert
 
 logger = get_logger(__name__)
 
+# 通知外发 HTTP 客户端共享单例：避免按请求实例化导致连接池/文件描述符泄漏。
+_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is None:
+        _HTTP_CLIENT = httpx.AsyncClient(timeout=10.0)
+    return _HTTP_CLIENT
+
 
 class NotifyService(BaseService):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session)
         self._session = session
         self._repo = NotifyRepository(session)
-        self._http_client = httpx.AsyncClient(timeout=10.0)
+        self._http_client = _get_http_client()
 
     async def publish_event(self, data: EventPublish) -> dict[str, int]:
         event = EventLog(
@@ -155,8 +165,8 @@ class NotifyService(BaseService):
                         f"### 质量异常告警\n\n"
                         f"**事件类型**：{event_type}\n\n"
                         f"**详情**：{notif.body or '无'}\n\n"
-                    f"**时间**：{datetime.now(UTC).isoformat()}\n\n"
-                    f"> 请及时处理"
+                        f"**时间**：{datetime.now(UTC).isoformat()}\n\n"
+                        f"> 请及时处理"
                     ),
                 },
             }
@@ -302,6 +312,7 @@ class NotifyService(BaseService):
         notif = await self._repo.get_notification(notif_id)
         if notif is None:
             from app.core.exceptions import NotFoundError
+
             raise NotFoundError(f"通知不存在: {notif_id}")
         return notif
 
@@ -346,4 +357,8 @@ class NotifyService(BaseService):
         return await self._repo.list_event_logs(event_type, limit)
 
     async def close(self) -> None:
-        await self._http_client.aclose()
+        """关闭共享 HTTP 客户端（应用关停时调用一次即可，幂等）。"""
+        global _HTTP_CLIENT
+        if _HTTP_CLIENT is not None:
+            await _HTTP_CLIENT.aclose()
+            _HTTP_CLIENT = None

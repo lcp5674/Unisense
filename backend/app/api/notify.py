@@ -67,6 +67,15 @@ async def mark_sent(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await NotifyService(db).mark_sent(notif_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="notify.mark_sent",
+        entity_type="notification",
+        entity_id=str(notif_id),
+        detail={},
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
@@ -82,6 +91,15 @@ async def mark_failed(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await NotifyService(db).mark_failed(notif_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="notify.mark_failed",
+        entity_type="notification",
+        entity_id=str(notif_id),
+        detail={},
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)
 

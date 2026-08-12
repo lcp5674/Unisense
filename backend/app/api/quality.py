@@ -171,6 +171,21 @@ async def detect(
         Decimal(str(payload.obs_value)),
         payload.rule_mode,
     )
+    # PLAT-3: 质量检测命中落异常事件为治理写操作，须留痕；未命中（None）无写入不审计
+    if resp is not None:
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="quality_event.detect",
+            entity_type="quality_event",
+            entity_id=str(resp.id),
+            detail={
+                "metric_id": resp.metric_id,
+                "rule_type": resp.rule_type.value,
+                "level": resp.level.value,
+            },
+            trace_id=trace_id,
+        )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
@@ -207,7 +222,7 @@ async def ack_event(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await QualityService(db).ack_event(event_id, payload.note, user.id)
-    await db.commit()
+    # PLAT-3: 审计须先于 commit，与业务同事务原子提交（避免业务落盘而审计随会话关闭丢失）
     await write_audit(
         db,
         actor_id=user.id,
@@ -217,6 +232,7 @@ async def ack_event(
         detail={},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
@@ -231,7 +247,7 @@ async def resolve_event(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await QualityService(db).resolve_event(event_id, user.id)
-    await db.commit()
+    # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
         actor_id=user.id,
@@ -241,6 +257,7 @@ async def resolve_event(
         detail={},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
@@ -255,7 +272,7 @@ async def close_event(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await QualityService(db).close_event(event_id, user.id)
-    await db.commit()
+    # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
         actor_id=user.id,
@@ -265,6 +282,7 @@ async def close_event(
         detail={},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
@@ -280,7 +298,7 @@ async def confirm_repair(
 ) -> Any:
     """Owner 确认已线下修复（TD §4.8.5 闭环）：在修复建议中记录确认留痕。"""
     resp = await QualityService(db).confirm_repair(event_id, user.id)
-    await db.commit()
+    # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
         actor_id=user.id,
@@ -290,10 +308,12 @@ async def confirm_repair(
         detail={"confirmed_by": user.id},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
 # --------------------------------------------------- 外部基准对账（TD §4.15.7）
+
 
 @router.post(
     "/benchmarks/import",
@@ -308,7 +328,7 @@ async def import_benchmark(
 ) -> Any:
     """导入外部权威基准值（幂等）：同 key 重复导入视为更新。"""
     resp = await QualityService(db).import_benchmark(payload, user.id)
-    await db.commit()
+    # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
         actor_id=user.id,
@@ -318,6 +338,7 @@ async def import_benchmark(
         detail={"metric_code": resp.metric_code, "provider": resp.provider},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
@@ -351,7 +372,7 @@ async def bind_benchmark(
 ) -> Any:
     """绑定基准到目标指标，声明比对口径 / 容忍率。"""
     resp = await QualityService(db).bind_benchmark(benchmark_id, payload, user.id)
-    await db.commit()
+    # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
         actor_id=user.id,
@@ -361,6 +382,7 @@ async def bind_benchmark(
         detail={},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
@@ -373,7 +395,7 @@ async def run_reconciliation(
 ) -> Any:
     """执行一次对账：基准值 vs 平台观测值，自动判定差异状态（ALERT 触发告警）。"""
     resp = await QualityService(db).run_reconciliation(payload, user.id)
-    await db.commit()
+    # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
         actor_id=user.id,
@@ -387,6 +409,7 @@ async def run_reconciliation(
         },
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
@@ -422,7 +445,7 @@ async def confirm_reconciliation(
 ) -> Any:
     """Owner 确认差异（reasonable 合理 / caliber_error 口径有误→走变更）。"""
     resp = await QualityService(db).confirm_reconciliation(record_id, payload, user.id)
-    await db.commit()
+    # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
         actor_id=user.id,
@@ -432,4 +455,5 @@ async def confirm_reconciliation(
         detail={"decision": payload.decision},
         trace_id=trace_id,
     )
+    await db.commit()
     return ok(data=resp, trace_id=trace_id)

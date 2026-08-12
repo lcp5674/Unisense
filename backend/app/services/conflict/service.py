@@ -143,7 +143,13 @@ class ConflictService(BaseService):
             raise NotFoundError(f"冲突不存在: {conflict_id}")
         return conflict
 
-    async def arbitrate(self, conflict_id: str, req: ArbitrateRequest) -> Conflict:
+    async def arbitrate(
+        self,
+        conflict_id: str,
+        req: ArbitrateRequest,
+        *,
+        actor_id: int | None = None,
+    ) -> Conflict:
         conflict = await self.get(conflict_id)
         if conflict.status not in (
             ConflictStatus.OPEN,
@@ -151,6 +157,8 @@ class ConflictService(BaseService):
             ConflictStatus.ESCALATED,
         ):
             raise ConflictError(f"当前状态 {conflict.status.value} 不可裁决")
+        # PLAT-2: 以服务端认证身份 actor_id 为权威归因，忽略客户端伪造的 req.arbitrator_id
+        arbitrator_id = actor_id if actor_id is not None else req.arbitrator_id
         decision_json = {
             "decision": req.decision,
             "canonical_metric_code": req.canonical_metric_code,
@@ -160,7 +168,7 @@ class ConflictService(BaseService):
         conflict = await self._repo.update_status(
             conflict,
             ConflictStatus.RULED,
-            arbitrator_id=req.arbitrator_id,
+            arbitrator_id=arbitrator_id,
             decision_json=decision_json,
             resolved=True,
         )
@@ -171,7 +179,7 @@ class ConflictService(BaseService):
                 dispute_desc=f"{conflict.type.value}",
                 decision=req.decision,
                 reason=req.reason,
-                arbitrator_id=req.arbitrator_id,
+                arbitrator_id=arbitrator_id,
                 decided_at=datetime.now(UTC),
             )
         )

@@ -73,7 +73,7 @@ class _BoomService:
     def __init__(self, db, events=None, llm=None) -> None:
         pass
 
-    async def arbitrate(self, cid, req):
+    async def arbitrate(self, cid, req, actor_id=None):
         raise ExternalDependencyError("rule service 不可达")
 
 

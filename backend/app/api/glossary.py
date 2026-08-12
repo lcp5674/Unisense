@@ -189,5 +189,14 @@ async def create_relation(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     resp = await GlossaryService(db).create_term_relation(term_code, payload)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.relation.create",
+        entity_type="term_relation",
+        entity_id=f"{term_code}->{payload.target_term_id}",
+        detail={},
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)

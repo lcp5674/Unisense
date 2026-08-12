@@ -68,6 +68,8 @@ class DimensionService(BaseService):
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:
         dim = await self._require(dim_code)
+        if dim.status == DimensionStatus.DEPRECATED.value:
+            raise UnisenseError(f"已废弃维度不可更新: {dim_code}", error_code="INVALID_STATE")
         if data.name is not None:
             dim.name = data.name
         if data.domain is not None:
@@ -76,6 +78,16 @@ class DimensionService(BaseService):
             dim.type = data.type
         if data.description is not None:
             dim.description = data.description
+        await self._repo.commit()
+        return dim
+
+    async def publish_dimension(self, dim_code: str) -> Dimension:
+        dim = await self._require(dim_code)
+        if dim.status != DimensionStatus.DRAFT.value:
+            raise UnisenseError(
+                f"仅 DRAFT 状态可发布，当前 {dim.status}", error_code="INVALID_STATE"
+            )
+        dim.status = DimensionStatus.PUBLISHED.value
         await self._repo.commit()
         return dim
 

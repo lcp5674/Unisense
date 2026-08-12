@@ -61,6 +61,31 @@ async def check_conflict(
     """冲突检测；命中则落库 OPEN，硬冲突（同名不同义/PII）阻断发布返回 409。"""
     svc = _svc(db, request)
     result = await svc.check(payload.candidate, payload.existing)
+    # PLAT-3: 命中冲突会落库 OPEN，属治理写操作须留痕；无命中（纯读）不审计
+    if result.detections:
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="conflict.check",
+            entity_type="conflict",
+            entity_id=payload.candidate.metric_code,
+            detail={
+                "candidate": payload.candidate.metric_code,
+                "domain": payload.candidate.domain,
+                "detections": [
+                    {
+                        "conflict_type": d.conflict_type.value,
+                        "existing_code": d.existing_code,
+                        "severity": d.severity,
+                        "block_publish": d.block_publish,
+                    }
+                    for d in result.detections
+                ],
+                "blocked": result.blocked,
+            },
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
     await db.commit()
     if result.blocked:
         raise HTTPException(
@@ -108,7 +133,8 @@ async def arbitrate_conflict(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
     svc = _svc(db, request)
-    conflict = await svc.arbitrate(conflict_id, payload)
+    # PLAT-2: 以服务端认证身份 user.id 作为权威归因，覆盖客户端请求体的 arbitrator_id
+    conflict = await svc.arbitrate(conflict_id, payload, actor_id=user.id)
     await write_audit(
         db,
         actor_id=user.id,
