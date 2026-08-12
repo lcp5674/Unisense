@@ -15,8 +15,9 @@ from app.core.exceptions import BusinessError
 from app.core.security import hash_password
 from app.models.consume import ApiClient, ApiClientStatus
 from app.models.metric import Metric
+from app.services.consume.rate_limiter import get_rate_limiter
 from app.services.consume.schemas import QueryRequest
-from app.services.consume.service import ConsumeService, rate_limiter
+from app.services.consume.service import ConsumeService
 
 
 def _client(
@@ -66,8 +67,9 @@ def _metric(
 
 @pytest.fixture(autouse=True)
 def reset_limiter():
-    rate_limiter._buckets.clear()
-    rate_limiter._daily.clear()
+    limiter = get_rate_limiter()
+    limiter._buckets.clear()
+    limiter._daily.clear()
     yield
 
 
@@ -115,6 +117,10 @@ async def test_dry_run_ok() -> None:
     assert res.meta["grain"] == "day"
     assert res.meta["unit"] == "yuan"
     assert res.execution_plan["expression_ast"]["raw"] == "SUM(x)"
+    # dry-run 必须下发真实物理口径 SQL（而非占位注释），并附回参数化参数
+    assert "dws_metric_gmv" in res.execution_plan["dialect_sql"]
+    assert "placeholder" not in res.execution_plan["dialect_sql"]
+    assert res.execution_plan["sql_params"]["metric_code"] == "gmv"
 
 
 async def test_dry_run_deprecated() -> None:
@@ -166,13 +172,15 @@ async def test_dry_run_dimension_violation() -> None:
     svc = _svc(_client())
     client = await svc.authenticate_client("acme:s3cr3t")
     svc._get_metric = AsyncMock(return_value=_metric(dims=("region",)))
-    with pytest.raises(BusinessError):
+    with pytest.raises(BusinessError) as exc:
         await svc.dry_run_query(
             QueryRequest(
                 metric_code="gmv", date_range="", dimensions=[{"name": "city", "value": "BJ"}]
             ),
             client,
         )
+    # 维度未声明于口径 → FORBIDDEN_DIMENSION
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_DIMENSION
 
 
 # ---- 查询降级 ----
@@ -211,7 +219,7 @@ async def test_daily_quota_exhausted() -> None:
 
 # ---- FR-06 执行引擎复审回归：真实物理口径 SQL 构建 ----
 def _metric_with_source() -> Metric:
-    m = _metric()
+    m = _metric(dims=("region", "city"))
     m.definition_json = {
         **m.definition_json,
         "source_table": "dws_gmv_daily",
@@ -256,3 +264,38 @@ def test_build_query_sql_multi_value_dimension() -> None:
     sql, params = svc._build_query_sql(req, _metric())
     assert "IN" in sql and ":dim_0" in sql
     assert params["dim_0"] == ["EAST", "WEST"]
+
+
+def test_build_query_sql_rejects_unauthorized_dimension() -> None:
+    """维度标识符收敛口径声明集：未声明维度拒绝 FORBIDDEN_DIMENSION，防越权列 / 标识符注入。
+
+    覆盖 execute_query 曾经漏检的路径：过去仅 dry-run 校验维度，执行路径直接下发 SQL。
+    """
+    svc = _svc(_client())
+    req = QueryRequest(
+        metric_code="gmv",
+        date_range="",
+        dimensions=[{"name": "secret_col", "value": "v"}],
+    )
+    with pytest.raises(BusinessError) as exc:
+        svc._build_query_sql(req, _metric(dims=("region",)))
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_DIMENSION
+
+
+async def test_execute_query_rejects_unauthorized_dimension(monkeypatch) -> None:
+    """execute_query 必须加权维度校验（过去唯有 dry-run 校验，执行路径越权缺口）。"""
+    svc = _svc(_client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric(dims=("region",)))
+    # 绕过 OLAP 不可用 503，直达 SQL 构建层的维度授权校验
+    monkeypatch.setattr("app.services.consume.service.settings.olap_url", "http://doris:8030/api/query")
+    with pytest.raises(BusinessError) as exc:
+        await svc.execute_query(
+            QueryRequest(
+                metric_code="gmv",
+                date_range="2026-01~2026-03",
+                dimensions=[{"name": "secret_col", "value": "v"}],
+            ),
+            client,
+        )
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_DIMENSION

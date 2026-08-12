@@ -88,6 +88,26 @@ class SubscriptionUpsert(BaseModel):
     enabled: bool = True
     threshold: int | None = None
 
+    @field_validator("channel")
+    @classmethod
+    def _normalize_channel(cls, v: str) -> str:
+        """统一渠道到 NotifyChannel 的规范 value（EMAIL/SMS/WEBHOOK/IN_APP/DINGTALK/console）。
+
+        避免大小写漂移：DB 列以枚举 value 存储（大写，console 为小写），若客户端传
+        小写 "webhook" 等，直接落库会导致幂等查询 miss 与 _dispatch 命中失败。
+        """
+        from app.models.notify import NotifyChannel
+
+        v = (v or "").strip()
+        try:
+            # 按 name 匹配（console 的 name=CONSOLE, value=console）
+            return NotifyChannel[v.upper()].value
+        except KeyError:
+            try:
+                return NotifyChannel(v).value  # 按 value 匹配
+            except ValueError as exc:
+                raise ValueError(f"非法通知渠道: {v}") from exc
+
 
 class SubscriptionResponse(BaseModel):
     id: int

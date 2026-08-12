@@ -10,9 +10,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from app.services.semantic.dependency_checker import DependencyChecker
 
@@ -84,21 +82,25 @@ class TestCycleDetected:
         """A 依赖 B，B 依赖 A → 检测到环。"""
         checker = _make_checker()
 
-        metric_a = _make_metric("metric_a_obj_val_day", "PUBLISHED", dependencies=["metric_b_obj_val_day"])
-        metric_b = _make_metric("metric_b_obj_val_day", "PUBLISHED", dependencies=["metric_a_obj_val_day"])
+        metric_a = _make_metric(
+            "sales_order_amount_daily", "PUBLISHED", dependencies=["sales_gmv_amount_daily"]
+        )
+        metric_b = _make_metric(
+            "sales_gmv_amount_daily", "PUBLISHED", dependencies=["sales_order_amount_daily"]
+        )
 
         async def _get(code: str) -> MagicMock | None:
-            if code == "metric_a_obj_val_day":
+            if code == "sales_order_amount_daily":
                 return metric_a
-            if code == "metric_b_obj_val_day":
+            if code == "sales_gmv_amount_daily":
                 return metric_b
             return None
 
         checker._get_metric_by_code = AsyncMock(side_effect=_get)
 
         cycle = await checker.detect_cycle(
-            "metric_a_obj_val_day",
-            {"dependencies": ["metric_b_obj_val_day"]},
+            "sales_order_amount_daily",
+            {"dependencies": ["sales_gmv_amount_daily"]},
         )
 
         assert cycle is not None
@@ -113,13 +115,15 @@ class TestThreeLevelChainPasses:
     async def test_chain_no_cycle_all_published(self) -> None:
         checker = _make_checker()
 
-        metric_b = _make_metric("metric_b_obj_val_day", "PUBLISHED", dependencies=["metric_c_obj_val_day"])
-        metric_c = _make_metric("metric_c_obj_val_day", "PUBLISHED")
+        metric_b = _make_metric(
+            "sales_gmv_amount_daily", "PUBLISHED", dependencies=["sales_order_cnt_daily"]
+        )
+        metric_c = _make_metric("sales_order_cnt_daily", "PUBLISHED")
 
         async def _get(code: str) -> MagicMock | None:
-            if code == "metric_b_obj_val_day":
+            if code == "sales_gmv_amount_daily":
                 return metric_b
-            if code == "metric_c_obj_val_day":
+            if code == "sales_order_cnt_daily":
                 return metric_c
             return None
 
@@ -127,14 +131,14 @@ class TestThreeLevelChainPasses:
 
         # 无环
         cycle = await checker.detect_cycle(
-            "metric_a_obj_val_day",
-            {"dependencies": ["metric_b_obj_val_day"]},
+            "sales_order_amount_daily",
+            {"dependencies": ["sales_gmv_amount_daily"]},
         )
         assert cycle is None
 
         # 全部发布
         unpublished = await checker.check_dependencies_published(
-            {"dependencies": ["metric_b_obj_val_day"]}
+            {"dependencies": ["sales_gmv_amount_daily"]}
         )
         assert unpublished == []
 
@@ -145,20 +149,20 @@ class TestCompositeMultiDepPasses:
     async def test_multi_dep_all_published(self) -> None:
         checker = _make_checker()
 
-        metric_b = _make_metric("metric_b_obj_val_day", "PUBLISHED")
-        metric_c = _make_metric("metric_c_obj_val_day", "PUBLISHED")
+        metric_b = _make_metric("sales_gmv_amount_daily", "PUBLISHED")
+        metric_c = _make_metric("sales_order_cnt_daily", "PUBLISHED")
 
         async def _get(code: str) -> MagicMock | None:
-            if code == "metric_b_obj_val_day":
+            if code == "sales_gmv_amount_daily":
                 return metric_b
-            if code == "metric_c_obj_val_day":
+            if code == "sales_order_cnt_daily":
                 return metric_c
             return None
 
         checker._get_metric_by_code = AsyncMock(side_effect=_get)
 
         unpublished = await checker.check_dependencies_published(
-            {"dependencies": ["metric_b_obj_val_day", "metric_c_obj_val_day"]}
+            {"dependencies": ["sales_gmv_amount_daily", "sales_order_cnt_daily"]}
         )
         assert unpublished == []
 

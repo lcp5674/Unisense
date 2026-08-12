@@ -12,7 +12,13 @@ from app.api.responses import get_trace_id, ok
 from app.core.audit import write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
-from app.services.notify.schemas import EventPublish, SubscriptionUpsert
+from app.services.notify.schemas import (
+    EventLogResponse,
+    EventPublish,
+    NotificationResponse,
+    SubscriptionResponse,
+    SubscriptionUpsert,
+)
 from app.services.notify.service import NotifyService
 
 router = APIRouter(prefix="/notify", tags=["notify"])
@@ -52,7 +58,8 @@ async def list_notifications(
     status: str | None = Query(None),
 ) -> Any:
     # PLAT-2: 以认证身份 user.id 作为 subscriber，禁止 client 伪造 subscriber_id 越权读取
-    items = await NotifyService(db).list_notifications(user.id, status)
+    notifs = await NotifyService(db).list_notifications(user.id, status)
+    items = [NotificationResponse.from_model(i) for i in notifs]
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
 
 
@@ -77,7 +84,7 @@ async def mark_sent(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=NotificationResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.post(
@@ -101,7 +108,7 @@ async def mark_failed(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=NotificationResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.put("/subscriptions", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
@@ -114,7 +121,7 @@ async def upsert_subscription(
     # PLAT-2: 以认证身份 user.id 覆盖 client 传入的 user_id，杜绝越权绑定
     resp = await NotifyService(db).upsert_subscription(payload, actor_id=user.id)
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=SubscriptionResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.get("/subscriptions", dependencies=_READ_DEPS)
@@ -124,7 +131,8 @@ async def list_subscriptions(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     # PLAT-2: 以认证身份 user.id 查询，禁止 client 伪造 user_id 越权读取
-    items = await NotifyService(db).list_subscriptions(user.id)
+    subs = await NotifyService(db).list_subscriptions(user.id)
+    items = [SubscriptionResponse.from_model(i) for i in subs]
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
 
 
@@ -136,5 +144,6 @@ async def list_event_logs(
     event_type: str | None = Query(None),
     limit: int = Query(100),
 ) -> Any:
-    items = await NotifyService(db).list_event_logs(event_type, limit)
+    logs = await NotifyService(db).list_event_logs(event_type, limit)
+    items = [EventLogResponse.from_model(i) for i in logs]
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)

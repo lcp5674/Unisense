@@ -58,3 +58,42 @@ async def test_upsert_subscription_creates() -> None:
     )
     assert isinstance(out, SubscriptionPref)
     repo.save_subscription.assert_awaited()
+
+
+class TestDispatchChannelNormalization:
+    """回归：DB 渠道为大写枚举值（EMAIL/WEBHOOK/...），_dispatch 曾只匹配小写，导致
+    除 console 外的渠道全部投递失败。
+    """
+
+    def _notif(self) -> MagicMock:
+        n = MagicMock()
+        n.template_code = "conflict.escalate"
+        n.title = "冲突升级"
+        n.body = "{}"
+        n.subscriber_id = 1
+        n.payload = {}
+        return n
+
+    async def test_uppercase_channel_hits_webhook(self) -> None:
+        svc, _ = _svc()
+        svc._dispatch_webhook = AsyncMock(return_value=True)  # noqa: SLF001
+        ok = await svc._dispatch(self._notif(), "WEBHOOK")  # noqa: SLF001
+        assert ok is True
+        svc._dispatch_webhook.assert_awaited_once()
+
+    async def test_lowercase_channel_hits_webhook(self) -> None:
+        svc, _ = _svc()
+        svc._dispatch_webhook = AsyncMock(return_value=True)  # noqa: SLF001
+        ok = await svc._dispatch(self._notif(), "webhook")  # noqa: SLF001
+        assert ok is True
+        svc._dispatch_webhook.assert_awaited_once()
+
+    async def test_uppercase_channel_hits_console(self) -> None:
+        svc, _ = _svc()
+        ok = await svc._dispatch(self._notif(), "console")  # noqa: SLF001
+        assert ok is True
+
+    async def test_unknown_channel_returns_false(self) -> None:
+        svc, _ = _svc()
+        ok = await svc._dispatch(self._notif(), "slack")  # noqa: SLF001
+        assert ok is False

@@ -95,15 +95,19 @@ class NotifyService(BaseService):
         - email: SMTP 发送
         - dingtalk: 钉钉 Webhook 机器人
         - console: 日志输出（开发环境）
+
+        channel 大小写归一化：DB 中 EMAIL/SMS/WEBHOOK/IN_APP/DINGTALK 为大写枚举值，
+        console 为小写值；统一转小写比较，避免大小写漂移导致渠道永远无法命中。
         """
+        channel_key = (channel or "").strip().lower()
         try:
-            if channel == "webhook":
+            if channel_key == "webhook":
                 return await self._dispatch_webhook(notif)
-            elif channel == "email":
+            elif channel_key == "email":
                 return await self._dispatch_email(notif)
-            elif channel == "dingtalk":
+            elif channel_key == "dingtalk":
                 return await self._dispatch_dingtalk(notif)
-            elif channel == "console":
+            elif channel_key == "console":
                 logger.info("通知（console）: %s", notif.body)
                 return True
             else:

@@ -37,9 +37,8 @@ from app.services.consume.schemas import (
     SnapshotResponse,
 )
 
-# 模块级限流器（从 rate_limiter 模块获取，Redis 优先，InMemory 降级）
-rate_limiter = get_rate_limiter()
-
+# 限流器在 lifespan 中通过 init_rate_limiter 动态初始化（Redis/InMemory 热切换）；
+# 运行期统经 get_rate_limiter() 查阅，避免在 import 期冻结失效的快照（C6）。
 _executor: Any | None = None
 
 
@@ -86,6 +85,15 @@ class ConsumeService(BaseService):
             params["date_to"] = parts[1].strip() if len(parts) > 1 else parts[0].strip()
 
         for i, dim in enumerate(req.dimensions):
+            # 维度名属 SQL 标识符（无法参数化），故必须收敛到口径声明的维度集。
+            # 过去仅 dry-run 校验，execute_query 路径未校验 → 越权列访问 / 标识符注入缺口。
+            # guard 仅扫描字符串 *值*，不防御标识符；此处为纵深防御的最内层。
+            allowed_dims = set((metric.definition_json or {}).get("dimensions", []))
+            if dim.name not in allowed_dims:
+                raise BusinessError(
+                    f"维度 {dim.name} 不在指标可用维度内",
+                    error_code=ErrorCode.FORBIDDEN_DIMENSION,
+                )
             key = f"dim_{i}"
             if isinstance(dim.value, (list, tuple)):
                 where.append(f"{dim.name} IN :{key}")
@@ -139,20 +147,16 @@ class ConsumeService(BaseService):
             )
             raise BusinessError(f"指标状态 {metric.status} 不可消费", error_code=code)
         self._assert_authorized(client, metric)
-        allowed_dims = set((metric.definition_json or {}).get("dimensions", []))
-        for d in req.dimensions:
-            if d.name not in allowed_dims:
-                raise BusinessError(
-                    f"维度 {d.name} 不在指标可用维度内",
-                    error_code=ErrorCode.GRANULARITY_VIOLATION,
-                )
         grain = (metric.definition_json or {}).get("grain")
         checks.append({"check": "granularity", "ok": True, "detail": f"指标粒度 {grain}"})
         expr = (metric.definition_json or {}).get("expression", "")
+        # 构建真实物理口径 SQL（参数化），而非占位注释；维度授权收敛在 _build_query_sql 内。
+        sql, sql_params = self._build_query_sql(req, metric)
         plan = {
             "metric_code": req.metric_code,
             "expression_ast": {"raw": expr},
-            "dialect_sql": f"-- OLAP dialect placeholder\n-- {expr}",
+            "dialect_sql": sql,
+            "sql_params": sql_params,
             "dimensions": [d.model_dump() for d in req.dimensions],
             "date_range": req.date_range,
             "granularity": req.granularity,
