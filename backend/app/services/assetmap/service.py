@@ -213,3 +213,36 @@ class AssetMapService(BaseService):
             按责任人分组的指标/目录/PII 统计。
         """
         return await self._repo.owner_aggregation(owner_id)
+
+    # ----------------------------------------------------------------
+    # 产品补充（FR-18 生产化）：全局搜索 / 健康 / PII / 变更 / 我的资产
+    # ----------------------------------------------------------------
+
+    async def search_assets(
+        self, q: str, entity_type: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """全局资产搜索：目录 + 指标统一结果。"""
+        return await self._repo.search_assets(q, entity_type, limit)
+
+    async def health_summary(self) -> dict[str, Any]:
+        """资产健康视图：源健康/schema 不完整/孤儿/陈旧资产。"""
+        return await self._repo.health_summary()
+
+    async def pii_overview(self) -> dict[str, Any]:
+        """PII 合规资产视图：按敏感级/域聚合 PII 资产。"""
+        return await self._repo.pii_overview()
+
+    async def recent_changes(self, days: int = 7, limit: int = 50) -> dict[str, Any]:
+        """变更追踪流：最近 N 天新增/变更的目录与指标。"""
+        return await self._repo.recent_changes(days, limit)
+
+    async def my_assets(self, owner_id: int, limit: int = 50) -> dict[str, Any]:
+        """我的资产：当前用户负责的目录与指标。"""
+        return await self._repo.my_assets(owner_id, limit)
+
+    async def export_tables(
+        self, source_id: str | None, sensitivity: str | None
+    ) -> list[dict[str, Any]]:
+        """导出目录资产（表/视图）为字典列表，供 CSV 序列化。"""
+        rows = await self._repo.list_tables(source_id, sensitivity, limit=5000)
+        return [r.to_dict() for r in rows]

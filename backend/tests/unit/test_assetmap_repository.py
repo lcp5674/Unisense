@@ -22,25 +22,50 @@ def _session() -> MagicMock:
 
 
 class TestGetEntityDetail:
+    def _cat(self, **kw) -> SimpleNamespace:
+        base = {
+            "id": 1,
+            "entity_name": "catalog.db.t",
+            "entity_type": "table",
+            "source_id": "s1",
+            "sensitivity_level": "PII",
+            "owner_id": 5,
+            "schema_incomplete": False,
+            "content_signature": "abc",
+            "schema_json": {"fields": [{"name": "id", "type": "BIGINT", "comment": "主键"}]},
+            "created_at": None,
+            "updated_at": None,
+        }
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def _edge(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            source_node="table:src",
+            target_node="catalog.db.t",
+            edge_type="DERIVED_FROM",
+            granularity="L2",
+            confidence=0.9,
+            provenance="manual",
+        )
+
+    def _related_metric(self) -> SimpleNamespace:
+        return SimpleNamespace(target_node="metric:gmv", edge_type="DERIVED_FROM")
+
     async def test_found_with_lineage_and_schema_summary(self) -> None:
         s = _session()
         repo = AssetMapRepository(s)
-        cat = SimpleNamespace(
-            id=1,
-            entity_name="catalog.db.t",
-            entity_type="table",
-            source_id="s1",
-            sensitivity_level="PII",
-            owner_id=5,
-            schema_incomplete=False,
-            content_signature="abc",
-            schema_json={"fields": [{"name": "id", "type": "BIGINT", "comment": "主键"}]},
-        )
         r1 = MagicMock()
-        r1.scalar_one_or_none.return_value = cat
+        r1.scalar_one_or_none.return_value = self._cat()
         r2 = MagicMock()
-        r2.scalar.return_value = 3
-        s.execute = AsyncMock(side_effect=[r1, r2])
+        r2.all.return_value = [self._edge()]
+        r3 = MagicMock()
+        r3.all.return_value = [self._related_metric()]
+        r4 = MagicMock()
+        r4.first.return_value = SimpleNamespace(
+            health_status="healthy", last_health_check=None, name="s1"
+        )
+        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4])
 
         out = await repo.get_entity_detail(1)
 
@@ -51,7 +76,11 @@ class TestGetEntityDetail:
         assert out["sensitivity_level"] == "PII"
         assert out["owner_id"] == 5
         assert out["pii_flag"] is True
-        assert out["lineage_count"] == 3
+        assert out["lineage_count"] == 1
+        assert out["lineage_edges"][0]["edge_type"] == "DERIVED_FROM"
+        assert out["lineage_edges"][0]["confidence"] == 0.9
+        assert out["related_metrics"][0]["metric_node"] == "metric:gmv"
+        assert out["source_health"]["health_status"] == "healthy"
         assert out["schema_summary"] == [
             {"name": "id", "type": "BIGINT", "comment": "主键"}
         ]
@@ -71,28 +100,30 @@ class TestGetEntityDetail:
 
     async def test_pii_flag_false_for_internal(self) -> None:
         s = _session()
-        cat = SimpleNamespace(
+        r1 = MagicMock()
+        r1.scalar_one_or_none.return_value = self._cat(
             id=2,
             entity_name="catalog.db.u",
-            entity_type="table",
-            source_id="s1",
             sensitivity_level="INTERNAL",
             owner_id=None,
             schema_incomplete=True,
             content_signature=None,
             schema_json={},
         )
-        r1 = MagicMock()
-        r1.scalar_one_or_none.return_value = cat
         r2 = MagicMock()
-        r2.scalar.return_value = 0
-        s.execute = AsyncMock(side_effect=[r1, r2])
+        r2.all.return_value = []
+        r3 = MagicMock()
+        r3.all.return_value = []
+        r4 = MagicMock()
+        r4.first.return_value = None
+        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4])
 
         out = await AssetMapRepository(s).get_entity_detail(2)
 
         assert out is not None
         assert out["pii_flag"] is False
         assert out["lineage_count"] == 0
+        assert out["source_health"]["health_status"] == "unknown"
         assert out["owner_id"] is None
 
 
@@ -350,3 +381,206 @@ class TestAggregations:
         assert out["metrics"]["published"] == 2
         assert out["metrics"]["by_domain"] == {"sales": 4}
         assert out["catalogs"]["total"] == 7
+
+
+class TestEscapeLike:
+    def test_escapes_wildcards(self) -> None:
+        assert AssetMapRepository._escape_like("100%_ok") == "100\\%\\_ok"
+        assert AssetMapRepository._escape_like("a\\b") == "a\\\\b"
+
+    def test_plain_text_unchanged(self) -> None:
+        assert AssetMapRepository._escape_like("sales") == "sales"
+
+
+class TestSearchAssets:
+    def _catalog(self, name: str = "catalog.db.orders") -> SimpleNamespace:
+        return SimpleNamespace(
+            id=1, entity_name=name, entity_type="table", sensitivity_level="INTERNAL",
+            owner_id=2,
+        )
+
+    def _metric(self, code: str = "sales_gmv_amount_day") -> SimpleNamespace:
+        return SimpleNamespace(
+            id=3, metric_code=code, name="GMV", pii_flag=False, domain="sales",
+            owner_id=2, status="PUBLISHED",
+        )
+
+    async def test_search_both_types(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_cat = MagicMock()
+        r_cat.scalars.return_value.all.return_value = [self._catalog()]
+        r_met = MagicMock()
+        r_met.scalars.return_value.all.return_value = [self._metric()]
+        s.execute = AsyncMock(side_effect=[r_cat, r_met])
+
+        out = await repo.search_assets("sales", None, 20)
+
+        assert len(out) == 2
+        assert out[0]["type"] == "catalog"
+        assert out[1]["type"] == "metric"
+        assert out[1]["sensitivity_level"] == "INTERNAL"
+        # 查询含转义后的 LIKE
+        cat_stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(cat_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "LIKE" in compiled.upper()
+
+    async def test_search_metric_only(self) -> None:
+        """限定 metric 时只查指标，不查目录（分流查询）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_met = MagicMock()
+        r_met.scalars.return_value.all.return_value = [self._metric()]
+        s.execute = AsyncMock(return_value=r_met)
+
+        out = await repo.search_assets("sales", "metric", 20)
+
+        assert len(out) == 1
+        assert out[0]["type"] == "metric"
+        # 只执行一次查询（指标）
+        s.execute.assert_awaited_once()
+
+    async def test_search_table_only_skips_metrics(self) -> None:
+        """限定 table 时只查目录，不查指标。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_cat = MagicMock()
+        r_cat.scalars.return_value.all.return_value = [self._catalog()]
+        s.execute = AsyncMock(return_value=r_cat)
+
+        out = await repo.search_assets("orders", "table", 20)
+
+        assert len(out) == 1
+        assert out[0]["type"] == "catalog"
+        s.execute.assert_awaited_once()
+
+    async def test_search_pii_metric_flagged(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_cat = MagicMock()
+        r_cat.scalars.return_value.all.return_value = []
+        r_met = MagicMock()
+        r_met.scalars.return_value.all.return_value = [
+            SimpleNamespace(id=1, metric_code="sales_user_phone", name="手机号",
+                            pii_flag=True, domain="sales", owner_id=2, status="PUBLISHED")
+        ]
+        s.execute = AsyncMock(side_effect=[r_cat, r_met])
+
+        out = await repo.search_assets("phone", None, 20)
+
+        assert out[0]["sensitivity_level"] == "PII"
+
+    async def test_search_blank_returns_empty(self) -> None:
+        s = _session()
+        out = await AssetMapRepository(s).search_assets("   ", None, 20)
+        assert out == []
+        s.execute.assert_not_awaited()
+
+
+class TestHealthSummary:
+    async def test_aggregates_all(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_unhealthy = MagicMock()
+        r_unhealthy.all.return_value = [
+            SimpleNamespace(source_id="s1", name="bad", health_status="unhealthy")
+        ]
+        r_incomplete = MagicMock()
+        r_incomplete.all.return_value = [
+            SimpleNamespace(id=1, entity_name="t", source_id="s1")
+        ]
+        r_orphan = MagicMock()
+        r_orphan.scalar.return_value = 2
+        r_stale = MagicMock()
+        r_stale.all.return_value = [
+            SimpleNamespace(id=2, entity_name="old", updated_at=None)
+        ]
+        s.execute = AsyncMock(side_effect=[r_unhealthy, r_incomplete, r_orphan, r_stale])
+
+        out = await repo.health_summary()
+
+        assert out["unhealthy_sources"][0]["source_id"] == "s1"
+        assert out["schema_incomplete"][0]["entity_name"] == "t"
+        assert out["orphan_assets"] == 2
+        assert len(out["stale_assets"]) == 1
+        assert out["stale_days"] == 7
+
+
+class TestPiiOverview:
+    async def test_aggregates(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_sens = MagicMock()
+        r_sens.all.return_value = [("PII", 3)]
+        r_domain = MagicMock()
+        r_domain.all.return_value = [("sales", 2)]
+        s.execute = AsyncMock(side_effect=[r_sens, r_domain])
+
+        out = await repo.pii_overview()
+
+        assert out["pii_catalog_count"] == 3
+        assert out["pii_metric_count"] == 2
+        assert out["by_sensitivity"] == {"PII": 3}
+        assert out["by_domain"] == {"sales": 2}
+
+
+class TestRecentChanges:
+    def _catalog_row(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=1, entity_name="catalog.db.t", entity_type="table",
+            sensitivity_level="INTERNAL", owner_id=2, source_id="s1", updated_at=None,
+        )
+
+    def _metric_row(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            metric_code="sales_gmv_amount_day", name="GMV", status="PUBLISHED",
+            domain="sales", pii_flag=False, updated_at=None,
+        )
+
+    async def test_recent_catalogs_and_metrics(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_cat = MagicMock()
+        r_cat.all.return_value = [self._catalog_row()]
+        r_met = MagicMock()
+        r_met.all.return_value = [self._metric_row()]
+        s.execute = AsyncMock(side_effect=[r_cat, r_met])
+
+        out = await repo.recent_changes(days=7, limit=50)
+
+        assert out["days"] == 7
+        assert out["catalogs"][0]["entity_name"] == "catalog.db.t"
+        assert out["metrics"][0]["metric_code"] == "sales_gmv_amount_day"
+        assert out["metrics"][0]["pii_flag"] is False
+
+
+class TestMyAssets:
+    def _catalog_row(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=1, entity_name="catalog.db.t", entity_type="table",
+            sensitivity_level="PII", source_id="s1",
+        )
+
+    def _metric_row(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            metric_code="sales_gmv_amount_day", name="GMV", status="PUBLISHED",
+            domain="sales", pii_flag=True,
+        )
+
+    async def test_my_assets(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_cat = MagicMock()
+        r_cat.all.return_value = [self._catalog_row()]
+        r_met = MagicMock()
+        r_met.all.return_value = [self._metric_row()]
+        s.execute = AsyncMock(side_effect=[r_cat, r_met])
+
+        out = await repo.my_assets(owner_id=2, limit=50)
+
+        assert out["owner_id"] == 2
+        assert out["catalogs"][0]["sensitivity_level"] == "PII"
+        assert out["metrics"][0]["pii_flag"] is True
+        cat_stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(cat_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "owner_id" in compiled

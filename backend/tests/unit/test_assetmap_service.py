@@ -230,3 +230,66 @@ def test_neo4j_driver_singleton_and_close(monkeypatch) -> None:
     assert svc_mod._NEO4J_DRIVER is None
     # 幂等：再次 close 不抛
     svc_mod._close_neo4j_driver()
+
+
+# ---- 产品补充（FR-18 生产化）：搜索 / 健康 / PII / 变更 / 我的资产 / 导出 ----
+
+
+async def test_search_assets_passthrough() -> None:
+    svc, repo = await _svc()
+    repo.search_assets = AsyncMock(
+        return_value=[{"type": "metric", "name": "sales_gmv_amount_day"}]
+    )
+    out = await svc.search_assets("sales", entity_type="metric", limit=20)
+    assert out[0]["name"] == "sales_gmv_amount_day"
+    repo.search_assets.assert_awaited_once_with("sales", "metric", 20)
+
+
+async def test_health_summary_passthrough() -> None:
+    svc, repo = await _svc()
+    repo.health_summary = AsyncMock(return_value={"orphan_assets": 3})
+    out = await svc.health_summary()
+    assert out["orphan_assets"] == 3
+    repo.health_summary.assert_awaited_once()
+
+
+async def test_pii_overview_passthrough() -> None:
+    svc, repo = await _svc()
+    repo.pii_overview = AsyncMock(return_value={"pii_metric_count": 5})
+    out = await svc.pii_overview()
+    assert out["pii_metric_count"] == 5
+    repo.pii_overview.assert_awaited_once()
+
+
+async def test_recent_changes_passthrough() -> None:
+    svc, repo = await _svc()
+    repo.recent_changes = AsyncMock(return_value={"catalogs": [], "metrics": [], "days": 7})
+    out = await svc.recent_changes(days=7, limit=50)
+    assert out["days"] == 7
+    repo.recent_changes.assert_awaited_once_with(7, 50)
+
+
+async def test_my_assets_passthrough() -> None:
+    svc, repo = await _svc()
+    repo.my_assets = AsyncMock(return_value={"owner_id": 9, "catalogs": [], "metrics": []})
+    out = await svc.my_assets(owner_id=9, limit=50)
+    assert out["owner_id"] == 9
+    repo.my_assets.assert_awaited_once_with(9, 50)
+
+
+async def test_export_tables_builds_rows() -> None:
+    """导出：透传 list_tables 并返回 to_dict 列表（敏感字段剥离）。"""
+    svc, repo = await _svc()
+    repo.list_tables = AsyncMock(
+        return_value=[
+            DBCatalog(
+                source_id="s", entity_name="t", entity_type="table", schema_json={}
+            )
+        ]
+    )
+    items = await svc.export_tables(None, None)
+    assert len(items) == 1
+    assert items[0]["entity_name"] == "t"
+    # to_dict 剥离 schema_json（敏感字段黑名单）
+    assert "schema_json" not in items[0]
+    repo.list_tables.assert_awaited_once()

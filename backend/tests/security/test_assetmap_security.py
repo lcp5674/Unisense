@@ -97,3 +97,86 @@ async def test_tables_blocks_unauthorized_role_403(
     app.dependency_overrides.clear()
     assert resp.status_code == 403
     assert resp.json()["code"] == "FORBIDDEN"
+
+
+# ---- 产品补充端点（FR-18 生产化）----
+
+
+async def test_search_returns_200(
+    reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全局搜索端点对已认证读者返回 200。"""
+    async def fake(self: AssetMapService, q: str, entity_type=None, limit: int = 20) -> list:
+        return [{"type": "metric", "id": 1, "name": "sales_gmv_amount_day"}]
+
+    monkeypatch.setattr(AssetMapService, "search_assets", fake)
+    resp = await reader_client.get("/api/v1/assetmap/search", params={"q": "sales"})
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["total"] == 1
+    assert body["items"][0]["type"] == "metric"
+
+
+async def test_search_blocks_injection_400(writer_client: httpx.AsyncClient) -> None:
+    """搜索关键词注入被守卫拦截。"""
+    resp = await writer_client.get(
+        "/api/v1/assetmap/search", params={"q": "' OR '1'='1"}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "INJECTION_DETECTED"
+
+
+async def test_health_pii_changes_my_assets_200(
+    reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """健康/PII/变更/我的资产四个新端点对读者返回 200。"""
+
+    async def fake_health(self: AssetMapService) -> dict:
+        return {"unhealthy_sources": [], "schema_incomplete": [], "orphan_assets": 0,
+                "stale_assets": [], "stale_days": 7}
+
+    async def fake_pii(self: AssetMapService) -> dict:
+        return {
+            "by_sensitivity": {},
+            "by_domain": {},
+            "pii_metric_count": 0,
+            "pii_catalog_count": 0,
+        }
+
+    async def fake_changes(self: AssetMapService, days: int = 7, limit: int = 50) -> dict:
+        return {"catalogs": [], "metrics": [], "days": days}
+
+    async def fake_mine(self: AssetMapService, owner_id: int, limit: int = 50) -> dict:
+        return {"owner_id": owner_id, "catalogs": [], "metrics": []}
+
+    monkeypatch.setattr(AssetMapService, "health_summary", fake_health)
+    monkeypatch.setattr(AssetMapService, "pii_overview", fake_pii)
+    monkeypatch.setattr(AssetMapService, "recent_changes", fake_changes)
+    monkeypatch.setattr(AssetMapService, "my_assets", fake_mine)
+
+    assert (await reader_client.get("/api/v1/assetmap/health")).status_code == 200
+    assert (await reader_client.get("/api/v1/assetmap/pii")).status_code == 200
+    assert (await reader_client.get("/api/v1/assetmap/changes?days=7")).status_code == 200
+    assert (await reader_client.get("/api/v1/assetmap/my-assets")).status_code == 200
+
+
+async def test_export_csv_returns_csv(
+    reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CSV 导出端点返回 text/csv 与表头。"""
+    from app.models.data_source import DBCatalog
+
+    async def fake_export(self: AssetMapService, source_id, sensitivity) -> list[dict]:
+        row = DBCatalog(
+            source_id="s", entity_name="catalog.db.t", entity_type="table", schema_json={}
+        )
+        d = row.to_dict()
+        d["sensitivity_level"] = "INTERNAL"
+        return [d]
+
+    monkeypatch.setattr(AssetMapService, "export_tables", fake_export)
+    resp = await reader_client.get("/api/v1/assetmap/export.csv")
+    assert resp.status_code == 200
+    assert "text/csv" in resp.headers["content-type"]
+    assert "entity_name" in resp.text
+    assert "catalog.db.t" in resp.text
