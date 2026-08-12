@@ -52,7 +52,7 @@ async def test_publish_metric_success(client):
     metric = make_metric(status="PUBLISHED")
     with patch("app.api.metrics.MetricService") as mock_svc:
         instance = mock_svc.return_value
-        instance.publish_metric = AsyncMock(return_value=metric)
+        instance.approve_metric = AsyncMock(return_value=metric)
 
         resp = await client.post(
             "/api/v1/metric-definitions/sales_gmv_daily/publish",
@@ -193,7 +193,7 @@ async def test_metric_write_endpoints_commit():
             instance = mock_svc.return_value
             instance.create_metric = AsyncMock(return_value=metric)
             instance.update_metric = AsyncMock(return_value=metric)
-            instance.publish_metric = AsyncMock(return_value=metric)
+            instance.approve_metric = AsyncMock(return_value=metric)
             instance.deprecate_metric = AsyncMock(return_value=metric)
             instance.review_compliance = AsyncMock(return_value=metric)
 
