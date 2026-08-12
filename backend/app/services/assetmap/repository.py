@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, cast
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.data_source import DBCatalog
@@ -35,6 +35,83 @@ class AssetMapRepository:
     async def orphan_assets(self) -> list[DBCatalog]:
         stmt = select(DBCatalog).where(DBCatalog.owner_id.is_(None))
         return list((await self._session.execute(stmt)).scalars().all())
+
+    @staticmethod
+    def _summarize_schema(schema_json: Any) -> Any:
+        """将 schema_json 压缩为可读摘要（字段名/类型/注释列表）。
+
+        不直接返回原始 schema_json：其字段可能含敏感细节，摘要仅暴露
+        字段级元数据，满足资产地图详情展示（TD §12.11 流程 #5）。
+        """
+        if not isinstance(schema_json, dict):
+            return None
+        fields = schema_json.get("fields") or schema_json.get("columns") or []
+        if isinstance(fields, list):
+            summary: list[dict[str, Any]] = []
+            for f in fields:
+                if isinstance(f, dict):
+                    summary.append(
+                        {
+                            "name": f.get("name") or f.get("column"),
+                            "type": f.get("type") or f.get("data_type"),
+                            "comment": f.get("comment"),
+                        }
+                    )
+                else:
+                    summary.append({"name": str(f)})
+            return summary
+        return schema_json
+
+    async def get_entity_detail(self, entity_id: int) -> dict[str, Any] | None:
+        """资产实体详情：元数据 + 敏感度 + PII + 血缘边数。
+
+        Args:
+            entity_id: db_catalog 主键。
+
+        Returns:
+            详情字典；实体不存在或已删除返回 ``None``。
+        """
+        row = (
+            await self._session.execute(
+                select(DBCatalog).where(
+                    DBCatalog.id == entity_id, DBCatalog.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+
+        # 血缘边数：实体名匹配 lineage 节点的多种编码形态
+        variants = [row.entity_name, f"table:{row.entity_name}", f"field:{row.entity_name}"]
+        lineage_count = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(LineageEdge)
+                .where(
+                    LineageEdge.deleted_at.is_(None),
+                    or_(
+                        LineageEdge.source_node.in_(variants),
+                        LineageEdge.target_node.in_(variants),
+                    ),
+                )
+            )
+        ).scalar() or 0
+        sens = (row.sensitivity_level or "").upper()
+        return {
+            "id": row.id,
+            "entity_name": row.entity_name,
+            "entity_type": row.entity_type,
+            "source_id": row.source_id,
+            "sensitivity_level": row.sensitivity_level,
+            "owner_id": row.owner_id,
+            "schema_incomplete": row.schema_incomplete,
+            "content_signature": row.content_signature,
+            "schema_summary": self._summarize_schema(row.schema_json),
+            "lineage_count": int(lineage_count),
+            "pii_flag": "PII" in sens,
+            # etl_sql 属敏感字段（可能内嵌连接串），详情接口不返回
+            "etl_sql": None,
+        }
 
     async def catalog_summary(self) -> dict[str, Any]:
         total = (
@@ -93,15 +170,21 @@ class AssetMapRepository:
     async def graph_from_mysql(
         self, domain: str | None, pii_only: bool
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """从 MySQL lineage_edge + metric 拼接图谱数据。"""
-        # 节点：从 metric 表构建
+        """从 MySQL lineage_edge + metric 拼接图谱数据。
+
+        - 节点：域内/全部 metric 节点，id 统一为 ``metric:{code}``（与血缘边端点格式一致，
+          避免图节点与边端点断裂）。
+        - 边：仅保留至少一端属于展示节点的边（**精确集合匹配**，消除原 ``contains``
+          子串误匹配，如 domain="s" 误命中所有含 "s" 的节点）。
+        """
+        # 节点：metric 表
         metric_stmt = select(
             Metric.metric_code,
             Metric.domain,
             Metric.pii_flag,
             Metric.owner_id,
             Metric.status,
-        )
+        ).where(Metric.deleted_at.is_(None))
         if domain:
             metric_stmt = metric_stmt.where(Metric.domain == domain)
         if pii_only:
@@ -109,33 +192,39 @@ class AssetMapRepository:
 
         metric_rows = (await self._session.execute(metric_stmt)).all()
         nodes: list[dict[str, Any]] = []
+        allowed: set[str] = set()
         seen_ids: set[str] = set()
         for row in metric_rows:
-            node_id = row.metric_code
+            node_id = f"metric:{row.metric_code}"
             if node_id in seen_ids:
                 continue
             seen_ids.add(node_id)
+            allowed.add(node_id)
             nodes.append({
                 "id": node_id,
                 "type": "metric",
-                "label": node_id,
+                "label": row.metric_code,
                 "pii": bool(row.pii_flag),
                 "domain": row.domain,
                 "owner": str(row.owner_id) if row.owner_id else None,
             })
 
-        # 边：从 lineage_edge 表
+        # 边：仅保留至少一端属于展示节点的边（精确匹配）
         edge_stmt = select(
             LineageEdge.source_node,
             LineageEdge.target_node,
             LineageEdge.edge_type,
-        )
-        if domain:
-            # 过滤至少一端在域内的边
+        ).where(LineageEdge.deleted_at.is_(None))
+        if allowed:
             edge_stmt = edge_stmt.where(
-                (LineageEdge.source_node.contains(domain))
-                | (LineageEdge.target_node.contains(domain))
+                or_(
+                    LineageEdge.source_node.in_(allowed),
+                    LineageEdge.target_node.in_(allowed),
+                )
             )
+        else:
+            # 无展示节点则无有效边
+            return nodes, []
 
         edge_rows = (await self._session.execute(edge_stmt.limit(1000))).all()
         edges: list[dict[str, Any]] = []

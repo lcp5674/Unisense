@@ -72,6 +72,25 @@ async def orphan_assets(
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
 
 
+@router.get("/entities/{entity_id}", dependencies=_READ_DEPS)
+async def get_entity_detail(
+    entity_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """资产实体详情：表/字段元数据 + 敏感度 + PII + 血缘边数（TD §12.11 流程 #5）。
+
+    前端「数据表目录/孤儿资产」详情抽屉调用此端点；实体不存在返回 404。
+    """
+    from app.core.exceptions import NotFoundError
+
+    data = await AssetMapService(db).get_entity_detail(entity_id)
+    if data is None:
+        raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
+    return ok(data=data, trace_id=trace_id)
+
+
 # ----------------------------------------------------------------
 # P2 Enhancement: 图谱 / 热力 / 责任人视图
 # ----------------------------------------------------------------

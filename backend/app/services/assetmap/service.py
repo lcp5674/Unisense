@@ -24,6 +24,32 @@ logger = logging.getLogger(__name__)
 # Neo4j 调用熔断器
 _NEO4J_BREAKER = CircuitBreaker(failure_threshold=5, reset_timeout=30.0)
 
+# Neo4j 异步 driver 单例：惰性创建并复用，避免每请求新建连接池导致泄漏（P2-1）。
+_NEO4J_DRIVER: Any | None = None
+
+
+def _get_neo4j_driver() -> Any:
+    """惰性创建并复用 Neo4j 异步 driver。"""
+    global _NEO4J_DRIVER
+    if _NEO4J_DRIVER is None:
+        from neo4j import AsyncGraphDatabase
+
+        from app.core.config import settings
+
+        _NEO4J_DRIVER = AsyncGraphDatabase.driver(
+            settings.neo4j_url,
+            auth=(settings.neo4j_user, settings.neo4j_password),
+        )
+    return _NEO4J_DRIVER
+
+
+def _close_neo4j_driver() -> None:
+    """关闭 Neo4j driver（进程退出/测试收尾时调用）。"""
+    global _NEO4J_DRIVER
+    if _NEO4J_DRIVER is not None:
+        _NEO4J_DRIVER.close()
+        _NEO4J_DRIVER = None
+
 
 class AssetMapService(BaseService):
     def __init__(self, session: AsyncSession) -> None:
@@ -50,6 +76,10 @@ class AssetMapService(BaseService):
     async def orphan_assets(self) -> list[dict[str, Any]]:
         rows = await self._repo.orphan_assets()
         return [r.to_dict() for r in rows]
+
+    async def get_entity_detail(self, entity_id: int) -> dict[str, Any] | None:
+        """资产实体详情：元数据 + 敏感度 + PII + 血缘边数（TD §12.11 流程 #5）。"""
+        return await self._repo.get_entity_detail(entity_id)
 
     # ----------------------------------------------------------------
     # P2 Enhancement: 图谱 / 热力 / 责任人视图
@@ -87,17 +117,12 @@ class AssetMapService(BaseService):
             return None
 
         try:
-            from neo4j import AsyncGraphDatabase
-
             from app.core.config import settings
 
             if not settings.neo4j_url or not settings.neo4j_password:
                 return None
 
-            driver = AsyncGraphDatabase.driver(
-                settings.neo4j_url,
-                auth=(settings.neo4j_user, settings.neo4j_password),
-            )
+            driver = _get_neo4j_driver()
             async with driver.session() as session:
                 # 构建动态 Cypher
                 match_clause = "MATCH (n:Asset)"
@@ -108,19 +133,31 @@ class AssetMapService(BaseService):
                     where_parts.append("n.pii = true")
                 where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
-                # 简化查询：取节点 + 关系
                 node_query = (
                     match_clause + where_clause
                     + " RETURN n.id AS id, n.type AS type, n.label AS label,"
                     + " n.pii AS pii, n.domain AS domain, n.owner AS owner LIMIT 500"
                 )
+
+                # 边：可变长关系按 depth 限跳（Neo4j pattern 不支持参数作长度上界，
+                # 故以字面量插值；depth 由 API 约束 ge=1 le=10 为安全整数）。
+                # UNWIND relationships(p) 逐跳展开，返回每条实际关系边。
                 edge_query = (
-                    "MATCH (a:Asset)-[r:DERIVED_FROM|LINEAGE_UP"
-                    "|LINEAGE_DOWN|CONSUMED_BY]->(b:Asset)"
+                    "MATCH p=(a:Asset)-[rels:DERIVED_FROM|LINEAGE_UP"
+                    f"|LINEAGE_DOWN|CONSUMED_BY*1..{int(depth)}]->(b:Asset)"
                 )
+                edge_where: list[str] = []
                 if domain:
-                    edge_query += " WHERE a.domain = $domain OR b.domain = $domain"
-                edge_query += " RETURN a.id AS source, b.id AS target, type(r) AS type LIMIT 1000"
+                    edge_where.append("(a.domain = $domain OR b.domain = $domain)")
+                if pii_only:
+                    edge_where.append("(a.pii = true AND b.pii = true)")
+                if edge_where:
+                    edge_query += " WHERE " + " AND ".join(edge_where)
+                edge_query += (
+                    " UNWIND relationships(p) AS r"
+                    " RETURN DISTINCT startNode(r).id AS source,"
+                    " endNode(r).id AS target, type(r) AS type LIMIT 1000"
+                )
 
                 params: dict[str, Any] = {}
                 if domain:

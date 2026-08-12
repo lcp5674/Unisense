@@ -13,7 +13,9 @@ from typing import Any
 from sqlalchemy import BigInteger, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 
-# assetmap T-2 / 平台级敏感字段黑名单：序列化时强制剔除
+# assetmap T-2 / 平台级敏感字段黑名单：序列化时强制剔除。
+# 注：sensitivity_level 非凭据，是资产地图核心展示字段（FR-18），不在此黑名单，
+# 否则 to_dict() 默认剔除会导致前端敏感度列永远空白。
 _SENSITIVE_FIELDS = frozenset({
     "connection_config",
     "password",
@@ -22,7 +24,6 @@ _SENSITIVE_FIELDS = frozenset({
     "credential",
     "etl_sql",
     "schema_json",
-    "sensitivity_level",
 })
 
 
