@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,6 +29,9 @@ class FakeBreaker:
 
     def record_failure(self) -> None:
         self.failures += 1
+
+    def record_success(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -65,8 +69,13 @@ def fake_metric() -> MagicMock:
     m.successor_code = None
     m.deprecated_at = None
     m.sunset_until = None
-    m.created_at = MagicMock()
-    m.updated_at = MagicMock()
+    m.id = 1
+    m.created_at = datetime.now(UTC)
+    m.updated_at = datetime.now(UTC)
+    m.emergency_publish = False
+    m.emergency_reason = None
+    m.pending_conflict = False
+    m.pending_conflict_detail = None
     m.deleted_at = None
     return m
 
@@ -160,6 +169,7 @@ class TestMetricCacheInvalidate:
     async def test_invalidate_success(self) -> None:
         redis = MagicMock()
         redis.delete = AsyncMock()
+        redis.scan = AsyncMock(return_value=(0, ["metric:def:M1:v1"]))
         cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
         await cache.invalidate("M1")
         redis.delete.assert_called_once()

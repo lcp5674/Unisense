@@ -83,7 +83,9 @@ async def viewer_client():
     """以 viewer 角色注入的客户端（应被写操作 RBAC 拦截）。"""
 
     async def fake_db():
-        yield MagicMock()
+        session = AsyncMock()
+        session.add = MagicMock()
+        yield session
 
     def fake_user():
         return MagicMock(id=2, role="viewer")
@@ -132,7 +134,9 @@ async def test_pii_review_succeeds_for_domain_admin(client):
 
         assert resp.status_code == 200
         assert resp.json()["data"]["compliance_reviewed"] is True
-        instance.review_compliance.assert_awaited_once_with("sales_gmv_daily", actor_id=99)
+        instance.review_compliance.assert_awaited_once_with(
+            "sales_gmv_daily", actor_id=99, role="domain_admin"
+        )
     finally:
         app.dependency_overrides.pop(deps.get_current_user, None)
 
@@ -167,3 +171,52 @@ async def test_get_metric_versions_success(client):
     assert body["code"] == "OK"
     instance.get_versions.assert_awaited_once_with("sales_gmv_daily")
     assert body["data"][0]["version"] == 1
+
+
+async def test_metric_write_endpoints_commit():
+    """回归（H-1）：指标全部 5 个写端点必须真实 ``await db.commit()``。
+
+    原缺陷：写端点只 flush 不 commit，事务随 ``get_db_session`` 关闭被回滚，
+    生产环境所有指标写入静默丢失。用可感知 await 的 AsyncMock 会话捕获 commit。
+    """
+    session = AsyncMock()
+    session.add = MagicMock()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="domain_admin")
+    metric = make_metric()
+    try:
+        with patch("app.api.metrics.MetricService") as mock_svc:
+            instance = mock_svc.return_value
+            instance.create_metric = AsyncMock(return_value=metric)
+            instance.update_metric = AsyncMock(return_value=metric)
+            instance.publish_metric = AsyncMock(return_value=metric)
+            instance.deprecate_metric = AsyncMock(return_value=metric)
+            instance.review_compliance = AsyncMock(return_value=metric)
+
+            transport = ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                responses = [
+                    await c.post("/api/v1/metric-definitions", json=make_create_payload()),
+                    await c.put(
+                        "/api/v1/metric-definitions/sales_gmv_daily",
+                        json={"change_reason": "修正口径说明"},
+                    ),
+                    await c.post(
+                        "/api/v1/metric-definitions/sales_gmv_daily/publish",
+                        json={"version": 1, "change_reason": "首次发布"},
+                    ),
+                    await c.post(
+                        "/api/v1/metric-definitions/sales_gmv_daily/deprecate",
+                        json={"successor_code": "bar"},
+                    ),
+                    await c.post("/api/v1/metric-definitions/sales_gmv_daily/pii-review"),
+                ]
+        for resp in responses:
+            assert resp.status_code < 300, resp.text
+        assert session.commit.await_count >= 5, "指标写端点未全部提交事务"
+    finally:
+        app.dependency_overrides.clear()

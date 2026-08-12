@@ -6,10 +6,15 @@ module-status 中 semantic 的 perf_contract「版本缓存失效延迟 < 1s」�
 
 Redis 属可选依赖；所有 Redis 调用均包裹 CircuitBreaker：Redis 抖动/宕机时
 熔断打开，读取自动降级到 MySQL，核心链路不受影响（舱壁隔离）。
+
+并发防护：进程内 per-key 互斥锁 + double-checked locking，冷 key 高并发 miss
+时把并发穿透串行化，避免缓存击穿（P3-1）；坏数据触发熔断失败计数，避免反复
+命中坏数据不降级（P3-6）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -23,7 +28,39 @@ from app.services.semantic.schemas import MetricResponse
 logger = get_logger("unisense.semantic.cache")
 
 _TTL_SECONDS = 600  # 10 分钟（对齐 US10 / FR-5 消费性能基线）
-_PREFIX = "metric:def:"
+_PREFIX = "metric:def:"  # 键格式: metric:def:{code}:v{version}
+
+# 进程内 per-key 互斥锁（singleflight）：防止同一冷 key 高并发击穿到 DB。
+# 锁用后即从字典移除以避免内存泄漏；移除后并发请求会重建新锁，同一 key 在
+# 极短窗口内可能并行穿透，属可接受的竞态。
+_LOCKS: dict[str, asyncio.Lock] = {}
+# 保护 _LOCKS 的并发 get-or-create（asyncio 环境，等待者需异步原语）。
+_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _lock_for(key: str) -> asyncio.Lock:
+    """获取 key 对应的进程内互斥锁（不存在则创建）。
+
+    Args:
+        key: 缓存键（含前缀）。
+
+    Returns:
+        该 key 的互斥锁。
+    """
+    async with _LOCKS_GUARD:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _LOCKS[key] = lock
+        return lock
+
+
+def _release_lock(key: str) -> None:
+    """释放 key 的锁引用，防止锁集合无界增长。
+
+    dict.pop 在 GIL 下原子；移除后新请求会重建锁（可接受的竞态）。
+    """
+    _LOCKS.pop(key, None)
 
 
 class MetricCache:
@@ -45,34 +82,69 @@ class MetricCache:
         """使用默认熔断参数构建缓存。"""
         return cls(redis)
 
-    async def get(self, metric_code: str) -> dict[str, Any] | None:
+    async def get(self, metric_code: str, version: int | None = None) -> dict[str, Any] | None:
         """读取缓存。
 
         命中返回序列化后的 dict；未命中、缓存禁用或熔断打开时返回 None，
         由调用方降级到 MySQL。
 
+        singleflight（防缓存击穿）：干净 miss 时按 key 加进程内互斥锁并二次
+        检查（double-check），把并发穿透串行化；Redis 异常/坏数据已由 _read
+        记录熔断失败，直接降级无需重复回读。
+
         Args:
             metric_code: 指标编码。
+            version: 版本号（用于构建版本化缓存键）。
 
         Returns:
             缓存的 MetricResponse dict，或 None。
         """
         if not self._enabled or not self._breaker.allow():
             return None
-        key = _PREFIX + metric_code
+        key = self._build_key(metric_code, version)
+        is_miss, data = await self._read(key, metric_code)
+        if data is not None:
+            self._breaker.record_success()
+            return data
+        if not is_miss:
+            return None
+        lock = await _lock_for(key)
+        try:
+            async with lock:
+                _, data = await self._read(key, metric_code)
+                if data is not None:
+                    self._breaker.record_success()
+                return data
+        finally:
+            _release_lock(key)
+
+    async def _read(self, key: str, metric_code: str) -> tuple[bool, dict[str, Any] | None]:
+        """读取并解析缓存值（含熔断失败计数）。
+
+        Args:
+            key: 缓存键（含前缀）。
+            metric_code: 指标编码（用于日志）。
+
+        Returns:
+            (is_miss, data)：is_miss=True 表示键不存在（可触发 singleflight
+            二次检查）；data 为解析后的 dict；Redis 异常/坏数据时 data 为
+            None（并已记录熔断失败）。
+        """
         try:
             raw = await self._redis.get(key)  # type: ignore[union-attr]
         except Exception:
             self._breaker.record_failure()
             logger.warning("metric_cache_get_failed", metric_code=metric_code)
-            return None
+            return False, None
         if raw is None:
-            return None
+            return True, None
         try:
             data: dict[str, Any] = json.loads(raw)
         except Exception:
-            return None
-        return data
+            self._breaker.record_failure()
+            logger.warning("metric_cache_bad_json", metric_code=metric_code)
+            return False, None
+        return False, data
 
     async def set(self, metric: Metric) -> None:
         """写入缓存（写穿）。降级或不可用时静默跳过，不阻断主流程。
@@ -82,30 +154,48 @@ class MetricCache:
         """
         if not self._enabled or not self._breaker.allow():
             return
-        key = _PREFIX + metric.metric_code
+        key = self._build_key(metric.metric_code, metric.version)
         try:
             payload = json.dumps(
                 MetricResponse.model_validate(metric).model_dump(mode="json"),
                 ensure_ascii=False,
             )
             await self._redis.set(key, payload, ex=_TTL_SECONDS)  # type: ignore[union-attr]
+            self._breaker.record_success()
         except Exception:
             self._breaker.record_failure()
             logger.warning("metric_cache_set_failed", metric_code=metric.metric_code)
 
-    async def invalidate(self, metric_code: str) -> None:
+    async def invalidate(self, metric_code: str, version: int | None = None) -> None:
         """失效缓存（版本缓存失效）。失败不影响写路径。
 
         Args:
             metric_code: 指标编码。
+            version: 版本号（如提供则只删版本键；否则删所有版本键）。
         """
         if not self._enabled:
             return
-        key = _PREFIX + metric_code
-        try:
-            await self._redis.delete(key)  # type: ignore[union-attr]
-        except Exception:
-            logger.warning("metric_cache_invalidate_failed", metric_code=metric_code)
+        if version is not None:
+            key = self._build_key(metric_code, version)
+            try:
+                await self._redis.delete(key)  # type: ignore[union-attr]
+            except Exception:
+                logger.warning("metric_cache_invalidate_failed", metric_code=metric_code)
+        else:
+            # 删除所有版本的键（用 SCAN + DEL）
+            pattern = _PREFIX + metric_code + ":v*"
+            try:
+                cursor = 0
+                while True:
+                    cursor, keys = await self._redis.scan(  # type: ignore[union-attr]
+                        cursor=cursor, match=pattern, count=100
+                    )
+                    if keys:
+                        await self._redis.delete(*keys)  # type: ignore[union-attr]
+                    if cursor == 0:
+                        break
+            except Exception:
+                logger.warning("metric_cache_invalidate_failed", metric_code=metric_code)
 
     async def invalidate_batch(self, metric_codes: list[str]) -> None:
         """批量失效缓存。失败不影响写路径。
@@ -115,14 +205,28 @@ class MetricCache:
         """
         if not self._enabled or not metric_codes:
             return
-        keys = [_PREFIX + code for code in metric_codes]
+        # 批量删除所有版本的键
         try:
-            await self._redis.delete(*keys)  # type: ignore[union-attr]
+            all_keys: list[str] = []
+            for code in metric_codes:
+                pattern = _PREFIX + code + ":v*"
+                cursor = 0
+                while True:
+                    cursor, keys = await self._redis.scan(  # type: ignore[union-attr]
+                        cursor=cursor, match=pattern, count=100
+                    )
+                    all_keys.extend(keys)
+                    if cursor == 0:
+                        break
+            if all_keys:
+                await self._redis.delete(*all_keys)  # type: ignore[union-attr]
         except Exception:
             logger.warning("metric_cache_invalidate_batch_failed", count=len(metric_codes))
 
     async def warm_up(self, metrics: list[Metric]) -> int:
-        """预热缓存：批量写入指标定义。
+        """预热缓存：使用 Redis pipeline 批量写入指标定义。
+
+        对齐 FR-034：warm_up 必须使用 pipeline 批量写入。
 
         Args:
             metrics: 指标 ORM 对象列表。
@@ -132,19 +236,49 @@ class MetricCache:
         """
         if not self._enabled:
             return 0
+        if not metrics:
+            return 0
+
         count = 0
-        for metric in metrics:
-            if not self._breaker.allow():
-                break
-            key = _PREFIX + metric.metric_code
-            try:
-                payload = json.dumps(
-                    MetricResponse.model_validate(metric).model_dump(mode="json"),
-                    ensure_ascii=False,
-                )
-                await self._redis.set(key, payload, ex=_TTL_SECONDS)  # type: ignore[union-attr]
-                count += 1
-            except Exception:
-                self._breaker.record_failure()
-                logger.warning("metric_cache_warmup_failed", metric_code=metric.metric_code)
+        try:
+            async with self._redis.pipeline() as pipe:  # type: ignore[union-attr]
+                for metric in metrics:
+                    if not self._breaker.allow():
+                        break
+                    key = self._build_key(metric.metric_code, metric.version)
+                    try:
+                        payload = json.dumps(
+                            MetricResponse.model_validate(metric).model_dump(mode="json"),
+                            ensure_ascii=False,
+                        )
+                        pipe.set(key, payload, ex=_TTL_SECONDS)
+                        count += 1
+                    except Exception:
+                        self._breaker.record_failure()
+                        logger.warning(
+                            "metric_cache_warmup_payload_failed",
+                            metric_code=metric.metric_code,
+                        )
+                if count > 0:
+                    await pipe.execute()
+                    self._breaker.record_success()
+        except Exception:
+            self._breaker.record_failure()
+            logger.warning("metric_cache_warmup_pipeline_failed", count=len(metrics))
         return count
+
+    @staticmethod
+    def _build_key(metric_code: str, version: int | None) -> str:
+        """构建版本化缓存键: metric:def:{code}:v{version}。
+
+        对齐 FR-032：缓存键必须含版本号。
+        版本变更时旧键自然过期（TTL=600s），无需主动 invalidate。
+
+        Args:
+            metric_code: 指标编码。
+            version: 版本号（None 时使用 v0 占位）。
+
+        Returns:
+            缓存键。
+        """
+        return f"{_PREFIX}{metric_code}:v{version or 0}"

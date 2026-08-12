@@ -70,7 +70,7 @@ async def test_deprecate_metric_writes_audit(client):
          patch.object(metrics_module, "write_audit", AsyncMock()) as wa, \
          patch.object(metrics_module, "client_ip", return_value="test"):
         resp = await client.post(
-            "/api/v1/metric-definitions/foo/deprecate", params={"successor_code": "bar"}
+            "/api/v1/metric-definitions/foo/deprecate", json={"successor_code": "bar"}
         )
         assert resp.status_code == 200
         wa.assert_awaited()

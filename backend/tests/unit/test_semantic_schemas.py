@@ -10,7 +10,7 @@ from app.services.semantic.schemas import MetricCreateRequest, MetricPublishRequ
 
 def _base_payload(**overrides) -> dict:
     payload = {
-        "metric_code": "fin_gmv_daily",
+        "metric_code": "fin_gmv_amount_daily",
         "name": "GMV",
         "domain": "fin",
         "type": "atomic",

@@ -55,9 +55,15 @@ class MetricCreateRequest(BaseModel):
     @field_validator("metric_code")
     @classmethod
     def validate_code(cls, v: str) -> str:
-        """校验指标编码格式: 域_业务对象_度量_统计周期。"""
-        if not v or "_" not in v:
-            raise ValueError("metric_code 须符合格式: 域_业务对象_度量_统计周期")
+        """校验指标编码格式: 域_业务对象_度量_统计周期（4 段式 + 保留词）。
+
+        委托 ConflictPrechecker.validate_code_format 实现严格校验。
+        """
+        from app.services.semantic.conflict_precheck import ConflictPrechecker
+
+        valid, error = ConflictPrechecker.validate_code_format(v)
+        if not valid:
+            raise ValueError(error)
         return v
 
 
@@ -77,8 +83,126 @@ class MetricUpdateRequest(BaseModel):
 class MetricPublishRequest(BaseModel):
     """发布指标请求（DRAFT → PUBLISHED）。"""
 
-    version: int | None = Field(None, description="待发布版本号（缺省为当前版本）")
+    version: int | None = Field(None, ge=1, description="待发布版本号（缺省为当前版本）")
     change_reason: str = Field(..., min_length=4, description="发布说明")
+
+
+class MetricDeprecateRequest(BaseModel):
+    """废弃指标请求（successor_code 必填，对齐 FR-039）。"""
+
+    successor_code: str = Field(
+        ...,
+        max_length=64,
+        description="替代指标编码（必填，须为已 PUBLISHED 指标）",
+    )
+
+
+class MetricSubmitRequest(BaseModel):
+    """提交审核请求（DRAFT → REVIEW，对齐 FR-003）。"""
+
+    change_reason: str = Field(..., min_length=4, description="提交审核说明")
+
+
+class MetricApproveRequest(BaseModel):
+    """审核通过请求（REVIEW → PUBLISHED/EXPERIMENTAL，对齐 FR-004）。"""
+
+    mode: Literal["standard", "experimental"] = Field(
+        "standard", description="发布模式: standard(全量)/experimental(灰度)"
+    )
+    gray_tenant_ids: list[int] | None = Field(
+        None, description="灰度白名单租户 ID（仅 experimental 模式）"
+    )
+    target_version: int | None = Field(
+        None, ge=1, description="待发布版本号（缺省为当前版本）"
+    )
+
+
+class MetricRejectRequest(BaseModel):
+    """审核驳回请求（REVIEW → DRAFT，对齐 FR-005）。"""
+
+    reason: str = Field(..., min_length=4, description="驳回原因")
+
+
+class MetricReviewRequest(BaseModel):
+    """评审请求（FR-07，approve → PUBLISHED / reject → DRAFT）。"""
+
+    approved: bool = Field(..., description="评审结论：True 通过并发布，False 打回 DRAFT")
+    change_reason: str | None = Field(
+        None, description="变更说明（通过时建议附口径变更理由，驳回时可为空）"
+    )
+
+
+class MetricSubmitReviewRequest(BaseModel):
+    """提交评审请求（FR-07，DRAFT → REVIEW）。"""
+
+    change_reason: str = Field(..., min_length=4, description="提交评审说明")
+
+
+class MetricEmergencyPublishRequest(BaseModel):
+    """紧急发布请求（DRAFT → PUBLISHED 跳过 REVIEW，对齐 FR-022）。"""
+
+    reason: str = Field(..., min_length=10, description="紧急发布原因")
+    target_version: int | None = Field(
+        None, ge=1, description="待发布版本号（缺省为当前版本）"
+    )
+
+
+class VersionConfirmRequest(BaseModel):
+    """消费方确认版本请求（对齐 FR-007）。"""
+
+    version: int = Field(..., ge=1, description="版本号")
+
+
+class VersionRejectRequest(BaseModel):
+    """消费方拒绝版本请求（对齐 FR-007）。"""
+
+    version: int = Field(..., ge=1, description="版本号")
+    reason: str = Field(..., min_length=4, description="拒绝原因")
+
+
+class VersionExtendRequest(BaseModel):
+    """版本确认延期请求（对齐 FR-008）。"""
+
+    version: int = Field(..., ge=1, description="版本号")
+
+
+class MetricCompareRequest(BaseModel):
+    """指标对比请求（对齐 FR-029）。"""
+
+    metric_codes: list[str] = Field(
+        ..., min_length=2, max_length=2, description="待对比的两个指标编码"
+    )
+
+
+class MetricBatchRegisterRequest(BaseModel):
+    """批量注册请求（对齐 FR-030）。"""
+
+    source_table: str = Field(..., description="源宽表名")
+    measure_columns: list[str] = Field(..., min_length=1, description="度量列列表")
+    dimension_mapping: dict[str, str] | None = Field(None, description="维度列映射")
+    llm_prefill: bool = Field(True, description="是否使用 LLM 预填（False=手动模式）")
+    domain: str = Field(..., max_length=64, description="所属域")
+
+
+class MetricTemplateCreateRequest(BaseModel):
+    """模板创建请求（对齐 FR-041：Schema 校验替代裸 dict）。"""
+
+    code: str = Field(..., max_length=64, pattern=r"^tpl_[a-z][a-z0-9_]*$", description="模板编码")
+    name: str = Field(..., max_length=128, description="模板名称")
+    domain: str = Field(..., max_length=64, description="适用域")
+    description: str | None = Field(None, description="模板说明")
+    defaults_json: dict[str, Any] = Field(default_factory=dict, description="预填字段默认值")
+    required_fields: list[str] | None = Field(None, description="必填字段列表")
+    type: Literal["atomic", "derived", "composite"] | None = Field(None, description="指标类型预设")
+    granularity: str | None = Field(None, max_length=64, description="粒度预设")
+    unit: str | None = Field(None, max_length=32, description="单位预设")
+    aggregation: str | None = Field(None, max_length=32, description="聚合方式预设")
+    time_semantics: str | None = Field(None, max_length=32, description="时间语义预设")
+    freshness: str | None = Field(None, max_length=32, description="数据新鲜度预设")
+    dw_layer: str | None = Field(None, max_length=32, description="数仓分层预设")
+    serving_mode: str | None = Field(None, max_length=32, description="服务模式预设")
+    additivity: str | None = Field(None, max_length=32, description="可加性预设")
+    metric_tier: str | None = Field(None, max_length=8, description="指标分级预设")
 
 
 class MetricListParams(BaseModel):
@@ -88,7 +212,7 @@ class MetricListParams(BaseModel):
     status: str | None = None
     metric_tier: str | None = None
     keyword: str | None = None
-    page: int = Field(1, ge=1)
+    page: int = Field(1, ge=1, le=1000)
     page_size: int = Field(20, ge=1, le=100)
 
 
@@ -128,6 +252,11 @@ class MetricResponse(BaseModel):
     successor_code: str | None
     deprecated_at: datetime | None
     sunset_until: str | None
+    emergency_publish: bool = False
+    emergency_reason: str | None = None
+    gray_tenant_ids: list[int] | None = None
+    pending_conflict: bool = False
+    pending_conflict_detail: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
 

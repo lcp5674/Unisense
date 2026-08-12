@@ -41,7 +41,7 @@ async def test_create_metric_happy_path():
 
     result = await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
 
-    repo.get_by_code.assert_awaited_once_with("sales_gmv_daily")
+    repo.get_by_code.assert_awaited_once_with("sales_gmv_amount_daily")
     repo.create.assert_awaited_once()
     repo.create_version.assert_awaited_once()
     assert result.status == "DRAFT"
@@ -80,6 +80,7 @@ async def test_update_metric_creates_version_and_bumps():
             change_reason="口径不变",
         ),
         actor_id=1,
+        role="metric_owner",
     )
 
     # 乐观锁使用原始 row_version
@@ -113,6 +114,7 @@ async def test_update_metric_breaking_change():
             change_reason="口径变更",
         ),
         actor_id=1,
+        role="metric_owner",
     )
 
     version_arg = repo.create_version.call_args.args[0]
@@ -129,12 +131,13 @@ async def test_update_metric_invalid_status_rejected():
             "sales_gmv_daily",
             MetricUpdateRequest(change_reason="修正名称"),
             actor_id=1,
+            role="metric_owner",
         )
 
 
 async def test_publish_metric_success():
     svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", pii_flag=False))
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="REVIEW", pii_flag=False))
     published = make_metric(status="PUBLISHED")
     repo.update_with_optimistic_lock = AsyncMock(return_value=published)
     repo.get_version = AsyncMock(return_value=MagicMock())
@@ -144,6 +147,7 @@ async def test_publish_metric_success():
         "sales_gmv_daily",
         MetricPublishRequest(version=1, change_reason="首次发布"),
         actor_id=1,
+        role="metric_owner",
     )
 
     assert result.status == "PUBLISHED"
@@ -156,7 +160,7 @@ async def test_publish_metric_success():
 async def test_publish_metric_pii_blocked_without_compliance():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(
-        return_value=make_metric(status="DRAFT", pii_flag=True, compliance_reviewed=False)
+        return_value=make_metric(status="REVIEW", pii_flag=True, compliance_reviewed=False)
     )
 
     with pytest.raises(BusinessError) as exc:
@@ -164,19 +168,22 @@ async def test_publish_metric_pii_blocked_without_compliance():
             "sales_gmv_daily",
             MetricPublishRequest(version=1, change_reason="发布含 PII 指标"),
             actor_id=1,
+            role="metric_owner",
         )
     assert exc.value.error_code == "COMPLIANCE_BLOCKED"
 
 
 async def test_publish_metric_invalid_status_rejected():
     svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    # DRAFT 直接发布非法（须先 submit→REVIEW，再 approve→PUBLISHED）
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT"))
 
     with pytest.raises(BusinessError):
         await svc.publish_metric(
             "sales_gmv_daily",
             MetricPublishRequest(version=1, change_reason="重复发布"),
             actor_id=1,
+            role="metric_owner",
         )
 
 
@@ -186,7 +193,9 @@ async def test_deprecate_metric_success_sets_sunset():
     deprecated = make_metric(status="DEPRECATED", successor_code="sales_gmv_v2")
     repo.update_with_optimistic_lock = AsyncMock(return_value=deprecated)
 
-    result = await svc.deprecate_metric("sales_gmv_daily", "sales_gmv_v2", actor_id=1)
+    result = await svc.deprecate_metric(
+        "sales_gmv_daily", "sales_gmv_v2", actor_id=1, role="metric_owner"
+    )
 
     assert result.status == "DEPRECATED"
     called = repo.update_with_optimistic_lock.call_args.kwargs
@@ -199,7 +208,7 @@ async def test_deprecate_metric_already_deprecated_rejected():
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DEPRECATED"))
 
     with pytest.raises(BusinessError):
-        await svc.deprecate_metric("sales_gmv_daily", "x", actor_id=1)
+        await svc.deprecate_metric("sales_gmv_daily", "x", actor_id=1, role="metric_owner")
 
 
 async def test_list_metrics_pagination_offset():
@@ -229,7 +238,7 @@ async def test_review_compliance_blocks_owner_self_review():
     repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(owner_id=7))
 
     with pytest.raises(BusinessError) as exc:
-        await svc.review_compliance("sales_gmv_daily", actor_id=7)
+        await svc.review_compliance("sales_gmv_daily", actor_id=7, role="domain_admin")
     assert exc.value.error_code == "SELF_REVIEW_BLOCKED"
     repo.update_with_optimistic_lock.assert_not_awaited()
 
@@ -241,6 +250,6 @@ async def test_review_compliance_allows_non_owner():
         return_value=make_metric(owner_id=7, compliance_reviewed=True)
     )
 
-    result = await svc.review_compliance("sales_gmv_daily", actor_id=99)
+    result = await svc.review_compliance("sales_gmv_daily", actor_id=99, role="domain_admin")
     assert result.compliance_reviewed is True
     repo.update_with_optimistic_lock.assert_awaited_once()

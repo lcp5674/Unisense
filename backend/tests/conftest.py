@@ -19,7 +19,7 @@ os.environ.setdefault("UNISENSE_JWT_SECRET", "test-secret-key-for-unit-tests")
 os.environ.setdefault("UNISENSE_ENVIRONMENT", "test")
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -69,6 +69,8 @@ def make_metric(**overrides: object) -> Metric:
         "approver_id": None,
         "pii_flag": False,
         "compliance_reviewed": False,
+        "emergency_publish": False,
+        "pending_conflict": False,
         "effective_version": None,
         "consumption_guide": None,
         "batch_id": None,
@@ -89,7 +91,7 @@ def make_metric(**overrides: object) -> Metric:
 def make_create_payload(**overrides: object) -> dict:
     """构造合法的 MetricCreate 请求体（owner_id 来自鉴权，不在体内）。"""
     defaults: dict[str, object] = {
-        "metric_code": "sales_gmv_daily",
+        "metric_code": "sales_gmv_amount_daily",
         "name": "每日 GMV",
         "domain": "sales",
         "type": "atomic",
@@ -122,10 +124,18 @@ def make_create_payload(**overrides: object) -> dict:
 
 @pytest.fixture
 async def client():
-    """ASGI 测试客户端：覆盖 DB 会话与当前用户依赖。"""
+    """ASGI 测试客户端：覆盖 DB 会话与当前用户依赖。
+
+    会话用 AsyncMock（非 MagicMock）：API 层的 ``await db.commit()`` 属真实契约，
+    不能让无法 await 的 MagicMock 掩盖「写操作未提交」类回归（对齐 D10 §6.3）。
+    """
 
     async def fake_db():
-        yield MagicMock()
+        session = AsyncMock()
+        # write_audit / ORM 以同步方式调用 session.add（不被 await），用普通 Mock 避免
+        # AsyncMock 自动生成协程导致的「coroutine never awaited」告警
+        session.add = MagicMock()
+        yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="metric_owner")
