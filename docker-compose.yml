@@ -51,16 +51,31 @@ services:
     image: elasticsearch:8.15.0
     environment:
       - discovery.type=single-node
-      - xpack.security.enabled=false
+      - xpack.security.enabled=true
+      - ELASTIC_PASSWORD=${UNISENSE_ES_PASSWORD:-es_changeme}
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
     ports: ["19200:9200"]
     volumes:
       - es_data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf -u elastic:${UNISENSE_ES_PASSWORD:-es_changeme} http://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
+
+  # ---- Elasticsearch security setup (create keystore + passwords) ----
+  elasticsearch-setup:
+    image: elasticsearch:8.15.0
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: >
+      bash -c '
+        echo "Elasticsearch security already configured via ELASTIC_PASSWORD env var."
+        echo "Built-in elastic user password: ${UNISENSE_ES_PASSWORD:-es_changeme}"
+        echo "Setup complete."
+      '
 
   redis:
     image: redis:7-alpine
@@ -151,6 +166,8 @@ services:
       UNISENSE_NEO4J_USER: ${UNISENSE_NEO4J_USER:-neo4j}
       UNISENSE_NEO4J_PASSWORD: ${UNISENSE_NEO4J_PASSWORD:-test1234}
       UNISENSE_ES_URL: http://elasticsearch:9200
+      UNISENSE_ES_USERNAME: elastic
+      UNISENSE_ES_PASSWORD: ${UNISENSE_ES_PASSWORD:-es_changeme}
       # OLAP 可选，默认空（consume 查询会降级 503）
       UNISENSE_OLAP_URL: ${UNISENSE_OLAP_URL:-}
       # JWT 密钥（生产必须通过环境变量注入强密钥）
@@ -171,11 +188,19 @@ services:
       UNISENSE_FERNET_KEY: ${UNISENSE_FERNET_KEY:-}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request,sys;
+          sys.exit(0 if
+          urllib.request.urlopen('http://localhost:8000/health',timeout=3).status
+          == 200 else 1)
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 40s
 
   frontend:
     build:
@@ -192,6 +217,12 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
+    # 覆盖 Dockerfile 的健康检查：用显式 IPv4（localhost 在 nginx 容器内可能解析到 ::1）
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
 
 volumes:
   mysql_data:
