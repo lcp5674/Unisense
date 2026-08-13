@@ -52,6 +52,8 @@ dependencies = [
     "httpx~=0.27.0",
     # 通知邮件外发（SMTP）
     "aiosmtplib~=3.0.1",
+    # 审计归档对象存储（S3 兼容 MinIO，SigV4 签名）
+    "minio~=7.2.0",
     # 工具
     "python-dateutil~=2.9.0",
     "pyyaml~=6.0",

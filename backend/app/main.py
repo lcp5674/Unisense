@@ -137,14 +137,26 @@ def _validate_config() -> None:
 
 
 #: 业务事件类型（quality/conflict/governance）→ 通知闭环订阅集合（TD §5.5）
+#: 必须与各服务 EventBus 实际发布的事件类型完全一致，否则事件永不进入通知闭环：
+#:   conflict 发布 conflict_open/conflict_ruled/conflict_escalated/pii_conflict
+#:   （services/conflict/service.py）
+#:   governance 发布 grant.*/classification.*/pii.*（services/governance/*）
+#:   quality 发布 quality.anomaly/reconciliation.alert/benchmark.imported
+#:   （services/quality/*）
 _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "quality.anomaly",
-    "conflict.detected",
-    "conflict.arbitrated",
-    "conflict.escalated",
+    "reconciliation.alert",
+    "benchmark.imported",
+    "conflict_open",
+    "conflict_ruled",
+    "conflict_escalated",
+    "pii_conflict",
     "grant.granted",
     "grant.revoked",
-    "pii.review_required",
+    "grant.expired",
+    "pii.reviewed",
+    "pii.propagated",
+    "classification.changed",
     "classification.done",
     "escalation.triggered",
 )

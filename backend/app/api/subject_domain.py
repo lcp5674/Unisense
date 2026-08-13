@@ -13,6 +13,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import ALL_ROLES, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.exceptions import BusinessError, NotFoundError
 from app.db.mysql import get_db_session as get_session
@@ -29,18 +30,22 @@ logger = structlog.get_logger("unisense.api.subject_domain")
 
 router = APIRouter(prefix="/domains", tags=["主题域管理"])
 
+#: 域管理写权限：platform_admin + domain_admin（与 docstring/plan 声明一致）。
+_ADMIN_DEPS = [Depends(require_roles("platform_admin", "domain_admin"))]
+#: 域查询读权限：全部已登录角色。
+_READ_DEPS = [Depends(require_roles(*ALL_ROLES))]
+
 
 def _get_service(db: AsyncSession = Depends(get_session)) -> SubjectDomainService:
     return SubjectDomainService(db)
 
 
-def _require_admin(role: str | None = None) -> None:
-    """简易 RBAC：仅 platform_admin / domain_admin 可管理。"""
-    # TODO: 接入真实 RBAC 中间件后替换
-    pass
-
-
-@router.get("/", response_model=ApiResponse[list[SubjectDomainTreeNode]], summary="查询域树")
+@router.get(
+    "/",
+    response_model=ApiResponse[list[SubjectDomainTreeNode]],
+    summary="查询域树",
+    dependencies=_READ_DEPS,
+)
 async def list_domain_tree(
     status: str | None = None,
     svc: SubjectDomainService = Depends(_get_service),
@@ -50,7 +55,12 @@ async def list_domain_tree(
     return ok(data=data, trace_id=trace_id)
 
 
-@router.get("/{code}", response_model=ApiResponse[SubjectDomainResponse], summary="获取域详情")
+@router.get(
+    "/{code}",
+    response_model=ApiResponse[SubjectDomainResponse],
+    summary="获取域详情",
+    dependencies=_READ_DEPS,
+)
 async def get_domain(
     code: str,
     svc: SubjectDomainService = Depends(_get_service),
@@ -65,13 +75,13 @@ async def get_domain(
     response_model=ApiResponse[SubjectDomainResponse],
     status_code=status.HTTP_201_CREATED,
     summary="创建域节点",
+    dependencies=_ADMIN_DEPS,
 )
 async def create_domain(
     data: SubjectDomainCreate,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[SubjectDomainResponse]:
-    _require_admin()
     try:
         domain = await svc.create_domain(data)
         await svc._db.commit()
@@ -85,14 +95,18 @@ async def create_domain(
         raise HTTPException(status_code=404, detail=exc.message) from exc
 
 
-@router.put("/{code}", response_model=ApiResponse[SubjectDomainResponse], summary="更新域")
+@router.put(
+    "/{code}",
+    response_model=ApiResponse[SubjectDomainResponse],
+    summary="更新域",
+    dependencies=_ADMIN_DEPS,
+)
 async def update_domain(
     code: str,
     data: SubjectDomainUpdate,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[SubjectDomainResponse]:
-    _require_admin()
     try:
         domain = await svc.update_domain(code, data)
         await svc._db.commit()
@@ -107,6 +121,7 @@ async def update_domain(
     "/{code}/status",
     response_model=ApiResponse[SubjectDomainResponse],
     summary="启用/停用域",
+    dependencies=_ADMIN_DEPS,
 )
 async def toggle_domain_status(
     code: str,
@@ -114,7 +129,6 @@ async def toggle_domain_status(
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[SubjectDomainResponse]:
-    _require_admin()
     try:
         if action == "activate":
             domain = await svc.activate_domain(code)
@@ -128,13 +142,17 @@ async def toggle_domain_status(
         raise HTTPException(status_code=400, detail=exc.message) from exc
 
 
-@router.delete("/{code}", response_model=ApiResponse[dict[str, str]], summary="删除域")
+@router.delete(
+    "/{code}",
+    response_model=ApiResponse[dict[str, str]],
+    summary="删除域",
+    dependencies=_ADMIN_DEPS,
+)
 async def delete_domain(
     code: str,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, str]]:
-    _require_admin()
     try:
         await svc.delete_domain(code)
         await svc._db.commit()
@@ -148,6 +166,7 @@ async def delete_domain(
     "/{code}/defaults",
     response_model=ApiResponse[dict[str, Any]],
     summary="获取域默认值预设",
+    dependencies=_READ_DEPS,
 )
 async def get_domain_defaults(
     code: str,
@@ -162,6 +181,7 @@ async def get_domain_defaults(
     "/{code}/defaults",
     response_model=ApiResponse[dict[str, Any]],
     summary="更新域默认值预设",
+    dependencies=_ADMIN_DEPS,
 )
 async def update_domain_defaults(
     code: str,
@@ -169,7 +189,6 @@ async def update_domain_defaults(
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, Any]]:
-    _require_admin()
     try:
         domain = await svc.update_defaults(code, data)
         await svc._db.commit()
@@ -183,6 +202,7 @@ async def update_domain_defaults(
     "/{code}/metrics",
     response_model=ApiResponse[list[dict[str, Any]]],
     summary="获取该域下指标列表",
+    dependencies=_READ_DEPS,
 )
 async def get_domain_metrics(
     code: str,

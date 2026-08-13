@@ -54,7 +54,7 @@ class GlossaryService(BaseService):
         self._session = session
         self._repo = GlossaryRepository(session)
 
-    async def create_term(self, data: TermCreate, actor_id: int) -> TermResponse:
+    async def create_term(self, data: TermCreate, actor_id: int | None = None) -> TermResponse:
         existing = await self._repo.get_term(data.term_code)
         if existing is not None:
             raise ConflictError(f"术语编码已存在: {data.term_code}", error_code="TERM_EXISTS")
@@ -66,10 +66,11 @@ class GlossaryService(BaseService):
             synonyms=list(data.synonyms),
             boundary=data.boundary,
             status=TermStatus.DRAFT.value,
-            owner_id=data.owner_id,
+            # PLAT-2: 认证身份优先，client 传入的 owner_id 仅作降级
+            owner_id=actor_id if actor_id is not None else data.owner_id,
         )
         term = await self._repo.save_term(term)
-        await self._snapshot(term, actor_id, "create")
+        await self._snapshot(term, actor_id or 0, "create")
         await self._detect_conflicts(term)
         await self._repo.commit()
         return TermResponse.from_model(term)

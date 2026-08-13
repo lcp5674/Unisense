@@ -43,7 +43,9 @@ class DimensionService(BaseService):
         self._session = session
         self._repo = DimensionRepository(session)
 
-    async def create_dimension(self, data: DimensionCreate) -> Dimension:
+    async def create_dimension(
+        self, data: DimensionCreate, actor_id: int | None = None
+    ) -> Dimension:
         if await self._repo.get_dimension(data.dim_code) is not None:
             raise ConflictError(f"维度编码已存在: {data.dim_code}", error_code="DIM_EXISTS")
         dim = Dimension(
@@ -52,7 +54,8 @@ class DimensionService(BaseService):
             domain=data.domain,
             type=data.type,
             description=data.description,
-            owner_id=data.owner_id,
+            # PLAT-2: 认证身份优先，client 传入的 owner_id 仅作降级
+            owner_id=actor_id if actor_id is not None else data.owner_id,
             status=DimensionStatus.DRAFT.value,
         )
         return await self._repo.save_dimension(dim)
@@ -114,13 +117,16 @@ class DimensionService(BaseService):
         await self._require(dim_code)
         return await self._repo.list_members(dim_code)
 
-    async def create_mapping(self, data: DimensionMappingCreate) -> DimensionMapping:
+    async def create_mapping(
+        self, data: DimensionMappingCreate, actor_id: int | None = None
+    ) -> DimensionMapping:
         mapping = DimensionMapping(
             source_dim_code=data.source_dim_code,
             target_dim_code=data.target_dim_code,
             mapping_type=data.mapping_type,
             expression=data.expression,
-            created_by=data.created_by,
+            # PLAT-2: 认证身份优先，client 传入的 created_by 仅作降级
+            created_by=actor_id if actor_id is not None else data.created_by,
         )
         return await self._repo.save_mapping(mapping)
 

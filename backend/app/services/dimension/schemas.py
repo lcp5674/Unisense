@@ -14,7 +14,8 @@ class DimensionCreate(BaseModel):
     domain: str
     type: str = "SCD1"
     description: str | None = None
-    owner_id: int
+    # PLAT-2: owner_id 允许客户端省略，服务端以认证身份覆盖（防越权指定责任人）。
+    owner_id: int | None = None
 
 
 class DimensionUpdate(BaseModel):
@@ -87,7 +88,8 @@ class DimensionMappingCreate(BaseModel):
     target_dim_code: str
     mapping_type: str
     expression: str | None = None
-    created_by: int
+    # PLAT-2: created_by 允许客户端省略，服务端以认证身份覆盖。
+    created_by: int | None = None
 
 
 class DimensionMappingResponse(BaseModel):
@@ -145,7 +147,8 @@ class ReconciliationSubmit(BaseModel):
 
 class ReconciliationReview(BaseModel):
     decision: str  # APPROVED | REJECTED
-    reviewer_id: int
+    # PLAT-2: reviewer_id 允许客户端省略，服务端以认证身份覆盖（防越权以他人名义复核）。
+    reviewer_id: int | None = None
 
 
 class ReconciliationResponse(BaseModel):

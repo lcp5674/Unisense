@@ -38,7 +38,7 @@ async def create_dimension(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await DimensionService(db).create_dimension(payload)
+    resp = await DimensionService(db).create_dimension(payload, actor_id=user.id)
     await write_audit(
         db,
         actor_id=user.id,
@@ -71,7 +71,7 @@ async def create_mapping(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await DimensionService(db).create_mapping(payload)
+    resp = await DimensionService(db).create_mapping(payload, actor_id=user.id)
     await write_audit(
         db,
         actor_id=user.id,

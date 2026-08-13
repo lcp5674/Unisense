@@ -26,6 +26,7 @@ from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
 from app.services.notify.escalation_tasks import check_escalation_retries
 from app.services.quality.tasks import run_quality_checks
+from app.tasks.audit_archive import audit_archive_task
 from app.tasks.semantic_tasks import (
     check_emergency_review_overdue,
     check_experimental_expiry,
@@ -130,6 +131,7 @@ class WorkerSettings:
         check_experimental_expiry,
         run_quality_checks,
         check_escalation_retries,
+        audit_archive_task,
     ]
     cron_jobs = [
         cron(
@@ -179,6 +181,13 @@ class WorkerSettings:
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
             second=0,
             run_at_startup=True,
+        ),
+        cron(
+            audit_archive_task,
+            name="audit-archive",
+            hour=2,
+            minute=0,
+            run_at_startup=False,
         ),
     ]
     on_startup = startup

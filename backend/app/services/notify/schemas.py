@@ -82,7 +82,8 @@ class EventLogResponse(BaseModel):
 
 
 class SubscriptionUpsert(BaseModel):
-    user_id: int
+    # PLAT-2: user_id 允许客户端省略，服务端以认证身份覆盖（防越权绑定他人订阅）。
+    user_id: int | None = None
     channel: str
     event_type: str
     enabled: bool = True

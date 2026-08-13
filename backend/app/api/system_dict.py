@@ -13,6 +13,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import ALL_ROLES, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.exceptions import BusinessError, NotFoundError
 from app.db.mysql import get_db_session as get_session
@@ -23,18 +24,22 @@ logger = structlog.get_logger("unisense.api.system_dict")
 
 router = APIRouter(prefix="/dicts", tags=["系统字典管理"])
 
+#: 字典管理写权限：仅 platform_admin（与 docstring/plan 声明一致）。
+_ADMIN_DEPS = [Depends(require_roles("platform_admin"))]
+#: 字典查询读权限：全部已登录角色。
+_READ_DEPS = [Depends(require_roles(*ALL_ROLES))]
+
 
 def _get_service(db: AsyncSession = Depends(get_session)) -> SystemDictService:
     return SystemDictService(db)
 
 
-def _require_admin() -> None:
-    """简易 RBAC：仅 platform_admin 可管理字典。"""
-    # TODO: 接入真实 RBAC 中间件后替换
-    pass
-
-
-@router.get("/types", response_model=ApiResponse[list[str]], summary="列出所有字典类型")
+@router.get(
+    "/types",
+    response_model=ApiResponse[list[str]],
+    summary="列出所有字典类型",
+    dependencies=_READ_DEPS,
+)
 async def list_dict_types(
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
@@ -47,6 +52,7 @@ async def list_dict_types(
     "/{dict_type}",
     response_model=ApiResponse[list[DictItemResponse]],
     summary="获取某类型字典列表（仅active）",
+    dependencies=_READ_DEPS,
 )
 async def list_dict_items(
     dict_type: str,
@@ -62,6 +68,7 @@ async def list_dict_items(
     "/{dict_type}/all",
     response_model=ApiResponse[list[DictItemResponse]],
     summary="获取某类型全部字典项（含inactive）",
+    dependencies=_READ_DEPS,
 )
 async def list_all_dict_items(
     dict_type: str,
@@ -78,6 +85,7 @@ async def list_all_dict_items(
     response_model=ApiResponse[DictItemResponse],
     status_code=status.HTTP_201_CREATED,
     summary="新增字典项",
+    dependencies=_ADMIN_DEPS,
 )
 async def create_dict_item(
     dict_type: str,
@@ -85,7 +93,6 @@ async def create_dict_item(
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[DictItemResponse]:
-    _require_admin()
     try:
         item = await svc.create_item(dict_type, data)
         ref_count = await svc.get_ref_count(dict_type, item.code)
@@ -100,6 +107,7 @@ async def create_dict_item(
     "/{dict_type}/{code}",
     response_model=ApiResponse[DictItemResponse],
     summary="更新字典项",
+    dependencies=_ADMIN_DEPS,
 )
 async def update_dict_item(
     dict_type: str,
@@ -108,7 +116,6 @@ async def update_dict_item(
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[DictItemResponse]:
-    _require_admin()
     try:
         item = await svc.update_item(dict_type, code, data)
         ref_count = await svc.get_ref_count(dict_type, code)
@@ -123,6 +130,7 @@ async def update_dict_item(
     "/{dict_type}/{code}/status",
     response_model=ApiResponse[DictItemResponse],
     summary="启用/停用字典项",
+    dependencies=_ADMIN_DEPS,
 )
 async def toggle_dict_item_status(
     dict_type: str,
@@ -131,7 +139,6 @@ async def toggle_dict_item_status(
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[DictItemResponse]:
-    _require_admin()
     try:
         if action == "activate":
             item = await svc.activate_item(dict_type, code)
@@ -149,6 +156,7 @@ async def toggle_dict_item_status(
     "/{dict_type}/{code}",
     response_model=ApiResponse[dict[str, str]],
     summary="删除字典项",
+    dependencies=_ADMIN_DEPS,
 )
 async def delete_dict_item(
     dict_type: str,
@@ -156,7 +164,6 @@ async def delete_dict_item(
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, str]]:
-    _require_admin()
     try:
         await svc.delete_item(dict_type, code)
         await svc._db.commit()
@@ -170,6 +177,7 @@ async def delete_dict_item(
     "/{dict_type}/{code}/ref-count",
     response_model=ApiResponse[dict[str, int]],
     summary="获取字典项引用计数",
+    dependencies=_READ_DEPS,
 )
 async def get_dict_item_ref_count(
     dict_type: str,

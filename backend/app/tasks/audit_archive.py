@@ -34,102 +34,102 @@ async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
     步骤：
     1. 查询 created_at < 30天前且 archived=False 的 audit_log
     2. 批量导出为 JSONL 格式
-    3. 上传至 MinIO
+    3. 上传至 MinIO（minio-py，真实 SigV4 签名）
     4. 更新 archived=True
     5. 记录 AuditArchiveLog
+
+    任务自建 DB 会话（对齐 quality/semantic tasks 模式），不依赖 ctx 注入 db。
     """
-    db = ctx.get("db")
-    if db is None:
-        logger.error("audit_archive_task: db session not provided in context")
-        return {"status": "FAILED", "error": "no db session"}
+    from app.db.mysql import async_session_factory
 
-    cutoff = datetime.now(UTC) - timedelta(days=ARCHIVE_RETENTION_DAYS)
-    archive_date = datetime.now(UTC)
+    async with async_session_factory() as db:
+        cutoff = datetime.now(UTC) - timedelta(days=ARCHIVE_RETENTION_DAYS)
+        archive_date = datetime.now(UTC)
 
-    # 1. 查询待归档记录
-    stmt = (
-        select(AuditLog)
-        .where(AuditLog.created_at < cutoff, AuditLog.archived.is_(False))
-        .limit(ARCHIVE_BATCH_SIZE)
-    )
-    result = await db.execute(stmt)
-    rows = result.scalars().all()
+        # 1. 查询待归档记录
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.created_at < cutoff, AuditLog.archived.is_(False))
+            .limit(ARCHIVE_BATCH_SIZE)
+        )
+        result = await db.execute(stmt)
+        rows = result.scalars().all()
 
-    if not rows:
-        logger.info("audit_archive_task: no rows to archive")
-        return {"status": "SUCCESS", "rows_archived": 0}
+        if not rows:
+            logger.info("audit_archive_task: no rows to archive")
+            return {"status": "SUCCESS", "rows_archived": 0}
 
-    # 2. 导出为 JSONL
-    jsonl_data = io.BytesIO()
-    for row in rows:
-        record = {
-            "id": row.id,
-            "actor_id": row.actor_id,
-            "action": row.action,
-            "entity_type": row.entity_type,
-            "entity_id": row.entity_id,
-            "detail_json": row.detail_json,
-            "ip": row.ip,
-            "trace_id": row.trace_id,
-            "pii_access": row.pii_access,
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-        }
-        jsonl_data.write((json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
+        # 2. 导出为 JSONL
+        jsonl_data = io.BytesIO()
+        for row in rows:
+            record = {
+                "id": row.id,
+                "actor_id": row.actor_id,
+                "action": row.action,
+                "entity_type": row.entity_type,
+                "entity_id": row.entity_id,
+                "detail_json": row.detail_json,
+                "ip": row.ip,
+                "trace_id": row.trace_id,
+                "pii_access": row.pii_access,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            jsonl_data.write((json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
 
-    jsonl_bytes = jsonl_data.getvalue()
-    date_prefix = archive_date.strftime('%Y/%m/%d')
-    date_stamp = archive_date.strftime('%Y%m%d%H%M%S')
-    s3_key = f"audit-archive/{date_prefix}/audit_log_{date_stamp}.jsonl"
+        jsonl_bytes = jsonl_data.getvalue()
+        date_prefix = archive_date.strftime('%Y/%m/%d')
+        date_stamp = archive_date.strftime('%Y%m%d%H%M%S')
+        s3_key = f"audit-archive/{date_prefix}/audit_log_{date_stamp}.jsonl"
 
-    # 3. 上传至 MinIO
-    s3_size = len(jsonl_bytes)
-    upload_ok = await _upload_to_minio(s3_key, jsonl_bytes)
-    if not upload_ok:
-        # 记录失败日志
+        # 3. 上传至 MinIO
+        s3_size = len(jsonl_bytes)
+        upload_ok = await _upload_to_minio(s3_key, jsonl_bytes)
+        if not upload_ok:
+            # 记录失败日志
+            archive_log = AuditArchiveLog(
+                archive_date=archive_date,
+                rows_archived=len(rows),
+                s3_key=s3_key,
+                s3_size_bytes=s3_size,
+                status="FAILED",
+                error_message="MinIO upload failed",
+            )
+            db.add(archive_log)
+            await db.commit()
+            return {"status": "FAILED", "error": "MinIO upload failed", "rows": len(rows)}
+
+        # 4. 更新 archived 标志
+        row_ids = [row.id for row in rows]
+        await db.execute(
+            update(AuditLog).where(AuditLog.id.in_(row_ids)).values(archived=True)
+        )
+
+        # 5. 记录 AuditArchiveLog
         archive_log = AuditArchiveLog(
             archive_date=archive_date,
             rows_archived=len(rows),
             s3_key=s3_key,
             s3_size_bytes=s3_size,
-            status="FAILED",
-            error_message="MinIO upload failed",
+            status="SUCCESS",
+            completed_at=datetime.now(UTC),
         )
         db.add(archive_log)
         await db.commit()
-        return {"status": "FAILED", "error": "MinIO upload failed", "rows": len(rows)}
 
-    # 4. 更新 archived 标志
-    row_ids = [row.id for row in rows]
-    await db.execute(
-        update(AuditLog).where(AuditLog.id.in_(row_ids)).values(archived=True)
-    )
-
-    # 5. 记录 AuditArchiveLog
-    archive_log = AuditArchiveLog(
-        archive_date=archive_date,
-        rows_archived=len(rows),
-        s3_key=s3_key,
-        s3_size_bytes=s3_size,
-        status="SUCCESS",
-        completed_at=datetime.now(UTC),
-    )
-    db.add(archive_log)
-    await db.commit()
-
-    logger.info(
-        "audit_archive_task: archived %d rows to %s (%d bytes)",
-        len(rows), s3_key, s3_size,
-    )
-    return {
-        "status": "SUCCESS",
-        "rows_archived": len(rows),
-        "s3_key": s3_key,
-        "s3_size_bytes": s3_size,
-    }
+        logger.info(
+            "audit_archive_task: archived %d rows to %s (%d bytes)",
+            len(rows), s3_key, s3_size,
+        )
+        return {
+            "status": "SUCCESS",
+            "rows_archived": len(rows),
+            "s3_key": s3_key,
+            "s3_size_bytes": s3_size,
+        }
 
 
 async def _upload_to_minio(key: str, data: bytes) -> bool:
-    """上传数据到 MinIO（S3 兼容）。
+    """上传数据到 MinIO（S3 兼容，minio-py SigV4 签名）。
 
     Args:
         key: S3 对象键。
@@ -139,7 +139,7 @@ async def _upload_to_minio(key: str, data: bytes) -> bool:
         上传是否成功。
     """
     try:
-        import httpx
+        from minio import Minio
 
         endpoint = settings.minio_endpoint
         access_key = settings.minio_access_key
@@ -150,48 +150,27 @@ async def _upload_to_minio(key: str, data: bytes) -> bool:
             logger.warning("MinIO not configured, skipping upload")
             return False
 
-        # 简化上传：使用 MinIO S3 兼容 API
-        # 生产环境应使用 minio-py 或 boto3
-        url = f"http://{endpoint}/{bucket}/{key}"
+        client = Minio(
+            endpoint,
+            access_key=access_key,
+            secret_key=secret_key,
+            secure=endpoint.startswith("https://"),
+        )
+        if not client.bucket_exists(bucket):
+            client.make_bucket(bucket)
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # 简化：直接 PUT（生产应使用正确的 S3 签名）
-            resp = await client.put(
-                url,
-                content=data,
-                headers={
-                    "Content-Type": "application/jsonl",
-                    "X-Auth-Type": "minio",
-                },
-            )
-            if resp.status_code in (200, 201, 204):
-                return True
-            logger.warning("MinIO upload failed: %d %s", resp.status_code, resp.text[:200])
-            return False
+        client.put_object(
+            bucket,
+            key,
+            io.BytesIO(data),
+            length=len(data),
+            content_type="application/jsonl",
+        )
+        return True
     except Exception as exc:
         logger.warning("MinIO upload error: %s", exc)
         return False
 
 
-# Arq worker 配置
-async def startup(ctx: dict[str, Any]) -> None:
-    """Arq worker 启动钩子。"""
-    logger.info("audit_archive_worker started")
-
-
-async def shutdown(ctx: dict[str, Any]) -> None:
-    """Arq worker 关闭钩子。"""
-    logger.info("audit_archive_worker stopped")
-
-
-# Arq 定时任务配置（每天凌晨 2 点执行）
-class AuditArchiveSettings:
-    """Arq 定时任务配置。"""
-
-    functions = [audit_archive_task]
-    on_startup = startup
-    on_shutdown = shutdown
-    cron_jobs = [
-        # 每天凌晨 2 点执行
-        {"function": audit_archive_task, "cron": "0 2 * * *"},
-    ]
+# 注意：audit_archive_task 已在统一 worker（app/services/collector/worker.py）注册，
+# 此处不再定义独立 AuditArchiveSettings，避免 cron 定义分裂（dict 格式不受 arq 支持）。

@@ -723,7 +723,8 @@ class GovernanceService(BaseService):
         if metric is None:
             raise NotFoundError("指标不存在", ctx={"metric_code": metric_code})
 
-        # 检查上游是否含 PII
+        # 检查上游是否含 PII：优先显式传入的 source_column 标记，
+        # 其次检查通过 lineage_edge 指向本指标的上游节点是否带 PII。
         has_upstream_pii = False
         if upstream_source_columns:
             for col in upstream_source_columns:
@@ -733,9 +734,12 @@ class GovernanceService(BaseService):
 
         if not has_upstream_pii:
             # 也检查通过 lineage_edge 传入的 PII 继承
-            stmt = select(LineageEdge).where(LineageEdge.target_node == metric_code)
+            stmt = select(LineageEdge).where(
+                LineageEdge.target_node == metric_code,
+                LineageEdge.deleted_at.is_(None),
+            )
             edges = (await self._db.execute(stmt)).scalars().all()
-        for _edge in edges:
+            for _edge in edges:
                 # 检查 source_node 对应的 catalog 是否有 PII
                 upstream_metric = await self._repo.get_metric_by_code(_edge.source_node)
                 if upstream_metric and upstream_metric.pii_flag:
@@ -758,13 +762,16 @@ class GovernanceService(BaseService):
             metric.definition_json = definition
             changed = True
 
-        # 标记 lineage_edge.pii_inherited
-        stmt = select(LineageEdge).where(LineageEdge.target_node == metric_code)
+        # 标记 lineage_edge.pii_inherited=True（列已存在于 0017 迁移，R10-04/0019）
+        stmt = select(LineageEdge).where(
+            LineageEdge.target_node == metric_code,
+            LineageEdge.deleted_at.is_(None),
+        )
         edges = (await self._db.execute(stmt)).scalars().all()
         for _edge in edges:
-            # 给 edge 添加 pii_inherited 属性（存入 confidence 或扩展属性）
-            # LineageEdge 没有 pii_inherited 列，迁移中添加
-            pass
+            if not _edge.pii_inherited:
+                _edge.pii_inherited = True
+                changed = True
 
         if changed:
             await self._safe_publish(

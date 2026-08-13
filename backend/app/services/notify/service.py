@@ -111,8 +111,9 @@ class NotifyService(BaseService):
         if level not in _ALLOWED_LEVELS:
             level = "INFO"
         source = event_type.split(".", 1)[0]
-        if source == "conflict":
-            source = "semantic"  # 白名单无 conflict，语义域承载冲突事件
+        if source == "conflict" or event_type.startswith("conflict_"):
+            # 白名单无 conflict，语义域承载冲突事件（兼容 conflict_open 等下划线命名）
+            source = "semantic"
         if source not in _ALLOWED_SOURCES:
             source = "system"
         try:
@@ -380,6 +381,8 @@ class NotifyService(BaseService):
     ) -> SubscriptionPref:
         # PLAT-2: 以服务端认证身份 actor_id 覆盖 client 传入的 user_id
         user_id = actor_id if actor_id is not None else data.user_id
+        if user_id is None:
+            raise ValueError("user_id 缺失：服务端认证身份与请求体均未提供")
         existing = await self._repo.find_subscription(user_id, data.channel, data.event_type)
         if existing is not None:
             existing.enabled = data.enabled

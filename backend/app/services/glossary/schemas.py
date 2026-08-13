@@ -22,7 +22,8 @@ class TermCreate(BaseModel):
     domain: str
     synonyms: list[str] = []
     boundary: str | None = None
-    owner_id: int
+    # PLAT-2: owner_id 允许客户端省略，服务端以认证身份覆盖（防越权指定责任人）。
+    owner_id: int | None = None
 
 
 class TermUpdate(BaseModel):

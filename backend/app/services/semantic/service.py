@@ -351,6 +351,29 @@ class MetricService(BaseService):
                 metric_code=metric.metric_code,
             )
 
+        # PII 血缘传播（对齐 US13/TD §12.6）：创建时若声明的上游字段带 PII 标记，
+        # 则联动治理服务标记指标 pii_flag + lineage_edge.pii_inherited。
+        # best-effort：治理/血缘不可用不阻塞指标创建。
+        try:
+            from app.services.governance.service import GovernanceService
+
+            upstream_columns = [
+                {"column": f.get("name") or f.get("column"), "pii": bool(f.get("pii"))}
+                for f in (definition.get("source_fields") or [])
+                if isinstance(f, dict)
+            ]
+            if upstream_columns:
+                await GovernanceService(self._db).propagate_pii_to_metric(
+                    metric.metric_code,
+                    upstream_source_columns=upstream_columns,
+                )
+                await self._db.flush()
+        except Exception:  # noqa: BLE001 - best-effort 不阻断创建
+            logger.warning(
+                "metric_pii_propagation_failed",
+                metric_code=metric.metric_code,
+            )
+
         return metric
 
     async def get_metric(self, metric_code: str) -> Metric:
