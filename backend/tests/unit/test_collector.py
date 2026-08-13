@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -340,6 +341,38 @@ async def test_repo_list_sources_no_crash_on_filters():
     )
     assert total == 1
     assert items
+
+
+async def test_repo_list_catalogs_keyword_table_and_field_level():
+    """keyword 为表+字段级：entity_name OR CAST(schema_json) 双条件过滤。"""
+    s = _session(all_rows=[MagicMock()], scalar=1)
+    repo = CollectorRepository(s)
+    params = SimpleNamespace(
+        source_id=None, entity_type=None, sensitivity_level=None,
+        keyword="order_id", page=1, page_size=20,
+    )
+    items, total = await repo.list_catalogs(params)
+    assert total == 1
+    assert items
+    stmt = s.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "schema_json" in compiled
+    # 关键词含 _ 通配符，转义后为 order\_id（防模糊放大）
+    assert "order\\_id" in compiled
+
+
+async def test_repo_list_catalogs_keyword_escapes_wildcards():
+    """LIKE 通配符（% / _）须转义，防模糊放大。"""
+    s = _session(all_rows=[], scalar=0)
+    repo = CollectorRepository(s)
+    params = SimpleNamespace(
+        source_id=None, entity_type=None, sensitivity_level=None,
+        keyword="100%_x", page=1, page_size=20,
+    )
+    await repo.list_catalogs(params)
+    stmt = s.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "100\\%\\_x" in compiled
 
 
 # ---------- US6: 空 schema 告警 ----------

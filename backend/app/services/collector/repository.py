@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import String, cast, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -218,7 +218,15 @@ class CollectorRepository:
         if params.sensitivity_level:
             base = base.where(DBCatalog.sensitivity_level == params.sensitivity_level)
         if params.keyword:
-            base = base.where(DBCatalog.entity_name.ilike(f"%{params.keyword}%"))
+            # 表+字段级搜索：entity_name 模糊 OR schema_json 字段名/注释模糊（CAST 跨方言）
+            # LIKE 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
+            escaped = params.keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            base = base.where(
+                or_(
+                    DBCatalog.entity_name.ilike(f"%{escaped}%"),
+                    cast(DBCatalog.schema_json, String).ilike(f"%{escaped}%"),
+                )
+            )
         count = await self._db.scalar(select(func.count()).select_from(base.subquery()))
         total = int(count) if count is not None else 0
         stmt = (
