@@ -20,6 +20,8 @@ import {
   AutoSuggestResponse,
   ClientCreateRequest,
   ClientCreatedResponse,
+  ConflictCheckRequest,
+  ConflictCheckResult,
   ClientResponse,
   CollectResult,
   ConflictListResponse,
@@ -530,16 +532,11 @@ export async function escalateConflict(conflictId: string, note: string): Promis
   });
 }
 
-// 主动冲突检测：创建指标前的口径冲突扫描
-export async function checkConflict(body: {
-  metric_code?: string;
-  name?: string;
-  domain?: string;
-  definition?: Record<string, unknown>;
-}): Promise<ConflictListResponse> {
-  return request<ConflictListResponse>(`${API_BASE}/conflicts/check`, {
+// 主动冲突检测：创建指标前的口径冲突扫描（POST /conflicts/check）
+export async function checkConflict(req: ConflictCheckRequest): Promise<ConflictCheckResult> {
+  return request<ConflictCheckResult>(`${API_BASE}/conflicts/check`, {
     method: "POST",
-    body: JSON.stringify(body),
+    body: JSON.stringify(req),
   });
 }
 

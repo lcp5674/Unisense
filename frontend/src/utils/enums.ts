@@ -189,3 +189,20 @@ export const ENTITY_TYPE_LABEL: Record<string, string> = {
   quality_rule: "质量规则",
   notification: "通知",
 };
+
+// ---- 冲突类型（conflict/schemas.py ConflictType）----
+
+export const CONFLICT_TYPE_LABEL: Record<string, string> = {
+  NAME_CONFLICT: "同名不同义",
+  SEMANTIC_DRIFT: "语义漂移",
+  PII_CONFLICT: "PII 冲突",
+  DEFINITION_DIVERGENCE: "定义分歧",
+};
+
+// ---- 冲突严重度 ----
+
+export const CONFLICT_SEVERITY_LABEL: Record<string, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};

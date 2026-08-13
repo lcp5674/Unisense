@@ -177,6 +177,37 @@ export interface ConflictListResponse {
   page_size: number;
 }
 
+// 冲突预检（POST /conflicts/check，backend/app/services/conflict/schemas.py）
+export interface ConflictMetricInput {
+  metric_code: string;
+  domain?: string;
+  definition?: string;
+  source_tables?: string[];
+  has_pii?: boolean;
+  pii_authorized?: boolean;
+  metric_id?: number | null;
+}
+
+export interface ConflictCheckRequest {
+  candidate: ConflictMetricInput;
+  existing?: ConflictMetricInput[];
+}
+
+export interface ConflictDetection {
+  conflict_type: ConflictType;
+  score: number;
+  existing_code: string;
+  existing_metric_id?: number | null;
+  severity: string;
+  block_publish: boolean;
+  reason?: string;
+  llm_confirmed?: boolean;
+}
+
+export interface ConflictCheckResult {
+  detections: ConflictDetection[];
+}
+
 // 血缘边（backend/app/services/lineage/schemas.py）
 export interface LineageEdge {
   id: number;

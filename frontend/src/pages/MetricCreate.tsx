@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Button, Card, Checkbox, Cascader, Col, Form, Input, Row, Segmented, Select, Space, Spin, Typography, App as AntApp, Tag,
+  Alert, Button, Card, Checkbox, Cascader, Col, Form, Input, Row, Segmented, Select, Space, Spin, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, fetchAssetSearch, autoSuggestMetric, listDomainTree, listDictItems, UnisenseApiError,
+  createMetric, fetchAssetSearch, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricType, MetricTier, SubjectDomainTreeNode } from "../types";
+import type { MetricCreateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult } from "../types";
+import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 
 const { Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -59,6 +60,10 @@ export function MetricCreate() {
   const [sourceTables, setSourceTables] = useState<string[]>([]);
   const [tableOptions, setTableOptions] = useState<{ value: string; label: string }[]>([]);
   const [tableSearching, setTableSearching] = useState(false);
+
+  // 冲突预检
+  const [prechecking, setPrechecking] = useState(false);
+  const [precheckResult, setPrecheckResult] = useState<ConflictCheckResult | null>(null);
 
   // 加载域树
   useEffect(() => {
@@ -172,6 +177,38 @@ export function MetricCreate() {
     try { def = values.definition ? JSON.parse(String(values.definition)) : {}; }
     catch { message.error("口径定义需为合法 JSON"); return null; }
     return { ...def, ...tables };
+  }
+
+  // 创建前冲突预检：构造 candidate 调 /conflicts/check，展示检测结果（不自动阻断）
+  async function handlePrecheck() {
+    const values = form.getFieldsValue();
+    if (!selectedDomain) { message.warning("请先选择业务域"); return; }
+    if (!values.metric_code) { message.warning("请填写指标编码"); return; }
+    setPrechecking(true);
+    setPrecheckResult(null);
+    try {
+      const result = await checkConflict({
+        candidate: {
+          metric_code: String(values.metric_code),
+          domain: selectedDomain,
+          definition: mode === "sql" ? sqlText.trim() : String(values.definition || ""),
+          source_tables: sourceTables,
+          has_pii: Boolean(values.pii_flag),
+        },
+      });
+      setPrecheckResult(result);
+      if (result.detections.length === 0) {
+        message.success("未检测到口径冲突，可安全创建");
+      } else if (result.detections.some((d) => d.block_publish)) {
+        message.warning(`检测到 ${result.detections.length} 项冲突（含阻断级），建议先处理再创建`);
+      } else {
+        message.warning(`检测到 ${result.detections.length} 项潜在冲突`);
+      }
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.code}）` : "冲突预检失败");
+    } finally {
+      setPrechecking(false);
+    }
   }
 
   async function handleSubmit(values: Record<string, unknown>) {
@@ -383,8 +420,32 @@ export function MetricCreate() {
             </Card>
 
             <Form.Item>
-              <Button type="primary" htmlType="submit" loading={loading} size="large">创建草稿</Button>
+              <Space>
+                <Button type="primary" htmlType="submit" loading={loading} size="large">创建草稿</Button>
+                <Button onClick={handlePrecheck} loading={prechecking} size="large">冲突预检</Button>
+              </Space>
             </Form.Item>
+
+            {precheckResult && precheckResult.detections.length > 0 && (
+              <Alert
+                type={precheckResult.detections.some((d) => d.block_publish) ? "error" : "warning"}
+                showIcon
+                message="冲突预检结果"
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 18 }}>
+                    {precheckResult.detections.map((d, idx) => (
+                      <li key={idx}>
+                        {enumLabel(CONFLICT_TYPE_LABEL, d.conflict_type)}：与
+                        <Tag style={{ margin: "0 4px" }}>{d.existing_code}</Tag>
+                        冲突（严重度 {enumLabel(CONFLICT_SEVERITY_LABEL, d.severity)}
+                        {d.block_publish ? " · 阻断发布" : ""}）
+                        {d.reason ? ` — ${d.reason}` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                }
+              />
+            )}
           </Space>
         </Form>
       </Card>

@@ -243,8 +243,8 @@ modules:
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "代码完成 + 单测(lint/type/unit)全绿 + 集成真实 MySQL@3307 通过(1 例) + 安全/混沌/可观测门禁(3 例)全绿。NL2SQL 语义锚定(已发布 Term+Metric 词表)+ 危险语义拦截(UNSAFE_QUERY 拒)。无新表(迁移 N/A)。§6.3 审查 High(3)/Med(6)/Low(2) 已于 2026-08-09 全量修复：审计写库置于 commit 前(PLAT-3 变体)、单写者串行化(ai M1)、所有写接口补 security_reverse 反向测；security_reverse 门禁恢复有效。待办: §1.5 人工 ratify。LLM 接入生产级补强（2026-08-12）：OpenAI 协议兼容客户端（services/llm/client.py 支持 openai/deepseek/qwen/ernie/kilo 多提供商，json_object 结构化输出 + confidence/reasoning/candidates + 熔断降级）、NL2SQL 真实走 LLM（anchored 词表锚定 + method=llm，网关不可达降级 keyword）、kilo.ai 网关接入（UNISENSE_LLM_BASE_URL/API_KEY/MODEL 环境变量，容器实跑 method=llm 验证）、P2 结构化输出 Schema 校验（LlmStructuredOutput）。门禁：643 unit / ruff 0 / mypy 0。提交 8906d50。"
-    updated: "2026-08-12"
+    note: "代码完成 + 单测(lint/type/unit)全绿 + 集成真实 MySQL@3307 通过(1 例) + 安全/混沌/可观测门禁(3 例)全绿。NL2SQL 语义锚定(已发布 Term+Metric 词表)+ 危险语义拦截(UNSAFE_QUERY 拒)。无新表(迁移 N/A)。§6.3 审查 High(3)/Med(6)/Low(2) 已于 2026-08-09 全量修复：审计写库置于 commit 前(PLAT-3 变体)、单写者串行化(ai M1)、所有写接口补 security_reverse 反向测；security_reverse 门禁恢复有效。待办: §1.5 人工 ratify。LLM 接入生产级补强（2026-08-12）：OpenAI 协议兼容客户端（services/llm/client.py 支持 openai/deepseek/qwen/ernie/kilo 多提供商，json_object 结构化输出 + confidence/reasoning/candidates + 熔断降级）、NL2SQL 真实走 LLM（anchored 词表锚定 + method=llm，网关不可达降级 keyword）、kilo.ai 网关接入（UNISENSE_LLM_BASE_URL/API_KEY/MODEL 环境变量，容器实跑 method=llm 验证）、P2 结构化输出 Schema 校验（LlmStructuredOutput）。门禁：643 unit / ruff 0 / mypy 0。提交 8906d50。性能优化（2026-08-13）：NL2SQL 结果加进程内 TTL 缓存（相同问句+指标范围命中，不重复打外部 LLM 网关，deepcopy 防污染）；k6 实测 ai P95 从 1235ms→45.6ms（1350 req 0 失败，max=159ms），perf_baseline_live_2026-08-13.txt 已更新；单测锁定 llm.chat 调用次数=1。提交见 R2 批次。"
+    updated: "2026-08-13"
 
   quality:
     fr: [FR-10]
