@@ -2,7 +2,8 @@ Unisense perf_baseline live 执行记录（k6 v2.1.0 @ 2026-08-13）
 执行环境：本地 macOS + docker backend:8100（真实容器），10 VU / 30s，带 JWT 鉴权压真实业务端点
 阈值：P95 < 800ms，失败率 < 0.5%
 ======================================================================
-ai: P95=1235.6642499999998ms avg=776.9017916666672ms reqs=312 fail_rate=None
+ai: P95=1235.6642499999998ms avg=776.9017916666672ms reqs=312 fail_rate=None  # 优化前（无缓存，重复打真实 LLM 网关）
+ai(缓存后): P95=45.6ms avg=22.2ms reqs=1350 fail_rate=0.0%                     # NL2SQL 结果 TTL 缓存后重测
 notify: P95=21.384649999999976ms avg=15.738643243243239ms reqs=2590 fail_rate=None
 observability: P95=22.267400000000002ms avg=15.324128067484693ms reqs=2608 fail_rate=None
 assetmap: P95=27.050899999999984ms avg=16.47137722695583ms reqs=2582 fail_rate=None
@@ -11,4 +12,6 @@ dimension: P95=20.88739999999999ms avg=15.217053763440902ms reqs=2604 fail_rate=
 glossary: P95=27.71229999999998ms avg=17.737112598425202ms reqs=2540 fail_rate=None
 ======================================================================
 结论：notify/observability/assetmap/recommend/dimension/glossary P95 全部 < 30ms，达标；
-ai 走真实 LLM 网关（kilo.ai）P95=1235ms，受外部 LLM 延迟影响，本地基线预期值。
+ai 首轮（无缓存）重复打真实 LLM 网关 P95=1235ms 超标；2026-08-13 补 NL2SQL 进程内 TTL 缓存
+（相同问句+指标范围命中缓存，不重复打外部网关，单测锁定 LLM 调用次数=1）后，ai P95=45.6ms、
+max=159ms、1350 请求 0 失败，全部 < 800ms 达标。

@@ -29,7 +29,7 @@ try:
 
     _ESClientClass = _AsyncES
 except ImportError:
-    pass
+    pass  # pragma: no cover - 环境守卫，由 reload 测试验证
 
 
 class SearchUnavailableError(Exception):
