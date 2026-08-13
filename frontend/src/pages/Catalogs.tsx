@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip } from "antd";
 import { PlusOutlined, ReloadOutlined, DeleteOutlined } from "@ant-design/icons";
 import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, UnisenseApiError } from "../api";
@@ -34,6 +35,17 @@ export function Catalogs() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  const [searchParams] = useSearchParams();
+
+  // 支持从全局搜索栏经 ?kw= 直达定位（表/字段级关键词）
+  useEffect(() => {
+    const kw = searchParams.get("kw");
+    if (kw) {
+      setKeyword(kw);
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   async function load() {
     setLoading(true);
@@ -51,7 +63,7 @@ export function Catalogs() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, sourceId, entityType, sensitivity]);
+  }, [page, sourceId, entityType, sensitivity, keyword]);
 
   async function handleRegister(values: Record<string, unknown>) {
     try {

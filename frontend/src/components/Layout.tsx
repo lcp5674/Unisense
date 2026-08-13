@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
-import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme } from "antd";
+import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme, AutoComplete, Spin } from "antd";
 import {
   AppstoreOutlined,
   PlusCircleOutlined,
@@ -31,8 +31,15 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
 } from "@ant-design/icons";
-import type { CurrentUser } from "../types";
-import { clearToken, fetchPreferences, listNotifications, setPreference } from "../api";
+import type { CurrentUser, GlobalSearchItem, GlobalSearchType } from "../types";
+import {
+  clearToken,
+  fetchGlobalSearch,
+  fetchPreferences,
+  listNotifications,
+  setPreference,
+} from "../api";
+import { navigateToSearchItem } from "../utils/searchNavigate";
 
 const ROLE_LABEL: Record<string, string> = {
   platform_admin: "平台管理员",
@@ -120,6 +127,30 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
 
 const ALL_NAV_KEYS = NAV_GROUPS.flatMap((g) => g.children.map((c) => c.key));
 
+// 全局搜索类型 → 中文标签（顶栏下拉分组标题）
+const SEARCH_TYPE_LABEL: Record<GlobalSearchType, string> = {
+  metric: "指标",
+  dimension: "维度",
+  term: "术语",
+  template: "模板",
+  data_source: "数据源",
+  catalog: "采集目录",
+  field: "字段",
+  subject_domain: "主题域",
+};
+
+// 顶栏下拉分组展示顺序
+const SEARCH_TYPE_ORDER: GlobalSearchType[] = [
+  "metric",
+  "dimension",
+  "term",
+  "template",
+  "data_source",
+  "catalog",
+  "field",
+  "subject_domain",
+];
+
 export function Layout({ user }: { user: CurrentUser }) {
   // 折叠状态从「该用户的本地缓存」恢复（跨用户隔离）；隐私模式等异常场景回退为展开
   const [collapsed, setCollapsed] = useState<boolean>(() => {
@@ -130,11 +161,17 @@ export function Layout({ user }: { user: CurrentUser }) {
     }
   });
   const [searchKw, setSearchKw] = useState("");
+  // 顶栏实时搜索：防抖聚合下拉的选项与加载态
+  const [searchOptions, setSearchOptions] = useState<
+    Array<{ value: string; label: React.ReactNode; groupLabel?: string; item: GlobalSearchItem }>
+  >([]);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = theme.useToken();
   const saveTimer = useRef<number | null>(null);
+  const searchTimer = useRef<number | null>(null);
   // 用户手动切换过折叠后，避免迟到的服务端响应覆盖用户意图
   const userToggled = useRef(false);
   // 内容区滚动容器引用，路由切换时自动回顶
@@ -214,10 +251,79 @@ export function Layout({ user }: { user: CurrentUser }) {
     };
   }, [location.pathname]);
 
-  function handleSearch() {
-    if (!searchKw.trim()) return;
-    navigate(`/catalog?kw=${encodeURIComponent(searchKw.trim())}`);
+  // 全局搜索跳转：按类型路由到对应详情/列表页（列表页支持 ?kw= 定位）
+  function handleGoToItem(item: GlobalSearchItem) {
+    navigateToSearchItem(navigate, item, searchKw.trim());
   }
+
+  // 拉取聚合搜索并按类型分组组装下拉选项
+  function runGlobalSearch(kw: string) {
+    const trimmed = kw.trim();
+    if (!trimmed) {
+      setSearchOptions([]);
+      return;
+    }
+    setSearchLoading(true);
+    fetchGlobalSearch(trimmed, 5)
+      .then((res) => {
+        const opts: Array<{ value: string; label: React.ReactNode; groupLabel?: string; item: GlobalSearchItem }> = [];
+        for (const type of SEARCH_TYPE_ORDER) {
+          const items = res.groups[type] ?? [];
+          if (items.length === 0) continue;
+          for (const it of items) {
+            opts.push({
+              value: `${type}:${it.code}`,
+              groupLabel: SEARCH_TYPE_LABEL[type],
+              label: (
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                  <span className="mono" style={{ fontSize: 13 }}>{it.code}</span>
+                  <span style={{ color: "rgba(0,0,0,0.45)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {it.name}
+                  </span>
+                </div>
+              ),
+              item: it,
+            });
+          }
+        }
+        setSearchOptions(opts);
+      })
+      .catch(() => {
+        // 搜索失败静默降级：下拉置空，不阻塞后续导航
+        setSearchOptions([]);
+      })
+      .finally(() => setSearchLoading(false));
+  }
+
+  // 输入变化：300ms 防抖触发聚合搜索
+  function handleSearchInput(value: string) {
+    setSearchKw(value);
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    if (!value.trim()) {
+      setSearchOptions([]);
+      return;
+    }
+    searchTimer.current = window.setTimeout(() => runGlobalSearch(value), 300);
+  }
+
+  function handleSearchSelect(_value: string, option: { item?: GlobalSearchItem }) {
+    if (option?.item) handleGoToItem(option.item);
+    setSearchOptions([]);
+  }
+
+  // 回车兜底：跳转全局搜索页查看全部结果
+  function handleSearchEnter() {
+    if (!searchKw.trim()) return;
+    navigate(`/search?q=${encodeURIComponent(searchKw.trim())}`);
+    setSearchOptions([]);
+  }
+
+  // 组件卸载清理搜索防抖定时器
+  useEffect(() => {
+    return () => {
+      if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    };
+  }, []);
 
   const userMenuItems = [
     {
@@ -343,14 +449,33 @@ export function Layout({ user }: { user: CurrentUser }) {
           </div>
 
           <div className="header-search">
-            <Input
-              prefix={<SearchOutlined style={{ color: token.colorTextSecondary }} />}
-              placeholder="搜索指标名 / 编码，回车直达目录"
+            <AutoComplete
               value={searchKw}
-              onChange={(e) => setSearchKw(e.target.value)}
-              onPressEnter={handleSearch}
+              options={searchOptions}
+              onChange={handleSearchInput}
+              onSelect={handleSearchSelect}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSearchEnter();
+              }}
               allowClear
-            />
+              popupMatchSelectWidth={400}
+              notFoundContent={
+                searchLoading ? (
+                  <Spin size="small" />
+                ) : searchKw.trim() ? (
+                  "未找到匹配结果"
+                ) : (
+                  "输入关键词搜索指标 / 维度 / 术语 / 表字段…"
+                )
+              }
+            >
+              <Input
+                prefix={<SearchOutlined style={{ color: token.colorTextSecondary }} />}
+                suffix={searchLoading ? <Spin size="small" /> : null}
+                placeholder="搜索指标 / 维度 / 术语 / 模板 / 数据源 / 表字段"
+                aria-label="全局搜索"
+              />
+            </AutoComplete>
           </div>
 
           <div style={{ flex: 1 }} />

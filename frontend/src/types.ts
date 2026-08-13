@@ -1173,3 +1173,41 @@ export interface AutoSuggestResponse {
     period: string | null;
   };
 }
+
+// ============================================================================
+// 全局聚合搜索（backend /api/v1/search，FR-18 全局搜索栏）
+// ============================================================================
+
+export type GlobalSearchType =
+  | "metric"
+  | "dimension"
+  | "term"
+  | "template"
+  | "data_source"
+  | "catalog"
+  | "field"
+  | "subject_domain";
+
+export interface GlobalSearchItem {
+  type: GlobalSearchType;
+  id: number;
+  /** 资源编码：metric_code/dim_code/term_code/template.code/source_id/entity_name/列名/域 code */
+  code: string;
+  name: string;
+  domain: string | null;
+  status: string | null;
+  /** 不同类型附带的上下文（源、表名、敏感度、实体类型、分级等） */
+  source_id?: string | null;
+  table_name?: string | null;
+  entity_type?: string | null;
+  sensitivity_level?: string | null;
+  pii_flag?: boolean;
+  source_type?: string | null;
+  level?: number;
+}
+
+export interface GlobalSearchResponse {
+  groups: Record<GlobalSearchType, GlobalSearchItem[]>;
+  total: number;
+}
+

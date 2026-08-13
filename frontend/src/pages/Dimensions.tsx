@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space } from "antd";
 import { PlusOutlined, SendOutlined } from "@ant-design/icons";
 import {
@@ -28,14 +29,23 @@ const RECON_STATUS_LABEL: Record<string, string> = {
 
 function DimensionsTab() {
   const [items, setItems] = useState<Dimension[]>([]);
+  const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  const [searchParams] = useSearchParams();
+
+  // 支持从全局搜索栏经 ?kw= 直达定位
+  useEffect(() => {
+    const kw = searchParams.get("kw");
+    if (kw) setKeyword(kw);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   async function load() {
     setLoading(true);
     try {
-      const res = await listDimensions();
+      const res = await listDimensions({ keyword: keyword || undefined });
       setItems(res.items);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
@@ -47,7 +57,7 @@ function DimensionsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [keyword]);
 
   async function handleCreate(values: Record<string, unknown>) {
     try {
@@ -117,9 +127,17 @@ function DimensionsTab() {
 
   return (
     <div>
-      <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Input.Search
+          placeholder="搜索维度编码 / 名称 / 描述"
+          allowClear
+          style={{ width: 260 }}
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          onSearch={() => load()}
+        />
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建维度</Button>
-      </div>
+      </Space>
       <Table dataSource={items} columns={columns} rowKey="dim_code" loading={loading} pagination={false} locale={{ emptyText: "暂无维度" }} />
 
       <Modal title="新建维度" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">

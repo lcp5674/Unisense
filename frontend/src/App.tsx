@@ -5,6 +5,7 @@ import { apiLogin, clearToken, fetchCurrentUser, getToken, UnisenseApiError } fr
 import type { CurrentUser } from "./types";
 import { Layout } from "./components/Layout";
 import { MetricCatalog } from "./pages/MetricCatalog";
+import { GlobalSearch } from "./pages/GlobalSearch";
 import { MetricDetail } from "./pages/MetricDetail";
 import { MetricCompare } from "./pages/MetricCompare";
 import { MetricCreate } from "./pages/MetricCreate";
@@ -185,6 +186,7 @@ export default function App() {
             <Route path="/todo" element={<TodoCenter />} />
             <Route path="/notifications" element={<Notifications />} />
             <Route path="/catalog" element={<MetricCatalog />} />
+            <Route path="/search" element={<GlobalSearch />} />
             <Route path="/templates" element={<Templates />} />
             <Route path="/detail/:code" element={<MetricDetail />} />
             <Route path="/compare" element={<MetricCompare />} />

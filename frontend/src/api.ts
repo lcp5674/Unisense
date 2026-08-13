@@ -45,6 +45,7 @@ import {
   Feedback,
   GlossaryConflict,
   GlossaryTerm,
+  GlobalSearchResponse,
   GrantBatchResult,
   GrantCreate,
   GrantResponse,
@@ -625,10 +626,12 @@ export async function fetchDashboard(domain?: string): Promise<DashboardData> {
 export async function listTemplates(params?: {
   domain?: string;
   is_active?: boolean;
+  keyword?: string;
 }): Promise<MetricTemplate[]> {
   const qs = pageQs({
     domain: params?.domain,
     is_active: params?.is_active === undefined ? undefined : params.is_active ? "true" : "false",
+    keyword: params?.keyword,
   });
   return request<MetricTemplate[]>(`${API_BASE}/semantics/templates?${qs}`);
 }
@@ -719,8 +722,9 @@ export async function rejectVersion(versionId: number, reason?: string): Promise
 export async function listDimensions(params?: {
   domain?: string;
   status?: string;
+  keyword?: string;
 }): Promise<{ items: Dimension[]; total: number }> {
-  const qs = pageQs({ domain: params?.domain, status: params?.status });
+  const qs = pageQs({ domain: params?.domain, status: params?.status, keyword: params?.keyword });
   return request(`${API_BASE}/dimensions?${qs}`);
 }
 
@@ -1507,6 +1511,15 @@ export async function fetchAssetSearch(params: {
 }): Promise<{ items: AssetSearchItem[]; total: number }> {
   const qs = pageQs({ q: params.q, type: params.type, limit: params.limit ?? 20 });
   return request(`${API_BASE}/assetmap/search?${qs}`);
+}
+
+// 全局聚合搜索（FR-18 全局搜索栏）：跨指标/维度/术语/模板/数据源/采集目录表+字段/主题域
+export async function fetchGlobalSearch(
+  q: string,
+  limit = 5,
+): Promise<GlobalSearchResponse> {
+  const qs = pageQs({ q, limit });
+  return request<GlobalSearchResponse>(`${API_BASE}/search?${qs}`);
 }
 
 // 资产健康视图

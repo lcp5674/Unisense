@@ -3,12 +3,14 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Layout } from "../components/Layout";
 
-// Mock API：Layout 挂载时拉取未读通知数与用户偏好（折叠态服务端持久化）
+// Mock API：Layout 挂载时拉取未读通知数与用户偏好（折叠态服务端持久化）；
+// fetchGlobalSearch 供顶栏实时下拉使用（测试中不触发）
 vi.mock("../api", () => ({
   listNotifications: vi.fn(),
   clearToken: vi.fn(),
   fetchPreferences: vi.fn(),
   setPreference: vi.fn(),
+  fetchGlobalSearch: vi.fn(),
 }));
 import { listNotifications, fetchPreferences, setPreference } from "../api";
 vi.mocked(listNotifications).mockResolvedValue({ items: [], total: 0 });

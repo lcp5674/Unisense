@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { DataSources } from "../pages/DataSources";
 import type { DataSource, SourceTypeInfo } from "../types";
 
@@ -73,7 +74,7 @@ const source: DataSource = {
 };
 
 async function openCreateModal() {
-  render(<DataSources />);
+  render(<MemoryRouter><DataSources /></MemoryRouter>);
   fireEvent.click(screen.getAllByText("新建数据源")[0]);
   await screen.findByText("选择数据源类型");
 }
@@ -85,7 +86,7 @@ async function selectType(label: string) {
 }
 
 function renderSources() {
-  return render(<DataSources />);
+  return render(<MemoryRouter><DataSources /></MemoryRouter>);
 }
 
 describe("DataSources", () => {

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert } from "antd";
 import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined } from "@ant-design/icons";
 import {
@@ -16,6 +17,7 @@ import {
 import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType } from "../types";
 import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
+import { parseMultiStatusResponse } from "../utils/apiErrorHandlers";
 
 const FALLBACK_TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
@@ -83,8 +85,20 @@ function SourceDetailModal({
     setCollecting(true);
     try {
       const res = await collectSource(source.source_id, "FULL");
-      setCollectResult(res);
-      message.success(`采集完成：扫描 ${res.scanned} · 注册 ${res.registered} · PII ${res.pii_registered}`);
+      if (res && (res as any).code === "MULTI_STATUS") {
+        const items = parseMultiStatusResponse(res);
+        const succeeded = items.filter((i) => i.status === "success");
+        const failed = items.filter((i) => i.status === "failed");
+        if (failed.length > 0) {
+          message.warning(`采集部分成功：${succeeded.length} 项成功，${failed.length} 项失败`);
+        } else {
+          message.success(`采集完成：${succeeded.length} 项成功`);
+        }
+        setCollectResult(res as any as CollectResult);
+      } else {
+        setCollectResult(res as any as CollectResult);
+        message.success(`采集完成：扫描 ${res.scanned} · 注册 ${res.registered} · PII ${res.pii_registered}`);
+      }
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "采集失败");
     } finally {
@@ -196,21 +210,33 @@ export function DataSources() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detail, setDetail] = useState<DataSource | null>(null);
   const [types, setTypes] = useState<SourceTypeInfo[]>(FALLBACK_TYPES);
   const [form] = Form.useForm();
+  const [searchParams] = useSearchParams();
   const sourceType = Form.useWatch("source_type", form);
   const watchedDatabase = Form.useWatch("database", form);
   const watchedSchema = Form.useWatch("schema", form);
   const domainWatch = Form.useWatch("domain", form) ?? "";
 
+  // 支持从全局搜索栏经 ?kw= 直达定位
+  useEffect(() => {
+    const kw = searchParams.get("kw");
+    if (kw) {
+      setKeyword(kw);
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   async function load(nextPage = page, nextPageSize = pageSize) {
     setLoading(true);
     try {
       // P1-1: 服务端分页（后端返回 {items, total, page, page_size}）
-      const resp = await listDataSources({ page: nextPage, page_size: nextPageSize });
+      const resp = await listDataSources({ keyword: keyword || undefined, page: nextPage, page_size: nextPageSize });
       setItems(resp.items);
       setTotal(resp.total);
     } catch (err) {
@@ -226,7 +252,7 @@ export function DataSources() {
       .then((t) => setTypes(t.length ? t : FALLBACK_TYPES))
       .catch(() => setTypes(FALLBACK_TYPES));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [keyword]);
 
   // 类型切换时自动带出默认端口
   function handleTypeChange(t: string) {
@@ -344,6 +370,16 @@ export function DataSources() {
       </div>
 
       <Card extra={<Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>刷新</Button>}>
+        <Space style={{ marginBottom: 12 }}>
+          <Input.Search
+            placeholder="搜索数据源名称 / ID"
+            allowClear
+            style={{ width: 260 }}
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            onSearch={() => { setPage(1); load(1, pageSize); }}
+          />
+        </Space>
         <Table
           dataSource={items}
           columns={columns}

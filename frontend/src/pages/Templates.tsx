@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space } from "antd";
 import { PlusOutlined } from "@ant-design/icons";
 import { listTemplates, createMetric, UnisenseApiError } from "../api";
@@ -9,17 +9,26 @@ import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIM
 
 export function Templates() {
   const [items, setItems] = useState<MetricTemplate[]>([]);
+  const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [instantiateTarget, setInstantiateTarget] = useState<MetricTemplate | null>(null);
   const [form] = Form.useForm();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { track } = useTracking();
+
+  // 支持从全局搜索栏经 ?kw= 直达定位
+  useEffect(() => {
+    const kw = searchParams.get("kw");
+    if (kw) setKeyword(kw);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   async function load() {
     setLoading(true);
     try {
-      setItems(await listTemplates({ is_active: true }));
+      setItems(await listTemplates({ is_active: true, keyword: keyword || undefined }));
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载模板失败");
     } finally {
@@ -30,7 +39,7 @@ export function Templates() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [keyword]);
 
   async function handleCreate(values: Record<string, unknown>) {
     setLoading(true);
@@ -111,6 +120,14 @@ export function Templates() {
       </div>
 
       <Card>
+        <Input.Search
+          placeholder="搜索模板编码 / 名称 / 描述"
+          allowClear
+          style={{ width: 280, marginBottom: 12 }}
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          onSearch={() => load()}
+        />
         <Table
           dataSource={items}
           columns={columns}
