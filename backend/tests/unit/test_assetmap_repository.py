@@ -12,12 +12,15 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from app.models.data_source import DBCatalog
 from app.services.assetmap.repository import AssetMapRepository
 
 
 def _session() -> MagicMock:
     s = MagicMock()
     s.execute = AsyncMock()
+    s.flush = AsyncMock()
+    s.add = MagicMock()
     return s
 
 
@@ -584,3 +587,114 @@ class TestMyAssets:
         cat_stmt = s.execute.call_args_list[0].args[0]
         compiled = str(cat_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "owner_id" in compiled
+
+
+class TestWriteOps:
+    """写能力（FR-18）：认领/转让、重分类、批量——同事务 flush，API 层 commit。"""
+
+    async def test_get_catalog_entity_found(self) -> None:
+        s = _session()
+        row = SimpleNamespace(id=1, entity_name="catalog.sales.orders", deleted_at=None)
+        res = MagicMock()
+        res.scalar_one_or_none.return_value = row
+        s.execute.return_value = res
+        repo = AssetMapRepository(s)
+        out = await repo.get_catalog_entity(1)
+        assert out is row
+        stmt = s.execute.call_args.args[0]
+        assert "deleted_at IS NULL" in str(stmt)
+
+    async def test_get_catalog_entity_missing(self) -> None:
+        s = _session()
+        res = MagicMock()
+        res.scalar_one_or_none.return_value = None
+        s.execute.return_value = res
+        repo = AssetMapRepository(s)
+        assert await repo.get_catalog_entity(999) is None
+
+    async def test_list_catalog_entities_empty(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        assert await repo.list_catalog_entities([]) == []
+        s.execute.assert_not_awaited()
+
+    async def test_list_catalog_entities_preserves_order(self) -> None:
+        """批量获取按入参顺序排序（供批量操作按请求顺序落库）。"""
+        s = _session()
+        a = SimpleNamespace(id=3, deleted_at=None)
+        b = SimpleNamespace(id=1, deleted_at=None)
+        # execute 返回普通 MagicMock（非 AsyncMock），scalars().all() 是同步链
+        res = MagicMock()
+        res.scalars.return_value.all.return_value = [a, b]
+        s.execute.return_value = res
+        repo = AssetMapRepository(s)
+        out = await repo.list_catalog_entities([1, 3])
+        assert [r.id for r in out] == [1, 3]  # 按入参顺序，而非 DB 返回序
+        stmt = s.execute.call_args.args[0]
+        assert "IN" in str(stmt) and "deleted_at IS NULL" in str(stmt)
+
+    async def test_user_exists_true(self) -> None:
+        s = _session()
+        res = MagicMock()
+        res.first.return_value = (1,)
+        s.execute.return_value = res
+        repo = AssetMapRepository(s)
+        assert await repo.user_exists(9) is True
+        stmt = s.execute.call_args.args[0]
+        assert "deleted_at IS NULL" in str(stmt)
+
+    async def test_user_exists_false(self) -> None:
+        s = _session()
+        res = MagicMock()
+        res.first.return_value = None
+        s.execute.return_value = res
+        repo = AssetMapRepository(s)
+        assert await repo.user_exists(999) is False
+
+    async def test_assign_owner(self) -> None:
+        s = _session()
+        entity = DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=None)
+        repo = AssetMapRepository(s)
+        out = await repo.assign_owner(entity, owner_id=9)
+        assert out is entity
+        assert entity.owner_id == 9
+        s.add.assert_called_once_with(entity)
+        s.flush.assert_awaited_once()
+
+    async def test_assign_owner_release(self) -> None:
+        s = _session()
+        entity = DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=9)
+        repo = AssetMapRepository(s)
+        await repo.assign_owner(entity, owner_id=None)
+        assert entity.owner_id is None
+
+    async def test_reclassify_sensitivity(self) -> None:
+        s = _session()
+        entity = DBCatalog(id=1, entity_name="catalog.sales.orders", sensitivity_level="INTERNAL")
+        repo = AssetMapRepository(s)
+        out = await repo.reclassify_sensitivity(entity, "PII")
+        assert out is entity
+        assert entity.sensitivity_level == "PII"
+        s.flush.assert_awaited_once()
+
+    async def test_batch_assign_owner(self) -> None:
+        s = _session()
+        entities = [
+            DBCatalog(id=1, entity_name="catalog.sales.orders"),
+            DBCatalog(id=2, entity_name="catalog.sales.items"),
+        ]
+        repo = AssetMapRepository(s)
+        affected = await repo.batch_assign_owner(entities, owner_id=9)
+        assert affected == 2
+        assert all(e.owner_id == 9 for e in entities)
+        assert s.add.call_count == 2
+        s.flush.assert_awaited_once()
+
+    async def test_batch_reclassify(self) -> None:
+        s = _session()
+        entities = [DBCatalog(id=1, entity_name="catalog.sales.orders")]
+        repo = AssetMapRepository(s)
+        affected = await repo.batch_reclassify(entities, "CONFIDENTIAL")
+        assert affected == 1
+        assert entities[0].sensitivity_level == "CONFIDENTIAL"
+        s.flush.assert_awaited_once()

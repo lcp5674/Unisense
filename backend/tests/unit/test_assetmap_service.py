@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+from app.core.exceptions import NotFoundError
 from app.models.data_source import DBCatalog
 from app.services.assetmap.service import AssetMapService
 
@@ -25,6 +26,14 @@ async def _svc() -> tuple[AssetMapService, MagicMock]:
         ]
     )
     repo.orphan_assets = AsyncMock(return_value=[])
+    # 写能力相关方法默认 AsyncMock（避免 MagicMock 无法 await / 无 assert_awaited）
+    repo.get_catalog_entity = AsyncMock(return_value=None)
+    repo.list_catalog_entities = AsyncMock(return_value=[])
+    repo.user_exists = AsyncMock(return_value=False)
+    repo.assign_owner = AsyncMock(return_value=None)
+    repo.reclassify_sensitivity = AsyncMock(return_value=None)
+    repo.batch_assign_owner = AsyncMock(return_value=0)
+    repo.batch_reclassify = AsyncMock(return_value=0)
     svc._repo = repo  # noqa: SLF001
     return svc, repo
 
@@ -293,3 +302,226 @@ async def test_export_tables_builds_rows() -> None:
     # to_dict 剥离 schema_json（敏感字段黑名单）
     assert "schema_json" not in items[0]
     repo.list_tables.assert_awaited_once()
+
+
+# ---- 写能力（FR-18 资产工作台）：认领/转让、重分类、批量 ----
+
+
+async def test_assign_owner_success() -> None:
+    """认领/转让归属：实体存在 + 用户存在 → 更新并返回。"""
+    svc, repo = await _svc()
+    entity = DBCatalog(id=1, entity_name="catalog.sales.orders", entity_type="table")
+    repo.get_catalog_entity = AsyncMock(return_value=entity)
+    repo.user_exists = AsyncMock(return_value=True)
+    repo.assign_owner = AsyncMock(
+        return_value=DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=9)
+    )
+    out = await svc.assign_owner(1, owner_id=9)
+    assert out["entity_id"] == 1
+    assert out["owner_id"] == 9
+    repo.assign_owner.assert_awaited_once_with(entity, 9)
+
+
+async def test_assign_owner_release() -> None:
+    """解除归属：owner_id=None 不校验用户，直接清除。"""
+    svc, repo = await _svc()
+    entity = DBCatalog(id=1, entity_name="catalog.sales.orders")
+    repo.get_catalog_entity = AsyncMock(return_value=entity)
+    repo.assign_owner = AsyncMock(return_value=DBCatalog(id=1, owner_id=None))
+    out = await svc.assign_owner(1, owner_id=None)
+    assert out["owner_id"] is None
+    repo.user_exists.assert_not_awaited()
+    repo.assign_owner.assert_awaited_once_with(entity, None)
+
+
+async def test_assign_owner_entity_missing_raises() -> None:
+    """认领不存在的资产 → NotFoundError。"""
+    svc, repo = await _svc()
+    repo.get_catalog_entity = AsyncMock(return_value=None)
+    try:
+        await svc.assign_owner(999, owner_id=1)
+    except NotFoundError:
+        pass
+    else:  # pragma: no cover - 断言异常必抛
+        raise AssertionError("应抛 NotFoundError")
+    repo.user_exists.assert_not_awaited()
+
+
+async def test_assign_owner_user_missing_raises() -> None:
+    """认领到不存在的用户 → NotFoundError（防孤儿归属脏数据）。"""
+    svc, repo = await _svc()
+    repo.get_catalog_entity = AsyncMock(
+        return_value=DBCatalog(id=1, entity_name="catalog.sales.orders")
+    )
+    repo.user_exists = AsyncMock(return_value=False)
+    try:
+        await svc.assign_owner(1, owner_id=999)
+    except NotFoundError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("应抛 NotFoundError")
+
+
+async def test_reclassify_sensitivity_success() -> None:
+    """重分类敏感级：实体存在 → 更新并返回新级别。"""
+    svc, repo = await _svc()
+    repo.get_catalog_entity = AsyncMock(
+        return_value=DBCatalog(id=1, entity_name="catalog.sales.orders")
+    )
+    repo.reclassify_sensitivity = AsyncMock(
+        return_value=DBCatalog(id=1, entity_name="catalog.sales.orders", sensitivity_level="PII")
+    )
+    out = await svc.reclassify_sensitivity(1, "PII")
+    assert out["sensitivity_level"] == "PII"
+    repo.reclassify_sensitivity.assert_awaited_once()
+
+
+async def test_reclassify_sensitivity_missing_raises() -> None:
+    """重分类不存在的资产 → NotFoundError。"""
+    svc, repo = await _svc()
+    repo.get_catalog_entity = AsyncMock(return_value=None)
+    try:
+        await svc.reclassify_sensitivity(999, "PII")
+    except NotFoundError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("应抛 NotFoundError")
+
+
+async def test_batch_assign_owner_success() -> None:
+    """批量认领：实体存在 → 同事务更新并返回影响数。"""
+    svc, repo = await _svc()
+    entities = [
+        DBCatalog(id=1, entity_name="catalog.sales.orders"),
+        DBCatalog(id=2, entity_name="catalog.sales.items"),
+    ]
+    repo.user_exists = AsyncMock(return_value=True)
+    repo.list_catalog_entities = AsyncMock(return_value=entities)
+    repo.batch_assign_owner = AsyncMock(return_value=2)
+    out = await svc.batch_assign_owner([1, 2], owner_id=9)
+    assert out["affected"] == 2
+    assert out["total"] == 2
+    repo.batch_assign_owner.assert_awaited_once_with(entities, 9)
+
+
+async def test_batch_assign_owner_empty_raises() -> None:
+    """批量认领：指定实体均不存在 → NotFoundError。"""
+    svc, repo = await _svc()
+    repo.list_catalog_entities = AsyncMock(return_value=[])
+    try:
+        await svc.batch_assign_owner([1, 2], owner_id=9)
+    except NotFoundError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("应抛 NotFoundError")
+
+
+async def test_batch_reclassify_success() -> None:
+    """批量重分类：返回影响数与目标级别。"""
+    svc, repo = await _svc()
+    entities = [DBCatalog(id=1, entity_name="catalog.sales.orders")]
+    repo.list_catalog_entities = AsyncMock(return_value=entities)
+    repo.batch_reclassify = AsyncMock(return_value=1)
+    out = await svc.batch_reclassify([1], "CONFIDENTIAL")
+    assert out["affected"] == 1
+    assert out["sensitivity_level"] == "CONFIDENTIAL"
+    repo.batch_reclassify.assert_awaited_once_with(entities, "CONFIDENTIAL")
+
+
+async def test_batch_reclassify_empty_raises() -> None:
+    """批量重分类：指定实体均不存在 → NotFoundError。"""
+    svc, repo = await _svc()
+    repo.list_catalog_entities = AsyncMock(return_value=[])
+    try:
+        await svc.batch_reclassify([1], "PII")
+    except NotFoundError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("应抛 NotFoundError")
+
+
+# ---- 聚合缓存（大规模优化）：cache-aside + 熔断降级 ----
+
+
+async def _fake_redis(monkeypatch, *, get_value=None, get_side_effect=None) -> MagicMock:
+    import app.db.redis as redis_mod
+
+    fake = MagicMock()
+    fake.get = AsyncMock(
+        return_value=get_value,
+        side_effect=get_side_effect,
+    )
+    fake.set = AsyncMock()
+    monkeypatch.setattr(redis_mod, "get_redis", lambda: fake)
+    return fake
+
+
+async def test_agg_cached_hit_skips_loader(monkeypatch) -> None:
+    """缓存命中：不调用 loader，直接返回缓存数据。"""
+    import app.services.assetmap.service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "_CACHE_BREAKER", _breaker(True))
+    await _fake_redis(
+        monkeypatch,
+        get_value='{"total": 3, "by_entity_type": {}}',
+    )
+    loader = AsyncMock(return_value={"total": 99})
+    out = await svc_mod._agg_cached("catalog_summary", loader)
+    assert out["total"] == 3
+    loader.assert_not_awaited()
+
+
+async def test_agg_cached_miss_loads_and_sets(monkeypatch) -> None:
+    """缓存未命中：调 loader 回源，并写缓存（TTL 30s）。"""
+    import app.services.assetmap.service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "_CACHE_BREAKER", _breaker(True))
+    fake = await _fake_redis(monkeypatch, get_value=None)
+    loader = AsyncMock(return_value={"total": 5})
+    out = await svc_mod._agg_cached("catalog_summary", loader)
+    assert out["total"] == 5
+    loader.assert_awaited_once()
+    fake.set.assert_awaited_once()
+    # key 带前缀；TTL=30
+    key = fake.set.await_args.args[0]
+    assert key == "assetmap:agg:catalog_summary"
+    assert fake.set.await_args.kwargs["ex"] == 30
+
+
+async def test_agg_cached_redis_down_falls_back(monkeypatch) -> None:
+    """Redis 不可用：记熔断失败并回源，不抛异常、不阻塞主链路。"""
+    import app.services.assetmap.service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "_CACHE_BREAKER", _breaker(True))
+    await _fake_redis(monkeypatch, get_side_effect=ConnectionError("redis down"))
+    loader = AsyncMock(return_value={"total": 7})
+    out = await svc_mod._agg_cached("catalog_summary", loader)
+    assert out["total"] == 7
+    loader.assert_awaited_once()
+
+
+async def test_agg_cached_breaker_open_skips_cache(monkeypatch) -> None:
+    """熔断打开：跳过缓存读写，直接回源（防雪崩）。"""
+    import app.services.assetmap.service as svc_mod
+    from app.db import redis as redis_mod
+
+    monkeypatch.setattr(svc_mod, "_CACHE_BREAKER", _breaker(False))
+    spy = MagicMock()
+    monkeypatch.setattr(redis_mod, "get_redis", spy)
+    loader = AsyncMock(return_value={"total": 11})
+    out = await svc_mod._agg_cached("catalog_summary", loader)
+    assert out["total"] == 11
+    spy.assert_not_called()  # 熔断打开时完全不触碰 Redis
+    loader.assert_awaited_once()
+
+
+async def test_agg_cached_bad_json_falls_back(monkeypatch) -> None:
+    """缓存坏数据（非 JSON）：回源且不抛异常。"""
+    import app.services.assetmap.service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "_CACHE_BREAKER", _breaker(True))
+    await _fake_redis(monkeypatch, get_value="not-json{")
+    loader = AsyncMock(return_value={"total": 13})
+    out = await svc_mod._agg_cached("catalog_summary", loader)
+    assert out["total"] == 13
+    loader.assert_awaited_once()

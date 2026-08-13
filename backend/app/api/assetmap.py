@@ -12,19 +12,30 @@ import csv
 import io
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
+from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
+from app.services.assetmap.schemas import (
+    AssignOwnerRequest,
+    BatchOwnerRequest,
+    BatchSensitivityRequest,
+    ReclassifySensitivityRequest,
+)
 from app.services.assetmap.service import AssetMapService
 
 router = APIRouter(prefix="/assetmap", tags=["assetmap"])
 
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+
+# 写能力仅限治理角色（认领/重分类/批量会影响资产归属与合规口径）
+_WRITE_ROLES = ("platform_admin", "domain_admin")
+_WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
 
 @router.get("/summary", dependencies=_READ_DEPS)
@@ -243,3 +254,121 @@ async def export_tables(
             "Content-Disposition": 'attachment; filename="assetmap_export.csv"',
         },
     )
+
+
+# ----------------------------------------------------------------
+# 写能力（FR-18 资产工作台）：认领/转让归属、敏感级重分类、批量操作
+# 全部仅限 platform_admin / domain_admin，写入与审计同事务原子提交（PLAT-3）。
+# ----------------------------------------------------------------
+
+
+@router.post("/entities/{entity_id}/owner", dependencies=_WRITE_DEPS)
+async def assign_owner(
+    entity_id: int,
+    payload: AssignOwnerRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """认领/转让资产归属（owner_id=None 解除归属回到孤儿池）。"""
+    data = await AssetMapService(db).assign_owner(entity_id, payload.owner_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_ASSIGN_OWNER",
+        entity_type="db_catalog",
+        entity_id=str(entity_id),
+        detail={"owner_id": payload.owner_id},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.post("/entities/{entity_id}/sensitivity", dependencies=_WRITE_DEPS)
+async def reclassify_sensitivity(
+    entity_id: int,
+    payload: ReclassifySensitivityRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """重分类资产敏感级（仅允许枚举值，影响 PII 合规口径）。"""
+    data = await AssetMapService(db).reclassify_sensitivity(
+        entity_id, str(payload.sensitivity_level)
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_RECLASSIFY",
+        entity_type="db_catalog",
+        entity_id=str(entity_id),
+        detail={"sensitivity_level": str(payload.sensitivity_level)},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.post("/batch-owner", dependencies=_WRITE_DEPS)
+async def batch_assign_owner(
+    payload: BatchOwnerRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """批量认领/转让归属（单次 ≤200，同事务原子提交）。"""
+    data = await AssetMapService(db).batch_assign_owner(
+        payload.entity_ids, payload.owner_id
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_BATCH_ASSIGN_OWNER",
+        entity_type="db_catalog",
+        entity_id="batch",
+        detail={
+            "entity_ids": payload.entity_ids,
+            "owner_id": payload.owner_id,
+            "affected": data.get("affected"),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.post("/batch-sensitivity", dependencies=_WRITE_DEPS)
+async def batch_reclassify(
+    payload: BatchSensitivityRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """批量重分类敏感级（单次 ≤200，同事务原子提交）。"""
+    data = await AssetMapService(db).batch_reclassify(
+        payload.entity_ids, str(payload.sensitivity_level)
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_BATCH_RECLASSIFY",
+        entity_type="db_catalog",
+        entity_id="batch",
+        detail={
+            "entity_ids": payload.entity_ids,
+            "sensitivity_level": str(payload.sensitivity_level),
+            "affected": data.get("affected"),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)

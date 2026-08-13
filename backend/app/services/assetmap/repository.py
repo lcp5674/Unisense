@@ -19,6 +19,7 @@ from app.models.data_source import DataSource, DBCatalog
 from app.models.governance import Classification
 from app.models.lineage import LineageEdge
 from app.models.metric import Metric
+from app.models.user import User
 
 
 class AssetMapRepository:
@@ -690,3 +691,75 @@ class AssetMapRepository:
             for r in metric_rows
         ]
         return {"owner_id": owner_id, "catalogs": catalogs, "metrics": metrics}
+
+    # ----------------------------------------------------------------
+    # 写能力（FR-18 资产工作台）：认领/转让归属、敏感级重分类、批量操作
+    # 全部写操作仅由 platform_admin/domain_admin 触发（API 层 RBAC），
+    # 且落审计（API 层 write_audit），此处只做数据变更与 flush。
+    # ----------------------------------------------------------------
+
+    async def get_catalog_entity(self, entity_id: int) -> DBCatalog | None:
+        """按 id 获取未删除的目录资产。"""
+        return (
+            await self._session.execute(
+                select(DBCatalog).where(
+                    DBCatalog.id == entity_id, DBCatalog.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def list_catalog_entities(self, entity_ids: list[int]) -> list[DBCatalog]:
+        """按 id 批量获取未删除的目录资产（保持入参顺序，供批量操作）。"""
+        if not entity_ids:
+            return []
+        rows = (
+            await self._session.execute(
+                select(DBCatalog).where(
+                    DBCatalog.id.in_(entity_ids), DBCatalog.deleted_at.is_(None)
+                )
+            )
+        ).scalars().all()
+        order = {eid: idx for idx, eid in enumerate(entity_ids)}
+        return sorted(rows, key=lambda r: order.get(r.id, len(order)))
+
+    async def user_exists(self, user_id: int) -> bool:
+        """校验用户存在且未删除（owner 指派目标）。"""
+        return (
+            await self._session.execute(
+                select(User.id).where(User.id == user_id, User.deleted_at.is_(None))
+            )
+        ).first() is not None
+
+    async def assign_owner(self, entity: DBCatalog, owner_id: int | None) -> DBCatalog:
+        """认领/转让归属（owner_id=None 表示解除归属回到孤儿池）。"""
+        entity.owner_id = owner_id
+        self._session.add(entity)
+        await self._session.flush()
+        return entity
+
+    async def reclassify_sensitivity(self, entity: DBCatalog, level: str) -> DBCatalog:
+        """重分类敏感级（仅允许枚举值，校验在 service/API 层）。"""
+        entity.sensitivity_level = level
+        self._session.add(entity)
+        await self._session.flush()
+        return entity
+
+    async def batch_assign_owner(
+        self, entities: Sequence[DBCatalog], owner_id: int | None
+    ) -> int:
+        """批量认领/转让归属，返回受影响数量（同事务 flush，API 层统一 commit）。"""
+        for e in entities:
+            e.owner_id = owner_id
+            self._session.add(e)
+        await self._session.flush()
+        return len(entities)
+
+    async def batch_reclassify(
+        self, entities: Sequence[DBCatalog], level: str
+    ) -> int:
+        """批量重分类敏感级，返回受影响数量。"""
+        for e in entities:
+            e.sensitivity_level = level
+            self._session.add(e)
+        await self._session.flush()
+        return len(entities)

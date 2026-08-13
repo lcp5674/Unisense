@@ -1,13 +1,13 @@
 """assetmap 安全测试（对齐 gateways security_reverse，TD §13）。
 
-assetmap 为只读服务，所有已认证角色可读，无写闸门；安全边界体现在
-读端点的 SQL 注入守卫（纵深防御），且输入仅接受强类型参数。
+覆盖读端点 RBAC/注入守卫 + 写能力端点（认领/重分类/批量）RBAC 闸门、
+成功路径与 404/422 边界（FR-18 资产工作台）。
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -21,10 +21,10 @@ from app.services.assetmap.service import AssetMapService
 def _session() -> MagicMock:
     s = MagicMock()
     s.add = MagicMock()
-    s.commit = MagicMock()
-    s.rollback = MagicMock()
-    s.flush = MagicMock()
-    s.refresh = MagicMock()
+    s.commit = AsyncMock()
+    s.rollback = AsyncMock()
+    s.flush = AsyncMock()
+    s.refresh = AsyncMock()
     s.execute = MagicMock()
     return s
 
@@ -180,3 +180,114 @@ async def test_export_csv_returns_csv(
     assert "text/csv" in resp.headers["content-type"]
     assert "entity_name" in resp.text
     assert "catalog.db.t" in resp.text
+
+
+# ---- 写能力端点（FR-18 资产工作台）：认领/重分类/批量——RBAC 闸门 ----
+# _WRITE_ROLES = (platform_admin, domain_admin)；viewer 等非写角色须 403。
+
+
+@pytest.fixture
+async def admin_client() -> AsyncIterator[httpx.AsyncClient]:
+    async for c in _client(1, "platform_admin"):
+        yield c
+
+
+async def test_assign_owner_blocks_viewer_403(reader_client: httpx.AsyncClient) -> None:
+    """非写角色（viewer）调用认领端点 → 403。"""
+    resp = await reader_client.post("/api/v1/assetmap/entities/1/owner", json={"owner_id": 9})
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "FORBIDDEN"
+
+
+async def test_assign_owner_success_admin(
+    admin_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """platform_admin 认领归属 → 200，且写入审计（PLAT-3 原子提交）。"""
+
+    async def fake(self: AssetMapService, entity_id: int, owner_id: int | None) -> dict:
+        return {"entity_id": entity_id, "owner_id": owner_id}
+
+    monkeypatch.setattr(AssetMapService, "assign_owner", fake)
+    resp = await admin_client.post(
+        "/api/v1/assetmap/entities/1/owner", json={"owner_id": 9}
+    )
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["entity_id"] == 1
+    assert body["owner_id"] == 9
+
+
+async def test_assign_owner_entity_missing_404(
+    admin_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """资产不存在 → 404（service 抛 NotFoundError 透传）。"""
+    from app.core.exceptions import NotFoundError
+
+    async def fake(self: AssetMapService, entity_id: int, owner_id: int | None) -> dict:
+        raise NotFoundError(f"资产不存在: {entity_id}")
+
+    monkeypatch.setattr(AssetMapService, "assign_owner", fake)
+    resp = await admin_client.post(
+        "/api/v1/assetmap/entities/999/owner", json={"owner_id": 9}
+    )
+    assert resp.status_code == 404
+
+
+async def test_reclassify_blocks_viewer_403(reader_client: httpx.AsyncClient) -> None:
+    """非写角色（viewer）调用重分类端点 → 403。"""
+    resp = await reader_client.post(
+        "/api/v1/assetmap/entities/1/sensitivity", json={"sensitivity_level": "PII"}
+    )
+    assert resp.status_code == 403
+
+
+async def test_reclassify_success_admin(
+    admin_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """platform_admin 重分类敏感级 → 200。"""
+
+    async def fake(self: AssetMapService, entity_id: int, level: str) -> dict:
+        return {"entity_id": entity_id, "sensitivity_level": level}
+
+    monkeypatch.setattr(AssetMapService, "reclassify_sensitivity", fake)
+    resp = await admin_client.post(
+        "/api/v1/assetmap/entities/1/sensitivity", json={"sensitivity_level": "PII"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["sensitivity_level"] == "PII"
+
+
+async def test_batch_owner_blocks_viewer_403(reader_client: httpx.AsyncClient) -> None:
+    """非写角色（viewer）调用批量认领 → 403。"""
+    resp = await reader_client.post(
+        "/api/v1/assetmap/batch-owner", json={"entity_ids": [1, 2], "owner_id": 9}
+    )
+    assert resp.status_code == 403
+
+
+async def test_batch_reclassify_success_admin(
+    admin_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """platform_admin 批量重分类 → 200，且返回受影响数。"""
+
+    async def fake(self: AssetMapService, entity_ids: list[int], level: str) -> dict:
+        return {"affected": len(entity_ids), "sensitivity_level": level, "total": len(entity_ids)}
+
+    monkeypatch.setattr(AssetMapService, "batch_reclassify", fake)
+    resp = await admin_client.post(
+        "/api/v1/assetmap/batch-sensitivity",
+        json={"entity_ids": [1, 2], "sensitivity_level": "CONFIDENTIAL"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["affected"] == 2
+    assert resp.json()["data"]["sensitivity_level"] == "CONFIDENTIAL"
+
+
+async def test_batch_owner_invalid_payload_422(
+    admin_client: httpx.AsyncClient,
+) -> None:
+    """批量认领空列表 → 422（schema min_length 校验）。"""
+    resp = await admin_client.post(
+        "/api/v1/assetmap/batch-owner", json={"entity_ids": [], "owner_id": 9}
+    )
+    assert resp.status_code == 422

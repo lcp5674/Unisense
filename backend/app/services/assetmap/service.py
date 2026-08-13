@@ -10,12 +10,15 @@ P3: 继承 BaseService Protocol。
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
+from app.core.exceptions import NotFoundError
 from app.core.resilience import CircuitBreaker
 from app.services.assetmap.repository import AssetMapRepository
 
@@ -23,6 +26,58 @@ logger = logging.getLogger(__name__)
 
 # Neo4j 调用熔断器
 _NEO4J_BREAKER = CircuitBreaker(failure_threshold=5, reset_timeout=30.0)
+
+# 聚合结果缓存：catalog/metric/classification/heatmap/health/pii 均为低频变化的
+# 全表聚合，加 cache-aside 短 TTL 缓存避免每次请求全表扫描（大规模优化，TD §13 perf）。
+_CACHE_TTL = 30  # 秒
+_CACHE_PREFIX = "assetmap:agg:"
+_CACHE_BREAKER = CircuitBreaker(failure_threshold=5, reset_timeout=30.0)
+
+
+async def _agg_cache_get(key: str) -> Any | None:
+    """聚合结果缓存读取（best-effort：Redis 不可用/熔断打开/坏数据均回源）。"""
+    if not _CACHE_BREAKER.allow():
+        return None
+    try:
+        from app.db.redis import get_redis
+
+        raw = await get_redis().get(key)
+        if raw is None:
+            return None
+        return json.loads(raw)
+    except Exception as exc:  # noqa: BLE001 - 缓存降级，不阻断主链路
+        _CACHE_BREAKER.record_failure()
+        logger.warning("assetmap_agg_cache_get_failed: %s", exc)
+        return None
+
+
+async def _agg_cache_set(key: str, value: Any) -> None:
+    """聚合结果缓存写入（best-effort）。熔断打开时跳过写，防雪崩。"""
+    if not _CACHE_BREAKER.allow():
+        return
+    try:
+        from app.db.redis import get_redis
+
+        await get_redis().set(
+            key, json.dumps(value, ensure_ascii=False, default=str), ex=_CACHE_TTL
+        )
+        _CACHE_BREAKER.record_success()
+    except Exception as exc:  # noqa: BLE001
+        _CACHE_BREAKER.record_failure()
+        logger.warning("assetmap_agg_cache_set_failed: %s", exc)
+
+
+async def _agg_cached(
+    name: str, loader: Callable[[], Awaitable[dict[str, Any]]]
+) -> dict[str, Any]:
+    """cache-aside 通用封装：读缓存命中即返，未命中回源并写缓存。"""
+    key = f"{_CACHE_PREFIX}{name}"
+    cached = await _agg_cache_get(key)
+    if cached is not None:
+        return cast("dict[str, Any]", cached)
+    data = await loader()
+    await _agg_cache_set(key, data)
+    return data
 
 # Neo4j 异步 driver 单例：惰性创建并复用，避免每请求新建连接池导致泄漏（P2-1）。
 _NEO4J_DRIVER: Any | None = None
@@ -58,13 +113,13 @@ class AssetMapService(BaseService):
         self._repo = AssetMapRepository(session)
 
     async def catalog_summary(self) -> dict[str, Any]:
-        return await self._repo.catalog_summary()
+        return await _agg_cached("catalog_summary", self._repo.catalog_summary)
 
     async def classification_summary(self) -> dict[str, Any]:
-        return await self._repo.classification_summary()
+        return await _agg_cached("classification_summary", self._repo.classification_summary)
 
     async def metric_summary(self) -> dict[str, Any]:
-        return await self._repo.metric_summary()
+        return await _agg_cached("metric_summary", self._repo.metric_summary)
 
     async def list_tables(
         self, source_id: str | None, sensitivity: str | None, limit: int
@@ -204,7 +259,10 @@ class AssetMapService(BaseService):
         Args:
             dimension: 聚合维度（domain / sensitivity / owner / dw_layer）。
         """
-        return await self._repo.heatmap_aggregation(dimension)
+        return await _agg_cached(
+            f"heatmap:{dimension}",
+            lambda: self._repo.heatmap_aggregation(dimension),
+        )
 
     async def get_owner_view(self, owner_id: int) -> dict[str, Any]:
         """按责任人聚合资产统计。
@@ -226,11 +284,11 @@ class AssetMapService(BaseService):
 
     async def health_summary(self) -> dict[str, Any]:
         """资产健康视图：源健康/schema 不完整/孤儿/陈旧资产。"""
-        return await self._repo.health_summary()
+        return await _agg_cached("health_summary", self._repo.health_summary)
 
     async def pii_overview(self) -> dict[str, Any]:
         """PII 合规资产视图：按敏感级/域聚合 PII 资产。"""
-        return await self._repo.pii_overview()
+        return await _agg_cached("pii_overview", self._repo.pii_overview)
 
     async def recent_changes(self, days: int = 7, limit: int = 50) -> dict[str, Any]:
         """变更追踪流：最近 N 天新增/变更的目录与指标。"""
@@ -246,3 +304,59 @@ class AssetMapService(BaseService):
         """导出目录资产（表/视图）为字典列表，供 CSV 序列化。"""
         rows = await self._repo.list_tables(source_id, sensitivity, limit=5000)
         return [r.to_dict() for r in rows]
+
+    # ----------------------------------------------------------------
+    # 写能力（FR-18 资产工作台）：认领/转让、重分类、批量
+    # ----------------------------------------------------------------
+
+    async def assign_owner(
+        self, entity_id: int, owner_id: int | None
+    ) -> dict[str, Any]:
+        """认领/转让归属（owner_id=None 解除归属）。"""
+        entity = await self._repo.get_catalog_entity(entity_id)
+        if entity is None:
+            raise NotFoundError(
+                f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id}
+            )
+        if owner_id is not None and not await self._repo.user_exists(owner_id):
+            raise NotFoundError(
+                f"目标用户不存在: {owner_id}", ctx={"owner_id": owner_id}
+            )
+        updated = await self._repo.assign_owner(entity, owner_id)
+        return {"entity_id": updated.id, "owner_id": updated.owner_id}
+
+    async def reclassify_sensitivity(
+        self, entity_id: int, level: str
+    ) -> dict[str, Any]:
+        """重分类敏感级（level 由 schema 校验为枚举值）。"""
+        entity = await self._repo.get_catalog_entity(entity_id)
+        if entity is None:
+            raise NotFoundError(
+                f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id}
+            )
+        updated = await self._repo.reclassify_sensitivity(entity, level)
+        return {"entity_id": updated.id, "sensitivity_level": updated.sensitivity_level}
+
+    async def batch_assign_owner(
+        self, entity_ids: list[int], owner_id: int | None
+    ) -> dict[str, Any]:
+        """批量认领/转让归属（同事务，API 层统一 commit）。"""
+        if owner_id is not None and not await self._repo.user_exists(owner_id):
+            raise NotFoundError(
+                f"目标用户不存在: {owner_id}", ctx={"owner_id": owner_id}
+            )
+        entities = await self._repo.list_catalog_entities(entity_ids)
+        if not entities:
+            raise NotFoundError("指定实体均不存在或已删除")
+        affected = await self._repo.batch_assign_owner(entities, owner_id)
+        return {"affected": affected, "owner_id": owner_id, "total": len(entity_ids)}
+
+    async def batch_reclassify(
+        self, entity_ids: list[int], level: str
+    ) -> dict[str, Any]:
+        """批量重分类敏感级（同事务，API 层统一 commit）。"""
+        entities = await self._repo.list_catalog_entities(entity_ids)
+        if not entities:
+            raise NotFoundError("指定实体均不存在或已删除")
+        affected = await self._repo.batch_reclassify(entities, level)
+        return {"affected": affected, "sensitivity_level": level, "total": len(entity_ids)}
