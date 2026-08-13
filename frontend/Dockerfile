@@ -38,9 +38,11 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
-    # API 反代到后端服务
+    # API 反代到后端服务（动态 DNS 解析：backend 重建换 IP 后无需重启 frontend）
+    resolver 127.0.0.11 valid=10s ipv6=off;
     location /api/ {
-        proxy_pass http://backend:8000;
+        set $backend_upstream http://backend:8000;
+        proxy_pass $backend_upstream;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
