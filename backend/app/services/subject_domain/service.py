@@ -154,19 +154,58 @@ class SubjectDomainService:
 
     @staticmethod
     def _slugify_code(name: str) -> str:
-        """把显示名规范化为域编码片段：小写、非字母数字折叠为下划线、去首尾下划线。
+        """把显示名规范化为域编码片段：中文转拼音、ASCII 保留、段落用下划线连接。
 
-        返回空串表示无 ASCII 可提取（如纯中文名）。
+        规则：
+        - 连续中文段逐字转拼音（无音调、取常用读音），如「销售」→ ``xiaoshou``；
+        - 连续 ASCII 字母数字原样保留，如「GMV」→ ``gmv``；
+        - 中文段与 ASCII 段之间补下划线（避免 ``dan``+``gmv`` 粘连成 ``dangmv``），
+          如「销售订单GMV」→ ``xiaoshoudingdan_gmv``；
+        - 空格/标点作为分隔符；返回空串表示无可提取字符（纯标点/空白名）。
         """
+        _lazy_pinyin: Any | None = None
+        import contextlib
+
+        with contextlib.suppress(ImportError):
+            from pypinyin import lazy_pinyin as _lazy_pinyin
+
+        if _lazy_pinyin is not None:
+            tokens: list[str] = []
+            cur: list[str] = []
+            cur_is_cjk: bool | None = None
+            for ch in name:
+                is_cjk = "\u4e00" <= ch <= "\u9fff"
+                if is_cjk:
+                    if cur_is_cjk is False:
+                        tokens.append("".join(cur))
+                        cur = []
+                    cur.append(_lazy_pinyin(ch)[0])
+                    cur_is_cjk = True
+                elif re.match(r"[a-z0-9]", ch, re.IGNORECASE):
+                    if cur_is_cjk is True:
+                        tokens.append("".join(cur))
+                        cur = []
+                    cur.append(ch)
+                    cur_is_cjk = False
+                else:
+                    if cur:
+                        tokens.append("".join(cur))
+                        cur = []
+                    cur_is_cjk = None
+            if cur:
+                tokens.append("".join(cur))
+            name = "_".join(t for t in tokens if t)
+
         slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
         return slug
 
     async def _generate_unique_code(self, name: str, parent: SubjectDomain | None) -> str:
         """自动生成唯一域编码。
 
-        规则：优先取显示名的 ASCII slug；子域拼接父域编码前缀（保持树形语义）；
-        纯中文等无 ASCII 名回退 ``{父域}_sub`` / ``domain``；冲突时追加 ``_2/_3/...``
-        后缀（上限 100 次）。与数据源 source_id 自动生成约定保持一致。
+        规则：显示名中文转拼音、ASCII 保留生成 slug；子域拼接父域编码前缀
+        （保持树形语义）；纯标点/空白等无可提取字符时回退 ``{父域}_sub`` /
+        ``domain``；冲突时追加 ``_2/_3/...`` 后缀（上限 100 次）。与数据源
+        source_id 自动生成约定保持一致。
         """
         slug = self._slugify_code(name)
         if slug:
@@ -214,6 +253,17 @@ class SubjectDomainService:
 
     async def deactivate_domain(self, code: str) -> SubjectDomain:
         domain = await self.get_domain(code)
+        # 级联一致性：存在 active 子域时禁止停用父域（须先停用子域），
+        # 避免「父 inactive、子仍 active」导致子域下指标在父停用后仍可服务。
+        # 与 activate_domain 校验父域 active 对称（fail-closed）。
+        active_children = await self._repo.list_children(domain.id)
+        active_children = [c for c in active_children if c.status == "active"]
+        if active_children:
+            raise BusinessError(
+                "存在启用中的子域，请先停用全部子域再停用本域",
+                error_code="ACTIVE_CHILDREN",
+                ctx={"child_codes": [c.code for c in active_children]},
+            )
         domain.status = "inactive"
         domain = await self._repo.update(domain)
         logger.info("domain_deactivated", code=code)

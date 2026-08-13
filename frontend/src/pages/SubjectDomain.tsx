@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { pinyin } from "pinyin-pro";
 import {
   Button, Card, Col, Row, Tree, Descriptions, Modal, Form, Input, InputNumber,
   Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip, Alert,
@@ -13,12 +14,41 @@ import type { SubjectDomainTreeNode, SubjectDomain } from "../types";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
 
 /**
- * 前端编码预览（与后端 SubjectDomainService._generate_unique_code 规则一致）：
- * 显示名 ASCII slug 化；子域拼接父域前缀；纯中文回退 domain / {父域}_sub。
+ * 前端编码预览（与后端 SubjectDomainService._slugify_code 规则对齐）：
+ * 连续中文段转拼音（无音调）、ASCII 保留、段落用下划线连接；
+ * 纯标点/空白名无可提取字符 → 根域回退 domain / 子域回退 {父域}_sub。
  * 仅用于表单预览，实际编码以后端生成/返回为准。
  */
 function slugifyCode(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const tokens: string[] = [];
+  let cur: string[] = [];
+  let curIsCjk: boolean | null = null;
+  for (const ch of name) {
+    const isCjk = /[\u4e00-\u9fff]/.test(ch);
+    if (isCjk) {
+      if (curIsCjk === false) {
+        tokens.push(cur.join(""));
+        cur = [];
+      }
+      cur.push(pinyin(ch, { toneType: "none" }));
+      curIsCjk = true;
+    } else if (/[a-z0-9]/i.test(ch)) {
+      if (curIsCjk === true) {
+        tokens.push(cur.join(""));
+        cur = [];
+      }
+      cur.push(ch);
+      curIsCjk = false;
+    } else {
+      if (cur.length > 0) {
+        tokens.push(cur.join(""));
+        cur = [];
+      }
+      curIsCjk = null;
+    }
+  }
+  if (cur.length > 0) tokens.push(cur.join(""));
+  return tokens.join("_").toLowerCase().replace(/^_+|_+$/g, "");
 }
 
 export function previewDomainCode(name: string, parentCode?: string | null): string {
@@ -111,26 +141,39 @@ const DICT_FIELD_MAPS: Record<string, Record<string, string>> = {
   metric_tier: METRIC_TIER_LABEL,
 };
 
-function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: SubjectDomainTreeNode) => void): DataNode[] {
+function _nodeDepth(nodes: SubjectDomainTreeNode[], targetId: number, depth: number = 1): number {
+  for (const n of nodes) {
+    if (n.id === targetId) return depth;
+    if (n.children.length > 0) {
+      const childDepth = _nodeDepth(n.children, targetId, depth + 1);
+      if (childDepth > 0) return childDepth;
+    }
+  }
+  return 0;
+}
+
+function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: SubjectDomainTreeNode) => void, allNodes: SubjectDomainTreeNode[]): DataNode[] {
   return nodes.map((n) => ({
     key: n.code,
     title: (
       <span>
         {n.name} <Tag color={n.status === "active" ? "green" : "red"} style={{ marginLeft: 4, fontSize: 10 }}>{n.status === "active" ? "启用" : "停用"}</Tag>
         {n.metric_count > 0 && <Tag color="blue" style={{ marginLeft: 4, fontSize: 10 }}>{n.metric_count}指标</Tag>}
-        <Tooltip title={`在「${n.name}」下新建子域`}>
-          <Button
-            type="text"
-            size="small"
-            icon={<BranchesOutlined />}
-            style={{ marginLeft: 4, fontSize: 12, color: "#E8862D" }}
-            onClick={(e) => { e.stopPropagation(); onAddChild(n); }}
-            aria-label={`新建子域-${n.name}`}
-          />
-        </Tooltip>
+        {_nodeDepth(allNodes, n.id) < 3 && (
+          <Tooltip title={`在「${n.name}」下新建子域`}>
+            <Button
+              type="text"
+              size="small"
+              icon={<BranchesOutlined />}
+              style={{ marginLeft: 4, fontSize: 12, color: "#E8862D" }}
+              onClick={(e) => { e.stopPropagation(); onAddChild(n); }}
+              aria-label={`新建子域-${n.name}`}
+            />
+          </Tooltip>
+        )}
       </span>
     ),
-    children: n.children.length > 0 ? treeDataToNodes(n.children, onAddChild) : undefined,
+    children: n.children.length > 0 ? treeDataToNodes(n.children, onAddChild, allNodes) : undefined,
   }));
 }
 
@@ -316,7 +359,7 @@ export function SubjectDomain() {
               <Tree
                 showLine
                 defaultExpandAll
-                treeData={treeDataToNodes(treeData, (n) => openCreate(false, n))}
+                treeData={treeDataToNodes(treeData, (n) => openCreate(false, n), treeData)}
                 onSelect={handleSelect}
                 selectedKeys={selectedCode ? [selectedCode] : []}
               />
