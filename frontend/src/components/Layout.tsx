@@ -248,7 +248,7 @@ export function Layout({ user }: { user: CurrentUser }) {
   }));
 
   return (
-    <AntLayout style={{ minHeight: "100vh" }}>
+    <AntLayout style={{ height: "100vh" }}>
       <Sider
         collapsible
         collapsed={collapsed}
@@ -288,12 +288,16 @@ export function Layout({ user }: { user: CurrentUser }) {
           mode="inline"
           selectedKeys={selectedKey ? [selectedKey] : []}
           items={menuItems}
-          onClick={({ key }) => navigate(key)}
-          style={{ borderInlineEnd: "none", paddingBottom: 24 }}
+          onClick={({ key }) => {
+            navigate(key);
+            // 点击导航立即回顶（即使已停留在当前路由），避免内容停留在上次滚动位置
+            contentRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+          }}
+          style={{ borderInlineEnd: "none", paddingBottom: 24, height: "calc(100vh - 56px)", overflowY: "auto" }}
         />
       </Sider>
 
-      <AntLayout>
+      <AntLayout style={{ height: "100%", overflow: "hidden" }}>
         <Header
           style={{
             padding: "0 24px",
