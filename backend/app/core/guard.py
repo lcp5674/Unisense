@@ -21,7 +21,9 @@ _PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?i);\s*(drop|delete|update|insert|truncate|alter)\b"),
     re.compile(r"(?i)\bunion\b.{0,40}?\bselect\b"),
     re.compile(r"(?i)/\*"),
-    re.compile(r"(?i)\*/"),
+    # 注意：*/ 单独出现（无前置 /*）不是 SQL 注入向量，且会误伤合法 cron 表达式
+    # （如 "*/5 * * * *" 每分钟/每5分钟），故不单独拦截——SQL 块注释必须以 /* 开头，
+    # 上面的 /\* 模式已覆盖真实注入场景。
     re.compile(r"(?i)\bxp_cmdshell\b"),
     re.compile(r"(?i)\bsleep\s*\("),
     re.compile(r"(?i)\bbenchmark\s*\("),

@@ -38,7 +38,10 @@ class TestIsSuspicious:
 
     def test_block_comment_detected(self) -> None:
         assert _is_suspicious("/* x */") is True
-        assert _is_suspicious("*/ x") is True
+
+    def test_cron_slash_star_not_injection(self) -> None:
+        """*/ 单独出现（cron 表达式，如 */5 * * * *）不应被误判为注入。"""
+        assert _is_suspicious("*/5 * * * *") is False
 
     def test_xp_cmdshell_detected(self) -> None:
         assert _is_suspicious("xp_cmdshell") is True
