@@ -27,6 +27,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -39,9 +40,7 @@ from app.services.semantic.repository import MetricRepository
 from app.services.semantic.schemas import (
     MetricApproveRequest,
     MetricCreateRequest,
-    MetricDeprecateRequest,
     MetricEmergencyPublishRequest,
-    MetricPublishRequest,
     MetricSubmitRequest,
     MetricUpdateRequest,
 )
@@ -57,15 +56,18 @@ _USE_EXT = bool(EXT_DB_URL) and "localhost" in EXT_DB_URL
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
-def _seed(session_factory) -> int:
-    """种子：组织 + Owner 用户（metric.owner_id 外键）。"""
+def _seed(session_factory) -> tuple[int, int]:
+    """种子：组织 + Owner 用户（metric.owner_id 外键）+ Reviewer 用户（审核人，避免自审）。
 
-    async def _run() -> int:
+    返回 (owner_id, reviewer_id)。
+    """
+
+    async def _run() -> tuple[int, int]:
         async with session_factory() as s:
             org = Organization(name="默认组织", code="default_org", status="active")
             s.add(org)
             await s.flush()
-            user = User(
+            owner = User(
                 org_id=org.id,
                 username="owner",
                 email="owner@example.com",
@@ -74,10 +76,20 @@ def _seed(session_factory) -> int:
                 role="metric_owner",
                 status="active",
             )
-            s.add(user)
+            s.add(owner)
+            reviewer = User(
+                org_id=org.id,
+                username="reviewer",
+                email="reviewer@example.com",
+                password_hash="x",
+                display_name="reviewer",
+                role="domain_admin",
+                status="active",
+            )
+            s.add(reviewer)
             await s.flush()
             await s.commit()
-            return user.id
+            return owner.id, reviewer.id
 
     return asyncio.run(_run())
 
@@ -89,14 +101,26 @@ def _reset_via_alembic(url: str) -> None:
     升级前用 ORM ``drop_all`` 完成，避免依赖迁移 downgrade 的可回滚性。
     """
     env = {**os.environ, "UNISENSE_DB_URL": url}
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        env=env,
-        cwd=_BACKEND_DIR,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    # MySQL 8.0 在连续 DDL（wipe→重建）下偶发 1684/1050 时序冲突（元数据锁未收敛）；
+    # 重试最多 3 次，间隔 1s，保证测试库重建稳定（CI 全新容器 + 本地共享库均适用）。
+    last_exc: subprocess.CalledProcessError | None = None
+    for attempt in range(3):
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                env=env,
+                cwd=_BACKEND_DIR,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(1.0)
+    assert last_exc is not None
+    raise last_exc
 
 
 @pytest.fixture(scope="function")
@@ -118,18 +142,32 @@ def db_env():
         async def _wipe() -> None:
             async with engine.begin() as conn:
                 await conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-                await conn.run_sync(Base.metadata.drop_all)
+                # 逐个 DROP TABLE IF EXISTS：避免 drop_all 的 information_schema 反射与
+                # DDL 并发触发 MySQL 1684（definition being modified by concurrent DDL）。
+                for table in reversed(Base.metadata.sorted_tables):
+                    await conn.execute(text(f"DROP TABLE IF EXISTS `{table.name}`"))
                 await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 await conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
 
         asyncio.run(_wipe())
+        # 显式释放 wipe 使用的所有连接，避免 MySQL DDL 锁残留与后续
+        # alembic 建表并发冲突（错误 1684：definition being modified by concurrent DDL）。
+        asyncio.run(engine.dispose())
+        # 大量 DROP TABLE 后 MySQL 8.0 元数据锁异步释放，立即建表会报 1684；
+        # 短暂等待让 DDL 锁完全收敛（12 个测试累计 ~6s，可接受）。
+        time.sleep(0.5)
 
         # 生产迁移建表（验证迁移在真实 MySQL 8.0 上可落地、ORM 模型与迁移一致）
         _reset_via_alembic(EXT_DB_URL)
 
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        owner_id = _seed(session_factory)
-        yield {"engine": engine, "session_factory": session_factory, "owner_id": owner_id}
+        owner_id, reviewer_id = _seed(session_factory)
+        yield {
+            "engine": engine,
+            "session_factory": session_factory,
+            "owner_id": owner_id,
+            "reviewer_id": reviewer_id,
+        }
 
         asyncio.run(engine.dispose())
     else:
@@ -157,14 +195,19 @@ def db_env():
 
         asyncio.run(_create_all())
 
-        owner_id = _seed(session_factory)
-        yield {"engine": engine, "session_factory": session_factory, "owner_id": owner_id}
+        owner_id, reviewer_id = _seed(session_factory)
+        yield {
+            "engine": engine,
+            "session_factory": session_factory,
+            "owner_id": owner_id,
+            "reviewer_id": reviewer_id,
+        }
         container.stop()
 
 
 def _create_payload(**overrides) -> MetricCreateRequest:
     payload = {
-        "metric_code": "fin_gmv_daily",
+        "metric_code": "fin_gmv_amount_day",
         "name": "GMV",
         "domain": "fin",
         "type": "atomic",
@@ -184,9 +227,10 @@ def _create_payload(**overrides) -> MetricCreateRequest:
 
 
 async def test_create_then_publish_promotes_version(db_env):
-    """创建(DRAFT)→发布：版本转正为 PUBLISHED，effective_version 正确。"""
+    """创建(DRAFT)→submit→approve：版本转正为 PUBLISHED，effective_version 正确。"""
     session_factory = db_env["session_factory"]
     owner_id = db_env["owner_id"]
+    reviewer_id = db_env["reviewer_id"]
 
     async with session_factory() as session:
         repo = MetricRepository(session)
@@ -201,11 +245,18 @@ async def test_create_then_publish_promotes_version(db_env):
         assert len(versions) == 1
         assert versions[0].status == "DRAFT"
 
-        # 发布（无 RETURNING，依赖 rowcount + 回查）
-        published = await svc.publish_metric(
+        # 提交审核（DRAFT → REVIEW）→ 审核通过（REVIEW → PUBLISHED，非自审）
+        await svc.submit_metric(
             metric.metric_code,
-            MetricPublishRequest(version=1, change_reason="首次发布"),
+            MetricSubmitRequest(change_reason="首次提交审核"),
             actor_id=owner_id,
+        )
+        await session.commit()
+
+        published = await svc.approve_metric(
+            metric.metric_code,
+            MetricApproveRequest(mode="standard", target_version=1),
+            actor_id=reviewer_id,
         )
         await session.commit()
 
@@ -246,34 +297,50 @@ async def test_pii_flow_deadlock_resolved(db_env):
     """PII 流程：未复核被拦截 → 复核 → 发布成功（打通此前死结）。"""
     session_factory = db_env["session_factory"]
     owner_id = db_env["owner_id"]
+    reviewer_id = db_env["reviewer_id"]
 
     async with session_factory() as session:
         svc = MetricService(session)
 
         metric = await svc.create_metric(
             _create_payload(
-                metric_code="fin_pii_daily",
+                metric_code="fin_pii_mobile_day",
                 pii_flag=True,
-                pii_fields=["user_id"],
             ),
             owner_id=owner_id,
         )
         await session.commit()
 
-        pub = MetricPublishRequest(version=1, change_reason="首次发布")
+        # 提交审核
+        await svc.submit_metric(
+            metric.metric_code,
+            MetricSubmitRequest(change_reason="提交含PII指标审核"),
+            actor_id=owner_id,
+        )
+        await session.commit()
 
-        # 未合规复核 → 被拦截
+        # 未合规复核 → approve 被拦截
         with pytest.raises(BusinessError) as exc:
-            await svc.publish_metric(metric.metric_code, pub, actor_id=owner_id)
+            await svc.approve_metric(
+                metric.metric_code,
+                MetricApproveRequest(mode="standard"),
+                actor_id=reviewer_id,
+            )
         assert exc.value.error_code == "COMPLIANCE_BLOCKED"
 
-        # 合规复核
-        reviewed = await svc.review_compliance(metric.metric_code, actor_id=owner_id)
+        # 合规复核（须非 Owner，防自审）
+        reviewed = await svc.review_compliance(
+            metric.metric_code, actor_id=reviewer_id, role="domain_admin"
+        )
         await session.commit()
         assert reviewed.compliance_reviewed is True
 
-        # 再次发布 → 成功
-        published = await svc.publish_metric(metric.metric_code, pub, actor_id=owner_id)
+        # 再次 approve → 成功
+        published = await svc.approve_metric(
+            metric.metric_code,
+            MetricApproveRequest(mode="standard"),
+            actor_id=reviewer_id,
+        )
         await session.commit()
         assert published.status == "PUBLISHED"
 
@@ -337,37 +404,37 @@ def test_migration_is_reversible():
 async def test_full_lifecycle_e2e(db_env):
     """端到端完整生命周期：DRAFT→SUBMIT→APPROVE→PUBLISHED→BREAKING→PENDING_VERSION。
 
-    验证状态机 + PENDING_VERSION 缓冲期 + 依赖校验 + 破坏性变更不直接生效。
+    验证状态机 + PENDING_VERSION 缓冲期 + 破坏性变更不直接生效。
     """
     session_factory = db_env["session_factory"]
     owner_id = db_env["owner_id"]
+    reviewer_id = db_env["reviewer_id"]
 
     async with session_factory() as session:
         svc = MetricService(session)
 
         # Step 1: 创建 DRAFT
         metric = await svc.create_metric(
-            _create_payload(metric_code="fin_lifecycle_daily"),
+            _create_payload(metric_code="fin_lifecycle_flow_day"),
             owner_id=owner_id,
         )
         await session.commit()
         assert metric.status == "DRAFT"
 
-        # Step 2: submit → REVIEW
+        # Step 2: submit → REVIEW（无 role 参数）
         submitted = await svc.submit_metric(
-            "fin_lifecycle_daily",
+            "fin_lifecycle_flow_day",
             MetricSubmitRequest(change_reason="提交评审"),
             actor_id=owner_id,
-            role="metric_owner",
         )
         await session.commit()
         assert submitted.status == "REVIEW"
 
-        # Step 3: approve → PUBLISHED
+        # Step 3: approve（非自审）→ PUBLISHED
         approved = await svc.approve_metric(
-            "fin_lifecycle_daily",
+            "fin_lifecycle_flow_day",
             MetricApproveRequest(mode="standard"),
-            actor_id=owner_id,
+            actor_id=reviewer_id,
         )
         await session.commit()
         assert approved.status == "PUBLISHED"
@@ -375,7 +442,7 @@ async def test_full_lifecycle_e2e(db_env):
 
         # Step 4: PUT breaking change → PENDING_VERSION
         updated = await svc.update_metric(
-            "fin_lifecycle_daily",
+            "fin_lifecycle_flow_day",
             MetricUpdateRequest(
                 definition_json={
                     "expression": "SUM(amount_new)",
@@ -402,35 +469,35 @@ async def test_gray_release_and_promote_e2e(db_env):
     """灰度发布：approve(mode=experimental) → EXPERIMENTAL → promote → PUBLISHED。"""
     session_factory = db_env["session_factory"]
     owner_id = db_env["owner_id"]
+    reviewer_id = db_env["reviewer_id"]
 
     async with session_factory() as session:
         svc = MetricService(session)
 
         metric = await svc.create_metric(  # noqa: F841
-            _create_payload(metric_code="fin_gray_daily"),
+            _create_payload(metric_code="fin_gray_flow_day"),
             owner_id=owner_id,
         )
         await session.commit()
 
         await svc.submit_metric(
-            "fin_gray_daily",
+            "fin_gray_flow_day",
             MetricSubmitRequest(change_reason="灰度评审"),
             actor_id=owner_id,
-            role="metric_owner",
         )
         await session.commit()
 
-        # 灰度发布
+        # 灰度发布（非自审）
         gray = await svc.approve_metric(
-            "fin_gray_daily",
+            "fin_gray_flow_day",
             MetricApproveRequest(mode="experimental", gray_tenant_ids=[1, 2]),
-            actor_id=owner_id,
+            actor_id=reviewer_id,
         )
         await session.commit()
         assert gray.status == "EXPERIMENTAL"
 
         # promote → PUBLISHED
-        promoted = await svc.promote_metric("fin_gray_daily", actor_id=owner_id)
+        promoted = await svc.promote_metric("fin_gray_flow_day", actor_id=owner_id)
         await session.commit()
         assert promoted.status == "PUBLISHED"
 
@@ -445,9 +512,8 @@ async def test_emergency_publish_blocks_pii_e2e(db_env):
 
         await svc.create_metric(  # noqa: F841
             _create_payload(
-                metric_code="fin_emergency_pii_daily",
+                metric_code="fin_emergency_pii_day",
                 pii_flag=True,
-                pii_fields=["user_id"],
             ),
             owner_id=owner_id,
         )
@@ -456,9 +522,10 @@ async def test_emergency_publish_blocks_pii_e2e(db_env):
         # PII 未合规 → 紧急发布被拒绝
         with pytest.raises(BusinessError, match="PII"):
             await svc.emergency_publish_metric(
-                "fin_emergency_pii_daily",
+                "fin_emergency_pii_day",
                 MetricEmergencyPublishRequest(reason="紧急业务需求需要立即上线"),
                 actor_id=owner_id,
+                role="domain_admin",
             )
 
 
@@ -471,16 +538,17 @@ async def test_emergency_publish_succeeds_non_pii_e2e(db_env):
         svc = MetricService(session)
 
         metric = await svc.create_metric(
-            _create_payload(metric_code="fin_emergency_nopii_daily", pii_flag=False),
+            _create_payload(metric_code="fin_emergency_nopii_day", pii_flag=False),
             owner_id=owner_id,
         )
         await session.commit()
         assert metric.status == "DRAFT"
 
         emergency = await svc.emergency_publish_metric(
-            "fin_emergency_nopii_daily",
+            "fin_emergency_nopii_day",
             MetricEmergencyPublishRequest(reason="紧急业务需求需要立即上线"),
             actor_id=owner_id,
+            role="domain_admin",
         )
         await session.commit()
         assert emergency.status == "PUBLISHED"
@@ -496,36 +564,36 @@ async def test_health_score_e2e(db_env):
         svc = MetricService(session)
 
         await svc.create_metric(  # noqa: F841
-            _create_payload(metric_code="fin_health_daily"),
+            _create_payload(metric_code="fin_health_score_day"),
             owner_id=owner_id,
         )
         await session.commit()
 
-        health = await svc.get_metric_health("fin_health_daily")
-        assert "score" in health
-        assert "level" in health
-        assert health["level"] in ("EXCELLENT", "GOOD", "WARNING", "CRITICAL")
+        health = await svc.get_metric_health("fin_health_score_day")
+        # get_metric_health 返回 MetricHealthScore ORM 对象（非 dict）
+        assert health.score is not None
+        assert health.level in ("EXCELLENT", "GOOD", "WARNING", "CRITICAL")
 
 
 async def test_deprecate_only_published_e2e(db_env):
-    """废弃：仅 PUBLISHED/EXPERIMENTAL 可废弃，DRAFT 不可。"""
+    """废弃：仅 PUBLISHED 可废弃，DRAFT 不可。"""
     session_factory = db_env["session_factory"]
     owner_id = db_env["owner_id"]
 
     async with session_factory() as session:
         svc = MetricService(session)
 
-        # DRAFT 状态废弃 → 拒绝
+        # DRAFT 状态废弃 → 拒绝（deprecate_metric 签名: successor_code: str|None）
         await svc.create_metric(  # noqa: F841
-            _create_payload(metric_code="fin_deprecate_draft_daily"),
+            _create_payload(metric_code="fin_deprecate_draft_day"),
             owner_id=owner_id,
         )
         await session.commit()
 
         with pytest.raises(BusinessError):
             await svc.deprecate_metric(
-                "fin_deprecate_draft_daily",
-                MetricDeprecateRequest(reason="测试DRAFT不可废弃"),
+                "fin_deprecate_draft_day",
+                None,
                 actor_id=owner_id,
                 role="domain_admin",
             )
@@ -535,5 +603,6 @@ async def test_state_machine_illegal_transition_e2e(db_env):
     """状态机非法跃迁：DEPRECATED → PUBLISHED 被拦截。"""
     from app.services.semantic.state_machine import MetricStateMachine
 
-    with pytest.raises(BusinessError):
-        MetricStateMachine.validate_transition("DEPRECATED", "PUBLISHED")
+    # validate_transition 返回拒绝原因字符串（None 表示合法），非法跃迁返回非 None
+    err = MetricStateMachine.validate_transition("DEPRECATED", "PUBLISHED")
+    assert err is not None
