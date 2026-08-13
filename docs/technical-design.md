@@ -319,7 +319,7 @@ POST   /metrics/{code}/watch         # 关注（US-DA-3）
 POST   /metrics/{code}/promote       # 灰度全量（EXPERIMENTAL → PUBLISHED，观察期满）
 POST   /metrics/{code}/rollback      # 灰度回滚（EXPERIMENTAL → 上一 PUBLISHED，异常一键）
 GET    /metrics/{code}/versions      # 版本历史（溯源，呼应 US-DA-2）
-GET    /metrics/templates            # 模板库（NEW-2）
+GET    /metrics/templates?keyword=   # 模板库（NEW-2，keyword 匹配编码/名称/描述）
 GET    /metrics/dashboard            # 治理驾驶舱聚合（MO-1）
 POST   /metrics/compare              # 指标对比工具（PRD 4.5：两指标并排 diff，同名不同义排查）
 GET/POST /sla-calendar               # SLA 例外日历查询/配置（PRD 4.5，domain_admin 维护）
@@ -334,6 +334,7 @@ GET    /lineage/impact/{id}          # 影响面（上游变更影响下游集�
 GET    /asset-map/overview           # 资产总览（域/分级/覆盖率）
 GET    /asset-map/heatmap            # 敏感分布热力（CONFIDENTIAL/PII 着色）
 GET    /asset-map/owner/{uid}        # 责任人视图（名下资产+健康度）
+GET    /search?q=&limit=             # 全局聚合搜索（FR-18 全局搜索栏）：跨指标/维度/术语/模板/数据源/采集目录表+字段/主题域，按类型分组返回 top-N，顶栏实时下拉 + /search 页消费
 ```
 
 ### 3.4 冲突（conflict）
@@ -540,7 +541,7 @@ GET    /terms/conflicts             # 术语冲突候选（glossary_conflict）
 ### 3.10 维度与同源对账（dimension · L2）
 ```
 POST   /dimensions                  # 建共享维度
-GET    /dimensions                  # 维度列表
+GET    /dimensions?keyword=          # 维度列表（keyword 匹配编码/名称/描述，列表页 kw 定位）
 POST   /dimension-mappings          # 录源列→标准维度值映射规则
 GET    /dimensions/{code}/mappings  # 映射规则查看
 POST   /reconciliation/run          # 手动触发同源口径对账
