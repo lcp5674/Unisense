@@ -50,7 +50,7 @@ from app.core.middleware import (
     SecurityHeadersMiddleware,
     TraceIdMiddleware,
 )
-from app.core.resilience import register_degradation_listener
+from app.core.resilience import init_circuit_breaker_store, register_degradation_listener
 from app.db.redis import close_redis_pool, init_redis_pool
 from app.services.consume.rate_limiter import init_rate_limiter
 
@@ -96,6 +96,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ---- 降级事件上报（TD §5.2.4/§5.2.5）：熔断器 open/close 回调持久化 + 告警 ----
     register_degradation_listener(handle_circuit_signal)
     logger.info("degradation_listener_registered")
+
+    # ---- 熔断态共享存储（TD §5.2a）：Redis 可用时跨 worker/副本协调 OPEN 态与半开单飞探针 ----
+    init_circuit_breaker_store(redis_pool)
+    logger.info("circuit_breaker_store_registered")
 
     # ---- 幂等播种依赖健康初值（仅当不存在），使运营看板即便依赖始终健康也不缺失行 ----
     await ensure_dependency_health_seed()

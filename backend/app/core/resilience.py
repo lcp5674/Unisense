@@ -12,6 +12,9 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
+
+import redis
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -87,6 +90,165 @@ def _emit_degradation(self: CircuitBreaker, event_state: str, reason: str) -> No
             )
 
 
+# ---------------------------------------------------------------------------
+# 熔断态共享存储（跨 worker / 副本协调，对齐 TD §5.2a Redis 状态键）
+# ---------------------------------------------------------------------------
+# 单进程内熔断器状态仅本 worker 可见；多 worker / 多副本部署时，worker A 打开熔断、
+# worker B 仍各自持有 CLOSED，会继续向故障依赖打流量（雪崩）。共享存储让「OPEN 状态」
+# 与「半开单飞探针」跨进程协调：任一 worker 打开 → 全部 worker 拒绝；仅一个 worker 探测。
+
+
+class CircuitBreakerStore:
+    """熔断态共享存储抽象（同步接口，best-effort）。
+
+    熔断判定在同步上下文执行，故存储接口亦为同步；调用方（CircuitBreaker）已对异常兜底，
+    实现内无需再抛。状态键对齐 TD §5.2a：``cb:{dep}:state`` / ``cb:{dep}:opened_at`` /
+    ``cb:{dep}:probing``（单飞探针锁）。
+    """
+
+    def load_state(self, dep_key: str) -> tuple[str, float | None] | None:
+        """读取共享熔断态 (state, opened_at)；无记录返回 None。"""
+        raise NotImplementedError
+
+    def save_state(self, dep_key: str, state: str, opened_at: float | None, ttl: float) -> None:
+        """写入共享熔断态并设置 TTL（秒），到期自动失效防永久集群 OPEN。"""
+        raise NotImplementedError
+
+    def try_acquire_probe(self, dep_key: str, ttl: float) -> bool:
+        """尝试获取集群级半开探针锁：成功(本 worker 探测)返回 True，已被持锁返回 False。"""
+        raise NotImplementedError
+
+    def clear_probe(self, dep_key: str) -> None:
+        """释放探针锁（恢复或探测失败后）。"""
+
+
+class LocalCircuitBreakerStore(CircuitBreakerStore):
+    """进程内熔断态存储（单 worker / Redis 不可用时降级）。
+
+    单 worker 的 intra-worker 单飞由 ``CircuitBreaker._probing`` 保证，
+    故 :meth:`try_acquire_probe` 恒放行（无需跨进程锁）。
+    """
+
+    def __init__(self) -> None:
+        self._states: dict[str, tuple[str, float | None]] = {}
+
+    def load_state(self, dep_key: str) -> tuple[str, float | None] | None:
+        return self._states.get(dep_key)
+
+    def save_state(self, dep_key: str, state: str, opened_at: float | None, ttl: float) -> None:
+        self._states[dep_key] = (state, opened_at)
+
+    def try_acquire_probe(self, dep_key: str, ttl: float) -> bool:
+        return True
+
+    def clear_probe(self, dep_key: str) -> None:
+        return None  # noqa: RET501  (无跨进程锁，no-op)
+
+
+# 模块级默认存储：初始为进程内 Local；lifespan 中 Redis 可用时经
+# :func:`init_circuit_breaker_store` 切换为 RedisCircuitBreakerStore（影响所有熔断器单例）。
+_DEFAULT_STORE: CircuitBreakerStore = LocalCircuitBreakerStore()
+# 共享态本地缓存 TTL（秒）：避免每次 allow() 都打 Redis，限制协调开销（仍保证秒级视图一致）。
+_STORE_CACHE_TTL = 1.0
+
+
+def get_default_circuit_breaker_store() -> CircuitBreakerStore:
+    """获取当前默认熔断态存储（供测试 / 诊断）。"""
+    return _DEFAULT_STORE
+
+
+def set_default_circuit_breaker_store(store: CircuitBreakerStore) -> None:
+    """切换默认熔断态存储（测试用，不进入生产路径）。"""
+    global _DEFAULT_STORE
+    _DEFAULT_STORE = store
+
+
+class RedisCircuitBreakerStore(CircuitBreakerStore):
+    """Redis 熔断态存储（跨 worker / 副本共享，对齐 TD §5.2a Redis 状态键）。
+
+    同步 redis 客户端（socket_timeout 极短，best-effort）：任一 Redis 异常均被调用方吞掉，
+    降级为「无共享态」（由本 worker 本地状态机兜底），绝不因 Redis 抖动阻断主流程或雪崩。
+    """
+
+    def __init__(self, url: str, *, socket_timeout: float = 0.1) -> None:
+        self._url = url
+        self._socket_timeout = socket_timeout
+        # sync redis 客户端（redis-py 同步接口动态返回 Any，故以 Any 标注规避 stub 歧义）
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            self._client = redis.Redis.from_url(
+                self._url,
+                decode_responses=True,
+                socket_timeout=self._socket_timeout,
+                socket_connect_timeout=self._socket_timeout,
+            )
+        return self._client
+
+    @staticmethod
+    def _state_key(dep_key: str) -> str:
+        return f"cb:{dep_key}:state"
+
+    @staticmethod
+    def _opened_key(dep_key: str) -> str:
+        return f"cb:{dep_key}:opened_at"
+
+    @staticmethod
+    def _probe_key(dep_key: str) -> str:
+        return f"cb:{dep_key}:probing"
+
+    def load_state(self, dep_key: str) -> tuple[str, float | None] | None:
+        client = self._get_client()
+        state = client.get(self._state_key(dep_key))
+        if state is None:
+            return None
+        raw = client.get(self._opened_key(dep_key))
+        opened_at = float(raw) if raw is not None else None
+        return (state, opened_at)
+
+    def save_state(self, dep_key: str, state: str, opened_at: float | None, ttl: float) -> None:
+        client = self._get_client()
+        client.set(self._state_key(dep_key), state, ex=int(ttl))
+        if opened_at is not None:
+            client.set(self._opened_key(dep_key), str(opened_at), ex=int(ttl))
+        else:
+            # 恢复（CLOSED）：清理 opened_at，避免残留
+            client.delete(self._opened_key(dep_key))
+
+    def try_acquire_probe(self, dep_key: str, ttl: float) -> bool:
+        client = self._get_client()
+        # SET NX EX：仅当无人持锁时获取成功（集群级单飞），到期自动释放防死锁
+        return bool(client.set(self._probe_key(dep_key), "1", nx=True, ex=int(ttl)))
+
+    def clear_probe(self, dep_key: str) -> None:
+        client = self._get_client()
+        client.delete(self._probe_key(dep_key))
+
+
+def init_circuit_breaker_store(redis_pool: object | None = None) -> None:
+    """初始化熔断态共享存储（main.lifespan 中调用）。
+
+    Redis 可用时构建 RedisCircuitBreakerStore（同步客户端，由 ``settings.redis_url`` 推导），
+    影响全部熔断器单例的跨进程协调；否则降级为进程内 Local 存储。
+
+    Args:
+        redis_pool: 异步 Redis 连接池（可用性信号）；为 None 或 Redis 不可用时降级 Local。
+    """
+    global _DEFAULT_STORE
+    if redis_pool is None or not getattr(settings, "redis_url", None):
+        _DEFAULT_STORE = LocalCircuitBreakerStore()
+        if redis_pool is None:
+            logger.info("circuit_breaker_store_initialized", type="local_fallback")
+        return
+    try:
+        _DEFAULT_STORE = RedisCircuitBreakerStore(str(settings.redis_url))
+        logger.info("circuit_breaker_store_initialized", type="redis")
+    except Exception:
+        logger.warning("circuit_breaker_store_init_failed", exc_info=True)
+        _DEFAULT_STORE = LocalCircuitBreakerStore()
+
+
 class CircuitBreaker:
     """最小可用熔断器：closed -> open -> half-open。
 
@@ -107,6 +269,7 @@ class CircuitBreaker:
         *,
         error_rate_threshold: float | None = None,
         error_rate_window: int = 20,
+        store: CircuitBreakerStore | None = None,
     ) -> None:
         self._name = name
         # 依赖实例标识：缺省按 name.lower() 推断（单实例依赖 OLAP/GRAPH/ES 与
@@ -128,6 +291,11 @@ class CircuitBreaker:
         self._error_rate_window = error_rate_window
         # 最近调用结果滑动窗口（True=成功 / False=失败），有界 deque 防止内存增长。
         self._recent_outcomes: deque[bool] = deque(maxlen=error_rate_window)
+        # 共享存储：None 表示使用模块级默认存储（_DEFAULT_STORE，可经 init 切换为 Redis）。
+        self._store = store
+        # 共享态本地缓存（秒级 TTL）：限制 Redis 协调频率，避免每次 allow() 都打网络。
+        self._shared_cache: tuple[str, float | None] | None = None
+        self._shared_cache_at: float = 0.0
         self._failures = 0
         self._opened_at: float | None = None
         self._open = False
@@ -159,26 +327,101 @@ class CircuitBreaker:
             return 0.0
         return 1.0 - sum(self._recent_outcomes) / len(self._recent_outcomes)
 
-    def allow(self) -> bool:
-        if not self._open:
-            # 错误率超阈 → 打开熔断（与连续失败阈值互补，对齐 TD §5.2a「错误率超阈切 OPEN」）。
-            # 仅当窗口样本数达阈值才判定，避免小样本误开；打开后返回 False 快速失败。
-            if (
-                self._error_rate_threshold is not None
-                and len(self._recent_outcomes) >= self._error_rate_window
-                and self.error_rate > self._error_rate_threshold
-            ):
-                self._open = True
-                self._opened_at = time.monotonic()
-                _emit_degradation(self, "DEGRADED", "circuit_open")
-            return not self._open
+    # --- 共享存储协调（跨 worker / 副本，对齐 TD §5.2a）---
+
+    @property
+    def _effective_store(self) -> CircuitBreakerStore | None:
+        """实际使用的存储：实例级覆盖优先，否则模块级默认（可被 init 切换为 Redis）。"""
+        return self._store or _DEFAULT_STORE
+
+    @property
+    def _store_key(self) -> str:
+        """共享存储键（按 依赖类型:实例 唯一）。"""
+        return f"{self._name}:{self._dependency_id}"
+
+    def _load_shared_state(self) -> tuple[str, float | None] | None:
+        """读取共享熔断态（带秒级本地缓存，限制 Redis 频率）。"""
+        store = self._effective_store
+        if store is None:
+            return None
         now = time.monotonic()
+        if self._shared_cache is not None and (now - self._shared_cache_at) < _STORE_CACHE_TTL:
+            return self._shared_cache
+        try:
+            state = store.load_state(self._store_key)
+        except Exception:
+            logger.warning("circuit_store_load_failed", dependency=self._name, exc_info=True)
+            return None
+        self._shared_cache = state
+        self._shared_cache_at = now
+        return state
+
+    def _save_shared_state(self, state: str, opened_at: float | None) -> None:
+        """写入共享熔断态（带 TTL）并刷新本地缓存。best-effort。"""
+        store = self._effective_store
+        if store is None:
+            return
+        try:
+            store.save_state(self._store_key, state, opened_at, self._reset_timeout + 10.0)
+            self._shared_cache = (state, opened_at)
+            self._shared_cache_at = time.monotonic()
+        except Exception:
+            logger.warning("circuit_store_save_failed", dependency=self._name, exc_info=True)
+
+    def _acquire_probe_lock(self) -> bool:
+        """尝试获取集群级半开探针锁；失败默认放行（安全侧，避免永久拒绝）。"""
+        store = self._effective_store
+        if store is None:
+            return True
+        try:
+            return store.try_acquire_probe(self._store_key, self._probe_timeout)
+        except Exception:
+            logger.warning("circuit_store_probe_failed", dependency=self._name, exc_info=True)
+            return True
+
+    def _release_probe_lock(self) -> None:
+        store = self._effective_store
+        if store is None:
+            return
+        try:
+            store.clear_probe(self._store_key)
+        except Exception:
+            logger.warning("circuit_store_clear_probe_failed", dependency=self._name, exc_info=True)
+
+    def _error_rate_should_open(self) -> bool:
+        """本地错误率是否超阈（小样本不触发）。"""
+        return (
+            self._error_rate_threshold is not None
+            and len(self._recent_outcomes) >= self._error_rate_window
+            and self.error_rate > self._error_rate_threshold
+        )
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        # 1. 本地错误率超阈 → 打开（同步写共享态，集群级可见）
+        if not self._open and self._error_rate_should_open():
+            self._open = True
+            self._opened_at = now
+            self._save_shared_state("OPEN", now)
+            _emit_degradation(self, "DEGRADED", "circuit_open")
+            return False
+        # 2. 本地关闭：与共享态协调（集群中已有 peer 打开且冷却未过 → 本 worker 亦拒绝，不重复上报）
+        if not self._open:
+            shared = self._load_shared_state()
+            peer_open = (
+                shared is not None
+                and shared[0] == "OPEN"
+                and shared[1] is not None
+                and (now - shared[1]) < self._reset_timeout
+            )
+            return not peer_open
+        # 3. 本地已打开：冷却未到 → 拒绝（集群仍 OPEN）
         half_open = self._opened_at is not None and (now - self._opened_at) >= self._reset_timeout
         if not half_open:
             return False
-        # 半开窗口内已放行过探测：若探测结果因调用方异常/丢失而迟迟未回调 record_*，
-        # 超过 probe_timeout 视为本次探测失效，释放窗口允许重新探测，防止永久拒绝。
+        # 4. 进入半开：单飞探针（集群级，避免多 worker 同时探测雪崩）
         if self._probing:
+            # 探测结果丢失（超 probe_timeout）视为失效，释放窗口允许重新探测，防止永久拒绝
             if (
                 self._probing_since is not None
                 and (now - self._probing_since) >= self._probe_timeout
@@ -187,6 +430,8 @@ class CircuitBreaker:
                 self._probing_since = None
             else:
                 return False
+        if not self._acquire_probe_lock():
+            return False  # 另一 worker 持有探针锁，本 worker 拒绝（不重复探测）
         self._probing = True
         self._probing_since = now
         # 进入半开探测：上报 PROBING（实时健康表 circuit_state=HALF_OPEN），不写审计事件
@@ -204,6 +449,8 @@ class CircuitBreaker:
         if was_probe or self._failures >= self._failure_threshold:
             self._open = True
             self._opened_at = time.monotonic()
+            # 同步写共享态：任一 worker 打开 → 全部 worker 拒绝（集群级防雪崩）
+            self._save_shared_state("OPEN", self._opened_at)
             # 仅在「从关闭/半开切到打开」这一刻上报，避免每次失败重复刷事件
             if not was_open:
                 _emit_degradation(self, "DEGRADED", "circuit_open")
@@ -218,6 +465,8 @@ class CircuitBreaker:
         self._opened_at = None
         # 仅在「从打开切回关闭（恢复）」这一刻上报，满足 TD §5.2.4 恢复事件
         if was_open:
+            self._save_shared_state("CLOSED", None)
+            self._release_probe_lock()
             _emit_degradation(self, "HEALTHY", "circuit_recovered")
 
 

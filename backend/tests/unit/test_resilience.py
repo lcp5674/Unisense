@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -25,6 +26,13 @@ def captured(monkeypatch):
         [lambda s: signals.append(s)],
     )
     return signals
+
+
+@pytest.fixture(autouse=True)
+def _reset_default_store():
+    """每个测试前重置模块级默认存储，避免 store=None 的熔断器跨测试读到残留 OPEN 态。"""
+    resilience.set_default_circuit_breaker_store(resilience.LocalCircuitBreakerStore())
+    yield
 
 
 def test_breaker_emits_open_signal_on_threshold_and_recovers(captured):
@@ -211,3 +219,108 @@ def test_breaker_error_rate_ignores_small_sample(captured):
     assert b.allow() is True
     assert b.state == "closed"
     assert len(captured) == 0
+
+
+# ---------------------------------------------------------------------------
+# 熔断态共享存储（跨 worker / 副本协调，TD §5.2a，gap #2）
+# ---------------------------------------------------------------------------
+
+
+def test_local_store_roundtrip():
+    store = resilience.LocalCircuitBreakerStore()
+    assert store.load_state("k") is None
+    store.save_state("k", "OPEN", 1.0, 40.0)
+    assert store.load_state("k") == ("OPEN", 1.0)
+
+
+def test_redis_store_save_and_load():
+    fake = MagicMock()
+    fake.get.side_effect = ["OPEN", "123.4"]
+    store = resilience.RedisCircuitBreakerStore("redis://test")
+    store._client = fake
+    assert store.load_state("OLAP:olap") == ("OPEN", 123.4)
+    fake.get.side_effect = [None]
+    assert store.load_state("OLAP:olap") is None
+
+
+def test_redis_store_probe_single_flight():
+    fake = MagicMock()
+    fake.set.side_effect = [True, False]  # 首次获取成功，二次被持锁
+    store = resilience.RedisCircuitBreakerStore("redis://test")
+    store._client = fake
+    assert store.try_acquire_probe("OLAP:olap", 5.0) is True
+    assert store.try_acquire_probe("OLAP:olap", 5.0) is False
+
+
+def test_redis_store_save_state_writes_ttl_and_clears_on_recover():
+    fake = MagicMock()
+    store = resilience.RedisCircuitBreakerStore("redis://test")
+    store._client = fake
+    store.save_state("OLAP:olap", "OPEN", 123.0, 40.0)
+    # OPEN 且 opened_at 非 None → state + opened_at 各带 ex 写入，不删
+    assert fake.set.call_count == 2
+    assert fake.delete.call_count == 0
+    fake.reset_mock()
+    store.save_state("OLAP:olap", "CLOSED", None, 40.0)
+    # 恢复 → 仅写 state 一次并清理 opened_at
+    assert fake.set.call_count == 1
+    assert fake.delete.call_count == 1
+
+
+def test_breaker_coordinates_open_state_across_instances(captured):
+    """任一 worker 打开熔断 → 共享态 OPEN → 其余 worker 拒绝（集群级防雪崩）。"""
+    store = resilience.LocalCircuitBreakerStore()
+    b1 = resilience.CircuitBreaker(
+        name="OLAP",
+        dependency_id="olap",
+        store=store,
+        failure_threshold=2,
+        reset_timeout=10.0,
+    )
+    b2 = resilience.CircuitBreaker(
+        name="OLAP",
+        dependency_id="olap",
+        store=store,
+        failure_threshold=100,
+        reset_timeout=10.0,  # 本地阈值抬高，隔离为集群协调
+    )
+    b1.record_failure()
+    b1.record_failure()  # b1 打开并写共享态
+    assert b1.state == "open"
+    assert b2._open is False  # b2 本地仍关闭
+    assert b2.allow() is False  # 集群级：peer 已开 → 拒绝（不重复上报）
+    assert len(captured) == 1  # 仅 b1 上报一次 DEGRADED
+    b1.record_success()  # 恢复 → 共享态切 CLOSED
+    b2._shared_cache = None  # 模拟本地缓存到期，重新读共享态
+    assert b2.allow() is True
+
+
+def test_breaker_respects_redis_probe_lock(captured):
+    """半开窗口内若集群探针锁已被持（另一 worker 探测中），本 worker 拒绝不重复探测。"""
+    fake = MagicMock()
+    fake.set.return_value = False  # 探针锁已被持
+    store = resilience.RedisCircuitBreakerStore("redis://test")
+    store._client = fake
+    b = resilience.CircuitBreaker(
+        name="OLAP",
+        dependency_id="olap",
+        store=store,
+        failure_threshold=1,
+        reset_timeout=0.0,
+        probe_timeout=5.0,
+    )
+    b.record_failure()  # 打开
+    assert b.allow() is False  # store 拒绝探针锁 → 本 worker 不探测
+    assert b._probing is False
+
+
+def test_init_circuit_breaker_store_falls_back_without_redis():
+    """Redis 不可用（pool=None）时降级为进程内 Local 存储，不抛异常。"""
+    original = resilience.get_default_circuit_breaker_store()
+    try:
+        resilience.init_circuit_breaker_store(None)
+        assert isinstance(
+            resilience.get_default_circuit_breaker_store(), resilience.LocalCircuitBreakerStore
+        )
+    finally:
+        resilience.set_default_circuit_breaker_store(original)

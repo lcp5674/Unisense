@@ -26,8 +26,21 @@ import pytest
 from httpx import ASGITransport
 
 from app.api import deps
+from app.core import resilience
 from app.main import app
 from app.models.metric import Metric
+
+
+@pytest.fixture(autouse=True)
+def _reset_circuit_breaker_store() -> None:
+    """每个测试前重置熔断态共享存储，隔离 I-3 引入的模块级默认 store。
+
+    I-3 让所有 ``store=None`` 的熔断器读写模块级 ``_DEFAULT_STORE``（跨 worker 协调用）。
+    混沌测试中多个用例各自新建 ``CircuitBreaker()``（默认 name=unknown，共享同一 store key），
+    若前一个用例打开熔断并写入 OPEN 态未清理，会污染后续用例。该 autouse fixture 保证每个
+    测试从干净的 LocalCircuitBreakerStore 起步，使跨测试污染可控（生产行为不变）。
+    """
+    resilience.set_default_circuit_breaker_store(resilience.LocalCircuitBreakerStore())
 
 
 def _now() -> datetime:
