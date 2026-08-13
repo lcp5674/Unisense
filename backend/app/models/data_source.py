@@ -70,6 +70,9 @@ class DataSource(Base, BaseModel):
     last_health_check: Mapped[datetime | None] = mapped_column(
         nullable=True, comment="最后健康检查时间"
     )
+    last_error: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, comment="最近一次采集/探活错误信息"
+    )
     created_by: Mapped[int] = mapped_column(
         ForeignKey("user.id", name="fk_data_source_user"), nullable=False
     )

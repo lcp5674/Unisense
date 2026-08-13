@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 LOG = "/tmp/webhook_received.log"
 
 class Handler(BaseHTTPRequestHandler):
-    def _record(self):
+    def _record(self) -> None:
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length).decode("utf-8", "replace")
         entry = {
@@ -23,7 +23,7 @@ class Handler(BaseHTTPRequestHandler):
 
     do_POST = _record
     do_GET = _record
-    def log_message(self, *args):
+    def log_message(self, *args: object) -> None:
         pass
 
 if __name__ == "__main__":

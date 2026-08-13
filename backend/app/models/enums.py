@@ -58,3 +58,32 @@ class VersionStatusEnum(enum.StrEnum):
     EXPERIMENTAL = "EXPERIMENTAL"
     ARCHIVED = "ARCHIVED"
     CANCELLED = "CANCELLED"
+
+
+class DomainStatusEnum(enum.StrEnum):
+    """主题域状态枚举（对齐 spec FR-001）。"""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+
+
+class DictStatusEnum(enum.StrEnum):
+    """系统字典状态枚举（对齐 spec FR-006）。"""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+
+
+class DictTypeEnum(enum.StrEnum):
+    """系统字典类型枚举（10 种字典类型，对齐 spec FR-005）。"""
+
+    GRANULARITY = "granularity"
+    UNIT = "unit"
+    AGGREGATION = "aggregation"
+    TIME_SEMANTICS = "time_semantics"
+    FRESHNESS = "freshness"
+    DW_LAYER = "dw_layer"
+    METRIC_TYPE = "metric_type"
+    ADDITIVITY = "additivity"
+    SERVING_MODE = "serving_mode"
+    METRIC_TIER = "metric_tier"

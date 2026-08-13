@@ -90,15 +90,17 @@ async def run_collection_task(
                 src = await repo.get_source(source_id)
                 if src is None:
                     raise RuntimeError(f"数据源不存在: {source_id}")
-                collector = collector or build_collector(
-                    src.source_type, src.connection_config
-                )
+                collector = collector or build_collector(src.source_type, src.connection_config)
             svc = CollectorService(db)
 
         if collector is None:
             raise RuntimeError(f"采集器不可用: {source_id}")
 
         result = await svc.collect_and_register(source_id, collector, actor_id, mode=mode)
+        # P0-4: 成功路径必须提交——worker 会话无外部调用方 commit，
+        # 否则 upsert 的 catalogs / watermark / health 全部不落库（采集等于没执行）。
+        if db is not None:
+            await db.commit()
 
         # US5: 成功 → 更新健康状态（service 层已处理）
         if store is not None:
@@ -111,7 +113,9 @@ async def run_collection_task(
         try:
             if db is not None:
                 repo = CollectorRepository(db)
-                await repo.update_health_status(source_id, "unhealthy")
+                await repo.update_health_status(source_id, "unhealthy", error=str(exc))
+                # P0-4: 失败路径同样提交 unhealthy，避免回滚丢失
+                await db.commit()
         except Exception:
             logger.warning("更新健康状态失败: source=%s", source_id)
 

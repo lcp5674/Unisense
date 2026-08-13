@@ -59,6 +59,9 @@ class HiveCollector(BaseCollector):
     async def _execute(self, sql: str) -> list[list[str]]:
         """通过 beeline CLI 执行 SQL，解析输出为表格数据。
 
+        P1-6: 密码经临时文件（``--password-file``，0600 权限）传递，
+        避免经命令行 ``-p`` 暴露在 ``ps`` 进程列表中。
+
         Args:
             sql: 要执行的 SQL 语句。
 
@@ -69,10 +72,18 @@ class HiveCollector(BaseCollector):
             ExternalDependencyError: beeline 执行失败。
         """
         args = ["beeline", "-u", self._jdbc_url]
+        password_file: str | None = None
         if self._user:
             args.extend(["-n", self._user])
         if self._password:
-            args.extend(["-p", self._password])
+            import os
+            import tempfile
+
+            fd, password_file = tempfile.mkstemp(prefix="beeline_pwd_")
+            os.write(fd, self._password.encode("utf-8"))
+            os.close(fd)
+            os.chmod(password_file, 0o600)
+            args.extend(["--password-file", password_file])
         args.extend(["-e", sql, "--outputformat=table2"])
 
         try:
@@ -89,6 +100,13 @@ class HiveCollector(BaseCollector):
             raise ExternalDependencyError(f"beeline 执行超时 (120s): {sql}") from exc
         except FileNotFoundError as exc:
             raise ExternalDependencyError("beeline 命令不可用，请确认已安装 Hive 客户端") from exc
+        finally:
+            if password_file is not None:
+                import contextlib
+                import os
+
+                with contextlib.suppress(OSError):
+                    os.unlink(password_file)
 
         # 解析 table2 格式输出（以 | 分隔的表格）
         lines = stdout.decode("utf-8", errors="replace").strip().splitlines()
@@ -178,8 +196,11 @@ class HiveCollector(BaseCollector):
 
     @staticmethod
     def _safe_ident(name: str) -> str:
-        """校验库/表名为合法标识符，防止拼入 SQL 造成注入。"""
-        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+        """校验库/表名为合法标识符，防止拼入 SQL 造成注入。
+
+        P2-6: 允许 ``-``（Hive 常见表名含连字符），不允许 ``.``（分隔符）。
+        """
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
             raise ExternalDependencyError(f"非法标识符: {name!r}")
         return name
 

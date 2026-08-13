@@ -26,6 +26,8 @@ dependencies = [
     "redis~=5.0",
     # 采集异步队列（Arq，基于 Redis）
     "arq~=0.28.0",
+    # 定时调度 cron 表达式解析（采集 worker 调度器）
+    "croniter~=3.0.0",
     # Neo4j
     "neo4j~=5.0",
     # Elasticsearch

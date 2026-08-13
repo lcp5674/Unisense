@@ -23,6 +23,12 @@ from app.models.degradation_event import (
     DEPENDENCY_TYPES,
     DegradationEvent,
 )
+from app.models.dependency_health import (
+    DEP_HEALTH_CIRCUIT,
+    DEP_HEALTH_DEP_TYPES,
+    DEP_HEALTH_STATES,
+    DependencyHealth,
+)
 from app.models.dimension import (
     Dimension,
     DimensionMapping,
@@ -30,7 +36,14 @@ from app.models.dimension import (
     MetricDimension,
     Reconciliation,
 )
-from app.models.enums import EntityTypeEnum, SensitivityLevelEnum, SourceTypeEnum
+from app.models.enums import (
+    DictStatusEnum,
+    DictTypeEnum,
+    DomainStatusEnum,
+    EntityTypeEnum,
+    SensitivityLevelEnum,
+    SourceTypeEnum,
+)
 from app.models.erasure import ErasureRequest, ErasureStatus
 from app.models.feedback import Feedback
 from app.models.glossary import GlossaryConflict, TermRelation, TermVersion
@@ -56,6 +69,8 @@ from app.models.quality import (
     ReconciliationRecord,
     ReconciliationStatus,
 )
+from app.models.subject_domain import SubjectDomain
+from app.models.system_dict import SystemDict
 from app.models.term import Term
 from app.models.tracking import TrackingEvent
 from app.models.user import Organization, User
@@ -76,9 +91,16 @@ __all__ = [
     "DegradationEvent",
     "DEPENDENCY_TYPES",
     "DataSource",
+    "DependencyHealth",
+    "DEP_HEALTH_CIRCUIT",
+    "DEP_HEALTH_DEP_TYPES",
+    "DEP_HEALTH_STATES",
+    "DictStatusEnum",
+    "DictTypeEnum",
     "Dimension",
     "DimensionMapping",
     "DimensionMember",
+    "DomainStatusEnum",
     "EntityTypeEnum",
     "ErasureRequest",
     "ErasureStatus",
@@ -115,6 +137,8 @@ __all__ = [
     "SoftDeleteMixin",
     "SourceTypeEnum",
     "SubscriptionPref",
+    "SubjectDomain",
+    "SystemDict",
     "Term",
     "TermRelation",
     "TermVersion",

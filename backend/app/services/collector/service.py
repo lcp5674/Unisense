@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
@@ -82,9 +83,7 @@ class CollectorService(BaseService):
         self._repo = CollectorRepository(db)
         # secrets 作为工具类使用（静态方法），缺省用 SecretManager
         self._secrets = secrets or SecretManager
-        self._events = events or CatalogEventPublisher(
-            get_redis() if _redis_available() else None
-        )
+        self._events = events or CatalogEventPublisher(get_redis() if _redis_available() else None)
         self._classifier = classifier or SensitivityClassifier()
 
     @staticmethod
@@ -96,7 +95,7 @@ class CollectorService(BaseService):
             domain=src.domain,
             cluster_id=src.cluster_id,
             coverage=float(src.coverage or 0.0),
-            health_status=src.health_status or "UNKNOWN",
+            health_status=src.health_status or "unknown",
             connection_config_present=bool(src.connection_config),
             schedule_cron=src.schedule_cron,
             collection_mode=src.collection_mode or "FULL",
@@ -110,11 +109,10 @@ class CollectorService(BaseService):
     ) -> DataSourceResponse:
         # 验证 source_type 在 CollectorRegistry 中已注册
         from app.services.collector.connectors import registry
+
         available_types = registry.list_types()
         source_type_value = (
-            req.source_type.value
-            if hasattr(req.source_type, "value")
-            else str(req.source_type)
+            req.source_type.value if hasattr(req.source_type, "value") else str(req.source_type)
         )
         if source_type_value not in available_types:
             raise BusinessError(
@@ -140,11 +138,16 @@ class CollectorService(BaseService):
             domain=req.domain,
             cluster_id=req.cluster_id,
             coverage=0.0,
-            health_status="UNKNOWN",
+            health_status="unknown",
             quota={},
             created_by=actor_id,
         )
-        await self._repo.create_source(src)
+        try:
+            await self._repo.create_source(src)
+        except IntegrityError as exc:
+            # P0-3/P2-2: 检查-插入竞态下软删遗留 ID 被占用 → 归一为 409（非 500）
+            await self._db.rollback()
+            raise ConflictError(f"数据源已存在: {source_id}") from exc
         return self._to_source_response(src)
 
     @staticmethod
@@ -156,12 +159,7 @@ class CollectorService(BaseService):
         """
         import re
 
-        base = (
-            cfg.get("database")
-            or cfg.get("schema")
-            or domain
-            or "default"
-        )
+        base = cfg.get("database") or cfg.get("schema") or domain or "default"
         normalized = re.sub(r"[^A-Za-z0-9]+", "_", str(base)).strip("_").lower()
         normalized = normalized or "default"
         return f"{source_type}_{normalized}"[:64]
@@ -190,9 +188,7 @@ class CollectorService(BaseService):
 
         return registry.list_type_info()
 
-    async def test_connection(
-        self, source_type: str, cfg: dict[str, Any]
-    ) -> TestConnectionResult:
+    async def test_connection(self, source_type: str, cfg: dict[str, Any]) -> TestConnectionResult:
         """连接预检（创建前）：明文配置构建采集器并轻量探活，不落库。
 
         任何异常（含类型未注册、连接失败）都归一为 ``ok=False`` 结果，不抛出。
@@ -230,13 +226,15 @@ class CollectorService(BaseService):
             finally:
                 await collector.dispose()
         except Exception as exc:
-            await self._repo.update_health_status(source_id, "unhealthy")
+            # P1-3: 探活失败记录错误信息（供健康端点返回 last_error）
+            await self._repo.update_health_status(source_id, "unhealthy", error=str(exc))
             logger.warning("check_connection_failed: source=%s err=%s", source_id, exc)
-            return TestConnectionResult(
-                ok=False, source_type=src.source_type, error=str(exc)
-            )
+            return TestConnectionResult(ok=False, source_type=src.source_type, error=str(exc))
         new_status = "healthy" if probe.ok else "unhealthy"
-        await self._repo.update_health_status(source_id, new_status)
+        # P1-3: 探活失败（probe.ok=False）时回填 probe.error 到健康状态
+        await self._repo.update_health_status(
+            source_id, new_status, error=None if probe.ok else probe.error
+        )
         return TestConnectionResult(
             ok=probe.ok,
             source_type=src.source_type,
@@ -283,7 +281,9 @@ class CollectorService(BaseService):
     async def register_catalog(
         self, req: DBCatalogCreateRequest, actor_id: int
     ) -> DBCatalogResponse:
-        sensitivity = self._classifier.classify(req.entity_name, req.schema_def)
+        # 规则引擎分类（确定性基线）
+        rule_sensitivity = self._classifier.classify(req.entity_name, req.schema_def)
+        sensitivity = rule_sensitivity
 
         # US6: 空 schema 告警
         if not req.schema_def.get("columns"):
@@ -293,16 +293,30 @@ class CollectorService(BaseService):
                 req.entity_name,
             )
 
-        # P2 增强：使用结构化 LLM 输出进行置信度分流
-        # 当 LLM 可用且 confidence < 0.7 时，标记为 "needs_review"
+        # P0-2: 使用 LLM 结构化输出分流——
+        #   高置信度（>=0.7）采用 LLM 判定的 content；
+        #   低置信度标记 NEEDS_REVIEW（大写，与 DB ENUM 一致）供人工复核。
         llm_sensitivity = await self._llm_classify_sensitivity(req.entity_name, req.schema_def)
-        if llm_sensitivity is not None and llm_sensitivity.get("confidence", 1.0) < 0.7:
-                sensitivity = "needs_review"
+        if llm_sensitivity is not None:
+            confidence = float(llm_sensitivity.get("confidence", 1.0) or 0.0)
+            content = str(llm_sensitivity.get("content", "")).strip().upper()
+            if confidence >= 0.7 and content in ("PII", "CONFIDENTIAL", "INTERNAL", "PUBLIC"):
+                if content != sensitivity:
+                    logger.info(
+                        "catalog_llm_override",
+                        entity_name=req.entity_name,
+                        confidence=confidence,
+                        rule_sensitivity=rule_sensitivity,
+                        llm_sensitivity=content,
+                    )
+                sensitivity = content
+            elif confidence < 0.7:
+                sensitivity = "NEEDS_REVIEW"
                 logger.info(
                     "catalog_llm_low_confidence",
                     entity_name=req.entity_name,
-                    confidence=llm_sensitivity.get("confidence"),
-                    original_sensitivity=self._classifier.classify(req.entity_name, req.schema_def),
+                    confidence=confidence,
+                    original_sensitivity=rule_sensitivity,
                 )
 
         cat, _created, drift_info = await self._repo.upsert_catalog(
@@ -373,6 +387,10 @@ class CollectorService(BaseService):
                 response_format={"type": "json_object"},
             )
             await client.close()
+            # P0-2 回归防护：降级客户端返回 content="" + confidence=0，
+            # 视为 LLM 不可用（不参与分流），否则所有实体都会被误标 NEEDS_REVIEW。
+            if not result.get("content") or float(result.get("confidence", 0) or 0) <= 0:
+                return None
             return result
         except (TimeoutError, ConnectionError, OSError) as exc:
             # FR-023: 具体异常类型替代 BLE001 + metric 计数
@@ -450,6 +468,7 @@ class CollectorService(BaseService):
         watermark_ts: datetime | None = None
         if mode == "INCREMENTAL":
             from app.services.collector.incremental import should_degrade_to_full
+
             watermark = await self._repo.get_watermark(source_id)
             if watermark is not None:
                 watermark_ts = watermark.last_collected_at
@@ -470,15 +489,21 @@ class CollectorService(BaseService):
 
         # US5: 采集成功后更新健康状态
         try:
+            # P0-6: 注入增量上下文——增量模式且水位有效时连接器只采变更实体
+            collector.set_incremental_context(effective_mode, watermark_ts)
             result: CollectResult = await collector.collect(src)
-        except Exception:
-            await self._repo.update_health_status(source_id, "unhealthy")
+        except Exception as exc:
+            # P0-4: 健康状态更新必须落库——即使采集失败也要记录 unhealthy，
+            # 否则 API/worker 上抛后被 get_db_session 回滚，健康状态永不更新。
+            await self._repo.update_health_status(source_id, "unhealthy", error=str(exc))
+            await self._db.commit()
             raise
 
         registered = 0
         pii_registered = 0
         batch_payloads: list[dict[str, Any]] = []
         drift_events: list[dict[str, Any]] = []
+        content_fingerprints: dict[str, str] = {}
         for spec in result.specs:
             sensitivity = self._classifier.classify(spec.entity_name, spec.schema_json)
             if sensitivity == "PII":
@@ -502,19 +527,27 @@ class CollectorService(BaseService):
                 sensitivity_level=sensitivity,
                 owner_id=None,
             )
+            # P2-4: 回填实体级内容指纹（供增量判断与审计追溯）
+            signature = _cat.content_signature
+            if signature:
+                content_fingerprints[spec.entity_name] = signature
             registered += 1
-            batch_payloads.append({
-                "source_id": source_id,
-                "entity_name": spec.entity_name,
-                "sensitivity": sensitivity,
-            })
+            batch_payloads.append(
+                {
+                    "source_id": source_id,
+                    "entity_name": spec.entity_name,
+                    "sensitivity": sensitivity,
+                }
+            )
             # US2: 检测到 Schema Drift 时处理
             if drift_info is not None:
                 await self._handle_drift(source_id, spec.entity_name, drift_info)
-                drift_events.append({
-                    "entity_name": spec.entity_name,
-                    "change_type": drift_info["change_type"],
-                })
+                drift_events.append(
+                    {
+                        "entity_name": spec.entity_name,
+                        "change_type": drift_info["change_type"],
+                    }
+                )
         # FR-024: 发布1次batch事件而非逐条publish
         if batch_payloads:
             await self._events.publish_batch("catalog_registered", batch_payloads)
@@ -529,6 +562,7 @@ class CollectorService(BaseService):
             mode=effective_mode,
             scanned_count=len(result.specs),
             failed_count=len(result.failed_specs),
+            content_fingerprints=content_fingerprints or None,
         )
 
         return {
@@ -538,8 +572,7 @@ class CollectorService(BaseService):
             "pii_registered": pii_registered,
             "failed_count": len(result.failed_specs),
             "failed_specs": [
-                {"entity_name": f.entity_name, "error": f.error}
-                for f in result.failed_specs
+                {"entity_name": f.entity_name, "error": f.error} for f in result.failed_specs
             ],
             "coverage": coverage,
             "mode": effective_mode,
@@ -596,9 +629,7 @@ class CollectorService(BaseService):
         return {
             "source_id": watermark.source_id,
             "last_collected_at": (
-                watermark.last_collected_at.isoformat()
-                if watermark.last_collected_at
-                else None
+                watermark.last_collected_at.isoformat() if watermark.last_collected_at else None
             ),
             "mode": watermark.mode,
             "scanned_count": watermark.scanned_count,
@@ -606,7 +637,11 @@ class CollectorService(BaseService):
         }
 
     async def get_health(self, source_id: str) -> dict[str, Any]:
-        """US5: 获取数据源健康状态（FR-016）。"""
+        """US5: 获取数据源健康状态（FR-016）。
+
+        P1-3 修复：返回真实 ``last_error`` / ``last_health_check``，
+        ``uptime_check`` 为存储态健康判断（离线健康，非实时探活）。
+        """
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
@@ -619,6 +654,9 @@ class CollectorService(BaseService):
                 if watermark and watermark.last_collected_at
                 else None
             ),
-            "last_error": None,
+            "last_error": src.last_error,
+            "last_health_check": (
+                src.last_health_check.isoformat() if src.last_health_check else None
+            ),
             "uptime_check": src.health_status == "healthy",
         }

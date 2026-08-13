@@ -229,7 +229,8 @@ async def test_coverage_recomputed_after_register(db_env):
         )
         await session.commit()
         src = await svc.get_source("src3")
-        assert src.coverage == 1.0  # 无 quota -> 已采集即 100%
+        # P2-3: 无 quota 基线时 coverage=0.0（覆盖率未知），非误导性 1.0
+        assert src.coverage == 0.0
 
 
 async def test_delete_missing_source_raises(db_env):
@@ -260,6 +261,9 @@ async def test_health_status_updates_on_collect(db_env):
 
         # 模拟采集成功
         class StubCollector:
+            def set_incremental_context(self, mode, watermark_ts=None):
+                return None
+
             async def collect(self, source: object) -> CollectResult:
                 return CollectResult(
                     specs=[
@@ -300,6 +304,9 @@ async def test_watermark_created_after_collection(db_env):
         await session.commit()
 
         class StubCollector:
+            def set_incremental_context(self, mode, watermark_ts=None):
+                return None
+
             async def collect(self, source: object) -> CollectResult:
                 return CollectResult(
                     specs=[

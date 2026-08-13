@@ -46,12 +46,40 @@ class KafkaCollector(BaseCollector):
         registry_user: str | None = None,
         registry_password: str | None = None,
         classifier: SensitivityClassifier | None = None,
+        *,
+        security_protocol: str | None = None,
+        sasl_mechanism: str | None = None,
+        sasl_username: str | None = None,
+        sasl_password: str | None = None,
+        ssl_cafile: str | None = None,
     ) -> None:
         super().__init__(classifier)
         self._bootstrap_servers = bootstrap_servers
         self._registry_url = registry_url
         self._registry_user = registry_user
         self._registry_password = registry_password
+        # P2-5: 生产 Kafka 常启用 SASL/SSL——透传连接参数（若客户端支持）
+        self._security_protocol = security_protocol
+        self._sasl_mechanism = sasl_mechanism
+        self._sasl_username = sasl_username
+        self._sasl_password = sasl_password
+        self._ssl_cafile = ssl_cafile
+
+    def _admin_kwargs(self) -> dict[str, Any]:
+        """构建 kafka-python KafkaAdminClient 连接参数（含可选 SASL/SSL）。"""
+        kwargs: dict[str, Any] = {
+            "bootstrap_servers": self._bootstrap_servers,
+            "request_timeout_ms": 10000,
+        }
+        if self._security_protocol:
+            kwargs["security_protocol"] = self._security_protocol
+        if self._sasl_mechanism:
+            kwargs["sasl_mechanism"] = self._sasl_mechanism
+            kwargs["sasl_plain_username"] = self._sasl_username or ""
+            kwargs["sasl_plain_password"] = self._sasl_password or ""
+        if self._ssl_cafile:
+            kwargs["ssl_cafile"] = self._ssl_cafile
+        return kwargs
 
     def _registry_headers(self) -> dict[str, str]:
         """构建 Schema Registry Basic Auth 头。"""
@@ -63,18 +91,29 @@ class KafkaCollector(BaseCollector):
         return {}
 
     async def _get_topics(self) -> list[dict[str, Any]]:
-        """获取 Kafka Topic 列表（尝试 kafka-python，降级返回空列表）。"""
+        """获取 Kafka Topic 列表（含分区数/副本因子）。
+
+        P0-5/P2-5 修复：
+        - 依赖缺失（kafka-python 未安装）时明确抛 ExternalDependencyError，
+          不再静默返回空列表（否则「测试连接」恒假成功）。
+        - 异常路径在 finally 中 close 客户端，避免连接泄漏。
+        """
         try:
             from kafka import KafkaAdminClient
+        except ImportError:
+            raise ExternalDependencyError(
+                "kafka-python 未安装，无法连接 Kafka Broker；"
+                "请安装 kafka-python（可选依赖 collectors 组）"
+            ) from None
 
-            client = KafkaAdminClient(
-                bootstrap_servers=self._bootstrap_servers,
-                request_timeout_ms=10000,
-            )
+        client: KafkaAdminClient | None = None
+        try:
+            client = KafkaAdminClient(**self._admin_kwargs())
             topics = client.list_topics()
             topic_details = []
             for topic_name in topics:
-                # 获取 Topic 元数据
+                # 获取 Topic 元数据（describe_topics 为旧 API 但功能稳定；
+                # 依赖客户端不泄漏——见 finally close）
                 try:
                     partitions = client.describe_topics([topic_name])
                     partition_count = 0
@@ -95,15 +134,17 @@ class KafkaCollector(BaseCollector):
                         "partition_count": 0,
                         "replication_factor": 0,
                     })
-            client.close()
             return topic_details
-        except ImportError:
-            logger.warning("kafka-python 未安装，Kafka Topic 列表为空")
-            return []
         except Exception as exc:
             raise ExternalDependencyError(
                 f"连接 Kafka Broker 失败 ({self._bootstrap_servers}): {exc}"
             ) from exc
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception as exc:  # noqa: BLE001 - 关闭失败不影响结果
+                    logger.warning("关闭 Kafka 客户端失败: %s", exc)
 
     async def _get_subject_schemas(
         self, client: httpx.AsyncClient
@@ -233,4 +274,9 @@ def create_kafka_collector(cfg: dict[str, Any]) -> KafkaCollector:
         registry_url=cfg.get("registry_url"),
         registry_user=cfg.get("registry_user", cfg.get("auth_user")),
         registry_password=cfg.get("registry_password", cfg.get("auth_password")),
+        security_protocol=cfg.get("security_protocol"),
+        sasl_mechanism=cfg.get("sasl_mechanism"),
+        sasl_username=cfg.get("sasl_username"),
+        sasl_password=cfg.get("sasl_password"),
+        ssl_cafile=cfg.get("ssl_cafile"),
     )

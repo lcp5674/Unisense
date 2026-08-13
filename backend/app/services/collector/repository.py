@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -49,10 +49,34 @@ class CollectorRepository:
         return source
 
     async def soft_delete_source(self, source_id: str) -> bool:
+        """软删除数据源，并释放 ``source_id`` 唯一约束以允许重建同名源。
+
+        P0-3/P2-9 修复：
+        - 级联清理子表：db_catalog 软删、collection_watermark / schema_drift_log 硬删
+          （既避免孤儿数据，又解除外键引用，使父表改名可执行）。
+        - 把软删记录的 ``source_id`` 改为 ``{source_id}__del_{ts}``，原 ID 即刻可复用，
+          否则重建同名源会撞唯一约束抛 IntegrityError 500。
+        """
         src = await self.get_source(source_id)
         if src is None:
             return False
-        src.deleted_at = datetime.now(UTC)
+        now = datetime.now(UTC)
+        # 1) 清理子表（外键引用 → 先于父表改名）
+        await self._db.execute(
+            update(DBCatalog)
+            .where(DBCatalog.source_id == source_id, DBCatalog.deleted_at.is_(None))
+            .values(deleted_at=now)
+        )
+        await self._db.execute(
+            delete(CollectionWatermark).where(CollectionWatermark.source_id == source_id)
+        )
+        await self._db.execute(
+            delete(SchemaDriftLog).where(SchemaDriftLog.source_id == source_id)
+        )
+        # 2) 释放唯一约束：改名保留软删记录
+        new_id = f"{source_id}__del_{int(now.timestamp())}"[:64]
+        src.source_id = new_id
+        src.deleted_at = now
         await self._db.flush()
         return True
 
@@ -78,6 +102,17 @@ class CollectorRepository:
         stmt = base.order_by(DataSource.id).offset((page - 1) * page_size).limit(page_size)
         res = await self._db.execute(stmt)
         return res.scalars().all(), total
+
+    async def list_scheduled_sources(self) -> list[DataSource]:
+        """列出配置了定时调度（schedule_cron 非空）的活跃数据源（P0-7 调度器扫描用）。"""
+        res = await self._db.execute(
+            select(DataSource).where(
+                DataSource.deleted_at.is_(None),
+                DataSource.schedule_cron.isnot(None),
+                DataSource.schedule_cron != "",
+            )
+        )
+        return list(res.scalars().all())
 
     async def get_catalog(self, source_id: str, entity_name: str) -> DBCatalog | None:
         res = await self._db.execute(
@@ -231,7 +266,9 @@ class CollectorRepository:
             expected = int(quota.get("max_scan_rows", 0) or 0)
         elif isinstance(quota, int):
             expected = quota
-        coverage = 1.0 if expected <= 0 else min(1.0, total / expected)
+        # P2-3: 无配额基线时 coverage=0.0（表示"覆盖率未知"），
+        # 而非旧的 1.0（"无配额=全覆盖"是误导性数据）。
+        coverage = 0.0 if expected <= 0 else min(1.0, total / expected)
         if src is not None:
             src.coverage = coverage
             await self._db.flush()
@@ -288,6 +325,7 @@ class CollectorRepository:
         mode: str,
         scanned_count: int,
         failed_count: int,
+        content_fingerprints: dict[str, str] | None = None,
     ) -> CollectionWatermark:
         """采集完成后更新采集水位。
 
@@ -298,9 +336,8 @@ class CollectorRepository:
             mode: 采集模式（FULL/INCREMENTAL）。
             scanned_count: 采集表数。
             failed_count: 失败表数。
-
-        Returns:
-            更新后的采集水位记录。
+            content_fingerprints: 实体级内容指纹映射 {entity_name: signature}
+                （P2-4：此前该列声明但从不写入，现由 service 层采集后回填）。
         """
         existing = await self.get_watermark(source_id)
         now = datetime.now(UTC)
@@ -309,6 +346,8 @@ class CollectorRepository:
             existing.mode = mode
             existing.scanned_count = scanned_count
             existing.failed_count = failed_count
+            if content_fingerprints:
+                existing.content_fingerprints = content_fingerprints
             await self._db.flush()
             return existing
 
@@ -318,16 +357,23 @@ class CollectorRepository:
             mode=mode,
             scanned_count=scanned_count,
             failed_count=failed_count,
-            content_fingerprints={},
+            content_fingerprints=content_fingerprints or {},
         )
         self._db.add(watermark)
         await self._db.flush()
         return watermark
 
-    async def update_health_status(self, source_id: str, status: str) -> None:
-        """更新数据源健康状态。"""
+    async def update_health_status(
+        self, source_id: str, status: str, error: str | None = None
+    ) -> None:
+        """更新数据源健康状态（P1-3：可附带最近错误信息，供健康端点返回）。"""
         src = await self.get_source(source_id)
         if src is not None:
             src.health_status = status
             src.last_health_check = datetime.now(UTC)
+            if error is not None:
+                src.last_error = error[:512]
+            elif status == "healthy":
+                # 恢复健康时清空历史错误
+                src.last_error = None
             await self._db.flush()

@@ -32,7 +32,11 @@ from app.services.collector.spi import (
 def _svc() -> tuple[CollectorService, MagicMock]:
     """构造服务并替换其仓库为 mock，返回 (service, mock_repo_instance)。"""
     with patch("app.services.collector.service.CollectorRepository") as mock_repo:
-        svc = CollectorService(db=MagicMock())
+        db = MagicMock()
+        # P0-4: 采集失败路径会 commit unhealthy（service 层），mock 需可 await
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+        svc = CollectorService(db=db)
         repo = mock_repo.return_value
         # 确保 US5/US3 新增的异步方法也有默认 AsyncMock
         repo.update_health_status = AsyncMock()
@@ -188,6 +192,9 @@ async def test_collect_and_register_uses_classifier_and_counts():
     repo.recompute_coverage = AsyncMock(return_value=0.5)
 
     class StubCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
         async def collect(self, source: object) -> CollectResult:
             return CollectResult(
                 specs=[
@@ -220,6 +227,9 @@ async def test_collect_and_register_handles_failed_specs():
     repo.recompute_coverage = AsyncMock(return_value=0.5)
 
     class FailingCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
         async def collect(self, source: object) -> CollectResult:
             return CollectResult(
                 specs=[
@@ -316,11 +326,11 @@ async def test_repo_recompute_coverage_dict_quota():
 
 
 async def test_repo_recompute_coverage_zero_expected():
-    """FR-009: expected<=0 时 coverage=1.0。"""
+    """P2-3: expected<=0（无配额基线）时 coverage=0.0（覆盖率未知，非误导性 1.0）。"""
     src = MagicMock()
     src.quota = {"max_scan_rows": 0}
     repo = CollectorRepository(_session(scalar_one_or_none=src, scalar=5))
-    assert await repo.recompute_coverage("s") == 1.0
+    assert await repo.recompute_coverage("s") == 0.0
 
 
 async def test_repo_list_sources_no_crash_on_filters():
@@ -351,6 +361,9 @@ async def test_collect_empty_schema_warns_and_marks_incomplete():
     )
 
     class EmptySchemaCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
         async def collect(self, source: object) -> CollectResult:
             return CollectResult(
                 specs=[
@@ -421,6 +434,9 @@ async def test_collect_and_register_publishes_batch_not_individual():
     )
 
     class MultiSpecCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
         async def collect(self, source: object) -> CollectResult:
             return CollectResult(
                 specs=[
@@ -601,7 +617,7 @@ async def test_check_connection_updates_health():
     ) as mock_build:
         result = await svc.check_connection("s1")
     mock_build.assert_called_once_with("mysql", "enc")
-    repo.update_health_status.assert_awaited_once_with("s1", "healthy")
+    repo.update_health_status.assert_awaited_once_with("s1", "healthy", error=None)
     assert result.ok is True
     assert result.detail == {"version": "8.0"}
 
@@ -627,7 +643,8 @@ async def test_check_connection_failure_marks_unhealthy():
         return_value=ProbeFailCollector(),
     ):
         result = await svc.check_connection("s1")
-    repo.update_health_status.assert_awaited_once_with("s1", "unhealthy")
+    # P1-3: 失败时回填错误信息到健康状态
+    repo.update_health_status.assert_awaited_once_with("s1", "unhealthy", error="timeout")
     assert result.ok is False
 
 
@@ -667,6 +684,13 @@ class _MultiSchemaConnector:
             return [{"schema_name": s} for s in self._schemas]
         if "information_schema.tables" in sql:
             return [{"table_name": t} for t in self._tables_by_schema.get(params.get("schema"), [])]
+        if "information_schema.columns" in sql:
+            # P1-7: 批量列查询返回 {table_name, column_name} 行（消除 N+1）
+            rows = []
+            for tbl, cols in self._columns.items():
+                for c in cols:
+                    rows.append({"table_name": tbl, "column_name": c})
+            return rows
         return [{"column_name": c} for c in self._columns.get(params.get("tbl"), [])]
 
     async def dispose(self):
@@ -774,3 +798,348 @@ async def test_registry_build_from_cfg_and_type_info():
     by_type = {t.source_type: t for t in info}
     assert by_type["postgres"].supports_schema is True
     assert by_type["postgres"].default_port == 5432
+
+
+# ============================================================
+# 工业级补齐回归测试（P0-1/2/3/5/6、P1-2/3/5、P2-3/4/5/6/7）
+# ============================================================
+
+
+# ---------- P0-1: 分类器 dict 列格式不误判 PII ----------
+
+
+def test_classifier_dict_columns_not_misclassified_as_pii():
+    """postgres/clickhouse/hive 的 dict 列格式（含字面量 'name' 键）不应误判 PII。"""
+    svc = SensitivityClassifier()
+    # 列只有 order_id/amount，无任何敏感字段 → 不应因 dict 键 'name' 命中 PII
+    assert (
+        svc.classify(
+            "orders",
+            {
+                "columns": [
+                    {"name": "order_id", "type": "integer"},
+                    {"name": "amount", "type": "decimal"},
+                ]
+            },
+        )
+        == "INTERNAL"
+    )
+    # 真实 PII 列（dict 格式含 user_name）仍应判定 PII
+    assert (
+        svc.classify(
+            "users", {"columns": [{"name": "user_name", "type": "varchar"}]}
+        )
+        == "PII"
+    )
+    # 混合格式（字符串列 + dict 列）兼容
+    assert (
+        svc.classify("t", {"columns": ["order_id", {"name": "email", "type": "varchar"}]})
+        == "PII"
+    )
+
+
+# ---------- P0-2: LLM content 使用 + NEEDS_REVIEW 大写 ----------
+
+
+async def test_register_catalog_llm_high_confidence_uses_content():
+    """LLM 高置信度（>=0.7）时采用其判定的 content（原实现忽略 content）。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    svc._llm_classify_sensitivity = AsyncMock(
+        return_value={"content": "CONFIDENTIAL", "confidence": 0.95}
+    )
+    repo.upsert_catalog = AsyncMock(return_value=(_FakeCatalog("INTERNAL"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.0)
+    await svc.register_catalog(
+        DBCatalogCreateRequest(
+            source_id="s", entity_name="orders", schema_def={"columns": ["amount"]}
+        ),
+        actor_id=1,
+    )
+    kwargs = repo.upsert_catalog.call_args.kwargs
+    assert kwargs["sensitivity_level"] == "CONFIDENTIAL"
+
+
+async def test_register_catalog_llm_low_confidence_marks_needs_review_uppercase():
+    """LLM 低置信度时标记 NEEDS_REVIEW（大写，与 DB ENUM 一致）。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    svc._events = events
+    svc._llm_classify_sensitivity = AsyncMock(
+        return_value={"content": "PII", "confidence": 0.5}
+    )
+    repo.upsert_catalog = AsyncMock(return_value=(_FakeCatalog("INTERNAL"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.0)
+    await svc.register_catalog(
+        DBCatalogCreateRequest(
+            source_id="s", entity_name="orders", schema_def={"columns": ["amount"]}
+        ),
+        actor_id=1,
+    )
+    kwargs = repo.upsert_catalog.call_args.kwargs
+    assert kwargs["sensitivity_level"] == "NEEDS_REVIEW"
+
+
+async def test_llm_classify_fallback_client_returns_none():
+    """P0-2 回归防护：LLM 降级客户端（content 空 + confidence=0）→ 返回 None，不参与分流。"""
+    from app.services.llm.client import DeterministicFallbackLlmClient
+
+    svc, repo = _svc()
+    with patch(
+        "app.services.llm.client.build_llm_client",
+        return_value=DeterministicFallbackLlmClient(),
+    ):
+        result = await svc._llm_classify_sensitivity("orders", {"columns": ["amount"]})
+    assert result is None
+
+
+# ---------- P0-3: 软删释放 source_id + IntegrityError 转 409 ----------
+
+
+async def test_soft_delete_source_releases_id_and_cleans_children():
+    """软删时清理子表并把 source_id 改名，释放唯一约束供重建同名源。"""
+    src = MagicMock()
+    src.source_id = "src1"
+    s = _session(scalar_one_or_none=src)
+    repo = CollectorRepository(s)
+    assert await repo.soft_delete_source("src1") is True
+    assert src.source_id != "src1"  # 已改名（__del_{ts} 后缀）
+    assert src.deleted_at is not None
+    # update(db_catalog) + delete(watermark) + delete(drift_log) 均被调用
+    assert s.execute.await_count >= 3
+
+
+async def test_create_source_integrity_error_returns_conflict():
+    """检查-插入竞态下唯一约束冲突归一为 ConflictError（非 500）。"""
+    from sqlalchemy.exc import IntegrityError
+
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=None)
+    repo.create_source = AsyncMock(
+        side_effect=IntegrityError("stmt", {}, Exception("dup"))
+    )
+    with pytest.raises(ConflictError):
+        await svc.create_source(
+            DataSourceCreateRequest(
+                source_id="src1",
+                name="S",
+                source_type="mysql",
+                connection_config={"host": "h"},
+                domain="d",
+            ),
+            actor_id=1,
+        )
+
+
+# ---------- P0-5: Kafka 依赖缺失时 probe 诚实失败 ----------
+
+
+async def test_kafka_probe_fails_when_kafka_python_missing():
+    """kafka-python 未安装时 probe 返回 ok=False（原实现恒假成功）。"""
+    from app.services.collector.connectors.kafka import KafkaCollector
+
+    collector = KafkaCollector(bootstrap_servers="kafka:9092")
+    with patch.dict("sys.modules", {"kafka": None}):
+        result = await collector.probe()
+    assert result.ok is False
+    assert "kafka-python" in (result.error or "")
+
+
+# ---------- P0-6: 增量采集真实接入 ----------
+
+
+async def test_mysql_incremental_collect_uses_change_query():
+    """增量模式下 MySQL 采集器使用带 UPDATE_TIME 条件的查询（原实现从未调用）。"""
+    from datetime import UTC, datetime
+
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _MultiSchemaConnector(
+        schemas=["finance"],
+        tables_by_schema={"finance": ["orders", "legacy"]},
+        columns={"orders": ["order_id"], "legacy": ["id"]},
+    )
+    collector = InformationSchemaCollector(connector, database="finance")
+    collector.set_incremental_context("INCREMENTAL", datetime(2026, 1, 1, tzinfo=UTC))
+    result = await collector.collect(MagicMock(source_id="s1"))
+    # 增量表查询 SQL 应含 UPDATE_TIME 水位条件
+    inc_sqls = [sql for sql, _ in connector.queries if "UPDATE_TIME" in sql]
+    assert inc_sqls, "增量模式必须生成带 UPDATE_TIME 条件的表查询"
+    assert result.source_id == "s1"
+
+
+# ---------- P1-2: PostgreSQL 空 schema 全库枚举 ----------
+
+
+async def test_postgres_collector_all_schemas_enumerates():
+    """PostgreSQL schema 为空时枚举全部非系统 schema，entity_name 用 schema.表 命名。"""
+    from app.services.collector.connectors.postgres import PostgresCollector
+
+    mock_connector = MagicMock()
+
+    async def fake_query(sql, params=None):
+        if "information_schema.schemata" in sql:
+            return [
+                {"schema_name": "finance"},
+                {"schema_name": "sales"},
+                {"schema_name": "pg_catalog"},
+            ]
+        if "information_schema.tables" in sql:
+            return [{"table_name": "orders"}]
+        return [{"column_name": "id", "data_type": "integer"}]
+
+    mock_connector.query = fake_query
+    mock_connector.dispose = AsyncMock()
+    collector = PostgresCollector(mock_connector, schema=None)  # 全库枚举
+    result = await collector.collect(MagicMock(source_id="pg"))
+    assert {s.entity_name for s in result.specs} == {"finance.orders", "sales.orders"}
+    # pg_catalog 系统 schema 被排除
+    assert len(result.specs) == 2
+
+
+# ---------- P1-3: 健康端点真实字段 ----------
+
+
+async def test_get_health_returns_last_error_and_check_time():
+    """健康端点返回真实 last_error / last_health_check（原为恒 None / 假 uptime）。"""
+    from datetime import UTC, datetime
+
+    svc, repo = _svc()
+    src = MagicMock(
+        source_id="s1",
+        health_status="unhealthy",
+        last_error="boom",
+        last_health_check=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    repo.get_source = AsyncMock(return_value=src)
+    repo.get_watermark = AsyncMock(return_value=None)
+    health = await svc.get_health("s1")
+    assert health["last_error"] == "boom"
+    assert health["last_health_check"] is not None
+    assert health["health_status"] == "unhealthy"
+
+
+# ---------- P1-5: ClickHouse 密码经 Basic Auth ----------
+
+
+async def test_clickhouse_query_uses_basic_auth_not_query_param():
+    """ClickHouse 密码经 HTTP Basic Auth 传递，不进入 URL query 参数。"""
+    from app.services.collector.connectors.clickhouse import ClickHouseCollector
+
+    collector = ClickHouseCollector(host="ch", port=8123, user="u", password="secret")
+    captured: dict = {}
+
+    async def fake_get(url, params=None, auth=None):
+        captured["params"] = dict(params or {})
+        captured["auth"] = auth
+
+        class _R:
+            text = "1"
+
+            def raise_for_status(self):
+                return None
+
+        return _R()
+
+    with patch("httpx.AsyncClient") as mock_client:
+        mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+            side_effect=fake_get
+        )
+        await collector._query("SELECT 1")
+    assert "password" not in captured["params"]
+    assert "user" not in captured["params"]
+    assert captured["auth"] == ("u", "secret")
+
+
+# ---------- P2-3: coverage 无配额语义 ----------
+
+
+async def test_repo_recompute_coverage_no_quota_is_unknown():
+    """无 quota 基线时 coverage=0.0（覆盖率未知），非误导性 1.0。"""
+    src = MagicMock()
+    src.quota = {}
+    repo = CollectorRepository(_session(scalar_one_or_none=src, scalar=5))
+    assert await repo.recompute_coverage("s") == 0.0
+
+
+# ---------- P2-4: watermark fingerprints 写入 ----------
+
+
+async def test_watermark_persists_content_fingerprints():
+    """采集水位持久化实体级内容指纹（P2-4：此前声明但从不写入）。"""
+    repo = CollectorRepository(_session(scalar_one_or_none=None))
+    wm = await repo.update_watermark_after_collection(
+        "s", "FULL", 2, 0, content_fingerprints={"t1": "sig1", "t2": "sig2"}
+    )
+    assert wm.content_fingerprints == {"t1": "sig1", "t2": "sig2"}
+
+
+# ---------- P2-5: Kafka SASL/SSL 连接参数 ----------
+
+
+def test_kafka_admin_kwargs_include_sasl():
+    """Kafka 采集器透传 SASL/SSL 连接参数（P2-5 生产安全连接）。"""
+    from app.services.collector.connectors.kafka import KafkaCollector
+
+    c = KafkaCollector(
+        bootstrap_servers="k:9092",
+        security_protocol="SASL_SSL",
+        sasl_mechanism="PLAIN",
+        sasl_username="u",
+        sasl_password="p",
+        ssl_cafile="/ca.pem",
+    )
+    kwargs = c._admin_kwargs()
+    assert kwargs["security_protocol"] == "SASL_SSL"
+    assert kwargs["sasl_mechanism"] == "PLAIN"
+    assert kwargs["sasl_plain_username"] == "u"
+    assert kwargs["sasl_plain_password"] == "p"
+    assert kwargs["ssl_cafile"] == "/ca.pem"
+
+
+# ---------- P2-6: _safe_ident 允许连字符 ----------
+
+
+def test_clickhouse_safe_ident_allows_dash():
+    from app.core.exceptions import ExternalDependencyError
+    from app.services.collector.connectors.clickhouse import ClickHouseCollector
+
+    assert ClickHouseCollector._safe_ident("orders-2026") == "orders-2026"
+    with pytest.raises(ExternalDependencyError):
+        ClickHouseCollector._safe_ident("db.table")  # 不允许 '.'（分隔符）
+
+
+def test_hive_safe_ident_allows_dash():
+    from app.services.collector.connectors.hive import HiveCollector
+
+    assert HiveCollector._safe_ident("orders-2026") == "orders-2026"
+
+
+# ---------- P2-7: kafka 连接配置按类型校验 ----------
+
+
+def test_kafka_connection_config_requires_bootstrap_or_host():
+    """kafka 类型必须提供 bootstrap_servers 或 host（语义错位修复）。"""
+    with pytest.raises(ValueError, match="bootstrap_servers"):
+        DataSourceCreateRequest(
+            source_id="k1",
+            name="K",
+            source_type="kafka",
+            connection_config={"user": "u"},
+            domain="d",
+        )
+
+
+def test_kafka_connection_config_with_host_passes():
+    req = DataSourceCreateRequest(
+        source_id="k1",
+        name="K",
+        source_type="kafka",
+        connection_config={"host": "kafka:9092"},
+        domain="d",
+    )
+    assert req.connection_config["host"] == "kafka:9092"

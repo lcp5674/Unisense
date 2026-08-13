@@ -36,9 +36,21 @@ class DataSourceCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_connection_config(self) -> DataSourceCreateRequest:
-        """FR-020: connection_config 必须包含 host 字段。"""
+        """FR-020/P2-7: 按类型校验连接配置必填项。
+
+        - kafka：需要 ``bootstrap_servers`` 或 ``host``（语义错位修复）；
+        - 其余类型：必须包含 ``host``。
+        """
         cfg = self.connection_config
-        if not isinstance(cfg, dict) or "host" not in cfg:
+        if not isinstance(cfg, dict):
+            raise ValueError("connection_config 必须是对象")
+        source_type_value = (
+            self.source_type.value if hasattr(self.source_type, "value") else str(self.source_type)
+        )
+        if source_type_value == "kafka":
+            if "bootstrap_servers" not in cfg and "host" not in cfg:
+                raise ValueError("kafka 的 connection_config 必须包含 bootstrap_servers 或 host")
+        elif "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
         return self
 
@@ -63,7 +75,15 @@ class TestConnectionRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_connection_config(self) -> TestConnectionRequest:
         cfg = self.connection_config
-        if not isinstance(cfg, dict) or "host" not in cfg:
+        if not isinstance(cfg, dict):
+            raise ValueError("connection_config 必须是对象")
+        source_type_value = (
+            self.source_type.value if hasattr(self.source_type, "value") else str(self.source_type)
+        )
+        if source_type_value == "kafka":
+            if "bootstrap_servers" not in cfg and "host" not in cfg:
+                raise ValueError("kafka 的 connection_config 必须包含 bootstrap_servers 或 host")
+        elif "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
         return self
 
@@ -94,6 +114,15 @@ class DataSourceResponse(BaseModel):
     created_by: int | None = None
     created_at: Any = None
     updated_at: Any = None
+
+
+class DataSourceListResponse(BaseModel):
+    """数据源列表分页响应（P1-1：此前仅返回 20 条、total 被丢弃导致静默截断）。"""
+
+    items: list[DataSourceResponse]
+    total: int
+    page: int
+    page_size: int
 
 
 class DBCatalogCreateRequest(BaseModel):

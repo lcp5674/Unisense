@@ -33,6 +33,24 @@ _CONFIDENTIAL_PATTERNS = [
 ]
 
 
+def _column_names(columns: list[Any]) -> list[str]:
+    """提取列名（兼容字符串列与 dict 列两种 schema 格式）。
+
+    postgres/clickhouse/hive/kafka 的 columns 为 ``[{"name": ..., "type": ...}]``
+    结构，直接 ``str(col)`` 会引入字面量键名（如 "name"）而命中 PII 规则，
+    导致这些连接器采集的每一张表都被误判为 PII（P0-1）。
+    """
+    names: list[str] = []
+    for col in columns:
+        if isinstance(col, dict):
+            name = col.get("name")
+            if name:
+                names.append(str(name))
+        elif isinstance(col, str):
+            names.append(col)
+    return names
+
+
 class SensitivityClassifier:
     """敏感分级分类器（无状态，可注入用于测试）。"""
 
@@ -47,7 +65,7 @@ class SensitivityClassifier:
             敏感级别字符串。
         """
         columns = schema_json.get("columns", []) if isinstance(schema_json, dict) else []
-        haystack = f"{entity_name} " + " ".join(str(c) for c in columns)
+        haystack = f"{entity_name} " + " ".join(_column_names(columns))
         for pattern in _PII_NAME_PATTERNS:
             if pattern.search(haystack):
                 return "PII"

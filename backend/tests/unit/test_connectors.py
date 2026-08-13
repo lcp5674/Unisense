@@ -26,7 +26,7 @@ from app.services.collector.spi import CollectResult
 
 
 class _FakeConnector:
-    """测试用假连接器。"""
+    """测试用假连接器（适配批量列查询：一次返回 {table_name, column_name} 多行）。"""
 
     def __init__(self, tables: list[str], columns: dict[str, list[dict]]) -> None:
         self._tables = tables
@@ -36,8 +36,19 @@ class _FakeConnector:
         if "information_schema.tables" in sql:
             return [{"table_name": t} for t in self._tables]
         if "information_schema.columns" in sql:
-            tbl = params.get("tbl", "") if params else ""
-            return self._columns.get(tbl, [])
+            if "data_type" in sql:
+                # Postgres 单表详细列：SELECT column_name, data_type ... WHERE table_name = :tbl
+                tbl = params.get("tbl", "") if params else ""
+                return [
+                    {"column_name": c.get("column_name"), "data_type": c.get("data_type")}
+                    for c in self._columns.get(tbl, [])
+                ]
+            # MySQL 批量列：SELECT table_name, column_name ...（一次全库）
+            rows: list[dict] = []
+            for tbl, cols in self._columns.items():
+                for c in cols:
+                    rows.append({"table_name": tbl, "column_name": c.get("column_name")})
+            return rows
         return []
 
     async def dispose(self) -> None:
@@ -55,7 +66,7 @@ class _BoomConnector:
 
 
 class _PartialFailConnector:
-    """部分表查询失败的连接器（模拟第500表超时）。"""
+    """批量列查询部分失败的连接器（模拟第 fail_at 表列缺失）。"""
 
     def __init__(self, tables: list[str], fail_at: str) -> None:
         self._tables = tables
@@ -65,10 +76,12 @@ class _PartialFailConnector:
         if "information_schema.tables" in sql:
             return [{"table_name": t} for t in self._tables]
         if "information_schema.columns" in sql:
-            tbl = params.get("tbl", "") if params else ""
-            if tbl == self._fail_at:
-                raise RuntimeError(f"查询表 {tbl} 超时")
-            return [{"column_name": f"{tbl}_col1"}]
+            rows: list[dict] = []
+            for tbl in self._tables:
+                if tbl == self._fail_at:
+                    continue  # 该表列缺失
+                rows.append({"table_name": tbl, "column_name": f"{tbl}_col1"})
+            return rows
         return []
 
     async def dispose(self) -> None:
@@ -84,7 +97,8 @@ async def test_mysql_collector_builds_specs():
         ["users", "orders"],
         {"users": [{"column_name": "user_name"}], "orders": [{"column_name": "order_id"}]},
     )
-    collector = InformationSchemaCollector(conn)
+    # FR-030：指定 database 时按单库采集（entity_name 为裸表名）
+    collector = InformationSchemaCollector(conn, database="db1")
     result = await collector.collect(MagicMock(source_id="s1", domain="db1"))
 
     assert isinstance(result, CollectResult)
@@ -102,15 +116,16 @@ async def test_mysql_collector_external_failure_raises():
 
 
 async def test_mysql_collector_single_table_failure_skips():
-    """FR-004: 单表失败跳过继续，不中断全批采集。"""
+    """批量列查询下某表列缺失 → 该表产出空列，不阻断整批采集（FR-004 容错）。"""
     conn = _PartialFailConnector(["table1", "table2", "table3"], fail_at="table2")
-    collector = InformationSchemaCollector(conn)
+    collector = InformationSchemaCollector(conn, database="db1")
     result = await collector.collect(MagicMock(source_id="s1", domain="db1"))
 
-    assert len(result.specs) == 2  # table1, table3 成功
-    assert len(result.failed_specs) == 1  # table2 失败
-    assert result.failed_specs[0].entity_name == "table2"
-    assert "超时" in result.failed_specs[0].error
+    assert len(result.specs) == 3  # 全部表仍产出
+    assert len(result.failed_specs) == 0  # 批量查询部分缺失不视为失败
+    by_name = {s.entity_name: s for s in result.specs}
+    assert by_name["table2"].schema_json["columns"] == []  # fail_at 表列缺失 → 空列
+    assert by_name["table1"].schema_json["columns"] == ["table1_col1"]
 
 
 # ---------- PostgresCollector ----------

@@ -121,7 +121,10 @@ async def test_event_publisher_circuit_degradation():
 
 async def test_single_table_timeout_skip():
     """FR-004: 采集1000表时1表超时，999表正常采集，不中断全批。"""
-    svc = CollectorService(db=MagicMock())
+    _db = MagicMock()
+    _db.commit = AsyncMock()
+    _db.rollback = AsyncMock()
+    svc = CollectorService(db=_db)
     repo = MagicMock()
     svc._repo = repo
     repo.get_source = AsyncMock(return_value=MagicMock(source_type="mysql"))
@@ -138,6 +141,9 @@ async def test_single_table_timeout_skip():
     svc._events = events
 
     class PartialFailingCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
         async def collect(self, source: object) -> CollectResult:
             specs = [
                 CatalogSpec(

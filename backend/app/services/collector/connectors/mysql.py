@@ -115,6 +115,12 @@ class InformationSchemaCollector(BaseCollector):
 
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
+        # P0-6: 读取增量上下文（service 层 collect 前注入）
+        incremental = (
+            getattr(self, "_incremental_mode", "FULL") == "INCREMENTAL"
+            and getattr(self, "_incremental_watermark", None) is not None
+        )
+        watermark_ts = getattr(self, "_incremental_watermark", None)
         try:
             if self._database:
                 schemas = [self._database]
@@ -127,14 +133,48 @@ class InformationSchemaCollector(BaseCollector):
         failed_specs: list[FailedSpec] = []
         for schema in schemas:
             try:
-                tables = await self._connector.query(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = :schema AND table_type = :ttype",
-                    {"schema": schema, "ttype": "BASE TABLE"},
-                )
+                if incremental:
+                    # 增量：只取 UPDATE_TIME 晚于水位的表（P0-6 真实接入）
+                    from app.services.collector.incremental import build_incremental_query
+
+                    inc_sql = build_incremental_query("mysql", schema, watermark_ts)
+                    tables = (
+                        await self._connector.query(
+                            inc_sql or "",
+                            {
+                                "schema": schema,
+                                "ttype": "BASE TABLE",
+                                "watermark": watermark_ts,
+                            },
+                        )
+                        if inc_sql
+                        else []
+                    )
+                else:
+                    tables = await self._connector.query(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = :schema AND table_type = :ttype",
+                        {"schema": schema, "ttype": "BASE TABLE"},
+                    )
             except Exception as exc:
                 logger.warning("采集源 %s 库 %s 表列表失败: %s", source_id, schema, exc)
                 continue
+
+            # P1-7: 一次批量查询该库全部列并按表分组，消除「每表一次查询」的 N+1
+            try:
+                col_rows = await self._connector.query(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema = :schema ORDER BY table_name, ordinal_position",
+                    {"schema": schema},
+                )
+            except Exception as exc:
+                logger.warning("采集源 %s 库 %s 列列表失败: %s", source_id, schema, exc)
+                col_rows = []
+            columns_by_table: dict[str, list[str]] = {}
+            for r in col_rows:
+                tbl, col = r.get("table_name"), r.get("column_name")
+                if tbl and col:
+                    columns_by_table.setdefault(tbl, []).append(col)
 
             for row in tables:
                 tbl = row.get("table_name")
@@ -142,24 +182,15 @@ class InformationSchemaCollector(BaseCollector):
                     continue
                 # 多库采集时以 库.表 命名，避免跨库同名表冲突
                 entity_name = f"{schema}.{tbl}" if not self._database else tbl
-                try:
-                    cols = await self._connector.query(
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = :schema AND table_name = :tbl",
-                        {"schema": schema, "tbl": tbl},
+                cols = columns_by_table.get(tbl, [])
+                schema_json = {"columns": cols}
+                specs.append(
+                    CatalogSpec(
+                        entity_name=entity_name,
+                        entity_type="TABLE",
+                        schema_json=schema_json,
                     )
-                    schema_json = {"columns": [c.get("column_name") for c in cols]}
-                    specs.append(
-                        CatalogSpec(
-                            entity_name=entity_name,
-                            entity_type="TABLE",
-                            schema_json=schema_json,
-                        )
-                    )
-                except Exception as exc:
-                    # FR-004: 单表失败跳过继续，记录到 failed_specs
-                    logger.warning("采集源 %s 表 %s 字段失败: %s", source_id, entity_name, exc)
-                    failed_specs.append(FailedSpec(entity_name=entity_name, error=str(exc)))
+                )
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
 

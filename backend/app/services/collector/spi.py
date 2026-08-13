@@ -78,6 +78,21 @@ class BaseCollector(ABC):
         """采集数据源，返回采集结果（含成功 specs 与失败 failed_specs）。"""
         ...
 
+    def set_incremental_context(
+        self, mode: str, watermark_ts: Any | None = None
+    ) -> None:
+        """注入增量采集上下文（P0-6：由 service 层在 collect 前调用）。
+
+        ``mode`` 为 "INCREMENTAL" 且 ``watermark_ts`` 非空时，支持增量的连接器
+        只采集水位之后发生变更的实体；默认实现保持全量（不支持增量降级为全量）。
+
+        Args:
+            mode: 采集模式（FULL/INCREMENTAL）。
+            watermark_ts: 上次采集水位时间戳。
+        """
+        self._incremental_mode = mode
+        self._incremental_watermark = watermark_ts
+
     async def probe(self) -> ProbeResult:
         """轻量连接探活（SELECT 1 或等价最小查询），供「测试连接 / 健康检查」使用。
 

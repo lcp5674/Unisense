@@ -141,6 +141,7 @@ def _session(scalar_one_or_none=None) -> MagicMock:
     s.execute = AsyncMock(return_value=res)
     s.add = MagicMock()
     s.flush = AsyncMock()
+    s.commit = AsyncMock()
     return s
 
 
@@ -191,7 +192,7 @@ async def test_repo_update_watermark_updates_existing():
 async def test_service_incremental_degrades_to_full_for_unsupported():
     """PostgreSQL 请求增量采集时自动降级为全量。"""
     with patch("app.services.collector.service.CollectorRepository") as mock_repo:
-        svc = CollectorService(db=MagicMock())
+        svc = CollectorService(db=_session())
         repo = mock_repo.return_value
         repo.get_source = AsyncMock(return_value=MagicMock(source_type="postgres"))
         repo.get_watermark = AsyncMock(return_value=None)
@@ -207,6 +208,10 @@ async def test_service_incremental_degrades_to_full_for_unsupported():
         svc._events = events
 
         class StubCollector:
+            def set_incremental_context(self, mode: str, watermark: object) -> None:
+                self._incremental_mode = mode
+                self._incremental_watermark = watermark
+
             async def collect(self, source: object) -> CollectResult:
                 return CollectResult(
                     specs=[
@@ -229,7 +234,7 @@ async def test_service_incremental_degrades_to_full_for_unsupported():
 async def test_service_incremental_stays_incremental_for_mysql_with_watermark():
     """MySQL 有水位时保持增量模式。"""
     with patch("app.services.collector.service.CollectorRepository") as mock_repo:
-        svc = CollectorService(db=MagicMock())
+        svc = CollectorService(db=_session())
         repo = mock_repo.return_value
         src_mock = MagicMock(source_type="mysql")
         repo.get_source = AsyncMock(return_value=src_mock)
@@ -248,6 +253,10 @@ async def test_service_incremental_stays_incremental_for_mysql_with_watermark():
         svc._events = events
 
         class StubCollector:
+            def set_incremental_context(self, mode: str, watermark: object) -> None:
+                self._incremental_mode = mode
+                self._incremental_watermark = watermark
+
             async def collect(self, source: object) -> CollectResult:
                 return CollectResult(
                     specs=[

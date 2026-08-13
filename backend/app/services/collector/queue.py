@@ -105,7 +105,12 @@ class RedisJobStore:
 
 
 class ArqCollectionQueue:
-    """基于 ``arq``（Redis）的生产采集队列（惰性导入 arq）。"""
+    """基于 ``arq``（Redis）的生产采集队列（惰性导入 arq）。
+
+    P1-4 修复：实现 ``get()`` 并配合 ``RedisJobStore`` 落初始状态，
+    使 ``GET /api/v1/data-sources/jobs/{job_id}`` 在 arq 模式下可查询
+    （此前无 get()，arq 模式任务状态恒 404）。
+    """
 
     def __init__(self, redis_url: str | None = None, redis: Any | None = None) -> None:
         self._redis_url = redis_url
@@ -125,8 +130,20 @@ class ArqCollectionQueue:
             _timeout=600,
         )
         job_id: str = job.job_id
+        # P1-4: 初始状态落 RedisJobStore（worker 完成后由 tasks.py 更新）
+        await RedisJobStore(redis).set(
+            job_id, "QUEUED", {"source_id": source_id, "actor_id": actor_id}
+        )
         # FR-019: 不再调用 redis.close()，复用连接池
         return job_id
+
+    async def get(self, job_id: str) -> dict[str, Any] | None:
+        from redis.asyncio import Redis as AsyncRedis
+
+        from app.core.config import settings
+
+        redis = self._redis or AsyncRedis.from_url(self._redis_url or settings.redis_url)
+        return await RedisJobStore(redis).get(job_id)
 
 
 _default_queue: InMemoryCollectionQueue | None = None

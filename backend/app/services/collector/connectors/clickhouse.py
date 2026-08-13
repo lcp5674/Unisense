@@ -56,6 +56,9 @@ class ClickHouseCollector(BaseCollector):
     async def _query(self, sql: str) -> str:
         """执行 ClickHouse HTTP 查询，返回原始文本响应。
 
+        P1-5：凭据经 HTTP Basic Auth 头传递（而非 URL query 参数），
+        避免密码进入 ClickHouse / 代理访问日志。
+
         Args:
             sql: SQL 查询语句。
 
@@ -67,15 +70,14 @@ class ClickHouseCollector(BaseCollector):
         """
         params: dict[str, str] = {
             "query": sql,
-            "user": self._user,
             "database": self._database,
         }
-        if self._password:
-            params["password"] = self._password
+        # Basic Auth：user + password 走 Authorization 头（httpx auth 元组）
+        auth = (self._user, self._password)
 
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.get(self._base_url, params=params)
+                response = await client.get(self._base_url, params=params, auth=auth)
                 response.raise_for_status()
                 return response.text
         except httpx.TimeoutException as exc:
@@ -115,12 +117,25 @@ class ClickHouseCollector(BaseCollector):
 
         for database in databases:
             safe_db = self._safe_ident(database)
-            # 获取表列表
+            # 获取表列表（P0-6：增量模式仅取水位后 metadata_modification_time 变更的表）
             try:
-                tables_text = await self._query(
-                    f"SELECT name FROM system.tables WHERE database = '{safe_db}' "
-                    f"FORMAT TabSeparated"
+                incremental = (
+                    getattr(self, "_incremental_mode", "FULL") == "INCREMENTAL"
+                    and getattr(self, "_incremental_watermark", None) is not None
                 )
+                if incremental:
+                    watermark_ts = self._incremental_watermark
+                    wm = watermark_ts.strftime("%Y-%m-%d %H:%M:%S") if watermark_ts else ""
+                    tables_text = await self._query(
+                        f"SELECT name FROM system.tables WHERE database = '{safe_db}' "
+                        f"AND metadata_modification_time > '{wm}' "
+                        f"FORMAT TabSeparated"
+                    )
+                else:
+                    tables_text = await self._query(
+                        f"SELECT name FROM system.tables WHERE database = '{safe_db}' "
+                        f"FORMAT TabSeparated"
+                    )
             except Exception as exc:
                 logger.warning("采集源 %s 库 %s 表列表失败: %s", source_id, database, exc)
                 continue
@@ -173,10 +188,13 @@ class ClickHouseCollector(BaseCollector):
 
     @staticmethod
     def _safe_ident(name: str) -> str:
-        """校验库/表名为合法标识符，防止拼入 SQL 造成注入。"""
+        """校验库/表名为合法标识符，防止拼入 SQL 造成注入。
+
+        P2-6: 允许 ``-``（ClickHouse 常见表名含连字符），不允许 ``.``（分隔符）。
+        """
         import re
 
-        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
             raise ExternalDependencyError(f"非法标识符: {name!r}")
         return name
 

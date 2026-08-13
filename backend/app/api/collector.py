@@ -40,6 +40,7 @@ from app.services.collector.schemas import (
     BulkDeprecateResult,
     CollectRequest,
     DataSourceCreateRequest,
+    DataSourceListResponse,
     DataSourceResponse,
     DataSourceTypeInfo,
     DBCatalogCreateRequest,
@@ -102,12 +103,18 @@ async def list_data_sources(
     keyword: str | None = None,
     page: int = 1,
     page_size: int = 20,
-) -> ApiResponse[list[DataSourceResponse]]:
+) -> ApiResponse[DataSourceListResponse]:
     svc = _svc(db)
-    items, _total = await svc.list_sources(
+    items, total = await svc.list_sources(
         domain=domain, source_type=source_type, keyword=keyword, page=page, page_size=page_size
     )
-    return ok(data=items, trace_id=trace_id)
+    # P1-1: 返回分页结构（含 total），此前 total 被丢弃导致 >20 个源时静默截断
+    return ok(
+        data=DataSourceListResponse(
+            items=items, total=total, page=page, page_size=page_size
+        ),
+        trace_id=trace_id,
+    )
 
 
 @source_router.get("/types", dependencies=_READ_DEPS)
