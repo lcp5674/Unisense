@@ -89,8 +89,10 @@ class DimensionService(BaseService):
             raise NotFoundError(f"维度不存在: {dim_code}")
         return dim
 
-    async def list_dimensions(self, domain: str | None, status: str | None) -> list[Dimension]:
-        return await self._repo.list_dimensions(domain, status)
+    async def list_dimensions(
+        self, domain: str | None, status: str | None, keyword: str | None = None
+    ) -> list[Dimension]:
+        return await self._repo.list_dimensions(domain, status, keyword)
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:
         dim = await self._require(dim_code)

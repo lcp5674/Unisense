@@ -87,6 +87,20 @@ class TestDimensionCRUD:
         assert "'sales'" in stmt
         assert "'PUBLISHED'" in stmt
 
+    async def test_list_dimensions_with_keyword(self, repo, session) -> None:
+        """keyword 命中编码/名称/描述 LIKE 条件。"""
+        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
+        await repo.list_dimensions(None, None, "region")
+        stmt = _first_stmt(session)
+        assert "%region%" in stmt
+
+    async def test_list_dimensions_keyword_escapes_wildcards(self, repo, session) -> None:
+        """LIKE 通配符（% / _）须转义，防模糊放大。"""
+        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
+        await repo.list_dimensions(None, None, "100%_x")
+        stmt = _first_stmt(session)
+        assert "100\\%\\_x" in stmt
+
 
 class TestMemberCRUD:
     async def test_save_member_adds_and_flushes(self, repo, session) -> None:

@@ -68,8 +68,9 @@ async def list_dimensions(
     trace_id: Annotated[str, Depends(get_trace_id)],
     domain: str | None = Query(None),
     status: str | None = Query(None),
+    keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
 ) -> Any:
-    items = await DimensionService(db).list_dimensions(domain, status)
+    items = await DimensionService(db).list_dimensions(domain, status, keyword)
     return ok(
         data={"items": [DimensionResponse.from_model(i) for i in items], "total": len(items)},
         trace_id=trace_id,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.dimension import (
@@ -27,12 +27,24 @@ class DimensionRepository:
         stmt = select(Dimension).where(Dimension.dim_code == dim_code)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def list_dimensions(self, domain: str | None, status: str | None) -> list[Dimension]:
+    async def list_dimensions(
+        self, domain: str | None, status: str | None, keyword: str | None = None
+    ) -> list[Dimension]:
         stmt = select(Dimension)
         if domain:
             stmt = stmt.where(Dimension.domain == domain)
         if status:
             stmt = stmt.where(Dimension.status == status)
+        if keyword:
+            # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
+            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            stmt = stmt.where(
+                or_(
+                    Dimension.dim_code.like(f"%{escaped}%"),
+                    Dimension.name.like(f"%{escaped}%"),
+                    Dimension.description.like(f"%{escaped}%"),
+                )
+            )
         return list((await self._session.execute(stmt)).scalars().all())
 
     async def save_member(self, obj: DimensionMember) -> DimensionMember:
