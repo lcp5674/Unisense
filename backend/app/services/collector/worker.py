@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
+from app.services.notify.escalation_tasks import check_escalation_retries
 from app.services.quality.tasks import run_quality_checks
 from app.tasks.semantic_tasks import (
     check_emergency_review_overdue,
@@ -128,6 +129,7 @@ class WorkerSettings:
         check_emergency_review_overdue,
         check_experimental_expiry,
         run_quality_checks,
+        check_escalation_retries,
     ]
     cron_jobs = [
         cron(
@@ -167,6 +169,13 @@ class WorkerSettings:
         cron(
             run_quality_checks,
             name="quality-checks",
+            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+            second=0,
+            run_at_startup=True,
+        ),
+        cron(
+            check_escalation_retries,
+            name="escalation-retries",
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
             second=0,
             run_at_startup=True,

@@ -27,7 +27,15 @@ services:
     ports: ["3307:3306"]
     volumes:
       - mysql_data:/var/lib/mysql
-    command: --default-authentication-plugin=caching_sha2_password --character-set-server=utf8mb4
+      - unisense_binlog:/var/lib/mysql-binlog
+    # 开启 binlog（ROW 格式）供增量备份（RPO ≤ 15min）；binlog 独立卷供 backup 服务只读归档
+    command: >-
+      --default-authentication-plugin=caching_sha2_password
+      --character-set-server=utf8mb4
+      --server-id=1
+      --log-bin=/var/lib/mysql-binlog/binlog
+      --binlog-format=ROW
+      --binlog_expire_logs_seconds=604800
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
@@ -234,6 +242,16 @@ services:
       UNISENSE_LLM_DEFAULT_MODEL: ${UNISENSE_LLM_DEFAULT_MODEL:-deepseek-chat}
       UNISENSE_NOTIFY_WEBHOOK_URL: ${UNISENSE_NOTIFY_WEBHOOK_URL:-}
       UNISENSE_FERNET_KEY: ${UNISENSE_FERNET_KEY:-}
+    # arq worker 不监听 HTTP，覆盖镜像级 :8000 健康检查，改为检测 arq 进程存活
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import os,sys;sys.exit(0 if any('arq app.services.collector.worker' in open('/proc/%s/cmdline'%p,'rb').read().decode(errors='ignore') for p in os.listdir('/proc') if p.isdigit()) else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     command: ["sh", "-c", "arq app.services.collector.worker.WorkerSettings"]
     restart: unless-stopped
 
@@ -283,16 +301,48 @@ services:
       - sh
       - -c
       - >-
-        chmod +x /usr/local/bin/backup.sh;
         while true; do
-          /usr/local/bin/backup.sh;
+          sh /usr/local/bin/backup.sh;
           echo "[backup-svc] sleep 24h";
           sleep 86400;
         done
     restart: unless-stopped
 
+  # ============ binlog 增量备份（每 5 分钟，RPO ≤ 15min）============
+  # 只读挂载 mysql 的 binlog 独立卷，FLUSH LOGS 后归档新文件到备份卷。
+  # 与每日全量 backup 服务配合：恢复 = 最新全量 + 全量之后的所有 binlog。
+  binlog-backup:
+    image: mysql:8.0
+    container_name: unisense-binlog-backup
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${UNISENSE_MYSQL_USER:-unisense}
+      MYSQL_PASSWORD: ${UNISENSE_MYSQL_PASSWORD:-test}
+      BINLOG_SRC: /mysql-binlog
+      BINLOG_DIR: /backups/binlog
+      RETENTION_DAYS: "7"
+    volumes:
+      - ./backend/scripts/backup_binlog.sh:/usr/local/bin/backup_binlog.sh:ro
+      - unisense_binlog:/mysql-binlog:ro
+      - unisense_backups:/backups
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        while true; do
+          sh /usr/local/bin/backup_binlog.sh;
+          echo "[binlog-svc] sleep 5m";
+          sleep 300;
+        done
+    restart: unless-stopped
+
 volumes:
   mysql_data:
+  unisense_binlog:
   neo4j_data:
   es_data:
   redis_data:

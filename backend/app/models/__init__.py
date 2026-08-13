@@ -61,6 +61,7 @@ from app.models.metric import Metric
 from app.models.metric_health import MetricHealthScore
 from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion, PendingVersionConfirmation
+from app.models.escalation import EscalationRecord, EscalationStatus
 from app.models.notify import EventLog, Notification, SubscriptionPref
 from app.models.quality import (
     ExternalBenchmark,
@@ -104,6 +105,8 @@ __all__ = [
     "EntityTypeEnum",
     "ErasureRequest",
     "ErasureStatus",
+    "EscalationRecord",
+    "EscalationStatus",
     "EventLog",
     "ExternalBenchmark",
     "Feedback",

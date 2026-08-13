@@ -66,8 +66,12 @@ async def test_scheduler_triggers_source_in_window():
     assert args.args[0] == "run_collection_task"
     assert args.args[1] == "src1"
     assert args.args[2] == 7
-    assert "_job_id" in args.kwargs
+    # job_id 必须作为第 4 位置参数（幂等键 + 状态回写），且与 _job_id 一致
+    assert args.args[3] == args.kwargs["_job_id"]
     assert args.kwargs["_job_id"].startswith("collect:sched:src1:")
+    # arq 0.28 不支持 _max_tries/_timeout，不得透传
+    assert "_max_tries" not in args.kwargs
+    assert "_timeout" not in args.kwargs
 
 
 async def test_scheduler_skips_source_outside_window():
