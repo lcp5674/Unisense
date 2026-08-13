@@ -405,11 +405,12 @@ async def get_watermark(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[dict[str, Any]]:
-    """US3: 获取数据源采集水位（FR-014）。"""
+    """US3: 获取数据源采集水位（FR-014）。
+
+    数据源不存在时由 service 抛 404；存在但从未采集时返回空水位。
+    """
     svc = _svc(db)
     watermark = await svc.get_watermark(source_id)
-    if watermark is None:
-        raise NotFoundError(f"采集水位不存在: {source_id}", ctx={"source_id": source_id})
     return ok(data=watermark, trace_id=trace_id)
 
 

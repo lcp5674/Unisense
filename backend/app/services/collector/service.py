@@ -675,11 +675,25 @@ class CollectorService(BaseService):
         src.collection_mode = mode
         await self._db.flush()
 
-    async def get_watermark(self, source_id: str) -> dict[str, Any] | None:
-        """US3: 获取数据源采集水位（FR-014）。"""
+    async def get_watermark(self, source_id: str) -> dict[str, Any]:
+        """US3: 获取数据源采集水位（FR-014）。
+
+        数据源不存在时抛 ``NotFoundError``；存在但从未采集时返回空水位
+        （``last_collected_at=None``、计数为 0），而非 404——与 ``get_health``
+        语义一致，使前端可正常展示「从未采集」。
+        """
+        src = await self._repo.get_source(source_id)
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
         watermark = await self._repo.get_watermark(source_id)
         if watermark is None:
-            return None
+            return {
+                "source_id": source_id,
+                "last_collected_at": None,
+                "mode": src.collection_mode or "FULL",
+                "scanned_count": 0,
+                "failed_count": 0,
+            }
         return {
             "source_id": watermark.source_id,
             "last_collected_at": (

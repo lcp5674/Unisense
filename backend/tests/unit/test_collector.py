@@ -1171,6 +1171,56 @@ async def test_get_health_returns_last_error_and_check_time():
     assert health["health_status"] == "unhealthy"
 
 
+# ---------- FR-014: 采集水位语义（存在但未采集 ≠ 404） ----------
+
+
+async def test_get_watermark_returns_empty_for_never_collected():
+    """数据源存在但从未采集：返回空水位而非 404（与 get_health 语义一致）。"""
+    svc, repo = _svc()
+    src = MagicMock(source_id="doris_default", collection_mode="FULL")
+    repo.get_source = AsyncMock(return_value=src)
+    repo.get_watermark = AsyncMock(return_value=None)
+    wm = await svc.get_watermark("doris_default")
+    assert wm is not None
+    assert wm["source_id"] == "doris_default"
+    assert wm["last_collected_at"] is None
+    assert wm["mode"] == "FULL"
+    assert wm["scanned_count"] == 0
+    assert wm["failed_count"] == 0
+
+
+async def test_get_watermark_raises_for_missing_source():
+    """数据源不存在：404（NotFoundError）。"""
+    from app.core.exceptions import NotFoundError
+
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.get_watermark("ghost")
+
+
+async def test_get_watermark_returns_record_when_collected():
+    """数据源已采集：返回真实水位记录。"""
+    from datetime import UTC, datetime
+
+    svc, repo = _svc()
+    src = MagicMock(source_id="s1", collection_mode="FULL")
+    repo.get_source = AsyncMock(return_value=src)
+    wm = MagicMock(
+        source_id="s1",
+        last_collected_at=datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC),
+        mode="INCREMENTAL",
+        scanned_count=10,
+        failed_count=1,
+    )
+    repo.get_watermark = AsyncMock(return_value=wm)
+    out = await svc.get_watermark("s1")
+    assert out["last_collected_at"] == "2026-08-01T12:00:00+00:00"
+    assert out["mode"] == "INCREMENTAL"
+    assert out["scanned_count"] == 10
+    assert out["failed_count"] == 1
+
+
 # ---------- P1-5: ClickHouse 密码经 Basic Auth ----------
 
 
