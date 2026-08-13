@@ -78,13 +78,19 @@ async def test_list_users_filters_by_role(users_client: httpx.AsyncClient) -> No
 async def audit_entity_client() -> AsyncIterator[httpx.AsyncClient]:
     async def fake_db():
         session = MagicMock()
+        # 新版查询：count（scalar_one）+ 主查询（join User 后返回 (log, display_name) 元组行）
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = 1
         rows = [
-            AuditLog(id=1, actor_id=1, action="CREATE", entity_type="metric_definition",
-                     entity_id="sales_gmv_sum_d", ip="x", trace_id="t", pii_access=False),
+            (
+                AuditLog(id=1, actor_id=1, action="CREATE", entity_type="metric_definition",
+                         entity_id="sales_gmv_sum_d", ip="x", trace_id="t", pii_access=False),
+                "管理员",
+            ),
         ]
-        result = MagicMock()
-        result.scalars.return_value.all.return_value = rows
-        session.execute = AsyncMock(return_value=result)
+        rows_result = MagicMock()
+        rows_result.all.return_value = rows
+        session.execute = AsyncMock(side_effect=[count_result, rows_result])
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db

@@ -137,7 +137,7 @@ function DeprecatedChain({ metric }: { metric: MetricResponse }) {
   );
 }
 
-// 口径定义结构化展示：expression / dependencies / 来源字段 / ETL SQL
+// 口径定义结构化展示：表达式 / 关联数据表 / 依赖 / 来源字段 / ETL SQL
 function DefinitionCard({ metric }: { metric: MetricResponse }) {
   const def = metric.definition_json ?? {};
   const expression = typeof def.expression === "string" ? def.expression : undefined;
@@ -148,6 +148,11 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
     : rawSource
       ? [String(rawSource)]
       : [];
+  const sourceTables: string[] = Array.isArray(def.source_tables)
+    ? def.source_tables.map((s) => String(s))
+    : def.source_tables
+      ? [String(def.source_tables)]
+      : [];
   const rawEtl = def.etl_sql ?? def.sql;
   const etlSql = rawEtl == null ? "" : String(rawEtl);
   return (
@@ -156,6 +161,13 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
         {expression && (
           <Descriptions.Item label="表达式">
             <code className="mono">{expression}</code>
+          </Descriptions.Item>
+        )}
+        {sourceTables.length > 0 && (
+          <Descriptions.Item label="关联数据表">
+            {sourceTables.map((t) => (
+              <Tag key={t} className="mono">{t}</Tag>
+            ))}
           </Descriptions.Item>
         )}
         {dependencies.length > 0 && (
@@ -173,7 +185,7 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
           </Descriptions.Item>
         )}
         {etlSql && (
-          <Descriptions.Item label="ETL SQL">
+          <Descriptions.Item label="口径 SQL">
             <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto" }}>
               {etlSql}
             </pre>

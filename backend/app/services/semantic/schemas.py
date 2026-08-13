@@ -13,6 +13,40 @@ from pydantic import BaseModel, Field, field_validator
 # ---- 请求 Schema ----
 
 
+def _validate_definition_json(v: dict[str, Any]) -> dict[str, Any]:
+    """口径定义结构校验与规范化（FR-07 生产化）。
+
+    1. ``sql``：若提供，用 sqlglot 做语法校验，非法 SQL 拒绝（422）。
+    2. ``source_tables``：若提供，规范化为去重字符串数组（指标锚定的数据表，
+       与 db_catalog/血缘节点约定一致）。
+    3. 仅做校验与规范化，不新增字段、不改变未提供字段。
+    """
+    sql = v.get("sql")
+    if sql is not None:
+        if not isinstance(sql, str) or not sql.strip():
+            raise ValueError("口径 SQL（definition_json.sql）必须为非空字符串")
+        try:
+            import sqlglot
+
+            sqlglot.parse_one(sql)
+        except Exception as exc:  # noqa: BLE001 - sqlglot 语法错误统一 422
+            raise ValueError(f"口径 SQL 语法错误: {exc}") from exc
+
+    source_tables = v.get("source_tables")
+    if source_tables is not None:
+        if not isinstance(source_tables, list):
+            raise ValueError("source_tables 必须为数据表名数组")
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for t in source_tables:
+            name = str(t).strip()
+            if name and name not in seen:
+                seen.add(name)
+                cleaned.append(name)
+        v["source_tables"] = cleaned
+    return v
+
+
 class MetricCreateRequest(BaseModel):
     """创建指标请求。
 
@@ -66,6 +100,12 @@ class MetricCreateRequest(BaseModel):
             raise ValueError(error)
         return v
 
+    @field_validator("definition_json")
+    @classmethod
+    def validate_definition(cls, v: dict[str, Any]) -> dict[str, Any]:
+        """口径定义：SQL 语法校验 + source_tables 规范化。"""
+        return _validate_definition_json(v)
+
 
 class MetricUpdateRequest(BaseModel):
     """更新指标请求。"""
@@ -78,6 +118,12 @@ class MetricUpdateRequest(BaseModel):
     consumption_guide: dict[str, Any] | None = Field(None, description="消费指南")
     backup_owner_id: int | None = Field(None, description="副 Owner ID")
     change_reason: str = Field(..., min_length=4, description="变更原因")
+
+    @field_validator("definition_json")
+    @classmethod
+    def validate_definition(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        """口径定义：SQL 语法校验 + source_tables 规范化。"""
+        return _validate_definition_json(v) if v is not None else v
 
 
 class MetricPublishRequest(BaseModel):

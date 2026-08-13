@@ -37,8 +37,13 @@ export function AuditLog() {
 
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
-    { title: "操作者", dataIndex: "actor_id", key: "actor", width: 90, render: (v: number) => <span className="mono">#{v}</span> },
-    { title: "动作", dataIndex: "action", key: "action", width: 200, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "操作者", dataIndex: "actor_id", key: "actor", width: 140, render: (_: number, r: AuditEntry) => <span>{r.actor_display ?? `#${r.actor_id}`}</span> },
+    { title: "动作", dataIndex: "action", key: "action", ellipsis: true, render: (v: string, r: AuditEntry) => (
+      <span>
+        <span>{r.action_desc ?? v}</span>
+        <Tag style={{ marginLeft: 6 }}>{v}</Tag>
+      </span>
+    ) },
     { title: "实体类型", dataIndex: "entity_type", key: "entityType", width: 150, render: (v: string) => <Tag>{v}</Tag> },
     { title: "实体 ID", dataIndex: "entity_id", key: "entityId", ellipsis: true, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
     {
@@ -46,7 +51,17 @@ export function AuditLog() {
       dataIndex: "detail_json",
       key: "detail",
       ellipsis: true,
-      render: (v: Record<string, unknown> | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{JSON.stringify(v)}</span> : <span className="muted">—</span>),
+      render: (v: Record<string, unknown> | null) =>
+        v && Object.keys(v).length > 0 ? (
+          <span className="mono" style={{ fontSize: 12 }}>
+            {Object.entries(v)
+              .filter(([, val]) => val !== null && val !== undefined)
+              .map(([k, val]) => `${k}:${typeof val === "object" ? JSON.stringify(val) : String(val)}`)
+              .join(" · ")}
+          </span>
+        ) : (
+          <span className="muted">—</span>
+        ),
     },
     { title: "IP", dataIndex: "ip", key: "ip", width: 130, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
     {

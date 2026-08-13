@@ -6,29 +6,68 @@ import {
   Checkbox,
   Form,
   Input,
+  Segmented,
   Select,
-  message,
   Space,
   Typography,
+  message,
 } from "antd";
-import { createMetric, UnisenseApiError } from "../api";
+import { createMetric, fetchAssetSearch, UnisenseApiError } from "../api";
 import type { MetricCreateRequest, MetricType, MetricTier } from "../types";
 
-const { Title } = Typography;
+const { Title, Paragraph } = Typography;
 const { TextArea } = Input;
 
 export function MetricCreate() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
+  // 口径录入模式：expression（结构化 JSON）↔ sql（SQL 语句）
+  const [mode, setMode] = useState<"expression" | "sql">("expression");
+  const [sqlText, setSqlText] = useState("");
+  const [sourceTables, setSourceTables] = useState<string[]>([]);
+  const [tableOptions, setTableOptions] = useState<{ value: string; label: string }[]>([]);
+  const [tableSearching, setTableSearching] = useState(false);
+
+  async function searchTables(q: string) {
+    if (!q.trim()) return;
+    setTableSearching(true);
+    try {
+      const res = await fetchAssetSearch({ q: q.trim(), type: "table", limit: 20 });
+      setTableOptions(
+        res.items.map((it) => ({ value: it.name, label: it.name })),
+      );
+    } catch {
+      setTableOptions([]);
+    } finally {
+      setTableSearching(false);
+    }
+  }
+
+  function buildDefinitionJson(values: Record<string, unknown>): Record<string, unknown> | null {
+    const tables = sourceTables.length ? { source_tables: sourceTables } : {};
+    if (mode === "sql") {
+      const sql = sqlText.trim();
+      if (!sql) {
+        message.error("口径 SQL 模式请输入 SQL 语句");
+        return null;
+      }
+      return { sql, ...tables };
+    }
+    let def: Record<string, unknown>;
+    try {
+      def = values.definition ? JSON.parse(String(values.definition)) : {};
+    } catch {
+      message.error("口径定义需为合法 JSON");
+      return null;
+    }
+    return { ...def, ...tables };
+  }
 
   async function handleSubmit(values: Record<string, unknown>) {
     setLoading(true);
-    let definitionJson: Record<string, unknown>;
-    try {
-      definitionJson = values.definition ? JSON.parse(String(values.definition)) : {};
-    } catch {
-      message.error("口径定义需为合法 JSON");
+    const definitionJson = buildDefinitionJson(values);
+    if (!definitionJson) {
       setLoading(false);
       return;
     }
@@ -157,12 +196,58 @@ export function MetricCreate() {
             <Form.Item name="pii_flag" label="含 PII" valuePropName="checked">
               <Checkbox>含 PII</Checkbox>
             </Form.Item>
-            <Form.Item name="definition" label="口径定义 (JSON)">
-              <TextArea
-                rows={5}
-                placeholder='{"expr": "sum(amount)", "filters": []}'
+
+            {/* 关联数据表：复用资产地图搜索，锚定指标取数来源 */}
+            <Form.Item label="关联数据表">
+              <Select
+                mode="multiple"
+                allowClear
+                showSearch
+                placeholder="搜索并选择口径引用的数据表（如 catalog.sales.orders）"
+                value={sourceTables}
+                onChange={(v: string[]) => setSourceTables(v)}
+                onSearch={searchTables}
+                loading={tableSearching}
+                notFoundContent={null}
+                options={tableOptions}
+                filterOption={false}
               />
             </Form.Item>
+
+            {/* 口径定义：表达式 ↔ SQL 双模式 */}
+            <Form.Item label="口径定义">
+              <Segmented
+                block
+                value={mode}
+                onChange={(v) => setMode(v as "expression" | "sql")}
+                options={[
+                  { value: "expression", label: "表达式（结构化）" },
+                  { value: "sql", label: "SQL 模式" },
+                ]}
+              />
+            </Form.Item>
+            {mode === "expression" ? (
+              <Form.Item name="definition" label="口径定义 (JSON)">
+                <TextArea
+                  rows={5}
+                  placeholder='{"expr": "sum(amount)", "filters": [], "source_fields": ["orders.amount"]}'
+                />
+              </Form.Item>
+            ) : (
+              <Form.Item label="口径 SQL">
+                <TextArea
+                  rows={5}
+                  value={sqlText}
+                  onChange={(e) => setSqlText(e.target.value)}
+                  placeholder={"SELECT SUM(amount) AS gmv\nFROM catalog.sales.orders\nWHERE dt >= '2026-01-01'"}
+                  className="mono"
+                />
+                <Paragraph type="secondary" style={{ marginTop: 4, fontSize: 12 }}>
+                  后端将用 sqlglot 校验 SQL 语法；不合法将拒绝提交。
+                </Paragraph>
+              </Form.Item>
+            )}
+
             <Form.Item>
               <Button type="primary" htmlType="submit" loading={loading}>
                 创建草稿

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Empty, Spin, Tag, Timeline, Typography } from "antd";
+import { Collapse, Empty, Spin, Tag, Timeline, Typography } from "antd";
 import { listAudit } from "../../api";
 import type { AuditEntry } from "../../types";
 
@@ -20,6 +20,22 @@ const ACTION_COLOR: Record<string, string> = {
   REJECT_VERSION: "red",
   EXTEND_VERSION: "lime",
 };
+
+// 将 detail_json 渲染为「key: 值」中文可读摘要，避免用户直面原始 JSON
+function DetailSummary({ detail }: { detail: Record<string, unknown> }) {
+  const entries = Object.entries(detail).filter(([, v]) => v !== null && v !== undefined);
+  if (!entries.length) return null;
+  return (
+    <div style={{ margin: "4px 0 0" }}>
+      {entries.map(([k, v]) => (
+        <span key={k} className="muted" style={{ fontSize: 12, marginRight: 12, display: "inline-block" }}>
+          <span style={{ color: "var(--text)" }}>{k}:</span>{" "}
+          <span className="mono">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
 
 export function AuditTimeline({ metricCode }: { metricCode: string }) {
   const [items, setItems] = useState<AuditEntry[]>([]);
@@ -63,19 +79,35 @@ export function AuditTimeline({ metricCode }: { metricCode: string }) {
         children: (
           <div>
             <Typography.Text strong>
-              <Tag color={ACTION_COLOR[it.action] ?? "default"}>{it.action}</Tag>
-              {it.entity_type}
+              {/* 优先展示后端 enrich 的中文描述；缺省回退英文 action */}
+              {it.action_desc ?? it.action}
+              <Tag color={ACTION_COLOR[it.action] ?? "default"} style={{ marginLeft: 8 }}>
+                {it.action}
+              </Tag>
             </Typography.Text>
             <div className="muted" style={{ fontSize: 12 }}>
+              <span>{it.entity_type}</span>
+              <span> · </span>
               <span className="mono">{it.entity_id}</span>
-              <span> · 操作人 #{it.actor_id}</span>
+              <span> · 操作人 {it.actor_display ?? `#${it.actor_id}`}</span>
               <span> · {it.created_at}</span>
               {it.trace_id && <span> · trace <span className="mono">{it.trace_id.slice(0, 8)}</span></span>}
             </div>
             {it.detail_json && Object.keys(it.detail_json).length > 0 && (
-              <pre style={{ background: "var(--paper)", padding: 6, borderRadius: 4, fontSize: 12, margin: "4px 0 0", overflow: "auto" }}>
-                {JSON.stringify(it.detail_json)}
-              </pre>
+              <Collapse
+                ghost
+                size="small"
+                style={{ marginTop: 4 }}
+                items={[
+                  {
+                    key: "detail",
+                    label: "查看详情",
+                    children: (
+                      <DetailSummary detail={it.detail_json} />
+                    ),
+                  },
+                ]}
+              />
             )}
           </div>
         ),

@@ -749,6 +749,10 @@ export interface AuditEntry {
   pii_access: boolean;
   archived: boolean;
   created_at: string;
+  /** 后端 enrich：站在用户角度的中文描述（如「发布了指标定义（版本=v2）」） */
+  action_desc?: string;
+  /** 后端 enrich：操作人显示名（联查 user，回退「用户 #id」） */
+  actor_display?: string;
 }
 
 // ============================================================================
@@ -763,6 +767,15 @@ export type SourceType =
   | "clickhouse"
   | "kafka"
   | "starrocks";
+
+export interface SourceTypeInfo {
+  source_type: string;
+  label: string;
+  default_port: number;
+  supports_database: boolean;
+  supports_schema: boolean;
+  description: string;
+}
 
 export interface DataSource {
   source_id: string;
@@ -781,12 +794,21 @@ export interface DataSource {
 }
 
 export interface DataSourceCreateRequest {
-  source_id: string;
+  /** 不传时由系统按 类型_库|域 自动生成 */
+  source_id?: string | null;
   name: string;
   source_type: SourceType;
   connection_config: Record<string, unknown>;
   domain: string;
   cluster_id?: string | null;
+}
+
+export interface TestConnectionResult {
+  ok: boolean;
+  source_type: string;
+  latency_ms: number | null;
+  error: string | null;
+  detail: Record<string, unknown> | null;
 }
 
 export interface DBCatalog {
