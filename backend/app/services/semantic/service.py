@@ -700,7 +700,7 @@ class MetricService(BaseService):
             mode="standard",
             target_version=request.version,
         )
-        return await self.approve_metric(metric_code, approve_req, actor_id)
+        return await self.approve_metric(metric_code, approve_req, actor_id, role)
 
     async def submit_review(
         self, metric_code: str, actor_id: int, role: str
@@ -853,17 +853,26 @@ class MetricService(BaseService):
         return updated
 
     async def approve_metric(
-        self, metric_code: str, request: MetricApproveRequest, actor_id: int
+        self,
+        metric_code: str,
+        request: MetricApproveRequest,
+        actor_id: int,
+        role: str | None = None,
     ) -> Metric:
         """审核通过指标（REVIEW → PUBLISHED/EXPERIMENTAL，对齐 FR-004）。
 
         含 PII 门禁 + 依赖校验 + 状态机校验。
         metric.status 更新与 version.status 转正在同一事务中原子执行（对齐 FR-042）。
 
+        自审豁免：approve/reject 端点仅 platform_admin/domain_admin 可调用，管理员拥有
+        最终审核权，允许审核自己提交的指标（小团队/单管理员场景的兜底）；
+        普通角色传 role 后仍严格禁止自审。role 缺省（None）时按严格模式处理。
+
         Args:
             metric_code: 指标编码。
             request: 审核请求（含 mode/gray_tenant_ids/target_version）。
             actor_id: 操作人 ID。
+            role: 操作人角色（platform_admin/domain_admin 豁免自审禁止）。
 
         Returns:
             审核通过后的指标。
@@ -871,12 +880,16 @@ class MetricService(BaseService):
         Raises:
             NotFoundError: 指标不存在。
             ConflictError: 非法状态跃迁。
-            BusinessError: PII 未过合规审核 / 依赖校验失败 / 环检测失败。
+            BusinessError: PII 未过合规审核 / 依赖校验失败 / 环检测失败 / 非管理员自审。
         """
         metric = await self.get_metric(metric_code)
 
-        # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人
-        if metric.submitted_by is not None and metric.submitted_by == actor_id:
+        # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人；管理员豁免
+        if (
+            role not in ("platform_admin", "domain_admin")
+            and metric.submitted_by is not None
+            and metric.submitted_by == actor_id
+        ):
             raise BusinessError(
                 "提交人与审核人不得为同一人（禁止自审）",
                 error_code="SELF_REVIEW_BLOCKED",
@@ -977,7 +990,11 @@ class MetricService(BaseService):
         return updated
 
     async def reject_metric(
-        self, metric_code: str, request: MetricRejectRequest, actor_id: int
+        self,
+        metric_code: str,
+        request: MetricRejectRequest,
+        actor_id: int,
+        role: str | None = None,
     ) -> Metric:
         """审核驳回指标（REVIEW → DRAFT，对齐 FR-005）。
 
@@ -985,6 +1002,7 @@ class MetricService(BaseService):
             metric_code: 指标编码。
             request: 驳回请求（含 reason）。
             actor_id: 操作人 ID。
+            role: 操作人角色（platform_admin/domain_admin 豁免自审禁止，同 approve_metric）。
 
         Returns:
             驳回后的指标。
@@ -992,11 +1010,16 @@ class MetricService(BaseService):
         Raises:
             NotFoundError: 指标不存在。
             ConflictError: 非法状态跃迁。
+            BusinessError: 非管理员自审。
         """
         metric = await self.get_metric(metric_code)
 
-        # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人
-        if metric.submitted_by is not None and metric.submitted_by == actor_id:
+        # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人；管理员豁免
+        if (
+            role not in ("platform_admin", "domain_admin")
+            and metric.submitted_by is not None
+            and metric.submitted_by == actor_id
+        ):
             raise BusinessError(
                 "提交人与审核人不得为同一人（禁止自审）",
                 error_code="SELF_REVIEW_BLOCKED",
@@ -1918,8 +1941,9 @@ class MetricService(BaseService):
         Raises:
             NotFoundError: 指标不存在。
         """
-        # 先查缓存
-        cached = await self._cache.get(f"guide:{metric_code}")
+        # 先查缓存（须用 get_guide 读 metric:guide: 命名空间，与下方 set_guide 对称；
+        # 误用 get() 会构造 metric:def:guide:{code}:v0 键，与写入键永不相交 → 缓存恒 miss）
+        cached = await self._cache.get_guide(metric_code)
         if cached is not None:
             return cached
 

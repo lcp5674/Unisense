@@ -240,7 +240,9 @@ async def publish_metric(
         mode="standard",
         target_version=request.version,
     )
-    metric = await service.approve_metric(metric_code, approve_req, actor_id=user.id)
+    metric = await service.approve_metric(
+        metric_code, approve_req, actor_id=user.id, role=user.role
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -347,7 +349,9 @@ async def approve_metric(
 ) -> ApiResponse[MetricResponse]:
     """REVIEW → PUBLISHED(standard) / EXPERIMENTAL(experimental)。含 PII 门禁 + 依赖校验。"""
     service = MetricService(db)
-    metric = await service.approve_metric(metric_code, request, actor_id=user.id)
+    metric = await service.approve_metric(
+        metric_code, request, actor_id=user.id, role=user.role
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -381,7 +385,9 @@ async def reject_metric(
 ) -> ApiResponse[MetricResponse]:
     """REVIEW → DRAFT，驳回审核。须填驳回原因，通知 Owner。"""
     service = MetricService(db)
-    metric = await service.reject_metric(metric_code, request, actor_id=user.id)
+    metric = await service.reject_metric(
+        metric_code, request, actor_id=user.id, role=user.role
+    )
     await write_audit(
         db,
         actor_id=user.id,

@@ -12,14 +12,19 @@ import pytest
 from tests.conftest import make_create_payload, make_metric
 
 from app.core.exceptions import (
+    AuthError,
     BusinessError,
     ConflictError,
     NotFoundError,
 )
 from app.services.semantic.schemas import (
+    MetricApproveRequest,
     MetricCreateRequest,
+    MetricEmergencyPublishRequest,
     MetricListParams,
     MetricPublishRequest,
+    MetricRejectRequest,
+    MetricSubmitRequest,
     MetricUpdateRequest,
 )
 from app.services.semantic.service import MetricService
@@ -455,3 +460,712 @@ async def test_create_metric_explicit_code_still_validated():
 
     with pytest.raises(ValueError):
         MetricCreateRequest(**make_create_payload(metric_code="bad_code"))
+
+
+# ---- approve/reject 自审豁免（管理员可审核自己提交的指标，普通角色仍禁止）----
+
+
+def _svc_approve_ready(svc, repo, *, submitted_by: int = 1, status: str = "REVIEW"):
+    """准备 approve/reject 所需的 mock 环境，返回指标。"""
+    metric = make_metric(status=status, submitted_by=submitted_by, owner_id=2)
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=MagicMock(id=1, version=1))
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_published = AsyncMock(return_value=None)
+    svc._cache.invalidate = AsyncMock(return_value=None)
+    svc._publish_event = AsyncMock(return_value=None)
+    return metric
+
+
+async def test_approve_metric_admin_can_self_review():
+    """platform_admin 可审核自己提交的指标（提交人==审核人）。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1)
+
+    result = await svc.approve_metric(
+        "sales_gmv_daily",
+        MetricApproveRequest(mode="standard", target_version=1),
+        actor_id=1,
+        role="platform_admin",
+    )
+
+    assert result.status == "PUBLISHED"
+    repo.update_with_optimistic_lock.assert_awaited_once()
+
+
+async def test_approve_metric_domain_admin_can_self_review():
+    """domain_admin 同样豁免自审。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1)
+
+    result = await svc.approve_metric(
+        "sales_gmv_daily",
+        MetricApproveRequest(mode="standard", target_version=1),
+        actor_id=1,
+        role="domain_admin",
+    )
+
+    assert result.status == "PUBLISHED"
+
+
+async def test_approve_metric_non_admin_self_review_blocked():
+    """普通角色（reviewer）自审仍被禁止。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1)
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily",
+            MetricApproveRequest(mode="standard", target_version=1),
+            actor_id=1,
+            role="reviewer",
+        )
+    assert exc.value.error_code == "SELF_REVIEW_BLOCKED"
+    repo.update_with_optimistic_lock.assert_not_awaited()
+
+
+async def test_approve_metric_no_role_self_review_blocked():
+    """role 缺省（None）按严格模式处理——向后兼容不传 role 的调用方。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1)
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily",
+            MetricApproveRequest(mode="standard", target_version=1),
+            actor_id=1,
+        )
+    assert exc.value.error_code == "SELF_REVIEW_BLOCKED"
+
+
+async def test_approve_metric_different_actor_still_allowed():
+    """提交人与审核人不同时，任何角色均可审核（不触发自审分支）。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1)
+
+    result = await svc.approve_metric(
+        "sales_gmv_daily",
+        MetricApproveRequest(mode="standard", target_version=1),
+        actor_id=99,
+        role="reviewer",
+    )
+
+    assert result.status == "PUBLISHED"
+
+
+async def test_reject_metric_admin_can_self_review():
+    """platform_admin 可驳回自己提交的指标。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="DRAFT"))
+
+    result = await svc.reject_metric(
+        "sales_gmv_daily",
+        MetricRejectRequest(reason="口径需调整"),
+        actor_id=1,
+        role="platform_admin",
+    )
+
+    assert result.status == "DRAFT"
+
+
+async def test_reject_metric_non_admin_self_review_blocked():
+    """普通角色自驳回仍被禁止。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1)
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.reject_metric(
+            "sales_gmv_daily",
+            MetricRejectRequest(reason="口径需调整"),
+            actor_id=1,
+            role="reviewer",
+        )
+    assert exc.value.error_code == "SELF_REVIEW_BLOCKED"
+
+
+# ---- 补充覆盖率：辅助函数 / 状态流转 / 版本确认 / 灰度 / 健康 / 消费指南 ----
+
+
+async def test_redact_definition_recurses():
+    """redact_definition 保留键结构、叶子值全部脱敏为 ***。"""
+    from app.services.semantic.service import redact_definition
+
+    out = redact_definition(
+        {"expr": "SUM(x)", "nested": {"a": 1}, "arr": ["x", "y"], "flag": True}
+    )
+    assert out == {"expr": "***", "nested": {"a": "***"}, "arr": ["***", "***"], "flag": "***"}
+
+
+async def test_normalize_pii_syncs_dual_source():
+    """_normalize_pii 双源一致：pii_flag 权威，回写/移除 definition.pii。"""
+    from app.services.semantic.service import _normalize_pii
+
+    # pii_flag=True 且 definition 无 pii → 回填
+    d1, f1 = _normalize_pii({"expr": "x"}, True)
+    assert d1["pii"] is True and f1 is True
+    # definition 显式 pii=False 覆盖 flag
+    d2, f2 = _normalize_pii({"pii": False}, True)
+    assert "pii" not in d2 and f2 is False
+
+
+async def test_submit_review_success():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+    updated = make_metric(status="REVIEW")
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+
+    result = await svc.submit_review("sales_gmv_daily", actor_id=1, role="metric_owner")
+    assert result.status == "REVIEW"
+    assert repo.update_with_optimistic_lock.call_args.kwargs["submitted_by"] == 1
+
+
+async def test_submit_review_invalid_transition():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", owner_id=1))
+    with pytest.raises(ConflictError):
+        await svc.submit_review("sales_gmv_daily", actor_id=1, role="metric_owner")
+
+
+async def test_submit_metric_publishes_event():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="REVIEW"))
+    svc._publish_event = AsyncMock()
+
+    await svc.submit_metric(
+        "sales_gmv_daily",
+        MetricSubmitRequest(change_reason="提交审核"),
+        actor_id=1,
+    )
+    svc._publish_event.assert_awaited_once()
+    assert svc._publish_event.call_args.args[0] == "metric.submitted"
+
+
+async def test_review_metric_approved_publishes():
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="REVIEW", owner_id=1, pii_flag=False)
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_published = AsyncMock()
+
+    result = await svc.review_metric(
+        "sales_gmv_daily", approved=True, actor_id=2, role="domain_admin", change_reason="通过"
+    )
+    assert result.status == "PUBLISHED"
+
+
+async def test_review_metric_self_review_blocked():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="REVIEW", owner_id=1))
+    with pytest.raises(BusinessError) as exc:
+        await svc.review_metric(
+            "sales_gmv_daily", approved=True, actor_id=1, role="domain_admin", change_reason="x"
+        )
+    assert exc.value.error_code == "SELF_REVIEW_BLOCKED"
+
+
+async def test_review_metric_reject_back_to_draft():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="REVIEW", owner_id=1))
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="DRAFT"))
+
+    result = await svc.review_metric(
+        "sales_gmv_daily", approved=False, actor_id=2, role="domain_admin", change_reason="驳回"
+    )
+    assert result.status == "DRAFT"
+
+
+async def test_approve_metric_standard():
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="REVIEW", owner_id=1, pii_flag=False)
+    metric.submitted_by = 1
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_published = AsyncMock()
+    svc._publish_event = AsyncMock()
+
+    result = await svc.approve_metric(
+        "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+    )
+    assert result.status == "PUBLISHED"
+    svc._publish_event.assert_awaited_once()
+
+
+async def test_approve_metric_experimental_mode():
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="REVIEW", owner_id=1, pii_flag=False)
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="EXPERIMENTAL"))
+    repo.mark_version_published = AsyncMock()
+
+    result = await svc.approve_metric(
+        "sales_gmv_daily",
+        MetricApproveRequest(mode="experimental", gray_tenant_ids=[7]),
+        actor_id=1,
+        role="platform_admin",
+    )
+    assert result.status == "EXPERIMENTAL"
+    assert repo.update_with_optimistic_lock.call_args.kwargs["gray_tenant_ids"] == [7]
+
+
+async def test_approve_metric_self_review_blocked():
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="REVIEW", owner_id=1)
+    metric.submitted_by = 1
+    repo.get_by_code = AsyncMock(return_value=metric)
+    with pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="metric_owner"
+        )
+    assert exc.value.error_code == "SELF_REVIEW_BLOCKED"
+
+
+async def test_approve_metric_pii_blocked_without_compliance():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="REVIEW", owner_id=1, pii_flag=True, compliance_reviewed=False
+        )
+    )
+    with pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+        )
+    assert exc.value.error_code == "COMPLIANCE_BLOCKED"
+
+
+async def test_reject_metric_success():
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="REVIEW", owner_id=1)
+    metric.submitted_by = 1
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="DRAFT"))
+    svc._publish_event = AsyncMock()
+
+    result = await svc.reject_metric(
+        "sales_gmv_daily", MetricRejectRequest(reason="口径不符"), actor_id=1, role="platform_admin"
+    )
+    assert result.status == "DRAFT"
+    assert svc._publish_event.call_args.args[0] == "metric.rejected"
+
+
+async def test_promote_metric_success():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="EXPERIMENTAL", owner_id=1))
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_published = AsyncMock()
+    svc._publish_event = AsyncMock()
+
+    result = await svc.promote_metric("sales_gmv_daily", actor_id=1)
+    assert result.status == "PUBLISHED"
+    assert svc._publish_event.call_args.args[0] == "metric.promoted"
+
+
+async def test_rollback_metric_success():
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="EXPERIMENTAL", owner_id=1, version=2, effective_version=2)
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.list_versions = AsyncMock(return_value=[MagicMock(version=1, status="PUBLISHED")])
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_archived = AsyncMock()
+    svc._db.execute = AsyncMock()
+    svc._publish_event = AsyncMock()
+
+    result = await svc.rollback_metric("sales_gmv_daily", actor_id=1)
+    assert result.status == "PUBLISHED"
+    assert svc._publish_event.call_args.args[0] == "metric.rolled_back"
+
+
+async def test_delete_metric_success_and_reject():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+    repo.soft_delete = AsyncMock()
+    result = await svc.delete_metric("sales_gmv_daily", actor_id=1)
+    assert result.status == "DRAFT"
+    repo.soft_delete.assert_awaited_once()
+
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", owner_id=1))
+    with pytest.raises(BusinessError):
+        await svc.delete_metric("sales_gmv_daily", actor_id=1)
+
+
+async def test_get_versions():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.list_versions = AsyncMock(return_value=[MagicMock(version=1)])
+    versions = await svc.get_versions("sales_gmv_daily")
+    assert len(versions) == 1
+
+
+async def test_confirm_version_success():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[MagicMock(id=1, consumer_id=9, status="PENDING")]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric())
+    repo.mark_version_published = AsyncMock()
+    svc._publish_event = AsyncMock()
+
+    result = await svc.confirm_version("sales_gmv_daily", version=1, consumer_id=9)
+    assert result is not None
+
+
+async def test_reject_version_success():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[MagicMock(id=1, consumer_id=9, status="PENDING")]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    svc._publish_event = AsyncMock()
+
+    await svc.reject_version("sales_gmv_daily", version=1, consumer_id=9, reason="口径变更")
+    assert repo.update_confirmation_status.await_count == 1
+
+
+async def test_extend_version_success():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[
+            MagicMock(
+                id=1, consumer_id=9, status="PENDING", extension_count=0, deadline=None
+            )
+        ]
+    )
+    repo.extend_confirmation_deadline = AsyncMock(return_value=MagicMock(version=1))
+
+    result = await svc.extend_version("sales_gmv_daily", version=1)
+    assert result is not None
+
+
+async def test_assert_owner_or_admin_rules():
+    svc, _ = _svc_with_repo()
+    metric = make_metric(owner_id=1, backup_owner_id=2)
+
+    # admin 放行
+    svc._assert_owner_or_admin(metric, actor_id=99, role="platform_admin")
+    # owner 本人放行
+    svc._assert_owner_or_admin(metric, actor_id=1, role="metric_owner")
+    # backup owner 放行
+    svc._assert_owner_or_admin(metric, actor_id=2, role="metric_owner")
+    # 越权拒绝
+    with pytest.raises(AuthError):
+        svc._assert_owner_or_admin(metric, actor_id=3, role="metric_owner")
+    # 无权限角色拒绝
+    with pytest.raises(AuthError):
+        svc._assert_owner_or_admin(metric, actor_id=1, role="viewer")
+
+
+async def test_publish_pii_blocked():
+    svc, repo = _svc_with_repo()
+    metric = make_metric(pii_flag=True, compliance_reviewed=False)
+    with pytest.raises(BusinessError) as exc:
+        await svc._publish(metric, 1, actor_id=1)
+    assert exc.value.error_code == "COMPLIANCE_BLOCKED"
+
+
+async def test_publish_version_not_found():
+    svc, repo = _svc_with_repo()
+    repo.get_version = AsyncMock(return_value=None)
+    metric = make_metric(pii_flag=False)
+    with pytest.raises(NotFoundError):
+        await svc._publish(metric, 99, actor_id=1)
+
+
+async def test_compute_diff_detects_changes():
+    svc, _ = _svc_with_repo()
+    diff = svc._compute_diff({"a": 1, "b": 2}, {"a": 1, "b": 3, "c": 4})
+    assert "b" in diff
+    assert diff["b"]["before"] == 2
+    assert diff["b"]["after"] == 3
+
+
+async def test_get_metric_health_critical_emits_event(monkeypatch):
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+
+    class _FakeHealth:
+        level = "CRITICAL"
+        score = 30
+        missing_dimensions = ["region"]
+
+    class _FakeScorer:
+        async def calculate(self, metric_id):
+            return _FakeHealth()
+
+    monkeypatch.setattr(
+        "app.services.semantic.health_scorer.HealthScorer", lambda db: _FakeScorer()
+    )
+    svc._publish_event = AsyncMock()
+    health = await svc.get_metric_health("sales_gmv_daily")
+    assert health.level == "CRITICAL"
+    assert svc._publish_event.call_args.args[0] == "metric.health_critical"
+
+
+async def test_get_consumption_guide_generates_and_caches():
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get_guide = AsyncMock(return_value=None)
+    svc._cache.set_guide = AsyncMock()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+
+    guide = await svc.get_consumption_guide("sales_gmv_daily")
+    assert guide["metric_code"] == "sales_gmv_daily"
+    assert "recommended_usage" in guide
+    svc._cache.set_guide.assert_awaited_once()
+
+
+async def test_get_consumption_guide_cache_hit():
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get_guide = AsyncMock(return_value={"metric_code": "cached"})
+    guide = await svc.get_consumption_guide("sales_gmv_daily")
+    assert guide == {"metric_code": "cached"}
+    repo.get_by_code.assert_not_called()
+
+
+async def test_validate_domain_active_degraded(monkeypatch):
+    """subject_domain 未配置（NotFoundError）→ 放行，不阻断创建。"""
+    svc, _ = _svc_with_repo()
+
+    class _Svc:
+        async def validate_domain_active(self, code):
+            raise NotFoundError("域未配置")
+
+    monkeypatch.setattr(
+        "app.services.subject_domain.service.SubjectDomainService", lambda db: _Svc()
+    )
+    # 不应抛异常
+    await svc._validate_domain_active("sales")
+
+
+async def test_get_domain_defaults_error_returns_empty(monkeypatch):
+    svc, _ = _svc_with_repo()
+
+    class _Boom:
+        async def get_defaults(self, code):
+            raise RuntimeError("DB down")
+
+    monkeypatch.setattr(
+        "app.services.subject_domain.service.SubjectDomainService", lambda db: _Boom()
+    )
+    assert await svc._get_domain_defaults("sales") == {}
+
+
+async def test_validate_dict_fields_disabled_value_blocked(monkeypatch):
+    """字典项已配置但停用 → BusinessError 拦截。"""
+    svc, _ = _svc_with_repo()
+    req = MetricCreateRequest(**make_create_payload())
+
+    class _DictSvc:
+        async def validate_dict_value(self, dict_type, code):
+            raise BusinessError("字典项已停用", error_code="DICT_DISABLED")
+
+    monkeypatch.setattr(
+        "app.services.system_dict.service.SystemDictService", lambda db: _DictSvc()
+    )
+    with pytest.raises(BusinessError):
+        await svc._validate_dict_fields(req)
+
+
+async def test_validate_dict_fields_not_found_degrades(monkeypatch):
+    """字典项未配置（NotFoundError）→ 放行。"""
+    svc, _ = _svc_with_repo()
+    req = MetricCreateRequest(**make_create_payload())
+
+    class _DictSvc:
+        async def validate_dict_value(self, dict_type, code):
+            raise NotFoundError("未配置")
+
+    monkeypatch.setattr(
+        "app.services.system_dict.service.SystemDictService", lambda db: _DictSvc()
+    )
+    await svc._validate_dict_fields(req)
+
+
+async def test_generate_metric_code_with_source_table(monkeypatch):
+    """自动生成编码：源表+度量+周期齐全 → 4 段式。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+
+    async def _gen(base, exists):
+        return base
+
+    monkeypatch.setattr("app.core.codegen.generate_unique_code", _gen)
+    monkeypatch.setattr(
+        "app.services.semantic.auto_fill.extract_biz_object", lambda t: "order"
+    )
+    monkeypatch.setattr(
+        "app.services.semantic.auto_fill.extract_measure", lambda m: "amount"
+    )
+    req = MetricCreateRequest(
+        **make_create_payload(metric_code=None, source_table="dwd_order", period="day")
+    )
+    code = await svc._generate_metric_code(req)
+    assert code == "sales_order_amount_day"
+
+
+# ---- 补充覆盖率：紧急发布 / 公共读路径 / 合规官可达性 ----
+
+
+async def test_get_metric_public_from_db_and_cache():
+    """get_metric_public：DB 回源 + 缓存命中双路径。"""
+    from app.services.semantic.schemas import MetricResponse
+
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+
+    # DB 回源
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    resp = await svc.get_metric_public("sales_gmv_daily")
+    assert isinstance(resp, MetricResponse)
+    svc._cache.set.assert_awaited_once()
+
+    # 缓存命中（完整响应 dict）
+    full = MetricResponse.model_validate(make_metric()).model_dump()
+    svc._cache.get = AsyncMock(return_value=full)
+    resp2 = await svc.get_metric_public("sales_gmv_daily")
+    assert resp2.metric_code == "sales_gmv_daily"
+
+
+async def test_get_metric_public_not_found():
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    repo.get_by_code = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.get_metric_public("missing")
+
+
+async def test_get_metric_not_found():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.get_metric("missing")
+
+
+async def test_emergency_publish_success():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", pii_flag=False))
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_published = AsyncMock()
+    svc._publish_event = AsyncMock()
+    svc._write_audit = AsyncMock()
+
+    result = await svc.emergency_publish_metric(
+        "sales_gmv_daily",
+        MetricEmergencyPublishRequest(reason="生产系统故障需立即紧急发布处理", target_version=1),
+        actor_id=1,
+        role="domain_admin",
+    )
+    assert result.status == "PUBLISHED"
+    kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert kwargs["emergency_publish"] is True
+    assert kwargs["emergency_reason"] == "生产系统故障需立即紧急发布处理"
+    svc._write_audit.assert_awaited_once()
+
+
+async def test_emergency_publish_forbidden_role():
+    svc, repo = _svc_with_repo()
+    with pytest.raises(Exception):
+        await svc.emergency_publish_metric(
+            "sales_gmv_daily",
+            MetricEmergencyPublishRequest(reason="生产系统故障需立即紧急发布处理"),
+            actor_id=1,
+            role="metric_owner",
+        )
+
+
+async def test_emergency_publish_pii_blocked_with_officer(monkeypatch):
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", pii_flag=True, compliance_reviewed=False)
+    )
+
+    async def _officer_exists(domain):
+        return True
+
+    monkeypatch.setattr(svc, "_has_active_compliance_officer", _officer_exists)
+    with pytest.raises(BusinessError) as exc:
+        await svc.emergency_publish_metric(
+            "sales_gmv_daily",
+            MetricEmergencyPublishRequest(reason="生产系统故障需立即紧急发布处理"),
+            actor_id=1,
+            role="domain_admin",
+        )
+    assert exc.value.error_code == "COMPLIANCE_BLOCKED"
+
+
+async def test_emergency_publish_pii_internal_downgrade(monkeypatch):
+    """合规官不可达：仅 INTERNAL 分级可降级发布。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="DRAFT", pii_flag=True, compliance_reviewed=False, serving_mode="INTERNAL"
+        )
+    )
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_published = AsyncMock()
+    svc._publish_event = AsyncMock()
+    svc._write_audit = AsyncMock()
+
+    async def _no_officer(domain):
+        return False
+
+    monkeypatch.setattr(svc, "_has_active_compliance_officer", _no_officer)
+    result = await svc.emergency_publish_metric(
+        "sales_gmv_daily",
+        MetricEmergencyPublishRequest(reason="生产系统故障需立即紧急发布处理"),
+        actor_id=1,
+        role="domain_admin",
+    )
+    assert result.status == "PUBLISHED"
+
+
+async def test_emergency_publish_pii_non_internal_blocked(monkeypatch):
+    """合规官不可达且非 INTERNAL 分级 → 拦截。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="DRAFT", pii_flag=True, compliance_reviewed=False, serving_mode="BATCH_ONLY"
+        )
+    )
+
+    async def _no_officer(domain):
+        return False
+
+    monkeypatch.setattr(svc, "_has_active_compliance_officer", _no_officer)
+    with pytest.raises(BusinessError) as exc:
+        await svc.emergency_publish_metric(
+            "sales_gmv_daily",
+            MetricEmergencyPublishRequest(reason="生产系统故障需立即紧急发布处理"),
+            actor_id=1,
+            role="domain_admin",
+        )
+    assert exc.value.error_code == "COMPLIANCE_UNREACHABLE_DOWNGRADE"
+
+
+async def test_has_active_compliance_officer():
+    """_has_active_compliance_officer：有活跃合规官返回 True，否则 False。"""
+    svc, _ = _svc_with_repo()
+    svc._db.execute = AsyncMock()
+
+    # 无活跃合规官 → False
+    svc._db.execute.return_value = MagicMock()
+    svc._db.execute.return_value.scalar.return_value = 0
+    assert await svc._has_active_compliance_officer("sales") is False
+
+    # 有活跃合规官 → True
+    svc._db.execute.return_value.scalar.return_value = 1
+    assert await svc._has_active_compliance_officer("sales") is True
