@@ -43,9 +43,7 @@ class SchemaDriftLog(Base, BaseModel):
         nullable=False,
         comment="数据源标识",
     )
-    entity_name: Mapped[str] = mapped_column(
-        String(256), nullable=False, comment="实体名"
-    )
+    entity_name: Mapped[str] = mapped_column(String(256), nullable=False, comment="实体名")
     change_type: Mapped[str] = mapped_column(
         Enum(
             "ADD_COLUMN",
@@ -72,9 +70,7 @@ class SchemaDriftLog(Base, BaseModel):
     diff_json: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, nullable=True, comment="差异详情"
     )
-    detected_at: Mapped[datetime] = mapped_column(
-        DATETIME, nullable=False, comment="检测时间"
-    )
+    detected_at: Mapped[datetime] = mapped_column(DATETIME, nullable=False, comment="检测时间")
 
     __table_args__ = (
         Index("idx_drift_source_entity", "source_id", "entity_name"),

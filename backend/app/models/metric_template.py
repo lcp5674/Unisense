@@ -66,9 +66,7 @@ class MetricTemplate(Base, BaseModel):
         nullable=True,
         comment="指标类型预设",
     )
-    granularity: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, comment="粒度预设"
-    )
+    granularity: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="粒度预设")
     unit: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="单位预设")
     aggregation: Mapped[str | None] = mapped_column(
         String(32), nullable=True, comment="聚合方式预设"
@@ -79,15 +77,11 @@ class MetricTemplate(Base, BaseModel):
     freshness: Mapped[str | None] = mapped_column(
         String(32), nullable=True, comment="数据新鲜度预设"
     )
-    dw_layer: Mapped[str | None] = mapped_column(
-        String(32), nullable=True, comment="数仓分层预设"
-    )
+    dw_layer: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="数仓分层预设")
     serving_mode: Mapped[str | None] = mapped_column(
         String(32), nullable=True, comment="服务模式预设"
     )
-    additivity: Mapped[str | None] = mapped_column(
-        String(32), nullable=True, comment="可加性预设"
-    )
+    additivity: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="可加性预设")
     metric_tier: Mapped[str | None] = mapped_column(
         String(8), nullable=True, comment="指标分级预设"
     )
@@ -97,12 +91,8 @@ class MetricTemplate(Base, BaseModel):
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, comment="是否启用"
     )
-    created_by: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, comment="创建人 ID"
-    )
-    published_at: Mapped[datetime | None] = mapped_column(
-        nullable=True, comment="发布时间"
-    )
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="创建人 ID")
+    published_at: Mapped[datetime | None] = mapped_column(nullable=True, comment="发布时间")
 
     __table_args__ = (
         Index("idx_template_domain", "domain"),

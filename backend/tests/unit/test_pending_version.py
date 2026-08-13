@@ -53,8 +53,11 @@ def sample_version() -> MagicMock:
 
 class TestCreatePending:
     async def test_create_pending_sets_deadline(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
-        sample_metric: MagicMock, sample_version: MagicMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
+        sample_metric: MagicMock,
+        sample_version: MagicMock,
     ) -> None:
         consumer_ids = [10, 20, 30]
         mock_repo.save_pending_confirmation = AsyncMock()
@@ -77,7 +80,9 @@ class TestCreatePending:
 
 class TestConfirm:
     async def test_confirm_waits_when_partial(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         # 3个消费方，仅1个确认
         confirmations = [
@@ -94,7 +99,9 @@ class TestConfirm:
         mock_repo.update_confirmation_status.assert_called_once()
 
     async def test_confirm_switches_current_when_all_confirmed(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         confirmations = [
             MagicMock(consumer_id=10, status="CONFIRMED"),
@@ -109,7 +116,9 @@ class TestConfirm:
         assert result == PendingAction.SWITCH_CURRENT
 
     async def test_confirm_no_pending_record(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         mock_repo.get_pending_confirmations = AsyncMock(return_value=[])
 
@@ -119,7 +128,9 @@ class TestConfirm:
 
 class TestReject:
     async def test_reject_cancels_pending(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         confirmations = [
             MagicMock(consumer_id=10, status="CONFIRMED"),
@@ -133,7 +144,9 @@ class TestReject:
         assert result == PendingAction.CANCEL
 
     async def test_reject_no_pending_record(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         mock_repo.get_pending_confirmations = AsyncMock(return_value=[])
 
@@ -143,14 +156,18 @@ class TestReject:
 
 class TestExtend:
     async def test_extend_adds_7_days(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         now = datetime.now(UTC)
         original_deadline = now + timedelta(days=14)
         confirmations = [
             MagicMock(
-                consumer_id=10, status="PENDING",
-                deadline=original_deadline, extension_count=0,
+                consumer_id=10,
+                status="PENDING",
+                deadline=original_deadline,
+                extension_count=0,
             ),
         ]
         mock_repo.get_pending_confirmations = AsyncMock(return_value=confirmations)
@@ -166,12 +183,15 @@ class TestExtend:
         assert abs((new_deadline - expected_deadline).total_seconds()) < 5
 
     async def test_extend_rejects_second_extension(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         now = datetime.now(UTC)
         confirmations = [
             MagicMock(
-                consumer_id=10, status="PENDING",
+                consumer_id=10,
+                status="PENDING",
                 deadline=now + timedelta(days=21),
                 extension_count=1,  # 已延期1次
             ),
@@ -182,7 +202,9 @@ class TestExtend:
             await manager.extend(metric_id=1, version=3)
 
     async def test_extend_no_pending_record(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         mock_repo.get_pending_confirmations = AsyncMock(return_value=[])
 
@@ -192,21 +214,27 @@ class TestExtend:
 
 class TestCheckTimeouts:
     async def test_check_timeouts_auto_accepts(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         # 已过deadline的确认记录（实现读取 get_timeout_pending_confirmations）
         expired = MagicMock(
-            id=101, metric_id=1, version=3, consumer_id=10,
+            id=101,
+            metric_id=1,
+            version=3,
+            consumer_id=10,
             status="PENDING",
             deadline=datetime.now(UTC) - timedelta(days=1),
         )
-        mock_repo.get_timeout_pending_confirmations = AsyncMock(
-            return_value=[expired]
-        )
+        mock_repo.get_timeout_pending_confirmations = AsyncMock(return_value=[expired])
         mock_repo.update_confirmation_status = AsyncMock()
         # 超时接受后再次查询，记录状态应为 TIMEOUT_ACCEPTED
         accepted = MagicMock(
-            id=101, metric_id=1, version=3, consumer_id=10,
+            id=101,
+            metric_id=1,
+            version=3,
+            consumer_id=10,
             status="TIMEOUT_ACCEPTED",
         )
         mock_repo.get_pending_confirmations = AsyncMock(return_value=[accepted])
@@ -216,7 +244,9 @@ class TestCheckTimeouts:
         assert 1 in result
 
     async def test_check_timeouts_no_expired(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         mock_repo.get_timeout_pending_confirmations = AsyncMock(return_value=[])
 
@@ -227,12 +257,15 @@ class TestCheckTimeouts:
 
 class TestPauseOnDrift:
     async def test_pause_on_drift_notifies_owner(
-        self, manager: PendingVersionManager, mock_repo: AsyncMock,
+        self,
+        manager: PendingVersionManager,
+        mock_repo: AsyncMock,
     ) -> None:
         # pause_on_drift 应记录日志并不抛异常
         with patch("app.services.semantic.pending_version_manager.logger") as mock_logger:
             await manager.pause_on_drift(
-                metric_id=1, version=3,
+                metric_id=1,
+                version=3,
                 drift_detail={"field": "column_x", "change": "type_changed"},
             )
             # 验证告警日志已记录

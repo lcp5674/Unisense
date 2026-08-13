@@ -55,9 +55,11 @@ async def test_scheduler_triggers_source_in_window():
     repo = MagicMock()
     repo.list_scheduled_sources = AsyncMock(return_value=[src])
 
-    with patch("app.db.mysql.async_session_factory") as m_fac, patch(
-        "app.services.collector.worker.croniter", _FakeCronIter
-    ), patch("app.services.collector.worker.CollectorRepository", return_value=repo):
+    with (
+        patch("app.db.mysql.async_session_factory") as m_fac,
+        patch("app.services.collector.worker.croniter", _FakeCronIter),
+        patch("app.services.collector.worker.CollectorRepository", return_value=repo),
+    ):
         m_fac.return_value = db
         await collect_scheduler({"redis": redis})
 
@@ -92,9 +94,11 @@ async def test_scheduler_skips_source_outside_window():
     repo = MagicMock()
     repo.list_scheduled_sources = AsyncMock(return_value=[src])
 
-    with patch("app.db.mysql.async_session_factory") as m_fac, patch(
-        "app.services.collector.worker.croniter", _FarCronIter
-    ), patch("app.services.collector.worker.CollectorRepository", return_value=repo):
+    with (
+        patch("app.db.mysql.async_session_factory") as m_fac,
+        patch("app.services.collector.worker.croniter", _FarCronIter),
+        patch("app.services.collector.worker.CollectorRepository", return_value=repo),
+    ):
         m_fac.return_value = db
         await collect_scheduler({"redis": redis})
 
@@ -119,9 +123,11 @@ async def test_scheduler_ignores_bad_cron_expr():
     repo = MagicMock()
     repo.list_scheduled_sources = AsyncMock(return_value=[bad])
 
-    with patch("app.db.mysql.async_session_factory") as m_fac, patch(
-        "app.services.collector.worker.croniter", side_effect=ValueError("bad cron")
-    ), patch("app.services.collector.worker.CollectorRepository", return_value=repo):
+    with (
+        patch("app.db.mysql.async_session_factory") as m_fac,
+        patch("app.services.collector.worker.croniter", side_effect=ValueError("bad cron")),
+        patch("app.services.collector.worker.CollectorRepository", return_value=repo),
+    ):
         m_fac.return_value = db
         await collect_scheduler({"redis": redis})  # 不应抛异常
 
@@ -150,9 +156,7 @@ async def test_arq_queue_enqueue_writes_initial_status():
 async def test_arq_queue_get_returns_job_status():
     """arq 队列 get() 委托 RedisJobStore 返回任务状态（原实现无 get → 恒 404）。"""
     redis = MagicMock()
-    redis.hgetall = AsyncMock(
-        return_value={"status": "COMPLETED", "detail": '{"scanned": 3}'}
-    )
+    redis.hgetall = AsyncMock(return_value={"status": "COMPLETED", "detail": '{"scanned": 3}'})
 
     q = ArqCollectionQueue(redis=redis)
     status = await q.get("job1")

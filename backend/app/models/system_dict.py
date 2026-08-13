@@ -29,27 +29,17 @@ class SystemDict(Base, BaseModel):
 
     __tablename__ = "system_dict"
 
-    dict_type: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="字典类型"
-    )
-    code: Mapped[str] = mapped_column(
-        String(64), nullable=False, comment="字典项编码"
-    )
-    label: Mapped[str] = mapped_column(
-        String(128), nullable=False, comment="显示名"
-    )
-    sort_order: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, comment="排序序号"
-    )
+    dict_type: Mapped[str] = mapped_column(String(64), nullable=False, comment="字典类型")
+    code: Mapped[str] = mapped_column(String(64), nullable=False, comment="字典项编码")
+    label: Mapped[str] = mapped_column(String(128), nullable=False, comment="显示名")
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="排序序号")
     status: Mapped[str] = mapped_column(
         Enum("active", "inactive", name="dict_status"),
         nullable=False,
         default="active",
         comment="状态",
     )
-    description: Mapped[str | None] = mapped_column(
-        String(256), nullable=True, comment="描述"
-    )
+    description: Mapped[str | None] = mapped_column(String(256), nullable=True, comment="描述")
 
     __table_args__ = (
         Index("uk_dict_type_code", "dict_type", "code", unique=True),

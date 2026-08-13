@@ -20,19 +20,17 @@ class TestLegalTransitions:
     @pytest.mark.parametrize(
         ("from_state", "to_state"),
         [
-            ("DRAFT", "REVIEW"),                    # submit
-            ("REVIEW", "PUBLISHED"),                # approve
-            ("REVIEW", "EXPERIMENTAL"),             # approve_gray
-            ("REVIEW", "DRAFT"),                    # reject
-            ("PUBLISHED", "DEPRECATED"),            # deprecate
-            ("EXPERIMENTAL", "PUBLISHED"),          # promote
-            ("DATA_SOURCE_DROPPED", "PUBLISHED"),   # source_recovered
+            ("DRAFT", "REVIEW"),  # submit
+            ("REVIEW", "PUBLISHED"),  # approve
+            ("REVIEW", "EXPERIMENTAL"),  # approve_gray
+            ("REVIEW", "DRAFT"),  # reject
+            ("PUBLISHED", "DEPRECATED"),  # deprecate
+            ("EXPERIMENTAL", "PUBLISHED"),  # promote
+            ("DATA_SOURCE_DROPPED", "PUBLISHED"),  # source_recovered
             ("DATA_SOURCE_DROPPED", "DEPRECATED"),  # confirm_deprecated
         ],
     )
-    def test_legal_transition_returns_none(
-        self, from_state: str, to_state: str
-    ) -> None:
+    def test_legal_transition_returns_none(self, from_state: str, to_state: str) -> None:
         result = MetricStateMachine.validate_transition(from_state, to_state)
         assert result is None, f"Expected {from_state}→{to_state} to be legal, got: {result}"
 
@@ -48,19 +46,17 @@ class TestIllegalTransitions:
     @pytest.mark.parametrize(
         ("from_state", "to_state"),
         [
-            ("DRAFT", "PUBLISHED"),      # 须先 submit→approve
-            ("DRAFT", "DEPRECATED"),     # 仅 PUBLISHED 可废弃
-            ("DRAFT", "EXPERIMENTAL"),   # 须先 submit→approve 灰度
-            ("PUBLISHED", "DRAFT"),      # 已发布不可回退
-            ("PUBLISHED", "REVIEW"),     # 已发布不可回退
-            ("DEPRECATED", "PUBLISHED"), # 已废弃不可恢复
-            ("DEPRECATED", "DRAFT"),     # 已废弃不可回退
-            ("REVIEW", "DEPRECATED"),    # 仅 PUBLISHED 可废弃
+            ("DRAFT", "PUBLISHED"),  # 须先 submit→approve
+            ("DRAFT", "DEPRECATED"),  # 仅 PUBLISHED 可废弃
+            ("DRAFT", "EXPERIMENTAL"),  # 须先 submit→approve 灰度
+            ("PUBLISHED", "DRAFT"),  # 已发布不可回退
+            ("PUBLISHED", "REVIEW"),  # 已发布不可回退
+            ("DEPRECATED", "PUBLISHED"),  # 已废弃不可恢复
+            ("DEPRECATED", "DRAFT"),  # 已废弃不可回退
+            ("REVIEW", "DEPRECATED"),  # 仅 PUBLISHED 可废弃
         ],
     )
-    def test_illegal_transition_returns_message(
-        self, from_state: str, to_state: str
-    ) -> None:
+    def test_illegal_transition_returns_message(self, from_state: str, to_state: str) -> None:
         result = MetricStateMachine.validate_transition(from_state, to_state)
         assert result is not None, f"Expected {from_state}→{to_state} to be illegal"
         assert "非法状态跃迁" in result
@@ -130,9 +126,7 @@ class TestGetActionName:
             ("DATA_SOURCE_DROPPED", "DEPRECATED", "confirm_deprecated"),
         ],
     )
-    def test_valid_action_name(
-        self, from_state: str, to_state: str, expected_action: str
-    ) -> None:
+    def test_valid_action_name(self, from_state: str, to_state: str, expected_action: str) -> None:
         result = MetricStateMachine.get_action_name(from_state, to_state)
         assert result == expected_action
 

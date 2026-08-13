@@ -43,19 +43,27 @@ class SubjectDomainRepository:
         return list(result.scalars().all())
 
     async def list_children(self, parent_id: int | None) -> list[SubjectDomain]:
-        stmt = select(SubjectDomain).where(
-            SubjectDomain.deleted_at.is_(None),
-            SubjectDomain.parent_id == parent_id
-            if parent_id is not None
-            else SubjectDomain.parent_id.is_(None),
-        ).order_by(SubjectDomain.sort_order, SubjectDomain.code)
+        stmt = (
+            select(SubjectDomain)
+            .where(
+                SubjectDomain.deleted_at.is_(None),
+                SubjectDomain.parent_id == parent_id
+                if parent_id is not None
+                else SubjectDomain.parent_id.is_(None),
+            )
+            .order_by(SubjectDomain.sort_order, SubjectDomain.code)
+        )
         result = await self._db.execute(stmt)
         return list(result.scalars().all())
 
     async def get_metric_count(self, domain_code: str) -> int:
-        stmt = select(func.count()).select_from(Metric).where(
-            Metric.domain == domain_code,
-            Metric.deleted_at.is_(None),
+        stmt = (
+            select(func.count())
+            .select_from(Metric)
+            .where(
+                Metric.domain == domain_code,
+                Metric.deleted_at.is_(None),
+            )
         )
         result = await self._db.execute(stmt)
         return result.scalar() or 0
@@ -71,14 +79,19 @@ class SubjectDomainRepository:
 
     async def soft_delete(self, domain: SubjectDomain) -> None:
         from datetime import UTC, datetime
+
         domain.deleted_at = datetime.now(UTC)
         await self._db.flush()
 
     async def code_exists(self, code: str) -> bool:
         # 注意：不按 deleted_at 过滤——MySQL 唯一索引 uq_subject_domain_code 对软删记录仍生效，
         # 若只查存活记录，软删 code 会被误判为空闲，插入时触发 Duplicate entry（端到端断层 P3-1）。
-        stmt = select(func.count()).select_from(SubjectDomain).where(
-            SubjectDomain.code == code,
+        stmt = (
+            select(func.count())
+            .select_from(SubjectDomain)
+            .where(
+                SubjectDomain.code == code,
+            )
         )
         result = await self._db.execute(stmt)
         return (result.scalar() or 0) > 0
@@ -96,12 +109,16 @@ class SubjectDomainRepository:
         用 ``func.trim`` 忽略首尾空格（与前端实时检测口径一致）。
         软删记录不计入（名称无唯一约束，软删后同名可安全重建）。
         """
-        stmt = select(func.count()).select_from(SubjectDomain).where(
-            func.trim(SubjectDomain.name) == name.strip(),
-            SubjectDomain.deleted_at.is_(None),
-            SubjectDomain.parent_id == parent_id
-            if parent_id is not None
-            else SubjectDomain.parent_id.is_(None),
+        stmt = (
+            select(func.count())
+            .select_from(SubjectDomain)
+            .where(
+                func.trim(SubjectDomain.name) == name.strip(),
+                SubjectDomain.deleted_at.is_(None),
+                SubjectDomain.parent_id == parent_id
+                if parent_id is not None
+                else SubjectDomain.parent_id.is_(None),
+            )
         )
         if exclude_id is not None:
             stmt = stmt.where(SubjectDomain.id != exclude_id)
@@ -109,9 +126,13 @@ class SubjectDomainRepository:
         return (result.scalar() or 0) > 0
 
     async def count_children(self, parent_id: int) -> int:
-        stmt = select(func.count()).select_from(SubjectDomain).where(
-            SubjectDomain.parent_id == parent_id,
-            SubjectDomain.deleted_at.is_(None),
+        stmt = (
+            select(func.count())
+            .select_from(SubjectDomain)
+            .where(
+                SubjectDomain.parent_id == parent_id,
+                SubjectDomain.deleted_at.is_(None),
+            )
         )
         result = await self._db.execute(stmt)
         return result.scalar() or 0

@@ -140,9 +140,7 @@ class TestGovernanceRepositoryExtended:
         assert "role_id IS NULL" in where_str
         assert "domain IS NULL" in where_str
 
-    async def test_find_active_grant_with_role_and_domain(
-        self, repo: GovernanceRepository
-    ) -> None:
+    async def test_find_active_grant_with_role_and_domain(self, repo: GovernanceRepository) -> None:
         repo._db.execute = AsyncMock(return_value=self._result(None))
         result = await repo.find_active_grant(2, 3, "sales", GrantType.WRITE)
         assert result is None
@@ -151,9 +149,7 @@ class TestGovernanceRepositoryExtended:
         assert "role_id = :role_id_1" in where_str
         assert "domain = :domain_1" in where_str
 
-    async def test_list_grants_with_domain_and_status(
-        self, repo: GovernanceRepository
-    ) -> None:
+    async def test_list_grants_with_domain_and_status(self, repo: GovernanceRepository) -> None:
         mock_count = MagicMock()
         mock_count.scalar.return_value = 2
         mock_rows = MagicMock()
@@ -249,9 +245,7 @@ class TestGovernanceRepositoryExtended:
         result = await repo.get_classification(1)
         assert result is cls
 
-    async def test_upsert_classification_updates_existing(
-        self, repo: GovernanceRepository
-    ) -> None:
+    async def test_upsert_classification_updates_existing(self, repo: GovernanceRepository) -> None:
         existing = Classification(
             catalog_id=1,
             sensitivity_level=SensitivityLevel.INTERNAL,
@@ -268,13 +262,9 @@ class TestGovernanceRepositoryExtended:
         assert result.model_version == "v2"
         repo._db.flush.assert_awaited_once()
 
-    async def test_upsert_classification_creates_new(
-        self, repo: GovernanceRepository
-    ) -> None:
+    async def test_upsert_classification_creates_new(self, repo: GovernanceRepository) -> None:
         repo._db.execute = AsyncMock(return_value=self._result(None))
-        result = await repo.upsert_classification(
-            5, SensitivityLevel.PUBLIC, [], "admin", "v1"
-        )
+        result = await repo.upsert_classification(5, SensitivityLevel.PUBLIC, [], "admin", "v1")
         assert result.catalog_id == 5
         assert result.sensitivity_level == SensitivityLevel.PUBLIC
         repo._db.add.assert_called_once_with(result)

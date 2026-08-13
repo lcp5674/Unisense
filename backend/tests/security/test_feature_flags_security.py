@@ -70,9 +70,7 @@ async def test_analyst_403(analyst_client: httpx.AsyncClient) -> None:
     """非管理角色（analyst）访问被拒（403）。"""
     resp = await analyst_client.get("/api/v1/feature-flags")
     assert resp.status_code == 403
-    resp_put = await analyst_client.put(
-        "/api/v1/feature-flags/quickbi", json={"enabled": False}
-    )
+    resp_put = await analyst_client.put("/api/v1/feature-flags/quickbi", json={"enabled": False})
     assert resp_put.status_code == 403
 
 
@@ -106,7 +104,5 @@ async def test_admin_update_200(admin_client: httpx.AsyncClient) -> None:
 
 async def test_admin_update_missing_404(admin_client: httpx.AsyncClient) -> None:
     """更新不存在的开关返回 404。"""
-    resp = await admin_client.put(
-        "/api/v1/feature-flags/nonexistent_flag", json={"enabled": True}
-    )
+    resp = await admin_client.put("/api/v1/feature-flags/nonexistent_flag", json={"enabled": True})
     assert resp.status_code == 404

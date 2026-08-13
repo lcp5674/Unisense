@@ -59,9 +59,7 @@ async def writer_client() -> AsyncIterator[httpx.AsyncClient]:
 async def test_create_dimension_returns_503_on_db_failure(
     writer_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def boom(
-        self: DimensionService, payload: object, actor_id: int | None = None
-    ) -> object:
+    async def boom(self: DimensionService, payload: object, actor_id: int | None = None) -> object:
         raise ExternalDependencyError("db 不可达")
 
     monkeypatch.setattr(DimensionService, "create_dimension", boom)

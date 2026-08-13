@@ -163,7 +163,7 @@ class TestMetricDimensionCRUD:
         session.execute = AsyncMock(return_value=_FakeResult(rows=rows))
         out = await repo.list_metric_dimensions(42)
         assert out == rows
-        assert '42' in _first_stmt(session)
+        assert "42" in _first_stmt(session)
 
 
 class TestReconciliationCRUD:
@@ -176,7 +176,7 @@ class TestReconciliationCRUD:
     async def test_list_reconciliations_no_filter(self, repo, session) -> None:
         session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
         await repo.list_reconciliations(None)
-        assert 'reconciliation' in _first_stmt(session)
+        assert "reconciliation" in _first_stmt(session)
 
     async def test_list_reconciliations_filter_by_status(self, repo, session) -> None:
         session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
@@ -188,7 +188,7 @@ class TestReconciliationCRUD:
         session.execute = AsyncMock(return_value=_FakeResult(row=rec))
         out = await repo.get_reconciliation(7)
         assert out is rec
-        assert '7' in _first_stmt(session)
+        assert "7" in _first_stmt(session)
 
     async def test_get_reconciliation_returns_none(self, repo, session) -> None:
         session.execute = AsyncMock(return_value=_FakeResult(row=None))

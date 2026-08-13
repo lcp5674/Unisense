@@ -21,6 +21,7 @@ async def test_health_returns_503_when_redis_down(monkeypatch):
     monkeypatch.setattr("app.db.redis.get_redis", _broken_redis)
 
     from app.main import app
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/health")
@@ -35,6 +36,7 @@ async def test_health_returns_503_when_redis_down(monkeypatch):
 async def test_health_includes_component_status():
     """T032: /health 响应包含各组件状态。"""
     from app.main import app
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/health")
@@ -51,6 +53,7 @@ async def test_graceful_shutdown_disposes_connections():
     验证 shutdown 事件处理器被注册。
     """
     from app.main import app
+
     # 验证 lifespan 中注册了 shutdown 处理
     # 实际关闭测试需要真实 SIGTERM，此处仅验证 app 对象可调用
     assert app is not None

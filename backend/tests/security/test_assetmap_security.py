@@ -106,6 +106,7 @@ async def test_search_returns_200(
     reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """全局搜索端点对已认证读者返回 200。"""
+
     async def fake(self: AssetMapService, q: str, entity_type=None, limit: int = 20) -> list:
         return [{"type": "metric", "id": 1, "name": "sales_gmv_amount_day"}]
 
@@ -119,9 +120,7 @@ async def test_search_returns_200(
 
 async def test_search_blocks_injection_400(writer_client: httpx.AsyncClient) -> None:
     """搜索关键词注入被守卫拦截。"""
-    resp = await writer_client.get(
-        "/api/v1/assetmap/search", params={"q": "' OR '1'='1"}
-    )
+    resp = await writer_client.get("/api/v1/assetmap/search", params={"q": "' OR '1'='1"})
     assert resp.status_code == 400
     assert resp.json()["code"] == "INJECTION_DETECTED"
 
@@ -132,8 +131,13 @@ async def test_health_pii_changes_my_assets_200(
     """健康/PII/变更/我的资产四个新端点对读者返回 200。"""
 
     async def fake_health(self: AssetMapService) -> dict:
-        return {"unhealthy_sources": [], "schema_incomplete": [], "orphan_assets": 0,
-                "stale_assets": [], "stale_days": 7}
+        return {
+            "unhealthy_sources": [],
+            "schema_incomplete": [],
+            "orphan_assets": 0,
+            "stale_assets": [],
+            "stale_days": 7,
+        }
 
     async def fake_pii(self: AssetMapService) -> dict:
         return {
@@ -208,9 +212,7 @@ async def test_assign_owner_success_admin(
         return {"entity_id": entity_id, "owner_id": owner_id}
 
     monkeypatch.setattr(AssetMapService, "assign_owner", fake)
-    resp = await admin_client.post(
-        "/api/v1/assetmap/entities/1/owner", json={"owner_id": 9}
-    )
+    resp = await admin_client.post("/api/v1/assetmap/entities/1/owner", json={"owner_id": 9})
     assert resp.status_code == 200
     body = resp.json()["data"]
     assert body["entity_id"] == 1
@@ -227,9 +229,7 @@ async def test_assign_owner_entity_missing_404(
         raise NotFoundError(f"资产不存在: {entity_id}")
 
     monkeypatch.setattr(AssetMapService, "assign_owner", fake)
-    resp = await admin_client.post(
-        "/api/v1/assetmap/entities/999/owner", json={"owner_id": 9}
-    )
+    resp = await admin_client.post("/api/v1/assetmap/entities/999/owner", json={"owner_id": 9})
     assert resp.status_code == 404
 
 

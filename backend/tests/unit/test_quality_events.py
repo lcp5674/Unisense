@@ -26,9 +26,7 @@ def breaker() -> MagicMock:
 
 
 @pytest.fixture
-def publisher(
-    breaker: MagicMock, monkeypatch: pytest.MonkeyPatch
-) -> events.QualityEventPublisher:
+def publisher(breaker: MagicMock, monkeypatch: pytest.MonkeyPatch) -> events.QualityEventPublisher:
     pub = events.QualityEventPublisher(notify_url="http://notify")
     # 模块级 _BREAKER 是真实熔断器单例，测试中替换为可控替身
     # （publish 内 record_success/record_failure 直接引用模块全局）
@@ -161,9 +159,7 @@ class TestSend:
             "http://notify/api/v1/notify/events", json={"event_type": "quality.anomaly"}
         )
 
-    async def test_send_reuses_existing_client(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_send_reuses_existing_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = self._client()
 
         monkeypatch.setattr("httpx.AsyncClient", lambda timeout: client)
@@ -176,9 +172,7 @@ class TestSend:
         assert pub._http_client is client
         assert client.post.await_count == 2
 
-    async def test_send_raises_on_non_2xx(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_send_raises_on_non_2xx(self, monkeypatch: pytest.MonkeyPatch) -> None:
         resp = MagicMock()
         resp.status_code = 404
         resp.text = "not found"
@@ -197,9 +191,7 @@ class TestClose:
         pub = events.QualityEventPublisher(notify_url=None)
         await pub.close()  # 不应抛异常
 
-    async def test_close_closes_and_resets_client(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_close_closes_and_resets_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         resp = MagicMock()
         resp.status_code = 200
         client = MagicMock()
@@ -215,9 +207,7 @@ class TestClose:
         client.aclose.assert_awaited_once()
         assert pub._http_client is None
 
-    async def test_close_suppresses_aclose_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_close_suppresses_aclose_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         resp = MagicMock()
         resp.status_code = 200
         client = MagicMock()

@@ -359,8 +359,6 @@ async def test_run_raises_when_collector_unavailable():
 
     with patch("app.services.collector.tasks.CollectorRepository", return_value=repo):
         with pytest.raises(RuntimeError, match="采集器不可用: src1"):
-            await run_collection_task(
-                {"svc": svc, "db": db, "job_store": store}, "src1", 1, "job1"
-            )
+            await run_collection_task({"svc": svc, "db": db, "job_store": store}, "src1", 1, "job1")
 
     store.set.assert_awaited_once_with("job1", "FAILED", {"error": "采集器不可用: src1"})

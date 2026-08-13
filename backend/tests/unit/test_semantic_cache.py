@@ -265,10 +265,15 @@ class TestVersionKey:
 
     async def test_invalidate_removes_old_version_keys(self) -> None:
         redis = MagicMock()
-        redis.scan = AsyncMock(return_value=(0, [
-            "metric:def:M1:v1",
-            "metric:def:M1:v2",
-        ]))
+        redis.scan = AsyncMock(
+            return_value=(
+                0,
+                [
+                    "metric:def:M1:v1",
+                    "metric:def:M1:v2",
+                ],
+            )
+        )
         redis.delete = AsyncMock()
         cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
         await cache.invalidate("M1")

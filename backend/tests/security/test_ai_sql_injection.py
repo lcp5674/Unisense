@@ -23,23 +23,12 @@ class TestNestedJsonInjectionGuard:
 
     def test_deeply_nested_dict_injection_detected(self) -> None:
         """嵌套 dict 中含注入向量应被检测。"""
-        body = {
-            "data": {
-                "inner": {
-                    "name": "'; DROP TABLE metrics; --"
-                }
-            }
-        }
+        body = {"data": {"inner": {"name": "'; DROP TABLE metrics; --"}}}
         assert _scan_deep(body) is True
 
     def test_nested_list_injection_detected(self) -> None:
         """嵌套 list 中含注入向量应被检测。"""
-        body = {
-            "items": [
-                "normal_value",
-                ["nested_list", "UNION SELECT * FROM users"]
-            ]
-        }
+        body = {"items": ["normal_value", ["nested_list", "UNION SELECT * FROM users"]]}
         assert _scan_deep(body) is True
 
     def test_dict_in_list_injection_detected(self) -> None:
@@ -73,7 +62,7 @@ class TestNestedJsonInjectionGuard:
             "data": {
                 "name": "sales_gmv_daily",
                 "dimensions": ["city", "category"],
-                "filters": [{"field": "date", "value": "2024-01-01"}]
+                "filters": [{"field": "date", "value": "2024-01-01"}],
             }
         }
         assert _scan_deep(body) is False
@@ -167,9 +156,7 @@ class TestAiKeywordSqlParameterization:
 class TestWeakKeyStartupRejection:
     """测试生产环境弱密钥拒绝启动。"""
 
-    def test_short_jwt_secret_rejected_in_prod(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_short_jwt_secret_rejected_in_prod(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """jwt_secret < 32 字符时，生产环境应拒绝启动。"""
         from app.core.config import ConfigurationError
 
@@ -180,11 +167,10 @@ class TestWeakKeyStartupRejection:
 
         with pytest.raises(ConfigurationError, match="JWT_SECRET"):
             from app.core.config import Settings
+
             Settings()  # 应抛出 ConfigurationError
 
-    def test_prod_requires_fernet_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_prod_requires_fernet_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """生产环境必须配置独立的 Fernet 密钥。"""
         from app.core.config import ConfigurationError
 
@@ -197,11 +183,10 @@ class TestWeakKeyStartupRejection:
 
         with pytest.raises(ConfigurationError, match="FERNET_KEY"):
             from app.core.config import Settings
+
             Settings()  # 应抛出 ConfigurationError
 
-    def test_prod_requires_olap_url(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_prod_requires_olap_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """生产环境必须配置 OLAP URL。"""
         from app.core.config import ConfigurationError
 
@@ -213,6 +198,7 @@ class TestWeakKeyStartupRejection:
 
         with pytest.raises(ConfigurationError, match="OLAP_URL"):
             from app.core.config import Settings
+
             Settings()  # 应抛出 ConfigurationError
 
 
@@ -224,9 +210,7 @@ class TestWeakKeyStartupRejection:
 class TestFernetDegradationRejection:
     """测试 Fernet 密钥不可从 JWT_SECRET 派生降级。"""
 
-    def test_secrets_no_jwt_fallback_in_prod(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_secrets_no_jwt_fallback_in_prod(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """生产环境 _build_key 不应从 JWT_SECRET 派生。"""
         from app.core.config import ConfigurationError
 
@@ -235,24 +219,22 @@ class TestFernetDegradationRejection:
         monkeypatch.delenv("UNISENSE_FERNET_KEY", raising=False)
 
         from app.core.secrets import _build_key
+
         with pytest.raises(ConfigurationError, match="FERNET_KEY"):
             _build_key()
 
-    def test_secrets_dev_uses_default_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_secrets_dev_uses_default_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """开发环境可以使用默认开发密钥。"""
         monkeypatch.setenv("UNISENSE_ENV", "local")
         monkeypatch.delenv("UNISENSE_FERNET_KEY", raising=False)
 
         from app.core.secrets import _build_key
+
         key = _build_key()
         assert key is not None
         assert len(key) > 0
 
-    def test_secrets_explicit_fernet_key_used(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_secrets_explicit_fernet_key_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """显式配置的 Fernet 密钥应被使用（PBKDF2 派生，对齐 SEC-01）。"""
         monkeypatch.setenv("UNISENSE_FERNET_KEY", "my-custom-fernet-key")
 
@@ -260,6 +242,7 @@ class TestFernetDegradationRejection:
         import hashlib
 
         from app.core.secrets import _build_key
+
         key = _build_key()
         # SEC-01：PBKDF2-HMAC-SHA256（600k 迭代，固定盐）而非裸 SHA-256
         expected = base64.urlsafe_b64encode(

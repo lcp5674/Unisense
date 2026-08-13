@@ -72,9 +72,7 @@ class TestObservabilityRepository:
         mock_scalar1.scalar.return_value = 10
         mock_scalar2 = MagicMock()
         mock_scalar2.scalar.return_value = 3
-        repo._session.execute = AsyncMock(
-            side_effect=[mock_by_status, mock_scalar1, mock_scalar2]
-        )
+        repo._session.execute = AsyncMock(side_effect=[mock_by_status, mock_scalar1, mock_scalar2])
         stats = await repo.notification_stats()
         assert stats["by_status"] == {"SENT": 4, "FAILED": 1}
         assert stats["event_total"] == 10

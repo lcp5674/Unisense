@@ -199,9 +199,7 @@ async def update_metric(
 ) -> ApiResponse[MetricResponse]:
     """变更口径时自动识别破坏性变更并递增版本号；乐观锁防止并发覆盖。"""
     service = MetricService(db)
-    metric = await service.update_metric(
-        metric_code, request, actor_id=user.id, role=user.role
-    )
+    metric = await service.update_metric(metric_code, request, actor_id=user.id, role=user.role)
     await write_audit(
         db,
         actor_id=user.id,
@@ -349,9 +347,7 @@ async def approve_metric(
 ) -> ApiResponse[MetricResponse]:
     """REVIEW → PUBLISHED(standard) / EXPERIMENTAL(experimental)。含 PII 门禁 + 依赖校验。"""
     service = MetricService(db)
-    metric = await service.approve_metric(
-        metric_code, request, actor_id=user.id, role=user.role
-    )
+    metric = await service.approve_metric(metric_code, request, actor_id=user.id, role=user.role)
     await write_audit(
         db,
         actor_id=user.id,
@@ -385,9 +381,7 @@ async def reject_metric(
 ) -> ApiResponse[MetricResponse]:
     """REVIEW → DRAFT，驳回审核。须填驳回原因，通知 Owner。"""
     service = MetricService(db)
-    metric = await service.reject_metric(
-        metric_code, request, actor_id=user.id, role=user.role
-    )
+    metric = await service.reject_metric(metric_code, request, actor_id=user.id, role=user.role)
     await write_audit(
         db,
         actor_id=user.id,
@@ -693,7 +687,10 @@ async def emergency_publish_metric(
         )
     service = MetricService(db)
     metric = await service.emergency_publish_metric(
-        metric_code, request, actor_id=user.id, role=user.role,
+        metric_code,
+        request,
+        actor_id=user.id,
+        role=user.role,
     )
     await write_audit(
         db,
@@ -761,7 +758,8 @@ async def compare_metrics(
     service = MetricService(db)
     # T049: PII 指标对比需合规角色权限，非合规角色对 PII 指标返回脱敏口径
     result = await service.compare_metrics(
-        request.metric_codes[0], request.metric_codes[1],
+        request.metric_codes[0],
+        request.metric_codes[1],
     )
     # PII 脱敏：非合规角色对比 PII 指标时，口径定义脱敏
     if user.role not in _SENSITIVE_ROLES:

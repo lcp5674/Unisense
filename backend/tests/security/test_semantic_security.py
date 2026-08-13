@@ -3,6 +3,7 @@
 对齐 dimension/glossary 同款审查标准：写端点须落审计、PII 复核禁 Owner 自审。
 依赖 conftest.client（默认角色 metric_owner，id=1）。
 """
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -32,9 +33,11 @@ async def test_pii_review_forbidden_for_metric_owner(client):
 
 async def test_create_metric_writes_audit(client):
     svc = _mock_service()
-    with patch.object(metrics_module, "MetricService", return_value=svc), \
-         patch.object(metrics_module, "write_audit", AsyncMock()) as wa, \
-         patch.object(metrics_module, "client_ip", return_value="test"):
+    with (
+        patch.object(metrics_module, "MetricService", return_value=svc),
+        patch.object(metrics_module, "write_audit", AsyncMock()) as wa,
+        patch.object(metrics_module, "client_ip", return_value="test"),
+    ):
         resp = await client.post("/api/v1/metric-definitions", json=make_create_payload())
         assert resp.status_code == 201
         wa.assert_awaited()
@@ -42,9 +45,11 @@ async def test_create_metric_writes_audit(client):
 
 async def test_update_metric_writes_audit(client):
     svc = _mock_service()
-    with patch.object(metrics_module, "MetricService", return_value=svc), \
-         patch.object(metrics_module, "write_audit", AsyncMock()) as wa, \
-         patch.object(metrics_module, "client_ip", return_value="test"):
+    with (
+        patch.object(metrics_module, "MetricService", return_value=svc),
+        patch.object(metrics_module, "write_audit", AsyncMock()) as wa,
+        patch.object(metrics_module, "client_ip", return_value="test"),
+    ):
         resp = await client.put(
             "/api/v1/metric-definitions/foo", json={"change_reason": "修正口径说明"}
         )
@@ -54,9 +59,11 @@ async def test_update_metric_writes_audit(client):
 
 async def test_publish_metric_writes_audit(client):
     svc = _mock_service()
-    with patch.object(metrics_module, "MetricService", return_value=svc), \
-         patch.object(metrics_module, "write_audit", AsyncMock()) as wa, \
-         patch.object(metrics_module, "client_ip", return_value="test"):
+    with (
+        patch.object(metrics_module, "MetricService", return_value=svc),
+        patch.object(metrics_module, "write_audit", AsyncMock()) as wa,
+        patch.object(metrics_module, "client_ip", return_value="test"),
+    ):
         resp = await client.post(
             "/api/v1/metric-definitions/foo/publish",
             json={"version": 1, "change_reason": "首次发布说明"},
@@ -67,9 +74,11 @@ async def test_publish_metric_writes_audit(client):
 
 async def test_deprecate_metric_writes_audit(client):
     svc = _mock_service()
-    with patch.object(metrics_module, "MetricService", return_value=svc), \
-         patch.object(metrics_module, "write_audit", AsyncMock()) as wa, \
-         patch.object(metrics_module, "client_ip", return_value="test"):
+    with (
+        patch.object(metrics_module, "MetricService", return_value=svc),
+        patch.object(metrics_module, "write_audit", AsyncMock()) as wa,
+        patch.object(metrics_module, "client_ip", return_value="test"),
+    ):
         resp = await client.post(
             "/api/v1/metric-definitions/foo/deprecate", json={"successor_code": "bar"}
         )

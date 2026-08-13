@@ -46,9 +46,8 @@ async def list_audit_logs(
     - ``action_desc``：站在用户角度的中文描述（含 detail 摘要）。
     """
     offset = (page - 1) * page_size
-    stmt = (
-        select(AuditLog, User.display_name)
-        .join(User, User.id == AuditLog.actor_id, isouter=True)
+    stmt = select(AuditLog, User.display_name).join(
+        User, User.id == AuditLog.actor_id, isouter=True
     )
     count_stmt = select(func.count()).select_from(AuditLog)
 

@@ -28,9 +28,7 @@ class TestAuditArchiveFlow:
         mock_result.scalars.return_value.all.return_value = []
         mock_db.execute.return_value = mock_result
 
-        with patch(
-            "app.db.mysql.async_session_factory"
-        ) as mock_factory:
+        with patch("app.db.mysql.async_session_factory") as mock_factory:
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
             result = await audit_archive_task({})
@@ -181,5 +179,6 @@ class TestPIIPropagation:
         """AuditLog.archived 字段默认 False。"""
         # 验证字段存在
         from app.models.audit import AuditLog
+
         columns = {c.name for c in AuditLog.__table__.columns}
         assert "archived" in columns

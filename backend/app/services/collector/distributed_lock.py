@@ -37,9 +37,7 @@ class CollectionLock:
     def _lock_key(source_id: str) -> str:
         return f"collect_lock:{source_id}"
 
-    async def acquire(
-        self, source_id: str, owner_id: str, ttl: int = 600
-    ) -> bool:
+    async def acquire(self, source_id: str, owner_id: str, ttl: int = 600) -> bool:
         """获取分布式锁。
 
         Args:

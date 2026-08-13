@@ -30,6 +30,7 @@ class TestCreateItem:
         svc._repo.create = AsyncMock(return_value=item)
 
         from app.services.system_dict.schemas import DictItemCreate
+
         data = DictItemCreate(code="minute", label="分钟", sort_order=7)
         result = await svc.create_item("granularity", data)
         assert result.code == "minute"
@@ -40,8 +41,10 @@ class TestCreateItem:
         svc._repo.get_item_including_deleted = AsyncMock(return_value=active)
 
         from app.services.system_dict.schemas import DictItemCreate
+
         data = DictItemCreate(code="day", label="天")
         from app.core.exceptions import ConflictError
+
         with pytest.raises(ConflictError):
             await svc.create_item("granularity", data)
 
@@ -54,6 +57,7 @@ class TestCreateItem:
         svc._repo.update = AsyncMock(return_value=deleted)
 
         from app.services.system_dict.schemas import DictItemCreate
+
         data = DictItemCreate(code="day", label="天", sort_order=1)
         result = await svc.create_item("granularity", data)
         assert deleted.deleted_at is None
@@ -127,6 +131,7 @@ class TestUpdate:
         svc._repo.update = AsyncMock(return_value=item)
 
         from app.services.system_dict.schemas import DictItemUpdate
+
         data = DictItemUpdate(label="天", sort_order=1)
         result = await svc.update_item("granularity", "day", data)
         assert item.label == "天"
@@ -135,6 +140,7 @@ class TestUpdate:
     async def test_update_item_not_found(self, svc) -> None:
         svc._repo.get_item = AsyncMock(return_value=None)
         from app.services.system_dict.schemas import DictItemUpdate
+
         with pytest.raises(NotFoundError):
             await svc.update_item("granularity", "nope", DictItemUpdate(label="x"))
 

@@ -201,6 +201,7 @@ async def test_batch_size_capped_422(admin_client: httpx.AsyncClient) -> None:
 
 # ---------------------------------------------------------------- erasure (D9)
 
+
 async def test_erasure_requires_compliance_role_403(owner_client: httpx.AsyncClient) -> None:
     """被遗忘权仅合规官可发起，指标 Owner 无权（R7-09③ 门禁）。"""
     resp = await owner_client.post(
@@ -230,15 +231,14 @@ async def test_erasure_compliance_role_success(
     )
     fake.created_at = datetime.now(UTC)
 
-    async def fake_exec(self: GovernanceService, subject_user_id: int, operator_id: int,
-                        reason: str | None = None) -> ErasureRequest:
+    async def fake_exec(
+        self: GovernanceService, subject_user_id: int, operator_id: int, reason: str | None = None
+    ) -> ErasureRequest:
         return fake
 
     monkeypatch.setattr(GovernanceService, "execute_erasure", fake_exec)
     async for c in _client(3, "compliance_officer"):
-        resp = await c.post(
-            "/api/v1/erasure", json={"subject_user_id": 42, "reason": "GDPR"}
-        )
+        resp = await c.post("/api/v1/erasure", json={"subject_user_id": 42, "reason": "GDPR"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["code"] == "OK"
@@ -251,10 +251,17 @@ async def test_erasure_compliance_role_success(
 
 async def test_erasure_rejects_invalid_user_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """subject_user_id <= 0 触发参数校验（422）。"""
-    async def fake_exec(self: GovernanceService, subject_user_id: int, operator_id: int,
-                        reason: str | None = None) -> ErasureRequest:
-        return ErasureRequest(subject_user_id=subject_user_id, requested_by=3,
-                              status=ErasureStatus.COMPLETED, token="x", affected_rows=0)
+
+    async def fake_exec(
+        self: GovernanceService, subject_user_id: int, operator_id: int, reason: str | None = None
+    ) -> ErasureRequest:
+        return ErasureRequest(
+            subject_user_id=subject_user_id,
+            requested_by=3,
+            status=ErasureStatus.COMPLETED,
+            token="x",
+            affected_rows=0,
+        )
 
     monkeypatch.setattr(GovernanceService, "execute_erasure", fake_exec)
     async for c in _client(3, "compliance_officer"):

@@ -108,9 +108,7 @@ class ClickHouseCollector(BaseCollector):
                     if d.strip() and d.strip() not in _CLICKHOUSE_SYSTEM_DBS
                 ]
             except Exception as exc:
-                raise ExternalDependencyError(
-                    f"采集源 {source_id} 枚举数据库失败: {exc}"
-                ) from exc
+                raise ExternalDependencyError(f"采集源 {source_id} 枚举数据库失败: {exc}") from exc
 
         specs: list[CatalogSpec] = []
         failed_specs: list[FailedSpec] = []

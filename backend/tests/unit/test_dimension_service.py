@@ -88,14 +88,21 @@ async def test_create_dimension_auto_generates_code() -> None:
 async def test_create_dimension_auto_code_conflict_suffix() -> None:
     """dim_code 自动生成冲突时追加 _2 后缀。"""
     svc, repo = await _svc()
-    repo.get_dimension = AsyncMock(side_effect=[
-        Dimension(
-            id=1, dim_code="geo_customer_region", name="x",
-            domain="geo", type="SCD1", status="DRAFT", owner_id=1,
-        ),
-        None,
-        None,
-    ])
+    repo.get_dimension = AsyncMock(
+        side_effect=[
+            Dimension(
+                id=1,
+                dim_code="geo_customer_region",
+                name="x",
+                domain="geo",
+                type="SCD1",
+                status="DRAFT",
+                owner_id=1,
+            ),
+            None,
+            None,
+        ]
+    )
     payload = DimensionCreate(dim_code=None, name="Customer Region", domain="geo", owner_id=1)
     out = await svc.create_dimension(payload, 1)
     assert out.dim_code == "geo_customer_region_2"
@@ -104,13 +111,22 @@ async def test_create_dimension_auto_code_conflict_suffix() -> None:
 async def test_create_member_auto_generates_code() -> None:
     """member_code 缺省时由系统自动生成（dim_code_name slug，维度内唯一）。"""
     svc, repo = await _svc()
-    repo.get_dimension = AsyncMock(return_value=Dimension(
-        id=1, dim_code="geo_region", name="地区", domain="geo",
-        type="SCD1", status="DRAFT", owner_id=1,
-    ))
+    repo.get_dimension = AsyncMock(
+        return_value=Dimension(
+            id=1,
+            dim_code="geo_region",
+            name="地区",
+            domain="geo",
+            type="SCD1",
+            status="DRAFT",
+            owner_id=1,
+        )
+    )
     payload = DimensionMemberCreate(
-        dim_code="geo_region", member_code=None,
-        member_name="华东", status="PUBLISHED",
+        dim_code="geo_region",
+        member_code=None,
+        member_name="华东",
+        status="PUBLISHED",
     )
     out = await svc.create_member(payload)
     # 纯中文名 → 英文 slug（华东 → east_china），带维度前缀
@@ -120,13 +136,22 @@ async def test_create_member_auto_generates_code() -> None:
 async def test_create_member_auto_code_uses_name_slug() -> None:
     """member_code 缺省且 member_name 含 ASCII 时按 dim_code_name slug 生成。"""
     svc, repo = await _svc()
-    repo.get_dimension = AsyncMock(return_value=Dimension(
-        id=1, dim_code="geo_region", name="地区", domain="geo",
-        type="SCD1", status="DRAFT", owner_id=1,
-    ))
+    repo.get_dimension = AsyncMock(
+        return_value=Dimension(
+            id=1,
+            dim_code="geo_region",
+            name="地区",
+            domain="geo",
+            type="SCD1",
+            status="DRAFT",
+            owner_id=1,
+        )
+    )
     payload = DimensionMemberCreate(
-        dim_code="geo_region", member_code=None,
-        member_name="East China", status="PUBLISHED",
+        dim_code="geo_region",
+        member_code=None,
+        member_name="East China",
+        status="PUBLISHED",
     )
     out = await svc.create_member(payload)
     assert out.member_code == "geo_region_east_china"

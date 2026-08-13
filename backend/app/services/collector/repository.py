@@ -70,9 +70,7 @@ class CollectorRepository:
         await self._db.execute(
             delete(CollectionWatermark).where(CollectionWatermark.source_id == source_id)
         )
-        await self._db.execute(
-            delete(SchemaDriftLog).where(SchemaDriftLog.source_id == source_id)
-        )
+        await self._db.execute(delete(SchemaDriftLog).where(SchemaDriftLog.source_id == source_id))
         # 2) 释放唯一约束：改名保留软删记录
         new_id = f"{source_id}__del_{int(now.timestamp())}"[:64]
         src.source_id = new_id

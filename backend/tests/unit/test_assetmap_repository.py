@@ -84,9 +84,7 @@ class TestGetEntityDetail:
         assert out["lineage_edges"][0]["confidence"] == 0.9
         assert out["related_metrics"][0]["metric_node"] == "metric:gmv"
         assert out["source_health"]["health_status"] == "healthy"
-        assert out["schema_summary"] == [
-            {"name": "id", "type": "BIGINT", "comment": "主键"}
-        ]
+        assert out["schema_summary"] == [{"name": "id", "type": "BIGINT", "comment": "主键"}]
         # 敏感字段绝不外泄
         assert out["etl_sql"] is None
 
@@ -291,9 +289,7 @@ class TestListTablesAndOrphans:
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
-        r.scalars.return_value.all.return_value = [
-            SimpleNamespace(id=1, owner_id=None)
-        ]
+        r.scalars.return_value.all.return_value = [SimpleNamespace(id=1, owner_id=None)]
         s.execute = AsyncMock(return_value=r)
 
         rows = await repo.orphan_assets()
@@ -368,9 +364,7 @@ class TestAggregations:
         s = _session()
         repo = AssetMapRepository(s)
         r_stats = MagicMock()
-        r_stats.one.return_value = SimpleNamespace(
-            total=4, published=2, draft=1, pii_count=1
-        )
+        r_stats.one.return_value = SimpleNamespace(total=4, published=2, draft=1, pii_count=1)
         r_domain = MagicMock()
         r_domain.all.return_value = [("sales", 4)]
         r_catalog = MagicMock()
@@ -398,14 +392,22 @@ class TestEscapeLike:
 class TestSearchAssets:
     def _catalog(self, name: str = "catalog.db.orders") -> SimpleNamespace:
         return SimpleNamespace(
-            id=1, entity_name=name, entity_type="table", sensitivity_level="INTERNAL",
+            id=1,
+            entity_name=name,
+            entity_type="table",
+            sensitivity_level="INTERNAL",
             owner_id=2,
         )
 
     def _metric(self, code: str = "sales_gmv_amount_day") -> SimpleNamespace:
         return SimpleNamespace(
-            id=3, metric_code=code, name="GMV", pii_flag=False, domain="sales",
-            owner_id=2, status="PUBLISHED",
+            id=3,
+            metric_code=code,
+            name="GMV",
+            pii_flag=False,
+            domain="sales",
+            owner_id=2,
+            status="PUBLISHED",
         )
 
     async def test_search_both_types(self) -> None:
@@ -464,8 +466,15 @@ class TestSearchAssets:
         r_cat.scalars.return_value.all.return_value = []
         r_met = MagicMock()
         r_met.scalars.return_value.all.return_value = [
-            SimpleNamespace(id=1, metric_code="sales_user_phone", name="手机号",
-                            pii_flag=True, domain="sales", owner_id=2, status="PUBLISHED")
+            SimpleNamespace(
+                id=1,
+                metric_code="sales_user_phone",
+                name="手机号",
+                pii_flag=True,
+                domain="sales",
+                owner_id=2,
+                status="PUBLISHED",
+            )
         ]
         s.execute = AsyncMock(side_effect=[r_cat, r_met])
 
@@ -489,15 +498,11 @@ class TestHealthSummary:
             SimpleNamespace(source_id="s1", name="bad", health_status="unhealthy")
         ]
         r_incomplete = MagicMock()
-        r_incomplete.all.return_value = [
-            SimpleNamespace(id=1, entity_name="t", source_id="s1")
-        ]
+        r_incomplete.all.return_value = [SimpleNamespace(id=1, entity_name="t", source_id="s1")]
         r_orphan = MagicMock()
         r_orphan.scalar.return_value = 2
         r_stale = MagicMock()
-        r_stale.all.return_value = [
-            SimpleNamespace(id=2, entity_name="old", updated_at=None)
-        ]
+        r_stale.all.return_value = [SimpleNamespace(id=2, entity_name="old", updated_at=None)]
         s.execute = AsyncMock(side_effect=[r_unhealthy, r_incomplete, r_orphan, r_stale])
 
         out = await repo.health_summary()
@@ -530,14 +535,23 @@ class TestPiiOverview:
 class TestRecentChanges:
     def _catalog_row(self) -> SimpleNamespace:
         return SimpleNamespace(
-            id=1, entity_name="catalog.db.t", entity_type="table",
-            sensitivity_level="INTERNAL", owner_id=2, source_id="s1", updated_at=None,
+            id=1,
+            entity_name="catalog.db.t",
+            entity_type="table",
+            sensitivity_level="INTERNAL",
+            owner_id=2,
+            source_id="s1",
+            updated_at=None,
         )
 
     def _metric_row(self) -> SimpleNamespace:
         return SimpleNamespace(
-            metric_code="sales_gmv_amount_day", name="GMV", status="PUBLISHED",
-            domain="sales", pii_flag=False, updated_at=None,
+            metric_code="sales_gmv_amount_day",
+            name="GMV",
+            status="PUBLISHED",
+            domain="sales",
+            pii_flag=False,
+            updated_at=None,
         )
 
     async def test_recent_catalogs_and_metrics(self) -> None:
@@ -560,14 +574,20 @@ class TestRecentChanges:
 class TestMyAssets:
     def _catalog_row(self) -> SimpleNamespace:
         return SimpleNamespace(
-            id=1, entity_name="catalog.db.t", entity_type="table",
-            sensitivity_level="PII", source_id="s1",
+            id=1,
+            entity_name="catalog.db.t",
+            entity_type="table",
+            sensitivity_level="PII",
+            source_id="s1",
         )
 
     def _metric_row(self) -> SimpleNamespace:
         return SimpleNamespace(
-            metric_code="sales_gmv_amount_day", name="GMV", status="PUBLISHED",
-            domain="sales", pii_flag=True,
+            metric_code="sales_gmv_amount_day",
+            name="GMV",
+            status="PUBLISHED",
+            domain="sales",
+            pii_flag=True,
         )
 
     async def test_my_assets(self) -> None:

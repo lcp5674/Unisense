@@ -11,8 +11,7 @@ from app.core.exceptions import UnisenseError
 from app.services.ai.service import AiService
 
 _LLM_SQL = (
-    "SELECT metric_code, value FROM unified_metric "
-    "WHERE metric_code = 'sales_gmv_amount_day'"
+    "SELECT metric_code, value FROM unified_metric WHERE metric_code = 'sales_gmv_amount_day'"
 )
 
 

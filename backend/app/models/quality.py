@@ -196,9 +196,7 @@ class ExternalBenchmark(Base, BaseModel):
     tolerance_pct: Mapped[Decimal | None] = mapped_column(
         Numeric(8, 4), nullable=True, comment="可接受差异率(%)，为空时默认 1.00"
     )
-    imported_by: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, comment="导入人 ID"
-    )
+    imported_by: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="导入人 ID")
 
 
 class QualityObservation(Base, BaseModel):
@@ -226,9 +224,7 @@ class QualityObservation(Base, BaseModel):
     obs_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True, comment="观测时间（分区就绪时刻）"
     )
-    value: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), nullable=False, comment="观测聚合值"
-    )
+    value: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, comment="观测聚合值")
     dims: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, nullable=True, comment="维度上下文（如 region/channel）"
     )
@@ -251,9 +247,7 @@ class ReconciliationRecord(Base, BaseModel):
     metric_value: Mapped[Decimal] = mapped_column(
         Numeric(18, 4), nullable=False, comment="平台观测值"
     )
-    bench_value: Mapped[Decimal] = mapped_column(
-        Numeric(18, 4), nullable=False, comment="基准值"
-    )
+    bench_value: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, comment="基准值")
     diff_pct: Mapped[Decimal] = mapped_column(
         Numeric(8, 4), nullable=False, comment="差异率(%) = (观测-基准)/基准*100"
     )
@@ -275,9 +269,5 @@ class ReconciliationRecord(Base, BaseModel):
         nullable=True,
         comment="CONFIRMED 时决策：reasonable(差异合理)/caliber_error(口径有误→走变更)",
     )
-    confirmed_by: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True, comment="确认人 ID"
-    )
-    checked_at: Mapped[datetime | None] = mapped_column(
-        DateTime, nullable=True, comment="确认时间"
-    )
+    confirmed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="确认人 ID")
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, comment="确认时间")

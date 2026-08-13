@@ -175,9 +175,7 @@ class MetricApproveRequest(BaseModel):
     gray_tenant_ids: list[int] | None = Field(
         None, description="灰度白名单租户 ID（仅 experimental 模式）"
     )
-    target_version: int | None = Field(
-        None, ge=1, description="待发布版本号（缺省为当前版本）"
-    )
+    target_version: int | None = Field(None, ge=1, description="待发布版本号（缺省为当前版本）")
 
 
 class MetricRejectRequest(BaseModel):
@@ -205,9 +203,7 @@ class MetricEmergencyPublishRequest(BaseModel):
     """紧急发布请求（DRAFT → PUBLISHED 跳过 REVIEW，对齐 FR-022）。"""
 
     reason: str = Field(..., min_length=10, description="紧急发布原因")
-    target_version: int | None = Field(
-        None, ge=1, description="待发布版本号（缺省为当前版本）"
-    )
+    target_version: int | None = Field(None, ge=1, description="待发布版本号（缺省为当前版本）")
 
 
 class VersionConfirmRequest(BaseModel):

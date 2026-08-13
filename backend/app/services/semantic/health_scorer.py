@@ -19,8 +19,15 @@ logger = structlog.get_logger("unisense.semantic.health_scorer")
 
 # 一等字段列表（口径完整度校验）
 _ESSENTIAL_FIELDS = (
-    "granularity", "unit", "aggregation", "time_semantics",
-    "freshness", "sla", "dw_layer", "serving_mode", "additivity",
+    "granularity",
+    "unit",
+    "aggregation",
+    "time_semantics",
+    "freshness",
+    "sla",
+    "dw_layer",
+    "serving_mode",
+    "additivity",
 )
 
 # 加权系数
@@ -38,22 +45,22 @@ _WEIGHTS = {
 _COMPLETENESS_DEDUCTION_PER_MISSING = 12
 
 # 活跃度评分
-_ACTIVITY_RECENT_UPDATE = 80   # 近 30 天有更新
-_ACTIVITY_STALE = 20           # 无近期更新
+_ACTIVITY_RECENT_UPDATE = 80  # 近 30 天有更新
+_ACTIVITY_STALE = 20  # 无近期更新
 
 # 质量评分
-_QUALITY_PII_UNREVIEWED = 30   # 含 PII 但未合规审核
-_QUALITY_REVIEWED = 90         # 已合规审核
-_QUALITY_DEFAULT = 70          # 无 PII 且未审核
+_QUALITY_PII_UNREVIEWED = 30  # 含 PII 但未合规审核
+_QUALITY_REVIEWED = 90  # 已合规审核
+_QUALITY_DEFAULT = 70  # 无 PII 且未审核
 
 # Owner 响应评分
-_OWNER_HAS_BACKUP = 85         # 配置了 backup_owner
-_OWNER_NO_BACKUP = 45          # 无 backup_owner
+_OWNER_HAS_BACKUP = 85  # 配置了 backup_owner
+_OWNER_NO_BACKUP = 45  # 无 backup_owner
 
 # 血缘覆盖评分
-_LINEAGE_FULL = 80             # 有 dependencies + expression
+_LINEAGE_FULL = 80  # 有 dependencies + expression
 _LINEAGE_EXPRESSION_ONLY = 50  # 仅 expression
-_LINEAGE_NONE = 10             # 无血缘信息
+_LINEAGE_NONE = 10  # 无血缘信息
 
 
 def _grade(score: int) -> str:
@@ -114,10 +121,7 @@ class HealthScorer:
             missing_dimensions.append("lineage_coverage")
 
         # 加权总分
-        total = sum(
-            scores[dim] * _WEIGHTS[dim]
-            for dim in _WEIGHTS
-        )
+        total = sum(scores[dim] * _WEIGHTS[dim] for dim in _WEIGHTS)
         total_score = int(round(total))
 
         now = datetime.now(UTC)

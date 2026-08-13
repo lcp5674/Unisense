@@ -132,9 +132,7 @@ async def test_single_table_timeout_skip():
     repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
     repo.recompute_coverage = AsyncMock(return_value=1.0)
     repo.update_health_status = AsyncMock()
-    repo.update_watermark_after_collection = AsyncMock(
-        return_value=MagicMock(mode="FULL")
-    )
+    repo.update_watermark_after_collection = AsyncMock(return_value=MagicMock(mode="FULL"))
 
     events = MagicMock()
     events.publish_batch = AsyncMock()

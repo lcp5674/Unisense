@@ -50,9 +50,7 @@ class SubjectDomain(Base, BaseModel):
     path: Mapped[str | None] = mapped_column(
         String(512), nullable=True, comment="物化路径（如 1.5.12）"
     )
-    sort_order: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, comment="同级排序"
-    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="同级排序")
     status: Mapped[str] = mapped_column(
         Enum("active", "inactive", name="domain_status"),
         nullable=False,
@@ -62,12 +60,8 @@ class SubjectDomain(Base, BaseModel):
     defaults_json: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, default=dict, comment="域级默认值预设"
     )
-    description: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="描述"
-    )
-    owner_id: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, comment="域管理员ID"
-    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True, comment="描述")
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="域管理员ID")
 
     __table_args__ = (
         Index("idx_domain_code", "code"),

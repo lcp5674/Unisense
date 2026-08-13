@@ -78,9 +78,7 @@ class BaseCollector(ABC):
         """采集数据源，返回采集结果（含成功 specs 与失败 failed_specs）。"""
         ...
 
-    def set_incremental_context(
-        self, mode: str, watermark_ts: Any | None = None
-    ) -> None:
+    def set_incremental_context(self, mode: str, watermark_ts: Any | None = None) -> None:
         """注入增量采集上下文（P0-6：由 service 层在 collect 前调用）。
 
         ``mode`` 为 "INCREMENTAL" 且 ``watermark_ts`` 非空时，支持增量的连接器

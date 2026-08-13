@@ -38,9 +38,7 @@ def _session() -> MagicMock:
     return s
 
 
-async def _client(
-    uid: int, role: str, *, authed: bool = True
-) -> AsyncIterator[httpx.AsyncClient]:
+async def _client(uid: int, role: str, *, authed: bool = True) -> AsyncIterator[httpx.AsyncClient]:
     session = _session()
 
     async def fake_db() -> AsyncIterator[MagicMock]:

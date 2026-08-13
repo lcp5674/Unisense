@@ -37,9 +37,7 @@ class MetricHealthScore(Base, BaseModel):
     metric_id: Mapped[int] = mapped_column(
         BigInteger, nullable=False, unique=True, comment="指标 ID（唯一）"
     )
-    score: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, comment="综合评分 0-100"
-    )
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="综合评分 0-100")
     level: Mapped[str] = mapped_column(
         Enum("EXCELLENT", "GOOD", "WARNING", "CRITICAL", name="health_level_enum"),
         nullable=False,

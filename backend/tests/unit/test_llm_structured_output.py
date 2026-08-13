@@ -122,12 +122,14 @@ class TestCalibrationGate:
 
     def test_structured_json_parsing(self) -> None:
         """结构化 JSON 输出正确解析。"""
-        raw = json.dumps({
-            "content": "PII",
-            "confidence": 0.92,
-            "reasoning": "含手机号",
-            "candidates": [{"level": "PII", "score": 0.92}],
-        })
+        raw = json.dumps(
+            {
+                "content": "PII",
+                "confidence": 0.92,
+                "reasoning": "含手机号",
+                "candidates": [{"level": "PII", "score": 0.92}],
+            }
+        )
         # 模拟 _parse_structured_output 逻辑
         parsed = json.loads(raw)
         out = LlmStructuredOutput(

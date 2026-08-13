@@ -101,7 +101,9 @@ class TestRunQualityChecks:
 
     @pytest.mark.asyncio
     async def test_fresh_obs_triggers_detect(
-        self, ctx: dict, monkeypatch: pytest.MonkeyPatch,
+        self,
+        ctx: dict,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         event = QualityEventResponse(
             id=1,
@@ -138,7 +140,9 @@ class TestRunQualityChecks:
 
     @pytest.mark.asyncio
     async def test_stale_obs_skipped(
-        self, ctx: dict, monkeypatch: pytest.MonkeyPatch,
+        self,
+        ctx: dict,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # 观测超过 48h 新鲜度窗口 → 跳过
         result, detect = await _run(
@@ -150,7 +154,9 @@ class TestRunQualityChecks:
 
     @pytest.mark.asyncio
     async def test_same_combo_deduped(
-        self, ctx: dict, monkeypatch: pytest.MonkeyPatch,
+        self,
+        ctx: dict,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # 同 (metric_id, rule_type) 两条规则 → 只评估一次
         result, detect = await _run(
@@ -165,7 +171,9 @@ class TestRunQualityChecks:
 
     @pytest.mark.asyncio
     async def test_detect_failure_does_not_block(
-        self, ctx: dict, monkeypatch: pytest.MonkeyPatch,
+        self,
+        ctx: dict,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # 单组合评估抛异常 → 不阻断整轮（combos 仍统计，异常被吞）
         result, detect = await _run(

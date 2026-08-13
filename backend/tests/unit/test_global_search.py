@@ -35,36 +35,49 @@ def _rows_result(*rows: object) -> MagicMock:
 
 
 def _metric(code: str = "sales_gmv_day", name: str = "每日GMV") -> SimpleNamespace:
-    return SimpleNamespace(id=1, metric_code=code, name=name, domain="sales",
-                           status="PUBLISHED", pii_flag=False)
+    return SimpleNamespace(
+        id=1, metric_code=code, name=name, domain="sales", status="PUBLISHED", pii_flag=False
+    )
 
 
 def _dimension(code: str = "region") -> SimpleNamespace:
-    return SimpleNamespace(id=2, dim_code=code, name="区域", domain="sales",
-                           status="PUBLISHED")
+    return SimpleNamespace(id=2, dim_code=code, name="区域", domain="sales", status="PUBLISHED")
 
 
 def _term(code: str = "gmv") -> SimpleNamespace:
-    return SimpleNamespace(id=3, term_code=code, name="成交总额", domain="sales",
-                           status="PUBLISHED")
+    return SimpleNamespace(
+        id=3, term_code=code, name="成交总额", domain="sales", status="PUBLISHED"
+    )
 
 
 def _template(code: str = "tpl_sales_orders") -> SimpleNamespace:
-    return SimpleNamespace(id=4, code=code, name="订单模板", domain="sales",
-                           description="订单指标", is_active=True)
+    return SimpleNamespace(
+        id=4, code=code, name="订单模板", domain="sales", description="订单指标", is_active=True
+    )
 
 
 def _source(source_id: str = "mysql_finance") -> SimpleNamespace:
-    return SimpleNamespace(id=5, source_id=source_id, name="财务MySQL",
-                           domain="finance", health_status="healthy", source_type="mysql")
+    return SimpleNamespace(
+        id=5,
+        source_id=source_id,
+        name="财务MySQL",
+        domain="finance",
+        health_status="healthy",
+        source_type="mysql",
+    )
 
 
 def _catalog(
     entity_name: str = "finance.dwd_order", columns: list[dict] | None = None
 ) -> SimpleNamespace:
-    return SimpleNamespace(id=6, entity_name=entity_name, source_id="mysql_finance",
-                           entity_type="TABLE", sensitivity_level="INTERNAL",
-                           schema_json={"columns": columns or []})
+    return SimpleNamespace(
+        id=6,
+        entity_name=entity_name,
+        source_id="mysql_finance",
+        entity_type="TABLE",
+        sensitivity_level="INTERNAL",
+        schema_json={"columns": columns or []},
+    )
 
 
 def _domain(code: str = "sales") -> SimpleNamespace:
@@ -82,16 +95,18 @@ class TestGlobalSearchRepository:
         """8 类资源各自查询，按类型分组返回。"""
         s = _session()
         repo = GlobalSearchRepository(s)
-        s.execute = AsyncMock(side_effect=[
-            _rows_result(_metric()),          # metric
-            _rows_result(_dimension()),       # dimension
-            _rows_result(_term()),            # term
-            _rows_result(_template()),        # template
-            _rows_result(_source()),          # data_source
-            _rows_result(_catalog()),         # catalog
-            _rows_result(),                   # field（本次无命中）
-            _rows_result(_domain()),          # subject_domain
-        ])
+        s.execute = AsyncMock(
+            side_effect=[
+                _rows_result(_metric()),  # metric
+                _rows_result(_dimension()),  # dimension
+                _rows_result(_term()),  # term
+                _rows_result(_template()),  # template
+                _rows_result(_source()),  # data_source
+                _rows_result(_catalog()),  # catalog
+                _rows_result(),  # field（本次无命中）
+                _rows_result(_domain()),  # subject_domain
+            ]
+        )
 
         groups = await repo.search("sales", limit=5)
 
@@ -119,13 +134,18 @@ class TestGlobalSearchRepository:
         """字段级搜索：schema_json 中列名命中关键词 → 返回独立 field 条目（含表名）。"""
         s = _session()
         repo = GlobalSearchRepository(s)
-        s.execute = AsyncMock(return_value=_rows_result(
-            _catalog("finance.dwd_order", columns=[
-                {"name": "order_id", "type": "bigint"},
-                {"name": "buyer_phone", "type": "varchar"},
-            ]),
-            _catalog("finance.dwd_pay", columns=[{"name": "pay_id", "type": "bigint"}]),
-        ))
+        s.execute = AsyncMock(
+            return_value=_rows_result(
+                _catalog(
+                    "finance.dwd_order",
+                    columns=[
+                        {"name": "order_id", "type": "bigint"},
+                        {"name": "buyer_phone", "type": "varchar"},
+                    ],
+                ),
+                _catalog("finance.dwd_pay", columns=[{"name": "pay_id", "type": "bigint"}]),
+            )
+        )
 
         fields = await repo._search_fields("phone", limit=5)
 

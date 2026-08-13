@@ -46,9 +46,7 @@ def test_is_borderline_false_for_distinct_defs() -> None:
 
 
 def test_detect_conflict_llm_confirms_same_semantics() -> None:
-    det = detect_conflict(
-        _cand(_BORDERLINE[0]), _ext(_BORDERLINE[1]), llm_judge=lambda a, b: True
-    )
+    det = detect_conflict(_cand(_BORDERLINE[0]), _ext(_BORDERLINE[1]), llm_judge=lambda a, b: True)
     assert isinstance(det, ConflictDetection)
     assert det.conflict_type.value == "same_def_diff_name"
     assert det.severity == "soft"
@@ -62,18 +60,14 @@ def test_detect_conflict_no_llm_returns_none_on_borderline() -> None:
 
 def test_detect_conflict_llm_abstain_keeps_no_conflict() -> None:
     assert (
-        detect_conflict(
-            _cand(_BORDERLINE[0]), _ext(_BORDERLINE[1]), llm_judge=lambda a, b: None
-        )
+        detect_conflict(_cand(_BORDERLINE[0]), _ext(_BORDERLINE[1]), llm_judge=lambda a, b: None)
         is None
     )
 
 
 def test_detect_conflict_llm_false_keeps_no_conflict() -> None:
     assert (
-        detect_conflict(
-            _cand(_BORDERLINE[0]), _ext(_BORDERLINE[1]), llm_judge=lambda a, b: False
-        )
+        detect_conflict(_cand(_BORDERLINE[0]), _ext(_BORDERLINE[1]), llm_judge=lambda a, b: False)
         is None
     )
 

@@ -53,9 +53,7 @@ class ErasureRequest(Base, TimestampMixin):
     affected_rows: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, comment="被覆写脱敏的审计行数"
     )
-    reason: Mapped[str | None] = mapped_column(
-        String(512), nullable=True, comment="执行事由"
-    )
+    reason: Mapped[str | None] = mapped_column(String(512), nullable=True, comment="执行事由")
 
     __table_args__ = (
         Index("idx_erasure_subject", "subject_user_id"),

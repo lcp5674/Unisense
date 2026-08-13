@@ -27,9 +27,7 @@ class TestBuildKey:
         monkeypatch.setenv("UNISENSE_FERNET_KEY", "my-custom-fernet-key")
         captured: dict = {}
 
-        def fake_pbkdf2(
-            hash_name: str, password: bytes, salt: bytes, iterations: int
-        ) -> bytes:
+        def fake_pbkdf2(hash_name: str, password: bytes, salt: bytes, iterations: int) -> bytes:
             captured["hash"] = hash_name
             captured["password"] = password
             captured["salt_len"] = len(salt)

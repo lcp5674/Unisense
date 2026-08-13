@@ -31,9 +31,7 @@ class TestDescribeAudit:
         assert describe_audit("DEPRECATE", "metric_definition") == "废弃了指标定义"
 
     def test_screaming_snake_with_detail_summary(self) -> None:
-        desc = describe_audit(
-            "PUBLISH", "metric_definition", {"version": 2, "pii_flag": False}
-        )
+        desc = describe_audit("PUBLISH", "metric_definition", {"version": 2, "pii_flag": False})
         # 已知摘要键（version）被提取；未知键（pii_flag）忽略
         assert desc == "发布了指标定义（版本=2）"
 
@@ -71,14 +69,10 @@ class TestDescribeAudit:
         assert desc == "更新了业务术语"
 
     def test_list_detail_summary(self) -> None:
-        desc = describe_audit(
-            "BULK_DEPRECATE", "metric_definition", {"metric_codes": ["a", "b"]}
-        )
+        desc = describe_audit("BULK_DEPRECATE", "metric_definition", {"metric_codes": ["a", "b"]})
         assert "批量废弃了指标定义" in desc
 
     def test_summarize_detail_list_value(self) -> None:
         """detail 中命中摘要键的 list/tuple 值应转为逗号串（对齐 210 行转换分支）。"""
-        desc = describe_audit(
-            "LINEAGE_PARSE", "lineage_edge", {"table_edges": ["a", "b"]}
-        )
+        desc = describe_audit("LINEAGE_PARSE", "lineage_edge", {"table_edges": ["a", "b"]})
         assert "表级血缘边=a,b" in desc

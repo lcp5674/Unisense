@@ -31,6 +31,7 @@ router = APIRouter(prefix="/me", tags=["preferences"])
 
 # ---- Schemas ----
 
+
 class PreferenceItem(BaseModel):
     """单条偏好（key + JSON 值）。"""
 
@@ -52,6 +53,7 @@ class PreferenceUpdate(BaseModel):
 
 
 # ---- Helpers ----
+
 
 async def _get_preference(db: AsyncSession, user_id: int, key: str) -> UserPreference | None:
     """按用户与键查询未删除偏好。"""
@@ -98,6 +100,7 @@ async def _upsert(db: AsyncSession, user_id: int, key: str, value: Any) -> UserP
 
 
 # ---- Endpoints ----
+
 
 @router.get("/preferences", response_model=ApiResponse[PreferenceListResponse])
 async def list_preferences(

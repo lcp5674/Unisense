@@ -481,9 +481,7 @@ class MetricRepository:
         # 单次查询: total + by_status + by_tier + by_domain + pii_count
         stmt = select(
             func.count().label("total"),
-            func.sum(
-                func.if_(Metric.pii_flag.is_(True), 1, 0)
-            ).label("pii_count"),
+            func.sum(func.if_(Metric.pii_flag.is_(True), 1, 0)).label("pii_count"),
         ).where(*conditions)
 
         result = await self._db.execute(stmt)

@@ -36,9 +36,18 @@ logger = structlog.get_logger("unisense.semantic.conflict_precheck")
 CODE_PATTERN = re.compile(r"^([a-z][a-z0-9]*)(_[a-z][a-z0-9]*){3}$")
 
 # 保留词：命中后软提醒（非硬阻断），但用于命名规范校验
-RESERVED_WORDS: frozenset[str] = frozenset({
-    "test", "temp", "dummy", "demo", "tmp", "sample", "staging", "todo",
-})
+RESERVED_WORDS: frozenset[str] = frozenset(
+    {
+        "test",
+        "temp",
+        "dummy",
+        "demo",
+        "tmp",
+        "sample",
+        "staging",
+        "todo",
+    }
+)
 
 # 依赖指标允许被消费的状态（与 DependencyChecker 一致）
 _ALLOWED_DEP_STATUSES = frozenset({"PUBLISHED", "EXPERIMENTAL"})
@@ -120,9 +129,7 @@ class ConflictPrechecker:
             "metric_code": metric_code,
             "domain": definition_json.get("domain", ""),
             "definition": (
-                definition_json.get("definition")
-                or definition_json.get("expression")
-                or ""
+                definition_json.get("definition") or definition_json.get("expression") or ""
             ),
             "source_tables": definition_json.get("source_tables", []) or [],
             "has_pii": bool(definition_json.get("pii", False)),

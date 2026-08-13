@@ -44,9 +44,7 @@ def _svc() -> tuple[CollectorService, MagicMock]:
         # 确保 US5/US3 新增的异步方法也有默认 AsyncMock
         repo.update_health_status = AsyncMock()
         repo.get_watermark = AsyncMock(return_value=None)
-        repo.update_watermark_after_collection = AsyncMock(
-            return_value=MagicMock(mode="FULL")
-        )
+        repo.update_watermark_after_collection = AsyncMock(return_value=MagicMock(mode="FULL"))
         return svc, repo
 
 
@@ -461,8 +459,12 @@ async def test_repo_list_catalogs_keyword_table_and_field_level():
     s = _session(all_rows=[MagicMock()], scalar=1)
     repo = CollectorRepository(s)
     params = SimpleNamespace(
-        source_id=None, entity_type=None, sensitivity_level=None,
-        keyword="order_id", page=1, page_size=20,
+        source_id=None,
+        entity_type=None,
+        sensitivity_level=None,
+        keyword="order_id",
+        page=1,
+        page_size=20,
     )
     items, total = await repo.list_catalogs(params)
     assert total == 1
@@ -479,8 +481,12 @@ async def test_repo_list_catalogs_keyword_escapes_wildcards():
     s = _session(all_rows=[], scalar=0)
     repo = CollectorRepository(s)
     params = SimpleNamespace(
-        source_id=None, entity_type=None, sensitivity_level=None,
-        keyword="100%_x", page=1, page_size=20,
+        source_id=None,
+        entity_type=None,
+        sensitivity_level=None,
+        keyword="100%_x",
+        page=1,
+        page_size=20,
     )
     await repo.list_catalogs(params)
     stmt = s.execute.call_args_list[0].args[0]
@@ -502,9 +508,7 @@ async def test_collect_empty_schema_warns_and_marks_incomplete():
     repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
     repo.recompute_coverage = AsyncMock(return_value=0.5)
     repo.update_health_status = AsyncMock()
-    repo.update_watermark_after_collection = AsyncMock(
-        return_value=MagicMock(mode="FULL")
-    )
+    repo.update_watermark_after_collection = AsyncMock(return_value=MagicMock(mode="FULL"))
 
     class EmptySchemaCollector:
         def set_incremental_context(self, mode, watermark_ts=None):
@@ -575,9 +579,7 @@ async def test_collect_and_register_publishes_batch_not_individual():
     repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
     repo.recompute_coverage = AsyncMock(return_value=0.5)
     repo.update_health_status = AsyncMock()
-    repo.update_watermark_after_collection = AsyncMock(
-        return_value=MagicMock(mode="FULL")
-    )
+    repo.update_watermark_after_collection = AsyncMock(return_value=MagicMock(mode="FULL"))
 
     class MultiSpecCollector:
         def set_incremental_context(self, mode, watermark_ts=None):
@@ -800,7 +802,14 @@ async def test_list_source_types_returns_metadata():
     info = await svc.list_source_types()
     types = {t.source_type: t for t in info}
     assert set(types.keys()) == {
-        "clickhouse", "doris", "hive", "kafka", "mysql", "postgres", "spark", "starrocks",
+        "clickhouse",
+        "doris",
+        "hive",
+        "kafka",
+        "mysql",
+        "postgres",
+        "spark",
+        "starrocks",
     }
     assert types["mysql"].label == "MySQL"
     assert types["kafka"].supports_database is False
@@ -974,16 +983,10 @@ def test_classifier_dict_columns_not_misclassified_as_pii():
         == "INTERNAL"
     )
     # 真实 PII 列（dict 格式含 user_name）仍应判定 PII
-    assert (
-        svc.classify(
-            "users", {"columns": [{"name": "user_name", "type": "varchar"}]}
-        )
-        == "PII"
-    )
+    assert svc.classify("users", {"columns": [{"name": "user_name", "type": "varchar"}]}) == "PII"
     # 混合格式（字符串列 + dict 列）兼容
     assert (
-        svc.classify("t", {"columns": ["order_id", {"name": "email", "type": "varchar"}]})
-        == "PII"
+        svc.classify("t", {"columns": ["order_id", {"name": "email", "type": "varchar"}]}) == "PII"
     )
 
 
@@ -1018,9 +1021,7 @@ async def test_register_catalog_llm_low_confidence_marks_needs_review_uppercase(
     events = MagicMock()
     events.publish = AsyncMock()
     svc._events = events
-    svc._llm_classify_sensitivity = AsyncMock(
-        return_value={"content": "PII", "confidence": 0.5}
-    )
+    svc._llm_classify_sensitivity = AsyncMock(return_value={"content": "PII", "confidence": 0.5})
     repo.upsert_catalog = AsyncMock(return_value=(_FakeCatalog("INTERNAL"), True, None))
     repo.recompute_coverage = AsyncMock(return_value=0.0)
     await svc.register_catalog(
@@ -1093,9 +1094,7 @@ async def test_create_source_integrity_error_returns_conflict():
 
     svc, repo = _svc()
     repo.get_source = AsyncMock(return_value=None)
-    repo.create_source = AsyncMock(
-        side_effect=IntegrityError("stmt", {}, Exception("dup"))
-    )
+    repo.create_source = AsyncMock(side_effect=IntegrityError("stmt", {}, Exception("dup")))
     with pytest.raises(ConflictError):
         await svc.create_source(
             DataSourceCreateRequest(
@@ -1270,9 +1269,7 @@ async def test_clickhouse_query_uses_basic_auth_not_query_param():
         return _R()
 
     with patch("httpx.AsyncClient") as mock_client:
-        mock_client.return_value.__aenter__.return_value.get = AsyncMock(
-            side_effect=fake_get
-        )
+        mock_client.return_value.__aenter__.return_value.get = AsyncMock(side_effect=fake_get)
         await collector._query("SELECT 1")
     assert "password" not in captured["params"]
     assert "user" not in captured["params"]

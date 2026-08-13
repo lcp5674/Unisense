@@ -23,9 +23,7 @@ class TrackingEvent(Base):
 
     __tablename__ = "tracking_event"
 
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, comment="UUID 主键"
-    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, comment="UUID 主键")
     event_type: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="事件类型(search/query/approve/browse/nps)"
     )

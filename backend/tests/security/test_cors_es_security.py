@@ -20,12 +20,16 @@ class TestCORSWhitelistRejection:
 
     def test_cors_origins_list_parses_comma_separated(self):
         """逗号分隔的 CORS 源字符串正确解析为列表。"""
-        with patch.dict("os.environ", {
-            "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
-            "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
-            "UNISENSE_CORS_ORIGINS": "http://localhost:3000,http://localhost:8080",
-            "UNISENSE_ENV": "local",
-        }, clear=False):
+        with patch.dict(
+            "os.environ",
+            {
+                "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
+                "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
+                "UNISENSE_CORS_ORIGINS": "http://localhost:3000,http://localhost:8080",
+                "UNISENSE_ENV": "local",
+            },
+            clear=False,
+        ):
             settings = Settings()
             assert settings.cors_origins_list == [
                 "http://localhost:3000",
@@ -34,37 +38,52 @@ class TestCORSWhitelistRejection:
 
     def test_cors_origins_list_empty_when_not_configured(self):
         """CORS 源为空时返回空列表。"""
-        with patch.dict("os.environ", {
-            "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
-            "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
-            "UNISENSE_CORS_ORIGINS": "",
-            "UNISENSE_ENV": "local",
-        }, clear=False):
+        with patch.dict(
+            "os.environ",
+            {
+                "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
+                "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
+                "UNISENSE_CORS_ORIGINS": "",
+                "UNISENSE_ENV": "local",
+            },
+            clear=False,
+        ):
             settings = Settings()
             assert settings.cors_origins_list == []
 
     def test_cors_wildcard_rejected_in_production(self):
         """生产环境拒绝通配符 CORS 源。"""
-        with patch.dict("os.environ", {
-            "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
-            "UNISENSE_JWT_SECRET": "prod-secret-at-least-32-characters-long!!",
-            "UNISENSE_FERNET_KEY": "test-fernet-key-for-production-env",
-            "UNISENSE_OLAP_URL": "http://doris:8030",
-            "UNISENSE_CORS_ORIGINS": "*",
-            "UNISENSE_ENV": "prod",
-        }, clear=False), pytest.raises(ConfigurationError, match="通配符"):
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
+                    "UNISENSE_JWT_SECRET": "prod-secret-at-least-32-characters-long!!",
+                    "UNISENSE_FERNET_KEY": "test-fernet-key-for-production-env",
+                    "UNISENSE_OLAP_URL": "http://doris:8030",
+                    "UNISENSE_CORS_ORIGINS": "*",
+                    "UNISENSE_ENV": "prod",
+                },
+                clear=False,
+            ),
+            pytest.raises(ConfigurationError, match="通配符"),
+        ):
             Settings()
 
     def test_specific_origins_allowed_in_production(self):
         """生产环境允许具体 Origin。"""
-        with patch.dict("os.environ", {
-            "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
-            "UNISENSE_JWT_SECRET": "prod-secret-at-least-32-characters-long!!",
-            "UNISENSE_FERNET_KEY": "test-fernet-key-for-production-env",
-            "UNISENSE_OLAP_URL": "http://doris:8030",
-            "UNISENSE_CORS_ORIGINS": "https://unisense.example.com,https://admin.example.com",
-            "UNISENSE_ENV": "prod",
-        }, clear=False):
+        with patch.dict(
+            "os.environ",
+            {
+                "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
+                "UNISENSE_JWT_SECRET": "prod-secret-at-least-32-characters-long!!",
+                "UNISENSE_FERNET_KEY": "test-fernet-key-for-production-env",
+                "UNISENSE_OLAP_URL": "http://doris:8030",
+                "UNISENSE_CORS_ORIGINS": "https://unisense.example.com,https://admin.example.com",
+                "UNISENSE_ENV": "prod",
+            },
+            clear=False,
+        ):
             settings = Settings()
             assert settings.cors_origins_list == [
                 "https://unisense.example.com",
@@ -77,35 +96,47 @@ class TestESAuthenticatedConnection:
 
     def test_es_username_password_configurable(self):
         """ES 用户名密码可通过环境变量配置。"""
-        with patch.dict("os.environ", {
-            "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
-            "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
-            "UNISENSE_ES_USERNAME": "elastic",
-            "UNISENSE_ES_PASSWORD": "es_changeme",
-            "UNISENSE_ENV": "local",
-        }, clear=False):
+        with patch.dict(
+            "os.environ",
+            {
+                "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
+                "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
+                "UNISENSE_ES_USERNAME": "elastic",
+                "UNISENSE_ES_PASSWORD": "es_changeme",
+                "UNISENSE_ENV": "local",
+            },
+            clear=False,
+        ):
             settings = Settings()
             assert settings.es_username == "elastic"
             assert settings.es_password == "es_changeme"
 
     def test_es_default_values_empty(self):
         """ES 认证默认值为空。"""
-        with patch.dict("os.environ", {
-            "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
-            "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
-            "UNISENSE_ENV": "local",
-        }, clear=False):
+        with patch.dict(
+            "os.environ",
+            {
+                "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
+                "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
+                "UNISENSE_ENV": "local",
+            },
+            clear=False,
+        ):
             settings = Settings()
             assert settings.es_username == ""
             assert settings.es_password == ""
 
     def test_es_url_default(self):
         """ES URL 默认值为本地 19200（端口避让后的默认配置）。"""
-        with patch.dict("os.environ", {
-            "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
-            "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
-            "UNISENSE_ENV": "local",
-        }, clear=False):
+        with patch.dict(
+            "os.environ",
+            {
+                "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
+                "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
+                "UNISENSE_ENV": "local",
+            },
+            clear=False,
+        ):
             settings = Settings()
             # 项目默认 ES 端口为 19200（compose 避让本机 9200 占用）
             assert settings.es_url == "http://localhost:19200"

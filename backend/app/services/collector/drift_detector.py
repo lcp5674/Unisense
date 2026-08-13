@@ -117,11 +117,13 @@ def _compute_column_diff(
         old_col = old_columns[name]
         new_col = new_columns[name]
         if old_col != new_col:
-            changed.append({
-                "name": name,
-                "before": old_col,
-                "after": new_col,
-            })
+            changed.append(
+                {
+                    "name": name,
+                    "before": old_col,
+                    "after": new_col,
+                }
+            )
 
     return {
         "added": added,

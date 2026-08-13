@@ -130,6 +130,7 @@ async def test_ready_registers_degradation_in_registry(
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_redis] = fake_redis
+
     async def _fake_status():
         return {"neo4j": False, "olap": True}
 

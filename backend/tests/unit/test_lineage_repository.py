@@ -301,9 +301,7 @@ async def test_upsert_metric_edge_idempotent() -> None:
 async def test_register_break_downstream() -> None:
     db = _FakeDB([])
     repo = LineageRepository(db)
-    edge = await repo.register_break(
-        node="table:orders", external_system="hive", owner="alice"
-    )
+    edge = await repo.register_break(node="table:orders", external_system="hive", owner="alice")
     assert edge.source_node == "table:orders"
     assert edge.target_node == "external:hive"
     assert edge.edge_type == "EXTERNAL_BREAK"

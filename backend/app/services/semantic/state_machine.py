@@ -117,10 +117,7 @@ class MetricStateMachine:
                 f"非法状态跃迁: {from_str}→{to_str}，"
                 f"当前状态 {from_str} 允许的跃迁为: {', '.join(allowed_names)}"
             )
-        return (
-            f"非法状态跃迁: {from_str}→{to_str}，"
-            f"当前状态 {from_str} 无允许的跃迁"
-        )
+        return f"非法状态跃迁: {from_str}→{to_str}，当前状态 {from_str} 无允许的跃迁"
 
     @classmethod
     def get_allowed_transitions(cls, state: str | MetricState) -> list[MetricState]:

@@ -119,6 +119,7 @@ class QualityDetectRequest(BaseModel):
 
 # --------------------------------------------------- 外部基准对账（TD §4.15.7）
 
+
 class BenchmarkImport(BaseModel):
     """外部权威基准值导入（幂等键：source_id + metric_code + bench_date + dims）。"""
 
@@ -217,6 +218,7 @@ class ReconciliationConfirm(BaseModel):
 
 
 # --------------------------------------------------- 质量观测样本（Epic 6）
+
 
 class QualityObservationRequest(BaseModel):
     """写入一次质量观测样本（采集 / 产出分区就绪时调用）。

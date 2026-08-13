@@ -52,7 +52,9 @@ class TestDingtalkDispatch:
         svc._http_client.post = AsyncMock(return_value=mock_response)
 
         with patch("app.services.notify.service.settings") as mock_settings:
-            mock_settings.notify_dingtalk_webhook = "https://oapi.dingtalk.com/robot/send?access_token=test"
+            mock_settings.notify_dingtalk_webhook = (
+                "https://oapi.dingtalk.com/robot/send?access_token=test"
+            )
             result = await svc._dispatch_dingtalk(notif)
 
         assert result is True
@@ -87,7 +89,9 @@ class TestDingtalkDispatch:
         svc._http_client.post = AsyncMock(return_value=mock_response)
 
         with patch("app.services.notify.service.settings") as mock_settings:
-            mock_settings.notify_dingtalk_webhook = "https://oapi.dingtalk.com/robot/send?access_token=test"
+            mock_settings.notify_dingtalk_webhook = (
+                "https://oapi.dingtalk.com/robot/send?access_token=test"
+            )
             result = await svc._dispatch_dingtalk(notif)
 
         assert result is False
@@ -109,7 +113,9 @@ class TestDingtalkDispatch:
         svc._http_client.post = AsyncMock(return_value=mock_response)
 
         with patch("app.services.notify.service.settings") as mock_settings:
-            mock_settings.notify_dingtalk_webhook = "https://oapi.dingtalk.com/robot/send?access_token=test"
+            mock_settings.notify_dingtalk_webhook = (
+                "https://oapi.dingtalk.com/robot/send?access_token=test"
+            )
             await svc._dispatch_dingtalk(notif)
 
         call_kwargs = svc._http_client.post.call_args
@@ -133,7 +139,9 @@ class TestDingtalkDispatch:
         svc._http_client.post = AsyncMock(return_value=mock_response)
 
         with patch("app.services.notify.service.settings") as mock_settings:
-            mock_settings.notify_dingtalk_webhook = "https://oapi.dingtalk.com/robot/send?access_token=test"
+            mock_settings.notify_dingtalk_webhook = (
+                "https://oapi.dingtalk.com/robot/send?access_token=test"
+            )
             await svc._dispatch_dingtalk(notif)
 
         call_kwargs = svc._http_client.post.call_args
@@ -157,7 +165,9 @@ class TestDingtalkDispatch:
         svc._http_client.post = AsyncMock(return_value=mock_response)
 
         with patch("app.services.notify.service.settings") as mock_settings:
-            mock_settings.notify_dingtalk_webhook = "https://oapi.dingtalk.com/robot/send?access_token=test"
+            mock_settings.notify_dingtalk_webhook = (
+                "https://oapi.dingtalk.com/robot/send?access_token=test"
+            )
             await svc._dispatch_dingtalk(notif)
 
         call_kwargs = svc._http_client.post.call_args

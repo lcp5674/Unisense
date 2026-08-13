@@ -133,9 +133,7 @@ class HiveCollector(BaseCollector):
                 db_rows = await self._execute("SHOW DATABASES")
                 schemas = [row[0].strip() for row in db_rows if row and row[0].strip()]
             except Exception as exc:
-                raise ExternalDependencyError(
-                    f"采集源 {source_id} 枚举数据库失败: {exc}"
-                ) from exc
+                raise ExternalDependencyError(f"采集源 {source_id} 枚举数据库失败: {exc}") from exc
 
         specs: list[CatalogSpec] = []
         failed_specs: list[FailedSpec] = []

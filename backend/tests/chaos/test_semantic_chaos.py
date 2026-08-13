@@ -171,9 +171,7 @@ class TestBreakingChangeOnPublished:
             mock_pvm_instance = AsyncMock()
             mock_pvm_cls.return_value = mock_pvm_instance
 
-            await svc.update_metric(
-                "chaos_metric", request, actor_id=10, role="domain_admin"
-            )
+            await svc.update_metric("chaos_metric", request, actor_id=10, role="domain_admin")
 
             # 验证 PendingVersionManager.create_pending 被调用（消费方=owner）
             mock_pvm_instance.create_pending.assert_called_once()
@@ -192,17 +190,13 @@ class TestEmergencyPublishPIIGate:
         from app.services.semantic.service import MetricService
 
         svc = MetricService(mock_db)
-        metric = _make_metric(
-            status="DRAFT", pii_flag=True, compliance_reviewed=False
-        )
+        metric = _make_metric(status="DRAFT", pii_flag=True, compliance_reviewed=False)
         svc._repo = AsyncMock()
         svc._repo.get_by_code = AsyncMock(return_value=metric)
         # 存在活跃合规官 → 直接 COMPLIANCE_BLOCKED（FR-024 主路径）
         svc._has_active_compliance_officer = AsyncMock(return_value=True)
 
-        request = MetricEmergencyPublishRequest(
-            reason="紧急业务需求导致必须立即发布修复口径数据"
-        )
+        request = MetricEmergencyPublishRequest(reason="紧急业务需求导致必须立即发布修复口径数据")
 
         with pytest.raises(BusinessError, match="PII"):
             await svc.emergency_publish_metric(

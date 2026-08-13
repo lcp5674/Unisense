@@ -55,6 +55,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
 
 # ---- P2: 结构化输出 Schema ----
 
+
 class LlmStructuredOutput(BaseModel):
     """LLM 结构化输出 Schema（P2 置信度分流）。
 
@@ -190,9 +191,7 @@ class LlmClient:
                 _LLM_BREAKER.record_failure()
                 last_exc = exc
                 if attempt < _LLM_MAX_RETRIES and (status >= 500 or status == 429):
-                    logger.warning(
-                        "LLM HTTP 错误（将退避重试）: %d，attempt=%d", status, attempt
-                    )
+                    logger.warning("LLM HTTP 错误（将退避重试）: %d，attempt=%d", status, attempt)
                     await asyncio.sleep(_LLM_BACKOFF_BASE * (2**attempt))
                     continue
                 logger.error(
@@ -211,9 +210,7 @@ class LlmClient:
                 _LLM_BREAKER.record_failure()
                 last_exc = exc
                 if attempt < _LLM_MAX_RETRIES:
-                    logger.warning(
-                        "LLM 网络错误（将退避重试）: %s，attempt=%d", exc, attempt
-                    )
+                    logger.warning("LLM 网络错误（将退避重试）: %s，attempt=%d", exc, attempt)
                     await asyncio.sleep(_LLM_BACKOFF_BASE * (2**attempt))
                     continue
                 logger.error("LLM 网络错误: %s", exc)

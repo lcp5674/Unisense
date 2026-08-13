@@ -151,9 +151,7 @@ class TestOwnerResponse:
 
 class TestLineageCoverage:
     def test_deps_and_expression(self, scorer: HealthScorer) -> None:
-        metric = _make_metric(
-            definition_json={"dependencies": ["t1"], "expression": "SUM(x)"}
-        )
+        metric = _make_metric(definition_json={"dependencies": ["t1"], "expression": "SUM(x)"})
         score, missing = scorer._calc_lineage_coverage(metric)
         assert score == 80
         assert missing is None

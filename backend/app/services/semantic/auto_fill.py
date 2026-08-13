@@ -29,11 +29,32 @@ METRIC_CODE_PATTERN = re.compile(
 )
 
 # 保留词（不可作为编码段）
-RESERVED_WORDS: frozenset[str] = frozenset({
-    "metric", "index", "table", "column", "select", "from", "where",
-    "group", "order", "limit", "insert", "update", "delete", "create",
-    "drop", "alter", "grant", "revoke", "all", "null", "true", "false",
-})
+RESERVED_WORDS: frozenset[str] = frozenset(
+    {
+        "metric",
+        "index",
+        "table",
+        "column",
+        "select",
+        "from",
+        "where",
+        "group",
+        "order",
+        "limit",
+        "insert",
+        "update",
+        "delete",
+        "create",
+        "drop",
+        "alter",
+        "grant",
+        "revoke",
+        "all",
+        "null",
+        "true",
+        "false",
+    }
+)
 
 
 def extract_biz_object(source_table: str) -> str:
@@ -90,9 +111,9 @@ def validate_metric_code(code: str) -> tuple[bool, str]:
     labels = ["域", "业务对象", "度量", "统计周期"]
     for i, part in enumerate(parts):
         if not _CODE_SEGMENT_PATTERN.match(part):
-            return False, f"第{i+1}段（{labels[i]}）格式错误：须小写字母开头+小写字母数字下划线"
+            return False, f"第{i + 1}段（{labels[i]}）格式错误：须小写字母开头+小写字母数字下划线"
         if part in RESERVED_WORDS:
-            return False, f"第{i+1}段（{labels[i]}）使用了保留词: {part}"
+            return False, f"第{i + 1}段（{labels[i]}）使用了保留词: {part}"
 
     return True, ""
 

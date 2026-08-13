@@ -62,14 +62,14 @@ def test_publish_version_optional():
 
 # ---- definition_json 校验：SQL 语法 + source_tables 规范化 ----
 
+
 def test_definition_sql_valid_accepted():
     """合法 SQL 通过校验，并保留在 definition_json.sql。"""
     req = MetricCreateRequest(
         **_base_payload(
             definition_json={
                 "sql": (
-                    "SELECT SUM(amount) AS gmv FROM catalog.sales.orders "
-                    "WHERE dt >= '2026-01-01'"
+                    "SELECT SUM(amount) AS gmv FROM catalog.sales.orders WHERE dt >= '2026-01-01'"
                 )
             }
         )
@@ -80,9 +80,7 @@ def test_definition_sql_valid_accepted():
 def test_definition_sql_invalid_rejected():
     """非法 SQL（语法错误）→ 422。"""
     with pytest.raises(ValidationError) as exc:
-        MetricCreateRequest(
-            **_base_payload(definition_json={"sql": "SELEC FROM WHERE"})
-        )
+        MetricCreateRequest(**_base_payload(definition_json={"sql": "SELEC FROM WHERE"}))
     assert "SQL 语法错误" in str(exc.value)
 
 

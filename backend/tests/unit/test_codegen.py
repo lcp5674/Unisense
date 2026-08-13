@@ -50,6 +50,7 @@ async def test_generate_unique_code_conflict_suffix() -> None:
 
 async def test_generate_unique_code_truncates() -> None:
     base = "x" * 200
+
     async def exists(_: str) -> bool:
         return False
 

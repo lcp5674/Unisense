@@ -112,8 +112,7 @@ class PostgresCollector(BaseCollector):
                     )
                     schema_json = {
                         "columns": [
-                            {"name": c.get("column_name"), "type": c.get("data_type")}
-                            for c in cols
+                            {"name": c.get("column_name"), "type": c.get("data_type")} for c in cols
                         ]
                     }
                     specs.append(

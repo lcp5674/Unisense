@@ -570,6 +570,7 @@ class TestUpdateDependencyHealthBoundary:
 class TestSchedulePersistCancelled:
     async def test_cancelled_task_cleans_up(self):
         """被取消的调度任务 → _on_done 走 cancelled 分支，任务从集合移除。"""
+
         async def coro():
             await asyncio.sleep(1)
 

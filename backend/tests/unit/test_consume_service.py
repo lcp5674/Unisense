@@ -535,8 +535,14 @@ async def test_execute_query_reraises_business_error(monkeypatch) -> None:
 # ---- 快照 WORM ----
 def _snap() -> MetricValueSnapshot:
     return MetricValueSnapshot(
-        id=1, metric_code="gmv", version=2, dims={"region": "EAST"}, date_range="2026-01",
-        value_json={"total": 100}, quality_flag="GOOD", generated_at=datetime.now(UTC),
+        id=1,
+        metric_code="gmv",
+        version=2,
+        dims={"region": "EAST"},
+        date_range="2026-01",
+        value_json={"total": 100},
+        quality_flag="GOOD",
+        generated_at=datetime.now(UTC),
         generated_by=SnapshotGeneratedBy.MATERIALIZE,
     )
 
@@ -550,8 +556,14 @@ async def test_save_snapshot() -> None:
 
     svc._snapshots.create = AsyncMock(side_effect=_persist_snap)
     resp = await svc.save_snapshot(
-        "gmv", 2, {"region": "EAST"}, "2026-01", {"total": 100},
-        "GOOD", datetime.now(UTC), SnapshotGeneratedBy.QUERY,
+        "gmv",
+        2,
+        {"region": "EAST"},
+        "2026-01",
+        {"total": 100},
+        "GOOD",
+        datetime.now(UTC),
+        SnapshotGeneratedBy.QUERY,
     )
     assert resp.metric_code == "gmv"
     assert resp.version == 2

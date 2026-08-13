@@ -70,12 +70,8 @@ def _audit_row(actor_id: int, *, detail: dict | None, ip: str) -> AuditLog:
 
 async def test_execute_erasure_scrubs_only_subject_rows() -> None:
     """仅 actor_id == subject 的审计行被去标识化，其余保持原样。"""
-    subject_row = _audit_row(
-        42, detail={"email": "a@b.com", "ip": "10.0.0.1"}, ip="10.0.0.1"
-    )
-    other_row = _audit_row(
-        99, detail={"email": "z@b.com", "ip": "192.168.1.1"}, ip="192.168.1.1"
-    )
+    subject_row = _audit_row(42, detail={"email": "a@b.com", "ip": "10.0.0.1"}, ip="10.0.0.1")
+    other_row = _audit_row(99, detail={"email": "z@b.com", "ip": "192.168.1.1"}, ip="192.168.1.1")
 
     db = _FakeDB([subject_row, other_row], subject=42)
     svc = GovernanceService(db)

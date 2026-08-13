@@ -127,9 +127,7 @@ class PendingVersionConfirmation(Base, BaseModel):
         comment="指标 ID",
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, comment="版本号")
-    consumer_id: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, comment="消费方用户 ID"
-    )
+    consumer_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="消费方用户 ID")
     status: Mapped[str] = mapped_column(
         Enum("PENDING", "CONFIRMED", "REJECTED", "TIMEOUT_ACCEPTED", name="pending_confirm_status"),
         nullable=False,
@@ -143,9 +141,7 @@ class PendingVersionConfirmation(Base, BaseModel):
     deadline: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, comment="确认截止时间"
     )
-    confirmed_at: Mapped[datetime | None] = mapped_column(
-        nullable=True, comment="确认/拒绝时间"
-    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(nullable=True, comment="确认/拒绝时间")
 
     __table_args__ = (
         UniqueConstraint("metric_id", "version", "consumer_id", name="uk_pending_confirm"),

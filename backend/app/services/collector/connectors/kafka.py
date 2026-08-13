@@ -122,18 +122,22 @@ class KafkaCollector(BaseCollector):
                         partition_count = len(partitions[0].partitions)
                         if partitions[0].partitions:
                             replication_factor = len(partitions[0].partitions[0].replicas)
-                    topic_details.append({
-                        "name": topic_name,
-                        "partition_count": partition_count,
-                        "replication_factor": replication_factor,
-                    })
+                    topic_details.append(
+                        {
+                            "name": topic_name,
+                            "partition_count": partition_count,
+                            "replication_factor": replication_factor,
+                        }
+                    )
                 except Exception as exc:
                     logger.warning("获取 Topic %s 元数据失败: %s", topic_name, exc)
-                    topic_details.append({
-                        "name": topic_name,
-                        "partition_count": 0,
-                        "replication_factor": 0,
-                    })
+                    topic_details.append(
+                        {
+                            "name": topic_name,
+                            "partition_count": 0,
+                            "replication_factor": 0,
+                        }
+                    )
             return topic_details
         except Exception as exc:
             raise ExternalDependencyError(
@@ -146,9 +150,7 @@ class KafkaCollector(BaseCollector):
                 except Exception as exc:  # noqa: BLE001 - 关闭失败不影响结果
                     logger.warning("关闭 Kafka 客户端失败: %s", exc)
 
-    async def _get_subject_schemas(
-        self, client: httpx.AsyncClient
-    ) -> dict[str, dict[str, Any]]:
+    async def _get_subject_schemas(self, client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
         """从 Schema Registry 获取所有 Subject 的最新 Schema。"""
         if not self._registry_url:
             return {}

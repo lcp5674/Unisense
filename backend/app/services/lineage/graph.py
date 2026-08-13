@@ -131,9 +131,7 @@ class LineageGraphClient:
                 )
             edges: list[tuple[str, str, str]] = []
             async with self._driver.session() as session:
-                records = await session.run(
-                    query, node=node, max_edges=max_edges
-                )
+                records = await session.run(query, node=node, max_edges=max_edges)
                 async for record in records:
                     edges.append((record["src"], record["tgt"], record["edge_type"]))
                     if len(edges) >= max_edges:

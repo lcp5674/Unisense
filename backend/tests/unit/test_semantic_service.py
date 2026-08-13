@@ -431,7 +431,8 @@ async def test_create_metric_auto_generates_fallback_code():
     repo.create_version = AsyncMock(return_value=MagicMock())
 
     result = await svc.create_metric(
-        MetricCreateRequest(**make_create_payload(metric_code=None)), owner_id=1,
+        MetricCreateRequest(**make_create_payload(metric_code=None)),
+        owner_id=1,
     )
 
     assert result.metric_code == "sales_entity_value_day"
@@ -447,7 +448,8 @@ async def test_create_metric_auto_code_conflict_suffix():
     repo.create_version = AsyncMock(return_value=MagicMock())
 
     result = await svc.create_metric(
-        MetricCreateRequest(**make_create_payload(metric_code=None)), owner_id=1,
+        MetricCreateRequest(**make_create_payload(metric_code=None)),
+        owner_id=1,
     )
 
     assert result.metric_code == "sales_entity_value_day_2"
@@ -591,9 +593,7 @@ async def test_redact_definition_recurses():
     """redact_definition 保留键结构、叶子值全部脱敏为 ***。"""
     from app.services.semantic.service import redact_definition
 
-    out = redact_definition(
-        {"expr": "SUM(x)", "nested": {"a": 1}, "arr": ["x", "y"], "flag": True}
-    )
+    out = redact_definition({"expr": "SUM(x)", "nested": {"a": 1}, "arr": ["x", "y"], "flag": True})
     assert out == {"expr": "***", "nested": {"a": "***"}, "arr": ["***", "***"], "flag": "***"}
 
 
@@ -844,9 +844,7 @@ async def test_extend_version_success():
     repo.get_by_code = AsyncMock(return_value=make_metric())
     repo.get_pending_confirmations = AsyncMock(
         return_value=[
-            MagicMock(
-                id=1, consumer_id=9, status="PENDING", extension_count=0, deadline=None
-            )
+            MagicMock(id=1, consumer_id=9, status="PENDING", extension_count=0, deadline=None)
         ]
     )
     repo.extend_confirmation_deadline = AsyncMock(return_value=MagicMock(version=1))
@@ -978,9 +976,7 @@ async def test_validate_dict_fields_disabled_value_blocked(monkeypatch):
         async def validate_dict_value(self, dict_type, code):
             raise BusinessError("字典项已停用", error_code="DICT_DISABLED")
 
-    monkeypatch.setattr(
-        "app.services.system_dict.service.SystemDictService", lambda db: _DictSvc()
-    )
+    monkeypatch.setattr("app.services.system_dict.service.SystemDictService", lambda db: _DictSvc())
     with pytest.raises(BusinessError):
         await svc._validate_dict_fields(req)
 
@@ -994,9 +990,7 @@ async def test_validate_dict_fields_not_found_degrades(monkeypatch):
         async def validate_dict_value(self, dict_type, code):
             raise NotFoundError("未配置")
 
-    monkeypatch.setattr(
-        "app.services.system_dict.service.SystemDictService", lambda db: _DictSvc()
-    )
+    monkeypatch.setattr("app.services.system_dict.service.SystemDictService", lambda db: _DictSvc())
     await svc._validate_dict_fields(req)
 
 
@@ -1009,12 +1003,8 @@ async def test_generate_metric_code_with_source_table(monkeypatch):
         return base
 
     monkeypatch.setattr("app.core.codegen.generate_unique_code", _gen)
-    monkeypatch.setattr(
-        "app.services.semantic.auto_fill.extract_biz_object", lambda t: "order"
-    )
-    monkeypatch.setattr(
-        "app.services.semantic.auto_fill.extract_measure", lambda m: "amount"
-    )
+    monkeypatch.setattr("app.services.semantic.auto_fill.extract_biz_object", lambda t: "order")
+    monkeypatch.setattr("app.services.semantic.auto_fill.extract_measure", lambda m: "amount")
     req = MetricCreateRequest(
         **make_create_payload(metric_code=None, source_table="dwd_order", period="day")
     )
@@ -1383,9 +1373,7 @@ async def test_rollback_metric_no_previous_published():
     """EXPERIMENTAL 回退但无上一 PUBLISHED 版本 → ConflictError。"""
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="EXPERIMENTAL", version=2))
-    repo.list_versions = AsyncMock(
-        return_value=[MagicMock(status="EXPERIMENTAL", version=2)]
-    )
+    repo.list_versions = AsyncMock(return_value=[MagicMock(status="EXPERIMENTAL", version=2)])
     with pytest.raises(ConflictError) as exc:
         await svc.rollback_metric("sales_gmv_daily", actor_id=1)
     assert exc.value.error_code == "NO_PREVIOUS_PUBLISHED_VERSION"
@@ -1434,13 +1422,14 @@ async def test_approve_derived_metric_unpublished_dependency():
     )
     repo.get_by_code = AsyncMock(return_value=metric)
     fake_checker = MagicMock()
-    fake_checker.check_dependencies_published = AsyncMock(
-        return_value=["sales_gmv_amount_daily"]
-    )
-    with patch(
-        "app.services.semantic.dependency_checker.DependencyChecker",
-        return_value=fake_checker,
-    ), pytest.raises(BusinessError) as exc:
+    fake_checker.check_dependencies_published = AsyncMock(return_value=["sales_gmv_amount_daily"])
+    with (
+        patch(
+            "app.services.semantic.dependency_checker.DependencyChecker",
+            return_value=fake_checker,
+        ),
+        pytest.raises(BusinessError) as exc,
+    ):
         await svc.approve_metric(
             "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
         )
@@ -1461,10 +1450,13 @@ async def test_approve_derived_metric_cycle():
     fake_checker = MagicMock()
     fake_checker.check_dependencies_published = AsyncMock(return_value=[])
     fake_checker.detect_cycle = AsyncMock(return_value=["a", "b", "a"])
-    with patch(
-        "app.services.semantic.dependency_checker.DependencyChecker",
-        return_value=fake_checker,
-    ), pytest.raises(BusinessError) as exc:
+    with (
+        patch(
+            "app.services.semantic.dependency_checker.DependencyChecker",
+            return_value=fake_checker,
+        ),
+        pytest.raises(BusinessError) as exc,
+    ):
         await svc.approve_metric(
             "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
         )
@@ -1483,9 +1475,7 @@ async def test_approve_derived_metric_emits_dependencies():
     )
     repo.get_by_code = AsyncMock(return_value=metric)
     repo.get_version = AsyncMock(return_value=MagicMock())
-    repo.update_with_optimistic_lock = AsyncMock(
-        return_value=make_metric(status="PUBLISHED")
-    )
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
     repo.mark_version_published = AsyncMock()
     svc._publish_event = AsyncMock()
     fake_checker = MagicMock()
@@ -1654,9 +1644,7 @@ async def test_auto_accept_timeout_all_confirmed_promotes():
     """无 PENDING 可标记但全部已确认 → 直接转正（返回更新后指标）。"""
     svc, repo = _svc_with_repo()
     repo.get_by_id = AsyncMock(return_value=make_metric())
-    repo.get_pending_confirmations = AsyncMock(
-        return_value=[MagicMock(id=1, status="CONFIRMED")]
-    )
+    repo.get_pending_confirmations = AsyncMock(return_value=[MagicMock(id=1, status="CONFIRMED")])
     repo.update_confirmation_status = AsyncMock()
     repo.get_version = AsyncMock(
         return_value=MagicMock(definition_json={"expression": "SUM(x)"}, diff_json={})
@@ -1770,17 +1758,11 @@ async def test_is_breaking_change_dependencies_set_diff():
     svc, _ = _svc_with_repo()
     # 顺序不同但集合相同 → 非破坏
     assert (
-        svc._is_breaking_change(
-            {"dependencies": ["a", "b"]}, {"dependencies": ["b", "a"]}
-        )
-        is False
+        svc._is_breaking_change({"dependencies": ["a", "b"]}, {"dependencies": ["b", "a"]}) is False
     )
     # 集合不同 → 破坏
     assert (
-        svc._is_breaking_change(
-            {"dependencies": ["a", "b"]}, {"dependencies": ["a", "c"]}
-        )
-        is True
+        svc._is_breaking_change({"dependencies": ["a", "b"]}, {"dependencies": ["a", "c"]}) is True
     )
 
 
@@ -1860,7 +1842,10 @@ async def test_create_metric_auto_fill_sets_default_field(monkeypatch):
         lambda **kw: {"defaults": {"metric_tier": "T2"}, "measure": "gmv"},
     )
     payload = make_create_payload(
-        metric_code=None, source_table="ods_order", measure_column="amount", period="day",
+        metric_code=None,
+        source_table="ods_order",
+        measure_column="amount",
+        period="day",
         metric_tier="T3",  # 默认值 → 将被覆盖为 T2
     )
     result = await svc.create_metric(MetricCreateRequest(**payload), owner_id=1)
@@ -1897,9 +1882,7 @@ async def test_generate_metric_code_exhausted_raises_conflict(monkeypatch):
     def _boom(base, exists):
         raise RuntimeError("exhausted")
 
-    monkeypatch.setattr(
-        "app.core.codegen.generate_unique_code", _boom
-    )
+    monkeypatch.setattr("app.core.codegen.generate_unique_code", _boom)
     with pytest.raises(ConflictError) as exc:
         await svc._generate_metric_code(
             MetricCreateRequest(**make_create_payload(metric_code=None))

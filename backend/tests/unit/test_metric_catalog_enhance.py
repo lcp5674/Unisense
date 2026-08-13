@@ -29,12 +29,28 @@ async def users_client() -> AsyncIterator[httpx.AsyncClient]:
     async def fake_db():
         session = MagicMock()
         rows = [
-            User(id=1, org_id=1, username="admin", email="admin@x.com",
-                 password_hash="hash1", display_name="管理员",
-                 role="platform_admin", domain=None, status="active"),
-            User(id=2, org_id=1, username="owner", email="owner@x.com",
-                 password_hash="hash2", display_name="指标负责人",
-                 role="metric_owner", domain="sales", status="active"),
+            User(
+                id=1,
+                org_id=1,
+                username="admin",
+                email="admin@x.com",
+                password_hash="hash1",
+                display_name="管理员",
+                role="platform_admin",
+                domain=None,
+                status="active",
+            ),
+            User(
+                id=2,
+                org_id=1,
+                username="owner",
+                email="owner@x.com",
+                password_hash="hash2",
+                display_name="指标负责人",
+                role="metric_owner",
+                domain="sales",
+                status="active",
+            ),
         ]
         result = MagicMock()
         result.scalars.return_value.all.return_value = rows
@@ -42,9 +58,7 @@ async def users_client() -> AsyncIterator[httpx.AsyncClient]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="viewer"
-    )
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -74,6 +88,7 @@ async def test_list_users_filters_by_role(users_client: httpx.AsyncClient) -> No
 
 # ---- audit entity_id 过滤 ----
 
+
 @pytest.fixture
 async def audit_entity_client() -> AsyncIterator[httpx.AsyncClient]:
     async def fake_db():
@@ -83,8 +98,16 @@ async def audit_entity_client() -> AsyncIterator[httpx.AsyncClient]:
         count_result.scalar_one.return_value = 1
         rows = [
             (
-                AuditLog(id=1, actor_id=1, action="CREATE", entity_type="metric_definition",
-                         entity_id="sales_gmv_sum_d", ip="x", trace_id="t", pii_access=False),
+                AuditLog(
+                    id=1,
+                    actor_id=1,
+                    action="CREATE",
+                    entity_type="metric_definition",
+                    entity_id="sales_gmv_sum_d",
+                    ip="x",
+                    trace_id="t",
+                    pii_access=False,
+                ),
                 "管理员",
             ),
         ]
@@ -94,9 +117,7 @@ async def audit_entity_client() -> AsyncIterator[httpx.AsyncClient]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin"
-    )
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -111,6 +132,7 @@ async def test_audit_accepts_entity_id_filter(audit_entity_client: httpx.AsyncCl
 
 
 # ---- repository 排序白名单 ----
+
 
 def _mk_session() -> MagicMock:
     session = MagicMock()

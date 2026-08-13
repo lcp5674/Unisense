@@ -63,9 +63,7 @@ class TestIssueTicket:
             )
         ).decode("ascii")
         # 使用原始签名（针对原 payload），篡改后必然不匹配
-        assert (
-            QuickBiService.verify_ticket(f"{forged_payload}.{sig}", "test-sign-key") is None
-        )
+        assert QuickBiService.verify_ticket(f"{forged_payload}.{sig}", "test-sign-key") is None
 
     def test_issue_actor_only_whitelisted_keys(self, service: QuickBiService) -> None:
         """actor 仅纳入白名单键，调用方无法用 actor 覆盖 exp/iat。"""

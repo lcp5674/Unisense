@@ -203,9 +203,7 @@ async def test_impact_preview_classifies_impact_and_risk() -> None:
         make_edge(i=1, source="metric:gm", target="metric:m1"),
         make_edge(i=2, source="metric:gm", target="metric:m2"),
         make_edge(i=3, source="metric:gm", target="table:dw.rpt1"),
-        make_edge(
-            i=4, source="metric:gm", target="report:r1", edge_type="CONSUMED_BY"
-        ),
+        make_edge(i=4, source="metric:gm", target="report:r1", edge_type="CONSUMED_BY"),
     ]
     svc._repo = repo
     svc._graph = None

@@ -342,6 +342,7 @@ def test_register_degradation_listener_appends(monkeypatch):
 
 def test_emitter_swallows_listener_exception(monkeypatch):
     """监听器抛异常不应阻断熔断主流程（best-effort 兜底，记 warning 继续）。"""
+
     def _boom(_sig: resilience.DegradationSignal) -> None:
         raise RuntimeError("listener boom")
 
@@ -484,6 +485,7 @@ def test_release_probe_lock_exception_best_effort():
 
 def test_tcp_alive_unreachable_returns_false(monkeypatch):
     """TCP 探活不可达 → False（OSError 兜底，不抛异常）。"""
+
     def _boom(*a: object, **k: object) -> None:
         raise OSError("connection refused")
 
@@ -520,9 +522,7 @@ def test_tcp_alive_reachable_returns_true(monkeypatch):
         def __exit__(self, *a: object) -> bool:
             return False
 
-    monkeypatch.setattr(
-        resilience.socket, "create_connection", lambda *a, **k: _FakeSock()
-    )
+    monkeypatch.setattr(resilience.socket, "create_connection", lambda *a, **k: _FakeSock())
     assert resilience._tcp_alive("127.0.0.1", 9, timeout=0.1) is True
 
 

@@ -32,21 +32,15 @@ def upgrade() -> None:
         sa.Column("attempts", sa.BigInteger(), nullable=False, server_default="1"),
         sa.Column("max_attempts", sa.BigInteger(), nullable=False, server_default="0"),
         sa.Column("next_retry_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "status", sa.String(16), nullable=False, server_default="ESCALATED"
-        ),
+        sa.Column("status", sa.String(16), nullable=False, server_default="ESCALATED"),
         sa.Column("last_payload", sa.JSON(), nullable=True),
         sa.Column("actor_id", sa.String(64), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.create_index(
-        "ix_escalation_record_event_type", "escalation_record", ["event_type"]
-    )
-    op.create_index(
-        "ix_escalation_record_source_ref", "escalation_record", ["source_ref"]
-    )
+    op.create_index("ix_escalation_record_event_type", "escalation_record", ["event_type"])
+    op.create_index("ix_escalation_record_source_ref", "escalation_record", ["source_ref"])
 
 
 def downgrade() -> None:

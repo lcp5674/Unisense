@@ -549,4 +549,3 @@ async def test_aggregate_dashboard_without_filters_and_zero_total():
     assert result["by_tier"] == {}
     assert result["by_domain"] == {}
     assert result["pii_ratio"] == 0.0
-

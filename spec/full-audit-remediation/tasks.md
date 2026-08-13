@@ -133,8 +133,8 @@
 
 - [X] T040 [P] [US6] TECH-04: 事件总线添加指数退避(1s→2s→4s→max 30s)，3次后写入死信队列 in backend/app/core/eventbus.py
 - [X] T041 [P] [US6] TECH-04: 实现内存死信队列+定时重放 in backend/app/core/dlq.py
-- [ ] T042 [P] [US6] TECH-05: 缓存锁字典添加 LRU 上限(10,000) in backend/app/services/semantic/cache.py
-- [ ] T043 [P] [US6] TECH-07: MySQL 连接池添加 pool_pre_ping=True + pool_recycle=1800 in backend/app/db/mysql.py
+- [X] T042 [P] [US6] TECH-05: 缓存锁字典添加 LRU 上限(10,000) in backend/app/services/semantic/cache.py
+- [X] T043 [P] [US6] TECH-07: MySQL 连接池添加 pool_pre_ping=True + pool_recycle=1800 in backend/app/db/mysql.py
 - [ ] T044 [P] [US6] TECH-11: 服务层 32 处 except Exception 静默吞错添加 logger.warning() in backend/app/services/semantic/cache.py + olap_executor.py + parser.py + rate_limiter.py + events.py + tasks.py
 - [X] T045 [P] [US6] TECH-13: tracking.py 日期参数格式错误返回 422 而非静默忽略 in backend/app/api/tracking.py
 - [ ] T046 [P] [US6] TECH-09: ClickHouse 连接器查询改用参数化 in backend/app/services/collector/connectors/clickhouse.py

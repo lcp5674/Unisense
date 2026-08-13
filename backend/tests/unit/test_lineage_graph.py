@@ -205,9 +205,7 @@ async def test_query_impact_zero_hops_returns_empty() -> None:
 async def test_query_impact_truncates_to_max_edges(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_breaker(monkeypatch)
     client = _make_client()
-    records = [
-        _FakeRecord(f"table:n{i}", f"table:n{i + 1}", "DERIVED_FROM") for i in range(10)
-    ]
+    records = [_FakeRecord(f"table:n{i}", f"table:n{i + 1}", "DERIVED_FROM") for i in range(10)]
     client._driver = _FakeDriver(_FakeResult(records))
     edges = await client.query_impact("table:a", max_edges=3)
     assert len(edges) == 3

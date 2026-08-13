@@ -351,14 +351,16 @@ async def test_postgres_collector_mock():
     from app.services.collector.connectors.postgres import PostgresCollector
 
     mock_connector = MagicMock(spec=SqlalchemyConnector)
-    mock_connector.query = AsyncMock(side_effect=[
-        [{"table_name": "users"}, {"table_name": "orders"}],
-        [
-            {"column_name": "id", "data_type": "integer"},
-            {"column_name": "name", "data_type": "varchar"},
-        ],
-        [{"column_name": "order_id", "data_type": "integer"}],
-    ])
+    mock_connector.query = AsyncMock(
+        side_effect=[
+            [{"table_name": "users"}, {"table_name": "orders"}],
+            [
+                {"column_name": "id", "data_type": "integer"},
+                {"column_name": "name", "data_type": "varchar"},
+            ],
+            [{"column_name": "order_id", "data_type": "integer"}],
+        ]
+    )
     mock_connector.dispose = AsyncMock()
 
     collector = PostgresCollector(mock_connector)
@@ -378,11 +380,13 @@ async def test_clickhouse_collector_mock():
     collector = ClickHouseCollector(host="ch-host", port=8123, database="analytics")
 
     # Mock _query method
-    collector._query = AsyncMock(side_effect=[
-        "events\nsessions\n",  # tables
-        "event_id\tString\ntimestamp\tDateTime\n",  # events columns
-        "session_id\tUInt64\n",  # sessions columns
-    ])
+    collector._query = AsyncMock(
+        side_effect=[
+            "events\nsessions\n",  # tables
+            "event_id\tString\ntimestamp\tDateTime\n",  # events columns
+            "session_id\tUInt64\n",  # sessions columns
+        ]
+    )
 
     source = MagicMock(source_id="ch_src", domain="analytics")
     result = await collector.collect(source)
@@ -403,10 +407,12 @@ async def test_kafka_collector_mock():
     )
 
     # Mock _get_topics
-    collector._get_topics = AsyncMock(return_value=[
-        {"name": "user-events", "partition_count": 3, "replication_factor": 2},
-        {"name": "order-events", "partition_count": 6, "replication_factor": 3},
-    ])
+    collector._get_topics = AsyncMock(
+        return_value=[
+            {"name": "user-events", "partition_count": 3, "replication_factor": 2},
+            {"name": "order-events", "partition_count": 6, "replication_factor": 3},
+        ]
+    )
     # Mock _get_subject_schemas
     collector._get_subject_schemas = AsyncMock(return_value={})
 

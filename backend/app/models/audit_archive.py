@@ -50,9 +50,7 @@ class AuditArchiveLog(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="PENDING", comment="归档状态 PENDING/SUCCESS/FAILED"
     )
-    error_message: Mapped[str | None] = mapped_column(
-        Text, nullable=True, comment="错误信息"
-    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True, comment="错误信息")
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="归档完成时间"
     )

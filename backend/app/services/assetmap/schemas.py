@@ -20,9 +20,7 @@ class AssignOwnerRequest(BaseModel):
     ``owner_id`` 为空表示解除归属（回到孤儿池）；非空须为存在的有效用户。
     """
 
-    owner_id: int | None = Field(
-        default=None, description="目标 Owner 用户 ID；None=解除归属"
-    )
+    owner_id: int | None = Field(default=None, description="目标 Owner 用户 ID；None=解除归属")
 
 
 class ReclassifySensitivityRequest(BaseModel):

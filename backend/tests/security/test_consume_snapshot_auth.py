@@ -220,9 +220,7 @@ async def test_snapshots_invalid_both_channels_401(
     with patch.object(
         consume_api.ConsumeService,
         "authenticate_consume_token",
-        new=AsyncMock(
-            side_effect=BusinessError("消费令牌无效", error_code="AUTH_APIKEY_INVALID")
-        ),
+        new=AsyncMock(side_effect=BusinessError("消费令牌无效", error_code="AUTH_APIKEY_INVALID")),
     ):
         resp = await client.get(
             "/api/v1/consume/metrics/M1/snapshots",

@@ -22,7 +22,6 @@ def upgrade() -> None:
         sa.Column("id", sa.BigInteger(), nullable=False, comment="主键 ID"),
         sa.Column("metric_id", sa.BigInteger(), nullable=False, comment="关联指标 ID"),
         sa.Column("metric_code", sa.String(length=64), nullable=False, comment="指标编码"),
-
         sa.Column(
             "source_id",
             sa.String(length=64),

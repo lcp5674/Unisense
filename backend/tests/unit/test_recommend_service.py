@@ -94,9 +94,7 @@ def _svc_with_profiles(
     repo.published_terms = AsyncMock(return_value=[])
     svc._repo = repo
     svc._session = MagicMock()
-    svc._session.execute = AsyncMock(
-        return_value=_dual_result(my_actions, profile_rows)
-    )
+    svc._session.execute = AsyncMock(return_value=_dual_result(my_actions, profile_rows))
     return svc, repo
 
 

@@ -323,13 +323,15 @@ def test_mysql_url_build_uses_url_create():
     """MySQL URL 构建使用 SQLAlchemy URL.create()。"""
     from app.services.collector.connectors.mysql import _build_mysql_url
 
-    url = _build_mysql_url({
-        "user": "root",
-        "password": "secret",
-        "host": "db-host",
-        "port": 3306,
-        "database": "mydb",
-    })
+    url = _build_mysql_url(
+        {
+            "user": "root",
+            "password": "secret",
+            "host": "db-host",
+            "port": 3306,
+            "database": "mydb",
+        }
+    )
     # URL.create 不暴露密码在 __repr__ 中
     url_str = str(url)
     assert "db-host" in url_str
@@ -341,13 +343,15 @@ def test_postgres_url_build():
     """PostgreSQL URL 构建使用 postgresql+asyncpg 驱动。"""
     from app.services.collector.connectors.postgres import _build_postgres_url
 
-    url = _build_postgres_url({
-        "user": "pguser",
-        "password": "pgpass",
-        "host": "pg-host",
-        "port": 5432,
-        "database": "pgdb",
-    })
+    url = _build_postgres_url(
+        {
+            "user": "pguser",
+            "password": "pgpass",
+            "host": "pg-host",
+            "port": 5432,
+            "database": "pgdb",
+        }
+    )
     url_str = str(url)
     assert "postgresql+asyncpg" in url_str
     assert "pg-host" in url_str
