@@ -54,6 +54,7 @@ import type {
   UserBrief,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL } from "../utils/enums";
 import { HealthCard } from "./metric/HealthCard";
 import { QualitySnapshot } from "./metric/QualitySnapshot";
 import { LineageImpact } from "./metric/LineageImpact";
@@ -312,7 +313,7 @@ export function MetricDetail() {
       track("metric_detail_view", code, "metric");
     } catch (err) {
       // eslint-disable-next-line no-alert
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -330,7 +331,7 @@ export function MetricDetail() {
       message.success(okMsg + "成功");
       await load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : okMsg + "失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : okMsg + "失败");
     } finally {
       setBusy(false);
     }
@@ -454,7 +455,7 @@ export function MetricDetail() {
           <h2>
             {metric.name}{" "}
             <Tag color={STATUS_COLOR[metric.status]}>{STATUS_LABEL[metric.status]}</Tag>
-            {metric.metric_tier && <Tag>{metric.metric_tier}</Tag>}
+            {metric.metric_tier && <Tag>{METRIC_TIER_LABEL[metric.metric_tier] ?? metric.metric_tier}</Tag>}
             {badgeArea}
           </h2>
           <p>
@@ -486,18 +487,18 @@ export function MetricDetail() {
         <Descriptions column={3} bordered size="small">
           <Descriptions.Item label="编码">{metric.metric_code}</Descriptions.Item>
           <Descriptions.Item label="域">{metric.domain}</Descriptions.Item>
-          <Descriptions.Item label="类型">{metric.type}</Descriptions.Item>
-          <Descriptions.Item label="分级">{metric.metric_tier}</Descriptions.Item>
-          <Descriptions.Item label="聚合">{metric.aggregation}</Descriptions.Item>
-          <Descriptions.Item label="粒度">{metric.granularity}</Descriptions.Item>
+          <Descriptions.Item label="类型">{enumLabel(METRIC_TYPE_LABEL, metric.type)}</Descriptions.Item>
+          <Descriptions.Item label="分级">{enumLabel(METRIC_TIER_LABEL, metric.metric_tier)}</Descriptions.Item>
+          <Descriptions.Item label="聚合">{enumLabel(AGGREGATION_LABEL, metric.aggregation)}</Descriptions.Item>
+          <Descriptions.Item label="粒度">{enumLabel(GRANULARITY_LABEL, metric.granularity)}</Descriptions.Item>
           <Descriptions.Item label="单位">{metric.unit}</Descriptions.Item>
           <Descriptions.Item label="币种">{metric.currency || <span className="muted">—</span>}</Descriptions.Item>
-          <Descriptions.Item label="数据分层">{metric.dw_layer}</Descriptions.Item>
-          <Descriptions.Item label="时间语义">{metric.time_semantics}</Descriptions.Item>
-          <Descriptions.Item label="新鲜度">{metric.freshness}</Descriptions.Item>
+          <Descriptions.Item label="数据分层">{enumLabel(DW_LAYER_LABEL, metric.dw_layer)}</Descriptions.Item>
+          <Descriptions.Item label="时间语义">{enumLabel(TIME_SEMANTICS_LABEL, metric.time_semantics)}</Descriptions.Item>
+          <Descriptions.Item label="新鲜度">{enumLabel(FRESHNESS_LABEL, metric.freshness)}</Descriptions.Item>
           <Descriptions.Item label="SLA">{metric.sla || <span className="muted">—</span>}</Descriptions.Item>
-          <Descriptions.Item label="服务模式">{metric.serving_mode}</Descriptions.Item>
-          <Descriptions.Item label="可加性">{metric.additivity}</Descriptions.Item>
+          <Descriptions.Item label="服务模式">{enumLabel(SERVING_MODE_LABEL, metric.serving_mode)}</Descriptions.Item>
+          <Descriptions.Item label="可加性">{enumLabel(ADDITIVITY_LABEL, metric.additivity)}</Descriptions.Item>
           <Descriptions.Item label="非可加维度">
             {metric.non_additive_dimensions?.length ? metric.non_additive_dimensions.join(", ") : <span className="muted">—</span>}
           </Descriptions.Item>

@@ -3,6 +3,7 @@ import { Card, Table, Tag, Input, Select, Button, Space, message } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { listAudit, UnisenseApiError } from "../api";
 import type { AuditEntry } from "../types";
+import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel } from "../utils/auditI18n";
 
 export function AuditLog() {
   const [items, setItems] = useState<AuditEntry[]>([]);
@@ -24,7 +25,7 @@ export function AuditLog() {
       });
       setItems(res.items);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -44,7 +45,7 @@ export function AuditLog() {
         <Tag style={{ marginLeft: 6 }}>{v}</Tag>
       </span>
     ) },
-    { title: "实体类型", dataIndex: "entity_type", key: "entityType", width: 150, render: (v: string) => <Tag>{v}</Tag> },
+    { title: "实体类型", dataIndex: "entity_type", key: "entityType", width: 150, render: (v: string) => <Tag>{entityTypeLabel(v)}</Tag> },
     { title: "实体 ID", dataIndex: "entity_id", key: "entityId", ellipsis: true, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
     {
       title: "详情",
@@ -56,7 +57,7 @@ export function AuditLog() {
           <span className="mono" style={{ fontSize: 12 }}>
             {Object.entries(v)
               .filter(([, val]) => val !== null && val !== undefined)
-              .map(([k, val]) => `${k}:${typeof val === "object" ? JSON.stringify(val) : String(val)}`)
+              .map(([k, val]) => `${AUDIT_FIELD_LABEL[k] ?? k}:${auditValueText(val)}`)
               .join(" · ")}
           </span>
         ) : (
@@ -98,7 +99,7 @@ export function AuditLog() {
             style={{ width: 180 }}
             value={entityType || undefined}
             onChange={(v) => { setEntityType(v || ""); setPage(1); }}
-            options={["metric_definition", "metric_template", "metric_version", "conflict", "lineage_edge", "grant", "term", "dimension", "quality_rule", "notification", "data_source", "db_catalog"].map((v) => ({ value: v, label: v }))}
+            options={["metric_definition", "metric_template", "metric_version", "conflict", "lineage_edge", "grant", "term", "dimension", "quality_rule", "notification", "data_source", "db_catalog"].map((v) => ({ value: v, label: entityTypeLabel(v) }))}
           />
           <Input
             placeholder="操作者 ID"

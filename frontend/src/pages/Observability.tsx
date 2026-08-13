@@ -13,6 +13,7 @@ import {
   UnisenseApiError,
 } from "../api";
 import type { Feedback } from "../types";
+import { QUALITY_LEVEL_LABEL, NOTIFY_STATUS_LABEL } from "../utils/enums";
 
 function MetricsTab() {
   const [quality, setQuality] = useState<{ by_level: Record<string, number>; by_status: Record<string, number>; total: number } | null>(null);
@@ -62,7 +63,7 @@ function MetricsTab() {
           <Card title="质量事件级别分布" size="small">
             {Object.entries(quality?.by_level ?? {}).map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid var(--line-soft)" }}>
-                <Tag color={k === "ERROR" ? "error" : k === "WARN" ? "warning" : "default"}>{k}</Tag>
+                <Tag color={k === "ERROR" ? "error" : k === "WARN" ? "warning" : "default"}>{QUALITY_LEVEL_LABEL[k] ?? k}</Tag>
                 <span className="mono">{v}</span>
               </div>
             ))}
@@ -72,7 +73,7 @@ function MetricsTab() {
           <Card title="通知投递状态" size="small">
             {Object.entries(notif?.by_status ?? {}).map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid var(--line-soft)" }}>
-                <Tag color={k === "FAILED" ? "error" : k === "SENT" ? "success" : "warning"}>{k}</Tag>
+                <Tag color={k === "FAILED" ? "error" : k === "SENT" ? "success" : "warning"}>{NOTIFY_STATUS_LABEL[k] ?? k}</Tag>
                 <span className="mono">{v}</span>
               </div>
             ))}
@@ -103,7 +104,7 @@ function FeedbackTab() {
       const res = await listFeedback();
       setItems(res.items);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -119,7 +120,7 @@ function FeedbackTab() {
       await updateFeedbackStatus(f.id, status, "前台处理");
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "更新失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
     }
   }
 
@@ -162,7 +163,7 @@ function SubmitFeedbackTab() {
       message.success("反馈已提交");
       form.resetFields();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "提交失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交失败");
     }
   }
 
@@ -204,7 +205,7 @@ function NpsTab() {
       setModalOpen(false);
       form.resetFields();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "提交失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交失败");
     }
   }
 

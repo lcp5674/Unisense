@@ -33,7 +33,7 @@ export function Favorites() {
       track("favorites_view", undefined, "favorite");
     } catch (err) {
       message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败",
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",
       );
     } finally {
       setLoading(false);
@@ -54,7 +54,7 @@ export function Favorites() {
       message.success("已添加收藏");
     } catch (err) {
       message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "添加失败",
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "添加失败",
       );
     }
   }
@@ -66,7 +66,7 @@ export function Favorites() {
       message.success("已移除收藏");
     } catch (err) {
       message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "移除失败",
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "移除失败",
       );
     }
   }

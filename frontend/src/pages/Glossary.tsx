@@ -35,7 +35,7 @@ function TermsTab() {
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -61,7 +61,7 @@ function TermsTab() {
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
     }
   }
 
@@ -71,7 +71,7 @@ function TermsTab() {
       message.success("已提交发布");
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "提交失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交失败");
     }
   }
 
@@ -81,7 +81,7 @@ function TermsTab() {
       message.success("已废弃");
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "废弃失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "废弃失败");
     }
   }
 
@@ -183,7 +183,7 @@ function ConflictsTab() {
       const res = await listTermConflicts();
       setItems(res.items);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -200,7 +200,7 @@ function ConflictsTab() {
       message.success(decision === "RESOLVED" ? "已解决冲突" : "已忽略冲突");
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "操作失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
     }
   }
 

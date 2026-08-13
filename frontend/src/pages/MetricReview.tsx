@@ -50,7 +50,7 @@ export function MetricReview() {
       setTotal(res.total);
     } catch (err) {
       message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败",
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",
       );
     } finally {
       setLoading(false);
@@ -70,7 +70,7 @@ export function MetricReview() {
       load();
     } catch (err) {
       message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "操作失败",
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败",
       );
     } finally {
       setBusyCode(null);

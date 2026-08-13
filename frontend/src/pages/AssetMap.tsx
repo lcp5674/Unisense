@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Card, Descriptions, Drawer, Empty, Row, Col, Input, Select, Space, Spin, Statistic, Switch, Table, Tabs, Tag, message } from "antd";
+import { Alert, Button, Card, Descriptions, Drawer, Empty, Row, Col, Input, Select, Space, Spin, Statistic, Switch, Table, Tabs, Tag, Tooltip, message } from "antd";
 import { ApartmentOutlined, DeleteOutlined, DownloadOutlined, EyeOutlined, GlobalOutlined, HeartOutlined, HeatMapOutlined, SafetyOutlined, SearchOutlined, TableOutlined, UserOutlined } from "@ant-design/icons";
 import { Pie } from "@ant-design/charts";
 import {
@@ -32,6 +32,8 @@ import type {
   AssetTableItem,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { ObjectView } from "../utils/display";
+import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 
 interface GraphNode {
   id: string;
@@ -76,11 +78,7 @@ function sensitivityTag(s: string | null | undefined) {
 function renderSchemaSummary(summary: string | Record<string, unknown> | null | undefined) {
   if (summary == null || summary === "") return <span className="muted">-</span>;
   if (typeof summary === "string") return <span>{summary}</span>;
-  return (
-    <pre style={{ margin: 0, maxHeight: 240, overflow: "auto", fontSize: 12, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-      {JSON.stringify(summary, null, 2)}
-    </pre>
-  );
+  return <ObjectView data={summary} />;
 }
 
 function normalizeBuckets(buckets: Array<Record<string, unknown>>) {
@@ -153,7 +151,7 @@ function OverviewTab() {
             <Row gutter={[8, 8]}>
               {Object.entries(summary.by_entity_type ?? {}).map(([k, v]) => (
                 <Col span={8} key={k}>
-                  <Statistic title={k} value={v} />
+                  <Statistic title={ENTITY_TYPE_LABEL[k] ?? k} value={v} />
                 </Col>
               ))}
             </Row>
@@ -456,7 +454,7 @@ function OrphansTab() {
           columns={[
             { title: "数据源", dataIndex: "source_id", key: "source_id" },
             { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true },
-            { title: "类型", dataIndex: "entity_type", key: "entity_type", width: 90 },
+            { title: "类型", dataIndex: "entity_type", key: "entity_type", width: 90, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
             {
               title: "敏感度",
               dataIndex: "sensitivity_level",
@@ -551,7 +549,7 @@ function TablesTab() {
           columns={[
             { title: "数据源", dataIndex: "source_id", key: "source_id" },
             { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true },
-            { title: "类型", dataIndex: "entity_type", key: "entity_type", width: 90 },
+            { title: "类型", dataIndex: "entity_type", key: "entity_type", width: 90, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
             {
               title: "敏感度",
               dataIndex: "sensitivity_level",
@@ -607,7 +605,13 @@ function TablesTab() {
               {detail.schema_incomplete ? <Tag color="orange">不完整</Tag> : <Tag color="green">完整</Tag>}
             </Descriptions.Item>
             <Descriptions.Item label="内容指纹">
-              <span style={{ fontFamily: "monospace", wordBreak: "break-all" }}>{detail.content_signature ?? "-"}</span>
+              {detail.content_signature ? (
+                <Tooltip title={detail.content_signature}>
+                  <span style={{ fontFamily: "monospace", cursor: "help" }}>{detail.content_signature.slice(0, 16)}…</span>
+                </Tooltip>
+              ) : (
+                <span className="muted">-</span>
+              )}
             </Descriptions.Item>
             <Descriptions.Item label="Schema 摘要">{renderSchemaSummary(detail.schema_summary)}</Descriptions.Item>
             <Descriptions.Item label="关联血缘">
@@ -623,7 +627,7 @@ function TablesTab() {
             <Descriptions.Item label="源健康">
               {detail.source_health ? (
                 <Tag color={detail.source_health.health_status === "healthy" ? "green" : detail.source_health.health_status === "unhealthy" ? "red" : "default"}>
-                  {detail.source_health.health_status}
+                  {SOURCE_HEALTH_LABEL[detail.source_health.health_status] ?? detail.source_health.health_status}
                 </Tag>
               ) : (
                 <span className="muted">未知</span>
@@ -752,7 +756,7 @@ function SearchTab() {
             columns={[
               { title: "类型", dataIndex: "type", key: "type", width: 90, render: (t: string) => <Tag color={t === "metric" ? "purple" : "blue"}>{t === "metric" ? "指标" : "目录"}</Tag> },
               { title: "名称", dataIndex: "name", key: "name", ellipsis: true, render: (v: string, r: AssetSearchItem) => (r.type === "metric" ? <span className="mono">{v}</span> : v) },
-              { title: "实体类型", dataIndex: "entity_type", key: "entity_type", width: 100 },
+              { title: "实体类型", dataIndex: "entity_type", key: "entity_type", width: 100, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
               { title: "敏感度", dataIndex: "sensitivity_level", key: "sensitivity", width: 110, render: (s: string | null) => sensitivityTag(s) },
               { title: "域", dataIndex: "domain", key: "domain", width: 120, render: (v: string | null) => v ?? "-" },
               { title: "状态", dataIndex: "status", key: "status", width: 110, render: (v: string | null) => v ?? "-" },
@@ -815,7 +819,7 @@ function HealthTab() {
                 columns={[
                   { title: "源 ID", dataIndex: "source_id", key: "source_id" },
                   { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
-                  { title: "状态", dataIndex: "health_status", key: "status", width: 100, render: () => <Tag color="red">unhealthy</Tag> },
+                  { title: "状态", dataIndex: "health_status", key: "status", width: 100, render: (v: string) => <Tag color="red">{SOURCE_HEALTH_LABEL[v] ?? v}</Tag> },
                 ]}
               />
             )}
@@ -969,7 +973,7 @@ function ChangesTab() {
         title={() => <b>目录</b>}
         columns={[
           { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
-          { title: "类型", dataIndex: "entity_type", key: "type", width: 90 },
+          { title: "类型", dataIndex: "entity_type", key: "type", width: 90, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
           { title: "敏感度", dataIndex: "sensitivity_level", key: "sensitivity", width: 110, render: (s: string | null) => sensitivityTag(s) },
           { title: "源", dataIndex: "source_id", key: "source", width: 120 },
           { title: "更新时间", dataIndex: "updated_at", key: "updated", width: 180, render: (v: string) => new Date(v).toLocaleString() },
@@ -1026,7 +1030,7 @@ function MyAssetsTab() {
         title={() => <b>我的目录</b>}
         columns={[
           { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
-          { title: "类型", dataIndex: "entity_type", key: "type", width: 90 },
+          { title: "类型", dataIndex: "entity_type", key: "type", width: 90, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
           { title: "敏感度", dataIndex: "sensitivity_level", key: "sensitivity", width: 110, render: (s: string | null) => sensitivityTag(s) },
           { title: "源", dataIndex: "source_id", key: "source", width: 120 },
         ]}

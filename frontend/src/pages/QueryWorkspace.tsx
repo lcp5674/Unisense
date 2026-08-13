@@ -15,13 +15,55 @@ import {
 } from "../api";
 import type { DimensionExpr, DryRunResponse, QueryResponse, SnapshotResponse, ClientResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { ObjectView, kvText } from "../utils/display";
+import { DATE_RANGE_LABEL, GRANULARITY_LABEL } from "../utils/enums";
+
+// 执行计划等对象字段名 → 中文（可读展示，避免裸 JSON 直出）
+const CHECK_LABEL: Record<string, string> = {
+  granularity: "粒度校验",
+  authorization: "权限校验",
+  staleness: "时效校验",
+  metric_status: "指标状态校验",
+};
+
+const VALUE_FIELD_LABEL: Record<string, string> = {
+  value: "指标值",
+  total: "总计",
+  count: "数量",
+};
 
 function PlanView({ plan }: { plan: Record<string, unknown> }) {
-  return (
-    <pre className="code-block" style={{ maxHeight: 260, overflow: "auto" }}>
-      {JSON.stringify(plan, null, 2)}
-    </pre>
-  );
+  return <ObjectView data={plan} />;
+}
+
+// 查询结果：rows 数组 → 动态列表格；非数组/空结果 → 结构化字段视图
+function QueryResultTable({ data }: { data: Record<string, unknown> }) {
+  const rows = Array.isArray(data.rows) ? (data.rows as Array<Record<string, unknown>>) : [];
+  if (rows.length > 0) {
+    const cols = Object.keys(rows[0]).map((k) => ({
+      title: k,
+      dataIndex: k,
+      key: k,
+      ellipsis: true,
+      render: (v: unknown) =>
+        typeof v === "object" && v !== null ? (
+          <span className="mono" style={{ fontSize: 12 }}>{JSON.stringify(v)}</span>
+        ) : (
+          String(v ?? "")
+        ),
+    }));
+    return (
+      <div>
+        <Table size="small" dataSource={rows} columns={cols} rowKey={(_, i) => String(i)} pagination={{ pageSize: 10 }} />
+        <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+          共 {String(data.total ?? rows.length)} 行
+          {data.elapsed_ms != null ? ` · 耗时 ${data.elapsed_ms} ms` : ""}
+          {data.from_cache ? " · 来自缓存" : ""}
+        </div>
+      </div>
+    );
+  }
+  return <ObjectView data={data} />;
 }
 
 export function QueryWorkspace() {
@@ -73,7 +115,7 @@ export function QueryWorkspace() {
       setQuery(null);
       track("consume_dry_run", metricCode, "metric");
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "校验失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "校验失败");
     } finally {
       setBusy(null);
     }
@@ -95,7 +137,7 @@ export function QueryWorkspace() {
       setDryRun(null);
       track("consume_query", metricCode, "metric");
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "查询失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "查询失败");
     } finally {
       setBusy(null);
     }
@@ -107,7 +149,7 @@ export function QueryWorkspace() {
     try {
       setSnapshots(await listSnapshots(metricCode, 50));
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载快照失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载快照失败");
     } finally {
       setBusy(null);
     }
@@ -126,16 +168,16 @@ export function QueryWorkspace() {
       setTokenOk(true);
       message.success(`已使用客户端 ${active.client_id} 签发消费令牌`);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "签发失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "签发失败");
     }
   }
 
   const snapColumns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "版本", dataIndex: "version", key: "version", width: 80, render: (v: number) => `v${v}` },
-    { title: "维度", dataIndex: "dims", key: "dims", render: (v: Record<string, unknown>) => <span className="mono">{JSON.stringify(v)}</span> },
+    { title: "维度", dataIndex: "dims", key: "dims", render: (v: Record<string, unknown>) => <span style={{ fontSize: 12 }}>{kvText(v)}</span> },
     { title: "时间范围", dataIndex: "date_range", key: "date_range" },
-    { title: "值", dataIndex: "value_json", key: "value", render: (v: Record<string, unknown>) => <span className="mono">{JSON.stringify(v)}</span> },
+    { title: "值", dataIndex: "value_json", key: "value", render: (v: Record<string, unknown>) => <span className="mono" style={{ fontSize: 12 }}>{kvText(v, VALUE_FIELD_LABEL)}</span> },
     {
       title: "质量",
       dataIndex: "quality_flag",
@@ -196,7 +238,7 @@ export function QueryWorkspace() {
                   <Select
                     value={dateRange}
                     onChange={setDateRange}
-                    options={["today", "last_7d", "last_30d", "last_90d", "ytd", "last_365d"].map((v) => ({ value: v, label: v }))}
+                    options={["today", "last_7d", "last_30d", "last_90d", "ytd", "last_365d"].map((v) => ({ value: v, label: DATE_RANGE_LABEL[v] ?? v }))}
                   />
                 </Form.Item>
               </Col>
@@ -206,8 +248,8 @@ export function QueryWorkspace() {
                     allowClear
                     value={granularity}
                     onChange={setGranularity}
-                    placeholder="day/week/month/quarter"
-                    options={["day", "week", "month", "quarter"].map((v) => ({ value: v, label: v }))}
+                    placeholder="按日 / 周 / 月 / 季"
+                    options={["day", "week", "month", "quarter"].map((v) => ({ value: v, label: GRANULARITY_LABEL[v] ?? v }))}
                   />
                 </Form.Item>
               </Col>
@@ -286,12 +328,18 @@ export function QueryWorkspace() {
               />
               {dryRun.checks && dryRun.checks.length > 0 && (
                 <Card size="small" title="校验项" style={{ marginBottom: 12 }}>
-                  {dryRun.checks.map((c, i) => (
-                    <div key={i} style={{ marginBottom: 4 }}>
-                      <Tag color={(c as { ok?: boolean }).ok ? "success" : "error"}>{(c as { ok?: boolean }).ok ? "PASS" : "FAIL"}</Tag>
-                      <span className="mono" style={{ fontSize: 13 }}>{JSON.stringify(c)}</span>
-                    </div>
-                  ))}
+                  {dryRun.checks.map((c, i) => {
+                    const ok = (c as { ok?: boolean }).ok;
+                    const checkName = CHECK_LABEL[String((c as { check?: string }).check ?? "")] ?? String((c as { check?: string }).check ?? "校验");
+                    const detail = c.detail != null ? String(c.detail) : "";
+                    return (
+                      <div key={i} style={{ marginBottom: 4 }}>
+                        <Tag color={ok ? "success" : "error"}>{ok ? "通过" : "未通过"}</Tag>
+                        <span style={{ fontSize: 13 }}>{checkName}</span>
+                        {detail && <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>{detail}</span>}
+                      </div>
+                    );
+                  })}
                 </Card>
               )}
               <Card size="small" title="执行计划" style={{ marginBottom: 12 }}>
@@ -313,7 +361,7 @@ export function QueryWorkspace() {
               />
               {query.data ? (
                 <Card size="small" title="查询结果" style={{ marginBottom: 12 }}>
-                  <pre className="code-block">{JSON.stringify(query.data, null, 2)}</pre>
+                  <QueryResultTable data={query.data} />
                 </Card>
               ) : (
                 <Alert type="info" message="无结果数据" style={{ marginBottom: 12 }} />

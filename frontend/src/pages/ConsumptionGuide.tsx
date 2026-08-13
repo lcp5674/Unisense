@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Card, Spin, Alert, Descriptions, Typography, Tag, Empty, Space } from "antd";
+import { Card, Spin, Alert, Descriptions, Tag, Empty, Space } from "antd";
 import { InfoCircleOutlined, WarningOutlined, LinkOutlined } from "@ant-design/icons";
 import { fetchConsumptionGuide, getMetric } from "../api";
 import type { ConsumptionGuideResponse, MetricResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
-
-const { Paragraph } = Typography;
+import { ObjectView, DEF_FIELD_LABEL } from "../utils/display";
+import { enumLabel, METRIC_TYPE_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, SERVING_MODE_LABEL } from "../utils/enums";
 
 export function ConsumptionGuide() {
   const { metricCode } = useParams<{ metricCode: string }>();
@@ -73,8 +73,8 @@ export function ConsumptionGuide() {
         </div>
         <Space>
           <Tag color="orange">{guide.domain}</Tag>
-          <Tag>{guide.type}</Tag>
-          <Tag>{guide.serving_mode}</Tag>
+          <Tag>{enumLabel(METRIC_TYPE_LABEL, guide.type)}</Tag>
+          <Tag>{enumLabel(SERVING_MODE_LABEL, guide.serving_mode)}</Tag>
         </Space>
       </div>
 
@@ -83,12 +83,12 @@ export function ConsumptionGuide() {
           <Descriptions.Item label="编码">{metricFields.metric_code}</Descriptions.Item>
           <Descriptions.Item label="名称">{metricFields.name}</Descriptions.Item>
           <Descriptions.Item label="域">{metricFields.domain}</Descriptions.Item>
-          <Descriptions.Item label="类型">{metricFields.type}</Descriptions.Item>
+          <Descriptions.Item label="类型">{enumLabel(METRIC_TYPE_LABEL, metricFields.type)}</Descriptions.Item>
           <Descriptions.Item label="粒度">{metricFields.granularity}</Descriptions.Item>
           <Descriptions.Item label="单位">{metricFields.unit}</Descriptions.Item>
-          <Descriptions.Item label="聚合">{metricFields.aggregation}</Descriptions.Item>
-          <Descriptions.Item label="时间语义">{metricFields.time_semantics}</Descriptions.Item>
-          <Descriptions.Item label="服务模式">{metricFields.serving_mode}</Descriptions.Item>
+          <Descriptions.Item label="聚合">{enumLabel(AGGREGATION_LABEL, metricFields.aggregation)}</Descriptions.Item>
+          <Descriptions.Item label="时间语义">{enumLabel(TIME_SEMANTICS_LABEL, metricFields.time_semantics)}</Descriptions.Item>
+          <Descriptions.Item label="服务模式">{enumLabel(SERVING_MODE_LABEL, metricFields.serving_mode)}</Descriptions.Item>
         </Descriptions>
       </Card>
 
@@ -135,14 +135,10 @@ export function ConsumptionGuide() {
       </Card>
 
       {metric && metric.definition_json && Object.keys(metric.definition_json).length > 0 && (
-        <Card title="口径定义（JSON）" style={{ marginTop: 20 }}>
-          <pre className="code-block">{JSON.stringify(metric.definition_json, null, 2)}</pre>
+        <Card title="口径定义" style={{ marginTop: 20 }}>
+          <ObjectView data={metric.definition_json} labels={DEF_FIELD_LABEL} />
         </Card>
       )}
-      <div style={{ height: 8 }} />
-      <Paragraph type="secondary" style={{ fontSize: 12 }}>
-        数据源：/semantics/consumption-guide/{metric?.id ?? "?"}（按指标 ID）+ /metric-definitions/{metricCode}
-      </Paragraph>
     </div>
   );
 }

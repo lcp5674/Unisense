@@ -73,7 +73,7 @@ function GrantsTab() {
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -100,7 +100,7 @@ function GrantsTab() {
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
     }
   }
 
@@ -110,7 +110,7 @@ function GrantsTab() {
       message.success("已回收");
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "回收失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "回收失败");
     }
   }
 
@@ -203,7 +203,7 @@ function RolesTab() {
       setModalOpen(false);
       form.resetFields();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
     }
   }
 
@@ -253,7 +253,7 @@ function PiiReviewTab() {
       setModalOpen(false);
       form.resetFields();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "复核失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "复核失败");
     }
   }
 
@@ -264,7 +264,7 @@ function PiiReviewTab() {
       const r = res as { scanned: number; changed: number; pii_found: number; degraded: number };
       message.success(`重扫完成：扫描 ${r.scanned} · 变更 ${r.changed} · PII ${r.pii_found} · 降级 ${r.degraded}`);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "重扫失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "重扫失败");
     } finally {
       setRescanLoading(false);
     }
@@ -318,7 +318,7 @@ function CheckTab() {
       });
       setResult({ allow: res.allow, reason: res.reason, masking: res.masking, restricted: res.restricted });
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "检查失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "检查失败");
     }
   }
 
@@ -368,7 +368,7 @@ function ErasureTab() {
       setModalOpen(false);
       form.resetFields();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "请求失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "请求失败");
     }
   }
 

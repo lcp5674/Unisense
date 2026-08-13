@@ -16,6 +16,8 @@ import {
   AssetSearchItem,
   AssetTableItem,
   AuditEntry,
+  AutoSuggestRequest,
+  AutoSuggestResponse,
   ClientCreateRequest,
   ClientCreatedResponse,
   ClientResponse,
@@ -28,6 +30,8 @@ import {
   DataSource,
   DataSourceCreateRequest,
   DBCatalog,
+  DictItemCreateRequest,
+  DictItemUpdateRequest,
   Dimension,
   DimensionMapping,
   DimensionMember,
@@ -77,6 +81,11 @@ import {
   SourceType,
   SourceTypeInfo,
   SubscriptionPref,
+  SubjectDomain,
+  SubjectDomainCreateRequest,
+  SubjectDomainTreeNode,
+  SubjectDomainUpdateRequest,
+  SystemDictItem,
   TestConnectionResult,
   UserBrief,
   UserPreferenceItem,
@@ -117,6 +126,36 @@ export function clearConsumeToken(): void {
   localStorage.removeItem(CONSUME_TOKEN_KEY);
 }
 
+// 后端 error_code → 中文可读描述（供全站错误提示展示，避免英文技术码直出给业务用户）
+const ERROR_CODE_ZH: Record<string, string> = {
+  AUTH_TOKEN_MISSING: "未登录或登录状态缺失",
+  AUTH_TOKEN_EXPIRED: "登录已过期，请重新登录",
+  AUTH_TOKEN_INVALID: "登录状态无效",
+  AUTH_INVALID_CREDENTIALS: "用户名或密码错误",
+  AUTH_APIKEY_MISSING: "缺少访问密钥（X-Api-Key）",
+  AUTH_APIKEY_INVALID: "访问密钥无效或已吊销",
+  FORBIDDEN: "您无权执行该操作",
+  FORBIDDEN_DOMAIN: "您无权访问该数据域",
+  FORBIDDEN_METRIC: "您无权访问该指标",
+  FORBIDDEN_DIMENSION: "您无权访问该维度",
+  FORBIDDEN_PII: "无权访问含个人信息的数据",
+  FORBIDDEN_DEPRECATED: "该指标已废弃，无法操作",
+  RATE_LIMITED: "请求过于频繁，请稍后再试",
+  DEPENDENCY_DEGRADED_ENGINE: "查询引擎暂不可用，请稍后再试",
+  INJECTION_DETECTED: "检测到非法输入，已拦截",
+  UNSAFE_QUERY: "查询包含危险语句，已拒绝",
+  SELF_REVIEW_BLOCKED: "不能审核自己提交的指标",
+  INVALID_TRANSITION: "当前状态不允许该操作",
+  NOT_FOUND: "资源不存在或已被删除",
+  VALIDATION_ERROR: "输入校验未通过",
+  INTERNAL_ERROR: "系统内部错误，请稍后重试",
+  DEPENDENCY_UNPUBLISHED: "依赖指标尚未发布",
+  CONFLICT: "存在冲突，需协商或裁决后继续",
+  PII_REVIEW_REQUIRED: "该指标含个人信息，需先完成合规复核",
+  GRANULARITY_VIOLATION: "查询粒度与指标定义不符",
+  CIRCULAR_DEPENDENCY: "检测到循环依赖，已拒绝",
+};
+
 export class UnisenseApiError extends Error {
   code: string;
   traceId: string;
@@ -129,6 +168,11 @@ export class UnisenseApiError extends Error {
     this.status = status;
     this.traceId = traceId;
     this.detail = detail;
+  }
+
+  /** 错误码的中文可读描述；未收录时回退为原始错误码。 */
+  get codeZh(): string {
+    return ERROR_CODE_ZH[this.code] ?? this.code;
   }
 }
 
@@ -291,10 +335,12 @@ export async function publishMetric(code: string, req: MetricPublishRequest): Pr
 }
 
 export async function deprecateMetric(code: string, successor_code: string): Promise<MetricResponse> {
-  const qs = new URLSearchParams({ successor_code });
   return request<MetricResponse>(
-    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/deprecate?${qs.toString()}`,
-    { method: "POST" },
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/deprecate`,
+    {
+      method: "POST",
+      body: JSON.stringify({ successor_code }),
+    },
   );
 }
 
@@ -309,10 +355,10 @@ export async function piiReview(code: string): Promise<MetricResponse> {
   );
 }
 
-// 提交评审：DRAFT → REVIEW；change_reason 可选，缺省"提交评审"
+// 提交评审：DRAFT → REVIEW；change_reason 缺省"提交评审"（后端 /submit，对齐 FR-003）
 export async function submitReview(metricCode: string, changeReason = "提交评审"): Promise<MetricResponse> {
   return request<MetricResponse>(
-    `${API_BASE}/metric-definitions/${encodeURIComponent(metricCode)}/submit-review`,
+    `${API_BASE}/metric-definitions/${encodeURIComponent(metricCode)}/submit`,
     {
       method: "POST",
       body: JSON.stringify({ change_reason: changeReason }),
@@ -320,19 +366,30 @@ export async function submitReview(metricCode: string, changeReason = "提交评
   );
 }
 
-// 评审：approved=true → REVIEW→PUBLISHED（PII 未过合规会被 409 拒绝）；false → REVIEW→DRAFT
+// 审核通过：REVIEW → PUBLISHED/EXPERIMENTAL（后端 /approve，对齐 FR-004）
+// 实现见下方统一版本（mode=standard 全量 / experimental 灰度，兼容 gray_tenant_ids/target_version）
+
+// 审核驳回：REVIEW → DRAFT（后端 /reject，对齐 FR-005）
+export async function rejectMetric(metricCode: string, reason: string): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(metricCode)}/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    },
+  );
+}
+
+// 兼容旧调用：reviewMetric(approved=true) → approveMetric；false → rejectMetric
 export async function reviewMetric(
   metricCode: string,
   approved: boolean,
   changeReason: string,
 ): Promise<MetricResponse> {
-  return request<MetricResponse>(
-    `${API_BASE}/metric-definitions/${encodeURIComponent(metricCode)}/review`,
-    {
-      method: "POST",
-      body: JSON.stringify({ approved, change_reason: changeReason }),
-    },
-  );
+  if (approved) {
+    return approveMetric(metricCode, { mode: "standard" });
+  }
+  return rejectMetric(metricCode, changeReason || "审核不通过，请修改后重新提交");
 }
 
 // ---- 指标可信度：健康度/对比/灰度/紧急发布/版本确认（backend /metric-definitions）----
@@ -578,11 +635,10 @@ export async function getTemplate(templateId: number): Promise<MetricTemplate> {
   return request<MetricTemplate>(`${API_BASE}/semantics/templates/${templateId}`);
 }
 
-// 消费指南：后端按 metric_id，前端按 code 使用 → 先解析 id 再取指南
+// 消费指南：后端按 metric_code 查询（对齐 semantic.py /consumption-guide/{metric_code}）
 export async function fetchConsumptionGuide(metricCode: string): Promise<ConsumptionGuideResponse> {
-  const metric = await getMetric(metricCode);
   return request<ConsumptionGuideResponse>(
-    `${API_BASE}/semantics/consumption-guide/${metric.id}`,
+    `${API_BASE}/semantics/consumption-guide/${encodeURIComponent(metricCode)}`,
   );
 }
 
@@ -1506,3 +1562,116 @@ export async function downloadAssetExport(params?: {
 }
 
 export type { ApiError, DimensionExpr };
+
+// ---- 主题域管理（backend /api/v1/domains/*）----
+
+export async function listDomainTree(status?: string): Promise<SubjectDomainTreeNode[]> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<SubjectDomainTreeNode[]>(`${API_BASE}/domains${qs}`);
+}
+
+export async function getDomain(code: string): Promise<SubjectDomain> {
+  return request<SubjectDomain>(`${API_BASE}/domains/${encodeURIComponent(code)}`);
+}
+
+export async function createDomain(data: SubjectDomainCreateRequest): Promise<SubjectDomain> {
+  return request<SubjectDomain>(`${API_BASE}/domains`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateDomain(code: string, data: SubjectDomainUpdateRequest): Promise<SubjectDomain> {
+  return request<SubjectDomain>(`${API_BASE}/domains/${encodeURIComponent(code)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deactivateDomain(code: string): Promise<SubjectDomain> {
+  return request<SubjectDomain>(`${API_BASE}/domains/${encodeURIComponent(code)}/status?action=deactivate`, {
+    method: "PATCH",
+  });
+}
+
+export async function activateDomain(code: string): Promise<SubjectDomain> {
+  return request<SubjectDomain>(`${API_BASE}/domains/${encodeURIComponent(code)}/status?action=activate`, {
+    method: "PATCH",
+  });
+}
+
+export async function deleteDomain(code: string): Promise<void> {
+  await request(`${API_BASE}/domains/${encodeURIComponent(code)}`, { method: "DELETE" });
+}
+
+export async function getDomainDefaults(code: string): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(`${API_BASE}/domains/${encodeURIComponent(code)}/defaults`);
+}
+
+export async function updateDomainDefaults(code: string, defaults: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(`${API_BASE}/domains/${encodeURIComponent(code)}/defaults`, {
+    method: "PUT",
+    body: JSON.stringify({ defaults_json: defaults }),
+  });
+}
+
+export async function getDomainMetrics(code: string): Promise<Array<{ id: number; metric_code: string; name: string; status: string; type: string }>> {
+  return request(`${API_BASE}/domains/${encodeURIComponent(code)}/metrics`);
+}
+
+// ---- 系统字典管理（backend /api/v1/dicts/*）----
+
+export async function listDictTypes(): Promise<string[]> {
+  return request<string[]>(`${API_BASE}/dicts/types`);
+}
+
+export async function listDictItems(dictType: string): Promise<SystemDictItem[]> {
+  return request<SystemDictItem[]>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}`);
+}
+
+export async function listAllDictItems(dictType: string): Promise<SystemDictItem[]> {
+  return request<SystemDictItem[]>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/all`);
+}
+
+export async function createDictItem(dictType: string, data: DictItemCreateRequest): Promise<SystemDictItem> {
+  return request<SystemDictItem>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateDictItem(dictType: string, code: string, data: DictItemUpdateRequest): Promise<SystemDictItem> {
+  return request<SystemDictItem>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deactivateDictItem(dictType: string, code: string): Promise<SystemDictItem> {
+  return request<SystemDictItem>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/status?action=deactivate`, {
+    method: "PATCH",
+  });
+}
+
+export async function activateDictItem(dictType: string, code: string): Promise<SystemDictItem> {
+  return request<SystemDictItem>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/status?action=activate`, {
+    method: "PATCH",
+  });
+}
+
+export async function deleteDictItem(dictType: string, code: string): Promise<void> {
+  await request(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}`, { method: "DELETE" });
+}
+
+export async function getDictItemRefCount(dictType: string, code: string): Promise<{ ref_count: number }> {
+  return request(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/ref-count`);
+}
+
+// ---- 自动推断（backend /api/v1/metric-definitions/auto-suggest）----
+
+export async function autoSuggestMetric(data: AutoSuggestRequest): Promise<AutoSuggestResponse> {
+  return request<AutoSuggestResponse>(`${API_BASE}/metric-definitions/auto-suggest`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}

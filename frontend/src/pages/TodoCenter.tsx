@@ -44,7 +44,7 @@ export function TodoCenter() {
       track("todo_center_view", undefined, "todo");
     } catch (err) {
       message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败",
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",
       );
     } finally {
       setLoading(false);

@@ -29,6 +29,8 @@ import { AiAssistant } from "./pages/AiAssistant";
 import { AuditLog } from "./pages/AuditLog";
 import { DataSources } from "./pages/DataSources";
 import { Catalogs } from "./pages/Catalogs";
+import { SubjectDomain } from "./pages/SubjectDomain";
+import { SystemDict } from "./pages/SystemDict";
 import { TrackingProvider } from "./components/TrackingProvider";
 
 const { useApp } = AntApp;
@@ -52,7 +54,7 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
       const me = await fetchCurrentUser();
       onLogin(me);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "登录失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "登录失败");
     } finally {
       setLoading(false);
     }
@@ -203,6 +205,8 @@ export default function App() {
             <Route path="/observability" element={<Observability />} />
             <Route path="/data-sources" element={<DataSources />} />
             <Route path="/catalogs" element={<Catalogs />} />
+            <Route path="/domains" element={<SubjectDomain />} />
+            <Route path="/dicts" element={<SystemDict />} />
             <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />

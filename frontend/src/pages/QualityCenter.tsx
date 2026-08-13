@@ -19,6 +19,8 @@ import {
   UnisenseApiError,
 } from "../api";
 import type { MetricResponse, QualityRule, QualityEvent, QualityBenchmark, ReconciliationRecord } from "../types";
+import { ThresholdSummary } from "../utils/display";
+import { RULE_TYPE_LABEL, RULE_MODE_LABEL, RECONCILIATION_STATUS_LABEL } from "../utils/enums";
 
 const RULE_TYPES = ["COMPLETENESS", "ACCURACY", "TIMELINESS", "CONSISTENCY", "UNIQUENESS", "VALIDITY", "WAVE_DIFF", "CROSS_SOURCE"];
 const SEVERITY_COLOR: Record<string, string> = { P0: "red", P1: "orange", P2: "default" };
@@ -53,7 +55,7 @@ function RulesTab() {
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -86,7 +88,7 @@ function RulesTab() {
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
     }
   }
 
@@ -95,7 +97,7 @@ function RulesTab() {
       await updateQualityRule(r.id, { enabled: !r.enabled });
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "操作失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
     }
   }
 
@@ -105,16 +107,16 @@ function RulesTab() {
       message.success("规则已删除");
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "删除失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "删除失败");
     }
   }
 
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "指标", dataIndex: "metric_id", key: "metric", width: 90, render: (v: number) => <span className="mono">#{v}</span> },
-    { title: "规则类型", dataIndex: "rule_type", key: "type", width: 140, render: (v: string) => <Tag>{v}</Tag> },
-    { title: "模式", dataIndex: "rule_mode", key: "mode", width: 120 },
-    { title: "阈值", dataIndex: "threshold", key: "threshold", render: (v: Record<string, unknown>) => <span className="mono" style={{ fontSize: 12 }}>{JSON.stringify(v)}</span> },
+    { title: "规则类型", dataIndex: "rule_type", key: "type", width: 140, render: (v: string) => <Tag>{RULE_TYPE_LABEL[v] ?? v}</Tag> },
+    { title: "模式", dataIndex: "rule_mode", key: "mode", width: 120, render: (v: string) => RULE_MODE_LABEL[v] ?? v },
+    { title: "阈值", dataIndex: "threshold", key: "threshold", render: (v: Record<string, unknown>) => <ThresholdSummary threshold={v} /> },
     { title: "严重度", dataIndex: "severity", key: "severity", width: 90, render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{v}</Tag> },
     {
       title: "启用",
@@ -150,10 +152,10 @@ function RulesTab() {
             <Select showSearch options={metrics.map((m) => ({ value: m.id, label: `${m.metric_code} · ${m.name}` }))} placeholder="选择指标" />
           </Form.Item>
           <Form.Item name="rule_type" label="规则类型" rules={[{ required: true }]}>
-            <Select options={RULE_TYPES.map((v) => ({ value: v, label: v }))} />
+            <Select options={RULE_TYPES.map((v) => ({ value: v, label: RULE_TYPE_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="rule_mode" label="规则模式" initialValue="static">
-            <Select options={["static", "dynamic_baseline", "yoy_woy", "cross_source"].map((v) => ({ value: v, label: v }))} />
+            <Select options={["static", "dynamic_baseline", "yoy_woy", "cross_source"].map((v) => ({ value: v, label: RULE_MODE_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="severity" label="严重度" initialValue="P2">
             <Select options={["P0", "P1", "P2"].map((v) => ({ value: v, label: v }))} />
@@ -181,7 +183,7 @@ function EventsTab() {
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -198,7 +200,7 @@ function EventsTab() {
       message.success(done);
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "操作失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
     }
   }
 
@@ -206,7 +208,7 @@ function EventsTab() {
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "指标", dataIndex: "metric_id", key: "metric", width: 90, render: (v: number) => <span className="mono">#{v}</span> },
     { title: "级别", dataIndex: "level", key: "level", width: 80, render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{v}</Tag> },
-    { title: "规则类型", dataIndex: "rule_type", key: "type", width: 130, render: (v: string) => <Tag>{v}</Tag> },
+    { title: "规则类型", dataIndex: "rule_type", key: "type", width: 130, render: (v: string) => <Tag>{RULE_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "观测值", dataIndex: "obs_value", key: "obs", width: 100, render: (v: number | null) => v ?? <span className="muted">—</span> },
     { title: "阈值", dataIndex: "threshold", key: "thr", width: 100, render: (v: number | null) => v ?? <span className="muted">—</span> },
     {
@@ -258,7 +260,7 @@ function BenchmarksTab() {
       const res = await listBenchmarks({ page_size: 50 });
       setItems(res.items);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -284,7 +286,7 @@ function BenchmarksTab() {
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "导入失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "导入失败");
     }
   }
 
@@ -344,7 +346,7 @@ function ReconciliationTab() {
       const res = await listReconciliationRecords({ page_size: 50 });
       setItems(res.items);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -368,7 +370,7 @@ function ReconciliationTab() {
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "执行失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "执行失败");
     }
   }
 
@@ -378,7 +380,7 @@ function ReconciliationTab() {
       message.success("已确认");
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "确认失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "确认失败");
     }
   }
 
@@ -394,7 +396,7 @@ function ReconciliationTab() {
       dataIndex: "status",
       key: "status",
       width: 100,
-      render: (v: string) => <Tag color={v === "ALERT" ? "error" : v === "WARN" ? "warning" : v === "CONFIRMED" ? "success" : "default"}>{v}</Tag>,
+      render: (v: string) => <Tag color={v === "ALERT" ? "error" : v === "WARN" ? "warning" : v === "CONFIRMED" ? "success" : "default"}>{RECONCILIATION_STATUS_LABEL[v] ?? v}</Tag>,
     },
     {
       title: "操作",

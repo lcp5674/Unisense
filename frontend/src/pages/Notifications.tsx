@@ -26,7 +26,7 @@ function NotifListTab() {
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -68,7 +68,7 @@ function SubscriptionsTab() {
       const res = await listSubscriptions();
       setItems(res.items);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -92,7 +92,7 @@ function SubscriptionsTab() {
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "保存失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "保存失败");
     }
   }
 
@@ -137,7 +137,7 @@ function EventLogTab() {
       const res = await listNotifyEvents();
       setItems(res.items);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -174,7 +174,7 @@ function PublishTab() {
       message.success(`事件已发布：扇出 ${res.notifications} 条通知，投递成功 ${res.delivered}`);
       form.resetFields();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "发布失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "发布失败");
     }
   }
 

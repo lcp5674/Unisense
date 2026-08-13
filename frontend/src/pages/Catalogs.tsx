@@ -41,7 +41,7 @@ export function Catalogs() {
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -67,7 +67,7 @@ export function Catalogs() {
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "登记失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "登记失败");
     }
   }
 
@@ -80,7 +80,7 @@ export function Catalogs() {
       setSelectedRowKeys([]);
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "批量废弃失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量废弃失败");
     }
   }
 

@@ -14,6 +14,8 @@ import {
   UnisenseApiError,
 } from "../api";
 import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType } from "../types";
+import { ObjectView } from "../utils/display";
+import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 
 const FALLBACK_TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
@@ -28,6 +30,18 @@ const FALLBACK_TYPES: SourceTypeInfo[] = [
 function typeInfo(types: SourceTypeInfo[], t: string): SourceTypeInfo | undefined {
   return types.find((x) => x.source_type === t);
 }
+
+// 连接检查 detail 字段名 → 中文
+const CONN_DETAIL_LABEL: Record<string, string> = {
+  host: "主机",
+  port: "端口",
+  database: "数据库",
+  schema: "Schema",
+  user: "账号",
+  error: "错误信息",
+  stage: "检查阶段",
+  latency_ms: "延迟",
+};
 
 function previewSourceId(sourceType: string | undefined, cfg: Record<string, unknown>, domain: string): string {
   const base = String(cfg.database || cfg.schema || domain || "default");
@@ -65,7 +79,7 @@ function SourceDetailModal({
       setCollectResult(res);
       message.success(`采集完成：扫描 ${res.scanned} · 注册 ${res.registered} · PII ${res.pii_registered}`);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "采集失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "采集失败");
     } finally {
       setCollecting(false);
     }
@@ -85,7 +99,7 @@ function SourceDetailModal({
       // 刷新健康状态展示
       getSourceHealth(source.source_id).then(setHealth).catch(() => {});
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "检查失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "检查失败");
     } finally {
       setChecking(false);
     }
@@ -96,7 +110,7 @@ function SourceDetailModal({
       const res = await scheduleSource(source.source_id, cron, scheduleMode);
       message.success(`已调度：job ${res.job_id}（${res.status}）`);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "调度失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "调度失败");
     }
   }
 
@@ -108,10 +122,10 @@ function SourceDetailModal({
         </Descriptions.Item>
         <Descriptions.Item label="域">{source.domain}</Descriptions.Item>
         <Descriptions.Item label="覆盖度">{Math.round(source.coverage * 100)}%</Descriptions.Item>
-        <Descriptions.Item label="采集模式">{source.collection_mode}</Descriptions.Item>
+        <Descriptions.Item label="采集模式">{COLLECTION_MODE_LABEL[source.collection_mode] ?? source.collection_mode}</Descriptions.Item>
         <Descriptions.Item label="健康状态">
           <Tag color={source.health_status === "healthy" ? "success" : source.health_status === "unhealthy" ? "error" : "default"}>
-            {source.health_status}
+            {SOURCE_HEALTH_LABEL[source.health_status] ?? source.health_status}
           </Tag>
         </Descriptions.Item>
         <Descriptions.Item label="连接配置">{(source.connection_config_present ? "已配置（明文不下发）" : "未配置")}</Descriptions.Item>
@@ -135,7 +149,7 @@ function SourceDetailModal({
           showIcon
           style={{ marginBottom: 12 }}
           message={checkResult.ok ? `连接正常（${checkResult.latency_ms}ms）` : `连接失败：${checkResult.error}`}
-          description={checkResult.detail ? JSON.stringify(checkResult.detail) : undefined}
+          description={checkResult.detail ? <ObjectView data={checkResult.detail} labels={CONN_DETAIL_LABEL} /> : undefined}
         />
       )}
       {health?.last_error && <Alert type="error" showIcon style={{ marginBottom: 12 }} message={`最近错误：${health.last_error}`} />}
@@ -187,7 +201,7 @@ export function DataSources() {
     try {
       setItems(await listDataSources());
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -239,7 +253,7 @@ export function DataSources() {
         message.error(`连接失败：${res.error ?? "未知错误"}`);
       }
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "测试失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "测试失败");
     }
   }
 
@@ -266,7 +280,7 @@ export function DataSources() {
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
     } finally {
       setLoading(false);
     }
@@ -291,7 +305,7 @@ export function DataSources() {
       dataIndex: "health_status",
       key: "health",
       width: 100,
-      render: (v: string) => <Tag color={v === "healthy" ? "success" : v === "unhealthy" ? "error" : "default"}>{v}</Tag>,
+      render: (v: string) => <Tag color={v === "healthy" ? "success" : v === "unhealthy" ? "error" : "default"}>{SOURCE_HEALTH_LABEL[v] ?? v}</Tag>,
     },
     { title: "覆盖度", dataIndex: "coverage", key: "coverage", width: 90, render: (v: number) => `${Math.round(v * 100)}%` },
     { title: "调度", dataIndex: "schedule_cron", key: "schedule", width: 110, render: (v: string | null) => (v ? <span className="mono">{v}</span> : <span className="muted">—</span>) },

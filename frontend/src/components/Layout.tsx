@@ -61,6 +61,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/compare", label: "指标对比", icon: <SwapOutlined /> },
       { key: "/templates", label: "指标模板", icon: <FileTextOutlined /> },
       { key: "/create", label: "注册指标", icon: <PlusCircleOutlined /> },
+      { key: "/domains", label: "主题域管理", icon: <ApartmentOutlined /> },
       { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
       { key: "/favorites", label: "我的收藏", icon: <HeartOutlined /> },
       { key: "/assetmap", label: "资产地图", icon: <GlobalOutlined /> },
@@ -79,6 +80,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/quality", label: "质量中心", icon: <ExperimentOutlined /> },
       { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
       { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
+      { key: "/dicts", label: "字典管理", icon: <BookOutlined /> },
       { key: "/governance", label: "权限治理", icon: <SafetyCertificateOutlined /> },
       { key: "/audit", label: "审计日志", icon: <FileSearchOutlined /> },
     ],
@@ -125,6 +127,8 @@ export function Layout({ user }: { user: CurrentUser }) {
   const saveTimer = useRef<number | null>(null);
   // 用户手动切换过折叠后，避免迟到的服务端响应覆盖用户意图
   const userToggled = useRef(false);
+  // 内容区滚动容器引用，路由切换时自动回顶
+  const contentRef = useRef<HTMLDivElement>(null);
 
   // 用户切换/首次挂载：先取该用户本地缓存（避免闪烁），再以服务端偏好为准并回写缓存
   useEffect(() => {
@@ -181,6 +185,11 @@ export function Layout({ user }: { user: CurrentUser }) {
     const matched = ALL_NAV_KEYS.filter((k) => path === k || path.startsWith(`${k}/`));
     if (matched.length === 0) return "";
     return matched.sort((a, b) => b.length - a.length)[0];
+  }, [location.pathname]);
+
+  // 路由切换时自动将内容区滚动到顶部，避免切换页面后仍停留在上次滚动位置
+  useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [location.pathname]);
 
   useEffect(() => {
@@ -350,7 +359,7 @@ export function Layout({ user }: { user: CurrentUser }) {
           </Dropdown>
         </Header>
 
-        <Content style={{ padding: 24, overflow: "auto" }} className="app-content">
+        <Content ref={contentRef} style={{ padding: 24, overflow: "auto" }} className="app-content">
           <Outlet />
         </Content>
       </AntLayout>

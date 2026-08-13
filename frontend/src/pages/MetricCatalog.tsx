@@ -11,6 +11,7 @@ import {
 import { fetchDashboard, listMetrics, UnisenseApiError } from "../api";
 import type { MetricResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { METRIC_TYPE_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
 
 const STATUS_COLOR: Record<string, string> = {
   DRAFT: "default",
@@ -28,7 +29,7 @@ const STATUS_LABEL: Record<string, string> = {
   DEPRECATED: "已废弃",
 };
 
-const TIER_OPTIONS = ["T1", "T2", "T3"].map((v) => ({ value: v, label: `P${v}` }));
+const TIER_OPTIONS = ["T1", "T2", "T3"].map((v) => ({ value: v, label: METRIC_TIER_LABEL[v] ?? v }));
 const SORT_OPTIONS = [
   { value: "updated_at", label: "按更新时间" },
   { value: "created_at", label: "按创建时间" },
@@ -93,7 +94,7 @@ export function MetricCatalog() {
       setSelected([]);
     } catch (err) {
       message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败",
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",
       );
     } finally {
       setLoading(false);
@@ -144,7 +145,7 @@ export function MetricCatalog() {
     },
     { title: "名称", dataIndex: "name", key: "name" },
     { title: "域", dataIndex: "domain", key: "domain", width: 100 },
-    { title: "类型", dataIndex: "type", key: "type", width: 90 },
+    { title: "类型", dataIndex: "type", key: "type", width: 90, render: (v: string) => METRIC_TYPE_LABEL[v] ?? v },
     {
       title: "状态",
       dataIndex: "status",
@@ -154,7 +155,7 @@ export function MetricCatalog() {
         <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>
       ),
     },
-    { title: "分级", dataIndex: "metric_tier", key: "tier", width: 70, render: (v: string) => <Tag>{v}</Tag> },
+    { title: "分级", dataIndex: "metric_tier", key: "tier", width: 70, render: (v: string) => <Tag>{METRIC_TIER_LABEL[v] ?? v}</Tag> },
     {
       title: "治理徽章",
       key: "badges",

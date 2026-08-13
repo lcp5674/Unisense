@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Collapse, Empty, Spin, Tag, Timeline, Typography } from "antd";
 import { listAudit } from "../../api";
 import type { AuditEntry } from "../../types";
+import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel } from "../../utils/auditI18n";
 
 const ACTION_COLOR: Record<string, string> = {
   CREATE: "green",
@@ -21,7 +22,7 @@ const ACTION_COLOR: Record<string, string> = {
   EXTEND_VERSION: "lime",
 };
 
-// 将 detail_json 渲染为「key: 值」中文可读摘要，避免用户直面原始 JSON
+// 将 detail_json 渲染为「中文字段名: 值」可读摘要，避免用户直面原始 JSON
 function DetailSummary({ detail }: { detail: Record<string, unknown> }) {
   const entries = Object.entries(detail).filter(([, v]) => v !== null && v !== undefined);
   if (!entries.length) return null;
@@ -29,8 +30,8 @@ function DetailSummary({ detail }: { detail: Record<string, unknown> }) {
     <div style={{ margin: "4px 0 0" }}>
       {entries.map(([k, v]) => (
         <span key={k} className="muted" style={{ fontSize: 12, marginRight: 12, display: "inline-block" }}>
-          <span style={{ color: "var(--text)" }}>{k}:</span>{" "}
-          <span className="mono">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+          <span style={{ color: "var(--text)" }}>{AUDIT_FIELD_LABEL[k] ?? k}:</span>{" "}
+          <span className="mono">{auditValueText(v)}</span>
         </span>
       ))}
     </div>
@@ -86,7 +87,7 @@ export function AuditTimeline({ metricCode }: { metricCode: string }) {
               </Tag>
             </Typography.Text>
             <div className="muted" style={{ fontSize: 12 }}>
-              <span>{it.entity_type}</span>
+              <span>{entityTypeLabel(it.entity_type)}</span>
               <span> · </span>
               <span className="mono">{it.entity_id}</span>
               <span> · 操作人 {it.actor_display ?? `#${it.actor_id}`}</span>

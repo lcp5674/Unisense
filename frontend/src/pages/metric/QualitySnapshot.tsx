@@ -10,6 +10,8 @@ import {
   UnisenseApiError,
 } from "../../api";
 import type { QualityEvent, QualityRule, SnapshotResponse } from "../../types";
+import { ThresholdSummary } from "../../utils/display";
+import { RULE_TYPE_LABEL, RULE_MODE_LABEL } from "../../utils/enums";
 
 const EVENT_STATUS: Record<string, { color: string; label: string }> = {
   OPEN: { color: "error", label: "开启" },
@@ -57,13 +59,13 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
       message.success(okMsg);
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "操作失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
     }
   }
 
   const eventColumns = [
     { title: "级别", dataIndex: "level", key: "level", width: 80, render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{v}</Tag> },
-    { title: "规则", dataIndex: "rule_type", key: "type", render: (v: string) => <Tag>{v}</Tag> },
+    { title: "规则", dataIndex: "rule_type", key: "type", render: (v: string) => <Tag>{RULE_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "观测值", dataIndex: "obs_value", key: "obs", width: 90, render: (v: number | null) => v ?? <span className="muted">—</span> },
     { title: "阈值", dataIndex: "threshold", key: "thr", width: 90, render: (v: number | null) => v ?? <span className="muted">—</span> },
     {
@@ -99,8 +101,8 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
   ];
 
   const ruleColumns = [
-    { title: "类型", dataIndex: "rule_type", key: "type", render: (v: string) => <Tag>{v}</Tag> },
-    { title: "模式", dataIndex: "rule_mode", key: "mode", width: 130 },
+    { title: "类型", dataIndex: "rule_type", key: "type", render: (v: string) => <Tag>{RULE_TYPE_LABEL[v] ?? v}</Tag> },
+    { title: "模式", dataIndex: "rule_mode", key: "mode", width: 130, render: (v: string) => RULE_MODE_LABEL[v] ?? v },
     {
       title: "严重度",
       dataIndex: "severity",
@@ -115,7 +117,7 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
       width: 80,
       render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "启用" : "停用"}</Tag>,
     },
-    { title: "阈值", dataIndex: "threshold", key: "threshold", render: (v: Record<string, unknown>) => <span className="mono" style={{ fontSize: 12 }}>{JSON.stringify(v)}</span> },
+    { title: "阈值", dataIndex: "threshold", key: "threshold", render: (v: Record<string, unknown>) => <ThresholdSummary threshold={v} /> },
   ];
 
   const snapshotColumns = [

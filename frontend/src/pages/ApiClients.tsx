@@ -18,7 +18,7 @@ export function ApiClients() {
     try {
       setItems(await listApiClients());
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
@@ -45,7 +45,7 @@ export function ApiClients() {
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
     } finally {
       setLoading(false);
     }
@@ -57,7 +57,7 @@ export function ApiClients() {
       navigator.clipboard?.writeText(access_token).catch(() => {});
       message.success(`已签发令牌并复制到剪贴板（60 分钟有效）`);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "签发失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "签发失败");
     }
   }
 

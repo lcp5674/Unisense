@@ -1029,3 +1029,106 @@ export interface AssetMyAssets {
 }
 
 export const API_BASE = "/api/v1";
+
+// ============================================================================
+// 主题域管理（backend /api/v1/domains/*）
+// ============================================================================
+
+export interface SubjectDomain {
+  id: number;
+  code: string;
+  name: string;
+  parent_id: number | null;
+  level: number;
+  path: string | null;
+  sort_order: number;
+  status: string;
+  defaults_json: Record<string, unknown>;
+  description: string | null;
+  owner_id: number;
+  metric_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SubjectDomainTreeNode {
+  id: number;
+  code: string;
+  name: string;
+  parent_id: number | null;
+  level: number;
+  sort_order: number;
+  status: string;
+  metric_count: number;
+  children: SubjectDomainTreeNode[];
+}
+
+export interface SubjectDomainCreateRequest {
+  code: string;
+  name: string;
+  parent_id?: number | null;
+  sort_order?: number;
+  description?: string | null;
+  owner_id: number;
+  defaults_json?: Record<string, unknown>;
+}
+
+export interface SubjectDomainUpdateRequest {
+  name?: string;
+  sort_order?: number;
+  description?: string | null;
+  owner_id?: number;
+  defaults_json?: Record<string, unknown>;
+}
+
+// ============================================================================
+// 系统字典管理（backend /api/v1/dicts/*）
+// ============================================================================
+
+export interface SystemDictItem {
+  id: number;
+  dict_type: string;
+  code: string;
+  label: string;
+  sort_order: number;
+  status: string;
+  description: string | null;
+  ref_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DictItemCreateRequest {
+  code: string;
+  label: string;
+  sort_order?: number;
+  description?: string | null;
+}
+
+export interface DictItemUpdateRequest {
+  label?: string;
+  sort_order?: number;
+  description?: string | null;
+}
+
+// ============================================================================
+// 自动推断（backend /api/v1/metric-definitions/auto-suggest）
+// ============================================================================
+
+export interface AutoSuggestRequest {
+  domain_code: string;
+  source_table?: string | null;
+  measure_column?: string | null;
+  period?: string | null;
+}
+
+export interface AutoSuggestResponse {
+  metric_code_suggestion: string | null;
+  defaults: Record<string, unknown>;
+  segments: {
+    domain: string;
+    biz_object: string | null;
+    measure: string | null;
+    period: string | null;
+  };
+}

@@ -31,7 +31,7 @@ function ImpactTab() {
       setTotal(data.total ?? (Array.isArray(data) ? data.length : 0));
       track("lineage_query", node.trim(), "node");
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "查询失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "查询失败");
       setEdges([]);
       setTotal(0);
     } finally {
@@ -52,7 +52,7 @@ function ImpactTab() {
       );
       track("lineage_preview", node.trim(), "node");
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "预览失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "预览失败");
     } finally {
       setLoading(false);
     }
@@ -146,7 +146,7 @@ function ParseTab() {
       message.success("血缘解析完成");
       track("lineage_parse", undefined, "sql", { dialect });
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "解析失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "解析失败");
     } finally {
       setLoading(false);
     }

@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Card, Input, Button, Form, Switch, Tag, Alert, Space, message } from "antd";
+import { Card, Input, Button, Form, Switch, Tag, Alert, Space, Table, message } from "antd";
 import { RobotOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { aiNl2Sql, UnisenseApiError } from "../api";
 import type { NL2SQLResult } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { kvText } from "../utils/display";
 
 const { TextArea } = Input;
 
@@ -12,6 +13,27 @@ const EXAMPLES = [
   "对比本月与上月 GMV 的环比变化",
   "统计 marketing 域新增用户数，同比上月",
 ];
+
+// 执行结果行：对象数组 → 动态列表格；非行结构 → 可读文本
+function ExecuteResultTable({ rows }: { rows: unknown[] }) {
+  const rowObjects = rows.filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null);
+  if (rowObjects.length === 0) {
+    return <span className="muted">无结构化行数据</span>;
+  }
+  const cols = Object.keys(rowObjects[0]).map((k) => ({
+    title: k,
+    dataIndex: k,
+    key: k,
+    ellipsis: true,
+    render: (v: unknown) =>
+      typeof v === "object" && v !== null ? (
+        <span className="mono" style={{ fontSize: 12 }}>{JSON.stringify(v)}</span>
+      ) : (
+        String(v ?? "")
+      ),
+  }));
+  return <Table size="small" dataSource={rowObjects} columns={cols} rowKey={(_, i) => String(i)} pagination={{ pageSize: 10 }} />;
+}
 
 export function AiAssistant() {
   const [nlQuery, setNlQuery] = useState("");
@@ -42,7 +64,7 @@ export function AiAssistant() {
       setResult(res);
       track("ai_nl2sql", undefined, "ai", { method: res.method });
     } catch (err) {
-      setError(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "调用失败");
+      setError(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "调用失败");
     } finally {
       setLoading(false);
     }
@@ -125,7 +147,7 @@ export function AiAssistant() {
                 {Object.keys(result.params ?? {}).length > 0 && (
                   <div style={{ marginTop: 8 }}>
                     <span className="muted" style={{ fontSize: 12 }}>参数：</span>
-                    <span className="mono" style={{ fontSize: 12 }}>{JSON.stringify(result.params)}</span>
+                    <span className="mono" style={{ fontSize: 12 }}>{kvText(result.params)}</span>
                   </div>
                 )}
                 {result.anchored?.length > 0 && (
@@ -143,9 +165,7 @@ export function AiAssistant() {
 
             {result.execute_result && (
               <Card title={`执行结果（${result.execute_result.elapsed_ms} ms，共 ${result.execute_result.total} 行）`} size="small">
-                <pre className="code-block" style={{ maxHeight: 300, overflow: "auto" }}>
-                  {JSON.stringify(result.execute_result.rows, null, 2)}
-                </pre>
+                <ExecuteResultTable rows={result.execute_result.rows} />
               </Card>
             )}
             {result.execute_error && (

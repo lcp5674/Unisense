@@ -20,7 +20,7 @@ export function Templates() {
     try {
       setItems(await listTemplates({ is_active: true }));
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载模板失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载模板失败");
     } finally {
       setLoading(false);
     }
@@ -52,7 +52,7 @@ export function Templates() {
       setModalOpen(false);
       navigate(`/detail/${created.metric_code}`);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
     } finally {
       setLoading(false);
     }

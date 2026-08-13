@@ -36,7 +36,7 @@ export function ReviewWorkbench() {
       setItems(res.items);
     } catch (err) {
       message.error(
-        err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "加载失败",
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",
       );
     } finally {
       setLoading(false);
@@ -76,7 +76,7 @@ export function ReviewWorkbench() {
         } catch (err) {
           message.error(
             err instanceof UnisenseApiError
-              ? `${err.message} (${err.code})`
+              ? `${err.message}（${err.codeZh}）`
               : "仲裁失败（仅 compliance_officer/domain_admin）",
           );
         } finally {
@@ -107,7 +107,7 @@ export function ReviewWorkbench() {
           load();
         } catch (err) {
           message.error(
-            err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "升级失败",
+            err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "升级失败",
           );
         } finally {
           setBusyId(null);
