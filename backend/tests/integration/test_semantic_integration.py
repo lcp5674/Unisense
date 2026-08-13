@@ -130,32 +130,32 @@ def db_env():
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
         from sqlalchemy.pool import NullPool
 
-        from app.db.mysql import Base
-
         url = EXT_DB_URL.replace("mysql+pymysql", "mysql+aiomysql")
         # NullPool：每次 checkout 在当前事件循环新建连接、归还即关闭，
         # 避免 fixture 内多次 asyncio.run 与 pytest-asyncio 循环之间复用连接导致
         # “Future attached to a different loop” 错误。
         engine = create_async_engine(url, echo=False, poolclass=NullPool)
 
-        # 干净复位：删除全部表 + alembic 版本（仅用于测试库复位，不依赖迁移 downgrade）
+        # 干净复位：DROP + CREATE 整个测试库（对独立测试库最可靠）。
+        # 大量连续 DDL 下 MySQL 8.0 偶发 1684 / 1050 时序冲突；整库重建原子、无残留。
+        # 注意：集成测试库账号需具备目标库的 CREATE/DROP 权限。
+        db_name = EXT_DB_URL.split("?")[0].rsplit("/", 1)[1]
+        admin_url = url.rsplit("/", 1)[0] + "/"  # 无默认库，用于 DROP/CREATE DATABASE
+        admin_engine = create_async_engine(admin_url, echo=False, poolclass=NullPool)
+
         async def _wipe() -> None:
-            async with engine.begin() as conn:
-                await conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-                # 逐个 DROP TABLE IF EXISTS：避免 drop_all 的 information_schema 反射与
-                # DDL 并发触发 MySQL 1684（definition being modified by concurrent DDL）。
-                for table in reversed(Base.metadata.sorted_tables):
-                    await conn.execute(text(f"DROP TABLE IF EXISTS `{table.name}`"))
-                await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-                await conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+            async with admin_engine.begin() as conn:
+                await conn.execute(text(f"DROP DATABASE IF EXISTS `{db_name}`"))
+                await conn.execute(
+                    text(
+                        f"CREATE DATABASE `{db_name}` "
+                        "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+                    )
+                )
 
         asyncio.run(_wipe())
-        # 显式释放 wipe 使用的所有连接，避免 MySQL DDL 锁残留与后续
-        # alembic 建表并发冲突（错误 1684：definition being modified by concurrent DDL）。
-        asyncio.run(engine.dispose())
-        # 大量 DROP TABLE 后 MySQL 8.0 元数据锁异步释放，立即建表会报 1684；
-        # 短暂等待让 DDL 锁完全收敛（12 个测试累计 ~6s，可接受）。
-        time.sleep(0.5)
+        # 显式释放 admin 连接，避免 DROP/CREATE 后连接句柄残留
+        asyncio.run(admin_engine.dispose())
 
         # 生产迁移建表（验证迁移在真实 MySQL 8.0 上可落地、ORM 模型与迁移一致）
         _reset_via_alembic(EXT_DB_URL)
