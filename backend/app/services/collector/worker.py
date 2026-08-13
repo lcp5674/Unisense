@@ -24,6 +24,13 @@ from app.core.config import settings
 from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
+from app.services.quality.tasks import run_quality_checks
+from app.tasks.semantic_tasks import (
+    check_emergency_review_overdue,
+    check_experimental_expiry,
+    check_pending_version_timeouts,
+    refresh_health_scores,
+)
 
 logger = logging.getLogger("unisense.collector.worker")
 
@@ -104,16 +111,65 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
 
 
 class WorkerSettings:
-    """arq worker 配置：采集任务 + 每分钟调度扫描。"""
+    """统一 arq worker 配置：采集 + 语义定时 + 质量自动检测。
 
-    functions = [run_collection_task, collect_scheduler]
+    承载全部后台定时任务，避免为每个模块单独起 worker：
+    - 采集：run_collection_task（入队任务）+ collect_scheduler（每分钟扫 cron）
+    - 语义：PENDING 超时（每分钟）/ 健康度（每日 3 点）/ 紧急补审（每小时）/ 灰度超期（每日 4 点）
+    - 质量：run_quality_checks（每 5 分钟用最近观测自动评估启用规则）
+    """
+
+    functions = [
+        run_collection_task,
+        collect_scheduler,
+        check_pending_version_timeouts,
+        refresh_health_scores,
+        check_emergency_review_overdue,
+        check_experimental_expiry,
+        run_quality_checks,
+    ]
     cron_jobs = [
         cron(
             collect_scheduler,
             name="collect-scheduler",
             second=0,
             run_at_startup=False,
-        )
+        ),
+        cron(
+            check_pending_version_timeouts,
+            name="pending-version-timeouts",
+            minute=None,
+            second=0,
+            run_at_startup=True,
+        ),
+        cron(
+            refresh_health_scores,
+            name="health-scores",
+            hour=3,
+            minute=0,
+            run_at_startup=False,
+        ),
+        cron(
+            check_emergency_review_overdue,
+            name="emergency-review",
+            hour=None,
+            minute=0,
+            run_at_startup=True,
+        ),
+        cron(
+            check_experimental_expiry,
+            name="experimental-expiry",
+            hour=4,
+            minute=0,
+            run_at_startup=False,
+        ),
+        cron(
+            run_quality_checks,
+            name="quality-checks",
+            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+            second=0,
+            run_at_startup=True,
+        ),
     ]
     on_startup = startup
     on_shutdown = shutdown

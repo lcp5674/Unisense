@@ -34,6 +34,7 @@ from app.api.observability import router as observability_router
 from app.api.preferences import router as preferences_router
 from app.api.quality import router as quality_router
 from app.api.recommend import router as recommend_router
+from app.api.semantic import quickbi_compat_router as semantic_quickbi_compat_router
 from app.api.semantic import router as semantic_router
 from app.api.subject_domain import router as subject_domain_router
 from app.api.system_dict import router as system_dict_router
@@ -145,6 +146,7 @@ _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "grant.revoked",
     "pii.review_required",
     "classification.done",
+    "escalation.triggered",
 )
 
 
@@ -226,6 +228,7 @@ def create_app() -> FastAPI:
     app.include_router(ai_router, prefix="/api/v1")
     app.include_router(tracking_router, prefix="/api/v1")
     app.include_router(semantic_router, prefix="/api/v1")
+    app.include_router(semantic_quickbi_compat_router, prefix="/api/v1")
     app.include_router(subject_domain_router, prefix="/api/v1")
     app.include_router(system_dict_router, prefix="/api/v1")
 

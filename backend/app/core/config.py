@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     # ---- KMS ----
     kms_key_id: str = ""
 
+    # ---- QuickBI 嵌入（FR-12：BI 报表嵌入消费，可选依赖）----
+    quickbi_sign_key: str = ""  # 票据签名密钥（未配置则 ticket 接口 503 降级）
+    quickbi_embed_base_url: str = ""  # 嵌入网关地址（默认 https://quickbi.aliyun.com）
+
     # ---- Fernet 密钥 ----
     fernet_key: str = ""
 

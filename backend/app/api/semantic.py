@@ -268,3 +268,86 @@ async def get_consumption_guide(
     svc = MetricService(db)
     guide = await svc.get_consumption_guide(metric_code)
     return ok(data=guide, trace_id=get_trace_id(request))
+
+
+# ----------------------------------------------------------------
+# 4. QuickBI 嵌入票据（FR-12 / TD §12.3）
+# ----------------------------------------------------------------
+
+
+async def _issue_quickbi_ticket(
+    body: dict[str, Any],
+    db: AsyncSession,
+    actor_id: int,
+    request: Request,
+) -> dict[str, Any]:
+    """签发 QuickBI 嵌入票据（共享处理，供主路径与兼容路径复用）。"""
+    from app.core.exceptions import ValidationError
+
+    report_id = str(body.get("reportId") or body.get("report_id") or "").strip()
+    if not report_id:
+        raise ValidationError("reportId 必填", ctx={"field": "reportId"})
+    dashboard_id = body.get("dashboardId") or body.get("dashboard_id")
+    params = body.get("params")
+    if params is not None and not isinstance(params, dict):
+        raise ValidationError("params 必须为对象", ctx={"field": "params"})
+
+    from app.services.semantic.quickbi import QuickBiService
+
+    data = QuickBiService().issue_ticket(
+        report_id=report_id,
+        dashboard_id=str(dashboard_id) if dashboard_id else None,
+        params=params if isinstance(params, dict) else None,
+    )
+    # FR-16: 票据签发为消费侧操作，留痕便于审计报表访问
+    await write_audit(
+        db,
+        actor_id=actor_id,
+        action="quickbi.ticket",
+        entity_type="quickbi_report",
+        entity_id=report_id,
+        detail={"dashboard_id": str(dashboard_id) if dashboard_id else None},
+        ip=client_ip(request),
+        trace_id=get_trace_id(request),
+    )
+    await db.commit()
+    return data
+
+
+@router.post(
+    "/quickbi/ticket",
+    dependencies=_READ_DEPS,
+    response_model=ApiResponse,
+    summary="获取 QuickBI 嵌入票据",
+)
+async def issue_quickbi_ticket(
+    request: Request,
+    _user: CurrentUser,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db_session),
+) -> Any:
+    """签发 QuickBI 嵌入票据（FR-12）。返回短期签名票据与嵌入地址。"""
+    data = await _issue_quickbi_ticket(body, db, _user.id, request)
+    return ok(data=data, trace_id=get_trace_id(request))
+
+
+# 兼容路径：前端 QuickBI 组件调用 /api/v1/semantic/quickbi/ticket（单数 semantic，
+# 与 router prefix /semantics 多一字母差异）。提供独立 router 保持双路径可用。
+quickbi_compat_router = APIRouter(prefix="/semantic", tags=["semantics"])
+
+
+@quickbi_compat_router.post(
+    "/quickbi/ticket",
+    dependencies=_READ_DEPS,
+    response_model=ApiResponse,
+    summary="获取 QuickBI 嵌入票据（兼容路径）",
+)
+async def issue_quickbi_ticket_compat(
+    request: Request,
+    _user: CurrentUser,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db_session),
+) -> Any:
+    """兼容前端 /api/v1/semantic/quickbi/ticket（单数 semantic）。"""
+    data = await _issue_quickbi_ticket(body, db, _user.id, request)
+    return ok(data=data, trace_id=get_trace_id(request))

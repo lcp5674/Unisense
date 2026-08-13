@@ -40,6 +40,18 @@ class QualityRepository:
         )
         return (await self._db.execute(stmt)).scalar_one_or_none()
 
+    async def list_all_enabled_rules(self) -> list[QualityRule]:
+        """列出全部启用规则（供自动调度扫描，不做分页——规则数量级小）。
+
+        Returns:
+            全部 enabled=True 且未删除的质量规则。
+        """
+        stmt = select(QualityRule).where(
+            QualityRule.enabled.is_(True),
+            QualityRule.deleted_at.is_(None),
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
     async def list_rules(
         self,
         metric_id: int | None,
