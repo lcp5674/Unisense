@@ -721,7 +721,7 @@ export async function listDimensions(params?: {
 }
 
 export async function createDimension(body: {
-  dim_code: string;
+  dim_code?: string;
   name: string;
   domain: string;
   type?: string;
@@ -794,7 +794,7 @@ export async function listDimensionMembers(dimCode: string): Promise<{ items: Di
 
 export async function createDimensionMember(body: {
   dim_code: string;
-  member_code: string;
+  member_code?: string;
   member_name: string;
   parent_code?: string | null;
   path?: string | null;
@@ -825,7 +825,7 @@ export async function listTerms(params?: {
 }
 
 export async function createTerm(body: {
-  term_code: string;
+  term_code?: string;
   name: string;
   definition: string;
   domain: string;

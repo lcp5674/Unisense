@@ -83,6 +83,22 @@ async def get_template(
     return ok(data=template.to_dict(), trace_id=get_trace_id(request))
 
 
+async def _generate_template_code(
+    db: AsyncSession, validated: Any,
+) -> str:
+    """自动生成唯一模板编码：``tpl_{domain}_{name_slug}``，冲突自增后缀。"""
+    from app.core.codegen import generate_unique_code, slugify_code
+
+    name_slug = slugify_code(validated.name)
+    base = f"tpl_{validated.domain}_{name_slug}" if name_slug else f"tpl_{validated.domain}"
+
+    async def _exists(code: str) -> bool:
+        res = await db.execute(select(MetricTemplate).where(MetricTemplate.code == code))
+        return res.scalar_one_or_none() is not None
+
+    return await generate_unique_code(base, _exists)
+
+
 @router.post(
     "/templates",
     dependencies=_WRITE_DEPS,
@@ -100,6 +116,17 @@ async def create_template(
 
     # Schema 校验替代裸 dict
     validated = MetricTemplateCreateRequest(**body)
+    # 编码自动生成（FR-010：缺省时由系统生成 tpl_{domain}_{name}，避免人为创造）
+    if not validated.code:
+        validated.code = await _generate_template_code(db, validated)
+    # 编码唯一性检查
+    dup = await db.execute(
+        select(MetricTemplate).where(MetricTemplate.code == validated.code)
+    )
+    if dup.scalar_one_or_none() is not None:
+        from app.core.exceptions import ConflictError
+
+        raise ConflictError(f"模板编码已存在: {validated.code}", error_code="TPL_EXISTS")
     template = MetricTemplate(
         code=validated.code,
         name=validated.name,

@@ -43,9 +43,32 @@ class DimensionService(BaseService):
         self._session = session
         self._repo = DimensionRepository(session)
 
+    async def _generate_dim_code(self, data: DimensionCreate) -> str:
+        """自动生成唯一维度编码：``{domain_slug}_{name_slug}``，冲突自增后缀。"""
+        from app.core.codegen import generate_unique_code, slugify_code
+
+        domain_slug = slugify_code(data.domain)
+        name_slug = slugify_code(data.name)
+        if domain_slug and name_slug:
+            base = f"{domain_slug}_{name_slug}"
+        elif name_slug:
+            base = f"dim_{name_slug}"
+        elif domain_slug:
+            base = f"dim_{domain_slug}"
+        else:
+            base = "dim"
+
+        async def _exists(code: str) -> bool:
+            return await self._repo.get_dimension(code) is not None
+
+        return await generate_unique_code(base, _exists)
+
     async def create_dimension(
         self, data: DimensionCreate, actor_id: int | None = None
     ) -> Dimension:
+        # 编码自动生成（FR-010：缺省时由系统生成，非人为创造）
+        if not data.dim_code:
+            data.dim_code = await self._generate_dim_code(data)
         if await self._repo.get_dimension(data.dim_code) is not None:
             raise ConflictError(f"维度编码已存在: {data.dim_code}", error_code="DIM_EXISTS")
         dim = Dimension(
@@ -100,8 +123,24 @@ class DimensionService(BaseService):
         await self._repo.commit()
         return dim
 
+    async def _generate_member_code(self, data: DimensionMemberCreate) -> str:
+        """自动生成维度成员编码：``{dim_code}_{name_slug}``，维度内唯一，冲突自增。"""
+        from app.core.codegen import generate_unique_code, slugify_code
+
+        name_slug = slugify_code(data.member_name)
+        base = f"{data.dim_code}_{name_slug}" if name_slug else f"{data.dim_code}_member"
+
+        async def _exists(code: str) -> bool:
+            members = await self._repo.list_members(data.dim_code)
+            return any(m.member_code == code for m in members)
+
+        return await generate_unique_code(base, _exists)
+
     async def create_member(self, data: DimensionMemberCreate) -> DimensionMember:
         await self._require(data.dim_code)
+        # 编码自动生成（FR-010：缺省时由系统生成）
+        if not data.member_code:
+            data.member_code = await self._generate_member_code(data)
         member = DimensionMember(
             dim_code=data.dim_code,
             member_code=data.member_code,

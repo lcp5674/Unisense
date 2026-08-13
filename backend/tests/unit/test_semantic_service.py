@@ -392,3 +392,66 @@ async def test_review_compliance_rejects_non_pii():
     with pytest.raises(BusinessError) as exc:
         await svc.review_compliance("sales_gmv_daily", actor_id=99, role="domain_admin")
     assert exc.value.error_code == "PII_FLAG_REQUIRED"
+
+
+# ---- 指标编码自动生成（FR-010）----
+
+
+async def test_create_metric_auto_generates_code_from_measure():
+    """metric_code 缺省时按 源表/度量列/周期 自动生成 4 段式编码。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric(metric_code="sales_sales_orderamount_day")
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    payload = make_create_payload(
+        metric_code=None,
+        source_table="dwd_sales_orders",
+        measure_column="order_amount",
+        period="day",
+    )
+    result = await svc.create_metric(MetricCreateRequest(**payload), owner_id=1)
+
+    # 生成编码: sales(域) + sales(业务对象) + orderamount(度量) + day(周期)
+    assert result.metric_code == "sales_sales_orderamount_day"
+
+
+async def test_create_metric_auto_generates_fallback_code():
+    """metric_code 缺省且无源表时回退 {domain}_entity_{measure}_day。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric(metric_code="sales_entity_value_day")
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    result = await svc.create_metric(
+        MetricCreateRequest(**make_create_payload(metric_code=None)), owner_id=1,
+    )
+
+    assert result.metric_code == "sales_entity_value_day"
+
+
+async def test_create_metric_auto_code_conflict_suffix():
+    """自动生成的编码冲突时追加 _2 后缀。"""
+    svc, repo = _svc_with_repo()
+    # 生成时第 1 次查（候选已存在）→ _2；生成时第 2 次查（_2 可用）+ 创建前唯一性检查均不存在
+    repo.get_by_code = AsyncMock(side_effect=[make_metric(), None, None])
+    created = make_metric(metric_code="sales_entity_value_day_2")
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    result = await svc.create_metric(
+        MetricCreateRequest(**make_create_payload(metric_code=None)), owner_id=1,
+    )
+
+    assert result.metric_code == "sales_entity_value_day_2"
+
+
+async def test_create_metric_explicit_code_still_validated():
+    """显式传入 metric_code 仍走 4 段式校验（ConflictError 之外，非法格式 422）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+
+    with pytest.raises(ValueError):
+        MetricCreateRequest(**make_create_payload(metric_code="bad_code"))

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Query
@@ -111,6 +112,17 @@ async def query(
     return ok(data=res)
 
 
+async def _generate_client_id(repo: ApiClientRepo) -> str:
+    """自动生成接入方 ID：``app_`` + 随机 hex，冲突重试（上限 10 次）。"""
+    for _ in range(10):
+        candidate = f"app_{secrets.token_hex(4)}"
+        if await repo.get_by_client_id(candidate) is None:
+            return candidate
+    from fastapi import HTTPException
+
+    raise HTTPException(status_code=409, detail="无法生成唯一接入方 ID，请重试")
+
+
 @router.post("/consume/api-clients", response_model=ApiResponse[ClientCreatedResponse])
 async def create_client(
     req: ClientCreateRequest,
@@ -120,6 +132,9 @@ async def create_client(
 ) -> ApiResponse[ClientCreatedResponse]:
     """平台管理员创建接入方（secret 仅此一次明文返回）。"""
     repo = ApiClientRepo(db)
+    # 编码自动生成（FR-010：缺省时由系统生成 app_ 前缀，避免人为创造）
+    if not req.client_id:
+        req.client_id = await _generate_client_id(repo)
     client = ApiClient(
         client_id=req.client_id,
         client_secret_ref=hash_password(req.secret),

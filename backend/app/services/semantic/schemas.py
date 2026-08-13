@@ -53,7 +53,11 @@ class MetricCreateRequest(BaseModel):
     对齐 TD §3 POST /api/v1/metric-definitions。
     """
 
-    metric_code: str = Field(..., max_length=64, description="指标编码")
+    metric_code: str | None = Field(
+        None,
+        max_length=64,
+        description="指标编码（4段式，缺省由系统按源表/度量列/周期自动生成）",
+    )
     name: str = Field(..., max_length=128, description="指标名称")
     domain: str = Field(..., max_length=64, description="所属域")
     type: Literal["atomic", "derived", "composite"] = Field(
@@ -98,11 +102,14 @@ class MetricCreateRequest(BaseModel):
 
     @field_validator("metric_code")
     @classmethod
-    def validate_code(cls, v: str) -> str:
+    def validate_code(cls, v: str | None) -> str | None:
         """校验指标编码格式: 域_业务对象_度量_统计周期（4 段式 + 保留词）。
 
-        委托 ConflictPrechecker.validate_code_format 实现严格校验。
+        缺省（None）时由 Service 层按自动生成逻辑补全；显式提供时委托
+        ConflictPrechecker.validate_code_format 做严格校验。
         """
+        if v is None:
+            return v
         from app.services.semantic.conflict_precheck import ConflictPrechecker
 
         valid, error = ConflictPrechecker.validate_code_format(v)
@@ -243,7 +250,12 @@ class MetricBatchRegisterRequest(BaseModel):
 class MetricTemplateCreateRequest(BaseModel):
     """模板创建请求（对齐 FR-041：Schema 校验替代裸 dict）。"""
 
-    code: str = Field(..., max_length=64, pattern=r"^tpl_[a-z][a-z0-9_]*$", description="模板编码")
+    code: str | None = Field(
+        None,
+        max_length=64,
+        pattern=r"^tpl_[a-z][a-z0-9_]*$",
+        description="模板编码（缺省由系统自动生成 tpl_{domain}_{name} slug）",
+    )
     name: str = Field(..., max_length=128, description="模板名称")
     domain: str = Field(..., max_length=64, description="适用域")
     description: str | None = Field(None, description="模板说明")

@@ -186,6 +186,41 @@ class MetricService(BaseService):
             # 查询异常（表不存在/DB 抖动）→ best-effort 放行，不阻断创建
             return
 
+    async def _generate_metric_code(self, request: MetricCreateRequest) -> str:
+        """自动生成唯一指标编码（4 段式：域_业务对象_度量_统计周期）。
+
+        规则（对齐 FR-010 / batch_register 的既有逻辑）：
+        1. 源表 + 度量列 + 周期齐全 → 用 auto_fill 引擎生成 ``{domain}_{biz}_{measure}_{period}``；
+        2. 否则回退 ``{domain}_entity_{measure}_day``；
+        3. 冲突时追加 ``_2/_3/...`` 后缀（上限 100 次）。
+        """
+        from app.core.codegen import generate_unique_code
+        from app.services.semantic.auto_fill import (
+            extract_biz_object,
+            extract_measure,
+        )
+
+        domain = (request.domain or "domain").strip().lower() or "domain"
+        measure = extract_measure(request.measure_column or "value") or "value"
+        if request.source_table and request.period:
+            biz_obj = extract_biz_object(request.source_table) or "entity"
+            base = f"{domain}_{biz_obj}_{measure}_{request.period.strip().lower()}"
+        else:
+            base = f"{domain}_entity_{measure}_day"
+
+        async def _exists(code: str) -> bool:
+            return await self._repo.get_by_code(code) is not None
+
+        try:
+            return await generate_unique_code(base, _exists)
+        except RuntimeError as exc:
+            from app.core.exceptions import ConflictError
+
+            raise ConflictError(
+                f"无法为指标自动生成唯一编码（已尝试 100 次），请手动指定: {base}",
+                ctx={"code": "CODE_EXHAUSTED", "metric_code": base},
+            ) from exc
+
     async def create_metric(self, request: MetricCreateRequest, owner_id: int) -> Metric:
         """创建指标（初始状态 DRAFT）。
 
@@ -202,6 +237,10 @@ class MetricService(BaseService):
         Raises:
             ConflictError: 指标编码已存在。
         """
+        # ---- 编码自动生成（FR-010：缺省时系统生成，非人为创造）----
+        if not request.metric_code:
+            request.metric_code = await self._generate_metric_code(request)
+
         # 检查编码唯一性
         existing = await self._repo.get_by_code(request.metric_code)
         if existing is not None:

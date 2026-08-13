@@ -59,7 +59,7 @@ function TermsTab() {
   async function handleCreate(values: Record<string, unknown>) {
     try {
       await createTerm({
-        term_code: String(values.term_code),
+        term_code: values.term_code ? String(values.term_code) : undefined,
         name: String(values.name),
         definition: String(values.definition),
         domain: String(values.domain),
@@ -159,8 +159,8 @@ function TermsTab() {
 
       <Modal title="新建术语" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
-          <Form.Item name="term_code" label="术语编码" rules={[{ required: true }]}>
-            <Input className="mono" placeholder="如 GMV" />
+          <Form.Item name="term_code" label="术语编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>}>
+            <Input className="mono" placeholder="留空自动生成" />
           </Form.Item>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
             <Input placeholder="如 成交总额" />

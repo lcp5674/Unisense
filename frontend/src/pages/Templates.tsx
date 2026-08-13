@@ -36,7 +36,7 @@ export function Templates() {
     setLoading(true);
     try {
       const created = await createMetric({
-        metric_code: String(values.metric_code),
+        metric_code: values.metric_code ? String(values.metric_code) : undefined,
         name: String(values.name),
         domain: String(values.domain),
         type: (String(values.type) as MetricType) ?? "atomic",
@@ -132,8 +132,8 @@ export function Templates() {
       >
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Space style={{ width: "100%" }} wrap>
-            <Form.Item name="metric_code" label="指标编码" rules={[{ required: true }]} style={{ width: 240 }}>
-              <Input className="mono" />
+            <Form.Item name="metric_code" label="指标编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>} style={{ width: 240 }}>
+              <Input className="mono" placeholder="留空自动生成" />
             </Form.Item>
             <Form.Item name="name" label="名称" rules={[{ required: true }]} style={{ width: 260 }}>
               <Input />

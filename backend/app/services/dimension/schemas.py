@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 
 class DimensionCreate(BaseModel):
-    dim_code: str
+    dim_code: str | None = None  # 缺省由系统自动生成（domain_name slug）
     name: str
     domain: str
     type: str = "SCD1"
@@ -51,7 +51,7 @@ class DimensionResponse(BaseModel):
 
 class DimensionMemberCreate(BaseModel):
     dim_code: str
-    member_code: str
+    member_code: str | None = None  # 缺省由系统自动生成（member_name slug，维度内唯一）
     member_name: str
     parent_code: str | None = None
     path: str | None = None

@@ -117,7 +117,7 @@ export interface MetricVersionResponse {
 }
 
 export interface MetricCreateRequest {
-  metric_code: string;
+  metric_code?: string;
   name: string;
   domain: string;
   type: MetricType;
@@ -351,7 +351,7 @@ export interface QueryResponse {
 }
 
 export interface ClientCreateRequest {
-  client_id: string;
+  client_id?: string;
   secret: string;
   scope_domain?: string | null;
   metric_whitelist?: string[] | null;

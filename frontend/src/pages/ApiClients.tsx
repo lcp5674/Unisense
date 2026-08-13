@@ -33,7 +33,7 @@ export function ApiClients() {
     setLoading(true);
     try {
       const created = await createApiClient({
-        client_id: String(values.client_id),
+        client_id: values.client_id ? String(values.client_id) : undefined,
         secret: String(values.secret),
         scope_domain: values.scope_domain ? String(values.scope_domain) : null,
         metric_whitelist: values.metric_whitelist ? String(values.metric_whitelist).split(",").map((s) => s.trim()).filter(Boolean) : null,
@@ -118,8 +118,8 @@ export function ApiClients() {
         okText="创建"
       >
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
-          <Form.Item name="client_id" label="Client ID" rules={[{ required: true, min: 3, max: 64 }]}>
-            <Input className="mono" placeholder="如 finance-reader" />
+          <Form.Item name="client_id" label="Client ID" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统生成 app_ 前缀 ID</span>}>
+            <Input className="mono" placeholder="留空自动生成（app_ 前缀）" />
           </Form.Item>
           <Form.Item name="secret" label="密钥" rules={[{ required: true, min: 8 }]}>
             <Input.Password placeholder="至少 8 位" />

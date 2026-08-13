@@ -183,13 +183,12 @@ export function MetricCreate() {
   async function handlePrecheck() {
     const values = form.getFieldsValue();
     if (!selectedDomain) { message.warning("请先选择业务域"); return; }
-    if (!values.metric_code) { message.warning("请填写指标编码"); return; }
     setPrechecking(true);
     setPrecheckResult(null);
     try {
       const result = await checkConflict({
         candidate: {
-          metric_code: String(values.metric_code),
+          metric_code: values.metric_code ? String(values.metric_code) : suggestedCode || "",
           domain: selectedDomain,
           definition: mode === "sql" ? sqlText.trim() : String(values.definition || ""),
           source_tables: sourceTables,
@@ -216,7 +215,7 @@ export function MetricCreate() {
     const definitionJson = buildDefinitionJson(values);
     if (!definitionJson) { setLoading(false); return; }
     const req: MetricCreateRequest = {
-      metric_code: String(values.metric_code),
+      metric_code: values.metric_code ? String(values.metric_code) : undefined,
       name: String(values.name),
       domain: selectedDomain,
       type: String(values.type) as MetricType,
@@ -303,8 +302,8 @@ export function MetricCreate() {
             <Card type="inner" title="③ 确认/覆盖字段" size="small">
               <Row gutter={16}>
                 <Col span={12}>
-                  <Form.Item name="metric_code" label="指标编码" rules={[{ required: true }]} extra={suggestedCode && <Tag color="blue" style={{ marginTop: 4 }}>系统建议: {suggestedCode}</Tag>}>
-                    <Input placeholder="4段式: 域_业务对象_度量_周期" />
+                  <Form.Item name="metric_code" label="指标编码" extra={<span>{suggestedCode ? <Tag color="blue" style={{ marginTop: 4 }}>系统建议: {suggestedCode}</Tag> : <span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>}</span>}>
+                    <Input placeholder="4段式: 域_业务对象_度量_周期（留空自动生成）" />
                   </Form.Item>
                 </Col>
                 <Col span={12}>

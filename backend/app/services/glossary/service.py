@@ -54,7 +54,34 @@ class GlossaryService(BaseService):
         self._session = session
         self._repo = GlossaryRepository(session)
 
+    async def _generate_term_code(self, data: TermCreate) -> str:
+        """自动生成唯一术语编码。
+
+        规则：``{domain_slug}_{name_slug}``；纯中文等无 ASCII 名回退 ``term``；
+        冲突追加 ``_2/_3/...`` 后缀（上限 100 次）。
+        """
+        from app.core.codegen import generate_unique_code, slugify_code
+
+        domain_slug = slugify_code(data.domain)
+        name_slug = slugify_code(data.name)
+        if domain_slug and name_slug:
+            base = f"{domain_slug}_{name_slug}"
+        elif name_slug:
+            base = f"term_{name_slug}"
+        elif domain_slug:
+            base = f"term_{domain_slug}"
+        else:
+            base = "term"
+
+        async def _exists(code: str) -> bool:
+            return await self._repo.get_term(code) is not None
+
+        return await generate_unique_code(base, _exists)
+
     async def create_term(self, data: TermCreate, actor_id: int | None = None) -> TermResponse:
+        # 编码自动生成（FR-010：缺省时由系统生成，非人为创造）
+        if not data.term_code:
+            data.term_code = await self._generate_term_code(data)
         existing = await self._repo.get_term(data.term_code)
         if existing is not None:
             raise ConflictError(f"术语编码已存在: {data.term_code}", error_code="TERM_EXISTS")

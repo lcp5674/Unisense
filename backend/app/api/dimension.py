@@ -15,10 +15,14 @@ from app.db.mysql import get_db_session
 from app.services.dimension.schemas import (
     DimensionCreate,
     DimensionMappingCreate,
+    DimensionMappingResponse,
     DimensionMemberCreate,
+    DimensionMemberResponse,
     DimensionResponse,
     DimensionUpdate,
     MetricDimensionBind,
+    MetricDimensionResponse,
+    ReconciliationResponse,
     ReconciliationReview,
     ReconciliationSubmit,
 )
@@ -63,7 +67,10 @@ async def list_dimensions(
     status: str | None = Query(None),
 ) -> Any:
     items = await DimensionService(db).list_dimensions(domain, status)
-    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+    return ok(
+        data={"items": [DimensionResponse.from_model(i) for i in items], "total": len(items)},
+        trace_id=trace_id,
+    )
 
 
 @router.post("/mappings", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
@@ -84,7 +91,7 @@ async def create_mapping(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=DimensionMappingResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.get("/mappings", dependencies=_READ_DEPS)
@@ -95,7 +102,8 @@ async def list_mappings(
     source_dim_code: str | None = Query(None),
 ) -> Any:
     items = await DimensionService(db).list_mappings(source_dim_code)
-    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+    converted = [DimensionMappingResponse.from_model(i) for i in items]
+    return ok(data={"items": converted, "total": len(items)}, trace_id=trace_id)
 
 
 @router.post("/reconciliations", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
@@ -116,7 +124,7 @@ async def submit_reconciliation(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=ReconciliationResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.get("/reconciliations", dependencies=_READ_DEPS)
@@ -127,7 +135,10 @@ async def list_reconciliations(
     status: str | None = Query(None),
 ) -> Any:
     items = await DimensionService(db).list_reconciliations(status)
-    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+    return ok(
+        data={"items": [ReconciliationResponse.from_model(i) for i in items], "total": len(items)},
+        trace_id=trace_id,
+    )
 
 
 @router.post(
@@ -152,7 +163,7 @@ async def review_reconciliation(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=ReconciliationResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.get("/{dim_code}", dependencies=[Depends(require_roles(*_READ_ROLES))])
@@ -162,7 +173,8 @@ async def get_dimension(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    return ok(data=await DimensionService(db).get_dimension(dim_code), trace_id=trace_id)
+    resp = await DimensionService(db).get_dimension(dim_code)
+    return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.put("/{dim_code}", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
@@ -184,7 +196,7 @@ async def update_dimension(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.post("/{dim_code}/deprecate", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
@@ -205,7 +217,7 @@ async def deprecate_dimension(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.post("/{dim_code}/publish", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
@@ -226,7 +238,7 @@ async def publish_dimension(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.post("/{dim_code}/members", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
@@ -248,18 +260,21 @@ async def create_member(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=DimensionMemberResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.get("/{dim_code}/members", dependencies=_READ_DEPS)
 async def list_members(
-    dim_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
+    dim_code: str,
 ) -> Any:
     items = await DimensionService(db).list_members(dim_code)
-    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+    return ok(
+        data={"items": [DimensionMemberResponse.from_model(i) for i in items], "total": len(items)},
+        trace_id=trace_id,
+    )
 
 
 @router.post(
@@ -284,7 +299,7 @@ async def bind_metric_dimension(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=MetricDimensionResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.get("/{metric_id}/metric-dimensions", dependencies=_READ_DEPS)
@@ -295,4 +310,7 @@ async def list_metric_dimensions(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     items = await DimensionService(db).list_metric_dimensions(metric_id)
-    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+    return ok(
+        data={"items": [MetricDimensionResponse.from_model(i) for i in items], "total": len(items)},
+        trace_id=trace_id,
+    )

@@ -105,7 +105,19 @@ async def test_review_reconciliation_ignores_client_reviewer_id(
 
     async def fake(self, rec_id, data, reviewer_id=None):
         captured["reviewer_id"] = reviewer_id
-        return {"id": rec_id, "status": data.decision}
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            id=rec_id,
+            metric_id=1,
+            dim_code=None,
+            expected_expr="SUM(a)",
+            actual_expr="SUM(b)",
+            status=data.decision,
+            diff_summary=None,
+            reviewed_by=reviewer_id,
+            created_at=None,
+        )
 
     monkeypatch.setattr(dsvc.DimensionService, "review_reconciliation", fake)
     async for admin in _client(9, "platform_admin"):

@@ -126,7 +126,8 @@ describe("SubjectDomain 页面", () => {
     expect(arg.code).toBeUndefined();
     expect(arg.name).toBe("Risk");
     expect(arg.parent_id).toBeNull();
-    expect(arg.owner_id).toBe(1);
+    // PLAT-2：owner_id 不随前端下发，后端以认证身份为准
+    expect(arg.owner_id).toBeUndefined();
   });
 
   it("点击树节点「新建子域」打开弹窗且父域已预选", async () => {

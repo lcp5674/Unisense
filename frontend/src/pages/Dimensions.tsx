@@ -52,7 +52,7 @@ function DimensionsTab() {
   async function handleCreate(values: Record<string, unknown>) {
     try {
       await createDimension({
-        dim_code: String(values.dim_code),
+        dim_code: values.dim_code ? String(values.dim_code) : undefined,
         name: String(values.name),
         domain: String(values.domain),
         type: String(values.type ?? "SCD1"),
@@ -124,8 +124,8 @@ function DimensionsTab() {
 
       <Modal title="新建维度" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
-          <Form.Item name="dim_code" label="维度编码" rules={[{ required: true }]}>
-            <Input className="mono" placeholder="如 dim_channel" />
+          <Form.Item name="dim_code" label="维度编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>}>
+            <Input className="mono" placeholder="留空自动生成" />
           </Form.Item>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
             <Input placeholder="如 渠道" />
@@ -171,7 +171,7 @@ function MembersTab() {
     try {
       await createDimensionMember({
         dim_code: dimCode,
-        member_code: String(values.member_code),
+        member_code: values.member_code ? String(values.member_code) : undefined,
         member_name: String(values.member_name),
         parent_code: values.parent_code ? String(values.parent_code) : null,
         path: values.path ? String(values.path) : null,
@@ -222,8 +222,8 @@ function MembersTab() {
 
       <Modal title="新增维度成员" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
-          <Form.Item name="member_code" label="成员编码" rules={[{ required: true }]}>
-            <Input className="mono" />
+          <Form.Item name="member_code" label="成员编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>}>
+            <Input className="mono" placeholder="留空自动生成" />
           </Form.Item>
           <Form.Item name="member_name" label="成员名称" rules={[{ required: true }]}>
             <Input />

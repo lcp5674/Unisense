@@ -66,7 +66,9 @@ class QueryResponse(BaseModel):
 class ClientCreateRequest(BaseModel):
     """创建接入方（平台管理员，POST /consume/api-clients）。"""
 
-    client_id: str = Field(..., min_length=3, max_length=64)
+    client_id: str | None = Field(
+        None, min_length=3, max_length=64, description="接入方ID（缺省由系统自动生成 app_ 前缀）"
+    )
     secret: str = Field(..., min_length=8, description="接入方密钥（明文，仅返回一次）")
     scope_domain: str | None = None
     metric_whitelist: list[str] | None = None

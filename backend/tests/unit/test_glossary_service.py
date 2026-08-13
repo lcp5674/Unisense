@@ -123,3 +123,54 @@ async def test_create_term_detects_alias_overlap() -> None:
     repo.save_conflict.assert_awaited()
     conflict: GlossaryConflict = repo.save_conflict.call_args.args[0]
     assert conflict.conflict_type in ("alias_overlap", "name_overlap")
+
+
+async def test_create_term_auto_generates_code() -> None:
+    """term_code 缺省时由系统自动生成（domain_name slug），非人为创造。"""
+    db = MagicMock()
+    svc = GlossaryService(db)
+    repo = MagicMock()
+    repo.get_term = AsyncMock(return_value=None)
+    repo.save_term = AsyncMock(side_effect=lambda t: _persist(t))
+    repo.count_term_versions = AsyncMock(return_value=0)
+    repo.save_term_version = AsyncMock()
+    repo.all_terms = AsyncMock(return_value=[])
+    repo.save_conflict = AsyncMock()
+    repo.commit = AsyncMock()
+    svc._repo = repo
+
+    payload = TermCreate(
+        term_code=None,
+        name="Active User",
+        definition="d",
+        domain="user",
+        owner_id=1,
+    )
+    resp = await svc.create_term(payload, 1)
+    assert resp.term_code == "user_active_user"
+    assert resp.status == TermStatus.DRAFT
+
+
+async def test_create_term_auto_code_fallback_for_chinese() -> None:
+    """纯中文名无 ASCII 时回退 term_{domain}。"""
+    db = MagicMock()
+    svc = GlossaryService(db)
+    repo = MagicMock()
+    repo.get_term = AsyncMock(return_value=None)
+    repo.save_term = AsyncMock(side_effect=lambda t: _persist(t))
+    repo.count_term_versions = AsyncMock(return_value=0)
+    repo.save_term_version = AsyncMock()
+    repo.all_terms = AsyncMock(return_value=[])
+    repo.save_conflict = AsyncMock()
+    repo.commit = AsyncMock()
+    svc._repo = repo
+
+    payload = TermCreate(
+        term_code=None,
+        name="活跃用户",
+        definition="d",
+        domain="user",
+        owner_id=1,
+    )
+    resp = await svc.create_term(payload, 1)
+    assert resp.term_code == "term_user"
