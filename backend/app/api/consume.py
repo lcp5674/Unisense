@@ -15,9 +15,10 @@ import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Query
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, require_roles
+from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import write_audit
 from app.core.error_codes import ErrorCode
@@ -45,12 +46,12 @@ from app.services.consume.service import ConsumeService
 router = APIRouter(tags=["consume"], dependencies=[Depends(guard_against_injection)])
 
 
-async def get_consume_client(
-    api_key: Annotated[str | None, Header(alias="X-Api-Key")] = None,
-    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
-    db: AsyncSession = Depends(get_db_session),
+async def _authenticate_consume(
+    db: AsyncSession,
+    api_key: str | None = None,
+    authorization: str | None = None,
 ) -> ApiClient:
-    """消费方鉴权依赖：优先 Bearer 消费方 JWT，其次 X-Api-Key（client_id:secret）。
+    """消费方鉴权核心：优先 Bearer 消费方 JWT，其次 X-Api-Key（client_id:secret）。
 
     两种方式均走接入方校验 + 限流闸门。Bearer 令牌由平台/域管理员
     经 ``POST /consume/api-clients/{id}/token`` 换发（TD §5.1），
@@ -69,6 +70,46 @@ async def get_consume_client(
     client = await svc.authenticate_client(api_key)
     await svc.check_rate_limit(client)
     return client
+
+
+async def get_consume_client(
+    api_key: Annotated[str | None, Header(alias="X-Api-Key")] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    db: AsyncSession = Depends(get_db_session),
+) -> ApiClient:
+    """消费方鉴权依赖（严格通道：仅 X-Api-Key / consume Bearer）。"""
+    return await _authenticate_consume(db=db, api_key=api_key, authorization=authorization)
+
+
+async def get_consume_or_internal_user(
+    api_key: Annotated[str | None, Header(alias="X-Api-Key")] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    db: AsyncSession = Depends(get_db_session),
+) -> ApiClient | User:
+    """消费数据只读双通道鉴权依赖（任一通过即可）。
+
+    FastAPI 的 ``Depends`` 为“且”关系，故自建“或”逻辑：
+    - 消费方：X-Api-Key（client_id:secret）或 consume Bearer token（QueryWorkspace / 外部接入方）。
+    - 内部登录用户：标准用户 JWT（指标详情 UI 展示消费快照，只读，不经过接入方限流）。
+
+    任一通道失败不阻断另一通道：前端会携带全局 X-Api-Key 默认头（semantic 域密钥），
+    对 consume 域无效时需回落到用户 JWT 通道；用户 JWT 本身即为有效凭证。
+    """
+    credentials: HTTPAuthorizationCredentials | None = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        if token:
+            credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+    # 优先消费方通道
+    if api_key or credentials is not None:
+        try:
+            return await _authenticate_consume(db=db, api_key=api_key, authorization=authorization)
+        except BusinessError:
+            pass
+    # 回落到内部登录用户只读通道
+    if credentials is not None:
+        return await get_current_user(db, credentials)
+    raise BusinessError("缺少认证凭证", error_code=ErrorCode.AUTH_APIKEY_MISSING)
 
 
 @router.post("/consume/query/dry-run", response_model=ApiResponse[DryRunResponse])
@@ -226,9 +267,10 @@ async def list_metric_snapshots(
     code: str,
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
-    client: ApiClient = Depends(get_consume_client),
+    _auth: ApiClient | User = Depends(get_consume_or_internal_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiResponse[list[SnapshotResponse]]:
+    """消费快照只读（WORM）：消费方（X-Api-Key / consume Bearer）或内部登录用户均可读。"""
     svc = ConsumeService(db)
     return ok(data=await svc.list_snapshots(code, limit, offset))
 

@@ -189,6 +189,8 @@ interface ApiEnvelope<T> {
 interface RequestOptions extends RequestInit {
   /** 消费服务调用：使用 API 客户端令牌而非用户 JWT */
   consumeAuth?: boolean;
+  /** consumeAuth 模式下，无消费令牌时回落登录用户 JWT（仅快照等双通道只读端点） */
+  consumeFallbackUser?: boolean;
 }
 
 async function request<T>(path: string, init?: RequestOptions): Promise<T> {
@@ -199,13 +201,15 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   };
   if (init?.consumeAuth) {
     const consumeToken = getConsumeToken();
-    if (consumeToken) headers["Authorization"] = `Bearer ${consumeToken}`;
+    let bearer: string | null = consumeToken;
+    if (!bearer && init?.consumeFallbackUser) bearer = getToken();
+    if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
   } else {
     const token = getToken();
     if (token) headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const { consumeAuth: _consumeAuth, ...restInit } = init ?? {};
+  const { consumeAuth: _consumeAuth, consumeFallbackUser: _consumeFallbackUser, ...restInit } = init ?? {};
 
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...restInit,
@@ -675,7 +679,7 @@ export async function listSnapshots(
 ): Promise<SnapshotResponse[]> {
   return request<SnapshotResponse[]>(
     `${API_BASE}/consume/metrics/${encodeURIComponent(code)}/snapshots?limit=${limit}`,
-    { consumeAuth: true },
+    { consumeAuth: true, consumeFallbackUser: true },
   );
 }
 
