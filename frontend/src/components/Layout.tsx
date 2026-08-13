@@ -28,6 +28,7 @@ import {
   DatabaseOutlined,
   FileTextOutlined,
   GlobalOutlined,
+  TagsOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
 } from "@ant-design/icons";
@@ -97,7 +98,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/quality", label: "质量中心", icon: <ExperimentOutlined /> },
       { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
       { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
-      { key: "/dicts", label: "字典管理", icon: <BookOutlined /> },
+      { key: "/dicts", label: "参照数据管理", icon: <TagsOutlined /> },
       { key: "/governance", label: "权限治理", icon: <SafetyCertificateOutlined /> },
       { key: "/audit", label: "审计日志", icon: <FileSearchOutlined /> },
     ],

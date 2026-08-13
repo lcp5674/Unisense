@@ -39,7 +39,7 @@ export function SystemDict() {
     listDictTypes().then((types) => {
       setDictTypes(types);
       if (types.length > 0 && !activeType) setActiveType(types[0]);
-    }).catch(() => message.error("加载字典类型失败"));
+    }).catch(() => message.error("加载参照数据类型失败"));
   }, []);
 
   useEffect(() => {
@@ -47,7 +47,7 @@ export function SystemDict() {
     setLoading(true);
     listAllDictItems(activeType)
       .then(setItems)
-      .catch(() => message.error("加载字典项失败"))
+      .catch(() => message.error("加载参照数据项失败"))
       .finally(() => setLoading(false));
   }, [activeType]);
 
@@ -99,7 +99,7 @@ export function SystemDict() {
   function handleDelete(item: SystemDictItem) {
     modal.confirm({
       title: "确认删除",
-      content: `确定要删除 "${item.label}" 吗？被引用的字典项不可删除。`,
+      content: `确定要删除 "${item.label}" 吗？被引用的参照数据项不可删除。`,
       okText: "删除",
       okType: "danger",
       onOk: async () => {
@@ -139,7 +139,7 @@ export function SystemDict() {
   ];
 
   return (
-    <Card title="系统字典管理">
+    <Card title="参照数据管理">
       <Tabs
         activeKey={activeType}
         onChange={setActiveType}
@@ -149,7 +149,7 @@ export function SystemDict() {
         }))}
       />
       <div style={{ marginBottom: 16 }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新增字典项</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新增参照数据项</Button>
       </div>
       <Table
         columns={columns}
@@ -161,7 +161,7 @@ export function SystemDict() {
       />
 
       {/* 新增弹窗 */}
-      <Modal title={`新增 ${DICT_TYPE_LABELS[activeType] || activeType} 字典项`} open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => createForm.submit()}>
+      <Modal title={`新增 ${DICT_TYPE_LABELS[activeType] || activeType} 参照数据项`} open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => createForm.submit()}>
         <Form form={createForm} onFinish={handleCreate} layout="vertical">
           <Form.Item name="code" label="编码" rules={[{ required: true }, { pattern: /^[A-Za-z0-9_]+$/, message: "仅字母数字下划线" }]}>
             <Input placeholder="如 CNY" />
@@ -179,7 +179,7 @@ export function SystemDict() {
       </Modal>
 
       {/* 编辑弹窗 */}
-      <Modal title="编辑字典项" open={editOpen} onCancel={() => { setEditOpen(false); setEditItem(null); }} onOk={() => editForm.submit()}>
+      <Modal title="编辑参照数据项" open={editOpen} onCancel={() => { setEditOpen(false); setEditItem(null); }} onOk={() => editForm.submit()}>
         <Form form={editForm} onFinish={handleEdit} layout="vertical">
           <Form.Item name="label" label="显示名" rules={[{ required: true }]}>
             <Input />
