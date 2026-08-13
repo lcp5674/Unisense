@@ -85,12 +85,13 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
                 next_run = itr.get_next(datetime)
                 if (next_run - now) <= timedelta(minutes=1):
                     job_id = f"collect:sched:{src.source_id}:{int(next_run.timestamp())}"
+                    # run_collection_task 以 job_id 作第 4 位置参数（幂等键 + 状态回写）；
+                    # arq 0.28 的 enqueue_job 不支持 _max_tries/_timeout，任务超时由内部兜底。
                     await redis.enqueue_job(
                         "run_collection_task",
                         src.source_id,
                         src.created_by,
-                        _max_tries=3,
-                        _timeout=600,
+                        job_id,
                         _job_id=job_id,
                     )
                     triggered += 1
