@@ -29,6 +29,7 @@ import {
   DashboardData,
   DataSource,
   DataSourceCreateRequest,
+  DataSourceListResponse,
   DBCatalog,
   DictItemCreateRequest,
   DictItemUpdateRequest,
@@ -1296,7 +1297,7 @@ export async function listDataSources(params?: {
   keyword?: string;
   page?: number;
   page_size?: number;
-}): Promise<DataSource[]> {
+}): Promise<DataSourceListResponse> {
   const qs = pageQs({
     domain: params?.domain,
     source_type: params?.source_type,
@@ -1304,7 +1305,8 @@ export async function listDataSources(params?: {
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 100,
   });
-  return request<DataSource[]>(`${API_BASE}/data-sources?${qs}`);
+  // P1-1: 后端返回分页结构 {items, total, page, page_size}（此前 total 被丢弃导致静默截断）
+  return request<DataSourceListResponse>(`${API_BASE}/data-sources?${qs}`);
 }
 
 export async function createDataSource(req: DataSourceCreateRequest): Promise<DataSource> {

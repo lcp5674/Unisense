@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from app.core.exceptions import BusinessError, NotFoundError
 from app.services.system_dict.service import SystemDictService

@@ -793,6 +793,13 @@ export interface DataSource {
   updated_at: string;
 }
 
+export interface DataSourceListResponse {
+  items: DataSource[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export interface DataSourceCreateRequest {
   /** 不传时由系统按 类型_库|域 自动生成 */
   source_id?: string | null;
@@ -865,6 +872,7 @@ export interface SourceHealth {
   health_status: string;
   last_collected_at: string | null;
   last_error: string | null;
+  last_health_check: string | null;
   uptime_check: boolean;
 }
 

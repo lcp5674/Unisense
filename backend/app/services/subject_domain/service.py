@@ -13,6 +13,7 @@ from app.services.subject_domain.repository import SubjectDomainRepository
 from app.services.subject_domain.schemas import (
     SubjectDomainCreate,
     SubjectDomainDefaultsUpdate,
+    SubjectDomainResponse,
     SubjectDomainTreeNode,
     SubjectDomainUpdate,
 )
@@ -36,26 +37,25 @@ class SubjectDomainService:
             raise NotFoundError(f"主题域不存在: {code}")
         return domain
 
-    async def get_domain_with_count(self, code: str) -> dict[str, Any]:
+    async def get_domain_with_count(self, code: str) -> SubjectDomainResponse:
         domain = await self.get_domain(code)
         count = await self._repo.get_metric_count(code)
-        result = {
-            "id": domain.id,
-            "code": domain.code,
-            "name": domain.name,
-            "parent_id": domain.parent_id,
-            "level": domain.level,
-            "path": domain.path,
-            "sort_order": domain.sort_order,
-            "status": domain.status,
-            "defaults_json": domain.defaults_json,
-            "description": domain.description,
-            "owner_id": domain.owner_id,
-            "metric_count": count,
-            "created_at": domain.created_at,
-            "updated_at": domain.updated_at,
-        }
-        return result
+        return SubjectDomainResponse(
+            id=domain.id,
+            code=domain.code,
+            name=domain.name,
+            parent_id=domain.parent_id,
+            level=domain.level,
+            path=domain.path,
+            sort_order=domain.sort_order,
+            status=domain.status,
+            defaults_json=domain.defaults_json,
+            description=domain.description,
+            owner_id=domain.owner_id,
+            metric_count=count,
+            created_at=domain.created_at,
+            updated_at=domain.updated_at,
+        )
 
     async def list_tree(self, status: str | None = None) -> list[SubjectDomainTreeNode]:
         """获取域树（3层）。"""

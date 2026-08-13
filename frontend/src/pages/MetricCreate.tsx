@@ -6,7 +6,7 @@ import {
 import {
   createMetric, fetchAssetSearch, autoSuggestMetric, listDomainTree, listDictItems, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricType, MetricTier, SubjectDomainTreeNode, AutoSuggestResponse } from "../types";
+import type { MetricCreateRequest, MetricType, MetricTier, SubjectDomainTreeNode } from "../types";
 
 const { Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -194,9 +194,6 @@ export function MetricCreate() {
       additivity: String(values.additivity || "ADDITIVE") as MetricCreateRequest["additivity"],
       definition_json: definitionJson,
       pii_flag: Boolean(values.pii_flag),
-      source_table: values.source_table ? String(values.source_table) : undefined,
-      measure_column: values.measure_column ? String(values.measure_column) : undefined,
-      period: values.period ? String(values.period) : undefined,
     };
     try {
       const created = await createMetric(req);
@@ -209,7 +206,7 @@ export function MetricCreate() {
     }
   }
 
-  const dictSelect = (dictType: string, field: string, placeholder: string) => (
+  const dictSelect = (dictType: string, _field: string, placeholder: string) => (
     <Select
       showSearch
       placeholder={placeholder}
@@ -248,18 +245,18 @@ export function MetricCreate() {
             <Card type="inner" title="② 自动推断" size="small" extra={suggesting && <Spin size="small" />}>
               <Row gutter={16}>
                 <Col span={8}>
-                  <Form.Item name="source_table" label="源表名" onBlur={handleAutoSuggest}>
-                    <Input placeholder="如 dwd.sales_detail" />
+                  <Form.Item name="source_table" label="源表名">
+                    <Input placeholder="如 dwd.sales_detail" onBlur={handleAutoSuggest} />
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="measure_column" label="度量列" onBlur={handleAutoSuggest}>
-                    <Input placeholder="如 amount" />
+                  <Form.Item name="measure_column" label="度量列">
+                    <Input placeholder="如 amount" onBlur={handleAutoSuggest} />
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="period" label="统计周期" onBlur={handleAutoSuggest}>
-                    <Input placeholder="如 day" />
+                  <Form.Item name="period" label="统计周期">
+                    <Input placeholder="如 day" onBlur={handleAutoSuggest} />
                   </Form.Item>
                 </Col>
               </Row>

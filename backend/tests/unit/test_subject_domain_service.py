@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from app.core.exceptions import BusinessError, NotFoundError
-from app.services.subject_domain.service import SubjectDomainService, MAX_LEVEL
+from app.services.subject_domain.service import SubjectDomainService
 
 
 @pytest.fixture
