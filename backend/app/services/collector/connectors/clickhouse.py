@@ -52,12 +52,22 @@ class ClickHouseCollector(BaseCollector):
         self._password = password
         self._database = database
         self._base_url = f"http://{host}:{port}"
+        # P1-3: httpx.AsyncClient 作为实例属性复用（单例），避免每次查询新建连接
+        self._client: httpx.AsyncClient | None = None
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        """懒加载并复用单个 httpx.AsyncClient 实例（P1-3 单例复用）。"""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=60.0)
+        return self._client
 
     async def _query(self, sql: str) -> str:
         """执行 ClickHouse HTTP 查询，返回原始文本响应。
 
         P1-5：凭据经 HTTP Basic Auth 头传递（而非 URL query 参数），
         避免密码进入 ClickHouse / 代理访问日志。
+
+        P1-3：复用实例级 httpx.AsyncClient，避免每次查询重建连接。
 
         Args:
             sql: SQL 查询语句。
@@ -75,11 +85,11 @@ class ClickHouseCollector(BaseCollector):
         # Basic Auth：user + password 走 Authorization 头（httpx auth 元组）
         auth = (self._user, self._password)
 
+        client = await self._ensure_client()
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.get(self._base_url, params=params, auth=auth)
-                response.raise_for_status()
-                return response.text
+            response = await client.get(self._base_url, params=params, auth=auth)
+            response.raise_for_status()
+            return response.text
         except httpx.TimeoutException as exc:
             raise ExternalDependencyError(f"ClickHouse 查询超时: {sql[:100]}") from exc
         except httpx.HTTPStatusError as exc:
@@ -90,6 +100,21 @@ class ClickHouseCollector(BaseCollector):
             ) from exc
         except httpx.ConnectError as exc:
             raise ExternalDependencyError(f"ClickHouse 连接失败: {self._base_url}") from exc
+
+    async def __aenter__(self) -> ClickHouseCollector:
+        """支持 `async with` 上下文管理，进入时确保 client 已建立。"""
+        await self._ensure_client()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        """退出上下文时释放 client 连接。"""
+        await self.close()
+
+    async def close(self) -> None:
+        """关闭并释放底层 httpx.AsyncClient（P1-3 防连接泄漏）。"""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")

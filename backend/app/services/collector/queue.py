@@ -70,6 +70,10 @@ class InMemoryCollectionQueue:
 class RedisJobStore:
     """基于 Redis 的任务状态存储（生产实现，供 arq worker 与状态查询共用）。"""
 
+    # P1-6: 终态任务加固定 TTL，避免重试幂等键在 Redis 中永久堆积
+    _TERMINAL_STATUSES: frozenset[str] = frozenset({"COMPLETED", "FAILED"})
+    _TERMINAL_TTL_SECONDS: int = 7 * 24 * 60 * 60  # 7 天
+
     def __init__(self, redis: Any) -> None:
         self._redis = redis
 
@@ -87,6 +91,9 @@ class RedisJobStore:
                 "detail": json.dumps(detail, ensure_ascii=False, default=str),
             },
         )
+        # P1-6: 终态（COMPLETED/FAILED）设置 7 天 TTL，过期后自动回收（重试幂等键可清理）
+        if status in self._TERMINAL_STATUSES:
+            await self._redis.expire(self._key(job_id), self._TERMINAL_TTL_SECONDS)
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
         import json
@@ -207,4 +214,4 @@ def create_collection_queue(
             "collection_queue_fallback_inmemory: Redis URL 未配置，"
             "采集队列降级为内存实现。生产环境请设置 UNISENSE_REDIS_URL。"
         )
-        return InMemoryCollectionQueue()
+        return get_default_queue()

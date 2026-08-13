@@ -244,3 +244,28 @@ class ScheduleRequest(BaseModel):
 
     cron: str = Field(max_length=100, description="定时调度 cron 表达式")
     mode: str = Field(default="FULL", max_length=16, pattern=r"^(FULL|INCREMENTAL)$")
+
+
+class DriftLogResponse(BaseModel):
+    """Schema Drift 日志条目（P1-4 暴露给前端）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    source_id: str
+    entity_name: str
+    change_type: str
+    before_signature: str | None = None
+    after_signature: str
+    before_schema: dict[str, Any] | None = None
+    after_schema: dict[str, Any]
+    diff_json: dict[str, Any] | None = None
+    detected_at: str
+
+
+class DriftLogListResponse(BaseModel):
+    """Schema Drift 日志分页列表（P1-4）。"""
+
+    items: list[DriftLogResponse]
+    total: int
+    page: int
+    page_size: int

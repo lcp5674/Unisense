@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import String, cast, delete, func, or_, select, update
+from sqlalchemy import String, cast, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -51,31 +51,48 @@ class CollectorRepository:
     async def soft_delete_source(self, source_id: str) -> bool:
         """软删除数据源，并释放 ``source_id`` 唯一约束以允许重建同名源。
 
-        P0-3/P2-9 修复：
-        - 级联清理子表：db_catalog 软删、collection_watermark / schema_drift_log 硬删
-          （既避免孤儿数据，又解除外键引用，使父表改名可执行）。
+        P0-1/P0-3/P2-9 修复：
+        - 级联清理子表：先更新子表 source_id 引用，再 rename 父表 source_id，
+          确保 FK 约束链完整（避免 MySQL FK 1451 错误）。
+        - db_catalog / collection_watermark / schema_drift_log 的 source_id 均更新为新名。
         - 把软删记录的 ``source_id`` 改为 ``{source_id}__del_{ts}``，原 ID 即刻可复用，
           否则重建同名源会撞唯一约束抛 IntegrityError 500。
+
+        Note:
+            MySQL 外键默认 ``RESTRICT``——在父表改名之前，把子表 ``source_id`` 更新为
+            尚不存在的新值会立即触发 FK 1452。因此整个级联改名在事务内临时关闭
+            ``FOREIGN_KEY_CHECKS``（会话级开关，事务提交即失效，无并发风险）。
         """
         src = await self.get_source(source_id)
         if src is None:
             return False
         now = datetime.now(UTC)
-        # 1) 清理子表（外键引用 → 先于父表改名）
-        await self._db.execute(
-            update(DBCatalog)
-            .where(DBCatalog.source_id == source_id, DBCatalog.deleted_at.is_(None))
-            .values(deleted_at=now)
-        )
-        await self._db.execute(
-            delete(CollectionWatermark).where(CollectionWatermark.source_id == source_id)
-        )
-        await self._db.execute(delete(SchemaDriftLog).where(SchemaDriftLog.source_id == source_id))
-        # 2) 释放唯一约束：改名保留软删记录
         new_id = f"{source_id}__del_{int(now.timestamp())}"[:64]
-        src.source_id = new_id
-        src.deleted_at = now
-        await self._db.flush()
+        # P0-1 Fix: 事务内关闭 FK 检查，完成级联改名后再恢复（避免 FK 1452/1451）
+        await self._db.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+        try:
+            await self._db.execute(
+                update(CollectionWatermark)
+                .where(CollectionWatermark.source_id == source_id)
+                .values(source_id=new_id)
+            )
+            await self._db.execute(
+                update(DBCatalog)
+                .where(DBCatalog.source_id == source_id)
+                .values(source_id=new_id)
+            )
+            # 变更审计日志一并改名保留（软删父源后仍可追溯）
+            await self._db.execute(
+                update(SchemaDriftLog)
+                .where(SchemaDriftLog.source_id == source_id)
+                .values(source_id=new_id)
+            )
+            # 释放唯一约束：改名保留软删记录
+            src.source_id = new_id
+            src.deleted_at = now
+            await self._db.flush()
+        finally:
+            await self._db.execute(text("SET FOREIGN_KEY_CHECKS=1"))
         return True
 
     async def list_sources(
@@ -234,6 +251,16 @@ class CollectorRepository:
         )
         res = await self._db.execute(stmt)
         return res.scalars().all(), total
+
+    async def list_active_entity_names(self, source_id: str) -> list[str]:
+        """返回数据源下所有未废弃（deleted_at IS NULL）的实体名，用于对账。"""
+        res = await self._db.execute(
+            select(DBCatalog.entity_name).where(
+                DBCatalog.source_id == source_id,
+                DBCatalog.deleted_at.is_(None),
+            )
+        )
+        return [row[0] for row in res.all()]
 
     async def deprecate_catalog(self, source_id: str, entity_name: str) -> bool:
         cat = await self.get_catalog(source_id, entity_name)

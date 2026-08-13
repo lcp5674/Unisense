@@ -48,6 +48,7 @@ from app.services.collector.schemas import (
     DBCatalogListParams,
     DBCatalogListResponse,
     DBCatalogResponse,
+    DriftLogListResponse,
     ScheduleRequest,
     TestConnectionRequest,
     TestConnectionResult,
@@ -353,28 +354,92 @@ async def schedule_collection(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[dict[str, Any]]:
-    """全量采集接入异步队列：立即返回 job_id，采集在后台 worker 执行（TD §12.1）。
+    """设置数据源定时调度（P1-7：仅保存 cron+mode，不触发立即采集）。
 
-    支持配置 cron 表达式和采集模式（FULL/INCREMENTAL），
-    保存到 DataSource.schedule_cron / collection_mode。
+    设置定时只负责保存调度配置（由 worker 的 collect_scheduler 每分钟扫描触发），
+    与「立即采集」语义分离——立即采集请调用 POST /{source_id}/collect 或 /collect-async。
     """
     svc = _svc(db)
-    # US3: 保存 cron+mode 到 DataSource
+    # P1-7: 仅保存 cron+mode 到 DataSource，不投递采集任务
     await svc.update_schedule(source_id, body.cron, body.mode)
-    job_id = await svc.schedule_collection(source_id, user.id)
     await write_audit(
         db,
         actor_id=user.id,
         action="COLLECT_SCHEDULE",
         entity_type="data_source",
         entity_id=source_id,
-        detail={"job_id": job_id, "cron": body.cron, "mode": body.mode},
+        detail={"cron": body.cron, "mode": body.mode, "scheduled": True},
         ip=client_ip(request),
         trace_id=trace_id,
     )
     await db.commit()
     return ok(
-        data={"job_id": job_id, "status": "QUEUED", "cron": body.cron, "mode": body.mode},
+        data={"scheduled": True, "cron": body.cron, "mode": body.mode},
+        trace_id=trace_id,
+    )
+
+
+@source_router.post("/{source_id}/collect-async", dependencies=_WRITE_DEPS)
+async def collect_source_async(
+    source_id: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """异步立即采集：立即返回 job_id，采集在后台 worker 执行（TD §12.1）。
+
+    与同步 POST /{source_id}/collect 的区别：本端点不阻塞请求，
+    适合大库采集（避免 300s 同步超时）。
+    """
+    svc = _svc(db)
+    job_id = await svc.schedule_collection(source_id, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="COLLECT_ASYNC",
+        entity_type="data_source",
+        entity_id=source_id,
+        detail={"job_id": job_id},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data={"job_id": job_id, "status": "QUEUED"},
+        trace_id=trace_id,
+    )
+
+
+@source_router.post("/{source_id}/collect-now", dependencies=_WRITE_DEPS)
+async def collect_now(
+    source_id: str,
+    body: CollectRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """P1-7: 立即触发一次采集（与定时调度解耦）。
+
+    将采集任务投递到异步队列，立即返回 job_id；采集在后台 worker 执行，
+    不影响已配置的 cron 调度。mode 经由 CollectRequest 指定（默认 FULL）。
+    """
+    svc = _svc(db)
+    job_id = await svc.schedule_collection(source_id, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="COLLECT_NOW",
+        entity_type="data_source",
+        entity_id=source_id,
+        detail={"job_id": job_id, "mode": body.mode},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data={"job_id": job_id, "status": "QUEUED", "mode": body.mode},
         trace_id=trace_id,
     )
 
@@ -421,6 +486,30 @@ async def get_health(
     svc = _svc(db)
     health_info = await svc.get_health(source_id)
     return ok(data=health_info, trace_id=trace_id)
+
+
+@source_router.get("/{source_id}/drift-logs", dependencies=_READ_DEPS)
+async def list_drift_logs(
+    source_id: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    entity_name: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> ApiResponse[DriftLogListResponse]:
+    """P1-4: Schema Drift 变更日志（按检测时间倒序，分页）。
+
+    用于前端展示数据源的 schema 漂移历史。
+    """
+    svc = _svc(db)
+    result = await svc.list_drift_logs(
+        source_id, entity_name, page=page, page_size=page_size
+    )
+    return ok(
+        data=DriftLogListResponse(**result),
+        trace_id=trace_id,
+    )
 
 
 @catalog_router.get("", dependencies=_READ_DEPS)

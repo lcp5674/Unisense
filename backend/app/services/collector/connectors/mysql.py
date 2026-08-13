@@ -172,21 +172,28 @@ class InformationSchemaCollector(BaseCollector):
                 logger.warning("采集源 %s 库 %s 表列表失败: %s", source_id, schema, exc)
                 continue
 
-            # P1-7: 一次批量查询该库全部列并按表分组，消除「每表一次查询」的 N+1
+            # P1-1: 一次批量查询该库全部列并按表分组，消除「每表一次查询」的 N+1；
+            # 补列类型（data_type）和可空（is_nullable），schema_json 格式对齐采集器规范。
             try:
                 col_rows = await self._connector.query(
-                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "SELECT table_name, column_name, data_type, is_nullable "
+                    "FROM information_schema.columns "
                     "WHERE table_schema = :schema ORDER BY table_name, ordinal_position",
                     {"schema": schema},
                 )
             except Exception as exc:
                 logger.warning("采集源 %s 库 %s 列列表失败: %s", source_id, schema, exc)
                 col_rows = []
-            columns_by_table: dict[str, list[str]] = {}
+            columns_by_table: dict[str, list[dict[str, Any]]] = {}
             for r in col_rows:
-                tbl, col = r.get("table_name"), r.get("column_name")
+                tbl = r.get("table_name")
+                col = r.get("column_name")
                 if tbl and col:
-                    columns_by_table.setdefault(tbl, []).append(col)
+                    columns_by_table.setdefault(tbl, []).append({
+                        "name": col,
+                        "type": r.get("data_type") or "unknown",
+                        "nullable": str(r.get("is_nullable") or "YES").upper() == "YES",
+                    })
 
             for row in tables:
                 tbl = row.get("table_name")

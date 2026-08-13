@@ -39,17 +39,30 @@ class _FakeConnector:
             return [{"table_name": t} for t in self._tables]
         if "information_schema.columns" in sql:
             if "data_type" in sql:
-                # Postgres 单表详细列：SELECT column_name, data_type ... WHERE table_name = :tbl
-                tbl = params.get("tbl", "") if params else ""
-                return [
-                    {"column_name": c.get("column_name"), "data_type": c.get("data_type")}
-                    for c in self._columns.get(tbl, [])
-                ]
-            # MySQL 批量列：SELECT table_name, column_name ...（一次全库）
-            rows: list[dict] = []
+                # Postgres 批量列：SELECT table_name, column_name, data_type ...（P1-2 批量）
+                rows: list[dict] = []
+                for tbl, cols in self._columns.items():
+                    for c in cols:
+                        rows.append(
+                            {
+                                "table_name": tbl,
+                                "column_name": c.get("column_name"),
+                                "data_type": c.get("data_type"),
+                            }
+                        )
+                return rows
+            # MySQL 批量列：SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE（一次全库）
+            rows = []
             for tbl, cols in self._columns.items():
                 for c in cols:
-                    rows.append({"table_name": tbl, "column_name": c.get("column_name")})
+                    rows.append(
+                        {
+                            "table_name": tbl,
+                            "column_name": c.get("column_name"),
+                            "data_type": c.get("data_type"),
+                            "is_nullable": c.get("is_nullable", "YES"),
+                        }
+                    )
             return rows
         return []
 
@@ -106,7 +119,11 @@ async def test_mysql_collector_builds_specs():
     assert isinstance(result, CollectResult)
     assert len(result.specs) == 2
     assert result.specs[0].entity_name == "users"
-    assert "user_name" in result.specs[0].schema_json["columns"]
+    # P1-1: schema_json.columns 为 {name,type,nullable} 字典列表
+    cols = result.specs[0].schema_json["columns"]
+    assert cols[0]["name"] == "user_name"
+    assert "type" in cols[0]
+    assert "nullable" in cols[0]
     assert len(result.failed_specs) == 0
 
 
@@ -127,7 +144,10 @@ async def test_mysql_collector_single_table_failure_skips():
     assert len(result.failed_specs) == 0  # 批量查询部分缺失不视为失败
     by_name = {s.entity_name: s for s in result.specs}
     assert by_name["table2"].schema_json["columns"] == []  # fail_at 表列缺失 → 空列
-    assert by_name["table1"].schema_json["columns"] == ["table1_col1"]
+    # P1-1: 成功表列信息为 {name,type,nullable} 字典
+    assert by_name["table1"].schema_json["columns"] == [
+        {"name": "table1_col1", "type": "unknown", "nullable": True}
+    ]
 
 
 # ---------- PostgresCollector ----------

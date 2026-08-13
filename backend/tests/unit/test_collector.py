@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -45,6 +46,9 @@ def _svc() -> tuple[CollectorService, MagicMock]:
         repo.update_health_status = AsyncMock()
         repo.get_watermark = AsyncMock(return_value=None)
         repo.update_watermark_after_collection = AsyncMock(return_value=MagicMock(mode="FULL"))
+        # P1-5: 对账相关方法默认 mock（空存活实体 → 不过期任何表）
+        repo.list_active_entity_names = AsyncMock(return_value=[])
+        repo.deprecate_catalog = AsyncMock(return_value=False)
         return svc, repo
 
 
@@ -360,6 +364,83 @@ async def test_collect_and_register_handles_failed_specs():
     result = await svc.collect_and_register("s", FailingCollector(), actor_id=1)
     assert result["failed_count"] == 1
     assert result["failed_specs"][0]["entity_name"] == "t2"
+
+
+async def test_collect_and_register_deprecates_dropped_tables_full_mode():
+    """P1-5: 全量采集后，catalog 中源端已 drop 的实体被标记为 DEPRECATED。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock())
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+    # 源端现有 users，但 catalog 中还残留已删除的 legacy_table
+    repo.list_active_entity_names = AsyncMock(return_value=["users", "legacy_table"])
+    repo.deprecate_catalog = AsyncMock(return_value=True)
+
+    class OnlyUsersCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="users",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["user_name"]},
+                    )
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    result = await svc.collect_and_register("s", OnlyUsersCollector(), actor_id=1, mode="FULL")
+    assert result["deprecated_count"] == 1
+    # 仅已 drop 的 legacy_table 被废弃，存活的 users 不被触碰
+    repo.deprecate_catalog.assert_awaited_once_with("s", "legacy_table")
+
+
+async def test_collect_and_register_no_deprecate_in_incremental_mode():
+    """P1-5: 增量模式不触发对账废弃（仅覆盖变更实体，避免误废未扫描实体）。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock(source_type="mysql"))
+    repo.get_watermark = AsyncMock(
+        return_value=MagicMock(last_collected_at=datetime(2026, 1, 1, tzinfo=UTC))
+    )
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+    repo.list_active_entity_names = AsyncMock(return_value=["users", "legacy_table"])
+    repo.deprecate_catalog = AsyncMock(return_value=True)
+
+    class OnlyUsersCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="users",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["user_name"]},
+                    )
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    result = await svc.collect_and_register(
+        "s", OnlyUsersCollector(), actor_id=1, mode="INCREMENTAL"
+    )
+    assert result["deprecated_count"] == 0
+    repo.deprecate_catalog.assert_not_awaited()
 
 
 # ---------- 仓储层（mock session） ----------
@@ -828,7 +909,7 @@ class _MultiSchemaConnector:
         self,
         schemas: list[str],
         tables_by_schema: dict[str, list[str]],
-        columns: dict[str, list[str]],
+        columns: dict[str, list[dict[str, str]]] | dict[str, list[str]],
     ) -> None:
         self._schemas = schemas
         self._tables_by_schema = tables_by_schema
@@ -842,11 +923,24 @@ class _MultiSchemaConnector:
         if "information_schema.tables" in sql:
             return [{"table_name": t} for t in self._tables_by_schema.get(params.get("schema"), [])]
         if "information_schema.columns" in sql:
-            # P1-7: 批量列查询返回 {table_name, column_name} 行（消除 N+1）
+            # P1-1/P1-2: 批量列查询返回 {table_name, column_name, data_type, is_nullable}
             rows = []
             for tbl, cols in self._columns.items():
                 for c in cols:
-                    rows.append({"table_name": tbl, "column_name": c})
+                    if isinstance(c, dict):
+                        rows.append({
+                            "table_name": tbl,
+                            "column_name": c["name"],
+                            "data_type": c.get("type", "varchar"),
+                            "is_nullable": c.get("nullable", "YES"),
+                        })
+                    else:
+                        rows.append({
+                            "table_name": tbl,
+                            "column_name": c,
+                            "data_type": "varchar",
+                            "is_nullable": "YES",
+                        })
             return rows
         return [{"column_name": c} for c in self._columns.get(params.get("tbl"), [])]
 
@@ -866,7 +960,10 @@ async def test_info_schema_collector_all_databases_enumerates():
             "information_schema": ["TABLES"],
             "mysql": ["user"],
         },
-        columns={"orders": ["order_id"], "gmv": ["amount"]},
+        columns={
+            "orders": [{"name": "order_id", "type": "bigint", "nullable": "NO"}],
+            "gmv": [{"name": "amount", "type": "decimal", "nullable": "YES"}],
+        },
     )
     collector = InformationSchemaCollector(connector)  # database=None
     result = await collector.collect(MagicMock(source_id="s1"))
@@ -875,6 +972,12 @@ async def test_info_schema_collector_all_databases_enumerates():
     assert entity_names == {"finance.orders", "sales.gmv"}
     assert len(result.specs) == 2
     assert result.specs[0].schema_json["columns"]  # 列已采集
+    # P1-1: schema_json 格式为 [{"name": ..., "type": ..., "nullable": ...}]
+    col = result.specs[0].schema_json["columns"][0]
+    assert "name" in col and "type" in col and "nullable" in col
+    assert col["name"] == "order_id"
+    assert col["type"] == "bigint"
+    assert col["nullable"] is False
 
 
 async def test_info_schema_collector_single_database_keeps_plain_name():
@@ -1084,8 +1187,15 @@ async def test_soft_delete_source_releases_id_and_cleans_children():
     assert await repo.soft_delete_source("src1") is True
     assert src.source_id != "src1"  # 已改名（__del_{ts} 后缀）
     assert src.deleted_at is not None
-    # update(db_catalog) + delete(watermark) + delete(drift_log) 均被调用
-    assert s.execute.await_count >= 3
+    # P0-1: FOREIGN_KEY_CHECKS=0（先关）→ 子表 update ×3 + 父表 flush → =1（后开）
+    stmts = [str(c.args[0]) if c.args else "" for c in s.execute.await_args_list]
+    fk_off = [i for i, st in enumerate(stmts) if "FOREIGN_KEY_CHECKS=0" in st]
+    fk_on = [i for i, st in enumerate(stmts) if "FOREIGN_KEY_CHECKS=1" in st]
+    assert fk_off and fk_on, f"FK 开关缺失: {stmts}"
+    assert fk_off[0] < fk_on[0], "FK 检查应先关闭后开启"
+    # update(db_catalog) + update(watermark) + update(drift_log) 均被调用（改名保留审计）
+    update_calls = [st for st in stmts if "UPDATE db_catalog" in st or "UPDATE collection_watermark" in st or "UPDATE schema_drift_log" in st]
+    assert len(update_calls) == 3, f"子表级联改名调用数异常: {stmts}"
 
 
 async def test_create_source_integrity_error_returns_conflict():
@@ -1174,6 +1284,48 @@ async def test_postgres_collector_all_schemas_enumerates():
     assert len(result.specs) == 2
 
 
+async def test_postgres_collector_batch_column_query_no_n_plus_1():
+    """列信息一次性批量查出（按 schema 单次查询），而非每张表各查一次（消除 N+1）。"""
+    from app.services.collector.connectors.postgres import PostgresCollector
+
+    mock_connector = MagicMock()
+    recorded: list = []
+
+    async def fake_query(sql, params=None):
+        recorded.append((sql, params))
+        if "information_schema.schemata" in sql:
+            return [{"schema_name": "finance"}]
+        if "information_schema.tables" in sql:
+            # 多张表，验证列查询不会逐表触发
+            return [
+                {"table_name": "orders"},
+                {"table_name": "customers"},
+                {"table_name": "invoices"},
+            ]
+        if "information_schema.columns" in sql:
+            return [
+                {"table_name": "orders", "column_name": "id", "data_type": "integer"},
+                {"table_name": "customers", "column_name": "id", "data_type": "integer"},
+                {"table_name": "invoices", "column_name": "id", "data_type": "integer"},
+            ]
+        return []
+
+    mock_connector.query = fake_query
+    mock_connector.dispose = AsyncMock()
+    collector = PostgresCollector(mock_connector, schema="finance")
+    await collector.collect(MagicMock(source_id="pg"))
+
+    column_queries = [
+        (sql, params)
+        for sql, params in recorded
+        if isinstance(sql, str) and "information_schema.columns" in sql
+    ]
+    # 批量：整个 schema 仅一次列查询，而非 N 张表各一次
+    assert len(column_queries) == 1
+    # 批量查询必须携带 schema 过滤参数
+    assert "table_schema" in column_queries[0][0].lower()
+
+
 # ---------- P1-3: 健康端点真实字段 ----------
 
 
@@ -1194,6 +1346,45 @@ async def test_get_health_returns_last_error_and_check_time():
     assert health["last_error"] == "boom"
     assert health["last_health_check"] is not None
     assert health["health_status"] == "unhealthy"
+
+
+# ---------- P1-4: Drift 日志暴露 ----------
+
+
+async def test_list_drift_logs_returns_paged_items():
+    """P1-4: list_drift_logs 返回分页的 drift 记录（含 total）。"""
+    from datetime import UTC, datetime
+
+    svc, repo = _svc()
+    src = MagicMock(source_id="s1")
+    repo.get_source = AsyncMock(return_value=src)
+
+    log = MagicMock(
+        source_id="s1",
+        entity_name="users",
+        change_type="ADD_COLUMN",
+        before_signature=None,
+        after_signature="sig2",
+        before_schema=None,
+        after_schema={"columns": [{"name": "age", "type": "int"}]},
+        diff_json={"added": ["age"], "removed": [], "changed": []},
+        detected_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+    repo.list_drift_logs = AsyncMock(return_value=([log], 1))
+
+    result = await svc.list_drift_logs("s1", page=1, page_size=20)
+    assert result["total"] == 1
+    assert result["items"][0]["entity_name"] == "users"
+    assert result["items"][0]["change_type"] == "ADD_COLUMN"
+    assert result["items"][0]["detected_at"] is not None
+
+
+async def test_list_drift_logs_raises_not_found_for_missing_source():
+    """P1-4: 数据源不存在时 list_drift_logs 抛 NotFoundError（非静默空列表）。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.list_drift_logs("ghost")
 
 
 # ---------- FR-014: 采集水位语义（存在但未采集 ≠ 404） ----------
@@ -1269,11 +1460,52 @@ async def test_clickhouse_query_uses_basic_auth_not_query_param():
         return _R()
 
     with patch("httpx.AsyncClient") as mock_client:
-        mock_client.return_value.__aenter__.return_value.get = AsyncMock(side_effect=fake_get)
+        mock_client.return_value.get = AsyncMock(side_effect=fake_get)
         await collector._query("SELECT 1")
     assert "password" not in captured["params"]
     assert "user" not in captured["params"]
     assert captured["auth"] == ("u", "secret")
+
+
+async def test_clickhouse_reuses_client_across_multiple_queries():
+    """P1-3: 多次 _query 复用同一个 httpx.AsyncClient 实例（单例），不重复创建。"""
+    from app.services.collector.connectors.clickhouse import ClickHouseCollector
+
+    collector = ClickHouseCollector(host="ch", port=8123, user="u", password="secret")
+
+    async def fake_get(url, params=None, auth=None):
+        class _R:
+            text = "1"
+
+            def raise_for_status(self):
+                return None
+
+        return _R()
+
+    with patch("httpx.AsyncClient") as mock_client:
+        mock_client.return_value.get = AsyncMock(side_effect=fake_get)
+        mock_client.return_value.aclose = AsyncMock()
+        await collector._query("SELECT 1")
+        await collector._query("SELECT 2")
+        await collector._query("SELECT 3")
+        # 仅首次创建一次 AsyncClient，后续复用实例
+        assert mock_client.call_count == 1
+        assert mock_client.return_value.get.await_count == 3
+        # 关闭后 client 置空，下次查询再次创建新实例
+        await collector.close()
+        assert collector._client is None
+
+
+async def test_clickhouse_async_context_manager_closes_client():
+    """P1-3: ClickHouseCollector 支持 async with，退出时关闭连接。"""
+    from app.services.collector.connectors.clickhouse import ClickHouseCollector
+
+    collector = ClickHouseCollector(host="ch")
+    async with collector as ctx:
+        assert ctx is collector
+        assert ctx._client is not None
+    # 退出上下文后 client 已释放
+    assert collector._client is None
 
 
 # ---------- P2-3: coverage 无配额语义 ----------

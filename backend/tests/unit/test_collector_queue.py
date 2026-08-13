@@ -148,3 +148,42 @@ class TestFallbackToInMemory:
         queue = create_collection_queue(redis_url="redis://localhost:6379/0", redis=mock_redis)
         assert isinstance(queue, ArqCollectionQueue)
         assert queue._redis is mock_redis
+
+
+class TestRedisJobStoreTtl:
+    """P1-6: RedisJobStore 终态 TTL（7 天）行为。"""
+
+    def _make_store(self) -> tuple:
+        from app.services.collector.queue import RedisJobStore
+
+        mock_redis = MagicMock()
+        mock_redis.hset = AsyncMock()
+        mock_redis.expire = AsyncMock()
+        return RedisJobStore(mock_redis), mock_redis
+
+    @pytest.mark.asyncio
+    async def test_terminal_status_sets_seven_day_ttl(self):
+        """COMPLETED/FAILED 终态设置 7 天 TTL，过期后自动回收幂等键。"""
+        from app.services.collector.queue import RedisJobStore
+
+        for terminal in ("COMPLETED", "FAILED"):
+            store, redis = self._make_store()
+            await store.set("job-1", terminal, {"ok": True})
+            redis.expire.assert_awaited_once_with(
+                RedisJobStore._key("job-1"), RedisJobStore._TERMINAL_TTL_SECONDS
+            )
+            assert RedisJobStore._TERMINAL_TTL_SECONDS == 7 * 24 * 60 * 60
+
+    @pytest.mark.asyncio
+    async def test_non_terminal_status_skips_ttl(self):
+        """非终态（QUEUED/RUNNING/INCREMENTAL 等）不设 TTL，状态长期可查。"""
+        store, redis = self._make_store()
+        await store.set("job-2", "RUNNING", {"progress": 30})
+        redis.expire.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ttl_not_applied_to_partial_failure_status(self):
+        """仅精确匹配终态集合才加 TTL（避免误伤中间态）。"""
+        store, redis = self._make_store()
+        await store.set("job-3", "RETRYING", {"attempt": 2})
+        redis.expire.assert_not_awaited()

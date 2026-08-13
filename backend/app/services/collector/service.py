@@ -533,7 +533,7 @@ class CollectorService(BaseService):
         effective_mode = mode
         watermark_ts: datetime | None = None
         if mode == "INCREMENTAL":
-            from app.services.collector.incremental import should_degrade_to_full
+            from app.services.collector.incremental import should_degrade_to_full, should_mix_in
 
             watermark = await self._repo.get_watermark(source_id)
             if watermark is not None:
@@ -547,11 +547,24 @@ class CollectorService(BaseService):
                 )
                 effective_mode = "FULL"
             else:
-                logger.info(
-                    "collect_incremental: source=%s watermark=%s",
-                    source_id,
-                    watermark_ts,
-                )
+                # P0-3: MySQL InnoDB UPDATE_TIME 通常为 NULL，<10%% 表有效时降级全量
+                if (
+                    src.source_type == "mysql"
+                    and getattr(collector, "_connector", None) is not None
+                    and hasattr(getattr(collector, "_connector", None), "query")
+                    and should_mix_in(src.source_type, getattr(collector, "_connector", None))
+                ):
+                    logger.info(
+                        "collect_mysql_update_time_sparse: source=%s, 降级为全量",
+                        source_id,
+                    )
+                    effective_mode = "FULL"
+                if effective_mode == "INCREMENTAL":
+                    logger.info(
+                        "collect_incremental: source=%s watermark=%s",
+                        source_id,
+                        watermark_ts,
+                    )
 
         # US5: 采集成功后更新健康状态
         try:
@@ -570,6 +583,7 @@ class CollectorService(BaseService):
         batch_payloads: list[dict[str, Any]] = []
         drift_events: list[dict[str, Any]] = []
         content_fingerprints: dict[str, str] = {}
+        catalog_failed_specs: list[dict[str, str]] = []
         for spec in result.specs:
             sensitivity = self._classifier.classify(spec.entity_name, spec.schema_json)
             if sensitivity == "PII":
@@ -584,15 +598,28 @@ class CollectorService(BaseService):
                     spec.entity_name,
                 )
 
-            _cat, _created, drift_info = await self._repo.upsert_catalog(
-                source_id=source_id,
-                entity_name=spec.entity_name,
-                entity_type=spec.entity_type,
-                schema_json=spec.schema_json,
-                etl_sql=spec.etl_sql,
-                sensitivity_level=sensitivity,
-                owner_id=None,
-            )
+            # P0-4: 每个 spec 单独 try/except，单表失败不影响整批
+            try:
+                _cat, _created, drift_info = await self._repo.upsert_catalog(
+                    source_id=source_id,
+                    entity_name=spec.entity_name,
+                    entity_type=spec.entity_type,
+                    schema_json=spec.schema_json,
+                    etl_sql=spec.etl_sql,
+                    sensitivity_level=sensitivity,
+                    owner_id=None,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "collect_catalog_upsert_failed: source=%s entity=%s error=%s",
+                    source_id,
+                    spec.entity_name,
+                    exc,
+                )
+                catalog_failed_specs.append(
+                    {"entity_name": spec.entity_name, "error": str(exc)}
+                )
+                continue
             # P2-4: 回填实体级内容指纹（供增量判断与审计追溯）
             signature = _cat.content_signature
             if signature:
@@ -617,6 +644,26 @@ class CollectorService(BaseService):
         # FR-024: 发布1次batch事件而非逐条publish
         if batch_payloads:
             await self._events.publish_batch("catalog_registered", batch_payloads)
+
+        # P1-5: 废弃表自动对账——仅在全量采集后执行（增量仅覆盖变更实体，不可对未采集实体误废）。
+        # 对比 catalog 中仍存活的实体与本次源端扫描到的实体名，源端已 drop 的标记为 DEPRECATED。
+        deprecated_count = 0
+        if effective_mode == "FULL":
+            collected_names = {spec.entity_name for spec in result.specs}
+            active_names = await self._repo.list_active_entity_names(source_id)
+            for name in active_names:
+                if name not in collected_names:
+                    try:
+                        if await self._repo.deprecate_catalog(source_id, name):
+                            deprecated_count += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "collect_deprecate_failed: source=%s entity=%s error=%s",
+                            source_id,
+                            name,
+                            exc,
+                        )
+
         coverage = await self._repo.recompute_coverage(source_id)
 
         # US5: 采集成功 → 更新健康状态
@@ -627,23 +674,27 @@ class CollectorService(BaseService):
             source_id=source_id,
             mode=effective_mode,
             scanned_count=len(result.specs),
-            failed_count=len(result.failed_specs),
+            failed_count=len(result.failed_specs) + len(catalog_failed_specs),
             content_fingerprints=content_fingerprints or None,
         )
 
+        # P0-4: 合并 collector 层 failed_specs 与 catalog 层 failed_specs
+        all_failed_specs = (
+            [{"entity_name": f.entity_name, "error": f.error} for f in result.failed_specs]
+            + catalog_failed_specs
+        )
         return {
             "source_id": source_id,
             "scanned": len(result.specs),
             "registered": registered,
             "pii_registered": pii_registered,
-            "failed_count": len(result.failed_specs),
-            "failed_specs": [
-                {"entity_name": f.entity_name, "error": f.error} for f in result.failed_specs
-            ],
+            "failed_count": len(all_failed_specs),
+            "failed_specs": all_failed_specs,
             "coverage": coverage,
             "mode": effective_mode,
             "drift_count": len(drift_events),
             "drift_events": drift_events,
+            "deprecated_count": deprecated_count,
         }
 
     async def schedule_collection(
@@ -739,4 +790,43 @@ class CollectorService(BaseService):
                 src.last_health_check.isoformat() if src.last_health_check else None
             ),
             "uptime_check": src.health_status == "healthy",
+        }
+
+    async def list_drift_logs(
+        self,
+        source_id: str,
+        entity_name: str | None = None,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """P1-4: 暴露 Schema Drift 变更日志（按检测时间倒序，分页）。
+
+        数据源不存在时抛 ``NotFoundError``；存在但无 drift 记录时返回空列表。
+        """
+        src = await self._repo.get_source(source_id)
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+        rows, total = await self._repo.list_drift_logs(
+            source_id, entity_name, page=page, page_size=page_size
+        )
+        items = [
+            {
+                "source_id": log.source_id,
+                "entity_name": log.entity_name,
+                "change_type": log.change_type,
+                "before_signature": log.before_signature,
+                "after_signature": log.after_signature,
+                "before_schema": log.before_schema,
+                "after_schema": log.after_schema,
+                "diff_json": log.diff_json,
+                "detected_at": log.detected_at.isoformat() if log.detected_at else None,
+            }
+            for log in rows
+        ]
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
         }
