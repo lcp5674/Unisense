@@ -33,3 +33,11 @@ if (typeof Element !== "undefined" && !Element.prototype.scrollTo) {
 }
 
 // jsdom 无 getComputedStyle 完整的 offsetWidth 读取，图表可能告警；静默即可
+
+// antd Modal/TreeSelect 的 scroll locker 以 getComputedStyle(elt, pseudoElt) 读取尺寸，
+// jsdom 只要第二参数存在（含 undefined）就打印 "Not implemented" stderr。丢弃伪元素参数。
+if (typeof window !== "undefined") {
+  const origGetComputedStyle = window.getComputedStyle.bind(window);
+  window.getComputedStyle = (elt: Element, _pseudoElt?: string | null) =>
+    origGetComputedStyle(elt);
+}

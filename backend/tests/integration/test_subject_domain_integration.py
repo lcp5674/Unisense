@@ -34,8 +34,12 @@ def mock_repo():
 
 
 class TestDomainValidation:
-    async def test_create_metric_with_nonexistent_domain(self, mock_db, mock_repo) -> None:
-        """domain 不存在时应抛 NotFoundError。"""
+    async def test_create_metric_with_unconfigured_domain_is_allowed(self, mock_db, mock_repo) -> None:
+        """降级语义：domain 未在 subject_domain 配置（NotFoundError）时放行。
+
+        对齐语义服务 _validate_domain_active 的降级约定——subject_domain 表为空/未种子时
+        不阻断存量指标创建；仅"已配置但停用"的域才拦截（迁移 0026 空表兼容）。
+        """
         with patch("app.services.semantic.service.MetricRepository", return_value=mock_repo), \
              patch("app.services.subject_domain.service.SubjectDomainRepository"), \
              patch(
@@ -48,13 +52,14 @@ class TestDomainValidation:
 
             svc = MetricService(mock_db)
             req = MetricCreateRequest(
-                metric_code="test_gmv_amount_day", name="测试", domain="nonexistent",
+                metric_code="order_gmv_amount_day", name="测试", domain="nonexistent",
                 type="atomic", granularity="day", unit="cnt",
                 aggregation="SUM", time_semantics="PERIOD", freshness="T1", dw_layer="DWD",
                 definition_json={"expression": "SUM(amount)"},
             )
-            with pytest.raises(NotFoundError, match="主题域不存在"):
-                await svc.create_metric(req, owner_id=1)
+            # 域未配置 → 放行，创建成功（不抛 NotFoundError）
+            result = await svc.create_metric(req, owner_id=1)
+            assert result.metric_code == "sales_sales_amount_day"
 
 
 class TestDictValidation:
