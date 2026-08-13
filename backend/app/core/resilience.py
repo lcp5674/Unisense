@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import socket
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -103,6 +104,9 @@ class CircuitBreaker:
         name: str = "unknown",
         probe_timeout: float | None = None,
         dependency_id: str | None = None,
+        *,
+        error_rate_threshold: float | None = None,
+        error_rate_window: int = 20,
     ) -> None:
         self._name = name
         # 依赖实例标识：缺省按 name.lower() 推断（单实例依赖 OLAP/GRAPH/ES 与
@@ -117,6 +121,13 @@ class CircuitBreaker:
         self._probe_timeout = (
             probe_timeout if probe_timeout is not None else max(reset_timeout, 10.0)
         )
+        # 错误率滑动窗口阈值（对齐 TD §5.2a：错误率超阈切 OPEN）。为 None 时关闭错误率触发，
+        # 仅依赖连续失败阈值（向后兼容）。error_rate_window 为窗口内保留的最近调用样本数
+        # （有界 deque，无内存泄漏）；仅当样本数达到窗口才判定，避免小样本误开。
+        self._error_rate_threshold = error_rate_threshold
+        self._error_rate_window = error_rate_window
+        # 最近调用结果滑动窗口（True=成功 / False=失败），有界 deque 防止内存增长。
+        self._recent_outcomes: deque[bool] = deque(maxlen=error_rate_window)
         self._failures = 0
         self._opened_at: float | None = None
         self._open = False
@@ -141,9 +152,26 @@ class CircuitBreaker:
         """当前连续失败次数（实时健康表/看板用）。"""
         return self._failures
 
+    @property
+    def error_rate(self) -> float:
+        """最近窗口内失败率（0.0~1.0）；样本不足时返回 0.0。"""
+        if not self._recent_outcomes:
+            return 0.0
+        return 1.0 - sum(self._recent_outcomes) / len(self._recent_outcomes)
+
     def allow(self) -> bool:
         if not self._open:
-            return True
+            # 错误率超阈 → 打开熔断（与连续失败阈值互补，对齐 TD §5.2a「错误率超阈切 OPEN」）。
+            # 仅当窗口样本数达阈值才判定，避免小样本误开；打开后返回 False 快速失败。
+            if (
+                self._error_rate_threshold is not None
+                and len(self._recent_outcomes) >= self._error_rate_window
+                and self.error_rate > self._error_rate_threshold
+            ):
+                self._open = True
+                self._opened_at = time.monotonic()
+                _emit_degradation(self, "DEGRADED", "circuit_open")
+            return not self._open
         now = time.monotonic()
         half_open = self._opened_at is not None and (now - self._opened_at) >= self._reset_timeout
         if not half_open:
@@ -171,6 +199,7 @@ class CircuitBreaker:
         self._probing = False
         self._probing_since = None
         self._failures += 1
+        self._recent_outcomes.append(False)
         # 半开探测失败或连续失败达到阈值 -> 打开熔断并重置计时
         if was_probe or self._failures >= self._failure_threshold:
             self._open = True
@@ -184,6 +213,7 @@ class CircuitBreaker:
         self._probing = False
         self._probing_since = None
         self._failures = 0
+        self._recent_outcomes.append(True)
         self._open = False
         self._opened_at = None
         # 仅在「从打开切回关闭（恢复）」这一刻上报，满足 TD §5.2.4 恢复事件
@@ -228,18 +258,25 @@ def optional_dependency_status() -> dict[str, bool]:
 
 # ---- P2/P3: 预构建熔断器实例（OLAP / Neo4j / ES）----
 
-# OLAP 熔断器：consume 语义查询下推。阈值对齐 TD §5.2a（OLAP 连续失败阈值=3，冷却期=30s）。
-olap_breaker = CircuitBreaker(name="OLAP", failure_threshold=3, reset_timeout=30.0)
+# OLAP 熔断器：consume 语义查询下推。阈值对齐 TD §5.2a（OLAP 连续失败阈值=3，冷却期=30s，
+# 错误率阈值=5%）。错误率超阈（窗口内样本达 20 且失败率>5%）亦切 OPEN，与连续失败互补。
+olap_breaker = CircuitBreaker(
+    name="OLAP", failure_threshold=3, reset_timeout=30.0, error_rate_threshold=0.05
+)
 
-# Neo4j 熔断器：血缘图查询（GRAPH）。阈值对齐 TD §5.2a：连续失败阈值=5，冷却期=30s。
-neo4j_breaker = CircuitBreaker(name="GRAPH", failure_threshold=5, reset_timeout=30.0)
+# Neo4j 熔断器：血缘图查询（GRAPH）。阈值对齐 TD §5.2a：连续失败阈值=5，冷却期=30s，错误率=5%。
+neo4j_breaker = CircuitBreaker(
+    name="GRAPH", failure_threshold=5, reset_timeout=30.0, error_rate_threshold=0.05
+)
 
-# ES 熔断器：全文检索。阈值对齐 TD §5.2a（ES 连续失败阈值=5，冷却期=30s）。
+# ES 熔断器：全文检索。阈值对齐 TD §5.2a（ES 连续失败阈值=5，冷却期=30s，错误率=10%）。
 # ES 客户端已接入（app/core/es_client.py）：就绪探针经 EsClient.health() 真实 .ping() 探活、
 # 检索经 EsClient.search()/index() 全程受 es_breaker 保护；熔断器已进入降级矩阵真实调用路径
 # （见 app/api/health.py 与 app/core/es_client.py），非死代码。ES 包缺失或未配置 es_url 时客户端
 # 自动禁用，调用方优雅降级（SearchUnavailableError），绝不因缺依赖导致启动失败。
-es_breaker = CircuitBreaker(name="ES", failure_threshold=5, reset_timeout=30.0)
+es_breaker = CircuitBreaker(
+    name="ES", failure_threshold=5, reset_timeout=30.0, error_rate_threshold=0.10
+)
 
 
 # 预构建熔断器注册表（对齐 TD §5.2a 各依赖类型阈值）。模块级单例，保证跨调用共享同一熔断状态。

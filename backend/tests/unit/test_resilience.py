@@ -129,6 +129,10 @@ def test_predefined_breakers_match_td_thresholds():
     assert resilience.neo4j_breaker._reset_timeout == 30.0
     assert resilience.es_breaker._failure_threshold == 5
     assert resilience.es_breaker._reset_timeout == 30.0
+    # 错误率滑动窗口阈值对齐 TD §5.2a（OLAP/GRAPH=5%，ES=10%）
+    assert resilience.olap_breaker._error_rate_threshold == 0.05
+    assert resilience.neo4j_breaker._error_rate_threshold == 0.05
+    assert resilience.es_breaker._error_rate_threshold == 0.10
 
 
 def test_get_circuit_breaker_returns_shared_instance():
@@ -141,3 +145,69 @@ def test_get_circuit_breaker_returns_shared_instance():
     u2 = resilience.get_circuit_breaker("unknown-svc")
     assert u1 is u2
     assert u1._name == "UNKNOWN-SVC"
+
+
+def test_error_rate_property_reflects_bounded_window():
+    """error_rate 反映有界滑动窗口失败率（0~1），样本不足返回 0.0。"""
+    b = resilience.CircuitBreaker(name="OLAP", error_rate_window=5)
+    assert b.error_rate == 0.0
+    for _ in range(4):
+        b.record_failure()
+    b.record_success()
+    assert b.error_rate == 0.8  # 5 个样本里 4 失败
+    assert b._recent_outcomes.maxlen == 5
+
+
+def test_breaker_opens_on_error_rate_exceeding_threshold(captured):
+    """错误率超阈（窗口样本充足）应切 OPEN 并上报 DEGRADED，与连续失败互补。"""
+    b = resilience.CircuitBreaker(
+        name="OLAP",
+        failure_threshold=100,  # 抬高连续失败阈值，隔离错误率触发
+        reset_timeout=30.0,
+        error_rate_threshold=0.5,
+        error_rate_window=10,
+    )
+    for _ in range(6):
+        b.record_failure()
+    for _ in range(4):
+        b.record_success()
+    # 窗口=10，失败率=0.6 > 0.5 → allow() 打开熔断
+    assert b.allow() is False
+    assert b.state == "open"
+    assert len(captured) == 1
+    assert captured[0].event_state == "DEGRADED"
+    assert captured[0].reason == "circuit_open"
+
+
+def test_breaker_stays_closed_when_error_rate_below_threshold(captured):
+    """错误率未超阈（失败率=0.3<0.5）保持 CLOSED，不误开。"""
+    b = resilience.CircuitBreaker(
+        name="OLAP",
+        failure_threshold=100,
+        reset_timeout=30.0,
+        error_rate_threshold=0.5,
+        error_rate_window=10,
+    )
+    for _ in range(3):
+        b.record_failure()
+    for _ in range(7):
+        b.record_success()
+    assert b.allow() is True
+    assert b.state == "closed"
+    assert len(captured) == 0
+
+
+def test_breaker_error_rate_ignores_small_sample(captured):
+    """样本数未达窗口时不依错误率误开（避免小样本抖动触发熔断）。"""
+    b = resilience.CircuitBreaker(
+        name="OLAP",
+        failure_threshold=100,
+        reset_timeout=30.0,
+        error_rate_threshold=0.5,
+        error_rate_window=10,
+    )
+    for _ in range(3):
+        b.record_failure()  # 失败率 1.0，但样本仅 3 < 窗口 10
+    assert b.allow() is True
+    assert b.state == "closed"
+    assert len(captured) == 0
