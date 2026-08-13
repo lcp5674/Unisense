@@ -150,7 +150,8 @@ class TestMetricCacheSet:
         breaker = FakeBreaker(allow=True)
         cache = MetricCache(redis=redis, breaker=breaker)
         await cache.set(fake_metric)
-        redis.set.assert_called_once()
+        # 写版本键 + v0 当前别名（对齐读路径 get(code)）
+        assert redis.set.call_count == 2
 
     async def test_set_redis_error_records_failure(self, fake_metric: MagicMock) -> None:
         redis = MagicMock()
@@ -257,10 +258,10 @@ class TestVersionKey:
         cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
         await cache.set(fake_metric)
 
-        # 验证 set 调用的键包含版本号
-        call_args = redis.set.call_args
-        key = call_args[0][0]
-        assert ":v3" in key
+        # 验证 set 同时写版本键(v3) 与 v0 当前别名
+        keys = [call[0][0] for call in redis.set.call_args_list]
+        assert any(":v3" in k for k in keys)
+        assert any(":v0" in k for k in keys)
 
     async def test_invalidate_removes_old_version_keys(self) -> None:
         redis = MagicMock()

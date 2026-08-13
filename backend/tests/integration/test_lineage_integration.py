@@ -10,6 +10,7 @@ import asyncio
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -48,12 +49,16 @@ def _seed(session_factory) -> int:
     return asyncio.run(_run())
 
 
+# backend 目录（alembic.ini 所在处），从测试文件推导，任意 cwd 均可运行
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+
 def _reset_via_alembic(url: str) -> None:
     env = {**os.environ, "UNISENSE_DB_URL": url}
     subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         env=env,
-        cwd="backend",
+        cwd=_BACKEND_DIR,
         check=True,
         capture_output=True,
         text=True,

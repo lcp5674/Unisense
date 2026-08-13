@@ -39,8 +39,22 @@ class _FakeRedis:
         self._store[key] = value
         return True
 
-    async def delete(self, key: str) -> int:
-        return 1 if self._store.pop(key, None) is not None else 0
+    async def delete(self, *keys: str) -> int:
+        removed = 0
+        for key in keys:
+            if self._store.pop(key, None) is not None:
+                removed += 1
+        return removed
+
+    async def scan(self, cursor: int = 0, match: str | None = None, count: int = 100):
+        """简化 scan：把 pattern 转成前缀匹配，一次返回全部键（无分页）。"""
+        if match is None:
+            keys = list(self._store)
+        else:
+            # match 形如 metric:def:m1:v* —— 前缀 = 去掉尾部 *
+            prefix = match[:-1] if match.endswith("*") else match
+            keys = [k for k in self._store if k.startswith(prefix)]
+        return (0, keys)
 
 
 class _DownRedis:
@@ -79,6 +93,11 @@ def _make_metric(code: str = "m1", pii: bool = False) -> Metric:
         row_version=1,
         status="DRAFT",
         owner_id=1,
+        currency=None,
+        sla=None,
+        backup_owner_id=None,
+        emergency_publish=False,
+        pending_conflict=False,
         pii_flag=pii,
         compliance_reviewed=False,
         effective_version=None,

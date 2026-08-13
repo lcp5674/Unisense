@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
 from app.core.config import settings
+from app.core.degradation import fire_degradation_event
 from app.core.error_codes import ErrorCode
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.core.security import verify_password
@@ -184,6 +185,8 @@ class ConsumeService(BaseService):
             raise BusinessError(f"指标状态 {metric.status} 不可消费", error_code=code)
         self._assert_authorized(client, metric)
         if not settings.olap_url:
+            # 配置级降级（熔断器无法感知），上报降级事件供看板/审计（TD §5.2.5）
+            fire_degradation_event("OLAP", "olap", "DEGRADED", "olap_not_configured")
             raise BusinessError(
                 "OLAP 执行引擎不可用，查询降级",
                 error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,
@@ -276,7 +279,8 @@ class ConsumeService(BaseService):
         mv = await self._get_version(version_id)
         if mv is None:
             raise NotFoundError(f"版本 {version_id} 不存在")
-        if mv.status != "PENDING_REVIEW":
+        # 对齐语义模块 VersionStatusEnum（T002）：待确认状态为 PENDING_CONFIRMATION
+        if mv.status != "PENDING_CONFIRMATION":
             raise ConflictError("版本不在待确认状态")
         mv.status = "PUBLISHED"
         await self._db.flush()
@@ -285,7 +289,8 @@ class ConsumeService(BaseService):
         mv = await self._get_version(version_id)
         if mv is None:
             raise NotFoundError(f"版本 {version_id} 不存在")
-        if mv.status != "PENDING_REVIEW":
+        # 对齐语义模块 VersionStatusEnum（T002）：待确认状态为 PENDING_CONFIRMATION
+        if mv.status != "PENDING_CONFIRMATION":
             raise ConflictError("版本不在待确认状态")
         mv.status = "ARCHIVED"
         await self._db.flush()

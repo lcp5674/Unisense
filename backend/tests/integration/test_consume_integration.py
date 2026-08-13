@@ -6,7 +6,7 @@
 - 语义查询降级（OLAP 未配置 → 503 DEPENDENCY_DEGRADED_ENGINE）
 - 快照 WORM（保存 + 列举）
 - 收藏（新增 / 列举 / 移除）
-- 版本消费方确认回调（PENDING_REVIEW → PUBLISHED / ARCHIVED）
+- 版本消费方确认回调（PENDING_CONFIRMATION → PUBLISHED / ARCHIVED）
 
 schema 由 Alembic 迁移建表（外部 localhost 库）或 Base.metadata.create_all（testcontainers）。
 """
@@ -136,7 +136,7 @@ def _seed(session_factory) -> dict[str, int]:
                 version=2,
                 change_type="BREAKING",
                 definition_json=m1.definition_json,
-                status="PENDING_REVIEW",
+                status="PENDING_CONFIRMATION",
                 change_reason="口径调整",
                 created_by=owner.id,
             )
@@ -314,7 +314,7 @@ async def test_version_confirm_reject(db_env) -> None:
             version=3,
             change_type="UPDATE",
             definition_json=m1.definition_json,
-            status="PENDING_REVIEW",
+            status="PENDING_CONFIRMATION",
             change_reason="小改",
             created_by=db_env["owner_id"],
         )

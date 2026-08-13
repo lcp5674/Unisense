@@ -197,6 +197,8 @@ class TestEmergencyPublishPIIGate:
         )
         svc._repo = AsyncMock()
         svc._repo.get_by_code = AsyncMock(return_value=metric)
+        # 存在活跃合规官 → 直接 COMPLIANCE_BLOCKED（FR-024 主路径）
+        svc._has_active_compliance_officer = AsyncMock(return_value=True)
 
         request = MetricEmergencyPublishRequest(
             reason="紧急业务需求导致必须立即发布修复口径数据"

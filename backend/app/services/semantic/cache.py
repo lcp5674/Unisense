@@ -157,13 +157,18 @@ class MetricCache:
         """
         if not self._enabled or not self._breaker.allow():
             return
-        key = self._build_key(metric.metric_code, metric.version)
         try:
             payload = json.dumps(
                 MetricResponse.model_validate(metric).model_dump(mode="json"),
                 ensure_ascii=False,
             )
+            # 版本键（v{version}，对齐 FR-032：版本变更时旧键自然过期）
+            key = self._build_key(metric.metric_code, metric.version)
             await self._redis.set(key, payload, ex=_TTL_SECONDS)  # type: ignore[union-attr]
+            # v0 当前别名：读路径 get(code) 不传版本时读取的键（对齐 _build_key 的
+            # “version=None 用 v0 占位”），否则 cache-aside 永远 miss、缓存失效。
+            current_key = self._build_key(metric.metric_code, None)
+            await self._redis.set(current_key, payload, ex=_TTL_SECONDS)  # type: ignore[union-attr]
             self._breaker.record_success()
         except Exception:
             self._breaker.record_failure()

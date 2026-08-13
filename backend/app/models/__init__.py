@@ -18,6 +18,11 @@ from app.models.consume import (
     UserPreference,
 )
 from app.models.data_source import DataSource, DBCatalog
+from app.models.degradation_event import (
+    DEGRADATION_STATES,
+    DEPENDENCY_TYPES,
+    DegradationEvent,
+)
 from app.models.dimension import (
     Dimension,
     DimensionMapping,
@@ -52,6 +57,7 @@ from app.models.quality import (
     ReconciliationStatus,
 )
 from app.models.term import Term
+from app.models.tracking import TrackingEvent
 from app.models.user import Organization, User
 
 __all__ = [
@@ -66,6 +72,9 @@ __all__ = [
     "ConflictStatus",
     "ConflictType",
     "DBCatalog",
+    "DEGRADATION_STATES",
+    "DegradationEvent",
+    "DEPENDENCY_TYPES",
     "DataSource",
     "Dimension",
     "DimensionMapping",
@@ -110,6 +119,7 @@ __all__ = [
     "TermRelation",
     "TermVersion",
     "TimestampMixin",
+    "TrackingEvent",
     "User",
     "UserPreference",
 ]

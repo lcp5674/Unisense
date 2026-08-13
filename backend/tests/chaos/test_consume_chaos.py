@@ -54,7 +54,10 @@ def _patch_client_store(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake_verify_password(secret, ref):  # noqa: ANN001
         return secret == "secret"
     monkeypatch.setattr(consume_svc, "verify_password", _fake_verify_password)
-    consume_svc.rate_limiter._buckets.clear()
+    # 限流器经 get_rate_limiter() 获取（对齐 C6：运行期动态查询，非模块属性）
+    from app.services.consume.rate_limiter import get_rate_limiter
+
+    get_rate_limiter()._buckets.clear()
 
 
 @pytest.fixture

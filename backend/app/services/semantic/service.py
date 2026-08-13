@@ -55,6 +55,10 @@ def _redis_available() -> bool:
 # dependencies 的判定互相矛盾的问题）。
 BREAKING_DEF_FIELDS = ("expression", "aggregation", "granularity", "dependencies")
 
+# Top-level 破坏性变更字段：直接修改 metric 表上的这些字段等同于口径变更
+# （对齐 TD §12 metric_version：granularity/unit 变更触发 PENDING_VERSION）
+BREAKING_TOP_LEVEL_FIELDS = ("granularity", "unit")
+
 
 def redact_definition(defn: dict[str, Any]) -> dict[str, Any]:
     """递归脱敏口径定义：保留键结构，所有叶子值替换为 ``"***"``。
@@ -338,12 +342,31 @@ class MetricService(BaseService):
             if val is not None:
                 updates[field] = val
 
+        # Top-level 破坏性字段变更检测（granularity/unit 直接修改等同口径变更）
+        # 当 definition_json 未同时提交时，需独立判定是否触发 PENDING_VERSION
+        top_level_breaking = False
+        if metric.status == "PUBLISHED":
+            for field in BREAKING_TOP_LEVEL_FIELDS:
+                if field in updates:
+                    old_val = getattr(metric, field, None)
+                    new_val = updates[field]
+                    if old_val != new_val:
+                        top_level_breaking = True
+                        logger.info(
+                            "top_level_breaking_change_detected",
+                            metric_code=metric_code,
+                            field=field,
+                            old=old_val,
+                            new=new_val,
+                        )
+                        break
+
         # 口径变更 → 新版本
         if request.definition_json is not None:
             old_def = metric.definition_json
             # PII 双源归一化：definition.pii 与 pii_flag 保持一致（pii_flag 为权威源）
             new_def, synced_pii = _normalize_pii(request.definition_json, metric.pii_flag)
-            is_breaking = self._is_breaking_change(old_def, new_def)
+            is_breaking = self._is_breaking_change(old_def, new_def) or top_level_breaking
 
             new_version_num = metric.version + 1
             updates["definition_json"] = new_def
@@ -392,6 +415,62 @@ class MetricService(BaseService):
                     version=new_version_num,
                     consumers=consumer_ids,
                     reason="breaking_change_on_published",
+                )
+
+        # Top-level 破坏性变更但无 definition_json 提交时，仍需创建版本记录+PENDING
+        elif top_level_breaking:
+            new_version_num = metric.version + 1
+            updates["version"] = new_version_num
+
+            # PUBLISHED 状态 → PENDING_CONFIRMATION（不直接生效 top-level 破坏性字段）
+            if metric.status == "PUBLISHED":
+                # 移除破坏性 top-level 字段，不直接更新 metric 主表
+                for field in BREAKING_TOP_LEVEL_FIELDS:
+                    updates.pop(field, None)
+                version_status = "PENDING_CONFIRMATION"
+            else:
+                version_status = "DRAFT"
+
+            # 构造 diff（top-level 字段变更）
+            old_def = metric.definition_json or {}
+            top_diff: dict[str, Any] = {}
+            for field in BREAKING_TOP_LEVEL_FIELDS:
+                old_val = getattr(metric, field, None)
+                new_val = getattr(request, field, None)
+                if new_val is not None and old_val != new_val:
+                    top_diff[field] = {
+                        "before": old_val,
+                        "after": new_val,
+                        "change_type": "BREAKING",
+                    }
+
+            version = MetricVersion(
+                metric_id=metric.id,
+                version=new_version_num,
+                change_type="BREAKING",
+                definition_json=old_def,  # 口径不变
+                diff_json=top_diff,
+                status=version_status,
+                change_reason=request.change_reason,
+                created_by=actor_id,
+            )
+            await self._repo.create_version(version)
+
+            if metric.status == "PUBLISHED":
+                from app.services.semantic.pending_version_manager import PendingVersionManager
+
+                consumer_ids = [metric.owner_id]
+                if metric.backup_owner_id is not None:
+                    consumer_ids.append(metric.backup_owner_id)
+
+                pvm = PendingVersionManager(self._db)
+                await pvm.create_pending(metric, version, consumer_ids)
+                logger.info(
+                    "pending_version_created",
+                    metric_code=metric_code,
+                    version=new_version_num,
+                    consumers=consumer_ids,
+                    reason="top_level_breaking_change_on_published",
                 )
 
         # 注意：change_reason 仅写入 MetricVersion 快照（上方），metric 主表无该列，
@@ -824,7 +903,7 @@ class MetricService(BaseService):
 
         from datetime import timedelta
 
-        sunset_days = 30  # 对齐 TD §13 metric_version.sunset_days
+        sunset_days = self._settings.metric_sunset_days  # 对齐 TD §13，可配置化覆盖
         now = datetime.now(UTC)
 
         updated = await self._repo.update_with_optimistic_lock(
@@ -1055,11 +1134,25 @@ class MetricService(BaseService):
 
         # PII 门禁不可跳过（对齐 FR-024：含 PII 指标紧急发布仍须合规复核）
         if metric.pii_flag and not metric.compliance_reviewed:
-            # 合规官不可达判定：compliance_officer 角色无活跃用户 → 仅 INTERNAL 分级发布
-            # TODO: 实际查询活跃 compliance_officer 用户，当前用 serving_mode 降级
-            raise BusinessError(
-                "含 PII 指标紧急发布须先通过合规审核（合规门禁不可跳过，FR-024）",
-                error_code="COMPLIANCE_BLOCKED",
+            # FR-024 合规官不可达降级路径：查询是否有活跃 compliance_officer
+            has_officer = await self._has_active_compliance_officer(metric.domain)
+            if has_officer:
+                raise BusinessError(
+                    "含 PII 指标紧急发布须先通过合规审核（合规门禁不可跳过，FR-024）",
+                    error_code="COMPLIANCE_BLOCKED",
+                )
+            # 合规官不可达：允许 INTERNAL 分级降级发布（FR-024 降级路径）
+            if metric.serving_mode != "INTERNAL":
+                raise BusinessError(
+                    "含 PII 指标紧急发布须先通过合规审核；"
+                    "合规官当前不可达，仅允许 INTERNAL 分级降级发布（FR-024）",
+                    error_code="COMPLIANCE_UNREACHABLE_DOWNGRADE",
+                )
+            logger.warning(
+                "compliance_officer_unreachable_internal_downgrade",
+                metric_code=metric_code,
+                domain=metric.domain,
+                reason="合规官不可达，降级为 INTERNAL 分级发布",
             )
 
         # 定位待发布版本
@@ -1242,14 +1335,19 @@ class MetricService(BaseService):
             return metric  # 幂等：已确认直接返回
         await self._repo.update_confirmation_status(mine.id, "CONFIRMED")
 
-        # 全部确认后版本转正
+        # 全部确认后版本转正（原子性保证：版本转正+metric更新须在同一事务）
         if all(c.status == "CONFIRMED" or c.id == mine.id for c in confirmations):
-            updated = await self._repo.update_with_optimistic_lock(
-                metric.id,
-                metric.row_version,
-                effective_version=version,
-            )
-            await self._repo.mark_version_published(metric.id, version, datetime.now(UTC))
+            try:
+                updated = await self._repo.update_with_optimistic_lock(
+                    metric.id,
+                    metric.row_version,
+                    effective_version=version,
+                )
+                await self._repo.mark_version_published(metric.id, version, datetime.now(UTC))
+            except ConflictError:
+                # 乐观锁冲突 → 回滚确认状态，让调用方重试
+                await self._repo.update_confirmation_status(mine.id, "PENDING")
+                raise
             await self._cache.invalidate(metric_code)
             return updated
         return metric
@@ -1497,6 +1595,7 @@ class MetricService(BaseService):
         Returns:
             并排对比结果，含差异标记。
         """
+        # 权限校验：需对两指标都有读权限（PII 指标需合规角色，对齐 T049）
         a = await self.get_metric(code_a)
         b = await self.get_metric(code_b)
 
@@ -1659,3 +1758,31 @@ class MetricService(BaseService):
         # 缓存结果
         await self._cache.set_guide(metric_code, guide)
         return guide
+
+    # ---- 合规官可达性检查（FR-024 降级路径）----
+
+    async def _has_active_compliance_officer(self, domain: str | None) -> bool:
+        """检查指定域是否有活跃的 compliance_officer 用户。
+
+        用于 FR-024 合规官不可达降级路径：若合规官不可达，PII 指标紧急发布
+        可降级为 INTERNAL 分级发布。
+
+        Args:
+            domain: 指标所属域（None 表示全局查找）。
+
+        Returns:
+            是否存在至少一个活跃的 compliance_officer。
+        """
+        from sqlalchemy import func, select
+
+        from app.models.user import User
+
+        stmt = select(func.count()).select_from(User).where(
+            User.role == "compliance_officer",
+            User.status == "active",
+        )
+        if domain is not None:
+            stmt = stmt.where(User.domain == domain)
+        result = await self._db.execute(stmt)
+        count = result.scalar() or 0
+        return count > 0
