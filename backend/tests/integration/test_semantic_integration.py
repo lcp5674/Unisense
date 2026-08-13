@@ -31,6 +31,12 @@ import time
 from pathlib import Path
 
 import pytest
+
+# 集成测试应用库保护：DROP 前拒绝重建应用库（host:port + 库名 精确匹配 backend/.env）。
+# 曾因 UNISENSE_INTEGRATION_DB_URL 未设置而回退到 UNISENSE_DB_URL（指向应用库
+# localhost:3307/unisense），导致整库被 DROP 重建、admin 账号丢失。仅按库名会误伤 CI
+# （临时可重建库同名 unisense），故用权威匹配；CI 无 .env 时保护自动失效。
+from _app_db_guard import assert_not_app_db
 from sqlalchemy.exc import DataError, IntegrityError
 
 from app.core.exceptions import BusinessError, ConflictError
@@ -51,6 +57,8 @@ EXT_DB_URL = os.getenv("UNISENSE_INTEGRATION_DB_URL") or os.getenv("UNISENSE_DB_
 # 仅当指向本地/可达 MySQL 时才启用外部模式；
 # 若为 conftest 的默认占位（3306 且无服务）则仍走 testcontainers。
 _USE_EXT = bool(EXT_DB_URL) and "localhost" in EXT_DB_URL
+
+# 应用库保护：DROP 前拒绝重建应用库（见顶部 _app_db_guard 导入说明）。
 
 # backend 目录（alembic.ini 所在处），从测试文件推导，任意 cwd 均可运行
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -140,6 +148,7 @@ def db_env():
         # 大量连续 DDL 下 MySQL 8.0 偶发 1684 / 1050 时序冲突；整库重建原子、无残留。
         # 注意：集成测试库账号需具备目标库的 CREATE/DROP 权限。
         db_name = EXT_DB_URL.split("?")[0].rsplit("/", 1)[1]
+        assert_not_app_db(EXT_DB_URL)
         admin_url = url.rsplit("/", 1)[0] + "/"  # 无默认库，用于 DROP/CREATE DATABASE
         admin_engine = create_async_engine(admin_url, echo=False, poolclass=NullPool)
 
