@@ -14,7 +14,7 @@
 #   6. 每次变更追加变更记录到 docs/CHANGELOG_MODULES.md（审计链，不可改写历史行）。
 #   7. CI/.gateways.yml 标记 protected，其门槛禁止开发 agent 自改以绕过验证。
 
-updated: "2026-08-12"
+updated: "2026-08-13"
 td_ref: "docs/technical-design.md"
 prd_ref: "docs/proposal.md"
 
