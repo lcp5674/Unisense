@@ -808,8 +808,15 @@ async def test_confirm_version_success():
         return_value=[MagicMock(id=1, consumer_id=9, status="PENDING")]
     )
     repo.update_confirmation_status = AsyncMock()
+    repo.get_version = AsyncMock(
+        return_value=MagicMock(
+            definition_json={"expression": "SUM(x)"},
+            diff_json={"granularity": {"before": "daily", "after": "hourly"}},
+        )
+    )
     repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric())
     repo.mark_version_published = AsyncMock()
+    svc._cache.invalidate = AsyncMock()
     svc._publish_event = AsyncMock()
 
     result = await svc.confirm_version("sales_gmv_daily", version=1, consumer_id=9)
@@ -823,10 +830,13 @@ async def test_reject_version_success():
         return_value=[MagicMock(id=1, consumer_id=9, status="PENDING")]
     )
     repo.update_confirmation_status = AsyncMock()
+    svc._db.execute = AsyncMock()
     svc._publish_event = AsyncMock()
 
     await svc.reject_version("sales_gmv_daily", version=1, consumer_id=9, reason="口径变更")
     assert repo.update_confirmation_status.await_count == 1
+    # 被拒版本置 CANCELLED（DB 更新执行）
+    svc._db.execute.assert_awaited_once()
 
 
 async def test_extend_version_success():
@@ -1162,3 +1172,825 @@ async def test_has_active_compliance_officer():
     # 有活跃合规官 → True
     svc._db.execute.return_value.scalar.return_value = 1
     assert await svc._has_active_compliance_officer("sales") is True
+
+
+# =====================================================================
+# 覆盖率补齐：semantic/service.py 84% → 90%+（未覆盖分支）
+# =====================================================================
+
+# ---- update_metric 破坏性变更分支（PUBLISHED → PENDING_CONFIRMATION）----
+
+
+async def test_update_metric_published_breaking_def_creates_pending():
+    """PUBLISHED + 口径破坏性变更 → PENDING_CONFIRMATION 版本
+    + create_pending（含备份 Owner 消费方）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="PUBLISHED",
+        row_version=1,
+        version=1,
+        backup_owner_id=2,
+        definition_json={"expression": "SUM(order_amount)"},
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    fake_pvm = MagicMock()
+    fake_pvm.create_pending = AsyncMock()
+
+    with patch(
+        "app.services.semantic.pending_version_manager.PendingVersionManager",
+        return_value=fake_pvm,
+    ):
+        result = await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                definition_json={"expression": "SUM(refund_amount)"},
+                change_reason="破坏性口径变更",
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+
+    version_arg = repo.create_version.call_args.args[0]
+    assert version_arg.status == "PENDING_CONFIRMATION"
+    assert version_arg.change_type == "BREAKING"
+    # create_pending(metric, version, consumer_ids) 位置参数
+    assert fake_pvm.create_pending.call_args.args[2] == [1, 2]
+    assert result.row_version == 2
+
+
+async def test_update_metric_published_top_level_breaking_creates_pending():
+    """PUBLISHED + top-level 破坏性字段（granularity）变更且无
+    definition_json → PENDING + 结构化 diff。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="PUBLISHED",
+        row_version=1,
+        version=1,
+        granularity="daily",
+        backup_owner_id=2,
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    fake_pvm = MagicMock()
+    fake_pvm.create_pending = AsyncMock()
+
+    with patch(
+        "app.services.semantic.pending_version_manager.PendingVersionManager",
+        return_value=fake_pvm,
+    ):
+        result = await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(granularity="hourly", change_reason="粒度变更"),
+            actor_id=1,
+            role="metric_owner",
+        )
+
+    version_arg = repo.create_version.call_args.args[0]
+    assert version_arg.status == "PENDING_CONFIRMATION"
+    assert version_arg.change_type == "BREAKING"
+    assert version_arg.diff_json["granularity"]["before"] == "daily"
+    assert version_arg.diff_json["granularity"]["after"] == "hourly"
+    assert fake_pvm.create_pending.call_args.args[2] == [1, 2]
+    assert result.row_version == 2
+
+
+async def test_update_metric_syncs_pii_flag_from_definition():
+    """definition_json 显式声明 pii=True 时，pii_flag 以权威源同步到 updates。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="DRAFT",
+        row_version=1,
+        version=1,
+        pii_flag=False,
+        definition_json={"expression": "SUM(order_amount)"},
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(
+            definition_json={"expression": "SUM(order_amount)", "pii": True},
+            change_reason="补充 PII 标记",
+        ),
+        actor_id=1,
+        role="metric_owner",
+    )
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["pii_flag"] is True
+
+
+async def test_update_metric_collects_optional_fields():
+    """非 None 的可选字段（name/sla/backup_owner_id）进入 updates。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=1, version=1)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(
+            name="新名称",
+            sla="08:00",
+            backup_owner_id=5,
+            change_reason="调整元数据",
+        ),
+        actor_id=1,
+        role="metric_owner",
+    )
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["name"] == "新名称"
+    assert kwargs["sla"] == "08:00"
+    assert kwargs["backup_owner_id"] == 5
+
+
+# ---- 状态机非法跃迁（submit/review/reject/promote/rollback/deprecate）----
+
+
+async def test_submit_metric_invalid_transition():
+    """非 DRAFT 状态提交（如 PUBLISHED）→ ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    with pytest.raises(ConflictError) as exc:
+        await svc.submit_metric(
+            "sales_gmv_daily", MetricSubmitRequest(change_reason="提交评审"), actor_id=1
+        )
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+async def test_review_metric_not_in_review_status():
+    """审核非 REVIEW 状态指标 → BusinessError。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="DRAFT", owner_id=1)
+    repo.get_by_code = AsyncMock(return_value=metric)
+    with pytest.raises(BusinessError) as exc:
+        await svc.review_metric(
+            "sales_gmv_daily",
+            approved=True,
+            actor_id=2,
+            role="platform_admin",
+            change_reason="通过评审",
+        )
+    assert exc.value.error_code == "VALIDATION_ERROR"
+
+
+async def test_reject_metric_invalid_transition():
+    """非 REVIEW 状态驳回（如 EXPERIMENTAL）→ ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="EXPERIMENTAL"))
+    with pytest.raises(ConflictError) as exc:
+        await svc.reject_metric(
+            "sales_gmv_daily",
+            MetricRejectRequest(reason="口径不符"),
+            actor_id=1,
+            role="platform_admin",
+        )
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+async def test_promote_metric_invalid_transition():
+    """非 EXPERIMENTAL 状态 promote → ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT"))
+    with pytest.raises(ConflictError) as exc:
+        await svc.promote_metric("sales_gmv_daily", actor_id=1)
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+async def test_rollback_metric_invalid_transition():
+    """非 EXPERIMENTAL 状态 rollback → ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT"))
+    with pytest.raises(ConflictError) as exc:
+        await svc.rollback_metric("sales_gmv_daily", actor_id=1)
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+async def test_rollback_metric_no_previous_published():
+    """EXPERIMENTAL 回退但无上一 PUBLISHED 版本 → ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="EXPERIMENTAL", version=2))
+    repo.list_versions = AsyncMock(
+        return_value=[MagicMock(status="EXPERIMENTAL", version=2)]
+    )
+    with pytest.raises(ConflictError) as exc:
+        await svc.rollback_metric("sales_gmv_daily", actor_id=1)
+    assert exc.value.error_code == "NO_PREVIOUS_PUBLISHED_VERSION"
+
+
+async def test_deprecate_metric_invalid_transition():
+    """非 PUBLISHED 状态废弃（如 DRAFT）→ ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT"))
+    with pytest.raises(ConflictError) as exc:
+        await svc.deprecate_metric(
+            "sales_gmv_daily",
+            successor_code="sales_gmv_amount_daily",
+            actor_id=1,
+            role="metric_owner",
+        )
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+async def test_deprecate_metric_successor_not_found():
+    """替代指标不存在 → NotFoundError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.get_by_code.side_effect = [
+        make_metric(status="PUBLISHED"),  # 原指标
+        None,  # successor 查询
+    ]
+    with pytest.raises(NotFoundError):
+        await svc.deprecate_metric(
+            "sales_gmv_daily", successor_code="not_exist_code", actor_id=1, role="metric_owner"
+        )
+
+
+# ---- approve_metric 派生/复合指标依赖校验（921-938 / 944 / 975）----
+
+
+async def test_approve_derived_metric_unpublished_dependency():
+    """派生指标发布时依赖未发布 → DEPENDENCY_NOT_PUBLISHED。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="REVIEW",
+        owner_id=1,
+        pii_flag=False,
+        type="derived",
+        definition_json={"dependencies": ["sales_gmv_amount_daily"]},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    fake_checker = MagicMock()
+    fake_checker.check_dependencies_published = AsyncMock(
+        return_value=["sales_gmv_amount_daily"]
+    )
+    with patch(
+        "app.services.semantic.dependency_checker.DependencyChecker",
+        return_value=fake_checker,
+    ), pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+        )
+    assert exc.value.error_code == "DEPENDENCY_NOT_PUBLISHED"
+
+
+async def test_approve_derived_metric_cycle():
+    """派生指标发布时检测到循环依赖 → CYCLIC_DEPENDENCY。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="REVIEW",
+        owner_id=1,
+        pii_flag=False,
+        type="composite",
+        definition_json={"dependencies": ["sales_gmv_amount_daily"]},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    fake_checker = MagicMock()
+    fake_checker.check_dependencies_published = AsyncMock(return_value=[])
+    fake_checker.detect_cycle = AsyncMock(return_value=["a", "b", "a"])
+    with patch(
+        "app.services.semantic.dependency_checker.DependencyChecker",
+        return_value=fake_checker,
+    ), pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+        )
+    assert exc.value.error_code == "CYCLIC_DEPENDENCY"
+
+
+async def test_approve_derived_metric_emits_dependencies():
+    """派生指标正常发布 → 事件 payload 携带 dependencies（975）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="REVIEW",
+        owner_id=1,
+        pii_flag=False,
+        type="derived",
+        definition_json={"dependencies": ["sales_gmv_amount_daily"]},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED")
+    )
+    repo.mark_version_published = AsyncMock()
+    svc._publish_event = AsyncMock()
+    fake_checker = MagicMock()
+    fake_checker.check_dependencies_published = AsyncMock(return_value=[])
+    fake_checker.detect_cycle = AsyncMock(return_value=None)
+    with patch(
+        "app.services.semantic.dependency_checker.DependencyChecker",
+        return_value=fake_checker,
+    ):
+        result = await svc.approve_metric(
+            "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+        )
+    assert result.status == "PUBLISHED"
+    payload = svc._publish_event.call_args.args[1]
+    assert payload["dependencies"] == ["sales_gmv_amount_daily"]
+
+
+async def test_approve_metric_version_not_found():
+    """approve 时目标版本不存在 → NotFoundError。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="REVIEW", owner_id=1, pii_flag=False)
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.approve_metric(
+            "sales_gmv_daily",
+            MetricApproveRequest(target_version=99),
+            actor_id=1,
+            role="platform_admin",
+        )
+
+
+# ---- emergency_publish 边界 ----
+
+
+async def test_emergency_publish_invalid_status():
+    """紧急发布非 DRAFT/REVIEW 状态（如 PUBLISHED）→ ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", pii_flag=False))
+    with pytest.raises(ConflictError) as exc:
+        await svc.emergency_publish_metric(
+            "sales_gmv_daily",
+            MetricEmergencyPublishRequest(reason="生产系统故障需立即紧急发布处理"),
+            actor_id=1,
+            role="domain_admin",
+        )
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+async def test_emergency_publish_version_not_found():
+    """紧急发布时目标版本不存在 → NotFoundError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", pii_flag=False))
+    repo.get_version = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.emergency_publish_metric(
+            "sales_gmv_daily",
+            MetricEmergencyPublishRequest(
+                reason="生产系统故障需立即紧急发布处理", target_version=99
+            ),
+            actor_id=1,
+            role="domain_admin",
+        )
+
+
+# ---- confirm_version 边界 ----
+
+
+async def test_confirm_version_no_pending():
+    """版本无待确认记录 → ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(return_value=[])
+    with pytest.raises(ConflictError) as exc:
+        await svc.confirm_version("sales_gmv_daily", version=1, consumer_id=9)
+    assert exc.value.error_code == "NO_PENDING_CONFIRMATION"
+
+
+async def test_confirm_version_no_mine():
+    """当前用户无待确认记录 → ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[MagicMock(id=1, consumer_id=9, status="PENDING")]
+    )
+    with pytest.raises(ConflictError) as exc:
+        await svc.confirm_version("sales_gmv_daily", version=1, consumer_id=888)
+    assert exc.value.error_code == "NO_PENDING_CONFIRMATION"
+
+
+async def test_confirm_version_already_confirmed_idempotent():
+    """已确认的确认记录幂等返回（不重复转正）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric()
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[MagicMock(id=1, consumer_id=9, status="CONFIRMED")]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    result = await svc.confirm_version("sales_gmv_daily", version=1, consumer_id=9)
+    assert result is metric
+    repo.update_confirmation_status.assert_not_called()
+
+
+async def test_confirm_version_partial_returns_without_promote():
+    """部分消费方确认（未全部）→ 返回 metric，不触发版本转正。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[
+            MagicMock(id=1, consumer_id=9, status="PENDING"),
+            MagicMock(id=2, consumer_id=3, status="PENDING"),
+        ]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    result = await svc.confirm_version("sales_gmv_daily", version=1, consumer_id=9)
+    assert result is not None
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_confirm_version_lock_conflict_rolls_back():
+    """全部确认后转正遇乐观锁冲突 → 回滚确认状态为 PENDING 并重新抛出。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[MagicMock(id=1, consumer_id=9, status="PENDING")]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    repo.get_version = AsyncMock(
+        return_value=MagicMock(definition_json={"expression": "SUM(x)"}, diff_json={})
+    )
+    repo.update_with_optimistic_lock = AsyncMock(side_effect=ConflictError("乐观锁冲突"))
+    with pytest.raises(ConflictError):
+        await svc.confirm_version("sales_gmv_daily", version=1, consumer_id=9)
+    # 回滚确认状态为 PENDING（位置参数 mine.id, status）
+    assert repo.update_confirmation_status.call_args.args[1] == "PENDING"
+
+
+# ---- auto_accept_timeout / _promote_pending_version（并行进程新增强）----
+
+
+async def test_auto_accept_timeout_promotes_when_all_accepted():
+    """超时自动接受：全部 PENDING 置 TIMEOUT_ACCEPTED 后转正。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_id = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        side_effect=[
+            [MagicMock(id=1, status="PENDING")],  # 首次读取：有 PENDING
+            [MagicMock(id=1, status="TIMEOUT_ACCEPTED")],  # 重读：全部已接受
+        ]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    repo.get_version = AsyncMock(
+        return_value=MagicMock(definition_json={"expression": "SUM(x)"}, diff_json={})
+    )
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric())
+    repo.mark_version_published = AsyncMock()
+    svc._cache.invalidate = AsyncMock()
+
+    result = await svc.auto_accept_timeout(metric_id=1, version=1)
+    assert result is not None
+    assert repo.update_confirmation_status.call_args.args[1] == "TIMEOUT_ACCEPTED"
+
+
+async def test_auto_accept_timeout_all_confirmed_promotes():
+    """无 PENDING 可标记但全部已确认 → 直接转正（返回更新后指标）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_id = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[MagicMock(id=1, status="CONFIRMED")]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    repo.get_version = AsyncMock(
+        return_value=MagicMock(definition_json={"expression": "SUM(x)"}, diff_json={})
+    )
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric())
+    repo.mark_version_published = AsyncMock()
+    svc._cache.invalidate = AsyncMock()
+
+    result = await svc.auto_accept_timeout(metric_id=1, version=1)
+    assert result is not None
+    # 无 PENDING → 不写 TIMEOUT_ACCEPTED
+    assert repo.update_confirmation_status.await_count == 0
+
+
+async def test_auto_accept_timeout_no_confirmations_returns_none():
+    """版本无待确认记录 → 返回 None（不抛错）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_id = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(return_value=[])
+    result = await svc.auto_accept_timeout(metric_id=1, version=1)
+    assert result is None
+
+
+async def test_auto_accept_timeout_metric_not_found():
+    """指标不存在 → NotFoundError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_id = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.auto_accept_timeout(metric_id=999, version=1)
+
+
+async def test_promote_pending_version_applies_top_level_after():
+    """_promote_pending_version：应用版本口径 + top-level 破坏性字段 after 值回写主表。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(row_version=1, version=1)
+    repo.get_version = AsyncMock(
+        return_value=MagicMock(
+            definition_json={"expression": "SUM(refund_amount)"},
+            diff_json={"granularity": {"before": "daily", "after": "hourly"}},
+        )
+    )
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(version=2))
+    repo.mark_version_published = AsyncMock()
+    svc._cache.invalidate = AsyncMock()
+
+    result = await svc._promote_pending_version(metric, version=2)
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["effective_version"] == 2
+    assert kwargs["version"] == 2
+    assert kwargs["definition_json"]["expression"] == "SUM(refund_amount)"
+    assert kwargs["granularity"] == "hourly"  # top-level diff after 回写
+    assert result.version == 2
+
+
+async def test_promote_pending_version_not_found():
+    """_promote_pending_version 版本不存在 → NotFoundError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_version = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc._promote_pending_version(make_metric(), version=99)
+
+
+async def test_reject_version_no_pending():
+    """reject 无待确认记录 → ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(return_value=[])
+    with pytest.raises(ConflictError):
+        await svc.reject_version("sales_gmv_daily", version=1, consumer_id=9, reason="不认可")
+
+
+async def test_reject_version_no_mine():
+    """reject 当前用户无记录 → ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[MagicMock(id=1, consumer_id=9, status="PENDING")]
+    )
+    with pytest.raises(ConflictError):
+        await svc.reject_version("sales_gmv_daily", version=1, consumer_id=888, reason="不认可")
+
+
+async def test_extend_version_no_pending():
+    """extend 无待确认记录 → ConflictError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(return_value=[])
+    with pytest.raises(ConflictError):
+        await svc.extend_version("sales_gmv_daily", version=1)
+
+
+async def test_extend_version_limit_reached():
+    """已延期满 1 次 → EXTEND_LIMIT_REACHED。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[
+            MagicMock(id=1, consumer_id=9, status="PENDING", extension_count=1, deadline=None)
+        ]
+    )
+    with pytest.raises(ConflictError) as exc:
+        await svc.extend_version("sales_gmv_daily", version=1)
+    assert exc.value.error_code == "EXTEND_LIMIT_REACHED"
+
+
+# ---- _is_breaking_change 依赖集合比较 / compare_metrics similar ----
+
+
+async def test_is_breaking_change_dependencies_set_diff():
+    """依赖项按集合比较：顺序不同不算破坏，集合不同算破坏。"""
+    svc, _ = _svc_with_repo()
+    # 顺序不同但集合相同 → 非破坏
+    assert (
+        svc._is_breaking_change(
+            {"dependencies": ["a", "b"]}, {"dependencies": ["b", "a"]}
+        )
+        is False
+    )
+    # 集合不同 → 破坏
+    assert (
+        svc._is_breaking_change(
+            {"dependencies": ["a", "b"]}, {"dependencies": ["a", "c"]}
+        )
+        is True
+    )
+
+
+async def test_compare_metrics_similar():
+    """字段值存在字符串包含关系 → 标记 similar。"""
+    svc, repo = _svc_with_repo()
+    a = make_metric(granularity="daily")
+    b = make_metric(granularity="daily_hourly")
+    repo.get_by_code = AsyncMock(side_effect=[a, b])
+    result = await svc.compare_metrics("sales_gmv_daily", "sales_gmv_daily")
+    assert result["metrics"] == ["sales_gmv_daily", "sales_gmv_daily"]
+    assert result["fields"]["granularity"]["difference_level"] == "similar"
+
+
+# ---- get_consumption_guide 分支 ----
+
+
+async def test_get_consumption_guide_uses_existing():
+    """已有 consumption_guide 直接返回（不生成默认）。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get_guide = AsyncMock(return_value=None)
+    svc._cache.set_guide = AsyncMock()
+    existing_guide = {"metric_code": "sales_gmv_daily", "recommended_usage": ["自定义"]}
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", consumption_guide=existing_guide)
+    )
+    guide = await svc.get_consumption_guide("sales_gmv_daily")
+    assert guide is existing_guide
+
+
+async def test_get_consumption_guide_pii_caution():
+    """PII 指标默认 guide 追加合规 caution。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get_guide = AsyncMock(return_value=None)
+    svc._cache.set_guide = AsyncMock()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", pii_flag=True))
+    guide = await svc.get_consumption_guide("sales_gmv_daily")
+    assert any("PII" in c for c in guide["cautions"])
+
+
+async def test_get_consumption_guide_semi_additive_caution():
+    """SEMI_ADDITIVE 指标默认 guide 追加不可加维度 caution。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get_guide = AsyncMock(return_value=None)
+    svc._cache.set_guide = AsyncMock()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="PUBLISHED",
+            additivity="SEMI_ADDITIVE",
+            non_additive_dimensions=["store_id"],
+        )
+    )
+    guide = await svc.get_consumption_guide("sales_gmv_daily")
+    assert any("store_id" in c for c in guide["cautions"])
+
+
+# ---- create_metric 自动补全 / PII 传播 / 编码耗尽 ----
+
+
+async def test_create_metric_auto_fill_sets_default_field(monkeypatch):
+    """自动推断命中且当前值=默认值（metric_tier=T3）时覆盖为建议值（275 行 setattr）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    async def _get_defaults(domain):
+        return {"metric_tier": "T3"}
+
+    monkeypatch.setattr(svc, "_get_domain_defaults", _get_defaults)
+    monkeypatch.setattr(
+        "app.services.semantic.auto_fill.auto_fill",
+        lambda **kw: {"defaults": {"metric_tier": "T2"}, "measure": "gmv"},
+    )
+    payload = make_create_payload(
+        metric_code=None, source_table="ods_order", measure_column="amount", period="day",
+        metric_tier="T3",  # 默认值 → 将被覆盖为 T2
+    )
+    result = await svc.create_metric(MetricCreateRequest(**payload), owner_id=1)
+    assert result.status == "DRAFT"
+
+
+async def test_create_metric_propagates_pii(monkeypatch):
+    """definition 含 source_fields 时触发 PII 血缘传播（best-effort，不阻断创建）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    propagated = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.governance.service.GovernanceService",
+        lambda db: MagicMock(propagate_pii_to_metric=propagated),
+    )
+    payload = make_create_payload(
+        definition_json={
+            "expression": "SUM(order_amount)",
+            "source_fields": [{"name": "order_amount", "pii": True}],
+        }
+    )
+    result = await svc.create_metric(MetricCreateRequest(**payload), owner_id=1)
+    assert result is created
+    propagated.assert_awaited_once()
+
+
+async def test_generate_metric_code_exhausted_raises_conflict(monkeypatch):
+    """自动编码耗尽（generate_unique_code 抛 RuntimeError）→ ConflictError。"""
+    svc, repo = _svc_with_repo()
+
+    def _boom(base, exists):
+        raise RuntimeError("exhausted")
+
+    monkeypatch.setattr(
+        "app.core.codegen.generate_unique_code", _boom
+    )
+    with pytest.raises(ConflictError) as exc:
+        await svc._generate_metric_code(
+            MetricCreateRequest(**make_create_payload(metric_code=None))
+        )
+    assert exc.value.ctx["code"] == "CODE_EXHAUSTED"
+
+
+async def test_redis_available_true(monkeypatch):
+    """Redis 已初始化时 _redis_available 返回 True（49 行）。"""
+    import app.services.semantic.service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "get_redis", lambda: MagicMock())
+    assert svc_mod._redis_available() is True
+
+
+async def test_update_metric_published_def_plus_top_level_breaking_merges_diff():
+    """口径 + 顶层破坏性字段同时变更（走 definition_json 分支）→ top_diff 合并进 diff_json。
+
+    覆盖 update_metric 的 ``if request.definition_json is not None`` 分支：
+    - top_level_breaking 检测（BREAKING_TOP_LEVEL_FIELDS 变化）
+    - top_diff 构建（556）与 merged_diff.update(top_diff)（585）
+    - PUBLISHED + breaking → PENDING_CONFIRMATION + PendingVersionManager.create_pending
+    """
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="PUBLISHED",
+        row_version=1,
+        version=1,
+        granularity="daily",
+        backup_owner_id=2,
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    fake_pvm = MagicMock()
+    fake_pvm.create_pending = AsyncMock()
+
+    with patch(
+        "app.services.semantic.pending_version_manager.PendingVersionManager",
+        return_value=fake_pvm,
+    ):
+        result = await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                definition_json={"expression": "SUM(new_col)"},
+                granularity="hourly",
+                change_reason="口径+粒度双重变更",
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+
+    version_arg = repo.create_version.call_args.args[0]
+    assert version_arg.status == "PENDING_CONFIRMATION"
+    assert version_arg.change_type == "BREAKING"
+    # top-level 破坏性字段 diff 已合并（556/585 覆盖）
+    assert version_arg.diff_json["granularity"]["before"] == "daily"
+    assert version_arg.diff_json["granularity"]["after"] == "hourly"
+    # 定义 diff 已合并（_compute_diff 产物）
+    assert "expression" in version_arg.diff_json
+    assert fake_pvm.create_pending.call_args.args[2] == [1, 2]
+    assert result.row_version == 2
+
+
+async def test_auto_accept_timeout_partial_rejected_returns_none():
+    """超时自动接受后有 REJECTED 残留（非全部 CONFIRMED/ACCEPTED）→ 返回 None。
+
+    覆盖 auto_accept_timeout 的 ``return None`` 分支（1598）：PENDING 被置
+    TIMEOUT_ACCEPTED 后重读，仍存在 REJECTED 记录时不转正。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_id = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        side_effect=[
+            [
+                MagicMock(id=1, status="PENDING"),
+                MagicMock(id=2, status="REJECTED"),
+            ],
+            [
+                MagicMock(id=1, status="TIMEOUT_ACCEPTED"),
+                MagicMock(id=2, status="REJECTED"),
+            ],
+        ]
+    )
+    repo.update_confirmation_status = AsyncMock()
+
+    result = await svc.auto_accept_timeout(metric_id=1, version=1)
+    assert result is None
+    # PENDING 记录被置 TIMEOUT_ACCEPTED
+    assert repo.update_confirmation_status.call_args.args[1] == "TIMEOUT_ACCEPTED"
+    # 未触发转正
+    repo.update_with_optimistic_lock.assert_not_called()
