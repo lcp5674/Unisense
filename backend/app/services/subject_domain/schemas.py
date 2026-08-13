@@ -13,9 +13,12 @@ _DOMAIN_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class SubjectDomainCreate(BaseModel):
-    """创建主题域请求。"""
+    """创建主题域请求。
 
-    code: str = Field(..., max_length=64, description="域编码")
+    ``code`` 可选：不传时由服务端按显示名自动生成（子域带父域前缀、冲突自增后缀）。
+    """
+
+    code: str | None = Field(None, max_length=64, description="域编码（可选，缺省自动生成）")
     name: str = Field(..., max_length=128, description="域显示名")
     parent_id: int | None = Field(None, description="父域ID（根域为null）")
     sort_order: int = Field(0, description="同级排序")
@@ -25,7 +28,9 @@ class SubjectDomainCreate(BaseModel):
 
     @field_validator("code")
     @classmethod
-    def validate_code(cls, v: str) -> str:
+    def validate_code(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         if not _DOMAIN_CODE_PATTERN.match(v):
             raise ValueError("域编码须以小写字母开头，仅含小写字母、数字和下划线")
         return v

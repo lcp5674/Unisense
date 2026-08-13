@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import structlog
@@ -22,6 +23,10 @@ logger = structlog.get_logger("unisense.subject_domain.service")
 
 # 最大层级深度
 MAX_LEVEL = 3
+#: 自动生成编码的最大长度（对齐模型 String(64)）
+_MAX_CODE_LEN = 64
+#: 自动生成编码冲突自增后缀上限
+_MAX_CODE_ATTEMPTS = 100
 
 
 class SubjectDomainService:
@@ -91,13 +96,10 @@ class SubjectDomainService:
         return roots
 
     async def create_domain(self, data: SubjectDomainCreate) -> SubjectDomain:
-        # 编码唯一性校验
-        if await self._repo.code_exists(data.code):
-            raise ConflictError(f"域编码已存在: {data.code}", error_code="DUPLICATE_CODE")
-
         # 层级校验
         level = 1
         parent_path = ""
+        parent: SubjectDomain | None = None
         if data.parent_id is not None:
             parent = await self._repo.get_by_id(data.parent_id)
             if parent is None:
@@ -112,8 +114,16 @@ class SubjectDomainService:
                 )
             parent_path = parent.path or str(parent.id)
 
+        # 编码唯一性校验（未传时自动生成）
+        code = data.code
+        if code:
+            if await self._repo.code_exists(code):
+                raise ConflictError(f"域编码已存在: {code}", error_code="DUPLICATE_CODE")
+        else:
+            code = await self._generate_unique_code(data.name, parent)
+
         domain = SubjectDomain(
-            code=data.code,
+            code=code,
             name=data.name,
             parent_id=data.parent_id,
             level=level,
@@ -130,8 +140,44 @@ class SubjectDomainService:
         domain.path = f"{parent_path}.{domain.id}" if data.parent_id is not None else str(domain.id)
         await self._repo.update(domain)
 
-        logger.info("domain_created", code=data.code, level=level)
+        logger.info("domain_created", code=code, level=level, auto_generated=not data.code)
         return domain
+
+    @staticmethod
+    def _slugify_code(name: str) -> str:
+        """把显示名规范化为域编码片段：小写、非字母数字折叠为下划线、去首尾下划线。
+
+        返回空串表示无 ASCII 可提取（如纯中文名）。
+        """
+        slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+        return slug
+
+    async def _generate_unique_code(self, name: str, parent: SubjectDomain | None) -> str:
+        """自动生成唯一域编码。
+
+        规则：优先取显示名的 ASCII slug；子域拼接父域编码前缀（保持树形语义）；
+        纯中文等无 ASCII 名回退 ``{父域}_sub`` / ``domain``；冲突时追加 ``_2/_3/...``
+        后缀（上限 100 次）。与数据源 source_id 自动生成约定保持一致。
+        """
+        slug = self._slugify_code(name)
+        if slug:
+            base_id = f"{parent.code}_{slug}" if parent else slug
+        else:
+            # 无 ASCII 可提取（纯中文）：子域用「父域_sub」，根域用「domain」兜底
+            base_id = f"{parent.code}_sub" if parent else "domain"
+
+        candidate = base_id[:_MAX_CODE_LEN]
+        n = 2
+        while await self._repo.code_exists(candidate):
+            suffix = f"_{n}"
+            candidate = f"{base_id[: _MAX_CODE_LEN - len(suffix)]}{suffix}"
+            n += 1
+            if n > _MAX_CODE_ATTEMPTS:
+                raise BusinessError(
+                    f"无法为 {name} 生成唯一域编码，请手动指定",
+                    error_code="DOMAIN_CODE_EXHAUSTED",
+                )
+        return candidate
 
     async def update_domain(self, code: str, data: SubjectDomainUpdate) -> SubjectDomain:
         domain = await self.get_domain(code)

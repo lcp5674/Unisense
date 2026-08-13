@@ -1103,7 +1103,8 @@ export interface SubjectDomainTreeNode {
 }
 
 export interface SubjectDomainCreateRequest {
-  code: string;
+  /** 域编码：可选，缺省由后端按显示名自动生成 */
+  code?: string;
   name: string;
   parent_id?: number | null;
   sort_order?: number;
