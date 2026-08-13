@@ -91,12 +91,13 @@ function renderSources() {
 describe("DataSources", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedList.mockResolvedValue([source]);
+    // P1-1: 列表返回分页结构 {items, total, page, page_size}
+    mockedList.mockResolvedValue({ items: [source], total: 1, page: 1, page_size: 20 });
     mockedTypes.mockResolvedValue(TYPES);
     mockedCreate.mockResolvedValue(source);
     mockedTest.mockResolvedValue({ ok: true, source_type: "mysql", latency_ms: 12, error: null, detail: null });
     mockedCheck.mockResolvedValue({ ok: true, source_type: "mysql", latency_ms: 8, error: null, detail: null });
-    mockedHealth.mockResolvedValue({ source_id: "mysql_finance", health_status: "healthy", last_collected_at: null, last_error: null, uptime_check: true });
+    mockedHealth.mockResolvedValue({ source_id: "mysql_finance", health_status: "healthy", last_collected_at: null, last_error: null, last_health_check: null, uptime_check: true });
     mockedWatermark.mockResolvedValue({ source_id: "mysql_finance", last_collected_at: null, mode: "FULL", scanned_count: 10, failed_count: 0 });
   });
 

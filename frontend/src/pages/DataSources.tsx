@@ -186,6 +186,9 @@ function SourceDetailModal({
 
 export function DataSources() {
   const [items, setItems] = useState<DataSource[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detail, setDetail] = useState<DataSource | null>(null);
@@ -196,10 +199,13 @@ export function DataSources() {
   const watchedSchema = Form.useWatch("schema", form);
   const domainWatch = Form.useWatch("domain", form) ?? "";
 
-  async function load() {
+  async function load(nextPage = page, nextPageSize = pageSize) {
     setLoading(true);
     try {
-      setItems(await listDataSources());
+      // P1-1: 服务端分页（后端返回 {items, total, page, page_size}）
+      const resp = await listDataSources({ page: nextPage, page_size: nextPageSize });
+      setItems(resp.items);
+      setTotal(resp.total);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
@@ -330,8 +336,26 @@ export function DataSources() {
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建数据源</Button>
       </div>
 
-      <Card extra={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>
-        <Table dataSource={items} columns={columns} rowKey="source_id" loading={loading} pagination={false} locale={{ emptyText: "暂无数据源" }} />
+      <Card extra={<Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>刷新</Button>}>
+        <Table
+          dataSource={items}
+          columns={columns}
+          rowKey="source_id"
+          loading={loading}
+          pagination={{
+            current: page,
+            pageSize,
+            total,
+            showSizeChanger: true,
+            showTotal: (t: number) => `共 ${t} 个数据源`,
+            onChange: (p: number, ps: number) => {
+              setPage(p);
+              setPageSize(ps);
+              load(p, ps);
+            },
+          }}
+          locale={{ emptyText: "暂无数据源" }}
+        />
       </Card>
 
       <Modal title="新建数据源" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} confirmLoading={loading} okText="创建" width={620}>

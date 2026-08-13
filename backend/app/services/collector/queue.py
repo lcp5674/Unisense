@@ -122,20 +122,23 @@ class ArqCollectionQueue:
         from app.core.config import settings
 
         redis = self._redis or ArqRedis.from_url(self._redis_url or settings.redis_url)
+        # run_collection_task 以 job_id 作第 4 位置参数（幂等键 + 状态回写）；
+        # arq 0.28 的 enqueue_job 不支持 _max_tries/_timeout（会被当普通 kwargs 透传给
+        # 任务函数导致 TypeError），任务超时由内部 collect_and_register 的 asyncio 保护兜底。
+        job_id = f"collect:{source_id}:{uuid.uuid4().hex}"
         job = await redis.enqueue_job(
             "run_collection_task",
             source_id,
             actor_id,
-            _max_tries=3,
-            _timeout=600,
+            job_id,
+            _job_id=job_id,
         )
-        job_id: str = job.job_id
         # P1-4: 初始状态落 RedisJobStore（worker 完成后由 tasks.py 更新）
         await RedisJobStore(redis).set(
             job_id, "QUEUED", {"source_id": source_id, "actor_id": actor_id}
         )
         # FR-019: 不再调用 redis.close()，复用连接池
-        return job_id
+        return job.job_id
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
         from redis.asyncio import Redis as AsyncRedis

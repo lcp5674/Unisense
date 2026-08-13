@@ -226,11 +226,15 @@ async def test_idempotency_check_degrades_without_redis():
     assert result is True
 
 
-# ---------- US4: Arq 重试 3 次 ----------
+# ---------- US4: Arq 投递签名（job_id 位置参数 + 幂等）----------
 
 
 async def test_arq_retry_configured():
-    """FR-006: ArqCollectionQueue enqueue 配置 max_tries=3, timeout=600。"""
+    """FR-006: ArqCollectionQueue enqueue 正确传递 job_id（幂等键）并落初始 QUEUED 状态。
+
+    arq 0.28 的 enqueue_job 不支持 _max_tries/_timeout（会被当普通 kwargs 透传给任务函数
+    导致 TypeError），因此投递契约是：run_collection_task(source_id, actor_id, job_id, _job_id=job_id)。
+    """
     from app.services.collector.queue import ArqCollectionQueue
 
     queue = ArqCollectionQueue(redis_url="redis://localhost")
@@ -239,6 +243,7 @@ async def test_arq_retry_configured():
     mock_job = MagicMock()
     mock_job.job_id = "test-job-id"
     mock_redis.enqueue_job = AsyncMock(return_value=mock_job)
+    mock_redis.hset = AsyncMock()  # RedisJobStore.set
 
     with patch("arq.ArqRedis") as mock_arq:
         mock_arq.from_url = AsyncMock(return_value=mock_redis)
@@ -246,8 +251,15 @@ async def test_arq_retry_configured():
 
         job_id = await queue.enqueue("src1", 1)
 
-        # 验证 enqueue_job 调用参数
+        # 验证 enqueue_job 调用参数：job_id 作为第 4 位置参数，且 _job_id 与之相同
         call_args = mock_redis.enqueue_job.call_args
-        assert call_args[1]["_max_tries"] == 3
-        assert call_args[1]["_timeout"] == 600
+        assert call_args[0][:3] == ("run_collection_task", "src1", 1)
+        enqueued_job_id = call_args[0][3]
+        assert call_args[1]["_job_id"] == enqueued_job_id
+        assert enqueued_job_id.startswith("collect:src1:")
+        # arq 0.28 不支持这两个保留参数，不得透传
+        assert "_max_tries" not in call_args[1]
+        assert "_timeout" not in call_args[1]
+        # 初始 QUEUED 状态落 RedisJobStore
+        mock_redis.hset.assert_awaited_once()
         assert job_id == "test-job-id"
