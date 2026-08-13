@@ -31,7 +31,11 @@ from app.core.logging import get_logger
 from app.core.resilience import DegradationSignal
 from app.db.mysql import async_session_factory
 from app.models.degradation_event import DEGRADATION_STATES, DegradationEvent
-from app.models.dependency_health import DependencyHealth
+from app.models.dependency_health import (
+    DEP_HEALTH_CIRCUIT,
+    DEP_HEALTH_STATES,
+    DependencyHealth,
+)
 
 logger = get_logger(__name__)
 
@@ -46,6 +50,12 @@ _EVENT_STATE_TO_STATUS = {
 # 哨兵：区分「调用方未提供该字段」与「显式传 None/0」。UPSERT 更新时，未提供的
 # 遥测字段（P95 延迟/错误率/扩展信息）必须保留既有值，绝不能因熔断事件而清零。
 _MISSING = object()
+
+# 同 (dependency_type, dependency_id) 最近一次已上报的状态。用于抑制「同状态重复事件」：
+# WORM 审计表不应被同一降级态的重复上报刷爆；热路径（如 OLAP 未配置时每次查询都触发
+# DEGRADED）也不应每请求写库/发事件。仅在状态发生变化、或调用方携带新遥测
+# （circuit_opened_at / metadata）时才真正落库。降级态在 down→up→down 往复时仍能各自产生事件。
+_fired_state: dict[tuple[str, str], str] = {}
 
 
 def _signal_to_health_params(signal: DegradationSignal) -> dict[str, Any]:
@@ -180,12 +190,32 @@ async def update_dependency_health(
         circuit_state: CLOSED/OPEN/HALF_OPEN（必填）。
         consecutive_failures: 连续失败次数（未提供则保留）。
         circuit_opened_at: 熔断开启时间（UTC），未开启为 None（未提供则保留）。
-        last_check_at: 最近探测时间（UTC），未提供则默认 now（仅插入新行时生效）。
+        last_check_at: 最近探测时间（UTC），未提供则默认 now；每次更新都会刷新（即便未提供），
+            使看板反映最近一次健康态变更时刻，而非停留在首次插入时刻。
         latency_p95_ms: 近5分钟 P95 延迟（ms）（未提供则保留）。
         error_rate_pct: 近5分钟错误率（%）（未提供则保留）。
         metadata: 扩展信息（如熔断阈值/活跃连接数）（未提供则保留）。
     """
     now = datetime.now(UTC)
+    # 边界处理：status/circuit_state 必须为合法 ENUM，非法值直接丢弃并告警，
+    # 避免向 MySQL ENUM 列写入非法值被静默拒绝（best-effort 吞错导致健康态更新丢失、
+    # 看板读到陈旧/错误状态）。record_degradation 已校验 state，此处补齐健康态校验。
+    if status not in DEP_HEALTH_STATES:
+        logger.warning(
+            "dependency_health_invalid_status",
+            status=status,
+            dependency_type=dependency_type,
+            dependency_id=dependency_id,
+        )
+        return
+    if circuit_state not in DEP_HEALTH_CIRCUIT:
+        logger.warning(
+            "dependency_health_invalid_circuit_state",
+            circuit_state=circuit_state,
+            dependency_type=dependency_type,
+            dependency_id=dependency_id,
+        )
+        return
     # 插入期默认值：未显式提供的字段用合理初值（仅影响首次插入的新行）
     insert_values: dict[str, Any] = {
         "dependency_type": dependency_type,
@@ -214,8 +244,10 @@ async def update_dependency_health(
                 update_values["consecutive_failures"] = stmt.inserted["consecutive_failures"]
             if circuit_opened_at is not _MISSING:
                 update_values["circuit_opened_at"] = stmt.inserted["circuit_opened_at"]
-            if last_check_at is not _MISSING:
-                update_values["last_check_at"] = stmt.inserted["last_check_at"]
+            # 每次健康态更新都代表一次探测/状态变更，刷新最近探测时间（即便未显式提供），
+            # 否则看板 last_check_at 会冻结在首次插入时刻、误报「很久未探测」。
+            # stmt.inserted["last_check_at"] 在提供时为提供值、未提供时为 now。
+            update_values["last_check_at"] = stmt.inserted["last_check_at"]
             if latency_p95_ms is not _MISSING:
                 update_values["latency_p95_ms"] = stmt.inserted["latency_p95_ms"]
             if error_rate_pct is not _MISSING:
@@ -344,9 +376,21 @@ def fire_degradation_event(
     此处将异步 :func:`_persist_degradation_and_health` 提交到事件循环，不阻塞调用方。
     对 ``PROBING``（半开探测）等中间态仅更新实时健康、不写审计事件。
 
+    去重：同 (dependency_type, dependency_id) 状态未变化、且调用方未携带新遥测
+    （``circuit_opened_at`` / ``metadata``）时直接跳过，避免 WORM 审计表被重复上报刷爆、
+    以及热路径（如 OLAP 未配置时每次查询都触发 DEGRADED）每请求写库/发事件。
+    降级态在 down→up→down 往复时仍能各自产生事件（状态发生变化）。
+
     Args:
         同 :func:`_persist_degradation_and_health`；``state`` 可为 DEGRADED/HEALTHY/PROBING。
     """
+    # 同状态且无可观测增量 → 跳过（去重）。熔断驱动的 DEGRADED 携带 circuit_opened_at、
+    # 探针携带 metadata，均视为新信息，不被去重。
+    has_telemetry = circuit_opened_at is not None or metadata is not None
+    key = (dependency_type, dependency_id)
+    if not has_telemetry and _fired_state.get(key) == state:
+        return
+    _fired_state[key] = state
     _schedule_persist(
         _persist_degradation_and_health(
             dependency_type,

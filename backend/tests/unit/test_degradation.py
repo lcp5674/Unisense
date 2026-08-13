@@ -22,6 +22,14 @@ from app.core.resilience import DegradationSignal
 from app.models.degradation_event import DegradationEvent
 
 
+@pytest.fixture(autouse=True)
+def _reset_fired_state():
+    """每个测试清空模块级去重状态，避免跨测试污染（工业级去重的副作用隔离）。"""
+    degradation._fired_state.clear()
+    yield
+    degradation._fired_state.clear()
+
+
 @pytest.fixture
 def patched(monkeypatch):
     """每个测试用全新 session/eventbus mock，避免 side_effect 跨测试泄漏。"""
@@ -378,3 +386,70 @@ class TestRecordDegradationBoundary:
         eb.publish.assert_not_called()
         session.add.assert_not_called()
         session.commit.assert_not_called()
+
+
+class TestFireDegradationDedup:
+    async def test_repeated_state_is_deduped(self, monkeypatch, patched):
+        captured: list = []
+        monkeypatch.setattr(degradation, "_schedule_persist", lambda coro: captured.append(coro))
+        # 首次 DEGRADED 触发落库
+        degradation.fire_degradation_event("OLAP", "olap", "DEGRADED", "reason")
+        # 同状态重复（如 OLAP 未配置时每次查询都触发）→ 去重跳过，不放大 WORM 审计表
+        degradation.fire_degradation_event("OLAP", "olap", "DEGRADED", "reason")
+        assert len(captured) == 1
+        # 状态变化（恢复）→ 再次触发
+        degradation.fire_degradation_event("OLAP", "olap", "HEALTHY", "reason")
+        assert len(captured) == 2
+        # 再次降级 → 再次触发（down→up→down 往复仍各自产生事件）
+        degradation.fire_degradation_event("OLAP", "olap", "DEGRADED", "reason")
+        assert len(captured) == 3
+        # 被调度的协程确实落库 + 发事件（去重不影响真实持久化）
+        for coro in captured:
+            await coro
+        eb, session = patched
+        assert session.commit.await_count == 3
+
+    async def test_telemetry_bypass_dedup(self, monkeypatch, patched):
+        captured: list = []
+        monkeypatch.setattr(degradation, "_schedule_persist", lambda coro: captured.append(coro))
+        # 携带 circuit_opened_at（熔断驱动）视为新信息，不被去重
+        degradation.fire_degradation_event(
+            "OLAP", "olap", "DEGRADED", "circuit_open", circuit_opened_at=datetime.now(UTC)
+        )
+        degradation.fire_degradation_event(
+            "OLAP", "olap", "DEGRADED", "circuit_open", circuit_opened_at=datetime.now(UTC)
+        )
+        assert len(captured) == 2
+        # 被调度的协程确实落库（避免未 await 协程告警）
+        for coro in captured:
+            await coro
+
+
+class TestUpdateDependencyHealthBoundary:
+    async def test_invalid_status_is_dropped(self, patched):
+        _, session = patched
+        await degradation.update_dependency_health(
+            "OLAP", "olap", status="BROKEN", circuit_state="OPEN"
+        )
+        # 非法 status 直接丢弃，不写库（避免静默写入 ENUM 失败丢失健康态）
+        session.execute.assert_not_called()
+
+    async def test_invalid_circuit_state_is_dropped(self, patched):
+        _, session = patched
+        await degradation.update_dependency_health(
+            "OLAP", "olap", status="DEGRADED", circuit_state="WEIRD"
+        )
+        session.execute.assert_not_called()
+
+    async def test_refreshes_last_check_at_on_update(self, patched):
+        from sqlalchemy.dialects import mysql as mysql_dialect
+
+        _, session = patched
+        await degradation.update_dependency_health(
+            "OLAP", "olap", status="DEGRADED", circuit_state="OPEN"
+        )
+        stmt = session.execute.call_args_list[0][0][0]
+        sql = str(stmt.compile(dialect=mysql_dialect.dialect()))
+        update_part = sql.split("ON DUPLICATE KEY UPDATE", 1)[1]
+        # 未显式提供 last_check_at 时，更新子句仍应包含（刷新最近探测时间）
+        assert "last_check_at" in update_part

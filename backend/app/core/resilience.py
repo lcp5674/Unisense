@@ -228,13 +228,13 @@ def optional_dependency_status() -> dict[str, bool]:
 
 # ---- P2/P3: 预构建熔断器实例（OLAP / Neo4j / ES）----
 
-# OLAP 熔断器：consume 语义查询下推，连续 5 次失败后熔断，30s 后半开探测
-olap_breaker = CircuitBreaker(name="OLAP", failure_threshold=5, reset_timeout=30.0)
+# OLAP 熔断器：consume 语义查询下推。阈值对齐 TD §5.2a（OLAP 连续失败阈值=3，冷却期=30s）。
+olap_breaker = CircuitBreaker(name="OLAP", failure_threshold=3, reset_timeout=30.0)
 
-# Neo4j 熔断器：血缘图查询（GRAPH 依赖类型），连续 3 次失败后熔断（图查询更脆弱），20s 后半开探测
-neo4j_breaker = CircuitBreaker(name="GRAPH", failure_threshold=3, reset_timeout=20.0)
+# Neo4j 熔断器：血缘图查询（GRAPH）。阈值对齐 TD §5.2a：连续失败阈值=5，冷却期=30s。
+neo4j_breaker = CircuitBreaker(name="GRAPH", failure_threshold=5, reset_timeout=30.0)
 
-# ES 熔断器：全文检索，连续 5 次失败后熔断，30s 后半开探测。
+# ES 熔断器：全文检索。阈值对齐 TD §5.2a（ES 连续失败阈值=5，冷却期=30s）。
 # ES 客户端已接入（app/core/es_client.py）：就绪探针经 EsClient.health() 真实 .ping() 探活、
 # 检索经 EsClient.search()/index() 全程受 es_breaker 保护；熔断器已进入降级矩阵真实调用路径
 # （见 app/api/health.py 与 app/core/es_client.py），非死代码。ES 包缺失或未配置 es_url 时客户端
@@ -242,18 +242,29 @@ neo4j_breaker = CircuitBreaker(name="GRAPH", failure_threshold=3, reset_timeout=
 es_breaker = CircuitBreaker(name="ES", failure_threshold=5, reset_timeout=30.0)
 
 
+# 预构建熔断器注册表（对齐 TD §5.2a 各依赖类型阈值）。模块级单例，保证跨调用共享同一熔断状态。
+_BREAKERS: dict[str, CircuitBreaker] = {
+    "olap": olap_breaker,
+    "neo4j": neo4j_breaker,
+    "es": es_breaker,
+}
+
+# 未知服务惰性创建的熔断器缓存：保证跨调用返回同一实例（否则每次新建→状态丢失→熔断失效）。
+_unknown_breakers: dict[str, CircuitBreaker] = {}
+
+
 def get_circuit_breaker(service: str) -> CircuitBreaker:
-    """获取指定服务的熔断器实例。
+    """获取指定服务的熔断器实例（共享单例，跨调用状态稳定）。
 
     Args:
-        service: 服务名（olap / neo4j / es）。
+        service: 服务名（olap / neo4j / es 等）。
 
     Returns:
-        对应的 CircuitBreaker 实例；未知服务返回新实例。
+        对应的 CircuitBreaker 单例；未知服务惰性创建并缓存（name 取 service.upper()），
+        同样跨调用共享，避免「每调用新建实例 → 熔断状态丢失」的隐性故障。
     """
-    breakers = {
-        "olap": olap_breaker,
-        "neo4j": neo4j_breaker,
-        "es": es_breaker,
-    }
-    return breakers.get(service, CircuitBreaker())
+    if service in _BREAKERS:
+        return _BREAKERS[service]
+    if service not in _unknown_breakers:
+        _unknown_breakers[service] = CircuitBreaker(name=service.upper())
+    return _unknown_breakers[service]

@@ -119,3 +119,25 @@ def test_breaker_recovers_from_lost_probe(captured):
     assert b.state == "closed"
     # 事件序列：DEGRADED -> PROBING -> PROBING(重新放行) -> HEALTHY
     assert [s.event_state for s in captured] == ["DEGRADED", "PROBING", "PROBING", "HEALTHY"]
+
+
+def test_predefined_breakers_match_td_thresholds():
+    """预构建熔断器阈值对齐 TD §5.2a 各依赖类型阈值参数。"""
+    assert resilience.olap_breaker._failure_threshold == 3
+    assert resilience.olap_breaker._reset_timeout == 30.0
+    assert resilience.neo4j_breaker._failure_threshold == 5
+    assert resilience.neo4j_breaker._reset_timeout == 30.0
+    assert resilience.es_breaker._failure_threshold == 5
+    assert resilience.es_breaker._reset_timeout == 30.0
+
+
+def test_get_circuit_breaker_returns_shared_instance():
+    """get_circuit_breaker 跨调用返回同一实例，保证熔断状态共享（不每调用新建）。"""
+    b1 = resilience.get_circuit_breaker("olap")
+    b2 = resilience.get_circuit_breaker("olap")
+    assert b1 is resilience.olap_breaker is b2  # 已知服务返回注册表单例
+    # 未知服务跨调用返回同一实例（状态共享），而非每次新建导致熔断失效
+    u1 = resilience.get_circuit_breaker("unknown-svc")
+    u2 = resilience.get_circuit_breaker("unknown-svc")
+    assert u1 is u2
+    assert u1._name == "UNKNOWN-SVC"
