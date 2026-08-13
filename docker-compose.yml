@@ -202,6 +202,41 @@ services:
       retries: 3
       start_period: 40s
 
+  # ============ 采集异步 worker（P0-7：定时调度真实执行者）============
+  # 消费后端投递的采集任务 + 每分钟扫描 schedule_cron 触发定时采集
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: unisense-worker
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      UNISENSE_ENV: ${UNISENSE_ENV:-dev}
+      UNISENSE_DB_URL: mysql+pymysql://${UNISENSE_MYSQL_USER:-unisense}:${UNISENSE_MYSQL_PASSWORD:-test}@mysql:3306/${UNISENSE_MYSQL_DATABASE:-unisense}
+      UNISENSE_REDIS_URL: redis://redis:6379/0
+      UNISENSE_NEO4J_URL: bolt://neo4j:7687
+      UNISENSE_NEO4J_USER: ${UNISENSE_NEO4J_USER:-neo4j}
+      UNISENSE_NEO4J_PASSWORD: ${UNISENSE_NEO4J_PASSWORD:-test1234}
+      UNISENSE_ES_URL: http://elasticsearch:9200
+      UNISENSE_ES_USERNAME: elastic
+      UNISENSE_ES_PASSWORD: ${UNISENSE_ES_PASSWORD:-es_changeme}
+      UNISENSE_OLAP_URL: ${UNISENSE_OLAP_URL:-}
+      UNISENSE_JWT_SECRET: ${UNISENSE_JWT_SECRET:-dev-jwt-secret-change-in-production-32bytes}
+      UNISENSE_JWT_ALGORITHM: HS256
+      UNISENSE_JWT_EXPIRE_MINUTES: 60
+      UNISENSE_CORS_ORIGINS: http://localhost:8180,http://frontend:80
+      UNISENSE_LOG_LEVEL: INFO
+      UNISENSE_LOG_FORMAT: json
+      UNISENSE_LLM_BASE_URL: ${UNISENSE_LLM_BASE_URL:-}
+      UNISENSE_LLM_API_KEY: ${UNISENSE_LLM_API_KEY:-}
+      UNISENSE_LLM_DEFAULT_MODEL: ${UNISENSE_LLM_DEFAULT_MODEL:-deepseek-chat}
+      UNISENSE_NOTIFY_WEBHOOK_URL: ${UNISENSE_NOTIFY_WEBHOOK_URL:-}
+      UNISENSE_FERNET_KEY: ${UNISENSE_FERNET_KEY:-}
+    command: ["sh", "-c", "arq app.services.collector.worker.WorkerSettings"]
+    restart: unless-stopped
+
   frontend:
     build:
       context: .
