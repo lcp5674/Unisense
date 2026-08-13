@@ -43,7 +43,8 @@ server {
     location /api/ {
         set $backend_upstream http://backend:8000;
         proxy_pass $backend_upstream;
-        proxy_set_header Host $host;
+        # $http_host 保留端口（$host 会丢弃 :8180）——否则后端 307 重定向会回到 :80 导致 CORS 失败
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
