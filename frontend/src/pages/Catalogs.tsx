@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip } from "antd";
 import { PlusOutlined, ReloadOutlined, DeleteOutlined } from "@ant-design/icons";
-import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, UnisenseApiError } from "../api";
-import type { DBCatalog } from "../types";
+import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, UnisenseApiError } from "../api";
+import type { DBCatalog, DataSource } from "../types";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
@@ -36,6 +36,9 @@ export function Catalogs() {
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
   const [searchParams] = useSearchParams();
+  // 数据源选项（登记实体时选择归属数据源，source_id 由系统自动填充，无需手填）
+  const [sources, setSources] = useState<DataSource[]>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(false);
 
   // 支持从全局搜索栏经 ?kw= 直达定位（表/字段级关键词）
   useEffect(() => {
@@ -65,11 +68,23 @@ export function Catalogs() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, sourceId, entityType, sensitivity, keyword]);
 
+  async function loadSources() {
+    setSourcesLoading(true);
+    try {
+      const res = await listDataSources({ page: 1, page_size: 200 });
+      setSources(res.items);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载数据源失败");
+    } finally {
+      setSourcesLoading(false);
+    }
+  }
+
   async function handleRegister(values: Record<string, unknown>) {
     try {
+      // source_id 由选中的数据源自动填充，系统不再要求手填
       const sid = String(values.source_id);
       await registerCatalog(sid, {
-        source_id: sid,
         entity_name: String(values.entity_name),
         entity_type: String(values.entity_type ?? "TABLE"),
         schema_def: {},
@@ -183,10 +198,25 @@ export function Catalogs() {
         />
       </Card>
 
-      <Modal title="登记目录实体" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="登记">
+      <Modal
+        title="登记目录实体"
+        open={modalOpen}
+        onCancel={() => setModalOpen(false)}
+        onOk={() => form.submit()}
+        okText="登记"
+        afterOpenChange={(open) => {
+          if (open) loadSources();
+        }}
+      >
         <Form form={form} layout="vertical" onFinish={handleRegister} style={{ marginTop: 8 }}>
-          <Form.Item name="source_id" label="Source ID" rules={[{ required: true }]}>
-            <Input className="mono" />
+          <Form.Item name="source_id" label="数据源" rules={[{ required: true, message: "请选择归属的数据源" }]}>
+            <Select
+              showSearch
+              loading={sourcesLoading}
+              placeholder="选择数据源（source_id 自动填充）"
+              optionFilterProp="label"
+              options={sources.map((s) => ({ value: s.source_id, label: `${s.name}（${s.source_id}）` }))}
+            />
           </Form.Item>
           <Form.Item name="entity_name" label="实体名" rules={[{ required: true }]}>
             <Input className="mono" placeholder="如 dwd_finance_order" />
@@ -197,7 +227,7 @@ export function Catalogs() {
           <Form.Item name="etl_sql" label="ETL SQL（可选）">
             <Input.TextArea rows={3} className="mono" />
           </Form.Item>
-          <Alert type="info" showIcon message="schema_def 可在采集时自动填充；此处先登记元信息。" />
+          <Alert type="info" showIcon message="source_id 由所选数据源自动确定，无需手填；schema_def 可在采集时自动填充。" />
         </Form>
       </Modal>
     </div>

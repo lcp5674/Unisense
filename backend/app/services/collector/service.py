@@ -37,6 +37,7 @@ from app.services.collector.schemas import (
     TestConnectionResult,
 )
 from app.services.collector.spi import BaseCollector, CollectResult
+from app.services.llm.client import LlmError
 
 logger = get_logger("unisense.collector.service")
 
@@ -335,6 +336,10 @@ class CollectorService(BaseService):
     async def register_catalog(
         self, req: DBCatalogCreateRequest, actor_id: int
     ) -> DBCatalogResponse:
+        # source_id 是下游唯一键，缺失时服务层防御性拒绝
+        # （API 层会按路径回填，但 worker/任务路径直接调用服务时需自行保证）
+        if req.source_id is None:
+            raise ValidationError("source_id 缺失：必须由路径参数或请求体提供")
         # 规则引擎分类（确定性基线）
         rule_sensitivity = self._classifier.classify(req.entity_name, req.schema_def)
         sensitivity = rule_sensitivity
@@ -405,6 +410,7 @@ class CollectorService(BaseService):
 
         LLM 不可用时返回 None（不阻断主流程）。
         """
+        client = None
         try:
             from app.services.llm.client import build_llm_client
 
@@ -440,7 +446,6 @@ class CollectorService(BaseService):
                 max_tokens=500,
                 response_format={"type": "json_object"},
             )
-            await client.close()
             # P0-2 回归防护：降级客户端返回 content="" + confidence=0，
             # 视为 LLM 不可用（不参与分流），否则所有实体都会被误标 NEEDS_REVIEW。
             if not result.get("content") or float(result.get("confidence", 0) or 0) <= 0:
@@ -461,6 +466,15 @@ class CollectorService(BaseService):
             logger.warning("llm_classify_runtime_error: %s", exc)
             _record_llm_error_metric("runtime_error")
             return None
+        except LlmError as exc:
+            # LLM 网关/模型错误（如模型不存在 404）——分类是辅助能力，降级不阻断登记
+            logger.warning("llm_classify_llm_error: %s", exc)
+            _record_llm_error_metric("llm_error")
+            return None
+        finally:
+            # 异常/早退路径也必须释放 httpx.AsyncClient，防连接泄漏
+            if client is not None:
+                await client.close()
 
     async def _handle_drift(
         self, source_id: str, entity_name: str, drift_info: dict[str, Any]

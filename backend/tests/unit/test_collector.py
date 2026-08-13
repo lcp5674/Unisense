@@ -1045,6 +1045,31 @@ async def test_llm_classify_fallback_client_returns_none():
     assert result is None
 
 
+async def test_llm_classify_llm_error_returns_none():
+    """LlmError（如模型不存在 404）→ 返回 None 不抛异常，登记实体不 500。
+
+    回归：LLM 分类是辅助能力，网关/模型错误必须降级而非阻断主流程。
+    """
+    from app.services.llm.client import LlmError
+
+    class _FailingClient:
+        enabled = True
+
+        async def chat(self, *args: object, **kwargs: object) -> dict[str, object]:
+            raise LlmError("LLM 请求失败: 404")
+
+        async def close(self) -> None:
+            return None
+
+    svc, _repo = _svc()
+    with patch(
+        "app.services.llm.client.build_llm_client",
+        return_value=_FailingClient(),
+    ):
+        result = await svc._llm_classify_sensitivity("orders", {"columns": ["amount"]})
+    assert result is None
+
+
 # ---------- P0-3: 软删释放 source_id + IntegrityError 转 409 ----------
 
 

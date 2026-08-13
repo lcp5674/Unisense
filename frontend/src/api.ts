@@ -1415,7 +1415,7 @@ export async function listCatalogs(params?: {
 export async function registerCatalog(
   sourceId: string,
   body: {
-    source_id: string;
+    source_id?: string; // 可选——后端以 URL 路径为准自动填充
     entity_name: string;
     entity_type?: string;
     schema_def: Record<string, unknown>;

@@ -258,8 +258,10 @@ async def register_catalog(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[DBCatalogResponse]:
-    if body.source_id != source_id:
+    # source_id 自动生成：请求体可选——未传时以 URL 路径为准并回填，传了则校验一致
+    if body.source_id is not None and body.source_id != source_id:
         raise BusinessError("body.source_id 与路径不一致", error_code="BAD_REQUEST")
+    body.source_id = source_id
     svc = _svc(db)
     resp = await svc.register_catalog(body, user.id)
     await write_audit(

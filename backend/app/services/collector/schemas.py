@@ -167,7 +167,7 @@ class DBCatalogCreateRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    source_id: str = Field(max_length=64)
+    source_id: str | None = Field(default=None, max_length=64)  # 可选——前端不填，由 URL 路径决定
     entity_name: str = Field(max_length=255)
     entity_type: EntityType = EntityTypeEnum.TABLE
     schema_def: dict[str, Any] = Field(alias="schema_json")
