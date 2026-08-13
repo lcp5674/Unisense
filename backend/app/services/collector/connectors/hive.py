@@ -5,6 +5,7 @@
 
 - 无增量支持，始终全量
 - 单表 try/catch 跳过容错
+- 生产语义（FR-030）：按 connection_config.database 过滤；为空时枚举全部库
 - @registry.register("hive") 注册
 
 beeline 命令示例::
@@ -17,12 +18,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import time
 from typing import Any
 
 from app.core.exceptions import ExternalDependencyError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.connectors.collector_registry import registry
-from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult, FailedSpec
+from app.services.collector.spi import (
+    BaseCollector,
+    CatalogSpec,
+    CollectResult,
+    FailedSpec,
+    ProbeResult,
+)
 
 logger = logging.getLogger("unisense.collector.connectors.hive")
 
@@ -97,40 +106,82 @@ class HiveCollector(BaseCollector):
 
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
-        schema = getattr(source, "domain", self._database)
 
-        # 获取表列表
-        try:
-            table_rows = await self._execute(f"SHOW TABLES IN {schema}")
-        except Exception as exc:
-            raise ExternalDependencyError(f"采集源 {source_id} 获取表列表失败: {exc}") from exc
+        # 生产语义：database 为空时枚举全部库
+        if self._database:
+            schemas = [self._database]
+        else:
+            try:
+                db_rows = await self._execute("SHOW DATABASES")
+                schemas = [row[0].strip() for row in db_rows if row and row[0].strip()]
+            except Exception as exc:
+                raise ExternalDependencyError(
+                    f"采集源 {source_id} 枚举数据库失败: {exc}"
+                ) from exc
 
         specs: list[CatalogSpec] = []
         failed_specs: list[FailedSpec] = []
 
-        for row in table_rows:
-            tbl = row[0] if row else None
-            if not tbl:
-                continue
+        for schema in schemas:
+            safe_schema = self._safe_ident(schema)
+            # 获取表列表
             try:
-                desc_rows = await self._execute(f"DESCRIBE {schema}.{tbl}")
-                columns = []
-                for desc_row in desc_rows:
-                    if len(desc_row) >= 2:
-                        col_name = desc_row[0].strip()
-                        col_type = desc_row[1].strip()
-                        # 跳过分区信息和表级信息（空行或非列条目）
-                        if col_name and not col_name.startswith("#"):
-                            columns.append({"name": col_name, "type": col_type})
-                schema_json = {"columns": columns}
-                specs.append(
-                    CatalogSpec(entity_name=tbl, entity_type="TABLE", schema_json=schema_json)
-                )
+                table_rows = await self._execute(f"SHOW TABLES IN {safe_schema}")
             except Exception as exc:
-                logger.warning("采集源 %s 表 %s 字段失败: %s", source_id, tbl, exc)
-                failed_specs.append(FailedSpec(entity_name=tbl, error=str(exc)))
+                logger.warning("采集源 %s 库 %s 表列表失败: %s", source_id, schema, exc)
+                continue
+
+            for row in table_rows:
+                tbl = row[0] if row else None
+                if not tbl:
+                    continue
+                tbl = tbl.strip()
+                entity_name = f"{schema}.{tbl}" if not self._database else tbl
+                try:
+                    desc_rows = await self._execute(
+                        f"DESCRIBE {safe_schema}.{self._safe_ident(tbl)}"
+                    )
+                    columns = []
+                    for desc_row in desc_rows:
+                        if len(desc_row) >= 2:
+                            col_name = desc_row[0].strip()
+                            col_type = desc_row[1].strip()
+                            # 跳过分区信息和表级信息（空行或非列条目）
+                            if col_name and not col_name.startswith("#"):
+                                columns.append({"name": col_name, "type": col_type})
+                    schema_json = {"columns": columns}
+                    specs.append(
+                        CatalogSpec(
+                            entity_name=entity_name,
+                            entity_type="TABLE",
+                            schema_json=schema_json,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("采集源 %s 表 %s 字段失败: %s", source_id, entity_name, exc)
+                    failed_specs.append(FailedSpec(entity_name=entity_name, error=str(exc)))
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
+
+    async def probe(self) -> ProbeResult:
+        """轻量探活：SELECT 1（经 beeline）。"""
+        start = time.monotonic()
+        try:
+            await self._execute("SELECT 1")
+            return ProbeResult(ok=True, latency_ms=int((time.monotonic() - start) * 1000))
+        except Exception as exc:
+            return ProbeResult(
+                ok=False,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error=str(exc),
+            )
+
+    @staticmethod
+    def _safe_ident(name: str) -> str:
+        """校验库/表名为合法标识符，防止拼入 SQL 造成注入。"""
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            raise ExternalDependencyError(f"非法标识符: {name!r}")
+        return name
 
 
 @registry.register("hive")

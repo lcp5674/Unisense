@@ -27,4 +27,9 @@ if (typeof window !== "undefined" && !window.ResizeObserver) {
   (window as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
 }
 
+// jsdom 未实现 Element.scrollTo，Layout 路由回顶 effect 依赖它
+if (typeof Element !== "undefined" && !Element.prototype.scrollTo) {
+  Element.prototype.scrollTo = () => {};
+}
+
 // jsdom 无 getComputedStyle 完整的 offsetWidth 读取，图表可能告警；静默即可

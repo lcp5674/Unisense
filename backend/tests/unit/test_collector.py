@@ -461,3 +461,316 @@ def test_llm_classify_error_metric_increments():
     counts = get_llm_classify_error_total()
     assert counts.get("timeout") == 2
     assert counts.get("format_error") == 1
+
+
+# ---------- FR-030: 自动生成 source_id / 连接测试 ----------
+
+
+async def test_create_source_auto_generates_source_id():
+    """source_id 未传时按 类型_库 自动生成。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=None)
+    repo.create_source = AsyncMock()
+    resp = await svc.create_source(
+        DataSourceCreateRequest(
+            source_id=None,
+            name="财务库",
+            source_type="mysql",
+            connection_config={"host": "h", "database": "finance"},
+            domain="sales",
+        ),
+        actor_id=1,
+    )
+    assert resp.source_id == "mysql_finance"
+    assert repo.create_source.call_args.args[0].source_id == "mysql_finance"
+
+
+async def test_create_source_auto_source_id_conflict_increments():
+    """自动生成的 source_id 冲突时追加 _2 后缀。"""
+    svc, repo = _svc()
+    # 第一次 get_source 命中（mysql_finance 已存在），第二次返回 None（mysql_finance_2 空闲）
+    repo.get_source = AsyncMock(side_effect=[MagicMock(), None])
+    repo.create_source = AsyncMock()
+    resp = await svc.create_source(
+        DataSourceCreateRequest(
+            source_id=None,
+            name="财务库",
+            source_type="mysql",
+            connection_config={"host": "h", "database": "finance"},
+            domain="sales",
+        ),
+        actor_id=1,
+    )
+    assert resp.source_id == "mysql_finance_2"
+
+
+async def test_create_source_manual_source_id_conflict_still_raises():
+    """显式传 source_id 且已存在时仍应冲突报错。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=MagicMock())
+    with pytest.raises(ConflictError):
+        await svc.create_source(
+            DataSourceCreateRequest(
+                source_id="src1",
+                name="S",
+                source_type="mysql",
+                connection_config={"host": "h"},
+                domain="d",
+            ),
+            actor_id=1,
+        )
+
+
+async def test_test_connection_ok():
+    """连接预检成功返回 ok=True + 延迟。"""
+    svc, repo = _svc()
+
+    class ProbeOkCollector:
+        async def probe(self):
+            from app.services.collector.spi import ProbeResult
+
+            return ProbeResult(ok=True, latency_ms=12)
+
+        async def dispose(self):
+            return None
+
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg",
+        return_value=ProbeOkCollector(),
+    ) as mock_build:
+        result = await svc.test_connection("mysql", {"host": "h"})
+    mock_build.assert_called_once()
+    assert result.ok is True
+    assert result.latency_ms == 12
+    assert result.error is None
+
+
+async def test_test_connection_failure_normalized():
+    """连接失败归一为 ok=False 结果而非抛出。"""
+    svc, repo = _svc()
+
+    class ProbeFailCollector:
+        async def probe(self):
+            from app.services.collector.spi import ProbeResult
+
+            return ProbeResult(ok=False, latency_ms=5, error="连接被拒绝")
+
+        async def dispose(self):
+            return None
+
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg",
+        return_value=ProbeFailCollector(),
+    ):
+        result = await svc.test_connection("mysql", {"host": "h"})
+    assert result.ok is False
+    assert "连接被拒绝" in (result.error or "")
+
+
+async def test_test_connection_unsupported_type_normalized():
+    """未注册类型构建失败归一为 ok=False（不抛出 BusinessError）。"""
+    svc, repo = _svc()
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg",
+        side_effect=BusinessError("不支持的采集器类型: oracle"),
+    ):
+        result = await svc.test_connection("oracle", {"host": "h"})
+    assert result.ok is False
+    assert "不支持的采集器类型" in (result.error or "")
+
+
+async def test_check_connection_updates_health():
+    """存量探活成功更新健康状态为 healthy。"""
+    svc, repo = _svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    repo.update_health_status = AsyncMock()
+
+    class ProbeOkCollector:
+        async def probe(self):
+            from app.services.collector.spi import ProbeResult
+
+            return ProbeResult(ok=True, latency_ms=8, detail={"version": "8.0"})
+
+        async def dispose(self):
+            return None
+
+    with patch(
+        "app.services.collector.connectors.registry.build",
+        return_value=ProbeOkCollector(),
+    ) as mock_build:
+        result = await svc.check_connection("s1")
+    mock_build.assert_called_once_with("mysql", "enc")
+    repo.update_health_status.assert_awaited_once_with("s1", "healthy")
+    assert result.ok is True
+    assert result.detail == {"version": "8.0"}
+
+
+async def test_check_connection_failure_marks_unhealthy():
+    """存量探活失败更新健康状态为 unhealthy。"""
+    svc, repo = _svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    repo.update_health_status = AsyncMock()
+
+    class ProbeFailCollector:
+        async def probe(self):
+            from app.services.collector.spi import ProbeResult
+
+            return ProbeResult(ok=False, latency_ms=0, error="timeout")
+
+        async def dispose(self):
+            return None
+
+    with patch(
+        "app.services.collector.connectors.registry.build",
+        return_value=ProbeFailCollector(),
+    ):
+        result = await svc.check_connection("s1")
+    repo.update_health_status.assert_awaited_once_with("s1", "unhealthy")
+    assert result.ok is False
+
+
+async def test_list_source_types_returns_metadata():
+    """类型元信息列表覆盖全部注册类型且含中文标签。"""
+    svc, repo = _svc()
+    info = await svc.list_source_types()
+    types = {t.source_type: t for t in info}
+    assert set(types.keys()) == {
+        "clickhouse", "doris", "hive", "kafka", "mysql", "postgres", "starrocks",
+    }
+    assert types["mysql"].label == "MySQL"
+    assert types["kafka"].supports_database is False
+    assert types["mysql"].default_port == 3306
+
+
+# ---------- FR-030: 采集器数据库语义（全库 / 单库） ----------
+
+
+class _MultiSchemaConnector:
+    """模拟多库 information_schema 的假连接器。"""
+
+    def __init__(
+        self,
+        schemas: list[str],
+        tables_by_schema: dict[str, list[str]],
+        columns: dict[str, list[str]],
+    ) -> None:
+        self._schemas = schemas
+        self._tables_by_schema = tables_by_schema
+        self._columns = columns
+        self.queries: list[tuple[str, object]] = []
+
+    async def query(self, sql: str, params: dict | None = None) -> list[dict]:
+        self.queries.append((sql, params))
+        if "information_schema.schemata" in sql:
+            return [{"schema_name": s} for s in self._schemas]
+        if "information_schema.tables" in sql:
+            return [{"table_name": t} for t in self._tables_by_schema.get(params.get("schema"), [])]
+        return [{"column_name": c} for c in self._columns.get(params.get("tbl"), [])]
+
+    async def dispose(self):
+        return None
+
+
+async def test_info_schema_collector_all_databases_enumerates():
+    """未指定 database 时枚举全部非系统库，entity_name 以 库.表 命名。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _MultiSchemaConnector(
+        schemas=["finance", "sales", "information_schema", "mysql"],
+        tables_by_schema={
+            "finance": ["orders"],
+            "sales": ["gmv"],
+            "information_schema": ["TABLES"],
+            "mysql": ["user"],
+        },
+        columns={"orders": ["order_id"], "gmv": ["amount"]},
+    )
+    collector = InformationSchemaCollector(connector)  # database=None
+    result = await collector.collect(MagicMock(source_id="s1"))
+    entity_names = {s.entity_name for s in result.specs}
+    # 系统库被排除，库.表 命名避免冲突
+    assert entity_names == {"finance.orders", "sales.gmv"}
+    assert len(result.specs) == 2
+    assert result.specs[0].schema_json["columns"]  # 列已采集
+
+
+async def test_info_schema_collector_single_database_keeps_plain_name():
+    """指定 database 时只采该库，entity_name 保持表名（向后兼容）。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _MultiSchemaConnector(
+        schemas=["finance", "sales"],
+        tables_by_schema={"finance": ["orders"]},
+        columns={"orders": ["order_id"]},
+    )
+    collector = InformationSchemaCollector(connector, database="finance")
+    result = await collector.collect(MagicMock(source_id="s1"))
+    assert [s.entity_name for s in result.specs] == ["orders"]
+
+
+async def test_mysql_probe_returns_ok():
+    """MySQL 探活 SELECT 1 成功返回 ok=True。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    class ProbeConnector:
+        async def query(self, sql, params=None):
+            return [{"1": 1}]
+
+        async def dispose(self):
+            return None
+
+    collector = InformationSchemaCollector(ProbeConnector())
+    result = await collector.probe()
+    assert result.ok is True
+    assert result.latency_ms >= 0
+
+
+async def test_sqlalchemy_connector_normalizes_uppercase_keys():
+    """MySQL information_schema 大写列标签被规范化为小写（FR-030 回归防护）。"""
+    from app.services.collector.connectors.mysql import SqlalchemyConnector
+
+    class FakeRow:
+        _mapping = {"SCHEMA_NAME": "unisense", "TABLE_NAME": "orders"}
+
+    class FakeResult:
+        def __init__(self) -> None:
+            self._rows = [FakeRow()]
+
+        def __iter__(self):
+            return iter(self._rows)
+
+    class FakeConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def execute(self, sql, params=None):
+            return FakeResult()
+
+    class FakeEngine:
+        def connect(self):
+            return FakeConn()
+
+    connector = SqlalchemyConnector.__new__(SqlalchemyConnector)
+    connector._engine = FakeEngine()  # type: ignore[attr-defined]
+    rows = await connector.query("SELECT schema_name, table_name FROM information_schema.tables")
+    assert rows == [{"schema_name": "unisense", "table_name": "orders"}]
+
+
+async def test_registry_build_from_cfg_and_type_info():
+    """registry.build_from_cfg 支持明文构建；list_type_info 兜底插件类型。"""
+    from app.services.collector.connectors import registry
+
+    collector = registry.build_from_cfg("mysql", {"host": "h", "user": "u"})
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    assert isinstance(collector, InformationSchemaCollector)
+
+    info = registry.list_type_info()
+    by_type = {t.source_type: t for t in info}
+    assert by_type["postgres"].supports_schema is True
+    assert by_type["postgres"].default_port == 5432

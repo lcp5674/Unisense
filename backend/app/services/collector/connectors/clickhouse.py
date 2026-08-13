@@ -5,12 +5,14 @@
 
 - HTTP API: GET http://{host}:8123/?query=SQL
 - 单表 try/catch 跳过容错
+- 生产语义（FR-030）：按 connection_config.database 过滤；为空时枚举全部非系统库
 - @registry.register("clickhouse") 注册
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -18,9 +20,17 @@ import httpx
 from app.core.exceptions import ExternalDependencyError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.connectors.collector_registry import registry
-from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult, FailedSpec
+from app.services.collector.spi import (
+    BaseCollector,
+    CatalogSpec,
+    CollectResult,
+    FailedSpec,
+    ProbeResult,
+)
 
 logger = logging.getLogger("unisense.collector.connectors.clickhouse")
+
+_CLICKHOUSE_SYSTEM_DBS = ("system", "information_schema", "INFORMATION_SCHEMA", "default")
 
 
 class ClickHouseCollector(BaseCollector):
@@ -81,44 +91,94 @@ class ClickHouseCollector(BaseCollector):
 
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
-        database = getattr(source, "domain", self._database)
 
-        # 获取表列表
-        try:
-            tables_text = await self._query(
-                f"SELECT name FROM system.tables WHERE database = '{database}' FORMAT TabSeparated"
-            )
-        except Exception as exc:
-            raise ExternalDependencyError(f"采集源 {source_id} 获取表列表失败: {exc}") from exc
-
-        table_names = [line.strip() for line in tables_text.strip().splitlines() if line.strip()]
+        # 生产语义：database 为空时枚举全部非系统库
+        if self._database:
+            databases = [self._database]
+        else:
+            try:
+                dbs_text = await self._query(
+                    "SELECT name FROM system.databases FORMAT TabSeparated"
+                )
+                databases = [
+                    d.strip()
+                    for d in dbs_text.strip().splitlines()
+                    if d.strip() and d.strip() not in _CLICKHOUSE_SYSTEM_DBS
+                ]
+            except Exception as exc:
+                raise ExternalDependencyError(
+                    f"采集源 {source_id} 枚举数据库失败: {exc}"
+                ) from exc
 
         specs: list[CatalogSpec] = []
         failed_specs: list[FailedSpec] = []
 
-        for tbl in table_names:
-            if not tbl:
-                continue
+        for database in databases:
+            safe_db = self._safe_ident(database)
+            # 获取表列表
             try:
-                columns_text = await self._query(
-                    f"SELECT name, type FROM system.columns "
-                    f"WHERE database = '{database}' AND table = '{tbl}' "
+                tables_text = await self._query(
+                    f"SELECT name FROM system.tables WHERE database = '{safe_db}' "
                     f"FORMAT TabSeparated"
                 )
-                columns = []
-                for line in columns_text.strip().splitlines():
-                    parts = line.strip().split("\t")
-                    if len(parts) >= 2:
-                        columns.append({"name": parts[0], "type": parts[1]})
-                schema_json = {"columns": columns}
-                specs.append(
-                    CatalogSpec(entity_name=tbl, entity_type="TABLE", schema_json=schema_json)
-                )
             except Exception as exc:
-                logger.warning("采集源 %s 表 %s 字段失败: %s", source_id, tbl, exc)
-                failed_specs.append(FailedSpec(entity_name=tbl, error=str(exc)))
+                logger.warning("采集源 %s 库 %s 表列表失败: %s", source_id, database, exc)
+                continue
+
+            table_names = [
+                line.strip() for line in tables_text.strip().splitlines() if line.strip()
+            ]
+
+            for tbl in table_names:
+                if not tbl:
+                    continue
+                entity_name = f"{database}.{tbl}" if not self._database else tbl
+                try:
+                    columns_text = await self._query(
+                        f"SELECT name, type FROM system.columns "
+                        f"WHERE database = '{safe_db}' AND table = '{self._safe_ident(tbl)}' "
+                        f"FORMAT TabSeparated"
+                    )
+                    columns = []
+                    for line in columns_text.strip().splitlines():
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 2:
+                            columns.append({"name": parts[0], "type": parts[1]})
+                    schema_json = {"columns": columns}
+                    specs.append(
+                        CatalogSpec(
+                            entity_name=entity_name,
+                            entity_type="TABLE",
+                            schema_json=schema_json,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("采集源 %s 表 %s 字段失败: %s", source_id, entity_name, exc)
+                    failed_specs.append(FailedSpec(entity_name=entity_name, error=str(exc)))
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
+
+    async def probe(self) -> ProbeResult:
+        """轻量探活：SELECT 1（ClickHouse HTTP 接口）。"""
+        start = time.monotonic()
+        try:
+            await self._query("SELECT 1")
+            return ProbeResult(ok=True, latency_ms=int((time.monotonic() - start) * 1000))
+        except Exception as exc:
+            return ProbeResult(
+                ok=False,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error=str(exc),
+            )
+
+    @staticmethod
+    def _safe_ident(name: str) -> str:
+        """校验库/表名为合法标识符，防止拼入 SQL 造成注入。"""
+        import re
+
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            raise ExternalDependencyError(f"非法标识符: {name!r}")
+        return name
 
 
 @registry.register("clickhouse")

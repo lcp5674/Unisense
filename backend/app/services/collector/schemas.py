@@ -21,9 +21,13 @@ EntityType = EntityTypeEnum
 
 
 class DataSourceCreateRequest(BaseModel):
-    """数据源注册请求。"""
+    """数据源注册请求。
 
-    source_id: str = Field(min_length=2, max_length=64)
+    生产约定：``source_id`` 可选——不传时由系统按
+    ``{source_type}_{database|domain}`` 自动生成（见 CollectorService.create_source）。
+    """
+
+    source_id: str | None = Field(default=None, min_length=2, max_length=64)
     name: str = Field(min_length=1, max_length=128)
     source_type: SourceType
     connection_config: dict[str, Any]
@@ -37,6 +41,41 @@ class DataSourceCreateRequest(BaseModel):
         if not isinstance(cfg, dict) or "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
         return self
+
+
+class DataSourceTypeInfo(BaseModel):
+    """数据源类型元信息（供前端动态渲染类型选择器）。"""
+
+    source_type: str
+    label: str
+    default_port: int
+    supports_database: bool
+    supports_schema: bool
+    description: str
+
+
+class TestConnectionRequest(BaseModel):
+    """连接测试请求（创建数据源前预检，不落库）。"""
+
+    source_type: SourceType
+    connection_config: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _validate_connection_config(self) -> TestConnectionRequest:
+        cfg = self.connection_config
+        if not isinstance(cfg, dict) or "host" not in cfg:
+            raise ValueError("connection_config 必须包含 host 字段")
+        return self
+
+
+class TestConnectionResult(BaseModel):
+    """连接测试结果。"""
+
+    ok: bool
+    source_type: str
+    latency_ms: int | None = None
+    error: str | None = None
+    detail: dict[str, Any] | None = None
 
 
 class DataSourceResponse(BaseModel):

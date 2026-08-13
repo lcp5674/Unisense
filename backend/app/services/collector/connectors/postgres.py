@@ -3,12 +3,15 @@
 通过 information_schema 查询 PostgreSQL 表和字段信息。
 - URL: postgresql+asyncpg://
 - 单表 try/catch 跳过容错
+- 生产语义（FR-030）：table_schema 取 connection_config.schema（默认 public），
+  不再误用业务 domain 作为 schema
 - @registry.register("postgres") 注册
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.engine import URL
@@ -16,7 +19,13 @@ from sqlalchemy.engine import URL
 from app.core.exceptions import ExternalDependencyError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.connectors.collector_registry import registry
-from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult, FailedSpec
+from app.services.collector.spi import (
+    BaseCollector,
+    CatalogSpec,
+    CollectResult,
+    FailedSpec,
+    ProbeResult,
+)
 
 if TYPE_CHECKING:
     from app.services.collector.connectors.mysql import SqlalchemyConnector
@@ -31,13 +40,16 @@ class PostgresCollector(BaseCollector):
         self,
         connector: SqlalchemyConnector,
         classifier: SensitivityClassifier | None = None,
+        *,
+        schema: str = "public",
     ) -> None:
         super().__init__(classifier)
         self._connector = connector
+        self._schema = schema or "public"
 
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
-        schema = getattr(source, "domain", "public")
+        schema = self._schema
 
         try:
             tables = await self._connector.query(
@@ -76,6 +88,19 @@ class PostgresCollector(BaseCollector):
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
 
+    async def probe(self) -> ProbeResult:
+        """轻量探活：SELECT 1。"""
+        start = time.monotonic()
+        try:
+            await self._connector.query("SELECT 1")
+            return ProbeResult(ok=True, latency_ms=int((time.monotonic() - start) * 1000))
+        except Exception as exc:
+            return ProbeResult(
+                ok=False,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error=str(exc),
+            )
+
     async def dispose(self) -> None:
         await self._connector.dispose()
 
@@ -99,4 +124,4 @@ def create_postgres_collector(cfg: dict[str, Any]) -> PostgresCollector:
 
     db_url = cfg.get("db_url") or _build_postgres_url(cfg)
     connector = SqlalchemyConnector(db_url, connect_timeout=10, query_timeout=60)
-    return PostgresCollector(connector)
+    return PostgresCollector(connector, schema=cfg.get("schema", "public"))

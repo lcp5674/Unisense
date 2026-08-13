@@ -41,11 +41,14 @@ from app.services.collector.schemas import (
     CollectRequest,
     DataSourceCreateRequest,
     DataSourceResponse,
+    DataSourceTypeInfo,
     DBCatalogCreateRequest,
     DBCatalogListParams,
     DBCatalogListResponse,
     DBCatalogResponse,
     ScheduleRequest,
+    TestConnectionRequest,
+    TestConnectionResult,
 )
 from app.services.collector.service import CollectorService
 from app.services.collector.spi import build_collector
@@ -107,6 +110,45 @@ async def list_data_sources(
     return ok(data=items, trace_id=trace_id)
 
 
+@source_router.get("/types", dependencies=_READ_DEPS)
+async def list_source_types(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[list[DataSourceTypeInfo]]:
+    """FR-030: 返回全部已注册采集器类型元信息（前端动态渲染类型选择器）。"""
+    svc = _svc(db)
+    return ok(data=await svc.list_source_types(), trace_id=trace_id)
+
+
+@source_router.post("/test-connection", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+async def test_connection(
+    body: TestConnectionRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[TestConnectionResult]:
+    """FR-030: 创建前连接预检（明文配置轻量探活，不落库、不写审计）。"""
+    svc = _svc(db)
+    source_type_value = (
+        body.source_type.value if hasattr(body.source_type, "value") else str(body.source_type)
+    )
+    result = await svc.test_connection(source_type_value, body.connection_config)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="TEST_CONNECTION",
+        entity_type="data_source",
+        entity_id=f"{source_type_value}:{body.connection_config.get('host', '')}",
+        detail={"ok": result.ok, "latency_ms": result.latency_ms},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
 @source_router.get("/{source_id}", dependencies=_READ_DEPS)
 async def get_data_source(
     source_id: str,
@@ -116,6 +158,31 @@ async def get_data_source(
 ) -> ApiResponse[DataSourceResponse]:
     svc = _svc(db)
     return ok(data=await svc.get_source(source_id), trace_id=trace_id)
+
+
+@source_router.post("/{source_id}/check", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+async def check_source_connection(
+    source_id: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[TestConnectionResult]:
+    """FR-030: 存量数据源实时探活（解密配置 → 轻量连接 → 更新健康状态）。"""
+    svc = _svc(db)
+    result = await svc.check_connection(source_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="CHECK_CONNECTION",
+        entity_type="data_source",
+        entity_id=source_id,
+        detail={"ok": result.ok, "latency_ms": result.latency_ms},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
 
 
 @source_router.delete("/{source_id}", dependencies=[Depends(require_roles(*_WRITE_ROLES))])

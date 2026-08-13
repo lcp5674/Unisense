@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert } from "antd";
-import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined } from "@ant-design/icons";
+import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined } from "@ant-design/icons";
 import {
   listDataSources,
   createDataSource,
@@ -8,17 +8,40 @@ import {
   scheduleSource,
   getSourceHealth,
   getSourceWatermark,
+  listDataSourceTypes,
+  testDataSourceConnection,
+  checkDataSourceConnection,
   UnisenseApiError,
 } from "../api";
-import type { DataSource, SourceHealth, Watermark, CollectResult } from "../types";
+import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType } from "../types";
 
-const SOURCE_TYPES = ["mysql", "postgres", "hive", "doris", "clickhouse", "kafka", "starrocks"];
+const FALLBACK_TYPES: SourceTypeInfo[] = [
+  { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
+  { source_type: "postgres", label: "PostgreSQL", default_port: 5432, supports_database: true, supports_schema: true, description: "关系型数据库" },
+  { source_type: "hive", label: "Hive", default_port: 10000, supports_database: true, supports_schema: false, description: "数据仓库" },
+  { source_type: "doris", label: "Doris", default_port: 9030, supports_database: true, supports_schema: false, description: "MPP 分析库" },
+  { source_type: "clickhouse", label: "ClickHouse", default_port: 8123, supports_database: true, supports_schema: false, description: "列式分析库" },
+  { source_type: "kafka", label: "Kafka", default_port: 9092, supports_database: false, supports_schema: false, description: "消息队列" },
+  { source_type: "starrocks", label: "StarRocks", default_port: 9030, supports_database: true, supports_schema: false, description: "MPP 分析库" },
+];
+
+function typeInfo(types: SourceTypeInfo[], t: string): SourceTypeInfo | undefined {
+  return types.find((x) => x.source_type === t);
+}
+
+function previewSourceId(sourceType: string | undefined, cfg: Record<string, unknown>, domain: string): string {
+  const base = String(cfg.database || cfg.schema || domain || "default");
+  const norm = base.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase() || "default";
+  return `${sourceType || "?"}_${norm}`.slice(0, 64);
+}
 
 function SourceDetailModal({
   source,
+  types,
   onClose,
 }: {
   source: DataSource;
+  types: SourceTypeInfo[];
   onClose: () => void;
 }) {
   const [health, setHealth] = useState<SourceHealth | null>(null);
@@ -27,6 +50,8 @@ function SourceDetailModal({
   const [collectResult, setCollectResult] = useState<CollectResult | null>(null);
   const [cron, setCron] = useState("0 3 * * *");
   const [scheduleMode, setScheduleMode] = useState("FULL");
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<TestConnectionResult | null>(null);
 
   useEffect(() => {
     getSourceHealth(source.source_id).then(setHealth).catch(() => {});
@@ -46,6 +71,26 @@ function SourceDetailModal({
     }
   }
 
+  async function handleCheck() {
+    setChecking(true);
+    setCheckResult(null);
+    try {
+      const res = await checkDataSourceConnection(source.source_id);
+      setCheckResult(res);
+      if (res.ok) {
+        message.success(`连接正常（${res.latency_ms}ms）`);
+      } else {
+        message.error(`连接失败：${res.error ?? "未知错误"}`);
+      }
+      // 刷新健康状态展示
+      getSourceHealth(source.source_id).then(setHealth).catch(() => {});
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "检查失败");
+    } finally {
+      setChecking(false);
+    }
+  }
+
   async function handleSchedule() {
     try {
       const res = await scheduleSource(source.source_id, cron, scheduleMode);
@@ -56,9 +101,11 @@ function SourceDetailModal({
   }
 
   return (
-    <Modal open onCancel={onClose} footer={null} width={680} title={`数据源：${source.name}（${source.source_id}）`}>
+    <Modal open onCancel={onClose} footer={null} width={720} title={`数据源：${source.name}（${source.source_id}）`}>
       <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>
-        <Descriptions.Item label="类型">{source.source_type}</Descriptions.Item>
+        <Descriptions.Item label="类型">
+          <Tag>{typeInfo(types, source.source_type)?.label ?? source.source_type}</Tag>
+        </Descriptions.Item>
         <Descriptions.Item label="域">{source.domain}</Descriptions.Item>
         <Descriptions.Item label="覆盖度">{Math.round(source.coverage * 100)}%</Descriptions.Item>
         <Descriptions.Item label="采集模式">{source.collection_mode}</Descriptions.Item>
@@ -82,6 +129,15 @@ function SourceDetailModal({
         </Col>
       </Row>
 
+      {checkResult && (
+        <Alert
+          type={checkResult.ok ? "success" : "error"}
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={checkResult.ok ? `连接正常（${checkResult.latency_ms}ms）` : `连接失败：${checkResult.error}`}
+          description={checkResult.detail ? JSON.stringify(checkResult.detail) : undefined}
+        />
+      )}
       {health?.last_error && <Alert type="error" showIcon style={{ marginBottom: 12 }} message={`最近错误：${health.last_error}`} />}
       {collectResult && (
         <Alert
@@ -96,6 +152,9 @@ function SourceDetailModal({
       <Space wrap>
         <Button type="primary" icon={<ThunderboltOutlined />} loading={collecting} onClick={handleCollect}>
           立即采集
+        </Button>
+        <Button icon={<ApiOutlined />} loading={checking} onClick={handleCheck}>
+          测试连接
         </Button>
         <Input
           className="mono"
@@ -116,7 +175,12 @@ export function DataSources() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [detail, setDetail] = useState<DataSource | null>(null);
+  const [types, setTypes] = useState<SourceTypeInfo[]>(FALLBACK_TYPES);
   const [form] = Form.useForm();
+  const sourceType = Form.useWatch("source_type", form);
+  const watchedDatabase = Form.useWatch("database", form);
+  const watchedSchema = Form.useWatch("schema", form);
+  const domainWatch = Form.useWatch("domain", form) ?? "";
 
   async function load() {
     setLoading(true);
@@ -131,21 +195,73 @@ export function DataSources() {
 
   useEffect(() => {
     load();
+    listDataSourceTypes()
+      .then((t) => setTypes(t.length ? t : FALLBACK_TYPES))
+      .catch(() => setTypes(FALLBACK_TYPES));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 类型切换时自动带出默认端口
+  function handleTypeChange(t: string) {
+    const info = typeInfo(types, t);
+    if (info?.default_port) {
+      form.setFieldValue("port", info.default_port);
+    }
+  }
+
+  function buildConnectionConfig(values: Record<string, unknown>): Record<string, unknown> {
+    const cfg: Record<string, unknown> = { host: String(values.host || "") };
+    if (values.port) cfg.port = Number(values.port);
+    if (values.database) cfg.database = String(values.database);
+    if (values.schema) cfg.schema = String(values.schema);
+    if (values.user) cfg.user = String(values.user);
+    if (values.password) cfg.password = String(values.password);
+    return cfg;
+  }
+
+  async function handleTest() {
+    try {
+      await form.validateFields(["host", "source_type"]);
+    } catch {
+      message.warning("请先填写类型与 Host");
+      return;
+    }
+    const values = form.getFieldsValue();
+    const cfg = buildConnectionConfig(values);
+    try {
+      const res = await testDataSourceConnection({
+        source_type: String(values.source_type) as SourceType,
+        connection_config: cfg,
+      });
+      if (res.ok) {
+        message.success(`连接成功（${res.latency_ms}ms）`);
+      } else {
+        message.error(`连接失败：${res.error ?? "未知错误"}`);
+      }
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message} (${err.code})` : "测试失败");
+    }
+  }
 
   async function handleCreate(values: Record<string, unknown>) {
     setLoading(true);
     try {
-      await createDataSource({
-        source_id: String(values.source_id),
+      const payload: {
+        name: string;
+        source_type: DataSource["source_type"];
+        domain: string;
+        cluster_id?: string | null;
+        connection_config: Record<string, unknown>;
+      } = {
         name: String(values.name),
         source_type: String(values.source_type) as DataSource["source_type"],
         domain: String(values.domain),
         cluster_id: values.cluster_id ? String(values.cluster_id) : null,
-        connection_config: { host: String(values.host || ""), port: Number(values.port || 0), database: String(values.database || "") },
-      });
-      message.success("数据源已创建");
+        connection_config: buildConnectionConfig(values),
+      };
+      // source_id 不传 → 后端按 类型_库|域 自动生成
+      await createDataSource(payload);
+      message.success(`数据源已创建（${previewSourceId(String(values.source_type), buildConnectionConfig(values), String(values.domain))}）`);
       setModalOpen(false);
       form.resetFields();
       load();
@@ -156,10 +272,19 @@ export function DataSources() {
     }
   }
 
+  const selType = typeInfo(types, sourceType);
+  const generated = previewSourceId(sourceType, { database: watchedDatabase, schema: watchedSchema }, domainWatch);
+
   const columns = [
     { title: "Source ID", dataIndex: "source_id", key: "source_id", render: (v: string) => <span className="mono">{v}</span> },
     { title: "名称", dataIndex: "name", key: "name" },
-    { title: "类型", dataIndex: "source_type", key: "type", width: 110, render: (v: string) => <Tag>{v}</Tag> },
+    {
+      title: "类型",
+      dataIndex: "source_type",
+      key: "type",
+      width: 130,
+      render: (v: string) => <Tag>{typeInfo(types, v)?.label ?? v}</Tag>,
+    },
     { title: "域", dataIndex: "domain", key: "domain", width: 130 },
     {
       title: "健康",
@@ -186,7 +311,7 @@ export function DataSources() {
         <div>
           <div className="page-kicker">Collection / Data Sources</div>
           <h2>数据源管理</h2>
-          <p>接入数据源、采集元数据、登记目录并持续发现 schema 漂移。</p>
+          <p>接入数据源、测试连接、采集元数据并持续发现 schema 漂移。Database 留空时采集该实例下全部非系统库。</p>
         </div>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建数据源</Button>
       </div>
@@ -195,42 +320,76 @@ export function DataSources() {
         <Table dataSource={items} columns={columns} rowKey="source_id" loading={loading} pagination={false} locale={{ emptyText: "暂无数据源" }} />
       </Card>
 
-      <Modal title="新建数据源" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} confirmLoading={loading} okText="创建" width={560}>
+      <Modal title="新建数据源" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} confirmLoading={loading} okText="创建" width={620}>
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Space size={16} style={{ width: "100%" }}>
-            <Form.Item name="source_id" label="Source ID" rules={[{ required: true, min: 2, max: 64 }]}>
-              <Input className="mono" placeholder="如 mysql_finance" />
-            </Form.Item>
-            <Form.Item name="name" label="名称" rules={[{ required: true }]}>
+            <Form.Item name="name" label="名称" rules={[{ required: true }]} style={{ width: "100%" }}>
               <Input placeholder="如 财务 MySQL" />
             </Form.Item>
-          </Space>
-          <Space size={16} style={{ width: "100%" }}>
-            <Form.Item name="source_type" label="类型" rules={[{ required: true }]}>
-              <Select options={SOURCE_TYPES.map((v) => ({ value: v, label: v }))} />
-            </Form.Item>
-            <Form.Item name="domain" label="业务域" rules={[{ required: true }]}>
+            <Form.Item name="domain" label="业务域" rules={[{ required: true }]} style={{ width: "100%" }}>
               <Input placeholder="如 finance" />
             </Form.Item>
           </Space>
-          <Form.Item name="cluster_id" label="集群 ID（可选）">
-            <Input className="mono" />
-          </Form.Item>
           <Space size={16} style={{ width: "100%" }}>
-            <Form.Item name="host" label="Host" rules={[{ required: true }]}>
-              <Input className="mono" placeholder="127.0.0.1" />
+            <Form.Item name="source_type" label="类型" rules={[{ required: true }]} style={{ width: "100%" }}>
+              <Select
+                placeholder="选择数据源类型"
+                onChange={handleTypeChange}
+                options={types.map((t) => ({ value: t.source_type, label: `${t.label}（${t.source_type}）` }))}
+              />
             </Form.Item>
-            <Form.Item name="port" label="Port">
-              <Input type="number" className="mono" defaultValue={3306} />
-            </Form.Item>
-            <Form.Item name="database" label="Database">
+            <Form.Item name="cluster_id" label="集群 ID（可选）" style={{ width: "100%" }}>
               <Input className="mono" />
             </Form.Item>
+          </Space>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={`Source ID 将由系统自动生成：${generated}`}
+            description="不填 Database 时采集该实例下全部非系统库；填了则只采集指定库。"
+          />
+          <Space size={16} style={{ width: "100%" }} align="start">
+            <Form.Item name="host" label="Host" rules={[{ required: true }]} style={{ width: "100%" }}>
+              <Input className="mono" placeholder="127.0.0.1" />
+            </Form.Item>
+            <Form.Item name="port" label="Port" initialValue={3306} style={{ width: 130 }}>
+              <Input type="number" className="mono" />
+            </Form.Item>
+          </Space>
+          <Space size={16} style={{ width: "100%" }} align="start">
+            <Form.Item
+              name="database"
+              label="Database（留空=采集全部库）"
+              style={{ width: "100%" }}
+              tooltip="指定库名则只采集该库；留空则枚举该实例下全部非系统库"
+            >
+              <Input className="mono" placeholder="留空则采集全部库" />
+            </Form.Item>
+            {selType?.supports_schema && (
+              <Form.Item name="schema" label="Schema" style={{ width: "100%" }} tooltip="PostgreSQL 库内 schema，默认 public">
+                <Input className="mono" placeholder="public" />
+              </Form.Item>
+            )}
+          </Space>
+          <Space size={16} style={{ width: "100%" }} align="start">
+            <Form.Item name="user" label="User" style={{ width: "100%" }}>
+              <Input className="mono" placeholder="连接账号" />
+            </Form.Item>
+            <Form.Item name="password" label="Password" style={{ width: "100%" }}>
+              <Input.Password className="mono" placeholder="连接密码" />
+            </Form.Item>
+          </Space>
+          <Space style={{ marginBottom: 8 }}>
+            <Button icon={<ApiOutlined />} onClick={handleTest}>
+              测试连接
+            </Button>
+            <span className="muted" style={{ fontSize: 12 }}>创建前验证 Host / 端口 / 凭据可达性</span>
           </Space>
         </Form>
       </Modal>
 
-      {detail && <SourceDetailModal source={detail} onClose={() => setDetail(null)} />}
+      {detail && <SourceDetailModal source={detail} types={types} onClose={() => setDetail(null)} />}
     </div>
   );
 }

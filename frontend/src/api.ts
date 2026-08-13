@@ -75,7 +75,9 @@ import {
   SnapshotResponse,
   SourceHealth,
   SourceType,
+  SourceTypeInfo,
   SubscriptionPref,
+  TestConnectionResult,
   UserBrief,
   UserPreferenceItem,
   UserPreferenceList,
@@ -1254,6 +1256,27 @@ export async function createDataSource(req: DataSourceCreateRequest): Promise<Da
     method: "POST",
     body: JSON.stringify(req),
   });
+}
+
+export async function listDataSourceTypes(): Promise<SourceTypeInfo[]> {
+  return request<SourceTypeInfo[]>(`${API_BASE}/data-sources/types`);
+}
+
+export async function testDataSourceConnection(req: {
+  source_type: SourceType;
+  connection_config: Record<string, unknown>;
+}): Promise<TestConnectionResult> {
+  return request<TestConnectionResult>(`${API_BASE}/data-sources/test-connection`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function checkDataSourceConnection(sourceId: string): Promise<TestConnectionResult> {
+  return request<TestConnectionResult>(
+    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/check`,
+    { method: "POST" },
+  );
 }
 
 export async function getDataSource(sourceId: string): Promise<DataSource> {

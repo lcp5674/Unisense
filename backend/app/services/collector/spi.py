@@ -45,6 +45,16 @@ class CollectResult:
     source_id: str = ""
 
 
+@dataclass
+class ProbeResult:
+    """连接探活结果（测试连接 / 实时健康检查）。"""
+
+    ok: bool
+    latency_ms: int
+    error: str | None = None
+    detail: dict[str, Any] | None = None
+
+
 class Connector(Protocol):
     """源库查询协议（便于测试注入假连接器）。"""
 
@@ -67,6 +77,13 @@ class BaseCollector(ABC):
     async def collect(self, source: Any) -> CollectResult:
         """采集数据源，返回采集结果（含成功 specs 与失败 failed_specs）。"""
         ...
+
+    async def probe(self) -> ProbeResult:
+        """轻量连接探活（SELECT 1 或等价最小查询），供「测试连接 / 健康检查」使用。
+
+        默认未实现；各连接器按自身协议覆盖。失败时返回 ``ok=False`` 而非抛出异常。
+        """
+        raise NotImplementedError(f"{type(self).__name__} 未实现 probe")
 
     async def dispose(self) -> None:
         """释放采集器持有的外部连接（如源库引擎）。默认无操作，子类按需实现。"""

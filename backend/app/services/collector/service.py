@@ -27,10 +27,12 @@ from app.services.collector.schemas import (
     BulkDeprecateResult,
     DataSourceCreateRequest,
     DataSourceResponse,
+    DataSourceTypeInfo,
     DBCatalogCreateRequest,
     DBCatalogListParams,
     DBCatalogListResponse,
     DBCatalogResponse,
+    TestConnectionResult,
 )
 from app.services.collector.spi import BaseCollector, CollectResult
 
@@ -120,11 +122,18 @@ class CollectorService(BaseService):
                 error_code="UNSUPPORTED_COLLECTOR",
             )
 
-        if await self._repo.get_source(req.source_id) is not None:
-            raise ConflictError(f"数据源已存在: {req.source_id}")
+        # 生产约定：source_id 未传时按 类型_库|域 自动生成，冲突自增后缀
+        source_id = req.source_id
+        if not source_id:
+            source_id = await self._generate_unique_source_id(
+                source_type_value, req.connection_config, req.domain
+            )
+        elif await self._repo.get_source(source_id) is not None:
+            raise ConflictError(f"数据源已存在: {source_id}")
+
         encrypted = self._secrets.encrypt(req.connection_config)
         src = DataSource(
-            source_id=req.source_id,
+            source_id=source_id,
             name=req.name,
             source_type=source_type_value,
             connection_config=encrypted,
@@ -137,6 +146,104 @@ class CollectorService(BaseService):
         )
         await self._repo.create_source(src)
         return self._to_source_response(src)
+
+    @staticmethod
+    def _generate_source_id(source_type: str, cfg: dict[str, Any], domain: str) -> str:
+        """按 ``{类型}_{库|schema|域}`` 生成规范化 source_id。
+
+        优先取 connection_config.database；postgres 场景可退化为 schema；
+        均缺失时回退到业务 domain。统一小写、非字母数字折叠为下划线、截断至 64。
+        """
+        import re
+
+        base = (
+            cfg.get("database")
+            or cfg.get("schema")
+            or domain
+            or "default"
+        )
+        normalized = re.sub(r"[^A-Za-z0-9]+", "_", str(base)).strip("_").lower()
+        normalized = normalized or "default"
+        return f"{source_type}_{normalized}"[:64]
+
+    async def _generate_unique_source_id(
+        self, source_type: str, cfg: dict[str, Any], domain: str
+    ) -> str:
+        """生成唯一 source_id：冲突时追加 ``_2/_3/...`` 后缀（上限 100 次）。"""
+        base_id = self._generate_source_id(source_type, cfg, domain)
+        candidate = base_id
+        n = 2
+        while await self._repo.get_source(candidate) is not None:
+            suffix = f"_{n}"
+            candidate = f"{base_id[: 64 - len(suffix)]}{suffix}"
+            n += 1
+            if n > 100:
+                raise BusinessError(
+                    f"无法为 {source_type} 生成唯一 source_id，请手动指定",
+                    error_code="SOURCE_ID_EXHAUSTED",
+                )
+        return candidate
+
+    async def list_source_types(self) -> list[DataSourceTypeInfo]:
+        """返回全部已注册采集器类型的元信息（供前端动态渲染）。"""
+        from app.services.collector.connectors import registry
+
+        return registry.list_type_info()
+
+    async def test_connection(
+        self, source_type: str, cfg: dict[str, Any]
+    ) -> TestConnectionResult:
+        """连接预检（创建前）：明文配置构建采集器并轻量探活，不落库。
+
+        任何异常（含类型未注册、连接失败）都归一为 ``ok=False`` 结果，不抛出。
+        """
+        from app.services.collector.connectors import registry
+
+        try:
+            collector = registry.build_from_cfg(source_type, cfg)
+            try:
+                probe = await collector.probe()
+            finally:
+                await collector.dispose()
+        except Exception as exc:  # 类型未注册 / 构建失败 / 探活异常
+            logger.warning("test_connection_failed: type=%s err=%s", source_type, exc)
+            return TestConnectionResult(ok=False, source_type=source_type, error=str(exc))
+        return TestConnectionResult(
+            ok=probe.ok,
+            source_type=source_type,
+            latency_ms=probe.latency_ms,
+            error=probe.error,
+            detail=probe.detail,
+        )
+
+    async def check_connection(self, source_id: str) -> TestConnectionResult:
+        """存量数据源实时探活：解密配置 → 轻量连接 → 更新健康状态与探活时间。"""
+        from app.services.collector.connectors import registry
+
+        src = await self._repo.get_source(source_id)
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+        try:
+            collector = registry.build(src.source_type, src.connection_config)
+            try:
+                probe = await collector.probe()
+            finally:
+                await collector.dispose()
+        except Exception as exc:
+            await self._repo.update_health_status(source_id, "unhealthy")
+            logger.warning("check_connection_failed: source=%s err=%s", source_id, exc)
+            return TestConnectionResult(
+                ok=False, source_type=src.source_type, error=str(exc)
+            )
+        new_status = "healthy" if probe.ok else "unhealthy"
+        await self._repo.update_health_status(source_id, new_status)
+        return TestConnectionResult(
+            ok=probe.ok,
+            source_type=src.source_type,
+            latency_ms=probe.latency_ms,
+            error=probe.error,
+            detail=probe.detail,
+        )
 
     async def list_sources(
         self,

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -24,7 +25,13 @@ import httpx
 from app.core.exceptions import ExternalDependencyError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.connectors.collector_registry import registry
-from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult, FailedSpec
+from app.services.collector.spi import (
+    BaseCollector,
+    CatalogSpec,
+    CollectResult,
+    FailedSpec,
+    ProbeResult,
+)
 
 logger = logging.getLogger("unisense.collector.connectors.kafka")
 
@@ -190,6 +197,32 @@ class KafkaCollector(BaseCollector):
                 )
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
+
+    async def probe(self) -> ProbeResult:
+        """轻量探活：尝试获取 Broker Topic 列表（含 Schema Registry 连通性）。"""
+        start = time.monotonic()
+        detail: dict[str, Any] = {}
+        try:
+            topics = await self._get_topics()
+            detail["topics"] = len(topics)
+            if self._registry_url:
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        subjects = await self._get_subject_schemas(client)
+                        detail["schema_subjects"] = len(subjects)
+                except Exception as exc:  # Registry 不可达不判定整体失败
+                    detail["schema_registry"] = f"不可达: {exc}"
+            return ProbeResult(
+                ok=True,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                detail=detail or None,
+            )
+        except Exception as exc:
+            return ProbeResult(
+                ok=False,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error=str(exc),
+            )
 
 
 @registry.register("kafka")
