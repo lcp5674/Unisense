@@ -101,8 +101,9 @@ class TestScanDeep:
     def test_deep_nested_beyond_max_depth_returns_false(self) -> None:
         from app.core.guard import _scan_deep
 
-        # 深度 0 → 用 max_depth=0 使任意非空深度立即截断返回 False
-        assert _scan_deep({"a": {"b": {"c": "value"}}}, depth=1, max_depth=0) is False
+        # 深度超限：实现升级为显式拒绝（抛 BusinessError），而非静默截断返回 False
+        with pytest.raises(BusinessError):
+            _scan_deep({"a": {"b": {"c": "value"}}}, depth=1, max_depth=0)
 
     def test_list_nested_injection_detected(self) -> None:
         from app.core.guard import _scan_deep

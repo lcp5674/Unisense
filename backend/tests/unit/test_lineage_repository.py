@@ -82,6 +82,18 @@ class _FakeDB:
             for r in matched:
                 self._rows.remove(r)
             return _Result([], rowcount=len(matched))
+        # 软删：UPDATE ... SET deleted_at 按 source/target 匹配（软删语义=从活跃行移除）
+        if sql.lstrip().upper().startswith("UPDATE") and "deleted_at" in sql:
+            node = _extract(sql, "source_node")
+            matched = [
+                r
+                for r in self._rows
+                if getattr(r, "source_node", None) == node
+                or getattr(r, "target_node", None) == node
+            ]
+            for r in matched:
+                self._rows.remove(r)
+            return _Result([], rowcount=len(matched))
         # upsert 精确查找：WHERE 同时含 edge_type/granularity 字面量等值条件
         if "edge_type = '" in sql and "granularity = '" in sql:
             src = _extract(sql, "source_node")

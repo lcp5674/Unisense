@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # ---- CORS ----
     cors_origins: str = "http://localhost:3000"
 
+    # ---- Trusted Proxies ----
+    trusted_proxies: str = ""
+
     # ---- 日志 ----
     log_level: str = "INFO"
     log_format: str = "json"
@@ -133,6 +136,14 @@ class Settings(BaseSettings):
                 raise ConfigurationError(
                     "生产环境 CORS 不允许通配符与 credentials=True 组合，请配置具体 Origin"
                 )
+            # CORS 内网地址检查（警告，不拒绝）
+            internal_patterns = ("127.0.0.1", "0.0.0.0", "localhost")
+            for origin in self.cors_origins_list:
+                if any(p in origin for p in internal_patterns):
+                    import logging
+                    logging.getLogger("unisense.config").warning(
+                        "cors_internal_origin_in_prod origin=%s", origin
+                    )
         return self
 
     @property
@@ -145,6 +156,13 @@ class Settings(BaseSettings):
         if not self.cors_origins:
             return []
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def trusted_proxies_list(self) -> list[str]:
+        """将逗号分隔的 trusted_proxies 字符串拆分为列表。"""
+        if not self.trusted_proxies:
+            return []
+        return [p.strip() for p in self.trusted_proxies.split(",") if p.strip()]
 
 
 @lru_cache

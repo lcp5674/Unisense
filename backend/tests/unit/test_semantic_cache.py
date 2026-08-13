@@ -311,3 +311,178 @@ class TestLIKEEscape:
         # 直接测试转义逻辑
         escaped = term.replace("%", "\\%").replace("_", "\\_")
         assert escaped == expected
+
+
+class TestInvalidateBatch:
+    """invalidate_batch：多 code 批量失效（含 SCAN 多页循环 / 异常兜底）。"""
+
+    async def test_batch_disabled_noop(self) -> None:
+        cache = MetricCache(redis=None)
+        await cache.invalidate_batch(["M1", "M2"])
+
+    async def test_batch_empty_noop(self) -> None:
+        redis = MagicMock()
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        await cache.invalidate_batch([])
+        redis.delete.assert_not_called()
+
+    async def test_batch_success(self) -> None:
+        redis = MagicMock()
+        redis.delete = AsyncMock()
+        redis.scan = AsyncMock(side_effect=[(0, ["metric:def:M1:v1"]), (0, ["metric:def:M2:v1"])])
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        await cache.invalidate_batch(["M1", "M2"])
+        assert redis.scan.call_count == 2
+        redis.delete.assert_awaited_once()
+
+    async def test_batch_multi_page_scan(self) -> None:
+        redis = MagicMock()
+        redis.delete = AsyncMock()
+        redis.scan = AsyncMock(side_effect=[(1, ["metric:def:M1:v1"]), (0, ["metric:def:M1:v2"])])
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        await cache.invalidate_batch(["M1"])
+        assert redis.scan.call_count == 2
+        redis.delete.assert_awaited_once_with("metric:def:M1:v1", "metric:def:M1:v2")
+
+    async def test_batch_redis_error_silent(self) -> None:
+        redis = MagicMock()
+        redis.scan = AsyncMock(side_effect=ConnectionError("Redis down"))
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        # 不应抛异常
+        await cache.invalidate_batch(["M1"])
+
+
+class TestWarmUpExtra:
+    """warm_up 剩余分支：熔断截断 / payload 失败 / pipeline 异常。"""
+
+    def _pipe(self) -> MagicMock:
+        pipe = MagicMock()
+        pipe.set = MagicMock()
+        pipe.execute = AsyncMock(return_value=True)
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=False)
+        return pipe
+
+    async def test_warm_up_breaker_open_breaks(self, fake_metric: MagicMock) -> None:
+        redis = MagicMock()
+        pipe = self._pipe()
+        redis.pipeline = MagicMock(return_value=pipe)
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=False))
+        count = await cache.warm_up([fake_metric])
+        assert count == 0
+        pipe.execute.assert_not_called()
+
+    async def test_warm_up_payload_failed_records_failure(self) -> None:
+        """单个 metric 序列化失败 → record_failure 并跳过，不中断其余。"""
+        redis = MagicMock()
+        pipe = self._pipe()
+        redis.pipeline = MagicMock(return_value=pipe)
+        breaker = FakeBreaker(allow=True)
+        cache = MetricCache(redis=redis, breaker=breaker)
+        # 未配置字段的 MagicMock → MetricResponse.model_validate 失败
+        bad = MagicMock()
+        count = await cache.warm_up([bad])
+        assert count == 0
+        assert breaker.failures == 1
+
+    async def test_warm_up_pipeline_error_records_failure(self, fake_metric: MagicMock) -> None:
+        redis = MagicMock()
+        pipe = self._pipe()
+        pipe.execute = AsyncMock(side_effect=ConnectionError("Redis down"))
+        redis.pipeline = MagicMock(return_value=pipe)
+        breaker = FakeBreaker(allow=True)
+        cache = MetricCache(redis=redis, breaker=breaker)
+        count = await cache.warm_up([fake_metric])
+        assert count == 1  # 已计入 count，但 pipeline 异常 → record_failure
+        assert breaker.failures == 1
+
+
+class TestGuideCache:
+    """消费指南缓存 get_guide / set_guide 全分支。"""
+
+    async def test_get_guide_hit(self) -> None:
+        redis = MagicMock()
+        redis.get = AsyncMock(return_value=json.dumps({"use": "daily"}))
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        guide = await cache.get_guide("M1")
+        assert guide == {"use": "daily"}
+
+    async def test_get_guide_miss(self) -> None:
+        redis = MagicMock()
+        redis.get = AsyncMock(return_value=None)
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        assert await cache.get_guide("M1") is None
+
+    async def test_get_guide_disabled(self) -> None:
+        cache = MetricCache(redis=None)
+        assert await cache.get_guide("M1") is None
+
+    async def test_get_guide_breaker_open(self) -> None:
+        redis = MagicMock()
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=False))
+        assert await cache.get_guide("M1") is None
+        redis.get.assert_not_called()
+
+    async def test_get_guide_redis_error(self) -> None:
+        redis = MagicMock()
+        redis.get = AsyncMock(side_effect=ConnectionError("Redis down"))
+        breaker = FakeBreaker(allow=True)
+        cache = MetricCache(redis=redis, breaker=breaker)
+        assert await cache.get_guide("M1") is None
+        assert breaker.failures == 1
+
+    async def test_set_guide_success(self) -> None:
+        redis = MagicMock()
+        redis.set = AsyncMock()
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        await cache.set_guide("M1", {"use": "daily"})
+        redis.set.assert_awaited_once()
+
+    async def test_set_guide_disabled(self) -> None:
+        cache = MetricCache(redis=None)
+        await cache.set_guide("M1", {"use": "daily"})
+
+    async def test_set_guide_breaker_open(self) -> None:
+        redis = MagicMock()
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=False))
+        await cache.set_guide("M1", {"use": "daily"})
+        redis.set.assert_not_called()
+
+    async def test_set_guide_redis_error(self) -> None:
+        redis = MagicMock()
+        redis.set = AsyncMock(side_effect=ConnectionError("Redis down"))
+        breaker = FakeBreaker(allow=True)
+        cache = MetricCache(redis=redis, breaker=breaker)
+        await cache.set_guide("M1", {"use": "daily"})
+        assert breaker.failures == 1
+
+
+class TestRemainingBranches:
+    """singleflight 二次命中 / invalidate 带版本 / warm_up 空列表。"""
+
+    async def test_get_singleflight_second_read_hit(self) -> None:
+        """干净 miss 后锁内二次 _read 命中（并发写入场景）返回数据。"""
+        redis = MagicMock()
+        payload = json.dumps({"metric_code": "M1"})
+        # 第一次 _read → None（miss）；锁内第二次 _read → JSON（并发写入）
+        redis.get = AsyncMock(side_effect=[None, payload])
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        result = await cache.get("M1")
+        assert result is not None
+        assert result["metric_code"] == "M1"
+
+    async def test_invalidate_with_version(self) -> None:
+        """invalidate 指定版本时按版本化键精确删除。"""
+        redis = MagicMock()
+        redis.delete = AsyncMock()
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        await cache.invalidate("M1", version=3)
+        redis.delete.assert_awaited_once_with("metric:def:M1:v3")
+
+    async def test_warm_up_empty_metrics(self) -> None:
+        """warm_up 空列表直接返回 0，不触碰 Redis。"""
+        redis = MagicMock()
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        count = await cache.warm_up([])
+        assert count == 0
+        redis.pipeline.assert_not_called()

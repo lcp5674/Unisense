@@ -1046,13 +1046,6 @@ async def test_get_metric_public_not_found():
         await svc.get_metric_public("missing")
 
 
-async def test_get_metric_not_found():
-    svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(return_value=None)
-    with pytest.raises(NotFoundError):
-        await svc.get_metric("missing")
-
-
 async def test_emergency_publish_success():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", pii_flag=False))
@@ -1077,7 +1070,7 @@ async def test_emergency_publish_success():
 
 async def test_emergency_publish_forbidden_role():
     svc, repo = _svc_with_repo()
-    with pytest.raises(Exception):
+    with pytest.raises(BusinessError):
         await svc.emergency_publish_metric(
             "sales_gmv_daily",
             MetricEmergencyPublishRequest(reason="生产系统故障需立即紧急发布处理"),

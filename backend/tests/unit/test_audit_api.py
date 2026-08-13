@@ -92,21 +92,41 @@ class TestClientIp:
 
         assert client_ip(None) == ""
 
-    def test_client_ip_single_forwarded(self) -> None:
-        """X-Forwarded-For 单 IP 直接返回。"""
+    def test_client_ip_single_forwarded(self, monkeypatch) -> None:
+        """直连 IP 在 trusted 白名单时，信任 X-Forwarded-For 单 IP。"""
         from app.core.audit import client_ip
+        from app.core.config import settings
 
+        monkeypatch.setattr(settings, "trusted_proxies", "127.0.0.1")
         req = MagicMock()
+        req.client = MagicMock()
+        req.client.host = "127.0.0.1"
         req.headers = {"X-Forwarded-For": "203.0.113.7"}
         assert client_ip(req) == "203.0.113.7"
 
-    def test_client_ip_multi_forwarded_takes_first(self) -> None:
-        """X-Forwarded-For 多代理链取首个 IP 并去空白。"""
+    def test_client_ip_multi_forwarded_takes_first(self, monkeypatch) -> None:
+        """trusted 代理后的 XFF 链：reversed 取第一个非 trusted IP（去空白）。"""
         from app.core.audit import client_ip
+        from app.core.config import settings
 
+        monkeypatch.setattr(settings, "trusted_proxies", "127.0.0.1,10.0.0.1")
         req = MagicMock()
-        req.headers = {"X-Forwarded-For": "203.0.113.9, 10.0.0.1, 192.168.1.1"}
+        req.client = MagicMock()
+        req.client.host = "10.0.0.1"
+        req.headers = {"X-Forwarded-For": "203.0.113.9, 127.0.0.1"}
         assert client_ip(req) == "203.0.113.9"
+
+    def test_client_ip_ignores_forged_xff(self, monkeypatch) -> None:
+        """SEC-03 防伪造：直连 IP 不在 trusted 白名单时忽略 XFF，使用直连地址。"""
+        from app.core.audit import client_ip
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "trusted_proxies", "")
+        req = MagicMock()
+        req.client = MagicMock()
+        req.client.host = "127.0.0.1"
+        req.headers = {"X-Forwarded-For": "203.0.113.7"}
+        assert client_ip(req) == "127.0.0.1"
 
     def test_client_ip_no_forwarded_uses_direct(self) -> None:
         """无 X-Forwarded-For 时回退直连地址。"""

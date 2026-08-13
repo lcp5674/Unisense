@@ -14,6 +14,24 @@ import pytest
 from app.services.llm.client import LlmClient, LlmError, build_llm_client
 
 
+@pytest.fixture(autouse=True)
+def _reset_shared_llm_breaker() -> None:
+    """每个测试前重置共享 LLM 熔断器单例。
+
+    同文件的失败测试（http_error/网络错误）会调用 ``_LLM_BREAKER.record_failure()``，
+    把模块级单例打满后，``test_chat_success`` 的开头 ``if not _LLM_BREAKER.allow()``
+    会直接拒绝（测试顺序依赖）。此处显式恢复关闭态，保证测试相互独立。
+    """
+    from app.services.llm.client import _LLM_BREAKER
+
+    _LLM_BREAKER._open = False
+    _LLM_BREAKER._failures = 0
+    _LLM_BREAKER._opened_at = None
+    _LLM_BREAKER._probing = False
+    _LLM_BREAKER._probing_since = None
+    _LLM_BREAKER._recent_outcomes.clear()
+
+
 class TestLlmClient:
     async def test_enabled_when_configured(self) -> None:
         client = LlmClient(base_url="https://api.example.com", api_key="test-key")
