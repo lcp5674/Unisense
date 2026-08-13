@@ -14,6 +14,9 @@ from typing import Any
 
 from sqlalchemy import select, update
 
+from app.db.mysql import async_session_factory
+from app.models.conflict import Conflict
+
 logger = logging.getLogger(__name__)
 
 # 冲突超时阈值：48 小时未裁决自动升级
@@ -30,20 +33,13 @@ async def conflict_escalation_task(ctx: dict[str, Any]) -> dict[str, Any]:
 
     任务自建 DB 会话（对齐 quality/semantic tasks 模式），不依赖 ctx 注入 db。
     """
-    from app.db.mysql import async_session_factory
-
     async with async_session_factory() as db:
         cutoff = datetime.now(UTC) - timedelta(hours=_CONFLICT_ESCALATION_HOURS)
 
         # 1. 查询超时未裁决的冲突
-        from app.models.conflict import Conflict
-
-        stmt = (
-            select(Conflict)
-            .where(
-                Conflict.status == "OPEN",
-                Conflict.created_at < cutoff,
-            )
+        stmt = select(Conflict).where(
+            Conflict.status == "OPEN",
+            Conflict.created_at < cutoff,
         )
         result = await db.execute(stmt)
         rows = result.scalars().all()
@@ -54,9 +50,7 @@ async def conflict_escalation_task(ctx: dict[str, Any]) -> dict[str, Any]:
         # 2. 批量更新状态为 ESCALATED
         row_ids = [row.id for row in rows]
         await db.execute(
-            update(Conflict)
-            .where(Conflict.id.in_(row_ids))
-            .values(status="ESCALATED")
+            update(Conflict).where(Conflict.id.in_(row_ids)).values(status="ESCALATED")
         )
         await db.commit()
 

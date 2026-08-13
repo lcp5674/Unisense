@@ -2,6 +2,7 @@
 
 仅覆盖 http 路由层行为，DB/Redis 以依赖覆盖 + mock 注入，无外部依赖。
 """
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -28,9 +29,7 @@ async def collector_client() -> AsyncIterator[httpx.AsyncClient]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin"
-    )
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
@@ -82,19 +81,6 @@ async def test_drift_logs_endpoint_returns_paged(
     collector_client: httpx.AsyncClient,
 ) -> None:
     """P1-4: GET /{source_id}/drift-logs 返回分页 drift 记录。"""
-    from datetime import UTC, datetime
-
-    fake_log = MagicMock(
-        source_id="s1",
-        entity_name="users",
-        change_type="ADD_COLUMN",
-        before_signature=None,
-        after_signature="sig2",
-        before_schema=None,
-        after_schema={"columns": [{"name": "age", "type": "int"}]},
-        diff_json={"added": ["age"], "removed": [], "changed": []},
-        detected_at=datetime(2026, 2, 1, tzinfo=UTC),
-    )
     with patch(
         "app.api.collector.CollectorService.list_drift_logs",
         new_callable=AsyncMock,
