@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from app.core.guard import _scan_deep
@@ -58,13 +56,16 @@ class TestNestedJsonInjectionGuard:
         assert _scan_deep(body) is True
 
     def test_max_depth_limit_not_exceeded(self) -> None:
-        """超过最大递归深度时应截断（不报错）。"""
+        """超过最大递归深度时应 fail-closed 拦截（深度超限视为可疑）。"""
         # 15 层嵌套，超过 max_depth=10
         body: object = "safe_value"
         for _ in range(15):
             body = {"nested": body}
-        # 超过最大深度后不会检测到，但也不会报错
-        assert _scan_deep(body) is False
+        # 深度超限 → 抛 BusinessError（INJECTION_DETECTED），而非静默放行
+        from app.core.exceptions import BusinessError
+
+        with pytest.raises(BusinessError):
+            _scan_deep(body)
 
     def test_safe_nested_structure_passes(self) -> None:
         """安全的嵌套结构应通过。"""
@@ -166,65 +167,53 @@ class TestAiKeywordSqlParameterization:
 class TestWeakKeyStartupRejection:
     """测试生产环境弱密钥拒绝启动。"""
 
-    def test_short_jwt_secret_rejected_in_prod(self) -> None:
+    def test_short_jwt_secret_rejected_in_prod(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """jwt_secret < 32 字符时，生产环境应拒绝启动。"""
         from app.core.config import ConfigurationError
 
+        # 模拟生产环境短密钥（monkeypatch 自动恢复，避免污染其他测试）
+        monkeypatch.setenv("UNISENSE_ENV", "prod")
+        monkeypatch.setenv("UNISENSE_JWT_SECRET", "short_key")
+        monkeypatch.setenv("UNISENSE_DB_URL", "mysql://test")
+
         with pytest.raises(ConfigurationError, match="JWT_SECRET"):
+            from app.core.config import Settings
+            Settings()  # 应抛出 ConfigurationError
 
-            # 模拟生产环境短密钥
-            os.environ["UNISENSE_ENV"] = "prod"
-            os.environ["UNISENSE_JWT_SECRET"] = "short_key"
-            os.environ["UNISENSE_DB_URL"] = "mysql://test"
-
-            try:
-                from app.core.config import Settings
-                Settings()  # 应抛出 ConfigurationError
-            finally:
-                os.environ.pop("UNISENSE_ENV", None)
-                os.environ.pop("UNISENSE_JWT_SECRET", None)
-                os.environ.pop("UNISENSE_DB_URL", None)
-
-    def test_prod_requires_fernet_key(self) -> None:
+    def test_prod_requires_fernet_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """生产环境必须配置独立的 Fernet 密钥。"""
         from app.core.config import ConfigurationError
 
+        monkeypatch.setenv("UNISENSE_ENV", "prod")
+        monkeypatch.setenv("UNISENSE_JWT_SECRET", "a" * 32)
+        monkeypatch.setenv("UNISENSE_DB_URL", "mysql://test")
+        monkeypatch.setenv("UNISENSE_OLAP_URL", "http://doris:8030")
+        # 显式置空，覆盖 .env 中可能存在的 FERNET_KEY
+        monkeypatch.setenv("UNISENSE_FERNET_KEY", "")
+
         with pytest.raises(ConfigurationError, match="FERNET_KEY"):
-            os.environ["UNISENSE_ENV"] = "prod"
-            os.environ["UNISENSE_JWT_SECRET"] = "a" * 32
-            os.environ["UNISENSE_DB_URL"] = "mysql://test"
-            os.environ["UNISENSE_OLAP_URL"] = "http://doris:8030"
-            # 显式置空，覆盖 .env 中可能存在的 FERNET_KEY
-            os.environ["UNISENSE_FERNET_KEY"] = ""
+            from app.core.config import Settings
+            Settings()  # 应抛出 ConfigurationError
 
-            try:
-                from app.core.config import Settings
-                Settings()  # 应抛出 ConfigurationError
-            finally:
-                os.environ.pop("UNISENSE_ENV", None)
-                os.environ.pop("UNISENSE_JWT_SECRET", None)
-                os.environ.pop("UNISENSE_DB_URL", None)
-                os.environ.pop("UNISENSE_OLAP_URL", None)
-
-    def test_prod_requires_olap_url(self) -> None:
+    def test_prod_requires_olap_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """生产环境必须配置 OLAP URL。"""
         from app.core.config import ConfigurationError
 
-        with pytest.raises(ConfigurationError, match="OLAP_URL"):
-            os.environ["UNISENSE_ENV"] = "prod"
-            os.environ["UNISENSE_JWT_SECRET"] = "a" * 32
-            os.environ["UNISENSE_DB_URL"] = "mysql://test"
-            os.environ["UNISENSE_FERNET_KEY"] = "test-fernet-key-for-prod"
-            # 不设置 UNISENSE_OLAP_URL
+        monkeypatch.setenv("UNISENSE_ENV", "prod")
+        monkeypatch.setenv("UNISENSE_JWT_SECRET", "a" * 32)
+        monkeypatch.setenv("UNISENSE_DB_URL", "mysql://test")
+        monkeypatch.setenv("UNISENSE_FERNET_KEY", "test-fernet-key-for-prod")
+        # 不设置 UNISENSE_OLAP_URL
 
-            try:
-                from app.core.config import Settings
-                Settings()  # 应抛出 ConfigurationError
-            finally:
-                os.environ.pop("UNISENSE_ENV", None)
-                os.environ.pop("UNISENSE_JWT_SECRET", None)
-                os.environ.pop("UNISENSE_DB_URL", None)
-                os.environ.pop("UNISENSE_FERNET_KEY", None)
+        with pytest.raises(ConfigurationError, match="OLAP_URL"):
+            from app.core.config import Settings
+            Settings()  # 应抛出 ConfigurationError
 
 
 # ============================================================
@@ -235,46 +224,50 @@ class TestWeakKeyStartupRejection:
 class TestFernetDegradationRejection:
     """测试 Fernet 密钥不可从 JWT_SECRET 派生降级。"""
 
-    def test_secrets_no_jwt_fallback_in_prod(self) -> None:
+    def test_secrets_no_jwt_fallback_in_prod(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """生产环境 _build_key 不应从 JWT_SECRET 派生。"""
         from app.core.config import ConfigurationError
 
-        os.environ["UNISENSE_ENV"] = "prod"
-        # 不设置 UNISENSE_FERNET_KEY
-        os.environ.pop("UNISENSE_FERNET_KEY", None)
+        monkeypatch.setenv("UNISENSE_ENV", "prod")
+        # 不设置 UNISENSE_FERNET_KEY（delenv 清除，测试后自动恢复）
+        monkeypatch.delenv("UNISENSE_FERNET_KEY", raising=False)
 
-        try:
-            from app.core.secrets import _build_key
-            with pytest.raises(ConfigurationError, match="FERNET_KEY"):
-                _build_key()
-        finally:
-            os.environ.pop("UNISENSE_ENV", None)
+        from app.core.secrets import _build_key
+        with pytest.raises(ConfigurationError, match="FERNET_KEY"):
+            _build_key()
 
-    def test_secrets_dev_uses_default_key(self) -> None:
+    def test_secrets_dev_uses_default_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """开发环境可以使用默认开发密钥。"""
-        os.environ["UNISENSE_ENV"] = "local"
-        os.environ.pop("UNISENSE_FERNET_KEY", None)
+        monkeypatch.setenv("UNISENSE_ENV", "local")
+        monkeypatch.delenv("UNISENSE_FERNET_KEY", raising=False)
 
-        try:
-            from app.core.secrets import _build_key
-            key = _build_key()
-            assert key is not None
-            assert len(key) > 0
-        finally:
-            os.environ.pop("UNISENSE_ENV", None)
+        from app.core.secrets import _build_key
+        key = _build_key()
+        assert key is not None
+        assert len(key) > 0
 
-    def test_secrets_explicit_fernet_key_used(self) -> None:
-        """显式配置的 Fernet 密钥应被使用。"""
-        os.environ["UNISENSE_FERNET_KEY"] = "my-custom-fernet-key"
-        try:
-            import base64
-            import hashlib
+    def test_secrets_explicit_fernet_key_used(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """显式配置的 Fernet 密钥应被使用（PBKDF2 派生，对齐 SEC-01）。"""
+        monkeypatch.setenv("UNISENSE_FERNET_KEY", "my-custom-fernet-key")
 
-            from app.core.secrets import _build_key
-            key = _build_key()
-            expected = base64.urlsafe_b64encode(
-                hashlib.sha256(b"my-custom-fernet-key").digest()
+        import base64
+        import hashlib
+
+        from app.core.secrets import _build_key
+        key = _build_key()
+        # SEC-01：PBKDF2-HMAC-SHA256（600k 迭代，固定盐）而非裸 SHA-256
+        expected = base64.urlsafe_b64encode(
+            hashlib.pbkdf2_hmac(
+                "sha256",
+                b"my-custom-fernet-key",
+                b"unisense-fernet-salt"[:16],
+                600_000,
             )
-            assert key == expected
-        finally:
-            os.environ.pop("UNISENSE_FERNET_KEY", None)
+        )
+        assert key == expected

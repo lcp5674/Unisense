@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
+from app.services.conflict.sla_tasks import auto_escalate_overdue
 from app.services.notify.escalation_tasks import check_escalation_retries
 from app.services.quality.tasks import run_quality_checks
 from app.tasks.audit_archive import audit_archive_task
@@ -132,6 +133,7 @@ class WorkerSettings:
         run_quality_checks,
         check_escalation_retries,
         audit_archive_task,
+        auto_escalate_overdue,
     ]
     cron_jobs = [
         cron(
@@ -188,6 +190,13 @@ class WorkerSettings:
             hour=2,
             minute=0,
             run_at_startup=False,
+        ),
+        cron(
+            auto_escalate_overdue,
+            name="conflict-sla-escalation",
+            hour=6,
+            minute=0,
+            run_at_startup=True,
         ),
     ]
     on_startup = startup

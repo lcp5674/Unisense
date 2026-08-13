@@ -17,7 +17,7 @@ from app.core.exceptions import BusinessError
 _PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?i)('\s*or\s*'|'\s*or\s*\d)"),
     re.compile(r"(?i)\bor\b\s+\d+\s*=\s*\d+"),
-    re.compile(r"(?i)--"),
+    re.compile(r"(?i)(?<!\d)--(?!\d)"),
     re.compile(r"(?i);\s*(drop|delete|update|insert|truncate|alter)\b"),
     re.compile(r"(?i)\bunion\b.{0,40}?\bselect\b"),
     re.compile(r"(?i)/\*"),
@@ -47,7 +47,7 @@ def _scan_deep(value: object, depth: int = 0, max_depth: int = _MAX_DEPTH) -> bo
         True 如果发现可疑字符串，False 否则。
     """
     if depth > max_depth:
-        return False
+        raise BusinessError("请求嵌套层级超限，已拦截", error_code="INJECTION_DETECTED")
     if isinstance(value, str):
         return _is_suspicious(value)
     if isinstance(value, dict):
