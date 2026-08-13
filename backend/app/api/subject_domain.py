@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
-from app.core.exceptions import BusinessError, NotFoundError
+from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session as get_session
 from app.services.subject_domain.schemas import (
@@ -106,6 +106,9 @@ async def create_domain(
         await svc._db.commit()
         result = await svc.get_domain_with_count(domain.code)
         return ok(data=result, trace_id=trace_id)
+    except ConflictError as exc:
+        await svc._db.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
     except BusinessError as exc:
         await svc._db.rollback()
         raise HTTPException(status_code=400, detail=exc.message) from exc
@@ -131,6 +134,9 @@ async def update_domain(
         await svc._db.commit()
         result = await svc.get_domain_with_count(domain.code)
         return ok(data=result, trace_id=trace_id)
+    except ConflictError as exc:
+        await svc._db.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
     except NotFoundError as exc:
         await svc._db.rollback()
         raise HTTPException(status_code=404, detail=exc.message) from exc

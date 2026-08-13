@@ -16,12 +16,13 @@ vi.mock("../api", () => ({
   updateDomainDefaults: vi.fn(),
 }));
 
-import { listDomainTree, createDomain, getDomain, getDomainDefaults } from "../api";
+import { listDomainTree, createDomain, getDomain, getDomainDefaults, updateDomain } from "../api";
 
 const mockedList = vi.mocked(listDomainTree);
 const mockedCreate = vi.mocked(createDomain);
 const mockedGet = vi.mocked(getDomain);
 const mockedDefaults = vi.mocked(getDomainDefaults);
+const mockedUpdate = vi.mocked(updateDomain);
 
 /** 组件依赖 AntApp.useApp() 的 message/modal，渲染时需包 <App> 提供真实 context。 */
 function renderPage() {
@@ -67,6 +68,7 @@ describe("previewDomainCode", () => {
 
 describe("SubjectDomain 页面", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     mockedList.mockResolvedValue(TREE);
     mockedCreate.mockResolvedValue({ id: 4, code: "risk", name: "风控", parent_id: null, level: 1, path: "4", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 0, created_at: "", updated_at: "" });
     mockedGet.mockResolvedValue({ id: 1, code: "sales", name: "销售", parent_id: null, level: 1, path: "1", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 3, created_at: "", updated_at: "" });
@@ -139,5 +141,61 @@ describe("SubjectDomain 页面", () => {
 
     fireEvent.change(screen.getByPlaceholderText("如 销售"), { target: { value: "Order" } });
     expect((screen.getByTestId("domain-code-preview") as HTMLInputElement).value).toBe("sales_order");
+  });
+
+  it("创建根域与已存在同名域冲突：显示警告并拦截提交", async () => {
+    renderPage();
+    await screen.findByText("销售");
+    fireEvent.click(screen.getAllByText("新建根域")[0]);
+
+    fireEvent.change(await screen.findByPlaceholderText("如 销售"), { target: { value: "销售" } });
+    // 同父域（根域）已存在「销售」（sales）
+    expect(await screen.findByTestId("create-dup-warning")).toBeTruthy();
+    expect(screen.getByTestId("create-dup-warning").textContent).toContain("销售");
+    expect(screen.getByTestId("create-dup-warning").textContent).toContain("sales");
+
+    // 提交被拦截：createDomain 不被调用
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("不同父域下同名不触发冲突警告", async () => {
+    renderPage();
+    await screen.findByText("销售");
+    // 在「销售」下新建名为「财务」的子域——根域已有「财务」(finance)，但不同父域应放行
+    fireEvent.click(screen.getByLabelText("新建子域-销售"));
+
+    fireEvent.change(screen.getByPlaceholderText("如 销售"), { target: { value: "财务" } });
+    expect(screen.queryByTestId("create-dup-warning")).toBeNull();
+  });
+
+  it("编辑改名撞同父域同名：显示警告并拦截提交", async () => {
+    renderPage();
+    await screen.findByText("销售");
+    // 选中「销售」节点 → 打开编辑弹窗
+    fireEvent.click(screen.getByText("销售"));
+    fireEvent.click(await screen.findByText("编辑"));
+
+    // 编辑弹窗 name 预填「销售」，改为「财务」（根域已存在 finance/财务）
+    const editInput = await screen.findByDisplayValue("销售");
+    fireEvent.change(editInput, { target: { value: "财务" } });
+    expect(await screen.findByTestId("edit-dup-warning")).toBeTruthy();
+    expect(screen.getByTestId("edit-dup-warning").textContent).toContain("财务");
+
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mockedUpdate).not.toHaveBeenCalled();
+  });
+
+  it("编辑保持原名（仅改描述）不触发同名警告", async () => {
+    renderPage();
+    await screen.findByText("销售");
+    fireEvent.click(screen.getByText("销售"));
+    fireEvent.click(await screen.findByText("编辑"));
+
+    const editInput = await screen.findByDisplayValue("销售");
+    fireEvent.change(editInput, { target: { value: "销售" } });
+    expect(screen.queryByTestId("edit-dup-warning")).toBeNull();
   });
 });

@@ -124,6 +124,13 @@ class SubjectDomainService:
         else:
             code = await self._generate_unique_code(data.name, parent)
 
+        # 同父域下名称唯一（不同父域允许同名；大小写不敏感、忽略首尾空格）
+        if await self._repo.name_exists(data.name, data.parent_id):
+            raise ConflictError(
+                f"同父域下已存在同名主题域: {data.name}",
+                error_code="DUPLICATE_NAME",
+            )
+
         domain = SubjectDomain(
             code=code,
             name=data.name,
@@ -184,6 +191,14 @@ class SubjectDomainService:
     async def update_domain(self, code: str, data: SubjectDomainUpdate) -> SubjectDomain:
         domain = await self.get_domain(code)
         if data.name is not None:
+            # 改名时检测同父域同名（排除自身；名称未实际变化则不查）
+            if data.name.strip() != (domain.name or "").strip() and await self._repo.name_exists(
+                data.name, domain.parent_id, exclude_id=domain.id
+            ):
+                raise ConflictError(
+                    f"同父域下已存在同名主题域: {data.name}",
+                    error_code="DUPLICATE_NAME",
+                )
             domain.name = data.name
         if data.sort_order is not None:
             domain.sort_order = data.sort_order

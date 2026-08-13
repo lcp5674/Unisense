@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Button, Card, Col, Row, Tree, Descriptions, Modal, Form, Input, InputNumber,
-  Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip,
+  Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip, Alert,
 } from "antd";
 import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, SettingOutlined, BranchesOutlined } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
@@ -43,6 +43,47 @@ function toSelectTreeData(nodes: SubjectDomainTreeNode[]): DataNode[] {
     value: n.id,
     children: n.children.length > 0 ? toSelectTreeData(n.children) : undefined,
   }));
+}
+
+/**
+ * 递归查找同父域下同名节点（trim + 小写，忽略首尾空格）。
+ * 作用域与后端一致：仅同父域（parent_id）内比较，不同父域允许同名。
+ * excludeCode 用于编辑时排除自身。
+ */
+function findDuplicateNode(
+  nodes: SubjectDomainTreeNode[],
+  name: string,
+  parentId: number | null,
+  excludeCode: string | null,
+): SubjectDomainTreeNode | null {
+  const n = name.trim().toLowerCase();
+  if (!n) return null;
+  for (const node of nodes) {
+    if (
+      node.code !== excludeCode &&
+      node.parent_id === parentId &&
+      node.name.trim().toLowerCase() === n
+    ) {
+      return node;
+    }
+    if (node.children.length > 0) {
+      const found = findDuplicateNode(node.children, name, parentId, excludeCode);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/** 按 id 递归查找节点名称（用于同名警告中展示父域上下文）。 */
+function findNodeName(nodes: SubjectDomainTreeNode[], id: number): string | null {
+  for (const n of nodes) {
+    if (n.id === id) return n.name;
+    if (n.children.length > 0) {
+      const found = findNodeName(n.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 const DICT_FIELDS = [
@@ -116,6 +157,23 @@ export function SubjectDomain() {
   const codeMap = collectCodeMap(treeData);
   const codePreview = previewDomainCode(watchName ?? "", watchParentId ? codeMap[watchParentId] : null);
 
+  // 创建弹窗同名冲突检测（同父域下；与后端 name_exists 口径一致）
+  const createDup = watchName?.trim()
+    ? findDuplicateNode(treeData, watchName, watchParentId ?? null, null)
+    : null;
+  const createDupWarning = createDup
+    ? `在${createDup.parent_id ? `「${findNodeName(treeData, createDup.parent_id) ?? "上级域"}」下` : "根域"}已存在同名主题域「${createDup.name}」（${createDup.code}）`
+    : null;
+
+  // 编辑弹窗同名冲突检测（排除自身 selectedCode）
+  const watchEditName = Form.useWatch("name", editForm);
+  const editDup = watchEditName?.trim()
+    ? findDuplicateNode(treeData, watchEditName, detail?.parent_id ?? null, selectedCode)
+    : null;
+  const editDupWarning = editDup
+    ? `在${editDup.parent_id ? `「${findNodeName(treeData, editDup.parent_id) ?? "上级域"}」下` : "根域"}已存在同名主题域「${editDup.name}」（${editDup.code}）`
+    : null;
+
   async function loadTree() {
     setLoading(true);
     try {
@@ -147,6 +205,11 @@ export function SubjectDomain() {
 
   // 创建域
   async function handleCreate(values: { name: string; parent_id?: number | null; sort_order?: number; description?: string }) {
+    // 同名冲突：提交前拦截，避免依赖后端 409 往返
+    if (createDup) {
+      message.warning(createDupWarning!);
+      return;
+    }
     try {
       // code 不传：由后端按显示名自动生成；owner_id 由后端以创建人认证身份覆盖（P2-3 修复硬编码）
       await createDomain({ ...values, parent_id: values.parent_id ?? null, sort_order: values.sort_order ?? 0 });
@@ -175,6 +238,11 @@ export function SubjectDomain() {
   // 编辑域
   async function handleEdit(values: { name?: string; sort_order?: number; description?: string }) {
     if (!selectedCode) return;
+    // 同名冲突：提交前拦截
+    if (editDup) {
+      message.warning(editDupWarning!);
+      return;
+    }
     try {
       await updateDomain(selectedCode, values);
       message.success("更新成功");
@@ -306,8 +374,9 @@ export function SubjectDomain() {
             />
           </Form.Item>
           <Form.Item name="name" label="显示名" rules={[{ required: true, message: "请输入显示名" }]}>
-            <Input placeholder="如 销售" />
+            <Input placeholder="如 销售" status={createDup ? "error" : undefined} />
           </Form.Item>
+          {createDupWarning && <Alert type="error" showIcon message={createDupWarning} style={{ marginBottom: 16 }} data-testid="create-dup-warning" />}
           <Form.Item label="域编码（自动生成）" tooltip="系统根据显示名自动生成，子域自动带父域前缀，冲突时自动追加序号；提交后以后端返回为准">
             <Space.Compact style={{ width: "100%" }}>
               <Input value={codePreview} disabled data-testid="domain-code-preview" />
@@ -327,8 +396,9 @@ export function SubjectDomain() {
       <Modal title="编辑主题域" open={editOpen} onCancel={() => setEditOpen(false)} onOk={() => editForm.submit()}>
         <Form form={editForm} onFinish={handleEdit} layout="vertical">
           <Form.Item name="name" label="显示名" rules={[{ required: true }]}>
-            <Input />
+            <Input status={editDup ? "error" : undefined} />
           </Form.Item>
+          {editDupWarning && <Alert type="error" showIcon message={editDupWarning} style={{ marginBottom: 16 }} data-testid="edit-dup-warning" />}
           <Form.Item name="sort_order" label="排序">
             <InputNumber min={0} />
           </Form.Item>

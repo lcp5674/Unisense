@@ -83,6 +83,31 @@ class SubjectDomainRepository:
         result = await self._db.execute(stmt)
         return (result.scalar() or 0) > 0
 
+    async def name_exists(
+        self,
+        name: str,
+        parent_id: int | None,
+        exclude_id: int | None = None,
+    ) -> bool:
+        """检测同一父域下是否存在同名（未删除）主题域。
+
+        作用域限定为同父域：不同父域下允许同名（如 销售/订单 与 财务/订单）。
+        MySQL utf8mb4_0900_ai_ci collation 保证比较大小写不敏感；
+        用 ``func.trim`` 忽略首尾空格（与前端实时检测口径一致）。
+        软删记录不计入（名称无唯一约束，软删后同名可安全重建）。
+        """
+        stmt = select(func.count()).select_from(SubjectDomain).where(
+            func.trim(SubjectDomain.name) == name.strip(),
+            SubjectDomain.deleted_at.is_(None),
+            SubjectDomain.parent_id == parent_id
+            if parent_id is not None
+            else SubjectDomain.parent_id.is_(None),
+        )
+        if exclude_id is not None:
+            stmt = stmt.where(SubjectDomain.id != exclude_id)
+        result = await self._db.execute(stmt)
+        return (result.scalar() or 0) > 0
+
     async def count_children(self, parent_id: int) -> int:
         stmt = select(func.count()).select_from(SubjectDomain).where(
             SubjectDomain.parent_id == parent_id,
