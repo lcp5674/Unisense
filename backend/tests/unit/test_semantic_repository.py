@@ -39,6 +39,7 @@ def _result(
     r.scalar_one_or_none.return_value = scalar_one_or_none
     r.scalar.return_value = scalar
     r.scalars.return_value.all.return_value = all_ if all_ is not None else []
+    r.all.return_value = all_ if all_ is not None else []
     r.rowcount = rowcount
     return r
 
@@ -243,3 +244,309 @@ async def test_list_versions_returns_desc_ordered():
     versions = await repo.list_versions(1)
 
     assert versions == [v2, v1]
+
+
+# ---------- 过滤分支（status / metric_tier） ----------
+
+
+async def test_list_metrics_applies_status_and_tier_filters():
+    db = _mock_session()
+    db.execute.side_effect = [
+        _result(scalar=1),
+        _result(all_=[_metric(metric_code="a")]),
+    ]
+    repo = MetricRepository(db)
+
+    items, total = await repo.list_metrics(status="PUBLISHED", metric_tier="T1")
+
+    assert total == 1
+    assert len(items) == 1
+
+
+async def test_list_metrics_escapes_like_wildcards():
+    db = _mock_session()
+    db.execute.side_effect = [
+        _result(scalar=0),
+        _result(all_=[]),
+    ]
+    repo = MetricRepository(db)
+
+    items, total = await repo.list_metrics(keyword="sales%rate_data")
+
+    assert total == 0
+    assert items == []
+
+
+async def test_list_metrics_asc_sort_and_whitelist_fallback():
+    db = _mock_session()
+    db.execute.side_effect = [
+        _result(scalar=1),
+        _result(all_=[_metric(metric_code="a")]),
+    ]
+    repo = MetricRepository(db)
+
+    # 非法 sort_by 回落到 updated_at，asc 方向
+    items, total = await repo.list_metrics(
+        sort_by="not-a-column", sort_order="asc", offset=10, limit=5
+    )
+    assert total == 1
+    assert items
+
+
+# ---------- 乐观锁更新后数据一致性异常 ----------
+
+
+async def test_update_with_optimistic_lock_updated_missing_raises_system_error():
+    from app.core.exceptions import SystemError as AppSystemError
+
+    db = _mock_session()
+    # update 命中 1 行，但随后 get_by_id 回查返回 None（数据一致性异常）
+    db.execute.return_value = _result(scalar_one_or_none=None, rowcount=1)
+    repo = MetricRepository(db)
+
+    with pytest.raises(AppSystemError) as exc:
+        await repo.update_with_optimistic_lock(1, expected_row_version=1, name="x")
+    assert exc.value.error_code == "INTERNAL_ERROR"
+
+
+# ---------- create_version 冲突 ----------
+
+
+async def test_create_version_duplicate_raises_conflict():
+    from sqlalchemy.exc import IntegrityError
+
+    db = _mock_session()
+    db.flush = AsyncMock(side_effect=IntegrityError("dup", {}, None))
+    db.rollback = AsyncMock()
+    repo = MetricRepository(db)
+    v = _version(metric_id=1, version=2)
+
+    with pytest.raises(ConflictError) as exc:
+        await repo.create_version(v)
+    assert exc.value.error_code == "CONFLICT"
+    db.rollback.assert_awaited_once()
+
+
+# ---------- PENDING_VERSION 确认相关 ----------
+
+
+def _confirmation(**kwargs: object) -> MagicMock:
+    c = MagicMock()
+    defaults = {
+        "id": 1,
+        "metric_id": 1,
+        "version": 2,
+        "consumer_id": 10,
+        "status": "PENDING",
+        "deadline": None,
+    }
+    defaults.update(kwargs)
+    for k, v in defaults.items():
+        setattr(c, k, v)
+    return c
+
+
+async def test_save_pending_confirmation_persists():
+    db = _mock_session()
+    repo = MetricRepository(db)
+    c = _confirmation()
+
+    result = await repo.save_pending_confirmation(c)
+
+    db.add.assert_called_once_with(c)
+    db.flush.assert_awaited()
+    db.refresh.assert_awaited_once_with(c)
+    assert result is c
+
+
+async def test_save_pending_confirmation_duplicate_raises_conflict():
+    from sqlalchemy.exc import IntegrityError
+
+    db = _mock_session()
+    db.flush = AsyncMock(side_effect=IntegrityError("dup", {}, None))
+    db.rollback = AsyncMock()
+    repo = MetricRepository(db)
+    c = _confirmation()
+
+    with pytest.raises(ConflictError):
+        await repo.save_pending_confirmation(c)
+
+
+async def test_get_pending_confirmations_returns_list():
+    db = _mock_session()
+    db.execute.return_value = _result(all_=[_confirmation(id=1), _confirmation(id=2)])
+    repo = MetricRepository(db)
+
+    rows = await repo.get_pending_confirmations(1, 2)
+
+    assert len(rows) == 2
+
+
+async def test_update_confirmation_status_with_and_without_reason():
+    db = _mock_session()
+    repo = MetricRepository(db)
+
+    await repo.update_confirmation_status(1, "CONFIRMED", reason="looks good")
+    await repo.update_confirmation_status(2, "REJECTED")
+
+    assert db.execute.await_count == 2
+
+
+async def test_get_pending_confirmation_returns_single():
+    db = _mock_session()
+    c = _confirmation(id=3)
+    db.execute.return_value = _result(scalar_one_or_none=c)
+    repo = MetricRepository(db)
+
+    row = await repo.get_pending_confirmation(1, 2, 10)
+
+    assert row is c
+
+
+async def test_extend_confirmation_deadline():
+    from datetime import UTC, datetime
+
+    db = _mock_session()
+    repo = MetricRepository(db)
+
+    await repo.extend_confirmation_deadline(1, datetime.now(UTC))
+
+    db.execute.assert_awaited_once()
+
+
+async def test_get_timeout_pending_confirmations():
+    db = _mock_session()
+    db.execute.return_value = _result(all_=[_confirmation(id=1)])
+    repo = MetricRepository(db)
+
+    rows = await repo.get_timeout_pending_confirmations()
+
+    assert len(rows) == 1
+
+
+# ---------- 健康度评分 ----------
+
+
+def _health_score(**kwargs: object) -> MagicMock:
+    h = MagicMock()
+    defaults = {
+        "id": 1,
+        "metric_id": 1,
+        "score": 90,
+        "level": "EXCELLENT",
+        "completeness_score": 95,
+        "activity_score": 90,
+        "quality_score": 85,
+        "owner_response_score": 92,
+        "lineage_coverage_score": 88,
+        "missing_dimensions": [],
+        "calculated_at": None,
+    }
+    defaults.update(kwargs)
+    for k, v in defaults.items():
+        setattr(h, k, v)
+    return h
+
+
+async def test_save_health_score_updates_existing():
+    db = _mock_session()
+    existing = _health_score(id=1)
+    db.execute.return_value = _result(scalar_one_or_none=existing)
+    repo = MetricRepository(db)
+    score = _health_score(metric_id=1)
+
+    result = await repo.save_health_score(score)
+
+    assert result is existing
+    db.refresh.assert_awaited_once_with(existing)
+    # 第一次 execute = 查询现有，第二次 = update
+    assert db.execute.await_count == 2
+
+
+async def test_save_health_score_creates_new():
+    db = _mock_session()
+    db.execute.return_value = _result(scalar_one_or_none=None)
+    repo = MetricRepository(db)
+    score = _health_score(metric_id=2)
+
+    result = await repo.save_health_score(score)
+
+    db.add.assert_called_once_with(score)
+    db.flush.assert_awaited()
+    db.refresh.assert_awaited_once_with(score)
+    assert result is score
+
+
+async def test_get_health_score_returns_score():
+    db = _mock_session()
+    h = _health_score(metric_id=1)
+    db.execute.return_value = _result(scalar_one_or_none=h)
+    repo = MetricRepository(db)
+
+    row = await repo.get_health_score(1)
+
+    assert row is h
+
+
+async def test_list_critical_metrics():
+    db = _mock_session()
+    db.execute.return_value = _result(all_=[_metric(metric_code="m1")])
+    repo = MetricRepository(db)
+
+    rows = await repo.list_critical_metrics(level="CRITICAL")
+
+    assert len(rows) == 1
+
+
+# ---------- Dashboard 聚合 ----------
+
+
+def _row_result(total: int, pii_count: int) -> MagicMock:
+    row = MagicMock()
+    row.total = total
+    row.pii_count = pii_count
+    r = MagicMock()
+    r.one.return_value = row
+    return r
+
+
+async def test_aggregate_dashboard_with_filters():
+    db = _mock_session()
+    db.execute.side_effect = [
+        _row_result(total=5, pii_count=2),
+        _result(all_=[("PUBLISHED", 3), ("DRAFT", 2)]),  # by_status
+        _result(all_=[("T1", 4), ("T2", 1)]),  # by_tier
+        _result(all_=[("sales", 5)]),  # by_domain
+    ]
+    repo = MetricRepository(db)
+
+    result = await repo.aggregate_dashboard(domain="sales", owner_id=1)
+
+    assert result["total"] == 5
+    assert result["pii_count"] == 2
+    assert result["by_status"] == {"PUBLISHED": 3, "DRAFT": 2}
+    assert result["by_tier"] == {"T1": 4, "T2": 1}
+    assert result["by_domain"] == {"sales": 5}
+    assert result["pii_ratio"] == round(2 / 5, 4)
+    assert db.execute.await_count == 4
+
+
+async def test_aggregate_dashboard_without_filters_and_zero_total():
+    db = _mock_session()
+    db.execute.side_effect = [
+        _row_result(total=0, pii_count=None),  # pii_count None → or 0
+        _result(all_=[]),
+        _result(all_=[]),
+        _result(all_=[]),
+    ]
+    repo = MetricRepository(db)
+
+    result = await repo.aggregate_dashboard()
+
+    assert result["total"] == 0
+    assert result["pii_count"] == 0
+    assert result["by_status"] == {}
+    assert result["by_tier"] == {}
+    assert result["by_domain"] == {}
+    assert result["pii_ratio"] == 0.0
+
