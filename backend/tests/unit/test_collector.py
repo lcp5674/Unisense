@@ -25,6 +25,7 @@ from app.services.collector.schemas import (
 )
 from app.services.collector.service import CollectorService
 from app.services.collector.spi import (
+    BaseCollector,
     CatalogSpec,
     CollectResult,
     FailedSpec,
@@ -110,6 +111,39 @@ def test_classifier_internal_default():
     )
 
 
+def test_classifier_pii_by_column_comment():
+    """P0 修复：列注释含敏感词即触发 PII——修复前注释未被采集，此类列被误判 INTERNAL。
+
+    典型生产场景：字段名是通用编码（c1/user_info），业务含义写在注释里
+    （「用户手机号」「客户邮箱」）。
+    """
+    assert (
+        SensitivityClassifier().classify(
+            "user_profile",
+            {"columns": [{"name": "c1", "type": "varchar", "comment": "用户手机号"}]},
+        )
+        == "PII"
+    )
+    assert (
+        SensitivityClassifier().classify(
+            "t",
+            {"columns": [{"name": "field_a", "type": "varchar", "comment": "客户邮箱地址"}]},
+        )
+        == "PII"
+    )
+
+
+def test_classifier_comment_does_not_pollute_generic_names():
+    """注释匹配不应把通用注释（如「创建时间」）误判为 PII/CONFIDENTIAL。"""
+    assert (
+        SensitivityClassifier().classify(
+            "orders",
+            {"columns": [{"name": "created_at", "type": "datetime", "comment": "创建时间"}]},
+        )
+        == "INTERNAL"
+    )
+
+
 # ---------- SPI ----------
 
 
@@ -137,9 +171,9 @@ async def test_create_source_encrypts_and_redacts():
     )
     assert resp.connection_config_present is True
     created = repo.create_source.call_args.args[0]
-    # 落库为密文，不含明文键名
+    # 落库为 Fernet 密文（token 前缀 gAAAA），不含明文
     assert created.connection_config != '{"host":"h","password":"p"}'
-    assert "password" not in created.connection_config
+    assert created.connection_config.startswith("gAAAA")
 
 
 async def test_create_source_conflict():
@@ -191,7 +225,7 @@ async def test_update_source_updates_fields_and_reencrypts():
     assert resp.source_type == "spark"
     assert resp.domain == "new_domain"
     assert src.connection_config != '{"host":"h2","port":10001}'
-    assert "h2" not in src.connection_config
+    assert src.connection_config.startswith("gAAAA")  # Fernet 密文格式
     # 连接配置变更 → 旧健康状态/错误不再可信
     assert src.health_status == "unknown"
     assert src.last_error is None
@@ -928,19 +962,23 @@ class _MultiSchemaConnector:
             for tbl, cols in self._columns.items():
                 for c in cols:
                     if isinstance(c, dict):
-                        rows.append({
-                            "table_name": tbl,
-                            "column_name": c["name"],
-                            "data_type": c.get("type", "varchar"),
-                            "is_nullable": c.get("nullable", "YES"),
-                        })
+                        rows.append(
+                            {
+                                "table_name": tbl,
+                                "column_name": c["name"],
+                                "data_type": c.get("type", "varchar"),
+                                "is_nullable": c.get("nullable", "YES"),
+                            }
+                        )
                     else:
-                        rows.append({
-                            "table_name": tbl,
-                            "column_name": c,
-                            "data_type": "varchar",
-                            "is_nullable": "YES",
-                        })
+                        rows.append(
+                            {
+                                "table_name": tbl,
+                                "column_name": c,
+                                "data_type": "varchar",
+                                "is_nullable": "YES",
+                            }
+                        )
             return rows
         return [{"column_name": c} for c in self._columns.get(params.get("tbl"), [])]
 
@@ -1194,7 +1232,13 @@ async def test_soft_delete_source_releases_id_and_cleans_children():
     assert fk_off and fk_on, f"FK 开关缺失: {stmts}"
     assert fk_off[0] < fk_on[0], "FK 检查应先关闭后开启"
     # update(db_catalog) + update(watermark) + update(drift_log) 均被调用（改名保留审计）
-    update_calls = [st for st in stmts if "UPDATE db_catalog" in st or "UPDATE collection_watermark" in st or "UPDATE schema_drift_log" in st]
+    update_calls = [
+        st
+        for st in stmts
+        if "UPDATE db_catalog" in st
+        or "UPDATE collection_watermark" in st
+        or "UPDATE schema_drift_log" in st
+    ]
     assert len(update_calls) == 3, f"子表级联改名调用数异常: {stmts}"
 
 
@@ -1596,3 +1640,211 @@ def test_kafka_connection_config_with_host_passes():
         domain="d",
     )
     assert req.connection_config["host"] == "kafka:9092"
+
+
+# ---------- 全链路工业级修复回归（列元数据 / 单实体刷新 / 签名短路 / 降级事件） ----------
+
+
+async def test_repo_upsert_short_circuits_when_signature_unchanged():
+    """元数据增量短路：内容签名未变、无漂移 → 不写库不更新实体。
+
+    这是 PostgreSQL 等无源端时间戳类型的核心增量机制——全量扫描廉价，
+    真正代价是逐实体 UPDATE；短路后仅变更落库。
+    """
+    existing = MagicMock()
+    existing.content_signature = "sig"
+    existing.schema_json = {"columns": ["old"]}
+    with (
+        patch("app.services.collector.repository.compute_content_signature", return_value="sig"),
+        patch(
+            "app.services.collector.repository.DriftDetector.detect", return_value=None
+        ) as mock_detect,
+    ):
+        repo = CollectorRepository(_session(scalar_one_or_none=existing))
+        cat, created, drift_info = await repo.upsert_catalog(
+            source_id="s",
+            entity_name="t",
+            entity_type="TABLE",
+            schema_json={"columns": ["new"]},
+            etl_sql=None,
+            sensitivity_level="PII",
+            owner_id=None,
+        )
+    assert created is False
+    assert cat is existing
+    # 短路：实体未被原地更新（旧 schema_json 保持不变）
+    assert existing.schema_json == {"columns": ["old"]}
+    mock_detect.assert_called_once()
+
+
+class _EntityConnector:
+    """模拟按 (schema, table) 过滤列元数据的假连接器（collect_entity 专用）。"""
+
+    def __init__(self, columns: dict[tuple[str, str], list[dict]]) -> None:
+        self._columns = columns
+
+    async def query(self, sql: str, params: dict | None = None) -> list[dict]:
+        params = params or {}
+        return self._columns.get((params.get("schema", ""), params.get("tbl", "")), [])
+
+    async def dispose(self) -> None:
+        return None
+
+
+async def test_collect_entity_mysql_single_database():
+    """MySQL 单库模式：collect_entity 精确返回目标表列元数据（含注释）。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _EntityConnector(
+        {
+            ("finance", "orders"): [
+                {
+                    "table_name": "orders",
+                    "column_name": "order_id",
+                    "data_type": "bigint",
+                    "is_nullable": "NO",
+                    "column_comment": "订单ID",
+                    "column_default": "0",
+                }
+            ],
+        }
+    )
+    collector = InformationSchemaCollector(connector, database="finance")
+    spec = await collector.collect_entity(MagicMock(source_id="s1"), "orders")
+    assert spec is not None
+    assert spec.entity_name == "orders"
+    col = spec.schema_json["columns"][0]
+    assert col["name"] == "order_id"
+    assert col["comment"] == "订单ID"
+    assert col["default"] == "0"
+    # 单库模式：entity_name 含库名不属于本实例 → None（回退全量）
+    assert await collector.collect_entity(MagicMock(source_id="s1"), "other.orders") is None
+
+
+async def test_collect_entity_mysql_multi_database_missing():
+    """MySQL 多库模式：entity_name 需带 schema；源端无此表返回 None。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _EntityConnector(
+        {
+            ("finance", "orders"): [
+                {
+                    "table_name": "orders",
+                    "column_name": "order_id",
+                    "data_type": "bigint",
+                    "is_nullable": "NO",
+                    "column_comment": "",
+                    "column_default": None,
+                }
+            ],
+        }
+    )
+    collector = InformationSchemaCollector(connector)  # database=None 多库模式
+    spec = await collector.collect_entity(MagicMock(source_id="s1"), "finance.orders")
+    assert spec is not None
+    assert spec.entity_name == "finance.orders"
+    # 多库模式纯表名无法定位 schema → None
+    assert await collector.collect_entity(MagicMock(source_id="s1"), "orders") is None
+    # 源端表不存在 → None
+    assert await collector.collect_entity(MagicMock(source_id="s1"), "finance.ghost") is None
+
+
+async def test_refresh_entity_uses_collect_entity():
+    """refresh_entity 走连接器单实体采集，不触发全源扫描；注释命中 PII 分级。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s"))
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), False, None))
+    repo.update_health_status = AsyncMock()
+
+    class SingleCollector:
+        async def collect_entity(self, source: object, entity_name: str):
+            return CatalogSpec(
+                entity_name=entity_name,
+                entity_type="TABLE",
+                schema_json={
+                    "columns": [{"name": "c1", "type": "varchar", "comment": "用户手机号"}]
+                },
+            )
+
+        async def collect(self, source: object) -> CollectResult:
+            raise AssertionError("单实体刷新不应触发全源采集")
+
+    result = await svc.refresh_entity("s", "orders", 1, SingleCollector())
+    assert result["entity_name"] == "orders"
+    # 列注释含「手机号」→ PII（修复前注释未采集，此列会被误判 INTERNAL）
+    assert result["sensitivity_level"] == "PII"
+    assert result["columns"] == 1
+    assert result["drifted"] is False
+    repo.upsert_catalog.assert_awaited_once()
+    repo.update_health_status.assert_awaited_once_with("s", "healthy")
+
+
+async def test_refresh_entity_fallback_to_full_when_unsupported():
+    """连接器未实现 collect_entity（继承默认）→ 回退全量采集后仅取目标实体。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s"))
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), False, None))
+    repo.update_health_status = AsyncMock()
+
+    class FullOnlyCollector(BaseCollector):
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="orders",
+                        entity_type="TABLE",
+                        schema_json={"columns": [{"name": "a", "type": "varchar"}]},
+                    )
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    result = await svc.refresh_entity("s", "orders", 1, FullOnlyCollector())
+    assert result["entity_name"] == "orders"
+
+
+async def test_refresh_entity_raises_when_source_entity_missing():
+    """目标实体在源端不存在 → NotFoundError（非静默成功）。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s"))
+
+    class MissingCollector:
+        async def collect_entity(self, source: object, entity_name: str):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            raise AssertionError("不应回退全量")
+
+    with pytest.raises(NotFoundError, match="源端不存在实体"):
+        await svc.refresh_entity("s", "ghost", 1, MissingCollector())
+
+
+async def test_collect_and_register_emits_degrade_event():
+    """可观测性：增量请求被降级为全量时发布 collect_degraded 事件（不静默失效）。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock(source_type="postgres"))
+    repo.get_watermark = AsyncMock(
+        return_value=MagicMock(last_collected_at=datetime(2026, 1, 1, tzinfo=UTC))
+    )
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+
+    class StubCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(specs=[], failed_specs=[], source_id="s")
+
+    await svc.collect_and_register("s", StubCollector(), actor_id=1, mode="INCREMENTAL")
+    # postgres 不支持增量 → 降级 FULL → 发布 collect_degraded
+    events.publish.assert_awaited_once()
+    event_type = events.publish.await_args.args[0]
+    payload = events.publish.await_args.args[1]
+    assert event_type == "collect_degraded"
+    assert payload["reason"] == "source_type_not_supported:postgres"

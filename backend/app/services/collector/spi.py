@@ -78,6 +78,22 @@ class BaseCollector(ABC):
         """采集数据源，返回采集结果（含成功 specs 与失败 failed_specs）。"""
         ...
 
+    async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
+        """采集单个实体（单表元数据刷新，生产运维场景）。
+
+        仅刷新目标表/实体，不触发全源扫描。返回该实体的最新 CatalogSpec；
+        连接器不支持单实体采集（如 Hive 启动开销大）时返回 None，
+        调用方应回退到全量采集后仅取目标实体。
+
+        Args:
+            source: 数据源 ORM 对象。
+            entity_name: 目录实体名（形如 ``schema.table`` 或 ``table``）。
+
+        Returns:
+            最新 CatalogSpec，不支持时返回 None。
+        """
+        return None
+
     def set_incremental_context(self, mode: str, watermark_ts: Any | None = None) -> None:
         """注入增量采集上下文（P0-6：由 service 层在 collect 前调用）。
 

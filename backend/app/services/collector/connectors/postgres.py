@@ -74,6 +74,63 @@ class PostgresCollector(BaseCollector):
                 names.append(str(name))
         return names
 
+    async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
+        """单表元数据刷新：仅查询目标表列元数据（含 pg_description 注释）。
+
+        ``entity_name`` 在单 schema 模式为 ``table``；多 schema 模式为 ``schema.table``。
+        表不存在或无法定位 schema 时返回 None（调用方回退全量采集）。
+        """
+        if self._schema:
+            schema, tbl = self._schema, entity_name
+        else:
+            if "." not in entity_name:
+                return None
+            schema, tbl = entity_name.rsplit(".", 1)
+        if not schema or not tbl:
+            return None
+        try:
+            col_rows = await self._connector.query(
+                "SELECT column_name, data_type, is_nullable, column_default, ordinal_position "
+                "FROM information_schema.columns "
+                "WHERE table_schema = :schema AND table_name = :tbl "
+                "ORDER BY ordinal_position",
+                {"schema": schema, "tbl": tbl},
+            )
+            comment_rows = await self._connector.query(
+                "SELECT a.attname AS column_name, "
+                "coalesce(col_description(a.attrelid, a.attnum), "
+                "obj_description(a.attrelid)) AS column_comment "
+                "FROM pg_catalog.pg_attribute a "
+                "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = :schema AND c.relname = :tbl "
+                "AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
+                {"schema": schema, "tbl": tbl},
+            )
+        except Exception as exc:
+            raise ExternalDependencyError(f"刷新实体 {entity_name} 失败: {exc}") from exc
+        comment_map = {
+            str(r.get("column_name", "")): str(r.get("column_comment") or "") for r in comment_rows
+        }
+        cols = [
+            {
+                "name": r.get("column_name"),
+                "type": r.get("data_type") or "unknown",
+                "nullable": str(r.get("is_nullable") or "YES").upper() == "YES",
+                "default": r.get("column_default"),
+                "comment": comment_map.get(str(r.get("column_name", "")), ""),
+            }
+            for r in col_rows
+            if r.get("column_name")
+        ]
+        if not cols:
+            return None
+        return CatalogSpec(
+            entity_name=entity_name,
+            entity_type="TABLE",
+            schema_json={"columns": cols},
+        )
+
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
 
@@ -98,10 +155,14 @@ class PostgresCollector(BaseCollector):
                 logger.warning("采集源 %s 库 %s 表列表失败: %s", source_id, schema, exc)
                 continue
 
-            # P1-2: 一次批量查出该库全部表的列，消除 N+1 查询
+            # P1-2: 一次批量查出该库全部表的列，消除 N+1 查询；
+            # P0: 补列类型（data_type）、可空（is_nullable）、默认值（column_default）、
+            #     注释（column_comment）。Postgres 注释在 pg_description（pg_catalog 层），
+            #     需单独批量查询——先用 information_schema 拿列基本信息。
             try:
                 col_rows = await self._connector.query(
-                    "SELECT table_name, column_name, data_type, is_nullable "
+                    "SELECT table_name, column_name, data_type, is_nullable, "
+                    "column_default, ordinal_position "
                     "FROM information_schema.columns "
                     "WHERE table_schema = :schema ORDER BY table_name, ordinal_position",
                     {"schema": schema},
@@ -109,16 +170,43 @@ class PostgresCollector(BaseCollector):
             except Exception as exc:
                 logger.warning("采集源 %s 库 %s 列列表失败: %s", source_id, schema, exc)
                 col_rows = []
+
+            # P0: 批量获取列注释（pg_catalog 层）——单次查询映射 (table, column) → comment，
+            # 避免逐列子查询的 N+1，同时对 information_schema 结果做 join 补全。
+            comment_map: dict[tuple[str, str], str] = {}
+            try:
+                comment_rows = await self._connector.query(
+                    "SELECT c.relname AS table_name, a.attname AS column_name, "
+                    "coalesce(col_description(a.attrelid, a.attnum), "
+                    "obj_description(a.attrelid)) AS column_comment "
+                    "FROM pg_catalog.pg_attribute a "
+                    "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = :schema "
+                    "AND a.attnum > 0 AND NOT a.attisdropped "
+                    "ORDER BY c.relname, a.attnum",
+                    {"schema": schema},
+                )
+                for r in comment_rows:
+                    key = (str(r.get("table_name", "")), str(r.get("column_name", "")))
+                    comment_map[key] = str(r.get("column_comment") or "")
+            except Exception as exc:
+                logger.warning("采集源 %s 库 %s 列注释查询失败: %s", source_id, schema, exc)
+
             columns_by_table: dict[str, list[dict[str, Any]]] = {}
             for r in col_rows:
                 tbl = r.get("table_name")
                 col = r.get("column_name")
                 if tbl and col:
-                    columns_by_table.setdefault(tbl, []).append({
-                        "name": col,
-                        "type": r.get("data_type") or "unknown",
-                        "nullable": str(r.get("is_nullable") or "YES").upper() == "YES",
-                    })
+                    columns_by_table.setdefault(tbl, []).append(
+                        {
+                            "name": col,
+                            "type": r.get("data_type") or "unknown",
+                            "nullable": str(r.get("is_nullable") or "YES").upper() == "YES",
+                            "default": r.get("column_default"),
+                            "comment": comment_map.get((str(tbl), str(col)), ""),
+                        }
+                    )
 
             for row in tables:
                 tbl = row.get("table_name")

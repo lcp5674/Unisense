@@ -1,8 +1,13 @@
 """敏感分级规则引擎（对齐 TD §12.1「敏感分级（PII/机密）」）。
 
-纯函数、确定性、可单测：依据实体名与字段名（schema_json.columns）匹配
-PII / 机密 关键字与令牌正则，给出 sensitivity_level。
+纯函数、确定性、可单测：依据实体名、字段名（schema_json.columns）以及字段注释（column.comment）
+匹配 PII / 机密 关键字与令牌正则，给出 sensitivity_level。
 默认为 INTERNAL（PUBLIC 仅用于显式公开维度，不在自动分级中给出）。
+
+P0 修复：分类器的 haystack 从仅含列名扩展为「列名 + 列注释」双重匹配——
+修复前：列注释从未被采集（所有连接器缺 column_comment），即使注释含「手机号」「客户邮箱」
+  也无法识别 PII，导致大量带注释的列被误判为 INTERNAL；
+修复后：schema_json.columns 中的 comment 字段被拼入 haystack，注释含敏感词即触发分级。
 """
 
 from __future__ import annotations
@@ -52,6 +57,20 @@ def _column_names(columns: list[Any]) -> list[str]:
     return names
 
 
+def _column_comments(columns: list[Any]) -> list[str]:
+    """提取列注释（P0 新增：修复前注释从未被采集，分类器无法利用注释匹配 PII）。
+
+    仅取非空注释，避免空字符串污染 haystack 触发误判。
+    """
+    comments: list[str] = []
+    for col in columns:
+        if isinstance(col, dict):
+            comment = col.get("comment")
+            if comment and str(comment).strip():
+                comments.append(str(comment).strip())
+    return comments
+
+
 class SensitivityClassifier:
     """敏感分级分类器（无状态，可注入用于测试）。"""
 
@@ -66,7 +85,10 @@ class SensitivityClassifier:
             敏感级别字符串。
         """
         columns = schema_json.get("columns", []) if isinstance(schema_json, dict) else []
-        haystack = f"{entity_name} " + " ".join(_column_names(columns))
+        # P0: haystack 扩展为「列名 + 列注释」，注释含敏感词同样触发 PII 分级
+        names = _column_names(columns)
+        comments = _column_comments(columns)
+        haystack = f"{entity_name} " + " ".join(names) + " " + " ".join(comments)
         for pattern in _PII_NAME_PATTERNS:
             if pattern.search(haystack):
                 return "PII"

@@ -281,6 +281,71 @@ async def register_catalog(
     return ok(data=resp, trace_id=trace_id)
 
 
+@source_router.get("/{source_id}/catalogs", dependencies=_READ_DEPS)
+async def list_source_catalogs(
+    source_id: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    entity_type: str | None = None,
+    sensitivity_level: str | None = None,
+    keyword: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> ApiResponse[DBCatalogListResponse]:
+    """按数据源查询采集目录（采集目录页按源查看表/字段的入口）。"""
+    svc = _svc(db)
+    params = DBCatalogListParams(
+        source_id=source_id,
+        entity_type=entity_type,
+        sensitivity_level=sensitivity_level,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+    return ok(data=await svc.list_catalogs(params), trace_id=trace_id)
+
+
+@source_router.post("/{source_id}/entities/{entity_name}/refresh", dependencies=_WRITE_DEPS)
+async def refresh_entity(
+    source_id: str,
+    entity_name: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """单实体元数据刷新（生产运维：只刷新一张表，不触发全源扫描）。
+
+    连接器支持单实体采集（MySQL/Postgres/ClickHouse）时精确刷新目标表；
+    不支持（Hive 等）时回退为全量采集后仅取目标实体。
+    """
+    svc = _svc(db)
+    src = await svc.get_source_orm(source_id)
+    collector = build_collector(src.source_type, src.connection_config)
+    try:
+        result = await svc.refresh_entity(source_id, entity_name, user.id, collector)
+    finally:
+        await collector.dispose()
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="REFRESH",
+        entity_type="db_catalog",
+        entity_id=f"{source_id}/{entity_name}",
+        detail={
+            "sensitivity": result["sensitivity_level"],
+            "drifted": result["drifted"],
+            "columns": result["columns"],
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+        pii_access=(result["sensitivity_level"] == "PII"),
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
 @source_router.post("/{source_id}/collect", dependencies=_WRITE_DEPS)
 async def collect_source(
     source_id: str,
@@ -503,9 +568,7 @@ async def list_drift_logs(
     用于前端展示数据源的 schema 漂移历史。
     """
     svc = _svc(db)
-    result = await svc.list_drift_logs(
-        source_id, entity_name, page=page, page_size=page_size
-    )
+    result = await svc.list_drift_logs(source_id, entity_name, page=page, page_size=page_size)
     return ok(
         data=DriftLogListResponse(**result),
         trace_id=trace_id,

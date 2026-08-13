@@ -206,6 +206,7 @@ async def test_service_incremental_degrades_to_full_for_unsupported():
 
         events = MagicMock()
         events.publish_batch = AsyncMock()
+        events.publish = AsyncMock()  # 降级事件 publish("collect_degraded")
         svc._events = events
 
         class StubCollector:
@@ -251,6 +252,7 @@ async def test_service_incremental_stays_incremental_for_mysql_with_watermark():
 
         events = MagicMock()
         events.publish_batch = AsyncMock()
+        events.publish = AsyncMock()  # 降级事件 publish("collect_degraded")
         svc._events = events
 
         class StubCollector:

@@ -17,11 +17,12 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from httpx import ASGITransport
 from sqlalchemy import text
@@ -29,19 +30,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.api import deps
-from app.core.exceptions import ConflictError
-from app.db.mysql import Base
 from app.models.user import Organization, User
-from app.services.collector.distributed_lock import CollectionLock
-from app.services.collector.schemas import CollectRequest, DataSourceCreateRequest
-from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult, FailedSpec
+from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult
 from app.services.llm.client import LlmError
 
 # --------------------------------------------------------------------------- #
 # 辅助常量与函数
 # --------------------------------------------------------------------------- #
 
-_BACKEND_DIR = Path(__file__).resolve().parents[3]
+# parents[2] = backend/（alembic.ini 所在目录）；parents[3] 会解析到仓库根，
+# 导致 alembic 子进程找不到配置。
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 # 独立测试库（不与生产 unisense / 开发 unisense_it 冲突）
 _EXT_DB_URL = os.getenv("UNISENSE_INTEGRATION_DB_URL") or os.getenv("UNISENSE_DB_URL")
@@ -52,13 +51,11 @@ def _default_test_db_url() -> str:
     """生成独立测试库 URL（替换库名为 unisense_it_collector）。"""
     if _EXT_DB_URL:
         base = _EXT_DB_URL.replace("mysql+pymysql", "mysql+aiomysql")
-        # 替换库名
-        if "/unisense" in base:
-            return base.replace("/unisense", "/unisense_it_collector")
-        if "/unisense_it" in base:
-            return base.replace("/unisense_it", "/unisense_it_collector")
-        # 兜底：直接拼接
-        return base.rstrip("/") + "/unisense_it_collector"
+        # 仅替换最后一个路径段（库名）。不能 .replace("/unisense", ...)——
+        # 会同时误改 URL 中 user 部分的 "unisense"（如 unisense:test@...），
+        # 导致库名被当成用户名（Access denied for user 'unisense_it_collector'）。
+        head, _, _tail = base.rpartition("/")
+        return f"{head}/unisense_it_collector"
     return "mysql+aiomysql://root:test@localhost:3306/unisense_it_collector?charset=utf8mb4"
 
 
@@ -110,9 +107,7 @@ def _reset_via_alembic(url: str) -> None:
             if attempt < 2:
                 time.sleep(1.0)
     assert last_exc is not None
-    raise RuntimeError(
-        f"Alembic upgrade failed after 3 attempts: {last_exc.stderr}"
-    ) from last_exc
+    raise RuntimeError(f"Alembic upgrade failed after 3 attempts: {last_exc.stderr}") from last_exc
 
 
 # --------------------------------------------------------------------------- #
@@ -121,47 +116,38 @@ def _reset_via_alembic(url: str) -> None:
 
 
 @pytest.fixture(scope="function")
-async def db_env():
-    """独立 MySQL 测试库 fixture（wipe + alembic upgrade head）。"""
-    # 先尝试创建库（如果不存在）
-    if _USE_EXT:
-        try:
-            admin_url = _EXT_DB_URL.replace("mysql+aiomysql", "mysql+pymysql")
-            subprocess.run(
-                [
-                    sys.executable, "-c",
-                    f"import MySQLdb; MySQLdb.connect(uri='{admin_url}').cursor().execute("
-                    f"'CREATE DATABASE IF NOT EXISTS unisense_it_collector CHARACTER SET utf8mb4')",
-                ],
-                check=True,
-                capture_output=True,
-            )
-        except Exception:
-            pass  # 库已存在或无权限，不阻断
+def db_env():
+    """独立 MySQL 测试库 fixture（wipe + alembic upgrade head）。
 
+    sync fixture：内部调用 ``asyncio.run`` 管理独立事件循环；若声明为 async，
+    会被 pytest-asyncio(auto) 放入运行中事件循环，``asyncio.run`` 报
+    "cannot be called from a running event loop" 导致测试被跳过。
+    """
     url = TEST_DB_URL
     engine = create_async_engine(url, echo=False, poolclass=NullPool)
 
+    # 干净复位：DROP + CREATE 整个测试库（对独立测试库最可靠）。
+    # 大量连续 DDL 下 MySQL 8.0 偶发 1684 / 1050 时序冲突（逐表 DROP 依赖表级锁，
+    # 前一个测试类的连接残留会阻塞）；整库重建原子、无残留。
+    db_name = TEST_DB_URL.split("?")[0].rsplit("/", 1)[1]
+    admin_url = TEST_DB_URL.rsplit("/", 1)[0] + "/"  # 无默认库，用于 DROP/CREATE DATABASE
+    admin_engine = create_async_engine(admin_url, echo=False, poolclass=NullPool)
+
     async def _wipe() -> None:
-        async with engine.begin() as conn:
-            await conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-            rows = (
-                await conn.execute(
-                    text(
-                        "SELECT table_name FROM information_schema.tables "
-                        "WHERE table_schema = DATABASE()"
-                    )
+        async with admin_engine.begin() as conn:
+            await conn.execute(text(f"DROP DATABASE IF EXISTS `{db_name}`"))
+            await conn.execute(
+                text(
+                    f"CREATE DATABASE `{db_name}` "
+                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
                 )
-            ).all()
-            for (tname,) in rows:
-                await conn.execute(text(f"DROP TABLE IF EXISTS `{tname}`"))
-            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            await conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+            )
 
     try:
         asyncio.run(_wipe())
     except Exception as exc:
         pytest.skip(f"无法连接测试数据库，跳过集成测试: {exc}")
+    asyncio.run(admin_engine.dispose())
 
     _reset_via_alembic(TEST_DB_URL)
 
@@ -215,25 +201,37 @@ class TestCollectorFullChain:
             "source_id": source_id,
             "name": f"MySQL数据源_{ts}",
             "source_type": "mysql",
-            "connection_config": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "test"},
+            "connection_config": {
+                "host": "127.0.0.1",
+                "port": 3306,
+                "user": "root",
+                "password": "test",
+            },
             "domain": "db_test",
         }
         resp = await client.post("/api/v1/data-sources", json=create_payload, headers=headers)
         assert resp.status_code == 200, f"创建数据源失败: {resp.text}"
         data = resp.json()
-        assert data["code"] == 0, f"API 错误: {data}"
+        assert data["code"] == "OK", f"API 错误: {data}"
         assert data["data"]["source_id"] == source_id
         assert data["data"]["connection_config_present"] is True
 
         # Step 2: 测试连接（预期失败，因为 MySQL 不可达，但应返回结构化结果）
         test_payload = {
             "source_type": "mysql",
-            "connection_config": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "test"},
+            "connection_config": {
+                "host": "127.0.0.1",
+                "port": 3306,
+                "user": "root",
+                "password": "test",
+            },
         }
-        resp = await client.post("/api/v1/data-sources/test-connection", json=test_payload, headers=headers)
+        resp = await client.post(
+            "/api/v1/data-sources/test-connection", json=test_payload, headers=headers
+        )
         assert resp.status_code == 200, f"测试连接失败: {resp.text}"
         data = resp.json()
-        assert data["code"] == 0
+        assert data["code"] == "OK"
         assert "ok" in data["data"]
         assert "source_type" in data["data"]
         # ok=False 是预期行为（测试 MySQL 不可达）
@@ -251,15 +249,15 @@ class TestCollectorFullChain:
         )
         assert resp.status_code == 200, f"注册 catalog 失败: {resp.text}"
         data = resp.json()
-        assert data["code"] == 0
+        assert data["code"] == "OK"
         assert data["data"]["entity_name"] == f"ods_orders_{ts}"
         assert data["data"]["sensitivity_level"] == "PII"  # user_name → PII
 
-        # Step 4: 查询 catalog 列表
-        resp = await client.get(f"/api/v1/data-sources/{source_id}/catalogs")
+        # Step 4: 查询 catalog 列表（全局 /catalogs 端点，按 source_id 过滤）
+        resp = await client.get(f"/api/v1/catalogs?source_id={source_id}")
         assert resp.status_code == 200, f"查询 catalogs 失败: {resp.text}"
         data = resp.json()
-        assert data["code"] == 0
+        assert data["code"] == "OK"
         assert data["data"]["total"] == 1
         assert data["data"]["items"][0]["entity_name"] == f"ods_orders_{ts}"
 
@@ -267,7 +265,7 @@ class TestCollectorFullChain:
         resp = await client.get(f"/api/v1/data-sources/{source_id}/watermark")
         assert resp.status_code == 200, f"查询 watermark 失败: {resp.text}"
         data = resp.json()
-        assert data["code"] == 0
+        assert data["code"] == "OK"
         assert data["data"]["source_id"] == source_id
         assert data["data"]["last_collected_at"] is None  # 从未采集
 
@@ -275,7 +273,7 @@ class TestCollectorFullChain:
         resp = await client.get(f"/api/v1/data-sources/{source_id}/health")
         assert resp.status_code == 200, f"健康检查失败: {resp.text}"
         data = resp.json()
-        assert data["code"] == 0
+        assert data["code"] == "OK"
         assert data["data"]["source_id"] == source_id
         assert data["data"]["health_status"] == "unknown"
 
@@ -283,14 +281,14 @@ class TestCollectorFullChain:
         resp = await client.get("/api/v1/data-sources?page=1&page_size=10")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["code"] == 0
+        assert data["code"] == "OK"
         assert data["data"]["total"] >= 1
 
         # Step 8: 列出全部 source_type
         resp = await client.get("/api/v1/data-sources/types")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["code"] == 0
+        assert data["code"] == "OK"
         assert len(data["data"]) > 0
         type_names = [t["source_type"] for t in data["data"]]
         assert "mysql" in type_names
@@ -311,7 +309,12 @@ class TestConcurrentCollectionConflict:
             "source_id": source_id,
             "name": f"并发测试数据源_{ts}",
             "source_type": "mysql",
-            "connection_config": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "test"},
+            "connection_config": {
+                "host": "127.0.0.1",
+                "port": 3306,
+                "user": "root",
+                "password": "test",
+            },
             "domain": "db_concurrent",
         }
         resp = await client.post("/api/v1/data-sources", json=create_payload, headers=headers)
@@ -329,7 +332,7 @@ class TestConcurrentCollectionConflict:
 
         # 第一次 collect（预期成功或超时，因为 mock collector）
         # 注意：由于 collector 需要真实连接，这里我们 mock build_collector
-        with patch("app.services.collector.spi.registry.build") as mock_build:
+        with patch("app.services.collector.connectors.registry.build") as mock_build:
             mock_collector = MagicMock(spec=BaseCollector)
             mock_collector.set_incremental_context = MagicMock()
             mock_collector.collect = AsyncMock(
@@ -349,7 +352,7 @@ class TestConcurrentCollectionConflict:
 
         # 第二次 collect（模拟并发场景，用 mock 实现锁冲突）
         # 由于分布式锁在 Redis 不可用时降级为无锁模式，我们测试 API 层面的锁逻辑
-        with patch("app.services.collector.spi.registry.build") as mock_build:
+        with patch("app.services.collector.connectors.registry.build") as mock_build:
             mock_collector = MagicMock(spec=BaseCollector)
             mock_collector.set_incremental_context = MagicMock()
             mock_collector.collect = AsyncMock(
@@ -383,7 +386,9 @@ class TestCatalogIdempotency:
     """测试3: 幂等性测试。"""
 
     @pytest.mark.asyncio
-    async def test_duplicate_catalog_registration_is_idempotent(self, client: httpx.AsyncClient, db_env):
+    async def test_duplicate_catalog_registration_is_idempotent(
+        self, client: httpx.AsyncClient, db_env
+    ):
         """同一 entity_name 重复注册应幂等（返回 200，不抛重复键错误）。"""
         ts = int(datetime.now(UTC).timestamp())
         source_id = f"mysql_idemp_{ts}"
@@ -395,7 +400,12 @@ class TestCatalogIdempotency:
             "source_id": source_id,
             "name": f"幂等测试数据源_{ts}",
             "source_type": "mysql",
-            "connection_config": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "test"},
+            "connection_config": {
+                "host": "127.0.0.1",
+                "port": 3306,
+                "user": "root",
+                "password": "test",
+            },
             "domain": "db_idemp",
         }
         resp = await client.post("/api/v1/data-sources", json=create_payload, headers=headers)
@@ -413,7 +423,7 @@ class TestCatalogIdempotency:
         )
         assert resp1.status_code == 200, f"第一次注册失败: {resp1.text}"
         data1 = resp1.json()
-        assert data1["code"] == 0
+        assert data1["code"] == "OK"
         assert data1["data"]["entity_name"] == entity_name
 
         # 第二次注册（幂等）
@@ -422,11 +432,11 @@ class TestCatalogIdempotency:
         )
         assert resp2.status_code == 200, f"第二次注册失败（不幂等）: {resp2.text}"
         data2 = resp2.json()
-        assert data2["code"] == 0, f"第二次注册返回错误（不幂等）: {data2}"
+        assert data2["code"] == "OK", f"第二次注册返回错误（不幂等）: {data2}"
         assert data2["data"]["entity_name"] == entity_name
 
         # 验证只有一条记录
-        resp_list = await client.get(f"/api/v1/data-sources/{source_id}/catalogs")
+        resp_list = await client.get(f"/api/v1/catalogs?source_id={source_id}")
         data_list = resp_list.json()
         assert data_list["data"]["total"] == 1, "幂等失败：重复注册产生了多条记录"
 
@@ -446,7 +456,12 @@ class TestDegradationPaths:
             "source_id": source_id,
             "name": f"Redis降级测试_{ts}",
             "source_type": "mysql",
-            "connection_config": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "test"},
+            "connection_config": {
+                "host": "127.0.0.1",
+                "port": 3306,
+                "user": "root",
+                "password": "test",
+            },
             "domain": "db_redis",
         }
         resp = await client.post("/api/v1/data-sources", json=create_payload, headers=headers)
@@ -456,7 +471,7 @@ class TestDegradationPaths:
         with patch("app.db.redis.get_redis") as mock_redis:
             mock_redis.side_effect = RuntimeError("Redis connection refused")
 
-            with patch("app.services.collector.spi.registry.build") as mock_build:
+            with patch("app.services.collector.connectors.registry.build") as mock_build:
                 mock_collector = MagicMock(spec=BaseCollector)
                 mock_collector.set_incremental_context = MagicMock()
                 mock_collector.collect = AsyncMock(
@@ -498,14 +513,19 @@ class TestDegradationPaths:
             "source_id": source_id,
             "name": f"LLM降级测试_{ts}",
             "source_type": "mysql",
-            "connection_config": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "test"},
+            "connection_config": {
+                "host": "127.0.0.1",
+                "port": 3306,
+                "user": "root",
+                "password": "test",
+            },
             "domain": "db_llm",
         }
         resp = await client.post("/api/v1/data-sources", json=create_payload, headers=headers)
         assert resp.status_code == 200, f"创建数据源失败: {resp.text}"
 
-        # Mock LLM 不可用
-        with patch("app.services.collector.service.build_llm_client") as mock_build_client:
+        # Mock LLM 不可用（build_llm_client 在 llm.client 模块，service 内函数级 import）
+        with patch("app.services.llm.client.build_llm_client") as mock_build_client:
             mock_client = MagicMock()
             mock_client.enabled = True
             mock_client.chat = AsyncMock(side_effect=LlmError("LLM service unavailable"))
@@ -540,19 +560,22 @@ class TestDegradationPaths:
             "source_id": source_id,
             "name": f"采集失败测试_{ts}",
             "source_type": "mysql",
-            "connection_config": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "test"},
+            "connection_config": {
+                "host": "127.0.0.1",
+                "port": 3306,
+                "user": "root",
+                "password": "test",
+            },
             "domain": "db_collector",
         }
         resp = await client.post("/api/v1/data-sources", json=create_payload, headers=headers)
         assert resp.status_code == 200, f"创建数据源失败: {resp.text}"
 
         # Mock 采集器抛出异常
-        with patch("app.services.collector.spi.registry.build") as mock_build:
+        with patch("app.services.collector.connectors.registry.build") as mock_build:
             mock_collector = MagicMock(spec=BaseCollector)
             mock_collector.set_incremental_context = MagicMock()
-            mock_collector.collect = AsyncMock(
-                side_effect=Exception("数据源连接失败")
-            )
+            mock_collector.collect = AsyncMock(side_effect=Exception("数据源连接失败"))
             mock_collector.dispose = AsyncMock()
             mock_build.return_value = mock_collector
 
@@ -580,7 +603,12 @@ class TestCatalogKeywordSearch:
             "source_id": source_id,
             "name": f"搜索测试数据源_{ts}",
             "source_type": "mysql",
-            "connection_config": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "test"},
+            "connection_config": {
+                "host": "127.0.0.1",
+                "port": 3306,
+                "user": "root",
+                "password": "test",
+            },
             "domain": "db_search",
         }
         resp = await client.post("/api/v1/data-sources", json=create_payload, headers=headers)
@@ -609,15 +637,15 @@ class TestCatalogKeywordSearch:
         # 验证总数
         resp_all = await client.get(f"/api/v1/data-sources/{source_id}/catalogs")
         data_all = resp_all.json()
-        assert data_all["data"]["total"] == 5, f"期望 5 条 catalog，实际 {data_all['data']['total']}"
+        assert data_all["data"]["total"] == 5, (
+            f"期望 5 条 catalog，实际 {data_all['data']['total']}"
+        )
 
         # 用 keyword="orders" 搜索（应只返回 ods_orders_{ts}）
-        resp_search = await client.get(
-            f"/api/v1/data-sources/{source_id}/catalogs?keyword=orders"
-        )
+        resp_search = await client.get(f"/api/v1/data-sources/{source_id}/catalogs?keyword=orders")
         assert resp_search.status_code == 200, f"搜索失败: {resp_search.text}"
         data_search = resp_search.json()
-        assert data_search["code"] == 0
+        assert data_search["code"] == "OK"
 
         # keyword=orders 应匹配：ods_orders_{ts} 和 ods_order_items_{ts}
         matching_names = [item["entity_name"] for item in data_search["data"]["items"]]
@@ -626,9 +654,7 @@ class TestCatalogKeywordSearch:
         )
 
         # 用 keyword="dws" 搜索（应只返回 dws_sales_{ts}）
-        resp_search2 = await client.get(
-            f"/api/v1/data-sources/{source_id}/catalogs?keyword=dws"
-        )
+        resp_search2 = await client.get(f"/api/v1/data-sources/{source_id}/catalogs?keyword=dws")
         data_search2 = resp_search2.json()
         matching_names2 = [item["entity_name"] for item in data_search2["data"]["items"]]
         assert f"dws_sales_{ts}" in matching_names2, (
@@ -636,9 +662,7 @@ class TestCatalogKeywordSearch:
         )
 
         # 用 keyword="gmv" 搜索（应只返回 ads_gmv_{ts}）
-        resp_search3 = await client.get(
-            f"/api/v1/data-sources/{source_id}/catalogs?keyword=gmv"
-        )
+        resp_search3 = await client.get(f"/api/v1/data-sources/{source_id}/catalogs?keyword=gmv")
         data_search3 = resp_search3.json()
         matching_names3 = [item["entity_name"] for item in data_search3["data"]["items"]]
         assert f"ads_gmv_{ts}" in matching_names3, (
@@ -670,7 +694,12 @@ class TestCatalogBulkOperations:
             "source_id": source_id,
             "name": f"批量操作测试_{ts}",
             "source_type": "mysql",
-            "connection_config": {"host": "127.0.0.1", "port": 3306, "user": "root", "password": "test"},
+            "connection_config": {
+                "host": "127.0.0.1",
+                "port": 3306,
+                "user": "root",
+                "password": "test",
+            },
             "domain": "db_bulk",
         }
         resp = await client.post("/api/v1/data-sources", json=create_payload, headers=headers)
@@ -696,10 +725,12 @@ class TestCatalogBulkOperations:
                 {"source_id": source_id, "entity_name": "nonexistent_entity"},  # 不存在
             ]
         }
-        resp = await client.post("/api/v1/catalogs/bulk-deprecate", json=bulk_payload, headers=headers)
+        resp = await client.post(
+            "/api/v1/catalogs/bulk-deprecate", json=bulk_payload, headers=headers
+        )
         assert resp.status_code == 200, f"批量废弃失败: {resp.text}"
         data = resp.json()
-        assert data["code"] == 0
+        assert data["code"] == "OK"
         assert len(data["data"]["succeeded"]) == 2, f"期望 2 个成功，实际: {data['data']}"
         assert len(data["data"]["failed"]) == 1, f"期望 1 个失败，实际: {data['data']}"
 

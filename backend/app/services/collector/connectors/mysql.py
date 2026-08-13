@@ -125,6 +125,51 @@ class InformationSchemaCollector(BaseCollector):
                 names.append(str(name))
         return names
 
+    async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
+        """单表元数据刷新：仅查询目标表的列元数据，不触发全源扫描。
+
+        ``entity_name`` 在单库模式为 ``table``；多库模式为 ``schema.table``。
+        表不存在或实体名无法定位 schema 时返回 None（由调用方回退全量采集）。
+        """
+        if self._database:
+            schema, tbl = self._database, entity_name
+        else:
+            if "." not in entity_name:
+                return None
+            schema, tbl = entity_name.rsplit(".", 1)
+        if not schema or not tbl:
+            return None
+        try:
+            rows = await self._connector.query(
+                "SELECT table_name, column_name, data_type, is_nullable, "
+                "column_comment, column_default "
+                "FROM information_schema.columns "
+                "WHERE table_schema = :schema AND table_name = :tbl "
+                "ORDER BY ordinal_position",
+                {"schema": schema, "tbl": tbl},
+            )
+        except Exception as exc:
+            raise ExternalDependencyError(f"刷新实体 {entity_name} 失败: {exc}") from exc
+        cols = [
+            {
+                "name": r.get("column_name"),
+                "type": r.get("data_type") or "unknown",
+                "nullable": str(r.get("is_nullable") or "YES").upper() == "YES",
+                "comment": r.get("column_comment") or "",
+                "default": r.get("column_default"),
+            }
+            for r in rows
+            if r.get("column_name")
+        ]
+        if not cols:
+            # 源端无此表 → 无法刷新，由调用方回退全量采集
+            return None
+        return CatalogSpec(
+            entity_name=entity_name,
+            entity_type="TABLE",
+            schema_json={"columns": cols},
+        )
+
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
         # P0-6: 读取增量上下文（service 层 collect 前注入）
@@ -173,10 +218,13 @@ class InformationSchemaCollector(BaseCollector):
                 continue
 
             # P1-1: 一次批量查询该库全部列并按表分组，消除「每表一次查询」的 N+1；
-            # 补列类型（data_type）和可空（is_nullable），schema_json 格式对齐采集器规范。
+            # P0: 补列类型（data_type）、可空（is_nullable）、注释（column_comment）、
+            #     默认值（column_default）——schema_json 完整存储供 PII 分类
+            #     （依赖列注释匹配）和下游消费。
             try:
                 col_rows = await self._connector.query(
-                    "SELECT table_name, column_name, data_type, is_nullable "
+                    "SELECT table_name, column_name, data_type, is_nullable, "
+                    "column_comment, column_default "
                     "FROM information_schema.columns "
                     "WHERE table_schema = :schema ORDER BY table_name, ordinal_position",
                     {"schema": schema},
@@ -189,11 +237,15 @@ class InformationSchemaCollector(BaseCollector):
                 tbl = r.get("table_name")
                 col = r.get("column_name")
                 if tbl and col:
-                    columns_by_table.setdefault(tbl, []).append({
-                        "name": col,
-                        "type": r.get("data_type") or "unknown",
-                        "nullable": str(r.get("is_nullable") or "YES").upper() == "YES",
-                    })
+                    columns_by_table.setdefault(tbl, []).append(
+                        {
+                            "name": col,
+                            "type": r.get("data_type") or "unknown",
+                            "nullable": str(r.get("is_nullable") or "YES").upper() == "YES",
+                            "comment": r.get("column_comment") or "",
+                            "default": r.get("column_default"),
+                        }
+                    )
 
             for row in tables:
                 tbl = row.get("table_name")

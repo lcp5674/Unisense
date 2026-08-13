@@ -119,9 +119,7 @@ class KafkaCollector(BaseCollector):
                 # 获取 Topic 元数据（describe_topics 为旧 API 但功能稳定；
                 # 依赖客户端不泄漏——见 finally close）
                 try:
-                    partitions = await asyncio.to_thread(
-                        client.describe_topics, [topic_name]
-                    )
+                    partitions = await asyncio.to_thread(client.describe_topics, [topic_name])
                     partition_count = 0
                     replication_factor = 0
                     if partitions and len(partitions) > 0:

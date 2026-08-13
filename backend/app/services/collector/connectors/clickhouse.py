@@ -116,6 +116,59 @@ class ClickHouseCollector(BaseCollector):
             await self._client.aclose()
             self._client = None
 
+    async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
+        """单表元数据刷新：仅查询目标表列元数据。
+
+        仅支持单库模式（``self._database`` 非空）——多库枚举模式下无法从
+        ``entity_name`` 可靠定位数据库，且 ``_query`` 受实例级 database 约束，
+        回退 None 由调用方走全量采集。
+        """
+        if not self._database:
+            return None
+        if "." in entity_name:
+            database, tbl = entity_name.rsplit(".", 1)
+            if database != self._database:
+                return None
+        else:
+            tbl = entity_name
+        if not tbl:
+            return None
+        try:
+            columns_text = await self._query(
+                f"SELECT name, type, default_kind, default_expression, comment "
+                f"FROM system.columns "
+                f"WHERE database = '{self._safe_ident(self._database)}' "
+                f"AND table = '{self._safe_ident(tbl)}' FORMAT TabSeparated"
+            )
+        except Exception as exc:
+            raise ExternalDependencyError(f"刷新实体 {entity_name} 失败: {exc}") from exc
+        cols = []
+        for line in columns_text.strip().splitlines():
+            parts = line.strip().split("\t")
+            col_name = parts[0] if len(parts) >= 1 else ""
+            col_type = parts[1] if len(parts) >= 2 else "unknown"
+            default_kind = parts[2] if len(parts) >= 3 else ""
+            default_expr = parts[3] if len(parts) >= 4 else ""
+            comment_text = parts[4] if len(parts) >= 5 else ""
+            if not col_name:
+                continue
+            col_default = default_expr if default_kind == "DEFAULT" else None
+            cols.append(
+                {
+                    "name": col_name,
+                    "type": col_type,
+                    "comment": comment_text,
+                    "default": col_default,
+                }
+            )
+        if not cols:
+            return None
+        return CatalogSpec(
+            entity_name=entity_name,
+            entity_type="TABLE",
+            schema_json={"columns": cols},
+        )
+
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
 
@@ -172,16 +225,34 @@ class ClickHouseCollector(BaseCollector):
                     continue
                 entity_name = f"{database}.{tbl}" if not self._database else tbl
                 try:
+                    # P0: 补列注释（comment）和默认值（default_kind/default_expression），
+                    # 完整 schema_json 供 PII 分类与下游消费。
                     columns_text = await self._query(
-                        f"SELECT name, type FROM system.columns "
+                        f"SELECT name, type, default_kind, default_expression, comment "
+                        f"FROM system.columns "
                         f"WHERE database = '{safe_db}' AND table = '{self._safe_ident(tbl)}' "
                         f"FORMAT TabSeparated"
                     )
                     columns = []
                     for line in columns_text.strip().splitlines():
                         parts = line.strip().split("\t")
-                        if len(parts) >= 2:
-                            columns.append({"name": parts[0], "type": parts[1]})
+                        col_name = parts[0] if len(parts) >= 1 else ""
+                        col_type = parts[1] if len(parts) >= 2 else "unknown"
+                        default_kind = parts[2] if len(parts) >= 3 else ""
+                        default_expr = parts[3] if len(parts) >= 4 else ""
+                        comment_text = parts[4] if len(parts) >= 5 else ""
+                        if not col_name:
+                            continue
+                        # 仅认 DEFAULT 类型，MATERIALIZED/EPHEMERAL/ALIAS 不是可写默认值
+                        col_default = default_expr if default_kind == "DEFAULT" else None
+                        columns.append(
+                            {
+                                "name": col_name,
+                                "type": col_type,
+                                "comment": comment_text,
+                                "default": col_default,
+                            }
+                        )
                     schema_json = {"columns": columns}
                     specs.append(
                         CatalogSpec(

@@ -159,12 +159,22 @@ class HiveCollector(BaseCollector):
                     )
                     columns = []
                     for desc_row in desc_rows:
+                        # DESCRIBE schema.table 输出格式（TabSeparated）：
+                        # 列名 \t 类型 \t [注释]
+                        # 注释列可能为空（仅两列）。
                         if len(desc_row) >= 2:
                             col_name = desc_row[0].strip()
                             col_type = desc_row[1].strip()
+                            col_comment = desc_row[2].strip() if len(desc_row) >= 3 else ""
                             # 跳过分区信息和表级信息（空行或非列条目）
                             if col_name and not col_name.startswith("#"):
-                                columns.append({"name": col_name, "type": col_type})
+                                columns.append(
+                                    {
+                                        "name": col_name,
+                                        "type": col_type,
+                                        "comment": col_comment,
+                                    }
+                                )
                     schema_json = {"columns": columns}
                     specs.append(
                         CatalogSpec(

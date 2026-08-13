@@ -36,7 +36,7 @@ from app.services.collector.schemas import (
     DBCatalogResponse,
     TestConnectionResult,
 )
-from app.services.collector.spi import BaseCollector, CollectResult
+from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult
 from app.services.llm.client import LlmError
 
 logger = get_logger("unisense.collector.service")
@@ -532,6 +532,7 @@ class CollectorService(BaseService):
         # US3: 增量采集逻辑 —— 读取水位，不支持时降级为全量
         effective_mode = mode
         watermark_ts: datetime | None = None
+        degrade_reason: str | None = None
         if mode == "INCREMENTAL":
             from app.services.collector.incremental import should_degrade_to_full, should_mix_in
 
@@ -546,6 +547,11 @@ class CollectorService(BaseService):
                     watermark_ts,
                 )
                 effective_mode = "FULL"
+                degrade_reason = (
+                    "watermark_missing"
+                    if watermark_ts is None
+                    else f"source_type_not_supported:{src.source_type}"
+                )
             else:
                 # P0-3: MySQL InnoDB UPDATE_TIME 通常为 NULL，<10%% 表有效时降级全量
                 if (
@@ -559,12 +565,26 @@ class CollectorService(BaseService):
                         source_id,
                     )
                     effective_mode = "FULL"
+                    degrade_reason = "mysql_update_time_sparse"
                 if effective_mode == "INCREMENTAL":
                     logger.info(
                         "collect_incremental: source=%s watermark=%s",
                         source_id,
                         watermark_ts,
                     )
+
+        # 可观测性：增量请求被降级为全量时发布事件（供通知/审计/运维追踪），
+        # 避免「增量静默失效」——用户以为在走增量，实际每次全量扫描。
+        if degrade_reason is not None:
+            await self._events.publish(
+                "collect_degraded",
+                {
+                    "source_id": source_id,
+                    "reason": degrade_reason,
+                    "source_type": src.source_type,
+                    "watermark": watermark_ts.isoformat() if watermark_ts else None,
+                },
+            )
 
         # US5: 采集成功后更新健康状态
         try:
@@ -616,9 +636,7 @@ class CollectorService(BaseService):
                     spec.entity_name,
                     exc,
                 )
-                catalog_failed_specs.append(
-                    {"entity_name": spec.entity_name, "error": str(exc)}
-                )
+                catalog_failed_specs.append({"entity_name": spec.entity_name, "error": str(exc)})
                 continue
             # P2-4: 回填实体级内容指纹（供增量判断与审计追溯）
             signature = _cat.content_signature
@@ -679,10 +697,9 @@ class CollectorService(BaseService):
         )
 
         # P0-4: 合并 collector 层 failed_specs 与 catalog 层 failed_specs
-        all_failed_specs = (
-            [{"entity_name": f.entity_name, "error": f.error} for f in result.failed_specs]
-            + catalog_failed_specs
-        )
+        all_failed_specs = [
+            {"entity_name": f.entity_name, "error": f.error} for f in result.failed_specs
+        ] + catalog_failed_specs
         return {
             "source_id": source_id,
             "scanned": len(result.specs),
@@ -695,6 +712,67 @@ class CollectorService(BaseService):
             "drift_count": len(drift_events),
             "drift_events": drift_events,
             "deprecated_count": deprecated_count,
+        }
+
+    async def refresh_entity(
+        self,
+        source_id: str,
+        entity_name: str,
+        actor_id: int,
+        collector: BaseCollector,
+    ) -> dict[str, Any]:
+        """单实体元数据刷新（生产运维：只刷新一张表，不触发全源扫描）。
+
+        优先走连接器的 ``collect_entity`` 精确刷新；连接器不支持单实体采集
+        （如 Hive，启动开销大）时回退为全量采集后仅取目标实体。
+        目标实体在源端已不存在时抛 ``NotFoundError``。
+
+        Returns:
+            dict 含 entity_name / sensitivity_level / drifted / columns 数。
+        """
+        src = await self._repo.get_source(source_id)
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+
+        # 判断连接器是否真实覆盖了 collect_entity（区分「不支持」与「表不存在」）；
+        # getattr 兜底防御：不继承 BaseCollector 的自定义采集器视为不支持单实体。
+        collect_entity_fn = getattr(type(collector), "collect_entity", None)
+        supports_single = (
+            collect_entity_fn is not None and collect_entity_fn is not BaseCollector.collect_entity
+        )
+        spec: CatalogSpec | None = None
+        if supports_single:
+            spec = await collector.collect_entity(src, entity_name)
+        else:
+            result = await collector.collect(src)
+            for s in result.specs:
+                if s.entity_name == entity_name:
+                    spec = s
+                    break
+        if spec is None:
+            raise NotFoundError(f"源端不存在实体: {entity_name}")
+
+        sensitivity = self._classifier.classify(spec.entity_name, spec.schema_json)
+        _cat, _created, drift_info = await self._repo.upsert_catalog(
+            source_id=source_id,
+            entity_name=spec.entity_name,
+            entity_type=spec.entity_type,
+            schema_json=spec.schema_json,
+            etl_sql=spec.etl_sql,
+            sensitivity_level=sensitivity,
+            owner_id=None,
+        )
+        if drift_info is not None:
+            await self._handle_drift(source_id, spec.entity_name, drift_info)
+        # 刷新成功视为健康信号
+        await self._repo.update_health_status(source_id, "healthy")
+        await self._db.flush()
+        return {
+            "source_id": source_id,
+            "entity_name": spec.entity_name,
+            "sensitivity_level": sensitivity,
+            "drifted": drift_info is not None,
+            "columns": len(spec.schema_json.get("columns", [])),
         }
 
     async def schedule_collection(

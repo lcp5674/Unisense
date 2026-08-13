@@ -77,9 +77,7 @@ class CollectorRepository:
                 .values(source_id=new_id)
             )
             await self._db.execute(
-                update(DBCatalog)
-                .where(DBCatalog.source_id == source_id)
-                .values(source_id=new_id)
+                update(DBCatalog).where(DBCatalog.source_id == source_id).values(source_id=new_id)
             )
             # 变更审计日志一并改名保留（软删父源后仍可追溯）
             await self._db.execute(
@@ -212,6 +210,13 @@ class CollectorRepository:
                 entity_name,
                 drift_result.change_type,
             )
+
+        # 元数据增量短路：内容签名未变、无漂移且无归属变更 → 不写库。
+        # 这是 PostgreSQL 等无源端修改时间戳类型的关键增量机制——
+        # information_schema 目录扫描本身廉价，真正代价是逐实体 UPDATE；
+        # 短路后全量扫描退化为「仅变更落库」，大幅降低写放大。
+        if drift_result is None and old_signature == new_signature and owner_id is None:
+            return existing, False, None
 
         # 更新 catalog
         existing.schema_json = schema_json

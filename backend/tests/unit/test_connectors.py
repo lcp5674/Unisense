@@ -37,6 +37,21 @@ class _FakeConnector:
     async def query(self, sql: str, params: dict | None = None) -> list[dict]:
         if "information_schema.tables" in sql:
             return [{"table_name": t} for t in self._tables]
+        if "pg_catalog.pg_attribute" in sql:
+            # Postgres 注释查询（pg_description 层）→ 按 (table, column) 返回注释
+            rows = []
+            for tbl, cols in self._columns.items():
+                for c in cols:
+                    comment = c.get("comment", "")
+                    if comment:
+                        rows.append(
+                            {
+                                "table_name": tbl,
+                                "column_name": c.get("column_name"),
+                                "column_comment": comment,
+                            }
+                        )
+            return rows
         if "information_schema.columns" in sql:
             if "data_type" in sql:
                 # Postgres 批量列：SELECT table_name, column_name, data_type ...（P1-2 批量）
@@ -48,6 +63,8 @@ class _FakeConnector:
                                 "table_name": tbl,
                                 "column_name": c.get("column_name"),
                                 "data_type": c.get("data_type"),
+                                "column_default": c.get("column_default"),
+                                "ordinal_position": c.get("ordinal_position", 1),
                             }
                         )
                 return rows
@@ -61,6 +78,8 @@ class _FakeConnector:
                             "column_name": c.get("column_name"),
                             "data_type": c.get("data_type"),
                             "is_nullable": c.get("is_nullable", "YES"),
+                            "column_comment": c.get("comment", ""),
+                            "column_default": c.get("column_default"),
                         }
                     )
             return rows
@@ -144,9 +163,15 @@ async def test_mysql_collector_single_table_failure_skips():
     assert len(result.failed_specs) == 0  # 批量查询部分缺失不视为失败
     by_name = {s.entity_name: s for s in result.specs}
     assert by_name["table2"].schema_json["columns"] == []  # fail_at 表列缺失 → 空列
-    # P1-1: 成功表列信息为 {name,type,nullable} 字典
+    # P1-1: 成功表列信息为 {name,type,nullable,comment,default} 字典
     assert by_name["table1"].schema_json["columns"] == [
-        {"name": "table1_col1", "type": "unknown", "nullable": True}
+        {
+            "name": "table1_col1",
+            "type": "unknown",
+            "nullable": True,
+            "comment": "",
+            "default": None,
+        }
     ]
 
 
@@ -154,10 +179,19 @@ async def test_mysql_collector_single_table_failure_skips():
 
 
 async def test_postgres_collector_builds_specs():
-    """PostgreSQL 采集器正常采集返回 specs。"""
+    """PostgreSQL 采集器正常采集返回 specs（含注释/默认值——P0 列元数据补全）。"""
     conn = _FakeConnector(
         ["users"],
-        {"users": [{"column_name": "user_name", "data_type": "varchar"}]},
+        {
+            "users": [
+                {
+                    "column_name": "user_name",
+                    "data_type": "varchar",
+                    "column_default": "NULL",
+                    "comment": "用户姓名",
+                }
+            ]
+        },
     )
     collector = PostgresCollector(conn)
     result = await collector.collect(MagicMock(source_id="s1", domain="public"))
@@ -170,13 +204,15 @@ async def test_postgres_collector_builds_specs():
     assert len(cols) == 1
     assert cols[0]["name"] == "user_name"
     assert cols[0]["type"] == "varchar"
+    # P0 修复：pg_description 注释被采集并拼入 schema_json（供 PII 分类）
+    assert cols[0]["comment"] == "用户姓名"
 
 
 # ---------- HiveCollector ----------
 
 
 async def test_hive_collector_parses_beeline_output():
-    """Hive 采集器解析 beeline 输出。"""
+    """Hive 采集器解析 beeline 输出（含注释——P0 列元数据补全）。"""
     collector = HiveCollector(host="hive-host", database="test_db")
 
     # Mock _execute 方法
@@ -185,7 +221,11 @@ async def test_hive_collector_parses_beeline_output():
             return [["orders"], ["customers"]]
         if "DESCRIBE" in sql:
             if "orders" in sql:
-                return [["order_id", "bigint"], ["amount", "decimal(10,2)"]]
+                # DESCRIBE 第三列为注释（可为空）
+                return [
+                    ["order_id", "bigint", "订单ID"],
+                    ["amount", "decimal(10,2)", ""],
+                ]
             if "customers" in sql:
                 return [["customer_id", "int"], ["name", "string"]]
         return []
@@ -196,7 +236,13 @@ async def test_hive_collector_parses_beeline_output():
     assert isinstance(result, CollectResult)
     assert len(result.specs) == 2
     assert result.specs[0].entity_name == "orders"
-    assert result.specs[0].schema_json["columns"][0]["name"] == "order_id"
+    cols = result.specs[0].schema_json["columns"]
+    assert cols[0]["name"] == "order_id"
+    # P0 修复：DESCRIBE 第三列注释被采集
+    assert cols[0]["comment"] == "订单ID"
+    assert cols[1]["comment"] == ""
+    # 仅两列（无注释）向下兼容
+    assert result.specs[1].schema_json["columns"][0]["comment"] == ""
 
 
 # ---------- SparkCollector ----------
@@ -244,7 +290,7 @@ async def test_spark_collector_default_port_and_register():
 
 
 async def test_clickhouse_collector_parses_http_response():
-    """ClickHouse 采集器解析 HTTP API 响应。"""
+    """ClickHouse 采集器解析 HTTP API 响应（含默认值/注释——P0 列元数据补全）。"""
     collector = ClickHouseCollector(host="ch-host", database="test_db")
 
     # Mock _query 方法
@@ -253,7 +299,8 @@ async def test_clickhouse_collector_parses_http_response():
             return "events\nlogs\n"
         if "system.columns" in sql:
             if "events" in sql:
-                return "event_id\tUInt64\nevent_name\tString\n"
+                # name \t type \t default_kind \t default_expression \t comment
+                return "event_id\tUInt64\tDEFAULT\t0\t事件ID\nevent_name\tString\n"
             if "logs" in sql:
                 return "log_id\tUInt64\nmessage\tString\n"
         return ""
@@ -264,8 +311,15 @@ async def test_clickhouse_collector_parses_http_response():
     assert isinstance(result, CollectResult)
     assert len(result.specs) == 2
     assert result.specs[0].entity_name == "events"
-    assert result.specs[0].schema_json["columns"][0]["name"] == "event_id"
-    assert result.specs[0].schema_json["columns"][0]["type"] == "UInt64"
+    cols = result.specs[0].schema_json["columns"]
+    assert cols[0]["name"] == "event_id"
+    assert cols[0]["type"] == "UInt64"
+    # P0 修复：默认值与注释被采集（仅 DEFAULT 类型认作可写默认值）
+    assert cols[0]["default"] == "0"
+    assert cols[0]["comment"] == "事件ID"
+    # 旧版 2 列 TabSeparated 兼容：type 兜底、comment/default 为空
+    assert cols[1]["type"] == "String"
+    assert cols[1]["comment"] == ""
 
 
 # ---------- KafkaCollector ----------

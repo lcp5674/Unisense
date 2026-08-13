@@ -135,6 +135,12 @@ class WorkerSettings:
         audit_archive_task,
         auto_escalate_overdue,
     ]
+    # 任务级超时（秒）：源库挂起/慢查询拖死 worker 的最终防线。
+    # 单查询超时由连接器 query_timeout 兜底（60s），此处约束整个任务上限——
+    # 避免采集/扫描任务无限期占用 worker 事件循环。
+    job_timeout = 1800
+    # max_tries 保持默认（1）：幂等键在任务开头 SET NX 占位，失败重试会命中
+    # 已占位而跳过，故不引入重试，避免与幂等语义冲突。
     cron_jobs = [
         cron(
             collect_scheduler,
