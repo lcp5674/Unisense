@@ -91,3 +91,57 @@ async def test_metrics_endpoint(client: httpx.AsyncClient) -> None:
     resp = await client.get("/metrics")
     assert resp.status_code == 200
     assert "http_requests_total" in resp.text
+
+
+async def test_degraded_overview(client: httpx.AsyncClient) -> None:
+    """/health/degraded 返回统一降级面板摘要（OPS-05）。"""
+    from app.core.degradation_registry import init_degradation_registry
+
+    registry = init_degradation_registry()
+    registry.register_degradation("redis", "probe failed")
+    try:
+        resp = await client.get("/health/degraded")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["overall_status"] == "degraded"
+        assert body["degraded_count"] == 1
+        assert body["degraded_components"][0]["component"] == "redis"
+    finally:
+        init_degradation_registry()
+
+
+async def test_ready_registers_degradation_in_registry(
+    client: httpx.AsyncClient, monkeypatch
+) -> None:
+    """可选依赖降级时 /ready 同步写入降级注册中心（OPS-05）。"""
+    from app.core.degradation_registry import init_degradation_registry
+
+    init_degradation_registry()
+    db = MagicMock()
+    db.execute = AsyncMock()
+    redis = MagicMock()
+    redis.ping = AsyncMock()
+
+    async def fake_db():
+        yield db
+
+    async def fake_redis():
+        yield redis
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_redis] = fake_redis
+    monkeypatch.setattr(
+        "app.api.health.optional_dependency_status",
+        lambda: {"neo4j": False, "olap": True},
+    )
+    try:
+        resp = await client.get("/ready")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "degraded"
+        from app.core.degradation_registry import get_degradation_registry
+
+        registry = get_degradation_registry()
+        assert registry.is_degraded("neo4j") is True
+    finally:
+        app.dependency_overrides.clear()
+        init_degradation_registry()

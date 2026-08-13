@@ -15,6 +15,7 @@ from starlette.responses import Response
 
 from app.api.deps import DBSession, RedisClient
 from app.core.degradation import read_dependency_health
+from app.core.degradation_registry import get_degradation_registry
 from app.core.es_client import get_es_client
 from app.core.metrics import render_metrics
 from app.core.resilience import optional_dependency_status
@@ -82,6 +83,14 @@ async def ready(
         optional[name] = "ok" if alive else "fail"
     degraded = [n for n, s in optional.items() if s == "fail"]
 
+    # 同步降级注册中心（OPS-05 统一降级面板）：降级→注册，恢复→清除
+    registry = get_degradation_registry()
+    for name, state in optional.items():
+        if state == "fail":
+            registry.register_degradation(name, f"optional_dependency_probe_failed: {name}")
+        else:
+            registry.clear_degradation(name)
+
     if checks["db"] == "fail" or checks["redis"] == "fail":
         status = "unavailable"
     elif degraded:
@@ -96,6 +105,16 @@ async def ready(
         "degraded": degraded,
         "timestamp": int(time.time()),
     }
+
+
+@router.get("/health/degraded", summary="降级面板（统一降级状态）")
+async def degraded_overview() -> dict[str, object]:
+    """返回统一降级面板（OPS-05/TD §4.13）：当前活跃降级组件与状态摘要。
+
+    供运营看板/告警网关查询；进程内注册中心为权威源。
+    """
+    registry = get_degradation_registry()
+    return registry.get_status_summary()
 
 
 @router.get("/dependencies/health", summary="依赖实时健康态（运营看板）")

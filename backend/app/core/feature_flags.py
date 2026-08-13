@@ -198,3 +198,22 @@ def is_feature_enabled(
 ) -> bool:
     """便捷函数：判断特性开关是否启用。"""
     return get_feature_flag_manager().is_feature_enabled(name, domain, user_id)
+
+
+def is_feature_enabled_or_default(
+    name: str,
+    default: bool = True,
+    domain: str | None = None,
+    user_id: int | None = None,
+) -> bool:
+    """判断特性开关；未注册时返回 default（存量能力默认开启，非破坏性）。
+
+    与 ``is_feature_enabled`` 的安全侧默认（未注册→False）不同，此函数用于
+    **存量能力**的开关闸门：开关未注册（如未走 lifespan 的测试/工具脚本）
+    时保持既有行为可用；仅在显式注册且关闭时拦截。避免"新功能开关导致
+    存量功能在未初始化场景下被误拦"。
+    """
+    manager = get_feature_flag_manager()
+    if manager.get_flag(name) is None:
+        return default
+    return manager.is_feature_enabled(name, domain, user_id)

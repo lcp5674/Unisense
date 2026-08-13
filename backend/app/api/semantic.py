@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -46,14 +46,25 @@ async def list_templates(
     _user: CurrentUser,
     domain: str | None = None,
     is_active: bool | None = None,
+    keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
     db: AsyncSession = Depends(get_db_session),
 ) -> Any:
-    """列出指标模板，可按域和启用状态过滤。"""
+    """列出指标模板，可按域、启用状态和关键词过滤。"""
     q = select(MetricTemplate)
     if domain is not None:
         q = q.where(MetricTemplate.domain == domain)
     if is_active is not None:
         q = q.where(MetricTemplate.is_active == is_active)
+    if keyword:
+        # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
+        escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        q = q.where(
+            or_(
+                MetricTemplate.code.like(f"%{escaped}%"),
+                MetricTemplate.name.like(f"%{escaped}%"),
+                MetricTemplate.description.like(f"%{escaped}%"),
+            )
+        )
     q = q.order_by(MetricTemplate.domain, MetricTemplate.name)
     result = await db.execute(q)
     templates = result.scalars().all()
@@ -309,7 +320,16 @@ async def _issue_quickbi_ticket(
     request: Request,
 ) -> dict[str, Any]:
     """签发 QuickBI 嵌入票据（共享处理，供主路径与兼容路径复用）。"""
-    from app.core.exceptions import ValidationError
+    from app.core.exceptions import AuthError, ValidationError
+    from app.core.feature_flags import is_feature_enabled_or_default
+
+    # OPS-09 特性开关：QuickBI 嵌入能力可被平台管理员灰度关闭（默认开启，非破坏）
+    if not is_feature_enabled_or_default("quickbi"):
+        raise AuthError(
+            "QuickBI 报表嵌入能力已被平台管理员关闭",
+            error_code="FORBIDDEN",
+            ctx={"feature_flag": "quickbi"},
+        )
 
     report_id = str(body.get("reportId") or body.get("report_id") or "").strip()
     if not report_id:

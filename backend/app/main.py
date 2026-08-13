@@ -16,6 +16,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.admin_key_rotation import router as admin_key_rotation_router
 from app.api.ai import router as ai_router
 from app.api.assetmap import router as assetmap_router
 from app.api.audit import router as audit_router
@@ -24,6 +25,7 @@ from app.api.collector import catalog_router, source_router
 from app.api.conflict import router as conflict_router
 from app.api.consume import router as consume_router
 from app.api.dimension import router as dimension_router
+from app.api.feature_flags import router as feature_flags_router
 from app.api.glossary import router as glossary_router
 from app.api.governance import router as governance_router
 from app.api.health import router as health_router
@@ -34,6 +36,7 @@ from app.api.observability import router as observability_router
 from app.api.preferences import router as preferences_router
 from app.api.quality import router as quality_router
 from app.api.recommend import router as recommend_router
+from app.api.search import router as search_router
 from app.api.semantic import quickbi_compat_router as semantic_quickbi_compat_router
 from app.api.semantic import router as semantic_router
 from app.api.subject_domain import router as subject_domain_router
@@ -41,7 +44,10 @@ from app.api.system_dict import router as system_dict_router
 from app.api.tracking import router as tracking_router
 from app.core.config import ConfigurationError, settings
 from app.core.degradation import ensure_dependency_health_seed, handle_circuit_signal
+from app.core.degradation_registry import init_degradation_registry
+from app.core.dlq import init_dlq
 from app.core.eventbus import get_eventbus, init_eventbus
+from app.core.feature_flags import get_feature_flag_manager, init_feature_flag_manager
 from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
 from app.core.middleware import (
@@ -88,6 +94,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ---- EventBus 初始化 ----
     init_eventbus(redis_pool)
     logger.info("eventbus_initialized")
+
+    # ---- 死信队列初始化（TECH-04）：承接 Redis 发布失败的事件，定时重放兜底 ----
+    init_dlq()
+    logger.info("dlq_initialized")
+
+    # ---- 降级注册中心初始化（OPS-05）：统一降级面板 + /health/degraded ----
+    init_degradation_registry()
+    logger.info("degradation_registry_initialized")
+
+    # ---- 特性开关初始化（OPS-09）：注册默认开关（默认开启，非破坏性）+ Redis 刷新 ----
+    init_feature_flag_manager()
+    ffm = get_feature_flag_manager()
+    ffm.register_flag("emergency_publish", enabled=True, description="紧急发布能力开关（PA/DA）")
+    ffm.register_flag("quickbi", enabled=True, description="QuickBI 报表嵌入票据签发")
+    ffm.register_flag("ai.nl2sql", enabled=True, description="AI 问数 NL2SQL 能力")
+    ffm.register_flag("audit_archive", enabled=True, description="审计日志冷热归档任务")
+    if redis_pool is not None:
+        ffm.refresh_from_redis(redis_pool)
+    logger.info("feature_flags_initialized", count=len(ffm.get_all_flags()))
 
     # ---- 业务事件 → 通知闭环（TD §5.5）：quality/conflict/governance 事件落 notify 并投递 ----
     _register_notify_event_consumers()
@@ -249,12 +274,15 @@ def create_app() -> FastAPI:
     app.include_router(preferences_router, prefix="/api/v1")
     app.include_router(assetmap_router, prefix="/api/v1")
     app.include_router(recommend_router, prefix="/api/v1")
+    app.include_router(search_router, prefix="/api/v1")
     app.include_router(ai_router, prefix="/api/v1")
     app.include_router(tracking_router, prefix="/api/v1")
     app.include_router(semantic_router, prefix="/api/v1")
     app.include_router(semantic_quickbi_compat_router, prefix="/api/v1")
     app.include_router(subject_domain_router, prefix="/api/v1")
     app.include_router(system_dict_router, prefix="/api/v1")
+    app.include_router(feature_flags_router, prefix="/api/v1")
+    app.include_router(admin_key_rotation_router, prefix="/api/v1")
 
     return app
 

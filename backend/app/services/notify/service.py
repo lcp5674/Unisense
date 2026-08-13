@@ -11,7 +11,9 @@ P3: datetime.utcnow() → datetime.now(UTC)。
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -41,12 +43,55 @@ logger = get_logger(__name__)
 # 通知外发 HTTP 客户端共享单例：避免按请求实例化导致连接池/文件描述符泄漏。
 _HTTP_CLIENT: httpx.AsyncClient | None = None
 
+# 投递重试参数：瞬时故障（网络抖动/网关超时）下退避重试，避免偶发失败即丢通知。
+# 重试仅针对传输层异常（httpx.HTTPError / SMTPException），4xx/5xx 响应视为终态不重试。
+_DELIVERY_MAX_ATTEMPTS = 3
+_DELIVERY_BACKOFF_BASE = 0.2  # 秒，指数退避基数
+# SMTP 单次投递超时（避免 aiosmtplib 无超时导致协程永久挂起阻塞 fan-out）
+_SMTP_TIMEOUT = 10
+
 
 def _get_http_client() -> httpx.AsyncClient:
     global _HTTP_CLIENT
     if _HTTP_CLIENT is None:
         _HTTP_CLIENT = httpx.AsyncClient(timeout=10.0)
     return _HTTP_CLIENT
+
+
+async def _deliver_with_retry(
+    send: Callable[[], Awaitable[bool]],
+    *,
+    operation: str,
+    retry_on: tuple[type[Exception], ...],
+) -> bool:
+    """投递重试包装：对传输层瞬时异常退避重试，终态返回/明确失败不重试。
+
+    Args:
+        send: 执行单次投递的协程工厂，返回 True 表示成功（不重试）。
+        operation: 渠道名（日志用）。
+        retry_on: 触发重试的异常类型（仅传输层，不含业务终态）。
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _DELIVERY_MAX_ATTEMPTS + 1):
+        try:
+            # 业务终态（如 4xx/5xx 响应、渠道未配置）不重试：直接返回投递结果
+            return await send()
+        except retry_on as exc:
+            last_exc = exc
+            logger.warning(
+                "notify_delivery_retryable",
+                operation=operation,
+                attempt=attempt,
+                error=str(exc),
+            )
+            if attempt < _DELIVERY_MAX_ATTEMPTS:
+                await asyncio.sleep(_DELIVERY_BACKOFF_BASE * (2 ** (attempt - 1)))
+    logger.error(
+        "notify_delivery_exhausted",
+        operation=operation,
+        error=str(last_exc),
+    )
+    return False
 
 
 class NotifyService(BaseService):
@@ -300,9 +345,20 @@ class NotifyService(BaseService):
             msg = MIMEMultipart("alternative")
             msg["Subject"] = f"[Unisense] {notif.title or '通知'}"
             msg["From"] = smtp_user or "unisense-noreply@unisense.local"
-            msg["To"] = (
-                smtp_user or "admin@unisense.local"
-            )  # Placeholder; real impl uses subscriber email
+            # 真实收件人：按订阅人 ID 解析其注册邮箱；解析失败/缺邮箱时降级到发件人地址
+            recipient = None
+            if notif.subscriber_id:
+                try:
+                    resolved = await self._repo.get_user_email(notif.subscriber_id)
+                    if isinstance(resolved, str) and resolved:
+                        recipient = resolved
+                except Exception as exc:  # noqa: BLE001 - 收件人解析失败不阻断投递降级
+                    logger.warning(
+                        "notify_resolve_recipient_failed",
+                        notif_id=notif.id,
+                        error=str(exc),
+                    )
+            msg["To"] = recipient or smtp_user or "admin@unisense.local"
 
             event_type = notif.template_code or ""
             # HTML 邮件模板

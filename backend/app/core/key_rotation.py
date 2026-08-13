@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from cryptography.fernet import Fernet
@@ -75,6 +76,8 @@ class KeyRotationManager:
         self._decrypt_keys: list[bytes] = []
         self._active_fernet: Fernet | None = None
         self._decrypt_fernets: list[Fernet] = []
+        self._key_version: int = 1
+        self._key_created_at: datetime | None = None
 
     def initialize(self) -> None:
         """初始化密钥：构建活跃密钥和解密密钥列表。
@@ -115,6 +118,7 @@ class KeyRotationManager:
         self._active_key = active_key
         self._active_salt = salt
         self._active_fernet = Fernet(active_key)
+        self._key_created_at = datetime.now(UTC)
 
         # 旧密钥（SHA-256 派生）加入解密列表，支持旧数据解密
         if raw:
@@ -179,6 +183,115 @@ class KeyRotationManager:
         if key_created_at is None:
             return False
         return datetime.now(UTC) - key_created_at > timedelta(days=DEFAULT_KEY_EXPIRY_DAYS)
+
+    def migrate_secrets(
+        self,
+        list_func: Callable[[], list[str]],
+        decrypt_func: Callable[[bytes], bytes],
+        encrypt_func: Callable[[bytes], bytes],
+    ) -> int:
+        """迁移旧 SHA-256 加密的数据至当前 PBKDF2 活跃密钥。
+
+        Args:
+            list_func: 无参回调，返回待迁移加密条目列表（list[str]）。
+            decrypt_func: 接收密文 token 返回明文 bytes 的回调。
+            encrypt_func: 接收明文 bytes 返回密文 bytes 的回调。
+
+        Returns:
+            成功迁移的条目数。
+        """
+        items = list_func()
+        migrated = 0
+        for token in items:
+            try:
+                raw = token if isinstance(token, bytes) else token.encode("utf-8")
+                plaintext = decrypt_func(raw)
+                encrypt_func(plaintext)
+                migrated += 1
+            except Exception:
+                logger.warning("migrate_secret_failed", exc_info=True)
+                continue
+        logger.info("migrate_secrets_completed", total=len(items), migrated=migrated)
+        return migrated
+
+    def rotate_key(self, new_raw_key: str) -> None:
+        """轮换密钥：旧活跃密钥移入解密列表，新密钥成为活跃密钥。
+
+        Args:
+            new_raw_key: 新的原始密钥材料。
+
+        Raises:
+            ValueError: new_raw_key 为空。
+        """
+        if not new_raw_key:
+            raise ValueError("new_raw_key 不能为空")
+
+        new_key, new_salt = derive_key_pbkdf2(new_raw_key)
+        new_fernet = Fernet(new_key)
+
+        if self._active_fernet is not None and self._active_key is not None:
+            self._decrypt_keys.append(self._active_key)
+            self._decrypt_fernets.append(self._active_fernet)
+
+        self._active_key = new_key
+        self._active_salt = new_salt
+        self._active_fernet = new_fernet
+
+        self._decrypt_keys.insert(0, new_key)
+        self._decrypt_fernets.insert(0, new_fernet)
+
+        self._key_version += 1
+        self._key_created_at = datetime.now(UTC)
+
+        encoded_salt = base64.urlsafe_b64encode(new_salt).decode("utf-8")
+        encoded_key = new_key.decode("utf-8")
+        os.environ["UNISENSE_FERNET_KEY"] = f"{encoded_salt}:{encoded_key}"
+
+        logger.info(
+            "key_rotated",
+            version=self._key_version,
+            decrypt_key_count=len(self._decrypt_fernets),
+        )
+
+    def is_key_expired(self) -> bool:
+        """检查当前活跃密钥是否超过90天有效期。"""
+        if self._key_created_at is None:
+            return False
+        return datetime.now(UTC) - self._key_created_at > timedelta(days=DEFAULT_KEY_EXPIRY_DAYS)
+
+    def get_key_metadata(self) -> dict[str, object]:
+        """获取当前密钥元数据。"""
+        return {
+            "version": self._key_version,
+            "created_at": self._key_created_at.isoformat() if self._key_created_at else None,
+            "is_expired": self.is_key_expired(),
+            "decrypt_key_count": len(self._decrypt_fernets),
+        }
+
+
+def migrate_legacy_secrets(
+    encrypt_func: Callable[[bytes], bytes],
+    decrypt_func: Callable[[bytes], bytes],
+    list_func: Callable[[], list[str]],
+) -> int:
+    """独立密钥迁移函数，供管理员端点调用。
+
+    遍历所有旧 SHA-256 加密数据，解密后用当前 PBKDF2 活跃密钥重加密。
+
+    Args:
+        encrypt_func: 加密回调（plaintext bytes → ciphertext bytes）。
+        decrypt_func: 解密回调（ciphertext bytes → plaintext bytes），支持多密钥。
+        list_func: 列出待迁移条目的回调（→ list[str]）。
+
+    Returns:
+        成功迁移条目数。
+    """
+    manager = get_key_rotation_manager()
+    return manager.migrate_secrets(
+        list_func=list_func,
+        decrypt_func=decrypt_func,
+        encrypt_func=encrypt_func,
+    )
 
 
 # 模块级单例

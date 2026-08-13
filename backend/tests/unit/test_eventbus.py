@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from app.core import eventbus as eb_module
 from app.core.eventbus import EventBus
@@ -86,6 +86,65 @@ class TestRedisPublish:
         # 发布失败仅告警，不抛异常
         await bus.publish("x", {})
         redis.publish.assert_awaited_once()
+
+
+class TestDlqWiring:
+    """TECH-04：Redis 发布失败 → 事件进入死信队列（DLQ 重放跳过，避免循环）。"""
+
+    async def test_redis_failure_enqueues_dlq(self, monkeypatch) -> None:
+        from app.core import dlq as dlq_module
+
+        # send_to_dlq 为同步方法，用普通 MagicMock（避免未 await 协程告警）
+        fake_dlq = MagicMock()
+        monkeypatch.setattr(dlq_module, "get_dlq", lambda: fake_dlq)
+
+        redis = AsyncMock()
+        redis.publish = AsyncMock(side_effect=RuntimeError("redis down"))
+        bus = EventBus(redis_pool=redis)
+        await bus.publish("metric.created", {"code": "a"})
+
+        fake_dlq.send_to_dlq.assert_called_once_with(
+            "metric.created", {"code": "a"}, "eventbus.redis_publish_failed"
+        )
+
+    async def test_skip_dlq_avoids_loop(self, monkeypatch) -> None:
+        from app.core import dlq as dlq_module
+
+        fake_dlq = MagicMock()
+        monkeypatch.setattr(dlq_module, "get_dlq", lambda: fake_dlq)
+
+        redis = AsyncMock()
+        redis.publish = AsyncMock(side_effect=RuntimeError("redis down"))
+        bus = EventBus(redis_pool=redis)
+        # DLQ 重放路径传 _skip_dlq=True，失败不重新入队（防循环）
+        await bus.publish("x", {}, _skip_dlq=True)
+        fake_dlq.send_to_dlq.assert_not_called()
+
+    async def test_redis_ok_no_dlq(self, monkeypatch) -> None:
+        from app.core import dlq as dlq_module
+
+        fake_dlq = MagicMock()
+        monkeypatch.setattr(dlq_module, "get_dlq", lambda: fake_dlq)
+
+        redis = AsyncMock()
+        redis.publish = AsyncMock(return_value=1)
+        bus = EventBus(redis_pool=redis)
+        await bus.publish("x", {})
+        fake_dlq.send_to_dlq.assert_not_called()
+
+    async def test_dlq_enqueue_failure_best_effort(self, monkeypatch) -> None:
+        from app.core import dlq as dlq_module
+
+        def _boom() -> None:
+            raise RuntimeError("dlq full")
+
+        monkeypatch.setattr(dlq_module, "get_dlq", _boom)
+
+        redis = AsyncMock()
+        redis.publish = AsyncMock(side_effect=RuntimeError("redis down"))
+        bus = EventBus(redis_pool=redis)
+        # DLQ 入队失败也不阻断主流程
+        await bus.publish("x", {})
 
 
 class TestSubscriberRegistry:

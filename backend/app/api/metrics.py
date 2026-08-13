@@ -675,6 +675,16 @@ async def emergency_publish_metric(
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
     """domain_admin 紧急发布：跳过 REVIEW 但不跳 PII 门禁。"""
+    # OPS-09 特性开关：紧急发布能力可被平台管理员灰度关闭（默认开启，非破坏）
+    from app.core.exceptions import AuthError
+    from app.core.feature_flags import is_feature_enabled_or_default
+
+    if not is_feature_enabled_or_default("emergency_publish"):
+        raise AuthError(
+            "紧急发布能力已被平台管理员关闭，请走常规评审发布流程",
+            error_code="FORBIDDEN",
+            ctx={"feature_flag": "emergency_publish"},
+        )
     service = MetricService(db)
     metric = await service.emergency_publish_metric(
         metric_code, request, actor_id=user.id, role=user.role,

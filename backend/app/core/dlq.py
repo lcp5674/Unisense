@@ -146,7 +146,8 @@ class DeadLetterQueue:
         success_count = 0
         for event in pending:
             try:
-                await bus.publish(event.event_type, event.payload)
+                # _skip_dlq=True：避免重放失败的事件被重新加入死信队列（循环）
+                await bus.publish(event.event_type, event.payload, _skip_dlq=True)
                 self.mark_retried(event, success=True)
                 success_count += 1
                 logger.info("dlq_replay_success", event_type=event.event_type)

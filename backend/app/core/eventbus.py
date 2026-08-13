@@ -16,6 +16,20 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+
+def _enqueue_dlq(event_type: str, payload: dict[str, Any], reason: str) -> None:
+    """将发布失败的事件写入死信队列（best-effort，不阻断主流程）。
+
+    TECH-04：Redis 发布失败时事件进入 DLQ，由 DLQ 定时重放兜底，
+    保证事件不丢失（对齐 R&D-04 死信队列）。
+    """
+    try:
+        from app.core.dlq import get_dlq
+
+        get_dlq().send_to_dlq(event_type, payload, reason)
+    except Exception:
+        logger.warning("eventbus.dlq_enqueue_failed", event_type=event_type, exc_info=True)
+
 # 订阅者回调类型
 Handler = Callable[[dict[str, Any]], Any]
 
@@ -33,7 +47,12 @@ class EventBus:
         self._subscribers: dict[str, list[Handler]] = defaultdict(list)
 
     async def publish(
-        self, event_type: str, payload: dict[str, Any], actor_id: str = ""
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        actor_id: str = "",
+        *,
+        _skip_dlq: bool = False,
     ) -> None:
         """发布事件。
 
@@ -41,6 +60,8 @@ class EventBus:
             event_type: 事件类型（如 "metric.created"、"quality.anomaly"）。
             payload: 事件负载字典。
             actor_id: 事件发起者 ID。
+            _skip_dlq: 内部参数——DLQ 重放时置 True，避免失败事件被重新
+                加入死信队列造成循环。
         """
         event = {
             "event_type": event_type,
@@ -76,6 +97,9 @@ class EventBus:
                     event_type=event_type,
                     exc_info=True,
                 )
+                # TECH-04：发布失败进入死信队列（DLQ 重放时跳过，避免循环）
+                if not _skip_dlq:
+                    _enqueue_dlq(event_type, payload, "eventbus.redis_publish_failed")
 
     def subscribe(self, event_type: str, handler: Handler) -> None:
         """注册本地订阅者。

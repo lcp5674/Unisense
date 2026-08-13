@@ -25,6 +25,7 @@ P2 增强：
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -33,8 +34,15 @@ import httpx
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import settings
+from app.core.resilience import get_circuit_breaker
 
 logger = logging.getLogger(__name__)
+
+# 熔断 + 重试参数：LLM 网关为外部强依赖，必须快速失败（熔断）并在瞬时故障时退避重试，
+# 否则单点故障会拖垮 AI 问数链路（对齐 TD §11 韧性 / retry+circuit breaker 要求）。
+_LLM_BREAKER = get_circuit_breaker("LLM")
+_LLM_MAX_RETRIES = 2  # 额外重试次数（总计最多 MAX_RETRIES+1 次）
+_LLM_BACKOFF_BASE = 0.2  # 指数退避基数（秒）
 
 # 国内主流 LLM 提供商的默认配置
 _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
@@ -138,6 +146,10 @@ class LlmClient:
         if not self.enabled:
             raise LlmError("LLM 未配置，请设置 UNISENSE_LLM_BASE_URL 和 UNISENSE_LLM_API_KEY")
 
+        # 熔断：网关已故障（集群级 OPEN）时快速失败，避免雪崩与无谓等待
+        if not _LLM_BREAKER.allow():
+            raise LlmError("LLM 熔断器已开启，请求被快速拒绝（依赖降级中）")
+
         # 使用 json_object 格式引导 LLM 输出结构化 JSON
         effective_format = response_format or {"type": "json_object"}
 
@@ -149,34 +161,65 @@ class LlmClient:
             "response_format": effective_format,
         }
 
-        try:
-            resp = await self._client.post("/v1/chat/completions", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            choice = data["choices"][0]["message"]
-            raw_content = choice.get("content", "")
+        last_exc: Exception | None = None
+        for attempt in range(_LLM_MAX_RETRIES + 1):
+            try:
+                resp = await self._client.post("/v1/chat/completions", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                choice = data["choices"][0]["message"]
+                raw_content = choice.get("content", "")
 
-            # 解析结构化输出
-            structured = self._parse_structured_output(raw_content)
+                # 解析结构化输出
+                structured = self._parse_structured_output(raw_content)
 
-            return {
-                "content": structured.content,
-                "confidence": structured.confidence,
-                "reasoning": structured.reasoning,
-                "candidates": structured.candidates,
-                "model": data.get("model", self._model),
-                "finish_reason": choice.get("finish_reason", "stop"),
-                "usage": data.get("usage", {}),
-            }
-        except httpx.HTTPStatusError as exc:
-            logger.error("LLM HTTP 错误: %d %s", exc.response.status_code, exc.response.text)
-            raise LlmError(f"LLM 请求失败: {exc.response.status_code}") from exc
-        except (KeyError, IndexError) as exc:
-            logger.error("LLM 响应解析失败: %s", exc)
-            raise LlmError("LLM 响应格式错误") from exc
-        except httpx.HTTPError as exc:
-            logger.error("LLM 网络错误: %s", exc)
-            raise LlmError(f"LLM 请求失败: {exc}") from exc
+                # 成功 → 复位熔断计数
+                _LLM_BREAKER.record_success()
+                return {
+                    "content": structured.content,
+                    "confidence": structured.confidence,
+                    "reasoning": structured.reasoning,
+                    "candidates": structured.candidates,
+                    "model": data.get("model", self._model),
+                    "finish_reason": choice.get("finish_reason", "stop"),
+                    "usage": data.get("usage", {}),
+                }
+            except httpx.HTTPStatusError as exc:
+                # 4xx（鉴权/参数错）为永久错误，不重试；5xx/429 视为瞬时重试
+                status = exc.response.status_code if exc.response is not None else 0
+                _LLM_BREAKER.record_failure()
+                last_exc = exc
+                if attempt < _LLM_MAX_RETRIES and (status >= 500 or status == 429):
+                    logger.warning(
+                        "LLM HTTP 错误（将退避重试）: %d，attempt=%d", status, attempt
+                    )
+                    await asyncio.sleep(_LLM_BACKOFF_BASE * (2**attempt))
+                    continue
+                logger.error(
+                    "LLM HTTP 错误: %d %s",
+                    status,
+                    exc.response.text if exc.response is not None else "",
+                )
+                raise LlmError(f"LLM 请求失败: {status}") from exc
+            except (KeyError, IndexError) as exc:
+                # 响应结构异常：记为一次失败（可能上游降级返回垃圾），但不在此退避重试
+                _LLM_BREAKER.record_failure()
+                logger.error("LLM 响应解析失败: %s", exc)
+                raise LlmError("LLM 响应格式错误") from exc
+            except httpx.HTTPError as exc:
+                # 网络/超时等传输层瞬时故障：熔断计数 + 退避重试
+                _LLM_BREAKER.record_failure()
+                last_exc = exc
+                if attempt < _LLM_MAX_RETRIES:
+                    logger.warning(
+                        "LLM 网络错误（将退避重试）: %s，attempt=%d", exc, attempt
+                    )
+                    await asyncio.sleep(_LLM_BACKOFF_BASE * (2**attempt))
+                    continue
+                logger.error("LLM 网络错误: %s", exc)
+                raise LlmError(f"LLM 请求失败: {exc}") from exc
+        # 不应到达；兜底抛出最后一次异常
+        raise LlmError(f"LLM 请求失败: {last_exc}") from last_exc
 
     def _parse_structured_output(self, raw_content: str) -> LlmStructuredOutput:
         """解析 LLM 输出为结构化结果。
