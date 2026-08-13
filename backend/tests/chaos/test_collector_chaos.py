@@ -233,7 +233,8 @@ async def test_arq_retry_configured():
     """FR-006: ArqCollectionQueue enqueue 正确传递 job_id（幂等键）并落初始 QUEUED 状态。
 
     arq 0.28 的 enqueue_job 不支持 _max_tries/_timeout（会被当普通 kwargs 透传给任务函数
-    导致 TypeError），因此投递契约是：run_collection_task(source_id, actor_id, job_id, _job_id=job_id)。
+    导致 TypeError），因此投递契约是：
+    run_collection_task(source_id, actor_id, job_id, _job_id=job_id)。
     """
     from app.services.collector.queue import ArqCollectionQueue
 

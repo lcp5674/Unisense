@@ -45,6 +45,7 @@ from app.models.enums import (
     SourceTypeEnum,
 )
 from app.models.erasure import ErasureRequest, ErasureStatus
+from app.models.escalation import EscalationRecord, EscalationStatus
 from app.models.feedback import Feedback
 from app.models.glossary import GlossaryConflict, TermRelation, TermVersion
 from app.models.governance import (
@@ -61,7 +62,6 @@ from app.models.metric import Metric
 from app.models.metric_health import MetricHealthScore
 from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion, PendingVersionConfirmation
-from app.models.escalation import EscalationRecord, EscalationStatus
 from app.models.notify import EventLog, Notification, SubscriptionPref
 from app.models.quality import (
     ExternalBenchmark,
