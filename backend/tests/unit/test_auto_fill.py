@@ -45,7 +45,7 @@ class TestGenerateMetricCode:
 
 class TestValidateMetricCode:
     def test_valid_code(self) -> None:
-        ok, err = validate_metric_code("sales_order_amount_day")
+        ok, err = validate_metric_code("sales_gmv_amount_day")
         assert ok is True
         assert err == ""
 
