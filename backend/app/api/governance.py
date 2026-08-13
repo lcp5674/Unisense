@@ -53,6 +53,10 @@ _GRANT_ADMIN_ROLES = ("platform_admin", "domain_admin")
 _COMPLIANCE_ROLES = ("compliance_officer", "platform_admin")
 _READ_ROLES = ALL_ROLES
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
+_ROLE_ADMIN_DEPS = [Depends(require_roles("platform_admin")), Depends(guard_against_injection)]
+_GRANT_ADMIN_DEPS = [Depends(require_roles(*_GRANT_ADMIN_ROLES)), Depends(guard_against_injection)]
+_COMPLIANCE_DEPS = [Depends(require_roles(*_COMPLIANCE_ROLES)), Depends(guard_against_injection)]
 
 
 def _svc(db: AsyncSession, request: Request) -> GovernanceService:
@@ -60,7 +64,7 @@ def _svc(db: AsyncSession, request: Request) -> GovernanceService:
     return GovernanceService(db, events=GovernanceEventPublisher(notify_url))
 
 
-@router.post("/roles", dependencies=[Depends(require_roles("platform_admin"))])
+@router.post("/roles", dependencies=_ROLE_ADMIN_DEPS)
 async def create_role(
     payload: RoleCreate,
     request: Request,
@@ -85,7 +89,7 @@ async def create_role(
     return ok(data=RoleResponse.model_validate(role).model_dump(), trace_id=trace_id)
 
 
-@router.post("/grants", dependencies=[Depends(require_roles(*_GRANT_ADMIN_ROLES))])
+@router.post("/grants", dependencies=_GRANT_ADMIN_DEPS)
 async def create_grant(
     payload: GrantCreate,
     request: Request,
@@ -140,7 +144,7 @@ async def list_grants(
     )
 
 
-@router.post("/grants/batch", dependencies=[Depends(require_roles(*_GRANT_ADMIN_ROLES))])
+@router.post("/grants/batch", dependencies=_GRANT_ADMIN_DEPS)
 async def batch_grants(
     payload: GrantBatchRequest,
     request: Request,
@@ -170,7 +174,7 @@ async def batch_grants(
     return ok(data=result.model_dump(), trace_id=trace_id)
 
 
-@router.post("/grants/batch/dry-run", dependencies=[Depends(require_roles(*_GRANT_ADMIN_ROLES))])
+@router.post("/grants/batch/dry-run", dependencies=_GRANT_ADMIN_DEPS)
 async def dry_run_batch_grants(
     payload: GrantBatchRequest,
     request: Request,
@@ -185,7 +189,7 @@ async def dry_run_batch_grants(
     return ok(data=result.model_dump(), trace_id=trace_id)
 
 
-@router.delete("/grants/{grant_id}", dependencies=[Depends(require_roles(*_READ_ROLES))])
+@router.delete("/grants/{grant_id}", dependencies=_GRANT_ADMIN_DEPS)
 async def revoke_grant(
     grant_id: int,
     request: Request,
@@ -215,7 +219,7 @@ async def revoke_grant(
     return ok(data=GrantResponse.model_validate(row).model_dump(), trace_id=trace_id)
 
 
-@router.post("/pii/review", dependencies=[Depends(require_roles(*_COMPLIANCE_ROLES))])
+@router.post("/pii/review", dependencies=_COMPLIANCE_DEPS)
 async def pii_review(
     payload: PiiReviewRequest,
     request: Request,
@@ -255,7 +259,7 @@ class PiiValidationRequest(BaseModel):
 
 @router.post(
     "/pii/validate",
-    dependencies=[Depends(require_roles(*_COMPLIANCE_ROLES))],
+    dependencies=_COMPLIANCE_DEPS,
 )
 async def pii_validate(
     payload: PiiValidationRequest,
@@ -283,7 +287,7 @@ async def pii_validate(
     return ok(data=result.model_dump(), trace_id=trace_id)
 
 
-@router.post("/classification/rescan", dependencies=[Depends(require_roles(*_COMPLIANCE_ROLES))])
+@router.post("/classification/rescan", dependencies=_COMPLIANCE_DEPS)
 async def classification_rescan(
     payload: ClassificationRescanRequest,
     request: Request,
@@ -326,7 +330,7 @@ async def my_permissions(
     return ok(data=snapshot.model_dump(), trace_id=trace_id)
 
 
-@router.post("/permissions/check")
+@router.post("/permissions/check", dependencies=[Depends(guard_against_injection)])
 async def check_permission(
     payload: PermissionCheckRequest,
     request: Request,

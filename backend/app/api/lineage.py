@@ -34,6 +34,8 @@ router = APIRouter(prefix="/lineage", tags=["lineage"])
 _WRITE_ROLES = ("platform_admin", "domain_admin", "metric_owner")
 _READ_ROLES = ALL_ROLES
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
+_WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
 
 def _svc(db: Any) -> LineageService:
@@ -48,7 +50,7 @@ def _svc(db: Any) -> LineageService:
     )
 
 
-@router.post("/parse", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/parse", dependencies=_WRITE_DEPS)
 async def parse_lineage(
     body: LineageParseRequest,
     request: Request,

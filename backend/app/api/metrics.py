@@ -661,7 +661,10 @@ async def review_metric_compliance(
     "/{metric_code}/emergency-publish",
     response_model=ApiResponse[MetricResponse],
     summary="紧急发布指标（跳过REVIEW，须填紧急原因，PII门禁不可跳）",
-    dependencies=[Depends(require_roles("platform_admin", "domain_admin"))],
+    dependencies=[
+        Depends(require_roles("platform_admin", "domain_admin")),
+        Depends(guard_against_injection),
+    ],
 )
 async def emergency_publish_metric(
     metric_code: str,
@@ -765,7 +768,7 @@ async def compare_metrics(
     "/batch-register",
     response_model=ApiResponse,
     summary="批量注册指标（从宽表度量列批量创建 DRAFT）",
-    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+    dependencies=_WRITE_DEPS,
 )
 async def batch_register_metrics(
     request: MetricBatchRegisterRequest,

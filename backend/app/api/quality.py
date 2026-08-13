@@ -33,9 +33,12 @@ _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin")
 _GOV_ROLES = ("metric_owner", "domain_admin", "platform_admin", "compliance_officer")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "compliance_officer", "viewer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
+_WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+_GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
 
 
-@router.post("/rules", status_code=201, dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/rules", status_code=201, dependencies=_WRITE_DEPS)
 async def create_rule(
     payload: QualityRuleCreate,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -88,7 +91,7 @@ async def get_rule(
     return ok(data=await QualityService(db).get_rule(rule_id), trace_id=trace_id)
 
 
-@router.put("/rules/{rule_id}", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.put("/rules/{rule_id}", dependencies=_WRITE_DEPS)
 async def update_rule(
     rule_id: int,
     payload: QualityRuleUpdate,
@@ -110,7 +113,7 @@ async def update_rule(
     return ok(data=resp, trace_id=trace_id)
 
 
-@router.delete("/rules/{rule_id}", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.delete("/rules/{rule_id}", dependencies=_WRITE_DEPS)
 async def delete_rule(
     rule_id: int,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -134,7 +137,7 @@ async def delete_rule(
 @router.post(
     "/observe",
     status_code=201,
-    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+    dependencies=_WRITE_DEPS,
 )
 async def record_observation(
     payload: QualityObservationRequest,
@@ -157,7 +160,7 @@ async def record_observation(
     return ok(data=resp, trace_id=trace_id)
 
 
-@router.post("/events/detect", dependencies=[Depends(require_roles(*_GOV_ROLES))])
+@router.post("/events/detect", dependencies=_GOV_DEPS)
 async def detect(
     payload: QualityDetectRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -212,7 +215,7 @@ async def list_events(
 
 @router.post(
     "/events/{event_id}/ack",
-    dependencies=[Depends(require_roles(*_GOV_ROLES))],
+    dependencies=_GOV_DEPS,
 )
 async def ack_event(
     event_id: int,
@@ -238,7 +241,7 @@ async def ack_event(
 
 @router.post(
     "/events/{event_id}/resolve",
-    dependencies=[Depends(require_roles(*_GOV_ROLES))],
+    dependencies=_GOV_DEPS,
 )
 async def resolve_event(
     event_id: int,
@@ -263,7 +266,7 @@ async def resolve_event(
 
 @router.post(
     "/events/{event_id}/close",
-    dependencies=[Depends(require_roles(*_GOV_ROLES))],
+    dependencies=_GOV_DEPS,
 )
 async def close_event(
     event_id: int,
@@ -288,7 +291,7 @@ async def close_event(
 
 @router.post(
     "/events/{event_id}/repair",
-    dependencies=[Depends(require_roles(*_GOV_ROLES))],
+    dependencies=_GOV_DEPS,
 )
 async def confirm_repair(
     event_id: int,
@@ -318,7 +321,7 @@ async def confirm_repair(
 @router.post(
     "/benchmarks/import",
     status_code=201,
-    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+    dependencies=_WRITE_DEPS,
 )
 async def import_benchmark(
     payload: BenchmarkImport,
@@ -361,7 +364,7 @@ async def list_benchmarks(
 
 @router.post(
     "/benchmarks/{benchmark_id}/bind",
-    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+    dependencies=_WRITE_DEPS,
 )
 async def bind_benchmark(
     benchmark_id: int,
@@ -386,7 +389,7 @@ async def bind_benchmark(
     return ok(data=resp, trace_id=trace_id)
 
 
-@router.post("/reconciliation/run", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/reconciliation/run", dependencies=_WRITE_DEPS)
 async def run_reconciliation(
     payload: ReconciliationRun,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -434,7 +437,7 @@ async def list_reconciliation_records(
 
 @router.post(
     "/reconciliation-records/{record_id}/confirm",
-    dependencies=[Depends(require_roles(*_GOV_ROLES))],
+    dependencies=_GOV_DEPS,
 )
 async def confirm_reconciliation(
     record_id: int,

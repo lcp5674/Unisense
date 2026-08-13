@@ -26,9 +26,11 @@ router = APIRouter(prefix="/notify", tags=["notify"])
 _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin", "system")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer", "system")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
+_WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
 
-@router.post("/events", status_code=201, dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/events", status_code=201, dependencies=_WRITE_DEPS)
 async def publish_event(
     payload: EventPublish,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -65,7 +67,7 @@ async def list_notifications(
 
 @router.post(
     "/notifications/{notif_id}/sent",
-    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+    dependencies=_WRITE_DEPS,
 )
 async def mark_sent(
     notif_id: int,
@@ -89,7 +91,7 @@ async def mark_sent(
 
 @router.post(
     "/notifications/{notif_id}/failed",
-    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+    dependencies=_WRITE_DEPS,
 )
 async def mark_failed(
     notif_id: int,
@@ -111,7 +113,7 @@ async def mark_failed(
     return ok(data=NotificationResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.put("/subscriptions", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.put("/subscriptions", dependencies=_WRITE_DEPS)
 async def upsert_subscription(
     payload: SubscriptionUpsert,
     db: Annotated[AsyncSession, Depends(get_db_session)],

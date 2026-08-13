@@ -62,13 +62,15 @@ catalog_router = APIRouter(prefix="/catalogs", tags=["collector-catalog"])
 _WRITE_ROLES = ("platform_admin", "domain_admin", "metric_owner")
 _READ_ROLES = ALL_ROLES
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
+_WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
 
 def _svc(db: AsyncSession) -> CollectorService:
     return CollectorService(db)
 
 
-@source_router.post("", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@source_router.post("", dependencies=_WRITE_DEPS)
 async def create_data_source(
     body: DataSourceCreateRequest,
     request: Request,
@@ -128,7 +130,7 @@ async def list_source_types(
     return ok(data=await svc.list_source_types(), trace_id=trace_id)
 
 
-@source_router.post("/test-connection", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@source_router.post("/test-connection", dependencies=_WRITE_DEPS)
 async def test_connection(
     body: TestConnectionRequest,
     request: Request,
@@ -167,7 +169,7 @@ async def get_data_source(
     return ok(data=await svc.get_source(source_id), trace_id=trace_id)
 
 
-@source_router.post("/{source_id}/check", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@source_router.post("/{source_id}/check", dependencies=_WRITE_DEPS)
 async def check_source_connection(
     source_id: str,
     request: Request,
@@ -192,7 +194,7 @@ async def check_source_connection(
     return ok(data=result, trace_id=trace_id)
 
 
-@source_router.delete("/{source_id}", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@source_router.delete("/{source_id}", dependencies=_WRITE_DEPS)
 async def delete_data_source(
     source_id: str,
     request: Request,
@@ -216,7 +218,7 @@ async def delete_data_source(
     return ok(data=None, trace_id=trace_id)
 
 
-@source_router.post("/{source_id}/catalogs", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@source_router.post("/{source_id}/catalogs", dependencies=_WRITE_DEPS)
 async def register_catalog(
     source_id: str,
     body: DBCatalogCreateRequest,
@@ -247,7 +249,7 @@ async def register_catalog(
     return ok(data=resp, trace_id=trace_id)
 
 
-@source_router.post("/{source_id}/collect", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@source_router.post("/{source_id}/collect", dependencies=_WRITE_DEPS)
 async def collect_source(
     source_id: str,
     body: CollectRequest,
@@ -314,7 +316,7 @@ async def collect_source(
 
 
 @source_router.post(
-    "/{source_id}/schedule", dependencies=[Depends(require_roles(*_WRITE_ROLES))]
+    "/{source_id}/schedule", dependencies=_WRITE_DEPS
 )
 async def schedule_collection(
     source_id: str,
@@ -404,7 +406,7 @@ async def list_catalogs(
     return ok(data=await svc.list_catalogs(params), trace_id=trace_id)
 
 
-@catalog_router.post("/bulk-deprecate", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@catalog_router.post("/bulk-deprecate", dependencies=_WRITE_DEPS)
 async def bulk_deprecate(
     body: BulkDeprecateRequest,
     request: Request,

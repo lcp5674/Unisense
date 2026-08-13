@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser
 from app.api.responses import ApiResponse, ok
+from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.models.consume import UserPreference
 
@@ -117,7 +118,11 @@ async def list_preferences(
     return ok(PreferenceListResponse(items=items, total=len(items)))
 
 
-@router.put("/preferences/{key}", response_model=ApiResponse[PreferenceItem])
+@router.put(
+    "/preferences/{key}",
+    response_model=ApiResponse[PreferenceItem],
+    dependencies=[Depends(guard_against_injection)],
+)
 async def upsert_preference(
     key: Annotated[str, Path(min_length=1, max_length=64, description="偏好键")],
     body: PreferenceUpdate,
@@ -129,7 +134,11 @@ async def upsert_preference(
     return ok(PreferenceItem(key=key, value=pref.preference_value))
 
 
-@router.delete("/preferences/{key}", response_model=ApiResponse[PreferenceItem])
+@router.delete(
+    "/preferences/{key}",
+    response_model=ApiResponse[PreferenceItem],
+    dependencies=[Depends(guard_against_injection)],
+)
 async def delete_preference(
     key: Annotated[str, Path(min_length=1, max_length=64, description="偏好键")],
     db: Annotated[AsyncSession, Depends(get_db_session)],

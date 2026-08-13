@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.exceptions import BusinessError, NotFoundError
+from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session as get_session
 from app.services.subject_domain.schemas import (
     SubjectDomainCreate,
@@ -31,9 +32,12 @@ logger = structlog.get_logger("unisense.api.subject_domain")
 router = APIRouter(prefix="/domains", tags=["主题域管理"])
 
 #: 域管理写权限：platform_admin + domain_admin（与 docstring/plan 声明一致）。
-_ADMIN_DEPS = [Depends(require_roles("platform_admin", "domain_admin"))]
+_ADMIN_DEPS = [
+    Depends(require_roles("platform_admin", "domain_admin")),
+    Depends(guard_against_injection),
+]
 #: 域查询读权限：全部已登录角色。
-_READ_DEPS = [Depends(require_roles(*ALL_ROLES))]
+_READ_DEPS = [Depends(require_roles(*ALL_ROLES)), Depends(guard_against_injection)]
 
 
 def _get_service(db: AsyncSession = Depends(get_session)) -> SubjectDomainService:

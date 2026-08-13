@@ -24,6 +24,8 @@ router = APIRouter(prefix="/observability", tags=["observability"])
 _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin", "viewer")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
+_WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
 
 class NpsSubmitRequest(BaseModel):
@@ -40,7 +42,7 @@ class FeedbackStatusUpdateRequest(BaseModel):
     resolution_note: str | None = Field(None, description="处理说明")
 
 
-@router.post("/feedback", status_code=201, dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/feedback", status_code=201, dependencies=_WRITE_DEPS)
 async def submit_feedback(
     payload: FeedbackCreate,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -121,7 +123,7 @@ async def lineage_metrics(
 # ----------------------------------------------------------------
 
 
-@router.post("/nps", status_code=201, dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/nps", status_code=201, dependencies=_WRITE_DEPS)
 async def submit_nps(
     payload: NpsSubmitRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -151,7 +153,10 @@ async def submit_nps(
 
 @router.patch(
     "/feedback/{feedback_id}/status",
-    dependencies=[Depends(require_roles("platform_admin", "domain_admin"))],
+    dependencies=[
+        Depends(require_roles("platform_admin", "domain_admin")),
+        Depends(guard_against_injection),
+    ],
 )
 async def update_feedback_status(
     feedback_id: int,

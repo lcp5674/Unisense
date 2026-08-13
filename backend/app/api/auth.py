@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, ok
 from app.core.exceptions import AuthError
+from app.core.guard import guard_against_injection
 from app.core.security import create_access_token, verify_password
 from app.db.mysql import get_db_session
 from app.models.user import User
@@ -60,7 +61,7 @@ class UserBrief(BaseModel):
     status: str
 
 
-@router.post("/login")
+@router.post("/login", dependencies=[Depends(guard_against_injection)])
 async def login(
     body: LoginRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],

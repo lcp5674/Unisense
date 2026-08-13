@@ -26,9 +26,12 @@ _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin")
 _GOV_ROLES = ("domain_admin", "platform_admin")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
+_WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+_GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
 
 
-@router.post("", status_code=201, dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("", status_code=201, dependencies=_WRITE_DEPS)
 async def create_term(
     payload: TermCreate,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -91,7 +94,7 @@ async def get_term(
     return ok(data=await GlossaryService(db).get_term(term_code), trace_id=trace_id)
 
 
-@router.post("/{term_code}/submit", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/{term_code}/submit", dependencies=_WRITE_DEPS)
 async def submit_term(
     term_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -112,7 +115,7 @@ async def submit_term(
     return ok(data=resp, trace_id=trace_id)
 
 
-@router.put("/{term_code}", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.put("/{term_code}", dependencies=_WRITE_DEPS)
 async def update_term(
     term_code: str,
     payload: TermUpdate,
@@ -134,7 +137,7 @@ async def update_term(
     return ok(data=resp, trace_id=trace_id)
 
 
-@router.post("/{term_code}/deprecate", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/{term_code}/deprecate", dependencies=_WRITE_DEPS)
 async def deprecate_term(
     term_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -157,7 +160,7 @@ async def deprecate_term(
 
 @router.post(
     "/conflicts/{conflict_id}/resolve",
-    dependencies=[Depends(require_roles(*_GOV_ROLES))],
+    dependencies=_GOV_DEPS,
 )
 async def resolve_conflict(
     conflict_id: int,
@@ -180,7 +183,7 @@ async def resolve_conflict(
     return ok(data=resp, trace_id=trace_id)
 
 
-@router.post("/{term_code}/relations", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/{term_code}/relations", dependencies=_WRITE_DEPS)
 async def create_relation(
     term_code: str,
     payload: TermRelationCreate,

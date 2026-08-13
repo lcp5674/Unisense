@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.exceptions import BusinessError, NotFoundError
+from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session as get_session
 from app.services.system_dict.schemas import DictItemCreate, DictItemResponse, DictItemUpdate
 from app.services.system_dict.service import SystemDictService
@@ -25,9 +26,9 @@ logger = structlog.get_logger("unisense.api.system_dict")
 router = APIRouter(prefix="/dicts", tags=["系统字典管理"])
 
 #: 字典管理写权限：仅 platform_admin（与 docstring/plan 声明一致）。
-_ADMIN_DEPS = [Depends(require_roles("platform_admin"))]
+_ADMIN_DEPS = [Depends(require_roles("platform_admin")), Depends(guard_against_injection)]
 #: 字典查询读权限：全部已登录角色。
-_READ_DEPS = [Depends(require_roles(*ALL_ROLES))]
+_READ_DEPS = [Depends(require_roles(*ALL_ROLES)), Depends(guard_against_injection)]
 
 
 def _get_service(db: AsyncSession = Depends(get_session)) -> SystemDictService:

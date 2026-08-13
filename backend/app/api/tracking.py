@@ -78,7 +78,10 @@ async def create_event(
 @router.get(
     "/stats",
     response_model=ApiResponse[TrackingStatsResponse],
-    dependencies=[Depends(require_roles("platform_admin", "domain_admin"))],
+    dependencies=[
+        Depends(require_roles("platform_admin", "domain_admin")),
+        Depends(guard_against_injection),
+    ],
 )
 async def get_stats(
     db: Annotated[AsyncSession, Depends(get_db_session)],

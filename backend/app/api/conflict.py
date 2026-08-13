@@ -40,6 +40,9 @@ _WRITE_ROLES = ("metric_owner", "platform_admin", "domain_admin")
 _GOV_ROLES = ("compliance_officer", "domain_admin", "platform_admin")
 _READ_ROLES = ALL_ROLES
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
+_WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+_GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
 
 
 def _svc(db: AsyncSession, request: Request) -> ConflictService:
@@ -51,7 +54,7 @@ def _svc(db: AsyncSession, request: Request) -> ConflictService:
     )
 
 
-@router.post("/check", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/check", dependencies=_WRITE_DEPS)
 async def check_conflict(
     payload: ConflictCheckRequest,
     request: Request,
@@ -123,7 +126,7 @@ async def list_conflicts(
 
 @router.post(
     "/{conflict_id}/arbitrate",
-    dependencies=[Depends(require_roles(*_GOV_ROLES))],
+    dependencies=_GOV_DEPS,
 )
 async def arbitrate_conflict(
     conflict_id: str,
@@ -152,7 +155,7 @@ async def arbitrate_conflict(
 
 @router.post(
     "/{conflict_id}/escalate",
-    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+    dependencies=_WRITE_DEPS,
 )
 async def escalate_conflict(
     conflict_id: str,
@@ -180,7 +183,7 @@ async def escalate_conflict(
 
 @router.post(
     "/{conflict_id}/close",
-    dependencies=[Depends(require_roles(*_GOV_ROLES))],
+    dependencies=_GOV_DEPS,
 )
 async def close_conflict(
     conflict_id: str,

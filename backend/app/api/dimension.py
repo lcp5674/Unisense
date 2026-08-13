@@ -34,9 +34,12 @@ _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin")
 _GOV_ROLES = ("domain_admin", "platform_admin")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
+_WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+_GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
 
 
-@router.post("", status_code=201, dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("", status_code=201, dependencies=_WRITE_DEPS)
 async def create_dimension(
     payload: DimensionCreate,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -73,7 +76,7 @@ async def list_dimensions(
     )
 
 
-@router.post("/mappings", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/mappings", dependencies=_WRITE_DEPS)
 async def create_mapping(
     payload: DimensionMappingCreate,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -106,7 +109,7 @@ async def list_mappings(
     return ok(data={"items": converted, "total": len(items)}, trace_id=trace_id)
 
 
-@router.post("/reconciliations", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/reconciliations", dependencies=_WRITE_DEPS)
 async def submit_reconciliation(
     payload: ReconciliationSubmit,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -143,7 +146,7 @@ async def list_reconciliations(
 
 @router.post(
     "/reconciliations/{rec_id}/review",
-    dependencies=[Depends(require_roles(*_GOV_ROLES))],
+    dependencies=_GOV_DEPS,
 )
 async def review_reconciliation(
     rec_id: int,
@@ -177,7 +180,7 @@ async def get_dimension(
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.put("/{dim_code}", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.put("/{dim_code}", dependencies=_WRITE_DEPS)
 async def update_dimension(
     dim_code: str,
     payload: DimensionUpdate,
@@ -199,7 +202,7 @@ async def update_dimension(
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.post("/{dim_code}/deprecate", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/{dim_code}/deprecate", dependencies=_WRITE_DEPS)
 async def deprecate_dimension(
     dim_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -220,7 +223,7 @@ async def deprecate_dimension(
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.post("/{dim_code}/publish", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/{dim_code}/publish", dependencies=_WRITE_DEPS)
 async def publish_dimension(
     dim_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -241,7 +244,7 @@ async def publish_dimension(
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.post("/{dim_code}/members", dependencies=[Depends(require_roles(*_WRITE_ROLES))])
+@router.post("/{dim_code}/members", dependencies=_WRITE_DEPS)
 async def create_member(
     dim_code: str,
     payload: DimensionMemberCreate,
@@ -279,7 +282,7 @@ async def list_members(
 
 @router.post(
     "/{dim_code}/metrics",
-    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+    dependencies=_WRITE_DEPS,
 )
 async def bind_metric_dimension(
     dim_code: str,
