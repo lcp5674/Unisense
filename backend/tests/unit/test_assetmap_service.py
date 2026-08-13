@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-from app.core.exceptions import NotFoundError
+import pytest
+
+from app.core.exceptions import NotFoundError, UnisenseError
 from app.models.data_source import DBCatalog
 from app.services.assetmap.service import AssetMapService
 
@@ -26,6 +28,8 @@ async def _svc() -> tuple[AssetMapService, MagicMock]:
         ]
     )
     repo.orphan_assets = AsyncMock(return_value=[])
+    repo.heatmap_aggregation = AsyncMock(return_value={})
+    repo.health_summary = AsyncMock(return_value={"healthy": 0})
     # 写能力相关方法默认 AsyncMock（避免 MagicMock 无法 await / 无 assert_awaited）
     repo.get_catalog_entity = AsyncMock(return_value=None)
     repo.list_catalog_entities = AsyncMock(return_value=[])
@@ -96,6 +100,15 @@ async def test_heatmap_passthrough() -> None:
     repo.heatmap_aggregation.assert_awaited_once_with("domain")
 
 
+async def test_heatmap_rejects_invalid_dimension() -> None:
+    """非法聚合维度必须显式拒绝，禁止静默回退到 domain 并以非法键缓存。"""
+    svc, repo = await _svc()
+    with pytest.raises(UnisenseError) as exc:
+        await svc.get_heatmap(dimension="bogus")
+    assert exc.value.error_code == "INVALID_HEATMAP_DIMENSION"
+    repo.heatmap_aggregation.assert_not_awaited()
+
+
 async def test_owner_view_passthrough() -> None:
     svc, repo = await _svc()
     repo.owner_aggregation = AsyncMock(
@@ -146,9 +159,7 @@ class _FakeSession:
                     )
                 ]
             )
-        return _FakeResult(
-            [_FakeRecord({"source": "a", "target": "b", "type": "DERIVED_FROM"})]
-        )
+        return _FakeResult([_FakeRecord({"source": "a", "target": "b", "type": "DERIVED_FROM"})])
 
     async def __aenter__(self):
         return self
@@ -224,7 +235,7 @@ def test_neo4j_driver_singleton_and_close(monkeypatch) -> None:
 
     calls: list[str] = []
 
-    def fake_driver(url: str, auth=None):
+    def fake_driver(url: str, auth=None, **kwargs):
         calls.append(url)
         return type("D", (), {"close": lambda self: None})()
 
@@ -239,6 +250,32 @@ def test_neo4j_driver_singleton_and_close(monkeypatch) -> None:
     assert svc_mod._NEO4J_DRIVER is None
     # 幂等：再次 close 不抛
     svc_mod._close_neo4j_driver()
+
+
+def test_neo4j_driver_sets_connection_timeouts(monkeypatch) -> None:
+    """外部 Neo4j 调用必须设连接/获取超时，防止无响应时无限挂起（熔断不兜挂起）。"""
+    import app.services.assetmap.service as svc_mod
+    from app.core.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "neo4j_url", "bolt://localhost:7687")
+    monkeypatch.setattr(cfg, "neo4j_password", "pw")
+    monkeypatch.setattr(svc_mod, "_NEO4J_DRIVER", None)
+
+    captured: dict = {}
+
+    def fake_driver(url: str, auth=None, **kwargs):
+        captured.update(kwargs)
+        return type("D", (), {"close": lambda self: None})()
+
+    monkeypatch.setattr("neo4j.AsyncGraphDatabase.driver", fake_driver)
+
+    svc_mod._get_neo4j_driver()
+    try:
+        assert captured["connection_timeout"] == 5.0
+        assert captured["connection_acquisition_timeout"] == 5.0
+        assert captured["max_connection_pool_size"] == 10
+    finally:
+        svc_mod._close_neo4j_driver()
 
 
 # ---- 产品补充（FR-18 生产化）：搜索 / 健康 / PII / 变更 / 我的资产 / 导出 ----
@@ -291,9 +328,7 @@ async def test_export_tables_builds_rows() -> None:
     svc, repo = await _svc()
     repo.list_tables = AsyncMock(
         return_value=[
-            DBCatalog(
-                source_id="s", entity_name="t", entity_type="table", schema_json={}
-            )
+            DBCatalog(source_id="s", entity_name="t", entity_type="table", schema_json={})
         ]
     )
     items = await svc.export_tables(None, None)

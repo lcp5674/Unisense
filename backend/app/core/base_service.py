@@ -103,3 +103,12 @@ class BaseService:
         from app.core.config import settings
 
         return settings
+
+    async def commit(self) -> None:
+        """Unit of Work 提交：封装 db.commit()（T048 UoW 渐进迁移）。
+
+        对齐 PLAT-3：业务写入 + 审计同事务原子提交。
+        渐进迁移策略：新代码优先调用 service.commit()，
+        存量 API 层的 await db.commit() 逐步替换（按模块推进）。
+        """
+        await self._db.commit()

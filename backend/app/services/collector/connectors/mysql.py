@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -71,14 +72,25 @@ class SqlalchemyConnector:
         self._query_timeout = query_timeout
 
     async def query(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """执行查询；受 ``query_timeout`` 约束，超时抛外部依赖错误。
+
+        FR-005 声明的 60s 查询超时此前为死配置（仅存储不使用），
+        源库挂起时会永久占死 arq worker/事件循环——此处用
+        ``asyncio.wait_for`` 真正落地超时。
+        """
         async with self._engine.connect() as conn:
-            result = await conn.execute(text(sql), params or {})
+            try:
+                result = await asyncio.wait_for(
+                    conn.execute(text(sql), params or {}),
+                    timeout=self._query_timeout,
+                )
+            except TimeoutError as exc:
+                raise ExternalDependencyError(
+                    f"查询超时（>{self._query_timeout}s）: {sql[:120]}"
+                ) from exc
             # MySQL information_schema 列标签为大写（SCHEMA_NAME/TABLE_NAME），
             # 统一规范化为小写，保证下游 row.get("table_name") 键访问稳定。
-            return [
-                {k.lower(): v for k, v in row._mapping.items()}
-                for row in result
-            ]
+            return [{k.lower(): v for k, v in row._mapping.items()} for row in result]
 
     async def dispose(self) -> None:
         await self._engine.dispose()

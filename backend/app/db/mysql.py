@@ -18,6 +18,13 @@ from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 
 
+def _mask_password(url: str) -> str:
+    """SEC-07: 掩码数据库连接串中的密码。"""
+    import re
+
+    return re.sub(r"(:\/\/[^:]+:)([^@]+)(@)", r"\1***\3", url)
+
+
 class Base(DeclarativeBase):
     """SQLAlchemy 2.0 声明式基类。"""
 
@@ -43,6 +50,7 @@ engine = create_async_engine(
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,
+    pool_recycle=1800,
     echo=settings.env == "local",
 )
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,6 +30,68 @@ logger = get_logger(__name__)
 # 缓存 TTL：5 分钟
 _CACHE_TTL_SECONDS = 300
 _CACHE_PREFIX = "olap:cache:"
+
+# SQLAlchemy 命名参数占位符（:name）
+_PLACEHOLDER_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _sql_literal(value: Any) -> str:
+    """把 Python 值编码为 SQL 字面量（IN 子句列表展开用，单引号翻倍防注入）。"""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _to_doris_sql(sql: str, params: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
+    """把 SQLAlchemy ``:name`` 占位符转换为 Doris HTTP variables 的 ``${name}``。
+
+    Doris ``/api/query`` 的 ``variables`` 是**纯文本替换**（``${var}``），不识别
+    SQLAlchemy 的 ``:name``——此前参数化查询直发 Doris 必然语法错误（OLAP 链路
+    实际不可用）。本转换在发送边界落地：
+
+    - 字符串标量 → SQL 中写 ``'${name}'`` 且 variables 值单引号翻倍：Doris 文本
+      替换后得到带引号且注入安全的字面量（``'BJ'' OR 1=1'`` 在引号内）；
+    - 数值/布尔标量 → ``${name}``，variables 原样（不加引号）；
+    - ``None`` → ``NULL``；
+    - 列表参数（``IN :key``）→ 原地展开为内联字面量 ``('a','b')``（Doris 对
+      数组替换行为因版本而异，展开最稳），值经 ``_sql_literal`` 转义防注入；
+    - 未知占位符（params 中不存在）保持原样，交由 Doris 报错暴露。
+
+    Args:
+        sql: 含 SQLAlchemy 占位符的 SQL。
+        params: 参数映射。
+
+    Returns:
+        (Doris 兼容 SQL, Doris variables 参数映射)。
+    """
+    if not params:
+        return sql, {}
+    variables: dict[str, Any] = {}
+
+    def _repl(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in params:
+            return match.group(0)
+        value = params[name]
+        if isinstance(value, (list, tuple)):
+            inner = ", ".join(_sql_literal(v) for v in value)
+            return f"({inner})"
+        if value is None:
+            return "NULL"
+        if isinstance(value, str):
+            # Doris variables 纯文本替换不做转义：字符串必须带引号包裹，
+            # 且值内单引号翻倍，杜绝文本替换注入。
+            variables[name] = value.replace("'", "''")
+            return f"'${{{name}}}'"
+        variables[name] = value
+        return f"${{{name}}}"
+
+    doris_sql = _PLACEHOLDER_RE.sub(_repl, sql)
+    return doris_sql, variables
 
 
 @dataclass
@@ -193,13 +256,17 @@ class OLAPExecutor:
         # 简单查询使用 /api/query endpoint
         url = f"http://{self._host}:{self._port}/api/query"
 
+        # 发送前把 SQLAlchemy :name 占位符转换为 Doris ${name} variables 语法
+        # （否则参数化查询直发 Doris 必然语法错误，OLAP 链路实际不可用）
+        doris_sql, variables = _to_doris_sql(sql, params)
+
         # 构建请求参数
         request_params: dict[str, Any] = {
-            "sql": sql,
+            "sql": doris_sql,
         }
-        if params:
+        if variables:
             # Doris HTTP API 支持 variables 参数传递命名参数
-            request_params["variables"] = json.dumps(params)
+            request_params["variables"] = json.dumps(variables)
 
         request_timeout = timeout or self._timeout
 

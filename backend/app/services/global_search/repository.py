@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from sqlalchemy import String, cast, or_, select
@@ -64,14 +65,28 @@ class GlobalSearchRepository:
         if not q.strip():
             return groups
         needle = f"%{_escape_like(q.strip())}%"
-        groups["metric"] = await self._search_metrics(needle, limit)
-        groups["dimension"] = await self._search_dimensions(needle, limit)
-        groups["term"] = await self._search_terms(needle, limit)
-        groups["template"] = await self._search_templates(needle, limit)
-        groups["data_source"] = await self._search_data_sources(needle, limit)
-        groups["catalog"] = await self._search_catalogs(needle, limit)
-        groups["field"] = await self._search_fields(q, limit)
-        groups["subject_domain"] = await self._search_subject_domains(needle, limit)
+        # 8 类资源查询相互独立，并行提交缩短聚合搜索 P95；
+        # 同一 AsyncSession 由 SQLAlchemy 内部锁串行化底层执行（安全），
+        # 未来拆分独立会话时即可真正并行下推。
+        (
+            groups["metric"],
+            groups["dimension"],
+            groups["term"],
+            groups["template"],
+            groups["data_source"],
+            groups["catalog"],
+            groups["field"],
+            groups["subject_domain"],
+        ) = await asyncio.gather(
+            self._search_metrics(needle, limit),
+            self._search_dimensions(needle, limit),
+            self._search_terms(needle, limit),
+            self._search_templates(needle, limit),
+            self._search_data_sources(needle, limit),
+            self._search_catalogs(needle, limit),
+            self._search_fields(q, limit),
+            self._search_subject_domains(needle, limit),
+        )
         return groups
 
     async def _search_metrics(self, needle: str, limit: int) -> list[dict[str, Any]]:
@@ -101,11 +116,12 @@ class GlobalSearchRepository:
         stmt = (
             select(Dimension)
             .where(
+                Dimension.deleted_at.is_(None),
                 or_(
                     Dimension.dim_code.like(needle),
                     Dimension.name.like(needle),
                     Dimension.description.like(needle),
-                )
+                ),
             )
             .limit(limit)
         )
@@ -126,11 +142,12 @@ class GlobalSearchRepository:
         stmt = (
             select(Term)
             .where(
+                Term.deleted_at.is_(None),
                 or_(
                     Term.term_code.like(needle),
                     Term.name.like(needle),
                     Term.definition.like(needle),
-                )
+                ),
             )
             .limit(limit)
         )
@@ -151,11 +168,12 @@ class GlobalSearchRepository:
         stmt = (
             select(MetricTemplate)
             .where(
+                MetricTemplate.deleted_at.is_(None),
                 or_(
                     MetricTemplate.code.like(needle),
                     MetricTemplate.name.like(needle),
                     MetricTemplate.description.like(needle),
-                )
+                ),
             )
             .limit(limit)
         )
@@ -241,17 +259,19 @@ class GlobalSearchRepository:
             for col in columns:
                 col_name = str(col.get("name", "")) if isinstance(col, dict) else ""
                 if col_name and raw in col_name.lower():
-                    items.append({
-                        "type": "field",
-                        "id": c.id,
-                        "code": col_name,
-                        "name": col_name,
-                        "domain": None,
-                        "status": None,
-                        "source_id": c.source_id,
-                        "table_name": c.entity_name,
-                        "sensitivity_level": c.sensitivity_level,
-                    })
+                    items.append(
+                        {
+                            "type": "field",
+                            "id": c.id,
+                            "code": col_name,
+                            "name": col_name,
+                            "domain": None,
+                            "status": None,
+                            "source_id": c.source_id,
+                            "table_name": c.entity_name,
+                            "sensitivity_level": c.sensitivity_level,
+                        }
+                    )
                     if len(items) >= limit:
                         return items
         return items

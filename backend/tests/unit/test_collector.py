@@ -929,6 +929,7 @@ async def test_sqlalchemy_connector_normalizes_uppercase_keys():
 
     connector = SqlalchemyConnector.__new__(SqlalchemyConnector)
     connector._engine = FakeEngine()  # type: ignore[attr-defined]
+    connector._query_timeout = 60  # type: ignore[attr-defined]
     rows = await connector.query("SELECT schema_name, table_name FROM information_schema.tables")
     assert rows == [{"schema_name": "unisense", "table_name": "orders"}]
 

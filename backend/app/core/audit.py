@@ -13,13 +13,31 @@ from app.models.audit import AuditLog
 
 
 def client_ip(request: Request | None) -> str:
-    """从 X-Forwarded-For 或直连地址提取客户端 IP。"""
+    """从 X-Forwarded-For 或直连地址提取客户端 IP。
+
+    仅当直连 IP 在 trusted_proxies 白名单中时才信任 XFF 头，
+    否则使用直连 IP（SEC-03: 防止 XFF 伪造）。
+    """
     if request is None:
         return ""
+    try:
+        from app.core.config import settings
+
+        trusted = settings.trusted_proxies_list
+    except Exception:
+        trusted = []
+
+    direct_ip = request.client.host if request.client else ""
     fwd = request.headers.get("X-Forwarded-For")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else ""
+
+    if fwd and direct_ip in trusted:
+        ips = [ip.strip() for ip in fwd.split(",")]
+        for ip in reversed(ips):
+            if ip not in trusted:
+                return ip
+        return ips[0]
+
+    return direct_ip
 
 
 async def write_audit(

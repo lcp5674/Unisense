@@ -113,8 +113,10 @@ def upgrade() -> None:
             bind.execute(
                 sa.text(
                     "INSERT INTO system_dict "
-                    "(dict_type, code, label, sort_order, status, description, created_at, updated_at) "
-                    "VALUES (:dict_type, :code, :label, :sort_order, 'active', :description, NOW(), NOW())"
+                    "(dict_type, code, label, sort_order, status, description, "
+                    "created_at, updated_at) "
+                    "VALUES (:dict_type, :code, :label, :sort_order, 'active', "
+                    ":description, NOW(), NOW())"
                 ),
                 {
                     "dict_type": dict_type,
@@ -132,8 +134,6 @@ def downgrade() -> None:
     for dict_type, items in SEED_DATA.items():
         for code, _label, _sort, _desc in items:
             bind.execute(
-                sa.text(
-                    "DELETE FROM system_dict WHERE dict_type = :dict_type AND code = :code"
-                ),
+                sa.text("DELETE FROM system_dict WHERE dict_type = :dict_type AND code = :code"),
                 {"dict_type": dict_type, "code": code},
             )

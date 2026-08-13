@@ -154,31 +154,32 @@ export interface MetricPublishRequest {
 }
 
 // 冲突（backend/app/services/conflict/schemas.py）
-export type ConflictStatus = "OPEN" | "NEGOTIATING" | "RESOLVED" | "CLOSED" | "ESCALATED";
-export type ConflictType = "NAME_CONFLICT" | "SEMANTIC_DRIFT" | "PII_CONFLICT" | "DEFINITION_DIVERGENCE";
+// 后端枚举见 models/conflict.py：状态 OPEN/NEGOTIATING/ESCALATED/RULED/CLOSED；
+// 类型 same_name_diff_def/same_def_diff_name/grain_unit/cross_domain_same_def/version_conflict/pii
+export type ConflictStatus = "OPEN" | "NEGOTIATING" | "ESCALATED" | "RULED" | "CLOSED";
+export type ConflictType =
+  | "same_name_diff_def"
+  | "same_def_diff_name"
+  | "grain_unit"
+  | "cross_domain_same_def"
+  | "version_conflict"
+  | "pii";
 
 export interface ConflictResponse {
   conflict_id: string;
   type: ConflictType;
   status: ConflictStatus;
   conflict_type: string;
-  metric_a: {
-    metric_code: string;
-    name?: string;
-    description?: string;
-    updated_at?: string;
-    [key: string]: unknown;
-  };
-  metric_b: {
-    metric_code: string;
-    name?: string;
-    description?: string;
-    updated_at?: string;
-    [key: string]: unknown;
-  };
+  // 后端 metric_a/b 为指标主键 id（int | null），指标编码请读扁平字段 candidate/existing_metric_code
+  metric_a: number | null;
+  metric_b: number | null;
   similarity_score: number;
   metric_codes: string[];
   decision_json: Record<string, unknown> | null;
+  severity?: string;
+  candidate_metric_code?: string;
+  existing_metric_code?: string;
+  description?: string;
   detected_at?: string;
   resolved_at?: string | null;
   created_at?: string;
@@ -243,12 +244,10 @@ export interface LineageEdgePage {
   has_more?: boolean;
 }
 
-// 变更影响预览（what-if）——受影响实体为节点 id 数组（与后端 service.impact_preview 一致）
+// 变更影响预览（what-if）——后端 lineage/schemas.py 的 ImpactPreviewResponse
 export interface ImpactPreview {
-  metric_code: string;
-  change_type: string;
-  affected_metrics: string[];
-  affected_reports: string[];
+  affected_metrics: { metric_code: string; change_type: string }[];
+  affected_tables: string[];
   affected_consumers: string[];
   risk_level: "low" | "medium" | "high" | "critical";
 }
@@ -470,7 +469,7 @@ export interface GlossaryTerm {
   boundary: string | null;
   status: string;
   owner_id: number;
-  version: number;
+  version?: number;
   created_at: string | null;
   updated_at: string | null;
 }

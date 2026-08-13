@@ -81,9 +81,7 @@ class DataSourceUpdateRequest(BaseModel):
         if not isinstance(cfg, dict):
             raise ValueError("connection_config 必须是对象")
         # 仅更新连接配置而未指定类型时按通用规则校验（host 必填）
-        source_type_value = (
-            self.source_type.value if self.source_type is not None else ""
-        )
+        source_type_value = self.source_type.value if self.source_type is not None else ""
         if source_type_value == "kafka":
             if "bootstrap_servers" not in cfg and "host" not in cfg:
                 raise ValueError("kafka 的 connection_config 必须包含 bootstrap_servers 或 host")
@@ -115,7 +113,9 @@ class TestConnectionRequest(BaseModel):
         if not isinstance(cfg, dict):
             raise ValueError("connection_config 必须是对象")
         source_type_value = (
-            self.source_type.value if hasattr(self.source_type, "value") else str(self.source_type)
+            self.source_type.value
+            if self.source_type is not None and hasattr(self.source_type, "value")
+            else str(self.source_type)
         )
         if source_type_value == "kafka":
             if "bootstrap_servers" not in cfg and "host" not in cfg:

@@ -109,7 +109,7 @@ async def test_response_contains_trace_id(
     reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def fake_list(self: DimensionService, *args: object, **kwargs: object) -> object:
-        return ([], 0)
+        return []
 
     monkeypatch.setattr(DimensionService, "list_dimensions", fake_list)
     resp = await reader_client.get("/api/v1/dimensions")

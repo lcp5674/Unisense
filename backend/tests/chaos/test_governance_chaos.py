@@ -35,7 +35,11 @@ class _RaisingEvents:
 
 
 def _svc_with_raising_events() -> tuple[GovernanceService, FakeRepo]:
-    svc = GovernanceService(db=FakeDB(FakeUser()), events=_RaisingEvents())  # type: ignore[arg-type]
+    # actor 用平台管理员：grant 走新越权防护（P0）后仅 platform_admin 可跨域授权，
+    # 该测试聚焦「通知故障不回滚授权」，不应被权限门禁阻断。
+    svc = GovernanceService(
+        db=FakeDB(FakeUser(uid=9, role="platform_admin")), events=_RaisingEvents()
+    )  # type: ignore[arg-type]
     repo = FakeRepo()
     svc._repo = repo  # type: ignore[assignment]
     return svc, repo

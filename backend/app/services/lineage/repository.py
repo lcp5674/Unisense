@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from datetime import UTC, datetime
+
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.lineage import LineageEdge, LineageEdgeHistory
@@ -255,13 +257,19 @@ class LineageRepository:
         return result
 
     async def soft_delete_by_node(self, node: str) -> int:
-        """级联软删某节点相关的全部血缘边（影响分析失效时维护一致性）。"""
+        """级联软删某节点相关的全部血缘边（影响分析失效时维护一致性）。
+
+        置 ``deleted_at`` 而非物理删除：血缘边是审计/溯源对象，物理删除会连带
+        丢失 ``lineage_edge_history`` 的关联上下文，且与全仓软删约定（所有查询
+        以 ``deleted_at IS NULL`` 过滤）不一致。
+        """
         stmt = (
-            delete(LineageEdge)
+            update(LineageEdge)
             .where(
                 (LineageEdge.source_node == node) | (LineageEdge.target_node == node),
                 LineageEdge.deleted_at.is_(None),
             )
+            .values(deleted_at=datetime.now(UTC))
             .execution_options(synchronize_session=False)
         )
         result = await self._db.execute(stmt)

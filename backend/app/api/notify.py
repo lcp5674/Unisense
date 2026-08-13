@@ -75,7 +75,7 @@ async def mark_sent(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await NotifyService(db).mark_sent(notif_id)
+    resp = await NotifyService(db).mark_sent(notif_id, actor_id=user.id, role=user.role)
     await write_audit(
         db,
         actor_id=user.id,
@@ -99,7 +99,7 @@ async def mark_failed(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await NotifyService(db).mark_failed(notif_id)
+    resp = await NotifyService(db).mark_failed(notif_id, actor_id=user.id, role=user.role)
     await write_audit(
         db,
         actor_id=user.id,

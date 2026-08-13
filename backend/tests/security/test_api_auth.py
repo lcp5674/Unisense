@@ -35,9 +35,9 @@ async def auth_client():
     app.dependency_overrides.clear()
 
 
-def _mock_user(password: str, **attrs: object) -> MagicMock:
+async def _mock_user(password: str, **attrs: object) -> MagicMock:
     user = MagicMock(spec=User)
-    user.password_hash = hash_password(password)
+    user.password_hash = await hash_password(password)
     for k, v in attrs.items():
         setattr(user, k, v)
     return user
@@ -52,7 +52,7 @@ def _result_with(user: MagicMock | None) -> MagicMock:
 async def test_login_success_issues_jwt(auth_client):
     c, session = auth_client
     session.execute.return_value = _result_with(
-        _mock_user("secret", id=1, role="platform_admin", org_id=1)
+        await _mock_user("secret", id=1, role="platform_admin", org_id=1)
     )
 
     resp = await c.post("/api/v1/auth/login", json={"username": "admin", "password": "secret"})
@@ -72,7 +72,7 @@ async def test_login_success_issues_jwt(auth_client):
 
 async def test_login_wrong_password_returns_same_code(auth_client):
     c, session = auth_client
-    session.execute.return_value = _result_with(_mock_user("secret"))
+    session.execute.return_value = _result_with(await _mock_user("secret"))
 
     resp = await c.post("/api/v1/auth/login", json={"username": "admin", "password": "wrong"})
 

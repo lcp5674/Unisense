@@ -43,6 +43,10 @@ class NotificationResponse(BaseModel):
     status: str
     ref_type: str | None = None
     ref_id: int | None = None
+    sent_at: datetime | None = None
+    payload: dict[str, Any] | None = None
+    send_at: datetime | None = None
+    created_at: datetime | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> NotificationResponse:
@@ -56,6 +60,10 @@ class NotificationResponse(BaseModel):
             status=m.status,
             ref_type=getattr(m, "ref_type", None),
             ref_id=getattr(m, "ref_id", None),
+            sent_at=getattr(m, "sent_at", None),
+            payload=getattr(m, "payload", None),
+            send_at=getattr(m, "send_at", None),
+            created_at=getattr(m, "created_at", None),
         )
 
 
@@ -117,6 +125,7 @@ class SubscriptionResponse(BaseModel):
     event_type: str
     enabled: bool
     threshold: int | None = None
+    created_at: datetime | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> SubscriptionResponse:
@@ -127,4 +136,5 @@ class SubscriptionResponse(BaseModel):
             event_type=m.event_type,
             enabled=getattr(m, "enabled", True),
             threshold=getattr(m, "threshold", None),
+            created_at=getattr(m, "created_at", None),
         )

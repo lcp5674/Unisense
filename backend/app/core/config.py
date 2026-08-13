@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import time as _time
 from functools import lru_cache
+from typing import Any
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -73,7 +75,7 @@ class Settings(BaseSettings):
     # ---- JWT ----
     jwt_secret: str
     jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 60
+    jwt_expire_minutes: int = 15
 
     # ---- CORS ----
     cors_origins: str = "http://localhost:3000"
@@ -105,6 +107,7 @@ class Settings(BaseSettings):
 
     # ---- 语义模块 ----
     metric_sunset_days: int = 30  # 指标废弃过渡天数（TD §13）
+    glossary_synonym_threshold: float = 0.8  # 术语同义词冲突判定阈值（T053）
 
     model_config = SettingsConfigDict(
         env_prefix="UNISENSE_",
@@ -141,6 +144,7 @@ class Settings(BaseSettings):
             for origin in self.cors_origins_list:
                 if any(p in origin for p in internal_patterns):
                     import logging
+
                     logging.getLogger("unisense.config").warning(
                         "cors_internal_origin_in_prod origin=%s", origin
                     )
@@ -176,3 +180,44 @@ def get_settings() -> Settings:
 
 
 settings: Settings = get_settings()
+
+
+class HotSettings:
+    """热配置（Redis Hash + 30s 内存缓存，对齐 R&D-08）。"""
+
+    def __init__(self) -> None:
+        self._cache: dict[str, str] = {}
+        self._cache_at: float = 0.0
+        self._ttl: float = 30.0
+
+    async def refresh(self, redis_client: Any) -> None:
+        now = _time.monotonic()
+        if now - self._cache_at < self._ttl:
+            return
+        try:
+            data = await redis_client.hgetall("unisense:hot_config")
+            self._cache = dict(data) if data else {}
+            self._cache_at = now
+        except Exception:
+            pass
+
+    def get(self, key: str, default: str = "") -> str:
+        return self._cache.get(key, default)
+
+
+_hot_settings: HotSettings | None = None
+
+
+def get_hot_settings() -> HotSettings:
+    global _hot_settings
+    if _hot_settings is None:
+        _hot_settings = HotSettings()
+    return _hot_settings
+
+
+async def init_hot_settings(redis_client: object | None) -> HotSettings:
+    global _hot_settings
+    _hot_settings = HotSettings()
+    if redis_client is not None:
+        await _hot_settings.refresh(redis_client)
+    return _hot_settings

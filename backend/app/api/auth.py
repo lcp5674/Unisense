@@ -1,4 +1,4 @@
-"""鉴权 API：登录签发 JWT、查询当前用户。
+"""鉴权 API：登录签发 JWT、登出撤销令牌、刷新令牌。
 
 对齐 TD §5（鉴权）与 DEV_GUIDE §8b.1。
 全局前缀由 main.py 注入（/api/v1），本路由前缀为 /auth。
@@ -9,16 +9,22 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+import jwt
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, ok
+from app.core.config import settings
 from app.core.exceptions import AuthError
 from app.core.guard import guard_against_injection
-from app.core.security import create_access_token, verify_password
+from app.core.security import (
+    blacklist_token,
+    create_access_token,
+    verify_password,
+)
 from app.db.mysql import get_db_session
 from app.models.user import User
 
@@ -138,3 +144,51 @@ async def list_users(
             for u in rows
         ]
     )
+
+
+@router.post("/logout")
+async def logout(
+    user: CurrentUser,
+    request: Request,
+) -> ApiResponse[dict[str, str]]:
+    """登出：将当前 JWT 的 jti 加入黑名单。
+
+    从请求 Bearer Token 中提取 jti，计算剩余有效期，加入黑名单。
+    """
+    jti, remaining_ttl = _decode_jti_and_ttl(request)
+    await blacklist_token(jti, remaining_ttl)
+    return ok({"status": "logged_out", "jti": jti})
+
+
+@router.post("/refresh")
+async def refresh(
+    user: CurrentUser,
+    request: Request,
+) -> ApiResponse[TokenResponse]:
+    """刷新令牌：黑名单旧 jti，签发新 JWT。
+
+    接受当前有效 JWT，将其 jti 加入黑名单，签发新令牌。
+    """
+    old_jti, remaining_ttl = _decode_jti_and_ttl(request)
+    await blacklist_token(old_jti, remaining_ttl)
+
+    new_token = create_access_token(sub=user.id, role=user.role, org_id=user.org_id)
+    return ok(TokenResponse(access_token=new_token))
+
+
+def _decode_jti_and_ttl(request: Request) -> tuple[str, int]:
+    """从请求 Authorization header 中解码 JWT 提取 jti 和剩余 TTL 秒数。"""
+    auth_header: str = request.headers.get("authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip() if auth_header.startswith("Bearer ") else ""
+    if not token:
+        return "", settings.jwt_expire_minutes * 60
+
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        jti: str = payload.get("jti", "")
+        exp: int = payload.get("exp", 0)
+        now = int(datetime.now(UTC).timestamp())
+        remaining_ttl = max(exp - now, 0)
+        return jti, remaining_ttl
+    except jwt.InvalidTokenError:
+        return "", settings.jwt_expire_minutes * 60

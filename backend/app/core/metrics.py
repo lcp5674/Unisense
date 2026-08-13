@@ -10,6 +10,7 @@ RED 方法：
 
 from __future__ import annotations
 
+import re
 import time
 from collections import defaultdict
 from typing import Any
@@ -22,6 +23,18 @@ from app.core.logging import get_logger
 
 logger = get_logger("metrics")
 
+_UUID_PATTERN = re.compile(
+    r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+_NUM_ID_PATTERN = re.compile(r"/\d+(?=/|$)")
+
+
+def _normalize_path(path: str) -> str:
+    path = _UUID_PATTERN.sub("/{id}", path)
+    path = _NUM_ID_PATTERN.sub("/{id}", path)
+    return path
+
 
 class _MetricsStore:
     """进程内 RED 指标计数（单实例，被 MetricsMiddleware 与 /metrics 共用）。"""
@@ -30,8 +43,14 @@ class _MetricsStore:
         self._counts: dict[tuple[str, str, int], int] = defaultdict(int)
         self._latency_sum: dict[tuple[str, str], float] = defaultdict(float)
         self._latency_count: dict[tuple[str, str], int] = defaultdict(int)
+        self._metric_publish_count: int = 0
+        self._query_success_count: int = 0
+        self._query_failure_count: int = 0
+        self._llm_call_count: int = 0
+        self._llm_failure_count: int = 0
 
     def observe(self, method: str, path: str, status: int, duration: float) -> None:
+        path = _normalize_path(path)
         self._counts[(method, path, status)] += 1
         self._latency_sum[(method, path)] += duration
         self._latency_count[(method, path)] += 1
@@ -54,7 +73,26 @@ class _MetricsStore:
             lines.append(
                 f'http_request_duration_seconds_count{{method="{method}",path="{path}"}} {n}'
             )
+        lines.append(f"unisense_metric_publish_total {self._metric_publish_count}")
+        lines.append(f"unisense_query_success_total {self._query_success_count}")
+        lines.append(f"unisense_query_failure_total {self._query_failure_count}")
+        lines.append(f"unisense_llm_call_total {self._llm_call_count}")
+        lines.append(f"unisense_llm_failure_total {self._llm_failure_count}")
         return "\n".join(lines) + "\n"
+
+    def observe_metric_publish(self) -> None:
+        self._metric_publish_count += 1
+
+    def observe_query_result(self, success: bool) -> None:
+        if success:
+            self._query_success_count += 1
+        else:
+            self._query_failure_count += 1
+
+    def observe_llm_call(self, success: bool) -> None:
+        self._llm_call_count += 1
+        if not success:
+            self._llm_failure_count += 1
 
 
 store = _MetricsStore()

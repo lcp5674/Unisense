@@ -18,7 +18,7 @@ from typing import Any, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, UnisenseError
 from app.core.resilience import CircuitBreaker
 from app.services.assetmap.repository import AssetMapRepository
 
@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 # Neo4j 调用熔断器
 _NEO4J_BREAKER = CircuitBreaker(failure_threshold=5, reset_timeout=30.0)
+
+# 热力聚合合法维度（Repository 对未知维度静默回退到 domain，Service 层须拒绝，
+# 否则会以非法键缓存 domain 数据造成结果与请求不一致）。
+_HEATMAP_DIMENSIONS = {"domain", "sensitivity", "owner", "dw_layer"}
 
 # 聚合结果缓存：catalog/metric/classification/heatmap/health/pii 均为低频变化的
 # 全表聚合，加 cache-aside 短 TTL 缓存避免每次请求全表扫描（大规模优化，TD §13 perf）。
@@ -67,9 +71,7 @@ async def _agg_cache_set(key: str, value: Any) -> None:
         logger.warning("assetmap_agg_cache_set_failed: %s", exc)
 
 
-async def _agg_cached(
-    name: str, loader: Callable[[], Awaitable[dict[str, Any]]]
-) -> dict[str, Any]:
+async def _agg_cached(name: str, loader: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
     """cache-aside 通用封装：读缓存命中即返，未命中回源并写缓存。"""
     key = f"{_CACHE_PREFIX}{name}"
     cached = await _agg_cache_get(key)
@@ -78,6 +80,7 @@ async def _agg_cached(
     data = await loader()
     await _agg_cache_set(key, data)
     return data
+
 
 # Neo4j 异步 driver 单例：惰性创建并复用，避免每请求新建连接池导致泄漏（P2-1）。
 _NEO4J_DRIVER: Any | None = None
@@ -94,6 +97,11 @@ def _get_neo4j_driver() -> Any:
         _NEO4J_DRIVER = AsyncGraphDatabase.driver(
             settings.neo4j_url,
             auth=(settings.neo4j_user, settings.neo4j_password),
+            # 故障容错：外部调用必须设超时，防止 Neo4j 无响应时 session.run 无限挂起
+            # （熔断只在抛异常时触发，悬挂连接不抛异常，故须靠连接超时兜底）。
+            connection_timeout=5.0,
+            connection_acquisition_timeout=5.0,
+            max_connection_pool_size=10,
         )
     return _NEO4J_DRIVER
 
@@ -189,7 +197,8 @@ class AssetMapService(BaseService):
                 where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
                 node_query = (
-                    match_clause + where_clause
+                    match_clause
+                    + where_clause
                     + " RETURN n.id AS id, n.type AS type, n.label AS label,"
                     + " n.pii AS pii, n.domain AS domain, n.owner AS owner LIMIT 500"
                 )
@@ -221,23 +230,27 @@ class AssetMapService(BaseService):
                 nodes_result = await session.run(node_query, params)
                 nodes = []
                 async for record in nodes_result:
-                    nodes.append({
-                        "id": record["id"],
-                        "type": record["type"] or "unknown",
-                        "label": record["label"] or "",
-                        "pii": bool(record["pii"]),
-                        "domain": record["domain"],
-                        "owner": record["owner"],
-                    })
+                    nodes.append(
+                        {
+                            "id": record["id"],
+                            "type": record["type"] or "unknown",
+                            "label": record["label"] or "",
+                            "pii": bool(record["pii"]),
+                            "domain": record["domain"],
+                            "owner": record["owner"],
+                        }
+                    )
 
                 edges_result = await session.run(edge_query, params)
                 edges = []
                 async for record in edges_result:
-                    edges.append({
-                        "source": record["source"],
-                        "target": record["target"],
-                        "type": record["type"],
-                    })
+                    edges.append(
+                        {
+                            "source": record["source"],
+                            "target": record["target"],
+                            "type": record["type"],
+                        }
+                    )
 
                 _NEO4J_BREAKER.record_success()
                 return {"nodes": nodes, "edges": edges}
@@ -246,9 +259,7 @@ class AssetMapService(BaseService):
             logger.warning("assetmap_neo4j_query_failed: %s", exc)
             return None
 
-    async def _get_graph_mysql(
-        self, domain: str | None, pii_only: bool
-    ) -> dict[str, Any]:
+    async def _get_graph_mysql(self, domain: str | None, pii_only: bool) -> dict[str, Any]:
         """降级：从 MySQL lineage_edge + metric 拼接图谱。"""
         nodes, edges = await self._repo.graph_from_mysql(domain, pii_only)
         return {"nodes": nodes, "edges": edges}
@@ -258,7 +269,16 @@ class AssetMapService(BaseService):
 
         Args:
             dimension: 聚合维度（domain / sensitivity / owner / dw_layer）。
+
+        Raises:
+            UnisenseError: 非法聚合维度（防止未知维度静默回退到 domain
+                并在错误缓存键下缓存 domain 数据造成结果与请求不一致）。
         """
+        if dimension not in _HEATMAP_DIMENSIONS:
+            raise UnisenseError(
+                f"非法的热力聚合维度: {dimension}",
+                error_code="INVALID_HEATMAP_DIMENSION",
+            )
         return await _agg_cached(
             f"heatmap:{dimension}",
             lambda: self._repo.heatmap_aggregation(dimension),
@@ -309,31 +329,21 @@ class AssetMapService(BaseService):
     # 写能力（FR-18 资产工作台）：认领/转让、重分类、批量
     # ----------------------------------------------------------------
 
-    async def assign_owner(
-        self, entity_id: int, owner_id: int | None
-    ) -> dict[str, Any]:
+    async def assign_owner(self, entity_id: int, owner_id: int | None) -> dict[str, Any]:
         """认领/转让归属（owner_id=None 解除归属）。"""
         entity = await self._repo.get_catalog_entity(entity_id)
         if entity is None:
-            raise NotFoundError(
-                f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id}
-            )
+            raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
         if owner_id is not None and not await self._repo.user_exists(owner_id):
-            raise NotFoundError(
-                f"目标用户不存在: {owner_id}", ctx={"owner_id": owner_id}
-            )
+            raise NotFoundError(f"目标用户不存在: {owner_id}", ctx={"owner_id": owner_id})
         updated = await self._repo.assign_owner(entity, owner_id)
         return {"entity_id": updated.id, "owner_id": updated.owner_id}
 
-    async def reclassify_sensitivity(
-        self, entity_id: int, level: str
-    ) -> dict[str, Any]:
+    async def reclassify_sensitivity(self, entity_id: int, level: str) -> dict[str, Any]:
         """重分类敏感级（level 由 schema 校验为枚举值）。"""
         entity = await self._repo.get_catalog_entity(entity_id)
         if entity is None:
-            raise NotFoundError(
-                f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id}
-            )
+            raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
         updated = await self._repo.reclassify_sensitivity(entity, level)
         return {"entity_id": updated.id, "sensitivity_level": updated.sensitivity_level}
 
@@ -342,18 +352,14 @@ class AssetMapService(BaseService):
     ) -> dict[str, Any]:
         """批量认领/转让归属（同事务，API 层统一 commit）。"""
         if owner_id is not None and not await self._repo.user_exists(owner_id):
-            raise NotFoundError(
-                f"目标用户不存在: {owner_id}", ctx={"owner_id": owner_id}
-            )
+            raise NotFoundError(f"目标用户不存在: {owner_id}", ctx={"owner_id": owner_id})
         entities = await self._repo.list_catalog_entities(entity_ids)
         if not entities:
             raise NotFoundError("指定实体均不存在或已删除")
         affected = await self._repo.batch_assign_owner(entities, owner_id)
         return {"affected": affected, "owner_id": owner_id, "total": len(entity_ids)}
 
-    async def batch_reclassify(
-        self, entity_ids: list[int], level: str
-    ) -> dict[str, Any]:
+    async def batch_reclassify(self, entity_ids: list[int], level: str) -> dict[str, Any]:
         """批量重分类敏感级（同事务，API 层统一 commit）。"""
         entities = await self._repo.list_catalog_entities(entity_ids)
         if not entities:

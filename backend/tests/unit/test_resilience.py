@@ -532,7 +532,7 @@ def test_parse_host_port_parses():
     assert resilience._parse_host_port("http://localhost:19200") == ("localhost", 19200)
 
 
-def test_optional_dependency_status(monkeypatch):
+async def test_optional_dependency_status(monkeypatch):
     """探活可选依赖：未配置跳过、解析失败记 False、成功记 True。"""
     monkeypatch.setattr(resilience.settings, "neo4j_url", "bolt://neo4j:7687")
     monkeypatch.setattr(resilience.settings, "es_url", "http://es:9200")
@@ -541,6 +541,10 @@ def test_optional_dependency_status(monkeypatch):
     def _fake_tcp(host: str, port: int, timeout: float = 0.5) -> bool:
         return host != "neo4j"  # neo4j 不可达，es 可达
 
+    async def _fake_tcp_async(host: str, port: int, timeout: float = 0.5) -> bool:
+        return host != "neo4j"
+
     monkeypatch.setattr(resilience, "_tcp_alive", _fake_tcp)
-    status = resilience.optional_dependency_status()
+    monkeypatch.setattr(resilience, "_tcp_alive_async", _fake_tcp_async)
+    status = await resilience.optional_dependency_status()
     assert status == {"neo4j": False, "elasticsearch": True}

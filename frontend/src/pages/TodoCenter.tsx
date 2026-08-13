@@ -13,15 +13,6 @@ const CONFLICT_TYPE_LABEL: Record<string, string> = {
   pii: "PII 冲突",
 };
 
-const SEVERITY_LABEL: Record<string, string> = {
-  low: "低",
-  medium: "中",
-  high: "高",
-  critical: "严重",
-  hard: "硬冲突",
-  soft: "软冲突",
-};
-
 interface Todo {
   kind: "conflict" | "draft";
   title: string;
@@ -47,7 +38,7 @@ export function TodoCenter() {
         list.push({
           kind: "conflict",
           title: `冲突待仲裁：${c.candidate_metric_code} vs ${c.existing_metric_code}`,
-          meta: `${CONFLICT_TYPE_LABEL[c.type] ?? c.type} · ${SEVERITY_LABEL[c.severity] ?? c.severity} · ${c.conflict_id}`,
+          meta: `${CONFLICT_TYPE_LABEL[c.type] ?? c.type} · ${c.status} · ${c.conflict_id}`,
         });
       }
       for (const m of drafts.items) {

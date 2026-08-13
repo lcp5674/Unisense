@@ -14,7 +14,8 @@ _PII_NAME_PATTERNS = [
     re.compile(r"(id_card|idcard|身份证|sfz)", re.I),
     re.compile(r"(phone|mobile|tel|手机|电话|手机号)", re.I),
     re.compile(r"(email|mail|邮箱|邮件)", re.I),
-    re.compile(r"(name|姓名|用户名|user_name|real_name|昵称)", re.I),
+    # name 必须词边界匹配，避免 city_name/product_name/hostname 等被误判为 PII
+    re.compile(r"(\bname\b|姓名|用户名|user_name|real_name|username|昵称)", re.I),
     re.compile(r"(address|地址|住址|居住地)", re.I),
     re.compile(r"(bank_card|bankcard|银行卡|卡号|card_no|卡号)", re.I),
     re.compile(r"(id_no|证件号|cert_no|passport|护照)", re.I),

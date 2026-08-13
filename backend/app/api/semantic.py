@@ -95,7 +95,8 @@ async def get_template(
 
 
 async def _generate_template_code(
-    db: AsyncSession, validated: Any,
+    db: AsyncSession,
+    validated: Any,
 ) -> str:
     """自动生成唯一模板编码：``tpl_{domain}_{name_slug}``，冲突自增后缀。"""
     from app.core.codegen import generate_unique_code, slugify_code
@@ -131,9 +132,7 @@ async def create_template(
     if not validated.code:
         validated.code = await _generate_template_code(db, validated)
     # 编码唯一性检查
-    dup = await db.execute(
-        select(MetricTemplate).where(MetricTemplate.code == validated.code)
-    )
+    dup = await db.execute(select(MetricTemplate).where(MetricTemplate.code == validated.code))
     if dup.scalar_one_or_none() is not None:
         from app.core.exceptions import ConflictError
 
@@ -316,7 +315,7 @@ async def get_consumption_guide(
 async def _issue_quickbi_ticket(
     body: dict[str, Any],
     db: AsyncSession,
-    actor_id: int,
+    actor: Any,
     request: Request,
 ) -> dict[str, Any]:
     """签发 QuickBI 嵌入票据（共享处理，供主路径与兼容路径复用）。"""
@@ -341,15 +340,24 @@ async def _issue_quickbi_ticket(
 
     from app.services.semantic.quickbi import QuickBiService
 
+    # 绑定签发者身份声明（user_id/role/domain），供网关侧按用户收敛报表访问：
+    # 此前票据不绑定身份，任意调用者可签任意 report_id 嵌入（含 PII 报表）。
+    role_val = actor.role.value if hasattr(actor.role, "value") else actor.role
+    actor_claim = {
+        "user_id": actor.id,
+        "role": str(role_val) if role_val is not None else None,
+        "domain": getattr(actor, "domain", None),
+    }
     data = QuickBiService().issue_ticket(
         report_id=report_id,
         dashboard_id=str(dashboard_id) if dashboard_id else None,
         params=params if isinstance(params, dict) else None,
+        actor=actor_claim,
     )
     # FR-16: 票据签发为消费侧操作，留痕便于审计报表访问
     await write_audit(
         db,
-        actor_id=actor_id,
+        actor_id=actor.id,
         action="quickbi.ticket",
         entity_type="quickbi_report",
         entity_id=report_id,
@@ -374,7 +382,7 @@ async def issue_quickbi_ticket(
     db: AsyncSession = Depends(get_db_session),
 ) -> Any:
     """签发 QuickBI 嵌入票据（FR-12）。返回短期签名票据与嵌入地址。"""
-    data = await _issue_quickbi_ticket(body, db, _user.id, request)
+    data = await _issue_quickbi_ticket(body, db, _user, request)
     return ok(data=data, trace_id=get_trace_id(request))
 
 
@@ -396,5 +404,5 @@ async def issue_quickbi_ticket_compat(
     db: AsyncSession = Depends(get_db_session),
 ) -> Any:
     """兼容前端 /api/v1/semantic/quickbi/ticket（单数 semantic）。"""
-    data = await _issue_quickbi_ticket(body, db, _user.id, request)
+    data = await _issue_quickbi_ticket(body, db, _user, request)
     return ok(data=data, trace_id=get_trace_id(request))

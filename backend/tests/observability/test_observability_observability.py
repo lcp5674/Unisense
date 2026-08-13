@@ -82,9 +82,17 @@ async def test_submit_feedback_writes_audit_record(
     async def fake_submit(
         self: ObservabilityService, payload: object, actor_id: int | None = None
     ) -> object:
-        m = MagicMock()
-        m.id = 1
-        return m
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            id=1,
+            user_id=actor_id or 11,
+            target_type="metric",
+            target_id=None,
+            rating=5,
+            comment="good",
+            created_at=None,
+        )
 
     monkeypatch.setattr(ObservabilityService, "submit_feedback", fake_submit)
     resp = await viewer_client.post("/api/v1/observability/feedback", json=_FEEDBACK_BODY)
@@ -101,7 +109,7 @@ async def test_response_contains_trace_id(
     reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def fake_list(self: ObservabilityService, *args: object, **kwargs: object) -> object:
-        return ([], 0)
+        return []
 
     monkeypatch.setattr(ObservabilityService, "list_feedback", fake_list)
     resp = await reader_client.get("/api/v1/observability/feedback")

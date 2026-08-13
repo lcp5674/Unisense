@@ -24,7 +24,16 @@ from app.models.user import Organization, User
 
 
 async def seed() -> None:
-    admin_password = os.getenv("UNISENSE_SEED_ADMIN_PASSWORD", "changeme123")
+    admin_password = (
+        os.getenv("ADMIN_INITIAL_PASSWORD")
+        or os.getenv("UNISENSE_SEED_ADMIN_PASSWORD")
+        or "changeme123"
+    )
+    if not os.getenv("ADMIN_INITIAL_PASSWORD") and not os.getenv("UNISENSE_SEED_ADMIN_PASSWORD"):
+        print(
+            "[seed] 提示：可用 ADMIN_INITIAL_PASSWORD 环境变量设置初始密码，"
+            "当前使用默认值 changeme123"
+        )
 
     async with async_session_factory() as db:
         result = await db.execute(select(Organization).where(Organization.code == "default"))
@@ -44,7 +53,7 @@ async def seed() -> None:
                     org_id=org.id,
                     username="admin",
                     email="admin@unisense.local",
-                    password_hash=hash_password(admin_password),
+                    password_hash=await hash_password(admin_password),
                     display_name="平台管理员",
                     role="platform_admin",
                     domain=None,

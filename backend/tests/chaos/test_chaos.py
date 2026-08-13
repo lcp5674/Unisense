@@ -70,10 +70,11 @@ async def test_redis_down_core_link_still_200(chaos_client, monkeypatch):
 async def test_neo4j_down_triggers_degradation(chaos_client, monkeypatch):
     # Neo4j 宕机 -> 降级生效
     app.dependency_overrides[deps.get_redis] = lambda: _healthy_redis()
-    monkeypatch.setattr(
-        "app.api.health.optional_dependency_status",
-        lambda: {"neo4j": False, "elasticsearch": True, "olap": True},
-    )
+
+    async def _fake_status():
+        return {"neo4j": False, "elasticsearch": True, "olap": True}
+
+    monkeypatch.setattr("app.api.health.optional_dependency_status", _fake_status)
     try:
         ready = await chaos_client.get("/ready")
         assert ready.status_code == 200
@@ -93,10 +94,11 @@ async def test_neo4j_down_triggers_degradation(chaos_client, monkeypatch):
 async def test_es_down_search_fallback(chaos_client, monkeypatch):
     # ES 宕机 -> 搜索降级返回（fallback 到 DB）
     app.dependency_overrides[deps.get_redis] = lambda: _healthy_redis()
-    monkeypatch.setattr(
-        "app.api.health.optional_dependency_status",
-        lambda: {"neo4j": True, "elasticsearch": False, "olap": True},
-    )
+
+    async def _fake_status():
+        return {"neo4j": True, "elasticsearch": False, "olap": True}
+
+    monkeypatch.setattr("app.api.health.optional_dependency_status", _fake_status)
     try:
         ready = await chaos_client.get("/ready")
         assert ready.json()["status"] == "degraded"
@@ -112,10 +114,11 @@ async def test_es_down_search_fallback(chaos_client, monkeypatch):
 async def test_olap_down_bulkhead_isolation(chaos_client, monkeypatch):
     # OLAP 宕机 -> 查询舱壁隔离（核心链路不受影响）
     app.dependency_overrides[deps.get_redis] = lambda: _healthy_redis()
-    monkeypatch.setattr(
-        "app.api.health.optional_dependency_status",
-        lambda: {"neo4j": True, "elasticsearch": True, "olap": False},
-    )
+
+    async def _fake_status():
+        return {"neo4j": True, "elasticsearch": True, "olap": False}
+
+    monkeypatch.setattr("app.api.health.optional_dependency_status", _fake_status)
     try:
         ready = await chaos_client.get("/ready")
         assert ready.json()["status"] == "degraded"

@@ -53,9 +53,24 @@ class TestTermRepo:
         result = await repo.get_term("MISSING")
         assert result is None
 
+    async def test_get_term_by_id_found(self, repo: GlossaryRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = Term(term_code="T1", id=7)
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        result = await repo.get_term_by_id(7)
+        assert result is not None
+        assert result.id == 7
+
+    async def test_get_term_by_id_not_found(self, repo: GlossaryRepository) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        assert await repo.get_term_by_id(999) is None
+
     async def test_list_terms_no_filters(self, repo: GlossaryRepository) -> None:
         mock_result = MagicMock()
         mock_result.scalars.return_value.all.return_value = [Term(term_code="T1")]
+        mock_result.scalar.return_value = 1
         repo._session.execute = AsyncMock(return_value=mock_result)
         rows, total = await repo.list_terms(
             domain=None, status=None, search=None, limit=10, offset=0
@@ -66,6 +81,7 @@ class TestTermRepo:
     async def test_list_terms_with_filters(self, repo: GlossaryRepository) -> None:
         mock_result = MagicMock()
         mock_result.scalars.return_value.all.return_value = [Term(term_code="T1")]
+        mock_result.scalar.return_value = 1
         repo._session.execute = AsyncMock(return_value=mock_result)
         rows, total = await repo.list_terms(
             domain="sales", status="PUBLISHED", search="用户", limit=10, offset=0
@@ -128,7 +144,7 @@ class TestVersionRelationRepo:
 
     async def test_count_term_versions(self, repo: GlossaryRepository) -> None:
         mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [TermVersion(term_id=1)]
+        mock_result.scalar.return_value = 1
         repo._session.execute = AsyncMock(return_value=mock_result)
         count = await repo.count_term_versions(term_id=1)
         assert count == 1

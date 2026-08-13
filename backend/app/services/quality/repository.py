@@ -117,6 +117,25 @@ class QualityRepository:
         )
         return (await self._db.execute(stmt)).scalar_one_or_none()
 
+    async def find_open_event(self, metric_id: int, rule_type: Any) -> QualityEvent | None:
+        """查找该指标+规则类型下仍为 OPEN 的质量事件（幂等去重用）。
+
+        观测持续异常且无新观测时，若既有 OPEN 事件未关闭，自动检测不应重复
+        落新事件+告警刷屏（审查发现 quality 自动任务非幂等）。
+        """
+        stmt = (
+            select(QualityEvent)
+            .where(
+                QualityEvent.metric_id == metric_id,
+                QualityEvent.rule_type == rule_type,
+                QualityEvent.status == QualityEventStatus.OPEN,
+                QualityEvent.deleted_at.is_(None),
+            )
+            .order_by(QualityEvent.id.desc())
+            .limit(1)
+        )
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
     async def list_events(
         self,
         metric_id: int | None,
@@ -168,6 +187,23 @@ class QualityRepository:
             .limit(limit)
         )
         return list((await self._db.execute(stmt)).scalars().all())
+
+    async def latest_observation(self, metric_id: int) -> QualityObservation | None:
+        """取某指标最近一次观测（按时间倒序取 1 条）。
+
+        供自动检测使用：与 ``list_recent_observations``（升序 + limit）区分，
+        后者取前 N 条最旧观测，取末条并非最新（观测超过 limit 时取到的是陈旧值）。
+        """
+        stmt = (
+            select(QualityObservation)
+            .where(
+                QualityObservation.metric_id == metric_id,
+                QualityObservation.deleted_at.is_(None),
+            )
+            .order_by(QualityObservation.obs_time.desc())
+            .limit(1)
+        )
+        return (await self._db.execute(stmt)).scalar_one_or_none()
 
     async def get_same_period_observation(
         self, metric_id: int, target_time: datetime, window_hours: int = 12
@@ -315,9 +351,7 @@ class QualityRepository:
         return list(rows), total
 
     # ---- ReconciliationRecord（外部基准对账记录，TD §4.15.7）----
-    async def save_reconciliation(
-        self, rec: ReconciliationRecord
-    ) -> ReconciliationRecord:
+    async def save_reconciliation(self, rec: ReconciliationRecord) -> ReconciliationRecord:
         self._db.add(rec)
         await self._db.flush()
         await self._db.refresh(rec)

@@ -53,9 +53,8 @@ async def run_quality_checks(ctx: dict[str, Any]) -> dict[str, int]:
         skipped_no_obs = 0
 
         for metric_id, rule_type in combos:
-            # 取该指标最近一次观测（升序，取末条为最新）
-            observations = await repo.list_recent_observations(metric_id, limit=50)
-            latest = observations[-1] if observations else None
+            # 取该指标最近一次观测（最新，非升序前 N 条的末条）
+            latest = await repo.latest_observation(metric_id)
             if latest is None or latest.obs_time < now - _OBS_FRESH_WINDOW:
                 skipped_no_obs += 1
                 continue

@@ -33,6 +33,8 @@ class FeedbackResponse(BaseModel):
     target_id: str | None = None
     rating: int | None = None
     comment: str | None = None
+    status: str = "pending"
+    resolution_note: str | None = None
     created_at: datetime | None = None
 
     @classmethod
@@ -44,5 +46,7 @@ class FeedbackResponse(BaseModel):
             target_id=getattr(m, "target_id", None),
             rating=getattr(m, "rating", None),
             comment=getattr(m, "comment", None),
+            status=getattr(m, "status", "pending") or "pending",
+            resolution_note=getattr(m, "resolution_note", None),
             created_at=getattr(m, "created_at", None),
         )

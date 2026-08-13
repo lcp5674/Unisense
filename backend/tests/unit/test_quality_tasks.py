@@ -52,7 +52,7 @@ def ctx() -> dict:
 async def _run(
     monkeypatch: pytest.MonkeyPatch,
     rules: list[QualityRule],
-    obs: list[QualityObservation],
+    latest_obs: QualityObservation | None,
     detect_result: object | None = None,
     detect_error: Exception | None = None,
 ) -> tuple[dict[str, int], AsyncMock]:
@@ -64,7 +64,7 @@ async def _run(
 
     repo = MagicMock()
     repo.list_all_enabled_rules = AsyncMock(return_value=rules)
-    repo.list_recent_observations = AsyncMock(return_value=obs)
+    repo.latest_observation = AsyncMock(return_value=latest_obs)
 
     # async_session_factory 是 async_sessionmaker：同步调用返回 AsyncSession，
     # 再经 async with session 进入异步上下文管理。
@@ -95,7 +95,7 @@ async def _run(
 class TestRunQualityChecks:
     @pytest.mark.asyncio
     async def test_no_rules_returns_zeros(self, ctx: dict, monkeypatch: pytest.MonkeyPatch) -> None:
-        result, detect = await _run(monkeypatch, rules=[], obs=[])
+        result, detect = await _run(monkeypatch, rules=[], latest_obs=None)
         assert result == {"combos": 0, "evaluated": 0, "triggered": 0, "skipped_no_obs": 0}
         detect.assert_not_called()
 
@@ -113,7 +113,10 @@ class TestRunQualityChecks:
             status=QualityEventStatus.OPEN,
         )
         result, detect = await _run(
-            monkeypatch, rules=[_rule()], obs=[_obs("0.5")], detect_result=event
+            monkeypatch,
+            rules=[_rule()],
+            latest_obs=_obs("0.5"),
+            detect_result=event,
         )
         assert result["combos"] == 1
         assert result["evaluated"] == 1
@@ -127,7 +130,7 @@ class TestRunQualityChecks:
 
     @pytest.mark.asyncio
     async def test_no_obs_skipped(self, ctx: dict, monkeypatch: pytest.MonkeyPatch) -> None:
-        result, detect = await _run(monkeypatch, rules=[_rule()], obs=[])
+        result, detect = await _run(monkeypatch, rules=[_rule()], latest_obs=None)
         assert result["combos"] == 1
         assert result["evaluated"] == 0
         assert result["skipped_no_obs"] == 1
@@ -139,7 +142,7 @@ class TestRunQualityChecks:
     ) -> None:
         # 观测超过 48h 新鲜度窗口 → 跳过
         result, detect = await _run(
-            monkeypatch, rules=[_rule()], obs=[_obs("0.5", age_hours=100)]
+            monkeypatch, rules=[_rule()], latest_obs=_obs("0.5", age_hours=100)
         )
         assert result["skipped_no_obs"] == 1
         assert result["evaluated"] == 0
@@ -153,7 +156,7 @@ class TestRunQualityChecks:
         result, detect = await _run(
             monkeypatch,
             rules=[_rule(), _rule()],
-            obs=[_obs("0.5")],
+            latest_obs=_obs("0.5"),
             detect_result=None,
         )
         assert result["combos"] == 1
@@ -168,7 +171,7 @@ class TestRunQualityChecks:
         result, detect = await _run(
             monkeypatch,
             rules=[_rule()],
-            obs=[_obs("0.5")],
+            latest_obs=_obs("0.5"),
             detect_error=RuntimeError("eval boom"),
         )
         assert result["combos"] == 1

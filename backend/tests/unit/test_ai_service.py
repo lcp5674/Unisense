@@ -16,6 +16,14 @@ _LLM_SQL = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_shared_cache() -> None:
+    """AiService._cache 为类属性（跨实例共享），每测试前清空防污染。"""
+    AiService._cache.clear()
+    yield
+    AiService._cache.clear()
+
+
 def _enabled_llm() -> MagicMock:
     """构造启用且可返回 SQL 的假 LLM（用于缓存行为验证）。"""
     llm = MagicMock()
@@ -141,7 +149,7 @@ async def test_ask_execute_true_delegates_to_olap(monkeypatch: pytest.MonkeyPatc
             return _FakeResult()
 
     monkeypatch.setattr(
-        "app.services.consume.olap_executor.OLAPExecutor",
+        "app.services.consume.service._get_olap_executor",
         lambda: _FakeExecutor(),
     )
     out = await svc.ask("查看 gmv 趋势", execute=True)
@@ -157,7 +165,7 @@ async def test_ask_execute_error_graceful(monkeypatch: pytest.MonkeyPatch) -> No
             raise RuntimeError("OLAP 不可达")
 
     monkeypatch.setattr(
-        "app.services.consume.olap_executor.OLAPExecutor",
+        "app.services.consume.service._get_olap_executor",
         lambda: _BoomExecutor(),
     )
     out = await svc.ask("查看 gmv 趋势", execute=True)

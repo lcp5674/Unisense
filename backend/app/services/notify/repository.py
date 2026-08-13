@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.notify import EventLog, Notification, SubscriptionPref
+from app.models.user import User
 
 
 class NotifyRepository:
@@ -23,9 +24,18 @@ class NotifyRepository:
         return obj
 
     async def list_notifications(
-        self, subscriber_id: int, status: str | None
+        self,
+        subscriber_id: int,
+        status: str | None,
+        limit: int = 200,
     ) -> list[Notification]:
-        stmt = select(Notification).where(Notification.subscriber_id == subscriber_id)
+        """列出订阅者通知；强制行数上限，防高活跃订阅者收件箱全量物化（D4）。"""
+        stmt = (
+            select(Notification)
+            .where(Notification.subscriber_id == subscriber_id)
+            .order_by(Notification.id.desc())
+            .limit(limit)
+        )
         if status:
             stmt = stmt.where(Notification.status == status)
         return list((await self._session.execute(stmt)).scalars().all())
@@ -59,6 +69,14 @@ class NotifyRepository:
         self._session.add(obj)
         await self._session.flush()
         return obj
+
+    async def get_user_email(self, user_id: int) -> str | None:
+        """按用户 ID 解析收件邮箱（订阅人为邮件投递真实收件人）。
+
+        缺失或邮箱为空时返回 None，由调用方降级到配置的发件人/占位地址。
+        """
+        stmt = select(User.email).where(User.id == user_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_event_logs(self, event_type: str | None, limit: int) -> list[EventLog]:
         stmt = select(EventLog)

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.glossary import GlossaryConflict, TermRelation, TermVersion
@@ -25,6 +25,11 @@ class GlossaryRepository:
 
     async def get_term(self, term_code: str) -> Term | None:
         stmt = select(Term).where(Term.term_code == term_code)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_term_by_id(self, term_id: int) -> Term | None:
+        stmt = select(Term).where(Term.id == term_id)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -49,10 +54,10 @@ class GlossaryRepository:
         stmt = select(Term)
         if conditions:
             stmt = stmt.where(*conditions)
-        count_stmt = select(Term)
+        count_stmt = select(func.count()).select_from(Term)
         if conditions:
             count_stmt = count_stmt.where(*conditions)
-        total = len((await self._session.execute(count_stmt)).scalars().all())
+        total = int((await self._session.execute(count_stmt)).scalar() or 0)
         rows = (
             (await self._session.execute(stmt.order_by(Term.id.desc()).limit(limit).offset(offset)))
             .scalars()
@@ -89,8 +94,8 @@ class GlossaryRepository:
         return version
 
     async def count_term_versions(self, term_id: int) -> int:
-        stmt = select(TermVersion).where(TermVersion.term_id == term_id)
-        return len((await self._session.execute(stmt)).scalars().all())
+        stmt = select(func.count()).select_from(TermVersion).where(TermVersion.term_id == term_id)
+        return int((await self._session.execute(stmt)).scalar() or 0)
 
     async def save_term_relation(self, relation: TermRelation) -> TermRelation:
         self._session.add(relation)

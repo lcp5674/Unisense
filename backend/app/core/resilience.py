@@ -6,6 +6,7 @@ OLAP（查询）均为可选依赖。任一可选依赖宕机时，核心链路�
 
 from __future__ import annotations
 
+import asyncio
 import re
 import socket
 import time
@@ -478,6 +479,16 @@ def _tcp_alive(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+async def _tcp_alive_async(host: str, port: int, timeout: float = 0.5) -> bool:
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except (TimeoutError, OSError):
+        return False
+
+
 def _parse_host_port(url: str) -> tuple[str, int] | None:
     """从连接串解析 host:port（支持 bolt://、http://、mysql+aiomysql:// 等）。"""
     matched = re.match(r"\w+://([^/:]+):(\d+)", url)
@@ -486,10 +497,11 @@ def _parse_host_port(url: str) -> tuple[str, int] | None:
     return matched.group(1), int(matched.group(2))
 
 
-def optional_dependency_status() -> dict[str, bool]:
+async def optional_dependency_status() -> dict[str, bool]:
     """探活可选依赖（Neo4j / ES / OLAP），返回各依赖是否存活。
 
     仅做 TCP 连通性探测，不引入额外驱动；空 url 视为未启用（跳过）。
+    使用异步探活避免阻塞事件循环。
     """
     result: dict[str, bool] = {}
     checks: dict[str, str] = {
@@ -501,7 +513,7 @@ def optional_dependency_status() -> dict[str, bool]:
         if not url:
             continue
         hp = _parse_host_port(url)
-        result[name] = _tcp_alive(*hp) if hp else False
+        result[name] = await _tcp_alive_async(*hp) if hp else False
     return result
 
 

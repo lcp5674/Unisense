@@ -72,7 +72,7 @@ async def list_tables(
     trace_id: Annotated[str, Depends(get_trace_id)],
     source_id: str | None = Query(None),
     sensitivity: str | None = Query(None),
-    limit: int = Query(100),
+    limit: int = Query(100, ge=1, le=200),
 ) -> Any:
     items = await AssetMapService(db).list_tables(source_id, sensitivity, limit)
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
@@ -231,20 +231,30 @@ async def export_tables(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
-        ["entity_name", "entity_type", "source_id", "sensitivity_level", "owner_id",
-         "schema_incomplete", "created_at", "updated_at"]
+        [
+            "entity_name",
+            "entity_type",
+            "source_id",
+            "sensitivity_level",
+            "owner_id",
+            "schema_incomplete",
+            "created_at",
+            "updated_at",
+        ]
     )
     for it in items:
-        writer.writerow([
-            it.get("entity_name", ""),
-            it.get("entity_type", ""),
-            it.get("source_id", ""),
-            it.get("sensitivity_level", ""),
-            it.get("owner_id", ""),
-            it.get("schema_incomplete", ""),
-            it.get("created_at", ""),
-            it.get("updated_at", ""),
-        ])
+        writer.writerow(
+            [
+                it.get("entity_name", ""),
+                it.get("entity_type", ""),
+                it.get("source_id", ""),
+                it.get("sensitivity_level", ""),
+                it.get("owner_id", ""),
+                it.get("schema_incomplete", ""),
+                it.get("created_at", ""),
+                it.get("updated_at", ""),
+            ]
+        )
     # UTF-8 BOM 便于 Excel 正确识别中文
     body = "\ufeff" + output.getvalue()
     return Response(
@@ -323,9 +333,7 @@ async def batch_assign_owner(
     http_req: Request,
 ) -> Any:
     """批量认领/转让归属（单次 ≤200，同事务原子提交）。"""
-    data = await AssetMapService(db).batch_assign_owner(
-        payload.entity_ids, payload.owner_id
-    )
+    data = await AssetMapService(db).batch_assign_owner(payload.entity_ids, payload.owner_id)
     await write_audit(
         db,
         actor_id=user.id,

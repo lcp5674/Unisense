@@ -176,6 +176,7 @@ class TestEmailDispatch:
         svc = NotifyService.__new__(NotifyService)
         svc._session = AsyncMock()
         svc._repo = AsyncMock()
+        svc._repo.get_user_email = AsyncMock(return_value="user@example.com")
         svc._http_client = AsyncMock()
 
         with (

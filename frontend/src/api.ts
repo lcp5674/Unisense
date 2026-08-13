@@ -1246,7 +1246,7 @@ export async function fetchRelatedMetrics(metricId: number | string, limit = 20)
 export async function fetchRecommendedTerms(limit = 20): Promise<GlossaryTerm[]> {
   return request<{ items: GlossaryTerm[]; total: number }>(
     `${API_BASE}/recommend/terms?limit=${limit}`,
-  ).then((r) => r.items);
+  ).then((r) => r.items.map((t) => ({ ...t, version: t.version ?? 1 })));
 }
 
 // ---- AI 助手 ----

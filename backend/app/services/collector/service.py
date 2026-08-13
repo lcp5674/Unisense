@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
-from app.core.exceptions import BusinessError, ConflictError, NotFoundError
+from app.core.exceptions import BusinessError, ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.secrets import SecretManager
 from app.db.redis import get_redis
@@ -295,9 +295,7 @@ class CollectorService(BaseService):
             from app.services.collector.connectors import registry
 
             source_type_value = (
-                req.source_type.value
-                if hasattr(req.source_type, "value")
-                else str(req.source_type)
+                req.source_type.value if hasattr(req.source_type, "value") else str(req.source_type)
             )
             if source_type_value not in registry.list_types():
                 raise BusinessError(

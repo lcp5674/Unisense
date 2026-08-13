@@ -39,6 +39,26 @@ class LineageParseResponse(BaseModel):
     graph_written: bool
 
 
+class ImpactedMetric(BaseModel):
+    """受影响的指标条目。"""
+
+    metric_code: str = Field(description="指标编码")
+    change_type: str = Field(description="影响路径上的变更类型，如 UPDATED/DELETED")
+
+
+class ImpactPreviewResponse(BaseModel):
+    """变更影响预览（what-if）响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    affected_metrics: list[ImpactedMetric] = Field(
+        description="受影响的指标列表（含 metric_code 与影响类型）"
+    )
+    affected_tables: list[str] = Field(description="受影响的物理表列表（table: 前缀）")
+    affected_consumers: list[str] = Field(description="消费方节点列表（CONSUMED_BY 边终点）")
+    risk_level: str = Field(description="风险等级：critical/high/medium/low")
+
+
 class LineageImpactParams(BaseModel):
     """影响分析查询参数（query）。"""
 

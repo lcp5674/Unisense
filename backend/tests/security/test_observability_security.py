@@ -108,6 +108,14 @@ async def test_submit_feedback_ignores_client_user_id(
             def id(self) -> int:
                 return 1
 
+            @property
+            def user_id(self) -> int:
+                return 9
+
+            @property
+            def target_type(self) -> str:
+                return "metric"
+
         return _FB({"id": 1, "target_type": "metric"})
 
     monkeypatch.setattr(osvc.ObservabilityService, "submit_feedback", fake)

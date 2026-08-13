@@ -19,14 +19,14 @@ _BACKEND = Path(__file__).resolve().parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-import structlog
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+import structlog  # noqa: E402
+from sqlalchemy import select  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-from app.core.logging import configure_logging
-from app.db.mysql import async_session_factory
-from app.models.subject_domain import SubjectDomain
-from app.models.system_dict import SystemDict
+from app.core.logging import configure_logging  # noqa: E402
+from app.db.mysql import async_session_factory  # noqa: E402
+from app.models.subject_domain import SubjectDomain  # noqa: E402
+from app.models.system_dict import SystemDict  # noqa: E402
 
 logger = structlog.get_logger("unisense.seed")
 
@@ -181,9 +181,13 @@ async def migrate_existing_domains(db: AsyncSession) -> int:
     """迁移存量 Metric 的 domain 字段：匹配 SubjectDomain.code，不匹配归入 uncategorized。"""
     from app.models.metric import Metric
 
-    stmt = select(Metric.domain).where(
-        Metric.deleted_at.is_(None),
-    ).distinct()
+    stmt = (
+        select(Metric.domain)
+        .where(
+            Metric.deleted_at.is_(None),
+        )
+        .distinct()
+    )
     result = await db.execute(stmt)
     existing_domains = [row[0] for row in result.all() if row[0]]
 

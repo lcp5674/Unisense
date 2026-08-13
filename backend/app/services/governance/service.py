@@ -122,10 +122,17 @@ class GovernanceService(BaseService):
     async def grant(self, payload: GrantCreate, actor_id: int) -> Grant:
         """新增/续期授权。
 
+        越权防护（P0）：授权人须具备与被授权范围匹配的域权限——
+        ``platform_admin`` 可全局授权；``domain_admin`` 仅可授权 **本域**
+        （域为空或跨域一律 fail-closed 拒绝）；其余角色禁止授权。
+
         Raises:
             ValidationError: 授权范围为空、TTL 已过期或被授权人不存在。
+            AuthError: 授权人域权限不足以授予目标范围。
         """
         self._validate_grant_scope(payload)
+        actor = await self._ensure_user_exists(actor_id)
+        self._assert_grant_scope(actor, payload)
         await self._ensure_user_exists(payload.user_id)
 
         existing = await self._repo.find_active_grant(
@@ -138,7 +145,11 @@ class GovernanceService(BaseService):
             )
             existing.metric_whitelist = merged or None
             existing.row_level = existing.row_level or payload.row_level
-            existing.expires_at = _later(existing.expires_at, payload.expires_at)
+            # 续期语义收敛：仅当显式传入 expires_at 才调整到期时间，
+            # 缺省（None）保持既有到期时间，避免「省略 TTL 续期」把临时授权
+            # 静默升级为永久授权（fail-closed）。
+            if payload.expires_at is not None:
+                existing.expires_at = _later(existing.expires_at, payload.expires_at)
             existing.granted_by = actor_id
             if payload.reason:
                 existing.reason = payload.reason
@@ -171,6 +182,40 @@ class GovernanceService(BaseService):
             }
         )
         return row
+
+    def _assert_grant_scope(self, actor: User, payload: GrantCreate) -> None:
+        """授权越权防护（P0）：授予范围必须收敛到授权人的管理域。
+
+        与 ``_assert_revoke_scope`` 对称，弥补原 grant 无 actor 范围校验的提权漏洞：
+
+        - ``platform_admin``：可全局授权；
+        - ``domain_admin``：仅可授予 **本域**（``payload.domain == actor.domain``）；
+          未指定域（``domain is None``）或跨域一律拒绝（fail-closed）；
+        - 其余角色：禁止授权（fail-closed，纵深防御）。
+
+        Raises:
+            AuthError: 授权人域权限不足以授予目标范围。
+        """
+        role = _role_to_str(actor.role)
+        if role == "platform_admin":
+            return
+        if role == "domain_admin":
+            if payload.domain and payload.domain == actor.domain:
+                return
+            raise AuthError(
+                "域管理员仅可授予本域授权",
+                error_code="FORBIDDEN",
+                ctx={
+                    "grant_domain": payload.domain,
+                    "actor_domain": actor.domain,
+                    "user_id": payload.user_id,
+                },
+            )
+        raise AuthError(
+            "当前角色无授权权限（仅平台管理员/本域管理员可授权）",
+            error_code="FORBIDDEN",
+            ctx={"actor_id": actor.id, "role": role},
+        )
 
     def _validate_grant_scope(self, payload: GrantCreate) -> None:
         """授权范围必须收敛：域与白名单不可同时为空（否则等价于全量放权）。"""
@@ -528,9 +573,7 @@ class GovernanceService(BaseService):
 
         # ① 合规复核门禁（COMPL-1）
         if not metric.compliance_reviewed:
-            findings.append(
-                "PII 指标未通过合规复核(compliance_reviewed=False)，禁止对外服务"
-            )
+            findings.append("PII 指标未通过合规复核(compliance_reviewed=False)，禁止对外服务")
         # ② 字段级脱敏策略须生效
         if masking in ("none", "NONE"):
             findings.append("PII 指标未配置字段级脱敏策略(mask_policy=none)")
@@ -542,9 +585,7 @@ class GovernanceService(BaseService):
         exposed_text = _strip_masking_calls(definition_text)
         for col in columns:
             if col and re.search(rf"\b{re.escape(col)}\b", exposed_text):
-                findings.append(
-                    f"PII 字段 {col} 在口径定义中明文暴露，字段级脱敏二次校验未通过"
-                )
+                findings.append(f"PII 字段 {col} 在口径定义中明文暴露，字段级脱敏二次校验未通过")
 
         return PiiSecondaryValidationResult(
             metric_code=metric_code,
@@ -644,7 +685,6 @@ class GovernanceService(BaseService):
             items=items,
         )
 
-
     # ---------------------------------------------------------- right to erasure
 
     async def execute_erasure(
@@ -664,8 +704,10 @@ class GovernanceService(BaseService):
         token = "ANONYMIZED_" + hashlib.sha256(str(subject_user_id).encode()).hexdigest()[:16]
 
         rows = (
-            await self._db.execute(select(AuditLog).where(AuditLog.actor_id == subject_user_id))
-        ).scalars().all()
+            (await self._db.execute(select(AuditLog).where(AuditLog.actor_id == subject_user_id)))
+            .scalars()
+            .all()
+        )
 
         affected = 0
         for row in rows:

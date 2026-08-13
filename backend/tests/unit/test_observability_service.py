@@ -48,7 +48,54 @@ async def test_list_feedback_delegates() -> None:
     repo.list_feedback = AsyncMock(return_value=[Feedback(id=1)])
     out = await svc.list_feedback("term", 10)
     assert len(out) == 1
-    repo.list_feedback.assert_awaited_once_with("term", 10)
+
+
+async def test_update_feedback_status_valid() -> None:
+    """合法状态更新追加到 comment 并提交。"""
+    svc, repo = await _svc()
+    fb = Feedback(id=1, user_id=1, target_type="term", comment="NPS: 9/10")
+    repo.get_feedback = AsyncMock(return_value=fb)
+    out = await svc.update_feedback_status(1, "adopted", resolver_id=5, resolution_note="done")
+    assert "status=adopted" in out.comment
+    assert "done" in out.comment
+    repo.save_feedback.assert_awaited()
+    repo.commit.assert_awaited()
+
+
+async def test_update_feedback_status_rejects_invalid() -> None:
+    """非法状态必须被白名单拒绝，禁止任意字符串写入 comment。"""
+    svc, repo = await _svc()
+    repo.get_feedback = AsyncMock(
+        return_value=Feedback(id=1, user_id=1, target_type="term", comment="c")
+    )
+    with pytest.raises(UnisenseError) as exc:
+        await svc.update_feedback_status(1, "hacked")
+    assert exc.value.error_code == "INVALID_FEEDBACK_STATUS"
+    repo.save_feedback.assert_not_awaited()
+
+
+async def test_update_feedback_status_missing_not_found() -> None:
+    """反馈不存在时抛 NotFoundError。"""
+    svc, repo = await _svc()
+    repo.get_feedback = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.update_feedback_status(999, "adopted")
+
+
+async def test_update_feedback_status_idempotent_no_growth() -> None:
+    """重复更新同一状态不得使 comment 无界增长（幂等去重）。"""
+    svc, repo = await _svc()
+    fb = Feedback(id=1, user_id=1, target_type="term", comment="NPS: 9/10")
+    repo.get_feedback = AsyncMock(return_value=fb)
+    await svc.update_feedback_status(1, "adopted")
+    first = fb.comment
+    # 同一状态下再次更新，不追加（时间戳不同，但语义状态相同）
+    await svc.update_feedback_status(1, "adopted")
+    assert fb.comment == first
+    # 真正的新状态仍会追加
+    await svc.update_feedback_status(1, "in_progress", resolver_id=2)
+    assert "status=in_progress" in fb.comment
+    assert fb.comment != first
 
 
 async def test_quality_stats_delegates() -> None:

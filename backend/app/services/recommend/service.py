@@ -62,9 +62,7 @@ class RecommendService(BaseService):
         # 冷启动兜底：原有血缘扩展推荐
         return await self._lineage_fallback(user_id, limit)
 
-    async def _collaborative_filtering(
-        self, user_id: int, limit: int
-    ) -> list[dict[str, Any]]:
+    async def _collaborative_filtering(self, user_id: int, limit: int) -> list[dict[str, Any]]:
         """基于 tracking_events 的协同过滤推荐。"""
         # 1. 获取当前用户行为画像
         my_metrics = await self._get_user_metric_actions(str(user_id))
@@ -95,12 +93,14 @@ class RecommendService(BaseService):
         ranked = sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)[:limit]
         recommendations: list[dict[str, Any]] = []
         for metric_id, score in ranked:
-            recommendations.append({
-                "metric_id": metric_id,
-                "via": "collaborative_filtering",
-                "score": round(score, 4),
-                "edge_type": "CF_RECOMMEND",
-            })
+            recommendations.append(
+                {
+                    "metric_id": metric_id,
+                    "via": "collaborative_filtering",
+                    "score": round(score, 4),
+                    "edge_type": "CF_RECOMMEND",
+                }
+            )
 
         return recommendations
 
@@ -121,16 +121,13 @@ class RecommendService(BaseService):
 
     async def _get_all_user_profiles(self) -> dict[str, set[str]]:
         """获取所有用户的指标行为画像。"""
-        stmt = (
-            select(
-                TrackingEvent.actor_id,
-                TrackingEvent.target_id,
-            )
-            .where(
-                TrackingEvent.target_type == "metric",
-                TrackingEvent.target_id.isnot(None),
-                TrackingEvent.event_type.in_(["query", "favorite", "browse", "search"]),
-            )
+        stmt = select(
+            TrackingEvent.actor_id,
+            TrackingEvent.target_id,
+        ).where(
+            TrackingEvent.target_type == "metric",
+            TrackingEvent.target_id.isnot(None),
+            TrackingEvent.event_type.in_(["query", "favorite", "browse", "search"]),
         )
         rows = (await self._session.execute(stmt)).all()
         profiles: dict[str, set[str]] = defaultdict(set)
@@ -161,21 +158,20 @@ class RecommendService(BaseService):
         return scores[:_SIMILAR_USER_LIMIT]
 
     async def _lineage_fallback(self, user_id: int, limit: int) -> list[dict[str, Any]]:
-        """血缘扩展推荐（冷启动兜底）。"""
-        events = await self._repo.recent_user_events(user_id, limit * 5)
-        seeds: set[str] = set()
-        for ev in events:
-            payload = getattr(ev, "payload", None) or {}
-            mid = payload.get("metric_id") if isinstance(payload, dict) else None
-            if mid:
-                seeds.add(str(mid))
+        """血缘扩展推荐（冷启动兜底）。
+
+        种子 = 当前用户在 tracking_events 中交互过的指标（与协同过滤同源，
+        避免依赖 EventLog 按用户过滤——EventLog 无 user 列，旧实现 ``source ==
+        str(user_id)`` 永不命中导致兜底恒空），再经血缘边扩展上下游指标。
+        """
+        seeds = await self._get_user_metric_actions(str(user_id))
         recommendations: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        seen: set[str] = set(seeds)
         for seed in seeds:
             edges = await self._repo.related_edges(seed, limit)
             for e in edges:
                 other = e.target_node if e.source_node == seed else e.source_node
-                if other in seeds or other in seen:
+                if other in seen:
                     continue
                 seen.add(other)
                 recommendations.append({"metric_id": other, "via": seed, "edge_type": e.edge_type})

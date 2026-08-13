@@ -17,6 +17,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -148,22 +149,35 @@ def _seed(session_factory) -> dict[str, int]:
 
 
 def _reset_via_alembic(url: str) -> None:
+    """用 Alembic 迁移将目标库升级到 head；MySQL 8.0 连续 DDL 下 1050/1684
+    元数据锁时序冲突偶发，重试最多 3 次（对齐 semantic 集成 fixture）。
+    """
     env = {**os.environ, "UNISENSE_DB_URL": url}
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        env=env,
-        cwd=_BACKEND_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    last_exc: subprocess.CalledProcessError | None = None
+    for attempt in range(3):
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                env=env,
+                cwd=_BACKEND_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(1.0)
+    assert last_exc is not None
+    raise last_exc
 
 
 async def _make_client(factory, client_id: str, secret: str, **kw) -> None:
     async with factory() as s:
         client = ApiClient(
             client_id=client_id,
-            client_secret_ref=hash_password(secret),
+            client_secret_ref=await hash_password(secret),
             scope_domain=kw.get("scope_domain", "finance"),
             metric_whitelist=kw.get("metric_whitelist"),
             qps=kw.get("qps", 1000),
@@ -182,9 +196,21 @@ def db_env():
         engine = create_async_engine(url, echo=False, poolclass=NullPool)
 
         async def _wipe() -> None:
+            # 全表清理：仅 import 本测试涉及模型时 Base.metadata.drop_all 会漏删
+            # 其余表，残留表使 alembic 重建报 1050。改为按 information_schema
+            # 枚举全部表删除，保证从零重建。
             async with engine.begin() as conn:
                 await conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-                await conn.run_sync(Base.metadata.drop_all)
+                rows = (
+                    await conn.execute(
+                        text(
+                            "SELECT table_name FROM information_schema.tables "
+                            "WHERE table_schema = DATABASE()"
+                        )
+                    )
+                ).all()
+                for (tname,) in rows:
+                    await conn.execute(text(f"DROP TABLE IF EXISTS `{tname}`"))
                 await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 await conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
 
@@ -249,15 +275,15 @@ async def test_dry_run_and_degraded(db_env) -> None:
     async with factory() as session:
         svc = ConsumeService(session)
         client = await svc.authenticate_client("cli_m:secret_m")
-        res = await svc.dry_run_query(QueryRequest(metric_code="M1", date_range="2024"), client)
+        res = await svc.dry_run_query(QueryRequest(metric_code="M1", date_range="2024-01"), client)
         assert res.status == "ok"
         assert res.meta["status"] == "PUBLISHED"
         with pytest.raises(BusinessError):
-            await svc.dry_run_query(QueryRequest(metric_code="M3", date_range="2024"), client)
+            await svc.dry_run_query(QueryRequest(metric_code="M3", date_range="2024-01"), client)
         with pytest.raises(BusinessError):
-            await svc.dry_run_query(QueryRequest(metric_code="M2", date_range="2024"), client)
+            await svc.dry_run_query(QueryRequest(metric_code="M2", date_range="2024-01"), client)
         with pytest.raises(BusinessError):
-            await svc.execute_query(QueryRequest(metric_code="M1", date_range="2024"), client)
+            await svc.execute_query(QueryRequest(metric_code="M1", date_range="2024-01"), client)
 
 
 async def test_snapshot_and_favorite(db_env) -> None:
@@ -270,7 +296,7 @@ async def test_snapshot_and_favorite(db_env) -> None:
             metric_code="M1",
             version=2,
             dims={},
-            date_range="2024",
+            date_range="2024-01",
             value_json={"rows": [{"k": "v"}]},
             quality_flag=None,
             generated_at=datetime.now(timezone.utc),  # noqa: UP017

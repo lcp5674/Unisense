@@ -33,6 +33,14 @@ server {
     server_name _;
 
     # SPA：所有路由都回退到 index.html
+    # index.html 必须 no-cache（否则浏览器缓存后用户看不到新功能）；
+    # 静态资源（带 hash）继续长缓存。
+    location = /index.html {
+        root /usr/share/nginx/html;
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+    }
     location / {
         root /usr/share/nginx/html;
         try_files $uri $uri/ /index.html;

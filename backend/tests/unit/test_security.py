@@ -23,23 +23,23 @@ from app.core.security import (
 
 
 class TestHashPassword:
-    def test_hash_is_not_plaintext(self) -> None:
-        hashed = hash_password("s3cret-pass")
+    async def test_hash_is_not_plaintext(self) -> None:
+        hashed = await hash_password("s3cret-pass")
         assert hashed != "s3cret-pass"
         assert hashed.startswith("$2")  # bcrypt 前缀
 
-    def test_hash_differs_for_same_password(self) -> None:
+    async def test_hash_differs_for_same_password(self) -> None:
         # bcrypt 自动加盐：同一明文两次哈希结果不同
-        assert hash_password("same") != hash_password("same")
+        assert await hash_password("same") != await hash_password("same")
 
 
 class TestVerifyPassword:
     async def test_verify_correct_password(self) -> None:
-        hashed = hash_password("correct-horse")
+        hashed = await hash_password("correct-horse")
         assert await verify_password("correct-horse", hashed) is True
 
     async def test_verify_wrong_password(self) -> None:
-        hashed = hash_password("right")
+        hashed = await hash_password("right")
         assert await verify_password("wrong", hashed) is False
 
     async def test_verify_invalid_hash_returns_false(self) -> None:

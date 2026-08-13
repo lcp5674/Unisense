@@ -12,6 +12,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -77,7 +78,18 @@ def _seed(session_factory: Any) -> dict[str, int]:
                 domain="risk",
                 status="active",
             )
-            s.add_all([owner, officer])
+            # 授权人须为平台管理员（grant 越权防护 P0：其余角色禁止授权）
+            admin = User(
+                org_id=org.id,
+                username="gadmin",
+                email="gadmin@example.com",
+                password_hash="x",
+                display_name="gadmin",
+                role="platform_admin",
+                domain="platform",
+                status="active",
+            )
+            s.add_all([owner, officer, admin])
             await s.flush()
 
             metric = Metric(
@@ -137,6 +149,7 @@ def _seed(session_factory: Any) -> dict[str, int]:
             return {
                 "owner_id": owner.id,
                 "officer_id": officer.id,
+                "admin_id": admin.id,
                 "catalog_pii": catalog_pii.id,
                 "catalog_plain": catalog_plain.id,
             }
@@ -146,15 +159,28 @@ def _seed(session_factory: Any) -> dict[str, int]:
 
 
 def _reset_via_alembic(url: str) -> None:
+    """用 Alembic 迁移将目标库升级到 head；MySQL 8.0 连续 DDL 下 1050/1684
+    元数据锁时序冲突偶发，重试最多 3 次（对齐 semantic 集成 fixture）。
+    """
     env = {**os.environ, "UNISENSE_DB_URL": url}
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        env=env,
-        cwd=_BACKEND_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    last_exc: subprocess.CalledProcessError | None = None
+    for attempt in range(3):
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                env=env,
+                cwd=_BACKEND_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(1.0)
+    assert last_exc is not None
+    raise last_exc
 
 
 @pytest.fixture(scope="function")
@@ -165,9 +191,21 @@ def db_env():
         engine = create_async_engine(url, echo=False, poolclass=NullPool)
 
         async def _wipe() -> None:
+            # 全表清理：仅 import 本测试涉及模型时 Base.metadata.drop_all 会漏删
+            # 其余表，残留表使 alembic 重建报 1050。改为按 information_schema
+            # 枚举全部表删除，保证从零重建。
             async with engine.begin() as conn:
                 await conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-                await conn.run_sync(Base.metadata.drop_all)
+                rows = (
+                    await conn.execute(
+                        text(
+                            "SELECT table_name FROM information_schema.tables "
+                            "WHERE table_schema = DATABASE()"
+                        )
+                    )
+                ).all()
+                for (tname,) in rows:
+                    await conn.execute(text(f"DROP TABLE IF EXISTS `{tname}`"))
                 await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 await conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
 
@@ -213,7 +251,7 @@ async def test_grant_persisted_and_merged_idempotently(db_env) -> None:
                 grant_type=GrantType.READ,
                 expires_at=_SOON,
             ),
-            actor_id=db_env["owner_id"],
+            actor_id=db_env["admin_id"],
         )
         await session.commit()
         assert first.id > 0
@@ -227,7 +265,7 @@ async def test_grant_persisted_and_merged_idempotently(db_env) -> None:
                 grant_type=GrantType.READ,
                 expires_at=_FUTURE,
             ),
-            actor_id=db_env["owner_id"],
+            actor_id=db_env["admin_id"],
         )
         await session.commit()
         assert second.id == first.id
@@ -242,7 +280,7 @@ async def test_expired_grant_recycled_and_excluded_from_snapshot(db_env) -> None
         svc = GovernanceService(session)
         row = await svc.grant(
             GrantCreate(user_id=db_env["officer_id"], domain="sales", expires_at=_SOON),
-            actor_id=db_env["owner_id"],
+            actor_id=db_env["admin_id"],
         )
         row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
         await session.commit()
@@ -274,7 +312,7 @@ async def test_permission_snapshot_reflects_active_grants(db_env) -> None:
                 row_level=True,
                 expires_at=_SOON,
             ),
-            actor_id=db_env["owner_id"],
+            actor_id=db_env["admin_id"],
         )
         await session.commit()
 

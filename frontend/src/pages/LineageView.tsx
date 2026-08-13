@@ -61,7 +61,7 @@ function ImpactTab() {
     try {
       const p = await lineageImpactPreview(node.trim(), "schema_drift");
       setRisk(
-        `受影响指标 ${p.affected_metrics.length} · 报表 ${p.affected_reports.length} · 消费方 ${p.affected_consumers.length} · 风险等级 ${RISK_LEVEL_LABEL[p.risk_level] ?? p.risk_level}`,
+        `受影响指标 ${p.affected_metrics.length} · 物理表 ${p.affected_tables.length} · 消费方 ${p.affected_consumers.length} · 风险等级 ${RISK_LEVEL_LABEL[p.risk_level] ?? p.risk_level}`,
       );
       track("lineage_preview", node.trim(), "node");
     } catch (err) {

@@ -1,8 +1,10 @@
 """本地 webhook 接收器：记录收到的 POST 请求体到日志文件（端到端验证 notify 真实外发）。"""
+
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 LOG = "/tmp/webhook_received.log"
+
 
 class Handler(BaseHTTPRequestHandler):
     def _record(self) -> None:
@@ -11,7 +13,7 @@ class Handler(BaseHTTPRequestHandler):
         entry = {
             "method": self.command,
             "path": self.path,
-            "headers": {k: v for k, v in self.headers.items()},
+            "headers": dict(self.headers),
             "body": body,
         }
         with open(LOG, "a") as f:
@@ -21,10 +23,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"ok":true}')
 
-    do_POST = _record
-    do_GET = _record
+    do_POST = _record  # noqa: E501, N815 - HTTP 方法名，BaseHTTPRequestHandler 协议要求
+    do_GET = _record  # noqa: E501, N815 - HTTP 方法名，BaseHTTPRequestHandler 协议要求
+
     def log_message(self, *args: object) -> None:
         pass
+
 
 if __name__ == "__main__":
     server = HTTPServer(("0.0.0.0", 18765), Handler)

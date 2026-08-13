@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -137,13 +138,18 @@ class TestSend:
         await pub._send({"event_type": "quality.anomaly"})
         assert pub._http_client is None
 
+    @staticmethod
+    def _client(post_side_effect: Any = None) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = 200
+        client = MagicMock()
+        client.post = AsyncMock(return_value=resp, side_effect=post_side_effect)
+        return client
+
     async def test_send_with_url_creates_client_and_posts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        client = MagicMock()
-        client.post = AsyncMock()
-        client.__aenter__ = AsyncMock(return_value=client)
-        client.__aexit__ = AsyncMock(return_value=False)
+        client = self._client()
 
         monkeypatch.setattr("httpx.AsyncClient", lambda timeout: client)
 
@@ -152,16 +158,13 @@ class TestSend:
 
         assert pub._http_client is client
         client.post.assert_awaited_once_with(
-            "http://notify/api/v1/notify/todo", json={"event_type": "quality.anomaly"}
+            "http://notify/api/v1/notify/events", json={"event_type": "quality.anomaly"}
         )
 
     async def test_send_reuses_existing_client(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        client = MagicMock()
-        client.post = AsyncMock()
-        client.__aenter__ = AsyncMock(return_value=client)
-        client.__aexit__ = AsyncMock(return_value=False)
+        client = self._client()
 
         monkeypatch.setattr("httpx.AsyncClient", lambda timeout: client)
 
@@ -169,9 +172,24 @@ class TestSend:
         await pub._send({"event_type": "quality.anomaly"})
         await pub._send({"event_type": "quality.anomaly"})
 
-        # 只创建一个客户端，post 调用两次
+        # 只创建一个客户端，post 调用两次（未被 aclose 复用）
         assert pub._http_client is client
         assert client.post.await_count == 2
+
+    async def test_send_raises_on_non_2xx(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.text = "not found"
+        client = MagicMock()
+        client.post = AsyncMock(return_value=resp)
+
+        monkeypatch.setattr("httpx.AsyncClient", lambda timeout: client)
+
+        pub = events.QualityEventPublisher(notify_url="http://notify")
+        with pytest.raises(RuntimeError, match="404"):
+            await pub._send({"event_type": "quality.anomaly"})
 
 
 class TestClose:
@@ -182,7 +200,10 @@ class TestClose:
     async def test_close_closes_and_resets_client(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        resp = MagicMock()
+        resp.status_code = 200
         client = MagicMock()
+        client.post = AsyncMock(return_value=resp)
         client.aclose = AsyncMock()
         monkeypatch.setattr("httpx.AsyncClient", lambda timeout: client)
 
@@ -197,7 +218,10 @@ class TestClose:
     async def test_close_suppresses_aclose_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        resp = MagicMock()
+        resp.status_code = 200
         client = MagicMock()
+        client.post = AsyncMock(return_value=resp)
         client.aclose = AsyncMock(side_effect=RuntimeError("close boom"))
         monkeypatch.setattr("httpx.AsyncClient", lambda timeout: client)
 

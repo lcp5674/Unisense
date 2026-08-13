@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
 from app.core.audit import write_audit
+from app.core.exceptions import AuthError
+from app.core.feature_flags import is_feature_enabled_or_default
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.ai.schemas import NL2SQLRequest
@@ -28,6 +30,14 @@ async def nl2sql(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
+    # OPS-09 特性开关：AI 问数能力可被平台管理员灰度关闭（kill switch）。
+    # 此前开关已在 main.py 注册但端点未接线，关闭配置形同虚设。
+    if not is_feature_enabled_or_default("ai.nl2sql"):
+        raise AuthError(
+            "AI 问数能力已被平台管理员关闭",
+            error_code="FORBIDDEN",
+            ctx={"feature_flag": "ai.nl2sql"},
+        )
     svc = AiService(db)
     try:
         result = await svc.ask(

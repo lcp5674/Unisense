@@ -1,4 +1,5 @@
-"""P2 增量：audit_log archived 字段 + audit_archive_log 表 + metric_template 表 + metric.template_id 字段 + lineage_edge.pii_inherited 字段。
+"""P2 增量：audit_log archived 字段 + audit_archive_log 表 + metric_template 表
++ metric.template_id 字段 + lineage_edge.pii_inherited 字段。
 
 可回滚：所有操作为 ADD COLUMN 或 CREATE TABLE，downgrade 中反向操作。
 """
@@ -37,14 +38,35 @@ def upgrade() -> None:
         "audit_archive_log",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("archive_date", sa.Date(), nullable=False, comment="归档日期"),
-        sa.Column("rows_archived", sa.Integer(), nullable=False, server_default=sa.text("0"), comment="归档行数"),
+        sa.Column(
+            "rows_archived",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="归档行数",
+        ),
         sa.Column("s3_key", sa.String(512), nullable=True, comment="MinIO/S3 对象键"),
         sa.Column("s3_size_bytes", sa.BigInteger(), nullable=True, comment="对象大小(bytes)"),
-        sa.Column("status", sa.String(32), nullable=False, server_default="pending", comment="归档状态"),
+        sa.Column(
+            "status", sa.String(32), nullable=False, server_default="pending", comment="归档状态"
+        ),
         sa.Column("error_message", sa.Text(), nullable=True, comment="错误信息"),
         sa.Column("completed_at", sa.DateTime(), nullable=True, comment="完成时间"),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), comment="创建时间"),
-        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now(), comment="更新时间"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+            comment="创建时间",
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            comment="更新时间",
+        ),
     )
 
     # 3. metric_template 表
@@ -67,12 +89,37 @@ def upgrade() -> None:
         sa.Column("serving_mode", sa.String(32), nullable=True, comment="服务模式预设"),
         sa.Column("additivity", sa.String(32), nullable=True, comment="可加性预设"),
         sa.Column("metric_tier", sa.String(8), nullable=True, comment="指标分级预设"),
-        sa.Column("version", sa.Integer(), nullable=False, server_default=sa.text("1"), comment="模板版本号"),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("1"), comment="是否启用"),
+        sa.Column(
+            "version",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("1"),
+            comment="模板版本号",
+        ),
+        sa.Column(
+            "is_active",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("1"),
+            comment="是否启用",
+        ),
         sa.Column("created_by", sa.Integer(), nullable=True, comment="创建人 ID"),
         sa.Column("published_at", sa.DateTime(), nullable=True, comment="发布时间"),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), comment="创建时间"),
-        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now(), comment="更新时间"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+            comment="创建时间",
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            comment="更新时间",
+        ),
     )
     op.create_index("idx_template_domain", "metric_template", ["domain"])
     op.create_index("idx_template_active", "metric_template", ["is_active"])

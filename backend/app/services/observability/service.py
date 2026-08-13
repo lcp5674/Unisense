@@ -10,6 +10,7 @@ P3: 继承 BaseService Protocol。
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,6 +20,16 @@ from app.core.base_service import BaseService
 from app.models.feedback import Feedback
 from app.services.observability.repository import ObservabilityRepository
 from app.services.observability.schemas import FeedbackCreate
+
+# 反馈采纳闭环的合法状态（Feedback 表无独立 status 列，状态以 comment 内
+# 标记记录；此处白名单校验防止任意字符串注入 comment 并造成不可解析状态）。
+_ALLOWED_STATUSES = {"adopted", "rejected", "in_progress", "pending"}
+
+
+def _last_status_marker(comment: str) -> str | None:
+    """解析 comment 中最近一次记录的状态标记（``status=xxx``）。"""
+    markers = re.findall(r"status=([A-Za-z_]+)", comment)
+    return markers[-1] if markers else None
 
 
 class ObservabilityService(BaseService):
@@ -85,6 +96,7 @@ class ObservabilityService(BaseService):
         """
         if not (0 <= score <= 10):
             from app.core.exceptions import UnisenseError
+
             raise UnisenseError("NPS 分数需在 0-10 之间", error_code="INVALID_NPS_SCORE")
 
         feedback = Feedback(
@@ -116,23 +128,42 @@ class ObservabilityService(BaseService):
 
         Args:
             feedback_id: 反馈 ID。
-            status: 新状态（adopted/rejected/in_progress）。
+            status: 新状态（adopted/rejected/in_progress/pending）。
             resolver_id: 处理人 ID。
             resolution_note: 处理说明。
+
+        Raises:
+            UnisenseError: 状态非法。
+            NotFoundError: 反馈不存在。
         """
+        if status not in _ALLOWED_STATUSES:
+            from app.core.exceptions import UnisenseError
+
+            raise UnisenseError(f"非法的反馈状态: {status}", error_code="INVALID_FEEDBACK_STATUS")
         feedback = await self._repo.get_feedback(feedback_id)
         if feedback is None:
             from app.core.exceptions import NotFoundError
+
             raise NotFoundError(f"反馈不存在: {feedback_id}")
 
-        # 更新状态（通过 comment 字段追加状态变更记录）
+        # 状态落库到 status 列（此前仅写进 comment 文本，状态不可查询/过滤，
+        # "反馈采纳闭环"未真正落地）；comment 保留追加的状态变更历史。
+        changed = feedback.status != status or resolution_note is not None
+        if changed:
+            feedback.status = status
+            if resolution_note is not None:
+                feedback.resolution_note = resolution_note
+        # comment 追加状态变更记录（幂等去重：同状态且无新说明/处理人时不重复追加，
+        # 防止 comment 文本无界增长）。
         existing_comment = feedback.comment or ""
-        status_note = f"\n[{datetime.now(UTC).isoformat()}] status={status}"
-        if resolution_note:
-            status_note += f" note={resolution_note}"
-        if resolver_id:
-            status_note += f" by={resolver_id}"
-        feedback.comment = existing_comment + status_note
+        last_status = _last_status_marker(existing_comment)
+        if last_status != status or resolution_note or resolver_id:
+            status_note = f"[{datetime.now(UTC).isoformat()}] status={status}"
+            if resolution_note:
+                status_note += f" note={resolution_note}"
+            if resolver_id:
+                status_note += f" by={resolver_id}"
+            feedback.comment = (existing_comment + "\n" + status_note).lstrip("\n")
 
         await self._repo.save_feedback(feedback)
         await self._repo.commit()

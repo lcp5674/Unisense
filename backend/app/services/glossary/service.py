@@ -15,13 +15,20 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
-from app.core.exceptions import ConflictError, NotFoundError, UnisenseError
+from app.core.config import settings
+from app.core.exceptions import (
+    ConflictError,
+    NotFoundError,
+    UnisenseError,
+    ValidationError,
+)
 from app.models.glossary import (
     GlossaryConflict,
     GlossaryConflictStatus,
     GlossaryConflictType,
     TermRelation,
     TermRelationType,
+    TermSourceType,
     TermVersion,
 )
 from app.models.term import Term
@@ -39,6 +46,11 @@ def _normalize(token: str) -> str:
     return unicodedata.normalize("NFKC", token.strip().lower())
 
 
+#: 合法关系类型 / 来源类型取值（DB Enum 列，非法值须在服务层转 4xx，而非 DB 500）。
+_VALID_RELATION_TYPES = {e.value for e in TermRelationType}
+_VALID_SOURCE_TYPES = {e.value for e in TermSourceType}
+
+
 def _overlap_ratio(a: list[str], b: list[str]) -> float:
     """两组词的归一化重叠率（Jaccard），用于同义词冲突判定。"""
     set_a = {_normalize(x) for x in a if x}
@@ -46,6 +58,14 @@ def _overlap_ratio(a: list[str], b: list[str]) -> float:
     if not set_a or not set_b:
         return 0.0
     return len(set_a & set_b) / len(set_a | set_b)
+
+
+def _get_synonym_threshold() -> float:
+    """获取同义词冲突阈值（可配置，默认 0.8）。
+
+    通过 settings.glossary_synonym_threshold 热更新，对齐 OPS-03 配置热更新。
+    """
+    return getattr(settings, "glossary_synonym_threshold", 0.8)
 
 
 class GlossaryService(BaseService):
@@ -178,9 +198,37 @@ class GlossaryService(BaseService):
         self, term_code: str, data: TermRelationCreate
     ) -> TermRelationResponse:
         term = await self._require_term(term_code)
+        # 目标术语存在性校验（防孤儿关系落到库）
+        target = await self._repo.get_term_by_id(data.target_term_id)
+        if target is None:
+            raise NotFoundError(
+                f"目标术语不存在: {data.target_term_id}",
+                error_code="TERM_TARGET_NOT_FOUND",
+                ctx={"target_term_id": data.target_term_id},
+            )
+        # enum 显式校验：非法值须转 4xx，而非触达 DB Enum 抛 500
+        if data.relation_type not in _VALID_RELATION_TYPES:
+            raise ValidationError(
+                f"未知术语关系类型: {data.relation_type}",
+                error_code="INVALID_RELATION_TYPE",
+                ctx={"relation_type": data.relation_type},
+            )
+        if data.source_type not in _VALID_SOURCE_TYPES:
+            raise ValidationError(
+                f"未知术语来源类型: {data.source_type}",
+                error_code="INVALID_SOURCE_TYPE",
+                ctx={"source_type": data.source_type},
+            )
+        # 自引用关系防护（防自环）
+        if target.id == term.id:
+            raise ConflictError(
+                "术语不能与自身建立关系",
+                error_code="SELF_RELATION",
+                ctx={"term_code": term_code, "term_id": term.id},
+            )
         relation = TermRelation(
             source_term_id=term.id,
-            target_term_id=data.target_term_id,
+            target_term_id=target.id,
             relation_type=TermRelationType(data.relation_type).value,
             declared_by=data.declared_by,
             source_type=data.source_type,
@@ -227,9 +275,10 @@ class GlossaryService(BaseService):
             if _normalize(other.name) in term_tokens:
                 await self._add_conflict(term, GlossaryConflictType.NAME_OVERLAP, other.id)
                 continue
-            # 同义词重叠率 > 0.8
+            # 同义词重叠率超阈值
             ratio = _overlap_ratio(term.synonyms or [], other_synonyms)
-            if ratio > 0.8:
+            threshold = _get_synonym_threshold()
+            if ratio > threshold:
                 await self._add_conflict(term, GlossaryConflictType.ALIAS_OVERLAP, other.id)
 
     async def _add_conflict(

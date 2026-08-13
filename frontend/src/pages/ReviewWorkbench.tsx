@@ -7,7 +7,7 @@ import { useTracking } from "../hooks/useTracking";
 
 const STATUS_LABEL: Record<string, string> = {
   OPEN: "待处理",
-  ARBITRATED: "已仲裁",
+  NEGOTIATING: "协商中",
   RULED: "已裁决",
   CLOSED: "已关闭",
   ESCALATED: "已升级",
@@ -15,7 +15,7 @@ const STATUS_LABEL: Record<string, string> = {
 
 const STATUS_COLOR: Record<string, string> = {
   OPEN: "warning",
-  ARBITRATED: "success",
+  NEGOTIATING: "processing",
   RULED: "success",
   CLOSED: "default",
   ESCALATED: "error",
@@ -28,15 +28,6 @@ const CONFLICT_TYPE_LABEL: Record<string, string> = {
   cross_domain_same_def: "跨域同口径异源",
   version_conflict: "口径版本冲突",
   pii: "PII 冲突",
-};
-
-const SEVERITY_LABEL: Record<string, string> = {
-  low: "低",
-  medium: "中",
-  high: "高",
-  critical: "严重",
-  hard: "硬冲突",
-  soft: "软冲突",
 };
 
 export function ReviewWorkbench() {
@@ -87,7 +78,7 @@ export function ReviewWorkbench() {
         if (!canonical) return;
         setBusyId(c.conflict_id);
         try {
-          await arbitrateConflict(c.conflict_id, "ACCEPT", canonical);
+          await arbitrateConflict(c.conflict_id, "choose_canonical", canonical);
           message.success(`已仲裁：${c.conflict_id}`);
           track("review_arbitrate", c.conflict_id, "conflict");
           load();
@@ -143,28 +134,49 @@ export function ReviewWorkbench() {
       key: "status",
       render: (s: string) => <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>,
     },
-    { title: "严重度", dataIndex: "severity", key: "severity", render: (v: string) => SEVERITY_LABEL[v] ?? v },
     {
-      title: "候选",
-      dataIndex: "candidate_metric_code",
+      title: "相似度",
+      dataIndex: "similarity_score",
+      key: "similarity_score",
+      width: 90,
+      render: (v: number) => `${(Number(v) * 100).toFixed(1)}%`,
+    },
+    {
+      title: "候选指标",
       key: "candidate",
-      render: (code: string) => (
-        <Button type="link" size="small" onClick={() => navigate(`/detail/${code}`)}>
-          {code}
-        </Button>
-      ),
+      render: (_: unknown, r: ConflictResponse) => {
+        const code = r.candidate_metric_code ?? "";
+        return (
+          <Button type="link" size="small" onClick={() => navigate(`/detail/${code}`)}>
+            {code}
+          </Button>
+        );
+      },
     },
     {
-      title: "现有",
-      dataIndex: "existing_metric_code",
+      title: "现有指标",
       key: "existing",
-      render: (code: string) => (
-        <Button type="link" size="small" onClick={() => navigate(`/detail/${code}`)}>
-          {code}
-        </Button>
-      ),
+      render: (_: unknown, r: ConflictResponse) => {
+        const code = r.existing_metric_code ?? "";
+        return (
+          <Button type="link" size="small" onClick={() => navigate(`/detail/${code}`)}>
+            {code}
+          </Button>
+        );
+      },
     },
-    { title: "描述", dataIndex: "description", key: "description", ellipsis: true },
+    {
+      title: "描述",
+      key: "description",
+      ellipsis: true,
+      render: (_: unknown, r: ConflictResponse) => r.description ?? "",
+    },
+    {
+      title: "检测时间",
+      key: "detected_at",
+      width: 160,
+      render: (_: unknown, r: ConflictResponse) => r.detected_at ?? "",
+    },
     {
       title: "操作",
       key: "actions",
@@ -204,7 +216,8 @@ export function ReviewWorkbench() {
             placeholder="全部状态"
             options={[
               { value: "OPEN", label: "待处理" },
-              { value: "ARBITRATED", label: "已仲裁" },
+              { value: "NEGOTIATING", label: "协商中" },
+              { value: "RULED", label: "已裁决" },
               { value: "ESCALATED", label: "已升级" },
               { value: "CLOSED", label: "已关闭" },
             ]}

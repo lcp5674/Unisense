@@ -677,3 +677,117 @@ async def test_get_version_builds_query() -> None:
     out = await svc._get_version(3)
     assert out is mv
     assert "metric_version" in str(db.execute.await_args.args[0])
+
+
+# ---- OLAP 参数化绑定修复（P1）：SQLAlchemy :name → Doris ${name} ----
+def test_to_doris_sql_scalar_params() -> None:
+    """字符串标量以 '${name}' 包裹进入 variables；数值以 ${name}。"""
+    from app.services.consume.olap_executor import _to_doris_sql
+
+    sql, variables = _to_doris_sql(
+        "SELECT `city` FROM `dws_gmv_daily` WHERE metric_code = :metric_code AND dt >= :date_from",
+        {"metric_code": "gmv", "date_from": "2026-01"},
+    )
+    assert ":metric_code" not in sql
+    assert ":date_from" not in sql
+    assert "'${metric_code}'" in sql and "'${date_from}'" in sql
+    assert variables == {"metric_code": "gmv", "date_from": "2026-01"}
+
+
+def test_to_doris_sql_scalar_string_injection_escaped() -> None:
+    """字符串标量单引号翻倍，防 Doris 文本替换注入。"""
+    from app.services.consume.olap_executor import _to_doris_sql
+
+    sql, variables = _to_doris_sql(
+        "SELECT * FROM `t` WHERE metric_code = :metric_code",
+        {"metric_code": "BJ' OR 1=1 --"},
+    )
+    assert sql == "SELECT * FROM `t` WHERE metric_code = '${metric_code}'"
+    # variables 值单引号翻倍：文本替换后落在引号内，不可逃逸
+    assert variables["metric_code"] == "BJ'' OR 1=1 --"
+
+
+def test_to_doris_sql_list_inline_expansion() -> None:
+    """IN 列表参数原地展开为内联字面量，单引号转义防注入。"""
+    from app.services.consume.olap_executor import _to_doris_sql
+
+    sql, variables = _to_doris_sql(
+        "SELECT * FROM `t` WHERE region IN :dim_0",
+        {"dim_0": ["EAST", "WEST"]},
+    )
+    assert sql == "SELECT * FROM `t` WHERE region IN ('EAST', 'WEST')"
+    assert variables == {}
+
+
+def test_to_doris_sql_list_injection_escaped() -> None:
+    """列表值含单引号 → 翻倍转义，防注入。"""
+    from app.services.consume.olap_executor import _to_doris_sql
+
+    sql, _ = _to_doris_sql(
+        "SELECT * FROM `t` WHERE name IN :dim_0",
+        {"dim_0": ["O'Reilly", "x; DROP TABLE t; --"]},
+    )
+    # 单引号翻倍：O'Reilly → O''Reilly
+    assert "O''Reilly" in sql
+    # 分号注入值被完整包裹在字符串字面量内（成对引号闭合），无法逃逸
+    assert sql == "SELECT * FROM `t` WHERE name IN ('O''Reilly', 'x; DROP TABLE t; --')"
+    # 引号必须成对闭合，否则可逃逸
+    assert sql.count("'") % 2 == 0
+
+
+def test_to_doris_sql_numeric_and_none() -> None:
+    """数字不加引号、None 转 NULL。"""
+    from app.services.consume.olap_executor import _to_doris_sql
+
+    sql, variables = _to_doris_sql(
+        "SELECT * FROM `t` WHERE id IN :ids AND flag = :flag",
+        {"ids": [1, 2, None], "flag": True},
+    )
+    assert "IN (1, 2, NULL)" in sql
+    assert variables == {"flag": True}
+
+
+def test_to_doris_sql_unknown_placeholder_preserved() -> None:
+    """params 中不存在的占位符保持原样（交由 Doris 报错暴露）。"""
+    from app.services.consume.olap_executor import _to_doris_sql
+
+    sql, variables = _to_doris_sql("SELECT * FROM t WHERE a = :missing", {"b": 1})
+    assert ":missing" in sql
+    assert variables == {}
+
+
+# ---- 投影列收敛（P1）：SELECT * → 口径声明列 + LIMIT 硬上限 ----
+def test_build_query_sql_select_projection_columns() -> None:
+    """口径声明 measures 时 SELECT 收敛到维度+度量列，不再 SELECT *。"""
+    svc = _svc(MagicMock())
+    m = _metric(dims=("region", "city"))
+    m.definition_json = {**m.definition_json, "measures": ["gmv", "order_cnt"]}
+    req = QueryRequest(metric_code="gmv", date_range="")
+    sql, params = svc._build_query_sql(req, m)
+    assert "SELECT `region`, `city`, `gmv`, `order_cnt`" in sql
+    assert "SELECT *" not in sql
+    assert "LIMIT :__max_rows" in sql
+    assert params["__max_rows"] == 1000
+
+
+def test_build_query_sql_fallback_star_still_limited() -> None:
+    """口径未声明任何投影列时退化为 *，但仍强制 LIMIT 防全表拖回。"""
+    svc = _svc(MagicMock())
+    m = _metric(dims=())
+    m.definition_json = {**m.definition_json, "dimensions": []}
+    req = QueryRequest(metric_code="gmv", date_range="")
+    sql, params = svc._build_query_sql(req, m)
+    assert sql.startswith("SELECT *")
+    assert "LIMIT :__max_rows" in sql
+    assert params["__max_rows"] == 1000
+
+
+def test_build_query_sql_rejects_illegal_projection_column() -> None:
+    """投影列非合法标识符 → INJECTION_DETECTED。"""
+    svc = _svc(MagicMock())
+    m = _metric(dims=("region",))
+    m.definition_json = {**m.definition_json, "measures": ["gmv`; DROP TABLE t; --"]}
+    req = QueryRequest(metric_code="gmv", date_range="")
+    with pytest.raises(BusinessError) as exc:
+        svc._build_query_sql(req, m)
+    assert exc.value.error_code == ErrorCode.INJECTION_DETECTED

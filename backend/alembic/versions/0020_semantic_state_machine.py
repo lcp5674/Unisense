@@ -1,8 +1,10 @@
 """语义模块工业级整改：状态机 + PENDING_VERSION + 健康度评分。
 
 新增字段/表：
-- metric 表新增 emergency_publish/emergency_reason/emergency_reviewed_at/gray_tenant_ids/pending_conflict/pending_conflict_detail
-- metric_version 表 status 枚举扩展 PENDING_CONFIRMATION/EXPERIMENTAL/CANCELLED，新增 pending_deadline/extension_count/effective_at
+- metric 表新增 emergency_publish/emergency_reason/emergency_reviewed_at/gray_tenant_ids/
+  pending_conflict/pending_conflict_detail
+- metric_version 表 status 枚举扩展 PENDING_CONFIRMATION/EXPERIMENTAL/CANCELLED，
+  新增 pending_deadline/extension_count/effective_at
 - metric.status 枚举扩展 EXPERIMENTAL/DATA_SOURCE_DROPPED
 - 新增 pending_version_confirmation 表
 - 新增 metric_health_score 表
@@ -26,15 +28,37 @@ def upgrade() -> None:
     op.alter_column(
         "metric",
         "status",
-        existing_type=sa.Enum("DRAFT", "REVIEW", "PUBLISHED", "EXPERIMENTAL", "DEPRECATED", "DATA_SOURCE_DROPPED", name="metric_status"),
-        type_=sa.Enum("DRAFT", "REVIEW", "PUBLISHED", "EXPERIMENTAL", "DEPRECATED", "DATA_SOURCE_DROPPED", name="metric_status"),
+        existing_type=sa.Enum(
+            "DRAFT",
+            "REVIEW",
+            "PUBLISHED",
+            "EXPERIMENTAL",
+            "DEPRECATED",
+            "DATA_SOURCE_DROPPED",
+            name="metric_status",
+        ),
+        type_=sa.Enum(
+            "DRAFT",
+            "REVIEW",
+            "PUBLISHED",
+            "EXPERIMENTAL",
+            "DEPRECATED",
+            "DATA_SOURCE_DROPPED",
+            name="metric_status",
+        ),
         existing_nullable=False,
     )
 
     # 2. metric 表新增字段
     op.add_column(
         "metric",
-        sa.Column("emergency_publish", sa.Boolean(), nullable=False, server_default=sa.text("0"), comment="紧急发布标记"),
+        sa.Column(
+            "emergency_publish",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="紧急发布标记",
+        ),
     )
     op.add_column(
         "metric",
@@ -42,7 +66,9 @@ def upgrade() -> None:
     )
     op.add_column(
         "metric",
-        sa.Column("emergency_reviewed_at", sa.DateTime(), nullable=True, comment="紧急发布补审时间"),
+        sa.Column(
+            "emergency_reviewed_at", sa.DateTime(), nullable=True, comment="紧急发布补审时间"
+        ),
     )
     op.add_column(
         "metric",
@@ -50,7 +76,13 @@ def upgrade() -> None:
     )
     op.add_column(
         "metric",
-        sa.Column("pending_conflict", sa.Boolean(), nullable=False, server_default=sa.text("0"), comment="冲突预检标记"),
+        sa.Column(
+            "pending_conflict",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="冲突预检标记",
+        ),
     )
     op.add_column(
         "metric",
@@ -61,19 +93,37 @@ def upgrade() -> None:
     op.alter_column(
         "metric_version",
         "status",
-        existing_type=sa.Enum("DRAFT", "PENDING_REVIEW", "PUBLISHED", "ARCHIVED", name="version_status"),
-        type_=sa.Enum("DRAFT", "PENDING_CONFIRMATION", "PUBLISHED", "EXPERIMENTAL", "ARCHIVED", "CANCELLED", name="version_status"),
+        existing_type=sa.Enum(
+            "DRAFT", "PENDING_REVIEW", "PUBLISHED", "ARCHIVED", name="version_status"
+        ),
+        type_=sa.Enum(
+            "DRAFT",
+            "PENDING_CONFIRMATION",
+            "PUBLISHED",
+            "EXPERIMENTAL",
+            "ARCHIVED",
+            "CANCELLED",
+            name="version_status",
+        ),
         existing_nullable=False,
     )
 
     # 4. metric_version 表新增字段
     op.add_column(
         "metric_version",
-        sa.Column("pending_deadline", sa.DateTime(), nullable=True, comment="PENDING_VERSION 确认截止时间"),
+        sa.Column(
+            "pending_deadline", sa.DateTime(), nullable=True, comment="PENDING_VERSION 确认截止时间"
+        ),
     )
     op.add_column(
         "metric_version",
-        sa.Column("extension_count", sa.Integer(), nullable=False, server_default=sa.text("0"), comment="延期次数（最多 1 次）"),
+        sa.Column(
+            "extension_count",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="延期次数（最多 1 次）",
+        ),
     )
     op.add_column(
         "metric_version",
@@ -84,16 +134,53 @@ def upgrade() -> None:
     op.create_table(
         "pending_version_confirmation",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
-        sa.Column("metric_id", sa.BigInteger(), sa.ForeignKey("metric.id", name="fk_pending_confirm_metric"), nullable=False, comment="指标 ID"),
+        sa.Column(
+            "metric_id",
+            sa.BigInteger(),
+            sa.ForeignKey("metric.id", name="fk_pending_confirm_metric"),
+            nullable=False,
+            comment="指标 ID",
+        ),
         sa.Column("version", sa.Integer(), nullable=False, comment="版本号"),
         sa.Column("consumer_id", sa.BigInteger(), nullable=False, comment="消费方用户 ID"),
-        sa.Column("status", sa.Enum("PENDING", "CONFIRMED", "REJECTED", "TIMEOUT_ACCEPTED", name="pending_confirm_status"), nullable=False, server_default="PENDING", comment="确认状态"),
+        sa.Column(
+            "status",
+            sa.Enum(
+                "PENDING",
+                "CONFIRMED",
+                "REJECTED",
+                "TIMEOUT_ACCEPTED",
+                name="pending_confirm_status",
+            ),
+            nullable=False,
+            server_default="PENDING",
+            comment="确认状态",
+        ),
         sa.Column("reason", sa.Text(), nullable=True, comment="拒绝原因"),
-        sa.Column("extension_count", sa.Integer(), nullable=False, server_default=sa.text("0"), comment="延期次数"),
+        sa.Column(
+            "extension_count",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="延期次数",
+        ),
         sa.Column("deadline", sa.DateTime(), nullable=False, comment="确认截止时间"),
         sa.Column("confirmed_at", sa.DateTime(), nullable=True, comment="确认/拒绝时间"),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), comment="创建时间"),
-        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now(), comment="更新时间"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+            comment="创建时间",
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            comment="更新时间",
+        ),
         sa.Column("deleted_at", sa.DateTime(), nullable=True, comment="软删除时间"),
         sa.UniqueConstraint("metric_id", "version", "consumer_id", name="uk_pending_confirm"),
     )
@@ -103,18 +190,75 @@ def upgrade() -> None:
     op.create_table(
         "metric_health_score",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
-        sa.Column("metric_id", sa.BigInteger(), nullable=False, unique=True, comment="指标 ID（唯一）"),
-        sa.Column("score", sa.Integer(), nullable=False, server_default=sa.text("0"), comment="综合评分 0-100"),
-        sa.Column("level", sa.Enum("EXCELLENT", "GOOD", "WARNING", "CRITICAL", name="health_level_enum"), nullable=False, server_default="CRITICAL", comment="分级"),
-        sa.Column("completeness_score", sa.Integer(), nullable=False, server_default=sa.text("0"), comment="口径完整度 0-100"),
-        sa.Column("activity_score", sa.Integer(), nullable=False, server_default=sa.text("0"), comment="活跃度 0-100"),
-        sa.Column("quality_score", sa.Integer(), nullable=False, server_default=sa.text("0"), comment="质量 0-100"),
-        sa.Column("owner_response_score", sa.Integer(), nullable=False, server_default=sa.text("0"), comment="Owner 响应 0-100"),
-        sa.Column("lineage_coverage_score", sa.Integer(), nullable=False, server_default=sa.text("0"), comment="血缘覆盖 0-100"),
+        sa.Column(
+            "metric_id", sa.BigInteger(), nullable=False, unique=True, comment="指标 ID（唯一）"
+        ),
+        sa.Column(
+            "score",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="综合评分 0-100",
+        ),
+        sa.Column(
+            "level",
+            sa.Enum("EXCELLENT", "GOOD", "WARNING", "CRITICAL", name="health_level_enum"),
+            nullable=False,
+            server_default="CRITICAL",
+            comment="分级",
+        ),
+        sa.Column(
+            "completeness_score",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="口径完整度 0-100",
+        ),
+        sa.Column(
+            "activity_score",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="活跃度 0-100",
+        ),
+        sa.Column(
+            "quality_score",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="质量 0-100",
+        ),
+        sa.Column(
+            "owner_response_score",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="Owner 响应 0-100",
+        ),
+        sa.Column(
+            "lineage_coverage_score",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+            comment="血缘覆盖 0-100",
+        ),
         sa.Column("missing_dimensions", sa.JSON(), nullable=True, comment="数据不足的维度列表"),
         sa.Column("calculated_at", sa.DateTime(), nullable=False, comment="评分计算时间"),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), comment="创建时间"),
-        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now(), comment="更新时间"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+            comment="创建时间",
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+            comment="更新时间",
+        ),
         sa.Column("deleted_at", sa.DateTime(), nullable=True, comment="软删除时间"),
     )
     op.create_index("idx_health_level", "metric_health_score", ["level"])
@@ -140,7 +284,15 @@ def downgrade() -> None:
     op.alter_column(
         "metric_version",
         "status",
-        existing_type=sa.Enum("DRAFT", "PENDING_CONFIRMATION", "PUBLISHED", "EXPERIMENTAL", "ARCHIVED", "CANCELLED", name="version_status"),
+        existing_type=sa.Enum(
+            "DRAFT",
+            "PENDING_CONFIRMATION",
+            "PUBLISHED",
+            "EXPERIMENTAL",
+            "ARCHIVED",
+            "CANCELLED",
+            name="version_status",
+        ),
         type_=sa.Enum("DRAFT", "PENDING_REVIEW", "PUBLISHED", "ARCHIVED", name="version_status"),
         existing_nullable=False,
     )

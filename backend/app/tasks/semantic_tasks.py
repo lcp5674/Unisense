@@ -18,21 +18,18 @@ async def check_pending_version_timeouts(ctx: dict[str, Any]) -> list[int]:
     """检查 PENDING_VERSION 超时（每分钟 cron）。
 
     查找 deadline 已过的 PendingVersionConfirmation 记录，
-    超时未确认 → 默认接受 + 切换 CURRENT。
+    超时未确认 → 默认接受 + 切换 CURRENT（应用新口径到主表并转正版本）。
 
     Returns:
-        超时接受的 metric_id 列表。
+        超时接受并完成转正的 metric_id 列表。
     """
     from sqlalchemy import select
 
     from app.db.mysql import async_session_factory
     from app.models.metric_version import PendingVersionConfirmation
-    from app.services.semantic.pending_version_manager import (
-        PendingAction,
-        PendingVersionManager,
-    )
+    from app.services.semantic.service import MetricService
 
-    timed_out: list[int] = []
+    promoted: list[int] = []
     now = datetime.now(UTC)
 
     async with async_session_factory() as db:
@@ -53,36 +50,30 @@ async def check_pending_version_timeouts(ctx: dict[str, Any]) -> list[int]:
             key = (conf.metric_id, conf.version)
             groups.setdefault(key, []).append(conf)
 
-        mgr = PendingVersionManager(db)
-        for (metric_id, version), confirmations in groups.items():
-            # 标记全部超时接受
-            for conf in confirmations:
-                conf.status = "TIMEOUT_ACCEPTED"
-                conf.confirmed_at = now
-            await db.flush()
-
-            # 切换 CURRENT
+        svc = MetricService(db)
+        for (metric_id, version), _confirmations in groups.items():
+            # 切换 CURRENT：标记超时接受 + 全部就绪后应用新口径并转正
             try:
-                mgr_result = await mgr.confirm(
-                    metric_id, version, confirmations[0].consumer_id
-                )
-                if mgr_result == PendingAction.SWITCH_CURRENT:
+                updated = await svc.auto_accept_timeout(metric_id, version)
+                if updated is not None:
                     logger.info(
                         "pending_version_timeout_accepted",
                         metric_id=metric_id,
                         version=version,
+                        metric_code=updated.metric_code,
                     )
-                    timed_out.append(metric_id)
+                    promoted.append(metric_id)
             except Exception:
                 logger.warning(
                     "pending_version_timeout_accept_failed",
                     metric_id=metric_id,
                     version=version,
+                    exc_info=True,
                 )
 
         await db.commit()
 
-    return timed_out
+    return promoted
 
 
 async def refresh_health_scores(ctx: dict[str, Any]) -> int:
@@ -216,7 +207,7 @@ functions = [
 # Cron 调度配置（供 arq worker 使用）
 cron_jobs = [
     {"func": check_pending_version_timeouts, "cron": "*/1 * * * *"},  # 每分钟
-    {"func": refresh_health_scores, "cron": "0 3 * * *"},             # 每日凌晨3点
-    {"func": check_emergency_review_overdue, "cron": "0 * * * *"},    # 每小时
-    {"func": check_experimental_expiry, "cron": "0 4 * * *"},         # 每日凌晨4点
+    {"func": refresh_health_scores, "cron": "0 3 * * *"},  # 每日凌晨3点
+    {"func": check_emergency_review_overdue, "cron": "0 * * * *"},  # 每小时
+    {"func": check_experimental_expiry, "cron": "0 4 * * *"},  # 每日凌晨4点
 ]

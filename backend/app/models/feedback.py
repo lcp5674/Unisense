@@ -20,3 +20,15 @@ class Feedback(Base, BaseModel):
     target_id: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="反馈对象 ID")
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="评分 1-5")
     comment: Mapped[str | None] = mapped_column(Text, nullable=True, comment="反馈内容")
+    #: 反馈处理状态（pending/adopted/rejected/in_progress）——此前仅写进 comment
+    #: 文本，状态不可查询/过滤，"反馈采纳闭环"未真正落地；现落库可筛。
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+        comment="处理状态：pending/adopted/rejected/in_progress",
+    )
+    resolution_note: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="处理说明（resolver 填写）"
+    )

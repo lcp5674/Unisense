@@ -33,6 +33,7 @@ _PII_PATTERNS = [
     (re.compile(r"\b\d{15,18}[Xx]?\b"), "***ID***"),  # 身份证
     (re.compile(r"\b1[3-9]\d{9}\b"), "***PHONE***"),  # 手机号
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "***EMAIL***"),  # 邮箱
+    (re.compile(r"\b(\d{1,3}\.){3}\d{1,3}\b"), "***IP***"),
 ]
 
 
@@ -53,6 +54,8 @@ def _redact_processor(
         val = event_dict[key]
         if key.lower() in _SENSITIVE_FIELDS:
             event_dict[key] = "***REDACTED***"
+        elif key.lower() in ("ip", "client_ip", "remote_addr"):
+            event_dict[key] = "***IP***"
         elif isinstance(val, str):
             for pattern, replacement in _PII_PATTERNS:
                 val = pattern.sub(replacement, val)

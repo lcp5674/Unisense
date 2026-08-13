@@ -72,9 +72,21 @@ def db_env():
         engine = create_async_engine(url, echo=False, poolclass=NullPool)
 
         async def _wipe() -> None:
+            # 全表清理：仅 import 本测试涉及模型时 Base.metadata.drop_all 会漏删
+            # 其余表，残留表使 alembic 重建报 1050。改为按 information_schema
+            # 枚举全部表删除，保证从零重建。
             async with engine.begin() as conn:
                 await conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-                await conn.run_sync(Base.metadata.drop_all)
+                rows = (
+                    await conn.execute(
+                        text(
+                            "SELECT table_name FROM information_schema.tables "
+                            "WHERE table_schema = DATABASE()"
+                        )
+                    )
+                ).all()
+                for (tname,) in rows:
+                    await conn.execute(text(f"DROP TABLE IF EXISTS `{tname}`"))
                 await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 await conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
 

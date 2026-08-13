@@ -30,6 +30,7 @@ _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_inje
 
 class NpsSubmitRequest(BaseModel):
     """NPS 提交请求。"""
+
     score: int = Field(..., ge=0, le=10, description="NPS 分数（0-10）")
     comment: str | None = Field(None, description="可选评论")
     target_type: str = Field("platform", description="目标类型")
@@ -38,6 +39,7 @@ class NpsSubmitRequest(BaseModel):
 
 class FeedbackStatusUpdateRequest(BaseModel):
     """反馈状态更新请求。"""
+
     status: str = Field(..., pattern="^(adopted|rejected|in_progress)$", description="新状态")
     resolution_note: str | None = Field(None, description="处理说明")
 
@@ -70,7 +72,7 @@ async def list_feedback(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     target_type: str | None = Query(None),
-    limit: int = Query(100),
+    limit: int = Query(100, ge=1, le=200),
 ) -> Any:
     items = await ObservabilityService(db).list_feedback(target_type, limit)
     return ok(

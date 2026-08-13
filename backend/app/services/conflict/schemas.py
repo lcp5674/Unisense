@@ -75,9 +75,17 @@ class ConflictResponse(BaseModel):
     decision_json: dict[str, Any] | None = None
     created_at: datetime | None = None
     resolved_at: datetime | None = None
+    # B1-1: 前端 types.ts 依赖的字段（从 metric_codes / decision_json / created_at 推导）
+    severity: str | None = None
+    candidate_metric_code: str | None = None
+    existing_metric_code: str | None = None
+    description: str | None = None
+    detected_at: datetime | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> ConflictResponse:
+        mc = m.metric_codes or {}
+        dj = m.decision_json or {}
         return cls(
             id=m.id,
             conflict_id=m.conflict_id,
@@ -92,6 +100,12 @@ class ConflictResponse(BaseModel):
             decision_json=m.decision_json,
             created_at=m.created_at,
             resolved_at=m.resolved_at,
+            # B1-1: 推导缺失字段
+            severity=dj.get("status") or dj.get("severity"),
+            candidate_metric_code=mc.get("candidate"),
+            existing_metric_code=mc.get("existing"),
+            description=mc.get("description"),
+            detected_at=m.created_at,
         )
 
 

@@ -17,6 +17,8 @@ import type { DimensionExpr, DryRunResponse, QueryResponse, SnapshotResponse, Cl
 import { useTracking } from "../hooks/useTracking";
 import { ObjectView, kvText } from "../utils/display";
 import { DATE_RANGE_LABEL, GRANULARITY_LABEL } from "../utils/enums";
+import { handleDegradedEngine, isDegradationError } from "../utils/apiErrorHandlers";
+import type { UnisenseApiError as UnisenseApiErrorType } from "../utils/apiErrorHandlers";
 
 // 执行计划等对象字段名 → 中文（可读展示，避免裸 JSON 直出）
 const CHECK_LABEL: Record<string, string> = {
@@ -79,7 +81,33 @@ export function QueryWorkspace() {
   const [snapshots, setSnapshots] = useState<SnapshotResponse[]>([]);
   const [busy, setBusy] = useState<"dry" | "query" | "snap" | null>(null);
   const [tokenOk, setTokenOk] = useState(!!getConsumeToken());
+  const [degraded, setDegraded] = useState(false);
+  const [degradedMessage, setDegradedMessage] = useState("");
   const { track } = useTracking();
+
+  // 将预设键翻译为后端要求的 YYYY-MM-DD,YYYY-MM-DD 格式
+  function translateDateRange(key: string): string {
+    const today = new Date();
+    // 用本地日期格式化（toISOString 是 UTC，本地凌晨会差一天）
+    const fmt = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    switch (key) {
+      case "today":
+        return fmt(today) + "," + fmt(today);
+      case "last_7d":
+        return fmt(new Date(today.getTime() - 7 * 86400000)) + "," + fmt(today);
+      case "last_30d":
+        return fmt(new Date(today.getTime() - 30 * 86400000)) + "," + fmt(today);
+      case "last_90d":
+        return fmt(new Date(today.getTime() - 90 * 86400000)) + "," + fmt(today);
+      case "ytd":
+        return today.getFullYear() + "-01-01," + fmt(today);
+      case "last_365d":
+        return fmt(new Date(today.getTime() - 365 * 86400000)) + "," + fmt(today);
+      default:
+        return key; // 已是 YYYY-MM-DD,YYYY-MM-DD 格式原样返回
+    }
+  }
 
   useEffect(() => {
     listMetrics({ page_size: 100 })
@@ -106,7 +134,7 @@ export function QueryWorkspace() {
       const res = await consumeDryRun({
         metric_code: metricCode,
         dimensions: buildRequest(),
-        date_range: dateRange,
+        date_range: translateDateRange(dateRange),
         granularity,
         comparison,
         accept_stale: acceptStale,
@@ -128,7 +156,7 @@ export function QueryWorkspace() {
       const res = await consumeQuery({
         metric_code: metricCode,
         dimensions: buildRequest(),
-        date_range: dateRange,
+        date_range: translateDateRange(dateRange),
         granularity,
         comparison,
         accept_stale: acceptStale,
@@ -137,6 +165,13 @@ export function QueryWorkspace() {
       setDryRun(null);
       track("consume_query", metricCode, "metric");
     } catch (err) {
+      if (err instanceof UnisenseApiError && isDegradationError(err as unknown as UnisenseApiErrorType)) {
+        const { isDegraded: isDg, message: dgMsg } = handleDegradedEngine(err as unknown as UnisenseApiErrorType);
+        if (isDg) {
+          setDegraded(true);
+          setDegradedMessage(dgMsg);
+        }
+      }
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "查询失败");
     } finally {
       setBusy(null);
@@ -194,6 +229,17 @@ export function QueryWorkspace() {
       label: "查询执行",
       children: (
         <div>
+          {degraded && (
+            <Alert
+              type="warning"
+              showIcon
+              banner
+              style={{ marginBottom: 16 }}
+              message={degradedMessage || "查询引擎暂不可用，请稍后重试"}
+              closable
+              onClose={() => setDegraded(false)}
+            />
+          )}
           <Alert
             type={tokenOk ? "success" : "warning"}
             showIcon

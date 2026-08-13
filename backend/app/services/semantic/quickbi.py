@@ -57,6 +57,7 @@ class QuickBiService:
         dashboard_id: str | None = None,
         params: dict[str, str] | None = None,
         ttl: int = _DEFAULT_TTL,
+        actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """签发嵌入票据。
 
@@ -65,6 +66,10 @@ class QuickBiService:
             dashboard_id: 看板 ID（可选）。
             params: 报表参数（可选，key/value 均为字符串）。
             ttl: 有效期秒数（默认 30 分钟）。
+            actor: 签发者身份声明（如 ``{"user_id": 1, "role": "analyst",
+                "domain": "sales"}``）。票据为自洽签名体，网关侧应据
+                ``actor`` 做用户级收敛（PII 报表/越权报表不得被任意调用者
+                凭未绑定身份的票据嵌入）；签名保证声明不可篡改。
 
         Returns:
             ``{ticket, embed_url, expires_at}``。
@@ -88,6 +93,14 @@ class QuickBiService:
             "iat": int(time.time()),
             "exp": expires_at,
         }
+        if actor:
+            # 绑定签发者身份声明：网关侧据此按用户收敛报表访问权限。
+            # 仅纳入白名单键，避免调用方塞入任意字段（如覆盖 exp/iat）。
+            body["actor"] = {
+                k: actor[k]
+                for k in ("user_id", "role", "domain")
+                if k in actor and actor[k] is not None
+            }
         # 票据体：base64url(json)，签名：HMAC-SHA256(票据体)
         payload = base64.urlsafe_b64encode(
             json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(

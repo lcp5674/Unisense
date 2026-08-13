@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 from fastapi import APIRouter
@@ -77,7 +76,7 @@ async def ready(
         es_alive = await es_client.health()
         optional["elasticsearch"] = "ok" if es_alive else "fail"
         es_probed = True
-    for name, alive in (await asyncio.to_thread(optional_dependency_status)).items():
+    for name, alive in (await optional_dependency_status()).items():
         if name == "elasticsearch" and es_probed:
             continue
         optional[name] = "ok" if alive else "fail"

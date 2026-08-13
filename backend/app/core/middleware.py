@@ -140,6 +140,29 @@ class ErrorHandlerMiddleware(BaseHTTPMiddleware):
             )
 
 
+_MAX_BODY_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+class RequestBodySizeMiddleware(BaseHTTPMiddleware):
+    """请求体大小限制中间件（SEC-11: 超过10MB返回413）。"""
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.method in ("POST", "PUT", "PATCH"):
+            content_length = request.headers.get("content-length")
+            if content_length and int(content_length) > _MAX_BODY_SIZE:
+                trace_id = getattr(request.state, "trace_id", "")
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "code": "REQUEST_TOO_LARGE",
+                        "message": "请求体超过10MB限制",
+                        "trace_id": trace_id,
+                        "detail": None,
+                    },
+                )
+        return await call_next(request)
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """安全响应头中间件（对齐 DEV_GUIDE §13.4）。"""
 

@@ -50,6 +50,7 @@ def _redis_available() -> bool:
     except RuntimeError:
         return False
 
+
 # 口径层破坏性变更字段：这些字段变更会破坏下游消费方
 # 同时用于 _is_breaking_change 与 _compute_diff，保证判定一致（修复原实现中二者对
 # dependencies 的判定互相矛盾的问题）。
@@ -65,6 +66,7 @@ def redact_definition(defn: dict[str, Any]) -> dict[str, Any]:
 
     用于 PII 指标读路径分级（非敏感角色只能看到口径骨架，看不到具体取值）。
     """
+
     def _redact(value: Any) -> Any:
         if isinstance(value, dict):
             return {k: _redact(v) for k, v in value.items()}
@@ -115,8 +117,10 @@ class MetricService(BaseService):
         """
         super().__init__(db)
         self._repo = MetricRepository(db)
-        self._cache = cache if cache is not None else MetricCache.from_defaults(
-            get_redis() if _redis_available() else None
+        self._cache = (
+            cache
+            if cache is not None
+            else MetricCache.from_defaults(get_redis() if _redis_available() else None)
         )
 
     # ---- 字典校验辅助方法（对齐 spec FR-008/FR-009, plan.md D2）----
@@ -357,9 +361,7 @@ class MetricService(BaseService):
                         {
                             "metric_code": m.metric_code,
                             "domain": m.domain,
-                            "definition": (
-                                defn.get("definition") or defn.get("expression") or ""
-                            ),
+                            "definition": (defn.get("definition") or defn.get("expression") or ""),
                             "source_tables": defn.get("source_tables") or [],
                             "has_pii": bool(m.pii_flag),
                             "pii_authorized": bool(m.compliance_reviewed),
@@ -508,6 +510,17 @@ class MetricService(BaseService):
         metric = await self.get_metric(metric_code)
         self._assert_owner_or_admin(metric, actor_id, role)
 
+        # TECH-07 (T050): metric_code 不可通过 definition_json.code 修改
+        if (
+            request.definition_json is not None
+            and "code" in request.definition_json
+            and request.definition_json["code"] != metric_code
+        ):
+            raise BusinessError(
+                f"指标编码不可修改（当前: {metric_code}，请求: {request.definition_json['code']}）",
+                error_code="FORBIDDEN",
+            )
+
         if metric.status not in ("DRAFT", "REVIEW", "PUBLISHED"):
             raise BusinessError(
                 f"指标状态 {metric.status} 不允许更新",
@@ -547,6 +560,18 @@ class MetricService(BaseService):
             new_def, synced_pii = _normalize_pii(request.definition_json, metric.pii_flag)
             is_breaking = self._is_breaking_change(old_def, new_def) or top_level_breaking
 
+            # top-level 破坏性字段 diff（与 elif 分支同构，供 PENDING 转正回写主表）
+            top_diff: dict[str, Any] = {}
+            for field in BREAKING_TOP_LEVEL_FIELDS:
+                old_val = getattr(metric, field, None)
+                new_val = getattr(request, field, None)
+                if new_val is not None and old_val != new_val:
+                    top_diff[field] = {
+                        "before": old_val,
+                        "after": new_val,
+                        "change_type": "BREAKING",
+                    }
+
             new_version_num = metric.version + 1
             updates["definition_json"] = new_def
             updates["version"] = new_version_num
@@ -555,13 +580,22 @@ class MetricService(BaseService):
 
             # S-02 修复：PUBLISHED 状态口径变更走 PENDING_VERSION 期，不直接生效
             if metric.status == "PUBLISHED" and is_breaking:
-                # 破坏性变更：创建 PENDING 版本，不更新 metric 主表口径
-                # 等 PendingVersionConfirmation 全部确认后才转正
+                # 破坏性变更：创建 PENDING 版本，不更新 metric 主表口径；
+                # 同时收敛 top-level 破坏性字段（granularity/unit），
+                # 防止组合请求绕过确认期直写主表（与 elif 分支一致）。
+                # 注意：主表 version 立即递增以「预留版本号」，避免 PENDING 期间
+                # 再次提交同版本号触发 MetricVersion 唯一键冲突（与 elif 分支一致）。
                 updates.pop("definition_json", None)
-                updates.pop("version", None)
+                for field in BREAKING_TOP_LEVEL_FIELDS:
+                    updates.pop(field, None)
                 version_status = "PENDING_CONFIRMATION"
             else:
                 version_status = "DRAFT"
+
+            # 合并定义 diff 与 top-level diff，供转正时回写主表
+            merged_diff = self._compute_diff(old_def, new_def)
+            if top_diff:
+                merged_diff.update(top_diff)
 
             # 创建版本记录
             version = MetricVersion(
@@ -569,7 +603,7 @@ class MetricService(BaseService):
                 version=new_version_num,
                 change_type="BREAKING" if is_breaking else "UPDATE",
                 definition_json=new_def,
-                diff_json=self._compute_diff(old_def, new_def),
+                diff_json=merged_diff,
                 status=version_status,
                 change_reason=request.change_reason,
                 created_by=actor_id,
@@ -608,16 +642,18 @@ class MetricService(BaseService):
                     updates.pop(field, None)
                 version_status = "PENDING_CONFIRMATION"
             else:
-                version_status = "DRAFT"
+                # top_level_breaking 仅在 PUBLISHED 状态被检测（见上方判定），此分支不可达；
+                # 保留以防御未来扩展。
+                version_status = "DRAFT"  # pragma: no cover - 不可达防御分支
 
             # 构造 diff（top-level 字段变更）
             old_def = metric.definition_json or {}
-            top_diff: dict[str, Any] = {}
+            top_level_diff: dict[str, Any] = {}
             for field in BREAKING_TOP_LEVEL_FIELDS:
                 old_val = getattr(metric, field, None)
                 new_val = getattr(request, field, None)
                 if new_val is not None and old_val != new_val:
-                    top_diff[field] = {
+                    top_level_diff[field] = {
                         "before": old_val,
                         "after": new_val,
                         "change_type": "BREAKING",
@@ -628,7 +664,7 @@ class MetricService(BaseService):
                 version=new_version_num,
                 change_type="BREAKING",
                 definition_json=old_def,  # 口径不变
-                diff_json=top_diff,
+                diff_json=top_level_diff,
                 status=version_status,
                 change_reason=request.change_reason,
                 created_by=actor_id,
@@ -702,9 +738,7 @@ class MetricService(BaseService):
         )
         return await self.approve_metric(metric_code, approve_req, actor_id, role)
 
-    async def submit_review(
-        self, metric_code: str, actor_id: int, role: str
-    ) -> Metric:
+    async def submit_review(self, metric_code: str, actor_id: int, role: str) -> Metric:
         """提交评审（DRAFT → REVIEW）。
 
         Args:
@@ -836,7 +870,7 @@ class MetricService(BaseService):
             return updated
 
         invalid = MetricStateMachine.validate_transition("REVIEW", "DRAFT")
-        if invalid is not None:
+        if invalid is not None:  # pragma: no cover - REVIEW→DRAFT 在状态机矩阵中恒合法，防御分支
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
 
         updated = await self._repo.update_with_optimistic_lock(
@@ -1174,9 +1208,7 @@ class MetricService(BaseService):
         )
 
         # 版本状态同步升为 PUBLISHED
-        await self._repo.mark_version_published(
-            metric.id, metric.version, now, status="PUBLISHED"
-        )
+        await self._repo.mark_version_published(metric.id, metric.version, now, status="PUBLISHED")
 
         await self._cache.invalidate(metric_code)
 
@@ -1376,9 +1408,7 @@ class MetricService(BaseService):
         )
 
         # 版本转正
-        await self._repo.mark_version_published(
-            metric.id, target_version, now, status="PUBLISHED"
-        )
+        await self._repo.mark_version_published(metric.id, target_version, now, status="PUBLISHED")
 
         await self._cache.invalidate(metric_code)
 
@@ -1444,9 +1474,7 @@ class MetricService(BaseService):
         logger.info("metric_deleted", metric_code=metric_code, actor_id=actor_id)
         return metric
 
-    async def review_compliance(
-        self, metric_code: str, actor_id: int, role: str
-    ) -> Metric:
+    async def review_compliance(self, metric_code: str, actor_id: int, role: str) -> Metric:
         """PII 合规复核（置 compliance_reviewed=True，打通 PII 指标发布闸门）。
 
         Args:
@@ -1501,9 +1529,7 @@ class MetricService(BaseService):
 
     # ---- PENDING_VERSION 版本确认期（FR-007/FR-008）----
 
-    async def confirm_version(
-        self, metric_code: str, version: int, consumer_id: int
-    ) -> Metric:
+    async def confirm_version(self, metric_code: str, version: int, consumer_id: int) -> Metric:
         """消费方确认版本（FR-007）。
 
         将当前消费方的 PENDING 记录置为 CONFIRMED；当该版本全部消费方确认后，
@@ -1526,9 +1552,7 @@ class MetricService(BaseService):
             raise ConflictError(
                 f"该版本 {version} 无待确认记录", error_code="NO_PENDING_CONFIRMATION"
             )
-        mine = next(
-            (c for c in confirmations if c.consumer_id == consumer_id), None
-        )
+        mine = next((c for c in confirmations if c.consumer_id == consumer_id), None)
         if mine is None:
             raise ConflictError(
                 "当前用户无该版本的待确认记录", error_code="NO_PENDING_CONFIRMATION"
@@ -1537,22 +1561,96 @@ class MetricService(BaseService):
             return metric  # 幂等：已确认直接返回
         await self._repo.update_confirmation_status(mine.id, "CONFIRMED")
 
-        # 全部确认后版本转正（原子性保证：版本转正+metric更新须在同一事务）
-        if all(c.status == "CONFIRMED" or c.id == mine.id for c in confirmations):
+        # 全部确认后版本转正：应用新口径到主表 + 转正版本（同一事务）
+        all_confirmed = all(
+            c.status in ("CONFIRMED", "TIMEOUT_ACCEPTED") or c.id == mine.id for c in confirmations
+        )
+        if all_confirmed:
             try:
-                updated = await self._repo.update_with_optimistic_lock(
-                    metric.id,
-                    metric.row_version,
-                    effective_version=version,
-                )
-                await self._repo.mark_version_published(metric.id, version, datetime.now(UTC))
+                return await self._promote_pending_version(metric, version)
             except ConflictError:
                 # 乐观锁冲突 → 回滚确认状态，让调用方重试
                 await self._repo.update_confirmation_status(mine.id, "PENDING")
                 raise
-            await self._cache.invalidate(metric_code)
-            return updated
         return metric
+
+    async def auto_accept_timeout(self, metric_id: int, version: int) -> Metric | None:
+        """超时自动接受：将仍为 PENDING 的超时确认记录置 TIMEOUT_ACCEPTED，
+        全部确认/超时接受后应用新口径并转正（供定时任务调用）。
+
+        Args:
+            metric_id: 指标 ID。
+            version: 版本号。
+
+        Returns:
+            转正后的指标；尚未全部确认时返回 None。
+        """
+        metric = await self._repo.get_by_id(metric_id)
+        if metric is None:
+            raise NotFoundError(f"指标不存在: id={metric_id}")
+        confirmations = await self._repo.get_pending_confirmations(metric_id, version)
+        if not confirmations:
+            return None
+        for c in confirmations:
+            if c.status == "PENDING":
+                await self._repo.update_confirmation_status(c.id, "TIMEOUT_ACCEPTED")
+        # 重新读取以反映最新状态；全部确认/超时接受即转正
+        # （含无 PENDING 可标记但已全部确认的恢复场景：旧缺陷遗留未转正的版本）
+        confirmations = await self._repo.get_pending_confirmations(metric_id, version)
+        if all(c.status in ("CONFIRMED", "TIMEOUT_ACCEPTED") for c in confirmations):
+            return await self._promote_pending_version(metric, version)
+        return None
+
+    async def _promote_pending_version(self, metric: Metric, version: int) -> Metric:
+        """PENDING_VERSION 全部确认/超时接受后的转正：把版本口径同步到主表。
+
+        旧实现仅置 ``effective_version`` 并标记版本发布，主表 ``definition_json`` /
+        ``version`` 仍为旧值——消费方读主表拿到旧口径，破坏性变更经确认后
+        永不生效（PENDING_VERSION 全链路空转）。本方法补齐主表同步：
+
+        - 应用版本记录的 ``definition_json``（新口径）；
+        - 应用 diff_json 中 top-level 破坏性字段（granularity/unit）的 after 值；
+        - 递增主表 ``version`` 至目标版本，标记版本 PUBLISHED，失效缓存。
+
+        Args:
+            metric: 已加载的指标对象。
+            version: 待转正的版本号。
+
+        Returns:
+            转正后的指标。
+
+        Raises:
+            NotFoundError: 版本不存在。
+            ConflictError: 乐观锁冲突。
+        """
+        version_obj = await self._repo.get_version(metric.id, version)
+        if version_obj is None:
+            raise NotFoundError(f"版本不存在: {version}")
+
+        updates: dict[str, Any] = {
+            "effective_version": version,
+            "version": version,
+        }
+        if version_obj.definition_json is not None:
+            updates["definition_json"] = version_obj.definition_json
+        # top-level 破坏性字段：diff_json 的 after 值回写主表
+        for field, diff in (version_obj.diff_json or {}).items():
+            if field in BREAKING_TOP_LEVEL_FIELDS and isinstance(diff, dict) and "after" in diff:
+                updates[field] = diff["after"]
+
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id, metric.row_version, **updates
+        )
+        await self._repo.mark_version_published(metric.id, version, datetime.now(UTC))
+        await self._cache.invalidate(metric.metric_code)
+        logger.info(
+            "pending_version_promoted",
+            metric_id=metric.id,
+            metric_code=metric.metric_code,
+            version=version,
+            definition_synced=version_obj.definition_json is not None,
+        )
+        return updated
 
     async def reject_version(
         self, metric_code: str, version: int, reason: str, consumer_id: int
@@ -1579,14 +1677,26 @@ class MetricService(BaseService):
             raise ConflictError(
                 f"该版本 {version} 无待确认记录", error_code="NO_PENDING_CONFIRMATION"
             )
-        mine = next(
-            (c for c in confirmations if c.consumer_id == consumer_id), None
-        )
+        mine = next((c for c in confirmations if c.consumer_id == consumer_id), None)
         if mine is None:
             raise ConflictError(
                 "当前用户无该版本的待确认记录", error_code="NO_PENDING_CONFIRMATION"
             )
         await self._repo.update_confirmation_status(mine.id, "REJECTED", reason=reason)
+        # 与 PendingVersionManager.reject 语义对齐：被拒版本置 CANCELLED，
+        # 防止后续被确认/超时逻辑错误处理（旧实现只改确认状态，版本滞留 PENDING）
+        from sqlalchemy import update as sa_update
+
+        from app.models.metric_version import MetricVersion
+
+        await self._db.execute(
+            sa_update(MetricVersion)
+            .where(
+                MetricVersion.metric_id == metric.id,
+                MetricVersion.version == version,
+            )
+            .values(status="CANCELLED")
+        )
         return metric
 
     async def extend_version(self, metric_code: str, version: int) -> Metric:
@@ -1619,9 +1729,7 @@ class MetricService(BaseService):
 
     # ---- 内部方法 ----
 
-    def _assert_owner_or_admin(
-        self, metric: Metric, actor_id: int, role: str
-    ) -> None:
+    def _assert_owner_or_admin(self, metric: Metric, actor_id: int, role: str) -> None:
         """越权守卫：metric_owner 仅可操作本人（或副 Owner）的指标。
 
         platform_admin / domain_admin 放行；metric_owner 校验 owner_id /
@@ -1811,9 +1919,16 @@ class MetricService(BaseService):
             return "different"
 
         fields = [
-            "granularity", "unit", "currency", "aggregation",
-            "time_semantics", "additivity", "dw_layer", "metric_tier",
-            "serving_mode", "freshness",
+            "granularity",
+            "unit",
+            "currency",
+            "aggregation",
+            "time_semantics",
+            "additivity",
+            "dw_layer",
+            "metric_tier",
+            "serving_mode",
+            "freshness",
         ]
         result: dict[str, Any] = {"metrics": [code_a, code_b], "fields": {}}
 
@@ -1821,7 +1936,8 @@ class MetricService(BaseService):
             va = getattr(a, field, None)
             vb = getattr(b, field, None)
             result["fields"][field] = {
-                "a": va, "b": vb,
+                "a": va,
+                "b": vb,
                 "difference_level": _diff_level(va, vb),
             }
 
@@ -1831,7 +1947,8 @@ class MetricService(BaseService):
         expr_a = def_a.get("expression", "")
         expr_b = def_b.get("expression", "")
         result["fields"]["definition"] = {
-            "a": def_a, "b": def_b,
+            "a": def_a,
+            "b": def_b,
             "difference_level": _diff_level(expr_a, expr_b),
         }
 
@@ -1839,7 +1956,8 @@ class MetricService(BaseService):
         dep_a = set(def_a.get("dependencies", []) or [])
         dep_b = set(def_b.get("dependencies", []) or [])
         result["fields"]["dependencies"] = {
-            "a": sorted(dep_a), "b": sorted(dep_b),
+            "a": sorted(dep_a),
+            "b": sorted(dep_b),
             "intersection": sorted(dep_a & dep_b),
             "only_a": sorted(dep_a - dep_b),
             "only_b": sorted(dep_b - dep_a),
@@ -1851,7 +1969,9 @@ class MetricService(BaseService):
     # ---- US10: 批量注册 ----
 
     async def batch_register_metrics(
-        self, request: Any, actor_id: int,
+        self,
+        request: Any,
+        actor_id: int,
     ) -> dict[str, Any]:
         """批量注册指标。
 
@@ -1915,15 +2035,21 @@ class MetricService(BaseService):
                     batch_id=batch_id,
                 )
                 await self.create_metric(create_req, owner_id=actor_id)
-                candidates.append({
-                    "metric_code": code, "status": "DRAFT",
-                    "validation_errors": None,
-                })
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "DRAFT",
+                        "validation_errors": None,
+                    }
+                )
             except (BusinessError, ConflictError) as exc:
-                candidates.append({
-                    "metric_code": code, "status": "VALIDATION_ERROR",
-                    "validation_errors": str(exc),
-                })
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "VALIDATION_ERROR",
+                        "validation_errors": str(exc),
+                    }
+                )
 
         return {"batch_id": batch_id, "candidates": candidates}
 
@@ -1971,9 +2097,7 @@ class MetricService(BaseService):
                 "related_metrics": [],
             }
             if metric.pii_flag:
-                guide["cautions"].append(
-                    "该指标包含 PII 数据，使用时需遵守数据合规要求"
-                )
+                guide["cautions"].append("该指标包含 PII 数据，使用时需遵守数据合规要求")
             if metric.additivity == "SEMI_ADDITIVE":
                 dims = metric.non_additive_dimensions or "未指定"
                 guide["cautions"].append(f"半可加指标，不可加维度: {dims}")
@@ -2000,9 +2124,13 @@ class MetricService(BaseService):
 
         from app.models.user import User
 
-        stmt = select(func.count()).select_from(User).where(
-            User.role == "compliance_officer",
-            User.status == "active",
+        stmt = (
+            select(func.count())
+            .select_from(User)
+            .where(
+                User.role == "compliance_officer",
+                User.status == "active",
+            )
         )
         if domain is not None:
             stmt = stmt.where(User.domain == domain)

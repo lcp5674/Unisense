@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 ARCHIVE_RETENTION_DAYS = 30
 ARCHIVE_BATCH_SIZE = 1000
+# OPS-06 (T075): 审计表容量预警阈值，超过此行数触发告警
+_AUDIT_CAPACITY_WARNING = 5_000_000
 
 
 async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -43,6 +45,9 @@ async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
     from app.db.mysql import async_session_factory
 
     async with async_session_factory() as db:
+        # OPS-06 (T075): 审计表容量预警
+        await _check_audit_capacity(db)
+
         cutoff = datetime.now(UTC) - timedelta(days=ARCHIVE_RETENTION_DAYS)
         archive_date = datetime.now(UTC)
 
@@ -77,8 +82,8 @@ async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
             jsonl_data.write((json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
 
         jsonl_bytes = jsonl_data.getvalue()
-        date_prefix = archive_date.strftime('%Y/%m/%d')
-        date_stamp = archive_date.strftime('%Y%m%d%H%M%S')
+        date_prefix = archive_date.strftime("%Y/%m/%d")
+        date_stamp = archive_date.strftime("%Y%m%d%H%M%S")
         s3_key = f"audit-archive/{date_prefix}/audit_log_{date_stamp}.jsonl"
 
         # 3. 上传至 MinIO
@@ -100,9 +105,7 @@ async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
 
         # 4. 更新 archived 标志
         row_ids = [row.id for row in rows]
-        await db.execute(
-            update(AuditLog).where(AuditLog.id.in_(row_ids)).values(archived=True)
-        )
+        await db.execute(update(AuditLog).where(AuditLog.id.in_(row_ids)).values(archived=True))
 
         # 5. 记录 AuditArchiveLog
         archive_log = AuditArchiveLog(
@@ -118,7 +121,9 @@ async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
 
         logger.info(
             "audit_archive_task: archived %d rows to %s (%d bytes)",
-            len(rows), s3_key, s3_size,
+            len(rows),
+            s3_key,
+            s3_size,
         )
         return {
             "status": "SUCCESS",
@@ -174,3 +179,43 @@ async def _upload_to_minio(key: str, data: bytes) -> bool:
 
 # 注意：audit_archive_task 已在统一 worker（app/services/collector/worker.py）注册，
 # 此处不再定义独立 AuditArchiveSettings，避免 cron 定义分裂（dict 格式不受 arq 支持）。
+
+
+async def _check_audit_capacity(db: Any) -> None:
+    """OPS-06 (T075): 检查审计表行数，超过阈值发布容量预警事件。
+
+    Args:
+        db: 异步数据库会话。
+    """
+    try:
+        from sqlalchemy import func, select
+
+        from app.models.audit import AuditLog
+
+        stmt = select(func.count(AuditLog.id))
+        result = await db.execute(stmt)
+        total = result.scalar() or 0
+
+        if total > _AUDIT_CAPACITY_WARNING:
+            logger.warning(
+                "audit_capacity_warning: audit_log rows=%d exceeds threshold=%d; %s",
+                total,
+                _AUDIT_CAPACITY_WARNING,
+                "consider_reducing_retention_or_scaling_storage",
+            )
+            # 发布容量预警事件（best-effort）
+            try:
+                from app.core.eventbus import get_eventbus
+
+                await get_eventbus().publish(
+                    "audit.capacity_warning",
+                    {
+                        "total_rows": total,
+                        "threshold": _AUDIT_CAPACITY_WARNING,
+                        "recommendation": "reduce_retention_or_scale_storage",
+                    },
+                )
+            except Exception:
+                pass  # best-effort
+    except Exception:
+        logger.warning("audit_capacity_check_failed", exc_info=True)

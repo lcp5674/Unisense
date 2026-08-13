@@ -178,7 +178,7 @@ async def create_client(
         req.client_id = await _generate_client_id(repo)
     client = ApiClient(
         client_id=req.client_id,
-        client_secret_ref=hash_password(req.secret),
+        client_secret_ref=await hash_password(req.secret),
         scope_domain=req.scope_domain,
         metric_whitelist=req.metric_whitelist,
         qps=req.qps,

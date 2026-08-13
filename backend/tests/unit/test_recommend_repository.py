@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.models.lineage import LineageEdge
-from app.models.notify import EventLog
 from app.models.term import Term
 from app.services.recommend.repository import RecommendRepository
 
@@ -28,20 +27,6 @@ def repo(db: MagicMock) -> RecommendRepository:
 
 
 class TestRecommendRepository:
-    async def test_recent_user_events(self, repo: RecommendRepository) -> None:
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [EventLog(id=1)]
-        repo._session.execute = AsyncMock(return_value=mock_result)
-        results = await repo.recent_user_events(user_id=7, limit=10)
-        assert len(results) == 1
-
-    async def test_recent_user_events_empty(self, repo: RecommendRepository) -> None:
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = []
-        repo._session.execute = AsyncMock(return_value=mock_result)
-        results = await repo.recent_user_events(user_id=999, limit=10)
-        assert results == []
-
     async def test_related_edges(self, repo: RecommendRepository) -> None:
         mock_result = MagicMock()
         mock_result.scalars.return_value.all.return_value = [LineageEdge(id=1)]

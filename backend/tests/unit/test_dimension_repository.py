@@ -117,6 +117,20 @@ class TestMemberCRUD:
         assert out == members
         assert "'region'" in _first_stmt(session)
 
+    async def test_get_member_filters_by_dim_and_code(self, repo, session) -> None:
+        member = SimpleNamespace(member_code="east")
+        session.execute = AsyncMock(return_value=_FakeResult(row=member))
+
+        out = await repo.get_member("region", "east")
+        assert out is member
+        stmt = _first_stmt(session)
+        assert "'region'" in stmt
+        assert "'east'" in stmt
+
+    async def test_get_member_returns_none(self, repo, session) -> None:
+        session.execute = AsyncMock(return_value=_FakeResult(row=None))
+        assert await repo.get_member("region", "missing") is None
+
 
 class TestMappingCRUD:
     async def test_save_mapping_adds_and_flushes(self, repo, session) -> None:

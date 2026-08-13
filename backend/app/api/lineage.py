@@ -37,6 +37,18 @@ _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_inject
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
+# Neo4j 驱动持连接池，每请求新建 LineageGraphClient 且从不 dispose 会让 driver
+# 随请求泄漏、连接持续耗尽（P1）。改为模块级单例复用同一 driver：
+# 惰性创建一次、跨请求复用，进程退出时由 lifespan 统一 dispose。
+_graph_client: LineageGraphClient | None = None
+
+
+def _get_graph_client() -> LineageGraphClient:
+    global _graph_client
+    if _graph_client is None:
+        _graph_client = LineageGraphClient()
+    return _graph_client
+
 
 def _svc(db: Any) -> LineageService:
     redis = None
@@ -44,10 +56,18 @@ def _svc(db: Any) -> LineageService:
         redis = get_redis()
     return LineageService(
         db,
-        graph=LineageGraphClient(),
+        graph=_get_graph_client(),
         events=LineageEventPublisher(redis, CircuitBreaker()),
         redis=redis,
     )
+
+
+async def dispose_graph_client() -> None:
+    """关闭共享 Neo4j driver（lifespan shutdown 调用）。"""
+    global _graph_client
+    if _graph_client is not None:
+        await _graph_client.dispose()
+        _graph_client = None
 
 
 @router.post("/parse", dependencies=_WRITE_DEPS)
@@ -102,7 +122,7 @@ async def impact_preview(
         action="LINEAGE_IMPACT_PREVIEW",
         entity_type="lineage",
         entity_id=f"metric:{body.metric_code}",
-        detail=result,
+        detail=result.model_dump(),
         ip=client_ip(request),
         trace_id=trace_id,
     )

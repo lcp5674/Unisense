@@ -48,8 +48,11 @@ class GovernanceEventPublisher:
 
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(timeout=2.0)
-        async with self._http_client as client:
-            await client.post(f"{self._notify_url}/api/v1/notify/todo", json=event)
+        # 复用共享客户端：不能用 `async with` 包裹（其 __aexit__ 会 aclose 客户端，
+        # 导致第二次发布抛 "client has been closed"）；直接 await post 保持连接复用。
+        resp = await self._http_client.post(f"{self._notify_url}/api/v1/notify/events", json=event)
+        if resp.status_code >= 300:
+            raise RuntimeError(f"notify 返回 {resp.status_code}: {resp.text[:200]}")
 
     async def close(self) -> None:
         if self._http_client is not None:

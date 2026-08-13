@@ -59,9 +59,7 @@ class InMemoryCollectionQueue:
         return job_id
 
     async def set(self, job_id: str, status: str, detail: dict[str, Any]) -> None:
-        job = self._jobs.setdefault(
-            job_id, {"job_id": job_id, "source_id": "", "actor_id": 0}
-        )
+        job = self._jobs.setdefault(job_id, {"job_id": job_id, "source_id": "", "actor_id": 0})
         job["status"] = status
         job["detail"] = detail
 
@@ -104,6 +102,28 @@ class RedisJobStore:
         }
 
 
+#: 模块级 arq Redis 连接单例：避免每次 enqueue/get 新建 ArqRedis/AsyncRedis
+#: 且从不 aclose 导致连接池泄漏（P1-9 修复）。
+_arq_redis: Any | None = None
+
+
+def _get_shared_arq_redis(url: str) -> Any:
+    """获取共享的 arq Redis 连接（惰性单例，进程内复用）。
+
+    Args:
+        url: Redis 连接 URL（首次创建时使用）。
+
+    Returns:
+        共享的 ArqRedis 实例。
+    """
+    global _arq_redis
+    if _arq_redis is None:
+        from arq import ArqRedis
+
+        _arq_redis = ArqRedis.from_url(url)
+    return _arq_redis
+
+
 class ArqCollectionQueue:
     """基于 ``arq``（Redis）的生产采集队列（惰性导入 arq）。
 
@@ -117,11 +137,9 @@ class ArqCollectionQueue:
         self._redis = redis
 
     async def enqueue(self, source_id: str, actor_id: int) -> str:
-        from arq import ArqRedis
-
         from app.core.config import settings
 
-        redis = self._redis or ArqRedis.from_url(self._redis_url or settings.redis_url)
+        redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
         # run_collection_task 以 job_id 作第 4 位置参数（幂等键 + 状态回写）；
         # arq 0.28 的 enqueue_job 不支持 _max_tries/_timeout（会被当普通 kwargs 透传给
         # 任务函数导致 TypeError），任务超时由内部 collect_and_register 的 asyncio 保护兜底。
@@ -140,15 +158,13 @@ class ArqCollectionQueue:
         # arq enqueue_job 返回 Job 对象，其 job_id 即传入的 _job_id；显式标注为 str
         # 以满足 mypy --strict 的 no-any-return（redis 为 Any 类型，job.job_id 被推断为 Any）。
         arq_job_id: str = job.job_id
-        # FR-019: 不再调用 redis.close()，复用连接池
+        # 复用模块级共享连接池（不 aclose）
         return arq_job_id
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
-        from redis.asyncio import Redis as AsyncRedis
-
         from app.core.config import settings
 
-        redis = self._redis or AsyncRedis.from_url(self._redis_url or settings.redis_url)
+        redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
         return await RedisJobStore(redis).get(job_id)
 
 

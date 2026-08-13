@@ -130,10 +130,10 @@ async def test_ready_registers_degradation_in_registry(
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_redis] = fake_redis
-    monkeypatch.setattr(
-        "app.api.health.optional_dependency_status",
-        lambda: {"neo4j": False, "olap": True},
-    )
+    async def _fake_status():
+        return {"neo4j": False, "olap": True}
+
+    monkeypatch.setattr("app.api.health.optional_dependency_status", _fake_status)
     try:
         resp = await client.get("/ready")
         assert resp.status_code == 200

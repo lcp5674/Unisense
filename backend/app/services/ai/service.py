@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import re
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,21 +54,61 @@ _BANNED_PATTERNS = (
 _CACHE_TTL = 60
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """把 SQL 注释替换为单个空格（保留块/行结构），防注释拼接绕过黑名单。
+
+    ``UNION/**/SELECT`` 若直接删除注释会粘连成 ``UNIONSELECT``，子串匹配
+    依旧落空；替换为空格后归一为 ``union select`` 即可命中（D2）。
+    行注释（``--`` / ``#``）同样替换为空格。
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "-" and i + 1 < n and sql[i + 1] == "-":
+            out.append(" ")
+            while i < n and sql[i] != "\n":
+                i += 1
+            continue
+        if c == "#":
+            out.append(" ")
+            while i < n and sql[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and sql[i + 1] == "*":
+            out.append(" ")
+            i += 2
+            while i + 1 < n and not (sql[i] == "*" and sql[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 class AiService(BaseService):
     """AI 问数服务：NL2SQL + 安全约束 + 执行委托。"""
+
+    #: 进程内共享 TTL 缓存：key -> (monotonic 时间戳, 结果 dict)。
+    #: **类属性**跨实例共享——此前为实例属性，API 每请求新建 AiService 导致
+    #: 缓存永不命中，"避免重复打 LLM 网关"的优化形同虚设（审查发现）。
+    _cache: ClassVar[dict[str, tuple[float, dict[str, Any]]]] = {}
 
     def __init__(self, session: AsyncSession, llm: LlmClient | None = None) -> None:
         super().__init__(session)
         self._session = session
         self._repo = AiRepository(session)
         self._llm = llm or build_llm_client()
-        #: 进程内 TTL 缓存：key -> (monotonic 时间戳, 结果 dict)。单实例部署下命中一致。
-        self._cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def _is_unsafe(self, text: str) -> bool:
-        """检查文本是否包含危险模式。"""
-        lowered = text.lower()
-        return any(pattern in lowered for pattern in _BANNED_PATTERNS)
+        """检查文本是否包含危险模式。
+
+        先剥离 SQL 注释并把连续空白归一为单空格，再做子串匹配——纯子串匹配
+        可被 ``UNION/**/SELECT``、``union  select``、换行等绕过（D2）。
+        """
+        normalized = re.sub(r"\s+", " ", _strip_sql_comments(text)).lower()
+        return any(pattern in normalized for pattern in _BANNED_PATTERNS)
 
     @staticmethod
     def _cache_key(nl_query: str, metric_scope: list[str] | None) -> str:
@@ -121,12 +162,22 @@ class AiService(BaseService):
             # 降级为关键词匹配（参数化）
             sql, params = await self._generate_sql_with_keywords(nl_query, vocab)
 
-        # 安全校验
+        # 安全校验：输入问句危险在入口抛异常；生成的 SQL 危险则结构化返回
+        # safe=False（调用方据此展示"无法生成安全 SQL"），两者语义一致：
+        # 危险 SQL 绝不进入执行路径（D2）。
         if self._is_unsafe(sql):
-            raise UnisenseError(
-                "生成的 SQL 包含危险语句，已拒绝",
-                error_code="UNSAFE_QUERY",
-            )
+            anchors = [v for v in vocab if v.lower() in nl_query.lower()]
+            result = {
+                "anchored": anchors,
+                "sql": "",
+                "params": {},
+                "safe": False,
+                "notes": ["生成的 SQL 包含危险语句，已拒绝"],
+                "method": "llm",
+            }
+            # 写缓存存深拷贝：返回对象与缓存隔离，调用方修改不污染缓存
+            self._cache[cache_key] = (time.monotonic(), copy.deepcopy(result))
+            return result
 
         # 提取锚定词
         anchors = [v for v in vocab if v.lower() in nl_query.lower()]
@@ -157,9 +208,7 @@ class AiService(BaseService):
         self._cache[cache_key] = (time.monotonic(), copy.deepcopy(result))
         return result
 
-    async def _generate_sql_with_llm(
-        self, nl_query: str, vocab: set[str]
-    ) -> str | None:
+    async def _generate_sql_with_llm(self, nl_query: str, vocab: set[str]) -> str | None:
         """使用 LLM 生成 SQL。"""
         if not self._llm.enabled:
             return None
@@ -179,7 +228,7 @@ class AiService(BaseService):
 要求：
 1. 仅生成 SELECT 语句，禁止 DML/DDL
 2. 禁止 SELECT *，必须指定列名
-3. 从以下指标中选择最相关的：{', '.join(vocab_sample)}
+3. 从以下指标中选择最相关的：{", ".join(vocab_sample)}
 4. 生成标准 SQL，使用统一视图 unified_metric
 5. 仅返回 SQL，不要解释
 
@@ -214,24 +263,27 @@ WHERE metric_code = 'sales_gmv_daily' AND dt = '2024-01-01'
     ) -> tuple[str, dict[str, Any]]:
         """使用关键词匹配生成参数化 SQL（降级方案）。
 
+        锚定词是 **metric_code 的过滤值**，投影到统一视图的标准列
+        （metric_code/value/dt），经 ``IN (:metric_code_0, ...)`` 参数化绑定。
+        此前把锚定词当列名拼进 SELECT 且用 SQLAlchemy 占位符直发 Doris——
+        Doris HTTP API 不识别 ``:name``，生成的 SQL 必然执行失败（假 SQL）。
+
         Returns:
             (sql, params) 元组：参数化 SQL 和参数字典。
         """
-        anchors = [v for v in vocab if v.lower() in nl_query.lower()]
+        anchors = [v for v in vocab if v.lower() in nl_query.lower()][:5]
         if not anchors:
             return "", {}
 
         # 参数化 SQL 模板：使用 :param 占位符而非 f-string 拼接
-        columns = ", ".join(anchors[:5])  # 限制列数
-        where_conditions = " AND ".join(
-            [f"metric_code = :metric_code_{i}" for i in range(min(len(anchors), 3))]
+        placeholders = ", ".join(f":metric_code_{i}" for i in range(len(anchors)))
+        sql = (
+            "SELECT metric_code, value, dt FROM unified_metric "
+            f"WHERE metric_code IN ({placeholders})"
         )
-        sql = f"SELECT {columns} FROM unified_metric WHERE {where_conditions}"
 
         # 构建参数字典
-        params: dict[str, Any] = {}
-        for i, anchor in enumerate(anchors[:3]):
-            params[f"metric_code_{i}"] = anchor
+        params: dict[str, Any] = {f"metric_code_{i}": anchor for i, anchor in enumerate(anchors)}
 
         logger.info("关键词匹配 SQL 生成（参数化），锚定词=%d", len(anchors))
         return sql, params
@@ -257,9 +309,12 @@ WHERE metric_code = 'sales_gmv_daily' AND dt = '2024-01-01'
         if execute and result.get("sql"):
             # 委托 consume 服务执行 SQL
             try:
-                from app.services.consume.olap_executor import OLAPExecutor
+                from app.services.consume.service import _get_olap_executor
 
-                executor = OLAPExecutor()
+                # 复用 consume 进程内共享 executor（单例连接池）：
+                # 每请求新建 OLAPExecutor 会各分配 20 连接 httpx 池且从不关闭，
+                # 高频 NL2SQL+execute 下连接/FD 持续泄漏（D1）。
+                executor = _get_olap_executor()
                 sql = result["sql"]
                 params = result.get("params", {})
                 olap_result = await executor.execute(sql, params)

@@ -21,7 +21,9 @@ class SystemDictService:
         self._repo = SystemDictRepository(db)
 
     async def list_by_type(
-        self, dict_type: str, status: str | None = "active",
+        self,
+        dict_type: str,
+        status: str | None = "active",
     ) -> list[SystemDict]:
         """获取某类型字典项列表（默认仅 active）。"""
         return await self._repo.list_by_type(dict_type, status)
@@ -42,13 +44,29 @@ class SystemDictService:
         return item
 
     async def create_item(self, dict_type: str, data: DictItemCreate) -> SystemDict:
-        """新增字典项。"""
-        # 编码唯一性校验
-        if await self._repo.code_exists_in_type(dict_type, data.code):
+        """新增字典项。
+
+        编码唯一性以「含软删除」全量判定：软删除行仍占用唯一索引
+        （uk_dict_type_code），若命中软删除行则恢复并更新字段，避免
+        IntegrityError → 500；命中 active 行则抛 ConflictError。
+        """
+        existing = await self._repo.get_item_including_deleted(dict_type, data.code)
+        if existing is not None and existing.deleted_at is None:
             raise ConflictError(
                 f"字典项已存在: {dict_type}/{data.code}",
                 error_code="DUPLICATE_DICT_CODE",
             )
+        if existing is not None:
+            # 软删除行 → 恢复重建（去删除标记 + 回 active + 覆盖字段）
+            existing.deleted_at = None
+            existing.status = "active"
+            existing.label = data.label
+            existing.sort_order = data.sort_order
+            existing.description = data.description
+            item = await self._repo.update(existing)
+            logger.info("dict_item_restored", dict_type=dict_type, code=data.code)
+            return item
+
         item = SystemDict(
             dict_type=dict_type,
             code=data.code,
@@ -62,7 +80,10 @@ class SystemDictService:
         return item
 
     async def update_item(
-        self, dict_type: str, code: str, data: DictItemUpdate,
+        self,
+        dict_type: str,
+        code: str,
+        data: DictItemUpdate,
     ) -> SystemDict:
         """更新字典项（label/sort_order/description）。"""
         item = await self.get_item(dict_type, code)
@@ -135,9 +156,13 @@ class SystemDictService:
         if column is None:
             return 0
 
-        stmt = select(func.count()).select_from(Metric).where(
-            column == code,
-            Metric.deleted_at.is_(None),
+        stmt = (
+            select(func.count())
+            .select_from(Metric)
+            .where(
+                column == code,
+                Metric.deleted_at.is_(None),
+            )
         )
         result = await self._db.execute(stmt)
         return result.scalar() or 0

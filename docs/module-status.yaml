@@ -585,3 +585,25 @@ p2_p3_enhancements:
       - id: AF-003
         desc: "前端注册页重构(级联域选择+字典下拉+半自动编码)"
         files: ["frontend/src/pages/MetricCreate.tsx"]
+
+  audit_remediation:
+    fr: [FR-SEC-01..FR-SEC-11, FR-OPS-01..FR-OPS-09, FR-TECH-01..FR-TECH-08]
+    td_section: "§全章节"
+    status: implemented
+    gateways_passed: [lint, unit, security_reverse]
+    perf_contract: "综合得分≥75/100（对标GB/T 36073 L3）"
+    evidence_path: "spec/full-audit-report-2026-08-13.md, spec/full-audit-remediation/"
+    implemented_at: "2026-08-13"
+    tasks:
+      - id: REM-SEC
+        desc: "安全修复: PBKDF2密钥派生(600k迭代)/JWT黑名单/trusted_proxies/guard嵌套拦截/MySQL密码mask/Redis TLS/body限制413/PII脱敏/beeline fd+chmod/JWT 15min/被遗忘权token_hex"
+        files: ["backend/app/core/security.py", "backend/app/core/guard.py", "backend/app/core/audit.py", "backend/app/core/config.py", "backend/app/core/middleware.py", "backend/app/core/logging.py", "backend/app/db/mysql.py", "backend/app/db/redis.py"]
+      - id: REM-OPS
+        desc: "运维修复: 优雅关闭/health 503降级/HotSettings配置热更新/rate_limiter降级注册/业务指标/审计容量预警/特性开关"
+        files: ["backend/app/main.py", "backend/app/api/health.py", "backend/app/core/config.py", "backend/app/core/metrics.py", "backend/app/tasks/audit_archive.py", "backend/app/core/feature_flags.py"]
+      - id: REM-TECH
+        desc: "技术修复: async探活/metrics path归一化/eventbus指数退避/cache LRU淘汰/pool_recycle/UoW基类/编码锁定/conflict超时升级/glossary阈值可配/DLQ/LLM重试熔断"
+        files: ["backend/app/core/eventbus.py", "backend/app/core/resilience.py", "backend/app/services/semantic/cache.py", "backend/app/services/semantic/service.py", "backend/app/tasks/conflict_tasks.py", "backend/app/services/glossary/service.py"]
+      - id: REM-FRONT
+        desc: "前端修复: 降级提示/207解析/三层限制/apiErrorHandlers"
+        files: ["frontend/src/pages/QueryWorkspace.tsx", "frontend/src/pages/SubjectDomain.tsx", "frontend/src/utils/apiErrorHandlers.ts"]

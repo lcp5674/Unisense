@@ -211,10 +211,11 @@ async def test_impact_preview_classifies_impact_and_risk() -> None:
     svc._graph = None
     svc._redis = None
     result = await svc.impact_preview("gm", "UPDATE")
-    assert result["affected_metrics"] == ["metric:m1", "metric:m2"]
-    assert result["affected_reports"] == ["table:dw.rpt1"]
-    assert result["affected_consumers"] == ["report:r1"]
-    assert result["risk_level"] == "medium"
+    assert [m.metric_code for m in result.affected_metrics] == ["m1", "m2"]
+    assert all(m.change_type == "UPDATE" for m in result.affected_metrics)
+    assert result.affected_tables == ["table:dw.rpt1"]
+    assert result.affected_consumers == ["report:r1"]
+    assert result.risk_level == "medium"
 
 
 async def test_impact_preview_low_risk_when_no_impact() -> None:
@@ -223,10 +224,10 @@ async def test_impact_preview_low_risk_when_no_impact() -> None:
     svc._graph = None
     svc._redis = None
     result = await svc.impact_preview("ghost", "DROP")
-    assert result["affected_metrics"] == []
-    assert result["affected_reports"] == []
-    assert result["affected_consumers"] == []
-    assert result["risk_level"] == "low"
+    assert result.affected_metrics == []
+    assert result.affected_tables == []
+    assert result.affected_consumers == []
+    assert result.risk_level == "low"
 
 
 async def test_impact_preview_breaking_change_escalates_risk() -> None:
@@ -237,7 +238,7 @@ async def test_impact_preview_breaking_change_escalates_risk() -> None:
     svc._graph = None
     svc._redis = None
     result = await svc.impact_preview("gm", "BREAKING")
-    assert result["risk_level"] == "high"
+    assert result.risk_level == "high"
 
 
 async def test_propagate_pii_marks_derived_descendants() -> None:

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import structlog
@@ -148,19 +148,13 @@ def _build_repair_suggestion(
     供 Owner 线下修复闭环；确认动作记录在 confirmed_by/confirmed_at。
     """
     rt = (
-        rule.rule_type.value
-        if isinstance(rule.rule_type, QualityRuleType)
-        else str(rule.rule_type)
+        rule.rule_type.value if isinstance(rule.rule_type, QualityRuleType) else str(rule.rule_type)
     )
     mode = (
-        rule.rule_mode.value
-        if isinstance(rule.rule_mode, QualityRuleMode)
-        else str(rule.rule_mode)
+        rule.rule_mode.value if isinstance(rule.rule_mode, QualityRuleMode) else str(rule.rule_mode)
     )
     severity = (
-        rule.severity.value
-        if isinstance(rule.severity, QualitySeverity)
-        else str(rule.severity)
+        rule.severity.value if isinstance(rule.severity, QualitySeverity) else str(rule.severity)
     )
     action, sql = _REPAIR_ACTION_TEMPLATES.get(
         rt, ("排查指标数据质量异常根因", "SELECT * FROM quality_event WHERE metric_id = :mid;")
@@ -188,12 +182,39 @@ class QualityService(BaseService):
         self._publisher = publisher or QualityEventPublisher()
 
     # ---- 规则 CRUD ----
+    def _validate_threshold(self, rule_mode: QualityRuleMode, threshold: dict[str, Any]) -> None:
+        """校验阈值配置，杜绝「死规则」占位符。
+
+        STATIC 模式必须有可用判定条件：``op``+数值 ``value``，或 ``min`` / ``max`` 数值边界；
+        否则 ``_evaluate`` 恒返回未命中，规则永远不触发（静默占位符，属生产缺陷）。
+        同时校验 value/min/max 可被 Decimal 解析——畸形值在 detect 时会静默失效（见 _evaluate）。
+        """
+        if rule_mode == QualityRuleMode.STATIC:
+            op = threshold.get("op")
+            has_op = op in _OPS and "value" in threshold
+            has_bounds = "min" in threshold or "max" in threshold
+            if not has_op and not has_bounds:
+                raise ValidationError(
+                    "STATIC 规则阈值须含 op+value 或 min/max 边界，否则规则永不触发（占位符）",
+                    error_code="QUALITY_THRESHOLD_INVALID",
+                )
+            for key in ("value", "min", "max"):
+                if key in threshold:
+                    try:
+                        Decimal(str(threshold[key]))
+                    except (TypeError, ValueError, InvalidOperation) as exc:
+                        raise ValidationError(
+                            f"阈值 {key}={threshold[key]!r} 非数值，无法参与越界判定",
+                            error_code="QUALITY_THRESHOLD_INVALID",
+                        ) from exc
+
     async def create_rule(self, payload: QualityRuleCreate, user_id: int) -> QualityRuleResponse:
         if payload.threshold is None or not isinstance(payload.threshold, dict):
             raise ValidationError(
                 "threshold 必须为非空字典（静态阈值 / 动态基线 / 同环比 / 跨源参数）",
                 error_code="QUALITY_THRESHOLD_INVALID",
             )
+        self._validate_threshold(payload.rule_mode, payload.threshold)
         rule = QualityRule(
             metric_id=payload.metric_id,
             rule_type=payload.rule_type,
@@ -235,6 +256,11 @@ class QualityService(BaseService):
                 "threshold 必须为非空字典", error_code="QUALITY_THRESHOLD_INVALID"
             )
         rule = await self._repo.get_rule(rule_id)
+        if rule is None:
+            raise NotFoundError(f"quality rule not found: {rule_id}")
+        if payload.threshold is not None:
+            effective_mode = payload.rule_mode or rule.rule_mode
+            self._validate_threshold(effective_mode, payload.threshold)
         if rule is None:
             raise NotFoundError(f"quality rule not found: {rule_id}")
         rule = await self._repo.update_rule(
@@ -295,6 +321,15 @@ class QualityService(BaseService):
                 )
                 continue
             if not abnormal:
+                continue
+            # 幂等去重：同 (metric_id, rule_type) 已有 OPEN 事件时不再重复落事件
+            # + 告警（观测持续异常且无新观测时，避免每轮 cron 刷屏；审查发现）。
+            if await self._repo.find_open_event(metric_id, rule.rule_type) is not None:
+                logger.info(
+                    "quality.detect skip open event exists",
+                    metric_id=metric_id,
+                    rule_type=rule.rule_type.value,
+                )
                 continue
             event = QualityEvent(
                 metric_id=metric_id,
@@ -420,7 +455,13 @@ class QualityService(BaseService):
                 # op 描述「正常值应满足的条件」，越界即异常
                 triggered = not _OPS[op](obs, Decimal(str(threshold["value"])))
                 return triggered, (Decimal(str(threshold["value"])) if triggered else None)
-            except Exception:  # noqa: BLE001 - 阈值格式异常按未命中处理
+            except Exception as exc:  # noqa: BLE001 - 阈值格式异常按未命中处理，但须留痕
+                logger.warning(
+                    "quality._evaluate 阈值格式异常，按未命中处理",
+                    op=op,
+                    value=threshold.get("value"),
+                    error=str(exc),
+                )
                 return False, None
         lower = Decimal(str(threshold["min"])) if "min" in threshold else None
         upper = Decimal(str(threshold["max"])) if "max" in threshold else None
@@ -507,9 +548,7 @@ class QualityService(BaseService):
         return QualityEventResponse.from_model(event)
 
     # ---- 外部基准对账（TD §4.15.7）----
-    async def import_benchmark(
-        self, payload: BenchmarkImport, user_id: int
-    ) -> BenchmarkResponse:
+    async def import_benchmark(self, payload: BenchmarkImport, user_id: int) -> BenchmarkResponse:
         """导入外部权威基准值，幂等（同 key 重复导入视为更新）。"""
         existing = await self._repo.find_benchmark(
             payload.source_id, payload.metric_code, payload.bench_date, payload.dims
@@ -580,9 +619,7 @@ class QualityService(BaseService):
             raise NotFoundError(f"benchmark not found: {payload.benchmark_id}")
         tolerance = bench.tolerance_pct if bench.tolerance_pct is not None else _DEFAULT_TOLERANCE
         if bench.bench_value == 0:
-            raise ValidationError(
-                "bench_value 为 0，无法计算差异率", error_code="BENCH_VALUE_ZERO"
-            )
+            raise ValidationError("bench_value 为 0，无法计算差异率", error_code="BENCH_VALUE_ZERO")
         diff_pct = (payload.metric_value - bench.bench_value) / bench.bench_value * 100
         abs_diff = abs(diff_pct)
         if abs_diff <= tolerance:

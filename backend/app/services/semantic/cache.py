@@ -37,6 +37,14 @@ _LOCKS: dict[str, asyncio.Lock] = {}
 # 保护 _LOCKS 的并发 get-or-create（asyncio 环境，等待者需异步原语）。
 _LOCKS_GUARD = asyncio.Lock()
 
+# TECH-04: 缓存键数上限，防止 Redis 无界增长；set 时超限则触发 LRU 淘汰。
+_CACHE_KEY_LIMIT = 10_000
+# LRU 淘汰批次：每次淘汰 10% 避免全量 SCAN 阻塞。
+_CACHE_EVICT_BATCH = max(1, _CACHE_KEY_LIMIT // 10)
+
+# 进程内写锁：保护 _prune_if_needed 的 SCAN+DEL 操作不并发。
+_PRUNE_LOCK = asyncio.Lock()
+
 
 async def _lock_for(key: str) -> asyncio.Lock:
     """获取 key 对应的进程内互斥锁（不存在则创建）。
@@ -152,12 +160,16 @@ class MetricCache:
     async def set(self, metric: Metric) -> None:
         """写入缓存（写穿）。降级或不可用时静默跳过，不阻断主流程。
 
+        写入前检查缓存键数上限，超限时触发 LRU 淘汰（TECH-04: 防止无界增长）。
+
         Args:
             metric: 指标 ORM 对象。
         """
         if not self._enabled or not self._breaker.allow():
             return
         try:
+            # TECH-04: 写入前检查键数，超限淘汰
+            await self._prune_if_needed()
             payload = json.dumps(
                 MetricResponse.model_validate(metric).model_dump(mode="json"),
                 ensure_ascii=False,
@@ -274,6 +286,56 @@ class MetricCache:
             self._breaker.record_failure()
             logger.warning("metric_cache_warmup_pipeline_failed", count=len(metrics))
         return count
+
+    async def _prune_if_needed(self) -> None:
+        """检查缓存键数上限，超限时 LRU 淘汰最旧的键（TECH-04）。
+
+        使用 SCAN + TTL 排序：TTL 最短（即最旧、即将过期）的键优先删除。
+        best-effort：SCAN/DEL 失败不影响写路径。
+        """
+        if not self._enabled:
+            return
+        try:
+            count = await self._redis.dbsize()  # type: ignore[union-attr]
+            if count < _CACHE_KEY_LIMIT:
+                return
+            async with _PRUNE_LOCK:
+                # double-check after acquiring lock
+                count = await self._redis.dbsize()  # type: ignore[union-attr]
+                if count < _CACHE_KEY_LIMIT:
+                    return
+                # SCAN 所有 metric:def:* 键，按 TTL 升序（最旧优先）淘汰
+                cursor = 0
+                keys_with_ttl: list[tuple[bytes, int]] = []
+                while True:
+                    cursor, keys = await self._redis.scan(  # type: ignore[union-attr]
+                        cursor=cursor, match=f"{_PREFIX}*", count=200
+                    )
+                    if keys:
+                        # pipeline 批量获取 TTL
+                        async with self._redis.pipeline() as pipe:  # type: ignore[union-attr]
+                            for k in keys:
+                                pipe.ttl(k)
+                            ttls = await pipe.execute()
+                        for k, ttl in zip(keys, ttls, strict=False):
+                            keys_with_ttl.append((k, ttl))
+                    if cursor == 0:
+                        break
+                if not keys_with_ttl:
+                    return
+                # TTL 升序：最旧的（TTL 最小）优先淘汰
+                keys_with_ttl.sort(key=lambda x: x[1])
+                evict_count = min(len(keys_with_ttl), _CACHE_EVICT_BATCH)
+                evict_keys = [k for k, _ in keys_with_ttl[:evict_count]]
+                if evict_keys:
+                    await self._redis.delete(*evict_keys)  # type: ignore[union-attr]
+                    logger.info(
+                        "metric_cache_lru_evicted",
+                        evicted=evict_count,
+                        total_before=count,
+                    )
+        except Exception:
+            logger.warning("metric_cache_prune_failed", exc_info=True)
 
     @staticmethod
     def _build_key(metric_code: str, version: int | None) -> str:

@@ -12,6 +12,7 @@ P3: datetime.utcnow() → datetime.now(UTC)。
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
 from app.core.config import settings
+from app.core.exceptions import AuthError
 from app.core.logging import get_logger
 from app.models.notify import (
     EventLevel,
@@ -149,9 +151,7 @@ class NotifyService(BaseService):
             return {"event_id": 0, "notifications": 0, "delivered": 0}
         payload = event.get("payload")
         if not isinstance(payload, dict):
-            payload = {
-                k: v for k, v in event.items() if k not in ("event_type", "actor_id")
-            }
+            payload = {k: v for k, v in event.items() if k not in ("event_type", "actor_id")}
         level = str(payload.get("level") or "INFO").upper()
         if level not in _ALLOWED_LEVELS:
             level = "INFO"
@@ -205,12 +205,13 @@ class NotifyService(BaseService):
             return False
 
     async def _dispatch_webhook(self, notif: Notification) -> bool:
-        """Webhook 投递：POST 到配置的 webhook URL。"""
+        """Webhook 投递：POST 到配置的 webhook URL（传输层异常退避重试）。"""
         webhook_url = settings.notify_webhook_url
         if not webhook_url:
             logger.warning("未配置 notify_webhook_url，跳过 webhook 投递")
             return False
-        try:
+
+        async def _send() -> bool:
             resp = await self._http_client.post(
                 webhook_url,
                 json={
@@ -223,10 +224,14 @@ class NotifyService(BaseService):
                 },
                 headers={"Content-Type": "application/json"},
             )
+            # 4xx/5xx 为业务终态，不重试（由 _deliver_with_retry 直接返回 False）
             return resp.status_code < 300
-        except Exception as exc:
-            logger.error("Webhook 投递失败: %s", exc)
-            return False
+
+        return await _deliver_with_retry(
+            _send,
+            operation="webhook",
+            retry_on=(httpx.HTTPError,),
+        )
 
     async def _dispatch_dingtalk(self, notif: Notification) -> bool:
         """钉钉 Webhook 投递：POST 到配置的钉钉机器人 Webhook URL。
@@ -300,16 +305,13 @@ class NotifyService(BaseService):
                 },
             }
 
-        try:
+        async def _send() -> bool:
             resp = await self._http_client.post(
                 webhook_url,
                 json=message_body,
                 headers={"Content-Type": "application/json"},
             )
-            if resp.status_code < 300:
-                logger.info("dingtalk_dispatch_ok", notif_id=notif.id, status=resp.status_code)
-                return True
-            else:
+            if resp.status_code >= 300:
                 logger.error(
                     "dingtalk_dispatch_failed",
                     notif_id=notif.id,
@@ -317,9 +319,14 @@ class NotifyService(BaseService):
                     body=resp.text[:500],
                 )
                 return False
-        except Exception as exc:
-            logger.error("钉钉 Webhook 投递失败: %s", exc)
-            return False
+            logger.info("dingtalk_dispatch_ok", notif_id=notif.id, status=resp.status_code)
+            return True
+
+        return await _deliver_with_retry(
+            _send,
+            operation="dingtalk",
+            retry_on=(httpx.HTTPError,),
+        )
 
     async def _dispatch_email(self, notif: Notification) -> bool:
         """邮件投递：通过 aiosmtplib 发送 SMTP 邮件。
@@ -345,20 +352,29 @@ class NotifyService(BaseService):
             msg = MIMEMultipart("alternative")
             msg["Subject"] = f"[Unisense] {notif.title or '通知'}"
             msg["From"] = smtp_user or "unisense-noreply@unisense.local"
-            # 真实收件人：按订阅人 ID 解析其注册邮箱；解析失败/缺邮箱时降级到发件人地址
+            # 真实收件人：按订阅人 ID 解析其注册邮箱；解析失败/缺邮箱时不投递
+            # （D3：不得回退到发件人/占位地址并标记 SENT——真实收件人永远收不到，
+            # 且通知被错误标记为已送达）。
             recipient = None
             if notif.subscriber_id:
                 try:
                     resolved = await self._repo.get_user_email(notif.subscriber_id)
                     if isinstance(resolved, str) and resolved:
                         recipient = resolved
-                except Exception as exc:  # noqa: BLE001 - 收件人解析失败不阻断投递降级
+                except Exception as exc:  # noqa: BLE001 - 收件人解析失败按缺收件人处理
                     logger.warning(
                         "notify_resolve_recipient_failed",
                         notif_id=notif.id,
                         error=str(exc),
                     )
-            msg["To"] = recipient or smtp_user or "admin@unisense.local"
+            if not recipient:
+                logger.warning(
+                    "notify_email_no_recipient",
+                    notif_id=notif.id,
+                    subscriber_id=notif.subscriber_id,
+                )
+                return False
+            msg["To"] = recipient
 
             event_type = notif.template_code or ""
             # HTML 邮件模板
@@ -387,17 +403,25 @@ class NotifyService(BaseService):
             msg.attach(MIMEText(text_body, "plain", "utf-8"))
             msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-            # SMTP 发送
-            await aiosmtplib.send(
-                msg,
-                hostname=smtp_host,
-                port=smtp_port,
-                username=smtp_user or None,
-                password=smtp_password or None,
-                use_tls=smtp_port == 587,
+            async def _send() -> bool:
+                # SMTP 单次投递超时（防无超时协程永久挂起阻塞 fan-out）
+                await aiosmtplib.send(
+                    msg,
+                    hostname=smtp_host,
+                    port=smtp_port,
+                    username=smtp_user or None,
+                    password=smtp_password or None,
+                    use_tls=smtp_port == 587,
+                    timeout=_SMTP_TIMEOUT,
+                )
+                logger.info("email_dispatch_ok", notif_id=notif.id)
+                return True
+
+            return await _deliver_with_retry(
+                _send,
+                operation="email",
+                retry_on=(aiosmtplib.SMTPException,),
             )
-            logger.info("email_dispatch_ok", notif_id=notif.id)
-            return True
         except ImportError:
             logger.warning("aiosmtplib 未安装，跳过邮件投递")
             return False
@@ -418,14 +442,25 @@ class NotifyService(BaseService):
             raise NotFoundError(f"通知不存在: {notif_id}")
         return notif
 
-    async def mark_sent(self, notif_id: int) -> Notification:
-        return await self._transition(notif_id, NotifyStatus.SENT.value)
+    async def mark_sent(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
+        return await self._transition(notif_id, NotifyStatus.SENT.value, actor_id, role)
 
-    async def mark_failed(self, notif_id: int) -> Notification:
-        return await self._transition(notif_id, NotifyStatus.FAILED.value)
+    async def mark_failed(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
+        return await self._transition(notif_id, NotifyStatus.FAILED.value, actor_id, role)
 
-    async def _transition(self, notif_id: int, status: str) -> Notification:
+    async def _transition(
+        self, notif_id: int, status: str, actor_id: int, role: str = ""
+    ) -> Notification:
         notif = await self.get_notification(notif_id)
+        # IDOR 防护：仅通知归属者本人或平台管理员可修改通知状态；
+        # 其余角色（含 domain_admin/其它 metric_owner）一律拒绝。
+        role_val = role.value if isinstance(role, enum.Enum) else str(role or "")
+        if not (role_val == "platform_admin" or notif.subscriber_id == actor_id):
+            raise AuthError(
+                "无权修改他人通知状态",
+                error_code="FORBIDDEN",
+                ctx={"notif_id": notif_id, "actor_id": actor_id, "owner_id": notif.subscriber_id},
+            )
         notif.status = status
         if status == NotifyStatus.SENT.value:
             notif.sent_at = datetime.now(UTC)

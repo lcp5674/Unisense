@@ -24,13 +24,18 @@ def create_redis_pool() -> aioredis.Redis:
     Returns:
         Redis 异步客户端。
     """
+    url = settings.redis_url
+    kwargs: dict[str, object] = {
+        "decode_responses": True,
+        "max_connections": 20,
+    }
+    if url.startswith("rediss://"):
+        import ssl
+
+        kwargs["ssl"] = ssl.create_default_context()
     return cast(
         aioredis.Redis,
-        aioredis.from_url(  # type: ignore[no-untyped-call]
-            settings.redis_url,
-            decode_responses=True,
-            max_connections=20,
-        ),
+        aioredis.from_url(url, **kwargs),  # type: ignore[no-untyped-call]
     )
 
 

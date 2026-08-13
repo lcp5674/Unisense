@@ -73,6 +73,8 @@ def _obs(value: Decimal) -> QualityObservation:
 def _svc() -> QualityService:
     svc = QualityService(db=MagicMock())
     svc._repo = MagicMock()
+    # 幂等去重：默认无既有 OPEN 事件，放行新事件落库
+    svc._repo.find_open_event = AsyncMock(return_value=None)
     svc._publisher = MagicMock()
     svc._publisher.publish = AsyncMock()
     return svc
@@ -272,9 +274,7 @@ async def test_record_observation_persists() -> None:
 async def test_detect_generates_repair_suggestion() -> None:
     """异常触发时即生成修复建议（责任方/上游任务/建议SQL/观测基线）。"""
     svc = _svc()
-    rule = _make_rule(
-        QualityRuleMode.STATIC, {"max": 50}, rule_type=QualityRuleType.COMPLETENESS
-    )
+    rule = _make_rule(QualityRuleMode.STATIC, {"max": 50}, rule_type=QualityRuleType.COMPLETENESS)
     svc._repo.list_enabled_rules_for = AsyncMock(return_value=[rule])
     captured: dict[int, QualityEvent] = {}
 

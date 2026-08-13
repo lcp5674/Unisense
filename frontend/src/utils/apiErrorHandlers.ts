@@ -150,3 +150,12 @@ export function getUserFriendlyMessage(error: UnisenseApiError): string {
 
   return messageMap[error.code] || error.message || '操作失败，请稍后重试';
 }
+
+export function parseMultiStatusResponse(response: any): Array<{item: string; status: 'success' | 'failed'; message?: string}> {
+  if (!response?.detail?.items) return [];
+  return response.detail.items.map((item: any) => ({
+    item: item.id || item.name || 'unknown',
+    status: item.status === 'success' ? 'success' : 'failed',
+    message: item.message || item.error,
+  }));
+}

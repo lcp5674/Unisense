@@ -111,9 +111,7 @@ class PendingVersionManager:
             deadline=deadline.isoformat(),
         )
 
-    async def confirm(
-        self, metric_id: int, version: int, consumer_id: int
-    ) -> PendingAction:
+    async def confirm(self, metric_id: int, version: int, consumer_id: int) -> PendingAction:
         """消费方确认版本。
 
         更新确认状态为 CONFIRMED；检查是否全部消费方已确认，
@@ -137,9 +135,7 @@ class PendingVersionManager:
                 error_code="NO_PENDING_CONFIRMATION",
             )
 
-        mine = next(
-            (c for c in confirmations if c.consumer_id == consumer_id), None
-        )
+        mine = next((c for c in confirmations if c.consumer_id == consumer_id), None)
         if mine is None:
             raise BusinessError(
                 "当前用户无该版本的待确认记录",
@@ -150,10 +146,11 @@ class PendingVersionManager:
         if mine.status != "CONFIRMED":
             await self._repo.update_confirmation_status(mine.id, "CONFIRMED")
 
-        # 检查是否全部确认（刚确认的 + 之前已确认的）
+        # 检查是否全部确认（刚确认的 + 之前已确认/超时接受的）
+        # TIMEOUT_ACCEPTED 视为已接受：超时未确认即默认同意，避免同组多条
+        # 超时后永不 SWITCH（旧实现仅认 CONFIRMED，多消费方场景确认期空转）
         all_confirmed = all(
-            c.status == "CONFIRMED" or c.id == mine.id
-            for c in confirmations
+            c.status in ("CONFIRMED", "TIMEOUT_ACCEPTED") or c.id == mine.id for c in confirmations
         )
 
         if all_confirmed:
@@ -192,9 +189,7 @@ class PendingVersionManager:
                 error_code="NO_PENDING_CONFIRMATION",
             )
 
-        mine = next(
-            (c for c in confirmations if c.consumer_id == consumer_id), None
-        )
+        mine = next((c for c in confirmations if c.consumer_id == consumer_id), None)
         if mine is None:
             raise BusinessError(
                 "当前用户无该版本的待确认记录",
@@ -293,18 +288,11 @@ class PendingVersionManager:
         for (metric_id, version), records in pending_groups.items():
             # 将所有超时记录标记为 TIMEOUT_ACCEPTED
             for record in records:
-                await self._repo.update_confirmation_status(
-                    record.id, "TIMEOUT_ACCEPTED"
-                )
+                await self._repo.update_confirmation_status(record.id, "TIMEOUT_ACCEPTED")
 
             # 获取该版本的所有确认记录，判断是否全部已确认/超时接受
-            all_confirmations = await self._repo.get_pending_confirmations(
-                metric_id, version
-            )
-            all_done = all(
-                c.status in ("CONFIRMED", "TIMEOUT_ACCEPTED")
-                for c in all_confirmations
-            )
+            all_confirmations = await self._repo.get_pending_confirmations(metric_id, version)
+            all_done = all(c.status in ("CONFIRMED", "TIMEOUT_ACCEPTED") for c in all_confirmations)
 
             if all_done:
                 switch_metric_ids.append(metric_id)

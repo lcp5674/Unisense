@@ -54,8 +54,15 @@ def upgrade() -> None:
                 comment="事件类型(search/query/approve/browse/nps)",
             ),
             sa.Column("actor_id", sa.String(36), nullable=False, comment="操作人 ID"),
-            sa.Column("target_id", sa.String(36), nullable=True, comment="目标对象 ID(指标/术语等)"),
-            sa.Column("target_type", sa.String(32), nullable=True, comment="目标类型(metric/term/glossary)"),
+            sa.Column(
+                "target_id", sa.String(36), nullable=True, comment="目标对象 ID(指标/术语等)"
+            ),
+            sa.Column(
+                "target_type",
+                sa.String(32),
+                nullable=True,
+                comment="目标类型(metric/term/glossary)",
+            ),
             sa.Column(
                 "context_json",
                 sa.JSON(),

@@ -167,10 +167,16 @@ class ConflictService(BaseService):
             ConflictStatus.ESCALATED,
         ):
             raise ConflictError(f"当前状态 {conflict.status.value} 不可裁决")
+        # B1-2: 前端传 "ACCEPT"/"REJECT" 归一化为内部枚举
+        decision = req.decision
+        if decision in ("ACCEPT", "accept"):
+            decision = "choose_canonical"
+        elif decision in ("REJECT", "reject"):
+            decision = "keep_diff"
         # PLAT-2: 以服务端认证身份 actor_id 为权威归因，忽略客户端伪造的 req.arbitrator_id
         arbitrator_id = actor_id if actor_id is not None else req.arbitrator_id
         decision_json = {
-            "decision": req.decision,
+            "decision": decision,
             "canonical_metric_code": req.canonical_metric_code,
             "reason": req.reason,
             "rule_template": req.rule_template,
@@ -187,7 +193,7 @@ class ConflictService(BaseService):
                 conflict_id=conflict.conflict_id,
                 metric_codes=conflict.metric_codes,
                 dispute_desc=f"{conflict.type.value}",
-                decision=req.decision,
+                decision=decision,
                 reason=req.reason,
                 arbitrator_id=arbitrator_id,
                 decided_at=datetime.now(UTC),
@@ -199,7 +205,7 @@ class ConflictService(BaseService):
                 "payload": {
                     "conflict_id": conflict.conflict_id,
                     "canonical": req.canonical_metric_code,
-                    "decision": req.decision,
+                    "decision": decision,
                 },
             }
         )

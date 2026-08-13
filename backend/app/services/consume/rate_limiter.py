@@ -169,6 +169,18 @@ def init_rate_limiter(redis: aioredis.Redis | None) -> None:
     if redis is not None:
         _rate_limiter = RedisRateLimiter(redis)
         logger.info("rate_limiter.initialized", type="redis")
+        try:
+            from app.core.degradation_registry import get_degradation_registry
+
+            get_degradation_registry().clear_degradation("rate_limiter")
+        except Exception:
+            pass
     else:
         _rate_limiter = InMemoryRateLimiter()
         logger.warning("rate_limiter.initialized", type="inmemory_fallback")
+        try:
+            from app.core.degradation_registry import get_degradation_registry
+
+            get_degradation_registry().register_degradation("rate_limiter", "init_failed")
+        except Exception:
+            pass

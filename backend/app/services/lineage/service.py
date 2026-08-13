@@ -27,6 +27,7 @@ from app.services.lineage.parser import (
 )
 from app.services.lineage.repository import LineageRepository
 from app.services.lineage.schemas import (
+    ImpactPreviewResponse,
     LineageEdgeResponse,
     LineageImpactParams,
     LineageParseRequest,
@@ -46,9 +47,7 @@ _CACHE_KEY_PREFIX = "lineage:impact:"
 _RISKY_CHANGE_TYPES = frozenset({"BREAKING", "DROP", "DELETE", "REMOVE"})
 
 
-def paginate_edges(
-    edges: list[LineageEdgeResponse], page: int, page_size: int
-) -> dict[str, Any]:
+def paginate_edges(edges: list[LineageEdgeResponse], page: int, page_size: int) -> dict[str, Any]:
     """对血缘边列表做内存分页（图/MySQL 结果均先整体展开，再切片）。
 
     Args:
@@ -186,7 +185,7 @@ class LineageService(BaseService):
         """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。"""
         return await self._repo.soft_delete_by_node(node)
 
-    async def impact_preview(self, metric_code: str, change_type: str) -> dict[str, Any]:
+    async def impact_preview(self, metric_code: str, change_type: str) -> ImpactPreviewResponse:
         """变更影响预览（what-if）：估算变更影响面与风险等级。
 
         基于下游影响分析结果分类：``metric:`` 前缀计受影响指标，``table:`` 前缀
@@ -198,31 +197,35 @@ class LineageService(BaseService):
             change_type: 变更类型（用于风险升级判定）。
 
         Returns:
-            ``{affected_metrics, affected_reports, affected_consumers, risk_level}``。
+            ``ImpactPreviewResponse``，含 ``affected_metrics``（含 metric_code 与
+            change_type）、``affected_tables``（物理表）、``affected_consumers``、
+            ``risk_level``。
         """
         params = LineageImpactParams(
             node=f"metric:{metric_code}", direction="downstream", max_hops=5
         )
         edges = await self.query_impact(params)
-        metrics: set[str] = set()
-        reports: set[str] = set()
+        metrics: list[dict[str, str]] = []
+        tables: list[str] = []
         consumers: set[str] = set()
+        seen_metrics: set[str] = set()
         for e in edges:
             if e.edge_type == "CONSUMED_BY":
                 consumers.add(e.target_node)
             if e.target_node.startswith("metric:"):
-                metrics.add(e.target_node)
+                mc = e.target_node[len("metric:") :]
+                if mc not in seen_metrics:
+                    seen_metrics.add(mc)
+                    metrics.append({"metric_code": mc, "change_type": change_type})
             elif e.target_node.startswith("table:"):
-                reports.add(e.target_node)
-        risk_level = self._risk_level(
-            len(metrics) + len(reports) + len(consumers), change_type
+                tables.append(e.target_node)
+        risk_level = self._risk_level(len(metrics) + len(tables) + len(consumers), change_type)
+        return ImpactPreviewResponse(
+            affected_metrics=metrics,
+            affected_tables=sorted(tables),
+            affected_consumers=sorted(consumers),
+            risk_level=risk_level,
         )
-        return {
-            "affected_metrics": sorted(metrics),
-            "affected_reports": sorted(reports),
-            "affected_consumers": sorted(consumers),
-            "risk_level": risk_level,
-        }
 
     async def propagate_pii(self, node: str, depth: int = 3) -> int:
         """PII 沿血缘传导：沿 ``DERIVED_FROM`` 下游遍历至多 ``depth`` 跳，标记边继承 PII。
@@ -281,8 +284,7 @@ class LineageService(BaseService):
             )
             if graph_edges is not None:
                 return [
-                    self._graph_edge_to_response(src, tgt, etype)
-                    for src, tgt, etype in graph_edges
+                    self._graph_edge_to_response(src, tgt, etype) for src, tgt, etype in graph_edges
                 ]
         rows = await self._repo.query_impact(
             params.node, params.direction, params.max_hops, max_edges=_MAX_EDGES
@@ -290,9 +292,7 @@ class LineageService(BaseService):
         return [LineageEdgeResponse.model_validate(e) for e in rows]
 
     @staticmethod
-    def _graph_edge_to_response(
-        source: str, target: str, edge_type: str
-    ) -> LineageEdgeResponse:
+    def _graph_edge_to_response(source: str, target: str, edge_type: str) -> LineageEdgeResponse:
         """将图读路径返回的 ``(source, target, edge_type)`` 组装为响应。
 
         id 在图存储无意义，置 0；granularity 由节点前缀推断（``field:`` 视为 L2）。
@@ -338,9 +338,7 @@ class LineageService(BaseService):
         if redis is None:
             return
         try:
-            payload = json.dumps(
-                [e.model_dump(mode="json") for e in edges], ensure_ascii=False
-            )
+            payload = json.dumps([e.model_dump(mode="json") for e in edges], ensure_ascii=False)
             await redis.set(key, payload, ex=_CACHE_TTL)
         except Exception as exc:
             logger.warning("lineage_impact_cache_set_failed", key=key, error=str(exc))

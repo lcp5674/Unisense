@@ -113,9 +113,7 @@ async def list_data_sources(
     )
     # P1-1: 返回分页结构（含 total），此前 total 被丢弃导致 >20 个源时静默截断
     return ok(
-        data=DataSourceListResponse(
-            items=items, total=total, page=page, page_size=page_size
-        ),
+        data=DataSourceListResponse(items=items, total=total, page=page, page_size=page_size),
         trace_id=trace_id,
     )
 
@@ -313,9 +311,7 @@ async def collect_source(
     try:
         # FR-017: asyncio.timeout(300) 保护
         result = await asyncio.wait_for(
-            svc.collect_and_register(
-                source_id, collector, user.id, mode=body.mode
-            ),
+            svc.collect_and_register(source_id, collector, user.id, mode=body.mode),
             timeout=300.0,
         )
     except TimeoutError:
@@ -348,9 +344,7 @@ async def collect_source(
     return ok(data=result, trace_id=trace_id)
 
 
-@source_router.post(
-    "/{source_id}/schedule", dependencies=_WRITE_DEPS
-)
+@source_router.post("/{source_id}/schedule", dependencies=_WRITE_DEPS)
 async def schedule_collection(
     source_id: str,
     body: ScheduleRequest,

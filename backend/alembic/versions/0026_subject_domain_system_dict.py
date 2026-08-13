@@ -7,8 +7,8 @@ Revises: 0025_dependency_health
 Create Date: 2026-08-13
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import mysql
 
 revision = "0026"
@@ -36,9 +36,15 @@ def upgrade() -> None:
         sa.Column("defaults_json", mysql.JSON(), nullable=False, comment="域级默认值预设"),
         sa.Column("description", sa.Text(), nullable=True, comment="描述"),
         sa.Column("owner_id", sa.BigInteger(), nullable=False, comment="域管理员ID"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, comment="创建时间（UTC）"),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, comment="更新时间（UTC）"),
-        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True, comment="软删除时间（UTC）"),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, comment="创建时间（UTC）"
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), nullable=False, comment="更新时间（UTC）"
+        ),
+        sa.Column(
+            "deleted_at", sa.DateTime(timezone=True), nullable=True, comment="软删除时间（UTC）"
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("code", name="uq_subject_domain_code"),
         sa.ForeignKeyConstraint(["parent_id"], ["subject_domain.id"], name="fk_domain_parent"),
@@ -62,9 +68,15 @@ def upgrade() -> None:
             comment="状态",
         ),
         sa.Column("description", sa.String(256), nullable=True, comment="描述"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, comment="创建时间（UTC）"),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, comment="更新时间（UTC）"),
-        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True, comment="软删除时间（UTC）"),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, comment="创建时间（UTC）"
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), nullable=False, comment="更新时间（UTC）"
+        ),
+        sa.Column(
+            "deleted_at", sa.DateTime(timezone=True), nullable=True, comment="软删除时间（UTC）"
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("dict_type", "code", name="uk_dict_type_code"),
     )

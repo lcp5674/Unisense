@@ -56,6 +56,14 @@ class DimensionRepository:
         stmt = select(DimensionMember).where(DimensionMember.dim_code == dim_code)
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def get_member(self, dim_code: str, member_code: str) -> DimensionMember | None:
+        stmt = (
+            select(DimensionMember)
+            .where(DimensionMember.dim_code == dim_code)
+            .where(DimensionMember.member_code == member_code)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def save_mapping(self, obj: DimensionMapping) -> DimensionMapping:
         self._session.add(obj)
         await self._session.flush()

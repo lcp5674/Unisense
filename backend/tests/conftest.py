@@ -10,25 +10,58 @@ from __future__ import annotations
 
 import os
 
+
 # 必须在导入 app 之前设置（settings 在导入时即读取环境变量）
-os.environ.setdefault(
-    "UNISENSE_DB_URL",
-    "mysql+aiomysql://unisense:unisense@localhost:3306/unisense?charset=utf8mb4",
-)
+def _default_db_url() -> str:
+    """确定测试默认数据库 URL（本地 / CI 自适应）。
+
+    优先级：
+    1. 已显式设置 UNISENSE_DB_URL（开发者 / CI 覆盖）→ 尊重；
+    2. 本地 .env 存在（docker-compose 起栈脚本写入，偏移端口 3307）
+       → 复用其 host:port，用户改用 root（拥有建库权限）、库改用**专用测试库**
+       ``unisense_it``——避免集成测试 DROP/CREATE 开发库 ``unisense``；
+    3. CI（无 .env，gateways.yml 的 MySQL 服务 root:test@3306）→ 直接用默认。
+
+    注意：``mysql+aiomysql`` 是 async 引擎驱动；alembic env.py 会自动转
+    ``mysql+pymysql`` 供迁移子进程使用，两者均可。
+    """
+    env_url = os.environ.get("UNISENSE_DB_URL")
+    if env_url:
+        return env_url
+    env_file = os.path.join(os.path.dirname(__file__), "..", ".env")
+    local_url: str | None = None
+    try:
+        with open(env_file, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("UNISENSE_DB_URL="):
+                    local_url = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+    except OSError:
+        pass
+    if local_url and "@" in local_url and "/" in local_url:
+        host_port = local_url.split("@", 1)[-1].split("/", 1)[0]
+        return f"mysql+aiomysql://root:test@{host_port}/unisense_it?charset=utf8mb4"
+    return "mysql+aiomysql://root:test@localhost:3306/unisense?charset=utf8mb4"
+
+
+os.environ.setdefault("UNISENSE_DB_URL", _default_db_url())
 os.environ.setdefault("UNISENSE_JWT_SECRET", "test-secret-key-for-unit-tests")
 os.environ.setdefault("UNISENSE_ENVIRONMENT", "test")
 
-from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+# 以下导入依赖上面已设置的环境变量（settings 在导入时即读取），
+# 因此位于 env 初始化之后，属 conftest 合法模式，忽略 E402。
+from datetime import UTC, datetime  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
-import httpx
-import pytest
-from httpx import ASGITransport
+import httpx  # noqa: E402
+import pytest  # noqa: E402
+from httpx import ASGITransport  # noqa: E402
 
-from app.api import deps
-from app.core import resilience
-from app.main import app
-from app.models.metric import Metric
+from app.api import deps  # noqa: E402
+from app.core import resilience  # noqa: E402
+from app.main import app  # noqa: E402
+from app.models.metric import Metric  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -156,3 +189,13 @@ async def client():
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+async def isolated_db_session():
+    """每测试独立事务隔离（测试结束自动回滚，TECH-08）。"""
+    from app.db.mysql import async_session_factory
+
+    async with async_session_factory() as session, session.begin():
+        yield session
+        await session.rollback()

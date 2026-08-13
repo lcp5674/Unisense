@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,6 +44,25 @@ from app.services.consume.schemas import (
 # 运行期统经 get_rate_limiter() 查阅，避免在 import 期冻结失效的快照（C6）。
 _executor: Any | None = None
 
+# 标识符白名单：表名 / 列名无法参数化，必须收敛到安全字符集（长度对齐 DB 列 String(64)），
+# 杜绝标识符注入（反引号 / 空格 / 分号等皆可逃逸 `` `...` `` 包裹）。维度名另有口径声明集二次校验。
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+# 日期区间每段的格式（YYYY-MM 或 YYYY-MM-DD），覆盖单值 / 区间两种写法。
+_DATE_PART_RE = re.compile(r"^\d{4}-\d{2}(-\d{2})?$")
+# 单次查询结果行数硬上限：防止 SELECT * 全表拖回导致 OOM/超时（FR-06 生产护栏）。
+_MAX_QUERY_ROWS = 1000
+
+
+def _validate_date_part(part: str) -> None:
+    """校验单段日期格式与语义合法性（年月 / 年月日），非法抛 VALIDATION_ERROR。"""
+    if not _DATE_PART_RE.match(part):
+        raise BusinessError("日期区间格式非法", error_code=ErrorCode.VALIDATION_ERROR)
+    y, m, *rest = part.split("-")
+    if not (1 <= int(m) <= 12):
+        raise BusinessError("日期区间格式非法", error_code=ErrorCode.VALIDATION_ERROR)
+    if rest and not (1 <= int(rest[0]) <= 31):
+        raise BusinessError("日期区间格式非法", error_code=ErrorCode.VALIDATION_ERROR)
+
 
 def _get_olap_executor() -> Any:
     """返回进程内共享的 OLAPExecutor 单例（复用连接池，避免每请求新建客户端泄漏）。"""
@@ -76,13 +96,24 @@ class ConsumeService(BaseService):
         )
         if not table:
             table = f"dws_metric_{req.metric_code}"
+        # 标识符（表名）无法参数化，须收敛到安全字符集，杜绝标识符注入。
+        # source_table 由指标 Owner 声明、metric_code 由调用方传入，二者均不可信。
+        if not _IDENTIFIER_RE.match(table):
+            raise BusinessError(
+                "指标来源表标识非法",
+                error_code=ErrorCode.INJECTION_DETECTED,
+            )
 
         where: list[str] = ["metric_code = :metric_code"]
         params: dict[str, Any] = {"metric_code": req.metric_code}
 
         if req.date_range:
-            where.append("dt >= :date_from AND dt <= :date_to")
             parts = req.date_range.split("~")
+            if len(parts) > 2:
+                raise BusinessError("日期区间格式非法", error_code=ErrorCode.VALIDATION_ERROR)
+            for part in parts:
+                _validate_date_part(part.strip())
+            where.append("dt >= :date_from AND dt <= :date_to")
             params["date_from"] = parts[0].strip()
             params["date_to"] = parts[1].strip() if len(parts) > 1 else parts[0].strip()
 
@@ -104,8 +135,32 @@ class ConsumeService(BaseService):
                 where.append(f"{dim.name} = :{key}")
                 params[key] = dim.value
 
-        sql = f"SELECT * FROM `{table}` WHERE {' AND '.join(where)}"
+        projection = self._projection_columns(metric)
+        sql = f"SELECT {projection} FROM `{table}` WHERE {' AND '.join(where)} LIMIT :__max_rows"
+        params["__max_rows"] = _MAX_QUERY_ROWS
         return sql, params
+
+    def _projection_columns(self, metric: Any) -> str:
+        """收敛 SELECT 投影列到口径声明的维度+度量列。
+
+        FR-06 生产护栏：口径未声明任何列时退化为 ``*``（兼容存量数据），
+        但仍受外层 ``LIMIT`` 硬上限约束；声明了 ``measures`` 时严格收敛投影，
+        既防越权列读取，也避免 ``SELECT *`` 拖回全表造成 OOM/超时。
+        投影列均须过标识符白名单（列名无法参数化，杜绝标识符注入）。
+        """
+        defn = metric.definition_json or {}
+        dims = defn.get("dimensions") or []
+        measures = defn.get("measures") or defn.get("columns") or []
+        cols = list(dims) + list(measures)
+        if not cols:
+            return "*"
+        for col in cols:
+            if not isinstance(col, str) or not _IDENTIFIER_RE.match(col):
+                raise BusinessError(
+                    "指标投影列标识非法",
+                    error_code=ErrorCode.INJECTION_DETECTED,
+                )
+        return ", ".join(f"`{c}`" for c in cols)
 
     # ---- 接入方鉴权 ----
     async def authenticate_client(self, api_key: str) -> ApiClient:
@@ -141,9 +196,7 @@ class ConsumeService(BaseService):
                 "消费令牌已过期，请重新签发", error_code=ErrorCode.AUTH_APIKEY_INVALID
             ) from None
         except jwt.InvalidTokenError:
-            raise BusinessError(
-                "消费令牌无效", error_code=ErrorCode.AUTH_APIKEY_INVALID
-            ) from None
+            raise BusinessError("消费令牌无效", error_code=ErrorCode.AUTH_APIKEY_INVALID) from None
         if payload.get("role") != "consume":
             raise BusinessError(
                 "令牌角色不符，请使用消费方令牌", error_code=ErrorCode.AUTH_APIKEY_INVALID

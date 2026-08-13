@@ -22,7 +22,7 @@ def svc(mock_db):
 
 class TestCreateItem:
     async def test_create_item_success(self, svc) -> None:
-        svc._repo.code_exists_in_type = AsyncMock(return_value=False)
+        svc._repo.get_item_including_deleted = AsyncMock(return_value=None)
         item = MagicMock()
         item.dict_type = "granularity"
         item.code = "minute"
@@ -35,13 +35,30 @@ class TestCreateItem:
         assert result.code == "minute"
 
     async def test_create_duplicate_rejected(self, svc) -> None:
-        svc._repo.code_exists_in_type = AsyncMock(return_value=True)
+        active = MagicMock()
+        active.deleted_at = None
+        svc._repo.get_item_including_deleted = AsyncMock(return_value=active)
 
         from app.services.system_dict.schemas import DictItemCreate
         data = DictItemCreate(code="day", label="天")
         from app.core.exceptions import ConflictError
         with pytest.raises(ConflictError):
             await svc.create_item("granularity", data)
+
+    async def test_create_restores_soft_deleted(self, svc) -> None:
+        """软删后重建同码：恢复行而非触发唯一索引冲突 500。"""
+        deleted = MagicMock()
+        deleted.deleted_at = object()  # 非 None → 软删行
+        deleted.status = "inactive"
+        svc._repo.get_item_including_deleted = AsyncMock(return_value=deleted)
+        svc._repo.update = AsyncMock(return_value=deleted)
+
+        from app.services.system_dict.schemas import DictItemCreate
+        data = DictItemCreate(code="day", label="天", sort_order=1)
+        result = await svc.create_item("granularity", data)
+        assert deleted.deleted_at is None
+        assert deleted.status == "active"
+        assert result is deleted
 
 
 class TestDeleteItem:
@@ -107,7 +124,6 @@ class TestUpdate:
         item.dict_type = "granularity"
         item.code = "day"
         svc._repo.get_item = AsyncMock(return_value=item)
-        svc._repo.code_exists_in_type = AsyncMock(return_value=False)
         svc._repo.update = AsyncMock(return_value=item)
 
         from app.services.system_dict.schemas import DictItemUpdate

@@ -229,7 +229,7 @@ async def test_create_role_is_idempotent() -> None:
 
 
 async def test_grant_creates_row_and_publishes_event() -> None:
-    svc, repo, events = _svc()
+    svc, repo, events = _svc(FakeUser(role="platform_admin"))
     row = await svc.grant(_payload(metric_whitelist=["m1"]), actor_id=9)
     assert row.id == 1
     assert row.status is GrantStatus.ACTIVE
@@ -238,7 +238,7 @@ async def test_grant_creates_row_and_publishes_event() -> None:
 
 
 async def test_grant_merges_whitelist_and_extends_ttl() -> None:
-    svc, repo, _ = _svc()
+    svc, repo, _ = _svc(FakeUser(role="platform_admin"))
     await svc.grant(_payload(metric_whitelist=["m1"], expires_at=_SOON), actor_id=9)
     row = await svc.grant(_payload(metric_whitelist=["m2"], expires_at=_FUTURE), actor_id=9)
     assert len(repo.grants) == 1
@@ -266,7 +266,7 @@ async def test_grant_rejects_unknown_user() -> None:
 
 
 async def test_revoke_flow_and_guards() -> None:
-    svc, repo, events = _svc()
+    svc, repo, events = _svc(FakeUser(role="platform_admin"))
     row = await svc.grant(_payload(), actor_id=9)
     revoked = await svc.revoke(row.id, actor_id=9, reason="离职")
     assert revoked.status is GrantStatus.REVOKED
@@ -369,7 +369,7 @@ async def test_batch_revoke_domain_admin_same_domain_ok() -> None:
 
 
 async def test_list_grants_delegates_to_repo() -> None:
-    svc, _, _ = _svc()
+    svc, _, _ = _svc(FakeUser(role="platform_admin"))
     await svc.grant(_payload(), actor_id=9)
     rows, total = await svc.list_grants(GrantListParams(user_id=1))
     assert total == 1
@@ -400,7 +400,7 @@ async def test_batch_dry_run_marks_invalid_items() -> None:
 
 
 async def test_batch_grant_executes_and_counts_metrics() -> None:
-    svc, repo, _ = _svc()
+    svc, repo, _ = _svc(FakeUser(role="platform_admin"))
     req = GrantBatchRequest(
         items=[_payload(metric_whitelist=["m1"]), _payload(domain="hr", metric_whitelist=["m2"])]
     )
@@ -429,7 +429,7 @@ async def test_batch_revoke_dry_run_reports_missing() -> None:
 
 
 async def test_expire_due_grants_marks_and_notifies() -> None:
-    svc, repo, events = _svc()
+    svc, repo, events = _svc(FakeUser(role="platform_admin"))
     row = await svc.grant(_payload(expires_at=_SOON), actor_id=9)
     row.expires_at = _PAST  # 模拟时间流逝
     count = await svc.expire_due_grants()
@@ -442,11 +442,12 @@ async def test_expire_due_grants_marks_and_notifies() -> None:
 
 
 async def test_my_permissions_snapshot() -> None:
-    user = FakeUser(uid=1, role="viewer", domain="hr")
-    svc, repo, _ = _svc(user)
+    viewer = FakeUser(uid=1, role="viewer", domain="hr")
+    # 授权人须为平台管理员（新越权防护 P0），快照主体仍用 viewer
+    svc, repo, _ = _svc(FakeUser(uid=9, role="platform_admin", domain="hr"))
     await svc.grant(_payload(metric_whitelist=["m1"], expires_at=_SOON), actor_id=9)
     await svc.grant(_payload(domain="ops", row_level=True), actor_id=9)
-    snap = await svc.my_permissions(user)  # type: ignore[arg-type]
+    snap = await svc.my_permissions(viewer)  # type: ignore[arg-type]
     assert snap.user_id == 1
     assert snap.home_domain == "hr"
     assert snap.granted_domains == ["ops", "sales"]
@@ -457,11 +458,12 @@ async def test_my_permissions_snapshot() -> None:
 
 
 async def test_my_permissions_filters_expired_grants() -> None:
-    user = FakeUser(uid=1)
-    svc, repo, _ = _svc(user)
+    viewer = FakeUser(uid=1)
+    # 授权人须为平台管理员（新越权防护 P0），快照主体仍用 viewer
+    svc, repo, _ = _svc(FakeUser(uid=9, role="platform_admin"))
     row = await svc.grant(_payload(expires_at=_SOON), actor_id=9)
     row.expires_at = _PAST
-    snap = await svc.my_permissions(user)  # type: ignore[arg-type]
+    snap = await svc.my_permissions(viewer)  # type: ignore[arg-type]
     assert snap.grants == []
     assert snap.granted_domains == []
 

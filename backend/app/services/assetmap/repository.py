@@ -29,7 +29,9 @@ class AssetMapRepository:
     async def list_tables(
         self, source_id: str | None, sensitivity: str | None, limit: int
     ) -> list[DBCatalog]:
-        stmt = select(DBCatalog).where(DBCatalog.entity_type == "table")
+        stmt = select(DBCatalog).where(
+            DBCatalog.entity_type == "table", DBCatalog.deleted_at.is_(None)
+        )
         if source_id:
             stmt = stmt.where(DBCatalog.source_id == source_id)
         if sensitivity:
@@ -37,7 +39,7 @@ class AssetMapRepository:
         return list((await self._session.execute(stmt.limit(limit))).scalars().all())
 
     async def orphan_assets(self) -> list[DBCatalog]:
-        stmt = select(DBCatalog).where(DBCatalog.owner_id.is_(None))
+        stmt = select(DBCatalog).where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
         return list((await self._session.execute(stmt)).scalars().all())
 
     @staticmethod
@@ -77,9 +79,7 @@ class AssetMapRepository:
         """
         row = (
             await self._session.execute(
-                select(DBCatalog).where(
-                    DBCatalog.id == entity_id, DBCatalog.deleted_at.is_(None)
-                )
+                select(DBCatalog).where(DBCatalog.id == entity_id, DBCatalog.deleted_at.is_(None))
             )
         ).scalar_one_or_none()
         if row is None:
@@ -122,9 +122,7 @@ class AssetMapRepository:
         """实体名的血缘节点编码形态（裸名/table:/field: 前缀）。"""
         return [entity_name, f"table:{entity_name}", f"field:{entity_name}"]
 
-    async def _lineage_edges_for(
-        self, variants: list[str], limit: int
-    ) -> list[dict[str, Any]]:
+    async def _lineage_edges_for(self, variants: list[str], limit: int) -> list[dict[str, Any]]:
         """查询与某实体相关的血缘边明细（含类型/粒度/置信度/来源）。"""
         rows = (
             await self._session.execute(
@@ -183,8 +181,9 @@ class AssetMapRepository:
         """查询数据源健康状态与最近健康检查时间（无则返回 unknown）。"""
         row = (
             await self._session.execute(
-                select(DataSource.health_status, DataSource.last_health_check, DataSource.name)
-                .where(DataSource.source_id == source_id)
+                select(
+                    DataSource.health_status, DataSource.last_health_check, DataSource.name
+                ).where(DataSource.source_id == source_id)
             )
         ).first()
         if row is None:
@@ -197,23 +196,29 @@ class AssetMapRepository:
 
     async def catalog_summary(self) -> dict[str, Any]:
         total = (
-            await self._session.execute(select(func.count()).select_from(DBCatalog))
+            await self._session.execute(
+                select(func.count()).select_from(DBCatalog).where(DBCatalog.deleted_at.is_(None))
+            )
         ).scalar() or 0
         by_type = (
             await self._session.execute(
-                select(DBCatalog.entity_type, func.count()).group_by(DBCatalog.entity_type)
+                select(DBCatalog.entity_type, func.count())
+                .where(DBCatalog.deleted_at.is_(None))
+                .group_by(DBCatalog.entity_type)
             )
         ).all()
         by_sens = (
             await self._session.execute(
-                select(DBCatalog.sensitivity_level, func.count()).group_by(
-                    DBCatalog.sensitivity_level
-                )
+                select(DBCatalog.sensitivity_level, func.count())
+                .where(DBCatalog.deleted_at.is_(None))
+                .group_by(DBCatalog.sensitivity_level)
             )
         ).all()
         orphans = (
             await self._session.execute(
-                select(func.count()).select_from(DBCatalog).where(DBCatalog.owner_id.is_(None))
+                select(func.count())
+                .select_from(DBCatalog)
+                .where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
             )
         ).scalar() or 0
         return {
@@ -235,10 +240,18 @@ class AssetMapRepository:
 
     async def metric_summary(self) -> dict[str, Any]:
         by_domain = (
-            await self._session.execute(select(Metric.domain, func.count()).group_by(Metric.domain))
+            await self._session.execute(
+                select(Metric.domain, func.count())
+                .where(Metric.deleted_at.is_(None))
+                .group_by(Metric.domain)
+            )
         ).all()
         by_status = (
-            await self._session.execute(select(Metric.status, func.count()).group_by(Metric.status))
+            await self._session.execute(
+                select(Metric.status, func.count())
+                .where(Metric.deleted_at.is_(None))
+                .group_by(Metric.status)
+            )
         ).all()
         return {
             "by_domain": dict(cast("Sequence[tuple[Any, Any]]", by_domain)),
@@ -282,14 +295,16 @@ class AssetMapRepository:
                 continue
             seen_ids.add(node_id)
             allowed.add(node_id)
-            nodes.append({
-                "id": node_id,
-                "type": "metric",
-                "label": row.metric_code,
-                "pii": bool(row.pii_flag),
-                "domain": row.domain,
-                "owner": str(row.owner_id) if row.owner_id else None,
-            })
+            nodes.append(
+                {
+                    "id": node_id,
+                    "type": "metric",
+                    "label": row.metric_code,
+                    "pii": bool(row.pii_flag),
+                    "domain": row.domain,
+                    "owner": str(row.owner_id) if row.owner_id else None,
+                }
+            )
 
         # 边：仅保留至少一端属于展示节点的边（精确匹配）
         edge_stmt = select(
@@ -311,11 +326,13 @@ class AssetMapRepository:
         edge_rows = (await self._session.execute(edge_stmt.limit(1000))).all()
         edges: list[dict[str, Any]] = []
         for edge_row in edge_rows:
-            edges.append({
-                "source": str(edge_row.source_node),
-                "target": str(edge_row.target_node),
-                "type": str(edge_row.edge_type),
-            })
+            edges.append(
+                {
+                    "source": str(edge_row.source_node),
+                    "target": str(edge_row.target_node),
+                    "type": str(edge_row.edge_type),
+                }
+            )
 
         return nodes, edges
 
@@ -329,6 +346,7 @@ class AssetMapRepository:
             rows = (
                 await self._session.execute(
                     select(DBCatalog.sensitivity_level, func.count())
+                    .where(DBCatalog.deleted_at.is_(None))
                     .group_by(DBCatalog.sensitivity_level)
                 )
             ).all()
@@ -340,7 +358,9 @@ class AssetMapRepository:
                         Metric.owner_id,
                         func.count().label("total"),
                         func.sum(case((Metric.pii_flag.is_(True), 1), else_=0)).label("pii_count"),
-                    ).group_by(Metric.owner_id)
+                    )
+                    .where(Metric.deleted_at.is_(None))
+                    .group_by(Metric.owner_id)
                 )
             ).all()
             buckets = [{"key": str(r[0]), "total": r[1], "pii_count": int(r[2] or 0)} for r in rows]
@@ -348,6 +368,7 @@ class AssetMapRepository:
             rows = (
                 await self._session.execute(
                     select(Metric.dw_layer, func.count())
+                    .where(Metric.deleted_at.is_(None))
                     .group_by(Metric.dw_layer)
                 )
             ).all()
@@ -360,7 +381,9 @@ class AssetMapRepository:
                         Metric.domain,
                         func.count().label("total"),
                         func.sum(case((Metric.pii_flag.is_(True), 1), else_=0)).label("pii_count"),
-                    ).group_by(Metric.domain)
+                    )
+                    .where(Metric.deleted_at.is_(None))
+                    .group_by(Metric.domain)
                 )
             ).all()
             buckets = [{"key": r[0], "total": r[1], "pii_count": int(r[2] or 0)} for r in rows]
@@ -377,7 +400,7 @@ class AssetMapRepository:
                     func.sum(case((Metric.status == "PUBLISHED", 1), else_=0)).label("published"),
                     func.sum(case((Metric.status == "DRAFT", 1), else_=0)).label("draft"),
                     func.sum(case((Metric.pii_flag.is_(True), 1), else_=0)).label("pii_count"),
-                ).where(Metric.owner_id == owner_id)
+                ).where(Metric.owner_id == owner_id, Metric.deleted_at.is_(None))
             )
         ).one()
 
@@ -385,7 +408,7 @@ class AssetMapRepository:
         domain_rows = (
             await self._session.execute(
                 select(Metric.domain, func.count())
-                .where(Metric.owner_id == owner_id)
+                .where(Metric.owner_id == owner_id, Metric.deleted_at.is_(None))
                 .group_by(Metric.domain)
             )
         ).all()
@@ -393,7 +416,9 @@ class AssetMapRepository:
         # 目录统计
         catalog_count = (
             await self._session.execute(
-                select(func.count()).select_from(DBCatalog).where(DBCatalog.owner_id == owner_id)
+                select(func.count())
+                .select_from(DBCatalog)
+                .where(DBCatalog.owner_id == owner_id, DBCatalog.deleted_at.is_(None))
             )
         ).scalar() or 0
 
@@ -438,20 +463,20 @@ class AssetMapRepository:
             )
             if entity_type:
                 catalog_stmt = catalog_stmt.where(DBCatalog.entity_type == entity_type)
-            catalog_rows = (
-                await self._session.execute(catalog_stmt.limit(limit))
-            ).scalars().all()
+            catalog_rows = (await self._session.execute(catalog_stmt.limit(limit))).scalars().all()
             for r in catalog_rows:
-                results.append({
-                    "type": "catalog",
-                    "id": r.id,
-                    "name": r.entity_name,
-                    "entity_type": r.entity_type,
-                    "sensitivity_level": r.sensitivity_level,
-                    "domain": None,
-                    "owner_id": r.owner_id,
-                    "status": None,
-                })
+                results.append(
+                    {
+                        "type": "catalog",
+                        "id": r.id,
+                        "name": r.entity_name,
+                        "entity_type": r.entity_type,
+                        "sensitivity_level": r.sensitivity_level,
+                        "domain": None,
+                        "owner_id": r.owner_id,
+                        "status": None,
+                    }
+                )
 
         # 指标：metric_code / name 模糊匹配（仅当未限定目录类型或限定 metric 时）
         if entity_type is None or entity_type == "metric":
@@ -459,20 +484,20 @@ class AssetMapRepository:
                 Metric.deleted_at.is_(None),
                 or_(Metric.metric_code.like(needle), Metric.name.like(needle)),
             )
-            metric_rows = (
-                await self._session.execute(metric_stmt.limit(limit))
-            ).scalars().all()
+            metric_rows = (await self._session.execute(metric_stmt.limit(limit))).scalars().all()
             for m in metric_rows:
-                results.append({
-                    "type": "metric",
-                    "id": m.id,
-                    "name": m.metric_code,
-                    "entity_type": "metric",
-                    "sensitivity_level": "PII" if m.pii_flag else "INTERNAL",
-                    "domain": m.domain,
-                    "owner_id": m.owner_id,
-                    "status": m.status,
-                })
+                results.append(
+                    {
+                        "type": "metric",
+                        "id": m.id,
+                        "name": m.metric_code,
+                        "entity_type": "metric",
+                        "sensitivity_level": "PII" if m.pii_flag else "INTERNAL",
+                        "domain": m.domain,
+                        "owner_id": m.owner_id,
+                        "status": m.status,
+                    }
+                )
         return results
 
     async def health_summary(self) -> dict[str, Any]:
@@ -484,8 +509,9 @@ class AssetMapRepository:
         # 不健康数据源
         unhealthy_rows = (
             await self._session.execute(
-                select(DataSource.source_id, DataSource.name, DataSource.health_status)
-                .where(DataSource.health_status == "unhealthy")
+                select(DataSource.source_id, DataSource.name, DataSource.health_status).where(
+                    DataSource.health_status == "unhealthy", DataSource.deleted_at.is_(None)
+                )
             )
         ).all()
         unhealthy_sources = [
@@ -512,7 +538,9 @@ class AssetMapRepository:
         # 孤儿资产
         orphan_count = (
             await self._session.execute(
-                select(func.count()).select_from(DBCatalog).where(DBCatalog.owner_id.is_(None))
+                select(func.count())
+                .select_from(DBCatalog)
+                .where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
             )
         ).scalar() or 0
 
@@ -702,9 +730,7 @@ class AssetMapRepository:
         """按 id 获取未删除的目录资产。"""
         return (
             await self._session.execute(
-                select(DBCatalog).where(
-                    DBCatalog.id == entity_id, DBCatalog.deleted_at.is_(None)
-                )
+                select(DBCatalog).where(DBCatalog.id == entity_id, DBCatalog.deleted_at.is_(None))
             )
         ).scalar_one_or_none()
 
@@ -713,12 +739,16 @@ class AssetMapRepository:
         if not entity_ids:
             return []
         rows = (
-            await self._session.execute(
-                select(DBCatalog).where(
-                    DBCatalog.id.in_(entity_ids), DBCatalog.deleted_at.is_(None)
+            (
+                await self._session.execute(
+                    select(DBCatalog).where(
+                        DBCatalog.id.in_(entity_ids), DBCatalog.deleted_at.is_(None)
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         order = {eid: idx for idx, eid in enumerate(entity_ids)}
         return sorted(rows, key=lambda r: order.get(r.id, len(order)))
 
@@ -744,9 +774,7 @@ class AssetMapRepository:
         await self._session.flush()
         return entity
 
-    async def batch_assign_owner(
-        self, entities: Sequence[DBCatalog], owner_id: int | None
-    ) -> int:
+    async def batch_assign_owner(self, entities: Sequence[DBCatalog], owner_id: int | None) -> int:
         """批量认领/转让归属，返回受影响数量（同事务 flush，API 层统一 commit）。"""
         for e in entities:
             e.owner_id = owner_id
@@ -754,9 +782,7 @@ class AssetMapRepository:
         await self._session.flush()
         return len(entities)
 
-    async def batch_reclassify(
-        self, entities: Sequence[DBCatalog], level: str
-    ) -> int:
+    async def batch_reclassify(self, entities: Sequence[DBCatalog], level: str) -> int:
         """批量重分类敏感级，返回受影响数量。"""
         for e in entities:
             e.sensitivity_level = level

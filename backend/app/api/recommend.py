@@ -25,7 +25,7 @@ async def related_metrics(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
-    limit: int = Query(20),
+    limit: int = Query(20, le=200),
 ) -> Any:
     items = await RecommendService(db).related_metrics(metric_id, limit)
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
@@ -36,7 +36,7 @@ async def recommend_metrics(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
-    limit: int = Query(20),
+    limit: int = Query(20, le=200),
 ) -> Any:
     # PLAT-2: 以认证身份 user.id 替代 client 传入的 user_id，杜绝 IDOR 越权读取
     items = await RecommendService(db).recommend_metrics(user.id, limit)
@@ -48,7 +48,7 @@ async def recommend_terms(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
-    limit: int = Query(20),
+    limit: int = Query(20, le=200),
 ) -> Any:
     items = await RecommendService(db).recommend_terms(limit)
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)

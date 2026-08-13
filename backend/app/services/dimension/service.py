@@ -15,13 +15,20 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
-from app.core.exceptions import ConflictError, NotFoundError, UnisenseError
+from app.core.exceptions import (
+    ConflictError,
+    NotFoundError,
+    UnisenseError,
+    ValidationError,
+)
 from app.models.dimension import (
     Dimension,
     DimensionMapping,
     DimensionMember,
     DimensionStatus,
+    MappingType,
     MetricDimension,
+    MetricDimensionRole,
     Reconciliation,
     ReconciliationStatus,
 )
@@ -35,6 +42,13 @@ from app.services.dimension.schemas import (
     ReconciliationReview,
     ReconciliationSubmit,
 )
+
+#: 维度成员层级深度上限（含根，1 层 = 根；防止深链/环导致的递归遍历风险）。
+_MAX_MEMBER_DEPTH = 10
+
+#: 合法映射类型 / 关联角色取值（DB Enum 列，非法值须在服务层转 4xx，而非 DB 500）。
+_VALID_MAPPING_TYPES = {e.value for e in MappingType}
+_VALID_ROLES = {e.value for e in MetricDimensionRole}
 
 
 class DimensionService(BaseService):
@@ -133,16 +147,47 @@ class DimensionService(BaseService):
         base = f"{data.dim_code}_{name_slug}" if name_slug else f"{data.dim_code}_member"
 
         async def _exists(code: str) -> bool:
-            members = await self._repo.list_members(data.dim_code)
-            return any(m.member_code == code for m in members)
+            # 定向存在性查询，避免每次尝试全量拉取维度成员（防 N+1 / 全表扫描）
+            return await self._repo.get_member(data.dim_code, code) is not None
 
         return await generate_unique_code(base, _exists)
 
     async def create_member(self, data: DimensionMemberCreate) -> DimensionMember:
         await self._require(data.dim_code)
-        # 编码自动生成（FR-010：缺省时由系统生成）
-        if not data.member_code:
+
+        members = await self._repo.list_members(data.dim_code)
+
+        # 编码唯一性：客户端显式传入时也须校验（uk_dim_member 唯一约束，
+        # 不校验会触发 IntegrityError → 500）
+        if data.member_code:
+            if any(m.member_code == data.member_code for m in members):
+                raise ConflictError(
+                    f"维度成员编码已存在: {data.dim_code}/{data.member_code}",
+                    error_code="DUPLICATE_MEMBER_CODE",
+                )
+        else:
             data.member_code = await self._generate_member_code(data)
+
+        # 父级校验：存在性 + 自引用 + 层级深度上限
+        if data.parent_code:
+            if data.parent_code == data.member_code:
+                raise ConflictError(
+                    "维度成员不能以自身为父级",
+                    error_code="SELF_PARENT",
+                    ctx={"member_code": data.member_code},
+                )
+            if not any(m.member_code == data.parent_code for m in members):
+                raise NotFoundError(
+                    f"父成员不存在: {data.dim_code}/{data.parent_code}",
+                    ctx={"parent_code": data.parent_code},
+                )
+            # path 由父路径拼接：限制层级深度防深链
+            if data.path and data.path.count("/") >= _MAX_MEMBER_DEPTH:
+                raise ConflictError(
+                    f"维度成员层级超过上限（{_MAX_MEMBER_DEPTH} 层）",
+                    error_code="MEMBER_DEPTH_EXCEEDED",
+                )
+
         member = DimensionMember(
             dim_code=data.dim_code,
             member_code=data.member_code,
@@ -161,10 +206,35 @@ class DimensionService(BaseService):
     async def create_mapping(
         self, data: DimensionMappingCreate, actor_id: int | None = None
     ) -> DimensionMapping:
+        # 源/目标维度存在性校验（防孤儿映射落到库）
+        if not await self._repo.get_dimension(data.source_dim_code):
+            raise NotFoundError(
+                f"源维度不存在: {data.source_dim_code}",
+                ctx={"source_dim_code": data.source_dim_code},
+            )
+        if not await self._repo.get_dimension(data.target_dim_code):
+            raise NotFoundError(
+                f"目标维度不存在: {data.target_dim_code}",
+                ctx={"target_dim_code": data.target_dim_code},
+            )
+        # 自映射防护（防自环）
+        if data.source_dim_code == data.target_dim_code:
+            raise ConflictError(
+                "维度不能映射到自身",
+                error_code="SELF_MAPPING",
+                ctx={"dim_code": data.source_dim_code},
+            )
+        # mapping_type enum 显式校验（非法值 → 4xx，而非 DB Enum 500）
+        if data.mapping_type not in _VALID_MAPPING_TYPES:
+            raise ValidationError(
+                f"未知维度映射类型: {data.mapping_type}",
+                error_code="INVALID_MAPPING_TYPE",
+                ctx={"mapping_type": data.mapping_type},
+            )
         mapping = DimensionMapping(
             source_dim_code=data.source_dim_code,
             target_dim_code=data.target_dim_code,
-            mapping_type=data.mapping_type,
+            mapping_type=MappingType(data.mapping_type).value,
             expression=data.expression,
             # PLAT-2: 认证身份优先，client 传入的 created_by 仅作降级
             created_by=actor_id if actor_id is not None else data.created_by,
@@ -176,10 +246,25 @@ class DimensionService(BaseService):
 
     async def bind_metric_dimension(self, data: MetricDimensionBind) -> MetricDimension:
         await self._require(data.dim_code)
+        # role enum 显式校验（非法值 → 4xx，而非 DB Enum 500）
+        if data.role not in _VALID_ROLES:
+            raise ValidationError(
+                f"未知关联角色: {data.role}",
+                error_code="INVALID_ROLE",
+                ctx={"role": data.role},
+            )
+        # 默认成员须为维度内已存在成员（防孤儿引用）
+        if data.default_member is not None and not await self._repo.get_member(
+            data.dim_code, data.default_member
+        ):
+            raise NotFoundError(
+                f"默认成员不存在: {data.dim_code}/{data.default_member}",
+                ctx={"default_member": data.default_member},
+            )
         binding = MetricDimension(
             metric_id=data.metric_id,
             dim_code=data.dim_code,
-            role=data.role,
+            role=MetricDimensionRole(data.role).value,
             default_member=data.default_member,
         )
         return await self._repo.save_metric_dimension(binding)
@@ -188,6 +273,12 @@ class DimensionService(BaseService):
         return await self._repo.list_metric_dimensions(metric_id)
 
     async def submit_reconciliation(self, data: ReconciliationSubmit) -> Reconciliation:
+        # dim_code 可选；若提供则须为已存在维度（防孤儿对账记录）
+        if data.dim_code and not await self._repo.get_dimension(data.dim_code):
+            raise NotFoundError(
+                f"维度不存在: {data.dim_code}",
+                ctx={"dim_code": data.dim_code},
+            )
         rec = Reconciliation(
             metric_id=data.metric_id,
             dim_code=data.dim_code,

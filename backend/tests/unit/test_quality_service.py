@@ -25,7 +25,10 @@ from app.services.quality.service import QualityService
 
 
 def _svc() -> QualityService:
-    return QualityService(MagicMock(), publisher=MagicMock())
+    svc = QualityService(MagicMock(), publisher=MagicMock())
+    # 幂等去重默认无既有 OPEN 事件（detect 正常落事件）
+    svc._repo.find_open_event = AsyncMock(return_value=None)  # noqa: SLF001
+    return svc
 
 
 @pytest.mark.parametrize(
@@ -239,3 +242,19 @@ async def test_create_rule_static_mode_regression() -> None:
     resp = await svc.create_rule(payload, 1)
     assert resp.rule_mode == QualityRuleMode.STATIC
     svc._repo.create_rule.assert_awaited_once()
+
+
+async def test_detect_skips_when_open_event_exists() -> None:
+    """同 (metric_id, rule_type) 已有 OPEN 事件时不再重复落事件+告警（幂等）。"""
+    svc = _svc()
+    svc._publisher = AsyncMock()
+    svc._repo.list_enabled_rules_for = AsyncMock(
+        return_value=[_rule(QualitySeverity.P1, {"max": 100})]
+    )
+    svc._repo.create_event = AsyncMock(side_effect=_persist)
+    # 存在既有 OPEN 事件 → detect 跳过，不落新事件
+    svc._repo.find_open_event = AsyncMock(return_value=object())
+    result = await svc.detect(1, QualityRuleType.COMPLETENESS, Decimal("5000"))
+    assert result is None
+    svc._repo.create_event.assert_not_called()
+    svc._publisher.publish.assert_not_called()

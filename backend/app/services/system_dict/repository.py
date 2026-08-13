@@ -37,31 +37,56 @@ class SystemDictRepository:
         result = await self._db.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def item_exists(self, dict_type: str, code: str) -> bool:
-        stmt = select(func.count()).select_from(SystemDict).where(
+    async def get_item_including_deleted(self, dict_type: str, code: str) -> SystemDict | None:
+        """按 (dict_type, code) 查任意状态行（含软删除），供软删后重建恢复。
+
+        软删除行仍占唯一索引（uk_dict_type_code），新建前必须检出并恢复，
+        否则触发 IntegrityError → 500。
+        """
+        stmt = select(SystemDict).where(
             SystemDict.dict_type == dict_type,
             SystemDict.code == code,
-            SystemDict.deleted_at.is_(None),
+        )
+        result = await self._db.execute(stmt)
+        return result.scalars().first()
+
+    async def item_exists(self, dict_type: str, code: str) -> bool:
+        stmt = (
+            select(func.count())
+            .select_from(SystemDict)
+            .where(
+                SystemDict.dict_type == dict_type,
+                SystemDict.code == code,
+                SystemDict.deleted_at.is_(None),
+            )
         )
         result = await self._db.execute(stmt)
         return (result.scalar() or 0) > 0
 
     async def dict_type_exists(self, dict_type: str) -> bool:
         """检查字典类型是否存在（有任意 active 项）。"""
-        stmt = select(func.count()).select_from(SystemDict).where(
-            SystemDict.dict_type == dict_type,
-            SystemDict.deleted_at.is_(None),
-            SystemDict.status == "active",
+        stmt = (
+            select(func.count())
+            .select_from(SystemDict)
+            .where(
+                SystemDict.dict_type == dict_type,
+                SystemDict.deleted_at.is_(None),
+                SystemDict.status == "active",
+            )
         )
         result = await self._db.execute(stmt)
         return (result.scalar() or 0) > 0
 
     async def code_exists_in_type(self, dict_type: str, code: str) -> bool:
         """检查某类型下某编码是否存在。"""
-        stmt = select(func.count()).select_from(SystemDict).where(
-            SystemDict.dict_type == dict_type,
-            SystemDict.code == code,
-            SystemDict.deleted_at.is_(None),
+        stmt = (
+            select(func.count())
+            .select_from(SystemDict)
+            .where(
+                SystemDict.dict_type == dict_type,
+                SystemDict.code == code,
+                SystemDict.deleted_at.is_(None),
+            )
         )
         result = await self._db.execute(stmt)
         return (result.scalar() or 0) > 0
@@ -77,13 +102,19 @@ class SystemDictRepository:
 
     async def soft_delete(self, item: SystemDict) -> None:
         from datetime import UTC, datetime
+
         item.deleted_at = datetime.now(UTC)
         await self._db.flush()
 
     async def list_dict_types(self) -> list[str]:
         """列出所有有数据的字典类型。"""
-        stmt = select(SystemDict.dict_type).where(
-            SystemDict.deleted_at.is_(None),
-        ).distinct().order_by(SystemDict.dict_type)
+        stmt = (
+            select(SystemDict.dict_type)
+            .where(
+                SystemDict.deleted_at.is_(None),
+            )
+            .distinct()
+            .order_by(SystemDict.dict_type)
+        )
         result = await self._db.execute(stmt)
         return [row[0] for row in result.all()]

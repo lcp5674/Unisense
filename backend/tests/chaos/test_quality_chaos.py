@@ -38,6 +38,8 @@ async def test_detect_lands_event_when_notify_down() -> None:
     """notify 不可达时，检测主流程仍成功落异常事件（告警降级）。"""
     svc = QualityService(db=MagicMock())
     svc._repo.list_enabled_rules_for = AsyncMock(return_value=[_rule()])
+    # 幂等去重：无既有 OPEN 事件，放行
+    svc._repo.find_open_event = AsyncMock(return_value=None)
 
     def _persist(event: QualityEvent) -> QualityEvent:
         event.id = 1
