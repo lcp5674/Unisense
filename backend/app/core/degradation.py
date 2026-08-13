@@ -30,7 +30,7 @@ from app.core.eventbus import get_eventbus
 from app.core.logging import get_logger
 from app.core.resilience import DegradationSignal
 from app.db.mysql import async_session_factory
-from app.models.degradation_event import DegradationEvent
+from app.models.degradation_event import DEGRADATION_STATES, DegradationEvent
 from app.models.dependency_health import DependencyHealth
 
 logger = get_logger(__name__)
@@ -42,6 +42,10 @@ _EVENT_STATE_TO_STATUS = {
     # 半开探测中：仍视为降级（过渡态），由 circuit_state=HALF_OPEN 体现
     "PROBING": "DEGRADED",
 }
+
+# 哨兵：区分「调用方未提供该字段」与「显式传 None/0」。UPSERT 更新时，未提供的
+# 遥测字段（P95 延迟/错误率/扩展信息）必须保留既有值，绝不能因熔断事件而清零。
+_MISSING = object()
 
 
 def _signal_to_health_params(signal: DegradationSignal) -> dict[str, Any]:
@@ -94,6 +98,16 @@ async def record_degradation(
         actor_id: 触发方（0=系统自动）。
         trace_id: 链路追踪 ID（可选）。
     """
+    # 边界处理：审计事件仅接受 DEGRADED/HEALTHY 枚举值，非法 state（拼写/误传 PROBING）
+    # 直接丢弃并告警，避免向 MySQL ENUM 列写入非法值被静默拒绝（best-effort 吞错无法定位）。
+    if state not in DEGRADATION_STATES:
+        logger.warning(
+            "degradation_record_invalid_state",
+            state=state,
+            dependency_type=dependency_type,
+            reason=reason,
+        )
+        return
     # 1. 事件总线（best-effort，失败仅告警）
     try:
         await get_eventbus().publish(
@@ -143,57 +157,72 @@ async def update_dependency_health(
     *,
     status: str,
     circuit_state: str,
-    consecutive_failures: int = 0,
-    circuit_opened_at: datetime | None = None,
-    last_check_at: datetime | None = None,
-    latency_p95_ms: int | None = None,
-    error_rate_pct: float = 0.0,
-    metadata: dict[str, Any] | None = None,
+    consecutive_failures: int | object = _MISSING,
+    circuit_opened_at: datetime | None | object = _MISSING,
+    last_check_at: datetime | None | object = _MISSING,
+    latency_p95_ms: int | None | object = _MISSING,
+    error_rate_pct: float | object = _MISSING,
+    metadata: dict[str, Any] | None | object = _MISSING,
 ) -> None:
     """UPSERT 依赖实时健康态（best-effort，按 (dependency_type, dependency_id) 唯一键）。
 
     对齐 TD §4.13 dependency_health：实时熔断态 + 连续失败数 + 最近探测时间。
     看板/运维直接查询此表即得各依赖健康，无需回放 degradation_event 历史。
 
+    关键语义：可选遥测字段（``latency_p95_ms`` / ``error_rate_pct`` / ``meta`` 等）以
+    哨兵 ``_MISSING`` 表示「未提供」。UPSERT 时，仅更新调用方**显式提供**的字段；
+    未提供的字段保留既有行值，绝不因一次熔断事件把探针采集的 P95 延迟 / 错误率 /
+    扩展信息清零（否则看板会在熔断开启瞬间谎报错误率 0%、丢失阈值等元数据）。
+
     Args:
         dependency_type / dependency_id: 依赖标识。
-        status: HEALTHY/DEGRADED/UNAVAILABLE。
-        circuit_state: CLOSED/OPEN/HALF_OPEN。
-        consecutive_failures: 连续失败次数。
-        circuit_opened_at: 熔断开启时间（UTC），未开启为 None。
-        last_check_at: 最近探测时间（UTC），默认 now。
-        latency_p95_ms: 近5分钟 P95 延迟（ms），可空。
-        error_rate_pct: 近5分钟错误率（%）。
-        metadata: 扩展信息（如熔断阈值/活跃连接数）。
+        status: HEALTHY/DEGRADED/UNAVAILABLE（必填）。
+        circuit_state: CLOSED/OPEN/HALF_OPEN（必填）。
+        consecutive_failures: 连续失败次数（未提供则保留）。
+        circuit_opened_at: 熔断开启时间（UTC），未开启为 None（未提供则保留）。
+        last_check_at: 最近探测时间（UTC），未提供则默认 now（仅插入新行时生效）。
+        latency_p95_ms: 近5分钟 P95 延迟（ms）（未提供则保留）。
+        error_rate_pct: 近5分钟错误率（%）（未提供则保留）。
+        metadata: 扩展信息（如熔断阈值/活跃连接数）（未提供则保留）。
     """
     now = datetime.now(UTC)
+    # 插入期默认值：未显式提供的字段用合理初值（仅影响首次插入的新行）
+    insert_values: dict[str, Any] = {
+        "dependency_type": dependency_type,
+        "dependency_id": dependency_id,
+        "status": status,
+        "circuit_state": circuit_state,
+        "consecutive_failures": 0 if consecutive_failures is _MISSING else consecutive_failures,
+        "circuit_opened_at": None if circuit_opened_at is _MISSING else circuit_opened_at,
+        "last_check_at": now if last_check_at is _MISSING else last_check_at,
+        "latency_p95_ms": None if latency_p95_ms is _MISSING else latency_p95_ms,
+        "error_rate_pct": 0.0 if error_rate_pct is _MISSING else error_rate_pct,
+        "meta": None if metadata is _MISSING else metadata,
+        "created_at": now,
+        "updated_at": now,
+    }
     try:
         async with async_session_factory() as session:
-            stmt = mysql_insert(DependencyHealth).values(
-                dependency_type=dependency_type,
-                dependency_id=dependency_id,
-                status=status,
-                circuit_state=circuit_state,
-                consecutive_failures=consecutive_failures,
-                circuit_opened_at=circuit_opened_at,
-                last_check_at=last_check_at or now,
-                latency_p95_ms=latency_p95_ms,
-                error_rate_pct=error_rate_pct,
-                meta=metadata,
-                created_at=now,
-                updated_at=now,
-            )
-            stmt = stmt.on_duplicate_key_update(
-                status=stmt.inserted["status"],
-                circuit_state=stmt.inserted["circuit_state"],
-                consecutive_failures=stmt.inserted["consecutive_failures"],
-                circuit_opened_at=stmt.inserted["circuit_opened_at"],
-                last_check_at=stmt.inserted["last_check_at"],
-                latency_p95_ms=stmt.inserted["latency_p95_ms"],
-                error_rate_pct=stmt.inserted["error_rate_pct"],
-                meta=stmt.inserted["meta"],
-                updated_at=now,
-            )
+            stmt = mysql_insert(DependencyHealth).values(**insert_values)
+            # 仅更新调用方显式提供的字段，保护未提供的遥测值
+            update_values: dict[str, Any] = {
+                "status": stmt.inserted["status"],
+                "circuit_state": stmt.inserted["circuit_state"],
+                "updated_at": now,
+            }
+            if consecutive_failures is not _MISSING:
+                update_values["consecutive_failures"] = stmt.inserted["consecutive_failures"]
+            if circuit_opened_at is not _MISSING:
+                update_values["circuit_opened_at"] = stmt.inserted["circuit_opened_at"]
+            if last_check_at is not _MISSING:
+                update_values["last_check_at"] = stmt.inserted["last_check_at"]
+            if latency_p95_ms is not _MISSING:
+                update_values["latency_p95_ms"] = stmt.inserted["latency_p95_ms"]
+            if error_rate_pct is not _MISSING:
+                update_values["error_rate_pct"] = stmt.inserted["error_rate_pct"]
+            if metadata is not _MISSING:
+                update_values["meta"] = stmt.inserted["meta"]
+            stmt = stmt.on_duplicate_key_update(**update_values)
             await session.execute(stmt)
             await session.commit()
     except Exception:
@@ -229,15 +258,17 @@ async def _persist_degradation_and_health(
             trace_id=trace_id,
         )
     status = _EVENT_STATE_TO_STATUS.get(state, "DEGRADED")
-    await update_dependency_health(
-        dependency_type,
-        dependency_id,
-        status=status,
-        circuit_state=circuit_state,
-        consecutive_failures=consecutive_failures,
-        circuit_opened_at=circuit_opened_at,
-        metadata=metadata,
-    )
+    # 仅当 metadata 真实提供时才下发；否则 update_dependency_health 会保留既有 meta，
+    # 避免熔断事件（通常不携带元数据）把探针写入的阈值/连接数等扩展信息清零。
+    health_kwargs: dict[str, Any] = {
+        "status": status,
+        "circuit_state": circuit_state,
+        "consecutive_failures": consecutive_failures,
+        "circuit_opened_at": circuit_opened_at,
+    }
+    if metadata is not None:
+        health_kwargs["metadata"] = metadata
+    await update_dependency_health(dependency_type, dependency_id, **health_kwargs)
 
 
 def handle_circuit_signal(signal: DegradationSignal) -> None:
@@ -245,11 +276,15 @@ def handle_circuit_signal(signal: DegradationSignal) -> None:
 
     注册于 ``main.lifespan``，使 resilience 层保持无 db/eventbus 依赖。
     ``PROBING``（半开探测）等中间态仅更新实时健康、不写审计事件。
+
+    ``dependency_id`` 优先取信号携带的真实实例标识；为空（未配置多实例）时回退到
+    ``dependency_type.lower()``，与 dependency_health 种子 id 对齐，兼容单实例依赖。
     """
     health = _signal_to_health_params(signal)
+    dependency_id = signal.dependency_id or signal.dependency_type.lower()
     fire_degradation_event(
         signal.dependency_type,
-        signal.dependency_type.lower(),
+        dependency_id,
         signal.event_state,
         signal.reason,
         circuit_state=health["circuit_state"],
@@ -268,16 +303,26 @@ def _schedule_persist(coro: Coroutine[Any, Any, None]) -> None:
     """将异步持久化协程提交到事件循环并保留强引用直至完成。
 
     通过 ``loop.create_task`` 调度，并把 Task 加入模块级集合、以 done_callback 移除，
-    避免任务被 GC 提前回收（asyncio 官方推荐做法）。
+    避免任务被 GC 提前回收（asyncio 官方推荐做法）。done_callback 显式取回异常，
+    避免「Task exception was never retrieved」告警并保留可观测性（降级记录失败应被看到）。
     """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         # 无运行中的事件循环（如离线脚本），跳过记录
         return
+
+    def _on_done(task: asyncio.Task[None]) -> None:
+        _in_flight_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("degradation_persist_task_failed", exc_info=exc)
+
     task = loop.create_task(coro)
     _in_flight_tasks.add(task)
-    task.add_done_callback(lambda _t: _in_flight_tasks.discard(task))
+    task.add_done_callback(_on_done)
 
 
 def fire_degradation_event(

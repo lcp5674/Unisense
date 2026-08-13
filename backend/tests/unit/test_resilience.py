@@ -79,6 +79,27 @@ def test_breaker_emits_half_open_signal_on_probe(captured):
     assert probe.circuit_state == "HALF_OPEN"
 
 
+def test_breaker_defaults_dependency_id_to_name_lower():
+    b = resilience.CircuitBreaker(name="GRAPH", failure_threshold=2, reset_timeout=10.0)
+    assert b._dependency_id == "graph"  # 单实例依赖：默认 name.lower() 对齐种子 id
+
+
+def test_breaker_uses_explicit_dependency_id():
+    # 多实例依赖（如多 DATASOURCE）显式传入实例 id
+    b = resilience.CircuitBreaker(name="DATASOURCE", dependency_id="ds-123")
+    assert b._dependency_id == "ds-123"
+
+
+def test_emitted_signal_carries_dependency_id(captured):
+    # 多实例依赖的实例 id 应原样进入信号，供 handle_circuit_signal 落到正确健康行
+    b = resilience.CircuitBreaker(
+        name="OLAP", failure_threshold=1, reset_timeout=1.0, dependency_id="olap-cluster-1"
+    )
+    b.record_failure()
+    assert len(captured) == 1
+    assert captured[0].dependency_id == "olap-cluster-1"
+
+
 def test_breaker_recovers_from_lost_probe(captured):
     """探测结果丢失（调用方未回调 record_*）时，超过 probe_timeout 应允许重新探测，避免永久拒绝。"""
     b = resilience.CircuitBreaker(

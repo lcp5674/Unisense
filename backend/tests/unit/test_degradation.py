@@ -191,9 +191,7 @@ class TestPersistDegradationAndHealth:
 class TestFireAndForget:
     async def test_fire_degradation_event_schedules_persist(self, monkeypatch, patched):
         captured: list = []
-        monkeypatch.setattr(
-            degradation, "_schedule_persist", lambda coro: captured.append(coro)
-        )
+        monkeypatch.setattr(degradation, "_schedule_persist", lambda coro: captured.append(coro))
         degradation.fire_degradation_event("OLAP", "olap", "DEGRADED", "reason")
         assert len(captured) == 1
         # 执行被调度的协程，验证最终落库 + 发事件
@@ -204,14 +202,33 @@ class TestFireAndForget:
 
     async def test_handle_circuit_signal_wires_signal_fields(self, monkeypatch):
         captured: list = []
-        monkeypatch.setattr(
-            degradation, "_schedule_persist", lambda coro: captured.append(coro)
-        )
+        monkeypatch.setattr(degradation, "_schedule_persist", lambda coro: captured.append(coro))
         signal = _signal("DEGRADED")
         degradation.handle_circuit_signal(signal)
         assert len(captured) == 1
         # 未执行的协程显式关闭，避免 unawaited coroutine 告警
         captured[0].close()
+
+
+def test_handle_circuit_signal_uses_real_dependency_id(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(degradation, "fire_degradation_event", lambda *a, **k: calls.append((a, k)))
+    sig = DegradationSignal(
+        "OLAP", "DEGRADED", "circuit_open", "OPEN", 3, 1.0, dependency_id="olap-x"
+    )
+    degradation.handle_circuit_signal(sig)
+    args, _ = calls[0]
+    assert args[1] == "olap-x"  # 真实实例 id 优先于 type.lower()
+
+
+def test_handle_circuit_signal_falls_back_to_type_lower(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(degradation, "fire_degradation_event", lambda *a, **k: calls.append((a, k)))
+    # dependency_id 缺省空串 -> 回退 dependency_type.lower()（兼容单实例依赖）
+    sig = DegradationSignal("GRAPH", "DEGRADED", "circuit_open", "OPEN", 3, 1.0)
+    degradation.handle_circuit_signal(sig)
+    args, _ = calls[0]
+    assert args[1] == "graph"
 
     async def test_schedule_persist_creates_task_and_cleans_up(self):
         done: list[int] = []
@@ -339,3 +356,25 @@ class TestEnsureSeed:
         _, session = patched
         session.execute = AsyncMock(side_effect=RuntimeError("db down"))
         await degradation.ensure_dependency_health_seed()  # 不抛异常
+
+
+class TestFireAndForgetRobustness:
+    async def test_schedule_persist_cleans_up_after_exception(self):
+        async def boom() -> None:
+            raise RuntimeError("persist failed")
+
+        degradation._schedule_persist(boom())
+        assert len(degradation._in_flight_tasks) == 1
+        # 即便协程抛错，done_callback 仍将其从集合移除，并取回异常避免未捕获告警
+        await asyncio.gather(*list(degradation._in_flight_tasks), return_exceptions=True)
+        assert not degradation._in_flight_tasks
+
+
+class TestRecordDegradationBoundary:
+    async def test_invalid_state_is_dropped(self, patched):
+        eb, session = patched
+        # PROBING 非合法审计态（仅 DEGRADED/HEALTHY），边界校验应丢弃，不发布不落库
+        await degradation.record_degradation("OLAP", "olap", "PROBING", "half_open")
+        eb.publish.assert_not_called()
+        session.add.assert_not_called()
+        session.commit.assert_not_called()

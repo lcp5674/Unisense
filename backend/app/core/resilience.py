@@ -40,6 +40,10 @@ class DegradationSignal:
     circuit_state: str
     consecutive_failures: int
     opened_at: float | None
+    # 依赖实例标识（如 olap / neo4j-cluster-2 / ds-123）。与 dependency_type 区分：
+    # type 是依赖「种类」（OLAP/GRAPH/ES…），id 是「具体实例」。缺省空串时由
+    # handle_circuit_signal 回退到 dependency_type.lower()，兼容单实例依赖。
+    dependency_id: str = ""
 
 
 # 降级监听器：熔断器状态切换时回调，供 degradation 模块记录事件与实时健康。
@@ -67,6 +71,7 @@ def _emit_degradation(self: CircuitBreaker, event_state: str, reason: str) -> No
         circuit_state=_CIRCUIT_STATE_ENUM[self.state],
         consecutive_failures=self._failures,
         opened_at=self._opened_at,
+        dependency_id=self._dependency_id,
     )
     for fn in _degradation_listeners:
         try:
@@ -97,8 +102,12 @@ class CircuitBreaker:
         reset_timeout: float = 30.0,
         name: str = "unknown",
         probe_timeout: float | None = None,
+        dependency_id: str | None = None,
     ) -> None:
         self._name = name
+        # 依赖实例标识：缺省按 name.lower() 推断（单实例依赖 OLAP/GRAPH/ES 与
+        # dependency_health 种子 id 对齐）；多实例依赖（如多 DATASOURCE）显式传入。
+        self._dependency_id = dependency_id if dependency_id is not None else name.lower()
         self._failure_threshold = failure_threshold
         self._reset_timeout = reset_timeout
         # 探测结果丢失（调用方未回调 record_*）时的自愈上限：超过该时长允许重新放行一次探测，

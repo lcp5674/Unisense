@@ -137,8 +137,11 @@ class ArqCollectionQueue:
         await RedisJobStore(redis).set(
             job_id, "QUEUED", {"source_id": source_id, "actor_id": actor_id}
         )
+        # arq enqueue_job 返回 Job 对象，其 job_id 即传入的 _job_id；显式标注为 str
+        # 以满足 mypy --strict 的 no-any-return（redis 为 Any 类型，job.job_id 被推断为 Any）。
+        arq_job_id: str = job.job_id
         # FR-019: 不再调用 redis.close()，复用连接池
-        return job.job_id
+        return arq_job_id
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
         from redis.asyncio import Redis as AsyncRedis

@@ -54,6 +54,48 @@ async def test_update_dependency_health_upserts(patched):
     session.commit.assert_awaited()
 
 
+async def test_upsert_preserves_unspecified_telemetry(patched_read):
+    """熔断事件式调用（仅 status/circuit_state/consecutive_failures）不得清零
+    P95 延迟 / 错误率 / 扩展信息等探针采集的遥测字段。"""
+    from sqlalchemy.dialects import mysql as mysql_dialect
+
+    await degradation.update_dependency_health(
+        "OLAP", "olap", status="DEGRADED", circuit_state="OPEN", consecutive_failures=3
+    )
+    stmt = patched_read.execute.call_args_list[0][0][0]
+    sql = str(stmt.compile(dialect=mysql_dialect.dialect()))
+    update_part = sql.split("ON DUPLICATE KEY UPDATE", 1)[1]
+    # 提供的字段必须出现在更新子句
+    assert "status" in update_part
+    assert "circuit_state" in update_part
+    assert "consecutive_failures" in update_part
+    # 未提供的遥测字段必须不出现（保护既有值，避免谎报错误率 0% / 丢失元数据）
+    assert "latency_p95_ms" not in update_part
+    assert "error_rate_pct" not in update_part
+    assert "meta" not in update_part
+
+
+async def test_upsert_includes_provided_telemetry(patched_read):
+    """探针显式提供遥测字段时，应纳入更新子句。"""
+    from sqlalchemy.dialects import mysql as mysql_dialect
+
+    await degradation.update_dependency_health(
+        "OLAP",
+        "olap",
+        status="DEGRADED",
+        circuit_state="OPEN",
+        latency_p95_ms=120,
+        error_rate_pct=2.5,
+        metadata={"threshold": 5},
+    )
+    stmt = patched_read.execute.call_args_list[0][0][0]
+    sql = str(stmt.compile(dialect=mysql_dialect.dialect()))
+    update_part = sql.split("ON DUPLICATE KEY UPDATE", 1)[1]
+    assert "latency_p95_ms" in update_part
+    assert "error_rate_pct" in update_part
+    assert "meta" in update_part
+
+
 async def test_persist_writes_event_and_health(patched):
     eb, session = patched
     await degradation._persist_degradation_and_health(
