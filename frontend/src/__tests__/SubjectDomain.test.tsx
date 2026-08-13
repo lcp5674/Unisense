@@ -49,20 +49,20 @@ describe("previewDomainCode", () => {
     expect(previewDomainCode("Sales Platform")).toBe("sales_platform");
   });
 
-  it("纯中文根域 → 拼音 slug", () => {
-    expect(previewDomainCode("销售")).toBe("xiaoshou");
+  it("纯中文根域 → 英文 slug", () => {
+    expect(previewDomainCode("销售")).toBe("sales");
   });
 
   it("子域带父域前缀", () => {
     expect(previewDomainCode("Order", "sales")).toBe("sales_order");
   });
 
-  it("子域纯中文 → 拼音并带父域前缀", () => {
-    expect(previewDomainCode("订单", "sales")).toBe("sales_dingdan");
+  it("子域纯中文 → 英文并带父域前缀", () => {
+    expect(previewDomainCode("订单", "sales")).toBe("sales_order");
   });
 
-  it("中英混合 → 拼音与 ASCII 用下划线连接", () => {
-    expect(previewDomainCode("销售订单GMV")).toBe("xiaoshoudingdan_gmv");
+  it("中英混合 → 英文与 ASCII 用下划线连接", () => {
+    expect(previewDomainCode("销售订单GMV")).toBe("sales_order_gmv");
   });
 
   it("含特殊符号折叠为下划线", () => {
@@ -89,7 +89,7 @@ describe("SubjectDomain 页面", () => {
     expect(screen.getByLabelText("新建子域-订单")).toBeTruthy();
   });
 
-  it("新建弹窗：编码预览随显示名实时变化（空名兜底 domain，中文转拼音）", async () => {
+  it("新建弹窗：编码预览随显示名实时变化（空名兜底 domain，中文转英文）", async () => {
     renderPage();
     await screen.findByText("销售");
     fireEvent.click(screen.getAllByText("新建根域")[0]);
@@ -102,9 +102,9 @@ describe("SubjectDomain 页面", () => {
     fireEvent.change(input, { target: { value: "Risk Control" } });
     expect((screen.getByTestId("domain-code-preview") as HTMLInputElement).value).toBe("risk_control");
 
-    // 纯中文 → 拼音
+    // 纯中文 → 英文
     fireEvent.change(input, { target: { value: "销售" } });
-    expect((screen.getByTestId("domain-code-preview") as HTMLInputElement).value).toBe("xiaoshou");
+    expect((screen.getByTestId("domain-code-preview") as HTMLInputElement).value).toBe("sales");
   });
 
   it("新建弹窗：选父域后编码预览带父域前缀", async () => {

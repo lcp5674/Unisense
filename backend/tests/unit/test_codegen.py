@@ -22,9 +22,14 @@ def test_slugify_code_ascii() -> None:
     assert slugify_code("  spaced  ") == "spaced"
 
 
-def test_slugify_code_chinese_returns_empty() -> None:
-    assert slugify_code("供应链") == ""
+def test_slugify_code_chinese_to_english() -> None:
+    assert slugify_code("供应链") == "supply_chain"
+    assert slugify_code("销售订单GMV") == "sales_order_gmv"
+
+
+def test_slugify_code_untranslatable_returns_empty() -> None:
     assert slugify_code("") == ""
+    assert slugify_code("!@# ") == ""
 
 
 async def test_generate_unique_code_no_conflict() -> None:

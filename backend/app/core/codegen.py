@@ -19,19 +19,47 @@ MAX_CODE_LEN = 64
 #: 冲突自增后缀上限（防止死循环）
 MAX_CODE_ATTEMPTS = 100
 
-# 非字母数字 → 下划线
-_NON_ALNUM = re.compile(r"[^a-z0-9]+")
-
 # 编码合法性：小写字母开头 + 小写字母数字下划线（对齐 auto_fill._CODE_SEGMENT_PATTERN）
 CODE_SEGMENT_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def slugify_code(name: str) -> str:
-    """把显示名规范化为编码片段：小写、非字母数字折叠为下划线、去首尾下划线。
+    """把显示名规范化为编码片段：中文转英文、ASCII 保留、段落用下划线连接。
 
-    返回空串表示无 ASCII 可提取（如纯中文名）。
+    中文段经中英术语字典翻译（贪心最长匹配），未覆盖词逐字拼音兜底；
+    空格/标点作为分隔符。返回空串表示无可提取字符（纯标点/空白名）。
+
+    与 ``subject_domain.service._slugify_code`` 行为保持一致。
     """
-    return _NON_ALNUM.sub("_", name.lower()).strip("_")
+    from app.core.zh_en_dict import zh_to_en
+
+    tokens: list[str] = []
+    cur: list[str] = []  # 当前 ASCII 字母数字段
+    cjk: list[str] = []  # 当前中文段
+    for ch in name:
+        is_cjk = "\u4e00" <= ch <= "\u9fff"
+        if is_cjk:
+            if cur:
+                tokens.append("".join(cur))
+                cur = []
+            cjk.append(ch)
+        elif re.match(r"[a-z0-9]", ch, re.IGNORECASE):
+            if cjk:
+                tokens.append(zh_to_en("".join(cjk)))
+                cjk = []
+            cur.append(ch.lower())
+        else:
+            if cjk:
+                tokens.append(zh_to_en("".join(cjk)))
+                cjk = []
+            if cur:
+                tokens.append("".join(cur))
+                cur = []
+    if cjk:
+        tokens.append(zh_to_en("".join(cjk)))
+    if cur:
+        tokens.append("".join(cur))
+    return "_".join(t for t in tokens if t)
 
 
 async def generate_unique_code(

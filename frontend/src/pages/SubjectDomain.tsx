@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { pinyin } from "pinyin-pro";
 import {
   Button, Card, Col, Row, Tree, Descriptions, Modal, Form, Input, InputNumber,
   Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip, Alert,
@@ -12,43 +11,47 @@ import {
 } from "../api";
 import type { SubjectDomainTreeNode, SubjectDomain } from "../types";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
+import { zhToEn } from "../utils/zhEnDict";
 
 /**
- * 前端编码预览（与后端 SubjectDomainService._slugify_code 规则对齐）：
- * 连续中文段转拼音（无音调）、ASCII 保留、段落用下划线连接；
- * 纯标点/空白名无可提取字符 → 根域回退 domain / 子域回退 {父域}_sub。
- * 仅用于表单预览，实际编码以后端生成/返回为准。
+ * 前端编码预览（与后端 codegen.slugify_code 规则对齐）：
+ * 连续中文段经中英术语字典翻译（贪心最长匹配）、未覆盖词拼音兜底、
+ * ASCII 保留、段落用下划线连接；纯标点/空白名无可提取字符 →
+ * 根域回退 domain / 子域回退 {父域}_sub。仅用于表单预览，
+ * 实际编码以后端生成/返回为准。
  */
 function slugifyCode(name: string): string {
   const tokens: string[] = [];
   let cur: string[] = [];
-  let curIsCjk: boolean | null = null;
+  let cjk: string[] = [];
   for (const ch of name) {
     const isCjk = /[\u4e00-\u9fff]/.test(ch);
     if (isCjk) {
-      if (curIsCjk === false) {
-        tokens.push(cur.join(""));
-        cur = [];
-      }
-      cur.push(pinyin(ch, { toneType: "none" }));
-      curIsCjk = true;
-    } else if (/[a-z0-9]/i.test(ch)) {
-      if (curIsCjk === true) {
-        tokens.push(cur.join(""));
-        cur = [];
-      }
-      cur.push(ch);
-      curIsCjk = false;
-    } else {
       if (cur.length > 0) {
         tokens.push(cur.join(""));
         cur = [];
       }
-      curIsCjk = null;
+      cjk.push(ch);
+    } else if (/[a-z0-9]/i.test(ch)) {
+      if (cjk.length > 0) {
+        tokens.push(zhToEn(cjk.join("")));
+        cjk = [];
+      }
+      cur.push(ch.toLowerCase());
+    } else {
+      if (cjk.length > 0) {
+        tokens.push(zhToEn(cjk.join("")));
+        cjk = [];
+      }
+      if (cur.length > 0) {
+        tokens.push(cur.join(""));
+        cur = [];
+      }
     }
   }
+  if (cjk.length > 0) tokens.push(zhToEn(cjk.join("")));
   if (cur.length > 0) tokens.push(cur.join(""));
-  return tokens.join("_").toLowerCase().replace(/^_+|_+$/g, "");
+  return tokens.join("_").replace(/^_+|_+$/g, "");
 }
 
 export function previewDomainCode(name: string, parentCode?: string | null): string {

@@ -151,8 +151,8 @@ async def test_create_term_auto_generates_code() -> None:
     assert resp.status == TermStatus.DRAFT
 
 
-async def test_create_term_auto_code_fallback_for_chinese() -> None:
-    """纯中文名无 ASCII 时回退 term_{domain}。"""
+async def test_create_term_auto_code_chinese_to_english() -> None:
+    """纯中文名 → 英文 slug（如 活跃用户 + user → user_active_user）。"""
     db = MagicMock()
     svc = GlossaryService(db)
     repo = MagicMock()
@@ -173,4 +173,55 @@ async def test_create_term_auto_code_fallback_for_chinese() -> None:
         owner_id=1,
     )
     resp = await svc.create_term(payload, 1)
-    assert resp.term_code == "term_user"
+    assert resp.term_code == "user_active_user"
+
+
+# ---- 编码自动生成：slug 缺失降级分支 ----
+async def test_create_term_auto_code_name_slug_only() -> None:
+    """domain 无可提取字符（纯标点）时回退 term_{name_slug}。"""
+    db = MagicMock()
+    svc = GlossaryService(db)
+    repo = MagicMock()
+    repo.get_term = AsyncMock(return_value=None)
+    repo.save_term = AsyncMock(side_effect=lambda t: _persist(t))
+    repo.count_term_versions = AsyncMock(return_value=0)
+    repo.save_term_version = AsyncMock()
+    repo.all_terms = AsyncMock(return_value=[])
+    repo.save_conflict = AsyncMock()
+    repo.commit = AsyncMock()
+    svc._repo = repo
+
+    payload = TermCreate(
+        term_code=None,
+        name="Active User",
+        definition="d",
+        domain="!@#",
+        owner_id=1,
+    )
+    resp = await svc.create_term(payload, 1)
+    assert resp.term_code == "term_active_user"
+
+
+async def test_create_term_auto_code_both_empty() -> None:
+    """domain/name 均为纯标点无可提取字符时回退基础编码 term。"""
+    db = MagicMock()
+    svc = GlossaryService(db)
+    repo = MagicMock()
+    repo.get_term = AsyncMock(return_value=None)
+    repo.save_term = AsyncMock(side_effect=lambda t: _persist(t))
+    repo.count_term_versions = AsyncMock(return_value=0)
+    repo.save_term_version = AsyncMock()
+    repo.all_terms = AsyncMock(return_value=[])
+    repo.save_conflict = AsyncMock()
+    repo.commit = AsyncMock()
+    svc._repo = repo
+
+    payload = TermCreate(
+        term_code=None,
+        name="!!!",
+        definition="d",
+        domain="@@@",
+        owner_id=1,
+    )
+    resp = await svc.create_term(payload, 1)
+    assert resp.term_code == "term"

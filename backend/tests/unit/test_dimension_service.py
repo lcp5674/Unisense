@@ -32,6 +32,7 @@ async def _svc() -> tuple[DimensionService, MagicMock]:
     repo.save_dimension = AsyncMock(side_effect=_persist)
     repo.save_member = AsyncMock(side_effect=lambda m: m)
     repo.list_members = AsyncMock(return_value=[])
+    repo.get_member = AsyncMock(return_value=None)
     repo.get_reconciliation = AsyncMock(return_value=None)
     repo.save_reconciliation = AsyncMock(side_effect=lambda r: r)
     repo.commit = AsyncMock()
@@ -112,8 +113,8 @@ async def test_create_member_auto_generates_code() -> None:
         member_name="华东", status="PUBLISHED",
     )
     out = await svc.create_member(payload)
-    # 纯中文名 → 回退 {dim_code}_member
-    assert out.member_code == "geo_region_member"
+    # 纯中文名 → 英文 slug（华东 → east_china），带维度前缀
+    assert out.member_code == "geo_region_east_china"
 
 
 async def test_create_member_auto_code_uses_name_slug() -> None:
@@ -129,3 +130,36 @@ async def test_create_member_auto_code_uses_name_slug() -> None:
     )
     out = await svc.create_member(payload)
     assert out.member_code == "geo_region_east_china"
+
+
+# ---- 编码自动生成：slug 缺失降级分支与中文转英文 ----
+async def test_generate_dim_code_name_only() -> None:
+    """domain 无可提取字符（纯标点）时降级为 dim_{name_slug}。"""
+    svc, repo = await _svc()
+    payload = DimensionCreate(dim_code=None, name="Customer Region", domain="!@#", owner_id=1)
+    out = await svc.create_dimension(payload, 1)
+    assert out.dim_code == "dim_customer_region"
+
+
+async def test_generate_dim_code_domain_only() -> None:
+    """name 无可提取字符（纯标点）时降级为 dim_{domain_slug}。"""
+    svc, repo = await _svc()
+    payload = DimensionCreate(dim_code=None, name="!!!", domain="geo", owner_id=1)
+    out = await svc.create_dimension(payload, 1)
+    assert out.dim_code == "dim_geo"
+
+
+async def test_generate_dim_code_both_empty() -> None:
+    """domain/name 均为纯标点无可提取字符时回退为 dim。"""
+    svc, repo = await _svc()
+    payload = DimensionCreate(dim_code=None, name="!!!", domain="@@@", owner_id=1)
+    out = await svc.create_dimension(payload, 1)
+    assert out.dim_code == "dim"
+
+
+async def test_generate_dim_code_chinese_to_english() -> None:
+    """中文 domain/name → 英文 slug（地理 + 地区 → geo_area）。"""
+    svc, repo = await _svc()
+    payload = DimensionCreate(dim_code=None, name="地区", domain="地理", owner_id=1)
+    out = await svc.create_dimension(payload, 1)
+    assert out.dim_code == "geo_area"
