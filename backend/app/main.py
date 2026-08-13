@@ -44,7 +44,12 @@ from app.core.degradation import ensure_dependency_health_seed, handle_circuit_s
 from app.core.eventbus import get_eventbus, init_eventbus
 from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
-from app.core.middleware import ErrorHandlerMiddleware, SecurityHeadersMiddleware, TraceIdMiddleware
+from app.core.middleware import (
+    DegradationMiddleware,
+    ErrorHandlerMiddleware,
+    SecurityHeadersMiddleware,
+    TraceIdMiddleware,
+)
 from app.core.resilience import register_degradation_listener
 from app.db.redis import close_redis_pool, init_redis_pool
 from app.services.consume.rate_limiter import init_rate_limiter
@@ -214,6 +219,9 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type", "X-API-Version", "X-Trace-Id"],
     )
     app.add_middleware(ErrorHandlerMiddleware)
+    # 降级舱壁：仅拦截依赖降级异常（DEPENDENCY_DEGRADED_*）并标注 degraded，置于
+    # ErrorHandlerMiddleware 内层（先执行），非降级异常上抛交由 ErrorHandler 统一处理。
+    app.add_middleware(DegradationMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(TraceIdMiddleware)
     app.add_middleware(MetricsMiddleware)

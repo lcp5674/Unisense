@@ -148,3 +148,69 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         for key, value in _SECURITY_HEADERS.items():
             response.headers[key] = value
         return response
+
+
+# 降级舱壁：命中依赖降级业务码（TD §5.2.5 ⑤）时统一标注 degraded，使上游区分
+# 「依赖降级（可重试 503）」与「系统错误（500）」，且相邻能力不受单依赖故障级联。
+_DEGRADED_DEPENDENCY_CODES: frozenset[str] = frozenset(
+    {
+        "DEPENDENCY_DEGRADED_ENGINE",
+        "DEPENDENCY_DEGRADED_GRAPH",
+        "DEPENDENCY_DEGRADED_LLM",
+    }
+)
+
+# 依赖降级业务码 → 用户态降级文案（TD §5.2 降级矩阵：OLAP 查询返 503；
+# Neo4j 血缘标 stale / LLM 取消 AI 预填）。
+_DEGRADED_MESSAGES: dict[str, str] = {
+    "DEPENDENCY_DEGRADED_ENGINE": "查询引擎暂不可用，请稍后重试",
+    "DEPENDENCY_DEGRADED_GRAPH": "血缘图暂不可用，指标列表仍可浏览",
+    "DEPENDENCY_DEGRADED_LLM": "AI 暂不可用，请手动填写",
+}
+
+
+class DegradationMiddleware(BaseHTTPMiddleware):
+    """降级舱壁中间件（TD §5.2.5 ⑤ 舱壁隔离模式）。
+
+    仅拦截依赖降级异常（``DEPENDENCY_DEGRADED_*``）：在响应体附加 ``degraded=true`` 与
+    降级文案、响应头 ``X-Degraded: true`` 与 ``Retry-After``，使前端/上游能区分依赖降级与
+    系统错误；单一依赖故障不级联为通用 5xx，相邻能力不受影响（舱壁）。
+
+    非降级异常（含 500/4xx）原样上抛，由外层 ``ErrorHandlerMiddleware`` 统一处理，
+    保证异常分层与错误码语义不被本中间件吞掉。
+    """
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """捕获依赖降级异常并标注降级响应；其余异常上抛。
+
+        Args:
+            request: 请求对象。
+            call_next: 下一个中间件。
+
+        Returns:
+            降级标注后的 503 响应；或透传正常响应；非降级异常向上抛出。
+        """
+        trace_id = getattr(request.state, "trace_id", "") or request.headers.get("X-Trace-Id", "")
+        try:
+            return await call_next(request)
+        except UnisenseError as exc:
+            if exc.error_code not in _DEGRADED_DEPENDENCY_CODES:
+                raise  # 非降级异常：交由外层 ErrorHandlerMiddleware 统一处理
+            # 依赖降级：标注 degraded，附加降级文案与 Retry-After（上游按 error_code 路由退避）
+            headers: dict[str, str] = {"X-Degraded": "true"}
+            retry_after = exc.ctx.get("retry_after") if isinstance(exc.ctx, dict) else None
+            if retry_after is not None:
+                headers["Retry-After"] = str(int(retry_after))
+            message = _DEGRADED_MESSAGES.get(exc.error_code, "依赖暂不可用，请稍后重试")
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "code": exc.error_code,
+                    "message": message,
+                    "trace_id": trace_id,
+                    "detail": exc.ctx or None,
+                    "degraded": True,
+                    "degradation_message": message,
+                },
+                headers=headers,
+            )

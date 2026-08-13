@@ -20,6 +20,7 @@ from app.core.exceptions import UnisenseError
 from app.core.middleware import (
     _ERROR_CODE_HTTP_STATUS,
     _SECURITY_HEADERS,
+    DegradationMiddleware,
     ErrorHandlerMiddleware,
     SecurityHeadersMiddleware,
     TraceIdMiddleware,
@@ -168,3 +169,81 @@ class TestSecurityHeadersMiddleware:
         response = await mw.dispatch(request, call_next)
         for key, value in _SECURITY_HEADERS.items():
             assert response.headers[key] == value, key
+
+
+class _DegradedEngineError(UnisenseError):
+    """命中降级舱壁的依赖降级异常（DEPENDENCY_DEGRADED_ENGINE，503）。"""
+
+    error_code = "DEPENDENCY_DEGRADED_ENGINE"
+    http_status = 503
+
+
+class _DegradedGraphError(UnisenseError):
+    error_code = "DEPENDENCY_DEGRADED_GRAPH"
+    http_status = 503
+
+
+class _GenericUnisenseError(UnisenseError):
+    """非降级异常，应上抛交由 ErrorHandlerMiddleware 处理。"""
+
+    error_code = "INTERNAL_ERROR"
+    http_status = 500
+
+
+class TestDegradationMiddleware:
+    async def test_annotates_engine_degradation_as_503_with_degraded_flag(self) -> None:
+        mw = DegradationMiddleware(lambda *a, **k: None)
+        request = _request()
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            raise _DegradedEngineError(
+                "查询引擎不可用", ctx={"retry_after": 30, "accept_stale": True}
+            )
+
+        response = await mw.dispatch(request, call_next)
+        assert response.status_code == 503
+        assert response.headers.get("X-Degraded") == "true"
+        assert response.headers.get("Retry-After") == "30"
+        body = json.loads(response.body)
+        assert body["code"] == "DEPENDENCY_DEGRADED_ENGINE"
+        assert body["degraded"] is True
+        assert body["degradation_message"] == "查询引擎暂不可用，请稍后重试"
+        # ctx 透传（如 accept_stale），不丢失原上下文
+        assert body["detail"] == {"retry_after": 30, "accept_stale": True}
+
+    async def test_maps_each_dependency_to_its_degradation_message(self) -> None:
+        mw = DegradationMiddleware(lambda *a, **k: None)
+        request = _request()
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            raise _DegradedGraphError("血缘图不可用")
+
+        response = await mw.dispatch(request, call_next)
+        assert response.status_code == 503
+        body = json.loads(response.body)
+        assert body["degradation_message"] == "血缘图暂不可用，指标列表仍可浏览"
+
+    async def test_non_degraded_error_reraised_for_outer_handler(self) -> None:
+        # 非降级异常必须上抛（不吞），由外层 ErrorHandlerMiddleware 统一处理
+        mw = DegradationMiddleware(lambda *a, **k: None)
+        request = _request()
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            raise _GenericUnisenseError("内部错误")
+
+        try:
+            await mw.dispatch(request, call_next)
+            raise AssertionError("expected _GenericUnisenseError to propagate")
+        except _GenericUnisenseError:
+            pass
+
+    async def test_success_response_passthrough_unchanged(self) -> None:
+        mw = DegradationMiddleware(lambda *a, **k: None)
+        request = _request()
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            return PlainTextResponse("ok")
+
+        response = await mw.dispatch(request, call_next)
+        assert response.status_code == 200
+        assert response.body == b"ok"
