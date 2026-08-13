@@ -3577,3 +3577,38 @@ erDiagram
 ### 20.4 迭代追踪与 PRD 对齐
 - 每 sprint 读 PRD §9 验收项，挑本迭代 FR，建 `module-status.yaml` 子任务。
 - 迭代结束生成"迭代验收报告"：哪些 FR 已 verified、缺口、文档是否同步。
+
+---
+
+## §21. 全维度审查整改变更附录（2026-08-13）
+
+> 本节记录 GB/T 36073 L3 全维度穿透式审查整改对 TD 的影响，供 contract_check.py doc_sync 门禁校验。
+
+### §21.1 新增数据表（对齐 §4.1）
+
+| 迁移版本 | 表名 | 用途 | 对齐 FR |
+|---------|------|------|---------|
+| 0032 | key_rotation_log | 密钥轮换审计 | SEC-02 |
+| 0032 | jwt_blacklist | JWT 黑名单（jti + TTL） | SEC-06 |
+| 0032 | degradation_entry | 降级注册中心 | OPS-05 |
+| 0032 | feature_flag | 特性开关 | OPS-09 |
+| 0032 | dead_letter_event | 死信队列事件 | TECH-04 |
+
+### §21.2 新增/变更接口（对齐 §3）
+
+| 端点 | 方法 | 变更类型 | 对齐 FR |
+|------|------|---------|---------|
+| /admin/keys/rotate | POST | 新增 | SEC-02 |
+| /admin/keys/migrate | POST | 新增 | SEC-02 |
+| /admin/keys/status | GET | 新增 | SEC-02 |
+| /health/degraded | GET | 新增 | OPS-05 |
+| /api/v1/feature-flags | GET/PUT | 新增 | OPS-09 |
+| /api/v1/auth/logout | POST | 变更（jti 黑名单） | SEC-06 |
+
+### §21.3 配置项变更（对齐 §12.2）
+
+| 配置项 | 默认值 | 用途 | 对齐 FR |
+|--------|-------|------|---------|
+| UNISENSE_JWT_EXPIRE_MINUTES | 15 | JWT 有效期缩短 | SEC-12 |
+| UNISENSE_TRUSTED_PROXIES | "" | XFF 白名单 | SEC-03 |
+| UNISENSE_GLOSSARY_SYNONYM_THRESHOLD | 0.8 | 术语冲突阈值可配 | PROD-06 |

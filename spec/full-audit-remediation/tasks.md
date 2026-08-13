@@ -135,12 +135,12 @@
 - [X] T041 [P] [US6] TECH-04: 实现内存死信队列+定时重放 in backend/app/core/dlq.py
 - [X] T042 [P] [US6] TECH-05: 缓存锁字典添加 LRU 上限(10,000) in backend/app/services/semantic/cache.py
 - [X] T043 [P] [US6] TECH-07: MySQL 连接池添加 pool_pre_ping=True + pool_recycle=1800 in backend/app/db/mysql.py
-- [ ] T044 [P] [US6] TECH-11: 服务层 32 处 except Exception 静默吞错添加 logger.warning() in backend/app/services/semantic/cache.py + olap_executor.py + parser.py + rate_limiter.py + events.py + tasks.py
+- [X] T044 [P] [US6] TECH-11: 服务层 32 处 except Exception 静默吞错添加 logger.warning() in backend/app/services/semantic/cache.py + olap_executor.py + parser.py + rate_limiter.py + events.py + tasks.py
 - [X] T045 [P] [US6] TECH-13: tracking.py 日期参数格式错误返回 422 而非静默忽略 in backend/app/api/tracking.py
-- [ ] T046 [P] [US6] TECH-09: ClickHouse 连接器查询改用参数化 in backend/app/services/collector/connectors/clickhouse.py
+- [X] T046 [P] [US6] TECH-09: ClickHouse 连接器查询改用参数化 in backend/app/services/collector/connectors/clickhouse.py
 - [X] T047 [P] [US6] TECH-10: LLM 客户端添加重试(3次+指数退避)+熔断器 in backend/app/services/llm/client.py
-- [ ] T048 [US6] TECH-12: UoW 渐进迁移 — P0/P1 相关 API 端点(metrics/collector/governance)的 db.commit() 迁移至 Service 层 in backend/app/api/metrics.py + backend/app/api/collector.py + backend/app/api/governance.py + backend/app/services/semantic/service.py + backend/app/services/collector/service.py + backend/app/services/governance/service.py
-- [ ] T049 [US6] 补充技术架构回归测试 in backend/tests/unit/test_eventbus_dlq.py + test_cache_lock_limit.py + test_llm_retry.py
+- [X] T048 [US6] TECH-12: UoW 渐进迁移 — P0/P1 相关 API 端点(metrics/collector/governance)的 db.commit() 迁移至 Service 层 in backend/app/api/metrics.py + backend/app/api/collector.py + backend/app/api/governance.py + backend/app/services/semantic/service.py + backend/app/services/collector/service.py + backend/app/services/governance/service.py
+- [X] T049 [US6] 补充技术架构回归测试 in backend/tests/unit/test_eventbus_dlq.py + test_cache_lock_limit.py + test_llm_retry.py
 
 **Checkpoint**: 技术架构健壮性提升
 
@@ -152,15 +152,15 @@
 
 **Independent Test**: 编码创建后不可改；冲突72h自动升级；无效规则被拒绝；207逐项展示
 
-- [ ] T050 [P] [US7] PROD-02: 指标编码创建后仅DRAFT允许修改且需审批 in backend/app/services/semantic/service.py + backend/app/api/metrics.py
-- [ ] T051 [P] [US7] PROD-04: 冲突仲裁 OPEN 超72小时自动升级 in backend/app/services/conflict/service.py + backend/app/tasks/conflict_tasks.py(新增定时任务)
+- [X] T050 [P] [US7] PROD-02: 指标编码创建后仅DRAFT允许修改且需审批 in backend/app/services/semantic/service.py + backend/app/api/metrics.py
+- [X] T051 [P] [US7] PROD-04: 冲突仲裁 OPEN 超72小时自动升级 in backend/app/services/conflict/service.py + backend/app/tasks/conflict_tasks.py(新增定时任务)
 - [X] T052 [P] [US7] PROD-05: 质量规则阈值格式异常拒绝创建(422) in backend/app/services/quality/service.py
-- [ ] T053 [P] [US7] PROD-06: 术语同义词冲突阈值(80%)移入 system_dict 可配置 in backend/app/services/glossary/service.py
+- [X] T053 [P] [US7] PROD-06: 术语同义词冲突阈值(80%)移入 system_dict 可配置 in backend/app/services/glossary/service.py
 - [X] T054 [P] [US7] PROD-07: 被遗忘权 token 改用 secrets.token_hex(16) 不关联 user_id in backend/app/services/governance/service.py
 - [X] T055 [P] [US7] PROD-08: 前端对 DEPENDENCY_DEGRADED_ENGINE 错误码展示降级提示 in frontend/src/utils/apiErrorHandlers.ts + frontend/src/pages/QueryWorkspace.tsx
-- [ ] T056 [P] [US7] PROD-09: 前端对 207 Multi-Status 响应逐项解析展示 in frontend/src/utils/apiErrorHandlers.ts + frontend/src/pages/DataSources.tsx
+- [X] T056 [P] [US7] PROD-09: 前端对 207 Multi-Status 响应逐项解析展示 in frontend/src/utils/apiErrorHandlers.ts + frontend/src/pages/DataSources.tsx
 - [X] T057 [P] [US7] PROD-03: 前端主题域树组件第3层节点禁止显示添加子域 in frontend/src/pages/SubjectDomain.tsx
-- [ ] T058 [US7] 补充产品逻辑回归测试 in backend/tests/unit/test_conflict_timeout.py + test_quality_rule_validation.py + test_glossary_threshold.py
+- [X] T058 [US7] 补充产品逻辑回归测试 in backend/tests/unit/test_conflict_timeout.py + test_quality_rule_validation.py + test_glossary_threshold.py
 
 **Checkpoint**: 产品逻辑正确性保证
 
@@ -198,8 +198,8 @@
 - [X] T071 [P] [US9] OPS-04: Alembic 迁移幂等性 CI 测试(upgrade→downgrade→upgrade) in scripts/test_migration_idempotent.py + .github/workflows/migration-test.yml(或CI配置)
 - [X] T072 [P] [US9] OPS-05: 统一降级注册中心实现 + /health/degraded 端点 in backend/app/core/degradation_registry.py + backend/app/api/health.py
 - [X] T073 [P] [US9] OPS-06: seed 脚本支持 ADMIN_INITIAL_PASSWORD 环境变量 in backend/scripts/seed_admin.py(或对应seed脚本)
-- [ ] T074 [P] [US9] OPS-07: 核心业务维度 Prometheus 指标（指标发布数/天、冲突仲裁时长、查询成功率、LLM调用成功率） in backend/app/core/metrics.py
-- [ ] T075 [P] [US9] OPS-08: 审计归档任务容量预警（审计表行数阈值告警） in backend/app/tasks/audit_archive.py
+- [X] T074 [P] [US9] OPS-07: 核心业务维度 Prometheus 指标（指标发布数/天、冲突仲裁时长、查询成功率、LLM调用成功率） in backend/app/core/metrics.py
+- [X] T075 [P] [US9] OPS-08: 审计归档任务容量预警（审计表行数阈值告警） in backend/app/tasks/audit_archive.py
 - [X] T076 [P] [US9] OPS-09: 特性开关框架实现（Redis存储+中间件检查+按域/用户灰度） in backend/app/core/feature_flags.py + backend/app/api/admin.py
 - [X] T077 [US9] 补充运营能力集成测试 in backend/tests/integration/test_degradation_registry_integration.py + test_feature_flags_integration.py
 
@@ -211,12 +211,12 @@
 
 **Purpose**: 跨故事改进和收尾
 
-- [ ] T078 [P] 更新 module-status.yaml 反映整改完成 in docs/module-status.yaml
-- [ ] T079 [P] 更新 CHANGELOG_MODULES.md 记录整改变更 in docs/CHANGELOG_MODULES.md
-- [ ] T080 [P] 更新 technical-design.md §3/§4/§12 反映新增表和接口变更 in docs/technical-design.md
-- [ ] T081 [P] 删除 audit-remediation 旧 spec 目录（已过时） in spec/audit-remediation/
-- [ ] T082 [P] 代码格式化+lint 修复（ruff check + ruff format） in backend/
-- [ ] T083 [P] 前端代码格式化+lint 修复 in frontend/
+- [X] T078 [P] 更新 module-status.yaml 反映整改完成 in docs/module-status.yaml
+- [X] T079 [P] 更新 CHANGELOG_MODULES.md 记录整改变更 in docs/CHANGELOG_MODULES.md
+- [X] T080 [P] 更新 technical-design.md §3/§4/§12 反映新增表和接口变更 in docs/technical-design.md
+- [X] T081 [P] 删除 audit-remediation 旧 spec 目录（已过时） in spec/audit-remediation/
+- [X] T082 [P] 代码格式化+lint 修复（ruff check + ruff format） in backend/
+- [X] T083 [P] 前端代码格式化+lint 修复 in frontend/
 
 ---
 
@@ -226,17 +226,17 @@
 
 **Purpose**: 构建、部署、UI验证
 
-- [ ] T084 构建后端 Docker 镜像并修复编译错误 in backend/ (docker build + pytest)
-- [ ] T085 构建前端并修复编译错误 in frontend/ (npm run build)
-- [ ] T086 Docker Compose 全栈部署并验证 in docker-compose.yml
-- [ ] T087 运行全量后端测试套件(pytest)确认无回归 in backend/tests/
-- [ ] T088 运行前端测试套件(vitest)确认无回归 in frontend/
-- [ ] T089 运行安全测试套件确认 P0/P1 修复有效 in backend/tests/security/
-- [ ] T090 UI 验证 — 密钥轮换管理界面 in frontend/
-- [ ] T091 UI 验证 — 健康检查/降级面板 in frontend/
-- [ ] T092 UI 验证 — 查询工作台降级提示 in frontend/
-- [ ] T093 UI 验证 — 批量废弃207逐项展示 in frontend/
-- [ ] T094 UI 验证 — 主题域3层限制 in frontend/
+- [X] T084 构建后端 Docker 镜像并修复编译错误 in backend/ (docker build + pytest)
+- [X] T085 构建前端并修复编译错误 in frontend/ (npm run build)
+- [X] T086 Docker Compose 全栈部署并验证 in docker-compose.yml
+- [X] T087 运行全量后端测试套件(pytest)确认无回归 in backend/tests/
+- [X] T088 运行前端测试套件(vitest)确认无回归 in frontend/
+- [X] T089 运行安全测试套件确认 P0/P1 修复有效 in backend/tests/security/
+- [X] T090 UI 验证 — 密钥轮换管理界面 in frontend/
+- [X] T091 UI 验证 — 健康检查/降级面板 in frontend/
+- [X] T092 UI 验证 — 查询工作台降级提示 in frontend/
+- [X] T093 UI 验证 — 批量废弃207逐项展示 in frontend/
+- [X] T094 UI 验证 — 主题域3层限制 in frontend/
 
 ---
 
