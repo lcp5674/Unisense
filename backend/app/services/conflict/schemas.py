@@ -44,7 +44,7 @@ class ConflictCheckResult(BaseModel):
 class ArbitrateRequest(BaseModel):
     decision: Literal["choose_canonical", "merge", "keep_diff"]
     canonical_metric_code: str | None = None
-    arbitrator_id: int
+    arbitrator_id: int | None = None  # PLAT-2: 以服务端认证身份为准，客户端可不传
     reason: str = ""
     rule_template: str | None = None
 

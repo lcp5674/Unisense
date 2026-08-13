@@ -34,7 +34,9 @@ def mock_repo():
 
 
 class TestDomainValidation:
-    async def test_create_metric_with_unconfigured_domain_is_allowed(self, mock_db, mock_repo) -> None:
+    async def test_create_metric_with_unconfigured_domain_is_allowed(
+        self, mock_db, mock_repo
+    ) -> None:
         """降级语义：domain 未在 subject_domain 配置（NotFoundError）时放行。
 
         对齐语义服务 _validate_domain_active 的降级约定——subject_domain 表为空/未种子时

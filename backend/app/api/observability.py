@@ -16,7 +16,7 @@ from app.api.responses import get_trace_id, ok
 from app.core.audit import write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
-from app.services.observability.schemas import FeedbackCreate
+from app.services.observability.schemas import FeedbackCreate, FeedbackResponse
 from app.services.observability.service import ObservabilityService
 
 router = APIRouter(prefix="/observability", tags=["observability"])
@@ -59,7 +59,7 @@ async def submit_feedback(
     )
     # PLAT-3: 审计与业务同一事务原子提交
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=FeedbackResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.get("/feedback", dependencies=_READ_DEPS)
@@ -71,7 +71,13 @@ async def list_feedback(
     limit: int = Query(100),
 ) -> Any:
     items = await ObservabilityService(db).list_feedback(target_type, limit)
-    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+    return ok(
+        data={
+            "items": [FeedbackResponse.from_model(i) for i in items],
+            "total": len(items),
+        },
+        trace_id=trace_id,
+    )
 
 
 @router.get("/metrics/quality", dependencies=_READ_DEPS)
@@ -140,7 +146,7 @@ async def submit_nps(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=FeedbackResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.patch(
@@ -171,4 +177,4 @@ async def update_feedback_status(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    return ok(data=FeedbackResponse.from_model(resp), trace_id=trace_id)

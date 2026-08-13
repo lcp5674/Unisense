@@ -42,7 +42,7 @@ async def create_term(
         actor_id=user.id,
         action="term.create",
         entity_type="term",
-        entity_id=payload.term_code,
+        entity_id=str(payload.term_code),
         detail={},
         trace_id=trace_id,
     )

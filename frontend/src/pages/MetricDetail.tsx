@@ -38,7 +38,6 @@ import {
   listVersions,
   piiReview,
   promoteMetric,
-  publishMetric,
   removeFavorite,
   rollbackMetric,
   submitReview,
@@ -351,7 +350,6 @@ export function MetricDetail() {
   const isAdmin = role === "platform_admin" || role === "domain_admin";
   const isOwnerOrAdmin = isAdmin || role === "metric_owner";
   const canPiiReview = isAdmin && metric.pii_flag;
-  const canPublish = metric.status !== "PUBLISHED" && metric.status !== "DEPRECATED";
   const piiMasked = metric.pii_flag && !SENSITIVE_ROLES.includes(role);
 
   const headerActions = (
@@ -391,14 +389,14 @@ export function MetricDetail() {
           提交评审
         </Button>
       )}
-      {canPublish && (
+      {metric.status === "REVIEW" && isAdmin && (
         <Button
           type="primary"
           loading={busy}
-          onClick={() => runAction(() => publishMetric(metric.metric_code, { change_reason: "发布指标" }), "发布")}
+          onClick={() => runAction(() => approveMetric(metric.metric_code, {}), "正式发布")}
           disabled={metric.pii_flag && !metric.compliance_reviewed}
         >
-          发布{metric.pii_flag && !metric.compliance_reviewed ? "（需先 PII 复核）" : ""}
+          正式发布{metric.pii_flag && !metric.compliance_reviewed ? "（需先 PII 复核）" : ""}
         </Button>
       )}
       {metric.status === "REVIEW" && isAdmin && (

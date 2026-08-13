@@ -12,7 +12,7 @@ _ALLOWED_TARGET_TYPES = {"metric", "term", "report", "dashboard"}
 
 
 class FeedbackCreate(BaseModel):
-    user_id: int
+    user_id: int | None = None  # PLAT-2: 以服务端认证身份为准，客户端可不传
     target_type: str
     target_id: str | None = None
     rating: int | None = None

@@ -45,7 +45,7 @@ async def create_dimension(
         actor_id=user.id,
         action="dimension.create",
         entity_type="dimension",
-        entity_id=payload.dim_code,
+        entity_id=str(payload.dim_code),
         detail={},
         trace_id=trace_id,
     )

@@ -16,7 +16,7 @@ class TermStatus(enum.StrEnum):
 
 
 class TermCreate(BaseModel):
-    term_code: str
+    term_code: str | None = None  # 缺省由系统自动生成（domain_name slug）
     name: str
     definition: str
     domain: str
@@ -140,4 +140,4 @@ class TermRelationResponse(BaseModel):
 
 class ConflictResolve(BaseModel):
     decision: str  # RESOLVED | IGNORED
-    resolver_id: int
+    resolver_id: int | None = None  # PLAT-2: 以服务端认证身份为准，客户端可不传

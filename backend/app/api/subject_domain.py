@@ -41,6 +41,12 @@ def _get_service(db: AsyncSession = Depends(get_session)) -> SubjectDomainServic
 
 
 @router.get(
+    "",
+    response_model=ApiResponse[list[SubjectDomainTreeNode]],
+    summary="查询域树",
+    dependencies=_READ_DEPS,
+)
+@router.get(
     "/",
     response_model=ApiResponse[list[SubjectDomainTreeNode]],
     summary="查询域树",
