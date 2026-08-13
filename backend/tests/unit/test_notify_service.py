@@ -60,6 +60,67 @@ async def test_upsert_subscription_creates() -> None:
     repo.save_subscription.assert_awaited()
 
 
+# ---- handle_business_event（EventBus 业务事件 → 通知闭环）----
+
+
+async def test_handle_business_event_quality_anomaly() -> None:
+    """quality.anomaly 事件落 EventLog 并按订阅扇出（source 映射 quality）。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=10, channel="CONSOLE", event_type="quality.anomaly", enabled=True
+            )
+        ]
+    )
+    out = await svc.handle_business_event(
+        {
+            "event_type": "quality.anomaly",
+            "metric_id": 1,
+            "level": "P1",
+            "rule_type": "COMPLETENESS",
+            "payload": {"obs_value": "0.55"},
+        }
+    )
+    assert out["notifications"] == 1
+    assert out["delivered"] == 1
+    event_type = repo.save_event.call_args.args[0].event_type
+    assert event_type == "quality.anomaly"
+
+
+async def test_handle_business_event_eventbus_format() -> None:
+    """兼容 EventBus.publish 的 {event_type, payload, actor_id} 嵌套格式。"""
+    svc, repo = _svc()
+    out = await svc.handle_business_event(
+        {
+            "event_type": "conflict.detected",
+            "payload": {"conflict_id": "c1", "level": "WARN"},
+            "actor_id": "3",
+        }
+    )
+    assert out["event_id"] == 1
+    event = repo.save_event.call_args.args[0]
+    assert event.source == "semantic"  # conflict → semantic（白名单映射）
+
+
+async def test_handle_business_event_empty_type_returns_zero() -> None:
+    svc, _ = _svc()
+    out = await svc.handle_business_event({"foo": "bar"})
+    assert out == {"event_id": 0, "notifications": 0, "delivered": 0}
+
+
+async def test_handle_business_event_unknown_source_maps_system() -> None:
+    """未知来源前缀映射为 system，非法 level 收敛为 INFO。"""
+    svc, repo = _svc()
+    out = await svc.handle_business_event(
+        {"event_type": "weird.event", "level": "PANIC", "payload": {"x": 1}}
+    )
+    assert out["event_id"] == 1
+    event = repo.save_event.call_args.args[0]
+    assert event.source == "system"
+    assert event.level == "INFO"
+
+
 class TestDispatchChannelNormalization:
     """回归：DB 渠道为大写枚举值（EMAIL/WEBHOOK/...），_dispatch 曾只匹配小写，导致
     除 console 外的渠道全部投递失败。

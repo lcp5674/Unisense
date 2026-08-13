@@ -54,7 +54,17 @@ class ConflictService(BaseService):
         self._llm = llm or DeterministicFallbackLlmClient()
 
     async def _safe_publish(self, event: dict[str, Any]) -> None:
-        """事件发布为 best-effort：通知/治理服务不可达时静默降级，不阻断主流程。"""
+        """事件发布为 best-effort：通知/治理服务不可达时静默降级，不阻断主流程。
+
+        优先经统一 EventBus 发布（供 notify 消费者落库投递），legacy HTTP 通道保留兼容。
+        """
+        try:
+            event_type = event.get("event_type", "")
+            if event_type:
+                payload = {k: v for k, v in event.items() if k != "event_type"}
+                await self._publish_event(event_type, payload)
+        except Exception as exc:  # noqa: BLE001 - 事件降级，不向上抛
+            logger.warning("conflict EventBus 发布失败（best-effort 跳过）：%s", exc)
         try:
             await self._events.publish(event)
         except Exception as exc:  # noqa: BLE001 - 事件降级，不向上抛

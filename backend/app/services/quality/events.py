@@ -25,6 +25,16 @@ class QualityEventPublisher:
         self._http_client: Any | None = None
 
     async def publish(self, event: dict[str, Any]) -> None:
+        # 同步发 EventBus（best-effort，供 notify 消费者落库投递；HTTP 通道保留兼容）
+        event_type = event.get("event_type", "")
+        if event_type:
+            try:
+                from app.core.eventbus import get_eventbus
+
+                payload = {k: v for k, v in event.items() if k != "event_type"}
+                await get_eventbus().publish(event_type, payload)
+            except Exception as exc:  # noqa: BLE001 - 降级：不向上抛
+                logger.warning("quality 事件 EventBus 发布失败（降级）：%s", exc)
         if not self._allow():
             logger.warning("quality 事件熔断开启，丢弃事件 %s", event.get("event_type"))
             return

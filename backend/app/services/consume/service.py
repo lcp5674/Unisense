@@ -121,6 +121,39 @@ class ConsumeService(BaseService):
             raise BusinessError("密钥校验失败", error_code=ErrorCode.AUTH_APIKEY_INVALID)
         return client
 
+    async def authenticate_consume_token(self, token: str) -> ApiClient:
+        """校验短效消费方 JWT（issue_token 签发，role=consume, sub=client_id）。
+
+        供平台内调试/前端 QueryWorkspace 使用：先由平台管理员经
+        ``POST /consume/api-clients/{id}/token`` 换发，再持 Bearer 调用查询端点。
+        校验失败抛出 AUTH_APIKEY_INVALID，不区分具体原因（防探测）。
+        """
+        import jwt
+
+        try:
+            payload = jwt.decode(
+                token,
+                settings.jwt_secret,
+                algorithms=[settings.jwt_algorithm],
+            )
+        except jwt.ExpiredSignatureError:
+            raise BusinessError(
+                "消费令牌已过期，请重新签发", error_code=ErrorCode.AUTH_APIKEY_INVALID
+            ) from None
+        except jwt.InvalidTokenError:
+            raise BusinessError(
+                "消费令牌无效", error_code=ErrorCode.AUTH_APIKEY_INVALID
+            ) from None
+        if payload.get("role") != "consume":
+            raise BusinessError(
+                "令牌角色不符，请使用消费方令牌", error_code=ErrorCode.AUTH_APIKEY_INVALID
+            )
+        cid = str(payload.get("sub", ""))
+        client = await self._clients.get_by_client_id(cid)
+        if client is None or client.status != ApiClientStatus.ACTIVE:
+            raise BusinessError("接入方不存在或已吊销", error_code=ErrorCode.AUTH_APIKEY_INVALID)
+        return client
+
     async def check_rate_limit(self, client: ApiClient) -> None:
         limiter = get_rate_limiter()  # 动态获取：lifespan 初始化后 Redis 优先
         if not await limiter.allow(client.client_id, client.qps):

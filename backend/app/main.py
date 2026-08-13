@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI
@@ -34,12 +35,16 @@ from app.api.preferences import router as preferences_router
 from app.api.quality import router as quality_router
 from app.api.recommend import router as recommend_router
 from app.api.semantic import router as semantic_router
+from app.api.subject_domain import router as subject_domain_router
+from app.api.system_dict import router as system_dict_router
 from app.api.tracking import router as tracking_router
 from app.core.config import ConfigurationError, settings
-from app.core.eventbus import init_eventbus
+from app.core.degradation import ensure_dependency_health_seed, handle_circuit_signal
+from app.core.eventbus import get_eventbus, init_eventbus
 from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
 from app.core.middleware import ErrorHandlerMiddleware, SecurityHeadersMiddleware, TraceIdMiddleware
+from app.core.resilience import register_degradation_listener
 from app.db.redis import close_redis_pool, init_redis_pool
 from app.services.consume.rate_limiter import init_rate_limiter
 
@@ -77,6 +82,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ---- EventBus 初始化 ----
     init_eventbus(redis_pool)
     logger.info("eventbus_initialized")
+
+    # ---- 业务事件 → 通知闭环（TD §5.5）：quality/conflict/governance 事件落 notify 并投递 ----
+    _register_notify_event_consumers()
+    logger.info("notify_event_consumers_registered")
+
+    # ---- 降级事件上报（TD §5.2.4/§5.2.5）：熔断器 open/close 回调持久化 + 告警 ----
+    register_degradation_listener(handle_circuit_signal)
+    logger.info("degradation_listener_registered")
+
+    # ---- 幂等播种依赖健康初值（仅当不存在），使运营看板即便依赖始终健康也不缺失行 ----
+    await ensure_dependency_health_seed()
+    logger.info("dependency_health_seeded")
 
     # ---- 限流器初始化（Redis 可用时启用分布式限流，否则 InMemory 降级）----
     init_rate_limiter(redis_pool)
@@ -116,6 +133,37 @@ def _validate_config() -> None:
                 "生产环境 CORS 不允许通配符与 credentials=True 组合，请配置具体 Origin"
             )
     logger.info("config_validation_passed", env=settings.env)
+
+
+#: 业务事件类型（quality/conflict/governance）→ 通知闭环订阅集合（TD §5.5）
+_BUSINESS_EVENT_TYPES: tuple[str, ...] = (
+    "quality.anomaly",
+    "conflict.detected",
+    "conflict.arbitrated",
+    "conflict.escalated",
+    "grant.granted",
+    "grant.revoked",
+    "pii.review_required",
+    "classification.done",
+)
+
+
+def _register_notify_event_consumers() -> None:
+    """注册业务事件 → 通知闭环消费者（best-effort，异常不阻断业务主流程）。
+
+    事件经 EventBus 本地订阅者消费，写入 notify 的 EventLog 并按订阅扇出投递
+    （Webhook/钉钉/SMTP/console）。单体进程内同步执行，Redis 仅作跨进程广播。
+    """
+    from app.db.mysql import async_session_factory
+    from app.services.notify.service import NotifyService
+
+    async def _consume(event: dict[str, Any]) -> None:
+        async with async_session_factory() as session:
+            await NotifyService(session).handle_business_event(event)
+
+    bus = get_eventbus()
+    for event_type in _BUSINESS_EVENT_TYPES:
+        bus.subscribe(event_type, _consume)
 
 
 def create_app() -> FastAPI:
@@ -178,6 +226,8 @@ def create_app() -> FastAPI:
     app.include_router(ai_router, prefix="/api/v1")
     app.include_router(tracking_router, prefix="/api/v1")
     app.include_router(semantic_router, prefix="/api/v1")
+    app.include_router(subject_domain_router, prefix="/api/v1")
+    app.include_router(system_dict_router, prefix="/api/v1")
 
     return app
 

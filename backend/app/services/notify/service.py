@@ -29,7 +29,12 @@ from app.models.notify import (
     SubscriptionPref,
 )
 from app.services.notify.repository import NotifyRepository
-from app.services.notify.schemas import EventPublish, SubscriptionUpsert
+from app.services.notify.schemas import (
+    _ALLOWED_LEVELS,
+    _ALLOWED_SOURCES,
+    EventPublish,
+    SubscriptionUpsert,
+)
 
 logger = get_logger(__name__)
 
@@ -86,6 +91,42 @@ class NotifyService(BaseService):
         event.notified = delivered > 0
         await self._repo.commit()
         return {"event_id": event.id, "notifications": created, "delivered": delivered}
+
+    async def handle_business_event(self, event: dict[str, Any]) -> dict[str, int]:
+        """消费 EventBus 业务事件（quality/conflict/governance），落 EventLog 并按订阅扇出投递。
+
+        事件格式兼容 EventBus.publish 的 ``{event_type, payload, actor_id}`` 与业务直发的
+        扁平 ``{event_type, ...}``。source 按事件前缀映射（conflict → semantic），
+        level 从 payload 提取并做白名单收敛；任何失败仅记日志，不阻断业务主流程（best-effort）。
+        """
+        event_type = str(event.get("event_type") or "")
+        if not event_type:
+            return {"event_id": 0, "notifications": 0, "delivered": 0}
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            payload = {
+                k: v for k, v in event.items() if k not in ("event_type", "actor_id")
+            }
+        level = str(payload.get("level") or "INFO").upper()
+        if level not in _ALLOWED_LEVELS:
+            level = "INFO"
+        source = event_type.split(".", 1)[0]
+        if source == "conflict":
+            source = "semantic"  # 白名单无 conflict，语义域承载冲突事件
+        if source not in _ALLOWED_SOURCES:
+            source = "system"
+        try:
+            return await self.publish_event(
+                EventPublish(
+                    event_type=event_type,
+                    source=source,
+                    payload=payload or None,
+                    level=level,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort 不阻断业务
+            logger.error("业务事件处理失败（best-effort 跳过）: %s", exc)
+            return {"event_id": 0, "notifications": 0, "delivered": 0}
 
     async def _dispatch(self, notif: Notification, channel: str) -> bool:
         """投递通知到指定渠道。

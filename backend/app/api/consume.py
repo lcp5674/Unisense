@@ -46,12 +46,25 @@ router = APIRouter(tags=["consume"], dependencies=[Depends(guard_against_injecti
 
 async def get_consume_client(
     api_key: Annotated[str | None, Header(alias="X-Api-Key")] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiClient:
-    """消费方鉴权依赖：X-Api-Key → 接入方校验 + 限流闸门。"""
+    """消费方鉴权依赖：优先 Bearer 消费方 JWT，其次 X-Api-Key（client_id:secret）。
+
+    两种方式均走接入方校验 + 限流闸门。Bearer 令牌由平台/域管理员
+    经 ``POST /consume/api-clients/{id}/token`` 换发（TD §5.1），
+    供平台内 QueryWorkspace 调试使用；外部消费方沿用 X-Api-Key。
+    """
+    svc = ConsumeService(db)
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        if not token:
+            raise BusinessError("缺少消费令牌", error_code=ErrorCode.AUTH_APIKEY_MISSING)
+        client = await svc.authenticate_consume_token(token)
+        await svc.check_rate_limit(client)
+        return client
     if not api_key:
         raise BusinessError("缺少 X-Api-Key 头", error_code=ErrorCode.AUTH_APIKEY_MISSING)
-    svc = ConsumeService(db)
     client = await svc.authenticate_client(api_key)
     await svc.check_rate_limit(client)
     return client
