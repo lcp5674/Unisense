@@ -109,7 +109,15 @@ async def test_upsert_subscription_ignores_client_user_id(
 
     async def fake_upsert(self, data, actor_id=None):
         captured["user_id"] = actor_id
-        return data
+        # 返回带 id 的 SubscriptionPref 等价对象，供 SubscriptionResponse.from_model 序列化
+        return MagicMock(
+            id=1,
+            user_id=actor_id,
+            channel=data.channel,
+            event_type=data.event_type,
+            enabled=data.enabled,
+            threshold=data.threshold,
+        )
 
     monkeypatch.setattr(
         __import__("app.services.notify.service", fromlist=["NotifyService"]).NotifyService,

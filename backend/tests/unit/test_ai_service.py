@@ -47,3 +47,48 @@ async def test_nl2sql_rejects_dml() -> None:
     svc, repo = await _svc({"活跃用户"})
     with pytest.raises(UnisenseError):
         await svc.nl2sql("delete from unified_metric")
+
+
+async def test_ask_execute_false_passthrough() -> None:
+    svc, repo = await _svc({"gmv"})
+    out = await svc.ask("查看 gmv 趋势", execute=False)
+    assert out["execute"] is False
+    assert "sql" in out
+
+
+async def test_ask_execute_true_delegates_to_olap(monkeypatch: pytest.MonkeyPatch) -> None:
+    svc, repo = await _svc({"gmv"})
+
+    class _FakeResult:
+        rows = [{"metric_code": "gmv", "value": 1}]
+        total = 1
+        elapsed_ms = 5
+
+    class _FakeExecutor:
+        async def execute(self, sql: str, params: dict) -> _FakeResult:
+            return _FakeResult()
+
+    monkeypatch.setattr(
+        "app.services.consume.olap_executor.OLAPExecutor",
+        lambda: _FakeExecutor(),
+    )
+    out = await svc.ask("查看 gmv 趋势", execute=True)
+    assert out["execute"] is True
+    assert out["execute_result"]["total"] == 1
+
+
+async def test_ask_execute_error_graceful(monkeypatch: pytest.MonkeyPatch) -> None:
+    svc, repo = await _svc({"gmv"})
+
+    class _BoomExecutor:
+        async def execute(self, sql: str, params: dict) -> None:
+            raise RuntimeError("OLAP 不可达")
+
+    monkeypatch.setattr(
+        "app.services.consume.olap_executor.OLAPExecutor",
+        lambda: _BoomExecutor(),
+    )
+    out = await svc.ask("查看 gmv 趋势", execute=True)
+    # 执行失败不抛异常，写入 execute_error
+    assert "execute_error" in out
+    assert "OLAP 不可达" in out["execute_error"]

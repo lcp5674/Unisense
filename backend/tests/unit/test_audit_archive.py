@@ -15,7 +15,7 @@ import pytest
 
 
 class TestAuditArchiveFlow:
-    """测试审计归档流程。"""
+    """测试审计归档流程（任务自建 DB 会话，patch async_session_factory）。"""
 
     @pytest.mark.asyncio
     async def test_archive_task_with_no_rows(self) -> None:
@@ -28,8 +28,12 @@ class TestAuditArchiveFlow:
         mock_result.scalars.return_value.all.return_value = []
         mock_db.execute.return_value = mock_result
 
-        ctx = {"db": mock_db}
-        result = await audit_archive_task(ctx)
+        with patch(
+            "app.db.mysql.async_session_factory"
+        ) as mock_factory:
+            mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+            mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await audit_archive_task({})
 
         assert result["status"] == "SUCCESS"
         assert result["rows_archived"] == 0
@@ -59,9 +63,13 @@ class TestAuditArchiveFlow:
         mock_db.add = MagicMock()
         mock_db.commit = AsyncMock()
 
-        ctx = {"db": mock_db}
-        with patch("app.tasks.audit_archive._upload_to_minio", return_value=True):
-            result = await audit_archive_task(ctx)
+        with (
+            patch("app.db.mysql.async_session_factory") as mock_factory,
+            patch("app.tasks.audit_archive._upload_to_minio", return_value=True),
+        ):
+            mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+            mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await audit_archive_task({})
 
         assert result["status"] == "SUCCESS"
         assert result["rows_archived"] == 1
@@ -92,21 +100,16 @@ class TestAuditArchiveFlow:
         mock_db.add = MagicMock()
         mock_db.commit = AsyncMock()
 
-        ctx = {"db": mock_db}
-        with patch("app.tasks.audit_archive._upload_to_minio", return_value=False):
-            result = await audit_archive_task(ctx)
+        with (
+            patch("app.db.mysql.async_session_factory") as mock_factory,
+            patch("app.tasks.audit_archive._upload_to_minio", return_value=False),
+        ):
+            mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+            mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await audit_archive_task({})
 
         assert result["status"] == "FAILED"
         assert "MinIO upload failed" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_archive_task_no_db_session(self) -> None:
-        """无 DB session 时返回 FAILED。"""
-        from app.tasks.audit_archive import audit_archive_task
-
-        result = await audit_archive_task({})
-        assert result["status"] == "FAILED"
-        assert "no db session" in result["error"]
 
 
 class TestMinioUpload:

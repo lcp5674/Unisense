@@ -591,3 +591,99 @@ async def test_check_permission_domain_only_denied_by_default() -> None:
     )
     assert result.allow is False
     assert result.error_code == "FORBIDDEN"
+
+
+# ------------------------------------------------------ PII 血缘传播 (US13)
+
+
+class _FakeLineageEdge:
+    def __init__(self, source: str, target: str, inherited: bool = False) -> None:
+        self.source_node = source
+        self.target_node = target
+        self.pii_inherited = inherited
+        self.deleted_at = None
+
+
+class _FakeDb:
+    """模拟 self._db.execute 返回 lineage 边。"""
+
+    def __init__(self, edges: list[_FakeLineageEdge]) -> None:
+        self._edges = edges
+
+    async def execute(self, stmt: Any) -> Any:
+        class _Result:
+            def __init__(self, edges: list[_FakeLineageEdge]) -> None:
+                self._edges = edges
+
+            def scalars(self) -> _Result:
+                return self
+
+            def all(self) -> list[_FakeLineageEdge]:
+                return self._edges
+
+        return _Result(self._edges)
+
+
+async def test_propagate_pii_from_upstream_columns_sets_metric_flag() -> None:
+    svc, repo, events = _svc()
+    metric = FakeMetric(metric_code="m1", pii_flag=False, definition_json={})
+    repo.metrics["m1"] = metric
+    svc._db = _FakeDb([])
+
+    changed = await svc.propagate_pii_to_metric(
+        "m1",
+        upstream_source_columns=[{"column": "phone", "pii": True}],
+    )
+    assert changed is True
+    assert metric.pii_flag is True
+    assert metric.definition_json.get("pii") is True
+    assert "pii.propagated" in events.types()
+
+
+async def test_propagate_pii_no_upstream_returns_false() -> None:
+    svc, repo, events = _svc()
+    metric = FakeMetric(metric_code="m1", pii_flag=False, definition_json={})
+    repo.metrics["m1"] = metric
+    svc._db = _FakeDb([])
+
+    changed = await svc.propagate_pii_to_metric(
+        "m1",
+        upstream_source_columns=[{"column": "name", "pii": False}],
+    )
+    assert changed is False
+    assert metric.pii_flag is False
+
+
+async def test_propagate_pii_inherits_via_lineage_edge() -> None:
+    svc, repo, events = _svc()
+    metric = FakeMetric(metric_code="m1", pii_flag=False, definition_json={})
+    # 上游指标带 PII，且存在 lineage 边 m_src -> m1
+    repo.metrics["m1"] = metric
+    repo.metrics["m_src"] = FakeMetric(metric_code="m_src", pii_flag=True)
+    svc._db = _FakeDb([_FakeLineageEdge(source="m_src", target="m1")])
+
+    changed = await svc.propagate_pii_to_metric("m1")
+    assert changed is True
+    assert metric.pii_flag is True
+
+
+async def test_propagate_pii_marks_lineage_edge_inherited() -> None:
+    svc, repo, events = _svc()
+    metric = FakeMetric(metric_code="m1", pii_flag=False, definition_json={})
+    repo.metrics["m1"] = metric
+    edge = _FakeLineageEdge(source="m_src", target="m1", inherited=False)
+    svc._db = _FakeDb([edge])
+
+    # 通过上游 columns 直接触发（不依赖边 PII 判定，但最终需标记边的 pii_inherited）
+    changed = await svc.propagate_pii_to_metric(
+        "m1",
+        upstream_source_columns=[{"column": "phone", "pii": True}],
+    )
+    assert changed is True
+    assert edge.pii_inherited is True
+
+
+async def test_propagate_pii_metric_not_found_raises() -> None:
+    svc, _, _ = _svc()
+    with pytest.raises(NotFoundError):
+        await svc.propagate_pii_to_metric("nonexistent")

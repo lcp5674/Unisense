@@ -78,7 +78,9 @@ async def test_create_dimension_writes_audit_record(
     audit_sink: list[dict[str, object]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_create(self: DimensionService, payload: object) -> object:
+    async def fake_create(
+        self: DimensionService, payload: object, actor_id: int | None = None
+    ) -> object:
         return MagicMock()
 
     monkeypatch.setattr(DimensionService, "create_dimension", fake_create)

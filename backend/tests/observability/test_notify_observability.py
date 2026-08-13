@@ -96,7 +96,7 @@ async def test_response_contains_trace_id(
     reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def fake_list(self: NotifyService, *args: object, **kwargs: object) -> object:
-        return ([], 0)
+        return []
 
     monkeypatch.setattr(NotifyService, "list_notifications", fake_list)
     resp = await reader_client.get("/api/v1/notify/notifications", params={"subscriber_id": 11})

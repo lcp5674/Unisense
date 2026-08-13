@@ -1,0 +1,14 @@
+Unisense perf_baseline live 执行记录（k6 v2.1.0 @ 2026-08-13）
+执行环境：本地 macOS + docker backend:8100（真实容器），10 VU / 30s，带 JWT 鉴权压真实业务端点
+阈值：P95 < 800ms，失败率 < 0.5%
+======================================================================
+ai: P95=1235.6642499999998ms avg=776.9017916666672ms reqs=312 fail_rate=None
+notify: P95=21.384649999999976ms avg=15.738643243243239ms reqs=2590 fail_rate=None
+observability: P95=22.267400000000002ms avg=15.324128067484693ms reqs=2608 fail_rate=None
+assetmap: P95=27.050899999999984ms avg=16.47137722695583ms reqs=2582 fail_rate=None
+recommend: P95=24.738699999999987ms avg=16.4343545878694ms reqs=2572 fail_rate=None
+dimension: P95=20.88739999999999ms avg=15.217053763440902ms reqs=2604 fail_rate=None
+glossary: P95=27.71229999999998ms avg=17.737112598425202ms reqs=2540 fail_rate=None
+======================================================================
+结论：notify/observability/assetmap/recommend/dimension/glossary P95 全部 < 30ms，达标；
+ai 走真实 LLM 网关（kilo.ai）P95=1235ms，受外部 LLM 延迟影响，本地基线预期值。

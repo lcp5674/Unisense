@@ -100,14 +100,15 @@ class TestESAuthenticatedConnection:
             assert settings.es_password == ""
 
     def test_es_url_default(self):
-        """ES URL 默认值为 localhost:9200。"""
+        """ES URL 默认值为本地 19200（端口避让后的默认配置）。"""
         with patch.dict("os.environ", {
             "UNISENSE_DB_URL": "mysql+pymysql://test:test@localhost/test",
             "UNISENSE_JWT_SECRET": "test-secret-at-least-32-characters-long",
             "UNISENSE_ENV": "local",
         }, clear=False):
             settings = Settings()
-            assert settings.es_url == "http://localhost:9200"
+            # 项目默认 ES 端口为 19200（compose 避让本机 9200 占用）
+            assert settings.es_url == "http://localhost:19200"
 
 
 class TestCORSMiddlewareSecurity:

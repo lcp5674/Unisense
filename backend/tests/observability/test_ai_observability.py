@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -29,8 +29,8 @@ def audit_sink(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
 def _session() -> MagicMock:
     s = MagicMock()
     s.add = MagicMock()
-    s.commit = MagicMock()
-    s.rollback = MagicMock()
+    s.commit = AsyncMock()
+    s.rollback = AsyncMock()
     s.flush = MagicMock()
     s.refresh = MagicMock()
     s.execute = MagicMock()
