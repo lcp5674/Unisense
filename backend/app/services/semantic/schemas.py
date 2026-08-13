@@ -85,6 +85,16 @@ class MetricCreateRequest(BaseModel):
     definition_json: dict[str, Any] = Field(..., description="口径定义")
     pii_flag: bool = Field(False, description="是否含 PII")
     sla: str | None = Field(None, max_length=128, description="SLA 契约")
+    # 自动推断辅助字段（FR-010/FR-011）：传入后由 Service 层 auto_fill 补全缺失字段
+    source_table: str | None = Field(
+        None, max_length=256, description="源表名（用于自动推断编码和数仓层）"
+    )
+    measure_column: str | None = Field(
+        None, max_length=128, description="度量列名（用于自动推断编码和指标类型）"
+    )
+    period: str | None = Field(
+        None, max_length=32, description="统计周期（用于自动推断编码和粒度）"
+    )
 
     @field_validator("metric_code")
     @classmethod

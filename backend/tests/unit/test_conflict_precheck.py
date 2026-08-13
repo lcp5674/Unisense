@@ -69,6 +69,16 @@ class TestValidateCodeFormat:
         ok, err = ConflictPrechecker.validate_code_format("2sales_gmv_day")
         assert ok is False
 
+    def test_four_segments_with_invalid_char_rejected(self) -> None:
+        # 恰好 4 段，但某段以小写字母外字符开头（命中"每段格式"分支）
+        ok, err = ConflictPrechecker.validate_code_format("sales_gmv_2amount_day")
+        assert ok is False
+        assert "小写字母" in err
+
+    def test_four_segments_with_uppercase_rejected(self) -> None:
+        ok, err = ConflictPrechecker.validate_code_format("sales_GMV_amount_day")
+        assert ok is False
+
     def test_valid_complex_code(self) -> None:
         ok, err = ConflictPrechecker.validate_code_format("finance_revenue_acc_period")
         assert ok is True
@@ -102,3 +112,147 @@ class TestPrecheck:
         result = await prechecker.precheck("unique_metric_code", {"expression": "SUM(a)"})
         # 在无真实 conflict 服务时，预检应优雅降级（返回 None 或空 dict）
         assert result is None or isinstance(result, dict)
+
+    async def test_precheck_without_loader_degrades_to_none(self) -> None:
+        # 未注入 existing_loader → 显式降级为空操作，不抛异常
+        prechecker = ConflictPrechecker()
+        result = await prechecker.precheck("sales_gmv_amount_day", {"definition": "GMV"})
+        assert result is None
+
+    async def test_precheck_empty_existing_returns_none(self) -> None:
+        async def loader():
+            return []
+
+        prechecker = ConflictPrechecker(existing_loader=loader)
+        result = await prechecker.precheck("sales_gmv_amount_day", {"definition": "GMV"})
+        assert result is None
+
+    async def test_precheck_detects_same_def_diff_name(self) -> None:
+        async def loader():
+            return [
+                {
+                    "metric_code": "sales_gmv_amount_daily",
+                    "domain": "sales",
+                    "definition": "当日支付 GMV 总额",
+                    "source_tables": ["ods.order"],
+                    "status": "PUBLISHED",
+                    "metric_id": 1,
+                }
+            ]
+
+        prechecker = ConflictPrechecker(existing_loader=loader)
+        result = await prechecker.precheck(
+            "sales_gmv_amount_day", {"domain": "sales", "definition": "当日支付 GMV 总额"}
+        )
+        assert result is not None
+        assert result["conflict_type"] == "same_def_diff_name"
+        assert result["existing_code"] == "sales_gmv_amount_daily"
+        assert result["block_publish"] is False  # 软冲突
+
+    async def test_precheck_detects_same_name_diff_def(self) -> None:
+        async def loader():
+            return [
+                {
+                    "metric_code": "sales_gmv_amount_day",
+                    "domain": "sales",
+                    "definition": "当日平均客单价",
+                    "status": "PUBLISHED",
+                    "metric_id": 3,
+                }
+            ]
+
+        prechecker = ConflictPrechecker(existing_loader=loader)
+        result = await prechecker.precheck(
+            "sales_gmv_amount_day", {"domain": "finance", "definition": "当日支付 GMV 总额"}
+        )
+        assert result is not None
+        assert result["conflict_type"] == "same_name_diff_def"
+        assert result["severity"] == "hard"
+        assert result["block_publish"] is True
+
+    async def test_precheck_detects_pii_unauthorized(self) -> None:
+        async def loader():
+            return [
+                {
+                    "metric_code": "sales_gmv_amount_day",
+                    "domain": "sales",
+                    "definition": "GMV",
+                    "status": "PUBLISHED",
+                    "metric_id": 1,
+                }
+            ]
+
+        prechecker = ConflictPrechecker(existing_loader=loader)
+        result = await prechecker.precheck(
+            "crm_user_phone_cnt_day",
+            {"domain": "crm", "definition": "手机号去重计数", "pii": True, "pii_authorized": False},
+        )
+        assert result is not None
+        assert result["conflict_type"] == "pii"
+        assert result["severity"] == "hard"
+        assert result["block_publish"] is True
+
+    async def test_precheck_detects_dependency_unpublished(self) -> None:
+        # 已存在口径与被依赖指标编码不同（避免相似度冲突先触发），但状态为 DRAFT
+        async def loader():
+            return [
+                {
+                    "metric_code": "crm_customer_cnt_day",
+                    "domain": "crm",
+                    "definition": "客户去重数",
+                    "status": "DRAFT",
+                    "metric_id": 1,
+                }
+            ]
+
+        prechecker = ConflictPrechecker(existing_loader=loader)
+        result = await prechecker.precheck(
+            "sales_gmv_rate_day",
+            {
+                "domain": "sales",
+                "definition": "GMV 增长率",
+                "dependencies": ["crm_customer_cnt_day"],
+            },
+        )
+        assert result is not None
+        assert result["conflict_type"] == "DEPENDENCY_UNPUBLISHED"
+        assert "crm_customer_cnt_day" in result["reason"]
+        assert result["block_publish"] is False
+
+    async def test_precheck_ignores_non_metric_dependencies(self) -> None:
+        async def loader():
+            return [
+                {
+                    "metric_code": "crm_customer_cnt_day",
+                    "domain": "crm",
+                    "definition": "客户去重数",
+                    "status": "DRAFT",
+                    "metric_id": 1,
+                }
+            ]
+
+        prechecker = ConflictPrechecker(existing_loader=loader)
+        # 依赖为表名/字段名（非 4 段式指标编码）→ 不触发依赖未发布
+        result = await prechecker.precheck(
+            "sales_gmv_rate_day",
+            {"domain": "sales", "definition": "GMV 增长率", "dependencies": ["ods.order"]},
+        )
+        assert result is None
+
+    async def test_precheck_no_conflict_returns_none(self) -> None:
+        async def loader():
+            return [
+                {
+                    "metric_code": "crm_customer_cnt_day",
+                    "domain": "crm",
+                    "definition": "客户去重数",
+                    "status": "PUBLISHED",
+                    "metric_id": 9,
+                }
+            ]
+
+        prechecker = ConflictPrechecker(existing_loader=loader)
+        result = await prechecker.precheck(
+            "sales_gmv_amount_day", {"domain": "sales", "definition": "当日支付 GMV 总额"}
+        )
+        assert result is None

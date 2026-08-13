@@ -119,6 +119,73 @@ class MetricService(BaseService):
             get_redis() if _redis_available() else None
         )
 
+    # ---- 字典校验辅助方法（对齐 spec FR-008/FR-009, plan.md D2）----
+
+    async def _validate_domain_active(self, domain_code: str) -> None:
+        """校验 domain 存在且 active（应用层可选校验，对齐 D1）。
+
+        降级语义：subject_domain 未配置该域（表为空/未种子/查询异常）时放行，
+        仅对"已配置但停用"的域拦截——避免迁移 0026 空表导致存量指标创建全阻断。
+        """
+        from app.core.exceptions import NotFoundError
+        from app.services.subject_domain.service import SubjectDomainService
+
+        try:
+            svc = SubjectDomainService(self._db)
+            await svc.validate_domain_active(domain_code)
+        except NotFoundError:
+            # 域未在 subject_domain 配置（兼容存量/未种子环境）→ 放行
+            return
+        except Exception:
+            # 查询异常（表不存在/DB 抖动）→ best-effort 放行，不阻断创建
+            return
+
+    async def _get_domain_defaults(self, domain_code: str) -> dict[str, Any]:
+        """获取域默认值预设。"""
+        try:
+            from app.services.subject_domain.service import SubjectDomainService
+
+            svc = SubjectDomainService(self._db)
+            return await svc.get_defaults(domain_code)
+        except Exception:
+            return {}
+
+    async def _validate_dict_fields(self, request: MetricCreateRequest) -> None:
+        """校验字典字段值存在于 SystemDict 且 active（应用层可选校验，对齐 D2）。
+
+        降级语义：字典项未配置（空表/未种子/查询异常）时放行，仅对"已配置但停用"
+        的值拦截——避免迁移 0025 空表导致存量指标创建全阻断。
+        """
+        from app.core.exceptions import BusinessError, NotFoundError
+        from app.services.system_dict.service import SystemDictService
+
+        try:
+            svc = SystemDictService(self._db)
+            # 需要校验的 dict_type → request 字段映射
+            dict_validations: list[tuple[str, str]] = [
+                ("granularity", request.granularity),
+                ("unit", request.unit),
+                ("aggregation", request.aggregation),
+                ("time_semantics", request.time_semantics),
+                ("freshness", request.freshness),
+                ("dw_layer", request.dw_layer),
+                ("metric_type", request.type),
+                ("additivity", request.additivity),
+                ("serving_mode", request.serving_mode),
+                ("metric_tier", request.metric_tier),
+            ]
+            for dict_type, code in dict_validations:
+                if code:
+                    await svc.validate_dict_value(dict_type, code)
+        except NotFoundError:
+            # 字典项未配置（空表/未种子环境）→ 放行，不阻断创建
+            return
+        except BusinessError:
+            raise  # 已配置但停用 → 拦截
+        except Exception:
+            # 查询异常（表不存在/DB 抖动）→ best-effort 放行，不阻断创建
+            return
+
     async def create_metric(self, request: MetricCreateRequest, owner_id: int) -> Metric:
         """创建指标（初始状态 DRAFT）。
 
@@ -142,6 +209,34 @@ class MetricService(BaseService):
                 f"指标编码已存在: {request.metric_code}",
                 ctx={"code": "CONFLICT", "metric_code": request.metric_code},
             )
+
+        # ---- 字典校验 + 自动推断（对齐 spec FR-008/FR-009/FR-011）----
+        # 1. 校验 domain 存在且 active
+        await self._validate_domain_active(request.domain)
+
+        # 2. 自动推断：用 source_table/measure_column/period 补全缺失字段
+        if request.source_table or request.measure_column or request.period:
+            from app.services.semantic.auto_fill import auto_fill as _auto_fill
+
+            domain_defaults = await self._get_domain_defaults(request.domain)
+            suggested = _auto_fill(
+                domain_code=request.domain,
+                source_table=request.source_table,
+                measure_column=request.measure_column,
+                period=request.period,
+                domain_defaults=domain_defaults,
+            )
+            # 用推断值补全缺失字段（仅当原值为默认值时覆盖）
+            for field_name, suggested_val in suggested.get("defaults", {}).items():
+                if suggested_val is not None:
+                    current = getattr(request, field_name, None)
+                    # 仅当当前值是默认值时才覆盖（保留用户显式设定的值）
+                    field_info = request.model_fields.get(field_name)
+                    if field_info and current == field_info.default and suggested_val != current:
+                        setattr(request, field_name, suggested_val)
+
+        # 3. 校验字典字段值存在于 SystemDict（对齐 FR-009）
+        await self._validate_dict_fields(request)
 
         # PII 双源归一化：definition_json.pii 与 pii_flag 保持一致（pii_flag 为权威源）
         definition, pii_flag = _normalize_pii(request.definition_json, request.pii_flag)
@@ -213,7 +308,29 @@ class MetricService(BaseService):
         try:
             from app.services.semantic.conflict_precheck import ConflictPrechecker
 
-            prechecker = ConflictPrechecker()
+            async def _load_existing_metrics() -> list[dict[str, Any]]:
+                """加载已存在口径供预检比对（仅取预检所需字段，避免整模型暴露）。"""
+                metrics, _ = await self._repo.list_metrics(limit=1000)
+                rows: list[dict[str, Any]] = []
+                for m in metrics:
+                    defn = m.definition_json or {}
+                    rows.append(
+                        {
+                            "metric_code": m.metric_code,
+                            "domain": m.domain,
+                            "definition": (
+                                defn.get("definition") or defn.get("expression") or ""
+                            ),
+                            "source_tables": defn.get("source_tables") or [],
+                            "has_pii": bool(m.pii_flag),
+                            "pii_authorized": bool(m.compliance_reviewed),
+                            "status": m.status,
+                            "metric_id": m.id,
+                        }
+                    )
+                return rows
+
+            prechecker = ConflictPrechecker(existing_loader=_load_existing_metrics)
             conflict_detail = await prechecker.precheck(metric.metric_code, definition)
             if conflict_detail is not None:
                 metric = await self._repo.update_with_optimistic_lock(
@@ -1653,6 +1770,8 @@ class MetricService(BaseService):
     ) -> dict[str, Any]:
         """批量注册指标。
 
+        对齐 spec FR-016：批量注册同样走字典校验，自动推断逻辑与单条注册一致。
+
         Args:
             request: 批量注册请求(含source_table+measure_columns+domain)。
             actor_id: 操作人ID。
@@ -1667,29 +1786,47 @@ class MetricService(BaseService):
         batch_id = f"batch_{uuid.uuid4().hex[:12]}"
         candidates: list[dict[str, Any]] = []
 
+        # 校验 domain 存在且 active
+        await self._validate_domain_active(request.domain)
+
+        # 获取域默认值
+        domain_defaults = await self._get_domain_defaults(request.domain)
+
         for col in request.measure_columns:
-            # 4段格式：域_业务对象_度量_统计周期
-            # 从 source_table 提取业务对象（如 dwd.sales_detail → sales）
-            table_name = request.source_table.split(".")[-1].lower()
-            # 去除常见前缀，取第一个有意义的词
-            clean = table_name.replace("dwd_", "").replace("ods_", "").replace("dim_", "")
-            biz_obj = clean.split("_")[0] if clean else "entity"
-            # 度量列名去除下划线以保持4段格式
-            measure = col.replace("_", "")
-            code = f"{request.domain}_{biz_obj}_{measure}_day"
+            # 使用 auto_fill 引擎生成编码建议
+            from app.services.semantic.auto_fill import auto_fill as _auto_fill
+
+            suggested = _auto_fill(
+                domain_code=request.domain,
+                source_table=request.source_table,
+                measure_column=col,
+                period="day",
+                domain_defaults=domain_defaults,
+            )
+            code = suggested.get("metric_code_suggestion") or (
+                f"{request.domain}_entity_{col.replace('_', '')}_day"
+            )
+            defaults = suggested.get("defaults", {})
+
             try:
                 create_req = MetricCreateRequest(
                     metric_code=code,
                     name=col,
                     domain=request.domain,
-                    type="atomic",
-                    granularity="day",
-                    unit="cnt",
-                    aggregation="SUM",
-                    time_semantics="PERIOD",
-                    freshness="T1",
-                    dw_layer="DWD",
+                    type=defaults.get("type", "atomic"),
+                    granularity=defaults.get("granularity", "day"),
+                    unit=defaults.get("unit", "cnt"),
+                    aggregation=defaults.get("aggregation", "SUM"),
+                    time_semantics=defaults.get("time_semantics", "PERIOD"),
+                    freshness=defaults.get("freshness", "T1"),
+                    dw_layer=defaults.get("dw_layer", "DWD"),
+                    metric_tier=defaults.get("metric_tier", "T3"),
+                    serving_mode=defaults.get("serving_mode", "BATCH_ONLY"),
+                    additivity=defaults.get("additivity", "ADDITIVE"),
                     definition_json={"expression": f"SUM({col})", "dependencies": []},
+                    source_table=request.source_table,
+                    measure_column=col,
+                    period="day",
                     batch_id=batch_id,
                 )
                 await self.create_metric(create_req, owner_id=actor_id)

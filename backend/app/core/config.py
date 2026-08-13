@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     es_url: str = "http://localhost:9200"
     es_username: str = ""
     es_password: str = ""
+    # ES 客户端请求超时（秒）：避免慢/挂的 ES 阻塞就绪探针与调用方。工业级容错下限。
+    es_request_timeout: float = 3.0
 
     # ---- OLAP（StarRocks / Doris，可选依赖）----
     olap_url: str = ""
@@ -92,6 +94,9 @@ class Settings(BaseSettings):
 
     # ---- Fernet 密钥 ----
     fernet_key: str = ""
+
+    # ---- 语义模块 ----
+    metric_sunset_days: int = 30  # 指标废弃过渡天数（TD §13）
 
     model_config = SettingsConfigDict(
         env_prefix="UNISENSE_",

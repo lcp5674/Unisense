@@ -32,6 +32,29 @@ _WEIGHTS = {
     "lineage_coverage": 0.15,
 }
 
+# ---- 评分配置（消除 magic number，集中管理，可按域覆盖）----
+
+# 口径完整度：每缺失一个一等字段扣分
+_COMPLETENESS_DEDUCTION_PER_MISSING = 12
+
+# 活跃度评分
+_ACTIVITY_RECENT_UPDATE = 80   # 近 30 天有更新
+_ACTIVITY_STALE = 20           # 无近期更新
+
+# 质量评分
+_QUALITY_PII_UNREVIEWED = 30   # 含 PII 但未合规审核
+_QUALITY_REVIEWED = 90         # 已合规审核
+_QUALITY_DEFAULT = 70          # 无 PII 且未审核
+
+# Owner 响应评分
+_OWNER_HAS_BACKUP = 85         # 配置了 backup_owner
+_OWNER_NO_BACKUP = 45          # 无 backup_owner
+
+# 血缘覆盖评分
+_LINEAGE_FULL = 80             # 有 dependencies + expression
+_LINEAGE_EXPRESSION_ONLY = 50  # 仅 expression
+_LINEAGE_NONE = 10             # 无血缘信息
+
 
 def _grade(score: int) -> str:
     if score >= 85:
@@ -143,14 +166,14 @@ class HealthScorer:
         if not missing:
             return 100, None
         # 每缺失一个字段扣分
-        score = max(0, 100 - len(missing) * 12)
+        score = max(0, 100 - len(missing) * _COMPLETENESS_DEDUCTION_PER_MISSING)
         return score, missing
 
     async def _calc_activity(self, metric: Metric) -> tuple[int, list[str] | None]:
         """活跃度：近 30 天是否有更新/查询。
 
-        简化实现：基于 updated_at 判断近 30 天有更新 → 80，
-        无更新 → 20，无 consume 数据 → 标缺失。
+        近 30 天有更新 → _ACTIVITY_RECENT_UPDATE，
+        无更新 → _ACTIVITY_STALE，无 consume 数据 → 标缺失。
         """
         now = datetime.now(UTC)
         if metric.updated_at:
@@ -160,24 +183,24 @@ class HealthScorer:
                 else metric.updated_at
             )
             if (now - updated).days < 30:
-                return 80, None
-        return 20, None
+                return _ACTIVITY_RECENT_UPDATE, None
+        return _ACTIVITY_STALE, None
 
     @staticmethod
     def _calc_quality(metric: Metric) -> tuple[int, list[str] | None]:
         """质量：基于合规审核状态。"""
         if metric.pii_flag and not metric.compliance_reviewed:
-            return 30, None
+            return _QUALITY_PII_UNREVIEWED, None
         if metric.compliance_reviewed:
-            return 90, None
-        return 70, None
+            return _QUALITY_REVIEWED, None
+        return _QUALITY_DEFAULT, None
 
     @staticmethod
     def _calc_owner_response(metric: Metric) -> tuple[int, list[str] | None]:
         """Owner 响应：基于 backup_owner 是否配置。"""
         if metric.backup_owner_id is not None:
-            return 85, None
-        return 45, None
+            return _OWNER_HAS_BACKUP, None
+        return _OWNER_NO_BACKUP, None
 
     @staticmethod
     def _calc_lineage_coverage(metric: Metric) -> tuple[int, list[str] | None]:
@@ -186,7 +209,7 @@ class HealthScorer:
         has_deps = bool(definition.get("dependencies"))
         has_expr = bool(definition.get("expression"))
         if has_deps and has_expr:
-            return 80, None
+            return _LINEAGE_FULL, None
         if has_expr:
-            return 50, None
-        return 10, ["lineage_coverage"]
+            return _LINEAGE_EXPRESSION_ONLY, None
+        return _LINEAGE_NONE, ["lineage_coverage"]

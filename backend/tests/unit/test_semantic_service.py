@@ -57,6 +57,51 @@ async def test_create_metric_duplicate_code_raises_conflict():
         await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
 
 
+async def test_create_metric_marks_pending_conflict_on_precheck_hit():
+    """真实预检命中相似口径 → 挂 pending_conflict 标记并持久化详情。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    # 已存在口径相同但编码不同 → 预检命中 SAME_DEF_DIFF_NAME（软冲突）
+    existing = make_metric(
+        id=9,
+        metric_code="sales_gmv_amount_day",
+        definition_json={"expression": "SUM(order_amount)"},
+    )
+    repo.list_metrics = AsyncMock(return_value=([existing], 1))
+    updated = make_metric(
+        pending_conflict=True,
+        pending_conflict_detail={"conflict_type": "same_def_diff_name"},
+    )
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+
+    result = await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
+
+    repo.update_with_optimistic_lock.assert_awaited_once()
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["pending_conflict"] is True
+    assert kwargs["pending_conflict_detail"]["conflict_type"] == "same_def_diff_name"
+    assert result.pending_conflict is True
+
+
+async def test_create_metric_precheck_failure_is_best_effort():
+    """预检依赖加载失败（list_metrics 抛错）→ 不阻断创建，也不抛异常。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    repo.list_metrics = AsyncMock(side_effect=RuntimeError("catalog down"))
+
+    result = await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
+
+    assert result is created
+    # 未挂冲突标记
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
 async def test_get_metric_not_found():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=None)

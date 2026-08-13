@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from fastapi import APIRouter
@@ -13,6 +14,8 @@ from sqlalchemy import text
 from starlette.responses import Response
 
 from app.api.deps import DBSession, RedisClient
+from app.core.degradation import read_dependency_health
+from app.core.es_client import get_es_client
 from app.core.metrics import render_metrics
 from app.core.resilience import optional_dependency_status
 
@@ -47,7 +50,6 @@ async def ready(
         各依赖检查结果与整体状态。
     """
     checks: dict[str, str] = {"db": "ok", "redis": "ok"}
-    degraded: list[str] = []
 
     # 检查 MySQL（核心依赖）
     try:
@@ -64,12 +66,21 @@ async def ready(
     else:
         checks["redis"] = "skip"
 
-    # 可选依赖探活（TD §11 韧性）：任一降级不影响核心链路
+    # 可选依赖探活（TD §11 韧性）：任一降级不影响核心链路。
+    # TCP 探活为阻塞调用，放入线程池避免阻塞事件循环（就绪探针也要快）。
+    # ES 若已接入客户端（es_breaker 进入降级矩阵），用真实 .ping() 探活替代 TCP。
     optional: dict[str, str] = {}
-    for name, alive in optional_dependency_status().items():
+    es_client = get_es_client()
+    es_probed = False
+    if es_client.enabled:
+        es_alive = await es_client.health()
+        optional["elasticsearch"] = "ok" if es_alive else "fail"
+        es_probed = True
+    for name, alive in (await asyncio.to_thread(optional_dependency_status)).items():
+        if name == "elasticsearch" and es_probed:
+            continue
         optional[name] = "ok" if alive else "fail"
-        if not alive:
-            degraded.append(name)
+    degraded = [n for n, s in optional.items() if s == "fail"]
 
     if checks["db"] == "fail" or checks["redis"] == "fail":
         status = "unavailable"
@@ -85,6 +96,16 @@ async def ready(
         "degraded": degraded,
         "timestamp": int(time.time()),
     }
+
+
+@router.get("/dependencies/health", summary="依赖实时健康态（运营看板）")
+async def dependencies_health() -> dict[str, object]:
+    """返回各依赖实时健康态快照（dependency_health 表），供运营看板实时查询（TD §4.13）。
+
+    任何 DB 异常均 best-effort 降级为空列表，绝不阻断探针/看板。
+    """
+    items = await read_dependency_health()
+    return {"count": len(items), "items": items}
 
 
 @router.get("/metrics", summary="Prometheus 指标", include_in_schema=True)

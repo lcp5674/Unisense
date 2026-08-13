@@ -15,6 +15,7 @@ from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
+from app.services.semantic.auto_fill import auto_fill
 from app.services.semantic.schemas import (
     MetricApproveRequest,
     MetricBatchRegisterRequest,
@@ -36,6 +37,7 @@ from app.services.semantic.schemas import (
     VersionRejectRequest,
 )
 from app.services.semantic.service import MetricService, redact_definition
+from app.services.subject_domain.service import SubjectDomainService
 
 router = APIRouter(prefix="/metric-definitions", tags=["metric-definitions"])
 
@@ -620,7 +622,7 @@ async def get_metric_versions(
     "/{metric_code}/pii-review",
     response_model=ApiResponse[MetricResponse],
     summary="PII 合规复核（打通 PII 指标发布闸门）",
-    dependencies=[Depends(require_roles(*_PII_REVIEW_ROLES))],
+    dependencies=[Depends(require_roles(*_PII_REVIEW_ROLES)), Depends(guard_against_injection)],
 )
 async def review_metric_compliance(
     metric_code: str,
@@ -738,9 +740,19 @@ async def compare_metrics(
 ) -> ApiResponse[Any]:
     """两指标关键字段并排 diff + 差异标记。"""
     service = MetricService(db)
+    # T049: PII 指标对比需合规角色权限，非合规角色对 PII 指标返回脱敏口径
     result = await service.compare_metrics(
         request.metric_codes[0], request.metric_codes[1],
     )
+    # PII 脱敏：非合规角色对比 PII 指标时，口径定义脱敏
+    if user.role not in _SENSITIVE_ROLES:
+        for key in ("fields",):
+            field_data = result.get(key, {})
+            if "definition" in field_data:
+                for side in ("a", "b"):
+                    defn = field_data["definition"].get(side)
+                    if isinstance(defn, dict) and defn.get("pii"):
+                        field_data["definition"][side] = redact_definition(defn)
     return ok(data=result, trace_id=trace_id)
 
 
@@ -774,4 +786,43 @@ async def batch_register_metrics(
         trace_id=trace_id,
     )
     await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/auto-suggest",
+    response_model=ApiResponse[Any],
+    summary="指标注册自动推断（FR-010/FR-011）",
+    dependencies=_READ_DEPS,
+)
+async def auto_suggest_metric(
+    request_body: dict[str, Any],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """输入域+源表+度量列→返回编码建议+字段默认值。
+
+    对齐 spec FR-010/FR-011, plan.md auto-suggest API。
+    """
+    domain_code = request_body.get("domain_code", "")
+    source_table = request_body.get("source_table")
+    measure_column = request_body.get("measure_column")
+    period = request_body.get("period")
+
+    # 获取域默认值预设
+    domain_defaults: dict[str, Any] = {}
+    if domain_code:
+        try:
+            domain_service = SubjectDomainService(db)
+            domain_defaults = await domain_service.get_defaults(domain_code)
+        except Exception:
+            pass  # 域不存在时默认值为空
+
+    result = auto_fill(
+        domain_code=domain_code,
+        source_table=source_table,
+        measure_column=measure_column,
+        period=period,
+        domain_defaults=domain_defaults,
+    )
     return ok(data=result, trace_id=trace_id)
