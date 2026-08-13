@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from datetime import UTC, datetime
 from typing import Any
@@ -63,7 +64,7 @@ class DeadLetterQueue:
 
     def __init__(self, max_size: int = _DLQ_MAX_SIZE) -> None:
         self._queue: deque[DeadLetterEvent] = deque(maxlen=max_size)
-        self._replay_task: asyncio.Task[None] | None = None  # type: ignore[type-arg]
+        self._replay_task: asyncio.Task[None] | None = None
 
     def send_to_dlq(
         self,
@@ -162,10 +163,8 @@ class DeadLetterQueue:
         """停止重放循环。"""
         if self._replay_task is not None:
             self._replay_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._replay_task
-            except asyncio.CancelledError:
-                pass
             self._replay_task = None
 
 

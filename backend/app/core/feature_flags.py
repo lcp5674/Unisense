@@ -108,13 +108,11 @@ class FeatureFlagManager:
         if not flag.enabled:
             return False
         # 有定向配置时，需满足条件
-        if flag.target_domains:
-            if domain is None or domain not in flag.target_domains:
-                return False
-        if flag.target_users:
-            if user_id is None or user_id not in flag.target_users:
-                return False
-        return True
+        if flag.target_domains and (domain is None or domain not in flag.target_domains):
+            return False
+        return not (
+            flag.target_users and (user_id is None or user_id not in flag.target_users)
+        )
 
     def get_flag(self, name: str) -> FeatureFlag | None:
         """获取指定开关。"""
