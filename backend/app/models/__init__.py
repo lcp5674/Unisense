@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 from app.models.audit import AuditLog
+from app.models.audit_archive import AuditArchiveLog
 from app.models.base import BaseModel, SoftDeleteMixin, TimestampMixin
 from app.models.collector_models import CollectionWatermark, SchemaDriftLog
+from app.models.conflict import Conflict, ConflictStatus, ConflictType, RulingRecord
 from app.models.consume import (
     ApiClient,
     ApiClientStatus,
@@ -27,7 +29,20 @@ from app.models.enums import EntityTypeEnum, SensitivityLevelEnum, SourceTypeEnu
 from app.models.erasure import ErasureRequest, ErasureStatus
 from app.models.feedback import Feedback
 from app.models.glossary import GlossaryConflict, TermRelation, TermVersion
-from app.models.metric import Metric, MetricVersion
+from app.models.governance import (
+    Classification,
+    Grant,
+    GrantStatus,
+    GrantType,
+    Role,
+    RoleName,
+    SensitivityLevel,
+)
+from app.models.lineage import LineageEdge, LineageEdgeHistory
+from app.models.metric import Metric
+from app.models.metric_health import MetricHealthScore
+from app.models.metric_template import MetricTemplate
+from app.models.metric_version import MetricVersion, PendingVersionConfirmation
 from app.models.notify import EventLog, Notification, SubscriptionPref
 from app.models.quality import (
     ExternalBenchmark,
@@ -42,9 +57,14 @@ from app.models.user import Organization, User
 __all__ = [
     "ApiClient",
     "ApiClientStatus",
+    "AuditArchiveLog",
     "AuditLog",
     "BaseModel",
+    "Classification",
     "CollectionWatermark",
+    "Conflict",
+    "ConflictStatus",
+    "ConflictType",
     "DBCatalog",
     "DataSource",
     "Dimension",
@@ -57,18 +77,30 @@ __all__ = [
     "ExternalBenchmark",
     "Feedback",
     "GlossaryConflict",
+    "Grant",
+    "GrantStatus",
+    "GrantType",
+    "LineageEdge",
+    "LineageEdgeHistory",
     "Metric",
     "MetricDimension",
+    "MetricHealthScore",
+    "MetricTemplate",
     "MetricValueSnapshot",
     "MetricVersion",
     "Notification",
     "Organization",
+    "PendingVersionConfirmation",
     "QualityEvent",
     "QualityRule",
     "Reconciliation",
     "ReconciliationRecord",
     "ReconciliationStatus",
+    "Role",
+    "RoleName",
+    "RulingRecord",
     "SchemaDriftLog",
+    "SensitivityLevel",
     "SensitivityLevelEnum",
     "SnapshotGeneratedBy",
     "SoftDeleteMixin",

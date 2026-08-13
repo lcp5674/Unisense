@@ -245,11 +245,105 @@ async def test_review_compliance_blocks_owner_self_review():
 
 async def test_review_compliance_allows_non_owner():
     svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(return_value=make_metric(owner_id=7))
+    repo.get_by_code = AsyncMock(return_value=make_metric(owner_id=7, pii_flag=True))
     repo.update_with_optimistic_lock = AsyncMock(
-        return_value=make_metric(owner_id=7, compliance_reviewed=True)
+        return_value=make_metric(owner_id=7, compliance_reviewed=True, pii_flag=True)
     )
 
     result = await svc.review_compliance("sales_gmv_daily", actor_id=99, role="domain_admin")
     assert result.compliance_reviewed is True
     repo.update_with_optimistic_lock.assert_awaited_once()
+
+
+# ---- T052: compare + batch_register 测试 ----
+
+
+async def test_compare_metrics_identical():
+    """两指标完全相同 → 所有字段 identical。"""
+    svc, repo = _svc_with_repo()
+    defn = {"expression": "SUM(x)", "dependencies": ["t1"]}
+    m1 = make_metric(metric_code="m1", definition_json=defn)
+    m2 = make_metric(metric_code="m2", definition_json=defn)
+    repo.get_by_code = AsyncMock(side_effect=[m1, m2])
+
+    result = await svc.compare_metrics("m1", "m2")
+    # 实现契约（对齐前端 MetricCompare）：result["metrics"] + result["fields"][...]
+    assert result["metrics"] == ["m1", "m2"]
+    # 同口径应标记 identical
+    defn_diff = result["fields"]["definition"]
+    assert defn_diff["difference_level"] == "identical"
+
+
+async def test_compare_metrics_different():
+    """两指标口径不同 → 标记 different。"""
+    svc, repo = _svc_with_repo()
+    m1 = make_metric(metric_code="m1", definition_json={"expression": "SUM(x)"})
+    m2 = make_metric(metric_code="m2", definition_json={"expression": "SUM(y)"})
+    repo.get_by_code = AsyncMock(side_effect=[m1, m2])
+
+    result = await svc.compare_metrics("m1", "m2")
+    defn_diff = result["fields"]["definition"]
+    assert defn_diff["difference_level"] == "different"
+
+
+async def test_batch_register_success():
+    """批量注册：全部成功。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)  # 无重名
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    from app.services.semantic.schemas import MetricBatchRegisterRequest
+
+    request = MetricBatchRegisterRequest(
+        source_table="dwd.sales_detail",
+        measure_columns=["gmv", "order_cnt"],
+        dimension_mapping={"domain": "sales"},
+        llm_prefill=True,
+        domain="sales",
+    )
+
+    result = await svc.batch_register_metrics(request, actor_id=1)
+
+    assert "batch_id" in result
+    assert len(result["candidates"]) == 2
+    # 实现契约：每条候选 {metric_code, status, validation_errors}，成功为 DRAFT
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    assert all(c["validation_errors"] is None for c in result["candidates"])
+
+
+async def test_batch_register_partial_failure():
+    """批量注册：部分校验失败。"""
+    svc, repo = _svc_with_repo()
+    # 第二个重名
+    repo.get_by_code = AsyncMock(side_effect=[None, make_metric()])
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    from app.services.semantic.schemas import MetricBatchRegisterRequest
+
+    request = MetricBatchRegisterRequest(
+        source_table="dwd.sales_detail",
+        measure_columns=["gmv", "order_cnt"],
+        dimension_mapping={"domain": "sales"},
+        llm_prefill=True,
+        domain="sales",
+    )
+
+    result = await svc.batch_register_metrics(request, actor_id=1)
+
+    assert len(result["candidates"]) == 2
+    # 失败信息在候选的 validation_errors 内（实现契约，无顶层 errors 键）
+    assert result["candidates"][0]["status"] == "DRAFT"
+    assert result["candidates"][1]["status"] == "VALIDATION_ERROR"
+    assert result["candidates"][1]["validation_errors"] is not None
+
+
+async def test_review_compliance_rejects_non_pii():
+    """非 PII 指标无需合规复核 → PII_FLAG_REQUIRED。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(owner_id=7, pii_flag=False))
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.review_compliance("sales_gmv_daily", actor_id=99, role="domain_admin")
+    assert exc.value.error_code == "PII_FLAG_REQUIRED"

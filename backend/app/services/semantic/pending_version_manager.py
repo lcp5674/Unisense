@@ -19,8 +19,8 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessError
-from app.models.metric import Metric, MetricVersion
-from app.models.metric_version import PendingVersionConfirmation
+from app.models.metric import Metric
+from app.models.metric_version import MetricVersion, PendingVersionConfirmation
 from app.services.semantic.repository import MetricRepository
 
 logger = structlog.get_logger("unisense.semantic.pending_version_manager")

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -672,7 +672,7 @@ async def emergency_publish_metric(
     """domain_admin 紧急发布：跳过 REVIEW 但不跳 PII 门禁。"""
     service = MetricService(db)
     metric = await service.emergency_publish_metric(
-        metric_code, request, actor_id=user.id,
+        metric_code, request, actor_id=user.id, role=user.role,
     )
     await write_audit(
         db,
@@ -735,7 +735,7 @@ async def compare_metrics(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
-) -> ApiResponse:
+) -> ApiResponse[Any]:
     """两指标关键字段并排 diff + 差异标记。"""
     service = MetricService(db)
     result = await service.compare_metrics(
@@ -760,7 +760,7 @@ async def batch_register_metrics(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
-) -> ApiResponse:
+) -> ApiResponse[Any]:
     """批量注册：LLM 预填 + 逐条校验 + 共享 batch_id。"""
     service = MetricService(db)
     result = await service.batch_register_metrics(request, actor_id=user.id)

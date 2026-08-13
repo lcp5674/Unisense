@@ -66,10 +66,13 @@ def _metric(
 
 
 @pytest.fixture(autouse=True)
-def reset_limiter():
+def reset_limiter() -> None:
     limiter = get_rate_limiter()
-    limiter._buckets.clear()
-    limiter._daily.clear()
+    # Only InMemoryRateLimiter has _buckets/_daily; RedisRateLimiter uses Redis storage.
+    # Tests mock db/session, so we expect InMemory in unit tests.
+    if hasattr(limiter, "_buckets") and hasattr(limiter, "_daily"):
+        limiter._buckets.clear()  # type: ignore[union-attr]
+        limiter._daily.clear()  # type: ignore[union-attr]
     yield
 
 
@@ -288,7 +291,9 @@ async def test_execute_query_rejects_unauthorized_dimension(monkeypatch) -> None
     client = await svc.authenticate_client("acme:s3cr3t")
     svc._get_metric = AsyncMock(return_value=_metric(dims=("region",)))
     # 绕过 OLAP 不可用 503，直达 SQL 构建层的维度授权校验
-    monkeypatch.setattr("app.services.consume.service.settings.olap_url", "http://doris:8030/api/query")
+    monkeypatch.setattr(
+        "app.services.consume.service.settings.olap_url", "http://doris:8030/api/query"
+    )
     with pytest.raises(BusinessError) as exc:
         await svc.execute_query(
             QueryRequest(

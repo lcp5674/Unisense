@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, cast
 
 from redis.asyncio import Redis
 
@@ -108,6 +108,9 @@ class MetricCache:
             return data
         if not is_miss:
             return None
+        # 干净 miss：Redis 已成功响应（键不存在）→ 复位熔断（对齐 T011：
+        # get() 成功即 record_success，Redis 恢复后熔断尽快复位）。
+        self._breaker.record_success()
         lock = await _lock_for(key)
         try:
             async with lock:
@@ -282,3 +285,51 @@ class MetricCache:
             缓存键。
         """
         return f"{_PREFIX}{metric_code}:v{version or 0}"
+
+    # ---- 消费指南缓存 ----
+
+    _GUIDE_PREFIX = "metric:guide:"
+
+    async def get_guide(self, metric_code: str) -> dict[str, Any] | None:
+        """获取消费指南缓存。
+
+        Args:
+            metric_code: 指标编码。
+
+        Returns:
+            缓存的消费指南字典，未命中返回 None。
+        """
+        if not self._enabled:
+            return None
+        key = f"{self._GUIDE_PREFIX}{metric_code}"
+        try:
+            if not self._breaker.allow():
+                return None
+            raw = await self._redis.get(key)  # type: ignore[union-attr]
+            if raw is None:
+                return None
+            self._breaker.record_success()
+            return cast(dict[str, Any], json.loads(raw))
+        except Exception:
+            self._breaker.record_failure()
+            return None
+
+    async def set_guide(self, metric_code: str, guide: dict[str, Any]) -> None:
+        """写入消费指南缓存。
+
+        Args:
+            metric_code: 指标编码。
+            guide: 消费指南字典。
+        """
+        if not self._enabled:
+            return
+        key = f"{self._GUIDE_PREFIX}{metric_code}"
+        try:
+            if not self._breaker.allow():
+                return
+            payload = json.dumps(guide, ensure_ascii=False)
+            await self._redis.set(key, payload, ex=_TTL_SECONDS)  # type: ignore[union-attr]
+            self._breaker.record_success()
+        except Exception:
+            self._breaker.record_failure()
+            logger.warning("cache_set_guide_failed", metric_code=metric_code)

@@ -18,7 +18,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -236,74 +235,5 @@ class Metric(Base, BaseModel):
     )
 
 
-class MetricVersion(Base, BaseModel):
-    """指标版本（溯源）。
-
-    对齐 TD §4.1 metric_version 表。
-    含破坏性判定与结构化 diff。
-
-    Attributes:
-        metric_id: 指标 ID。
-        version: 版本号。
-        change_type: 变更类型。
-        definition_json: 口径快照。
-        diff_json: 结构化 diff（可空）。
-        status: 版本状态。
-        change_reason: 变更原因。
-        created_by: 创建人 ID。
-        published_at: 发布时间（可空）。
-    """
-
-    __tablename__ = "metric_version"
-
-    metric_id: Mapped[int] = mapped_column(
-        ForeignKey("metric.id", name="fk_metric_version_metric"),
-        nullable=False,
-        comment="指标 ID",
-    )
-    version: Mapped[int] = mapped_column(Integer, nullable=False, comment="版本号")
-    change_type: Mapped[str] = mapped_column(
-        Enum("CREATE", "UPDATE", "BREAKING", "DEPRECATE", "RESTORE", name="change_type_enum"),
-        nullable=False,
-        comment="变更类型",
-    )
-    definition_json: Mapped[dict[str, Any]] = mapped_column(
-        JSON, nullable=False, comment="口径快照"
-    )
-    diff_json: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON, nullable=True, comment="结构化 diff"
-    )
-    status: Mapped[str] = mapped_column(
-        Enum(
-            "DRAFT",
-            "PENDING_CONFIRMATION",
-            "PUBLISHED",
-            "EXPERIMENTAL",
-            "ARCHIVED",
-            "CANCELLED",
-            name="version_status",
-        ),
-        nullable=False,
-        default="DRAFT",
-        comment="版本状态",
-    )
-    change_reason: Mapped[str] = mapped_column(Text, nullable=False, comment="变更原因")
-    created_by: Mapped[int] = mapped_column(
-        ForeignKey("user.id", name="fk_metric_version_user"), nullable=False
-    )
-    published_at: Mapped[datetime | None] = mapped_column(nullable=True, comment="发布时间")
-
-    # ---- PENDING_VERSION 机制字段（对齐 TD §12.3 / FR-006~FR-009）----
-    pending_deadline: Mapped[datetime | None] = mapped_column(
-        nullable=True, comment="PENDING_VERSION 确认截止时间"
-    )
-    extension_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, comment="延期次数（最多 1 次）"
-    )
-    effective_at: Mapped[datetime | None] = mapped_column(
-        nullable=True, comment="实际生效时间（confirm 后记录）"
-    )
-
-    metric: Mapped[Metric] = relationship("Metric", back_populates="versions")
-
-    __table_args__ = (UniqueConstraint("metric_id", "version", name="uk_metric_version"),)
+# MetricVersion 已拆至 app.models.metric_version，此处保留 re-export 兼容
+from app.models.metric_version import MetricVersion  # noqa: E402

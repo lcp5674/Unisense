@@ -139,3 +139,38 @@ class TestGetActionName:
     def test_invalid_action_name_returns_none(self) -> None:
         result = MetricStateMachine.get_action_name("DRAFT", "PUBLISHED")
         assert result is None
+
+
+class TestExperimentalTransitions:
+    """灰度发布与回滚跃迁测试（对齐 FR-019/FR-020）。"""
+
+    def test_experimental_to_published_is_legal(self) -> None:
+        """EXPERIMENTAL→PUBLISHED（promote 全量发布）是合法跃迁。"""
+        result = MetricStateMachine.validate_transition("EXPERIMENTAL", "PUBLISHED")
+        assert result is None
+
+    def test_experimental_to_draft_is_illegal(self) -> None:
+        """EXPERIMENTAL→DRAFT 是非法跃迁。"""
+        result = MetricStateMachine.validate_transition("EXPERIMENTAL", "DRAFT")
+        assert result is not None
+
+    def test_experimental_to_deprecated_is_illegal(self) -> None:
+        """EXPERIMENTAL→DEPRECATED 是非法跃迁（须先 promote→PUBLISHED→DEPRECATED）。"""
+        result = MetricStateMachine.validate_transition("EXPERIMENTAL", "DEPRECATED")
+        assert result is not None
+
+    def test_experimental_to_review_is_illegal(self) -> None:
+        """EXPERIMENTAL→REVIEW 是非法跃迁。"""
+        result = MetricStateMachine.validate_transition("EXPERIMENTAL", "REVIEW")
+        assert result is not None
+
+    def test_promote_action_name(self) -> None:
+        """EXPERIMENTAL→PUBLISHED 的动作名为 promote。"""
+        action = MetricStateMachine.get_action_name("EXPERIMENTAL", "PUBLISHED")
+        assert action == "promote"
+
+    def test_experimental_only_allows_published(self) -> None:
+        """EXPERIMENTAL 状态只允许跃迁到 PUBLISHED。"""
+        allowed = MetricStateMachine.get_allowed_transitions("EXPERIMENTAL")
+        assert len(allowed) == 1
+        assert MetricState.PUBLISHED in allowed

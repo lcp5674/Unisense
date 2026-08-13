@@ -22,7 +22,8 @@ from app.core.exceptions import (
     NotFoundError,
 )
 from app.db.redis import get_redis
-from app.models.metric import Metric, MetricVersion
+from app.models.metric import Metric
+from app.models.metric_version import MetricVersion
 from app.services.semantic.cache import MetricCache
 from app.services.semantic.repository import MetricRepository
 from app.services.semantic.schemas import (
@@ -377,16 +378,19 @@ class MetricService(BaseService):
             if metric.status == "PUBLISHED" and is_breaking:
                 from app.services.semantic.pending_version_manager import PendingVersionManager
 
+                # 消费方 = 指标 Owner（+备份 Owner），负责在 14 天确认期内确认/拒绝；
+                # 生产环境可扩展为经血缘反查下游消费方列表。
+                consumer_ids = [metric.owner_id]
+                if metric.backup_owner_id is not None:
+                    consumer_ids.append(metric.backup_owner_id)
+
                 pvm = PendingVersionManager(self._db)
-                await pvm.create_pending_confirmations(
-                    metric_id=metric.id,
-                    version=new_version_num,
-                    deadline_days=14,
-                )
+                await pvm.create_pending(metric, version, consumer_ids)
                 logger.info(
                     "pending_version_created",
                     metric_code=metric_code,
                     version=new_version_num,
+                    consumers=consumer_ids,
                     reason="breaking_change_on_published",
                 )
 
@@ -1040,10 +1044,14 @@ class MetricService(BaseService):
 
         metric = await self.get_metric(metric_code)
 
-        # 状态机校验：DRAFT→PUBLISHED（紧急发布跳过 REVIEW）
-        invalid = MetricStateMachine.validate_transition(metric.status, "PUBLISHED")
-        if invalid is not None:
-            raise ConflictError(invalid, error_code="INVALID_TRANSITION")
+        # 紧急发布状态校验：仅 DRAFT/REVIEW 可紧急发布（跳过常规 approve 流程）。
+        # 不能用 MetricStateMachine.validate_transition("DRAFT", "PUBLISHED")——
+        # 该跃迁不在常规矩阵中（非法），而紧急发布语义就是"跳 REVIEW"（FR-022）。
+        if metric.status not in ("DRAFT", "REVIEW"):
+            raise ConflictError(
+                f"紧急发布仅支持 DRAFT/REVIEW 状态，当前 {metric.status}",
+                error_code="INVALID_TRANSITION",
+            )
 
         # PII 门禁不可跳过（对齐 FR-024：含 PII 指标紧急发布仍须合规复核）
         if metric.pii_flag and not metric.compliance_reviewed:
@@ -1561,7 +1569,15 @@ class MetricService(BaseService):
         candidates: list[dict[str, Any]] = []
 
         for col in request.measure_columns:
-            code = f"{request.domain}_{col}_day"
+            # 4段格式：域_业务对象_度量_统计周期
+            # 从 source_table 提取业务对象（如 dwd.sales_detail → sales）
+            table_name = request.source_table.split(".")[-1].lower()
+            # 去除常见前缀，取第一个有意义的词
+            clean = table_name.replace("dwd_", "").replace("ods_", "").replace("dim_", "")
+            biz_obj = clean.split("_")[0] if clean else "entity"
+            # 度量列名去除下划线以保持4段格式
+            measure = col.replace("_", "")
+            code = f"{request.domain}_{biz_obj}_{measure}_day"
             try:
                 create_req = MetricCreateRequest(
                     metric_code=code,

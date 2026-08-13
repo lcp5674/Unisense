@@ -24,7 +24,8 @@ from app.models.consume import (
     MetricValueSnapshot,
     SnapshotGeneratedBy,
 )
-from app.models.metric import Metric, MetricVersion
+from app.models.metric import Metric
+from app.models.metric_version import MetricVersion
 from app.services.consume.rate_limiter import (
     get_rate_limiter,
 )

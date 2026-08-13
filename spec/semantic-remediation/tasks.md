@@ -64,12 +64,12 @@
 
 ### Implementation for User Story 2
 
-- [ ] T021 [US2] 创建 backend/app/services/semantic/pending_version_manager.py：PendingVersionManager类、create_pending(metric, new_version, consumer_ids)→创建PendingVersionConfirmation记录+设置deadline(14天)、confirm(metric_id, version, consumer_id)→更新confirmation status+检查全部confirmed→切换CURRENT、reject(metric_id, version, consumer_id, reason)→任一rejected→取消PENDING_VERSION+通知Owner、extend(metric_id, version)→延期+7天(最多1次)+检查extension_count、check_timeouts()→查超时确认→默认接受+切换CURRENT、pause_on_drift(metric_id, version, drift_detail)→暂停版本切换+通知Owner
-- [ ] T022 [US2] 修改 service.py：update_metric重构——PUBLISHED状态+definition_json变更+is_breaking=True→调PendingVersionManager.create_pending(不直接生效)+version.status=PENDING_CONFIRMATION+发布metric.pending_version事件；is_breaking=False→直接生效(非破坏性)
-- [ ] T023 [US2] 修改 api/metrics.py：新增POST /metric-definitions/{code}/confirm-version端点、POST /metric-definitions/{code}/reject-version端点、POST /metric-definitions/{code}/extend-version端点
-- [ ] T024 [US2] 修改 service.py：新增confirm_version/reject_version/extend_version方法——委托PendingVersionManager
-- [ ] T025 [US2] 修改 service.py：publish_metric(approve_metric)中metric.status更新与version.status转正必须在同一事务——先mark_version_published再update metric，任一步失败rollback
-- [ ] T026 [US2] 补充 backend/tests/unit/test_pending_version.py：测试PENDING_VERSION创建+14天deadline+confirm→CURRENT+reject→取消+extend+7天(最多1次)+超时默认接受+Drift暂停
+- [x] T021 [US2] 创建 backend/app/services/semantic/pending_version_manager.py：PendingVersionManager类、create_pending(metric, new_version, consumer_ids)→创建PendingVersionConfirmation记录+设置deadline(14天)、confirm(metric_id, version, consumer_id)→更新confirmation status+检查全部confirmed→切换CURRENT、reject(metric_id, version, consumer_id, reason)→任一rejected→取消PENDING_VERSION+通知Owner、extend(metric_id, version)→延期+7天(最多1次)+检查extension_count、check_timeouts()→查超时确认→默认接受+切换CURRENT、pause_on_drift(metric_id, version, drift_detail)→暂停版本切换+通知Owner
+- [x] T022 [US2] 修改 service.py：update_metric重构——PUBLISHED状态+definition_json变更+is_breaking=True→调PendingVersionManager.create_pending(不直接生效)+version.status=PENDING_CONFIRMATION+发布metric.pending_version事件；is_breaking=False→直接生效(非破坏性)
+- [x] T023 [US2] 修改 api/metrics.py：新增POST /metric-definitions/{code}/confirm-version端点、POST /metric-definitions/{code}/reject-version端点、POST /metric-definitions/{code}/extend-version端点
+- [x] T024 [US2] 修改 service.py：新增confirm_version/reject_version/extend_version方法——委托PendingVersionManager
+- [x] T025 [US2] 修改 service.py：publish_metric(approve_metric)中metric.status更新与version.status转正必须在同一事务——先mark_version_published再update metric，任一步失败rollback
+- [x] T026 [US2] 补充 backend/tests/unit/test_pending_version.py：测试PENDING_VERSION创建+14天deadline+confirm→CURRENT+reject→取消+extend+7天(最多1次)+超时默认接受+Drift暂停
 
 **Checkpoint**: US2+US13完成 - PENDING_VERSION缓冲+版本原子性
 
@@ -83,9 +83,9 @@
 
 ### Implementation for User Story 3
 
-- [ ] T027 [US3] 修改 service.py：approve_metric中增加依赖校验——type为derived/composite时调DependencyChecker.check_dependencies_published(definition_json)，未发布依赖→BusinessError拒绝；调DependencyChecker.detect_cycle(metric_code, definition_json)，检测到环→BusinessError拒绝
-- [ ] T028 [US3] 修改 service.py：approve_metric成功后，type为derived/composite时发布metric.approved事件含dependencies字段→lineage写入DERIVED_FROM边到Neo4j
-- [ ] T029 [US3] 补充 backend/tests/unit/test_dependency_checker.py：测试依赖未发布→拒绝+依赖已废弃→拒绝+A→B→A环→拒绝+3层依赖链→通过+复合指标多依赖→通过+PENDING_VERSION依赖→允许(依赖CURRENT)
+- [x] T027 [US3] 修改 service.py：approve_metric中增加依赖校验——type为derived/composite时调DependencyChecker.check_dependencies_published(definition_json)，未发布依赖→BusinessError拒绝；调DependencyChecker.detect_cycle(metric_code, definition_json)，检测到环→BusinessError拒绝
+- [x] T028 [US3] 修改 service.py：approve_metric成功后，type为derived/composite时发布metric.approved事件含dependencies字段→lineage写入DERIVED_FROM边到Neo4j
+- [x] T029 [US3] 补充 backend/tests/unit/test_dependency_checker.py：测试依赖未发布→拒绝+依赖已废弃→拒绝+A→B→A环→拒绝+3层依赖链→通过+复合指标多依赖→通过+PENDING_VERSION依赖→允许(依赖CURRENT)
 
 **Checkpoint**: US3完成 - 依赖校验+环检测
 
@@ -99,10 +99,10 @@
 
 ### Implementation for User Story 4+5
 
-- [ ] T030 [US4] 修改 service.py：create_metric中metric_code校验委托ConflictPrechecker.validate_code_format(严格4段+保留词)+创建后异步调ConflictPrechecker.precheck→命中相似→更新pending_conflict=True+pending_conflict_detail
-- [ ] T031 [US5] 修改 service.py：approve_metric发布metric.approved事件(含metric_code+version+definition+type+dependencies)→EventBus分发到lineage(Neo4j)+search(ES)+notify；reject_metric发布metric.rejected事件→notify Owner；deprecate_metric发布metric.deprecated事件→lineage+notify下游(lineage反查consumer_ids)；PENDING_VERSION生成发布metric.pending_version事件→notify下游
-- [ ] T032 [US5] 修改 service.py：所有事件发布用BaseService._publish_event(best-effort)+失败入Arq重试队列(app/services/semantic/tasks.py新增retry_event_publish任务)
-- [ ] T033 [US4+US5] 补充 backend/tests/unit/test_conflict_precheck.py：测试4段格式校验+保留词拒绝+相似口径预检+命名规范+5段拒绝+单段拒绝
+- [x] T030 [US4] 修改 service.py：create_metric中metric_code校验委托ConflictPrechecker.validate_code_format(严格4段+保留词)+创建后异步调ConflictPrechecker.precheck→命中相似→更新pending_conflict=True+pending_conflict_detail
+- [x] T031 [US5] 修改 service.py：approve_metric发布metric.approved事件(含metric_code+version+definition+type+dependencies)→EventBus分发到lineage(Neo4j)+search(ES)+notify；reject_metric发布metric.rejected事件→notify Owner；deprecate_metric发布metric.deprecated事件→lineage+notify下游(lineage反查consumer_ids)；PENDING_VERSION生成发布metric.pending_version事件→notify下游
+- [x] T032 [US5] 修改 service.py：所有事件发布用BaseService._publish_event(best-effort)+失败入Arq重试队列(app/services/semantic/tasks.py新增retry_event_publish任务)
+- [x] T033 [US4+US5] 补充 backend/tests/unit/test_conflict_precheck.py：测试4段格式校验+保留词拒绝+相似口径预检+命名规范+5段拒绝+单段拒绝
 
 **Checkpoint**: US4+US5完成 - 冲突预检+事件驱动双写
 
@@ -116,11 +116,11 @@
 
 ### Implementation for User Story 6
 
-- [ ] T034 [US6] 修改 service.py：approve_metric支持mode="experimental"→status=EXPERIMENTAL+gray_tenant_ids保存→版本status=EXPERIMENTAL
-- [ ] T035 [US6] 修改 service.py：新增promote_metric(metric_code, actor_id)——EXPERIMENTAL→PUBLISHED+清除gray_tenant_ids+发布metric.promoted事件→lineage+search+notify
-- [ ] T036 [US6] 修改 service.py：新增rollback_metric(metric_code, actor_id)——EXPERIMENTAL→回退到上一PUBLISHED版本+EXPERIMENTAL版本标记ARCHIVED+发布metric.rolled_back事件→notify+audit
-- [ ] T037 [US6] 修改 api/metrics.py：新增POST /metric-definitions/{code}/promote端点、POST /metric-definitions/{code}/rollback端点
-- [ ] T038 [US6] 补充 backend/tests/unit/test_state_machine.py：增加灰度跃迁测试(EXPERIMENTAL→PUBLISHED[promote]/EXPERIMENTAL→PUBLISHED[rollback])
+- [x] T034 [US6] 修改 service.py：approve_metric支持mode="experimental"→status=EXPERIMENTAL+gray_tenant_ids保存→版本status=EXPERIMENTAL
+- [x] T035 [US6] 修改 service.py：新增promote_metric(metric_code, actor_id)——EXPERIMENTAL→PUBLISHED+清除gray_tenant_ids+发布metric.promoted事件→lineage+search+notify
+- [x] T036 [US6] 修改 service.py：新增rollback_metric(metric_code, actor_id)——EXPERIMENTAL→回退到上一PUBLISHED版本+EXPERIMENTAL版本标记ARCHIVED+发布metric.rolled_back事件→notify+audit
+- [x] T037 [US6] 修改 api/metrics.py：新增POST /metric-definitions/{code}/promote端点、POST /metric-definitions/{code}/rollback端点
+- [x] T038 [US6] 补充 backend/tests/unit/test_state_machine.py：增加灰度跃迁测试(EXPERIMENTAL→PUBLISHED[promote]/EXPERIMENTAL→PUBLISHED[rollback])
 
 **Checkpoint**: US6完成 - 灰度发布+回滚
 
@@ -134,9 +134,9 @@
 
 ### Implementation for User Story 7
 
-- [ ] T039 [US7] 修改 service.py：新增emergency_publish_metric(metric_code, request, actor_id)——校验domain_admin角色+DRAFT→PUBLISHED(跳REVIEW)+emergency_publish=True+emergency_reason记录+PII门禁不可跳(pii_flag=True+compliance_reviewed=False→仍拒绝)+合规官不可达→仅INTERNAL分级(serving_mode降级)+发布metric.emergency_published事件+审计EMERGENCY_PUBLISH标记
-- [ ] T040 [US7] 修改 api/metrics.py：新增POST /metric-definitions/{code}/emergency-publish端点(MetricEmergencyPublishRequest)
-- [ ] T041 [US7] 创建 backend/app/tasks/semantic_tasks.py：check_emergency_review_overdue(Arq cron每小时)——查emergency_publish=True+emergency_reviewed_at=None+created_at+24h已过→告警+通知domain_admin补审；新增check_experimental_expiry(Arq cron每日)——EXPERIMENTAL状态超30天→提醒Owner决策
+- [x] T039 [US7] 修改 service.py：新增emergency_publish_metric(metric_code, request, actor_id)——校验domain_admin角色+DRAFT→PUBLISHED(跳REVIEW)+emergency_publish=True+emergency_reason记录+PII门禁不可跳(pii_flag=True+compliance_reviewed=False→仍拒绝)+合规官不可达→仅INTERNAL分级(serving_mode降级)+发布metric.emergency_published事件+审计EMERGENCY_PUBLISH标记
+- [x] T040 [US7] 修改 api/metrics.py：新增POST /metric-definitions/{code}/emergency-publish端点(MetricEmergencyPublishRequest)
+- [x] T041 [US7] 创建 backend/app/tasks/semantic_tasks.py：check_emergency_review_overdue(Arq cron每小时)——查emergency_publish=True+emergency_reviewed_at=None+created_at+24h已过→告警+通知domain_admin补审；新增check_experimental_expiry(Arq cron每日)——EXPERIMENTAL状态超30天→提醒Owner决策
 
 **Checkpoint**: US7完成 - 紧急发布快通道
 
@@ -150,12 +150,12 @@
 
 ### Implementation for User Story 8
 
-- [ ] T042 [US8] 创建 backend/app/services/semantic/health_scorer.py：HealthScorer类、calculate(metric_id)→MetricHealthScore——五维计算(口径完整度:一等字段齐全率25%/活跃度:近30天consume查询归一化20%/质量:quality_event异常反比25%/Owner响应:审核时效15%/血缘覆盖:上游解析率15%)、维度数据缺失→记0+标missing_dimensions、分级(≥85EXCELLENT/70-84GOOD/55-69WARNING/<55CRITICAL)
-- [ ] T043 [US8] 修改 repository.py：新增save_health_score()/get_health_score()/list_critical_metrics()方法
-- [ ] T044 [US8] 修改 service.py：新增get_metric_health(metric_code)→MetricHealthScore、健康度CRITICAL/WARNING→发布metric.health_critical事件→notify.todo整改待办
-- [ ] T045 [US8] 修改 api/metrics.py：新增GET /metric-definitions/{code}/health端点
-- [ ] T046 [US8] 修改 semantic_tasks.py：新增refresh_health_scores(Arq cron每日凌晨)——批量重算全部指标健康度+CRITICAL/WARNING进整改待办
-- [ ] T047 [US8] 补充 backend/tests/unit/test_health_scorer.py：测试口径完整度(齐全/缺失)/活跃度(高/零)/质量(异常多/无)/分级(85+优/55-危)/缺失维度标"数据不足"/批量计算
+- [x] T042 [US8] 创建 backend/app/services/semantic/health_scorer.py：HealthScorer类、calculate(metric_id)→MetricHealthScore——五维计算(口径完整度:一等字段齐全率25%/活跃度:近30天consume查询归一化20%/质量:quality_event异常反比25%/Owner响应:审核时效15%/血缘覆盖:上游解析率15%)、维度数据缺失→记0+标missing_dimensions、分级(≥85EXCELLENT/70-84GOOD/55-69WARNING/<55CRITICAL)
+- [x] T043 [US8] 修改 repository.py：新增save_health_score()/get_health_score()/list_critical_metrics()方法
+- [x] T044 [US8] 修改 service.py：新增get_metric_health(metric_code)→MetricHealthScore、健康度CRITICAL/WARNING→发布metric.health_critical事件→notify.todo整改待办
+- [x] T045 [US8] 修改 api/metrics.py：新增GET /metric-definitions/{code}/health端点
+- [x] T046 [US8] 修改 semantic_tasks.py：新增refresh_health_scores(Arq cron每日凌晨)——批量重算全部指标健康度+CRITICAL/WARNING进整改待办
+- [x] T047 [US8] 补充 backend/tests/unit/test_health_scorer.py：测试口径完整度(齐全/缺失)/活跃度(高/零)/质量(异常多/无)/分级(85+优/55-危)/缺失维度标"数据不足"/批量计算
 
 **Checkpoint**: US8完成 - 健康度评分引擎
 
@@ -169,11 +169,11 @@
 
 ### Implementation for User Story 9+10
 
-- [ ] T048 [US9] 修改 service.py：新增compare_metrics(metric_code_a, metric_code_b)→dict(并排对比definition/granularity/dimensions/unit/currency/source_tables/time_semantics/additivity+差异标记identical/similar/different)
-- [ ] T049 [US9] 修改 api/metrics.py：新增POST /metric-definitions/compare端点(MetricCompareRequest)+权限校验(两指标查看权限)
-- [ ] T050 [US10] 修改 service.py：新增batch_register_metrics(request, actor_id)→生成batch_id+LLM解析候选指标(llm_prefill=True)→逐条校验门禁→成功入库DRAFT(共享batch_id)+失败条目标记validation_error
-- [ ] T051 [US10] 修改 api/metrics.py：新增POST /metric-definitions/batch-register端点(MetricBatchRegisterRequest)
-- [ ] T052 [US10] 补充 backend/tests/unit/test_semantic_service.py：测试compare(相同/不同/无权限)+batch_register(成功/部分失败/LLM超时降级)
+- [x] T048 [US9] 修改 service.py：新增compare_metrics(metric_code_a, metric_code_b)→dict(并排对比definition/granularity/dimensions/unit/currency/source_tables/time_semantics/additivity+差异标记identical/similar/different)
+- [x] T049 [US9] 修改 api/metrics.py：新增POST /metric-definitions/compare端点(MetricCompareRequest)+权限校验(两指标查看权限)
+- [x] T050 [US10] 修改 service.py：新增batch_register_metrics(request, actor_id)→生成batch_id+LLM解析候选指标(llm_prefill=True)→逐条校验门禁→成功入库DRAFT(共享batch_id)+失败条目标记validation_error
+- [x] T051 [US10] 修改 api/metrics.py：新增POST /metric-definitions/batch-register端点(MetricBatchRegisterRequest)
+- [x] T052 [US10] 补充 backend/tests/unit/test_semantic_service.py：测试compare(相同/不同/无权限)+batch_register(成功/部分失败/LLM超时降级)
 
 **Checkpoint**: US9+US10完成 - 对比+批量注册
 
@@ -187,14 +187,14 @@
 
 ### Implementation for User Story 11+12
 
-- [ ] T053 [US11] 修改 repository.py：新增aggregate_dashboard(domain, owner_id)方法——单次SELECT含CASE WHEN+GROUP BY条件聚合(total/by_status/by_tier/by_domain/pii_count)+deleted_at IS NULL过滤
-- [ ] T054 [US11] 修改 api/semantic.py：dashboard端点改为调用MetricRepository.aggregate_dashboard()+MetricService包装，移除API层ORM查询
-- [ ] T055 [US11] 修改 service.py：新增get_consumption_guide(metric_code)→自动生成消费指南(含PII/SEMI_ADDITIVE判断)+缓存结果
-- [ ] T056 [US11] 修改 api/semantic.py：消费指南端点改为调用MetricService.get_consumption_guide()，移除API层硬编码逻辑
-- [ ] T057 [US11] 修改 api/semantic.py：create_template改用MetricTemplateCreateRequest Schema校验替代裸dict、instantiate_template过滤merged字段为MetricCreateRequest接受字段集合
-- [ ] T058 [US12] 修改 service.py：update_metric中PUBLISHED状态更新definition_json走PENDING_VERSION机制(FR-037)、dependencies比较用set()替代list直接!=(FR-046)、change_reason仅在口径变更时设置到版本记录(FR-022)
-- [ ] T059 [US12] 修改 service.py：review_compliance增加pii_flag=True校验(非PII指标拒绝复核)(FR-040)
-- [ ] T060 [US12] 补充 backend/tests/unit/test_semantic_cache.py：测试熔断复位(5次失败→成功record_success复位)+版本键(版本变更旧键过期)+pipeline预热+LIKE通配符转义
+- [x] T053 [US11] 修改 repository.py：新增aggregate_dashboard(domain, owner_id)方法——单次SELECT含CASE WHEN+GROUP BY条件聚合(total/by_status/by_tier/by_domain/pii_count)+deleted_at IS NULL过滤
+- [x] T054 [US11] 修改 api/semantic.py：dashboard端点改为调用MetricRepository.aggregate_dashboard()+MetricService包装，移除API层ORM查询
+- [x] T055 [US11] 修改 service.py：新增get_consumption_guide(metric_code)→自动生成消费指南(含PII/SEMI_ADDITIVE判断)+缓存结果
+- [x] T056 [US11] 修改 api/semantic.py：消费指南端点改为调用MetricService.get_consumption_guide()，移除API层硬编码逻辑
+- [x] T057 [US11] 修改 api/semantic.py：create_template改用MetricTemplateCreateRequest Schema校验替代裸dict、instantiate_template过滤merged字段为MetricCreateRequest接受字段集合
+- [x] T058 [US12] 修改 service.py：update_metric中PUBLISHED状态更新definition_json走PENDING_VERSION机制(FR-037)、dependencies比较用set()替代list直接!=(FR-046)、change_reason仅在口径变更时设置到版本记录(FR-022)
+- [x] T059 [US12] 修改 service.py：review_compliance增加pii_flag=True校验(非PII指标拒绝复核)(FR-040)
+- [x] T060 [US12] 补充 backend/tests/unit/test_semantic_cache.py：测试熔断复位(5次失败→成功record_success复位)+版本键(版本变更旧键过期)+pipeline预热+LIKE通配符转义
 
 **Checkpoint**: US11+US12完成 - 架构重构+安全加固
 
@@ -204,10 +204,10 @@
 
 **Purpose**: PENDING_VERSION超时+健康度刷新+紧急补审+灰度超期
 
-- [ ] T061 修改 semantic_tasks.py：新增check_pending_version_timeouts(Arq cron每分钟)——查pending_version_confirmation表status=PENDING且deadline已过→默认接受+切换CURRENT+发布metric.version_confirmed事件
-- [ ] T062 [P] 修改 semantic_tasks.py：refresh_health_scores(Arq cron每日凌晨)——调HealthScorer.batch_calculate全部指标+CRITICAL/WARNING→notify.todo
-- [ ] T063 [P] 修改 semantic_tasks.py：check_emergency_review_overdue+check_experimental_expiry——前述T041已定义，验证实现完整
-- [ ] T064 补充 backend/tests/chaos/test_semantic_chaos.py：并发发布同一指标→乐观锁409+并发create_version→IntegrityError→ConflictError+Redis宕机→缓存降级DB+PENDING_VERSION并发confirm→幂等
+- [x] T061 修改 semantic_tasks.py：新增check_pending_version_timeouts(Arq cron每分钟)——查pending_version_confirmation表status=PENDING且deadline已过→默认接受+切换CURRENT+发布metric.version_confirmed事件
+- [x] T062 [P] 修改 semantic_tasks.py：refresh_health_scores(Arq cron每日凌晨)——调HealthScorer.batch_calculate全部指标+CRITICAL/WARNING→notify.todo
+- [x] T063 [P] 修改 semantic_tasks.py：check_emergency_review_overdue+check_experimental_expiry——前述T041已定义，验证实现完整
+- [x] T064 补充 backend/tests/chaos/test_semantic_chaos.py：并发发布同一指标→乐观锁409+并发create_version→IntegrityError→ConflictError+Redis宕机→缓存降级DB+PENDING_VERSION并发confirm→幂等
 
 ---
 
@@ -215,10 +215,10 @@
 
 **Purpose**: 文档更新+依赖管理+集成测试
 
-- [ ] T065 [P] 更新 docs/module-status.yaml：标注语义模块工业级修复完成
-- [ ] T066 [P] 更新 docs/CHANGELOG_MODULES.md：记录语义模块修复变更
-- [ ] T067 [P] 补充 backend/tests/integration/test_semantic_integration.py：端到端集成测试——创建→submit→approve→PUBLISHED→PUT breaking→PENDING_VERSION→confirm→新CURRENT→deprecate→notify→灰度→promote→紧急发布→健康度评分
-- [ ] T068 [P] 修改 service.py：MetricVersion拆为独立文件metric_version.py后更新import路径
+- [x] T065 [P] 更新 docs/module-status.yaml：标注语义模块工业级修复完成
+- [x] T066 [P] 更新 docs/CHANGELOG_MODULES.md：记录语义模块修复变更
+- [x] T067 [P] 补充 backend/tests/integration/test_semantic_integration.py：端到端集成测试——创建→submit→approve→PUBLISHED→PUT breaking→PENDING_VERSION→confirm→新CURRENT→deprecate→notify→灰度→promote→紧急发布→健康度评分
+- [x] T068 [P] 修改 service.py：MetricVersion拆为独立文件metric_version.py后更新import路径
 
 ---
 
@@ -228,10 +228,10 @@
 
 **Purpose**: 构建、部署和UI验证
 
-- [ ] T069 构建后端项目并修复所有编译错误：ruff check + mypy
-- [ ] T070 构建前端项目并修复所有编译错误
-- [ ] T071 部署应用到测试环境：docker-compose up -d
-- [ ] T072 运行UI验证：验证完整状态机流程(submit/approve/reject)+PENDING_VERSION缓冲+依赖校验+灰度发布+紧急发布+健康度评分+指标对比+批量注册+dashboard+消费指南
+- [x] T069 构建后端项目并修复所有编译错误：ruff check + mypy
+- [x] T070 构建前端项目并修复所有编译错误
+- [x] T071 部署应用到测试环境：docker-compose up -d
+- [x] T072 运行UI验证：验证完整状态机流程(submit/approve/reject)+PENDING_VERSION缓冲+依赖校验+灰度发布+紧急发布+健康度评分+指标对比+批量注册+dashboard+消费指南
 
 ---
 

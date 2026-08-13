@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.exceptions import SystemError as AppSystemError
-from app.models.metric import Metric, MetricVersion
+from app.models.metric import Metric
 from app.models.metric_health import MetricHealthScore
-from app.models.metric_version import PendingVersionConfirmation
+from app.models.metric_version import MetricVersion, PendingVersionConfirmation
 
 
 class MetricRepository:

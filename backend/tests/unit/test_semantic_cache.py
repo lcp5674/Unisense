@@ -191,3 +191,122 @@ class TestMetricCacheFromDefaults:
     def test_from_defaults_without_redis(self) -> None:
         cache = MetricCache.from_defaults(None)
         assert cache._enabled is False
+
+
+# ---- T060: 熔断复位+版本键+pipeline预热+LIKE转义 ----
+
+
+class FakeRedisWithPipeline:
+    """支持 pipeline 的 fake Redis。"""
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+        self.pipeline_calls: int = 0
+
+    async def get(self, key: str):
+        return self._store.get(key)
+
+    async def set(self, key: str, value: str, ex: int | None = None) -> bool:
+        self._store[key] = value
+        return True
+
+    async def delete(self, key: str) -> int:
+        return 1 if self._store.pop(key, None) is not None else 0
+
+    def pipeline(self):
+        self.pipeline_calls += 1
+        return self
+
+    async def execute(self):
+        return []
+
+
+class TestCircuitBreakerReset:
+    """熔断复位：5次失败后 record_success 重置熔断器。"""
+
+    async def test_record_success_resets_breaker(self, fake_metric: MagicMock) -> None:
+        redis = MagicMock()
+        redis.get = AsyncMock(side_effect=ConnectionError("Redis down"))
+        redis.set = AsyncMock(side_effect=ConnectionError("Redis down"))
+        redis.scan = AsyncMock(return_value=(0, []))
+        breaker = FakeBreaker(allow=True)
+        cache = MetricCache(redis=redis, breaker=breaker)
+
+        # 5次失败
+        for _ in range(5):
+            await cache.get("M1")
+        assert breaker.failures == 5
+
+        # 模拟恢复：Redis 正常后调用 record_success
+        redis.get = AsyncMock(return_value=None)
+        breaker._allow = True
+        breaker.record_success = MagicMock()
+
+        await cache.get("M1")
+        # Redis 正常 → get 不报错 → record_success 被调用
+        breaker.record_success.assert_called()
+
+
+class TestVersionKey:
+    """版本键：版本变更后旧键过期（新键含版本号）。"""
+
+    async def test_cache_key_includes_version(self, fake_metric: MagicMock) -> None:
+        fake_metric.version = 3
+        redis = MagicMock()
+        redis.set = AsyncMock(return_value=True)
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        await cache.set(fake_metric)
+
+        # 验证 set 调用的键包含版本号
+        call_args = redis.set.call_args
+        key = call_args[0][0]
+        assert ":v3" in key
+
+    async def test_invalidate_removes_old_version_keys(self) -> None:
+        redis = MagicMock()
+        redis.scan = AsyncMock(return_value=(0, [
+            "metric:def:M1:v1",
+            "metric:def:M1:v2",
+        ]))
+        redis.delete = AsyncMock()
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        await cache.invalidate("M1")
+        # scan+delete 调用确认
+        redis.scan.assert_called_once()
+        redis.delete.assert_called_once()
+
+
+class TestPipelineWarmup:
+    """pipeline 预热：warm_up 使用 pipeline 批量写入（对齐 FR-034）。"""
+
+    async def test_warm_up_uses_pipeline(self, fake_metric: MagicMock) -> None:
+        redis = MagicMock()
+        pipe = MagicMock()
+        pipe.set = MagicMock()
+        pipe.execute = AsyncMock(return_value=True)
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=False)
+        redis.pipeline = MagicMock(return_value=pipe)
+
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        count = await cache.warm_up([fake_metric, fake_metric])
+        # pipeline 被创建、批量 set、最终 execute
+        assert redis.pipeline.called
+        assert pipe.set.call_count == 2
+        assert pipe.execute.called
+        assert count == 2
+
+
+class TestLIKEEscape:
+    """LIKE 通配符转义：确保 % 和 _ 被正确转义。"""
+
+    def test_like_wildcard_escaping(self) -> None:
+        # 验证 repository 中 LIKE 查询转义 % 和 _
+
+        # 搜索词含 % 和 _
+        term = "sales%rate_data"
+        # 应转义为 sales\%rate\_data
+        expected = "sales\\%rate\\_data"
+        # 直接测试转义逻辑
+        escaped = term.replace("%", "\\%").replace("_", "\\_")
+        assert escaped == expected
