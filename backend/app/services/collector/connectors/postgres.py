@@ -98,33 +98,42 @@ class PostgresCollector(BaseCollector):
                 logger.warning("采集源 %s 库 %s 表列表失败: %s", source_id, schema, exc)
                 continue
 
+            # P1-2: 一次批量查出该库全部表的列，消除 N+1 查询
+            try:
+                col_rows = await self._connector.query(
+                    "SELECT table_name, column_name, data_type, is_nullable "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = :schema ORDER BY table_name, ordinal_position",
+                    {"schema": schema},
+                )
+            except Exception as exc:
+                logger.warning("采集源 %s 库 %s 列列表失败: %s", source_id, schema, exc)
+                col_rows = []
+            columns_by_table: dict[str, list[dict[str, Any]]] = {}
+            for r in col_rows:
+                tbl = r.get("table_name")
+                col = r.get("column_name")
+                if tbl and col:
+                    columns_by_table.setdefault(tbl, []).append({
+                        "name": col,
+                        "type": r.get("data_type") or "unknown",
+                        "nullable": str(r.get("is_nullable") or "YES").upper() == "YES",
+                    })
+
             for row in tables:
                 tbl = row.get("table_name")
                 if not tbl:
                     continue
                 entity_name = f"{schema}.{tbl}" if not self._schema else tbl
-                try:
-                    cols = await self._connector.query(
-                        "SELECT column_name, data_type FROM information_schema.columns "
-                        "WHERE table_schema = :schema AND table_name = :tbl "
-                        "ORDER BY ordinal_position",
-                        {"schema": schema, "tbl": tbl},
+                cols = columns_by_table.get(tbl, [])
+                schema_json = {"columns": cols}
+                specs.append(
+                    CatalogSpec(
+                        entity_name=entity_name,
+                        entity_type="TABLE",
+                        schema_json=schema_json,
                     )
-                    schema_json = {
-                        "columns": [
-                            {"name": c.get("column_name"), "type": c.get("data_type")} for c in cols
-                        ]
-                    }
-                    specs.append(
-                        CatalogSpec(
-                            entity_name=entity_name,
-                            entity_type="TABLE",
-                            schema_json=schema_json,
-                        )
-                    )
-                except Exception as exc:
-                    logger.warning("采集源 %s 表 %s 字段失败: %s", source_id, entity_name, exc)
-                    failed_specs.append(FailedSpec(entity_name=entity_name, error=str(exc)))
+                )
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
 

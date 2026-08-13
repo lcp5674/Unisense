@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import time
@@ -96,6 +97,8 @@ class KafkaCollector(BaseCollector):
         P0-5/P2-5 修复：
         - 依赖缺失（kafka-python 未安装）时明确抛 ExternalDependencyError，
           不再静默返回空列表（否则「测试连接」恒假成功）。
+        - list_topics/describe_topics 为同步阻塞调用，用 asyncio.to_thread()
+          包裹以避免冻结事件循环。
         - 异常路径在 finally 中 close 客户端，避免连接泄漏。
         """
         try:
@@ -109,13 +112,16 @@ class KafkaCollector(BaseCollector):
         client: KafkaAdminClient | None = None
         try:
             client = KafkaAdminClient(**self._admin_kwargs())
-            topics = client.list_topics()
+            # P0-5: 同步调用用 to_thread 避免阻塞事件循环
+            topics = await asyncio.to_thread(client.list_topics)
             topic_details = []
             for topic_name in topics:
                 # 获取 Topic 元数据（describe_topics 为旧 API 但功能稳定；
                 # 依赖客户端不泄漏——见 finally close）
                 try:
-                    partitions = client.describe_topics([topic_name])
+                    partitions = await asyncio.to_thread(
+                        client.describe_topics, [topic_name]
+                    )
                     partition_count = 0
                     replication_factor = 0
                     if partitions and len(partitions) > 0:

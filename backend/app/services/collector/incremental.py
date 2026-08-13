@@ -6,12 +6,14 @@
 - PostgreSQL/Hive/Kafka 无增量支持，降级为全量采集
 - 降级路径：增量模式请求但源库不支持 → 自动降级为 FULL，记录日志
 - 采集水位缺失时也降级为全量（首次采集必须全量）
+- P0-3: MySQL InnoDB UPDATE_TIME 通常为 NULL，<10%% 有效表时降级全量
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 
 logger = logging.getLogger("unisense.collector.incremental")
 
@@ -105,6 +107,80 @@ def should_degrade_to_full(
     if not supports_incremental(source_type):
         return True
     return watermark_ts is None
+
+
+def should_mix_in(source_type: str, connector: Any | None) -> bool:
+    """P0-3: MySQL InnoDB UPDATE_TIME 通常为 NULL，<10%% 有效表时降级全量。
+
+    检测逻辑：查询 information_schema.tables 中 UPDATE_TIME IS NOT NULL 的表占比，
+    若低于 10%% 说明增量采集会漏采大量表，此时应降级为全量并记录 event。
+
+    Args:
+        source_type: 数据源类型。
+        connector: 数据库连接器（有 query 方法）。
+
+    Returns:
+        True 表示应降级为全量（mix-in 全量）。
+    """
+    if source_type != "mysql" or connector is None:
+        return False
+    try:
+        ratio = _get_mysql_update_time_ratio(connector)
+        if ratio < 0.1:
+            logger.warning(
+                "mysql_update_time_sparse: ratio=%.2f%% < 10%%, 降级为全量",
+                ratio * 100,
+            )
+            return True
+    except Exception as exc:
+        logger.warning("mysql_update_time_ratio_check_failed: %s", exc)
+    return False
+
+
+def _get_mysql_update_time_ratio(connector: Any) -> float:
+    """获取 MySQL UPDATE_TIME IS NOT NULL 表占比（同步轮询版本）。
+
+    Args:
+        connector: 有 query(sql, params) -> list[dict] 方法的连接器。
+
+    Returns:
+        占比 0.0-1.0。
+    """
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(_get_mysql_update_time_ratio_async(connector))
+        finally:
+            loop.close()
+
+    return loop.run_until_complete(_get_mysql_update_time_ratio_async(connector))
+
+
+async def _get_mysql_update_time_ratio_async(connector: Any) -> float:
+    """异步获取 MySQL UPDATE_TIME IS NOT NULL 表占比。"""
+    try:
+        rows = await connector.query(
+            "SELECT COUNT(*) as total, "
+            "SUM(CASE WHEN UPDATE_TIME IS NOT NULL THEN 1 ELSE 0 END) as with_time "
+            "FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'",
+            {},
+        )
+        if not rows:
+            return 0.0
+        row = rows[0]
+        total = int(row.get("total", 0) or 0)
+        with_time = int(row.get("with_time", 0) or 0)
+        if total == 0:
+            return 0.0
+        return with_time / total
+    except Exception:
+        return 0.0
 
 
 class IncrementalCollectorMixin:

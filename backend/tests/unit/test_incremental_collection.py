@@ -200,6 +200,9 @@ async def test_service_incremental_degrades_to_full_for_unsupported():
         repo.recompute_coverage = AsyncMock(return_value=1.0)
         repo.update_health_status = AsyncMock()
         repo.update_watermark_after_collection = AsyncMock(return_value=MagicMock(mode="FULL"))
+        # P1-5: 降级为 FULL 后触发废弃表对账
+        repo.list_active_entity_names = AsyncMock(return_value=[])
+        repo.deprecate_catalog = AsyncMock(return_value=False)
 
         events = MagicMock()
         events.publish_batch = AsyncMock()
