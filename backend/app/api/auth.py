@@ -125,5 +125,15 @@ async def list_users(
         stmt = stmt.where(User.role == role)
     rows = (await db.execute(stmt)).scalars().all()
     return ok(
-        [UserBrief(id=u.id, username=u.username, display_name=u.display_name, role=u.role, domain=u.domain, status=u.status) for u in rows]
+        [
+            UserBrief(
+                id=u.id,
+                username=u.username,
+                display_name=u.display_name,
+                role=u.role,
+                domain=u.domain,
+                status=u.status,
+            )
+            for u in rows
+        ]
     )
