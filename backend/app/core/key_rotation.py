@@ -168,7 +168,7 @@ class KeyRotationManager:
             except Exception as exc:
                 last_exc = exc
                 continue
-        raise last_exc or Exception("所有密钥均无法解密")  # type: ignore[misc]
+        raise last_exc or Exception("所有密钥均无法解密")
 
     def encrypt(self, data: bytes) -> bytes:
         """使用活跃密钥加密。"""
