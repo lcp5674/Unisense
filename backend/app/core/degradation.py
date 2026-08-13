@@ -47,6 +47,23 @@ _EVENT_STATE_TO_STATUS = {
     "PROBING": "DEGRADED",
 }
 
+# event_type 推导（对齐 TD §4.13 degradation_event.event_type ENUM）：
+# state 仅区分 DEGRADED/HEALTHY，event_type 进一步刻画熔断语义。
+_EVENT_TYPE_BY_STATE_REASON: dict[tuple[str, str], str] = {
+    ("DEGRADED", "circuit_open"): "CIRCUIT_OPENED",
+    ("HEALTHY", "circuit_recovered"): "CIRCUIT_CLOSED",
+}
+# 严重程度默认映射：降级=能力关停(HEAVY)，恢复=LIGHT（可被调用方覆盖）。
+_SEVERITY_BY_STATE = {"DEGRADED": "HEAVY", "HEALTHY": "LIGHT"}
+# 恢复动作默认：电路自动探测恢复（可被调用方覆盖）。
+_RESOLUTION_BY_REASON = {"circuit_recovered": "自动探测恢复"}
+
+
+def _derive_event_type(state: str, reason: str) -> str:
+    """由 (state, reason) 推导 TD §4.13 event_type ENUM 值（纯函数，便于单测）。"""
+    return _EVENT_TYPE_BY_STATE_REASON.get((state, reason), state)
+
+
 # 哨兵：区分「调用方未提供该字段」与「显式传 None/0」。UPSERT 更新时，未提供的
 # 遥测字段（P95 延迟/错误率/扩展信息）必须保留既有值，绝不能因熔断事件而清零。
 _MISSING = object()
@@ -97,8 +114,15 @@ async def record_degradation(
     *,
     actor_id: int = 0,
     trace_id: str = "",
+    severity: str | None = None,
+    affected_capabilities: list[str] | None = None,
+    affected_user_count: int = 0,
 ) -> None:
     """记录一次降级开始/恢复审计事件（best-effort，不抛异常）。
+
+    对齐 TD §4.13：补齐 event_type / severity / affected_capabilities /
+    affected_user_count / started_at / recovered_at / duration_seconds /
+    trigger_reason / resolution_action，使看板可计算降级时长与影响用户数（Gap #4）。
 
     Args:
         dependency_type: 依赖类型（LLM/OLAP/GRAPH/ES/DATASOURCE/NOTIFICATION）。
@@ -107,6 +131,9 @@ async def record_degradation(
         reason: 触发原因（如 circuit_open / circuit_recovered / olap_not_configured）。
         actor_id: 触发方（0=系统自动）。
         trace_id: 链路追踪 ID（可选）。
+        severity: 严重程度（LIGHT/HEAVY），缺省按 state 推导（降级=HEAVY/恢复=LIGHT）。
+        affected_capabilities: 受影响能力列表（如 ["ai_prefill","nl2sql"]），可选。
+        affected_user_count: 预估受影响用户数，缺省 0。
     """
     # 边界处理：审计事件仅接受 DEGRADED/HEALTHY 枚举值，非法 state（拼写/误传 PROBING）
     # 直接丢弃并告警，避免向 MySQL ENUM 列写入非法值被静默拒绝（best-effort 吞错无法定位）。
@@ -118,6 +145,9 @@ async def record_degradation(
             reason=reason,
         )
         return
+    event_type = _derive_event_type(state, reason)
+    sev = severity or _SEVERITY_BY_STATE.get(state, "LIGHT")
+    now = datetime.now(UTC)
     # 1. 事件总线（best-effort，失败仅告警）
     try:
         await get_eventbus().publish(
@@ -129,6 +159,8 @@ async def record_degradation(
                 "reason": reason,
                 "actor_id": actor_id,
                 "trace_id": trace_id,
+                "event_type": event_type,
+                "severity": sev,
             },
         )
     except Exception:
@@ -142,15 +174,53 @@ async def record_degradation(
     # 2. 持久化（独立会话 best-effort，独立于请求事务，避免随回滚丢失）
     try:
         async with async_session_factory() as session:
-            session.add(
-                DegradationEvent(
-                    dependency_type=dependency_type,
-                    dependency_id=dependency_id,
-                    state=state,
-                    reason=reason,
-                    actor_id=actor_id,
-                )
+            event = DegradationEvent(
+                dependency_type=dependency_type,
+                dependency_id=dependency_id,
+                state=state,
+                reason=reason,
+                actor_id=actor_id,
+                # TD §4.13 度量字段：降级事件记 started_at，恢复事件记 recovered_at
+                event_type=event_type,
+                severity=sev,
+                affected_capabilities=affected_capabilities,
+                affected_user_count=affected_user_count,
+                started_at=now if state == "DEGRADED" else None,
+                recovered_at=now if state == "HEALTHY" else None,
+                trigger_reason=reason,
             )
+            session.add(event)
+            # 恢复配对（best-effort）：回填最近一次未恢复的 DEGRADED 事件的
+            # recovered_at / duration_seconds / resolution_action，使看板可直接聚合降级
+            # 持续时长（无需回放历史）。此逻辑独立容错——即便配对查询/回填失败，
+            # 主降级审计事件仍须落库（审计记录最关键，绝不可因配对异常丢失）。
+            if state == "HEALTHY":
+                try:
+                    paired = await session.execute(
+                        select(DegradationEvent)
+                        .where(
+                            DegradationEvent.dependency_type == dependency_type,
+                            DegradationEvent.dependency_id == dependency_id,
+                            DegradationEvent.state == "DEGRADED",
+                            DegradationEvent.recovered_at.is_(None),
+                        )
+                        .order_by(DegradationEvent.started_at.desc())
+                        .limit(1)
+                    )
+                    degraded = paired.scalars().first()
+                    if degraded is not None and degraded.started_at is not None:
+                        degraded.recovered_at = now
+                        degraded.duration_seconds = int((now - degraded.started_at).total_seconds())
+                        degraded.resolution_action = _RESOLUTION_BY_REASON.get(
+                            reason, "自动探测恢复"
+                        )
+                except Exception:
+                    logger.warning(
+                        "degradation_recovery_pairing_failed",
+                        dependency_type=dependency_type,
+                        dependency_id=dependency_id,
+                        exc_info=True,
+                    )
             await session.commit()
     except Exception:
         logger.warning(
@@ -278,6 +348,9 @@ async def _persist_degradation_and_health(
     consecutive_failures: int = 0,
     circuit_opened_at: datetime | None = None,
     metadata: dict[str, Any] | None = None,
+    severity: str | None = None,
+    affected_capabilities: list[str] | None = None,
+    affected_user_count: int = 0,
 ) -> None:
     """同时落 degradation_event（仅 DEGRADED/HEALTHY）与 dependency_health（始终）。"""
     if state in ("DEGRADED", "HEALTHY"):
@@ -288,6 +361,9 @@ async def _persist_degradation_and_health(
             reason,
             actor_id=actor_id,
             trace_id=trace_id,
+            severity=severity,
+            affected_capabilities=affected_capabilities,
+            affected_user_count=affected_user_count,
         )
     status = _EVENT_STATE_TO_STATUS.get(state, "DEGRADED")
     # 仅当 metadata 真实提供时才下发；否则 update_dependency_health 会保留既有 meta，
@@ -369,6 +445,9 @@ def fire_degradation_event(
     consecutive_failures: int = 0,
     circuit_opened_at: datetime | None = None,
     metadata: dict[str, Any] | None = None,
+    severity: str | None = None,
+    affected_capabilities: list[str] | None = None,
+    affected_user_count: int = 0,
 ) -> None:
     """同步入口：在低层客户端 / 同步熔断器中触发降级记录（fire-and-forget）。
 
@@ -403,6 +482,9 @@ def fire_degradation_event(
             consecutive_failures=consecutive_failures,
             circuit_opened_at=circuit_opened_at,
             metadata=metadata,
+            severity=severity,
+            affected_capabilities=affected_capabilities,
+            affected_user_count=affected_user_count,
         )
     )
 

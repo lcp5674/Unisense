@@ -388,6 +388,87 @@ class TestRecordDegradationBoundary:
         session.commit.assert_not_called()
 
 
+class TestRecordDegradationTd413:
+    async def test_degraded_event_populates_td413_fields(self, patched):
+        eb, session = patched
+        await degradation.record_degradation("OLAP", "olap", "DEGRADED", "circuit_open")
+        added = session.add.call_args[0][0]
+        assert isinstance(added, DegradationEvent)
+        # event_type 由 (state, reason) 推导为电路开启；severity 降级默认 HEAVY
+        assert added.event_type == "CIRCUIT_OPENED"
+        assert added.severity == "HEAVY"
+        assert added.started_at is not None
+        assert added.recovered_at is None
+        assert added.duration_seconds is None
+        assert added.trigger_reason == "circuit_open"
+        assert added.affected_user_count == 0
+        assert added.affected_capabilities is None
+        # 事件总线载荷也携带 event_type / severity（供 notify/看板消费）
+        eb.publish.assert_awaited_once()
+        payload = eb.publish.call_args[0][1]
+        assert payload["event_type"] == "CIRCUIT_OPENED"
+        assert payload["severity"] == "HEAVY"
+
+    async def test_healthy_event_event_type_and_recovered_at(self, patched):
+        _, session = patched
+        await degradation.record_degradation("OLAP", "olap", "HEALTHY", "circuit_recovered")
+        added = session.add.call_args[0][0]
+        assert added.event_type == "CIRCUIT_CLOSED"
+        assert added.severity == "LIGHT"
+        assert added.recovered_at is not None
+
+    async def test_affected_metadata_is_captured(self, patched):
+        _, session = patched
+        await degradation.record_degradation(
+            "OLAP",
+            "olap",
+            "DEGRADED",
+            "olap_not_configured",
+            severity="HEAVY",
+            affected_capabilities=["ai_prefill", "nl2sql"],
+            affected_user_count=120,
+        )
+        added = session.add.call_args[0][0]
+        assert added.severity == "HEAVY"
+        assert added.affected_capabilities == ["ai_prefill", "nl2sql"]
+        assert added.affected_user_count == 120
+
+    async def test_healthy_event_pairs_with_prior_degraded(self, patched):
+        _, session = patched
+        # 预置一条未恢复的 DEGRADED 事件（真实 ORM 实例，started_at 在 past）
+        degraded = DegradationEvent(
+            dependency_type="OLAP",
+            dependency_id="olap",
+            state="DEGRADED",
+            reason="circuit_open",
+            event_type="CIRCUIT_OPENED",
+            severity="HEAVY",
+            started_at=datetime(2026, 8, 1, 0, 0, 0, tzinfo=UTC),
+            recovered_at=None,
+        )
+        # 配对查询返回该未恢复事件
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = degraded
+        session.execute = AsyncMock(return_value=result)
+        await degradation.record_degradation("OLAP", "olap", "HEALTHY", "circuit_recovered")
+        # 恢复配对：回填最近 DEGRADED 事件的 recovered_at / duration_seconds / resolution_action
+        assert degraded.recovered_at is not None
+        assert degraded.duration_seconds is not None
+        assert degraded.duration_seconds > 0
+        assert degraded.resolution_action == "自动探测恢复"
+
+    async def test_healthy_event_without_prior_degraded_is_safe(self, patched):
+        _, session = patched
+        # 无匹配 DEGRADED 事件（首次恢复或历史已配对）→ 不抛异常，仅记录恢复事件
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = None
+        session.execute = AsyncMock(return_value=result)
+        await degradation.record_degradation("OLAP", "olap", "HEALTHY", "circuit_recovered")
+        added = session.add.call_args[0][0]
+        assert added.state == "HEALTHY"
+        assert added.event_type == "CIRCUIT_CLOSED"
+
+
 class TestFireDegradationDedup:
     async def test_repeated_state_is_deduped(self, monkeypatch, patched):
         captured: list = []
