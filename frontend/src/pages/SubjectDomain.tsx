@@ -148,8 +148,8 @@ export function SubjectDomain() {
   // 创建域
   async function handleCreate(values: { name: string; parent_id?: number | null; sort_order?: number; description?: string }) {
     try {
-      // code 不传：由后端按显示名自动生成
-      await createDomain({ ...values, parent_id: values.parent_id ?? null, owner_id: 1, sort_order: values.sort_order ?? 0 });
+      // code 不传：由后端按显示名自动生成；owner_id 由后端以创建人认证身份覆盖（P2-3 修复硬编码）
+      await createDomain({ ...values, parent_id: values.parent_id ?? null, sort_order: values.sort_order ?? 0 });
       message.success("创建成功");
       setCreateOpen(false);
       createForm.resetFields();

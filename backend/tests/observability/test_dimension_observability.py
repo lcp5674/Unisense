@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -81,7 +82,17 @@ async def test_create_dimension_writes_audit_record(
     async def fake_create(
         self: DimensionService, payload: object, actor_id: int | None = None
     ) -> object:
-        return MagicMock()
+        # 返回真实字段结构对象（DimensionResponse.from_model 需要真实属性，MagicMock 会校验失败）
+        return SimpleNamespace(
+            id=1,
+            dim_code="D_REGION",
+            name="区域",
+            domain="sales",
+            type="SCD1",
+            description=None,
+            owner_id=9,
+            status="DRAFT",
+        )
 
     monkeypatch.setattr(DimensionService, "create_dimension", fake_create)
     resp = await writer_client.post("/api/v1/dimensions", json=_DIM_BODY)

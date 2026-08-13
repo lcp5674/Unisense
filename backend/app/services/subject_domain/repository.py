@@ -75,9 +75,10 @@ class SubjectDomainRepository:
         await self._db.flush()
 
     async def code_exists(self, code: str) -> bool:
+        # 注意：不按 deleted_at 过滤——MySQL 唯一索引 uq_subject_domain_code 对软删记录仍生效，
+        # 若只查存活记录，软删 code 会被误判为空闲，插入时触发 Duplicate entry（端到端断层 P3-1）。
         stmt = select(func.count()).select_from(SubjectDomain).where(
             SubjectDomain.code == code,
-            SubjectDomain.deleted_at.is_(None),
         )
         result = await self._db.execute(stmt)
         return (result.scalar() or 0) > 0

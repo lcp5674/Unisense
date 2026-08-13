@@ -95,7 +95,9 @@ class SubjectDomainService:
         roots.sort(key=lambda n: (n.sort_order, n.code))
         return roots
 
-    async def create_domain(self, data: SubjectDomainCreate) -> SubjectDomain:
+    async def create_domain(
+        self, data: SubjectDomainCreate, owner_id: int | None = None
+    ) -> SubjectDomain:
         # 层级校验
         level = 1
         parent_path = ""
@@ -132,7 +134,7 @@ class SubjectDomainService:
             status="active",
             defaults_json=data.defaults_json,
             description=data.description,
-            owner_id=data.owner_id,
+            owner_id=owner_id if owner_id is not None else data.owner_id,
         )
         domain = await self._repo.create(domain)
 

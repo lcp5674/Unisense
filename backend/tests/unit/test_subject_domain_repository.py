@@ -107,6 +107,21 @@ class TestSubjectDomainRepo:
         db.execute.return_value = result
         assert await repo.code_exists("nope") is False
 
+    async def test_code_exists_does_not_filter_soft_deleted(self, repo, db) -> None:
+        """回归（端到端断层 P3-1）：软删记录仍占用唯一索引，code_exists 不得按 deleted_at 过滤。
+
+        原缺陷：查询带 ``deleted_at.is_(None)``，对软删 code 返回 False →
+        自动生成重名 code → INSERT 触发 MySQL 唯一索引 Duplicate entry → 500。
+        """
+        result = MagicMock()
+        result.scalar.return_value = 1  # 仅有软删记录也算占用
+        db.execute.return_value = result
+        assert await repo.code_exists("domain") is True
+        # 断言查询语句未对 deleted_at 做软删过滤（WHERE 不得有 IS NULL）
+        stmt = db.execute.call_args.args[0]
+        rendered = str(stmt)
+        assert "deleted_at IS NULL" not in rendered
+
     async def test_count_children(self, repo, db) -> None:
         result = MagicMock()
         result.scalar.return_value = 2

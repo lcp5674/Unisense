@@ -13,7 +13,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ALL_ROLES, require_roles
+from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.exceptions import BusinessError, NotFoundError
 from app.db.mysql import get_db_session as get_session
@@ -71,6 +71,13 @@ async def get_domain(
 
 
 @router.post(
+    "",
+    response_model=ApiResponse[SubjectDomainResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="创建域节点",
+    dependencies=_ADMIN_DEPS,
+)
+@router.post(
     "/",
     response_model=ApiResponse[SubjectDomainResponse],
     status_code=status.HTTP_201_CREATED,
@@ -79,11 +86,13 @@ async def get_domain(
 )
 async def create_domain(
     data: SubjectDomainCreate,
+    user: CurrentUser,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[SubjectDomainResponse]:
     try:
-        domain = await svc.create_domain(data)
+        # P2-3: 域管理员以认证身份为准（PLAT-2），不信任客户端传入的 owner_id
+        domain = await svc.create_domain(data, owner_id=user.id)
         await svc._db.commit()
         result = await svc.get_domain_with_count(domain.code)
         return ok(data=result, trace_id=trace_id)

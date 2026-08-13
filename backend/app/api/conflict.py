@@ -35,7 +35,8 @@ from app.services.conflict.service import ConflictService
 
 router = APIRouter(prefix="/conflicts", tags=["conflict"])
 
-_WRITE_ROLES = ("metric_owner",)
+# P2-4: 前端 MetricCreate「冲突预检」对全部写角色可见，platform_admin/domain_admin 也须可调
+_WRITE_ROLES = ("metric_owner", "platform_admin", "domain_admin")
 _GOV_ROLES = ("compliance_officer", "domain_admin")
 _READ_ROLES = ALL_ROLES
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]

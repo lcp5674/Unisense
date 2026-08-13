@@ -23,7 +23,8 @@ class SubjectDomainCreate(BaseModel):
     parent_id: int | None = Field(None, description="父域ID（根域为null）")
     sort_order: int = Field(0, description="同级排序")
     description: str | None = Field(None, description="描述")
-    owner_id: int = Field(..., description="域管理员ID")
+    # PLAT-2: owner_id 允许客户端省略，服务端以认证身份覆盖（防越权指定他人为域管理员）。
+    owner_id: int | None = Field(None, description="域管理员ID（可选，缺省以创建人身份）")
     defaults_json: dict[str, Any] = Field(default_factory=dict, description="域级默认值预设")
 
     @field_validator("code")

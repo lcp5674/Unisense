@@ -16,6 +16,7 @@ from app.services.dimension.schemas import (
     DimensionCreate,
     DimensionMappingCreate,
     DimensionMemberCreate,
+    DimensionResponse,
     DimensionUpdate,
     MetricDimensionBind,
     ReconciliationReview,
@@ -49,7 +50,8 @@ async def create_dimension(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=resp, trace_id=trace_id)
+    # P0-3: 直接返回 ORM 对象会触发 FastAPI 序列化 500，须经 DimensionResponse 转换
+    return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.get("", dependencies=_READ_DEPS)

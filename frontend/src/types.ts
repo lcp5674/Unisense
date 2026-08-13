@@ -242,7 +242,7 @@ export interface ImpactPreview {
 // 收藏（backend/app/api/consume.py）：GET 返回 string[]，POST 返回 FavoriteResponse
 export interface FavoriteResponse {
   metric_code: string;
-  favorited: boolean;
+  pinned: boolean;
 }
 
 // 当前用户（backend/app/api/auth.py UserInfo）
@@ -1109,7 +1109,8 @@ export interface SubjectDomainCreateRequest {
   parent_id?: number | null;
   sort_order?: number;
   description?: string | null;
-  owner_id: number;
+  /** 域管理员：可选，缺省由后端以创建人认证身份覆盖（PLAT-2） */
+  owner_id?: number;
   defaults_json?: Record<string, unknown>;
 }
 
