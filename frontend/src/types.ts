@@ -929,6 +929,16 @@ export interface SourceHealth {
   uptime_check: boolean;
 }
 
+/** 异步采集任务（采集任务中心）。 */
+export interface CollectionJob {
+  job_id: string;
+  source_id?: string;
+  actor_id?: number;
+  status: string;
+  detail?: Record<string, unknown>;
+  created_at?: string | null;
+}
+
 // ============================================================================
 // 资产地图（backend /api/v1/assetmap/*）
 // ============================================================================

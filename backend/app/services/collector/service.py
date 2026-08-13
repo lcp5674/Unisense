@@ -807,6 +807,22 @@ class CollectorService(BaseService):
         result: dict[str, Any] | None = await getter(job_id)
         return result
 
+    async def list_jobs(
+        self, limit: int = 50, offset: int = 0, queue: CollectionQueue | None = None
+    ) -> list[dict[str, Any]]:
+        """列出采集任务（按入队逆序分页，供采集任务中心展示）。
+
+        队列不支持 list 时返回空列表（不阻断）。
+        """
+        from app.core.config import settings as _settings
+
+        q = queue or create_collection_queue(redis_url=_settings.redis_url)
+        lister = getattr(q, "list", None)
+        if lister is None:
+            return []
+        result: list[dict[str, Any]] = await lister(limit=limit, offset=offset)
+        return result
+
     async def update_schedule(self, source_id: str, cron: str, mode: str) -> None:
         """US3: 更新数据源的定时调度配置（schedule_cron + collection_mode）。"""
         src = await self._repo.get_source(source_id)

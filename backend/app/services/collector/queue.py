@@ -40,6 +40,10 @@ class JobStore(Protocol):
         """读取任务状态。"""
         ...
 
+    async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """列出任务（按入队逆序，供采集任务中心展示）。"""
+        ...
+
 
 class InMemoryCollectionQueue:
     """进程内采集队列 + 状态存储（默认实现 / 单测载体）。"""
@@ -48,6 +52,8 @@ class InMemoryCollectionQueue:
         self._jobs: dict[str, dict[str, Any]] = {}
 
     async def enqueue(self, source_id: str, actor_id: int) -> str:
+        from datetime import UTC, datetime
+
         job_id = f"job-{uuid.uuid4().hex[:12]}"
         self._jobs[job_id] = {
             "job_id": job_id,
@@ -55,6 +61,7 @@ class InMemoryCollectionQueue:
             "actor_id": actor_id,
             "status": "QUEUED",
             "detail": {},
+            "created_at": datetime.now(UTC).isoformat(),
         }
         return job_id
 
@@ -64,7 +71,30 @@ class InMemoryCollectionQueue:
         job["detail"] = detail
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
-        return self._jobs.get(job_id)
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        return {
+            "job_id": job["job_id"],
+            "source_id": job.get("source_id"),
+            "actor_id": job.get("actor_id"),
+            "status": job.get("status"),
+            "detail": job.get("detail", {}),
+        }
+
+    async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        jobs = list(self._jobs.values())
+        jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+        return [
+            {
+                "job_id": j["job_id"],
+                "source_id": j.get("source_id"),
+                "actor_id": j.get("actor_id"),
+                "status": j.get("status"),
+                "detail": j.get("detail", {}),
+            }
+            for j in jobs[offset : offset + limit]
+        ]
 
 
 class RedisJobStore:
@@ -101,12 +131,66 @@ class RedisJobStore:
         raw = await self._redis.hgetall(self._key(job_id))
         if not raw:
             return None
-        detail = raw.get("detail")
+        # redis.asyncio 未开 decode_responses 时 hgetall 返回 bytes 键值，统一解码
+        decoded = {
+            (k.decode("utf-8", errors="replace") if isinstance(k, bytes) else k): (
+                v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
+            )
+            for k, v in raw.items()
+        }
+        detail_raw = decoded.get("detail")
+        detail: dict[str, Any] = json.loads(detail_raw) if detail_raw else {}
         return {
             "job_id": job_id,
-            "status": raw.get("status"),
-            "detail": json.loads(detail) if detail else {},
+            "source_id": detail.get("source_id"),
+            "actor_id": detail.get("actor_id"),
+            "status": decoded.get("status"),
+            "detail": detail,
         }
+
+    async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        import json
+
+        # SCAN 遍历 collect_job:*（生产模式下任务状态由 worker 回写，带 7 天 TTL）
+        keys: list[str] = []
+        cursor = 0
+        while True:
+            cursor, batch = await self._redis.scan(
+                cursor, match="collect_job:*", count=200
+            )
+            keys.extend(batch)
+            if not cursor:
+                break
+        jobs: list[dict[str, Any]] = []
+        for key in keys:
+            # redis.asyncio 的 SCAN/KEYS 返回 bytes；str(bytes) 会带 b'...' 包装，
+            # 必须显式 decode 后再按 "collect_job:" 前缀切出 job_id。
+            if isinstance(key, bytes):
+                key = key.decode("utf-8", errors="replace")
+            job_id = key.split(":", 1)[1]
+            raw = await self._redis.hgetall(self._key(job_id))
+            if not raw:
+                continue
+            decoded = {
+                (k.decode("utf-8", errors="replace") if isinstance(k, bytes) else k): (
+                    v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
+                )
+                for k, v in raw.items()
+            }
+            detail_raw = decoded.get("detail")
+            detail = json.loads(detail_raw) if detail_raw else {}
+            jobs.append(
+                {
+                    "job_id": job_id,
+                    "source_id": detail.get("source_id"),
+                    "actor_id": detail.get("actor_id"),
+                    "status": decoded.get("status"),
+                    "detail": detail,
+                }
+            )
+        # 按 job_id 前缀中的时间戳近似排序不可靠；保持扫描顺序并做稳定分页
+        jobs.sort(key=lambda j: j.get("job_id", ""), reverse=True)
+        return jobs[offset : offset + limit]
 
 
 #: 模块级 arq Redis 连接单例：避免每次 enqueue/get 新建 ArqRedis/AsyncRedis
@@ -173,6 +257,12 @@ class ArqCollectionQueue:
 
         redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
         return await RedisJobStore(redis).get(job_id)
+
+    async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        from app.core.config import settings
+
+        redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
+        return await RedisJobStore(redis).list(limit=limit, offset=offset)
 
 
 _default_queue: InMemoryCollectionQueue | None = None

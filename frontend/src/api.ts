@@ -82,6 +82,7 @@ import {
   RoleResponse,
   ScheduleResult,
   SnapshotResponse,
+  CollectionJob,
   SourceHealth,
   SourceType,
   SourceTypeInfo,
@@ -1410,6 +1411,22 @@ export async function listDriftLogs(
   });
   return request<{ items: DriftLogItem[]; total: number; page: number; page_size: number }>(
     `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/drift-logs?${qs}`,
+  );
+}
+
+/** 采集任务中心：列出异步采集任务（按入队逆序分页）。 */
+export async function listCollectionJobs(params?: {
+  limit?: number;
+  offset?: number;
+}): Promise<CollectionJob[]> {
+  const qs = pageQs({ limit: params?.limit ?? 50, offset: params?.offset ?? 0 });
+  return request<CollectionJob[]>(`${API_BASE}/data-sources/jobs?${qs}`);
+}
+
+/** 查询单个采集任务状态。 */
+export async function getCollectionJob(jobId: string): Promise<CollectionJob | null> {
+  return request<CollectionJob | null>(
+    `${API_BASE}/data-sources/jobs/${encodeURIComponent(jobId)}`,
   );
 }
 

@@ -158,6 +158,24 @@ async def test_connection(
     return ok(data=result, trace_id=trace_id)
 
 
+@source_router.get("/jobs", dependencies=_READ_DEPS)
+async def list_collection_jobs(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    limit: int = 50,
+    offset: int = 0,
+) -> ApiResponse[list[dict[str, Any]]]:
+    """列出采集任务（按入队逆序分页，采集任务中心入口）。
+
+    注意：本端点须注册在 ``GET /{source_id}`` 之前——FastAPI 按注册顺序匹配，
+    单段静态路径 ``/jobs`` 若在 ``/{source_id}`` 之后会被当作 source_id 吞掉。
+    """
+    svc = _svc(db)
+    jobs = await svc.list_jobs(limit=limit, offset=offset)
+    return ok(data=jobs, trace_id=trace_id)
+
+
 @source_router.get("/{source_id}", dependencies=_READ_DEPS)
 async def get_data_source(
     source_id: str,

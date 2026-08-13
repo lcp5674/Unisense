@@ -109,3 +109,45 @@ async def test_drift_logs_endpoint_returns_paged(
     assert body["total"] == 1
     assert body["items"][0]["entity_name"] == "users"
     assert body["items"][0]["change_type"] == "ADD_COLUMN"
+
+
+async def test_list_jobs_returns_jobs(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """采集任务中心：GET /jobs 返回任务列表（含状态/详情）。"""
+    with patch(
+        "app.api.collector.CollectorService.list_jobs",
+        new_callable=AsyncMock,
+        return_value=[
+            {
+                "job_id": "job-abc123",
+                "source_id": "mysql_src_1",
+                "status": "QUEUED",
+                "detail": {"mode": "FULL"},
+            }
+        ],
+    ):
+        resp = await collector_client.get("/api/v1/data-sources/jobs?limit=10&offset=0")
+    assert resp.status_code == 200
+    jobs = resp.json()["data"]
+    assert len(jobs) == 1
+    assert jobs[0]["job_id"] == "job-abc123"
+    assert jobs[0]["status"] == "QUEUED"
+
+
+async def test_list_jobs_must_precede_source_id_route(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """GET /jobs 必须命中列表端点而非被 /{source_id} 吞掉（静态路由先注册）。"""
+    with patch(
+        "app.api.collector.CollectorService.list_jobs",
+        new_callable=AsyncMock,
+        return_value=[],
+    ) as mock_list, patch(
+        "app.api.collector.CollectorService.get_source",
+        new_callable=AsyncMock,
+    ) as mock_get:
+        resp = await collector_client.get("/api/v1/data-sources/jobs")
+    assert resp.status_code == 200
+    mock_list.assert_awaited_once()
+    mock_get.assert_not_awaited()

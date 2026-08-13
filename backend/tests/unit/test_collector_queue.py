@@ -187,3 +187,59 @@ class TestRedisJobStoreTtl:
         store, redis = self._make_store()
         await store.set("job-3", "RETRYING", {"attempt": 2})
         redis.expire.assert_not_awaited()
+
+
+class TestRedisJobStoreBytesDecode:
+    """redis.asyncio 未开 decode_responses 时 hgetall/scan 返回 bytes——get/list 必须解码。"""
+
+    def _bytes_store(self, hgetall_result: dict, scan_result: tuple = (0, [])):
+        from app.services.collector.queue import RedisJobStore
+
+        mock_redis = MagicMock()
+        mock_redis.hgetall = AsyncMock(return_value=hgetall_result)
+        mock_redis.scan = AsyncMock(return_value=scan_result)
+        return RedisJobStore(mock_redis), mock_redis
+
+    @pytest.mark.asyncio
+    async def test_get_decodes_bytes_values(self):
+        """get() 从 bytes 键值解码出 str 状态与 dict 详情（此前返回 None/空）。"""
+        store, _redis = self._bytes_store(
+            {b"status": b"COMPLETED", b"detail": b'{"scanned": 54}'}
+        )
+        job = await store.get("job-x")
+        assert job is not None
+        assert job["status"] == "COMPLETED"
+        assert job["detail"] == {"scanned": 54}
+
+    @pytest.mark.asyncio
+    async def test_list_decodes_bytes_keys_and_values(self):
+        """list() 对 bytes SCAN keys 解码切出 job_id，并解码 hgetall 值。"""
+        store, redis = self._bytes_store(
+            {b"status": b"QUEUED", b"detail": b"{}"},
+            scan_result=(0, [b"collect_job:collect:sched:s1:123"]),
+        )
+        jobs = await store.list(limit=10, offset=0)
+        assert len(jobs) == 1
+        assert jobs[0]["job_id"] == "collect:sched:s1:123"
+        assert jobs[0]["status"] == "QUEUED"
+        # 二次扫描（SCAN cursor 循环）被正确终止
+        redis.scan.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_inmemory_list_returns_jobs(self):
+        """InMemoryCollectionQueue.list 返回任务（采集任务中心）。"""
+        from app.services.collector.queue import InMemoryCollectionQueue
+
+        q = InMemoryCollectionQueue()
+        j1 = await q.enqueue("s1", 1)
+        j2 = await q.enqueue("s2", 2)
+        await q.set(j1, "COMPLETED", {"scanned": 10})
+        jobs = await q.list(limit=10, offset=0)
+        assert len(jobs) == 2
+        by_id = {j["job_id"]: j for j in jobs}
+        assert by_id[j1]["status"] == "COMPLETED"
+        assert by_id[j1]["detail"] == {"scanned": 10}
+        assert by_id[j2]["status"] == "QUEUED"
+        # 分页：offset 越过第一条
+        page2 = await q.list(limit=10, offset=1)
+        assert len(page2) == 1
