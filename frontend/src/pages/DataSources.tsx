@@ -14,9 +14,11 @@ import {
   listDomainTree,
   testDataSourceConnection,
   checkDataSourceConnection,
+  listDriftLogs,
   UnisenseApiError,
 } from "../api";
 import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest } from "../types";
+import type { DriftLogItem } from "../api";
 import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { parseMultiStatusResponse } from "../utils/apiErrorHandlers";
@@ -94,10 +96,14 @@ function SourceDetailModal({
   const [scheduleMode, setScheduleMode] = useState("FULL");
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<TestConnectionResult | null>(null);
+  const [driftLogs, setDriftLogs] = useState<DriftLogItem[]>([]);
 
   useEffect(() => {
     getSourceHealth(source.source_id).then(setHealth).catch(() => {});
     getSourceWatermark(source.source_id).then(setWatermark).catch(() => {});
+    listDriftLogs(source.source_id, { page: 1, page_size: 10 })
+      .then((res) => setDriftLogs(res.items))
+      .catch(() => setDriftLogs([]));
   }, [source.source_id]);
 
   async function handleCollect() {
@@ -148,7 +154,11 @@ function SourceDetailModal({
   async function handleSchedule() {
     try {
       const res = await scheduleSource(source.source_id, cron, scheduleMode);
-      message.success(`已调度：job ${res.job_id}（${res.status}）`);
+      if (res?.scheduled) {
+        message.success(`已保存定时调度：${res.cron}（${res.mode}）`);
+      } else {
+        message.success("调度配置已保存");
+      }
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "调度失败");
     }
@@ -201,6 +211,46 @@ function SourceDetailModal({
           message={`采集结果：注册 ${collectResult.registered} · PII ${collectResult.pii_registered} · 漂移 ${collectResult.drift_count}`}
           description={collectResult.drift_events?.length ? collectResult.drift_events.slice(0, 5).map((d) => `${d.entity_name} (${DRIFT_CHANGE_LABEL[d.change_type] ?? d.change_type})`).join("、") : "无 schema 漂移"}
         />
+      )}
+
+      {driftLogs.length > 0 && (
+        <Card
+          size="small"
+          title={`变更审计（${driftLogs.length}）`}
+          style={{ marginBottom: 12 }}
+          extra={<span className="muted">Schema Drift · GB/T 36073 §6.4</span>}
+        >
+          <Table
+            size="small"
+            rowKey="entity_name"
+            pagination={false}
+            dataSource={driftLogs}
+            columns={[
+              {
+                title: "实体",
+                dataIndex: "entity_name",
+                ellipsis: true,
+                render: (v: string) => <span className="mono">{v}</span>,
+              },
+              {
+                title: "变更类型",
+                dataIndex: "change_type",
+                width: 130,
+                render: (v: string) => (
+                  <Tag color={v === "DROP_COLUMN" ? "error" : v === "TYPE_CHANGE" ? "warning" : "processing"}>
+                    {DRIFT_CHANGE_LABEL[v] ?? v}
+                  </Tag>
+                ),
+              },
+              {
+                title: "检测时间",
+                dataIndex: "detected_at",
+                width: 170,
+                render: (v: string | null) => (v ? new Date(v).toLocaleString() : "—"),
+              },
+            ]}
+          />
+        </Card>
       )}
 
       <Space wrap>

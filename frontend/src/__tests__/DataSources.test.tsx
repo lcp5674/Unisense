@@ -31,6 +31,7 @@ vi.mock("../api", () => {
     scheduleSource: vi.fn(),
     getSourceHealth: vi.fn(),
     getSourceWatermark: vi.fn(),
+    listDriftLogs: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -45,6 +46,7 @@ import {
   checkDataSourceConnection,
   getSourceHealth,
   getSourceWatermark,
+  listDriftLogs,
 } from "../api";
 
 const mockedList = vi.mocked(listDataSources);
@@ -56,6 +58,7 @@ const mockedTest = vi.mocked(testDataSourceConnection);
 const mockedCheck = vi.mocked(checkDataSourceConnection);
 const mockedHealth = vi.mocked(getSourceHealth);
 const mockedWatermark = vi.mocked(getSourceWatermark);
+const mockedListDriftLogs = vi.mocked(listDriftLogs);
 
 const TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
@@ -120,6 +123,7 @@ describe("DataSources", () => {
     mockedCheck.mockResolvedValue({ ok: true, source_type: "mysql", latency_ms: 8, error: null, detail: null });
     mockedHealth.mockResolvedValue({ source_id: "mysql_finance", health_status: "healthy", last_collected_at: null, last_error: null, last_health_check: null, uptime_check: true });
     mockedWatermark.mockResolvedValue({ source_id: "mysql_finance", last_collected_at: null, mode: "FULL", scanned_count: 10, failed_count: 0 });
+    mockedListDriftLogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
   });
 
   it("动态拉取类型元信息并展示中文标签", async () => {

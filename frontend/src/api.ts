@@ -1387,6 +1387,32 @@ export async function getSourceHealth(sourceId: string): Promise<SourceHealth> {
   );
 }
 
+export interface DriftLogItem {
+  source_id: string;
+  entity_name: string;
+  change_type: string;
+  before_signature: string | null;
+  after_signature: string | null;
+  before_schema: Record<string, unknown> | null;
+  after_schema: Record<string, unknown> | null;
+  diff_json: Record<string, unknown> | null;
+  detected_at: string | null;
+}
+
+export async function listDriftLogs(
+  sourceId: string,
+  params?: { entity_name?: string; page?: number; page_size?: number },
+): Promise<{ items: DriftLogItem[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    entity_name: params?.entity_name,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 10,
+  });
+  return request<{ items: DriftLogItem[]; total: number; page: number; page_size: number }>(
+    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/drift-logs?${qs}`,
+  );
+}
+
 export async function getSourceWatermark(sourceId: string): Promise<Watermark> {
   return request<Watermark>(
     `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/watermark`,

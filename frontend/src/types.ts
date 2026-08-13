@@ -899,8 +899,7 @@ export interface CollectResult {
 }
 
 export interface ScheduleResult {
-  job_id: string;
-  status: string;
+  scheduled: boolean;
   cron: string;
   mode: string;
 }
