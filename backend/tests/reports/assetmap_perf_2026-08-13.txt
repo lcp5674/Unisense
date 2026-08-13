@@ -1,0 +1,13 @@
+# assetmap 性能基线（k6 实跑，2026-08-13）
+命令：BASE_URL=http://127.0.0.1:8199 ASSETMAP_TOKEN=<JWT> k6 run backend/tests/perf/baseline_assetmap.js --summary-export
+环境：本地 uvicorn（新代码）+ docker MySQL/Redis/Neo4j；k6 v2.1.0（Grafana 官方）
+
+## 结果
+- http_req_duration: avg=11.31ms med=9.9ms p(90)=16.31ms p(95)=19.97ms max=109.48ms
+- http_req_failed: 0.00% (0/2700)
+- 吞吐: 2700 req / 30s = 89.4 req/s；10 VUs
+- 阈值: p(95)<800ms 达成（19.97ms）；失败率<0.5% 达成（0.00%）
+
+## 结论
+- perf_contract 达标（含缓存：聚合端点 cache-aside TTL 30s，压测命中缓存）
+- 读路径 P95 19.97ms，远低于契约 800ms，具备生产余量

@@ -42,15 +42,19 @@
 | GET | `/api/v1/assetmap/changes` | 变更追踪（days/limit） |
 | GET | `/api/v1/assetmap/my-assets` | 我的资产 |
 | GET | `/api/v1/assetmap/export.csv` | 资产 CSV 导出 |
+| POST | `/api/v1/assetmap/entities/{id}/owner` | 认领/转让归属（owner_id=None 解除） |
+| POST | `/api/v1/assetmap/entities/{id}/sensitivity` | 重分类敏感级（枚举值） |
+| POST | `/api/v1/assetmap/batch-owner` | 批量认领/转让（≤200） |
+| POST | `/api/v1/assetmap/batch-sensitivity` | 批量重分类（≤200） |
 
 ## 3. 安全边界
 
-只读服务，无写闸门；安全边界体现在：
-
-- 全部读端点挂 `Depends(require_roles(*_READ_ROLES))` + `Depends(guard_against_injection)`（RBAC 闸门 + 注入守卫）。
+- 读端点：`Depends(require_roles(*_READ_ROLES))` + `Depends(guard_against_injection)`（RBAC 闸门 + 注入守卫）。
+- **写端点**（2026-08-13 新增）：仅 `platform_admin` / `domain_admin`（`_WRITE_DEPS`），非写角色 403；写入与审计同事务原子提交（PLAT-3）。
 - 敏感字段剥离：`models/base.py::_SENSITIVE_FIELDS` 序列化黑名单（`connection_config` / `password` / `secret` / `token` / `credential` / `etl_sql` / `schema_json`），详情接口 `etl_sql` 恒为 `None` 不外泄。
 - `sensitivity_level` 为资产地图核心展示字段，**不在**黑名单内（前端敏感度列依赖）。
 - Neo4j 图谱读经 `CircuitBreaker`（阈值 5，复位 30s），故障降级 MySQL 不抛错。
+- 写操作目标用户须存在（`user_exists` 校验），防孤儿归属脏数据；批量空列表 422。
 
 ## 4. 业务语义
 
@@ -59,6 +63,7 @@
 - 搜索 LIKE 通配符转义：`%` / `_` 作为字面量匹配，防全表模糊放大；按类型分流查询（table/field 只查目录，metric 只查指标）。
 - 陈旧资产阈值：7 天未更新（`updated_at < now-7d`），可通过 `stale_days` 配置。
 - Neo4j driver 惰性单例复用（`_get_neo4j_driver` / `_close_neo4j_driver`），防每请求连接泄漏。
+- 聚合端点（summary/classification/metrics/heatmap/health/pii）经 **cache-aside 缓存**（TTL 30s + 熔断），Redis 不可用时静默回源，不阻断主链路。
 
 ## 5. 依赖与故障
 
@@ -76,16 +81,16 @@
 
 ## 7. 可观测性
 
-- 只读服务，无写审计；依赖 API 层 RED 指标（`/metrics`）。
+- 读端点依赖 API 层 RED 指标（`/metrics`）。
+- **写审计**（2026-08-13 新增）：`ASSET_ASSIGN_OWNER` / `ASSET_RECLASSIFY` / `ASSET_BATCH_ASSIGN_OWNER` / `ASSET_BATCH_RECLASSIFY` 写入 `audit_log`（actor/entity/detail，PLAT-3 原子提交）。
 - 数据新鲜度取决于上游写入频率；资产健康视图（`/assetmap/health`）提供不健康源 / 陈旧资产一览，应结合上游健康判断。
 
 ## 8. 已知限制（记录在案）
 
-- **数据新鲜度依赖上游**：上游延迟会静默反映为陈旧资产地图（非故障，需监控上游）；无写入能力，异常修复需回到上游服务。
-- **搜索为 LIKE 前缀模糊**：大规模资产（>10 万行）建议升级 ES / 全文索引（当前 LIKE 已转义防放大，性能待规模压测）。
-- **聚合为实时全表**：`summary` / `heatmap` / `pii` 每次请求实时 count/group_by；高频访问建议 Redis 短缓存（当前无缓存）。
+- **perf 基线已实跑入库**（2026-08-13，`assetmap_perf_2026-08-13.txt`）：k6 v2.1.0 压真实业务端点（带鉴权），10 VU / 30s / 2700 请求，**P95 = 19.97ms**（契约 <800ms）、失败率 0.00%。聚合端点命中缓存（TTL 30s）。
 - **图谱边上限**：Neo4j 边 LIMIT 1000、MySQL 边 LIMIT 1000，超大图会截断（有界返回，避免响应爆内存）。
-- **perf 基线**：`backend/tests/perf/baseline_assetmap.js` 为 Grafana k6 脚本，未做 live 压测入库（待 perf 门禁补齐）。
+- **大规模（>10 万资产）搜索为 LIKE 前缀**：建议后续接 ES 全文检索；聚合已有 Redis 短缓存，超大规模可换物化表。
+- **数据新鲜度依赖上游**：上游延迟会静默反映为陈旧资产地图（非故障，需监控上游）；异常修复需回到上游服务。
 
 ## 9. 前端入口
 

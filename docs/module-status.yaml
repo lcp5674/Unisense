@@ -319,7 +319,8 @@ modules:
     owner: ""
     note: "§6.3 High(2)/Med(5)/Low(4) 已全部修复：① PLAT-1 全部读端点补 require_roles RBAC 闸门 + 越权 403 反向测试；② T-2 敏感字段外泄修复 BaseModel.to_dict 默认剔除 connection_config 等敏感列，资产地图经 to_dict 序列化；③ PLAT-4 删除 _tx 死代码。security_reverse 门禁恢复有效。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
     note2: "生产级补强(2026-08-12 5ae6e5f)：实体详情端点/Neo4j读路径修复(driver单例+depth接Cypher+pii边过滤)/域精确匹配/测试94%；产品补充(2026-08-12 6108894)：全局搜索/资产健康/PII合规视图/变更追踪/我的资产/CSV导出/详情增强(血缘边+关联指标+源健康+新鲜度)，前端11 Tab。测试：repository 93% service 96%，53 用例全绿，端到端实跑通过"
-    updated: "2026-08-12"
+    note3: "写能力+性能基线(2026-08-13 aacac22)：资产工作台写端点(POST /entities/{id}/owner、/sensitivity、/batch-owner、/batch-sensitivity，仅 platform_admin/domain_admin，PLAT-3 原子审计) + repository 写方法(存在性/用户校验/批量空集防护) + 聚合 cache-aside TTL30s 熔断降级。测试 87 全绿(service31/repo41/security15)，覆盖率 93%(api81/repo97/svc97/schemas100)。perf 基线 k6 实跑入库(assetmap_perf_2026-08-13.txt)：P95=19.97ms(契约<800ms)、失败率0.00%，2700 请求全通过；端到端实跑验证 RBAC403/404/422/审计留痕/DB生效"
+    updated: "2026-08-13"
 
   recommend:
     fr: [FR-19]
