@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import sqlglot
+from sqlglot import exp
+
 from app.services.lineage.parser import (
+    _branch_queries,
     extract_field_lineage,
     extract_table_lineage,
     node_field,
@@ -70,10 +74,7 @@ def test_field_lineage_cte_deep() -> None:
         "INSERT INTO dest SELECT cte.id AS x, cte.name AS y FROM cte"
     )
     edges = extract_field_lineage(sql)
-    mapping = {
-        (e.target_table, e.target_column): (e.source_table, e.source_column)
-        for e in edges
-    }
+    mapping = {(e.target_table, e.target_column): (e.source_table, e.source_column) for e in edges}
     assert mapping.get(("dest", "x")) == ("src", "id")
     assert mapping.get(("dest", "y")) == ("src", "name")
 
@@ -93,10 +94,7 @@ def test_field_lineage_nested_cte_chain() -> None:
 
 def test_field_lineage_subquery_derived_table() -> None:
     """FROM 子查询（派生表）须解析到内部真实表列。"""
-    sql = (
-        "INSERT INTO dest SELECT sq.v AS x FROM "
-        "(SELECT v FROM t) sq"
-    )
+    sql = "INSERT INTO dest SELECT sq.v AS x FROM (SELECT v FROM t) sq"
     edges = extract_field_lineage(sql)
     assert len(edges) == 1
     assert (edges[0].source_table, edges[0].source_column) == ("t", "v")
@@ -105,10 +103,7 @@ def test_field_lineage_subquery_derived_table() -> None:
 
 def test_field_lineage_expression_populates_expression_field() -> None:
     """派生表达式（多源）须记录 expression 并拆出多源列边。"""
-    sql = (
-        "INSERT INTO dest SELECT a.col + b.col AS sum_col "
-        "FROM t a JOIN u b ON a.id = b.id"
-    )
+    sql = "INSERT INTO dest SELECT a.col + b.col AS sum_col FROM t a JOIN u b ON a.id = b.id"
     edges = extract_field_lineage(sql)
     # 多源：一条边对应一个源列，但同属一个 target_column
     targets = {e.target_column for e in edges}
@@ -127,6 +122,7 @@ def test_field_lineage_update_degrades_gracefully() -> None:
 
 
 # ---- T1 生产级补强：SELECT * / MERGE / UNION / 多语句拆分 / 非法 SQL 降级 ----
+
 
 def test_select_star_table_lineage_kept() -> None:
     """SELECT * 场景表级血缘仍正常产出（字段级降级）。"""
@@ -164,6 +160,28 @@ def test_union_field_lineage_both_branches() -> None:
     assert ("y", "uid") in sources
 
 
+def test_union_multi_branch_flatten() -> None:
+    """多级 UNION 经 _branch_queries 由 sqlglot flatten 全量展开（锁 parser.py:193 链路）。
+
+    多级 UNION 必须拆成恰好 3 个 SELECT 分支：既不能漏分支（flatten 退化导致丢源表），
+    也不能把 UNION 节点误当 SELECT 多拆。端到端校验表级/字段级血缘均合并全部源。
+    """
+    sql = "CREATE TABLE t AS SELECT a FROM x UNION ALL SELECT b FROM y UNION ALL SELECT c FROM z"
+    ast = sqlglot.parse_one(sql)
+    branches = _branch_queries(ast.expression)
+    # 直接守卫本次改动链路：多级 UNION -> 3 个 Select 分支
+    assert len(branches) == 3
+    assert all(isinstance(b, exp.Select) for b in branches)
+    # 端到端：表级血缘合并全部 3 个源表，字段级解析各分支源列
+    table_edges = extract_table_lineage(sql)
+    assert {e.source for e in table_edges} == {"x", "y", "z"}
+    assert all(e.target == "t" for e in table_edges)
+    field_sources = {(e.source_table, e.source_column) for e in extract_field_lineage(sql)}
+    assert ("x", "a") in field_sources
+    assert ("y", "b") in field_sources
+    assert ("z", "c") in field_sources
+
+
 def test_merge_into_table_lineage() -> None:
     """MERGE INTO 表级血缘：源 USING 表 → 目标表。"""
     sql = "MERGE INTO tgt USING src ON tgt.id = src.id WHEN MATCHED THEN UPDATE SET tgt.v = src.v"
@@ -198,9 +216,7 @@ def test_invalid_sql_degrades_empty() -> None:
 def test_dialect_doris_and_hive() -> None:
     """方言透传：doris/hive 均能解析（不因方言差异崩溃）。"""
     for dialect in ("hive", "doris", "mysql"):
-        edges = extract_table_lineage(
-            "INSERT INTO t SELECT id FROM s", dialect=dialect
-        )
+        edges = extract_table_lineage("INSERT INTO t SELECT id FROM s", dialect=dialect)
         assert len(edges) == 1
         assert (edges[0].source, edges[0].target) == ("s", "t")
 
