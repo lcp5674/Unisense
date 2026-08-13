@@ -47,6 +47,14 @@ TYPE_INFO: dict[str, DataSourceTypeInfo] = {
         supports_schema=False,
         description="数据仓库，经 beeline 连接 HiveServer2",
     ),
+    "spark": DataSourceTypeInfo(
+        source_type="spark",
+        label="Spark",
+        default_port=10000,
+        supports_database=True,
+        supports_schema=False,
+        description="Spark SQL，经 beeline 连接 Spark Thrift Server（HiveServer2 协议）",
+    ),
     "doris": DataSourceTypeInfo(
         source_type="doris",
         label="Doris",

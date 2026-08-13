@@ -9,11 +9,12 @@ import enum
 
 
 class SourceTypeEnum(enum.StrEnum):
-    """数据源类型枚举（7 种生产类型）。"""
+    """数据源类型枚举（8 种生产类型）。"""
 
     MYSQL = "mysql"
     POSTGRES = "postgres"
     HIVE = "hive"
+    SPARK = "spark"
     DORIS = "doris"
     CLICKHOUSE = "clickhouse"
     KAFKA = "kafka"

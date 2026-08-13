@@ -45,7 +45,44 @@ class DataSourceCreateRequest(BaseModel):
         if not isinstance(cfg, dict):
             raise ValueError("connection_config 必须是对象")
         source_type_value = (
-            self.source_type.value if hasattr(self.source_type, "value") else str(self.source_type)
+            self.source_type.value
+            if self.source_type is not None and hasattr(self.source_type, "value")
+            else str(self.source_type)
+        )
+        if source_type_value == "kafka":
+            if "bootstrap_servers" not in cfg and "host" not in cfg:
+                raise ValueError("kafka 的 connection_config 必须包含 bootstrap_servers 或 host")
+        elif "host" not in cfg:
+            raise ValueError("connection_config 必须包含 host 字段")
+        return self
+
+
+class DataSourceUpdateRequest(BaseModel):
+    """数据源更新请求（PATCH 语义：全部字段可选，仅更新传入项）。
+
+    安全约束：
+    - ``source_id`` 不可变更（由路径参数唯一确定），变更连接配置前须走
+      ``test-connection`` 预检（前端引导），后端不强制重新探活。
+    - ``connection_config`` 传入时按类型校验必填项（与创建一致）。
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    source_type: SourceType | None = None
+    connection_config: dict[str, Any] | None = None
+    domain: str | None = Field(default=None, max_length=64)
+    cluster_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_connection_config(self) -> DataSourceUpdateRequest:
+        """FR-020/P2-7: 仅当传入 connection_config 时按类型校验必填项。"""
+        cfg = self.connection_config
+        if cfg is None:
+            return self
+        if not isinstance(cfg, dict):
+            raise ValueError("connection_config 必须是对象")
+        # 仅更新连接配置而未指定类型时按通用规则校验（host 必填）
+        source_type_value = (
+            self.source_type.value if self.source_type is not None else ""
         )
         if source_type_value == "kafka":
             if "bootstrap_servers" not in cfg and "host" not in cfg:

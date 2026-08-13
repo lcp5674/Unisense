@@ -43,6 +43,7 @@ from app.services.collector.schemas import (
     DataSourceListResponse,
     DataSourceResponse,
     DataSourceTypeInfo,
+    DataSourceUpdateRequest,
     DBCatalogCreateRequest,
     DBCatalogListParams,
     DBCatalogListResponse,
@@ -167,6 +168,36 @@ async def get_data_source(
 ) -> ApiResponse[DataSourceResponse]:
     svc = _svc(db)
     return ok(data=await svc.get_source(source_id), trace_id=trace_id)
+
+
+@source_router.put("/{source_id}", dependencies=_WRITE_DEPS)
+async def update_data_source(
+    source_id: str,
+    body: DataSourceUpdateRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[DataSourceResponse]:
+    """更新数据源（PATCH 语义：仅更新传入字段；source_id 不可变更）。"""
+    svc = _svc(db)
+    resp = await svc.update_source(source_id, body, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="UPDATE",
+        entity_type="data_source",
+        entity_id=source_id,
+        detail={
+            "name": resp.name,
+            "source_type": resp.source_type,
+            "config_changed": body.connection_config is not None,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=resp, trace_id=trace_id)
 
 
 @source_router.post("/{source_id}/check", dependencies=_WRITE_DEPS)

@@ -1,7 +1,7 @@
 """CollectorRegistry 单元测试（对齐 US1 / FR-002）。
 
 覆盖：
-1. 7种类型注册 + list_types
+1. 8种类型注册 + list_types
 2. build() 工厂方法
 3. 未知类型报错
 4. 装饰器注册 + 直接调用注册
@@ -95,11 +95,20 @@ class TestCollectorRegistry:
         assert "mysql" in reg.list_types()
         # 第二次注册覆盖了第一次
 
-    def test_seven_connector_types_registered(self):
-        """验证全局 registry 注册了7种连接器类型。"""
+    def test_eight_connector_types_registered(self):
+        """验证全局 registry 注册了8种连接器类型。"""
         # 惰性导入触发注册
         from app.services.collector.connectors import registry
 
         types = registry.list_types()
-        expected = ["clickhouse", "doris", "hive", "kafka", "mysql", "postgres", "starrocks"]
+        expected = [
+            "clickhouse",
+            "doris",
+            "hive",
+            "kafka",
+            "mysql",
+            "postgres",
+            "spark",
+            "starrocks",
+        ]
         assert sorted(types) == expected, f"Expected {expected}, got {sorted(types)}"

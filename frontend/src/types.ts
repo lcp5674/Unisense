@@ -154,20 +154,34 @@ export interface MetricPublishRequest {
 }
 
 // 冲突（backend/app/services/conflict/schemas.py）
-export type ConflictStatus = "OPEN" | "ARBITRATED" | "RULED" | "CLOSED" | "ESCALATED";
+export type ConflictStatus = "OPEN" | "NEGOTIATING" | "RESOLVED" | "CLOSED" | "ESCALATED";
 export type ConflictType = "NAME_CONFLICT" | "SEMANTIC_DRIFT" | "PII_CONFLICT" | "DEFINITION_DIVERGENCE";
 
 export interface ConflictResponse {
   conflict_id: string;
   type: ConflictType;
   status: ConflictStatus;
-  severity: string;
-  candidate_metric_code: string;
-  existing_metric_code: string;
-  description: string;
-  detected_at: string;
-  resolved_at: string | null;
-  created_at: string;
+  conflict_type: string;
+  metric_a: {
+    metric_code: string;
+    name?: string;
+    description?: string;
+    updated_at?: string;
+    [key: string]: unknown;
+  };
+  metric_b: {
+    metric_code: string;
+    name?: string;
+    description?: string;
+    updated_at?: string;
+    [key: string]: unknown;
+  };
+  similarity_score: number;
+  metric_codes: string[];
+  decision_json: Record<string, unknown> | null;
+  detected_at?: string;
+  resolved_at?: string | null;
+  created_at?: string;
 }
 
 export interface ConflictListResponse {
@@ -794,6 +808,7 @@ export type SourceType =
   | "mysql"
   | "postgres"
   | "hive"
+  | "spark"
   | "doris"
   | "clickhouse"
   | "kafka"
@@ -838,6 +853,15 @@ export interface DataSourceCreateRequest {
   source_type: SourceType;
   connection_config: Record<string, unknown>;
   domain: string;
+  cluster_id?: string | null;
+}
+
+export interface DataSourceUpdateRequest {
+  /** PATCH 语义：全部字段可选，仅更新传入项；source_id 不可变更 */
+  name?: string;
+  source_type?: SourceType;
+  connection_config?: Record<string, unknown>;
+  domain?: string;
   cluster_id?: string | null;
 }
 

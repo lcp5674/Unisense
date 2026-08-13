@@ -12,13 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.exceptions import BusinessError, ConflictError
+from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.schemas import (
     BulkDeprecateItem,
     BulkDeprecateRequest,
     DataSourceCreateRequest,
+    DataSourceUpdateRequest,
     DBCatalogCreateRequest,
 )
 from app.services.collector.service import CollectorService
@@ -37,6 +38,7 @@ def _svc() -> tuple[CollectorService, MagicMock]:
         # P0-4: 采集失败路径会 commit unhealthy（service 层），mock 需可 await
         db.commit = AsyncMock()
         db.rollback = AsyncMock()
+        db.flush = AsyncMock()
         svc = CollectorService(db=db)
         repo = mock_repo.return_value
         # 确保 US5/US3 新增的异步方法也有默认 AsyncMock
@@ -150,6 +152,117 @@ async def test_create_source_conflict():
                 connection_config={"host": "h"},
                 domain="d",
             ),
+            actor_id=1,
+        )
+
+
+async def test_update_source_updates_fields_and_reencrypts():
+    """更新源：字段覆盖 + 连接配置重新加密 + 健康状态重置为 unknown。"""
+    from app.models.data_source import DataSource
+
+    svc, repo = _svc()
+    src = DataSource(
+        source_id="src1",
+        name="旧名",
+        source_type="mysql",
+        connection_config="old_cipher",
+        domain="old_domain",
+        cluster_id=None,
+        coverage=0.5,
+        health_status="healthy",
+        last_error="old error",
+        quota={},
+        created_by=1,
+    )
+    repo.get_source = AsyncMock(return_value=src)
+    resp = await svc.update_source(
+        "src1",
+        DataSourceUpdateRequest(
+            name="新名",
+            source_type="spark",
+            connection_config={"host": "h2", "port": 10001},
+            domain="new_domain",
+        ),
+        actor_id=1,
+    )
+    assert resp.name == "新名"
+    assert resp.source_type == "spark"
+    assert resp.domain == "new_domain"
+    assert src.connection_config != '{"host":"h2","port":10001}'
+    assert "h2" not in src.connection_config
+    # 连接配置变更 → 旧健康状态/错误不再可信
+    assert src.health_status == "unknown"
+    assert src.last_error is None
+    svc._db.flush.assert_called_once()
+
+
+async def test_update_source_partial_update_keeps_untouched():
+    """PATCH 语义：仅更新传入字段，未传字段保持原值。"""
+    from app.models.data_source import DataSource
+
+    svc, repo = _svc()
+    src = DataSource(
+        source_id="src1",
+        name="旧名",
+        source_type="mysql",
+        connection_config="old_cipher",
+        domain="old_domain",
+        cluster_id="cluster-a",
+        coverage=0.5,
+        health_status="healthy",
+        quota={},
+        created_by=1,
+    )
+    repo.get_source = AsyncMock(return_value=src)
+    resp = await svc.update_source(
+        "src1",
+        DataSourceUpdateRequest(name="仅改名"),
+        actor_id=1,
+    )
+    assert resp.name == "仅改名"
+    assert src.source_type == "mysql"  # 未传类型保持不变
+    assert src.domain == "old_domain"
+    assert src.connection_config == "old_cipher"  # 未传配置不重加密
+    assert src.health_status == "healthy"  # 配置未变 → 健康状态保留
+    svc._db.flush.assert_called_once()
+
+
+async def test_update_source_unsupported_type_raises():
+    """变更 source_type 为枚举已含但采集器未注册的类型时抛 BusinessError（服务层兜底）。"""
+    from app.models.data_source import DataSource
+    from app.services.collector.connectors import registry
+
+    svc, repo = _svc()
+    src = DataSource(
+        source_id="src1",
+        name="S",
+        source_type="mysql",
+        connection_config="cipher",
+        domain="d",
+        quota={},
+        created_by=1,
+    )
+    repo.get_source = AsyncMock(return_value=src)
+    # 模拟枚举新增值但采集器尚未注册（Pydantic 校验通过，服务层防御拦截）
+    with (
+        patch.object(registry, "list_types", return_value=["mysql", "postgres"]),
+        pytest.raises(BusinessError, match="不支持的采集器类型"),
+    ):
+        await svc.update_source(
+            "src1",
+            DataSourceUpdateRequest(source_type="spark"),
+            actor_id=1,
+        )
+
+
+async def test_update_source_not_found():
+    """更新不存在的源抛 NotFoundError。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.update_source(
+            "nope",
+            DataSourceUpdateRequest(name="x"),
             actor_id=1,
         )
 
@@ -687,11 +800,13 @@ async def test_list_source_types_returns_metadata():
     info = await svc.list_source_types()
     types = {t.source_type: t for t in info}
     assert set(types.keys()) == {
-        "clickhouse", "doris", "hive", "kafka", "mysql", "postgres", "starrocks",
+        "clickhouse", "doris", "hive", "kafka", "mysql", "postgres", "spark", "starrocks",
     }
     assert types["mysql"].label == "MySQL"
     assert types["kafka"].supports_database is False
     assert types["mysql"].default_port == 3306
+    assert types["spark"].label == "Spark"
+    assert types["spark"].default_port == 10000
 
 
 # ---------- FR-030: 采集器数据库语义（全库 / 单库） ----------

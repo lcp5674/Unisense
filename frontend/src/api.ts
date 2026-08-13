@@ -32,6 +32,7 @@ import {
   DataSource,
   DataSourceCreateRequest,
   DataSourceListResponse,
+  DataSourceUpdateRequest,
   DBCatalog,
   DictItemCreateRequest,
   DictItemUpdateRequest,
@@ -1317,6 +1318,13 @@ export async function listDataSources(params?: {
 export async function createDataSource(req: DataSourceCreateRequest): Promise<DataSource> {
   return request<DataSource>(`${API_BASE}/data-sources`, {
     method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function updateDataSource(sourceId: string, req: DataSourceUpdateRequest): Promise<DataSource> {
+  return request<DataSource>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}`, {
+    method: "PUT",
     body: JSON.stringify(req),
   });
 }

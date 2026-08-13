@@ -5,9 +5,10 @@
 2. MySQL InformationSchemaCollector 单表容错
 3. PostgresCollector 查询+解析
 4. HiveCollector beeline 输出解析
-5. DorisCollector/StarRocksCollector MySQL 兼容性
-6. ClickHouseCollector HTTP API
-7. KafkaCollector Topic+Schema Registry
+5. SparkCollector 复用 beeline 输出解析（Spark Thrift Server / HiveServer2 协议）
+6. DorisCollector/StarRocksCollector MySQL 兼容性
+7. ClickHouseCollector HTTP API
+8. KafkaCollector Topic+Schema Registry
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from app.services.collector.connectors.hive import HiveCollector
 from app.services.collector.connectors.kafka import KafkaCollector
 from app.services.collector.connectors.mysql import InformationSchemaCollector
 from app.services.collector.connectors.postgres import PostgresCollector
+from app.services.collector.connectors.spark import SparkCollector
 from app.services.collector.spi import CollectResult
 
 
@@ -175,6 +177,47 @@ async def test_hive_collector_parses_beeline_output():
     assert len(result.specs) == 2
     assert result.specs[0].entity_name == "orders"
     assert result.specs[0].schema_json["columns"][0]["name"] == "order_id"
+
+
+# ---------- SparkCollector ----------
+
+
+async def test_spark_collector_parses_beeline_output():
+    """Spark 采集器经 Spark Thrift Server（HiveServer2 协议）解析 beeline 输出。"""
+    collector = SparkCollector(host="spark-host", database="test_db")
+
+    # Mock _execute 方法（与 Hive 相同的 SHOW TABLES / DESCRIBE 协议）
+    async def mock_execute(sql: str) -> list[list[str]]:
+        if "SHOW TABLES" in sql:
+            return [["orders"], ["customers"]]
+        if "DESCRIBE" in sql:
+            if "orders" in sql:
+                return [["order_id", "bigint"], ["amount", "decimal(10,2)"]]
+            if "customers" in sql:
+                return [["customer_id", "int"], ["name", "string"]]
+        return []
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    result = await collector.collect(MagicMock(source_id="spark1", domain="test_db"))
+
+    assert isinstance(result, CollectResult)
+    assert len(result.specs) == 2
+    assert result.specs[0].entity_name == "orders"
+    assert result.specs[0].schema_json["columns"][1]["name"] == "amount"
+
+
+async def test_spark_collector_default_port_and_register():
+    """Spark 采集器默认端口 10000（Spark Thrift Server 官方默认）且已注册到全局 registry。"""
+    collector = SparkCollector(host="spark-host")
+    assert collector._port == 10000
+    assert collector._jdbc_url == "jdbc:hive2://spark-host:10000/default"
+
+    from app.services.collector.connectors import registry
+
+    assert "spark" in registry.list_types()
+    built = registry.build_from_cfg("spark", {"host": "spark-host", "port": 10001})
+    assert isinstance(built, SparkCollector)
+    assert built._port == 10001
 
 
 # ---------- ClickHouseCollector ----------

@@ -1,20 +1,22 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert } from "antd";
-import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined } from "@ant-design/icons";
+import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined } from "@ant-design/icons";
 import {
   listDataSources,
   createDataSource,
+  updateDataSource,
   collectSource,
   scheduleSource,
   getSourceHealth,
   getSourceWatermark,
   listDataSourceTypes,
+  listDomainTree,
   testDataSourceConnection,
   checkDataSourceConnection,
   UnisenseApiError,
 } from "../api";
-import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType } from "../types";
+import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest } from "../types";
 import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { parseMultiStatusResponse } from "../utils/apiErrorHandlers";
@@ -23,6 +25,7 @@ const FALLBACK_TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
   { source_type: "postgres", label: "PostgreSQL", default_port: 5432, supports_database: true, supports_schema: true, description: "关系型数据库" },
   { source_type: "hive", label: "Hive", default_port: 10000, supports_database: true, supports_schema: false, description: "数据仓库" },
+  { source_type: "spark", label: "Spark", default_port: 10000, supports_database: true, supports_schema: false, description: "Spark SQL（Thrift Server）" },
   { source_type: "doris", label: "Doris", default_port: 9030, supports_database: true, supports_schema: false, description: "MPP 分析库" },
   { source_type: "clickhouse", label: "ClickHouse", default_port: 8123, supports_database: true, supports_schema: false, description: "列式分析库" },
   { source_type: "kafka", label: "Kafka", default_port: 9092, supports_database: false, supports_schema: false, description: "消息队列" },
@@ -31,6 +34,20 @@ const FALLBACK_TYPES: SourceTypeInfo[] = [
 
 function typeInfo(types: SourceTypeInfo[], t: string): SourceTypeInfo | undefined {
   return types.find((x) => x.source_type === t);
+}
+
+// 主题域树 → 扁平化选项（保留层级前缀，便于区分同名子域）
+function flattenDomains(
+  nodes: SubjectDomainTreeNode[],
+  depth = 0,
+  out: Array<{ value: string; label: string }> = [],
+): Array<{ value: string; label: string }> {
+  for (const n of nodes) {
+    const indent = depth > 0 ? `${"　".repeat(depth)}` : "";
+    out.push({ value: n.code, label: `${indent}${n.name}（${n.code}）` });
+    if (n.children?.length) flattenDomains(n.children, depth + 1, out);
+  }
+  return out;
 }
 
 // 连接检查 detail 字段名 → 中文
@@ -62,10 +79,12 @@ function SourceDetailModal({
   source,
   types,
   onClose,
+  onEdit,
 }: {
   source: DataSource;
   types: SourceTypeInfo[];
   onClose: () => void;
+  onEdit: (source: DataSource) => void;
 }) {
   const [health, setHealth] = useState<SourceHealth | null>(null);
   const [watermark, setWatermark] = useState<Watermark | null>(null);
@@ -185,6 +204,9 @@ function SourceDetailModal({
       )}
 
       <Space wrap>
+        <Button type="primary" icon={<EditOutlined />} onClick={() => onEdit(source)}>
+          编辑
+        </Button>
         <Button type="primary" icon={<ThunderboltOutlined />} loading={collecting} onClick={handleCollect}>
           立即采集
         </Button>
@@ -213,8 +235,10 @@ export function DataSources() {
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<DataSource | null>(null);
   const [detail, setDetail] = useState<DataSource | null>(null);
   const [types, setTypes] = useState<SourceTypeInfo[]>(FALLBACK_TYPES);
+  const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [form] = Form.useForm();
   const [searchParams] = useSearchParams();
   const sourceType = Form.useWatch("source_type", form);
@@ -251,6 +275,10 @@ export function DataSources() {
     listDataSourceTypes()
       .then((t) => setTypes(t.length ? t : FALLBACK_TYPES))
       .catch(() => setTypes(FALLBACK_TYPES));
+    // 业务域下拉选项：仅展示启用中的主题域
+    listDomainTree("active")
+      .then((tree) => setDomainOptions(flattenDomains(tree)))
+      .catch(() => setDomainOptions([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyword]);
 
@@ -296,30 +324,65 @@ export function DataSources() {
     }
   }
 
-  async function handleCreate(values: Record<string, unknown>) {
+  function openCreate() {
+    setEditTarget(null);
+    form.resetFields();
+    form.setFieldsValue({ source_type: undefined, port: 3306 });
+    setModalOpen(true);
+  }
+
+  function openEdit(source: DataSource) {
+    setEditTarget(source);
+    form.resetFields();
+    // 连接配置明文不下发（connection_config_present 仅为标记），编辑时留空以保持原配置；
+    // 仅当用户重新填写连接字段时才提交 connection_config 覆盖。
+    form.setFieldsValue({
+      name: source.name,
+      source_type: source.source_type,
+      domain: source.domain,
+      cluster_id: source.cluster_id ?? undefined,
+      port: typeInfo(types, source.source_type)?.default_port ?? undefined,
+    });
+    setModalOpen(true);
+  }
+
+  async function handleSubmit(values: Record<string, unknown>) {
     setLoading(true);
     try {
-      const payload: {
-        name: string;
-        source_type: DataSource["source_type"];
-        domain: string;
-        cluster_id?: string | null;
-        connection_config: Record<string, unknown>;
-      } = {
-        name: String(values.name),
-        source_type: String(values.source_type) as DataSource["source_type"],
-        domain: String(values.domain),
-        cluster_id: values.cluster_id ? String(values.cluster_id) : null,
-        connection_config: buildConnectionConfig(values),
-      };
-      // source_id 不传 → 后端按 类型_库|域 自动生成
-      await createDataSource(payload);
-      message.success(`数据源已创建（${previewSourceId(String(values.source_type), buildConnectionConfig(values), String(values.domain))}）`);
+      const cfg = buildConnectionConfig(values);
+      if (editTarget) {
+        const payload: DataSourceUpdateRequest = {
+          name: String(values.name),
+          source_type: String(values.source_type) as SourceType,
+          domain: String(values.domain),
+        };
+        if (values.cluster_id != null) payload.cluster_id = String(values.cluster_id);
+        // 连接配置明文不下发，仅当用户实际填写（touched）连接字段时才覆盖，否则保持原配置；
+        // 避免编辑时预填的默认端口被误判为用户输入。
+        const touchedConn = ["host", "port", "database", "schema", "user", "password"].some((f) =>
+          form.isFieldTouched(f),
+        );
+        if (touchedConn) payload.connection_config = cfg;
+        await updateDataSource(editTarget.source_id, payload);
+        message.success(`数据源已更新：${editTarget.source_id}`);
+      } else {
+        const payload: DataSourceCreateRequest = {
+          name: String(values.name),
+          source_type: String(values.source_type) as SourceType,
+          domain: String(values.domain),
+          cluster_id: values.cluster_id ? String(values.cluster_id) : null,
+          connection_config: cfg,
+        };
+        // source_id 不传 → 后端按 类型_库|域 自动生成
+        await createDataSource(payload);
+        message.success(`数据源已创建（${previewSourceId(String(values.source_type), cfg, String(values.domain))}）`);
+      }
       setModalOpen(false);
+      setEditTarget(null);
       form.resetFields();
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : editTarget ? "更新失败" : "创建失败");
     } finally {
       setLoading(false);
     }
@@ -366,7 +429,7 @@ export function DataSources() {
           <h2>数据源管理</h2>
           <p>接入数据源、测试连接、采集元数据并持续发现 schema 漂移。Database 留空时采集该实例下全部非系统库。</p>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建数据源</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建数据源</Button>
       </div>
 
       <Card extra={<Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>刷新</Button>}>
@@ -401,14 +464,28 @@ export function DataSources() {
         />
       </Card>
 
-      <Modal title="新建数据源" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} confirmLoading={loading} okText="创建" width={620}>
-        <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
+      <Modal
+        title={editTarget ? `编辑数据源：${editTarget.source_id}` : "新建数据源"}
+        open={modalOpen}
+        onCancel={() => { setModalOpen(false); setEditTarget(null); }}
+        onOk={() => form.submit()}
+        confirmLoading={loading}
+        okText={editTarget ? "保存" : "创建"}
+        width={620}
+      >
+        <Form form={form} layout="vertical" onFinish={handleSubmit} style={{ marginTop: 8 }}>
           <Space size={16} style={{ width: "100%" }}>
             <Form.Item name="name" label="名称" rules={[{ required: true }]} style={{ width: "100%" }}>
               <Input placeholder="如 财务 MySQL" />
             </Form.Item>
             <Form.Item name="domain" label="业务域" rules={[{ required: true }]} style={{ width: "100%" }}>
-              <Input placeholder="如 finance" />
+              <Select
+                placeholder="从主题域选择"
+                showSearch
+                optionFilterProp="label"
+                options={domainOptions}
+                notFoundContent="暂无启用中的主题域"
+              />
             </Form.Item>
           </Space>
           <Space size={16} style={{ width: "100%" }}>
@@ -416,13 +493,32 @@ export function DataSources() {
               <Select
                 placeholder="选择数据源类型"
                 onChange={handleTypeChange}
+                listHeight={400}
                 options={types.map((t) => ({ value: t.source_type, label: `${t.label}（${t.source_type}）` }))}
+                optionRender={(opt) => {
+                  const t = typeInfo(types, String(opt.value));
+                  return (
+                    <div>
+                      <div>{opt.label}</div>
+                      {t?.description && <div style={{ fontSize: 12, color: "rgba(0,0,0,0.45)" }}>{t.description}</div>}
+                    </div>
+                  );
+                }}
               />
             </Form.Item>
             <Form.Item name="cluster_id" label="集群 ID（可选）" style={{ width: "100%" }}>
               <Input className="mono" />
             </Form.Item>
           </Space>
+          {editTarget && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="连接配置已脱敏，不随编辑回显"
+              description="如需修改连接信息，请在下方的连接字段中重新填写（留空则保持原配置）。修改连接配置后将重置健康状态。"
+            />
+          )}
           <Alert
             type="info"
             showIcon
@@ -431,7 +527,13 @@ export function DataSources() {
             description="不填 Database 时采集该实例下全部非系统库；填了则只采集指定库。"
           />
           <Space size={16} style={{ width: "100%" }} align="start">
-            <Form.Item name="host" label="Host" rules={[{ required: true }]} style={{ width: "100%" }}>
+            <Form.Item
+              name="host"
+              label="Host"
+              // 编辑模式连接配置留空=保持原配置，故 Host 非必填；新建时才必填
+              rules={editTarget ? [] : [{ required: true }]}
+              style={{ width: "100%" }}
+            >
               <Input className="mono" placeholder="127.0.0.1" />
             </Form.Item>
             <Form.Item name="port" label="Port" initialValue={3306} style={{ width: 130 }}>
@@ -470,7 +572,14 @@ export function DataSources() {
         </Form>
       </Modal>
 
-      {detail && <SourceDetailModal source={detail} types={types} onClose={() => setDetail(null)} />}
+      {detail && (
+        <SourceDetailModal
+          source={detail}
+          types={types}
+          onClose={() => setDetail(null)}
+          onEdit={(s) => { setDetail(null); openEdit(s); }}
+        />
+      )}
     </div>
   );
 }

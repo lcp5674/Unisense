@@ -29,6 +29,7 @@ from app.services.collector.schemas import (
     DataSourceCreateRequest,
     DataSourceResponse,
     DataSourceTypeInfo,
+    DataSourceUpdateRequest,
     DBCatalogCreateRequest,
     DBCatalogListParams,
     DBCatalogListResponse,
@@ -265,6 +266,59 @@ class CollectorService(BaseService):
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
+        return self._to_source_response(src)
+
+    async def update_source(
+        self, source_id: str, req: DataSourceUpdateRequest, actor_id: int
+    ) -> DataSourceResponse:
+        """更新数据源（PATCH 语义：仅更新传入字段）。
+
+        - ``source_id`` 不可变更（由路径参数唯一确定）。
+        - ``source_type`` 变更时校验已在 CollectorRegistry 注册。
+        - ``connection_config`` 变更时重新加密落库；其余字段直接覆盖。
+
+        Args:
+            source_id: 数据源标识（路径参数）。
+            req: 更新请求（字段可选）。
+            actor_id: 操作人 ID（审计用）。
+
+        Raises:
+            NotFoundError: 数据源不存在。
+            BusinessError: source_type 未注册。
+        """
+        src = await self._repo.get_source(source_id)
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+
+        if req.source_type is not None:
+            from app.services.collector.connectors import registry
+
+            source_type_value = (
+                req.source_type.value
+                if hasattr(req.source_type, "value")
+                else str(req.source_type)
+            )
+            if source_type_value not in registry.list_types():
+                raise BusinessError(
+                    f"不支持的采集器类型: {source_type_value}，已注册类型: {registry.list_types()}",
+                    error_code="UNSUPPORTED_COLLECTOR",
+                )
+            src.source_type = source_type_value
+
+        if req.connection_config is not None:
+            src.connection_config = self._secrets.encrypt(req.connection_config)
+        if req.name is not None:
+            src.name = req.name
+        if req.domain is not None:
+            src.domain = req.domain
+        if req.cluster_id is not None:
+            src.cluster_id = req.cluster_id
+        # updated_at 由 BaseModel.onupdate 自动维护；连接配置变更后健康状态重置
+        # （旧探活结果对新凭据不再可信），并清空历史错误。
+        if req.connection_config is not None:
+            src.health_status = "unknown"
+            src.last_error = None
+        await self._db.flush()
         return self._to_source_response(src)
 
     async def delete_source(self, source_id: str) -> None:
