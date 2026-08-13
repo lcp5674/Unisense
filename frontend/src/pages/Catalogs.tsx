@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip } from "antd";
 import { PlusOutlined, ReloadOutlined, DeleteOutlined } from "@ant-design/icons";
 import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, UnisenseApiError } from "../api";
 import type { DBCatalog } from "../types";
+import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -87,7 +88,7 @@ export function Catalogs() {
   const columns = [
     { title: "数据源", dataIndex: "source_id", key: "source_id", render: (v: string) => <span className="mono">{v}</span> },
     { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true, render: (v: string) => <span className="mono">{v}</span> },
-    { title: "类型", dataIndex: "entity_type", key: "type", width: 90, render: (v: string) => <Tag>{v}</Tag> },
+    { title: "类型", dataIndex: "entity_type", key: "type", width: 90, render: (v: string) => <Tag>{enumLabel(ENTITY_TYPE_LABEL, v)}</Tag> },
     {
       title: "敏感度",
       dataIndex: "sensitivity_level",
@@ -97,7 +98,9 @@ export function Catalogs() {
     },
     { title: "责任人", dataIndex: "owner_id", key: "owner", width: 90, render: (v: number | null) => v ?? <Tag>无</Tag> },
     { title: "schema 缺失", dataIndex: "schema_incomplete", key: "incomplete", width: 120, render: (v: boolean) => (v ? <Tag color="error">是</Tag> : <Tag color="success">否</Tag>) },
-    { title: "上游签名", dataIndex: "upstream_signature", key: "upstream", width: 130, render: (v: string) => <span className="mono" style={{ fontSize: 11 }}>{v.slice(0, 12)}…</span> },
+    { title: "上游签名", dataIndex: "upstream_signature", key: "upstream", width: 130, render: (v: string) => (v ? (
+      <Tooltip title={v}><span className="mono" style={{ fontSize: 11 }}>{v.slice(0, 12)}…</span></Tooltip>
+    ) : <span className="muted">—</span>) },
   ];
 
   return (
@@ -133,7 +136,7 @@ export function Catalogs() {
             style={{ width: 120 }}
             value={entityType || undefined}
             onChange={(v) => { setEntityType(v || ""); setPage(1); }}
-            options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: v }))}
+            options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: ENTITY_TYPE_LABEL[v] ?? v }))}
           />
           <Select
             allowClear
@@ -177,7 +180,7 @@ export function Catalogs() {
             <Input className="mono" placeholder="如 dwd_finance_order" />
           </Form.Item>
           <Form.Item name="entity_type" label="类型" initialValue="TABLE">
-            <Select options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: v }))} />
+            <Select options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: ENTITY_TYPE_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="etl_sql" label="ETL SQL（可选）">
             <Input.TextArea rows={3} className="mono" />

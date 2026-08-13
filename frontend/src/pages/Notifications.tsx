@@ -10,6 +10,35 @@ import {
   UnisenseApiError,
 } from "../api";
 import type { Notification, NotifyEventLog, SubscriptionPref } from "../types";
+import { NOTIFY_STATUS_LABEL, QUALITY_LEVEL_LABEL } from "../utils/enums";
+
+const CHANNEL_LABEL: Record<string, string> = {
+  email: "邮件",
+  webhook: "Webhook",
+  sms: "短信",
+  inapp: "站内",
+};
+
+const EVENT_TYPE_LABEL: Record<string, string> = {
+  "metric.created": "指标创建",
+  "metric.published": "指标发布",
+  "metric.deprecated": "指标废弃",
+  "conflict.detected": "冲突发现",
+  "quality.alert": "质量告警",
+  "governance.grant": "授权变更",
+  "lineage.change": "血缘变更",
+  "system.notice": "系统公告",
+};
+
+const SOURCE_LABEL: Record<string, string> = {
+  metric: "指标",
+  lineage: "血缘",
+  quality: "质量",
+  governance: "治理",
+  semantic: "语义",
+  system: "系统",
+  scheduler: "调度",
+};
 
 const CHANNELS = ["email", "webhook", "sms", "inapp"];
 const EVENT_TYPES = ["metric.created", "metric.published", "metric.deprecated", "conflict.detected", "quality.alert", "governance.grant", "lineage.change", "system.notice"];
@@ -41,13 +70,13 @@ function NotifListTab() {
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "标题", dataIndex: "title", key: "title" },
     { title: "正文", dataIndex: "body", key: "body", ellipsis: true },
-    { title: "渠道", dataIndex: "channel", key: "channel", width: 90, render: (v: string) => <Tag>{v}</Tag> },
+    { title: "渠道", dataIndex: "channel", key: "channel", width: 90, render: (v: string) => <Tag>{CHANNEL_LABEL[v] ?? v}</Tag> },
     {
       title: "状态",
       dataIndex: "status",
       key: "status",
       width: 100,
-      render: (v: string) => <Tag color={v === "SENT" ? "success" : v === "FAILED" ? "error" : "warning"}>{v}</Tag>,
+      render: (v: string) => <Tag color={v === "SENT" ? "success" : v === "FAILED" ? "error" : "warning"}>{NOTIFY_STATUS_LABEL[v] ?? v}</Tag>,
     },
     { title: "引用", dataIndex: "ref_type", key: "ref", width: 110, render: (v: string | null, r: Notification) => (v ? `${v}#${r.ref_id}` : <span className="muted">—</span>) },
     { title: "发送时间", dataIndex: "sent_at", key: "sent", width: 170, render: (v: string | null) => v ?? <span className="muted">未发送</span> },
@@ -97,8 +126,8 @@ function SubscriptionsTab() {
   }
 
   const columns = [
-    { title: "渠道", dataIndex: "channel", key: "channel", width: 120, render: (v: string) => <Tag>{v}</Tag> },
-    { title: "事件类型", dataIndex: "event_type", key: "event", render: (v: string) => <span className="mono">{v}</span> },
+    { title: "渠道", dataIndex: "channel", key: "channel", width: 120, render: (v: string) => <Tag>{CHANNEL_LABEL[v] ?? v}</Tag> },
+    { title: "事件类型", dataIndex: "event_type", key: "event", render: (v: string) => <span className="mono">{EVENT_TYPE_LABEL[v] ?? v}</span> },
     { title: "阈值", dataIndex: "threshold", key: "threshold", width: 90, render: (v: number | null) => v ?? <span className="muted">—</span> },
     { title: "启用", dataIndex: "enabled", key: "enabled", width: 90, render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "是" : "否"}</Tag> },
   ];
@@ -113,10 +142,10 @@ function SubscriptionsTab() {
       <Modal title="新增订阅偏好" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="保存">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="channel" label="渠道" rules={[{ required: true }]}>
-            <Select options={CHANNELS.map((c) => ({ value: c, label: c }))} />
+            <Select options={CHANNELS.map((c) => ({ value: c, label: CHANNEL_LABEL[c] ?? c }))} />
           </Form.Item>
           <Form.Item name="event_type" label="事件类型" rules={[{ required: true }]}>
-            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: c }))} />
+            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: EVENT_TYPE_LABEL[c] ?? c }))} />
           </Form.Item>
           <Form.Item name="threshold" label="阈值（可选）">
             <InputNumber min={1} style={{ width: 200 }} />
@@ -150,9 +179,9 @@ function EventLogTab() {
 
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
-    { title: "事件类型", dataIndex: "event_type", key: "event", render: (v: string) => <span className="mono">{v}</span> },
-    { title: "来源", dataIndex: "source", key: "source", width: 110, render: (v: string | null) => v ?? <span className="muted">—</span> },
-    { title: "级别", dataIndex: "level", key: "level", width: 90, render: (v: string) => <Tag color={v === "ERROR" ? "error" : v === "WARN" ? "warning" : "default"}>{v}</Tag> },
+    { title: "事件类型", dataIndex: "event_type", key: "event", render: (v: string) => <span className="mono">{EVENT_TYPE_LABEL[v] ?? v}</span> },
+    { title: "来源", dataIndex: "source", key: "source", width: 110, render: (v: string | null) => (v ? SOURCE_LABEL[v] ?? v : <span className="muted">—</span>) },
+    { title: "级别", dataIndex: "level", key: "level", width: 90, render: (v: string) => <Tag color={v === "ERROR" ? "error" : v === "WARN" ? "warning" : "default"}>{QUALITY_LEVEL_LABEL[v] ?? v}</Tag> },
     { title: "已通知", dataIndex: "notified", key: "notified", width: 90, render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "是" : "否"}</Tag> },
     { title: "时间", dataIndex: "created_at", key: "created", width: 170 },
   ];
@@ -184,13 +213,13 @@ function PublishTab() {
       <Card title="发布事件" size="small">
         <Form form={form} layout="vertical" onFinish={handlePublish}>
           <Form.Item name="event_type" label="事件类型" rules={[{ required: true }]}>
-            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: c }))} />
+            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: EVENT_TYPE_LABEL[c] ?? c }))} />
           </Form.Item>
           <Form.Item name="source" label="来源">
-            <Select allowClear options={["metric", "lineage", "quality", "governance", "semantic", "system", "scheduler"].map((c) => ({ value: c, label: c }))} />
+            <Select allowClear options={["metric", "lineage", "quality", "governance", "semantic", "system", "scheduler"].map((c) => ({ value: c, label: SOURCE_LABEL[c] ?? c }))} />
           </Form.Item>
           <Form.Item name="level" label="级别" initialValue="INFO">
-            <Select options={["INFO", "WARN", "ERROR"].map((c) => ({ value: c, label: c }))} />
+            <Select options={["INFO", "WARN", "ERROR"].map((c) => ({ value: c, label: QUALITY_LEVEL_LABEL[c] ?? c }))} />
           </Form.Item>
           <Form.Item name="note" label="备注">
             <Input.TextArea rows={2} />

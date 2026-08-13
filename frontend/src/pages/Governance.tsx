@@ -15,6 +15,46 @@ import {
 } from "../api";
 import type { GrantResponse, PermissionSnapshot } from "../types";
 
+const GRANT_TYPE_LABEL: Record<string, string> = {
+  READ: "只读",
+  WRITE: "写",
+  READ_WRITE: "读写",
+};
+
+const GRANT_STATUS_LABEL: Record<string, string> = {
+  ACTIVE: "生效",
+  EXPIRED: "已过期",
+  REVOKED: "已回收",
+};
+
+const ACTION_LABEL: Record<string, string> = {
+  read: "读取",
+  write: "写入",
+  approve: "审批",
+  export: "导出",
+  review: "复核",
+};
+
+const SENSITIVITY_LABEL: Record<string, string> = {
+  PUBLIC: "公开",
+  INTERNAL: "内部",
+  CONFIDENTIAL: "机密",
+  PII: "PII 敏感",
+  UNKNOWN: "未知",
+};
+
+const MASK_POLICY_LABEL: Record<string, string> = {
+  none: "无",
+  mask: "掩码",
+  hash: "哈希",
+  deny: "拒绝访问",
+};
+
+const DECISION_LABEL: Record<string, string> = {
+  APPROVE: "通过",
+  REJECT: "拒绝",
+};
+
 function PermissionsTab() {
   const [snap, setSnap] = useState<PermissionSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -38,7 +78,7 @@ function PermissionsTab() {
         <Descriptions.Item label="行级受限">{snap.row_level_restricted ? "是" : "否"}</Descriptions.Item>
         <Descriptions.Item label="可用操作" span={2}>
           <Space wrap>
-            {snap.allowed_actions.map((a) => <Tag key={a}>{a}</Tag>)}
+            {snap.allowed_actions.map((a) => <Tag key={a}>{ACTION_LABEL[a] ?? a}</Tag>)}
           </Space>
         </Descriptions.Item>
         <Descriptions.Item label="授权域" span={2}>
@@ -119,14 +159,14 @@ function GrantsTab() {
     { title: "用户", dataIndex: "user_id", key: "user", width: 80 },
     { title: "角色", dataIndex: "role_id", key: "role", width: 90, render: (v: number | null) => v ? <span className="mono">#{v}</span> : <Tag>角色挂起</Tag> },
     { title: "域", dataIndex: "domain", key: "domain", render: (v: string | null) => v ?? <span className="muted">全部</span> },
-    { title: "授权类型", dataIndex: "grant_type", key: "type", width: 110, render: (v: string) => <Tag color={v === "READ_WRITE" ? "warning" : v === "WRITE" ? "orange" : "default"}>{v}</Tag> },
+    { title: "授权类型", dataIndex: "grant_type", key: "type", width: 110, render: (v: string) => <Tag color={v === "READ_WRITE" ? "warning" : v === "WRITE" ? "orange" : "default"}>{GRANT_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "行级", dataIndex: "row_level", key: "row", width: 70, render: (v: boolean) => (v ? "是" : "否") },
     {
       title: "状态",
       dataIndex: "status",
       key: "status",
       width: 100,
-      render: (v: string) => <Tag color={v === "ACTIVE" ? "success" : v === "EXPIRED" ? "default" : "error"}>{v}</Tag>,
+      render: (v: string) => <Tag color={v === "ACTIVE" ? "success" : v === "EXPIRED" ? "default" : "error"}>{GRANT_STATUS_LABEL[v] ?? v}</Tag>,
     },
     { title: "到期", dataIndex: "expires_at", key: "expires", width: 160, render: (v: string | null) => v ?? <span className="muted">长期</span> },
     {
@@ -249,7 +289,7 @@ function PiiReviewTab() {
         pii_columns: values.pii_columns ? String(values.pii_columns).split(",").map((s) => s.trim()).filter(Boolean) : null,
         comment: String(values.comment),
       });
-      message.success(`复核完成：${res.decision}`);
+      message.success(`复核完成：${DECISION_LABEL[res.decision] ?? res.decision}`);
       setModalOpen(false);
       form.resetFields();
     } catch (err) {
@@ -287,7 +327,7 @@ function PiiReviewTab() {
             <Select options={[{ value: "APPROVE", label: "通过（合规复核通过）" }, { value: "REJECT", label: "拒绝（退回）" }]} />
           </Form.Item>
           <Form.Item name="sensitivity_level" label="敏感度" initialValue="PII">
-            <Select options={["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "UNKNOWN"].map((v) => ({ value: v, label: v }))} />
+            <Select options={["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "UNKNOWN"].map((v) => ({ value: v, label: SENSITIVITY_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="masking_policy" label="脱敏策略">
             <Select allowClear options={[{ value: "none", label: "无" }, { value: "mask", label: "掩码" }, { value: "hash", label: "哈希" }, { value: "deny", label: "拒绝访问" }]} />
@@ -329,7 +369,7 @@ function CheckTab() {
           <InputNumber min={1} style={{ width: 110 }} />
         </Form.Item>
         <Form.Item name="action" label="动作" rules={[{ required: true }]}>
-          <Select style={{ width: 130 }} options={["read", "write", "approve", "export", "review"].map((v) => ({ value: v, label: v }))} />
+          <Select style={{ width: 130 }} options={["read", "write", "approve", "export", "review"].map((v) => ({ value: v, label: ACTION_LABEL[v] ?? v }))} />
         </Form.Item>
         <Form.Item name="domain" label="域">
           <Input style={{ width: 140 }} />
@@ -347,7 +387,7 @@ function CheckTab() {
           showIcon
           style={{ marginTop: 12 }}
           message={result.allow ? "允许执行" : "拒绝执行"}
-          description={`${result.reason}${result.restricted ? "（行级受限）" : ""}${result.masking && result.masking !== "none" ? ` · 脱敏策略：${result.masking}` : ""}`}
+          description={`${result.reason}${result.restricted ? "（行级受限）" : ""}${result.masking && result.masking !== "none" ? ` · 脱敏策略：${MASK_POLICY_LABEL[result.masking] ?? result.masking}` : ""}`}
         />
       )}
     </Card>

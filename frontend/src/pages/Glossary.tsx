@@ -15,6 +15,16 @@ import type { GlossaryTerm, GlossaryConflict } from "../types";
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
+const CONFLICT_TYPE_LABEL: Record<string, string> = {
+  alias_overlap: "同义别名冲突",
+  name_overlap: "同名冲突",
+  definition_overlap: "语义漂移",
+};
+const CONFLICT_STATUS_LABEL: Record<string, string> = {
+  OPEN: "待处理",
+  RESOLVED: "已解决",
+  IGNORED: "已忽略",
+};
 
 function TermsTab() {
   const [items, setItems] = useState<GlossaryTerm[]>([]);
@@ -207,7 +217,7 @@ function ConflictsTab() {
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "术语", dataIndex: "term_id", key: "term", width: 90, render: (v: number) => <span className="mono">#{v}</span> },
-    { title: "冲突类型", dataIndex: "conflict_type", key: "type", width: 180 },
+    { title: "冲突类型", dataIndex: "conflict_type", key: "type", width: 180, render: (v: string) => CONFLICT_TYPE_LABEL[v] ?? v },
     { title: "关联术语", dataIndex: "ref_term_id", key: "refTerm", render: (v: number | null) => v ? <span className="mono">#{v}</span> : <span className="muted">—</span> },
     { title: "关联指标", dataIndex: "ref_metric_id", key: "refMetric", render: (v: number | null) => v ? <span className="mono">#{v}</span> : <span className="muted">—</span> },
     {
@@ -215,7 +225,7 @@ function ConflictsTab() {
       dataIndex: "status",
       key: "status",
       width: 100,
-      render: (s: string) => <Tag color={s === "OPEN" ? "warning" : "success"}>{s}</Tag>,
+      render: (s: string) => <Tag color={s === "OPEN" ? "warning" : "success"}>{CONFLICT_STATUS_LABEL[s] ?? s}</Tag>,
     },
     {
       title: "操作",

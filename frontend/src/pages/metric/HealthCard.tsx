@@ -17,6 +17,22 @@ const LEVEL_META: Record<string, { label: string; color: string; pct: number }> 
   CRITICAL: { label: "危", color: "red", pct: 25 },
 };
 
+const MISSING_DIM_LABEL: Record<string, string> = {
+  granularity: "粒度",
+  unit: "单位",
+  aggregation: "聚合",
+  time_semantics: "时间语义",
+  freshness: "新鲜度",
+  sla: "SLA",
+  dw_layer: "数仓分层",
+  serving_mode: "服务模式",
+  additivity: "可加性",
+  activity: "活跃度",
+  quality: "质量审核",
+  owner_response: "备份 Owner",
+  lineage_coverage: "血缘覆盖",
+};
+
 export function HealthCard({ health }: { health: MetricHealth }) {
   const meta = LEVEL_META[health.level] ?? LEVEL_META.CRITICAL;
 
@@ -66,7 +82,7 @@ export function HealthCard({ health }: { health: MetricHealth }) {
         <Card size="small" style={{ gridColumn: "1 / -1" }}>
           <span className="muted">数据不足：</span>
           {health.missing_dimensions.map((m) => (
-            <Tag key={m} color="orange">{m}</Tag>
+            <Tag key={m} color="orange">{MISSING_DIM_LABEL[m] ?? m}</Tag>
           ))}
         </Card>
       ) : null}

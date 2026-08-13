@@ -21,6 +21,24 @@ const STATUS_COLOR: Record<string, string> = {
   ESCALATED: "error",
 };
 
+const CONFLICT_TYPE_LABEL: Record<string, string> = {
+  same_name_diff_def: "同名不同义",
+  same_def_diff_name: "同义不同名",
+  grain_unit: "粒度/单位冲突",
+  cross_domain_same_def: "跨域同口径异源",
+  version_conflict: "口径版本冲突",
+  pii: "PII 冲突",
+};
+
+const SEVERITY_LABEL: Record<string, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+  critical: "严重",
+  hard: "硬冲突",
+  soft: "软冲突",
+};
+
 export function ReviewWorkbench() {
   const [items, setItems] = useState<ConflictResponse[]>([]);
   const [status, setStatus] = useState("");
@@ -118,14 +136,14 @@ export function ReviewWorkbench() {
 
   const columns = [
     { title: "冲突ID", dataIndex: "conflict_id", key: "conflict_id" },
-    { title: "类型", dataIndex: "type", key: "type" },
+    { title: "类型", dataIndex: "type", key: "type", render: (v: string) => CONFLICT_TYPE_LABEL[v] ?? v },
     {
       title: "状态",
       dataIndex: "status",
       key: "status",
       render: (s: string) => <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>,
     },
-    { title: "严重度", dataIndex: "severity", key: "severity" },
+    { title: "严重度", dataIndex: "severity", key: "severity", render: (v: string) => SEVERITY_LABEL[v] ?? v },
     {
       title: "候选",
       dataIndex: "candidate_metric_code",

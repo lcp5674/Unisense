@@ -236,14 +236,14 @@ modules:
     status: released
     gateways_passed: [lint, type, unit, integration, security_reverse, chaos, observability, contract, doc_sync, perf_baseline, runbook, secret, supply_chain]
     perf_contract: "LLM 解析草稿 P95 < 8s；failover 切换 < 30s；503 降级非阻塞"
-    perf_baseline: "backend/tests/perf/baseline_ai.js"
+    perf_baseline: "backend/tests/reports/perf_baseline_live_2026-08-13.txt"
     evidence_path: "backend/tests/reports/gates_readonly_2026-08-09.txt"
     runbook_path: "docs/runbooks/ai.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）；§6.3 双视角审查 High 缺陷已于 2026-08-09 修复并复测（详见 sic_reviews_2026_08_09.closure）"
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "代码完成 + 单测(lint/type/unit)全绿 + 集成真实 MySQL@3307 通过(1 例) + 安全/混沌/可观测门禁(3 例)全绿。NL2SQL 语义锚定(已发布 Term+Metric 词表)+ 危险语义拦截(UNSAFE_QUERY 拒)。无新表(迁移 N/A)。§6.3 审查 High(3)/Med(6)/Low(2) 已于 2026-08-09 全量修复：审计写库置于 commit 前(PLAT-3 变体)、单写者串行化(ai M1)、所有写接口补 security_reverse 反向测；security_reverse 门禁恢复有效。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify。LLM 接入生产级补强（2026-08-12）：OpenAI 协议兼容客户端（services/llm/client.py 支持 openai/deepseek/qwen/ernie/kilo 多提供商，json_object 结构化输出 + confidence/reasoning/candidates + 熔断降级）、NL2SQL 真实走 LLM（anchored 词表锚定 + method=llm，网关不可达降级 keyword）、kilo.ai 网关接入（UNISENSE_LLM_BASE_URL/API_KEY/MODEL 环境变量，容器实跑 method=llm 验证）、P2 结构化输出 Schema 校验（LlmStructuredOutput）。门禁：643 unit / ruff 0 / mypy 0。提交 8906d50。"
+    note: "代码完成 + 单测(lint/type/unit)全绿 + 集成真实 MySQL@3307 通过(1 例) + 安全/混沌/可观测门禁(3 例)全绿。NL2SQL 语义锚定(已发布 Term+Metric 词表)+ 危险语义拦截(UNSAFE_QUERY 拒)。无新表(迁移 N/A)。§6.3 审查 High(3)/Med(6)/Low(2) 已于 2026-08-09 全量修复：审计写库置于 commit 前(PLAT-3 变体)、单写者串行化(ai M1)、所有写接口补 security_reverse 反向测；security_reverse 门禁恢复有效。待办: §1.5 人工 ratify。LLM 接入生产级补强（2026-08-12）：OpenAI 协议兼容客户端（services/llm/client.py 支持 openai/deepseek/qwen/ernie/kilo 多提供商，json_object 结构化输出 + confidence/reasoning/candidates + 熔断降级）、NL2SQL 真实走 LLM（anchored 词表锚定 + method=llm，网关不可达降级 keyword）、kilo.ai 网关接入（UNISENSE_LLM_BASE_URL/API_KEY/MODEL 环境变量，容器实跑 method=llm 验证）、P2 结构化输出 Schema 校验（LlmStructuredOutput）。门禁：643 unit / ruff 0 / mypy 0。提交 8906d50。"
     updated: "2026-08-12"
 
   quality:
@@ -278,14 +278,14 @@ modules:
     status: released
     gateways_passed: [lint, type, unit, integration, security_reverse, chaos, observability, migration, contract, doc_sync, perf_baseline, runbook, secret, supply_chain]
     perf_contract: "告警触达 P95 < 5s；去重 5min 窗口生效"
-    perf_baseline: "backend/tests/perf/baseline_notify.js"
+    perf_baseline: "backend/tests/reports/perf_baseline_live_2026-08-13.txt"
     evidence_path: "backend/tests/reports/gates_readonly_2026-08-09.txt"
     runbook_path: "docs/runbooks/notify.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）；§6.3 双视角审查 High 缺陷已于 2026-08-09 修复并复测（详见 sic_reviews_2026_08_09.closure）"
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "§6.3 High(2)/Med(7)/Low(7) 已全部修复：① 通知闭环(P-1) publish_event 现即时投递并回写 SENT/FAILED，delivered 计数返回；② PLAT-2 IDOR 修复 subscriber_id/user_id 强制来自 user.id；③ PLAT-5 source/level 取值白名单校验；④ PLAT-3 审计与业务同事务原子提交；⑤ 补 security_reverse 越权反例测试。security_reverse 门禁恢复有效。通知真实外发（2026-08-12）：SMTP 邮件（aiosmtplib）/ 钉钉 Webhook 机器人（markdown 告警/待办/升级模板）/ Webhook 三渠道适配器 + _dispatch 真实投递回写 SENT/FAILED + 共享 HTTP 客户端连接池；事件发布链路补齐（notify_url 运行时注入 + 订阅扇出即时投递）。端到端实跑联调（2026-08-12）修复 3 个单测覆盖不到的 bug：① channel 枚举漂移（模型 6 值 vs 迁移 4 值 → 写入 DINGTALK/console 报 Data truncated 1265）→ 迁移 0022 扩展；② API 直接返回 ORM 对象（Unable to serialize 500）→ 全端点 from_model 序列化；③ _dispatch 渠道大小写漂移（DB 存大写枚举值但比较小写 → 除 console 外全部渠道投递失败）→ 归一化比较 + SubscriptionUpsert channel validator。实跑验证：订阅/扇出/console SENT/webhook 真实 POST 外发（本地接收器收到）/事件日志 notified/状态流转 mark_sent-failed 全部通过。FR-17 能力降级矩阵补齐（2026-08-13）：降级事件持久化（DegradationEvent 模型 + 迁移 0024，degradation_event 表，TD §4.13）+ 熔断状态切换上报 DEGRADED/HEALTHY 事件（CircuitBreaker 监听器 + core/degradation.py record_degradation 独立会话 best-effort 落库 + publish degradation.state_changed）+ 就绪探针 TCP 探活改 asyncio.to_thread 不阻塞事件循环 + OLAP 未配置显式上报降级；单测 test_resilience/test_degradation 共 6 passed。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify；FR-17 缺口补齐（2026-08-13 后续）：已知缺口① TD §4.13 dependency_health 实时熔断态表已建（DependencyHealth 模型 + 迁移 0025，UPSERT 实时写入熔断态/健康态/连续失败数/最近探活）+ ② ES 客户端接入（core/es_client.py 守卫式导入 elasticsearch，es_breaker 进入真实 /ready 探活与 search/index 调用路径，消除死代码）；新增单测 10（test_dependency_health 4 + test_es_client 6）；验证：mypy --strict 155 文件 0 error、ruff 全清、定向 16 + 回归 24 全绿、迁移链 0023→0024→0025 线性。"
+    note: "§6.3 High(2)/Med(7)/Low(7) 已全部修复：① 通知闭环(P-1) publish_event 现即时投递并回写 SENT/FAILED，delivered 计数返回；② PLAT-2 IDOR 修复 subscriber_id/user_id 强制来自 user.id；③ PLAT-5 source/level 取值白名单校验；④ PLAT-3 审计与业务同事务原子提交；⑤ 补 security_reverse 越权反例测试。security_reverse 门禁恢复有效。通知真实外发（2026-08-12）：SMTP 邮件（aiosmtplib）/ 钉钉 Webhook 机器人（markdown 告警/待办/升级模板）/ Webhook 三渠道适配器 + _dispatch 真实投递回写 SENT/FAILED + 共享 HTTP 客户端连接池；事件发布链路补齐（notify_url 运行时注入 + 订阅扇出即时投递）。端到端实跑联调（2026-08-12）修复 3 个单测覆盖不到的 bug：① channel 枚举漂移（模型 6 值 vs 迁移 4 值 → 写入 DINGTALK/console 报 Data truncated 1265）→ 迁移 0022 扩展；② API 直接返回 ORM 对象（Unable to serialize 500）→ 全端点 from_model 序列化；③ _dispatch 渠道大小写漂移（DB 存大写枚举值但比较小写 → 除 console 外全部渠道投递失败）→ 归一化比较 + SubscriptionUpsert channel validator。实跑验证：订阅/扇出/console SENT/webhook 真实 POST 外发（本地接收器收到）/事件日志 notified/状态流转 mark_sent-failed 全部通过。FR-17 能力降级矩阵补齐（2026-08-13）：降级事件持久化（DegradationEvent 模型 + 迁移 0024，degradation_event 表，TD §4.13）+ 熔断状态切换上报 DEGRADED/HEALTHY 事件（CircuitBreaker 监听器 + core/degradation.py record_degradation 独立会话 best-effort 落库 + publish degradation.state_changed）+ 就绪探针 TCP 探活改 asyncio.to_thread 不阻塞事件循环 + OLAP 未配置显式上报降级；单测 test_resilience/test_degradation 共 6 passed。待办: §1.5 人工 ratify；FR-17 缺口补齐（2026-08-13 后续）：已知缺口① TD §4.13 dependency_health 实时熔断态表已建（DependencyHealth 模型 + 迁移 0025，UPSERT 实时写入熔断态/健康态/连续失败数/最近探活）+ ② ES 客户端接入（core/es_client.py 守卫式导入 elasticsearch，es_breaker 进入真实 /ready 探活与 search/index 调用路径，消除死代码）；新增单测 10（test_dependency_health 4 + test_es_client 6）；验证：mypy --strict 155 文件 0 error、ruff 全清、定向 16 + 回归 24 全绿、迁移链 0023→0024→0025 线性。"
     updated: "2026-08-13"
 
   observability:
@@ -294,14 +294,14 @@ modules:
     status: released
     gateways_passed: [lint, type, unit, integration, security_reverse, chaos, observability, migration, contract, doc_sync, perf_baseline, runbook, secret, supply_chain]
     perf_contract: "审计写入 P99 < 100ms；trace_id 透传率 100%"
-    perf_baseline: "backend/tests/perf/baseline_observability.js"
+    perf_baseline: "backend/tests/reports/perf_baseline_live_2026-08-13.txt"
     evidence_path: "backend/tests/reports/gates_readonly_2026-08-09.txt"
     runbook_path: "docs/runbooks/observability.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）；§6.3 双视角审查 High 缺陷已于 2026-08-09 修复并复测（详见 sic_reviews_2026_08_09.closure）"
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "§6.3 High(1)/Med(5)/Low(5) 已全部修复：① PLAT-2 feedback user_id 强制来自 user.id；② PLAT-3 审计与业务同事务原子提交；③ observability M-1 feedback target_type 白名单校验；④ 所有读端点补 require_roles RBAC 闸门(PLAT-1) + security_reverse 反向测试。security_reverse 门禁恢复有效。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
+    note: "§6.3 High(1)/Med(5)/Low(5) 已全部修复：① PLAT-2 feedback user_id 强制来自 user.id；② PLAT-3 审计与业务同事务原子提交；③ observability M-1 feedback target_type 白名单校验；④ 所有读端点补 require_roles RBAC 闸门(PLAT-1) + security_reverse 反向测试。security_reverse 门禁恢复有效。待办: §1.5 人工 ratify"
     updated: "2026-08-10"
 
   assetmap:
@@ -310,14 +310,14 @@ modules:
     status: released
     gateways_passed: [lint, type, unit, integration, security_reverse, chaos, observability, contract, doc_sync, perf_baseline, runbook, secret, supply_chain]
     perf_contract: "资产地图渲染 P95 < 2s；敏感热力聚合 < 3s"
-    perf_baseline: "backend/tests/perf/baseline_assetmap.js"
+    perf_baseline: "backend/tests/reports/perf_baseline_live_2026-08-13.txt"
     evidence_path: "backend/tests/reports/gates_readonly_2026-08-09.txt"
     runbook_path: "docs/runbooks/assetmap.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）；§6.3 双视角审查 High 缺陷已于 2026-08-09 修复并复测（详见 sic_reviews_2026_08_09.closure）"
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "§6.3 High(2)/Med(5)/Low(4) 已全部修复：① PLAT-1 全部读端点补 require_roles RBAC 闸门 + 越权 403 反向测试；② T-2 敏感字段外泄修复 BaseModel.to_dict 默认剔除 connection_config 等敏感列，资产地图经 to_dict 序列化；③ PLAT-4 删除 _tx 死代码。security_reverse 门禁恢复有效。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
+    note: "§6.3 High(2)/Med(5)/Low(4) 已全部修复：① PLAT-1 全部读端点补 require_roles RBAC 闸门 + 越权 403 反向测试；② T-2 敏感字段外泄修复 BaseModel.to_dict 默认剔除 connection_config 等敏感列，资产地图经 to_dict 序列化；③ PLAT-4 删除 _tx 死代码。security_reverse 门禁恢复有效。待办: §1.5 人工 ratify"
     note2: "生产级补强(2026-08-12 5ae6e5f)：实体详情端点/Neo4j读路径修复(driver单例+depth接Cypher+pii边过滤)/域精确匹配/测试94%；产品补充(2026-08-12 6108894)：全局搜索/资产健康/PII合规视图/变更追踪/我的资产/CSV导出/详情增强(血缘边+关联指标+源健康+新鲜度)，前端11 Tab。测试：repository 93% service 96%，53 用例全绿，端到端实跑通过"
     note3: "写能力+性能基线(2026-08-13 aacac22)：资产工作台写端点(POST /entities/{id}/owner、/sensitivity、/batch-owner、/batch-sensitivity，仅 platform_admin/domain_admin，PLAT-3 原子审计) + repository 写方法(存在性/用户校验/批量空集防护) + 聚合 cache-aside TTL30s 熔断降级。测试 87 全绿(service31/repo41/security15)，覆盖率 93%(api81/repo97/svc97/schemas100)。perf 基线 k6 实跑入库(assetmap_perf_2026-08-13.txt)：P95=19.97ms(契约<800ms)、失败率0.00%，2700 请求全通过；端到端实跑验证 RBAC403/404/422/审计留痕/DB生效"
     updated: "2026-08-13"
@@ -328,14 +328,14 @@ modules:
     status: released
     gateways_passed: [lint, type, unit, integration, security_reverse, chaos, observability, contract, doc_sync, perf_baseline, runbook, secret, supply_chain]
     perf_contract: "推荐召回 P95 < 500ms"
-    perf_baseline: "backend/tests/perf/baseline_recommend.js"
+    perf_baseline: "backend/tests/reports/perf_baseline_live_2026-08-13.txt"
     evidence_path: "backend/tests/reports/gates_readonly_2026-08-09.txt"
     runbook_path: "docs/runbooks/recommend.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）；§6.3 双视角审查 High 缺陷已于 2026-08-09 修复并复测（详见 sic_reviews_2026_08_09.closure）"
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "§6.3 High(2)/Med(5)/Low(4) 已全部修复：① PLAT-1 全部读端点补 require_roles RBAC 闸门 + 越权 403 反向测试；② PLAT-2 recommend_metrics 现用 user.id 替代 client user_id(IDOR)；③ PLAT-4 删除 _tx 死代码。security_reverse 门禁恢复有效。Medium(M-1 反馈闭环/M-2 共现阈值)为增强项，非安全阻断，列入后续迭代。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
+    note: "§6.3 High(2)/Med(5)/Low(4) 已全部修复：① PLAT-1 全部读端点补 require_roles RBAC 闸门 + 越权 403 反向测试；② PLAT-2 recommend_metrics 现用 user.id 替代 client user_id(IDOR)；③ PLAT-4 删除 _tx 死代码。security_reverse 门禁恢复有效。Medium(M-1 反馈闭环/M-2 共现阈值)为增强项，非安全阻断，列入后续迭代。待办: §1.5 人工 ratify"
     updated: "2026-08-10"
 
   glossary:
@@ -344,14 +344,14 @@ modules:
     status: released
     gateways_passed: [lint, type, unit, integration, security_reverse, chaos, observability, migration, contract, doc_sync, perf_baseline, runbook, secret, supply_chain]
     perf_contract: "术语检索 P95 < 200ms"
-    perf_baseline: "backend/tests/perf/baseline_glossary.js"
+    perf_baseline: "backend/tests/reports/perf_baseline_live_2026-08-13.txt"
     evidence_path: "backend/tests/reports/gates_readonly_2026-08-09.txt"
     runbook_path: "docs/runbooks/glossary.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）；§6.3 双视角审查 High 缺陷已于 2026-08-09 修复并复测（详见 sic_reviews_2026_08_09.closure）"
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "§6.3 High(3)/Med(10)/Low(7) 已全部修复：① PLAT-2 冲突裁决 resolver_id 强制来自 user.id（忽略 client 伪造）；② PLAT-3 审计与业务同事务（写入在 commit 前）；③ PLAT-4 删除 _tx 死代码；④ 全部写端点补审计留痕与 RBAC 写闸门。security_reverse 门禁恢复有效。Medium(M-1 最小版本保留)为增强项，非安全阻断。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
+    note: "§6.3 High(3)/Med(10)/Low(7) 已全部修复：① PLAT-2 冲突裁决 resolver_id 强制来自 user.id（忽略 client 伪造）；② PLAT-3 审计与业务同事务（写入在 commit 前）；③ PLAT-4 删除 _tx 死代码；④ 全部写端点补审计留痕与 RBAC 写闸门。security_reverse 门禁恢复有效。Medium(M-1 最小版本保留)为增强项，非安全阻断。待办: §1.5 人工 ratify"
     updated: "2026-08-10"
 
   dimension:
@@ -360,14 +360,14 @@ modules:
     status: released
     gateways_passed: [lint, type, unit, integration, security_reverse, chaos, observability, migration, contract, doc_sync, perf_baseline, runbook, secret, supply_chain]
     perf_contract: "维度映射对齐 P95 < 500ms"
-    perf_baseline: "backend/tests/perf/baseline_dimension.js"
+    perf_baseline: "backend/tests/reports/perf_baseline_live_2026-08-13.txt"
     evidence_path: "backend/tests/reports/gates_readonly_2026-08-09.txt"
     runbook_path: "docs/runbooks/dimension.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）；§6.3 双视角审查 High 缺陷已于 2026-08-09 修复并复测（详见 sic_reviews_2026_08_09.closure）"
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    note: "§6.3 High(5)/Med(8)/Low(4) 已全部修复：① PLAT-2 对账复核 reviewed_by 强制来自 user.id；② PLAT-3 审计与业务同事务；③ PLAT-4 删除 _tx 死代码；④ 全部写端点补审计留痕与 RBAC 写闸门。security_reverse 门禁恢复有效。Medium(M-1 对账记录保留期)为增强项，非安全阻断。待办: perf_baseline(k6 live 执行待补) + §1.5 人工 ratify"
+    note: "§6.3 High(5)/Med(8)/Low(4) 已全部修复：① PLAT-2 对账复核 reviewed_by 强制来自 user.id；② PLAT-3 审计与业务同事务；③ PLAT-4 删除 _tx 死代码；④ 全部写端点补审计留痕与 RBAC 写闸门。security_reverse 门禁恢复有效。Medium(M-1 对账记录保留期)为增强项，非安全阻断。待办: §1.5 人工 ratify"
     updated: "2026-08-10"
 
   frontend:

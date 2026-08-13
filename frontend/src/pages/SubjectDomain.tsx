@@ -10,6 +10,7 @@ import {
   activateDomain, deleteDomain, getDomainDefaults, updateDomainDefaults,
 } from "../api";
 import type { SubjectDomainTreeNode, SubjectDomain } from "../types";
+import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
 
 const DICT_FIELDS = [
   { key: "granularity", label: "粒度" },
@@ -23,6 +24,18 @@ const DICT_FIELDS = [
   { key: "additivity", label: "可加性" },
   { key: "metric_tier", label: "分级" },
 ];
+
+const DICT_FIELD_MAPS: Record<string, Record<string, string>> = {
+  granularity: GRANULARITY_LABEL,
+  aggregation: AGGREGATION_LABEL,
+  time_semantics: TIME_SEMANTICS_LABEL,
+  freshness: FRESHNESS_LABEL,
+  dw_layer: DW_LAYER_LABEL,
+  type: METRIC_TYPE_LABEL,
+  serving_mode: SERVING_MODE_LABEL,
+  additivity: ADDITIVITY_LABEL,
+  metric_tier: METRIC_TIER_LABEL,
+};
 
 function treeDataToNodes(nodes: SubjectDomainTreeNode[]): DataNode[] {
   return nodes.map((n) => ({
@@ -194,7 +207,7 @@ export function SubjectDomain() {
                 <Descriptions.Item label="编码">{detail.code}</Descriptions.Item>
                 <Descriptions.Item label="名称">{detail.name}</Descriptions.Item>
                 <Descriptions.Item label="层级">{detail.level}</Descriptions.Item>
-                <Descriptions.Item label="状态"><Tag color={detail.status === "active" ? "green" : "red"}>{detail.status}</Tag></Descriptions.Item>
+                <Descriptions.Item label="状态"><Tag color={detail.status === "active" ? "green" : "red"}>{detail.status === "active" ? "启用" : "停用"}</Tag></Descriptions.Item>
                 <Descriptions.Item label="排序">{detail.sort_order}</Descriptions.Item>
                 <Descriptions.Item label="关联指标数">{detail.metric_count}</Descriptions.Item>
                 <Descriptions.Item label="描述" span={2}>{detail.description || "-"}</Descriptions.Item>
@@ -204,7 +217,7 @@ export function SubjectDomain() {
                   <h4>域默认值预设</h4>
                   <Descriptions column={2} bordered size="small">
                     {DICT_FIELDS.filter(f => defaults[f.key]).map(f => (
-                      <Descriptions.Item key={f.key} label={f.label}>{String(defaults[f.key])}</Descriptions.Item>
+                      <Descriptions.Item key={f.key} label={f.label}>{enumLabel(DICT_FIELD_MAPS[f.key] ?? {}, String(defaults[f.key]))}</Descriptions.Item>
                     ))}
                   </Descriptions>
                 </div>

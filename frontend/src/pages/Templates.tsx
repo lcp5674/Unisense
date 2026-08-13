@@ -5,6 +5,7 @@ import { PlusOutlined } from "@ant-design/icons";
 import { listTemplates, createMetric, UnisenseApiError } from "../api";
 import type { MetricCreateRequest, MetricTemplate, MetricType } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
 
 export function Templates() {
   const [items, setItems] = useState<MetricTemplate[]>([]);
@@ -80,10 +81,13 @@ export function Templates() {
     { title: "模板编码", dataIndex: "code", key: "code", render: (v: string) => <span className="mono">{v}</span> },
     { title: "名称", dataIndex: "name", key: "name" },
     { title: "域", dataIndex: "domain", key: "domain", width: 140 },
-    { title: "类型", dataIndex: "type", key: "type", width: 100 },
-    { title: "粒度", dataIndex: "granularity", key: "granularity", width: 100 },
-    { title: "聚合", dataIndex: "aggregation", key: "aggregation", width: 120 },
-    { title: "分级", dataIndex: "metric_tier", key: "metric_tier", width: 90, render: (v: string) => <Tag>{v}</Tag> },
+    { title: "类型", dataIndex: "type", key: "type", width: 100, render: (v: string) => enumLabel(METRIC_TYPE_LABEL, v) },
+    { title: "粒度", dataIndex: "granularity", key: "granularity", width: 100, render: (v: string) => enumLabel(GRANULARITY_LABEL, v) },
+    { title: "聚合", dataIndex: "aggregation", key: "aggregation", width: 120, render: (v: string) => enumLabel(AGGREGATION_LABEL, v) },
+    { title: "时间语义", dataIndex: "time_semantics", key: "time_semantics", width: 110, render: (v: string) => enumLabel(TIME_SEMANTICS_LABEL, v) },
+    { title: "新鲜度", dataIndex: "freshness", key: "freshness", width: 90, render: (v: string) => enumLabel(FRESHNESS_LABEL, v) },
+    { title: "数仓层", dataIndex: "dw_layer", key: "dw_layer", width: 90, render: (v: string) => enumLabel(DW_LAYER_LABEL, v) },
+    { title: "分级", dataIndex: "metric_tier", key: "metric_tier", width: 90, render: (v: string) => <Tag>{enumLabel(METRIC_TIER_LABEL, v)}</Tag> },
     { title: "必填字段", dataIndex: "required_fields", key: "required_fields", render: (v: string[] | null) => (v?.length ? v.join("、") : <span className="muted">—</span>) },
     {
       title: "操作",
@@ -138,7 +142,7 @@ export function Templates() {
               <Input />
             </Form.Item>
             <Form.Item name="type" label="类型" style={{ width: 240 }}>
-              <Select options={[{ value: "atomic", label: "atomic" }, { value: "derived", label: "derived" }, { value: "composite", label: "composite" }]} />
+              <Select options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="granularity" label="粒度" style={{ width: 240 }}>
               <Input />
@@ -147,16 +151,16 @@ export function Templates() {
               <Input />
             </Form.Item>
             <Form.Item name="aggregation" label="聚合" style={{ width: 240 }}>
-              <Select options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE"].map((v) => ({ value: v, label: v }))} />
+              <Select options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE"].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="time_semantics" label="时间语义" style={{ width: 240 }}>
-              <Select options={["PERIOD", "YTD", "TTM", "AVG"].map((v) => ({ value: v, label: v }))} />
+              <Select options={["PERIOD", "YTD", "TTM", "AVG"].map((v) => ({ value: v, label: TIME_SEMANTICS_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="freshness" label="新鲜度" style={{ width: 240 }}>
-              <Select options={["REALTIME", "T1", "HOURLY"].map((v) => ({ value: v, label: v }))} />
+              <Select options={["REALTIME", "T1", "HOURLY"].map((v) => ({ value: v, label: FRESHNESS_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="dw_layer" label="数仓层" style={{ width: 240 }}>
-              <Select options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: v }))} />
+              <Select options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} />
             </Form.Item>
           </Space>
         </Form>

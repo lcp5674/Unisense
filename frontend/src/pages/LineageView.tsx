@@ -4,6 +4,19 @@ import { SearchOutlined, CodeOutlined, ApartmentOutlined } from "@ant-design/ico
 import { lineageImpact, lineageEdges, lineageImpactPreview, parseLineage, UnisenseApiError } from "../api";
 import type { LineageEdge } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
+
+const RISK_LEVEL_LABEL: Record<string, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+  critical: "严重",
+};
+
+const EDGE_TYPE_LABEL: Record<string, string> = {
+  DERIVED_FROM: "派生自",
+  CONSUMED_BY: "被消费",
+};
 
 type Direction = "upstream" | "downstream" | "both";
 
@@ -48,7 +61,7 @@ function ImpactTab() {
     try {
       const p = await lineageImpactPreview(node.trim(), "schema_drift");
       setRisk(
-        `受影响指标 ${p.affected_metrics.length} · 报表 ${p.affected_reports.length} · 消费方 ${p.affected_consumers.length} · 风险等级 ${p.risk_level}`,
+        `受影响指标 ${p.affected_metrics.length} · 报表 ${p.affected_reports.length} · 消费方 ${p.affected_consumers.length} · 风险等级 ${RISK_LEVEL_LABEL[p.risk_level] ?? p.risk_level}`,
       );
       track("lineage_preview", node.trim(), "node");
     } catch (err) {
@@ -61,8 +74,8 @@ function ImpactTab() {
   const columns = [
     { title: "源", dataIndex: "source_node", key: "source", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
     { title: "目标", dataIndex: "target_node", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
-    { title: "类型", dataIndex: "edge_type", key: "type", render: (v: string) => <Tag>{v}</Tag> },
-    { title: "粒度", dataIndex: "granularity", key: "granularity", width: 100 },
+    { title: "类型", dataIndex: "edge_type", key: "type", render: (v: string) => <Tag>{EDGE_TYPE_LABEL[v] ?? v}</Tag> },
+    { title: "粒度", dataIndex: "granularity", key: "granularity", width: 100, render: (v: string) => enumLabel(GRANULARITY_LABEL, v) },
     { title: "置信度", dataIndex: "confidence", key: "confidence", width: 90, render: (v: number) => `${(v * 100).toFixed(0)}%` },
     { title: "PII", dataIndex: "pii_inherited", key: "pii", width: 70, render: (v?: boolean) => (v ? <Tag color="red">PII</Tag> : null) },
   ];

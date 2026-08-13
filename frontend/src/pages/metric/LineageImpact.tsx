@@ -11,6 +11,25 @@ const EDGE_COLOR: Record<string, string> = {
   SQL_PARSE: "default",
 };
 
+const EDGE_TYPE_LABEL: Record<string, string> = {
+  DERIVED_FROM: "派生自",
+  LINEAGE_UP: "上游依赖",
+  LINEAGE_DOWN: "下游影响",
+  CONSUMED_BY: "被消费",
+  EXTERNAL_BREAK: "外部断链",
+  METRIC_DERIVES: "指标派生",
+  METRIC_DEPENDS_ON: "指标依赖",
+  TABLE_TO_FIELD: "表到字段",
+  FIELD_TO_TABLE: "字段到表",
+  SQL_PARSE: "SQL 解析",
+};
+
+const PROVENANCE_LABEL: Record<string, string> = {
+  sqlglot: "SQL 解析",
+  manual: "人工登记",
+  neo4j: "图谱导入",
+};
+
 export function LineageImpact({ metricCode }: { metricCode: string }) {
   const [edges, setEdges] = useState<LineageEdge[]>([]);
   const [direction, setDirection] = useState<"upstream" | "downstream">("downstream");
@@ -49,10 +68,10 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
       dataIndex: "edge_type",
       key: "edge_type",
       width: 160,
-      render: (v: string) => <Tag color={EDGE_COLOR[v] ?? "default"}>{v}</Tag>,
+      render: (v: string) => <Tag color={EDGE_COLOR[v] ?? "default"}>{EDGE_TYPE_LABEL[v] ?? v}</Tag>,
     },
     { title: "置信度", dataIndex: "confidence", key: "conf", width: 100, render: (v: number) => `${Math.round(v * 100)}%` },
-    { title: "来源", dataIndex: "provenance", key: "prov", width: 110, render: (v: string) => v },
+    { title: "来源", dataIndex: "provenance", key: "prov", width: 110, render: (v: string) => PROVENANCE_LABEL[v] ?? v },
     { title: "PII 传导", dataIndex: "pii_inherited", key: "pii", width: 100, render: (v?: boolean) => v ? <Tag color="red">PII</Tag> : <span className="muted">—</span> },
   ];
 

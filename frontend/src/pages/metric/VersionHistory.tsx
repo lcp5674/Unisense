@@ -6,6 +6,14 @@ import {
   rejectMetricVersion,
 } from "../../api";
 import type { MetricVersionResponse } from "../../types";
+import { ObjectView, DEF_FIELD_LABEL } from "../../utils/display";
+
+const CHANGE_TYPE_LABEL: Record<string, string> = {
+  CREATE: "创建",
+  UPDATE: "更新",
+  PUBLISH: "发布",
+  DEPRECATE: "废弃",
+};
 
 const VERSION_STATUS_META: Record<string, { color: string; label: string }> = {
   DRAFT: { color: "default", label: "草稿" },
@@ -22,18 +30,14 @@ function VersionDefinition({ record }: { record: MetricVersionResponse }) {
         <Descriptions.Item label="版本">
           v{record.version} · <Tag color={VERSION_STATUS_META[record.status]?.color}>{VERSION_STATUS_META[record.status]?.label ?? record.status}</Tag>
         </Descriptions.Item>
-        <Descriptions.Item label="变更类型">{record.change_type}</Descriptions.Item>
+        <Descriptions.Item label="变更类型">{CHANGE_TYPE_LABEL[record.change_type] ?? record.change_type}</Descriptions.Item>
         <Descriptions.Item label="变更说明">{record.change_reason || <span className="muted">—</span>}</Descriptions.Item>
         <Descriptions.Item label="口径定义">
-          <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto" }}>
-            {JSON.stringify(record.definition_json, null, 2)}
-          </pre>
+          <ObjectView data={record.definition_json} labels={DEF_FIELD_LABEL} />
         </Descriptions.Item>
         {record.diff_json && (
           <Descriptions.Item label="差异 (vs 上一版本)">
-            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto" }}>
-              {JSON.stringify(record.diff_json, null, 2)}
-            </pre>
+            <ObjectView data={record.diff_json} labels={DEF_FIELD_LABEL} />
           </Descriptions.Item>
         )}
       </Descriptions>
@@ -98,7 +102,7 @@ export function VersionHistory({
 
   const columns = [
     { title: "版本", dataIndex: "version", key: "version", width: 80, render: (v: number) => `v${v}` },
-    { title: "变更类型", dataIndex: "change_type", key: "type", width: 150 },
+    { title: "变更类型", dataIndex: "change_type", key: "type", width: 150, render: (t: string) => CHANGE_TYPE_LABEL[t] ?? t },
     { title: "说明", dataIndex: "change_reason", key: "reason" },
     {
       title: "状态",

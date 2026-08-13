@@ -34,6 +34,16 @@ import {
 import type { CurrentUser } from "../types";
 import { clearToken, fetchPreferences, listNotifications, setPreference } from "../api";
 
+const ROLE_LABEL: Record<string, string> = {
+  platform_admin: "平台管理员",
+  domain_admin: "域管理员",
+  metric_owner: "指标负责人",
+  reviewer: "评审员",
+  compliance_officer: "合规官",
+  analyst: "分析师",
+  viewer: "只读用户",
+};
+
 const { Header, Sider, Content } = AntLayout;
 
 // 侧边栏折叠状态：按用户持久化（服务端 user_preference 为准 + 本地 per-user 缓存加速，跨用户隔离）
@@ -212,7 +222,7 @@ export function Layout({ user }: { user: CurrentUser }) {
   const userMenuItems = [
     {
       key: "profile",
-      label: `${user.display_name}（${user.role}${user.domain ? ` · ${user.domain}` : ""}）`,
+      label: `${user.display_name}（${ROLE_LABEL[user.role] ?? user.role}${user.domain ? ` · ${user.domain}` : ""}）`,
       disabled: true,
     },
     { type: "divider" as const },

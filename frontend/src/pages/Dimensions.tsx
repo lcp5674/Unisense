@@ -20,6 +20,11 @@ import type { Dimension, DimensionMapping, Reconciliation, DimensionMember, Metr
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
+const RECON_STATUS_LABEL: Record<string, string> = {
+  PENDING: "待复核",
+  APPROVED: "已通过",
+  REJECTED: "已驳回",
+};
 
 function DimensionsTab() {
   const [items, setItems] = useState<Dimension[]>([]);
@@ -371,7 +376,7 @@ function ReconciliationsTab() {
       dataIndex: "status",
       key: "status",
       width: 110,
-      render: (s: string) => <Tag color={s === "APPROVED" ? "success" : s === "REJECTED" ? "error" : "warning"}>{s}</Tag>,
+      render: (s: string) => <Tag color={s === "APPROVED" ? "success" : s === "REJECTED" ? "error" : "warning"}>{RECON_STATUS_LABEL[s] ?? s}</Tag>,
     },
     {
       title: "操作",

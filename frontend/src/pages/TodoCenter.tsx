@@ -4,6 +4,24 @@ import { Card, Button, List, Tag, message } from "antd";
 import { listConflicts, listMetrics, UnisenseApiError } from "../api";
 import { useTracking } from "../hooks/useTracking";
 
+const CONFLICT_TYPE_LABEL: Record<string, string> = {
+  same_name_diff_def: "同名不同义",
+  same_def_diff_name: "同义不同名",
+  grain_unit: "粒度/单位冲突",
+  cross_domain_same_def: "跨域同口径异源",
+  version_conflict: "口径版本冲突",
+  pii: "PII 冲突",
+};
+
+const SEVERITY_LABEL: Record<string, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+  critical: "严重",
+  hard: "硬冲突",
+  soft: "软冲突",
+};
+
 interface Todo {
   kind: "conflict" | "draft";
   title: string;
@@ -29,7 +47,7 @@ export function TodoCenter() {
         list.push({
           kind: "conflict",
           title: `冲突待仲裁：${c.candidate_metric_code} vs ${c.existing_metric_code}`,
-          meta: `${c.type} · ${c.severity} · ${c.conflict_id}`,
+          meta: `${CONFLICT_TYPE_LABEL[c.type] ?? c.type} · ${SEVERITY_LABEL[c.severity] ?? c.severity} · ${c.conflict_id}`,
         });
       }
       for (const m of drafts.items) {

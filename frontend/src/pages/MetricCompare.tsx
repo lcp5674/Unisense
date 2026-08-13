@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button, Card, Empty, Spin, Table, Tag } from "antd";
 import { compareMetrics } from "../api";
 import type { MetricCompareDeps, MetricCompareField, MetricCompareResult } from "../types";
+import { ObjectView } from "../utils/display";
 
 const FIELD_LABELS: Record<string, string> = {
   granularity: "粒度",
@@ -28,11 +29,7 @@ const DIFF_META: Record<string, { color: string; label: string }> = {
 function renderValue(v: unknown) {
   if (v == null) return <span className="muted">—</span>;
   if (typeof v === "object") {
-    return (
-      <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", maxHeight: 200 }}>
-        {JSON.stringify(v, null, 2)}
-      </pre>
-    );
+    return <ObjectView data={v as Record<string, unknown>} depth={1} />;
   }
   return <span className="mono">{String(v)}</span>;
 }

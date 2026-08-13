@@ -15,6 +15,11 @@ import { fetchDashboard, fetchRecommendedMetrics, fetchRecommendedTerms } from "
 import type { DashboardData, RecommendItem, GlossaryTerm } from "../types";
 import { useTracking } from "../hooks/useTracking";
 
+const EDGE_TYPE_LABEL: Record<string, string> = {
+  DERIVED_FROM: "派生自",
+  CONSUMED_BY: "被消费",
+};
+
 // 生命周期五站：顺序即真实流程
 const STATIONS = [
   { key: "DRAFT", name: "草稿", hotPriority: 2 },
@@ -341,7 +346,7 @@ export function Dashboard() {
                 >
                   <span className="mono" style={{ fontWeight: 600 }}>{r.metric_id}</span>
                   <span className="muted" style={{ fontSize: 12 }}>
-                    {r.via === "collaborative_filtering" ? "协同过滤" : `血缘 · ${r.edge_type}`}
+                    {r.via === "collaborative_filtering" ? "协同过滤" : `血缘 · ${EDGE_TYPE_LABEL[r.edge_type] ?? r.edge_type}`}
                     {typeof r.score === "number" && ` · ${(r.score * 100).toFixed(0)}%`}
                   </span>
                 </div>
@@ -386,8 +391,8 @@ export function Dashboard() {
 
       <div style={{ height: 8 }} />
       <div className="muted" style={{ fontSize: 12, display: "flex", gap: 20 }}>
-        <span><AppstoreOutlined /> 总览数据源：/semantics/dashboard</span>
-        <span>推荐：/recommend/metrics · /recommend/terms</span>
+        <span><AppstoreOutlined /> 总览数据由后端聚合仪表接口实时返回</span>
+        <span>推荐基于协同过滤与血缘关系</span>
       </div>
     </div>
   );

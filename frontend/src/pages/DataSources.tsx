@@ -43,6 +43,13 @@ const CONN_DETAIL_LABEL: Record<string, string> = {
   latency_ms: "延迟",
 };
 
+const DRIFT_CHANGE_LABEL: Record<string, string> = {
+  ADD_COLUMN: "新增列",
+  DROP_COLUMN: "删除列",
+  TYPE_CHANGE: "类型变更",
+  SCHEMA_CHANGED: "结构变更",
+};
+
 function previewSourceId(sourceType: string | undefined, cfg: Record<string, unknown>, domain: string): string {
   const base = String(cfg.database || cfg.schema || domain || "default");
   const norm = base.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase() || "default";
@@ -159,7 +166,7 @@ function SourceDetailModal({
           showIcon
           style={{ marginBottom: 12 }}
           message={`采集结果：注册 ${collectResult.registered} · PII ${collectResult.pii_registered} · 漂移 ${collectResult.drift_count}`}
-          description={collectResult.drift_events?.length ? collectResult.drift_events.slice(0, 5).map((d) => `${d.entity_name} (${d.change_type})`).join("、") : "无 schema 漂移"}
+          description={collectResult.drift_events?.length ? collectResult.drift_events.slice(0, 5).map((d) => `${d.entity_name} (${DRIFT_CHANGE_LABEL[d.change_type] ?? d.change_type})`).join("、") : "无 schema 漂移"}
         />
       )}
 
