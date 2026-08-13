@@ -324,3 +324,223 @@ def test_init_circuit_breaker_store_falls_back_without_redis():
         )
     finally:
         resilience.set_default_circuit_breaker_store(original)
+
+
+# ---------------------------------------------------------------------------
+# 补覆盖：监听器注册/异常兜底、抽象基类、Redis store 懒建/clear、共享态异常路径
+# ---------------------------------------------------------------------------
+
+
+def test_register_degradation_listener_appends(monkeypatch):
+    """register_degradation_listener 将监听器追加到全局列表。"""
+    seen: list[resilience.DegradationSignal] = []
+    fn: resilience.DegradationListener = seen.append  # noqa: F821
+    monkeypatch.setattr(resilience, "_degradation_listeners", [])
+    resilience.register_degradation_listener(fn)
+    assert resilience._degradation_listeners == [fn]
+
+
+def test_emitter_swallows_listener_exception(monkeypatch):
+    """监听器抛异常不应阻断熔断主流程（best-effort 兜底，记 warning 继续）。"""
+    def _boom(_sig: resilience.DegradationSignal) -> None:
+        raise RuntimeError("listener boom")
+
+    signals: list[resilience.DegradationSignal] = []
+    monkeypatch.setattr(
+        resilience,
+        "_degradation_listeners",
+        [_boom, lambda s: signals.append(s)],
+    )
+    b = resilience.CircuitBreaker(name="OLAP", failure_threshold=1, reset_timeout=10.0)
+    b.record_failure()  # 打开触发 DEGRADED；_boom 抛异常被吞
+    assert len(signals) == 1
+    assert b.state == "open"
+
+
+def test_abstract_store_raises_not_implemented():
+    """抽象基类三个接口方法直接调用应抛 NotImplementedError（引导实现者）。"""
+    store = resilience.CircuitBreakerStore()
+    with pytest.raises(NotImplementedError):
+        store.load_state("k")
+    with pytest.raises(NotImplementedError):
+        store.save_state("k", "OPEN", 1.0, 40.0)
+    with pytest.raises(NotImplementedError):
+        store.try_acquire_probe("k", 5.0)
+    store.clear_probe("k")  # 有默认空实现（no-op，不抛）
+
+
+def test_redis_store_lazy_client_creation(monkeypatch):
+    """Redis store 首次访问时经 redis.Redis.from_url 懒建客户端，二次复用。"""
+    fake_client = MagicMock()
+    monkeypatch.setattr("redis.Redis.from_url", lambda *a, **k: fake_client)
+    store = resilience.RedisCircuitBreakerStore("redis://test")
+    assert store._client is None
+    assert store._get_client() is fake_client
+    assert store._get_client() is fake_client  # 复用不新建
+
+
+def test_redis_store_clear_probe():
+    fake = MagicMock()
+    store = resilience.RedisCircuitBreakerStore("redis://test")
+    store._client = fake
+    store.clear_probe("OLAP:olap")
+    fake.delete.assert_called_once_with("cb:OLAP:olap:probing")
+
+
+def test_init_circuit_breaker_store_with_redis(monkeypatch):
+    """Redis 可用（pool 非空）→ 构建 Redis store 并切换为默认存储。"""
+    original = resilience.get_default_circuit_breaker_store()
+    try:
+        monkeypatch.setattr(resilience.settings, "redis_url", "redis://localhost:6379/0")
+        resilience.init_circuit_breaker_store(object())
+        assert isinstance(
+            resilience.get_default_circuit_breaker_store(), resilience.RedisCircuitBreakerStore
+        )
+    finally:
+        resilience.set_default_circuit_breaker_store(original)
+
+
+def test_init_circuit_breaker_store_redis_init_failure(monkeypatch):
+    """Redis store 构建抛异常 → 降级为 Local（best-effort，不阻断启动）。"""
+    original = resilience.get_default_circuit_breaker_store()
+    try:
+        monkeypatch.setattr(resilience.settings, "redis_url", "redis://localhost:6379/0")
+
+        def _boom(*a: object, **k: object) -> None:
+            raise RuntimeError("redis init boom")
+
+        monkeypatch.setattr(resilience, "RedisCircuitBreakerStore", _boom)
+        resilience.init_circuit_breaker_store(object())
+        assert isinstance(
+            resilience.get_default_circuit_breaker_store(), resilience.LocalCircuitBreakerStore
+        )
+    finally:
+        resilience.set_default_circuit_breaker_store(original)
+
+
+def test_failures_property_reflects_counter():
+    """failures 属性返回当前连续失败次数（实时健康表/看板用）。"""
+    b = resilience.CircuitBreaker(name="OLAP", failure_threshold=3, reset_timeout=10.0)
+    assert b.failures == 0
+    b.record_failure()
+    assert b.failures == 1
+
+
+def test_shared_state_handles_none_store(monkeypatch):
+    """默认存储为 None 时，共享态读写/探针锁/释放均安全 no-op（不抛）。"""
+    b = resilience.CircuitBreaker(
+        name="OLAP", dependency_id="olap", failure_threshold=1, reset_timeout=10.0
+    )
+    monkeypatch.setattr(resilience, "_DEFAULT_STORE", None)
+    assert b._load_shared_state() is None
+    b._save_shared_state("OPEN", 1.0)  # no-op
+    assert b._acquire_probe_lock() is True  # 无 store 默认放行（安全侧）
+    b._release_probe_lock()  # no-op
+
+
+def test_load_shared_state_cache_hit():
+    """共享态本地缓存 TTL 内命中，不重复调用 store.load_state。"""
+    store = MagicMock()
+    store.load_state.return_value = ("OPEN", 1.0)
+    b = resilience.CircuitBreaker(name="OLAP", dependency_id="olap", store=store)
+    assert b._load_shared_state() == ("OPEN", 1.0)
+    store.load_state.assert_called_once()
+    # 缓存命中（TTL 内）→ 不再调用 store
+    assert b._load_shared_state() == ("OPEN", 1.0)
+    assert store.load_state.call_count == 1
+
+
+def test_load_shared_state_exception_falls_back():
+    """store.load_state 抛异常 → 返回 None（best-effort 降级），不阻断。"""
+    store = MagicMock()
+    store.load_state.side_effect = RuntimeError("redis down")
+    b = resilience.CircuitBreaker(name="OLAP", dependency_id="olap", store=store)
+    assert b._load_shared_state() is None
+
+
+def test_save_shared_state_exception_best_effort():
+    """store.save_state 抛异常 → 静默降级（记 warning，不抛）。"""
+    store = MagicMock()
+    store.save_state.side_effect = RuntimeError("redis down")
+    b = resilience.CircuitBreaker(name="OLAP", dependency_id="olap", store=store)
+    b._save_shared_state("OPEN", 1.0)  # 不抛
+
+
+def test_acquire_probe_lock_exception_falls_open():
+    """store.try_acquire_probe 抛异常 → 默认放行（安全侧，避免永久拒绝）。"""
+    store = MagicMock()
+    store.try_acquire_probe.side_effect = RuntimeError("redis down")
+    b = resilience.CircuitBreaker(name="OLAP", dependency_id="olap", store=store)
+    assert b._acquire_probe_lock() is True
+
+
+def test_release_probe_lock_exception_best_effort():
+    """store.clear_probe 抛异常 → 静默降级，不抛。"""
+    store = MagicMock()
+    store.clear_probe.side_effect = RuntimeError("redis down")
+    b = resilience.CircuitBreaker(name="OLAP", dependency_id="olap", store=store)
+    b._release_probe_lock()  # 不抛
+
+
+def test_tcp_alive_unreachable_returns_false(monkeypatch):
+    """TCP 探活不可达 → False（OSError 兜底，不抛异常）。"""
+    def _boom(*a: object, **k: object) -> None:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(resilience.socket, "create_connection", _boom)
+    assert resilience._tcp_alive("127.0.0.1", 9, timeout=0.1) is False
+
+
+def test_parse_host_port_no_match():
+    """连接串无协议/端口 → None（调用方视依赖未启用）。"""
+    assert resilience._parse_host_port("not-a-url") is None
+    assert resilience._parse_host_port("localhost") is None
+
+
+# ---------------------------------------------------------------------------
+# 补覆盖：冷却期拒绝、TCP 探活成功、host:port 解析、可选依赖探活遍历
+# ---------------------------------------------------------------------------
+
+
+def test_breaker_rejects_while_open_before_reset(captured):
+    """本地已打开且冷却未到 → allow() 拒绝（不进入半开探测）。"""
+    b = resilience.CircuitBreaker(name="OLAP", failure_threshold=1, reset_timeout=30.0)
+    b.record_failure()  # 打开
+    assert b.state == "open"
+    assert b.allow() is False  # 冷却 30s 未到 → 拒绝
+
+
+def test_tcp_alive_reachable_returns_true(monkeypatch):
+    """TCP 探活可达 → True。"""
+
+    class _FakeSock:
+        def __enter__(self) -> _FakeSock:
+            return self
+
+        def __exit__(self, *a: object) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        resilience.socket, "create_connection", lambda *a, **k: _FakeSock()
+    )
+    assert resilience._tcp_alive("127.0.0.1", 9, timeout=0.1) is True
+
+
+def test_parse_host_port_parses():
+    """连接串成功解析 host:port（支持 bolt/http/mysql 等 scheme）。"""
+    assert resilience._parse_host_port("bolt://neo4j:7687") == ("neo4j", 7687)
+    assert resilience._parse_host_port("http://localhost:19200") == ("localhost", 19200)
+
+
+def test_optional_dependency_status(monkeypatch):
+    """探活可选依赖：未配置跳过、解析失败记 False、成功记 True。"""
+    monkeypatch.setattr(resilience.settings, "neo4j_url", "bolt://neo4j:7687")
+    monkeypatch.setattr(resilience.settings, "es_url", "http://es:9200")
+    monkeypatch.setattr(resilience.settings, "olap_url", "")  # 未配置 → 跳过
+
+    def _fake_tcp(host: str, port: int, timeout: float = 0.5) -> bool:
+        return host != "neo4j"  # neo4j 不可达，es 可达
+
+    monkeypatch.setattr(resilience, "_tcp_alive", _fake_tcp)
+    status = resilience.optional_dependency_status()
+    assert status == {"neo4j": False, "elasticsearch": True}

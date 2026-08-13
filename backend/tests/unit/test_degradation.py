@@ -217,27 +217,6 @@ class TestFireAndForget:
         # 未执行的协程显式关闭，避免 unawaited coroutine 告警
         captured[0].close()
 
-
-def test_handle_circuit_signal_uses_real_dependency_id(monkeypatch):
-    calls: list = []
-    monkeypatch.setattr(degradation, "fire_degradation_event", lambda *a, **k: calls.append((a, k)))
-    sig = DegradationSignal(
-        "OLAP", "DEGRADED", "circuit_open", "OPEN", 3, 1.0, dependency_id="olap-x"
-    )
-    degradation.handle_circuit_signal(sig)
-    args, _ = calls[0]
-    assert args[1] == "olap-x"  # 真实实例 id 优先于 type.lower()
-
-
-def test_handle_circuit_signal_falls_back_to_type_lower(monkeypatch):
-    calls: list = []
-    monkeypatch.setattr(degradation, "fire_degradation_event", lambda *a, **k: calls.append((a, k)))
-    # dependency_id 缺省空串 -> 回退 dependency_type.lower()（兼容单实例依赖）
-    sig = DegradationSignal("GRAPH", "DEGRADED", "circuit_open", "OPEN", 3, 1.0)
-    degradation.handle_circuit_signal(sig)
-    args, _ = calls[0]
-    assert args[1] == "graph"
-
     async def test_schedule_persist_creates_task_and_cleans_up(self):
         done: list[int] = []
 
@@ -260,6 +239,27 @@ def test_handle_circuit_signal_falls_back_to_type_lower(monkeypatch):
         degradation._schedule_persist(c)
         assert not degradation._in_flight_tasks
         c.close()  # 显式关闭，避免 unawaited coroutine 告警
+
+
+def test_handle_circuit_signal_uses_real_dependency_id(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(degradation, "fire_degradation_event", lambda *a, **k: calls.append((a, k)))
+    sig = DegradationSignal(
+        "OLAP", "DEGRADED", "circuit_open", "OPEN", 3, 1.0, dependency_id="olap-x"
+    )
+    degradation.handle_circuit_signal(sig)
+    args, _ = calls[0]
+    assert args[1] == "olap-x"  # 真实实例 id 优先于 type.lower()
+
+
+def test_handle_circuit_signal_falls_back_to_type_lower(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(degradation, "fire_degradation_event", lambda *a, **k: calls.append((a, k)))
+    # dependency_id 缺省空串 -> 回退 dependency_type.lower()（兼容单实例依赖）
+    sig = DegradationSignal("GRAPH", "DEGRADED", "circuit_open", "OPEN", 3, 1.0)
+    degradation.handle_circuit_signal(sig)
+    args, _ = calls[0]
+    assert args[1] == "graph"
 
 
 class _ScalarResult:
@@ -534,3 +534,49 @@ class TestUpdateDependencyHealthBoundary:
         update_part = sql.split("ON DUPLICATE KEY UPDATE", 1)[1]
         # 未显式提供 last_check_at 时，更新子句仍应包含（刷新最近探测时间）
         assert "last_check_at" in update_part
+
+    async def test_preserves_optional_telemetry_on_update(self, patched):
+        """显式提供 latency/error_rate/metadata 时，UPSERT 应写入这些遥测字段。"""
+        from sqlalchemy.dialects import mysql as mysql_dialect
+
+        _, session = patched
+        await degradation.update_dependency_health(
+            "OLAP",
+            "olap",
+            status="DEGRADED",
+            circuit_state="OPEN",
+            latency_p95_ms=123,
+            error_rate_pct=0.05,
+            metadata={"threshold": 0.05},
+        )
+        stmt = session.execute.call_args_list[0][0][0]
+        sql = str(stmt.compile(dialect=mysql_dialect.dialect()))
+        update_part = sql.split("ON DUPLICATE KEY UPDATE", 1)[1]
+        assert "latency_p95_ms" in update_part
+        assert "error_rate_pct" in update_part
+        assert "meta" in update_part
+
+    async def test_fire_degradation_event_with_metadata(self, monkeypatch, patched):
+        """fire_degradation_event 携带 metadata 时应透传到 update_dependency_health。"""
+        captured: list = []
+        monkeypatch.setattr(degradation, "_schedule_persist", lambda coro: captured.append(coro))
+        degradation.fire_degradation_event(
+            "OLAP", "olap", "DEGRADED", "reason", metadata={"threshold": 0.05}
+        )
+        assert len(captured) == 1
+        await captured[0]  # 执行调度协程 → 覆盖 _persist 的 metadata 透传分支
+
+
+class TestSchedulePersistCancelled:
+    async def test_cancelled_task_cleans_up(self):
+        """被取消的调度任务 → _on_done 走 cancelled 分支，任务从集合移除。"""
+        async def coro():
+            await asyncio.sleep(1)
+
+        degradation._schedule_persist(coro())
+        tasks = list(degradation._in_flight_tasks)
+        assert len(tasks) == 1
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        assert not degradation._in_flight_tasks

@@ -81,3 +81,99 @@ async def test_list_audit_logs_with_filters(audit_client: httpx.AsyncClient) -> 
     assert resp.status_code == 200
     assert resp.json()["data"]["page"] == 1
     assert resp.json()["data"]["page_size"] == 20
+
+
+class TestClientIp:
+    """client_ip 分支覆盖（audit.py 15-22）：None 请求 / X-Forwarded-For 拆分 / 直连地址。"""
+
+    def test_client_ip_none_request(self) -> None:
+        """request 为 None 时返回空串。"""
+        from app.core.audit import client_ip
+
+        assert client_ip(None) == ""
+
+    def test_client_ip_single_forwarded(self) -> None:
+        """X-Forwarded-For 单 IP 直接返回。"""
+        from app.core.audit import client_ip
+
+        req = MagicMock()
+        req.headers = {"X-Forwarded-For": "203.0.113.7"}
+        assert client_ip(req) == "203.0.113.7"
+
+    def test_client_ip_multi_forwarded_takes_first(self) -> None:
+        """X-Forwarded-For 多代理链取首个 IP 并去空白。"""
+        from app.core.audit import client_ip
+
+        req = MagicMock()
+        req.headers = {"X-Forwarded-For": "203.0.113.9, 10.0.0.1, 192.168.1.1"}
+        assert client_ip(req) == "203.0.113.9"
+
+    def test_client_ip_no_forwarded_uses_direct(self) -> None:
+        """无 X-Forwarded-For 时回退直连地址。"""
+        from app.core.audit import client_ip
+
+        req = MagicMock()
+        req.headers = {}
+        req.client = MagicMock()
+        req.client.host = "127.0.0.1"
+        assert client_ip(req) == "127.0.0.1"
+
+    def test_client_ip_no_forwarded_no_client(self) -> None:
+        """既无 X-Forwarded-For 也无 client 时返回空串。"""
+        from app.core.audit import client_ip
+
+        req = MagicMock()
+        req.headers = {}
+        req.client = None
+        assert client_ip(req) == ""
+
+
+class TestWriteAudit:
+    """write_audit 落库断言（audit.py 25-48）：仅 add、不 commit、字段完整。"""
+
+    async def test_write_audit_adds_entry_with_all_fields(self) -> None:
+        from app.core.audit import write_audit
+
+        session = MagicMock()
+        await write_audit(
+            session,
+            actor_id=7,
+            action="CONFLICT_ARBITRATE",
+            entity_type="conflict",
+            entity_id="conflict-42",
+            detail={"decision": "alias", "canonical": "c"},
+            ip="203.0.113.7",
+            trace_id="trace-abc",
+            pii_access=True,
+        )
+        session.add.assert_called_once()
+        entry = session.add.call_args.args[0]
+        assert isinstance(entry, AuditLog)
+        assert entry.actor_id == 7
+        assert entry.action == "CONFLICT_ARBITRATE"
+        assert entry.entity_type == "conflict"
+        assert entry.entity_id == "conflict-42"
+        assert entry.detail_json == {"decision": "alias", "canonical": "c"}
+        assert entry.ip == "203.0.113.7"
+        assert entry.trace_id == "trace-abc"
+        assert entry.pii_access is True
+        # 仅 add，不 commit（由调用方控制事务边界）
+        session.commit.assert_not_called()
+
+    async def test_write_audit_defaults(self) -> None:
+        from app.core.audit import write_audit
+
+        session = MagicMock()
+        await write_audit(
+            session,
+            actor_id=1,
+            action="CREATE",
+            entity_type="metric_definition",
+            entity_id=99,
+            detail={},
+        )
+        entry = session.add.call_args.args[0]
+        assert entry.entity_id == "99"  # int 转为 str
+        assert entry.ip == ""
+        assert entry.trace_id == ""
+        assert entry.pii_access is False

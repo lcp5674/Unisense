@@ -75,3 +75,10 @@ class TestDescribeAudit:
             "BULK_DEPRECATE", "metric_definition", {"metric_codes": ["a", "b"]}
         )
         assert "批量废弃了指标定义" in desc
+
+    def test_summarize_detail_list_value(self) -> None:
+        """detail 中命中摘要键的 list/tuple 值应转为逗号串（对齐 210 行转换分支）。"""
+        desc = describe_audit(
+            "LINEAGE_PARSE", "lineage_edge", {"table_edges": ["a", "b"]}
+        )
+        assert "表级血缘边=a,b" in desc

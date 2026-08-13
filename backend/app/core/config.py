@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     neo4j_password: str = ""
 
     # ---- Elasticsearch ----
-    es_url: str = "http://localhost:9200"
+    # 默认 19200：docker-compose 已将 ES 避让到宿主 19200（避开本机 9200 占用）。
+    es_url: str = "http://localhost:19200"
     es_username: str = ""
     es_password: str = ""
     # ES 客户端请求超时（秒）：避免慢/挂的 ES 阻塞就绪探针与调用方。工业级容错下限。

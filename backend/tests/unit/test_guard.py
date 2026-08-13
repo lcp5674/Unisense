@@ -93,3 +93,36 @@ class TestGuardAgainstInjection:
         request.json = AsyncMock()
         await guard_against_injection(request)
         request.json.assert_not_called()
+
+
+class TestScanDeep:
+    """_scan_deep 递归扫描分支（深度截断 / list 嵌套 / dict 嵌套）。"""
+
+    def test_deep_nested_beyond_max_depth_returns_false(self) -> None:
+        from app.core.guard import _scan_deep
+
+        # 深度 0 → 用 max_depth=0 使任意非空深度立即截断返回 False
+        assert _scan_deep({"a": {"b": {"c": "value"}}}, depth=1, max_depth=0) is False
+
+    def test_list_nested_injection_detected(self) -> None:
+        from app.core.guard import _scan_deep
+
+        assert _scan_deep(["normal", "a' or '1'='1"]) is True
+
+    def test_list_plain_values_not_suspicious(self) -> None:
+        from app.core.guard import _scan_deep
+
+        assert _scan_deep(["sales", "gmv", "amount"]) is False
+
+    def test_dict_nested_injection_detected(self) -> None:
+        from app.core.guard import _scan_deep
+
+        assert _scan_deep({"filters": [{"expr": "x = 1; drop table t"}]}) is True
+
+    def test_scalar_types_not_suspicious(self) -> None:
+        from app.core.guard import _scan_deep
+
+        assert _scan_deep(42) is False
+        assert _scan_deep(3.14) is False
+        assert _scan_deep(None) is False
+        assert _scan_deep(True) is False
