@@ -117,7 +117,7 @@ modules:
     pr: ""
     owner: ""
     updated: "2026-08-12"
-    note: "工业级整改（2026-08-12 重新 implemented）：深度审查38项缺陷(S-01~S-38,综合评分57.0/100)全部修复——P0×5:状态机独立模块(6态10跃迁MetricStateMachine)+非法跃迁拦截、破坏性变更走PENDING_VERSION(14天确认期+延期+超时默认接受)、依赖校验DFS三色标记环检测、冲突预检命名规范(4段+保留词)、API路径统一(metric-definitions前缀)。P1×9:metric_code严格校验(4段式)、双写事件(Arq重试+stale标记)、下游通知、非PUBLISHED禁止废弃、发布原子化(单事务)、紧急发布(跳REVIEW不跳PII门禁)、五维健康度评分引擎(HealthScorer)、dashboard单次CASE WHEN聚合SQL、API层写ORM消除。P2+P3:缓存键含版本号+pipeline+record_success复位、LIKE参数化转义、模板Schema校验(MetricTemplateCreateRequest)、assert替换为BusinessError。新增:state_machine.py/dependency_checker.py/conflict_precheck.py/pending_version_manager.py/metric_version.py/metric_health.py/health_scorer.py/semantic_tasks.py+4个Arq定时任务+7个新Schema+4个新API端点(emergency-publish/health/compare/batch-register)+dashboard重构(调repository聚合)+消费指南重构(调service+缓存)+模板Schema校验+review_compliance pii_flag门禁。新增测试:test_state_machine/test_dependency_checker/test_pending_version/test_conflict_precheck/test_health_scorer/test_semantic_chaos。迁移:0019_pending_version_confirmation。"
+    note: "工业级整改（2026-08-12 重新 implemented）：深度审查38项缺陷(S-01~S-38,综合评分57.0/100)全部修复——P0×5:状态机独立模块(6态10跃迁MetricStateMachine)+非法跃迁拦截、破坏性变更走PENDING_VERSION(14天确认期+延期+超时默认接受)、依赖校验DFS三色标记环检测、冲突预检命名规范(4段+保留词)、API路径统一(metric-definitions前缀)。P1×9:metric_code严格校验(4段式)、双写事件(Arq重试+stale标记)、下游通知、非PUBLISHED禁止废弃、发布原子化(单事务)、紧急发布(跳REVIEW不跳PII门禁)、五维健康度评分引擎(HealthScorer)、dashboard单次CASE WHEN聚合SQL、API层写ORM消除。P2+P3:缓存键含版本号+pipeline+record_success复位、LIKE参数化转义、模板Schema校验(MetricTemplateCreateRequest)、assert替换为BusinessError。新增:state_machine.py/dependency_checker.py/conflict_precheck.py/pending_version_manager.py/metric_version.py/metric_health.py/health_scorer.py/semantic_tasks.py+4个Arq定时任务+7个新Schema+4个新API端点(emergency-publish/health/compare/batch-register)+dashboard重构(调repository聚合)+消费指南重构(调service+缓存)+模板Schema校验+review_compliance pii_flag门禁。新增测试:test_state_machine/test_dependency_checker/test_pending_version/test_conflict_precheck/test_health_scorer/test_semantic_chaos。迁移:0019_pending_version_confirmation。校验降级与契约修复（2026-08-13）：_validate_domain_active/_validate_dict_fields 改为条件校验（subject_domain/system_dict 未配置时放行、已配置但停用拦截、查询异常 best-effort 放行）——消除迁移 0025/0026 空表导致的存量指标创建全阻断；前后端契约修复：submit-review→/submit、review→/approve+/reject 分流、deprecate body 化、consumption-guide 改 metric_code；审计/口径 SQL 模式/数据表关联已中文化。core 覆盖率 91%（guard 88/logging·middleware·eventbus·degradation·metrics 100）；全量 1004 unit / ruff 0 / mypy 0(170 文件)。"
 
   conflict:
     fr: [FR-09]
@@ -215,8 +215,8 @@ modules:
     verified_at: "2026-08-09"
     pr: ""
     owner: ""
-    updated: "2026-08-12"
-    note: "生产级补强（2026-08-12）：OLAP 执行器（olap_executor 统一方言/直连 Doris/StarRocks、结果封装、不可用降级 503）、分布式限流（rate_limiter Redis 令牌桶 + InMemory 降级 + 多副本一致，429 限流头）、查询链路（count 页、缓存、防注入）。端到端实跑（2026-08-12，docker 容器）：dry-run 200 / OLAP 未配置降级 503 DEPENDENCY_DEGRADED_ENGINE / 越权三层拦截（白名单外 FORBIDDEN_METRIC、跨域 FORBIDDEN_DOMAIN、非法密钥 401）/ QPS 滑动窗口限流 429 retry_after / 收藏增删查 / consume.api_client.create 审计留痕全部验证通过；维度标识符纵深防御（未声明维度拒绝 FORBIDDEN_DIMENSION，execute_query 与 dry-run 双路径）。原 p95≈1.73s 超契约问题随执行器落地缓解；本地 Docker MySQL 往返非逻辑回归。门禁：667 unit / ruff 0 / mypy 0(147 文件)。提交 9603002。"
+    updated: "2026-08-13"
+    note: "生产级补强（2026-08-12）：OLAP 执行器（olap_executor 统一方言/直连 Doris/StarRocks、结果封装、不可用降级 503）、分布式限流（rate_limiter Redis 令牌桶 + InMemory 降级 + 多副本一致，429 限流头）、查询链路（count 页、缓存、防注入）。端到端实跑（2026-08-12，docker 容器）：dry-run 200 / OLAP 未配置降级 503 DEPENDENCY_DEGRADED_ENGINE / 越权三层拦截（白名单外 FORBIDDEN_METRIC、跨域 FORBIDDEN_DOMAIN、非法密钥 401）/ QPS 滑动窗口限流 429 retry_after / 收藏增删查 / consume.api_client.create 审计留痕全部验证通过；维度标识符纵深防御（未声明维度拒绝 FORBIDDEN_DIMENSION，execute_query 与 dry-run 双路径）。原 p95≈1.73s 超契约问题随执行器落地缓解；本地 Docker MySQL 往返非逻辑回归。门禁：667 unit / ruff 0 / mypy 0(147 文件)。提交 9603002。Bearer 消费方鉴权（2026-08-13）：get_consume_client 新增 Authorization Bearer consume JWT 分支（ConsumeService.authenticate_consume_token 校验 role=consume + sub=client_id），修复前端 QueryWorkspace 签发令牌后仍 401 的断链；X-Api-Key 兼容保留。端到端实测：纯 Bearer consume JWT dry-run OK / 非 consume 角色 Bearer 401 拒绝 / 伪造 token 401。提交 5ef46cc。"
     post_verify_review:
       standard: "DEV_GUIDE §6.3 双视角漏洞审查 + §12.6 消费层契约"
       performed_at: "2026-08-09"
@@ -524,3 +524,63 @@ p2_p3_enhancements:
       desc: "docker-compose.yml MinIO + Doris DDL"
     - id: T080
       desc: "CircuitBreaker 集成到 OLAPExecutor + Neo4j 调用链"
+
+  subject_domain:
+    fr: [FR-001, FR-002, FR-003, FR-004, FR-008, FR-010, FR-011, FR-013]
+    td_section: "§12.subject_domain"
+    status: implemented
+    gateways_passed: [lint, unit]
+    perf_contract: "域树查询 ≤100ms p95"
+    evidence_path: "backend/tests/unit/test_subject_domain_service.py"
+    implemented_at: "2026-08-13"
+    tasks:
+      - id: SD-001
+        desc: "SubjectDomain ORM模型 + Alembic 0026迁移"
+        files: ["backend/app/models/subject_domain.py", "backend/alembic/versions/0026_subject_domain_system_dict.py"]
+      - id: SD-002
+        desc: "主题域服务层(repository/schemas/service) + API端点8个"
+        files: ["backend/app/services/subject_domain/", "backend/app/api/subject_domain.py"]
+      - id: SD-003
+        desc: "前端主题域管理页(树组件+详情面板+CRUD弹窗)"
+        files: ["frontend/src/pages/SubjectDomain.tsx"]
+
+  system_dict:
+    fr: [FR-005, FR-006, FR-007, FR-009, FR-014]
+    td_section: "§12.system_dict"
+    status: implemented
+    gateways_passed: [lint, unit]
+    perf_contract: "字典查询 ≤50ms p95"
+    evidence_path: "backend/tests/unit/test_system_dict_service.py"
+    implemented_at: "2026-08-13"
+    tasks:
+      - id: DICT-001
+        desc: "SystemDict ORM模型 + Alembic 0026迁移"
+        files: ["backend/app/models/system_dict.py", "backend/alembic/versions/0026_subject_domain_system_dict.py"]
+      - id: DICT-002
+        desc: "系统字典服务层(repository/schemas/service) + API端点8个"
+        files: ["backend/app/services/system_dict/", "backend/app/api/system_dict.py"]
+      - id: DICT-003
+        desc: "前端字典管理页(Tab切换+表格CRUD)"
+        files: ["frontend/src/pages/SystemDict.tsx"]
+      - id: DICT-004
+        desc: "初始化seed脚本(6域+10类字典项)"
+        files: ["backend/scripts/seed_domains_dicts.py"]
+
+  auto_fill:
+    fr: [FR-010, FR-011, FR-016]
+    td_section: "§12.auto_fill"
+    status: implemented
+    gateways_passed: [lint, unit]
+    perf_contract: "auto-suggest ≤200ms p95"
+    evidence_path: "backend/tests/unit/test_auto_fill.py"
+    implemented_at: "2026-08-13"
+    tasks:
+      - id: AF-001
+        desc: "自动推断引擎(auto_fill.py纯函数+编码4段生成+格式校验)"
+        files: ["backend/app/services/semantic/auto_fill.py"]
+      - id: AF-002
+        desc: "auto-suggest API端点 + MetricService字典校验集成"
+        files: ["backend/app/api/metrics.py", "backend/app/services/semantic/service.py"]
+      - id: AF-003
+        desc: "前端注册页重构(级联域选择+字典下拉+半自动编码)"
+        files: ["frontend/src/pages/MetricCreate.tsx"]
