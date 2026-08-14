@@ -23,6 +23,7 @@ import {
   ConsoleSqlOutlined,
   KeyOutlined,
   RobotOutlined,
+  MessageOutlined,
   LineChartOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
@@ -125,6 +126,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     label: "运营中心",
     children: [
       { key: "/observability", label: "可观测中心", icon: <LineChartOutlined /> },
+      { key: "/feedback", label: "用户反馈", icon: <MessageOutlined /> },
       { key: "/tracking-stats", label: "埋点统计", icon: <FundOutlined /> },
     ],
   },

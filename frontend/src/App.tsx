@@ -26,6 +26,7 @@ import { Governance } from "./pages/Governance";
 import { QualityCenter } from "./pages/QualityCenter";
 import { Notifications } from "./pages/Notifications";
 import { Observability } from "./pages/Observability";
+import { FeedbackCenter } from "./pages/FeedbackCenter";
 import { TrackingStats } from "./pages/TrackingStats";
 import { AiAssistant } from "./pages/AiAssistant";
 import { SystemConfig } from "./pages/SystemConfig";
@@ -212,6 +213,7 @@ export default function App() {
             <Route path="/system-config" element={<SystemConfig />} />
             <Route path="/users" element={<UserManagement />} />
             <Route path="/observability" element={<Observability />} />
+            <Route path="/feedback" element={<FeedbackCenter />} />
             <Route path="/tracking-stats" element={<TrackingStats />} />
             <Route path="/data-sources" element={<DataSources />} />
             <Route path="/catalogs" element={<Catalogs />} />
