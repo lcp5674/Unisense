@@ -202,8 +202,8 @@ class DBCatalogListParams(BaseModel):
     entity_type: str | None = None
     sensitivity_level: str | None = None
     keyword: str | None = Field(default=None, max_length=128)
-    # 源状态过滤：active（仅活跃源）/ deleted（仅已删除源）/ None（全部）
-    source_status: str | None = Field(default=None, pattern=r"^(active|deleted)$")
+    # 源状态过滤：active（仅活跃源）/ deleted（仅已删除源）/ all（全部，含已删除源）
+    source_status: str | None = Field(default=None, pattern=r"^(active|deleted|all)$")
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=200)
 
