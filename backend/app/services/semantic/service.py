@@ -490,6 +490,8 @@ class MetricService(BaseService):
             status=params.status,
             metric_tier=params.metric_tier,
             keyword=params.keyword,
+            owner_id=params.owner_id,
+            pii_flag=params.pii_flag,
             sort_by=params.sort_by,
             sort_order=params.sort_order,
             offset=offset,

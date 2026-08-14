@@ -98,6 +98,8 @@ class MetricRepository:
         status: str | None = None,
         metric_tier: str | None = None,
         keyword: str | None = None,
+        owner_id: int | None = None,
+        pii_flag: bool | None = None,
         sort_by: str = "updated_at",
         sort_order: str = "desc",
         offset: int = 0,
@@ -110,6 +112,8 @@ class MetricRepository:
             status: 状态过滤。
             metric_tier: 分级过滤。
             keyword: 关键词搜索（metric_code/name）。
+            owner_id: 责任人（Owner）ID 过滤。
+            pii_flag: PII 过滤（True 仅 PII，False 仅非 PII，None 不过滤）。
             sort_by: 排序字段（白名单映射，防注入）。
             sort_order: 排序方向（asc/desc）。
             offset: 偏移量。
@@ -125,6 +129,10 @@ class MetricRepository:
             conditions.append(Metric.status == status)
         if metric_tier:
             conditions.append(Metric.metric_tier == metric_tier)
+        if owner_id is not None:
+            conditions.append(Metric.owner_id == owner_id)
+        if pii_flag is not None:
+            conditions.append(Metric.pii_flag.is_(pii_flag))
         if keyword:
             # LIKE 通配符转义（对齐 FR-035：% 和 _ 须转义）
             escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

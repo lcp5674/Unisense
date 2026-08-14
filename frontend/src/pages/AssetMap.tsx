@@ -60,8 +60,10 @@ import type {
   AssetChanges,
   AssetEntityDetail,
   AssetHealthSummary,
+  AssetHeatmapMatrix,
   AssetMetricSummary,
   AssetMyAssets,
+  AssetOwnerView,
   AssetPiiOverview,
   AssetSearchItem,
   AssetTableItem,
@@ -614,49 +616,64 @@ function GraphTab() {
   );
 }
 
+// PII 加权系数：风险指数 = 资产数 + PII 数 × 权重（PII 权重越高，风险色越深）
+const PII_RISK_WEIGHT = 3;
+// 风险色阶：0 → 低 → 中 → 高（浅灰 → 黄 → 橙 → 深红），一眼可读"哪个域风险最高"
+const RISK_RANGE = ["#f5f5f5", "#fff7e6", "#ffd591", "#ffa940", "#e8590c", "#a61e1e"];
+
 function HeatmapTab() {
-  const [matrix, setMatrix] = useState<{
-    cells: Array<{ domain: string; sensitivity: string; count: number; pii_count: number }>;
-    columns: string[];
-  } | null>(null);
+  // 双视角：catalog=目录资产（业务域 × 敏感级）/ metric=指标资产（业务域 × PII/内部）
+  const [assetType, setAssetType] = useState<"catalog" | "metric">("catalog");
+  const [matrix, setMatrix] = useState<AssetHeatmapMatrix | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 单元格下钻抽屉（域 × 敏感级 → 该敏感级目录明细）
+  // 单元格下钻抽屉（域 × 敏感级 → 双过滤明细）
   const [drillOpen, setDrillOpen] = useState(false);
   const [drillLoading, setDrillLoading] = useState(false);
   const [drillTitle, setDrillTitle] = useState("");
   const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
-  // 色阶主题（0 值浅灰 + 非 0 由浅到深）
-  const [colorTheme, setColorTheme] = useState<"blue" | "warm" | "green">("blue");
-  const colorRanges: Record<string, string[]> = {
-    blue: ["#f0f0f0", "#d6e4ff", "#1677ff", "#003eb3"],
-    warm: ["#f0f0f0", "#fff1d6", "#ffa940", "#d4380d"],
-    green: ["#f0f0f0", "#d9f7be", "#52c41a", "#135200"],
-  };
 
   useEffect(() => {
+    let cancelled = false;
     async function load() {
       setLoading(true);
       setError(null);
       try {
-        setMatrix(await fetchAssetHeatmapMatrix());
+        const m = await fetchAssetHeatmapMatrix(assetType);
+        if (!cancelled) setMatrix(m);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "加载热力矩阵失败");
+        if (!cancelled) setError(err instanceof Error ? err.message : "加载热力矩阵失败");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
+    setMatrix(null);
     load();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [assetType]);
 
+  // 单元格下钻：目录视角=域+敏感度双过滤；指标视角=域+PII 过滤（修复"点格子明细对不上"bug）
   async function openCellDrill(sensKey: string, domain: string) {
-    setDrillTitle(`${domain} · ${SENSITIVITY_LABEL[sensKey] ?? sensKey} 资产明细`);
+    const sensLabel =
+      assetType === "metric"
+        ? sensKey === "PII"
+          ? "PII"
+          : "内部"
+        : (SENSITIVITY_LABEL[sensKey] ?? sensKey);
+    setDrillTitle(`${domain} · ${sensLabel} 资产明细`);
     setDrillOpen(true);
     setDrillLoading(true);
     setDrillRows([]);
     try {
-      const r = await listCatalogs({ sensitivity_level: sensKey, page_size: 200 });
-      setDrillRows(r.items as unknown as DrillRow[]);
+      if (assetType === "metric") {
+        const r = await listMetrics({ domain, pii_flag: sensKey === "PII", page_size: 100 });
+        setDrillRows(r.items as unknown as DrillRow[]);
+      } else {
+        const r = await listCatalogs({ sensitivity_level: sensKey, domain, page_size: 200 });
+        setDrillRows(r.items as unknown as DrillRow[]);
+      }
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载明细失败");
     } finally {
@@ -668,14 +685,21 @@ function HeatmapTab() {
   if (error) return <Alert type="error" message={error} />;
   if (!matrix) return <Empty description="暂无热力数据" />;
 
+  const isMetric = assetType === "metric";
   const heatData = matrix.cells.map((c) => ({
-    x: SENSITIVITY_LABEL[c.sensitivity] ?? c.sensitivity,
+    x: isMetric
+      ? c.sensitivity === "PII"
+        ? "PII"
+        : "内部"
+      : (SENSITIVITY_LABEL[c.sensitivity] ?? c.sensitivity),
     sensKey: c.sensitivity,
     y: c.domain,
     value: c.count,
     piiCount: c.pii_count,
+    // 风险指数：数量 + PII 加权，色阶表达"风险"而非"数量"
+    risk: c.count + c.pii_count * PII_RISK_WEIGHT,
   }));
-  const maxValue = Math.max(1, ...heatData.map((d) => d.value));
+  const maxRisk = Math.max(1, ...heatData.map((d) => d.risk));
   const domainCount = new Set(heatData.map((d) => d.y)).size;
   const totalCount = heatData.reduce((a, b) => a + b.value, 0);
   const piiTotal = heatData.reduce((a, c) => a + c.piiCount, 0);
@@ -685,22 +709,26 @@ function HeatmapTab() {
   return (
     <div>
       <Card
-        title="敏感分布热力矩阵（业务域 × 敏感级别）"
+        title={
+          isMetric
+            ? "指标风险热力矩阵（业务域 × PII/内部）"
+            : "目录资产风险热力矩阵（业务域 × 敏感级别）"
+        }
         size="small"
         extra={
           <Space wrap>
             <Segmented
               size="small"
-              value={colorTheme}
-              onChange={(v) => setColorTheme(v as "blue" | "warm" | "green")}
+              value={assetType}
+              onChange={(v) => setAssetType(v as "catalog" | "metric")}
               options={[
-                { label: "蓝阶", value: "blue" },
-                { label: "暖阶", value: "warm" },
-                { label: "绿阶", value: "green" },
+                { label: "目录资产", value: "catalog" },
+                { label: "指标资产", value: "metric" },
               ]}
             />
             <span className="muted">
-              共 {totalCount} 项 · PII {piiTotal} 项 · 悬停查看 / 点击单元格下钻明细
+              共 {totalCount} 项 · PII {piiTotal} 项 · 颜色越深=风险越高（PII 加权×
+              {PII_RISK_WEIGHT}）· 点击单元格查看明细
             </span>
           </Space>
         }
@@ -712,15 +740,15 @@ function HeatmapTab() {
             data={heatData}
             xField="x"
             yField="y"
-            colorField="value"
+            colorField="risk"
             height={chartHeight}
             shape="square"
-            // 0 值映射浅灰，非 0 按量由浅到深蓝渐变；域标签过长时省略、悬停看全名
+            // 风险色阶：0 值浅灰，越高越红（PII 加权后风险直觉可视化）
             scale={{
               color: {
                 type: "linear",
-                domain: [0, maxValue],
-                range: colorRanges[colorTheme],
+                domain: [0, maxRisk],
+                range: RISK_RANGE,
               },
             }}
             label={{
@@ -729,7 +757,7 @@ function HeatmapTab() {
               display: (d: { value: number }) => d.value > 0,
             }}
             style={{ inset: 3 }}
-            legend={{ color: { title: "资产数" } }}
+            legend={{ color: { title: "风险指数" } }}
             axis={{
               y: {
                 label: {
@@ -742,6 +770,7 @@ function HeatmapTab() {
               items: [
                 (d: { value: number }) => ({ name: "资产数", value: d.value }),
                 (d: { piiCount: number }) => ({ name: "含 PII", value: d.piiCount }),
+                (d: { risk: number }) => ({ name: "风险指数", value: d.risk }),
               ],
             }}
             onReady={(plot) => {
@@ -760,7 +789,7 @@ function HeatmapTab() {
       <DrillDownDrawer
         open={drillOpen}
         title={drillTitle}
-        columns={CATALOG_COLUMNS}
+        columns={isMetric ? METRIC_COLUMNS : CATALOG_COLUMNS}
         rows={drillRows}
         loading={drillLoading}
         onClose={() => setDrillOpen(false)}
@@ -772,19 +801,14 @@ function HeatmapTab() {
 function OwnerTab() {
   const [ownerId, setOwnerId] = useState<number | undefined>(undefined);
   const [ownerOptions, setOwnerOptions] = useState<Array<{ label: string; value: number }>>([]);
-  const [view, setView] = useState<{
-    owner_id: number;
-    metrics: {
-      total: number;
-      published: number;
-      draft: number;
-      pii_count: number;
-      by_domain: Record<string, number>;
-    };
-    catalogs: { total: number };
-  } | null>(null);
+  const [view, setView] = useState<AssetOwnerView | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 指标统计值下钻抽屉（点击数字 → 该口径的指标明细）
+  const [drillOpen, setDrillOpen] = useState(false);
+  const [drillLoading, setDrillLoading] = useState(false);
+  const [drillTitle, setDrillTitle] = useState("");
+  const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
 
   useEffect(() => {
     fetchAssetGraph({ depth: 1 })
@@ -816,78 +840,147 @@ function OwnerTab() {
       .finally(() => setLoading(false));
   }, [ownerId]);
 
+  // 按口径下钻该责任人的指标明细（status / domain / PII 组合过滤）
+  async function drillMetrics(opts?: { status?: string; domain?: string; piiFlag?: boolean }) {
+    const parts = [
+      opts?.domain ? `域：${opts.domain}` : null,
+      opts?.status ? `状态：${opts.status}` : null,
+      opts?.piiFlag ? "PII" : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    setDrillTitle(`责任人 #${ownerId} 指标明细${parts ? `（${parts}）` : ""}`);
+    setDrillOpen(true);
+    setDrillLoading(true);
+    setDrillRows([]);
+    try {
+      const r = await listMetrics({
+        owner_id: ownerId,
+        ...(opts?.status ? { status: opts.status } : {}),
+        ...(opts?.domain ? { domain: opts.domain } : {}),
+        ...(opts?.piiFlag !== undefined ? { pii_flag: opts.piiFlag } : {}),
+        page_size: 100,
+      });
+      setDrillRows(r.items as unknown as DrillRow[]);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载指标明细失败");
+    } finally {
+      setDrillLoading(false);
+    }
+  }
+
+  // 可点击值渲染：把 Statistic 的 value 包成可点击链接（对齐 OverviewTab 模式）
+  function clickableValue(onClick: () => void) {
+    return (node: ReactNode) => (
+      <a
+        href="#"
+        onClick={(e) => {
+          e.preventDefault();
+          onClick();
+        }}
+        style={{ cursor: "pointer" }}
+      >
+        {node}
+      </a>
+    );
+  }
+
   return (
-    <Card
-      title="责任人视图"
-      size="small"
-      extra={
-        ownerOptions.length > 0 ? (
-          <Select
-            style={{ width: 180 }}
-            value={ownerId}
-            onChange={setOwnerId}
-            options={ownerOptions}
-          />
+    <div>
+      <Card
+        title="责任人视图"
+        size="small"
+        extra={
+          ownerOptions.length > 0 ? (
+            <Select
+              style={{ width: 180 }}
+              value={ownerId}
+              onChange={setOwnerId}
+              options={ownerOptions}
+            />
+          ) : (
+            <span className="muted">从图谱提取责任人…</span>
+          )
+        }
+      >
+        {loading ? (
+          <Spin />
+        ) : error ? (
+          <Alert type="error" message={error} />
+        ) : !view ? (
+          <Empty description="请选择责任人" />
         ) : (
-          <span className="muted">从图谱提取责任人…</span>
-        )
-      }
-    >
-      {loading ? (
-        <Spin />
-      ) : error ? (
-        <Alert type="error" message={error} />
-      ) : !view ? (
-        <Empty description="请选择责任人" />
-      ) : (
-        <Row gutter={[16, 16]}>
-          <Col span={6}>
-            <Statistic title="指标总数" value={view.metrics.total} />
-          </Col>
-          <Col span={6}>
-            <Statistic
-              title="已发布"
-              value={view.metrics.published}
-              valueStyle={{ color: "#2e9e5b" }}
-            />
-          </Col>
-          <Col span={6}>
-            <Statistic title="草稿" value={view.metrics.draft} />
-          </Col>
-          <Col span={6}>
-            <Statistic
-              title="PII 指标"
-              value={view.metrics.pii_count}
-              valueStyle={{ color: "#d64545" }}
-            />
-          </Col>
-          <Col span={12}>
-            <div style={{ marginTop: 8 }}>
-              <span className="muted" style={{ fontSize: 13 }}>
-                域分布
-              </span>
-              <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
-                {Object.entries(view.metrics.by_domain ?? {}).map(([k, v]) => (
-                  <Col span={8} key={k}>
-                    <Statistic title={k} value={v} />
-                  </Col>
-                ))}
-              </Row>
-            </div>
-          </Col>
-          <Col span={12}>
-            <div style={{ marginTop: 8 }}>
-              <span className="muted" style={{ fontSize: 13 }}>
-                目录资产
-              </span>
-              <div style={{ fontSize: 28, fontWeight: 600, fontFamily: "var(--font-display)" }}>
-                {view.catalogs.total}
+          <Row gutter={[16, 16]}>
+            <Col span={6}>
+              <Statistic
+                title="指标总数"
+                value={view.metrics.total}
+                valueRender={clickableValue(() => drillMetrics())}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="已发布"
+                value={view.metrics.published}
+                valueStyle={{ color: "#2e9e5b" }}
+                valueRender={clickableValue(() => drillMetrics({ status: "PUBLISHED" }))}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="草稿"
+                value={view.metrics.draft}
+                valueRender={clickableValue(() => drillMetrics({ status: "DRAFT" }))}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="PII 指标"
+                value={view.metrics.pii_count}
+                valueStyle={{ color: "#d64545" }}
+                valueRender={clickableValue(() => drillMetrics({ piiFlag: true }))}
+              />
+            </Col>
+            <Col span={12}>
+              <div style={{ marginTop: 8 }}>
+                <span className="muted" style={{ fontSize: 13 }}>
+                  域分布（点击查看该域明细）
+                </span>
+                <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+                  {Object.entries(view.metrics.by_domain ?? {}).map(([k, v]) => (
+                    <Col span={8} key={k}>
+                      <Statistic
+                        title={k}
+                        value={v}
+                        valueRender={clickableValue(() => drillMetrics({ domain: k }))}
+                      />
+                    </Col>
+                  ))}
+                </Row>
               </div>
-            </div>
-          </Col>
-        </Row>
-      )}
-    </Card>
+            </Col>
+            <Col span={12}>
+              <div style={{ marginTop: 8 }}>
+                <span className="muted" style={{ fontSize: 13 }}>
+                  目录资产
+                </span>
+                <div style={{ fontSize: 28, fontWeight: 600, fontFamily: "var(--font-display)" }}>
+                  {view.catalogs.total}
+                </div>
+              </div>
+            </Col>
+          </Row>
+        )}
+      </Card>
+      <DrillDownDrawer
+        open={drillOpen}
+        title={drillTitle}
+        columns={METRIC_COLUMNS}
+        rows={drillRows}
+        loading={drillLoading}
+        onClose={() => setDrillOpen(false)}
+      />
+    </div>
   );
 }
 

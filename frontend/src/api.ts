@@ -9,6 +9,7 @@ import {
   AssetClassificationSummary,
   AssetEntityDetail,
   AssetHealthSummary,
+  AssetHeatmapMatrix,
   AssetMetricSummary,
   AssetMyAssets,
   AssetOwnerView,
@@ -338,6 +339,10 @@ export async function listMetrics(params: {
   status?: string;
   metric_tier?: string;
   keyword?: string;
+  /** 责任人（Owner）ID 过滤（资产地图 Owner 视图下钻） */
+  owner_id?: number;
+  /** PII 过滤：true=仅 PII，false=仅非 PII（热力指标视角下钻） */
+  pii_flag?: boolean;
   sort_by?: "updated_at" | "created_at" | "version" | "metric_code" | "name";
   sort_order?: "asc" | "desc";
   page?: number;
@@ -348,6 +353,8 @@ export async function listMetrics(params: {
     status: params.status,
     metric_tier: params.metric_tier,
     keyword: params.keyword,
+    owner_id: params.owner_id,
+    pii_flag: params.pii_flag === undefined ? undefined : String(params.pii_flag),
     sort_by: params.sort_by,
     sort_order: params.sort_order,
     page: params.page ?? 1,
@@ -1779,6 +1786,8 @@ export async function listCatalogs(params?: {
   source_id?: string;
   entity_type?: string;
   sensitivity_level?: string;
+  /** 业务域过滤（经数据源继承）——热力下钻"域+敏感度"双过滤 */
+  domain?: string;
   /** 库名（entity_name 前缀过滤） */
   database?: string;
   keyword?: string;
@@ -1791,6 +1800,7 @@ export async function listCatalogs(params?: {
     source_id: params?.source_id,
     entity_type: params?.entity_type,
     sensitivity_level: params?.sensitivity_level,
+    domain: params?.domain,
     database: params?.database,
     keyword: params?.keyword,
     source_status: params?.source_status,
@@ -1798,6 +1808,11 @@ export async function listCatalogs(params?: {
     page_size: params?.page_size ?? 20,
   });
   return request(`${API_BASE}/catalogs?${qs}`);
+}
+
+/** 按主键取目录实体详情（血缘图谱表节点下钻展示用）。 */
+export async function getCatalogDetail(catalogId: number): Promise<DBCatalog> {
+  return request<DBCatalog>(`${API_BASE}/catalogs/${catalogId}`);
 }
 
 /** 目录去重库名列表（供库名筛选下拉，可随 source_id 联动）。 */
@@ -1961,11 +1976,12 @@ export async function fetchAssetHeatmap(dimension = "domain"): Promise<{
 }
 
 // 二维热力矩阵：业务域 × 敏感级别（真热力图数据源，P3）
-export async function fetchAssetHeatmapMatrix(): Promise<{
-  cells: Array<{ domain: string; sensitivity: string; count: number; pii_count: number }>;
-  columns: string[];
-}> {
-  return request(`${API_BASE}/assetmap/heatmap-matrix`);
+// assetType：catalog=目录资产 / metric=指标资产（指标视角列 = INTERNAL/PII）
+export async function fetchAssetHeatmapMatrix(
+  assetType: "catalog" | "metric" = "catalog",
+): Promise<AssetHeatmapMatrix> {
+  const qs = pageQs({ asset_type: assetType });
+  return request<AssetHeatmapMatrix>(`${API_BASE}/assetmap/heatmap-matrix?${qs}`);
 }
 
 export async function fetchAssetOwnerView(ownerId: number): Promise<AssetOwnerView> {

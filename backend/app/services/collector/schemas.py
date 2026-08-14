@@ -213,6 +213,10 @@ class DBCatalogListParams(BaseModel):
         default=None, max_length=128, description="库名（entity_name 前缀过滤）"
     )
     keyword: str | None = Field(default=None, max_length=128)
+    # 业务域过滤（经数据源继承）：db_catalog 无 domain 列，join DataSource 取 domain
+    domain: str | None = Field(
+        default=None, max_length=128, description="业务域（经数据源继承过滤）"
+    )
     # 源状态过滤：active（仅活跃源）/ deleted（仅已删除源）/ all（全部，含已删除源）
     source_status: str | None = Field(default=None, pattern=r"^(active|deleted|all)$")
     page: int = Field(default=1, ge=1)

@@ -143,9 +143,18 @@ async def get_heatmap_matrix(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
+    asset_type: str = Query(
+        "catalog",
+        pattern="^(catalog|metric)$",
+        description="资产视角：catalog=目录资产 / metric=指标资产",
+    ),
 ) -> Any:
-    """二维热力矩阵：业务域 × 敏感级别资产分布（前端真热力图数据源）。"""
-    data = await AssetMapService(db).heatmap_matrix()
+    """二维热力矩阵：业务域 × 敏感级别资产分布（前端真热力图数据源）。
+
+    catalog 视角聚合 db_catalog（域经数据源继承）；metric 视角聚合指标表
+    （PII / 内部两列）。
+    """
+    data = await AssetMapService(db).heatmap_matrix(asset_type=asset_type)
     return ok(data=data, trace_id=trace_id)
 
 

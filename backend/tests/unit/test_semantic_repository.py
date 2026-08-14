@@ -119,6 +119,26 @@ async def test_list_metrics_applies_filters_and_returns_total():
     assert db.execute.await_count == 2
 
 
+async def test_list_metrics_applies_owner_and_pii_filters():
+    db = _mock_session()
+    m1, m2 = _metric(metric_code="a"), _metric(metric_code="b")
+    db.execute.side_effect = [
+        _result(scalar=2),
+        _result(all_=[m1, m2]),
+    ]
+    repo = MetricRepository(db)
+
+    items, total = await repo.list_metrics(owner_id=7, pii_flag=True, offset=0, limit=10)
+
+    assert total == 2
+    assert items == [m1, m2]
+    # 编译首条 count 语句，验证 owner_id 与 pii_flag 条件已加入
+    stmt = db.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "owner_id" in compiled
+    assert "pii_flag" in compiled
+
+
 # ---------- update_with_optimistic_lock ----------
 
 

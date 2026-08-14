@@ -532,6 +532,31 @@ class TestAggregations:
         assert "GROUP BY" in compiled.upper()
         assert "db_catalog" in compiled.lower()
 
+    async def test_heatmap_matrix_metric_view(self) -> None:
+        """指标视角热力矩阵：按 domain × pii_flag 聚合，列 = INTERNAL/PII。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.all.return_value = [
+            ("sales", True, 3),
+            ("sales", False, 2),
+            ("finance", False, 1),
+        ]
+        s.execute = AsyncMock(return_value=r)
+
+        out = await repo.heatmap_matrix(asset_type="metric")
+
+        assert out["columns"] == ["INTERNAL", "PII"]
+        assert out["cells"] == [
+            {"domain": "sales", "sensitivity": "PII", "count": 3, "pii_count": 3},
+            {"domain": "sales", "sensitivity": "INTERNAL", "count": 2, "pii_count": 0},
+            {"domain": "finance", "sensitivity": "INTERNAL", "count": 1, "pii_count": 0},
+        ]
+        stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "pii_flag" in compiled.lower()
+        assert "metric" in compiled.lower()
+
 
 class TestEscapeLike:
     def test_escapes_wildcards(self) -> None:

@@ -505,4 +505,105 @@ describe("AssetMap", () => {
     await user.click(screen.getByText("finance_cost_sum_d"));
     await waitFor(() => expect(window.location.pathname).toBe("/detail/finance_cost_sum_d"));
   });
+
+  // 触发热力单元格点击（通过 Heatmap onReady 捕获 element:click）
+  function triggerHeatmapCellClick(sensKey: string, domain: string) {
+    expect(typeof heatmapReadyRef.onReady).toBe("function");
+    let cellClick:
+      | ((evt: { data?: { data?: { sensKey?: string; y?: string } } }) => void)
+      | undefined;
+    heatmapReadyRef.onReady?.({
+      on: (name, fn) => {
+        if (name === "element:click") cellClick = fn as typeof cellClick;
+      },
+    });
+    cellClick?.({ data: { data: { sensKey, y: domain } } });
+  }
+
+  it("heatmap switches to metric asset view and refetches", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("热力视图")).toBeInTheDocument());
+    await user.click(screen.getByText("热力视图"));
+    await waitFor(() => expect(fetchAssetHeatmapMatrix).toHaveBeenCalled());
+
+    // 切换到「指标资产」视角 → 应带 assetType=metric 重新请求
+    await user.click(screen.getByText("指标资产"));
+    await waitFor(() =>
+      expect(fetchAssetHeatmapMatrix).toHaveBeenCalledWith(
+        expect.stringMatching(/^metric$/),
+      ),
+    );
+    // 标题随视角更新
+    expect(screen.getByText(/指标风险热力矩阵/)).toBeInTheDocument();
+  });
+
+  it("heatmap cell drill filters by domain + sensitivity (catalog view)", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("热力视图")).toBeInTheDocument());
+    await user.click(screen.getByText("热力视图"));
+    await waitFor(() => expect(fetchAssetHeatmapMatrix).toHaveBeenCalled());
+
+    triggerHeatmapCellClick("PII", "sales");
+
+    // 目录视角：域 + 敏感度双过滤（修复"点格子明细对不上"bug）
+    await waitFor(() =>
+      expect(listCatalogs).toHaveBeenCalledWith(
+        expect.objectContaining({ sensitivity_level: "PII", domain: "sales" }),
+      ),
+    );
+    expect(screen.getByText(/sales · PII 资产明细/)).toBeInTheDocument();
+  });
+
+  it("heatmap metric view cell drill filters by domain + pii_flag", async () => {
+    const user = userEvent.setup();
+    // 指标视角返回 INTERNAL/PII 两列矩阵
+    vi.mocked(fetchAssetHeatmapMatrix).mockResolvedValue({
+      cells: [
+        { domain: "sales", sensitivity: "PII", count: 3, pii_count: 3 },
+        { domain: "sales", sensitivity: "INTERNAL", count: 5, pii_count: 0 },
+      ],
+      columns: ["INTERNAL", "PII"],
+    });
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("热力视图")).toBeInTheDocument());
+    await user.click(screen.getByText("热力视图"));
+    await user.click(screen.getByText("指标资产"));
+    await waitFor(() =>
+      expect(fetchAssetHeatmapMatrix).toHaveBeenCalledWith(expect.stringMatching(/^metric$/)),
+    );
+
+    triggerHeatmapCellClick("PII", "sales");
+
+    // 指标视角：域 + PII 过滤，抽屉用指标列
+    await waitFor(() =>
+      expect(listMetrics).toHaveBeenCalledWith(
+        expect.objectContaining({ domain: "sales", pii_flag: true }),
+      ),
+    );
+    expect(screen.getByText(/sales · PII 资产明细/)).toBeInTheDocument();
+  });
+
+  it("owner view statistic click drills into owner metric list", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("Owner 视图")).toBeInTheDocument());
+    await user.click(screen.getByText("Owner 视图"));
+    // mock 无 owner 节点 → 回退责任人 #1，加载视图
+    await waitFor(() => expect(fetchAssetOwnerView).toHaveBeenCalledWith(1));
+
+    // 点击「已发布」统计值 30 → 按 owner_id + status=PUBLISHED 下钻
+    await user.click(screen.getByText("30"));
+    await waitFor(() =>
+      expect(listMetrics).toHaveBeenCalledWith(
+        expect.objectContaining({ owner_id: 1, status: "PUBLISHED" }),
+      ),
+    );
+    expect(screen.getByText(/责任人 #1 指标明细（状态：PUBLISHED）/)).toBeInTheDocument();
+  });
 });

@@ -488,12 +488,39 @@ class AssetMapRepository:
         ]
         return nodes + field_nodes, edges
 
-    async def heatmap_matrix(self) -> dict[str, Any]:
-        """二维热力矩阵：业务域 × 敏感级别的资产分布（db_catalog 表/视图/字段）。
+    async def heatmap_matrix(self, asset_type: str = "catalog") -> dict[str, Any]:
+        """二维热力矩阵：业务域 × 敏感级别的资产分布。
 
-        域从 ``data_source.domain`` 继承；``columns`` 固定为完整敏感级枚举，
+        Args:
+            asset_type: 资产视角。``catalog``=目录资产（db_catalog 表/视图/字段，
+                域从 ``data_source.domain`` 继承）；``metric``=指标资产
+                （metric.pii_flag → PII / 内部 两列）。
+
+        ``columns`` 固定为完整敏感级枚举（catalog）或 PII/内部（metric），
         保证前端坐标轴稳定（空矩阵也返回全轴）。
         """
+        if asset_type == "metric":
+            rows = (
+                await self._session.execute(
+                    select(
+                        Metric.domain,
+                        Metric.pii_flag,
+                        func.count().label("total"),
+                    )
+                    .where(Metric.deleted_at.is_(None))
+                    .group_by(Metric.domain, Metric.pii_flag)
+                )
+            ).all()
+            cells = [
+                {
+                    "domain": r[0],
+                    "sensitivity": "PII" if r[1] else "INTERNAL",
+                    "count": r[2],
+                    "pii_count": r[2] if r[1] else 0,
+                }
+                for r in rows
+            ]
+            return {"cells": cells, "columns": ["INTERNAL", "PII"]}
         rows = (
             await self._session.execute(
                 select(
