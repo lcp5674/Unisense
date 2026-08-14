@@ -381,6 +381,67 @@ class TestGraphFromMysql:
         assert "metric:sales_pii" in ids
         assert "table:sales.ods" in ids
 
+    async def test_depth_prunes_far_tables(self) -> None:
+        """depth 收敛：从指标 BFS 按层展开，depth=1 只保留直连表，剔除中间表。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_metrics = MagicMock()
+        r_metrics.all.return_value = [self._metric("sales_gmv", "sales")]
+        r_catalog = MagicMock()
+        r_catalog.all.return_value = [
+            self._catalog("sales.ods"),
+            self._catalog("sales.dwd"),
+            self._catalog("sales.ads"),
+        ]
+        # 链：metric ← ads ← dwd ← ods（血缘汇聚到指标）
+        r_edges = MagicMock()
+        r_edges.all.return_value = [
+            self._edge("table:sales.ads", "metric:sales_gmv"),
+            self._edge("table:sales.dwd", "table:sales.ads"),
+            self._edge("table:sales.ods", "table:sales.dwd"),
+        ]
+        s.execute = AsyncMock(
+            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+        )
+
+        nodes, edges = await repo.graph_from_mysql(
+            domain="sales", pii_only=False, depth=1
+        )
+
+        ids = [n["id"] for n in nodes]
+        assert "metric:sales_gmv" in ids
+        assert "table:sales.ads" in ids  # 直连
+        assert "table:sales.dwd" not in ids  # 1 层外
+        assert "table:sales.ods" not in ids
+        assert all(e["target"] in ids or e["source"] in ids for e in edges)
+        assert len(edges) == 1  # 仅 metric↔ads 两端都在
+
+    async def test_depth_none_keeps_all(self) -> None:
+        """depth=None（默认）不过滤：全量返回。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_metrics = MagicMock()
+        r_metrics.all.return_value = [self._metric("sales_gmv", "sales")]
+        r_catalog = MagicMock()
+        r_catalog.all.return_value = [
+            self._catalog("sales.ads"),
+            self._catalog("sales.dwd"),
+        ]
+        r_edges = MagicMock()
+        r_edges.all.return_value = [
+            self._edge("table:sales.ads", "metric:sales_gmv"),
+            self._edge("table:sales.dwd", "table:sales.ads"),
+        ]
+        s.execute = AsyncMock(
+            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+        )
+
+        nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
+
+        ids = [n["id"] for n in nodes]
+        assert "table:sales.dwd" in ids
+        assert len(edges) == 2
+
 
 class TestListTablesAndOrphans:
     async def test_list_tables_with_filters(self) -> None:

@@ -23,6 +23,45 @@ from app.models.metric import Metric
 from app.models.user import User
 
 
+def _prune_graph_by_depth(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, str]],
+    depth: int,
+    seed_nodes: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """从指标（seed）出发沿血缘边 BFS ``depth`` 层，收敛图谱规模。
+
+    血缘是下游汇聚到指标的有向图：指标作为 BFS 起点向上游逐层展开，
+    ``depth=1`` 只保留指标与其直连表，``depth=2`` 再展开一层中间表。
+    返回 (收敛后节点, 两端均在被保留节点内的边)。
+    """
+    seed_ids = {n["id"] for n in seed_nodes}
+    adj: dict[str, set[str]] = {}
+    for e in edges:
+        adj.setdefault(e["source"], set()).add(e["target"])
+        adj.setdefault(e["target"], set()).add(e["source"])
+
+    # BFS 无向遍历（血缘上下游都算邻居）；visited 防环
+    frontier = set(seed_ids)
+    visited = set(seed_ids)
+    for _ in range(depth):
+        nxt: set[str] = set()
+        for nid in frontier:
+            nxt |= adj.get(nid, set())
+        nxt -= visited
+        if not nxt:
+            break
+        visited |= nxt
+        frontier = nxt
+
+    kept_ids = set(visited)
+    pruned_nodes = [n for n in nodes if n["id"] in kept_ids]
+    pruned_edges = [
+        e for e in edges if e["source"] in kept_ids and e["target"] in kept_ids
+    ]
+    return pruned_nodes, pruned_edges
+
+
 class AssetMapRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -422,7 +461,7 @@ class AssetMapRepository:
         return nodes, domain_by_id
 
     async def graph_from_mysql(
-        self, domain: str | None, pii_only: bool
+        self, domain: str | None, pii_only: bool, depth: int | None = None
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """从 MySQL lineage_edge + metric + db_catalog 拼接图谱数据。
 
@@ -431,6 +470,9 @@ class AssetMapRepository:
         - 边：仅保留至少一端属于展示节点的边（**精确 IN 集合匹配**，消除 ``contains``
           子串误匹配）。
         - PII 视图：仅指标/表节点（字段级 PII 无法从血缘边判定，故不展示字段）。
+        - ``depth``：从指标出发沿血缘边 BFS 收敛（None=全量不过滤）。值越小图越聚焦：
+          depth=1 仅指标与其直连表，depth=2 展开一层中间表，以此类推——避免
+          "节点很多时一团乱麻"，同时保留血缘语义（指标是下游汇聚点）。
         """
         metric_nodes, allowed = await self._graph_metric_nodes(domain, pii_only)
         lineage_tables = await self._graph_lineage_table_names()
@@ -486,6 +528,11 @@ class AssetMapRepository:
             }
             for row in edge_rows
         ]
+        if depth is not None and depth > 0:
+            nodes, edges = _prune_graph_by_depth(
+                nodes + field_nodes, edges, depth, metric_nodes
+            )
+            return nodes, edges
         return nodes + field_nodes, edges
 
     async def heatmap_matrix(self, asset_type: str = "catalog") -> dict[str, Any]:

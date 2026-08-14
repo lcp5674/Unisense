@@ -53,6 +53,7 @@ import {
   fetchAssetSummary,
   fetchAssetTables,
   listCatalogs,
+  listDomainTree,
   listMetrics,
 } from "../api";
 import type {
@@ -384,7 +385,8 @@ function GraphTab() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchAssetGraph({ domain, depth: 3, pii_only: piiOnly });
+      // depth=2：从指标出发 2 层收敛，避免 500+ 节点挤成一团（depth 越大展开越多）
+      const data = await fetchAssetGraph({ domain, depth: 2, pii_only: piiOnly });
       setGraphData(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载图谱数据失败");
@@ -477,6 +479,8 @@ function GraphTab() {
           edges={graphData.edges}
           height={620}
           onNodeClick={handleNodeClick}
+          showFields={false}
+          layout="auto"
         />
       </Card>
 

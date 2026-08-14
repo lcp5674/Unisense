@@ -168,8 +168,8 @@ class AssetMapService(BaseService):
         if result is not None:
             return result
 
-        # 降级：从 MySQL lineage_edge + metric 拼接
-        return await self._get_graph_mysql(domain, pii_only)
+        # 降级：从 MySQL lineage_edge + metric 拼接（按 depth 收敛，避免大图一团乱麻）
+        return await self._get_graph_mysql(domain, pii_only, depth)
 
     async def _get_graph_neo4j(
         self, domain: str | None, depth: int, pii_only: bool
@@ -273,9 +273,11 @@ class AssetMapService(BaseService):
             logger.warning("assetmap_neo4j_query_failed: %s", exc)
             return None
 
-    async def _get_graph_mysql(self, domain: str | None, pii_only: bool) -> dict[str, Any]:
-        """降级：从 MySQL lineage_edge + metric 拼接图谱。"""
-        nodes, edges = await self._repo.graph_from_mysql(domain, pii_only)
+    async def _get_graph_mysql(
+        self, domain: str | None, pii_only: bool, depth: int | None = None
+    ) -> dict[str, Any]:
+        """降级：从 MySQL lineage_edge + metric 拼接图谱（按 depth 收敛规模）。"""
+        nodes, edges = await self._repo.graph_from_mysql(domain, pii_only, depth)
         return {"nodes": nodes, "edges": edges}
 
     async def get_heatmap(self, dimension: str = "domain") -> dict[str, Any]:

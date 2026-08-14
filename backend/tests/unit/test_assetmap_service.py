@@ -87,7 +87,7 @@ async def test_get_graph_falls_back_to_mysql_when_neo4j_unconfigured(
     repo.graph_from_mysql = AsyncMock(return_value=([{"id": "metric:m1"}], []))
     out = await svc.get_graph(domain="sales", depth=3, pii_only=False)
     assert out["nodes"][0]["id"] == "metric:m1"
-    repo.graph_from_mysql.assert_awaited_once_with("sales", False)
+    repo.graph_from_mysql.assert_awaited_once_with("sales", False, 3)
 
 
 async def test_heatmap_passthrough() -> None:

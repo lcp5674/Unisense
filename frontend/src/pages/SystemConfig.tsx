@@ -21,9 +21,11 @@ import {
   CheckCircleOutlined,
   CloudDownloadOutlined,
   CloseCircleOutlined,
+  CopyOutlined,
   DeleteOutlined,
   EditOutlined,
   EyeOutlined,
+  LinkOutlined,
   PlusOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
@@ -114,14 +116,76 @@ export function SystemConfig() {
   const [modelOptions, setModelOptions] = useState<{ value: string }[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const hideTimerRef = useRef<number | null>(null);
+  const [countdownSec, setCountdownSec] = useState(0);
 
   function clearReveal() {
     if (hideTimerRef.current != null) {
-      window.clearTimeout(hideTimerRef.current);
+      window.clearInterval(hideTimerRef.current);
       hideTimerRef.current = null;
     }
+    setCountdownSec(0);
     setRevealedKey(null);
     form.setFieldValue("api_key", "");
+  }
+
+  // 校验 API Key 格式（仅新建时，按提供商类型）
+  function validateApiKey(_: unknown, value: string | undefined) {
+    if (!value || editing) return Promise.resolve();
+    const provider = form.getFieldValue("provider") as string;
+    if (provider === "openai" && !value.startsWith("sk-") && !value.startsWith("sk-proj-")) {
+      return Promise.reject(new Error("OpenAI API Key 通常以 sk- 开头"));
+    }
+    if (provider === "deepseek" && !value.startsWith("sk-")) {
+      return Promise.reject(new Error("DeepSeek API Key 通常以 sk- 开头"));
+    }
+    if (provider === "kilo" && !value.startsWith("poolside-")) {
+      return Promise.reject(new Error("kilo.ai API Key 通常以 poolside- 开头"));
+    }
+    return Promise.resolve();
+  }
+
+  async function handleRevealKey() {
+    if (editing?.id == null) return;
+    setRevealingKey(true);
+    try {
+      const secret = await getLlmConfigSecret(editing.id);
+      form.setFieldValue("api_key", secret.api_key);
+      setRevealedKey(secret.api_key);
+      setCountdownSec(15);
+      if (hideTimerRef.current != null) window.clearInterval(hideTimerRef.current);
+      hideTimerRef.current = window.setInterval(() => {
+        setCountdownSec((prev) => {
+          if (prev <= 1) {
+            if (hideTimerRef.current != null) {
+              window.clearInterval(hideTimerRef.current);
+              hideTimerRef.current = null;
+            }
+            form.setFieldValue("api_key", "");
+            setRevealedKey(null);
+            message.info("密钥已自动隐藏（未保存则不会改动）");
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+      message.success("明文仅在前端保留 15 秒，已写入审计日志");
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "读取密钥失败",
+      );
+    } finally {
+      setRevealingKey(false);
+    }
+  }
+
+  async function handleCopyKey() {
+    if (!revealedKey) return;
+    try {
+      await navigator.clipboard.writeText(revealedKey);
+      message.success("已复制到剪贴板，请尽快粘贴", 2);
+    } catch {
+      message.error("复制失败，请手动选中密钥文本复制");
+    }
   }
 
   function load() {
@@ -201,29 +265,6 @@ export function SystemConfig() {
       );
     } finally {
       setFetchingModels(false);
-    }
-  }
-
-  async function handleRevealKey() {
-    if (editing?.id == null) return;
-    setRevealingKey(true);
-    try {
-      const secret = await getLlmConfigSecret(editing.id);
-      form.setFieldValue("api_key", secret.api_key);
-      setRevealedKey(secret.api_key);
-      // 自动隐藏：15 秒后清空字段，防止密钥停留在表单/内存
-      if (hideTimerRef.current != null) window.clearTimeout(hideTimerRef.current);
-      hideTimerRef.current = window.setTimeout(() => {
-        form.setFieldValue("api_key", "");
-        setRevealedKey(null);
-        message.info("密钥已自动隐藏（未保存则不会改动）");
-      }, 15000);
-    } catch (err) {
-      message.error(
-        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "读取密钥失败",
-      );
-    } finally {
-      setRevealingKey(false);
     }
   }
 
@@ -523,14 +564,55 @@ export function SystemConfig() {
           <Form.Item
             name="api_key"
             label={editing ? "API Key（留空保持原密钥）" : "API Key"}
-            rules={editing ? [] : [{ required: true, message: "请输入 API Key" }]}
+            rules={
+              editing
+                ? []
+                : [
+                    { required: true, message: "请输入 API Key" },
+                    { validator: validateApiKey },
+                  ]
+            }
             style={{ marginBottom: 12 }}
+            extra={
+              editing ? (
+                <span className="muted" style={{ fontSize: 12 }}>
+                  留空保持原密钥；格式示例：<span className="mono">sk-...</span>。密钥加密存储，编辑后不会泄露。
+                </span>
+              ) : (
+                <span className="muted" style={{ fontSize: 12 }}>
+                  不同提供商密钥格式不同（OpenAI/DeepSeek 以 <span className="mono">sk-</span> 开头，kilo.ai 以 <span className="mono">poolside-</span> 开头）。密钥加密存储。
+                </span>
+              )
+            }
           >
             <Input.Password
               placeholder={
                 editing && editing.has_api_key ? "已配置（留空保持不变）" : "sk-..."
               }
               autoComplete="new-password"
+              visibilityToggle={false}
+              suffix={
+                revealedKey ? (
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<CopyOutlined />}
+                    onClick={handleCopyKey}
+                    aria-label="复制密钥"
+                  />
+                ) : editing && form.getFieldValue("api_key") ? (
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<CloseCircleOutlined />}
+                    onClick={() => {
+                      form.setFieldValue("api_key", "");
+                      message.info("已清空密钥输入");
+                    }}
+                    aria-label="清空密钥"
+                  />
+                ) : undefined
+              }
             />
           </Form.Item>
           {editing?.has_api_key ? (
@@ -542,11 +624,35 @@ export function SystemConfig() {
                   loading={revealingKey}
                   onClick={handleRevealKey}
                 >
-                  {revealedKey ? "已显示（15 秒后自动隐藏）" : "显示密钥"}
+                  {revealedKey
+                    ? `已显示（${countdownSec} 秒后自动隐藏）`
+                    : "显示密钥"}
                 </Button>
                 <span className="muted" style={{ fontSize: 12 }}>
                   密钥加密存储，仅按需解密显示（查看记录会写入审计日志）
                 </span>
+                {revealedKey ? (
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<CopyOutlined />}
+                    onClick={handleCopyKey}
+                  >
+                    复制
+                  </Button>
+                ) : null}
+                {revealedKey ? (
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<LinkOutlined />}
+                    onClick={() => {
+                      window.open("/audit?entity_type=llm_config", "_blank");
+                    }}
+                  >
+                    审计记录
+                  </Button>
+                ) : null}
               </Space>
             </div>
           ) : null}

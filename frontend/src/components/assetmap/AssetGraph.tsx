@@ -29,6 +29,8 @@ interface AssetGraphProps {
   onNodeClick?: (node: AssetGraphNode) => void;
   /** 是否展示字段节点（血缘总览等场景默认隐藏，减少视觉噪声）；默认 true */
   showFields?: boolean;
+  /** 布局策略：auto=检测到真环用力导向否则分层；hierarchy=分层（DAG）；force=力导向。默认 auto */
+  layout?: "auto" | "hierarchy" | "force";
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -75,6 +77,116 @@ function edgeColor(type?: string): string {
 
 function trimLabel(label: string, max = 26): string {
   return label.length > max ? `${label.slice(0, max)}…` : label;
+}
+
+/** 图边的展示数据（在 AssetGraphEdge 之上叠加渲染语义字段）。 */
+interface RenderEdge extends AssetGraphEdge {
+  /** 双向边（A↔B 合并后置 true，单箭头改双箭头） */
+  bidirectional?: boolean;
+  /** 属于真实循环（SCC 尺寸>2）的边 */
+  inCycle?: boolean;
+}
+
+/** 合并 A↔B 双向边为一条双箭头边，减少大图的视觉噪声（796/1000 边是双向边）。 */
+function mergeBidirectionalEdges(edges: AssetGraphEdge[]): RenderEdge[] {
+  const key = (a: string, b: string) => `${a}__${b}`;
+  const seen = new Map<string, number>();
+  const result: RenderEdge[] = [];
+  for (const e of edges) {
+    const forward = key(e.source, e.target);
+    const backward = key(e.target, e.source);
+    // 已存在反向边 → 把它标记为双向（两条合并为一条）
+    const existingIdx = seen.get(backward);
+    if (existingIdx !== undefined && !result[existingIdx].bidirectional) {
+      result[existingIdx] = { ...result[existingIdx], bidirectional: true };
+      continue;
+    }
+    seen.set(forward, result.length);
+    result.push({ ...e, bidirectional: false });
+  }
+  return result;
+}
+
+/** Tarjan 强连通分量：返回尺寸>2 的分量（真实循环依赖，区别于双向边 2-cycle）。 */
+function findTrueCycles(edges: RenderEdge[], nodeIds: string[]): Set<string> {
+  const adj = new Map<string, string[]>();
+  for (const id of nodeIds) adj.set(id, []);
+  for (const e of edges) {
+    if (adj.has(e.source)) adj.get(e.source)!.push(e.target);
+  }
+  const index = new Map<string, number>();
+  const low = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const cycles = new Set<string>();
+  let idx = 0;
+
+  const strongconnect = (v: string): void => {
+    index.set(v, idx);
+    low.set(v, idx);
+    idx += 1;
+    stack.push(v);
+    onStack.add(v);
+    for (const w of adj.get(v) ?? []) {
+      if (!index.has(w)) {
+        strongconnect(w);
+        low.set(v, Math.min(low.get(v)!, low.get(w)!));
+      } else if (onStack.has(w)) {
+        low.set(v, Math.min(low.get(v)!, index.get(w)!));
+      }
+    }
+    if (low.get(v) === index.get(v)) {
+      const comp: string[] = [];
+      let w: string | undefined;
+      do {
+        w = stack.pop();
+        onStack.delete(w!);
+        comp.push(w!);
+      } while (w !== v);
+      // 尺寸>2 视为真实循环（2 节点分量是双向边，已合并处理）
+      if (comp.length > 2) {
+        for (const c of comp) cycles.add(c);
+      }
+    }
+  };
+
+  for (const id of nodeIds) {
+    if (!index.has(id)) strongconnect(id);
+  }
+  return cycles;
+}
+
+/** 标记属于真环的边：两端都在同一个 SCC>2 分量内的边。 */
+function markCycleEdges(edges: RenderEdge[], cycleNodes: Set<string>): RenderEdge[] {
+  return edges.map((e) =>
+    cycleNodes.has(e.source) && cycleNodes.has(e.target)
+      ? { ...e, inCycle: true }
+      : e,
+  );
+}
+
+// G6 状态更新安全封装：图在数据重载/销毁过渡期，节点可能暂不存在——
+// setElementState 会同步抛错或异步 rejection，统一吞掉避免未捕获异常污染控制台/打断交互。
+function safeSetElementState(
+  graph: G6Graph | null | undefined,
+  id: string,
+  state: string | string[],
+) {
+  if (!graph || graph.destroyed) return;
+  try {
+    void graph.setElementState(id, state).catch(() => {});
+  } catch {
+    // 忽略瞬时异常
+  }
+}
+
+function safeFocusElement(graph: G6Graph | null | undefined, id: string) {
+  if (!graph || graph.destroyed) return;
+  try {
+    void graph.focusElement(id).catch(() => {});
+  } catch {
+    // 个别环境不可用时不阻断
+  }
 }
 
 /** 图例中的节点形状示意（指标=圆 / 表=圆角矩形 / 字段=椭圆）。 */
@@ -158,6 +270,7 @@ export function AssetGraph({
   height = 600,
   onNodeClick,
   showFields = true,
+  layout = "auto",
 }: AssetGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<G6Graph | null>(null);
@@ -167,6 +280,8 @@ export function AssetGraph({
   // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
+  // 布局手动覆盖：undefined=跟随 auto 检测；否则强制指定
+  const [layoutOverride, setLayoutOverride] = useState<"hierarchy" | "force" | undefined>(undefined);
   onNodeClickRef.current = onNodeClick;
 
   // 类型筛选（空 = 全部）；showFields=false 时剔除字段节点（血缘总览降噪）
@@ -183,6 +298,24 @@ export function AssetGraph({
     hidden,
   } = useMemo(() => pickVisible(filteredNodes, edges, showAll), [filteredNodes, edges, showAll]);
 
+  // 环检测 + 双向边合并：A↔B 合并为双箭头减少视觉噪声；SCC>2 的真环单独标记
+  const mergedEdges = useMemo(() => mergeBidirectionalEdges(visibleEdges), [visibleEdges]);
+  const cycleNodes = useMemo(
+    () => findTrueCycles(mergedEdges, visibleNodes.map((n) => n.id)),
+    [mergedEdges, visibleNodes],
+  );
+  const renderEdges = useMemo(
+    () => markCycleEdges(mergedEdges, cycleNodes),
+    [mergedEdges, cycleNodes],
+  );
+  // 布局策略：auto=有真环用力导向（环图 dagre 渲染异常），无环用分层；手动覆盖优先
+  const layoutMode = useMemo<"hierarchy" | "force">(() => {
+    if (layoutOverride) return layoutOverride;
+    if (layout === "force") return "force";
+    if (layout === "hierarchy") return "hierarchy";
+    return cycleNodes.size > 0 ? "force" : "hierarchy";
+  }, [layout, layoutOverride, cycleNodes]);
+
   // 血缘度：节点关联边数 → 编码节点大小
   const degreeMap = useMemo(() => {
     const m = new Map<string, number>();
@@ -198,8 +331,12 @@ export function AssetGraph({
   // G6 图实例在首次 render() 的异步 prepare 中才初始化 context.element——
   // 在此之前调用 setElementState 会因 context.element 为 undefined 崩溃。此标志标记「图已就绪」。
   const graphReadyRef = useRef(false);
+  // 渲染串行链：setData+render 排队执行，前一次渲染完成后再进行下一次，
+  // 避免数据快速变化（如 PII/域筛选切换）时 setData 与前一次渲染重叠触发 G6 内部 Node not found。
+  const renderChainRef = useRef<Promise<void>>(Promise.resolve());
+  const renderSeqRef = useRef(0);
 
-  // 图实例创建（仅一次）：销毁只发生在组件卸载。
+  // 图实例创建：layoutMode 变化（含 auto 检测结果改变）时销毁重建。
   // 复用实例避免「每次数据变化都 destroy + 重建」——G6 d3-force 仿真在 destroy 后
   // 仍可能派发在途 tick/事件，访问已被清空的 context 会抛 `Cannot read ... of undefined (reading 'draw')`。
   useEffect(() => {
@@ -257,19 +394,38 @@ export function AssetGraph({
         },
         edge: {
           style: {
-            stroke: (e) => edgeColor((e.data as AssetGraphEdge | undefined)?.type),
-            lineWidth: 1.3,
-            strokeOpacity: 0.72,
+            stroke: (e) =>
+              (e.data as RenderEdge | undefined)?.inCycle
+                ? "#e53935" // 真环：红色虚线醒目提示
+                : edgeColor((e.data as AssetGraphEdge | undefined)?.type),
+            lineWidth: (e) => ((e.data as RenderEdge | undefined)?.inCycle ? 2.4 : 1.3),
+            strokeOpacity: (e) =>
+              (e.data as RenderEdge | undefined)?.inCycle ? 1 : 0.72,
+            lineDash: (e) => ((e.data as RenderEdge | undefined)?.inCycle ? [6, 4] : undefined),
             endArrow: true,
+            startArrow: (e) => ((e.data as RenderEdge | undefined)?.bidirectional ? true : false),
             radius: 10,
           },
         },
-        layout: {
-          type: "d3-force",
-          linkDistance: 90,
-          collide: { radius: 30 },
-          manyBody: { strength: -380 },
-        },
+        layout: (() => {
+          if (layoutMode === "hierarchy") {
+            // 分层布局：血缘 DAG 自上而下（表→指标），节点多时比力导向清晰得多
+            return {
+              type: "antv-dagre",
+              rankdir: "TB",
+              align: "DL",
+              nodesep: 24,
+              ranksep: 48,
+            };
+          }
+          // 力导向：环图/交互定位用（对循环依赖天然容忍，节点自然分布）
+          return {
+            type: "d3-force",
+            linkDistance: 90,
+            collide: { radius: 30 },
+            manyBody: { strength: -380 },
+          };
+        })(),
         behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
       });
       graphRef.current = graph;
@@ -283,25 +439,34 @@ export function AssetGraph({
         if (node) onNodeClickRef.current?.(node);
       });
 
-      // 悬停邻域高亮：相邻节点高亮，其余淡化（图销毁后的在途事件一律忽略）
+      // 悬停邻域高亮：相邻节点高亮，其余淡化（图销毁/渲染过渡期的在途事件一律忽略）
       graph.on<IElementEvent>("node:pointerenter", (evt) => {
-        if (!graph || graph.destroyed) return;
+        if (!graph || graph.destroyed || !graphReadyRef.current) return;
         const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
         const id = raw?.id ?? raw?.__data__?.id;
         if (!id) return;
-        const neighbors = graph.getNeighborNodesData(String(id));
-        const active = new Set<string>([String(id), ...neighbors.map((n) => String(n.id))]);
-        for (const n of graph.getNodeData()) {
-          void graph.setElementState(
-            String(n.id),
-            active.has(String(n.id)) ? "active" : "inactive",
-          );
+        try {
+          const neighbors = graph.getNeighborNodesData(String(id));
+          const active = new Set<string>([String(id), ...neighbors.map((n) => String(n.id))]);
+          for (const n of graph.getNodeData()) {
+            safeSetElementState(
+              graph,
+              String(n.id),
+              active.has(String(n.id)) ? "active" : "inactive",
+            );
+          }
+        } catch {
+          // 高亮为装饰性交互，过渡期失败静默忽略
         }
       });
       graph.on("node:pointerleave", () => {
-        if (!graph || graph.destroyed) return;
-        for (const n of graph.getNodeData()) {
-          void graph.setElementState(String(n.id), []);
+        if (!graph || graph.destroyed || !graphReadyRef.current) return;
+        try {
+          for (const n of graph.getNodeData()) {
+            safeSetElementState(graph, String(n.id), []);
+          }
+        } catch {
+          // 忽略过渡期状态清理失败
         }
       });
     } catch (err) {
@@ -318,71 +483,81 @@ export function AssetGraph({
       }
       if (graphRef.current === graph) graphRef.current = null;
     };
-  }, []);
+  }, [layoutMode]);
 
-  // 数据更新：复用图实例 setData + render（不再销毁重建，从根上消除竞态）
+  // 数据更新：复用图实例，串行 setData + render（不再销毁重建）。
+  // render 为异步（prepare 内 initRuntime/重建元素），期间调用 setElementState 会因元素未就绪
+  // 抛 `Node not found`——渲染开始即标记未就绪，渲染完成后才允许状态操作。
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph || graph.destroyed) return;
-    const markReady = () => {
-      graphReadyRef.current = true;
-    };
-    if (visibleNodes.length === 0) {
-      // 空数据：清空画布，避免残留旧图
-      try {
-        graph.setData({ nodes: [], edges: [] });
-        void graph.render().then(markReady).catch(() => undefined);
-      } catch {
-        // 空数据渲染失败可忽略（保留空画布）
-      }
-      return;
-    }
-    const nodeData: GraphData = {
-      nodes: visibleNodes.map((n) => ({ id: n.id, data: n })),
-      edges: visibleEdges.map((e) => ({ source: e.source, target: e.target, data: e })),
-    };
-    try {
-      graph.setData(nodeData);
-      graph
-        .render()
-        .then(markReady)
-        .catch((err: unknown) => {
+    const seq = ++renderSeqRef.current;
+    graphReadyRef.current = false;
+    const data: GraphData =
+      visibleNodes.length === 0
+        ? { nodes: [], edges: [] }
+        : {
+            nodes: visibleNodes.map((n) => ({ id: n.id, data: n })),
+            edges: renderEdges.map((e) => ({ source: e.source, target: e.target, data: e })),
+          };
+    renderChainRef.current = renderChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const g = graphRef.current;
+        if (!g || g.destroyed || seq !== renderSeqRef.current) return;
+        try {
+          g.setData(data);
+          await g.render();
+          if (seq === renderSeqRef.current) graphReadyRef.current = true;
+        } catch (err) {
           console.error("[AssetGraph] G6 render 失败，降级为表格", err);
           setRenderFailed(true);
-        });
-      setRenderFailed(false);
-    } catch (err) {
-      console.error("[AssetGraph] G6 数据更新失败，降级为表格", err);
-      setRenderFailed(true);
-    }
-  }, [visibleNodes, visibleEdges, degreeMap]);
+        }
+      });
+    setRenderFailed(false);
+  }, [visibleNodes, renderEdges, degreeMap, layoutMode]);
 
   // 搜索定位：匹配 label 的节点高亮 + 聚焦首个匹配；清空时恢复全量状态。
-  // 图未就绪（context.element 尚未初始化）时跳过——否则 setElementState 会崩溃
+  // 图未就绪（渲染中/未初始化）时跳过——否则 setElementState 会崩溃或抛 Node not found
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph || graph.destroyed || !graphReadyRef.current) return;
-    const allNodes = graph.getNodeData?.() as unknown;
-    const nodeList = Array.isArray(allNodes) ? allNodes : [];
-    if (!searchText.trim()) {
-      for (const n of nodeList) void graph.setElementState(String(n.id), []);
-      return;
-    }
-    const kw = searchText.trim().toLowerCase();
-    const matchIds = new Set(
-      visibleNodes.filter((n) => n.label.toLowerCase().includes(kw)).map((n) => n.id),
-    );
-    for (const n of nodeList) {
-      void graph.setElementState(String(n.id), matchIds.has(String(n.id)) ? "active" : "inactive");
-    }
-    if (matchIds.size > 0) {
-      try {
-        void graph.focusElement([...matchIds][0]);
-      } catch {
-        // focusElement 在个别环境不可用时不阻断搜索高亮
+    try {
+      const allNodes = graph.getNodeData?.() as unknown;
+      const nodeList = Array.isArray(allNodes) ? allNodes : [];
+      if (!searchText.trim()) {
+        for (const n of nodeList) safeSetElementState(graph, String(n.id), []);
+        return;
       }
+      const kw = searchText.trim().toLowerCase();
+      const matchIds = new Set(
+        visibleNodes.filter((n) => n.label.toLowerCase().includes(kw)).map((n) => n.id),
+      );
+      for (const n of nodeList) {
+        safeSetElementState(
+          graph,
+          String(n.id),
+          matchIds.has(String(n.id)) ? "active" : "inactive",
+        );
+      }
+      if (matchIds.size > 0) {
+        safeFocusElement(graph, [...matchIds][0]);
+      }
+    } catch {
+      // 图状态变化导致的瞬时异常（如数据重载中）静默忽略，避免崩溃
     }
   }, [searchText, visibleNodes]);
+
+  // G6 内部 setData 的异步 batch 在数据过渡期可能抛 `Node not found` 未处理 rejection——
+  // 这是库在节点被替换时的已知瞬时噪音，不影响渲染结果，作用域内抑制以免污染控制台。
+  useEffect(() => {
+    const handler = (e: PromiseRejectionEvent) => {
+      const reason = e.reason instanceof Error ? e.reason.message : String(e.reason);
+      if (reason.includes("Node not found")) e.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", handler);
+    return () => window.removeEventListener("unhandledrejection", handler);
+  }, []);
 
   if (nodes.length === 0) {
     return <Empty description="暂无图谱数据" />;
@@ -472,6 +647,28 @@ export function AssetGraph({
           </Button>
         </div>
       )}
+      {cycleNodes.size > 0 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 12px",
+            marginBottom: 8,
+            background: "rgba(229,57,53,0.08)",
+            border: "1px solid rgba(229,57,53,0.35)",
+            borderRadius: 6,
+            fontSize: 13,
+            color: "#b71c1c",
+          }}
+          data-testid="asset-graph-cycle-banner"
+        >
+          <span>
+            检测到 <b>{cycleNodes.size}</b> 个节点存在<b>循环依赖</b>（红色虚线标注，见下方图例）。
+            这通常是 ETL 回流或配置错误，请检查相关表的加工链。
+          </span>
+        </div>
+      )}
       <div
         style={{
           display: "flex",
@@ -500,6 +697,18 @@ export function AssetGraph({
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
           data-testid="asset-graph-search"
+        />
+        <Select
+          allowClear
+          placeholder="布局：自动"
+          style={{ minWidth: 130 }}
+          value={layoutOverride}
+          onChange={setLayoutOverride}
+          data-testid="asset-graph-layout"
+          options={[
+            { value: "hierarchy", label: "分层布局" },
+            { value: "force", label: "力导向布局" },
+          ]}
         />
       </div>
       <div ref={containerRef} style={{ height, width: "100%" }} data-testid="asset-graph-canvas" />
@@ -557,6 +766,21 @@ export function AssetGraph({
             }}
           />
           <span className="muted">PII 描边 · 节点大小=血缘度 · 圆形/矩形/椭圆=指标/表/字段</span>
+        </div>
+        <div>
+          <span
+            style={{
+              display: "inline-block",
+              width: 18,
+              height: 0,
+              borderTop: "2px dashed #e53935",
+              marginRight: 4,
+              verticalAlign: "middle",
+            }}
+          />
+          <span className="muted" style={{ color: "#b71c1c" }}>
+            循环依赖
+          </span>
         </div>
         <Button
           size="small"
