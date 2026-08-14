@@ -19,6 +19,7 @@ import { aiNl2Sql, UnisenseApiError } from "../api";
 import type { NL2SQLResult } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { kvText } from "../utils/display";
+import { formatSql } from "../utils/sqlFormat";
 
 const { TextArea } = Input;
 
@@ -157,7 +158,7 @@ export function AiAssistant() {
 
             {result.sql ? (
               <Card title="生成的 SQL" size="small" style={{ marginBottom: 16 }}>
-                <pre className="code-block">{result.sql}</pre>
+                <pre className="code-block">{formatSql(result.sql)}</pre>
                 {Object.keys(result.params ?? {}).length > 0 && (
                   <div style={{ marginTop: 8 }}>
                     <span className="muted" style={{ fontSize: 12 }}>参数：</span>

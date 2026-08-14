@@ -47,6 +47,7 @@ import type { DBCatalog, LineageChannel, LineageEdge, LineageIngestRun, StaleEdg
 import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
+import { formatSql } from "../utils/sqlFormat";
 
 const RISK_LEVEL_LABEL: Record<string, string> = {
   low: "低",
@@ -230,7 +231,7 @@ function GraphTab() {
               <>
                 <h4 style={{ marginTop: 16 }}>ETL SQL</h4>
                 <pre className="mono" style={{ fontSize: 12, background: "#f5f5f5", padding: 12, borderRadius: 6, maxHeight: 240, overflow: "auto" }}>
-                  {detail.etl_sql}
+                  {formatSql(detail.etl_sql)}
                 </pre>
               </>
             )}
