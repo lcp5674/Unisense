@@ -489,6 +489,57 @@ class GovernanceService(BaseService):
             masking=decision.masking,
         )
 
+    async def check_metric_permission(
+        self,
+        metric_code: str,
+        action: str,
+        user_id: int,
+        role: str,
+        user_domain: str | None = None,
+        *,
+        skip_pii_gate: bool = False,
+    ) -> policy.Decision:
+        """PDP 决策入口——供 semantic 等服务调用。
+
+        构建 Subject 时不加载 grants（semantic 操作仅需角色+域校验，
+        grants 由 consume 的接入方鉴权路径处理）。
+
+        Args:
+            metric_code: 指标编码。
+            action: read/write/approve/export/review。
+            user_id: 操作人 ID。
+            role: 操作人角色字符串。
+            user_domain: 操作人所属域。
+            skip_pii_gate: 跳过 PII 合规门禁（仅用于提交审核等 PII 合规流程入口，
+                否则未复核的 PII 指标永远无法进入 REVIEW 状态形成死锁）。
+
+        Returns:
+            policy.Decision。
+
+        Raises:
+            NotFoundError: 指标不存在。
+        """
+        metric = await self._repo.get_metric_by_code(metric_code)
+        if metric is None:
+            raise NotFoundError("指标不存在", ctx={"metric_code": metric_code})
+        resource = policy.Resource(
+            domain=metric.domain,
+            metric_code=metric.metric_code,
+            sensitivity=(
+                SensitivityLevel.PII.value if metric.pii_flag else SensitivityLevel.INTERNAL.value
+            ),
+            # skip_pii_gate=True 时视为已复核，绕过 PII 门禁但保留域/角色校验
+            compliance_reviewed=bool(metric.compliance_reviewed) or skip_pii_gate,
+            owner_id=metric.owner_id,
+        )
+        subject = policy.Subject(
+            user_id=user_id,
+            role=role,
+            domain=user_domain,
+            grants=(),
+        )
+        return policy.decide(subject, action, resource)
+
     # ------------------------------------------------------------ PII review
 
     async def pii_review(self, payload: PiiReviewRequest, reviewer: User) -> PiiReviewResult:

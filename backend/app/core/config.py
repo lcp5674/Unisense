@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     metric_sunset_days: int = 30  # 指标废弃过渡天数（TD §13）
     glossary_synonym_threshold: float = 0.8  # 术语同义词冲突判定阈值（T053）
 
+    # ---- 采集模块 ----
+    # MySQL 增量采集：UPDATE_TIME IS NOT NULL 表占比低于此值时降级全量（0.0-1.0）
+    # 修复前：硬编码 0.1（10%），无法根据不同数据源调整。
+    # 生产建议：稳定表多的库设 0.05（5%），频繁无 UPDATE_TIME 的库设 0.2（20%）。
+    collector_mysql_incremental_ratio_threshold: float = 0.1
+
     model_config = SettingsConfigDict(
         env_prefix="UNISENSE_",
         env_file=".env",

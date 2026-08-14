@@ -109,15 +109,18 @@ def should_degrade_to_full(
     return watermark_ts is None
 
 
-def should_mix_in(source_type: str, connector: Any | None) -> bool:
-    """P0-3: MySQL InnoDB UPDATE_TIME 通常为 NULL，<10%% 有效表时降级全量。
+def should_mix_in(source_type: str, connector: Any | None, ratio_threshold: float = 0.1) -> bool:
+    """MySQL InnoDB UPDATE_TIME 通常为 NULL，低于占比阈值时降级全量。
 
     检测逻辑：查询 information_schema.tables 中 UPDATE_TIME IS NOT NULL 的表占比，
-    若低于 10%% 说明增量采集会漏采大量表，此时应降级为全量并记录 event。
+    若低于阈值说明增量采集会漏采大量表，此时应降级为全量并记录 event。
+
+    阈值可通过环境变量 UNISENSE_COLLECTOR_MYSQL_INCREMENTAL_RATIO_THRESHOLD 配置（默认 0.1）。
 
     Args:
         source_type: 数据源类型。
         connector: 数据库连接器（有 query 方法）。
+        ratio_threshold: 降级阈值（0.0-1.0），低于此占比时降级全量。
 
     Returns:
         True 表示应降级为全量（mix-in 全量）。
@@ -126,10 +129,11 @@ def should_mix_in(source_type: str, connector: Any | None) -> bool:
         return False
     try:
         ratio = _get_mysql_update_time_ratio(connector)
-        if ratio < 0.1:
+        if ratio < ratio_threshold:
             logger.warning(
-                "mysql_update_time_sparse: ratio=%.2f%% < 10%%, 降级为全量",
+                "mysql_update_time_sparse: ratio=%.2f%% < %.0f%%, 降级为全量",
                 ratio * 100,
+                ratio_threshold * 100,
             )
             return True
     except Exception as exc:

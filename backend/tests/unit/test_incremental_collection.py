@@ -277,3 +277,30 @@ async def test_service_incremental_stays_incremental_for_mysql_with_watermark():
             "s", StubCollector(), actor_id=1, mode="INCREMENTAL"
         )
         assert result["mode"] == "INCREMENTAL"  # 保持增量
+
+
+# ---------- should_mix_in 阈值可配置化（遗留问题修复） ----------
+
+
+def test_should_mix_in_honors_ratio_threshold():
+    """阈值可配置：低于配置阈值降级全量，高于则保持增量。"""
+    from app.services.collector.incremental import should_mix_in
+
+    connector = MagicMock()
+    # ratio = 2/8 = 0.25（25% 表有 UPDATE_TIME）
+    connector.query = AsyncMock(return_value=[{"total": 8, "with_time": 2}])
+    # 默认阈值 0.1 → 0.25 >= 0.1 不降级
+    assert should_mix_in("mysql", connector) is False
+    # 显式阈值 0.3 → 0.25 < 0.3 降级全量
+    assert should_mix_in("mysql", connector, ratio_threshold=0.3) is True
+    # 非 mysql 源不降级
+    assert should_mix_in("postgres", connector, ratio_threshold=0.3) is False
+
+
+def test_should_mix_in_ratio_function():
+    """_get_mysql_update_time_ratio 正确计算占比。"""
+    from app.services.collector.incremental import _get_mysql_update_time_ratio
+
+    connector = MagicMock()
+    connector.query = AsyncMock(return_value=[{"total": 3, "with_time": 2}])
+    assert _get_mysql_update_time_ratio(connector) == 2 / 3

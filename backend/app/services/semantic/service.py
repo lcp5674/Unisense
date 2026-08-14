@@ -24,6 +24,7 @@ from app.core.exceptions import (
 from app.db.redis import get_redis
 from app.models.metric import Metric
 from app.models.metric_version import MetricVersion
+from app.services.governance.service import GovernanceService  # noqa: F401 供测试 patch 定位
 from app.services.semantic.cache import MetricCache
 from app.services.semantic.repository import MetricRepository
 from app.services.semantic.schemas import (
@@ -108,12 +109,18 @@ class MetricService(BaseService):
     - 读侧对 Neo4j/ES 缺失标 stale
     """
 
-    def __init__(self, db: AsyncSession, cache: MetricCache | None = None) -> None:
+    def __init__(
+        self,
+        db: AsyncSession,
+        cache: MetricCache | None = None,
+        governance_svc: GovernanceService | None = None,
+    ) -> None:
         """初始化服务。
 
         Args:
             db: 异步数据库会话。
             cache: 指标读缓存；缺省使用默认 Redis 客户端（不可用时自动降级 DB）。
+            governance_svc: 治理服务实例（PDP 鉴权用）；缺省按需创建。
         """
         super().__init__(db)
         self._repo = MetricRepository(db)
@@ -122,6 +129,15 @@ class MetricService(BaseService):
             if cache is not None
             else MetricCache.from_defaults(get_redis() if _redis_available() else None)
         )
+        self._governance_svc = governance_svc
+
+    def _gov_svc(self) -> GovernanceService:
+        """获取治理服务实例（延迟创建，支持测试注入 mock）。"""
+        if self._governance_svc is not None:
+            return self._governance_svc
+        from app.services.governance.service import GovernanceService
+
+        return GovernanceService(self._db)
 
     # ---- 字典校验辅助方法（对齐 spec FR-008/FR-009, plan.md D2）----
 
@@ -486,6 +502,7 @@ class MetricService(BaseService):
         request: MetricUpdateRequest,
         actor_id: int,
         role: str,
+        user_domain: str | None = None,
     ) -> Metric:
         """更新指标（乐观锁）。
 
@@ -497,6 +514,7 @@ class MetricService(BaseService):
             request: 更新请求。
             actor_id: 操作人 ID。
             role: 操作人角色。
+            user_domain: 操作人所属域（API 层传入，避免 service 内额外查 DB）。
 
         Returns:
             更新后的指标。
@@ -504,11 +522,35 @@ class MetricService(BaseService):
         Raises:
             NotFoundError: 指标不存在。
             AuthError: metric_owner 操作他人指标（越权）。
-            BusinessError: 状态不允许更新。
+            BusinessError: 状态不允许更新 / PII 未合规复核。
             ConflictError: 乐观锁冲突。
         """
         metric = await self.get_metric(metric_code)
         self._assert_owner_or_admin(metric, actor_id, role)
+
+        # PII 合规闸门（COMPL-1）：未经合规复核的 PII 指标，禁止 update
+        # 修复前：update 操作不校验 compliance_reviewed，pii_flag=1 且未复核的指标可被修改
+        if metric.pii_flag and not metric.compliance_reviewed:
+            raise BusinessError(
+                "PII 指标未通过合规复核，禁止修改",
+                error_code="FORBIDDEN_PII",
+                ctx={"metric_code": metric_code},
+            )
+
+        # PDP 域权限闸门：update 须有 write 权限（同域或跨域 grant）
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权更新该指标",
+                error_code=decision.error_code or "FORBIDDEN",
+                ctx={"metric_code": metric_code, "actor_id": actor_id},
+            )
 
         # TECH-07 (T050): metric_code 不可通过 definition_json.code 修改
         if (
@@ -738,39 +780,13 @@ class MetricService(BaseService):
         )
         return await self.approve_metric(metric_code, approve_req, actor_id, role)
 
-    async def submit_review(self, metric_code: str, actor_id: int, role: str) -> Metric:
-        """提交评审（DRAFT → REVIEW）。
-
-        Args:
-            metric_code: 指标编码。
-            actor_id: 操作人 ID。
-            role: 操作人角色。
-
-        Returns:
-            评审中的指标。
-
-        Raises:
-            NotFoundError: 指标不存在。
-            AuthError: metric_owner 操作他人指标（越权）。
-            ConflictError: 非法状态跃迁。
-        """
-        metric = await self.get_metric(metric_code)
-        self._assert_owner_or_admin(metric, actor_id, role)
-
-        invalid = MetricStateMachine.validate_transition(metric.status, "REVIEW")
-        if invalid is not None:
-            raise ConflictError(invalid, error_code="INVALID_TRANSITION")
-
-        updated = await self._repo.update_with_optimistic_lock(
-            metric.id, metric.row_version, status="REVIEW", submitted_by=actor_id
-        )
-        await self._cache.invalidate(metric_code)
-
-        logger.info("metric_submit_review", metric_code=metric_code, actor_id=actor_id)
-        return updated
-
     async def submit_metric(
-        self, metric_code: str, request: MetricSubmitRequest, actor_id: int
+        self,
+        metric_code: str,
+        request: MetricSubmitRequest,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> Metric:
         """提交指标审核（DRAFT → REVIEW，对齐 FR-003）。
 
@@ -778,15 +794,38 @@ class MetricService(BaseService):
             metric_code: 指标编码。
             request: 提交请求。
             actor_id: 操作人 ID。
+            role: 操作人角色（PDP 域权限判定用）。
+            user_domain: 操作人所属域（API 层传入，避免 service 内额外查 DB）。
 
         Returns:
             提交后的指标。
 
         Raises:
             NotFoundError: 指标不存在。
+            AuthError: metric_owner 操作他人指标（越权）。
+            BusinessError: PDP 拒绝（跨域/无权限）。
             ConflictError: 非法状态跃迁。
         """
         metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role or "")
+
+        # PDP 域权限闸门：提交审核须有 write 权限（同域或跨域 grant）。
+        # skip_pii_gate=True：提交审核是 PII 合规流程入口——未复核的 PII 指标
+        # 必须先进入 REVIEW 状态才能被合规复核，若在此处拦截 PII 将形成死锁。
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role or "",
+            user_domain=user_domain,
+            skip_pii_gate=True,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权提交该指标审核",
+                error_code=decision.error_code or "FORBIDDEN",
+                ctx={"metric_code": metric_code, "actor_id": actor_id},
+            )
 
         # 状态机校验：DRAFT→REVIEW
         invalid = MetricStateMachine.validate_transition(metric.status, "REVIEW")
@@ -892,11 +931,19 @@ class MetricService(BaseService):
         request: MetricApproveRequest,
         actor_id: int,
         role: str | None = None,
+        user_domain: str | None = None,
     ) -> Metric:
         """审核通过指标（REVIEW → PUBLISHED/EXPERIMENTAL，对齐 FR-004）。
 
         含 PII 门禁 + 依赖校验 + 状态机校验。
         metric.status 更新与 version.status 转正在同一事务中原子执行（对齐 FR-042）。
+
+        Args:
+            metric_code: 指标编码。
+            request: 审核请求（含 mode/gray_tenant_ids/target_version）。
+            actor_id: 操作人 ID。
+            role: 操作人角色（platform_admin/domain_admin 豁免自审禁止）。
+            user_domain: 操作人所属域（API 层传入，避免 service 内额外查 DB）。
 
         自审豁免：approve/reject 端点仅 platform_admin/domain_admin 可调用，管理员拥有
         最终审核权，允许审核自己提交的指标（小团队/单管理员场景的兜底）；
@@ -928,6 +975,24 @@ class MetricService(BaseService):
                 "提交人与审核人不得为同一人（禁止自审）",
                 error_code="SELF_REVIEW_BLOCKED",
                 ctx={"metric_code": metric_code, "submitted_by": metric.submitted_by},
+            )
+
+        # PDP 域权限闸门：approve 须有 approve 权限（同域或跨域 grant）。
+        # skip_pii_gate=True：PII 合规门禁由下方业务层统一处理（返回语义
+        # 更清晰的 COMPLIANCE_BLOCKED），此处仅做域/角色校验。
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="approve",
+            user_id=actor_id,
+            role=role or "metric_owner",
+            user_domain=user_domain,
+            skip_pii_gate=True,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权审核该指标",
+                error_code=decision.error_code or "FORBIDDEN",
+                ctx={"metric_code": metric_code, "actor_id": actor_id},
             )
 
         # 确定目标状态
@@ -1191,6 +1256,14 @@ class MetricService(BaseService):
             ConflictError: 非法状态跃迁（非 EXPERIMENTAL）。
         """
         metric = await self.get_metric(metric_code)
+
+        # PII 合规闸门（COMPL-1）：灰度全量发布到生产前，PII 指标必须已复核
+        if metric.pii_flag and not metric.compliance_reviewed:
+            raise BusinessError(
+                "PII 指标未通过合规复核，禁止全量发布",
+                error_code="FORBIDDEN_PII",
+                ctx={"metric_code": metric_code},
+            )
 
         # 状态机校验：EXPERIMENTAL→PUBLISHED
         invalid = MetricStateMachine.validate_transition(metric.status, "PUBLISHED")

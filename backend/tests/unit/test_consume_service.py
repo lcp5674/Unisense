@@ -60,12 +60,16 @@ def _metric(
     grain="day",
     domain: str | None = "sales",
     pii: bool = False,
+    pii_flag: bool = False,
+    compliance_reviewed: bool = False,
 ) -> Metric:
     m = Metric()
     m.metric_code = code
     m.status = status
     m.owner_org = 1
     m.domain = domain
+    m.pii_flag = pii_flag
+    m.compliance_reviewed = compliance_reviewed
     m.definition_json = {
         "expression": expr,
         "dependencies": ["fct_order"],
@@ -165,22 +169,46 @@ async def test_dry_run_cross_domain_denied() -> None:
 
 
 async def test_dry_run_pii_requires_explicit_whitelist() -> None:
-    """PII 指标在"域内全量"授权下不可隐式访问（FORBIDDEN_PII）。"""
+    """PII 指标在"域内全量"授权下不可隐式访问（FORBIDDEN_PII）。
+
+    修复后：PII 合规闸门独立于白名单——即使指标被显式白名单授权，
+    未通过合规复核（compliance_reviewed=False）时仍阻断消费。
+    """
     svc = _svc(await _client(whitelist=None))
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc._get_metric = AsyncMock(return_value=_metric(pii=True))
+    svc._get_metric = AsyncMock(return_value=_metric(pii=True, pii_flag=True))
     with pytest.raises(BusinessError) as exc:
         await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
     assert exc.value.error_code == ErrorCode.FORBIDDEN_PII
 
 
-async def test_dry_run_pii_allowed_when_whitelisted() -> None:
-    """PII 指标被白名单显式列出时放行，且 meta 标注 pii=True 供上层审计分级。"""
+async def test_dry_run_pii_allowed_when_whitelisted_and_reviewed() -> None:
+    """PII 指标需同时满足：白名单显式授权 + 合规复核通过，才可消费。
+
+    修复后：合规闸门（compliance_reviewed=True）独立于白名单。
+    仅白名单授权而未复核 → FORBIDDEN_PII（而非旧语义下的放行）。
+    """
     svc = _svc(await _client(whitelist=["gmv"]))
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc._get_metric = AsyncMock(return_value=_metric(pii=True))
+    # 已复核的 PII 指标，白名单授权下放行
+    svc._get_metric = AsyncMock(
+        return_value=_metric(pii=True, pii_flag=True, compliance_reviewed=True)
+    )
     res = await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
     assert res.meta["pii"] is True
+
+
+async def test_dry_run_pii_whitelisted_but_not_reviewed_blocked() -> None:
+    """白名单授权不足以绕过 PII 合规闸门——未复核时阻断（FORBIDDEN_PII）。
+
+    这是新安全语义的核心体现：合规闸门是独立的安全基线，不可被白名单绕过。
+    """
+    svc = _svc(await _client(whitelist=["gmv"]))
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric(pii=True, pii_flag=True))
+    with pytest.raises(BusinessError) as exc:
+        await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_PII
 
 
 async def test_dry_run_dimension_violation() -> None:

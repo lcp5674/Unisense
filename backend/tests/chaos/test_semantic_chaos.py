@@ -19,6 +19,7 @@ import pytest
 from app.core.exceptions import BusinessError
 from app.core.resilience import CircuitBreaker
 from app.models.metric import Metric
+from app.services.governance.policy import Decision
 from app.services.semantic.cache import MetricCache
 from app.services.semantic.state_machine import MetricStateMachine
 
@@ -144,7 +145,12 @@ class TestBreakingChangeOnPublished:
         """PUBLISHED 指标破坏性变更 → 创建 PENDING_VERSION 而非直接生效。"""
         from app.services.semantic.service import MetricService
 
-        svc = MetricService(mock_db)
+        # 注入放行 PDP（domain_admin 越权防护由专门测试覆盖；此处聚焦破坏性变更路径）
+        mock_gov_svc = MagicMock()
+        mock_gov_svc.check_metric_permission = AsyncMock(
+            return_value=Decision(allow=True, reason="mocked")
+        )
+        svc = MetricService(mock_db, governance_svc=mock_gov_svc)
         metric = _make_metric(status="PUBLISHED", version=3)
         metric.definition_json = {"dependencies": ["t1"], "expression": "SUM(x)"}
 

@@ -199,7 +199,9 @@ async def update_metric(
 ) -> ApiResponse[MetricResponse]:
     """变更口径时自动识别破坏性变更并递增版本号；乐观锁防止并发覆盖。"""
     service = MetricService(db)
-    metric = await service.update_metric(metric_code, request, actor_id=user.id, role=user.role)
+    metric = await service.update_metric(
+        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -313,7 +315,9 @@ async def submit_metric(
 ) -> ApiResponse[MetricResponse]:
     """DRAFT → REVIEW，提交审核。状态机校验，非法跃迁返回 409。"""
     service = MetricService(db)
-    metric = await service.submit_metric(metric_code, request, actor_id=user.id)
+    metric = await service.submit_metric(
+        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -347,7 +351,9 @@ async def approve_metric(
 ) -> ApiResponse[MetricResponse]:
     """REVIEW → PUBLISHED(standard) / EXPERIMENTAL(experimental)。含 PII 门禁 + 依赖校验。"""
     service = MetricService(db)
-    metric = await service.approve_metric(metric_code, request, actor_id=user.id, role=user.role)
+    metric = await service.approve_metric(
+        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,

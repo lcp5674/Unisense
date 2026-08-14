@@ -17,6 +17,7 @@ from app.core.exceptions import (
     ConflictError,
     NotFoundError,
 )
+from app.services.governance.policy import Decision
 from app.services.semantic.schemas import (
     MetricApproveRequest,
     MetricCreateRequest,
@@ -31,10 +32,19 @@ from app.services.semantic.service import MetricService
 
 
 def _svc_with_repo() -> tuple[MetricService, MagicMock]:
-    """构造服务并替换其仓库为 mock，返回 (service, mock_repo_instance)。"""
-    with patch("app.services.semantic.service.MetricRepository") as mock_repo:
-        svc = MetricService(db=MagicMock())
-        return svc, mock_repo.return_value
+    """构造服务并替换其仓库为 mock，返回 (service, mock_repo_instance)。
+
+    修复后：update_metric / submit_metric / approve_metric 调用
+    GovernanceService.check_metric_permission，
+    此处通过构造函数注入 mock 返回 allow=True，不阻断非 PDP 测试路径。
+    """
+    mock_gov_svc = MagicMock()
+    mock_gov_svc.check_metric_permission = AsyncMock(
+        return_value=Decision(allow=True, reason="mocked_allowed")
+    )
+    with patch("app.services.semantic.service.MetricRepository") as mock_repo_cls:
+        svc = MetricService(db=MagicMock(), governance_svc=mock_gov_svc)
+        return svc, mock_repo_cls.return_value
 
 
 async def test_create_metric_happy_path():
@@ -142,6 +152,39 @@ async def test_update_metric_creates_version_and_bumps():
     assert version_arg.version == 2
     assert result.row_version == 2
     assert result.version == 2
+
+
+async def test_update_metric_blocked_by_pdp_decision():
+    """PDP 拒绝（check_metric_permission allow=False）→ 写操作被阻断，不落库。
+
+    场景：actor 为 owner（通过 _assert_owner_or_admin），但 PDP 以跨域越权拒绝——
+    验证 PDP 作为独立安全闸门在 owner 校验之上再拦截。
+    """
+    mock_gov_svc = MagicMock()
+    mock_gov_svc.check_metric_permission = AsyncMock(
+        return_value=Decision(allow=False, reason="跨域越权", error_code="FORBIDDEN_DOMAIN")
+    )
+    with patch("app.services.semantic.service.MetricRepository") as mock_repo_cls:
+        svc = MetricService(db=MagicMock(), governance_svc=mock_gov_svc)
+        repo = mock_repo_cls.return_value
+        repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", row_version=1))
+        repo.update_with_optimistic_lock = AsyncMock()
+
+        with pytest.raises(BusinessError) as exc:
+            await svc.update_metric(
+                "sales_gmv_daily",
+                MetricUpdateRequest(
+                    definition_json={"expression": "SUM(order_amount)"},
+                    change_reason="跨域尝试",
+                ),
+                actor_id=1,  # owner：通过 _assert_owner_or_admin
+                role="metric_owner",
+                user_domain="other_domain",
+            )
+
+        assert exc.value.error_code == "FORBIDDEN_DOMAIN"
+        mock_gov_svc.check_metric_permission.assert_awaited_once()
+        repo.update_with_optimistic_lock.assert_not_awaited()
 
 
 async def test_update_metric_breaking_change():
@@ -609,22 +652,46 @@ async def test_normalize_pii_syncs_dual_source():
     assert "pii" not in d2 and f2 is False
 
 
-async def test_submit_review_success():
+async def test_submit_metric_success():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
     updated = make_metric(status="REVIEW")
     repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
 
-    result = await svc.submit_review("sales_gmv_daily", actor_id=1, role="metric_owner")
+    result = await svc.submit_metric(
+        "sales_gmv_daily",
+        MetricSubmitRequest(change_reason="提交审核"),
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+    )
     assert result.status == "REVIEW"
     assert repo.update_with_optimistic_lock.call_args.kwargs["submitted_by"] == 1
 
 
-async def test_submit_review_invalid_transition():
-    svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", owner_id=1))
-    with pytest.raises(ConflictError):
-        await svc.submit_review("sales_gmv_daily", actor_id=1, role="metric_owner")
+async def test_submit_metric_blocked_by_pdp_decision():
+    """PDP 拒绝 → submit_metric 不提交审核。"""
+    mock_gov_svc = MagicMock()
+    mock_gov_svc.check_metric_permission = AsyncMock(
+        return_value=Decision(allow=False, reason="无 write 权限", error_code="FORBIDDEN")
+    )
+    with patch("app.services.semantic.service.MetricRepository") as mock_repo_cls:
+        svc = MetricService(db=MagicMock(), governance_svc=mock_gov_svc)
+        repo = mock_repo_cls.return_value
+        repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+        repo.update_with_optimistic_lock = AsyncMock()
+
+        with pytest.raises(BusinessError) as exc:
+            await svc.submit_metric(
+                "sales_gmv_daily",
+                MetricSubmitRequest(change_reason="提交审核"),
+                actor_id=1,
+                role="metric_owner",
+                user_domain="other_domain",
+            )
+
+        assert exc.value.error_code == "FORBIDDEN"
+        repo.update_with_optimistic_lock.assert_not_awaited()
 
 
 async def test_submit_metric_publishes_event():
@@ -637,6 +704,8 @@ async def test_submit_metric_publishes_event():
         "sales_gmv_daily",
         MetricSubmitRequest(change_reason="提交审核"),
         actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
     )
     svc._publish_event.assert_awaited_once()
     assert svc._publish_event.call_args.args[0] == "metric.submitted"
@@ -1313,10 +1382,14 @@ async def test_update_metric_collects_optional_fields():
 async def test_submit_metric_invalid_transition():
     """非 DRAFT 状态提交（如 PUBLISHED）→ ConflictError。"""
     svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", owner_id=1))
     with pytest.raises(ConflictError) as exc:
         await svc.submit_metric(
-            "sales_gmv_daily", MetricSubmitRequest(change_reason="提交评审"), actor_id=1
+            "sales_gmv_daily",
+            MetricSubmitRequest(change_reason="提交评审"),
+            actor_id=1,
+            role="metric_owner",
+            user_domain="sales",
         )
     assert exc.value.error_code == "INVALID_TRANSITION"
 

@@ -689,3 +689,79 @@ async def test_propagate_pii_metric_not_found_raises() -> None:
     svc, _, _ = _svc()
     with pytest.raises(NotFoundError):
         await svc.propagate_pii_to_metric("nonexistent")
+
+
+# ---------- check_metric_permission（PDP 决策入口，供 semantic 写操作调用） ----------
+
+
+async def test_check_metric_permission_allows_same_domain_owner() -> None:
+    svc, repo, _ = _svc()
+    repo.metrics["m1"] = FakeMetric(metric_code="m1", domain="sales", owner_id=5)
+    decision = await svc.check_metric_permission(
+        metric_code="m1", action="write", user_id=5, role="metric_owner", user_domain="sales"
+    )
+    assert decision.allow is True
+
+
+async def test_check_metric_permission_blocks_cross_domain() -> None:
+    svc, repo, _ = _svc()
+    repo.metrics["m1"] = FakeMetric(metric_code="m1", domain="sales", owner_id=5)
+    decision = await svc.check_metric_permission(
+        metric_code="m1", action="write", user_id=5, role="metric_owner", user_domain="finance"
+    )
+    assert decision.allow is False
+    assert decision.error_code == "FORBIDDEN"
+
+
+async def test_check_metric_permission_blocks_unreviewed_pii() -> None:
+    svc, repo, _ = _svc()
+    repo.metrics["m1"] = FakeMetric(
+        metric_code="m1", domain="sales", owner_id=5, pii_flag=True, compliance_reviewed=False
+    )
+    decision = await svc.check_metric_permission(
+        metric_code="m1", action="read", user_id=5, role="metric_owner", user_domain="sales"
+    )
+    assert decision.allow is False
+    assert decision.error_code == "FORBIDDEN_PII"
+
+
+async def test_check_metric_permission_metric_not_found() -> None:
+    svc, _, _ = _svc()
+    with pytest.raises(NotFoundError):
+        await svc.check_metric_permission(
+            metric_code="nonexistent", action="write", user_id=1, role="platform_admin"
+        )
+
+
+async def test_check_metric_permission_skip_pii_gate_allows_submit_flow() -> None:
+    """死锁修复：skip_pii_gate=True 时未复核 PII 指标可提交审核（进入 REVIEW）。"""
+    svc, repo, _ = _svc()
+    repo.metrics["m1"] = FakeMetric(
+        metric_code="m1", domain="sales", owner_id=5, pii_flag=True, compliance_reviewed=False
+    )
+    # 默认（不跳过）→ PII 门禁拦截
+    blocked = await svc.check_metric_permission(
+        metric_code="m1", action="write", user_id=5, role="metric_owner", user_domain="sales"
+    )
+    assert blocked.allow is False
+    assert blocked.error_code == "FORBIDDEN_PII"
+    # 跳过 PII 门禁 → 域/角色校验放行（提交审核入口）
+    allowed = await svc.check_metric_permission(
+        metric_code="m1",
+        action="write",
+        user_id=5,
+        role="metric_owner",
+        user_domain="sales",
+        skip_pii_gate=True,
+    )
+    assert allowed.allow is True
+    # 跨域仍被拦截（skip_pii_gate 只豁免 PII，不豁免域）
+    cross = await svc.check_metric_permission(
+        metric_code="m1",
+        action="write",
+        user_id=5,
+        role="metric_owner",
+        user_domain="finance",
+        skip_pii_gate=True,
+    )
+    assert cross.allow is False

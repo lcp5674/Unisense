@@ -394,16 +394,23 @@ class ConsumeService(BaseService):
 
     @staticmethod
     def is_pii(metric: Metric) -> bool:
-        """指标是否承载 PII（definition_json.pii，对齐 TD §15.4 数据分级）。"""
-        return bool((metric.definition_json or {}).get("pii", False))
+        """指标是否承载 PII（definition_json.pii 或 pii_flag，任一为真即为 PII）。
+
+        修复前：仅检查 definition_json.pii，pii_flag 由合规复核写入，
+        导致通过 PII 复核但 definition_json 未同步的指标被误判为非 PII。
+        """
+        dj = metric.definition_json or {}
+        return bool(dj.get("pii", False)) or bool(metric.pii_flag)
 
     @classmethod
     def _assert_authorized(cls, client: ApiClient, metric: Metric) -> None:
-        """接入方授权闸门（fail-closed）：域 → 白名单 → PII 三级校验。
+        """接入方授权闸门（fail-closed）：域 → 白名单 → PII 合规四级校验。
 
         - scope_domain 非空时，跨域访问一律 FORBIDDEN_DOMAIN（此前未校验，属越权缺口）。
         - metric_whitelist 非空时，仅白名单内指标可访问。
         - PII 指标必须被白名单**显式列出**才可消费；"域内全量"授权不隐式覆盖 PII。
+        - PII 指标须已完成合规复核（compliance_reviewed=True），
+          未经复核的 PII 指标对所有接入方禁止消费（TD §12.5 COMPL-1）。
         """
         if client.scope_domain and metric.domain != client.scope_domain:
             raise BusinessError("指标不在接入方授权域内", error_code=ErrorCode.FORBIDDEN_DOMAIN)
@@ -411,6 +418,13 @@ class ConsumeService(BaseService):
             raise BusinessError("超出接入方授权范围", error_code=ErrorCode.FORBIDDEN_METRIC)
         if cls.is_pii(metric) and metric.metric_code not in (client.metric_whitelist or []):
             raise BusinessError("PII 指标需显式白名单授权", error_code=ErrorCode.FORBIDDEN_PII)
+        # PII 合规复核闸门（COMPL-1）：修复前 consume 不校验 compliance_reviewed，
+        # PII=1 且未复核的指标仍可被消费，造成合规风险
+        if cls.is_pii(metric) and not metric.compliance_reviewed:
+            raise BusinessError(
+                "PII 指标未通过合规复核，禁止消费",
+                error_code=ErrorCode.FORBIDDEN_PII,
+            )
 
     @staticmethod
     def _build_meta(metric: Metric) -> dict[str, Any]:
