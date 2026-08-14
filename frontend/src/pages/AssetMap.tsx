@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { Alert, Button, Card, Descriptions, Drawer, Empty, Row, Col, Input, Select, Space, Spin, Statistic, Switch, Table, Tabs, Tag, Tooltip, message } from "antd";
+import type { ColumnsType } from "antd/es/table";
 import { ApartmentOutlined, DeleteOutlined, DownloadOutlined, EyeOutlined, GlobalOutlined, HeartOutlined, HeatMapOutlined, SafetyOutlined, SearchOutlined, TableOutlined, UserOutlined } from "@ant-design/icons";
 import { Pie } from "@ant-design/charts";
 import {
   downloadAssetExport,
   fetchAssetChanges,
-  fetchAssetClassification,
   fetchAssetEntityDetail,
   fetchAssetGraph,
   fetchAssetHealth,
@@ -19,11 +19,12 @@ import {
   fetchAssetSearch,
   fetchAssetSummary,
   fetchAssetTables,
+  listCatalogs,
+  listMetrics,
 } from "../api";
 import type {
   AssetCatalogSummary,
   AssetChanges,
-  AssetClassificationSummary,
   AssetEntityDetail,
   AssetHealthSummary,
   AssetMetricSummary,
@@ -37,6 +38,7 @@ import { ObjectView } from "../utils/display";
 import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
+import { DrillDownDrawer } from "../components/assetmap/DrillDownDrawer";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -79,25 +81,51 @@ function normalizeBuckets(buckets: Array<Record<string, unknown>>) {
   }));
 }
 
+type DrillRow = Record<string, unknown>;
+
+// 下钻明细列（目录 / 指标 / 孤儿三种口径）
+const CATALOG_COLUMNS: ColumnsType<DrillRow> = [
+  { title: "数据源", dataIndex: "source_id", width: 130 },
+  { title: "实体", dataIndex: "entity_name", ellipsis: true },
+  { title: "类型", dataIndex: "entity_type", width: 90, render: (v) => ENTITY_TYPE_LABEL[v as string] ?? v },
+  { title: "敏感度", dataIndex: "sensitivity_level", width: 110, render: (s) => sensitivityTag(s as string | null | undefined) },
+  { title: "责任人", dataIndex: "owner_id", width: 80, render: (v) => (v == null ? <Tag>无</Tag> : v) },
+];
+
+const METRIC_COLUMNS: ColumnsType<DrillRow> = [
+  { title: "编码", dataIndex: "metric_code", ellipsis: true, render: (v) => <span className="mono">{v as string}</span> },
+  { title: "名称", dataIndex: "name", ellipsis: true },
+  { title: "域", dataIndex: "domain", width: 110 },
+  { title: "状态", dataIndex: "status", width: 100 },
+  { title: "PII", dataIndex: "pii_flag", width: 70, render: (v) => (v ? <Tag color="red">PII</Tag> : null) },
+];
+
+const ORPHAN_COLUMNS: ColumnsType<DrillRow> = [
+  { title: "数据源", dataIndex: "source_id", width: 130 },
+  { title: "实体", dataIndex: "entity_name", ellipsis: true },
+  { title: "类型", dataIndex: "entity_type", width: 90, render: (v) => ENTITY_TYPE_LABEL[v as string] ?? v },
+  { title: "敏感度", dataIndex: "sensitivity_level", width: 110, render: (s) => sensitivityTag(s as string | null | undefined) },
+];
+
 function OverviewTab() {
   const [summary, setSummary] = useState<AssetCatalogSummary | null>(null);
-  const [classification, setClassification] = useState<AssetClassificationSummary | null>(null);
   const [metricSummary, setMetricSummary] = useState<AssetMetricSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 明细下钻抽屉状态（指标点击值 → 明细表）
+  const [drillOpen, setDrillOpen] = useState(false);
+  const [drillLoading, setDrillLoading] = useState(false);
+  const [drillTitle, setDrillTitle] = useState("");
+  const [drillColumns, setDrillColumns] = useState<ColumnsType<DrillRow>>([]);
+  const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
 
   useEffect(() => {
     async function load() {
       setLoading(true);
       setError(null);
       try {
-        const [s, c, m] = await Promise.all([
-          fetchAssetSummary(),
-          fetchAssetClassification(),
-          fetchAssetMetricSummary(),
-        ]);
+        const [s, m] = await Promise.all([fetchAssetSummary(), fetchAssetMetricSummary()]);
         setSummary(s);
-        setClassification(c);
         setMetricSummary(m);
       } catch (err) {
         setError(err instanceof Error ? err.message : "加载资产概览失败");
@@ -108,12 +136,75 @@ function OverviewTab() {
     load();
   }, []);
 
+  async function openDrill(
+    title: string,
+    columns: ColumnsType<DrillRow>,
+    loader: () => Promise<DrillRow[]>,
+  ) {
+    setDrillTitle(title);
+    setDrillColumns(columns);
+    setDrillOpen(true);
+    setDrillLoading(true);
+    setDrillRows([]);
+    try {
+      setDrillRows(await loader());
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载明细失败");
+    } finally {
+      setDrillLoading(false);
+    }
+  }
+
+  function drillCatalogs(params?: { entity_type?: string; sensitivity_level?: string }) {
+    const title = params?.entity_type
+      ? `实体类型：${ENTITY_TYPE_LABEL[params.entity_type] ?? params.entity_type}`
+      : params?.sensitivity_level
+        ? `敏感度：${SENSITIVITY_LABEL[params.sensitivity_level] ?? params.sensitivity_level}`
+        : "目录资产明细";
+    return openDrill(title, CATALOG_COLUMNS, async () => {
+      const r = await listCatalogs({ ...params, page_size: 200 });
+      return r.items as unknown as DrillRow[];
+    });
+  }
+
+  function drillMetrics(status?: string) {
+    return openDrill(status ? "已发布指标明细" : "指标明细", METRIC_COLUMNS, async () => {
+      const r = await listMetrics({ ...(status ? { status } : {}), page_size: 100 });
+      return r.items as unknown as DrillRow[];
+    });
+  }
+
+  function drillOrphans() {
+    return openDrill("孤儿资产明细", ORPHAN_COLUMNS, async () => {
+      const r = await fetchAssetOrphans();
+      return r.items as unknown as DrillRow[];
+    });
+  }
+
+  // 可点击值渲染：把 Statistic 的 value 包成可点击链接
+  function clickableValue(onClick: () => void) {
+    return (node: ReactNode) => (
+      <a
+        href="#"
+        onClick={(e) => {
+          e.preventDefault();
+          onClick();
+        }}
+        style={{ cursor: "pointer" }}
+      >
+        {node}
+      </a>
+    );
+  }
+
   if (loading) return <Spin />;
   if (error) return <Alert type="error" message={error} />;
   if (!summary || !metricSummary) return <Empty description="暂无资产数据" />;
 
-  const sensData = Object.entries(classification?.by_sensitivity ?? {}).map(([k, v]) => ({
+  const totalMetrics = metricSummary.by_domain ? Object.values(metricSummary.by_domain).reduce((a, b) => a + b, 0) : 0;
+  const sensData = Object.entries(summary.by_sensitivity ?? {}).map(([k, v]) => ({
     type: SENSITIVITY_LABEL[k] ?? k,
+    key: k,
     value: v,
   }));
 
@@ -121,16 +212,26 @@ function OverviewTab() {
     <div>
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col xs={12} md={6}>
-          <Statistic title="目录资产总数" value={summary.total} />
+          <Statistic title="目录资产总数" value={summary.total} valueRender={clickableValue(() => drillCatalogs())} />
         </Col>
         <Col xs={12} md={6}>
-          <Statistic title="指标总数" value={(metricSummary.by_domain ? Object.values(metricSummary.by_domain).reduce((a, b) => a + b, 0) : 0)} />
+          <Statistic title="指标总数" value={totalMetrics} valueRender={clickableValue(() => drillMetrics())} />
         </Col>
         <Col xs={12} md={6}>
-          <Statistic title="孤儿资产" value={summary.orphan_assets} valueStyle={{ color: summary.orphan_assets > 0 ? "#d64545" : undefined }} />
+          <Statistic
+            title="孤儿资产"
+            value={summary.orphan_assets}
+            valueRender={clickableValue(() => drillOrphans())}
+            valueStyle={{ color: summary.orphan_assets > 0 ? "#d64545" : undefined }}
+          />
         </Col>
         <Col xs={12} md={6}>
-          <Statistic title="已发布指标" value={metricSummary.by_status?.PUBLISHED ?? 0} valueStyle={{ color: "#2e9e5b" }} />
+          <Statistic
+            title="已发布指标"
+            value={metricSummary.by_status?.PUBLISHED ?? 0}
+            valueRender={clickableValue(() => drillMetrics("PUBLISHED"))}
+            valueStyle={{ color: "#2e9e5b" }}
+          />
         </Col>
       </Row>
 
@@ -140,7 +241,11 @@ function OverviewTab() {
             <Row gutter={[8, 8]}>
               {Object.entries(summary.by_entity_type ?? {}).map(([k, v]) => (
                 <Col span={8} key={k}>
-                  <Statistic title={ENTITY_TYPE_LABEL[k] ?? k} value={v} />
+                  <Statistic
+                    title={ENTITY_TYPE_LABEL[k] ?? k}
+                    value={v}
+                    valueRender={clickableValue(() => drillCatalogs({ entity_type: k }))}
+                  />
                 </Col>
               ))}
             </Row>
@@ -159,11 +264,27 @@ function OverviewTab() {
                 innerRadius={0.6}
                 height={220}
                 label={{ text: "value", style: { fontWeight: 600 } }}
+                onReady={(plot) => {
+                  // 扇区点击 → 下钻该敏感度的目录明细
+                  plot.on("element:click", (evt: { data?: { data?: { key?: string } } }) => {
+                    const key = evt?.data?.data?.key;
+                    if (key) drillCatalogs({ sensitivity_level: key });
+                  });
+                }}
               />
             )}
           </Card>
         </Col>
       </Row>
+
+      <DrillDownDrawer
+        open={drillOpen}
+        title={drillTitle}
+        columns={drillColumns}
+        rows={drillRows}
+        loading={drillLoading}
+        onClose={() => setDrillOpen(false)}
+      />
     </div>
   );
 }

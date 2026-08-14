@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { BrowserRouter } from "react-router-dom";
 import { AssetMap } from "../pages/AssetMap";
@@ -15,6 +15,8 @@ vi.mock("../api", () => ({
   fetchAssetTables: vi.fn(),
   fetchAssetOrphans: vi.fn(),
   fetchAssetEntityDetail: vi.fn(),
+  listCatalogs: vi.fn(),
+  listMetrics: vi.fn(),
 }));
 
 vi.mock("@ant-design/charts", () => ({
@@ -52,6 +54,8 @@ import {
   fetchAssetTables,
   fetchAssetOrphans,
   fetchAssetEntityDetail,
+  listCatalogs,
+  listMetrics,
 } from "../api";
 
 const mockGraphData = {
@@ -97,6 +101,8 @@ describe("AssetMap", () => {
     vi.mocked(fetchAssetMetricSummary).mockResolvedValue({ by_domain: { finance: 2 }, by_status: { PUBLISHED: 1 } });
     vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
     vi.mocked(fetchAssetOrphans).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(listCatalogs).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
+    vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
   });
 
   it("renders with default graph tab", async () => {
@@ -189,5 +195,42 @@ describe("AssetMap", () => {
 
     await waitFor(() => expect(fetchAssetEntityDetail).toHaveBeenCalledWith(5));
     expect(screen.getByText(/实体详情/)).toBeInTheDocument();
+  });
+
+  it("overview statistic click drills into catalog detail", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+    // 切到概览 tab
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(fetchAssetSummary).toHaveBeenCalled());
+
+    // 点击「目录资产总数」的值
+    const totalValue = screen.getByText("10");
+    await user.click(totalValue);
+
+    await waitFor(() => expect(listCatalogs).toHaveBeenCalled());
+    expect(screen.getByText(/目录资产明细/)).toBeInTheDocument();
+  });
+
+  it("overview orphan statistic drills into orphan detail", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetOrphans).mockResolvedValue({
+      items: [{ entity_name: "o1", entity_type: "TABLE", source_id: "s1", owner_id: null, schema_incomplete: false }],
+      total: 1,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(fetchAssetSummary).toHaveBeenCalled());
+
+    // 定位「孤儿资产」Statistic 内的可点击值（避开同名 tab 标签）
+    const orphanStat = screen
+      .getByText("孤儿资产", { selector: ".ant-statistic-title" })
+      .closest(".ant-statistic") as HTMLElement;
+    await user.click(within(orphanStat).getByRole("link"));
+
+    await waitFor(() => expect(fetchAssetOrphans).toHaveBeenCalled());
+    expect(screen.getByText(/孤儿资产明细/)).toBeInTheDocument();
   });
 });
