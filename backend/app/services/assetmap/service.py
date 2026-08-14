@@ -199,8 +199,14 @@ class AssetMapService(BaseService):
                 node_query = (
                     match_clause
                     + where_clause
+                    # 指标节点优先返回：图节点上限 500，无排序会挤掉指标节点，
+                    # 而边查询可能引用它们，导致前端过滤边时端点缺失、指标不可见。
+                    # 排序 metric > table > field，保证指标节点总是进入节点集。
                     + " RETURN n.id AS id, n.type AS type, n.label AS label,"
-                    + " n.pii AS pii, n.domain AS domain, n.owner AS owner LIMIT 500"
+                    + " n.pii AS pii, n.domain AS domain, n.owner AS owner"
+                    + " ORDER BY CASE n.type WHEN 'metric' THEN 0"
+                    + " WHEN 'table' THEN 1 ELSE 2 END"
+                    + " LIMIT 500"
                 )
 
                 # 边：可变长关系按 depth 限跳（Neo4j pattern 不支持参数作长度上界，
