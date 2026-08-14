@@ -81,11 +81,8 @@ test.describe("Asset Map", () => {
       await expect(heatmapContainer).toBeVisible();
     }
 
-    // Statistic cards (节点数/边数) should be visible in 热力视图
-    const statCard = page.locator(".ant-statistic").first();
-    if (await statCard.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await expect(statCard).toBeVisible();
-    }
+    // 二维热力矩阵标题应可见（真实 Heatmap 替代原水平进度条）
+    await expect(page.getByText("敏感分布热力矩阵")).toBeVisible({ timeout: 5000 });
     await expect(page.getByRole("heading", { name: "资产地图" })).toBeVisible({ timeout: 5000 });
   });
 

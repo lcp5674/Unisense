@@ -3037,6 +3037,8 @@ PIPL 撤回同意/销户时，审计中个人标识**覆写脱敏**而非物理�
 3. `GET /asset-map/heatmap`：敏感分布热力（按 `classification.sensitivity_level` 着色）→ 驱动合规整改（触发 `governance.POST /classification/rescan`）。
 4. `GET /asset-map/owner/{uid}`：责任人视图（名下资产+健康度，复用 metric 驾驶舱）。
 5. `GET /asset-map/{entity}`：表/字段详情（含血缘入口、PII 标记、责任人）。
+6. `GET /assetmap/heatmap-matrix`：二维热力矩阵（业务域×敏感级别，db_catalog 经 data_source 继承域），前端 G2 Heatmap 渲染真热力图，替代单维进度条。
+7. `GET /assetmap/graph`：资产图谱（力导向图）——节点并入 metric + db_catalog 表/视图 + 血缘边引用字段（`table:{entity_name}` 与血缘边对齐），按域着色成簇、PII 红描边、血缘度编码大小；前端 G6 v5 力导向渲染，点击节点下钻（指标→详情页；表/字段→实体详情抽屉）；Neo4j 不可用降级 MySQL 拼接。
 
 **接口调用链**：
 - 入：§3.3 端点 + 事件总线（catalog/metric/classification）
