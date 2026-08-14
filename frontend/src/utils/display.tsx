@@ -28,19 +28,39 @@ export const PLAN_FIELD_LABEL: Record<string, string> = {
   from_cache: "来自缓存",
 };
 
-/** 口径定义 JSON 字段名 → 中文 */
+/** 口径定义 JSON 字段名 → 中文（对齐 backend definition_json 全集：SQL 模式 / 表达式模式 / seed 数据） */
 export const DEF_FIELD_LABEL: Record<string, string> = {
-  expression: "表达式",
-  expr: "表达式",
+  // SQL 模式
+  sql: "口径 SQL",
+  etl_sql: "口径 SQL",
   source_tables: "关联数据表",
   source_fields: "来源字段",
   source_columns: "来源字段",
-  dependencies: "依赖指标",
-  etl_sql: "口径 SQL",
-  sql: "口径 SQL",
+  group_by: "分组维度",
   filters: "过滤条件",
+  time_column: "时间字段",
+  partition_key: "分区字段",
+  measure_columns: "度量列",
+  dimensions: "维度",
+  // 表达式模式
+  expression: "表达式",
+  expr: "表达式",
+  // 依赖与来源
+  dependencies: "依赖指标",
+  source_table: "源表",
+  measure_column: "度量列",
+  period: "统计周期",
   grain: "口径粒度",
   unit: "单位",
+  // 嵌套对象（measures / source_fields 项）
+  name: "名称",
+  aggregation: "聚合方式",
+  table: "来源表",
+  column: "字段",
+  pii: "含 PII",
+  // 其它元信息
+  code: "指标编码",
+  metric_code: "指标编码",
 };
 
 /** 质量阈值字段名 → 中文 */

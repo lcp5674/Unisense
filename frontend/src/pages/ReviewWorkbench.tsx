@@ -398,7 +398,7 @@ export function ReviewWorkbench() {
         open={compareOpen != null}
         onCancel={() => setCompareOpen(null)}
         footer={<Button onClick={() => setCompareOpen(null)}>关闭</Button>}
-        width={920}
+        width={1120}
       >
         {compareOpen ? (
           <>
@@ -429,7 +429,7 @@ export function ReviewWorkbench() {
         okText="提交裁决"
         okButtonProps={{ loading: arbitrateBusy, disabled: decisionOptions.length === 0 }}
         cancelButtonProps={{ disabled: arbitrateBusy }}
-        width={920}
+        width={1120}
       >
         {arbitrating ? (
           <>

@@ -948,10 +948,10 @@ body {
   overflow-wrap: anywhere;
   white-space: normal;
 }
-/* 字段列加宽到 160：避免「新鲜度」「时间语义」等 4 字中文被竖排 */
+/* 字段列 min-width 对齐组件 width=200：避免「新鲜度」「时间语义」等 4 字中文被竖排 */
 .compare-modal .ant-table-thead > tr > th:nth-child(1),
 .compare-modal .ant-table-tbody > tr > td:nth-child(1) {
-  min-width: 160px;
+  min-width: 200px;
 }
 
 .notif-meta-item .anticon {

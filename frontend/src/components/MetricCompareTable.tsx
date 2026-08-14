@@ -1,6 +1,6 @@
 import { Table } from "antd";
 import type { MetricCompareDeps, MetricCompareField, MetricCompareResult } from "../types";
-import { ObjectView } from "../utils/display";
+import { DEF_FIELD_LABEL, ObjectView } from "../utils/display";
 
 export const COMPARE_FIELD_LABELS: Record<string, string> = {
   granularity: "粒度",
@@ -27,7 +27,8 @@ const DIFF_META: Record<string, { bg: string; pillBg: string; pillFg: string; la
 function renderValue(v: unknown) {
   if (v == null) return <span className="muted">—</span>;
   if (typeof v === "object") {
-    return <ObjectView data={v as Record<string, unknown>} depth={1} />;
+    // 口径定义/依赖对象：用 DEF_FIELD_LABEL 做字段名中文化，避免技术 key 直出
+    return <ObjectView data={v as Record<string, unknown>} depth={1} labels={DEF_FIELD_LABEL} />;
   }
   return <span className="mono">{String(v)}</span>;
 }
@@ -155,7 +156,7 @@ export function MetricCompareTable({
       title: "字段",
       dataIndex: "label",
       key: "label",
-      width: 160,
+      width: 200,
       render: (v: string) => (
         <strong style={{ color: "var(--ink)" }}>{COMPARE_FIELD_LABELS[v] ?? v}</strong>
       ),
@@ -164,7 +165,7 @@ export function MetricCompareTable({
       title: codeA || "指标 A",
       dataIndex: "a",
       key: "a",
-      width: 280,
+      width: 330,
       render: (v: unknown) => (
         <div style={{ padding: "2px 0" }}>{renderValue(v)}</div>
       ),
@@ -173,14 +174,14 @@ export function MetricCompareTable({
       title: "差异",
       dataIndex: "level",
       key: "level",
-      width: 88,
+      width: 100,
       render: (v: keyof typeof DIFF_META) => <DiffPill level={v} />,
     },
     {
       title: codeB || "指标 B",
       dataIndex: "b",
       key: "b",
-      width: 280,
+      width: 330,
       render: (v: unknown) => (
         <div style={{ padding: "2px 0" }}>{renderValue(v)}</div>
       ),
