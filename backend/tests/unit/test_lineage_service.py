@@ -327,8 +327,12 @@ async def test_query_graph_reuses_assetmap_assembly(monkeypatch: Any) -> None:
     async def fake_graph_from_mysql(self, domain, pii_only):
         called["domain"] = domain
         called["pii_only"] = pii_only
+        nodes = [
+            {"id": "table:a", "type": "table", "label": "a"},
+            {"id": "metric:m", "type": "metric", "label": "m"},
+        ]
         edges = [{"source": "table:a", "target": "metric:m", "type": "DERIVED_FROM"}] * 5
-        return ([{"id": "table:a", "type": "table", "label": "a"}], edges)
+        return (nodes, edges)
 
     fake_cls = type(
         "FakeAssetMapRepo",
@@ -346,6 +350,36 @@ async def test_query_graph_reuses_assetmap_assembly(monkeypatch: Any) -> None:
     assert called["pii_only"] is True
     assert out["nodes"][0]["id"] == "table:a"
     assert len(out["edges"]) == 2  # limit 截断边
+
+
+async def test_query_graph_drops_dangling_edges(monkeypatch: Any) -> None:
+    """自包含子图：仅保留两端都在节点集内的边，悬空边（指向未渲染节点）被剔除。"""
+    async def fake_graph_from_mysql(self, domain, pii_only):
+        nodes = [
+            {"id": "table:a", "type": "table", "label": "a"},
+            {"id": "metric:m", "type": "metric", "label": "m"},
+        ]
+        edges = [
+            {"source": "table:a", "target": "metric:m", "type": "DERIVED_FROM"},  # 保留
+            {"source": "table:a", "target": "table:ghost", "type": "DERIVED_FROM"},  # 悬空
+            {"source": "table:ghost", "target": "table:a", "type": "DERIVED_FROM"},  # 悬空
+        ]
+        return (nodes, edges)
+
+    fake_cls = type(
+        "FakeAssetMapRepo",
+        (),
+        {
+            "__init__": lambda self, db: setattr(self, "_db", db),
+            "graph_from_mysql": fake_graph_from_mysql,
+        },
+    )
+    monkeypatch.setattr("app.services.assetmap.repository.AssetMapRepository", fake_cls)
+
+    svc = LineageService(db=_FakeSession())
+    out = await svc.query_graph()
+    assert len(out["edges"]) == 1
+    assert out["edges"][0] == {"source": "table:a", "target": "metric:m", "type": "DERIVED_FROM"}
 
 
 async def test_query_graph_defaults_without_filters(monkeypatch: Any) -> None:

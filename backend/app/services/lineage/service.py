@@ -211,11 +211,16 @@ class LineageService(BaseService):
                 前端力导向图另行限流节点数，保证可读性）。
 
         Returns:
-            ``{"nodes": [...], "edges": [...]}``。
+            ``{"nodes": [...], "edges": [...]}``——边为**自包含子图**（仅保留
+            两端都在节点集内的边），保证返回边数与图谱实际渲染一致。
         """
         from app.services.assetmap.repository import AssetMapRepository
 
         nodes, edges = await AssetMapRepository(self._db).graph_from_mysql(domain, pii_only)
+        # 自包含子图：仅保留两端都在节点集内的边，消除指向未渲染节点的悬空边
+        # （如中间层 *_tmp / ads_* 表），避免界面“共 N 条边”与实际渲染不符。
+        node_ids = {n["id"] for n in nodes}
+        edges = [e for e in edges if e["source"] in node_ids and e["target"] in node_ids]
         return {"nodes": nodes, "edges": edges[:limit]}
 
     async def impact_preview(self, metric_code: str, change_type: str) -> ImpactPreviewResponse:
