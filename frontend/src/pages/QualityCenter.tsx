@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Alert } from "antd";
-import { PlusOutlined, ReloadOutlined, ThunderboltOutlined, LinkOutlined } from "@ant-design/icons";
+import { PlusOutlined, ReloadOutlined, ThunderboltOutlined, LinkOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   listQualityRules,
   createQualityRule,
@@ -543,6 +544,14 @@ function ReconciliationTab() {
 }
 
 export function QualityCenter() {
+  const navigate = useNavigate();
+
+  // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
+
   const tabItems = [
     { key: "rules", label: "质量规则", children: <RulesTab /> },
     { key: "events", label: "质量事件", children: <EventsTab /> },
@@ -554,6 +563,9 @@ export function QualityCenter() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Governance / Quality</div>
           <h2>质量中心</h2>
           <p>规则、告警、基准与对账——指标质量的持续守护。</p>

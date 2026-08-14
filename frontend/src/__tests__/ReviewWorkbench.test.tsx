@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ReviewWorkbench } from "../pages/ReviewWorkbench";
 import type { ConflictListResponse, ConflictResponse, MetricCompareResult, RulingRecord } from "../types";
 
@@ -231,5 +231,41 @@ describe("ReviewWorkbench 冲突仲裁", () => {
     const ruledRow = screen.getByText("CF-C").closest("tr") as HTMLElement;
     fireEvent.click(within(ruledRow).getByRole("button", { name: /裁决记录/ }));
     await waitFor(() => expect(screen.getByText(/暂无裁决记录/)).toBeInTheDocument());
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-A")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/lineage", "/review"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/review" element={<ReviewWorkbench />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("CF-A")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <MemoryRouter initialEntries={["/review"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/review" element={<ReviewWorkbench />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("CF-A")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
   });
 });

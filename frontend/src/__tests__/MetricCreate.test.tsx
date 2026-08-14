@@ -226,4 +226,44 @@ describe("MetricCreate 批量注册指标", () => {
     });
     expect(mockedBatch).not.toHaveBeenCalled();
   });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <AntApp>
+        <MemoryRouter initialEntries={["/lineage", "/create"]}>
+          <Routes>
+            <Route path="/lineage" element={<div>lineage-page</div>} />
+            <Route path="/create" element={<MetricCreate />} />
+          </Routes>
+        </MemoryRouter>
+      </AntApp>,
+    );
+    await screen.findByText("注册指标（草稿）");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <AntApp>
+        <MemoryRouter initialEntries={["/create"]}>
+          <Routes>
+            <Route path="/dashboard" element={<div>dashboard-page</div>} />
+            <Route path="/create" element={<MetricCreate />} />
+          </Routes>
+        </MemoryRouter>
+      </AntApp>,
+    );
+    await screen.findByText("注册指标（草稿）");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
+  });
 });

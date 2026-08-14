@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { LineageView } from "../pages/LineageView";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
@@ -150,5 +150,41 @@ describe("LineageView 血缘图谱 Tab", () => {
     await waitFor(() => {
       expect(screen.getByText(/暂无血缘图谱数据/)).toBeInTheDocument();
     });
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/assetmap", "/lineage"]}>
+        <Routes>
+          <Route path="/assetmap" element={<div>assetmap-page</div>} />
+          <Route path="/lineage" element={<LineageView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    screen.getByRole("button", { name: /返\s*回/ }).click();
+    await screen.findByText("assetmap-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <MemoryRouter initialEntries={["/lineage"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/lineage" element={<LineageView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    screen.getByRole("button", { name: /返\s*回/ }).click();
+    await screen.findByText("dashboard-page");
   });
 });

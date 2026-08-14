@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button, Card, Input, Modal, Space, Table, Tag, message } from "antd";
+import { ArrowLeftOutlined } from "@ant-design/icons";
 import { listMetrics, reviewMetric, UnisenseApiError } from "../api";
 import type { MetricResponse } from "../types";
 
@@ -41,6 +42,12 @@ export function MetricReview() {
   const [loading, setLoading] = useState(false);
   const [busyCode, setBusyCode] = useState<string | null>(null);
   const navigate = useNavigate();
+
+  // 统一返回上一入口：优先回退浏览器历史（总览告警带等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   async function load() {
     setLoading(true);
@@ -108,7 +115,7 @@ export function MetricReview() {
       key: "version",
       render: (v: number) => `v${v}`,
     },
-    { title: "更新时间", dataIndex: "updated_at", key: "updated_at" },
+    { title: "更新时间", dataIndex: "updated_at", key: "updated_at", render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span className="muted">—</span>) },
     {
       title: "操作",
       key: "actions",
@@ -137,6 +144,9 @@ export function MetricReview() {
 
   return (
     <div>
+      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
+        返回
+      </Button>
       <Card
         title="指标审批"
         extra={

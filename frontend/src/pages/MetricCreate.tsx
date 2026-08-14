@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { BarsOutlined } from "@ant-design/icons";
+import { BarsOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   Alert, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
@@ -101,6 +101,12 @@ export function MetricCreate() {
   const { message } = AntApp.useApp();
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
+
+  // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   const [domainTree, setDomainTree] = useState<SubjectDomainTreeNode[]>([]);
   const [domainLoading, setDomainLoading] = useState(false);
@@ -468,6 +474,9 @@ export function MetricCreate() {
 
   return (
     <div>
+      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
+        返回
+      </Button>
       <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }} align="center">
         <Title level={3} style={{ margin: 0 }}>注册指标（草稿）</Title>
         <Button type="dashed" icon={<BarsOutlined />} onClick={openBatchModal}>

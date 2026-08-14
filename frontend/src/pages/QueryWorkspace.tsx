@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Card, Select, Input, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col, Drawer, Empty } from "antd";
-import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined } from "@ant-design/icons";
+import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   consumeDryRun,
   consumeQuery,
@@ -88,6 +89,13 @@ export function QueryWorkspace() {
   const [semanticOpen, setSemanticOpen] = useState(false);
   const [semanticData, setSemanticData] = useState<DryRunResponse | null>(null);
   const { track } = useTracking();
+  const navigate = useNavigate();
+
+  // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   // 将预设键翻译为后端要求的 YYYY-MM-DD,YYYY-MM-DD 格式
   function translateDateRange(key: string): string {
@@ -500,6 +508,9 @@ export function QueryWorkspace() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Consumption / Query</div>
           <h2>查询工作台</h2>
           <p>基于指标语义的查询——先 dry-run 校验口径，再安全执行。</p>

@@ -84,6 +84,7 @@ describe("ConsumptionGuide", () => {
       gray_tenant_ids: null,
       pending_conflict: false,
       pending_conflict_detail: null,
+  pending_version: false,
       created_at: "2026-08-01T00:00:00",
       updated_at: "2026-08-01T00:00:00",
     });
@@ -123,5 +124,51 @@ describe("ConsumptionGuide", () => {
 
     expect(screen.getByText("注意事项")).toBeInTheDocument();
     expect(screen.getByText("关联指标")).toBeInTheDocument();
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    mockedFetchGuide.mockResolvedValue(mockGuideData);
+    renderGuide();
+    await waitFor(() => {
+      expect(screen.getAllByText("finance_revenue_sum_d").length).toBeGreaterThan(0);
+    });
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    mockedFetchGuide.mockResolvedValue(mockGuideData);
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/detail/finance_revenue_sum_d", "/guide/finance_revenue_sum_d"]}>
+        <Routes>
+          <Route path="/detail/:code" element={<div>detail-page</div>} />
+          <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByText("finance_revenue_sum_d").length).toBeGreaterThan(0);
+    });
+    const backBtn = screen.getByRole("button", { name: /返\s*回/ });
+    backBtn.click();
+    await screen.findByText("detail-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    mockedFetchGuide.mockResolvedValue(mockGuideData);
+    render(
+      <MemoryRouter initialEntries={["/guide/finance_revenue_sum_d"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getAllByText("finance_revenue_sum_d").length).toBeGreaterThan(0);
+    });
+    screen.getByRole("button", { name: /返\s*回/ }).click();
+    await screen.findByText("dashboard-page");
   });
 });

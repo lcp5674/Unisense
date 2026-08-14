@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Card, Spin, Alert, Descriptions, Tag, Empty, Space } from "antd";
-import { InfoCircleOutlined, WarningOutlined, LinkOutlined } from "@ant-design/icons";
+import { Card, Spin, Alert, Descriptions, Tag, Empty, Space, Button } from "antd";
+import { InfoCircleOutlined, WarningOutlined, LinkOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import { fetchConsumptionGuide, getMetric } from "../api";
 import type { ConsumptionGuideResponse, MetricResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
@@ -16,6 +16,12 @@ export function ConsumptionGuide() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { track } = useTracking();
+
+  // 统一返回上一入口：优先回退浏览器历史（指标详情等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   useEffect(() => {
     if (!metricCode) return;
@@ -67,6 +73,9 @@ export function ConsumptionGuide() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Consumption / Guide</div>
           <h2>消费指南 — <span className="mono">{metricCode}</span></h2>
           <p>推荐的查询方式、注意事项与关联指标——基于指标语义自动生成。</p>

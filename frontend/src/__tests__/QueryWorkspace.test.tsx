@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryWorkspace } from "../pages/QueryWorkspace";
 
 // Mock API：QueryWorkspace 依赖的模块全量提供（含消费令牌存取 + 错误类）
@@ -65,7 +66,11 @@ const mockSemanticData = {
 };
 
 function renderPage() {
-  return render(<QueryWorkspace />);
+  return render(
+    <MemoryRouter initialEntries={["/query"]}>
+      <QueryWorkspace />
+    </MemoryRouter>,
+  );
 }
 
 // 定位「指标」Form.Item 内的 Select 搜索输入框（antd 不把 placeholder 放到 input 上）
@@ -118,6 +123,7 @@ describe("QueryWorkspace", () => {
           gray_tenant_ids: null,
           pending_conflict: false,
           pending_conflict_detail: null,
+  pending_version: false,
           created_at: "2026-08-01T00:00:00",
           updated_at: "2026-08-01T00:00:00",
         },
@@ -189,5 +195,41 @@ describe("QueryWorkspace", () => {
     await waitFor(() => {
       expect(screen.getByText("加载指标语义失败")).toBeInTheDocument();
     });
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/lineage", "/query"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/query" element={<QueryWorkspace />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <MemoryRouter initialEntries={["/query"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/query" element={<QueryWorkspace />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
   });
 });

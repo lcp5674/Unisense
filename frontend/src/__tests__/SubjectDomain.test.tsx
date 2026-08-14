@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { App as AntApp } from "antd";
 import { SubjectDomain, previewDomainCode } from "../pages/SubjectDomain";
 import type { SubjectDomainTreeNode } from "../types";
@@ -24,11 +25,13 @@ const mockedGet = vi.mocked(getDomain);
 const mockedDefaults = vi.mocked(getDomainDefaults);
 const mockedUpdate = vi.mocked(updateDomain);
 
-/** 组件依赖 AntApp.useApp() 的 message/modal，渲染时需包 <App> 提供真实 context。 */
+/** 组件依赖 AntApp.useApp() 的 message/modal，渲染时需包 <App> 提供真实 context；组件用 useNavigate 需配路由。 */
 function renderPage() {
   return render(
     <AntApp>
-      <SubjectDomain />
+      <MemoryRouter>
+        <SubjectDomain />
+      </MemoryRouter>
     </AntApp>,
   );
 }
@@ -205,5 +208,45 @@ describe("SubjectDomain 页面", () => {
     const editInput = await screen.findByDisplayValue("销售");
     fireEvent.change(editInput, { target: { value: "销售" } });
     expect(screen.queryByTestId("edit-dup-warning")).toBeNull();
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    renderPage();
+    await screen.findByText("销售");
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <AntApp>
+        <MemoryRouter initialEntries={["/search", "/domains"]}>
+          <Routes>
+            <Route path="/search" element={<div>search-page</div>} />
+            <Route path="/domains" element={<SubjectDomain />} />
+          </Routes>
+        </MemoryRouter>
+      </AntApp>,
+    );
+    await screen.findByText("销售");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("search-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <AntApp>
+        <MemoryRouter initialEntries={["/domains"]}>
+          <Routes>
+            <Route path="/dashboard" element={<div>dashboard-page</div>} />
+            <Route path="/domains" element={<SubjectDomain />} />
+          </Routes>
+        </MemoryRouter>
+      </AntApp>,
+    );
+    await screen.findByText("销售");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
   });
 });

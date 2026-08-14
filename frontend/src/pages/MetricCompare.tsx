@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button, Card, Empty, Spin } from "antd";
+import { ArrowLeftOutlined } from "@ant-design/icons";
 import { compareMetrics } from "../api";
 import type { MetricCompareResult } from "../types";
 import { MetricCompareTable } from "../components/MetricCompareTable";
@@ -13,6 +14,12 @@ export function MetricCompare() {
   const [result, setResult] = useState<MetricCompareResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // 统一返回上一入口：优先回退浏览器历史（指标目录勾选对比等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   useEffect(() => {
     let alive = true;
@@ -51,7 +58,7 @@ export function MetricCompare() {
             关键字段并排 diff
           </p>
         </div>
-        <Button type="link" onClick={() => navigate("/catalog")}>← 返回目录</Button>
+        <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack}>← 返回</Button>
       </div>
 
       {loading ? (

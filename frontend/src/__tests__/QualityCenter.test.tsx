@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QualityCenter } from "../pages/QualityCenter";
 import type { MetricResponse, QualityBenchmark, QualityEvent } from "../types";
 
@@ -78,6 +79,7 @@ const metric: MetricResponse = {
   gray_tenant_ids: null,
   pending_conflict: false,
   pending_conflict_detail: null,
+  pending_version: false,
   created_at: "2026-08-01T00:00:00",
   updated_at: "2026-08-01T00:00:00",
 };
@@ -115,7 +117,11 @@ const benchmark: QualityBenchmark = {
 };
 
 function renderQuality() {
-  return render(<QualityCenter />);
+  return render(
+    <MemoryRouter initialEntries={["/quality"]}>
+      <QualityCenter />
+    </MemoryRouter>,
+  );
 }
 
 beforeEach(() => {
@@ -199,5 +205,38 @@ describe("QualityCenter 质量中心", () => {
         tolerance_pct: null,
       }),
     );
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    renderQuality();
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/lineage", "/quality"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/quality" element={<QualityCenter />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <MemoryRouter initialEntries={["/quality"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/quality" element={<QualityCenter />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
   });
 });

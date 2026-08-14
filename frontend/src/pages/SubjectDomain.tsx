@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Button, Card, Col, Row, Tree, Descriptions, Modal, Form, Input, InputNumber,
   Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip, Alert,
 } from "antd";
-import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, SettingOutlined, BranchesOutlined } from "@ant-design/icons";
+import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, SettingOutlined, BranchesOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
 import {
   listDomainTree, getDomain, createDomain, updateDomain, deactivateDomain,
@@ -184,11 +185,18 @@ function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: Subject
 
 export function SubjectDomain() {
   const { message, modal } = AntApp.useApp();
+  const navigate = useNavigate();
   const [treeData, setTreeData] = useState<SubjectDomainTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [detail, setDetail] = useState<SubjectDomain | null>(null);
   const [defaults, setDefaults] = useState<Record<string, unknown>>({});
+
+  // 统一返回上一入口：优先回退浏览器历史（全局搜索等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   // 弹窗
   const [createOpen, setCreateOpen] = useState(false);
@@ -357,6 +365,9 @@ export function SubjectDomain() {
 
   return (
     <div>
+      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
+        返回
+      </Button>
       <Row gutter={16}>
         <Col span={10}>
           <Card title="主题域树" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate(true)}>新建根域</Button>} style={{ minHeight: 500 }}>

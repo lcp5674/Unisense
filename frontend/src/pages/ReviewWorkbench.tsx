@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button, Card, Input, Modal, Radio, Select, Space, Table, Tag, message } from "antd";
+import { ArrowLeftOutlined } from "@ant-design/icons";
 import {
   arbitrateConflict,
   closeConflict,
@@ -135,6 +136,12 @@ export function ReviewWorkbench() {
 
   const navigate = useNavigate();
   const { track } = useTracking();
+
+  // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   async function load() {
     setLoading(true);
@@ -362,6 +369,9 @@ export function ReviewWorkbench() {
 
   return (
     <div>
+      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
+        返回
+      </Button>
       <Card
         title="审核工作台（冲突仲裁）"
         extra={
