@@ -18,6 +18,7 @@ from app.services.dimension.schemas import (
     DimensionMappingResponse,
     DimensionMemberCreate,
     DimensionMemberResponse,
+    DimensionMemberUpdate,
     DimensionResponse,
     DimensionUpdate,
     MetricDimensionBind,
@@ -279,6 +280,29 @@ async def list_members(
         data={"items": [DimensionMemberResponse.from_model(i) for i in items], "total": len(items)},
         trace_id=trace_id,
     )
+
+
+@router.put("/{dim_code}/members/{member_code}", dependencies=_WRITE_DEPS)
+async def update_member(
+    dim_code: str,
+    member_code: str,
+    payload: DimensionMemberUpdate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    resp = await DimensionService(db).update_member(dim_code, member_code, payload)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.member.update",
+        entity_type="dimension_member",
+        entity_id=f"{dim_code}:{member_code}",
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=DimensionMemberResponse.from_model(resp), trace_id=trace_id)
 
 
 @router.post(

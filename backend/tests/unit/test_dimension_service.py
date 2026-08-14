@@ -7,14 +7,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.dimension import (
     Dimension,
+    DimensionMember,
     Reconciliation,
 )
 from app.services.dimension.schemas import (
     DimensionCreate,
     DimensionMemberCreate,
+    DimensionMemberUpdate,
 )
 from app.services.dimension.service import DimensionService
 
@@ -188,3 +190,121 @@ async def test_generate_dim_code_chinese_to_english() -> None:
     payload = DimensionCreate(dim_code=None, name="地区", domain="地理", owner_id=1)
     out = await svc.create_dimension(payload, 1)
     assert out.dim_code == "geo_area"
+
+
+# ---- 缓慢变化维类型枚举校验 ----
+async def test_create_dimension_invalid_type_rejected() -> None:
+    """非法 SCD 类型（如 SCD9）应在服务层 4xx，而非 DB Enum 500。"""
+    svc, repo = await _svc()
+    payload = DimensionCreate(dim_code="dim1", name="地区", domain="geo", type="SCD9", owner_id=1)
+    with pytest.raises(ValidationError):
+        await svc.create_dimension(payload, 1)
+
+
+async def test_create_dimension_scd3_accepted() -> None:
+    """SCD3（有限历史）属生产全集，应被接受并落库。"""
+    svc, repo = await _svc()
+    payload = DimensionCreate(dim_code="dim3", name="地区", domain="geo", type="SCD3", owner_id=1)
+    out = await svc.create_dimension(payload, 1)
+    assert out.type == "SCD3"
+
+
+# ---- 成员层级路径自动推测 ----
+async def test_create_member_auto_resolves_root_path() -> None:
+    """根成员（无父级）path 自动推测为 /{member_code}。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=Dimension(id=1, dim_code="geo_region", name="地区", domain="geo", type="SCD1", status="DRAFT", owner_id=1)
+    )
+    payload = DimensionMemberCreate(dim_code="geo_region", member_code="east", member_name="华东", status="PUBLISHED")
+    out = await svc.create_member(payload)
+    assert out.path == "/east"
+
+
+async def test_create_member_auto_resolves_child_path() -> None:
+    """子成员（指定父级）path 自动推测为 父path/子member_code。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=Dimension(id=1, dim_code="geo_region", name="地区", domain="geo", type="SCD1", status="DRAFT", owner_id=1)
+    )
+    parent = DimensionMember(id=1, dim_code="geo_region", member_code="east", member_name="华东", parent_code=None, path="/east", status="PUBLISHED")
+    repo.list_members = AsyncMock(return_value=[parent])
+    payload = DimensionMemberCreate(
+        dim_code="geo_region", member_code="east_nanjing", member_name="南京", parent_code="east", status="PUBLISHED"
+    )
+    out = await svc.create_member(payload)
+    assert out.path == "/east/east_nanjing"
+
+
+async def test_create_member_explicit_path_kept() -> None:
+    """客户端显式提供 path 时服务端不覆盖（保留手工路径）。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=Dimension(id=1, dim_code="geo_region", name="地区", domain="geo", type="SCD1", status="DRAFT", owner_id=1)
+    )
+    payload = DimensionMemberCreate(
+        dim_code="geo_region", member_code="east", member_name="华东", path="/自定义/路径", status="PUBLISHED"
+    )
+    out = await svc.create_member(payload)
+    assert out.path == "/自定义/路径"
+
+
+# ---- 成员编辑 ----
+async def test_update_member_reparent_resolves_path() -> None:
+    """编辑成员改父级：自动重算 path = 新父 path + / + member_code。"""
+    svc, repo = await _svc()
+    member = DimensionMember(id=1, dim_code="geo_region", member_code="child", member_name="子级", parent_code=None, path="/child", status="PUBLISHED")
+    repo.get_member = AsyncMock(return_value=member)
+    repo.list_members = AsyncMock(
+        return_value=[
+            member,
+            DimensionMember(id=2, dim_code="geo_region", member_code="parent", member_name="父级", parent_code=None, path="/parent", status="PUBLISHED"),
+        ]
+    )
+    out = await svc.update_member(
+        "geo_region", "child",
+        DimensionMemberUpdate(parent_code="parent", member_name="子级（新）"),
+    )
+    assert out.member_name == "子级（新）"
+    assert out.parent_code == "parent"
+    assert out.path == "/parent/child"
+
+
+async def test_update_member_clear_parent_to_root() -> None:
+    """编辑成员置为根：parent_code="" → parent 清空，path 重算为 /{member_code}。"""
+    svc, repo = await _svc()
+    member = DimensionMember(id=1, dim_code="geo_region", member_code="child", member_name="子级", parent_code="parent", path="/parent/child", status="PUBLISHED")
+    repo.get_member = AsyncMock(return_value=member)
+    repo.list_members = AsyncMock(return_value=[member])
+    out = await svc.update_member("geo_region", "child", DimensionMemberUpdate(parent_code=""))
+    assert out.parent_code is None
+    assert out.path == "/child"
+
+
+async def test_update_member_rejects_cycle() -> None:
+    """环防护：不能把成员移动到自身后代之下。"""
+    svc, repo = await _svc()
+    member = DimensionMember(id=1, dim_code="geo_region", member_code="root", member_name="根", parent_code=None, path="/root", status="PUBLISHED")
+    descendant = DimensionMember(id=2, dim_code="geo_region", member_code="sub", member_name="子", parent_code="root", path="/root/sub", status="PUBLISHED")
+    repo.get_member = AsyncMock(return_value=member)
+    # 尝试把 root 挂到 sub（root 的后代）下 → 环
+    repo.list_members = AsyncMock(return_value=[member, descendant])
+    with pytest.raises(ConflictError):
+        await svc.update_member("geo_region", "root", DimensionMemberUpdate(parent_code="sub"))
+
+
+async def test_update_member_missing_raises() -> None:
+    """编辑不存在的成员 → 404。"""
+    svc, repo = await _svc()
+    repo.get_member = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.update_member("geo_region", "nope", DimensionMemberUpdate(member_name="x"))
+
+
+async def test_update_member_invalid_status_rejected() -> None:
+    """非法成员状态在服务层 4xx，而非 DB Enum 500。"""
+    svc, repo = await _svc()
+    member = DimensionMember(id=1, dim_code="geo_region", member_code="m1", member_name="成员", parent_code=None, path="/m1", status="PUBLISHED")
+    repo.get_member = AsyncMock(return_value=member)
+    with pytest.raises(ValidationError):
+        await svc.update_member("geo_region", "m1", DimensionMemberUpdate(status="BOGUS"))

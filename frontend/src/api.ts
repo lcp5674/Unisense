@@ -1137,6 +1137,25 @@ export async function createDimensionMember(body: {
   );
 }
 
+/** 编辑维度成员（PUT /dimensions/{dim_code}/members/{member_code}） */
+export async function updateDimensionMember(body: {
+  dim_code: string;
+  member_code: string;
+  member_name?: string;
+  parent_code?: string | null;
+  path?: string | null;
+  attributes?: Record<string, unknown> | null;
+  status?: string;
+}): Promise<DimensionMember> {
+  return request<DimensionMember>(
+    `${API_BASE}/dimensions/${encodeURIComponent(body.dim_code)}/members/${encodeURIComponent(body.member_code)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
 /** 维度详情（GET /dimensions/{dim_code}） */
 export async function getDimension(dimCode: string): Promise<Dimension> {
   return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}`);

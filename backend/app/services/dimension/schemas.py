@@ -54,9 +54,19 @@ class DimensionMemberCreate(BaseModel):
     member_code: str | None = None  # 缺省由系统自动生成（member_name slug，维度内唯一）
     member_name: str
     parent_code: str | None = None
-    path: str | None = None
+    path: str | None = None  # 缺省由服务端按父级路径自动推测（父 path + / + member_code）
     attributes: dict[str, Any] | None = None
     status: str = "PUBLISHED"
+
+
+class DimensionMemberUpdate(BaseModel):
+    """维度成员编辑（member_code 为业务标识，不可变更；仅改名称/父级/属性/状态）。"""
+
+    member_name: str | None = None
+    parent_code: str | None = None  # 变更父级时服务端自动重算 path
+    path: str | None = None
+    attributes: dict[str, Any] | None = None
+    status: str | None = None
 
 
 class DimensionMemberResponse(BaseModel):

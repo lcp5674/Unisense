@@ -25,8 +25,22 @@ from app.models.base import BaseModel
 
 
 class DimensionType(enum.StrEnum):
+    """缓慢变化维类型全集（生产标准）。
+
+    - SCD0: 原样保留（不跟踪变化）
+    - SCD1: 覆盖旧值（仅保留当前值）
+    - SCD2: 保留历史（按时间切片新增记录）
+    - SCD3: 有限历史（同时保留当前值 + 原值列）
+    - SCD4: 历史表（当前值与全量历史分离存放）
+    - SCD6: 混合（SCD1 + SCD2 组合，历史 + 当前均可查）
+    """
+
+    SCD0 = "SCD0"
     SCD1 = "SCD1"
     SCD2 = "SCD2"
+    SCD3 = "SCD3"
+    SCD4 = "SCD4"
+    SCD6 = "SCD6"
 
 
 class DimensionStatus(enum.StrEnum):

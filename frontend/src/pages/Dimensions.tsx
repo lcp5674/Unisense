@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space } from "antd";
-import { PlusOutlined, SendOutlined } from "@ant-design/icons";
+import { EditOutlined, PlusOutlined, SendOutlined } from "@ant-design/icons";
 import {
   listDimensions,
   createDimension,
@@ -17,10 +17,19 @@ import {
   reviewReconciliation,
   listDimensionMembers,
   createDimensionMember,
+  updateDimensionMember,
   listMetrics,
+  listDomainTree,
   UnisenseApiError,
 } from "../api";
-import type { Dimension, DimensionMapping, Reconciliation, DimensionMember, MetricResponse } from "../types";
+import type {
+  Dimension,
+  DimensionMapping,
+  Reconciliation,
+  DimensionMember,
+  MetricResponse,
+  SubjectDomainTreeNode,
+} from "../types";
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
@@ -30,12 +39,40 @@ const RECON_STATUS_LABEL: Record<string, string> = {
   REJECTED: "已驳回",
 };
 
+// 缓慢变化维类型全集（对齐后端 DimensionType 枚举：SCD0-SCD6）
+const SCD_TYPE_OPTIONS = [
+  { value: "SCD0", label: "SCD0 原样保留" },
+  { value: "SCD1", label: "SCD1 覆盖旧值" },
+  { value: "SCD2", label: "SCD2 保留历史" },
+  { value: "SCD3", label: "SCD3 有限历史" },
+  { value: "SCD4", label: "SCD4 历史表" },
+  { value: "SCD6", label: "SCD6 混合" },
+];
+
+// 指标-维度关联角色（对齐后端 MetricDimensionRole 枚举）
+const ROLE_OPTIONS = [
+  { value: "PARTITION", label: "PARTITION 分区" },
+  { value: "SPLICE", label: "SPLICE 拼接" },
+  { value: "FILTER", label: "FILTER 过滤" },
+];
+
+// 递归展平主题域树 → code → 中文名映射（业务域选项框用）
+function flattenDomainNames(nodes: SubjectDomainTreeNode[], acc: Map<string, string>) {
+  for (const n of nodes) {
+    acc.set(n.code, n.name);
+    if (n.children?.length) flattenDomainNames(n.children, acc);
+  }
+}
+
 function DimensionsTab() {
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
+  // 生命周期状态下钻（?status=，总览仪表「维度」资产卡片）作为初始筛选
+  const urlStatus = searchParams.get("status") ?? "";
   const [items, setItems] = useState<Dimension[]>([]);
   const [keyword, setKeyword] = useState(urlKw);
+  const [status, setStatus] = useState(urlStatus);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
@@ -50,6 +87,10 @@ function DimensionsTab() {
   const [bindForm] = Form.useForm();
   // 绑定指标下拉候选（指标列表）
   const [metrics, setMetrics] = useState<MetricResponse[]>([]);
+  // 业务域树 → 中文名映射（新建/编辑维度的业务域选项框）
+  const [domainMap, setDomainMap] = useState<Map<string, string>>(new Map());
+  // 绑定 Modal 中「默认成员」下拉候选（当前维度的成员列表）
+  const [bindMembers, setBindMembers] = useState<DimensionMember[]>([]);
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
 
@@ -59,6 +100,12 @@ function DimensionsTab() {
     if (urlKw && urlKw !== keyword) setKeyword(urlKw);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKw]);
+
+  // 响应 URL 状态参数变化（总览仪表「维度」资产卡片二次下钻）；status 在 load 依赖中自动重查
+  useEffect(() => {
+    if (urlStatus && urlStatus !== status) setStatus(urlStatus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlStatus]);
 
   // 编辑 Modal 打开时预填当前维度值（基于列表行，getDimension 拉最新后覆盖）
   useEffect(() => {
@@ -73,10 +120,17 @@ function DimensionsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editOpen, editTarget]);
 
-  // 绑定指标候选（指标列表，失败静默不影响列表主流程）
+  // 绑定指标候选（指标列表，失败静默不影响列表主流程）；同时加载业务域树供选项框使用
   useEffect(() => {
     listMetrics({ page_size: 200 })
       .then((r) => setMetrics(r.items))
+      .catch(() => {});
+    listDomainTree()
+      .then((tree) => {
+        const m = new Map<string, string>();
+        flattenDomainNames(tree, m);
+        setDomainMap(m);
+      })
       .catch(() => {});
   }, []);
 
@@ -84,7 +138,10 @@ function DimensionsTab() {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await listDimensions({ keyword: keyword || undefined });
+      const res = await listDimensions({
+        keyword: keyword || undefined,
+        status: status || undefined,
+      });
       // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
       if (seq !== loadSeq.current) return;
       setItems(res.items);
@@ -99,7 +156,7 @@ function DimensionsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword]);
+  }, [keyword, status]);
 
   async function handleCreate(values: Record<string, unknown>) {
     try {
@@ -219,9 +276,21 @@ function DimensionsTab() {
             <Button size="small" onClick={() => openEdit(d)}>编辑</Button>
             <Button
               size="small"
-              onClick={() => {
+              onClick={async () => {
                 bindForm.resetFields();
                 setBindTarget(d);
+                // 打开时重新加载指标候选（确保与指标目录一致，带状态标签可区分）
+                try {
+                  const r = await listMetrics({ page_size: 200 });
+                  setMetrics(r.items);
+                } catch { /* 静默：已有候选可降级 */ }
+                // 加载该维度成员作为「默认成员」下拉候选
+                try {
+                  const r = await listDimensionMembers(d.dim_code);
+                  setBindMembers(r.items);
+                } catch {
+                  setBindMembers([]);
+                }
               }}
             >
               绑定指标
@@ -259,10 +328,18 @@ function DimensionsTab() {
             <Input placeholder="如 渠道" />
           </Form.Item>
           <Form.Item name="domain" label="业务域" rules={[{ required: true }]}>
-            <Input placeholder="如 finance" />
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择业务域"
+              options={Array.from(domainMap.entries()).map(([code, name]) => ({
+                value: code,
+                label: `${name}（${code}）`,
+              }))}
+            />
           </Form.Item>
           <Form.Item name="type" label="缓慢变化维类型">
-            <Select options={[{ value: "SCD1", label: "SCD1 覆盖" }, { value: "SCD2", label: "SCD2 历史" }]} />
+            <Select options={SCD_TYPE_OPTIONS} placeholder="选择类型" />
           </Form.Item>
           <Form.Item name="description" label="描述">
             <Input.TextArea rows={2} />
@@ -286,10 +363,18 @@ function DimensionsTab() {
             <Input placeholder="如 渠道" />
           </Form.Item>
           <Form.Item name="domain" label="业务域" rules={[{ required: true }]}>
-            <Input placeholder="如 finance" />
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择业务域"
+              options={Array.from(domainMap.entries()).map(([code, name]) => ({
+                value: code,
+                label: `${name}（${code}）`,
+              }))}
+            />
           </Form.Item>
           <Form.Item name="type" label="缓慢变化维类型">
-            <Select options={[{ value: "SCD1", label: "SCD1 覆盖" }, { value: "SCD2", label: "SCD2 历史" }]} />
+            <Select options={SCD_TYPE_OPTIONS} placeholder="选择类型" />
           </Form.Item>
           <Form.Item name="description" label="描述">
             <Input.TextArea rows={2} />
@@ -308,7 +393,7 @@ function DimensionsTab() {
         <Form
           form={bindForm}
           layout="vertical"
-          initialValues={{ role: "filter" }}
+          initialValues={{ role: "FILTER" }}
           onFinish={handleBind}
           style={{ marginTop: 8 }}
         >
@@ -317,20 +402,58 @@ function DimensionsTab() {
               showSearch
               optionFilterProp="label"
               placeholder="选择指标"
+              notFoundContent={metrics.length === 0 ? "暂无指标，请先在指标目录创建" : "无匹配指标"}
               options={metrics.map((m) => ({
                 value: m.id,
                 label: `${m.metric_code} · ${m.name}`,
               }))}
             />
           </Form.Item>
-          <Form.Item name="role" label="维度角色" extra="如 partition/filter/group，标识该指标如何消费此维度">
-            <Input placeholder="filter" />
+          <Form.Item name="role" label="维度角色" extra="标识该指标如何消费此维度">
+            <Select options={ROLE_OPTIONS} placeholder="选择角色" />
           </Form.Item>
           <Form.Item name="default_member" label="默认成员">
-            <Input className="mono" placeholder="如 /渠道/线上" />
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择该维度下的成员"
+              notFoundContent={bindMembers.length === 0 ? "该维度暂无成员" : "无匹配成员"}
+              options={bindMembers.map((mem) => ({
+                value: mem.member_code,
+                label: mem.path ? `${mem.path}（${mem.member_name}）` : `${mem.member_code} · ${mem.member_name}`,
+              }))}
+            />
           </Form.Item>
         </Form>
       </Modal>
+    </div>
+  );
+}
+
+// 层级路径实时预览：选择父级/输入编码时自动推算将生成的路径（提交时交由后端兜底）
+function PathPreview({
+  form,
+  members,
+}: {
+  form: ReturnType<typeof Form.useForm>[0];
+  members: DimensionMember[];
+}) {
+  const parentCode = Form.useWatch("parent_code", form);
+  const memberCode = Form.useWatch("member_code", form);
+  let path: string;
+  if (parentCode) {
+    const parent = members.find((m) => m.member_code === parentCode);
+    const base = parent?.path ?? `/${parentCode}`;
+    path = memberCode ? `${base}/${memberCode}` : `${base}/{member_code}`;
+  } else if (memberCode) {
+    path = `/${memberCode}`;
+  } else {
+    path = "/{member_code}";
+  }
+  return (
+    <div className="muted" style={{ fontSize: 12 }}>
+      层级路径将自动生成：<code className="mono">{path}</code>
     </div>
   );
 }
@@ -342,6 +465,11 @@ function MembersTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  // 编辑态：复用新增布局，打开时预填当前成员值
+  const [editTarget, setEditTarget] = useState<DimensionMember | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editForm] = Form.useForm();
 
   useEffect(() => {
     listDimensions().then((r) => setDims(r.items)).catch(() => {});
@@ -356,6 +484,12 @@ function MembersTab() {
       .finally(() => setLoading(false));
   }, [dimCode]);
 
+  async function reload() {
+    if (!dimCode) return;
+    setLoading(true);
+    listDimensionMembers(dimCode).then((r) => setMembers(r.items)).finally(() => setLoading(false));
+  }
+
   async function handleCreate(values: Record<string, unknown>) {
     if (!dimCode) return;
     try {
@@ -364,16 +498,58 @@ function MembersTab() {
         member_code: values.member_code ? String(values.member_code) : undefined,
         member_name: String(values.member_name),
         parent_code: values.parent_code ? String(values.parent_code) : null,
-        path: values.path ? String(values.path) : null,
+        // path 留空，由后端按父级路径自动推测
       });
       message.success("成员已创建");
       setModalOpen(false);
       form.resetFields();
-      setLoading(true);
-      listDimensionMembers(dimCode).then((r) => setMembers(r.items)).finally(() => setLoading(false));
+      reload();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
     }
+  }
+
+  function openEdit(m: DimensionMember) {
+    setEditTarget(m);
+    setEditOpen(true);
+    editForm.setFieldsValue({
+      member_name: m.member_name,
+      parent_code: m.parent_code ?? undefined,
+      status: m.status,
+    });
+  }
+
+  async function handleEdit(values: Record<string, unknown>) {
+    if (!dimCode || !editTarget) return;
+    setEditSaving(true);
+    try {
+      await updateDimensionMember({
+        dim_code: dimCode,
+        member_code: editTarget.member_code,
+        member_name: values.member_name ? String(values.member_name) : undefined,
+        // 空串表示置为根成员（取消父级），后端据此重算 path
+        parent_code: values.parent_code ? String(values.parent_code) : "",
+        status: values.status ? String(values.status) : undefined,
+      });
+      message.success("成员已更新");
+      setEditOpen(false);
+      editForm.resetFields();
+      reload();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  // 成员下拉选项（父级选择框）：展示路径 + 名称，便于识别层级
+  function memberOptions(excludeCode?: string) {
+    return members
+      .filter((m) => m.member_code !== excludeCode)
+      .map((m) => ({
+        value: m.member_code,
+        label: m.path ? `${m.path}（${m.member_name}）` : `${m.member_code} · ${m.member_name}`,
+      }));
   }
 
   return (
@@ -407,6 +583,14 @@ function MembersTab() {
             width: 100,
             render: (s: string) => <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>,
           },
+          {
+            title: "操作",
+            key: "actions",
+            width: 90,
+            render: (_: unknown, m: DimensionMember) => (
+              <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(m)}>编辑</Button>
+            ),
+          },
         ]}
       />
 
@@ -418,12 +602,55 @@ function MembersTab() {
           <Form.Item name="member_name" label="成员名称" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Form.Item name="parent_code" label="父级编码">
-            <Input className="mono" />
+          <Form.Item name="parent_code" label="父级编码" extra={<span className="muted" style={{ fontSize: 12 }}>留空则为根成员</span>}>
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择父级成员（可留空作为根）"
+              notFoundContent={members.length === 0 ? "当前维度暂无成员，该成员将作为根" : "无匹配成员"}
+              options={memberOptions()}
+            />
           </Form.Item>
-          <Form.Item name="path" label="层级路径">
-            <Input className="mono" placeholder="如 /渠道/线上" />
+          <PathPreview form={form} members={members} />
+        </Form>
+      </Modal>
+
+      <Modal
+        title={editTarget ? `编辑成员：${editTarget.member_code}` : "编辑成员"}
+        open={editOpen}
+        onCancel={() => {
+          setEditOpen(false);
+          editForm.resetFields();
+        }}
+        onOk={() => editForm.submit()}
+        okText="保存"
+        confirmLoading={editSaving}
+      >
+        <Form form={editForm} layout="vertical" onFinish={handleEdit} style={{ marginTop: 8 }}>
+          <Form.Item name="member_name" label="成员名称" rules={[{ required: true }]}>
+            <Input />
           </Form.Item>
+          <Form.Item name="parent_code" label="父级编码" extra={<span className="muted" style={{ fontSize: 12 }}>清空则置为根成员，层级路径自动重算</span>}>
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择父级成员"
+              notFoundContent={members.length === 0 ? "当前维度暂无成员" : "无匹配成员"}
+              options={memberOptions(editTarget?.member_code)}
+            />
+          </Form.Item>
+          <Form.Item name="status" label="状态">
+            <Select
+              options={[
+                { value: "DRAFT", label: "草稿" },
+                { value: "PUBLISHED", label: "已发布" },
+                { value: "DEPRECATED", label: "已废弃" },
+              ]}
+            />
+          </Form.Item>
+          <PathPreview form={editForm} members={members} />
         </Form>
       </Modal>
     </div>
@@ -435,6 +662,8 @@ function MappingsTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  // 维度下拉候选（源/目标维度选项框）
+  const [dims, setDims] = useState<Dimension[]>([]);
 
   async function load() {
     setLoading(true);
@@ -450,6 +679,7 @@ function MappingsTab() {
 
   useEffect(() => {
     load();
+    listDimensions().then((r) => setDims(r.items)).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -486,11 +716,23 @@ function MappingsTab() {
 
       <Modal title="新建维度映射" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
-          <Form.Item name="source_dim_code" label="源维度编码" rules={[{ required: true }]}>
-            <Input className="mono" />
+          <Form.Item name="source_dim_code" label="源维度" rules={[{ required: true }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择源维度"
+              notFoundContent={dims.length === 0 ? "暂无维度，请先创建" : "无匹配维度"}
+              options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}
+            />
           </Form.Item>
-          <Form.Item name="target_dim_code" label="目标维度编码" rules={[{ required: true }]}>
-            <Input className="mono" />
+          <Form.Item name="target_dim_code" label="目标维度" rules={[{ required: true }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择目标维度"
+              notFoundContent={dims.length === 0 ? "暂无维度，请先创建" : "无匹配维度"}
+              options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}
+            />
           </Form.Item>
           <Form.Item name="mapping_type" label="映射类型">
             <Select options={[{ value: "EQUIVALENT", label: "等价" }, { value: "PARTIAL", label: "部分" }]} />

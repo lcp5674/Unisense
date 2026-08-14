@@ -26,6 +26,7 @@ from app.models.dimension import (
     DimensionMapping,
     DimensionMember,
     DimensionStatus,
+    DimensionType,
     MappingType,
     MetricDimension,
     MetricDimensionRole,
@@ -37,6 +38,7 @@ from app.services.dimension.schemas import (
     DimensionCreate,
     DimensionMappingCreate,
     DimensionMemberCreate,
+    DimensionMemberUpdate,
     DimensionUpdate,
     MetricDimensionBind,
     ReconciliationReview,
@@ -46,9 +48,11 @@ from app.services.dimension.schemas import (
 #: 维度成员层级深度上限（含根，1 层 = 根；防止深链/环导致的递归遍历风险）。
 _MAX_MEMBER_DEPTH = 10
 
-#: 合法映射类型 / 关联角色取值（DB Enum 列，非法值须在服务层转 4xx，而非 DB 500）。
+#: 合法映射类型 / 关联角色 / 缓慢变化维类型取值（DB Enum 列，非法值须在服务层转 4xx，而非 DB 500）。
 _VALID_MAPPING_TYPES = {e.value for e in MappingType}
 _VALID_ROLES = {e.value for e in MetricDimensionRole}
+_VALID_DIM_TYPES = {e.value for e in DimensionType}
+_VALID_MEMBER_STATUSES = {e.value for e in DimensionStatus}
 
 
 class DimensionService(BaseService):
@@ -85,6 +89,13 @@ class DimensionService(BaseService):
             data.dim_code = await self._generate_dim_code(data)
         if await self._repo.get_dimension(data.dim_code) is not None:
             raise ConflictError(f"维度编码已存在: {data.dim_code}", error_code="DIM_EXISTS")
+        # 缓慢变化维类型 enum 显式校验（非法值 → 4xx，而非 DB Enum 500）
+        if data.type not in _VALID_DIM_TYPES:
+            raise ValidationError(
+                f"未知缓慢变化维类型: {data.type}",
+                error_code="INVALID_DIM_TYPE",
+                ctx={"type": data.type},
+            )
         dim = Dimension(
             dim_code=data.dim_code,
             name=data.name,
@@ -117,6 +128,12 @@ class DimensionService(BaseService):
         if data.domain is not None:
             dim.domain = data.domain
         if data.type is not None:
+            if data.type not in _VALID_DIM_TYPES:
+                raise ValidationError(
+                    f"未知缓慢变化维类型: {data.type}",
+                    error_code="INVALID_DIM_TYPE",
+                    ctx={"type": data.type},
+                )
             dim.type = data.type
         if data.description is not None:
             dim.description = data.description
@@ -152,6 +169,16 @@ class DimensionService(BaseService):
 
         return await generate_unique_code(base, _exists)
 
+    def _resolve_member_path(
+        self, parent: DimensionMember | None, member_code: str
+    ) -> str:
+        """层级路径自动推测：根成员 ``/{member_code}``，子成员 ``父path/{member_code}``。"""
+        if parent is None:
+            return f"/{member_code}"
+        if parent.path:
+            return f"{parent.path}/{member_code}"
+        return f"/{parent.member_code}/{member_code}"
+
     async def create_member(self, data: DimensionMemberCreate) -> DimensionMember:
         await self._require(data.dim_code)
 
@@ -168,7 +195,8 @@ class DimensionService(BaseService):
         else:
             data.member_code = await self._generate_member_code(data)
 
-        # 父级校验：存在性 + 自引用 + 层级深度上限
+        # 父级校验：存在性 + 自引用
+        parent: DimensionMember | None = None
         if data.parent_code:
             if data.parent_code == data.member_code:
                 raise ConflictError(
@@ -176,17 +204,23 @@ class DimensionService(BaseService):
                     error_code="SELF_PARENT",
                     ctx={"member_code": data.member_code},
                 )
-            if not any(m.member_code == data.parent_code for m in members):
+            parent = next(
+                (m for m in members if m.member_code == data.parent_code), None
+            )
+            if parent is None:
                 raise NotFoundError(
                     f"父成员不存在: {data.dim_code}/{data.parent_code}",
                     ctx={"parent_code": data.parent_code},
                 )
-            # path 由父路径拼接：限制层级深度防深链
-            if data.path and data.path.count("/") >= _MAX_MEMBER_DEPTH:
-                raise ConflictError(
-                    f"维度成员层级超过上限（{_MAX_MEMBER_DEPTH} 层）",
-                    error_code="MEMBER_DEPTH_EXCEEDED",
-                )
+
+        # 层级路径自动推测：未显式提供时按父路径拼接（生产兜底，避免手工路径错位）
+        if data.path is None:
+            data.path = self._resolve_member_path(parent, data.member_code)
+        if data.path.count("/") >= _MAX_MEMBER_DEPTH:
+            raise ConflictError(
+                f"维度成员层级超过上限（{_MAX_MEMBER_DEPTH} 层）",
+                error_code="MEMBER_DEPTH_EXCEEDED",
+            )
 
         member = DimensionMember(
             dim_code=data.dim_code,
@@ -198,6 +232,90 @@ class DimensionService(BaseService):
             status=data.status,
         )
         return await self._repo.save_member(member)
+
+    async def update_member(
+        self, dim_code: str, member_code: str, data: DimensionMemberUpdate
+    ) -> DimensionMember:
+        """编辑维度成员（member_code 为业务标识不可变更）。
+
+        - 改父级时自动重算 path，并做环防护（不能移动到自身后代之下）。
+        - ``parent_code=""`` 表示置为根成员（取消父级）。
+        """
+        member = await self._repo.get_member(dim_code, member_code)
+        if member is None:
+            raise NotFoundError(
+                f"维度成员不存在: {dim_code}/{member_code}",
+                ctx={"member_code": member_code},
+            )
+        if data.status is not None and data.status not in _VALID_MEMBER_STATUSES:
+            raise ValidationError(
+                f"未知成员状态: {data.status}",
+                error_code="INVALID_MEMBER_STATUS",
+                ctx={"status": data.status},
+            )
+        if data.member_name is not None:
+            member.member_name = data.member_name
+        if data.attributes is not None:
+            member.attributes = data.attributes
+
+        # 父级变更（含置根）：重新推导 path
+        if data.parent_code is not None:
+            new_parent_code = data.parent_code or None  # "" → 置根
+            if new_parent_code != member.parent_code:
+                await self._validate_reparent(member, new_parent_code, dim_code)
+        elif data.path is not None:
+            member.path = data.path
+
+        if member.path and member.path.count("/") >= _MAX_MEMBER_DEPTH:
+            raise ConflictError(
+                f"维度成员层级超过上限（{_MAX_MEMBER_DEPTH} 层）",
+                error_code="MEMBER_DEPTH_EXCEEDED",
+            )
+        await self._repo.commit()
+        return member
+
+    async def _validate_reparent(
+        self,
+        member: DimensionMember,
+        new_parent_code: str | None,
+        dim_code: str,
+    ) -> None:
+        """校验并执行父级变更：存在性/自引用/环防护 + path 自动重算。"""
+        if new_parent_code == member.member_code:
+            raise ConflictError(
+                "维度成员不能以自身为父级",
+                error_code="SELF_PARENT",
+                ctx={"member_code": member.member_code},
+            )
+        if new_parent_code is None:
+            member.parent_code = None
+            member.path = self._resolve_member_path(None, member.member_code)
+            return
+        members = await self._repo.list_members(dim_code)
+        parent = next((m for m in members if m.member_code == new_parent_code), None)
+        if parent is None:
+            raise NotFoundError(
+                f"父成员不存在: {dim_code}/{new_parent_code}",
+                ctx={"parent_code": new_parent_code},
+            )
+        # 环防护：沿新父向上追溯，若回到当前成员即成环（禁止移动到自身后代之下）
+        cursor: DimensionMember | None = parent
+        visited: set[str] = set()
+        while cursor is not None:
+            if cursor.member_code == member.member_code:
+                raise ConflictError(
+                    "维度成员不能移动到自己后代之下（将形成环）",
+                    error_code="CYCLE_PARENT",
+                    ctx={"member_code": member.member_code},
+                )
+            if cursor.member_code in visited:
+                break
+            visited.add(cursor.member_code)
+            cursor = next(
+                (m for m in members if m.member_code == cursor.parent_code), None
+            )
+        member.parent_code = new_parent_code
+        member.path = self._resolve_member_path(parent, member.member_code)
 
     async def list_members(self, dim_code: str) -> list[DimensionMember]:
         await self._require(dim_code)

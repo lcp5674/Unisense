@@ -36,12 +36,14 @@ vi.mock("../api", () => {
     reviewReconciliation: vi.fn(),
     listDimensionMembers: vi.fn(),
     createDimensionMember: vi.fn(),
+    updateDimensionMember: vi.fn(),
     listMetrics: vi.fn(),
+    listDomainTree: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 
@@ -77,6 +79,12 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ items: DIMS, total: 2 });
   // 维度列表 Tab 挂载即拉取指标候选（绑定指标下拉），默认返回空列表
   vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
+  // 业务域树（新建/编辑维度业务域选项框）：finance → 财务域
+  vi.mocked(listDomainTree).mockResolvedValue([
+    { id: 1, code: "finance", name: "财务域", parent_id: null, level: 1, sort_order: 0, status: "ACTIVE", metric_count: 0, children: [] },
+  ]);
+  // 成员列表（默认成员下拉/父级选择），默认空
+  vi.mocked(listDimensionMembers).mockResolvedValue({ items: [], total: 0 });
 });
 
 describe("Dimensions 页面", () => {
@@ -95,6 +103,21 @@ describe("Dimensions 页面", () => {
     }
   });
 
+  it("从总览仪表 ?status=xxx 直达：所有查询都携带状态过滤（资产卡片下钻）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/dimensions?status=PUBLISHED"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("dim_channel");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ status: "PUBLISHED" });
+    }
+  });
+
   it("URL 直达时搜索框预填关键词（?kw=）", async () => {
     render(
       <MemoryRouter initialEntries={["/dimensions?kw=渠道"]}>
@@ -103,8 +126,7 @@ describe("Dimensions 页面", () => {
     );
 
     const input = await screen.findByPlaceholderText("搜索维度编码 / 名称 / 描述");
-    expect((input as HTMLInputElement).value).toBe("渠道");
-  });
+    expect((input as HTMLInputElement).value).toBe("渠道");  });
 
   it("防竞态：迟到的首查响应不覆盖最新筛选结果", async () => {
     type DimListResponse = { items: Dimension[]; total: number };
@@ -229,8 +251,116 @@ describe("Dimensions 页面", () => {
 
     await waitFor(() => {
       expect(bindMetricDimension).toHaveBeenCalledWith(
-        expect.objectContaining({ metric_id: 10, dim_code: "dim_channel", role: "filter" }),
+        expect.objectContaining({ metric_id: 10, dim_code: "dim_channel", role: "FILTER" }),
       );
     });
+  });
+
+  it("成员管理：父级选择为选项框，选择父级后路径自动推测预览", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDimensionMembers).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          dim_code: "dim_channel",
+          member_code: "online",
+          member_name: "线上",
+          parent_code: null,
+          path: "/online",
+          attributes: null,
+          status: "PUBLISHED",
+          created_at: "2026-08-01T00:00:00",
+        },
+      ],
+      total: 1,
+    });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    // 切到「成员管理」Tab
+    await user.click(screen.getByRole("tab", { name: /成员管理/ }));
+    // 选择维度（Tab 内唯一的 Select combobox）
+    const dimSelect = await screen.findByRole("combobox");
+    fireEvent.mouseDown(dimSelect);
+    await user.click(await screen.findByText("dim_channel · 渠道"));
+
+    // 打开新增成员，父级应为 Select（选项来自成员列表）
+    await user.click(screen.getByRole("button", { name: /新增成员/ }));
+    const dialog = screen.getByRole("dialog");
+    const parentItem = within(dialog).getByText("父级编码").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(within(parentItem).getByRole("combobox"));
+    await user.click(await screen.findByText("/online（线上）"));
+    // 路径自动推测预览：选择 online 父级 + 尚未填 member_code → 显示 /online/{member_code}
+    await waitFor(() => {
+      expect(within(dialog).getByText(/层级路径将自动生成/)).toBeInTheDocument();
+      expect(within(dialog).getByText("/online/{member_code}")).toBeInTheDocument();
+    });
+  });
+
+  it("成员管理：编辑成员调用 updateDimensionMember 并提交父级/状态", async () => {
+    const user = userEvent.setup();
+    const member = {
+      id: 1,
+      dim_code: "dim_channel",
+      member_code: "online",
+      member_name: "线上",
+      parent_code: null,
+      path: "/online",
+      attributes: null,
+      status: "PUBLISHED",
+      created_at: "2026-08-01T00:00:00",
+    };
+    vi.mocked(listDimensionMembers).mockResolvedValue({ items: [member], total: 1 });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole("tab", { name: /成员管理/ }));
+    const dimSelect = await screen.findByRole("combobox");
+    fireEvent.mouseDown(dimSelect);
+    await user.click(await screen.findByText("dim_channel · 渠道"));
+
+    await screen.findByText("online");
+    const row = screen.getByText("online").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: /编\s*辑/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/编辑成员：online/)).toBeInTheDocument();
+    });
+    const nameInput = screen.getByLabelText("成员名称") as HTMLInputElement;
+    expect(nameInput.value).toBe("线上");
+    await user.clear(nameInput);
+    await user.type(nameInput, "线上（新）");
+    await user.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(updateDimensionMember).toHaveBeenCalledWith(
+        expect.objectContaining({
+          dim_code: "dim_channel",
+          member_code: "online",
+          member_name: "线上（新）",
+          status: "PUBLISHED",
+        }),
+      );
+    });
+  });
+
+  it("维度映射：源/目标维度为选项框，选项来自维度列表", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole("tab", { name: /维度映射/ }));
+    await user.click(await screen.findByRole("button", { name: /新建映射/ }));
+    const dialog = screen.getByRole("dialog");
+    const sourceItem = within(dialog).getByText("源维度").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(within(sourceItem).getByRole("combobox"));
+    // 维度列表已加载 → 下拉含 dim_channel · 渠道
+    await user.click(await screen.findByText("dim_channel · 渠道"));
+    expect(within(sourceItem).getByText("dim_channel · 渠道")).toBeInTheDocument();
   });
 });
