@@ -1589,6 +1589,7 @@ function PiiTab() {
 }
 
 function ChangesTab() {
+  const navigate = useNavigate();
   const [data, setData] = useState<AssetChanges | null>(null);
   const [days, setDays] = useState(7);
   const [loading, setLoading] = useState(true);
@@ -1663,13 +1664,27 @@ function ChangesTab() {
         pagination={{ pageSize: 10 }}
         style={{ marginTop: 16 }}
         title={() => <b>指标</b>}
+        onRow={(r) => ({
+          onClick: () => navigate(`/detail/${encodeURIComponent(r.metric_code)}`),
+          style: { cursor: "pointer" },
+        })}
         columns={[
           {
             title: "编码",
             dataIndex: "metric_code",
             key: "code",
             ellipsis: true,
-            render: (v: string) => <span className="mono">{v}</span>,
+            render: (v: string) => (
+              <a
+                className="mono"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate(`/detail/${encodeURIComponent(v)}`);
+                }}
+              >
+                {v}
+              </a>
+            ),
           },
           { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
           { title: "状态", dataIndex: "status", key: "status", width: 110 },
@@ -1695,6 +1710,7 @@ function ChangesTab() {
 }
 
 function MyAssetsTab() {
+  const navigate = useNavigate();
   const [data, setData] = useState<AssetMyAssets | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1749,13 +1765,27 @@ function MyAssetsTab() {
         pagination={{ pageSize: 10 }}
         style={{ marginTop: 16 }}
         title={() => <b>我的指标</b>}
+        onRow={(r) => ({
+          onClick: () => navigate(`/detail/${encodeURIComponent(r.metric_code)}`),
+          style: { cursor: "pointer" },
+        })}
         columns={[
           {
             title: "编码",
             dataIndex: "metric_code",
             key: "code",
             ellipsis: true,
-            render: (v: string) => <span className="mono">{v}</span>,
+            render: (v: string) => (
+              <a
+                className="mono"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate(`/detail/${encodeURIComponent(v)}`);
+                }}
+              >
+                {v}
+              </a>
+            ),
           },
           { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
           { title: "状态", dataIndex: "status", key: "status", width: 110 },

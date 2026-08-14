@@ -17,6 +17,8 @@ vi.mock("../api", () => ({
   fetchAssetOrphans: vi.fn(),
   fetchAssetEntityDetail: vi.fn(),
   fetchAssetSearch: vi.fn(),
+  fetchAssetChanges: vi.fn(),
+  fetchAssetMyAssets: vi.fn(),
   listCatalogs: vi.fn(),
   listMetrics: vi.fn(),
 }));
@@ -73,6 +75,8 @@ import {
   fetchAssetOrphans,
   fetchAssetEntityDetail,
   fetchAssetSearch,
+  fetchAssetChanges,
+  fetchAssetMyAssets,
   listCatalogs,
   listMetrics,
 } from "../api";
@@ -132,6 +136,8 @@ describe("AssetMap", () => {
     });
     vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
     vi.mocked(fetchAssetOrphans).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(fetchAssetChanges).mockResolvedValue({ catalogs: [], metrics: [], days: 7 });
+    vi.mocked(fetchAssetMyAssets).mockResolvedValue({ owner_id: 1, catalogs: [], metrics: [] });
     vi.mocked(listCatalogs).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
     vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
   });
@@ -445,5 +451,58 @@ describe("AssetMap", () => {
     await waitFor(() => expect(screen.getByText("sales.ods")).toBeInTheDocument());
     // 目录行名称不是链接（仅指标行可跳转详情）
     expect(screen.getByText("sales.ods").closest("a")).toBeNull();
+  });
+
+  it("changes tab metric row click navigates to metric detail", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetChanges).mockResolvedValue({
+      catalogs: [],
+      metrics: [
+        {
+          metric_code: "finance_revenue_sum_d",
+          name: "收入",
+          status: "PUBLISHED",
+          domain: "finance",
+          pii_flag: false,
+          updated_at: "2026-08-01T00:00:00Z",
+        },
+      ],
+      days: 7,
+    });
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /变更追踪/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /变更追踪/ }));
+
+    await waitFor(() => expect(screen.getByText("finance_revenue_sum_d")).toBeInTheDocument());
+    expect(screen.getByText("finance_revenue_sum_d").closest("a")).not.toBeNull();
+    await user.click(screen.getByText("finance_revenue_sum_d"));
+    await waitFor(() => expect(window.location.pathname).toBe("/detail/finance_revenue_sum_d"));
+  });
+
+  it("my assets tab metric row click navigates to metric detail", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetMyAssets).mockResolvedValue({
+      owner_id: 1,
+      catalogs: [],
+      metrics: [
+        {
+          metric_code: "finance_cost_sum_d",
+          name: "成本",
+          status: "DRAFT",
+          domain: "finance",
+          pii_flag: false,
+        },
+      ],
+    });
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /我的资产/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /我的资产/ }));
+
+    await waitFor(() => expect(screen.getByText("finance_cost_sum_d")).toBeInTheDocument());
+    expect(screen.getByText("finance_cost_sum_d").closest("a")).not.toBeNull();
+    await user.click(screen.getByText("finance_cost_sum_d"));
+    await waitFor(() => expect(window.location.pathname).toBe("/detail/finance_cost_sum_d"));
   });
 });
