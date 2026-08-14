@@ -424,6 +424,11 @@ export interface UserPreferenceList {
 // 语义服务（backend /api/v1/semantics/*）
 // ============================================================================
 
+export interface AssetStat {
+  total: number;
+  by_status: Record<string, number>;
+}
+
 export interface DashboardData {
   total: number;
   by_status: Record<string, number>;
@@ -431,6 +436,17 @@ export interface DashboardData {
   by_domain: Record<string, number>;
   pii_count: number;
   pii_ratio: number;
+  /** 全资产总览：指标/数据表/数据源/维度/术语/指标模板/采集任务/数据字典 */
+  assets?: {
+    metric: AssetStat;
+    table: AssetStat;
+    source: AssetStat;
+    dimension: AssetStat;
+    term: AssetStat;
+    template: AssetStat;
+    collection_task: AssetStat;
+    system_dict: AssetStat;
+  };
 }
 
 export interface MetricTemplate {
@@ -1169,6 +1185,8 @@ export interface TestConnectionResult {
 }
 
 export interface DBCatalog {
+  /** db_catalog 主键（列表/详情接口均返回；LLM 推断/编辑描述依赖） */
+  id?: number;
   source_id: string;
   entity_name: string;
   entity_type: string;

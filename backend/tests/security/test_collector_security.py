@@ -74,6 +74,7 @@ async def test_normal_user_cannot_create_source_403(analyst_client):
 async def test_register_pii_catalog_writes_audit(owner_client, monkeypatch):
     client, session = owner_client
     pii_resp = DBCatalogResponse(
+        id=1,
         source_id="s",
         entity_name="users",
         entity_type="TABLE",

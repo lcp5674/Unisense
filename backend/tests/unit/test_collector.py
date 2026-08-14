@@ -58,6 +58,7 @@ class _FakeCatalog:
     """用于 DBCatalogResponse.model_validate 的轻量替身（含 schema_json 列名）。"""
 
     def __init__(self, sensitivity: str) -> None:
+        self.id = 1
         self.source_id = "src1"
         self.entity_name = "users"
         self.entity_type = "TABLE"
@@ -2542,3 +2543,32 @@ async def test_repo_get_description_coverage_stats() -> None:
     assert by_name["dwd_user"]["domain"] == "platform"
     assert by_name["dwd_user"]["table_desc"] is True
     assert by_name["dwd_user"]["sensitivity_level"] == "CONFIDENTIAL"
+
+
+async def test_count_jobs_by_status_aggregates() -> None:
+    """总览仪表资产卡片：按任务状态聚合计数（运行时 JobStore 数据）。"""
+    svc, _repo = _svc()
+    svc.list_jobs = AsyncMock(
+        return_value=[
+            {"job_id": "j1", "status": "COMPLETED"},
+            {"job_id": "j2", "status": "COMPLETED"},
+            {"job_id": "j3", "status": "RUNNING"},
+            {"job_id": "j4", "status": "QUEUED"},
+            {"job_id": "j5", "status": None},
+        ]
+    )
+
+    counts = await svc.count_jobs_by_status()
+
+    assert counts == {"COMPLETED": 2, "RUNNING": 1, "QUEUED": 1, "UNKNOWN": 1}
+    svc.list_jobs.assert_awaited_once_with(limit=100000, offset=0)
+
+
+async def test_count_jobs_by_status_queue_unsupported_returns_empty() -> None:
+    """队列不支持 list 时返回空分布，不阻断仪表盘。"""
+    svc, _repo = _svc()
+    svc.list_jobs = AsyncMock(return_value=[])
+
+    counts = await svc.count_jobs_by_status()
+
+    assert counts == {}

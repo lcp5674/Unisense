@@ -67,6 +67,7 @@ class _FakeRegisterSvc:
 
     async def register_catalog(self, req: object, actor_id: int) -> DBCatalogResponse:
         return DBCatalogResponse(
+            id=1,
             source_id="s",
             entity_name="users",
             entity_type="TABLE",
