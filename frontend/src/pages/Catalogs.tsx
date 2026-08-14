@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty } from "antd";
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined } from "@ant-design/icons";
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, inferColumnDescription, inferDescriptions, updateColumnDescription, UnisenseApiError } from "../api";
 import type { DBCatalog, DataSource, SchemaColumn } from "../types";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
@@ -25,6 +25,7 @@ const SENSITIVITY_COLOR: Record<string, string> = {
 };
 
 export function Catalogs() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw= / ?source_id=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
@@ -211,6 +212,12 @@ export function Catalogs() {
     }
   }
 
+  // 统一返回上一入口：优先回退浏览器历史（总览资产卡片/血缘视图/数据源详情等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
+
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -329,6 +336,9 @@ export function Catalogs() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Collection / Catalog</div>
           <h2>采集目录</h2>
           <p>采集器登记的元数据目录——含敏感度分级与 schema 完整性标记。</p>
