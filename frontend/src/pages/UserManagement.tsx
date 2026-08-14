@@ -1,0 +1,396 @@
+import { useEffect, useState } from "react";
+import {
+  Alert,
+  Button,
+  Card,
+  Form,
+  Input,
+  Modal,
+  Popconfirm,
+  Select,
+  Space,
+  Table,
+  Tag,
+  message,
+} from "antd";
+import {
+  LockOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  TeamOutlined,
+} from "@ant-design/icons";
+import {
+  UnisenseApiError,
+  createUser,
+  fetchCurrentUser,
+  listAdminUsers,
+  resetUserPassword,
+  setUserStatus,
+  updateUser,
+} from "../api";
+import type { AdminUser, CurrentUser, UserCreateRequest, UserUpdateRequest } from "../types";
+
+const ROLE_LABEL: Record<string, string> = {
+  platform_admin: "平台管理员",
+  domain_admin: "域管理员",
+  metric_owner: "指标负责人",
+  reviewer: "评审员",
+  compliance_officer: "合规官",
+  analyst: "分析师",
+  viewer: "只读用户",
+};
+
+const ROLE_OPTIONS = Object.entries(ROLE_LABEL).map(([value, label]) => ({ value, label }));
+
+const STATUS_LABEL: Record<string, { text: string; color: string }> = {
+  active: { text: "启用", color: "success" },
+  disabled: { text: "禁用", color: "error" },
+  deleted: { text: "已删除", color: "default" },
+};
+
+export function UserManagement() {
+  const [me, setMe] = useState<CurrentUser | null>(null);
+  const [items, setItems] = useState<AdminUser[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [role, setRole] = useState("");
+  const [status, setStatus] = useState("");
+  const [keyword, setKeyword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<AdminUser | null>(null);
+  const [resetTarget, setResetTarget] = useState<AdminUser | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [createForm] = Form.useForm();
+  const [editForm] = Form.useForm();
+  const [resetForm] = Form.useForm();
+
+  const canManage = me?.role === "platform_admin";
+
+  async function load() {
+    setLoading(true);
+    try {
+      const res = await listAdminUsers({
+        role: role || undefined,
+        status: status || undefined,
+        keyword: keyword || undefined,
+        page,
+        page_size: 20,
+      });
+      setItems(res.items);
+      setTotal(res.total);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchCurrentUser().then(setMe).catch(() => setMe(null));
+  }, []);
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, role, status]);
+
+  async function handleCreate(values: Record<string, unknown>) {
+    setSaving(true);
+    try {
+      const payload: UserCreateRequest = {
+        username: String(values.username),
+        email: String(values.email),
+        display_name: String(values.display_name),
+        role: String(values.role ?? "viewer"),
+        domain: values.domain ? String(values.domain) : null,
+        password: String(values.password),
+      };
+      await createUser(payload);
+      message.success("用户已创建");
+      setCreateOpen(false);
+      createForm.resetFields();
+      setPage(1);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleUpdate(values: Record<string, unknown>) {
+    if (!editTarget) return;
+    setSaving(true);
+    try {
+      const payload: UserUpdateRequest = {
+        display_name: String(values.display_name),
+        email: String(values.email),
+        role: String(values.role),
+        domain: values.domain ? String(values.domain) : null,
+      };
+      await updateUser(editTarget.id, payload);
+      message.success("用户已更新");
+      setEditTarget(null);
+      editForm.resetFields();
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleToggleStatus(u: AdminUser) {
+    const next = u.status === "active" ? "disabled" : "active";
+    try {
+      await setUserStatus(u.id, next);
+      message.success(next === "active" ? "已启用" : "已禁用");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
+  }
+
+  async function handleReset(values: Record<string, unknown>) {
+    if (!resetTarget) return;
+    setSaving(true);
+    try {
+      await resetUserPassword(resetTarget.id, String(values.new_password));
+      message.success(`已重置「${resetTarget.username}」的密码`);
+      setResetTarget(null);
+      resetForm.resetFields();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "重置失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function openEdit(u: AdminUser) {
+    setEditTarget(u);
+    editForm.setFieldsValue({
+      display_name: u.display_name,
+      email: u.email,
+      role: u.role,
+      domain: u.domain ?? "",
+    });
+  }
+
+  const columns = [
+    { title: "ID", dataIndex: "id", key: "id", width: 60 },
+    {
+      title: "用户名",
+      dataIndex: "username",
+      key: "username",
+      render: (v: string) => <span className="mono">{v}</span>,
+    },
+    { title: "显示名", dataIndex: "display_name", key: "display_name" },
+    {
+      title: "邮箱",
+      dataIndex: "email",
+      key: "email",
+      render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span>,
+    },
+    {
+      title: "角色",
+      dataIndex: "role",
+      key: "role",
+      render: (v: string) => <Tag>{ROLE_LABEL[v] ?? v}</Tag>,
+    },
+    {
+      title: "域",
+      dataIndex: "domain",
+      key: "domain",
+      render: (v: string | null) => v ?? <span className="muted">—</span>,
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      key: "status",
+      width: 90,
+      render: (v: string) => (
+        <Tag color={STATUS_LABEL[v]?.color ?? "default"}>{STATUS_LABEL[v]?.text ?? v}</Tag>
+      ),
+    },
+    {
+      title: "最后登录",
+      dataIndex: "last_login_at",
+      key: "last_login",
+      width: 160,
+      render: (v: string | null) =>
+        v ? <span className="mono" style={{ fontSize: 12 }}>{v.replace("T", " ").slice(0, 19)}</span> : <span className="muted">—</span>,
+    },
+    {
+      title: "操作",
+      key: "actions",
+      width: 220,
+      render: (_: unknown, u: AdminUser) =>
+        canManage ? (
+          <Space size={4}>
+            <Button size="small" onClick={() => openEdit(u)}>编辑</Button>
+            <Button size="small" icon={<LockOutlined />} onClick={() => { setResetTarget(u); resetForm.resetFields(); }}>
+              重置密码
+            </Button>
+            <Popconfirm
+              title={u.status === "active" ? `禁用用户 ${u.username}？` : `启用用户 ${u.username}？`}
+              description={u.status === "active" ? "禁用后该用户将无法登录" : undefined}
+              okText="确认"
+              cancelText="取消"
+              onConfirm={() => handleToggleStatus(u)}
+            >
+              <Button size="small" danger={u.status === "active"}>{u.status === "active" ? "禁用" : "启用"}</Button>
+            </Popconfirm>
+          </Space>
+        ) : null,
+    },
+  ];
+
+  return (
+    <div>
+      <div className="page-head">
+        <div>
+          <div className="page-kicker">系统管理 / Users & Accounts</div>
+          <h2>用户管理</h2>
+          <p>账号生命周期管理：创建、编辑、启用/禁用与重置密码——仅平台管理员可操作，全程审计。</p>
+        </div>
+      </div>
+
+      {!canManage && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="当前账号为只读视图：用户管理操作仅平台管理员可执行。"
+        />
+      )}
+
+      <Card styles={{ body: { paddingTop: 8 } }}>
+        <Space style={{ marginBottom: 12 }} wrap>
+          <Select
+            allowClear
+            placeholder="全部角色"
+            style={{ width: 150 }}
+            value={role || undefined}
+            onChange={(v) => { setRole(v || ""); setPage(1); }}
+            options={ROLE_OPTIONS}
+          />
+          <Select
+            allowClear
+            placeholder="全部状态"
+            style={{ width: 130 }}
+            value={status || undefined}
+            onChange={(v) => { setStatus(v || ""); setPage(1); }}
+            options={[
+              { value: "active", label: "启用" },
+              { value: "disabled", label: "禁用" },
+              { value: "deleted", label: "已删除" },
+            ]}
+          />
+          <Input.Search
+            allowClear
+            placeholder="搜索用户名 / 显示名 / 邮箱"
+            style={{ width: 240 }}
+            onSearch={(v) => { setKeyword(v); setPage(1); }}
+          />
+          {canManage && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => { setCreateOpen(true); createForm.resetFields(); }}>
+              创建用户
+            </Button>
+          )}
+          <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
+        </Space>
+        <Table
+          dataSource={items}
+          columns={columns}
+          rowKey="id"
+          loading={loading}
+          pagination={{
+            current: page,
+            pageSize: 20,
+            total,
+            onChange: setPage,
+            showTotal: (t) => `共 ${t} 个用户`,
+          }}
+          locale={{ emptyText: "暂无用户" }}
+        />
+      </Card>
+
+      {/* 创建用户 */}
+      <Modal
+        title={<Space><TeamOutlined />创建用户</Space>}
+        open={createOpen}
+        onCancel={() => setCreateOpen(false)}
+        onOk={() => createForm.submit()}
+        okText="创建"
+        confirmLoading={saving}
+      >
+        <Form form={createForm} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
+          <Form.Item name="username" label="用户名" rules={[{ required: true, pattern: /^[A-Za-z0-9_.-]{2,64}$/, message: "2-64 位字母/数字/._-" }]}>
+            <Input className="mono" placeholder="如 zhangsan" />
+          </Form.Item>
+          <Form.Item name="email" label="邮箱" rules={[{ required: true, type: "email", message: "请输入合法邮箱" }]}>
+            <Input className="mono" placeholder="name@example.com" />
+          </Form.Item>
+          <Form.Item name="display_name" label="显示名称" rules={[{ required: true }]}>
+            <Input placeholder="如 张三" />
+          </Form.Item>
+          <Space size={16} style={{ width: "100%" }}>
+            <Form.Item name="role" label="角色" initialValue="viewer" rules={[{ required: true }]} style={{ width: 180 }}>
+              <Select options={ROLE_OPTIONS} />
+            </Form.Item>
+            <Form.Item name="domain" label="所属域（可留空）" style={{ width: 200 }}>
+              <Input placeholder="如 finance" />
+            </Form.Item>
+          </Space>
+          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8, message: "至少 8 位" }]}>
+            <Input.Password autoComplete="new-password" placeholder="至少 8 位" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 编辑用户 */}
+      <Modal
+        title={`编辑用户：${editTarget?.username ?? ""}`}
+        open={!!editTarget}
+        onCancel={() => setEditTarget(null)}
+        onOk={() => editForm.submit()}
+        okText="保存"
+        confirmLoading={saving}
+      >
+        <Form form={editForm} layout="vertical" onFinish={handleUpdate} style={{ marginTop: 8 }}>
+          <Form.Item name="display_name" label="显示名称" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="email" label="邮箱" rules={[{ required: true, type: "email", message: "请输入合法邮箱" }]}>
+            <Input className="mono" />
+          </Form.Item>
+          <Form.Item name="role" label="角色" rules={[{ required: true }]}>
+            <Select options={ROLE_OPTIONS} />
+          </Form.Item>
+          <Form.Item name="domain" label="所属域（留空为无）">
+            <Input placeholder="如 finance" />
+          </Form.Item>
+          <div className="muted" style={{ fontSize: 12 }}>用户名不可修改；密码请使用「重置密码」单独操作。</div>
+        </Form>
+      </Modal>
+
+      {/* 重置密码 */}
+      <Modal
+        title={`重置密码：${resetTarget?.username ?? ""}`}
+        open={!!resetTarget}
+        onCancel={() => setResetTarget(null)}
+        onOk={() => resetForm.submit()}
+        okText="重置"
+        confirmLoading={saving}
+      >
+        <Form form={resetForm} layout="vertical" onFinish={handleReset} style={{ marginTop: 8 }}>
+          <Form.Item name="new_password" label="新密码" rules={[{ required: true, min: 8, message: "至少 8 位" }]}>
+            <Input.Password autoComplete="new-password" placeholder="至少 8 位" />
+          </Form.Item>
+          <Alert type="warning" showIcon message="重置后将立即生效，请通知该用户使用新密码登录。" />
+        </Form>
+      </Modal>
+    </div>
+  );
+}

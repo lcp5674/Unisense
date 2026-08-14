@@ -28,6 +28,7 @@ import { Notifications } from "./pages/Notifications";
 import { Observability } from "./pages/Observability";
 import { AiAssistant } from "./pages/AiAssistant";
 import { SystemConfig } from "./pages/SystemConfig";
+import { UserManagement } from "./pages/UserManagement";
 import { AuditLog } from "./pages/AuditLog";
 import { DataSources } from "./pages/DataSources";
 import { Catalogs } from "./pages/Catalogs";
@@ -208,6 +209,7 @@ export default function App() {
             <Route path="/api-clients" element={<ApiClients />} />
             <Route path="/ai" element={<AiAssistant />} />
             <Route path="/system-config" element={<SystemConfig />} />
+            <Route path="/users" element={<UserManagement />} />
             <Route path="/observability" element={<Observability />} />
             <Route path="/data-sources" element={<DataSources />} />
             <Route path="/catalogs" element={<Catalogs />} />

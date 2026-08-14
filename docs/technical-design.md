@@ -365,6 +365,16 @@ POST   /classification/rescan        # 分级重扫（COMP-2，频率 ≥ 每周
 GET    /me/permissions               # 当前用户权限快照
 ```
 
+### 3.5a 用户管理（users · platform_admin 专属，FR-13a 补齐）
+```
+GET    /users?role=&status=&keyword=&page=&page_size=   # 用户管理列表（含 email/最后登录/创建时间；platform_admin 专属，响应不暴露 password_hash）
+POST   /users                        # 创建用户（username/email/display_name/role/domain/初始密码；用户名邮箱唯一，密码 bcrypt 落库）
+PUT    /users/{id}                   # 编辑用户（显示名/邮箱/角色/域全量覆盖；禁止自降级 platform_admin）
+PATCH  /users/{id}/status            # 启用/禁用（status=active|disabled；禁止禁用当前登录账号）
+POST   /users/{id}/reset-password    # 重置密码（新密码 bcrypt 哈希落库，不返回明文）
+```
+> 全部写操作落 `audit_log`（USER_CREATE/USER_UPDATE/USER_STATUS/USER_RESET_PASSWORD）；错误码对齐 §5.4（USER_EXISTS=409、USER_NOT_FOUND=404、SELF_DEMOTE_FORBIDDEN / SELF_DISABLE_FORBIDDEN=422）。只读用户摘要（Owner 责任链渲染用）沿用 `GET /auth/users`（任意登录角色可读，不暴露 email）。
+
 ### 3.6 消费（consume · Semantic API）
 
 > **通用请求/响应规范（R13-12 对齐 PRD 4.11.2）**：请求必带 `Authorization: Bearer <JWT>` + `Content-Type: application/json`；响应必含 `X-Request-ID` + `X-Trace-ID`（审计关联）；API 版本响应 Header `X-API-Version: v1`。

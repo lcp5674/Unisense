@@ -1,0 +1,6 @@
+[users 用户管理] 门禁证据 (2026-08-14)
+- unit: backend/tests/unit/test_users_api.py 12 passed（创建/冲突409/弱密码422/编辑/自降级422/404/禁用/自禁用422/重置密码/列表/权限403/不泄露哈希）
+- ruff: app/api/users.py + tests/unit/test_users_api.py All checks passed
+- mypy: app/api/users.py Success（no issues）
+- 前端: UserManagement.test.tsx 5 passed；全套 vitest 89 passed；tsc 0
+- 契约: contract + doc_sync 通过

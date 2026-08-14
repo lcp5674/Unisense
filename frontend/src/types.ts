@@ -95,6 +95,42 @@ export interface UserBrief {
   status: string;
 }
 
+// 用户管理视图（backend /api/v1/users，platform_admin 专属）
+export interface AdminUser {
+  id: number;
+  username: string;
+  email: string;
+  display_name: string;
+  role: string;
+  domain: string | null;
+  status: string;
+  last_login_at: string | null;
+  created_at: string | null;
+}
+
+export interface AdminUserListResponse {
+  total: number;
+  page: number;
+  page_size: number;
+  items: AdminUser[];
+}
+
+export interface UserCreateRequest {
+  username: string;
+  email: string;
+  display_name: string;
+  role: string;
+  domain?: string | null;
+  password: string;
+}
+
+export interface UserUpdateRequest {
+  display_name: string;
+  email: string;
+  role: string;
+  domain?: string | null;
+}
+
 export interface MetricListResponse {
   total: number;
   page: number;

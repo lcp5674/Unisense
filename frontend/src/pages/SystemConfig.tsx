@@ -267,7 +267,14 @@ function TestResultBadge({ result }: { result: LlmConfigTestResult }) {
   }
   return (
     <Tag icon={<CloseCircleOutlined />} color="error">
-      连通失败：{result.error || "未知错误"}
+      <span>
+        连通失败：{result.error || "未知错误"}
+        {result.detail?.request_url ? (
+          <span className="muted" style={{ fontSize: 11, marginLeft: 8 }}>
+            （{String(result.detail.request_url)}）
+          </span>
+        ) : null}
+      </span>
     </Tag>
   );
 }

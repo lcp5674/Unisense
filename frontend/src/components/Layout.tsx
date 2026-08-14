@@ -31,6 +31,7 @@ import {
   GlobalOutlined,
   TagsOutlined,
   SettingOutlined,
+  TeamOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
 } from "@ant-design/icons";
@@ -131,6 +132,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
   {
     label: "系统管理",
     children: [
+      { key: "/users", label: "用户管理", icon: <TeamOutlined /> },
       { key: "/system-config", label: "系统配置", icon: <SettingOutlined /> },
     ],
   },

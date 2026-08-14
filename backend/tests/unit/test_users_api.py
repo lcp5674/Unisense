@@ -1,0 +1,293 @@
+"""用户管理 API 测试（GET/POST /users + PUT/PATCH/重置密码）。
+
+覆盖：CRUD 全流程、唯一性冲突、自我保护（自降级/自禁用）、权限控制、不泄露哈希。
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+from httpx import ASGITransport
+
+from app.api import deps
+from app.main import app
+from app.models.user import User
+
+
+def _make_session() -> MagicMock:
+    """构造 mock 会话：execute/add/flush/commit。
+
+    flush 副作用：为已 ``add`` 的 User 实例填充 id（模拟真实 flush 回填主键）。
+    """
+    session = MagicMock()
+
+    def _flush_side_effect(*args: object, **kwargs: object) -> None:
+        for call in session.add.call_args_list:
+            obj = call.args[0] if call.args else None
+            if isinstance(obj, User) and getattr(obj, "id", None) is None:
+                obj.id = 2
+
+    session.flush = AsyncMock(side_effect=_flush_side_effect)
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+    session.refresh = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=result)
+    return session
+
+
+def _make_user(**overrides: object) -> User:
+    """构造 User ORM 实例（供 _get_user mock 返回）。"""
+    base: dict[str, object] = {
+        "id": 2,
+        "org_id": 1,
+        "username": "alice",
+        "email": "alice@example.com",
+        "password_hash": "hashed:xxx",
+        "display_name": "爱丽丝",
+        "role": "viewer",
+        "domain": "finance",
+        "status": "active",
+    }
+    base.update(overrides)
+    return User(**base)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+async def admin_client() -> AsyncIterator[httpx.AsyncClient]:
+    """platform_admin 客户端 + mock 会话（默认无冲突、用户存在）。"""
+    session = _make_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+async def _request(role: str) -> httpx.AsyncClient:
+    """按角色构造客户端（覆盖 get_current_user）。"""
+    session = _make_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role=role)
+    transport = ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+# ---------------------------------------------------------------------------
+# 权限控制
+# ---------------------------------------------------------------------------
+
+
+async def test_create_requires_platform_admin() -> None:
+    client = await _request("viewer")
+    async with client:
+        resp = await client.post("/api/v1/users", json={"username": "bob", "password": "secret123"})
+    assert resp.status_code == 403
+    app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# 列表
+# ---------------------------------------------------------------------------
+
+
+async def test_list_users_returns_paginated() -> None:
+    """platform_admin 列表：返回分页结构且不含哈希。"""
+    session = _make_session()
+    u1 = _make_user(id=1, username="admin", display_name="管理员", role="platform_admin")
+    u2 = _make_user(id=2, username="alice", display_name="爱丽丝")
+    total_result = MagicMock()
+    total_result.scalar.return_value = 2
+    rows_result = MagicMock()
+    rows_result.scalars.return_value.all.return_value = [u1, u2]
+    session.execute = AsyncMock(side_effect=[total_result, rows_result])
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/users?page=1&page_size=20")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total"] == 2
+    assert len(data["items"]) == 2
+    assert data["items"][1]["username"] == "alice"
+    assert data["items"][1]["email"] == "alice@example.com"
+    assert "password_hash" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# 创建
+# ---------------------------------------------------------------------------
+
+
+async def test_create_user_success(admin_client: httpx.AsyncClient) -> None:
+    with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
+        "app.api.users._assert_unique", new=AsyncMock()
+    ):
+        resp = await admin_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bob",
+                "email": "bob@example.com",
+                "display_name": "鲍勃",
+                "role": "viewer",
+                "domain": "finance",
+                "password": "secret123",
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["username"] == "bob"
+    assert data["role"] == "viewer"
+    assert "password_hash" not in resp.text
+    assert "password" not in resp.text
+
+
+async def test_create_user_conflict(admin_client: httpx.AsyncClient) -> None:
+    from app.core.exceptions import ConflictError
+
+    with patch("app.api.users._assert_unique", side_effect=ConflictError("用户名已被占用")):
+        resp = await admin_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bob",
+                "email": "bob@example.com",
+                "display_name": "鲍勃",
+                "password": "secret123",
+            },
+        )
+    assert resp.status_code == 409
+
+
+async def test_create_user_weak_password(admin_client: httpx.AsyncClient) -> None:
+    resp = await admin_client.post(
+        "/api/v1/users",
+        json={"username": "bob", "email": "bob@example.com", "password": "short"},
+    )
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# 编辑
+# ---------------------------------------------------------------------------
+
+
+async def test_update_user_success(admin_client: httpx.AsyncClient) -> None:
+    user = _make_user()
+    with patch("app.api.users._get_user", return_value=user), patch(
+        "app.api.users._assert_unique", new=AsyncMock()
+    ):
+        resp = await admin_client.put(
+            "/api/v1/users/2",
+            json={
+                "display_name": "爱丽丝·新",
+                "email": "alice@example.com",
+                "role": "metric_owner",
+                "domain": "sales",
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["display_name"] == "爱丽丝·新"
+    assert data["role"] == "metric_owner"
+    assert data["domain"] == "sales"
+
+
+async def test_update_user_self_demote_rejected(admin_client: httpx.AsyncClient) -> None:
+    # 当前用户 id=1，编辑目标 id=1（自己），且降级非 platform_admin
+    admin = _make_user(id=1, username="admin", role="platform_admin")
+    with patch("app.api.users._get_user", return_value=admin), patch(
+        "app.api.users._assert_unique", new=AsyncMock()
+    ):
+        resp = await admin_client.put(
+            "/api/v1/users/1",
+            json={
+                "display_name": "管理员",
+                "email": "admin@example.com",
+                "role": "viewer",
+                "domain": None,
+            },
+        )
+    assert resp.status_code == 422
+    assert "SELF_DEMOTE_FORBIDDEN" in resp.text
+
+
+async def test_update_user_not_found(admin_client: httpx.AsyncClient) -> None:
+    with patch("app.api.users._get_user", return_value=None):
+        resp = await admin_client.put(
+            "/api/v1/users/999",
+            json={
+                "display_name": "X",
+                "email": "x@example.com",
+                "role": "viewer",
+                "domain": None,
+            },
+        )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 启用 / 禁用
+# ---------------------------------------------------------------------------
+
+
+async def test_disable_user_success(admin_client: httpx.AsyncClient) -> None:
+    user = _make_user()
+    with patch("app.api.users._get_user", return_value=user):
+        resp = await admin_client.patch("/api/v1/users/2/status", json={"status": "disabled"})
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "disabled"
+
+
+async def test_disable_self_rejected(admin_client: httpx.AsyncClient) -> None:
+    admin = _make_user(id=1, username="admin", role="platform_admin")
+    with patch("app.api.users._get_user", return_value=admin):
+        resp = await admin_client.patch("/api/v1/users/1/status", json={"status": "disabled"})
+    assert resp.status_code == 422
+    assert "SELF_DISABLE_FORBIDDEN" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# 重置密码
+# ---------------------------------------------------------------------------
+
+
+async def test_reset_password_success(admin_client: httpx.AsyncClient) -> None:
+    user = _make_user()
+    with patch("app.api.users._get_user", return_value=user), patch(
+        "app.api.users.hash_password", return_value="hashed:new"
+    ):
+        resp = await admin_client.post(
+            "/api/v1/users/2/reset-password", json={"new_password": "newsecret123"}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["ok"] is True
+    # 不返回明文新密码
+    assert "newsecret123" not in resp.text
+
+
+async def test_reset_password_not_found(admin_client: httpx.AsyncClient) -> None:
+    with patch("app.api.users._get_user", return_value=None):
+        resp = await admin_client.post(
+            "/api/v1/users/999/reset-password", json={"new_password": "newsecret123"}
+        )
+    assert resp.status_code == 404

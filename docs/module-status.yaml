@@ -202,6 +202,18 @@ modules:
     owner: ""
     updated: "2026-08-11"
 
+  users:
+    fr: [FR-13a]
+    td_section: "§12.5"
+    status: released
+    gateways_passed: [lint, type, unit, contract, doc_sync]
+    evidence_path: "backend/tests/reports/users_gateways_2026-08-14.txt"
+    implemented_files:
+      - app/api/users.py
+      - app/models/user.py
+      - tests/unit/test_users_api.py
+    note: "用户管理补齐（2026-08-14）：新增 /api/v1/users 管理端点（platform_admin 专属 + 全程审计）——GET 列表（含 email/最后登录/创建时间，分页+角色/状态/关键词过滤，响应不暴露 password_hash）、POST 创建（用户名邮箱唯一校验 USER_EXISTS=409、密码 bcrypt 落库）、PUT 编辑（显示名/邮箱/角色/域全量覆盖，禁止自降级 SELF_DEMOTE_FORBIDDEN=422）、PATCH /{id}/status 启用禁用（禁止自禁用 SELF_DISABLE_FORBIDDEN=422）、POST /{id}/reset-password（bcrypt 哈希落库不返回明文）。前端新增 系统管理→用户管理 页（/users：列表/创建/编辑/启用禁用/重置密码，platform_admin 专属，非管理员只读视图）；权限治理授权表单与权限检查的用户 ID 输入改为用户选择器（listUsers 按用户名/显示名搜索）。只读用户摘要沿用 GET /auth/users（任意登录角色可读，不暴露 email）。验证：后端 12 项 API 测试全绿、ruff/mypy 0；前端 UserManagement 5 项 + 全量 89 全绿、tsc 0。"
+
   consume:
     fr: [FR-12, FR-13]
     td_section: "§12.6"

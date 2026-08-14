@@ -102,6 +102,10 @@ import {
   SystemDictItem,
   TestConnectionResult,
   UserBrief,
+  UserCreateRequest,
+  UserUpdateRequest,
+  AdminUser,
+  AdminUserListResponse,
   UserPreferenceItem,
   UserPreferenceList,
   Watermark,
@@ -513,6 +517,55 @@ export async function extendMetricVersion(code: string, version: number): Promis
 export async function listUsers(role?: string): Promise<UserBrief[]> {
   const qs = role ? `?role=${encodeURIComponent(role)}` : "";
   return request<UserBrief[]>(`${API_BASE}/auth/users${qs}`);
+}
+
+// ---- 用户管理（backend /api/v1/users，platform_admin 专属）----
+export async function listAdminUsers(params: {
+  role?: string;
+  status?: string;
+  keyword?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<AdminUserListResponse> {
+  const qs = pageQs({
+    role: params.role,
+    status: params.status,
+    keyword: params.keyword,
+    page: params.page ?? 1,
+    page_size: params.page_size ?? 50,
+  });
+  return request<AdminUserListResponse>(`${API_BASE}/users?${qs}`);
+}
+
+export async function createUser(payload: UserCreateRequest): Promise<AdminUser> {
+  return request<AdminUser>(`${API_BASE}/users`, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function updateUser(userId: number, payload: UserUpdateRequest): Promise<AdminUser> {
+  return request<AdminUser>(`${API_BASE}/users/${userId}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function setUserStatus(
+  userId: number,
+  status: "active" | "disabled",
+): Promise<AdminUser> {
+  return request<AdminUser>(`${API_BASE}/users/${userId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export async function resetUserPassword(
+  userId: number,
+  newPassword: string,
+): Promise<{ user_id: number; ok: boolean }> {
+  return request<{ user_id: number; ok: boolean }>(
+    `${API_BASE}/users/${userId}/reset-password`,
+    { method: "POST", body: JSON.stringify({ new_password: newPassword }) },
+  );
 }
 
 // ---- 冲突 ----

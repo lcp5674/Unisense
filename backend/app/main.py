@@ -42,6 +42,7 @@ from app.api.semantic import router as semantic_router
 from app.api.subject_domain import router as subject_domain_router
 from app.api.system_dict import router as system_dict_router
 from app.api.tracking import router as tracking_router
+from app.api.users import router as users_router
 from app.core.config import ConfigurationError, settings
 from app.core.degradation import ensure_dependency_health_seed, handle_circuit_signal
 from app.core.degradation_registry import init_degradation_registry
@@ -283,6 +284,7 @@ def create_app() -> FastAPI:
     app.include_router(system_dict_router, prefix="/api/v1")
     app.include_router(feature_flags_router, prefix="/api/v1")
     app.include_router(admin_key_rotation_router, prefix="/api/v1")
+    app.include_router(users_router, prefix="/api/v1")
 
     return app
 

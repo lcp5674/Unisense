@@ -11,9 +11,10 @@ import {
   piiReviewAction,
   classificationRescan,
   requestErasure,
+  listUsers,
   UnisenseApiError,
 } from "../api";
-import type { GrantResponse, PermissionSnapshot } from "../types";
+import type { GrantResponse, PermissionSnapshot, UserBrief } from "../types";
 
 const GRANT_TYPE_LABEL: Record<string, string> = {
   READ: "只读",
@@ -102,9 +103,16 @@ function GrantsTab() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState("");
+  const [users, setUsers] = useState<UserBrief[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+
+  useEffect(() => {
+    listUsers()
+      .then(setUsers)
+      .catch(() => setUsers([]));
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -202,8 +210,17 @@ function GrantsTab() {
       <Modal title="新建授权" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="授权">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Space size={16} style={{ width: "100%" }}>
-            <Form.Item name="user_id" label="用户 ID" rules={[{ required: true }]}>
-              <InputNumber min={1} style={{ width: 140 }} />
+            <Form.Item name="user_id" label="用户" rules={[{ required: true, message: "请选择用户" }]}>
+              <Select
+                showSearch
+                optionFilterProp="label"
+                style={{ width: 220 }}
+                placeholder="按用户名 / 显示名搜索"
+                options={users.map((u) => ({
+                  value: u.id,
+                  label: `${u.username}（${u.display_name}）`,
+                }))}
+              />
             </Form.Item>
             <Form.Item name="role_id" label="角色 ID（可留空）">
               <InputNumber min={1} style={{ width: 140 }} />
@@ -346,7 +363,14 @@ function PiiReviewTab() {
 
 function CheckTab() {
   const [result, setResult] = useState<{ allow: boolean; reason: string; masking: string; restricted: boolean } | null>(null);
+  const [users, setUsers] = useState<UserBrief[]>([]);
   const [form] = Form.useForm();
+
+  useEffect(() => {
+    listUsers()
+      .then(setUsers)
+      .catch(() => setUsers([]));
+  }, []);
 
   async function handleCheck(values: Record<string, unknown>) {
     try {
@@ -365,8 +389,17 @@ function CheckTab() {
   return (
     <Card title="权限即时检查">
       <Form form={form} layout="inline" onFinish={handleCheck} style={{ rowGap: 12 }}>
-        <Form.Item name="user_id" label="用户 ID" rules={[{ required: true }]}>
-          <InputNumber min={1} style={{ width: 110 }} />
+        <Form.Item name="user_id" label="用户" rules={[{ required: true, message: "请选择用户" }]}>
+          <Select
+            showSearch
+            optionFilterProp="label"
+            style={{ width: 220 }}
+            placeholder="按用户名 / 显示名搜索"
+            options={users.map((u) => ({
+              value: u.id,
+              label: `${u.username}（${u.display_name}）`,
+            }))}
+          />
         </Form.Item>
         <Form.Item name="action" label="动作" rules={[{ required: true }]}>
           <Select style={{ width: 130 }} options={["read", "write", "approve", "export", "review"].map((v) => ({ value: v, label: ACTION_LABEL[v] ?? v }))} />
