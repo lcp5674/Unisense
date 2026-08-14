@@ -29,6 +29,7 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.guard import guard_against_injection
 from app.core.security import hash_password
 from app.db.mysql import get_db_session
+from app.models.subject_domain import SubjectDomain
 from app.models.user import User
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -148,6 +149,30 @@ async def _assert_unique(
         )
 
 
+async def _assert_domain_active(db: AsyncSession, domain: str | None) -> None:
+    """校验所属域：若提供，必须是存在且 active 的主题域 code。
+
+    与前端「主题域管理」下拉数据源（``list_domain_tree(status=active)``）保持一致，
+    防止绕过 UI 直接写接口注入任意域值（对齐 TD §3.4，错误码见 TD §5.4）。
+    """
+    if not domain:
+        return
+    row = (
+        await db.execute(
+            select(SubjectDomain).where(
+                SubjectDomain.code == domain,
+                SubjectDomain.status == "active",
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise ValidationError(
+            f"所属域不存在或未启用: {domain}",
+            error_code="USER_DOMAIN_INVALID",
+            ctx={"domain": domain},
+        )
+
+
 def _to_admin(row: User) -> UserAdmin:
     """ORM → 管理视图（created_at 序列化为 ISO 字符串）。"""
     return UserAdmin(
@@ -220,6 +245,7 @@ async def create_user(
     校验用户名/邮箱唯一，初始密码经 bcrypt 哈希落库。
     """
     await _assert_unique(db, username=payload.username, email=payload.email)
+    await _assert_domain_active(db, payload.domain)
     row = User(
         org_id=user.org_id,
         username=payload.username,
@@ -269,6 +295,7 @@ async def update_user(
     if row is None:
         raise NotFoundError("用户不存在", error_code="USER_NOT_FOUND")
     await _assert_unique(db, username=row.username, email=payload.email, exclude_id=row.id)
+    await _assert_domain_active(db, payload.domain)
     if row.id == user.id and payload.role != "platform_admin":
         raise ValidationError(
             "不能降级当前登录的平台管理员角色", error_code="SELF_DEMOTE_FORBIDDEN"

@@ -14,6 +14,7 @@ import {
   message,
 } from "antd";
 import {
+  CopyOutlined,
   LockOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -24,11 +25,18 @@ import {
   createUser,
   fetchCurrentUser,
   listAdminUsers,
+  listDomainTree,
   resetUserPassword,
   setUserStatus,
   updateUser,
 } from "../api";
-import type { AdminUser, CurrentUser, UserCreateRequest, UserUpdateRequest } from "../types";
+import type {
+  AdminUser,
+  CurrentUser,
+  SubjectDomainTreeNode,
+  UserCreateRequest,
+  UserUpdateRequest,
+} from "../types";
 
 const ROLE_LABEL: Record<string, string> = {
   platform_admin: "平台管理员",
@@ -41,6 +49,45 @@ const ROLE_LABEL: Record<string, string> = {
 };
 
 const ROLE_OPTIONS = Object.entries(ROLE_LABEL).map(([value, label]) => ({ value, label }));
+
+// 主题域树 → 扁平化下拉选项（保留层级缩进，与数据源页「业务域」下拉同款实现）
+function flattenDomains(
+  nodes: SubjectDomainTreeNode[],
+  depth = 0,
+  out: Array<{ value: string; label: string }> = [],
+): Array<{ value: string; label: string }> {
+  for (const n of nodes) {
+    const indent = depth > 0 ? `${"　".repeat(depth)}` : "";
+    out.push({ value: n.code, label: `${indent}${n.name}（${n.code}）` });
+    if (n.children?.length) flattenDomains(n.children, depth + 1, out);
+  }
+  return out;
+}
+
+// 强随机密码：crypto.getRandomValues，保证大小写/数字/符号各至少 1 个（后端要求 ≥8 位）
+function generateStrongPassword(length = 16): string {
+  const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const lower = "abcdefghijklmnopqrstuvwxyz";
+  const digits = "0123456789";
+  const symbols = "!@#$%^&*()-_=+[]{};:,.?";
+  const all = upper + lower + digits + symbols;
+  const chars: string[] = [];
+  for (const pool of [upper, lower, digits, symbols]) {
+    const buf = new Uint32Array(1);
+    crypto.getRandomValues(buf);
+    chars.push(pool[buf[0] % pool.length]);
+  }
+  const rest = new Uint32Array(Math.max(0, length - chars.length));
+  crypto.getRandomValues(rest);
+  for (const v of rest) chars.push(all[v % all.length]);
+  const shuffle = new Uint32Array(chars.length);
+  crypto.getRandomValues(shuffle);
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = shuffle[i] % (i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join("");
+}
 
 const STATUS_LABEL: Record<string, { text: string; color: string }> = {
   active: { text: "启用", color: "success" },
@@ -65,6 +112,11 @@ export function UserManagement() {
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
   const [resetForm] = Form.useForm();
+  const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [generatedPassword, setGeneratedPassword] = useState("");
+  const [createdResult, setCreatedResult] = useState<{ username: string; password: string } | null>(
+    null,
+  );
 
   const canManage = me?.role === "platform_admin";
 
@@ -92,6 +144,13 @@ export function UserManagement() {
   }, []);
 
   useEffect(() => {
+    // 所属域下拉：仅展示启用中的主题域（与数据源页「业务域」下拉同源）
+    listDomainTree("active")
+      .then((tree) => setDomainOptions(flattenDomains(tree)))
+      .catch(() => setDomainOptions([]));
+  }, []);
+
+  useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, role, status]);
@@ -111,6 +170,7 @@ export function UserManagement() {
       message.success("用户已创建");
       setCreateOpen(false);
       createForm.resetFields();
+      setCreatedResult({ username: String(values.username), password: String(values.password) });
       setPage(1);
       load();
     } catch (err) {
@@ -174,7 +234,7 @@ export function UserManagement() {
       display_name: u.display_name,
       email: u.email,
       role: u.role,
-      domain: u.domain ?? "",
+      domain: u.domain ?? undefined,
     });
   }
 
@@ -295,7 +355,17 @@ export function UserManagement() {
             onSearch={(v) => { setKeyword(v); setPage(1); }}
           />
           {canManage && (
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => { setCreateOpen(true); createForm.resetFields(); }}>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => {
+                const pwd = generateStrongPassword();
+                setGeneratedPassword(pwd);
+                setCreateOpen(true);
+                createForm.resetFields();
+                createForm.setFieldsValue({ password: pwd });
+              }}
+            >
               创建用户
             </Button>
           )}
@@ -342,11 +412,39 @@ export function UserManagement() {
             <Form.Item name="role" label="角色" initialValue="viewer" rules={[{ required: true }]} style={{ width: 180 }}>
               <Select options={ROLE_OPTIONS} />
             </Form.Item>
-            <Form.Item name="domain" label="所属域（可留空）" style={{ width: 200 }}>
-              <Input placeholder="如 finance" />
+            <Form.Item name="domain" label="所属域（可留空）" style={{ width: 240 }}>
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                placeholder="选择主题域"
+                options={domainOptions}
+              />
             </Form.Item>
           </Space>
-          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8, message: "至少 8 位" }]}>
+          <Form.Item
+            name="password"
+            label="初始密码"
+            extra={
+              <Space size={8} style={{ marginTop: 4 }}>
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0 }}
+                  icon={<ReloadOutlined />}
+                  onClick={() => {
+                    const pwd = generateStrongPassword();
+                    setGeneratedPassword(pwd);
+                    createForm.setFieldsValue({ password: pwd });
+                  }}
+                >
+                  重新生成
+                </Button>
+                {generatedPassword ? <span className="muted">已自动预填强密码（含大小写/数字/符号）</span> : null}
+              </Space>
+            }
+            rules={[{ required: true, min: 8, message: "至少 8 位" }]}
+          >
             <Input.Password autoComplete="new-password" placeholder="至少 8 位" />
           </Form.Item>
         </Form>
@@ -372,7 +470,13 @@ export function UserManagement() {
             <Select options={ROLE_OPTIONS} />
           </Form.Item>
           <Form.Item name="domain" label="所属域（留空为无）">
-            <Input placeholder="如 finance" />
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择主题域"
+              options={domainOptions}
+            />
           </Form.Item>
           <div className="muted" style={{ fontSize: 12 }}>用户名不可修改；密码请使用「重置密码」单独操作。</div>
         </Form>
@@ -393,6 +497,48 @@ export function UserManagement() {
           </Form.Item>
           <Alert type="warning" showIcon message="重置后将立即生效，请通知该用户使用新密码登录。" />
         </Form>
+      </Modal>
+
+      {/* 创建成功：一次性展示初始密码明文（仅内存，可复制交付，不落日志） */}
+      <Modal
+        title="用户创建成功"
+        open={!!createdResult}
+        onCancel={() => setCreatedResult(null)}
+        footer={[
+          <Button
+            key="copy"
+            type="primary"
+            icon={<CopyOutlined />}
+            onClick={() => {
+              navigator.clipboard?.writeText(createdResult?.password ?? "");
+              message.success("初始密码已复制");
+            }}
+          >
+            复制密码
+          </Button>,
+          <Button key="close" onClick={() => setCreatedResult(null)}>关闭</Button>,
+        ]}
+      >
+        <Alert
+          type="success"
+          showIcon
+          message={`用户「${createdResult?.username ?? ""}」已创建`}
+          description="初始密码仅在此展示一次，请立即安全地交给该用户；关闭后无法再次查看明文。"
+        />
+        <div
+          className="mono"
+          style={{
+            marginTop: 12,
+            padding: "12px 16px",
+            background: "#fafafa",
+            border: "1px solid #f0f0f0",
+            borderRadius: 6,
+            fontSize: 14,
+            wordBreak: "break-all",
+          }}
+        >
+          {createdResult?.password}
+        </div>
       </Modal>
     </div>
   );

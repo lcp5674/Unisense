@@ -142,7 +142,7 @@ async def test_list_users_returns_paginated() -> None:
 async def test_create_user_success(admin_client: httpx.AsyncClient) -> None:
     with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
         "app.api.users._assert_unique", new=AsyncMock()
-    ):
+    ), patch("app.api.users._assert_domain_active", new=AsyncMock()):
         resp = await admin_client.post(
             "/api/v1/users",
             json={
@@ -186,6 +186,43 @@ async def test_create_user_weak_password(admin_client: httpx.AsyncClient) -> Non
     assert resp.status_code == 422
 
 
+async def test_create_user_invalid_domain_rejected(admin_client: httpx.AsyncClient) -> None:
+    """domain 非 active 主题域 code → 422 USER_DOMAIN_INVALID（防绕过 UI 注入任意域值）。"""
+    with patch("app.api.users._assert_unique", new=AsyncMock()):
+        resp = await admin_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bob",
+                "email": "bob@example.com",
+                "display_name": "鲍勃",
+                "role": "viewer",
+                "domain": "ghost_domain",
+                "password": "secret123",
+            },
+        )
+    assert resp.status_code == 422
+    assert "USER_DOMAIN_INVALID" in resp.text
+
+
+async def test_update_user_invalid_domain_rejected(admin_client: httpx.AsyncClient) -> None:
+    """编辑时把域改为不存在/未启用的主题域 → 422 USER_DOMAIN_INVALID。"""
+    user = _make_user()
+    with patch("app.api.users._get_user", return_value=user), patch(
+        "app.api.users._assert_unique", new=AsyncMock()
+    ):
+        resp = await admin_client.put(
+            "/api/v1/users/2",
+            json={
+                "display_name": "爱丽丝",
+                "email": "alice@example.com",
+                "role": "viewer",
+                "domain": "ghost_domain",
+            },
+        )
+    assert resp.status_code == 422
+    assert "USER_DOMAIN_INVALID" in resp.text
+
+
 # ---------------------------------------------------------------------------
 # 编辑
 # ---------------------------------------------------------------------------
@@ -195,7 +232,7 @@ async def test_update_user_success(admin_client: httpx.AsyncClient) -> None:
     user = _make_user()
     with patch("app.api.users._get_user", return_value=user), patch(
         "app.api.users._assert_unique", new=AsyncMock()
-    ):
+    ), patch("app.api.users._assert_domain_active", new=AsyncMock()):
         resp = await admin_client.put(
             "/api/v1/users/2",
             json={

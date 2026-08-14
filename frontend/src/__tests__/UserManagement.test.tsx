@@ -18,6 +18,7 @@ vi.mock("../api", () => {
   return {
     fetchCurrentUser: vi.fn(),
     listAdminUsers: vi.fn(),
+    listDomainTree: vi.fn(),
     createUser: vi.fn(),
     updateUser: vi.fn(),
     setUserStatus: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock("../api", () => {
 import {
   fetchCurrentUser,
   listAdminUsers,
+  listDomainTree,
   createUser,
   updateUser,
   setUserStatus,
@@ -37,10 +39,25 @@ import {
 
 const mockMe = vi.mocked(fetchCurrentUser);
 const mockList = vi.mocked(listAdminUsers);
+const mockDomains = vi.mocked(listDomainTree);
 const mockCreate = vi.mocked(createUser);
 const mockUpdate = vi.mocked(updateUser);
 const mockStatus = vi.mocked(setUserStatus);
 const mockReset = vi.mocked(resetUserPassword);
+
+/** 在可见 antd 下拉中点击指定选项：虚拟列表渲染同名包裹节点，须点 .ant-select-item-option 本体才触发选中。 */
+async function clickSelectOption(title: string) {
+  await waitFor(() => {
+    const dropdown = document.querySelector(
+      ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+    ) as HTMLElement | null;
+    const option = dropdown?.querySelector(
+      `.ant-select-item-option[title="${title}"]`,
+    ) as HTMLElement | null;
+    expect(option).toBeTruthy();
+    if (option) fireEvent.click(option);
+  });
+}
 
 const ADMIN = {
   id: 1,
@@ -65,10 +82,12 @@ describe("UserManagement 用户管理", () => {
   beforeEach(() => {
     mockMe.mockReset();
     mockList.mockReset();
+    mockDomains.mockReset();
     mockCreate.mockReset();
     mockUpdate.mockReset();
     mockStatus.mockReset();
     mockReset.mockReset();
+    mockDomains.mockResolvedValue([]);
   });
 
   it("platform_admin：渲染用户列表与全部管理操作", async () => {
@@ -99,9 +118,12 @@ describe("UserManagement 用户管理", () => {
     expect(screen.getByText(/当前账号为只读视图/)).toBeTruthy();
   });
 
-  it("创建用户：调用 createUser 并刷新列表", async () => {
+  it("创建用户：手动输入密码、选择主题域，创建成功后一次性展示明文", async () => {
     mockMe.mockResolvedValue(ADMIN);
     mockList.mockResolvedValue(USERS);
+    mockDomains.mockResolvedValue([
+      { id: 1, code: "finance", name: "财务域", level: 1, parent_id: null, sort_order: 1, status: "active", metric_count: 0, children: [] },
+    ]);
     mockCreate.mockResolvedValue(USERS.items[1]);
     render(<UserManagement />);
     await screen.findByText("alice");
@@ -112,6 +134,10 @@ describe("UserManagement 用户管理", () => {
     fireEvent.change(screen.getByPlaceholderText("如 张三"), { target: { value: "鲍勃" } });
     fireEvent.change(screen.getByPlaceholderText("至少 8 位"), { target: { value: "secret123" } });
 
+    // 所属域下拉：从主题域列表选择（复用 listDomainTree(active)）
+    fireEvent.mouseDown(screen.getByText("选择主题域"));
+    await clickSelectOption("财务域（finance）");
+
     fireEvent.click(screen.getByText("创 建"));
     await waitFor(() => expect(mockCreate).toHaveBeenCalled());
     expect(mockCreate.mock.calls[0][0]).toMatchObject({
@@ -119,7 +145,40 @@ describe("UserManagement 用户管理", () => {
       email: "bob@example.com",
       display_name: "鲍勃",
       role: "viewer",
+      domain: "finance",
+      password: "secret123",
     });
+
+    // 创建成功后一次性展示明文密码（可复制交付）
+    expect(await screen.findByText("用户创建成功")).toBeTruthy();
+    expect(screen.getByText("secret123")).toBeTruthy();
+    expect(screen.getByText(/仅在此展示一次/)).toBeTruthy();
+  });
+
+  it("创建用户：打开弹窗自动预填强随机密码，可直接提交", async () => {
+    mockMe.mockResolvedValue(ADMIN);
+    mockList.mockResolvedValue(USERS);
+    mockCreate.mockResolvedValue(USERS.items[1]);
+    render(<UserManagement />);
+    await screen.findByText("alice");
+
+    fireEvent.click(screen.getByText("创建用户"));
+    fireEvent.change(screen.getByPlaceholderText("如 zhangsan"), { target: { value: "bob" } });
+    fireEvent.change(screen.getByPlaceholderText("name@example.com"), { target: { value: "bob@example.com" } });
+    fireEvent.change(screen.getByPlaceholderText("如 张三"), { target: { value: "鲍勃" } });
+
+    // 密码框已自动预填强密码
+    expect(screen.getByText(/已自动预填强密码/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText("创 建"));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalled());
+    const payload = mockCreate.mock.calls[0][0];
+    // 满足后端 ≥8 位且含大小写/数字/符号的强密码要求
+    expect(payload.password).toMatch(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/);
+
+    // 创建成功后展示该明文
+    expect(await screen.findByText("用户创建成功")).toBeTruthy();
+    expect(screen.getByText(payload.password)).toBeTruthy();
   });
 
   it("禁用用户：确认后调用 setUserStatus(disabled)", async () => {
