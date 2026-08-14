@@ -54,8 +54,8 @@ test.describe("Asset Map", () => {
     const searchInput = page.getByPlaceholder("输入表名 / 字段名 / 指标编码 / 指标名称");
     await expect(searchInput).toBeVisible({ timeout: 5000 });
 
-    // Type a table name and search
-    await searchInput.fill("dwd");
+    // Type a table name and search（用 dwd_e2e 精确命中 seed 表，避免并行会话的 dwd.v_* 干扰）
+    await searchInput.fill("dwd_e2e");
     await page.getByRole("button", { name: "搜索" }).click();
     await page.waitForTimeout(2000); // wait for results to render
 
@@ -63,6 +63,17 @@ test.describe("Asset Map", () => {
     const resultsArea = page.locator(".ant-table");
     if (await resultsArea.isVisible({ timeout: 5000 }).catch(() => false)) {
       await expect(resultsArea).toBeVisible();
+      // 造数后搜索 dwd_e2e 应命中 seed 注册的 dwd_e2e_order 表
+      const rows = page.locator(".ant-table-tbody tr");
+      let found = false;
+      for (let i = 0; i < (await rows.count()); i++) {
+        const rowText = await rows.nth(i).innerText();
+        if (/dwd_e2e_order/.test(rowText)) {
+          found = true;
+          break;
+        }
+      }
+      expect(found).toBe(true);
     }
   });
 
@@ -182,24 +193,23 @@ test.describe("Asset Map", () => {
     }
   });
 
-  // 8. ETL 信息
-  test("ETL 信息 - 验证 ETL SQL 显示", async ({ page }) => {
+  // 8. 数据表 - 验证资产表数据渲染
+  test("数据表 - 验证资产表数据渲染", async ({ page }) => {
     await page.goto(`${BASE_URL}/assetmap`);
     await page.waitForLoadState("networkidle");
 
-    // Navigate to 图谱视图 tab
-    await page.getByRole("tab", { name: "图谱视图" }).click();
+    // Navigate to 数据表 tab（真实 Tab 名，非"图谱视图"）
+    await page.getByRole("tab", { name: "数据表" }).click();
     await page.waitForLoadState("networkidle");
 
-    // Nodes table should be present
-    const nodesTable = page.locator(".ant-table").first();
-    await expect(nodesTable).toBeVisible({ timeout: 5000 });
-
-    // Check for ETL SQL column or related content in drawer
-    const etlRelatedText = page.locator("text=ETL").or(page.locator("text=SQL")).or(page.locator("text=血缘"));
-    if (await etlRelatedText.first().isVisible({ timeout: 3000 }).catch(() => false)) {
-      await expect(etlRelatedText.first()).toBeVisible();
-    }
+    // 数据表目录应渲染真实采集表（默认第一页为系统采集表，db_catalog 必然存在）
+    await expect(page.getByText("数据表目录")).toBeVisible({ timeout: 5000 });
+    const rows = page.locator(".ant-table-tbody tr");
+    const count = await rows.count();
+    expect(count).toBeGreaterThan(0);
+    const bodyText = await page.textContent("body");
+    expect(bodyText).toMatch(/db_catalog/);
+    expect(bodyText).not.toMatch(/undefined/);
   });
 });
 
@@ -269,10 +279,10 @@ test.describe("Lineage View", () => {
     await page.goto(`${BASE_URL}/lineage`);
     await page.waitForLoadState("networkidle");
 
-    // Enter a known node in the impact analysis tab
+    // Enter a known node in the impact analysis tab (seed 注册的真实表，有下游边)
     const nodeInput = page.getByPlaceholder("节点（指标编码 / 表名）");
     await expect(nodeInput).toBeVisible({ timeout: 5000 });
-    await nodeInput.fill("dwd_finance_order");
+    await nodeInput.fill("ods_e2e_order");
 
     // Direction select (下游影响 / 上游来源 / 双向)
     const dirSelect = page.locator(".ant-select").filter({ hasText: "下游影响" }).first();
@@ -303,14 +313,14 @@ test.describe("Lineage View", () => {
     await page.goto(`${BASE_URL}/lineage`);
     await page.waitForLoadState("networkidle");
 
-    // Enter a node and query
+    // Enter a node and query (seed 真实表，血缘图有边可点)
     const nodeInput = page.getByPlaceholder("节点（指标编码 / 表名）");
-    await nodeInput.fill("dwd_finance_order");
+    await nodeInput.fill("ods_e2e_order");
     await page.getByRole("button", { name: /查\s*询/ }).click();
     await page.waitForTimeout(3000);
 
     // Try clicking a node link in the results table (源 or 目标 column)
-    const nodeLink = page.locator("a:has-text('dwd')").first();
+    const nodeLink = page.locator("a:has-text('ods_e2e')").first();
     if (await nodeLink.isVisible({ timeout: 3000 }).catch(() => false)) {
       await nodeLink.click();
       await page.waitForTimeout(1500);
@@ -330,9 +340,9 @@ test.describe("Lineage View", () => {
     // Ensure we are on 血缘查询 / 影响分析 tab
     await expect(page.getByRole("tab", { name: "血缘查询 / 影响分析" })).toBeVisible({ timeout: 5000 });
 
-    // Enter a node for impact analysis
+    // Enter a node for impact analysis (seed 真实表，有下游血缘边)
     const nodeInput = page.getByPlaceholder("节点（指标编码 / 表名）");
-    await nodeInput.fill("dwd_finance_order");
+    await nodeInput.fill("ods_e2e_order");
 
     // Click 查询
     await page.getByRole("button", { name: /查\s*询/ }).click();
@@ -343,11 +353,14 @@ test.describe("Lineage View", () => {
     const resultsTable = page.locator(".ant-table").first();
     if (await resultsTable.isVisible({ timeout: 5000 }).catch(() => false)) {
       await expect(resultsTable).toBeVisible();
-      // Should not crash, results render correctly
+      // 造数后 ods_e2e_order 有下游边（→ dwd_e2e_order），应返回真实表行
       const rows = page.locator(".ant-table-tbody tr");
       const rowCount = await rows.count();
-      // Row count should be >= 0 (may be 0 for isolated nodes)
-      expect(rowCount).toBeGreaterThanOrEqual(0);
+      if (rowCount > 0) {
+        const rowText = await rows.first().innerText();
+        expect(rowText).toMatch(/dwd_e2e_order/);
+        expect(rowText).not.toMatch(/undefined/);
+      }
     }
   });
 

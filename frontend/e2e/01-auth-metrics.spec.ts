@@ -106,11 +106,17 @@ test.describe("指标目录", () => {
     }
   });
 
-  test("创建指标按钮 → 可点击", async ({ page }) => {
+  test("创建指标入口 → 注册指标菜单可进入创建页", async ({ page }) => {
     await page.goto(`${BASE}/catalog`);
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-    const createBtn = page.getByRole("button", { name: /创建指标/i });
-    await expect(createBtn).toBeVisible({ timeout: 5000 });
+    // 指标目录工具栏应加载（导出/搜索为真实工具按钮）
+    await expect(page.getByRole("button", { name: /导出/i })).toBeVisible({ timeout: 8000 });
+    // 有数据时目录工具栏无"创建指标"按钮（仅空态显示）；真实创建入口为侧边栏「注册指标」
+    await page.getByRole("menuitem", { name: /注册指标/i }).click();
+    await page.waitForTimeout(1500);
+    // 应跳转到创建页并显示表单
+    expect(page.url()).toMatch(/create/);
+    await expect(page.getByText(/指标编码/i).first()).toBeVisible({ timeout: 5000 });
   });
 
   test("查看指标详情 → 进入详情页", async ({ page }) => {

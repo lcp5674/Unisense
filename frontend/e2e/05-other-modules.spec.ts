@@ -165,10 +165,20 @@ test.describe("Glossary（术语表）", () => {
     const conflictTab = page.getByRole("tab", { name: /术语冲突/i }).or(page.getByText(/术语冲突/i).first());
     if (await conflictTab.isVisible({ timeout: 3000 }).catch(() => false)) {
       await conflictTab.click();
-      await page.waitForTimeout(1000);
-      // 应看到冲突列表或解决/忽略按钮
-      const hasConflictContent = await page.getByText(/冲突|conflict/i).first().isVisible({ timeout: 3000 }).catch(() => false);
-      expect(hasConflictContent).toBeTruthy();
+      await page.waitForTimeout(1500);
+      // 造数后应存在同名冲突记录（seed 创建了两个同名的 E2E术语-日活用户）
+      const conflictRows = page.locator(".ant-table-tbody tr, table tbody tr");
+      const count = await conflictRows.count();
+      if (count > 0) {
+        const rowText = await conflictRows.first().innerText();
+        // 冲突记录含术语名或冲突类型，且非 undefined
+        expect(rowText).not.toMatch(/undefined/);
+        expect(rowText).toMatch(/E2E术语|日活|冲突/i);
+      } else {
+        // 无冲突时验证冲突 Tab 已打开（有"冲突"相关文本）
+        const hasConflictContent = await page.getByText(/冲突|conflict/i).first().isVisible({ timeout: 3000 }).catch(() => false);
+        expect(hasConflictContent).toBeTruthy();
+      }
     }
   });
 });
@@ -389,13 +399,26 @@ test.describe("Data Sources（数据源）", () => {
     await expect(page.locator("h1, h2").filter({ hasText: /数据源/i }).first()).toBeVisible({ timeout: 10000 });
   });
 
-  test("25. 数据源列表 → 列表加载", async ({ page }) => {
+  test("25. 数据源列表 → 列表加载并显示真实数据源", async ({ page }) => {
     await page.goto(`${BASE}/data-sources`);
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1500);
     // 表格或卡片列表
     const hasList = await page.locator("table, .ant-list, .ant-card, [role='list']").first().isVisible({ timeout: 5000 }).catch(() => false);
     expect(hasList).toBeTruthy();
+    // 造数后应显示 E2E 数据源（seed 脚本注册的 mysql_e2e_biz；不假设它在第一行）
+    const rows = page.locator(".ant-table-tbody tr, table tbody tr");
+    if ((await rows.count()) > 0) {
+      let foundE2E = false;
+      let noUndefined = true;
+      for (let i = 0; i < (await rows.count()); i++) {
+        const rowText = await rows.nth(i).innerText().catch(() => "");
+        if (/E2E MySQL|mysql_e2e_biz/.test(rowText)) foundE2E = true;
+        if (/undefined/.test(rowText)) noUndefined = false;
+      }
+      expect(foundE2E).toBeTruthy();
+      expect(noUndefined).toBeTruthy();
+    }
   });
 
   test("26. 注册数据源 → 注册新数据源", async ({ page }) => {
@@ -415,9 +438,19 @@ test.describe("Data Sources（数据源）", () => {
     await page.goto(`${BASE}/data-sources`);
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(1500);
-    // 检查是否有状态标签（ACTIVE/INACTIVE/ERROR 等）或表格（含空状态行）
-    // 数据源页面加载成功（URL 保持 /data-sources 即表示页面正常渲染）
-    expect(page.url()).toContain("/data-sources");
+    // 造数后有 2 个数据源，应显示健康状态标签（健康/未知/异常等）与覆盖度
+    const rows = page.locator(".ant-table-tbody tr, table tbody tr");
+    if ((await rows.count()) > 0) {
+      const rowText = await rows.first().innerText();
+      // 健康列应有状态文本（健康/未知/异常）且覆盖度显示百分比
+      expect(rowText).toMatch(/健康|未知|异常|error|unhealthy/i);
+      expect(rowText).toMatch(/\d+%/);
+      // 不应是 undefined
+      expect(rowText).not.toMatch(/undefined/);
+    } else {
+      // 无数据源时页面应正常渲染（URL 保持）
+      expect(page.url()).toContain("/data-sources");
+    }
   });
 });
 

@@ -57,7 +57,8 @@ async def write_audit(
         actor_id=actor_id,
         action=action,
         entity_type=entity_type,
-        entity_id=str(entity_id),
+        # 列宽 String(64) 防御：超长拼接（如 维度code:成员code）截断，审计不阻断业务
+        entity_id=str(entity_id)[:64],
         detail_json=detail,
         ip=ip,
         trace_id=trace_id,

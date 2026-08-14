@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -323,7 +323,8 @@ class MetricResponse(BaseModel):
     consumption_guide: dict[str, Any] | None
     successor_code: str | None
     deprecated_at: datetime | None
-    sunset_until: str | None
+    # DB 列为 date（models/metric.py），序列化输出 ISO "YYYY-MM-DD"，前端 string 兼容
+    sunset_until: date | None
     emergency_publish: bool = False
     emergency_reason: str | None = None
     gray_tenant_ids: list[int] | None = None

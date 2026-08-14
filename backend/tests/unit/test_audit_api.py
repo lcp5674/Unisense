@@ -195,3 +195,21 @@ class TestWriteAudit:
         assert entry.ip == ""
         assert entry.trace_id == ""
         assert entry.pii_access is False
+
+    async def test_write_audit_truncates_oversized_entity_id(self) -> None:
+        """超长 entity_id（如 维度code:成员code 拼接）截断到列宽 64，审计不阻断业务。"""
+        from app.core.audit import write_audit
+
+        session = MagicMock()
+        long_id = "sales_e2e_channel_dimension:" + "x" * 100
+        await write_audit(
+            session,
+            actor_id=1,
+            action="DIMENSION_MEMBER_CREATE",
+            entity_type="dimension_member",
+            entity_id=long_id,
+            detail={},
+        )
+        entry = session.add.call_args.args[0]
+        assert len(entry.entity_id) == 64
+        assert entry.entity_id.startswith("sales_e2e_channel_dimension:")

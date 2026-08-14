@@ -14,7 +14,8 @@ async function login(page: Page) {
   await page.getByPlaceholder(/用户名|账号|username/i).fill("admin");
   await page.getByPlaceholder(/密码|password/i).fill("changeme123");
   await page.getByRole("button", { name: "进入工作台" }).click();
-  await page.waitForURL(/\/dashboard|\/$/, { timeout: 10000 });
+  // 全量运行时后端负载高，登录跳转可能较慢，超时放宽到 15s
+  await page.waitForURL(/\/dashboard|\/$/, { timeout: 15000 });
 }
 
 // ── Conflict Center（9个）───────────────────────────────────────────────────
@@ -36,18 +37,27 @@ test.describe("Conflict Center（冲突中心）", () => {
     expect(loaded).toBe(true);
   });
 
-  test("2. 冲突列表加载 → 验证 metric_a vs metric_b 格式", async ({ page }) => {
+  test("2. 冲突列表加载 → 显示真实冲突（类型/相似度/编码列）", async ({ page }) => {
     await page.goto(`${BASE}/review`);
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     // 等待表格行出现
     await page.waitForTimeout(2000);
-    // 验证冲突标题格式为 metric_code vs metric_code，不再是 undefined vs undefined
+    // 冲突列：冲突ID/类型(同义不同名|同名不同义)/状态(待处理)/相似度%/候选/现有/时间/操作
     const rows = page.locator("table tbody tr, .ant-table-tbody tr, [role='row']");
     const count = await rows.count();
     if (count > 0) {
-      // 至少有一行包含 " vs " 且不全是 "undefined vs undefined"
-      const pageText = await page.textContent("body");
-      expect(pageText).not.toMatch(/undefined\s+vs\s+undefined/);
+      const firstRowText = await rows.first().innerText();
+      // 相似度列显示百分比
+      expect(firstRowText).toMatch(/\d+(\.\d+)?%/);
+      // 冲突类型为业务文案（同义不同名 / 同名不同义）
+      expect(firstRowText).toMatch(/同义不同名|同名不同义/);
+      // 冲突 ID 为 CF-xxx 格式
+      expect(firstRowText).toMatch(/CF-[0-9A-F]+/i);
+      // 不再出现 undefined
+      expect(firstRowText).not.toMatch(/undefined/);
+    } else {
+      // 无冲突数据时验证空态提示
+      await expect(page.getByText(/暂无|没有|空/i).first()).toBeVisible({ timeout: 5000 }).catch(() => {});
     }
   });
 
@@ -90,23 +100,23 @@ test.describe("Conflict Center（冲突中心）", () => {
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(2000);
     // 点击仲裁按钮
-    const arbitrateBtn = page.getByRole("button", { name: /仲裁|arbitrat/i }).first();
+    const arbitrateBtn = page.getByRole("button", { name: /仲\s*裁|arbitrat/i }).first();
     if (await arbitrateBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
       await arbitrateBtn.click();
       await page.waitForTimeout(1000);
-      // 输入指标编码
+      // 输入指标编码（seed 数据里的真实候选编码）
       const input = page.getByPlaceholder(/采纳为权威|编码|code/i);
       if (await input.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await input.fill("test_metric_code");
+        await input.fill("sales_e2e_conflicta_day");
         await page.waitForTimeout(500);
         // 点击确认/仲裁按钮
-        const confirmBtn = page.getByRole("button", { name: /确定|确认|submit/i }).first();
+        const confirmBtn = page.getByRole("button", { name: /确\s*定|确认|submit/i }).first();
         if (await confirmBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
           await confirmBtn.click();
           await page.waitForTimeout(1500);
-          // 不应出现 422 错误（decision 已改为 choose_canonical）
+          // 不应出现 422/500/校验错误（decision 已改为 choose_canonical）
           const errorText = await page.textContent("body");
-          expect(errorText).not.toMatch(/422|VALIDATION_ERROR/);
+          expect(errorText).not.toMatch(/422|VALIDATION_ERROR|500/);
         }
       }
     }
@@ -117,7 +127,7 @@ test.describe("Conflict Center（冲突中心）", () => {
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(2000);
     // 点击仲裁按钮
-    const arbitrateBtn = page.getByRole("button", { name: /仲裁|arbitrat/i }).first();
+    const arbitrateBtn = page.getByRole("button", { name: /仲\s*裁|arbitrat/i }).first();
     if (await arbitrateBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
       await arbitrateBtn.click();
       await page.waitForTimeout(1000);
@@ -135,7 +145,7 @@ test.describe("Conflict Center（冲突中心）", () => {
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(2000);
     // 点击升级按钮
-    const escalateBtn = page.getByRole("button", { name: /升级|escalat/i }).first();
+    const escalateBtn = page.getByRole("button", { name: /升\s*级|escalat/i }).first();
     if (await escalateBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
       await escalateBtn.click();
       await page.waitForTimeout(1000);
@@ -144,7 +154,7 @@ test.describe("Conflict Center（冲突中心）", () => {
       if (await noteInput.isVisible({ timeout: 2000 }).catch(() => false)) {
         await noteInput.fill("E2E 测试升级备注");
         await page.waitForTimeout(500);
-        const submitBtn = page.getByRole("button", { name: /确定|确认|submit/i }).first();
+        const submitBtn = page.getByRole("button", { name: /确\s*定|确认|submit/i }).first();
         if (await submitBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
           await submitBtn.click();
           await page.waitForTimeout(1500);
@@ -233,7 +243,7 @@ test.describe("Todo Center（待办中心）", () => {
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(2000);
     // 点击查看按钮
-    const viewBtn = page.getByRole("button", { name: /查看|view|详情/i }).first();
+    const viewBtn = page.getByRole("button", { name: /查\s*看|view|详情/i }).first();
     if (await viewBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
       await viewBtn.click();
       await page.waitForTimeout(2000);
@@ -441,7 +451,7 @@ test.describe("Consumption Query（消费查询）", () => {
       await page.waitForTimeout(3000);
     }
     // 点击导出按钮
-    const exportBtn = page.getByRole("button", { name: /导出|export|download/i }).first();
+    const exportBtn = page.getByRole("button", { name: /导\s*出|export|download/i }).first();
     if (await exportBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
       await exportBtn.click();
       await page.waitForTimeout(2000);
