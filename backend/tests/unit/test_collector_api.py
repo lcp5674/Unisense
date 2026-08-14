@@ -267,3 +267,71 @@ async def test_infer_table_description_endpoint(
     assert data["description"] == "订单明细事实表"
     assert data["source"] == "llm"
     assert data["confidence"] == 0.9
+
+
+async def test_infer_column_description_inflight_conflict(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """FR-023: 单字段推断进行中时，重复请求返回 409 LLM_INFER_IN_PROGRESS。"""
+    fake_svc = MagicMock()
+    fake_svc._llm_infer_column_description = AsyncMock(
+        return_value={"description": "订单ID", "confidence": 0.9}
+    )
+    fake_svc._repo.upsert_description = AsyncMock()
+    mock_guard = MagicMock()
+    mock_guard.acquire = AsyncMock(return_value=False)
+    mock_guard.release = AsyncMock(return_value=True)
+    with patch("app.api.collector._svc", return_value=fake_svc), patch(
+        "app.api.collector.InferInflightGuard", return_value=mock_guard
+    ):
+        resp = await collector_client.post(
+            "/api/v1/catalogs/1/columns/id/infer-description",
+            json={"entity_name": "ods_order", "column_type": "bigint"},
+        )
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "LLM_INFER_IN_PROGRESS"
+    # 推断未执行（被去重拦截）
+    fake_svc._llm_infer_column_description.assert_not_awaited()
+    mock_guard.acquire.assert_awaited_once()
+
+
+async def test_infer_descriptions_batch_inflight_conflict(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """FR-023: 批量推断进行中时，重复请求返回 409，且不读取描述/不逐字段推断。"""
+    fake_svc = MagicMock()
+    fake_svc._repo.get_descriptions = AsyncMock(return_value=[])
+    mock_guard = MagicMock()
+    mock_guard.acquire = AsyncMock(return_value=False)
+    mock_guard.release = AsyncMock(return_value=True)
+    with patch("app.api.collector._svc", return_value=fake_svc), patch(
+        "app.api.collector.InferInflightGuard", return_value=mock_guard
+    ):
+        resp = await collector_client.post("/api/v1/catalogs/1/infer-descriptions")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "LLM_INFER_IN_PROGRESS"
+    fake_svc._repo.get_descriptions.assert_not_awaited()
+
+
+async def test_infer_table_description_inflight_conflict(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """FR-023: 表级推断进行中时，重复请求返回 409。"""
+    fake_svc = MagicMock()
+    fake_svc._llm_infer_table_description = AsyncMock(
+        return_value={"description": "订单明细事实表", "confidence": 0.9}
+    )
+    fake_svc._repo.update_table_description = AsyncMock()
+    mock_guard = MagicMock()
+    mock_guard.acquire = AsyncMock(return_value=False)
+    mock_guard.release = AsyncMock(return_value=True)
+    with patch("app.api.collector._svc", return_value=fake_svc), patch(
+        "app.api.collector.InferInflightGuard", return_value=mock_guard
+    ):
+        resp = await collector_client.post(
+            "/api/v1/catalogs/1/infer-table-description",
+            json={"fields": [{"name": "order_id", "type": "bigint"}]},
+        )
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "LLM_INFER_IN_PROGRESS"
+    fake_svc._llm_infer_table_description.assert_not_awaited()

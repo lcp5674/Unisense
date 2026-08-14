@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, within, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { BrowserRouter } from "react-router-dom";
 import { AssetMap } from "../pages/AssetMap";
@@ -113,6 +113,7 @@ import {
   fetchAssetMyAssets,
   fetchDescriptionCoverage,
   updateTableDescription,
+  inferTableDescription,
   assignAssetOwner,
   reclassifyAssetSensitivity,
   batchAssignAssetOwner,
@@ -958,6 +959,64 @@ describe("AssetMap", () => {
     await waitFor(() => {
       expect(updateTableDescription).toHaveBeenCalledWith(1, "新表描述");
     });
+  });
+
+  it("描述缺失 tab：推断进行中（退出再进）二次点击被模块级 in-flight 拦截", async () => {
+    const user = userEvent.setup();
+    let resolveInfer: (v: any) => void = () => {};
+    vi.mocked(inferTableDescription).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveInfer = resolve;
+        }),
+    );
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "ods_order",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: "sig1",
+      schema_summary: [],
+      description: null,
+      description_source: null,
+    } as any);
+
+    try {
+      // 第一次进入：打开详情抽屉并触发表级推断（挂起，模拟 LLM 慢调用）
+      const first = renderAssetMap();
+      await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+      await user.click(screen.getByText("描述缺失"));
+      await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
+      await user.click(screen.getByText("ods_order"));
+      await waitFor(() => expect(screen.getByText("暂无表级描述")).toBeInTheDocument());
+      await user.click(screen.getByRole("button", { name: /推\s*断/ }));
+      await waitFor(() => expect(inferTableDescription).toHaveBeenCalledTimes(1));
+
+      // 模拟退出页面：卸载组件（模块级 inferInflight 不随组件卸载重置）
+      first.unmount();
+
+      // 重新进入：再次触发表级推断，应被模块级 Map 拦截，不再发第二次请求
+      renderAssetMap();
+      await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+      await user.click(screen.getByText("描述缺失"));
+      await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
+      await user.click(screen.getByText("ods_order"));
+      await waitFor(() => expect(screen.getByText("暂无表级描述")).toBeInTheDocument());
+      await user.click(screen.getByRole("button", { name: /推\s*断/ }));
+
+      await waitFor(() => {
+        expect(inferTableDescription).toHaveBeenCalledTimes(1); // 仍为 1 次，第二次被拦截
+        expect(screen.getByText("该表的表级推断正在进行中，请稍候")).toBeInTheDocument();
+      });
+    } finally {
+      // 清理：resolve 挂起的推断，触发模块级 Map 清理，避免污染后续测试
+      await act(async () => {
+        resolveInfer({});
+      });
+    }
   });
 
   it("数据表行设置：单条重分类敏感度调用 reclassifyAssetSensitivity", async () => {

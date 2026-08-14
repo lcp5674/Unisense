@@ -56,6 +56,33 @@ type CoverageMetricKey =
   | "totalTables";
 
 /**
+ * 模块级 in-flight 去重集合（FR-023）：key -> 进行中的推断 Promise。
+ *
+ * LLM 推断是慢操作（数十秒）。用户退出页面再进入（组件卸载重建）时，
+ * 组件内 loading 状态会丢失，若再次点击推断会对同一字段/表发起重复请求。
+ * 该 Map 挂在模块级（跨组件实例共享），进行中的推断完成后才移除，从而
+ * 在「退出再进」场景拦截重复调用。后端另有 Redis/进程内幂等兜底（409）。
+ */
+const inferInflight = new Map<string, Promise<unknown>>();
+
+/** 若 key 对应的推断已在途中则返回 null（拦截）；否则执行并登记，完成时清理。 */
+function runInflight<T>(key: string, task: () => Promise<T>): Promise<T> | null {
+  if (inferInflight.has(key)) return null;
+  const p = task().finally(() => inferInflight.delete(key));
+  inferInflight.set(key, p);
+  return p;
+}
+
+/** 后端 409 LLM_INFER_IN_PROGRESS：已有推断进行中（可能是其它会话/进程触发）。 */
+function isInferInProgress(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: string }).code === "LLM_INFER_IN_PROGRESS"
+  );
+}
+
+/**
  * 把 Statistic 的 value 包装成可点击链接，点击触发下钻（沿用资产地图 OverviewTab 的交互）。
  */
 function clickableValue(onClick: () => void) {
@@ -219,21 +246,55 @@ export function DescriptionCoverageTab() {
 
   async function handleFieldInfer(col: SchemaColumn) {
     if (!detail) return;
-    await inferColumnDescription(detail.id, col.name, {
-      entity_name: detail.entity_name,
-      column_type: col.type,
-    });
-    message.success(`字段「${col.name}」描述已生成`);
-    await refreshDetail();
+    const key = `column:${detail.id}:${col.name}`;
+    const p = runInflight(key, () =>
+      inferColumnDescription(detail.id, col.name, {
+        entity_name: detail.entity_name,
+        column_type: col.type,
+      }).then(() => {
+        message.success(`字段「${col.name}」描述已生成`);
+        return refreshDetail();
+      }),
+    );
+    if (!p) {
+      message.info("该字段的 LLM 推断正在进行中，请稍候");
+      return;
+    }
+    try {
+      await p;
+    } catch (err) {
+      if (isInferInProgress(err)) {
+        message.info("该字段的 LLM 推断正在进行中，请稍候");
+      } else {
+        message.error(err instanceof Error ? err.message : "推断失败");
+      }
+    }
   }
 
   async function handleBatchInfer() {
     if (!detail) return;
-    const res = await inferDescriptions(detail.id);
-    message.success(
-      `批量推断完成：成功 ${res.inferred.length}，跳过 ${res.skipped.length}，失败 ${res.failed.length}`,
+    const key = `batch:${detail.id}`;
+    const p = runInflight(key, () =>
+      inferDescriptions(detail.id).then((res) => {
+        message.success(
+          `批量推断完成：成功 ${res.inferred.length}，跳过 ${res.skipped.length}，失败 ${res.failed.length}`,
+        );
+        return refreshDetail();
+      }),
     );
-    await refreshDetail();
+    if (!p) {
+      message.info("该表的批量推断正在进行中，请稍候");
+      return;
+    }
+    try {
+      await p;
+    } catch (err) {
+      if (isInferInProgress(err)) {
+        message.info("该表的批量推断正在进行中，请稍候");
+      } else {
+        message.error(err instanceof Error ? err.message : "批量推断失败");
+      }
+    }
   }
 
   async function handleTableDescSave() {
@@ -254,15 +315,29 @@ export function DescriptionCoverageTab() {
   async function handleTableDescInfer() {
     if (!detail) return;
     setTableInferring(true);
+    const key = `table:${detail.id}`;
+    const fields = Array.isArray(detail.schema_summary)
+      ? detail.schema_summary.map((c) => ({ name: c.name, type: c.type }))
+      : [];
+    const p = runInflight(key, () =>
+      inferTableDescription(detail.id, fields).then(() => {
+        message.success("表级描述已生成");
+        return refreshDetail();
+      }),
+    );
+    if (!p) {
+      setTableInferring(false);
+      message.info("该表的表级推断正在进行中，请稍候");
+      return;
+    }
     try {
-      const fields = Array.isArray(detail.schema_summary)
-        ? detail.schema_summary.map((c) => ({ name: c.name, type: c.type }))
-        : [];
-      await inferTableDescription(detail.id, fields);
-      message.success("表级描述已生成");
-      await refreshDetail();
+      await p;
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "推断表描述失败");
+      if (isInferInProgress(err)) {
+        message.info("该表的表级推断正在进行中，请稍候");
+      } else {
+        message.error(err instanceof Error ? err.message : "推断表描述失败");
+      }
     } finally {
       setTableInferring(false);
     }

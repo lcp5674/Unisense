@@ -23,6 +23,7 @@ import contextlib
 import json
 import time
 import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
@@ -40,6 +41,7 @@ from app.db.mysql import get_db_session
 from app.db.redis import get_redis
 from app.models.data_source import DBCatalog
 from app.services.collector.distributed_lock import CollectionLock
+from app.services.collector.infer_guard import InferInflightGuard
 from app.services.collector.schemas import (
     BatchDeleteRequest,
     BatchSourceResult,
@@ -88,6 +90,32 @@ _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_inje
 
 def _svc(db: AsyncSession) -> CollectorService:
     return CollectorService(db)
+
+
+@contextlib.asynccontextmanager
+async def _infer_inflight(
+    kind: str, catalog_id: int, column: str | None = None
+) -> AsyncIterator[None]:
+    """LLM 推断 in-flight 去重：获得推断权才进入，退出释放（异常也释放，TTL 兜底）。
+
+    Redis 可用时 SET NX EX 跨进程去重；Redis 不可用降级为进程内去重。
+    已有推断进行中时抛 409（LLM_INFER_IN_PROGRESS），前端据此提示「正在进行中」。
+    """
+    owner_id = f"infer-{uuid.uuid4().hex[:8]}"
+    redis = None
+    with contextlib.suppress(RuntimeError):
+        redis = get_redis()  # Redis 不可用时降级为进程内去重
+    guard = InferInflightGuard(redis)
+    acquired = await guard.acquire(kind, catalog_id, column, owner=owner_id)
+    if not acquired:
+        raise ConflictError(
+            "该实体的 LLM 推断正在进行中，请稍后重试",
+            error_code="LLM_INFER_IN_PROGRESS",
+        )
+    try:
+        yield
+    finally:
+        await guard.release(kind, catalog_id, column, owner=owner_id)
 
 
 @source_router.post("", dependencies=_WRITE_DEPS)
@@ -885,45 +913,47 @@ async def infer_column_description(
     if cat is None:
         raise NotFoundError(f"目录实体不存在: {catalog_id}")
 
-    svc = _svc(db)
-    result = await svc._llm_infer_column_description(
-        entity_name=cat.entity_name,
-        column_name=column_name,
-        column_type=body.column_type,
-    )
-    if result is None:
-        raise BusinessError(
-            "LLM 推断暂时不可用，请稍后重试",
-            error_code="LLM_INFER_UNAVAILABLE",
+    # FR-023: in-flight 去重——同一字段推断进行中时拒绝重复请求（409）
+    async with _infer_inflight("column", catalog_id, column_name):
+        svc = _svc(db)
+        result = await svc._llm_infer_column_description(
+            entity_name=cat.entity_name,
+            column_name=column_name,
+            column_type=body.column_type,
         )
+        if result is None:
+            raise BusinessError(
+                "LLM 推断暂时不可用，请稍后重试",
+                error_code="LLM_INFER_UNAVAILABLE",
+            )
 
-    # upsert 到 column_descriptions
-    await svc._repo.upsert_description(
-        catalog_id=catalog_id,
-        column_name=column_name,
-        description=result["description"],
-        source="llm",
-    )
-    await write_audit(
-        db,
-        actor_id=user.id,
-        action="INFER_DESCRIPTION",
-        entity_type="column_description",
-        entity_id=f"{catalog_id}/{column_name}",
-        detail={"description": result["description"], "confidence": result["confidence"]},
-        ip=client_ip(request),
-        trace_id=trace_id,
-    )
-    await db.commit()
-    return ok(
-        data=InferDescriptionResponse(
+        # upsert 到 column_descriptions
+        await svc._repo.upsert_description(
+            catalog_id=catalog_id,
             column_name=column_name,
             description=result["description"],
             source="llm",
-            confidence=result["confidence"],
-        ),
-        trace_id=trace_id,
-    )
+        )
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="INFER_DESCRIPTION",
+            entity_type="column_description",
+            entity_id=f"{catalog_id}/{column_name}",
+            detail={"description": result["description"], "confidence": result["confidence"]},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
+        await db.commit()
+        return ok(
+            data=InferDescriptionResponse(
+                column_name=column_name,
+                description=result["description"],
+                source="llm",
+                confidence=result["confidence"],
+            ),
+            trace_id=trace_id,
+        )
 
 
 @catalog_router.post("/{catalog_id}/infer-descriptions", dependencies=_WRITE_DEPS)
@@ -943,82 +973,84 @@ async def infer_descriptions_batch(
     if cat is None:
         raise NotFoundError(f"目录实体不存在: {catalog_id}")
 
-    svc = _svc(db)
+    # FR-023: in-flight 去重——整表批量推断进行中时拒绝重复请求（409）
+    async with _infer_inflight("batch", catalog_id):
+        svc = _svc(db)
 
-    # 获取已有描述（避免覆盖 manual/llm 记录）
-    existing_descs = await svc._repo.get_descriptions(catalog_id)
-    existing_map = {d.column_name: d for d in existing_descs}
+        # 获取已有描述（避免覆盖 manual/llm 记录）
+        existing_descs = await svc._repo.get_descriptions(catalog_id)
+        existing_map = {d.column_name: d for d in existing_descs}
 
-    # 解析 schema_json columns
-    schema_json = cat.schema_json or {}
-    columns = schema_json.get("columns") or schema_json.get("fields") or []
+        # 解析 schema_json columns
+        schema_json = cat.schema_json or {}
+        columns = schema_json.get("columns") or schema_json.get("fields") or []
 
-    inferred: list[InferDescriptionResponse] = []
-    skipped: list[str] = []
-    failed: list[str] = []
+        inferred: list[InferDescriptionResponse] = []
+        skipped: list[str] = []
+        failed: list[str] = []
 
-    for col in columns:
-        if not isinstance(col, dict):
-            continue
-        col_name = col.get("name") or col.get("column")
-        if not col_name:
-            continue
-        col_name = str(col_name)
+        for col in columns:
+            if not isinstance(col, dict):
+                continue
+            col_name = col.get("name") or col.get("column")
+            if not col_name:
+                continue
+            col_name = str(col_name)
 
-        # 跳过已有 manual/llm 描述的字段
-        if col_name in existing_map and existing_map[col_name].source in ("manual", "llm"):
-            skipped.append(col_name)
-            continue
+            # 跳过已有 manual/llm 描述的字段
+            if col_name in existing_map and existing_map[col_name].source in ("manual", "llm"):
+                skipped.append(col_name)
+                continue
 
-        # 跳过已有 comment 的字段（除非 comment 为空）
-        comment = col.get("comment")
-        if comment and col_name not in existing_map:
-            skipped.append(col_name)
-            continue
+            # 跳过已有 comment 的字段（除非 comment 为空）
+            comment = col.get("comment")
+            if comment and col_name not in existing_map:
+                skipped.append(col_name)
+                continue
 
-        # 推断
-        col_type = col.get("type") or col.get("data_type")
-        result = await svc._llm_infer_column_description(
-            entity_name=cat.entity_name,
-            column_name=col_name,
-            column_type=str(col_type) if col_type else None,
-        )
-        if result is None:
-            failed.append(col_name)
-            continue
+            # 推断
+            col_type = col.get("type") or col.get("data_type")
+            result = await svc._llm_infer_column_description(
+                entity_name=cat.entity_name,
+                column_name=col_name,
+                column_type=str(col_type) if col_type else None,
+            )
+            if result is None:
+                failed.append(col_name)
+                continue
 
-        # upsert
-        await svc._repo.upsert_description(
-            catalog_id=catalog_id,
-            column_name=col_name,
-            description=result["description"],
-            source="llm",
-        )
-        inferred.append(
-            InferDescriptionResponse(
+            # upsert
+            await svc._repo.upsert_description(
+                catalog_id=catalog_id,
                 column_name=col_name,
                 description=result["description"],
                 source="llm",
-                confidence=result["confidence"],
             )
-        )
+            inferred.append(
+                InferDescriptionResponse(
+                    column_name=col_name,
+                    description=result["description"],
+                    source="llm",
+                    confidence=result["confidence"],
+                )
+            )
 
-    if inferred:
-        await write_audit(
-            db,
-            actor_id=user.id,
-            action="INFER_DESCRIPTIONS_BATCH",
-            entity_type="column_description",
-            entity_id=str(catalog_id),
-            detail={"inferred": len(inferred), "skipped": len(skipped), "failed": len(failed)},
-            ip=client_ip(request),
+        if inferred:
+            await write_audit(
+                db,
+                actor_id=user.id,
+                action="INFER_DESCRIPTIONS_BATCH",
+                entity_type="column_description",
+                entity_id=str(catalog_id),
+                detail={"inferred": len(inferred), "skipped": len(skipped), "failed": len(failed)},
+                ip=client_ip(request),
+                trace_id=trace_id,
+            )
+        await db.commit()
+        return ok(
+            data=InferBatchResponse(inferred=inferred, skipped=skipped, failed=failed),
             trace_id=trace_id,
         )
-    await db.commit()
-    return ok(
-        data=InferBatchResponse(inferred=inferred, skipped=skipped, failed=failed),
-        trace_id=trace_id,
-    )
 
 
 @catalog_router.put("/{catalog_id}/columns/{column_name}/description", dependencies=_WRITE_DEPS)
@@ -1132,46 +1164,48 @@ async def infer_table_description(
     if cat is None:
         raise NotFoundError(f"目录实体不存在: {catalog_id}")
 
-    svc = _svc(db)
-    schema_json = cat.schema_json or {}
-    fields = (
-        body.fields
-        if body and body.fields
-        else (schema_json.get("columns") or schema_json.get("fields") or [])
-    )
-    result = await svc._llm_infer_table_description(
-        entity_name=cat.entity_name,
-        columns=fields,
-    )
-    if result is None:
-        raise BusinessError(
-            "LLM 推断暂时不可用，请稍后重试",
-            error_code="LLM_INFER_UNAVAILABLE",
+    # FR-023: in-flight 去重——表级推断进行中时拒绝重复请求（409）
+    async with _infer_inflight("table", catalog_id):
+        svc = _svc(db)
+        schema_json = cat.schema_json or {}
+        fields = (
+            body.fields
+            if body and body.fields
+            else (schema_json.get("columns") or schema_json.get("fields") or [])
         )
+        result = await svc._llm_infer_table_description(
+            entity_name=cat.entity_name,
+            columns=fields,
+        )
+        if result is None:
+            raise BusinessError(
+                "LLM 推断暂时不可用，请稍后重试",
+                error_code="LLM_INFER_UNAVAILABLE",
+            )
 
-    updated = await svc._repo.update_table_description(
-        catalog_id=catalog_id,
-        description=result["description"],
-        source="llm",
-    )
-    if updated is None:
-        raise NotFoundError(f"目录实体不存在: {catalog_id}")
-    await write_audit(
-        db,
-        actor_id=user.id,
-        action="INFER_TABLE_DESCRIPTION",
-        entity_type="catalog",
-        entity_id=str(catalog_id),
-        detail={"description": result["description"], "confidence": result["confidence"]},
-        ip=client_ip(request),
-        trace_id=trace_id,
-    )
-    await db.commit()
-    return ok(
-        data=InferTableDescriptionResponse(
+        updated = await svc._repo.update_table_description(
             catalog_id=catalog_id,
             description=result["description"],
-            confidence=result["confidence"],
-        ),
-        trace_id=trace_id,
-    )
+            source="llm",
+        )
+        if updated is None:
+            raise NotFoundError(f"目录实体不存在: {catalog_id}")
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="INFER_TABLE_DESCRIPTION",
+            entity_type="catalog",
+            entity_id=str(catalog_id),
+            detail={"description": result["description"], "confidence": result["confidence"]},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
+        await db.commit()
+        return ok(
+            data=InferTableDescriptionResponse(
+                catalog_id=catalog_id,
+                description=result["description"],
+                confidence=result["confidence"],
+            ),
+            trace_id=trace_id,
+        )
