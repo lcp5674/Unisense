@@ -238,6 +238,76 @@ async def test_get_graph_neo4j_error_falls_back(monkeypatch) -> None:
     repo.graph_from_mysql.assert_awaited_once()
 
 
+async def test_get_graph_neo4j_missing_labels_falls_back(monkeypatch) -> None:
+    """Neo4j 数据未就绪（节点仅含 id、label 全空）时回退 MySQL 完整图谱。
+
+    线上 Neo4j 导入脚本当前只写节点 id + 关系，缺 type/label/domain 等属性，
+    若直接用会渲染出满屏 unknown/空标签散点；应降级到数据完整的 MySQL 路径。
+    """
+    from app.core.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "neo4j_url", "bolt://localhost:7687")
+    monkeypatch.setattr(cfg, "neo4j_password", "pw")
+
+    class _MissingLabelSession(_FakeSession):
+        async def run(self, query: str, params: dict | None = None):
+            if "RETURN n.id" in query:
+                return _FakeResult(
+                    [
+                        _FakeRecord(
+                            {
+                                "id": "table:ods_orders",
+                                "type": None,
+                                "label": None,
+                                "pii": None,
+                                "domain": None,
+                                "owner": None,
+                            }
+                        ),
+                        _FakeRecord(
+                            {
+                                "id": "table:dwd_orders",
+                                "type": None,
+                                "label": None,
+                                "pii": None,
+                                "domain": None,
+                                "owner": None,
+                            }
+                        ),
+                    ]
+                )
+            return _FakeResult([])
+
+    class _MissingLabelDriver:
+        def session(self):
+            return _MissingLabelSession()
+
+    monkeypatch.setattr(
+        "app.services.assetmap.service._get_neo4j_driver", lambda: _MissingLabelDriver()
+    )
+    monkeypatch.setattr("app.services.assetmap.service._NEO4J_BREAKER", _breaker(True))
+
+    svc, repo = await _svc()
+    repo.graph_from_mysql = AsyncMock(
+        return_value=(
+            [
+                {
+                    "id": "table:ods_orders",
+                    "type": "table",
+                    "label": "ods_orders",
+                    "domain": "sales",
+                }
+            ],
+            [{"source": "a", "target": "b", "type": "DERIVED_FROM"}],
+        )
+    )
+    out = await svc.get_graph(domain=None, depth=3, pii_only=False)
+
+    assert out["nodes"][0]["label"] == "ods_orders"
+    assert out["nodes"][0]["type"] == "table"
+    repo.graph_from_mysql.assert_awaited_once()
+
+
 def test_neo4j_driver_singleton_and_close(monkeypatch) -> None:
     """driver 惰性单例复用 + close 幂等（防每请求泄漏）。"""
     import app.services.assetmap.service as svc_mod

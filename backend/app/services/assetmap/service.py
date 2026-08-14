@@ -252,6 +252,12 @@ class AssetMapService(BaseService):
                         }
                     )
 
+                # Neo4j 数据未就绪（节点仅导入 id、缺 label/type 等属性）时回退
+                # MySQL 完整图谱，避免前端拿到满屏 unknown/空标签的孤立散点。
+                if nodes and not any(n["label"] for n in nodes):
+                    _NEO4J_BREAKER.record_failure()
+                    logger.warning("assetmap_neo4j_nodes_missing_labels_fallback_mysql")
+                    return None
                 _NEO4J_BREAKER.record_success()
                 return {"nodes": nodes, "edges": edges}
         except Exception as exc:
