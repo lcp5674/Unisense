@@ -214,9 +214,19 @@ async def test_create_member_auto_resolves_root_path() -> None:
     """根成员（无父级）path 自动推测为 /{member_code}。"""
     svc, repo = await _svc()
     repo.get_dimension = AsyncMock(
-        return_value=Dimension(id=1, dim_code="geo_region", name="地区", domain="geo", type="SCD1", status="DRAFT", owner_id=1)
+        return_value=Dimension(
+            id=1,
+            dim_code="geo_region",
+            name="地区",
+            domain="geo",
+            type="SCD1",
+            status="DRAFT",
+            owner_id=1,
+        )
     )
-    payload = DimensionMemberCreate(dim_code="geo_region", member_code="east", member_name="华东", status="PUBLISHED")
+    payload = DimensionMemberCreate(
+        dim_code="geo_region", member_code="east", member_name="华东", status="PUBLISHED"
+    )
     out = await svc.create_member(payload)
     assert out.path == "/east"
 
@@ -225,12 +235,32 @@ async def test_create_member_auto_resolves_child_path() -> None:
     """子成员（指定父级）path 自动推测为 父path/子member_code。"""
     svc, repo = await _svc()
     repo.get_dimension = AsyncMock(
-        return_value=Dimension(id=1, dim_code="geo_region", name="地区", domain="geo", type="SCD1", status="DRAFT", owner_id=1)
+        return_value=Dimension(
+            id=1,
+            dim_code="geo_region",
+            name="地区",
+            domain="geo",
+            type="SCD1",
+            status="DRAFT",
+            owner_id=1,
+        )
     )
-    parent = DimensionMember(id=1, dim_code="geo_region", member_code="east", member_name="华东", parent_code=None, path="/east", status="PUBLISHED")
+    parent = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="east",
+        member_name="华东",
+        parent_code=None,
+        path="/east",
+        status="PUBLISHED",
+    )
     repo.list_members = AsyncMock(return_value=[parent])
     payload = DimensionMemberCreate(
-        dim_code="geo_region", member_code="east_nanjing", member_name="南京", parent_code="east", status="PUBLISHED"
+        dim_code="geo_region",
+        member_code="east_nanjing",
+        member_name="南京",
+        parent_code="east",
+        status="PUBLISHED",
     )
     out = await svc.create_member(payload)
     assert out.path == "/east/east_nanjing"
@@ -240,10 +270,22 @@ async def test_create_member_explicit_path_kept() -> None:
     """客户端显式提供 path 时服务端不覆盖（保留手工路径）。"""
     svc, repo = await _svc()
     repo.get_dimension = AsyncMock(
-        return_value=Dimension(id=1, dim_code="geo_region", name="地区", domain="geo", type="SCD1", status="DRAFT", owner_id=1)
+        return_value=Dimension(
+            id=1,
+            dim_code="geo_region",
+            name="地区",
+            domain="geo",
+            type="SCD1",
+            status="DRAFT",
+            owner_id=1,
+        )
     )
     payload = DimensionMemberCreate(
-        dim_code="geo_region", member_code="east", member_name="华东", path="/自定义/路径", status="PUBLISHED"
+        dim_code="geo_region",
+        member_code="east",
+        member_name="华东",
+        path="/自定义/路径",
+        status="PUBLISHED",
     )
     out = await svc.create_member(payload)
     assert out.path == "/自定义/路径"
@@ -253,16 +295,33 @@ async def test_create_member_explicit_path_kept() -> None:
 async def test_update_member_reparent_resolves_path() -> None:
     """编辑成员改父级：自动重算 path = 新父 path + / + member_code。"""
     svc, repo = await _svc()
-    member = DimensionMember(id=1, dim_code="geo_region", member_code="child", member_name="子级", parent_code=None, path="/child", status="PUBLISHED")
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="child",
+        member_name="子级",
+        parent_code=None,
+        path="/child",
+        status="PUBLISHED",
+    )
     repo.get_member = AsyncMock(return_value=member)
     repo.list_members = AsyncMock(
         return_value=[
             member,
-            DimensionMember(id=2, dim_code="geo_region", member_code="parent", member_name="父级", parent_code=None, path="/parent", status="PUBLISHED"),
+            DimensionMember(
+                id=2,
+                dim_code="geo_region",
+                member_code="parent",
+                member_name="父级",
+                parent_code=None,
+                path="/parent",
+                status="PUBLISHED",
+            ),
         ]
     )
     out = await svc.update_member(
-        "geo_region", "child",
+        "geo_region",
+        "child",
         DimensionMemberUpdate(parent_code="parent", member_name="子级（新）"),
     )
     assert out.member_name == "子级（新）"
@@ -273,7 +332,15 @@ async def test_update_member_reparent_resolves_path() -> None:
 async def test_update_member_clear_parent_to_root() -> None:
     """编辑成员置为根：parent_code="" → parent 清空，path 重算为 /{member_code}。"""
     svc, repo = await _svc()
-    member = DimensionMember(id=1, dim_code="geo_region", member_code="child", member_name="子级", parent_code="parent", path="/parent/child", status="PUBLISHED")
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="child",
+        member_name="子级",
+        parent_code="parent",
+        path="/parent/child",
+        status="PUBLISHED",
+    )
     repo.get_member = AsyncMock(return_value=member)
     repo.list_members = AsyncMock(return_value=[member])
     out = await svc.update_member("geo_region", "child", DimensionMemberUpdate(parent_code=""))
@@ -284,8 +351,24 @@ async def test_update_member_clear_parent_to_root() -> None:
 async def test_update_member_rejects_cycle() -> None:
     """环防护：不能把成员移动到自身后代之下。"""
     svc, repo = await _svc()
-    member = DimensionMember(id=1, dim_code="geo_region", member_code="root", member_name="根", parent_code=None, path="/root", status="PUBLISHED")
-    descendant = DimensionMember(id=2, dim_code="geo_region", member_code="sub", member_name="子", parent_code="root", path="/root/sub", status="PUBLISHED")
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="root",
+        member_name="根",
+        parent_code=None,
+        path="/root",
+        status="PUBLISHED",
+    )
+    descendant = DimensionMember(
+        id=2,
+        dim_code="geo_region",
+        member_code="sub",
+        member_name="子",
+        parent_code="root",
+        path="/root/sub",
+        status="PUBLISHED",
+    )
     repo.get_member = AsyncMock(return_value=member)
     # 尝试把 root 挂到 sub（root 的后代）下 → 环
     repo.list_members = AsyncMock(return_value=[member, descendant])
@@ -304,7 +387,143 @@ async def test_update_member_missing_raises() -> None:
 async def test_update_member_invalid_status_rejected() -> None:
     """非法成员状态在服务层 4xx，而非 DB Enum 500。"""
     svc, repo = await _svc()
-    member = DimensionMember(id=1, dim_code="geo_region", member_code="m1", member_name="成员", parent_code=None, path="/m1", status="PUBLISHED")
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="m1",
+        member_name="成员",
+        parent_code=None,
+        path="/m1",
+        status="PUBLISHED",
+    )
     repo.get_member = AsyncMock(return_value=member)
     with pytest.raises(ValidationError):
         await svc.update_member("geo_region", "m1", DimensionMemberUpdate(status="BOGUS"))
+
+
+async def test_delete_member_cascades_subtree() -> None:
+    """工业级语义：删除父级连带级联删除整个子树（BFS 收集后代一次删除）。"""
+    svc, repo = await _svc()
+    root = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="root",
+        member_name="根",
+        parent_code=None,
+        path="/root",
+        status="PUBLISHED",
+    )
+    child = DimensionMember(
+        id=2,
+        dim_code="geo_region",
+        member_code="sub",
+        member_name="子",
+        parent_code="root",
+        path="/root/sub",
+        status="PUBLISHED",
+    )
+    grand = DimensionMember(
+        id=3,
+        dim_code="geo_region",
+        member_code="leaf",
+        member_name="孙",
+        parent_code="sub",
+        path="/root/sub/leaf",
+        status="PUBLISHED",
+    )
+    other = DimensionMember(
+        id=4,
+        dim_code="geo_region",
+        member_code="sibling",
+        member_name="旁支",
+        parent_code=None,
+        path="/sibling",
+        status="PUBLISHED",
+    )
+    repo.get_member = AsyncMock(return_value=root)
+    repo.list_members = AsyncMock(return_value=[root, child, grand, other])
+    repo.delete_members = AsyncMock()
+    deleted = await svc.delete_member("geo_region", "root")
+    codes = {m.member_code for m in deleted}
+    # 级联删除 root + 全部后代；旁支不受影响
+    assert codes == {"root", "sub", "leaf"}
+    repo.delete_members.assert_awaited_once()
+    assert repo.delete_members.await_args[0][0] == deleted
+
+
+async def test_delete_member_missing_raises() -> None:
+    """删除不存在的成员 → 404。"""
+    svc, repo = await _svc()
+    repo.get_member = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.delete_member("geo_region", "nope")
+
+
+async def test_update_mapping_edits_type_and_expression() -> None:
+    """编辑映射：映射类型/表达式可更新，非法类型 422。"""
+    svc, repo = await _svc()
+    mapping = MagicMock()
+    mapping.mapping_type = "EQUIVALENT"
+    mapping.expression = "a=b"
+    repo.get_mapping = AsyncMock(return_value=mapping)
+    from app.services.dimension.schemas import DimensionMappingUpdate
+
+    resp = await svc.update_mapping(
+        1, DimensionMappingUpdate(mapping_type="PARTIAL", expression="c=d")
+    )
+    assert resp.mapping_type == "PARTIAL"
+    assert resp.expression == "c=d"
+    with pytest.raises(ValidationError):
+        await svc.update_mapping(1, DimensionMappingUpdate(mapping_type="BOGUS"))
+
+
+async def test_update_mapping_missing_raises() -> None:
+    """编辑不存在的映射 → 404。"""
+    svc, repo = await _svc()
+    repo.get_mapping = AsyncMock(return_value=None)
+    from app.services.dimension.schemas import DimensionMappingUpdate
+
+    with pytest.raises(NotFoundError):
+        await svc.update_mapping(99, DimensionMappingUpdate(expression="x"))
+
+
+async def test_delete_mapping_removes() -> None:
+    """删除映射：存在则删除，不存在 404。"""
+    svc, repo = await _svc()
+    mapping = MagicMock()
+    repo.get_mapping = AsyncMock(return_value=mapping)
+    repo.delete_mapping = AsyncMock()
+    await svc.delete_mapping(1)
+    repo.delete_mapping.assert_awaited_once_with(mapping)
+    repo.get_mapping = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.delete_mapping(99)
+
+
+async def test_list_dimension_metrics_joins_metric() -> None:
+    """按维度查绑定指标：join Metric 补 metric_code/name/status（治理追溯）。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=MagicMock())
+    binding = MagicMock()
+    metric = MagicMock()
+    repo.list_dimension_metrics = AsyncMock(return_value=[(binding, metric)])
+    result = await svc.list_dimension_metrics("geo_region")
+    assert result == [(binding, metric)]
+    repo.list_dimension_metrics.assert_awaited_once_with("geo_region")
+
+
+async def test_list_dimensions_returns_count_tuples() -> None:
+    """维度列表：repository 返回 (维度, 绑定指标数) 二元组。"""
+    svc, repo = await _svc()
+    dim = Dimension(
+        id=1,
+        dim_code="d",
+        name="维度",
+        domain="finance",
+        type="SCD1",
+        owner_id=1,
+        status="PUBLISHED",
+    )
+    repo.list_dimensions = AsyncMock(return_value=[(dim, 3)])
+    result = await svc.list_dimensions(None, None)
+    assert result == [(dim, 3)]

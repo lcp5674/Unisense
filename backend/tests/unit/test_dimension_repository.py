@@ -73,10 +73,11 @@ class TestDimensionCRUD:
 
     async def test_list_dimensions_no_filter(self, repo, session) -> None:
         dims = [SimpleNamespace(dim_code="a"), SimpleNamespace(dim_code="b")]
-        session.execute = AsyncMock(return_value=_FakeResult(rows=dims))
+        # list_dimensions 返回 (维度, 绑定指标数) 二元组（LEFT JOIN 聚合）
+        session.execute = AsyncMock(return_value=_FakeResult(rows=[(d, 0) for d in dims]))
 
         out = await repo.list_dimensions(None, None)
-        assert out == dims
+        assert [d for d, _ in out] == dims
         stmt = _first_stmt(session)
         assert "dimension" in stmt
 

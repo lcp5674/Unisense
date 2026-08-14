@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.dimension import (
@@ -12,6 +12,7 @@ from app.models.dimension import (
     MetricDimension,
     Reconciliation,
 )
+from app.models.metric import Metric
 
 
 class DimensionRepository:
@@ -29,8 +30,13 @@ class DimensionRepository:
 
     async def list_dimensions(
         self, domain: str | None, status: str | None, keyword: str | None = None
-    ) -> list[Dimension]:
-        stmt = select(Dimension)
+    ) -> list[tuple[Dimension, int]]:
+        """列出维度并附带绑定指标数（LEFT JOIN 聚合，未绑定的维度计数为 0）。"""
+        stmt = (
+            select(Dimension, func.count(MetricDimension.id))
+            .outerjoin(MetricDimension, MetricDimension.dim_code == Dimension.dim_code)
+            .group_by(Dimension.id)
+        )
         if domain:
             stmt = stmt.where(Dimension.domain == domain)
         if status:
@@ -45,7 +51,8 @@ class DimensionRepository:
                     Dimension.description.like(f"%{escaped}%"),
                 )
             )
-        return list((await self._session.execute(stmt)).scalars().all())
+        rows = (await self._session.execute(stmt)).all()
+        return [(dim, count) for dim, count in rows]
 
     async def save_member(self, obj: DimensionMember) -> DimensionMember:
         self._session.add(obj)
@@ -64,6 +71,12 @@ class DimensionRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def delete_members(self, members: list[DimensionMember]) -> None:
+        """物理删除一组维度成员（级联子树时一次性删除，避免逐条 N+1）。"""
+        for member in members:
+            await self._session.delete(member)
+        await self._session.flush()
+
     async def save_mapping(self, obj: DimensionMapping) -> DimensionMapping:
         self._session.add(obj)
         await self._session.flush()
@@ -75,6 +88,14 @@ class DimensionRepository:
             stmt = stmt.where(DimensionMapping.source_dim_code == source_dim_code)
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def get_mapping(self, mapping_id: int) -> DimensionMapping | None:
+        stmt = select(DimensionMapping).where(DimensionMapping.id == mapping_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def delete_mapping(self, obj: DimensionMapping) -> None:
+        await self._session.delete(obj)
+        await self._session.flush()
+
     async def save_metric_dimension(self, obj: MetricDimension) -> MetricDimension:
         self._session.add(obj)
         await self._session.flush()
@@ -84,16 +105,32 @@ class DimensionRepository:
         stmt = select(MetricDimension).where(MetricDimension.metric_id == metric_id)
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def list_dimension_metrics(self, dim_code: str) -> list[tuple[MetricDimension, Metric]]:
+        """按维度查绑定指标：join Metric 拿 metric_code/name/status（治理追溯）。"""
+        stmt = (
+            select(MetricDimension, Metric)
+            .join(Metric, Metric.id == MetricDimension.metric_id)
+            .where(MetricDimension.dim_code == dim_code)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(binding, metric) for binding, metric in rows]
+
     async def save_reconciliation(self, obj: Reconciliation) -> Reconciliation:
         self._session.add(obj)
         await self._session.flush()
         return obj
 
-    async def list_reconciliations(self, status: str | None) -> list[Reconciliation]:
-        stmt = select(Reconciliation)
+    async def list_reconciliations(
+        self, status: str | None
+    ) -> list[tuple[Reconciliation, Metric | None]]:
+        """列出对账记录并 LEFT JOIN Metric 取指标编码/名称；metric 缺失时返回 None。"""
+        stmt = select(Reconciliation, Metric).outerjoin(
+            Metric, Metric.id == Reconciliation.metric_id
+        )
         if status:
             stmt = stmt.where(Reconciliation.status == status)
-        return list((await self._session.execute(stmt)).scalars().all())
+        rows = (await self._session.execute(stmt)).all()
+        return [(rec, metric) for rec, metric in rows]
 
     async def get_reconciliation(self, rec_id: int) -> Reconciliation | None:
         stmt = select(Reconciliation).where(Reconciliation.id == rec_id)

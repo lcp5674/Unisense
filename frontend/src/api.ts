@@ -1215,6 +1215,45 @@ export async function listMetricDimensions(
   return request(`${API_BASE}/dimensions/${metricId}/metric-dimensions`);
 }
 
+/** 查询维度已绑定的指标（GET /dimensions/{dim_code}/metrics，role 为 PARTITION/SPLICE/FILTER） */
+export async function listDimensionMetrics(
+  dimCode: string,
+): Promise<{ items: DimensionMetricBinding[]; total: number }> {
+  return request(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/metrics`);
+}
+
+/** 删除维度成员（DELETE /dimensions/{dim_code}/members/{member_code}，可能级联删除子树） */
+export async function deleteDimensionMember(
+  dimCode: string,
+  memberCode: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members/${encodeURIComponent(memberCode)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** 编辑维度映射（PUT /dimensions/mappings/{mapping_id}，仅 mapping_type/expression 可改） */
+export async function updateDimensionMapping(
+  mappingId: number,
+  body: {
+    mapping_type?: string;
+    expression?: string | null;
+  },
+): Promise<DimensionMapping> {
+  return request<DimensionMapping>(`${API_BASE}/dimensions/mappings/${mappingId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 删除维度映射（DELETE /dimensions/mappings/{mapping_id}） */
+export async function deleteDimensionMapping(mappingId: number): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`${API_BASE}/dimensions/mappings/${mappingId}`, {
+    method: "DELETE",
+  });
+}
+
 // ---- 术语表 ----
 export async function listTerms(params?: {
   domain?: string;

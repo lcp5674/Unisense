@@ -581,6 +581,8 @@ export interface Dimension {
   status: string;
   created_at: string;
   updated_at: string;
+  /** 绑定指标数（列表接口批量回填，默认 0；兼容旧后端缺省场景） */
+  metric_count?: number;
 }
 
 export interface DimensionMapping {
@@ -596,6 +598,9 @@ export interface DimensionMapping {
 export interface Reconciliation {
   id: number;
   metric_id: number;
+  /** 对账指标编码/名称（后端联查回填，旧后端可能缺省 → 前端回退 #metric_id） */
+  metric_code?: string | null;
+  metric_name?: string | null;
   dim_code: string | null;
   expected_expr: string;
   actual_expr: string;
@@ -625,6 +630,16 @@ export interface MetricDimension {
   dim_code: string;
   role: string;
   default_member: string | null;
+}
+
+/** 按维度查绑定指标（GET /dimensions/{dim_code}/metrics，role 为 PARTITION/SPLICE/FILTER） */
+export interface DimensionMetricBinding {
+  metric_id: number;
+  metric_code: string;
+  metric_name: string;
+  role: string;
+  default_member: string | null;
+  metric_status: string;
 }
 
 // ============================================================================

@@ -34,6 +34,10 @@ class DimensionResponse(BaseModel):
     description: str | None = None
     owner_id: int
     status: str
+    #: 绑定指标数（list_dimensions LEFT JOIN 聚合，from_model 默认 0）
+    metric_count: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> DimensionResponse:
@@ -46,6 +50,9 @@ class DimensionResponse(BaseModel):
             description=getattr(m, "description", None),
             owner_id=m.owner_id,
             status=m.status,
+            metric_count=getattr(m, "metric_count", 0),
+            created_at=getattr(m, "created_at", None),
+            updated_at=getattr(m, "updated_at", None),
         )
 
 
@@ -78,6 +85,7 @@ class DimensionMemberResponse(BaseModel):
     path: str | None = None
     attributes: dict[str, Any] | None = None
     status: str
+    created_at: datetime | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> DimensionMemberResponse:
@@ -90,6 +98,7 @@ class DimensionMemberResponse(BaseModel):
             path=getattr(m, "path", None),
             attributes=getattr(m, "attributes", None),
             status=m.status,
+            created_at=getattr(m, "created_at", None),
         )
 
 
@@ -102,6 +111,13 @@ class DimensionMappingCreate(BaseModel):
     created_by: int | None = None
 
 
+class DimensionMappingUpdate(BaseModel):
+    """维度映射编辑（仅可改映射类型/表达式，源/目标维度不可变更）。"""
+
+    mapping_type: str | None = None
+    expression: str | None = None
+
+
 class DimensionMappingResponse(BaseModel):
     id: int
     source_dim_code: str
@@ -109,6 +125,7 @@ class DimensionMappingResponse(BaseModel):
     mapping_type: str
     expression: str | None = None
     created_by: int
+    created_at: datetime | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> DimensionMappingResponse:
@@ -119,6 +136,7 @@ class DimensionMappingResponse(BaseModel):
             mapping_type=m.mapping_type,
             expression=getattr(m, "expression", None),
             created_by=m.created_by,
+            created_at=getattr(m, "created_at", None),
         )
 
 
@@ -147,6 +165,18 @@ class MetricDimensionResponse(BaseModel):
         )
 
 
+class DimensionMetricBinding(BaseModel):
+    """按维度查绑定指标：绑定关系 + 指标信息（治理追溯）。"""
+
+    metric_id: int
+    dim_code: str
+    role: str
+    default_member: str | None = None
+    metric_code: str | None = None
+    metric_name: str | None = None
+    metric_status: str | None = None
+
+
 class ReconciliationSubmit(BaseModel):
     metric_id: int
     dim_code: str | None = None
@@ -171,6 +201,9 @@ class ReconciliationResponse(BaseModel):
     diff_summary: str | None = None
     reviewed_by: int | None = None
     created_at: datetime | None = None
+    reviewed_at: datetime | None = None
+    metric_code: str | None = None
+    metric_name: str | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> ReconciliationResponse:
@@ -184,4 +217,7 @@ class ReconciliationResponse(BaseModel):
             diff_summary=getattr(m, "diff_summary", None),
             reviewed_by=getattr(m, "reviewed_by", None),
             created_at=getattr(m, "created_at", None),
+            reviewed_at=getattr(m, "reviewed_at", None),
+            metric_code=getattr(m, "metric_code", None),
+            metric_name=getattr(m, "metric_name", None),
         )

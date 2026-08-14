@@ -16,9 +16,11 @@ from app.services.dimension.schemas import (
     DimensionCreate,
     DimensionMappingCreate,
     DimensionMappingResponse,
+    DimensionMappingUpdate,
     DimensionMemberCreate,
     DimensionMemberResponse,
     DimensionMemberUpdate,
+    DimensionMetricBinding,
     DimensionResponse,
     DimensionUpdate,
     MetricDimensionBind,
@@ -72,8 +74,13 @@ async def list_dimensions(
     keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
 ) -> Any:
     items = await DimensionService(db).list_dimensions(domain, status, keyword)
+    converted = []
+    for dim, metric_count in items:
+        resp = DimensionResponse.from_model(dim)
+        resp.metric_count = metric_count
+        converted.append(resp)
     return ok(
-        data={"items": [DimensionResponse.from_model(i) for i in items], "total": len(items)},
+        data={"items": converted, "total": len(converted)},
         trace_id=trace_id,
     )
 
@@ -111,6 +118,49 @@ async def list_mappings(
     return ok(data={"items": converted, "total": len(items)}, trace_id=trace_id)
 
 
+@router.put("/mappings/{mapping_id}", dependencies=_WRITE_DEPS)
+async def update_mapping(
+    mapping_id: int,
+    payload: DimensionMappingUpdate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    resp = await DimensionService(db).update_mapping(mapping_id, payload)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.mapping.update",
+        entity_type="dimension_mapping",
+        entity_id=str(mapping_id),
+        detail=payload.model_dump(exclude_none=True),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=DimensionMappingResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.delete("/mappings/{mapping_id}", dependencies=_WRITE_DEPS)
+async def delete_mapping(
+    mapping_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    await DimensionService(db).delete_mapping(mapping_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.mapping.delete",
+        entity_type="dimension_mapping",
+        entity_id=str(mapping_id),
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=None, trace_id=trace_id)
+
+
 @router.post("/reconciliations", dependencies=_WRITE_DEPS)
 async def submit_reconciliation(
     payload: ReconciliationSubmit,
@@ -140,8 +190,15 @@ async def list_reconciliations(
     status: str | None = Query(None),
 ) -> Any:
     items = await DimensionService(db).list_reconciliations(status)
+    converted = []
+    for rec, metric in items:
+        resp = ReconciliationResponse.from_model(rec)
+        if metric is not None:
+            resp.metric_code = metric.metric_code
+            resp.metric_name = metric.name
+        converted.append(resp)
     return ok(
-        data={"items": [ReconciliationResponse.from_model(i) for i in items], "total": len(items)},
+        data={"items": converted, "total": len(converted)},
         trace_id=trace_id,
     )
 
@@ -305,6 +362,29 @@ async def update_member(
     return ok(data=DimensionMemberResponse.from_model(resp), trace_id=trace_id)
 
 
+@router.delete("/{dim_code}/members/{member_code}", dependencies=_WRITE_DEPS)
+async def delete_member(
+    dim_code: str,
+    member_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    # 服务端级联删除：删除父级连带整个子树（成员表无软删列，物理删除）
+    deleted = await DimensionService(db).delete_member(dim_code, member_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.member.delete",
+        entity_type="dimension_member",
+        entity_id=f"{dim_code}:{member_code}",
+        detail={"cascade_count": len(deleted)},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=None, trace_id=trace_id)
+
+
 @router.post(
     "/{dim_code}/metrics",
     dependencies=_WRITE_DEPS,
@@ -328,6 +408,30 @@ async def bind_metric_dimension(
     )
     await db.commit()
     return ok(data=MetricDimensionResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.get("/{dim_code}/metrics", dependencies=_READ_DEPS)
+async def list_dimension_metrics(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    # 治理追溯：查看该维度被哪些指标消费（绑定关系 + 指标信息）
+    items = await DimensionService(db).list_dimension_metrics(dim_code)
+    converted = [
+        DimensionMetricBinding(
+            metric_id=binding.metric_id,
+            dim_code=binding.dim_code,
+            role=binding.role,
+            default_member=binding.default_member,
+            metric_code=metric.metric_code,
+            metric_name=metric.name,
+            metric_status=metric.status,
+        )
+        for binding, metric in items
+    ]
+    return ok(data={"items": converted, "total": len(converted)}, trace_id=trace_id)
 
 
 @router.get("/{metric_id}/metric-dimensions", dependencies=_READ_DEPS)

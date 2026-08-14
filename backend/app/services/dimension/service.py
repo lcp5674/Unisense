@@ -33,10 +33,12 @@ from app.models.dimension import (
     Reconciliation,
     ReconciliationStatus,
 )
+from app.models.metric import Metric
 from app.services.dimension.repository import DimensionRepository
 from app.services.dimension.schemas import (
     DimensionCreate,
     DimensionMappingCreate,
+    DimensionMappingUpdate,
     DimensionMemberCreate,
     DimensionMemberUpdate,
     DimensionUpdate,
@@ -116,7 +118,7 @@ class DimensionService(BaseService):
 
     async def list_dimensions(
         self, domain: str | None, status: str | None, keyword: str | None = None
-    ) -> list[Dimension]:
+    ) -> list[tuple[Dimension, int]]:
         return await self._repo.list_dimensions(domain, status, keyword)
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:
@@ -317,6 +319,39 @@ class DimensionService(BaseService):
         member.parent_code = new_parent_code
         member.path = self._resolve_member_path(parent, member.member_code)
 
+    async def delete_member(self, dim_code: str, member_code: str) -> list[DimensionMember]:
+        """删除维度成员（工业级语义：级联删除其全部后代，保留孤儿引用不落库）。
+
+        实现说明：
+        - 成员表无 deleted_at 列，采用物理删除（对齐 create/update 无软删约定）。
+        - 删除父级连带整个子树：先按 parent_code 建子节点索引，再自顶向下收集
+          后代一次性删除，避免深递归。
+        """
+        member = await self._repo.get_member(dim_code, member_code)
+        if member is None:
+            raise NotFoundError(
+                f"维度成员不存在: {dim_code}/{member_code}",
+                ctx={"member_code": member_code},
+            )
+        members = await self._repo.list_members(dim_code)
+        children: dict[str, list[DimensionMember]] = {}
+        for m in members:
+            if m.parent_code:
+                children.setdefault(m.parent_code, []).append(m)
+        # BFS 收集子树（member 自身 + 所有后代），防止 parent_code 成环导致死循环
+        stack: list[DimensionMember] = [member]
+        to_delete: list[DimensionMember] = []
+        seen: set[str] = set()
+        while stack:
+            cur = stack.pop()
+            if cur.member_code in seen:
+                continue
+            seen.add(cur.member_code)
+            to_delete.append(cur)
+            stack.extend(children.get(cur.member_code, []))
+        await self._repo.delete_members(to_delete)
+        return to_delete
+
     async def list_members(self, dim_code: str) -> list[DimensionMember]:
         await self._require(dim_code)
         return await self._repo.list_members(dim_code)
@@ -362,6 +397,32 @@ class DimensionService(BaseService):
     async def list_mappings(self, source_dim_code: str | None) -> list[DimensionMapping]:
         return await self._repo.list_mappings(source_dim_code)
 
+    async def update_mapping(
+        self, mapping_id: int, data: DimensionMappingUpdate
+    ) -> DimensionMapping:
+        mapping = await self._repo.get_mapping(mapping_id)
+        if mapping is None:
+            raise NotFoundError(f"维度映射不存在: {mapping_id}")
+        if data.mapping_type is not None:
+            # 枚举显式校验（非法值 → 4xx，而非 DB Enum 500）
+            if data.mapping_type not in _VALID_MAPPING_TYPES:
+                raise ValidationError(
+                    f"未知维度映射类型: {data.mapping_type}",
+                    error_code="INVALID_MAPPING_TYPE",
+                    ctx={"mapping_type": data.mapping_type},
+                )
+            mapping.mapping_type = MappingType(data.mapping_type).value
+        if data.expression is not None:
+            mapping.expression = data.expression
+        await self._repo.commit()
+        return mapping
+
+    async def delete_mapping(self, mapping_id: int) -> None:
+        mapping = await self._repo.get_mapping(mapping_id)
+        if mapping is None:
+            raise NotFoundError(f"维度映射不存在: {mapping_id}")
+        await self._repo.delete_mapping(mapping)
+
     async def bind_metric_dimension(self, data: MetricDimensionBind) -> MetricDimension:
         await self._require(data.dim_code)
         # role enum 显式校验（非法值 → 4xx，而非 DB Enum 500）
@@ -390,6 +451,13 @@ class DimensionService(BaseService):
     async def list_metric_dimensions(self, metric_id: int) -> list[MetricDimension]:
         return await self._repo.list_metric_dimensions(metric_id)
 
+    async def list_dimension_metrics(
+        self, dim_code: str
+    ) -> list[tuple[MetricDimension, Metric]]:
+        """按维度查绑定指标（join Metric 补 metric_code/name/status，治理追溯）。"""
+        await self._require(dim_code)
+        return await self._repo.list_dimension_metrics(dim_code)
+
     async def submit_reconciliation(self, data: ReconciliationSubmit) -> Reconciliation:
         # dim_code 可选；若提供则须为已存在维度（防孤儿对账记录）
         if data.dim_code and not await self._repo.get_dimension(data.dim_code):
@@ -407,7 +475,9 @@ class DimensionService(BaseService):
         )
         return await self._repo.save_reconciliation(rec)
 
-    async def list_reconciliations(self, status: str | None) -> list[Reconciliation]:
+    async def list_reconciliations(
+        self, status: str | None
+    ) -> list[tuple[Reconciliation, Metric | None]]:
         return await self._repo.list_reconciliations(status)
 
     async def review_reconciliation(

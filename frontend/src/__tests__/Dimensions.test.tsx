@@ -31,19 +31,24 @@ vi.mock("../api", () => {
     listMetricDimensions: vi.fn(),
     listDimensionMappings: vi.fn(),
     createDimensionMapping: vi.fn(),
+    updateDimensionMapping: vi.fn(),
+    deleteDimensionMapping: vi.fn(),
     listReconciliations: vi.fn(),
     submitReconciliation: vi.fn(),
     reviewReconciliation: vi.fn(),
     listDimensionMembers: vi.fn(),
     createDimensionMember: vi.fn(),
     updateDimensionMember: vi.fn(),
+    deleteDimensionMember: vi.fn(),
+    listDimensionMetrics: vi.fn(),
     listMetrics: vi.fn(),
+    listUsers: vi.fn(),
     listDomainTree: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 
@@ -85,6 +90,12 @@ beforeEach(() => {
   ]);
   // 成员列表（默认成员下拉/父级选择），默认空
   vi.mocked(listDimensionMembers).mockResolvedValue({ items: [], total: 0 });
+  // 用户选择器（维度 Owner 下拉），默认空
+  vi.mocked(listUsers).mockResolvedValue([]);
+  // 详情抽屉/成员删除/映射编辑等新功能默认值（避免组件内 .then 到 undefined）
+  vi.mocked(listDimensionMetrics).mockResolvedValue({ items: [], total: 0 });
+  vi.mocked(listDimensionMappings).mockResolvedValue({ items: [], total: 0 });
+  vi.mocked(listReconciliations).mockResolvedValue({ items: [], total: 0 });
 });
 
 describe("Dimensions 页面", () => {
@@ -362,5 +373,110 @@ describe("Dimensions 页面", () => {
     // 维度列表已加载 → 下拉含 dim_channel · 渠道
     await user.click(await screen.findByText("dim_channel · 渠道"));
     expect(within(sourceItem).getByText("dim_channel · 渠道")).toBeInTheDocument();
+  });
+
+  it("详情抽屉：点击详情并行拉取绑定指标/成员/映射并展示", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDimensionMetrics).mockResolvedValue({
+      items: [{ metric_id: 7, metric_code: "sales_gmv", metric_name: "成交额", role: "PARTITION", default_member: "all", metric_status: "PUBLISHED" }],
+      total: 1,
+    });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("dim_channel");
+    await user.click(screen.getAllByRole("button", { name: /详\s*情/ })[0]);
+
+    await waitFor(() => {
+      expect(listDimensionMetrics).toHaveBeenCalledWith("dim_channel");
+    });
+    expect(await screen.findByText("sales_gmv")).toBeInTheDocument();
+    expect(screen.getByText(/PARTITION 分区/)).toBeInTheDocument();
+    expect(screen.getByText(/成交额/)).toBeInTheDocument();
+  });
+
+  it("成员管理：删除成员经 Popconfirm 确认后调用 deleteDimensionMember", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDimensions).mockResolvedValue({ items: DIMS, total: 2 });
+    vi.mocked(listDimensionMembers).mockResolvedValue({
+      items: [
+        { id: 1, dim_code: "dim_channel", member_code: "m1", member_name: "华东", parent_code: null, path: "/m1", attributes: null, status: "PUBLISHED", created_at: "2026-01-01T00:00:00Z" },
+      ],
+      total: 1,
+    });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("tab", { name: /成员管理/ }));
+    // 先选择维度（Tab 内唯一的 Select combobox），成员列表才会加载
+    const dimSelect = await screen.findByRole("combobox");
+    fireEvent.mouseDown(dimSelect);
+    await user.click(await screen.findByText("dim_channel · 渠道"));
+    await screen.findByText("华东");
+    // Popconfirm 为 click 触发：点触发按钮 → 浮层出现 → 点「删除」确认
+    await user.click(screen.getAllByRole("button", { name: /删\s*除/ })[0]);
+    const desc = await screen.findByText(/级联删除整个子树/);
+    const popconfirm = desc.closest(".ant-popover") as HTMLElement;
+    await user.click(within(popconfirm).getByRole("button", { name: /删\s*除/ }));
+
+    await waitFor(() => {
+      expect(deleteDimensionMember).toHaveBeenCalledWith("dim_channel", "m1");
+    });
+  });
+
+  it("维度映射：点击编辑预填映射类型/表达式，保存调用 updateDimensionMapping", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDimensionMappings).mockResolvedValue({
+      items: [
+        { id: 9, source_dim_code: "dim_channel", target_dim_code: "dim_region", mapping_type: "EQUIVALENT", expression: "a=b", created_by: 1, created_at: "2026-01-01T00:00:00Z" },
+      ],
+      total: 1,
+    });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("tab", { name: /维度映射/ }));
+    await user.click(await screen.findByRole("button", { name: /编\s*辑/ }));
+
+    // 编辑 Modal 预填当前值
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() => {
+      expect(within(dialog).getByText(/编辑维度映射：dim_channel/)).toBeInTheDocument();
+    });
+    await user.click(within(dialog).getByRole("button", { name: /保\s*存/ }));
+
+    await waitFor(() => {
+      expect(updateDimensionMapping).toHaveBeenCalledWith(9, expect.objectContaining({ mapping_type: "EQUIVALENT" }));
+    });
+  });
+
+  it("对账 Tab：指标列展示 metric_code · metric_name（非 #id）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listReconciliations).mockResolvedValue({
+      items: [
+        { id: 1, metric_id: 7, metric_code: "sales_gmv", metric_name: "成交额", dim_code: "dim_channel", expected_expr: "a", actual_expr: "b", diff_summary: null, status: "PENDING", reviewed_by: null, reviewed_at: null, created_at: "2026-08-01T00:00:00" },
+      ],
+      total: 1,
+    });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("tab", { name: /对账/ }));
+    await screen.findByText(/sales_gmv/);
+    expect(screen.getByText("sales_gmv · 成交额")).toBeInTheDocument();
+    // 不应再显示裸 #id
+    expect(screen.queryByText("#7")).not.toBeInTheDocument();
   });
 });
