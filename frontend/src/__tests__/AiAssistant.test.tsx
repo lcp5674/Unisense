@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { AiAssistant } from "../pages/AiAssistant";
 
 vi.mock("../api", () => {
@@ -26,127 +26,45 @@ vi.mock("../api", () => {
   };
 });
 
-import { getLlmConfig, saveLlmConfig, testLlmConfig } from "../api";
+import { aiNl2Sql } from "../api";
 
-const mockGet = vi.mocked(getLlmConfig);
-const mockSave = vi.mocked(saveLlmConfig);
-const mockTest = vi.mocked(testLlmConfig);
+const mockNl2Sql = vi.mocked(aiNl2Sql);
 
-describe("AiAssistant LLM 配置", () => {
+describe("AiAssistant 自然语言查询", () => {
   beforeEach(() => {
-    mockGet.mockReset();
-    mockSave.mockReset();
-    mockTest.mockReset();
+    mockNl2Sql.mockReset();
   });
 
-  it("平台管理员：展示可编辑配置表单并回填已存配置", async () => {
-    mockGet.mockResolvedValue({
-      provider: "deepseek",
-      base_url: "https://api.deepseek.com",
-      model: "deepseek-chat",
-      has_api_key: true,
-      timeout: 30,
-      enabled: true,
-      source: "db",
-      can_edit: true,
-      updated_by: 1,
-      updated_at: null,
+  it("生成 SQL：调用 aiNl2Sql 并展示生成的 SQL", async () => {
+    mockNl2Sql.mockResolvedValue({
+      sql: "SELECT ... FROM dwd_finance_order",
+      safe: true,
+      notes: ["命中指标 finance_revenue_sum_d"],
+      method: "keyword",
+      anchored: ["finance_revenue_sum_d"],
+      params: {},
+      execute: false,
     });
     render(<AiAssistant />);
-    expect(await screen.findByText("LLM 配置")).toBeTruthy();
-    expect(await screen.findByText("已启用")).toBeTruthy();
+    const textarea = screen.getByPlaceholderText(/如：最近 30 天 finance 域收入总额/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "最近 30 天 finance 域收入总额，按日粒度" } });
+    fireEvent.click(screen.getByText("生成 SQL"));
     await waitFor(() => {
-      expect(screen.getByDisplayValue("https://api.deepseek.com")).toBeTruthy();
-    });
-  });
-
-  it("普通用户：只读展示，无编辑按钮", async () => {
-    mockGet.mockResolvedValue({
-      provider: "deepseek",
-      base_url: "https://api.deepseek.com",
-      model: "deepseek-chat",
-      has_api_key: true,
-      timeout: 30,
-      enabled: true,
-      source: "env",
-      can_edit: false,
-      updated_by: null,
-      updated_at: null,
-    });
-    render(<AiAssistant />);
-    await screen.findByText("LLM 配置");
-    await waitFor(() => {
-      expect(screen.queryByText("保存配置")).toBeNull();
-      expect(screen.queryByText("测试连通性")).toBeNull();
-    });
-  });
-
-  it("测试连通性：成功时展示连通成功徽标", async () => {
-    mockGet.mockResolvedValue({
-      provider: "deepseek",
-      base_url: "https://api.deepseek.com",
-      model: "deepseek-chat",
-      has_api_key: true,
-      timeout: 30,
-      enabled: true,
-      source: "db",
-      can_edit: true,
-      updated_by: 1,
-      updated_at: null,
-    });
-    mockTest.mockResolvedValue({
-      ok: true,
-      latency_ms: 123,
-      model: "deepseek-chat",
-      error: "",
-    });
-    render(<AiAssistant />);
-    const testBtn = await screen.findByText("测试连通性");
-    fireEvent.click(testBtn);
-    await waitFor(() => {
-      expect(screen.getByText(/连通成功/)).toBeTruthy();
-    });
-  });
-
-  it("保存配置：调用 saveLlmConfig 并刷新", async () => {
-    mockGet
-      .mockResolvedValueOnce({
-        provider: "custom",
-        base_url: "",
-        model: "",
-        has_api_key: false,
-        timeout: 30,
-        enabled: false,
-        source: "none",
-        can_edit: true,
-        updated_by: null,
-        updated_at: null,
-      })
-      .mockResolvedValueOnce({
-        provider: "deepseek",
-        base_url: "https://api.deepseek.com",
-        model: "deepseek-chat",
-        has_api_key: true,
-        timeout: 30,
-        enabled: true,
-        source: "db",
-        can_edit: true,
-        updated_by: 1,
-        updated_at: null,
+      expect(mockNl2Sql).toHaveBeenCalledWith({
+        nl_query: "最近 30 天 finance 域收入总额，按日粒度",
+        metric_scope: null,
+        execute: false,
       });
-    mockSave.mockResolvedValue({ id: 1 });
-    render(<AiAssistant />);
-    const baseUrl = (await screen.findByPlaceholderText("https://api.deepseek.com")) as HTMLInputElement;
-    fireEvent.change(baseUrl, { target: { value: "https://api.deepseek.com" } });
-    const modelInput = screen.getByPlaceholderText("deepseek-chat") as HTMLInputElement;
-    fireEvent.change(modelInput, { target: { value: "deepseek-chat" } });
-    const saveBtn = screen.getByText("保存配置");
-    fireEvent.click(saveBtn);
-    await waitFor(() => {
-      expect(mockSave).toHaveBeenCalled();
     });
+    expect(await screen.findByText(/SELECT \.\.\./)).toBeTruthy();
+    expect(screen.getByText(/关键词匹配/)).toBeTruthy();
+  });
+
+  it("空输入时提示，不调用接口", async () => {
+    render(<AiAssistant />);
+    fireEvent.click(screen.getByText("生成 SQL"));
     await waitFor(() => {
-      expect(screen.getByText("已启用")).toBeTruthy();
+      expect(mockNl2Sql).not.toHaveBeenCalled();
     });
   });
 });

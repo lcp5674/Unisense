@@ -30,6 +30,7 @@ import {
   FileTextOutlined,
   GlobalOutlined,
   TagsOutlined,
+  SettingOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
 } from "@ant-design/icons";
@@ -125,6 +126,12 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/catalogs", label: "采集目录", icon: <DatabaseOutlined /> },
       { key: "/collection-tasks", label: "采集任务中心", icon: <ScheduleOutlined /> },
       { key: "/collection-history", label: "采集记录", icon: <AuditOutlined /> },
+    ],
+  },
+  {
+    label: "系统管理",
+    children: [
+      { key: "/system-config", label: "系统配置", icon: <SettingOutlined /> },
     ],
   },
 ];
