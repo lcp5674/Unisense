@@ -12,7 +12,7 @@ import {
 } from "@ant-design/icons";
 import { Pie, Bar } from "@ant-design/charts";
 import { fetchDashboard, fetchRecommendedMetrics, fetchRecommendedTerms } from "../api";
-import type { DashboardData, RecommendItem, GlossaryTerm } from "../types";
+import type { AssetStat, DashboardData, RecommendItem, GlossaryTerm } from "../types";
 import { useTracking } from "../hooks/useTracking";
 
 const EDGE_TYPE_LABEL: Record<string, string> = {
@@ -186,6 +186,158 @@ const QUICK_ENTRIES = [
   },
 ];
 
+// ---- 资产总览卡片配置（对齐后端 /semantics/dashboard assets 聚合）----
+// 每种资产按自身的治理/运行状态分组，点击状态段带参数下钻对应目录页。
+interface AssetStatusDef {
+  value: string;
+  label: string;
+}
+interface AssetConfig {
+  key: keyof NonNullable<DashboardData["assets"]>;
+  label: string;
+  route: string;
+  /** 下钻时写入 URL 的查询参数名（各目录页按此参数过滤） */
+  statusParam: string;
+  statuses: AssetStatusDef[];
+}
+
+const ASSET_CONFIGS: AssetConfig[] = [
+  {
+    key: "metric",
+    label: "指标",
+    route: "/catalog",
+    statusParam: "status",
+    statuses: [
+      { value: "DRAFT", label: "草稿" },
+      { value: "EXPERIMENTAL", label: "实验" },
+      { value: "REVIEW", label: "审核" },
+      { value: "PUBLISHED", label: "已发布" },
+      { value: "DEPRECATED", label: "已废弃" },
+    ],
+  },
+  {
+    key: "table",
+    label: "数据表",
+    route: "/catalogs",
+    statusParam: "sensitivity",
+    statuses: [
+      { value: "PUBLIC", label: "公开" },
+      { value: "INTERNAL", label: "内部" },
+      { value: "CONFIDENTIAL", label: "机密" },
+      { value: "PII", label: "PII" },
+      { value: "NEEDS_REVIEW", label: "待复核" },
+    ],
+  },
+  {
+    key: "source",
+    label: "数据源",
+    route: "/data-sources",
+    statusParam: "health",
+    statuses: [
+      { value: "healthy", label: "健康" },
+      { value: "unhealthy", label: "异常" },
+      { value: "unknown", label: "未知" },
+    ],
+  },
+  {
+    key: "dimension",
+    label: "维度",
+    route: "/dimensions",
+    statusParam: "status",
+    statuses: [
+      { value: "DRAFT", label: "草稿" },
+      { value: "PUBLISHED", label: "已发布" },
+      { value: "DEPRECATED", label: "已废弃" },
+    ],
+  },
+  {
+    key: "term",
+    label: "术语",
+    route: "/glossary",
+    statusParam: "status",
+    statuses: [
+      { value: "DRAFT", label: "草稿" },
+      { value: "PUBLISHED", label: "已发布" },
+      { value: "DEPRECATED", label: "已废弃" },
+    ],
+  },
+  {
+    key: "template",
+    label: "指标模板",
+    route: "/templates",
+    statusParam: "is_active",
+    statuses: [
+      { value: "active", label: "启用" },
+      { value: "inactive", label: "停用" },
+    ],
+  },
+  {
+    key: "collection_task",
+    label: "采集任务",
+    route: "/collection-tasks",
+    statusParam: "status",
+    statuses: [
+      { value: "QUEUED", label: "排队" },
+      { value: "RUNNING", label: "采集中" },
+      { value: "COMPLETED", label: "已完成" },
+      { value: "FAILED", label: "失败" },
+    ],
+  },
+  {
+    key: "system_dict",
+    label: "数据字典",
+    route: "/dicts",
+    statusParam: "status",
+    statuses: [
+      { value: "active", label: "启用" },
+      { value: "inactive", label: "停用" },
+    ],
+  },
+];
+
+function AssetCard({
+  config,
+  stat,
+  navigate,
+}: {
+  config: AssetConfig;
+  stat?: AssetStat;
+  navigate: (to: string) => void;
+}) {
+  const total = stat?.total ?? 0;
+  const byStatus = stat?.by_status ?? {};
+  return (
+    <div className="asset-card">
+      <button
+        className="ac-head"
+        type="button"
+        onClick={() => navigate(config.route)}
+        title={`查看全部${config.label}`}
+      >
+        <span className="ac-label">{config.label}</span>
+        <span className="ac-total">{total}</span>
+      </button>
+      <div className="ac-statuses">
+        {config.statuses.map((s) => {
+          const count = byStatus[s.value] ?? 0;
+          return (
+            <button
+              key={s.value}
+              type="button"
+              className={`ac-seg${count > 0 ? " has" : ""}`}
+              onClick={() => navigate(`${config.route}?${config.statusParam}=${s.value}`)}
+              title={`${s.label}：${count} 个（下钻 ${config.label} 目录）`}
+            >
+              <span className="ac-seg-name">{s.label}</span>
+              <span className="ac-seg-count">{count}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [recommended, setRecommended] = useState<RecommendItem[]>([]);
@@ -241,7 +393,7 @@ export function Dashboard() {
         <div>
           <div className="page-kicker">Workspace / Overview</div>
           <h2>总览仪表</h2>
-          <p>指标资产与治理状态的实时读数——点击任一生命周期站点可下钻目录。</p>
+          <p>全资产与治理状态的实时读数——点击生命周期站点或资产卡片可下钻目录。</p>
         </div>
         <Tag color={piiRatio > 30 ? "error" : piiRatio > 10 ? "warning" : "success"} style={{ margin: 0 }}>
           PII 占比 {piiRatio}%
@@ -262,6 +414,26 @@ export function Dashboard() {
         }
       >
         <LifecycleSignalBar data={data} />
+      </Card>
+
+      {/* 资产总览：全资产计数 + 状态下钻（与生命周期信号条一致的交互） */}
+      <Card
+        style={{ marginBottom: 20 }}
+        styles={{ body: { paddingTop: 16, paddingBottom: 16 } }}
+        title={
+          <span style={{ fontSize: 15, fontWeight: 600 }}>
+            资产总览
+            <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+              点击资产名进入目录，点击状态段带状态下钻
+            </span>
+          </span>
+        }
+      >
+        <div className="asset-grid">
+          {ASSET_CONFIGS.map((cfg) => (
+            <AssetCard key={cfg.key} config={cfg} stat={data.assets?.[cfg.key]} navigate={navigate} />
+          ))}
+        </div>
       </Card>
 
       {/* KPI 读数格 */}

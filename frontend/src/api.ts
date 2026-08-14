@@ -1855,6 +1855,8 @@ export async function listDataSources(params?: {
   domain?: string;
   source_type?: SourceType;
   keyword?: string;
+  /** 健康状态过滤（总览仪表「数据源」资产卡片下钻：healthy/unhealthy/unknown） */
+  health?: string;
   page?: number;
   page_size?: number;
 }): Promise<DataSourceListResponse> {
@@ -1862,6 +1864,7 @@ export async function listDataSources(params?: {
     domain: params?.domain,
     source_type: params?.source_type,
     keyword: params?.keyword,
+    health_status: params?.health,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 100,
   });
@@ -2089,11 +2092,14 @@ export async function listCollectionJobs(params?: {
   limit?: number;
   offset?: number;
   source_id?: string;
+  /** 任务状态下钻（总览仪表「采集任务」资产卡片：QUEUED/RUNNING/COMPLETED/FAILED） */
+  status?: string;
 }): Promise<CollectionJob[]> {
   const qs = pageQs({
     limit: params?.limit ?? 50,
     offset: params?.offset ?? 0,
     source_id: params?.source_id ?? undefined,
+    status: params?.status ?? undefined,
   });
   return request<CollectionJob[]>(`${API_BASE}/data-sources/jobs?${qs}`);
 }
