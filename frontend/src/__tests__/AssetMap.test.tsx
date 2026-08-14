@@ -27,7 +27,7 @@ const { g6GraphMock } = vi.hoisted(() => ({
     on: vi.fn(),
     render: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
-    getNodeData: vi.fn(() => ({ data: undefined })),
+    getNodeData: vi.fn<() => { data: Record<string, unknown> | undefined }>(() => ({ data: undefined })),
     getNeighborNodesData: vi.fn(() => []),
     setElementState: vi.fn(),
   },
