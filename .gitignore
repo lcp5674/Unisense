@@ -84,3 +84,14 @@ frontend/e2e/.auth/
 frontend/playwright-report/
 frontend/test-results/
 frontend/blob-report/
+
+# 本地测试数据（禁止上传 GitHub）
+# DP 血缘导入的数据源与描述文件（28MB CSV 属本地测试数据）
+dp元数据.csv
+dp_table_desc.txt
+loaded.yaml
+
+# Playwright 运行时目录与 E2E 最终产物变体
+.playwright-cli/
+frontend/test-results-final*/
+
