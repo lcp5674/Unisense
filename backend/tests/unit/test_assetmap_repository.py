@@ -185,6 +185,15 @@ class TestGraphFromMysql:
         r.all.return_value = []
         return r
 
+    def _lineage_names(self, names: list[str] | None = None) -> MagicMock:
+        """血缘边引用的表名查询 mock（scalars().all() 返回完整 ``table:`` 节点）。"""
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = names or [
+            "table:sales.ods",
+            "table:sales.dwd",
+        ]
+        return r
+
     async def test_node_id_uses_metric_prefix_and_precise_domain_filter(self) -> None:
         """域过滤必须是精确集合匹配（IN），不得再用 contains 子串匹配。"""
         s = _session()
@@ -193,14 +202,16 @@ class TestGraphFromMysql:
         r_metrics.all.return_value = [self._metric("sales_gmv_amount_day", "sales")]
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_gmv_amount_day")]
-        s.execute = AsyncMock(side_effect=[r_metrics, self._empty_rows(), r_edges])
+        s.execute = AsyncMock(
+            side_effect=[r_metrics, self._lineage_names(), self._empty_rows(), r_edges]
+        )
 
         nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
 
         assert nodes[0]["id"] == "metric:sales_gmv_amount_day"
         assert nodes[0]["label"] == "sales_gmv_amount_day"
         assert len(edges) == 1
-        edge_stmt = s.execute.call_args_list[2].args[0]
+        edge_stmt = s.execute.call_args_list[3].args[0]
         compiled = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
         # 精确匹配：IN 集合，非 LIKE/contains 子串
         assert "metric:sales_gmv_amount_day" in compiled
@@ -219,11 +230,13 @@ class TestGraphFromMysql:
         r_metrics.all.return_value = [self._metric("sales_gmv_amount_day", "sales")]
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("table:fin.raw", "metric:fin_cost")]
-        s.execute = AsyncMock(side_effect=[r_metrics, self._empty_rows(), r_edges])
+        s.execute = AsyncMock(
+            side_effect=[r_metrics, self._lineage_names(), self._empty_rows(), r_edges]
+        )
 
         await repo.graph_from_mysql(domain="sales", pii_only=False)
 
-        edge_stmt = s.execute.call_args_list[2].args[0]
+        edge_stmt = s.execute.call_args_list[3].args[0]
         compiled = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "metric:sales_gmv_amount_day" in compiled
         assert "metric:fin_cost" not in compiled
@@ -236,13 +249,13 @@ class TestGraphFromMysql:
         repo = AssetMapRepository(s)
         r_metrics = MagicMock()
         r_metrics.all.return_value = []
-        s.execute = AsyncMock(side_effect=[r_metrics, self._empty_rows()])
+        s.execute = AsyncMock(side_effect=[r_metrics, self._lineage_names(), self._empty_rows()])
 
         nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
 
         assert nodes == []
         assert edges == []
-        assert s.execute.await_count == 2
+        assert s.execute.await_count == 3
 
     async def test_pii_only_filters_metric_stmt(self) -> None:
         s = _session()
@@ -251,7 +264,9 @@ class TestGraphFromMysql:
         r_metrics.all.return_value = [self._metric("sales_pii", "sales", pii=True)]
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_pii")]
-        s.execute = AsyncMock(side_effect=[r_metrics, self._empty_rows(), r_edges])
+        s.execute = AsyncMock(
+            side_effect=[r_metrics, self._lineage_names(), self._empty_rows(), r_edges]
+        )
 
         nodes, edges = await repo.graph_from_mysql(domain=None, pii_only=True)
 
@@ -274,7 +289,9 @@ class TestGraphFromMysql:
         ]
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_gmv_amount_day")]
-        s.execute = AsyncMock(side_effect=[r_metrics, r_catalog, r_edges])
+        s.execute = AsyncMock(
+            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+        )
 
         nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
 
@@ -289,13 +306,14 @@ class TestGraphFromMysql:
         view_node = next(n for n in nodes if n["id"] == "table:sales.dwd")
         assert view_node["pii"] is False
         assert len(edges) == 1
-        # catalog 查询含 entity_type 过滤与 data_source 域继承 join
-        catalog_stmt = s.execute.call_args_list[1].args[0]
+        # catalog 查询含 entity_type 过滤、data_source 域继承 join、血缘表优先与已删源排除
+        catalog_stmt = s.execute.call_args_list[2].args[0]
         compiled = str(catalog_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "TABLE" in compiled
         assert "JOIN" in compiled.upper()
+        assert "sales.ods" in compiled
         # 边的 IN 集合同时含表节点
-        edge_stmt = s.execute.call_args_list[2].args[0]
+        edge_stmt = s.execute.call_args_list[3].args[0]
         edge_sql = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "table:sales.ods" in edge_sql
 
@@ -312,7 +330,9 @@ class TestGraphFromMysql:
             self._edge("table:sales.ods", "field:sales.ods.amount"),
             self._edge("field:sales.ods.amount", "metric:sales_gmv_amount_day"),
         ]
-        s.execute = AsyncMock(side_effect=[r_metrics, r_catalog, r_edges])
+        s.execute = AsyncMock(
+            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+        )
 
         nodes, _ = await repo.graph_from_mysql(domain="sales", pii_only=False)
 
@@ -332,7 +352,9 @@ class TestGraphFromMysql:
         r_catalog.all.return_value = [self._catalog("sales.ods", sens="PII")]
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("field:sales.ods.amount", "metric:sales_pii")]
-        s.execute = AsyncMock(side_effect=[r_metrics, r_catalog, r_edges])
+        s.execute = AsyncMock(
+            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+        )
 
         nodes, _ = await repo.graph_from_mysql(domain=None, pii_only=True)
 

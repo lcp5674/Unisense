@@ -304,14 +304,41 @@ class AssetMapRepository:
             )
         return nodes, allowed
 
+    async def _graph_lineage_table_names(self) -> set[str]:
+        """血缘边引用的表/视图名集合（``table:`` 前缀节点），用于优先让业务表进图。
+
+        若直接全量取 db_catalog 表并按插入序 LIMIT，会混入已删除探针源的系统表，
+        导致 catalog 节点与血缘边（业务表）无法匹配、图退化为孤立散点。
+        """
+        rows = (
+            await self._session.execute(
+                select(LineageEdge.source_node).where(
+                    LineageEdge.deleted_at.is_(None),
+                    LineageEdge.source_node.like("table:%"),
+                )
+            )
+        ).scalars().all()
+        return {r.split(":", 1)[1] for r in rows}
+
     async def _graph_catalog_nodes(
-        self, pii_only: bool
+        self, pii_only: bool, lineage_tables: set[str]
     ) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
         """db_catalog 表/视图节点：id=``table:{entity_name}``（与血缘边格式对齐）。
 
-        域从 ``data_source.domain`` 继承（db_catalog 无域字段）；PII 由
-        ``sensitivity_level`` 含 "PII" 判定。返回节点列表 + {节点 id -> 域}。
+        优先血缘边引用的表（``lineage_tables``）并排除已删除数据源，保证节点与边
+        连通、图呈现真实血缘结构；域从 ``data_source.domain`` 继承（db_catalog 无
+        域字段）；PII 由 ``sensitivity_level`` 含 "PII" 判定。
         """
+        filters: list[Any] = [
+            DBCatalog.deleted_at.is_(None),
+            DBCatalog.entity_type.in_(["TABLE", "VIEW"]),
+            DataSource.deleted_at.is_(None),
+        ]
+        if lineage_tables:
+            filters.append(DBCatalog.entity_name.in_(lineage_tables))
+        if pii_only:
+            filters.append(DBCatalog.sensitivity_level.like("%PII%"))
+
         catalog_stmt = (
             select(
                 DBCatalog.id,
@@ -322,14 +349,8 @@ class AssetMapRepository:
                 DataSource.domain,
             )
             .join(DataSource, DataSource.source_id == DBCatalog.source_id)
-            .where(
-                DBCatalog.deleted_at.is_(None),
-                DBCatalog.entity_type.in_(["TABLE", "VIEW"]),
-            )
+            .where(*filters)
         )
-        if pii_only:
-            catalog_stmt = catalog_stmt.where(DBCatalog.sensitivity_level.like("%PII%"))
-
         rows = (await self._session.execute(catalog_stmt.limit(self._GRAPH_CATALOG_LIMIT))).all()
         nodes: list[dict[str, Any]] = []
         domain_by_id: dict[str, str | None] = {}
@@ -365,7 +386,8 @@ class AssetMapRepository:
         - PII 视图：仅指标/表节点（字段级 PII 无法从血缘边判定，故不展示字段）。
         """
         metric_nodes, allowed = await self._graph_metric_nodes(domain, pii_only)
-        catalog_nodes, catalog_domain = await self._graph_catalog_nodes(pii_only)
+        lineage_tables = await self._graph_lineage_table_names()
+        catalog_nodes, catalog_domain = await self._graph_catalog_nodes(pii_only, lineage_tables)
         allowed.update(catalog_domain)
         nodes: list[dict[str, Any]] = metric_nodes + catalog_nodes
 
