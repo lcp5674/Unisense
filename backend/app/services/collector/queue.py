@@ -40,8 +40,10 @@ class JobStore(Protocol):
         """读取任务状态。"""
         ...
 
-    async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        """列出任务（按入队逆序，供采集任务中心展示）。"""
+    async def list(
+        self, limit: int = 50, offset: int = 0, source_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """列出任务（按入队逆序，供采集任务中心展示；可按 source_id 过滤）。"""
         ...
 
 
@@ -66,9 +68,17 @@ class InMemoryCollectionQueue:
         return job_id
 
     async def set(self, job_id: str, status: str, detail: dict[str, Any]) -> None:
+        from datetime import UTC, datetime
+
         job = self._jobs.setdefault(job_id, {"job_id": job_id, "source_id": "", "actor_id": 0})
+        # 首次写入（任意状态）记录创建时间，后续不覆盖（与 RedisJobStore 语义一致）
+        job.setdefault("created_at", datetime.now(UTC).isoformat())
         job["status"] = status
         job["detail"] = detail
+
+    @staticmethod
+    def _kind(job_id: str) -> str:
+        return "scheduled" if job_id.startswith("collect:sched:") else "manual"
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
         job = self._jobs.get(job_id)
@@ -80,10 +90,18 @@ class InMemoryCollectionQueue:
             "actor_id": job.get("actor_id"),
             "status": job.get("status"),
             "detail": job.get("detail", {}),
+            "created_at": job.get("created_at"),
+            "kind": self._kind(job_id),
         }
 
-    async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        jobs = list(self._jobs.values())
+    async def list(
+        self, limit: int = 50, offset: int = 0, source_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        jobs = [
+            j
+            for j in self._jobs.values()
+            if source_id is None or j.get("source_id") == source_id
+        ]
         jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
         return [
             {
@@ -92,6 +110,8 @@ class InMemoryCollectionQueue:
                 "actor_id": j.get("actor_id"),
                 "status": j.get("status"),
                 "detail": j.get("detail", {}),
+                "created_at": j.get("created_at"),
+                "kind": self._kind(j["job_id"]),
             }
             for j in jobs[offset : offset + limit]
         ]
@@ -111,8 +131,14 @@ class RedisJobStore:
     def _key(job_id: str) -> str:
         return f"collect_job:{job_id}"
 
+    @staticmethod
+    def _kind(job_id: str) -> str:
+        """任务来源标记：定时调度（collect:sched:）或手动触发（collect-now）。"""
+        return "scheduled" if job_id.startswith("collect:sched:") else "manual"
+
     async def set(self, job_id: str, status: str, detail: dict[str, Any]) -> None:
         import json
+        from datetime import UTC, datetime
 
         await self._redis.hset(
             self._key(job_id),
@@ -121,6 +147,9 @@ class RedisJobStore:
                 "detail": json.dumps(detail, ensure_ascii=False, default=str),
             },
         )
+        # 任务中心创建时间：首次写入（任意状态，含定时调度直接 RUNNING 的路径）
+        # 用 HSETNX 落 created_at，后续进度高频写入不覆盖。HSETNX 为 O(1)，开销可忽略。
+        await self._redis.hsetnx(self._key(job_id), "created_at", datetime.now(UTC).isoformat())
         # P1-6: 终态（COMPLETED/FAILED）设置 7 天 TTL，过期后自动回收（重试幂等键可清理）
         if status in self._TERMINAL_STATUSES:
             await self._redis.expire(self._key(job_id), self._TERMINAL_TTL_SECONDS)
@@ -146,9 +175,13 @@ class RedisJobStore:
             "actor_id": detail.get("actor_id"),
             "status": decoded.get("status"),
             "detail": detail,
+            "created_at": decoded.get("created_at"),
+            "kind": self._kind(job_id),
         }
 
-    async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    async def list(
+        self, limit: int = 50, offset: int = 0, source_id: str | None = None
+    ) -> list[dict[str, Any]]:
         import json
 
         # SCAN 遍历 collect_job:*（生产模式下任务状态由 worker 回写，带 7 天 TTL）
@@ -177,6 +210,8 @@ class RedisJobStore:
             }
             detail_raw = decoded.get("detail")
             detail = json.loads(detail_raw) if detail_raw else {}
+            if source_id is not None and detail.get("source_id") != source_id:
+                continue
             jobs.append(
                 {
                     "job_id": job_id,
@@ -184,10 +219,15 @@ class RedisJobStore:
                     "actor_id": detail.get("actor_id"),
                     "status": decoded.get("status"),
                     "detail": detail,
+                    "created_at": decoded.get("created_at"),
+                    "kind": self._kind(job_id),
                 }
             )
-        # 按 job_id 前缀中的时间戳近似排序不可靠；保持扫描顺序并做稳定分页
-        jobs.sort(key=lambda j: j.get("job_id", ""), reverse=True)
+        # 按创建时间倒序（无 created_at 的旧任务回退到 job_id 排序，仍靠前展示）
+        jobs.sort(
+            key=lambda j: (j.get("created_at") or "", j.get("job_id") or ""),
+            reverse=True,
+        )
         return jobs[offset : offset + limit]
 
 
@@ -256,11 +296,13 @@ class ArqCollectionQueue:
         redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
         return await RedisJobStore(redis).get(job_id)
 
-    async def list(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    async def list(
+        self, limit: int = 50, offset: int = 0, source_id: str | None = None
+    ) -> list[dict[str, Any]]:
         from app.core.config import settings
 
         redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
-        return await RedisJobStore(redis).list(limit=limit, offset=offset)
+        return await RedisJobStore(redis).list(limit=limit, offset=offset, source_id=source_id)
 
 
 _default_queue: InMemoryCollectionQueue | None = None

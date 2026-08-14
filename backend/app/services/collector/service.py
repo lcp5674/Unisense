@@ -925,7 +925,11 @@ class CollectorService(BaseService):
         return result
 
     async def list_jobs(
-        self, limit: int = 50, offset: int = 0, queue: CollectionQueue | None = None
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        source_id: str | None = None,
+        queue: CollectionQueue | None = None,
     ) -> list[dict[str, Any]]:
         """列出采集任务（按入队逆序分页，供采集任务中心展示）。
 
@@ -937,7 +941,7 @@ class CollectorService(BaseService):
         lister = getattr(q, "list", None)
         if lister is None:
             return []
-        result: list[dict[str, Any]] = await lister(limit=limit, offset=offset)
+        result: list[dict[str, Any]] = await lister(limit=limit, offset=offset, source_id=source_id)
         return result
 
     async def update_schedule(self, source_id: str, cron: str, mode: str) -> None:

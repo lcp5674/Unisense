@@ -144,6 +144,7 @@ async def test_arq_queue_enqueue_writes_initial_status():
     job.job_id = "j1"
     redis.enqueue_job = AsyncMock(return_value=job)
     redis.hset = AsyncMock()
+    redis.hsetnx = AsyncMock()
 
     q = ArqCollectionQueue(redis=redis)
     job_id = await q.enqueue("src1", 1)

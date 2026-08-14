@@ -165,7 +165,13 @@ async def run_collection_task(
             logger.warning("更新健康状态失败: source=%s", source_id)
 
         if store is not None:
-            await store.set(job_id, "FAILED", {"error": str(exc)})
+            # 失败回写保留 source_id/actor_id（任务中心需按源标识展示），
+            # 避免仅存 error 导致任务列表 source_id 列变空。
+            await store.set(
+                job_id,
+                "FAILED",
+                {"source_id": source_id, "actor_id": actor_id, "error": str(exc)},
+            )
         raise
     finally:
         if own_session and db is not None:

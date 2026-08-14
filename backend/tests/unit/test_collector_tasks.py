@@ -240,7 +240,9 @@ async def test_run_failure_writes_health_and_failed_status():
 
     repo.update_health_status.assert_awaited_once_with("src1", "unhealthy", error="boom")
     db.commit.assert_awaited_once()
-    store.set.assert_awaited_once_with("job1", "FAILED", {"error": "boom"})
+    store.set.assert_awaited_once_with(
+        "job1", "FAILED", {"source_id": "src1", "actor_id": 1, "error": "boom"}
+    )
 
 
 async def test_run_failure_health_update_error_swallowed():
@@ -263,7 +265,9 @@ async def test_run_failure_health_update_error_swallowed():
             )
 
     # 健康状态回写失败仅告警，不影响 FAILED 回写与上抛
-    store.set.assert_awaited_once_with("job1", "FAILED", {"error": "boom"})
+    store.set.assert_awaited_once_with(
+        "job1", "FAILED", {"source_id": "src1", "actor_id": 1, "error": "boom"}
+    )
 
 
 async def test_run_failure_without_db_skips_health_update():
@@ -277,7 +281,9 @@ async def test_run_failure_without_db_skips_health_update():
             {"svc": svc, "job_store": store, "collector": MagicMock()}, "src1", 1, "job1"
         )
 
-    store.set.assert_awaited_once_with("job1", "FAILED", {"error": "boom"})
+    store.set.assert_awaited_once_with(
+        "job1", "FAILED", {"source_id": "src1", "actor_id": 1, "error": "boom"}
+    )
 
 
 async def test_run_failure_without_store_reraises():
@@ -312,7 +318,9 @@ async def test_run_failure_production_path_source_not_found():
             await run_collection_task({"job_store": store}, "src1", 1, "job1")
 
     repo.update_health_status.assert_awaited_once()
-    store.set.assert_awaited_once_with("job1", "FAILED", {"error": "数据源不存在: src1"})
+    store.set.assert_awaited_once_with(
+        "job1", "FAILED", {"source_id": "src1", "actor_id": 1, "error": "数据源不存在: src1"}
+    )
     # own_session=True 但采集器尚未构建 → 只关闭会话，不 dispose
     db.close.assert_awaited_once()
 
@@ -349,7 +357,9 @@ async def test_run_failure_own_session_closes_and_disposes_collector():
 
     db.close.assert_awaited_once()
     collector.dispose.assert_awaited_once()
-    store.set.assert_awaited_once_with("job1", "FAILED", {"error": "collect failed"})
+    store.set.assert_awaited_once_with(
+        "job1", "FAILED", {"source_id": "src1", "actor_id": 1, "error": "collect failed"}
+    )
 
 
 async def test_run_raises_when_collector_unavailable():
@@ -366,4 +376,6 @@ async def test_run_raises_when_collector_unavailable():
         with pytest.raises(RuntimeError, match="采集器不可用: src1"):
             await run_collection_task({"svc": svc, "db": db, "job_store": store}, "src1", 1, "job1")
 
-    store.set.assert_awaited_once_with("job1", "FAILED", {"error": "采集器不可用: src1"})
+    store.set.assert_awaited_once_with(
+        "job1", "FAILED", {"source_id": "src1", "actor_id": 1, "error": "采集器不可用: src1"}
+    )

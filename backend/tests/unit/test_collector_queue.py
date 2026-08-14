@@ -158,6 +158,7 @@ class TestRedisJobStoreTtl:
 
         mock_redis = MagicMock()
         mock_redis.hset = AsyncMock()
+        mock_redis.hsetnx = AsyncMock()
         mock_redis.expire = AsyncMock()
         return RedisJobStore(mock_redis), mock_redis
 
@@ -187,6 +188,88 @@ class TestRedisJobStoreTtl:
         store, redis = self._make_store()
         await store.set("job-3", "RETRYING", {"attempt": 2})
         redis.expire.assert_not_awaited()
+
+
+class TestRedisJobStoreCreatedAtAndKind:
+    """任务中心元数据：created_at（创建时间）/ kind（手动 or 定时）。"""
+
+    def _make_store(self, hgetall_result: dict):
+        from app.services.collector.queue import RedisJobStore
+
+        mock_redis = MagicMock()
+        mock_redis.hgetall = AsyncMock(return_value=hgetall_result)
+        return RedisJobStore(mock_redis), mock_redis
+
+    @pytest.mark.asyncio
+    async def test_set_records_created_at_via_hsetnx(self):
+        """set 首次写入用 HSETNX 落 created_at，进度高频写入不覆盖。"""
+        from app.services.collector.queue import RedisJobStore
+
+        mock_redis = MagicMock()
+        mock_redis.hset = AsyncMock()
+        mock_redis.hsetnx = AsyncMock()
+        mock_redis.expire = AsyncMock()
+        store = RedisJobStore(mock_redis)
+        await store.set("job-a", "RUNNING", {"source_id": "s1"})
+        args = mock_redis.hsetnx.call_args.args
+        assert args[0] == RedisJobStore._key("job-a")
+        assert args[1] == "created_at"
+
+    @pytest.mark.asyncio
+    async def test_get_returns_created_at_and_kind(self):
+        """get 返回 created_at 与 kind（手动/定时）。"""
+        store, _ = self._make_store(
+            {
+                b"status": b"COMPLETED",
+                b"created_at": b"2026-08-14T03:00:00+00:00",
+                b"detail": b'{"source_id": "s1", "scanned": 54}',
+            }
+        )
+        job = await store.get("collect:sched:s1:1752000000")
+        assert job is not None
+        assert job["created_at"] == "2026-08-14T03:00:00+00:00"
+        assert job["kind"] == "scheduled"
+        manual = await store.get("collect:s1:abc")
+        assert manual is not None
+        assert manual["kind"] == "manual"
+
+    @pytest.mark.asyncio
+    async def test_list_filters_by_source_id(self):
+        """list 按 source_id 过滤任务（任务中心按数据源筛选）。"""
+        from app.services.collector.queue import RedisJobStore
+
+        def _hgetall(key: str):
+            jobs = {
+                "collect_job:collect:s1:aaa": {
+                    b"status": b"COMPLETED",
+                    b"created_at": b"2026-08-14T03:00:00+00:00",
+                    b"detail": b'{"source_id": "s1", "scanned": 54}',
+                },
+                "collect_job:collect:sched:s2:bbb": {
+                    b"status": b"QUEUED",
+                    b"created_at": b"2026-08-14T03:01:00+00:00",
+                    b"detail": b'{"source_id": "s2"}',
+                },
+            }
+            return jobs.get(key, {})
+
+        mock_redis = MagicMock()
+
+        def _scan(cursor: int, match: str = "", count: int = 0):
+            if cursor == 0:
+                return (1, [b"collect_job:collect:s1:aaa"])
+            return (0, [b"collect_job:collect:sched:s2:bbb"])
+
+        mock_redis.scan = AsyncMock(side_effect=_scan)
+        mock_redis.hgetall = AsyncMock(side_effect=_hgetall)
+        store = RedisJobStore(mock_redis)
+
+        s1_jobs = await store.list(limit=50, offset=0, source_id="s1")
+        assert len(s1_jobs) == 1
+        assert s1_jobs[0]["job_id"] == "collect:s1:aaa"
+        assert s1_jobs[0]["kind"] == "manual"
+        all_jobs = await store.list(limit=50, offset=0)
+        assert len(all_jobs) == 2
 
 
 class TestRedisJobStoreBytesDecode:

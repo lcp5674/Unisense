@@ -188,14 +188,18 @@ async def list_collection_jobs(
     trace_id: Annotated[str, Depends(get_trace_id)],
     limit: int = 50,
     offset: int = 0,
+    source_id: str | None = None,
 ) -> ApiResponse[list[dict[str, Any]]]:
     """列出采集任务（按入队逆序分页，采集任务中心入口）。
+
+    可按 ``source_id`` 过滤（任务中心按数据源筛选）；job 含 ``created_at``（创建时间）
+    与 ``kind``（manual 手动 / scheduled 定时）供前端展示。
 
     注意：本端点须注册在 ``GET /{source_id}`` 之前——FastAPI 按注册顺序匹配，
     单段静态路径 ``/jobs`` 若在 ``/{source_id}`` 之后会被当作 source_id 吞掉。
     """
     svc = _svc(db)
-    jobs = await svc.list_jobs(limit=limit, offset=offset)
+    jobs = await svc.list_jobs(limit=limit, offset=offset, source_id=source_id)
     return ok(data=jobs, trace_id=trace_id)
 
 
@@ -602,7 +606,30 @@ async def stream_collection_job(
                 yield _sse_event("error", {"message": f"采集任务不存在: {job_id}"})
                 break
             if status.get("status") in ("COMPLETED", "FAILED"):
-                yield _sse_event("progress", status)
+                # 终态先补发一条"进度拉满"的 progress 事件：1s 轮询快照下，
+                # 前端收到的最后一帧 RUNNING 进度可能停在中间值（如 25%），
+                # 此处以结果中的 scanned 作为 index=total，把进度条推进到 100%。
+                _detail = status.get("detail") or {}
+                _scanned = int(_detail.get("scanned") or 0)
+                _done_progress = {
+                    "phase": "done",
+                    "index": _scanned,
+                    "total": _scanned,
+                    "message": "采集完成" if status.get("status") == "COMPLETED" else "采集失败",
+                    "messages": [],
+                }
+                yield _sse_event(
+                    "progress",
+                    {
+                        "job_id": job_id,
+                        "status": "RUNNING",
+                        "source_id": status.get("source_id"),
+                        "detail": {
+                            "source_id": status.get("source_id"),
+                            "progress": _done_progress,
+                        },
+                    },
+                )
                 yield _sse_event("done", status)
                 break
             yield _sse_event("progress", status)
