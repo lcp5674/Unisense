@@ -29,6 +29,8 @@ export function Catalogs() {
   // URL 直达参数（?kw= / ?source_id=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
   const urlSourceId = searchParams.get("source_id") ?? "";
+  // 敏感级别下钻（?sensitivity=，总览仪表「数据表」资产卡片）作为初始筛选
+  const urlSensitivity = searchParams.get("sensitivity") ?? "";
   const [items, setItems] = useState<DBCatalog[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -36,7 +38,7 @@ export function Catalogs() {
   const [sourceId, setSourceId] = useState(urlSourceId);
   const [sourceStatus, setSourceStatus] = useState<"" | "active" | "deleted">("");
   const [entityType, setEntityType] = useState("");
-  const [sensitivity, setSensitivity] = useState("");
+  const [sensitivity, setSensitivity] = useState(urlSensitivity);
   const [keyword, setKeyword] = useState(urlKw);
   // 库名筛选（随数据源联动）
   const [database, setDatabase] = useState("");
@@ -173,6 +175,15 @@ export function Catalogs() {
     if (urlKw || urlSourceId) setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKw, urlSourceId]);
+
+  // 响应 URL 敏感级别参数变化（总览仪表「数据表」资产卡片二次下钻）；sensitivity 在 load 依赖中自动重查
+  useEffect(() => {
+    if (urlSensitivity && urlSensitivity !== sensitivity) {
+      setSensitivity(urlSensitivity);
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlSensitivity]);
 
   async function load() {
     const seq = ++loadSeq.current;
