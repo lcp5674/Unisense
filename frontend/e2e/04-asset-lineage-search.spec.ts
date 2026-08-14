@@ -32,7 +32,7 @@ test.describe("Asset Map", () => {
 
   // 1. 访问资产地图
   test("访问资产地图 - goto /asset-map", async ({ page }) => {
-    await page.goto(`${BASE_URL}/asset-map`);
+    await page.goto(`${BASE_URL}/assetmap`);
     await page.waitForLoadState("networkidle");
 
     // Verify page title and header
@@ -43,7 +43,7 @@ test.describe("Asset Map", () => {
 
   // 2. 表搜索
   test("表搜索 - 输入表名搜索", async ({ page }) => {
-    await page.goto(`${BASE_URL}/asset-map`);
+    await page.goto(`${BASE_URL}/assetmap`);
     await page.waitForLoadState("networkidle");
 
     // Switch to 搜索 tab
@@ -68,7 +68,7 @@ test.describe("Asset Map", () => {
 
   // 3. 表热度显示
   test("表热度显示 - 热度值显示", async ({ page }) => {
-    await page.goto(`${BASE_URL}/asset-map`);
+    await page.goto(`${BASE_URL}/assetmap`);
     await page.waitForLoadState("networkidle");
 
     // Switch to 热力视图 tab
@@ -87,7 +87,7 @@ test.describe("Asset Map", () => {
 
   // 4. 表详情
   test("表详情 - 点击表显示详情", async ({ page }) => {
-    await page.goto(`${BASE_URL}/asset-map`);
+    await page.goto(`${BASE_URL}/assetmap`);
     await page.waitForLoadState("networkidle");
 
     // Switch to 数据表 tab
@@ -110,7 +110,7 @@ test.describe("Asset Map", () => {
 
   // 5. 孤表查看
   test("孤表查看 - 查看孤儿资产 Tab", async ({ page }) => {
-    await page.goto(`${BASE_URL}/asset-map`);
+    await page.goto(`${BASE_URL}/assetmap`);
     await page.waitForLoadState("networkidle");
 
     // Switch to 孤儿资产 tab
@@ -124,7 +124,7 @@ test.describe("Asset Map", () => {
 
   // 6. 搜索 Tab 多维度搜索
   test("搜索 Tab - 多维度搜索", async ({ page }) => {
-    await page.goto(`${BASE_URL}/asset-map`);
+    await page.goto(`${BASE_URL}/assetmap`);
     await page.waitForLoadState("networkidle");
 
     // Switch to 搜索 tab
@@ -160,7 +160,7 @@ test.describe("Asset Map", () => {
 
   // 7. 表导出
   test("表导出 - 导出 CSV", async ({ page }) => {
-    await page.goto(`${BASE_URL}/asset-map`);
+    await page.goto(`${BASE_URL}/assetmap`);
     await page.waitForLoadState("networkidle");
 
     // Find 导出 CSV button
@@ -179,7 +179,7 @@ test.describe("Asset Map", () => {
 
   // 8. ETL 信息
   test("ETL 信息 - 验证 ETL SQL 显示", async ({ page }) => {
-    await page.goto(`${BASE_URL}/asset-map`);
+    await page.goto(`${BASE_URL}/assetmap`);
     await page.waitForLoadState("networkidle");
 
     // Navigate to 图谱视图 tab
