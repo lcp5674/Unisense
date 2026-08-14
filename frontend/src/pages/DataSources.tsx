@@ -464,11 +464,14 @@ function SourceDetailModal({
 }
 
 export function DataSources() {
+  const [searchParams] = useSearchParams();
+  // URL 直达参数（?kw=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
+  const urlKw = searchParams.get("kw") ?? "";
   const [items, setItems] = useState<DataSource[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [keyword, setKeyword] = useState("");
+  const [keyword, setKeyword] = useState(urlKw);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<DataSource | null>(null);
@@ -486,33 +489,36 @@ export function DataSources() {
   const editConfigRef = useRef<Record<string, unknown> | null>(null);
   // 编辑保存且连接配置变更后，引导"立即重新采集"的目标数据源
   const [recollectSource, setRecollectSource] = useState<string | null>(null);
-  const [searchParams] = useSearchParams();
+  // 并发查询防竞态：只有最后一次发起的请求允许落地结果
+  const loadSeq = useRef(0);
   const sourceType = Form.useWatch("source_type", form);
   const watchedDatabase = Form.useWatch("database", form);
   const watchedSchema = Form.useWatch("schema", form);
   const domainWatch = Form.useWatch("domain", form) ?? "";
 
-  // 支持从全局搜索栏经 ?kw= 直达定位
+  // 支持从全局搜索栏经 ?kw= 直达定位；初始值已由 useState 承接，
+  // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
   useEffect(() => {
-    const kw = searchParams.get("kw");
-    if (kw) {
-      setKeyword(kw);
-      setPage(1);
-    }
+    if (urlKw && urlKw !== keyword) setKeyword(urlKw);
+    if (urlKw) setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, [urlKw]);
 
   async function load(nextPage = page, nextPageSize = pageSize) {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       // P1-1: 服务端分页（后端返回 {items, total, page, page_size}）
       const resp = await listDataSources({ keyword: keyword || undefined, page: nextPage, page_size: nextPageSize });
+      // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
+      if (seq !== loadSeq.current) return;
       setItems(resp.items);
       setTotal(resp.total);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }
 

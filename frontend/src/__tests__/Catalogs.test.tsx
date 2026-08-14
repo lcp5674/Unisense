@@ -42,6 +42,7 @@ const SOURCES: DataSource[] = [
     name: "Unisense MySQL",
     source_type: "mysql",
     domain: "sales",
+    enabled: true,
     cluster_id: null,
     coverage: 0.9,
     health_status: "healthy",
@@ -57,6 +58,7 @@ const SOURCES: DataSource[] = [
     name: "ODS Hive",
     source_type: "hive",
     domain: "finance",
+    enabled: true,
     cluster_id: null,
     coverage: 0.5,
     health_status: "unknown",
@@ -171,6 +173,67 @@ describe("Catalogs 页面", () => {
     });
   });
 
+  it("从数据源详情 ?source_id=xxx 直达：所有查询都携带 source_id 过滤（避免全量首查竞态覆盖）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/catalogs?source_id=mysql_unisense"]}>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("共 1 条");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    // 任何一次查询都不得丢失 URL 带来的 source_id 过滤
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ source_id: "mysql_unisense" });
+    }
+  });
+
+  it("从全局搜索 ?kw=xxx 直达：所有查询都携带关键词过滤", async () => {
+    render(
+      <MemoryRouter initialEntries={["/catalogs?kw=order"]}>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("共 1 条");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ keyword: "order" });
+    }
+  });
+
+  it("防竞态：迟到的首查响应不覆盖最新筛选结果", async () => {
+    type CatalogListResponse = { items: DBCatalog[]; total: number; page: number; page_size: number };
+    let resolveFull!: (v: CatalogListResponse) => void;
+    const fullPromise = new Promise<CatalogListResponse>((r) => {
+      resolveFull = r;
+    });
+    // 首查（挂起）；随后切换源状态触发二次查询立即返回 2；兜底返回 8
+    mockedList.mockImplementationOnce(() => fullPromise);
+    mockedList.mockResolvedValueOnce({ items: CATALOGS, total: 2, page: 1, page_size: 20 });
+    mockedList.mockResolvedValue({ items: [], total: 8, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter initialEntries={["/catalogs?source_id=mysql_unisense"]}>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("全部源状态");
+    fireEvent.mouseDown(screen.getByText("全部源状态"));
+    const deletedOption = await screen.findByText("已删除源");
+    fireEvent.click(deletedOption);
+
+    await screen.findByText("共 2 条");
+
+    // 迟到的首查此刻才返回：若被应用会覆盖筛选结果（total 变 8）
+    resolveFull({ items: [], total: 8, page: 1, page_size: 20 });
+    await screen.findByText("共 2 条");
+    expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ source_status: "deleted" }));
+  });
+
   it("切换每页条数后按新 page_size 重新请求（不固化为 20 条/页）", async () => {
     const { container } = render(
       <MemoryRouter>
@@ -199,4 +262,5 @@ describe("Catalogs 页面", () => {
       expect(lastCall?.page_size).toBe(50);
     });
   });
+
 });

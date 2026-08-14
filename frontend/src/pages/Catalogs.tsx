@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty } from "antd";
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined } from "@ant-design/icons";
@@ -25,15 +25,19 @@ const SENSITIVITY_COLOR: Record<string, string> = {
 };
 
 export function Catalogs() {
+  const [searchParams] = useSearchParams();
+  // URL 直达参数（?kw= / ?source_id=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
+  const urlKw = searchParams.get("kw") ?? "";
+  const urlSourceId = searchParams.get("source_id") ?? "";
   const [items, setItems] = useState<DBCatalog[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [sourceId, setSourceId] = useState("");
+  const [sourceId, setSourceId] = useState(urlSourceId);
   const [sourceStatus, setSourceStatus] = useState<"" | "active" | "deleted">("");
   const [entityType, setEntityType] = useState("");
   const [sensitivity, setSensitivity] = useState("");
-  const [keyword, setKeyword] = useState("");
+  const [keyword, setKeyword] = useState(urlKw);
   // 库名筛选（随数据源联动）
   const [database, setDatabase] = useState("");
   const [databases, setDatabases] = useState<string[]>([]);
@@ -42,7 +46,8 @@ export function Catalogs() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
-  const [searchParams] = useSearchParams();
+  // 并发查询防竞态：只有最后一次发起的请求允许落地结果
+  const loadSeq = useRef(0);
   // 数据源选项（登记实体时选择归属数据源，source_id 由系统自动填充，无需手填）
   const [sources, setSources] = useState<DataSource[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(false);
@@ -160,22 +165,17 @@ export function Catalogs() {
     message.success(`字段「${col.name}」描述已更新`);
   }
 
-  // 支持从全局搜索栏 / 数据源详情经 ?kw= 或 ?source_id= 直达定位
+  // 支持从全局搜索栏 / 数据源详情经 ?kw= 或 ?source_id= 直达定位；初始值已由 useState 承接，
+  // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
   useEffect(() => {
-    const kw = searchParams.get("kw");
-    if (kw) {
-      setKeyword(kw);
-      setPage(1);
-    }
-    const sid = searchParams.get("source_id");
-    if (sid) {
-      setSourceId(sid);
-      setPage(1);
-    }
+    if (urlKw && urlKw !== keyword) setKeyword(urlKw);
+    if (urlSourceId && urlSourceId !== sourceId) setSourceId(urlSourceId);
+    if (urlKw || urlSourceId) setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, [urlKw, urlSourceId]);
 
   async function load() {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const res = await listCatalogs({
@@ -188,12 +188,15 @@ export function Catalogs() {
         page,
         page_size: pageSize,
       });
+      // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
+      if (seq !== loadSeq.current) return;
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }
 

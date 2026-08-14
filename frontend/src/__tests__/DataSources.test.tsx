@@ -417,4 +417,47 @@ describe("DataSources", () => {
       );
     });
   });
+
+  it("从全局搜索 ?kw=xxx 直达：所有查询都携带关键词过滤（避免全量首查竞态覆盖）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/data-sources?kw=财务"]}>
+        <DataSources />
+      </MemoryRouter>,
+    );
+    await screen.findByText("mysql_finance");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    // 任何一次查询都不得丢失 URL 带来的关键词过滤
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ keyword: "财务" });
+    }
+  });
+
+  it("防竞态：迟到的首查响应不覆盖最新搜索筛选结果", async () => {
+    type DSListResponse = { items: DataSource[]; total: number; page: number; page_size: number };
+    let resolveFull!: (v: DSListResponse) => void;
+    const fullPromise = new Promise<DSListResponse>((r) => {
+      resolveFull = r;
+    });
+    // 首查（挂起）；随后输入关键词触发二次查询立即返回 total=2；兜底返回 total=8
+    mockedList.mockImplementationOnce(() => fullPromise);
+    mockedList.mockResolvedValueOnce({ items: [source], total: 2, page: 1, page_size: 20 });
+    mockedList.mockResolvedValue({ items: [], total: 8, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <DataSources />
+      </MemoryRouter>,
+    );
+
+    // 等待搜索框可用（首查挂起，表格暂无数据）
+    const searchInput = await screen.findByPlaceholderText("搜索数据源名称 / ID");
+    fireEvent.change(searchInput, { target: { value: "财务" } });
+
+    await screen.findByText("共 2 个数据源");
+
+    // 迟到的首查此刻才返回：若被应用会覆盖筛选结果（total 变 8）
+    resolveFull({ items: [], total: 8, page: 1, page_size: 20 });
+    await screen.findByText("共 2 个数据源");
+  });
 });

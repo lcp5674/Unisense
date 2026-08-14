@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space } from "antd";
 import { PlusOutlined, SendOutlined } from "@ant-design/icons";
@@ -28,29 +28,37 @@ const RECON_STATUS_LABEL: Record<string, string> = {
 };
 
 function DimensionsTab() {
+  const [searchParams] = useSearchParams();
+  // URL 直达参数（?kw=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
+  const urlKw = searchParams.get("kw") ?? "";
   const [items, setItems] = useState<Dimension[]>([]);
-  const [keyword, setKeyword] = useState("");
+  const [keyword, setKeyword] = useState(urlKw);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
-  const [searchParams] = useSearchParams();
+  // 并发查询防竞态：只有最后一次发起的请求允许落地结果
+  const loadSeq = useRef(0);
 
-  // 支持从全局搜索栏经 ?kw= 直达定位
+  // 支持从全局搜索栏经 ?kw= 直达定位；初始值已由 useState 承接，
+  // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
   useEffect(() => {
-    const kw = searchParams.get("kw");
-    if (kw) setKeyword(kw);
+    if (urlKw && urlKw !== keyword) setKeyword(urlKw);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, [urlKw]);
 
   async function load() {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const res = await listDimensions({ keyword: keyword || undefined });
+      // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
+      if (seq !== loadSeq.current) return;
       setItems(res.items);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }
 
