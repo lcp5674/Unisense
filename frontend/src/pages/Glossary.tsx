@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space } from "antd";
 import { PlusOutlined, SendOutlined } from "@ant-design/icons";
@@ -31,26 +31,47 @@ function TermsTab() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
   const [searchParams] = useSearchParams();
+  // URL 直达关键词（?kw=，全局搜索跳术语）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
+  const urlKw = searchParams.get("kw") ?? "";
   const focusCode = searchParams.get("focus");
+  // 并发查询防竞态：只有最后一次发起的请求允许落地结果
+  const loadSeq = useRef(0);
+  // 搜索框初始值承接 URL 关键词（首查即带过滤）
+  const [search, setSearch] = useState(urlKw);
 
-  async function load() {
+  async function load(overSearch?: string) {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await listTerms({ search, status, page, page_size: pageSize });
+      const res = await listTerms({ search: overSearch ?? search, status, page, page_size: pageSize });
+      // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
+      if (seq !== loadSeq.current) return;
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }
+
+  // 响应 URL 直达关键词变化（全局搜索 SPA 内跳转，同路由不 remount）；初始值已由 useState 承接，
+  // 此处仅同步「URL 出现新关键词」的场景，并保留用户手动清空/修改搜索的能力。
+  useEffect(() => {
+    if (urlKw && urlKw !== search) {
+      setSearch(urlKw);
+      setPage(1);
+      // search 不在 load 依赖中（手动搜索模式），此处直接用新值查询
+      load(urlKw);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlKw]);
 
   useEffect(() => {
     load();
