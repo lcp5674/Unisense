@@ -38,6 +38,10 @@ class TestGetEntityDetail:
             "schema_json": {"fields": [{"name": "id", "type": "BIGINT", "comment": "主键"}]},
             "created_at": None,
             "updated_at": None,
+            # 表级业务描述（治理补全，TD §12.1）
+            "description": None,
+            "description_source": None,
+            "description_updated_at": None,
         }
         base.update(kw)
         return SimpleNamespace(**base)

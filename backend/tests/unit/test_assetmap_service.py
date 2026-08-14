@@ -158,7 +158,7 @@ class _FakeResult:
 
 class _FakeSession:
     async def run(self, query: str, params: dict | None = None):
-        if "RETURN n.id" in query:
+        if "RETURN DISTINCT n.id" in query:
             return _FakeResult(
                 [
                     _FakeRecord(
@@ -251,7 +251,7 @@ async def test_get_graph_neo4j_missing_labels_falls_back(monkeypatch) -> None:
 
     class _MissingLabelSession(_FakeSession):
         async def run(self, query: str, params: dict | None = None):
-            if "RETURN n.id" in query:
+            if "RETURN DISTINCT n.id" in query:
                 return _FakeResult(
                     [
                         _FakeRecord(

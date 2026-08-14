@@ -187,48 +187,36 @@ class AssetMapService(BaseService):
 
             driver = _get_neo4j_driver()
             async with driver.session() as session:
-                # 构建动态 Cypher
-                match_clause = "MATCH (n:Asset)"
-                where_parts: list[str] = []
+                # 节点：从指标种子出发按 depth 无向展开（与 MySQL 降级路径 BFS 语义一致），
+                # 避免"无论 depth 多大都返回全量 500 节点挤成一团"。depth=1 仅指标+直连表，
+                # 越深展开越多中间表。指标节点优先排序保证指标总在节点集内。
+                seed_where = " seed.domain = $domain" if domain else ""
+                node_where: list[str] = []
                 if domain:
-                    where_parts.append("n.domain = $domain")
+                    node_where.append("n.domain = $domain")
                 if pii_only:
-                    where_parts.append("n.pii = true")
-                where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
-
+                    node_where.append("n.pii = true")
+                node_where_clause = (" WHERE " + " AND ".join(node_where)) if node_where else ""
                 node_query = (
-                    match_clause
-                    + where_clause
-                    # 指标节点优先返回：图节点上限 500，无排序会挤掉指标节点，
-                    # 而边查询可能引用它们，导致前端过滤边时端点缺失、指标不可见。
-                    # 排序 metric > table > field，保证指标节点总是进入节点集。
-                    + " RETURN n.id AS id, n.type AS type, n.label AS label,"
+                    "MATCH (seed:Asset {type: 'metric'})"
+                    + (f" WHERE{seed_where}" if seed_where else "")
+                    + " WITH collect(seed) AS seeds UNWIND seeds AS seed"
+                    + f" MATCH (seed)-[rels:LINEAGE*0..{int(depth)}]-(n:Asset)"
+                    + node_where_clause
+                    + " RETURN DISTINCT n.id AS id, n.type AS type, n.label AS label,"
                     + " n.pii AS pii, n.domain AS domain, n.owner AS owner"
                     + " ORDER BY CASE n.type WHEN 'metric' THEN 0"
                     + " WHEN 'table' THEN 1 ELSE 2 END"
                     + " LIMIT 500"
                 )
 
-                # 边：可变长关系按 depth 限跳（Neo4j pattern 不支持参数作长度上界，
-                # 故以字面量插值；depth 由 API 约束 ge=1 le=10 为安全整数）。
-                # UNWIND relationships(p) 逐跳展开，返回每条实际关系边。
-                # 关系类型固定为 LINEAGE（与 lineage.write_edges/query_impact 约定
-                # 一致），语义类型取关系属性 r.type（如 DERIVED_FROM）。
+                # 边：两端均在被保留的收敛节点集内（自包含子图，消除悬空边——
+                # 与 MySQL 路径一致，边数与图实际渲染完全对应）。
                 edge_query = (
-                    "MATCH p=(a:Asset)-[rels:LINEAGE*1.."
-                    f"{int(depth)}]->(b:Asset)"
-                )
-                edge_where: list[str] = []
-                if domain:
-                    edge_where.append("(a.domain = $domain OR b.domain = $domain)")
-                if pii_only:
-                    edge_where.append("(a.pii = true AND b.pii = true)")
-                if edge_where:
-                    edge_query += " WHERE " + " AND ".join(edge_where)
-                edge_query += (
-                    " UNWIND relationships(p) AS r"
-                    " RETURN DISTINCT startNode(r).id AS source,"
-                    " endNode(r).id AS target, r.type AS type LIMIT 1000"
+                    "MATCH (a:Asset)-[r:LINEAGE]->(b:Asset)"
+                    " WHERE a.id IN $node_ids AND b.id IN $node_ids"
+                    " RETURN DISTINCT a.id AS source, b.id AS target,"
+                    " r.type AS type LIMIT 1000"
                 )
 
                 params: dict[str, Any] = {}
@@ -249,7 +237,13 @@ class AssetMapService(BaseService):
                         }
                     )
 
-                edges_result = await session.run(edge_query, params)
+                # 无指标种子（图数据未就绪）→ 返回空图，避免全量散点
+                if not nodes:
+                    _NEO4J_BREAKER.record_success()
+                    return {"nodes": [], "edges": []}
+
+                edge_params: dict[str, Any] = {"node_ids": [n["id"] for n in nodes]}
+                edges_result = await session.run(edge_query, edge_params)
                 edges = []
                 async for record in edges_result:
                     edges.append(
