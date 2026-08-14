@@ -501,6 +501,12 @@ export function AssetGraph({
         // 销毁异常不阻断卸载
       }
       if (graphRef.current === graph) graphRef.current = null;
+      // 布局切换/卸载时重置渲染串行链：旧图 destroy 后其 in-flight render promise
+      // 可能永不 resolve（G6 v5 在 destroy 后不完成在途 d3-force 仿真 tick），
+      // 若不重置，新图的 setData 会永远排队在后、图空白（布局 force→hierarchy 复现）。
+      // 递增序号同时作废旧在途渲染（其 then 内 seq 检查会 return）。
+      renderSeqRef.current += 1;
+      renderChainRef.current = Promise.resolve();
     };
   }, [layoutMode]);
 

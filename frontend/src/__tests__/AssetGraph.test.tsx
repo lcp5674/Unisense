@@ -53,6 +53,8 @@ function lastGraphData(): {
 describe("AssetGraph 交互", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 每个用例有干净的 render implementation（避免上一个用例 mockReset 污染）
+    vi.mocked(graphMock.render).mockImplementation(() => Promise.resolve(undefined));
   });
 
   it("按类型筛选后仅保留所选类型的节点", async () => {
@@ -177,5 +179,49 @@ describe("AssetGraph 交互", () => {
       layout?: { type?: string };
     };
     expect(ctorConfig.layout?.type).toBe("antv-dagre");
+  });
+
+  it("渲染中切走再切回布局后数据不丢失——回归：force→hierarchy 图空白", async () => {
+    const user = userEvent.setup();
+    // 模拟真实 G6：第 1 次渲染（分层）正常 resolve；切到力导向后其 render promise
+    // 永不 resolve（destroy 后在途 d3-force 仿真被中断）；切回分层后新图 render 恢复
+    // resolve。修复前新图 setData 永远排队在卡住的 promise 之后导致图空白，
+    // 修复后 cleanup 重置渲染链 + 递增序号作废旧在途渲染。
+    let renderCalls = 0;
+    vi.mocked(graphMock.render).mockImplementation(() => {
+      renderCalls += 1;
+      if (renderCalls === 2) return new Promise<void>(() => {});
+      return Promise.resolve(undefined);
+    });
+
+    const dagNodes: AssetGraphNode[] = [
+      { id: "table:o", label: "ods_orders", type: "table", domain: "sales" },
+      { id: "metric:m", label: "gmv", type: "metric", domain: "sales" },
+    ];
+    const dagEdges: AssetGraphEdge[] = [
+      { source: "table:o", target: "metric:m", type: "DERIVED_FROM" },
+    ];
+    render(<AssetGraph nodes={dagNodes} edges={dagEdges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(graphMock.setData).toHaveBeenCalled());
+
+    // 切到力导向：layoutMode 变化 → 销毁重建，第 2 次 render 卡住（在途仿真被中断）
+    const select = screen.getByTestId("asset-graph-layout");
+    fireEvent.mouseDown(select.querySelector(".ant-select-selector") as Element);
+    await user.click(await screen.findByText("力导向布局"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(Graph).toHaveBeenCalledTimes(2));
+
+    // 切回分层布局：cleanup 必须重置渲染链 → 新图应能立即 setData 出数据（修复点）
+    fireEvent.mouseDown(select.querySelector(".ant-select-selector") as Element);
+    await user.click(await screen.findByText("分层布局"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(Graph).toHaveBeenCalledTimes(3));
+
+    // 决定性断言：第 3 次构造的新图必须执行 setData（修复前永远停在 2 次）
+    await waitFor(() => expect(graphMock.setData).toHaveBeenCalledTimes(3));
+    const data = lastGraphData();
+    expect(data.nodes.length).toBe(2);
+    expect(renderCalls).toBe(3);
   });
 });
