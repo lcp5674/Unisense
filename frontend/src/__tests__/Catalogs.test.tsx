@@ -165,8 +165,9 @@ describe("Catalogs 页面", () => {
     const options = await screen.findAllByText("unisense");
     fireEvent.click(options[options.length - 1]);
     await waitFor(() => {
-      const lastCall = mockedList.mock.calls[mockedList.mock.calls.length - 1][0];
-      expect(lastCall.database).toBe("unisense");
+      const calls = mockedList.mock.calls;
+      const lastCall = calls.length > 0 ? calls[calls.length - 1][0] : undefined;
+      expect(lastCall?.database).toBe("unisense");
     });
   });
 });
