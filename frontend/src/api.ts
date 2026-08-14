@@ -517,6 +517,14 @@ export async function updateMetricDescription(
   );
 }
 
+// LLM 推断指标业务描述（治理补充 TD §12.1，source=llm，不触发版本）
+export async function inferMetricDescription(code: string): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/infer-description`,
+    { method: "POST" },
+  );
+}
+
 export async function publishMetric(
   code: string,
   req: MetricPublishRequest,

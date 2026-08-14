@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { BrowserRouter } from "react-router-dom";
+import { BrowserRouter, MemoryRouter, Routes, Route } from "react-router-dom";
 import { AssetMap } from "../pages/AssetMap";
 
 // Mock API
@@ -36,6 +36,7 @@ vi.mock("../api", () => ({
   listSnapshots: vi.fn(),
   queryMetricInternal: vi.fn(),
   updateMetricDescription: vi.fn(),
+  inferMetricDescription: vi.fn(),
   listCatalogs: vi.fn(),
   listDomainTree: vi.fn(),
   listMetrics: vi.fn(),
@@ -126,6 +127,7 @@ import {
   listSnapshots,
   queryMetricInternal,
   updateMetricDescription,
+  inferMetricDescription,
 } from "../api";
 
 const mockGraphData = {
@@ -380,6 +382,65 @@ describe("AssetMap", () => {
         "finance_revenue_sum_d",
         "每日营收总额",
       ),
+    );
+  });
+
+  it("metric drawer AI 推断：点击 AI 推断 → 调 inferMetricDescription → 刷新描述", async () => {
+    const baseMetric = {
+      id: 1,
+      metric_code: "finance_revenue_sum_d",
+      name: "营收汇总",
+      domain: "finance",
+      type: "atomic",
+      granularity: "day",
+      unit: "yuan",
+      aggregation: "SUM",
+      time_semantics: "PERIOD",
+      freshness: "T1",
+      dw_layer: "DWD",
+      metric_tier: "T2",
+      serving_mode: "BATCH_ONLY",
+      additivity: "ADDITIVE",
+      definition_json: {},
+      version: 1,
+      row_version: 1,
+      status: "PUBLISHED",
+      owner_id: 1,
+      pii_flag: false,
+      compliance_reviewed: true,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    vi.mocked(getMetric).mockResolvedValue({
+      ...baseMetric,
+      description: "AI 推断的每日营收总额描述",
+      description_source: "llm",
+    } as never);
+    vi.mocked(listSnapshots).mockResolvedValue([] as never);
+    vi.mocked(inferMetricDescription).mockResolvedValue({
+      ...baseMetric,
+      description: "AI 推断的每日营收总额描述",
+      description_source: "llm",
+    } as never);
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "metric:m1", label: "finance_revenue_sum_d", type: "metric", domain: "finance" },
+    });
+    clickHandler?.({ target: { id: "metric:m1" } });
+
+    await waitFor(() => expect(screen.getByText("AI 推断")).toBeInTheDocument());
+    await userEvent.click(screen.getByText("AI 推断"));
+
+    await waitFor(() =>
+      expect(inferMetricDescription).toHaveBeenCalledWith("finance_revenue_sum_d"),
+    );
+    // 推断成功后刷新描述展示（source=llm）
+    await waitFor(() =>
+      expect(screen.getByText("AI 推断的每日营收总额描述")).toBeInTheDocument(),
     );
   });
 
@@ -1190,5 +1251,44 @@ describe("AssetMap", () => {
     await waitFor(() => {
       expect(batchReclassifyAssetSensitivity).toHaveBeenCalledWith([1, 2], "CONFIDENTIAL");
     });
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "资产地图" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/lineage", "/assetmap"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/assetmap" element={<AssetMap />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByRole("heading", { name: "资产地图" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    // 显式确保 history.length === 1（组件内部其他导航会污染真实 history，套件并发时需隔离）
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(1);
+    render(
+      <MemoryRouter initialEntries={["/assetmap"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/assetmap" element={<AssetMap />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByRole("heading", { name: "资产地图" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
+    lengthSpy.mockRestore();
   });
 });

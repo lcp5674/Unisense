@@ -43,6 +43,7 @@ import {
   TableOutlined,
   ThunderboltOutlined,
   UserOutlined,
+  ArrowLeftOutlined,
 } from "@ant-design/icons";
 import { Bar, Pie } from "@ant-design/charts";
 import {
@@ -66,6 +67,7 @@ import {
   getMetric,
   inferColumnDescription,
   inferDescriptions,
+  inferMetricDescription,
   inferTableDescription,
   listCatalogs,
   listDomainTree,
@@ -500,6 +502,7 @@ function GraphTab() {
   const [metricDescEditing, setMetricDescEditing] = useState(false);
   const [metricDescDraft, setMetricDescDraft] = useState("");
   const [metricDescSaving, setMetricDescSaving] = useState(false);
+  const [metricInferring, setMetricInferring] = useState(false);
 
   async function loadGraph() {
     setLoading(true);
@@ -658,6 +661,20 @@ function GraphTab() {
       message.error(err instanceof Error ? err.message : "保存指标描述失败");
     } finally {
       setMetricDescSaving(false);
+    }
+  }
+
+  async function handleMetricDescInfer() {
+    if (!metricData) return;
+    setMetricInferring(true);
+    try {
+      await inferMetricDescription(metricData.metric_code);
+      message.success("指标描述已通过 AI 推断生成");
+      setMetricData(await getMetric(metricData.metric_code));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "AI 推断指标描述失败");
+    } finally {
+      setMetricInferring(false);
     }
   }
 
@@ -827,6 +844,14 @@ function GraphTab() {
                       }}
                     >
                       补充描述
+                    </Button>
+                    <Button
+                      size="small"
+                      icon={<ThunderboltOutlined />}
+                      loading={metricInferring}
+                      onClick={handleMetricDescInfer}
+                    >
+                      AI 推断
                     </Button>
                     {descriptionSourceTag(metricData.description_source)}
                     {metricData.description_updated_at ? (
@@ -2657,6 +2682,13 @@ function MyAssetsTab() {
 export function AssetMap() {
   const [activeTab, setActiveTab] = useState("graph");
   const { track } = useTracking();
+  const navigate = useNavigate();
+
+  // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   useEffect(() => {
     track("view", undefined, "page", { page: "assetmap" });
@@ -2777,6 +2809,9 @@ export function AssetMap() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Assets / Inventory</div>
           <h2>资产地图</h2>
           <p>目录、指标、敏感度、责任人——资产全貌一图纵览。</p>
