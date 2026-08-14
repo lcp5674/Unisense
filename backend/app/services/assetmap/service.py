@@ -206,9 +206,11 @@ class AssetMapService(BaseService):
                 # 边：可变长关系按 depth 限跳（Neo4j pattern 不支持参数作长度上界，
                 # 故以字面量插值；depth 由 API 约束 ge=1 le=10 为安全整数）。
                 # UNWIND relationships(p) 逐跳展开，返回每条实际关系边。
+                # 关系类型固定为 LINEAGE（与 lineage.write_edges/query_impact 约定
+                # 一致），语义类型取关系属性 r.type（如 DERIVED_FROM）。
                 edge_query = (
-                    "MATCH p=(a:Asset)-[rels:DERIVED_FROM|LINEAGE_UP"
-                    f"|LINEAGE_DOWN|CONSUMED_BY*1..{int(depth)}]->(b:Asset)"
+                    "MATCH p=(a:Asset)-[rels:LINEAGE*1.."
+                    f"{int(depth)}]->(b:Asset)"
                 )
                 edge_where: list[str] = []
                 if domain:
@@ -220,7 +222,7 @@ class AssetMapService(BaseService):
                 edge_query += (
                     " UNWIND relationships(p) AS r"
                     " RETURN DISTINCT startNode(r).id AS source,"
-                    " endNode(r).id AS target, type(r) AS type LIMIT 1000"
+                    " endNode(r).id AS target, r.type AS type LIMIT 1000"
                 )
 
                 params: dict[str, Any] = {}

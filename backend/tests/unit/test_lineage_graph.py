@@ -295,6 +295,62 @@ async def test_write_edges_creates_driver_lazily(monkeypatch: pytest.MonkeyPatch
     assert client._driver is fake_driver
 
 
+async def test_upsert_assets_returns_false_when_unconfigured() -> None:
+    client = _make_client()
+    client._uri = ""
+    assets = [{"id": "table:a", "label": "a", "type": "table"}]
+    assert await client.upsert_assets(assets) is False
+
+
+async def test_upsert_assets_returns_false_when_breaker_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_breaker(monkeypatch, allow=False)
+    client = _make_client()
+    assert await client.upsert_assets([{"id": "table:a"}]) is False
+
+
+async def test_upsert_assets_success_sets_properties(monkeypatch: pytest.MonkeyPatch) -> None:
+    """成功路径：MERGE + SET 全部展示属性（label/type/domain/pii/owner）。"""
+    breaker = _patch_breaker(monkeypatch)
+    client = _make_client()
+    driver = _FakeDriver(_FakeResult([]))
+    client._driver = driver
+    assets = [
+        {
+            "id": "table:orders",
+            "type": "table",
+            "label": "orders",
+            "pii": True,
+            "domain": "sales",
+            "owner": "1",
+        },
+        {"id": "field:orders.id", "type": "field", "label": "orders.id", "pii": False},
+    ]
+    assert await client.upsert_assets(assets) is True
+    assert breaker.successes == 1
+    session = driver.last_session
+    assert session is not None
+    query, params = session.runs[0]
+    assert "MERGE (n:Asset {id: row.id})" in query
+    assert "SET n.type = row.type" in query and "n.label = row.label" in query
+    assert "n.domain = row.domain" in query and "n.owner = row.owner" in query
+    rows = params["rows"]
+    assert len(rows) == 2
+    assert rows[0]["id"] == "table:orders" and rows[0]["pii"] is True
+    assert rows[1]["domain"] is None  # 缺省字段置空
+
+
+async def test_upsert_assets_returns_false_on_driver_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    breaker = _patch_breaker(monkeypatch)
+    client = _make_client()
+    client._driver = _RaisingDriver()
+    assert await client.upsert_assets([{"id": "table:a"}]) is False
+    assert breaker.failures == 1
+
+
 async def test_dispose_closes_driver() -> None:
     client = _make_client()
     driver = _DisposableDriver()

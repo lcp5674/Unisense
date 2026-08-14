@@ -83,6 +83,60 @@ class LineageGraphClient:
             logger.warning("lineage_graph_write_failed", error=str(exc))
             return False
 
+    async def upsert_assets(self, assets: list[dict[str, Any]]) -> bool:
+        """批量 upsert 资产节点展示属性（MERGE + SET，幂等），带熔断保护。
+
+        资产地图 Neo4j 路径的节点属性补全：血缘导入脚本只写节点 ``id`` 与关系，
+        展示所需 ``type/label/domain/pii/owner`` 由此方法从 MySQL 资产元数据同步。
+
+        Args:
+            assets: ``{"id": str, "type": str, "label": str, "pii": bool,
+                "domain": str|None, "owner": str|None}`` 列表；id 必填，其余可缺省。
+
+        Returns:
+            全部写入成功返回 True；未配置/不可达/熔断时返回 False（降级）。
+        """
+        if not self._uri or not assets:
+            return False
+        if not neo4j_breaker.allow():
+            logger.warning("lineage_graph_breaker_open")
+            return False
+        try:
+            from neo4j import AsyncGraphDatabase
+        except Exception:  # pragma: no cover - 依赖缺失时降级
+            return False
+        try:
+            if self._driver is None:
+                self._driver = AsyncGraphDatabase.driver(
+                    self._uri, auth=(self._user, self._password)
+                )
+            rows = [
+                {
+                    "id": a["id"],
+                    "type": a.get("type"),
+                    "label": a.get("label"),
+                    "pii": bool(a.get("pii")),
+                    "domain": a.get("domain"),
+                    "owner": a.get("owner"),
+                }
+                for a in assets
+            ]
+            async with self._driver.session() as session:
+                for i in range(0, len(rows), _WRITE_BATCH_SIZE):
+                    await session.run(
+                        "UNWIND $rows AS row "
+                        "MERGE (n:Asset {id: row.id}) "
+                        "SET n.type = row.type, n.label = row.label, "
+                        "n.pii = row.pii, n.domain = row.domain, n.owner = row.owner",
+                        rows=rows[i : i + _WRITE_BATCH_SIZE],
+                    )
+            neo4j_breaker.record_success()
+            return True
+        except Exception as exc:  # 图存储不可达，降级
+            neo4j_breaker.record_failure()
+            logger.warning("lineage_graph_upsert_failed", error=str(exc))
+            return False
+
     async def query_impact(
         self,
         node: str,
