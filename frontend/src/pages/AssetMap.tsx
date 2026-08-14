@@ -291,6 +291,9 @@ function GraphTab() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  // 字段信息抽屉（field 节点无 entity_id 时的兜底展示 + 所属表入口）
+  const [fieldNode, setFieldNode] = useState<AssetGraphNode | null>(null);
+  const [fieldTableNode, setFieldTableNode] = useState<AssetGraphNode | null>(null);
 
   async function loadGraph() {
     setLoading(true);
@@ -332,26 +335,44 @@ function GraphTab() {
       openDetail(node.entity_id);
       return;
     }
-    message.info(`节点「${node.label}」暂无详情数据`);
+    if (node.type === "field") {
+      // field:{table}.{col} → 推导所属表节点，提供表详情入口（无 entity_id 时展示字段信息）
+      const tableId = `table:${node.id.slice("field:".length).split(".").slice(0, -1).join(".")}`;
+      const tableNode = graphData?.nodes.find((n) => n.id === tableId) ?? null;
+      setFieldNode(node);
+      setFieldTableNode(tableNode);
+      return;
+    }
+    message.info(`节点「${node.label}」暂不支持查看详情`);
   }
 
   if (loading && !graphData) return <Spin tip="加载图谱数据…" />;
   if (error) return <Alert type="error" message={error} />;
   if (!graphData) return <Empty description="暂无图谱数据" />;
 
-  const domainOptions = [...new Set(graphData.nodes.map((n) => n.domain).filter(Boolean))].map((d) => ({
-    label: d,
-    value: d,
-  }));
+  const domainOptions = [...new Set(graphData.nodes.map((n) => n.domain).filter(Boolean))].map(
+    (d) => ({
+      label: d,
+      value: d,
+    }),
+  );
 
-  const detailHasPii = Boolean(detail?.pii_flag) || (detail?.sensitivity_level ?? "").includes("PII");
+  const detailHasPii =
+    Boolean(detail?.pii_flag) || (detail?.sensitivity_level ?? "").includes("PII");
 
   return (
     <div>
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }} align="middle">
         <Col>
           <span className="muted">域筛选：</span>
-          <Select allowClear placeholder="全部域" style={{ width: 200 }} value={domain} onChange={setDomain} options={domainOptions} />
+          <Select
+            allowClear
+            placeholder="全部域"
+            style={{ width: 200 }}
+            value={domain}
+            onChange={setDomain}
+            options={domainOptions}
+          />
         </Col>
         <Col>
           <span className="muted">仅 PII：</span>
@@ -366,7 +387,12 @@ function GraphTab() {
       </Row>
 
       <Card title="资产地图" size="small">
-        <AssetGraph nodes={graphData.nodes} edges={graphData.edges} onNodeClick={handleNodeClick} />
+        <AssetGraph
+          nodes={graphData.nodes}
+          edges={graphData.edges}
+          height={620}
+          onNodeClick={handleNodeClick}
+        />
       </Card>
 
       <Drawer
@@ -412,8 +438,28 @@ function GraphTab() {
                   size="small"
                   pagination={false}
                   columns={[
-                    { title: "源", dataIndex: "source", key: "source", ellipsis: true, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
-                    { title: "目标", dataIndex: "target", key: "target", ellipsis: true, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+                    {
+                      title: "源",
+                      dataIndex: "source",
+                      key: "source",
+                      ellipsis: true,
+                      render: (v: string) => (
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {v}
+                        </span>
+                      ),
+                    },
+                    {
+                      title: "目标",
+                      dataIndex: "target",
+                      key: "target",
+                      ellipsis: true,
+                      render: (v: string) => (
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {v}
+                        </span>
+                      ),
+                    },
                     { title: "类型", dataIndex: "edge_type", key: "type", width: 120 },
                     { title: "粒度", dataIndex: "granularity", key: "granularity", width: 80 },
                   ]}
@@ -422,6 +468,45 @@ function GraphTab() {
             )}
           </>
         ) : null}
+      </Drawer>
+
+      <Drawer
+        title="字段信息"
+        open={fieldNode != null}
+        onClose={() => setFieldNode(null)}
+        width={440}
+      >
+        {fieldNode && (
+          <>
+            <Descriptions column={1} bordered size="small">
+              <Descriptions.Item label="字段名">{fieldNode.label}</Descriptions.Item>
+              <Descriptions.Item label="类型">字段</Descriptions.Item>
+              <Descriptions.Item label="所属表">
+                {fieldTableNode?.label ?? (
+                  <span className="muted">不在当前视图，可用「资产搜索」查找</span>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="业务域">
+                {fieldNode.domain ?? <span className="muted">-</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="PII">
+                {fieldNode.pii ? <Tag color="red">含 PII</Tag> : <Tag>否</Tag>}
+              </Descriptions.Item>
+            </Descriptions>
+            {fieldTableNode?.entity_id != null && (
+              <Button
+                type="primary"
+                style={{ marginTop: 16 }}
+                onClick={() => {
+                  setFieldNode(null);
+                  openDetail(fieldTableNode.entity_id as number);
+                }}
+              >
+                查看所属表详情
+              </Button>
+            )}
+          </>
+        )}
       </Drawer>
     </div>
   );
@@ -434,6 +519,11 @@ function HeatmapTab() {
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 单元格下钻抽屉（域 × 敏感级 → 该敏感级目录明细）
+  const [drillOpen, setDrillOpen] = useState(false);
+  const [drillLoading, setDrillLoading] = useState(false);
+  const [drillTitle, setDrillTitle] = useState("");
+  const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
 
   useEffect(() => {
     async function load() {
@@ -450,54 +540,137 @@ function HeatmapTab() {
     load();
   }, []);
 
+  async function openCellDrill(sensKey: string, domain: string) {
+    setDrillTitle(`${domain} · ${SENSITIVITY_LABEL[sensKey] ?? sensKey} 资产明细`);
+    setDrillOpen(true);
+    setDrillLoading(true);
+    setDrillRows([]);
+    try {
+      const r = await listCatalogs({ sensitivity_level: sensKey, page_size: 200 });
+      setDrillRows(r.items as unknown as DrillRow[]);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载明细失败");
+    } finally {
+      setDrillLoading(false);
+    }
+  }
+
   if (loading) return <Spin />;
   if (error) return <Alert type="error" message={error} />;
   if (!matrix) return <Empty description="暂无热力数据" />;
 
   const heatData = matrix.cells.map((c) => ({
     x: SENSITIVITY_LABEL[c.sensitivity] ?? c.sensitivity,
+    sensKey: c.sensitivity,
     y: c.domain,
     value: c.count,
+    piiCount: c.pii_count,
   }));
+  const maxValue = Math.max(1, ...heatData.map((d) => d.value));
+  const domainCount = new Set(heatData.map((d) => d.y)).size;
   const totalCount = heatData.reduce((a, b) => a + b.value, 0);
-  const piiCount = matrix.cells.filter((c) => c.pii_count > 0).reduce((a, c) => a + c.pii_count, 0);
+  const piiTotal = heatData.reduce((a, c) => a + c.piiCount, 0);
+  // 域越多越需要高度，避免 y 轴标签/单元格被压缩
+  const chartHeight = Math.max(420, domainCount * 34 + 90);
 
   return (
-    <Card
-      title="敏感分布热力矩阵（业务域 × 敏感级别）"
-      size="small"
-      extra={<span className="muted">共 {totalCount} 项 · PII {piiCount} 项</span>}
-    >
-      {heatData.length === 0 ? (
-        <Empty description="暂无热力数据" />
-      ) : (
-        <Heatmap
-          data={heatData}
-          xField="x"
-          yField="y"
-          colorField="value"
-          height={380}
-          shape="square"
-          label={{ text: "value", style: { fontSize: 11 } }}
-          style={{ inset: 4 }}
-          legend={{ color: { title: "资产数" } }}
-        />
-      )}
-    </Card>
+    <div>
+      <Card
+        title="敏感分布热力矩阵（业务域 × 敏感级别）"
+        size="small"
+        extra={
+          <span className="muted">
+            共 {totalCount} 项 · PII {piiTotal} 项 · 悬停查看 / 点击单元格下钻明细
+          </span>
+        }
+      >
+        {heatData.length === 0 ? (
+          <Empty description="暂无热力数据" />
+        ) : (
+          <Heatmap
+            data={heatData}
+            xField="x"
+            yField="y"
+            colorField="value"
+            height={chartHeight}
+            shape="square"
+            // 0 值映射浅灰，非 0 按量由浅到深蓝渐变；域标签过长时省略、悬停看全名
+            scale={{
+              color: {
+                type: "linear",
+                domain: [0, maxValue],
+                range: ["#f0f0f0", "#d6e4ff", "#1677ff", "#003eb3"],
+              },
+            }}
+            label={{
+              text: "value",
+              style: { fontSize: 11 },
+              display: (d: { value: number }) => d.value > 0,
+            }}
+            style={{ inset: 3 }}
+            legend={{ color: { title: "资产数" } }}
+            axis={{
+              y: {
+                label: {
+                  formatter: (v: string) => (v.length > 10 ? `${v.slice(0, 10)}…` : v),
+                },
+              },
+            }}
+            tooltip={{
+              title: (d: { y: string; x: string }) => `${d.y} × ${d.x}`,
+              items: [
+                (d: { value: number }) => ({ name: "资产数", value: d.value }),
+                (d: { piiCount: number }) => ({ name: "含 PII", value: d.piiCount }),
+              ],
+            }}
+            onReady={(plot) => {
+              plot.on(
+                "element:click",
+                (evt: { data?: { data?: { sensKey?: string; y?: string } } }) => {
+                  const key = evt?.data?.data?.sensKey;
+                  const domain = evt?.data?.data?.y;
+                  if (key && domain) openCellDrill(key, domain);
+                },
+              );
+            }}
+          />
+        )}
+      </Card>
+      <DrillDownDrawer
+        open={drillOpen}
+        title={drillTitle}
+        columns={CATALOG_COLUMNS}
+        rows={drillRows}
+        loading={drillLoading}
+        onClose={() => setDrillOpen(false)}
+      />
+    </div>
   );
 }
 
 function OwnerTab() {
   const [ownerId, setOwnerId] = useState<number | undefined>(undefined);
   const [ownerOptions, setOwnerOptions] = useState<Array<{ label: string; value: number }>>([]);
-  const [view, setView] = useState<{ owner_id: number; metrics: { total: number; published: number; draft: number; pii_count: number; by_domain: Record<string, number> }; catalogs: { total: number } } | null>(null);
+  const [view, setView] = useState<{
+    owner_id: number;
+    metrics: {
+      total: number;
+      published: number;
+      draft: number;
+      pii_count: number;
+      by_domain: Record<string, number>;
+    };
+    catalogs: { total: number };
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchAssetGraph({ depth: 1 })
       .then((g) => {
-        const owners = [...new Set(g.nodes.map((n) => n.owner).filter(Boolean))].map((o) => Number(o));
+        const owners = [...new Set(g.nodes.map((n) => n.owner).filter(Boolean))].map((o) =>
+          Number(o),
+        );
         if (owners.length > 0) {
           const opts = owners.map((id) => ({ label: `责任人 #${id}`, value: id }));
           setOwnerOptions(opts);

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Empty, Table, Tag } from "antd";
+import { Button, Empty, Table, Tag } from "antd";
+import { FullscreenOutlined } from "@ant-design/icons";
 import { Graph as G6Graph } from "@antv/g6";
 import type { GraphData, IElementEvent, NodeData } from "@antv/g6";
 
@@ -60,44 +61,88 @@ function trimLabel(label: string, max = 26): string {
   return label.length > max ? `${label.slice(0, max)}…` : label;
 }
 
+// 节点渲染上限：节点过多时力导向图会失去可读性（挤成一团、标签不可辨）。
+// 超出后按优先级保留核心节点：指标 > 表/视图 > 字段，同一优先级按血缘度降序。
+const MAX_RENDER_NODES = 160;
+
+function nodeRank(n: AssetGraphNode): number {
+  if (n.type === "metric") return 0;
+  if (n.type === "table") return 1;
+  return 2; // field 及未知类型
+}
+
+/** 按优先级 + 血缘度截断节点，返回可见节点集与仅含两端可见的边。 */
+function pickVisible(
+  nodes: AssetGraphNode[],
+  edges: AssetGraphEdge[],
+  showAll: boolean,
+): { visible: AssetGraphNode[]; visibleEdges: AssetGraphEdge[]; hidden: number } {
+  if (showAll || nodes.length <= MAX_RENDER_NODES) {
+    const ids = new Set(nodes.map((n) => n.id));
+    return {
+      visible: nodes,
+      visibleEdges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)),
+      hidden: 0,
+    };
+  }
+  const degree = new Map<string, number>();
+  for (const e of edges) {
+    degree.set(e.source, (degree.get(e.source) ?? 0) + 1);
+    degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
+  }
+  const sorted = [...nodes].sort(
+    (a, b) => nodeRank(a) - nodeRank(b) || (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0),
+  );
+  const visible = sorted.slice(0, MAX_RENDER_NODES);
+  const ids = new Set(visible.map((n) => n.id));
+  return {
+    visible,
+    visibleEdges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)),
+    hidden: nodes.length - MAX_RENDER_NODES,
+  };
+}
+
 /**
  * 资产地图力导向图（方案 A 主视图）。
  *
  * - 节点：按业务域着色成簇、PII 红色描边、按血缘度编码大小
- * - 交互：拖拽画布 / 滚轮缩放 / 拖拽节点 / 悬停邻域高亮 / 点击节点回调
+ * - 交互：拖拽画布 / 滚轮缩放 / 拖拽节点 / 悬停邻域高亮 / 点击节点回调 / 重置视图
+ * - 可读性：节点过多时按优先级限流渲染 + 提示筛选；节点数较少时保留完整标签
  * - 兜底：canvas 不可用（jsdom/弱环境）时降级为表格，保证数据可浏览
  */
-export function AssetGraph({ nodes, edges, height = 560, onNodeClick }: AssetGraphProps) {
+export function AssetGraph({ nodes, edges, height = 600, onNodeClick }: AssetGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<G6Graph | null>(null);
   const onNodeClickRef = useRef(onNodeClick);
   const [renderFailed, setRenderFailed] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   onNodeClickRef.current = onNodeClick;
+
+  // 限流渲染：优先保留核心节点，超出阈值时默认隐藏附属字段节点
+  const {
+    visible: visibleNodes,
+    visibleEdges,
+    hidden,
+  } = useMemo(() => pickVisible(nodes, edges, showAll), [nodes, edges, showAll]);
 
   // 血缘度：节点关联边数 → 编码节点大小
   const degreeMap = useMemo(() => {
     const m = new Map<string, number>();
-    for (const e of edges) {
+    for (const e of visibleEdges) {
       m.set(e.source, (m.get(e.source) ?? 0) + 1);
       m.set(e.target, (m.get(e.target) ?? 0) + 1);
     }
     return m;
-  }, [edges]);
-
-  // 仅保留两端都存在的边，避免悬空边破坏布局
-  const validEdges = useMemo(() => {
-    const ids = new Set(nodes.map((n) => n.id));
-    return edges.filter((e) => ids.has(e.source) && ids.has(e.target));
-  }, [nodes, edges]);
+  }, [visibleEdges]);
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || nodes.length === 0) return;
+    if (!container || visibleNodes.length === 0) return;
 
     let graph: G6Graph | null = null;
     const nodeData: GraphData = {
-      nodes: nodes.map((n) => ({ id: n.id, data: n })),
-      edges: validEdges.map((e) => ({ source: e.source, target: e.target, data: e })),
+      nodes: visibleNodes.map((n) => ({ id: n.id, data: n })),
+      edges: visibleEdges.map((e) => ({ source: e.source, target: e.target, data: e })),
     };
 
     try {
@@ -108,7 +153,7 @@ export function AssetGraph({ nodes, edges, height = 560, onNodeClick }: AssetGra
         data: nodeData,
         node: {
           style: {
-            size: (d: NodeData) => 18 + Math.min(26, (degreeMap.get(String(d.id)) ?? 0) * 3),
+            size: (d: NodeData) => Math.min(26, 10 + (degreeMap.get(String(d.id)) ?? 0) * 1.5),
             fill: (d: NodeData) => domainColor((d.data as AssetGraphNode | undefined)?.domain),
             stroke: (d: NodeData) =>
               (d.data as AssetGraphNode | undefined)?.pii ? "#e02020" : "#ffffff",
@@ -134,16 +179,17 @@ export function AssetGraph({ nodes, edges, height = 560, onNodeClick }: AssetGra
         },
         layout: {
           type: "d3-force",
-          linkDistance: 90,
-          collide: { radius: 34 },
-          manyBody: { strength: -220 },
+          linkDistance: 60,
+          collide: { radius: 22 },
+          manyBody: { strength: -320 },
         },
         behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
       });
       graphRef.current = graph;
 
       graph.on<IElementEvent>("node:click", (evt) => {
-        const id = evt.target?.id;
+        const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
+        const id = raw?.id ?? raw?.__data__?.id;
         if (!id || !graph) return;
         const node = graph.getNodeData(String(id))?.data as AssetGraphNode | undefined;
         if (node) onNodeClickRef.current?.(node);
@@ -151,12 +197,16 @@ export function AssetGraph({ nodes, edges, height = 560, onNodeClick }: AssetGra
 
       // 悬停邻域高亮：相邻节点高亮，其余淡化
       graph.on<IElementEvent>("node:pointerenter", (evt) => {
-        const id = evt.target?.id;
+        const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
+        const id = raw?.id ?? raw?.__data__?.id;
         if (!id || !graph) return;
         const neighbors = graph.getNeighborNodesData(String(id));
         const active = new Set<string>([String(id), ...neighbors.map((n) => String(n.id))]);
         for (const n of graph.getNodeData()) {
-          void graph.setElementState(String(n.id), active.has(String(n.id)) ? "active" : "inactive");
+          void graph.setElementState(
+            String(n.id),
+            active.has(String(n.id)) ? "active" : "inactive",
+          );
         }
       });
       graph.on("node:pointerleave", () => {
@@ -180,7 +230,7 @@ export function AssetGraph({ nodes, edges, height = 560, onNodeClick }: AssetGra
       graphRef.current = null;
       graph?.destroy();
     };
-  }, [nodes, validEdges, degreeMap]);
+  }, [visibleNodes, visibleEdges, degreeMap]);
 
   if (nodes.length === 0) {
     return <Empty description="暂无图谱数据" />;
@@ -247,6 +297,29 @@ export function AssetGraph({ nodes, edges, height = 560, onNodeClick }: AssetGra
 
   return (
     <div>
+      {hidden > 0 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 12px",
+            marginBottom: 8,
+            background: "var(--bg-elevated, #fafafa)",
+            borderRadius: 6,
+            fontSize: 13,
+            color: "var(--text-2)",
+          }}
+        >
+          <span>
+            图节点较多（共 {nodes.length} 个），已优先展示 {visibleNodes.length} 个核心节点。
+            可切换到全部或使用「域筛选」缩小范围后更清晰。
+          </span>
+          <Button size="small" type="link" onClick={() => setShowAll(true)}>
+            显示全部
+          </Button>
+        </div>
+      )}
       <div ref={containerRef} style={{ height, width: "100%" }} data-testid="asset-graph-canvas" />
       <div
         style={{
@@ -256,6 +329,7 @@ export function AssetGraph({ nodes, edges, height = 560, onNodeClick }: AssetGra
           flexWrap: "wrap",
           fontSize: 12,
           color: "var(--text-2)",
+          alignItems: "center",
         }}
       >
         <div>
@@ -296,8 +370,15 @@ export function AssetGraph({ nodes, edges, height = 560, onNodeClick }: AssetGra
               marginRight: 4,
             }}
           />
-          <span className="muted">PII 描边 · 节点大小=血缘度 · 拖拽画布 / 滚轮缩放</span>
+          <span className="muted">PII 描边 · 节点大小=血缘度</span>
         </div>
+        <Button
+          size="small"
+          icon={<FullscreenOutlined />}
+          onClick={() => graphRef.current?.fitView()}
+        >
+          重置视图
+        </Button>
       </div>
     </div>
   );

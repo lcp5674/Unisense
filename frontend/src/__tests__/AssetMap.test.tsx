@@ -22,18 +22,31 @@ vi.mock("../api", () => ({
 
 vi.mock("@ant-design/charts", () => ({
   Pie: () => <div data-testid="mock-pie" />,
-  Heatmap: () => <div data-testid="mock-heatmap" />,
+  Heatmap: ({
+    onReady,
+  }: {
+    onReady?: (plot: { on: (name: string, fn: (evt: unknown) => void) => void }) => void;
+  }) => {
+    heatmapReadyRef.onReady = onReady;
+    return <div data-testid="mock-heatmap" />;
+  },
 }));
 
-// Mock @antv/g6：jsdom 无 canvas，G6 渲染必然失败；mock 让 AssetGraph 走正常路径
-const { g6GraphMock } = vi.hoisted(() => ({
+// 捕获 Heatmap 的 onReady，供单元格下钻测试手动触发 element:click
+const { g6GraphMock, heatmapReadyRef } = vi.hoisted(() => ({
   g6GraphMock: {
     on: vi.fn(),
     render: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
-    getNodeData: vi.fn<() => { data: Record<string, unknown> | undefined }>(() => ({ data: undefined })),
+    getNodeData: vi.fn<() => { data: Record<string, unknown> | undefined }>(() => ({
+      data: undefined,
+    })),
     getNeighborNodesData: vi.fn(() => []),
     setElementState: vi.fn(),
+  },
+  heatmapReadyRef: {
+    onReady: undefined as
+      ((plot: { on: (name: string, fn: (evt: unknown) => void) => void }) => void) | undefined,
   },
 }));
 vi.mock("@antv/g6", () => ({
@@ -65,14 +78,18 @@ const mockGraphData = {
     { id: "m1", label: "finance_revenue_sum_d", type: "metric", domain: "finance" },
     { id: "m2", label: "finance_cost_sum_d", type: "metric", domain: "finance" },
   ],
-  edges: [
-    { source: "m1", target: "m2", type: "derives_from" },
-  ],
+  edges: [{ source: "m1", target: "m2", type: "derives_from" }],
 };
 
 const mockOwnerViewData = {
   owner_id: 1,
-  metrics: { total: 50, published: 30, draft: 10, pii_count: 5, by_domain: { finance: 40, marketing: 10 } },
+  metrics: {
+    total: 50,
+    published: 30,
+    draft: 10,
+    pii_count: 5,
+    by_domain: { finance: 40, marketing: 10 },
+  },
   catalogs: { total: 8 },
 };
 
@@ -96,9 +113,19 @@ describe("AssetMap", () => {
       columns: ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "NEEDS_REVIEW"],
     });
     vi.mocked(fetchAssetOwnerView).mockResolvedValue(mockOwnerViewData);
-    vi.mocked(fetchAssetSummary).mockResolvedValue({ total: 10, by_entity_type: { table: 8, field: 2 }, by_sensitivity: { PUBLIC: 6, PII: 4 }, orphan_assets: 1 });
-    vi.mocked(fetchAssetClassification).mockResolvedValue({ by_sensitivity: { PUBLIC: 6, PII: 4 } });
-    vi.mocked(fetchAssetMetricSummary).mockResolvedValue({ by_domain: { finance: 2 }, by_status: { PUBLISHED: 1 } });
+    vi.mocked(fetchAssetSummary).mockResolvedValue({
+      total: 10,
+      by_entity_type: { table: 8, field: 2 },
+      by_sensitivity: { PUBLIC: 6, PII: 4 },
+      orphan_assets: 1,
+    });
+    vi.mocked(fetchAssetClassification).mockResolvedValue({
+      by_sensitivity: { PUBLIC: 6, PII: 4 },
+    });
+    vi.mocked(fetchAssetMetricSummary).mockResolvedValue({
+      by_domain: { finance: 2 },
+      by_status: { PUBLISHED: 1 },
+    });
     vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
     vi.mocked(fetchAssetOrphans).mockResolvedValue({ items: [], total: 0 });
     vi.mocked(listCatalogs).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
@@ -159,8 +186,7 @@ describe("AssetMap", () => {
     await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
 
     const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
-      | ((evt: { target?: { id?: string } }) => void)
-      | undefined;
+      ((evt: { target?: { id?: string } }) => void) | undefined;
     expect(typeof clickHandler).toBe("function");
     g6GraphMock.getNodeData.mockReturnValue({
       data: { id: "metric:m1", label: "finance_revenue_sum_d", type: "metric", domain: "finance" },
@@ -186,10 +212,15 @@ describe("AssetMap", () => {
     await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
 
     const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
-      | ((evt: { target?: { id?: string } }) => void)
-      | undefined;
+      ((evt: { target?: { id?: string } }) => void) | undefined;
     g6GraphMock.getNodeData.mockReturnValue({
-      data: { id: "table:sales.ods", label: "sales.ods", type: "table", entity_id: 5, domain: "sales" },
+      data: {
+        id: "table:sales.ods",
+        label: "sales.ods",
+        type: "table",
+        entity_id: 5,
+        domain: "sales",
+      },
     });
     clickHandler?.({ target: { id: "table:sales.ods" } });
 
@@ -216,7 +247,15 @@ describe("AssetMap", () => {
   it("overview orphan statistic drills into orphan detail", async () => {
     const user = userEvent.setup();
     vi.mocked(fetchAssetOrphans).mockResolvedValue({
-      items: [{ entity_name: "o1", entity_type: "TABLE", source_id: "s1", owner_id: null, schema_incomplete: false }],
+      items: [
+        {
+          entity_name: "o1",
+          entity_type: "TABLE",
+          source_id: "s1",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+      ],
       total: 1,
     });
     renderAssetMap();
@@ -232,5 +271,103 @@ describe("AssetMap", () => {
 
     await waitFor(() => expect(fetchAssetOrphans).toHaveBeenCalled());
     expect(screen.getByText(/孤儿资产明细/)).toBeInTheDocument();
+  });
+
+  it("click field node opens field info drawer with table drill entry", async () => {
+    vi.mocked(fetchAssetGraph).mockResolvedValue({
+      nodes: [
+        { id: "metric:m1", label: "m1", type: "metric", domain: "sales" },
+        { id: "table:sales.ods", label: "sales.ods", type: "table", entity_id: 5, domain: "sales" },
+        { id: "field:sales.ods.amount", label: "sales.ods.amount", type: "field", domain: "sales" },
+      ],
+      edges: [
+        { source: "table:sales.ods", target: "field:sales.ods.amount", type: "contains" },
+        { source: "field:sales.ods.amount", target: "metric:m1", type: "derives_from" },
+      ],
+    });
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: {
+        id: "field:sales.ods.amount",
+        label: "sales.ods.amount",
+        type: "field",
+        domain: "sales",
+      },
+    });
+    clickHandler?.({ target: { id: "field:sales.ods.amount" } });
+
+    // 字段信息抽屉打开，且推导出所属表后提供「查看所属表详情」入口
+    await waitFor(() => expect(screen.getByText("字段信息")).toBeInTheDocument());
+    expect(screen.getByText("sales.ods.amount")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /查看所属表详情/ })).toBeInTheDocument();
+  });
+
+  it("click field node without table node still shows field info", async () => {
+    vi.mocked(fetchAssetGraph).mockResolvedValue({
+      nodes: [{ id: "field:only.col", label: "only.col", type: "field", domain: "sales" }],
+      edges: [],
+    });
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "field:only.col", label: "only.col", type: "field", domain: "sales" },
+    });
+    clickHandler?.({ target: { id: "field:only.col" } });
+
+    await waitFor(() => expect(screen.getByText("字段信息")).toBeInTheDocument());
+    // 所属表不在图中：不渲染「查看所属表详情」按钮，避免无详情死路
+    expect(screen.queryByRole("button", { name: /查看所属表详情/ })).not.toBeInTheDocument();
+  });
+
+  it("heatmap cell click drills into sensitivity catalog detail", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listCatalogs).mockResolvedValue({
+      items: [
+        {
+          source_id: "s1",
+          entity_name: "sales.ods",
+          entity_type: "TABLE",
+          schema_def: {},
+          etl_sql: null,
+          sensitivity_level: "PII",
+          owner_id: null,
+          upstream_signature: "sig",
+          content_signature: null,
+          schema_incomplete: false,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("热力视图")).toBeInTheDocument());
+    await user.click(screen.getByText("热力视图"));
+    await waitFor(() => expect(fetchAssetHeatmapMatrix).toHaveBeenCalled());
+
+    // 触发 Heatmap onReady，模拟单元格点击（data 携带 sensKey/y）
+    expect(typeof heatmapReadyRef.onReady).toBe("function");
+    let cellClick:
+      ((evt: { data?: { data?: { sensKey?: string; y?: string } } }) => void) | undefined;
+    heatmapReadyRef.onReady?.({
+      on: (name, fn) => {
+        if (name === "element:click") cellClick = fn as typeof cellClick;
+      },
+    });
+    cellClick?.({ data: { data: { sensKey: "PII", y: "sales" } } });
+
+    await waitFor(() =>
+      expect(listCatalogs).toHaveBeenCalledWith(
+        expect.objectContaining({ sensitivity_level: "PII" }),
+      ),
+    );
+    expect(screen.getByText(/sales · PII 资产明细/)).toBeInTheDocument();
   });
 });
