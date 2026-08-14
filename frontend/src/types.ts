@@ -898,6 +898,11 @@ export interface LlmConfigTestResult {
   detail?: Record<string, unknown> | null;
 }
 
+export interface LlmConfigSecret {
+  id: number;
+  api_key: string;
+}
+
 // ============================================================================
 // 审计日志（backend /api/v1/audit）
 // ============================================================================

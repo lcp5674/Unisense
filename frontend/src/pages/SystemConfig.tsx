@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -21,6 +21,7 @@ import {
   CloseCircleOutlined,
   DeleteOutlined,
   EditOutlined,
+  EyeOutlined,
   PlusOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
@@ -28,6 +29,7 @@ import {
   createLlmConfig,
   deleteLlmConfig,
   getLlmConfigs,
+  getLlmConfigSecret,
   testLlmConfig,
   UnisenseApiError,
   updateLlmConfig,
@@ -100,6 +102,18 @@ export function SystemConfig() {
   const [testResults, setTestResults] = useState<Record<number, LlmConfigTestResult>>({});
   const [deleteTarget, setDeleteTarget] = useState<LlmConfigItem | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [revealingKey, setRevealingKey] = useState(false);
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const hideTimerRef = useRef<number | null>(null);
+
+  function clearReveal() {
+    if (hideTimerRef.current != null) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+    setRevealedKey(null);
+    form.setFieldValue("api_key", "");
+  }
 
   function load() {
     setLoading(true);
@@ -128,6 +142,7 @@ export function SystemConfig() {
     setEditing(null);
     form.resetFields();
     form.setFieldsValue({ provider: "custom", timeout: 30, enabled: true, priority: 0 });
+    clearReveal();
     setModalOpen(true);
   }
 
@@ -142,9 +157,33 @@ export function SystemConfig() {
       timeout: item.timeout,
       enabled: item.enabled,
       priority: item.priority,
-      // api_key 不回填明文：留空表示保持原密钥
+      // api_key 不回填明文：留空表示保持原密钥，按需经「显示密钥」按钮解密回显
     });
+    clearReveal();
     setModalOpen(true);
+  }
+
+  async function handleRevealKey() {
+    if (editing?.id == null) return;
+    setRevealingKey(true);
+    try {
+      const secret = await getLlmConfigSecret(editing.id);
+      form.setFieldValue("api_key", secret.api_key);
+      setRevealedKey(secret.api_key);
+      // 自动隐藏：15 秒后清空字段，防止密钥停留在表单/内存
+      if (hideTimerRef.current != null) window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = window.setTimeout(() => {
+        form.setFieldValue("api_key", "");
+        setRevealedKey(null);
+        message.info("密钥已自动隐藏（未保存则不会改动）");
+      }, 15000);
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "读取密钥失败",
+      );
+    } finally {
+      setRevealingKey(false);
+    }
   }
 
   async function handleSave() {
@@ -169,6 +208,7 @@ export function SystemConfig() {
         message.success("LLM 实例已新增");
       }
       setModalOpen(false);
+      clearReveal();
       load();
     } catch (err) {
       if (err instanceof Error && "errorFields" in err) return; // 表单校验错误，已高亮
@@ -368,7 +408,10 @@ export function SystemConfig() {
       <Modal
         title={editing ? `编辑 LLM 实例${editing.name ? `（${editing.name}）` : ""}` : "新增 LLM 实例"}
         open={modalOpen}
-        onCancel={() => setModalOpen(false)}
+        onCancel={() => {
+          clearReveal();
+          setModalOpen(false);
+        }}
         onOk={handleSave}
         confirmLoading={saving}
         okText="保存"
@@ -423,6 +466,23 @@ export function SystemConfig() {
               autoComplete="new-password"
             />
           </Form.Item>
+          {editing?.has_api_key ? (
+            <div style={{ marginTop: -8, marginBottom: 12 }}>
+              <Space size={8}>
+                <Button
+                  size="small"
+                  icon={<EyeOutlined />}
+                  loading={revealingKey}
+                  onClick={handleRevealKey}
+                >
+                  {revealedKey ? "已显示（15 秒后自动隐藏）" : "显示密钥"}
+                </Button>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  密钥加密存储，仅按需解密显示（查看记录会写入审计日志）
+                </span>
+              </Space>
+            </div>
+          ) : null}
           <Space size={24}>
             <Form.Item
               name="timeout"

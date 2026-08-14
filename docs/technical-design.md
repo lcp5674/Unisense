@@ -506,6 +506,7 @@ POST   /nl2sql                       # 自然语言→语义层查询（先锚�
 POST   /mcp/tools/list               # MCP 工具清单
 POST   /mcp/tools/call               # MCP 工具调用（list_metrics/query_metric/...）
 GET    /config                       # 读取 LLM 实例列表（脱敏 items[] + strategy=round_robin + effective + can_edit；任意登录用户）
+GET    /config/{id}/secret           # 按需解密返回明文 API Key（编辑回显；platform_admin/domain_admin，每次查看写审计 ai.config.secret.reveal）
 POST   /config                       # 新增 LLM 实例（api_key 必填，加密落库；platform_admin/domain_admin）
 PUT    /config/{id}                  # 更新 LLM 实例（api_key 留空保持原密钥）
 DELETE /config/{id}                  # 删除 LLM 实例（软删除，保留审计）
@@ -515,7 +516,8 @@ LLM 多实例轮询路由：llm_config 表可配置多个实例（每行一个�
 priority 排序后轮询（round-robin）；单实例调用失败自动切换下一个可用实例（failover），连续失败
 实例进入冷却（约 30 秒）自动恢复，避免单点 LLM 不可用造成服务不可用（迁移 0039 增补 name/priority）。
 配置优先级：llm_config 表（enabled=true）> 环境变量（UNISENSE_LLM_*）> 未配置降级。
-API Key 经 SecretManager Fernet 加密落库（迁移 0037），响应一律脱敏。
+API Key 经 SecretManager Fernet 加密落库（迁移 0037），列表与常规 GET 一律脱敏（仅返回 has_api_key）；
+编辑回显按需经 GET /config/{id}/secret 解密取明文（仅管理员，每次查看写审计日志，前端 15 秒自动隐藏）。
 
 ### 3.8 通知与运营（notify / observability）
 ```

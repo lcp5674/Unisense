@@ -110,6 +110,18 @@ class LlmConfigTestRequest(BaseModel):
     timeout: int = Field(30, ge=1, le=300, description="请求超时秒数")
 
 
+class LlmConfigSecretResponse(BaseModel):
+    """LLM 实例密钥响应（仅按需解密返回，用于编辑回显）。
+
+    列表与常规 GET 一律脱敏（仅 has_api_key）；只有管理员在编辑弹窗点
+    「显示密钥」时，才通过 GET /ai/config/{id}/secret 按需取明文，且每次
+    查看都写审计日志。
+    """
+
+    id: int
+    api_key: str = ""
+
+
 class LlmConfigTestResult(BaseModel):
     """LLM 连通性测试结果。"""
 

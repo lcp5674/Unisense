@@ -103,6 +103,72 @@ async def test_get_config_can_edit_false_for_viewer() -> None:
     app.dependency_overrides.clear()
 
 
+async def test_get_config_secret_returns_plaintext() -> None:
+    session = _make_session()
+    session.execute.return_value.scalar_one_or_none.return_value = _row()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/ai/config/1/secret")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["id"] == 1
+    assert data["api_key"] == "sk-test"
+    app.dependency_overrides.clear()
+
+
+async def test_get_config_secret_404_when_missing() -> None:
+    session = _make_session()
+    session.execute.return_value.scalar_one_or_none.return_value = None
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/ai/config/99/secret")
+    assert resp.status_code == 404
+    app.dependency_overrides.clear()
+
+
+async def test_get_config_secret_404_when_no_key() -> None:
+    session = _make_session()
+    session.execute.return_value.scalar_one_or_none.return_value = _row(api_key_enc="")
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/ai/config/1/secret")
+    assert resp.status_code == 404
+    app.dependency_overrides.clear()
+
+
+async def test_get_config_secret_forbidden_for_viewer() -> None:
+    session = _make_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/ai/config/1/secret")
+    assert resp.status_code == 403
+    app.dependency_overrides.clear()
+
+
 async def test_post_config_creates(llm_client: httpx.AsyncClient) -> None:
     resp = await llm_client.post(
         "/api/v1/ai/config",

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { act, render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { SystemConfig } from "../pages/SystemConfig";
 
 vi.mock("../api", () => {
@@ -25,6 +25,7 @@ vi.mock("../api", () => {
   }
   return {
     getLlmConfigs: vi.fn(),
+    getLlmConfigSecret: vi.fn(),
     createLlmConfig: vi.fn(),
     updateLlmConfig: vi.fn(),
     deleteLlmConfig: vi.fn(),
@@ -37,11 +38,13 @@ import {
   createLlmConfig,
   deleteLlmConfig,
   getLlmConfigs,
+  getLlmConfigSecret,
   testLlmConfig,
   updateLlmConfig,
 } from "../api";
 
 const mockGet = vi.mocked(getLlmConfigs);
+const mockSecret = vi.mocked(getLlmConfigSecret);
 const mockCreate = vi.mocked(createLlmConfig);
 const mockUpdate = vi.mocked(updateLlmConfig);
 const mockDelete = vi.mocked(deleteLlmConfig);
@@ -79,6 +82,7 @@ const PRIMARY_ITEM = {
 describe("SystemConfig LLM 路由配置", () => {
   beforeEach(() => {
     mockGet.mockReset();
+    mockSecret.mockReset();
     mockCreate.mockReset();
     mockUpdate.mockReset();
     mockDelete.mockReset();
@@ -195,5 +199,35 @@ describe("SystemConfig LLM 路由配置", () => {
     await waitFor(() => {
       expect(mockDelete).toHaveBeenCalledWith(1);
     });
+  });
+
+  it("编辑时按需显示密钥：点显示密钥 → 调 getLlmConfigSecret → 回填 → 15 秒后自动隐藏", async () => {
+    mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
+    mockSecret.mockResolvedValue({ id: 1, api_key: "sk-revealed" });
+    vi.useFakeTimers();
+    try {
+      render(<SystemConfig />);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      fireEvent.click(screen.getByText("编辑"));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      fireEvent.click(screen.getByText("显示密钥"));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockSecret).toHaveBeenCalledWith(1);
+      expect(screen.getByDisplayValue("sk-revealed")).toBeTruthy();
+      expect(screen.getByText("已显示（15 秒后自动隐藏）")).toBeTruthy();
+      // 自动隐藏：推进 15 秒后字段被清空
+      act(() => {
+        vi.advanceTimersByTime(16000);
+      });
+      expect(screen.queryByDisplayValue("sk-revealed")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

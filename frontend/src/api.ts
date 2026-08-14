@@ -69,6 +69,7 @@ import {
   NL2SQLResult,
   LlmConfigList,
   LlmConfigPayload,
+  LlmConfigSecret,
   LlmConfigTestResult,
   Notification,
   NotifyEventLog,
@@ -1351,6 +1352,10 @@ export async function aiNl2Sql(body: {
 // ---- LLM 配置（多实例轮询路由）----
 export async function getLlmConfigs(): Promise<LlmConfigList> {
   return request<LlmConfigList>(`${API_BASE}/ai/config`);
+}
+
+export async function getLlmConfigSecret(id: number): Promise<LlmConfigSecret> {
+  return request<LlmConfigSecret>(`${API_BASE}/ai/config/${id}/secret`);
 }
 
 export async function createLlmConfig(body: LlmConfigPayload): Promise<{ id: number }> {

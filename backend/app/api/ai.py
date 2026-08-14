@@ -29,6 +29,7 @@ from app.services.llm.schemas import (
     LlmConfigListResponse,
     LlmConfigPayload,
     LlmConfigResponse,
+    LlmConfigSecretResponse,
     LlmConfigTestRequest,
     LlmConfigTestResult,
 )
@@ -123,6 +124,39 @@ async def get_llm_config(
         can_edit=can_edit,
     )
     return ok(data=resp.model_dump(), trace_id=trace_id)
+
+
+@router.get("/config/{instance_id}/secret", dependencies=_CONFIG_ADMIN_DEPS)
+async def get_llm_config_secret(
+    instance_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """按需解密返回实例明文 API Key（编辑回显用）。
+
+    列表与常规 GET 一律脱敏；仅管理员在此端点按需取明文，且每次查看都写审计
+    日志（密钥属敏感信息）。实例不存在 / 未配置密钥均返回 404。
+    """
+    svc = LlmConfigService(db)
+    row = await svc.get_row(instance_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="LLM 实例不存在")
+    secret = await svc.get_secret(instance_id)
+    if not secret:
+        raise HTTPException(status_code=404, detail="该实例未配置 API Key")
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ai.config.secret.reveal",
+        entity_type="llm_config",
+        entity_id=str(instance_id),
+        detail={"name": row.name},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    data = LlmConfigSecretResponse(id=instance_id, api_key=secret).model_dump()
+    return ok(data=data, trace_id=trace_id)
 
 
 @router.post("/config", dependencies=_CONFIG_ADMIN_DEPS, status_code=201)

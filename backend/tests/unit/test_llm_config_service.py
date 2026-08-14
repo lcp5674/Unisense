@@ -103,6 +103,29 @@ class TestGetEffective:
         assert eff["source"] == "env"
 
 
+class TestGetSecret:
+    async def test_decrypt_returns_plaintext(self) -> None:
+        s = _session()
+        s.execute.return_value.scalar_one_or_none.return_value = _row()
+        secret = await LlmConfigService(s).get_secret(1)
+        assert secret == "sk-test"
+
+    async def test_missing_row_returns_none(self) -> None:
+        s = _session()
+        s.execute.return_value.scalar_one_or_none.return_value = None
+        assert await LlmConfigService(s).get_secret(99) is None
+
+    async def test_no_key_returns_none(self) -> None:
+        s = _session()
+        s.execute.return_value.scalar_one_or_none.return_value = _row(api_key_enc="")
+        assert await LlmConfigService(s).get_secret(1) is None
+
+    async def test_decrypt_failure_returns_none(self) -> None:
+        s = _session()
+        s.execute.return_value.scalar_one_or_none.return_value = _row(api_key_enc="corrupt-token")
+        assert await LlmConfigService(s).get_secret(1) is None
+
+
 class TestCreateUpdateDelete:
     async def test_create_with_encrypted_key(self) -> None:
         s = _session([])
