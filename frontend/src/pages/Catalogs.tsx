@@ -24,6 +24,29 @@ const SENSITIVITY_COLOR: Record<string, string> = {
   UNKNOWN: "default",
 };
 
+/**
+ * 模块级推断去重：退出页面再进入时组件内 loading 会丢失，但该 Map 跨组件实例保留，
+ * 进行中的推断未完成时拦截重复点击（后端另有 Redis/进程内 409 幂等兜底）。
+ */
+const inferInflight = new Map<string, Promise<unknown>>();
+
+/** 若 key 对应推断已在途中则返回 null（拦截）；否则执行并登记，完成时清理。 */
+function runInflight<T>(key: string, task: () => Promise<T>): Promise<T> | null {
+  if (inferInflight.has(key)) return null;
+  const p = task().finally(() => inferInflight.delete(key));
+  inferInflight.set(key, p);
+  return p;
+}
+
+/** 后端 409 LLM_INFER_IN_PROGRESS：已有推断进行中（可能是其它会话/进程触发）。 */
+function isInferInProgress(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: string }).code === "LLM_INFER_IN_PROGRESS"
+  );
+}
+
 export function Catalogs() {
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw= / ?source_id=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
@@ -108,18 +131,31 @@ export function Catalogs() {
         message.warning("该目录实体缺少 ID，无法推断");
         return;
       }
-      const result = await inferColumnDescription(catalogId, col.name, {
-        entity_name: fieldDrawerCatalog.entity_name,
-        column_type: col.type,
-      });
-      updateFieldDescription(col.name, result.description, result.source);
-      message.success(`字段「${col.name}」推断成功`);
-    } catch (err) {
-      message.error(
-        err instanceof UnisenseApiError
-          ? `${err.message}（${err.codeZh}）`
-          : "LLM 推断暂时不可用，请稍后重试",
+      const key = `column:${catalogId}:${col.name}`;
+      const p = runInflight(key, () =>
+        inferColumnDescription(catalogId, col.name, {
+          entity_name: fieldDrawerCatalog.entity_name,
+          column_type: col.type,
+        }).then((result) => {
+          updateFieldDescription(col.name, result.description, result.source);
+          message.success(`字段「${col.name}」推断成功`);
+        }),
       );
+      if (!p) {
+        message.info("该字段的 LLM 推断正在进行中，请稍候");
+        return;
+      }
+      await p;
+    } catch (err) {
+      if (isInferInProgress(err)) {
+        message.info("该字段的 LLM 推断正在进行中，请稍候");
+      } else {
+        message.error(
+          err instanceof UnisenseApiError
+            ? `${err.message}（${err.codeZh}）`
+            : "LLM 推断暂时不可用，请稍后重试",
+        );
+      }
     } finally {
       setInferLoading(false);
     }
@@ -135,20 +171,33 @@ export function Catalogs() {
         message.warning("该目录实体缺少 ID，无法推断");
         return;
       }
-      const result = await inferDescriptions(catalogId);
-      // 更新推断成功的字段
-      for (const item of result.inferred) {
-        updateFieldDescription(item.column_name, item.description, item.source);
+      const key = `batch:${catalogId}`;
+      const p = runInflight(key, () =>
+        inferDescriptions(catalogId).then((result) => {
+          // 更新推断成功的字段
+          for (const item of result.inferred) {
+            updateFieldDescription(item.column_name, item.description, item.source);
+          }
+          message.success(
+            `推断完成：成功 ${result.inferred.length}，跳过 ${result.skipped.length}，失败 ${result.failed.length}`,
+          );
+        }),
+      );
+      if (!p) {
+        message.info("该表的批量推断正在进行中，请稍候");
+        return;
       }
-      message.success(
-        `推断完成：成功 ${result.inferred.length}，跳过 ${result.skipped.length}，失败 ${result.failed.length}`,
-      );
+      await p;
     } catch (err) {
-      message.error(
-        err instanceof UnisenseApiError
-          ? `${err.message}（${err.codeZh}）`
-          : "批量推断暂时不可用，请稍后重试",
-      );
+      if (isInferInProgress(err)) {
+        message.info("该表的批量推断正在进行中，请稍候");
+      } else {
+        message.error(
+          err instanceof UnisenseApiError
+            ? `${err.message}（${err.codeZh}）`
+            : "批量推断暂时不可用，请稍后重试",
+        );
+      }
     } finally {
       setBatchInferLoading(false);
     }

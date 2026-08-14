@@ -989,6 +989,8 @@ async def infer_descriptions_batch(
         skipped: list[str] = []
         failed: list[str] = []
 
+        # 收集待推断字段（跳过已有 manual/llm 描述或已有 comment 的字段）
+        targets: list[tuple[str, str | None]] = []
         for col in columns:
             if not isinstance(col, dict):
                 continue
@@ -1008,14 +1010,27 @@ async def infer_descriptions_batch(
                 skipped.append(col_name)
                 continue
 
-            # 推断
             col_type = col.get("type") or col.get("data_type")
-            result = await svc._llm_infer_column_description(
-                entity_name=cat.entity_name,
-                column_name=col_name,
-                column_type=str(col_type) if col_type else None,
-            )
-            if result is None:
+            targets.append((col_name, str(col_type) if col_type else None))
+
+        # 并发调用 LLM（限流 4）避免整表串行拖到 nginx 超时；写库保持串行有序
+        sem = asyncio.Semaphore(4)
+
+        async def _infer_one(col_name: str, col_type: str | None) -> dict[str, Any] | None:
+            async with sem:
+                return await svc._llm_infer_column_description(
+                    entity_name=cat.entity_name,
+                    column_name=col_name,
+                    column_type=col_type,
+                )
+
+        results = await asyncio.gather(
+            *(_infer_one(name, ctype) for name, ctype in targets),
+            return_exceptions=True,
+        )
+
+        for (col_name, _ctype), result in zip(targets, results, strict=True):
+            if isinstance(result, BaseException) or result is None:
                 failed.append(col_name)
                 continue
 

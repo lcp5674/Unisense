@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -311,6 +312,70 @@ async def test_infer_descriptions_batch_inflight_conflict(
     assert resp.status_code == 409
     assert resp.json()["code"] == "LLM_INFER_IN_PROGRESS"
     fake_svc._repo.get_descriptions.assert_not_awaited()
+
+
+async def test_infer_descriptions_batch_success_concurrent(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """批量推断：并发调用 LLM（Semaphore 限流 4）并正确分类 skipped/inferred/failed。"""
+    cat = SimpleNamespace(
+        id=1,
+        entity_name="ods_order",
+        schema_json={
+            "columns": [
+                {"name": "id", "type": "bigint", "comment": "主键"},
+                {"name": "amount", "type": "decimal", "comment": ""},
+                {"name": "note", "type": "varchar", "comment": ""},
+            ]
+        },
+    )
+    session = MagicMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = cat
+    session.execute = AsyncMock(return_value=exec_result)
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    async def fake_db() -> AsyncIterator[MagicMock]:
+        yield session
+
+    # 记录并发峰值的 mock LLM（模拟耗时调用）
+    active = 0
+    peak = 0
+    counter_lock = asyncio.Lock()
+
+    async def fake_infer(entity_name: str, column_name: str, column_type: str | None) -> dict:
+        nonlocal active, peak
+        async with counter_lock:
+            active += 1
+            peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        async with counter_lock:
+            active -= 1
+        return {"description": f"{column_name} 描述", "confidence": 0.8}
+
+    fake_svc = MagicMock()
+    fake_svc._repo.get_descriptions = AsyncMock(return_value=[])
+    fake_svc._repo.upsert_description = AsyncMock()
+    fake_svc._llm_infer_column_description = AsyncMock(side_effect=fake_infer)
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    try:
+        with patch("app.api.collector._svc", return_value=fake_svc):
+            resp = await collector_client.post("/api/v1/catalogs/1/infer-descriptions")
+    finally:
+        app.dependency_overrides.pop(deps.get_db_session, None)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    # 已有 comment 且无描述记录 → 跳过
+    assert data["skipped"] == ["id"]
+    assert [i["column_name"] for i in data["inferred"]] == ["amount", "note"]
+    assert data["failed"] == []
+    assert fake_svc._llm_infer_column_description.await_count == 2
+    # Semaphore(4) 限流生效且并发执行（非串行）
+    assert peak <= 4
+    assert peak >= 2
 
 
 async def test_infer_table_description_inflight_conflict(
