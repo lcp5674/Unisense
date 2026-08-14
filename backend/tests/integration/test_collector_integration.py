@@ -523,13 +523,15 @@ class TestDegradationPaths:
         resp = await client.post("/api/v1/data-sources", json=create_payload, headers=headers)
         assert resp.status_code == 200, f"创建数据源失败: {resp.text}"
 
-        # Mock LLM 不可用（build_llm_client 在 llm.client 模块，service 内函数级 import）
-        with patch("app.services.llm.client.build_llm_client") as mock_build_client:
-            mock_client = MagicMock()
-            mock_client.enabled = True
-            mock_client.chat = AsyncMock(side_effect=LlmError("LLM service unavailable"))
-            mock_client.close = AsyncMock()
-            mock_build_client.return_value = mock_client
+        # Mock LLM 不可用（collector 走 LlmConfigService.build_client，DB 路径优先）
+        mock_client = MagicMock()
+        mock_client.enabled = True
+        mock_client.chat = AsyncMock(side_effect=LlmError("LLM service unavailable"))
+        mock_client.close = AsyncMock()
+        with patch(
+            "app.services.llm.config_service.LlmConfigService.build_client",
+            new=AsyncMock(return_value=mock_client),
+        ):
 
             # 注册一个明显包含 PII 的表名
             catalog_payload = {

@@ -36,7 +36,10 @@ async def test_llm_infer_column_description_normal():
     mock_client.chat = AsyncMock(return_value={"description": "用户唯一标识ID", "confidence": 0.85})
     mock_client.close = AsyncMock()
 
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_column_description(
             entity_name="dwd_order",
             column_name="user_id",
@@ -58,7 +61,10 @@ async def test_llm_infer_column_description_disabled():
     mock_client.enabled = False
     mock_client.close = AsyncMock()
 
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_column_description(
             entity_name="dwd_order",
             column_name="user_id",
@@ -78,7 +84,10 @@ async def test_llm_infer_column_description_timeout():
     mock_client.chat = AsyncMock(side_effect=TimeoutError("LLM timeout"))
     mock_client.close = AsyncMock()
 
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_column_description(
             entity_name="dwd_order",
             column_name="user_id",
@@ -98,7 +107,10 @@ async def test_llm_infer_column_description_format_error():
     mock_client.chat = AsyncMock(side_effect=ValueError("Invalid JSON"))
     mock_client.close = AsyncMock()
 
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_column_description(
             entity_name="dwd_order",
             column_name="user_id",
@@ -118,7 +130,10 @@ async def test_llm_infer_column_description_empty_response():
     mock_client.chat = AsyncMock(return_value={"description": "", "confidence": 0})
     mock_client.close = AsyncMock()
 
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_column_description(
             entity_name="dwd_order",
             column_name="user_id",
@@ -138,7 +153,10 @@ async def test_llm_infer_column_description_llm_error():
     mock_client.chat = AsyncMock(side_effect=LlmError("Model not found"))
     mock_client.close = AsyncMock()
 
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_column_description(
             entity_name="dwd_order",
             column_name="user_id",
@@ -158,7 +176,10 @@ async def test_llm_infer_column_description_runtime_error():
     mock_client.chat = AsyncMock(side_effect=RuntimeError("Client init failed"))
     mock_client.close = AsyncMock()
 
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_column_description(
             entity_name="dwd_order",
             column_name="user_id",
@@ -187,7 +208,10 @@ async def test_llm_infer_table_description_normal():
         {"name": "order_id", "type": "bigint"},
         {"name": "user_id", "type": "bigint"},
     ]
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_table_description(
             entity_name="dwd_order", columns=columns
         )
@@ -214,7 +238,10 @@ async def test_llm_infer_table_description_truncates_many_columns():
     mock_client.close = AsyncMock()
 
     columns = [{"name": f"col_{i}", "type": "varchar"} for i in range(50)]
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_table_description(
             entity_name="dwd_wide", columns=columns
         )
@@ -233,7 +260,10 @@ async def test_llm_infer_table_description_disabled():
     mock_client.enabled = False
     mock_client.close = AsyncMock()
 
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_table_description(
             entity_name="dwd_order", columns=[]
         )
@@ -252,10 +282,44 @@ async def test_llm_infer_table_description_timeout():
     mock_client.chat = AsyncMock(side_effect=TimeoutError("LLM timeout"))
     mock_client.close = AsyncMock()
 
-    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
         result = await svc._llm_infer_table_description(
             entity_name="dwd_order", columns=[]
         )
 
     assert result is None
+    mock_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_llm_build_client_falls_back_on_db_config_error():
+    """DB 配置读取异常时回退 env 静态客户端，推断仍可用（回归：描述推断不因 DB 抖动 500）。"""
+    svc, _ = _svc()
+
+    mock_client = AsyncMock()
+    mock_client.enabled = True
+    mock_client.chat = AsyncMock(
+        return_value={"description": "用户唯一标识ID", "confidence": 0.85}
+    )
+    mock_client.close = AsyncMock()
+
+    with (
+        patch(
+            "app.services.llm.config_service.LlmConfigService.build_client",
+            side_effect=RuntimeError("db down"),
+        ),
+        patch("app.services.llm.client.build_llm_client", return_value=mock_client),
+    ):
+        result = await svc._llm_infer_column_description(
+            entity_name="dwd_order",
+            column_name="user_id",
+            column_type="bigint",
+        )
+
+    assert result is not None
+    assert result["description"] == "用户唯一标识ID"
+    assert result["confidence"] == 0.85
     mock_client.close.assert_awaited_once()

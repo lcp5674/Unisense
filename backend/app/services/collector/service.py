@@ -41,7 +41,12 @@ from app.services.collector.schemas import (
     TestConnectionResult,
 )
 from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult
-from app.services.llm.client import LlmError
+from app.services.llm.client import (
+    DeterministicFallbackLlmClient,
+    LlmClient,
+    LlmError,
+    LlmRouterClient,
+)
 
 logger = get_logger("unisense.collector.service")
 
@@ -543,6 +548,24 @@ class CollectorService(BaseService):
 
         return DBCatalogResponse.model_validate(cat)
 
+    async def _build_llm_client(
+        self,
+    ) -> LlmClient | LlmRouterClient | DeterministicFallbackLlmClient:
+        """构建 LLM 客户端：优先 DB 配置（env 兜底参与路由），DB 读取失败回退 env 静态客户端。
+
+        与 ai/metrics 消费方一致，避免描述/敏感度推断走已失效的 env 静态客户端
+        （如 kilo.ai 模型下线 → 404 → LLM_INFER_UNAVAILABLE）。
+        """
+        try:
+            from app.services.llm.config_service import LlmConfigService
+
+            return await LlmConfigService(self._db).build_client()
+        except Exception:  # noqa: BLE001 - DB 配置读取异常降级 env 静态客户端，不阻断推断
+            logger.warning("llm_db_config_load_failed, fallback to env client", exc_info=True)
+            from app.services.llm.client import build_llm_client
+
+            return build_llm_client()
+
     async def _llm_classify_sensitivity(
         self, entity_name: str, schema_def: dict[str, Any] | None
     ) -> dict[str, Any] | None:
@@ -552,9 +575,7 @@ class CollectorService(BaseService):
         """
         client = None
         try:
-            from app.services.llm.client import build_llm_client
-
-            client = build_llm_client()
+            client = await self._build_llm_client()
             if not client.enabled:
                 return None
 
@@ -624,7 +645,7 @@ class CollectorService(BaseService):
     ) -> dict[str, Any] | None:
         """使用 LLM 推断字段描述，返回结构化结果。
 
-        复用 build_llm_client + 熔断器模式（与 _llm_classify_sensitivity 一致）。
+        复用 _build_llm_client（DB 配置优先 + 熔断器模式，与 _llm_classify_sensitivity 一致）。
         LLM 不可用时返回 None（不阻断主流程）。
 
         Args:
@@ -637,9 +658,7 @@ class CollectorService(BaseService):
         """
         client = None
         try:
-            from app.services.llm.client import build_llm_client
-
-            client = build_llm_client()
+            client = await self._build_llm_client()
             if not client.enabled:
                 return None
 
@@ -703,14 +722,12 @@ class CollectorService(BaseService):
     ) -> dict[str, Any] | None:
         """使用 LLM 推断表级业务描述（表名 + 字段清单上下文）。
 
-        复用 build_llm_client + 熔断器模式（与字段推断一致）；
+        复用 _build_llm_client（DB 配置优先 + 熔断器模式，与字段推断一致）；
         LLM 不可用返回 None（不阻断主流程）。
         """
         client = None
         try:
-            from app.services.llm.client import build_llm_client
-
-            client = build_llm_client()
+            client = await self._build_llm_client()
             if not client.enabled:
                 return None
 

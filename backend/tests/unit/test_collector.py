@@ -1289,8 +1289,8 @@ async def test_llm_classify_fallback_client_returns_none():
 
     svc, repo = _svc()
     with patch(
-        "app.services.llm.client.build_llm_client",
-        return_value=DeterministicFallbackLlmClient(),
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=DeterministicFallbackLlmClient()),
     ):
         result = await svc._llm_classify_sensitivity("orders", {"columns": ["amount"]})
     assert result is None
@@ -1314,8 +1314,8 @@ async def test_llm_classify_llm_error_returns_none():
 
     svc, _repo = _svc()
     with patch(
-        "app.services.llm.client.build_llm_client",
-        return_value=_FailingClient(),
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=_FailingClient()),
     ):
         result = await svc._llm_classify_sensitivity("orders", {"columns": ["amount"]})
     assert result is None
