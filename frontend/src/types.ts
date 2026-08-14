@@ -280,6 +280,29 @@ export interface LineageEdgePage {
   has_more?: boolean;
 }
 
+// 血缘图谱节点/边（后端 lineage/graph 端点返回，与资产地图图谱结构对齐，
+// 可被 assetmap/AssetGraph 力导向图组件直接消费）
+export interface LineageGraphNode {
+  id: string;
+  type: string;
+  label: string;
+  entity_id?: number;
+  pii?: boolean;
+  domain?: string;
+  owner?: string;
+}
+
+export interface LineageGraphEdge {
+  source: string;
+  target: string;
+  type: string;
+}
+
+export interface LineageGraphData {
+  nodes: LineageGraphNode[];
+  edges: LineageGraphEdge[];
+}
+
 // 变更影响预览（what-if）——后端 lineage/schemas.py 的 ImpactPreviewResponse
 export interface ImpactPreview {
   affected_metrics: { metric_code: string; change_type: string }[];

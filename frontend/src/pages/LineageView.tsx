@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Alert,
   Badge,
@@ -23,6 +24,7 @@ import {
   DatabaseOutlined,
   ReloadOutlined,
   SearchOutlined,
+  ShareAltOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
 import {
@@ -30,6 +32,7 @@ import {
   lineageChannelRuns,
   lineageChannels,
   lineageEdges,
+  lineageGraph,
   lineageImpact,
   lineageImpactPreview,
   lineageStale,
@@ -38,6 +41,7 @@ import {
   UnisenseApiError,
 } from "../api";
 import type { LineageChannel, LineageEdge, LineageIngestRun, StaleEdge } from "../types";
+import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
 
@@ -54,6 +58,69 @@ const EDGE_TYPE_LABEL: Record<string, string> = {
 };
 
 type Direction = "upstream" | "downstream" | "both";
+
+/** 血缘图谱 Tab：进入即加载全量血缘图谱（力导向图），支持节点点击跳转。 */
+function GraphTab() {
+  const navigate = useNavigate();
+  const [data, setData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const { track } = useTracking();
+
+  async function load() {
+    setLoading(true);
+    try {
+      const d = await lineageGraph({ limit: 2000 });
+      setData({ nodes: d.nodes as AssetGraphNode[], edges: d.edges as AssetGraphEdge[] });
+      track("lineage_graph_view");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载血缘图谱失败");
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function handleNodeClick(node: AssetGraphNode) {
+    if (node.type === "metric") {
+      const code = node.id.replace(/^metric:/, "");
+      navigate(`/detail/${encodeURIComponent(code)}`);
+    } else if (node.type === "table") {
+      const name = node.id.replace(/^table:/, "");
+      navigate(`/catalog?kw=${encodeURIComponent(name)}`);
+    }
+  }
+
+  return (
+    <div>
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
+          刷新
+        </Button>
+        <span className="muted" style={{ fontSize: 13 }}>
+          {data ? `共 ${data.nodes.length} 节点 · ${data.edges.length} 条血缘边` : "加载血缘图谱…"}
+          ，点击节点：指标 → 指标详情，表/视图 → 采集目录定位
+        </span>
+      </Space>
+      {data && data.nodes.length > 0 ? (
+        <AssetGraph
+          nodes={data.nodes}
+          edges={data.edges}
+          height={560}
+          onNodeClick={handleNodeClick}
+        />
+      ) : (
+        !loading && (
+          <Empty description="暂无血缘图谱数据。可在「SQL 血缘解析」粘贴 SQL 入库，或运行 scripts/import_dp_lineage.py 导入。" />
+        )
+      )}
+    </div>
+  );
+}
 
 function ImpactTab() {
   const [node, setNode] = useState("");
@@ -408,6 +475,7 @@ function ChannelsTab() {
 
 export function LineageView() {
   const tabItems = [
+    { key: "graph", label: <span><ShareAltOutlined /> 血缘图谱</span>, children: <GraphTab /> },
     { key: "impact", label: <span><ApartmentOutlined /> 血缘查询 / 影响分析</span>, children: <ImpactTab /> },
     { key: "parse", label: <span><CodeOutlined /> SQL 血缘解析</span>, children: <ParseTab /> },
     { key: "channels", label: <span><DatabaseOutlined /> 采集通道</span>, children: <ChannelsTab /> },
@@ -419,7 +487,7 @@ export function LineageView() {
         <div>
           <div className="page-kicker">Lineage / Impact</div>
           <h2>血缘视图</h2>
-          <p>上下游血缘查询、what-if 变更影响预览、SQL 血缘解析入库、采集通道增量运维。</p>
+          <p>血缘图谱总览、上下游血缘查询、what-if 变更影响预览、SQL 血缘解析入库、采集通道增量运维。</p>
         </div>
       </div>
       <Card styles={{ body: { paddingTop: 16 } }}>

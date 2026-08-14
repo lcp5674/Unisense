@@ -55,6 +55,7 @@ import {
   ImpactPreview,
   LineageChannel,
   LineageEdgePage,
+  LineageGraphData,
   LineageIngestRun,
   ListDatabasesResult,
   MetricCreateRequest,
@@ -682,6 +683,20 @@ export async function lineageEdges(params: {
     page_size: params.page_size,
   });
   return request<LineageEdgePage>(`${API_BASE}/lineage/edges?${qs}`);
+}
+
+// 血缘图谱（力导向图渲染数据，节点/边结构与资产地图图谱对齐）
+export async function lineageGraph(params?: {
+  domain?: string;
+  pii_only?: boolean;
+  limit?: number;
+}): Promise<LineageGraphData> {
+  const qs = pageQs({
+    domain: params?.domain,
+    pii_only: params?.pii_only === undefined ? undefined : String(params.pii_only),
+    limit: params?.limit,
+  });
+  return request<LineageGraphData>(`${API_BASE}/lineage/graph${qs ? `?${qs}` : ""}`);
 }
 
 export async function parseLineage(
