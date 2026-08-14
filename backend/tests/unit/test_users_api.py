@@ -151,7 +151,7 @@ async def test_create_user_success(admin_client: httpx.AsyncClient) -> None:
                 "display_name": "鲍勃",
                 "role": "viewer",
                 "domain": "finance",
-                "password": "secret123",
+                "password": "Secret123!",
             },
         )
     assert resp.status_code == 200
@@ -172,7 +172,7 @@ async def test_create_user_conflict(admin_client: httpx.AsyncClient) -> None:
                 "username": "bob",
                 "email": "bob@example.com",
                 "display_name": "鲍勃",
-                "password": "secret123",
+                "password": "Secret123!",
             },
         )
     assert resp.status_code == 409
@@ -197,7 +197,7 @@ async def test_create_user_invalid_domain_rejected(admin_client: httpx.AsyncClie
                 "display_name": "鲍勃",
                 "role": "viewer",
                 "domain": "ghost_domain",
-                "password": "secret123",
+                "password": "Secret123!",
             },
         )
     assert resp.status_code == 422
@@ -411,7 +411,7 @@ async def test_reset_password_success(admin_client: httpx.AsyncClient) -> None:
         "app.api.users.hash_password", return_value="hashed:new"
     ):
         resp = await admin_client.post(
-            "/api/v1/users/2/reset-password", json={"new_password": "newsecret123"}
+            "/api/v1/users/2/reset-password", json={"new_password": "Newsecret123!"}
         )
     assert resp.status_code == 200
     assert resp.json()["data"]["ok"] is True
@@ -422,6 +422,6 @@ async def test_reset_password_success(admin_client: httpx.AsyncClient) -> None:
 async def test_reset_password_not_found(admin_client: httpx.AsyncClient) -> None:
     with patch("app.api.users._get_user", return_value=None):
         resp = await admin_client.post(
-            "/api/v1/users/999/reset-password", json={"new_password": "newsecret123"}
+            "/api/v1/users/999/reset-password", json={"new_password": "Newsecret123!"}
         )
     assert resp.status_code == 404

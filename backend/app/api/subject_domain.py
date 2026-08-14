@@ -10,11 +10,12 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
+from app.core.audit import client_ip, write_audit
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session as get_session
@@ -97,12 +98,23 @@ async def get_domain(
 async def create_domain(
     data: SubjectDomainCreate,
     user: CurrentUser,
+    request: Request,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[SubjectDomainResponse]:
     try:
         # P2-3: 域管理员以认证身份为准（PLAT-2），不信任客户端传入的 owner_id
         domain = await svc.create_domain(data, owner_id=user.id)
+        await write_audit(
+            svc._db,
+            actor_id=user.id,
+            action="subject_domain.create",
+            entity_type="subject_domain",
+            entity_id=domain.code,
+            detail={"code": domain.code, "name": domain.name, "owner_id": domain.owner_id},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
         await svc._db.commit()
         result = await svc.get_domain_with_count(domain.code)
         return ok(data=result, trace_id=trace_id)
@@ -126,11 +138,23 @@ async def create_domain(
 async def update_domain(
     code: str,
     data: SubjectDomainUpdate,
+    user: CurrentUser,
+    request: Request,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[SubjectDomainResponse]:
     try:
         domain = await svc.update_domain(code, data)
+        await write_audit(
+            svc._db,
+            actor_id=user.id,
+            action="subject_domain.update",
+            entity_type="subject_domain",
+            entity_id=code,
+            detail={"code": code, "name": domain.name},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
         await svc._db.commit()
         result = await svc.get_domain_with_count(domain.code)
         return ok(data=result, trace_id=trace_id)
@@ -151,6 +175,8 @@ async def update_domain(
 async def toggle_domain_status(
     code: str,
     action: str,  # "activate" or "deactivate"
+    user: CurrentUser,
+    request: Request,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[SubjectDomainResponse]:
@@ -159,6 +185,16 @@ async def toggle_domain_status(
             domain = await svc.activate_domain(code)
         else:
             domain = await svc.deactivate_domain(code)
+        await write_audit(
+            svc._db,
+            actor_id=user.id,
+            action="subject_domain.status",
+            entity_type="subject_domain",
+            entity_id=code,
+            detail={"code": code, "action": action, "status": domain.status},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
         await svc._db.commit()
         result = await svc.get_domain_with_count(domain.code)
         return ok(data=result, trace_id=trace_id)
@@ -175,11 +211,23 @@ async def toggle_domain_status(
 )
 async def delete_domain(
     code: str,
+    user: CurrentUser,
+    request: Request,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, str]]:
     try:
         await svc.delete_domain(code)
+        await write_audit(
+            svc._db,
+            actor_id=user.id,
+            action="subject_domain.delete",
+            entity_type="subject_domain",
+            entity_id=code,
+            detail={"code": code},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
         await svc._db.commit()
         return ok(data={"detail": "deleted"}, trace_id=trace_id)
     except (NotFoundError, BusinessError) as exc:
@@ -211,11 +259,23 @@ async def get_domain_defaults(
 async def update_domain_defaults(
     code: str,
     data: SubjectDomainDefaultsUpdate,
+    user: CurrentUser,
+    request: Request,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, Any]]:
     try:
         domain = await svc.update_defaults(code, data)
+        await write_audit(
+            svc._db,
+            actor_id=user.id,
+            action="subject_domain.update_defaults",
+            entity_type="subject_domain",
+            entity_id=code,
+            detail={"code": code},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
         await svc._db.commit()
         return ok(data=domain.defaults_json or {}, trace_id=trace_id)
     except NotFoundError as exc:

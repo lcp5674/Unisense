@@ -5,14 +5,17 @@
 - GET    /users                       用户管理列表（含 email / 最后登录 / 创建时间）
 - POST   /users                       创建用户
 - POST   /users/batch-status          批量启用 / 禁用（207 语义：逐项标注失败，不影响其余）
+- POST   /users/me/password           自助改密（任意登录角色，校验旧密码 + 新密码复杂度）
 - PUT    /users/{user_id}             编辑用户（显示名 / 邮箱 / 角色 / 域）
 - PATCH  /users/{user_id}/status      启用 / 禁用
 - POST   /users/{user_id}/reset-password  重置密码
 
-鉴权：全部端点仅 ``platform_admin``（账号生命周期管理属平台级操作）。
+鉴权：除自助改密（任意登录用户）外，全部端点仅 ``platform_admin``（账号生命周期管理属平台级操作）。
 审计：全部写操作落 ``audit_log``（action=USER_CREATE/USER_UPDATE/USER_STATUS/USER_STATUS_BATCH/
-USER_RESET_PASSWORD）。
+USER_RESET_PASSWORD/USER_PASSWORD_CHANGE）。
 响应绝不暴露 ``password_hash``；错误码对齐 TD §5.4（CONFLICT / NOT_FOUND / VALIDATION_ERROR）。
+密码策略：创建/重置/自助改密统一校验复杂度（≥8 位且含大写/小写/数字/特殊字符至少 3 类，
+错误码 PASSWORD_WEAK）；管理员创建/重置后置 ``must_change_password=True`` 强制首登改密。
 """
 
 from __future__ import annotations
@@ -27,9 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import AuthError, ConflictError, NotFoundError, ValidationError
 from app.core.guard import guard_against_injection
-from app.core.security import hash_password
+from app.core.security import hash_password, verify_password
 from app.db.mysql import get_db_session
 from app.models.subject_domain import SubjectDomain
 from app.models.user import User
@@ -150,6 +153,13 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=128, description="新密码")
 
 
+class UserChangePasswordRequest(BaseModel):
+    """自助改密请求体（新密码复杂度由 _validate_password_complexity 校验）。"""
+
+    current_password: str = Field(..., min_length=1, description="当前密码")
+    new_password: str = Field(..., min_length=1, max_length=128, description="新密码")
+
+
 async def _get_user(db: AsyncSession, user_id: int) -> User | None:
     """按 ID 取用户（含软删记录，便于管理端查看/恢复）。"""
     res = await db.execute(select(User).where(User.id == user_id))
@@ -196,6 +206,36 @@ async def _assert_domain_active(db: AsyncSession, domain: str | None) -> None:
             f"所属域不存在或未启用: {domain}",
             error_code="USER_DOMAIN_INVALID",
             ctx={"domain": domain},
+        )
+
+
+def _password_category_count(password: str) -> int:
+    """统计密码命中的字符类别数（大写/小写/数字/特殊字符，每类至多 1 分）。"""
+    return sum(
+        (
+            any(c.isupper() for c in password),
+            any(c.islower() for c in password),
+            any(c.isdigit() for c in password),
+            any(not c.isalnum() for c in password),
+        )
+    )
+
+
+def _validate_password_complexity(password: str) -> None:
+    """校验密码复杂度：长度 ≥8 且含大写/小写/数字/特殊字符中至少 3 类。
+
+    Args:
+        password: 明文密码。
+
+    Raises:
+        ValidationError: 密码不满足复杂度要求（error_code=PASSWORD_WEAK）。
+    """
+    if len(password) < 8:
+        raise ValidationError("密码长度至少 8 位", error_code="PASSWORD_WEAK")
+    if _password_category_count(password) < 3:
+        raise ValidationError(
+            "密码须至少包含大写字母/小写字母/数字/特殊字符中的 3 类",
+            error_code="PASSWORD_WEAK",
         )
 
 
@@ -268,8 +308,10 @@ async def create_user(
 ) -> ApiResponse[UserAdmin]:
     """创建用户（platform_admin 专属，全部落审计）。
 
-    校验用户名/邮箱唯一，初始密码经 bcrypt 哈希落库。
+    校验用户名/邮箱唯一，初始密码经 bcrypt 哈希落库；管理员设置的初始密码
+    强制首登改密（must_change_password=True）。
     """
+    _validate_password_complexity(payload.password)
     await _assert_unique(db, username=payload.username, email=payload.email)
     await _assert_domain_active(db, payload.domain)
     row = User(
@@ -280,6 +322,7 @@ async def create_user(
         role=payload.role,
         domain=payload.domain or None,
         status="active",
+        must_change_password=True,
         password_hash=await hash_password(payload.password),
     )
     db.add(row)
@@ -366,6 +409,42 @@ async def batch_set_user_status(
     )
     await db.commit()
     return ok(UserBatchStatusResult(succeeded=succeeded, failed=failed), trace_id=trace_id)
+
+
+@router.post("/me/password", dependencies=[Depends(guard_against_injection)])
+async def change_my_password(
+    payload: UserChangePasswordRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """自助修改当前登录用户密码（任意登录角色，不校验 platform_admin）。
+
+    校验旧密码正确性（错误码 PASSWORD_INCORRECT）+ 新密码复杂度；
+    成功后清除首登强制改密标记（must_change_password=False）并落审计。
+    注意：本静态路径注册在 ``/{user_id}`` 系列之前（FastAPI 按注册顺序匹配）。
+    """
+    _validate_password_complexity(payload.new_password)
+    if not await verify_password(payload.current_password, user.password_hash):
+        raise AuthError("当前密码错误", error_code="PASSWORD_INCORRECT")
+    if payload.new_password == payload.current_password:
+        raise ValidationError("新密码不能与当前密码相同", error_code="PASSWORD_SAME")
+
+    user.password_hash = await hash_password(payload.new_password)
+    user.must_change_password = False
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="USER_PASSWORD_CHANGE",
+        entity_type="user",
+        entity_id=str(user.id),
+        detail={"username": user.username},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok({"user_id": user.id, "ok": True}, trace_id=trace_id)
 
 
 @router.put("/{user_id}", dependencies=_ADMIN_DEPS)
@@ -459,12 +538,14 @@ async def reset_password(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[dict[str, Any]]:
-    """重置用户密码（bcrypt 哈希落库，不返回明文）。"""
+    """重置用户密码（bcrypt 哈希落库，不返回明文；重置后强制首登改密）。"""
     row = await _get_user(db, user_id)
     if row is None:
         raise NotFoundError("用户不存在", error_code="USER_NOT_FOUND")
 
+    _validate_password_complexity(payload.new_password)
     row.password_hash = await hash_password(payload.new_password)
+    row.must_change_password = True
     await write_audit(
         db,
         actor_id=user.id,

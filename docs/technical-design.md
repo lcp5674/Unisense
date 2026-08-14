@@ -358,7 +358,7 @@ POST   /drift-scans/{id}/confirm     # Owner 处置：CONFIRMED_INTENT(走4.5变
 
 ### 3.5 权限与合规（governance）
 ```
-POST   /roles                        # 角色（platform_admin/domain_admin/metric_owner/reviewer/compliance_officer/viewer，对齐 PRD 4.9.2）
+POST   /roles                        # 角色（platform_admin/domain_admin/metric_owner/reviewer/compliance_officer/analyst/viewer，对齐 PRD 4.9.2 + 存量 analyst）
 POST   /grants                       # 域授权 + 指标白名单
 POST   /grants/batch                 # 批量授权/回收（R3-07：dry-run+逐条审计+失败回滚）
 POST   /grants/batch/dry-run         # 批量操作影响预览（受影响用户数/指标数）
@@ -372,11 +372,12 @@ GET    /me/permissions               # 当前用户权限快照
 GET    /users?role=&status=&keyword=&page=&page_size=   # 用户管理列表（含 email/最后登录/创建时间；platform_admin 专属，响应不暴露 password_hash）
 POST   /users                        # 创建用户（username/email/display_name/role/domain/初始密码；用户名邮箱唯一，密码 bcrypt 落库；domain 须为存在且 active 的主题域 code，否则 USER_DOMAIN_INVALID=422）
 POST   /users/batch-status           # 批量启用/禁用（user_ids 1~200；207 语义逐项标注失败原因、不影响其余；禁止禁用当前登录账号；单条汇总审计 USER_STATUS_BATCH）
+POST   /users/me/password            # 自助改密（任意登录角色；校验当前密码 + 新密码复杂度；成功清除 must_change_password 标记；审计 USER_PASSWORD_CHANGE）
 PUT    /users/{id}                   # 编辑用户（显示名/邮箱/角色/域全量覆盖；禁止自降级 platform_admin；domain 同创建，须为 active 主题域 code）
 PATCH  /users/{id}/status            # 启用/禁用（status=active|disabled；禁止禁用当前登录账号）
-POST   /users/{id}/reset-password    # 重置密码（新密码 bcrypt 哈希落库，不返回明文）
+POST   /users/{id}/reset-password    # 重置密码（新密码 bcrypt 哈希落库，不返回明文；重置后置 must_change_password=True 强制首登改密）
 ```
-> 全部写操作落 `audit_log`（USER_CREATE/USER_UPDATE/USER_STATUS/USER_STATUS_BATCH/USER_RESET_PASSWORD）；错误码对齐 §5.4（USER_EXISTS=409、USER_NOT_FOUND=404、USER_DOMAIN_INVALID / SELF_DEMOTE_FORBIDDEN / SELF_DISABLE_FORBIDDEN=422）。只读用户摘要（Owner 责任链渲染用）沿用 `GET /auth/users`（任意登录角色可读，不暴露 email）。
+> 全部写操作落 `audit_log`（USER_CREATE/USER_UPDATE/USER_STATUS/USER_STATUS_BATCH/USER_RESET_PASSWORD/USER_PASSWORD_CHANGE）；错误码对齐 §5.4（USER_EXISTS=409、USER_NOT_FOUND=404、USER_DOMAIN_INVALID / SELF_DEMOTE_FORBIDDEN / SELF_DISABLE_FORBIDDEN=422、PASSWORD_WEAK / PASSWORD_SAME=422、PASSWORD_INCORRECT=401）。密码策略：创建/重置/自助改密统一校验复杂度（≥8 位且含大写/小写/数字/特殊字符至少 3 类）；管理员创建/重置后置 `must_change_password=True`，登录响应 `must_change_password` 字段驱动前端强制改密弹窗（不可关闭）。只读用户摘要（Owner 责任链渲染用）沿用 `GET /auth/users`（任意登录角色可读，不暴露 email）。
 
 ### 3.6 消费（consume · Semantic API）
 
@@ -1455,6 +1456,9 @@ CLOSED ──错误率超阈──▶ OPEN ──冷却期满──▶ HALF_OPEN
 401  AUTH_TOKEN_MISSING        请求未携带 Bearer Token
 401  AUTH_TOKEN_EXPIRED        Token 已过期（用 refresh_token/client_secret 重新签发）
 401  AUTH_TOKEN_INVALID        Token 签名/格式错误
+401  AUTH_TOKEN_REVOKED        Token 已撤销（登出后 jti 入黑名单，剩余有效期内拒绝）
+401  AUTH_INVALID_CREDENTIALS  用户名/密码错误（不区分用户不存在，防枚举）
+401  PASSWORD_INCORRECT        自助改密时当前密码校验失败（§3.5a）
 403  FORBIDDEN                 越权（域/白名单不匹配，必入审计）
 403  FORBIDDEN_DOMAIN          无权访问目标域（申请 domain_grant）
 403  FORBIDDEN_METRIC          无权访问目标指标（申请指标权限）
@@ -1483,10 +1487,13 @@ CLOSED ──错误率超阈──▶ OPEN ──冷却期满──▶ HALF_OPEN
 422  QUOTA_EXCEEDED_EXPORT     导出行数超限
 422  BATCH_QUOTA_EXCEEDED      批量操作超上限（20个/批次）
 422  USER_DOMAIN_INVALID       用户所属域非存在且 active 的主题域 code（创建/编辑用户，§3.5a）
+422  PASSWORD_WEAK              密码不满足复杂度（≥8 位且含大小写/数字/特殊字符至少 3 类，创建/重置/自助改密）
+422  PASSWORD_SAME              新密码与当前密码相同（自助改密）
 207  BATCH_PARTIAL_FAILURE     批量操作部分成功部分失败（检查响应体每条结果）
 
 ────────── 限流与降级 ──────────
 429  RATE_LIMITED              调用速率超 QPS/RPM/TPM 配额（带 retry_after）
+429  AUTH_RATE_LIMITED          登录失败次数超限（username+IP 15 分钟窗口，防撞库）
 429  FREE_QUOTA_EXCEEDED       月度免费额度已用尽（响应含 budget_reset_at）
 429  BUDGET_EXCEEDED           月度预算已超 100% 自动限流（响应含 budget_reset_at）
 429  LLM_QUOTA_EXCEEDED        LLM 调用配额耗尽+队列满，按 tier 优先级排队或稍后重试
@@ -2648,11 +2655,12 @@ governance --分级结果--> assetmap(热力) + classification(落库)
 
 **关键算法/容错**：
 - 越权访问 → `403 FORBIDDEN` + 审计（observability）。
-- **行级权限一期骨架（最低交付标准，③）**：维度值标记敏感度（`dimension.sensitivity` 字段 PUBLIC/INTERNAL/RESTRICTED），`grants.row_level=true` 时 consume 返回维度值但标注 `restricted: true`（提示消费方该值受管控）；一期不强制过滤（不阻断查询），仅标记+审计。二期深化为 RLS 策略引擎：按 `grant.row_expression` 自动注入 WHERE 子句，PII 维度对无权限消费方自动脱敏（mask/nullify）。
+- **行级权限一期骨架（最低交付标准，③）**：维度值标记敏感度（`dimension.sensitivity` 字段 PUBLIC/INTERNAL/RESTRICTED），`grants.row_level=true` 时 consume 返回维度值但标注 `restricted: true`（提示消费方该值受管控）；**内部用户查询路径（`POST /consume/metrics/{code}/query`）已落地基础安全兜底**——命中 restricted 授权时结果行按授权 `metric_whitelist` 二次过滤（`ConsumeService._filter_restricted_rows`，2026-08-15），不再"仅标记不阻断"。完整 RLS（维度值级过滤 + 自动脱敏）仍为二期：按 `grant.row_expression` 自动注入 WHERE 子句，PII 维度对无权限消费方自动脱敏（mask/nullify）。
 - 分级引擎降级见 §5.5，不影响注册/发布主链路。
 
 **实现偏差同步（2026-08-07，governance 模块落地）**：
 - **PDP 决策引擎**：本期以 `app/services/governance/policy.py` 中的**纯函数 `decide()`** 实现（角色-动作矩阵 `ROLE_ACTIONS` + 授权类型-动作矩阵 `GRANT_TYPE_ACTIONS` + 跨域 `find_active_grant` 判定 + PII 门禁 + 默认 Deny/fail-closed）。**未落地** TD§12.5 描述的 `policy` 表 + ABAC JSON 条件表达式求值 + Redis `pdp:decision:{hash}` 决策缓存（PRD 4.9.9）。即：策略以代码常量形式固化，未做可配置化与 60s TTL 缓存；后续若需热更新策略或缓解 PDP 性能瓶颈，再按 TD 补 `policy` 表与 Redis 缓存层。
+- **内部用户查询接入 PDP（2026-08-15）**：`POST /consume/metrics/{code}/query` 此前 internal_user 分支跳过一切鉴权（可对任意域任意指标执行真实查询）。现接入 `GovernanceService.check_internal_read_permission`（PDP 决策：platform_admin 直通 / 本域角色按 ROLE_ACTIONS / 跨域须命中 ACTIVE 未过期 grants，含 metric_whitelist / row_level），拒绝返回 `403 FORBIDDEN`（决策原因入 ctx + 审计）；restricted 授权命中时结果行按 metric_whitelist 过滤。接入方（API 客户端）路径不变（scope_domain + metric_whitelist + 限流闸门）。
 - **授权幂等**：因 `grants.metric_whitelist` 为 JSON 列无法建唯一索引（见 §4.1 注释），幂等由 `GovernanceService.grant()` 服务层保证（同 (user,role,domain,grant_type) 已生效授权做白名单合并/延期），而非 DB 唯一约束。
 - **TTL 回收**：`grants.status`（ACTIVE/EXPIRED）软回收替代物理删除，`expire_due_grants()` 定时将到期授权置 EXPIRED，`my_permissions()` 快照据此排除并另列 `expiring_soon`。
 - **增量范围**：本期实现 TD"最低交付标准"子集——RBAC 六角色、域授权 + 跨域只读引用（grants）、PII 复核门禁（COMPL-1）、分级重扫（COMPL-2，降级 UNKNOWN）、权限快照、临时授权 TTL。未实现：`dimension`/`dimension_mapping`/`metric_dimension` 维度映射维护、`reconciliation` 同源对账调度、`policy` 表与 RLS 自动脱敏（标注为后续迭代，矩阵见 §13 末尾）。

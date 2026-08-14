@@ -22,7 +22,8 @@ from app.models.user import User
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
-_READ_ROLES = ("platform_admin", "domain_admin", "compliance_officer", "viewer")
+#: 审计读权限：管理/合规角色（viewer 等只读角色不可见含 actor/detail/PII 标记的完整审计）。
+_READ_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 
 

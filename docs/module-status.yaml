@@ -179,7 +179,7 @@ modules:
       - tests/chaos/test_governance_chaos.py
       - tests/observability/test_governance_observability.py
       - tests/integration/test_governance_integration.py
-    note: "verified 达成（2026-08-08）：11/11 门禁全绿，含 perf_baseline(k6 @ MySQL 3307，P95=26ms/P99=48ms/错误率0%/1125 检查全绿)。released 仍待 runbook + 人工 ratify。"
+    note: "verified 达成（2026-08-08）：11/11 门禁全绿，含 perf_baseline(k6 @ MySQL 3307，P95=26ms/P99=48ms/错误率0%/1125 检查全绿)。released 仍待 runbook + 人工 ratify。PDP 内部查询接入（2026-08-15）：新增 GovernanceService.check_internal_read_permission——POST /consume/metrics/{code}/query 的 internal_user 分支此前跳过一切鉴权，现接入 PDP 决策（platform_admin 直通/本域角色/跨域须命中 ACTIVE 未过期 grants，含 metric_whitelist/row_level），拒绝 403 FORBIDDEN + 审计；restricted 授权命中时 consume 结果行按 metric_whitelist 过滤（_filter_restricted_rows）。行级权限一期从『仅标注』升级为『基础安全兜底过滤』，完整 RLS（维度值级过滤+脱敏）仍为二期（TD §12.5 同步）。"
     post_verify_review:
       standard: "DEV_GUIDE §6.3 (2026-08-07 新增约束：开发+验证完成后双视角漏洞审查)"
       performed_at: "2026-08-07"
@@ -216,7 +216,7 @@ modules:
       - frontend/src/api.ts
       - frontend/src/types.ts
       - frontend/src/__tests__/UserManagement.test.tsx
-    note: "用户管理补齐（2026-08-14）：新增 /api/v1/users 管理端点（platform_admin 专属 + 全程审计）——GET 列表（含 email/最后登录/创建时间，分页+角色/状态/关键词过滤，响应不暴露 password_hash）、POST 创建（用户名邮箱唯一校验 USER_EXISTS=409、密码 bcrypt 落库）、PUT 编辑（显示名/邮箱/角色/域全量覆盖，禁止自降级 SELF_DEMOTE_FORBIDDEN=422）、PATCH /{id}/status 启用禁用（禁止自禁用 SELF_DISABLE_FORBIDDEN=422）、POST /{id}/reset-password（bcrypt 哈希落库不返回明文）。前端新增 系统管理→用户管理 页（/users：列表/创建/编辑/启用禁用/重置密码，platform_admin 专属，非管理员只读视图）；权限治理授权表单与权限检查的用户 ID 输入改为用户选择器（listUsers 按用户名/显示名搜索）。只读用户摘要沿用 GET /auth/users（任意登录角色可读，不暴露 email）。验证：后端 12 项 API 测试全绿、ruff/mypy 0；前端 UserManagement 5 项 + 全量 89 全绿、tsc 0。所属域主题域化+随机密码增强（2026-08-14）：① 用户所属域由自由文本改为主题域下拉——创建/编辑弹窗 Select 复用 listDomainTree(active)+flattenDomains（与数据源页业务域同源），列表值在「主题域管理」页增删改即自动生效；② 后端 create_user/update_user 对 domain 做强校验（须为存在且 active 的主题域 code，否则 422 USER_DOMAIN_INVALID，错误码新增入 TD §5.4，防绕过 UI 注入任意域值）；③ 创建用户打开弹窗自动预填强随机密码（crypto.getRandomValues，≥8 位含大小写/数字/符号）+「重新生成」按钮，创建成功后一次性展示明文密码（可复制交付，不落日志、不回传）。验证：后端 14 项 API 测试全绿（新增 2 项非法域拒绝反向用例）、ruff 0、mypy users.py 0；前端 UserManagement 7 项全绿（新增主题域选择 + 自动预填密码 + 明文展示）、tsc 0。批量启用/停用（2026-08-14）：用户管理列表加 rowSelection 多选 + 工具栏「批量启用」「批量停用」（停用 Popconfirm 二次确认）；后端新增 POST /users/batch-status（user_ids 1~200、207 语义逐项标注失败不影响其余、禁止禁用当前登录账号、单条汇总审计 USER_STATUS_BATCH，TD §3.5a 同步）。验证：后端 test_users_api 19 项全绿（新增批量成功/部分失败/空列表/超上限 5 项）+ ruff 0 + mypy users.py 0；前端 UserManagement 10 项全绿（新增批量停用确认/批量启用部分失败/viewer 无批量 3 项）+ tsc 0。"
+    note: "用户管理补齐（2026-08-14）：新增 /api/v1/users 管理端点（platform_admin 专属 + 全程审计）——GET 列表（含 email/最后登录/创建时间，分页+角色/状态/关键词过滤，响应不暴露 password_hash）、POST 创建（用户名邮箱唯一校验 USER_EXISTS=409、密码 bcrypt 落库）、PUT 编辑（显示名/邮箱/角色/域全量覆盖，禁止自降级 SELF_DEMOTE_FORBIDDEN=422）、PATCH /{id}/status 启用禁用（禁止自禁用 SELF_DISABLE_FORBIDDEN=422）、POST /{id}/reset-password（bcrypt 哈希落库不返回明文）。前端新增 系统管理→用户管理 页（/users：列表/创建/编辑/启用禁用/重置密码，platform_admin 专属，非管理员只读视图）；权限治理授权表单与权限检查的用户 ID 输入改为用户选择器（listUsers 按用户名/显示名搜索）。只读用户摘要沿用 GET /auth/users（任意登录角色可读，不暴露 email）。验证：后端 12 项 API 测试全绿、ruff/mypy 0；前端 UserManagement 5 项 + 全量 89 全绿、tsc 0。所属域主题域化+随机密码增强（2026-08-14）：① 用户所属域由自由文本改为主题域下拉——创建/编辑弹窗 Select 复用 listDomainTree(active)+flattenDomains（与数据源页业务域同源），列表值在「主题域管理」页增删改即自动生效；② 后端 create_user/update_user 对 domain 做强校验（须为存在且 active 的主题域 code，否则 422 USER_DOMAIN_INVALID，错误码新增入 TD §5.4，防绕过 UI 注入任意域值）；③ 创建用户打开弹窗自动预填强随机密码（crypto.getRandomValues，≥8 位含大小写/数字/符号）+「重新生成」按钮，创建成功后一次性展示明文密码（可复制交付，不落日志、不回传）。验证：后端 14 项 API 测试全绿（新增 2 项非法域拒绝反向用例）、ruff 0、mypy users.py 0；前端 UserManagement 7 项全绿（新增主题域选择 + 自动预填密码 + 明文展示）、tsc 0。批量启用/停用（2026-08-14）：用户管理列表加 rowSelection 多选 + 工具栏「批量启用」「批量停用」（停用 Popconfirm 二次确认）；后端新增 POST /users/batch-status（user_ids 1~200、207 语义逐项标注失败不影响其余、禁止禁用当前登录账号、单条汇总审计 USER_STATUS_BATCH，TD §3.5a 同步）。验证：后端 test_users_api 19 项全绿（新增批量成功/部分失败/空列表/超上限 5 项）+ ruff 0 + mypy users.py 0；前端 UserManagement 10 项全绿（新增批量停用确认/批量启用部分失败/viewer 无批量 3 项）+ tsc 0。密码自助管理（2026-08-15）：新增 POST /users/me/password 自助改密（任意登录角色，校验当前密码 PASSWORD_INCORRECT=401 + 新密码复杂度 PASSWORD_WEAK/PASSWORD_SAME=422 + 新旧不同）；创建/重置统一校验密码复杂度（≥8 位含大小写/数字/特殊字符至少 3 类）；user 表新增 must_change_password 列（迁移 0044，管理员创建/重置后置 True），登录响应携带该字段，前端 Layout 首次登录强制改密弹窗（force 不可关闭，成功后清除）。验证：后端 test_users_api 通过 + ruff/mypy 0；前端 Layout/UserManagement 全绿 + tsc 0；错误码新增入 TD §5.4，§3.5a 同步。"
 
   consume:
     fr: [FR-12, FR-13]
@@ -562,6 +562,7 @@ p2_p3_enhancements:
       - id: SD-003
         desc: "前端主题域管理页(树组件+详情面板+CRUD弹窗)"
         files: ["frontend/src/pages/SubjectDomain.tsx"]
+    note: "写操作审计（2026-08-15）：create/update/status/delete/update_defaults 五个写端点全部补 write_audit（action=subject_domain.create/update/status/delete/update_defaults，含 actor/IP/trace_id），对齐治理全量审计定位。"
 
   system_dict:
     fr: [FR-005, FR-006, FR-007, FR-009, FR-014]
@@ -584,6 +585,7 @@ p2_p3_enhancements:
       - id: DICT-004
         desc: "初始化seed脚本(6域+10类字典项)"
         files: ["backend/scripts/seed_domains_dicts.py"]
+    note: "写操作审计（2026-08-15）：create/update/status/delete 四个写端点全部补 write_audit（action=DICT_CREATE/DICT_UPDATE/DICT_STATUS/DICT_DELETE，含 actor/IP/trace_id），对齐治理全量审计定位。"
 
   auto_fill:
     fr: [FR-010, FR-011, FR-016]

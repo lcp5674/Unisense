@@ -75,6 +75,23 @@ def _role_to_str(role: Any) -> str:
     return str(value)
 
 
+def _grant_to_dict(g: Grant) -> dict[str, Any]:
+    """将 Grant ORM 行转为 PDP ``Subject.grants`` 元组项。
+
+    ``policy.decide`` / ``policy._match_grant`` 消费该字典（status 须为 "ACTIVE" 字符串、
+    grant_type 为 READ/WRITE/READ_WRITE、expires_at 支持 datetime/None/ISO 字符串）。
+    """
+    return {
+        "id": g.id,
+        "domain": g.domain,
+        "metric_whitelist": [str(x) for x in (g.metric_whitelist or [])],
+        "grant_type": str(g.grant_type),
+        "status": str(g.status),
+        "row_level": g.row_level,
+        "expires_at": g.expires_at,
+    }
+
+
 #: 授权到期提醒窗口（天）——快照中标记 expiring_soon，驱动「一键续期」待办（OP-02）。
 EXPIRING_WINDOW_DAYS = 7
 
@@ -451,18 +468,7 @@ class GovernanceService(BaseService):
             user_id=user.id,
             role=_role_to_str(user.role),
             domain=user.domain,
-            grants=tuple(
-                {
-                    "id": g.id,
-                    "domain": g.domain,
-                    "metric_whitelist": [str(x) for x in (g.metric_whitelist or [])],
-                    "grant_type": str(g.grant_type),
-                    "status": str(g.status),
-                    "row_level": g.row_level,
-                    "expires_at": g.expires_at,
-                }
-                for g in grants
-            ),
+            grants=tuple(_grant_to_dict(g) for g in grants),
         )
         resource = policy.Resource(domain=req.domain, metric_code=req.metric_code)
         if req.metric_code:
@@ -539,6 +545,51 @@ class GovernanceService(BaseService):
             grants=(),
         )
         return policy.decide(subject, action, resource)
+
+    async def check_internal_read_permission(
+        self,
+        user: User,
+        metric_code: str,
+    ) -> tuple[policy.Decision, dict[str, Any] | None]:
+        """PDP 决策入口——内部登录用户只读查询（consume internal 路径，TD §12.5）。
+
+        与 ``check_metric_permission``（grants=()，语义/资产管理场景）不同：
+        本方法加载该用户的跨域授权（``active_grants_for_user``）再构建 Subject，
+        使 metric_whitelist / domain / row_level 授权在内部查询路径真正生效。
+
+        Returns:
+            (Decision, 命中的授权字典)。``restricted`` 授权命中时返回对应 grant
+            （供调用方按 metric_whitelist 做行级过滤），其余情况返回 ``None``。
+
+        Raises:
+            NotFoundError: 指标不存在。
+        """
+        metric = await self._repo.get_metric_by_code(metric_code)
+        if metric is None:
+            raise NotFoundError("指标不存在", ctx={"metric_code": metric_code})
+        grants = await self._repo.active_grants_for_user(user.id)
+        subject = policy.Subject(
+            user_id=user.id,
+            role=_role_to_str(user.role),
+            domain=user.domain,
+            grants=tuple(_grant_to_dict(g) for g in grants),
+        )
+        resource = policy.Resource(
+            domain=metric.domain,
+            metric_code=metric.metric_code,
+            sensitivity=(
+                SensitivityLevel.PII.value if metric.pii_flag else SensitivityLevel.INTERNAL.value
+            ),
+            compliance_reviewed=bool(metric.compliance_reviewed),
+            owner_id=metric.owner_id,
+        )
+        decision = policy.decide(subject, "read", resource)
+        matched = (
+            policy._match_grant(subject.grants, "read", resource)
+            if decision.allow and decision.restricted
+            else None
+        )
+        return decision, matched
 
     # ------------------------------------------------------------ PII review
 

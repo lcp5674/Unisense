@@ -41,6 +41,7 @@ from app.services.consume.schemas import (
     QueryResponse,
     SnapshotResponse,
 )
+from app.services.governance.service import GovernanceService  # noqa: F401 供测试 patch 定位
 
 # 限流器在 lifespan 中通过 init_rate_limiter 动态初始化（Redis/InMemory 热切换）；
 # 运行期统经 get_rate_limiter() 查阅，避免在 import 期冻结失效的快照（C6）。
@@ -296,7 +297,9 @@ class ConsumeService(BaseService):
             req: 查询请求。
             client: 接入方（internal_user 为空时走接入方鉴权 + 限流闸门）。
             internal_user: 内部登录用户（资产地图/指标详情「查询最新数据」用）。
-                提供时跳过接入方白名单/域校验，但仍保留指标状态与 PII 合规复核闸门。
+                提供时接入 PDP 数据权限决策（platform_admin 直通 / 本域角色 /
+                跨域 ACTIVE 未过期 grants，含 metric_whitelist / row_level），
+                并保留指标状态与 PII 合规复核闸门（COMPL-1）。
 
         Returns:
             QueryResponse（含真实查询行）。成功后自动保存 WORM 快照（写入失败不阻塞响应）。
@@ -311,23 +314,40 @@ class ConsumeService(BaseService):
                 else ErrorCode.FORBIDDEN_METRIC
             )
             raise BusinessError(f"指标状态 {metric.status} 不可消费", error_code=code)
+        row_grant: dict[str, Any] | None = None
         if internal_user is None:
             if client is None:
                 raise BusinessError("缺少消费凭证", error_code=ErrorCode.AUTH_APIKEY_MISSING)
             self._assert_authorized(client, metric)
         else:
-            # 内部用户：跳过接入方白名单/域校验，但 PII 合规复核闸门（COMPL-1）保留
+            # PII 合规复核闸门（COMPL-1）保留
             if self.is_pii(metric) and not metric.compliance_reviewed:
                 raise BusinessError(
                     "PII 指标未通过合规复核，禁止消费",
                     error_code=ErrorCode.FORBIDDEN_PII,
                 )
+            # PDP 数据权限闸门（P0 修复）：内部用户此前跳过一切鉴权，可对任意域任意
+            # 指标执行真实查询。现接入 PDP：platform_admin 直通 / 本域角色按
+            # ROLE_ACTIONS / 跨域须命中 ACTIVE 未过期 grants（含 metric_whitelist）。
+            decision, matched_grant = await GovernanceService(
+                self._db
+            ).check_internal_read_permission(internal_user, req.metric_code)
+            if not decision.allow:
+                raise BusinessError(
+                    decision.reason or "无权限查询该指标",
+                    error_code=decision.error_code or ErrorCode.FORBIDDEN,
+                    ctx={"metric_code": req.metric_code, "actor_id": internal_user.id},
+                )
+            if decision.restricted and matched_grant is not None:
+                row_grant = matched_grant
 
         # 构建执行 SQL（真实物理口径，而非占位查询）
         sql, params = self._build_query_sql(req, metric)
 
         # 引擎选择：OLAP 优先，失败/未配置时降级 MySQL 只读执行器
         result, engine_used = await self._execute_with_fallback(req, sql, params)
+        if row_grant is not None:
+            result = self._filter_restricted_rows(result, row_grant)
         plan = {
             "metric_code": req.metric_code,
             "dimensions": [d.model_dump() for d in req.dimensions],
@@ -392,6 +412,27 @@ class ConsumeService(BaseService):
             error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,
             ctx={"retry_after": 30, "accept_stale": req.accept_stale},
         )
+
+    @staticmethod
+    def _filter_restricted_rows(result: Any, grant: dict[str, Any]) -> Any:
+        """行级授权安全兜底：restricted 授权命中时仅保留白名单内指标的行。
+
+        查询 SQL 已按 ``metric_code = :metric_code`` 收敛到单指标（该码命中白名单
+        由 PDP ``_match_grant`` 保证），此处对结果行做二次防御性过滤：行内含
+        ``metric_code`` 字段时须在白名单内，否则剔除；行内无该字段的按查询约束
+        视为白名单内放行。完整 RLS（维度值级过滤 + 脱敏）为 TD §12.5 二期范围。
+        """
+        whitelist = {str(x) for x in (grant.get("metric_whitelist") or [])}
+        if not whitelist:
+            return result
+        filtered = [
+            row
+            for row in result.rows
+            if "metric_code" not in row or str(row.get("metric_code")) in whitelist
+        ]
+        result.rows = filtered
+        result.total = len(filtered)
+        return result
 
     async def _maybe_save_snapshot(
         self,

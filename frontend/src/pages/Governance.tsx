@@ -12,10 +12,25 @@ import {
   classificationRescan,
   requestErasure,
   listUsers,
+  listDomainTree,
   UnisenseApiError,
 } from "../api";
-import type { GrantResponse, PermissionSnapshot, UserBrief } from "../types";
+import type { GrantResponse, PermissionSnapshot, SubjectDomainTreeNode, UserBrief } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+
+// 主题域树 → 扁平化下拉选项（保留层级缩进，与用户管理/数据源页「业务域」下拉同款实现）
+function flattenDomains(
+  nodes: SubjectDomainTreeNode[],
+  depth = 0,
+  out: Array<{ value: string; label: string }> = [],
+): Array<{ value: string; label: string }> {
+  for (const n of nodes) {
+    const indent = depth > 0 ? `${"　".repeat(depth)}` : "";
+    out.push({ value: n.code, label: `${indent}${n.name}（${n.code}）` });
+    if (n.children?.length) flattenDomains(n.children, depth + 1, out);
+  }
+  return out;
+}
 
 const GRANT_TYPE_LABEL: Record<string, string> = {
   READ: "只读",
@@ -106,6 +121,7 @@ function GrantsTab() {
   const [pageSize, setPageSize] = useState(20);
   const [status, setStatus] = useState("");
   const [users, setUsers] = useState<UserBrief[]>([]);
+  const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
@@ -114,6 +130,9 @@ function GrantsTab() {
     listUsers()
       .then(setUsers)
       .catch(() => setUsers([]));
+    listDomainTree("active")
+      .then((tree) => setDomainOptions(flattenDomains(tree)))
+      .catch(() => setDomainOptions([]));
   }, []);
 
   async function load() {
@@ -236,8 +255,14 @@ function GrantsTab() {
               <Select style={{ width: 160 }} options={[{ value: false, label: "否" }, { value: true, label: "是" }]} />
             </Form.Item>
           </Space>
-          <Form.Item name="domain" label="授权域">
-            <Input placeholder="如 finance（留空为全部）" />
+          <Form.Item name="domain" label="授权域（留空为全部）">
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择主题域"
+              options={domainOptions}
+            />
           </Form.Item>
           <Form.Item name="metric_whitelist" label="指标白名单（逗号分隔）">
             <Input className="mono" />
@@ -268,7 +293,7 @@ function RolesTab() {
 
   return (
     <div>
-      <Alert type="info" showIcon style={{ marginBottom: 12 }} message="角色为内置枚举（platform_admin / domain_admin / metric_owner / reviewer / compliance_officer / viewer），创建角色用于授予绑定。" />
+      <Alert type="info" showIcon style={{ marginBottom: 12 }} message="角色为内置枚举（platform_admin / domain_admin / metric_owner / reviewer / compliance_officer / analyst / viewer），创建角色用于授予绑定。" />
       <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>创建角色</Button>
       <Modal title="创建角色" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
@@ -280,6 +305,7 @@ function RolesTab() {
                 { value: "metric_owner", label: "metric_owner 指标负责人" },
                 { value: "reviewer", label: "reviewer 评审员" },
                 { value: "compliance_officer", label: "compliance_officer 合规官" },
+                { value: "analyst", label: "analyst 分析师（存量兼容）" },
                 { value: "viewer", label: "viewer 只读" },
               ]}
             />

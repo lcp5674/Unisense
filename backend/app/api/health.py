@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from starlette.responses import Response
 
-from app.api.deps import DBSession, RedisClient
+from app.api.deps import DBSession, RedisClient, require_roles
 from app.core.degradation import read_dependency_health
 from app.core.degradation_registry import get_degradation_registry
 from app.core.es_client import get_es_client
@@ -106,7 +106,11 @@ async def ready(
     }
 
 
-@router.get("/health/degraded", summary="降级面板（统一降级状态）")
+@router.get(
+    "/health/degraded",
+    summary="降级面板（统一降级状态）",
+    dependencies=[Depends(require_roles("platform_admin", "domain_admin"))],
+)
 async def degraded_overview() -> dict[str, object]:
     """返回统一降级面板（OPS-05/TD §4.13）：当前活跃降级组件与状态摘要。
 
@@ -116,7 +120,11 @@ async def degraded_overview() -> dict[str, object]:
     return registry.get_status_summary()
 
 
-@router.get("/dependencies/health", summary="依赖实时健康态（运营看板）")
+@router.get(
+    "/dependencies/health",
+    summary="依赖实时健康态（运营看板）",
+    dependencies=[Depends(require_roles("platform_admin", "domain_admin"))],
+)
 async def dependencies_health() -> dict[str, object]:
     """返回各依赖实时健康态快照（dependency_health 表），供运营看板实时查询（TD §4.13）。
 
@@ -126,7 +134,12 @@ async def dependencies_health() -> dict[str, object]:
     return {"count": len(items), "items": items}
 
 
-@router.get("/metrics", summary="Prometheus 指标", include_in_schema=True)
+@router.get(
+    "/metrics",
+    summary="Prometheus 指标",
+    include_in_schema=True,
+    dependencies=[Depends(require_roles("platform_admin", "domain_admin"))],
+)
 async def metrics() -> Response:
-    """Prometheus exposition 格式的 RED 指标端点（无需鉴权）。"""
+    """Prometheus exposition 格式的 RED 指标端点（仅平台管理员/域管理员可见）。"""
     return render_metrics()

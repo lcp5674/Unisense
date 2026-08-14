@@ -353,10 +353,9 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     } else if (res.status === 401) {
       // 401：刷新失败或重放仍 401 → 会话彻底失效，清空 access + refresh
       clearAuthTokens();
-    } else {
-      // 403：权限拒绝，与旧行为一致仅清 access token
-      clearToken();
     }
+    // 403：已登录但无权限（非令牌过期），保留登录态（access + refresh），
+    // 交由上层路由守卫/页面按角色处理，避免「清 access 后刷新仍 403」的割裂中间态。
   }
 
   // 尝试解析统一信封；非 2xx 抛出 UnisenseApiError
@@ -416,6 +415,22 @@ export async function apiLogin(username: string, password: string): Promise<stri
 
 export async function fetchCurrentUser(): Promise<CurrentUser> {
   return request<CurrentUser>(`${API_BASE}/auth/me`);
+}
+
+/** 登出：调用后端撤销当前 access token（JWT jti 入黑名单），best-effort。 */
+export async function apiLogout(): Promise<void> {
+  await request<void>(`${API_BASE}/auth/logout`, { method: "POST" });
+}
+
+/** 自助修改密码（POST /users/me/password，登录用户改自己的密码）。 */
+export async function changePassword(body: {
+  current_password: string;
+  new_password: string;
+}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`${API_BASE}/users/me/password`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 // ---- 用户偏好（按用户持久化，如侧边栏折叠态）----

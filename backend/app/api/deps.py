@@ -60,6 +60,7 @@ async def get_current_user(
     import jwt
 
     from app.core.config import settings
+    from app.core.security import is_token_blacklisted
 
     if credentials is None:
         raise AuthError("请求未携带 Bearer Token", error_code="AUTH_TOKEN_MISSING")
@@ -78,6 +79,11 @@ async def get_current_user(
         raise AuthError("Token 已过期", error_code="AUTH_TOKEN_EXPIRED") from None
     except jwt.InvalidTokenError:
         raise AuthError("Token 无效", error_code="AUTH_TOKEN_INVALID") from None
+
+    # 登出撤销检查：jti 已进黑名单的 token 即便未过期也拒绝（P0）。
+    jti = str(payload.get("jti", ""))
+    if jti and await is_token_blacklisted(jti):
+        raise AuthError("Token 已撤销，请重新登录", error_code="AUTH_TOKEN_REVOKED")
 
     result = await db.execute(select(User).where(User.id == user_id, User.status == "active"))
     user = result.scalar_one_or_none()

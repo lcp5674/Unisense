@@ -3,6 +3,7 @@
 对齐 spec FR-005~FR-007, FR-014, plan.md 字典管理 API。
 RBAC: platform_admin 可管理字典；ALL_ROLES 可查询。
 统一响应信封：{code, message, data, trace_id}。
+审计：全部写操作落 audit_log（action=DICT_CREATE/DICT_UPDATE/DICT_STATUS/DICT_DELETE）。
 """
 
 from __future__ import annotations
@@ -10,11 +11,12 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ALL_ROLES, require_roles
+from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
+from app.core.audit import client_ip, write_audit
 from app.core.exceptions import BusinessError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session as get_session
@@ -91,12 +93,24 @@ async def list_all_dict_items(
 async def create_dict_item(
     dict_type: str,
     data: DictItemCreate,
+    user: CurrentUser,
+    request: Request,
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[DictItemResponse]:
     try:
         item = await svc.create_item(dict_type, data)
         ref_count = await svc.get_ref_count(dict_type, item.code)
+        await write_audit(
+            svc._db,
+            actor_id=user.id,
+            action="DICT_CREATE",
+            entity_type="dict_item",
+            entity_id=f"{dict_type}:{item.code}",
+            detail={"dict_type": dict_type, "code": item.code, "label": item.label},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
         await svc._db.commit()
         return ok(data=_item_response(item, ref_count), trace_id=trace_id)
     except BusinessError as exc:
@@ -114,12 +128,24 @@ async def update_dict_item(
     dict_type: str,
     code: str,
     data: DictItemUpdate,
+    user: CurrentUser,
+    request: Request,
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[DictItemResponse]:
     try:
         item = await svc.update_item(dict_type, code, data)
         ref_count = await svc.get_ref_count(dict_type, code)
+        await write_audit(
+            svc._db,
+            actor_id=user.id,
+            action="DICT_UPDATE",
+            entity_type="dict_item",
+            entity_id=f"{dict_type}:{code}",
+            detail={"dict_type": dict_type, "code": code, "label": item.label},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
         await svc._db.commit()
         return ok(data=_item_response(item, ref_count), trace_id=trace_id)
     except NotFoundError as exc:
@@ -137,6 +163,8 @@ async def toggle_dict_item_status(
     dict_type: str,
     code: str,
     action: str,  # "activate" or "deactivate"
+    user: CurrentUser,
+    request: Request,
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[DictItemResponse]:
@@ -146,6 +174,16 @@ async def toggle_dict_item_status(
         else:
             item = await svc.deactivate_item(dict_type, code)
         ref_count = await svc.get_ref_count(dict_type, code)
+        await write_audit(
+            svc._db,
+            actor_id=user.id,
+            action="DICT_STATUS",
+            entity_type="dict_item",
+            entity_id=f"{dict_type}:{code}",
+            detail={"dict_type": dict_type, "code": code, "action": action, "status": item.status},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
         await svc._db.commit()
         return ok(data=_item_response(item, ref_count), trace_id=trace_id)
     except NotFoundError as exc:
@@ -162,11 +200,23 @@ async def toggle_dict_item_status(
 async def delete_dict_item(
     dict_type: str,
     code: str,
+    user: CurrentUser,
+    request: Request,
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, str]]:
     try:
         await svc.delete_item(dict_type, code)
+        await write_audit(
+            svc._db,
+            actor_id=user.id,
+            action="DICT_DELETE",
+            entity_type="dict_item",
+            entity_id=f"{dict_type}:{code}",
+            detail={"dict_type": dict_type, "code": code},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
         await svc._db.commit()
         return ok(data={"detail": "deleted"}, trace_id=trace_id)
     except (NotFoundError, BusinessError) as exc:

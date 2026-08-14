@@ -88,15 +88,30 @@ async def test_ready_redis_none_skips(client: httpx.AsyncClient) -> None:
 
 
 async def test_metrics_endpoint(client: httpx.AsyncClient) -> None:
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin"
+    )
+    try:
+        resp = await client.get("/metrics")
+        assert resp.status_code == 200
+        assert "http_requests_total" in resp.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_metrics_endpoint_requires_auth(client: httpx.AsyncClient) -> None:
+    """运营端点（/metrics）需鉴权：匿名访问应 401（P0 缺口修复）。"""
     resp = await client.get("/metrics")
-    assert resp.status_code == 200
-    assert "http_requests_total" in resp.text
+    assert resp.status_code == 401
 
 
 async def test_degraded_overview(client: httpx.AsyncClient) -> None:
-    """/health/degraded 返回统一降级面板摘要（OPS-05）。"""
+    """/health/degraded 返回统一降级面板摘要（OPS-05，需管理角色）。"""
     from app.core.degradation_registry import init_degradation_registry
 
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin"
+    )
     registry = init_degradation_registry()
     registry.register_degradation("redis", "probe failed")
     try:
@@ -107,6 +122,7 @@ async def test_degraded_overview(client: httpx.AsyncClient) -> None:
         assert body["degraded_count"] == 1
         assert body["degraded_components"][0]["component"] == "redis"
     finally:
+        app.dependency_overrides.clear()
         init_degradation_registry()
 
 

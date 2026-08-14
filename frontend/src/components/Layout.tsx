@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
-import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme, AutoComplete, Spin } from "antd";
+import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme, AutoComplete, Spin, Modal, Form, App as AntApp } from "antd";
 import {
   AppstoreOutlined,
   PlusCircleOutlined,
@@ -39,11 +39,14 @@ import {
 } from "@ant-design/icons";
 import type { CurrentUser, GlobalSearchItem, GlobalSearchType } from "../types";
 import {
+  apiLogout,
+  changePassword,
   clearAuthTokens,
   fetchGlobalSearch,
   fetchPreferences,
   listNotifications,
   setPreference,
+  UnisenseApiError,
 } from "../api";
 import { navigateToSearchItem } from "../utils/searchNavigate";
 
@@ -144,6 +147,99 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
 
 const ALL_NAV_KEYS = NAV_GROUPS.flatMap((g) => g.children.map((c) => c.key));
 
+// 管理类菜单：仅 platform_admin / domain_admin 可见，其余角色隐藏
+const ADMIN_ONLY_NAV_KEYS = new Set([
+  "/users",
+  "/governance",
+  "/audit",
+  "/dicts",
+  "/system-config",
+  "/tracking-stats",
+  "/api-clients",
+  "/observability",
+]);
+
+function isAdminRole(role: string): boolean {
+  return role === "platform_admin" || role === "domain_admin";
+}
+
+// 修改密码弹窗：force=true 为首次登录强制改密（不可关闭），否则为普通自助改密。
+// 两态复用同一表单与提交逻辑。
+function PasswordChangeModal({
+  open,
+  force,
+  onClose,
+}: {
+  open: boolean;
+  force: boolean;
+  onClose: () => void;
+}) {
+  const { message } = AntApp.useApp();
+  const [form] = Form.useForm<{ current_password: string; new_password: string; confirm: string }>();
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleSubmit() {
+    const values = await form.validateFields().catch(() => null);
+    if (!values) return;
+    setSubmitting(true);
+    try {
+      await changePassword({
+        current_password: values.current_password,
+        new_password: values.new_password,
+      });
+      message.success("密码修改成功");
+      form.resetFields();
+      onClose();
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "密码修改失败，请稍后重试",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={force ? "首次登录需修改密码" : "修改密码"}
+      open={open}
+      onOk={handleSubmit}
+      onCancel={force ? undefined : onClose}
+      closable={!force}
+      maskClosable={!force}
+      keyboard={!force}
+      okText="确认修改"
+      confirmLoading={submitting}
+      cancelButtonProps={force ? { style: { display: "none" } } : undefined}
+    >
+      <Form form={form} layout="vertical" autoComplete="off">
+        <Form.Item name="current_password" label="当前密码" rules={[{ required: true, message: "请输入当前密码" }]}>
+          <Input.Password autoComplete="current-password" placeholder="请输入当前密码" />
+        </Form.Item>
+        <Form.Item name="new_password" label="新密码" rules={[{ required: true, message: "请输入新密码" }]}>
+          <Input.Password autoComplete="new-password" placeholder="请输入新密码" />
+        </Form.Item>
+        <Form.Item
+          name="confirm"
+          label="确认新密码"
+          dependencies={["new_password"]}
+          rules={[
+            { required: true, message: "请再次输入新密码" },
+            ({ getFieldValue }) => ({
+              validator(_rule, value) {
+                if (!value || getFieldValue("new_password") === value) return Promise.resolve();
+                return Promise.reject(new Error("两次输入的新密码不一致"));
+              },
+            }),
+          ]}
+        >
+          <Input.Password autoComplete="new-password" placeholder="请再次输入新密码" />
+        </Form.Item>
+      </Form>
+    </Modal>
+  );
+}
+
 // 全局搜索类型 → 中文标签（顶栏下拉分组标题）
 const SEARCH_TYPE_LABEL: Record<GlobalSearchType, string> = {
   metric: "指标",
@@ -184,6 +280,9 @@ export function Layout({ user }: { user: CurrentUser }) {
   >([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
+  // 修改密码弹窗：普通自助改密 / 首次登录强制改密（成功后置位避免重开）
+  const [pwdModalOpen, setPwdModalOpen] = useState(false);
+  const [forcePwdDone, setForcePwdDone] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = theme.useToken();
@@ -350,6 +449,11 @@ export function Layout({ user }: { user: CurrentUser }) {
     },
     { type: "divider" as const },
     {
+      key: "password",
+      label: "修改密码",
+      icon: <KeyOutlined />,
+    },
+    {
       key: "logout",
       label: "退出登录",
       icon: <LogoutOutlined />,
@@ -357,18 +461,39 @@ export function Layout({ user }: { user: CurrentUser }) {
     },
   ];
 
-  function handleUserMenu({ key }: { key: string }) {
+  async function handleUserMenu({ key }: { key: string }) {
+    if (key === "password") {
+      setPwdModalOpen(true);
+      return;
+    }
     if (key === "logout") {
+      // 先调用后端撤销 access token（JWT jti 入黑名单），再清本地登录态；
+      // 后端不可达等失败不阻塞登出（best-effort）
+      await apiLogout().catch(() => {});
       clearAuthTokens();
       window.location.reload();
     }
   }
 
-  const menuItems = NAV_GROUPS.map((g) => ({
-    type: "group" as const,
-    label: g.label,
-    children: g.children.map((c) => ({ key: c.key, icon: c.icon, label: c.label })),
-  }));
+  // 按角色过滤导航菜单：非管理员隐藏管理类入口；某组过滤后为空则整组隐藏
+  const menuItems = useMemo(() => {
+    const isAdmin = isAdminRole(user.role);
+    return NAV_GROUPS.map((g) => ({
+      type: "group" as const,
+      label: g.label,
+      children: g.children
+        .filter((c) => isAdmin || !ADMIN_ONLY_NAV_KEYS.has(c.key))
+        .map((c) => ({ key: c.key, icon: c.icon, label: c.label })),
+    })).filter((g) => g.children.length > 0);
+  }, [user.role]);
+
+  // 首次登录强制改密：必须修改成功才消失（force 弹窗不可关闭）
+  const forceChangeRequired = user.must_change_password === true && !forcePwdDone;
+
+  function handlePasswordModalClose() {
+    if (forceChangeRequired) setForcePwdDone(true);
+    setPwdModalOpen(false);
+  }
 
   return (
     <AntLayout style={{ height: "100vh" }}>
@@ -519,6 +644,12 @@ export function Layout({ user }: { user: CurrentUser }) {
           <Outlet />
         </Content>
       </AntLayout>
+
+      <PasswordChangeModal
+        open={forceChangeRequired || pwdModalOpen}
+        force={forceChangeRequired}
+        onClose={handlePasswordModalClose}
+      />
     </AntLayout>
   );
 }

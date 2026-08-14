@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Enum, ForeignKey, Index, String
+from sqlalchemy import Boolean, Enum, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.mysql import Base
@@ -56,6 +56,7 @@ class User(Base, BaseModel):
             compliance_officer/analyst/viewer，对齐 PRD 4.9.2 六角色 + 历史 analyst）。
         domain: 所属域。
         status: 用户状态。
+        must_change_password: 首次登录须强制改密（管理员创建/重置后为 True）。
         last_login_at: 最后登录时间。
     """
 
@@ -95,6 +96,9 @@ class User(Base, BaseModel):
         comment="用户状态",
     )
     last_login_at: Mapped[datetime | None] = mapped_column(nullable=True, comment="最后登录时间")
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="首次登录须强制改密"
+    )
 
     org: Mapped[Organization] = relationship("Organization", back_populates="users")
 

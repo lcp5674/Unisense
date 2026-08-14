@@ -911,6 +911,16 @@ async def test_execute_internal_user_pii_reviewed_ok(monkeypatch) -> None:
     monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
     monkeypatch.setattr("app.services.consume.service.settings.mysql_fallback_url", "mysql+aiomysql://u:p@h/db")
     monkeypatch.setattr("app.services.consume.service._get_mysql_executor", lambda: fake)
+    # 内部用户查询已接入 PDP 闸门：放行（allow=True，无行级授权命中）
+    from app.services.governance.policy import Decision
+
+    async def _allow(*args, **kwargs):
+        return (Decision(allow=True, reason="allowed"), None)
+
+    monkeypatch.setattr(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        _allow,
+    )
     from app.models.user import User
 
     user = User(id=1, username="alice")
@@ -919,6 +929,33 @@ async def test_execute_internal_user_pii_reviewed_ok(monkeypatch) -> None:
     )
     assert res.data["engine"] == "mysql"
     svc._snapshots.create.assert_awaited_once()
+
+
+async def test_execute_internal_user_denied_without_permission(monkeypatch) -> None:
+    """内部用户查询 PDP 闸门：无跨域授权/非本域角色 → 拒绝（P0 数据权限修复）。"""
+    svc = _svc(await _client())
+    svc._get_metric = AsyncMock(return_value=_metric(pii=False, pii_flag=False))
+    svc._snapshots = MagicMock()
+    svc._snapshots.create = AsyncMock()
+    from app.services.governance.policy import Decision
+
+    async def _deny(*args, **kwargs):
+        return (Decision(allow=False, reason="no grant", error_code="FORBIDDEN"), None)
+
+    monkeypatch.setattr(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        _deny,
+    )
+    from app.models.user import User
+
+    user = User(id=1, username="alice")
+    with pytest.raises(BusinessError) as exc:
+        await svc.execute_query(
+            QueryRequest(metric_code="gmv", date_range=""), internal_user=user
+        )
+    assert exc.value.error_code == ErrorCode.FORBIDDEN
+    # 拒绝后不得落快照
+    svc._snapshots.create.assert_not_awaited()
 
 
 async def test_projection_columns_supports_measures_object_array() -> None:

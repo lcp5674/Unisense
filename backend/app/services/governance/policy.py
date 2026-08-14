@@ -197,7 +197,9 @@ class Decision:
         allow: 是否放行。
         reason: 判定依据（审计可读）。
         error_code: 拒绝时的错误码（放行为空串）。
-        restricted: 行级权限标记，一期仅标注不强制过滤（TD §12.5）。
+        restricted: 行级权限标记。restricted 授权命中时为 True；consume 内部查询
+            路径已落地基础安全兜底（结果行按命中授权的 metric_whitelist 过滤），
+            完整 RLS（维度值级过滤 + 脱敏）为二期范围（TD §12.5）。
         masking: 建议脱敏策略。
     """
 

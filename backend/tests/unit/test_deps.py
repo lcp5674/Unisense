@@ -29,6 +29,7 @@ def _valid_token(uid: int = 1, role: str = "metric_owner", expired: bool = False
         "sub": str(uid),
         "role": role,
         "org_id": 1,
+        "jti": "test-jti-001",
         "iat": int(now.timestamp()),
         "exp": int(exp.timestamp()),
     }
@@ -72,6 +73,22 @@ class TestGetCurrentUser:
         result = await deps.get_current_user(db, creds)
         assert result.id == 1
         assert result.role == "metric_owner"
+
+    async def test_blacklisted_token_raises_revoked(self) -> None:
+        """登出撤销（jti 黑名单命中）的 token → AuthError AUTH_TOKEN_REVOKED（P0）。"""
+        from app.core.security import blacklist_token
+
+        await blacklist_token("test-jti-001", 600)
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = _make_user()
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=mock_result)
+        creds = MagicMock(credentials=_valid_token())
+        with pytest.raises(AuthError) as exc_info:
+            await deps.get_current_user(db, creds)
+        assert exc_info.value.error_code == "AUTH_TOKEN_REVOKED"
+        db.execute.assert_not_awaited()  # 黑名单命中必须在查库前拦截
 
 
 class TestRequireRoles:

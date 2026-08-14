@@ -81,7 +81,8 @@ logger = get_logger("unisense.collector.api")
 source_router = APIRouter(prefix="/data-sources", tags=["collector-source"])
 catalog_router = APIRouter(prefix="/catalogs", tags=["collector-catalog"])
 
-_WRITE_ROLES = ("platform_admin", "domain_admin", "metric_owner")
+#: 数据源/采集写权限：平台级运维仅管理/域管理员（metric_owner 单域指标负责人不操作平台级数据源）。
+_WRITE_ROLES = ("platform_admin", "domain_admin")
 _READ_ROLES = ALL_ROLES
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）

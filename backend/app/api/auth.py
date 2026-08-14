@@ -20,6 +20,7 @@ from app.api.responses import ApiResponse, ok
 from app.core.config import settings
 from app.core.exceptions import AuthError
 from app.core.guard import guard_against_injection
+from app.core.login_throttle import is_login_blocked, record_login_failure, reset_login_failures
 from app.core.security import (
     blacklist_token,
     create_access_token,
@@ -46,6 +47,7 @@ class TokenResponse(BaseModel):
     access_token: str = Field(..., description="JWT 访问令牌")
     token_type: str = Field(default="bearer", description="令牌类型")
     refresh_token: str = Field(default="", description="JWT 刷新令牌（7天有效，登录/刷新时签发）")
+    must_change_password: bool = Field(default=False, description="首次登录/密码到期时需强制改密")
 
 
 class RefreshRequest(BaseModel):
@@ -79,20 +81,29 @@ class UserBrief(BaseModel):
 @router.post("/login", dependencies=[Depends(guard_against_injection)])
 async def login(
     body: LoginRequest,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ApiResponse[TokenResponse]:
     """用户名/密码登录，签发 JWT。
 
     Args:
         body: 登录凭证。
+        request: 请求对象（取客户端 IP 参与限流键）。
         db: 数据库会话。
 
     Returns:
         包含 access_token 的统一信封。
 
     Raises:
-        AuthError: 用户不存在/已禁用/密码错误（统一返回 AUTH_INVALID_CREDENTIALS）。
+        AuthError: 登录失败次数超限（AUTH_RATE_LIMITED）/ 用户不存在或密码错误
+            （统一返回 AUTH_INVALID_CREDENTIALS）。
     """
+    # 登录防撞库（TD §5）：按 username+IP 固定窗口限流失败次数，Redis 不可用降级内存，不阻断登录。
+    client_ip = request.client.host if request.client else ""
+    throttle_key = f"{body.username}:{client_ip}"
+    if await is_login_blocked(throttle_key):
+        raise AuthError("登录失败次数过多，请稍后再试", error_code="AUTH_RATE_LIMITED")
+
     result = await db.execute(
         select(User).where(User.username == body.username, User.status == "active")
     )
@@ -100,14 +111,23 @@ async def login(
 
     # 用户不存在与密码错误返回相同错误码，避免用户枚举。
     if user is None or not await verify_password(body.password, user.password_hash):
+        await record_login_failure(throttle_key)
         raise AuthError("用户名或密码错误", error_code="AUTH_INVALID_CREDENTIALS")
 
+    await reset_login_failures(throttle_key)
     user.last_login_at = datetime.now(UTC)
     await db.commit()
 
     token = create_access_token(sub=user.id, role=user.role, org_id=user.org_id)
     refresh = create_refresh_token(sub=user.id, role=user.role, org_id=user.org_id)
-    return ok(TokenResponse(access_token=token, refresh_token=refresh))
+    return ok(
+        TokenResponse(
+            access_token=token,
+            refresh_token=refresh,
+            # 字段由用户模型提供（agent-users 并行接入），未就绪时默认 False，防御式读取。
+            must_change_password=bool(getattr(user, "must_change_password", False)),
+        )
+    )
 
 
 @router.get("/me")

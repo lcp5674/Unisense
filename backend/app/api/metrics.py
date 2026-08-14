@@ -44,8 +44,9 @@ router = APIRouter(prefix="/metric-definitions", tags=["metric-definitions"])
 
 # 语义定义写操作允许的角色（对齐 RBAC：平台/域管理员 + 指标 Owner）
 _WRITE_ROLES = ("platform_admin", "domain_admin", "metric_owner")
-# PII 合规复核须由合规/域管理员执行，禁止指标 Owner 自审（对齐治理 COMPL-2）
-_PII_REVIEW_ROLES = ("platform_admin", "domain_admin")
+# PII 合规复核须由合规/域管理员执行，禁止指标 Owner 自审
+# （对齐治理 COMPL-2 / governance._COMPLIANCE_ROLES）
+_PII_REVIEW_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
 _READ_ROLES = ALL_ROLES
 # PII 指标口径可读角色：仅管理/合规可见完整口径，其余角色读路径脱敏
 _SENSITIVE_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
