@@ -9,9 +9,11 @@ import {
 
 const { graphMock } = vi.hoisted(() => ({
   graphMock: {
+    destroyed: false,
     on: vi.fn(),
     render: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
+    setData: vi.fn(),
     getNodeData: vi.fn<() => Array<{ id: string; data?: Record<string, unknown> }>>(() => []),
     getNeighborNodesData: vi.fn(() => []),
     setElementState: vi.fn(),
@@ -32,12 +34,17 @@ const edges: AssetGraphEdge[] = [
   { source: "metric:revenue", target: "table:orders", type: "DERIVED_FROM" },
 ];
 
+// 图实例复用后，真实数据通过 setData 传入（构造时 data 为空）；回退读取构造参数
 function lastGraphData(): {
   nodes: Array<{ id: string; data?: AssetGraphNode }>;
   edges: AssetGraphEdge[];
 } {
-  const calls = vi.mocked(Graph).mock.calls;
-  return calls[calls.length - 1][0].data as {
+  const dataCalls = graphMock.setData.mock.calls as Array<
+    [{ nodes: Array<{ id: string; data?: AssetGraphNode }>; edges: AssetGraphEdge[] }]
+  >;
+  if (dataCalls.length > 0) return dataCalls[dataCalls.length - 1][0];
+  const ctorCalls = vi.mocked(Graph).mock.calls;
+  return ctorCalls[ctorCalls.length - 1][0].data as {
     nodes: Array<{ id: string; data?: AssetGraphNode }>;
     edges: AssetGraphEdge[];
   };
@@ -103,6 +110,18 @@ describe("AssetGraph 交互", () => {
 
     await waitFor(() => {
       expect(graphMock.setElementState).toHaveBeenCalledWith("metric:revenue", []);
+    });
+  });
+
+  it("showFields=false 时剔除字段节点（血缘总览降噪）", async () => {
+    render(<AssetGraph nodes={nodes} edges={edges} height={300} showFields={false} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    await waitFor(() => {
+      const data = lastGraphData();
+      expect(data.nodes).toHaveLength(2);
+      expect(
+        data.nodes.every((n) => (n.data as AssetGraphNode | undefined)?.type !== "field"),
+      ).toBe(true);
     });
   });
 });

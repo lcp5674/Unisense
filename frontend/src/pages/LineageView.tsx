@@ -112,6 +112,8 @@ function GraphTab() {
           edges={data.edges}
           height={560}
           onNodeClick={handleNodeClick}
+          // 血缘总览默认隐藏字段节点，聚焦表/指标主干，减少视觉噪声
+          showFields={false}
         />
       ) : (
         !loading && (
