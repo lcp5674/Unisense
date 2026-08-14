@@ -365,4 +365,74 @@ describe("SystemConfig LLM 路由配置", () => {
     // 失败时给「去编辑密钥」快捷入口
     expect(await screen.findByText("去编辑密钥")).toBeTruthy();
   });
+
+  it("P1 上移位次：点上移 → 与相邻实例交换优先级（调用 updateLlmConfig ×2）", async () => {
+    mockGet.mockResolvedValue(
+      listData({
+        items: [
+          { ...PRIMARY_ITEM, id: 1, name: "主用", priority: 0 },
+          { ...PRIMARY_ITEM, id: 2, name: "备用", priority: 1 },
+        ],
+      }) as never,
+    );
+    mockUpdate.mockResolvedValue({ id: 2 });
+    render(<SystemConfig />);
+    await screen.findByText("备用");
+    fireEvent.click(screen.getByLabelText("上移 备用"));
+    await waitFor(() => {
+      // 备用(id=2, p1) 与主用(id=1, p0) 交换优先级
+      expect(mockUpdate).toHaveBeenCalledWith(2, expect.objectContaining({ priority: 0 }));
+      expect(mockUpdate).toHaveBeenCalledWith(1, expect.objectContaining({ priority: 1 }));
+    });
+  });
+
+  it("P1 同优先级冲突：两个实例优先级相同 → 显示冲突警告图标", async () => {
+    mockGet.mockResolvedValue(
+      listData({
+        items: [
+          { ...PRIMARY_ITEM, id: 1, name: "主用", priority: 0 },
+          { ...PRIMARY_ITEM, id: 2, name: "备用", priority: 0 },
+        ],
+      }) as never,
+    );
+    render(<SystemConfig />);
+    await screen.findByText("备用");
+    expect(screen.getAllByTestId("priority-conflict").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("P1 删除影响：删除当前路由且唯一启用实例 → 提示将处于未配置状态", async () => {
+    mockGet.mockResolvedValue(listData({ items: [{ ...PRIMARY_ITEM, id: 1 }] }) as never);
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("删除"));
+    const modal = await screen.findByText("删除 LLM 实例");
+    const modalBox = modal.closest(".ant-modal") as HTMLElement;
+    expect(within(modalBox).getByTestId("delete-effective")).toBeTruthy();
+    expect(within(modalBox).getByText(/LLM 将处于未配置状态/)).toBeTruthy();
+  });
+
+  it("P1 批量测试：全部测试 → 并行调用 testLlmConfig ×2 + 集群健康报告", async () => {
+    mockGet.mockResolvedValue(
+      listData({
+        items: [
+          { ...PRIMARY_ITEM, id: 1, name: "主用" },
+          { ...PRIMARY_ITEM, id: 2, name: "备用" },
+        ],
+      }) as never,
+    );
+    mockTest.mockImplementation((body?: { instance_id?: number }) => {
+      if (body?.instance_id === 1) {
+        return Promise.resolve({ ok: true, latency_ms: 30, model: "deepseek-chat", error: "" });
+      }
+      return Promise.resolve({ ok: false, latency_ms: 0, model: "qwen-turbo", error: "HTTP 401" });
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("全部测试"));
+    await waitFor(() => {
+      expect(mockTest).toHaveBeenCalledWith({ instance_id: 1 });
+      expect(mockTest).toHaveBeenCalledWith({ instance_id: 2 });
+    });
+    expect(await screen.findByTestId("cluster-health")).toBeTruthy();
+    const health = screen.getByTestId("cluster-health");
+    expect(within(health).getByText(/集群健康：1 可用 \/ 1 失败/)).toBeTruthy();
+  });
 });

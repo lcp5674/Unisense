@@ -13,11 +13,14 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   ApiOutlined,
+  ArrowDownOutlined,
+  ArrowUpOutlined,
   CheckCircleOutlined,
   CloudDownloadOutlined,
   CloseCircleOutlined,
@@ -28,6 +31,7 @@ import {
   LinkOutlined,
   PlusOutlined,
   ThunderboltOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import {
   createLlmConfig,
@@ -183,6 +187,8 @@ export function SystemConfig() {
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<{ value: string }[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [reordering, setReordering] = useState<{ id: number; dir: -1 | 1 } | null>(null);
+  const [testingAll, setTestingAll] = useState(false);
   const hideTimerRef = useRef<number | null>(null);
   const [countdownSec, setCountdownSec] = useState(0);
 
@@ -461,7 +467,110 @@ export function SystemConfig() {
     }
   }
 
+  /** P1-5：把实例转成更新载荷（api_key 留空 = 保持原密钥，不参与位次调整）。 */
+  function payloadFromItem(item: LlmConfigItem): LlmConfigPayload {
+    return {
+      name: item.name || "",
+      provider: item.provider,
+      base_url: item.base_url,
+      model: item.model,
+      api_key: "",
+      timeout: item.timeout,
+      enabled: item.enabled,
+      priority: item.priority,
+    };
+  }
+
+  /** P1-5：上移/下移一位——与相邻实例交换优先级（同优先级时按移动方向 ±1，钳制 ≥0）。 */
+  async function moveRank(id: number, dir: -1 | 1) {
+    const ranked = (data?.items ?? [])
+      .filter((i) => i.id != null && i.source !== "env")
+      .sort((a, b) => {
+        if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        return (a.id ?? 0) - (b.id ?? 0);
+      });
+    const idx = ranked.findIndex((i) => i.id === id);
+    if (idx === -1) return;
+    const cur = ranked[idx];
+    const target = ranked[idx + dir];
+    if (!cur || !target || cur.id == null || target.id == null) return;
+    setReordering({ id, dir });
+    try {
+      if (cur.priority !== target.priority) {
+        // 交换两个实例的优先级，保持唯一
+        await updateLlmConfig(cur.id, { ...payloadFromItem(cur), priority: target.priority });
+        await updateLlmConfig(target.id, { ...payloadFromItem(target), priority: cur.priority });
+      } else {
+        // 同优先级（按 ID 排序的并列）：仅移动方 ±1，打破并列
+        const newP = dir === -1 ? Math.max(0, cur.priority - 1) : cur.priority + 1;
+        await updateLlmConfig(cur.id, { ...payloadFromItem(cur), priority: newP });
+      }
+      message.success(`已将「${cur.name || cur.provider}」${dir === -1 ? "上移" : "下移"}一位（下次请求起效）`);
+      await load();
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "调整位次失败",
+      );
+    } finally {
+      setReordering(null);
+    }
+  }
+
+  /** P1-7：并行测试全部数据库实例，生成集群健康报告。 */
+  async function handleTestAll() {
+    const targets = (data?.items ?? []).filter((i) => i.id != null && i.source !== "env");
+    if (targets.length === 0) {
+      message.info("没有可测试的数据库实例（env 兜底不计入）");
+      return;
+    }
+    setTestingAll(true);
+    setTestResults({});
+    const results: Record<number, LlmConfigTestResult> = {};
+    try {
+      await Promise.all(
+        targets.map(async (t) => {
+          const id = t.id as number;
+          try {
+            const res = await testLlmConfig({ instance_id: id });
+            results[id] = res;
+          } catch (err) {
+            results[id] = {
+              ok: false,
+              latency_ms: 0,
+              model: t.model || "",
+              error: err instanceof UnisenseApiError ? err.message : "测试失败",
+            };
+          }
+        }),
+      );
+    } finally {
+      setTestResults(results);
+      setTestingAll(false);
+      const ok = Object.values(results).filter((r) => r?.ok).length;
+      const fail = targets.length - ok;
+      if (fail === 0) {
+        message.success(`集群健康：全部 ${targets.length} 个实例连通正常`);
+      } else {
+        message.warning(`集群健康：${ok} 可用 / ${fail} 失败`);
+      }
+    }
+  }
+
   const canEdit = data?.can_edit ?? false;
+  // P1-5：同优先级冲突计数（仅数据库实例）
+  const priorityCount = new Map<number, number>();
+  (data?.items ?? [])
+    .filter((i) => i.id != null && i.source !== "env")
+    .forEach((i) => priorityCount.set(i.priority, (priorityCount.get(i.priority) ?? 0) + 1));
+  // P1-5：真实轮询排序（供位次列判断是否可上移/下移）
+  const rankedItems = (data?.items ?? [])
+    .filter((i) => i.id != null && i.source !== "env")
+    .sort((a, b) => {
+      if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      return (a.id ?? 0) - (b.id ?? 0);
+    });
   const columns: ColumnsType<LlmConfigItem> = [
     {
       title: "名称",
@@ -495,22 +604,62 @@ export function SystemConfig() {
       title: "优先级",
       dataIndex: "priority",
       key: "priority",
-      width: 80,
-      render: (v: number, r) => (r.source === "env" ? "—" : <span className="mono">{v}</span>),
+      width: 90,
+      render: (v: number, r) => {
+        if (r.source === "env") return "—";
+        const conflict = (priorityCount.get(v) ?? 0) > 1;
+        return (
+          <Space size={4}>
+            <span className="mono">{v}</span>
+            {conflict ? (
+              <Tooltip title={`有 ${priorityCount.get(v)} 个实例优先级相同，轮询顺序按创建顺序（ID）决定`}>
+                <WarningOutlined style={{ color: "#faad14" }} data-testid="priority-conflict" />
+              </Tooltip>
+            ) : null}
+          </Space>
+        );
+      },
     },
     {
       title: "轮询位次",
       key: "rank",
-      width: 90,
+      width: 130,
       render: (_: unknown, r) => {
         if (r.source === "env") return <Tag>兜底</Tag>;
         const rank = r.id != null ? computeRank(data?.items ?? [], r.id) : 0;
-        return rank > 0 ? (
-          <span className="mono" style={{ fontWeight: 600 }}>
-            第 {rank} 位
-          </span>
-        ) : (
-          <span className="muted">—</span>
+        if (rank <= 0) return <span className="muted">—</span>;
+        return (
+          <Space size={2}>
+            <span className="mono" style={{ fontWeight: 600 }}>
+              第 {rank} 位
+            </span>
+            {canEdit && r.id != null ? (
+              <>
+                <Tooltip title="上移一位（提升优先级）">
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<ArrowUpOutlined />}
+                    disabled={rank <= 1 || (reordering?.id === r.id && reordering.dir !== -1)}
+                    loading={reordering?.id === r.id && reordering.dir === -1}
+                    onClick={() => moveRank(r.id as number, -1)}
+                    aria-label={`上移 ${r.name || r.provider}`}
+                  />
+                </Tooltip>
+                <Tooltip title="下移一位（降低优先级）">
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<ArrowDownOutlined />}
+                    disabled={rank >= rankedItems.length || (reordering?.id === r.id && reordering.dir !== 1)}
+                    loading={reordering?.id === r.id && reordering.dir === 1}
+                    onClick={() => moveRank(r.id as number, 1)}
+                    aria-label={`下移 ${r.name || r.provider}`}
+                  />
+                </Tooltip>
+              </>
+            ) : null}
+          </Space>
         );
       },
     },
@@ -603,6 +752,21 @@ export function SystemConfig() {
           size="small"
           locale={{ emptyText: "尚未配置 LLM 实例" }}
         />
+        {(() => {
+          const entries = Object.values(testResults).filter((r) => r != null);
+          if (entries.length >= 2) {
+            const ok = entries.filter((r) => r.ok).length;
+            const fail = entries.length - ok;
+            return (
+              <div style={{ marginTop: 10 }} data-testid="cluster-health">
+                <Tag color={fail === 0 ? "success" : "warning"} icon={fail === 0 ? <CheckCircleOutlined /> : <WarningOutlined />}>
+                  集群健康：{ok} 可用 / {fail} 失败（共 {entries.length}）
+                </Tag>
+              </div>
+            );
+          }
+          return null;
+        })()}
         {Object.entries(testResults).map(([id, res]) =>
           res ? (
             <div key={id} style={{ marginTop: 8 }}>
@@ -625,11 +789,28 @@ export function SystemConfig() {
             </div>
           ) : null,
         )}
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
           {canEdit ? (
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              新增 LLM 实例
-            </Button>
+            <>
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={openCreate}
+              >
+                新增 LLM 实例
+              </Button>
+              <Button
+                icon={<ThunderboltOutlined />}
+                loading={testingAll}
+                disabled={(data?.items ?? []).filter((i) => i.id != null && i.source !== "env").length === 0}
+                onClick={handleTestAll}
+              >
+                全部测试
+              </Button>
+              <span className="muted" style={{ fontSize: 12 }}>
+                并行测试所有实例，一键生成集群健康报告
+              </span>
+            </>
           ) : (
             <span className="muted" style={{ fontSize: 12 }}>
               仅平台管理员 / 域管理员可配置 LLM 实例。
@@ -840,16 +1021,65 @@ export function SystemConfig() {
         okText="删除"
         okButtonProps={{ danger: true }}
         cancelText="取消"
-        width={440}
+        width={480}
       >
-        <p>
-          确认删除实例「
-          <strong>{deleteTarget ? deleteTarget.name || deleteTarget.provider : ""}</strong>
-          」？
-        </p>
-        <p className="muted" style={{ fontSize: 13 }}>
-          删除后该实例不再参与 LLM 轮询路由；此操作将保留审计记录。
-        </p>
+        {deleteTarget ? (
+          (() => {
+            const items = data?.items ?? [];
+            const dbItems = items.filter((i) => i.id != null && i.source !== "env");
+            const isEffective =
+              data?.effective?.base_url != null && data.effective.base_url === deleteTarget.base_url;
+            const remaining = dbItems.filter((i) => i.id !== deleteTarget.id);
+            const remainingEnabled = remaining.filter((i) => i.enabled).length;
+            const willFallback = remainingEnabled === 0;
+            const hasEnv = items.some((i) => i.source === "env");
+            const rank = deleteTarget.id != null ? computeRank(items, deleteTarget.id) : 0;
+            return (
+              <>
+                <p>
+                  确认删除实例「
+                  <strong>{deleteTarget.name || deleteTarget.provider}</strong>
+                  」？
+                </p>
+                <ul style={{ margin: "8px 0 0 18px", padding: 0, fontSize: 13, lineHeight: 2 }}>
+                  <li>
+                    当前轮询位次：<b>第 {rank} 位</b>
+                  </li>
+                  <li>
+                    {isEffective ? (
+                      <Tag color="orange" data-testid="delete-effective">
+                        当前路由正在使用该实例
+                      </Tag>
+                    ) : (
+                      <span className="muted">非当前路由实例</span>
+                    )}
+                  </li>
+                  <li>
+                    删除后剩余 <b>{remaining.length}</b> 个数据库实例（{remainingEnabled} 个启用）
+                  </li>
+                  <li>
+                    {willFallback ? (
+                      hasEnv ? (
+                        <span>
+                          将<b>回落到环境变量</b>配置（{data?.effective?.provider}）
+                        </span>
+                      ) : (
+                        <b style={{ color: "#cf1322" }}>
+                          LLM 将处于未配置状态，AI 问数 / 指标命名推断会失效
+                        </b>
+                      )
+                    ) : (
+                      <span className="muted">其余启用实例继续参与轮询路由</span>
+                    )}
+                  </li>
+                </ul>
+                <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                  删除后该实例不再参与轮询路由；此操作将保留审计记录。
+                </p>
+              </>
+            );
+          })()
+        ) : null}
       </Modal>
 
       <div className="muted" style={{ fontSize: 12 }}>
