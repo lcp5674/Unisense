@@ -17,6 +17,11 @@
   --ok: #2e9e5b;
   --warn: #c77700;
   --danger: #d64545;
+  /* 语义化文字色阶（部分旧组件用 var(--text*) 直接引用，补齐避免回退失效） */
+  --text: var(--ink);
+  --text-secondary: var(--muted);
+  --text-tertiary: #8b94a3;
+  /* 等宽数据字体栈 */
   --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
   --font-display: "Space Grotesk", "PingFang SC", -apple-system, sans-serif;
@@ -891,6 +896,31 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+/* ---- 指标对比表：行底色高亮（仪表盘信号灯） ---- */
+.ant-table-tbody > tr.compare-row {
+  transition: background-color 0.12s ease;
+}
+.ant-table-tbody > tr.compare-row:hover > td,
+.ant-table-tbody > tr.compare-row:hover > th {
+  background: rgba(232, 134, 45, 0.08) !important;
+}
+.ant-table-tbody > tr.compare-row-identical > td {
+  background: var(--surface);
+}
+.ant-table-tbody > tr.compare-row-similar > td {
+  background: rgba(232, 134, 45, 0.06);
+}
+.ant-table-tbody > tr.compare-row-different > td {
+  background: rgba(214, 69, 69, 0.05);
+}
+/* 加深表头：保证对比弹窗里表格头部与内容区分清晰 */
+.ant-table-wrapper .ant-table-thead > tr > th {
+  background: #f8f9fb !important;
+  color: var(--ink) !important;
+  font-weight: 600 !important;
+  border-bottom: 1px solid var(--line) !important;
 }
 
 .notif-meta-item .anticon {

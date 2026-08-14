@@ -316,6 +316,8 @@ export function ReviewWorkbench() {
     {
       title: "候选指标",
       key: "candidate",
+      width: 180,
+      ellipsis: true,
       render: (_: unknown, r: ConflictResponse) => {
         const code = r.candidate_metric_code ?? "";
         return (
@@ -328,6 +330,8 @@ export function ReviewWorkbench() {
     {
       title: "现有指标",
       key: "existing",
+      width: 180,
+      ellipsis: true,
       render: (_: unknown, r: ConflictResponse) => {
         const code = r.existing_metric_code ?? "";
         return (
@@ -340,8 +344,9 @@ export function ReviewWorkbench() {
     {
       title: "描述",
       key: "description",
+      width: 200,
       ellipsis: true,
-      render: (_: unknown, r: ConflictResponse) => r.description ?? "",
+      render: (_: unknown, r: ConflictResponse) => r.description ?? <span className="muted">—</span>,
     },
     {
       title: "检测时间",
