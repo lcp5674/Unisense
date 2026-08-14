@@ -3,7 +3,7 @@ import { Card, Table, Tag, Input, Select, Button, Space, Tooltip, message } from
 import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { listAudit, UnisenseApiError } from "../api";
 import type { AuditEntry } from "../types";
-import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel, auditActionLabel, formatAuditTime, entityIdWithLabel } from "../utils/auditI18n";
+import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel, auditActionLabel, formatAuditTime } from "../utils/auditI18n";
 
 export function AuditLog() {
   const [items, setItems] = useState<AuditEntry[]>([]);
@@ -53,12 +53,9 @@ export function AuditLog() {
       dataIndex: "action",
       key: "action",
       render: (v: string, _r: AuditEntry) => (
-        <span>
-          {auditActionLabel(v)}
-          <Tooltip title={v}>
-            <Tag style={{ marginLeft: 6, fontSize: 10, cursor: "help" }} color="default">{v}</Tag>
-          </Tooltip>
-        </span>
+        <Tooltip title={v}>
+          <span>{auditActionLabel(v)}</span>
+        </Tooltip>
       ),
     },
     {
@@ -69,7 +66,7 @@ export function AuditLog() {
         <span>
           <Tag>{entityTypeLabel(_r.entity_type)}</Tag>
           <span className="mono" style={{ fontSize: 12, marginLeft: 4 }}>
-            {entityIdWithLabel(_r.entity_type, _r.entity_id)}
+            #{String(_r.entity_id || "").replace(/^[^#]*#?/, "") || "—"}
           </span>
         </span>
       ),
@@ -109,7 +106,7 @@ export function AuditLog() {
         ),
     },
     {
-      title: "来源 IP",
+      title: "来源地址",
       dataIndex: "ip",
       key: "ip",
       width: 130,
@@ -160,7 +157,7 @@ export function AuditLog() {
             options={["metric_definition", "metric_template", "metric_version", "conflict", "lineage_edge", "grant", "term", "dimension", "quality_rule", "notification", "data_source", "db_catalog"].map((v) => ({ value: v, label: entityTypeLabel(v) }))}
           />
           <Input
-            placeholder="操作者 ID"
+            placeholder="操作人"
             className="mono"
             style={{ width: 140 }}
             prefix={<SearchOutlined />}
