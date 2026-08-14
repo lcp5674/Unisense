@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Empty, Table, Tag } from "antd";
-import { FullscreenOutlined } from "@ant-design/icons";
+import { Button, Empty, Input, Select, Table, Tag } from "antd";
+import { FullscreenOutlined, SearchOutlined } from "@ant-design/icons";
 import { Graph as G6Graph } from "@antv/g6";
 import type { GraphData, IElementEvent, NodeData } from "@antv/g6";
 
@@ -35,6 +35,8 @@ const TYPE_LABEL: Record<string, string> = {
   field: "字段",
   unknown: "未知",
 };
+
+const TYPE_OPTIONS = Object.entries(TYPE_LABEL).map(([value, label]) => ({ value, label }));
 
 // 业务域配色：确定性 hash 取色（同域恒定同色，避免渲染抖动）
 const DOMAIN_PALETTE = [
@@ -116,14 +118,23 @@ export function AssetGraph({ nodes, edges, height = 600, onNodeClick }: AssetGra
   const onNodeClickRef = useRef(onNodeClick);
   const [renderFailed, setRenderFailed] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
+  const [typeFilter, setTypeFilter] = useState<string[]>([]);
+  const [searchText, setSearchText] = useState("");
   onNodeClickRef.current = onNodeClick;
+
+  // 类型筛选（空 = 全部）
+  const filteredNodes = useMemo(
+    () => (typeFilter.length === 0 ? nodes : nodes.filter((n) => typeFilter.includes(n.type))),
+    [nodes, typeFilter],
+  );
 
   // 限流渲染：优先保留核心节点，超出阈值时默认隐藏附属字段节点
   const {
     visible: visibleNodes,
     visibleEdges,
     hidden,
-  } = useMemo(() => pickVisible(nodes, edges, showAll), [nodes, edges, showAll]);
+  } = useMemo(() => pickVisible(filteredNodes, edges, showAll), [filteredNodes, edges, showAll]);
 
   // 血缘度：节点关联边数 → 编码节点大小
   const degreeMap = useMemo(() => {
@@ -232,6 +243,32 @@ export function AssetGraph({ nodes, edges, height = 600, onNodeClick }: AssetGra
     };
   }, [visibleNodes, visibleEdges, degreeMap]);
 
+  // 搜索定位：匹配 label 的节点高亮 + 聚焦首个匹配；清空时恢复全量状态
+  useEffect(() => {
+    const graph = graphRef.current;
+    const allNodes = graph?.getNodeData?.() as unknown;
+    const nodeList = Array.isArray(allNodes) ? allNodes : [];
+    if (!searchText.trim()) {
+      for (const n of nodeList) void graph?.setElementState(String(n.id), []);
+      return;
+    }
+    if (!graph) return;
+    const kw = searchText.trim().toLowerCase();
+    const matchIds = new Set(
+      visibleNodes.filter((n) => n.label.toLowerCase().includes(kw)).map((n) => n.id),
+    );
+    for (const n of nodeList) {
+      void graph.setElementState(String(n.id), matchIds.has(String(n.id)) ? "active" : "inactive");
+    }
+    if (matchIds.size > 0) {
+      try {
+        void graph.focusElement([...matchIds][0]);
+      } catch {
+        // focusElement 在个别环境不可用时不阻断搜索高亮
+      }
+    }
+  }, [searchText, visibleNodes]);
+
   if (nodes.length === 0) {
     return <Empty description="暂无图谱数据" />;
   }
@@ -320,6 +357,36 @@ export function AssetGraph({ nodes, edges, height = 600, onNodeClick }: AssetGra
           </Button>
         </div>
       )}
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          flexWrap: "wrap",
+          marginBottom: 10,
+          alignItems: "center",
+        }}
+      >
+        <Select
+          mode="multiple"
+          allowClear
+          placeholder="按类型筛选"
+          style={{ minWidth: 180 }}
+          value={typeFilter}
+          onChange={setTypeFilter}
+          options={TYPE_OPTIONS}
+          maxTagCount="responsive"
+          data-testid="asset-graph-type-filter"
+        />
+        <Input
+          allowClear
+          prefix={<SearchOutlined />}
+          placeholder="搜索节点（名称）…"
+          style={{ width: 240 }}
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          data-testid="asset-graph-search"
+        />
+      </div>
       <div ref={containerRef} style={{ height, width: "100%" }} data-testid="asset-graph-canvas" />
       <div
         style={{

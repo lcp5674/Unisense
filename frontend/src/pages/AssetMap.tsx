@@ -1,8 +1,41 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Card, Descriptions, Drawer, Empty, Row, Col, Input, Select, Space, Spin, Statistic, Switch, Table, Tabs, Tag, Tooltip, message } from "antd";
+import {
+  Alert,
+  Button,
+  Card,
+  Descriptions,
+  Drawer,
+  Empty,
+  Row,
+  Col,
+  Input,
+  Segmented,
+  Select,
+  Space,
+  Spin,
+  Statistic,
+  Switch,
+  Table,
+  Tabs,
+  Tag,
+  Tooltip,
+  message,
+} from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { ApartmentOutlined, DeleteOutlined, DownloadOutlined, EyeOutlined, GlobalOutlined, HeartOutlined, HeatMapOutlined, SafetyOutlined, SearchOutlined, TableOutlined, UserOutlined } from "@ant-design/icons";
+import {
+  ApartmentOutlined,
+  DeleteOutlined,
+  DownloadOutlined,
+  EyeOutlined,
+  GlobalOutlined,
+  HeartOutlined,
+  HeatMapOutlined,
+  SafetyOutlined,
+  SearchOutlined,
+  TableOutlined,
+  UserOutlined,
+} from "@ant-design/icons";
 import { Heatmap, Pie } from "@ant-design/charts";
 import {
   downloadAssetExport,
@@ -540,6 +573,13 @@ function HeatmapTab() {
   const [drillLoading, setDrillLoading] = useState(false);
   const [drillTitle, setDrillTitle] = useState("");
   const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
+  // 色阶主题（0 值浅灰 + 非 0 由浅到深）
+  const [colorTheme, setColorTheme] = useState<"blue" | "warm" | "green">("blue");
+  const colorRanges: Record<string, string[]> = {
+    blue: ["#f0f0f0", "#d6e4ff", "#1677ff", "#003eb3"],
+    warm: ["#f0f0f0", "#fff1d6", "#ffa940", "#d4380d"],
+    green: ["#f0f0f0", "#d9f7be", "#52c41a", "#135200"],
+  };
 
   useEffect(() => {
     async function load() {
@@ -595,9 +635,21 @@ function HeatmapTab() {
         title="敏感分布热力矩阵（业务域 × 敏感级别）"
         size="small"
         extra={
-          <span className="muted">
-            共 {totalCount} 项 · PII {piiTotal} 项 · 悬停查看 / 点击单元格下钻明细
-          </span>
+          <Space wrap>
+            <Segmented
+              size="small"
+              value={colorTheme}
+              onChange={(v) => setColorTheme(v as "blue" | "warm" | "green")}
+              options={[
+                { label: "蓝阶", value: "blue" },
+                { label: "暖阶", value: "warm" },
+                { label: "绿阶", value: "green" },
+              ]}
+            />
+            <span className="muted">
+              共 {totalCount} 项 · PII {piiTotal} 项 · 悬停查看 / 点击单元格下钻明细
+            </span>
+          </Space>
         }
       >
         {heatData.length === 0 ? (
@@ -615,7 +667,7 @@ function HeatmapTab() {
               color: {
                 type: "linear",
                 domain: [0, maxValue],
-                range: ["#f0f0f0", "#d6e4ff", "#1677ff", "#003eb3"],
+                range: colorRanges[colorTheme],
               },
             }}
             label={{
