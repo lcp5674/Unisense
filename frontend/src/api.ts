@@ -1936,6 +1936,79 @@ export async function updateColumnDescription(
   );
 }
 
+// ---- 表级业务描述 + 描述缺失统计（TD §12.1） ----
+
+export interface TableCoverageItem {
+  catalog_id: number;
+  entity_name: string;
+  source_id: string;
+  entity_type: string;
+  domain: string | null;
+  sensitivity_level: string;
+  table_desc: boolean;
+  total_fields: number;
+  covered_fields: number;
+  missing_fields: number;
+}
+
+export interface DescriptionCoverage {
+  total_tables: number;
+  tables_with_desc: number;
+  tables_missing_desc: number;
+  total_fields: number;
+  fields_with_desc: number;
+  fields_missing_desc: number;
+  per_table: TableCoverageItem[];
+}
+
+export interface TableDescriptionResult {
+  catalog_id: number;
+  description: string;
+  source: string;
+  updated_by: number | null;
+  updated_at: string | null;
+}
+
+export interface InferTableDescriptionResult {
+  catalog_id: number;
+  description: string;
+  source: string;
+  confidence: number;
+}
+
+/** 描述缺失统计（资产地图「描述缺失」tab / 采集目录概览卡） */
+export async function fetchDescriptionCoverage(): Promise<DescriptionCoverage> {
+  return request<DescriptionCoverage>(`${API_BASE}/catalogs/description-coverage`);
+}
+
+/** 人工编辑表级描述 */
+export async function updateTableDescription(
+  catalogId: number,
+  description: string,
+): Promise<TableDescriptionResult> {
+  return request<TableDescriptionResult>(
+    `${API_BASE}/catalogs/${catalogId}/description`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ description }),
+    },
+  );
+}
+
+/** LLM 推断表级描述 */
+export async function inferTableDescription(
+  catalogId: number,
+  fields?: Array<{ name?: string; type?: string }>,
+): Promise<InferTableDescriptionResult> {
+  return request<InferTableDescriptionResult>(
+    `${API_BASE}/catalogs/${catalogId}/infer-table-description`,
+    {
+      method: "POST",
+      body: JSON.stringify({ fields: fields ?? [] }),
+    },
+  );
+}
+
 // ---- 资产地图 ----
 export async function fetchAssetSummary(): Promise<AssetCatalogSummary> {
   return request<AssetCatalogSummary>(`${API_BASE}/assetmap/summary`);

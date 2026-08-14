@@ -1050,6 +1050,11 @@ export interface DBCatalog {
   /** 数据源维度展示信息：源是否已删除 / 源名称 */
   source_deleted?: boolean;
   source_name?: string | null;
+  /** 表级业务描述（治理补全，TD §12.1） */
+  description?: string | null;
+  description_source?: DescriptionSource | null;
+  description_updated_by?: number | null;
+  description_updated_at?: string | null;
 }
 
 export interface CollectResult {
@@ -1215,6 +1220,10 @@ export interface AssetEntityDetail {
   content_signature: string | null;
   /** schema 摘要：结构化字段列表或字符串/null */
   schema_summary?: SchemaColumn[] | string | null;
+  /** 表级业务描述（治理补全，TD §12.1） */
+  description?: string | null;
+  description_source?: DescriptionSource | null;
+  description_updated_at?: string | null;
   /** 血缘相关边数（表/字段级别） */
   lineage_count?: number;
   /** 血缘边明细列表（生产化增强） */

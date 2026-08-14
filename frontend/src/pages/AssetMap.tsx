@@ -25,15 +25,20 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import {
   ApartmentOutlined,
+  CheckOutlined,
+  CloseOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  EditOutlined,
   EyeOutlined,
+  FileTextOutlined,
   GlobalOutlined,
   HeartOutlined,
   HeatMapOutlined,
   SafetyOutlined,
   SearchOutlined,
   TableOutlined,
+  ThunderboltOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { Bar, Pie } from "@ant-design/charts";
@@ -52,9 +57,14 @@ import {
   fetchAssetSearch,
   fetchAssetSummary,
   fetchAssetTables,
+  inferColumnDescription,
+  inferDescriptions,
+  inferTableDescription,
   listCatalogs,
   listDomainTree,
   listMetrics,
+  updateColumnDescription,
+  updateTableDescription,
 } from "../api";
 import type {
   AssetCatalogSummary,
@@ -110,6 +120,19 @@ function renderSchemaSummary(summary: SchemaColumn[] | string | null | undefined
   if (typeof summary === "string") return <span>{summary}</span>;
   if (Array.isArray(summary)) return <SchemaTable columns={summary} editable={false} />;
   return <span className="muted">-</span>;
+}
+
+const DESCRIPTION_SOURCE_TAG: Record<string, { label: string; color: string }> = {
+  manual: { label: "人工编辑", color: "blue" },
+  llm: { label: "LLM 推断", color: "purple" },
+  schema: { label: "采集原始", color: "default" },
+};
+
+function descriptionSourceTag(source?: string | null) {
+  if (!source) return null;
+  const cfg = DESCRIPTION_SOURCE_TAG[source];
+  if (!cfg) return <Tag>{source}</Tag>;
+  return <Tag color={cfg.color}>{cfg.label}</Tag>;
 }
 
 type DrillRow = Record<string, unknown>;
@@ -379,6 +402,11 @@ function GraphTab() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  // 表级描述编辑态（治理补全，TD §12.1）
+  const [tableDescEditing, setTableDescEditing] = useState(false);
+  const [tableDescDraft, setTableDescDraft] = useState("");
+  const [tableDescSaving, setTableDescSaving] = useState(false);
+  const [tableInferring, setTableInferring] = useState(false);
   // 字段信息抽屉（field 节点无 entity_id 时的兜底展示 + 所属表入口）
   const [fieldNode, setFieldNode] = useState<AssetGraphNode | null>(null);
   const [fieldTableNode, setFieldTableNode] = useState<AssetGraphNode | null>(null);
@@ -406,12 +434,76 @@ function GraphTab() {
     setDetailOpen(true);
     setDetailLoading(true);
     setDetail(null);
+    setTableDescEditing(false);
     try {
       setDetail(await fetchAssetEntityDetail(entityId));
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载实体详情失败");
     } finally {
       setDetailLoading(false);
+    }
+  }
+
+  async function refreshDetail() {
+    if (!detail) return;
+    setDetail(await fetchAssetEntityDetail(detail.id));
+  }
+
+  async function handleFieldEdit(col: SchemaColumn, newDesc: string) {
+    if (!detail) return;
+    await updateColumnDescription(detail.id, col.name, newDesc);
+    message.success(`字段「${col.name}」描述已保存`);
+    await refreshDetail();
+  }
+
+  async function handleFieldInfer(col: SchemaColumn) {
+    if (!detail) return;
+    await inferColumnDescription(detail.id, col.name, {
+      entity_name: detail.entity_name,
+      column_type: col.type,
+    });
+    message.success(`字段「${col.name}」描述已生成`);
+    await refreshDetail();
+  }
+
+  async function handleBatchInfer() {
+    if (!detail) return;
+    const res = await inferDescriptions(detail.id);
+    message.success(
+      `批量推断完成：成功 ${res.inferred.length}，跳过 ${res.skipped.length}，失败 ${res.failed.length}`,
+    );
+    await refreshDetail();
+  }
+
+  async function handleTableDescSave() {
+    if (!detail || !tableDescDraft.trim()) return;
+    setTableDescSaving(true);
+    try {
+      await updateTableDescription(detail.id, tableDescDraft.trim());
+      message.success("表级描述已保存");
+      setTableDescEditing(false);
+      await refreshDetail();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "保存表描述失败");
+    } finally {
+      setTableDescSaving(false);
+    }
+  }
+
+  async function handleTableDescInfer() {
+    if (!detail) return;
+    setTableInferring(true);
+    try {
+      const fields = Array.isArray(detail.schema_summary)
+        ? detail.schema_summary.map((c) => ({ name: c.name, type: c.type }))
+        : [];
+      await inferTableDescription(detail.id, fields);
+      message.success("表级描述已生成");
+      await refreshDetail();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "推断表描述失败");
+    } finally {
+      setTableInferring(false);
     }
   }
 
@@ -518,8 +610,76 @@ function GraphTab() {
                   <Tag color="green">完整</Tag>
                 )}
               </Descriptions.Item>
-              <Descriptions.Item label="Schema 摘要">
-                {renderSchemaSummary(detail.schema_summary)}
+              <Descriptions.Item label="表级描述">
+                {tableDescEditing ? (
+                  <Space.Compact style={{ width: "100%" }}>
+                    <Input.TextArea
+                      value={tableDescDraft}
+                      onChange={(e) => setTableDescDraft(e.target.value)}
+                      autoSize={{ minRows: 1, maxRows: 3 }}
+                      disabled={tableDescSaving}
+                      style={{ flex: 1 }}
+                    />
+                    <Button
+                      type="primary"
+                      icon={<CheckOutlined />}
+                      loading={tableDescSaving}
+                      onClick={handleTableDescSave}
+                    />
+                    <Button
+                      icon={<CloseOutlined />}
+                      disabled={tableDescSaving}
+                      onClick={() => setTableDescEditing(false)}
+                    />
+                  </Space.Compact>
+                ) : (
+                  <Space direction="vertical" style={{ width: "100%" }}>
+                    <Space size={4} wrap>
+                      {detail.description ? (
+                        <span>{detail.description}</span>
+                      ) : (
+                        <span className="muted" style={{ fontStyle: "italic" }}>
+                          暂无表级描述
+                        </span>
+                      )}
+                      {descriptionSourceTag(detail.description_source)}
+                    </Space>
+                    <Space>
+                      <Tooltip title="编辑表级描述">
+                        <Button
+                          size="small"
+                          icon={<EditOutlined />}
+                          onClick={() => {
+                            setTableDescDraft(detail.description ?? "");
+                            setTableDescEditing(true);
+                          }}
+                        >
+                          编辑
+                        </Button>
+                      </Tooltip>
+                      <Tooltip title="LLM 推断表级描述">
+                        <Button
+                          size="small"
+                          icon={<ThunderboltOutlined />}
+                          loading={tableInferring}
+                          onClick={handleTableDescInfer}
+                        >
+                          推断
+                        </Button>
+                      </Tooltip>
+                    </Space>
+                  </Space>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="字段描述">
+                <SchemaTable
+                  columns={Array.isArray(detail.schema_summary) ? detail.schema_summary : []}
+                  editable
+                  inferable
+                  onEdit={handleFieldEdit}
+                  onInfer={handleFieldInfer}
+                  onBatchInfer={handleBatchInfer}
+                />
               </Descriptions.Item>
               <Descriptions.Item label="源健康">
                 {detail.source_health ? (
@@ -2005,6 +2165,15 @@ export function AssetMap() {
         </span>
       ),
       children: <HeatmapTab />,
+    },
+    {
+      key: "description",
+      label: (
+        <span>
+          <FileTextOutlined /> 描述缺失
+        </span>
+      ),
+      children: <DescriptionCoverageTab />,
     },
     {
       key: "health",

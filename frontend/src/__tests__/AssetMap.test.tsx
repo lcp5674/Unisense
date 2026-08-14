@@ -19,6 +19,12 @@ vi.mock("../api", () => ({
   fetchAssetSearch: vi.fn(),
   fetchAssetChanges: vi.fn(),
   fetchAssetMyAssets: vi.fn(),
+  fetchDescriptionCoverage: vi.fn(),
+  inferColumnDescription: vi.fn(),
+  inferDescriptions: vi.fn(),
+  inferTableDescription: vi.fn(),
+  updateColumnDescription: vi.fn(),
+  updateTableDescription: vi.fn(),
   listCatalogs: vi.fn(),
   listDomainTree: vi.fn(),
   listMetrics: vi.fn(),
@@ -94,6 +100,8 @@ import {
   fetchAssetSearch,
   fetchAssetChanges,
   fetchAssetMyAssets,
+  fetchDescriptionCoverage,
+  updateTableDescription,
   listCatalogs,
   listDomainTree,
   listMetrics,
@@ -169,6 +177,26 @@ describe("AssetMap", () => {
         sort_order: 1, status: "active", metric_count: 2, children: [],
       },
     ]);
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 2,
+      tables_with_desc: 1,
+      tables_missing_desc: 1,
+      total_fields: 4,
+      fields_with_desc: 2,
+      fields_missing_desc: 2,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", entity_type: "TABLE",
+          domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+        },
+        {
+          catalog_id: 2, entity_name: "dwd_user", source_id: "s2", entity_type: "TABLE",
+          domain: "platform", sensitivity_level: "CONFIDENTIAL", table_desc: true,
+          total_fields: 2, covered_fields: 2, missing_fields: 0,
+        },
+      ],
+    });
   });
 
   it("renders with default graph tab", async () => {
@@ -639,5 +667,92 @@ describe("AssetMap", () => {
       ),
     );
     expect(screen.getByText(/责任人 #1 指标明细（状态：PUBLISHED）/)).toBeInTheDocument();
+  });
+
+  it("description coverage tab shows stats and per-table rows", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+    await user.click(screen.getByText("描述缺失"));
+
+    await waitFor(() => {
+      expect(screen.getByText("字段描述覆盖率")).toBeInTheDocument();
+      expect(screen.getByText("ods_order")).toBeInTheDocument();
+      expect(screen.getByText("dwd_user")).toBeInTheDocument();
+      expect(fetchDescriptionCoverage).toHaveBeenCalled();
+    });
+  });
+
+  it("description coverage row click opens detail drawer with table description", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "ods_order",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: "sig1",
+      schema_summary: [
+        { name: "id", type: "bigint", description: "主键" },
+        { name: "name", type: "varchar" },
+      ],
+      description: "订单明细表",
+      description_source: "manual",
+    } as any);
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+    await user.click(screen.getByText("描述缺失"));
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
+
+    await user.click(screen.getByText("ods_order"));
+    await waitFor(() => {
+      expect(screen.getByText(/订单明细表/)).toBeInTheDocument();
+      expect(screen.getByText("主键")).toBeInTheDocument();
+    });
+  });
+
+  it("description coverage edit table description saves", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "ods_order",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: "sig1",
+      schema_summary: [],
+      description: null,
+      description_source: null,
+    } as any);
+    vi.mocked(updateTableDescription).mockResolvedValue({
+      catalog_id: 1,
+      description: "新表描述",
+      source: "manual",
+      updated_by: 1,
+      updated_at: null,
+    });
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+    await user.click(screen.getByText("描述缺失"));
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
+    await user.click(screen.getByText("ods_order"));
+    await waitFor(() => expect(screen.getByText("暂无表级描述")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /编辑/ }));
+    const textarea = screen.getByRole("textbox");
+    await user.clear(textarea);
+    await user.type(textarea, "新表描述");
+    await user.click(screen.getByRole("button", { name: "保存表描述" }));
+
+    await waitFor(() => {
+      expect(updateTableDescription).toHaveBeenCalledWith(1, "新表描述");
+    });
   });
 });
