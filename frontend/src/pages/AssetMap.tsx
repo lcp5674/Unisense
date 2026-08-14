@@ -70,7 +70,22 @@ function sensitivityTag(s: string | null | undefined) {
 function renderSchemaSummary(summary: SchemaColumn[] | string | null | undefined) {
   if (summary == null || summary === "") return <span className="muted">-</span>;
   if (typeof summary === "string") return <span>{summary}</span>;
-  if (Array.isArray(summary)) return <ObjectView data={summary} />;
+  if (Array.isArray(summary)) {
+    // SchemaColumn[]（并行会话引入的类型）：紧凑列名清单，避免依赖外部渲染组件
+    return (
+      <div style={{ lineHeight: 1.8 }}>
+        {summary.map((c) => (
+          <div key={c.name} style={{ fontSize: 12 }}>
+            <span className="mono">{c.name}</span>
+            {c.type ? <span className="muted" style={{ marginLeft: 6 }}>{c.type}</span> : null}
+            {c.description ? (
+              <span className="muted" style={{ marginLeft: 6 }}>· {c.description}</span>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    );
+  }
   return <span className="muted">-</span>;
 }
 
