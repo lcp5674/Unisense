@@ -20,6 +20,7 @@ vi.mock("../api", () => ({
   fetchAssetChanges: vi.fn(),
   fetchAssetMyAssets: vi.fn(),
   listCatalogs: vi.fn(),
+  listDomainTree: vi.fn(),
   listMetrics: vi.fn(),
 }));
 
@@ -94,6 +95,7 @@ import {
   fetchAssetChanges,
   fetchAssetMyAssets,
   listCatalogs,
+  listDomainTree,
   listMetrics,
 } from "../api";
 
@@ -156,6 +158,17 @@ describe("AssetMap", () => {
     vi.mocked(fetchAssetMyAssets).mockResolvedValue({ owner_id: 1, catalogs: [], metrics: [] });
     vi.mocked(listCatalogs).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
     vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    // 默认域树（含中文名，供热力 Tab 中文域展示断言）
+    vi.mocked(listDomainTree).mockResolvedValue([
+      {
+        id: 1, code: "sales", name: "销售域", parent_id: null, level: 1,
+        sort_order: 0, status: "active", metric_count: 3, children: [],
+      },
+      {
+        id: 2, code: "finance", name: "财务域", parent_id: null, level: 1,
+        sort_order: 1, status: "active", metric_count: 2, children: [],
+      },
+    ]);
   });
 
   it("renders with default graph tab", async () => {
@@ -394,7 +407,7 @@ describe("AssetMap", () => {
         expect.objectContaining({ sensitivity_level: "PII" }),
       ),
     );
-    expect(screen.getByText(/sales · PII 资产明细/)).toBeInTheDocument();
+    expect(screen.getByText(/销售域 · PII 资产明细/)).toBeInTheDocument();
   });
 
   it("search tab metric row click navigates to metric detail", async () => {
@@ -576,7 +589,7 @@ describe("AssetMap", () => {
         expect.objectContaining({ sensitivity_level: "PII", domain: "sales" }),
       ),
     );
-    expect(screen.getByText(/sales · PII 资产明细/)).toBeInTheDocument();
+    expect(screen.getByText(/销售域 · PII 资产明细/)).toBeInTheDocument();
   });
 
   it("heatmap metric view cell drill filters by domain + pii_flag", async () => {
@@ -606,7 +619,7 @@ describe("AssetMap", () => {
         expect.objectContaining({ domain: "sales", pii_flag: true }),
       ),
     );
-    expect(screen.getByText(/sales · PII 资产明细/)).toBeInTheDocument();
+    expect(screen.getByText(/销售域 · PII 资产明细/)).toBeInTheDocument();
   });
 
   it("owner view statistic click drills into owner metric list", async () => {

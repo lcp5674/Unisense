@@ -69,12 +69,14 @@ import type {
   AssetSearchItem,
   AssetTableItem,
   SchemaColumn,
+  SubjectDomainTreeNode,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { SchemaTable } from "../components/SchemaTable";
 import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
+import { DescriptionCoverageTab } from "../components/assetmap/DescriptionCoverageTab";
 import { DrillDownDrawer } from "../components/assetmap/DrillDownDrawer";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
@@ -636,11 +638,37 @@ function HeatmapTab() {
   const [matrix, setMatrix] = useState<AssetHeatmapMatrix | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 业务域 code → 中文名映射（后端仅返回 code，展示需中文）
+  const [domainNames, setDomainNames] = useState<Record<string, string>>({});
   // 条形段下钻抽屉（域 × 敏感级 → 双过滤明细）
   const [drillOpen, setDrillOpen] = useState(false);
   const [drillLoading, setDrillLoading] = useState(false);
   const [drillTitle, setDrillTitle] = useState("");
   const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // 加载域中文名映射（失败不阻塞热力分布，仅回退显示 code）
+    listDomainTree()
+      .then((tree) => {
+        const map: Record<string, string> = {};
+        const walk = (nodes: SubjectDomainTreeNode[]) => {
+          for (const n of nodes) {
+            map[n.code] = n.name;
+            if (n.children?.length) walk(n.children);
+          }
+        };
+        walk(tree);
+        if (!cancelled) setDomainNames(map);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 域 code → 中文名（无映射时回退显示 code）
+  const domainLabel = (code: string) => domainNames[code] ?? code;
 
   useEffect(() => {
     let cancelled = false;
@@ -671,7 +699,7 @@ function HeatmapTab() {
           ? "PII"
           : "内部"
         : (SENSITIVITY_LABEL[sensKey] ?? sensKey);
-    setDrillTitle(`${domain} · ${sensLabel} 资产明细`);
+    setDrillTitle(`${domainLabel(domain)} · ${sensLabel} 资产明细`);
     setDrillOpen(true);
     setDrillLoading(true);
     setDrillRows([]);
@@ -785,7 +813,10 @@ function HeatmapTab() {
               y: {
                 title: "业务域",
                 label: {
-                  formatter: (v: string) => (v.length > 12 ? `${v.slice(0, 12)}…` : v),
+                  formatter: (v: string) => {
+                    const name = domainLabel(v);
+                    return name.length > 12 ? `${name.slice(0, 12)}…` : name;
+                  },
                 },
               },
               x: {
@@ -794,7 +825,7 @@ function HeatmapTab() {
             }}
             tooltip={{
               title: (d: { domain: string; sensitivity: string }) =>
-                `${d.domain} · ${d.sensitivity}`,
+                `${domainLabel(d.domain)} · ${d.sensitivity}`,
               items: [
                 (d: { count: number }) => ({ name: "资产数", value: d.count }),
                 (d: { piiCount: number; sensKey: string }) =>
@@ -803,11 +834,16 @@ function HeatmapTab() {
             }}
             interactions={[{ type: "element-active" }] as any}
             onReady={(plot) => {
+              // G2Plot Bar 的 element:click 事件中 evt.data 即原始数据行；
+              // 兼容个别版本嵌套 { data: { ... } } 的结构
               plot.on(
                 "element:click",
-                (evt: { data?: { data?: { sensKey?: string; domain?: string } } }) => {
-                  const key = evt?.data?.data?.sensKey;
-                  const domain = evt?.data?.data?.domain;
+                (evt: {
+                  data?: { sensKey?: string; domain?: string; data?: { sensKey?: string; domain?: string } };
+                }) => {
+                  const row = evt?.data?.data ?? evt?.data;
+                  const key = row?.sensKey;
+                  const domain = row?.domain;
                   if (key && domain) openBarDrill(key, domain);
                 },
               );
