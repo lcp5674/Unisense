@@ -191,7 +191,7 @@ def _branch_queries(query: exp.Expression) -> list[exp.Select]:
     """将源查询展开为多个 SELECT 分支（UNION 拆开，普通 SELECT 单个）。"""
     if isinstance(query, exp.Union):
         # sqlglot 的 Expression.flatten 泛化成生成器后过滤 SELECT 分支
-        branches: list[Any] = list(query.flatten())  # type: ignore[no-untyped-call]
+        branches: list[Any] = list(query.flatten())
         return [b for b in branches if isinstance(b, exp.Select)]
     if isinstance(query, exp.Select):
         return [query]
