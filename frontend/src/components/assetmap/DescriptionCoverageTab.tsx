@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -42,7 +42,36 @@ import type {
   SchemaColumn,
 } from "../../types";
 import { SchemaTable } from "../SchemaTable";
+import { DrillDownDrawer } from "./DrillDownDrawer";
 import { ENTITY_TYPE_LABEL } from "../../utils/enums";
+
+/**
+ * 概览指标 → 明细下钻的口径标识。
+ * 每个口径对应一组对 per_table 的过滤/排序，点击指标数字后展示其贡献明细。
+ */
+type CoverageMetricKey =
+  | "fieldCoverage"
+  | "fieldsMissing"
+  | "tablesMissing"
+  | "totalTables";
+
+/**
+ * 把 Statistic 的 value 包装成可点击链接，点击触发下钻（沿用资产地图 OverviewTab 的交互）。
+ */
+function clickableValue(onClick: () => void) {
+  return (node: ReactNode) => (
+    <a
+      href="#"
+      onClick={(e) => {
+        e.preventDefault();
+        onClick();
+      }}
+      style={{ cursor: "pointer" }}
+    >
+      {node}
+    </a>
+  );
+}
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -103,6 +132,11 @@ export function DescriptionCoverageTab() {
   const [tableDescSaving, setTableDescSaving] = useState(false);
   const [tableInferring, setTableInferring] = useState(false);
 
+  // 概览指标下钻明细（点击指标数字 → 该口径贡献的 per_table 子集）
+  const [metricDrillOpen, setMetricDrillOpen] = useState(false);
+  const [metricDrillTitle, setMetricDrillTitle] = useState("");
+  const [metricDrillRows, setMetricDrillRows] = useState<TableCoverageItem[]>([]);
+
   async function load() {
     setLoading(true);
     setError(null);
@@ -136,6 +170,44 @@ export function DescriptionCoverageTab() {
   async function refreshDetail() {
     if (!detail) return;
     setDetail(await fetchAssetEntityDetail(detail.id));
+  }
+
+  // 概览指标 → 明细下钻：根据口径过滤/排序已加载的 per_table 子集
+  function openMetricDrill(key: CoverageMetricKey) {
+    if (!coverage) return;
+    const byMissingDesc = (a: TableCoverageItem, b: TableCoverageItem) =>
+      b.missing_fields - a.missing_fields;
+    let rows: TableCoverageItem[];
+    let title: string;
+    switch (key) {
+      case "fieldCoverage":
+        // 字段描述覆盖率 = 已描述字段 / 总字段；展示各表字段覆盖，未完全覆盖的排在前面
+        rows = [...coverage.per_table].sort(byMissingDesc);
+        title = `字段描述覆盖率明细（各表字段覆盖 · 共 ${coverage.total_tables} 张表）`;
+        break;
+      case "fieldsMissing":
+        // 缺失字段数 = 各表 missing_fields 之和；仅列出仍有缺失字段的表
+        rows = coverage.per_table
+          .filter((t) => t.missing_fields > 0)
+          .sort(byMissingDesc);
+        title = `缺失字段明细（${rows.length} 张表待补全字段描述 · 共 ${coverage.fields_missing_desc} 个字段）`;
+        break;
+      case "tablesMissing":
+        // 缺表描述：仅列出 table_desc 为 false 的表
+        rows = coverage.per_table
+          .filter((t) => !t.table_desc)
+          .sort(byMissingDesc);
+        title = `缺表描述明细（${rows.length} 张表待补全表级描述）`;
+        break;
+      case "totalTables":
+      default:
+        rows = [...coverage.per_table];
+        title = `全部表资产明细（共 ${coverage.total_tables} 张表）`;
+        break;
+    }
+    setMetricDrillTitle(title);
+    setMetricDrillRows(rows);
+    setMetricDrillOpen(true);
   }
 
   async function handleFieldEdit(col: SchemaColumn, newDesc: string) {
@@ -295,10 +367,21 @@ export function DescriptionCoverageTab() {
               title="字段描述覆盖率"
               value={fieldCoveragePct}
               suffix="%"
+              valueRender={clickableValue(() => openMetricDrill("fieldCoverage"))}
               valueStyle={{ color: fieldCoveragePct >= 80 ? "#3f8600" : "#cf1322" }}
             />
             <div className="muted" style={{ fontSize: 12 }}>
               {coverage.fields_with_desc} / {coverage.total_fields} 字段有描述
+              {" · "}
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  openMetricDrill("fieldCoverage");
+                }}
+              >
+                查看明细
+              </a>
             </div>
           </Card>
         </Col>
@@ -307,9 +390,22 @@ export function DescriptionCoverageTab() {
             <Statistic
               title="缺失字段数"
               value={coverage.fields_missing_desc}
+              valueRender={clickableValue(() => openMetricDrill("fieldsMissing"))}
               valueStyle={{ color: coverage.fields_missing_desc > 0 ? "#cf1322" : "#3f8600" }}
             />
-            <div className="muted" style={{ fontSize: 12 }}>待 LLM 推断或人工补全</div>
+            <div className="muted" style={{ fontSize: 12 }}>
+              待 LLM 推断或人工补全
+              {" · "}
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  openMetricDrill("fieldsMissing");
+                }}
+              >
+                查看明细
+              </a>
+            </div>
           </Card>
         </Col>
         <Col span={6}>
@@ -317,18 +413,43 @@ export function DescriptionCoverageTab() {
             <Statistic
               title="缺表描述"
               value={coverage.tables_missing_desc}
+              valueRender={clickableValue(() => openMetricDrill("tablesMissing"))}
               valueStyle={{ color: coverage.tables_missing_desc > 0 ? "#cf1322" : "#3f8600" }}
             />
             <div className="muted" style={{ fontSize: 12 }}>
               {coverage.tables_with_desc} / {coverage.total_tables} 表已补全
+              {" · "}
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  openMetricDrill("tablesMissing");
+                }}
+              >
+                查看明细
+              </a>
             </div>
           </Card>
         </Col>
         <Col span={6}>
           <Card size="small">
-            <Statistic title="表总数" value={coverage.total_tables} />
+            <Statistic
+              title="表总数"
+              value={coverage.total_tables}
+              valueRender={clickableValue(() => openMetricDrill("totalTables"))}
+            />
             <div className="muted" style={{ fontSize: 12 }}>
               表级描述覆盖率 {tableCoveragePct}%
+              {" · "}
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  openMetricDrill("totalTables");
+                }}
+              >
+                查看明细
+              </a>
             </div>
           </Card>
         </Col>
@@ -450,6 +571,20 @@ export function DescriptionCoverageTab() {
           </>
         ) : null}
       </Drawer>
+
+      {/* 概览指标下钻明细：点击指标数字展示该口径贡献的 per_table 子集，行点击可进一步下钻实体详情 */}
+      <DrillDownDrawer
+        open={metricDrillOpen}
+        title={metricDrillTitle}
+        columns={columns as unknown as ColumnsType<Record<string, unknown>>}
+        rows={metricDrillRows as unknown as Record<string, unknown>[]}
+        loading={false}
+        onClose={() => setMetricDrillOpen(false)}
+        onRow={(record) => ({
+          onClick: () => openDetail(record.catalog_id as number),
+          style: { cursor: "pointer" },
+        })}
+      />
     </div>
   );
 }
