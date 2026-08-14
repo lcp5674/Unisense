@@ -178,6 +178,8 @@ services:
       UNISENSE_ES_PASSWORD: ${UNISENSE_ES_PASSWORD:-es_changeme}
       # OLAP 可选，默认空（consume 查询会降级 503）
       UNISENSE_OLAP_URL: ${UNISENSE_OLAP_URL:-}
+      # MySQL 查询降级引擎（OLAP 不可用时的只读兜底，指向可执行指标口径的 MySQL 业务库）
+      UNISENSE_MYSQL_FALLBACK_URL: ${UNISENSE_MYSQL_FALLBACK_URL:-mysql+aiomysql://e2e:e2e@mysql:3306/e2e_biz?charset=utf8mb4}
       # JWT 密钥（生产必须通过环境变量注入强密钥）
       UNISENSE_JWT_SECRET: ${UNISENSE_JWT_SECRET:-dev-jwt-secret-change-in-production-32bytes}
       UNISENSE_JWT_ALGORITHM: HS256
