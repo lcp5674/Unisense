@@ -16,6 +16,7 @@ vi.mock("../api", () => ({
   fetchAssetTables: vi.fn(),
   fetchAssetOrphans: vi.fn(),
   fetchAssetEntityDetail: vi.fn(),
+  fetchAssetSearch: vi.fn(),
   listCatalogs: vi.fn(),
   listMetrics: vi.fn(),
 }));
@@ -35,9 +36,11 @@ vi.mock("@ant-design/charts", () => ({
 // 捕获 Heatmap 的 onReady，供单元格下钻测试手动触发 element:click
 const { g6GraphMock, heatmapReadyRef } = vi.hoisted(() => ({
   g6GraphMock: {
+    destroyed: false,
     on: vi.fn(),
     render: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
+    setData: vi.fn(),
     getNodeData: vi.fn<() => { data: Record<string, unknown> | undefined }>(() => ({
       data: undefined,
     })),
@@ -69,6 +72,7 @@ import {
   fetchAssetTables,
   fetchAssetOrphans,
   fetchAssetEntityDetail,
+  fetchAssetSearch,
   listCatalogs,
   listMetrics,
 } from "../api";
@@ -369,5 +373,77 @@ describe("AssetMap", () => {
       ),
     );
     expect(screen.getByText(/sales · PII 资产明细/)).toBeInTheDocument();
+  });
+
+  it("search tab metric row click navigates to metric detail", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetSearch).mockResolvedValue({
+      items: [
+        {
+          type: "metric",
+          id: 1,
+          name: "finance_revenue_sum_d",
+          entity_type: "metric",
+          sensitivity_level: "INTERNAL",
+          domain: "finance",
+          owner_id: 1,
+          status: "PUBLISHED",
+        },
+        {
+          type: "catalog",
+          id: 2,
+          name: "sales.ods",
+          entity_type: "TABLE",
+          sensitivity_level: "PII",
+          domain: null,
+          owner_id: null,
+          status: null,
+        },
+      ],
+      total: 2,
+    });
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /搜索/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /搜索/ }));
+
+    await user.type(screen.getByPlaceholderText(/输入表名 \/ 字段名 \/ 指标编码/), "revenue");
+    await user.click(screen.getByRole("button", { name: /搜\s*索/ }));
+
+    // 指标行渲染为可点击链接
+    await waitFor(() => expect(screen.getByText("finance_revenue_sum_d")).toBeInTheDocument());
+    expect(screen.getByText("finance_revenue_sum_d").closest("a")).not.toBeNull();
+    await user.click(screen.getByText("finance_revenue_sum_d"));
+    await waitFor(() => expect(window.location.pathname).toBe("/detail/finance_revenue_sum_d"));
+  });
+
+  it("search tab catalog row is not a navigable link", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetSearch).mockResolvedValue({
+      items: [
+        {
+          type: "catalog",
+          id: 2,
+          name: "sales.ods",
+          entity_type: "TABLE",
+          sensitivity_level: "PII",
+          domain: null,
+          owner_id: null,
+          status: null,
+        },
+      ],
+      total: 1,
+    });
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /搜索/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /搜索/ }));
+
+    await user.type(screen.getByPlaceholderText(/输入表名 \/ 字段名 \/ 指标编码/), "sales.ods");
+    await user.click(screen.getByRole("button", { name: /搜\s*索/ }));
+
+    await waitFor(() => expect(screen.getByText("sales.ods")).toBeInTheDocument());
+    // 目录行名称不是链接（仅指标行可跳转详情）
+    expect(screen.getByText("sales.ods").closest("a")).toBeNull();
   });
 });

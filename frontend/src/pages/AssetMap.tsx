@@ -1233,6 +1233,7 @@ function TablesTab() {
 // ----------------------------------------------------------------
 
 function SearchTab() {
+  const navigate = useNavigate();
   const [q, setQ] = useState("");
   const [type, setType] = useState<string | undefined>(undefined);
   const [items, setItems] = useState<AssetSearchItem[]>([]);
@@ -1301,6 +1302,12 @@ function SearchTab() {
             rowKey={(r) => `${r.type}-${r.id}-${r.name}`}
             size="small"
             pagination={{ pageSize: 20 }}
+            onRow={(r) => ({
+              onClick: () => {
+                if (r.type === "metric") navigate(`/detail/${encodeURIComponent(r.name)}`);
+              },
+              style: r.type === "metric" ? { cursor: "pointer" } : undefined,
+            })}
             columns={[
               {
                 title: "类型",
@@ -1319,7 +1326,17 @@ function SearchTab() {
                 key: "name",
                 ellipsis: true,
                 render: (v: string, r: AssetSearchItem) =>
-                  r.type === "metric" ? <span className="mono">{v}</span> : v,
+                  r.type === "metric" ? (
+                    <a
+                      className="mono"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`/detail/${encodeURIComponent(v)}`);
+                      }}
+                    >
+                      {v}
+                    </a>
+                  ) : v,
               },
               {
                 title: "实体类型",
