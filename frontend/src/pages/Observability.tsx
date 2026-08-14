@@ -1,12 +1,27 @@
 import { useEffect, useState } from "react";
-import { Card, Tag, Tabs, Statistic, Row, Col } from "antd";
+import { Alert, Card, Tag, Tabs, Statistic, Row, Col } from "antd";
 import {
   fetchObsMetricsQuality,
   fetchObsMetricsApi,
   fetchObsMetricsNotifications,
   fetchObsMetricsLineage,
+  fetchObsOverview,
 } from "../api";
-import { QUALITY_LEVEL_LABEL, NOTIFY_STATUS_LABEL } from "../utils/enums";
+import type { ObsOverview } from "../types";
+import {
+  QUALITY_LEVEL_LABEL,
+  NOTIFY_STATUS_LABEL,
+  SOURCE_HEALTH_LABEL,
+  METRIC_STATUS_LABEL,
+} from "../utils/enums";
+import { auditActionLabel } from "../utils/auditI18n";
+
+const rowStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  padding: "6px 0",
+  borderBottom: "1px solid var(--line-soft)",
+};
 
 function MetricsTab() {
   const [quality, setQuality] = useState<{ by_level: Record<string, number>; by_status: Record<string, number>; total: number } | null>(null);
@@ -55,7 +70,7 @@ function MetricsTab() {
         <Col xs={24} lg={8}>
           <Card title="质量事件级别分布" size="small">
             {Object.entries(quality?.by_level ?? {}).map(([k, v]) => (
-              <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid var(--line-soft)" }}>
+              <div key={k} style={rowStyle}>
                 <Tag color={k === "ERROR" ? "error" : k === "WARN" ? "warning" : "default"}>{QUALITY_LEVEL_LABEL[k] ?? k}</Tag>
                 <span className="mono">{v}</span>
               </div>
@@ -65,7 +80,7 @@ function MetricsTab() {
         <Col xs={24} lg={8}>
           <Card title="通知投递状态" size="small">
             {Object.entries(notif?.by_status ?? {}).map(([k, v]) => (
-              <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid var(--line-soft)" }}>
+              <div key={k} style={rowStyle}>
                 <Tag color={k === "FAILED" ? "error" : k === "SENT" ? "success" : "warning"}>{NOTIFY_STATUS_LABEL[k] ?? k}</Tag>
                 <span className="mono">{v}</span>
               </div>
@@ -75,8 +90,8 @@ function MetricsTab() {
         <Col xs={24} lg={8}>
           <Card title="API 动作分布" size="small">
             {Object.entries(api ?? {}).slice(0, 12).map(([k, v]) => (
-              <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid var(--line-soft)" }}>
-                <span className="mono" style={{ fontSize: 12 }}>{k}</span>
+              <div key={k} style={rowStyle}>
+                <span style={{ fontSize: 12 }}>{auditActionLabel(k)}</span>
                 <span className="mono">{v}</span>
               </div>
             ))}
@@ -87,8 +102,108 @@ function MetricsTab() {
   );
 }
 
+/** 平台概览：数据源健康 / 治理积压 / 资产规模 / 消费接入（生产视角一次拉齐） */
+function OverviewTab() {
+  const [overview, setOverview] = useState<ObsOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchObsOverview()
+      .then(setOverview)
+      .catch((err) => setError(err instanceof Error ? err.message : "加载失败"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return (
+      <div style={{ padding: "32px 0", textAlign: "center", color: "var(--text-tertiary)" }}>
+        加载平台概览…
+      </div>
+    );
+  }
+  if (!overview) {
+    return <Alert type="error" showIcon message="平台概览加载失败" description={error ?? ""} />;
+  }
+
+  return (
+    <div>
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+        <Col xs={24} lg={12}>
+          <Card title="数据源健康" size="small">
+            {Object.keys(overview.sources.by_health).length === 0 ? (
+              <div style={rowStyle}>暂无数据源</div>
+            ) : (
+              Object.entries(overview.sources.by_health).map(([k, v]) => (
+                <div key={k} style={rowStyle}>
+                  <Tag color={k === "healthy" ? "success" : k === "unhealthy" ? "error" : "default"}>
+                    {SOURCE_HEALTH_LABEL[k] ?? k}
+                  </Tag>
+                  <span className="mono">{v}</span>
+                </div>
+              ))
+            )}
+            <div key="total" style={{ ...rowStyle, borderBottom: "none" }}>
+              <span>数据源总数</span>
+              <span className="mono" style={{ fontWeight: 600 }}>{overview.sources.total}</span>
+            </div>
+          </Card>
+        </Col>
+        <Col xs={24} lg={12}>
+          <Card title="治理积压" size="small">
+            <Row gutter={[8, 8]}>
+              <Col span={12}><Statistic title="待处理冲突" value={overview.backlog.open_conflicts} /></Col>
+              <Col span={12}><Statistic title="未关闭质量事件" value={overview.backlog.pending_quality_events} /></Col>
+              <Col span={12}><Statistic title="待审核指标" value={overview.backlog.review_metrics} /></Col>
+              <Col span={12}><Statistic title="未闭环升级" value={overview.backlog.open_escalations} /></Col>
+            </Row>
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={12}>
+          <Card title="资产规模" size="small">
+            {Object.entries(overview.assets.metrics_by_status).map(([k, v]) => (
+              <div key={k} style={rowStyle}>
+                <Tag>{METRIC_STATUS_LABEL[k] ?? k}</Tag>
+                <span className="mono">{v}</span>
+              </div>
+            ))}
+            <div key="terms" style={rowStyle}>
+              <span>术语</span>
+              <span className="mono">{overview.assets.terms}</span>
+            </div>
+            <div key="dimensions" style={rowStyle}>
+              <span>维度</span>
+              <span className="mono">{overview.assets.dimensions}</span>
+            </div>
+            <div key="domains" style={rowStyle}>
+              <span>主题域</span>
+              <span className="mono">{overview.assets.domains}</span>
+            </div>
+            <div key="sources" style={{ ...rowStyle, borderBottom: "none" }}>
+              <span>数据源</span>
+              <span className="mono">{overview.assets.sources}</span>
+            </div>
+          </Card>
+        </Col>
+        <Col xs={24} lg={12}>
+          <Card title="消费接入" size="small">
+            <Row gutter={[8, 8]}>
+              <Col span={12}><Statistic title="接入方总数" value={overview.clients.total} /></Col>
+              <Col span={12}><Statistic title="活跃接入方" value={overview.clients.active} /></Col>
+            </Row>
+          </Card>
+        </Col>
+      </Row>
+    </div>
+  );
+}
+
 export function Observability() {
   const tabItems = [
+    { key: "overview", label: "平台概览", children: <OverviewTab /> },
     { key: "metrics", label: "运行指标", children: <MetricsTab /> },
   ];
 
@@ -98,7 +213,7 @@ export function Observability() {
         <div>
           <div className="page-kicker">Operation / Observability</div>
           <h2>可观测中心</h2>
-          <p>质量/通知/血缘/API 跨模块运行聚合读数。用户反馈与 NPS 见「用户反馈」。</p>
+          <p>平台运营总览：数据源健康、治理积压、资产规模、消费接入与质量/通知/血缘/API 运行读数。用户反馈与 NPS 见「用户反馈」。</p>
         </div>
       </div>
       <Card styles={{ body: { paddingTop: 8 } }}>

@@ -206,3 +206,65 @@ export const CONFLICT_SEVERITY_LABEL: Record<string, string> = {
   medium: "中",
   low: "低",
 };
+
+// ---- 埋点（对齐 frontend track() 上报的事件类型全集）----
+
+export const TRACKING_EVENT_LABEL: Record<string, string> = {
+  // 通用
+  page_view: "页面浏览",
+  view: "页面浏览",
+  button_click: "按钮点击",
+  search: "搜索",
+  export: "导出",
+  // 总览 / 待办 / 收藏
+  dashboard_view: "总览访问",
+  todo_center_view: "待办中心访问",
+  favorites_view: "收藏列表访问",
+  favorite_add: "添加收藏",
+  favorite_remove: "取消收藏",
+  // 指标
+  metric_view: "指标查看",
+  metric_search: "指标搜索",
+  metric_detail_view: "指标详情查看",
+  metric_create: "注册指标",
+  metric_submit: "提交评审",
+  metric_approve: "审核通过",
+  metric_reject: "审核驳回",
+  template_instantiate: "模板实例化",
+  // 消费
+  consume_query: "消费查询",
+  consume_dry_run: "消费校验",
+  consume_semantic: "语义解析查询",
+  consumption_guide_view: "消费指南查看",
+  // 血缘
+  lineage_graph_view: "血缘图查看",
+  lineage_table_detail: "血缘表详情",
+  lineage_query: "血缘查询",
+  lineage_preview: "血缘预览",
+  lineage_parse: "SQL 血缘解析",
+  lineage_channel_runs: "血缘通道运行",
+  lineage_stale_confirm: "血缘失效确认",
+  lineage_stale_restore: "血缘失效恢复",
+  // 治理
+  review_arbitrate: "冲突仲裁",
+  review_escalate: "冲突升级",
+  // AI
+  ai_nl2sql: "AI 问数",
+};
+
+/** 埋点 target_type 取值 → 中文业务标签 */
+export const TRACKING_TARGET_LABEL: Record<string, string> = {
+  dashboard: "仪表盘",
+  page: "页面",
+  metric: "指标",
+  table: "表",
+  todo: "待办",
+  favorite: "收藏",
+  source: "数据源",
+  conflict: "口径冲突",
+  node: "血缘节点",
+  sql: "SQL 解析",
+  edge: "血缘边",
+  ai: "AI 助手",
+  template: "指标模板",
+};

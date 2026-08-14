@@ -122,6 +122,12 @@ async def test_lineage_stats_delegates() -> None:
     assert await svc.lineage_stats() == {"edges": 7}
 
 
+async def test_overview_stats_delegates() -> None:
+    svc, repo = await _svc()
+    repo.overview_stats = AsyncMock(return_value={"sources": {"total": 1}})
+    assert await svc.overview_stats() == {"sources": {"total": 1}}
+
+
 async def test_submit_nps_valid() -> None:
     svc, repo = await _svc()
     out = await svc.submit_nps(user_id=3, score=9)

@@ -84,6 +84,7 @@ import {
   NotifyEventLog,
   ObsMetricsNotifications,
   ObsMetricsQuality,
+  ObsOverview,
   PermissionCheckResult,
   PermissionSnapshot,
   PiiReviewResult,
@@ -1679,6 +1680,10 @@ export async function fetchObsMetricsNotifications(): Promise<ObsMetricsNotifica
 
 export async function fetchObsMetricsLineage(): Promise<{ edges: number }> {
   return request<{ edges: number }>(`${API_BASE}/observability/metrics/lineage`);
+}
+
+export async function fetchObsOverview(): Promise<ObsOverview> {
+  return request<ObsOverview>(`${API_BASE}/observability/overview`);
 }
 
 // ---- 推荐 ----

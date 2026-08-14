@@ -120,6 +120,16 @@ async def lineage_metrics(
     return ok(data=await ObservabilityService(db).lineage_stats(), trace_id=trace_id)
 
 
+@router.get("/overview", dependencies=_READ_DEPS)
+async def overview_metrics(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """平台运营总览：数据源健康 / 治理积压 / 资产规模 / 消费接入 一次拉齐。"""
+    return ok(data=await ObservabilityService(db).overview_stats(), trace_id=trace_id)
+
+
 # ----------------------------------------------------------------
 # P2 Enhancement: NPS 采集 + 反馈采纳闭环
 # ----------------------------------------------------------------

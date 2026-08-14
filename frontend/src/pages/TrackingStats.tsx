@@ -6,7 +6,6 @@ import {
   Col,
   DatePicker,
   Empty,
-  Input,
   Row,
   Select,
   Space,
@@ -19,8 +18,9 @@ import { Bar } from "@ant-design/charts";
 import { ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
-import { fetchTrackingStats } from "../api";
-import type { TrackingGroupBy, TrackingStatsResponse, TrackingStatsRow } from "../types";
+import { fetchTrackingStats, listUsers } from "../api";
+import type { TrackingGroupBy, TrackingStatsResponse, TrackingStatsRow, UserBrief } from "../types";
+import { TRACKING_EVENT_LABEL, TRACKING_TARGET_LABEL } from "../utils/enums";
 
 // 分组字段 → 中文标签（对齐后端 tracking.py _GROUP_BY_ALLOWED 白名单）
 const GROUP_BY_LABEL: Record<TrackingGroupBy, string> = {
@@ -29,25 +29,15 @@ const GROUP_BY_LABEL: Record<TrackingGroupBy, string> = {
   actor_id: "操作用户",
 };
 
-// 事件类型常见值 → 中文（埋点事件 type 多为英文 snake_case，展示时转译；未知值原样展示）
-const EVENT_TYPE_LABEL: Record<string, string> = {
-  page_view: "页面浏览",
-  button_click: "按钮点击",
-  search: "搜索",
-  metric_view: "指标查看",
-  metric_create: "注册指标",
-  metric_submit: "提交评审",
-  metric_approve: "审核通过",
-  metric_reject: "审核驳回",
-  consume_query: "消费查询",
-  consume_dry_run: "消费校验",
-  favorite_add: "添加收藏",
-  favorite_remove: "取消收藏",
-  export: "导出",
-};
+// 事件类型筛选项：已知事件全量业务标签（未收录值保留原值供展示兜底）
+const EVENT_OPTIONS = Object.entries(TRACKING_EVENT_LABEL)
+  .map(([value, label]) => ({ value, label }))
+  .sort((a, b) => a.label.localeCompare(b.label, "zh"));
 
-function groupLabel(key: string, groupBy: TrackingGroupBy): string {
-  if (groupBy === "event_type") return EVENT_TYPE_LABEL[key] ?? key;
+function groupLabel(key: string, groupBy: TrackingGroupBy, userMap: Record<string, string>): string {
+  if (groupBy === "event_type") return TRACKING_EVENT_LABEL[key] ?? key;
+  if (groupBy === "target_type") return TRACKING_TARGET_LABEL[key] ?? key;
+  if (groupBy === "actor_id") return userMap[key] ?? key;
   return key;
 }
 
@@ -79,6 +69,21 @@ export function TrackingStats() {
   const [data, setData] = useState<TrackingStatsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // actor_id → 用户名（业务术语化：操作用户分组不直出数字 ID）
+  const [userMap, setUserMap] = useState<Record<string, string>>({});
+
+  // 加载用户名单一次，供「操作用户」分组显示中文名（display_name 优先）
+  useEffect(() => {
+    listUsers()
+      .then((users: UserBrief[]) => {
+        const map: Record<string, string> = {};
+        for (const u of users) map[String(u.id)] = u.display_name || u.username;
+        setUserMap(map);
+      })
+      .catch(() => {
+        // 用户名单加载失败时回落显示原始 ID，不影响统计主流程
+      });
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -114,7 +119,7 @@ export function TrackingStats() {
 
   const chartData = (data?.stats ?? [])
     .filter((r) => r.event_count > 0)
-    .map((r) => ({ type: groupLabel(r.group_key, groupBy), count: r.event_count }));
+    .map((r) => ({ type: groupLabel(r.group_key, groupBy, userMap), count: r.event_count }));
 
   return (
     <div>
@@ -148,14 +153,15 @@ export function TrackingStats() {
             }))}
           />
           <span className="muted">事件类型：</span>
-          <Input
-            className="mono"
-            placeholder="如 metric_view"
-            style={{ width: 200 }}
+          <Select
+            style={{ width: 220 }}
+            placeholder="全部事件类型"
             allowClear
+            showSearch
+            optionFilterProp="label"
             value={eventType}
-            onChange={(e) => setEventType(e.target.value || undefined)}
-            onPressEnter={load}
+            onChange={(v) => setEventType(v || undefined)}
+            options={EVENT_OPTIONS}
           />
           <span className="muted">日期：</span>
           <DatePicker
@@ -251,7 +257,7 @@ export function TrackingStats() {
                   dataIndex: "group_key",
                   key: "group_key",
                   ellipsis: true,
-                  render: (v: string) => groupLabel(v, groupBy),
+                  render: (v: string) => groupLabel(v, groupBy, userMap),
                 },
                 ...TABLE_COLUMNS.slice(1),
               ]}

@@ -70,6 +70,10 @@ class ObservabilityService(BaseService):
     async def lineage_stats(self) -> dict[str, int]:
         return await self._repo.lineage_stats()
 
+    async def overview_stats(self) -> dict[str, Any]:
+        """平台运营总览聚合（生产视角：健康/积压/资产/消费一次拉齐）。"""
+        return await self._repo.overview_stats()
+
     # ----------------------------------------------------------------
     # P2 Enhancement: NPS 采集 + 反馈采纳闭环
     # ----------------------------------------------------------------

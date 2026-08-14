@@ -906,6 +906,31 @@ export interface ObsMetricsNotifications {
   event_notified: number;
 }
 
+/** 平台运营总览（backend GET /observability/overview） */
+export interface ObsOverview {
+  sources: {
+    by_health: Record<string, number>;
+    total: number;
+  };
+  backlog: {
+    open_conflicts: number;
+    pending_quality_events: number;
+    review_metrics: number;
+    open_escalations: number;
+  };
+  assets: {
+    metrics_by_status: Record<string, number>;
+    terms: number;
+    dimensions: number;
+    domains: number;
+    sources: number;
+  };
+  clients: {
+    total: number;
+    active: number;
+  };
+}
+
 // ============================================================================
 // 推荐（backend /api/v1/recommend/*）
 // ============================================================================

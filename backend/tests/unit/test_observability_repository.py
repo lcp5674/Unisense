@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -84,6 +85,49 @@ class TestObservabilityRepository:
         repo._session.execute = AsyncMock(return_value=mock_result)
         stats = await repo.lineage_stats()
         assert stats == {"edges": 42}
+
+    async def test_overview_stats(self, repo: ObservabilityRepository) -> None:
+        def rows(*items: tuple[Any, int]) -> MagicMock:
+            m = MagicMock()
+            m.all.return_value = list(items)
+            return m
+
+        def scalar(v: int) -> MagicMock:
+            m = MagicMock()
+            m.scalar.return_value = v
+            return m
+
+        # 按 overview_stats 执行顺序：源健康/冲突/质量/指标/升级/指标状态/术语/维度/域/客户端
+        repo._session.execute = AsyncMock(
+            side_effect=[
+                rows(("healthy", 2), ("unknown", 1)),  # sources by health
+                scalar(1),  # open conflicts
+                scalar(2),  # pending quality events
+                scalar(3),  # review metrics
+                scalar(0),  # open escalations
+                rows(("PUBLISHED", 5), ("DRAFT", 2)),  # metrics by status
+                scalar(4),  # terms
+                scalar(3),  # dimensions
+                scalar(2),  # domains
+                scalar(1),  # clients total
+                scalar(1),  # clients active
+            ]
+        )
+        stats = await repo.overview_stats()
+        assert stats["sources"]["by_health"] == {"healthy": 2, "unknown": 1}
+        assert stats["sources"]["total"] == 3
+        assert stats["backlog"] == {
+            "open_conflicts": 1,
+            "pending_quality_events": 2,
+            "review_metrics": 3,
+            "open_escalations": 0,
+        }
+        assert stats["assets"]["metrics_by_status"] == {"PUBLISHED": 5, "DRAFT": 2}
+        assert stats["assets"]["terms"] == 4
+        assert stats["assets"]["dimensions"] == 3
+        assert stats["assets"]["domains"] == 2
+        assert stats["assets"]["sources"] == 3
+        assert stats["clients"] == {"total": 1, "active": 1}
 
     async def test_commit(self, repo: ObservabilityRepository) -> None:
         await repo.commit()
