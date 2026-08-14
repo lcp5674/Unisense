@@ -31,6 +31,7 @@ import { AuditLog } from "./pages/AuditLog";
 import { DataSources } from "./pages/DataSources";
 import { Catalogs } from "./pages/Catalogs";
 import { CollectionTasks } from "./pages/CollectionTasks";
+import { CollectionHistory } from "./pages/CollectionHistory";
 import { SubjectDomain } from "./pages/SubjectDomain";
 import { SystemDict } from "./pages/SystemDict";
 import { TrackingProvider } from "./components/TrackingProvider";
@@ -209,6 +210,7 @@ export default function App() {
             <Route path="/data-sources" element={<DataSources />} />
             <Route path="/catalogs" element={<Catalogs />} />
             <Route path="/collection-tasks" element={<CollectionTasks />} />
+            <Route path="/collection-history" element={<CollectionHistory />} />
             <Route path="/domains" element={<SubjectDomain />} />
             <Route path="/dicts" element={<SystemDict />} />
             <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
