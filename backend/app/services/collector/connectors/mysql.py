@@ -125,6 +125,10 @@ class InformationSchemaCollector(BaseCollector):
                 names.append(str(name))
         return names
 
+    async def list_databases(self) -> list[str]:
+        """枚举实例下全部非系统数据库（复用 _list_schemas，供创建时选择目标库）。"""
+        return await self._list_schemas()
+
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
         """单表元数据刷新：仅查询目标表的列元数据，不触发全源扫描。
 

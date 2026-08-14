@@ -107,6 +107,13 @@ class BaseCollector(ABC):
         self._incremental_mode = mode
         self._incremental_watermark = watermark_ts
 
+    async def list_databases(self) -> list[str]:
+        """枚举该实例下可采集的非系统数据库（创建数据源时选择目标库）。
+
+        连接器不支持枚举（如 Kafka）时返回空列表，前端可回退为手填。
+        """
+        return []
+
     async def probe(self) -> ProbeResult:
         """轻量连接探活（SELECT 1 或等价最小查询），供「测试连接 / 健康检查」使用。
 

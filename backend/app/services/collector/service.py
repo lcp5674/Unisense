@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
@@ -13,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
+from app.core.config import Settings
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.secrets import SecretManager
@@ -87,6 +89,7 @@ class CollectorService(BaseService):
         self._secrets = secrets or SecretManager
         self._events = events or CatalogEventPublisher(get_redis() if _redis_available() else None)
         self._classifier = classifier or SensitivityClassifier()
+        self._settings = Settings()
 
     @staticmethod
     def _to_source_response(src: DataSource) -> DataSourceResponse:
@@ -213,6 +216,31 @@ class CollectorService(BaseService):
             error=probe.error,
             detail=probe.detail,
         )
+
+    async def list_databases(self, source_type: str, cfg: dict[str, Any]) -> list[str]:
+        """枚举实例下可采集的非系统数据库（创建数据源时选择目标库）。
+
+        明文配置构建采集器（与 test_connection 一致），不支持枚举的
+        连接器（如 Kafka）返回空列表，前端回退为手填；任何异常同样返回空。
+
+        Args:
+            source_type: 采集器类型。
+            cfg: 明文连接配置（不落库）。
+
+        Returns:
+            非系统数据库名列表。
+        """
+        from app.services.collector.connectors import registry
+
+        try:
+            collector = registry.build_from_cfg(source_type, cfg)
+            try:
+                return await collector.list_databases()
+            finally:
+                await collector.dispose()
+        except Exception as exc:
+            logger.warning("list_databases_failed: type=%s err=%s", source_type, exc)
+            return []
 
     async def check_connection(self, source_id: str) -> TestConnectionResult:
         """存量数据源实时探活：解密配置 → 轻量连接 → 更新健康状态与探活时间。"""
@@ -506,8 +534,23 @@ class CollectorService(BaseService):
 
     async def list_catalogs(self, params: DBCatalogListParams) -> DBCatalogListResponse:
         cats, total = await self._repo.list_catalogs(params)
+        # 批量补源维度信息（名称 / 删除状态）：join 路径已带瞬态属性，普通路径批量查询
+        source_ids = {c.source_id for c in cats}
+        meta = await self._repo.get_sources_meta(list(source_ids)) if source_ids else {}
+        items: list[DBCatalogResponse] = []
+        for c in cats:
+            resp = DBCatalogResponse.model_validate(c)
+            src_deleted = getattr(c, "_src_deleted", None)
+            if src_deleted is not None:
+                resp.source_deleted = bool(src_deleted)
+                resp.source_name = getattr(c, "_src_name", None) or c.source_id
+            else:
+                name, deleted = meta.get(c.source_id, (None, True))
+                resp.source_deleted = deleted
+                resp.source_name = name or c.source_id
+            items.append(resp)
         return DBCatalogListResponse(
-            items=[DBCatalogResponse.model_validate(c) for c in cats],
+            items=items,
             total=total,
             page=params.page,
             page_size=params.page_size,
@@ -522,8 +565,26 @@ class CollectorService(BaseService):
             )
         return BulkDeprecateResult(succeeded=succeeded, failed=failed)
 
+    @staticmethod
+    async def _emit_progress(
+        progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None, event: dict[str, Any]
+    ) -> None:
+        """触发采集进度回调（回调失败仅告警，不阻断采集主流程）。"""
+        if progress_cb is None:
+            return
+        try:
+            await progress_cb(event)
+        except Exception as exc:  # noqa: BLE001 - 进度推送是辅助能力
+            logger.warning("collect_progress_cb_failed: %s", exc)
+
     async def collect_and_register(
-        self, source_id: str, collector: BaseCollector, actor_id: int, *, mode: str = "FULL"
+        self,
+        source_id: str,
+        collector: BaseCollector,
+        actor_id: int,
+        *,
+        mode: str = "FULL",
+        progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         src = await self._repo.get_source(source_id)
         if src is None:
@@ -553,12 +614,16 @@ class CollectorService(BaseService):
                     else f"source_type_not_supported:{src.source_type}"
                 )
             else:
-                # P0-3: MySQL InnoDB UPDATE_TIME 通常为 NULL，<10%% 表有效时降级全量
+                # P0-3: MySQL InnoDB UPDATE_TIME 通常为 NULL，按占比阈值降级全量
                 if (
                     src.source_type == "mysql"
                     and getattr(collector, "_connector", None) is not None
                     and hasattr(getattr(collector, "_connector", None), "query")
-                    and should_mix_in(src.source_type, getattr(collector, "_connector", None))
+                    and should_mix_in(
+                        src.source_type,
+                        getattr(collector, "_connector", None),
+                        self._settings.collector_mysql_incremental_ratio_threshold,
+                    )
                 ):
                     logger.info(
                         "collect_mysql_update_time_sparse: source=%s, 降级为全量",
@@ -587,6 +652,10 @@ class CollectorService(BaseService):
             )
 
         # US5: 采集成功后更新健康状态
+        await self._emit_progress(
+            progress_cb,
+            {"phase": "start", "message": f"开始采集 {source_id}（{effective_mode} 模式）"},
+        )
         try:
             # P0-6: 注入增量上下文——增量模式且水位有效时连接器只采变更实体
             collector.set_incremental_context(effective_mode, watermark_ts)
@@ -598,12 +667,22 @@ class CollectorService(BaseService):
             await self._db.commit()
             raise
 
+        await self._emit_progress(
+            progress_cb,
+            {
+                "phase": "scanning",
+                "scanned": len(result.specs),
+                "message": f"源端扫描完成，发现 {len(result.specs)} 个实体",
+            },
+        )
+
         registered = 0
         pii_registered = 0
         batch_payloads: list[dict[str, Any]] = []
         drift_events: list[dict[str, Any]] = []
         content_fingerprints: dict[str, str] = {}
         catalog_failed_specs: list[dict[str, str]] = []
+        entities: list[dict[str, Any]] = []
         for spec in result.specs:
             sensitivity = self._classifier.classify(spec.entity_name, spec.schema_json)
             if sensitivity == "PII":
@@ -659,6 +738,26 @@ class CollectorService(BaseService):
                         "change_type": drift_info["change_type"],
                     }
                 )
+            # 明细：本次采集到的实体（供前端"采集结果"展示）
+            entities.append(
+                {
+                    "entity_name": spec.entity_name,
+                    "sensitivity_level": sensitivity,
+                    "drifted": drift_info is not None,
+                    "change_type": drift_info["change_type"] if drift_info is not None else None,
+                }
+            )
+            await self._emit_progress(
+                progress_cb,
+                {
+                    "phase": "registering",
+                    "index": len(entities),
+                    "total": len(result.specs),
+                    "entity_name": spec.entity_name,
+                    "sensitivity": sensitivity,
+                    "message": f"注册 {len(entities)}/{len(result.specs)}：{spec.entity_name}",
+                },
+            )
         # FR-024: 发布1次batch事件而非逐条publish
         if batch_payloads:
             await self._events.publish_batch("catalog_registered", batch_payloads)
@@ -712,6 +811,7 @@ class CollectorService(BaseService):
             "drift_count": len(drift_events),
             "drift_events": drift_events,
             "deprecated_count": deprecated_count,
+            "entities": entities,
         }
 
     async def refresh_entity(

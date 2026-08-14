@@ -1848,3 +1848,150 @@ async def test_collect_and_register_emits_degrade_event():
     payload = events.publish.await_args.args[1]
     assert event_type == "collect_degraded"
     assert payload["reason"] == "source_type_not_supported:postgres"
+
+
+# ---------- 采集进度回调 + 明细（SSE 实时推送） ----------
+
+
+async def test_collect_and_register_emits_progress_and_entities():
+    """progress_cb 逐阶段回调 + 结果含 entities 明细（供前端展示本次采集到哪些表）。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock())
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+
+    class StubCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec("t1", "TABLE", {"columns": ["a"]}),
+                    CatalogSpec("t2", "TABLE", {"columns": ["b"]}),
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    emitted: list[dict] = []
+
+    async def progress_cb(event: dict) -> None:
+        emitted.append(event)
+
+    result = await svc.collect_and_register(
+        "s", StubCollector(), actor_id=1, progress_cb=progress_cb
+    )
+    # 阶段：start → scanning → registering×2
+    phases = [e["phase"] for e in emitted]
+    assert phases == ["start", "scanning", "registering", "registering"]
+    assert emitted[-1]["index"] == 2
+    assert emitted[-1]["total"] == 2
+    # entities 明细
+    assert [e["entity_name"] for e in result["entities"]] == ["t1", "t2"]
+    assert result["entities"][0]["sensitivity_level"] in (
+        "PII",
+        "INTERNAL",
+        "CONFIDENTIAL",
+        "PUBLIC",
+    )
+
+
+async def test_collect_and_register_progress_cb_failure_does_not_break():
+    """进度回调抛异常只告警，不阻断采集主流程。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock())
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+
+    class StubCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(specs=[], failed_specs=[], source_id="s")
+
+    async def broken_cb(event: dict) -> None:
+        raise RuntimeError("store down")
+
+    result = await svc.collect_and_register("s", StubCollector(), actor_id=1, progress_cb=broken_cb)
+    assert result["scanned"] == 0
+    assert result["registered"] == 0
+
+
+async def test_list_databases_delegates_to_connector():
+    """list_databases 用明文配置构建采集器并委托 list_databases。"""
+    svc, _repo = _svc()
+    fake_collector = MagicMock()
+    fake_collector.list_databases = AsyncMock(return_value=["db1", "db2"])
+    fake_collector.dispose = AsyncMock()
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg",
+        return_value=fake_collector,
+    ):
+        dbs = await svc.list_databases("mysql", {"host": "h", "database": "d"})
+    assert dbs == ["db1", "db2"]
+    fake_collector.dispose.assert_awaited_once()
+
+
+async def test_list_databases_failure_returns_empty():
+    """连接器构建/枚举失败时返回空列表（不抛出，前端回退手填）。"""
+    svc, _repo = _svc()
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg",
+        side_effect=RuntimeError("down"),
+    ):
+        dbs = await svc.list_databases("mysql", {"host": "h"})
+    assert dbs == []
+
+
+async def test_repo_list_catalogs_source_status_active_uses_join():
+    """source_status=active 时外连接 DataSource 过滤仅活跃源，并挂瞬态属性。"""
+    s = MagicMock()
+    res = MagicMock()
+    cat = SimpleNamespace(source_id="mysql_unisense", entity_name="t1")
+    res.all.return_value = [(cat, None, "MySQL 主库")]
+    res.scalar.return_value = 1
+    s.execute = AsyncMock(return_value=res)
+    s.scalar = AsyncMock(return_value=1)
+    repo = CollectorRepository(s)
+    params = SimpleNamespace(
+        source_id=None,
+        entity_type=None,
+        sensitivity_level=None,
+        keyword=None,
+        source_status="active",
+        page=1,
+        page_size=20,
+    )
+    items, total = await repo.list_catalogs(params)
+    assert total == 1
+    assert items[0]._src_deleted is False
+    assert items[0]._src_name == "MySQL 主库"
+    compiled = str(
+        s.execute.call_args_list[0].args[0].compile(compile_kwargs={"literal_binds": True})
+    )
+    assert "data_source" in compiled  # 已 join DataSource
+
+
+async def test_repo_get_sources_meta():
+    """批量取数据源名称与删除状态。"""
+    s = MagicMock()
+    res = MagicMock()
+    res.all.return_value = [
+        ("mysql_a", "A", None),
+        ("mysql_b", "B", datetime(2026, 1, 1, tzinfo=UTC)),
+    ]
+    s.execute = AsyncMock(return_value=res)
+    repo = CollectorRepository(s)
+    meta = await repo.get_sources_meta(["mysql_a", "mysql_b", "missing"])
+    assert meta["mysql_a"] == ("A", False)
+    assert meta["mysql_b"] == ("B", True)
+    assert "missing" not in meta

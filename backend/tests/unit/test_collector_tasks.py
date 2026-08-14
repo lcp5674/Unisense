@@ -112,7 +112,12 @@ async def test_run_success_with_injected_svc_db_collector():
     )
 
     assert result == {"scanned": 2, "source_id": "src1"}
-    svc.collect_and_register.assert_awaited_once_with("src1", collector, 1, mode="FULL")
+    svc.collect_and_register.assert_awaited_once()
+    call = svc.collect_and_register.await_args
+    assert call.args[:3] == ("src1", collector, 1)
+    assert call.kwargs["mode"] == "FULL"
+    # 注入 job_store 时须传入进度回调（供 SSE 实时推送）
+    assert callable(call.kwargs["progress_cb"])
     db.commit.assert_awaited_once()
     store.set.assert_awaited_once_with("job1", "COMPLETED", result)
     # 注入会话非 own_session：不得关闭会话或采集器

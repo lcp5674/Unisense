@@ -190,6 +190,9 @@ class DBCatalogResponse(BaseModel):
     upstream_signature: str
     content_signature: str | None = None
     schema_incomplete: bool = False
+    # 数据源维度展示信息（默认 False/None——源被软删或不存在时 source_deleted=True）
+    source_deleted: bool = False
+    source_name: str | None = None
 
 
 class DBCatalogListParams(BaseModel):
@@ -199,6 +202,8 @@ class DBCatalogListParams(BaseModel):
     entity_type: str | None = None
     sensitivity_level: str | None = None
     keyword: str | None = Field(default=None, max_length=128)
+    # 源状态过滤：active（仅活跃源）/ deleted（仅已删除源）/ None（全部）
+    source_status: str | None = Field(default=None, pattern=r"^(active|deleted)$")
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=200)
 

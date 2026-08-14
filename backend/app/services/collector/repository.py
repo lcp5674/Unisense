@@ -230,6 +230,10 @@ class CollectorRepository:
         return existing, False, drift_info
 
     async def list_catalogs(self, params: Any) -> tuple[Sequence[DBCatalog], int]:
+        # 按源状态过滤时需外连接 DataSource（取删除状态）；否则保持原查询不变
+        if getattr(params, "source_status", None) in ("active", "deleted"):
+            return await self._list_catalogs_with_source_status(params)
+
         base = select(DBCatalog).where(DBCatalog.deleted_at.is_(None))
         if params.source_id:
             base = base.where(DBCatalog.source_id == params.source_id)
@@ -256,6 +260,71 @@ class CollectorRepository:
         )
         res = await self._db.execute(stmt)
         return res.scalars().all(), total
+
+    async def _list_catalogs_with_source_status(
+        self, params: Any
+    ) -> tuple[Sequence[DBCatalog], int]:
+        """按源状态过滤目录（active=仅活跃源 / deleted=仅已删除源）。
+
+        外连接 DataSource 取删除状态与名称，并以瞬态属性（``_src_deleted`` /
+        ``_src_name``）挂到 ORM 对象上，供 service 层组装响应——不改变
+        list_catalogs 的返回形态，避免破坏既有调用方。
+        """
+        base = (
+            select(DBCatalog, DataSource.deleted_at, DataSource.name)
+            .outerjoin(DataSource, DataSource.source_id == DBCatalog.source_id)
+            .where(DBCatalog.deleted_at.is_(None))
+        )
+        if params.source_id:
+            base = base.where(DBCatalog.source_id == params.source_id)
+        if params.entity_type:
+            base = base.where(DBCatalog.entity_type == params.entity_type)
+        if params.sensitivity_level:
+            base = base.where(DBCatalog.sensitivity_level == params.sensitivity_level)
+        if params.keyword:
+            escaped = params.keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            base = base.where(
+                or_(
+                    DBCatalog.entity_name.ilike(f"%{escaped}%"),
+                    cast(DBCatalog.schema_json, String).ilike(f"%{escaped}%"),
+                )
+            )
+        if params.source_status == "active":
+            base = base.where(DataSource.deleted_at.is_(None))
+        else:
+            base = base.where(DataSource.deleted_at.isnot(None))
+        count = await self._db.scalar(select(func.count()).select_from(base.subquery()))
+        total = int(count) if count is not None else 0
+        stmt = (
+            base.order_by(DBCatalog.id)
+            .offset((params.page - 1) * params.page_size)
+            .limit(params.page_size)
+        )
+        res = await self._db.execute(stmt)
+        cats: list[DBCatalog] = []
+        for row in res.all():
+            cat = row[0]
+            # 瞬态属性（不入库），供 service 组装 source_deleted / source_name
+            cat._src_deleted = row[1] is not None
+            cat._src_name = row[2]
+            cats.append(cat)
+        return cats, total
+
+    async def get_sources_meta(self, source_ids: Sequence[str]) -> dict[str, tuple[str, bool]]:
+        """批量取数据源名称与删除状态（供目录展示 source 维度信息）。
+
+        Returns:
+            {source_id: (名称, 是否已删除)}；源不存在时不在结果中。
+        """
+        ids = list(source_ids)
+        if not ids:
+            return {}
+        res = await self._db.execute(
+            select(DataSource.source_id, DataSource.name, DataSource.deleted_at).where(
+                DataSource.source_id.in_(ids)
+            )
+        )
+        return {row[0]: (row[1] or row[0], row[2] is not None) for row in res.all()}
 
     async def list_active_entity_names(self, source_id: str) -> list[str]:
         """返回数据源下所有未废弃（deleted_at IS NULL）的实体名，用于对账。"""

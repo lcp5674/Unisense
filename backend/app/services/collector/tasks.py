@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.db.mysql import async_session_factory
@@ -25,6 +26,44 @@ from app.services.collector.service import CollectorService
 from app.services.collector.spi import build_collector
 
 logger = logging.getLogger("unisense.collector.tasks")
+
+#: 进度日志保留上限（避免长任务在 Redis/内存中无限膨胀）
+_MAX_PROGRESS_MESSAGES = 300
+
+
+def _make_progress_cb(
+    store: Any, job_id: str, source_id: str, actor_id: int
+) -> Callable[[dict[str, Any]], Awaitable[None]]:
+    """构造写入 JobStore 的采集进度回调（供 SSE 实时推送）。
+
+    每次回调把最新进度快照写入 ``store.set(job_id, "RUNNING", {...})``；
+    消息列表保留最近 N 条，Redis/内存中不无限增长。
+    """
+    messages: list[str] = []
+
+    async def cb(event: dict[str, Any]) -> None:
+        msg = str(event.get("message") or "")
+        if msg:
+            messages.append(msg)
+            if len(messages) > _MAX_PROGRESS_MESSAGES:
+                del messages[: len(messages) - _MAX_PROGRESS_MESSAGES]
+        progress = {
+            "phase": event.get("phase"),
+            "message": msg,
+            "messages": messages[-50:],
+            "index": event.get("index"),
+            "total": event.get("total"),
+            "entity_name": event.get("entity_name"),
+            "scanned": event.get("scanned"),
+            "sensitivity": event.get("sensitivity"),
+        }
+        await store.set(
+            job_id,
+            "RUNNING",
+            {"source_id": source_id, "actor_id": actor_id, "progress": progress},
+        )
+
+    return cb
 
 
 async def _check_idempotency(redis: Any | None, job_id: str) -> bool:
@@ -96,7 +135,15 @@ async def run_collection_task(
         if collector is None:
             raise RuntimeError(f"采集器不可用: {source_id}")
 
-        result = await svc.collect_and_register(source_id, collector, actor_id, mode=mode)
+        # 构造进度回调：worker 侧把 RUNNING 进度写入 JobStore，供 SSE 实时推送
+        progress_cb = (
+            _make_progress_cb(store, job_id, source_id, actor_id)
+            if store is not None
+            else None
+        )
+        result = await svc.collect_and_register(
+            source_id, collector, actor_id, mode=mode, progress_cb=progress_cb
+        )
         # P0-4: 成功路径必须提交——worker 会话无外部调用方 commit，
         # 否则 upsert 的 catalogs / watermark / health 全部不落库（采集等于没执行）。
         if db is not None:

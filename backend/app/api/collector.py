@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import time
 import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -156,6 +159,26 @@ async def test_connection(
     )
     await db.commit()
     return ok(data=result, trace_id=trace_id)
+
+
+@source_router.post("/databases", dependencies=_WRITE_DEPS)
+async def list_databases(
+    body: TestConnectionRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """FR-030: 枚举实例下可采集的非系统数据库（创建数据源时选择目标库）。
+
+    与 test-connection 同构（明文配置，不落库）；连接器不支持枚举时返回空列表。
+    """
+    svc = _svc(db)
+    source_type_value = (
+        body.source_type.value if hasattr(body.source_type, "value") else str(body.source_type)
+    )
+    databases = await svc.list_databases(source_type_value, body.connection_config)
+    return ok(data={"databases": databases, "source_type": source_type_value}, trace_id=trace_id)
 
 
 @source_router.get("/jobs", dependencies=_READ_DEPS)
@@ -540,6 +563,63 @@ async def get_collection_job(
     if status is None:
         raise NotFoundError(f"采集任务不存在: {job_id}", ctx={"job_id": job_id})
     return ok(data=status, trace_id=trace_id)
+
+
+def _sse_event(event: str, data: dict[str, Any]) -> str:
+    """构造一条 SSE 消息（event + JSON data）。"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+@source_router.get("/jobs/{job_id}/stream", dependencies=_READ_DEPS)
+async def stream_collection_job(
+    job_id: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> StreamingResponse:
+    """SSE 实时推送采集任务进度（轮询 JobStore，1s 粒度）。
+
+    事件流：
+    - ``progress``：RUNNING 中的进度快照（phase / index / total / messages）
+    - ``done``：终态快照（COMPLETED 含完整结果 / FAILED 含 error）
+    - ``error``：任务不存在或推送超时
+
+    客户端断开即停止；单连接最长 1800s（与 worker job_timeout 对齐）。
+    """
+    from app.core.config import settings as _settings
+    from app.services.collector.queue import create_collection_queue
+
+    async def event_gen() -> Any:
+        q = create_collection_queue(redis_url=_settings.redis_url)
+        getter = getattr(q, "get", None)
+        start = time.monotonic()
+        while True:
+            if await request.is_disconnected():
+                break
+            status = await getter(job_id) if getter is not None else None
+            if status is None:
+                yield _sse_event("error", {"message": f"采集任务不存在: {job_id}"})
+                break
+            if status.get("status") in ("COMPLETED", "FAILED"):
+                yield _sse_event("progress", status)
+                yield _sse_event("done", status)
+                break
+            yield _sse_event("progress", status)
+            if time.monotonic() - start > 1800:
+                yield _sse_event("error", {"message": "进度推送超时（1800s）"})
+                break
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @source_router.get("/{source_id}/watermark", dependencies=_READ_DEPS)
