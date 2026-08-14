@@ -74,6 +74,35 @@ class TestManagerInitialize:
         assert mgr.active_fernet is not None
         assert mgr._active_key is not None
 
+    def test_init_key_deterministic_across_instances(self, monkeypatch) -> None:
+        """SEC-01 回归：显式密钥路径两次 initialize 派生相同活跃密钥。
+
+        随机盐曾导致每个进程/每次重启派生不同密钥 → 跨进程解密失败
+        （先前加密落库的连接配置全部无法解密，数据回归）。
+        """
+        monkeypatch.setenv("UNISENSE_FERNET_KEY", "explicit-key-material")
+        monkeypatch.setenv("UNISENSE_ENV", "local")
+        m1 = KeyRotationManager()
+        m1.initialize()
+        m2 = KeyRotationManager()
+        m2.initialize()
+        assert m1._active_key == m2._active_key
+        # 跨实例互解密也应成功（同一密钥）
+        token = m1.active_fernet.encrypt(b"payload")
+        assert m2.decrypt_with_any_key(token) == b"payload"
+
+    def test_init_dev_key_deterministic_across_instances(self, monkeypatch) -> None:
+        """SEC-01 回归：开发默认密钥路径跨实例派生一致。"""
+        monkeypatch.delenv("UNISENSE_FERNET_KEY", raising=False)
+        monkeypatch.setenv("UNISENSE_ENV", "local")
+        m1 = KeyRotationManager()
+        m1.initialize()
+        m2 = KeyRotationManager()
+        m2.initialize()
+        assert m1._active_key == m2._active_key
+        token = m1.active_fernet.encrypt(b"dev-payload")
+        assert m2.decrypt_with_any_key(token) == b"dev-payload"
+
     def test_init_salt_prefix_format(self, monkeypatch) -> None:
         import base64
 

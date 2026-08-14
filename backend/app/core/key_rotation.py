@@ -30,6 +30,13 @@ PBKDF2_ITERATIONS = 600_000
 PBKDF2_SALT_MIN_LENGTH = 16
 PBKDF2_ALGORITHM = "sha256"
 
+# 确定性盐（与 secrets.py `_build_key` 保持一致）。
+# SEC-01 修复：绝不可用随机盐——`derive_key_pbkdf2` 默认 salt=None 时会 os.urandom，
+# 导致每个进程/每次重启派生不同的活跃密钥，先前用 Fernet 加密落库的连接配置将
+# 全部无法解密（数据回归）。固定盐保证跨进程、跨重启派生一致。
+_SALT_RAW = b"unisense-fernet-salt"[:16]
+_SALT_DEV = b"dev-salt-16byte!"
+
 
 def derive_key_pbkdf2(password: str, salt: bytes | None = None) -> tuple[bytes, bytes]:
     """使用 PBKDF2-HMAC-SHA256 派生 Fernet 密钥。
@@ -97,9 +104,9 @@ class KeyRotationManager:
                     "生产环境 UNISENSE_FERNET_KEY 必须独立配置，"
                     "禁止从 JWT_SECRET 派生降级。请设置独立的 Fernet 密钥后重启。"
                 )
-            # 开发环境：使用 PBKDF2 派生开发密钥
+            # 开发环境：使用 PBKDF2 派生开发密钥（固定盐，保证跨进程一致）
             dev_secret = "dev-fernet-key-for-local-testing-only"
-            active_key, salt = derive_key_pbkdf2(dev_secret)
+            active_key, salt = derive_key_pbkdf2(dev_secret, _SALT_DEV)
         else:
             # 尝试解析 salt:key 格式
             if ":" in raw and len(raw.split(":")) == 2:
@@ -109,11 +116,11 @@ class KeyRotationManager:
                     active_key = base64.urlsafe_b64decode(parts[1])
                     active_key = base64.urlsafe_b64encode(active_key)
                 except Exception:
-                    # 解析失败，用 PBKDF2 重新派生
-                    active_key, salt = derive_key_pbkdf2(raw)
+                    # 解析失败，用 PBKDF2 重新派生（固定盐）
+                    active_key, salt = derive_key_pbkdf2(raw, _SALT_RAW)
             else:
-                # 无 salt 前缀，用 PBKDF2 派生
-                active_key, salt = derive_key_pbkdf2(raw)
+                # 无 salt 前缀，用 PBKDF2 派生（固定盐）
+                active_key, salt = derive_key_pbkdf2(raw, _SALT_RAW)
 
         self._active_key = active_key
         self._active_salt = salt
