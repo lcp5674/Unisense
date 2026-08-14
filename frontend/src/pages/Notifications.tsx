@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Tooltip } from "antd";
-import { PlusOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination } from "antd";
+import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined } from "@ant-design/icons";
 import {
   listNotifications,
   listNotifyEvents,
@@ -167,6 +167,27 @@ function formatNotifyBody(body: string | null): string {
   return body;
 }
 
+// 把正文解析为结构化字段（{标签, 值}），供卡片网格化展示——每条信息一目了然、完整呈现
+function parseNotifyBodyFields(body: string | null, payload: Record<string, unknown> | null): { label: string; value: string }[] {
+  const text = formatNotifyBody(body);
+  if (text) {
+    return text
+      .split("\n")
+      .map((line) => {
+        const idx = line.indexOf("：");
+        if (idx > 0) return { label: line.slice(0, idx), value: line.slice(idx + 1) };
+        return { label: "", value: line };
+      })
+      .filter((f) => f.value !== "" && f.value !== "无");
+  }
+  if (payload && Object.keys(payload).length > 0) {
+    return Object.entries(payload)
+      .filter(([k]) => k !== "event_type" && k !== "payload")
+      .map(([k, v]) => ({ label: PAYLOAD_FIELD_LABEL_FE[k] ?? k, value: humanizeFeValue(k, v) }));
+  }
+  return [];
+}
+
 // 所属模块（业务术语）
 const SOURCE_LABEL: Record<string, string> = {
   metric: "指标",
@@ -202,10 +223,26 @@ const REF_TYPE_LABEL: Record<string, string> = {
 const CHANNELS = ["email", "webhook", "sms", "in_app"];
 const EVENT_TYPES = ["metric.created", "metric.published", "metric.deprecated", "quality.anomaly", "conflict_open", "conflict_escalated", "grant.granted", "grant.revoked", "pii.reviewed", "benchmark.imported", "governance.grant", "lineage.change", "system.notice"];
 
+// 通知状态 → 卡片左侧状态条颜色（沿「校准仪表」设计语言：成功=数据青绿、失败=告警红、待发送=信号琥珀）
+const NOTIF_STATUS_BAR: Record<string, string> = {
+  SENT: "#0e7c86",
+  FAILED: "#d64545",
+  PENDING: "#e8862d",
+};
+
+// ISO 时间 → "YYYY-MM-DD HH:mm"（截断毫秒，展示更整洁）
+function formatTime(v: string | null | undefined): string {
+  if (!v) return "";
+  const t = v.includes("T") ? v.replace("T", " ").replace(/\.\d+/, "") : v;
+  return t.length > 19 ? t.slice(0, 19) : t;
+}
+
 function NotifListTab() {
   const [items, setItems] = useState<Notification[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
 
   async function load() {
     setLoading(true);
@@ -225,45 +262,90 @@ function NotifListTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const columns = [
-    { title: "编号", dataIndex: "id", key: "id", width: 70 },
-    { title: "标题", dataIndex: "title", key: "title", render: (v: string) => eventTypeLabel(v) },
-    {
-      title: "内容",
-      dataIndex: "body",
-      key: "body",
-      render: (v: string | null) => {
-        const text = formatNotifyBody(v);
-        if (!text) return <span className="muted">—</span>;
-        return (
-          <Tooltip title={<div style={{ whiteSpace: "pre-wrap" }}>{text}</div>}>
-            <div style={{ whiteSpace: "pre-wrap", maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
-              {text}
-            </div>
-          </Tooltip>
-        );
-      },
-    },
-    { title: "送达方式", dataIndex: "channel", key: "channel", width: 100, render: (v: string) => <Tag>{CHANNEL_LABEL[(v ?? "").toLowerCase()] ?? v}</Tag> },
-    {
-      title: "状态",
-      dataIndex: "status",
-      key: "status",
-      width: 100,
-      render: (v: string) => <Tag color={v === "SENT" ? "success" : v === "FAILED" ? "error" : "warning"}>{NOTIFY_STATUS_LABEL[v] ?? v}</Tag>,
-    },
-    {
-      title: "关联对象",
-      dataIndex: "ref_type",
-      key: "ref",
-      width: 140,
-      render: (v: string | null, r: Notification) =>
-        v ? `${REF_TYPE_LABEL[v] ?? v} #${r.ref_id}` : <span className="muted">—</span>,
-    },
-    { title: "送达时间", dataIndex: "sent_at", key: "sent", width: 170, render: (v: string | null) => v ?? <span className="muted">尚未送达</span> },
-  ];
+  const start = (page - 1) * pageSize;
+  const pageItems = items.slice(start, start + pageSize);
 
-  return <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize: 20, total, showTotal: (t) => `共 ${t} 条` }} locale={{ emptyText: "暂无通知" }} />;
+  return (
+    <div>
+      {loading ? (
+        <div className="notif-loading">
+          <Spin />
+          <span className="muted">正在加载消息…</span>
+        </div>
+      ) : items.length === 0 ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无通知" style={{ padding: "32px 0" }} />
+      ) : (
+        <>
+          <div className="notif-stream">
+            {pageItems.map((n) => {
+              const statusKey = n.status ?? "";
+              const fields = parseNotifyBodyFields(n.body, n.payload);
+              const singleLine = fields.length <= 1;
+              return (
+                <div key={n.id} className="notif-card">
+                  <div className="notif-bar" style={{ background: NOTIF_STATUS_BAR[statusKey] ?? "#c4cbd6" }} />
+                  <div className="notif-main">
+                    <div className="notif-head">
+                      <span className="notif-title">{eventTypeLabel(n.title)}</span>
+                      <div className="notif-head-right">
+                        {n.sent_at && <span className="notif-sent-time">已送达 {formatTime(n.sent_at)}</span>}
+                        <Tag
+                          className="notif-status"
+                          color={n.status === "SENT" ? "success" : n.status === "FAILED" ? "error" : "warning"}
+                        >
+                          {NOTIFY_STATUS_LABEL[n.status] ?? n.status}
+                        </Tag>
+                      </div>
+                    </div>
+                    {fields.length > 0 && (
+                      <div className={`notif-body${singleLine ? " notif-body-single" : ""}`}>
+                        {fields.map((f, i) =>
+                          f.label ? (
+                            <div key={i} className="notif-body-field">
+                              <span className="notif-body-label">{f.label}</span>
+                              <span className="notif-body-value">{f.value}</span>
+                            </div>
+                          ) : (
+                            <div key={i} className="notif-body-full">{f.value}</div>
+                          ),
+                        )}
+                      </div>
+                    )}
+                    <div className="notif-meta">
+                      <span className="notif-meta-item">
+                        <SendOutlined /> {CHANNEL_LABEL[(n.channel ?? "").toLowerCase()] ?? n.channel}
+                      </span>
+                      {n.ref_type && n.ref_id != null && (
+                        <span className="notif-meta-item">
+                          <LinkOutlined /> {REF_TYPE_LABEL[n.ref_type] ?? n.ref_type} #{n.ref_id}
+                        </span>
+                      )}
+                      <span className="notif-meta-item">
+                        <ClockCircleOutlined /> 触发于 {formatTime(n.created_at)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <Pagination
+            className="notif-pagination"
+            current={page}
+            pageSize={pageSize}
+            total={total}
+            showTotal={(t) => `共 ${t} 条`}
+            showSizeChanger
+            pageSizeOptions={[10, 20, 50]}
+            onChange={(p, ps) => {
+              setPage(p);
+              setPageSize(ps);
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
 }
 
 function SubscriptionsTab() {

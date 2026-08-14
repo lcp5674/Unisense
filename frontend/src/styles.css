@@ -664,3 +664,151 @@ body {
 .tree-add-child-btn:focus-visible {
   opacity: 1;
 }
+
+/* ============ 通知中心 · 卡片式通知流 ============ */
+.notif-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px 0;
+  color: var(--muted);
+}
+
+.notif-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 单条通知卡片：左侧状态条 + 主体（标题/正文/元信息） */
+.notif-card {
+  display: flex;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.notif-card:hover {
+  border-color: #cdd5e0;
+  box-shadow: 0 2px 8px rgba(12, 22, 38, 0.05);
+}
+
+.notif-bar {
+  width: 4px;
+  flex: 0 0 auto;
+  align-self: stretch;
+}
+
+.notif-main {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 16px 10px;
+}
+
+/* 标题行：业务标题 + 状态标签 */
+.notif-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notif-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.notif-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.notif-sent-time {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.notif-status {
+  margin-inline-end: 0;
+  flex: 0 0 auto;
+}
+
+/* 正文：结构化字段网格（替代纯文本堆叠）——每条信息一目了然、完整呈现 */
+.notif-body {
+  margin-top: 8px;
+  background: var(--paper);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 8px 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 5px 24px;
+}
+
+/* 字段较少（1 条）时退化为整行，避免空荡 */
+.notif-body-single {
+  display: block;
+}
+
+.notif-body-field {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  min-width: 0;
+}
+
+.notif-body-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.notif-body-value {
+  color: var(--ink);
+  word-break: break-word;
+  min-width: 0;
+}
+
+.notif-body-full {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+/* 元信息区：送达方式 / 关联对象 / 时间，发丝线分隔 */
+.notif-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.notif-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.notif-meta-item .anticon {
+  font-size: 12px;
+  color: var(--data);
+}
+
+.notif-pagination {
+  margin-top: 16px;
+  text-align: right;
+}
