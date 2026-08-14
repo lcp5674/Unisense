@@ -305,6 +305,11 @@ POST   /sources/{id}/import          # 通道B：提交 DDL/JSON + 样本（人�
 GET    /sources/{id}/coverage        # 资产清点与覆盖度看板（FR-02/北极星）
 DELETE /sources/{id}                 # 软删（保留血缘历史）
 POST   /sources/{id}/bulk-deprecate  # 批量源表废弃（逐条标记+影响预览+审计，R4-01）
+POST   /sources/databases            # 枚举实例下非系统库（测试连接通过后供选择目标库，留空=采集全部库）
+POST   /sources/{id}/collect-now     # 立即触发异步采集（返回 job_id，后台 worker 执行，与定时调度解耦）
+GET    /sources/jobs?limit=&offset=&source_id=  # 采集任务中心：按入队逆序分页；job 含 created_at（创建时间）/kind（manual 手动 or scheduled 定时）；可按 source_id 过滤
+GET    /sources/jobs/{id}            # 查询单个任务状态（进度 / 结果）
+GET    /sources/jobs/{id}/stream     # SSE 实时推送采集进度（1s 轮询快照；终态先补发"进度拉满"事件再发 done，避免进度停留中间值）
 ```
 
 ### 3.2 指标语义层（semantic）
