@@ -35,7 +35,6 @@ import type {
   SchemaColumn,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
-import { ObjectView } from "../utils/display";
 import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
