@@ -42,6 +42,192 @@ from app.services.notify.schemas import (
 
 logger = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# 业务化：事件类型 → 中文标题、payload 字段 → 中文标签
+# 目标：通知的标题/内容从源头就是用户可读的业务术语，而非英文码 / JSON。
+# ---------------------------------------------------------------------------
+
+_EVENT_TITLE_CN: dict[str, str] = {
+    "metric.created": "指标创建",
+    "metric.published": "指标发布",
+    "metric.deprecated": "指标废弃",
+    "metric.submitted": "指标待审核",
+    "metric.approved": "指标已通过",
+    "metric.rejected": "指标已驳回",
+    "conflict.detected": "口径冲突检测",
+    "conflict_open": "口径冲突待处理",
+    "conflict_escalated": "口径冲突已升级",
+    "quality.alert": "数据质量告警",
+    "quality.anomaly": "数据质量异常告警",
+    "governance.grant": "权限变更",
+    "grant.granted": "权限已授予",
+    "grant.revoked": "权限已收回",
+    "lineage.change": "血缘变更",
+    "benchmark.imported": "参照基准已导入",
+    "orphan.event": "孤立实体告警",
+    "pii.propagated": "敏感数据已扩散",
+    "pii.reviewed": "敏感数据已复核",
+    "review.pending": "审核待办提醒",
+    "system.notice": "系统公告",
+}
+
+_SOURCE_CN: dict[str, str] = {
+    "metric": "指标",
+    "lineage": "血缘",
+    "quality": "数据质量",
+    "governance": "治理合规",
+    "semantic": "指标口径",
+    "system": "系统",
+    "scheduler": "定时任务",
+    "conflict": "口径冲突",
+    "grant": "权限",
+    "pii": "敏感数据",
+    "benchmark": "参照基准",
+    "orphan": "孤立实体",
+    "review": "审核",
+}
+
+_ACTION_CN: dict[str, str] = {
+    "created": "创建",
+    "updated": "更新",
+    "published": "发布",
+    "submitted": "待审核",
+    "approved": "已通过",
+    "rejected": "已驳回",
+    "deprecated": "废弃",
+    "detected": "检测",
+    "alert": "告警",
+    "open": "待处理",
+    "escalated": "升级",
+    "imported": "导入",
+    "granted": "授予",
+    "revoked": "收回",
+    "propagated": "扩散",
+    "reviewed": "复核",
+    "pending": "待办",
+    "change": "变更",
+    "notice": "公告",
+    "anomaly": "异常告警",
+}
+
+_PAYLOAD_LABEL: dict[str, str] = {
+    "metric_id": "指标ID",
+    "metric_code": "指标编码",
+    "metric_name": "指标名称",
+    "level": "重要程度",
+    "severity": "严重级别",
+    "rule_type": "规则类型",
+    "rule_mode": "规则模式",
+    "obs_value": "观测值",
+    "threshold": "阈值",
+    "window": "统计周期",
+    "domain": "业务域",
+    "user_id": "用户ID",
+    "operator_id": "操作人ID",
+    "grant_id": "授权ID",
+    "grant_type": "授权类型",
+    "expires_at": "到期时间",
+    "conflict_id": "冲突编号",
+    "note": "说明",
+    "reason": "原因",
+    "source_table": "源表",
+    "target_table": "目标表",
+    "pii_columns": "敏感字段",
+    "notify_targets": "通知对象",
+    "reviewer_id": "审核人ID",
+    "reviewer": "审核人",
+}
+
+_RULE_TYPE_CN: dict[str, str] = {
+    "COMPLETENESS": "完整性",
+    "ACCURACY": "准确性",
+    "TIMELINESS": "时效性",
+    "CONSISTENCY": "一致性",
+    "UNIQUENESS": "唯一性",
+    "VALIDITY": "有效性",
+    "WAVE_DIFF": "波动差异",
+    "CROSS_SOURCE": "跨源校验",
+}
+_RULE_MODE_CN: dict[str, str] = {
+    "static": "静态阈值",
+    "dynamic_baseline": "动态基线",
+    "yoy_woy": "同比环比",
+    "cross_source": "跨源对比",
+}
+_GRANT_TYPE_CN: dict[str, str] = {"READ": "只读", "WRITE": "可写", "READ_WRITE": "读写"}
+_LEVEL_CN: dict[str, str] = {
+    "P0": "严重",
+    "P1": "高",
+    "P2": "中",
+    "INFO": "提示",
+    "WARN": "警告",
+    "ERROR": "错误",
+    "CRITICAL": "严重",
+}
+# 内部/冗余字段，正文中不展示（event_type 已体现在标题）
+_SKIP_FIELDS = {"event_type", "payload"}
+
+
+def _humanize_event_title(event_type: str) -> str:
+    """事件类型英文码 → 业务标题（已知映射优先，未知按 ``域.动作`` 拆词兜底）。"""
+    if not event_type:
+        return "系统通知"
+    title = _EVENT_TITLE_CN.get(event_type)
+    if title:
+        return title
+    if "." in event_type:
+        source, _, action = event_type.partition(".")
+        src_cn = _SOURCE_CN.get(source, source)
+        act_cn = _ACTION_CN.get(action, action)
+        return f"{src_cn} · {act_cn}"
+    return event_type
+
+
+def _humanize_value(key: str, value: Any) -> str:
+    """单个 payload 字段值 → 业务可读中文。"""
+    if value is None:
+        return "无"
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if key == "level":
+        return _LEVEL_CN.get(str(value), str(value))
+    if key == "rule_type":
+        return _RULE_TYPE_CN.get(str(value), str(value))
+    if key == "rule_mode":
+        return _RULE_MODE_CN.get(str(value), str(value))
+    if key == "grant_type":
+        return _GRANT_TYPE_CN.get(str(value), str(value))
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _humanize_payload(payload: dict[str, Any] | None) -> str | None:
+    """把通知 payload（JSON）渲染成人类可读的多行文本。
+
+    - 已知字段用中文标签（``_PAYLOAD_LABEL``），未知字段用字段名原样展示；
+    - 枚举值（level/rule_type/rule_mode/grant_type）转中文；
+    - 事件总线包装的 ``{"payload": {...}}`` 会展开内层；
+    - 空 payload 返回 None（不产生空正文）。
+    """
+    if not payload:
+        return None
+    inner = payload.get("payload")
+    data: dict[str, Any] = inner if isinstance(inner, dict) else payload
+    lines: list[str] = []
+    for key, value in data.items():
+        if key in _SKIP_FIELDS:
+            continue
+        if key == "payload" and isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                lines.append(
+                    f"{_PAYLOAD_LABEL.get(sub_key, sub_key)}：{_humanize_value(sub_key, sub_value)}"
+                )
+            continue
+        lines.append(f"{_PAYLOAD_LABEL.get(key, key)}：{_humanize_value(key, value)}")
+    return "\n".join(lines) if lines else None
+
+
 # 通知外发 HTTP 客户端共享单例：避免按请求实例化导致连接池/文件描述符泄漏。
 _HTTP_CLIENT: httpx.AsyncClient | None = None
 
@@ -120,8 +306,8 @@ class NotifyService(BaseService):
                 subscriber_id=sub.user_id,
                 channel=sub.channel,
                 template_code=data.event_type,
-                title=data.event_type,
-                body=json.dumps(data.payload, ensure_ascii=False) if data.payload else None,
+                title=_humanize_event_title(data.event_type),
+                body=_humanize_payload(data.payload),
                 payload=data.payload,
                 status=NotifyStatus.PENDING.value,
                 ref_type="event",

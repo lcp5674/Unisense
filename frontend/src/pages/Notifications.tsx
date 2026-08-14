@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Tooltip } from "antd";
 import { PlusOutlined } from "@ant-design/icons";
 import {
   listNotifications,
@@ -17,7 +17,7 @@ const CHANNEL_LABEL: Record<string, string> = {
   email: "邮件",
   webhook: "接口推送",
   sms: "短信",
-  inapp: "站内消息",
+  in_app: "站内消息",
   dingtalk: "钉钉",
   console: "控制台",
 };
@@ -27,12 +27,145 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "metric.created": "指标创建",
   "metric.published": "指标发布",
   "metric.deprecated": "指标废弃",
-  "conflict.detected": "口径冲突",
+  "metric.submitted": "指标待审核",
+  "metric.approved": "指标已通过",
+  "metric.rejected": "指标已驳回",
+  "conflict.detected": "口径冲突检测",
+  "conflict_open": "口径冲突待处理",
+  "conflict_escalated": "口径冲突已升级",
   "quality.alert": "数据质量告警",
+  "quality.anomaly": "数据质量异常告警",
   "governance.grant": "权限变更",
+  "grant.granted": "权限已授予",
+  "grant.revoked": "权限已收回",
   "lineage.change": "血缘变更",
+  "benchmark.imported": "参照基准已导入",
+  "orphan.event": "孤立实体告警",
+  "pii.propagated": "敏感数据已扩散",
+  "pii.reviewed": "敏感数据已复核",
+  "review.pending": "审核待办提醒",
   "system.notice": "系统公告",
 };
+
+// 事件类型兜底：未命中的 ``域.动作`` 拆词为中文（历史数据/新类型都能显示中文）
+const EVENT_SOURCE_CN: Record<string, string> = {
+  metric: "指标",
+  lineage: "血缘",
+  quality: "数据质量",
+  governance: "治理合规",
+  semantic: "指标口径",
+  system: "系统",
+  scheduler: "定时任务",
+  conflict: "口径冲突",
+  grant: "权限",
+  pii: "敏感数据",
+  benchmark: "参照基准",
+  orphan: "孤立实体",
+  review: "审核",
+};
+const EVENT_ACTION_CN: Record<string, string> = {
+  created: "创建",
+  updated: "更新",
+  published: "发布",
+  submitted: "待审核",
+  approved: "已通过",
+  rejected: "已驳回",
+  deprecated: "废弃",
+  detected: "检测",
+  alert: "告警",
+  open: "待处理",
+  escalated: "升级",
+  imported: "导入",
+  granted: "授予",
+  revoked: "收回",
+  propagated: "扩散",
+  reviewed: "复核",
+  pending: "待办",
+  change: "变更",
+  notice: "公告",
+  anomaly: "异常告警",
+};
+
+function eventTypeLabel(v: string | null | undefined): string {
+  if (!v) return "—";
+  const known = EVENT_TYPE_LABEL[v];
+  if (known) return known;
+  const dot = v.indexOf(".");
+  if (dot > 0) {
+    const src = v.slice(0, dot);
+    const act = v.slice(dot + 1);
+    return `${EVENT_SOURCE_CN[src] ?? src} · ${EVENT_ACTION_CN[act] ?? act}`;
+  }
+  return v;
+}
+
+// 历史通知正文兜底：旧数据 body 是 JSON dump，解析后渲染成「中文标签：值」
+const PAYLOAD_FIELD_LABEL_FE: Record<string, string> = {
+  metric_id: "指标ID",
+  metric_code: "指标编码",
+  metric_name: "指标名称",
+  level: "重要程度",
+  rule_type: "规则类型",
+  rule_mode: "规则模式",
+  obs_value: "观测值",
+  threshold: "阈值",
+  domain: "业务域",
+  user_id: "用户ID",
+  operator_id: "操作人ID",
+  grant_id: "授权ID",
+  grant_type: "授权类型",
+  expires_at: "到期时间",
+  conflict_id: "冲突编号",
+  note: "说明",
+  reason: "原因",
+  notify_targets: "通知对象",
+};
+const RULE_TYPE_CN_FE: Record<string, string> = {
+  COMPLETENESS: "完整性",
+  ACCURACY: "准确性",
+  TIMELINESS: "时效性",
+  CONSISTENCY: "一致性",
+  UNIQUENESS: "唯一性",
+  VALIDITY: "有效性",
+  WAVE_DIFF: "波动差异",
+  CROSS_SOURCE: "跨源校验",
+};
+const LEVEL_CN_FE: Record<string, string> = {
+  P0: "严重",
+  P1: "高",
+  P2: "中",
+  INFO: "提示",
+  WARN: "警告",
+  ERROR: "错误",
+  CRITICAL: "严重",
+};
+
+function humanizeFeValue(key: string, v: unknown): string {
+  if (v === null || v === undefined) return "无";
+  if (typeof v === "boolean") return v ? "是" : "否";
+  if (key === "level") return LEVEL_CN_FE[String(v)] ?? String(v);
+  if (key === "rule_type") return RULE_TYPE_CN_FE[String(v)] ?? String(v);
+  if (key === "grant_type") return v === "READ" ? "只读" : v === "READ_WRITE" ? "读写" : String(v);
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function formatNotifyBody(body: string | null): string {
+  if (!body) return "";
+  const t = body.trim();
+  if (t.startsWith("{")) {
+    try {
+      const obj = JSON.parse(t) as Record<string, unknown>;
+      return Object.entries(obj)
+        .filter(([k]) => k !== "event_type" && k !== "payload")
+        .map(([k, v]) => `${PAYLOAD_FIELD_LABEL_FE[k] ?? k}：${humanizeFeValue(k, v)}`)
+        .join("\n");
+    } catch {
+      return body;
+    }
+  }
+  return body;
+}
 
 // 所属模块（业务术语）
 const SOURCE_LABEL: Record<string, string> = {
@@ -63,10 +196,11 @@ const REF_TYPE_LABEL: Record<string, string> = {
   notification: "通知",
   reconciliation: "数据对账",
   benchmark: "参照基准",
+  event: "消息",
 };
 
-const CHANNELS = ["email", "webhook", "sms", "inapp"];
-const EVENT_TYPES = ["metric.created", "metric.published", "metric.deprecated", "conflict.detected", "quality.alert", "governance.grant", "lineage.change", "system.notice"];
+const CHANNELS = ["email", "webhook", "sms", "in_app"];
+const EVENT_TYPES = ["metric.created", "metric.published", "metric.deprecated", "quality.anomaly", "conflict_open", "conflict_escalated", "grant.granted", "grant.revoked", "pii.reviewed", "benchmark.imported", "governance.grant", "lineage.change", "system.notice"];
 
 function NotifListTab() {
   const [items, setItems] = useState<Notification[]>([]);
@@ -93,9 +227,24 @@ function NotifListTab() {
 
   const columns = [
     { title: "编号", dataIndex: "id", key: "id", width: 70 },
-    { title: "标题", dataIndex: "title", key: "title" },
-    { title: "内容", dataIndex: "body", key: "body", ellipsis: true },
-    { title: "送达方式", dataIndex: "channel", key: "channel", width: 100, render: (v: string) => <Tag>{CHANNEL_LABEL[v] ?? v}</Tag> },
+    { title: "标题", dataIndex: "title", key: "title", render: (v: string) => eventTypeLabel(v) },
+    {
+      title: "内容",
+      dataIndex: "body",
+      key: "body",
+      render: (v: string | null) => {
+        const text = formatNotifyBody(v);
+        if (!text) return <span className="muted">—</span>;
+        return (
+          <Tooltip title={<div style={{ whiteSpace: "pre-wrap" }}>{text}</div>}>
+            <div style={{ whiteSpace: "pre-wrap", maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
+              {text}
+            </div>
+          </Tooltip>
+        );
+      },
+    },
+    { title: "送达方式", dataIndex: "channel", key: "channel", width: 100, render: (v: string) => <Tag>{CHANNEL_LABEL[(v ?? "").toLowerCase()] ?? v}</Tag> },
     {
       title: "状态",
       dataIndex: "status",
@@ -158,8 +307,8 @@ function SubscriptionsTab() {
   }
 
   const columns = [
-    { title: "送达方式", dataIndex: "channel", key: "channel", width: 130, render: (v: string) => <Tag>{CHANNEL_LABEL[v] ?? v}</Tag> },
-    { title: "消息类型", dataIndex: "event_type", key: "event", render: (v: string) => EVENT_TYPE_LABEL[v] ?? v },
+    { title: "送达方式", dataIndex: "channel", key: "channel", width: 130, render: (v: string) => <Tag>{CHANNEL_LABEL[(v ?? "").toLowerCase()] ?? v}</Tag> },
+    { title: "消息类型", dataIndex: "event_type", key: "event", render: (v: string) => eventTypeLabel(v) },
     { title: "告警阈值", dataIndex: "threshold", key: "threshold", width: 100, render: (v: number | null) => v ?? <span className="muted">—</span> },
     { title: "是否启用", dataIndex: "enabled", key: "enabled", width: 90, render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "是" : "否"}</Tag> },
   ];
@@ -177,7 +326,7 @@ function SubscriptionsTab() {
             <Select options={CHANNELS.map((c) => ({ value: c, label: CHANNEL_LABEL[c] ?? c }))} />
           </Form.Item>
           <Form.Item name="event_type" label="消息类型" rules={[{ required: true }]}>
-            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: EVENT_TYPE_LABEL[c] ?? c }))} />
+            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: eventTypeLabel(c) }))} />
           </Form.Item>
           <Form.Item name="threshold" label="告警阈值（可选）" extra="用于数据质量告警，达到该阈值时才推送。">
             <InputNumber min={1} style={{ width: 200 }} />
@@ -211,7 +360,7 @@ function EventLogTab() {
 
   const columns = [
     { title: "编号", dataIndex: "id", key: "id", width: 70 },
-    { title: "消息类型", dataIndex: "event_type", key: "event", render: (v: string) => EVENT_TYPE_LABEL[v] ?? v },
+    { title: "消息类型", dataIndex: "event_type", key: "event", render: (v: string) => eventTypeLabel(v) },
     { title: "所属模块", dataIndex: "source", key: "source", width: 110, render: (v: string | null) => (v ? SOURCE_LABEL[v] ?? v : <span className="muted">—</span>) },
     { title: "重要程度", dataIndex: "level", key: "level", width: 90, render: (v: string) => <Tag color={v === "ERROR" ? "error" : v === "WARN" ? "warning" : "default"}>{QUALITY_LEVEL_LABEL[v] ?? v}</Tag> },
     { title: "已推送", dataIndex: "notified", key: "notified", width: 90, render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "是" : "否"}</Tag> },
@@ -245,7 +394,7 @@ function PublishTab() {
       <Card title="发送消息" size="small">
         <Form form={form} layout="vertical" onFinish={handlePublish}>
           <Form.Item name="event_type" label="消息类型" rules={[{ required: true }]}>
-            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: EVENT_TYPE_LABEL[c] ?? c }))} />
+            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: eventTypeLabel(c) }))} />
           </Form.Item>
           <Form.Item name="source" label="所属模块">
             <Select allowClear options={["metric", "lineage", "quality", "governance", "semantic", "system", "scheduler"].map((c) => ({ value: c, label: SOURCE_LABEL[c] ?? c }))} />

@@ -51,6 +51,49 @@ async def test_publish_event_fanout() -> None:
     assert repo.save_notification.await_count == 2
 
 
+async def test_publish_event_title_body_business_terms() -> None:
+    """通知标题/正文应从源头业务化——非英文码、非 JSON（TD §12.9 产品化）。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=10, channel="EMAIL", event_type="quality.anomaly", enabled=True
+            )
+        ]
+    )
+    await svc.publish_event(
+        EventPublish(
+            event_type="quality.anomaly",
+            source="quality",
+            payload={
+                "level": "P1",
+                "metric_id": 1,
+                "rule_type": "COMPLETENESS",
+                "obs_value": "50.0",
+            },
+        )
+    )
+    notif = repo.save_notification.await_args.args[0]
+    # 标题：英文码 → 中文业务标题
+    assert notif.title == "数据质量异常告警"
+    # 正文：不再是 JSON dump，而是「中文标签：值」多行文本
+    assert "{" not in (notif.body or "")
+    assert "重要程度：高" in notif.body
+    assert "规则类型：完整性" in notif.body
+    assert "观测值：50.0" in notif.body
+
+
+async def test_humanize_event_title_fallback() -> None:
+    """未知事件类型按 ``域.动作`` 拆词兜底，仍返回中文而非英文码。"""
+    from app.services.notify.service import _humanize_event_title
+
+    assert _humanize_event_title("metric.submitted") == "指标待审核"
+    assert _humanize_event_title("grant.revoked") == "权限已收回"
+    assert _humanize_event_title("conflict_escalated") == "口径冲突已升级"
+    assert _humanize_event_title("scheduler.unknown") == "定时任务 · unknown"
+    assert _humanize_event_title("") == "系统通知"
+
+
 async def test_upsert_subscription_creates() -> None:
     svc, repo = _svc()
     out = await svc.upsert_subscription(
