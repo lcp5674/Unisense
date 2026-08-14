@@ -102,6 +102,7 @@ function GrantsTab() {
   const [items, setItems] = useState<GrantResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [status, setStatus] = useState("");
   const [users, setUsers] = useState<UserBrief[]>([]);
   const [loading, setLoading] = useState(false);
@@ -117,7 +118,7 @@ function GrantsTab() {
   async function load() {
     setLoading(true);
     try {
-      const res = await listGrants({ status, page, page_size: 20 });
+      const res = await listGrants({ status, page, page_size: pageSize });
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
@@ -130,7 +131,7 @@ function GrantsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, status]);
+  }, [page, pageSize, status]);
 
   async function handleCreate(values: Record<string, unknown>) {
     try {
@@ -203,7 +204,7 @@ function GrantsTab() {
         columns={columns}
         rowKey="id"
         loading={loading}
-        pagination={{ current: page, pageSize: 20, total, onChange: setPage, showTotal: (t) => `共 ${t} 条` }}
+        pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
         locale={{ emptyText: "暂无授权记录" }}
       />
 

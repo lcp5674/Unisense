@@ -150,4 +150,30 @@ describe("UserManagement 用户管理", () => {
     fireEvent.click(screen.getByText("重 置"));
     await waitFor(() => expect(mockReset).toHaveBeenCalledWith(2, "newsecret123"));
   });
+
+  it("切换每页条数后按新 page_size 重新请求（不固化为 20 条/页）", async () => {
+    mockMe.mockResolvedValue(ADMIN);
+    mockList.mockResolvedValue(USERS);
+    const { container } = render(<UserManagement />);
+    await screen.findByText("alice");
+
+    // 初始请求固定 page_size=20
+    await waitFor(() => {
+      expect(mockList).toHaveBeenCalledWith(expect.objectContaining({ page_size: 20 }));
+    });
+
+    // 打开每页条数选择器并选择「50」
+    const sizeChanger = container.querySelector(".ant-pagination-options .ant-select-selector");
+    expect(sizeChanger).toBeTruthy();
+    fireEvent.mouseDown(sizeChanger!);
+    const option = await screen.findByRole("option", { name: /50/ });
+    fireEvent.click(option);
+
+    // 重新请求携带新的 page_size
+    await waitFor(() => {
+      const calls = mockList.mock.calls;
+      const lastCall = calls.length > 0 ? calls[calls.length - 1][0] : undefined;
+      expect(lastCall?.page_size).toBe(50);
+    });
+  });
 });

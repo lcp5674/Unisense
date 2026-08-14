@@ -43,6 +43,7 @@ function RulesTab() {
   const [items, setItems] = useState<QualityRule[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
@@ -51,7 +52,7 @@ function RulesTab() {
   async function load() {
     setLoading(true);
     try {
-      const res = await listQualityRules({ page, page_size: 20 });
+      const res = await listQualityRules({ page, page_size: pageSize });
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
@@ -64,7 +65,7 @@ function RulesTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
+  }, [page, pageSize]);
 
   async function handleCreate(values: Record<string, unknown>) {
     try {
@@ -144,7 +145,7 @@ function RulesTab() {
         <Alert type="info" showIcon style={{ flex: 1 }} message="规则随指标 PUBLISHED 注册，按 T1/T2/T3 与数仓层差异化生效。" />
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)} style={{ marginLeft: 12 }}>新建规则</Button>
       </div>
-      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ current: page, pageSize: 20, total, onChange: setPage, showTotal: (t) => `共 ${t} 条` }} locale={{ emptyText: "暂无质量规则" }} />
+      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }} locale={{ emptyText: "暂无质量规则" }} />
 
       <Modal title="新建质量规则" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
@@ -173,13 +174,14 @@ function EventsTab() {
   const [items, setItems] = useState<QualityEvent[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function load() {
     setLoading(true);
     try {
-      const res = await listQualityEvents({ status, page, page_size: 20 });
+      const res = await listQualityEvents({ status, page, page_size: pageSize });
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
@@ -192,7 +194,7 @@ function EventsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, status]);
+  }, [page, pageSize, status]);
 
   async function act(eventId: number, fn: (id: number) => Promise<QualityEvent>, done: string) {
     try {
@@ -243,7 +245,7 @@ function EventsTab() {
         onChange={(v) => { setStatus(v || ""); setPage(1); }}
         options={Object.entries(EVENT_STATUS).map(([k, v]) => ({ value: k, label: v.label }))}
       />
-      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ current: page, pageSize: 20, total, onChange: setPage, showTotal: (t) => `共 ${t} 条` }} locale={{ emptyText: "暂无质量事件" }} />
+      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }} locale={{ emptyText: "暂无质量事件" }} />
     </div>
   );
 }

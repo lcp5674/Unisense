@@ -53,6 +53,7 @@ export function UserManagement() {
   const [items, setItems] = useState<AdminUser[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [role, setRole] = useState("");
   const [status, setStatus] = useState("");
   const [keyword, setKeyword] = useState("");
@@ -75,7 +76,7 @@ export function UserManagement() {
         status: status || undefined,
         keyword: keyword || undefined,
         page,
-        page_size: 20,
+        page_size: pageSize,
       });
       setItems(res.items);
       setTotal(res.total);
@@ -93,7 +94,7 @@ export function UserManagement() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, role, status]);
+  }, [page, pageSize, role, status]);
 
   async function handleCreate(values: Record<string, unknown>) {
     setSaving(true);
@@ -307,9 +308,11 @@ export function UserManagement() {
           loading={loading}
           pagination={{
             current: page,
-            pageSize: 20,
+            pageSize,
             total,
-            onChange: setPage,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50, 100],
+            onChange: (p, ps) => { setPage(p); setPageSize(ps); },
             showTotal: (t) => `共 ${t} 个用户`,
           }}
           locale={{ emptyText: "暂无用户" }}

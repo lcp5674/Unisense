@@ -8,6 +8,7 @@ import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel } from "../utils/aud
 export function AuditLog() {
   const [items, setItems] = useState<AuditEntry[]>([]);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [entityType, setEntityType] = useState("");
   const [actorId, setActorId] = useState("");
   const [piiOnly, setPiiOnly] = useState<boolean | undefined>(undefined);
@@ -21,7 +22,7 @@ export function AuditLog() {
         actor_id: actorId ? Number(actorId) : undefined,
         pii_access: piiOnly,
         page,
-        page_size: 20,
+        page_size: pageSize,
       });
       setItems(res.items);
     } catch (err) {
@@ -34,7 +35,7 @@ export function AuditLog() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, entityType, piiOnly]);
+  }, [page, pageSize, entityType, piiOnly]);
 
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
@@ -124,7 +125,7 @@ export function AuditLog() {
           columns={columns}
           rowKey="id"
           loading={loading}
-          pagination={{ current: page, pageSize: 20, onChange: setPage, showTotal: (t) => `共 ${t} 条（后端返回近似值）` }}
+          pagination={{ current: page, pageSize, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条（后端返回近似值）` }}
           locale={{ emptyText: "暂无审计记录" }}
           size="small"
         />

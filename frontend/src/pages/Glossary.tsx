@@ -30,6 +30,7 @@ function TermsTab() {
   const [items, setItems] = useState<GlossaryTerm[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
@@ -41,7 +42,7 @@ function TermsTab() {
   async function load() {
     setLoading(true);
     try {
-      const res = await listTerms({ search, status, page, page_size: 20 });
+      const res = await listTerms({ search, status, page, page_size: pageSize });
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
@@ -54,7 +55,7 @@ function TermsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, status]);
+  }, [page, pageSize, status]);
 
   async function handleCreate(values: Record<string, unknown>) {
     try {
@@ -152,7 +153,7 @@ function TermsTab() {
         columns={columns}
         rowKey="term_code"
         loading={loading}
-        pagination={{ current: page, pageSize: 20, total, onChange: setPage, showTotal: (t) => `共 ${t} 条` }}
+        pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
         locale={{ emptyText: "暂无术语" }}
         rowClassName={(r) => (focusCode && r.term_code === focusCode ? "ant-table-row-selected" : "")}
       />
