@@ -393,11 +393,12 @@ export function ReviewWorkbench() {
 
       {/* 只读对比弹窗：当前窗口展示候选 vs 现有差异，无需跳转指标目录 */}
       <Modal
+        className="compare-modal"
         title={`差异对比 ${compareOpen?.conflict_id ?? ""}`}
         open={compareOpen != null}
         onCancel={() => setCompareOpen(null)}
         footer={<Button onClick={() => setCompareOpen(null)}>关闭</Button>}
-        width={860}
+        width={920}
       >
         {compareOpen ? (
           <>
@@ -420,6 +421,7 @@ export function ReviewWorkbench() {
 
       {/* 仲裁弹窗：差异对比 + 按类型差异化的决策表单 */}
       <Modal
+        className="compare-modal"
         title={`仲裁冲突 ${arbitrating?.conflict_id ?? ""}`}
         open={arbitrating != null}
         onCancel={() => setArbitrating(null)}
@@ -427,7 +429,7 @@ export function ReviewWorkbench() {
         okText="提交裁决"
         okButtonProps={{ loading: arbitrateBusy, disabled: decisionOptions.length === 0 }}
         cancelButtonProps={{ disabled: arbitrateBusy }}
-        width={860}
+        width={920}
       >
         {arbitrating ? (
           <>

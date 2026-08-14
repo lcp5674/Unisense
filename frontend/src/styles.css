@@ -923,6 +923,37 @@ body {
   border-bottom: 1px solid var(--line) !important;
 }
 
+/* ---- 冲突仲裁对比弹窗：消除灰色 Modal body，统一白底 ----
+   theme.ts 中 colorBgLayout = paper(#F5F6F8) 默认覆盖 Modal 背景，
+   对比表自身 surface 白底悬浮其上会形成「右侧/下半透明发灰」感。 */
+.ant-modal .ant-modal-content,
+.ant-modal .ant-modal-body {
+  background: var(--surface) !important;
+}
+/* 弹窗 body 限高 + 内部滚动：避免 12 行对比表把 Modal 撑到视口外 */
+.compare-modal .ant-modal-body {
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 20px 24px 4px;
+}
+/* 对比表里 ObjectView 嵌套元素不撑破单元格 */
+.compare-modal .ant-modal-body .ant-table-cell {
+  vertical-align: top;
+  padding: 10px 12px;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+/* 固定表格布局下，指标编码等长文本超宽时折行而非撑破列 */
+.compare-modal .ant-modal-body .ant-table-cell .mono {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+/* 字段列加宽到 160：避免「新鲜度」「时间语义」等 4 字中文被竖排 */
+.compare-modal .ant-table-thead > tr > th:nth-child(1),
+.compare-modal .ant-table-tbody > tr > td:nth-child(1) {
+  min-width: 160px;
+}
+
 .notif-meta-item .anticon {
   font-size: 12px;
   color: var(--data);

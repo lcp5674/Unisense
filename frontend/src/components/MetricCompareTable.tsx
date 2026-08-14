@@ -155,7 +155,7 @@ export function MetricCompareTable({
       title: "字段",
       dataIndex: "label",
       key: "label",
-      width: 120,
+      width: 160,
       render: (v: string) => (
         <strong style={{ color: "var(--ink)" }}>{COMPARE_FIELD_LABELS[v] ?? v}</strong>
       ),
@@ -164,6 +164,7 @@ export function MetricCompareTable({
       title: codeA || "指标 A",
       dataIndex: "a",
       key: "a",
+      width: 280,
       render: (v: unknown) => (
         <div style={{ padding: "2px 0" }}>{renderValue(v)}</div>
       ),
@@ -172,13 +173,14 @@ export function MetricCompareTable({
       title: "差异",
       dataIndex: "level",
       key: "level",
-      width: 78,
+      width: 88,
       render: (v: keyof typeof DIFF_META) => <DiffPill level={v} />,
     },
     {
       title: codeB || "指标 B",
       dataIndex: "b",
       key: "b",
+      width: 280,
       render: (v: unknown) => (
         <div style={{ padding: "2px 0" }}>{renderValue(v)}</div>
       ),
@@ -195,6 +197,7 @@ export function MetricCompareTable({
         size={size}
         pagination={false}
         bordered
+        tableLayout="fixed"
         rowClassName={(r) => `compare-row compare-row-${r.level}`}
         style={{
           background: "var(--surface)",
