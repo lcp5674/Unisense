@@ -34,6 +34,7 @@ vi.mock("../api", () => ({
   updateTableDescription: vi.fn(),
   getMetric: vi.fn(),
   listSnapshots: vi.fn(),
+  queryMetricInternal: vi.fn(),
   updateMetricDescription: vi.fn(),
   listCatalogs: vi.fn(),
   listDomainTree: vi.fn(),
@@ -122,6 +123,7 @@ import {
   listMetrics,
   getMetric,
   listSnapshots,
+  queryMetricInternal,
   updateMetricDescription,
 } from "../api";
 
@@ -378,6 +380,91 @@ describe("AssetMap", () => {
         "每日营收总额",
       ),
     );
+  });
+
+  it("metric drawer 查询最新数据：真实查询并展示结果 + 刷新快照", async () => {
+    vi.mocked(getMetric).mockResolvedValue({
+      id: 1,
+      metric_code: "finance_revenue_sum_d",
+      name: "营收汇总",
+      domain: "finance",
+      type: "atomic",
+      granularity: "day",
+      unit: "yuan",
+      aggregation: "SUM",
+      time_semantics: "PERIOD",
+      freshness: "T1",
+      dw_layer: "DWD",
+      metric_tier: "T2",
+      serving_mode: "BATCH_ONLY",
+      additivity: "ADDITIVE",
+      definition_json: {
+        sql: "SELECT SUM(amount) FROM ods_order",
+        period: "day",
+        measures: [{ name: "revenue", aggregation: "SUM" }],
+      },
+      version: 1,
+      row_version: 1,
+      status: "PUBLISHED",
+      owner_id: 1,
+      pii_flag: false,
+      compliance_reviewed: true,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    } as never);
+    vi.mocked(listSnapshots)
+      .mockResolvedValueOnce([] as never)
+      .mockResolvedValueOnce([
+        {
+          id: 1,
+          metric_code: "finance_revenue_sum_d",
+          version: 1,
+          dims: {},
+          date_range: "2026-08-01",
+          value_json: { rows: [], total: 0, engine: "mysql" },
+          quality_flag: null,
+          generated_at: "2026-08-14T10:00:00Z",
+          generated_by: "QUERY",
+        },
+      ] as never);
+    vi.mocked(queryMetricInternal).mockResolvedValue({
+      metric_code: "finance_revenue_sum_d",
+      degraded: false,
+      data: {
+        rows: [
+          { region: "east", revenue: 100.5 },
+          { region: "west", revenue: 200 },
+        ],
+        total: 2,
+        engine: "mysql",
+      },
+      execution_plan: {},
+      meta: {},
+    } as never);
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "metric:m1", label: "finance_revenue_sum_d", type: "metric", domain: "finance" },
+    });
+    clickHandler?.({ target: { id: "metric:m1" } });
+    await waitFor(() => expect(screen.getByText("营收汇总")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole("button", { name: /查询最新数据/ }));
+    await waitFor(() =>
+      expect(queryMetricInternal).toHaveBeenCalledWith("finance_revenue_sum_d", {
+        dimensions: [],
+        date_range: "",
+      }),
+    );
+    // 展示本次真实查询结果
+    await waitFor(() => expect(screen.getByText(/本次查询结果（2 行/)).toBeInTheDocument());
+    expect(screen.getByText("east")).toBeInTheDocument();
+    expect(screen.getByText("west")).toBeInTheDocument();
+    // 快照列表已刷新（自动落库后回读，周期列展示 date_range）
+    await waitFor(() => expect(screen.getByText("2026-08-01")).toBeInTheDocument());
   });
 
   it("click table node opens entity detail drawer", async () => {

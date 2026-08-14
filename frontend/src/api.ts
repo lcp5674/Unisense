@@ -1012,6 +1012,20 @@ export async function listSnapshots(code: string, limit = 50): Promise<SnapshotR
   );
 }
 
+/** 内部用户查询指标（POST /consume/metrics/{code}/query，真实执行 + 自动落快照）。 */
+export async function queryMetricInternal(
+  code: string,
+  req: {
+    dimensions?: { name: string; value: string | number | string[] }[];
+    date_range: string;
+  },
+): Promise<QueryResponse> {
+  return request<QueryResponse>(`${API_BASE}/consume/metrics/${encodeURIComponent(code)}/query`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
 export async function createApiClient(req: ClientCreateRequest): Promise<ClientCreatedResponse> {
   return request<ClientCreatedResponse>(`${API_BASE}/consume/api-clients`, {
     method: "POST",

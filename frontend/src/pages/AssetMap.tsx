@@ -72,6 +72,7 @@ import {
   listMetrics,
   listSnapshots,
   listUsers,
+  queryMetricInternal,
   reclassifyAssetSensitivity,
   updateColumnDescription,
   updateMetricDescription,
@@ -491,6 +492,11 @@ function GraphTab() {
   const [metricLoading, setMetricLoading] = useState(false);
   const [metricData, setMetricData] = useState<MetricResponse | null>(null);
   const [metricSnapshots, setMetricSnapshots] = useState<SnapshotResponse[]>([]);
+  const [metricQuerying, setMetricQuerying] = useState(false);
+  const [metricQueryRows, setMetricQueryRows] = useState<Record<string, unknown>[] | null>(null);
+  const [metricQueryMeta, setMetricQueryMeta] = useState<{ engine: string; total: number } | null>(
+    null,
+  );
   const [metricDescEditing, setMetricDescEditing] = useState(false);
   const [metricDescDraft, setMetricDescDraft] = useState("");
   const [metricDescSaving, setMetricDescSaving] = useState(false);
@@ -596,6 +602,8 @@ function GraphTab() {
     setMetricLoading(true);
     setMetricData(null);
     setMetricDescEditing(false);
+    setMetricQueryRows(null);
+    setMetricQueryMeta(null);
     try {
       const [m, snaps] = await Promise.all([
         getMetric(code),
@@ -610,9 +618,37 @@ function GraphTab() {
     }
   }
 
+  async function handleQueryLatest() {
+    if (!metricData) return;
+    const code = metricData.metric_code;
+    setMetricQuerying(true);
+    try {
+      // 真实执行指标口径（OLAP 优先 / MySQL 降级），后端自动落 WORM 快照
+      const res = await queryMetricInternal(code, { dimensions: [], date_range: "" });
+      const rows = Array.isArray(res.data?.rows)
+        ? (res.data.rows as Record<string, unknown>[])
+        : null;
+      setMetricQueryRows(rows);
+      setMetricQueryMeta(
+        res.data?.engine
+          ? { engine: String(res.data.engine), total: Number(res.data?.total ?? 0) }
+          : null,
+      );
+      // 刷新快照列表（本次查询已自动落库）
+      const snaps = await listSnapshots(code, 50).catch(() => []);
+      setMetricSnapshots(snaps);
+      message.success(
+        `查询完成：${res.data?.total ?? 0} 行 · 引擎 ${res.data?.engine ?? "unknown"}`,
+      );
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "查询指标失败");
+    } finally {
+      setMetricQuerying(false);
+    }
+  }
+
   async function handleMetricDescSave() {
-    if (!metricData || !metricDescDraft.trim()) return;
-    setMetricDescSaving(true);
+    if (!metricData || !metricDescDraft.trim()) return;    setMetricDescSaving(true);
     try {
       await updateMetricDescription(metricData.metric_code, metricDescDraft.trim());
       message.success("指标描述已保存");
@@ -832,17 +868,52 @@ function GraphTab() {
               size="small"
               title="数值快照"
               extra={
-                <Button
-                  type="link"
-                  size="small"
-                  onClick={() => navigate(`/detail/${encodeURIComponent(metricData.metric_code)}`)}
-                >
-                  前往指标详情 →
-                </Button>
+                <Space>
+                  <Button
+                    type="primary"
+                    size="small"
+                    loading={metricQuerying}
+                    onClick={handleQueryLatest}
+                  >
+                    查询最新数据
+                  </Button>
+                  <Button
+                    type="link"
+                    size="small"
+                    onClick={() => navigate(`/detail/${encodeURIComponent(metricData.metric_code)}`)}
+                  >
+                    前往指标详情 →
+                  </Button>
+                </Space>
               }
             >
+              {metricQueryRows !== null ? (
+                <Card
+                  size="small"
+                  type="inner"
+                  title={`本次查询结果（${metricQueryRows.length} 行 · 引擎 ${metricQueryMeta?.engine ?? "unknown"}）`}
+                  style={{ marginBottom: 16 }}
+                >
+                  {metricQueryRows.length === 0 ? (
+                    <Empty description="查询无数据（该口径在所选范围无匹配行）" />
+                  ) : (
+                    <Table
+                      size="small"
+                      rowKey={(_, i) => String(i ?? 0)}
+                      dataSource={metricQueryRows}
+                      columns={Object.keys(metricQueryRows[0] ?? {}).map((key) => ({
+                        title: key,
+                        dataIndex: key,
+                        key,
+                        ellipsis: true,
+                      }))}
+                      pagination={{ pageSize: 5, showSizeChanger: false }}
+                    />
+                  )}
+                </Card>
+              ) : null}
               {metricSnapshots.length === 0 ? (
-                <Empty description="暂无查询快照（在指标详情执行查询后生成）" />
+                <Empty description="暂无查询快照（点击「查询最新数据」即刻生成）" />
               ) : (
                 <Table
                   size="small"
