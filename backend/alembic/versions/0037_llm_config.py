@@ -41,7 +41,6 @@ def upgrade() -> None:
             "api_key_enc",
             sa.Text(),
             nullable=False,
-            server_default="",
             comment="API Key（Fernet 加密令牌）",
         ),
         sa.Column(
