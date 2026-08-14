@@ -178,7 +178,10 @@ class DBCatalogCreateRequest(BaseModel):
     source_id: str | None = Field(default=None, max_length=64)  # 可选——前端不填，由 URL 路径决定
     entity_name: str = Field(max_length=255)
     entity_type: EntityType = EntityTypeEnum.TABLE
-    schema_def: dict[str, Any] = Field(alias="schema_json")
+    # validation_alias 仅用于「从 ORM/JSON 读取 schema_json 列」；输出固定用字段名
+    # schema_def。若用 alias 会被 FastAPI 按 by_alias 序列化输出 schema_json，
+    # 与前端 DBCatalog.schema_def 契约不一致（字段详情抽屉读不到列）。
+    schema_def: dict[str, Any] = Field(validation_alias="schema_json")
     etl_sql: str | None = None
     owner_id: int | None = None
 
@@ -191,7 +194,10 @@ class DBCatalogResponse(BaseModel):
     source_id: str
     entity_name: str
     entity_type: str
-    schema_def: dict[str, Any] = Field(alias="schema_json")
+    # validation_alias（而非 alias）：ORM 输入读 schema_json 列，响应输出用
+    # 字段名 schema_def——FastAPI by_alias 序列化下 alias 会输出 schema_json，
+    # 与前端契约 schema_def 不一致（Catalogs 字段详情读不到字段）。
+    schema_def: dict[str, Any] = Field(validation_alias="schema_json")
     etl_sql: str | None = None
     sensitivity_level: str
     owner_id: int | None = None

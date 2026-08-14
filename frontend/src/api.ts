@@ -1822,6 +1822,22 @@ export async function listCatalogDatabases(sourceId?: string): Promise<string[]>
   return res.items;
 }
 
+/** 单实体元数据刷新：只采集该表/实体，不触发全源扫描（生产运维入口）。 */
+export async function refreshCatalogEntity(
+  sourceId: string,
+  entityName: string,
+): Promise<{
+  source_id: string;
+  entity_name: string;
+  sensitivity_level: string;
+  drifted: boolean;
+  columns: number;
+}> {
+  return request(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/entities/${encodeURIComponent(entityName)}/refresh`, {
+    method: "POST",
+  });
+}
+
 export async function registerCatalog(
   sourceId: string,
   body: {

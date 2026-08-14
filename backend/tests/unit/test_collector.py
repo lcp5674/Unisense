@@ -2312,6 +2312,22 @@ async def test_service_get_catalog_detail_enriches_source_meta() -> None:
     assert resp.sensitivity_level == "PII-HIGH"
 
 
+async def test_dbcatalog_response_serializes_schema_def_not_schema_json() -> None:
+    """响应序列化契约回归：FastAPI 以 by_alias=True 序列化时，schema 字段必须输出
+    ``schema_def``（而非 alias 的 ``schema_json``），否则前端字段详情读不到列。
+
+    修复前用 ``Field(alias=...)``，FastAPI by_alias 序列化输出 ``schema_json``，
+    与前端 ``DBCatalog.schema_def`` 契约不一致，导致采集目录字段详情抽屉恒为空。
+    """
+    from app.services.collector.schemas import DBCatalogResponse
+
+    resp = DBCatalogResponse.model_validate(_FakeCatalog("INTERNAL"))
+    dump = resp.model_dump(by_alias=True)  # 模拟 FastAPI 响应序列化
+    assert "schema_def" in dump
+    assert "schema_json" not in dump
+    assert dump["schema_def"] == {"columns": ["user_name"]}
+
+
 async def test_service_get_catalog_detail_not_found() -> None:
     """目录实体不存在（或已删除）时抛 NotFoundError。"""
     from app.core.exceptions import NotFoundError
