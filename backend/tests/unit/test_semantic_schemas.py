@@ -53,6 +53,24 @@ def test_valid_enum_values_accepted():
     assert req.metric_tier == "T2"
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("aggregation", "MAX"),
+        ("aggregation", "MIN"),
+        ("aggregation", "MEDIAN"),
+        ("aggregation", "PERCENTILE"),
+        ("time_semantics", "MOM"),
+        ("time_semantics", "YOY"),
+        ("freshness", "T0"),
+    ],
+)
+def test_expanded_dict_enum_values_accepted(field, value):
+    """字典种子扩展值（MAX/MIN/MEDIAN/PERCENTILE/MOM/YOY/T0）应被后端接受，避免 422。"""
+    req = MetricCreateRequest(**_base_payload(**{field: value}))
+    assert getattr(req, field) == value
+
+
 def test_publish_version_optional():
     req = MetricPublishRequest(change_reason="首次发布")
     assert req.version is None

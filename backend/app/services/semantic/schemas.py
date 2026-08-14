@@ -66,14 +66,20 @@ class MetricCreateRequest(BaseModel):
     granularity: str = Field(..., max_length=64, description="粒度")
     unit: str = Field(..., max_length=32, description="单位")
     currency: str | None = Field(None, max_length=16, description="币种")
-    aggregation: Literal["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE"] = Field(
-        ..., description="聚合方式: SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE"
+    # 与字典种子对齐（9 值）：SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE + MAX/MIN/MEDIAN/PERCENTILE
+    aggregation: Literal[
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+    ] = Field(
+        ...,
+        description="聚合方式: SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE/MAX/MIN/MEDIAN/PERCENTILE",
     )
-    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG"] = Field(
-        ..., description="时间语义: PERIOD/YTD/TTM/AVG"
+    # 与字典种子对齐（6 值）：PERIOD/YTD/TTM/AVG + MOM/YOY
+    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] = Field(
+        ..., description="时间语义: PERIOD/YTD/TTM/AVG/MOM/YOY"
     )
-    freshness: Literal["REALTIME", "T1", "HOURLY"] = Field(
-        ..., description="新鲜度: REALTIME/T1/HOURLY"
+    # 与字典种子对齐（4 值）：REALTIME/T0/T1/HOURLY
+    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] = Field(
+        ..., description="新鲜度: REALTIME/T0/T1/HOURLY"
     )
     dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] = Field(
         ..., description="数仓分层: ODS/DWD/DWS/ADS/DM"

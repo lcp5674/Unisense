@@ -84,18 +84,32 @@ class Metric(Base, BaseModel):
     granularity: Mapped[str] = mapped_column(String(64), nullable=False, comment="粒度")
     unit: Mapped[str] = mapped_column(String(32), nullable=False, comment="单位")
     currency: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="币种")
+    # 与字典种子（aggregation 9 值）对齐：补充 MAX/MIN/MEDIAN/PERCENTILE
     aggregation: Mapped[str] = mapped_column(
-        Enum("SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", name="agg_type"),
+        Enum(
+            "SUM",
+            "AVG",
+            "COUNT",
+            "COUNT_DISTINCT",
+            "LAST_VALUE",
+            "MAX",
+            "MIN",
+            "MEDIAN",
+            "PERCENTILE",
+            name="agg_type",
+        ),
         nullable=False,
         comment="聚合方式",
     )
+    # 与字典种子（time_semantics 6 值）对齐：补充 MOM/YOY
     time_semantics: Mapped[str] = mapped_column(
-        Enum("PERIOD", "YTD", "TTM", "AVG", name="time_sem"),
+        Enum("PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY", name="time_sem"),
         nullable=False,
         comment="时间语义",
     )
+    # 与字典种子（freshness 4 值）对齐：补充 T0（实时/流）
     freshness: Mapped[str] = mapped_column(
-        Enum("REALTIME", "T1", "HOURLY", name="freshness_type"),
+        Enum("REALTIME", "T0", "T1", "HOURLY", name="freshness_type"),
         nullable=False,
         comment="数据新鲜度",
     )

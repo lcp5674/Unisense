@@ -610,9 +610,10 @@ CREATE TABLE metric (
   -- 治理一等字段结构化（PRD 4.5：粒度/单位/聚合/时间语义/时效/分层/分级/服务模式/可加性）
   granularity VARCHAR(64),                  -- 粒度：一行代表什么（如 day×region×channel）
   unit VARCHAR(32), currency VARCHAR(16) NULL,  -- 单位与币种锚定
-  aggregation ENUM('SUM','AVG','COUNT','COUNT_DISTINCT','LAST_VALUE'),
-  time_semantics ENUM('PERIOD','YTD','TTM','AVG'),  -- 当期/累计/平均 + 同环比基期规则
-  freshness ENUM('REALTIME','T1','HOURLY'),         -- 数据新鲜度（实时/T+1/小时级）
+  -- 聚合/时间语义/新鲜度枚举与字典种子（system_dict）对齐，扩展覆盖生产场景
+  aggregation ENUM('SUM','AVG','COUNT','COUNT_DISTINCT','LAST_VALUE','MAX','MIN','MEDIAN','PERCENTILE'),
+  time_semantics ENUM('PERIOD','YTD','TTM','AVG','MOM','YOY'),  -- 当期/累计/平均 + 同环比基期规则
+  freshness ENUM('REALTIME','T0','T1','HOURLY'),         -- 数据新鲜度（实时/T+0/T+1/小时级）
   sla VARCHAR(128),                                 -- 产出 SLA 契约：绑定 task_id + 就绪时间（如 "08:30"）
   dw_layer ENUM('ODS','DWD','DWS','ADS','DM'),      -- 数仓分层（驱动质量SLA/审核流/血缘精度差异化）
   metric_tier ENUM('T1','T2','T3') DEFAULT 'T3',    -- 指标分级（治理与质量规则从严到宽）
