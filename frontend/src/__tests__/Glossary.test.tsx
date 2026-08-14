@@ -22,6 +22,9 @@ vi.mock("../api", () => {
   return {
     listTerms: vi.fn(),
     createTerm: vi.fn(),
+    getTerm: vi.fn(),
+    updateTerm: vi.fn(),
+    createTermRelation: vi.fn(),
     submitTerm: vi.fn(),
     deprecateTerm: vi.fn(),
     listTermConflicts: vi.fn(),
@@ -30,10 +33,13 @@ vi.mock("../api", () => {
   };
 });
 
-import { listTerms, listTermConflicts } from "../api";
+import { listTerms, listTermConflicts, getTerm, updateTerm, createTermRelation } from "../api";
 
 const mockedList = vi.mocked(listTerms);
 const mockedConflicts = vi.mocked(listTermConflicts);
+const mockedGet = vi.mocked(getTerm);
+const mockedUpdate = vi.mocked(updateTerm);
+const mockedRelation = vi.mocked(createTermRelation);
 
 const TERMS: GlossaryTerm[] = [
   {
@@ -145,6 +151,83 @@ describe("Glossary 页面", () => {
     fireEvent.click(screen.getByText("跳到AOV"));
     await waitFor(() => {
       expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ search: "AOV" }));
+    });
+  });
+
+  it("详情：点击详情按钮拉取最新术语完整信息并展示", async () => {
+    mockedGet.mockResolvedValue({ ...TERMS[0], version: 3, created_at: "2026-08-01T00:00:00" });
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("成交总额");
+    // 表格行内每个术语都有详情按钮，取第一行（GMV）
+    fireEvent.click(screen.getAllByText("详情")[0]);
+
+    await screen.findByText("术语详情：GMV");
+    // 详情弹窗展示完整字段（含列外字段 owner/版本）
+    expect(screen.getByText("Owner ID")).toBeTruthy();
+    expect(screen.getByText("3")).toBeTruthy();
+    expect(mockedGet).toHaveBeenCalledWith("GMV");
+  });
+
+  it("编辑：打开编辑弹窗回填当前值，提交时调用 updateTerm", async () => {
+    mockedUpdate.mockResolvedValue(TERMS[0]);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByText("编辑")[0]);
+
+    await screen.findByText("编辑术语：GMV");
+    const nameInput = screen.getByDisplayValue("成交总额");
+    fireEvent.change(nameInput, { target: { value: "成交总额(修订)" } });
+    fireEvent.click(screen.getByText(/保\s*存/));
+
+    await waitFor(() => {
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        "GMV",
+        expect.objectContaining({ name: "成交总额(修订)" }),
+      );
+    });
+  });
+
+  it("关系管理：提交时调用 createTermRelation 建立术语关系", async () => {
+    mockedRelation.mockResolvedValue({
+      id: 1,
+      source_term_id: 1,
+      target_term_id: 2,
+      relation_type: "RELATED_TO",
+      declared_by: null,
+      source_type: "MANUAL",
+      confirmed_at: null,
+    });
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByText("关系")[0]);
+
+    await screen.findByText("建立关系：GMV");
+    // 目标术语 ID（InputNumber 实际渲染为文本框，用占位符定位）+ 关系类型
+    const idInput = screen.getByPlaceholderText("如 3");
+    fireEvent.change(idInput, { target: { value: "2" } });
+    fireEvent.mouseDown(screen.getByText("相关（RELATED_TO）"));
+    fireEvent.click(screen.getByRole("button", { name: /建\s*立/ }));
+
+    await waitFor(() => {
+      expect(mockedRelation).toHaveBeenCalledWith(
+        "GMV",
+        expect.objectContaining({ target_term_id: 2, relation_type: "RELATED_TO" }),
+      );
     });
   });
 });

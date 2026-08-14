@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space } from "antd";
 import { PlusOutlined } from "@ant-design/icons";
-import { listTemplates, createMetric, UnisenseApiError } from "../api";
+import { listTemplates, createMetric, instantiateTemplate, UnisenseApiError } from "../api";
 import type { MetricCreateRequest, MetricTemplate, MetricType } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
@@ -53,7 +53,8 @@ export function Templates() {
   async function handleCreate(values: Record<string, unknown>) {
     setLoading(true);
     try {
-      const created = await createMetric({
+      // 组装指标基础信息（模板实例化时后端会把模板默认口径与用户覆盖合并）
+      const payload: MetricCreateRequest = {
         metric_code: values.metric_code ? String(values.metric_code) : undefined,
         name: String(values.name),
         domain: String(values.domain),
@@ -64,14 +65,20 @@ export function Templates() {
         time_semantics: (String(values.time_semantics) as MetricCreateRequest["time_semantics"]) ?? "PERIOD",
         freshness: (String(values.freshness) as MetricCreateRequest["freshness"]) ?? "T1",
         dw_layer: (String(values.dw_layer) as MetricCreateRequest["dw_layer"]) ?? "DWS",
-        definition_json: {},
-      });
-      message.success(`已按模板创建：${created.metric_code}`);
+        // 模板默认口径优先保留（defaults_json.definition_json）；缺省时补空对象满足后端必填
+        definition_json:
+          (instantiateTarget?.defaults_json?.definition_json as Record<string, unknown>) ?? {},
+      };
+      // 从模板实例化：调用专用接口（后端合并模板默认字段）；无模板上下文时退回普通创建指标
+      const created = instantiateTarget
+        ? await instantiateTemplate(instantiateTarget.id, payload)
+        : await createMetric(payload);
+      message.success(instantiateTarget ? `已从模板实例化：${created.metric_code}` : `已创建指标：${created.metric_code}`);
       track("template_instantiate", created.metric_code, "template");
       setModalOpen(false);
       navigate(`/detail/${created.metric_code}`);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "实例化失败");
     } finally {
       setLoading(false);
     }

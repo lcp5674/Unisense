@@ -7,9 +7,11 @@ import {
   Descriptions,
   Drawer,
   Empty,
+  Form,
+  Input,
+  Modal,
   Row,
   Col,
-  Input,
   Segmented,
   Select,
   Space,
@@ -37,12 +39,16 @@ import {
   HeatMapOutlined,
   SafetyOutlined,
   SearchOutlined,
+  SettingOutlined,
   TableOutlined,
   ThunderboltOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { Bar, Pie } from "@ant-design/charts";
 import {
+  assignAssetOwner,
+  batchAssignAssetOwner,
+  batchReclassifyAssetSensitivity,
   downloadAssetExport,
   fetchAssetChanges,
   fetchAssetEntityDetail,
@@ -63,6 +69,8 @@ import {
   listCatalogs,
   listDomainTree,
   listMetrics,
+  listUsers,
+  reclassifyAssetSensitivity,
   updateColumnDescription,
   updateTableDescription,
 } from "../api";
@@ -1271,15 +1279,96 @@ function TablesTab() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  // 批量行选择（责任人设置 / 敏感度重分类共用）
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  // 责任人下拉候选（后端 /auth/users，Owner 可为 null=解除归属）
+  const [ownerOptions, setOwnerOptions] = useState<Array<{ label: string; value: number }>>([]);
+  // 治理设置 Modal：single=单条（行/详情抽屉入口）/ batch=批量（表格勾选）
+  const [govOpen, setGovOpen] = useState(false);
+  const [govEntityIds, setGovEntityIds] = useState<number[]>([]);
+  const [govSaving, setGovSaving] = useState(false);
+  const [govOnSaved, setGovOnSaved] = useState<(() => void) | null>(null);
+  const [govForm] = Form.useForm();
 
-  useEffect(() => {
+  async function load() {
     setLoading(true);
     setError(null);
-    fetchAssetTables({ sensitivity, limit: 200 })
-      .then((r) => setItems(r.items))
-      .catch((err) => setError(err instanceof Error ? err.message : "加载数据表失败"))
-      .finally(() => setLoading(false));
+    try {
+      const r = await fetchAssetTables({ sensitivity, limit: 200 });
+      setItems(r.items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加载数据表失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sensitivity]);
+
+  // 责任人候选：加载失败不阻塞治理入口（仅下拉无选项）
+  useEffect(() => {
+    listUsers()
+      .then((users) =>
+        setOwnerOptions(
+          users
+            .filter((u) => u.status === "active")
+            .map((u) => ({ label: `${u.display_name || u.username} (#${u.id})`, value: u.id })),
+        ),
+      )
+      .catch(() => {});
+  }, []);
+
+  // 打开治理设置 Modal（single 传单个 entity_id；batch 传勾选 id 列表）
+  function openGov(entityIds: number[], onSaved?: () => void) {
+    setGovEntityIds(entityIds);
+    setGovOnSaved(() => onSaved ?? null);
+    setGovOpen(true);
+  }
+
+  // 提交：只发送用户实际填写的字段；owner 选「解除归属」哨兵值 → null
+  async function handleGovSubmit() {
+    const values = govForm.getFieldsValue();
+    const ids = govEntityIds;
+    const calls: Promise<unknown>[] = [];
+    const sens = values.sensitivity_level as string | undefined;
+    if (sens) {
+      calls.push(
+        ids.length > 1
+          ? batchReclassifyAssetSensitivity(ids, sens)
+          : reclassifyAssetSensitivity(ids[0], sens),
+      );
+    }
+    // owner 未动（undefined）不提交；显式「解除归属」→ null
+    if (values.owner_id !== undefined && values.owner_id !== null) {
+      const ownerId = values.owner_id === "__none__" ? null : (values.owner_id as number);
+      calls.push(
+        ids.length > 1
+          ? batchAssignAssetOwner(ids, ownerId)
+          : assignAssetOwner(ids[0], ownerId),
+      );
+    }
+    if (calls.length === 0) {
+      message.warning("请选择要设置的责任人或敏感度");
+      return;
+    }
+    setGovSaving(true);
+    try {
+      await Promise.all(calls);
+      message.success(`已更新 ${ids.length} 项资产`);
+      setGovOpen(false);
+      govForm.resetFields();
+      setSelectedRowKeys([]);
+      await load();
+      govOnSaved?.();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "保存失败");
+    } finally {
+      setGovSaving(false);
+    }
+  }
 
   async function openDetail(item: AssetTableItem) {
     if (item.id == null) {
@@ -1296,6 +1385,25 @@ function TablesTab() {
     } finally {
       setDetailLoading(false);
     }
+  }
+
+  // 治理保存后刷新当前详情抽屉内容（责任人/敏感度即时生效）
+  async function refreshDetail() {
+    if (!detail) return;
+    try {
+      setDetail(await fetchAssetEntityDetail(detail.id));
+    } catch {
+      // 静默失败：抽屉内容保持旧值，下次打开自动刷新
+    }
+  }
+
+  // 表格勾选（rowKey 为复合键）→ 映射为实体 id 列表
+  function selectedEntityIds(): number[] {
+    const ids = items
+      .filter((r) => selectedRowKeys.includes(`${r.source_id}-${r.entity_name}`))
+      .map((r) => r.id)
+      .filter((v): v is number => v != null);
+    return ids;
   }
 
   const lineageCount = detail?.lineage_count ?? 0;
@@ -1330,6 +1438,20 @@ function TablesTab() {
           <Button icon={<DownloadOutlined />} onClick={handleExport}>
             导出 CSV
           </Button>
+          <Button
+            icon={<SettingOutlined />}
+            disabled={selectedRowKeys.length === 0}
+            onClick={() => {
+              const ids = selectedEntityIds();
+              if (ids.length === 0) {
+                message.warning("所选资产缺少详情标识（id），无法批量设置");
+                return;
+              }
+              openGov(ids);
+            }}
+          >
+            批量设置
+          </Button>
         </Space>
       }
     >
@@ -1343,6 +1465,10 @@ function TablesTab() {
           rowKey={(r) => `${r.source_id}-${r.entity_name}`}
           size="small"
           pagination={{ pageSize: 20 }}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys) => setSelectedRowKeys(keys),
+          }}
           columns={[
             { title: "数据源", dataIndex: "source_id", key: "source_id" },
             { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true },
@@ -1370,17 +1496,30 @@ function TablesTab() {
             {
               title: "操作",
               key: "action",
-              width: 80,
+              width: 140,
               render: (_: unknown, record: AssetTableItem) => (
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<EyeOutlined />}
-                  disabled={record.id == null}
-                  onClick={() => openDetail(record)}
-                >
-                  详情
-                </Button>
+                <Space size={0}>
+                  <Button
+                    type="link"
+                    size="small"
+                    icon={<EyeOutlined />}
+                    disabled={record.id == null}
+                    onClick={() => openDetail(record)}
+                  >
+                    详情
+                  </Button>
+                  <Button
+                    type="link"
+                    size="small"
+                    icon={<SettingOutlined />}
+                    disabled={record.id == null}
+                    onClick={() => {
+                      if (record.id != null) openGov([record.id]);
+                    }}
+                  >
+                    设置
+                  </Button>
+                </Space>
               ),
             },
           ]}
@@ -1398,7 +1537,18 @@ function TablesTab() {
         ) : detail ? (
           <>
             <Descriptions column={1} bordered size="small">
-              <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+              <Descriptions.Item label="实体名称">
+                {detail.entity_name}
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<SettingOutlined />}
+                  style={{ paddingLeft: 8 }}
+                  onClick={() => openGov([detail.id], refreshDetail)}
+                >
+                  设置
+                </Button>
+              </Descriptions.Item>
               <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
               <Descriptions.Item label="数据源">{detail.source_id}</Descriptions.Item>
               <Descriptions.Item label="敏感度">
@@ -1542,6 +1692,47 @@ function TablesTab() {
           </>
         ) : null}
       </Drawer>
+      <Modal
+        title={
+          govEntityIds.length > 1
+            ? `批量设置（${govEntityIds.length} 项资产）`
+            : "设置资产治理信息"
+        }
+        open={govOpen}
+        onCancel={() => {
+          setGovOpen(false);
+          govForm.resetFields();
+        }}
+        onOk={handleGovSubmit}
+        okText="保存"
+        confirmLoading={govSaving}
+      >
+        <Form form={govForm} layout="vertical" style={{ marginTop: 8 }}>
+          <Form.Item
+            name="owner_id"
+            label="责任人"
+            extra="留空表示不修改；选择「解除归属」将清空责任人"
+          >
+            <Select
+              allowClear
+              placeholder="选择责任人"
+              options={[
+                { label: "（解除归属）", value: "__none__" },
+                ...ownerOptions,
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="sensitivity_level" label="敏感度" extra="留空表示不修改">
+            <Select
+              placeholder="选择敏感级别"
+              options={Object.keys(SENSITIVITY_LABEL).map((k) => ({
+                value: k,
+                label: SENSITIVITY_LABEL[k],
+              }))}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
     </Card>
   );
 }

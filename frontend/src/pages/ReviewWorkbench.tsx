@@ -8,9 +8,10 @@ import {
   compareMetrics,
   escalateConflict,
   listConflicts,
+  listConflictRulings,
   UnisenseApiError,
 } from "../api";
-import type { ConflictResponse, MetricCompareResult } from "../types";
+import type { ConflictResponse, MetricCompareResult, RulingRecord } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { MetricCompareTable } from "../components/MetricCompareTable";
 
@@ -127,6 +128,10 @@ export function ReviewWorkbench() {
   // 升级弹窗
   const [escalating, setEscalating] = useState<ConflictResponse | null>(null);
   const [escalateNote, setEscalateNote] = useState("");
+  // 裁决记录（历史知识库）弹窗
+  const [rulingsFor, setRulingsFor] = useState<ConflictResponse | null>(null);
+  const [rulings, setRulings] = useState<RulingRecord[]>([]);
+  const [rulingsLoading, setRulingsLoading] = useState(false);
 
   const navigate = useNavigate();
   const { track } = useTracking();
@@ -226,6 +231,20 @@ export function ReviewWorkbench() {
     }
   }
 
+  // 打开历史裁决记录（知识库条目，GET /conflicts/{id}/rulings）
+  async function openRulings(c: ConflictResponse) {
+    setRulingsFor(c);
+    setRulings([]);
+    setRulingsLoading(true);
+    try {
+      setRulings(await listConflictRulings(c.conflict_id));
+    } catch (err) {
+      message.error(errText(err, "加载裁决记录失败"));
+    } finally {
+      setRulingsLoading(false);
+    }
+  }
+
   const actionsFor = (c: ConflictResponse) => {
     if (c.type === "pii") {
       return <Tag>已转交治理</Tag>;
@@ -264,6 +283,14 @@ export function ReviewWorkbench() {
       actions.push(
         <Button size="small" disabled={busyId === c.conflict_id} onClick={() => handleClose(c)}>
           关闭
+        </Button>,
+      );
+    }
+    // 已裁决 / 已关闭可查看历史裁决记录（知识库）
+    if (c.status === "RULED" || c.status === "CLOSED") {
+      actions.push(
+        <Button size="small" onClick={() => openRulings(c)}>
+          裁决记录
         </Button>,
       );
     }
@@ -465,6 +492,63 @@ export function ReviewWorkbench() {
           value={escalateNote}
           onChange={(e) => setEscalateNote(e.target.value)}
         />
+      </Modal>
+
+      {/* 历史裁决记录弹窗（知识库） */}
+      <Modal
+        title={`裁决记录 ${rulingsFor?.conflict_id ?? ""}`}
+        open={rulingsFor != null}
+        onCancel={() => setRulingsFor(null)}
+        footer={<Button onClick={() => setRulingsFor(null)}>关闭</Button>}
+        width={760}
+      >
+        {rulingsFor ? (
+          <>
+            <ConflictSummary c={rulingsFor} />
+            {rulingsLoading ? (
+              <Card loading style={{ minHeight: 160 }} />
+            ) : rulings.length === 0 ? (
+              <p className="muted">暂无裁决记录（仲裁后的知识库条目将沉淀于此）。</p>
+            ) : (
+              <Table
+                rowKey="id"
+                size="small"
+                dataSource={rulings}
+                pagination={false}
+                columns={[
+                  { title: "ID", dataIndex: "id", key: "id", width: 70 },
+                  {
+                    title: "决策",
+                    dataIndex: "decision",
+                    key: "decision",
+                    width: 140,
+                    render: (v: string | null) => v ?? "—",
+                  },
+                  {
+                    title: "理由",
+                    dataIndex: "reason",
+                    key: "reason",
+                    render: (v: string | null) => v ?? "—",
+                  },
+                  {
+                    title: "仲裁人",
+                    dataIndex: "arbitrator_id",
+                    key: "arbitrator",
+                    width: 90,
+                    render: (v: number | null) => (v != null ? <span className="mono">#{v}</span> : "—"),
+                  },
+                  {
+                    title: "裁决时间",
+                    dataIndex: "decided_at",
+                    key: "decided_at",
+                    width: 170,
+                    render: (v: string | null) => v ?? "—",
+                  },
+                ]}
+              />
+            )}
+          </>
+        ) : null}
       </Modal>
     </div>
   );

@@ -1,12 +1,13 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { BarsOutlined } from "@ant-design/icons";
 import {
-  Alert, Button, Card, Checkbox, Cascader, Col, Form, Input, Row, Segmented, Select, Space, Spin, Tooltip, Typography, App as AntApp, Tag,
+  Alert, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog, SuggestionField, AutoSuggestResponse } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog, SuggestionField, AutoSuggestResponse } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 
 const { Title, Paragraph } = Typography;
@@ -19,6 +20,32 @@ function treeToCascaderOptions(nodes: SubjectDomainTreeNode[]): any[] {
     children: n.children.length > 0 ? treeToCascaderOptions(n.children) : undefined,
   }));
 }
+
+// 批量注册弹窗：域树扁平化（父子域均可选，域编码作为请求体 domain）
+function flattenDomainOptions(nodes: SubjectDomainTreeNode[]): Array<{ value: string; label: string }> {
+  return nodes.flatMap((n) => [
+    { value: n.code, label: `${n.name} (${n.code})` },
+    ...flattenDomainOptions(n.children),
+  ]);
+}
+
+// 批量注册结果明细列：成功=DRAFT（草稿），失败=VALIDATION_ERROR（含原因）
+const BATCH_RESULT_COLUMNS = [
+  { title: "指标编码", dataIndex: "metric_code", key: "metric_code" },
+  {
+    title: "状态",
+    dataIndex: "status",
+    key: "status",
+    render: (s: string) =>
+      s === "DRAFT" ? <Tag color="success">已创建草稿</Tag> : <Tag color="error">校验失败</Tag>,
+  },
+  {
+    title: "失败原因",
+    dataIndex: "validation_errors",
+    key: "validation_errors",
+    render: (v: string | null) => v || <span className="muted">—</span>,
+  },
+];
 
 const DICT_FIELD_MAP: Array<{ dictType: string; field: string; label: string }> = [
   { dictType: "granularity", field: "granularity", label: "粒度" },
@@ -107,6 +134,12 @@ export function MetricCreate() {
   // 推断结果回填：各字段来源徽标 + 自动生成的口径定义预览
   const [inferred, setInferred] = useState<Record<string, SuggestionField>>({});
   const [inferredDefinition, setInferredDefinition] = useState<{ json: Record<string, unknown> | null; mode: string | null }>({ json: null, mode: null });
+
+  // 批量注册指标弹窗状态（POST /metric-definitions/batch-register）
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchForm] = Form.useForm();
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+  const [batchResult, setBatchResult] = useState<MetricBatchRegisterResult | null>(null);
 
   useEffect(() => {
     setDomainLoading(true);
@@ -367,6 +400,56 @@ export function MetricCreate() {
     }
   }
 
+  // 打开批量注册弹窗：清空上次结果，主表单已选域时预填，减少重复选择
+  function openBatchModal() {
+    batchForm.resetFields();
+    setBatchResult(null);
+    if (selectedDomain) batchForm.setFieldValue("domain", selectedDomain);
+    setBatchOpen(true);
+  }
+
+  // 提交批量注册：度量列按行拆分，维度映射为可选 JSON，成功/失败明细展示在结果区
+  async function handleBatchSubmit(values: Record<string, unknown>) {
+    const measureColumns = String(values.measure_columns || "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (measureColumns.length === 0) {
+      message.warning("请至少填写一个度量列");
+      return;
+    }
+    let dimensionMapping: Record<string, string> | undefined;
+    const mappingText = String(values.dimension_mapping || "").trim();
+    if (mappingText) {
+      try {
+        const parsed: unknown = JSON.parse(mappingText);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          dimensionMapping = parsed as Record<string, string>;
+        } else {
+          message.warning("维度映射需为 JSON 对象，已忽略");
+        }
+      } catch {
+        message.warning("维度映射不是合法 JSON，已忽略");
+      }
+    }
+    const req: MetricBatchRegisterRequest = {
+      source_table: String(values.source_table).trim(),
+      measure_columns: measureColumns,
+      domain: String(values.domain),
+      llm_prefill: Boolean(values.llm_prefill),
+      dimension_mapping: dimensionMapping,
+    };
+    setBatchSubmitting(true);
+    try {
+      const result = await batchRegisterMetrics(req);
+      setBatchResult(result);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.code}）` : "批量注册失败");
+    } finally {
+      setBatchSubmitting(false);
+    }
+  }
+
   const dictSelect = (dictType: string, _field: string, placeholder: string) => (
     <Select
       showSearch
@@ -385,7 +468,12 @@ export function MetricCreate() {
 
   return (
     <div>
-      <Title level={3}>注册指标（草稿）</Title>
+      <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }} align="center">
+        <Title level={3} style={{ margin: 0 }}>注册指标（草稿）</Title>
+        <Button type="dashed" icon={<BarsOutlined />} onClick={openBatchModal}>
+          批量注册指标
+        </Button>
+      </Space>
       <Card>
         <Form form={form} layout="vertical" onFinish={handleSubmit} initialValues={{
           type: "atomic", granularity: "day", aggregation: "SUM",
@@ -650,6 +738,108 @@ export function MetricCreate() {
           </Space>
         </Form>
       </Card>
+
+      {/* 批量注册指标弹窗：源宽表 + 多个度量列 → 批量创建 DRAFT（对齐 FR-030） */}
+      <Modal
+        title="批量注册指标"
+        open={batchOpen}
+        onCancel={() => setBatchOpen(false)}
+        footer={null}
+        width={720}
+        destroyOnClose
+      >
+        {batchResult ? (
+          <div>
+            {(() => {
+              const failed = batchResult.candidates.filter((c) => c.status === "VALIDATION_ERROR").length;
+              const succeeded = batchResult.candidates.length - failed;
+              return (
+                <Alert
+                  type={failed > 0 ? "warning" : "success"}
+                  showIcon
+                  message={`批量注册完成：成功 ${succeeded} / 失败 ${failed}`}
+                  description={`批次号：${batchResult.batch_id}（成功的指标已创建为 DRAFT 草稿）`}
+                />
+              );
+            })()}
+            <Table
+              size="small"
+              rowKey="metric_code"
+              dataSource={batchResult.candidates}
+              columns={BATCH_RESULT_COLUMNS}
+              pagination={false}
+              style={{ marginTop: 16 }}
+              locale={{ emptyText: "无注册结果" }}
+            />
+            <Space style={{ marginTop: 16 }}>
+              <Button onClick={() => setBatchResult(null)}>继续注册</Button>
+              <Button type="primary" onClick={() => setBatchOpen(false)}>
+                关闭
+              </Button>
+            </Space>
+          </div>
+        ) : (
+          <Form form={batchForm} layout="vertical" onFinish={handleBatchSubmit}>
+            <Form.Item
+              name="domain"
+              label="业务域"
+              rules={[{ required: true, message: "请选择业务域" }]}
+            >
+              <Select
+                showSearch
+                placeholder="选择所属业务域（须为 active 域）"
+                optionFilterProp="label"
+                options={flattenDomainOptions(domainTree)}
+                loading={domainLoading}
+              />
+            </Form.Item>
+            <Form.Item
+              name="source_table"
+              label="源表名"
+              rules={[{ required: true, message: "请输入源宽表名" }]}
+            >
+              <Select
+                showSearch
+                allowClear
+                placeholder="搜索并选择源宽表（如 dwd.sales_detail）"
+                onSearch={handleSrcTableSearch}
+                loading={srcTableSearchLoading}
+                notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
+                options={srcTableSearchOptions}
+                filterOption={false}
+              />
+            </Form.Item>
+            <Form.Item
+              name="measure_columns"
+              label="度量列"
+              rules={[{ required: true, message: "请至少填写一个度量列" }]}
+              extra="每行一个度量列，系统将逐个创建指标草稿（DRAFT）"
+            >
+              <TextArea
+                rows={5}
+                placeholder={"gmv\norder_cnt\nrefund_amt"}
+                className="mono"
+              />
+            </Form.Item>
+            <Form.Item
+              name="dimension_mapping"
+              label="维度列映射（可选）"
+              extra='JSON 对象，如 {"date": "dt", "shop": "shop_id"}；解析失败将被忽略'
+            >
+              <TextArea rows={2} placeholder='{"date": "dt"}' className="mono" />
+            </Form.Item>
+            <Form.Item name="llm_prefill" label="LLM 预填" valuePropName="checked" initialValue={true}>
+              <Switch checkedChildren="开启" unCheckedChildren="手动" />
+            </Form.Item>
+            <Space>
+              <Button type="primary" htmlType="submit" loading={batchSubmitting}>
+                提交批量注册
+              </Button>
+              <Button onClick={() => setBatchOpen(false)}>取消</Button>
+            </Space>
+          </Form>
+        )}
+      </Modal>
     </div>
   );
 }

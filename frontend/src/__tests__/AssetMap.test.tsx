@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { BrowserRouter } from "react-router-dom";
 import { AssetMap } from "../pages/AssetMap";
@@ -19,6 +19,13 @@ vi.mock("../api", () => ({
   fetchAssetSearch: vi.fn(),
   fetchAssetChanges: vi.fn(),
   fetchAssetMyAssets: vi.fn(),
+  fetchAssetHealth: vi.fn(),
+  fetchAssetPiiOverview: vi.fn(),
+  assignAssetOwner: vi.fn(),
+  reclassifyAssetSensitivity: vi.fn(),
+  batchAssignAssetOwner: vi.fn(),
+  batchReclassifyAssetSensitivity: vi.fn(),
+  listUsers: vi.fn(),
   fetchDescriptionCoverage: vi.fn(),
   inferColumnDescription: vi.fn(),
   inferDescriptions: vi.fn(),
@@ -102,6 +109,11 @@ import {
   fetchAssetMyAssets,
   fetchDescriptionCoverage,
   updateTableDescription,
+  assignAssetOwner,
+  reclassifyAssetSensitivity,
+  batchAssignAssetOwner,
+  batchReclassifyAssetSensitivity,
+  listUsers,
   listCatalogs,
   listDomainTree,
   listMetrics,
@@ -162,6 +174,17 @@ describe("AssetMap", () => {
     });
     vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
     vi.mocked(fetchAssetOrphans).mockResolvedValue({ items: [], total: 0 });
+    // 数据表 tab 治理设置的责任人候选（Owner 下拉选项）
+    vi.mocked(listUsers).mockResolvedValue([
+      {
+        id: 1,
+        username: "admin",
+        display_name: "管理员",
+        role: "platform_admin",
+        domain: null,
+        status: "active",
+      },
+    ]);
     vi.mocked(fetchAssetChanges).mockResolvedValue({ catalogs: [], metrics: [], days: 7 });
     vi.mocked(fetchAssetMyAssets).mockResolvedValue({ owner_id: 1, catalogs: [], metrics: [] });
     vi.mocked(listCatalogs).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
@@ -753,6 +776,179 @@ describe("AssetMap", () => {
 
     await waitFor(() => {
       expect(updateTableDescription).toHaveBeenCalledWith(1, "新表描述");
+    });
+  });
+
+  it("数据表行设置：单条重分类敏感度调用 reclassifyAssetSensitivity", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [
+        {
+          id: 5,
+          source_id: "s1",
+          entity_name: "sales.ods",
+          entity_type: "TABLE",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+      ],
+      total: 1,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+
+    const row = screen.getByText("sales.ods").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: /设\s*置/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("设置资产治理信息")).toBeInTheDocument();
+    });
+    const dialog = screen.getByRole("dialog");
+    const sensItem = within(dialog).getByText("敏感度").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(within(sensItem).getByRole("combobox"));
+    await user.click(await screen.findByText("PII"));
+    await user.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    await waitFor(() => {
+      expect(reclassifyAssetSensitivity).toHaveBeenCalledWith(5, "PII");
+    });
+  });
+
+  it("数据表行设置：设置责任人调用 assignAssetOwner", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [
+        {
+          id: 5,
+          source_id: "s1",
+          entity_name: "sales.ods",
+          entity_type: "TABLE",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+      ],
+      total: 1,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+
+    const row = screen.getByText("sales.ods").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: /设\s*置/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("设置资产治理信息")).toBeInTheDocument();
+    });
+    const dialog = screen.getByRole("dialog");
+    const ownerItem = within(dialog).getByText("责任人").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(within(ownerItem).getByRole("combobox"));
+    await user.click(await screen.findByText("管理员 (#1)"));
+    await user.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    await waitFor(() => {
+      expect(assignAssetOwner).toHaveBeenCalledWith(5, 1);
+    });
+  });
+
+  it("数据表批量设置：勾选多行后批量分配责任人", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          source_id: "s1",
+          entity_name: "sales.ods",
+          entity_type: "TABLE",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+        {
+          id: 2,
+          source_id: "s1",
+          entity_name: "sales.dwd",
+          entity_type: "TABLE",
+          sensitivity_level: "CONFIDENTIAL",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+      ],
+      total: 2,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+
+    // 表头全选（rowSelection 选择所有行）
+    const checkboxes = screen.getAllByRole("checkbox");
+    await user.click(checkboxes[0]);
+
+    await user.click(screen.getByRole("button", { name: /批量设置/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("批量设置（2 项资产）")).toBeInTheDocument();
+    });
+    const dialog = screen.getByRole("dialog");
+    const ownerItem = within(dialog).getByText("责任人").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(within(ownerItem).getByRole("combobox"));
+    await user.click(await screen.findByText("管理员 (#1)"));
+    await user.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    await waitFor(() => {
+      expect(batchAssignAssetOwner).toHaveBeenCalledWith([1, 2], 1);
+    });
+  });
+
+  it("数据表批量设置：批量重分类敏感度调用 batchReclassifyAssetSensitivity", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          source_id: "s1",
+          entity_name: "sales.ods",
+          entity_type: "TABLE",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+        {
+          id: 2,
+          source_id: "s1",
+          entity_name: "sales.dwd",
+          entity_type: "TABLE",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+      ],
+      total: 2,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    await user.click(checkboxes[0]);
+    await user.click(screen.getByRole("button", { name: /批量设置/ }));
+    await waitFor(() => {
+      expect(screen.getByText("批量设置（2 项资产）")).toBeInTheDocument();
+    });
+    const dialog = screen.getByRole("dialog");
+    const sensItem = within(dialog).getByText("敏感度").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(within(sensItem).getByRole("combobox"));
+    await user.click(await screen.findByText("机密"));
+    await user.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    await waitFor(() => {
+      expect(batchReclassifyAssetSensitivity).toHaveBeenCalledWith([1, 2], "CONFIDENTIAL");
     });
   });
 });

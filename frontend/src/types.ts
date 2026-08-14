@@ -189,6 +189,34 @@ export interface MetricPublishRequest {
   change_reason: string; // 必填，min_length=4
 }
 
+// 批量注册指标（backend POST /metric-definitions/batch-register，对齐 FR-030）
+// 请求体对齐 backend/app/services/semantic/schemas.py MetricBatchRegisterRequest
+export interface MetricBatchRegisterRequest {
+  /** 源宽表名（必填） */
+  source_table: string;
+  /** 度量列列表（至少 1 个，按列批量创建 DRAFT 指标） */
+  measure_columns: string[];
+  /** 维度列映射，可选（如 { date: dt, shop: shop_id }） */
+  dimension_mapping?: Record<string, string> | null;
+  /** 是否使用 LLM 预填（默认 true；False=纯规则手动模式） */
+  llm_prefill?: boolean;
+  /** 所属域（必填，须为 active 域） */
+  domain: string;
+}
+
+/** 批量注册结果中的单条候选（成功=DRAFT，失败=VALIDATION_ERROR） */
+export interface MetricBatchRegisterCandidate {
+  metric_code: string;
+  status: "DRAFT" | "VALIDATION_ERROR";
+  validation_errors: string | null;
+}
+
+/** 批量注册响应 data 结构（对齐 service.batch_register_metrics 返回值） */
+export interface MetricBatchRegisterResult {
+  batch_id: string;
+  candidates: MetricBatchRegisterCandidate[];
+}
+
 // 冲突（backend/app/services/conflict/schemas.py）
 // 后端枚举见 models/conflict.py：状态 OPEN/NEGOTIATING/ESCALATED/RULED/CLOSED；
 // 类型 same_name_diff_def/same_def_diff_name/grain_unit/cross_domain_same_def/version_conflict/pii
@@ -257,6 +285,18 @@ export interface ConflictDetection {
 
 export interface ConflictCheckResult {
   detections: ConflictDetection[];
+}
+
+// 裁决记录（知识库条目，GET /conflicts/{id}/rulings，backend/app/services/conflict/schemas.py）
+export interface RulingRecord {
+  id: number;
+  conflict_id: string;
+  metric_codes: Record<string, unknown> | null;
+  dispute_desc: string | null;
+  decision: string | null;
+  reason: string | null;
+  arbitrator_id: number | null;
+  decided_at: string | null;
 }
 
 // 血缘边（backend/app/services/lineage/schemas.py）
@@ -551,6 +591,15 @@ export interface DimensionMember {
   created_at: string;
 }
 
+/** 指标-维度绑定关系（POST /dimensions/{dim_code}/metrics） */
+export interface MetricDimension {
+  id: number;
+  metric_id: number;
+  dim_code: string;
+  role: string;
+  default_member: string | null;
+}
+
 // ============================================================================
 // 术语表（backend /api/v1/terms/*）
 // ============================================================================
@@ -579,6 +628,17 @@ export interface GlossaryConflict {
   status: string;
   resolver: number | null;
   created_at: string | null;
+}
+
+// 术语关系（backend POST /terms/{term_code}/relations，对齐 TermRelationResponse）
+export interface TermRelation {
+  id: number;
+  source_term_id: number;
+  target_term_id: number;
+  relation_type: string;
+  declared_by: number | null;
+  source_type: string;
+  confirmed_at: string | null;
 }
 
 // ============================================================================
@@ -957,6 +1017,25 @@ export interface AuditEntry {
   /** 后端 enrich：操作人显示名（联查 user，回退「用户 #id」） */
   actor_display?: string;
 }
+
+// ============================================================================
+// 埋点统计（backend /api/v1/tracking/stats，platform_admin/domain_admin）
+// ============================================================================
+
+/** 埋点统计单行（按 group_by 分组聚合的结果）。 */
+export interface TrackingStatsRow {
+  group_key: string;
+  event_count: number;
+  unique_actors: number;
+}
+
+/** 埋点统计响应（backend tracking.py TrackingStatsResponse）。 */
+export interface TrackingStatsResponse {
+  stats: TrackingStatsRow[];
+}
+
+/** 埋点统计允许的分组字段（对齐后端 _GROUP_BY_ALLOWED 白名单）。 */
+export type TrackingGroupBy = "event_type" | "target_type" | "actor_id";
 
 // ============================================================================
 // 采集器（backend /api/v1/data-sources + /api/v1/catalogs）

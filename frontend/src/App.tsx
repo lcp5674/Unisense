@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Button, Input, App as AntApp } from "antd";
-import { apiLogin, clearToken, fetchCurrentUser, getToken, UnisenseApiError } from "./api";
+import { apiLogin, clearAuthTokens, fetchCurrentUser, getToken, UnisenseApiError } from "./api";
 import type { CurrentUser } from "./types";
 import { Layout } from "./components/Layout";
 import { MetricCatalog } from "./pages/MetricCatalog";
@@ -26,6 +26,7 @@ import { Governance } from "./pages/Governance";
 import { QualityCenter } from "./pages/QualityCenter";
 import { Notifications } from "./pages/Notifications";
 import { Observability } from "./pages/Observability";
+import { TrackingStats } from "./pages/TrackingStats";
 import { AiAssistant } from "./pages/AiAssistant";
 import { SystemConfig } from "./pages/SystemConfig";
 import { UserManagement } from "./pages/UserManagement";
@@ -163,7 +164,7 @@ export default function App() {
     }
     fetchCurrentUser()
       .then((me) => setUser(me))
-      .catch(() => clearToken())
+      .catch(() => clearAuthTokens())
       .finally(() => setBooting(false));
   }, []);
 
@@ -211,6 +212,7 @@ export default function App() {
             <Route path="/system-config" element={<SystemConfig />} />
             <Route path="/users" element={<UserManagement />} />
             <Route path="/observability" element={<Observability />} />
+            <Route path="/tracking-stats" element={<TrackingStats />} />
             <Route path="/data-sources" element={<DataSources />} />
             <Route path="/catalogs" element={<Catalogs />} />
             <Route path="/collection-tasks" element={<CollectionTasks />} />

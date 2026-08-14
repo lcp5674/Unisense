@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Alert } from "antd";
-import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { PlusOutlined, ReloadOutlined, ThunderboltOutlined, LinkOutlined } from "@ant-design/icons";
 import {
   listQualityRules,
   createQualityRule,
@@ -10,8 +10,11 @@ import {
   qualityEventAck,
   qualityEventResolve,
   qualityEventClose,
+  qualityEventDetect,
+  qualityEventConfirmRepair,
   listBenchmarks,
   importBenchmark,
+  bindBenchmark,
   listReconciliationRecords,
   runReconciliation,
   confirmReconciliation,
@@ -177,6 +180,10 @@ function EventsTab() {
   const [pageSize, setPageSize] = useState(20);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
+  // 手动触发检测弹窗
+  const [detectOpen, setDetectOpen] = useState(false);
+  const [detectForm] = Form.useForm();
+  const metrics = useMetrics();
 
   async function load() {
     setLoading(true);
@@ -206,6 +213,28 @@ function EventsTab() {
     }
   }
 
+  // 手动触发检测：后端 POST /quality/events/detect，命中返回事件、未命中返回 null
+  async function handleDetect(values: Record<string, unknown>) {
+    try {
+      const hit = await qualityEventDetect({
+        metric_id: Number(values.metric_id),
+        rule_type: String(values.rule_type),
+        obs_value: Number(values.obs_value),
+        rule_mode: values.rule_mode ? String(values.rule_mode) : null,
+      });
+      if (hit) {
+        message.success(`检测命中，已生成异常事件 #${hit.id}`);
+      } else {
+        message.info("检测未命中（或该指标已有 OPEN 异常），未生成新事件");
+      }
+      setDetectOpen(false);
+      detectForm.resetFields();
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "检测失败");
+    }
+  }
+
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "指标", dataIndex: "metric_id", key: "metric", width: 90, render: (v: number) => <span className="mono">#{v}</span> },
@@ -224,11 +253,13 @@ function EventsTab() {
     {
       title: "操作",
       key: "actions",
-      width: 210,
+      width: 280,
       render: (_: unknown, e: QualityEvent) => (
         <Space>
           {e.status === "OPEN" && <Button size="small" onClick={() => act(e.id, qualityEventAck, "已确认")}>确认</Button>}
           {(e.status === "OPEN" || e.status === "ACK") && <Button size="small" type="primary" onClick={() => act(e.id, qualityEventResolve, "已解决")}>解决</Button>}
+          {/* 修复确认：Owner 已线下修复留痕（后端仅 OPEN 状态允许） */}
+          {e.status === "OPEN" && <Button size="small" onClick={() => act(e.id, qualityEventConfirmRepair, "已确认修复")}>修复确认</Button>}
           {e.status !== "CLOSED" && <Button size="small" onClick={() => act(e.id, qualityEventClose, "已关闭")}>关闭</Button>}
         </Space>
       ),
@@ -237,15 +268,36 @@ function EventsTab() {
 
   return (
     <div>
-      <Select
-        allowClear
-        placeholder="全部状态"
-        style={{ width: 140, marginBottom: 12 }}
-        value={status || undefined}
-        onChange={(v) => { setStatus(v || ""); setPage(1); }}
-        options={Object.entries(EVENT_STATUS).map(([k, v]) => ({ value: k, label: v.label }))}
-      />
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+        <Select
+          allowClear
+          placeholder="全部状态"
+          style={{ width: 140 }}
+          value={status || undefined}
+          onChange={(v) => { setStatus(v || ""); setPage(1); }}
+          options={Object.entries(EVENT_STATUS).map(([k, v]) => ({ value: k, label: v.label }))}
+        />
+        <Button type="primary" icon={<ThunderboltOutlined />} onClick={() => setDetectOpen(true)}>手动检测</Button>
+      </div>
       <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }} locale={{ emptyText: "暂无质量事件" }} />
+
+      {/* 手动触发质量检测弹窗 */}
+      <Modal title="手动触发质量检测" open={detectOpen} onCancel={() => setDetectOpen(false)} onOk={() => detectForm.submit()} okText="检测">
+        <Form form={detectForm} layout="vertical" onFinish={handleDetect} style={{ marginTop: 8 }}>
+          <Form.Item name="metric_id" label="指标" rules={[{ required: true }]}>
+            <Select showSearch options={metrics.map((m) => ({ value: m.id, label: `${m.metric_code} · ${m.name}` }))} placeholder="选择指标" />
+          </Form.Item>
+          <Form.Item name="rule_type" label="规则类型" rules={[{ required: true }]}>
+            <Select placeholder="选择规则类型" options={RULE_TYPES.map((v) => ({ value: v, label: RULE_TYPE_LABEL[v] ?? v }))} />
+          </Form.Item>
+          <Form.Item name="rule_mode" label="规则模式">
+            <Select allowClear placeholder="默认按规则自身模式" options={["static", "dynamic_baseline", "yoy_woy", "cross_source"].map((v) => ({ value: v, label: RULE_MODE_LABEL[v] ?? v }))} />
+          </Form.Item>
+          <Form.Item name="obs_value" label="观测值" rules={[{ required: true }]}>
+            <InputNumber style={{ width: 200 }} />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 }
@@ -255,6 +307,9 @@ function BenchmarksTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  // 基准绑定弹窗
+  const [bindTarget, setBindTarget] = useState<QualityBenchmark | null>(null);
+  const [bindForm] = Form.useForm();
 
   async function load() {
     setLoading(true);
@@ -292,6 +347,24 @@ function BenchmarksTab() {
     }
   }
 
+  // 绑定基准到目标指标（声明比对口径 / 容忍率）
+  async function handleBind(values: Record<string, unknown>) {
+    const target = bindTarget;
+    if (!target) return;
+    try {
+      await bindBenchmark(target.id, {
+        metric_code: values.metric_code ? String(values.metric_code) : null,
+        tolerance_pct: values.tolerance_pct !== undefined && values.tolerance_pct !== null ? Number(values.tolerance_pct) : null,
+      });
+      message.success(`基准 #${target.id} 已绑定`);
+      setBindTarget(null);
+      bindForm.resetFields();
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "绑定失败");
+    }
+  }
+
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "数据源", dataIndex: "source_id", key: "source", render: (v: string) => <span className="mono">{v}</span> },
@@ -300,6 +373,14 @@ function BenchmarksTab() {
     { title: "基准值", dataIndex: "bench_value", key: "value", width: 110 },
     { title: "提供方", dataIndex: "provider", key: "provider", width: 130 },
     { title: "容差%", dataIndex: "tolerance_pct", key: "tol", width: 90, render: (v: number | null) => (v !== null && v !== undefined ? `${v}%` : "—") },
+    {
+      title: "操作",
+      key: "actions",
+      width: 110,
+      render: (_: unknown, b: QualityBenchmark) => (
+        <Button size="small" icon={<LinkOutlined />} onClick={() => setBindTarget(b)}>绑定</Button>
+      ),
+    },
   ];
 
   return (
@@ -325,6 +406,27 @@ function BenchmarksTab() {
           </Form.Item>
           <Form.Item name="provider" label="提供方" rules={[{ required: true }]}>
             <Input placeholder="如 财务部 / 第三方" />
+          </Form.Item>
+          <Form.Item name="tolerance_pct" label="容差 (%)">
+            <InputNumber min={0} max={100} style={{ width: 200 }} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 基准绑定弹窗：重声明比对目标指标与容忍率 */}
+      <Modal
+        title={`绑定基准 #${bindTarget?.id ?? ""}`}
+        open={bindTarget != null}
+        onCancel={() => setBindTarget(null)}
+        onOk={() => bindForm.submit()}
+        okText="绑定"
+      >
+        <p className="muted" style={{ marginBottom: 8 }}>
+          {bindTarget ? `${bindTarget.provider} · ${bindTarget.metric_code} @${bindTarget.bench_date}` : ""}
+        </p>
+        <Form form={bindForm} layout="vertical" onFinish={handleBind} style={{ marginTop: 8 }}>
+          <Form.Item name="metric_code" label="目标指标编码">
+            <Input className="mono" placeholder="留空表示绑定到自身指标编码" />
           </Form.Item>
           <Form.Item name="tolerance_pct" label="容差 (%)">
             <InputNumber min={0} max={100} style={{ width: 200 }} />

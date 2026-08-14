@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { Templates } from "../pages/Templates";
-import type { MetricTemplate } from "../types";
+import type { MetricTemplate, MetricResponse } from "../types";
 
 vi.mock("../api", () => {
   class UnisenseApiError extends Error {
@@ -22,6 +22,7 @@ vi.mock("../api", () => {
   return {
     listTemplates: vi.fn(),
     createMetric: vi.fn(),
+    instantiateTemplate: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -30,9 +31,51 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
-import { listTemplates } from "../api";
+import { listTemplates, createMetric, instantiateTemplate } from "../api";
 
 const mockedList = vi.mocked(listTemplates);
+const mockedCreate = vi.mocked(createMetric);
+const mockedInstantiate = vi.mocked(instantiateTemplate);
+
+const CREATED: MetricResponse = {
+  id: 1,
+  metric_code: "finance_gmv_daily",
+  name: "GMV 日汇总模板",
+  domain: "finance",
+  type: "atomic",
+  granularity: "daily",
+  unit: "元",
+  currency: null,
+  aggregation: "SUM",
+  time_semantics: "PERIOD",
+  freshness: "T1",
+  sla: null,
+  dw_layer: "DWS",
+  metric_tier: "T1",
+  serving_mode: "BATCH_ONLY",
+  additivity: "ADDITIVE",
+  non_additive_dimensions: null,
+  definition_json: {},
+  version: 1,
+  row_version: 1,
+  status: "DRAFT",
+  owner_id: 1,
+  backup_owner_id: null,
+  pii_flag: false,
+  compliance_reviewed: false,
+  effective_version: null,
+  consumption_guide: null,
+  successor_code: null,
+  deprecated_at: null,
+  sunset_until: null,
+  emergency_publish: false,
+  emergency_reason: null,
+  gray_tenant_ids: null,
+  pending_conflict: false,
+  pending_conflict_detail: null,
+  created_at: "2026-08-13T00:00:00",
+  updated_at: "2026-08-13T00:00:00",
+};
 
 const TPLS: MetricTemplate[] = [
   {
@@ -157,5 +200,30 @@ describe("Templates 页面", () => {
     await waitFor(() => {
       expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ keyword: "AOV" }));
     });
+  });
+
+  it("从模板实例化：提交时调用 instantiateTemplate（而非普通 createMetric）", async () => {
+    mockedInstantiate.mockResolvedValue(CREATED);
+    mockedCreate.mockResolvedValue(CREATED);
+    render(
+      <MemoryRouter>
+        <Templates />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("tpl_gmv_daily");
+    // 打开实例化弹窗（列表有多行，取第一个模板）
+    fireEvent.click(screen.getAllByText("实例化指标")[0]);
+    await screen.findByText("从模板实例化：GMV 日汇总模板");
+
+    // 提交表单：应调用模板实例化专用接口
+    fireEvent.click(screen.getByText("实例化创建"));
+    await waitFor(() => {
+      expect(mockedInstantiate).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ name: "GMV 日汇总模板", domain: "finance" }),
+      );
+    });
+    expect(mockedCreate).not.toHaveBeenCalled();
   });
 });

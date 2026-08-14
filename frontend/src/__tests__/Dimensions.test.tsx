@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { Dimensions } from "../pages/Dimensions";
 import type { Dimension } from "../types";
@@ -22,8 +23,12 @@ vi.mock("../api", () => {
   return {
     listDimensions: vi.fn(),
     createDimension: vi.fn(),
+    getDimension: vi.fn(),
+    updateDimension: vi.fn(),
     publishDimension: vi.fn(),
     deprecateDimension: vi.fn(),
+    bindMetricDimension: vi.fn(),
+    listMetricDimensions: vi.fn(),
     listDimensionMappings: vi.fn(),
     createDimensionMapping: vi.fn(),
     listReconciliations: vi.fn(),
@@ -36,7 +41,7 @@ vi.mock("../api", () => {
   };
 });
 
-import { listDimensions } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 
@@ -70,6 +75,8 @@ const DIMS: Dimension[] = [
 beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue({ items: DIMS, total: 2 });
+  // 维度列表 Tab 挂载即拉取指标候选（绑定指标下拉），默认返回空列表
+  vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
 });
 
 describe("Dimensions 页面", () => {
@@ -145,6 +152,85 @@ describe("Dimensions 页面", () => {
     fireEvent.click(screen.getByText("跳到区域"));
     await waitFor(() => {
       expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ keyword: "区域" }));
+    });
+  });
+
+  it("编辑维度：点击编辑打开预填表单，保存调用 updateDimension 并刷新列表", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getDimension).mockResolvedValue(DIMS[1]);
+    vi.mocked(updateDimension).mockResolvedValue({ ...DIMS[1], name: "区域（新）" });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("dim_region");
+    const row = screen.getByText("dim_region").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: /编\s*辑/ }));
+
+    // Modal 打开且从详情端点拉取最新值预填
+    await waitFor(() => {
+      expect(screen.getByText(/编辑维度：dim_region/)).toBeInTheDocument();
+      expect(getDimension).toHaveBeenCalledWith("dim_region");
+    });
+    const nameInput = screen.getByLabelText("名称") as HTMLInputElement;
+    expect(nameInput.value).toBe("区域");
+
+    await user.clear(nameInput);
+    await user.type(nameInput, "区域（新）");
+    await user.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    await waitFor(() => {
+      expect(updateDimension).toHaveBeenCalledWith(
+        "dim_region",
+        expect.objectContaining({ name: "区域（新）", domain: "finance", type: "SCD1" }),
+      );
+    });
+    // 保存成功后重新拉取列表
+    await waitFor(() => {
+      expect(mockedList.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("绑定指标：选择指标后调用 bindMetricDimension", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listMetrics).mockResolvedValue({
+      items: [{ id: 10, metric_code: "sales_gmv_day", name: "GMV" } as any],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    });
+    vi.mocked(bindMetricDimension).mockResolvedValue({
+      id: 1,
+      metric_id: 10,
+      dim_code: "dim_channel",
+      role: "filter",
+      default_member: null,
+    });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("dim_channel");
+    const row = screen.getByText("dim_channel").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: "绑定指标" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/绑定指标 → dim_channel/)).toBeInTheDocument();
+    });
+    const dialog = screen.getByRole("dialog");
+    const metricItem = within(dialog).getByText("指标").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(within(metricItem).getByRole("combobox"));
+    await user.click(await screen.findByText("sales_gmv_day · GMV"));
+    await user.click(within(dialog).getByRole("button", { name: /绑\s*定/ }));
+
+    await waitFor(() => {
+      expect(bindMetricDimension).toHaveBeenCalledWith(
+        expect.objectContaining({ metric_id: 10, dim_code: "dim_channel", role: "filter" }),
+      );
     });
   });
 });

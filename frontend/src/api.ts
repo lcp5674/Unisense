@@ -59,8 +59,11 @@ import {
   LineageGraphData,
   LineageIngestRun,
   ListDatabasesResult,
+  MetricBatchRegisterRequest,
+  MetricBatchRegisterResult,
   MetricCreateRequest,
   MetricListResponse,
+  MetricDimension,
   MetricCompareResult,
   MetricHealth,
   MetricPublishRequest,
@@ -92,6 +95,7 @@ import {
   Reconciliation,
   ReconciliationRecord,
   RoleResponse,
+  RulingRecord,
   ScheduleResult,
   SnapshotResponse,
   CollectionJob,
@@ -105,7 +109,10 @@ import {
   SubjectDomainTreeNode,
   SubjectDomainUpdateRequest,
   SystemDictItem,
+  TermRelation,
   TestConnectionResult,
+  TrackingGroupBy,
+  TrackingStatsResponse,
   UserBrief,
   UserCreateRequest,
   UserUpdateRequest,
@@ -137,6 +144,24 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+// P0 令牌无感续期：访问令牌（短效）过期后，用长效 refresh token 换新
+const REFRESH_TOKEN_KEY = "unisense_refresh_token";
+export function getRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_TOKEN_KEY);
+}
+export function setRefreshToken(token: string): void {
+  localStorage.setItem(REFRESH_TOKEN_KEY, token);
+}
+export function clearRefreshToken(): void {
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+}
+
+/** 清除全部登录态（access + refresh），用于会话彻底失效（刷新失败/登出）。 */
+export function clearAuthTokens(): void {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+}
+
 // 消费服务客户端访问令牌（role=consume 的 JWT），由 /consume/api-clients/{id}/token 签发
 const CONSUME_TOKEN_KEY = "unisense_consume_token";
 export function getConsumeToken(): string | null {
@@ -154,6 +179,8 @@ const ERROR_CODE_ZH: Record<string, string> = {
   AUTH_TOKEN_MISSING: "未登录或登录状态缺失",
   AUTH_TOKEN_EXPIRED: "登录已过期，请重新登录",
   AUTH_TOKEN_INVALID: "登录状态无效",
+  AUTH_REFRESH_EXPIRED: "登录已过期，请重新登录",
+  AUTH_REFRESH_REVOKED: "登录状态已失效，请重新登录",
   AUTH_INVALID_CREDENTIALS: "用户名或密码错误",
   AUTH_APIKEY_MISSING: "缺少访问密钥（X-Api-Key）",
   AUTH_APIKEY_INVALID: "访问密钥无效或已吊销",
@@ -219,6 +246,60 @@ interface RequestOptions extends RequestInit {
   consumeFallbackUser?: boolean;
 }
 
+// P0 令牌无感续期：单飞（single-flight）刷新，多个并发 401 共享同一次 /auth/refresh，
+// 避免重复刷新互相覆盖令牌。返回是否续期成功。
+let _refreshPromise: Promise<boolean> | null = null;
+
+async function refreshAccessToken(): Promise<boolean> {
+  if (_refreshPromise) return _refreshPromise;
+  // 先创建任务 Promise，再赋值给单飞锁，最后 await + finally 释放。
+  // 关键：任务内部可能有同步完成路径（如无 refresh token 提前返回），
+  // 若把 finally 放进任务体，其会先于外层赋值执行，把锁重新覆盖成已 resolve 的
+  // Promise，导致单飞锁被永久占用、后续刷新全部失效。
+  const task = (async (): Promise<boolean> => {
+    try {
+      const refreshToken = getRefreshToken();
+      if (!refreshToken) {
+        clearRefreshToken();
+        return false;
+      }
+      const res = await fetch(`${API_BASE_URL}${API_BASE}/auth/refresh`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Api-Key": SEMANTIC_API_KEY,
+        },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) {
+        clearAuthTokens();
+        return false;
+      }
+      const body = (await res.json()) as {
+        data?: { access_token?: string; refresh_token?: string };
+      };
+      const newAccess = body.data?.access_token;
+      const newRefresh = body.data?.refresh_token;
+      if (!newAccess || !newRefresh) {
+        clearAuthTokens();
+        return false;
+      }
+      setToken(newAccess);
+      setRefreshToken(newRefresh);
+      return true;
+    } catch {
+      clearAuthTokens();
+      return false;
+    }
+  })();
+  _refreshPromise = task;
+  try {
+    return await task;
+  } finally {
+    _refreshPromise = null;
+  }
+}
+
 async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -241,16 +322,33 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     ...restInit
   } = init ?? {};
 
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  let res = await fetch(`${API_BASE_URL}${path}`, {
     ...restInit,
     headers,
   });
+
+  // P0 令牌无感续期：用户访问令牌过期（401）时，用 refresh token 换新后重放一次原请求。
+  // 403 是权限拒绝（非过期）、consumeAuth 走独立消费令牌，均不触发刷新。
+  if (res.status === 401 && !init?.consumeAuth) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) {
+      const newToken = getToken();
+      if (newToken) {
+        headers["Authorization"] = `Bearer ${newToken}`;
+        res = await fetch(`${API_BASE_URL}${path}`, { ...restInit, headers });
+      }
+    }
+  }
 
   if (res.status === 401 || res.status === 403) {
     // 鉴权失效：清 token，交由上层跳登录（消费令牌失效仅清除消费令牌）
     if (init?.consumeAuth) {
       clearConsumeToken();
+    } else if (res.status === 401) {
+      // 401：刷新失败或重放仍 401 → 会话彻底失效，清空 access + refresh
+      clearAuthTokens();
     } else {
+      // 403：权限拒绝，与旧行为一致仅清 access token
       clearToken();
     }
   }
@@ -297,14 +395,16 @@ function pageQs(params: Record<string, string | number | undefined>): string {
 
 // ---- 鉴权 ----
 export async function apiLogin(username: string, password: string): Promise<string> {
-  const data = await request<{ access_token: string; token_type: string }>(
-    `${API_BASE}/auth/login`,
-    {
-      method: "POST",
-      body: JSON.stringify({ username, password }),
-    },
-  );
+  const data = await request<{
+    access_token: string;
+    refresh_token: string;
+    token_type: string;
+  }>(`${API_BASE}/auth/login`, {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
   setToken(data.access_token);
+  if (data.refresh_token) setRefreshToken(data.refresh_token);
   return data.access_token;
 }
 
@@ -372,6 +472,19 @@ export async function createMetric(req: MetricCreateRequest): Promise<MetricResp
     method: "POST",
     body: JSON.stringify(req),
   });
+}
+
+// 批量注册指标：源宽表 + 多个度量列 → 批量创建 DRAFT（backend POST /metric-definitions/batch-register，对齐 FR-030）
+export async function batchRegisterMetrics(
+  req: MetricBatchRegisterRequest,
+): Promise<MetricBatchRegisterResult> {
+  return request<MetricBatchRegisterResult>(
+    `${API_BASE}/metric-definitions/batch-register`,
+    {
+      method: "POST",
+      body: JSON.stringify(req),
+    },
+  );
 }
 
 export async function updateMetric(
@@ -666,6 +779,11 @@ export async function checkConflict(req: ConflictCheckRequest): Promise<Conflict
   });
 }
 
+// 裁决记录（知识库）：GET /conflicts/{conflict_id}/rulings，返回历史裁决列表
+export async function listConflictRulings(conflictId: string): Promise<RulingRecord[]> {
+  return request<RulingRecord[]>(`${API_BASE}/conflicts/${conflictId}/rulings`);
+}
+
 // ---- 血缘 ----
 export async function lineageImpact(params: {
   node: string;
@@ -805,6 +923,17 @@ export async function getTemplate(templateId: number): Promise<MetricTemplate> {
   return request<MetricTemplate>(`${API_BASE}/semantics/templates/${templateId}`);
 }
 
+// 从模板实例化创建指标（POST /semantics/templates/{id}/instantiate，后端合并模板默认口径 + 用户覆盖）
+export async function instantiateTemplate(
+  templateId: number,
+  body: MetricCreateRequest,
+): Promise<MetricResponse> {
+  return request<MetricResponse>(`${API_BASE}/semantics/templates/${templateId}/instantiate`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 // 消费指南：后端按 metric_code 查询（对齐 semantic.py /consumption-guide/{metric_code}）
 export async function fetchConsumptionGuide(metricCode: string): Promise<ConsumptionGuideResponse> {
   return request<ConsumptionGuideResponse>(
@@ -839,6 +968,14 @@ export async function consumeQuery(req: QueryRequest): Promise<QueryResponse> {
     body: JSON.stringify(req),
     consumeAuth: true,
   });
+}
+
+// 消费侧指标语义（只读拉取，GET /consume/metrics/{code}/semantic，返回 DryRunResponse）
+export async function consumeSemantic(code: string): Promise<DryRunResponse> {
+  return request<DryRunResponse>(
+    `${API_BASE}/consume/metrics/${encodeURIComponent(code)}/semantic`,
+    { consumeAuth: true },
+  );
 }
 
 export async function listSnapshots(code: string, limit = 50): Promise<SnapshotResponse[]> {
@@ -988,6 +1125,50 @@ export async function createDimensionMember(body: {
   );
 }
 
+/** 维度详情（GET /dimensions/{dim_code}） */
+export async function getDimension(dimCode: string): Promise<Dimension> {
+  return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}`);
+}
+
+/** 更新维度基础信息（PUT /dimensions/{dim_code}，仅 name/domain/type/description 可改） */
+export async function updateDimension(
+  dimCode: string,
+  body: {
+    name?: string;
+    domain?: string;
+    type?: string;
+    description?: string | null;
+  },
+): Promise<Dimension> {
+  return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 绑定指标到维度（POST /dimensions/{dim_code}/metrics，role 如 partition/filter/group） */
+export async function bindMetricDimension(body: {
+  metric_id: number;
+  dim_code: string;
+  role: string;
+  default_member?: string | null;
+}): Promise<MetricDimension> {
+  return request<MetricDimension>(
+    `${API_BASE}/dimensions/${encodeURIComponent(body.dim_code)}/metrics`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+/** 查询某指标已绑定的维度（GET /dimensions/{metric_id}/metric-dimensions） */
+export async function listMetricDimensions(
+  metricId: number,
+): Promise<{ items: MetricDimension[]; total: number }> {
+  return request(`${API_BASE}/dimensions/${metricId}/metric-dimensions`);
+}
+
 // ---- 术语表 ----
 export async function listTerms(params?: {
   domain?: string;
@@ -1030,6 +1211,42 @@ export async function submitTerm(termCode: string): Promise<GlossaryTerm> {
 export async function deprecateTerm(termCode: string): Promise<GlossaryTerm> {
   return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/deprecate`, {
     method: "POST",
+  });
+}
+
+// 术语详情（GET /terms/{term_code}）
+export async function getTerm(termCode: string): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}`);
+}
+
+// 更新术语（PUT /terms/{term_code}，字段缺省则不更新）
+export async function updateTerm(
+  termCode: string,
+  body: {
+    name?: string;
+    definition?: string;
+    domain?: string;
+    synonyms?: string[];
+    boundary?: string | null;
+  },
+): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+// 建立术语关系（POST /terms/{term_code}/relations）
+export async function createTermRelation(
+  termCode: string,
+  body: {
+    target_term_id: number;
+    relation_type: string;
+  },
+): Promise<TermRelation> {
+  return request<TermRelation>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/relations`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }
 
@@ -1234,6 +1451,24 @@ export async function qualityEventClose(eventId: number): Promise<QualityEvent> 
   return request<QualityEvent>(`${API_BASE}/quality/events/${eventId}/close`, { method: "POST" });
 }
 
+// 手动触发质量检测（POST /quality/events/detect）：命中返回异常事件，未命中返回 null
+export async function qualityEventDetect(body: {
+  metric_id: number;
+  rule_type: string;
+  obs_value: number;
+  rule_mode?: string | null;
+}): Promise<QualityEvent | null> {
+  return request<QualityEvent | null>(`${API_BASE}/quality/events/detect`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// Owner 确认已线下修复（POST /quality/events/{event_id}/repair，仅 OPEN 状态可确认）
+export async function qualityEventConfirmRepair(eventId: number): Promise<QualityEvent> {
+  return request<QualityEvent>(`${API_BASE}/quality/events/${eventId}/repair`, { method: "POST" });
+}
+
 export async function submitQualityObservation(body: {
   metric_id: number;
   metric_code: string;
@@ -1276,6 +1511,21 @@ export async function listBenchmarks(params?: {
     page_size: params?.page_size ?? 20,
   });
   return request(`${API_BASE}/quality/benchmarks?${qs}`);
+}
+
+// 绑定基准到目标指标（POST /quality/benchmarks/{benchmark_id}/bind，声明比对口径 / 容忍率）
+export async function bindBenchmark(
+  benchmarkId: number,
+  body: {
+    metric_code?: string | null;
+    tolerance_pct?: number | null;
+    dims?: Record<string, unknown> | null;
+  },
+): Promise<QualityBenchmark> {
+  return request<QualityBenchmark>(`${API_BASE}/quality/benchmarks/${benchmarkId}/bind`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function runReconciliation(body: {
@@ -1545,6 +1795,24 @@ export async function trackEvent(event: {
     method: "POST",
     body: JSON.stringify(event),
   });
+}
+
+// 埋点统计聚合（GET /tracking/stats，需 platform_admin/domain_admin 角色）
+export async function fetchTrackingStats(params?: {
+  event_type?: string;
+  /** YYYY-MM-DD */
+  start_date?: string;
+  /** YYYY-MM-DD */
+  end_date?: string;
+  group_by?: TrackingGroupBy;
+}): Promise<TrackingStatsResponse> {
+  const qs = pageQs({
+    event_type: params?.event_type,
+    start_date: params?.start_date,
+    end_date: params?.end_date,
+    group_by: params?.group_by,
+  });
+  return request<TrackingStatsResponse>(`${API_BASE}/tracking/stats${qs ? `?${qs}` : ""}`);
 }
 
 // ---- 采集器 ----
@@ -2087,6 +2355,53 @@ export async function fetchAssetOwnerView(ownerId: number): Promise<AssetOwnerVi
 // 实体详情：返回表/字段详情（schema 摘要/敏感度/PII/Owner/血缘边数）
 export async function fetchAssetEntityDetail(entityId: number): Promise<AssetEntityDetail> {
   return request<AssetEntityDetail>(`${API_BASE}/assetmap/entities/${entityId}`);
+}
+
+// ---- 资产工作台写能力（FR-18）：责任人设置 / 敏感度重分类 / 批量操作 ----
+// 写接口 RBAC 仅限 platform_admin / domain_admin（后端把关），此处仅提供入口封装。
+
+/** 认领/转让资产归属（ownerId=null 表示解除归属，回到孤儿池） */
+export async function assignAssetOwner(
+  entityId: number,
+  ownerId: number | null,
+): Promise<{ entity_id: number; owner_id: number | null }> {
+  return request(`${API_BASE}/assetmap/entities/${entityId}/owner`, {
+    method: "POST",
+    body: JSON.stringify({ owner_id: ownerId }),
+  });
+}
+
+/** 重分类资产敏感级（仅允许枚举值：PUBLIC/INTERNAL/CONFIDENTIAL/PII/NEEDS_REVIEW） */
+export async function reclassifyAssetSensitivity(
+  entityId: number,
+  sensitivityLevel: string,
+): Promise<{ entity_id: number; sensitivity_level: string }> {
+  return request(`${API_BASE}/assetmap/entities/${entityId}/sensitivity`, {
+    method: "POST",
+    body: JSON.stringify({ sensitivity_level: sensitivityLevel }),
+  });
+}
+
+/** 批量认领/转让归属（单次 ≤200，同事务原子提交） */
+export async function batchAssignAssetOwner(
+  entityIds: number[],
+  ownerId: number | null,
+): Promise<{ affected: number; owner_id: number | null; total: number }> {
+  return request(`${API_BASE}/assetmap/batch-owner`, {
+    method: "POST",
+    body: JSON.stringify({ entity_ids: entityIds, owner_id: ownerId }),
+  });
+}
+
+/** 批量重分类敏感级（单次 ≤200，同事务原子提交） */
+export async function batchReclassifyAssetSensitivity(
+  entityIds: number[],
+  sensitivityLevel: string,
+): Promise<{ affected: number; sensitivity_level: string; total: number }> {
+  return request(`${API_BASE}/assetmap/batch-sensitivity`, {
+    method: "POST",
+    body: JSON.stringify({ entity_ids: entityIds, sensitivity_level: sensitivityLevel }),
+  });
 }
 
 // ---- 产品补充（FR-18 生产化）：搜索 / 健康 / PII / 变更 / 我的资产 / 导出 ----

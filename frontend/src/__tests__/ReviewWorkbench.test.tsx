@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ReviewWorkbench } from "../pages/ReviewWorkbench";
-import type { ConflictListResponse, ConflictResponse, MetricCompareResult } from "../types";
+import type { ConflictListResponse, ConflictResponse, MetricCompareResult, RulingRecord } from "../types";
 
 vi.mock("../api", () => ({
   listConflicts: vi.fn(),
@@ -10,6 +10,7 @@ vi.mock("../api", () => ({
   escalateConflict: vi.fn(),
   closeConflict: vi.fn(),
   compareMetrics: vi.fn(),
+  listConflictRulings: vi.fn(),
 }));
 const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
@@ -21,11 +22,13 @@ import {
   arbitrateConflict,
   closeConflict,
   compareMetrics,
+  listConflictRulings,
 } from "../api";
 const mockedList = vi.mocked(listConflicts);
 const mockedArbitrate = vi.mocked(arbitrateConflict);
 const mockedClose = vi.mocked(closeConflict);
 const mockedCompare = vi.mocked(compareMetrics);
+const mockedRulings = vi.mocked(listConflictRulings);
 
 const baseConflict = (over: Partial<Omit<ConflictResponse, "conflict_type">>): ConflictResponse => {
   const {
@@ -95,6 +98,7 @@ beforeEach(() => {
   } as ConflictListResponse);
   mockedCompare.mockResolvedValue(compareResult);
   mockedArbitrate.mockResolvedValue(baseConflict({ status: "RULED" }));
+  mockedRulings.mockResolvedValue([]);
 });
 
 describe("ReviewWorkbench 冲突仲裁", () => {
@@ -192,5 +196,40 @@ describe("ReviewWorkbench 冲突仲裁", () => {
     const row = screen.getByText("CF-P").closest("tr") as HTMLElement;
     expect(within(row).getByText("已转交治理")).toBeInTheDocument();
     expect(within(row).queryByText("仲裁")).not.toBeInTheDocument();
+  });
+
+  it("RULED/CLOSED 冲突提供裁决记录入口，展示历史知识库条目", async () => {
+    const rulings: RulingRecord[] = [
+      {
+        id: 1,
+        conflict_id: "CF-C",
+        metric_codes: { a: "sales_gmv_day", b: "sales_gmv_d" },
+        dispute_desc: "同名不同义",
+        decision: "choose_canonical",
+        reason: "现有口径更符合业务定义",
+        arbitrator_id: 42,
+        decided_at: "2026-08-12T10:00:00",
+      },
+    ];
+    mockedRulings.mockResolvedValue(rulings);
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-C")).toBeInTheDocument());
+    const ruledRow = screen.getByText("CF-C").closest("tr") as HTMLElement;
+    fireEvent.click(within(ruledRow).getByRole("button", { name: /裁决记录/ }));
+
+    await waitFor(() => expect(mockedRulings).toHaveBeenCalledWith("CF-C"));
+    expect(screen.getByText(/裁决记录 CF-C/)).toBeInTheDocument();
+    expect(screen.getByText("choose_canonical")).toBeInTheDocument();
+    expect(screen.getByText("现有口径更符合业务定义")).toBeInTheDocument();
+    expect(screen.getByText("2026-08-12T10:00:00")).toBeInTheDocument();
+  });
+
+  it("无裁决记录时展示空态提示", async () => {
+    mockedRulings.mockResolvedValue([]);
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-C")).toBeInTheDocument());
+    const ruledRow = screen.getByText("CF-C").closest("tr") as HTMLElement;
+    fireEvent.click(within(ruledRow).getByRole("button", { name: /裁决记录/ }));
+    await waitFor(() => expect(screen.getByText(/暂无裁决记录/)).toBeInTheDocument());
   });
 });

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Card, Select, Input, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col } from "antd";
-import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined } from "@ant-design/icons";
+import { Card, Select, Input, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col, Drawer, Empty } from "antd";
+import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined } from "@ant-design/icons";
 import {
   consumeDryRun,
   consumeQuery,
+  consumeSemantic,
   listMetrics,
   listSnapshots,
   listApiClients,
@@ -79,10 +80,13 @@ export function QueryWorkspace() {
   const [dryRun, setDryRun] = useState<DryRunResponse | null>(null);
   const [query, setQuery] = useState<QueryResponse | null>(null);
   const [snapshots, setSnapshots] = useState<SnapshotResponse[]>([]);
-  const [busy, setBusy] = useState<"dry" | "query" | "snap" | null>(null);
+  const [busy, setBusy] = useState<"dry" | "query" | "snap" | "semantic" | null>(null);
   const [tokenOk, setTokenOk] = useState(!!getConsumeToken());
   const [degraded, setDegraded] = useState(false);
   const [degradedMessage, setDegradedMessage] = useState("");
+  // 指标语义（只读拉取 GET /consume/metrics/{code}/semantic）抽屉状态
+  const [semanticOpen, setSemanticOpen] = useState(false);
+  const [semanticData, setSemanticData] = useState<DryRunResponse | null>(null);
   const { track } = useTracking();
 
   // 将预设键翻译为后端要求的 YYYY-MM-DD,YYYY-MM-DD 格式
@@ -185,6 +189,22 @@ export function QueryWorkspace() {
       setSnapshots(await listSnapshots(metricCode, 50));
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载快照失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // 指标语义：只读拉取消费侧语义（GET /consume/metrics/{code}/semantic），不执行/不写/不计费
+  async function handleSemantic() {
+    if (!metricCode) { message.warning("请选择指标"); return; }
+    setBusy("semantic");
+    try {
+      const res = await consumeSemantic(metricCode);
+      setSemanticData(res);
+      setSemanticOpen(true);
+      track("consume_semantic", metricCode, "metric");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载指标语义失败");
     } finally {
       setBusy(null);
     }
@@ -361,6 +381,9 @@ export function QueryWorkspace() {
               <Button icon={<DatabaseOutlined />} onClick={handleSnapshots} loading={busy === "snap"}>
                 加载快照
               </Button>
+              <Button icon={<ReadOutlined />} onClick={handleSemantic} loading={busy === "semantic"}>
+                指标语义
+              </Button>
             </Space>
           </Form>
 
@@ -426,6 +449,48 @@ export function QueryWorkspace() {
               <Table dataSource={snapshots} columns={snapColumns} rowKey="id" size="small" pagination={{ pageSize: 10 }} />
             </Card>
           )}
+
+          <Drawer
+            title={`指标语义：${semanticData?.metric_code ?? metricCode ?? ""}`}
+            open={semanticOpen}
+            onClose={() => setSemanticOpen(false)}
+            width={680}
+          >
+            {semanticData ? (
+              <>
+                <Alert
+                  type={semanticData.status === "ok" ? "success" : "error"}
+                  showIcon
+                  message={`语义校验：${semanticData.status === "ok" ? "通过" : "被拒绝"}`}
+                  style={{ marginBottom: 12 }}
+                />
+                {semanticData.checks && semanticData.checks.length > 0 && (
+                  <Card size="small" title="校验项" style={{ marginBottom: 12 }}>
+                    {semanticData.checks.map((c, i) => {
+                      const ok = (c as { ok?: boolean }).ok;
+                      const checkName = CHECK_LABEL[String((c as { check?: string }).check ?? "")] ?? String((c as { check?: string }).check ?? "校验");
+                      const detail = c.detail != null ? String(c.detail) : "";
+                      return (
+                        <div key={i} style={{ marginBottom: 4 }}>
+                          <Tag color={ok ? "success" : "error"}>{ok ? "通过" : "未通过"}</Tag>
+                          <span style={{ fontSize: 13 }}>{checkName}</span>
+                          {detail && <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>{detail}</span>}
+                        </div>
+                      );
+                    })}
+                  </Card>
+                )}
+                <Card size="small" title="执行计划" style={{ marginBottom: 12 }}>
+                  <PlanView plan={semanticData.execution_plan} />
+                </Card>
+                <Card size="small" title="元信息">
+                  <PlanView plan={semanticData.meta} />
+                </Card>
+              </>
+            ) : (
+              <Empty description="暂无语义数据" />
+            )}
+          </Drawer>
         </div>
       ),
     },

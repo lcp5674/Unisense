@@ -5,8 +5,11 @@ import { PlusOutlined, SendOutlined } from "@ant-design/icons";
 import {
   listDimensions,
   createDimension,
+  getDimension,
+  updateDimension,
   publishDimension,
   deprecateDimension,
+  bindMetricDimension,
   listDimensionMappings,
   createDimensionMapping,
   listReconciliations,
@@ -36,6 +39,17 @@ function DimensionsTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  // 编辑态：复用新建表单布局，打开时预填当前维度值
+  const [editTarget, setEditTarget] = useState<Dimension | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editForm] = Form.useForm();
+  // 绑定指标态：选择指标 + 维度内角色（partition/filter/group 等）
+  const [bindTarget, setBindTarget] = useState<Dimension | null>(null);
+  const [bindSaving, setBindSaving] = useState(false);
+  const [bindForm] = Form.useForm();
+  // 绑定指标下拉候选（指标列表）
+  const [metrics, setMetrics] = useState<MetricResponse[]>([]);
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
 
@@ -45,6 +59,26 @@ function DimensionsTab() {
     if (urlKw && urlKw !== keyword) setKeyword(urlKw);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKw]);
+
+  // 编辑 Modal 打开时预填当前维度值（基于列表行，getDimension 拉最新后覆盖）
+  useEffect(() => {
+    if (editOpen && editTarget) {
+      editForm.setFieldsValue({
+        name: editTarget.name,
+        domain: editTarget.domain,
+        type: editTarget.type,
+        description: editTarget.description ?? undefined,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editOpen, editTarget]);
+
+  // 绑定指标候选（指标列表，失败静默不影响列表主流程）
+  useEffect(() => {
+    listMetrics({ page_size: 200 })
+      .then((r) => setMetrics(r.items))
+      .catch(() => {});
+  }, []);
 
   async function load() {
     const seq = ++loadSeq.current;
@@ -105,6 +139,64 @@ function DimensionsTab() {
     }
   }
 
+  // 打开编辑：先拉取最新详情确保基于最新数据（详情端点接线）
+  async function openEdit(d: Dimension) {
+    setEditTarget(d);
+    setEditOpen(true);
+    try {
+      const fresh = await getDimension(d.dim_code);
+      editForm.setFieldsValue({
+        name: fresh.name,
+        domain: fresh.domain,
+        type: fresh.type,
+        description: fresh.description ?? undefined,
+      });
+    } catch {
+      // 详情拉取失败不阻塞：仍可用列表数据编辑
+    }
+  }
+
+  async function handleEdit(values: Record<string, unknown>) {
+    if (!editTarget) return;
+    setEditSaving(true);
+    try {
+      await updateDimension(editTarget.dim_code, {
+        name: values.name ? String(values.name) : undefined,
+        domain: values.domain ? String(values.domain) : undefined,
+        type: values.type ? String(values.type) : undefined,
+        description: values.description ? String(values.description) : null,
+      });
+      message.success("维度已更新");
+      setEditOpen(false);
+      editForm.resetFields();
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  async function handleBind(values: Record<string, unknown>) {
+    if (!bindTarget) return;
+    setBindSaving(true);
+    try {
+      await bindMetricDimension({
+        metric_id: Number(values.metric_id),
+        dim_code: bindTarget.dim_code,
+        role: String(values.role ?? "filter"),
+        default_member: values.default_member ? String(values.default_member) : null,
+      });
+      message.success(`指标已绑定到维度「${bindTarget.dim_code}」`);
+      setBindTarget(null);
+      bindForm.resetFields();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "绑定失败");
+    } finally {
+      setBindSaving(false);
+    }
+  }
+
   const columns = [
     { title: "编码", dataIndex: "dim_code", key: "dim_code", render: (v: string) => <span className="mono">{v}</span> },
     { title: "名称", dataIndex: "name", key: "name" },
@@ -120,10 +212,20 @@ function DimensionsTab() {
     {
       title: "操作",
       key: "actions",
-      width: 150,
+      width: 250,
       render: (_: unknown, d: Dimension) =>
         d.status !== "DEPRECATED" ? (
-          <Space>
+          <Space size={4} wrap>
+            <Button size="small" onClick={() => openEdit(d)}>编辑</Button>
+            <Button
+              size="small"
+              onClick={() => {
+                bindForm.resetFields();
+                setBindTarget(d);
+              }}
+            >
+              绑定指标
+            </Button>
             {d.status !== "PUBLISHED" && <Button size="small" type="primary" onClick={() => handlePublish(d)}>发布</Button>}
             <Button size="small" danger onClick={() => handleDeprecate(d)}>废弃</Button>
           </Space>
@@ -164,6 +266,68 @@ function DimensionsTab() {
           </Form.Item>
           <Form.Item name="description" label="描述">
             <Input.TextArea rows={2} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={editTarget ? `编辑维度：${editTarget.dim_code}` : "编辑维度"}
+        open={editOpen}
+        onCancel={() => {
+          setEditOpen(false);
+          editForm.resetFields();
+        }}
+        onOk={() => editForm.submit()}
+        okText="保存"
+        confirmLoading={editSaving}
+      >
+        <Form form={editForm} layout="vertical" onFinish={handleEdit} style={{ marginTop: 8 }}>
+          <Form.Item name="name" label="名称" rules={[{ required: true }]}>
+            <Input placeholder="如 渠道" />
+          </Form.Item>
+          <Form.Item name="domain" label="业务域" rules={[{ required: true }]}>
+            <Input placeholder="如 finance" />
+          </Form.Item>
+          <Form.Item name="type" label="缓慢变化维类型">
+            <Select options={[{ value: "SCD1", label: "SCD1 覆盖" }, { value: "SCD2", label: "SCD2 历史" }]} />
+          </Form.Item>
+          <Form.Item name="description" label="描述">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={bindTarget ? `绑定指标 → ${bindTarget.dim_code}` : "绑定指标"}
+        open={bindTarget != null}
+        onCancel={() => setBindTarget(null)}
+        onOk={() => bindForm.submit()}
+        okText="绑定"
+        confirmLoading={bindSaving}
+      >
+        <Form
+          form={bindForm}
+          layout="vertical"
+          initialValues={{ role: "filter" }}
+          onFinish={handleBind}
+          style={{ marginTop: 8 }}
+        >
+          <Form.Item name="metric_id" label="指标" rules={[{ required: true }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择指标"
+              options={metrics.map((m) => ({
+                value: m.id,
+                label: `${m.metric_code} · ${m.name}`,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item name="role" label="维度角色" extra="如 partition/filter/group，标识该指标如何消费此维度">
+            <Input placeholder="filter" />
+          </Form.Item>
+          <Form.Item name="default_member" label="默认成员">
+            <Input className="mono" placeholder="如 /渠道/线上" />
           </Form.Item>
         </Form>
       </Modal>
