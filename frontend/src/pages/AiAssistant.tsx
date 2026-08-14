@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -14,6 +15,7 @@ import {
 import {
   RobotOutlined,
   ThunderboltOutlined,
+  ArrowLeftOutlined,
 } from "@ant-design/icons";
 import { aiNl2Sql, UnisenseApiError } from "../api";
 import type { NL2SQLResult } from "../types";
@@ -58,6 +60,13 @@ export function AiAssistant() {
   const [result, setResult] = useState<NL2SQLResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { track } = useTracking();
+  const navigate = useNavigate();
+
+  // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   async function handleSubmit() {
     if (!nlQuery.trim()) {
@@ -89,6 +98,9 @@ export function AiAssistant() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Intelligence / NL2SQL</div>
           <h2>AI 助手</h2>
           <p>自然语言查询 → 锚定指标口径 → 生成安全 SQL（keyword / LLM 双通道）。</p>
