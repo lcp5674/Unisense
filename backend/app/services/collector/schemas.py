@@ -71,6 +71,7 @@ class DataSourceUpdateRequest(BaseModel):
     connection_config: dict[str, Any] | None = None
     domain: str | None = Field(default=None, max_length=64)
     cluster_id: str | None = Field(default=None, max_length=64)
+    enabled: bool | None = Field(default=None, description="停用/启用（None 表示不修改）")
 
     @model_validator(mode="after")
     def _validate_connection_config(self) -> DataSourceUpdateRequest:
@@ -154,6 +155,7 @@ class DataSourceResponse(BaseModel):
     connection_config: dict[str, Any] | None = None
     schedule_cron: str | None = None
     collection_mode: str = "FULL"
+    enabled: bool = True
     created_by: int | None = None
     created_at: Any = None
     updated_at: Any = None

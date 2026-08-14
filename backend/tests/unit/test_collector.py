@@ -570,6 +570,26 @@ async def test_repo_list_sources_no_crash_on_filters():
     assert items
 
 
+async def test_repo_list_scheduled_sources_filters_disabled() -> None:
+    """list_scheduled_sources 仅返回启用中（enabled=True）的源，停用源不进定时调度。"""
+    captured: dict[str, object] = {}
+    s = _session(all_rows=[MagicMock()])
+    res = s.execute.return_value  # _session 生成的 AsyncMock 返回值
+
+    async def _capture(stmt, *args, **kwargs):
+        captured["stmt"] = stmt
+        return res
+
+    s.execute = _capture
+    repo = CollectorRepository(s)
+
+    await repo.list_scheduled_sources()
+
+    stmt = captured["stmt"]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "enabled" in sql.lower()
+
+
 async def test_repo_list_catalogs_keyword_table_and_field_level():
     """keyword 为表+字段级：entity_name OR CAST(schema_json) 双条件过滤。"""
     s = _session(all_rows=[MagicMock()], scalar=1)
@@ -629,6 +649,29 @@ async def test_repo_list_catalogs_filters_by_database_prefix():
     # 库名转义后为 sales\_\%，并带前缀匹配 sales\_.%（防模糊放大）
     assert "sales\\_\\%" in compiled
     assert ".%" in compiled
+
+
+async def test_repo_list_catalogs_filters_by_domain():
+    """domain 参数经数据源继承过滤（JOIN data_source + WHERE domain）。"""
+    s = _session(all_rows=[], scalar=0)
+    repo = CollectorRepository(s)
+    params = SimpleNamespace(
+        source_id=None,
+        entity_type=None,
+        sensitivity_level=None,
+        domain="sales",
+        database=None,
+        keyword=None,
+        page=1,
+        page_size=20,
+    )
+    await repo.list_catalogs(params)
+    stmt = s.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    # db_catalog 无 domain 列，须 JOIN data_source 并按 domain 过滤
+    assert "JOIN" in compiled.upper()
+    assert "data_source" in compiled.lower()
+    assert "'sales'" in compiled
 
 
 async def test_repo_list_catalog_databases_returns_distinct_prefix():
@@ -2108,3 +2151,128 @@ async def test_get_source_decrypt_failure_degrades_to_none() -> None:
 
     assert resp.connection_config is None
     assert resp.connection_config_present is True
+
+
+# ---- 停用/启用（enabled）----
+
+
+async def test_collect_and_register_rejects_disabled_source() -> None:
+    """停用（enabled=False）的数据源被拒采集，返回 SOURCE_DISABLED。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.enabled = False
+    repo.get_source = AsyncMock(return_value=src)
+
+    # enabled 校验先于 collector.collect，传 MagicMock 即可
+    with pytest.raises(BusinessError) as ei:
+        await svc.collect_and_register("s1", MagicMock(), actor_id=1)
+
+    assert ei.value.error_code == "SOURCE_DISABLED"
+
+
+class _EnabledStubCollector:
+    """模块级最小采集器（enabled 回归测试用）：单表 users。"""
+
+    def set_incremental_context(self, mode, watermark_ts=None):
+        return None
+
+    async def collect(self, source: object) -> CollectResult:
+        return CollectResult(
+            specs=[
+                CatalogSpec(
+                    entity_name="users",
+                    entity_type="TABLE",
+                    schema_json={"columns": ["user_name"]},
+                )
+            ],
+            failed_specs=[],
+            source_id=source.source_id,
+        )
+
+
+async def test_collect_and_register_allows_enabled_source() -> None:
+    """启用状态（enabled=True）的数据源正常采集（回归）。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.enabled = True
+    repo.get_source = AsyncMock(return_value=src)
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+
+    result = await svc.collect_and_register("s1", _EnabledStubCollector(), actor_id=1)
+
+    assert result["registered"] == 1
+
+
+async def test_refresh_entity_rejects_disabled_source() -> None:
+    """停用源的单实体刷新同样被拒。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.enabled = False
+    repo.get_source = AsyncMock(return_value=src)
+
+    with pytest.raises(BusinessError) as ei:
+        await svc.refresh_entity("s1", "users", 1, MagicMock())
+
+    assert ei.value.error_code == "SOURCE_DISABLED"
+
+
+async def test_schedule_collection_rejects_disabled_source() -> None:
+    """停用源的异步入队（collect-async/collect-now）同样被拒。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.enabled = False
+    repo.get_source = AsyncMock(return_value=src)
+
+    with pytest.raises(BusinessError) as ei:
+        await svc.schedule_collection("s1", 1)
+
+    assert ei.value.error_code == "SOURCE_DISABLED"
+
+
+async def test_update_source_toggles_enabled() -> None:
+    """update_source 支持停用/启用（enabled 字段）。"""
+    from app.services.collector.schemas import DataSourceUpdateRequest
+
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.enabled = True
+    repo.get_source = AsyncMock(return_value=src)
+
+    resp = await svc.update_source("s1", DataSourceUpdateRequest(enabled=False), 1)
+
+    assert src.enabled is False
+    assert resp.enabled is False
+
+    resp = await svc.update_source("s1", DataSourceUpdateRequest(enabled=True), 1)
+
+    assert src.enabled is True
+    assert resp.enabled is True
+
+
+async def test_update_source_enabled_none_keeps_unchanged() -> None:
+    """enabled 未传（None）时不修改（PATCH 语义）。"""
+    from app.services.collector.schemas import DataSourceUpdateRequest
+
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.enabled = True
+    repo.get_source = AsyncMock(return_value=src)
+
+    resp = await svc.update_source("s1", DataSourceUpdateRequest(name="改名"), 1)
+
+    assert src.enabled is True
+    assert resp.enabled is True
+
+
+async def test_response_includes_enabled() -> None:
+    """DataSourceResponse 携带 enabled 字段（列表/详情均可见）。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.enabled = False
+    repo.get_source = AsyncMock(return_value=src)
+
+    resp = await svc.get_source("s1")
+
+    assert resp.enabled is False
+

@@ -994,6 +994,7 @@ export interface DataSource {
   connection_config?: Record<string, unknown> | null;
   schedule_cron: string | null;
   collection_mode: string;
+  enabled: boolean;
   created_by: number | null;
   created_at: string;
   updated_at: string;
@@ -1023,6 +1024,8 @@ export interface DataSourceUpdateRequest {
   connection_config?: Record<string, unknown>;
   domain?: string;
   cluster_id?: string | null;
+  /** 停用/启用：undefined 表示不修改 */
+  enabled?: boolean;
 }
 
 export interface TestConnectionResult {
@@ -1248,6 +1251,18 @@ export interface AssetOwnerView {
     by_domain: Record<string, number>;
   };
   catalogs: { total: number };
+}
+
+// 二维热力矩阵（GET /assetmap/heatmap-matrix?asset_type=）
+// catalog 视角：sensitivity 为敏感级枚举；metric 视角：sensitivity 为 INTERNAL/PII
+export interface AssetHeatmapMatrix {
+  cells: Array<{
+    domain: string;
+    sensitivity: string;
+    count: number;
+    pii_count: number;
+  }>;
+  columns: string[];
 }
 
 // ---- 产品补充（FR-18 生产化）：搜索 / 健康 / PII / 变更 / 我的资产 ----

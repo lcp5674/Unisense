@@ -94,6 +94,7 @@ const source: DataSource = {
   name: "财务库",
   source_type: "mysql",
   domain: "finance",
+  enabled: true,
   cluster_id: null,
   coverage: 0.5,
   health_status: "healthy",
@@ -372,6 +373,48 @@ describe("DataSources", () => {
     // 删除后刷新列表
     await waitFor(() => {
       expect(mockedList).toHaveBeenCalled();
+    });
+  });
+
+  it("停用数据源：详情抽屉停用按钮二次确认后调用接口并刷新", async () => {
+    mockedUpdate.mockResolvedValue({ ...source, enabled: false });
+    renderSources();
+    await waitFor(() => expect(screen.getByText("mysql_finance")).toBeTruthy());
+    // 打开详情抽屉
+    fireEvent.click(screen.getByText("管理"));
+    // 点击停用 → Popconfirm
+    fireEvent.click(screen.getByText("停用"));
+    await screen.findByText("停用数据源");
+    // 确认停用 → 调用 updateDataSource 且 enabled=false
+    fireEvent.click(screen.getByText("确认停用"));
+    await waitFor(() => {
+      expect(mockedUpdate).toHaveBeenCalledWith("mysql_finance", { enabled: false });
+    });
+    // 详情抽屉状态更新为已停用 + 列表刷新
+    await waitFor(() => {
+      expect(screen.getByText("已停用")).toBeTruthy();
+      expect(mockedList).toHaveBeenCalled();
+    });
+  });
+
+  it("编辑表单可切换启用状态并随保存提交", async () => {
+    mockedUpdate.mockResolvedValue({ ...source, enabled: false });
+    renderSources();
+    await waitFor(() => expect(screen.getByText("mysql_finance")).toBeTruthy());
+    // 打开详情抽屉 → 编辑
+    fireEvent.click(screen.getByText("管理"));
+    fireEvent.click(screen.getByText("编辑"));
+    // 编辑表单出现启用开关
+    await screen.findByText("启用状态");
+    // 切换为停用
+    fireEvent.click(screen.getByRole("switch"));
+    // 保存（Modal 确认按钮）
+    fireEvent.click(await screen.findByRole("button", { name: "保 存" }));
+    await waitFor(() => {
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        "mysql_finance",
+        expect.objectContaining({ enabled: false }),
+      );
     });
   });
 });

@@ -135,6 +135,13 @@ class DataSource(Base, BaseModel):
     collection_mode: Mapped[str] = mapped_column(
         String(16), nullable=False, default="FULL", comment="采集模式（FULL/INCREMENTAL）"
     )
+    enabled: Mapped[bool] = mapped_column(
+        BOOLEAN,
+        nullable=False,
+        default=True,
+        server_default="1",
+        comment="是否启用（停用后不参与定时调度与手动采集）",
+    )
 
     __table_args__ = (Index("idx_data_source_domain", "domain"),)
 

@@ -242,6 +242,13 @@ class CollectorRepository:
             base = base.where(DBCatalog.entity_type == params.entity_type)
         if params.sensitivity_level:
             base = base.where(DBCatalog.sensitivity_level == params.sensitivity_level)
+        domain = getattr(params, "domain", None)
+        if domain:
+            # db_catalog 无 domain 列，经数据源继承过滤（仅活跃源归属明确）
+            base = base.join(DataSource, DataSource.source_id == DBCatalog.source_id).where(
+                DataSource.deleted_at.is_(None),
+                DataSource.domain == domain,
+            )
         db_name = getattr(params, "database", None)
         if db_name:
             # 库名 = entity_name 前缀（库.表）；LIKE 通配符转义防模糊放大
@@ -287,6 +294,10 @@ class CollectorRepository:
             base = base.where(DBCatalog.entity_type == params.entity_type)
         if params.sensitivity_level:
             base = base.where(DBCatalog.sensitivity_level == params.sensitivity_level)
+        domain = getattr(params, "domain", None)
+        if domain:
+            # 已 outerjoin DataSource，直接按源域过滤（已删除源也能按原域匹配）
+            base = base.where(DataSource.domain == domain)
         db_name = getattr(params, "database", None)
         if db_name:
             esc_db = db_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

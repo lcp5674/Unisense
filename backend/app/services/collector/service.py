@@ -118,6 +118,7 @@ class CollectorService(BaseService):
             connection_config=config,
             schedule_cron=src.schedule_cron,
             collection_mode=src.collection_mode or "FULL",
+            enabled=bool(getattr(src, "enabled", True)),
             created_by=src.created_by,
             created_at=src.created_at,
             updated_at=src.updated_at,
@@ -355,6 +356,8 @@ class CollectorService(BaseService):
             src.domain = req.domain
         if req.cluster_id is not None:
             src.cluster_id = req.cluster_id
+        if req.enabled is not None:
+            src.enabled = req.enabled
         # updated_at 由 BaseModel.onupdate 自动维护；连接配置变更后健康状态重置
         # （旧探活结果对新凭据不再可信），并清空历史错误。
         if req.connection_config is not None:
@@ -688,6 +691,11 @@ class CollectorService(BaseService):
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
+        if not getattr(src, "enabled", True):
+            raise BusinessError(
+                f"数据源已停用: {source_id}，请先在数据源管理启用后再采集",
+                error_code="SOURCE_DISABLED",
+            )
 
         # US3: 增量采集逻辑 —— 读取水位，不支持时降级为全量
         effective_mode = mode
@@ -932,6 +940,11 @@ class CollectorService(BaseService):
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
+        if not getattr(src, "enabled", True):
+            raise BusinessError(
+                f"数据源已停用: {source_id}，请先在数据源管理启用后再刷新",
+                error_code="SOURCE_DISABLED",
+            )
 
         # 判断连接器是否真实覆盖了 collect_entity（区分「不支持」与「表不存在」）；
         # getattr 兜底防御：不继承 BaseCollector 的自定义采集器视为不支持单实体。
@@ -986,8 +999,14 @@ class CollectorService(BaseService):
         Raises:
             NotFoundError: 数据源不存在。
         """
-        if await self._repo.get_source(source_id) is None:
+        src = await self._repo.get_source(source_id)
+        if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
+        if not getattr(src, "enabled", True):
+            raise BusinessError(
+                f"数据源已停用: {source_id}，请先在数据源管理启用后再采集",
+                error_code="SOURCE_DISABLED",
+            )
         from app.core.config import settings as _settings
 
         q = queue or create_collection_queue(redis_url=_settings.redis_url)

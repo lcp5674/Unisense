@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm } from "antd";
-import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined, DeleteOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm, Switch } from "antd";
+import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined, DeleteOutlined, StopOutlined, PlayCircleOutlined } from "@ant-design/icons";
 import {
   listDataSources,
   getDataSource,
@@ -104,14 +104,18 @@ function SourceDetailModal({
   onClose,
   onEdit,
   onDelete,
+  onToggleEnabled,
   deleting,
+  toggling,
 }: {
   source: DataSource;
   types: SourceTypeInfo[];
   onClose: () => void;
   onEdit: (source: DataSource) => void;
   onDelete: (source: DataSource) => void;
+  onToggleEnabled: (source: DataSource) => void;
   deleting: boolean;
+  toggling: boolean;
 }) {
   const navigate = useNavigate();
   const [health, setHealth] = useState<SourceHealth | null>(null);
@@ -263,6 +267,9 @@ function SourceDetailModal({
         <Descriptions.Item label="域">{source.domain}</Descriptions.Item>
         <Descriptions.Item label="覆盖度">{Math.round(source.coverage * 100)}%</Descriptions.Item>
         <Descriptions.Item label="采集模式">{COLLECTION_MODE_LABEL[source.collection_mode] ?? source.collection_mode}</Descriptions.Item>
+        <Descriptions.Item label="状态">
+          <Tag color={source.enabled ? "success" : "default"}>{source.enabled ? "启用中" : "已停用"}</Tag>
+        </Descriptions.Item>
         <Descriptions.Item label="健康状态">
           <Tag color={source.health_status === "healthy" ? "success" : source.health_status === "unhealthy" ? "error" : "default"}>
             {SOURCE_HEALTH_LABEL[source.health_status] ?? source.health_status}
@@ -411,6 +418,21 @@ function SourceDetailModal({
         <Button type="primary" icon={<EditOutlined />} onClick={() => onEdit(source)}>
           编辑
         </Button>
+        <Popconfirm
+          title={source.enabled ? "停用数据源" : "启用数据源"}
+          description={
+            source.enabled
+              ? `停用「${source.name}」后不再参与定时调度与手动采集，采集目录与历史血缘保留。`
+              : `启用「${source.name}」后恢复参与定时调度与手动采集。`
+          }
+          okText={source.enabled ? "确认停用" : "确认启用"}
+          cancelText="取消"
+          onConfirm={() => onToggleEnabled(source)}
+        >
+          <Button icon={source.enabled ? <StopOutlined /> : <PlayCircleOutlined />} loading={toggling}>
+            {source.enabled ? "停用" : "启用"}
+          </Button>
+        </Popconfirm>
         <Button type="primary" icon={<ThunderboltOutlined />} loading={collecting} onClick={handleCollect}>
           立即采集
         </Button>
@@ -452,6 +474,7 @@ export function DataSources() {
   const [editTarget, setEditTarget] = useState<DataSource | null>(null);
   const [detail, setDetail] = useState<DataSource | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [toggling, setToggling] = useState(false);
   const [types, setTypes] = useState<SourceTypeInfo[]>(FALLBACK_TYPES);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 数据库枚举（测试连接通过后自动列出，供选择目标库）
@@ -618,6 +641,21 @@ export function DataSources() {
     }
   }
 
+  async function handleToggleEnabled(source: DataSource) {
+    setToggling(true);
+    try {
+      const target = !source.enabled;
+      await updateDataSource(source.source_id, { enabled: target });
+      message.success(target ? `数据源「${source.name}」已启用` : `数据源「${source.name}」已停用`);
+      setDetail((prev) => (prev && prev.source_id === source.source_id ? { ...prev, enabled: target } : prev));
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    } finally {
+      setToggling(false);
+    }
+  }
+
   function openEdit(source: DataSource) {
     setEditTarget(source);
     form.resetFields();
@@ -629,6 +667,7 @@ export function DataSources() {
       source_type: source.source_type,
       domain: source.domain,
       cluster_id: source.cluster_id ?? undefined,
+      enabled: source.enabled,
       port: typeInfo(types, source.source_type)?.default_port ?? undefined,
     });
     setDbOptions([]);
@@ -669,6 +708,8 @@ export function DataSources() {
           domain: String(values.domain),
         };
         if (values.cluster_id != null) payload.cluster_id = String(values.cluster_id);
+        // 停用/启用：编辑表单开关显式提交（区别于不传的 PATCH 语义）
+        payload.enabled = Boolean(values.enabled);
         // 连接配置已回显明文：仅当表单值与原始配置快照不同（即用户实际修改了连接字段）
         // 才提交覆盖，避免纯改名/改域时误覆盖配置并重置健康状态。
         const prev = editConfigRef.current;
@@ -735,6 +776,13 @@ export function DataSources() {
     },
     { title: "覆盖度", dataIndex: "coverage", key: "coverage", width: 90, render: (v: number) => `${Math.round(v * 100)}%` },
     { title: "调度", dataIndex: "schedule_cron", key: "schedule", width: 110, render: (v: string | null) => (v ? <span className="mono">{v}</span> : <span className="muted">—</span>) },
+    {
+      title: "状态",
+      dataIndex: "enabled",
+      key: "enabled",
+      width: 90,
+      render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "启用" : "停用"}</Tag>,
+    },
     {
       title: "操作",
       key: "actions",
@@ -835,6 +883,17 @@ export function DataSources() {
             </Form.Item>
           </Space>
           {editTarget && (
+            <Form.Item
+              name="enabled"
+              label="启用状态"
+              valuePropName="checked"
+              style={{ marginBottom: 16 }}
+              tooltip="停用后该数据源不再参与定时调度，手动采集/刷新/异步入队也会被拒绝；采集目录与历史血缘保留"
+            >
+              <Switch checkedChildren="启用" unCheckedChildren="停用" />
+            </Form.Item>
+          )}
+          {editTarget && (
             <Alert
               type="info"
               showIcon
@@ -917,9 +976,11 @@ export function DataSources() {
           source={detail}
           types={types}
           deleting={deleting}
+          toggling={toggling}
           onClose={() => setDetail(null)}
           onEdit={(s) => { setDetail(null); openEdit(s); }}
           onDelete={handleDeleteSource}
+          onToggleEnabled={handleToggleEnabled}
         />
       )}
 
