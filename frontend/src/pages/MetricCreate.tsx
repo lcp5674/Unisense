@@ -1,18 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Alert, Button, Card, Checkbox, Cascader, Col, Form, Input, Row, Segmented, Select, Space, Spin, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, fetchAssetSearch, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult } from "../types";
+import type { MetricCreateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 
 const { Title, Paragraph } = Typography;
 const { TextArea } = Input;
 
-// 域树→Cascader options
 function treeToCascaderOptions(nodes: SubjectDomainTreeNode[]): any[] {
   return nodes.map((n) => ({
     value: n.code,
@@ -21,7 +20,6 @@ function treeToCascaderOptions(nodes: SubjectDomainTreeNode[]): any[] {
   }));
 }
 
-// 字典字段配置：dict_type → 表单字段名
 const DICT_FIELD_MAP: Array<{ dictType: string; field: string; label: string }> = [
   { dictType: "granularity", field: "granularity", label: "粒度" },
   { dictType: "unit", field: "unit", label: "单位" },
@@ -35,37 +33,52 @@ const DICT_FIELD_MAP: Array<{ dictType: string; field: string; label: string }> 
   { dictType: "metric_tier", field: "metric_tier", label: "分级" },
 ];
 
+const PERIOD_OPTIONS = [
+  { value: "day", label: "日 (day)" },
+  { value: "week", label: "周 (week)" },
+  { value: "month", label: "月 (month)" },
+  { value: "quarter", label: "季 (quarter)" },
+  { value: "year", label: "年 (year)" },
+];
+
+interface ColumnInfo {
+  name: string;
+  type?: string;
+  comment?: string;
+}
+
 export function MetricCreate() {
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
 
-  // 域树数据
   const [domainTree, setDomainTree] = useState<SubjectDomainTreeNode[]>([]);
   const [domainLoading, setDomainLoading] = useState(false);
   const [selectedDomain, setSelectedDomain] = useState<string>("");
 
-  // 字典选项
   const [dictOptions, setDictOptions] = useState<Record<string, Array<{ value: string; label: string }>>>({});
   const [dictLoading, setDictLoading] = useState(false);
 
-  // 自动推断
   const [suggesting, setSuggesting] = useState(false);
   const [suggestedCode, setSuggestedCode] = useState<string | null>(null);
 
-  // 口径录入模式
   const [mode, setMode] = useState<"expression" | "sql">("expression");
   const [sqlText, setSqlText] = useState("");
   const [sourceTables, setSourceTables] = useState<string[]>([]);
   const [tableOptions, setTableOptions] = useState<{ value: string; label: string }[]>([]);
   const [tableSearching, setTableSearching] = useState(false);
 
-  // 冲突预检
+  // 源表搜索（自动推断区）
+  const [srcTableSearchOptions, setSrcTableSearchOptions] = useState<{ value: string; label: string }[]>([]);
+  const [srcTableSearchLoading, setSrcTableSearchLoading] = useState(false);
+  const [_selectedTableCatalog, setSelectedTableCatalog] = useState<DBCatalog | null>(null);
+  const [columnOptions, setColumnOptions] = useState<{ value: string; label: string }[]>([]);
+  const srcTableSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+
   const [prechecking, setPrechecking] = useState(false);
   const [precheckResult, setPrecheckResult] = useState<ConflictCheckResult | null>(null);
 
-  // 加载域树
   useEffect(() => {
     setDomainLoading(true);
     listDomainTree("active")
@@ -74,7 +87,6 @@ export function MetricCreate() {
       .finally(() => setDomainLoading(false));
   }, []);
 
-  // 加载所有字典选项
   useEffect(() => {
     setDictLoading(true);
     Promise.all(
@@ -95,17 +107,83 @@ export function MetricCreate() {
       .finally(() => setDictLoading(false));
   }, []);
 
+  // 口径定义区：关联数据表搜索
   async function searchTables(q: string) {
     if (!q.trim()) return;
     setTableSearching(true);
     try {
-      const res = await fetchAssetSearch({ q: q.trim(), type: "table", limit: 20 });
-      setTableOptions(res.items.map((it) => ({ value: it.name, label: it.name })));
+      const res = await listCatalogs({ entity_type: "TABLE", keyword: q.trim(), page_size: 20 });
+      setTableOptions(res.items.map((it) => ({ value: it.entity_name, label: it.entity_name })));
     } catch { setTableOptions([]); }
     finally { setTableSearching(false); }
   }
 
-  // 选域后自动推断
+  // 自动推断区：源表名模糊搜索（防抖 300ms）
+  function handleSrcTableSearch(q: string) {
+    if (srcTableSearchTimer.current) clearTimeout(srcTableSearchTimer.current);
+    if (!q.trim()) { setSrcTableSearchOptions([]); return; }
+    srcTableSearchTimer.current = setTimeout(async () => {
+      setSrcTableSearchLoading(true);
+      try {
+        const res = await listCatalogs({ entity_type: "TABLE", keyword: q.trim(), page_size: 20, source_status: "active" });
+        setSrcTableSearchOptions(
+          res.items.map((it) => ({
+            value: it.entity_name,
+            label: it.source_name ? `${it.entity_name}（${it.source_name}）` : it.entity_name,
+          }))
+        );
+      } catch { setSrcTableSearchOptions([]); }
+      finally { setSrcTableSearchLoading(false); }
+    }, 300);
+  }
+
+  // 选了源表后：1) 加载该表列信息  2) 触发自动推断
+  async function handleSrcTableSelect(entityName: string) {
+    if (!entityName) {
+      setSelectedTableCatalog(null);
+      setColumnOptions([]);
+      handleAutoSuggest();
+      return;
+    }
+    try {
+      const res = await listCatalogs({ entity_type: "TABLE", keyword: entityName, page_size: 5, source_status: "active" });
+      const catalog = res.items.find((it) => it.entity_name === entityName);
+      if (catalog) {
+        setSelectedTableCatalog(catalog);
+        const cols: ColumnInfo[] = (catalog as any).schema_def?.columns || (catalog as any).schema_json?.columns || [];
+        if (cols.length > 0) {
+          setColumnOptions(
+            cols.map((col) => ({
+              value: col.name,
+              label: col.type ? `${col.name} (${col.type})${col.comment ? " — " + col.comment : ""}` : col.name,
+            }))
+          );
+        } else {
+          setColumnOptions([]);
+          message.info("该表无列信息（schema 未采集完整）");
+        }
+      } else {
+        setColumnOptions([]);
+      }
+    } catch {
+      setColumnOptions([]);
+    }
+    form.setFieldValue("source_table", entityName);
+    handleAutoSuggest();
+  }
+
+  // 选了度量列后触发自动推断
+  function handleColumnSelect(value: string) {
+    form.setFieldValue("measure_column", value);
+    handleAutoSuggest();
+  }
+
+  // 选了统计周期后触发自动推断
+  function handlePeriodSelect(value: string) {
+    form.setFieldValue("period", value);
+    handleAutoSuggest();
+  }
+
   async function handleDomainChange(value: string[], _selectedOptions: any) {
     const domainCode = value[value.length - 1];
     setSelectedDomain(domainCode);
@@ -122,20 +200,17 @@ export function MetricCreate() {
         period,
       });
 
-      // 填入编码建议
       if (result.metric_code_suggestion) {
         setSuggestedCode(result.metric_code_suggestion);
         form.setFieldValue("metric_code", result.metric_code_suggestion);
       }
 
-      // 填入默认值
       const defaults = result.defaults || {};
       for (const { dictType, field } of DICT_FIELD_MAP) {
         const defaultVal = defaults[dictType] || defaults[field];
         if (defaultVal) form.setFieldValue(field, defaultVal);
       }
 
-      // 填入推断的 period → granularity
       if (defaults.granularity) form.setFieldValue("granularity", defaults.granularity);
     } catch {
       // 推断失败不阻断
@@ -144,7 +219,6 @@ export function MetricCreate() {
     }
   }
 
-  // 输入源表/度量列后重新推断编码
   async function handleAutoSuggest() {
     if (!selectedDomain) return;
     setSuggesting(true);
@@ -162,6 +236,13 @@ export function MetricCreate() {
         setSuggestedCode(result.metric_code_suggestion);
         form.setFieldValue("metric_code", result.metric_code_suggestion);
       }
+      // 也更新推断的默认字段
+      const defaults = result.defaults || {};
+      for (const { dictType, field } of DICT_FIELD_MAP) {
+        const defaultVal = defaults[dictType] || defaults[field];
+        if (defaultVal && !form.getFieldValue(field)) form.setFieldValue(field, defaultVal);
+      }
+      if (defaults.granularity && !form.getFieldValue("granularity")) form.setFieldValue("granularity", defaults.granularity);
     } catch { /* 忽略 */ }
     finally { setSuggesting(false); }
   }
@@ -179,7 +260,6 @@ export function MetricCreate() {
     return { ...def, ...tables };
   }
 
-  // 创建前冲突预检：构造 candidate 调 /conflicts/check，展示检测结果（不自动阻断）
   async function handlePrecheck() {
     const values = form.getFieldsValue();
     if (!selectedDomain) { message.warning("请先选择业务域"); return; }
@@ -282,17 +362,42 @@ export function MetricCreate() {
               <Row gutter={16}>
                 <Col span={8}>
                   <Form.Item name="source_table" label="源表名">
-                    <Input placeholder="如 dwd.sales_detail" onBlur={handleAutoSuggest} />
+                    <Select
+                      showSearch
+                      allowClear
+                      placeholder="搜索并选择源表（如 sales_detail）"
+                      onSearch={handleSrcTableSearch}
+                      onChange={handleSrcTableSelect}
+                      loading={srcTableSearchLoading}
+                      notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
+                      options={srcTableSearchOptions}
+                      filterOption={false}
+                    />
                   </Form.Item>
                 </Col>
                 <Col span={8}>
                   <Form.Item name="measure_column" label="度量列">
-                    <Input placeholder="如 amount" onBlur={handleAutoSuggest} />
+                    <Select
+                      showSearch
+                      allowClear
+                      placeholder={columnOptions.length > 0 ? "选择度量列" : "请先选择源表"}
+                      onChange={handleColumnSelect}
+                      options={columnOptions}
+                      disabled={columnOptions.length === 0}
+                      filterOption={(input, option) =>
+                        (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+                      }
+                    />
                   </Form.Item>
                 </Col>
                 <Col span={8}>
                   <Form.Item name="period" label="统计周期">
-                    <Input placeholder="如 day" onBlur={handleAutoSuggest} />
+                    <Select
+                      allowClear
+                      placeholder="选择统计周期"
+                      onChange={handlePeriodSelect}
+                      options={PERIOD_OPTIONS}
+                    />
                   </Form.Item>
                 </Col>
               </Row>
@@ -325,7 +430,7 @@ export function MetricCreate() {
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="unit" label="单位">
+                  <Form.Item name="unit" label="单位" rules={[{ required: true, message: "请选择单位" }]}>
                     {dictSelect("unit", "unit", "选择单位")}
                   </Form.Item>
                 </Col>
@@ -391,7 +496,7 @@ export function MetricCreate() {
                   onChange={(v: string[]) => setSourceTables(v)}
                   onSearch={searchTables}
                   loading={tableSearching}
-                  notFoundContent={null}
+                  notFoundContent={tableSearching ? <Spin size="small" /> : null}
                   options={tableOptions}
                   filterOption={false}
                 />
