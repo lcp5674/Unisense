@@ -230,8 +230,9 @@ class CollectorRepository:
         return existing, False, drift_info
 
     async def list_catalogs(self, params: Any) -> tuple[Sequence[DBCatalog], int]:
-        # 按源状态过滤时需外连接 DataSource（取删除状态）；否则保持原查询不变
-        if getattr(params, "source_status", None) in ("active", "deleted"):
+        # "all" 时退化为普通查询（不过滤删除状态，不过滤 source_id）
+        source_status = getattr(params, "source_status", None)
+        if source_status in ("active", "deleted"):
             return await self._list_catalogs_with_source_status(params)
 
         base = select(DBCatalog).where(DBCatalog.deleted_at.is_(None))

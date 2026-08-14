@@ -155,9 +155,7 @@ class RedisJobStore:
         keys: list[str] = []
         cursor = 0
         while True:
-            cursor, batch = await self._redis.scan(
-                cursor, match="collect_job:*", count=200
-            )
+            cursor, batch = await self._redis.scan(cursor, match="collect_job:*", count=200)
             keys.extend(batch)
             if not cursor:
                 break

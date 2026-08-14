@@ -137,9 +137,7 @@ async def run_collection_task(
 
         # 构造进度回调：worker 侧把 RUNNING 进度写入 JobStore，供 SSE 实时推送
         progress_cb = (
-            _make_progress_cb(store, job_id, source_id, actor_id)
-            if store is not None
-            else None
+            _make_progress_cb(store, job_id, source_id, actor_id) if store is not None else None
         )
         result = await svc.collect_and_register(
             source_id, collector, actor_id, mode=mode, progress_cb=progress_cb

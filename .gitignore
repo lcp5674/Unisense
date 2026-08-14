@@ -78,3 +78,9 @@ backend/reports/
 .codebuddy/
 .deveco/
 .workbuddy/
+
+# Playwright E2E（e2e/.auth 含 admin 登录态 JWT，禁止入库）
+frontend/e2e/.auth/
+frontend/playwright-report/
+frontend/test-results/
+frontend/blob-report/
