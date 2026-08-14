@@ -610,6 +610,54 @@ async def test_repo_list_catalogs_keyword_escapes_wildcards():
     assert "100\\%\\_x" in compiled
 
 
+async def test_repo_list_catalogs_filters_by_database_prefix():
+    """database 参数按 entity_name 前缀（库.表）过滤，且通配符转义。"""
+    s = _session(all_rows=[], scalar=0)
+    repo = CollectorRepository(s)
+    params = SimpleNamespace(
+        source_id=None,
+        entity_type=None,
+        sensitivity_level=None,
+        database="sales_%",
+        keyword=None,
+        page=1,
+        page_size=20,
+    )
+    await repo.list_catalogs(params)
+    stmt = s.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    # 库名转义后为 sales\_\%，并带前缀匹配 sales\_.%（防模糊放大）
+    assert "sales\\_\\%" in compiled
+    assert ".%" in compiled
+
+
+async def test_repo_list_catalog_databases_returns_distinct_prefix():
+    """list_catalog_databases 返回去重库名（entity_name 前缀），可随 source_id 过滤。"""
+    s = MagicMock()
+    res = MagicMock()
+    res.all.return_value = [("unisense.a",), ("unisense.b",), ("sales.c",), ("kafka_topic",)]
+    s.execute = AsyncMock(return_value=res)
+    repo = CollectorRepository(s)
+    dbs = await repo.list_catalog_databases()
+    assert dbs == ["sales", "unisense"]
+    # 无 "." 前缀的实体（Kafka topic）不计入
+    assert "kafka_topic" not in dbs
+
+
+async def test_repo_list_catalog_databases_filters_by_source():
+    """指定 source_id 时仅统计该源下的库名。"""
+    s = MagicMock()
+    res = MagicMock()
+    res.all.return_value = [("sales.c",)]
+    s.execute = AsyncMock(return_value=res)
+    repo = CollectorRepository(s)
+    dbs = await repo.list_catalog_databases(source_id="mysql_sales")
+    assert dbs == ["sales"]
+    stmt = s.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "mysql_sales" in compiled
+
+
 # ---------- US6: 空 schema 告警 ----------
 
 

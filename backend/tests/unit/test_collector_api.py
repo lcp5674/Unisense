@@ -154,3 +154,21 @@ async def test_list_jobs_must_precede_source_id_route(
     assert resp.status_code == 200
     mock_list.assert_awaited_once()
     mock_get.assert_not_awaited()
+
+
+async def test_list_catalog_databases_returns_distinct(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """GET /catalogs/databases 返回去重库名列表，并可随 source_id 过滤。"""
+    with patch(
+        "app.api.collector.CollectorService.list_catalog_databases",
+        new_callable=AsyncMock,
+        return_value=["unisense", "sales"],
+    ) as mock_list:
+        resp = await collector_client.get("/api/v1/catalogs/databases?source_id=mysql_unisense")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["items"] == ["unisense", "sales"]
+    mock_list.assert_awaited_once()
+    # 校验 source_id 透传到 service
+    call_kwargs = mock_list.await_args.args
+    assert call_kwargs[0] == "mysql_unisense"

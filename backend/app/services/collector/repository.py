@@ -242,6 +242,11 @@ class CollectorRepository:
             base = base.where(DBCatalog.entity_type == params.entity_type)
         if params.sensitivity_level:
             base = base.where(DBCatalog.sensitivity_level == params.sensitivity_level)
+        db_name = getattr(params, "database", None)
+        if db_name:
+            # 库名 = entity_name 前缀（库.表）；LIKE 通配符转义防模糊放大
+            esc_db = db_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            base = base.where(DBCatalog.entity_name.ilike(f"{esc_db}.%"))
         if params.keyword:
             # 表+字段级搜索：entity_name 模糊 OR schema_json 字段名/注释模糊（CAST 跨方言）
             # LIKE 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
@@ -282,6 +287,10 @@ class CollectorRepository:
             base = base.where(DBCatalog.entity_type == params.entity_type)
         if params.sensitivity_level:
             base = base.where(DBCatalog.sensitivity_level == params.sensitivity_level)
+        db_name = getattr(params, "database", None)
+        if db_name:
+            esc_db = db_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            base = base.where(DBCatalog.entity_name.ilike(f"{esc_db}.%"))
         if params.keyword:
             escaped = params.keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             base = base.where(
@@ -326,6 +335,23 @@ class CollectorRepository:
             )
         )
         return {row[0]: (row[1] or row[0], row[2] is not None) for row in res.all()}
+
+    async def list_catalog_databases(self, source_id: str | None = None) -> list[str]:
+        """目录去重库名列表（entity_name 前缀，供前端库名筛选下拉）。
+
+        - 仅统计未删除（deleted_at IS NULL）的实体；
+        - 指定 source_id 时仅统计该源；
+        - 无前缀（无 "." 的实体，如 Kafka topic）不计入库名。
+        """
+        base = select(DBCatalog.entity_name).where(DBCatalog.deleted_at.is_(None))
+        if source_id:
+            base = base.where(DBCatalog.source_id == source_id)
+        res = await self._db.execute(base)
+        dbs: set[str] = set()
+        for (name,) in res.all():
+            if "." in name:
+                dbs.add(name.split(".", 1)[0])
+        return sorted(dbs)
 
     async def list_active_entity_names(self, source_id: str) -> list[str]:
         """返回数据源下所有未废弃（deleted_at IS NULL）的实体名，用于对账。"""

@@ -24,15 +24,17 @@ vi.mock("../api", () => {
     registerCatalog: vi.fn(),
     bulkDeprecateCatalogs: vi.fn(),
     listDataSources: vi.fn(),
+    listCatalogDatabases: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listCatalogs, registerCatalog, listDataSources } from "../api";
+import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases } from "../api";
 
 const mockedList = vi.mocked(listCatalogs);
 const mockedRegister = vi.mocked(registerCatalog);
 const mockedSources = vi.mocked(listDataSources);
+const mockedDatabases = vi.mocked(listCatalogDatabases);
 
 const SOURCES: DataSource[] = [
   {
@@ -86,6 +88,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue({ items: CATALOGS, total: 1, page: 1, page_size: 20 });
   mockedSources.mockResolvedValue({ items: SOURCES, total: 2, page: 1, page_size: 200 });
+  mockedDatabases.mockResolvedValue(["unisense", "sales"]);
   mockedRegister.mockResolvedValue({ ...CATALOGS[0], sensitivity_level: "INTERNAL" } as DBCatalog);
 });
 
@@ -143,6 +146,27 @@ describe("Catalogs 页面", () => {
     await waitFor(() => {
       expect(screen.getByText("dwd_finance_order")).toBeTruthy();
       expect(screen.getByText("mysql_unisense")).toBeTruthy();
+    });
+  });
+
+  it("库名下拉随数据源联动，选择库名后按 database 过滤请求", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 库名选项来自后端（含真实库名）
+    await waitFor(() => {
+      expect(mockedDatabases).toHaveBeenCalled();
+    });
+    // 选择库名 "unisense" → 触发带 database 参数的列表请求
+    fireEvent.mouseDown(screen.getByText("全部库名"));
+    const options = await screen.findAllByText("unisense");
+    fireEvent.click(options[options.length - 1]);
+    await waitFor(() => {
+      const lastCall = mockedList.mock.calls[mockedList.mock.calls.length - 1][0];
+      expect(lastCall.database).toBe("unisense");
     });
   });
 });

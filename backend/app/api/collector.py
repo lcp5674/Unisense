@@ -711,6 +711,18 @@ async def list_catalogs(
     return ok(data=await svc.list_catalogs(params), trace_id=trace_id)
 
 
+@catalog_router.get("/databases", dependencies=_READ_DEPS)
+async def list_catalog_databases(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    source_id: str | None = None,
+) -> ApiResponse[dict[str, list[str]]]:
+    """目录去重库名列表（供前端库名筛选下拉，可随 source_id 联动）。"""
+    svc = _svc(db)
+    return ok(data={"items": await svc.list_catalog_databases(source_id)}, trace_id=trace_id)
+
+
 @catalog_router.post("/bulk-deprecate", dependencies=_WRITE_DEPS)
 async def bulk_deprecate(
     body: BulkDeprecateRequest,

@@ -573,6 +573,10 @@ class CollectorService(BaseService):
             page_size=params.page_size,
         )
 
+    async def list_catalog_databases(self, source_id: str | None = None) -> list[str]:
+        """目录去重库名列表（供前端库名筛选下拉，可随 source_id 联动）。"""
+        return await self._repo.list_catalog_databases(source_id)
+
     async def bulk_deprecate(self, req: BulkDeprecateRequest, actor_id: int) -> BulkDeprecateResult:
         succeeded, failed = await self._repo.bulk_deprecate(req.items)
         for it in succeeded:

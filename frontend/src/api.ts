@@ -1547,6 +1547,8 @@ export async function listCatalogs(params?: {
   source_id?: string;
   entity_type?: string;
   sensitivity_level?: string;
+  /** 库名（entity_name 前缀过滤） */
+  database?: string;
   keyword?: string;
   /** active=仅活跃源 / deleted=仅已删除源 / 不传=全部 */
   source_status?: "active" | "deleted";
@@ -1557,12 +1559,20 @@ export async function listCatalogs(params?: {
     source_id: params?.source_id,
     entity_type: params?.entity_type,
     sensitivity_level: params?.sensitivity_level,
+    database: params?.database,
     keyword: params?.keyword,
     source_status: params?.source_status,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 20,
   });
   return request(`${API_BASE}/catalogs?${qs}`);
+}
+
+/** 目录去重库名列表（供库名筛选下拉，可随 source_id 联动）。 */
+export async function listCatalogDatabases(sourceId?: string): Promise<string[]> {
+  const qs = pageQs({ source_id: sourceId });
+  const res = await request<{ items: string[] }>(`${API_BASE}/catalogs/databases?${qs}`);
+  return res.items;
 }
 
 export async function registerCatalog(

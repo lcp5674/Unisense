@@ -207,6 +207,9 @@ class DBCatalogListParams(BaseModel):
     source_id: str | None = None
     entity_type: str | None = None
     sensitivity_level: str | None = None
+    database: str | None = Field(
+        default=None, max_length=128, description="库名（entity_name 前缀过滤）"
+    )
     keyword: str | None = Field(default=None, max_length=128)
     # 源状态过滤：active（仅活跃源）/ deleted（仅已删除源）/ all（全部，含已删除源）
     source_status: str | None = Field(default=None, pattern=r"^(active|deleted|all)$")

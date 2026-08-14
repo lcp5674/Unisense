@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip } from "antd";
 import { PlusOutlined, ReloadOutlined, DeleteOutlined } from "@ant-design/icons";
-import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, UnisenseApiError } from "../api";
+import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, UnisenseApiError } from "../api";
 import type { DBCatalog, DataSource } from "../types";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 
@@ -32,6 +32,10 @@ export function Catalogs() {
   const [entityType, setEntityType] = useState("");
   const [sensitivity, setSensitivity] = useState("");
   const [keyword, setKeyword] = useState("");
+  // 库名筛选（随数据源联动）
+  const [database, setDatabase] = useState("");
+  const [databases, setDatabases] = useState<string[]>([]);
+  const [databasesLoading, setDatabasesLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
@@ -63,6 +67,7 @@ export function Catalogs() {
         source_id: sourceId || undefined,
         entity_type: entityType || undefined,
         sensitivity_level: sensitivity || undefined,
+        database: database || undefined,
         keyword: keyword || undefined,
         source_status: sourceStatus || undefined,
         page,
@@ -80,7 +85,26 @@ export function Catalogs() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, sourceId, sourceStatus, entityType, sensitivity, keyword]);
+  }, [page, sourceId, sourceStatus, entityType, sensitivity, keyword, database]);
+
+  // 库名选项随数据源联动：切换数据源时刷新库名下拉并重置已选库名
+  async function loadDatabases() {
+    setDatabasesLoading(true);
+    try {
+      setDatabases(await listCatalogDatabases(sourceId || undefined));
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载库名失败");
+      setDatabases([]);
+    } finally {
+      setDatabasesLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadDatabases();
+    setDatabase("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId]);
 
   async function loadSources() {
     setSourcesLoading(true);
@@ -194,6 +218,17 @@ export function Catalogs() {
               { value: "active", label: "活跃源" },
               { value: "deleted", label: "已删除源" },
             ]}
+          />
+          <Select
+            allowClear
+            placeholder="全部库名"
+            style={{ width: 160 }}
+            loading={databasesLoading}
+            disabled={!sourceId && databases.length === 0}
+            value={database || undefined}
+            onChange={(v) => { setDatabase(v || ""); setPage(1); }}
+            options={databases.map((d) => ({ value: d, label: d }))}
+            notFoundContent={databasesLoading ? <span>加载中…</span> : <span>无可用库名</span>}
           />
           <Select
             allowClear
