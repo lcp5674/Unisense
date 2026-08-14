@@ -123,6 +123,7 @@ import {
   UserUpdateRequest,
   AdminUser,
   AdminUserListResponse,
+  UserBatchStatusResult,
   UserPreferenceItem,
   UserPreferenceList,
   Watermark,
@@ -743,6 +744,16 @@ export async function setUserStatus(
   return request<AdminUser>(`${API_BASE}/users/${userId}/status`, {
     method: "PATCH",
     body: JSON.stringify({ status }),
+  });
+}
+
+export async function batchSetUserStatus(
+  userIds: number[],
+  status: "active" | "disabled",
+): Promise<UserBatchStatusResult> {
+  return request<UserBatchStatusResult>(`${API_BASE}/users/batch-status`, {
+    method: "POST",
+    body: JSON.stringify({ user_ids: userIds, status }),
   });
 }
 

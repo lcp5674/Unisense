@@ -1,7 +1,8 @@
 [users 用户管理] 门禁证据 (2026-08-14)
-- unit: backend/tests/unit/test_users_api.py 14 passed（创建/冲突409/弱密码422/非法域422创建/编辑/自降级422/404/禁用/自禁用422/重置密码/列表/权限403/不泄露哈希）
+- unit: backend/tests/unit/test_users_api.py 19 passed（创建/冲突409/弱密码422/非法域422创建/编辑/自降级422/404/禁用/自禁用422/重置密码/列表/权限403/不泄露哈希/批量禁用/批量启用/批量部分失败/批量空列表422/批量超上限422）
 - ruff: app/api/users.py + tests/unit/test_users_api.py All checks passed
 - mypy: app/api/users.py Success（no issues）
-- 前端: UserManagement.test.tsx 7 passed；全套 vitest 282 passed；tsc 0
+- 前端: UserManagement.test.tsx 10 passed；全套 vitest（本次文件全绿，DataSources 瞬时失败为并行会话在途改动、单独跑全绿）；tsc 0
 - 契约: contract + doc_sync 通过
 - 增强(2026-08-14): 所属域改主题域下拉(listDomainTree active)+后端强校验(USER_DOMAIN_INVALID=422)；创建用户自动预填强随机密码(crypto)+「重新生成」+创建成功后一次性明文展示
+- 批量(2026-08-14): 新增 POST /users/batch-status（user_ids 1~200，207 语义逐项标注失败不影响其余，禁止自禁 SELF_DISABLE_FORBIDDEN，单条汇总审计 USER_STATUS_BATCH）；前端 rowSelection 多选 + 批量启用/停用（停用 Popconfirm 二次确认），部分失败逐项提示

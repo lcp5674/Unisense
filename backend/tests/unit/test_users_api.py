@@ -304,6 +304,103 @@ async def test_disable_self_rejected(admin_client: httpx.AsyncClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 批量启用 / 禁用
+# ---------------------------------------------------------------------------
+
+
+async def _batch_status_client(rows: list[User]) -> tuple[httpx.AsyncClient, MagicMock]:
+    """构造批量状态测试客户端（id=1 平台管理员 + 指定用户行）。"""
+    session = _make_session()
+    rows_result = MagicMock()
+    rows_result.scalars.return_value.all.return_value = rows
+    session.execute = AsyncMock(return_value=rows_result)
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    transport = ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test"), session
+
+
+async def test_batch_disable_success() -> None:
+    """批量禁用：全部成功，返回 succeeded 2 条且行状态已更新。"""
+    u2 = _make_user(id=2, username="alice")
+    u3 = _make_user(id=3, username="bob")
+    client, _ = await _batch_status_client([u2, u3])
+    async with client:
+        resp = await client.post(
+            "/api/v1/users/batch-status", json={"user_ids": [2, 3], "status": "disabled"}
+        )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert len(data["succeeded"]) == 2
+    assert data["failed"] == []
+    assert u2.status == "disabled"
+    assert u3.status == "disabled"
+
+
+async def test_batch_enable_success() -> None:
+    """批量启用：全部成功，返回 succeeded 2 条。"""
+    u2 = _make_user(id=2, username="alice", status="disabled")
+    u3 = _make_user(id=3, username="bob", status="disabled")
+    client, _ = await _batch_status_client([u2, u3])
+    async with client:
+        resp = await client.post(
+            "/api/v1/users/batch-status", json={"user_ids": [2, 3], "status": "active"}
+        )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert len(data["succeeded"]) == 2
+    assert data["failed"] == []
+    assert u2.status == "active"
+
+
+async def test_batch_status_partial_failure() -> None:
+    """部分失败：不存在 + 自我保护逐项标注，不影响其余更新（207 语义）。"""
+    admin = _make_user(id=1, username="admin", role="platform_admin")
+    u2 = _make_user(id=2, username="alice")
+    client, _ = await _batch_status_client([admin, u2])
+    async with client:
+        resp = await client.post(
+            "/api/v1/users/batch-status",
+            json={"user_ids": [1, 2, 999], "status": "disabled"},
+        )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert len(data["succeeded"]) == 1
+    assert data["succeeded"][0]["user_id"] == 2
+    failed = {f["user_id"]: f for f in data["failed"]}
+    assert failed[1]["error_code"] == "SELF_DISABLE_FORBIDDEN"
+    assert failed[999]["error_code"] == "USER_NOT_FOUND"
+    assert u2.status == "disabled"
+
+
+async def test_batch_status_empty_rejected(admin_client: httpx.AsyncClient) -> None:
+    """空 user_ids → 422（pydantic min_length=1）。"""
+    resp = await admin_client.post(
+        "/api/v1/users/batch-status", json={"user_ids": [], "status": "disabled"}
+    )
+    assert resp.status_code == 422
+
+
+async def test_batch_status_over_quota_rejected(admin_client: httpx.AsyncClient) -> None:
+    """超过 200 上限 → 422（pydantic max_length=200）。"""
+    resp = await admin_client.post(
+        "/api/v1/users/batch-status",
+        json={"user_ids": list(range(1, 202)), "status": "disabled"},
+    )
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # 重置密码
 # ---------------------------------------------------------------------------
 

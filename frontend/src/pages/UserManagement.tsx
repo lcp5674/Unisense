@@ -16,12 +16,15 @@ import {
 import {
   CopyOutlined,
   LockOutlined,
+  PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
+  StopOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
 import {
   UnisenseApiError,
+  batchSetUserStatus,
   createUser,
   fetchCurrentUser,
   listAdminUsers,
@@ -34,6 +37,7 @@ import type {
   AdminUser,
   CurrentUser,
   SubjectDomainTreeNode,
+  UserBatchStatusResult,
   UserCreateRequest,
   UserUpdateRequest,
 } from "../types";
@@ -117,6 +121,9 @@ export function UserManagement() {
   const [createdResult, setCreatedResult] = useState<{ username: string; password: string } | null>(
     null,
   );
+  // 批量启用/停用：多选行 + 请求进行中标记
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchLoading, setBatchLoading] = useState(false);
 
   const canManage = me?.role === "platform_admin";
 
@@ -210,6 +217,35 @@ export function UserManagement() {
       load();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
+  }
+
+  async function handleBatchToggle(enabled: boolean) {
+    if (selectedRowKeys.length === 0) return;
+    const ids = selectedRowKeys.map(Number);
+    setBatchLoading(true);
+    try {
+      const result: UserBatchStatusResult = await batchSetUserStatus(
+        ids,
+        enabled ? "active" : "disabled",
+      );
+      const action = enabled ? "启用" : "停用";
+      if (result.failed.length > 0) {
+        const names = result.failed
+          .map((f) => `${f.username ?? f.user_id}（${f.message ?? f.error_code ?? "失败"}）`)
+          .join("、");
+        message.warning(
+          `${action}完成 ${result.succeeded.length} 个，失败 ${result.failed.length} 个：${names}`,
+        );
+      } else {
+        message.success(`${action}成功 ${result.succeeded.length} 个用户`);
+      }
+      setSelectedRowKeys([]);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量操作失败");
+    } finally {
+      setBatchLoading(false);
     }
   }
 
@@ -369,6 +405,33 @@ export function UserManagement() {
               创建用户
             </Button>
           )}
+          {canManage && (
+            <>
+              {selectedRowKeys.length > 0 && (
+                <span style={{ color: "rgba(0,0,0,0.45)", fontSize: 13 }}>
+                  已选 {selectedRowKeys.length} 个用户
+                </span>
+              )}
+              <Button
+                icon={<PlayCircleOutlined />}
+                onClick={() => handleBatchToggle(true)}
+                disabled={selectedRowKeys.length === 0 || batchLoading}
+              >
+                批量启用
+              </Button>
+              <Popconfirm
+                title="批量停用"
+                description={`确定停用选中的 ${selectedRowKeys.length} 个用户？停用后这些账号将无法登录，可随时再次启用。`}
+                okText="确认停用"
+                onConfirm={() => handleBatchToggle(false)}
+                disabled={selectedRowKeys.length === 0 || batchLoading}
+              >
+                <Button icon={<StopOutlined />} disabled={selectedRowKeys.length === 0 || batchLoading}>
+                  批量停用
+                </Button>
+              </Popconfirm>
+            </>
+          )}
           <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
         </Space>
         <Table
@@ -376,6 +439,7 @@ export function UserManagement() {
           columns={columns}
           rowKey="id"
           loading={loading}
+          rowSelection={canManage ? { selectedRowKeys, onChange: setSelectedRowKeys } : undefined}
           pagination={{
             current: page,
             pageSize,

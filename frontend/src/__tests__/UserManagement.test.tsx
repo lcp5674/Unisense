@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { UserManagement } from "../pages/UserManagement";
 
 vi.mock("../api", () => {
@@ -22,6 +23,7 @@ vi.mock("../api", () => {
     createUser: vi.fn(),
     updateUser: vi.fn(),
     setUserStatus: vi.fn(),
+    batchSetUserStatus: vi.fn(),
     resetUserPassword: vi.fn(),
     UnisenseApiError,
   };
@@ -34,6 +36,7 @@ import {
   createUser,
   updateUser,
   setUserStatus,
+  batchSetUserStatus,
   resetUserPassword,
 } from "../api";
 
@@ -43,6 +46,7 @@ const mockDomains = vi.mocked(listDomainTree);
 const mockCreate = vi.mocked(createUser);
 const mockUpdate = vi.mocked(updateUser);
 const mockStatus = vi.mocked(setUserStatus);
+const mockBatchStatus = vi.mocked(batchSetUserStatus);
 const mockReset = vi.mocked(resetUserPassword);
 
 /** 在可见 antd 下拉中点击指定选项：虚拟列表渲染同名包裹节点，须点 .ant-select-item-option 本体才触发选中。 */
@@ -86,6 +90,7 @@ describe("UserManagement 用户管理", () => {
     mockCreate.mockReset();
     mockUpdate.mockReset();
     mockStatus.mockReset();
+    mockBatchStatus.mockReset();
     mockReset.mockReset();
     mockDomains.mockResolvedValue([]);
   });
@@ -234,5 +239,70 @@ describe("UserManagement 用户管理", () => {
       const lastCall = calls.length > 0 ? calls[calls.length - 1][0] : undefined;
       expect(lastCall?.page_size).toBe(50);
     });
+  });
+
+  it("批量停用：勾选多行后确认，调用 batchSetUserStatus(disabled) 并提示成功", async () => {
+    const user = userEvent.setup();
+    mockMe.mockResolvedValue(ADMIN);
+    mockList.mockResolvedValue(USERS);
+    mockBatchStatus.mockResolvedValue({
+      succeeded: [
+        { user_id: 1, username: "admin", ok: true, error_code: null, message: "已停用" },
+        { user_id: 2, username: "alice", ok: true, error_code: null, message: "已停用" },
+      ],
+      failed: [],
+    });
+    render(<UserManagement />);
+    await screen.findByText("alice");
+
+    // 表头全选（rowSelection 选择所有行）
+    const checkboxes = screen.getAllByRole("checkbox");
+    await user.click(checkboxes[0]);
+
+    expect(screen.getByText("已选 2 个用户")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /批量停用/ }));
+    await user.click(await screen.findByText("确认停用"));
+
+    await waitFor(() => {
+      expect(mockBatchStatus).toHaveBeenCalledWith([1, 2], "disabled");
+    });
+    expect(await screen.findByText("停用成功 2 个用户")).toBeTruthy();
+  });
+
+  it("批量启用：勾选多行后调用 batchSetUserStatus(active)，部分失败逐项提示", async () => {
+    const user = userEvent.setup();
+    mockMe.mockResolvedValue(ADMIN);
+    mockList.mockResolvedValue(USERS);
+    mockBatchStatus.mockResolvedValue({
+      succeeded: [
+        { user_id: 1, username: "admin", ok: true, error_code: null, message: "已启用" },
+      ],
+      failed: [
+        { user_id: 2, username: "alice", ok: false, error_code: "USER_NOT_FOUND", message: "用户不存在" },
+      ],
+    });
+    render(<UserManagement />);
+    await screen.findByText("alice");
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    await user.click(checkboxes[0]);
+    await user.click(screen.getByRole("button", { name: /批量启用/ }));
+
+    await waitFor(() => {
+      expect(mockBatchStatus).toHaveBeenCalledWith([1, 2], "active");
+    });
+    expect(await screen.findByText(/启用完成 1 个，失败 1 个/)).toBeTruthy();
+  });
+
+  it("viewer：只读视图无批量操作按钮与复选框", async () => {
+    mockMe.mockResolvedValue({ ...ADMIN, role: "viewer" });
+    mockList.mockResolvedValue(USERS);
+    render(<UserManagement />);
+    await screen.findByText("alice");
+
+    expect(screen.queryByText("批量停用")).toBeNull();
+    expect(screen.queryByText("批量启用")).toBeNull();
+    // 无 rowSelection 复选框列
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 });

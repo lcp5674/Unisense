@@ -4,12 +4,14 @@
 
 - GET    /users                       用户管理列表（含 email / 最后登录 / 创建时间）
 - POST   /users                       创建用户
+- POST   /users/batch-status          批量启用 / 禁用（207 语义：逐项标注失败，不影响其余）
 - PUT    /users/{user_id}             编辑用户（显示名 / 邮箱 / 角色 / 域）
 - PATCH  /users/{user_id}/status      启用 / 禁用
 - POST   /users/{user_id}/reset-password  重置密码
 
 鉴权：全部端点仅 ``platform_admin``（账号生命周期管理属平台级操作）。
-审计：全部写操作落 ``audit_log``（action=USER_CREATE/USER_UPDATE/USER_STATUS/USER_RESET_PASSWORD）。
+审计：全部写操作落 ``audit_log``（action=USER_CREATE/USER_UPDATE/USER_STATUS/USER_STATUS_BATCH/
+USER_RESET_PASSWORD）。
 响应绝不暴露 ``password_hash``；错误码对齐 TD §5.4（CONFLICT / NOT_FOUND / VALIDATION_ERROR）。
 """
 
@@ -115,6 +117,30 @@ class UserUpdateRequest(BaseModel):
 class UserStatusRequest(BaseModel):
     """启用 / 禁用请求体。"""
 
+    status: Literal["active", "disabled"] = Field(..., description="目标状态")
+
+
+class UserBatchStatusItem(BaseModel):
+    """批量启用 / 禁用单项结果（207 语义：逐项标注失败原因）。"""
+
+    user_id: int
+    username: str | None = None
+    ok: bool
+    error_code: str | None = None
+    message: str | None = None
+
+
+class UserBatchStatusResult(BaseModel):
+    """批量启用 / 禁用汇总结果（对齐 BatchSourceResult 的 207 模式）。"""
+
+    succeeded: list[UserBatchStatusItem]
+    failed: list[UserBatchStatusItem]
+
+
+class UserBatchStatusRequest(BaseModel):
+    """批量启用 / 禁用请求体（上限 200，空列表由 min_length 拒绝）。"""
+
+    user_ids: list[int] = Field(min_length=1, max_length=200, description="目标用户 ID 列表")
     status: Literal["active", "disabled"] = Field(..., description="目标状态")
 
 
@@ -276,6 +302,70 @@ async def create_user(
     await db.commit()
     await db.refresh(row)
     return ok(_to_admin(row), trace_id=trace_id)
+
+
+@router.post("/batch-status", dependencies=_ADMIN_DEPS)
+async def batch_set_user_status(
+    payload: UserBatchStatusRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[UserBatchStatusResult]:
+    """批量启用 / 禁用用户（207 语义：单条失败逐项标注，不影响其余）。
+
+    与单条 ``PATCH /users/{id}/status`` 同口径（存在校验 + 禁止自禁）；
+    批量禁用包含当前登录账号时，该项单独标注失败，其余照常更新。
+    一次提交统一落一条 ``USER_STATUS_BATCH`` 审计（含成败计数）。
+    注意：本端点须注册在 ``/{{user_id}}`` 系列之前（FastAPI 按注册顺序匹配）。
+    """
+    rows = (await db.execute(select(User).where(User.id.in_(payload.user_ids)))).scalars().all()
+    by_id = {r.id: r for r in rows}
+
+    succeeded: list[UserBatchStatusItem] = []
+    failed: list[UserBatchStatusItem] = []
+    for uid in payload.user_ids:
+        row = by_id.get(uid)
+        if row is None:
+            failed.append(
+                UserBatchStatusItem(
+                    user_id=uid, ok=False, error_code="USER_NOT_FOUND", message="用户不存在"
+                )
+            )
+            continue
+        if row.id == user.id and payload.status == "disabled":
+            failed.append(
+                UserBatchStatusItem(
+                    user_id=uid,
+                    username=row.username,
+                    ok=False,
+                    error_code="SELF_DISABLE_FORBIDDEN",
+                    message="不能禁用当前登录的账号",
+                )
+            )
+            continue
+        row.status = payload.status
+        succeeded.append(
+            UserBatchStatusItem(
+                user_id=uid,
+                username=row.username,
+                ok=True,
+                message="已启用" if payload.status == "active" else "已禁用",
+            )
+        )
+
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="USER_STATUS_BATCH",
+        entity_type="user",
+        entity_id=f"items:{len(payload.user_ids)}",
+        detail={"status": payload.status, "succeeded": len(succeeded), "failed": len(failed)},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(UserBatchStatusResult(succeeded=succeeded, failed=failed), trace_id=trace_id)
 
 
 @router.put("/{user_id}", dependencies=_ADMIN_DEPS)

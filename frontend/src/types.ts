@@ -126,6 +126,19 @@ export interface AdminUserListResponse {
   items: AdminUser[];
 }
 
+export interface UserBatchStatusItem {
+  user_id: number;
+  username: string | null;
+  ok: boolean;
+  error_code: string | null;
+  message: string | null;
+}
+
+export interface UserBatchStatusResult {
+  succeeded: UserBatchStatusItem[];
+  failed: UserBatchStatusItem[];
+}
+
 export interface UserCreateRequest {
   username: string;
   email: string;

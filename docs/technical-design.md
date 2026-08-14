@@ -371,11 +371,12 @@ GET    /me/permissions               # 当前用户权限快照
 ```
 GET    /users?role=&status=&keyword=&page=&page_size=   # 用户管理列表（含 email/最后登录/创建时间；platform_admin 专属，响应不暴露 password_hash）
 POST   /users                        # 创建用户（username/email/display_name/role/domain/初始密码；用户名邮箱唯一，密码 bcrypt 落库；domain 须为存在且 active 的主题域 code，否则 USER_DOMAIN_INVALID=422）
+POST   /users/batch-status           # 批量启用/禁用（user_ids 1~200；207 语义逐项标注失败原因、不影响其余；禁止禁用当前登录账号；单条汇总审计 USER_STATUS_BATCH）
 PUT    /users/{id}                   # 编辑用户（显示名/邮箱/角色/域全量覆盖；禁止自降级 platform_admin；domain 同创建，须为 active 主题域 code）
 PATCH  /users/{id}/status            # 启用/禁用（status=active|disabled；禁止禁用当前登录账号）
 POST   /users/{id}/reset-password    # 重置密码（新密码 bcrypt 哈希落库，不返回明文）
 ```
-> 全部写操作落 `audit_log`（USER_CREATE/USER_UPDATE/USER_STATUS/USER_RESET_PASSWORD）；错误码对齐 §5.4（USER_EXISTS=409、USER_NOT_FOUND=404、USER_DOMAIN_INVALID / SELF_DEMOTE_FORBIDDEN / SELF_DISABLE_FORBIDDEN=422）。只读用户摘要（Owner 责任链渲染用）沿用 `GET /auth/users`（任意登录角色可读，不暴露 email）。
+> 全部写操作落 `audit_log`（USER_CREATE/USER_UPDATE/USER_STATUS/USER_STATUS_BATCH/USER_RESET_PASSWORD）；错误码对齐 §5.4（USER_EXISTS=409、USER_NOT_FOUND=404、USER_DOMAIN_INVALID / SELF_DEMOTE_FORBIDDEN / SELF_DISABLE_FORBIDDEN=422）。只读用户摘要（Owner 责任链渲染用）沿用 `GET /auth/users`（任意登录角色可读，不暴露 email）。
 
 ### 3.6 消费（consume · Semantic API）
 
