@@ -11,6 +11,22 @@ export default defineConfig({
     headers: {
       "Cache-Control": "no-store",
     },
+    // macOS FSEvents 在本仓库反复静默失效（监听不到文件变更 → 模块转换缓存不失效，
+    // 出现「改了代码页面无变化」，只能重启）。改用 chokidar 轮询监听：不依赖系统事件，
+    // 代价是少量 CPU，换取稳定可靠的热更新。
+    watch: {
+      usePolling: true,
+      interval: 200,
+      // 显式忽略大目录/测试产物，降低轮询开销并避免并行测试写文件触发无谓刷新
+      ignored: [
+        "**/.git/**",
+        "**/node_modules/**",
+        "**/.eslintcache",
+        "**/dist/**",
+        "**/test-results*/**",
+        "**/.playwright-cli/**",
+      ],
+    },
     proxy: {
       "/api": {
         target: "http://localhost:8100",
