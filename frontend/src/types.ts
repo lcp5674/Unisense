@@ -1092,6 +1092,28 @@ export interface DataSourceListResponse {
   page_size: number;
 }
 
+export interface BatchSourceItem {
+  source_id: string;
+  name: string | null;
+  ok: boolean;
+  error_code: string | null;
+  message: string | null;
+}
+
+export interface BatchSourceResult {
+  succeeded: BatchSourceItem[];
+  failed: BatchSourceItem[];
+}
+
+export interface BatchToggleRequest {
+  source_ids: string[];
+  enabled: boolean;
+}
+
+export interface BatchDeleteRequest {
+  source_ids: string[];
+}
+
 export interface DataSourceCreateRequest {
   /** 不传时由系统按 类型_库|域 自动生成 */
   source_id?: string | null;

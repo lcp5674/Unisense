@@ -26,6 +26,8 @@ from app.services.collector.events import CatalogEventPublisher
 from app.services.collector.queue import CollectionQueue, create_collection_queue
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.schemas import (
+    BatchSourceItem,
+    BatchSourceResult,
     BulkDeprecateRequest,
     BulkDeprecateResult,
     DataSourceCreateRequest,
@@ -369,6 +371,98 @@ class CollectorService(BaseService):
     async def delete_source(self, source_id: str) -> None:
         if not await self._repo.soft_delete_source(source_id):
             raise NotFoundError(f"数据源不存在: {source_id}")
+
+    async def batch_toggle_sources(
+        self, source_ids: list[str], enabled: bool, actor_id: int
+    ) -> BatchSourceResult:
+        """批量启用/停用数据源（逐条独立处理，单条失败不影响其余）。
+
+        对齐 bulk_deprecate 的 207 语义：不存在的源记为 NOT_FOUND 失败项，
+        其余逐条更新 enabled。成功项携带 name 供前端提示。
+
+        Args:
+            source_ids: 待操作数据源 ID 列表（API 层已按 max_length=200 校验）。
+            enabled: True 启用 / False 停用。
+            actor_id: 操作人 ID（审计用，预留）。
+
+        Returns:
+            BatchSourceResult(succeeded, failed)。
+        """
+        succeeded: list[BatchSourceItem] = []
+        failed: list[BatchSourceItem] = []
+        for sid in source_ids:
+            try:
+                src = await self._repo.set_source_enabled(sid, enabled)
+                if src is None:
+                    failed.append(
+                        BatchSourceItem(
+                            source_id=sid,
+                            ok=False,
+                            error_code="NOT_FOUND",
+                            message="数据源不存在",
+                        )
+                    )
+                    continue
+                succeeded.append(BatchSourceItem(source_id=sid, name=src.name, ok=True))
+            except Exception as exc:  # noqa: BLE001 - 批量单条失败不阻断其余（207 语义）
+                failed.append(
+                    BatchSourceItem(
+                        source_id=sid,
+                        ok=False,
+                        error_code="INTERNAL",
+                        message=str(exc),
+                    )
+                )
+        return BatchSourceResult(succeeded=succeeded, failed=failed)
+
+    async def batch_delete_sources(
+        self, source_ids: list[str], actor_id: int
+    ) -> BatchSourceResult:
+        """批量删除数据源（软删，逐条独立处理，单条失败不影响其余）。
+
+        Args:
+            source_ids: 待删除数据源 ID 列表（API 层已按 max_length=200 校验）。
+            actor_id: 操作人 ID（审计用，预留）。
+
+        Returns:
+            BatchSourceResult(succeeded, failed)。
+        """
+        succeeded: list[BatchSourceItem] = []
+        failed: list[BatchSourceItem] = []
+        for sid in source_ids:
+            try:
+                src = await self._repo.get_source(sid)
+                if src is None:
+                    failed.append(
+                        BatchSourceItem(
+                            source_id=sid,
+                            ok=False,
+                            error_code="NOT_FOUND",
+                            message="数据源不存在",
+                        )
+                    )
+                    continue
+                if not await self._repo.soft_delete_source(sid):
+                    failed.append(
+                        BatchSourceItem(
+                            source_id=sid,
+                            ok=False,
+                            error_code="DELETE_FAILED",
+                            message="删除失败",
+                        )
+                    )
+                    continue
+                succeeded.append(BatchSourceItem(source_id=sid, name=src.name, ok=True))
+            except Exception as exc:  # noqa: BLE001 - 批量单条失败不阻断其余（207 语义）
+                failed.append(
+                    BatchSourceItem(
+                        source_id=sid,
+                        ok=False,
+                        error_code="INTERNAL",
+                        message=str(exc),
+                    )
+                )
+        return BatchSourceResult(succeeded=succeeded, failed=failed)
 
     async def get_source_orm(self, source_id: str) -> DataSource:
         """取原始 DataSource（供采集编排还原连接配置，不对外暴露明文）。"""

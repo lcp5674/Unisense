@@ -8,6 +8,8 @@ import {
   createDataSource,
   updateDataSource,
   deleteDataSource,
+  batchToggleDataSources,
+  batchDeleteDataSources,
   collectSourceNow,
   streamCollectionJob,
   getCollectionJob,
@@ -22,7 +24,7 @@ import {
   listDriftLogs,
   UnisenseApiError,
 } from "../api";
-import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest, CollectionProgress } from "../types";
+import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest, CollectionProgress, BatchSourceResult } from "../types";
 import type { DriftLogItem } from "../api";
 import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
@@ -478,6 +480,9 @@ export function DataSources() {
   const [detail, setDetail] = useState<DataSource | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [toggling, setToggling] = useState(false);
+  // 批量启停/删除：多选行 + 请求进行中标记
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchLoading, setBatchLoading] = useState(false);
   const [types, setTypes] = useState<SourceTypeInfo[]>(FALLBACK_TYPES);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 数据库枚举（测试连接通过后自动列出，供选择目标库）
@@ -662,6 +667,54 @@ export function DataSources() {
     }
   }
 
+  function batchFailSummary(result: BatchSourceResult): string {
+    // 失败清单：source_id（原因）——批量 207 语义下逐项标注，便于治理定位
+    return result.failed
+      .map((f) => `${f.source_id}（${f.message ?? f.error_code ?? "失败"}）`)
+      .join("、");
+  }
+
+  async function handleBatchToggle(enabled: boolean) {
+    if (selectedRowKeys.length === 0) return;
+    setBatchLoading(true);
+    try {
+      const ids = selectedRowKeys.map(String);
+      const result = await batchToggleDataSources(ids, enabled);
+      const action = enabled ? "启用" : "停用";
+      if (result.failed.length > 0) {
+        message.warning(`${action}完成 ${result.succeeded.length} 个，失败 ${result.failed.length} 个：${batchFailSummary(result)}`);
+      } else {
+        message.success(`已${action} ${result.succeeded.length} 个数据源`);
+      }
+      setSelectedRowKeys([]);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量操作失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
+  async function handleBatchDelete() {
+    if (selectedRowKeys.length === 0) return;
+    setBatchLoading(true);
+    try {
+      const ids = selectedRowKeys.map(String);
+      const result = await batchDeleteDataSources(ids);
+      if (result.failed.length > 0) {
+        message.warning(`删除完成 ${result.succeeded.length} 个，失败 ${result.failed.length} 个：${batchFailSummary(result)}`);
+      } else {
+        message.success(`已删除 ${result.succeeded.length} 个数据源`);
+      }
+      setSelectedRowKeys([]);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量删除失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
   function openEdit(source: DataSource) {
     setEditTarget(source);
     form.resetFields();
@@ -820,12 +873,51 @@ export function DataSources() {
             onChange={(e) => setKeyword(e.target.value)}
             onSearch={() => { setPage(1); load(1, pageSize); }}
           />
+          {selectedRowKeys.length > 0 && (
+            <span style={{ color: "rgba(0,0,0,0.45)", fontSize: 13 }}>
+              已选 {selectedRowKeys.length} 项
+            </span>
+          )}
+          <Button
+            icon={<PlayCircleOutlined />}
+            onClick={() => handleBatchToggle(true)}
+            disabled={selectedRowKeys.length === 0 || batchLoading}
+          >
+            批量启用
+          </Button>
+          <Popconfirm
+            title="批量停用"
+            description={`确定停用选中的 ${selectedRowKeys.length} 个数据源？停用后不再参与定时调度与手动采集，采集目录与历史血缘保留。`}
+            okText="确认停用"
+            onConfirm={() => handleBatchToggle(false)}
+            disabled={selectedRowKeys.length === 0 || batchLoading}
+          >
+            <Button icon={<StopOutlined />} disabled={selectedRowKeys.length === 0 || batchLoading}>
+              批量停用
+            </Button>
+          </Popconfirm>
+          <Popconfirm
+            title="批量删除"
+            description={`确定删除选中的 ${selectedRowKeys.length} 个数据源？其采集目录、水位、漂移日志将一并清理，删除后原 ID 可重建同名数据源。`}
+            okText="确认删除"
+            okButtonProps={{ danger: true }}
+            onConfirm={handleBatchDelete}
+            disabled={selectedRowKeys.length === 0 || batchLoading}
+          >
+            <Button danger icon={<DeleteOutlined />} disabled={selectedRowKeys.length === 0 || batchLoading}>
+              批量删除
+            </Button>
+          </Popconfirm>
         </Space>
         <Table
           dataSource={items}
           columns={columns}
           rowKey="source_id"
           loading={loading}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys) => setSelectedRowKeys(keys),
+          }}
           pagination={{
             current: page,
             pageSize,

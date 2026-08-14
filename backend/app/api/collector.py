@@ -41,6 +41,9 @@ from app.db.redis import get_redis
 from app.models.data_source import DBCatalog
 from app.services.collector.distributed_lock import CollectionLock
 from app.services.collector.schemas import (
+    BatchDeleteRequest,
+    BatchSourceResult,
+    BatchToggleRequest,
     BulkDeprecateRequest,
     BulkDeprecateResult,
     CollectRequest,
@@ -191,6 +194,65 @@ async def list_databases(
     )
     databases = await svc.list_databases(source_type_value, body.connection_config)
     return ok(data={"databases": databases, "source_type": source_type_value}, trace_id=trace_id)
+
+
+@source_router.post("/batch-toggle", dependencies=_WRITE_DEPS)
+async def batch_toggle_data_sources(
+    body: BatchToggleRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[BatchSourceResult]:
+    """批量启用/停用数据源（207 语义：单条失败逐项标注，不影响其余）。
+
+    注意：本端点须注册在 ``GET/PUT/DELETE /{source_id}`` 之前——FastAPI 按注册
+    顺序匹配，静态路径 ``/batch-toggle`` 若在 ``/{source_id}`` 之后会被当作
+    source_id 吞掉（与 ``/jobs`` 同理）。
+    """
+    svc = _svc(db)
+    result = await svc.batch_toggle_sources(body.source_ids, body.enabled, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="BATCH_ENABLE" if body.enabled else "BATCH_DISABLE",
+        entity_type="data_source",
+        entity_id=f"items:{len(body.source_ids)}",
+        detail={
+            "succeeded": len(result.succeeded),
+            "failed": len(result.failed),
+            "enabled": body.enabled,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@source_router.post("/batch-delete", dependencies=_WRITE_DEPS)
+async def batch_delete_data_sources(
+    body: BatchDeleteRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[BatchSourceResult]:
+    """批量删除数据源（软删，207 语义：单条失败逐项标注，不影响其余）。"""
+    svc = _svc(db)
+    result = await svc.batch_delete_sources(body.source_ids, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="BATCH_DELETE",
+        entity_type="data_source",
+        entity_id=f"items:{len(body.source_ids)}",
+        detail={"succeeded": len(result.succeeded), "failed": len(result.failed)},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
 
 
 @source_router.get("/jobs", dependencies=_READ_DEPS)

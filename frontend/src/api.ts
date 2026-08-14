@@ -19,6 +19,9 @@ import {
   AuditEntry,
   AutoSuggestRequest,
   AutoSuggestResponse,
+  BatchDeleteRequest,
+  BatchSourceResult,
+  BatchToggleRequest,
   ClientCreateRequest,
   ClientCreatedResponse,
   ConflictCheckRequest,
@@ -1862,6 +1865,23 @@ export async function updateDataSource(
 export async function deleteDataSource(sourceId: string): Promise<void> {
   await request<void>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}`, {
     method: "DELETE",
+  });
+}
+
+export async function batchToggleDataSources(
+  sourceIds: string[],
+  enabled: boolean,
+): Promise<BatchSourceResult> {
+  return request<BatchSourceResult>(`${API_BASE}/data-sources/batch-toggle`, {
+    method: "POST",
+    body: JSON.stringify({ source_ids: sourceIds, enabled } satisfies BatchToggleRequest),
+  });
+}
+
+export async function batchDeleteDataSources(sourceIds: string[]): Promise<BatchSourceResult> {
+  return request<BatchSourceResult>(`${API_BASE}/data-sources/batch-delete`, {
+    method: "POST",
+    body: JSON.stringify({ source_ids: sourceIds } satisfies BatchDeleteRequest),
   });
 }
 

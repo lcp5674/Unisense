@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { DataSources } from "../pages/DataSources";
 import type { DataSource, SourceTypeInfo, SubjectDomainTreeNode } from "../types";
@@ -27,6 +27,8 @@ vi.mock("../api", () => {
     createDataSource: vi.fn(),
     updateDataSource: vi.fn(),
     deleteDataSource: vi.fn(),
+    batchToggleDataSources: vi.fn(),
+    batchDeleteDataSources: vi.fn(),
     testDataSourceConnection: vi.fn(),
     checkDataSourceConnection: vi.fn(),
     collectSourceNow: vi.fn(),
@@ -49,6 +51,8 @@ import {
   createDataSource,
   updateDataSource,
   deleteDataSource,
+  batchToggleDataSources,
+  batchDeleteDataSources,
   testDataSourceConnection,
   checkDataSourceConnection,
   getSourceHealth,
@@ -67,6 +71,8 @@ const mockedDomains = vi.mocked(listDomainTree);
 const mockedCreate = vi.mocked(createDataSource);
 const mockedUpdate = vi.mocked(updateDataSource);
 const mockedDelete = vi.mocked(deleteDataSource);
+const mockedBatchToggle = vi.mocked(batchToggleDataSources);
+const mockedBatchDelete = vi.mocked(batchDeleteDataSources);
 const mockedTest = vi.mocked(testDataSourceConnection);
 const mockedCheck = vi.mocked(checkDataSourceConnection);
 const mockedHealth = vi.mocked(getSourceHealth);
@@ -148,6 +154,8 @@ describe("DataSources", () => {
     mockedStream.mockReturnValue(() => {});
     mockedGetJob.mockResolvedValue({ job_id: "job-1", status: "COMPLETED", detail: {} });
     mockedListDatabases.mockResolvedValue({ databases: ["finance", "orders"], source_type: "mysql" });
+    mockedBatchToggle.mockResolvedValue({ succeeded: [], failed: [] });
+    mockedBatchDelete.mockResolvedValue({ succeeded: [], failed: [] });
   });
 
   it("动态拉取类型元信息并展示中文标签", async () => {
@@ -459,5 +467,73 @@ describe("DataSources", () => {
     // 迟到的首查此刻才返回：若被应用会覆盖筛选结果（total 变 8）
     resolveFull({ items: [], total: 8, page: 1, page_size: 20 });
     await screen.findByText("共 2 个数据源");
+  });
+
+  it("多选行后点击「批量启用」调用批量接口并提示成功", async () => {
+    mockedBatchToggle.mockResolvedValue({
+      succeeded: [{ source_id: "mysql_finance", name: "财务库", ok: true, error_code: null, message: null }],
+      failed: [],
+    });
+    renderSources();
+    await screen.findByText("mysql_finance");
+
+    const row = screen.getByRole("row", { name: /mysql_finance/ });
+    fireEvent.click(within(row).getByRole("checkbox"));
+    await screen.findByText("已选 1 项");
+
+    fireEvent.click(screen.getByText("批量启用"));
+    await waitFor(() => {
+      expect(mockedBatchToggle).toHaveBeenCalledWith(["mysql_finance"], true);
+    });
+    expect(await screen.findByText("已启用 1 个数据源")).toBeTruthy();
+    // 操作成功后清空选择
+    await waitFor(() => expect(screen.queryByText("已选 1 项")).toBeNull());
+  });
+
+  it("多选行后点击「批量停用」调用批量接口（enabled=false）", async () => {
+    mockedBatchToggle.mockResolvedValue({
+      succeeded: [{ source_id: "mysql_finance", name: "财务库", ok: true, error_code: null, message: null }],
+      failed: [],
+    });
+    renderSources();
+    await screen.findByText("mysql_finance");
+
+    const row = screen.getByRole("row", { name: /mysql_finance/ });
+    fireEvent.click(within(row).getByRole("checkbox"));
+    await screen.findByText("已选 1 项");
+
+    fireEvent.click(screen.getByText("批量停用"));
+    await screen.findByText(/确定停用选中的 1 个数据源/);
+    fireEvent.click(screen.getByText("确认停用"));
+    await waitFor(() => {
+      expect(mockedBatchToggle).toHaveBeenCalledWith(["mysql_finance"], false);
+    });
+    expect(await screen.findByText("已停用 1 个数据源")).toBeTruthy();
+  });
+
+  it("批量删除需二次确认，部分失败时给出失败清单", async () => {
+    mockedBatchDelete.mockResolvedValue({
+      succeeded: [{ source_id: "mysql_finance", name: "财务库", ok: true, error_code: null, message: null }],
+      failed: [
+        { source_id: "mysql_orders", name: null, ok: false, error_code: "NOT_FOUND", message: "数据源不存在" },
+      ],
+    });
+    renderSources();
+    await screen.findByText("mysql_finance");
+
+    const row = screen.getByRole("row", { name: /mysql_finance/ });
+    fireEvent.click(within(row).getByRole("checkbox"));
+    await screen.findByText("已选 1 项");
+
+    fireEvent.click(screen.getByText("批量删除"));
+    await screen.findByText(/确定删除选中的 1 个数据源/);
+    fireEvent.click(screen.getByText("确认删除"));
+
+    await waitFor(() => {
+      expect(mockedBatchDelete).toHaveBeenCalledWith(["mysql_finance"]);
+    });
+    // 部分失败：成功数与失败清单均在提示中
+    expect(await screen.findByText(/删除完成 1 个，失败 1 个/)).toBeTruthy();
+    expect(screen.getByText(/mysql_orders（数据源不存在）/)).toBeTruthy();
   });
 });

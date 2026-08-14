@@ -111,6 +111,15 @@ class CollectorRepository:
             await self._db.execute(text("SET FOREIGN_KEY_CHECKS=1"))
         return True
 
+    async def set_source_enabled(self, source_id: str, enabled: bool) -> DataSource | None:
+        """设置数据源启用状态（批量启停逐条复用；不存在返回 None）。"""
+        src = await self.get_source(source_id)
+        if src is None:
+            return None
+        src.enabled = enabled
+        await self._db.flush()
+        return src
+
     async def list_sources(
         self,
         *,

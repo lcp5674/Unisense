@@ -170,6 +170,43 @@ class DataSourceListResponse(BaseModel):
     page_size: int
 
 
+class BatchSourceItem(BaseModel):
+    """批量操作结果单项（207 语义，逐项标注成败原因）。"""
+
+    source_id: str
+    name: str | None = None
+    ok: bool
+    error_code: str | None = None
+    message: str | None = None
+
+
+class BatchSourceResult(BaseModel):
+    """批量操作汇总结果（对齐 BulkDeprecateResult 的 207 模式）。
+
+    ``succeeded`` 为成功项（含 name 便于前端提示）；``failed`` 为失败项
+    （含 error_code + message）。调用方按「全成功=200、部分/全失败=207」判断。
+    """
+
+    succeeded: list[BatchSourceItem]
+    failed: list[BatchSourceItem]
+
+
+class BatchToggleRequest(BaseModel):
+    """批量启用/停用请求。
+
+    上限 200（对齐 BATCH_QUOTA_EXCEEDED 校验），空列表由 min_length 拒绝。
+    """
+
+    source_ids: list[str] = Field(min_length=1, max_length=200)
+    enabled: bool
+
+
+class BatchDeleteRequest(BaseModel):
+    """批量删除请求（软删，逐条独立处理）。"""
+
+    source_ids: list[str] = Field(min_length=1, max_length=200)
+
+
 class DBCatalogCreateRequest(BaseModel):
     """元数据实体注册请求。"""
 

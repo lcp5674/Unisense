@@ -546,6 +546,21 @@ async def test_repo_bulk_deprecate_partial():
     assert len(failed) == 1
 
 
+async def test_repo_set_source_enabled():
+    src = MagicMock()
+    src.enabled = False
+    repo = CollectorRepository(_session(scalar_one_or_none=src))
+    result = await repo.set_source_enabled("s", True)
+    assert result is src
+    assert src.enabled is True
+    repo._db.flush.assert_awaited()
+
+
+async def test_repo_set_source_enabled_not_found():
+    repo = CollectorRepository(_session(scalar_one_or_none=None))
+    assert await repo.set_source_enabled("s", True) is None
+
+
 async def test_repo_recompute_coverage_dict_quota():
     src = MagicMock()
     src.quota = {"max_scan_rows": 2}
@@ -2263,6 +2278,89 @@ async def test_update_source_enabled_none_keeps_unchanged() -> None:
 
     assert src.enabled is True
     assert resp.enabled is True
+
+
+async def test_batch_toggle_sources_all_success() -> None:
+    """批量启停：全部成功时 succeeded 全量、failed 为空，逐条携带目标状态。"""
+    svc, repo = _svc()
+    src_a = _make_src_with_config({"host": "h"})
+    src_a.name = "源A"
+    src_b = _make_src_with_config({"host": "h"})
+    src_b.name = "源B"
+    repo.set_source_enabled = AsyncMock(side_effect=[src_a, src_b])
+
+    result = await svc.batch_toggle_sources(["a", "b"], False, 1)
+
+    assert len(result.succeeded) == 2
+    assert len(result.failed) == 0
+    assert result.succeeded[0].name == "源A"
+    # repository 逐条以目标状态调用（enabled=False 表示停用）
+    assert [c.args for c in repo.set_source_enabled.call_args_list] == [
+        ("a", False),
+        ("b", False),
+    ]
+
+
+async def test_batch_toggle_sources_partial_failure() -> None:
+    """批量启停：不存在的源记为 NOT_FOUND 失败项，其余仍成功（207）。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.name = "源A"
+    repo.set_source_enabled = AsyncMock(side_effect=[src, None])
+
+    result = await svc.batch_toggle_sources(["a", "missing"], True, 1)
+
+    assert len(result.succeeded) == 1
+    assert len(result.failed) == 1
+    assert result.failed[0].source_id == "missing"
+    assert result.failed[0].error_code == "NOT_FOUND"
+
+
+async def test_batch_toggle_sources_exception_isolated() -> None:
+    """批量启停：单条抛异常记为 INTERNAL 失败项，不阻断其余（207）。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.name = "源A"
+    repo.set_source_enabled = AsyncMock(side_effect=[RuntimeError("boom"), src])
+
+    result = await svc.batch_toggle_sources(["bad", "ok"], True, 1)
+
+    assert len(result.succeeded) == 1
+    assert result.succeeded[0].source_id == "ok"
+    assert len(result.failed) == 1
+    assert result.failed[0].error_code == "INTERNAL"
+
+
+async def test_batch_delete_sources_all_success() -> None:
+    """批量删除：全部成功时 succeeded 全量、failed 为空。"""
+    svc, repo = _svc()
+    src_a = _make_src_with_config({"host": "h"})
+    src_a.name = "源A"
+    src_b = _make_src_with_config({"host": "h"})
+    src_b.name = "源B"
+    repo.get_source = AsyncMock(side_effect=[src_a, src_b])
+    repo.soft_delete_source = AsyncMock(return_value=True)
+
+    result = await svc.batch_delete_sources(["a", "b"], 1)
+
+    assert len(result.succeeded) == 2
+    assert len(result.failed) == 0
+    assert result.succeeded[0].name == "源A"
+
+
+async def test_batch_delete_sources_partial_failure() -> None:
+    """批量删除：不存在的源记为 NOT_FOUND 失败项，其余仍成功（207）。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.name = "源A"
+    repo.get_source = AsyncMock(side_effect=[src, None])
+    repo.soft_delete_source = AsyncMock(return_value=True)
+
+    result = await svc.batch_delete_sources(["a", "missing"], 1)
+
+    assert len(result.succeeded) == 1
+    assert len(result.failed) == 1
+    assert result.failed[0].error_code == "NOT_FOUND"
 
 
 async def test_response_includes_enabled() -> None:
