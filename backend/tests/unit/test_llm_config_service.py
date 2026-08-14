@@ -240,3 +240,26 @@ class TestTestConnection:
             result = await svc.test_connection(payload)
         # ok=True 即证明回落了已保存密钥（否则会返回"未配置 api_key"）
         assert result.ok is True
+
+    async def test_base_url_with_v1_suffix_uses_normalized_endpoint(self) -> None:
+        """openai 预设（base_url 含 /v1）测试连通性时，端点不得拼成 /v1/v1（回归 404）。"""
+        svc, _ = await self._svc()
+        payload = LlmConfigPayload(
+            base_url="https://api.openai.com/v1",
+            api_key="sk-x",
+            model="gpt-4o-mini",
+            timeout=30,
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"model": "gpt-4o-mini"}
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        assert result.ok is True
+        called_url = mock_client.post.call_args[0][0]
+        assert called_url == "https://api.openai.com/v1/chat/completions"
+        assert "/v1/v1/" not in called_url

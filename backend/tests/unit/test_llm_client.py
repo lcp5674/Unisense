@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from app.services.llm.client import LlmClient, LlmError, build_llm_client
+from app.services.llm.client import (
+    LlmClient,
+    LlmError,
+    build_llm_client,
+    chat_completions_url,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +35,41 @@ def _reset_shared_llm_breaker() -> None:
     _LLM_BREAKER._probing = False
     _LLM_BREAKER._probing_since = None
     _LLM_BREAKER._recent_outcomes.clear()
+
+
+class TestChatCompletionsUrl:
+    """base_url 三种合法形态的端点规范化（修复 /v1/v1/... 404 的回归证据）。"""
+
+    def test_bare_domain_appends_v1_path(self) -> None:
+        # deepseek 预设：裸域名 → /v1/chat/completions
+        assert (
+            chat_completions_url("https://api.deepseek.com")
+            == "https://api.deepseek.com/v1/chat/completions"
+        )
+
+    def test_base_url_with_v1_suffix(self) -> None:
+        # openai 预设：base_url 已含 /v1 → 只追加 /chat/completions，避免 /v1/v1
+        assert (
+            chat_completions_url("https://api.openai.com/v1")
+            == "https://api.openai.com/v1/chat/completions"
+        )
+
+    def test_full_endpoint_passthrough(self) -> None:
+        # 用户直接填完整端点 → 原样返回，不重复拼接
+        assert (
+            chat_completions_url("https://api.example.com/v1/chat/completions")
+            == "https://api.example.com/v1/chat/completions"
+        )
+
+    def test_trailing_slash_stripped(self) -> None:
+        assert (
+            chat_completions_url("https://api.deepseek.com/")
+            == "https://api.deepseek.com/v1/chat/completions"
+        )
+
+    def test_empty_base_url(self) -> None:
+        assert chat_completions_url("") == ""
+        assert chat_completions_url("   ") == ""
 
 
 class TestLlmClient:
@@ -65,6 +105,25 @@ class TestLlmClient:
         assert result["content"] == "Hello"
         assert result["model"] == "test-model"
         client._client.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_chat_uses_normalized_url_when_base_has_v1(self) -> None:
+        """base_url 已含 /v1（openai 预设）时，请求端点不得拼出 /v1/v1（回归 404）。"""
+        client = LlmClient(base_url="https://api.openai.com/v1", api_key="test-key")
+        assert client._chat_url == "https://api.openai.com/v1/chat/completions"
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "Hello", "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        await client.chat([{"role": "user", "content": "Hi"}])
+        called_url = client._client.post.call_args[0][0]
+        assert called_url == "https://api.openai.com/v1/chat/completions"
+        assert "/v1/v1/" not in called_url
 
     @pytest.mark.asyncio
     async def test_chat_http_error(self) -> None:

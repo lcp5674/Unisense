@@ -53,6 +53,31 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
 }
 
 
+def chat_completions_url(base_url: str) -> str:
+    """规范化 OpenAI 协议 chat/completions 端点 URL。
+
+    base_url 存在三种合法形态，若一律追加 ``/v1/chat/completions`` 会拼出
+    ``/v1/v1/...`` 或 ``.../completions/v1/...`` 导致 404：
+    - 裸域名/根路径：``https://api.deepseek.com`` → 追加 ``/v1/chat/completions``
+    - 已含版本前缀：``https://api.openai.com/v1`` → 追加 ``/chat/completions``
+    - 已含完整端点：``https://xxx/v1/chat/completions`` → 原样返回
+
+    Args:
+        base_url: 用户配置的 base_url（可能含尾部斜杠）。
+
+    Returns:
+        可直接请求的 chat/completions 完整 URL；base_url 为空时返回空串。
+    """
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return url
+    if url.endswith("/chat/completions"):
+        return url
+    if url.endswith("/v1"):
+        return f"{url}/chat/completions"
+    return f"{url}/v1/chat/completions"
+
+
 # ---- P2: 结构化输出 Schema ----
 
 
@@ -104,6 +129,9 @@ class LlmClient:
         self._api_key = api_key or settings.llm_api_key
         self._model = model or settings.llm_default_model
         self._timeout = timeout
+        # 兼容 base_url 是否已含 /v1 后缀（openai 预设含 /v1，deepseek 不含），
+        # 统一在此解析出 chat/completions 完整端点，避免每次调用拼出 /v1/v1/... 404。
+        self._chat_url = chat_completions_url(self._base_url)
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=httpx.Timeout(self._timeout),
@@ -165,7 +193,7 @@ class LlmClient:
         last_exc: Exception | None = None
         for attempt in range(_LLM_MAX_RETRIES + 1):
             try:
-                resp = await self._client.post("/v1/chat/completions", json=payload)
+                resp = await self._client.post(self._chat_url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
                 choice = data["choices"][0]["message"]

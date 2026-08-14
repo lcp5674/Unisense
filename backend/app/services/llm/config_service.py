@@ -17,7 +17,11 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.secrets import SecretManager
 from app.models.llm_config import LlmConfig
-from app.services.llm.client import DeterministicFallbackLlmClient, LlmClient
+from app.services.llm.client import (
+    DeterministicFallbackLlmClient,
+    LlmClient,
+    chat_completions_url,
+)
 from app.services.llm.schemas import LlmConfigPayload, LlmConfigTestResult
 
 logger = get_logger("unisense.llm.config")
@@ -70,10 +74,7 @@ class LlmConfigService:
     async def get_config(self) -> LlmConfig | None:
         """读取单行配置（仅取未软删除的最新一条）。"""
         res = await self._db.execute(
-            select(LlmConfig)
-            .where(LlmConfig.deleted_at.is_(None))
-            .order_by(LlmConfig.id)
-            .limit(1)
+            select(LlmConfig).where(LlmConfig.deleted_at.is_(None)).order_by(LlmConfig.id).limit(1)
         )
         return res.scalar_one_or_none()
 
@@ -84,9 +85,7 @@ class LlmConfigService:
             try:
                 decrypted = SecretManager.decrypt(row.api_key_enc)
                 api_key = (
-                    decrypted.get("api_key")
-                    if isinstance(decrypted, dict)
-                    else str(decrypted)
+                    decrypted.get("api_key") if isinstance(decrypted, dict) else str(decrypted)
                 )
                 return {
                     "provider": row.provider or "custom",
@@ -201,12 +200,13 @@ class LlmConfigService:
         start = time.monotonic()
         try:
             async with httpx.AsyncClient(
-                base_url=base_url.rstrip("/"),
                 timeout=httpx.Timeout(timeout),
                 headers={"Authorization": f"Bearer {api_key}"},
             ) as client:
+                # 复用 client.chat_completions_url 兼容 base_url 是否已含 /v1 后缀，
+                # 否则 openai 预设（https://api.openai.com/v1）会拼出 /v1/v1/... 404。
                 resp = await client.post(
-                    "/v1/chat/completions",
+                    chat_completions_url(base_url),
                     json={
                         "model": model,
                         "messages": _PROBE_MESSAGES,
