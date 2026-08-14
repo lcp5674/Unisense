@@ -486,25 +486,26 @@ export function SystemConfig() {
           >
             <Input placeholder="https://api.deepseek.com" className="mono" />
           </Form.Item>
-          <Form.Item
-            name="model"
-            label="模型名称"
-            rules={[{ required: true, message: "请输入模型名称" }]}
-            style={{ marginBottom: 12 }}
-          >
+          <Form.Item label="模型名称" required style={{ marginBottom: 12 }}>
             <Space.Compact style={{ width: "100%" }}>
-              <AutoComplete
-                aria-label="模型名称"
-                options={modelOptions}
-                placeholder="deepseek-chat"
-                className="mono"
-                style={{ width: "100%" }}
-                filterOption={(inputValue, option) =>
-                  String(option?.value ?? "")
-                    .toLowerCase()
-                    .includes(inputValue.toLowerCase())
-                }
-              />
+              <Form.Item
+                name="model"
+                noStyle
+                rules={[{ required: true, message: "请输入模型名称" }]}
+              >
+                <AutoComplete
+                  aria-label="模型名称"
+                  options={modelOptions}
+                  placeholder="deepseek-chat"
+                  className="mono"
+                  style={{ width: "100%" }}
+                  filterOption={(inputValue, option) =>
+                    String(option?.value ?? "")
+                      .toLowerCase()
+                      .includes(inputValue.toLowerCase())
+                  }
+                />
+              </Form.Item>
               <Button
                 icon={<CloudDownloadOutlined />}
                 loading={fetchingModels}

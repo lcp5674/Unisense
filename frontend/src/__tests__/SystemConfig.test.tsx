@@ -223,6 +223,9 @@ describe("SystemConfig LLM 路由配置", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("https://api.deepseek.com")).toBeTruthy();
     });
+    // AutoComplete 必须回填已保存的模型名（回归：被 Space.Compact 包裹时 Form.Item
+    // 的 value 注入不到 AutoComplete 上，导致编辑时模型显示为空）
+    expect(screen.getByDisplayValue("deepseek-chat")).toBeTruthy();
     fireEvent.change(screen.getByDisplayValue("https://api.deepseek.com"), {
       target: { value: "https://new.example.com" },
     });
@@ -230,7 +233,7 @@ describe("SystemConfig LLM 路由配置", () => {
     await waitFor(() => {
       expect(mockUpdate).toHaveBeenCalledWith(
         1,
-        expect.objectContaining({ base_url: "https://new.example.com" }),
+        expect.objectContaining({ base_url: "https://new.example.com", model: "deepseek-chat" }),
       );
     });
   });
