@@ -165,6 +165,113 @@ export function ObjectView({
   );
 }
 
+/**
+ * 口径定义专用视图：标签列（右对齐、固定宽）+ 值列对齐的规格表布局。
+ * 用于两指标对比时，让「口径定义」行 A/B 两列的同一子字段（口径 SQL / 统计周期 / 度量…）按统一顺序纵向对齐，
+ * 行对行可对照，避免 ObjectView 默认竖排文本块难以比对的问题。
+ */
+export const DEF_CANON_ORDER: string[] = [
+  "sql", "etl_sql",
+  "source_tables", "source_fields", "source_columns",
+  "group_by", "filters", "time_column", "partition_key", "measure_columns",
+  "dimensions", "measures", "columns",
+  "expression", "expr",
+  "dependencies", "source_table", "measure_column", "period", "grain", "unit",
+];
+
+function renderDefValue(key: string, value: unknown, labels: Record<string, string>): ReactNode {
+  if (value === null || value === undefined || value === "") return <span className="muted">—</span>;
+  if (key === "sql" || key === "etl_sql") {
+    return (
+      <pre
+        style={{
+          margin: 0,
+          maxHeight: 200,
+          overflow: "auto",
+          background: "var(--paper)",
+          padding: 8,
+          borderRadius: 4,
+          fontSize: 12,
+        }}
+      >
+        {String(value)}
+      </pre>
+    );
+  }
+  if (key === "expression" || key === "expr") return <code className="mono">{String(value)}</code>;
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "number") return <span className="mono">{String(value)}</span>;
+  if (Array.isArray(value)) {
+    if (!value.length) return <span className="muted">无</span>;
+    const allObjects = value.every((it) => typeof it === "object" && it !== null);
+    if (allObjects) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {value.map((item, i) => (
+            <div key={i} style={{ display: "flex", flexWrap: "wrap", gap: "0 12px" }}>
+              {Object.entries(item as Record<string, unknown>).map(([sk, sv]) => (
+                <span key={sk}>
+                  <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>{labels[sk] ?? sk}</span>
+                  <span className="mono" style={{ marginLeft: 3 }}>
+                    {typeof sv === "object" ? JSON.stringify(sv) : String(sv)}
+                  </span>
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      );
+    }
+    return (
+      <span>
+        {value.map((item, i) => (
+          <Tag key={i} className="mono" style={{ marginBottom: 2 }}>
+            {String(item)}
+          </Tag>
+        ))}
+      </span>
+    );
+  }
+  if (typeof value === "object") return <DefinitionView data={value as Record<string, unknown>} labels={labels} />;
+  return <span className="mono">{translateByKey(key, String(value))}</span>;
+}
+
+export function DefinitionView({
+  data,
+  labels = DEF_FIELD_LABEL,
+}: {
+  data: Record<string, unknown>;
+  labels?: Record<string, string>;
+}) {
+  const entries = Object.entries(data).filter(([, v]) => v !== null && v !== undefined && v !== "");
+  entries.sort((a, b) => DEF_CANON_ORDER.indexOf(a[0]) - DEF_CANON_ORDER.indexOf(b[0]));
+  if (!entries.length) return <span className="muted">—</span>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {entries.map(([k, v]) => (
+        <div
+          key={k}
+          style={{ display: "grid", gridTemplateColumns: "84px 1fr", gap: 8, alignItems: "start" }}
+        >
+          <span
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              color: "var(--text-secondary)",
+              textAlign: "right",
+              lineHeight: 1.7,
+              paddingTop: 1,
+            }}
+          >
+            {labels[k] ?? k}
+          </span>
+          <div style={{ fontSize: 13, lineHeight: 1.7, minWidth: 0 }}>{renderDefValue(k, v, labels)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** 紧凑对象文本：用于表格单元格等窄空间，键→中文、值→可读文本 */
 export function kvText(obj: Record<string, unknown>, labels: Record<string, string> = {}): string {
   return Object.entries(obj)

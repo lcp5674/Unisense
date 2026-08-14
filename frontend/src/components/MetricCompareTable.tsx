@@ -1,6 +1,6 @@
 import { Table } from "antd";
 import type { MetricCompareDeps, MetricCompareField, MetricCompareResult } from "../types";
-import { DEF_FIELD_LABEL, ObjectView } from "../utils/display";
+import { DEF_FIELD_LABEL, DefinitionView, ObjectView } from "../utils/display";
 
 export const COMPARE_FIELD_LABELS: Record<string, string> = {
   granularity: "粒度",
@@ -166,8 +166,14 @@ export function MetricCompareTable({
       dataIndex: "a",
       key: "a",
       width: 330,
-      render: (v: unknown) => (
-        <div style={{ padding: "2px 0" }}>{renderValue(v)}</div>
+      render: (v: unknown, r: { key: string }) => (
+        <div style={{ padding: "2px 0" }}>
+          {r.key === "definition" && v && typeof v === "object" ? (
+            <DefinitionView data={v as Record<string, unknown>} />
+          ) : (
+            renderValue(v)
+          )}
+        </div>
       ),
     },
     {
@@ -182,8 +188,14 @@ export function MetricCompareTable({
       dataIndex: "b",
       key: "b",
       width: 330,
-      render: (v: unknown) => (
-        <div style={{ padding: "2px 0" }}>{renderValue(v)}</div>
+      render: (v: unknown, r: { key: string }) => (
+        <div style={{ padding: "2px 0" }}>
+          {r.key === "definition" && v && typeof v === "object" ? (
+            <DefinitionView data={v as Record<string, unknown>} />
+          ) : (
+            renderValue(v)
+          )}
+        </div>
       ),
     },
   ];
