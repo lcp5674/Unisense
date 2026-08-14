@@ -26,6 +26,7 @@ from app.services.lineage.schemas import (
     LineageEdgeListParams,
     LineageImpactParams,
     LineageParseRequest,
+    LineageStaleParams,
 )
 from app.services.lineage.service import LineageService, paginate_edges
 
@@ -182,3 +183,118 @@ async def delete_edges_by_node(
     )
     await db.commit()
     return ok(data={"deleted": deleted}, trace_id=trace_id)
+
+
+# ---- 血缘采集通道（增量采集运维，TD §12.2）----
+
+
+@router.get("/channels", dependencies=_READ_DEPS)
+async def list_channels(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """血缘采集通道总览：各来源边数/节点数/失效数/最近运行。"""
+    svc = _svc(db)
+    channels = await svc.list_channels()
+    return ok(
+        data=[c.model_dump(mode="json") for c in channels],
+        trace_id=trace_id,
+    )
+
+
+@router.get("/channels/{source}/runs", dependencies=_READ_DEPS)
+async def list_channel_runs(
+    source: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    limit: int = 20,
+) -> ApiResponse[Any]:
+    """某来源通道的采集运行历史（变更摘要，按时间倒序）。"""
+    svc = _svc(db)
+    runs = await svc.list_ingest_runs(source, limit)
+    return ok(
+        data=[r.model_dump(mode="json") for r in runs],
+        trace_id=trace_id,
+    )
+
+
+@router.get("/stale", dependencies=_READ_DEPS)
+async def list_stale(
+    params: Annotated[LineageStaleParams, Depends()],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """失效队列：连续未被采集确认、待人工处置的血缘边。"""
+    svc = _svc(db)
+    edges = await svc.list_stale(params.source, params.limit)
+    return ok(
+        data=[e.model_dump(mode="json") for e in edges],
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/stale/{edge_id}/confirm",
+    dependencies=_WRITE_DEPS,
+)
+async def confirm_stale(
+    edge_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """确认失效边：软删权威存储并同步清理图存储。"""
+    svc = _svc(db)
+    edge = await svc.confirm_stale_edge(edge_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="LINEAGE_STALE_CONFIRM",
+        entity_type="lineage_edge",
+        entity_id=str(edge_id),
+        detail={
+            "source_node": edge.source_node,
+            "target_node": edge.target_node,
+            "provenance": edge.provenance,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=edge.model_dump(mode="json"), trace_id=trace_id)
+
+
+@router.post(
+    "/stale/{edge_id}/restore",
+    dependencies=_WRITE_DEPS,
+)
+async def restore_stale(
+    edge_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """恢复失效边：清除失效标记，重新参与血缘查询。"""
+    svc = _svc(db)
+    edge = await svc.restore_stale_edge(edge_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="LINEAGE_STALE_RESTORE",
+        entity_type="lineage_edge",
+        entity_id=str(edge_id),
+        detail={
+            "source_node": edge.source_node,
+            "target_node": edge.target_node,
+            "provenance": edge.provenance,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=edge.model_dump(mode="json"), trace_id=trace_id)

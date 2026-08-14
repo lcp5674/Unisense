@@ -115,6 +115,12 @@ class Settings(BaseSettings):
     # 生产建议：稳定表多的库设 0.05（5%），频繁无 UPDATE_TIME 的库设 0.2（20%）。
     collector_mysql_incremental_ratio_threshold: float = 0.1
 
+    # ---- 血缘采集通道（TD §12.2）----
+    # 增量采集的失效观察期：某条边连续 N 次未被来源通道确认后进入失效队列
+    # （期间不直接删除，防止"本次未采到"误删真实血缘）。达到阈值后由人工
+    # 在「采集通道」视图确认删除或恢复。
+    lineage_stale_observation_runs: int = 3
+
     model_config = SettingsConfigDict(
         env_prefix="UNISENSE_",
         env_file=".env",

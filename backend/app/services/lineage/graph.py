@@ -149,6 +149,47 @@ class LineageGraphClient:
             logger.warning("lineage_graph_query_failed", error=str(exc))
             return None
 
+    async def delete_edges(self, edges: list[tuple[str, str, str]]) -> bool:
+        """从 Neo4j 删除血缘边（确认失效边时同步图存储，best-effort）。
+
+        Args:
+            edges: ``(source_node, target_node, edge_type)`` 三元组列表。
+
+        Returns:
+            全部删除成功返回 True；未配置/不可达/熔断时返回 False（降级，不影响
+            MySQL 权威删除——图读路径对已删边回退 MySQL，行为一致）。
+        """
+        if not self._uri or not edges:
+            return False
+        if not neo4j_breaker.allow():
+            logger.warning("lineage_graph_breaker_open")
+            return False
+        try:
+            from neo4j import AsyncGraphDatabase
+        except Exception:  # pragma: no cover - 依赖缺失时降级
+            return False
+        try:
+            if self._driver is None:
+                self._driver = AsyncGraphDatabase.driver(
+                    self._uri, auth=(self._user, self._password)
+                )
+            rows = [{"src": s, "tgt": t, "etype": e} for s, t, e in edges]
+            async with self._driver.session() as session:
+                for i in range(0, len(rows), _WRITE_BATCH_SIZE):
+                    await session.run(
+                        "UNWIND $rows AS row "
+                        "MATCH (s:Asset {id:row.src})"
+                        "-[r:LINEAGE {type:row.etype}]->(t:Asset {id:row.tgt}) "
+                        "DELETE r",
+                        rows=rows[i : i + _WRITE_BATCH_SIZE],
+                    )
+            neo4j_breaker.record_success()
+            return True
+        except Exception as exc:  # 图存储不可达，降级
+            neo4j_breaker.record_failure()
+            logger.warning("lineage_graph_delete_failed", error=str(exc))
+            return False
+
     async def dispose(self) -> None:
         """关闭驱动连接。"""
         if self._driver is not None:

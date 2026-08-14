@@ -20,10 +20,13 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Float,
     Index,
+    Integer,
     String,
+    Text,
 )
 from sqlalchemy import (
     Enum as SQLEnum,
@@ -71,6 +74,35 @@ class LineageEdge(Base, BaseModel):
     )
     owner: Mapped[str | None] = mapped_column(
         String(64), nullable=True, default=None, comment="登记人（人工断链等人工边）"
+    )
+    # ---- 增量采集与失效管理（TD §12.2 血缘采集通道）----
+    # last_seen_at：最近一次被任何采集通道确认存在的时间（未确认过为 NULL）。
+    # missing_count：连续未被采集通道确认的轮次（观察期计数，达到阈值进入失效队列）。
+    # stale：是否进入失效队列（不再参与影响分析，等待人工确认删除或恢复）。
+    # stale_since：进入失效队列的时间。
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+        comment="最近一次被采集通道确认存在的时间（UTC）",
+    )
+    missing_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        comment="连续未被采集通道确认的轮次（观察期计数）",
+    )
+    stale: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        comment="是否进入失效队列（等待确认删除或恢复）",
+    )
+    stale_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+        comment="进入失效队列的时间（UTC）",
     )
     # created_at / updated_at / deleted_at 由 BaseModel 提供，不重复声明
 
@@ -149,4 +181,60 @@ class LineageEdgeHistory(Base):
     __table_args__ = (
         Index("ix_lineage_edge_history_source", "source_node"),
         Index("ix_lineage_edge_history_target", "target_node"),
+    )
+
+
+class LineageIngestRun(Base):
+    """血缘采集通道运行记录（增量采集审计）。
+
+    每次增量采集（dp_csv / quickbi / 数据接口 / SQL 解析）写一条运行记录，
+    记录本次运行的新增/更新/未再出现/新失效/恢复边数，用于「采集通道」视图
+    展示来源新鲜度与变更摘要（TD §12.2 增量血缘运维）。
+
+    对齐 TD §12.2 血缘采集；运行记录为追加型审计数据，不参与软删过滤。
+    """
+
+    __tablename__ = "lineage_ingest_run"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="主键 ID"
+    )
+    source: Mapped[str] = mapped_column(
+        String(32), nullable=False, index=True, comment="来源通道，如 dp_csv"
+    )
+    run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        comment="运行时间（UTC）",
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="running/success/failed"
+    )
+    total_edges: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="本次采集确认的边总数"
+    )
+    added_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="本次新增边数"
+    )
+    updated_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="本次更新边数"
+    )
+    missing_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="本次未再出现的边数（观察期累加）"
+    )
+    stale_flagged_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="本次新进入失效队列的边数"
+    )
+    restored_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, comment="本次恢复的失效边数"
+    )
+    error: Mapped[str | None] = mapped_column(
+        Text, nullable=True, default=None, comment="失败原因（status=failed 时）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        comment="创建时间（UTC）",
     )

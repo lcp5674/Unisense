@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -92,3 +93,56 @@ class ImpactPreviewRequest(BaseModel):
 def impact_to_dict(edges: list[Any]) -> list[dict[str, Any]]:
     """将血缘边 ORM 列表序列化为字典。"""
     return [LineageEdgeResponse.model_validate(e).model_dump() for e in edges]
+
+
+class LineageIngestRunResponse(BaseModel):
+    """血缘采集通道运行记录响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source: str
+    run_at: datetime
+    status: str
+    total_edges: int
+    added_count: int
+    updated_count: int
+    missing_count: int
+    stale_flagged_count: int
+    restored_count: int
+    error: str | None = None
+
+
+class LineageChannelResponse(BaseModel):
+    """血缘采集通道总览响应。"""
+
+    source: str = Field(description="来源通道标识，如 dp_csv")
+    edge_count: int = Field(description="该来源血缘边总数")
+    node_count: int = Field(description="涉及节点数（源∪目标去重）")
+    stale_count: int = Field(description="当前失效队列边数")
+    last_run: LineageIngestRunResponse | None = Field(
+        default=None, description="最近一次采集运行记录"
+    )
+
+
+class StaleEdgeResponse(BaseModel):
+    """失效队列边响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source_node: str
+    target_node: str
+    edge_type: str
+    granularity: str
+    confidence: float
+    provenance: str
+    missing_count: int = Field(description="连续未确认轮次")
+    stale_since: datetime | None = Field(default=None, description="进入失效队列时间")
+
+
+class LineageStaleParams(BaseModel):
+    """失效队列查询参数（query）。"""
+
+    source: str | None = Field(default=None, max_length=32, description="按来源通道过滤")
+    limit: int = Field(default=200, ge=1, le=1000, description="返回条数上限")

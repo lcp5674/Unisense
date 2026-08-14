@@ -411,3 +411,96 @@ async def test_soft_delete_by_node() -> None:
     assert n == 2
     assert db.flushed is True
     assert len(db._rows) == 0
+
+
+# ---- 增量采集 / 失效管理（mark_seen / mark_missing）----
+
+
+class _StaleDB:
+    """面向 mark_seen/mark_missing 的假 db：execute 返回预设 LineageEdge 列表。"""
+
+    def __init__(self, edges: list[LineageEdge]) -> None:
+        self.edges = edges
+        self.flushes = 0
+
+    async def execute(self, stmt: object) -> _Result:
+        return _Result(rows=list(self.edges))
+
+    async def flush(self) -> None:
+        self.flushes += 1
+
+
+def _l1_edge(
+    source: str,
+    target: str,
+    *,
+    provenance: str = "dp_csv",
+    last_seen: Any | None = None,
+    missing: int = 0,
+    stale: bool = False,
+) -> LineageEdge:
+    edge = LineageEdge(
+        source_node=f"table:{source}",
+        target_node=f"table:{target}",
+        edge_type="DERIVED_FROM",
+        granularity="L1",
+        provenance=provenance,
+    )
+    edge.last_seen_at = last_seen
+    edge.missing_count = missing
+    edge.stale = stale
+    return edge
+
+
+async def test_mark_seen_refreshes_and_restores() -> None:
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    stale_edge = _l1_edge("a", "b", last_seen=now, missing=2, stale=True)
+    fresh = _l1_edge("c", "d", last_seen=now, missing=0, stale=False)
+    repo = LineageRepository(_StaleDB([stale_edge, fresh]))
+
+    confirmed, restored = await repo.mark_seen("dp_csv", {("table:a", "table:b")})
+
+    assert confirmed == 1
+    assert restored == 1
+    assert stale_edge.stale is False
+    assert stale_edge.missing_count == 0
+    assert stale_edge.stale_since is None
+    assert stale_edge.last_seen_at is not None
+    # 未命中的边不受影响
+    assert fresh.missing_count == 0
+    assert fresh.stale is False
+
+
+async def test_mark_missing_flags_stale_at_threshold() -> None:
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    below = _l1_edge("a", "b", last_seen=now, missing=1, stale=False)
+    at_threshold = _l1_edge("c", "d", last_seen=now, missing=2, stale=False)
+    never_seen = _l1_edge("e", "f", last_seen=None, missing=0, stale=False)
+    repo = LineageRepository(_StaleDB([below, at_threshold, never_seen]))
+
+    missing, flagged = await repo.mark_missing("dp_csv", set(), threshold=3)
+
+    assert missing == 2
+    assert flagged == 1
+    assert below.missing_count == 2 and below.stale is False
+    assert at_threshold.missing_count == 3 and at_threshold.stale is True
+    # 从未被确认过的边不参与失效检测
+    assert never_seen.missing_count == 0 and never_seen.stale is False
+
+
+async def test_mark_missing_skips_seen_pairs() -> None:
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    edge = _l1_edge("a", "b", last_seen=now, missing=0, stale=False)
+    repo = LineageRepository(_StaleDB([edge]))
+
+    missing, flagged = await repo.mark_missing("dp_csv", {("table:a", "table:b")}, threshold=3)
+
+    assert missing == 0
+    assert flagged == 0
+    assert edge.missing_count == 0

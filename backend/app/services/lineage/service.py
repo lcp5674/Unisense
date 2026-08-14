@@ -14,7 +14,8 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
-from app.core.exceptions import ConflictError
+from app.core.config import settings
+from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.models.lineage import LineageEdge
 from app.services.lineage.events import LineageEventPublisher
@@ -28,10 +29,13 @@ from app.services.lineage.parser import (
 from app.services.lineage.repository import LineageRepository
 from app.services.lineage.schemas import (
     ImpactPreviewResponse,
+    LineageChannelResponse,
     LineageEdgeResponse,
     LineageImpactParams,
+    LineageIngestRunResponse,
     LineageParseRequest,
     LineageParseResponse,
+    StaleEdgeResponse,
 )
 
 logger = get_logger("unisense.lineage.service")
@@ -45,6 +49,8 @@ _CACHE_KEY_PREFIX = "lineage:impact:"
 
 #: 变更类型中视为破坏性/高风险的取值（what-if 风险分级用）。
 _RISKY_CHANGE_TYPES = frozenset({"BREAKING", "DROP", "DELETE", "REMOVE"})
+#: 增量采集分批提交大小（控制单事务规模，大批量导入时分批 commit）。
+_INGEST_COMMIT_BATCH = 500
 
 
 def paginate_edges(edges: list[LineageEdgeResponse], page: int, page_size: int) -> dict[str, Any]:
@@ -273,6 +279,141 @@ class LineageService(BaseService):
             frontier = next_frontier
             hops += 1
         return marked
+
+    # ---- 增量采集与采集通道（TD §12.2）----
+
+    async def ingest_batch(
+        self,
+        provenance: str,
+        edges: set[tuple[str, str]],
+        *,
+        threshold: int | None = None,
+        change_reason: str = "ingest",
+    ) -> dict[str, Any]:
+        """增量采集一批表级血缘边，并记录运行摘要与失效观察。
+
+        供各来源通道（dp_csv / quickbi / 数据接口）统一调用：
+        1. 逐条幂等 upsert（返回 created 标记 → 新增/更新计数）；
+        2. ``mark_seen`` 刷新已见边的 ``last_seen_at`` 并恢复既往失效边；
+        3. ``mark_missing`` 对未再出现的边累加观察期计数，达到阈值进入失效队列
+           （不直接删除，防"本次未采到"误删真实血缘）；
+        4. 写一条 ``lineage_ingest_run`` 运行记录（变更摘要审计）。
+
+        Args:
+            provenance: 来源通道标识（如 ``dp_csv``）。
+            edges: 本次采集确认存在的 ``(source_node, target_node)`` 集合。
+            threshold: 失效观察期（连续未确认轮次）；缺省取配置
+                ``lineage_stale_observation_runs``。
+            change_reason: 变更历史原因标记（默认 ``ingest``）。
+
+        Returns:
+            变更摘要 ``{run_id, source, total_edges, added, updated, missing,
+            stale_flagged, restored}``。
+        """
+        threshold = (
+            threshold if threshold is not None else int(settings.lineage_stale_observation_runs)
+        )
+        run = await self._repo.begin_ingest_run(provenance)
+        added = 0
+        updated = 0
+        seen: set[tuple[str, str]] = set()
+        try:
+            for source, target in sorted(edges):
+                _, created = await self._repo.upsert_edge_with_status(
+                    source_node=node_table(source),
+                    target_node=node_table(target),
+                    edge_type="DERIVED_FROM",
+                    granularity="L1",
+                    confidence=1.0,
+                    provenance=provenance,
+                    change_reason=change_reason,
+                )
+                seen.add((node_table(source), node_table(target)))
+                if created:
+                    added += 1
+                else:
+                    updated += 1
+                if (added + updated) % _INGEST_COMMIT_BATCH == 0:
+                    await self._db.commit()
+            confirmed, restored = await self._repo.mark_seen(provenance, seen)
+            missing, stale_flagged = await self._repo.mark_missing(provenance, seen, threshold)
+            await self._repo.finish_ingest_run(
+                run,
+                status="success",
+                total_edges=len(seen),
+                added=added,
+                updated=updated,
+                missing=missing,
+                stale_flagged=stale_flagged,
+                restored=restored,
+            )
+            await self._db.commit()
+            if self._events is not None:
+                await self._events.publish(
+                    "lineage_ingested",
+                    {
+                        "source": provenance,
+                        "added": added,
+                        "updated": updated,
+                        "missing": missing,
+                        "stale_flagged": stale_flagged,
+                        "restored": restored,
+                    },
+                )
+            return {
+                "run_id": run.id,
+                "source": provenance,
+                "total_edges": len(seen),
+                "added": added,
+                "updated": updated,
+                "missing": missing,
+                "stale_flagged": stale_flagged,
+                "restored": restored,
+            }
+        except Exception as exc:
+            await self._db.rollback()
+            await self._repo.finish_ingest_run(run, status="failed", error=str(exc))
+            await self._db.commit()
+            raise
+
+    async def list_channels(self) -> list[LineageChannelResponse]:
+        """血缘采集通道总览（按来源聚合边数/节点数/失效数/最近运行）。"""
+        rows = await self._repo.list_channels()
+        return [LineageChannelResponse(**r) for r in rows]
+
+    async def list_ingest_runs(
+        self, source: str, limit: int = 20
+    ) -> list[LineageIngestRunResponse]:
+        """某来源通道的采集运行历史（按时间倒序）。"""
+        runs = await self._repo.list_ingest_runs(source, limit)
+        return [LineageIngestRunResponse.model_validate(r) for r in runs]
+
+    async def list_stale(
+        self, source: str | None = None, limit: int = 200
+    ) -> list[StaleEdgeResponse]:
+        """失效队列：连续未被确认、待人工处置的血缘边。"""
+        edges = await self._repo.list_stale_edges(source, limit)
+        return [StaleEdgeResponse.model_validate(e) for e in edges]
+
+    async def confirm_stale_edge(self, edge_id: int) -> StaleEdgeResponse:
+        """确认失效边：软删权威存储，并 best-effort 同步删除图存储。"""
+        edge = await self._repo.get_edge(edge_id)
+        if edge is None:
+            raise NotFoundError(f"血缘边不存在或已删除: {edge_id}")
+        await self._repo.confirm_stale(edge)
+        await self._db.commit()
+        if self._graph is not None:
+            await self._graph.delete_edges([(edge.source_node, edge.target_node, edge.edge_type)])
+        return StaleEdgeResponse.model_validate(edge)
+
+    async def restore_stale_edge(self, edge_id: int) -> StaleEdgeResponse:
+        """恢复失效边：清除失效标记与观察期计数，重新参与血缘查询。"""
+        edge = await self._repo.get_edge(edge_id)
+        if edge is None:
+            raise NotFoundError(f"血缘边不存在或已删除: {edge_id}")
+        await self._repo.restore_stale(edge)
+        await self._db.commit()
+        return StaleEdgeResponse.model_validate(edge)
 
     # ---- 内部方法 ----
 

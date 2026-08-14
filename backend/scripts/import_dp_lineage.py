@@ -10,16 +10,22 @@
   （如 ``trcd_dcare_sign.patient_sign_protocol`` -> ``wedw_ods.xxx_ful_d``）；
 - parentIds DAG 边：父节点输出表 -> 子节点输入表（任务内调度依赖）。
 
-幂等：``LineageRepository.upsert_edge`` 按唯一键 ``(source_node, target_node,
-edge_type, granularity)`` 幂等，重复执行不产生重复边、不重复写历史。
+增量采集语义（TD §12.2 血缘采集通道）：
+- 走 ``LineageService.ingest_batch``，幂等 upsert（按唯一键）且每次运行写一条
+  ``lineage_ingest_run`` 记录（新增/更新/未再出现/新失效/恢复变更摘要）；
+- 失效观察：本次 CSV 中未再出现的既有边累加 ``missing_count``，连续
+  ``--stale-threshold``（默认取配置 3）次后进入失效队列（不直接删除），
+  由「血缘视图 → 采集通道」确认删除或恢复。
 
 用法:
-    poetry run python -m scripts.import_dp_lineage [--csv 路径] [--dry-run] [--no-graph]
+    poetry run python -m scripts.import_dp_lineage \\
+        [--csv 路径] [--dry-run] [--no-graph] [--stale-threshold N]
 
 参数:
     --csv:  CSV 路径（默认仓库根 ``dp元数据.csv``）
     --dry-run: 只解析统计，不写库
     --no-graph: 不写 Neo4j 图存储（默认同时写 MySQL + Neo4j）
+    --stale-threshold: 失效观察期（连续未出现轮次，默认取配置 lineage_stale_observation_runs）
 """
 
 from __future__ import annotations
@@ -47,22 +53,17 @@ from app.core.logging import configure_logging  # noqa: E402
 from app.db.mysql import async_session_factory  # noqa: E402
 from app.services.lineage.graph import LineageGraphClient  # noqa: E402
 from app.services.lineage.parser import extract_table_lineage, node_table  # noqa: E402
-from app.services.lineage.repository import LineageRepository  # noqa: E402
+from app.services.lineage.service import LineageService  # noqa: E402
 
 logger = structlog.get_logger("unisense.import_dp_lineage")
 
 # 默认 CSV 路径：仓库根目录下
 DEFAULT_CSV = Path(__file__).resolve().parent.parent.parent / "dp元数据.csv"
 
-# 每批提交的边数（控制单事务大小）
-_BATCH_SIZE = 500
-
-# 表级血缘统一参数
+# 表级血缘统一参数（粒度/置信度在 ingest_batch 内固定为 L1/1.0）
 _EDGE_TYPE = "DERIVED_FROM"
-_GRANULARITY = "L1"
 _PROVENANCE = "dp_csv"
 _CHANGE_REASON = "import"
-_CONFIDENCE = 1.0
 
 # 同步节点类型：6/8/10
 _SYNC_NODE_TYPES = frozenset({6, 8, 10})
@@ -204,38 +205,27 @@ def collect_edges(
                 nt = node.get("nodeType")
                 node_types[str(nt)] = node_types.get(str(nt), 0) + 1
             edges |= edges_from_nodes(nodes)
-            if any(
-                node_lineage(node)[0] or node_lineage(node)[1] for node in nodes
-            ):
+            if any(node_lineage(node)[0] or node_lineage(node)[1] for node in nodes):
                 tasks_with_edges += 1
 
     return edges, node_types, task_count
 
 
-async def persist_edges(db: AsyncSession, edges: set[tuple[str, str]]) -> int:
-    """将血缘边写入 ``lineage_edge``（幂等，分批 commit）。"""
-    repo = LineageRepository(db)
-    written = 0
-    pending = 0
-    for source, target in sorted(edges):
-        await repo.upsert_edge(
-            source_node=node_table(source),
-            target_node=node_table(target),
-            edge_type=_EDGE_TYPE,
-            granularity=_GRANULARITY,
-            confidence=_CONFIDENCE,
-            provenance=_PROVENANCE,
-            change_reason=_CHANGE_REASON,
-        )
-        written += 1
-        pending += 1
-        if pending >= _BATCH_SIZE:
-            await db.commit()
-            logger.info("batch_committed", batch=written)
-            pending = 0
-    if pending:
-        await db.commit()
-    return written
+async def persist_edges(
+    db: AsyncSession, edges: set[tuple[str, str]], stale_threshold: int | None
+) -> dict[str, Any]:
+    """增量采集血缘边并记录运行摘要（幂等，含失效观察）。
+
+    委托 ``LineageService.ingest_batch``：逐条幂等 upsert、标记已见、失效检测、
+    写 ``lineage_ingest_run`` 运行记录。
+    """
+    svc = LineageService(db)
+    return await svc.ingest_batch(
+        _PROVENANCE,
+        edges,
+        threshold=stale_threshold,
+        change_reason=_CHANGE_REASON,
+    )
 
 
 async def persist_graph(edges: set[tuple[str, str]]) -> bool:
@@ -244,16 +234,25 @@ async def persist_graph(edges: set[tuple[str, str]]) -> bool:
     与 MySQL 写入共用同一份 ``node_table()`` 规范化节点 id，保证图/库节点一致。
     """
     graph = LineageGraphClient()
-    triples = [
-        (node_table(source), node_table(target), _EDGE_TYPE) for source, target in edges
-    ]
+    triples = [(node_table(source), node_table(target), _EDGE_TYPE) for source, target in edges]
     return await graph.write_edges(triples)
 
 
-async def run(csv_path: Path, dry_run: bool = False, no_graph: bool = False) -> None:
-    """执行导入。"""
+async def run(
+    csv_path: Path,
+    dry_run: bool = False,
+    no_graph: bool = False,
+    stale_threshold: int | None = None,
+) -> None:
+    """执行导入（增量采集语义）。"""
     configure_logging()
-    logger.info("dp_lineage_start", csv=str(csv_path), dry_run=dry_run, no_graph=no_graph)
+    logger.info(
+        "dp_lineage_start",
+        csv=str(csv_path),
+        dry_run=dry_run,
+        no_graph=no_graph,
+        stale_threshold=stale_threshold,
+    )
     edges, node_types, task_count = collect_edges(csv_path)
     logger.info(
         "dp_lineage_parsed",
@@ -269,8 +268,18 @@ async def run(csv_path: Path, dry_run: bool = False, no_graph: bool = False) -> 
         return
     async with async_session_factory() as db:
         try:
-            written = await persist_edges(db, edges)
-            logger.info("dp_lineage_complete", written=written)
+            summary = await persist_edges(db, edges, stale_threshold)
+            logger.info(
+                "dp_lineage_complete",
+                run_id=summary["run_id"],
+                source=summary["source"],
+                total_edges=summary["total_edges"],
+                added=summary["added"],
+                updated=summary["updated"],
+                missing=summary["missing"],
+                stale_flagged=summary["stale_flagged"],
+                restored=summary["restored"],
+            )
         except Exception:
             await db.rollback()
             logger.exception("dp_lineage_failed")
@@ -291,11 +300,24 @@ def main() -> None:
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV, help="DP 元数据 CSV 路径")
     parser.add_argument("--dry-run", action="store_true", help="只解析统计，不写库")
     parser.add_argument("--no-graph", action="store_true", help="不写 Neo4j 图存储")
+    parser.add_argument(
+        "--stale-threshold",
+        type=int,
+        default=None,
+        help="失效观察期（连续未出现轮次，默认取配置 lineage_stale_observation_runs）",
+    )
     args = parser.parse_args()
     if not args.csv.exists():
         logger.error("csv_not_found", path=str(args.csv))
         sys.exit(1)
-    asyncio.run(run(args.csv, dry_run=args.dry_run, no_graph=args.no_graph))
+    asyncio.run(
+        run(
+            args.csv,
+            dry_run=args.dry_run,
+            no_graph=args.no_graph,
+            stale_threshold=args.stale_threshold,
+        )
+    )
 
 
 if __name__ == "__main__":
