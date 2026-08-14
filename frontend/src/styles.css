@@ -632,3 +632,35 @@ body {
     transition: none;
   }
 }
+
+/* ==========================================================================
+   主题域树交互增强：hover 显示「+」按钮
+   ========================================================================== */
+
+/* 节点标题：鼠标悬停时显示新建子域按钮（减少视觉噪音，平时隐藏） */
+.tree-node-title {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 4px;
+  transition: background-color 0.15s ease;
+  min-width: 60px;
+}
+
+/* 非叶子节点（非最后层）悬停时背景高亮，提示可点击创建子域 */
+.ant-tree-treenode:not(.ant-tree-treenode-disabled) .tree-node-title:hover {
+  background-color: rgba(232, 134, 45, 0.08);
+}
+
+/* 新建子域按钮：默认隐藏，悬停节点时淡入显示 */
+.tree-add-child-btn {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: auto; /* 按钮本身保持可点击 */
+}
+
+.tree-node-title:hover .tree-add-child-btn,
+.tree-add-child-btn:focus-visible {
+  opacity: 1;
+}

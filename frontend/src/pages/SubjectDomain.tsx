@@ -159,7 +159,8 @@ function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: Subject
   return nodes.map((n) => ({
     key: n.code,
     title: (
-      <span>
+      // hover-show 包裹：鼠标悬停时显示「+」按钮；点击节点本身仍走 Tree onSelect 查看详情（不冲突）
+      <span className="tree-node-title">
         {n.name} <Tag color={n.status === "active" ? "green" : "red"} style={{ marginLeft: 4, fontSize: 10 }}>{n.status === "active" ? "启用" : "停用"}</Tag>
         {n.metric_count > 0 && <Tag color="blue" style={{ marginLeft: 4, fontSize: 10 }}>{n.metric_count}指标</Tag>}
         {_nodeDepth(allNodes, n.id) < 3 && (
@@ -168,6 +169,7 @@ function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: Subject
               type="text"
               size="small"
               icon={<BranchesOutlined />}
+              className="tree-add-child-btn"
               style={{ marginLeft: 4, fontSize: 12, color: "#E8862D" }}
               onClick={(e) => { e.stopPropagation(); onAddChild(n); }}
               aria-label={`新建子域-${n.name}`}
