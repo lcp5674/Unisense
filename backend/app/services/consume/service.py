@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.core.degradation import fire_degradation_event
 from app.core.error_codes import ErrorCode
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
+from app.core.logging import get_logger
 from app.core.security import verify_password
 from app.models.consume import (
     ApiClient,
@@ -28,6 +29,7 @@ from app.models.consume import (
 )
 from app.models.metric import Metric
 from app.models.metric_version import MetricVersion
+from app.models.user import User
 from app.services.consume.rate_limiter import (
     get_rate_limiter,
 )
@@ -43,6 +45,7 @@ from app.services.consume.schemas import (
 # 限流器在 lifespan 中通过 init_rate_limiter 动态初始化（Redis/InMemory 热切换）；
 # 运行期统经 get_rate_limiter() 查阅，避免在 import 期冻结失效的快照（C6）。
 _executor: Any | None = None
+logger = get_logger("unisense.consume")
 
 # 标识符白名单：表名 / 列名无法参数化，必须收敛到安全字符集（长度对齐 DB 列 String(64)），
 # 杜绝标识符注入（反引号 / 空格 / 分号等皆可逃逸 `` `...` `` 包裹）。维度名另有口径声明集二次校验。
@@ -72,6 +75,19 @@ def _get_olap_executor() -> Any:
 
         _executor = OLAPExecutor()
     return _executor
+
+
+_mysql_executor: Any | None = None
+
+
+def _get_mysql_executor() -> Any:
+    """返回进程内共享的 MysqlExecutor 单例（OLAP 不可用时的只读降级引擎）。"""
+    global _mysql_executor
+    if _mysql_executor is None:
+        from app.services.consume.mysql_executor import MysqlExecutor
+
+        _mysql_executor = MysqlExecutor()
+    return _mysql_executor
 
 
 class ConsumeService(BaseService):
@@ -258,7 +274,23 @@ class ConsumeService(BaseService):
         )
 
     # ---- execute ----
-    async def execute_query(self, req: QueryRequest, client: ApiClient) -> QueryResponse:
+    async def execute_query(
+        self,
+        req: QueryRequest,
+        client: ApiClient | None = None,
+        internal_user: User | None = None,
+    ) -> QueryResponse:
+        """执行指标真实查询（OLAP 优先，不可用/失败时降级 MySQL 只读引擎）。
+
+        Args:
+            req: 查询请求。
+            client: 接入方（internal_user 为空时走接入方鉴权 + 限流闸门）。
+            internal_user: 内部登录用户（资产地图/指标详情「查询最新数据」用）。
+                提供时跳过接入方白名单/域校验，但仍保留指标状态与 PII 合规复核闸门。
+
+        Returns:
+            QueryResponse（含真实查询行）。成功后自动保存 WORM 快照（写入失败不阻塞响应）。
+        """
         metric = await self._get_metric(req.metric_code)
         if metric is None:
             raise NotFoundError(f"指标 {req.metric_code} 不存在")
@@ -269,48 +301,124 @@ class ConsumeService(BaseService):
                 else ErrorCode.FORBIDDEN_METRIC
             )
             raise BusinessError(f"指标状态 {metric.status} 不可消费", error_code=code)
-        self._assert_authorized(client, metric)
-        if not settings.olap_url:
-            # 配置级降级（熔断器无法感知），上报降级事件供看板/审计（TD §5.2.5）
-            fire_degradation_event("OLAP", "olap", "DEGRADED", "olap_not_configured")
-            raise BusinessError(
-                "OLAP 执行引擎不可用，查询降级",
-                error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,
-                ctx={"retry_after": 30, "accept_stale": req.accept_stale},
-            )
+        if internal_user is None:
+            if client is None:
+                raise BusinessError("缺少消费凭证", error_code=ErrorCode.AUTH_APIKEY_MISSING)
+            self._assert_authorized(client, metric)
+        else:
+            # 内部用户：跳过接入方白名单/域校验，但 PII 合规复核闸门（COMPL-1）保留
+            if self.is_pii(metric) and not metric.compliance_reviewed:
+                raise BusinessError(
+                    "PII 指标未通过合规复核，禁止消费",
+                    error_code=ErrorCode.FORBIDDEN_PII,
+                )
 
         # 构建执行 SQL（真实物理口径，而非占位查询）
         sql, params = self._build_query_sql(req, metric)
 
-        # 通过共享 OLAPExecutor 执行真实查询（复用连接池，避免每请求新建客户端泄漏）
-        executor = _get_olap_executor()
+        # 引擎选择：OLAP 优先，失败/未配置时降级 MySQL 只读执行器
+        result, engine_used = await self._execute_with_fallback(req, sql, params)
+        plan = {
+            "metric_code": req.metric_code,
+            "dimensions": [d.model_dump() for d in req.dimensions],
+            "date_range": req.date_range,
+        }
+        response = QueryResponse(
+            metric_code=req.metric_code,
+            degraded=False,
+            data={
+                "rows": result.rows,
+                "total": result.total,
+                "elapsed_ms": result.elapsed_ms,
+                "from_cache": result.from_cache,
+                "engine": engine_used,
+            },
+            execution_plan=plan,
+            meta=self._build_meta(metric),
+        )
+        # 查询成功即自动保存 WORM 快照（留痕；写入失败仅告警，不阻塞查询响应）
+        await self._maybe_save_snapshot(metric, req, result, engine_used)
+        return response
+
+    async def _execute_with_fallback(
+        self,
+        req: QueryRequest,
+        sql: str,
+        params: dict[str, Any],
+    ) -> tuple[Any, str]:
+        """执行查询并返回 (OLAPResult, 引擎标识)，OLAP 不可用时降级 MySQL。
+
+        - OLAP 配置且执行成功 → ("olap")；
+        - OLAP 失败或未配置 → 尝试 MySQL 降级（配置了 mysql_fallback_url 时）→ ("mysql")；
+        - 两者均不可用 → 抛 DEPENDENCY_DEGRADED_ENGINE。
+        """
+        olap_tried = False
+        if settings.olap_url:
+            olap_tried = True
+            try:
+                executor = _get_olap_executor()
+                return await executor.execute(sql, params), "olap"
+            except Exception as exc:
+                logger.warning("olap_execute_failed_fallback_mysql", error=str(exc))
+
+        mysql_executor = _get_mysql_executor()
+        if mysql_executor.enabled:
+            try:
+                return await mysql_executor.execute(sql, params), "mysql"
+            except Exception as exc:
+                logger.warning("mysql_fallback_failed", error=str(exc))
+                fire_degradation_event("OLAP", "olap", "DEGRADED", "engine_unavailable")
+                raise BusinessError(
+                    "查询执行引擎不可用，查询降级",
+                    error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,
+                    ctx={"retry_after": 30, "accept_stale": req.accept_stale},
+                ) from exc
+
+        # 无任何可用引擎
+        reason = "olap_failed" if olap_tried else "olap_not_configured"
+        fire_degradation_event("OLAP", "olap", "DEGRADED", reason)
+        raise BusinessError(
+            "OLAP 执行引擎不可用，查询降级",
+            error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,
+            ctx={"retry_after": 30, "accept_stale": req.accept_stale},
+        )
+
+    async def _maybe_save_snapshot(
+        self,
+        metric: Metric,
+        req: QueryRequest,
+        result: Any,
+        engine_used: str,
+    ) -> None:
+        """查询成功后自动保存 WORM 快照（写入失败仅告警，不阻塞查询响应）。"""
         try:
-            olap_result = await executor.execute(sql, params)
-            plan = {
-                "metric_code": req.metric_code,
-                "dimensions": [d.model_dump() for d in req.dimensions],
-                "date_range": req.date_range,
-            }
-            return QueryResponse(
+            dims: dict[str, Any] = {}
+            for d in req.dimensions:
+                if isinstance(d.value, (list, tuple)):
+                    dims[d.name] = list(d.value)
+                else:
+                    dims[d.name] = d.value
+            await self.save_snapshot(
                 metric_code=req.metric_code,
-                degraded=False,
-                data={
-                    "rows": olap_result.rows,
-                    "total": olap_result.total,
-                    "elapsed_ms": olap_result.elapsed_ms,
-                    "from_cache": olap_result.from_cache,
+                version=getattr(metric, "version", 1),
+                dims=dims,
+                date_range=req.date_range or "",
+                value_json={
+                    "rows": result.rows,
+                    "total": result.total,
+                    "engine": engine_used,
                 },
-                execution_plan=plan,
-                meta=self._build_meta(metric),
+                quality_flag=None,
+                generated_at=datetime.now(UTC),
+                generated_by=SnapshotGeneratedBy.QUERY,
             )
-        except BusinessError:
-            raise  # 降级错误直接抛出
-        except Exception as exc:
-            raise BusinessError(
-                f"OLAP 查询执行失败: {exc}",
-                error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,
-                ctx={"retry_after": 30},
-            ) from exc
+        except Exception:
+            logger.warning(
+                "snapshot_save_failed",
+                metric_code=req.metric_code,
+                engine=engine_used,
+                exc_info=True,
+            )
 
     # ---- 快照 WORM ----
     async def save_snapshot(

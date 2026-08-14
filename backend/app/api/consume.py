@@ -153,6 +153,38 @@ async def query(
     return ok(data=res)
 
 
+@router.post("/consume/metrics/{code}/query", response_model=ApiResponse[QueryResponse])
+async def query_metric_internal(
+    code: str,
+    req: QueryRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[QueryResponse]:
+    """内部用户查询（资产地图/指标详情「查询最新数据」专用）。
+
+    真实执行指标口径（OLAP 优先、MySQL 降级），成功后自动落 WORM 快照；
+    保留指标状态与 PII 合规复核闸门，跳过接入方白名单/域校验（平台内读操作）。
+    """
+    merged = req.model_copy(update={"metric_code": code})
+    svc = ConsumeService(db)
+    res = await svc.execute_query(merged, internal_user=user)
+    # PII 数据分级审计（对齐 TD §15.4：PII 访问必须留痕 data_classification=PII）
+    is_pii = bool((res.meta or {}).get("pii", False))
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="consume.query.internal",
+        entity_type="metric",
+        entity_id=code,
+        detail={"data_classification": "PII" if is_pii else "INTERNAL"},
+        trace_id=trace_id,
+        pii_access=is_pii,
+    )
+    await db.commit()
+    return ok(data=res)
+
+
 async def _generate_client_id(repo: ApiClientRepo) -> str:
     """自动生成接入方 ID：``app_`` + 随机 hex，冲突重试（上限 10 次）。"""
     for _ in range(10):

@@ -831,3 +831,91 @@ def test_build_query_sql_rejects_illegal_projection_column() -> None:
     with pytest.raises(BusinessError) as exc:
         svc._build_query_sql(req, m)
     assert exc.value.error_code == ErrorCode.INJECTION_DETECTED
+
+
+# ---- MySQL 降级执行 + 内部用户查询 + 自动保存快照 ----
+class _FakeMysqlExecutor:
+    """模拟 MySQL 降级执行器（enabled=True，execute 返回固定行）。"""
+
+    enabled = True
+
+    def __init__(self, rows=None):
+        self.rows = rows or [{"region": "east", "gmv": 100.5}]
+        self.executed_sql = None
+
+    async def execute(self, sql, params=None, timeout=None):
+        self.executed_sql = sql
+        from app.services.consume.olap_executor import OLAPResult
+
+        return OLAPResult(rows=self.rows, total=len(self.rows), elapsed_ms=5.0)
+
+
+async def test_execute_mysql_fallback_when_olap_unconfigured(monkeypatch) -> None:
+    """OLAP 未配置时降级 MySQL 执行器，并自动保存快照。"""
+    svc = _svc(await _client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    svc._get_metric = AsyncMock(return_value=_metric(dims=("region",)))
+    svc._build_query_sql = MagicMock(
+        return_value=("SELECT region, gmv FROM t WHERE metric_code=:m", {"m": "gmv"})
+    )
+    svc._snapshots = MagicMock()
+    svc._snapshots.create = AsyncMock()
+    fake = _FakeMysqlExecutor()
+    monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
+    monkeypatch.setattr("app.services.consume.service.settings.mysql_fallback_url", "mysql+aiomysql://u:p@h:3306/db")
+    monkeypatch.setattr("app.services.consume.service._get_mysql_executor", lambda: fake)
+
+    res = await svc.execute_query(QueryRequest(metric_code="gmv", date_range=""), client)
+
+    assert res.degraded is False
+    assert res.data["engine"] == "mysql"
+    assert res.data["rows"] == fake.rows
+    assert fake.executed_sql.startswith("SELECT")
+    # 自动保存快照（WORM）
+    svc._snapshots.create.assert_awaited_once()
+    snap = svc._snapshots.create.await_args.args[0]
+    assert snap.metric_code == "gmv"
+    assert snap.generated_by == SnapshotGeneratedBy.QUERY
+    assert snap.value_json["engine"] == "mysql"
+
+
+async def test_execute_internal_user_skips_whitelist_but_keeps_pii_gate(monkeypatch) -> None:
+    """内部用户查询：跳过接入方白名单，但 PII 未复核仍被拒。"""
+    svc = _svc(await _client())
+    svc._get_metric = AsyncMock(
+        return_value=_metric(pii=True, pii_flag=True, compliance_reviewed=False)
+    )
+    svc._build_query_sql = MagicMock(return_value=("SELECT 1", {}))
+    svc._snapshots = MagicMock()
+    svc._snapshots.create = AsyncMock()
+    monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
+    monkeypatch.setattr("app.services.consume.service.settings.mysql_fallback_url", "")
+    from app.models.user import User
+
+    user = User(id=1, username="alice")
+    with pytest.raises(BusinessError) as exc:
+        await svc.execute_query(QueryRequest(metric_code="gmv", date_range=""), internal_user=user)
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_PII
+
+
+async def test_execute_internal_user_pii_reviewed_ok(monkeypatch) -> None:
+    """内部用户查询：PII 已复核则放行并走 MySQL 降级。"""
+    svc = _svc(await _client())
+    svc._get_metric = AsyncMock(
+        return_value=_metric(pii=True, pii_flag=True, compliance_reviewed=True)
+    )
+    svc._build_query_sql = MagicMock(return_value=("SELECT 1", {}))
+    svc._snapshots = MagicMock()
+    svc._snapshots.create = AsyncMock()
+    fake = _FakeMysqlExecutor()
+    monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
+    monkeypatch.setattr("app.services.consume.service.settings.mysql_fallback_url", "mysql+aiomysql://u:p@h/db")
+    monkeypatch.setattr("app.services.consume.service._get_mysql_executor", lambda: fake)
+    from app.models.user import User
+
+    user = User(id=1, username="alice")
+    res = await svc.execute_query(
+        QueryRequest(metric_code="gmv", date_range=""), internal_user=user
+    )
+    assert res.data["engine"] == "mysql"
+    svc._snapshots.create.assert_awaited_once()

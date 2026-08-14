@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # ---- OLAP（StarRocks / Doris，可选依赖）----
     olap_url: str = ""
 
+    # ---- MySQL 查询降级引擎（OLAP 不可用时的只读兜底，可选依赖）----
+    # 指向可执行指标口径 SQL 的 MySQL 业务库（如 E2E 业务库）；空则不启用降级。
+    mysql_fallback_url: str = ""
+
     # ---- Doris（OLAP 引擎直连配置）----
     doris_host: str = "localhost"
     doris_port: int = 8030
