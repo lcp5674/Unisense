@@ -36,6 +36,7 @@ const source: DataSource = {
   name: "财务库",
   source_type: "mysql",
   domain: "finance",
+  enabled: true,
   cluster_id: null,
   coverage: 0.5,
   health_status: "healthy",
@@ -99,6 +100,20 @@ describe("CollectionTasks", () => {
     fireEvent.click(screen.getByText("财务库（mysql_finance）"));
     await waitFor(() => {
       expect(mockedJobs).toHaveBeenCalledWith({ limit: 50, source_id: "mysql_finance" });
+    });
+  });
+
+  it("从总览仪表 ?status=RUNNING 直达：请求携带任务状态过滤（资产卡片下钻）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/collection-tasks?status=RUNNING"]}>
+        <CollectionTasks />
+      </MemoryRouter>,
+    );
+    await screen.findByText("采集任务中心");
+    await waitFor(() => {
+      expect(mockedJobs).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "RUNNING", limit: 50 }),
+      );
     });
   });
 });

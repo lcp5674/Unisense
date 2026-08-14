@@ -105,6 +105,21 @@ describe("Glossary 页面", () => {
     expect((input as HTMLInputElement).value).toBe("GMV");
   });
 
+  it("从总览仪表 ?status=xxx 直达：所有查询都携带状态过滤（资产卡片下钻）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/glossary?status=PUBLISHED"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+
+    await screen.findAllByText("共 2 条");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ status: "PUBLISHED" });
+    }
+  });
+
   it("防竞态：迟到的首查响应不覆盖最新筛选结果", async () => {
     type TermListResponse = { items: GlossaryTerm[]; total: number; page: number; page_size: number };
     let resolveFull!: (v: TermListResponse) => void;

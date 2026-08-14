@@ -11,8 +11,12 @@ export function Templates() {
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
+  // 启用状态下钻（?is_active=，总览仪表「指标模板」资产卡片）作为初始筛选；
+  // 默认仅展示启用模板（与原有行为一致），inactive 下钻展示停用模板
+  const urlIsActive = searchParams.get("is_active") ?? "";
   const [items, setItems] = useState<MetricTemplate[]>([]);
   const [keyword, setKeyword] = useState(urlKw);
+  const [isActive, setIsActive] = useState<string>(urlIsActive === "inactive" ? "inactive" : "active");
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [instantiateTarget, setInstantiateTarget] = useState<MetricTemplate | null>(null);
@@ -29,11 +33,19 @@ export function Templates() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKw]);
 
+  // 响应 URL 启用状态参数变化（总览仪表「指标模板」资产卡片二次下钻）
+  useEffect(() => {
+    const next = urlIsActive === "inactive" ? "inactive" : "active";
+    if (next !== isActive) setIsActive(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlIsActive]);
+
   async function load() {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await listTemplates({ is_active: true, keyword: keyword || undefined });
+      // 默认仅展示启用模板；inactive 时展示停用模板（总览仪表下钻）
+      const res = await listTemplates({ is_active: isActive !== "inactive", keyword: keyword || undefined });
       // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
       if (seq !== loadSeq.current) return;
       setItems(res);
@@ -48,7 +60,7 @@ export function Templates() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword]);
+  }, [keyword, isActive]);
 
   async function handleCreate(values: Record<string, unknown>) {
     setLoading(true);
@@ -136,14 +148,25 @@ export function Templates() {
       </div>
 
       <Card>
-        <Input.Search
-          placeholder="搜索模板编码 / 名称 / 描述"
-          allowClear
-          style={{ width: 280, marginBottom: 12 }}
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
-          onSearch={() => load()}
-        />
+        <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
+          <Input.Search
+            placeholder="搜索模板编码 / 名称 / 描述"
+            allowClear
+            style={{ width: 280 }}
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            onSearch={() => load()}
+          />
+          <Select
+            style={{ width: 130 }}
+            value={isActive}
+            onChange={(v?: string) => setIsActive(v ?? "active")}
+            options={[
+              { value: "active", label: "启用" },
+              { value: "inactive", label: "停用" },
+            ]}
+          />
+        </div>
         <Table
           dataSource={items}
           columns={columns}

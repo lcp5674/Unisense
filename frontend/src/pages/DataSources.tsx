@@ -469,11 +469,14 @@ export function DataSources() {
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
+  // 健康状态下钻（?health=，总览仪表「数据源」资产卡片）作为初始筛选
+  const urlHealth = searchParams.get("health") ?? "";
   const [items, setItems] = useState<DataSource[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [keyword, setKeyword] = useState(urlKw);
+  const [health, setHealth] = useState<string>(urlHealth);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<DataSource | null>(null);
@@ -509,12 +512,26 @@ export function DataSources() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKw]);
 
+  // 响应 URL 健康状态参数变化（总览仪表「数据源」资产卡片二次下钻）
+  useEffect(() => {
+    if (urlHealth && urlHealth !== health) {
+      setHealth(urlHealth);
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlHealth]);
+
   async function load(nextPage = page, nextPageSize = pageSize) {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
       // P1-1: 服务端分页（后端返回 {items, total, page, page_size}）
-      const resp = await listDataSources({ keyword: keyword || undefined, page: nextPage, page_size: nextPageSize });
+      const resp = await listDataSources({
+        keyword: keyword || undefined,
+        health: health || undefined,
+        page: nextPage,
+        page_size: nextPageSize,
+      });
       // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
       if (seq !== loadSeq.current) return;
       setItems(resp.items);
@@ -537,7 +554,7 @@ export function DataSources() {
       .then((tree) => setDomainOptions(flattenDomains(tree)))
       .catch(() => setDomainOptions([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword]);
+  }, [keyword, health]);
 
   // 类型切换时自动带出默认端口，并清空已枚举的数据库列表
   function handleTypeChange(t: string) {
@@ -872,6 +889,18 @@ export function DataSources() {
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
             onSearch={() => { setPage(1); load(1, pageSize); }}
+          />
+          <Select
+            allowClear
+            placeholder="全部健康状态"
+            style={{ width: 140 }}
+            value={health || undefined}
+            onChange={(v?: string) => { setHealth(v ?? ""); setPage(1); }}
+            options={[
+              { value: "healthy", label: "健康" },
+              { value: "unhealthy", label: "异常" },
+              { value: "unknown", label: "未知" },
+            ]}
           />
           {selectedRowKeys.length > 0 && (
             <span style={{ color: "rgba(0,0,0,0.45)", fontSize: 13 }}>

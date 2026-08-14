@@ -40,7 +40,10 @@ function TermsTab() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [status, setStatus] = useState("");
+  const [searchParams] = useSearchParams();
+  // 生命周期状态下钻（?status=，总览仪表「术语」资产卡片）作为初始筛选
+  const urlStatus = searchParams.get("status") ?? "";
+  const [status, setStatus] = useState(urlStatus);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
@@ -50,7 +53,6 @@ function TermsTab() {
   const [editForm] = Form.useForm();
   const [relationTarget, setRelationTarget] = useState<GlossaryTerm | null>(null);
   const [relationForm] = Form.useForm();
-  const [searchParams] = useSearchParams();
   // URL 直达关键词（?kw=，全局搜索跳术语）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
   const focusCode = searchParams.get("focus");
@@ -87,6 +89,16 @@ function TermsTab() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKw]);
+
+  // 响应 URL 状态参数变化（总览仪表「术语」资产卡片二次下钻）；status 在 load 依赖中，
+  // setStatus 会经依赖链自动触发重查，无需手动 load
+  useEffect(() => {
+    if (urlStatus && urlStatus !== status) {
+      setStatus(urlStatus);
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlStatus]);
 
   useEffect(() => {
     load();

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
-  Card, Tabs, Table, Button, Modal, Form, Input, InputNumber, Space, Tag, App as AntApp,
+  Card, Tabs, Table, Button, Modal, Form, Input, InputNumber, Space, Tag, Select, App as AntApp,
 } from "antd";
 import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined } from "@ant-design/icons";
 import {
@@ -24,9 +25,13 @@ const DICT_TYPE_LABELS: Record<string, string> = {
 
 export function SystemDict() {
   const { message, modal } = AntApp.useApp();
+  const [searchParams] = useSearchParams();
+  // 启用状态下钻（?status=，总览仪表「数据字典」资产卡片）作为初始筛选
+  const urlStatus = searchParams.get("status") ?? "";
   const [dictTypes, setDictTypes] = useState<string[]>([]);
   const [activeType, setActiveType] = useState<string>("");
   const [items, setItems] = useState<SystemDictItem[]>([]);
+  const [status, setStatus] = useState<string>(urlStatus);
   const [loading, setLoading] = useState(false);
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -34,6 +39,12 @@ export function SystemDict() {
   const [editItem, setEditItem] = useState<SystemDictItem | null>(null);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
+
+  // 状态筛选为客户端过滤（数据字典按类型 Tabs 一次性加载全部项）
+  const visibleItems = useMemo(
+    () => (status ? items.filter((i) => i.status === status) : items),
+    [items, status],
+  );
 
   useEffect(() => {
     listDictTypes().then((types) => {
@@ -148,12 +159,23 @@ export function SystemDict() {
           label: DICT_TYPE_LABELS[t] || t,
         }))}
       />
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center" }}>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新增参照数据项</Button>
+        <Select
+          allowClear
+          placeholder="全部状态"
+          style={{ width: 140 }}
+          value={status || undefined}
+          onChange={(v?: string) => setStatus(v ?? "")}
+          options={[
+            { value: "active", label: "启用" },
+            { value: "inactive", label: "停用" },
+          ]}
+        />
       </div>
       <Table
         columns={columns}
-        dataSource={items}
+        dataSource={visibleItems}
         rowKey="id"
         loading={loading}
         size="small"

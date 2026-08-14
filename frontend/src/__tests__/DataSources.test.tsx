@@ -441,6 +441,20 @@ describe("DataSources", () => {
     }
   });
 
+  it("从总览仪表 ?health=xxx 直达：所有查询都携带健康状态过滤（资产卡片下钻）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/data-sources?health=unhealthy"]}>
+        <DataSources />
+      </MemoryRouter>,
+    );
+    await screen.findByText("mysql_finance");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ health: "unhealthy" });
+    }
+  });
+
   it("防竞态：迟到的首查响应不覆盖最新搜索筛选结果", async () => {
     type DSListResponse = { items: DataSource[]; total: number; page: number; page_size: number };
     let resolveFull!: (v: DSListResponse) => void;

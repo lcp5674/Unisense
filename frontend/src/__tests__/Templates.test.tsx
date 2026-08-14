@@ -75,6 +75,7 @@ const CREATED: MetricResponse = {
   gray_tenant_ids: null,
   pending_conflict: false,
   pending_conflict_detail: null,
+  pending_version: false,
   created_at: "2026-08-13T00:00:00",
   updated_at: "2026-08-13T00:00:00",
 };
@@ -154,6 +155,21 @@ describe("Templates 页面", () => {
 
     const input = await screen.findByPlaceholderText("搜索模板编码 / 名称 / 描述");
     expect((input as HTMLInputElement).value).toBe("GMV");
+  });
+
+  it("从总览仪表 ?is_active=inactive 直达：查询携带停用模板过滤", async () => {
+    render(
+      <MemoryRouter initialEntries={["/templates?is_active=inactive"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("tpl_gmv_daily");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ is_active: false });
+    }
   });
 
   it("防竞态：迟到的首查响应不覆盖最新筛选结果", async () => {

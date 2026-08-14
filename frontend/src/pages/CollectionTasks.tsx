@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Button, Card, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { listCollectionJobs, listDataSources, UnisenseApiError } from "../api";
@@ -43,22 +44,26 @@ function detailText(detail: Record<string, unknown> | undefined): string {
 }
 
 export function CollectionTasks() {
+  const [searchParams] = useSearchParams();
+  // 任务状态下钻（?status=，总览仪表「采集任务」资产卡片）作为初始筛选
+  const urlStatus = searchParams.get("status") ?? "";
   const [jobs, setJobs] = useState<CollectionJob[]>([]);
   const [sources, setSources] = useState<DataSource[]>([]);
   const [sourceId, setSourceId] = useState<string | undefined>(undefined);
+  const [status, setStatus] = useState<string>(urlStatus);
   const [loading, setLoading] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const res = await listCollectionJobs({ limit: 50, source_id: sourceId });
+      const res = await listCollectionJobs({ limit: 50, source_id: sourceId, status: status || undefined });
       setJobs(res);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
-  }, [sourceId]);
+  }, [sourceId, status]);
 
   useEffect(() => {
     setLoading(true);
@@ -150,6 +155,17 @@ export function CollectionTasks() {
               label: `${s.name}（${s.source_id}）`,
             }))}
             optionFilterProp="label"
+          />
+          <Select
+            allowClear
+            placeholder="全部状态"
+            style={{ width: 130 }}
+            value={status || undefined}
+            onChange={(v?: string) => setStatus(v ?? "")}
+            options={["QUEUED", "RUNNING", "COMPLETED", "FAILED"].map((s) => ({
+              value: s,
+              label: STATUS_LABEL[s] ?? s,
+            }))}
           />
         </Space>
         <Table<CollectionJob>
