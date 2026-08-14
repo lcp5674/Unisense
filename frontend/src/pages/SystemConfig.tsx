@@ -100,6 +100,74 @@ function TestResultBadge({ result }: { result: LlmConfigTestResult }) {
   );
 }
 
+/** 轮询位次：enabled 优先 → priority 升序 → id 升序；env 兜底不计入。返回 1-based 位次。 */
+function computeRank(items: LlmConfigItem[], targetId: number): number {
+  const ranked = [...items]
+    .filter((i) => i.id != null && i.source !== "env")
+    .sort((a, b) => {
+      if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      return (a.id ?? 0) - (b.id ?? 0);
+    });
+  const idx = ranked.findIndex((i) => i.id === targetId);
+  return idx === -1 ? 0 : idx + 1;
+}
+
+/** 路由状态概览条（P0-1）：当前路由选中谁 · 启用几个 · 已验证连通几个。 */
+function RoutingOverview({
+  data,
+  testResults,
+}: {
+  data: LlmConfigList;
+  testResults: Record<number, LlmConfigTestResult>;
+}) {
+  const items = data.items ?? [];
+  const enabledCount = items.filter((i) => i.enabled).length;
+  const verifiedCount = Object.values(testResults).filter((r) => r?.ok).length;
+  const effectiveItem =
+    items.find((i) => i.base_url === data.effective.base_url) ?? null;
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 20,
+        flexWrap: "wrap",
+        alignItems: "center",
+        padding: "8px 12px",
+        marginBottom: 12,
+        background: "var(--bg-elevated, #fafafa)",
+        borderRadius: 6,
+        fontSize: 13,
+        color: "var(--text-2)",
+      }}
+      data-testid="routing-overview"
+    >
+      <span>
+        当前路由：
+        <b style={{ color: "var(--text-1)" }}>
+          {effectiveItem?.name || data.effective.provider || "未配置"}
+        </b>
+        <Tag style={{ marginLeft: 6 }}>
+          {data.effective.source === "env" ? "环境变量" : "数据库"}
+        </Tag>
+      </span>
+      <span>
+        启用 <b style={{ color: "var(--text-1)" }}>{enabledCount}</b> 个实例
+      </span>
+      <span>
+        已验证连通{" "}
+        <b style={{ color: verifiedCount > 0 ? "#2e7d32" : "var(--text-1)" }}>
+          {verifiedCount}
+        </b>{" "}
+        个
+      </span>
+      {items.some((i) => i.enabled && i.priority === 0) ? (
+        <span style={{ color: "#2e7d32" }}>● 有最高优先级（0）实例</span>
+      ) : null}
+    </div>
+  );
+}
+
 export function SystemConfig() {
   const [form] = Form.useForm();
   const [data, setData] = useState<LlmConfigList | null>(null);
@@ -188,18 +256,21 @@ export function SystemConfig() {
     }
   }
 
-  function load() {
+  async function load(): Promise<LlmConfigList | null> {
     setLoading(true);
-    getLlmConfigs()
-      .then(setData)
-      .catch((err) => {
-        message.error(
-          err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",
-        );
-      })
-      .finally(() => setLoading(false));
+    try {
+      const d = await getLlmConfigs();
+      setData(d);
+      return d;
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",
+      );
+      return null;
+    } finally {
+      setLoading(false);
+    }
   }
-
   useEffect(() => {
     load();
   }, []);
@@ -282,16 +353,34 @@ export function SystemConfig() {
         enabled: values.enabled,
         priority: values.priority ?? 0,
       };
+      // P0-4 生效反馈：记录保存前位次（编辑场景），保存后对比给出"新位次"
+      const prevRank = editing?.id != null ? computeRank(data?.items ?? [], editing.id) : -1;
+      let savedId: number;
       if (editing && editing.id != null) {
         await updateLlmConfig(editing.id, payload);
-        message.success("LLM 实例已更新");
+        savedId = editing.id;
       } else {
-        await createLlmConfig(payload);
-        message.success("LLM 实例已新增");
+        const created = await createLlmConfig(payload);
+        savedId = created.id;
       }
       setModalOpen(false);
       clearReveal();
-      load();
+      const fresh = await load();
+      const newRank = fresh ? computeRank(fresh.items ?? [], savedId) : -1;
+      // P0-4：Toast 明确生效反馈与位次变化
+      if (fresh && newRank > 0) {
+        if (prevRank > 0 && prevRank !== newRank) {
+          message.success(
+            `实例已保存，轮询位次 第 ${prevRank} 位 → 第 ${newRank} 位（下次请求起效）`,
+          );
+        } else {
+          message.success(`实例已保存，当前轮询位次 第 ${newRank} 位（下次请求起效）`);
+        }
+      } else {
+        message.success(editing ? "LLM 实例已更新" : "LLM 实例已新增");
+      }
+      // P0-2 保存后一键启用流：自动跑连通性测试，失败给"去编辑密钥"引导
+      await autoTestAfterSave(savedId);
     } catch (err) {
       if (err instanceof Error && "errorFields" in err) return; // 表单校验错误，已高亮
       message.error(
@@ -299,6 +388,36 @@ export function SystemConfig() {
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  /** P0-2：保存后自动测试该实例，结果写入 testResults 供徽标展示。 */
+  async function autoTestAfterSave(id: number) {
+    setTestingId(id);
+    setTestResults((prev) => ({ ...prev, [id]: undefined as unknown as LlmConfigTestResult }));
+    try {
+      const res = await testLlmConfig({ instance_id: id });
+      setTestResults((prev) => ({ ...prev, [id]: res }));
+      if (res.ok) {
+        message.success(`实例已启用 · 连通正常（${res.latency_ms}ms）`);
+      } else {
+        message.warning(`实例已保存但连通失败：${res.error || "未知错误"}`);
+      }
+    } catch (err) {
+      setTestResults((prev) => ({
+        ...prev,
+        [id]: {
+          ok: false,
+          latency_ms: 0,
+          model: "",
+          error: err instanceof UnisenseApiError ? err.message : "测试失败",
+        },
+      }));
+      message.warning(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "连通测试失败",
+      );
+    } finally {
+      setTestingId(null);
     }
   }
 
@@ -380,6 +499,22 @@ export function SystemConfig() {
       render: (v: number, r) => (r.source === "env" ? "—" : <span className="mono">{v}</span>),
     },
     {
+      title: "轮询位次",
+      key: "rank",
+      width: 90,
+      render: (_: unknown, r) => {
+        if (r.source === "env") return <Tag>兜底</Tag>;
+        const rank = r.id != null ? computeRank(data?.items ?? [], r.id) : 0;
+        return rank > 0 ? (
+          <span className="mono" style={{ fontWeight: 600 }}>
+            第 {rank} 位
+          </span>
+        ) : (
+          <span className="muted">—</span>
+        );
+      },
+    },
+    {
       title: "启用",
       dataIndex: "enabled",
       key: "enabled",
@@ -458,6 +593,7 @@ export function SystemConfig() {
           message="多实例高可用"
           description="请求按优先级轮询选择实例；某实例调用失败时自动切换到下一个可用实例，连续失败的实例进入冷却（约 30 秒）自动恢复，避免单个 LLM 不可用导致 AI 问数 / 指标命名推断不可用。"
         />
+        {data && <RoutingOverview data={data} testResults={testResults} />}
         <Table<LlmConfigItem>
           rowKey={(r) => String(r.id ?? `env-${r.base_url}`)}
           columns={columns}
@@ -470,7 +606,22 @@ export function SystemConfig() {
         {Object.entries(testResults).map(([id, res]) =>
           res ? (
             <div key={id} style={{ marginTop: 8 }}>
-              <TestResultBadge result={res} />
+              <Space size={8}>
+                <TestResultBadge result={res} />
+                {!res.ok && canEdit ? (
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<EditOutlined />}
+                    onClick={() => {
+                      const item = (data?.items ?? []).find((i) => i.id === Number(id));
+                      if (item) openEdit(item);
+                    }}
+                  >
+                    去编辑密钥
+                  </Button>
+                ) : null}
+              </Space>
             </div>
           ) : null,
         )}

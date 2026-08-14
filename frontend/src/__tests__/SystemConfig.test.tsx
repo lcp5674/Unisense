@@ -100,7 +100,8 @@ describe("SystemConfig LLM 路由配置", () => {
     );
     render(<SystemConfig />);
     expect(await screen.findByText("LLM 路由配置")).toBeTruthy();
-    expect(await screen.findByText("主用")).toBeTruthy();
+    // 概览条显示「当前路由：主用」+ 表格行也含「主用」→ 至少两处
+    expect((await screen.findAllByText("主用")).length).toBeGreaterThanOrEqual(1);
     expect(await screen.findByText("https://api.deepseek.com")).toBeTruthy();
     expect(await screen.findByText("已启用")).toBeTruthy();
     expect(screen.getByText("新增 LLM 实例")).toBeTruthy();
@@ -281,5 +282,87 @@ describe("SystemConfig LLM 路由配置", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("P0 概览条：展示当前路由、启用数与已验证连通数", async () => {
+    mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
+    render(<SystemConfig />);
+    const overview = await screen.findByTestId("routing-overview");
+    expect(within(overview).getByText(/当前路由/)).toBeTruthy();
+    expect(within(overview).getByText("主用")).toBeTruthy();
+    expect(within(overview).getByText(/启用/)).toBeTruthy();
+    expect(within(overview).getByText(/已验证连通/)).toBeTruthy();
+  });
+
+  it("P0 轮询位次：多实例按 priority 排序展示第 N 位", async () => {
+    mockGet.mockResolvedValue(
+      listData({
+        items: [
+          { ...PRIMARY_ITEM, id: 1, name: "主用", priority: 0 },
+          { ...PRIMARY_ITEM, id: 2, name: "备用", priority: 1 },
+        ],
+      }) as never,
+    );
+    render(<SystemConfig />);
+    await screen.findByText("备用");
+    expect(screen.getByText("第 1 位")).toBeTruthy();
+    expect(screen.getByText("第 2 位")).toBeTruthy();
+  });
+
+  it("P0 保存后一键启用流：保存成功 → 自动测试 → 展示连通徽标", async () => {
+    mockGet.mockResolvedValue(
+      listData({ items: [{ ...PRIMARY_ITEM, id: 1 }] }) as never,
+    );
+    mockCreate.mockResolvedValue({ id: 2 });
+    mockTest.mockResolvedValue({ ok: true, latency_ms: 88, model: "qwen-turbo", error: "" });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    fireEvent.change(await screen.findByPlaceholderText("如：主用 DeepSeek / 备用通义"), {
+      target: { value: "备用通义" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "https://dashscope.aliyuncs.com/compatible-mode" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "模型名称" }), {
+      target: { value: "qwen-turbo" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    // 保存后应自动对该新实例（id=2）发起连通性测试
+    await waitFor(() => {
+      expect(mockCreate).toHaveBeenCalled();
+      expect(mockTest).toHaveBeenCalledWith({ instance_id: 2 });
+    });
+    expect(await screen.findByText(/连通成功 · 88 ms/)).toBeTruthy();
+  });
+
+  it("P0 保存后一键启用流：连通失败 → 展示失败徽标 + 去编辑密钥入口", async () => {
+    mockGet.mockResolvedValue(
+      listData({ items: [{ ...PRIMARY_ITEM, id: 1 }] }) as never,
+    );
+    mockCreate.mockResolvedValue({ id: 2 });
+    mockTest.mockResolvedValue({ ok: false, latency_ms: 0, model: "qwen-turbo", error: "HTTP 401" });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    fireEvent.change(await screen.findByPlaceholderText("如：主用 DeepSeek / 备用通义"), {
+      target: { value: "备用通义" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "https://dashscope.aliyuncs.com/compatible-mode" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "模型名称" }), {
+      target: { value: "qwen-turbo" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/连通失败/)).toBeTruthy();
+    });
+    // 失败时给「去编辑密钥」快捷入口
+    expect(await screen.findByText("去编辑密钥")).toBeTruthy();
   });
 });
