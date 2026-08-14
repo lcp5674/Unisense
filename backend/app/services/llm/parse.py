@@ -96,6 +96,47 @@ def parse_description_result(raw: str) -> tuple[str | None, float | None]:
     return description, confidence
 
 
+def parse_batch_description_result(
+    raw: str, expected_names: list[str]
+) -> dict[str, tuple[str, float]]:
+    """解析批量字段描述推断结果（一次 LLM 调用返回多个字段）。
+
+    约定返回结构：
+    ``{"descriptions": [{"column_name": "...", "description": "...", "confidence": 0.0}, ...]}``。
+    **顺序性保证**：按 ``column_name`` 匹配回填（不依赖 LLM 返回顺序），且只保留
+    请求期望的字段——模型漏报/插报/乱序都不会污染结果。
+
+    Returns:
+        ``{column_name: (description, confidence)}``；整体解析失败时返回空 dict。
+    """
+    obj = parse_json_object(raw)
+    if obj is None:
+        return {}
+    items: Any = None
+    for key in ("descriptions", "results", "fields", "items", "columns"):
+        value = obj.get(key)
+        if isinstance(value, list):
+            items = value
+            break
+    if items is None:
+        return {}
+    expected_set = set(expected_names)
+    out: dict[str, tuple[str, float]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        column_name = extract_str_field(item, "column_name", "name", "column", "field")
+        if column_name is None or column_name not in expected_set:
+            continue
+        description = extract_str_field(item, "description", "desc", "text", "label", "summary")
+        confidence = extract_numeric_field(
+            item, "confidence", "score", "prob", "certainty", min_value=0.0, max_value=1.0
+        )
+        if description is not None and confidence is not None:
+            out[column_name] = (description, confidence)
+    return out
+
+
 def parse_bool_result(raw: str, *aliases: str) -> bool | None:
     """解析布尔型判定结果（如同义判定 ``{"same": true}``）。
 

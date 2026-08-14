@@ -1013,40 +1013,38 @@ async def infer_descriptions_batch(
             col_type = col.get("type") or col.get("data_type")
             targets.append((col_name, str(col_type) if col_type else None))
 
-        # 并发调用 LLM（限流 4）避免整表串行拖到 nginx 超时；写库保持串行有序
-        sem = asyncio.Semaphore(4)
-
-        async def _infer_one(col_name: str, col_type: str | None) -> dict[str, Any] | None:
-            async with sem:
-                return await svc._llm_infer_column_description(
+        # FR-023: 一次 LLM 调用返回全部字段描述（json_schema 数组强约束 + 按 column_name 回填，
+        # 不依赖返回顺序）。字段超限时按块多次调用（每块仍为一次请求），写库保持 targets 原始顺序。
+        batch_chunk = 60
+        parsed_map: dict[str, tuple[str, float]] = {}
+        for start in range(0, len(targets), batch_chunk):
+            chunk = targets[start : start + batch_chunk]
+            parsed_map.update(
+                await svc._llm_infer_batch_descriptions(
                     entity_name=cat.entity_name,
-                    column_name=col_name,
-                    column_type=col_type,
+                    targets=chunk,
                 )
+            )
 
-        results = await asyncio.gather(
-            *(_infer_one(name, ctype) for name, ctype in targets),
-            return_exceptions=True,
-        )
-
-        for (col_name, _ctype), result in zip(targets, results, strict=True):
-            if isinstance(result, BaseException) or result is None:
+        for col_name, _ctype in targets:
+            item = parsed_map.get(col_name)
+            if item is None:
                 failed.append(col_name)
                 continue
-
+            description, confidence = item
             # upsert
             await svc._repo.upsert_description(
                 catalog_id=catalog_id,
                 column_name=col_name,
-                description=result["description"],
+                description=description,
                 source="llm",
             )
             inferred.append(
                 InferDescriptionResponse(
                     column_name=col_name,
-                    description=result["description"],
+                    description=description,
                     source="llm",
-                    confidence=result["confidence"],
+                    confidence=confidence,
                 )
             )
 

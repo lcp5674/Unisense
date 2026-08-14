@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.services.llm.parse import (
     extract_numeric_field,
     extract_str_field,
+    parse_batch_description_result,
     parse_bool_result,
     parse_description_result,
     parse_json_object,
@@ -139,3 +140,72 @@ def test_parse_bool_result_alias() -> None:
 def test_parse_bool_result_none() -> None:
     assert parse_bool_result("not json") is None
     assert parse_bool_result('{"unrelated": 1}') is None
+
+
+def test_parse_batch_description_result_happy() -> None:
+    raw = (
+        '{"descriptions": ['
+        '{"column_name": "amount", "description": "订单金额", "confidence": 0.8},'
+        '{"column_name": "note", "description": "备注", "confidence": 0.7}'
+        "]}"
+    )
+    out = parse_batch_description_result(raw, ["amount", "note"])
+    assert out == {"amount": ("订单金额", 0.8), "note": ("备注", 0.7)}
+
+
+def test_parse_batch_description_result_order_independent() -> None:
+    # LLM 返回顺序与请求清单不同，按 column_name 匹配回填（顺序性保证）
+    raw = (
+        '{"descriptions": ['
+        '{"column_name": "note", "description": "备注", "confidence": 0.7},'
+        '{"column_name": "amount", "description": "订单金额", "confidence": 0.8}'
+        "]}"
+    )
+    out = parse_batch_description_result(raw, ["amount", "note"])
+    assert out["amount"] == ("订单金额", 0.8)
+    assert out["note"] == ("备注", 0.7)
+
+
+def test_parse_batch_description_result_filters_unknown() -> None:
+    # 模型插报请求外的字段 → 被过滤，不污染结果
+    raw = (
+        '{"descriptions": ['
+        '{"column_name": "amount", "description": "金额", "confidence": 0.8},'
+        '{"column_name": "hacker", "description": "不该出现", "confidence": 0.9}'
+        "]}"
+    )
+    out = parse_batch_description_result(raw, ["amount"])
+    assert out == {"amount": ("金额", 0.8)}
+
+
+def test_parse_batch_description_result_partial_missing() -> None:
+    # 模型漏报某个字段 → 该字段不返回
+    raw = '{"descriptions": [{"column_name": "a", "description": "A", "confidence": 0.8}]}'
+    out = parse_batch_description_result(raw, ["a", "b"])
+    assert out == {"a": ("A", 0.8)}
+    assert "b" not in out
+
+
+def test_parse_batch_description_result_fence_and_alias() -> None:
+    # 围栏 + 元素内字段别名（name/desc）容错
+    raw = '```json\n{"results": [{"name": "a", "desc": "字段A", "score": "0.8"}]}\n```'
+    out = parse_batch_description_result(raw, ["a"])
+    assert out == {"a": ("字段A", 0.8)}
+
+
+def test_parse_batch_description_result_invalid_returns_empty() -> None:
+    assert parse_batch_description_result("not json", ["a"]) == {}
+    assert parse_batch_description_result('{"descriptions": "not array"}', ["a"]) == {}
+    assert parse_batch_description_result('{"other": 1}', ["a"]) == {}
+
+
+def test_parse_batch_description_result_confidence_out_of_range_skipped() -> None:
+    # 单元素置信度越界 → 该元素被跳过，其余保留
+    raw = (
+        '{"descriptions": ['
+        '{"column_name": "a", "description": "A", "confidence": 2.0},'
+        '{"column_name": "b", "description": "B", "confidence": 0.6}'
+        "]}"
+    )
+    out = parse_batch_description_result(raw, ["a", "b"])
+    assert out == {"b": ("B", 0.6)}

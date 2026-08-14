@@ -348,3 +348,121 @@ async def test_llm_infer_column_description_non_json_content():
 
     assert result is None
     mock_client.close.assert_awaited_once()
+
+
+# ---- 批量字段描述推断（一次调用返回全部字段，FR-023） ----
+
+
+@pytest.mark.asyncio
+async def test_llm_infer_batch_descriptions_normal():
+    """批量推断：一次调用返回全部字段，按 column_name 回填（顺序无关）。"""
+    svc, _ = _svc()
+
+    mock_client = AsyncMock()
+    mock_client.enabled = True
+    # LLM 返回乱序数组（note 在 amount 前），验证按 column_name 匹配
+    mock_client.chat = AsyncMock(
+        return_value={
+            "content": (
+                '{"descriptions": ['
+                '{"column_name": "note", "description": "备注", "confidence": 0.7},'
+                '{"column_name": "amount", "description": "订单金额", "confidence": 0.8}'
+                "]}"
+            )
+        }
+    )
+    mock_client.close = AsyncMock()
+
+    targets = [("amount", "decimal"), ("note", "varchar")]
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
+        result = await svc._llm_infer_batch_descriptions(entity_name="ods_order", targets=targets)
+
+    assert result == {"amount": ("订单金额", 0.8), "note": ("备注", 0.7)}
+    mock_client.close.assert_awaited_once()
+    # 整表字段清单应一次传给 LLM 上下文
+    call_content = mock_client.chat.await_args.args[0][1]["content"]
+    assert "amount" in call_content and "note" in call_content
+    # 使用 json_schema 数组强约束
+    assert mock_client.chat.await_args.kwargs["response_format"]["type"] == "json_schema"
+
+
+@pytest.mark.asyncio
+async def test_llm_infer_batch_descriptions_disabled():
+    """LLM 不可用：返回空 dict，不阻断。"""
+    svc, _ = _svc()
+
+    mock_client = AsyncMock()
+    mock_client.enabled = False
+    mock_client.close = AsyncMock()
+
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
+        result = await svc._llm_infer_batch_descriptions(
+            entity_name="ods_order", targets=[("a", "int")]
+        )
+
+    assert result == {}
+    mock_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_llm_infer_batch_descriptions_timeout():
+    """LLM 超时：返回空 dict，降级不阻断。"""
+    svc, _ = _svc()
+
+    mock_client = AsyncMock()
+    mock_client.enabled = True
+    mock_client.chat = AsyncMock(side_effect=TimeoutError("LLM timeout"))
+    mock_client.close = AsyncMock()
+
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
+        result = await svc._llm_infer_batch_descriptions(
+            entity_name="ods_order", targets=[("a", "int")]
+        )
+
+    assert result == {}
+    mock_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_llm_infer_batch_descriptions_llm_error_then_retry():
+    """json_schema 抛 LlmError → 降级 json_object 重试成功。"""
+    svc, _ = _svc()
+
+    mock_client = AsyncMock()
+    mock_client.enabled = True
+    # 第一次（json_schema）抛 LlmError，第二次（json_object）成功
+    mock_client.chat = AsyncMock(
+        side_effect=[
+            LlmError("json_schema unsupported"),
+            {
+                "content": (
+                    '{"descriptions": [{"column_name": "a", "description": "A", '
+                    '"confidence": 0.8}]}'
+                )
+            },
+        ]
+    )
+    mock_client.close = AsyncMock()
+
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
+        result = await svc._llm_infer_batch_descriptions(
+            entity_name="ods_order", targets=[("a", "int")]
+        )
+
+    assert result == {"a": ("A", 0.8)}
+    assert mock_client.chat.await_count == 2
+    # 第二次降级为 json_object
+    assert mock_client.chat.await_args.kwargs["response_format"] == {"type": "json_object"}
+    mock_client.close.assert_awaited_once()

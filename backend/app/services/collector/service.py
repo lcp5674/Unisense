@@ -69,6 +69,35 @@ _DESCRIPTION_RESPONSE_FORMAT: dict[str, Any] = {
     },
 }
 _JSON_OBJECT_FORMAT: dict[str, Any] = {"type": "json_object"}
+# 批量推断（一次调用返回多个字段）的 JSON Schema 强约束：数组元素也锁定
+# column_name/description/confidence 结构，保证逐字段对齐。
+_BATCH_DESCRIPTION_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "batch_description_result",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["descriptions"],
+            "properties": {
+                "descriptions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["column_name", "description", "confidence"],
+                        "properties": {
+                            "column_name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "confidence": {"type": "number"},
+                        },
+                    },
+                }
+            },
+        },
+    },
+}
 # 格式重试提示：解析为 None 时追加，迫使模型收敛到合规 JSON（最多重试 1 次）。
 _STRICT_JSON_HINT = "请严格只输出符合 JSON Schema 的 JSON，不要任何额外文字。"
 
@@ -762,6 +791,93 @@ class CollectorService(BaseService):
             logger.warning("llm_infer_desc_llm_error: %s", exc)
             _record_llm_error_metric("llm_error")
             return None
+        finally:
+            if client is not None:
+                await client.close()
+
+    async def _llm_infer_batch_descriptions(
+        self,
+        entity_name: str,
+        targets: list[tuple[str, str | None]],
+    ) -> dict[str, tuple[str, float]]:
+        """一次 LLM 调用推断多个字段描述（批量，FR-023 顺序性 + 格式保证）。
+
+        将整表缺失字段清单一次发送，要求返回 ``{"descriptions": [...]}`` 数组；
+        解析后按 ``column_name`` 回填（不依赖返回顺序）。json_schema 数组强约束优先，
+        网关不支持时降级 json_object，解析失败重试 1 次（模式与
+        ``_infer_description_structured`` 一致）。LLM 不可用返回空 dict（不阻断主流程）。
+
+        Returns:
+            ``{column_name: (description, confidence)}``；失败时为空 dict。
+        """
+        client = None
+        try:
+            client = await self._build_llm_client()
+            if not client.enabled or not targets:
+                return {}
+
+            field_lines = "\n".join(
+                f"- {name} ({ctype or 'unknown'})" for name, ctype in targets
+            )
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是数据治理领域的字段描述专家。根据表名和字段清单，"
+                        "逐字段推断每个字段的中文描述。\n"
+                        "返回 JSON 格式：{\n"
+                        '  "descriptions": [\n'
+                        '    {"column_name": "字段名", "description": "中文描述", '
+                        '"confidence": 0.0-1.0}\n'
+                        "  ]\n"
+                        "}\n"
+                        "要求：\n"
+                        "1. 必须为清单中每个字段各返回一个元素，column_name 与清单完全一致\n"
+                        "2. 描述简洁精准，10-50字\n"
+                        "3. confidence < 0.5 表示不确定"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"表名: {entity_name}\n字段清单:\n{field_lines}",
+                },
+            ]
+
+            from app.services.llm.parse import parse_batch_description_result
+
+            expected = [name for name, _ctype in targets]
+            for attempt in (0, 1):
+                aug = messages
+                if attempt:
+                    aug = [*messages, {"role": "user", "content": _STRICT_JSON_HINT}]
+                for fmt in (_BATCH_DESCRIPTION_RESPONSE_FORMAT, _JSON_OBJECT_FORMAT):
+                    try:
+                        result = await client.chat(
+                            aug, temperature=0.0, max_tokens=1500, response_format=fmt
+                        )
+                    except LlmError:
+                        continue
+                    parsed = parse_batch_description_result(result.get("content", ""), expected)
+                    if parsed:
+                        return parsed
+            logger.warning("llm_infer_desc_batch_all_formats_failed: 强约束与降级均无法解析")
+            return {}
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            logger.warning("llm_infer_batch_timeout_error: %s", exc)
+            _record_llm_error_metric("timeout")
+            return {}
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.warning("llm_infer_batch_format_error: %s", exc)
+            _record_llm_error_metric("format_error")
+            return {}
+        except RuntimeError as exc:
+            logger.warning("llm_infer_batch_runtime_error: %s", exc)
+            _record_llm_error_metric("runtime_error")
+            return {}
+        except LlmError as exc:
+            logger.warning("llm_infer_batch_llm_error: %s", exc)
+            _record_llm_error_metric("llm_error")
+            return {}
         finally:
             if client is not None:
                 await client.close()

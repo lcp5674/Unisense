@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -317,7 +316,7 @@ async def test_infer_descriptions_batch_inflight_conflict(
 async def test_infer_descriptions_batch_success_concurrent(
     collector_client: httpx.AsyncClient,
 ) -> None:
-    """批量推断：并发调用 LLM（Semaphore 限流 4）并正确分类 skipped/inferred/failed。"""
+    """批量推断：一次 LLM 调用返回全部字段描述，按 column_name 回填并正确分类。"""
     cat = SimpleNamespace(
         id=1,
         entity_name="ods_order",
@@ -339,25 +338,13 @@ async def test_infer_descriptions_batch_success_concurrent(
     async def fake_db() -> AsyncIterator[MagicMock]:
         yield session
 
-    # 记录并发峰值的 mock LLM（模拟耗时调用）
-    active = 0
-    peak = 0
-    counter_lock = asyncio.Lock()
-
-    async def fake_infer(entity_name: str, column_name: str, column_type: str | None) -> dict:
-        nonlocal active, peak
-        async with counter_lock:
-            active += 1
-            peak = max(peak, active)
-        await asyncio.sleep(0.02)
-        async with counter_lock:
-            active -= 1
-        return {"description": f"{column_name} 描述", "confidence": 0.8}
-
     fake_svc = MagicMock()
     fake_svc._repo.get_descriptions = AsyncMock(return_value=[])
     fake_svc._repo.upsert_description = AsyncMock()
-    fake_svc._llm_infer_column_description = AsyncMock(side_effect=fake_infer)
+    # 一次调用返回全部字段（顺序与请求清单不同，验证按 column_name 匹配）
+    fake_svc._llm_infer_batch_descriptions = AsyncMock(
+        return_value={"note": ("备注说明", 0.7), "amount": ("订单金额", 0.8)}
+    )
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     try:
@@ -372,10 +359,67 @@ async def test_infer_descriptions_batch_success_concurrent(
     assert data["skipped"] == ["id"]
     assert [i["column_name"] for i in data["inferred"]] == ["amount", "note"]
     assert data["failed"] == []
-    assert fake_svc._llm_infer_column_description.await_count == 2
-    # Semaphore(4) 限流生效且并发执行（非串行）
-    assert peak <= 4
-    assert peak >= 2
+    # 仅一次 LLM 调用（整表清单一次发送）
+    fake_svc._llm_infer_batch_descriptions.assert_awaited_once()
+    # 按 targets 顺序回填（amount 在 note 前）
+    assert data["inferred"][0]["description"] == "订单金额"
+    assert data["inferred"][1]["description"] == "备注说明"
+    # 写库保持 targets 顺序（upsert_description 走关键字参数）
+    upsert_calls = [c.kwargs for c in fake_svc._repo.upsert_description.await_args_list]
+    assert [c["column_name"] for c in upsert_calls] == ["amount", "note"]
+    assert all(c["source"] == "llm" for c in upsert_calls)
+
+
+async def test_infer_descriptions_batch_partial_failure(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """批量推断：LLM 返回缺失个别字段 → 该字段进 failed，其余正常落库。"""
+    cat = SimpleNamespace(
+        id=1,
+        entity_name="ods_order",
+        schema_json={
+            "columns": [
+                {"name": "a", "type": "int", "comment": ""},
+                {"name": "b", "type": "varchar", "comment": ""},
+                {"name": "c", "type": "int", "comment": ""},
+            ]
+        },
+    )
+    session = MagicMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = cat
+    session.execute = AsyncMock(return_value=exec_result)
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    async def fake_db() -> AsyncIterator[MagicMock]:
+        yield session
+
+    fake_svc = MagicMock()
+    fake_svc._repo.get_descriptions = AsyncMock(return_value=[])
+    fake_svc._repo.upsert_description = AsyncMock()
+    # 只返回 a/b，c 缺失 → c 进 failed
+    fake_svc._llm_infer_batch_descriptions = AsyncMock(
+        return_value={"a": ("字段A", 0.8), "b": ("字段B", 0.6)}
+    )
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    try:
+        with patch("app.api.collector._svc", return_value=fake_svc):
+            resp = await collector_client.post("/api/v1/catalogs/1/infer-descriptions")
+    finally:
+        app.dependency_overrides.pop(deps.get_db_session, None)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert [i["column_name"] for i in data["inferred"]] == ["a", "b"]
+    assert data["failed"] == ["c"]
+    # c 未被 upsert
+    upsert_cols = [
+        c.kwargs["column_name"]
+        for c in fake_svc._repo.upsert_description.await_args_list
+    ]
+    assert upsert_cols == ["a", "b"]
 
 
 async def test_infer_table_description_inflight_conflict(
