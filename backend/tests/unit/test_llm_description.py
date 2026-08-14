@@ -33,7 +33,9 @@ async def test_llm_infer_column_description_normal():
 
     mock_client = AsyncMock()
     mock_client.enabled = True
-    mock_client.chat = AsyncMock(return_value={"description": "用户唯一标识ID", "confidence": 0.85})
+    mock_client.chat = AsyncMock(
+        return_value={"content": '{"description": "用户唯一标识ID", "confidence": 0.85}'}
+    )
     mock_client.close = AsyncMock()
 
     with patch(
@@ -127,7 +129,7 @@ async def test_llm_infer_column_description_empty_response():
 
     mock_client = AsyncMock()
     mock_client.enabled = True
-    mock_client.chat = AsyncMock(return_value={"description": "", "confidence": 0})
+    mock_client.chat = AsyncMock(return_value={"content": ""})
     mock_client.close = AsyncMock()
 
     with patch(
@@ -200,7 +202,7 @@ async def test_llm_infer_table_description_normal():
     mock_client = AsyncMock()
     mock_client.enabled = True
     mock_client.chat = AsyncMock(
-        return_value={"description": "订单明细事实表", "confidence": 0.9}
+        return_value={"content": '{"description": "订单明细事实表", "confidence": 0.9}'}
     )
     mock_client.close = AsyncMock()
 
@@ -233,7 +235,7 @@ async def test_llm_infer_table_description_truncates_many_columns():
     mock_client = AsyncMock()
     mock_client.enabled = True
     mock_client.chat = AsyncMock(
-        return_value={"description": "大宽表", "confidence": 0.8}
+        return_value={"content": '{"description": "大宽表", "confidence": 0.8}'}
     )
     mock_client.close = AsyncMock()
 
@@ -302,7 +304,7 @@ async def test_llm_build_client_falls_back_on_db_config_error():
     mock_client = AsyncMock()
     mock_client.enabled = True
     mock_client.chat = AsyncMock(
-        return_value={"description": "用户唯一标识ID", "confidence": 0.85}
+        return_value={"content": '{"description": "用户唯一标识ID", "confidence": 0.85}'}
     )
     mock_client.close = AsyncMock()
 
@@ -322,4 +324,27 @@ async def test_llm_build_client_falls_back_on_db_config_error():
     assert result is not None
     assert result["description"] == "用户唯一标识ID"
     assert result["confidence"] == 0.85
+    mock_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_llm_infer_column_description_non_json_content():
+    """LLM 返回非 JSON 内容：视为不可用，返回 None（解析健壮性）。"""
+    svc, _ = _svc()
+
+    mock_client = AsyncMock()
+    mock_client.enabled = True
+    mock_client.chat = AsyncMock(return_value={"content": "抱歉，我无法理解"})
+    mock_client.close = AsyncMock()
+
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=mock_client),
+    ):
+        result = await svc._llm_infer_column_description(
+            entity_name="dwd_order",
+            column_name="user_id",
+        )
+
+    assert result is None
     mock_client.close.assert_awaited_once()

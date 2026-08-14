@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
@@ -548,6 +549,27 @@ class CollectorService(BaseService):
 
         return DBCatalogResponse.model_validate(cat)
 
+    @staticmethod
+    def _parse_llm_description_result(raw: str) -> dict[str, Any] | None:
+        """解析 LLM 字段/表描述返回。
+
+        LlmClient.chat 的 content 为原始 JSON 字符串（如
+        ``{"description": "...", "confidence": 0.75}``）；解析失败/缺失视为不可用。
+        """
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        description = str(parsed.get("description", "")).strip()
+        confidence = float(parsed.get("confidence", 0) or 0)
+        if not description or confidence <= 0:
+            return None
+        return {"description": description, "confidence": confidence}
+
     async def _build_llm_client(
         self,
     ) -> LlmClient | LlmRouterClient | DeterministicFallbackLlmClient:
@@ -690,11 +712,7 @@ class CollectorService(BaseService):
                 max_tokens=200,
                 response_format={"type": "json_object"},
             )
-            description = result.get("description", "")
-            confidence = float(result.get("confidence", 0) or 0)
-            if not description or confidence <= 0:
-                return None
-            return {"description": description, "confidence": confidence}
+            return self._parse_llm_description_result(result.get("content", ""))
         except (TimeoutError, ConnectionError, OSError) as exc:
             logger.warning("llm_infer_desc_timeout_error: %s", exc)
             _record_llm_error_metric("timeout")
@@ -765,11 +783,7 @@ class CollectorService(BaseService):
                 max_tokens=300,
                 response_format={"type": "json_object"},
             )
-            description = result.get("description", "")
-            confidence = float(result.get("confidence", 0) or 0)
-            if not description or confidence <= 0:
-                return None
-            return {"description": description, "confidence": confidence}
+            return self._parse_llm_description_result(result.get("content", ""))
         except (TimeoutError, ConnectionError, OSError) as exc:
             logger.warning("llm_infer_table_desc_timeout_error: %s", exc)
             _record_llm_error_metric("timeout")
