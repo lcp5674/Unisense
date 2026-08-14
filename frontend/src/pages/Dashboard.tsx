@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Card, Row, Col, Spin, Alert, Tag, Empty, Tooltip } from "antd";
+import { Button, Card, Popconfirm, Row, Col, Spin, Alert, Tag, Empty, Tooltip } from "antd";
 import {
   AppstoreOutlined,
   PlusCircleOutlined,
@@ -350,6 +350,24 @@ export function Dashboard() {
   const { track } = useTracking();
   const navigate = useNavigate();
 
+  // 推荐曝光上报：仅对首次进入列表的推荐项上报 recommend_view；
+  // 负反馈移除后该指标不再出现在列表中，后续渲染不会补报。
+  const reportedViewRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const reported = reportedViewRef.current;
+    for (const r of recommended) {
+      if (!reported.has(r.metric_id)) {
+        reported.add(r.metric_id);
+        track("recommend_view", r.metric_id, "metric");
+      }
+    }
+  }, [recommended, track]);
+
+  function handleDismiss(metricId: string) {
+    track("recommend_dismiss", metricId, "metric");
+    setRecommended((prev) => prev.filter((r) => r.metric_id !== metricId));
+  }
+
   useEffect(() => {
     async function load() {
       setLoading(true);
@@ -516,21 +534,47 @@ export function Dashboard() {
                     display: "flex",
                     justifyContent: "space-between",
                     alignItems: "center",
+                    gap: 12,
                     padding: "10px 0",
                     borderBottom: "1px solid var(--line-soft)",
-                    cursor: "pointer",
                   }}
-                  onClick={() => navigate(`/detail/${r.metric_id}`)}
                 >
-                  <span className="mono" style={{ fontWeight: 600 }}>{r.metric_id}</span>
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    {r.reason
-                      ? r.reason
-                      : r.via === "collaborative_filtering"
-                        ? "协同过滤"
-                        : `血缘 · ${EDGE_TYPE_LABEL[r.edge_type] ?? r.edge_type}`}
-                    {typeof r.score === "number" && ` · ${(r.score * 100).toFixed(0)}%`}
-                  </span>
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 12,
+                      cursor: "pointer",
+                    }}
+                    onClick={() => {
+                      track("recommend_click", r.metric_id, "metric");
+                      navigate(`/detail/${r.metric_id}`);
+                    }}
+                  >
+                    <span className="mono" style={{ fontWeight: 600 }}>{r.metric_id}</span>
+                    <span className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {r.reason
+                        ? r.reason
+                        : r.via === "collaborative_filtering"
+                          ? "协同过滤"
+                          : `血缘 · ${EDGE_TYPE_LABEL[r.edge_type] ?? r.edge_type}`}
+                      {typeof r.score === "number" && ` · ${(r.score * 100).toFixed(0)}%`}
+                    </span>
+                  </div>
+                  <Popconfirm
+                    title="不再推荐该指标？"
+                    description="我们将减少此类推荐"
+                    okText="不再推荐"
+                    cancelText="取消"
+                    onConfirm={() => handleDismiss(r.metric_id)}
+                  >
+                    <Button size="small" type="text" style={{ flexShrink: 0 }}>
+                      不感兴趣
+                    </Button>
+                  </Popconfirm>
                 </div>
               ))
             )}

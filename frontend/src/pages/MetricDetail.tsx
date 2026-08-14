@@ -30,6 +30,7 @@ import {
   deprecateMetric,
   emergencyPublishMetric,
   fetchCurrentUser,
+  fetchRelatedMetrics,
   getMetric,
   getMetricHealth,
   listFavorites,
@@ -49,6 +50,7 @@ import type {
   MetricHealth,
   MetricResponse,
   MetricVersionResponse,
+  RecommendItem,
   SubscriptionPref,
   UserBrief,
 } from "../types";
@@ -77,6 +79,15 @@ const STATUS_LABEL: Record<string, string> = {
   REVIEW: "审核",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",
+};
+
+// 推荐/血缘边类型 → 中文（与 Dashboard 的推荐流展示口径一致）
+const EDGE_TYPE_LABEL: Record<string, string> = {
+  DERIVED_FROM: "派生自",
+  CONSUMED_BY: "被消费",
+  LINEAGE: "关联",
+  POPULAR: "热门",
+  RECENT: "最新",
 };
 
 const ROLE_LABEL: Record<string, string> = {
@@ -277,6 +288,7 @@ export function MetricDetail() {
   const [favorited, setFavorited] = useState(false);
   const [subscribed, setSubscribed] = useState(false);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
+  const [related, setRelated] = useState<RecommendItem[]>([]);
   const [emergencyOpen, setEmergencyOpen] = useState(false);
   const [emergencyReason, setEmergencyReason] = useState("");
   const [grayOpen, setGrayOpen] = useState(false);
@@ -290,7 +302,7 @@ export function MetricDetail() {
     if (!code) return;
     setLoading(true);
     try {
-      const [m, vs, me, favs, healthRes, userList, subs] = await Promise.all([
+      const [m, vs, me, favs, healthRes, userList, subs, rel] = await Promise.all([
         getMetric(code),
         listVersions(code),
         fetchCurrentUser(),
@@ -298,6 +310,7 @@ export function MetricDetail() {
         getMetricHealth(code).catch(() => null),
         listUsers().catch(() => [] as UserBrief[]),
         listSubscriptions().catch(() => ({ items: [] as SubscriptionPref[] })),
+        fetchRelatedMetrics(code).catch(() => [] as RecommendItem[]),
       ]);
       setMetric(m);
       setVersions(vs);
@@ -310,6 +323,7 @@ export function MetricDetail() {
           (s) => s.channel === "IN_APP" && ["metric.update", "quality.alert"].includes(s.event_type) && s.enabled,
         ),
       );
+      setRelated(rel);
       track("metric_detail_view", code, "metric");
     } catch (err) {
       // eslint-disable-next-line no-alert
@@ -524,6 +538,37 @@ export function MetricDetail() {
           ]}
         />
       </Card>
+
+      {/* 场景化推荐：看过此指标的人还看了（GET /recommend/metrics/{code}/related，空则隐藏） */}
+      {related.length > 0 && (
+        <Card size="small" title="看过此指标的人还看了" style={{ marginBottom: 16 }}>
+          <div>
+            {related.map((r) => (
+              <div
+                key={r.metric_id}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 12,
+                  padding: "10px 0",
+                  borderBottom: "1px solid var(--line-soft)",
+                  cursor: "pointer",
+                }}
+                onClick={() => {
+                  track("recommend_click", r.metric_id, "metric");
+                  navigate(`/detail/${r.metric_id}`);
+                }}
+              >
+                <span className="mono" style={{ fontWeight: 600 }}>{r.metric_id}</span>
+                <span className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {r.reason ? r.reason : `血缘 · ${EDGE_TYPE_LABEL[r.edge_type] ?? r.edge_type}`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <SubscribeModal open={subscribeOpen} onClose={() => setSubscribeOpen(false)} onChanged={load} />
 
