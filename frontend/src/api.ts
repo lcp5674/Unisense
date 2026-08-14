@@ -1661,6 +1661,14 @@ export async function fetchAssetHeatmap(dimension = "domain"): Promise<{
   return request(`${API_BASE}/assetmap/heatmap?dimension=${encodeURIComponent(dimension)}`);
 }
 
+// 二维热力矩阵：业务域 × 敏感级别（真热力图数据源，P3）
+export async function fetchAssetHeatmapMatrix(): Promise<{
+  cells: Array<{ domain: string; sensitivity: string; count: number; pii_count: number }>;
+  columns: string[];
+}> {
+  return request(`${API_BASE}/assetmap/heatmap-matrix`);
+}
+
 export async function fetchAssetOwnerView(ownerId: number): Promise<AssetOwnerView> {
   return request<AssetOwnerView>(
     `${API_BASE}/assetmap/owner-view?owner_id=${ownerId}`,

@@ -109,6 +109,20 @@ async def test_heatmap_rejects_invalid_dimension() -> None:
     repo.heatmap_aggregation.assert_not_awaited()
 
 
+async def test_heatmap_matrix_passthrough() -> None:
+    svc, repo = await _svc()
+    repo.heatmap_matrix = AsyncMock(
+        return_value={
+            "cells": [{"domain": "sales", "sensitivity": "PII", "count": 3, "pii_count": 3}],
+            "columns": ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "NEEDS_REVIEW"],
+        }
+    )
+    out = await svc.heatmap_matrix()
+    assert out["cells"][0]["count"] == 3
+    assert out["columns"] == ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "NEEDS_REVIEW"]
+    repo.heatmap_matrix.assert_awaited_once()
+
+
 async def test_owner_view_passthrough() -> None:
     svc, repo = await _svc()
     repo.owner_aggregation = AsyncMock(

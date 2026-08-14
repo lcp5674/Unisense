@@ -466,6 +466,32 @@ class TestAggregations:
         assert out["metrics"]["by_domain"] == {"sales": 4}
         assert out["catalogs"]["total"] == 7
 
+    async def test_heatmap_matrix(self) -> None:
+        """二维热力矩阵：域 × 敏感级别聚合，含 join/group_by 与 PII 判定。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.all.return_value = [
+            ("sales", "PII", 3),
+            ("sales", "INTERNAL", 2),
+            ("finance", "PUBLIC", 1),
+        ]
+        s.execute = AsyncMock(return_value=r)
+
+        out = await repo.heatmap_matrix()
+
+        assert out["columns"] == ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "NEEDS_REVIEW"]
+        assert out["cells"] == [
+            {"domain": "sales", "sensitivity": "PII", "count": 3, "pii_count": 3},
+            {"domain": "sales", "sensitivity": "INTERNAL", "count": 2, "pii_count": 0},
+            {"domain": "finance", "sensitivity": "PUBLIC", "count": 1, "pii_count": 0},
+        ]
+        stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "JOIN" in compiled.upper()
+        assert "GROUP BY" in compiled.upper()
+        assert "db_catalog" in compiled.lower()
+
 
 class TestEscapeLike:
     def test_escapes_wildcards(self) -> None:

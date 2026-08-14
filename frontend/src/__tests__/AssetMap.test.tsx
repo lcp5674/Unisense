@@ -8,6 +8,7 @@ import { AssetMap } from "../pages/AssetMap";
 vi.mock("../api", () => ({
   fetchAssetGraph: vi.fn(),
   fetchAssetHeatmap: vi.fn(),
+  fetchAssetHeatmapMatrix: vi.fn(),
   fetchAssetOwnerView: vi.fn(),
   fetchAssetSummary: vi.fn(),
   fetchAssetClassification: vi.fn(),
@@ -21,6 +22,7 @@ vi.mock("../api", () => ({
 
 vi.mock("@ant-design/charts", () => ({
   Pie: () => <div data-testid="mock-pie" />,
+  Heatmap: () => <div data-testid="mock-heatmap" />,
 }));
 
 // Mock @antv/g6：jsdom 无 canvas，G6 渲染必然失败；mock 让 AssetGraph 走正常路径
@@ -46,7 +48,7 @@ vi.mock("../hooks/useTracking", () => ({
 
 import {
   fetchAssetGraph,
-  fetchAssetHeatmap,
+  fetchAssetHeatmapMatrix,
   fetchAssetOwnerView,
   fetchAssetSummary,
   fetchAssetClassification,
@@ -68,14 +70,6 @@ const mockGraphData = {
   ],
 };
 
-const mockHeatmapData = {
-  dimension: "domain",
-  buckets: [
-    { key: "finance", pii_count: 5, total: 40 },
-    { key: "marketing", pii_count: 2, total: 30 },
-  ],
-};
-
 const mockOwnerViewData = {
   owner_id: 1,
   metrics: { total: 50, published: 30, draft: 10, pii_count: 5, by_domain: { finance: 40, marketing: 10 } },
@@ -94,7 +88,13 @@ describe("AssetMap", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(fetchAssetGraph).mockResolvedValue(mockGraphData);
-    vi.mocked(fetchAssetHeatmap).mockResolvedValue(mockHeatmapData);
+    vi.mocked(fetchAssetHeatmapMatrix).mockResolvedValue({
+      cells: [
+        { domain: "sales", sensitivity: "PII", count: 3, pii_count: 3 },
+        { domain: "sales", sensitivity: "INTERNAL", count: 2, pii_count: 0 },
+      ],
+      columns: ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "NEEDS_REVIEW"],
+    });
     vi.mocked(fetchAssetOwnerView).mockResolvedValue(mockOwnerViewData);
     vi.mocked(fetchAssetSummary).mockResolvedValue({ total: 10, by_entity_type: { table: 8, field: 2 }, by_sensitivity: { PUBLIC: 6, PII: 4 }, orphan_assets: 1 });
     vi.mocked(fetchAssetClassification).mockResolvedValue({ by_sensitivity: { PUBLIC: 6, PII: 4 } });
@@ -135,7 +135,7 @@ describe("AssetMap", () => {
     await user.click(screen.getByText("热力视图"));
 
     await waitFor(() => {
-      expect(fetchAssetHeatmap).toHaveBeenCalled();
+      expect(fetchAssetHeatmapMatrix).toHaveBeenCalled();
     });
   });
 

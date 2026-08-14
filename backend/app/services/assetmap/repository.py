@@ -16,6 +16,7 @@ from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.data_source import DataSource, DBCatalog
+from app.models.enums import SensitivityLevelEnum
 from app.models.governance import Classification
 from app.models.lineage import LineageEdge
 from app.models.metric import Metric
@@ -417,6 +418,38 @@ class AssetMapRepository:
             for row in edge_rows
         ]
         return nodes + field_nodes, edges
+
+    async def heatmap_matrix(self) -> dict[str, Any]:
+        """二维热力矩阵：业务域 × 敏感级别的资产分布（db_catalog 表/视图/字段）。
+
+        域从 ``data_source.domain`` 继承；``columns`` 固定为完整敏感级枚举，
+        保证前端坐标轴稳定（空矩阵也返回全轴）。
+        """
+        rows = (
+            await self._session.execute(
+                select(
+                    DataSource.domain,
+                    DBCatalog.sensitivity_level,
+                    func.count().label("total"),
+                )
+                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(DBCatalog.deleted_at.is_(None))
+                .group_by(DataSource.domain, DBCatalog.sensitivity_level)
+            )
+        ).all()
+        cells = [
+            {
+                "domain": r[0],
+                "sensitivity": r[1],
+                "count": r[2],
+                "pii_count": r[2] if (r[1] and "PII" in r[1]) else 0,
+            }
+            for r in rows
+        ]
+        return {
+            "cells": cells,
+            "columns": [e.value for e in SensitivityLevelEnum],
+        }
 
     async def heatmap_aggregation(self, dimension: str) -> dict[str, Any]:
         """按维度聚合返回热力桶数据。

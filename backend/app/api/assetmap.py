@@ -138,6 +138,17 @@ async def get_heatmap(
     return ok(data=data, trace_id=trace_id)
 
 
+@router.get("/heatmap-matrix", dependencies=_READ_DEPS)
+async def get_heatmap_matrix(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """二维热力矩阵：业务域 × 敏感级别资产分布（前端真热力图数据源）。"""
+    data = await AssetMapService(db).heatmap_matrix()
+    return ok(data=data, trace_id=trace_id)
+
+
 @router.get("/owner-view", dependencies=_READ_DEPS)
 async def get_owner_view(
     owner_id: Annotated[int, Query(description="责任人 ID")],

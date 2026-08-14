@@ -3,14 +3,14 @@ import { useNavigate } from "react-router-dom";
 import { Alert, Button, Card, Descriptions, Drawer, Empty, Row, Col, Input, Select, Space, Spin, Statistic, Switch, Table, Tabs, Tag, Tooltip, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { ApartmentOutlined, DeleteOutlined, DownloadOutlined, EyeOutlined, GlobalOutlined, HeartOutlined, HeatMapOutlined, SafetyOutlined, SearchOutlined, TableOutlined, UserOutlined } from "@ant-design/icons";
-import { Pie } from "@ant-design/charts";
+import { Heatmap, Pie } from "@ant-design/charts";
 import {
   downloadAssetExport,
   fetchAssetChanges,
   fetchAssetEntityDetail,
   fetchAssetGraph,
   fetchAssetHealth,
-  fetchAssetHeatmap,
+  fetchAssetHeatmapMatrix,
   fetchAssetMetricSummary,
   fetchAssetMyAssets,
   fetchAssetOrphans,
@@ -70,15 +70,6 @@ function renderSchemaSummary(summary: string | Record<string, unknown> | null | 
   if (summary == null || summary === "") return <span className="muted">-</span>;
   if (typeof summary === "string") return <span>{summary}</span>;
   return <ObjectView data={summary} />;
-}
-
-function normalizeBuckets(buckets: Array<Record<string, unknown>>) {
-  return buckets.map((b) => ({
-    key: String(b.key ?? "未知"),
-    count: Number(b.count ?? b.total ?? 0),
-    pii_count: Number(b.pii_count ?? 0),
-    has_pii: "pii_count" in b,
-  }));
 }
 
 type DrillRow = Record<string, unknown>;
@@ -437,8 +428,10 @@ function GraphTab() {
 }
 
 function HeatmapTab() {
-  const [dimension, setDimension] = useState("domain");
-  const [buckets, setBuckets] = useState<Array<Record<string, unknown>>>([]);
+  const [matrix, setMatrix] = useState<{
+    cells: Array<{ domain: string; sensitivity: string; count: number; pii_count: number }>;
+    columns: string[];
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -447,64 +440,48 @@ function HeatmapTab() {
       setLoading(true);
       setError(null);
       try {
-        const data = await fetchAssetHeatmap(dimension);
-        setBuckets(data.buckets ?? []);
+        setMatrix(await fetchAssetHeatmapMatrix());
       } catch (err) {
-        setError(err instanceof Error ? err.message : "加载热力数据失败");
+        setError(err instanceof Error ? err.message : "加载热力矩阵失败");
       } finally {
         setLoading(false);
       }
     }
     load();
-  }, [dimension]);
+  }, []);
 
-  const rows = normalizeBuckets(buckets);
+  if (loading) return <Spin />;
+  if (error) return <Alert type="error" message={error} />;
+  if (!matrix) return <Empty description="暂无热力数据" />;
+
+  const heatData = matrix.cells.map((c) => ({
+    x: SENSITIVITY_LABEL[c.sensitivity] ?? c.sensitivity,
+    y: c.domain,
+    value: c.count,
+  }));
+  const totalCount = heatData.reduce((a, b) => a + b.value, 0);
+  const piiCount = matrix.cells.filter((c) => c.pii_count > 0).reduce((a, c) => a + c.pii_count, 0);
 
   return (
-    <Card title="敏感分布热力" size="small" extra={
-      <Select
-        value={dimension}
-        onChange={setDimension}
-        style={{ width: 160 }}
-        options={[
-          { value: "domain", label: "按业务域" },
-          { value: "sensitivity", label: "按敏感度" },
-          { value: "dw_layer", label: "按数仓层" },
-          { value: "owner", label: "按责任人" },
-        ]}
-      />
-    }>
-      {loading ? (
-        <Spin />
-      ) : error ? (
-        <Alert type="error" message={error} />
-      ) : rows.length === 0 ? (
+    <Card
+      title="敏感分布热力矩阵（业务域 × 敏感级别）"
+      size="small"
+      extra={<span className="muted">共 {totalCount} 项 · PII {piiCount} 项</span>}
+    >
+      {heatData.length === 0 ? (
         <Empty description="暂无热力数据" />
       ) : (
-        rows.map((r) => {
-          const pct = Math.round((r.pii_count / Math.max(r.count, 1)) * 100);
-          return (
-            <div key={r.key} style={{ marginBottom: 12 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
-                <span style={{ fontWeight: 600 }}>{r.key}</span>
-                <span className="muted">
-                  {r.count} 项{r.has_pii && ` · PII ${r.pii_count}（${pct}%）`}
-                </span>
-              </div>
-              <div style={{ height: 10, background: "var(--line-soft)", borderRadius: 5, overflow: "hidden" }}>
-                <div
-                  style={{
-                    height: "100%",
-                    width: `${Math.min(100, pct)}%`,
-                    background: pct > 40 ? "var(--danger)" : pct > 15 ? "var(--signal)" : "var(--data)",
-                    borderRadius: 5,
-                    transition: "width 0.3s ease",
-                  }}
-                />
-              </div>
-            </div>
-          );
-        })
+        <Heatmap
+          data={heatData}
+          xField="x"
+          yField="y"
+          colorField="value"
+          height={380}
+          shape="square"
+          label={{ text: "value", style: { fontSize: 11 } }}
+          style={{ inset: 4 }}
+          legend={{ color: { title: "资产数" } }}
+        />
       )}
     </Card>
   );

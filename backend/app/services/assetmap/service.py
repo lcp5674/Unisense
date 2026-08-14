@@ -284,6 +284,10 @@ class AssetMapService(BaseService):
             lambda: self._repo.heatmap_aggregation(dimension),
         )
 
+    async def heatmap_matrix(self) -> dict[str, Any]:
+        """二维热力矩阵：业务域 × 敏感级别（前端真热力图数据源）。"""
+        return await _agg_cached("heatmap-matrix", self._repo.heatmap_matrix)
+
     async def get_owner_view(self, owner_id: int) -> dict[str, Any]:
         """按责任人聚合资产统计。
 
