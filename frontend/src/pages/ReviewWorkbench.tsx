@@ -15,6 +15,7 @@ import {
 import type { ConflictResponse, MetricCompareResult, RulingRecord } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { MetricCompareTable } from "../components/MetricCompareTable";
+import { formatCnTime } from "../utils/timeCn";
 
 const STATUS_LABEL: Record<string, string> = {
   OPEN: "待处理",
@@ -359,7 +360,7 @@ export function ReviewWorkbench() {
       title: "检测时间",
       key: "detected_at",
       width: 160,
-      render: (_: unknown, r: ConflictResponse) => r.detected_at ?? "",
+      render: (_: unknown, r: ConflictResponse) => (r.detected_at ? formatCnTime(r.detected_at) : ""),
     },
     { title: "操作", key: "actions", render: (_: unknown, c: ConflictResponse) => actionsFor(c) },
   ];
@@ -559,7 +560,7 @@ export function ReviewWorkbench() {
                     dataIndex: "decided_at",
                     key: "decided_at",
                     width: 170,
-                    render: (v: string | null) => v ?? "—",
+                    render: (v: string | null) => (v ? formatCnTime(v) : "—"),
                   },
                 ]}
               />

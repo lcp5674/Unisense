@@ -12,6 +12,7 @@ import {
 import type { QualityEvent, QualityRule, SnapshotResponse } from "../../types";
 import { ThresholdSummary } from "../../utils/display";
 import { RULE_TYPE_LABEL, RULE_MODE_LABEL } from "../../utils/enums";
+import { formatCnTime, formatCnRange } from "../../utils/timeCn";
 
 const EVENT_STATUS: Record<string, { color: string; label: string }> = {
   OPEN: { color: "error", label: "开启" },
@@ -75,7 +76,7 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
       width: 90,
       render: (v: string) => <Tag color={EVENT_STATUS[v]?.color}>{EVENT_STATUS[v]?.label ?? v}</Tag>,
     },
-    { title: "时间", dataIndex: "created_at", key: "created", render: (v: string | null) => v ?? "—" },
+    { title: "时间", dataIndex: "created_at", key: "created", render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
     {
       title: "操作",
       key: "action",
@@ -122,10 +123,10 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
 
   const snapshotColumns = [
     { title: "版本", dataIndex: "version", key: "version", width: 80, render: (v: number) => `v${v}` },
-    { title: "时间范围", dataIndex: "date_range", key: "range" },
+    { title: "时间范围", dataIndex: "date_range", key: "range", render: (v: string) => <span style={{ fontSize: 12 }}>{formatCnRange(v)}</span> },
     { title: "质量标记", dataIndex: "quality_flag", key: "qf", width: 120, render: (v: string | null) => v ? <Tag color={v === "GOOD" ? "success" : "warning"}>{v}</Tag> : <span className="muted">—</span> },
     { title: "生成方式", dataIndex: "generated_by", key: "gen", width: 120, render: (v: string) => v },
-    { title: "生成时间", dataIndex: "generated_at", key: "genat", render: (v: string) => v },
+    { title: "生成时间", dataIndex: "generated_at", key: "genat", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> },
   ];
 
   return (

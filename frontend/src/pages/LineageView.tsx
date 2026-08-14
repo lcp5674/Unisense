@@ -48,6 +48,7 @@ import type { DBCatalog, LineageChannel, LineageEdge, LineageIngestRun, StaleEdg
 import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
+import { formatCnTime } from "../utils/timeCn";
 import { formatSql } from "../utils/sqlFormat";
 
 const RISK_LEVEL_LABEL: Record<string, string> = {
@@ -489,7 +490,7 @@ function ChannelsTab() {
   }
 
   const runColumns = [
-    { title: "运行时间", dataIndex: "run_at", key: "run_at", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v?.replace("T", " ").slice(0, 19)}</span> },
+    { title: "运行时间", dataIndex: "run_at", key: "run_at", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> },
     { title: "状态", dataIndex: "status", key: "status", width: 90, render: (v: string) => <Badge status={STALE_STATUS_COLOR[v] as "success" | "processing" | "error"} text={CHANNEL_STATUS_LABEL[v] ?? v} /> },
     { title: "总边数", dataIndex: "total_edges", key: "total", width: 80 },
     { title: "新增", dataIndex: "added_count", key: "added", width: 70, render: (v: number) => <Tag color="green">+{v}</Tag> },
@@ -504,7 +505,7 @@ function ChannelsTab() {
     { title: "目标", dataIndex: "target_node", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
     { title: "来源", dataIndex: "provenance", key: "provenance", width: 110, render: (v: string) => <Tag color="blue">{v}</Tag> },
     { title: "连续未确认", dataIndex: "missing_count", key: "missing", width: 110, render: (v: number) => <Tag color={v >= 3 ? "red" : "orange"}>{v} 轮</Tag> },
-    { title: "进入失效", dataIndex: "stale_since", key: "since", width: 160, render: (v?: string) => <span className="mono" style={{ fontSize: 12 }}>{v?.replace("T", " ").slice(0, 19)}</span> },
+    { title: "进入失效", dataIndex: "stale_since", key: "since", width: 160, render: (v?: string) => <span className="mono" style={{ fontSize: 12 }}>{v ? formatCnTime(v) : "—"}</span> },
     {
       title: "操作",
       key: "action",
@@ -555,7 +556,7 @@ function ChannelsTab() {
                   </Row>
                   <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
                     {last
-                      ? `最近采集 ${last.run_at?.replace("T", " ").slice(0, 19)} · 新增 +${last.added_count} · 更新 ~${last.updated_count} · 失效 ${last.stale_flagged_count}`
+                      ? `最近采集 ${last.run_at ? formatCnTime(last.run_at) : "—"} · 新增 +${last.added_count} · 更新 ~${last.updated_count} · 失效 ${last.stale_flagged_count}`
                       : "尚无采集运行记录（点击查看详情）"}
                   </div>
                 </Card>

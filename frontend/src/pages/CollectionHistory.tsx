@@ -4,6 +4,7 @@ import { ReloadOutlined } from "@ant-design/icons";
 import { listDataSources, listDriftLogs } from "../api";
 import type { DataSource } from "../types";
 import type { DriftLogItem } from "../api";
+import { formatCnTime } from "../utils/timeCn";
 
 const CHANGE_TYPE_LABEL: Record<string, { label: string; color: string }> = {
   ADD_COLUMN: { label: "新增列", color: "green" },
@@ -105,7 +106,7 @@ export function CollectionHistory() {
       key: "detectedAt",
       width: 180,
       render: (v: string | null) =>
-        v ? new Date(v).toLocaleString("zh-CN") : <span style={{ color: "#bbb" }}>—</span>,
+        v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span style={{ color: "#bbb" }}>—</span>,
     },
   ];
 

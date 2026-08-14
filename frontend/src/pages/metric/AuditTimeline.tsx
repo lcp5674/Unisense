@@ -3,6 +3,7 @@ import { Collapse, Empty, Spin, Tag, Timeline, Typography } from "antd";
 import { listAudit } from "../../api";
 import type { AuditEntry } from "../../types";
 import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel } from "../../utils/auditI18n";
+import { formatCnTime } from "../../utils/timeCn";
 
 const ACTION_COLOR: Record<string, string> = {
   CREATE: "green",
@@ -91,7 +92,7 @@ export function AuditTimeline({ metricCode }: { metricCode: string }) {
               <span> · </span>
               <span className="mono">{it.entity_id}</span>
               <span> · 操作人 {it.actor_display ?? `#${it.actor_id}`}</span>
-              <span> · {it.created_at}</span>
+              <span> · {formatCnTime(it.created_at)}</span>
               {it.trace_id && <span> · trace <span className="mono">{it.trace_id.slice(0, 8)}</span></span>}
             </div>
             {it.detail_json && Object.keys(it.detail_json).length > 0 && (

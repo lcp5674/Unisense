@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseBackendTime, formatCnTime, timeAgoCn } from "../utils/timeCn";
+import { parseBackendTime, formatCnTime, formatCnDate, formatCnRange, timeAgoCn } from "../utils/timeCn";
 
 describe("timeCn 时间中文展示（强制上海时区）", () => {
   describe("parseBackendTime", () => {
@@ -35,6 +35,45 @@ describe("timeCn 时间中文展示（强制上海时区）", () => {
     it("非法输入返回占位符 —", () => {
       expect(formatCnTime("garbage")).toBe("—");
       expect(formatCnTime(null)).toBe("—");
+    });
+  });
+
+  describe("formatCnDate", () => {
+    it("纯日期串按日历日直显，不涉及时区换算", () => {
+      expect(formatCnDate("2026-08-14")).toBe("2026年8月14日");
+      expect(formatCnDate("2026-01-05")).toBe("2026年1月5日");
+    });
+
+    it("含时间串取上海时区日期部分", () => {
+      // UTC 8-13 16:00 = 上海 8-14 00:00
+      expect(formatCnDate("2026-08-13T16:00:00")).toBe("2026年8月14日");
+      expect(formatCnDate("2026-08-14T02:30:00Z")).toBe("2026年8月14日");
+    });
+
+    it("非法输入返回占位符 —", () => {
+      expect(formatCnDate("garbage")).toBe("—");
+      expect(formatCnDate(null)).toBe("—");
+      expect(formatCnDate("2026-13-99")).toBe("—");
+    });
+  });
+
+  describe("formatCnRange", () => {
+    it("日级范围", () => {
+      expect(formatCnRange("2026-01-01~2026-01-31")).toBe("2026年1月1日 至 2026年1月31日");
+    });
+
+    it("月级范围", () => {
+      expect(formatCnRange("2026-01~2026-03")).toBe("2026年1月 至 2026年3月");
+    });
+
+    it("单段范围", () => {
+      expect(formatCnRange("2026-01-01")).toBe("2026年1月1日");
+      expect(formatCnRange("2026-01")).toBe("2026年1月");
+    });
+
+    it("非法输入返回占位符 —", () => {
+      expect(formatCnRange(null)).toBe("—");
+      expect(formatCnRange("")).toBe("—");
     });
   });
 

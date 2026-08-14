@@ -19,6 +19,7 @@ import type { DimensionExpr, DryRunResponse, QueryResponse, SnapshotResponse, Cl
 import { useTracking } from "../hooks/useTracking";
 import { ObjectView, kvText } from "../utils/display";
 import { DATE_RANGE_LABEL, GRANULARITY_LABEL } from "../utils/enums";
+import { formatCnRange } from "../utils/timeCn";
 import { handleDegradedEngine, isDegradationError } from "../utils/apiErrorHandlers";
 import type { UnisenseApiError as UnisenseApiErrorType } from "../utils/apiErrorHandlers";
 
@@ -239,7 +240,7 @@ export function QueryWorkspace() {
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "版本", dataIndex: "version", key: "version", width: 80, render: (v: number) => `v${v}` },
     { title: "维度", dataIndex: "dims", key: "dims", render: (v: Record<string, unknown>) => <span style={{ fontSize: 12 }}>{kvText(v)}</span> },
-    { title: "时间范围", dataIndex: "date_range", key: "date_range" },
+    { title: "时间范围", dataIndex: "date_range", key: "date_range", render: (v: string) => <span style={{ fontSize: 12 }}>{formatCnRange(v)}</span> },
     { title: "值", dataIndex: "value_json", key: "value", render: (v: Record<string, unknown>) => <span className="mono" style={{ fontSize: 12 }}>{kvText(v, VALUE_FIELD_LABEL)}</span> },
     {
       title: "质量",

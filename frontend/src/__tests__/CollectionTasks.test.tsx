@@ -84,8 +84,8 @@ describe("CollectionTasks", () => {
     // 手动/定时标记列
     expect(screen.getByText("手动")).toBeTruthy();
     expect(screen.getByText("定时")).toBeTruthy();
-    // 创建时间已回显（不再是 "—"）
-    expect(screen.getAllByText(/2026\/8\/14/).length).toBeGreaterThanOrEqual(2);
+    // 创建时间已回显（上海时区中文格式，不再是 "—"）
+    expect(screen.getAllByText(/2026年8月14日/).length).toBeGreaterThanOrEqual(2);
     // 任务 ID 均展示
     expect(screen.getByText("collect:mysql_finance:abc123")).toBeTruthy();
   });

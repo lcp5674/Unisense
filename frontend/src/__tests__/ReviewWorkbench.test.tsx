@@ -221,7 +221,7 @@ describe("ReviewWorkbench 冲突仲裁", () => {
     expect(screen.getByText(/裁决记录 CF-C/)).toBeInTheDocument();
     expect(screen.getByText("choose_canonical")).toBeInTheDocument();
     expect(screen.getByText("现有口径更符合业务定义")).toBeInTheDocument();
-    expect(screen.getByText("2026-08-12T10:00:00")).toBeInTheDocument();
+    expect(screen.getByText("2026年8月12日 18:00")).toBeInTheDocument();
   });
 
   it("无裁决记录时展示空态提示", async () => {

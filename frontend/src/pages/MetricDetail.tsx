@@ -57,6 +57,7 @@ import type {
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL } from "../utils/enums";
+import { formatCnTime, formatCnDate } from "../utils/timeCn";
 import { HealthCard } from "./metric/HealthCard";
 import { QualitySnapshot } from "./metric/QualitySnapshot";
 import { LineageImpact } from "./metric/LineageImpact";
@@ -141,8 +142,8 @@ function DeprecatedChain({ metric }: { metric: MetricResponse }) {
           <span>
             替代指标：{metric.successor_code ? <span className="mono">{metric.successor_code}</span> : <span className="muted">未指定</span>}
           </span>
-          {metric.sunset_until && <span className="muted">日落时间：{metric.sunset_until}</span>}
-          {metric.deprecated_at && <span className="muted">废弃时间：{metric.deprecated_at}</span>}
+          {metric.sunset_until && <span className="muted">日落时间：{formatCnDate(metric.sunset_until)}</span>}
+          {metric.deprecated_at && <span className="muted">废弃时间：{formatCnTime(metric.deprecated_at)}</span>}
         </Space>
       }
       style={{ marginBottom: 16 }}

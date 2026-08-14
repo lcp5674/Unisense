@@ -11,6 +11,7 @@ import {
 } from "../api";
 import type { Notification, NotifyEventLog, SubscriptionPref } from "../types";
 import { NOTIFY_STATUS_LABEL, QUALITY_LEVEL_LABEL } from "../utils/enums";
+import { formatCnTime } from "../utils/timeCn";
 
 // 渠道 = 消息送达方式（面向业务用户，不用 webhook/sms 等英文码）
 const CHANNEL_LABEL: Record<string, string> = {
@@ -230,13 +231,6 @@ const NOTIF_STATUS_BAR: Record<string, string> = {
   PENDING: "#e8862d",
 };
 
-// ISO 时间 → "YYYY-MM-DD HH:mm"（截断毫秒，展示更整洁）
-function formatTime(v: string | null | undefined): string {
-  if (!v) return "";
-  const t = v.includes("T") ? v.replace("T", " ").replace(/\.\d+/, "") : v;
-  return t.length > 19 ? t.slice(0, 19) : t;
-}
-
 function NotifListTab() {
   const [items, setItems] = useState<Notification[]>([]);
   const [total, setTotal] = useState(0);
@@ -288,7 +282,7 @@ function NotifListTab() {
                     <div className="notif-head">
                       <span className="notif-title">{eventTypeLabel(n.title)}</span>
                       <div className="notif-head-right">
-                        {n.sent_at && <span className="notif-sent-time">已送达 {formatTime(n.sent_at)}</span>}
+                        {n.sent_at && <span className="notif-sent-time">已送达 {formatCnTime(n.sent_at)}</span>}
                         <Tag
                           className="notif-status"
                           color={n.status === "SENT" ? "success" : n.status === "FAILED" ? "error" : "warning"}
@@ -321,7 +315,7 @@ function NotifListTab() {
                         </span>
                       )}
                       <span className="notif-meta-item">
-                        <ClockCircleOutlined /> 触发于 {formatTime(n.created_at)}
+                        <ClockCircleOutlined /> 触发于 {formatCnTime(n.created_at)}
                       </span>
                     </div>
                   </div>
@@ -446,7 +440,7 @@ function EventLogTab() {
     { title: "所属模块", dataIndex: "source", key: "source", width: 110, render: (v: string | null) => (v ? SOURCE_LABEL[v] ?? v : <span className="muted">—</span>) },
     { title: "重要程度", dataIndex: "level", key: "level", width: 90, render: (v: string) => <Tag color={v === "ERROR" ? "error" : v === "WARN" ? "warning" : "default"}>{QUALITY_LEVEL_LABEL[v] ?? v}</Tag> },
     { title: "已推送", dataIndex: "notified", key: "notified", width: 90, render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "是" : "否"}</Tag> },
-    { title: "触发时间", dataIndex: "created_at", key: "created", width: 170 },
+    { title: "触发时间", dataIndex: "created_at", key: "created", width: 170, render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span className="muted">—</span>) },
   ];
 
   return <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize: 20 }} locale={{ emptyText: "暂无消息记录" }} />;

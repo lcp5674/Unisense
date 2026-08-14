@@ -100,6 +100,7 @@ import type {
 import { useTracking } from "../hooks/useTracking";
 import { SchemaTable } from "../components/SchemaTable";
 import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
+import { formatCnTime } from "../utils/timeCn";
 import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { DescriptionCoverageTab } from "../components/assetmap/DescriptionCoverageTab";
@@ -742,7 +743,7 @@ function GraphTab() {
       dataIndex: "generated_at",
       key: "generated_at",
       width: 170,
-      render: (v: string) => (v ? new Date(v).toLocaleString() : "—"),
+      render: (v: string) => formatCnTime(v),
     },
   ];
 
@@ -856,7 +857,7 @@ function GraphTab() {
                     {descriptionSourceTag(metricData.description_source)}
                     {metricData.description_updated_at ? (
                       <span className="muted" style={{ fontSize: 12 }}>
-                        更新于 {new Date(metricData.description_updated_at).toLocaleString()}
+                        更新于 {formatCnTime(metricData.description_updated_at)}
                       </span>
                     ) : null}
                   </Space>
@@ -1981,17 +1982,17 @@ function TablesTab() {
                 )}
                 {detail.source_health?.last_health_check ? (
                   <span className="muted" style={{ marginLeft: 8 }}>
-                    检查于 {new Date(detail.source_health.last_health_check).toLocaleString()}
+                    检查于 {formatCnTime(detail.source_health.last_health_check)}
                   </span>
                 ) : null}
               </Descriptions.Item>
               <Descriptions.Item label="新鲜度">
                 <div className="muted" style={{ fontSize: 12 }}>
                   <div>
-                    创建：{detail.created_at ? new Date(detail.created_at).toLocaleString() : "-"}
+                    创建：{detail.created_at ? formatCnTime(detail.created_at) : "-"}
                   </div>
                   <div>
-                    更新：{detail.updated_at ? new Date(detail.updated_at).toLocaleString() : "-"}
+                    更新：{detail.updated_at ? formatCnTime(detail.updated_at) : "-"}
                   </div>
                 </div>
               </Descriptions.Item>
@@ -2372,7 +2373,7 @@ function HealthTab() {
                     dataIndex: "updated_at",
                     key: "updated",
                     width: 170,
-                    render: (v: string) => new Date(v).toLocaleString(),
+                    render: (v: string) => formatCnTime(v),
                   },
                 ]}
               />
@@ -2529,7 +2530,7 @@ function ChangesTab() {
             dataIndex: "updated_at",
             key: "updated",
             width: 180,
-            render: (v: string) => new Date(v).toLocaleString(),
+            render: (v: string) => formatCnTime(v),
           },
         ]}
       />
@@ -2577,7 +2578,7 @@ function ChangesTab() {
             dataIndex: "updated_at",
             key: "updated",
             width: 180,
-            render: (v: string) => new Date(v).toLocaleString(),
+            render: (v: string) => formatCnTime(v),
           },
         ]}
       />

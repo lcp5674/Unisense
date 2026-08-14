@@ -15,6 +15,7 @@ import {
   UnisenseApiError,
 } from "../api";
 import type { GrantResponse, PermissionSnapshot, UserBrief } from "../types";
+import { formatCnTime } from "../utils/timeCn";
 
 const GRANT_TYPE_LABEL: Record<string, string> = {
   READ: "只读",
@@ -177,7 +178,7 @@ function GrantsTab() {
       width: 100,
       render: (v: string) => <Tag color={v === "ACTIVE" ? "success" : v === "EXPIRED" ? "default" : "error"}>{GRANT_STATUS_LABEL[v] ?? v}</Tag>,
     },
-    { title: "到期", dataIndex: "expires_at", key: "expires", width: 160, render: (v: string | null) => v ?? <span className="muted">长期</span> },
+    { title: "到期", dataIndex: "expires_at", key: "expires", width: 160, render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span className="muted">长期</span>) },
     {
       title: "操作",
       key: "actions",

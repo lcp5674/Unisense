@@ -7,6 +7,7 @@ import {
 } from "../../api";
 import type { MetricVersionResponse } from "../../types";
 import { ObjectView, DEF_FIELD_LABEL } from "../../utils/display";
+import { formatCnTime } from "../../utils/timeCn";
 
 const CHANGE_TYPE_LABEL: Record<string, string> = {
   CREATE: "创建",
@@ -111,7 +112,7 @@ export function VersionHistory({
       width: 120,
       render: (s: string) => <Tag color={VERSION_STATUS_META[s]?.color}>{VERSION_STATUS_META[s]?.label ?? s}</Tag>,
     },
-    { title: "时间", dataIndex: "created_at", key: "created", width: 170 },
+    { title: "时间", dataIndex: "created_at", key: "created", width: 170, render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
     {
       title: "操作",
       key: "action",

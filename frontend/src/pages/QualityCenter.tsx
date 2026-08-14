@@ -25,6 +25,7 @@ import {
 import type { MetricResponse, QualityRule, QualityEvent, QualityBenchmark, ReconciliationRecord } from "../types";
 import { ThresholdSummary } from "../utils/display";
 import { RULE_TYPE_LABEL, RULE_MODE_LABEL, RECONCILIATION_STATUS_LABEL } from "../utils/enums";
+import { formatCnTime, formatCnDate } from "../utils/timeCn";
 
 const RULE_TYPES = ["COMPLETENESS", "ACCURACY", "TIMELINESS", "CONSISTENCY", "UNIQUENESS", "VALIDITY", "WAVE_DIFF", "CROSS_SOURCE"];
 const SEVERITY_COLOR: Record<string, string> = { P0: "red", P1: "orange", P2: "default" };
@@ -250,7 +251,7 @@ function EventsTab() {
       width: 100,
       render: (v: string) => <Tag color={EVENT_STATUS[v]?.color}>{EVENT_STATUS[v]?.label ?? v}</Tag>,
     },
-    { title: "时间", dataIndex: "created_at", key: "created", width: 170, render: (v: string | null) => v ?? "—" },
+    { title: "时间", dataIndex: "created_at", key: "created", width: 170, render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
     {
       title: "操作",
       key: "actions",
@@ -423,7 +424,7 @@ function BenchmarksTab() {
         okText="绑定"
       >
         <p className="muted" style={{ marginBottom: 8 }}>
-          {bindTarget ? `${bindTarget.provider} · ${bindTarget.metric_code} @${bindTarget.bench_date}` : ""}
+          {bindTarget ? `${bindTarget.provider} · ${bindTarget.metric_code} @${formatCnDate(bindTarget.bench_date)}` : ""}
         </p>
         <Form form={bindForm} layout="vertical" onFinish={handleBind} style={{ marginTop: 8 }}>
           <Form.Item name="metric_code" label="目标指标编码">
@@ -529,7 +530,7 @@ function ReconciliationTab() {
       <Modal title="执行基准对账" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="执行">
         <Form form={form} layout="vertical" onFinish={handleRun} style={{ marginTop: 8 }}>
           <Form.Item name="benchmark_id" label="基准" rules={[{ required: true }]}>
-            <Select showSearch options={benchmarks.map((b) => ({ value: b.id, label: `${b.metric_code} · ${b.provider} @${b.bench_date}` }))} placeholder="选择基准" />
+            <Select showSearch options={benchmarks.map((b) => ({ value: b.id, label: `${b.metric_code} · ${b.provider} @${formatCnDate(b.bench_date)}` }))} placeholder="选择基准" />
           </Form.Item>
           <Form.Item name="metric_value" label="当前指标值" rules={[{ required: true }]}>
             <InputNumber style={{ width: 200 }} />

@@ -42,6 +42,7 @@ import {
   METRIC_TIER_LABEL,
   TIME_SEMANTICS_LABEL,
 } from "../utils/enums";
+import { formatCnTime } from "../utils/timeCn";
 
 const STATUS_COLOR: Record<string, string> = {
   DRAFT: "default",
@@ -138,7 +139,7 @@ function ExpandContent({
         <Descriptions.Item label="提交人">{userName(r.submitted_by)}</Descriptions.Item>
         <Descriptions.Item label="审批人">{userName(r.approver_id)}</Descriptions.Item>
         <Descriptions.Item label="创建时间">
-          <span className="mono" style={{ fontSize: 12 }}>{r.created_at}</span>
+          <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(r.created_at)}</span>
         </Descriptions.Item>
         <Descriptions.Item label="数据分层">{DW_LAYER_LABEL[r.dw_layer] ?? r.dw_layer}</Descriptions.Item>
         <Descriptions.Item label="更新时效">{FRESHNESS_LABEL[r.freshness] ?? r.freshness}</Descriptions.Item>
@@ -441,7 +442,7 @@ export function MetricCatalog() {
       [
         m.metric_code, m.name, m.domain, m.owner_id, m.type, m.status,
         m.aggregation, m.granularity, m.unit, m.dw_layer, m.metric_tier,
-        m.pii_flag ? "PII" : "", m.version, m.created_at, m.updated_at,
+        m.pii_flag ? "PII" : "", m.version, formatCnTime(m.created_at), formatCnTime(m.updated_at),
       ]
         .map((c) => `"${String(c).replace(/"/g, '""')}"`)
         .join(","),
@@ -584,7 +585,7 @@ export function MetricCatalog() {
       dataIndex: "updated_at",
       key: "updated_at",
       width: 170,
-      render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span>,
+      render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span>,
     },
   ];
 

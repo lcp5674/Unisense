@@ -2,6 +2,7 @@
 // 后端 detail_json 仍以英文 key 透传，这里统一映射为中文展示，避免用户直面技术字段。
 
 import { enumLabel, ENTITY_TYPE_LABEL } from "./enums";
+import { formatCnTime } from "./timeCn";
 
 /** detail_json 字段名 → 中文 */
 export const AUDIT_FIELD_LABEL: Record<string, string> = {
@@ -380,11 +381,9 @@ export function auditActionLabel(action: string | null | undefined): string {
   return pureMap[action] ?? action;
 }
 
-/** 格式化审计时间——ISO 转为 "YYYY-MM-DD HH:mm" */
+/** 格式化审计时间——上海时区中文格式（统一走 timeCn.formatCnTime，避免浏览器本地时区漂移） */
 export function formatAuditTime(v: string | null | undefined): string {
-  if (!v) return "—";
-  const t = v.includes("T") ? v.replace("T", " ").replace(/\.\d+/, "") : v;
-  return t.length > 19 ? t.slice(0, 19) : t;
+  return formatCnTime(v);
 }
 
 /** 实体 ID 加业务前缀（把 metric#123 转为「指标 #123」） */

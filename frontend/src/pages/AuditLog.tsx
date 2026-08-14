@@ -3,7 +3,8 @@ import { Card, Table, Tag, Input, Select, Button, Space, Tooltip, message } from
 import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { listAudit, UnisenseApiError } from "../api";
 import type { AuditEntry } from "../types";
-import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel, auditActionLabel, formatAuditTime } from "../utils/auditI18n";
+import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel, auditActionLabel } from "../utils/auditI18n";
+import { formatCnTime } from "../utils/timeCn";
 
 export function AuditLog() {
   const [items, setItems] = useState<AuditEntry[]>([]);
@@ -125,7 +126,7 @@ export function AuditLog() {
       key: "created",
       width: 170,
       render: (v: string) => (
-        <span className="mono" style={{ fontSize: 12 }}>{formatAuditTime(v)}</span>
+        <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span>
       ),
     },
   ];

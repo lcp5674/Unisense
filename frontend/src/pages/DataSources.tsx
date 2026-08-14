@@ -28,6 +28,7 @@ import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo
 import type { DriftLogItem } from "../api";
 import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
+import { formatCnTime } from "../utils/timeCn";
 
 const FALLBACK_TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
@@ -409,7 +410,7 @@ function SourceDetailModal({
                 title: "检测时间",
                 dataIndex: "detected_at",
                 width: 170,
-                render: (v: string | null) => (v ? new Date(v).toLocaleString() : "—"),
+                render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—"),
               },
             ]}
           />

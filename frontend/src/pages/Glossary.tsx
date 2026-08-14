@@ -15,6 +15,7 @@ import {
   UnisenseApiError,
 } from "../api";
 import type { GlossaryTerm, GlossaryConflict } from "../types";
+import { formatCnTime } from "../utils/timeCn";
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
@@ -311,8 +312,8 @@ function TermsTab() {
             <Descriptions.Item label="边界说明">{detailTerm.boundary ?? <span className="muted">—</span>}</Descriptions.Item>
             <Descriptions.Item label="Owner ID"><span className="mono">{detailTerm.owner_id}</span></Descriptions.Item>
             <Descriptions.Item label="版本"><span className="mono">{detailTerm.version ?? 1}</span></Descriptions.Item>
-            <Descriptions.Item label="创建时间">{detailTerm.created_at ?? "—"}</Descriptions.Item>
-            <Descriptions.Item label="更新时间">{detailTerm.updated_at ?? "—"}</Descriptions.Item>
+            <Descriptions.Item label="创建时间">{detailTerm.created_at ? formatCnTime(detailTerm.created_at) : "—"}</Descriptions.Item>
+            <Descriptions.Item label="更新时间">{detailTerm.updated_at ? formatCnTime(detailTerm.updated_at) : "—"}</Descriptions.Item>
           </Descriptions>
         )}
       </Modal>

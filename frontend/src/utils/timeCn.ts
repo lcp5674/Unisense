@@ -41,13 +41,69 @@ function shanghaiDayKey(d: Date): string {
 export function formatCnTime(value: string | null | undefined): string {
   const d = parseBackendTime(value);
   if (!d) return "—";
-  const date = new Intl.DateTimeFormat("zh-CN", {
+  return `${shanghaiCnDate(d)} ${cnTimeOfDay(d)}`;
+}
+
+/** 上海时区日期部分中文：2026年8月14日 */
+function shanghaiCnDate(d: Date): string {
+  return new Intl.DateTimeFormat("zh-CN", {
     timeZone: SHANGHAI_TZ,
     year: "numeric",
     month: "long",
     day: "numeric",
   }).format(d);
-  return `${date} ${cnTimeOfDay(d)}`;
+}
+
+/**
+ * 上海时区日期中文格式：2026年8月14日。
+ * 纯日期串 "YYYY-MM-DD" 按日历日直显（不涉及时区换算）；含时间串则取上海时区日期部分。非法输入返回 —。
+ */
+export function formatCnDate(value: string | null | undefined): string {
+  if (!value) return "—";
+  const s = String(value).trim();
+  if (!s) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (m) {
+    const [, y, mo, d] = m;
+    const year = Number(y);
+    const month = Number(mo);
+    const day = Number(d);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return "—";
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (Number.isNaN(date.getTime())) return "—";
+    return new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    }).format(date);
+  }
+  const d = parseBackendTime(s);
+  if (!d) return "—";
+  return shanghaiCnDate(d);
+}
+
+/**
+ * 日期范围中文格式：后端 date_range（"YYYY-MM-DD~YYYY-MM-DD" / "YYYY-MM~YYYY-MM" / 单段）转中文，
+ * 如 "2026年1月1日 至 2026年1月31日"、"2026年1月 至 2026年3月"、"2026年1月1日"。非法输入返回原值或 —。
+ */
+export function formatCnRange(value: string | null | undefined): string {
+  if (!value) return "—";
+  const parts = String(value)
+    .split("~")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (!parts.length) return "—";
+  const fmt = (p: string) => {
+    const ym = /^(\d{4})-(\d{2})$/.exec(p);
+    if (ym) {
+      const [, y, mo] = ym;
+      return `${Number(y)}年${Number(mo)}月`;
+    }
+    return formatCnDate(p);
+  };
+  const zh = parts.map(fmt);
+  return zh.length === 1 ? zh[0] : zh.join(" 至 ");
 }
 
 /**

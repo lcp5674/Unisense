@@ -4,6 +4,7 @@ import { Button, Card, Select, Space, Table, Tag, Tooltip, message } from "antd"
 import { ReloadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import { listCollectionJobs, listDataSources, UnisenseApiError } from "../api";
 import type { CollectionJob, DataSource } from "../types";
+import { formatCnTime } from "../utils/timeCn";
 
 const STATUS_LABEL: Record<string, string> = {
   QUEUED: "排队中",
@@ -129,7 +130,7 @@ export function CollectionTasks() {
       key: "createdAt",
       width: 190,
       render: (v?: string | null) =>
-        v ? new Date(v).toLocaleString("zh-CN") : <span style={{ color: "#999" }}>—</span>,
+        v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span style={{ color: "#999" }}>—</span>,
     },
   ];
 

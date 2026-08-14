@@ -41,6 +41,7 @@ import type {
   UserCreateRequest,
   UserUpdateRequest,
 } from "../types";
+import { formatCnTime } from "../utils/timeCn";
 
 const ROLE_LABEL: Record<string, string> = {
   platform_admin: "平台管理员",
@@ -316,7 +317,7 @@ export function UserManagement() {
       key: "last_login",
       width: 160,
       render: (v: string | null) =>
-        v ? <span className="mono" style={{ fontSize: 12 }}>{v.replace("T", " ").slice(0, 19)}</span> : <span className="muted">—</span>,
+        v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span className="muted">—</span>,
     },
     {
       title: "操作",

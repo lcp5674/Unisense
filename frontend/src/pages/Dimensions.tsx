@@ -37,6 +37,7 @@ import type {
   SubjectDomainTreeNode,
   UserBrief,
 } from "../types";
+import { formatCnTime } from "../utils/timeCn";
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
@@ -520,8 +521,8 @@ function DimensionsTab() {
                 <Tag color={STATUS_COLOR[detailTarget.status]}>{STATUS_LABEL[detailTarget.status] ?? detailTarget.status}</Tag>
               </Descriptions.Item>
               <Descriptions.Item label="描述">{detailTarget.description || <span className="muted">—</span>}</Descriptions.Item>
-              <Descriptions.Item label="创建时间">{detailTarget.created_at || "—"}</Descriptions.Item>
-              <Descriptions.Item label="更新时间">{detailTarget.updated_at || "—"}</Descriptions.Item>
+              <Descriptions.Item label="创建时间">{detailTarget.created_at ? formatCnTime(detailTarget.created_at) : "—"}</Descriptions.Item>
+              <Descriptions.Item label="更新时间">{detailTarget.updated_at ? formatCnTime(detailTarget.updated_at) : "—"}</Descriptions.Item>
             </Descriptions>
 
             <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>绑定指标（{detailMetrics.length}）</div>
