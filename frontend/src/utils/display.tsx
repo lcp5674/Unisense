@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { Tag } from "antd";
 import { enumLabel, DATE_RANGE_LABEL, GRANULARITY_LABEL, METRIC_STATUS_LABEL } from "./enums";
+import { formatSql } from "./sqlFormat";
 
 /** 执行计划 / 元信息通用字段名 → 中文 */
 export const PLAN_FIELD_LABEL: Record<string, string> = {
@@ -101,9 +102,10 @@ function renderValue(key: string, value: unknown, depth: number, labels: Record<
           padding: 8,
           borderRadius: 4,
           fontSize: 12,
+          lineHeight: 1.5,
         }}
       >
-        {String(value)}
+        {formatSql(String(value))}
       </pre>
     );
   }
@@ -192,9 +194,10 @@ function renderDefValue(key: string, value: unknown, labels: Record<string, stri
           padding: 8,
           borderRadius: 4,
           fontSize: 12,
+          lineHeight: 1.5,
         }}
       >
-        {String(value)}
+        {formatSql(String(value))}
       </pre>
     );
   }
