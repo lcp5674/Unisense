@@ -204,6 +204,21 @@ describe("Catalogs 页面", () => {
     }
   });
 
+  it("从总览仪表 ?sensitivity=xxx 直达：所有查询都携带敏感级别过滤（资产卡片下钻）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/catalogs?sensitivity=PII"]}>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("共 1 条");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ sensitivity_level: "PII" });
+    }
+  });
+
   it("防竞态：迟到的首查响应不覆盖最新筛选结果", async () => {
     type CatalogListResponse = { items: DBCatalog[]; total: number; page: number; page_size: number };
     let resolveFull!: (v: CatalogListResponse) => void;
