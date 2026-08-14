@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions } from "antd";
 import {
+  ArrowLeftOutlined,
   SearchOutlined,
   ColumnWidthOutlined,
   PlusCircleOutlined,
@@ -283,6 +284,12 @@ export function MetricCatalog() {
     load();
   }
 
+  // 统一返回上一入口：优先回退浏览器历史（总览信号条/血缘视图等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
+
   // CSV 导出：对当前筛选结果（当前页）生成可审计清单
   function exportCsv() {
     const header = [
@@ -426,6 +433,9 @@ export function MetricCatalog() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Assets / Catalog</div>
           <h2>指标目录</h2>
           <p>全量指标定义——按状态/域/分级/关键词检索；展开行查看口径与治理追溯，点击进入详情。</p>
