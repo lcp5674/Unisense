@@ -281,6 +281,39 @@ class TestTestConnection:
         assert result.ok is False
         assert "connection refused" in result.error
 
+    async def test_connect_error_with_loopback_base_url_hints_host_docker(self) -> None:
+        """回环地址（127.0.0.1）ConnectError 时，应提示容器场景改用 host.docker.internal。"""
+        svc, _ = await self._svc()
+        payload = LlmConfigPayload(
+            base_url="http://127.0.0.1:19090/v1/chat/completions",
+            api_key="sk-x",
+            model="m1",
+            timeout=30,
+        )
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = httpx.ConnectError("connection refused")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        assert result.ok is False
+        assert "host.docker.internal" in result.error
+
+    async def test_connect_error_with_public_base_url_no_hint(self) -> None:
+        """非回环地址 ConnectError 不附加容器提示（避免误导公网地址用户）。"""
+        svc, _ = await self._svc()
+        payload = LlmConfigPayload(
+            base_url="https://api.deepseek.com", api_key="sk-x", model="m1", timeout=30
+        )
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = httpx.ConnectError("connection refused")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        assert result.ok is False
+        assert "host.docker.internal" not in result.error
+
     async def test_missing_config(self) -> None:
         svc, _ = await self._svc()
         payload = LlmConfigPayload(base_url="", api_key="", model="m1", timeout=30)

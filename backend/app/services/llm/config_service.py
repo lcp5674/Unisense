@@ -55,6 +55,15 @@ _PROBE_MESSAGES = [
     {"role": "user", "content": "ping"},
 ]
 
+#: 指向回环地址的 base_url 片段（容器内 127.0.0.1/localhost 指向容器自身，而非宿主机）
+_LOOPBACK_TOKENS = ("127.0.0.1", "localhost", "0.0.0.0")
+
+
+def _looks_like_loopback(base_url: str) -> bool:
+    """判断 base_url 是否指向回环地址（容器内无法经其访问宿主机服务）。"""
+    lowered = (base_url or "").lower()
+    return any(token in lowered for token in _LOOPBACK_TOKENS)
+
 
 def _infer_provider(base_url: str) -> str:
     """根据 base_url 反推提供商标识（仅用于 env 兜底展示）。"""
@@ -148,6 +157,24 @@ class LlmConfigService:
             "updated_by": None,
             "updated_at": None,
         }
+
+    async def get_secret(self, instance_id: int) -> str | None:
+        """按需解密返回实例的明文 api_key（编辑回显用）。
+
+        实例不存在、未配置密钥或解密失败均返回 None（由 API 层区分 404 原因）。
+        """
+        row = await self.get_row(instance_id)
+        if row is None or not row.api_key_enc:
+            return None
+        try:
+            decrypted = SecretManager.decrypt(row.api_key_enc)
+            api_key = (
+                decrypted.get("api_key") if isinstance(decrypted, dict) else str(decrypted)
+            )
+            return api_key or None
+        except Exception as exc:  # noqa: BLE001 - 解密失败不抛 500，按无密钥处理
+            logger.error("llm_config_secret_decrypt_failed: id=%s %s", instance_id, exc)
+            return None
 
     # ---- 写入 ----
 
@@ -349,9 +376,17 @@ class LlmConfigService:
         except httpx.HTTPError as exc:
             latency_ms = int((time.monotonic() - start) * 1000)
             logger.warning("llm_test_connection_failed: %s", exc)
+            # 容器部署自诊断：回环地址在容器内指向容器自身，
+            # 访问宿主机 LLM 网关须用 host.docker.internal
+            hint = ""
+            if isinstance(exc, httpx.ConnectError) and _looks_like_loopback(base_url):
+                hint = (
+                    "；提示：后端运行在 Docker 容器中，127.0.0.1/localhost 指向容器自身，"
+                    "访问宿主机服务请改用 host.docker.internal"
+                )
             return LlmConfigTestResult(
                 ok=False,
                 latency_ms=latency_ms,
                 model=model,
-                error=f"{type(exc).__name__}: {exc}",
+                error=f"{type(exc).__name__}: {exc}{hint}",
             )
