@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Card, Tabs, Table, Button, Modal, Form, Input, InputNumber, Space, Tag, Select, App as AntApp,
 } from "antd";
-import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined } from "@ant-design/icons";
+import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   listDictTypes, listAllDictItems, createDictItem, updateDictItem,
   deactivateDictItem, activateDictItem, deleteDictItem,
@@ -25,6 +25,7 @@ const DICT_TYPE_LABELS: Record<string, string> = {
 
 export function SystemDict() {
   const { message, modal } = AntApp.useApp();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   // 启用状态下钻（?status=，总览仪表「数据字典」资产卡片）作为初始筛选
   const urlStatus = searchParams.get("status") ?? "";
@@ -33,6 +34,12 @@ export function SystemDict() {
   const [items, setItems] = useState<SystemDictItem[]>([]);
   const [status, setStatus] = useState<string>(urlStatus);
   const [loading, setLoading] = useState(false);
+
+  // 统一返回上一入口：优先回退浏览器历史（总览资产卡片等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -150,7 +157,11 @@ export function SystemDict() {
   ];
 
   return (
-    <Card title="参照数据管理">
+    <div>
+      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
+        返回
+      </Button>
+      <Card title="参照数据管理">
       <Tabs
         activeKey={activeType}
         onChange={setActiveType}
@@ -215,5 +226,6 @@ export function SystemDict() {
         </Form>
       </Modal>
     </Card>
+    </div>
   );
 }

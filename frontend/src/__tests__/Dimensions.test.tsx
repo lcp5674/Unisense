@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, useNavigate } from "react-router-dom";
+import { MemoryRouter, useNavigate, Routes, Route } from "react-router-dom";
 import { Dimensions } from "../pages/Dimensions";
 import type { Dimension } from "../types";
 
@@ -478,5 +478,45 @@ describe("Dimensions 页面", () => {
     expect(screen.getByText("sales_gmv · 成交额")).toBeInTheDocument();
     // 不应再显示裸 #id
     expect(screen.queryByText("#7")).not.toBeInTheDocument();
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await screen.findByText("dim_channel");
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/lineage", "/dimensions"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/dimensions" element={<Dimensions />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("dim_channel");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/dimensions" element={<Dimensions />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("dim_channel");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
   });
 });

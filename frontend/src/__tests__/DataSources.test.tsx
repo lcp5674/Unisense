@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { DataSources } from "../pages/DataSources";
 import type { DataSource, SourceTypeInfo, SubjectDomainTreeNode } from "../types";
 
@@ -549,5 +549,41 @@ describe("DataSources", () => {
     // 部分失败：成功数与失败清单均在提示中
     expect(await screen.findByText(/删除完成 1 个，失败 1 个/)).toBeTruthy();
     expect(screen.getByText(/mysql_orders（数据源不存在）/)).toBeTruthy();
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    renderSources();
+    await screen.findByText("mysql_finance");
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/lineage", "/data-sources"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/data-sources" element={<DataSources />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("mysql_finance");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <MemoryRouter initialEntries={["/data-sources"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/data-sources" element={<DataSources />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("mysql_finance");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
   });
 });

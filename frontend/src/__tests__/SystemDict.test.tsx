@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { SystemDict } from "../pages/SystemDict";
 import type { SystemDictItem } from "../types";
 
@@ -93,5 +93,41 @@ describe("SystemDict 页面", () => {
     fireEvent.click(inactiveOpt!);
     await waitFor(() => expect(screen.getByText("周")).toBeInTheDocument());
     expect(screen.queryByText("日")).not.toBeInTheDocument();
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    renderDict();
+    await screen.findByText("日");
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/lineage", "/dicts"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/dicts" element={<SystemDict />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <MemoryRouter initialEntries={["/dicts"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/dicts" element={<SystemDict />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
   });
 });

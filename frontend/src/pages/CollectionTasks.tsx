@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button, Card, Select, Space, Table, Tag, Tooltip, message } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { ReloadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import { listCollectionJobs, listDataSources, UnisenseApiError } from "../api";
 import type { CollectionJob, DataSource } from "../types";
 
@@ -44,6 +44,7 @@ function detailText(detail: Record<string, unknown> | undefined): string {
 }
 
 export function CollectionTasks() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   // 任务状态下钻（?status=，总览仪表「采集任务」资产卡片）作为初始筛选
   const urlStatus = searchParams.get("status") ?? "";
@@ -64,6 +65,12 @@ export function CollectionTasks() {
       setLoading(false);
     }
   }, [sourceId, status]);
+
+  // 统一返回上一入口：优先回退浏览器历史（总览资产卡片等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -127,20 +134,24 @@ export function CollectionTasks() {
   ];
 
   return (
-    <Card
-      title={
-        <span>
-          采集任务中心
-          <span className="page-eyebrow">Collection Jobs · 异步采集进度与结果</span>
-        </span>
-      }
-      extra={
-        <Button icon={<ReloadOutlined />} onClick={() => { setLoading(true); load(); }} loading={loading}>
-          刷新
-        </Button>
-      }
-      style={{ marginBottom: 16 }}
-    >
+    <div>
+      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
+        返回
+      </Button>
+      <Card
+        title={
+          <span>
+            采集任务中心
+            <span className="page-eyebrow">Collection Jobs · 异步采集进度与结果</span>
+          </span>
+        }
+        extra={
+          <Button icon={<ReloadOutlined />} onClick={() => { setLoading(true); load(); }} loading={loading}>
+            刷新
+          </Button>
+        }
+        style={{ marginBottom: 16 }}
+      >
       <Space direction="vertical" style={{ width: "100%" }} size={16}>
         <Space wrap>
           <Select
@@ -178,5 +189,6 @@ export function CollectionTasks() {
         />
       </Space>
     </Card>
+    </div>
   );
 }

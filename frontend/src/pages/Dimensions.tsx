@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm } from "antd";
-import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   listDimensions,
   createDimension,
@@ -1134,6 +1134,14 @@ function ReconciliationsTab() {
 }
 
 export function Dimensions() {
+  const navigate = useNavigate();
+
+  // 统一返回上一入口：优先回退浏览器历史（总览资产卡片/全局搜索等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
+
   const tabItems = [
     { key: "dims", label: "维度列表", children: <DimensionsTab /> },
     { key: "members", label: "成员管理", children: <MembersTab /> },
@@ -1145,6 +1153,9 @@ export function Dimensions() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Governance / Dimensions</div>
           <h2>维度管理</h2>
           <p>维度定义、成员、跨维度映射与口径对账——保证维度语义一致。</p>

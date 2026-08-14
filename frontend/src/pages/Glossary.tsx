@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Descriptions, InputNumber } from "antd";
-import { PlusOutlined, SendOutlined } from "@ant-design/icons";
+import { PlusOutlined, SendOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   listTerms,
   createTerm,
@@ -436,6 +436,14 @@ function ConflictsTab() {
 }
 
 export function Glossary() {
+  const navigate = useNavigate();
+
+  // 统一返回上一入口：优先回退浏览器历史（总览资产卡片/全局搜索等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
+
   const tabItems = [
     { key: "terms", label: "术语列表", children: <TermsTab /> },
     { key: "conflicts", label: "术语冲突", children: <ConflictsTab /> },
@@ -445,6 +453,9 @@ export function Glossary() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Governance / Glossary</div>
           <h2>术语表</h2>
           <p>业务术语统一定义——创建即触发冲突检测，保证全组织口径一致。</p>

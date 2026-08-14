@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space } from "antd";
-import { PlusOutlined } from "@ant-design/icons";
+import { PlusOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import { listTemplates, createMetric, instantiateTemplate, UnisenseApiError } from "../api";
 import type { MetricCreateRequest, MetricTemplate, MetricType } from "../types";
 import { useTracking } from "../hooks/useTracking";
@@ -55,6 +55,12 @@ export function Templates() {
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
+  }
+
+  // 统一返回上一入口：优先回退浏览器历史（总览资产卡片/全局搜索等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
   }
 
   useEffect(() => {
@@ -140,6 +146,9 @@ export function Templates() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Assets / Templates</div>
           <h2>指标模板</h2>
           <p>标准化的指标创建模板——一键实例化，默认口径自动合并。</p>
