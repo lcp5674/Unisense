@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.base_service import BaseService
 from app.models.tracking import TrackingEvent
 from app.services.glossary.schemas import TermResponse
-from app.services.recommend.repository import RecommendRepository
+from app.services.recommend.repository import METRIC_EVENT_TYPES, RecommendRepository
 
 logger = logging.getLogger(__name__)
 
@@ -47,21 +47,31 @@ class RecommendService(BaseService):
         return result
 
     async def recommend_metrics(self, user_id: int, limit: int) -> list[dict[str, Any]]:
-        """协同过滤推荐 + 血缘冷启动兜底。
+        """分层推荐策略（协同过滤 → 血缘扩展 → 全局热门 → 最新发布）。
 
-        策略：
-        1. 基于 tracking_events 计算用户行为画像（查询/收藏/浏览的指标集合）
-        2. 找出行为相似的用户（Jaccard 相似度）
-        3. 推荐相似用户偏好但当前用户未交互过的指标
-        4. 协同过滤无结果时，降级为原有血缘扩展推荐（冷启动兜底）
+        1. 协同过滤：基于 tracking_events 计算相似用户，推荐其偏好但当前用户未交互的指标；
+        2. 血缘扩展：以用户交互过的指标为种子，经 lineage_edge 扩展上下游指标；
+        3. 全局热门：无相似用户时，回退到全站行为热度（按埋点事件聚合）；
+        4. 最新发布：系统无任何行为信号时的终极兜底，保证面板永不空白。
+
+        每个推荐项均携带 ``reason`` 字段，便于前端向用户解释「为何推荐」。
         """
-        # 尝试协同过滤
+        # 1. 协同过滤（个性化最强，优先）
         cf_results = await self._collaborative_filtering(user_id, limit)
         if cf_results:
             return cf_results
 
-        # 冷启动兜底：原有血缘扩展推荐
-        return await self._lineage_fallback(user_id, limit)
+        # 2. 血缘扩展兜底
+        lineage = await self._lineage_fallback(user_id, limit)
+        if lineage:
+            return lineage
+
+        # 3 & 4. 冷启动兜底：全局热门（排除已交互）→ 最新发布，保证面板非空
+        seeds = await self._get_user_metric_actions(str(user_id))
+        popular = await self._global_popular(limit, seeds)
+        if popular:
+            return popular
+        return await self._latest_published(limit, seeds)
 
     async def _collaborative_filtering(self, user_id: int, limit: int) -> list[dict[str, Any]]:
         """基于 tracking_events 的协同过滤推荐。"""
@@ -100,6 +110,7 @@ class RecommendService(BaseService):
                     "via": "collaborative_filtering",
                     "score": round(score, 4),
                     "edge_type": "CF_RECOMMEND",
+                    "reason": "与你行为相似的同事也关注",
                 }
             )
 
@@ -113,7 +124,7 @@ class RecommendService(BaseService):
                 TrackingEvent.actor_id == user_id,
                 TrackingEvent.target_type == "metric",
                 TrackingEvent.target_id.isnot(None),
-                TrackingEvent.event_type.in_(["query", "favorite", "browse", "search"]),
+                TrackingEvent.event_type.in_(METRIC_EVENT_TYPES),
             )
             .distinct()
         )
@@ -128,7 +139,7 @@ class RecommendService(BaseService):
         ).where(
             TrackingEvent.target_type == "metric",
             TrackingEvent.target_id.isnot(None),
-            TrackingEvent.event_type.in_(["query", "favorite", "browse", "search"]),
+            TrackingEvent.event_type.in_(METRIC_EVENT_TYPES),
         )
         rows = (await self._session.execute(stmt)).all()
         profiles: dict[str, set[str]] = defaultdict(set)
@@ -179,6 +190,57 @@ class RecommendService(BaseService):
                 if len(recommendations) >= limit:
                     return recommendations
         return recommendations
+
+    async def _global_popular(self, limit: int, exclude: set[str]) -> list[dict[str, Any]]:
+        """全局热门指标（冷启动兜底，基于全站 tracking_events 聚合）。
+
+        排除当前用户已交互过的指标（exclude），避免重复推荐其已看过的指标。
+        """
+        rows = await self._repo.popular_metrics(limit + len(exclude))
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set(exclude)
+        for metric_id, _cnt in rows:
+            metric_id = str(metric_id)
+            if metric_id in seen:
+                continue
+            seen.add(metric_id)
+            result.append(
+                {
+                    "metric_id": metric_id,
+                    "via": "global_hot",
+                    "edge_type": "POPULAR",
+                    "reason": "全站热门指标",
+                }
+            )
+            if len(result) >= limit:
+                break
+        return result
+
+    async def _latest_published(self, limit: int, exclude: set[str]) -> list[dict[str, Any]]:
+        """最新发布指标（终极兜底，保证面板永不空白）。
+
+        当系统完全没有任何行为信号时，回退到最新发布的指标，作为用户的探索起点；
+        同样排除当前用户已交互过的指标。
+        """
+        codes = await self._repo.recent_published_metrics(limit + len(exclude))
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set(exclude)
+        for code in codes:
+            code = str(code)
+            if code in seen:
+                continue
+            seen.add(code)
+            result.append(
+                {
+                    "metric_id": code,
+                    "via": "latest_published",
+                    "edge_type": "RECENT",
+                    "reason": "最新发布指标",
+                }
+            )
+            if len(result) >= limit:
+                break
+        return result
 
     async def recommend_terms(self, limit: int) -> list[TermResponse]:
         """返回已发布术语候选（ORM → TermResponse 转换，避免 Pydantic 序列化 500）。"""

@@ -138,6 +138,8 @@ def _fallback_repo(edge_side_effect) -> MagicMock:
     repo = MagicMock()
     repo.related_edges = AsyncMock(side_effect=edge_side_effect)
     repo.published_terms = AsyncMock(return_value=[])
+    repo.popular_metrics = AsyncMock(return_value=[])
+    repo.recent_published_metrics = AsyncMock(return_value=[])
     return repo
 
 
@@ -240,3 +242,43 @@ async def test_lineage_fallback_hits_limit() -> None:
     _seed_session(svc, ["m1"])
     items = await svc.recommend_metrics(7, 1)
     assert items == [{"metric_id": "m2", "via": "m1", "edge_type": "LINEAGE"}]
+
+
+async def test_recommend_metrics_global_popular_fallback() -> None:
+    """协同过滤与血缘均无可推时，回退到全站热门指标。"""
+    svc = RecommendService(MagicMock())
+    svc._repo = _fallback_repo(lambda node, limit: [])
+    svc._session = MagicMock()
+    svc._session.execute = AsyncMock(return_value=_dual_result([], []))
+    svc._repo.popular_metrics = AsyncMock(return_value=[("m_hot_1", 12), ("m_hot_2", 5)])
+    items = await svc.recommend_metrics(7, 6)
+    assert items
+    assert items[0]["metric_id"] == "m_hot_1"
+    assert items[0]["via"] == "global_hot"
+    assert items[0]["reason"] == "全站热门指标"
+
+
+async def test_recommend_metrics_global_popular_excludes_seeds() -> None:
+    """全局热门应排除用户已交互过的指标，避免重复推荐。"""
+    svc = RecommendService(MagicMock())
+    svc._repo = _fallback_repo(lambda node, limit: [])
+    svc._session = MagicMock()
+    svc._session.execute = AsyncMock(return_value=_dual_result(["m_hot_1"], []))
+    svc._repo.popular_metrics = AsyncMock(return_value=[("m_hot_1", 12), ("m_hot_2", 5)])
+    items = await svc.recommend_metrics(7, 6)
+    assert [i["metric_id"] for i in items] == ["m_hot_2"]
+
+
+async def test_recommend_metrics_latest_published_fallback() -> None:
+    """全站无任何行为信号时，回退到最新发布指标，保证面板非空。"""
+    svc = RecommendService(MagicMock())
+    svc._repo = _fallback_repo(lambda node, limit: [])
+    svc._session = MagicMock()
+    svc._session.execute = AsyncMock(return_value=_dual_result([], []))
+    svc._repo.popular_metrics = AsyncMock(return_value=[])
+    svc._repo.recent_published_metrics = AsyncMock(return_value=["m_new_1", "m_new_2"])
+    items = await svc.recommend_metrics(7, 6)
+    assert items
+    assert items[0]["metric_id"] == "m_new_1"
+    assert items[0]["via"] == "latest_published"
+    assert items[0]["reason"] == "最新发布指标"

@@ -15,7 +15,14 @@ from app.services.recommend.service import RecommendService
 
 router = APIRouter(prefix="/recommend", tags=["recommend"])
 
-_READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
+_READ_ROLES = (
+    "metric_owner",
+    "domain_admin",
+    "platform_admin",
+    "reviewer",
+    "viewer",
+    "compliance_officer",
+)
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 
 

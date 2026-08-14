@@ -18,6 +18,9 @@ import { useTracking } from "../hooks/useTracking";
 const EDGE_TYPE_LABEL: Record<string, string> = {
   DERIVED_FROM: "派生自",
   CONSUMED_BY: "被消费",
+  LINEAGE: "关联",
+  POPULAR: "热门",
+  RECENT: "最新",
 };
 
 // 生命周期五站：顺序即真实流程
@@ -354,7 +357,10 @@ export function Dashboard() {
       try {
         const [dash, rec, recTerms] = await Promise.all([
           fetchDashboard(),
-          fetchRecommendedMetrics(6).catch(() => []),
+          fetchRecommendedMetrics(6).catch((e) => {
+            console.warn("[Dashboard] 推荐指标加载失败", e);
+            return [];
+          }),
           fetchRecommendedTerms(5).catch(() => []),
         ]);
         setData(dash);
@@ -501,7 +507,7 @@ export function Dashboard() {
             extra={<a onClick={() => navigate("/catalog")}>去目录</a>}
           >
             {recommended.length === 0 ? (
-              <Empty description="暂无推荐（随使用积累协同过滤信号）" />
+              <Empty description="暂无推荐（去指标目录逛逛，很快就有专属推荐）" />
             ) : (
               recommended.map((r) => (
                 <div
@@ -518,7 +524,11 @@ export function Dashboard() {
                 >
                   <span className="mono" style={{ fontWeight: 600 }}>{r.metric_id}</span>
                   <span className="muted" style={{ fontSize: 12 }}>
-                    {r.via === "collaborative_filtering" ? "协同过滤" : `血缘 · ${EDGE_TYPE_LABEL[r.edge_type] ?? r.edge_type}`}
+                    {r.reason
+                      ? r.reason
+                      : r.via === "collaborative_filtering"
+                        ? "协同过滤"
+                        : `血缘 · ${EDGE_TYPE_LABEL[r.edge_type] ?? r.edge_type}`}
                     {typeof r.score === "number" && ` · ${(r.score * 100).toFixed(0)}%`}
                   </span>
                 </div>

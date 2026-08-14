@@ -977,6 +977,7 @@ export interface RecommendItem {
   score?: number;
   edge_type: string;
   from?: string;
+  reason?: string;
 }
 
 export interface RecommendTermsResponse {
