@@ -298,6 +298,41 @@ async def update_metric_description(
 
 
 @router.post(
+    "/{metric_code}/infer-description",
+    response_model=ApiResponse[MetricResponse],
+    summary="LLM 推断指标业务描述（治理补充 TD §12.1，不触发版本/不参与口径变更）",
+    dependencies=_WRITE_DEPS,
+)
+async def infer_metric_description(
+    metric_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """资产地图/指标详情一键 LLM 推断描述并落库（source=llm）；写审计与业务同事务提交。"""
+    service = MetricService(db)
+    metric = await service.infer_metric_description(
+        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="UPDATE",
+        entity_type="metric_description",
+        entity_id=metric.metric_code,
+        detail={"source": "llm"},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+@router.post(
     "/{metric_code}/publish",
     response_model=ApiResponse[MetricResponse],
     summary="发布指标（FR-07，路由到 approve_metric）",

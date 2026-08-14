@@ -2135,3 +2135,97 @@ async def test_update_metric_description_not_owner_raises_auth():
         )
     repo.update_with_optimistic_lock.assert_not_called()
 
+
+# infer_metric_description（TD §12.1 LLM 推断指标业务描述，source=llm）
+# ---------------------------------------------------------------------------
+
+
+def _llm_client(content: str) -> MagicMock:
+    """构造 enabled=True 的假 LLM 客户端（chat 返回指定 content）。"""
+    client = MagicMock()
+    client.enabled = True
+    client.chat = AsyncMock(return_value={"content": content})
+    client.close = AsyncMock()
+    return client
+
+
+async def test_infer_metric_description_llm_success_sets_llm_source():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", row_version=3))
+    updated = make_metric(description="每日成交总额（含退款前）", description_source="llm")
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+    fake = _llm_client(
+        '{"description": "每日成交总额（含退款前），按渠道汇总", "confidence": 0.92}'
+    )
+    with patch.object(svc, "_build_llm_client", AsyncMock(return_value=fake)):
+        result = await svc.infer_metric_description(
+            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domain="sales"
+        )
+
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["description"] == "每日成交总额（含退款前），按渠道汇总"
+    assert kwargs["description_source"] == "llm"
+    assert kwargs["description_updated_by"] == 1
+    # 推断不触发版本号递增
+    assert "version" not in kwargs
+    assert result is updated
+
+
+async def test_infer_metric_description_llm_unavailable_raises_business():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    fake = MagicMock()
+    fake.enabled = False
+    with (
+        patch.object(svc, "_build_llm_client", AsyncMock(return_value=fake)),
+        pytest.raises(BusinessError) as ei,
+    ):
+        await svc.infer_metric_description(
+            "sales_gmv_daily", actor_id=1, role="metric_owner"
+        )
+    assert ei.value.error_code == "LLM_INFER_UNAVAILABLE"
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_infer_metric_description_parse_fail_raises_business():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    # chat 返回非 JSON → 解析失败 → 视为 LLM 不可用
+    fake = _llm_client("抱歉，我无法生成描述。")
+    with (
+        patch.object(svc, "_build_llm_client", AsyncMock(return_value=fake)),
+        pytest.raises(BusinessError) as ei,
+    ):
+        await svc.infer_metric_description(
+            "sales_gmv_daily", actor_id=1, role="metric_owner"
+        )
+    assert ei.value.error_code == "LLM_INFER_UNAVAILABLE"
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_infer_metric_description_blocked_by_pdp():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    svc._governance_svc.check_metric_permission = AsyncMock(
+        return_value=Decision(allow=False, reason="no write", error_code="FORBIDDEN")
+    )
+
+    with pytest.raises(BusinessError) as ei:
+        await svc.infer_metric_description(
+            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domain="sales"
+        )
+    assert ei.value.error_code == "FORBIDDEN"
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_infer_metric_description_not_owner_raises_auth():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(owner_id=1))
+
+    with pytest.raises(AuthError):
+        await svc.infer_metric_description(
+            "sales_gmv_daily", actor_id=99, role="analyst", user_domain="sales"
+        )
+    repo.update_with_optimistic_lock.assert_not_called()
+
+

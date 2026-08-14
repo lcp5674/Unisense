@@ -8,6 +8,8 @@ P3: 继承 BaseService Protocol，统一 db+eventbus+settings 注入模式。
 
 from __future__ import annotations
 
+import json
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -42,6 +44,27 @@ from app.services.semantic.schemas import (
 from app.services.semantic.state_machine import MetricStateMachine
 
 logger = structlog.get_logger("unisense.semantic.service")
+
+# 指标描述推断的 LLM 响应格式（对齐 collector：json_schema 强约束优先 + json_object 降级）
+_METRIC_DESC_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "metric_description_result",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            },
+            "required": ["description", "confidence"],
+            "additionalProperties": False,
+        },
+    },
+}
+_METRIC_JSON_OBJECT_FORMAT: dict[str, Any] = {"type": "json_object"}
+# 格式重试提示：解析为 None 时追加，迫使模型收敛到合规 JSON（最多重试 1 次）。
+_METRIC_STRICT_JSON_HINT = "请严格只输出符合 JSON Schema 的 JSON，不要任何额外文字。"
 
 
 def _redis_available() -> bool:
@@ -812,6 +835,172 @@ class MetricService(BaseService):
             cleared=not stripped,
         )
         return updated
+
+    async def infer_metric_description(
+        self,
+        metric_code: str,
+        actor_id: int,
+        role: str,
+        user_domain: str | None = None,
+    ) -> Metric:
+        """用 LLM 推断指标业务描述并落库（TD §12.1，不触发版本/不参与口径变更）。
+
+        与 ``update_metric_description`` 同语义：描述是运营层补充，不创建 MetricVersion、
+        不设 PII 复核闸门；权限沿用 owner/admin + PDP write。
+
+        Args:
+            metric_code: 指标编码。
+            actor_id: 操作人 ID。
+            role: 操作人角色。
+            user_domain: 操作人所属域（API 层传入）。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            AuthError: metric_owner 操作他人指标（越权）。
+            BusinessError: PDP 无 write 权限，或 LLM 不可用/推断失败。
+        """
+        metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权更新该指标描述",
+                error_code=decision.error_code or "FORBIDDEN",
+                ctx={"metric_code": metric_code, "actor_id": actor_id},
+            )
+
+        inferred = await self._llm_infer_metric_description(metric)
+        if inferred is None:
+            raise BusinessError(
+                "LLM 推断不可用：请检查 LLM 配置或稍后重试",
+                error_code="LLM_INFER_UNAVAILABLE",
+                ctx={"metric_code": metric_code},
+            )
+
+        updates: dict[str, Any] = {
+            "description": inferred["description"],
+            "description_source": "llm",
+            "description_updated_by": actor_id,
+            "description_updated_at": datetime.now(UTC),
+        }
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id, metric.row_version, **updates
+        )
+        await self._cache.invalidate(metric_code)
+
+        logger.info(
+            "metric_description_inferred",
+            metric_code=metric_code,
+            actor_id=actor_id,
+            confidence=inferred.get("confidence"),
+        )
+        return updated
+
+    async def _build_llm_client(self) -> Any:
+        """构建 LLM 客户端：优先 DB 配置（env 兜底参与路由），DB 读取失败回退 env 静态客户端。
+
+        与 collector/ai 消费方一致，避免描述推断走已失效的 env 静态客户端
+        （如 kilo.ai 模型下线 → 404 → LLM_INFER_UNAVAILABLE）。
+        """
+        try:
+            from app.services.llm.config_service import LlmConfigService
+
+            return await LlmConfigService(self._db).build_client()
+        except Exception:  # noqa: BLE001 - DB 配置读取异常降级 env 静态客户端，不阻断推断
+            logger.warning("llm_db_config_load_failed, fallback to env client", exc_info=True)
+            from app.services.llm.client import build_llm_client
+
+            return build_llm_client()
+
+    async def _llm_infer_metric_description(
+        self, metric: Metric
+    ) -> dict[str, Any] | None:
+        """使用 LLM 推断指标业务描述，返回结构化结果（失败返回 None）。
+
+        复用 ``LlmConfigService.build_client``（DB 配置优先 + 路由/熔断），
+        解析走统一解析器 ``llm.parse.parse_description_result``；
+        json_schema 强约束优先，失败降级 json_object，解析失败追加约束提示重试 1 次。
+        """
+        from app.services.llm.parse import parse_description_result
+
+        client = None
+        try:
+            client = await self._build_llm_client()
+            if not getattr(client, "enabled", False):
+                return None
+
+            definition = metric.definition_json or {}
+            context_lines = [
+                f"- 指标名称: {metric.name}",
+                f"- 指标编码: {metric.metric_code}",
+                f"- 所属域: {metric.domain}",
+                f"- 指标类型: {metric.type}",
+                f"- 粒度: {metric.granularity}",
+                f"- 单位: {metric.unit}",
+                f"- 聚合方式: {metric.aggregation}",
+                f"- 时间语义: {metric.time_semantics}",
+                f"- 数仓层: {metric.dw_layer}",
+                f"- 口径定义: {json.dumps(definition, ensure_ascii=False)[:1500]}",
+            ]
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是数据指标治理专家。根据指标元数据与口径定义，推断该指标的中文业务描述。\n"
+                        "返回 JSON 格式：{\n"
+                        '  "description": "指标的中文业务描述",\n'
+                        '  "confidence": 0.0-1.0\n'
+                        "}\n"
+                        "要求：\n"
+                        "1. 描述简洁准确，20-100字\n"
+                        "2. 说明指标的业务含义、计算口径要点与使用场景\n"
+                        "3. confidence < 0.5 表示不确定"
+                    ),
+                },
+                {"role": "user", "content": "\n".join(context_lines)},
+            ]
+
+            for attempt in (0, 1):
+                aug = messages
+                if attempt:
+                    aug = [*messages, {"role": "user", "content": _METRIC_STRICT_JSON_HINT}]
+                for fmt in (_METRIC_DESC_RESPONSE_FORMAT, _METRIC_JSON_OBJECT_FORMAT):
+                    try:
+                        result = await client.chat(
+                            aug, temperature=0.0, max_tokens=300, response_format=fmt
+                        )
+                    except Exception:  # noqa: BLE001 - LLM 网关错误按格式失败降级重试
+                        continue
+                    description, confidence = parse_description_result(
+                        result.get("content", "")
+                    )
+                    if description is not None and confidence is not None:
+                        return {"description": description, "confidence": confidence}
+            logger.warning("llm_infer_metric_desc_all_formats_failed")
+            return None
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            logger.warning("llm_infer_metric_desc_timeout_error: %s", exc)
+            return None
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.warning("llm_infer_metric_desc_format_error: %s", exc)
+            return None
+        except RuntimeError as exc:
+            logger.warning("llm_infer_metric_desc_runtime_error: %s", exc)
+            return None
+        except Exception:  # noqa: BLE001 - 兜底：推断是辅助能力，绝不阻断主流程
+            logger.warning("llm_infer_metric_desc_unexpected_error", exc_info=True)
+            return None
+        finally:
+            if client is not None:
+                with suppress(Exception):  # 释放失败不阻断
+                    await client.close()
 
     async def publish_metric(
         self,
