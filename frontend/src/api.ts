@@ -65,6 +65,8 @@ import {
   MetricUpdateRequest,
   MetricVersionResponse,
   NL2SQLResult,
+  LlmConfig,
+  LlmConfigTestResult,
   Notification,
   NotifyEventLog,
   ObsMetricsNotifications,
@@ -1262,6 +1264,38 @@ export async function aiNl2Sql(body: {
   return request<NL2SQLResult>(`${API_BASE}/ai/nl2sql`, {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+// ---- LLM 配置 ----
+export async function getLlmConfig(): Promise<LlmConfig> {
+  return request<LlmConfig>(`${API_BASE}/ai/config`);
+}
+
+export async function saveLlmConfig(body: {
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key?: string;
+  timeout: number;
+  enabled: boolean;
+}): Promise<{ id: number }> {
+  return request<{ id: number }>(`${API_BASE}/ai/config`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function testLlmConfig(body?: {
+  provider?: string;
+  base_url?: string;
+  model?: string;
+  api_key?: string;
+  timeout?: number;
+}): Promise<LlmConfigTestResult> {
+  return request<LlmConfigTestResult>(`${API_BASE}/ai/config/test`, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
   });
 }
 

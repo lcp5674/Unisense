@@ -58,6 +58,7 @@ from app.models.governance import (
     SensitivityLevel,
 )
 from app.models.lineage import LineageEdge, LineageEdgeHistory
+from app.models.llm_config import LlmConfig
 from app.models.metric import Metric
 from app.models.metric_health import MetricHealthScore
 from app.models.metric_template import MetricTemplate
@@ -116,6 +117,7 @@ __all__ = [
     "GrantType",
     "LineageEdge",
     "LineageEdgeHistory",
+    "LlmConfig",
     "Metric",
     "MetricDimension",
     "MetricHealthScore",

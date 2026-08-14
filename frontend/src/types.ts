@@ -777,6 +777,28 @@ export interface NL2SQLResult {
   execute_error?: string;
 }
 
+// LLM 平台配置（backend /api/v1/ai/config）
+export interface LlmConfig {
+  provider: string;
+  base_url: string;
+  model: string;
+  has_api_key: boolean;
+  timeout: number;
+  enabled: boolean;
+  source: "db" | "env" | "none";
+  can_edit: boolean;
+  updated_by: number | null;
+  updated_at: string | null;
+}
+
+export interface LlmConfigTestResult {
+  ok: boolean;
+  latency_ms: number;
+  model: string;
+  error: string;
+  detail?: Record<string, unknown> | null;
+}
+
 // ============================================================================
 // 审计日志（backend /api/v1/audit）
 // ============================================================================

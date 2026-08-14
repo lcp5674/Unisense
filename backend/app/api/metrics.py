@@ -896,9 +896,9 @@ async def auto_suggest_metric(
     # 可选 LLM 命名（best-effort，不可用降级到规则）
     llm_name: str | None = None
     try:
-        from app.services.llm.client import build_llm_client
+        from app.services.llm.config_service import LlmConfigService
 
-        llm_client = build_llm_client()
+        llm_client = await LlmConfigService(db).build_client()
         if getattr(llm_client, "enabled", False) and effective_table:
             period_cn = {
                 "day": "日", "week": "周", "month": "月",

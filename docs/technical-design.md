@@ -495,7 +495,12 @@ GET    /me/recent                   # 最近浏览（前 20，前端记录指标
 POST   /nl2sql                       # 自然语言→语义层查询（先锚定再生成）
 POST   /mcp/tools/list               # MCP 工具清单
 POST   /mcp/tools/call               # MCP 工具调用（list_metrics/query_metric/...）
+GET    /config                       # 读取 LLM 生效配置（脱敏：source=db/env/none + can_edit；任意登录用户）
+PUT    /config                       # 保存 LLM 配置（单例行 upsert，api_key 留空保持原密钥；platform_admin/domain_admin）
+POST   /config/test                  # 连通性测试（POST {base_url}/v1/chat/completions 探针，返回 ok/latency_ms/model）
 ```
+LLM 配置优先级：llm_config 表（enabled=true）> 环境变量（UNISENSE_LLM_*）> 未配置降级。
+API Key 经 SecretManager Fernet 加密落库（迁移 0037），响应一律脱敏。
 
 ### 3.8 通知与运营（notify / observability）
 ```
