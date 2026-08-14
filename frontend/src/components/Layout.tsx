@@ -101,9 +101,6 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/quality", label: "质量中心", icon: <ExperimentOutlined /> },
       { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
       { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
-      { key: "/dicts", label: "参照数据管理", icon: <TagsOutlined /> },
-      { key: "/governance", label: "权限治理", icon: <SafetyCertificateOutlined /> },
-      { key: "/audit", label: "审计日志", icon: <FileSearchOutlined /> },
     ],
   },
   {
@@ -133,6 +130,9 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     label: "系统管理",
     children: [
       { key: "/users", label: "用户管理", icon: <TeamOutlined /> },
+      { key: "/governance", label: "权限治理", icon: <SafetyCertificateOutlined /> },
+      { key: "/audit", label: "审计日志", icon: <FileSearchOutlined /> },
+      { key: "/dicts", label: "参照数据管理", icon: <TagsOutlined /> },
       { key: "/system-config", label: "系统配置", icon: <SettingOutlined /> },
     ],
   },

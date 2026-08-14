@@ -27,7 +27,13 @@ from app.core.base_service import BaseService
 from app.core.exceptions import UnisenseError
 from app.core.logging import get_logger
 from app.services.ai.repository import AiRepository
-from app.services.llm.client import LlmClient, LlmError, build_llm_client
+from app.services.llm.client import (
+    DeterministicFallbackLlmClient,
+    LlmClient,
+    LlmError,
+    LlmRouterClient,
+    build_llm_client,
+)
 
 logger = get_logger(__name__)
 
@@ -95,7 +101,11 @@ class AiService(BaseService):
     #: 缓存永不命中，"避免重复打 LLM 网关"的优化形同虚设（审查发现）。
     _cache: ClassVar[dict[str, tuple[float, dict[str, Any]]]] = {}
 
-    def __init__(self, session: AsyncSession, llm: LlmClient | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        llm: LlmClient | LlmRouterClient | DeterministicFallbackLlmClient | None = None,
+    ) -> None:
         super().__init__(session)
         self._session = session
         self._repo = AiRepository(session)

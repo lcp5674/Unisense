@@ -850,18 +850,44 @@ export interface NL2SQLResult {
   execute_error?: string;
 }
 
-// LLM 平台配置（backend /api/v1/ai/config）
-export interface LlmConfig {
+// LLM 平台配置（backend /api/v1/ai/config，多实例轮询路由）
+export interface LlmConfigItem {
+  id: number | null;
+  name: string;
   provider: string;
   base_url: string;
   model: string;
   has_api_key: boolean;
   timeout: number;
   enabled: boolean;
+  priority: number;
   source: "db" | "env" | "none";
   can_edit: boolean;
   updated_by: number | null;
   updated_at: string | null;
+}
+
+export interface LlmConfigList {
+  items: LlmConfigItem[];
+  strategy: string;
+  effective: Record<string, unknown> & {
+    provider: string;
+    base_url: string;
+    model: string;
+    source: "db" | "env" | "none";
+  };
+  can_edit: boolean;
+}
+
+export interface LlmConfigPayload {
+  name: string;
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key?: string;
+  timeout: number;
+  enabled: boolean;
+  priority: number;
 }
 
 export interface LlmConfigTestResult {

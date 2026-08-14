@@ -1,10 +1,18 @@
-"""AI 问数 API（TD §12.7 / FR-14）。"""
+"""AI 问数 API（TD §12.7 / FR-14）。
+
+除 NL2SQL 外，提供 LLM 平台配置的多实例管理端点（系统配置页）：
+- GET  /ai/config            读取全部 LLM 实例 + 路由策略 + 生效配置（脱敏）
+- POST /ai/config            新增 LLM 实例（platform_admin/domain_admin）
+- PUT  /ai/config/{id}       更新 LLM 实例（api_key 留空保持原密钥）
+- DELETE /ai/config/{id}     删除 LLM 实例（软删除）
+- POST /ai/config/test       测试连通性（已保存实例 或 临时载荷）
+"""
 
 from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
@@ -17,7 +25,13 @@ from app.db.mysql import get_db_session
 from app.services.ai.schemas import NL2SQLRequest
 from app.services.ai.service import AiService
 from app.services.llm.config_service import LlmConfigService
-from app.services.llm.schemas import LlmConfigPayload, LlmConfigResponse, LlmConfigTestResult
+from app.services.llm.schemas import (
+    LlmConfigListResponse,
+    LlmConfigPayload,
+    LlmConfigResponse,
+    LlmConfigTestRequest,
+    LlmConfigTestResult,
+)
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -38,7 +52,6 @@ async def nl2sql(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     # OPS-09 特性开关：AI 问数能力可被平台管理员灰度关闭（kill switch）。
-    # 此前开关已在 main.py 注册但端点未接线，关闭配置形同虚设。
     if not is_feature_enabled_or_default("ai.nl2sql"):
         raise AuthError(
             "AI 问数能力已被平台管理员关闭",
@@ -74,62 +87,147 @@ async def get_llm_config(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    """读取 LLM 生效配置（脱敏：不含明文 API Key）。
+    """读取全部 LLM 实例（脱敏）+ 路由策略 + 生效配置。
 
     任意登录用户可读（用于展示"是否已配置 LLM"），can_edit 标识当前用户
     是否可写（platform_admin / domain_admin）。
     """
     svc = LlmConfigService(db)
+    rows = await svc.list_configs()
+    can_edit = user.role in ("platform_admin", "domain_admin")
+    items = [
+        LlmConfigResponse.build(
+            id=row.id,
+            name=row.name,
+            provider=row.provider or "custom",
+            base_url=row.base_url,
+            model=row.model,
+            has_api_key=bool(row.api_key_enc),
+            timeout=row.timeout or 30,
+            enabled=row.enabled,
+            priority=row.priority or 0,
+            source="db",
+            can_edit=can_edit,
+            updated_by=row.updated_by,
+            updated_at=str(row.updated_at) if row.updated_at else None,
+        )
+        for row in rows
+    ]
     effective = await svc.get_effective()
-    row = await svc.get_config()
-    resp = LlmConfigResponse.build(
-        provider=effective["provider"],
-        base_url=effective["base_url"],
-        model=effective["model"],
-        has_api_key=bool(effective["api_key"]),
-        timeout=effective["timeout"],
-        enabled=bool(row is not None and row.enabled) if row is not None else False,
-        source=effective["source"],
-        can_edit=user.role in ("platform_admin", "domain_admin"),
-        updated_by=effective["updated_by"],
-        updated_at=str(effective["updated_at"]) if effective["updated_at"] else None,
+    # 生效配置脱敏（不回传明文密钥）
+    effective_masked = {**effective, "api_key": ""}
+    resp = LlmConfigListResponse(
+        items=items,
+        strategy="round_robin",
+        effective=effective_masked,
+        can_edit=can_edit,
     )
     return ok(data=resp.model_dump(), trace_id=trace_id)
 
 
-@router.put("/config", dependencies=_CONFIG_ADMIN_DEPS)
-async def save_llm_config(
+@router.post("/config", dependencies=_CONFIG_ADMIN_DEPS, status_code=201)
+async def create_llm_config(
     payload: LlmConfigPayload,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    """保存 LLM 配置（单例行 upsert）。api_key 留空表示保持原密钥不变。"""
+    """新增一个 LLM 实例（api_key 必填，加密落库）。"""
+    if not payload.api_key.strip():
+        raise HTTPException(status_code=422, detail="新增实例必须填写 api_key")
     svc = LlmConfigService(db)
-    row = await svc.save(payload, updated_by=user.id)
+    row = await svc.create(payload, updated_by=user.id)
     await write_audit(
         db,
         actor_id=user.id,
-        action="ai.config.update",
+        action="ai.config.create",
         entity_type="llm_config",
         entity_id=str(row.id),
-        detail={"provider": payload.provider, "enabled": payload.enabled},
+        detail={"name": payload.name, "provider": payload.provider, "enabled": payload.enabled},
         trace_id=trace_id,
     )
     await db.commit()
     return ok(data={"id": row.id}, trace_id=trace_id)
 
 
+@router.put("/config/{instance_id}", dependencies=_CONFIG_ADMIN_DEPS)
+async def update_llm_config(
+    instance_id: int,
+    payload: LlmConfigPayload,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """更新 LLM 实例；api_key 留空保持原密钥不变。"""
+    svc = LlmConfigService(db)
+    row = await svc.update(instance_id, payload, updated_by=user.id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="LLM 实例不存在")
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ai.config.update",
+        entity_type="llm_config",
+        entity_id=str(row.id),
+        detail={"name": payload.name, "provider": payload.provider, "enabled": payload.enabled},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"id": row.id}, trace_id=trace_id)
+
+
+@router.delete("/config/{instance_id}", dependencies=_CONFIG_ADMIN_DEPS)
+async def delete_llm_config(
+    instance_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """删除 LLM 实例（软删除，保留审计痕迹）。"""
+    svc = LlmConfigService(db)
+    deleted = await svc.delete(instance_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="LLM 实例不存在")
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ai.config.delete",
+        entity_type="llm_config",
+        entity_id=str(instance_id),
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"id": instance_id, "deleted": True}, trace_id=trace_id)
+
+
 @router.post("/config/test", dependencies=_CONFIG_ADMIN_DEPS)
 async def test_llm_config(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     trace_id: Annotated[str, Depends(get_trace_id)],
-    payload: LlmConfigPayload | None = None,
+    payload: LlmConfigTestRequest | None = None,
 ) -> Any:
-    """测试 LLM 连通性（payload 为空时用已保存配置）。
+    """测试 LLM 连通性。
 
-    兼容 OpenAI 协议：POST {base_url}/v1/chat/completions 探针。
+    支持两种入参：
+    - instance_id：测试已保存实例（用其落库密钥）；
+    - base_url/model/api_key/timeout：临时测试（不落库；api_key 留空回落已保存/环境密钥）。
     """
     svc = LlmConfigService(db)
-    result: LlmConfigTestResult = await svc.test_connection(payload)
+    if payload is not None and payload.instance_id is not None:
+        result: LlmConfigTestResult = await svc.test_instance(payload.instance_id)
+    elif payload is not None:
+        result = await svc.test_connection(
+            LlmConfigPayload(
+                name="probe",
+                provider="custom",
+                base_url=payload.base_url,
+                model=payload.model,
+                api_key=payload.api_key,
+                timeout=payload.timeout,
+                enabled=False,
+            )
+        )
+    else:
+        result = await svc.test_connection(None)
     return ok(data=result.model_dump(), trace_id=trace_id)

@@ -67,7 +67,8 @@ import {
   MetricUpdateRequest,
   MetricVersionResponse,
   NL2SQLResult,
-  LlmConfig,
+  LlmConfigList,
+  LlmConfigPayload,
   LlmConfigTestResult,
   Notification,
   NotifyEventLog,
@@ -1347,26 +1348,36 @@ export async function aiNl2Sql(body: {
   });
 }
 
-// ---- LLM 配置 ----
-export async function getLlmConfig(): Promise<LlmConfig> {
-  return request<LlmConfig>(`${API_BASE}/ai/config`);
+// ---- LLM 配置（多实例轮询路由）----
+export async function getLlmConfigs(): Promise<LlmConfigList> {
+  return request<LlmConfigList>(`${API_BASE}/ai/config`);
 }
 
-export async function saveLlmConfig(body: {
-  provider: string;
-  base_url: string;
-  model: string;
-  api_key?: string;
-  timeout: number;
-  enabled: boolean;
-}): Promise<{ id: number }> {
+export async function createLlmConfig(body: LlmConfigPayload): Promise<{ id: number }> {
   return request<{ id: number }>(`${API_BASE}/ai/config`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateLlmConfig(
+  id: number,
+  body: LlmConfigPayload,
+): Promise<{ id: number }> {
+  return request<{ id: number }>(`${API_BASE}/ai/config/${id}`, {
     method: "PUT",
     body: JSON.stringify(body),
   });
 }
 
+export async function deleteLlmConfig(id: number): Promise<{ id: number }> {
+  return request<{ id: number }>(`${API_BASE}/ai/config/${id}`, {
+    method: "DELETE",
+  });
+}
+
 export async function testLlmConfig(body?: {
+  instance_id?: number;
   provider?: string;
   base_url?: string;
   model?: string;

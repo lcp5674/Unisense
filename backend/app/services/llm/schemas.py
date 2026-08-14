@@ -1,6 +1,6 @@
-"""LLM 平台配置 Schemas（对齐 TD §12.7 / FR-14 扩展）。
+"""LLM 平台配置 Schemas（对齐 TD §12.7 / FR-14 扩展，多实例轮询路由）。
 
-提供前端「AI 助手」页配置 OpenAI 协议兼容 LLM 的载荷与响应结构。
+提供前端「系统配置」页配置多个 OpenAI 协议兼容 LLM 实例的载荷与响应结构。
 API Key 前端提交时为明文（HTTPS 传输），后端经 SecretManager 加密后落库，
 响应一律脱敏（仅返回 has_api_key 布尔标记）。
 """
@@ -13,17 +13,19 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class LlmConfigPayload(BaseModel):
-    """LLM 配置保存载荷。
+    """LLM 实例保存载荷（创建 / 更新共用）。
 
     api_key 可选：为空表示保持原密钥不变（编辑时不覆盖已有密钥）。
     """
 
+    name: str = Field("", max_length=64, description="实例名称（如 主用/备用）")
     provider: str = Field("custom", max_length=32, description="提供商标识")
     base_url: str = Field("", max_length=256, description="OpenAI 兼容接口基础 URL")
     model: str = Field("", max_length=128, description="模型名称")
     api_key: str = Field("", description="API Key（留空表示保持原密钥）")
     timeout: int = Field(30, ge=1, le=300, description="请求超时秒数")
-    enabled: bool = Field(False, description="是否启用")
+    enabled: bool = Field(False, description="是否启用该实例（仅启用参与路由）")
+    priority: int = Field(0, ge=0, le=100, description="路由优先级（小者优先，0 最高）")
 
     @field_validator("base_url", "model", mode="after")
     @classmethod
@@ -32,14 +34,17 @@ class LlmConfigPayload(BaseModel):
 
 
 class LlmConfigResponse(BaseModel):
-    """LLM 配置响应（脱敏：不含明文 API Key）。"""
+    """LLM 实例响应（脱敏：不含明文 API Key）。"""
 
+    id: int | None = None
+    name: str = ""
     provider: str = ""
     base_url: str = ""
     model: str = ""
     has_api_key: bool = False
     timeout: int = 30
     enabled: bool = False
+    priority: int = 0
     source: str = "none"  # db | env | none
     can_edit: bool = False
     updated_by: int | None = None
@@ -49,29 +54,60 @@ class LlmConfigResponse(BaseModel):
     def build(
         cls,
         *,
-        provider: str,
-        base_url: str,
-        model: str,
-        has_api_key: bool,
-        timeout: int,
-        enabled: bool,
-        source: str,
-        can_edit: bool,
+        id: int | None = None,  # noqa: A002 - Pydantic 字段名，模型亦用 id
+        name: str = "",
+        provider: str = "",
+        base_url: str = "",
+        model: str = "",
+        has_api_key: bool = False,
+        timeout: int = 30,
+        enabled: bool = False,
+        priority: int = 0,
+        source: str = "none",
+        can_edit: bool = False,
         updated_by: int | None = None,
         updated_at: str | None = None,
     ) -> LlmConfigResponse:
         return cls(
+            id=id,
+            name=name,
             provider=provider,
             base_url=base_url,
             model=model,
             has_api_key=has_api_key,
             timeout=timeout,
             enabled=enabled,
+            priority=priority,
             source=source,
             can_edit=can_edit,
             updated_by=updated_by,
             updated_at=updated_at,
         )
+
+
+class LlmConfigListResponse(BaseModel):
+    """LLM 配置列表响应（多实例 + 路由策略 + 生效配置）。"""
+
+    items: list[LlmConfigResponse] = Field(default_factory=list, description="全部实例（脱敏）")
+    strategy: str = Field("round_robin", description="路由策略（轮询 + 故障转移）")
+    effective: dict[str, Any] = Field(
+        default_factory=dict, description="当前生效配置（供展示，含 source）"
+    )
+    can_edit: bool = False
+
+
+class LlmConfigTestRequest(BaseModel):
+    """连通性测试请求（二选一）：
+
+    - instance_id: 测试已保存实例（用其落库密钥）；
+    - 或直接给 base_url/model/api_key/timeout 临时测试（不落库，api_key 留空回落已保存密钥）。
+    """
+
+    instance_id: int | None = Field(None, description="已保存实例 ID")
+    base_url: str = Field("", max_length=256, description="OpenAI 兼容接口基础 URL")
+    model: str = Field("", max_length=128, description="模型名称")
+    api_key: str = Field("", description="API Key（留空回落已保存/环境密钥）")
+    timeout: int = Field(30, ge=1, le=300, description="请求超时秒数")
 
 
 class LlmConfigTestResult(BaseModel):

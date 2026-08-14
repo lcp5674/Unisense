@@ -505,11 +505,16 @@ GET    /me/recent                   # 最近浏览（前 20，前端记录指标
 POST   /nl2sql                       # 自然语言→语义层查询（先锚定再生成）
 POST   /mcp/tools/list               # MCP 工具清单
 POST   /mcp/tools/call               # MCP 工具调用（list_metrics/query_metric/...）
-GET    /config                       # 读取 LLM 生效配置（脱敏：source=db/env/none + can_edit；任意登录用户）
-PUT    /config                       # 保存 LLM 配置（单例行 upsert，api_key 留空保持原密钥；platform_admin/domain_admin）
-POST   /config/test                  # 连通性测试（POST {base_url}/v1/chat/completions 探针，返回 ok/latency_ms/model）
+GET    /config                       # 读取 LLM 实例列表（脱敏 items[] + strategy=round_robin + effective + can_edit；任意登录用户）
+POST   /config                       # 新增 LLM 实例（api_key 必填，加密落库；platform_admin/domain_admin）
+PUT    /config/{id}                  # 更新 LLM 实例（api_key 留空保持原密钥）
+DELETE /config/{id}                  # 删除 LLM 实例（软删除，保留审计）
+POST   /config/test                  # 连通性测试（instance_id 测试已存实例 或 载荷临时测试，POST {base_url}/v1/chat/completions 探针）
 ```
-LLM 配置优先级：llm_config 表（enabled=true）> 环境变量（UNISENSE_LLM_*）> 未配置降级。
+LLM 多实例轮询路由：llm_config 表可配置多个实例（每行一个，含 name/priority），启用实例按
+priority 排序后轮询（round-robin）；单实例调用失败自动切换下一个可用实例（failover），连续失败
+实例进入冷却（约 30 秒）自动恢复，避免单点 LLM 不可用造成服务不可用（迁移 0039 增补 name/priority）。
+配置优先级：llm_config 表（enabled=true）> 环境变量（UNISENSE_LLM_*）> 未配置降级。
 API Key 经 SecretManager Fernet 加密落库（迁移 0037），响应一律脱敏。
 
 ### 3.8 通知与运营（notify / observability）

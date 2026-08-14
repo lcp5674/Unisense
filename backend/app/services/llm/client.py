@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -43,6 +44,12 @@ logger = logging.getLogger(__name__)
 _LLM_BREAKER = get_circuit_breaker("LLM")
 _LLM_MAX_RETRIES = 2  # 额外重试次数（总计最多 MAX_RETRIES+1 次）
 _LLM_BACKOFF_BASE = 0.2  # 指数退避基数（秒）
+
+# 多实例路由（LlmRouterClient）参数：
+# - 单实例在路由层连续失败阈值（达到后暂时摘除进入冷却，冷却结束自动恢复）
+# - 冷却秒数：故障实例在此窗口内不再被轮询选中（由剩余健康实例承接流量）
+_ROUTER_FAILOVER_THRESHOLD = 3
+_ROUTER_COOLDOWN_SECONDS = 30.0
 
 # 国内主流 LLM 提供商的默认配置
 _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
@@ -124,11 +131,17 @@ class LlmClient:
         api_key: str | None = None,
         model: str | None = None,
         timeout: float = 30.0,
+        breaker: Any | None = None,
+        name: str = "llm",
     ) -> None:
         self._base_url = (base_url or settings.llm_base_url or "").rstrip("/")
         self._api_key = api_key or settings.llm_api_key
         self._model = model or settings.llm_default_model
         self._timeout = timeout
+        self._name = name
+        # 熔断器：多实例路由时传入「每实例专属熔断器」实现隔离（某实例故障不牵连其他实例）；
+        # 缺省回落到模块级全局熔断器（单实例/直接构建场景，向后兼容）。
+        self._breaker = breaker or _LLM_BREAKER
         # 兼容 base_url 是否已含 /v1 后缀（openai 预设含 /v1，deepseek 不含），
         # 统一在此解析出 chat/completions 完整端点，避免每次调用拼出 /v1/v1/... 404。
         self._chat_url = chat_completions_url(self._base_url)
@@ -176,7 +189,7 @@ class LlmClient:
             raise LlmError("LLM 未配置，请设置 UNISENSE_LLM_BASE_URL 和 UNISENSE_LLM_API_KEY")
 
         # 熔断：网关已故障（集群级 OPEN）时快速失败，避免雪崩与无谓等待
-        if not _LLM_BREAKER.allow():
+        if not self._breaker.allow():
             raise LlmError("LLM 熔断器已开启，请求被快速拒绝（依赖降级中）")
 
         # 使用 json_object 格式引导 LLM 输出结构化 JSON
@@ -203,7 +216,7 @@ class LlmClient:
                 structured = self._parse_structured_output(raw_content)
 
                 # 成功 → 复位熔断计数
-                _LLM_BREAKER.record_success()
+                self._breaker.record_success()
                 return {
                     "content": structured.content,
                     "confidence": structured.confidence,
@@ -216,7 +229,7 @@ class LlmClient:
             except httpx.HTTPStatusError as exc:
                 # 4xx（鉴权/参数错）为永久错误，不重试；5xx/429 视为瞬时重试
                 status = exc.response.status_code if exc.response is not None else 0
-                _LLM_BREAKER.record_failure()
+                self._breaker.record_failure()
                 last_exc = exc
                 if attempt < _LLM_MAX_RETRIES and (status >= 500 or status == 429):
                     logger.warning("LLM HTTP 错误（将退避重试）: %d，attempt=%d", status, attempt)
@@ -230,12 +243,12 @@ class LlmClient:
                 raise LlmError(f"LLM 请求失败: {status}") from exc
             except (KeyError, IndexError) as exc:
                 # 响应结构异常：记为一次失败（可能上游降级返回垃圾），但不在此退避重试
-                _LLM_BREAKER.record_failure()
+                self._breaker.record_failure()
                 logger.error("LLM 响应解析失败: %s", exc)
                 raise LlmError("LLM 响应格式错误") from exc
             except httpx.HTTPError as exc:
                 # 网络/超时等传输层瞬时故障：熔断计数 + 退避重试
-                _LLM_BREAKER.record_failure()
+                self._breaker.record_failure()
                 last_exc = exc
                 if attempt < _LLM_MAX_RETRIES:
                     logger.warning("LLM 网络错误（将退避重试）: %s，attempt=%d", exc, attempt)
@@ -281,6 +294,99 @@ class LlmClient:
     async def close(self) -> None:
         """关闭客户端连接。"""
         await self._client.aclose()
+
+
+class LlmRouterClient:
+    """多 LLM 实例轮询路由 + 故障转移客户端。
+
+    承载「LLM 多实例高可用」：平台配置多个 OpenAI 协议兼容实例后，请求按优先级
+    轮询（round-robin）选择起始实例，单实例调用失败（LlmError）时自动切换到下一个
+    可用实例（failover），连续失败的实例进入冷却期（暂时摘除，冷却结束自动恢复），
+    避免单点 LLM 不可用造成服务不可用（对齐 TD §11 韧性）。
+
+    每个实例持有自己的熔断器（LlmClient breaker 注入），某实例熔断不影响其他实例。
+    """
+
+    def __init__(self, instances: list[LlmClient]) -> None:
+        self._instances = list(instances)
+        self._rotation = 0
+        # 实例下标 -> 冷却到期时刻（time.monotonic）；期内不参与轮询
+        self._cooldown_until: dict[int, float] = {}
+        # 实例下标 -> 路由层连续失败计数
+        self._consecutive_failures: dict[int, int] = {}
+
+    @property
+    def enabled(self) -> bool:
+        """是否存在可用实例（至少一个）。"""
+        return bool(self._instances)
+
+    @property
+    def instance_count(self) -> int:
+        return len(self._instances)
+
+    def _candidate_indexes(self, start: int) -> list[int]:
+        """按轮询顺序返回候选实例下标，冷却中的实例跳过。
+
+        全部冷却时退化为全量顺序（保证至少尝试一次，避免永久不可用）。
+        """
+        n = len(self._instances)
+        now = time.monotonic()
+        ordered = [(start + i) % n for i in range(n)]
+        healthy = [i for i in ordered if now >= self._cooldown_until.get(i, 0.0)]
+        return healthy or ordered
+
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1000,
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """按轮询顺序尝试各实例，单实例失败自动切换下一个。
+
+        Raises:
+            LlmError: 所有可用实例均失败时抛出（附带最后一个失败原因）。
+        """
+        if not self._instances:
+            raise LlmError("LLM 未配置，请先配置至少一个 LLM 实例")
+        n = len(self._instances)
+        start = self._rotation % n
+        last_exc: Exception | None = None
+        for idx in self._candidate_indexes(start):
+            try:
+                result = await self._instances[idx].chat(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                )
+                # 成功后推进轮询指针到下一实例，并复位该实例失败计数
+                self._rotation = (idx + 1) % n
+                self._consecutive_failures[idx] = 0
+                return result
+            except LlmError as exc:
+                last_exc = exc
+                self._consecutive_failures[idx] = self._consecutive_failures.get(idx, 0) + 1
+                if self._consecutive_failures[idx] >= _ROUTER_FAILOVER_THRESHOLD:
+                    self._cooldown_until[idx] = time.monotonic() + _ROUTER_COOLDOWN_SECONDS
+                    logger.warning(
+                        "LLM 实例 %d 连续失败 %d 次，进入冷却 %ss（由剩余实例承接流量）",
+                        idx,
+                        self._consecutive_failures[idx],
+                        _ROUTER_COOLDOWN_SECONDS,
+                    )
+                continue
+        self._rotation = (start + 1) % n
+        raise LlmError(f"所有 LLM 实例均不可用：{last_exc}") from last_exc
+
+    async def close(self) -> None:
+        """关闭全部实例连接。"""
+        for inst in self._instances:
+            try:
+                await inst.close()
+            except Exception:  # noqa: BLE001 - 关闭异常不影响其他实例
+                logger.warning("LLM 实例关闭失败", exc_info=True)
 
 
 class LlmError(Exception):

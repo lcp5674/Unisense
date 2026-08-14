@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { SystemConfig } from "../pages/SystemConfig";
 
 vi.mock("../api", () => {
@@ -8,7 +8,13 @@ vi.mock("../api", () => {
     traceId: string;
     status: number;
     detail?: Record<string, unknown> | null;
-    constructor(message: string, code: string, status: number, traceId: string, detail?: Record<string, unknown> | null) {
+    constructor(
+      message: string,
+      code: string,
+      status: number,
+      traceId: string,
+      detail?: Record<string, unknown> | null,
+    ) {
       super(message);
       this.name = "UnisenseApiError";
       this.code = code;
@@ -18,82 +24,99 @@ vi.mock("../api", () => {
     }
   }
   return {
-    aiNl2Sql: vi.fn(),
-    getLlmConfig: vi.fn(),
-    saveLlmConfig: vi.fn(),
+    getLlmConfigs: vi.fn(),
+    createLlmConfig: vi.fn(),
+    updateLlmConfig: vi.fn(),
+    deleteLlmConfig: vi.fn(),
     testLlmConfig: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { getLlmConfig, saveLlmConfig, testLlmConfig } from "../api";
+import {
+  createLlmConfig,
+  deleteLlmConfig,
+  getLlmConfigs,
+  testLlmConfig,
+  updateLlmConfig,
+} from "../api";
 
-const mockGet = vi.mocked(getLlmConfig);
-const mockSave = vi.mocked(saveLlmConfig);
+const mockGet = vi.mocked(getLlmConfigs);
+const mockCreate = vi.mocked(createLlmConfig);
+const mockUpdate = vi.mocked(updateLlmConfig);
+const mockDelete = vi.mocked(deleteLlmConfig);
 const mockTest = vi.mocked(testLlmConfig);
 
-describe("SystemConfig LLM 配置", () => {
+function listData(overrides: {
+  canEdit?: boolean;
+  items?: Array<Record<string, unknown>>;
+} = {}) {
+  const { canEdit = true, items = [] } = overrides;
+  return {
+    items: items as never[],
+    strategy: "round_robin",
+    effective: { source: "db", provider: "deepseek", base_url: "https://api.deepseek.com", model: "deepseek-chat" },
+    can_edit: canEdit,
+  };
+}
+
+const PRIMARY_ITEM = {
+  id: 1,
+  name: "主用",
+  provider: "deepseek",
+  base_url: "https://api.deepseek.com",
+  model: "deepseek-chat",
+  has_api_key: true,
+  timeout: 30,
+  enabled: true,
+  priority: 0,
+  source: "db",
+  can_edit: true,
+  updated_by: 1,
+  updated_at: null,
+};
+
+describe("SystemConfig LLM 路由配置", () => {
   beforeEach(() => {
     mockGet.mockReset();
-    mockSave.mockReset();
+    mockCreate.mockReset();
+    mockUpdate.mockReset();
+    mockDelete.mockReset();
     mockTest.mockReset();
+    mockGet.mockResolvedValue(listData() as never);
   });
 
-  it("平台管理员：展示可编辑配置表单并回填已存配置", async () => {
-    mockGet.mockResolvedValue({
-      provider: "deepseek",
-      base_url: "https://api.deepseek.com",
-      model: "deepseek-chat",
-      has_api_key: true,
-      timeout: 30,
-      enabled: true,
-      source: "db",
-      can_edit: true,
-      updated_by: 1,
-      updated_at: null,
-    });
+  it("平台管理员：展示实例列表（名称/接口/模型/优先级/启用）+ 新增按钮", async () => {
+    mockGet.mockResolvedValue(
+      listData({ items: [PRIMARY_ITEM] }) as never,
+    );
     render(<SystemConfig />);
-    expect(await screen.findByText("LLM 配置")).toBeTruthy();
+    expect(await screen.findByText("LLM 路由配置")).toBeTruthy();
+    expect(await screen.findByText("主用")).toBeTruthy();
+    expect(await screen.findByText("https://api.deepseek.com")).toBeTruthy();
     expect(await screen.findByText("已启用")).toBeTruthy();
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("https://api.deepseek.com")).toBeTruthy();
-    });
+    expect(screen.getByText("新增 LLM 实例")).toBeTruthy();
+    expect(screen.getByText("测试")).toBeTruthy();
+    expect(screen.getByText("编辑")).toBeTruthy();
+    expect(screen.getByText("删除")).toBeTruthy();
   });
 
-  it("普通用户：只读展示，无编辑按钮", async () => {
-    mockGet.mockResolvedValue({
-      provider: "deepseek",
-      base_url: "https://api.deepseek.com",
-      model: "deepseek-chat",
-      has_api_key: true,
-      timeout: 30,
-      enabled: true,
-      source: "env",
-      can_edit: false,
-      updated_by: null,
-      updated_at: null,
-    });
+  it("普通用户：只读展示，无操作列与新增按钮", async () => {
+    mockGet.mockResolvedValue(
+      listData({ canEdit: false, items: [{ ...PRIMARY_ITEM, source: "env" }] }) as never,
+    );
     render(<SystemConfig />);
-    await screen.findByText("LLM 配置");
+    await screen.findByText("LLM 路由配置");
     await waitFor(() => {
-      expect(screen.queryByText("保存配置")).toBeNull();
-      expect(screen.queryByText("测试连通性")).toBeNull();
+      expect(screen.queryByText("新增 LLM 实例")).toBeNull();
+      expect(screen.queryByText("测试")).toBeNull();
+      expect(screen.queryByText("编辑")).toBeNull();
+      expect(screen.queryByText("删除")).toBeNull();
     });
   });
 
-  it("测试连通性：成功时展示连通成功徽标", async () => {
-    mockGet.mockResolvedValue({
-      provider: "deepseek",
-      base_url: "https://api.deepseek.com",
-      model: "deepseek-chat",
-      has_api_key: true,
-      timeout: 30,
-      enabled: true,
-      source: "db",
-      can_edit: true,
-      updated_by: 1,
-      updated_at: null,
-    });
+  it("测试连通性：点行内测试按钮 → 展示连通成功徽标", async () => {
+    mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
     mockTest.mockResolvedValue({
       ok: true,
       latency_ms: 123,
@@ -101,52 +124,76 @@ describe("SystemConfig LLM 配置", () => {
       error: "",
     });
     render(<SystemConfig />);
-    const testBtn = await screen.findByText("测试连通性");
+    const testBtn = await screen.findByText("测试");
     fireEvent.click(testBtn);
     await waitFor(() => {
+      expect(mockTest).toHaveBeenCalledWith({ instance_id: 1 });
       expect(screen.getByText(/连通成功/)).toBeTruthy();
     });
   });
 
-  it("保存配置：调用 saveLlmConfig 并刷新", async () => {
-    mockGet
-      .mockResolvedValueOnce({
-        provider: "custom",
-        base_url: "",
-        model: "",
-        has_api_key: false,
-        timeout: 30,
-        enabled: false,
-        source: "none",
-        can_edit: true,
-        updated_by: null,
-        updated_at: null,
-      })
-      .mockResolvedValueOnce({
-        provider: "deepseek",
-        base_url: "https://api.deepseek.com",
-        model: "deepseek-chat",
-        has_api_key: true,
-        timeout: 30,
-        enabled: true,
-        source: "db",
-        can_edit: true,
-        updated_by: 1,
-        updated_at: null,
-      });
-    mockSave.mockResolvedValue({ id: 1 });
+  it("新增实例：打开弹窗 → 填写 → 保存 → 调用 createLlmConfig", async () => {
+    mockCreate.mockResolvedValue({ id: 2 });
     render(<SystemConfig />);
-    const baseUrl = (await screen.findByPlaceholderText("https://api.deepseek.com")) as HTMLInputElement;
-    fireEvent.change(baseUrl, { target: { value: "https://api.deepseek.com" } });
-    const modelInput = screen.getByPlaceholderText("deepseek-chat") as HTMLInputElement;
-    fireEvent.change(modelInput, { target: { value: "deepseek-chat" } });
-    const saveBtn = screen.getByText("保存配置");
-    fireEvent.click(saveBtn);
-    await waitFor(() => {
-      expect(mockSave).toHaveBeenCalled();
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    // 弹窗表单
+    fireEvent.change(await screen.findByPlaceholderText("如：主用 DeepSeek / 备用通义"), {
+      target: { value: "备用通义" },
     });
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "https://dashscope.aliyuncs.com/compatible-mode" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("deepseek-chat"), {
+      target: { value: "qwen-turbo" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
     await waitFor(() => {
-      expect(screen.getByText("已启用")).toBeTruthy();
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "备用通义",
+          base_url: "https://dashscope.aliyuncs.com/compatible-mode",
+          model: "qwen-turbo",
+          api_key: "sk-test",
+        }),
+      );
+    });
+  });
+
+  it("编辑实例：点编辑 → 回填表单 → 保存 → 调用 updateLlmConfig", async () => {
+    mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
+    mockUpdate.mockResolvedValue({ id: 1 });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("编辑"));
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("https://api.deepseek.com")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByDisplayValue("https://api.deepseek.com"), {
+      target: { value: "https://new.example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ base_url: "https://new.example.com" }),
+      );
+    });
+  });
+
+  it("删除实例：点删除 → 确认弹窗 → 确定 → 调用 deleteLlmConfig", async () => {
+    mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
+    mockDelete.mockResolvedValue({ id: 1 });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("删除"));
+    // 确认弹窗（可控 Modal）出现，限定在弹窗内点击确认按钮
+    const modal = await screen.findByText("删除 LLM 实例");
+    const modalBox = modal.closest(".ant-modal") as HTMLElement;
+    expect(within(modalBox).getByText(/确认删除实例/)).toBeTruthy();
+    fireEvent.click(within(modalBox).getByRole("button", { name: /删\s*除/ }));
+    await waitFor(() => {
+      expect(mockDelete).toHaveBeenCalledWith(1);
     });
   });
 });
