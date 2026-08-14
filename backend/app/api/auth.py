@@ -23,6 +23,8 @@ from app.core.guard import guard_against_injection
 from app.core.security import (
     blacklist_token,
     create_access_token,
+    create_refresh_token,
+    is_token_blacklisted,
     verify_password,
 )
 from app.db.mysql import get_db_session
@@ -39,10 +41,17 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    """登录成功响应（Bearer Token）。"""
+    """登录成功响应（Bearer Token + 刷新令牌）。"""
 
     access_token: str = Field(..., description="JWT 访问令牌")
     token_type: str = Field(default="bearer", description="令牌类型")
+    refresh_token: str = Field(default="", description="JWT 刷新令牌（7天有效，登录/刷新时签发）")
+
+
+class RefreshRequest(BaseModel):
+    """刷新令牌请求体。"""
+
+    refresh_token: str = Field(..., min_length=1, description="刷新令牌")
 
 
 class UserInfo(BaseModel):
@@ -97,7 +106,8 @@ async def login(
     await db.commit()
 
     token = create_access_token(sub=user.id, role=user.role, org_id=user.org_id)
-    return ok(TokenResponse(access_token=token))
+    refresh = create_refresh_token(sub=user.id, role=user.role, org_id=user.org_id)
+    return ok(TokenResponse(access_token=token, refresh_token=refresh))
 
 
 @router.get("/me")
@@ -160,20 +170,55 @@ async def logout(
     return ok({"status": "logged_out", "jti": jti})
 
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(guard_against_injection)])
 async def refresh(
-    user: CurrentUser,
-    request: Request,
+    body: RefreshRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ApiResponse[TokenResponse]:
-    """刷新令牌：黑名单旧 jti，签发新 JWT。
+    """刷新令牌：用 refresh token 换发新 access token + 新 refresh token（轮换）。
 
-    接受当前有效 JWT，将其 jti 加入黑名单，签发新令牌。
+    校验 refresh token（type=refresh、未过期、未黑名单、用户存在且启用），
+    将旧 refresh token 的 jti 加入黑名单实现轮换（防重放），
+    签发新的 access token 与 refresh token。
+
+    设计：access token 短效（jwt_expire_minutes），refresh token 长效（7天）。
+    前端在访问令牌过期（401）时调用本端点无感续期，避免整页重登。
     """
-    old_jti, remaining_ttl = _decode_jti_and_ttl(request)
+    try:
+        payload = jwt.decode(
+            body.refresh_token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+        )
+    except jwt.ExpiredSignatureError:
+        raise AuthError("刷新令牌已过期，请重新登录", error_code="AUTH_REFRESH_EXPIRED") from None
+    except jwt.InvalidTokenError:
+        raise AuthError("刷新令牌无效", error_code="AUTH_TOKEN_INVALID") from None
+
+    # 仅接受 type=refresh 令牌，防止把 access token 当 refresh token 使用
+    if payload.get("type") != "refresh":
+        raise AuthError("刷新令牌无效", error_code="AUTH_TOKEN_INVALID")
+
+    old_jti = str(payload.get("jti", ""))
+    if await is_token_blacklisted(old_jti):
+        raise AuthError("刷新令牌已失效，请重新登录", error_code="AUTH_REFRESH_REVOKED")
+
+    user_id: int = int(payload.get("sub", 0))
+    if user_id == 0:
+        raise AuthError("刷新令牌无效", error_code="AUTH_TOKEN_INVALID")
+
+    result = await db.execute(select(User).where(User.id == user_id, User.status == "active"))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise AuthError("用户不存在或已禁用", error_code="AUTH_TOKEN_INVALID")
+
+    # 轮换：旧 refresh token 加入黑名单（防重放），TTL = 剩余有效期
+    remaining_ttl = max(int(payload.get("exp", 0)) - int(datetime.now(UTC).timestamp()), 0)
     await blacklist_token(old_jti, remaining_ttl)
 
-    new_token = create_access_token(sub=user.id, role=user.role, org_id=user.org_id)
-    return ok(TokenResponse(access_token=new_token))
+    new_access = create_access_token(sub=user.id, role=user.role, org_id=user.org_id)
+    new_refresh = create_refresh_token(sub=user.id, role=user.role, org_id=user.org_id)
+    return ok(TokenResponse(access_token=new_access, refresh_token=new_refresh))
 
 
 def _decode_jti_and_ttl(request: Request) -> tuple[str, int]:

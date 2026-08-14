@@ -14,7 +14,12 @@ from httpx import ASGITransport
 
 from app.api import deps
 from app.core.config import settings
-from app.core.security import hash_password
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    hash_password,
+    is_token_blacklisted,
+)
 from app.main import app
 from app.models.user import User
 
@@ -62,11 +67,17 @@ async def test_login_success_issues_jwt(auth_client):
     assert body["code"] == "OK"
     token = body["data"]["access_token"]
     assert body["data"]["token_type"] == "bearer"
+    refresh = body["data"]["refresh_token"]
+    assert refresh  # P0：登录同时签发 refresh token（7天），供 401 无感续期
 
     payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     assert payload["sub"] == "1"
     assert payload["role"] == "platform_admin"
     assert payload["org_id"] == 1
+    # refresh token 必须带 type=refresh 标记，且 sub 一致
+    refresh_payload = jwt.decode(refresh, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    assert refresh_payload["type"] == "refresh"
+    assert refresh_payload["sub"] == "1"
     session.commit.assert_awaited()  # 登录成功更新 last_login_at
 
 
@@ -109,3 +120,88 @@ async def test_me_returns_current_user(auth_client):
     assert data["role"] == "analyst"
     assert data["org_id"] == 2
     assert data["domain"] == "sales"
+
+
+# ---- P0：令牌无感续期（refresh token 换发 + 轮换）----
+
+
+async def test_refresh_rotates_and_issues_new_tokens(auth_client):
+    """有效的 refresh token → 换发新 access + 新 refresh，旧 jti 进入黑名单（防重放）。"""
+    c, session = auth_client
+    session.execute.return_value = _result_with(
+        await _mock_user("secret", id=1, role="platform_admin", org_id=1)
+    )
+    refresh_token = create_refresh_token(sub=1, role="platform_admin", org_id=1)
+    old_jti = jwt.decode(refresh_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])[
+        "jti"
+    ]
+
+    resp = await c.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["access_token"]
+    assert data["refresh_token"]
+    # 新 access token 载荷正确
+    payload = jwt.decode(
+        data["access_token"], settings.jwt_secret, algorithms=[settings.jwt_algorithm]
+    )
+    assert payload["sub"] == "1"
+    assert payload["role"] == "platform_admin"
+    # 新 refresh token 是 type=refresh，且 jti 不同于旧的（轮换）
+    new_payload = jwt.decode(
+        data["refresh_token"], settings.jwt_secret, algorithms=[settings.jwt_algorithm]
+    )
+    assert new_payload["type"] == "refresh"
+    assert new_payload["jti"] != old_jti
+    # 旧 refresh token 已入黑名单（防重放）
+    assert await is_token_blacklisted(old_jti) is True
+
+
+async def test_refresh_rejects_access_token(auth_client):
+    """把 access token 当 refresh token 用 → 拒绝（type 校验）。"""
+    c, _ = auth_client
+    access_token = create_access_token(sub=1, role="platform_admin", org_id=1)
+
+    resp = await c.post("/api/v1/auth/refresh", json={"refresh_token": access_token})
+
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "AUTH_TOKEN_INVALID"
+
+
+async def test_refresh_rejects_blacklisted_token(auth_client):
+    """已被撤销（黑名单）的 refresh token → 拒绝重放。"""
+    c, session = auth_client
+    session.execute.return_value = _result_with(
+        await _mock_user("secret", id=1, role="platform_admin", org_id=1)
+    )
+    refresh_token = create_refresh_token(sub=1, role="platform_admin", org_id=1)
+    jti = jwt.decode(refresh_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])["jti"]
+    from app.core.security import blacklist_token
+
+    await blacklist_token(jti, 600)
+
+    resp = await c.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "AUTH_REFRESH_REVOKED"
+
+
+async def test_refresh_rejects_invalid_token(auth_client):
+    """无效/乱写的 refresh token → 拒绝。"""
+    c, _ = auth_client
+    resp = await c.post("/api/v1/auth/refresh", json={"refresh_token": "garbage.token.value"})
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "AUTH_TOKEN_INVALID"
+
+
+async def test_refresh_user_not_found(auth_client):
+    """refresh token 对应的用户已删除/禁用 → 拒绝。"""
+    c, session = auth_client
+    session.execute.return_value = _result_with(None)
+    refresh_token = create_refresh_token(sub=99, role="analyst", org_id=1)
+
+    resp = await c.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "AUTH_TOKEN_INVALID"
