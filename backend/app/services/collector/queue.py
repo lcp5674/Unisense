@@ -41,9 +41,13 @@ class JobStore(Protocol):
         ...
 
     async def list(
-        self, limit: int = 50, offset: int = 0, source_id: str | None = None
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        source_id: str | None = None,
+        status: str | None = None,
     ) -> list[dict[str, Any]]:
-        """列出任务（按入队逆序，供采集任务中心展示；可按 source_id 过滤）。"""
+        """列出任务（按入队逆序，供采集任务中心展示；可按 source_id / status 过滤）。"""
         ...
 
 
@@ -95,12 +99,17 @@ class InMemoryCollectionQueue:
         }
 
     async def list(
-        self, limit: int = 50, offset: int = 0, source_id: str | None = None
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        source_id: str | None = None,
+        status: str | None = None,
     ) -> list[dict[str, Any]]:
         jobs = [
             j
             for j in self._jobs.values()
-            if source_id is None or j.get("source_id") == source_id
+            if (source_id is None or j.get("source_id") == source_id)
+            and (status is None or j.get("status") == status)
         ]
         jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
         return [
@@ -180,7 +189,11 @@ class RedisJobStore:
         }
 
     async def list(
-        self, limit: int = 50, offset: int = 0, source_id: str | None = None
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        source_id: str | None = None,
+        status: str | None = None,
     ) -> list[dict[str, Any]]:
         import json
 
@@ -211,6 +224,8 @@ class RedisJobStore:
             detail_raw = decoded.get("detail")
             detail = json.loads(detail_raw) if detail_raw else {}
             if source_id is not None and detail.get("source_id") != source_id:
+                continue
+            if status is not None and (decoded.get("status") or "UNKNOWN") != status:
                 continue
             jobs.append(
                 {
@@ -297,12 +312,18 @@ class ArqCollectionQueue:
         return await RedisJobStore(redis).get(job_id)
 
     async def list(
-        self, limit: int = 50, offset: int = 0, source_id: str | None = None
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        source_id: str | None = None,
+        status: str | None = None,
     ) -> list[dict[str, Any]]:
         from app.core.config import settings
 
         redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
-        return await RedisJobStore(redis).list(limit=limit, offset=offset, source_id=source_id)
+        return await RedisJobStore(redis).list(
+            limit=limit, offset=offset, source_id=source_id, status=status
+        )
 
 
 _default_queue: InMemoryCollectionQueue | None = None

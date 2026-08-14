@@ -296,6 +296,7 @@ class CollectorService(BaseService):
         domain: str | None = None,
         source_type: str | None = None,
         keyword: str | None = None,
+        health_status: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[DataSourceResponse], int]:
@@ -303,6 +304,7 @@ class CollectorService(BaseService):
             domain=domain,
             source_type=source_type,
             keyword=keyword,
+            health_status=health_status,
             page=page,
             page_size=page_size,
         )
@@ -1218,10 +1220,12 @@ class CollectorService(BaseService):
         limit: int = 50,
         offset: int = 0,
         source_id: str | None = None,
+        status: str | None = None,
         queue: CollectionQueue | None = None,
     ) -> list[dict[str, Any]]:
         """列出采集任务（按入队逆序分页，供采集任务中心展示）。
 
+        可按 ``status`` 过滤（总览仪表「采集任务」资产卡片下钻）。
         队列不支持 list 时返回空列表（不阻断）。
         """
         from app.core.config import settings as _settings
@@ -1230,8 +1234,27 @@ class CollectorService(BaseService):
         lister = getattr(q, "list", None)
         if lister is None:
             return []
-        result: list[dict[str, Any]] = await lister(limit=limit, offset=offset, source_id=source_id)
+        result: list[dict[str, Any]] = await lister(
+            limit=limit, offset=offset, source_id=source_id, status=status
+        )
         return result
+
+    async def count_jobs_by_status(self) -> dict[str, int]:
+        """按状态统计采集任务数（供总览仪表「采集任务」资产卡片）。
+
+        采集任务为运行时数据（JobStore：内存 / Redis，终态带 7 天 TTL），
+        非持久化表；此处复用 ``list_jobs`` 全量拉取后按 status 聚合。
+        队列不支持 list 时返回空分布（不阻断仪表盘）。
+
+        Returns:
+            {status: count}，如 {QUEUED: 2, RUNNING: 1, COMPLETED: 5, FAILED: 0}。
+        """
+        jobs = await self.list_jobs(limit=100000, offset=0)
+        counts: dict[str, int] = {}
+        for job in jobs:
+            status = job.get("status") or "UNKNOWN"
+            counts[status] = counts.get(status, 0) + 1
+        return counts
 
     async def update_schedule(self, source_id: str, cron: str, mode: str) -> None:
         """US3: 更新数据源的定时调度配置（schedule_cron + collection_mode）。"""

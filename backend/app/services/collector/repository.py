@@ -126,6 +126,7 @@ class CollectorRepository:
         domain: str | None,
         source_type: str | None,
         keyword: str | None,
+        health_status: str | None = None,
         page: int,
         page_size: int,
     ) -> tuple[Sequence[DataSource], int]:
@@ -137,6 +138,9 @@ class CollectorRepository:
         if keyword:
             # 参数化 LIKE（值经绑定，无字符串拼接 SQL）
             base = base.where(DataSource.name.ilike(f"%{keyword}%"))
+        if health_status:
+            # 总览仪表「数据源」资产卡片按健康状态下钻（healthy/unhealthy/unknown）
+            base = base.where(DataSource.health_status == health_status)
         count = await self._db.scalar(select(func.count()).select_from(base.subquery()))
         total = int(count) if count is not None else 0
         stmt = base.order_by(DataSource.id).offset((page - 1) * page_size).limit(page_size)

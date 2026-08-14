@@ -123,12 +123,18 @@ async def list_data_sources(
     domain: str | None = None,
     source_type: str | None = None,
     keyword: str | None = None,
+    health_status: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> ApiResponse[DataSourceListResponse]:
     svc = _svc(db)
     items, total = await svc.list_sources(
-        domain=domain, source_type=source_type, keyword=keyword, page=page, page_size=page_size
+        domain=domain,
+        source_type=source_type,
+        keyword=keyword,
+        health_status=health_status,
+        page=page,
+        page_size=page_size,
     )
     # P1-1: 返回分页结构（含 total），此前 total 被丢弃导致 >20 个源时静默截断
     return ok(
@@ -263,17 +269,19 @@ async def list_collection_jobs(
     limit: int = 50,
     offset: int = 0,
     source_id: str | None = None,
+    status: str | None = None,
 ) -> ApiResponse[list[dict[str, Any]]]:
     """列出采集任务（按入队逆序分页，采集任务中心入口）。
 
-    可按 ``source_id`` 过滤（任务中心按数据源筛选）；job 含 ``created_at``（创建时间）
-    与 ``kind``（manual 手动 / scheduled 定时）供前端展示。
+    可按 ``source_id`` 过滤（任务中心按数据源筛选）；``status`` 供总览仪表
+    「采集任务」资产卡片下钻；job 含 ``created_at``（创建时间）与 ``kind``
+    （manual 手动 / scheduled 定时）供前端展示。
 
     注意：本端点须注册在 ``GET /{source_id}`` 之前——FastAPI 按注册顺序匹配，
     单段静态路径 ``/jobs`` 若在 ``/{source_id}`` 之后会被当作 source_id 吞掉。
     """
     svc = _svc(db)
-    jobs = await svc.list_jobs(limit=limit, offset=offset, source_id=source_id)
+    jobs = await svc.list_jobs(limit=limit, offset=offset, source_id=source_id, status=status)
     return ok(data=jobs, trace_id=trace_id)
 
 
