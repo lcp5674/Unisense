@@ -78,12 +78,22 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     ],
   },
   {
+    label: "数据采集",
+    children: [
+      { key: "/data-sources", label: "数据源", icon: <CloudServerOutlined /> },
+      { key: "/catalogs", label: "采集目录", icon: <DatabaseOutlined /> },
+      { key: "/collection-tasks", label: "采集任务", icon: <ScheduleOutlined /> },
+      { key: "/collection-history", label: "采集记录", icon: <AuditOutlined /> },
+    ],
+  },
+  {
     label: "指标资产",
     children: [
       { key: "/catalog", label: "指标目录", icon: <AppstoreOutlined /> },
       { key: "/compare", label: "指标对比", icon: <SwapOutlined /> },
       { key: "/templates", label: "指标模板", icon: <FileTextOutlined /> },
       { key: "/create", label: "注册指标", icon: <PlusCircleOutlined /> },
+      { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
       { key: "/domains", label: "主题域管理", icon: <ApartmentOutlined /> },
       { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
       { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
@@ -99,7 +109,6 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
   {
     label: "治理合规",
     children: [
-      { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
       { key: "/review", label: "冲突仲裁", icon: <DeploymentUnitOutlined /> },
       { key: "/quality", label: "质量中心", icon: <ExperimentOutlined /> },
     ],
@@ -113,19 +122,10 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     ],
   },
   {
-    label: "平台可观测",
+    label: "运营中心",
     children: [
       { key: "/observability", label: "可观测中心", icon: <LineChartOutlined /> },
       { key: "/tracking-stats", label: "埋点统计", icon: <FundOutlined /> },
-    ],
-  },
-  {
-    label: "数据采集",
-    children: [
-      { key: "/data-sources", label: "数据源管理", icon: <CloudServerOutlined /> },
-      { key: "/catalogs", label: "采集目录", icon: <DatabaseOutlined /> },
-      { key: "/collection-tasks", label: "采集任务中心", icon: <ScheduleOutlined /> },
-      { key: "/collection-history", label: "采集记录", icon: <AuditOutlined /> },
     ],
   },
   {
@@ -134,7 +134,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/users", label: "用户管理", icon: <TeamOutlined /> },
       { key: "/governance", label: "权限治理", icon: <SafetyCertificateOutlined /> },
       { key: "/audit", label: "审计日志", icon: <FileSearchOutlined /> },
-      { key: "/dicts", label: "参照数据管理", icon: <TagsOutlined /> },
+      { key: "/dicts", label: "数据字典", icon: <TagsOutlined /> },
       { key: "/system-config", label: "系统配置", icon: <SettingOutlined /> },
     ],
   },
