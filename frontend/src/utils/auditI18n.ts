@@ -117,3 +117,133 @@ export function auditValueText(value: unknown): string {
 export function entityTypeLabel(v: string | null | undefined): string {
   return enumLabel(ENTITY_TYPE_LABEL, v);
 }
+
+/** 审计动作 → 中文 */
+export const AUDIT_ACTION_LABEL: Record<string, string> = {
+  "metric.created": "创建指标",
+  "metric.updated": "更新指标",
+  "metric.submitted": "提交审核",
+  "metric.approved": "审核通过",
+  "metric.rejected": "审核驳回",
+  "metric.published": "发布指标",
+  "metric.deprecated": "废弃指标",
+  "metric.emergency_publish": "紧急发布",
+  "metric.rollback": "回滚指标",
+  "metric.promote": "灰度发布",
+  "metric.updated_definition": "更新口径",
+  "metric.updated_owner": "变更责任人",
+  "metric.health_check": "健康检查",
+  "metric.pii_flagged": "PII 标记",
+  "metric.activated": "激活指标",
+  "metric.deactivated": "停用指标",
+  "lineage.created": "创建血缘",
+  "lineage.updated": "更新血缘",
+  "lineage.deleted": "删除血缘",
+  "lineage.change": "血缘变更",
+  "lineage.imported": "导入血缘",
+  "lineage.sync": "血缘同步",
+  "conflict.detected": "冲突检测",
+  "conflict.resolved": "解决冲突",
+  "conflict.escalated": "升级冲突",
+  "conflict.rejected": "驳回冲突",
+  "grant.created": "创建授权",
+  "grant.revoked": "撤销授权",
+  "grant.batch": "批量授权",
+  "grant.check": "权限检查",
+  "term.created": "创建术语",
+  "term.updated": "更新术语",
+  "term.submitted": "提交术语",
+  "term.approved": "审核术语",
+  "term.deprecated": "废弃术语",
+  "term.resolved": "解决术语冲突",
+  "dimension.created": "创建维度",
+  "dimension.updated": "更新维度",
+  "dimension.deprecated": "废弃维度",
+  "dimension.published": "发布维度",
+  "dimension.mapping": "维度映射",
+  "dimension.reconciliation": "维度对账",
+  "member.created": "创建成员",
+  "quality.rule_created": "创建质量规则",
+  "quality.rule_updated": "更新质量规则",
+  "quality.rule_deleted": "删除质量规则",
+  "quality.alert": "质量告警",
+  "quality.observation": "质量观测",
+  "quality.benchmark_imported": "导入基准",
+  "quality.reconciliation": "质量对账",
+  "data_source.created": "创建数据源",
+  "data_source.updated": "更新数据源",
+  "data_source.deleted": "删除数据源",
+  "data_source.collected": "采集元数据",
+  "data_source.tested": "测试连接",
+  "data_source.checked": "探活检查",
+  "data_source.scheduled": "配置调度",
+  "catalog.registered": "登记目录实体",
+  "catalog.deprecated": "废弃目录实体",
+  "auth.login": "登录系统",
+  "auth.logout": "退出登录",
+  "auth.login_failed": "登录失败",
+  "audit.archive": "归档审计",
+  "ai.nl2sql": "AI 问数",
+  "nl2sql": "AI 问数",
+  "secret.reveal": "查看密钥",
+  "config.updated": "更新配置",
+  "config.created": "创建配置",
+  "config.deleted": "删除配置",
+  "TEST_CONNECTION": "测试连接",
+  "CHECK_CONNECTION": "探活检查",
+  "COLLECT": "采集元数据",
+  "REGISTER": "登记实体",
+  "DELETE": "删除",
+  "UPDATE": "更新",
+  "CREATE": "创建",
+  "LOGIN": "登录系统",
+  "LOGOUT": "退出登录",
+};
+
+/** 审计动作 → 格式化中文显示（命中返回中文，未命中用拆词兜底） */
+export function auditActionLabel(action: string | null | undefined): string {
+  if (!action) return "—";
+  const known = AUDIT_ACTION_LABEL[action];
+  if (known) return known;
+  // 兜底：域.动作 拆词
+  const dot = action.indexOf(".");
+  if (dot > 0) {
+    const domain = entityTypeLabel(action.slice(0, dot)) || action.slice(0, dot);
+    const verb = action.slice(dot + 1);
+    const verbMap: Record<string, string> = {
+      created: "创建", updated: "更新", deleted: "删除",
+      published: "发布", deprecated: "废弃", submitted: "提交审核",
+      approved: "审核通过", rejected: "驳回", activated: "激活",
+      deactivated: "停用", resolved: "解决", escalated: "升级",
+      imported: "导入", checked: "检查", tested: "测试",
+      collected: "采集", registered: "登记", scheduled: "配置调度",
+      sync: "同步", migrated: "迁移", applied: "应用",
+    };
+    return `${domain}${verbMap[verb] ? "·" + verbMap[verb] : "·" + verb}`;
+  }
+  // 纯英文动作（如 DELETE, UPDATE, COLLECT）
+  const pureMap: Record<string, string> = {
+    DELETE: "删除", UPDATE: "更新", CREATE: "创建",
+    LOGIN: "登录系统", LOGOUT: "退出登录", COLLECT: "采集元数据",
+    REGISTER: "登记实体", TEST_CONNECTION: "测试连接",
+    CHECK_CONNECTION: "探活检查",
+  };
+  return pureMap[action] ?? action;
+}
+
+/** 格式化审计时间——ISO 转为 "YYYY-MM-DD HH:mm" */
+export function formatAuditTime(v: string | null | undefined): string {
+  if (!v) return "—";
+  const t = v.includes("T") ? v.replace("T", " ").replace(/\.\d+/, "") : v;
+  return t.length > 19 ? t.slice(0, 19) : t;
+}
+
+/** 实体 ID 加业务前缀（把 metric#123 转为「指标 #123」） */
+export function entityIdWithLabel(entityType: string | null | undefined, entityId: string | null | undefined): string {
+  if (!entityId) return "—";
+  if (entityType) {
+    const label = entityTypeLabel(entityType);
+    if (label) return `${label} #${entityId.replace(/^[^#]*#?/, "")}`;
+  }
+  return entityId;
+}
