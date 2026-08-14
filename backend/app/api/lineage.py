@@ -9,7 +9,7 @@ from __future__ import annotations
 import contextlib
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -186,6 +186,20 @@ async def delete_edges_by_node(
 
 
 # ---- 血缘采集通道（增量采集运维，TD §12.2）----
+
+
+@router.get("/graph", dependencies=_READ_DEPS)
+async def lineage_graph(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    domain: str | None = Query(None, description="按业务域过滤节点"),
+    pii_only: bool = Query(False, description="仅返回含 PII 标记的节点"),
+    limit: int = Query(1000, ge=1, le=5000, description="返回边数上限"),
+) -> ApiResponse[Any]:
+    """血缘图谱：返回节点+边数据，前端力导向图渲染（血缘视图默认 Tab）。"""
+    data = await _svc(db).query_graph(domain=domain, pii_only=pii_only, limit=limit)
+    return ok(data=data, trace_id=trace_id)
 
 
 @router.get("/channels", dependencies=_READ_DEPS)

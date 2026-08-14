@@ -191,6 +191,33 @@ class LineageService(BaseService):
         """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。"""
         return await self._repo.soft_delete_by_node(node)
 
+    async def query_graph(
+        self,
+        domain: str | None = None,
+        pii_only: bool = False,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """血缘图谱：返回 ``nodes + edges``（力导向图渲染数据）。
+
+        复用资产地图的图谱拼接（``AssetMapRepository.graph_from_mysql``）——它从
+        MySQL ``lineage_edge``（血缘边）+ ``metric`` + ``db_catalog`` 拼装血缘专属
+        图谱（表/指标/字段节点 + DERIVED_FROM 等血缘边），纯查询无副作用，避免
+        血缘与资产两套图谱逻辑漂移。
+
+        Args:
+            domain: 按业务域过滤节点。
+            pii_only: 仅返回含 PII 标记的节点（不展示字段级节点）。
+            limit: 返回边数软上限（``graph_from_mysql`` 内置 1000 条上限，
+                前端力导向图另行限流节点数，保证可读性）。
+
+        Returns:
+            ``{"nodes": [...], "edges": [...]}``。
+        """
+        from app.services.assetmap.repository import AssetMapRepository
+
+        nodes, edges = await AssetMapRepository(self._db).graph_from_mysql(domain, pii_only)
+        return {"nodes": nodes, "edges": edges[:limit]}
+
     async def impact_preview(self, metric_code: str, change_type: str) -> ImpactPreviewResponse:
         """变更影响预览（what-if）：估算变更影响面与风险等级。
 

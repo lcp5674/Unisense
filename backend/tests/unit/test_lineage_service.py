@@ -320,6 +320,60 @@ async def test_delete_by_node_delegates() -> None:
     assert await svc.delete_by_node("table:a") == 3
 
 
+async def test_query_graph_reuses_assetmap_assembly(monkeypatch: Any) -> None:
+    """血缘图谱复用资产地图拼接：透传 domain/pii_only，按 limit 截断边。"""
+    called: dict[str, Any] = {}
+
+    async def fake_graph_from_mysql(self, domain, pii_only):
+        called["domain"] = domain
+        called["pii_only"] = pii_only
+        edges = [{"source": "table:a", "target": "metric:m", "type": "DERIVED_FROM"}] * 5
+        return ([{"id": "table:a", "type": "table", "label": "a"}], edges)
+
+    fake_cls = type(
+        "FakeAssetMapRepo",
+        (),
+        {
+            "__init__": lambda self, db: setattr(self, "_db", db),
+            "graph_from_mysql": fake_graph_from_mysql,
+        },
+    )
+    monkeypatch.setattr("app.services.assetmap.repository.AssetMapRepository", fake_cls)
+
+    svc = LineageService(db=_FakeSession())
+    out = await svc.query_graph(domain="finance", pii_only=True, limit=2)
+    assert called["domain"] == "finance"
+    assert called["pii_only"] is True
+    assert out["nodes"][0]["id"] == "table:a"
+    assert len(out["edges"]) == 2  # limit 截断边
+
+
+async def test_query_graph_defaults_without_filters(monkeypatch: Any) -> None:
+    """血缘图谱默认不设域/PII 过滤，limit 默认 1000。"""
+    called: dict[str, Any] = {}
+
+    async def fake_graph_from_mysql(self, domain, pii_only):
+        called["domain"] = domain
+        called["pii_only"] = pii_only
+        return [], []
+
+    fake_cls = type(
+        "FakeAssetMapRepo",
+        (),
+        {
+            "__init__": lambda self, db: setattr(self, "_db", db),
+            "graph_from_mysql": fake_graph_from_mysql,
+        },
+    )
+    monkeypatch.setattr("app.services.assetmap.repository.AssetMapRepository", fake_cls)
+
+    svc = LineageService(db=_FakeSession())
+    out = await svc.query_graph()
+    assert called["domain"] is None
+    assert called["pii_only"] is False
+    assert out == {"nodes": [], "edges": []}
+
+
 def test_paginate_edges_slices_and_has_more() -> None:
     edges = [make_edge(i=i, target=f"table:t{i}") for i in range(1, 26)]
     page1 = paginate_edges(edges, 1, 10)
