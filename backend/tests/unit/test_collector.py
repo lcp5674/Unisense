@@ -2276,3 +2276,48 @@ async def test_response_includes_enabled() -> None:
 
     assert resp.enabled is False
 
+
+
+# ---------- 目录实体详情（血缘图谱表节点下钻） ----------
+
+
+async def test_repo_get_catalog_by_id() -> None:
+    """按主键取目录实体（含删除过滤）。"""
+    s = MagicMock()
+    cat = MagicMock()
+    s.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=cat)))
+    repo = CollectorRepository(s)
+    got = await repo.get_catalog_by_id(42)
+    assert got is cat
+    compiled = str(
+        s.execute.call_args_list[0].args[0].compile(compile_kwargs={"literal_binds": True})
+    )
+    assert "db_catalog" in compiled and "deleted_at" in compiled and "42" in compiled
+
+
+async def test_service_get_catalog_detail_enriches_source_meta() -> None:
+    """详情返回目录实体并富集源名称/删除状态。"""
+    from app.services.collector.schemas import DBCatalogResponse
+
+    svc, repo = _svc()
+    repo.get_catalog_by_id = AsyncMock(return_value=_FakeCatalog("PII-HIGH"))
+    repo.get_sources_meta = AsyncMock(return_value={"src1": ("MySQL 主库", False)})
+
+    resp = await svc.get_catalog_detail(42)
+
+    assert isinstance(resp, DBCatalogResponse)
+    assert resp.entity_name == "users"
+    assert resp.source_name == "MySQL 主库"
+    assert resp.source_deleted is False
+    assert resp.sensitivity_level == "PII-HIGH"
+
+
+async def test_service_get_catalog_detail_not_found() -> None:
+    """目录实体不存在（或已删除）时抛 NotFoundError。"""
+    from app.core.exceptions import NotFoundError
+
+    svc, repo = _svc()
+    repo.get_catalog_by_id = AsyncMock(return_value=None)
+
+    with pytest.raises(NotFoundError):
+        await svc.get_catalog_detail(999)

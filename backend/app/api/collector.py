@@ -730,6 +730,18 @@ async def list_catalog_databases(
     return ok(data={"items": await svc.list_catalog_databases(source_id)}, trace_id=trace_id)
 
 
+@catalog_router.get("/{catalog_id}", dependencies=_READ_DEPS)
+async def get_catalog_detail(
+    catalog_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[DBCatalogResponse]:
+    """按主键取目录实体详情（血缘图谱表节点下钻展示用）。"""
+    svc = _svc(db)
+    return ok(data=await svc.get_catalog_detail(catalog_id), trace_id=trace_id)
+
+
 @catalog_router.post("/bulk-deprecate", dependencies=_WRITE_DEPS)
 async def bulk_deprecate(
     body: BulkDeprecateRequest,

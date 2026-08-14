@@ -658,6 +658,23 @@ class CollectorService(BaseService):
         """目录去重库名列表（供前端库名筛选下拉，可随 source_id 联动）。"""
         return await self._repo.list_catalog_databases(source_id)
 
+    async def get_catalog_detail(self, catalog_id: int) -> DBCatalogResponse:
+        """按主键取目录实体详情（血缘图谱表节点下钻用）。
+
+        Raises:
+            NotFoundError: 目录实体不存在（含已删除）。
+        """
+        cat = await self._repo.get_catalog_by_id(catalog_id)
+        if cat is None:
+            raise NotFoundError(f"目录实体不存在: {catalog_id}")
+        resp = DBCatalogResponse.model_validate(cat)
+        name, deleted = (await self._repo.get_sources_meta([cat.source_id])).get(
+            cat.source_id, (None, True)
+        )
+        resp.source_deleted = deleted
+        resp.source_name = name or cat.source_id
+        return resp
+
     async def bulk_deprecate(self, req: BulkDeprecateRequest, actor_id: int) -> BulkDeprecateResult:
         succeeded, failed = await self._repo.bulk_deprecate(req.items)
         for it in succeeded:

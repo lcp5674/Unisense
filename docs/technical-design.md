@@ -336,6 +336,7 @@ GET    /help                         # 帮助中心内容（静态 + 术语库�
 ### 3.3 血缘与资产地图（lineage / assetmap）
 ```
 GET    /lineage/graph                 # 血缘图谱（血缘视图默认 Tab）：从 MySQL lineage_edge + metric + db_catalog 拼装 nodes+edges（表/指标/字段节点 + 血缘边），支持 domain/pii_only/limit，前端 G6 力导向图渲染；边为自包含子图（仅保留两端都在节点集内的边，消除指向未渲染中间表如 *_tmp/ads_* 的悬空边，返回边数与图实际渲染一致）
+GET    /catalogs/{catalog_id}         # 目录实体详情（血缘视图表节点下钻）：按主键返回 DBCatalogResponse（schema_def 字段清单/敏感度/ETL SQL + 源名称与删除状态富集），不存在 404；前端血缘图谱点击表/视图节点 → 本页 Drawer 展示详情，用户决定是否跳转指标目录
 GET    /lineage/table/{id}           # 表级上下游
 GET    /lineage/field/{id}           # 字段级上下游
 GET    /lineage/impact/{id}          # 影响面（上游变更影响下游集合）

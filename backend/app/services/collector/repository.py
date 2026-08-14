@@ -137,6 +137,16 @@ class CollectorRepository:
         )
         return res.scalar_one_or_none()
 
+    async def get_catalog_by_id(self, catalog_id: int) -> DBCatalog | None:
+        """按主键取目录实体（血缘图谱表节点下钻详情用）。"""
+        res = await self._db.execute(
+            select(DBCatalog).where(
+                DBCatalog.id == catalog_id,
+                DBCatalog.deleted_at.is_(None),
+            )
+        )
+        return res.scalar_one_or_none()
+
     async def upsert_catalog(
         self,
         *,

@@ -6,6 +6,8 @@ import {
   Button,
   Card,
   Col,
+  Descriptions,
+  Drawer,
   Empty,
   Input,
   Popconfirm,
@@ -29,6 +31,7 @@ import {
 } from "@ant-design/icons";
 import {
   confirmStaleEdge,
+  getCatalogDetail,
   lineageChannelRuns,
   lineageChannels,
   lineageEdges,
@@ -40,7 +43,7 @@ import {
   restoreStaleEdge,
   UnisenseApiError,
 } from "../api";
-import type { LineageChannel, LineageEdge, LineageIngestRun, StaleEdge } from "../types";
+import type { DBCatalog, LineageChannel, LineageEdge, LineageIngestRun, StaleEdge } from "../types";
 import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
@@ -57,13 +60,27 @@ const EDGE_TYPE_LABEL: Record<string, string> = {
   CONSUMED_BY: "被消费",
 };
 
+const SENSITIVITY_COLOR: Record<string, string> = {
+  INTERNAL: "default",
+  CONFIDENTIAL: "orange",
+  SECRET: "volcano",
+  "PII-LOW": "cyan",
+  "PII-MEDIUM": "gold",
+  "PII-HIGH": "red",
+};
+
 type Direction = "upstream" | "downstream" | "both";
 
-/** 血缘图谱 Tab：进入即加载全量血缘图谱（力导向图），支持节点点击跳转。 */
+/** 血缘图谱 Tab：进入即加载全量血缘图谱（力导向图）。指标节点点击跳详情；
+ *  表/视图节点点击在本页 Drawer 展示表详情，由用户决定是否跳转指标目录。 */
 function GraphTab() {
   const navigate = useNavigate();
   const [data, setData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
   const [loading, setLoading] = useState(false);
+  // 表节点详情抽屉
+  const [detail, setDetail] = useState<DBCatalog | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const { track } = useTracking();
 
   async function load() {
@@ -85,15 +102,51 @@ function GraphTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  async function openTableDetail(node: AssetGraphNode) {
+    const entityId = node.entity_id;
+    if (!entityId) {
+      message.warning("该表节点缺少目录实体标识，无法查看详情");
+      return;
+    }
+    setDetailOpen(true);
+    setDetailLoading(true);
+    setDetail(null);
+    try {
+      setDetail(await getCatalogDetail(entityId));
+      track("lineage_table_detail", node.label, "table");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载表详情失败");
+      setDetailOpen(false);
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
   function handleNodeClick(node: AssetGraphNode) {
     if (node.type === "metric") {
       const code = node.id.replace(/^metric:/, "");
       navigate(`/detail/${encodeURIComponent(code)}`);
     } else if (node.type === "table") {
-      const name = node.id.replace(/^table:/, "");
-      navigate(`/catalog?kw=${encodeURIComponent(name)}`);
+      void openTableDetail(node);
     }
   }
+
+  function goToCatalog() {
+    if (!detail) return;
+    navigate(`/catalog?kw=${encodeURIComponent(detail.entity_name)}`);
+  }
+
+  // schema_json.columns 详细格式：{name, type, nullable, comment, default}
+  const columns = (detail?.schema_def?.columns ?? []) as Array<Record<string, unknown>>;
+  const columnData = columns
+    .map((c, i) => ({
+      key: i,
+      name: String(c.name ?? ""),
+      type: String(c.type ?? ""),
+      nullable: c.nullable ? "是" : "否",
+      comment: String(c.comment ?? ""),
+    }))
+    .filter((c) => c.name);
 
   return (
     <div>
@@ -103,7 +156,7 @@ function GraphTab() {
         </Button>
         <span className="muted" style={{ fontSize: 13 }}>
           {data ? `共 ${data.nodes.length} 节点 · ${data.edges.length} 条血缘边` : "加载血缘图谱…"}
-          ，点击节点：指标 → 指标详情，表/视图 → 采集目录定位
+          ，点击节点：指标 → 指标详情；表/视图 → 本页查看表详情
         </span>
       </Space>
       {data && data.nodes.length > 0 ? (
@@ -120,6 +173,70 @@ function GraphTab() {
           <Empty description="暂无血缘图谱数据。可在「SQL 血缘解析」粘贴 SQL 入库，或运行 scripts/import_dp_lineage.py 导入。" />
         )
       )}
+
+      <Drawer
+        title={detail ? `${detail.entity_type === "VIEW" ? "视图" : "表"} · ${detail.entity_name}` : "表详情"}
+        width={680}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        loading={detailLoading}
+        extra={
+          <Button type="primary" onClick={goToCatalog} disabled={!detail}>
+            在指标目录中查看
+          </Button>
+        }
+      >
+        {detail && (
+          <div>
+            <Descriptions size="small" column={2} bordered>
+              <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+              <Descriptions.Item label="实体类型">
+                {detail.entity_type === "VIEW" ? "视图" : "表"}
+              </Descriptions.Item>
+              <Descriptions.Item label="敏感度">
+                <Tag color={SENSITIVITY_COLOR[detail.sensitivity_level] ?? "default"}>
+                  {detail.sensitivity_level || "未分级"}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="所属数据源">
+                {detail.source_name ?? detail.source_id}
+                {detail.source_deleted && <Tag color="red" style={{ marginLeft: 6 }}>源已删除</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="Schema 完整">
+                {detail.schema_incomplete ? <Tag color="orange">不完整</Tag> : "完整"}
+              </Descriptions.Item>
+              <Descriptions.Item label="字段数">{columnData.length}</Descriptions.Item>
+            </Descriptions>
+
+            <h4 style={{ marginTop: 16 }}>字段清单（{columnData.length}）</h4>
+            {columnData.length > 0 ? (
+              <Table
+                size="small"
+                rowKey="key"
+                dataSource={columnData}
+                pagination={false}
+                columns={[
+                  { title: "字段名", dataIndex: "name", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+                  { title: "类型", dataIndex: "type", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+                  { title: "可空", dataIndex: "nullable", width: 60 },
+                  { title: "注释", dataIndex: "comment" },
+                ]}
+              />
+            ) : (
+              <Empty description="该实体无字段元数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            )}
+
+            {detail.etl_sql && (
+              <>
+                <h4 style={{ marginTop: 16 }}>ETL SQL</h4>
+                <pre className="mono" style={{ fontSize: 12, background: "#f5f5f5", padding: 12, borderRadius: 6, maxHeight: 240, overflow: "auto" }}>
+                  {detail.etl_sql}
+                </pre>
+              </>
+            )}
+          </div>
+        )}
+      </Drawer>
     </div>
   );
 }
