@@ -23,6 +23,10 @@ const EDGE_TYPE_LABEL: Record<string, string> = {
   RECENT: "最新",
 };
 
+// 推荐指标数量：默认展示 6 条（卡片区高度有限，超出滚动）；「查看更多」可展开到 20 条
+const RECOMMEND_INITIAL_LIMIT = 6;
+const RECOMMEND_EXPAND_LIMIT = 20;
+
 // 生命周期五站：顺序即真实流程
 const STATIONS = [
   { key: "DRAFT", name: "草稿", hotPriority: 2 },
@@ -368,6 +372,24 @@ export function Dashboard() {
     setRecommended((prev) => prev.filter((r) => r.metric_id !== metricId));
   }
 
+  // 查看更多推荐：拉取更多并去重合并（保留已有 reason/via 展示）
+  const [expandingRec, setExpandingRec] = useState(false);
+  async function handleExpandRecommend() {
+    if (expandingRec) return;
+    setExpandingRec(true);
+    try {
+      const more = await fetchRecommendedMetrics(RECOMMEND_EXPAND_LIMIT);
+      setRecommended((prev) => {
+        const seen = new Set(prev.map((r) => r.metric_id));
+        return [...prev, ...more.filter((r) => !seen.has(r.metric_id))];
+      });
+    } catch (e) {
+      console.warn("[Dashboard] 展开推荐指标失败", e);
+    } finally {
+      setExpandingRec(false);
+    }
+  }
+
   useEffect(() => {
     async function load() {
       setLoading(true);
@@ -375,7 +397,7 @@ export function Dashboard() {
       try {
         const [dash, rec, recTerms] = await Promise.all([
           fetchDashboard(),
-          fetchRecommendedMetrics(6).catch((e) => {
+          fetchRecommendedMetrics(RECOMMEND_INITIAL_LIMIT).catch((e) => {
             console.warn("[Dashboard] 推荐指标加载失败", e);
             return [];
           }),
@@ -522,7 +544,7 @@ export function Dashboard() {
           <Card
             title="为你推荐指标"
             styles={{ body: { maxHeight: 320, overflow: "auto" } }}
-            extra={<a onClick={() => navigate("/catalog")}>去目录</a>}
+            extra={<a onClick={() => navigate("/catalog", { state: { from: "dashboard" } })}>去目录</a>}
           >
             {recommended.length === 0 ? (
               <Empty description="暂无推荐（去指标目录逛逛，很快就有专属推荐）" />
@@ -551,7 +573,7 @@ export function Dashboard() {
                     }}
                     onClick={() => {
                       track("recommend_click", r.metric_id, "metric");
-                      navigate(`/detail/${r.metric_id}`);
+                      navigate(`/detail/${r.metric_id}`, { state: { from: "dashboard" } });
                     }}
                   >
                     <span className="mono" style={{ fontWeight: 600 }}>{r.metric_id}</span>
@@ -577,6 +599,13 @@ export function Dashboard() {
                   </Popconfirm>
                 </div>
               ))
+            )}
+            {recommended.length > 0 && (
+              <div style={{ textAlign: "center", paddingTop: 10 }}>
+                <Button type="link" size="small" loading={expandingRec} onClick={handleExpandRecommend}>
+                  {recommended.length >= RECOMMEND_EXPAND_LIMIT ? "已展示全部推荐" : "查看更多推荐"}
+                </Button>
+              </div>
             )}
           </Card>
         </Col>

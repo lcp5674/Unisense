@@ -327,6 +327,21 @@ describe("MetricCatalog", () => {
     await screen.findByText("dashboard-page");
   });
 
+  it("点击返回：来源标记为总览仪表时优先回仪表盘（不依赖 history.length）", async () => {
+    // 模拟从总览仪表「为你推荐 → 去目录」进入：location.state.from = "dashboard"
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/catalog", state: { from: "dashboard" } }]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/catalog" element={<MetricCatalog />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("sales_gmv_sum_d");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
+  });
+
   it("健康度列：有评分显示分级标签，无评分显示未评分", async () => {
     const healthy = { ...metric, health_level: "GOOD", health_score: 78 };
     const unscored = { ...metric, metric_code: "sales_gmv_sum_w", health_level: null, health_score: null };

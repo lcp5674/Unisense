@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal } from "antd";
 import {
   ArrowLeftOutlined,
@@ -220,6 +220,7 @@ function ExpandContent({
 
 export function MetricCatalog() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const { track } = useTracking();
   const urlKw = searchParams.get("kw") ?? "";
@@ -335,8 +336,16 @@ export function MetricCatalog() {
     load();
   }
 
-  // 统一返回上一入口：优先回退浏览器历史（总览信号条/血缘视图等入口），无上一页（URL 直达）时兜底总览仪表
+  // 统一返回上一入口：优先按来源标记精确返回（总览仪表/推荐流/血缘视图等入口），
+  // 无来源标记时回退浏览器历史（历史栈有上一页才回退），URL 直达则兜底总览仪表。
+  // 说明：SPA 中 window.history.length 是跨站点累计的（含浏览器历史），不能作为
+  // "是否有上一页"的可靠判据，故来源标记优先于 history.length 判断。
   function handleBack() {
+    const from = (location.state as { from?: string } | null)?.from;
+    if (from === "dashboard" || from === "recommend") {
+      navigate("/dashboard");
+      return;
+    }
     if (window.history.length > 1) navigate(-1);
     else navigate("/dashboard");
   }

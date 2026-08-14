@@ -158,3 +158,80 @@ describe("Dashboard", () => {
     expect(probe.location()?.search).toContain("status=RUNNING");
   });
 });
+
+describe("Dashboard 推荐卡片", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedFetchDashboard.mockResolvedValue(mockDashboardData);
+    vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
+    vi.mocked(fetchRecommendedTerms).mockResolvedValue([]);
+  });
+
+  it("渲染推荐指标卡片：展示 metric_id 与后端下发的 reason 文案", async () => {
+    vi.mocked(fetchRecommendedMetrics).mockResolvedValue([
+      {
+        metric_id: "sales_gmv",
+        via: "collaborative_filtering",
+        score: 0.667,
+        edge_type: "CF_RECOMMEND",
+        reason: "与你行为相似的同事也关注",
+      },
+      {
+        metric_id: "sales_uv",
+        via: "global_hot",
+        edge_type: "POPULAR",
+        reason: "全站热门指标",
+      },
+    ]);
+    renderDashboard();
+
+    await waitFor(() => expect(screen.getByText("sales_gmv")).toBeInTheDocument());
+    expect(screen.getByText(/与你行为相似的同事也关注/)).toBeInTheDocument();
+    expect(screen.getByText(/全站热门指标/)).toBeInTheDocument();
+    // 协同过滤项展示相似度（0.667 → 67%）
+    expect(screen.getByText(/67%/)).toBeInTheDocument();
+    expect(screen.getByText("sales_uv")).toBeInTheDocument();
+  });
+
+  it("推荐卡片无 reason 时按 via/edge_type 渲染兜底文案", async () => {
+    vi.mocked(fetchRecommendedMetrics).mockResolvedValue([
+      { metric_id: "m_lineage", via: "m_seed", edge_type: "LINEAGE" },
+    ]);
+    renderDashboard();
+
+    await waitFor(() => expect(screen.getByText("m_lineage")).toBeInTheDocument());
+    expect(screen.getByText(/血缘 · 关联/)).toBeInTheDocument();
+  });
+
+  it("推荐为空时展示引导文案（空态）", async () => {
+    vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
+    renderDashboard();
+
+    await waitFor(() => expect(screen.getByText(/暂无推荐（去指标目录逛逛/)).toBeInTheDocument());
+    expect(screen.getByText(/很快就有专属推荐/)).toBeInTheDocument();
+  });
+
+  it("查看更多推荐：点击后拉取更多并去重合并", async () => {
+    vi.mocked(fetchRecommendedMetrics)
+      .mockResolvedValueOnce([{ metric_id: "m1", via: "global_hot", edge_type: "POPULAR", reason: "全站热门指标" }])
+      .mockResolvedValueOnce([
+        { metric_id: "m1", via: "global_hot", edge_type: "POPULAR", reason: "全站热门指标" },
+        { metric_id: "m2", via: "global_hot", edge_type: "POPULAR", reason: "全站热门指标" },
+        { metric_id: "m3", via: "global_hot", edge_type: "POPULAR", reason: "全站热门指标" },
+        { metric_id: "m4", via: "global_hot", edge_type: "POPULAR", reason: "全站热门指标" },
+        { metric_id: "m5", via: "global_hot", edge_type: "POPULAR", reason: "全站热门指标" },
+        { metric_id: "m6", via: "global_hot", edge_type: "POPULAR", reason: "全站热门指标" },
+      ]);
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("m1")).toBeInTheDocument());
+
+    // 初始 1 条 < 6，仍显示「查看更多推荐」
+    const moreBtn = screen.getByRole("button", { name: /查看更多推荐/ });
+    fireEvent.click(moreBtn);
+
+    // 合并去重：m1 不重复出现，m2~m6 被追加
+    await waitFor(() => expect(screen.getByText("m2")).toBeInTheDocument());
+    expect(screen.getAllByText("m1")).toHaveLength(1);
+    expect(screen.getByText("m6")).toBeInTheDocument();
+  });
+});

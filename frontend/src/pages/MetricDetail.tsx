@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -23,6 +23,7 @@ import {
   ExperimentOutlined,
   RollbackOutlined,
   RiseOutlined,
+  ArrowLeftOutlined,
 } from "@ant-design/icons";
 import {
   addFavorite,
@@ -280,6 +281,7 @@ function SubscribeModal({
 export function MetricDetail() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [metric, setMetric] = useState<MetricResponse | null>(null);
   const [versions, setVersions] = useState<MetricVersionResponse[]>([]);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
@@ -297,6 +299,18 @@ export function MetricDetail() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const { track } = useTracking();
+
+  // 来源感知返回：从总览仪表/推荐流进入时返回仪表盘，否则回退浏览器历史（无上页兜底仪表盘）。
+  // 说明：SPA 中 window.history.length 跨站点累计不可靠，来源标记优先于 history.length 判断。
+  const fromDashboard = (location.state as { from?: string } | null)?.from === "dashboard";
+  function handleBack() {
+    if (fromDashboard) {
+      navigate("/dashboard");
+      return;
+    }
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
 
   async function load() {
     if (!code) return;
@@ -391,8 +405,8 @@ export function MetricDetail() {
       <Button icon={<ReadOutlined />} onClick={() => navigate(`/guide/${metric.metric_code}`)}>
         消费指南
       </Button>
-      <Button type="link" onClick={() => navigate("/catalog")}>
-        ← 返回目录
+      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack}>
+        {fromDashboard ? "← 返回仪表盘" : "← 返回"}
       </Button>
     </Space>
   );
