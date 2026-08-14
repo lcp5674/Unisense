@@ -14,11 +14,12 @@
 edge_type, granularity)`` 幂等，重复执行不产生重复边、不重复写历史。
 
 用法:
-    poetry run python -m scripts.import_dp_lineage [--csv 路径] [--dry-run]
+    poetry run python -m scripts.import_dp_lineage [--csv 路径] [--dry-run] [--no-graph]
 
 参数:
     --csv:  CSV 路径（默认仓库根 ``dp元数据.csv``）
     --dry-run: 只解析统计，不写库
+    --no-graph: 不写 Neo4j 图存储（默认同时写 MySQL + Neo4j）
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ csv.field_size_limit(100_000_000)
 
 from app.core.logging import configure_logging  # noqa: E402
 from app.db.mysql import async_session_factory  # noqa: E402
+from app.services.lineage.graph import LineageGraphClient  # noqa: E402
 from app.services.lineage.parser import extract_table_lineage, node_table  # noqa: E402
 from app.services.lineage.repository import LineageRepository  # noqa: E402
 
@@ -236,10 +238,22 @@ async def persist_edges(db: AsyncSession, edges: set[tuple[str, str]]) -> int:
     return written
 
 
-async def run(csv_path: Path, dry_run: bool = False) -> None:
+async def persist_graph(edges: set[tuple[str, str]]) -> bool:
+    """将血缘边写入 Neo4j 图存储（best-effort：不可达/熔断时降级 False 不影响主流程）。
+
+    与 MySQL 写入共用同一份 ``node_table()`` 规范化节点 id，保证图/库节点一致。
+    """
+    graph = LineageGraphClient()
+    triples = [
+        (node_table(source), node_table(target), _EDGE_TYPE) for source, target in edges
+    ]
+    return await graph.write_edges(triples)
+
+
+async def run(csv_path: Path, dry_run: bool = False, no_graph: bool = False) -> None:
     """执行导入。"""
     configure_logging()
-    logger.info("dp_lineage_start", csv=str(csv_path), dry_run=dry_run)
+    logger.info("dp_lineage_start", csv=str(csv_path), dry_run=dry_run, no_graph=no_graph)
     edges, node_types, task_count = collect_edges(csv_path)
     logger.info(
         "dp_lineage_parsed",
@@ -261,6 +275,14 @@ async def run(csv_path: Path, dry_run: bool = False) -> None:
             await db.rollback()
             logger.exception("dp_lineage_failed")
             raise
+    if not no_graph:
+        graph_written = await persist_graph(edges)
+        logger.info("dp_lineage_graph", written=graph_written)
+    # 显式关闭连接池，避免 asyncio.run 结束后 aiomysql 连接在 __del__ 时
+    # 访问已关闭事件循环（"Event loop is closed" 告警）
+    from app.db.mysql import engine as db_engine
+
+    await db_engine.dispose()
 
 
 def main() -> None:
@@ -268,11 +290,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="导入 DP 平台元数据血缘")
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV, help="DP 元数据 CSV 路径")
     parser.add_argument("--dry-run", action="store_true", help="只解析统计，不写库")
+    parser.add_argument("--no-graph", action="store_true", help="不写 Neo4j 图存储")
     args = parser.parse_args()
     if not args.csv.exists():
         logger.error("csv_not_found", path=str(args.csv))
         sys.exit(1)
-    asyncio.run(run(args.csv, dry_run=args.dry_run))
+    asyncio.run(run(args.csv, dry_run=args.dry_run, no_graph=args.no_graph))
 
 
 if __name__ == "__main__":

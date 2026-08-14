@@ -19,6 +19,9 @@ from app.core.resilience import neo4j_breaker
 
 logger = get_logger("unisense.lineage.graph")
 
+# 批量写图时分批大小（防单请求过大；语义与逐条 MERGE 等价）
+_WRITE_BATCH_SIZE = 2000
+
 
 class LineageGraphClient:
     """Neo4j 血缘图客户端（惰性连接，可降级，带熔断保护）。"""
@@ -35,7 +38,7 @@ class LineageGraphClient:
         self._driver: Any = None
 
     async def write_edges(self, edges: list[tuple[str, str, str]]) -> bool:
-        """将血缘边写入 Neo4j（MERGE 节点与关系），带熔断保护。
+        """将血缘边写入 Neo4j（UNWIND 批量 MERGE 节点与关系），带熔断保护。
 
         Args:
             edges: ``(source_node, target_node, edge_type)`` 三元组列表。
@@ -61,14 +64,17 @@ class LineageGraphClient:
                     self._uri, auth=(self._user, self._password)
                 )
             async with self._driver.session() as session:
-                for src, tgt, etype in edges:
+                # UNWIND 批量 MERGE（幂等，语义与逐条 MERGE 等价）：大批量
+                # （如脚本导入上万条边）一次提交性能远优于逐条 session.run。
+                # 分批防单请求过大；每批内任意一条失败即整批报错降级。
+                rows = [{"src": s, "tgt": t, "etype": e} for s, t, e in edges]
+                for i in range(0, len(rows), _WRITE_BATCH_SIZE):
                     await session.run(
-                        "MERGE (s:Asset {id:$s}) "
-                        "MERGE (t:Asset {id:$t}) "
-                        "MERGE (s)-[:LINEAGE {type:$e}]->(t)",
-                        s=src,
-                        t=tgt,
-                        e=etype,
+                        "UNWIND $rows AS row "
+                        "MERGE (s:Asset {id:row.src}) "
+                        "MERGE (t:Asset {id:row.tgt}) "
+                        "MERGE (s)-[:LINEAGE {type:row.etype}]->(t)",
+                        rows=rows[i : i + _WRITE_BATCH_SIZE],
                     )
             neo4j_breaker.record_success()
             return True

@@ -233,6 +233,26 @@ async def test_write_edges_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert breaker.successes == 1
 
 
+async def test_write_edges_batches_by_unwind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """大批量边走 UNWIND 分批 MERGE：断言 rows 参数正确切分且分批计数。"""
+    breaker = _patch_breaker(monkeypatch)
+    client = _make_client()
+    driver = _FakeDriver(_FakeResult([]))
+    client._driver = driver
+    edges = [(f"table:s{i}", f"table:t{i}", "DERIVED_FROM") for i in range(2500)]
+    assert await client.write_edges(edges) is True
+    assert breaker.successes == 1
+    session = driver.last_session
+    assert session is not None
+    # 2500 条 → 两批（2000 + 500），每批 rows 参数为对应切片
+    assert len(session.runs) == 2
+    assert len(session.runs[0][1]["rows"]) == 2000
+    assert len(session.runs[1][1]["rows"]) == 500
+    assert session.runs[0][1]["rows"][0]["src"] == "table:s0"
+    assert session.runs[1][1]["rows"][-1]["tgt"] == "table:t2499"
+    assert "UNWIND $rows AS row" in session.runs[0][0]
+
+
 async def test_write_edges_returns_false_on_driver_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

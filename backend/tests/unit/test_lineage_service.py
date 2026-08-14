@@ -142,6 +142,20 @@ async def test_query_impact_falls_back_to_mysql_when_graph_none() -> None:
     assert out[0].provenance == "sqlglot"
 
 
+async def test_query_impact_falls_back_to_mysql_when_graph_empty() -> None:
+    """图可达但查不到该节点（空列表）时回退 MySQL——否则仅写入 MySQL 的
+    导入血缘（如 dp_csv）在前端永远不可见。"""
+    svc = LineageService(db=object())
+    repo = FakeRepo()
+    repo.impact = [make_edge(source="table:a", target="table:t")]
+    svc._repo = repo
+    svc._graph = FakeGraph(result=[])
+    out = await svc.query_impact(LineageImpactParams(node="table:a"))
+    assert len(out) == 1
+    assert out[0].target_node == "table:t"
+    assert out[0].provenance == "sqlglot"
+
+
 async def test_query_impact_skips_cache_without_redis() -> None:
     svc = LineageService(db=object())
     repo = FakeRepo()

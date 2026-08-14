@@ -277,12 +277,17 @@ class LineageService(BaseService):
     # ---- 内部方法 ----
 
     async def _query_impact_sources(self, params: LineageImpactParams) -> list[LineageEdgeResponse]:
-        """图优先 + MySQL 兜底的影响分析读路径（缓存未命中时调用）。"""
+        """图优先 + MySQL 兜底的影响分析读路径（缓存未命中时调用）。
+
+        图查询返回**空列表**（图可达但该节点在图中无数据，如仅写入 MySQL 的
+        导入血缘）同样回退 MySQL——否则导入的边在前端永远不可见。仅当图不可达/
+        熔断/异常（返回 None）才直接使用图结果语义，空结果一律回退权威 MySQL。
+        """
         if self._graph is not None:
             graph_edges = await self._graph.query_impact(
                 params.node, params.direction, params.max_hops, _MAX_EDGES
             )
-            if graph_edges is not None:
+            if graph_edges is not None and graph_edges:
                 return [
                     self._graph_edge_to_response(src, tgt, etype) for src, tgt, etype in graph_edges
                 ]
