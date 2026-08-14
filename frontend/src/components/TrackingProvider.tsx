@@ -2,6 +2,7 @@ import { createContext, useContext, type ReactNode } from "react";
 import { trackEvent } from "../api";
 import type { CurrentUser } from "../types";
 import { useAppStore } from "../store";
+import { dedupKey, trackingDedup } from "../utils/trackingDedup";
 
 interface TrackingContextValue {
   track: (
@@ -30,6 +31,9 @@ export function TrackingProvider({ user, children }: TrackingProviderProps) {
     targetType?: string,
     context?: Record<string, unknown>,
   ) {
+    // 同事件节流：窗口内重复触发直接丢弃，防止测试/快速刷新刷爆统计
+    if (!trackingDedup.shouldSend(dedupKey(eventType, targetId, targetType), Date.now())) return;
+
     const event = {
       event_type: eventType,
       target_id: targetId,
