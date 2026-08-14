@@ -123,13 +123,18 @@ class LlmConfigSecretResponse(BaseModel):
 
 
 class LlmConfigTestResult(BaseModel):
-    """LLM 连通性测试结果。"""
+    """LLM 连通性测试结果（方案 A'：仅 GET /models 快速验证，不触发真实推理）。
+
+    ok=True 表示地址可连、鉴权通过、模型列表可读（毫秒级反馈）；
+    ``models`` 为 /models 返回的可用模型 ID 列表（空列表表示网关未返回或结构异常）。
+    """
 
     ok: bool
     latency_ms: int = 0
     model: str = ""
     error: str = ""
     detail: dict[str, Any] | None = None
+    models: list[str] | None = None
 
 
 class LlmModelsRequest(BaseModel):

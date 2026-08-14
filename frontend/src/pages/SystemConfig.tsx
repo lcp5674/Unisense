@@ -74,9 +74,13 @@ const SOURCE_LABEL: Record<string, string> = {
 
 function TestResultBadge({ result }: { result: LlmConfigTestResult }) {
   if (result.ok) {
+    const modelInfo = result.models?.length
+      ? ` · 可用模型 ${result.models.length} 个`
+      : "";
     return (
       <Tag icon={<CheckCircleOutlined />} color="success">
         连通成功 · {result.latency_ms} ms · {result.model}
+        {modelInfo}
       </Tag>
     );
   }

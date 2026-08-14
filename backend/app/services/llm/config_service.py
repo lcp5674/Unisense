@@ -25,7 +25,6 @@ from app.services.llm.client import (
     DeterministicFallbackLlmClient,
     LlmClient,
     LlmRouterClient,
-    chat_completions_url,
     models_url,
     normalize_base_url,
 )
@@ -52,13 +51,31 @@ PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "custom": {"base_url": "", "model": ""},
 }
 
-#: 连通性测试的探针消息（极短，仅验证连通/鉴权/模型可用，不追求输出质量）
-_PROBE_MESSAGES = [
-    {"role": "user", "content": "ping"},
-]
-
 #: 指向回环地址的 base_url 片段（容器内 127.0.0.1/localhost 指向容器自身，而非宿主机）
 _LOOPBACK_TOKENS = ("127.0.0.1", "localhost", "0.0.0.0")
+
+
+def _extract_model_ids(resp: Any) -> list[str]:
+    """从 ``GET /models`` 响应中提取模型 ID 列表（兼容 ``data[].id`` 结构）。
+
+    Args:
+        resp: httpx 响应对象（status_code 已判为 200）。
+
+    Returns:
+        模型 ID 列表；响应结构异常时返回空列表（不抛异常）。
+    """
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001 - 响应非 JSON 时按无模型处理
+        return []
+    items = data.get("data", []) if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        return []
+    ids: list[str] = []
+    for item in items:
+        if isinstance(item, dict) and item.get("id"):
+            ids.append(str(item["id"]))
+    return ids
 
 
 def _looks_like_loopback(base_url: str) -> bool:
@@ -343,71 +360,29 @@ class LlmConfigService:
     async def _probe(
         self, base_url: str, api_key: str, model: str, timeout: float
     ) -> LlmConfigTestResult:
+        """连通性测试（方案 A'）：仅做轻量 GET /models 验证连通 + 鉴权。
+
+        不再触发真实推理——「连通成功」定义为地址可连、鉴权通过、模型列表可读，
+        毫秒级反馈；真实推理耗时属于模型性能指标（本地模型 prefill 可达数秒），
+        不阻塞连通性判断。网关不支持 /models 端点（404/405/501）时返回明确
+        失败提示，而非回退慢速推理。
+        """
         if not base_url or not api_key:
             return LlmConfigTestResult(
                 ok=False,
                 error="未配置 base_url 或 api_key",
                 model=model,
             )
-        # 方案 A 两步探测：先轻量 GET /models（毫秒级）验证连通 + 鉴权。
-        # - 连通失败 / 鉴权失败 / 网关 5xx → 立即快速失败，无需等待真实推理超时；
-        # - 通过（200）或网关不支持 /models（404/405/501）→ 进入第二步真实推理，
-        #   验证模型可用并返回完整推理耗时（本地模型 prefill 慢属模型真实表现）。
-        quick = await self._quick_probe(base_url, api_key, timeout)
-        if quick is not None:
-            return quick.model_copy(update={"model": model or quick.model})
-        start = time.monotonic()
-        try:
-            req_url = chat_completions_url(base_url)
-            logger.info("llm_test_connection: url=%s model=%s", req_url, model)
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(timeout),
-                headers={"Authorization": f"Bearer {api_key}"},
-            ) as client:
-                resp = await client.post(
-                    req_url,
-                    json={
-                        "model": model,
-                        "messages": _PROBE_MESSAGES,
-                        "max_tokens": 5,
-                    },
-                )
-                latency_ms = int((time.monotonic() - start) * 1000)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return LlmConfigTestResult(
-                        ok=True,
-                        latency_ms=latency_ms,
-                        model=str(data.get("model", model)),
-                    )
-                body = resp.text[:200]
-                return LlmConfigTestResult(
-                    ok=False,
-                    latency_ms=latency_ms,
-                    model=model,
-                    error=f"HTTP {resp.status_code}（请求 {req_url}）: {body}",
-                    detail={"status_code": resp.status_code, "request_url": req_url},
-                )
-        except httpx.HTTPError as exc:
-            latency_ms = int((time.monotonic() - start) * 1000)
-            logger.warning("llm_test_connection_failed: %s", exc)
-            return LlmConfigTestResult(
-                ok=False,
-                latency_ms=latency_ms,
-                model=model,
-                error=f"{type(exc).__name__}: {exc}{_loopback_hint(base_url)}",
-            )
+        return await self._quick_probe(base_url, api_key, timeout, model=model)
 
     async def _quick_probe(
-        self, base_url: str, api_key: str, timeout: float
-    ) -> LlmConfigTestResult | None:
-        """轻量快速探测：GET /models 验证连通 + 鉴权（毫秒级失败反馈）。
+        self, base_url: str, api_key: str, timeout: float, model: str = ""
+    ) -> LlmConfigTestResult:
+        """轻量快速探测：GET /models 验证连通 + 鉴权 + 模型可用（毫秒级）。
 
-        Returns:
-            - None: 快速探测通过（HTTP 200），或网关不支持 /models 端点
-              （404/405/501），交由真实推理继续验证；
-            - LlmConfigTestResult: 快速失败（连通失败 / 鉴权失败 / 网关 5xx），
-              无需等待真实推理即可给出明确失败原因。
+        成功（HTTP 200）即判连通成功，并带回可用模型列表；连通失败 / 鉴权失败 /
+        网关 5xx / 网关不支持 /models（404/405/501）均直接返回明确失败原因，
+        不再回退真实推理（避免本地模型 prefill 慢导致测试阻塞数秒）。
         """
         start = time.monotonic()
         try:
@@ -424,18 +399,29 @@ class LlmConfigService:
             return LlmConfigTestResult(
                 ok=False,
                 latency_ms=latency_ms,
-                model="",
+                model=model,
                 error=f"{type(exc).__name__}: {exc}{_loopback_hint(base_url)}",
             )
         latency_ms = int((time.monotonic() - start) * 1000)
         if resp.status_code == 200:
-            logger.info("llm_models_probe_ok: url=%s latency=%dms", req_url, latency_ms)
-            return None
+            models = _extract_model_ids(resp)
+            logger.info(
+                "llm_models_probe_ok: url=%s latency=%dms models=%d",
+                req_url,
+                latency_ms,
+                len(models),
+            )
+            return LlmConfigTestResult(
+                ok=True,
+                latency_ms=latency_ms,
+                model=model,
+                models=models,
+            )
         if resp.status_code in (401, 403):
             return LlmConfigTestResult(
                 ok=False,
                 latency_ms=latency_ms,
-                model="",
+                model=model,
                 error=f"鉴权失败（HTTP {resp.status_code}，请求 {req_url}）: {resp.text[:120]}",
                 detail={"status_code": resp.status_code, "request_url": req_url},
             )
@@ -443,14 +429,23 @@ class LlmConfigService:
             return LlmConfigTestResult(
                 ok=False,
                 latency_ms=latency_ms,
-                model="",
+                model=model,
                 error=f"LLM 网关错误（HTTP {resp.status_code}，请求 {req_url}）: {resp.text[:120]}",
                 detail={"status_code": resp.status_code, "request_url": req_url},
             )
-        # 404/405/501 等：网关仅实现 chat/completions、不暴露 /models，
-        # 不视为失败，回退真实推理验证（向后兼容）。
+        # 404/405/501 等：网关未实现 /models 端点，无法用快速探测验证连通。
+        # 方案 A' 不再回退真实推理（本地模型可能阻塞数秒），返回明确提示。
         logger.info("llm_models_probe_unsupported: url=%s status=%d", req_url, resp.status_code)
-        return None
+        return LlmConfigTestResult(
+            ok=False,
+            latency_ms=latency_ms,
+            model=model,
+            error=(
+                f"LLM 网关不支持 GET /models 端点（HTTP {resp.status_code}，请求 {req_url}）。"
+                "无法自动验证连通性，请确认接口地址指向 OpenAI 兼容 /v1 服务。"
+            ),
+            detail={"status_code": resp.status_code, "request_url": req_url},
+        )
 
     # ---- 一键获取模型 ----
 

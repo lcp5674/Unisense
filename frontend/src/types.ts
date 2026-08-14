@@ -896,6 +896,8 @@ export interface LlmConfigTestResult {
   model: string;
   error: string;
   detail?: Record<string, unknown> | null;
+  /** GET /models 返回的可用模型列表（连通成功时） */
+  models?: string[];
 }
 
 export interface LlmConfigSecret {

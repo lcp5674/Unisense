@@ -285,57 +285,57 @@ class TestTestConnection:
         payload = LlmConfigPayload(
             base_url="https://api.example.com", api_key="sk-x", model="m1", timeout=30
         )
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"model": "m1"}
         mock_client = AsyncMock()
         mock_models_resp = MagicMock()
         mock_models_resp.status_code = 200
+        mock_models_resp.json.return_value = {"data": [{"id": "m1"}, {"id": "m2"}]}
         mock_client.get.return_value = mock_models_resp
-        mock_client.post.return_value = mock_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
             result = await svc.test_connection(payload)
         assert result.ok is True
         assert result.model == "m1"
+        assert result.models == ["m1", "m2"]
+        # 方案 A'：只做 GET /models，不触发真实推理（POST 不应被调用）
+        mock_client.post.assert_not_awaited()
 
     async def test_http_error(self) -> None:
+        """GET /models 返回 401 → 鉴权失败（毫秒级，不触发真实推理）。"""
         svc, _ = await self._svc()
         payload = LlmConfigPayload(
             base_url="https://api.example.com", api_key="sk-x", model="m1", timeout=30
         )
-        mock_resp = MagicMock()
-        mock_resp.status_code = 401
-        mock_resp.text = "unauthorized"
         mock_client = AsyncMock()
         mock_models_resp = MagicMock()
-        mock_models_resp.status_code = 200
+        mock_models_resp.status_code = 401
+        mock_models_resp.text = "unauthorized"
         mock_client.get.return_value = mock_models_resp
-        mock_client.post.return_value = mock_resp
+        mock_client.post = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
             result = await svc.test_connection(payload)
         assert result.ok is False
         assert "401" in result.error
+        mock_client.post.assert_not_awaited()
 
     async def test_network_error(self) -> None:
+        """GET /models 抛 ConnectError → 快速失败，不触发真实推理。"""
         svc, _ = await self._svc()
         payload = LlmConfigPayload(
             base_url="https://api.example.com", api_key="sk-x", model="m1", timeout=30
         )
         mock_client = AsyncMock()
-        mock_models_resp = MagicMock()
-        mock_models_resp.status_code = 200
-        mock_client.get.return_value = mock_models_resp
-        mock_client.post.side_effect = httpx.ConnectError("connection refused")
+        mock_client.get.side_effect = httpx.ConnectError("connection refused")
+        mock_client.post = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
             result = await svc.test_connection(payload)
         assert result.ok is False
         assert "connection refused" in result.error
+        mock_client.post.assert_not_awaited()
 
     async def test_connect_error_with_loopback_base_url_hints_host_docker(self) -> None:
         """回环地址（127.0.0.1）ConnectError 时，应提示容器场景改用 host.docker.internal。"""
@@ -347,16 +347,15 @@ class TestTestConnection:
             timeout=30,
         )
         mock_client = AsyncMock()
-        mock_models_resp = MagicMock()
-        mock_models_resp.status_code = 200
-        mock_client.get.return_value = mock_models_resp
-        mock_client.post.side_effect = httpx.ConnectError("connection refused")
+        mock_client.get.side_effect = httpx.ConnectError("connection refused")
+        mock_client.post = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
             result = await svc.test_connection(payload)
         assert result.ok is False
         assert "host.docker.internal" in result.error
+        mock_client.post.assert_not_awaited()
 
     async def test_connect_error_with_public_base_url_no_hint(self) -> None:
         """非回环地址 ConnectError 不附加容器提示（避免误导公网地址用户）。"""
@@ -365,16 +364,15 @@ class TestTestConnection:
             base_url="https://api.deepseek.com", api_key="sk-x", model="m1", timeout=30
         )
         mock_client = AsyncMock()
-        mock_models_resp = MagicMock()
-        mock_models_resp.status_code = 200
-        mock_client.get.return_value = mock_models_resp
-        mock_client.post.side_effect = httpx.ConnectError("connection refused")
+        mock_client.get.side_effect = httpx.ConnectError("connection refused")
+        mock_client.post = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
             result = await svc.test_connection(payload)
         assert result.ok is False
         assert "host.docker.internal" not in result.error
+        mock_client.post.assert_not_awaited()
 
     async def test_missing_config(self) -> None:
         svc, _ = await self._svc()
@@ -405,7 +403,7 @@ class TestTestConnection:
         assert result.ok is True  # 回落已保存密钥才可能成功
 
     async def test_base_url_with_v1_suffix_uses_normalized_endpoint(self) -> None:
-        """openai 预设（base_url 含 /v1）测试连通性时，端点不得拼成 /v1/v1（回归 404）。"""
+        """openai 预设（base_url 含 /v1）时 GET /models 端点不得拼成 /v1/v1（回归 404）。"""
         svc, _ = await self._svc()
         payload = LlmConfigPayload(
             base_url="https://api.openai.com/v1",
@@ -413,34 +411,30 @@ class TestTestConnection:
             model="gpt-4o-mini",
             timeout=30,
         )
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"model": "gpt-4o-mini"}
         mock_client = AsyncMock()
         mock_models_resp = MagicMock()
         mock_models_resp.status_code = 200
+        mock_models_resp.json.return_value = {"data": [{"id": "gpt-4o-mini"}]}
         mock_client.get.return_value = mock_models_resp
-        mock_client.post.return_value = mock_resp
+        mock_client.post = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
             result = await svc.test_connection(payload)
         assert result.ok is True
-        called_url = mock_client.post.call_args[0][0]
-        assert called_url == "https://api.openai.com/v1/chat/completions"
+        called_url = mock_client.get.call_args[0][0]
+        assert called_url == "https://api.openai.com/v1/models"
         assert "/v1/v1/" not in called_url
+        mock_client.post.assert_not_awaited()
 
     async def test_test_instance_decrypt_and_probe(self) -> None:
         svc, s = await self._svc()
         s.execute.return_value.scalar_one_or_none.return_value = _row()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"model": "deepseek-chat"}
         mock_client = AsyncMock()
         mock_models_resp = MagicMock()
         mock_models_resp.status_code = 200
+        mock_models_resp.json.return_value = {"data": [{"id": "deepseek-chat"}]}
         mock_client.get.return_value = mock_models_resp
-        mock_client.post.return_value = mock_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
@@ -551,7 +545,9 @@ class TestFetchModels:
 
 
 class TestQuickProbe:
-    """两步探测的快速失败路径（方案 A 核心：连通/鉴权问题毫秒级返回，不触发真实推理）。"""
+    """方案 A'（仅 GET /models 探测）的快速失败路径：
+    连通/鉴权/网关错误/不支持 /models 均毫秒级返回，不触发真实推理。
+    """
 
     async def _svc(self) -> tuple[LlmConfigService, MagicMock]:
         s = _session([])
@@ -596,8 +592,8 @@ class TestQuickProbe:
         assert "host.docker.internal" in result.error
         mock_client.post.assert_not_awaited()
 
-    async def test_unsupported_models_falls_back_to_real_inference(self) -> None:
-        """GET /models 返回 404（网关不支持）→ 不判失败，回退真实推理（POST 被调用）。"""
+    async def test_unsupported_models_returns_clear_error(self) -> None:
+        """GET /models 返回 404（网关不支持）→ 明确失败提示，不再回退慢速真实推理。"""
         svc, _ = await self._svc()
         payload = LlmConfigPayload(
             base_url="https://api.example.com", api_key="sk-x", model="m1", timeout=30
@@ -607,14 +603,11 @@ class TestQuickProbe:
         models_resp.text = "not found"
         mock_client = AsyncMock()
         mock_client.get.return_value = models_resp
-        post_resp = MagicMock()
-        post_resp.status_code = 200
-        post_resp.json.return_value = {"model": "m1"}
-        mock_client.post.return_value = post_resp
+        mock_client.post = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
             result = await svc.test_connection(payload)
-        assert result.ok is True
-        assert result.model == "m1"
-        mock_client.post.assert_awaited()
+        assert result.ok is False
+        assert "不支持 GET /models" in result.error
+        mock_client.post.assert_not_awaited()
