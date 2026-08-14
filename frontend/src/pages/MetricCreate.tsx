@@ -1,12 +1,12 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Alert, Button, Card, Checkbox, Cascader, Col, Form, Input, Row, Segmented, Select, Space, Spin, Typography, App as AntApp, Tag,
+  Alert, Button, Card, Checkbox, Cascader, Col, Form, Input, Row, Segmented, Select, Space, Spin, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
   createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog } from "../types";
+import type { MetricCreateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog, SuggestionField, AutoSuggestResponse } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 
 const { Title, Paragraph } = Typography;
@@ -47,6 +47,28 @@ interface ColumnInfo {
   comment?: string;
 }
 
+// 推断来源 → 徽标样式（与后端 SuggestionField.source 对齐）
+const SOURCE_META: Record<string, { color: string; text: string }> = {
+  sql_parse: { color: "geekblue", text: "SQL解析" },
+  column_meta: { color: "purple", text: "列元数据" },
+  domain_default: { color: "gold", text: "域默认" },
+  rule: { color: "cyan", text: "规则" },
+  llm: { color: "magenta", text: "AI" },
+  fallback: { color: "default", text: "兜底" },
+};
+
+function InferBadge({ field }: { field: SuggestionField }) {
+  const meta = SOURCE_META[field.source] || { color: "default", text: field.source };
+  const pct = Math.round((Number(field.confidence) || 0) * 100);
+  return (
+    <Tooltip title={field.reason || `${field.source}（置信度 ${pct}%）`}>
+      <Tag color={meta.color} style={{ marginLeft: 6 }}>
+        {meta.text} · {pct}%
+      </Tag>
+    </Tooltip>
+  );
+}
+
 export function MetricCreate() {
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
@@ -78,6 +100,13 @@ export function MetricCreate() {
 
   const [prechecking, setPrechecking] = useState(false);
   const [precheckResult, setPrecheckResult] = useState<ConflictCheckResult | null>(null);
+
+  // SQL 智能推断入口状态
+  const [sqlInferText, setSqlInferText] = useState("");
+  const [sqlInferring, setSqlInferring] = useState(false);
+  // 推断结果回填：各字段来源徽标 + 自动生成的口径定义预览
+  const [inferred, setInferred] = useState<Record<string, SuggestionField>>({});
+  const [inferredDefinition, setInferredDefinition] = useState<{ json: Record<string, unknown> | null; mode: string | null }>({ json: null, mode: null });
 
   useEffect(() => {
     setDomainLoading(true);
@@ -184,38 +213,64 @@ export function MetricCreate() {
     handleAutoSuggest();
   }
 
+  // 将后端推断结果回填到表单：属性字段 + 指标编码，并保存来源徽标与口径定义预览
+  function applySuggestion(result: AutoSuggestResponse) {
+    const fields = result.fields || {};
+    const merged: Record<string, unknown> = {};
+    for (const [key, sf] of Object.entries(fields)) {
+      if (key === "definition_json" || key === "definition_mode") continue;
+      if (sf && sf.value !== null && sf.value !== undefined) merged[key] = sf.value;
+    }
+    if (result.metric_code_suggestion) merged.metric_code = result.metric_code_suggestion;
+    if (Object.keys(merged).length > 0) form.setFieldsValue(merged);
+    if (result.metric_code_suggestion) setSuggestedCode(result.metric_code_suggestion);
+    setInferred(fields);
+    const defField = fields.definition_json;
+    const modeField = fields.definition_mode;
+    setInferredDefinition({
+      json: (defField?.value as Record<string, unknown>) ?? null,
+      mode: (modeField?.value as string) ?? null,
+    });
+  }
+
   async function handleDomainChange(value: string[], _selectedOptions: any) {
     const domainCode = value[value.length - 1];
     setSelectedDomain(domainCode);
+    if (!domainCode) return;
     setSuggesting(true);
     try {
       const sourceTable = form.getFieldValue("source_table");
       const measureColumn = form.getFieldValue("measure_column");
       const period = form.getFieldValue("period") || "day";
-
       const result = await autoSuggestMetric({
         domain_code: domainCode,
         source_table: sourceTable || undefined,
         measure_column: measureColumn || undefined,
         period,
       });
-
-      if (result.metric_code_suggestion) {
-        setSuggestedCode(result.metric_code_suggestion);
-        form.setFieldValue("metric_code", result.metric_code_suggestion);
-      }
-
-      const defaults = result.defaults || {};
-      for (const { dictType, field } of DICT_FIELD_MAP) {
-        const defaultVal = defaults[dictType] || defaults[field];
-        if (defaultVal) form.setFieldValue(field, defaultVal);
-      }
-
-      if (defaults.granularity) form.setFieldValue("granularity", defaults.granularity);
+      applySuggestion(result);
     } catch {
       // 推断失败不阻断
     } finally {
       setSuggesting(false);
+    }
+  }
+
+  // 粘贴 SQL 智能推断（独立入口：仅用于推断并回填属性，与最终「口径定义」相互独立）
+  async function handleSqlInfer() {
+    if (!selectedDomain || !sqlInferText.trim()) return;
+    setSqlInferring(true);
+    try {
+      const result = await autoSuggestMetric({
+        domain_code: selectedDomain,
+        sql: sqlInferText.trim(),
+      });
+      applySuggestion(result);
+      message.success("已从 SQL 推断并回填字段");
+    } catch {
+      message.error("SQL 推断失败，请检查语法或稍后重试");
+    } finally {
+      setSqlInferring(false);
     }
   }
 
@@ -232,17 +287,7 @@ export function MetricCreate() {
         measure_column: measureColumn || undefined,
         period,
       });
-      if (result.metric_code_suggestion) {
-        setSuggestedCode(result.metric_code_suggestion);
-        form.setFieldValue("metric_code", result.metric_code_suggestion);
-      }
-      // 也更新推断的默认字段
-      const defaults = result.defaults || {};
-      for (const { dictType, field } of DICT_FIELD_MAP) {
-        const defaultVal = defaults[dictType] || defaults[field];
-        if (defaultVal && !form.getFieldValue(field)) form.setFieldValue(field, defaultVal);
-      }
-      if (defaults.granularity && !form.getFieldValue("granularity")) form.setFieldValue("granularity", defaults.granularity);
+      applySuggestion(result);
     } catch { /* 忽略 */ }
     finally { setSuggesting(false); }
   }
@@ -332,6 +377,12 @@ export function MetricCreate() {
     />
   );
 
+  // 推断来源徽标：展示某字段是否被自动推断、来自何处、置信度
+  const fieldBadge = (name: string) => {
+    const sf = inferred[name];
+    return sf ? <InferBadge field={sf} /> : null;
+  };
+
   return (
     <div>
       <Title level={3}>注册指标（草稿）</Title>
@@ -355,6 +406,31 @@ export function MetricCreate() {
                   showSearch
                 />
               </Form.Item>
+            </Card>
+
+            {/* Step 1.5: 粘贴 SQL 智能推断（独立入口） */}
+            <Card type="inner" title="①½ 粘贴 SQL 智能推断" size="small" extra={sqlInferring && <Spin size="small" />}>
+              <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
+                粘贴一段指标定义 SQL（含 SELECT + 聚合 + GROUP BY + 时间过滤），系统用 sqlglot 解析并自动推断类型、名称、粒度、单位、聚合、时间语义、新鲜度、数仓层、可加性、服务模式与分级，并生成口径定义。
+                该 SQL 仅用于推断，与下方「口径定义」相互独立，最终口径可另行编写。
+              </Paragraph>
+              <Form.Item label="指标 SQL">
+                <TextArea
+                  rows={4}
+                  value={sqlInferText}
+                  onChange={(e) => setSqlInferText(e.target.value)}
+                  placeholder={"SELECT SUM(amount) AS gmv\nFROM dwd.sales_detail\nGROUP BY dt, shop_id"}
+                  className="mono"
+                />
+              </Form.Item>
+              <Button
+                type="dashed"
+                block
+                onClick={handleSqlInfer}
+                disabled={!selectedDomain || !sqlInferText.trim()}
+              >
+                智能推断并回填字段
+              </Button>
             </Card>
 
             {/* Step 2: 自动推断 */}
@@ -412,7 +488,7 @@ export function MetricCreate() {
                   </Form.Item>
                 </Col>
                 <Col span={12}>
-                  <Form.Item name="name" label="名称" rules={[{ required: true }]}>
+                  <Form.Item name="name" label={<span>名称{fieldBadge("name")}</span>} rules={[{ required: true }]}>
                     <Input placeholder="指标显示名称" />
                   </Form.Item>
                 </Col>
@@ -420,17 +496,17 @@ export function MetricCreate() {
 
               <Row gutter={16}>
                 <Col span={8}>
-                  <Form.Item name="type" label="类型">
+                  <Form.Item name="type" label={<span>类型{fieldBadge("type")}</span>}>
                     {dictSelect("metric_type", "type", "选择类型")}
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="granularity" label="粒度">
+                  <Form.Item name="granularity" label={<span>粒度{fieldBadge("granularity")}</span>}>
                     {dictSelect("granularity", "granularity", "选择粒度")}
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="unit" label="单位" rules={[{ required: true, message: "请选择单位" }]}>
+                  <Form.Item name="unit" label={<span>单位{fieldBadge("unit")}</span>} rules={[{ required: true, message: "请选择单位" }]}>
                     {dictSelect("unit", "unit", "选择单位")}
                   </Form.Item>
                 </Col>
@@ -438,17 +514,17 @@ export function MetricCreate() {
 
               <Row gutter={16}>
                 <Col span={8}>
-                  <Form.Item name="aggregation" label="聚合">
+                  <Form.Item name="aggregation" label={<span>聚合{fieldBadge("aggregation")}</span>}>
                     {dictSelect("aggregation", "aggregation", "选择聚合方式")}
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="time_semantics" label="时间语义">
+                  <Form.Item name="time_semantics" label={<span>时间语义{fieldBadge("time_semantics")}</span>}>
                     {dictSelect("time_semantics", "time_semantics", "选择时间语义")}
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="freshness" label="新鲜度">
+                  <Form.Item name="freshness" label={<span>新鲜度{fieldBadge("freshness")}</span>}>
                     {dictSelect("freshness", "freshness", "选择新鲜度")}
                   </Form.Item>
                 </Col>
@@ -456,17 +532,17 @@ export function MetricCreate() {
 
               <Row gutter={16}>
                 <Col span={8}>
-                  <Form.Item name="dw_layer" label="数仓层">
+                  <Form.Item name="dw_layer" label={<span>数仓层{fieldBadge("dw_layer")}</span>}>
                     {dictSelect("dw_layer", "dw_layer", "选择数仓层")}
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="additivity" label="可加性">
+                  <Form.Item name="additivity" label={<span>可加性{fieldBadge("additivity")}</span>}>
                     {dictSelect("additivity", "additivity", "选择可加性")}
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="serving_mode" label="服务模式">
+                  <Form.Item name="serving_mode" label={<span>服务模式{fieldBadge("serving_mode")}</span>}>
                     {dictSelect("serving_mode", "serving_mode", "选择服务模式")}
                   </Form.Item>
                 </Col>
@@ -474,7 +550,7 @@ export function MetricCreate() {
 
               <Row gutter={16}>
                 <Col span={8}>
-                  <Form.Item name="metric_tier" label="分级">
+                  <Form.Item name="metric_tier" label={<span>分级{fieldBadge("metric_tier")}</span>}>
                     {dictSelect("metric_tier", "metric_tier", "选择分级")}
                   </Form.Item>
                 </Col>
@@ -488,6 +564,27 @@ export function MetricCreate() {
 
             {/* 关联数据表 */}
             <Card type="inner" title="④ 口径定义" size="small">
+              {inferredDefinition.json && (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message={
+                    <span>
+                      推断口径定义（定义模式：
+                      <Tag color={inferredDefinition.mode === "sql" ? "geekblue" : "cyan"}>
+                        {inferredDefinition.mode === "sql" ? "SQL 模式" : "表达式模式"}
+                      </Tag>
+                      ，可据此调整下方口径）
+                    </span>
+                  }
+                  description={
+                    <pre className="mono" style={{ margin: 0, maxHeight: 200, overflow: "auto", fontSize: 12 }}>
+                      {JSON.stringify(inferredDefinition.json, null, 2)}
+                    </pre>
+                  }
+                />
+              )}
               <Form.Item label="关联数据表">
                 <Select
                   mode="multiple" allowClear showSearch

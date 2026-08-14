@@ -1233,17 +1233,31 @@ export interface AutoSuggestRequest {
   source_table?: string | null;
   measure_column?: string | null;
   period?: string | null;
+  sql?: string | null;
+}
+
+/** 单个推断字段：含取值、来源、置信度与理由，便于前端展示来源徽标。 */
+export interface SuggestionField {
+  value: unknown;
+  source: string;
+  confidence: number;
+  reason?: string;
 }
 
 export interface AutoSuggestResponse {
   metric_code_suggestion: string | null;
-  defaults: Record<string, unknown>;
   segments: {
     domain: string;
     biz_object: string | null;
     measure: string | null;
     period: string | null;
   };
+  /** 13 字段推断结果（name/type/granularity/unit/aggregation/time_semantics/freshness/dw_layer/additivity/serving_mode/metric_tier/definition_json/definition_mode）。 */
+  fields: Record<string, SuggestionField>;
+  definition_json: Record<string, unknown> | null;
+  definition_mode: string | null;
+  /** 向后兼容：旧式域默认/规则默认值聚合。 */
+  defaults?: Record<string, unknown>;
 }
 
 // ============================================================================
