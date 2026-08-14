@@ -17,6 +17,7 @@ from app.services.llm.client import (
     build_llm_client,
     chat_completions_url,
     models_url,
+    normalize_base_url,
 )
 
 
@@ -73,19 +74,52 @@ class TestChatCompletionsUrl:
         assert chat_completions_url("   ") == ""
 
 
+class TestNormalizeBaseUrl:
+    """base_url 归一化：完整端点/含 /v1/裸 URL 统一存为干净 base_url（幂等）。"""
+
+    def test_full_endpoint_strips_chat_suffix(self) -> None:
+        # 用户填完整 chat/completions 端点 → 归一化为干净 base URL
+        assert (
+            normalize_base_url("http://host.docker.internal:19090/v1/chat/completions")
+            == "http://host.docker.internal:19090"
+        )
+
+    def test_v1_suffix_stripped(self) -> None:
+        assert normalize_base_url("http://host.docker.internal:19090/v1") == (
+            "http://host.docker.internal:19090"
+        )
+
+    def test_bare_url_unchanged(self) -> None:
+        # 裸 URL 归一化幂等（不破坏原有配置）
+        assert normalize_base_url("http://host.docker.internal:19090") == (
+            "http://host.docker.internal:19090"
+        )
+
+    def test_full_models_endpoint_stripped(self) -> None:
+        assert normalize_base_url("https://api.example.com/v1/models") == "https://api.example.com"
+
+    def test_chat_without_v1_stripped(self) -> None:
+        assert (
+            normalize_base_url("https://api.example.com/chat/completions")
+            == "https://api.example.com"
+        )
+
+    def test_trailing_slash_stripped(self) -> None:
+        assert normalize_base_url("https://api.deepseek.com/") == "https://api.deepseek.com"
+
+    def test_empty_base_url(self) -> None:
+        assert normalize_base_url("") == ""
+        assert normalize_base_url("   ") == ""
+
+
 class TestModelsUrl:
     """models_url 端点规范化（一键获取模型/快速探测用，与 chat 端点形态对齐）。"""
 
     def test_bare_domain_appends_v1_path(self) -> None:
-        assert (
-            models_url("https://api.deepseek.com")
-            == "https://api.deepseek.com/v1/models"
-        )
+        assert models_url("https://api.deepseek.com") == "https://api.deepseek.com/v1/models"
 
     def test_base_url_with_v1_suffix(self) -> None:
-        assert (
-            models_url("https://api.openai.com/v1") == "https://api.openai.com/v1/models"
-        )
+        assert models_url("https://api.openai.com/v1") == "https://api.openai.com/v1/models"
 
     def test_chat_endpoint_replaced_with_models(self) -> None:
         # 用户填了完整 chat 端点 → 替换为同前缀 /models
@@ -96,15 +130,11 @@ class TestModelsUrl:
 
     def test_models_endpoint_passthrough(self) -> None:
         assert (
-            models_url("https://api.example.com/v1/models")
-            == "https://api.example.com/v1/models"
+            models_url("https://api.example.com/v1/models") == "https://api.example.com/v1/models"
         )
 
     def test_trailing_slash_stripped(self) -> None:
-        assert (
-            models_url("https://api.deepseek.com/")
-            == "https://api.deepseek.com/v1/models"
-        )
+        assert models_url("https://api.deepseek.com/") == "https://api.deepseek.com/v1/models"
 
     def test_empty_base_url(self) -> None:
         assert models_url("") == ""

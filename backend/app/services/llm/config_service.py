@@ -27,6 +27,7 @@ from app.services.llm.client import (
     LlmRouterClient,
     chat_completions_url,
     models_url,
+    normalize_base_url,
 )
 from app.services.llm.schemas import LlmConfigPayload, LlmConfigTestResult, LlmModelsResult
 
@@ -112,9 +113,7 @@ class LlmConfigService:
     async def get_row(self, instance_id: int) -> LlmConfig | None:
         """按 ID 读取单个未软删除实例。"""
         res = await self._db.execute(
-            select(LlmConfig).where(
-                LlmConfig.id == instance_id, LlmConfig.deleted_at.is_(None)
-            )
+            select(LlmConfig).where(LlmConfig.id == instance_id, LlmConfig.deleted_at.is_(None))
         )
         return res.scalar_one_or_none()
 
@@ -126,9 +125,7 @@ class LlmConfigService:
                 try:
                     decrypted = SecretManager.decrypt(row.api_key_enc)
                     api_key = (
-                        decrypted.get("api_key")
-                        if isinstance(decrypted, dict)
-                        else str(decrypted)
+                        decrypted.get("api_key") if isinstance(decrypted, dict) else str(decrypted)
                     )
                 except Exception as exc:  # noqa: BLE001 - 解密失败降级 env，不阻断
                     logger.error("llm_config_decrypt_failed: %s", exc)
@@ -183,9 +180,7 @@ class LlmConfigService:
             return None
         try:
             decrypted = SecretManager.decrypt(row.api_key_enc)
-            api_key = (
-                decrypted.get("api_key") if isinstance(decrypted, dict) else str(decrypted)
-            )
+            api_key = decrypted.get("api_key") if isinstance(decrypted, dict) else str(decrypted)
             return api_key or None
         except Exception as exc:  # noqa: BLE001 - 解密失败不抛 500，按无密钥处理
             logger.error("llm_config_secret_decrypt_failed: id=%s %s", instance_id, exc)
@@ -198,7 +193,7 @@ class LlmConfigService:
         row = LlmConfig(
             name=payload.name,
             provider=payload.provider,
-            base_url=payload.base_url,
+            base_url=normalize_base_url(payload.base_url),
             model=payload.model,
             api_key_enc="",
             timeout=payload.timeout,
@@ -221,7 +216,9 @@ class LlmConfigService:
             return None
         row.name = payload.name
         row.provider = payload.provider
-        row.base_url = payload.base_url
+        # 与 create 对称：base_url 统一归一化存储（用户可能填完整端点或基础 URL），
+        # 避免编辑后库里残留 /v1/chat/completions 完整后缀导致展示/拼接不一致。
+        row.base_url = normalize_base_url(payload.base_url)
         row.model = payload.model
         row.timeout = payload.timeout
         row.enabled = payload.enabled
@@ -259,9 +256,7 @@ class LlmConfigService:
             try:
                 decrypted = SecretManager.decrypt(row.api_key_enc)
                 api_key = (
-                    decrypted.get("api_key")
-                    if isinstance(decrypted, dict)
-                    else str(decrypted)
+                    decrypted.get("api_key") if isinstance(decrypted, dict) else str(decrypted)
                 )
             except Exception as exc:  # noqa: BLE001 - 单个实例解密失败跳过，不阻断路由
                 logger.error("llm_build_client_decrypt_failed: id=%s %s", row.id, exc)
@@ -312,9 +307,7 @@ class LlmConfigService:
                 decrypted.get("api_key") if isinstance(decrypted, dict) else decrypted or ""
             )
         except Exception as exc:  # noqa: BLE001
-            return LlmConfigTestResult(
-                ok=False, error=f"密钥解密失败: {exc}", model=row.model
-            )
+            return LlmConfigTestResult(ok=False, error=f"密钥解密失败: {exc}", model=row.model)
         return await self._probe(
             base_url=row.base_url,
             api_key=api_key,
@@ -456,9 +449,7 @@ class LlmConfigService:
             )
         # 404/405/501 等：网关仅实现 chat/completions、不暴露 /models，
         # 不视为失败，回退真实推理验证（向后兼容）。
-        logger.info(
-            "llm_models_probe_unsupported: url=%s status=%d", req_url, resp.status_code
-        )
+        logger.info("llm_models_probe_unsupported: url=%s status=%d", req_url, resp.status_code)
         return None
 
     # ---- 一键获取模型 ----
@@ -481,9 +472,7 @@ class LlmConfigService:
             timeout=float(row.timeout or 30),
         )
 
-    async def fetch_models(
-        self, base_url: str, api_key: str, timeout: float
-    ) -> LlmModelsResult:
+    async def fetch_models(self, base_url: str, api_key: str, timeout: float) -> LlmModelsResult:
         """获取提供商可用模型列表（GET /models）。
 
         api_key 为空时回落已保存/环境密钥（前端编辑留空=保持原密钥）。

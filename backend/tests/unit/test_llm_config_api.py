@@ -275,7 +275,12 @@ async def test_test_connection_success(llm_client: httpx.AsyncClient) -> None:
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {"model": "m1"}
+    # 两步探测：先 GET /models 快速探测（返回 200 通过），再 POST 真实推理
+    mock_models_resp = MagicMock()
+    mock_models_resp.status_code = 200
+    mock_models_resp.json.return_value = {"data": [{"id": "m1"}]}
     mock_client = AsyncMock()
+    mock_client.get.return_value = mock_models_resp
     mock_client.post.return_value = mock_resp
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -307,7 +312,12 @@ async def test_test_instance_by_id() -> None:
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {"model": "deepseek-chat"}
+    # 两步探测：GET /models 快速探测返回 200，再 POST 真实推理
+    mock_models_resp = MagicMock()
+    mock_models_resp.status_code = 200
+    mock_models_resp.json.return_value = {"data": [{"id": "deepseek-chat"}]}
     mock_client = AsyncMock()
+    mock_client.get.return_value = mock_models_resp
     mock_client.post.return_value = mock_resp
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)

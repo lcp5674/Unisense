@@ -147,6 +147,8 @@ class TestCreateUpdateDelete:
         assert added.priority == 1
         assert added.api_key_enc  # 已加密非明文
         assert "sk-plain" not in added.api_key_enc
+        # base_url 归一化：openai 预设（含 /v1）落库为干净裸 URL
+        assert added.base_url == "https://api.openai.com"
 
     async def test_update_keeps_key_when_payload_empty(self) -> None:
         s = _session()
@@ -166,6 +168,28 @@ class TestCreateUpdateDelete:
         assert existing.base_url == "https://new.example.com"
         assert existing.api_key_enc == "existing-encrypted-token"  # 未覆盖
         assert existing.name == "改"
+
+    async def test_update_normalizes_full_url(self) -> None:
+        """编辑时输入完整 chat/completions 端点，落库应归一化为干净 base_url（与 create 对称）。"""
+        s = _session()
+        existing = _row()
+        s.execute.return_value.scalar_one_or_none.return_value = existing
+        payload = LlmConfigPayload(
+            name="改",
+            provider="custom",
+            base_url="http://host.docker.internal:19090/v1/chat/completions",
+            model="hy3",
+            api_key="",
+            timeout=30,
+            enabled=True,
+        )
+        await LlmConfigService(s).update(1, payload, updated_by=2)
+        assert existing.base_url == "http://host.docker.internal:19090"
+        # 裸 URL 幂等，不破坏原有干净配置
+        existing.base_url = "https://api.deepseek.com"
+        payload2 = LlmConfigPayload(base_url="https://api.deepseek.com/")
+        await LlmConfigService(s).update(1, payload2, updated_by=3)
+        assert existing.base_url == "https://api.deepseek.com"
 
     async def test_update_overwrites_key_when_payload_provided(self) -> None:
         s = _session()

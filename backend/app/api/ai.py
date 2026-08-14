@@ -24,6 +24,7 @@ from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.ai.schemas import NL2SQLRequest
 from app.services.ai.service import AiService
+from app.services.llm.client import normalize_base_url
 from app.services.llm.config_service import LlmConfigService
 from app.services.llm.schemas import (
     LlmConfigListResponse,
@@ -103,7 +104,9 @@ async def get_llm_config(
             id=row.id,
             name=row.name,
             provider=row.provider or "custom",
-            base_url=row.base_url,
+            # 展示统一归一化：兼容存量完整 URL（如 .../v1/chat/completions）与基础 URL，
+            # 列表/编辑回显均为干净 base_url；对裸 URL 幂等。
+            base_url=normalize_base_url(row.base_url),
             model=row.model,
             has_api_key=bool(row.api_key_enc),
             timeout=row.timeout or 30,
@@ -117,8 +120,10 @@ async def get_llm_config(
         for row in rows
     ]
     effective = await svc.get_effective()
-    # 生效配置脱敏（不回传明文密钥）
+    # 生效配置脱敏（不回传明文密钥）；db 来源的 base_url 同样归一化展示
     effective_masked = {**effective, "api_key": ""}
+    if effective_masked.get("source") == "db" and effective_masked.get("base_url"):
+        effective_masked["base_url"] = normalize_base_url(effective_masked["base_url"])
     resp = LlmConfigListResponse(
         items=items,
         strategy="round_robin",
