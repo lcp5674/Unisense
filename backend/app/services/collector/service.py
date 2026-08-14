@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
@@ -50,6 +49,28 @@ from app.services.llm.client import (
 )
 
 logger = get_logger("unisense.collector.service")
+
+# FR-023: 描述推断的 JSON Schema 强约束（strict 模式保证字段名/类型一致），
+# 网关不支持 json_schema 时降级为 json_object（见 _infer_description_structured）。
+_DESCRIPTION_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "description_result",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["description", "confidence"],
+            "properties": {
+                "description": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+        },
+    },
+}
+_JSON_OBJECT_FORMAT: dict[str, Any] = {"type": "json_object"}
+# 格式重试提示：解析为 None 时追加，迫使模型收敛到合规 JSON（最多重试 1 次）。
+_STRICT_JSON_HINT = "请严格只输出符合 JSON Schema 的 JSON，不要任何额外文字。"
 
 # FR-023: LLM 分类错误 metric 计数器（进程内，非 Redis/Statsd）
 _llm_classify_error_counts: dict[str, int] = {}
@@ -551,24 +572,41 @@ class CollectorService(BaseService):
 
     @staticmethod
     def _parse_llm_description_result(raw: str) -> dict[str, Any] | None:
-        """解析 LLM 字段/表描述返回。
+        """解析 LLM 字段/表描述返回，委托统一解析器（fence 剥离/字段别名/类型强转）。"""
+        from app.services.llm.parse import parse_description_result
 
-        LlmClient.chat 的 content 为原始 JSON 字符串（如
-        ``{"description": "...", "confidence": 0.75}``）；解析失败/缺失视为不可用。
-        """
-        if not raw:
-            return None
-        try:
-            parsed = json.loads(raw)
-        except (ValueError, TypeError):
-            return None
-        if not isinstance(parsed, dict):
-            return None
-        description = str(parsed.get("description", "")).strip()
-        confidence = float(parsed.get("confidence", 0) or 0)
-        if not description or confidence <= 0:
+        description, confidence = parse_description_result(raw)
+        if description is None or confidence is None:
             return None
         return {"description": description, "confidence": confidence}
+
+    @staticmethod
+    async def _infer_description_structured(
+        client: Any, messages: list[dict[str, Any]], max_tokens: int
+    ) -> dict[str, Any] | None:
+        """调用 LLM 推断描述：json_schema 强约束优先，失败降级 json_object，解析失败重试 1 次。
+
+        两层保证：请求层（json_schema strict 迫使模型输出正确结构）+ 解析层（统一解析器
+        容错 fence/别名/越界）。任一层解析为 None 时追加约束提示重发，最多 2 次尝试。
+        """
+        from app.services.llm.parse import parse_description_result
+
+        for attempt in (0, 1):
+            aug = messages
+            if attempt:
+                aug = [*messages, {"role": "user", "content": _STRICT_JSON_HINT}]
+            for fmt in (_DESCRIPTION_RESPONSE_FORMAT, _JSON_OBJECT_FORMAT):
+                try:
+                    result = await client.chat(
+                        aug, temperature=0.0, max_tokens=max_tokens, response_format=fmt
+                    )
+                except LlmError:
+                    continue
+                description, confidence = parse_description_result(result.get("content", ""))
+                if description is not None and confidence is not None:
+                    return {"description": description, "confidence": confidence}
+        logger.warning("llm_infer_desc_all_formats_failed: 强约束与降级均无法解析")
+        return None
 
     async def _build_llm_client(
         self,
@@ -706,13 +744,8 @@ class CollectorService(BaseService):
                 },
             ]
 
-            result = await client.chat(
-                messages,
-                temperature=0.0,
-                max_tokens=200,
-                response_format={"type": "json_object"},
-            )
-            return self._parse_llm_description_result(result.get("content", ""))
+            result = await self._infer_description_structured(client, messages, max_tokens=200)
+            return result
         except (TimeoutError, ConnectionError, OSError) as exc:
             logger.warning("llm_infer_desc_timeout_error: %s", exc)
             _record_llm_error_metric("timeout")
@@ -777,13 +810,8 @@ class CollectorService(BaseService):
                 },
             ]
 
-            result = await client.chat(
-                messages,
-                temperature=0.0,
-                max_tokens=300,
-                response_format={"type": "json_object"},
-            )
-            return self._parse_llm_description_result(result.get("content", ""))
+            result = await self._infer_description_structured(client, messages, max_tokens=300)
+            return result
         except (TimeoutError, ConnectionError, OSError) as exc:
             logger.warning("llm_infer_table_desc_timeout_error: %s", exc)
             _record_llm_error_metric("timeout")

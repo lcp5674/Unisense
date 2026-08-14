@@ -26,7 +26,6 @@ P2 增强：
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from typing import Any
@@ -307,11 +306,9 @@ class LlmClient:
         raise LlmError(f"LLM 请求失败: {last_exc}") from last_exc
 
     def _parse_structured_output(self, raw_content: str) -> LlmStructuredOutput:
-        """解析 LLM 输出为结构化结果。
+        """解析 LLM 输出为结构化结果（委托统一解析器，含 fence 剥离）。"""
+        from app.services.llm.parse import parse_json_object
 
-        如果 LLM 输出为合法 JSON，尝试解析为 LlmStructuredOutput；
-        否则包装为默认结构（confidence=0.5, reasoning="非结构化输出"）。
-        """
         if not raw_content:
             return LlmStructuredOutput(
                 content="",
@@ -319,17 +316,17 @@ class LlmClient:
                 reasoning="LLM 返回空内容",
             )
 
-        try:
-            parsed = json.loads(raw_content)
-            if isinstance(parsed, dict):
+        obj = parse_json_object(raw_content)
+        if obj is not None:
+            try:
                 return LlmStructuredOutput(
-                    content=str(parsed.get("content", raw_content)),
-                    confidence=float(parsed.get("confidence", 0.5)),
-                    reasoning=str(parsed.get("reasoning", "")),
-                    candidates=parsed.get("candidates", []),
+                    content=str(obj.get("content", raw_content)),
+                    confidence=float(obj.get("confidence", 0.5)),
+                    reasoning=str(obj.get("reasoning", "")),
+                    candidates=obj.get("candidates", []),
                 )
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
+            except (ValueError, TypeError):
+                pass
 
         # 非结构化输出：包装为默认结构
         return LlmStructuredOutput(

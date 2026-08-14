@@ -59,11 +59,9 @@ class UnifiedConflictLlmClient:
                 response_format={"type": "json_object"},
             )
             content = result.get("content", "").strip()
-            parsed = json.loads(content)
-            val = parsed.get("same")
-            if isinstance(val, bool):
-                return val
-            return None
+            from app.services.llm.parse import parse_bool_result
+
+            return parse_bool_result(content, "same", "is_same", "equal", "match")
         except (LlmError, json.JSONDecodeError, KeyError) as exc:
             logger.warning("冲突 LLM 判定失败（降级为词法判定）: %s", exc)
             return None
