@@ -24,6 +24,22 @@ vi.mock("../api", () => ({
 }));
 
 vi.mock("@ant-design/charts", () => ({
+  Bar: ({ onReady, data, yField, xField, colorField, isStack }: any) => {
+    // 模拟 onReady 回调，让测试可以触发点击事件
+    if (onReady) {
+      const mockPlot = {
+        on: vi.fn((event: string, handler: any) => {
+          if (event === "element:click") {
+            heatmapReadyRef.lastClickHandler = handler;
+          }
+        }),
+      };
+      onReady(mockPlot);
+      // 同步到 heatmapReadyRef 兼容旧测试模式
+      heatmapReadyRef.onReady = onReady;
+    }
+    return <div data-testid="mock-bar" data-rows={data?.length} data-yfield={yField} data-xfield={xField} data-colorfield={colorField} data-stack={String(isStack)} />;
+  },
   Pie: () => <div data-testid="mock-pie" />,
   Heatmap: ({
     onReady,
@@ -49,7 +65,7 @@ const { g6GraphMock, heatmapReadyRef } = vi.hoisted(() => ({
     getNeighborNodesData: vi.fn(() => []),
     setElementState: vi.fn(),
   },
-  heatmapReadyRef: {
+  heatmapReadyRef: { lastClickHandler: undefined as ((evt: { data?: { data?: { sensKey?: string; domain?: string } } }) => void) | undefined,
     onReady: undefined as
       ((plot: { on: (name: string, fn: (evt: unknown) => void) => void }) => void) | undefined,
   },
@@ -365,13 +381,13 @@ describe("AssetMap", () => {
     // 触发 Heatmap onReady，模拟单元格点击（data 携带 sensKey/y）
     expect(typeof heatmapReadyRef.onReady).toBe("function");
     let cellClick:
-      ((evt: { data?: { data?: { sensKey?: string; y?: string } } }) => void) | undefined;
+      ((evt: { data?: { data?: { sensKey?: string; domain?: string } } }) => void) | undefined;
     heatmapReadyRef.onReady?.({
       on: (name, fn) => {
         if (name === "element:click") cellClick = fn as typeof cellClick;
       },
     });
-    cellClick?.({ data: { data: { sensKey: "PII", y: "sales" } } });
+    cellClick?.({ data: { data: { sensKey: "PII", domain: "sales" } } });
 
     await waitFor(() =>
       expect(listCatalogs).toHaveBeenCalledWith(
@@ -508,16 +524,21 @@ describe("AssetMap", () => {
 
   // 触发热力单元格点击（通过 Heatmap onReady 捕获 element:click）
   function triggerHeatmapCellClick(sensKey: string, domain: string) {
+    expect(typeof heatmapReadyRef.lastClickHandler).toBe("function");
+    heatmapReadyRef.lastClickHandler?.({ data: { data: { sensKey, domain } } });
+    return;
+    // legacy path (kept for reference)
+
     expect(typeof heatmapReadyRef.onReady).toBe("function");
     let cellClick:
-      | ((evt: { data?: { data?: { sensKey?: string; y?: string } } }) => void)
+      | ((evt: { data?: { data?: { sensKey?: string; domain?: string } } }) => void)
       | undefined;
     heatmapReadyRef.onReady?.({
       on: (name, fn) => {
         if (name === "element:click") cellClick = fn as typeof cellClick;
       },
     });
-    cellClick?.({ data: { data: { sensKey, y: domain } } });
+    cellClick?.({ data: { data: { sensKey, domain } } });
   }
 
   it("heatmap switches to metric asset view and refetches", async () => {
@@ -536,7 +557,7 @@ describe("AssetMap", () => {
       ),
     );
     // 标题随视角更新
-    expect(screen.getByText(/指标风险热力矩阵/)).toBeInTheDocument();
+    expect(screen.getByText(/指标资产分布/)).toBeInTheDocument();
   });
 
   it("heatmap cell drill filters by domain + sensitivity (catalog view)", async () => {

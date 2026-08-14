@@ -36,7 +36,7 @@ import {
   TableOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { Heatmap, Pie } from "@ant-design/charts";
+import { Bar, Pie } from "@ant-design/charts";
 import {
   downloadAssetExport,
   fetchAssetChanges,
@@ -616,18 +616,23 @@ function GraphTab() {
   );
 }
 
-// PII 加权系数：风险指数 = 资产数 + PII 数 × 权重（PII 权重越高，风险色越深）
-const PII_RISK_WEIGHT = 3;
-// 风险色阶：0 → 低 → 中 → 高（浅灰 → 黄 → 橙 → 深红），一眼可读"哪个域风险最高"
-const RISK_RANGE = ["#f5f5f5", "#fff7e6", "#ffd591", "#ffa940", "#e8590c", "#a61e1e"];
+// 敏感级 → 对应可视化色值（PII 红、机密橙、内部蓝、公开绿、待复核紫）
+const SENSITIVITY_CHART_COLOR: Record<string, string> = {
+  PII: "#f5222d",
+  CONFIDENTIAL: "#fa8c16",
+  NEEDS_REVIEW: "#722ed1",
+  INTERNAL: "#1677ff",
+  PUBLIC: "#52c41a",
+  UNKNOWN: "#bfbfbf",
+};
 
 function HeatmapTab() {
-  // 双视角：catalog=目录资产（业务域 × 敏感级）/ metric=指标资产（业务域 × PII/内部）
+  // 双视角：catalog=目录资产（按敏感级分布）/ metric=指标资产（按 PII/内部分布）
   const [assetType, setAssetType] = useState<"catalog" | "metric">("catalog");
   const [matrix, setMatrix] = useState<AssetHeatmapMatrix | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 单元格下钻抽屉（域 × 敏感级 → 双过滤明细）
+  // 条形段下钻抽屉（域 × 敏感级 → 双过滤明细）
   const [drillOpen, setDrillOpen] = useState(false);
   const [drillLoading, setDrillLoading] = useState(false);
   const [drillTitle, setDrillTitle] = useState("");
@@ -642,7 +647,7 @@ function HeatmapTab() {
         const m = await fetchAssetHeatmapMatrix(assetType);
         if (!cancelled) setMatrix(m);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "加载热力矩阵失败");
+        if (!cancelled) setError(err instanceof Error ? err.message : "加载热力分布失败");
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -654,8 +659,8 @@ function HeatmapTab() {
     };
   }, [assetType]);
 
-  // 单元格下钻：目录视角=域+敏感度双过滤；指标视角=域+PII 过滤（修复"点格子明细对不上"bug）
-  async function openCellDrill(sensKey: string, domain: string) {
+  // 条形段下钻：目录视角=域+敏感度双过滤；指标视角=域+PII 过滤
+  async function openBarDrill(sensKey: string, domain: string) {
     const sensLabel =
       assetType === "metric"
         ? sensKey === "PII"
@@ -683,36 +688,55 @@ function HeatmapTab() {
 
   if (loading) return <Spin />;
   if (error) return <Alert type="error" message={error} />;
-  if (!matrix) return <Empty description="暂无热力数据" />;
+  if (!matrix) return <Empty description="暂无分布数据" />;
 
   const isMetric = assetType === "metric";
-  const heatData = matrix.cells.map((c) => ({
-    x: isMetric
-      ? c.sensitivity === "PII"
-        ? "PII"
-        : "内部"
-      : (SENSITIVITY_LABEL[c.sensitivity] ?? c.sensitivity),
-    sensKey: c.sensitivity,
-    y: c.domain,
-    value: c.count,
-    piiCount: c.pii_count,
-    // 风险指数：数量 + PII 加权，色阶表达"风险"而非"数量"
-    risk: c.count + c.pii_count * PII_RISK_WEIGHT,
-  }));
-  const maxRisk = Math.max(1, ...heatData.map((d) => d.risk));
-  const domainCount = new Set(heatData.map((d) => d.y)).size;
-  const totalCount = heatData.reduce((a, b) => a + b.value, 0);
-  const piiTotal = heatData.reduce((a, c) => a + c.piiCount, 0);
-  // 域越多越需要高度，避免 y 轴标签/单元格被压缩
-  const chartHeight = Math.max(420, domainCount * 34 + 90);
+  // 按域汇总：每域一个总计数
+  const domainTotals: Record<string, number> = {};
+  // 展平数据为堆积条形图所需格式：每行 = {domain, sensitivity, count, piiCount}
+  const barData = matrix.cells
+    .filter((c) => c.count > 0)
+    .map((c) => {
+      domainTotals[c.domain] = (domainTotals[c.domain] || 0) + c.count;
+      return {
+        domain: c.domain,
+        sensitivity: isMetric
+          ? c.sensitivity === "PII"
+            ? "PII"
+            : "内部"
+          : (SENSITIVITY_LABEL[c.sensitivity] ?? c.sensitivity),
+        sensKey: c.sensitivity,
+        count: c.count,
+        piiCount: c.pii_count,
+      };
+    });
+  // 按域排序（总量从高到低）
+  const domainOrder = [...new Set(barData.map((d) => d.domain))].sort(
+    (a, b) => (domainTotals[b] ?? 0) - (domainTotals[a] ?? 0),
+  );
+  const totalCount = Object.values(domainTotals).reduce((a, b) => a + b, 0);
+  const piiTotal = barData.filter((d) => d.sensKey === "PII").reduce((a, c) => a + c.count, 0);
+  // 动态高度：每域 40px + 上下 padding
+  const chartHeight = Math.max(320, domainOrder.length * 40 + 80);
+
+  // 敏感级 → 颜色映射（指标视角只用 PII + 内部）
+  const colorMap: Record<string, string> = {};
+  if (isMetric) {
+    colorMap["PII"] = "#f5222d";
+    colorMap["内部"] = "#1677ff";
+  } else {
+    for (const k of Object.keys(SENSITIVITY_CHART_COLOR)) {
+      colorMap[SENSITIVITY_LABEL[k] ?? k] = SENSITIVITY_CHART_COLOR[k];
+    }
+  }
 
   return (
     <div>
       <Card
         title={
           isMetric
-            ? "指标风险热力矩阵（业务域 × PII/内部）"
-            : "目录资产风险热力矩阵（业务域 × 敏感级别）"
+            ? "指标资产分布（业务域 × PII/内部）"
+            : "目录资产分布（业务域 × 敏感级别）"
         }
         size="small"
         extra={
@@ -727,59 +751,60 @@ function HeatmapTab() {
               ]}
             />
             <span className="muted">
-              共 {totalCount} 项 · PII {piiTotal} 项 · 颜色越深=风险越高（PII 加权×
-              {PII_RISK_WEIGHT}）· 点击单元格查看明细
+              共 {totalCount} 项 · PII {piiTotal} 项 · 点击色段查看明细
             </span>
           </Space>
         }
       >
-        {heatData.length === 0 ? (
-          <Empty description="暂无热力数据" />
+        {barData.length === 0 ? (
+          <Empty description="暂无分布数据" />
         ) : (
-          <Heatmap
-            data={heatData}
-            xField="x"
-            yField="y"
-            colorField="risk"
+          <Bar
+            data={barData}
+            yField="domain"
+            xField="count"
+            colorField="sensitivity"
+            seriesField="sensitivity"
+            isStack={true}
             height={chartHeight}
-            shape="square"
-            // 风险色阶：0 值浅灰，越高越红（PII 加权后风险直觉可视化）
-            scale={{
-              color: {
-                type: "linear",
-                domain: [0, maxRisk],
-                range: RISK_RANGE,
-              },
-            }}
+            sort={{ y: domainOrder }}
+            color={({ sensitivity }: { sensitivity: string }) => colorMap[sensitivity] ?? "#bfbfbf"}
             label={{
-              text: "value",
-              style: { fontSize: 11 },
-              display: (d: { value: number }) => d.value > 0,
+              position: "inside",
+              formatter: (d: { count: number }) => (d.count > 0 ? String(d.count) : ""),
+              style: { fontSize: 11, fill: "#fff" },
             }}
-            style={{ inset: 3 }}
-            legend={{ color: { title: "风险指数" } }}
+            legend={{
+              color: { title: "敏感级别" },
+            }}
             axis={{
               y: {
+                title: "业务域",
                 label: {
-                  formatter: (v: string) => (v.length > 10 ? `${v.slice(0, 10)}…` : v),
+                  formatter: (v: string) => (v.length > 12 ? `${v.slice(0, 12)}…` : v),
                 },
+              },
+              x: {
+                title: "资产数量",
               },
             }}
             tooltip={{
-              title: (d: { y: string; x: string }) => `${d.y} × ${d.x}`,
+              title: (d: { domain: string; sensitivity: string }) =>
+                `${d.domain} · ${d.sensitivity}`,
               items: [
-                (d: { value: number }) => ({ name: "资产数", value: d.value }),
-                (d: { piiCount: number }) => ({ name: "含 PII", value: d.piiCount }),
-                (d: { risk: number }) => ({ name: "风险指数", value: d.risk }),
+                (d: { count: number }) => ({ name: "资产数", value: d.count }),
+                (d: { piiCount: number; sensKey: string }) =>
+                  d.sensKey === "PII" ? { name: "含 PII", value: d.piiCount } : null,
               ],
             }}
+            interactions={[{ type: "element-active" }] as any}
             onReady={(plot) => {
               plot.on(
                 "element:click",
-                (evt: { data?: { data?: { sensKey?: string; y?: string } } }) => {
+                (evt: { data?: { data?: { sensKey?: string; domain?: string } } }) => {
                   const key = evt?.data?.data?.sensKey;
-                  const domain = evt?.data?.data?.y;
-                  if (key && domain) openCellDrill(key, domain);
+                  const domain = evt?.data?.data?.domain;
+                  if (key && domain) openBarDrill(key, domain);
                 },
               );
             }}
