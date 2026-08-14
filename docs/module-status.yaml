@@ -63,7 +63,7 @@ modules:
     runbook_path: "docs/runbooks/lineage.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）"
     verified_at: "2026-08-08"
-    note: "生产级重构(2026-08-12)：五通道解析(sqlglot L1/L2 + sqlparse 多语句/方言)、Neo4j 图读路径(图优先+MySQL兜底, Cypher 可变长关系)、循环依赖检测(409)、血缘历史快照(lineage_edge_history WORM, R10-04)、指标级血缘 L3 + EXTERNAL_BREAK 断链登记(R10-03)、what-if 变更预览(/lineage/impact-preview)、PII 沿血缘传导(pii_inherited)、影响分析 Redis 缓存+分页。迁移到 0019。门禁：606 unit / ruff 0 / mypy 0(141文件) / 血缘核心覆盖率 repository97% service94% graph100% events100% parser83%。提交 a1abcdb。"
+    note: "生产级重构(2026-08-12)：五通道解析(sqlglot L1/L2 + sqlparse 多语句/方言)、Neo4j 图读路径(图优先+MySQL兜底, Cypher 可变长关系)、循环依赖检测(409)、血缘历史快照(lineage_edge_history WORM, R10-04)、指标级血缘 L3 + EXTERNAL_BREAK 断链登记(R10-03)、what-if 变更预览(/lineage/impact-preview)、PII 沿血缘传导(pii_inherited)、影响分析 Redis 缓存+分页。迁移到 0019。门禁：606 unit / ruff 0 / mypy 0(141文件) / 血缘核心覆盖率 repository97% service94% graph100% events100% parser83%。提交 a1abcdb。血缘图谱总览（2026-08-14）：新增 GET /lineage/graph 血缘图谱端点——从 MySQL lineage_edge + metric + db_catalog 拼装 nodes+edges（表/指标/字段节点 + 血缘边，复用 AssetMapRepository.graph_from_mysql 防逻辑漂移，支持 domain/pii_only/limit）；血缘视图新增「血缘图谱」默认 Tab（复用 AssetGraph G6 力导向图，进入即加载全量图谱，点击节点：指标→详情、表→采集目录定位）。lineage 相关 29 单测全绿 + ruff/mypy 0；前端 LineageView 4 项 + 全套 101 全绿 + tsc 0。"
     post_verify_review:
       standard: "DEV_GUIDE §6.3 (2026-08-07 新增约束：开发+验证完成后双视角漏洞审查)"
       performed_at: "2026-08-07"
