@@ -160,28 +160,47 @@ class TestGraphFromMysql:
             status="PUBLISHED",
         )
 
+    def _catalog(
+        self,
+        entity_name: str,
+        entity_type: str = "TABLE",
+        sens: str = "INTERNAL",
+        domain: str | None = "sales",
+        cid: int = 101,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=cid,
+            entity_name=entity_name,
+            entity_type=entity_type,
+            sensitivity_level=sens,
+            owner_id=2,
+            domain=domain,
+        )
+
+    def _edge(self, source: str, target: str, edge_type: str = "DERIVED_FROM") -> SimpleNamespace:
+        return SimpleNamespace(source_node=source, target_node=target, edge_type=edge_type)
+
+    def _empty_rows(self) -> MagicMock:
+        r = MagicMock()
+        r.all.return_value = []
+        return r
+
     async def test_node_id_uses_metric_prefix_and_precise_domain_filter(self) -> None:
         """域过滤必须是精确集合匹配（IN），不得再用 contains 子串匹配。"""
         s = _session()
         repo = AssetMapRepository(s)
-        m = self._metric("sales_gmv_amount_day", "sales")
         r_metrics = MagicMock()
-        r_metrics.all.return_value = [m]
-        e = SimpleNamespace(
-            source_node="table:sales.ods",
-            target_node="metric:sales_gmv_amount_day",
-            edge_type="DERIVED_FROM",
-        )
+        r_metrics.all.return_value = [self._metric("sales_gmv_amount_day", "sales")]
         r_edges = MagicMock()
-        r_edges.all.return_value = [e]
-        s.execute = AsyncMock(side_effect=[r_metrics, r_edges])
+        r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_gmv_amount_day")]
+        s.execute = AsyncMock(side_effect=[r_metrics, self._empty_rows(), r_edges])
 
         nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
 
         assert nodes[0]["id"] == "metric:sales_gmv_amount_day"
         assert nodes[0]["label"] == "sales_gmv_amount_day"
         assert len(edges) == 1
-        edge_stmt = s.execute.call_args_list[1].args[0]
+        edge_stmt = s.execute.call_args_list[2].args[0]
         compiled = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
         # 精确匹配：IN 集合，非 LIKE/contains 子串
         assert "metric:sales_gmv_amount_day" in compiled
@@ -196,21 +215,15 @@ class TestGraphFromMysql:
         """
         s = _session()
         repo = AssetMapRepository(s)
-        m = self._metric("sales_gmv_amount_day", "sales")
         r_metrics = MagicMock()
-        r_metrics.all.return_value = [m]
-        e = SimpleNamespace(
-            source_node="table:fin.raw",
-            target_node="metric:fin_cost",
-            edge_type="DERIVED_FROM",
-        )
+        r_metrics.all.return_value = [self._metric("sales_gmv_amount_day", "sales")]
         r_edges = MagicMock()
-        r_edges.all.return_value = [e]
-        s.execute = AsyncMock(side_effect=[r_metrics, r_edges])
+        r_edges.all.return_value = [self._edge("table:fin.raw", "metric:fin_cost")]
+        s.execute = AsyncMock(side_effect=[r_metrics, self._empty_rows(), r_edges])
 
         await repo.graph_from_mysql(domain="sales", pii_only=False)
 
-        edge_stmt = s.execute.call_args_list[1].args[0]
+        edge_stmt = s.execute.call_args_list[2].args[0]
         compiled = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "metric:sales_gmv_amount_day" in compiled
         assert "metric:fin_cost" not in compiled
@@ -223,28 +236,22 @@ class TestGraphFromMysql:
         repo = AssetMapRepository(s)
         r_metrics = MagicMock()
         r_metrics.all.return_value = []
-        s.execute = AsyncMock(side_effect=[r_metrics])
+        s.execute = AsyncMock(side_effect=[r_metrics, self._empty_rows()])
 
         nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
 
         assert nodes == []
         assert edges == []
-        s.execute.assert_awaited_once()
+        assert s.execute.await_count == 2
 
     async def test_pii_only_filters_metric_stmt(self) -> None:
         s = _session()
         repo = AssetMapRepository(s)
-        m = self._metric("sales_pii", "sales", pii=True)
         r_metrics = MagicMock()
-        r_metrics.all.return_value = [m]
-        e = SimpleNamespace(
-            source_node="table:sales.ods",
-            target_node="metric:sales_pii",
-            edge_type="DERIVED_FROM",
-        )
+        r_metrics.all.return_value = [self._metric("sales_pii", "sales", pii=True)]
         r_edges = MagicMock()
-        r_edges.all.return_value = [e]
-        s.execute = AsyncMock(side_effect=[r_metrics, r_edges])
+        r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_pii")]
+        s.execute = AsyncMock(side_effect=[r_metrics, self._empty_rows(), r_edges])
 
         nodes, edges = await repo.graph_from_mysql(domain=None, pii_only=True)
 
@@ -253,6 +260,86 @@ class TestGraphFromMysql:
         metric_stmt = s.execute.call_args_list[0].args[0]
         compiled = str(metric_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "pii_flag" in compiled
+
+    async def test_catalog_nodes_included_with_domain_inheritance(self) -> None:
+        """表/视图节点并入图，域从 data_source 继承、PII 由敏感级判定。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_metrics = MagicMock()
+        r_metrics.all.return_value = [self._metric("sales_gmv_amount_day", "sales")]
+        r_catalog = MagicMock()
+        r_catalog.all.return_value = [
+            self._catalog("sales.ods", sens="PII"),
+            self._catalog("sales.dwd", entity_type="VIEW", sens="INTERNAL"),
+        ]
+        r_edges = MagicMock()
+        r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_gmv_amount_day")]
+        s.execute = AsyncMock(side_effect=[r_metrics, r_catalog, r_edges])
+
+        nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
+
+        ids = [n["id"] for n in nodes]
+        assert "table:sales.ods" in ids
+        assert "table:sales.dwd" in ids
+        table_node = next(n for n in nodes if n["id"] == "table:sales.ods")
+        assert table_node["type"] == "table"
+        assert table_node["domain"] == "sales"
+        assert table_node["pii"] is True
+        assert table_node["entity_id"] == 101
+        view_node = next(n for n in nodes if n["id"] == "table:sales.dwd")
+        assert view_node["pii"] is False
+        assert len(edges) == 1
+        # catalog 查询含 entity_type 过滤与 data_source 域继承 join
+        catalog_stmt = s.execute.call_args_list[1].args[0]
+        compiled = str(catalog_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "TABLE" in compiled
+        assert "JOIN" in compiled.upper()
+        # 边的 IN 集合同时含表节点
+        edge_stmt = s.execute.call_args_list[2].args[0]
+        edge_sql = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "table:sales.ods" in edge_sql
+
+    async def test_field_nodes_extracted_from_edges(self) -> None:
+        """血缘边引用的字段节点并入图，域继承对端表。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_metrics = MagicMock()
+        r_metrics.all.return_value = [self._metric("sales_gmv_amount_day", "sales")]
+        r_catalog = MagicMock()
+        r_catalog.all.return_value = [self._catalog("sales.ods", sens="PII")]
+        r_edges = MagicMock()
+        r_edges.all.return_value = [
+            self._edge("table:sales.ods", "field:sales.ods.amount"),
+            self._edge("field:sales.ods.amount", "metric:sales_gmv_amount_day"),
+        ]
+        s.execute = AsyncMock(side_effect=[r_metrics, r_catalog, r_edges])
+
+        nodes, _ = await repo.graph_from_mysql(domain="sales", pii_only=False)
+
+        field_node = next(n for n in nodes if n["id"] == "field:sales.ods.amount")
+        assert field_node["type"] == "field"
+        assert field_node["label"] == "sales.ods.amount"
+        assert field_node["domain"] == "sales"
+        assert field_node["pii"] is False
+
+    async def test_pii_only_excludes_field_nodes(self) -> None:
+        """PII 视图不展示字段节点（字段级 PII 无法从血缘边判定）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_metrics = MagicMock()
+        r_metrics.all.return_value = [self._metric("sales_pii", "sales", pii=True)]
+        r_catalog = MagicMock()
+        r_catalog.all.return_value = [self._catalog("sales.ods", sens="PII")]
+        r_edges = MagicMock()
+        r_edges.all.return_value = [self._edge("field:sales.ods.amount", "metric:sales_pii")]
+        s.execute = AsyncMock(side_effect=[r_metrics, r_catalog, r_edges])
+
+        nodes, _ = await repo.graph_from_mysql(domain=None, pii_only=True)
+
+        ids = [n["id"] for n in nodes]
+        assert "field:sales.ods.amount" not in ids
+        assert "metric:sales_pii" in ids
+        assert "table:sales.ods" in ids
 
 
 class TestListTablesAndOrphans:

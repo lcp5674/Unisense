@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Alert, Button, Card, Descriptions, Drawer, Empty, Row, Col, Input, Select, Space, Spin, Statistic, Switch, Table, Tabs, Tag, Tooltip, message } from "antd";
 import { ApartmentOutlined, DeleteOutlined, DownloadOutlined, EyeOutlined, GlobalOutlined, HeartOutlined, HeatMapOutlined, SafetyOutlined, SearchOutlined, TableOutlined, UserOutlined } from "@ant-design/icons";
 import { Pie } from "@ant-design/charts";
@@ -34,20 +35,8 @@ import type {
 import { useTracking } from "../hooks/useTracking";
 import { ObjectView } from "../utils/display";
 import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
-
-interface GraphNode {
-  id: string;
-  type: string;
-  label: string;
-  pii?: boolean;
-  domain?: string;
-  owner?: string;
-}
-interface GraphEdge {
-  source: string;
-  target: string;
-  type: string;
-}
+import { AssetGraph } from "../components/assetmap/AssetGraph";
+import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -180,11 +169,16 @@ function OverviewTab() {
 }
 
 function GraphTab() {
-  const [graphData, setGraphData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null);
+  const navigate = useNavigate();
+  const [graphData, setGraphData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
   const [domain, setDomain] = useState<string | undefined>(undefined);
   const [piiOnly, setPiiOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 实体详情抽屉（table/field 节点下钻）
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
 
   async function loadGraph() {
     setLoading(true);
@@ -204,6 +198,31 @@ function GraphTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [domain, piiOnly]);
 
+  async function openDetail(entityId: number) {
+    setDetailOpen(true);
+    setDetailLoading(true);
+    setDetail(null);
+    try {
+      setDetail(await fetchAssetEntityDetail(entityId));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载实体详情失败");
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  function handleNodeClick(node: AssetGraphNode) {
+    if (node.type === "metric") {
+      navigate(`/detail/${encodeURIComponent(node.label)}`);
+      return;
+    }
+    if (node.entity_id != null) {
+      openDetail(node.entity_id);
+      return;
+    }
+    message.info(`节点「${node.label}」暂无详情数据`);
+  }
+
   if (loading && !graphData) return <Spin tip="加载图谱数据…" />;
   if (error) return <Alert type="error" message={error} />;
   if (!graphData) return <Empty description="暂无图谱数据" />;
@@ -212,6 +231,8 @@ function GraphTab() {
     label: d,
     value: d,
   }));
+
+  const detailHasPii = Boolean(detail?.pii_flag) || (detail?.sensitivity_level ?? "").includes("PII");
 
   return (
     <div>
@@ -232,40 +253,64 @@ function GraphTab() {
         </Col>
       </Row>
 
-      <Card title="图谱节点" size="small" style={{ marginBottom: 16 }}>
-        <Table
-          dataSource={graphData.nodes}
-          rowKey="id"
-          pagination={{ pageSize: 20 }}
-          size="small"
-          columns={[
-            { title: "ID", dataIndex: "id", key: "id", ellipsis: true },
-            { title: "类型", dataIndex: "type", key: "type", width: 80 },
-            { title: "标签", dataIndex: "label", key: "label", ellipsis: true },
-            {
-              title: "PII",
-              dataIndex: "pii",
-              key: "pii",
-              width: 70,
-              render: (val: boolean) => (val ? <Tag color="red">PII</Tag> : <Tag>普通</Tag>),
-            },
-            { title: "域", dataIndex: "domain", key: "domain", width: 110 },
-          ]}
-        />
+      <Card title="资产地图" size="small">
+        <AssetGraph nodes={graphData.nodes} edges={graphData.edges} onNodeClick={handleNodeClick} />
       </Card>
-      <Card title="关联边" size="small">
-        <Table
-          dataSource={graphData.edges}
-          rowKey={(r) => `${r.source}-${r.target}-${r.type}`}
-          pagination={{ pageSize: 20 }}
-          size="small"
-          columns={[
-            { title: "源", dataIndex: "source", key: "source", ellipsis: true },
-            { title: "目标", dataIndex: "target", key: "target", ellipsis: true },
-            { title: "类型", dataIndex: "type", key: "type", width: 160 },
-          ]}
-        />
-      </Card>
+
+      <Drawer
+        title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        width={560}
+      >
+        {detailLoading ? (
+          <Spin tip="加载实体详情…" />
+        ) : detail ? (
+          <>
+            <Descriptions column={1} bordered size="small">
+              <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+              <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
+              <Descriptions.Item label="数据源">{detail.source_id}</Descriptions.Item>
+              <Descriptions.Item label="敏感度">
+                {sensitivityTag(detail.sensitivity_level)}
+                {detailHasPii && <Tag color="red" style={{ marginLeft: 8 }}>含 PII</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="责任人">
+                {detail.owner_id != null ? `#${detail.owner_id}` : <Tag>无</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="Schema 状态">
+                {detail.schema_incomplete ? <Tag color="orange">不完整</Tag> : <Tag color="green">完整</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="Schema 摘要">{renderSchemaSummary(detail.schema_summary)}</Descriptions.Item>
+              <Descriptions.Item label="源健康">
+                {detail.source_health ? (
+                  <Tag color={detail.source_health.health_status === "healthy" ? "green" : detail.source_health.health_status === "unhealthy" ? "red" : "default"}>
+                    {SOURCE_HEALTH_LABEL[detail.source_health.health_status] ?? detail.source_health.health_status}
+                  </Tag>
+                ) : (
+                  <span className="muted">未知</span>
+                )}
+              </Descriptions.Item>
+            </Descriptions>
+            {(detail.lineage_edges?.length ?? 0) > 0 && (
+              <Card title="血缘边明细" size="small" style={{ marginTop: 16 }}>
+                <Table
+                  dataSource={detail.lineage_edges}
+                  rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
+                  size="small"
+                  pagination={false}
+                  columns={[
+                    { title: "源", dataIndex: "source", key: "source", ellipsis: true, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+                    { title: "目标", dataIndex: "target", key: "target", ellipsis: true, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+                    { title: "类型", dataIndex: "edge_type", key: "type", width: 120 },
+                    { title: "粒度", dataIndex: "granularity", key: "granularity", width: 80 },
+                  ]}
+                />
+              </Card>
+            )}
+          </>
+        ) : null}
+      </Drawer>
     </div>
   );
 }
@@ -1065,7 +1110,7 @@ export function AssetMap() {
   const tabItems = [
     { key: "overview", label: <span><GlobalOutlined /> 概览</span>, children: <OverviewTab /> },
     { key: "search", label: <span><SearchOutlined /> 搜索</span>, children: <SearchTab /> },
-    { key: "graph", label: <span><ApartmentOutlined /> 图谱视图</span>, children: <GraphTab /> },
+    { key: "graph", label: <span><ApartmentOutlined /> 资产地图</span>, children: <GraphTab /> },
     { key: "heatmap", label: <span><HeatMapOutlined /> 热力视图</span>, children: <HeatmapTab /> },
     { key: "health", label: <span><HeartOutlined /> 资产健康</span>, children: <HealthTab /> },
     { key: "pii", label: <span><SafetyOutlined /> PII 合规</span>, children: <PiiTab /> },

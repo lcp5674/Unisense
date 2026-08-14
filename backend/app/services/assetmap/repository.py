@@ -262,17 +262,13 @@ class AssetMapRepository:
     # P2 Enhancement: 图谱降级、热力聚合、责任人视图
     # ----------------------------------------------------------------
 
-    async def graph_from_mysql(
-        self, domain: str | None, pii_only: bool
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """从 MySQL lineage_edge + metric 拼接图谱数据。
+    # 图谱表/视图节点上限（力导向图可读性：节点过多会失去地图形态）
+    _GRAPH_CATALOG_LIMIT = 200
 
-        - 节点：域内/全部 metric 节点，id 统一为 ``metric:{code}``（与血缘边端点格式一致，
-          避免图节点与边端点断裂）。
-        - 边：仅保留至少一端属于展示节点的边（**精确集合匹配**，消除原 ``contains``
-          子串误匹配，如 domain="s" 误命中所有含 "s" 的节点）。
-        """
-        # 节点：metric 表
+    async def _graph_metric_nodes(
+        self, domain: str | None, pii_only: bool
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        """metric 节点：id=``metric:{code}``，按域/PII 过滤。"""
         metric_stmt = select(
             Metric.metric_code,
             Metric.domain,
@@ -285,15 +281,15 @@ class AssetMapRepository:
         if pii_only:
             metric_stmt = metric_stmt.where(Metric.pii_flag.is_(True))
 
-        metric_rows = (await self._session.execute(metric_stmt)).all()
+        rows = (await self._session.execute(metric_stmt)).all()
         nodes: list[dict[str, Any]] = []
         allowed: set[str] = set()
-        seen_ids: set[str] = set()
-        for row in metric_rows:
+        seen: set[str] = set()
+        for row in rows:
             node_id = f"metric:{row.metric_code}"
-            if node_id in seen_ids:
+            if node_id in seen:
                 continue
-            seen_ids.add(node_id)
+            seen.add(node_id)
             allowed.add(node_id)
             nodes.append(
                 {
@@ -305,36 +301,122 @@ class AssetMapRepository:
                     "owner": str(row.owner_id) if row.owner_id else None,
                 }
             )
+        return nodes, allowed
 
-        # 边：仅保留至少一端属于展示节点的边（精确匹配）
+    async def _graph_catalog_nodes(
+        self, pii_only: bool
+    ) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
+        """db_catalog 表/视图节点：id=``table:{entity_name}``（与血缘边格式对齐）。
+
+        域从 ``data_source.domain`` 继承（db_catalog 无域字段）；PII 由
+        ``sensitivity_level`` 含 "PII" 判定。返回节点列表 + {节点 id -> 域}。
+        """
+        catalog_stmt = (
+            select(
+                DBCatalog.id,
+                DBCatalog.entity_name,
+                DBCatalog.entity_type,
+                DBCatalog.sensitivity_level,
+                DBCatalog.owner_id,
+                DataSource.domain,
+            )
+            .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+            .where(
+                DBCatalog.deleted_at.is_(None),
+                DBCatalog.entity_type.in_(["TABLE", "VIEW"]),
+            )
+        )
+        if pii_only:
+            catalog_stmt = catalog_stmt.where(DBCatalog.sensitivity_level.like("%PII%"))
+
+        rows = (await self._session.execute(catalog_stmt.limit(self._GRAPH_CATALOG_LIMIT))).all()
+        nodes: list[dict[str, Any]] = []
+        domain_by_id: dict[str, str | None] = {}
+        seen: set[str] = set()
+        for row in rows:
+            node_id = f"table:{row.entity_name}"
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            domain_by_id[node_id] = row.domain
+            nodes.append(
+                {
+                    "id": node_id,
+                    "type": "table",
+                    "label": row.entity_name,
+                    "entity_id": row.id,
+                    "pii": bool(row.sensitivity_level and "PII" in row.sensitivity_level),
+                    "domain": row.domain,
+                    "owner": str(row.owner_id) if row.owner_id else None,
+                }
+            )
+        return nodes, domain_by_id
+
+    async def graph_from_mysql(
+        self, domain: str | None, pii_only: bool
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """从 MySQL lineage_edge + metric + db_catalog 拼接图谱数据。
+
+        - 节点：metric（``metric:{code}``）+ db_catalog 表/视图（``table:{entity_name}``，
+          与血缘边节点格式对齐）+ 血缘边引用到的字段（``field:{...}``，数量受控）。
+        - 边：仅保留至少一端属于展示节点的边（**精确 IN 集合匹配**，消除 ``contains``
+          子串误匹配）。
+        - PII 视图：仅指标/表节点（字段级 PII 无法从血缘边判定，故不展示字段）。
+        """
+        metric_nodes, allowed = await self._graph_metric_nodes(domain, pii_only)
+        catalog_nodes, catalog_domain = await self._graph_catalog_nodes(pii_only)
+        allowed.update(catalog_domain)
+        nodes: list[dict[str, Any]] = metric_nodes + catalog_nodes
+
+        if not allowed:
+            # 无展示节点则无有效边
+            return nodes, []
+
         edge_stmt = select(
             LineageEdge.source_node,
             LineageEdge.target_node,
             LineageEdge.edge_type,
-        ).where(LineageEdge.deleted_at.is_(None))
-        if allowed:
-            edge_stmt = edge_stmt.where(
-                or_(
-                    LineageEdge.source_node.in_(allowed),
-                    LineageEdge.target_node.in_(allowed),
-                )
-            )
-        else:
-            # 无展示节点则无有效边
-            return nodes, []
-
+        ).where(
+            LineageEdge.deleted_at.is_(None),
+            or_(
+                LineageEdge.source_node.in_(allowed),
+                LineageEdge.target_node.in_(allowed),
+            ),
+        )
         edge_rows = (await self._session.execute(edge_stmt.limit(1000))).all()
-        edges: list[dict[str, Any]] = []
-        for edge_row in edge_rows:
-            edges.append(
-                {
-                    "source": str(edge_row.source_node),
-                    "target": str(edge_row.target_node),
-                    "type": str(edge_row.edge_type),
-                }
-            )
 
-        return nodes, edges
+        # 血缘边引用的字段节点（数量受控）：域继承对端表/视图
+        field_seen: set[str] = set()
+        field_nodes: list[dict[str, Any]] = []
+        for row in edge_rows:
+            for node_id in (row.source_node, row.target_node):
+                if not node_id.startswith("field:") or node_id in field_seen:
+                    continue
+                if pii_only:
+                    # 字段级 PII 无法从血缘边判定，PII 视图不展示字段节点
+                    continue
+                field_seen.add(node_id)
+                other = row.target_node if node_id == row.source_node else row.source_node
+                field_nodes.append(
+                    {
+                        "id": node_id,
+                        "type": "field",
+                        "label": node_id.split(":", 1)[1],
+                        "pii": False,
+                        "domain": catalog_domain.get(other),
+                        "owner": None,
+                    }
+                )
+
+        edges = [
+            {
+                "source": str(row.source_node),
+                "target": str(row.target_node),
+                "type": str(row.edge_type),
+            }
+            for row in edge_rows
+        ]
+        return nodes + field_nodes, edges
 
     async def heatmap_aggregation(self, dimension: str) -> dict[str, Any]:
         """按维度聚合返回热力桶数据。

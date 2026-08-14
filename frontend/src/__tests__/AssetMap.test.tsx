@@ -14,10 +14,26 @@ vi.mock("../api", () => ({
   fetchAssetMetricSummary: vi.fn(),
   fetchAssetTables: vi.fn(),
   fetchAssetOrphans: vi.fn(),
+  fetchAssetEntityDetail: vi.fn(),
 }));
 
 vi.mock("@ant-design/charts", () => ({
   Pie: () => <div data-testid="mock-pie" />,
+}));
+
+// Mock @antv/g6：jsdom 无 canvas，G6 渲染必然失败；mock 让 AssetGraph 走正常路径
+const { g6GraphMock } = vi.hoisted(() => ({
+  g6GraphMock: {
+    on: vi.fn(),
+    render: vi.fn().mockResolvedValue(undefined),
+    destroy: vi.fn(),
+    getNodeData: vi.fn(() => ({ data: undefined })),
+    getNeighborNodesData: vi.fn(() => []),
+    setElementState: vi.fn(),
+  },
+}));
+vi.mock("@antv/g6", () => ({
+  Graph: vi.fn(() => g6GraphMock),
 }));
 
 // Mock useTracking hook（返回稳定引用，避免 effect 依赖反复触发）
@@ -35,6 +51,7 @@ import {
   fetchAssetMetricSummary,
   fetchAssetTables,
   fetchAssetOrphans,
+  fetchAssetEntityDetail,
 } from "../api";
 
 const mockGraphData = {
@@ -86,7 +103,7 @@ describe("AssetMap", () => {
     renderAssetMap();
 
     await waitFor(() => {
-      expect(screen.getByText("图谱视图")).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: /资产地图/ })).toBeInTheDocument();
     });
 
     expect(screen.getByText("热力视图")).toBeInTheDocument();
@@ -129,5 +146,48 @@ describe("AssetMap", () => {
     await waitFor(() => {
       expect(fetchAssetOwnerView).toHaveBeenCalled();
     });
+  });
+
+  it("click metric node navigates to metric detail", async () => {
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      | ((evt: { target?: { id?: string } }) => void)
+      | undefined;
+    expect(typeof clickHandler).toBe("function");
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "metric:m1", label: "finance_revenue_sum_d", type: "metric", domain: "finance" },
+    });
+    clickHandler?.({ target: { id: "metric:m1" } });
+
+    await waitFor(() => expect(window.location.pathname).toBe("/detail/finance_revenue_sum_d"));
+  });
+
+  it("click table node opens entity detail drawer", async () => {
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 5,
+      entity_name: "sales.ods",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "PII",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: null,
+      pii_flag: true,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      | ((evt: { target?: { id?: string } }) => void)
+      | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "table:sales.ods", label: "sales.ods", type: "table", entity_id: 5, domain: "sales" },
+    });
+    clickHandler?.({ target: { id: "table:sales.ods" } });
+
+    await waitFor(() => expect(fetchAssetEntityDetail).toHaveBeenCalledWith(5));
+    expect(screen.getByText(/实体详情/)).toBeInTheDocument();
   });
 });
