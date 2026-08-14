@@ -24,6 +24,7 @@
 5. **独立复核（有记录才可认）**：开发方声明 `verified` 后，必须由**独立复核方**（另一 agent / 人）重新独立运行全部门禁并核对证据，禁止自证清白。**复核产出物必须写入 `docs/CHANGELOG_MODULES.md`**（含复核方、日期、门禁重跑结论、evidence 核对结果），无记录视为未复核。
 6. **禁改门禁配置**：`CI/.gateways.yml` 标记 `protected: true`，其 `required`/阈值/门禁清单**禁止开发 agent 修改以绕过**；确需调整门槛须经 PR + 独立复核 + 在 CHANGELOG_MODULES 记录理由。
 7. **evidence 真实性**：`verified`/`released`/`implemented` 的 `evidence_path` 必须指向**真实存在、非空、≥50 字节**的测试报告文件（由 `contract_check.py --mode gateways_verify` 校验），禁止填假路径或占位文件。
+8. **截图证据用完即删**：验证过程中产生的截图（`.png` / `.jpg` 等）、临时 JSON 响应、分析脚本等中间产物，在验证完成并提交后**必须立即清理**，统一存放于 `/tmp/` 的子目录，用完后用 `rm -rf` 删除，不得遗留在工作区或 `/tmp` 中。所有 agent 应养成"验证完即清理"的习惯，避免磁盘空间被持续累积的截图证据占用。
 
 ---
 
