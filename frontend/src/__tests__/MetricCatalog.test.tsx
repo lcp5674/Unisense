@@ -6,16 +6,20 @@ import { MetricCatalog } from "../pages/MetricCatalog";
 vi.mock("../api", () => ({
   listMetrics: vi.fn(),
   fetchDashboard: vi.fn(),
+  listUsers: vi.fn(),
+  listDomainTree: vi.fn(),
 }));
 const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
-import { listMetrics, fetchDashboard } from "../api";
+import { listMetrics, fetchDashboard, listUsers, listDomainTree } from "../api";
 import type { MetricResponse, MetricListResponse } from "../types";
 const mockedList = vi.mocked(listMetrics);
 const mockedDashboard = vi.mocked(fetchDashboard);
+const mockedUsers = vi.mocked(listUsers);
+const mockedDomains = vi.mocked(listDomainTree);
 
 const metric: MetricResponse = {
   id: 1,
@@ -35,12 +39,20 @@ const metric: MetricResponse = {
   serving_mode: "BATCH_ONLY",
   additivity: "ADDITIVE",
   non_additive_dimensions: null,
-  definition_json: { expression: "sum(gmv)" },
+  definition_json: {
+    expression: "sum(gmv)",
+    definition: "当日支付成功订单的成交总额",
+    source_tables: ["dwd_order_di"],
+    dependencies: ["user_base_cnt_d"],
+    source_fields: ["gmv"],
+  },
   version: 2,
   row_version: 1,
   status: "PUBLISHED",
   owner_id: 1,
-  backup_owner_id: null,
+  backup_owner_id: 2,
+  approver_id: 3,
+  submitted_by: 1,
   pii_flag: true,
   compliance_reviewed: true,
   effective_version: 2,
@@ -80,6 +92,24 @@ describe("MetricCatalog", () => {
       pii_count: 1,
       pii_ratio: 1,
     });
+    mockedUsers.mockResolvedValue([
+      { id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", status: "active" },
+      { id: 2, username: "lisi", display_name: "李四", role: "metric_owner", domain: "sales", status: "active" },
+      { id: 3, username: "wangwu", display_name: "王五", role: "platform_admin", domain: null, status: "active" },
+    ]);
+    mockedDomains.mockResolvedValue([
+      {
+        id: 1,
+        code: "sales",
+        name: "销售域",
+        parent_id: null,
+        level: 1,
+        sort_order: 0,
+        status: "ACTIVE",
+        metric_count: 1,
+        children: [],
+      },
+    ]);
   });
 
   it("渲染治理徽章（紧急/灰度/PII）", async () => {
@@ -90,6 +120,47 @@ describe("MetricCatalog", () => {
     expect(screen.getByText("紧急")).toBeTruthy();
     expect(screen.getByText("灰度")).toBeTruthy();
     expect(screen.getByText("PII 已复核")).toBeTruthy();
+  });
+
+  it("展示责任人中文名与业务域中文名", async () => {
+    renderCatalog();
+    await waitFor(() => {
+      expect(screen.getByText("sales_gmv_sum_d")).toBeTruthy();
+    });
+    // 责任人 owner_id=1 → 张三；业务域 sales → 销售域
+    expect(screen.getByText("张三")).toBeTruthy();
+    expect(screen.getByText("销售域")).toBeTruthy();
+  });
+
+  it("展示口径摘要（聚合 · 粒度 · 单位）", async () => {
+    renderCatalog();
+    await waitFor(() => {
+      expect(screen.getByText("sales_gmv_sum_d")).toBeTruthy();
+    });
+    // SUM → 求和；day → 日；unit 元
+    expect(screen.getByText("求和 · 日 · 元")).toBeTruthy();
+  });
+
+  it("展开行展示指标定义/计算口径/治理追溯", async () => {
+    renderCatalog();
+    await waitFor(() => {
+      expect(screen.getByText("sales_gmv_sum_d")).toBeTruthy();
+    });
+    // 点击行首展开图标
+    const expandBtn = document.querySelector(".ant-table-row-expand-icon");
+    expect(expandBtn).toBeTruthy();
+    fireEvent.click(expandBtn as Element);
+    // 展开内容：指标定义 / 计算口径 / 来源字段 / 提交人=张三 / 审批人=王五
+    await waitFor(() => {
+      expect(screen.getByText("当日支付成功订单的成交总额")).toBeTruthy();
+      expect(screen.getByText("sum(gmv)")).toBeTruthy();
+      expect(screen.getByText("dwd_order_di")).toBeTruthy();
+      expect(screen.getByText("user_base_cnt_d")).toBeTruthy();
+      expect(screen.getByText("gmv")).toBeTruthy();
+      // 治理追溯：备份责任人=李四、审批人=王五
+      expect(screen.getAllByText("李四").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("王五").length).toBeGreaterThan(0);
+    });
   });
 
   it("域筛选选项来自真实 dashboard by_domain（非硬编码）", async () => {

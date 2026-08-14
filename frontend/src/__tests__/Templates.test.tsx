@@ -61,6 +61,8 @@ const CREATED: MetricResponse = {
   status: "DRAFT",
   owner_id: 1,
   backup_owner_id: null,
+  approver_id: null,
+  submitted_by: null,
   pii_flag: false,
   compliance_reviewed: false,
   effective_version: null,

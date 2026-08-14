@@ -70,6 +70,8 @@ describe("ConsumptionGuide", () => {
       status: "PUBLISHED",
       owner_id: 1,
       backup_owner_id: null,
+      approver_id: null,
+      submitted_by: null,
       pii_flag: true,
       compliance_reviewed: true,
       effective_version: 1,

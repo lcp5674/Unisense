@@ -64,6 +64,8 @@ const metric: MetricResponse = {
   status: "PUBLISHED",
   owner_id: 1,
   backup_owner_id: null,
+  approver_id: null,
+  submitted_by: null,
   pii_flag: false,
   compliance_reviewed: true,
   effective_version: null,

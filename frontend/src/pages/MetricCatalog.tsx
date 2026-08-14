@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Table, Input, Select, Button, Space, Tag, message, Tooltip } from "antd";
+import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions } from "antd";
 import {
   SearchOutlined,
   ColumnWidthOutlined,
@@ -8,10 +8,18 @@ import {
   FileTextOutlined,
   DownloadOutlined,
 } from "@ant-design/icons";
-import { fetchDashboard, listMetrics, UnisenseApiError } from "../api";
-import type { MetricResponse } from "../types";
+import { fetchDashboard, listDomainTree, listMetrics, listUsers, UnisenseApiError } from "../api";
+import type { MetricResponse, SubjectDomainTreeNode } from "../types";
 import { useTracking } from "../hooks/useTracking";
-import { METRIC_TYPE_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
+import {
+  AGGREGATION_LABEL,
+  DW_LAYER_LABEL,
+  FRESHNESS_LABEL,
+  GRANULARITY_LABEL,
+  METRIC_TYPE_LABEL,
+  METRIC_TIER_LABEL,
+  TIME_SEMANTICS_LABEL,
+} from "../utils/enums";
 
 const STATUS_COLOR: Record<string, string> = {
   DRAFT: "default",
@@ -37,6 +45,132 @@ const SORT_OPTIONS = [
   { value: "metric_code", label: "按编码" },
 ];
 
+// 递归展平主题域树 → code → 中文名 映射
+function flattenDomains(nodes: SubjectDomainTreeNode[], acc: Map<string, string>) {
+  for (const n of nodes) {
+    acc.set(n.code, n.name);
+    if (n.children?.length) flattenDomains(n.children, acc);
+  }
+}
+
+// 口径摘要：聚合(字段) · 粒度 · 单位 —— 指标"怎么算的"浓缩成一行可扫读
+function calibreSummary(r: MetricResponse): string {
+  const agg = AGGREGATION_LABEL[r.aggregation] ?? r.aggregation;
+  const gran = GRANULARITY_LABEL[r.granularity] ?? r.granularity;
+  return `${agg} · ${gran} · ${r.unit}`;
+}
+
+// 展开行：完整口径定义 + 治理追溯（责任人/备份/提交人/审批人/创建时间）
+function ExpandContent({
+  r,
+  userName,
+  domainName,
+}: {
+  r: MetricResponse;
+  userName: (id: number | null | undefined) => string;
+  domainName: (code: string) => string;
+}) {
+  const def = r.definition_json ?? {};
+  const expression = typeof def.expression === "string" ? def.expression : undefined;
+  const definition = typeof def.definition === "string" ? def.definition : undefined;
+  const dependencies = Array.isArray(def.dependencies) ? def.dependencies.map((d) => String(d)) : [];
+  const rawSource = def.source_fields ?? def.source_columns;
+  const sourceFields = Array.isArray(rawSource) ? rawSource.map((s) => String(s)) : rawSource ? [String(rawSource)] : [];
+  const sourceTables = Array.isArray(def.source_tables)
+    ? def.source_tables.map((s) => String(s))
+    : def.source_tables
+      ? [String(def.source_tables)]
+      : [];
+  const rawEtl = def.etl_sql ?? def.sql;
+  const etlSql = rawEtl == null ? "" : String(rawEtl);
+
+  return (
+    <div style={{ padding: "4px 8px" }}>
+      <Descriptions column={2} size="small" bordered style={{ marginBottom: 12 }}>
+        <Descriptions.Item label="业务域">{domainName(r.domain)}</Descriptions.Item>
+        <Descriptions.Item label="指标类型">{METRIC_TYPE_LABEL[r.type] ?? r.type}</Descriptions.Item>
+        <Descriptions.Item label="责任人">{userName(r.owner_id)}</Descriptions.Item>
+        <Descriptions.Item label="备份责任人">{userName(r.backup_owner_id)}</Descriptions.Item>
+        <Descriptions.Item label="提交人">{userName(r.submitted_by)}</Descriptions.Item>
+        <Descriptions.Item label="审批人">{userName(r.approver_id)}</Descriptions.Item>
+        <Descriptions.Item label="创建时间">
+          <span className="mono" style={{ fontSize: 12 }}>{r.created_at}</span>
+        </Descriptions.Item>
+        <Descriptions.Item label="数据分层">{DW_LAYER_LABEL[r.dw_layer] ?? r.dw_layer}</Descriptions.Item>
+        <Descriptions.Item label="更新时效">{FRESHNESS_LABEL[r.freshness] ?? r.freshness}</Descriptions.Item>
+        <Descriptions.Item label="时间语义">{TIME_SEMANTICS_LABEL[r.time_semantics] ?? r.time_semantics}</Descriptions.Item>
+      </Descriptions>
+      {definition && (
+        <p style={{ margin: "0 0 8px" }}>
+          <span className="muted">指标定义：</span>
+          {definition}
+        </p>
+      )}
+      {expression && (
+        <p style={{ margin: "0 0 8px" }}>
+          <span className="muted">计算口径：</span>
+          <code className="mono">{expression}</code>
+        </p>
+      )}
+      {sourceTables.length > 0 && (
+        <p style={{ margin: "0 0 8px" }}>
+          <span className="muted">关联数据表：</span>
+          {sourceTables.map((t) => (
+            <Tag key={t} className="mono">{t}</Tag>
+          ))}
+        </p>
+      )}
+      {dependencies.length > 0 && (
+        <p style={{ margin: "0 0 8px" }}>
+          <span className="muted">依赖指标：</span>
+          {dependencies.map((d) => (
+            <Tag key={d}>{d}</Tag>
+          ))}
+        </p>
+      )}
+      {sourceFields.length > 0 && (
+        <p style={{ margin: "0 0 8px" }}>
+          <span className="muted">来源字段：</span>
+          {sourceFields.map((s) => (
+            <Tag key={s}>{s}</Tag>
+          ))}
+        </p>
+      )}
+      {etlSql && (
+        <pre
+          style={{
+            background: "var(--paper)",
+            padding: 8,
+            borderRadius: 4,
+            margin: "0 0 8px",
+            fontSize: 12,
+            overflow: "auto",
+            maxHeight: 200,
+          }}
+        >
+          {etlSql}
+        </pre>
+      )}
+      <details>
+        <summary className="muted" style={{ cursor: "pointer" }}>完整口径 JSON</summary>
+        <pre
+          style={{
+            background: "var(--paper)",
+            padding: 8,
+            borderRadius: 4,
+            margin: "8px 0 0",
+            fontSize: 12,
+            overflow: "auto",
+            maxHeight: 240,
+          }}
+        >
+          {JSON.stringify(def, null, 2)}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
 export function MetricCatalog() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -57,6 +191,10 @@ export function MetricCatalog() {
   const [pageSize, setPageSize] = useState(20);
   const [selected, setSelected] = useState<MetricResponse[]>([]);
   const [loading, setLoading] = useState(false);
+  // 用户 id → 显示名 映射（责任人/提交人/审批人中文名）
+  const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
+  // 域 code → 中文名 映射
+  const [domainMap, setDomainMap] = useState<Map<string, string>>(new Map());
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
 
@@ -66,6 +204,33 @@ export function MetricCatalog() {
       .then((d) => setDomainOptions(Object.keys(d.by_domain ?? {}).map((v) => ({ value: v, label: v }))))
       .catch(() => setDomainOptions([]));
   }, []);
+
+  // 责任人/审批人/提交人 中文名映射（真实 listUsers）
+  useEffect(() => {
+    listUsers()
+      .then((u) => setUserMap(new Map(u.map((x) => [x.id, x.display_name || x.username]))))
+      .catch(() => setUserMap(new Map()));
+  }, []);
+
+  // 业务域中文名映射（真实 listDomainTree，失败回退显示 code）
+  useEffect(() => {
+    listDomainTree()
+      .then((tree) => {
+        const m = new Map<string, string>();
+        flattenDomains(tree, m);
+        setDomainMap(m);
+      })
+      .catch(() => setDomainMap(new Map()));
+  }, []);
+
+  const userName = useMemo(
+    () => (id: number | null | undefined) => (id == null ? "—" : (userMap.get(id) ?? `#${id}`)),
+    [userMap],
+  );
+  const domainName = useMemo(
+    () => (code: string) => (code ? (domainMap.get(code) ?? code) : "—"),
+    [domainMap],
+  );
 
   // 响应 URL 直达参数变化（全局搜索 / 生命周期信号条 SPA 内跳转）；初始值已由 useState 承接，
   // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
@@ -120,9 +285,17 @@ export function MetricCatalog() {
 
   // CSV 导出：对当前筛选结果（当前页）生成可审计清单
   function exportCsv() {
-    const header = ["metric_code", "name", "domain", "type", "status", "metric_tier", "pii_flag", "version", "updated_at"];
+    const header = [
+      "metric_code", "name", "domain", "owner_id", "type", "status",
+      "aggregation", "granularity", "unit", "dw_layer", "metric_tier",
+      "pii_flag", "version", "created_at", "updated_at",
+    ];
     const rows = items.map((m) =>
-      [m.metric_code, m.name, m.domain, m.type, m.status, m.metric_tier, m.pii_flag ? "PII" : "", m.version, m.updated_at]
+      [
+        m.metric_code, m.name, m.domain, m.owner_id, m.type, m.status,
+        m.aggregation, m.granularity, m.unit, m.dw_layer, m.metric_tier,
+        m.pii_flag ? "PII" : "", m.version, m.created_at, m.updated_at,
+      ]
         .map((c) => `"${String(c).replace(/"/g, '""')}"`)
         .join(","),
     );
@@ -147,8 +320,21 @@ export function MetricCatalog() {
         </Button>
       ),
     },
-    { title: "名称", dataIndex: "name", key: "name" },
-    { title: "域", dataIndex: "domain", key: "domain", width: 100 },
+    { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
+    {
+      title: "业务域",
+      dataIndex: "domain",
+      key: "domain",
+      width: 110,
+      render: (v: string) => domainName(v),
+    },
+    {
+      title: "责任人",
+      key: "owner",
+      width: 110,
+      ellipsis: true,
+      render: (_: unknown, r: MetricResponse) => userName(r.owner_id),
+    },
     { title: "类型", dataIndex: "type", key: "type", width: 90, render: (v: string) => METRIC_TYPE_LABEL[v] ?? v },
     {
       title: "状态",
@@ -158,6 +344,31 @@ export function MetricCatalog() {
       render: (s: string) => (
         <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>
       ),
+    },
+    {
+      title: "口径摘要",
+      key: "calibre",
+      width: 180,
+      ellipsis: true,
+      render: (_: unknown, r: MetricResponse) => {
+        const def = r.definition_json ?? {};
+        const expr = typeof def.expression === "string" ? def.expression : undefined;
+        const text = calibreSummary(r);
+        return expr ? (
+          <Tooltip title={`计算口径：${expr}`}>
+            <span style={{ fontSize: 12 }}>{text}</span>
+          </Tooltip>
+        ) : (
+          <span style={{ fontSize: 12 }}>{text}</span>
+        );
+      },
+    },
+    {
+      title: "分层",
+      dataIndex: "dw_layer",
+      key: "dw_layer",
+      width: 110,
+      render: (v: string) => DW_LAYER_LABEL[v] ?? v,
     },
     { title: "分级", dataIndex: "metric_tier", key: "tier", width: 70, render: (v: string) => <Tag>{METRIC_TIER_LABEL[v] ?? v}</Tag> },
     {
@@ -217,7 +428,7 @@ export function MetricCatalog() {
         <div>
           <div className="page-kicker">Assets / Catalog</div>
           <h2>指标目录</h2>
-          <p>全量指标定义——按状态/域/分级/关键词检索，点击进入详情。</p>
+          <p>全量指标定义——按状态/域/分级/关键词检索；展开行查看口径与治理追溯，点击进入详情。</p>
         </div>
         <Space wrap>
           <Tooltip title="将当前筛选结果导出为 CSV">
@@ -312,6 +523,10 @@ export function MetricCatalog() {
           selectedRowKeys: selected.map((s) => s.metric_code),
           onChange: (_, rows) => setSelected(rows),
         }}
+        expandable={{
+          expandedRowRender: (r) => <ExpandContent r={r} userName={userName} domainName={domainName} />,
+        }}
+        scroll={{ x: 1500 }}
         pagination={{
           current: page,
           pageSize,
