@@ -274,11 +274,26 @@ async def dashboard(
     owner_id: int | None = None,
     db: AsyncSession = Depends(get_db_session),
 ) -> Any:
-    """消费者仪表盘：按域/Owner 聚合指标统计（单次聚合查询+deleted_at过滤）。"""
+    """消费者仪表盘：按域/Owner 聚合指标统计 + 全资产计数（单次聚合查询+deleted_at过滤）。
+
+    ``assets`` 覆盖指标/数据表/数据源/维度/术语/指标模板/数据字典（DB 聚合），
+    采集任务为运行时 JobStore 数据，由采集服务聚合后并入，避免 semantic 仓储耦合 collector。
+    """
     from app.services.semantic.repository import MetricRepository
 
     repo = MetricRepository(db)
     data = await repo.aggregate_dashboard(domain=domain, owner_id=owner_id)
+    # 采集任务：运行时数据（Redis/内存 JobStore），采集服务聚合；失败不阻断仪表盘
+    try:
+        from app.services.collector.service import CollectorService
+
+        job_stats = await CollectorService(db).count_jobs_by_status()
+        data["assets"]["collection_task"] = {
+            "total": sum(job_stats.values()),
+            "by_status": job_stats,
+        }
+    except Exception:  # noqa: BLE001 —— 采集服务异常不影响指标/资产读数
+        data["assets"]["collection_task"] = {"total": 0, "by_status": {}}
     return ok(data=data, trace_id=get_trace_id(request))
 
 

@@ -14,9 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.exceptions import SystemError as AppSystemError
+from app.models.data_source import DataSource, DBCatalog
+from app.models.dimension import Dimension
 from app.models.metric import Metric
 from app.models.metric_health import MetricHealthScore
+from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion, PendingVersionConfirmation
+from app.models.system_dict import SystemDict
+from app.models.term import Term
 
 
 class MetricRepository:
@@ -465,6 +470,66 @@ class MetricRepository:
 
     # ---- Dashboard 聚合 ----
 
+    async def _count_by_status(
+        self, model: type[Any], status_col: ColumnElement[Any]
+    ) -> dict[str, int]:
+        """按状态列分组计数（软删除过滤），返回 {status: count}。
+
+        Args:
+            model: 资产 ORM 模型（须含 deleted_at 软删除字段）。
+            status_col: 状态列（枚举/字符串/布尔均可，键统一转 str）。
+
+        Returns:
+            状态 → 数量映射。
+        """
+        stmt = (
+            select(status_col, func.count().label("cnt"))
+            .where(model.deleted_at.is_(None))
+            .group_by(status_col)
+        )
+        rows = (await self._db.execute(stmt)).all()
+        return {str(row[0]): row[1] for row in rows}
+
+    async def _aggregate_assets(self) -> dict[str, dict[str, Any]]:
+        """聚合各类数据资产的计数与状态分布（对齐 TD §12.11 资产总览）。
+
+        各资产按其治理/运行状态字段分组：
+        - table 数据表：sensitivity_level 敏感级别（含 NEEDS_REVIEW）。
+        - source 数据源：health_status 健康状态（healthy/unhealthy/unknown）。
+        - dimension 维度 / term 术语：生命周期状态（DRAFT/PUBLISHED/DEPRECATED）。
+        - template 指标模板 / system_dict 数据字典：启用状态（active/inactive）。
+
+        Returns:
+            {资产键: {total, by_status}}。
+        """
+        table = await self._count_by_status(DBCatalog, DBCatalog.sensitivity_level)
+        source = await self._count_by_status(DataSource, DataSource.health_status)
+        dimension = await self._count_by_status(Dimension, Dimension.status)
+        term = await self._count_by_status(Term, Term.status)
+        # 布尔启用列统一映射为 active/inactive，避免 "True"/"False" 键泄漏到前端
+        template_raw = await self._count_by_status(MetricTemplate, MetricTemplate.is_active)
+        template = {
+            "active": template_raw.get("True", 0),
+            "inactive": template_raw.get("False", 0),
+        }
+        system_dict_raw = await self._count_by_status(SystemDict, SystemDict.status)
+        system_dict = {
+            "active": system_dict_raw.get("active", 0),
+            "inactive": system_dict_raw.get("inactive", 0),
+        }
+
+        def stat(by_status: dict[str, int]) -> dict[str, Any]:
+            return {"total": sum(by_status.values()), "by_status": by_status}
+
+        return {
+            "table": stat(table),
+            "source": stat(source),
+            "dimension": stat(dimension),
+            "term": stat(term),
+            "template": stat(template),
+            "system_dict": stat(system_dict),
+        }
+
     async def aggregate_dashboard(
         self, domain: str | None = None, owner_id: int | None = None
     ) -> dict[str, Any]:
@@ -534,4 +599,8 @@ class MetricRepository:
             "by_domain": by_domain,
             "pii_count": pii_count,
             "pii_ratio": round(pii_count / max(total, 1), 4),
+            "assets": {
+                "metric": {"total": total, "by_status": by_status},
+                **await self._aggregate_assets(),
+            },
         }

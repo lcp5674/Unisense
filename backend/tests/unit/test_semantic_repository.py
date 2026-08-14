@@ -532,11 +532,19 @@ def _row_result(total: int, pii_count: int) -> MagicMock:
 
 async def test_aggregate_dashboard_with_filters():
     db = _mock_session()
+    # 顺序：total+pii / by_status / by_tier / by_domain / table / source /
+    #       dimension / term / template / system_dict
     db.execute.side_effect = [
         _row_result(total=5, pii_count=2),
         _result(all_=[("PUBLISHED", 3), ("DRAFT", 2)]),  # by_status
         _result(all_=[("T1", 4), ("T2", 1)]),  # by_tier
         _result(all_=[("sales", 5)]),  # by_domain
+        _result(all_=[("INTERNAL", 10), ("PII", 3)]),  # table: sensitivity_level
+        _result(all_=[("healthy", 4), ("unknown", 1)]),  # source: health_status
+        _result(all_=[("PUBLISHED", 2)]),  # dimension: status
+        _result(all_=[("PUBLISHED", 3), ("DRAFT", 1)]),  # term: status
+        _result(all_=[(True, 5), (False, 1)]),  # template: is_active（bool→active/inactive）
+        _result(all_=[("active", 8), ("inactive", 2)]),  # system_dict: status
     ]
     repo = MetricRepository(db)
 
@@ -548,7 +556,21 @@ async def test_aggregate_dashboard_with_filters():
     assert result["by_tier"] == {"T1": 4, "T2": 1}
     assert result["by_domain"] == {"sales": 5}
     assert result["pii_ratio"] == round(2 / 5, 4)
-    assert db.execute.await_count == 4
+    assert db.execute.await_count == 10
+    # 资产总览：指标复用顶层聚合；其余资产按各自状态列分组
+    assert result["assets"]["metric"] == {
+        "total": 5,
+        "by_status": {"PUBLISHED": 3, "DRAFT": 2},
+    }
+    assert result["assets"]["table"] == {"total": 13, "by_status": {"INTERNAL": 10, "PII": 3}}
+    assert result["assets"]["source"] == {"total": 5, "by_status": {"healthy": 4, "unknown": 1}}
+    assert result["assets"]["dimension"] == {"total": 2, "by_status": {"PUBLISHED": 2}}
+    assert result["assets"]["term"] == {"total": 4, "by_status": {"PUBLISHED": 3, "DRAFT": 1}}
+    assert result["assets"]["template"] == {"total": 6, "by_status": {"active": 5, "inactive": 1}}
+    assert result["assets"]["system_dict"] == {
+        "total": 10,
+        "by_status": {"active": 8, "inactive": 2},
+    }
 
 
 async def test_aggregate_dashboard_without_filters_and_zero_total():
@@ -558,6 +580,12 @@ async def test_aggregate_dashboard_without_filters_and_zero_total():
         _result(all_=[]),
         _result(all_=[]),
         _result(all_=[]),
+        _result(all_=[]),  # table
+        _result(all_=[]),  # source
+        _result(all_=[]),  # dimension
+        _result(all_=[]),  # term
+        _result(all_=[]),  # template
+        _result(all_=[]),  # system_dict
     ]
     repo = MetricRepository(db)
 
@@ -569,3 +597,9 @@ async def test_aggregate_dashboard_without_filters_and_zero_total():
     assert result["by_tier"] == {}
     assert result["by_domain"] == {}
     assert result["pii_ratio"] == 0.0
+    assert result["assets"]["metric"] == {"total": 0, "by_status": {}}
+    assert result["assets"]["template"] == {"total": 0, "by_status": {"active": 0, "inactive": 0}}
+    assert result["assets"]["system_dict"] == {
+        "total": 0,
+        "by_status": {"active": 0, "inactive": 0},
+    }
