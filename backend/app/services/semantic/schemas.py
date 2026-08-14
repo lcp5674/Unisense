@@ -321,6 +321,9 @@ class MetricResponse(BaseModel):
     status: str
     owner_id: int
     backup_owner_id: int | None
+    # 治理追溯：审批人 / 提交人，DB 模型已有，响应透出供目录页显示
+    approver_id: int | None = None
+    submitted_by: int | None = None
     pii_flag: bool
     compliance_reviewed: bool
     effective_version: int | None
@@ -334,6 +337,11 @@ class MetricResponse(BaseModel):
     gray_tenant_ids: list[int] | None = None
     pending_conflict: bool = False
     pending_conflict_detail: dict[str, Any] | None = None
+    # 版本待确认：PUBLISHED+破坏性变更后，消费方需在 14 天内确认
+    pending_version: bool = False
+    # 健康度信号：列表接口经 metric_health_score 批量回填（无记录时为 None，目录页显示"未评分"）
+    health_score: int | None = None
+    health_level: str | None = None
     created_at: datetime
     updated_at: datetime
 

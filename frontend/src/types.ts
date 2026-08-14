@@ -36,6 +36,8 @@ export interface MetricResponse {
   status: MetricStatus;
   owner_id: number;
   backup_owner_id: number | null;
+  approver_id: number | null;
+  submitted_by: number | null;
   pii_flag: boolean;
   compliance_reviewed: boolean;
   effective_version: number | null;
@@ -48,6 +50,10 @@ export interface MetricResponse {
   gray_tenant_ids: number[] | null;
   pending_conflict: boolean;
   pending_conflict_detail: Record<string, unknown> | null;
+  pending_version: boolean;
+  /** 健康度信号（列表接口批量回填，无评分记录时为 null）：score 0-100 / level EXCELLENT|GOOD|WARNING|CRITICAL */
+  health_score?: number | null;
+  health_level?: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions } from "antd";
+import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal } from "antd";
 import {
   ArrowLeftOutlined,
   SearchOutlined,
@@ -8,9 +8,30 @@ import {
   PlusCircleOutlined,
   FileTextOutlined,
   DownloadOutlined,
+  HeartOutlined,
+  HeartFilled,
+  UserOutlined,
+  DeleteOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  ExclamationCircleOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
-import { fetchDashboard, listDomainTree, listMetrics, listUsers, UnisenseApiError } from "../api";
+import {
+  fetchCurrentUser,
+  fetchDashboard,
+  listDomainTree,
+  listMetrics,
+  listUsers,
+  listFavorites,
+  addFavorite,
+  removeFavorite,
+  submitReview,
+  deleteMetric,
+  UnisenseApiError,
+} from "../api";
 import type { MetricResponse, SubjectDomainTreeNode } from "../types";
+import type { ColumnsType } from "antd/es/table";
 import { useTracking } from "../hooks/useTracking";
 import {
   AGGREGATION_LABEL,
@@ -38,12 +59,33 @@ const STATUS_LABEL: Record<string, string> = {
   DEPRECATED: "已废弃",
 };
 
+// 健康度分级（backend metric_health_score：>=85 EXCELLENT / >=70 GOOD / >=55 WARNING / <55 CRITICAL）
+const HEALTH_LABEL: Record<string, string> = {
+  EXCELLENT: "优秀",
+  GOOD: "良好",
+  WARNING: "警告",
+  CRITICAL: "严重",
+};
+const HEALTH_COLOR: Record<string, string> = {
+  EXCELLENT: "green",
+  GOOD: "blue",
+  WARNING: "orange",
+  CRITICAL: "red",
+};
+
 const TIER_OPTIONS = ["T1", "T2", "T3"].map((v) => ({ value: v, label: METRIC_TIER_LABEL[v] ?? v }));
 const SORT_OPTIONS = [
   { value: "updated_at", label: "按更新时间" },
   { value: "created_at", label: "按创建时间" },
   { value: "version", label: "按版本号" },
   { value: "metric_code", label: "按编码" },
+];
+
+// 生命周期快筛预设
+const LIFECYCLE_PRESETS = [
+  { key: "created_7d", label: "最近7天创建", icon: <PlusCircleOutlined /> },
+  { key: "stale_30d", label: "30天未更新", icon: <ClockCircleOutlined /> },
+  { key: "deprecating", label: "即将废弃", icon: <ExclamationCircleOutlined /> },
 ];
 
 // 递归展平主题域树 → code → 中文名 映射
@@ -54,14 +96,14 @@ function flattenDomains(nodes: SubjectDomainTreeNode[], acc: Map<string, string>
   }
 }
 
-// 口径摘要：聚合(字段) · 粒度 · 单位 —— 指标"怎么算的"浓缩成一行可扫读
+// 口径摘要：聚合(字段) · 粒度 · 单位
 function calibreSummary(r: MetricResponse): string {
   const agg = AGGREGATION_LABEL[r.aggregation] ?? r.aggregation;
   const gran = GRANULARITY_LABEL[r.granularity] ?? r.granularity;
   return `${agg} · ${gran} · ${r.unit}`;
 }
 
-// 展开行：完整口径定义 + 治理追溯（责任人/备份/提交人/审批人/创建时间）
+// 展开行：完整口径定义 + 治理追溯
 function ExpandContent({
   r,
   userName,
@@ -176,7 +218,6 @@ export function MetricCatalog() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { track } = useTracking();
-  // URL 直达参数（?kw= / ?status=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
   const urlStatus = searchParams.get("status") ?? "";
   const [items, setItems] = useState<MetricResponse[]>([]);
@@ -192,36 +233,41 @@ export function MetricCatalog() {
   const [pageSize, setPageSize] = useState(20);
   const [selected, setSelected] = useState<MetricResponse[]>([]);
   const [loading, setLoading] = useState(false);
-  // 用户 id → 显示名 映射（责任人/提交人/审批人中文名）
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
-  // 域 code → 中文名 映射
   const [domainMap, setDomainMap] = useState<Map<string, string>>(new Map());
-  // 并发查询防竞态：只有最后一次发起的请求允许落地结果
+  const [currentUserId, setCurrentUserId] = useState<number | undefined>(undefined);
+  const [myMetricsOnly, setMyMetricsOnly] = useState(false);
+  const [lifecycleFilter, setLifecycleFilter] = useState<string | null>(null);
+  const [favorites, setFavorites] = useState<Set<string>>(new Set());
+  // 只看收藏：客户端过滤当前页（后端 list 无收藏过滤参数）
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除
+  const [batchAction, setBatchAction] = useState<"submit" | "delete" | null>(null);
+  const [batchBusy, setBatchBusy] = useState(false);
+  // 预览抽屉
+  const [previewMetric, setPreviewMetric] = useState<MetricResponse | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const loadSeq = useRef(0);
 
-  // 域列表从真实 dashboard by_domain 聚合（不硬编码）
+  // 域列表
   useEffect(() => {
     fetchDashboard()
       .then((d) => setDomainOptions(Object.keys(d.by_domain ?? {}).map((v) => ({ value: v, label: v }))))
       .catch(() => setDomainOptions([]));
   }, []);
 
-  // 责任人/审批人/提交人 中文名映射（真实 listUsers）
+  // 用户/域中文名映射
   useEffect(() => {
-    listUsers()
-      .then((u) => setUserMap(new Map(u.map((x) => [x.id, x.display_name || x.username]))))
-      .catch(() => setUserMap(new Map()));
-  }, []);
-
-  // 业务域中文名映射（真实 listDomainTree，失败回退显示 code）
-  useEffect(() => {
-    listDomainTree()
-      .then((tree) => {
+    Promise.all([
+      listUsers().then((u) => setUserMap(new Map(u.map((x) => [x.id, x.display_name || x.username])))),
+      listDomainTree().then((tree) => {
         const m = new Map<string, string>();
         flattenDomains(tree, m);
         setDomainMap(m);
-      })
-      .catch(() => setDomainMap(new Map()));
+      }),
+      fetchCurrentUser().then((u) => setCurrentUserId(u.id)).catch(() => {}),
+      listFavorites().then((codes) => setFavorites(new Set(codes))).catch(() => {}),
+    ]).catch(() => {});
   }, []);
 
   const userName = useMemo(
@@ -232,14 +278,16 @@ export function MetricCatalog() {
     () => (code: string) => (code ? (domainMap.get(code) ?? code) : "—"),
     [domainMap],
   );
+  // 域筛选下拉选项也使用中文名
+  const domainFilterOptions = useMemo(
+    () => domainOptions.map((d) => ({ value: d.value, label: domainName(d.value) })),
+    [domainOptions, domainName],
+  );
 
-  // 响应 URL 直达参数变化（全局搜索 / 生命周期信号条 SPA 内跳转）；初始值已由 useState 承接，
-  // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
   useEffect(() => {
     if (urlKw && urlKw !== keyword) setKeyword(urlKw);
     if (urlStatus && urlStatus !== status) setStatus(urlStatus);
     if (urlKw || urlStatus) setPage(1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKw, urlStatus]);
 
   async function load() {
@@ -251,12 +299,12 @@ export function MetricCatalog() {
         status,
         domain: domain || undefined,
         metric_tier: tier || undefined,
+        owner_id: myMetricsOnly ? currentUserId : undefined,
         sort_by: sortBy,
         sort_order: sortOrder,
         page,
         page_size: pageSize,
       });
-      // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
       if (seq !== loadSeq.current) return;
       setItems(res.items);
       setTotal(res.total);
@@ -273,8 +321,7 @@ export function MetricCatalog() {
 
   useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, status, domain, tier, sortBy, sortOrder]);
+  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, currentUserId]);
 
   function handleSearch() {
     if (keyword) {
@@ -290,7 +337,87 @@ export function MetricCatalog() {
     else navigate("/dashboard");
   }
 
-  // CSV 导出：对当前筛选结果（当前页）生成可审计清单
+  function handleLifecycle(key: string) {
+    if (key === "created_7d") {
+      setKeyword("");
+      setStatus("");
+      setLifecycleFilter(key);
+      // 后端不支持按创建时间筛，用排序引导
+      setSortBy("created_at");
+      setSortOrder("desc");
+    } else if (key === "stale_30d") {
+      setKeyword("");
+      setStatus("");
+      setLifecycleFilter(key);
+      setSortBy("updated_at");
+      setSortOrder("asc");
+    } else if (key === "deprecating") {
+      setKeyword("");
+      setStatus("DEPRECATED");
+      setLifecycleFilter(key);
+    }
+    setPage(1);
+  }
+
+  // 收藏切换（心形列）
+  async function toggleFavorite(code: string) {
+    const fav = favorites.has(code);
+    try {
+      if (fav) {
+        await removeFavorite(code);
+        setFavorites((prev) => {
+          const next = new Set(prev);
+          next.delete(code);
+          return next;
+        });
+        message.success("已取消收藏");
+      } else {
+        await addFavorite(code);
+        setFavorites((prev) => new Set(prev).add(code));
+        message.success("已收藏");
+      }
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "收藏操作失败");
+    }
+  }
+
+  // 只看收藏：客户端过滤当前页
+  const displayItems = useMemo(
+    () => (favoritesOnly ? items.filter((m) => favorites.has(m.metric_code)) : items),
+    [items, favoritesOnly, favorites],
+  );
+
+  // 批量操作执行：逐条提交审核 / 删除，收集成功与失败明细
+  async function runBatch() {
+    if (!batchAction || !selected.length) return;
+    const targets = selected.filter((m) => m.status === "DRAFT");
+    if (!targets.length) {
+      message.warning("勾选的指标中没有草稿状态可操作");
+      setBatchAction(null);
+      return;
+    }
+    setBatchBusy(true);
+    let ok = 0;
+    const errors: string[] = [];
+    for (const m of targets) {
+      try {
+        if (batchAction === "submit") await submitReview(m.metric_code);
+        else await deleteMetric(m.metric_code);
+        ok += 1;
+      } catch (err) {
+        errors.push(
+          `${m.metric_code}: ${err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "失败"}`,
+        );
+      }
+    }
+    setBatchBusy(false);
+    setBatchAction(null);
+    if (ok) message.success(`${batchAction === "submit" ? "提交审核" : "删除"}成功 ${ok} 个`);
+    if (errors.length) message.error(errors.slice(0, 3).join("；"));
+    setSelected([]);
+    load();
+  }
+
   function exportCsv() {
     const header = [
       "metric_code", "name", "domain", "owner_id", "type", "status",
@@ -315,7 +442,7 @@ export function MetricCatalog() {
     URL.revokeObjectURL(url);
   }
 
-  const columns = [
+  const columns: ColumnsType<MetricResponse> = [
     {
       title: "编码",
       dataIndex: "metric_code",
@@ -328,6 +455,30 @@ export function MetricCatalog() {
       ),
     },
     { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
+    {
+      title: "收藏",
+      key: "fav",
+      width: 56,
+      align: "center",
+      render: (_: unknown, r: MetricResponse) => (
+        <Button
+          type="text"
+          size="small"
+          aria-label={favorites.has(r.metric_code) ? "取消收藏" : "收藏"}
+          icon={
+            favorites.has(r.metric_code) ? (
+              <HeartFilled style={{ color: "#eb2f96" }} />
+            ) : (
+              <HeartOutlined />
+            )
+          }
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleFavorite(r.metric_code);
+          }}
+        />
+      ),
+    },
     {
       title: "业务域",
       dataIndex: "domain",
@@ -381,7 +532,7 @@ export function MetricCatalog() {
     {
       title: "治理徽章",
       key: "badges",
-      width: 170,
+      width: 220,
       render: (_: unknown, r: MetricResponse) => (
         <Space size={4} wrap>
           {r.pii_flag && (
@@ -389,10 +540,24 @@ export function MetricCatalog() {
           )}
           {r.emergency_publish && <Tag color="volcano">紧急</Tag>}
           {r.pending_conflict && <Tag color="orange">冲突</Tag>}
+          {r.pending_version && <Tag color="purple" icon={<ThunderboltOutlined />}>版本待确认</Tag>}
           {r.gray_tenant_ids && r.gray_tenant_ids.length > 0 && <Tag color="purple">灰度</Tag>}
-          {!r.pii_flag && !r.emergency_publish && !r.pending_conflict && !r.gray_tenant_ids && <span className="muted">—</span>}
+          {!r.pii_flag && !r.emergency_publish && !r.pending_conflict && !r.pending_version && !r.gray_tenant_ids && <span className="muted">—</span>}
         </Space>
       ),
+    },
+    {
+      title: "健康",
+      key: "health",
+      width: 90,
+      render: (_: unknown, r: MetricResponse) =>
+        r.health_level ? (
+          <Tooltip title={`健康分 ${r.health_score ?? 0}/100（${HEALTH_LABEL[r.health_level] ?? r.health_level}）`}>
+            <Tag color={HEALTH_COLOR[r.health_level]}>{HEALTH_LABEL[r.health_level] ?? r.health_level}</Tag>
+          </Tooltip>
+        ) : (
+          <span className="muted">未评分</span>
+        ),
     },
     {
       title: "版本",
@@ -410,7 +575,7 @@ export function MetricCatalog() {
     },
   ];
 
-  const hasFilter = Boolean(keyword || status || domain || tier);
+  const hasFilter = Boolean(keyword || status || domain || tier || myMetricsOnly || lifecycleFilter || favoritesOnly);
   const emptyGuide = useMemo(
     () => (
       <div style={{ padding: "16px 0", textAlign: "center" }}>
@@ -425,7 +590,6 @@ export function MetricCatalog() {
         </Space>
       </div>
     ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [hasFilter],
   );
 
@@ -438,9 +602,15 @@ export function MetricCatalog() {
           </Button>
           <div className="page-kicker">Assets / Catalog</div>
           <h2>指标目录</h2>
-          <p>全量指标定义——按状态/域/分级/关键词检索；展开行查看口径与治理追溯，点击进入详情。</p>
+          <p>全量指标定义——按状态/域/分级/关键词检索；展开行查看口径与治理追溯。</p>
         </div>
         <Space wrap>
+          <Button type="primary" icon={<PlusCircleOutlined />} onClick={() => navigate("/create")}>
+            创建指标
+          </Button>
+          <Button icon={<FileTextOutlined />} onClick={() => navigate("/templates")}>
+            从模板创建
+          </Button>
           <Tooltip title="将当前筛选结果导出为 CSV">
             <Button icon={<DownloadOutlined />} onClick={exportCsv} disabled={!items.length}>
               导出
@@ -452,8 +622,34 @@ export function MetricCatalog() {
             disabled={selected.length !== 2}
             onClick={() => selected.length === 2 && navigate(`/compare?a=${selected[0].metric_code}&b=${selected[1].metric_code}`)}
           >
-            对比所选{selected.length === 2 ? `（${selected[0].metric_code} ↔ ${selected[1].metric_code}）` : ` (${selected.length}/2)`}
+            对比所选
           </Button>
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: "submit",
+                  label: "批量提交审核（草稿）",
+                  icon: <CheckCircleOutlined />,
+                  disabled: !selected.some((m) => m.status === "DRAFT"),
+                },
+                { type: "divider" },
+                {
+                  key: "delete",
+                  label: "批量删除（草稿）",
+                  icon: <DeleteOutlined />,
+                  danger: true,
+                  disabled: !selected.some((m) => m.status === "DRAFT"),
+                },
+              ],
+              onClick: ({ key }) => setBatchAction(key as "submit" | "delete"),
+            }}
+            trigger={["click"]}
+          >
+            <Button icon={<ThunderboltOutlined />} disabled={!selected.length}>
+              批量操作
+            </Button>
+          </Dropdown>
         </Space>
       </div>
 
@@ -471,21 +667,15 @@ export function MetricCatalog() {
         </Button>
         <Select
           value={domain || undefined}
-          onChange={(v) => {
-            setDomain(v || "");
-            setPage(1);
-          }}
+          onChange={(v) => { setDomain(v || ""); setPage(1); }}
           style={{ width: 130 }}
           allowClear
           placeholder="全部域"
-          options={domainOptions}
+          options={domainFilterOptions}
         />
         <Select
           value={status || undefined}
-          onChange={(v) => {
-            setStatus(v || "");
-            setPage(1);
-          }}
+          onChange={(v) => { setStatus(v || ""); setPage(1); }}
           style={{ width: 130 }}
           allowClear
           placeholder="全部状态"
@@ -499,10 +689,7 @@ export function MetricCatalog() {
         />
         <Select
           value={tier || undefined}
-          onChange={(v) => {
-            setTier(v || "");
-            setPage(1);
-          }}
+          onChange={(v) => { setTier(v || ""); setPage(1); }}
           style={{ width: 110 }}
           allowClear
           placeholder="全部分级"
@@ -521,11 +708,47 @@ export function MetricCatalog() {
         >
           {sortOrder === "asc" ? "升序 ↑" : "降序 ↓"}
         </Button>
+        {currentUserId && (
+          <Button
+            type={myMetricsOnly ? "primary" : "default"}
+            icon={<UserOutlined />}
+            onClick={() => setMyMetricsOnly(!myMetricsOnly)}
+          >
+            {myMetricsOnly ? "我的指标" : "全部指标"}
+          </Button>
+        )}
+        <Button
+          type={favoritesOnly ? "primary" : "default"}
+          icon={favoritesOnly ? <HeartFilled style={{ color: "#eb2f96" }} /> : <HeartOutlined />}
+          onClick={() => setFavoritesOnly(!favoritesOnly)}
+        >
+          {favoritesOnly ? "只看收藏" : "我的收藏"}
+        </Button>
+        {LIFECYCLE_PRESETS.map((p) => (
+          <Button
+            key={p.key}
+            size="small"
+            type={lifecycleFilter === p.key ? "primary" : "default"}
+            icon={p.icon}
+            onClick={() => {
+              if (lifecycleFilter === p.key) {
+                setLifecycleFilter(null);
+                setStatus("");
+                setSortBy("updated_at");
+                setPage(1);
+              } else {
+                handleLifecycle(p.key);
+              }
+            }}
+          >
+            {p.label}
+          </Button>
+        ))}
         <span className="muted">共 {total} 条</span>
       </Space>
 
       <Table
-        dataSource={items}
+        dataSource={displayItems}
         columns={columns}
         rowKey="metric_code"
         loading={loading}
@@ -547,11 +770,53 @@ export function MetricCatalog() {
           showTotal: (t) => `共 ${t} 条`,
         }}
         onRow={(record) => ({
-          onClick: () => navigate(`/detail/${record.metric_code}`),
+          onClick: () => {
+            setPreviewMetric(record);
+            setPreviewOpen(true);
+          },
           style: { cursor: "pointer" },
         })}
         locale={{ emptyText: emptyGuide }}
       />
+
+      <Drawer
+        title={previewMetric ? `${previewMetric.metric_code} · ${previewMetric.name}` : "指标预览"}
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        width={600}
+        extra={
+          previewMetric ? (
+            <Button type="primary" onClick={() => { setPreviewOpen(false); navigate(`/detail/${previewMetric.metric_code}`); }}>
+              查看完整详情 →</Button>
+          ) : null
+        }
+      >
+        {previewMetric && (
+          <ExpandContent r={previewMetric} userName={userName} domainName={domainName} />
+        )}
+      </Drawer>
+
+      <Modal
+        title={batchAction === "submit" ? "批量提交审核" : "批量删除草稿"}
+        open={batchAction !== null}
+        confirmLoading={batchBusy}
+        onOk={runBatch}
+        onCancel={() => setBatchAction(null)}
+        okText={batchAction === "submit" ? "提交" : "删除"}
+        okButtonProps={{ danger: batchAction === "delete" }}
+      >
+        {batchAction === "submit" ? (
+          <p>
+            将勾选的 <b>{selected.filter((m) => m.status === "DRAFT").length}</b> 个草稿指标提交审核
+            （DRAFT → REVIEW）。非草稿状态的勾选项将被跳过。
+          </p>
+        ) : (
+          <p>
+            将删除勾选的 <b>{selected.filter((m) => m.status === "DRAFT").length}</b> 个草稿指标
+            （软删除，仅 platform_admin 可执行）。此操作不可恢复。
+          </p>
+        )}
+      </Modal>
     </div>
   );
 }

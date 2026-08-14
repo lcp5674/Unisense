@@ -141,6 +141,46 @@ async def list_metrics(
         )
     # PLAT-3: PII 访问审计须提交持久化，否则随会话关闭被回滚（合规审计静默丢失）
     await db.commit()
+    # 版本待确认标记：查询当前指标是否有 PENDING 状态确认记录
+    metric_ids = [m.id for m in metrics]
+    if metric_ids:
+        from sqlalchemy import select
+
+        from app.models.metric_version import PendingVersionConfirmation
+        pending_rows = (
+            (
+                await db.execute(
+                    select(PendingVersionConfirmation.metric_id).where(
+                        PendingVersionConfirmation.metric_id.in_(metric_ids),
+                        PendingVersionConfirmation.status == "PENDING",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        pending_ids = set(pending_rows)
+        for item in items:
+            if item.id in pending_ids:
+                item.pending_version = True
+    # 健康度信号（目录页"健康"列）：批量查询 metric_health_score，无记录保持 None
+    if metric_ids:
+        from sqlalchemy import select
+
+        from app.models.metric_health import MetricHealthScore
+        health_rows = (
+            await db.execute(
+                select(
+                    MetricHealthScore.metric_id,
+                    MetricHealthScore.score,
+                    MetricHealthScore.level,
+                ).where(MetricHealthScore.metric_id.in_(metric_ids))
+            )
+        ).all()
+        health_map = {r.metric_id: (r.score, r.level) for r in health_rows}
+        for item in items:
+            if item.id in health_map:
+                item.health_score, item.health_level = health_map[item.id]
     return ok(data=response, trace_id=trace_id)
 
 

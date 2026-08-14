@@ -523,6 +523,14 @@ export async function deprecateMetric(
   );
 }
 
+// 删除指标（软删除，仅 DRAFT 状态；仅 platform_admin）
+export async function deleteMetric(code: string): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}`,
+    { method: "DELETE" },
+  );
+}
+
 export async function listVersions(code: string): Promise<MetricVersionResponse[]> {
   return request<MetricVersionResponse[]>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/versions`,

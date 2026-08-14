@@ -8,18 +8,41 @@ vi.mock("../api", () => ({
   fetchDashboard: vi.fn(),
   listUsers: vi.fn(),
   listDomainTree: vi.fn(),
+  fetchCurrentUser: vi.fn(),
+  listFavorites: vi.fn(),
+  addFavorite: vi.fn(),
+  removeFavorite: vi.fn(),
+  submitReview: vi.fn(),
+  deleteMetric: vi.fn(),
 }));
 const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
-import { listMetrics, fetchDashboard, listUsers, listDomainTree } from "../api";
+import {
+  listMetrics,
+  fetchDashboard,
+  listUsers,
+  listDomainTree,
+  fetchCurrentUser,
+  listFavorites,
+  addFavorite,
+  removeFavorite,
+  submitReview,
+  deleteMetric,
+} from "../api";
 import type { MetricResponse, MetricListResponse } from "../types";
 const mockedList = vi.mocked(listMetrics);
 const mockedDashboard = vi.mocked(fetchDashboard);
 const mockedUsers = vi.mocked(listUsers);
 const mockedDomains = vi.mocked(listDomainTree);
+const mockedCurrentUser = vi.mocked(fetchCurrentUser);
+const mockedFavorites = vi.mocked(listFavorites);
+const mockedAddFavorite = vi.mocked(addFavorite);
+const mockedRemoveFavorite = vi.mocked(removeFavorite);
+const mockedSubmitReview = vi.mocked(submitReview);
+const mockedDeleteMetric = vi.mocked(deleteMetric);
 
 const metric: MetricResponse = {
   id: 1,
@@ -65,6 +88,7 @@ const metric: MetricResponse = {
   gray_tenant_ids: [101, 102],
   pending_conflict: false,
   pending_conflict_detail: null,
+  pending_version: false,
   created_at: "2026-08-01T00:00:00",
   updated_at: "2026-08-02T00:00:00",
 };
@@ -110,6 +134,15 @@ describe("MetricCatalog", () => {
         children: [],
       },
     ]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "zhangsan",
+      display_name: "张三",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    mockedFavorites.mockResolvedValue([]);
   });
 
   it("渲染治理徽章（紧急/灰度/PII）", async () => {
@@ -183,8 +216,9 @@ describe("MetricCatalog", () => {
     mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
     renderCatalog();
     await waitFor(() => {
-      expect(screen.getByText("创建指标")).toBeTruthy();
-      expect(screen.getByText("从模板创建")).toBeTruthy();
+      // page-head 与空态引导各有一组创建/模板按钮，断言均存在
+      expect(screen.getAllByText("创建指标").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("从模板创建").length).toBeGreaterThan(0);
     });
   });
 
@@ -230,8 +264,9 @@ describe("MetricCatalog", () => {
     const fullPromise = new Promise<MetricListResponse>((r) => {
       resolveFull = r;
     });
-    // 首查（全量）挂起；筛选查询立即返回 2；兜底全量 8
+    // 首查（全量）挂起；currentUserId 落地/筛选各触发一次返回 2；兜底全量 8
     mockedList.mockImplementationOnce(() => fullPromise);
+    mockedList.mockResolvedValueOnce({ items: [metric], total: 2, page: 1, page_size: 20 });
     mockedList.mockResolvedValueOnce({ items: [metric], total: 2, page: 1, page_size: 20 });
     mockedList.mockResolvedValue({ items: [], total: 8, page: 1, page_size: 20 });
 
@@ -286,5 +321,77 @@ describe("MetricCatalog", () => {
     await screen.findByText("sales_gmv_sum_d");
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+
+  it("健康度列：有评分显示分级标签，无评分显示未评分", async () => {
+    const healthy = { ...metric, health_level: "GOOD", health_score: 78 };
+    const unscored = { ...metric, metric_code: "sales_gmv_sum_w", health_level: null, health_score: null };
+    mockedList.mockResolvedValue({ items: [healthy, unscored], total: 2, page: 1, page_size: 20 });
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    expect(screen.getByText("良好")).toBeTruthy();
+    expect(screen.getByText("未评分")).toBeTruthy();
+  });
+
+  it("收藏：点击心形调用 addFavorite 并显示已收藏", async () => {
+    mockedAddFavorite.mockResolvedValue({} as never);
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    const favBtn = screen.getByRole("button", { name: "收藏" });
+    fireEvent.click(favBtn);
+    await waitFor(() => {
+      expect(mockedAddFavorite).toHaveBeenCalledWith("sales_gmv_sum_d");
+    });
+    expect(screen.getByRole("button", { name: "取消收藏" })).toBeTruthy();
+  });
+
+  it("收藏：再次点击已收藏的心形调用 removeFavorite", async () => {
+    mockedFavorites.mockResolvedValue(["sales_gmv_sum_d"]);
+    mockedRemoveFavorite.mockResolvedValue({} as never);
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    const unfavBtn = screen.getByRole("button", { name: "取消收藏" });
+    fireEvent.click(unfavBtn);
+    await waitFor(() => {
+      expect(mockedRemoveFavorite).toHaveBeenCalledWith("sales_gmv_sum_d");
+    });
+    expect(screen.getByRole("button", { name: "收藏" })).toBeTruthy();
+  });
+
+  it("批量操作：勾选草稿指标提交审核（DRAFT → REVIEW）", async () => {
+    const draft = { ...metric, status: "DRAFT" as const };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    mockedSubmitReview.mockResolvedValue({} as never);
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    // 勾选表头全选
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    // 打开批量操作下拉 → 批量提交审核
+    fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
+    fireEvent.click(screen.getByText("批量提交审核（草稿）"));
+    // 确认弹窗 → 提交（Ant 双字按钮渲染为"提 交"）
+    await screen.findByText(/将勾选的/);
+    fireEvent.click(screen.getByRole("button", { name: /提\s*交/ }));
+    await waitFor(() => {
+      expect(mockedSubmitReview).toHaveBeenCalledWith("sales_gmv_sum_d");
+    });
+  });
+
+  it("批量操作：勾选草稿指标批量删除", async () => {
+    const draft = { ...metric, status: "DRAFT" as const };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    mockedDeleteMetric.mockResolvedValue({} as never);
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
+    fireEvent.click(screen.getByText("批量删除（草稿）"));
+    await screen.findByText(/将删除勾选的/);
+    fireEvent.click(screen.getByRole("button", { name: "删 除" }));
+    await waitFor(() => {
+      expect(mockedDeleteMetric).toHaveBeenCalledWith("sales_gmv_sum_d");
+    });
   });
 });

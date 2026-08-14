@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -163,3 +165,93 @@ async def test_list_metrics_falls_back_to_updated_at_on_bad_sort() -> None:
     # 非法字段回退 updated_at（白名单防注入）
     assert "ORDER BY metric.updated_at" in sql
     assert "evil_col" not in sql
+
+
+# ---- 列表接口健康度回填（目录页"健康"列）----
+
+
+def _metric_snapshot() -> SimpleNamespace:
+    """构造一个可通过 MetricResponse.model_validate 的最小指标对象。"""
+    return SimpleNamespace(
+        id=1,
+        metric_code="sales_gmv_sum_d",
+        name="销售 GMV",
+        domain="sales",
+        type="atomic",
+        granularity="day",
+        unit="元",
+        currency=None,
+        aggregation="SUM",
+        time_semantics="PERIOD",
+        freshness="T1",
+        sla=None,
+        dw_layer="DWS",
+        metric_tier="T1",
+        serving_mode="BATCH_ONLY",
+        additivity="ADDITIVE",
+        non_additive_dimensions=None,
+        definition_json={"expression": "sum(gmv)"},
+        version=1,
+        row_version=1,
+        status="PUBLISHED",
+        owner_id=1,
+        backup_owner_id=None,
+        approver_id=None,
+        submitted_by=None,
+        pii_flag=False,
+        compliance_reviewed=True,
+        effective_version=1,
+        consumption_guide=None,
+        successor_code=None,
+        deprecated_at=None,
+        sunset_until=None,
+        emergency_publish=False,
+        emergency_reason=None,
+        gray_tenant_ids=None,
+        pending_conflict=False,
+        pending_conflict_detail=None,
+        pending_version=False,
+        created_at=datetime(2026, 8, 1),
+        updated_at=datetime(2026, 8, 2),
+    )
+
+
+async def test_list_metrics_enriches_health_score_from_table() -> None:
+    """GET /metric-definitions 应经 metric_health_score 批量回填 health_score/level。"""
+
+    async def fake_db():
+        session = MagicMock()
+
+        async def fake_execute(statement, *args, **kwargs):
+            sql = str(statement.compile(dialect=None))
+            result = MagicMock()
+            if "pending_version_confirmation" in sql:
+                result.scalars.return_value.all.return_value = []
+            elif "metric_health_score" in sql:
+                # 模拟 SQLAlchemy Row（支持属性访问）
+                result.all.return_value = [
+                    SimpleNamespace(metric_id=1, score=78, level="GOOD")
+                ]
+            else:
+                result.scalars.return_value.all.return_value = []
+            return result
+
+        session.execute = AsyncMock(side_effect=fake_execute)
+        session.commit = AsyncMock()
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
+    with patch(
+        "app.api.metrics.MetricService.list_metrics",
+        new=AsyncMock(return_value=([_metric_snapshot()], 1)),
+    ):
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/metric-definitions")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    item = resp.json()["data"]["items"][0]
+    assert item["health_score"] == 78
+    assert item["health_level"] == "GOOD"
