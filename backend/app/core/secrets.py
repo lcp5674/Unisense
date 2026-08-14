@@ -86,6 +86,8 @@ class SecretManager:
         使用活跃密钥（PBKDF2 派生）加密。
         """
         fernet = _manager.active_fernet if _manager is not None else Fernet(_build_key())
+        if fernet is None:
+            fernet = Fernet(_build_key())
         token: str = fernet.encrypt(json.dumps(obj, ensure_ascii=False).encode("utf-8")).decode(
             "utf-8"
         )

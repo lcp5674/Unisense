@@ -68,6 +68,7 @@ import type {
   SchemaColumn,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { SchemaTable } from "../components/SchemaTable";
 import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
@@ -102,22 +103,7 @@ function sensitivityTag(s: string | null | undefined) {
 function renderSchemaSummary(summary: SchemaColumn[] | string | null | undefined) {
   if (summary == null || summary === "") return <span className="muted">-</span>;
   if (typeof summary === "string") return <span>{summary}</span>;
-  if (Array.isArray(summary)) {
-    // SchemaColumn[]（并行会话引入的类型）：紧凑列名清单，避免依赖外部渲染组件
-    return (
-      <div style={{ lineHeight: 1.8 }}>
-        {summary.map((c) => (
-          <div key={c.name} style={{ fontSize: 12 }}>
-            <span className="mono">{c.name}</span>
-            {c.type ? <span className="muted" style={{ marginLeft: 6 }}>{c.type}</span> : null}
-            {c.description ? (
-              <span className="muted" style={{ marginLeft: 6 }}>· {c.description}</span>
-            ) : null}
-          </div>
-        ))}
-      </div>
-    );
-  }
+  if (Array.isArray(summary)) return <SchemaTable columns={summary} editable={false} />;
   return <span className="muted">-</span>;
 }
 
@@ -127,24 +113,59 @@ type DrillRow = Record<string, unknown>;
 const CATALOG_COLUMNS: ColumnsType<DrillRow> = [
   { title: "数据源", dataIndex: "source_id", width: 130 },
   { title: "实体", dataIndex: "entity_name", ellipsis: true },
-  { title: "类型", dataIndex: "entity_type", width: 90, render: (v) => ENTITY_TYPE_LABEL[v as string] ?? v },
-  { title: "敏感度", dataIndex: "sensitivity_level", width: 110, render: (s) => sensitivityTag(s as string | null | undefined) },
-  { title: "责任人", dataIndex: "owner_id", width: 80, render: (v) => (v == null ? <Tag>无</Tag> : v) },
+  {
+    title: "类型",
+    dataIndex: "entity_type",
+    width: 90,
+    render: (v) => ENTITY_TYPE_LABEL[v as string] ?? v,
+  },
+  {
+    title: "敏感度",
+    dataIndex: "sensitivity_level",
+    width: 110,
+    render: (s) => sensitivityTag(s as string | null | undefined),
+  },
+  {
+    title: "责任人",
+    dataIndex: "owner_id",
+    width: 80,
+    render: (v) => (v == null ? <Tag>无</Tag> : v),
+  },
 ];
 
 const METRIC_COLUMNS: ColumnsType<DrillRow> = [
-  { title: "编码", dataIndex: "metric_code", ellipsis: true, render: (v) => <span className="mono">{v as string}</span> },
+  {
+    title: "编码",
+    dataIndex: "metric_code",
+    ellipsis: true,
+    render: (v) => <span className="mono">{v as string}</span>,
+  },
   { title: "名称", dataIndex: "name", ellipsis: true },
   { title: "域", dataIndex: "domain", width: 110 },
   { title: "状态", dataIndex: "status", width: 100 },
-  { title: "PII", dataIndex: "pii_flag", width: 70, render: (v) => (v ? <Tag color="red">PII</Tag> : null) },
+  {
+    title: "PII",
+    dataIndex: "pii_flag",
+    width: 70,
+    render: (v) => (v ? <Tag color="red">PII</Tag> : null),
+  },
 ];
 
 const ORPHAN_COLUMNS: ColumnsType<DrillRow> = [
   { title: "数据源", dataIndex: "source_id", width: 130 },
   { title: "实体", dataIndex: "entity_name", ellipsis: true },
-  { title: "类型", dataIndex: "entity_type", width: 90, render: (v) => ENTITY_TYPE_LABEL[v as string] ?? v },
-  { title: "敏感度", dataIndex: "sensitivity_level", width: 110, render: (s) => sensitivityTag(s as string | null | undefined) },
+  {
+    title: "类型",
+    dataIndex: "entity_type",
+    width: 90,
+    render: (v) => ENTITY_TYPE_LABEL[v as string] ?? v,
+  },
+  {
+    title: "敏感度",
+    dataIndex: "sensitivity_level",
+    width: 110,
+    render: (s) => sensitivityTag(s as string | null | undefined),
+  },
 ];
 
 function OverviewTab() {
@@ -241,7 +262,9 @@ function OverviewTab() {
   if (error) return <Alert type="error" message={error} />;
   if (!summary || !metricSummary) return <Empty description="暂无资产数据" />;
 
-  const totalMetrics = metricSummary.by_domain ? Object.values(metricSummary.by_domain).reduce((a, b) => a + b, 0) : 0;
+  const totalMetrics = metricSummary.by_domain
+    ? Object.values(metricSummary.by_domain).reduce((a, b) => a + b, 0)
+    : 0;
   const sensData = Object.entries(summary.by_sensitivity ?? {}).map(([k, v]) => ({
     type: SENSITIVITY_LABEL[k] ?? k,
     key: k,
@@ -252,10 +275,18 @@ function OverviewTab() {
     <div>
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col xs={12} md={6}>
-          <Statistic title="目录资产总数" value={summary.total} valueRender={clickableValue(() => drillCatalogs())} />
+          <Statistic
+            title="目录资产总数"
+            value={summary.total}
+            valueRender={clickableValue(() => drillCatalogs())}
+          />
         </Col>
         <Col xs={12} md={6}>
-          <Statistic title="指标总数" value={totalMetrics} valueRender={clickableValue(() => drillMetrics())} />
+          <Statistic
+            title="指标总数"
+            value={totalMetrics}
+            valueRender={clickableValue(() => drillMetrics())}
+          />
         </Col>
         <Col xs={12} md={6}>
           <Statistic
@@ -331,7 +362,10 @@ function OverviewTab() {
 
 function GraphTab() {
   const navigate = useNavigate();
-  const [graphData, setGraphData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
+  const [graphData, setGraphData] = useState<{
+    nodes: AssetGraphNode[];
+    edges: AssetGraphEdge[];
+  } | null>(null);
   const [domain, setDomain] = useState<string | undefined>(undefined);
   const [piiOnly, setPiiOnly] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -444,12 +478,12 @@ function GraphTab() {
         />
       </Card>
 
-      <Drawer
-        title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
-        open={detailOpen}
-        onClose={() => setDetailOpen(false)}
-        width={560}
-      >
+       <Drawer
+         title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
+         open={detailOpen}
+         onClose={() => setDetailOpen(false)}
+         width={720}
+       >
         {detailLoading ? (
           <Spin tip="加载实体详情…" />
         ) : detail ? (
@@ -460,19 +494,38 @@ function GraphTab() {
               <Descriptions.Item label="数据源">{detail.source_id}</Descriptions.Item>
               <Descriptions.Item label="敏感度">
                 {sensitivityTag(detail.sensitivity_level)}
-                {detailHasPii && <Tag color="red" style={{ marginLeft: 8 }}>含 PII</Tag>}
+                {detailHasPii && (
+                  <Tag color="red" style={{ marginLeft: 8 }}>
+                    含 PII
+                  </Tag>
+                )}
               </Descriptions.Item>
               <Descriptions.Item label="责任人">
                 {detail.owner_id != null ? `#${detail.owner_id}` : <Tag>无</Tag>}
               </Descriptions.Item>
               <Descriptions.Item label="Schema 状态">
-                {detail.schema_incomplete ? <Tag color="orange">不完整</Tag> : <Tag color="green">完整</Tag>}
+                {detail.schema_incomplete ? (
+                  <Tag color="orange">不完整</Tag>
+                ) : (
+                  <Tag color="green">完整</Tag>
+                )}
               </Descriptions.Item>
-              <Descriptions.Item label="Schema 摘要">{renderSchemaSummary(detail.schema_summary)}</Descriptions.Item>
+              <Descriptions.Item label="Schema 摘要">
+                {renderSchemaSummary(detail.schema_summary)}
+              </Descriptions.Item>
               <Descriptions.Item label="源健康">
                 {detail.source_health ? (
-                  <Tag color={detail.source_health.health_status === "healthy" ? "green" : detail.source_health.health_status === "unhealthy" ? "red" : "default"}>
-                    {SOURCE_HEALTH_LABEL[detail.source_health.health_status] ?? detail.source_health.health_status}
+                  <Tag
+                    color={
+                      detail.source_health.health_status === "healthy"
+                        ? "green"
+                        : detail.source_health.health_status === "unhealthy"
+                          ? "red"
+                          : "default"
+                    }
+                  >
+                    {SOURCE_HEALTH_LABEL[detail.source_health.health_status] ??
+                      detail.source_health.health_status}
                   </Tag>
                 ) : (
                   <span className="muted">未知</span>
@@ -769,7 +822,12 @@ function OwnerTab() {
       size="small"
       extra={
         ownerOptions.length > 0 ? (
-          <Select style={{ width: 180 }} value={ownerId} onChange={setOwnerId} options={ownerOptions} />
+          <Select
+            style={{ width: 180 }}
+            value={ownerId}
+            onChange={setOwnerId}
+            options={ownerOptions}
+          />
         ) : (
           <span className="muted">从图谱提取责任人…</span>
         )
@@ -783,24 +841,48 @@ function OwnerTab() {
         <Empty description="请选择责任人" />
       ) : (
         <Row gutter={[16, 16]}>
-          <Col span={6}><Statistic title="指标总数" value={view.metrics.total} /></Col>
-          <Col span={6}><Statistic title="已发布" value={view.metrics.published} valueStyle={{ color: "#2e9e5b" }} /></Col>
-          <Col span={6}><Statistic title="草稿" value={view.metrics.draft} /></Col>
-          <Col span={6}><Statistic title="PII 指标" value={view.metrics.pii_count} valueStyle={{ color: "#d64545" }} /></Col>
+          <Col span={6}>
+            <Statistic title="指标总数" value={view.metrics.total} />
+          </Col>
+          <Col span={6}>
+            <Statistic
+              title="已发布"
+              value={view.metrics.published}
+              valueStyle={{ color: "#2e9e5b" }}
+            />
+          </Col>
+          <Col span={6}>
+            <Statistic title="草稿" value={view.metrics.draft} />
+          </Col>
+          <Col span={6}>
+            <Statistic
+              title="PII 指标"
+              value={view.metrics.pii_count}
+              valueStyle={{ color: "#d64545" }}
+            />
+          </Col>
           <Col span={12}>
             <div style={{ marginTop: 8 }}>
-              <span className="muted" style={{ fontSize: 13 }}>域分布</span>
+              <span className="muted" style={{ fontSize: 13 }}>
+                域分布
+              </span>
               <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
                 {Object.entries(view.metrics.by_domain ?? {}).map(([k, v]) => (
-                  <Col span={8} key={k}><Statistic title={k} value={v} /></Col>
+                  <Col span={8} key={k}>
+                    <Statistic title={k} value={v} />
+                  </Col>
                 ))}
               </Row>
             </div>
           </Col>
           <Col span={12}>
             <div style={{ marginTop: 8 }}>
-              <span className="muted" style={{ fontSize: 13 }}>目录资产</span>
-              <div style={{ fontSize: 28, fontWeight: 600, fontFamily: "var(--font-display)" }}>{view.catalogs.total}</div>
+              <span className="muted" style={{ fontSize: 13 }}>
+                目录资产
+              </span>
+              <div style={{ fontSize: 28, fontWeight: 600, fontFamily: "var(--font-display)" }}>
+                {view.catalogs.total}
+              </div>
             </div>
           </Col>
         </Row>
@@ -822,7 +904,11 @@ function OrphansTab() {
   }, []);
 
   return (
-    <Card title="孤儿资产（无责任人）" size="small" extra={<Statistic title="数量" value={items.length} valueStyle={{ fontSize: 18 }} />}>
+    <Card
+      title="孤儿资产（无责任人）"
+      size="small"
+      extra={<Statistic title="数量" value={items.length} valueStyle={{ fontSize: 18 }} />}
+    >
       {loading ? (
         <Spin />
       ) : error ? (
@@ -838,7 +924,13 @@ function OrphansTab() {
           columns={[
             { title: "数据源", dataIndex: "source_id", key: "source_id" },
             { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true },
-            { title: "类型", dataIndex: "entity_type", key: "entity_type", width: 90, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
+            {
+              title: "类型",
+              dataIndex: "entity_type",
+              key: "entity_type",
+              width: 90,
+              render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
+            },
             {
               title: "敏感度",
               dataIndex: "sensitivity_level",
@@ -912,7 +1004,10 @@ function TablesTab() {
             style={{ width: 160 }}
             value={sensitivity}
             onChange={setSensitivity}
-            options={Object.keys(SENSITIVITY_LABEL).map((k) => ({ value: k, label: SENSITIVITY_LABEL[k] }))}
+            options={Object.keys(SENSITIVITY_LABEL).map((k) => ({
+              value: k,
+              label: SENSITIVITY_LABEL[k],
+            }))}
           />
           <Button icon={<DownloadOutlined />} onClick={handleExport}>
             导出 CSV
@@ -933,7 +1028,13 @@ function TablesTab() {
           columns={[
             { title: "数据源", dataIndex: "source_id", key: "source_id" },
             { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true },
-            { title: "类型", dataIndex: "entity_type", key: "entity_type", width: 90, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
+            {
+              title: "类型",
+              dataIndex: "entity_type",
+              key: "entity_type",
+              width: 90,
+              render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
+            },
             {
               title: "敏感度",
               dataIndex: "sensitivity_level",
@@ -941,7 +1042,13 @@ function TablesTab() {
               width: 110,
               render: (s: string | null | undefined) => sensitivityTag(s),
             },
-            { title: "责任人", dataIndex: "owner_id", key: "owner", width: 90, render: (v: number | null) => v ?? <Tag>无</Tag> },
+            {
+              title: "责任人",
+              dataIndex: "owner_id",
+              key: "owner",
+              width: 90,
+              render: (v: number | null) => v ?? <Tag>无</Tag>,
+            },
             {
               title: "操作",
               key: "action",
@@ -965,98 +1072,155 @@ function TablesTab() {
         title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
-        width={560}
+        width={720}
         destroyOnClose={false}
       >
         {detailLoading ? (
           <Spin tip="加载实体详情…" />
         ) : detail ? (
           <>
-          <Descriptions column={1} bordered size="small">
-            <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
-            <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
-            <Descriptions.Item label="数据源">{detail.source_id}</Descriptions.Item>
-            <Descriptions.Item label="敏感度">
-              {sensitivityTag(detail.sensitivity_level)}
-              {hasPii && (
-                <Tag color="red" style={{ marginLeft: 8 }}>含 PII</Tag>
-              )}
-            </Descriptions.Item>
-            <Descriptions.Item label="责任人">
-              {detail.owner_id != null ? `#${detail.owner_id}` : <Tag>无</Tag>}
-            </Descriptions.Item>
-            <Descriptions.Item label="Schema 状态">
-              {detail.schema_incomplete ? <Tag color="orange">不完整</Tag> : <Tag color="green">完整</Tag>}
-            </Descriptions.Item>
-            <Descriptions.Item label="内容指纹">
-              {detail.content_signature ? (
-                <Tooltip title={detail.content_signature}>
-                  <span style={{ fontFamily: "monospace", cursor: "help" }}>{detail.content_signature.slice(0, 16)}…</span>
-                </Tooltip>
-              ) : (
-                <span className="muted">-</span>
-              )}
-            </Descriptions.Item>
-            <Descriptions.Item label="Schema 摘要">{renderSchemaSummary(detail.schema_summary)}</Descriptions.Item>
-            <Descriptions.Item label="关联血缘">
-              <Button
-                type="link"
-                size="small"
-                disabled={lineageCount <= 0}
-                onClick={() => message.info(`实体「${detail.entity_name}」关联血缘 ${lineageCount} 条`) }
-              >
-                关联血缘 {lineageCount} 条
-              </Button>
-            </Descriptions.Item>
-            <Descriptions.Item label="源健康">
-              {detail.source_health ? (
-                <Tag color={detail.source_health.health_status === "healthy" ? "green" : detail.source_health.health_status === "unhealthy" ? "red" : "default"}>
-                  {SOURCE_HEALTH_LABEL[detail.source_health.health_status] ?? detail.source_health.health_status}
-                </Tag>
-              ) : (
-                <span className="muted">未知</span>
-              )}
-              {detail.source_health?.last_health_check ? (
-                <span className="muted" style={{ marginLeft: 8 }}>检查于 {new Date(detail.source_health.last_health_check).toLocaleString()}</span>
-              ) : null}
-            </Descriptions.Item>
-            <Descriptions.Item label="新鲜度">
-              <div className="muted" style={{ fontSize: 12 }}>
-                <div>创建：{detail.created_at ? new Date(detail.created_at).toLocaleString() : "-"}</div>
-                <div>更新：{detail.updated_at ? new Date(detail.updated_at).toLocaleString() : "-"}</div>
-              </div>
-            </Descriptions.Item>
-          </Descriptions>
-          {(detail.lineage_edges?.length ?? 0) > 0 && (
-            <Card title="血缘边明细" size="small" style={{ marginTop: 16 }}>
-              <Table
-                dataSource={detail.lineage_edges}
-                rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
-                size="small"
-                pagination={false}
-                columns={[
-                  { title: "源", dataIndex: "source", key: "source", ellipsis: true, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
-                  { title: "目标", dataIndex: "target", key: "target", ellipsis: true, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
-                  { title: "类型", dataIndex: "edge_type", key: "type", width: 120 },
-                  { title: "粒度", dataIndex: "granularity", key: "granularity", width: 80 },
-                ]}
-              />
-            </Card>
-          )}
-          {(detail.related_metrics?.length ?? 0) > 0 && (
-            <Card title="关联指标" size="small" style={{ marginTop: 16 }}>
-              <Table
-                dataSource={detail.related_metrics}
-                rowKey={(e, i) => `${e.metric_node}-${i}`}
-                size="small"
-                pagination={false}
-                columns={[
-                  { title: "指标", dataIndex: "metric_node", key: "metric", ellipsis: true, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
-                  { title: "关系", dataIndex: "edge_type", key: "edge", width: 140 },
-                ]}
-              />
-            </Card>
-          )}
+            <Descriptions column={1} bordered size="small">
+              <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+              <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
+              <Descriptions.Item label="数据源">{detail.source_id}</Descriptions.Item>
+              <Descriptions.Item label="敏感度">
+                {sensitivityTag(detail.sensitivity_level)}
+                {hasPii && (
+                  <Tag color="red" style={{ marginLeft: 8 }}>
+                    含 PII
+                  </Tag>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="责任人">
+                {detail.owner_id != null ? `#${detail.owner_id}` : <Tag>无</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="Schema 状态">
+                {detail.schema_incomplete ? (
+                  <Tag color="orange">不完整</Tag>
+                ) : (
+                  <Tag color="green">完整</Tag>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="内容指纹">
+                {detail.content_signature ? (
+                  <Tooltip title={detail.content_signature}>
+                    <span style={{ fontFamily: "monospace", cursor: "help" }}>
+                      {detail.content_signature.slice(0, 16)}…
+                    </span>
+                  </Tooltip>
+                ) : (
+                  <span className="muted">-</span>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="Schema 摘要">
+                {renderSchemaSummary(detail.schema_summary)}
+              </Descriptions.Item>
+              <Descriptions.Item label="关联血缘">
+                <Button
+                  type="link"
+                  size="small"
+                  disabled={lineageCount <= 0}
+                  onClick={() =>
+                    message.info(`实体「${detail.entity_name}」关联血缘 ${lineageCount} 条`)
+                  }
+                >
+                  关联血缘 {lineageCount} 条
+                </Button>
+              </Descriptions.Item>
+              <Descriptions.Item label="源健康">
+                {detail.source_health ? (
+                  <Tag
+                    color={
+                      detail.source_health.health_status === "healthy"
+                        ? "green"
+                        : detail.source_health.health_status === "unhealthy"
+                          ? "red"
+                          : "default"
+                    }
+                  >
+                    {SOURCE_HEALTH_LABEL[detail.source_health.health_status] ??
+                      detail.source_health.health_status}
+                  </Tag>
+                ) : (
+                  <span className="muted">未知</span>
+                )}
+                {detail.source_health?.last_health_check ? (
+                  <span className="muted" style={{ marginLeft: 8 }}>
+                    检查于 {new Date(detail.source_health.last_health_check).toLocaleString()}
+                  </span>
+                ) : null}
+              </Descriptions.Item>
+              <Descriptions.Item label="新鲜度">
+                <div className="muted" style={{ fontSize: 12 }}>
+                  <div>
+                    创建：{detail.created_at ? new Date(detail.created_at).toLocaleString() : "-"}
+                  </div>
+                  <div>
+                    更新：{detail.updated_at ? new Date(detail.updated_at).toLocaleString() : "-"}
+                  </div>
+                </div>
+              </Descriptions.Item>
+            </Descriptions>
+            {(detail.lineage_edges?.length ?? 0) > 0 && (
+              <Card title="血缘边明细" size="small" style={{ marginTop: 16 }}>
+                <Table
+                  dataSource={detail.lineage_edges}
+                  rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
+                  size="small"
+                  pagination={false}
+                  columns={[
+                    {
+                      title: "源",
+                      dataIndex: "source",
+                      key: "source",
+                      ellipsis: true,
+                      render: (v: string) => (
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {v}
+                        </span>
+                      ),
+                    },
+                    {
+                      title: "目标",
+                      dataIndex: "target",
+                      key: "target",
+                      ellipsis: true,
+                      render: (v: string) => (
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {v}
+                        </span>
+                      ),
+                    },
+                    { title: "类型", dataIndex: "edge_type", key: "type", width: 120 },
+                    { title: "粒度", dataIndex: "granularity", key: "granularity", width: 80 },
+                  ]}
+                />
+              </Card>
+            )}
+            {(detail.related_metrics?.length ?? 0) > 0 && (
+              <Card title="关联指标" size="small" style={{ marginTop: 16 }}>
+                <Table
+                  dataSource={detail.related_metrics}
+                  rowKey={(e, i) => `${e.metric_node}-${i}`}
+                  size="small"
+                  pagination={false}
+                  columns={[
+                    {
+                      title: "指标",
+                      dataIndex: "metric_node",
+                      key: "metric",
+                      ellipsis: true,
+                      render: (v: string) => (
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {v}
+                        </span>
+                      ),
+                    },
+                    { title: "关系", dataIndex: "edge_type", key: "edge", width: 140 },
+                  ]}
+                />
+              </Card>
+            )}
           </>
         ) : null}
       </Drawer>
@@ -1138,12 +1302,53 @@ function SearchTab() {
             size="small"
             pagination={{ pageSize: 20 }}
             columns={[
-              { title: "类型", dataIndex: "type", key: "type", width: 90, render: (t: string) => <Tag color={t === "metric" ? "purple" : "blue"}>{t === "metric" ? "指标" : "目录"}</Tag> },
-              { title: "名称", dataIndex: "name", key: "name", ellipsis: true, render: (v: string, r: AssetSearchItem) => (r.type === "metric" ? <span className="mono">{v}</span> : v) },
-              { title: "实体类型", dataIndex: "entity_type", key: "entity_type", width: 100, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
-              { title: "敏感度", dataIndex: "sensitivity_level", key: "sensitivity", width: 110, render: (s: string | null) => sensitivityTag(s) },
-              { title: "域", dataIndex: "domain", key: "domain", width: 120, render: (v: string | null) => v ?? "-" },
-              { title: "状态", dataIndex: "status", key: "status", width: 110, render: (v: string | null) => v ?? "-" },
+              {
+                title: "类型",
+                dataIndex: "type",
+                key: "type",
+                width: 90,
+                render: (t: string) => (
+                  <Tag color={t === "metric" ? "purple" : "blue"}>
+                    {t === "metric" ? "指标" : "目录"}
+                  </Tag>
+                ),
+              },
+              {
+                title: "名称",
+                dataIndex: "name",
+                key: "name",
+                ellipsis: true,
+                render: (v: string, r: AssetSearchItem) =>
+                  r.type === "metric" ? <span className="mono">{v}</span> : v,
+              },
+              {
+                title: "实体类型",
+                dataIndex: "entity_type",
+                key: "entity_type",
+                width: 100,
+                render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
+              },
+              {
+                title: "敏感度",
+                dataIndex: "sensitivity_level",
+                key: "sensitivity",
+                width: 110,
+                render: (s: string | null) => sensitivityTag(s),
+              },
+              {
+                title: "域",
+                dataIndex: "domain",
+                key: "domain",
+                width: 120,
+                render: (v: string | null) => v ?? "-",
+              },
+              {
+                title: "状态",
+                dataIndex: "status",
+                key: "status",
+                width: 110,
+                render: (v: string | null) => v ?? "-",
+              },
             ]}
           />
         )}
@@ -1176,16 +1381,40 @@ function HealthTab() {
     <div>
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={6}>
-          <Card size="small"><Statistic title="不健康数据源" value={unhealthyCount} valueStyle={{ color: unhealthyCount > 0 ? "#cf1322" : "#3f8600" }} /></Card>
+          <Card size="small">
+            <Statistic
+              title="不健康数据源"
+              value={unhealthyCount}
+              valueStyle={{ color: unhealthyCount > 0 ? "#cf1322" : "#3f8600" }}
+            />
+          </Card>
         </Col>
         <Col span={6}>
-          <Card size="small"><Statistic title="Schema 不完整" value={incompleteCount} valueStyle={{ color: incompleteCount > 0 ? "#d46b08" : "#3f8600" }} /></Card>
+          <Card size="small">
+            <Statistic
+              title="Schema 不完整"
+              value={incompleteCount}
+              valueStyle={{ color: incompleteCount > 0 ? "#d46b08" : "#3f8600" }}
+            />
+          </Card>
         </Col>
         <Col span={6}>
-          <Card size="small"><Statistic title="孤儿资产" value={data.orphan_assets} valueStyle={{ color: data.orphan_assets > 0 ? "#d46b08" : "#3f8600" }} /></Card>
+          <Card size="small">
+            <Statistic
+              title="孤儿资产"
+              value={data.orphan_assets}
+              valueStyle={{ color: data.orphan_assets > 0 ? "#d46b08" : "#3f8600" }}
+            />
+          </Card>
         </Col>
         <Col span={6}>
-          <Card size="small"><Statistic title={`${data.stale_days} 天未更新`} value={staleCount} valueStyle={{ color: staleCount > 0 ? "#d46b08" : "#3f8600" }} /></Card>
+          <Card size="small">
+            <Statistic
+              title={`${data.stale_days} 天未更新`}
+              value={staleCount}
+              valueStyle={{ color: staleCount > 0 ? "#d46b08" : "#3f8600" }}
+            />
+          </Card>
         </Col>
       </Row>
 
@@ -1203,7 +1432,13 @@ function HealthTab() {
                 columns={[
                   { title: "源 ID", dataIndex: "source_id", key: "source_id" },
                   { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
-                  { title: "状态", dataIndex: "health_status", key: "status", width: 100, render: (v: string) => <Tag color="red">{SOURCE_HEALTH_LABEL[v] ?? v}</Tag> },
+                  {
+                    title: "状态",
+                    dataIndex: "health_status",
+                    key: "status",
+                    width: 100,
+                    render: (v: string) => <Tag color="red">{SOURCE_HEALTH_LABEL[v] ?? v}</Tag>,
+                  },
                 ]}
               />
             )}
@@ -1239,7 +1474,13 @@ function HealthTab() {
                 pagination={false}
                 columns={[
                   { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
-                  { title: "更新时间", dataIndex: "updated_at", key: "updated", width: 170, render: (v: string) => new Date(v).toLocaleString() },
+                  {
+                    title: "更新时间",
+                    dataIndex: "updated_at",
+                    key: "updated",
+                    width: 170,
+                    render: (v: string) => new Date(v).toLocaleString(),
+                  },
                 ]}
               />
             )}
@@ -1273,10 +1514,22 @@ function PiiTab() {
     <div>
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={6}>
-          <Card size="small"><Statistic title="PII 指标数" value={data.pii_metric_count} valueStyle={{ color: "#cf1322" }} /></Card>
+          <Card size="small">
+            <Statistic
+              title="PII 指标数"
+              value={data.pii_metric_count}
+              valueStyle={{ color: "#cf1322" }}
+            />
+          </Card>
         </Col>
         <Col span={6}>
-          <Card size="small"><Statistic title="PII 目录数" value={data.pii_catalog_count} valueStyle={{ color: "#cf1322" }} /></Card>
+          <Card size="small">
+            <Statistic
+              title="PII 目录数"
+              value={data.pii_catalog_count}
+              valueStyle={{ color: "#cf1322" }}
+            />
+          </Card>
         </Col>
       </Row>
       <Row gutter={16}>
@@ -1288,7 +1541,12 @@ function PiiTab() {
               size="small"
               pagination={false}
               columns={[
-                { title: "敏感级", dataIndex: "key", key: "key", render: (k: string) => sensitivityTag(k) },
+                {
+                  title: "敏感级",
+                  dataIndex: "key",
+                  key: "key",
+                  render: (k: string) => sensitivityTag(k),
+                },
                 { title: "数量", dataIndex: "count", key: "count", align: "right" },
               ]}
             />
@@ -1357,10 +1615,28 @@ function ChangesTab() {
         title={() => <b>目录</b>}
         columns={[
           { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
-          { title: "类型", dataIndex: "entity_type", key: "type", width: 90, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
-          { title: "敏感度", dataIndex: "sensitivity_level", key: "sensitivity", width: 110, render: (s: string | null) => sensitivityTag(s) },
+          {
+            title: "类型",
+            dataIndex: "entity_type",
+            key: "type",
+            width: 90,
+            render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
+          },
+          {
+            title: "敏感度",
+            dataIndex: "sensitivity_level",
+            key: "sensitivity",
+            width: 110,
+            render: (s: string | null) => sensitivityTag(s),
+          },
           { title: "源", dataIndex: "source_id", key: "source", width: 120 },
-          { title: "更新时间", dataIndex: "updated_at", key: "updated", width: 180, render: (v: string) => new Date(v).toLocaleString() },
+          {
+            title: "更新时间",
+            dataIndex: "updated_at",
+            key: "updated",
+            width: 180,
+            render: (v: string) => new Date(v).toLocaleString(),
+          },
         ]}
       />
       <Table
@@ -1371,12 +1647,30 @@ function ChangesTab() {
         style={{ marginTop: 16 }}
         title={() => <b>指标</b>}
         columns={[
-          { title: "编码", dataIndex: "metric_code", key: "code", ellipsis: true, render: (v: string) => <span className="mono">{v}</span> },
+          {
+            title: "编码",
+            dataIndex: "metric_code",
+            key: "code",
+            ellipsis: true,
+            render: (v: string) => <span className="mono">{v}</span>,
+          },
           { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
           { title: "状态", dataIndex: "status", key: "status", width: 110 },
           { title: "域", dataIndex: "domain", key: "domain", width: 110 },
-          { title: "PII", dataIndex: "pii_flag", key: "pii", width: 70, render: (v: boolean) => (v ? <Tag color="red">PII</Tag> : null) },
-          { title: "更新时间", dataIndex: "updated_at", key: "updated", width: 180, render: (v: string) => new Date(v).toLocaleString() },
+          {
+            title: "PII",
+            dataIndex: "pii_flag",
+            key: "pii",
+            width: 70,
+            render: (v: boolean) => (v ? <Tag color="red">PII</Tag> : null),
+          },
+          {
+            title: "更新时间",
+            dataIndex: "updated_at",
+            key: "updated",
+            width: 180,
+            render: (v: string) => new Date(v).toLocaleString(),
+          },
         ]}
       />
     </Card>
@@ -1414,8 +1708,20 @@ function MyAssetsTab() {
         title={() => <b>我的目录</b>}
         columns={[
           { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
-          { title: "类型", dataIndex: "entity_type", key: "type", width: 90, render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v },
-          { title: "敏感度", dataIndex: "sensitivity_level", key: "sensitivity", width: 110, render: (s: string | null) => sensitivityTag(s) },
+          {
+            title: "类型",
+            dataIndex: "entity_type",
+            key: "type",
+            width: 90,
+            render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
+          },
+          {
+            title: "敏感度",
+            dataIndex: "sensitivity_level",
+            key: "sensitivity",
+            width: 110,
+            render: (s: string | null) => sensitivityTag(s),
+          },
           { title: "源", dataIndex: "source_id", key: "source", width: 120 },
         ]}
       />
@@ -1427,11 +1733,23 @@ function MyAssetsTab() {
         style={{ marginTop: 16 }}
         title={() => <b>我的指标</b>}
         columns={[
-          { title: "编码", dataIndex: "metric_code", key: "code", ellipsis: true, render: (v: string) => <span className="mono">{v}</span> },
+          {
+            title: "编码",
+            dataIndex: "metric_code",
+            key: "code",
+            ellipsis: true,
+            render: (v: string) => <span className="mono">{v}</span>,
+          },
           { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
           { title: "状态", dataIndex: "status", key: "status", width: 110 },
           { title: "域", dataIndex: "domain", key: "domain", width: 110 },
-          { title: "PII", dataIndex: "pii_flag", key: "pii", width: 70, render: (v: boolean) => (v ? <Tag color="red">PII</Tag> : null) },
+          {
+            title: "PII",
+            dataIndex: "pii_flag",
+            key: "pii",
+            width: 70,
+            render: (v: boolean) => (v ? <Tag color="red">PII</Tag> : null),
+          },
         ]}
       />
     </div>
@@ -1447,17 +1765,105 @@ export function AssetMap() {
   }, [track]);
 
   const tabItems = [
-    { key: "overview", label: <span><GlobalOutlined /> 概览</span>, children: <OverviewTab /> },
-    { key: "search", label: <span><SearchOutlined /> 搜索</span>, children: <SearchTab /> },
-    { key: "graph", label: <span><ApartmentOutlined /> 资产地图</span>, children: <GraphTab /> },
-    { key: "heatmap", label: <span><HeatMapOutlined /> 热力视图</span>, children: <HeatmapTab /> },
-    { key: "health", label: <span><HeartOutlined /> 资产健康</span>, children: <HealthTab /> },
-    { key: "pii", label: <span><SafetyOutlined /> PII 合规</span>, children: <PiiTab /> },
-    { key: "changes", label: <span><TableOutlined /> 变更追踪</span>, children: <ChangesTab /> },
-    { key: "mine", label: <span><UserOutlined /> 我的资产</span>, children: <MyAssetsTab /> },
-    { key: "owner", label: <span><UserOutlined /> Owner 视图</span>, children: <OwnerTab /> },
-    { key: "orphans", label: <span><DeleteOutlined /> 孤儿资产</span>, children: <OrphansTab /> },
-    { key: "tables", label: <span><TableOutlined /> 数据表</span>, children: <TablesTab /> },
+    {
+      key: "overview",
+      label: (
+        <span>
+          <GlobalOutlined /> 概览
+        </span>
+      ),
+      children: <OverviewTab />,
+    },
+    {
+      key: "search",
+      label: (
+        <span>
+          <SearchOutlined /> 搜索
+        </span>
+      ),
+      children: <SearchTab />,
+    },
+    {
+      key: "graph",
+      label: (
+        <span>
+          <ApartmentOutlined /> 资产地图
+        </span>
+      ),
+      children: <GraphTab />,
+    },
+    {
+      key: "heatmap",
+      label: (
+        <span>
+          <HeatMapOutlined /> 热力视图
+        </span>
+      ),
+      children: <HeatmapTab />,
+    },
+    {
+      key: "health",
+      label: (
+        <span>
+          <HeartOutlined /> 资产健康
+        </span>
+      ),
+      children: <HealthTab />,
+    },
+    {
+      key: "pii",
+      label: (
+        <span>
+          <SafetyOutlined /> PII 合规
+        </span>
+      ),
+      children: <PiiTab />,
+    },
+    {
+      key: "changes",
+      label: (
+        <span>
+          <TableOutlined /> 变更追踪
+        </span>
+      ),
+      children: <ChangesTab />,
+    },
+    {
+      key: "mine",
+      label: (
+        <span>
+          <UserOutlined /> 我的资产
+        </span>
+      ),
+      children: <MyAssetsTab />,
+    },
+    {
+      key: "owner",
+      label: (
+        <span>
+          <UserOutlined /> Owner 视图
+        </span>
+      ),
+      children: <OwnerTab />,
+    },
+    {
+      key: "orphans",
+      label: (
+        <span>
+          <DeleteOutlined /> 孤儿资产
+        </span>
+      ),
+      children: <OrphansTab />,
+    },
+    {
+      key: "tables",
+      label: (
+        <span>
+          <TableOutlined /> 数据表
+        </span>
+      ),
+      children: <TablesTab />,
+    },
   ];
 
   return (

@@ -112,6 +112,26 @@ def models_url(base_url: str) -> str:
     return f"{url}/v1/models"
 
 
+def normalize_base_url(base_url: str) -> str:
+    """归一化 base_url：无论用户输入完整端点还是裸 URL，都存为「干净 base URL」。
+
+    用户可能输入三种形态之一：
+    - ``http://host.docker.internal:19090/v1/chat/completions`` → ``http://host.docker.internal:19090``
+    - ``http://host.docker.internal:19090/v1`` → ``http://host.docker.internal:19090``
+    - ``http://host.docker.internal:19090`` → **不变**
+
+    归一化后在库中统一存储裸 URL，前端展示、编辑时也一致。
+    """
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return url
+    for suffix in ("/v1/chat/completions", "/chat/completions", "/v1/models", "/models", "/v1"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+            break
+    return url.rstrip("/") or url
+
+
 # ---- P2: 结构化输出 Schema ----
 
 

@@ -27,6 +27,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -37,6 +38,7 @@ from app.core.guard import guard_against_injection
 from app.core.logging import get_logger
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
+from app.models.data_source import DBCatalog
 from app.services.collector.distributed_lock import CollectionLock
 from app.services.collector.schemas import (
     BulkDeprecateRequest,
@@ -52,9 +54,14 @@ from app.services.collector.schemas import (
     DBCatalogListResponse,
     DBCatalogResponse,
     DriftLogListResponse,
+    InferBatchResponse,
+    InferDescriptionRequest,
+    InferDescriptionResponse,
     ScheduleRequest,
     TestConnectionRequest,
     TestConnectionResult,
+    UpdateDescriptionRequest,
+    UpdateDescriptionResponse,
 )
 from app.services.collector.service import CollectorService
 from app.services.collector.spi import build_collector
@@ -748,3 +755,216 @@ async def bulk_deprecate(
     )
     await db.commit()
     return ok(data=result, trace_id=trace_id)
+
+
+# ---- 字段描述推断 + 人工编辑端点 ----
+
+
+@catalog_router.post(
+    "/{catalog_id}/columns/{column_name}/infer-description",
+    dependencies=_WRITE_DEPS,
+)
+async def infer_column_description(
+    catalog_id: int,
+    column_name: str,
+    body: InferDescriptionRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[InferDescriptionResponse]:
+    """LLM 推断单字段描述，成功后 upsert 到 column_descriptions 表。"""
+    # 校验 catalog 存在
+    cat = (
+        await db.execute(
+            select(DBCatalog).where(DBCatalog.id == catalog_id, DBCatalog.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if cat is None:
+        raise NotFoundError(f"目录实体不存在: {catalog_id}")
+
+    svc = _svc(db)
+    result = await svc._llm_infer_column_description(
+        entity_name=cat.entity_name,
+        column_name=column_name,
+        column_type=body.column_type,
+    )
+    if result is None:
+        raise BusinessError(
+            "LLM 推断暂时不可用，请稍后重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+        )
+
+    # upsert 到 column_descriptions
+    await svc._repo.upsert_description(
+        catalog_id=catalog_id,
+        column_name=column_name,
+        description=result["description"],
+        source="llm",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="INFER_DESCRIPTION",
+        entity_type="column_description",
+        entity_id=f"{catalog_id}/{column_name}",
+        detail={"description": result["description"], "confidence": result["confidence"]},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=InferDescriptionResponse(
+            column_name=column_name,
+            description=result["description"],
+            source="llm",
+            confidence=result["confidence"],
+        ),
+        trace_id=trace_id,
+    )
+
+
+@catalog_router.post("/{catalog_id}/infer-descriptions", dependencies=_WRITE_DEPS)
+async def infer_descriptions_batch(
+    catalog_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[InferBatchResponse]:
+    """批量推断该 catalog 所有空 comment 字段描述。逐字段推断并 upsert。"""
+    cat = (
+        await db.execute(
+            select(DBCatalog).where(DBCatalog.id == catalog_id, DBCatalog.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if cat is None:
+        raise NotFoundError(f"目录实体不存在: {catalog_id}")
+
+    svc = _svc(db)
+
+    # 获取已有描述（避免覆盖 manual/llm 记录）
+    existing_descs = await svc._repo.get_descriptions(catalog_id)
+    existing_map = {d.column_name: d for d in existing_descs}
+
+    # 解析 schema_json columns
+    schema_json = cat.schema_json or {}
+    columns = schema_json.get("columns") or schema_json.get("fields") or []
+
+    inferred: list[InferDescriptionResponse] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+
+    for col in columns:
+        if not isinstance(col, dict):
+            continue
+        col_name = col.get("name") or col.get("column")
+        if not col_name:
+            continue
+        col_name = str(col_name)
+
+        # 跳过已有 manual/llm 描述的字段
+        if col_name in existing_map and existing_map[col_name].source in ("manual", "llm"):
+            skipped.append(col_name)
+            continue
+
+        # 跳过已有 comment 的字段（除非 comment 为空）
+        comment = col.get("comment")
+        if comment and col_name not in existing_map:
+            skipped.append(col_name)
+            continue
+
+        # 推断
+        col_type = col.get("type") or col.get("data_type")
+        result = await svc._llm_infer_column_description(
+            entity_name=cat.entity_name,
+            column_name=col_name,
+            column_type=str(col_type) if col_type else None,
+        )
+        if result is None:
+            failed.append(col_name)
+            continue
+
+        # upsert
+        await svc._repo.upsert_description(
+            catalog_id=catalog_id,
+            column_name=col_name,
+            description=result["description"],
+            source="llm",
+        )
+        inferred.append(
+            InferDescriptionResponse(
+                column_name=col_name,
+                description=result["description"],
+                source="llm",
+                confidence=result["confidence"],
+            )
+        )
+
+    if inferred:
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="INFER_DESCRIPTIONS_BATCH",
+            entity_type="column_description",
+            entity_id=str(catalog_id),
+            detail={"inferred": len(inferred), "skipped": len(skipped), "failed": len(failed)},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
+    await db.commit()
+    return ok(
+        data=InferBatchResponse(inferred=inferred, skipped=skipped, failed=failed),
+        trace_id=trace_id,
+    )
+
+
+@catalog_router.put("/{catalog_id}/columns/{column_name}/description", dependencies=_WRITE_DEPS)
+async def update_column_description(
+    catalog_id: int,
+    column_name: str,
+    body: UpdateDescriptionRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[UpdateDescriptionResponse]:
+    """人工编辑字段描述：upsert 到 column_descriptions 表，source=manual。"""
+    cat = (
+        await db.execute(
+            select(DBCatalog).where(DBCatalog.id == catalog_id, DBCatalog.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if cat is None:
+        raise NotFoundError(f"目录实体不存在: {catalog_id}")
+
+    svc = _svc(db)
+    desc = await svc._repo.upsert_description(
+        catalog_id=catalog_id,
+        column_name=column_name,
+        description=body.description,
+        source="manual",
+        updated_by=user.id,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="UPDATE_DESCRIPTION",
+        entity_type="column_description",
+        entity_id=f"{catalog_id}/{column_name}",
+        detail={"description": body.description, "source": "manual"},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=UpdateDescriptionResponse(
+            catalog_id=desc.catalog_id,
+            column_name=desc.column_name,
+            description=desc.description,
+            source=desc.source,
+            updated_by=desc.updated_by,
+            updated_at=desc.updated_at,
+        ),
+        trace_id=trace_id,
+    )

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip } from "antd";
-import { PlusOutlined, ReloadOutlined, DeleteOutlined } from "@ant-design/icons";
-import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, UnisenseApiError } from "../api";
-import type { DBCatalog, DataSource } from "../types";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty } from "antd";
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined } from "@ant-design/icons";
+import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, inferColumnDescription, inferDescriptions, updateColumnDescription, UnisenseApiError } from "../api";
+import type { DBCatalog, DataSource, SchemaColumn } from "../types";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
+import { SchemaTable } from "../components/SchemaTable";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -44,6 +45,119 @@ export function Catalogs() {
   // 数据源选项（登记实体时选择归属数据源，source_id 由系统自动填充，无需手填）
   const [sources, setSources] = useState<DataSource[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(false);
+  // 字段详情抽屉
+  const [fieldDrawerOpen, setFieldDrawerOpen] = useState(false);
+  const [fieldDrawerCatalog, setFieldDrawerCatalog] = useState<DBCatalog | null>(null);
+  const [fieldColumns, setFieldColumns] = useState<SchemaColumn[]>([]);
+  const [inferLoading, setInferLoading] = useState(false);
+  const [batchInferLoading, setBatchInferLoading] = useState(false);
+
+  function openFieldDetail(record: DBCatalog) {
+    setFieldDrawerCatalog(record);
+    setFieldColumns(parseSchemaColumns(record));
+    setFieldDrawerOpen(true);
+  }
+
+  /** 解析 catalog 的 schema_def.columns 为 SchemaColumn[] */
+  function parseSchemaColumns(catalog: DBCatalog): SchemaColumn[] {
+    const schemaDef = catalog.schema_def as Record<string, unknown>;
+    if (!schemaDef || typeof schemaDef !== "object") return [];
+    const columns = schemaDef.columns || schemaDef.fields;
+    if (!Array.isArray(columns)) return [];
+    return columns.map((col: unknown) => {
+      if (typeof col === "object" && col !== null) {
+        const c = col as Record<string, unknown>;
+        return {
+          name: String(c.name || c.column || ""),
+          type: c.type ? String(c.type) : c.data_type ? String(c.data_type) : undefined,
+          comment: c.comment ? String(c.comment) : undefined,
+          nullable: c.nullable != null ? Boolean(c.nullable) : undefined,
+          default: c.default != null ? String(c.default) : undefined,
+        } as SchemaColumn;
+      }
+      return { name: String(col) } as SchemaColumn;
+    });
+  }
+
+  /** 刷新字段列表（推断/编辑后更新某字段的描述） */
+  function updateFieldDescription(columnName: string, description: string, source: string) {
+    setFieldColumns((prev) =>
+      prev.map((col) =>
+        col.name === columnName
+          ? { ...col, description, description_source: source as "manual" | "llm" | "schema" }
+          : col,
+      ),
+    );
+  }
+
+  /** 单字段推断 */
+  async function handleInfer(col: SchemaColumn) {
+    if (!fieldDrawerCatalog) return;
+    setInferLoading(true);
+    try {
+      const catalogId = (fieldDrawerCatalog as DBCatalog & { id?: number }).id ?? 0;
+      if (!catalogId) {
+        message.warning("该目录实体缺少 ID，无法推断");
+        return;
+      }
+      const result = await inferColumnDescription(catalogId, col.name, {
+        entity_name: fieldDrawerCatalog.entity_name,
+        column_type: col.type,
+      });
+      updateFieldDescription(col.name, result.description, result.source);
+      message.success(`字段「${col.name}」推断成功`);
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError
+          ? `${err.message}（${err.codeZh}）`
+          : "LLM 推断暂时不可用，请稍后重试",
+      );
+    } finally {
+      setInferLoading(false);
+    }
+  }
+
+  /** 批量推断 */
+  async function handleBatchInfer() {
+    if (!fieldDrawerCatalog) return;
+    setBatchInferLoading(true);
+    try {
+      const catalogId = (fieldDrawerCatalog as DBCatalog & { id?: number }).id ?? 0;
+      if (!catalogId) {
+        message.warning("该目录实体缺少 ID，无法推断");
+        return;
+      }
+      const result = await inferDescriptions(catalogId);
+      // 更新推断成功的字段
+      for (const item of result.inferred) {
+        updateFieldDescription(item.column_name, item.description, item.source);
+      }
+      message.success(
+        `推断完成：成功 ${result.inferred.length}，跳过 ${result.skipped.length}，失败 ${result.failed.length}`,
+      );
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError
+          ? `${err.message}（${err.codeZh}）`
+          : "批量推断暂时不可用，请稍后重试",
+      );
+    } finally {
+      setBatchInferLoading(false);
+    }
+  }
+
+  /** 人工编辑描述 */
+  async function handleEdit(col: SchemaColumn, newDesc: string) {
+    if (!fieldDrawerCatalog) return;
+    const catalogId = (fieldDrawerCatalog as DBCatalog & { id?: number }).id ?? 0;
+    if (!catalogId) {
+      message.warning("该目录实体缺少 ID，无法编辑");
+      return;
+    }
+    await updateColumnDescription(catalogId, col.name, newDesc);
+    updateFieldDescription(col.name, newDesc, "manual");
+    message.success(`字段「${col.name}」描述已更新`);
+  }
 
   // 支持从全局搜索栏 / 数据源详情经 ?kw= 或 ?source_id= 直达定位
   useEffect(() => {
@@ -179,6 +293,21 @@ export function Catalogs() {
     { title: "上游签名", dataIndex: "upstream_signature", key: "upstream", width: 130, render: (v: string) => (v ? (
       <Tooltip title={v}><span className="mono" style={{ fontSize: 11 }}>{v.slice(0, 12)}…</span></Tooltip>
     ) : <span className="muted">—</span>) },
+    {
+      title: "操作",
+      key: "action",
+      width: 100,
+      render: (_: unknown, record: DBCatalog) => (
+        <Button
+          type="link"
+          size="small"
+          icon={<EyeOutlined />}
+          onClick={() => openFieldDetail(record)}
+        >
+          字段详情
+        </Button>
+      ),
+    },
   ];
 
   return (
@@ -303,6 +432,45 @@ export function Catalogs() {
           <Alert type="info" showIcon message="source_id 由所选数据源自动确定，无需手填；schema_def 可在采集时自动填充。" />
         </Form>
       </Modal>
+
+      <Drawer
+        title={fieldDrawerCatalog ? `字段详情：${fieldDrawerCatalog.entity_name}` : "字段详情"}
+        open={fieldDrawerOpen}
+        onClose={() => { setFieldDrawerOpen(false); setFieldDrawerCatalog(null); setFieldColumns([]); }}
+        width={720}
+        destroyOnClose={false}
+      >
+        {fieldDrawerCatalog && (() => {
+          const isSchemaIncomplete = fieldDrawerCatalog.schema_incomplete;
+          const hasNoSchema = fieldColumns.length === 0;
+
+          return (
+            <>
+              {isSchemaIncomplete && !hasNoSchema && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="Schema 不完整，部分字段信息缺失"
+                  style={{ marginBottom: 12 }}
+                />
+              )}
+              {hasNoSchema ? (
+                <Empty description="暂无字段信息，请先执行采集" />
+              ) : (
+                <SchemaTable
+                  columns={fieldColumns}
+                  editable={true}
+                  inferable={true}
+                  onEdit={handleEdit}
+                  onInfer={handleInfer}
+                  onBatchInfer={handleBatchInfer}
+                  loading={inferLoading || batchInferLoading}
+                />
+              )}
+            </>
+          );
+        })()}
+      </Drawer>
     </div>
   );
 }

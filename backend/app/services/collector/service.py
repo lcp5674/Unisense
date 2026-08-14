@@ -92,9 +92,7 @@ class CollectorService(BaseService):
         self._settings = Settings()
 
     @staticmethod
-    def _to_source_response(
-        src: DataSource, include_config: bool = False
-    ) -> DataSourceResponse:
+    def _to_source_response(src: DataSource, include_config: bool = False) -> DataSourceResponse:
         """ORM → 响应。
 
         Args:
@@ -516,6 +514,86 @@ class CollectorService(BaseService):
             return None
         finally:
             # 异常/早退路径也必须释放 httpx.AsyncClient，防连接泄漏
+            if client is not None:
+                await client.close()
+
+    async def _llm_infer_column_description(
+        self,
+        entity_name: str,
+        column_name: str,
+        column_type: str | None = None,
+    ) -> dict[str, Any] | None:
+        """使用 LLM 推断字段描述，返回结构化结果。
+
+        复用 build_llm_client + 熔断器模式（与 _llm_classify_sensitivity 一致）。
+        LLM 不可用时返回 None（不阻断主流程）。
+
+        Args:
+            entity_name: 表名（库.表格式）。
+            column_name: 字段名。
+            column_type: 字段类型（可选，供推断上下文）。
+
+        Returns:
+            推断结果 dict 含 description/confidence，或 None 表示推断失败。
+        """
+        client = None
+        try:
+            from app.services.llm.client import build_llm_client
+
+            client = build_llm_client()
+            if not client.enabled:
+                return None
+
+            type_info = f"，类型为 {column_type}" if column_type else ""
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是数据治理领域的字段描述专家。根据表名和字段名推断字段的中文描述。\n"
+                        "返回 JSON 格式：{\n"
+                        '  "description": "字段的中文描述",\n'
+                        '  "confidence": 0.0-1.0\n'
+                        "}\n"
+                        "要求：\n"
+                        "1. 描述简洁精准，10-50字\n"
+                        "2. 基于字段名和表名的语义推断\n"
+                        "3. confidence < 0.5 表示不确定"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"表名: {entity_name}\n字段名: {column_name}{type_info}",
+                },
+            ]
+
+            result = await client.chat(
+                messages,
+                temperature=0.0,
+                max_tokens=200,
+                response_format={"type": "json_object"},
+            )
+            description = result.get("description", "")
+            confidence = float(result.get("confidence", 0) or 0)
+            if not description or confidence <= 0:
+                return None
+            return {"description": description, "confidence": confidence}
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            logger.warning("llm_infer_desc_timeout_error: %s", exc)
+            _record_llm_error_metric("timeout")
+            return None
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.warning("llm_infer_desc_format_error: %s", exc)
+            _record_llm_error_metric("format_error")
+            return None
+        except RuntimeError as exc:
+            logger.warning("llm_infer_desc_runtime_error: %s", exc)
+            _record_llm_error_metric("runtime_error")
+            return None
+        except LlmError as exc:
+            logger.warning("llm_infer_desc_llm_error: %s", exc)
+            _record_llm_error_metric("llm_error")
+            return None
+        finally:
             if client is not None:
                 await client.close()
 

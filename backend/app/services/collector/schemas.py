@@ -283,3 +283,62 @@ class DriftLogListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+# ---- 字段描述推断 + 人工编辑 Schema ----
+
+
+class ColumnDescriptionResponse(BaseModel):
+    """字段描述响应。"""
+
+    catalog_id: int
+    column_name: str
+    description: str
+    source: str
+    updated_by: int | None = None
+    updated_at: Any = None
+
+
+class InferDescriptionRequest(BaseModel):
+    """推断单字段描述请求。"""
+
+    entity_name: str = Field(max_length=256, description="表名（供 LLM 推断上下文）")
+    column_type: str | None = Field(
+        default=None, max_length=128, description="字段类型（供 LLM 推断上下文）"
+    )
+
+
+class InferDescriptionResponse(BaseModel):
+    """推断单字段描述响应。"""
+
+    column_name: str
+    description: str
+    source: str = "llm"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class InferBatchResponse(BaseModel):
+    """批量推断描述响应。"""
+
+    inferred: list[InferDescriptionResponse]
+    skipped: list[str] = Field(
+        default_factory=list, description="跳过的字段名（已有 manual/llm 描述）"
+    )
+    failed: list[str] = Field(default_factory=list, description="推断失败的字段名")
+
+
+class UpdateDescriptionRequest(BaseModel):
+    """人工编辑字段描述请求。"""
+
+    description: str = Field(min_length=1, max_length=2000, description="新的描述文本")
+
+
+class UpdateDescriptionResponse(BaseModel):
+    """人工编辑字段描述响应。"""
+
+    catalog_id: int
+    column_name: str
+    description: str
+    source: str = "manual"
+    updated_by: int | None = None
+    updated_at: Any = None

@@ -68,7 +68,11 @@ class TestGetEntityDetail:
         r4.first.return_value = SimpleNamespace(
             health_status="healthy", last_health_check=None, name="s1"
         )
-        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4])
+        # column_descriptions 查询：本用例 schema_summary 为 list，get_entity_detail
+        # 会再执行一次 ColumnDescription 查询（并行会话新增，测试需同步 mock）
+        r5 = MagicMock()
+        r5.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5])
 
         out = await repo.get_entity_detail(1)
 
@@ -84,7 +88,17 @@ class TestGetEntityDetail:
         assert out["lineage_edges"][0]["confidence"] == 0.9
         assert out["related_metrics"][0]["metric_node"] == "metric:gmv"
         assert out["source_health"]["health_status"] == "healthy"
-        assert out["schema_summary"] == [{"name": "id", "type": "BIGINT", "comment": "主键"}]
+        assert out["schema_summary"] == [
+            {
+                "name": "id",
+                "type": "BIGINT",
+                "comment": "主键",
+                # 无独立描述记录但有原始 comment → 取 comment、来源 schema（并行会话
+                # 新增的 _merge_descriptions 行为）
+                "description": "主键",
+                "description_source": "schema",
+            }
+        ]
         # 敏感字段绝不外泄
         assert out["etl_sql"] is None
 
@@ -117,7 +131,11 @@ class TestGetEntityDetail:
         r3.all.return_value = []
         r4 = MagicMock()
         r4.first.return_value = None
-        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4])
+        # schema_json={} 经 _summarize_schema 仍返回空 list，同样触发
+        # ColumnDescription 查询（并行会话新增）
+        r5 = MagicMock()
+        r5.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5])
 
         out = await AssetMapRepository(s).get_entity_detail(2)
 

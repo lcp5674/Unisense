@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import enum
 from datetime import datetime
 from typing import Any
 
@@ -15,6 +16,58 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.mysql import Base
 from app.models.base import BaseModel
 from app.models.enums import EntityTypeEnum, SensitivityLevelEnum, SourceTypeEnum
+
+
+class DescriptionSourceEnum(enum.StrEnum):
+    """字段描述来源枚举。"""
+
+    MANUAL = "manual"
+    LLM = "llm"
+    SCHEMA = "schema"
+
+
+class ColumnDescription(Base, BaseModel):
+    """独立字段描述记录（防止采集覆盖人工/LLM 编辑）。
+
+    对齐 TD §4.1 column_descriptions 表。
+    优先级链：manual > llm > schema_json 原始 comment。
+
+    Attributes:
+        catalog_id: 关联目录实体（FK→db_catalog.id）。
+        column_name: 字段名。
+        description: 描述文本。
+        source: 描述来源（manual/llm/schema）。
+        updated_by: 编辑者用户 ID（LLM 推断时为 NULL）。
+    """
+
+    __tablename__ = "column_descriptions"
+
+    catalog_id: Mapped[int] = mapped_column(
+        ForeignKey("db_catalog.id", name="fk_column_desc_catalog"),
+        nullable=False,
+        comment="关联目录实体",
+    )
+    column_name: Mapped[str] = mapped_column(String(256), nullable=False, comment="字段名")
+    description: Mapped[str] = mapped_column(Text, nullable=False, comment="描述文本")
+    source: Mapped[str] = mapped_column(
+        Enum(
+            *[e.value for e in DescriptionSourceEnum],
+            name="description_source_enum",
+        ),
+        nullable=False,
+        default="schema",
+        comment="描述来源",
+    )
+    updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", name="fk_column_desc_user"),
+        nullable=True,
+        comment="编辑者用户 ID（LLM 推断时为 NULL）",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("catalog_id", "column_name", name="uk_column_desc_catalog_col"),
+        Index("idx_column_desc_source", "source"),
+    )
 
 
 class DataSource(Base, BaseModel):

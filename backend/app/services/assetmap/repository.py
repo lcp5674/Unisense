@@ -15,7 +15,7 @@ from typing import Any, cast
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.data_source import DataSource, DBCatalog
+from app.models.data_source import ColumnDescription, DataSource, DBCatalog
 from app.models.enums import SensitivityLevelEnum
 from app.models.governance import Classification
 from app.models.lineage import LineageEdge
@@ -69,6 +69,36 @@ class AssetMapRepository:
             return summary
         return schema_json
 
+    @staticmethod
+    def _merge_descriptions(
+        summary: list[dict[str, Any]],
+        descriptions: Sequence[ColumnDescription],
+    ) -> list[dict[str, Any]]:
+        """将 column_descriptions 按 manual>llm>schema 优先级合并到 schema_summary。
+
+        Args:
+            summary: _summarize_schema 的输出列表。
+            descriptions: column_descriptions 表记录。
+
+        Returns:
+            增强后的 summary，每条字段增加 description 和 description_source。
+        """
+        desc_map: dict[str, ColumnDescription] = {d.column_name: d for d in descriptions}
+        for field in summary:
+            col_name = field.get("name")
+            if col_name and col_name in desc_map:
+                d = desc_map[col_name]
+                field["description"] = d.description
+                field["description_source"] = d.source
+            elif field.get("comment"):
+                # 无独立描述记录，但有原始 comment → 使用 schema_json 原始 comment
+                field["description"] = field["comment"]
+                field["description_source"] = "schema"
+            else:
+                field["description"] = None
+                field["description_source"] = None
+        return summary
+
     async def get_entity_detail(self, entity_id: int) -> dict[str, Any] | None:
         """资产实体详情：元数据 + 敏感度 + PII + 血缘边列表 + 关联指标 + 源健康/新鲜度。
 
@@ -97,6 +127,19 @@ class AssetMapRepository:
         source_health = await self._source_health(row.source_id)
 
         sens = (row.sensitivity_level or "").upper()
+
+        # 查询 column_descriptions 并合并到 schema_summary
+        schema_summary = self._summarize_schema(row.schema_json)
+        if isinstance(schema_summary, list):
+            descriptions = await self._session.execute(
+                select(ColumnDescription).where(
+                    ColumnDescription.catalog_id == row.id,
+                    ColumnDescription.deleted_at.is_(None),
+                )
+            )
+            desc_list = descriptions.scalars().all()
+            schema_summary = self._merge_descriptions(schema_summary, desc_list)
+
         return {
             "id": row.id,
             "entity_name": row.entity_name,
@@ -106,7 +149,7 @@ class AssetMapRepository:
             "owner_id": row.owner_id,
             "schema_incomplete": row.schema_incomplete,
             "content_signature": row.content_signature,
-            "schema_summary": self._summarize_schema(row.schema_json),
+            "schema_summary": schema_summary,
             "lineage_count": int(lineage_count),
             "lineage_edges": lineage_edges,
             "related_metrics": related_metrics,
@@ -311,13 +354,17 @@ class AssetMapRepository:
         导致 catalog 节点与血缘边（业务表）无法匹配、图退化为孤立散点。
         """
         rows = (
-            await self._session.execute(
-                select(LineageEdge.source_node).where(
-                    LineageEdge.deleted_at.is_(None),
-                    LineageEdge.source_node.like("table:%"),
+            (
+                await self._session.execute(
+                    select(LineageEdge.source_node).where(
+                        LineageEdge.deleted_at.is_(None),
+                        LineageEdge.source_node.like("table:%"),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         return {r.split(":", 1)[1] for r in rows}
 
     async def _graph_catalog_nodes(

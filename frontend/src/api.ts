@@ -182,7 +182,13 @@ export class UnisenseApiError extends Error {
   traceId: string;
   detail?: Record<string, unknown> | null;
   status: number;
-  constructor(message: string, code: string, status: number, traceId: string, detail?: Record<string, unknown> | null) {
+  constructor(
+    message: string,
+    code: string,
+    status: number,
+    traceId: string,
+    detail?: Record<string, unknown> | null,
+  ) {
     super(message);
     this.name = "UnisenseApiError";
     this.code = code;
@@ -227,7 +233,11 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     if (token) headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const { consumeAuth: _consumeAuth, consumeFallbackUser: _consumeFallbackUser, ...restInit } = init ?? {};
+  const {
+    consumeAuth: _consumeAuth,
+    consumeFallbackUser: _consumeFallbackUser,
+    ...restInit
+  } = init ?? {};
 
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...restInit,
@@ -244,7 +254,9 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   }
 
   // 尝试解析统一信封；非 2xx 抛出 UnisenseApiError
-  let body: ApiEnvelope<T> | { code: string; message: string; trace_id: string; detail?: unknown } | null = null;
+  let body:
+    ApiEnvelope<T> | { code: string; message: string; trace_id: string; detail?: unknown } | null =
+    null;
   try {
     body = (await res.json()) as ApiEnvelope<T>;
   } catch {
@@ -254,7 +266,13 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   }
 
   if (!res.ok) {
-    const err = (body as { message?: string; code?: string; trace_id?: string; detail?: Record<string, unknown> }) || {};
+    const err =
+      (body as {
+        message?: string;
+        code?: string;
+        trace_id?: string;
+        detail?: Record<string, unknown>;
+      }) || {};
     throw new UnisenseApiError(
       err.message || `请求失败 (HTTP ${res.status})`,
       err.code || "HTTP_ERROR",
@@ -277,10 +295,13 @@ function pageQs(params: Record<string, string | number | undefined>): string {
 
 // ---- 鉴权 ----
 export async function apiLogin(username: string, password: string): Promise<string> {
-  const data = await request<{ access_token: string; token_type: string }>(`${API_BASE}/auth/login`, {
-    method: "POST",
-    body: JSON.stringify({ username, password }),
-  });
+  const data = await request<{ access_token: string; token_type: string }>(
+    `${API_BASE}/auth/login`,
+    {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    },
+  );
   setToken(data.access_token);
   return data.access_token;
 }
@@ -345,21 +366,33 @@ export async function createMetric(req: MetricCreateRequest): Promise<MetricResp
   });
 }
 
-export async function updateMetric(code: string, req: MetricUpdateRequest): Promise<MetricResponse> {
+export async function updateMetric(
+  code: string,
+  req: MetricUpdateRequest,
+): Promise<MetricResponse> {
   return request<MetricResponse>(`${API_BASE}/metric-definitions/${encodeURIComponent(code)}`, {
     method: "PUT",
     body: JSON.stringify(req),
   });
 }
 
-export async function publishMetric(code: string, req: MetricPublishRequest): Promise<MetricResponse> {
-  return request<MetricResponse>(`${API_BASE}/metric-definitions/${encodeURIComponent(code)}/publish`, {
-    method: "POST",
-    body: JSON.stringify(req),
-  });
+export async function publishMetric(
+  code: string,
+  req: MetricPublishRequest,
+): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/publish`,
+    {
+      method: "POST",
+      body: JSON.stringify(req),
+    },
+  );
 }
 
-export async function deprecateMetric(code: string, successor_code: string): Promise<MetricResponse> {
+export async function deprecateMetric(
+  code: string,
+  successor_code: string,
+): Promise<MetricResponse> {
   return request<MetricResponse>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/deprecate`,
     {
@@ -370,7 +403,9 @@ export async function deprecateMetric(code: string, successor_code: string): Pro
 }
 
 export async function listVersions(code: string): Promise<MetricVersionResponse[]> {
-  return request<MetricVersionResponse[]>(`${API_BASE}/metric-definitions/${encodeURIComponent(code)}/versions`);
+  return request<MetricVersionResponse[]>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/versions`,
+  );
 }
 
 export async function piiReview(code: string): Promise<MetricResponse> {
@@ -381,7 +416,10 @@ export async function piiReview(code: string): Promise<MetricResponse> {
 }
 
 // 提交评审：DRAFT → REVIEW；change_reason 缺省"提交评审"（后端 /submit，对齐 FR-003）
-export async function submitReview(metricCode: string, changeReason = "提交评审"): Promise<MetricResponse> {
+export async function submitReview(
+  metricCode: string,
+  changeReason = "提交评审",
+): Promise<MetricResponse> {
   return request<MetricResponse>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(metricCode)}/submit`,
     {
@@ -420,15 +458,17 @@ export async function reviewMetric(
 // ---- 指标可信度：健康度/对比/灰度/紧急发布/版本确认（backend /metric-definitions）----
 
 export async function getMetricHealth(code: string): Promise<MetricHealth> {
-  return request<MetricHealth>(
-    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/health`,
-  );
+  return request<MetricHealth>(`${API_BASE}/metric-definitions/${encodeURIComponent(code)}/health`);
 }
 
 // 审核通过：mode=standard 全量发布 / experimental 灰度发布（灰度可带 gray_tenant_ids）
 export async function approveMetric(
   code: string,
-  opts: { mode?: "standard" | "experimental"; gray_tenant_ids?: number[]; target_version?: number } = {},
+  opts: {
+    mode?: "standard" | "experimental";
+    gray_tenant_ids?: number[];
+    target_version?: number;
+  } = {},
 ): Promise<MetricResponse> {
   return request<MetricResponse>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/approve`,
@@ -443,10 +483,7 @@ export async function approveMetric(
   );
 }
 
-export async function compareMetrics(
-  codeA: string,
-  codeB: string,
-): Promise<MetricCompareResult> {
+export async function compareMetrics(codeA: string, codeB: string): Promise<MetricCompareResult> {
   return request<MetricCompareResult>(`${API_BASE}/metric-definitions/compare`, {
     method: "POST",
     body: JSON.stringify({ metric_codes: [codeA, codeB] }),
@@ -596,7 +633,10 @@ export async function arbitrateConflict(
   });
 }
 
-export async function escalateConflict(conflictId: string, note: string): Promise<ConflictResponse> {
+export async function escalateConflict(
+  conflictId: string,
+  note: string,
+): Promise<ConflictResponse> {
   return request<ConflictResponse>(`${API_BASE}/conflicts/${conflictId}/escalate`, {
     method: "POST",
     body: JSON.stringify({ note }),
@@ -644,7 +684,10 @@ export async function lineageEdges(params: {
   return request<LineageEdgePage>(`${API_BASE}/lineage/edges?${qs}`);
 }
 
-export async function parseLineage(sql: string, dialect?: string): Promise<{ table_edges: number; field_edges: number; graph_written: boolean }> {
+export async function parseLineage(
+  sql: string,
+  dialect?: string,
+): Promise<{ table_edges: number; field_edges: number; graph_written: boolean }> {
   return request(`${API_BASE}/lineage/parse`, {
     method: "POST",
     body: JSON.stringify({ sql, dialect: dialect ?? null, provenance: "sqlglot" }),
@@ -699,9 +742,12 @@ export async function addFavorite(metricCode: string): Promise<FavoriteResponse>
 }
 
 export async function removeFavorite(metricCode: string): Promise<FavoriteResponse> {
-  return request<FavoriteResponse>(`${API_BASE}/consume/me/favorites/${encodeURIComponent(metricCode)}`, {
-    method: "DELETE",
-  });
+  return request<FavoriteResponse>(
+    `${API_BASE}/consume/me/favorites/${encodeURIComponent(metricCode)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 // ---- 语义服务（后端为 /semantics，复数）----
@@ -766,10 +812,7 @@ export async function consumeQuery(req: QueryRequest): Promise<QueryResponse> {
   });
 }
 
-export async function listSnapshots(
-  code: string,
-  limit = 50,
-): Promise<SnapshotResponse[]> {
+export async function listSnapshots(code: string, limit = 50): Promise<SnapshotResponse[]> {
   return request<SnapshotResponse[]>(
     `${API_BASE}/consume/metrics/${encodeURIComponent(code)}/snapshots?limit=${limit}`,
     { consumeAuth: true, consumeFallbackUser: true },
@@ -844,7 +887,9 @@ export async function deprecateDimension(dimCode: string): Promise<Dimension> {
   });
 }
 
-export async function listDimensionMappings(sourceDimCode?: string): Promise<{ items: DimensionMapping[]; total: number }> {
+export async function listDimensionMappings(
+  sourceDimCode?: string,
+): Promise<{ items: DimensionMapping[]; total: number }> {
   const qs = sourceDimCode ? `?source_dim_code=${encodeURIComponent(sourceDimCode)}` : "";
   return request(`${API_BASE}/dimensions/mappings${qs}`);
 }
@@ -861,7 +906,9 @@ export async function createDimensionMapping(body: {
   });
 }
 
-export async function listReconciliations(status?: string): Promise<{ items: Reconciliation[]; total: number }> {
+export async function listReconciliations(
+  status?: string,
+): Promise<{ items: Reconciliation[]; total: number }> {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";
   return request(`${API_BASE}/dimensions/reconciliations${qs}`);
 }
@@ -879,14 +926,19 @@ export async function submitReconciliation(body: {
   });
 }
 
-export async function reviewReconciliation(recId: number, decision: string): Promise<Reconciliation> {
+export async function reviewReconciliation(
+  recId: number,
+  decision: string,
+): Promise<Reconciliation> {
   return request<Reconciliation>(`${API_BASE}/dimensions/reconciliations/${recId}/review`, {
     method: "POST",
     body: JSON.stringify({ decision }),
   });
 }
 
-export async function listDimensionMembers(dimCode: string): Promise<{ items: DimensionMember[]; total: number }> {
+export async function listDimensionMembers(
+  dimCode: string,
+): Promise<{ items: DimensionMember[]; total: number }> {
   return request(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members`);
 }
 
@@ -898,10 +950,13 @@ export async function createDimensionMember(body: {
   path?: string | null;
   attributes?: Record<string, unknown> | null;
 }): Promise<DimensionMember> {
-  return request<DimensionMember>(`${API_BASE}/dimensions/${encodeURIComponent(body.dim_code)}/members`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return request<DimensionMember>(
+    `${API_BASE}/dimensions/${encodeURIComponent(body.dim_code)}/members`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 // ---- 术语表 ----
@@ -949,12 +1004,17 @@ export async function deprecateTerm(termCode: string): Promise<GlossaryTerm> {
   });
 }
 
-export async function listTermConflicts(status?: string): Promise<{ items: GlossaryConflict[]; total: number }> {
+export async function listTermConflicts(
+  status?: string,
+): Promise<{ items: GlossaryConflict[]; total: number }> {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";
   return request(`${API_BASE}/terms/conflicts${qs}`);
 }
 
-export async function resolveTermConflict(conflictId: number, decision: string): Promise<GlossaryConflict> {
+export async function resolveTermConflict(
+  conflictId: number,
+  decision: string,
+): Promise<GlossaryConflict> {
   return request<GlossaryConflict>(`${API_BASE}/terms/conflicts/${conflictId}/resolve`, {
     method: "POST",
     body: JSON.stringify({ decision }),
@@ -962,7 +1022,10 @@ export async function resolveTermConflict(conflictId: number, decision: string):
 }
 
 // ---- 治理 ----
-export async function createRole(body: { name: string; description?: string | null }): Promise<RoleResponse> {
+export async function createRole(body: {
+  name: string;
+  description?: string | null;
+}): Promise<RoleResponse> {
   return request<RoleResponse>(`${API_BASE}/roles`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -1217,19 +1280,26 @@ export async function confirmReconciliation(
   decision: string,
   ownerNote?: string | null,
 ): Promise<ReconciliationRecord> {
-  return request<ReconciliationRecord>(`${API_BASE}/quality/reconciliation-records/${recordId}/confirm`, {
-    method: "POST",
-    body: JSON.stringify({ decision, owner_note: ownerNote ?? null }),
-  });
+  return request<ReconciliationRecord>(
+    `${API_BASE}/quality/reconciliation-records/${recordId}/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({ decision, owner_note: ownerNote ?? null }),
+    },
+  );
 }
 
 // ---- 通知 ----
-export async function listNotifications(status?: string): Promise<{ items: Notification[]; total: number }> {
+export async function listNotifications(
+  status?: string,
+): Promise<{ items: Notification[]; total: number }> {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";
   return request(`${API_BASE}/notify/notifications${qs}`);
 }
 
-export async function listNotifyEvents(eventType?: string): Promise<{ items: NotifyEventLog[]; total: number }> {
+export async function listNotifyEvents(
+  eventType?: string,
+): Promise<{ items: NotifyEventLog[]; total: number }> {
   const qs = eventType ? `?event_type=${encodeURIComponent(eventType)}` : "";
   return request(`${API_BASE}/notify/events${qs}`);
 }
@@ -1263,7 +1333,9 @@ export async function upsertSubscription(body: {
 }
 
 // ---- 可观测 ----
-export async function listFeedback(targetType?: string): Promise<{ items: Feedback[]; total: number }> {
+export async function listFeedback(
+  targetType?: string,
+): Promise<{ items: Feedback[]; total: number }> {
   const qs = targetType ? `?target_type=${encodeURIComponent(targetType)}` : "";
   return request(`${API_BASE}/observability/feedback${qs}`);
 }
@@ -1326,7 +1398,10 @@ export async function fetchRecommendedMetrics(limit = 20): Promise<RecommendItem
   ).then((r) => r.items);
 }
 
-export async function fetchRelatedMetrics(metricId: number | string, limit = 20): Promise<RecommendItem[]> {
+export async function fetchRelatedMetrics(
+  metricId: number | string,
+  limit = 20,
+): Promise<RecommendItem[]> {
   return request<{ items: RecommendItem[]; total: number }>(
     `${API_BASE}/recommend/metrics/${encodeURIComponent(String(metricId))}/related?limit=${limit}`,
   ).then((r) => r.items);
@@ -1469,7 +1544,10 @@ export async function createDataSource(req: DataSourceCreateRequest): Promise<Da
   });
 }
 
-export async function updateDataSource(sourceId: string, req: DataSourceUpdateRequest): Promise<DataSource> {
+export async function updateDataSource(
+  sourceId: string,
+  req: DataSourceUpdateRequest,
+): Promise<DataSource> {
   return request<DataSource>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}`, {
     method: "PUT",
     body: JSON.stringify(req),
@@ -1501,10 +1579,7 @@ export async function getDataSource(sourceId: string): Promise<DataSource> {
   return request<DataSource>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}`);
 }
 
-export async function collectSource(
-  sourceId: string,
-  mode = "FULL",
-): Promise<CollectResult> {
+export async function collectSource(sourceId: string, mode = "FULL"): Promise<CollectResult> {
   return request<CollectResult>(
     `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/collect`,
     {
@@ -1526,10 +1601,7 @@ export async function listDataSourceDatabases(req: {
 }
 
 /** 异步立即采集（返回 job_id，进度走 SSE / 轮询任务状态）。 */
-export async function collectSourceNow(
-  sourceId: string,
-  mode = "FULL",
-): Promise<CollectNowResult> {
+export async function collectSourceNow(sourceId: string, mode = "FULL"): Promise<CollectNowResult> {
   return request<CollectNowResult>(
     `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/collect-now`,
     {
@@ -1628,9 +1700,7 @@ export async function scheduleSource(
 }
 
 export async function getSourceHealth(sourceId: string): Promise<SourceHealth> {
-  return request<SourceHealth>(
-    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/health`,
-  );
+  return request<SourceHealth>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/health`);
 }
 
 export interface DriftLogItem {
@@ -1681,9 +1751,7 @@ export async function getCollectionJob(jobId: string): Promise<CollectionJob | n
 }
 
 export async function getSourceWatermark(sourceId: string): Promise<Watermark> {
-  return request<Watermark>(
-    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/watermark`,
-  );
+  return request<Watermark>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/watermark`);
 }
 
 export async function listCatalogs(params?: {
@@ -1737,11 +1805,76 @@ export async function registerCatalog(
 
 export async function bulkDeprecateCatalogs(
   items: Array<{ source_id: string; entity_name: string }>,
-): Promise<{ succeeded: Array<{ source_id: string; entity_name: string }>; failed: Array<Record<string, unknown>> }> {
+): Promise<{
+  succeeded: Array<{ source_id: string; entity_name: string }>;
+  failed: Array<Record<string, unknown>>;
+}> {
   return request(`${API_BASE}/catalogs/bulk-deprecate`, {
     method: "POST",
     body: JSON.stringify({ items }),
   });
+}
+
+// ---- 字段描述推断 + 人工编辑 ----
+
+export interface InferDescriptionResult {
+  column_name: string;
+  description: string;
+  source: string;
+  confidence: number;
+}
+
+export interface InferBatchResult {
+  inferred: InferDescriptionResult[];
+  skipped: string[];
+  failed: string[];
+}
+
+export interface UpdateDescriptionResult {
+  catalog_id: number;
+  column_name: string;
+  description: string;
+  source: string;
+  updated_by: number | null;
+  updated_at: string;
+}
+
+/** LLM 推断单字段描述 */
+export async function inferColumnDescription(
+  catalogId: number,
+  columnName: string,
+  params: { entity_name: string; column_type?: string },
+): Promise<InferDescriptionResult> {
+  return request<InferDescriptionResult>(
+    `${API_BASE}/catalogs/${catalogId}/columns/${encodeURIComponent(columnName)}/infer-description`,
+    {
+      method: "POST",
+      body: JSON.stringify(params),
+    },
+  );
+}
+
+/** 批量推断缺失描述 */
+export async function inferDescriptions(catalogId: number): Promise<InferBatchResult> {
+  return request<InferBatchResult>(
+    `${API_BASE}/catalogs/${catalogId}/infer-descriptions`,
+    { method: "POST" },
+  );
+}
+
+/** 人工编辑字段描述 */
+export async function updateColumnDescription(
+  catalogId: number,
+  columnName: string,
+  description: string,
+): Promise<UpdateDescriptionResult> {
+  return request<UpdateDescriptionResult>(
+    `${API_BASE}/catalogs/${catalogId}/columns/${encodeURIComponent(columnName)}/description`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ description }),
+    },
+  );
 }
 
 // ---- 资产地图 ----
@@ -1815,9 +1948,7 @@ export async function fetchAssetHeatmapMatrix(): Promise<{
 }
 
 export async function fetchAssetOwnerView(ownerId: number): Promise<AssetOwnerView> {
-  return request<AssetOwnerView>(
-    `${API_BASE}/assetmap/owner-view?owner_id=${ownerId}`,
-  );
+  return request<AssetOwnerView>(`${API_BASE}/assetmap/owner-view?owner_id=${ownerId}`);
 }
 
 // 实体详情：返回表/字段详情（schema 摘要/敏感度/PII/Owner/血缘边数）
@@ -1838,10 +1969,7 @@ export async function fetchAssetSearch(params: {
 }
 
 // 全局聚合搜索（FR-18 全局搜索栏）：跨指标/维度/术语/模板/数据源/采集目录表+字段/主题域
-export async function fetchGlobalSearch(
-  q: string,
-  limit = 5,
-): Promise<GlobalSearchResponse> {
+export async function fetchGlobalSearch(q: string, limit = 5): Promise<GlobalSearchResponse> {
   const qs = pageQs({ q, limit });
   return request<GlobalSearchResponse>(`${API_BASE}/search?${qs}`);
 }
@@ -1921,7 +2049,10 @@ export async function createDomain(data: SubjectDomainCreateRequest): Promise<Su
   });
 }
 
-export async function updateDomain(code: string, data: SubjectDomainUpdateRequest): Promise<SubjectDomain> {
+export async function updateDomain(
+  code: string,
+  data: SubjectDomainUpdateRequest,
+): Promise<SubjectDomain> {
   return request<SubjectDomain>(`${API_BASE}/domains/${encodeURIComponent(code)}`, {
     method: "PUT",
     body: JSON.stringify(data),
@@ -1929,15 +2060,21 @@ export async function updateDomain(code: string, data: SubjectDomainUpdateReques
 }
 
 export async function deactivateDomain(code: string): Promise<SubjectDomain> {
-  return request<SubjectDomain>(`${API_BASE}/domains/${encodeURIComponent(code)}/status?action=deactivate`, {
-    method: "PATCH",
-  });
+  return request<SubjectDomain>(
+    `${API_BASE}/domains/${encodeURIComponent(code)}/status?action=deactivate`,
+    {
+      method: "PATCH",
+    },
+  );
 }
 
 export async function activateDomain(code: string): Promise<SubjectDomain> {
-  return request<SubjectDomain>(`${API_BASE}/domains/${encodeURIComponent(code)}/status?action=activate`, {
-    method: "PATCH",
-  });
+  return request<SubjectDomain>(
+    `${API_BASE}/domains/${encodeURIComponent(code)}/status?action=activate`,
+    {
+      method: "PATCH",
+    },
+  );
 }
 
 export async function deleteDomain(code: string): Promise<void> {
@@ -1945,17 +2082,27 @@ export async function deleteDomain(code: string): Promise<void> {
 }
 
 export async function getDomainDefaults(code: string): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>(`${API_BASE}/domains/${encodeURIComponent(code)}/defaults`);
+  return request<Record<string, unknown>>(
+    `${API_BASE}/domains/${encodeURIComponent(code)}/defaults`,
+  );
 }
 
-export async function updateDomainDefaults(code: string, defaults: Record<string, unknown>): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>(`${API_BASE}/domains/${encodeURIComponent(code)}/defaults`, {
-    method: "PUT",
-    body: JSON.stringify({ defaults_json: defaults }),
-  });
+export async function updateDomainDefaults(
+  code: string,
+  defaults: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(
+    `${API_BASE}/domains/${encodeURIComponent(code)}/defaults`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ defaults_json: defaults }),
+    },
+  );
 }
 
-export async function getDomainMetrics(code: string): Promise<Array<{ id: number; metric_code: string; name: string; status: string; type: string }>> {
+export async function getDomainMetrics(
+  code: string,
+): Promise<Array<{ id: number; metric_code: string; name: string; status: string; type: string }>> {
   return request(`${API_BASE}/domains/${encodeURIComponent(code)}/metrics`);
 }
 
@@ -1973,38 +2120,61 @@ export async function listAllDictItems(dictType: string): Promise<SystemDictItem
   return request<SystemDictItem[]>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/all`);
 }
 
-export async function createDictItem(dictType: string, data: DictItemCreateRequest): Promise<SystemDictItem> {
+export async function createDictItem(
+  dictType: string,
+  data: DictItemCreateRequest,
+): Promise<SystemDictItem> {
   return request<SystemDictItem>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}`, {
     method: "POST",
     body: JSON.stringify(data),
   });
 }
 
-export async function updateDictItem(dictType: string, code: string, data: DictItemUpdateRequest): Promise<SystemDictItem> {
-  return request<SystemDictItem>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}`, {
-    method: "PUT",
-    body: JSON.stringify(data),
-  });
+export async function updateDictItem(
+  dictType: string,
+  code: string,
+  data: DictItemUpdateRequest,
+): Promise<SystemDictItem> {
+  return request<SystemDictItem>(
+    `${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(data),
+    },
+  );
 }
 
 export async function deactivateDictItem(dictType: string, code: string): Promise<SystemDictItem> {
-  return request<SystemDictItem>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/status?action=deactivate`, {
-    method: "PATCH",
-  });
+  return request<SystemDictItem>(
+    `${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/status?action=deactivate`,
+    {
+      method: "PATCH",
+    },
+  );
 }
 
 export async function activateDictItem(dictType: string, code: string): Promise<SystemDictItem> {
-  return request<SystemDictItem>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/status?action=activate`, {
-    method: "PATCH",
-  });
+  return request<SystemDictItem>(
+    `${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/status?action=activate`,
+    {
+      method: "PATCH",
+    },
+  );
 }
 
 export async function deleteDictItem(dictType: string, code: string): Promise<void> {
-  await request(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}`, { method: "DELETE" });
+  await request(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}`, {
+    method: "DELETE",
+  });
 }
 
-export async function getDictItemRefCount(dictType: string, code: string): Promise<{ ref_count: number }> {
-  return request(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/ref-count`);
+export async function getDictItemRefCount(
+  dictType: string,
+  code: string,
+): Promise<{ ref_count: number }> {
+  return request(
+    `${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/ref-count`,
+  );
 }
 
 // ---- 自动推断（backend /api/v1/metric-definitions/auto-suggest）----

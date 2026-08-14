@@ -624,6 +624,21 @@ CREATE TABLE db_catalog (
   INDEX idx_owner (owner_id), INDEX idx_sens (sensitivity_level)
 );
 
+-- 字段描述（独立于 db_catalog.schema_json，防止采集覆盖 manual/llm 编辑）
+CREATE TABLE column_descriptions (
+  id BIGINT PK,
+  catalog_id BIGINT NOT NULL,          -- FK → db_catalog.id
+  column_name VARCHAR(256) NOT NULL,    -- 字段名（与 schema_json 中 name 对齐）
+  description TEXT,                     -- 描述内容（manual/llm 推断/schema 原始）
+  source ENUM('manual','llm','schema'), -- 来源：人工编辑 > LLM 推断 > 采集原始
+  updated_by BIGINT NULL,               -- 编辑人 FK → user.id（manual 时必填）
+  created_at DATETIME, updated_at DATETIME,
+  UNIQUE KEY uk_catalog_column (catalog_id, column_name),
+  INDEX idx_catalog_id (catalog_id),
+  FOREIGN KEY (catalog_id) REFERENCES db_catalog(id),
+  FOREIGN KEY (updated_by) REFERENCES user(id)
+);
+
 -- 指标（语义层核心，状态机）
 CREATE TABLE metric (
   id BIGINT PK, metric_code VARCHAR(64) UNIQUE,
@@ -2015,6 +2030,13 @@ Owner       ·    ·   审/写  裁   读    管     ·    ·   处    读   管
 **接口调用链**：
 - 入：`POST /sources` → collector.create_source → Secret Manager.store → arq.enqueue(collect:full)
 - 出：collector → lineage（事件 `catalog.updated`）→ semantic（仅 LLM 候选，异步，可选）
+
+**字段描述推断与编辑接口**（独立于 schema_json，防采集覆盖）：
+- `POST /catalogs/{catalog_id}/columns/{column_name}/infer-description`：单字段 LLM 推断描述，写入 `column_descriptions`（source=llm），复用 `build_llm_client` + 熔断器 + 降级友好提示。
+- `POST /catalogs/{catalog_id}/infer-descriptions`：批量推断该 catalog 所有空 comment 字段，逐字段推断并 upsert，返回 `{inferred, skipped, failed}` 统计。
+- `PUT /catalogs/{catalog_id}/columns/{column_name}/description`：人工编辑描述，upsert `column_descriptions`（source=manual, updated_by=current_user.id），审计日志 `UPDATE_DESCRIPTION`。
+- **优先级链**：manual > llm > schema_json 原始 comment。`upsert_description` 保护高优先级不被低优先级覆盖。
+- **合并展示**：`assetmap.get_entity_detail` 查询 `column_descriptions` 并按优先级合并 `description`/`description_source` 到 `schema_summary` 每条字段。
 
 **数据流转**：
 ```

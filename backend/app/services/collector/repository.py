@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.models.collector_models import CollectionWatermark, SchemaDriftLog
-from app.models.data_source import DataSource, DBCatalog
+from app.models.data_source import ColumnDescription, DataSource, DBCatalog
 from app.services.collector.drift_detector import DriftDetector, compute_content_signature
 from app.services.collector.schemas import BulkDeprecateItem
 
@@ -511,3 +511,79 @@ class CollectorRepository:
                 # 恢复健康时清空历史错误
                 src.last_error = None
             await self._db.flush()
+
+    # ---- 字段描述 CRUD ----
+
+    async def get_descriptions(self, catalog_id: int) -> Sequence[ColumnDescription]:
+        """获取指定 catalog 下所有字段描述记录。"""
+        res = await self._db.execute(
+            select(ColumnDescription).where(
+                ColumnDescription.catalog_id == catalog_id,
+                ColumnDescription.deleted_at.is_(None),
+            )
+        )
+        return res.scalars().all()
+
+    async def upsert_description(
+        self,
+        catalog_id: int,
+        column_name: str,
+        description: str,
+        source: str,
+        updated_by: int | None = None,
+    ) -> ColumnDescription:
+        """Upsert 单条字段描述（按 catalog_id + column_name 唯一键）。"""
+        existing = (
+            await self._db.execute(
+                select(ColumnDescription).where(
+                    ColumnDescription.catalog_id == catalog_id,
+                    ColumnDescription.column_name == column_name,
+                    ColumnDescription.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+
+        if existing is not None:
+            # 优先级链保护：manual 不被 llm 覆盖，llm 不被 schema 覆盖
+            priority = {"manual": 3, "llm": 2, "schema": 1}
+            if priority.get(source, 0) >= priority.get(existing.source, 0):
+                existing.description = description
+                existing.source = source
+                existing.updated_by = updated_by
+                await self._db.flush()
+            return existing
+
+        desc = ColumnDescription(
+            catalog_id=catalog_id,
+            column_name=column_name,
+            description=description,
+            source=source,
+            updated_by=updated_by,
+        )
+        self._db.add(desc)
+        await self._db.flush()
+        return desc
+
+    async def batch_upsert_descriptions(
+        self,
+        catalog_id: int,
+        items: list[dict[str, Any]],
+        source: str,
+    ) -> list[ColumnDescription]:
+        """批量 upsert 字段描述。
+
+        Args:
+            catalog_id: 目录 ID。
+            items: [{column_name, description}, ...]
+            source: 来源标记（llm/schema）。
+        """
+        results: list[ColumnDescription] = []
+        for item in items:
+            desc = await self.upsert_description(
+                catalog_id=catalog_id,
+                column_name=item["column_name"],
+                description=item["description"],
+                source=source,
+            )
+            results.append(desc)
+        return results
