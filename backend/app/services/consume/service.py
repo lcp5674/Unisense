@@ -167,7 +167,17 @@ class ConsumeService(BaseService):
         defn = metric.definition_json or {}
         dims = defn.get("dimensions") or []
         measures = defn.get("measures") or defn.get("columns") or []
-        cols = list(dims) + list(measures)
+        # measures 支持两种形态：字符串数组（["gmv"]）或对象数组
+        # （[{"name":"gmv","aggregation":"SUM"}]），对象形态取 name 字段
+        # （既存口径的合法结构，旧路径因 OLAP 未配置降级从未执行到此处）。
+        cols = list(dims)
+        for m in measures:
+            if isinstance(m, dict):
+                name = m.get("name") or m.get("column")
+                if name:
+                    cols.append(name)
+            else:
+                cols.append(m)
         if not cols:
             return "*"
         for col in cols:

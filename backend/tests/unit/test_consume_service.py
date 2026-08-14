@@ -919,3 +919,22 @@ async def test_execute_internal_user_pii_reviewed_ok(monkeypatch) -> None:
     )
     assert res.data["engine"] == "mysql"
     svc._snapshots.create.assert_awaited_once()
+
+
+async def test_projection_columns_supports_measures_object_array() -> None:
+    """投影列兼容 measures 对象数组（[{name, aggregation}]）——既存口径合法结构。
+
+    回归：旧路径因 OLAP 未配置直接降级，_projection_columns 从未执行到对象数组；
+    MySQL 降级打通后暴露「指标投影列标识非法」INJECTION_DETECTED。
+    """
+    svc = _svc(await _client())
+    m = _metric(dims=("channel", "store"))
+    m.definition_json = {
+        **m.definition_json,
+        "source_table": "dws_metric_sales_e2e_gmv_day",
+        "measures": [{"name": "gmv", "aggregation": "SUM"}],
+    }
+    req = QueryRequest(metric_code="gmv", date_range="")
+    sql, params = svc._build_query_sql(req, m)
+    assert "`channel`, `store`, `gmv`" in sql
+    assert params["metric_code"] == "gmv"
