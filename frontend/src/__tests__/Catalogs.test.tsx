@@ -170,4 +170,33 @@ describe("Catalogs 页面", () => {
       expect(lastCall?.database).toBe("unisense");
     });
   });
+
+  it("切换每页条数后按新 page_size 重新请求（不固化为 20 条/页）", async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 初始请求固定 page_size=20
+    await waitFor(() => {
+      expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ page_size: 20 }));
+    });
+
+    // 打开每页条数选择器（antd size changer 显式开启，total=1 也可见）
+    const sizeChanger = container.querySelector(".ant-pagination-options .ant-select-selector");
+    expect(sizeChanger).toBeTruthy();
+    fireEvent.mouseDown(sizeChanger!);
+
+    // 选择「50」（测试环境无 ConfigProvider，选项文本为 antd 默认 en_US 的 "50 / page"）
+    const option = await screen.findByRole("option", { name: /50/ });
+    fireEvent.click(option);
+
+    // 重新请求携带新的 page_size
+    await waitFor(() => {
+      const calls = mockedList.mock.calls;
+      const lastCall = calls.length > 0 ? calls[calls.length - 1][0] : undefined;
+      expect(lastCall?.page_size).toBe(50);
+    });
+  });
 });

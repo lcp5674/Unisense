@@ -28,6 +28,7 @@ export function Catalogs() {
   const [items, setItems] = useState<DBCatalog[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [sourceId, setSourceId] = useState("");
   const [sourceStatus, setSourceStatus] = useState<"" | "active" | "deleted">("");
   const [entityType, setEntityType] = useState("");
@@ -185,7 +186,7 @@ export function Catalogs() {
         keyword: keyword || undefined,
         source_status: sourceStatus || undefined,
         page,
-        page_size: 20,
+        page_size: pageSize,
       });
       setItems(res.items);
       setTotal(res.total);
@@ -199,7 +200,7 @@ export function Catalogs() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, sourceId, sourceStatus, entityType, sensitivity, keyword, database]);
+  }, [page, pageSize, sourceId, sourceStatus, entityType, sensitivity, keyword, database]);
 
   // 库名选项随数据源联动：切换数据源时刷新库名下拉并重置已选库名
   async function loadDatabases() {
@@ -395,7 +396,7 @@ export function Catalogs() {
           rowKey={(r) => `${r.source_id}-${r.entity_name}`}
           loading={loading}
           rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
-          pagination={{ current: page, pageSize: 20, total, onChange: setPage, showTotal: (t) => `共 ${t} 条` }}
+          pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
           locale={{ emptyText: "暂无目录实体" }}
         />
       </Card>

@@ -48,6 +48,7 @@ export function MetricCatalog() {
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [selected, setSelected] = useState<MetricResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
@@ -87,7 +88,7 @@ export function MetricCatalog() {
         sort_by: sortBy,
         sort_order: sortOrder,
         page,
-        page_size: 20,
+        page_size: pageSize,
       });
       setItems(res.items);
       setTotal(res.total);
@@ -104,7 +105,7 @@ export function MetricCatalog() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, status, domain, tier, sortBy, sortOrder]);
+  }, [page, pageSize, status, domain, tier, sortBy, sortOrder]);
 
   function handleSearch() {
     if (keyword) {
@@ -310,9 +311,11 @@ export function MetricCatalog() {
         }}
         pagination={{
           current: page,
-          pageSize: 20,
+          pageSize,
           total,
-          onChange: (p) => setPage(p),
+          showSizeChanger: true,
+          pageSizeOptions: [10, 20, 50, 100],
+          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
           showTotal: (t) => `共 ${t} 条`,
         }}
         onRow={(record) => ({
