@@ -4,6 +4,7 @@ import { Button, Card, Input, Modal, Space, Table, Tag, message } from "antd";
 import { ArrowLeftOutlined } from "@ant-design/icons";
 import { listMetrics, reviewMetric, UnisenseApiError } from "../api";
 import type { MetricResponse } from "../types";
+import { formatCnTime } from "../utils/timeCn";
 
 function openReviewModal(
   metric: MetricResponse,
