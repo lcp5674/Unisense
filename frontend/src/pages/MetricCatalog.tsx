@@ -124,7 +124,8 @@ function ExpandContent({
     : def.source_tables
       ? [String(def.source_tables)]
       : [];
-  const rawEtl = def.etl_sql ?? def.sql;
+  // 口径 SQL：兼容多种键名（etl_sql / sql / calculation_sql / query_sql / sql_template）
+  const rawEtl = def.etl_sql ?? def.sql ?? def.calculation_sql ?? def.query_sql ?? def.sql_template;
   const etlSql = rawEtl == null ? "" : String(rawEtl);
 
   return (
@@ -180,19 +181,22 @@ function ExpandContent({
         </p>
       )}
       {etlSql && (
-        <pre
-          style={{
-            background: "var(--paper)",
-            padding: 8,
-            borderRadius: 4,
-            margin: "0 0 8px",
-            fontSize: 12,
-            overflow: "auto",
-            maxHeight: 200,
-          }}
-        >
-          {etlSql}
-        </pre>
+        <div style={{ margin: "0 0 8px" }}>
+          <span className="muted">口径 SQL：</span>
+          <pre
+            style={{
+              background: "var(--paper)",
+              padding: 8,
+              borderRadius: 4,
+              margin: "4px 0 0",
+              fontSize: 12,
+              overflow: "auto",
+              maxHeight: 200,
+            }}
+          >
+            {etlSql}
+          </pre>
+        </div>
       )}
       <details>
         <summary className="muted" style={{ cursor: "pointer" }}>完整口径 JSON</summary>

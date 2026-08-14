@@ -65,6 +65,7 @@ const metric: MetricResponse = {
   definition_json: {
     expression: "sum(gmv)",
     definition: "当日支付成功订单的成交总额",
+    sql: "SELECT SUM(order_amount) AS gmv, dt FROM dwd_order_di GROUP BY dt",
     source_tables: ["dwd_order_di"],
     dependencies: ["user_base_cnt_d"],
     source_fields: ["gmv"],
@@ -183,10 +184,13 @@ describe("MetricCatalog", () => {
     const expandBtn = document.querySelector(".ant-table-row-expand-icon");
     expect(expandBtn).toBeTruthy();
     fireEvent.click(expandBtn as Element);
-    // 展开内容：指标定义 / 计算口径 / 来源字段 / 提交人=张三 / 审批人=王五
+    // 展开内容：指标定义 / 计算口径 / 口径 SQL / 来源字段 / 提交人=张三 / 审批人=王五
     await waitFor(() => {
       expect(screen.getByText("当日支付成功订单的成交总额")).toBeTruthy();
       expect(screen.getByText("sum(gmv)")).toBeTruthy();
+      // 口径 SQL：带标签 + SQL 文本
+      expect(screen.getByText("口径 SQL：")).toBeTruthy();
+      expect(screen.getByText("SELECT SUM(order_amount) AS gmv, dt FROM dwd_order_di GROUP BY dt")).toBeTruthy();
       expect(screen.getByText("dwd_order_di")).toBeTruthy();
       expect(screen.getByText("user_base_cnt_d")).toBeTruthy();
       expect(screen.getByText("gmv")).toBeTruthy();
