@@ -328,6 +328,9 @@ export function AssetGraph({
   // 图实例仅创建一次，节点大小回调需通过 ref 读取最新度图（避免闭包捕获旧值）
   const degreeMapRef = useRef(degreeMap);
   degreeMapRef.current = degreeMap;
+  // 环检测结果同样通过 ref 穿透到 graph 样式回调（节点描边区分环节点）
+  const cycleNodesRef = useRef(cycleNodes);
+  cycleNodesRef.current = cycleNodes;
   // G6 图实例在首次 render() 的异步 prepare 中才初始化 context.element——
   // 在此之前调用 setElementState 会因 context.element 为 undefined 崩溃。此标志标记「图已就绪」。
   const graphReadyRef = useRef(false);
@@ -365,14 +368,30 @@ export function AssetGraph({
               if (t === "field") return [r * 1.3, r * 0.7];
               return r;
             },
-            fill: (d: NodeData) => domainColor((d.data as AssetGraphNode | undefined)?.domain),
-            stroke: (d: NodeData) =>
-              (d.data as AssetGraphNode | undefined)?.pii ? "#c62828" : "#ffffff",
-            lineWidth: (d: NodeData) =>
-              ((d.data as AssetGraphNode | undefined)?.pii ? 3 : 1.5),
-            // 投影让节点从画布上"浮起"，减少平铺感
-            shadowColor: "rgba(0,0,0,0.28)",
-            shadowBlur: 8,
+            fill: (d: NodeData) => {
+              const n = d.data as AssetGraphNode | undefined;
+              // 环节点：橙色填充淡出提示（不覆盖域色，仅叠加暖色倾向）
+              if (n && cycleNodesRef.current.has(String(d.id))) return "#ff8a80";
+              return domainColor(n?.domain);
+            },
+            stroke: (d: NodeData) => {
+              const n = d.data as AssetGraphNode | undefined;
+              // 环节点：橙色粗描边（区别于 PII 红色）；PII 红色优先保留语义
+              if (n && cycleNodesRef.current.has(String(d.id))) return "#e65100";
+              return n?.pii ? "#c62828" : "#ffffff";
+            },
+            lineWidth: (d: NodeData) => {
+              const n = d.data as AssetGraphNode | undefined;
+              if (n && cycleNodesRef.current.has(String(d.id))) return 3.5;
+              return n?.pii ? 3 : 1.5;
+            },
+            // 投影让节点从画布上"浮起"，减少平铺感；环节点用橙色投影强调
+            shadowColor: (d: NodeData) =>
+              cycleNodesRef.current.has(String(d.id))
+                ? "rgba(230,81,0,0.5)"
+                : "rgba(0,0,0,0.28)",
+            shadowBlur: (d: NodeData) =>
+              cycleNodesRef.current.has(String(d.id)) ? 14 : 8,
             shadowOffsetY: 3,
             labelText: (d: NodeData) =>
               trimLabel((d.data as AssetGraphNode | undefined)?.label ?? String(d.id)),
@@ -664,7 +683,9 @@ export function AssetGraph({
           data-testid="asset-graph-cycle-banner"
         >
           <span>
-            检测到 <b>{cycleNodes.size}</b> 个节点存在<b>循环依赖</b>（红色虚线标注，见下方图例）。
+            检测到 <b>{cycleNodes.size}</b> 个节点存在<b>循环依赖</b>。
+            <b style={{ color: "#e65100" }}> 橙色描边</b>为环节点、
+            <b style={{ color: "#e53935" }}> 红色虚线</b>为环边（见下图例）。
             这通常是 ETL 回流或配置错误，请检查相关表的加工链。
           </span>
         </div>
@@ -771,6 +792,23 @@ export function AssetGraph({
           <span
             style={{
               display: "inline-block",
+              width: 10,
+              height: 10,
+              borderRadius: "50%",
+              border: "3px solid #e65100",
+              background: "#ff8a80",
+              marginRight: 4,
+              verticalAlign: "middle",
+            }}
+          />
+          <span className="muted" style={{ color: "#e65100" }}>
+            环节点（橙色描边）
+          </span>
+        </div>
+        <div>
+          <span
+            style={{
+              display: "inline-block",
               width: 18,
               height: 0,
               borderTop: "2px dashed #e53935",
@@ -779,7 +817,7 @@ export function AssetGraph({
             }}
           />
           <span className="muted" style={{ color: "#b71c1c" }}>
-            循环依赖
+            环边（红色虚线）
           </span>
         </div>
         <Button

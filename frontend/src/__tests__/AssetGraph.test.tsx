@@ -124,4 +124,58 @@ describe("AssetGraph 交互", () => {
       ).toBe(true);
     });
   });
+
+  it("检测到真环时显示循环提示条并自动切换力导向布局", async () => {
+    // A→B→C→A 三节点真环（SCC 尺寸 3 > 2）
+    const cycNodes: AssetGraphNode[] = [
+      { id: "table:a", label: "a", type: "table", domain: "sales" },
+      { id: "table:b", label: "b", type: "table", domain: "sales" },
+      { id: "table:c", label: "c", type: "table", domain: "sales" },
+    ];
+    const cycEdges: AssetGraphEdge[] = [
+      { source: "table:a", target: "table:b", type: "DERIVED_FROM" },
+      { source: "table:b", target: "table:c", type: "DERIVED_FROM" },
+      { source: "table:c", target: "table:a", type: "DERIVED_FROM" },
+    ];
+    render(<AssetGraph nodes={cycNodes} edges={cycEdges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+
+    // 循环提示条出现，说明 3 个节点被识别为循环依赖
+    const banner = await screen.findByTestId("asset-graph-cycle-banner");
+    expect(banner.textContent).toContain("3");
+    expect(banner.textContent).toContain("循环依赖");
+    // 提示条同时解释环节点（橙色描边）与环边（红色虚线）图例语义
+    expect(banner.textContent).toContain("橙色描边");
+    expect(banner.textContent).toContain("红色虚线");
+
+    // 有环时布局自动切换为力导向（dagre 对环渲染异常），环边标记为 inCycle 虚线
+    const ctorCalls = vi.mocked(Graph).mock.calls;
+    const ctorConfig = ctorCalls[ctorCalls.length - 1][0] as {
+      layout?: { type?: string };
+    };
+    expect(ctorConfig.layout?.type).toBe("d3-force");
+    const data = lastGraphData();
+    expect(
+      data.edges.every((e) => (e.data as AssetGraphEdge | undefined)?.inCycle === true),
+    ).toBe(true);
+  });
+
+  it("无环的 DAG 使用分层布局", async () => {
+    const dagNodes: AssetGraphNode[] = [
+      { id: "table:o", label: "ods_orders", type: "table", domain: "sales" },
+      { id: "metric:m", label: "gmv", type: "metric", domain: "sales" },
+    ];
+    const dagEdges: AssetGraphEdge[] = [
+      { source: "table:o", target: "metric:m", type: "DERIVED_FROM" },
+    ];
+    render(<AssetGraph nodes={dagNodes} edges={dagEdges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+
+    expect(screen.queryByTestId("asset-graph-cycle-banner")).toBeNull();
+    const ctorCalls = vi.mocked(Graph).mock.calls;
+    const ctorConfig = ctorCalls[ctorCalls.length - 1][0] as {
+      layout?: { type?: string };
+    };
+    expect(ctorConfig.layout?.type).toBe("antv-dagre");
+  });
 });
