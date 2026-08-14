@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from app.services.semantic.auto_fill import (
     auto_fill,
+    build_profile,
     extract_biz_object,
     extract_measure,
     generate_metric_code,
+    infer_metric,
     validate_metric_code,
 )
 
@@ -102,3 +104,108 @@ class TestAutoFill:
     def test_infer_metric_type_derived(self) -> None:
         result = auto_fill(domain_code="test", measure_column="conversion_rate")
         assert result["defaults"].get("type") == "derived"
+
+
+class TestInferMetricSql:
+    """SQL 驱动的多字段推断。"""
+
+    def test_full_inference_from_sql(self) -> None:
+        sql = """
+        SELECT shop_id, dt, SUM(amount) AS amount
+        FROM dwd.sales_detail
+        WHERE dt = DATE_SUB(CURRENT_DATE, INTERVAL 1 DAY)
+        GROUP BY shop_id, dt
+        """
+        profile = build_profile(
+            sql=sql,
+            period="day",
+            measure_meta={"type": "decimal(18,2)", "comment": "订单金额"},
+        )
+        # 注入 domain_code（endpoint 会设置）
+        profile["domain_code"] = ""
+        result = infer_metric(profile)
+        f = result["fields"]
+        assert f["aggregation"]["value"] == "SUM"
+        assert f["aggregation"]["source"] == "sql_parse"
+        assert f["granularity"]["value"] == "day"
+        assert f["type"]["value"] == "atomic"
+        assert f["additivity"]["value"] == "ADDITIVE"
+        assert f["serving_mode"]["value"] == "BATCH_ONLY"
+        assert f["definition_mode"]["value"] == "sql"
+        assert "dwd.sales_detail" in f["definition_json"]["value"]["source_tables"]
+        # 名称：列注释优先
+        assert f["name"]["value"] == "日订单金额"
+        assert f["name"]["source"] == "column_meta"
+
+    def test_count_distinct_from_sql(self) -> None:
+        sql = "SELECT dt, COUNT(DISTINCT user_id) AS uv FROM dwd.user_active GROUP BY dt"
+        profile = build_profile(sql=sql, period="day")
+        profile["domain_code"] = ""
+        result = infer_metric(profile)
+        f = result["fields"]
+        assert f["aggregation"]["value"] == "COUNT_DISTINCT"
+        assert f["additivity"]["value"] == "ADDITIVE"
+
+    def test_time_semantics_ytd(self) -> None:
+        sql = (
+            "SELECT SUM(gmv) AS gmv FROM dwd.sales_detail "
+            "WHERE YEAR(dt)=YEAR(CURRENT_DATE) GROUP BY dt"
+        )
+        profile = build_profile(sql=sql, period="day")
+        profile["domain_code"] = ""
+        result = infer_metric(profile)
+        assert result["fields"]["time_semantics"]["value"] == "YTD"
+
+    def test_ratio_type_derived(self) -> None:
+        sql = (
+            "SELECT SUM(pay)/SUM(order_cnt) AS rate "
+            "FROM dwd.sales_detail WHERE dt = DATE_SUB(CURRENT_DATE, INTERVAL 1 DAY)"
+        )
+        profile = build_profile(sql=sql, period="day")
+        profile["domain_code"] = ""
+        result = infer_metric(profile)
+        assert result["fields"]["type"]["value"] == "derived"
+
+    def test_semi_additive_for_balance(self) -> None:
+        profile = build_profile(
+            source_table="dws.account_balance", measure_column="end_bal", period="day"
+        )
+        profile["domain_code"] = ""
+        result = infer_metric(profile)
+        f = result["fields"]
+        assert f["aggregation"]["value"] == "LAST_VALUE"
+        assert f["additivity"]["value"] == "SEMI_ADDITIVE"
+
+
+class TestAutoFillBackwardCompat:
+    """auto_fill 旧结构 + 新附加字段兼容。"""
+
+    def test_returns_legacy_and_new_keys(self) -> None:
+        result = auto_fill(
+            domain_code="sales",
+            source_table="dwd.sales_detail",
+            measure_column="amount",
+            period="day",
+            sql="SELECT dt, SUM(amount) AS a FROM dwd.sales_detail GROUP BY dt",
+        )
+        assert result["metric_code_suggestion"] == "sales_sales_amount_day"
+        assert result["defaults"]["dw_layer"] == "DWD"
+        assert result["defaults"]["type"] == "atomic"
+        # 新字段
+        assert "fields" in result
+        assert result["definition_mode"] == "sql"
+        assert result["definition_json"]["source_tables"] == ["dwd.sales_detail"]
+
+    def test_domain_default_overrides(self) -> None:
+        result = auto_fill(
+            domain_code="finance",
+            sql="SELECT SUM(amount) AS a FROM dwd.t",
+            domain_defaults={"unit": "CNY", "aggregation": "SUM", "metric_tier": "T1"},
+        )
+        f = result["fields"]
+        # 域默认值覆盖并标记来源
+        assert f["unit"]["value"] == "CNY"
+        assert f["unit"]["source"] == "domain_default"
+        assert f["metric_tier"]["value"] == "T1"
+        # 仍保留 SQL 推断的聚合（与域默认一致）
+        assert f["aggregation"]["value"] == "SUM"

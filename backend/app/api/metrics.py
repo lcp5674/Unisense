@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -15,7 +16,6 @@ from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
-from app.services.semantic.auto_fill import auto_fill
 from app.services.semantic.schemas import (
     MetricApproveRequest,
     MetricBatchRegisterRequest,
@@ -823,14 +823,21 @@ async def auto_suggest_metric(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
-    """输入域+源表+度量列→返回编码建议+字段默认值。
+    """输入域 +（SQL 或 源表+度量列+周期）→ 返回 13 字段推断 + 口径定义/模式。
 
+    推断优先级：域默认值 > SQL 解析 > 列元数据 > 规则 > AI/兜底。
+    枚举字段全部确定性规则产出（合法字典 code）；仅名称可选 LLM（不可用自动降级）。
     对齐 spec FR-010/FR-011, plan.md auto-suggest API。
     """
+    from app.models.data_source import DBCatalog
+    from app.services.semantic.auto_fill import auto_fill
+    from app.services.semantic.sql_infer import parse_sql_profile
+
     domain_code = request_body.get("domain_code", "")
     source_table = request_body.get("source_table")
     measure_column = request_body.get("measure_column")
     period = request_body.get("period")
+    sql = request_body.get("sql")
 
     # 获取域默认值预设
     domain_defaults: dict[str, Any] = {}
@@ -841,11 +848,95 @@ async def auto_suggest_metric(
         except Exception:
             pass  # 域不存在时默认值为空
 
+    # SQL 解析（best-effort；失败不影响后续规则推断）
+    parsed = parse_sql_profile(sql) if sql else None
+    effective_table = source_table
+    if (not effective_table) and parsed and parsed.source_tables:
+        effective_table = parsed.source_tables[0]
+    effective_measure = measure_column
+    if (not effective_measure) and parsed and parsed.measures:
+        effective_measure = parsed.measures[0]["column"]
+
+    # 列元数据富集（best-effort）：从采集目录取列类型/注释/表刷新频率
+    measure_meta: dict[str, Any] = {}
+    table_meta: dict[str, Any] = {}
+    if effective_table and effective_measure:
+        try:
+            norm_table = effective_table.split(".")[-1]
+            stmt = (
+                select(DBCatalog)
+                .where(DBCatalog.entity_name.like(f"%{norm_table}"))
+                .where(DBCatalog.deleted_at.is_(None))
+                .limit(5)
+            )
+            rows = (await db.execute(stmt)).scalars().all()
+            for row in rows:
+                schema = row.schema_json or {}
+                columns = schema.get("columns") if isinstance(schema, dict) else schema
+                if isinstance(columns, list):
+                    for col in columns:
+                        if isinstance(col, dict) and col.get("name") == effective_measure:
+                            measure_meta = {
+                                "type": col.get("type", ""),
+                                "comment": col.get("comment", ""),
+                                "name": effective_measure,
+                            }
+                            break
+                # 表级元数据：库名/注释推断刷新频率
+                if row.schema_json and isinstance(row.schema_json, dict):
+                    table_meta = {
+                        "freshness": row.schema_json.get("freshness"),
+                        "comment": row.schema_json.get("comment", ""),
+                    }
+                if measure_meta:
+                    break
+        except Exception:
+            pass  # 富集失败不阻断推断
+
+    # 可选 LLM 命名（best-effort，不可用降级到规则）
+    llm_name: str | None = None
+    try:
+        from app.services.llm.client import build_llm_client
+
+        llm_client = build_llm_client()
+        if getattr(llm_client, "enabled", False) and effective_table:
+            period_cn = {
+                "day": "日", "week": "周", "month": "月",
+                "quarter": "季", "year": "年", "hour": "小时",
+            }.get(
+                (period or "day").lower(), "日"
+            )
+            prompt = (
+                f"为指标生成中文业务名称。源表={effective_table}，度量列={effective_measure}，"
+                f"统计周期={period_cn}，聚合={measure_meta.get('comment', '') or '见 SQL'}。"
+                f"只返回名称本身（如：日订单金额），不要解释、不要引号、不要 JSON。"
+            )
+            resp = await llm_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=32,
+            )
+            raw = (resp.get("content") or "").strip().strip("\"'").strip("`").strip()
+            if raw:
+                llm_name = raw
+    except Exception:
+        pass  # LLM 不可用 → 规则兜底
+
     result = auto_fill(
         domain_code=domain_code,
-        source_table=source_table,
-        measure_column=measure_column,
+        source_table=effective_table,
+        measure_column=effective_measure,
         period=period,
         domain_defaults=domain_defaults,
+        sql=sql,
+        measure_meta=measure_meta or None,
+        table_meta=table_meta or None,
     )
+    # 注入 LLM 名称（走 name 字段的 AI 来源）
+    if llm_name and result["fields"].get("name", {}).get("source") != "column_meta":
+        result["fields"]["name"] = {
+            "value": llm_name,
+            "source": "llm",
+            "confidence": 0.7,
+            "reason": "AI 依据表结构/SQL 生成的业务命名",
+        }
     return ok(data=result, trace_id=trace_id)
