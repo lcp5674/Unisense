@@ -130,3 +130,29 @@ class LlmConfigTestResult(BaseModel):
     model: str = ""
     error: str = ""
     detail: dict[str, Any] | None = None
+
+
+class LlmModelsRequest(BaseModel):
+    """一键获取模型列表请求（二选一）：
+
+    - instance_id: 使用已保存实例（用其落库密钥）；
+    - 或直接给 base_url/api_key/timeout（api_key 留空回落已保存/环境密钥）。
+    """
+
+    instance_id: int | None = Field(None, description="已保存实例 ID")
+    base_url: str = Field("", max_length=256, description="OpenAI 兼容接口基础 URL")
+    api_key: str = Field("", description="API Key（留空回落已保存/环境密钥）")
+    timeout: int = Field(30, ge=1, le=300, description="请求超时秒数")
+
+
+class LlmModelsResult(BaseModel):
+    """一键获取模型列表结果。
+
+    supported=False 表示网关不支持 ``GET /models`` 端点（或请求失败），
+    调用方应回退为手动输入模型名；models 为空列表时同理。
+    """
+
+    models: list[str] = Field(default_factory=list, description="可用模型名列表")
+    supported: bool = Field(False, description="网关是否支持 /models 端点")
+    error: str = Field("", description="失败原因（supported=False 时）")
+    latency_ms: int = Field(0, description="请求耗时（毫秒）")

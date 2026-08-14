@@ -265,6 +265,9 @@ class TestTestConnection:
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"model": "m1"}
         mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_client.get.return_value = mock_models_resp
         mock_client.post.return_value = mock_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -282,6 +285,9 @@ class TestTestConnection:
         mock_resp.status_code = 401
         mock_resp.text = "unauthorized"
         mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_client.get.return_value = mock_models_resp
         mock_client.post.return_value = mock_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -296,6 +302,9 @@ class TestTestConnection:
             base_url="https://api.example.com", api_key="sk-x", model="m1", timeout=30
         )
         mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_client.get.return_value = mock_models_resp
         mock_client.post.side_effect = httpx.ConnectError("connection refused")
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -314,6 +323,9 @@ class TestTestConnection:
             timeout=30,
         )
         mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_client.get.return_value = mock_models_resp
         mock_client.post.side_effect = httpx.ConnectError("connection refused")
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -329,6 +341,9 @@ class TestTestConnection:
             base_url="https://api.deepseek.com", api_key="sk-x", model="m1", timeout=30
         )
         mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_client.get.return_value = mock_models_resp
         mock_client.post.side_effect = httpx.ConnectError("connection refused")
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -355,6 +370,9 @@ class TestTestConnection:
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"model": "deepseek-chat"}
         mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_client.get.return_value = mock_models_resp
         mock_client.post.return_value = mock_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -375,6 +393,9 @@ class TestTestConnection:
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"model": "gpt-4o-mini"}
         mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_client.get.return_value = mock_models_resp
         mock_client.post.return_value = mock_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -392,6 +413,9 @@ class TestTestConnection:
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"model": "deepseek-chat"}
         mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_client.get.return_value = mock_models_resp
         mock_client.post.return_value = mock_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -405,3 +429,168 @@ class TestTestConnection:
         result = await svc.test_instance(99)
         assert result.ok is False
         assert "不存在" in result.error
+
+
+class TestFetchModels:
+    """一键获取模型列表（fetch_models / fetch_models_for_instance）。"""
+
+    async def _svc(self) -> tuple[LlmConfigService, MagicMock]:
+        s = _session([])
+        return LlmConfigService(s), s
+
+    async def test_fetch_models_ok(self) -> None:
+        svc, _ = await self._svc()
+        models_resp = MagicMock()
+        models_resp.status_code = 200
+        models_resp.json.return_value = {
+            "data": [{"id": "m1"}, {"id": "m2"}, {"id": ""}, {"name": "no-id"}]
+        }
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models("https://api.deepseek.com", "sk-x", 30)
+        assert result.supported is True
+        assert result.models == ["m1", "m2"]  # 空/缺 id 的条目被过滤
+        assert result.error == ""
+
+    async def test_fetch_models_unsupported_returns_false(self) -> None:
+        """网关不支持 /models（404）→ supported=False + 错误信息，不判为连通失败。"""
+        svc, _ = await self._svc()
+        models_resp = MagicMock()
+        models_resp.status_code = 404
+        models_resp.text = "not found"
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models("https://api.example.com", "sk-x", 30)
+        assert result.supported is False
+        assert "404" in result.error
+
+    async def test_fetch_models_network_error_with_loopback_hint(self) -> None:
+        svc, _ = await self._svc()
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = httpx.ConnectError("conn refused")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models("http://127.0.0.1:19090", "sk-x", 30)
+        assert result.supported is False
+        assert "conn refused" in result.error
+        assert "host.docker.internal" in result.error  # 回环自诊断提示
+
+    async def test_fetch_models_empty_api_key_falls_back_to_saved(self) -> None:
+        svc, s = await self._svc()
+        s.execute.return_value.scalars.return_value.all.return_value = [_row()]
+        models_resp = MagicMock()
+        models_resp.status_code = 200
+        models_resp.json.return_value = {"data": [{"id": "deepseek-chat"}]}
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models("https://api.deepseek.com", "", 30)
+        assert result.supported is True
+        assert result.models == ["deepseek-chat"]
+
+    async def test_fetch_models_missing_base_url(self) -> None:
+        svc, _ = await self._svc()
+        result = await svc.fetch_models("", "sk-x", 30)
+        assert result.supported is False
+        assert "base_url" in result.error
+
+    async def test_fetch_models_for_instance(self) -> None:
+        svc, s = await self._svc()
+        s.execute.return_value.scalar_one_or_none.return_value = _row()
+        models_resp = MagicMock()
+        models_resp.status_code = 200
+        models_resp.json.return_value = {"data": [{"id": "deepseek-chat"}]}
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models_for_instance(1)
+        assert result.supported is True
+        assert result.models == ["deepseek-chat"]
+
+    async def test_fetch_models_for_instance_missing(self) -> None:
+        svc, s = await self._svc()
+        s.execute.return_value.scalar_one_or_none.return_value = None
+        result = await svc.fetch_models_for_instance(99)
+        assert result.supported is False
+        assert "不存在" in result.error
+
+
+class TestQuickProbe:
+    """两步探测的快速失败路径（方案 A 核心：连通/鉴权问题毫秒级返回，不触发真实推理）。"""
+
+    async def _svc(self) -> tuple[LlmConfigService, MagicMock]:
+        s = _session([])
+        return LlmConfigService(s), s
+
+    async def test_auth_failure_returns_immediately_without_post(self) -> None:
+        """GET /models 返回 401 → 立即失败，不应再触发真实推理（POST 不应被调用）。"""
+        svc, _ = await self._svc()
+        payload = LlmConfigPayload(
+            base_url="https://api.example.com", api_key="sk-bad", model="m1", timeout=30
+        )
+        models_resp = MagicMock()
+        models_resp.status_code = 401
+        models_resp.text = "invalid key"
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.post = AsyncMock()  # 快速失败路径不应调用真实推理
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        assert result.ok is False
+        assert "鉴权失败" in result.error
+        assert "401" in result.error
+        mock_client.post.assert_not_awaited()
+
+    async def test_connect_error_returns_fast(self) -> None:
+        """GET /models 抛 ConnectError → 快速失败，POST 不被调用（无需等真实推理超时）。"""
+        svc, _ = await self._svc()
+        payload = LlmConfigPayload(
+            base_url="http://127.0.0.1:19090", api_key="sk-x", model="m1", timeout=30
+        )
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = httpx.ConnectError("conn refused")
+        mock_client.post = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        assert result.ok is False
+        assert "conn refused" in result.error
+        assert "host.docker.internal" in result.error
+        mock_client.post.assert_not_awaited()
+
+    async def test_unsupported_models_falls_back_to_real_inference(self) -> None:
+        """GET /models 返回 404（网关不支持）→ 不判失败，回退真实推理（POST 被调用）。"""
+        svc, _ = await self._svc()
+        payload = LlmConfigPayload(
+            base_url="https://api.example.com", api_key="sk-x", model="m1", timeout=30
+        )
+        models_resp = MagicMock()
+        models_resp.status_code = 404
+        models_resp.text = "not found"
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        post_resp = MagicMock()
+        post_resp.status_code = 200
+        post_resp.json.return_value = {"model": "m1"}
+        mock_client.post.return_value = post_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        assert result.ok is True
+        assert result.model == "m1"
+        mock_client.post.assert_awaited()

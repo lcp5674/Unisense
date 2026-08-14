@@ -85,6 +85,33 @@ def chat_completions_url(base_url: str) -> str:
     return f"{url}/v1/chat/completions"
 
 
+def models_url(base_url: str) -> str:
+    """规范化 OpenAI 协议模型列表端点（``GET /models``）URL。
+
+    与 ``chat_completions_url`` 同构，保证与用户配置的 base_url 形态一致：
+    - 裸域名/根路径：``https://api.deepseek.com`` → 追加 ``/v1/models``
+    - 已含版本前缀：``https://api.openai.com/v1`` → 追加 ``/models``
+    - 已含完整 chat 端点：``https://xxx/v1/chat/completions`` → 替换为 ``/v1/models``
+    - 已含完整 models 端点：``https://xxx/v1/models`` → 原样返回
+
+    Args:
+        base_url: 用户配置的 base_url（可能含尾部斜杠或完整端点）。
+
+    Returns:
+        可直接请求的 /models 完整 URL；base_url 为空时返回空串。
+    """
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return url
+    if url.endswith("/models"):
+        return url
+    if url.endswith("/chat/completions"):
+        return f"{url[: -len('/chat/completions')]}/models"
+    if url.endswith("/v1"):
+        return f"{url}/models"
+    return f"{url}/v1/models"
+
+
 # ---- P2: 结构化输出 Schema ----
 
 

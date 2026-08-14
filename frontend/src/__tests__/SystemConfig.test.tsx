@@ -30,6 +30,7 @@ vi.mock("../api", () => {
     updateLlmConfig: vi.fn(),
     deleteLlmConfig: vi.fn(),
     testLlmConfig: vi.fn(),
+    fetchLlmModels: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -37,6 +38,7 @@ vi.mock("../api", () => {
 import {
   createLlmConfig,
   deleteLlmConfig,
+  fetchLlmModels,
   getLlmConfigs,
   getLlmConfigSecret,
   testLlmConfig,
@@ -49,6 +51,7 @@ const mockCreate = vi.mocked(createLlmConfig);
 const mockUpdate = vi.mocked(updateLlmConfig);
 const mockDelete = vi.mocked(deleteLlmConfig);
 const mockTest = vi.mocked(testLlmConfig);
+const mockFetchModels = vi.mocked(fetchLlmModels);
 
 function listData(overrides: {
   canEdit?: boolean;
@@ -87,6 +90,7 @@ describe("SystemConfig LLM 路由配置", () => {
     mockUpdate.mockReset();
     mockDelete.mockReset();
     mockTest.mockReset();
+    mockFetchModels.mockReset();
     mockGet.mockResolvedValue(listData() as never);
   });
 
@@ -147,7 +151,7 @@ describe("SystemConfig LLM 路由配置", () => {
     fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
       target: { value: "https://dashscope.aliyuncs.com/compatible-mode" },
     });
-    fireEvent.change(screen.getByPlaceholderText("deepseek-chat"), {
+    fireEvent.change(screen.getByRole("combobox", { name: "模型名称" }), {
       target: { value: "qwen-turbo" },
     });
     fireEvent.change(screen.getByPlaceholderText("sk-..."), {
@@ -163,6 +167,51 @@ describe("SystemConfig LLM 路由配置", () => {
           api_key: "sk-test",
         }),
       );
+    });
+  });
+
+  it("新增实例：点获取模型 → 调 fetchLlmModels → 提示可用模型数", async () => {
+    mockFetchModels.mockResolvedValue({
+      models: ["hy3", "hy3-pro"],
+      supported: true,
+      error: "",
+      latency_ms: 36,
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "http://127.0.0.1:19091" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByText("获取模型"));
+    await waitFor(() => {
+      expect(mockFetchModels).toHaveBeenCalledWith(
+        expect.objectContaining({ base_url: "http://127.0.0.1:19091" }),
+      );
+      expect(screen.getByText(/获取到 2 个可用模型/)).toBeTruthy();
+    });
+  });
+
+  it("获取模型：网关不支持 /models → 提示错误并保留手动输入", async () => {
+    mockFetchModels.mockResolvedValue({
+      models: [],
+      supported: false,
+      error: "HTTP 404: not found",
+      latency_ms: 8,
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "http://127.0.0.1:19091" },
+    });
+    fireEvent.click(screen.getByText("获取模型"));
+    await waitFor(() => {
+      expect(mockFetchModels).toHaveBeenCalledWith(
+        expect.objectContaining({ base_url: "http://127.0.0.1:19091" }),
+      );
+      expect(screen.getByText(/HTTP 404/)).toBeTruthy();
     });
   });
 

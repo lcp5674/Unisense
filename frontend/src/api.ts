@@ -71,6 +71,7 @@ import {
   LlmConfigPayload,
   LlmConfigSecret,
   LlmConfigTestResult,
+  LlmModelsResult,
   Notification,
   NotifyEventLog,
   ObsMetricsNotifications,
@@ -1390,6 +1391,18 @@ export async function testLlmConfig(body?: {
   timeout?: number;
 }): Promise<LlmConfigTestResult> {
   return request<LlmConfigTestResult>(`${API_BASE}/ai/config/test`, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
+}
+
+export async function fetchLlmModels(body?: {
+  instance_id?: number;
+  base_url?: string;
+  api_key?: string;
+  timeout?: number;
+}): Promise<LlmModelsResult> {
+  return request<LlmModelsResult>(`${API_BASE}/ai/config/models`, {
     method: "POST",
     body: JSON.stringify(body ?? {}),
   });

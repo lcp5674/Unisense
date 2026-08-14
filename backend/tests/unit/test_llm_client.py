@@ -16,6 +16,7 @@ from app.services.llm.client import (
     LlmError,
     build_llm_client,
     chat_completions_url,
+    models_url,
 )
 
 
@@ -70,6 +71,44 @@ class TestChatCompletionsUrl:
     def test_empty_base_url(self) -> None:
         assert chat_completions_url("") == ""
         assert chat_completions_url("   ") == ""
+
+
+class TestModelsUrl:
+    """models_url 端点规范化（一键获取模型/快速探测用，与 chat 端点形态对齐）。"""
+
+    def test_bare_domain_appends_v1_path(self) -> None:
+        assert (
+            models_url("https://api.deepseek.com")
+            == "https://api.deepseek.com/v1/models"
+        )
+
+    def test_base_url_with_v1_suffix(self) -> None:
+        assert (
+            models_url("https://api.openai.com/v1") == "https://api.openai.com/v1/models"
+        )
+
+    def test_chat_endpoint_replaced_with_models(self) -> None:
+        # 用户填了完整 chat 端点 → 替换为同前缀 /models
+        assert (
+            models_url("https://api.example.com/v1/chat/completions")
+            == "https://api.example.com/v1/models"
+        )
+
+    def test_models_endpoint_passthrough(self) -> None:
+        assert (
+            models_url("https://api.example.com/v1/models")
+            == "https://api.example.com/v1/models"
+        )
+
+    def test_trailing_slash_stripped(self) -> None:
+        assert (
+            models_url("https://api.deepseek.com/")
+            == "https://api.deepseek.com/v1/models"
+        )
+
+    def test_empty_base_url(self) -> None:
+        assert models_url("") == ""
+        assert models_url("   ") == ""
 
 
 class TestLlmClient:

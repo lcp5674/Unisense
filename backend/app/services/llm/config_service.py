@@ -26,8 +26,9 @@ from app.services.llm.client import (
     LlmClient,
     LlmRouterClient,
     chat_completions_url,
+    models_url,
 )
-from app.services.llm.schemas import LlmConfigPayload, LlmConfigTestResult
+from app.services.llm.schemas import LlmConfigPayload, LlmConfigTestResult, LlmModelsResult
 
 logger = get_logger("unisense.llm.config")
 
@@ -63,6 +64,20 @@ def _looks_like_loopback(base_url: str) -> bool:
     """判断 base_url 是否指向回环地址（容器内无法经其访问宿主机服务）。"""
     lowered = (base_url or "").lower()
     return any(token in lowered for token in _LOOPBACK_TOKENS)
+
+
+def _loopback_hint(base_url: str) -> str:
+    """回环地址在容器场景的连通失败自诊断提示（附加到错误信息尾部）。
+
+    后端运行在 Docker 容器中时，容器内 ``127.0.0.1/localhost`` 指向容器自身，
+    无法访问宿主机上监听的 LLM 网关；应改用 ``host.docker.internal``。
+    """
+    if not _looks_like_loopback(base_url):
+        return ""
+    return (
+        "；提示：后端运行在 Docker 容器中，127.0.0.1/localhost 指向容器自身，"
+        "访问宿主机服务请改用 host.docker.internal"
+    )
 
 
 def _infer_provider(base_url: str) -> str:
@@ -341,6 +356,13 @@ class LlmConfigService:
                 error="未配置 base_url 或 api_key",
                 model=model,
             )
+        # 方案 A 两步探测：先轻量 GET /models（毫秒级）验证连通 + 鉴权。
+        # - 连通失败 / 鉴权失败 / 网关 5xx → 立即快速失败，无需等待真实推理超时；
+        # - 通过（200）或网关不支持 /models（404/405/501）→ 进入第二步真实推理，
+        #   验证模型可用并返回完整推理耗时（本地模型 prefill 慢属模型真实表现）。
+        quick = await self._quick_probe(base_url, api_key, timeout)
+        if quick is not None:
+            return quick.model_copy(update={"model": model or quick.model})
         start = time.monotonic()
         try:
             req_url = chat_completions_url(base_url)
@@ -376,17 +398,135 @@ class LlmConfigService:
         except httpx.HTTPError as exc:
             latency_ms = int((time.monotonic() - start) * 1000)
             logger.warning("llm_test_connection_failed: %s", exc)
-            # 容器部署自诊断：回环地址在容器内指向容器自身，
-            # 访问宿主机 LLM 网关须用 host.docker.internal
-            hint = ""
-            if isinstance(exc, httpx.ConnectError) and _looks_like_loopback(base_url):
-                hint = (
-                    "；提示：后端运行在 Docker 容器中，127.0.0.1/localhost 指向容器自身，"
-                    "访问宿主机服务请改用 host.docker.internal"
-                )
             return LlmConfigTestResult(
                 ok=False,
                 latency_ms=latency_ms,
                 model=model,
-                error=f"{type(exc).__name__}: {exc}{hint}",
+                error=f"{type(exc).__name__}: {exc}{_loopback_hint(base_url)}",
             )
+
+    async def _quick_probe(
+        self, base_url: str, api_key: str, timeout: float
+    ) -> LlmConfigTestResult | None:
+        """轻量快速探测：GET /models 验证连通 + 鉴权（毫秒级失败反馈）。
+
+        Returns:
+            - None: 快速探测通过（HTTP 200），或网关不支持 /models 端点
+              （404/405/501），交由真实推理继续验证；
+            - LlmConfigTestResult: 快速失败（连通失败 / 鉴权失败 / 网关 5xx），
+              无需等待真实推理即可给出明确失败原因。
+        """
+        start = time.monotonic()
+        try:
+            req_url = models_url(base_url)
+            async with httpx.AsyncClient(
+                # 快速探测不等完整超时：上限 10 秒即可覆盖连通/鉴权判定
+                timeout=httpx.Timeout(min(timeout, 10.0)),
+                headers={"Authorization": f"Bearer {api_key}"},
+            ) as client:
+                resp = await client.get(req_url)
+        except httpx.HTTPError as exc:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            logger.warning("llm_models_probe_failed: %s", exc)
+            return LlmConfigTestResult(
+                ok=False,
+                latency_ms=latency_ms,
+                model="",
+                error=f"{type(exc).__name__}: {exc}{_loopback_hint(base_url)}",
+            )
+        latency_ms = int((time.monotonic() - start) * 1000)
+        if resp.status_code == 200:
+            logger.info("llm_models_probe_ok: url=%s latency=%dms", req_url, latency_ms)
+            return None
+        if resp.status_code in (401, 403):
+            return LlmConfigTestResult(
+                ok=False,
+                latency_ms=latency_ms,
+                model="",
+                error=f"鉴权失败（HTTP {resp.status_code}，请求 {req_url}）: {resp.text[:120]}",
+                detail={"status_code": resp.status_code, "request_url": req_url},
+            )
+        if resp.status_code >= 500:
+            return LlmConfigTestResult(
+                ok=False,
+                latency_ms=latency_ms,
+                model="",
+                error=f"LLM 网关错误（HTTP {resp.status_code}，请求 {req_url}）: {resp.text[:120]}",
+                detail={"status_code": resp.status_code, "request_url": req_url},
+            )
+        # 404/405/501 等：网关仅实现 chat/completions、不暴露 /models，
+        # 不视为失败，回退真实推理验证（向后兼容）。
+        logger.info(
+            "llm_models_probe_unsupported: url=%s status=%d", req_url, resp.status_code
+        )
+        return None
+
+    # ---- 一键获取模型 ----
+
+    async def fetch_models_for_instance(self, instance_id: int) -> LlmModelsResult:
+        """获取已保存实例的可用模型列表（用其落库密钥）。实例不存在返回不支持。"""
+        row = await self.get_row(instance_id)
+        if row is None:
+            return LlmModelsResult(supported=False, error="实例不存在")
+        try:
+            decrypted = SecretManager.decrypt(row.api_key_enc)
+            api_key = str(
+                decrypted.get("api_key") if isinstance(decrypted, dict) else decrypted or ""
+            )
+        except Exception as exc:  # noqa: BLE001
+            return LlmModelsResult(supported=False, error=f"密钥解密失败: {exc}")
+        return await self.fetch_models(
+            base_url=row.base_url,
+            api_key=api_key,
+            timeout=float(row.timeout or 30),
+        )
+
+    async def fetch_models(
+        self, base_url: str, api_key: str, timeout: float
+    ) -> LlmModelsResult:
+        """获取提供商可用模型列表（GET /models）。
+
+        api_key 为空时回落已保存/环境密钥（前端编辑留空=保持原密钥）。
+        网关不支持 /models 端点（404/405/501）或请求失败时返回
+        ``supported=False`` + error，由调用方提示用户手动输入模型名。
+        """
+        base_url = base_url.strip()
+        if not base_url:
+            return LlmModelsResult(supported=False, error="未配置 base_url")
+        if not api_key:
+            effective = await self.get_effective()
+            api_key = effective["api_key"]
+        if not api_key:
+            return LlmModelsResult(supported=False, error="未配置 API Key")
+        start = time.monotonic()
+        try:
+            req_url = models_url(base_url)
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(min(timeout, 10.0)),
+                headers={"Authorization": f"Bearer {api_key}"},
+            ) as client:
+                resp = await client.get(req_url)
+        except httpx.HTTPError as exc:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            return LlmModelsResult(
+                supported=False,
+                error=f"{type(exc).__name__}: {exc}{_loopback_hint(base_url)}",
+                latency_ms=latency_ms,
+            )
+        latency_ms = int((time.monotonic() - start) * 1000)
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                models = [
+                    str(m.get("id"))
+                    for m in data.get("data", [])
+                    if isinstance(m, dict) and m.get("id")
+                ]
+            except Exception:  # noqa: BLE001 - 响应结构异常按不支持处理
+                models = []
+            return LlmModelsResult(models=models, supported=True, latency_ms=latency_ms)
+        return LlmModelsResult(
+            supported=False,
+            error=f"HTTP {resp.status_code}（请求 {req_url}）: {resp.text[:120]}",
+            latency_ms=latency_ms,
+        )

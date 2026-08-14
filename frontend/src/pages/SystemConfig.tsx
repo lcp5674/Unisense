@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
+  AutoComplete,
   Button,
   Card,
   Form,
@@ -18,6 +19,7 @@ import type { ColumnsType } from "antd/es/table";
 import {
   ApiOutlined,
   CheckCircleOutlined,
+  CloudDownloadOutlined,
   CloseCircleOutlined,
   DeleteOutlined,
   EditOutlined,
@@ -28,6 +30,7 @@ import {
 import {
   createLlmConfig,
   deleteLlmConfig,
+  fetchLlmModels,
   getLlmConfigs,
   getLlmConfigSecret,
   testLlmConfig,
@@ -104,6 +107,8 @@ export function SystemConfig() {
   const [deleting, setDeleting] = useState(false);
   const [revealingKey, setRevealingKey] = useState(false);
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [modelOptions, setModelOptions] = useState<{ value: string }[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
   const hideTimerRef = useRef<number | null>(null);
 
   function clearReveal() {
@@ -143,6 +148,7 @@ export function SystemConfig() {
     form.resetFields();
     form.setFieldsValue({ provider: "custom", timeout: 30, enabled: true, priority: 0 });
     clearReveal();
+    setModelOptions([]);
     setModalOpen(true);
   }
 
@@ -160,7 +166,38 @@ export function SystemConfig() {
       // api_key 不回填明文：留空表示保持原密钥，按需经「显示密钥」按钮解密回显
     });
     clearReveal();
+    setModelOptions([]);
     setModalOpen(true);
+  }
+
+  async function handleFetchModels() {
+    try {
+      const values = await form.validateFields(["base_url"]);
+      const apiKey = (form.getFieldValue("api_key") as string) || "";
+      setFetchingModels(true);
+      setModelOptions([]);
+      const res = await fetchLlmModels({
+        instance_id: editing?.id ?? undefined,
+        base_url: values.base_url,
+        api_key: apiKey || undefined,
+        timeout: (form.getFieldValue("timeout") as number) ?? 30,
+      });
+      if (res.supported && res.models.length > 0) {
+        setModelOptions(res.models.map((m) => ({ value: m })));
+        message.success(`获取到 ${res.models.length} 个可用模型（${res.latency_ms}ms）`);
+      } else {
+        message.warning(
+          res.error || "该网关不支持 /models 接口，请手动输入模型名称",
+        );
+      }
+    } catch (err) {
+      if (err instanceof Error && "errorFields" in err) return; // 表单校验错误，已高亮
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "获取模型失败",
+      );
+    } finally {
+      setFetchingModels(false);
+    }
   }
 
   async function handleRevealKey() {
@@ -451,8 +488,33 @@ export function SystemConfig() {
             rules={[{ required: true, message: "请输入模型名称" }]}
             style={{ marginBottom: 12 }}
           >
-            <Input placeholder="deepseek-chat" className="mono" />
+            <Space.Compact style={{ width: "100%" }}>
+              <AutoComplete
+                aria-label="模型名称"
+                options={modelOptions}
+                placeholder="deepseek-chat"
+                className="mono"
+                style={{ width: "100%" }}
+                filterOption={(inputValue, option) =>
+                  String(option?.value ?? "")
+                    .toLowerCase()
+                    .includes(inputValue.toLowerCase())
+                }
+              />
+              <Button
+                icon={<CloudDownloadOutlined />}
+                loading={fetchingModels}
+                onClick={handleFetchModels}
+              >
+                获取模型
+              </Button>
+            </Space.Compact>
           </Form.Item>
+          <div style={{ marginTop: -8, marginBottom: 12 }}>
+            <span className="muted" style={{ fontSize: 12 }}>
+              点击「获取模型」从当前接口拉取可用模型列表；网关不支持 /models 时请手动输入。
+            </span>
+          </div>
           <Form.Item
             name="api_key"
             label={editing ? "API Key（留空保持原密钥）" : "API Key"}

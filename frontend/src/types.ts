@@ -903,6 +903,14 @@ export interface LlmConfigSecret {
   api_key: string;
 }
 
+// 一键获取模型列表结果（backend /api/v1/ai/config/models）
+export interface LlmModelsResult {
+  models: string[];
+  supported: boolean;
+  error: string;
+  latency_ms: number;
+}
+
 // ============================================================================
 // 审计日志（backend /api/v1/audit）
 // ============================================================================

@@ -32,6 +32,8 @@ from app.services.llm.schemas import (
     LlmConfigSecretResponse,
     LlmConfigTestRequest,
     LlmConfigTestResult,
+    LlmModelsRequest,
+    LlmModelsResult,
 )
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -233,6 +235,40 @@ async def delete_llm_config(
     )
     await db.commit()
     return ok(data={"id": instance_id, "deleted": True}, trace_id=trace_id)
+
+
+@router.post("/config/models", dependencies=_CONFIG_ADMIN_DEPS)
+async def fetch_llm_models(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    payload: LlmModelsRequest | None = None,
+) -> Any:
+    """一键获取提供商可用模型列表（配置表单「获取模型」按钮用）。
+
+    支持两种入参（与 /config/test 一致）：
+    - instance_id：获取已保存实例（用其落库密钥）；
+    - base_url/model/api_key/timeout：临时获取（不落库；api_key 留空回落已保存/环境密钥）。
+
+    网关不支持 ``GET /models`` 端点时返回 ``supported=False`` + error，
+    前端提示用户手动输入模型名。
+    """
+    svc = LlmConfigService(db)
+    if payload is not None and payload.instance_id is not None:
+        result: LlmModelsResult = await svc.fetch_models_for_instance(payload.instance_id)
+    elif payload is not None:
+        result = await svc.fetch_models(
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+            timeout=float(payload.timeout or 30),
+        )
+    else:
+        effective = await svc.get_effective()
+        result = await svc.fetch_models(
+            base_url=effective["base_url"],
+            api_key=effective["api_key"],
+            timeout=float(effective["timeout"] or 30),
+        )
+    return ok(data=result.model_dump(), trace_id=trace_id)
 
 
 @router.post("/config/test", dependencies=_CONFIG_ADMIN_DEPS)
