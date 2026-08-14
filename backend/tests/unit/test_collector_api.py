@@ -139,14 +139,17 @@ async def test_list_jobs_must_precede_source_id_route(
     collector_client: httpx.AsyncClient,
 ) -> None:
     """GET /jobs 必须命中列表端点而非被 /{source_id} 吞掉（静态路由先注册）。"""
-    with patch(
-        "app.api.collector.CollectorService.list_jobs",
-        new_callable=AsyncMock,
-        return_value=[],
-    ) as mock_list, patch(
-        "app.api.collector.CollectorService.get_source",
-        new_callable=AsyncMock,
-    ) as mock_get:
+    with (
+        patch(
+            "app.api.collector.CollectorService.list_jobs",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_list,
+        patch(
+            "app.api.collector.CollectorService.get_source",
+            new_callable=AsyncMock,
+        ) as mock_get,
+    ):
         resp = await collector_client.get("/api/v1/data-sources/jobs")
     assert resp.status_code == 200
     mock_list.assert_awaited_once()

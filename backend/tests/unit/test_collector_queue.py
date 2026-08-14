@@ -203,9 +203,7 @@ class TestRedisJobStoreBytesDecode:
     @pytest.mark.asyncio
     async def test_get_decodes_bytes_values(self):
         """get() 从 bytes 键值解码出 str 状态与 dict 详情（此前返回 None/空）。"""
-        store, _redis = self._bytes_store(
-            {b"status": b"COMPLETED", b"detail": b'{"scanned": 54}'}
-        )
+        store, _redis = self._bytes_store({b"status": b"COMPLETED", b"detail": b'{"scanned": 54}'})
         job = await store.get("job-x")
         assert job is not None
         assert job["status"] == "COMPLETED"

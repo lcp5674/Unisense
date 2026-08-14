@@ -138,8 +138,7 @@ def db_env():
             await conn.execute(text(f"DROP DATABASE IF EXISTS `{db_name}`"))
             await conn.execute(
                 text(
-                    f"CREATE DATABASE `{db_name}` "
-                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+                    f"CREATE DATABASE `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
                 )
             )
 

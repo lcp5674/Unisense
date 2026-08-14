@@ -325,12 +325,13 @@ ZH_EN_MAP: dict[str, str] = {
 }
 
 #: 未知单字的拼音兜底（延迟导入，避免在无 pypinyin 环境硬依赖）
-import contextlib  # noqa: E402
+_lazy_pinyin: Any = None
+try:
+    from pypinyin import lazy_pinyin  # noqa: F811
 
-_lazy_pinyin: Any | None = None
-
-with contextlib.suppress(ImportError):
-    from pypinyin import lazy_pinyin as _lazy_pinyin
+    _lazy_pinyin = lazy_pinyin
+except ImportError:
+    pass
 
 
 def _pinyin_char(ch: str) -> str:
