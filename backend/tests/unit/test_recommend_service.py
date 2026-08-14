@@ -50,6 +50,8 @@ def _edge_repo() -> MagicMock:
             )
         ]
     )
+    repo.dismissed_metrics = AsyncMock(return_value=set())
+    repo.related_by_behavior = AsyncMock(return_value=[])
     return repo
 
 
@@ -122,6 +124,7 @@ def _svc_with_profiles(
     repo = MagicMock()
     repo.related_edges = AsyncMock(return_value=[])
     repo.published_terms = AsyncMock(return_value=[])
+    repo.dismissed_metrics = AsyncMock(return_value=set())
     svc._repo = repo
     svc._session = MagicMock()
     svc._session.execute = AsyncMock(return_value=_dual_result(my_actions, profile_rows))
@@ -140,6 +143,7 @@ def _fallback_repo(edge_side_effect) -> MagicMock:
     repo.published_terms = AsyncMock(return_value=[])
     repo.popular_metrics = AsyncMock(return_value=[])
     repo.recent_published_metrics = AsyncMock(return_value=[])
+    repo.dismissed_metrics = AsyncMock(return_value=set())
     return repo
 
 
@@ -282,3 +286,82 @@ async def test_recommend_metrics_latest_published_fallback() -> None:
     assert items[0]["metric_id"] == "m_new_1"
     assert items[0]["via"] == "latest_published"
     assert items[0]["reason"] == "最新发布指标"
+
+
+async def test_recommend_metrics_cf_carries_reason() -> None:
+    """协同过滤命中项携带可解释 reason（FR-16 可解释推荐）。"""
+    rows = [
+        SimpleNamespace(actor_id="1", target_id="m1"),
+        SimpleNamespace(actor_id="2", target_id="m1"),
+        SimpleNamespace(actor_id="2", target_id="m2"),
+        SimpleNamespace(actor_id="2", target_id="m3"),
+        SimpleNamespace(actor_id="3", target_id="m9"),
+    ]
+    svc, _ = _svc_with_profiles(["m1", "m2"], rows)
+    items = await svc.recommend_metrics(1, 10)
+    assert len(items) == 1
+    assert items[0]["reason"] == "与你行为相似的同事也关注"
+
+
+async def test_recommend_metrics_latest_published_excludes_seeds() -> None:
+    """最新发布兜底同样排除用户已交互指标，避免重复推荐。"""
+    svc = RecommendService(MagicMock())
+    svc._repo = _fallback_repo(lambda node, limit: [])
+    svc._session = MagicMock()
+    svc._session.execute = AsyncMock(return_value=_dual_result(["m_new_1"], []))
+    svc._repo.popular_metrics = AsyncMock(return_value=[])
+    svc._repo.recent_published_metrics = AsyncMock(return_value=["m_new_1", "m_new_2"])
+    items = await svc.recommend_metrics(7, 6)
+    assert [i["metric_id"] for i in items] == ["m_new_2"]
+
+
+async def test_recommend_metrics_popular_excluded_falls_to_latest() -> None:
+    """全局热门候选全被排除时，继续下探到最新发布，面板仍非空。"""
+    svc = RecommendService(MagicMock())
+    svc._repo = _fallback_repo(lambda node, limit: [])
+    svc._session = MagicMock()
+    svc._session.execute = AsyncMock(return_value=_dual_result(["m_hot_1"], []))
+    svc._repo.popular_metrics = AsyncMock(return_value=[("m_hot_1", 12)])
+    svc._repo.recent_published_metrics = AsyncMock(return_value=["m_fresh_1"])
+    items = await svc.recommend_metrics(7, 6)
+    assert items
+    assert items[0]["metric_id"] == "m_fresh_1"
+    assert items[0]["via"] == "latest_published"
+
+
+async def test_related_metrics_behavior_first() -> None:
+    """行为协同优先：有共同行为数据时 related_metrics 不走血缘（people-also-viewed）。"""
+    svc, repo = await _svc()
+    repo.related_by_behavior = AsyncMock(return_value=[("m_behave", 5)])
+    items = await svc.related_metrics("m1", 10)
+    assert len(items) == 1
+    assert items[0]["metric_id"] == "m_behave"
+    assert items[0]["via"] == "behavior"
+    assert items[0]["edge_type"] == "CO_VIEWED"
+    assert items[0]["reason"] == "看过此指标的人还看了"
+    repo.related_edges.assert_not_awaited()  # 行为命中时不查血缘
+
+
+async def test_related_metrics_falls_back_to_lineage() -> None:
+    """无共同行为数据时 related_metrics 回退血缘上下游，保证有内容。"""
+    svc, repo = await _svc()
+    repo.related_by_behavior = AsyncMock(return_value=[])
+    items = await svc.related_metrics("m1", 10)
+    assert len(items) == 1
+    assert items[0]["metric_id"] == "m2"
+    assert items[0]["via"] == "lineage"
+    assert items[0]["reason"] == "血缘相关指标"
+
+
+async def test_recommend_metrics_excludes_dismissed() -> None:
+    """负反馈持久化：被用户「不感兴趣」的指标在所有层级都被排除。"""
+    svc = RecommendService(MagicMock())
+    repo = _fallback_repo(lambda node, limit: [])
+    repo.dismissed_metrics = AsyncMock(return_value={"m_hot_1"})
+    svc._repo = repo
+    svc._session = MagicMock()
+    svc._session.execute = AsyncMock(return_value=_dual_result([], []))
+    repo.popular_metrics = AsyncMock(return_value=[("m_hot_1", 12), ("m_hot_2", 8)])
+    repo.recent_published_metrics = AsyncMock(return_value=["m_fresh_1"])
+    items = await svc.recommend_metrics(7, 6)
+    assert [i["metric_id"] for i in items] == ["m_hot_2"]  # m_hot_1 被排除

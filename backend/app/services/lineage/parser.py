@@ -545,6 +545,11 @@ def node_table(name: str) -> str:
     return f"table:{name}"
 
 
+def node_metric(code: str) -> str:
+    """构造指标节点标识（L3 指标级血缘边两端统一用 ``metric:{code}``）。"""
+    return f"metric:{code}"
+
+
 def node_field(table: str, column: str) -> str:
     """构造字段节点标识。"""
     return f"field:{table}.{column}"

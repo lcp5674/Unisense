@@ -39,11 +39,38 @@ class RecommendService(BaseService):
         self._repo = RecommendRepository(session)
 
     async def related_metrics(self, metric_id: str, limit: int) -> list[dict[str, Any]]:
+        """推荐「与某指标相关」的指标——行为协同优先，血缘兜底。
+
+        FR-16 语义（MetricDetail「看过此指标的人还看了」卡片消费本接口）：
+        1. 行为协同：找到与 ``metric_id`` 有过交互的用户，推荐他们看的其它指标
+           （people-also-viewed，行为驱动）；
+        2. 血缘兜底：无任何共同行为数据时，回退到血缘上下游指标，保证有内容。
+        """
+        behavior = await self._repo.related_by_behavior(metric_id, limit)
+        if behavior:
+            return [
+                {
+                    "metric_id": str(mid),
+                    "via": "behavior",
+                    "edge_type": "CO_VIEWED",
+                    "reason": "看过此指标的人还看了",
+                    "score": float(cnt),
+                }
+                for mid, cnt in behavior
+            ]
         edges = await self._repo.related_edges(metric_id, limit)
         result: list[dict[str, Any]] = []
         for e in edges:
             other = e.target_node if e.source_node == metric_id else e.source_node
-            result.append({"metric_id": other, "edge_type": e.edge_type, "from": e.source_node})
+            result.append(
+                {
+                    "metric_id": other,
+                    "via": "lineage",
+                    "edge_type": e.edge_type,
+                    "from": e.source_node,
+                    "reason": "血缘相关指标",
+                }
+            )
         return result
 
     async def recommend_metrics(self, user_id: int, limit: int) -> list[dict[str, Any]]:
@@ -55,26 +82,32 @@ class RecommendService(BaseService):
         4. 最新发布：系统无任何行为信号时的终极兜底，保证面板永不空白。
 
         每个推荐项均携带 ``reason`` 字段，便于前端向用户解释「为何推荐」。
+        所有层级统一排除用户「不感兴趣」（recommend_dismiss）的指标，负反馈跨刷新生效。
         """
+        dismissed = await self._repo.dismissed_metrics(str(user_id))
         # 1. 协同过滤（个性化最强，优先）
-        cf_results = await self._collaborative_filtering(user_id, limit)
+        cf_results = await self._collaborative_filtering(user_id, limit, dismissed)
         if cf_results:
             return cf_results
 
         # 2. 血缘扩展兜底
-        lineage = await self._lineage_fallback(user_id, limit)
+        lineage = await self._lineage_fallback(user_id, limit, dismissed)
         if lineage:
             return lineage
 
-        # 3 & 4. 冷启动兜底：全局热门（排除已交互）→ 最新发布，保证面板非空
+        # 3 & 4. 冷启动兜底：全局热门（排除已交互+已排除）→ 最新发布，保证面板非空
         seeds = await self._get_user_metric_actions(str(user_id))
-        popular = await self._global_popular(limit, seeds)
+        exclude = seeds | dismissed
+        popular = await self._global_popular(limit, exclude)
         if popular:
             return popular
-        return await self._latest_published(limit, seeds)
+        return await self._latest_published(limit, exclude)
 
-    async def _collaborative_filtering(self, user_id: int, limit: int) -> list[dict[str, Any]]:
+    async def _collaborative_filtering(
+        self, user_id: int, limit: int, dismissed: set[str] | None = None
+    ) -> list[dict[str, Any]]:
         """基于 tracking_events 的协同过滤推荐。"""
+        dismissed = dismissed or set()
         # 1. 获取当前用户行为画像
         my_metrics = await self._get_user_metric_actions(str(user_id))
         if not my_metrics:
@@ -92,12 +125,12 @@ class RecommendService(BaseService):
         if not similar_users:
             return []
 
-        # 4. 聚合相似用户的偏好指标，排除当前用户已交互的
+        # 4. 聚合相似用户的偏好指标，排除当前用户已交互的与「不感兴趣」的
         candidate_scores: dict[str, float] = defaultdict(float)
         for sim_uid, similarity in similar_users:
             sim_metrics = all_profiles.get(sim_uid, set())
             for metric_id in sim_metrics:
-                if metric_id not in my_metrics:
+                if metric_id not in my_metrics and metric_id not in dismissed:
                     candidate_scores[metric_id] += similarity
 
         # 5. 按得分排序取 Top-N
@@ -169,16 +202,20 @@ class RecommendService(BaseService):
         scores.sort(key=lambda x: x[1], reverse=True)
         return scores[:_SIMILAR_USER_LIMIT]
 
-    async def _lineage_fallback(self, user_id: int, limit: int) -> list[dict[str, Any]]:
+    async def _lineage_fallback(
+        self, user_id: int, limit: int, dismissed: set[str] | None = None
+    ) -> list[dict[str, Any]]:
         """血缘扩展推荐（冷启动兜底）。
 
         种子 = 当前用户在 tracking_events 中交互过的指标（与协同过滤同源，
         避免依赖 EventLog 按用户过滤——EventLog 无 user 列，旧实现 ``source ==
         str(user_id)`` 永不命中导致兜底恒空），再经血缘边扩展上下游指标。
+        扩展结果排除用户「不感兴趣」的指标（dismissed）。
         """
+        dismissed = dismissed or set()
         seeds = await self._get_user_metric_actions(str(user_id))
         recommendations: list[dict[str, Any]] = []
-        seen: set[str] = set(seeds)
+        seen: set[str] = set(seeds) | dismissed
         for seed in seeds:
             edges = await self._repo.related_edges(seed, limit)
             for e in edges:

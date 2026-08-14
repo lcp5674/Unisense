@@ -18,12 +18,14 @@ from app.core.config import settings
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.models.lineage import LineageEdge
+from app.models.metric import Metric
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.parser import (
     extract_field_lineage,
     extract_table_lineage,
     node_field,
+    node_metric,
     node_table,
 )
 from app.services.lineage.repository import LineageRepository
@@ -186,6 +188,98 @@ class LineageService(BaseService):
         """列出与某节点直接相关的血缘边（一跳，含 ``pii_inherited``）。"""
         edges = await self._repo.query_impact(node, direction, max_hops=1, max_edges=_MAX_EDGES)
         return [LineageEdgeResponse.model_validate(e) for e in edges]
+
+    # ---- 指标级（L3）血缘：注册与查询 ----
+
+    async def get_metric_edges(
+        self, metric_code: str, direction: str = "both"
+    ) -> list[LineageEdgeResponse]:
+        """给定指标编码返回其血缘边（一跳，上游/下游/双向）。
+
+        内部将 ``metric_code`` 规范化为 ``metric:{code}`` 节点查询，供推荐模块血缘兜底
+        与指标详情页血缘 Tab 使用（推荐方只需按 ``metric:{code}`` 节点查边即可命中）。
+        """
+        node = node_metric(metric_code)
+        edges = await self._repo.edges_for_node(node, direction)
+        return [LineageEdgeResponse.model_validate(e) for e in edges]
+
+    async def register_metric_lineage(
+        self, metric_code: str, source_table: str, *, commit: bool = True
+    ) -> LineageEdge | None:
+        """注册「指标→底表」血缘边（粒度 L3，幂等）。
+
+        写入 ``metric:{code}`` → ``table:{source_table}``（DERIVED_FROM，
+        provenance=metric_definition）；``source_table`` 为空/非字符串时静默跳过
+        （返回 None），不抛错。
+
+        Args:
+            metric_code: 指标编码。
+            source_table: 底表名（如 ``dws_metric_gmv``）。不带库前缀时按原样作为
+                ``table:{source_table}`` 节点写入（与 ``scripts.sync_neo4j_assets``
+                约定一致）；带 ``db.table`` 形式时直接沿用。
+            commit: 是否立即提交（默认 True；批量注册时置 False 由调用方统一提交）。
+
+        Returns:
+            写入的血缘边；无有效底表名时返回 None。
+        """
+        if not isinstance(source_table, str) or not source_table.strip():
+            logger.warning(
+                "metric_lineage_skip_empty_source_table", metric_code=metric_code
+            )
+            return None
+        edge = await self._repo.upsert_metric_table_edge(
+            metric_code=metric_code,
+            table_node=node_table(source_table.strip()),
+            change_reason="metric_definition",
+        )
+        if commit:
+            await self._db.commit()
+        return edge
+
+    async def register_metric_from_definition(
+        self, metric: Metric, *, commit: bool = True
+    ) -> list[LineageEdge]:
+        """从指标口径定义（``definition_json``）注册指标↔表血缘边（L3，幂等）。
+
+        解析约定与 ``scripts.sync_neo4j_assets.parse_metric_edges`` 保持一致：
+        - ``source_table``（落地/物化表）→ ``metric:{code}`` → ``table:{t}``；
+        - ``source_tables``（上游源表）→ ``table:{t}`` → ``metric:{code}``。
+
+        ``definition_json`` 缺键/类型异常/空值对应边静默跳过；返回本次写入的边列表
+        （空列表表示无可注册的表血缘）。
+
+        Args:
+            metric: 指标 ORM 实体（读取 ``metric_code`` 与 ``definition_json``）。
+            commit: 是否立即提交（默认 True）。
+        """
+        definition = metric.definition_json or {}
+        if not isinstance(definition, dict):
+            return []
+        edges: list[LineageEdge] = []
+        metric_code = metric.metric_code
+        for table in definition.get("source_tables") or []:
+            if isinstance(table, str) and table:
+                edges.append(
+                    await self._repo.upsert_metric_table_edge(
+                        metric_code=metric_code,
+                        table_node=node_table(table),
+                        direction="upstream",
+                        change_reason="metric_definition",
+                    )
+                )
+        source_table = definition.get("source_table")
+        if isinstance(source_table, str) and source_table:
+            edges.append(
+                await self._repo.upsert_metric_table_edge(
+                    metric_code=metric_code,
+                    table_node=node_table(source_table),
+                    direction="downstream",
+                    change_reason="metric_definition",
+                )
+            )
+        if commit and edges:
+            await self._db.commit()
+        return edges
 
     async def delete_by_node(self, node: str) -> int:
         """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。"""

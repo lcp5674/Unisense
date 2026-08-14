@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models.lineage import LineageEdge
 from app.models.metric import Metric
@@ -40,6 +41,58 @@ class RecommendRepository:
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def related_by_behavior(self, metric_id: str, limit: int) -> list[tuple[str, int]]:
+        """行为协同相关指标（people-also-viewed）。
+
+        找到与 ``metric_id`` 有过交互（查看/查询/收藏等）的用户，聚合这些用户
+        交互过的**其它**指标（排除自身），按共同用户数降序返回
+        ``(metric_id, co_users)``。用于 MetricDetail「看过此指标的人还看了」卡片，
+        行为驱动优先；无共同行为数据时由服务层回退血缘兜底。
+        """
+        te1 = aliased(TrackingEvent, name="te1")
+        te2 = aliased(TrackingEvent, name="te2")
+        stmt = (
+            select(te2.target_id, func.count(func.distinct(te1.actor_id)).label("co_users"))
+            .select_from(te1)
+            .join(
+                te2,
+                (te1.actor_id == te2.actor_id)
+                & (te2.target_id.isnot(None))
+                & (te2.target_id != metric_id),
+            )
+            .where(
+                te1.target_id == metric_id,
+                te1.target_type == "metric",
+                te2.target_type == "metric",
+                te1.event_type.in_(METRIC_EVENT_TYPES),
+                te2.event_type.in_(METRIC_EVENT_TYPES),
+            )
+            .group_by(te2.target_id)
+            .order_by(func.count(func.distinct(te1.actor_id)).desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(str(r[0]), int(r[1])) for r in rows if r[0] is not None]
+
+    async def dismissed_metrics(self, user_id: str) -> set[str]:
+        """用户标记「不感兴趣」的指标集合（recommend_dismiss 事件）。
+
+        负反馈持久化：前端「不感兴趣」上报 recommend_dismiss 事件，推荐各层级
+        据此排除，保证「减少此类推荐」跨刷新真实生效。
+        """
+        stmt = (
+            select(TrackingEvent.target_id)
+            .where(
+                TrackingEvent.actor_id == user_id,
+                TrackingEvent.target_type == "metric",
+                TrackingEvent.event_type == "recommend_dismiss",
+                TrackingEvent.target_id.isnot(None),
+            )
+            .distinct()
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {str(r) for r in rows if r}
+
     async def published_terms(self, limit: int) -> list[Term]:
         stmt = select(Term).where(Term.status == "PUBLISHED").order_by(Term.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars().all())
@@ -61,7 +114,8 @@ class RecommendRepository:
             .order_by(func.count().desc())
             .limit(limit)
         )
-        return list((await self._session.execute(stmt)).all())
+        rows = (await self._session.execute(stmt)).all()
+        return [(str(r[0]), int(r[1])) for r in rows if r[0] is not None]
 
     async def recent_published_metrics(self, limit: int) -> list[str]:
         """最新发布的指标码（无任何行为信号时的最终兜底，保证面板永不空白）。"""

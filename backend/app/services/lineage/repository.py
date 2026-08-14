@@ -225,6 +225,41 @@ class LineageRepository:
             change_reason=change_reason,
         )
 
+    async def upsert_metric_table_edge(
+        self,
+        *,
+        metric_code: str,
+        table_node: str,
+        direction: str = "downstream",
+        edge_type: str = "DERIVED_FROM",
+        confidence: float = 1.0,
+        provenance: str = "metric_definition",
+        change_reason: str = "metric_definition",
+    ) -> LineageEdge:
+        """写入「指标↔表」血缘边（粒度 L3，幂等）。
+
+        direction=downstream 时 ``metric:{code}`` → ``table:{tbl}``（指标产出/物化表）；
+        direction=upstream 时 ``table:{tbl}`` → ``metric:{code}``（指标源表）。
+
+        方向约定与 ``scripts.sync_neo4j_assets.parse_metric_edges`` 一致；幂等性由
+        ``_upsert`` 的唯一键（source/target/edge_type/granularity）保证，重复注册
+        不产生重复边。
+        """
+        metric_node = f"metric:{metric_code}"
+        if direction == "upstream":
+            source_node, target_node = table_node, metric_node
+        else:
+            source_node, target_node = metric_node, table_node
+        return await self._upsert(
+            source_node=source_node,
+            target_node=target_node,
+            edge_type=edge_type,
+            granularity="L3",
+            confidence=confidence,
+            provenance=provenance,
+            change_reason=change_reason,
+        )
+
     async def register_break(
         self,
         *,
@@ -279,6 +314,29 @@ class LineageRepository:
             .scalars()
             .all()
         )
+
+    async def edges_for_node(self, node: str, direction: str = "both") -> list[LineageEdge]:
+        """返回与节点直接相连（一跳）的未删除血缘边。
+
+        Args:
+            node: 节点 id（如 ``metric:gmv_total`` / ``table:dws_metric_gmv``）。
+            direction: ``upstream`` 仅入边（target==node）、``downstream`` 仅出边
+                （source==node）、``both`` 双向。
+        """
+        if direction == "upstream":
+            stmt = select(LineageEdge).where(
+                LineageEdge.target_node == node, LineageEdge.deleted_at.is_(None)
+            )
+        elif direction == "downstream":
+            stmt = select(LineageEdge).where(
+                LineageEdge.source_node == node, LineageEdge.deleted_at.is_(None)
+            )
+        else:
+            stmt = select(LineageEdge).where(
+                (LineageEdge.source_node == node) | (LineageEdge.target_node == node),
+                LineageEdge.deleted_at.is_(None),
+            )
+        return list((await self._db.execute(stmt)).scalars().all())
 
     async def query_impact(
         self, node: str, direction: str = "downstream", max_hops: int = 5, max_edges: int = 5000
