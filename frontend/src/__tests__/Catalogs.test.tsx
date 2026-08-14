@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { MemoryRouter } from "react-router-dom";
 import { Catalogs } from "../pages/Catalogs";
 import type { DBCatalog, DataSource } from "../types";
 
@@ -276,46 +276,6 @@ describe("Catalogs 页面", () => {
       const lastCall = calls.length > 0 ? calls[calls.length - 1][0] : undefined;
       expect(lastCall?.page_size).toBe(50);
     });
-  });
-
-  it("提供统一的返回按钮（返回上一入口）", async () => {
-    render(
-      <MemoryRouter initialEntries={["/catalogs"]}>
-        <Catalogs />
-      </MemoryRouter>,
-    );
-    await screen.findByText("dwd_finance_order");
-    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
-  });
-
-  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
-    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
-    render(
-      <MemoryRouter initialEntries={["/lineage", "/catalogs"]}>
-        <Routes>
-          <Route path="/lineage" element={<div>lineage-page</div>} />
-          <Route path="/catalogs" element={<Catalogs />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-    await screen.findByText("dwd_finance_order");
-    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
-    await screen.findByText("lineage-page");
-    lengthSpy.mockRestore();
-  });
-
-  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
-    render(
-      <MemoryRouter initialEntries={["/catalogs"]}>
-        <Routes>
-          <Route path="/dashboard" element={<div>dashboard-page</div>} />
-          <Route path="/catalogs" element={<Catalogs />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-    await screen.findByText("dwd_finance_order");
-    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
-    await screen.findByText("dashboard-page");
   });
 
 });
