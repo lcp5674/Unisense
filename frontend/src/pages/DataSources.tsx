@@ -162,6 +162,9 @@ function SourceDetailModal({
       entities: (detail.entities as CollectResult["entities"]) ?? [],
     };
     setCollectResult(result);
+    // 进度兜底拉满：SSE 为 1s 快照，终态到达时最后一帧 RUNNING 进度可能停在中间值
+    // （如 25%），此处以结果 scanned 作为 index=total 把进度条推进到 100%。
+    setProgress({ phase: "done", index: result.scanned, total: result.scanned });
     if (status.status === "FAILED") {
       const errMsg = typeof detail.error === "string" ? detail.error : "采集失败";
       message.error(`采集失败：${errMsg}`);
@@ -442,6 +445,8 @@ export function DataSources() {
   const [form] = Form.useForm();
   // 编辑回显时的连接配置明文快照（用于判断用户是否实际修改了连接字段）
   const editConfigRef = useRef<Record<string, unknown> | null>(null);
+  // 编辑保存且连接配置变更后，引导"立即重新采集"的目标数据源
+  const [recollectSource, setRecollectSource] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
   const sourceType = Form.useWatch("source_type", form);
   const watchedDatabase = Form.useWatch("database", form);
@@ -617,6 +622,8 @@ export function DataSources() {
 
   async function handleSubmit(values: Record<string, unknown>) {
     setLoading(true);
+    // 编辑保存时连接配置是否发生变更（决定是否引导重新采集）
+    let configChanged = false;
     try {
       const cfg = buildConnectionConfig(values);
       if (editTarget) {
@@ -629,7 +636,6 @@ export function DataSources() {
         // 连接配置已回显明文：仅当表单值与原始配置快照不同（即用户实际修改了连接字段）
         // 才提交覆盖，避免纯改名/改域时误覆盖配置并重置健康状态。
         const prev = editConfigRef.current;
-        let configChanged: boolean;
         if (prev == null) {
           // 未成功回显（拉取失败/无配置）：用 antd touched 兜底判断用户是否填写
           configChanged = ["host", "port", "database", "schema", "user", "password"].some((f) =>
@@ -653,10 +659,16 @@ export function DataSources() {
         await createDataSource(payload);
         message.success(`数据源已创建（${previewSourceId(String(values.source_type), cfg, String(values.domain))}）`);
       }
+      const updatedSourceId = editTarget?.source_id ?? null;
       setModalOpen(false);
       setEditTarget(null);
       form.resetFields();
       load();
+      // 编辑保存且连接配置变更 → 引导重新采集：
+      // 新配置下的元数据需重新采集；旧采集表会在下次全量采集后自动标记 DEPRECATED（不删除）。
+      if (updatedSourceId && configChanged) {
+        setRecollectSource(updatedSourceId);
+      }
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : editTarget ? "更新失败" : "创建失败");
     } finally {
@@ -872,6 +884,32 @@ export function DataSources() {
           onEdit={(s) => { setDetail(null); openEdit(s); }}
         />
       )}
+
+      {/* 编辑保存且连接配置变更 → 引导重新采集 */}
+      <Modal
+        title="连接配置已变更"
+        open={recollectSource !== null}
+        onCancel={() => setRecollectSource(null)}
+        onOk={async () => {
+          const sid = recollectSource;
+          setRecollectSource(null);
+          if (!sid) return;
+          try {
+            await collectSourceNow(sid, "FULL");
+            message.success("已触发重新采集，可到「采集任务中心」查看进度");
+          } catch (err) {
+            message.error(
+              err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "触发采集失败",
+            );
+          }
+        }}
+        okText="立即重新采集"
+        cancelText="稍后再说"
+      >
+        <p>
+          数据源已更新。是否立即重新采集，以刷新该数据源下的元数据？旧配置采集的表会在下次全量采集后自动标记为「已废弃」。
+        </p>
+      </Modal>
     </div>
   );
 }

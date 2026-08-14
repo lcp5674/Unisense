@@ -1516,12 +1516,17 @@ export async function listDriftLogs(
   );
 }
 
-/** 采集任务中心：列出异步采集任务（按入队逆序分页）。 */
+/** 采集任务中心：列出异步采集任务（按入队逆序分页；可按 source_id 过滤）。 */
 export async function listCollectionJobs(params?: {
   limit?: number;
   offset?: number;
+  source_id?: string;
 }): Promise<CollectionJob[]> {
-  const qs = pageQs({ limit: params?.limit ?? 50, offset: params?.offset ?? 0 });
+  const qs = pageQs({
+    limit: params?.limit ?? 50,
+    offset: params?.offset ?? 0,
+    source_id: params?.source_id ?? undefined,
+  });
   return request<CollectionJob[]>(`${API_BASE}/data-sources/jobs?${qs}`);
 }
 

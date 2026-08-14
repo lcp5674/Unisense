@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Card, Space, Table, Tag, Tooltip, message } from "antd";
+import { Button, Card, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
-import { listCollectionJobs, UnisenseApiError } from "../api";
-import type { CollectionJob } from "../types";
+import { listCollectionJobs, listDataSources, UnisenseApiError } from "../api";
+import type { CollectionJob, DataSource } from "../types";
 
 const STATUS_LABEL: Record<string, string> = {
   QUEUED: "排队中",
@@ -23,6 +23,13 @@ function statusTag(v: string) {
   return <Tag color={color}>{STATUS_LABEL[v] ?? v}</Tag>;
 }
 
+/** 任务来源标记：定时调度 vs 手动触发。 */
+function kindTag(kind?: string) {
+  if (kind === "scheduled") return <Tag color="blue">定时</Tag>;
+  if (kind === "manual") return <Tag>手动</Tag>;
+  return <span style={{ color: "#999" }}>—</span>;
+}
+
 function detailText(detail: Record<string, unknown> | undefined): string {
   if (!detail) return "";
   const parts: string[] = [];
@@ -37,19 +44,21 @@ function detailText(detail: Record<string, unknown> | undefined): string {
 
 export function CollectionTasks() {
   const [jobs, setJobs] = useState<CollectionJob[]>([]);
+  const [sources, setSources] = useState<DataSource[]>([]);
+  const [sourceId, setSourceId] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const res = await listCollectionJobs({ limit: 50 });
+      const res = await listCollectionJobs({ limit: 50, source_id: sourceId });
       setJobs(res);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sourceId]);
 
   useEffect(() => {
     setLoading(true);
@@ -60,6 +69,13 @@ export function CollectionTasks() {
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [load]);
+
+  // 数据源筛选选项：供"按数据源查看任务"使用
+  useEffect(() => {
+    listDataSources({ page: 1, page_size: 100 })
+      .then((res) => setSources(res.items))
+      .catch(() => setSources([]));
+  }, []);
 
   const columns = [
     {
@@ -83,6 +99,7 @@ export function CollectionTasks() {
       render: (v?: string) =>
         v ? <span className="mono" style={{ fontSize: 12 }}>{v}</span> : <span style={{ color: "#999" }}>—</span>,
     },
+    { title: "类型", dataIndex: "kind", key: "kind", width: 80, render: (v?: string) => kindTag(v) },
     { title: "状态", dataIndex: "status", key: "status", width: 110, render: (v: string) => statusTag(v) },
     {
       title: "进度 / 结果",
@@ -120,6 +137,21 @@ export function CollectionTasks() {
       style={{ marginBottom: 16 }}
     >
       <Space direction="vertical" style={{ width: "100%" }} size={16}>
+        <Space wrap>
+          <Select
+            allowClear
+            showSearch
+            placeholder="按数据源筛选"
+            style={{ width: 260 }}
+            value={sourceId}
+            onChange={(v?: string) => setSourceId(v || undefined)}
+            options={sources.map((s) => ({
+              value: s.source_id,
+              label: `${s.name}（${s.source_id}）`,
+            }))}
+            optionFilterProp="label"
+          />
+        </Space>
         <Table<CollectionJob>
           rowKey="job_id"
           loading={loading}

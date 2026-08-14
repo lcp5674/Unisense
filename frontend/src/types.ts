@@ -975,6 +975,8 @@ export interface CollectionJob {
   status: string;
   detail?: Record<string, unknown>;
   created_at?: string | null;
+  /** 任务来源：manual 手动触发 / scheduled 定时调度（由 job_id 前缀推导）。 */
+  kind?: "manual" | "scheduled";
 }
 
 // ============================================================================

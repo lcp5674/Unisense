@@ -327,4 +327,26 @@ describe("DataSources", () => {
       password: "secret",
     });
   });
+
+  it("编辑修改连接配置保存后，引导「立即重新采集」", async () => {
+    renderSources();
+    await waitFor(() => {
+      expect(screen.getByText("管理")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    fireEvent.click(screen.getByText("编辑"));
+    await screen.findByText(/编辑数据源：mysql_finance/);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("10.0.0.1")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByDisplayValue("10.0.0.1"), { target: { value: "10.0.0.9" } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    // 保存成功且连接配置变更 → 出现重新采集引导确认框
+    await screen.findByText("连接配置已变更");
+    fireEvent.click(screen.getByText("立即重新采集"));
+    await waitFor(() => {
+      expect(mockedCollectNow).toHaveBeenCalledWith("mysql_finance", "FULL");
+    });
+  });
 });
