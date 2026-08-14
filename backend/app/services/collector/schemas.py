@@ -136,7 +136,12 @@ class TestConnectionResult(BaseModel):
 
 
 class DataSourceResponse(BaseModel):
-    """数据源响应（脱敏：不含 connection_config 明文）。"""
+    """数据源响应。
+
+    安全边界：``connection_config`` 明文**仅详情接口**（``GET /data-sources/{id}``）
+    返回，供前端编辑回显；列表接口保持 ``None``（脱敏，TD §13）。
+    是否携带明文由 service 层 ``_to_source_response(include_config=...)`` 控制。
+    """
 
     source_id: str
     name: str
@@ -146,6 +151,7 @@ class DataSourceResponse(BaseModel):
     coverage: float
     health_status: str
     connection_config_present: bool
+    connection_config: dict[str, Any] | None = None
     schedule_cron: str | None = None
     collection_mode: str = "FULL"
     created_by: int | None = None

@@ -21,6 +21,7 @@ vi.mock("../api", () => {
   }
   return {
     listDataSources: vi.fn(),
+    getDataSource: vi.fn(),
     listDataSourceTypes: vi.fn(),
     listDomainTree: vi.fn(),
     createDataSource: vi.fn(),
@@ -41,6 +42,7 @@ vi.mock("../api", () => {
 
 import {
   listDataSources,
+  getDataSource,
   listDataSourceTypes,
   listDomainTree,
   createDataSource,
@@ -57,6 +59,7 @@ import {
 } from "../api";
 
 const mockedList = vi.mocked(listDataSources);
+const mockedGet = vi.mocked(getDataSource);
 const mockedTypes = vi.mocked(listDataSourceTypes);
 const mockedDomains = vi.mocked(listDomainTree);
 const mockedCreate = vi.mocked(createDataSource);
@@ -126,6 +129,8 @@ describe("DataSources", () => {
     vi.clearAllMocks();
     // P1-1: 列表返回分页结构 {items, total, page, page_size}
     mockedList.mockResolvedValue({ items: [source], total: 1, page: 1, page_size: 20 });
+    // 详情（编辑回显）：返回带明文连接配置的详情
+    mockedGet.mockResolvedValue({ ...source, connection_config: { host: "10.0.0.1", port: 3306, database: "finance", user: "root", password: "secret" } });
     mockedTypes.mockResolvedValue(TYPES);
     mockedDomains.mockResolvedValue(DOMAINS);
     mockedCreate.mockResolvedValue(source);
@@ -264,7 +269,7 @@ describe("DataSources", () => {
     expect(screen.getAllByText(/连接正常/).length).toBeGreaterThan(0);
   });
 
-  it("编辑数据源：预填现有值并调用更新接口（连接字段留空保持原配置）", async () => {
+  it("编辑数据源：回显明文连接配置，仅改名不提交 connection_config", async () => {
     renderSources();
     await waitFor(() => {
       expect(screen.getByText("管理")).toBeTruthy();
@@ -275,6 +280,11 @@ describe("DataSources", () => {
     // 编辑弹窗预填现有值
     await screen.findByText(/编辑数据源：mysql_finance/);
     expect(screen.getByDisplayValue("财务库")).toBeTruthy();
+    // 明文连接配置回显（host/port/database/user/password 均已预填）
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("10.0.0.1")).toBeTruthy();
+      expect(screen.getByDisplayValue("secret")).toBeTruthy();
+    });
     // 修改名称并保存
     fireEvent.change(screen.getByDisplayValue("财务库"), { target: { value: "财务库-新" } });
     fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
@@ -285,11 +295,11 @@ describe("DataSources", () => {
     expect(sourceId).toBe("mysql_finance");
     expect(payload.name).toBe("财务库-新");
     expect(payload.domain).toBe("finance");
-    // 未填写连接字段 → 不提交 connection_config（保持原配置）
+    // 未修改连接字段 → 不提交 connection_config（保持原配置，避免重置健康状态）
     expect(payload.connection_config).toBeUndefined();
   });
 
-  it("编辑时填写连接字段则随更新提交 connection_config", async () => {
+  it("编辑时修改连接字段则随更新提交完整 connection_config（含回显字段）", async () => {
     renderSources();
     await waitFor(() => {
       expect(screen.getByText("管理")).toBeTruthy();
@@ -298,13 +308,23 @@ describe("DataSources", () => {
     await screen.findByText(/数据源：财务库/);
     fireEvent.click(screen.getByText("编辑"));
     await screen.findByText(/编辑数据源：mysql_finance/);
-    fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), { target: { value: "10.0.0.2" } });
+    // 等待明文回显完成后修改 Host
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("10.0.0.1")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByDisplayValue("10.0.0.1"), { target: { value: "10.0.0.2" } });
     fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
     await waitFor(() => {
       expect(mockedUpdate).toHaveBeenCalled();
     });
     const payload = mockedUpdate.mock.calls[0][1] as unknown as Record<string, unknown>;
-    // 编辑弹窗预填默认端口 3306，连接字段填写后随更新提交
-    expect(payload.connection_config).toEqual({ host: "10.0.0.2", port: 3306 });
+    // 修改 Host 后提交完整配置：改动的 host + 回显的其余字段
+    expect(payload.connection_config).toEqual({
+      host: "10.0.0.2",
+      port: 3306,
+      database: "finance",
+      user: "root",
+      password: "secret",
+    });
   });
 });

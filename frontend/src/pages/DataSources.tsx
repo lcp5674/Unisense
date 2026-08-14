@@ -4,6 +4,7 @@ import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, S
 import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined } from "@ant-design/icons";
 import {
   listDataSources,
+  getDataSource,
   createDataSource,
   updateDataSource,
   collectSourceNow,
@@ -259,7 +260,7 @@ function SourceDetailModal({
             {SOURCE_HEALTH_LABEL[source.health_status] ?? source.health_status}
           </Tag>
         </Descriptions.Item>
-        <Descriptions.Item label="连接配置">{(source.connection_config_present ? "已配置（明文不下发）" : "未配置")}</Descriptions.Item>
+        <Descriptions.Item label="连接配置">{(source.connection_config_present ? "已配置" : "未配置")}</Descriptions.Item>
       </Descriptions>
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -439,6 +440,8 @@ export function DataSources() {
   const [dbLoading, setDbLoading] = useState(false);
   const [dbEnumerated, setDbEnumerated] = useState(false);
   const [form] = Form.useForm();
+  // 编辑回显时的连接配置明文快照（用于判断用户是否实际修改了连接字段）
+  const editConfigRef = useRef<Record<string, unknown> | null>(null);
   const [searchParams] = useSearchParams();
   const sourceType = Form.useWatch("source_type", form);
   const watchedDatabase = Form.useWatch("database", form);
@@ -577,8 +580,9 @@ export function DataSources() {
   function openEdit(source: DataSource) {
     setEditTarget(source);
     form.resetFields();
-    // 连接配置明文不下发（connection_config_present 仅为标记），编辑时留空以保持原配置；
-    // 仅当用户重新填写连接字段时才提交 connection_config 覆盖。
+    // 连接配置明文快照：编辑保存时对比表单值，未修改则不覆盖（避免纯改名重置健康状态）
+    editConfigRef.current = null;
+    // 先填基础字段；连接配置明文由详情接口异步拉取后回显（见下方 getDataSource）。
     form.setFieldsValue({
       name: source.name,
       source_type: source.source_type,
@@ -589,6 +593,26 @@ export function DataSources() {
     setDbOptions([]);
     setDbEnumerated(false);
     setModalOpen(true);
+    // 编辑回显：拉取详情中的明文连接配置并预填连接字段（未修改的连接字段保持原配置）。
+    getDataSource(source.source_id)
+      .then((d) => {
+        const cfg = d.connection_config ?? null;
+        if (cfg && typeof cfg === "object") {
+          editConfigRef.current = cfg as Record<string, unknown>;
+          form.setFieldsValue({
+            host: cfg.host != null ? String(cfg.host) : undefined,
+            port: cfg.port != null ? String(cfg.port) : undefined,
+            database: cfg.database != null ? String(cfg.database) : undefined,
+            schema: cfg.schema != null ? String(cfg.schema) : undefined,
+            user: cfg.user != null ? String(cfg.user) : undefined,
+            password: cfg.password != null ? String(cfg.password) : undefined,
+          });
+          setDbEnumerated(Boolean(cfg.database));
+        }
+      })
+      .catch(() => {
+        // 拉取失败（如密钥漂移）：保持连接字段留空，沿用"留空=保持原配置"兜底
+      });
   }
 
   async function handleSubmit(values: Record<string, unknown>) {
@@ -602,12 +626,19 @@ export function DataSources() {
           domain: String(values.domain),
         };
         if (values.cluster_id != null) payload.cluster_id = String(values.cluster_id);
-        // 连接配置明文不下发，仅当用户实际填写（touched）连接字段时才覆盖，否则保持原配置；
-        // 避免编辑时预填的默认端口被误判为用户输入。
-        const touchedConn = ["host", "port", "database", "schema", "user", "password"].some((f) =>
-          form.isFieldTouched(f),
-        );
-        if (touchedConn) payload.connection_config = cfg;
+        // 连接配置已回显明文：仅当表单值与原始配置快照不同（即用户实际修改了连接字段）
+        // 才提交覆盖，避免纯改名/改域时误覆盖配置并重置健康状态。
+        const prev = editConfigRef.current;
+        let configChanged: boolean;
+        if (prev == null) {
+          // 未成功回显（拉取失败/无配置）：用 antd touched 兜底判断用户是否填写
+          configChanged = ["host", "port", "database", "schema", "user", "password"].some((f) =>
+            form.isFieldTouched(f),
+          );
+        } else {
+          configChanged = JSON.stringify(cfg) !== JSON.stringify(prev);
+        }
+        if (configChanged) payload.connection_config = cfg;
         await updateDataSource(editTarget.source_id, payload);
         message.success(`数据源已更新：${editTarget.source_id}`);
       } else {
@@ -760,8 +791,8 @@ export function DataSources() {
               type="info"
               showIcon
               style={{ marginBottom: 16 }}
-              message="连接配置已脱敏，不随编辑回显"
-              description="如需修改连接信息，请在下方的连接字段中重新填写（留空则保持原配置）。修改连接配置后将重置健康状态。"
+              message="已回显当前连接配置，可直接修改"
+              description="未修改的连接字段将保持原配置；修改连接配置后将重置健康状态并重新探活。"
             />
           )}
           <Alert

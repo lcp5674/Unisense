@@ -92,7 +92,22 @@ class CollectorService(BaseService):
         self._settings = Settings()
 
     @staticmethod
-    def _to_source_response(src: DataSource) -> DataSourceResponse:
+    def _to_source_response(
+        src: DataSource, include_config: bool = False
+    ) -> DataSourceResponse:
+        """ORM → 响应。
+
+        Args:
+            include_config: True 时解密并携带 ``connection_config`` 明文
+                （仅详情/编辑回显用）；False（列表）时保持 ``None`` 脱敏。
+        """
+        config: dict[str, Any] | None = None
+        if include_config and src.connection_config:
+            try:
+                config = SecretManager.decrypt(src.connection_config)
+            except Exception:
+                # 密钥漂移等导致解密失败：不阻断详情，按未配置处理
+                config = None
         return DataSourceResponse(
             source_id=src.source_id,
             name=src.name,
@@ -102,6 +117,7 @@ class CollectorService(BaseService):
             coverage=float(src.coverage or 0.0),
             health_status=src.health_status or "unknown",
             connection_config_present=bool(src.connection_config),
+            connection_config=config,
             schedule_cron=src.schedule_cron,
             collection_mode=src.collection_mode or "FULL",
             created_by=src.created_by,
@@ -295,7 +311,8 @@ class CollectorService(BaseService):
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
-        return self._to_source_response(src)
+        # 详情/编辑回显需要明文连接配置（列表保持脱敏）
+        return self._to_source_response(src, include_config=True)
 
     async def update_source(
         self, source_id: str, req: DataSourceUpdateRequest, actor_id: int

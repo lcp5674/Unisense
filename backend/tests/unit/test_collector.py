@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1995,3 +1996,67 @@ async def test_repo_get_sources_meta():
     assert meta["mysql_a"] == ("A", False)
     assert meta["mysql_b"] == ("B", True)
     assert "missing" not in meta
+
+
+# ---------- 连接配置明文回显（编辑场景） ----------
+
+
+def _make_src_with_config(cfg: dict[str, Any]) -> Any:
+    """构造带真实加密配置的 DataSource ORM（模拟落库形态）。"""
+    from app.core.secrets import SecretManager
+    from app.models.data_source import DataSource
+
+    return DataSource(
+        source_id="s1",
+        name="S",
+        source_type="mysql",
+        connection_config=SecretManager.encrypt(cfg),
+        domain="d",
+        coverage=0.0,
+        quota={},
+        health_status="unknown",
+        cluster_id="default",
+        created_by=1,
+    )
+
+
+async def test_get_source_returns_plaintext_config() -> None:
+    """详情接口返回明文连接配置（供编辑回显），解密值与加密前一致。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(
+        return_value=_make_src_with_config(
+            {"host": "h", "port": 3306, "user": "u", "password": "p"}
+        )
+    )
+
+    resp = await svc.get_source("s1")
+
+    assert resp.connection_config == {"host": "h", "port": 3306, "user": "u", "password": "p"}
+    assert resp.connection_config_present is True
+
+
+async def test_list_data_sources_redacts_config() -> None:
+    """列表接口保持脱敏：connection_config 一律为 None（安全边界不扩大）。"""
+    svc, repo = _svc()
+    repo.list_sources = AsyncMock(
+        return_value=([_make_src_with_config({"host": "h", "password": "p"})], 1)
+    )
+
+    items, total = await svc.list_sources(page=1, page_size=20)
+
+    assert total == 1
+    assert items[0].connection_config is None
+    assert items[0].connection_config_present is True
+
+
+async def test_get_source_decrypt_failure_degrades_to_none() -> None:
+    """密钥漂移导致解密失败时，详情返回 connection_config=None 而不抛 500。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.connection_config = "invalid-token"
+    repo.get_source = AsyncMock(return_value=src)
+
+    resp = await svc.get_source("s1")
+
+    assert resp.connection_config is None
+    assert resp.connection_config_present is True

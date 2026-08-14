@@ -297,8 +297,9 @@ llm:
 ### 3.1 采集（collector）
 ```
 POST   /sources                      # 新增数据源（保存即触发全量采集）
-GET    /sources                      # 数据源列表（含 last_scan_at/coverage）
-PUT    /sources/{id}                 # 更新数据源（PATCH 语义：名称/类型/域/集群/连接配置，source_id 不可变更；连接配置留空保持原配置，变更后重置健康状态）
+GET    /sources                      # 数据源列表（含 last_scan_at/coverage；connection_config 脱敏，仅 connection_config_present 标记）
+GET    /sources/{id}                 # 数据源详情（编辑回显：返回明文 connection_config，供前端编辑弹窗预填；列表接口保持脱敏）
+PUT    /sources/{id}                 # 更新数据源（PATCH 语义：名称/类型/域/集群/连接配置，source_id 不可变更；连接配置未修改时保持原配置——前端编辑回显明文、仅变更时提交覆盖，变更后重置健康状态）
 POST   /sources/{id}/scan            # 手动触发补采
 POST   /sources/{id}/import          # 通道B：提交 DDL/JSON + 样本（人工证据）
 GET    /sources/{id}/coverage        # 资产清点与覆盖度看板（FR-02/北极星）

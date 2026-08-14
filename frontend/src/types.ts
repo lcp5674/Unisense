@@ -831,6 +831,8 @@ export interface DataSource {
   coverage: number;
   health_status: string;
   connection_config_present: boolean;
+  /** 明文连接配置：仅详情接口返回（供编辑回显）；列表接口为 null（脱敏） */
+  connection_config?: Record<string, unknown> | null;
   schedule_cron: string | null;
   collection_mode: string;
   created_by: number | null;
