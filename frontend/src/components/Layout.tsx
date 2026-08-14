@@ -74,6 +74,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/dashboard", label: "总览仪表", icon: <DashboardOutlined /> },
       { key: "/todo", label: "待办中心", icon: <CheckSquareOutlined /> },
       { key: "/notifications", label: "通知中心", icon: <BellOutlined /> },
+      { key: "/favorites", label: "我的收藏", icon: <HeartOutlined /> },
     ],
   },
   {
@@ -86,20 +87,19 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/domains", label: "主题域管理", icon: <ApartmentOutlined /> },
       { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
       { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
-      { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
-      { key: "/favorites", label: "我的收藏", icon: <HeartOutlined /> },
-      { key: "/assetmap", label: "资产地图", icon: <GlobalOutlined /> },
     ],
   },
   {
-    label: "血缘与影响",
+    label: "资产洞察",
     children: [
+      { key: "/assetmap", label: "资产地图", icon: <GlobalOutlined /> },
       { key: "/lineage", label: "血缘视图", icon: <ApartmentOutlined /> },
     ],
   },
   {
     label: "治理合规",
     children: [
+      { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
       { key: "/review", label: "冲突仲裁", icon: <DeploymentUnitOutlined /> },
       { key: "/quality", label: "质量中心", icon: <ExperimentOutlined /> },
     ],
@@ -108,13 +108,13 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     label: "消费接入",
     children: [
       { key: "/query", label: "查询工作台", icon: <ConsoleSqlOutlined /> },
+      { key: "/ai", label: "AI 助手", icon: <RobotOutlined /> },
       { key: "/api-clients", label: "API 客户端", icon: <KeyOutlined /> },
     ],
   },
   {
-    label: "智能与可观测",
+    label: "平台可观测",
     children: [
-      { key: "/ai", label: "AI 助手", icon: <RobotOutlined /> },
       { key: "/observability", label: "可观测中心", icon: <LineChartOutlined /> },
       { key: "/tracking-stats", label: "埋点统计", icon: <FundOutlined /> },
     ],
