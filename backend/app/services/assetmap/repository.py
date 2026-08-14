@@ -189,6 +189,10 @@ class AssetMapRepository:
             "schema_incomplete": row.schema_incomplete,
             "content_signature": row.content_signature,
             "schema_summary": schema_summary,
+            # 表级业务描述（治理补全，TD §12.1）
+            "description": row.description,
+            "description_source": row.description_source,
+            "description_updated_at": row.description_updated_at,
             "lineage_count": int(lineage_count),
             "lineage_edges": lineage_edges,
             "related_metrics": related_metrics,

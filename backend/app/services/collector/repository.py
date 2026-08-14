@@ -29,6 +29,24 @@ def _signature(source_id: str, entity_name: str) -> str:
     return hashlib.sha256(f"{source_id}:{entity_name}".encode()).hexdigest()
 
 
+def _catalog_columns(schema_json: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """解析 schema_json 的字段清单（兼容 columns/fields 两种键）。"""
+    schema = schema_json or {}
+    columns = schema.get("columns") or schema.get("fields") or []
+    return [c for c in columns if isinstance(c, dict) and (c.get("name") or c.get("column"))]
+
+
+def _column_has_desc(
+    col: dict[str, Any],
+    catalog_id: int,
+    desc_keys: set[tuple[int, str]],
+) -> bool:
+    """字段是否有描述：schema comment 非空 或 column_descriptions 有 manual/llm 记录。"""
+    name = str(col.get("name") or col.get("column"))
+    comment = (col.get("comment") or "").strip()
+    return bool(comment) or (catalog_id, name) in desc_keys
+
+
 class CollectorRepository:
     """采集领域数据访问。"""
 
@@ -117,10 +135,14 @@ class CollectorRepository:
         return res.scalars().all(), total
 
     async def list_scheduled_sources(self) -> list[DataSource]:
-        """列出配置了定时调度（schedule_cron 非空）的活跃数据源（P0-7 调度器扫描用）。"""
+        """列出配置了定时调度（schedule_cron 非空）且启用中的活跃数据源（P0-7 调度器扫描用）。
+
+        停用（enabled=False）的数据源不参与定时调度，避免维护窗口期被自动触发。
+        """
         res = await self._db.execute(
             select(DataSource).where(
                 DataSource.deleted_at.is_(None),
+                DataSource.enabled.is_(True),
                 DataSource.schedule_cron.isnot(None),
                 DataSource.schedule_cron != "",
             )
@@ -608,3 +630,108 @@ class CollectorRepository:
             )
             results.append(desc)
         return results
+
+    # ---- 表级业务描述（治理补全，TD §12.1）----
+
+    async def update_table_description(
+        self,
+        catalog_id: int,
+        description: str,
+        source: str,
+        updated_by: int | None = None,
+    ) -> DBCatalog | None:
+        """人工/LLM 更新表级业务描述（db_catalog.description）。
+
+        采集 upsert 显式设置既有字段，不会覆盖这些治理列。
+
+        Returns:
+            更新后的 DBCatalog；目录不存在返回 None。
+        """
+        cat = (
+            await self._db.execute(
+                select(DBCatalog).where(
+                    DBCatalog.id == catalog_id, DBCatalog.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        if cat is None:
+            return None
+        cat.description = description
+        cat.description_source = source
+        cat.description_updated_by = updated_by
+        cat.description_updated_at = datetime.now(UTC)
+        await self._db.flush()
+        return cat
+
+    async def get_description_coverage(self) -> dict[str, Any]:
+        """描述缺失统计：表/字段覆盖率 + 按表列缺失字段数（治理优先级）。
+
+        Returns:
+            {
+                "total_tables": 表总数,
+                "tables_with_desc": 有表级描述数,
+                "tables_missing_desc": 缺表级描述数,
+                "total_fields": 字段总数,
+                "fields_with_desc": 有字段描述数,
+                "fields_missing_desc": 缺字段描述数,
+                "per_table": 按表列明细（可排序）,
+            }
+        """
+        cats = (
+            await self._db.execute(
+                select(DBCatalog).where(DBCatalog.deleted_at.is_(None))
+            )
+        ).scalars().all()
+        descs = (
+            await self._db.execute(
+                select(ColumnDescription).where(ColumnDescription.deleted_at.is_(None))
+            )
+        ).scalars().all()
+        srcs = (
+            await self._db.execute(
+                select(DataSource.source_id, DataSource.domain)
+            )
+        ).all()
+
+        domain_map = {row.source_id: row.domain for row in srcs}
+        # 仅 manual/llm 记录计入已描述（schema 来源与 comment 等价，避免重复计）
+        desc_keys: set[tuple[int, str]] = {
+            (d.catalog_id, d.column_name)
+            for d in descs
+            if d.source in ("manual", "llm")
+        }
+
+        per_table: list[dict[str, Any]] = []
+        total_fields = 0
+        fields_with_desc = 0
+        for cat in cats:
+            columns = _catalog_columns(cat.schema_json)
+            total = len(columns)
+            covered = sum(1 for c in columns if _column_has_desc(c, cat.id, desc_keys))
+            total_fields += total
+            fields_with_desc += covered
+            per_table.append(
+                {
+                    "catalog_id": cat.id,
+                    "entity_name": cat.entity_name,
+                    "source_id": cat.source_id,
+                    "entity_type": cat.entity_type,
+                    "domain": domain_map.get(cat.source_id),
+                    "sensitivity_level": cat.sensitivity_level,
+                    "table_desc": bool(cat.description and cat.description.strip()),
+                    "total_fields": total,
+                    "covered_fields": covered,
+                    "missing_fields": total - covered,
+                }
+            )
+
+        tables_with_desc = sum(1 for t in per_table if t["table_desc"])
+        return {
+            "total_tables": len(per_table),
+            "tables_with_desc": tables_with_desc,
+            "tables_missing_desc": len(per_table) - tables_with_desc,
+            "total_fields": total_fields,
+            "fields_with_desc": fields_with_desc,
+            "fields_missing_desc": total_fields - fields_with_desc,
+            "per_table": per_table,
+        }

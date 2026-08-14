@@ -53,11 +53,16 @@ from app.services.collector.schemas import (
     DBCatalogListParams,
     DBCatalogListResponse,
     DBCatalogResponse,
+    DescriptionCoverageResponse,
     DriftLogListResponse,
     InferBatchResponse,
     InferDescriptionRequest,
     InferDescriptionResponse,
+    InferTableDescriptionRequest,
+    InferTableDescriptionResponse,
     ScheduleRequest,
+    TableDescriptionRequest,
+    TableDescriptionResponse,
     TestConnectionRequest,
     TestConnectionResult,
     UpdateDescriptionRequest,
@@ -730,6 +735,21 @@ async def list_catalog_databases(
     return ok(data={"items": await svc.list_catalog_databases(source_id)}, trace_id=trace_id)
 
 
+@catalog_router.get("/description-coverage", dependencies=_READ_DEPS)
+async def get_description_coverage(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[DescriptionCoverageResponse]:
+    """描述缺失统计：表/字段覆盖率 + 按表列缺失字段数（治理优先级排序依据）。
+
+    供资产地图「描述缺失」tab 与采集目录概览卡使用。
+    """
+    svc = _svc(db)
+    coverage = await svc._repo.get_description_coverage()
+    return ok(data=DescriptionCoverageResponse(**coverage), trace_id=trace_id)
+
+
 @catalog_router.get("/{catalog_id}", dependencies=_READ_DEPS)
 async def get_catalog_detail(
     catalog_id: int,
@@ -977,6 +997,111 @@ async def update_column_description(
             source=desc.source,
             updated_by=desc.updated_by,
             updated_at=desc.updated_at,
+        ),
+        trace_id=trace_id,
+    )
+
+
+@catalog_router.put("/{catalog_id}/description", dependencies=_WRITE_DEPS)
+async def update_table_description(
+    catalog_id: int,
+    body: TableDescriptionRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[TableDescriptionResponse]:
+    """人工编辑表级业务描述：更新 db_catalog.description，source=manual。"""
+    svc = _svc(db)
+    cat = await svc._repo.update_table_description(
+        catalog_id=catalog_id,
+        description=body.description,
+        source="manual",
+        updated_by=user.id,
+    )
+    if cat is None:
+        raise NotFoundError(f"目录实体不存在: {catalog_id}")
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="UPDATE_TABLE_DESCRIPTION",
+        entity_type="catalog",
+        entity_id=str(catalog_id),
+        detail={"description": body.description, "source": "manual"},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=TableDescriptionResponse(
+            catalog_id=cat.id,
+            description=cat.description or "",
+            source=cat.description_source or "manual",
+            updated_by=cat.description_updated_by,
+            updated_at=cat.description_updated_at,
+        ),
+        trace_id=trace_id,
+    )
+
+
+@catalog_router.post("/{catalog_id}/infer-table-description", dependencies=_WRITE_DEPS)
+async def infer_table_description(
+    catalog_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    body: InferTableDescriptionRequest | None = None,
+) -> ApiResponse[InferTableDescriptionResponse]:
+    """LLM 推断表级业务描述，成功后落库 db_catalog.description（source=llm）。"""
+    cat = (
+        await db.execute(
+            select(DBCatalog).where(DBCatalog.id == catalog_id, DBCatalog.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if cat is None:
+        raise NotFoundError(f"目录实体不存在: {catalog_id}")
+
+    svc = _svc(db)
+    schema_json = cat.schema_json or {}
+    fields = (
+        body.fields
+        if body and body.fields
+        else (schema_json.get("columns") or schema_json.get("fields") or [])
+    )
+    result = await svc._llm_infer_table_description(
+        entity_name=cat.entity_name,
+        columns=fields,
+    )
+    if result is None:
+        raise BusinessError(
+            "LLM 推断暂时不可用，请稍后重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+        )
+
+    updated = await svc._repo.update_table_description(
+        catalog_id=catalog_id,
+        description=result["description"],
+        source="llm",
+    )
+    if updated is None:
+        raise NotFoundError(f"目录实体不存在: {catalog_id}")
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="INFER_TABLE_DESCRIPTION",
+        entity_type="catalog",
+        entity_id=str(catalog_id),
+        detail={"description": result["description"], "confidence": result["confidence"]},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=InferTableDescriptionResponse(
+            catalog_id=catalog_id,
+            description=result["description"],
+            confidence=result["confidence"],
         ),
         trace_id=trace_id,
     )

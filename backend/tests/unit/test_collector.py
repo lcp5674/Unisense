@@ -2337,3 +2337,110 @@ async def test_service_get_catalog_detail_not_found() -> None:
 
     with pytest.raises(NotFoundError):
         await svc.get_catalog_detail(999)
+
+
+# ---- 表级业务描述 + 描述缺失统计（TD §12.1） ----
+
+
+async def test_repo_update_table_description_ok() -> None:
+    """人工/LLM 更新表级描述：写 4 列并返回更新后的实体。"""
+    cat = MagicMock()
+    cat.description = None
+    cat.description_source = None
+    cat.description_updated_by = None
+    cat.description_updated_at = None
+    repo = CollectorRepository(_session(scalar_one_or_none=cat))
+
+    result = await repo.update_table_description(
+        catalog_id=1, description="订单明细表", source="manual", updated_by=7
+    )
+
+    assert result is cat
+    assert cat.description == "订单明细表"
+    assert cat.description_source == "manual"
+    assert cat.description_updated_by == 7
+    assert cat.description_updated_at is not None
+
+
+async def test_repo_update_table_description_not_found() -> None:
+    """目录不存在：返回 None（由 API 层抛 404）。"""
+    repo = CollectorRepository(_session(scalar_one_or_none=None))
+    result = await repo.update_table_description(
+        catalog_id=999, description="x", source="manual"
+    )
+    assert result is None
+
+
+def _coverage_session() -> MagicMock:
+    """构造 coverage 统计用 session：三次 execute 返回 catalog/desc/source。"""
+    s = MagicMock()
+
+    cat1 = MagicMock()
+    cat1.id = 1
+    cat1.entity_name = "ods_order"
+    cat1.source_id = "s1"
+    cat1.entity_type = "TABLE"
+    cat1.sensitivity_level = "INTERNAL"
+    cat1.schema_json = {
+        "columns": [
+            {"name": "id", "type": "bigint", "comment": ""},
+            {"name": "name", "type": "varchar", "comment": "用户名"},
+        ]
+    }
+    cat1.description = None
+
+    cat2 = MagicMock()
+    cat2.id = 2
+    cat2.entity_name = "dwd_user"
+    cat2.source_id = "s2"
+    cat2.entity_type = "TABLE"
+    cat2.sensitivity_level = "CONFIDENTIAL"
+    cat2.schema_json = {
+        "columns": [
+            {"name": "email", "type": "varchar", "comment": ""},
+            {"name": "phone", "type": "varchar", "comment": ""},
+        ]
+    }
+    cat2.description = "用户明细表"
+
+    desc = MagicMock()
+    desc.catalog_id = 2
+    desc.column_name = "email"
+    desc.source = "manual"
+
+    res_cats = MagicMock()
+    res_cats.scalars.return_value.all.return_value = [cat1, cat2]
+    res_descs = MagicMock()
+    res_descs.scalars.return_value.all.return_value = [desc]
+    res_srcs = MagicMock()
+    res_srcs.all.return_value = [
+        SimpleNamespace(source_id="s1", domain="sales"),
+        SimpleNamespace(source_id="s2", domain="platform"),
+    ]
+
+    s.execute = AsyncMock(side_effect=[res_cats, res_descs, res_srcs])
+    return s
+
+
+async def test_repo_get_description_coverage_stats() -> None:
+    """覆盖统计：表/字段覆盖率、按表列缺失字段数、domain join。"""
+    repo = CollectorRepository(_coverage_session())
+    cov = await repo.get_description_coverage()
+
+    assert cov["total_tables"] == 2
+    assert cov["tables_with_desc"] == 1
+    assert cov["tables_missing_desc"] == 1
+    assert cov["total_fields"] == 4
+    # cat1.name(schema comment) + cat2.email(manual 记录) = 2
+    assert cov["fields_with_desc"] == 2
+    assert cov["fields_missing_desc"] == 2
+
+    by_name = {t["entity_name"]: t for t in cov["per_table"]}
+    assert by_name["ods_order"]["missing_fields"] == 1
+    assert by_name["ods_order"]["domain"] == "sales"
+    assert by_name["ods_order"]["table_desc"] is False
+    assert by_name["ods_order"]["sensitivity_level"] == "INTERNAL"
+    assert by_name["dwd_user"]["missing_fields"] == 1
+    assert by_name["dwd_user"]["domain"] == "platform"
+    assert by_name["dwd_user"]["table_desc"] is True
+    assert by_name["dwd_user"]["sensitivity_level"] == "CONFIDENTIAL"

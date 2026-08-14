@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -172,3 +173,97 @@ async def test_list_catalog_databases_returns_distinct(
     # 校验 source_id 透传到 service
     call_kwargs = mock_list.await_args.args
     assert call_kwargs[0] == "mysql_unisense"
+
+
+# ---- 表级业务描述 + 描述缺失统计（TD §12.1） ----
+
+
+async def test_get_description_coverage_endpoint(collector_client: httpx.AsyncClient) -> None:
+    """GET /catalogs/description-coverage 返回表/字段覆盖统计。"""
+    fake_svc = MagicMock()
+    fake_svc._repo.get_description_coverage = AsyncMock(
+        return_value={
+            "total_tables": 2,
+            "tables_with_desc": 1,
+            "tables_missing_desc": 1,
+            "total_fields": 4,
+            "fields_with_desc": 2,
+            "fields_missing_desc": 2,
+            "per_table": [
+                {
+                    "catalog_id": 1,
+                    "entity_name": "ods_order",
+                    "source_id": "s1",
+                    "entity_type": "TABLE",
+                    "domain": "sales",
+                    "sensitivity_level": "INTERNAL",
+                    "table_desc": False,
+                    "total_fields": 2,
+                    "covered_fields": 1,
+                    "missing_fields": 1,
+                }
+            ],
+        }
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc):
+        resp = await collector_client.get("/api/v1/catalogs/description-coverage")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total_tables"] == 2
+    assert data["fields_missing_desc"] == 2
+    assert data["per_table"][0]["entity_name"] == "ods_order"
+
+
+async def test_update_table_description_endpoint(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """PUT /catalogs/{id}/description 人工编辑表级描述。"""
+    fake_svc = MagicMock()
+    fake_svc._repo.update_table_description = AsyncMock(
+        return_value=SimpleNamespace(
+            id=1,
+            description="订单明细表",
+            description_source="manual",
+            description_updated_by=7,
+            description_updated_at=None,
+        )
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc):
+        resp = await collector_client.put(
+            "/api/v1/catalogs/1/description",
+            json={"description": "订单明细表"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["description"] == "订单明细表"
+    assert data["source"] == "manual"
+    assert data["catalog_id"] == 1
+
+
+async def test_infer_table_description_endpoint(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """POST /catalogs/{id}/infer-table-description LLM 推断表级描述并落库。"""
+    fake_svc = MagicMock()
+    fake_svc._llm_infer_table_description = AsyncMock(
+        return_value={"description": "订单明细事实表", "confidence": 0.9}
+    )
+    fake_svc._repo.update_table_description = AsyncMock(
+        return_value=SimpleNamespace(
+            id=1,
+            description="订单明细事实表",
+            description_source="llm",
+            description_updated_by=None,
+            description_updated_at=None,
+        )
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc):
+        resp = await collector_client.post(
+            "/api/v1/catalogs/1/infer-table-description",
+            json={"fields": [{"name": "order_id", "type": "bigint"}]},
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["description"] == "订单明细事实表"
+    assert data["source"] == "llm"
+    assert data["confidence"] == 0.9

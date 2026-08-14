@@ -9,7 +9,7 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Enum, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import BOOLEAN, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -209,6 +209,28 @@ class DBCatalog(Base, BaseModel):
         nullable=False,
         default=False,
         comment="空 schema 标记",
+    )
+    # ---- 表级业务描述（治理补全，采集不覆盖，TD §12.1）----
+    description: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="表级业务描述（治理补全）"
+    )
+    description_source: Mapped[str | None] = mapped_column(
+        Enum(
+            *[e.value for e in DescriptionSourceEnum],
+            name="description_source_enum",
+        ),
+        nullable=True,
+        comment="表级描述来源（manual/llm）",
+    )
+    description_updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", name="fk_db_catalog_desc_user"),
+        nullable=True,
+        comment="表级描述编辑者（LLM 推断为 NULL）",
+    )
+    description_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="表级描述更新时间（UTC）",
     )
 
     __table_args__ = (

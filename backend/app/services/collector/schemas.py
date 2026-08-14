@@ -204,6 +204,11 @@ class DBCatalogResponse(BaseModel):
     upstream_signature: str
     content_signature: str | None = None
     schema_incomplete: bool = False
+    # 表级业务描述（治理补全，TD §12.1；采集不覆盖）
+    description: str | None = None
+    description_source: str | None = None
+    description_updated_by: int | None = None
+    description_updated_at: Any = None
     # 数据源维度展示信息（默认 False/None——源被软删或不存在时 source_deleted=True）
     source_deleted: bool = False
     source_name: str | None = None
@@ -354,3 +359,66 @@ class UpdateDescriptionResponse(BaseModel):
     source: str = "manual"
     updated_by: int | None = None
     updated_at: Any = None
+
+
+# ---- 表级业务描述 + 描述缺失统计 Schema（TD §12.1）----
+
+
+class TableDescriptionRequest(BaseModel):
+    """人工编辑表级描述请求。"""
+
+    description: str = Field(min_length=1, max_length=2000, description="表级业务描述")
+
+
+class TableDescriptionResponse(BaseModel):
+    """表级描述响应。"""
+
+    catalog_id: int
+    description: str
+    source: str
+    updated_by: int | None = None
+    updated_at: Any = None
+
+
+class InferTableDescriptionRequest(BaseModel):
+    """LLM 推断表级描述请求（字段清单上下文，可空）。"""
+
+    fields: list[dict[str, Any]] | None = Field(
+        default=None, description="字段清单（空则服务端取 schema_json）"
+    )
+
+
+class InferTableDescriptionResponse(BaseModel):
+    """LLM 推断表级描述响应。"""
+
+    catalog_id: int
+    description: str
+    source: str = "llm"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class TableCoverageItem(BaseModel):
+    """按表列描述覆盖明细。"""
+
+    catalog_id: int
+    entity_name: str
+    source_id: str
+    entity_type: str
+    domain: str | None = None
+    sensitivity_level: str
+    table_desc: bool
+    total_fields: int
+    covered_fields: int
+    missing_fields: int
+
+
+class DescriptionCoverageResponse(BaseModel):
+    """描述缺失统计响应。"""
+
+    total_tables: int
+    tables_with_desc: int
+    tables_missing_desc: int
+    total_fields: int
+    fields_with_desc: int
+    fields_missing_desc: int
+    per_table: list[TableCoverageItem]

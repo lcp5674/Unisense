@@ -168,20 +168,93 @@ async def test_llm_infer_column_description_runtime_error():
     mock_client.close.assert_awaited_once()
 
 
+# ---- 表级业务描述推断（TD §12.1） ----
+
+
 @pytest.mark.asyncio
-async def test_llm_infer_column_description_connection_error():
-    """LLM 连接错误：返回 None，降级不阻断。"""
+async def test_llm_infer_table_description_normal():
+    """正常推断：基于表名 + 字段清单返回表级描述。"""
     svc, _ = _svc()
 
     mock_client = AsyncMock()
     mock_client.enabled = True
-    mock_client.chat = AsyncMock(side_effect=ConnectionError("Connection refused"))
+    mock_client.chat = AsyncMock(
+        return_value={"description": "订单明细事实表", "confidence": 0.9}
+    )
+    mock_client.close = AsyncMock()
+
+    columns = [
+        {"name": "order_id", "type": "bigint"},
+        {"name": "user_id", "type": "bigint"},
+    ]
+    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+        result = await svc._llm_infer_table_description(
+            entity_name="dwd_order", columns=columns
+        )
+
+    assert result is not None
+    assert result["description"] == "订单明细事实表"
+    assert result["confidence"] == 0.9
+    mock_client.close.assert_awaited_once()
+    # 字段清单应传给 LLM 上下文
+    call_content = mock_client.chat.await_args.args[0][1]["content"]
+    assert "order_id" in call_content
+
+
+@pytest.mark.asyncio
+async def test_llm_infer_table_description_truncates_many_columns():
+    """字段超 30 个时截断，避免请求体过长。"""
+    svc, _ = _svc()
+
+    mock_client = AsyncMock()
+    mock_client.enabled = True
+    mock_client.chat = AsyncMock(
+        return_value={"description": "大宽表", "confidence": 0.8}
+    )
+    mock_client.close = AsyncMock()
+
+    columns = [{"name": f"col_{i}", "type": "varchar"} for i in range(50)]
+    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+        result = await svc._llm_infer_table_description(
+            entity_name="dwd_wide", columns=columns
+        )
+
+    assert result is not None
+    call_content = mock_client.chat.await_args.args[0][1]["content"]
+    assert "col_49" not in call_content  # 超出 30 个被截断
+
+
+@pytest.mark.asyncio
+async def test_llm_infer_table_description_disabled():
+    """LLM 不可用：返回 None，不阻断。"""
+    svc, _ = _svc()
+
+    mock_client = AsyncMock()
+    mock_client.enabled = False
     mock_client.close = AsyncMock()
 
     with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
-        result = await svc._llm_infer_column_description(
-            entity_name="dwd_order",
-            column_name="user_id",
+        result = await svc._llm_infer_table_description(
+            entity_name="dwd_order", columns=[]
+        )
+
+    assert result is None
+    mock_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_llm_infer_table_description_timeout():
+    """LLM 超时：返回 None，降级不阻断。"""
+    svc, _ = _svc()
+
+    mock_client = AsyncMock()
+    mock_client.enabled = True
+    mock_client.chat = AsyncMock(side_effect=TimeoutError("LLM timeout"))
+    mock_client.close = AsyncMock()
+
+    with patch("app.services.llm.client.build_llm_client", return_value=mock_client):
+        result = await svc._llm_infer_table_description(
+            entity_name="dwd_order", columns=[]
         )
 
     assert result is None
