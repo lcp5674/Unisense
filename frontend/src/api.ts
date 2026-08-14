@@ -1569,6 +1569,12 @@ export async function updateDataSource(
   });
 }
 
+export async function deleteDataSource(sourceId: string): Promise<void> {
+  await request<void>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function listDataSourceTypes(): Promise<SourceTypeInfo[]> {
   return request<SourceTypeInfo[]>(`${API_BASE}/data-sources/types`);
 }

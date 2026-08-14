@@ -26,6 +26,7 @@ vi.mock("../api", () => {
     listDomainTree: vi.fn(),
     createDataSource: vi.fn(),
     updateDataSource: vi.fn(),
+    deleteDataSource: vi.fn(),
     testDataSourceConnection: vi.fn(),
     checkDataSourceConnection: vi.fn(),
     collectSourceNow: vi.fn(),
@@ -47,6 +48,7 @@ import {
   listDomainTree,
   createDataSource,
   updateDataSource,
+  deleteDataSource,
   testDataSourceConnection,
   checkDataSourceConnection,
   getSourceHealth,
@@ -64,6 +66,7 @@ const mockedTypes = vi.mocked(listDataSourceTypes);
 const mockedDomains = vi.mocked(listDomainTree);
 const mockedCreate = vi.mocked(createDataSource);
 const mockedUpdate = vi.mocked(updateDataSource);
+const mockedDelete = vi.mocked(deleteDataSource);
 const mockedTest = vi.mocked(testDataSourceConnection);
 const mockedCheck = vi.mocked(checkDataSourceConnection);
 const mockedHealth = vi.mocked(getSourceHealth);
@@ -347,6 +350,28 @@ describe("DataSources", () => {
     fireEvent.click(screen.getByText("立即重新采集"));
     await waitFor(() => {
       expect(mockedCollectNow).toHaveBeenCalledWith("mysql_finance", "FULL");
+    });
+  });
+
+  it("删除数据源：详情抽屉删除按钮二次确认后调用接口并刷新列表", async () => {
+    mockedDelete.mockResolvedValue(undefined);
+    renderSources();
+    await waitFor(() => expect(screen.getByText("mysql_finance")).toBeTruthy());
+    // 打开详情抽屉
+    fireEvent.click(screen.getByText("管理"));
+    // 未确认前不调用删除接口
+    expect(mockedDelete).not.toHaveBeenCalled();
+    // 点击删除 → Popconfirm 弹窗出现
+    fireEvent.click(screen.getByText("删除"));
+    await screen.findByText("删除数据源");
+    // 确认删除
+    fireEvent.click(screen.getByText("确认删除"));
+    await waitFor(() => {
+      expect(mockedDelete).toHaveBeenCalledWith("mysql_finance");
+    });
+    // 删除后刷新列表
+    await waitFor(() => {
+      expect(mockedList).toHaveBeenCalled();
     });
   });
 });

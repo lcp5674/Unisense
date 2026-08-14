@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse } from "antd";
-import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm } from "antd";
+import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined, DeleteOutlined } from "@ant-design/icons";
 import {
   listDataSources,
   getDataSource,
   createDataSource,
   updateDataSource,
+  deleteDataSource,
   collectSourceNow,
   streamCollectionJob,
   getCollectionJob,
@@ -102,11 +103,15 @@ function SourceDetailModal({
   types,
   onClose,
   onEdit,
+  onDelete,
+  deleting,
 }: {
   source: DataSource;
   types: SourceTypeInfo[];
   onClose: () => void;
   onEdit: (source: DataSource) => void;
+  onDelete: (source: DataSource) => void;
+  deleting: boolean;
 }) {
   const navigate = useNavigate();
   const [health, setHealth] = useState<SourceHealth | null>(null);
@@ -421,6 +426,16 @@ function SourceDetailModal({
         />
         <Select value={scheduleMode} onChange={setScheduleMode} style={{ width: 130 }} options={[{ value: "FULL", label: "全量" }, { value: "INCREMENTAL", label: "增量" }]} />
         <Button icon={<ScheduleOutlined />} onClick={handleSchedule}>设置调度</Button>
+        <Popconfirm
+          title="删除数据源"
+          description={`确定删除「${source.name}」？其采集目录、水位、漂移日志将一并清理，删除后原 ID 可重建同名数据源。`}
+          okText="确认删除"
+          okButtonProps={{ danger: true }}
+          cancelText="取消"
+          onConfirm={() => onDelete(source)}
+        >
+          <Button danger icon={<DeleteOutlined />} loading={deleting}>删除</Button>
+        </Popconfirm>
       </Space>
     </Modal>
   );
@@ -436,6 +451,7 @@ export function DataSources() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<DataSource | null>(null);
   const [detail, setDetail] = useState<DataSource | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [types, setTypes] = useState<SourceTypeInfo[]>(FALLBACK_TYPES);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 数据库枚举（测试连接通过后自动列出，供选择目标库）
@@ -580,6 +596,26 @@ export function DataSources() {
     setDbOptions([]);
     setDbEnumerated(false);
     setModalOpen(true);
+  }
+
+  async function handleDeleteSource(source: DataSource) {
+    setDeleting(true);
+    try {
+      await deleteDataSource(source.source_id);
+      message.success(`数据源「${source.name}」已删除`);
+      setDetail(null);
+      // 当前页删空后回退到上一页，避免停在空页
+      if (items.length === 1 && page > 1) {
+        setPage(page - 1);
+        load(page - 1, pageSize);
+      } else {
+        load();
+      }
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "删除失败");
+    } finally {
+      setDeleting(false);
+    }
   }
 
   function openEdit(source: DataSource) {
@@ -880,8 +916,10 @@ export function DataSources() {
         <SourceDetailModal
           source={detail}
           types={types}
+          deleting={deleting}
           onClose={() => setDetail(null)}
           onEdit={(s) => { setDetail(null); openEdit(s); }}
+          onDelete={handleDeleteSource}
         />
       )}
 
