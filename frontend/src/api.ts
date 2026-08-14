@@ -53,7 +53,9 @@ import {
   GrantCreate,
   GrantResponse,
   ImpactPreview,
+  LineageChannel,
   LineageEdgePage,
+  LineageIngestRun,
   ListDatabasesResult,
   MetricCreateRequest,
   MetricListResponse,
@@ -91,6 +93,7 @@ import {
   SourceHealth,
   SourceType,
   SourceTypeInfo,
+  StaleEdge,
   SubscriptionPref,
   SubjectDomain,
   SubjectDomainCreateRequest,
@@ -601,6 +604,30 @@ export async function lineageImpactPreview(
     method: "POST",
     body: JSON.stringify({ metric_code: metricCode, change_type: changeType }),
   });
+}
+
+// ---- 血缘采集通道（增量采集运维）----
+export async function lineageChannels(): Promise<LineageChannel[]> {
+  return request<LineageChannel[]>(`${API_BASE}/lineage/channels`);
+}
+
+export async function lineageChannelRuns(source: string, limit = 20): Promise<LineageIngestRun[]> {
+  return request<LineageIngestRun[]>(
+    `${API_BASE}/lineage/channels/${encodeURIComponent(source)}/runs?limit=${limit}`,
+  );
+}
+
+export async function lineageStale(source?: string, limit = 200): Promise<StaleEdge[]> {
+  const qs = source ? `?source=${encodeURIComponent(source)}&limit=${limit}` : `?limit=${limit}`;
+  return request<StaleEdge[]>(`${API_BASE}/lineage/stale${qs}`);
+}
+
+export async function confirmStaleEdge(edgeId: number): Promise<StaleEdge> {
+  return request<StaleEdge>(`${API_BASE}/lineage/stale/${edgeId}/confirm`, { method: "POST" });
+}
+
+export async function restoreStaleEdge(edgeId: number): Promise<StaleEdge> {
+  return request<StaleEdge>(`${API_BASE}/lineage/stale/${edgeId}/restore`, { method: "POST" });
 }
 
 // ---- 收藏（consume 服务）----
@@ -1674,6 +1701,8 @@ export async function fetchAssetGraph(params?: {
     id: string;
     type: string;
     label: string;
+    /** db_catalog 主键（表/视图节点下钻实体详情用） */
+    entity_id?: number;
     pii?: boolean;
     domain?: string;
     owner?: string;

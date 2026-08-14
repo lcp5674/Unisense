@@ -252,6 +252,43 @@ export interface ImpactPreview {
   risk_level: "low" | "medium" | "high" | "critical";
 }
 
+// 血缘采集通道运行记录（后端 lineage/schemas.py 的 LineageIngestRunResponse）
+export interface LineageIngestRun {
+  id: number;
+  source: string;
+  run_at: string;
+  status: string;
+  total_edges: number;
+  added_count: number;
+  updated_count: number;
+  missing_count: number;
+  stale_flagged_count: number;
+  restored_count: number;
+  error?: string | null;
+}
+
+// 血缘采集通道总览（后端 LineageChannelResponse）
+export interface LineageChannel {
+  source: string;
+  edge_count: number;
+  node_count: number;
+  stale_count: number;
+  last_run?: LineageIngestRun | null;
+}
+
+// 失效队列边（后端 StaleEdgeResponse）
+export interface StaleEdge {
+  id: number;
+  source_node: string;
+  target_node: string;
+  edge_type: string;
+  granularity: string;
+  confidence: number;
+  provenance: string;
+  missing_count: number;
+  stale_since?: string | null;
+}
+
 // 收藏（backend/app/api/consume.py）：GET 返回 string[]，POST 返回 FavoriteResponse
 export interface FavoriteResponse {
   metric_code: string;
@@ -1037,6 +1074,32 @@ export interface AssetTableItem {
   updated_at?: string | null;
 }
 
+/** 字段描述来源 */
+export type DescriptionSource = "manual" | "llm" | "schema";
+
+/** Schema 字段结构（含优先级合并后的描述与来源标记） */
+export interface SchemaColumn {
+  name: string;
+  type?: string;
+  comment?: string;
+  /** 优先级合并后最终展示描述（manual > llm > schema_json comment） */
+  description?: string;
+  /** 描述来源标记 */
+  description_source?: DescriptionSource | null;
+  nullable?: boolean;
+  default?: string;
+}
+
+/** 独立字段描述记录（对应 column_descriptions 表） */
+export interface ColumnDescription {
+  catalog_id: number;
+  column_name: string;
+  description: string;
+  source: DescriptionSource;
+  updated_by: number | null;
+  updated_at: string;
+}
+
 // 实体详情（GET /api/v1/assetmap/entities/{entity_id}，A1 新增端点）
 export interface AssetEntityDetail {
   id: number;
@@ -1047,8 +1110,8 @@ export interface AssetEntityDetail {
   owner_id: number | null;
   schema_incomplete: boolean;
   content_signature: string | null;
-  /** schema 摘要：后端可能返回字符串摘要或结构化对象 */
-  schema_summary?: string | Record<string, unknown> | null;
+  /** schema 摘要：结构化字段列表或字符串/null */
+  schema_summary?: SchemaColumn[] | string | null;
   /** 血缘相关边数（表/字段级别） */
   lineage_count?: number;
   /** 血缘边明细列表（生产化增强） */

@@ -1,8 +1,43 @@
 import { useState } from "react";
-import { Button, Card, Input, Select, Space, Table, Tag, message, Tabs, Alert } from "antd";
-import { SearchOutlined, CodeOutlined, ApartmentOutlined } from "@ant-design/icons";
-import { lineageImpact, lineageEdges, lineageImpactPreview, parseLineage, UnisenseApiError } from "../api";
-import type { LineageEdge } from "../types";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Col,
+  Empty,
+  Input,
+  Popconfirm,
+  Row,
+  Select,
+  Space,
+  Statistic,
+  Table,
+  Tag,
+  Tabs,
+  message,
+} from "antd";
+import {
+  ApartmentOutlined,
+  CodeOutlined,
+  DatabaseOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  SyncOutlined,
+} from "@ant-design/icons";
+import {
+  confirmStaleEdge,
+  lineageChannelRuns,
+  lineageChannels,
+  lineageEdges,
+  lineageImpact,
+  lineageImpactPreview,
+  lineageStale,
+  parseLineage,
+  restoreStaleEdge,
+  UnisenseApiError,
+} from "../api";
+import type { LineageChannel, LineageEdge, LineageIngestRun, StaleEdge } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
 
@@ -76,6 +111,7 @@ function ImpactTab() {
     { title: "目标", dataIndex: "target_node", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
     { title: "类型", dataIndex: "edge_type", key: "type", render: (v: string) => <Tag>{EDGE_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "粒度", dataIndex: "granularity", key: "granularity", width: 100, render: (v: string) => enumLabel(GRANULARITY_LABEL, v) },
+    { title: "来源", dataIndex: "provenance", key: "provenance", width: 110, render: (v: string) => <Tag color="blue">{v}</Tag> },
     { title: "置信度", dataIndex: "confidence", key: "confidence", width: 90, render: (v: number) => `${(v * 100).toFixed(0)}%` },
     { title: "PII", dataIndex: "pii_inherited", key: "pii", width: 70, render: (v?: boolean) => (v ? <Tag color="red">PII</Tag> : null) },
   ];
@@ -84,13 +120,13 @@ function ImpactTab() {
     <div>
       <Space style={{ marginBottom: 16 }} wrap>
         <Input
-          placeholder="节点（指标编码 / 表名）"
+          placeholder="节点（table:库.表 / metric:编码 / 指标编码）"
           value={node}
           onChange={(e) => setNode(e.target.value)}
           onPressEnter={loadImpact}
           prefix={<SearchOutlined />}
           className="mono"
-          style={{ width: 300 }}
+          style={{ width: 320 }}
         />
         <Select
           value={direction}
@@ -199,10 +235,182 @@ function ParseTab() {
   );
 }
 
+const CHANNEL_STATUS_LABEL: Record<string, string> = {
+  running: "采集中",
+  success: "成功",
+  failed: "失败",
+};
+
+const STALE_STATUS_COLOR: Record<string, string> = {
+  running: "processing",
+  success: "success",
+  failed: "error",
+};
+
+function ChannelsTab() {
+  const [channels, setChannels] = useState<LineageChannel[]>([]);
+  const [stale, setStale] = useState<StaleEdge[]>([]);
+  const [runs, setRuns] = useState<LineageIngestRun[]>([]);
+  const [activeSource, setActiveSource] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const { track } = useTracking();
+
+  async function loadChannels() {
+    setLoading(true);
+    try {
+      const [ch, st] = await Promise.all([lineageChannels(), lineageStale()]);
+      setChannels(ch);
+      setStale(st);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载采集通道失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadRuns(source: string) {
+    setActiveSource(source);
+    try {
+      setRuns(await lineageChannelRuns(source));
+      track("lineage_channel_runs", source, "source");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载运行历史失败");
+    }
+  }
+
+  async function handleConfirm(edge: StaleEdge) {
+    try {
+      await confirmStaleEdge(edge.id);
+      message.success("已确认失效并删除该血缘边");
+      track("lineage_stale_confirm", String(edge.id), "edge");
+      await loadChannels();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
+  }
+
+  async function handleRestore(edge: StaleEdge) {
+    try {
+      await restoreStaleEdge(edge.id);
+      message.success("已恢复该血缘边");
+      track("lineage_stale_restore", String(edge.id), "edge");
+      await loadChannels();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
+  }
+
+  const runColumns = [
+    { title: "运行时间", dataIndex: "run_at", key: "run_at", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v?.replace("T", " ").slice(0, 19)}</span> },
+    { title: "状态", dataIndex: "status", key: "status", width: 90, render: (v: string) => <Badge status={STALE_STATUS_COLOR[v] as "success" | "processing" | "error"} text={CHANNEL_STATUS_LABEL[v] ?? v} /> },
+    { title: "总边数", dataIndex: "total_edges", key: "total", width: 80 },
+    { title: "新增", dataIndex: "added_count", key: "added", width: 70, render: (v: number) => <Tag color="green">+{v}</Tag> },
+    { title: "更新", dataIndex: "updated_count", key: "updated", width: 70, render: (v: number) => <Tag color="blue">~{v}</Tag> },
+    { title: "未再出现", dataIndex: "missing_count", key: "missing", width: 80 },
+    { title: "新失效", dataIndex: "stale_flagged_count", key: "stale", width: 80, render: (v: number) => (v ? <Tag color="orange">{v}</Tag> : 0) },
+    { title: "恢复", dataIndex: "restored_count", key: "restored", width: 70, render: (v: number) => (v ? <Tag color="cyan">{v}</Tag> : 0) },
+  ];
+
+  const staleColumns = [
+    { title: "源", dataIndex: "source_node", key: "source", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "目标", dataIndex: "target_node", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "来源", dataIndex: "provenance", key: "provenance", width: 110, render: (v: string) => <Tag color="blue">{v}</Tag> },
+    { title: "连续未确认", dataIndex: "missing_count", key: "missing", width: 110, render: (v: number) => <Tag color={v >= 3 ? "red" : "orange"}>{v} 轮</Tag> },
+    { title: "进入失效", dataIndex: "stale_since", key: "since", width: 160, render: (v?: string) => <span className="mono" style={{ fontSize: 12 }}>{v?.replace("T", " ").slice(0, 19)}</span> },
+    {
+      title: "操作",
+      key: "action",
+      width: 160,
+      render: (_: unknown, edge: StaleEdge) => (
+        <Space>
+          <Popconfirm title="确认删除该失效血缘边？" onConfirm={() => handleConfirm(edge)}>
+            <Button size="small" danger>确认删除</Button>
+          </Popconfirm>
+          <Popconfirm title="恢复该血缘边？" onConfirm={() => handleRestore(edge)}>
+            <Button size="small">恢复</Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div>
+      <Space style={{ marginBottom: 16 }} wrap>
+        <Button icon={<ReloadOutlined />} onClick={loadChannels} loading={loading}>
+          刷新
+        </Button>
+        <span className="muted" style={{ fontSize: 13 }}>
+          各来源通道（DP 同步 / SQL 解析 / 数据接口）的采集运行与失效治理。连续多轮未确认的边进入失效队列，由人工处置。
+        </span>
+      </Space>
+
+      {channels.length === 0 && !loading ? (
+        <Empty description="暂无血缘采集通道。运行 scripts/import_dp_lineage.py 或通过 SQL 解析写入血缘。" />
+      ) : (
+        <Row gutter={[16, 16]}>
+          {channels.map((c) => {
+            const last = c.last_run;
+            return (
+              <Col xs={24} sm={12} lg={8} key={c.source}>
+                <Card
+                  size="small"
+                  title={<Space><DatabaseOutlined /><span className="mono">{c.source}</span></Space>}
+                  extra={last ? <Badge status={STALE_STATUS_COLOR[last.status] as "success" | "processing" | "error"} text={CHANNEL_STATUS_LABEL[last.status] ?? last.status} /> : null}
+                  onClick={() => loadRuns(c.source)}
+                  style={{ cursor: "pointer" }}
+                >
+                  <Row gutter={8}>
+                    <Col span={8}><Statistic title="血缘边" value={c.edge_count} /></Col>
+                    <Col span={8}><Statistic title="涉及节点" value={c.node_count} /></Col>
+                    <Col span={8}><Statistic title="失效边" value={c.stale_count} valueStyle={{ color: c.stale_count ? "#cf1322" : undefined }} /></Col>
+                  </Row>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                    {last
+                      ? `最近采集 ${last.run_at?.replace("T", " ").slice(0, 19)} · 新增 +${last.added_count} · 更新 ~${last.updated_count} · 失效 ${last.stale_flagged_count}`
+                      : "尚无采集运行记录（点击查看详情）"}
+                  </div>
+                </Card>
+              </Col>
+            );
+          })}
+        </Row>
+      )}
+
+      {activeSource && (
+        <Card size="small" title={`运行历史 · ${activeSource}`} style={{ marginTop: 16 }}>
+          <Table
+            dataSource={runs}
+            columns={runColumns}
+            rowKey="id"
+            size="small"
+            pagination={{ pageSize: 10, showSizeChanger: false }}
+          />
+        </Card>
+      )}
+
+      <Card size="small" title={<Space><SyncOutlined />失效队列（{stale.length}）</Space>} style={{ marginTop: 16 }}>
+        {stale.length === 0 ? (
+          <Empty description="暂无失效血缘边" />
+        ) : (
+          <Table
+            dataSource={stale}
+            columns={staleColumns}
+            rowKey="id"
+            size="small"
+            pagination={{ pageSize: 10, showSizeChanger: false }}
+          />
+        )}
+      </Card>
+    </div>
+  );
+}
+
 export function LineageView() {
   const tabItems = [
     { key: "impact", label: <span><ApartmentOutlined /> 血缘查询 / 影响分析</span>, children: <ImpactTab /> },
     { key: "parse", label: <span><CodeOutlined /> SQL 血缘解析</span>, children: <ParseTab /> },
+    { key: "channels", label: <span><DatabaseOutlined /> 采集通道</span>, children: <ChannelsTab /> },
   ];
 
   return (
@@ -211,7 +419,7 @@ export function LineageView() {
         <div>
           <div className="page-kicker">Lineage / Impact</div>
           <h2>血缘视图</h2>
-          <p>上下游血缘查询、what-if 变更影响预览、SQL 血缘解析入库。</p>
+          <p>上下游血缘查询、what-if 变更影响预览、SQL 血缘解析入库、采集通道增量运维。</p>
         </div>
       </div>
       <Card styles={{ body: { paddingTop: 16 } }}>
