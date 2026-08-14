@@ -22,6 +22,7 @@ from app.services.semantic.schemas import (
     MetricCompareRequest,
     MetricCreateRequest,
     MetricDeprecateRequest,
+    MetricDescriptionUpdateRequest,
     MetricEmergencyPublishRequest,
     MetricHealthResponse,
     MetricListParams,
@@ -253,6 +254,42 @@ async def update_metric(
         trace_id=trace_id,
     )
     # PLAT-3: 业务写入 + 审计同事务原子提交
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+@router.put(
+    "/{metric_code}/description",
+    response_model=ApiResponse[MetricResponse],
+    summary="更新指标业务描述（治理补充 TD §12.1，不触发版本/不参与口径变更）",
+    dependencies=_WRITE_DEPS,
+)
+async def update_metric_description(
+    metric_code: str,
+    request: MetricDescriptionUpdateRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """资产地图/指标详情补充描述；空串清除；写审计与业务同事务提交。"""
+    service = MetricService(db)
+    metric = await service.update_metric_description(
+        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="UPDATE",
+        entity_type="metric_description",
+        entity_id=metric.metric_code,
+        detail={"cleared": not (request.description or "").strip()},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(
         data=MetricResponse.model_validate(metric),

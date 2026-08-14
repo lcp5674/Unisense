@@ -63,15 +63,18 @@ import {
   fetchAssetSearch,
   fetchAssetSummary,
   fetchAssetTables,
+  getMetric,
   inferColumnDescription,
   inferDescriptions,
   inferTableDescription,
   listCatalogs,
   listDomainTree,
   listMetrics,
+  listSnapshots,
   listUsers,
   reclassifyAssetSensitivity,
   updateColumnDescription,
+  updateMetricDescription,
   updateTableDescription,
 } from "../api";
 import type {
@@ -86,7 +89,9 @@ import type {
   AssetPiiOverview,
   AssetSearchItem,
   AssetTableItem,
+  MetricResponse,
   SchemaColumn,
+  SnapshotResponse,
   SubjectDomainTreeNode,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
@@ -141,6 +146,69 @@ function descriptionSourceTag(source?: string | null) {
   const cfg = DESCRIPTION_SOURCE_TAG[source];
   if (!cfg) return <Tag>{source}</Tag>;
   return <Tag color={cfg.color}>{cfg.label}</Tag>;
+}
+
+// 指标口径明细：definition_json 结构化解构（SQL/表达式 + 度量 + 维度 + 源表 + 周期）
+function DefinitionsDetail({ def }: { def: Record<string, unknown> }) {
+  const sql = typeof def?.sql === "string" ? def.sql : undefined;
+  const expression = typeof def?.expression === "string" ? def.expression : undefined;
+  const period = typeof def?.period === "string" ? def.period : undefined;
+  const measureColumn = typeof def?.measure_column === "string" ? def.measure_column : undefined;
+  const measures = Array.isArray(def?.measures)
+    ? (def.measures as Array<{ name?: string; aggregation?: string }>)
+    : [];
+  const dimensions = Array.isArray(def?.dimensions) ? (def.dimensions as string[]) : [];
+  const sourceTables = Array.isArray(def?.source_tables) ? (def.source_tables as string[]) : [];
+  const sourceTable = typeof def?.source_table === "string" ? def.source_table : undefined;
+  const primaryMeasure = measures.length
+    ? `${measures[0].aggregation ?? ""}(${measures[0].name ?? ""})`.trim()
+    : null;
+
+  return (
+    <>
+      {sql ? (
+        <pre
+          style={{
+            background: "#f6f8fa",
+            padding: 10,
+            borderRadius: 6,
+            fontSize: 12,
+            overflowX: "auto",
+            marginBottom: 8,
+          }}
+        >
+          {sql}
+        </pre>
+      ) : expression ? (
+        <Descriptions column={1} size="small" bordered style={{ marginBottom: 8 }}>
+          <Descriptions.Item label="表达式">{expression}</Descriptions.Item>
+        </Descriptions>
+      ) : null}
+      <Descriptions column={2} size="small" bordered>
+        {primaryMeasure ? (
+          <Descriptions.Item label="主度量">{primaryMeasure}</Descriptions.Item>
+        ) : null}
+        {measureColumn ? (
+          <Descriptions.Item label="度量列">{measureColumn}</Descriptions.Item>
+        ) : null}
+        <Descriptions.Item label="统计周期">{period ?? "—"}</Descriptions.Item>
+        <Descriptions.Item label="维度">
+          {dimensions.length ? dimensions.join("，") : "—"}
+        </Descriptions.Item>
+        <Descriptions.Item label="源表">
+          {sourceTables.length ? sourceTables.join("，") : sourceTable ?? "—"}
+        </Descriptions.Item>
+        {measures.length > 1 ? (
+          <Descriptions.Item label="全量度量">
+            {measures
+              .map((m) => `${m.aggregation ?? ""}(${m.name ?? ""})`.trim())
+              .filter(Boolean)
+              .join("；")}
+          </Descriptions.Item>
+        ) : null}
+      </Descriptions>
+    </>
+  );
 }
 
 type DrillRow = Record<string, unknown>;
@@ -418,6 +486,14 @@ function GraphTab() {
   // 字段信息抽屉（field 节点无 entity_id 时的兜底展示 + 所属表入口）
   const [fieldNode, setFieldNode] = useState<AssetGraphNode | null>(null);
   const [fieldTableNode, setFieldTableNode] = useState<AssetGraphNode | null>(null);
+  // 指标详情抽屉（metric 节点下钻：明细 + 补充描述，TD §12.1）
+  const [metricOpen, setMetricOpen] = useState(false);
+  const [metricLoading, setMetricLoading] = useState(false);
+  const [metricData, setMetricData] = useState<MetricResponse | null>(null);
+  const [metricSnapshots, setMetricSnapshots] = useState<SnapshotResponse[]>([]);
+  const [metricDescEditing, setMetricDescEditing] = useState(false);
+  const [metricDescDraft, setMetricDescDraft] = useState("");
+  const [metricDescSaving, setMetricDescSaving] = useState(false);
 
   async function loadGraph() {
     setLoading(true);
@@ -515,9 +591,44 @@ function GraphTab() {
     }
   }
 
+  async function openMetric(code: string) {
+    setMetricOpen(true);
+    setMetricLoading(true);
+    setMetricData(null);
+    setMetricDescEditing(false);
+    try {
+      const [m, snaps] = await Promise.all([
+        getMetric(code),
+        listSnapshots(code, 50).catch(() => []),
+      ]);
+      setMetricData(m);
+      setMetricSnapshots(snaps);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载指标详情失败");
+    } finally {
+      setMetricLoading(false);
+    }
+  }
+
+  async function handleMetricDescSave() {
+    if (!metricData || !metricDescDraft.trim()) return;
+    setMetricDescSaving(true);
+    try {
+      await updateMetricDescription(metricData.metric_code, metricDescDraft.trim());
+      message.success("指标描述已保存");
+      setMetricDescEditing(false);
+      setMetricData(await getMetric(metricData.metric_code));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "保存指标描述失败");
+    } finally {
+      setMetricDescSaving(false);
+    }
+  }
+
   function handleNodeClick(node: AssetGraphNode) {
     if (node.type === "metric") {
-      navigate(`/detail/${encodeURIComponent(node.label)}`);
+      // 本页打开指标详情抽屉（明细 + 补充描述），用户可再决定是否跳转指标详情
+      openMetric(node.label);
       return;
     }
     if (node.entity_id != null) {
@@ -548,6 +659,39 @@ function GraphTab() {
 
   const detailHasPii =
     Boolean(detail?.pii_flag) || (detail?.sensitivity_level ?? "").includes("PII");
+
+  const snapshotColumns: ColumnsType<SnapshotResponse> = [
+    { title: "周期", dataIndex: "date_range", key: "date_range", width: 150 },
+    {
+      title: "维度",
+      dataIndex: "dims",
+      key: "dims",
+      width: 160,
+      render: (v: Record<string, unknown>) =>
+        v && typeof v === "object" && Object.keys(v).length ? JSON.stringify(v) : "—",
+    },
+    {
+      title: "数值",
+      dataIndex: "value_json",
+      key: "value_json",
+      render: (v: Record<string, unknown>) =>
+        v && typeof v === "object" && Object.keys(v).length ? JSON.stringify(v) : "—",
+    },
+    {
+      title: "质量",
+      dataIndex: "quality_flag",
+      key: "quality_flag",
+      width: 80,
+      render: (v: string | null) => v ?? "—",
+    },
+    {
+      title: "生成时间",
+      dataIndex: "generated_at",
+      key: "generated_at",
+      width: 170,
+      render: (v: string) => (v ? new Date(v).toLocaleString() : "—"),
+    },
+  ];
 
   return (
     <div>
@@ -585,6 +729,133 @@ function GraphTab() {
           layout="auto"
         />
       </Card>
+
+      {/* 指标详情抽屉：明细 + 补充描述（TD §12.1） */}
+      <Drawer
+        title={
+          metricData
+            ? `指标详情：${metricData.name}（${metricData.metric_code}）`
+            : "指标详情"
+        }
+        open={metricOpen}
+        onClose={() => setMetricOpen(false)}
+        width={760}
+      >
+        {metricLoading ? (
+          <Spin tip="加载指标详情…" />
+        ) : metricData ? (
+          <>
+            <Card size="small" title="业务描述" style={{ marginBottom: 16 }}>
+              {metricDescEditing ? (
+                <>
+                  <Input.TextArea
+                    rows={3}
+                    value={metricDescDraft}
+                    onChange={(e) => setMetricDescDraft(e.target.value)}
+                    placeholder="补充指标的业务含义、使用场景、注意事项…"
+                  />
+                  <Space style={{ marginTop: 8 }}>
+                    <Button
+                      type="primary"
+                      size="small"
+                      loading={metricDescSaving}
+                      onClick={handleMetricDescSave}
+                    >
+                      保存
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setMetricDescEditing(false);
+                        setMetricDescDraft(metricData.description ?? "");
+                      }}
+                    >
+                      取消
+                    </Button>
+                  </Space>
+                </>
+              ) : (
+                <>
+                  <div style={{ whiteSpace: "pre-wrap" }}>
+                    {metricData.description || (
+                      <span className="muted">暂无描述，点击下方按钮补充</span>
+                    )}
+                  </div>
+                  <Space size={8} style={{ marginTop: 8 }}>
+                    <Button
+                      size="small"
+                      icon={<EditOutlined />}
+                      onClick={() => {
+                        setMetricDescEditing(true);
+                        setMetricDescDraft(metricData.description ?? "");
+                      }}
+                    >
+                      补充描述
+                    </Button>
+                    {descriptionSourceTag(metricData.description_source)}
+                    {metricData.description_updated_at ? (
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        更新于 {new Date(metricData.description_updated_at).toLocaleString()}
+                      </span>
+                    ) : null}
+                  </Space>
+                </>
+              )}
+            </Card>
+
+            <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="指标名称">{metricData.name}</Descriptions.Item>
+              <Descriptions.Item label="指标编码">{metricData.metric_code}</Descriptions.Item>
+              <Descriptions.Item label="所属域">{metricData.domain}</Descriptions.Item>
+              <Descriptions.Item label="类型">{metricData.type}</Descriptions.Item>
+              <Descriptions.Item label="粒度">{metricData.granularity}</Descriptions.Item>
+              <Descriptions.Item label="单位">{metricData.unit}</Descriptions.Item>
+              <Descriptions.Item label="聚合方式">{metricData.aggregation}</Descriptions.Item>
+              <Descriptions.Item label="时间语义">{metricData.time_semantics}</Descriptions.Item>
+              <Descriptions.Item label="新鲜度">{metricData.freshness}</Descriptions.Item>
+              <Descriptions.Item label="数仓层">{metricData.dw_layer}</Descriptions.Item>
+              <Descriptions.Item label="指标分级">{metricData.metric_tier}</Descriptions.Item>
+              <Descriptions.Item label="状态">{metricData.status}</Descriptions.Item>
+              <Descriptions.Item label="可加性">{metricData.additivity}</Descriptions.Item>
+              <Descriptions.Item label="PII">
+                {metricData.pii_flag ? <Tag color="red">PII</Tag> : "否"}
+              </Descriptions.Item>
+              <Descriptions.Item label="版本">{metricData.version}</Descriptions.Item>
+              <Descriptions.Item label="Owner ID">{metricData.owner_id}</Descriptions.Item>
+            </Descriptions>
+
+            <Card size="small" title="口径明细" style={{ marginBottom: 16 }}>
+              <DefinitionsDetail def={metricData.definition_json} />
+            </Card>
+
+            <Card
+              size="small"
+              title="数值快照"
+              extra={
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={() => navigate(`/detail/${encodeURIComponent(metricData.metric_code)}`)}
+                >
+                  前往指标详情 →
+                </Button>
+              }
+            >
+              {metricSnapshots.length === 0 ? (
+                <Empty description="暂无查询快照（在指标详情执行查询后生成）" />
+              ) : (
+                <Table
+                  size="small"
+                  rowKey="id"
+                  dataSource={metricSnapshots}
+                  columns={snapshotColumns}
+                  pagination={false}
+                />
+              )}
+            </Card>
+          </>
+        ) : null}
+      </Drawer>
 
        <Drawer
          title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}

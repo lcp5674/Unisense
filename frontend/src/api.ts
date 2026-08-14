@@ -67,6 +67,7 @@ import {
   MetricCreateRequest,
   MetricListResponse,
   MetricDimension,
+  DimensionMetricBinding,
   MetricCompareResult,
   MetricHealth,
   MetricPublishRequest,
@@ -499,6 +500,20 @@ export async function updateMetric(
     method: "PUT",
     body: JSON.stringify(req),
   });
+}
+
+// 更新指标业务描述（治理补充 TD §12.1，不触发版本；空串清除）
+export async function updateMetricDescription(
+  code: string,
+  description: string,
+): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/description`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ description }),
+    },
+  );
 }
 
 export async function publishMetric(

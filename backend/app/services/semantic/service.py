@@ -30,6 +30,7 @@ from app.services.semantic.repository import MetricRepository
 from app.services.semantic.schemas import (
     MetricApproveRequest,
     MetricCreateRequest,
+    MetricDescriptionUpdateRequest,
     MetricEmergencyPublishRequest,
     MetricListParams,
     MetricPublishRequest,
@@ -746,6 +747,69 @@ class MetricService(BaseService):
             metric_code=metric_code,
             actor_id=actor_id,
             fields=list(updates.keys()),
+        )
+        return updated
+
+    async def update_metric_description(
+        self,
+        metric_code: str,
+        request: MetricDescriptionUpdateRequest,
+        actor_id: int,
+        role: str,
+        user_domain: str | None = None,
+    ) -> Metric:
+        """更新指标业务描述（治理补充 TD §12.1，不触发版本/不参与口径变更）。
+
+        与 ``update_metric`` 的版本状态机解耦：描述是运营层补充说明，
+        不属口径定义，因此不创建 MetricVersion、不设 PII 复核闸门。
+        权限沿用 owner/admin + PDP write。
+
+        Args:
+            metric_code: 指标编码。
+            request: 描述更新请求（空串=清除描述）。
+            actor_id: 操作人 ID。
+            role: 操作人角色。
+            user_domain: 操作人所属域（API 层传入）。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            AuthError: metric_owner 操作他人指标（越权）。
+            BusinessError: PDP 无 write 权限。
+        """
+        metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权更新该指标描述",
+                error_code=decision.error_code or "FORBIDDEN",
+                ctx={"metric_code": metric_code, "actor_id": actor_id},
+            )
+
+        stripped = request.description.strip()
+        updates: dict[str, Any] = {
+            "description": stripped or None,
+            "description_source": "manual" if stripped else None,
+            "description_updated_by": actor_id,
+            "description_updated_at": datetime.now(UTC),
+        }
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id, metric.row_version, **updates
+        )
+        await self._cache.invalidate(metric_code)
+
+        logger.info(
+            "metric_description_updated",
+            metric_code=metric_code,
+            actor_id=actor_id,
+            cleared=not stripped,
         )
         return updated
 

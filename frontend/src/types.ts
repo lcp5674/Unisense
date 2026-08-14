@@ -51,6 +51,11 @@ export interface MetricResponse {
   pending_conflict: boolean;
   pending_conflict_detail: Record<string, unknown> | null;
   pending_version: boolean;
+  /** 指标业务描述（治理补充 TD §12.1，资产地图/详情展示与编辑） */
+  description?: string | null;
+  description_source?: string | null;
+  description_updated_by?: number | null;
+  description_updated_at?: string | null;
   /** 健康度信号（列表接口批量回填，无评分记录时为 null）：score 0-100 / level EXCELLENT|GOOD|WARNING|CRITICAL */
   health_score?: number | null;
   health_level?: string | null;

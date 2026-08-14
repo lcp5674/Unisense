@@ -21,6 +21,7 @@ from app.services.governance.policy import Decision
 from app.services.semantic.schemas import (
     MetricApproveRequest,
     MetricCreateRequest,
+    MetricDescriptionUpdateRequest,
     MetricEmergencyPublishRequest,
     MetricListParams,
     MetricPublishRequest,
@@ -2050,3 +2051,87 @@ async def test_auto_accept_timeout_partial_rejected_returns_none():
     assert repo.update_confirmation_status.call_args.args[1] == "TIMEOUT_ACCEPTED"
     # 未触发转正
     repo.update_with_optimistic_lock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# update_metric_description（TD §12.1 指标业务描述，不触发版本/不参与口径变更）
+# ---------------------------------------------------------------------------
+
+
+async def test_update_metric_description_sets_manual_source():
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="PUBLISHED", row_version=3, version=2)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    updated = make_metric(status="PUBLISHED", row_version=4, version=2)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+
+    result = await svc.update_metric_description(
+        "sales_gmv_daily",
+        MetricDescriptionUpdateRequest(description="  每日成交总额（含退款前）  "),
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+    )
+
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["description"] == "每日成交总额（含退款前）"  # 去除首尾空白
+    assert kwargs["description_source"] == "manual"
+    assert kwargs["description_updated_by"] == 1
+    assert kwargs["description_updated_at"] is not None
+    # 描述更新不触发版本号递增
+    assert "version" not in kwargs
+    assert repo.create_version.call_count == 0
+    assert result is updated
+
+
+async def test_update_metric_description_clears_on_blank():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(description="旧描述"))
+    updated = make_metric(description=None, description_source=None)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+
+    await svc.update_metric_description(
+        "sales_gmv_daily",
+        MetricDescriptionUpdateRequest(description="   "),
+        actor_id=1,
+        role="metric_owner",
+    )
+
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["description"] is None
+    assert kwargs["description_source"] is None
+    assert kwargs["description_updated_by"] == 1
+
+
+async def test_update_metric_description_blocked_by_pdp():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    svc._governance_svc.check_metric_permission = AsyncMock(
+        return_value=Decision(allow=False, reason="no write", error_code="FORBIDDEN")
+    )
+
+    with pytest.raises(BusinessError) as ei:
+        await svc.update_metric_description(
+            "sales_gmv_daily",
+            MetricDescriptionUpdateRequest(description="越权描述"),
+            actor_id=9,
+            role="viewer",
+        )
+    assert ei.value.error_code == "FORBIDDEN"
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_update_metric_description_not_owner_raises_auth():
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(owner_id=1))
+
+    with pytest.raises(AuthError):
+        await svc.update_metric_description(
+            "sales_gmv_daily",
+            MetricDescriptionUpdateRequest(description="他人指标"),
+            actor_id=99,
+            role="analyst",
+            user_domain="sales",
+        )
+    repo.update_with_optimistic_lock.assert_not_called()
+

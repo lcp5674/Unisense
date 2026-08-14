@@ -32,6 +32,9 @@ vi.mock("../api", () => ({
   inferTableDescription: vi.fn(),
   updateColumnDescription: vi.fn(),
   updateTableDescription: vi.fn(),
+  getMetric: vi.fn(),
+  listSnapshots: vi.fn(),
+  updateMetricDescription: vi.fn(),
   listCatalogs: vi.fn(),
   listDomainTree: vi.fn(),
   listMetrics: vi.fn(),
@@ -117,6 +120,9 @@ import {
   listCatalogs,
   listDomainTree,
   listMetrics,
+  getMetric,
+  listSnapshots,
+  updateMetricDescription,
 } from "../api";
 
 const mockGraphData = {
@@ -271,7 +277,37 @@ describe("AssetMap", () => {
     });
   });
 
-  it("click metric node navigates to metric detail", async () => {
+  it("click metric node opens in-page metric drawer (no navigation)", async () => {
+    vi.mocked(getMetric).mockResolvedValue({
+      id: 1,
+      metric_code: "finance_revenue_sum_d",
+      name: "营收汇总",
+      domain: "finance",
+      type: "atomic",
+      granularity: "day",
+      unit: "yuan",
+      aggregation: "SUM",
+      time_semantics: "PERIOD",
+      freshness: "T1",
+      dw_layer: "DWD",
+      metric_tier: "T2",
+      serving_mode: "BATCH_ONLY",
+      additivity: "ADDITIVE",
+      definition_json: {
+        sql: "SELECT SUM(amount) FROM ods_order",
+        period: "day",
+        measures: [{ name: "revenue", aggregation: "SUM" }],
+      },
+      version: 1,
+      row_version: 1,
+      status: "PUBLISHED",
+      owner_id: 1,
+      pii_flag: false,
+      compliance_reviewed: true,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    } as never);
+    vi.mocked(listSnapshots).mockResolvedValue([] as never);
     renderAssetMap();
     await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
 
@@ -283,7 +319,65 @@ describe("AssetMap", () => {
     });
     clickHandler?.({ target: { id: "metric:m1" } });
 
-    await waitFor(() => expect(window.location.pathname).toBe("/detail/finance_revenue_sum_d"));
+    // 本页打开指标详情抽屉（明细 + 补充描述），不再直接跳转指标详情
+    await waitFor(() => expect(screen.getByText("营收汇总")).toBeInTheDocument());
+    expect(getMetric).toHaveBeenCalledWith("finance_revenue_sum_d");
+    expect(window.location.pathname).not.toBe("/detail/finance_revenue_sum_d");
+  });
+
+  it("metric drawer supports supplementing description", async () => {
+    vi.mocked(getMetric).mockResolvedValue({
+      id: 1,
+      metric_code: "finance_revenue_sum_d",
+      name: "营收汇总",
+      domain: "finance",
+      type: "atomic",
+      granularity: "day",
+      unit: "yuan",
+      aggregation: "SUM",
+      time_semantics: "PERIOD",
+      freshness: "T1",
+      dw_layer: "DWD",
+      metric_tier: "T2",
+      serving_mode: "BATCH_ONLY",
+      additivity: "ADDITIVE",
+      definition_json: {},
+      version: 1,
+      row_version: 1,
+      status: "PUBLISHED",
+      owner_id: 1,
+      pii_flag: false,
+      compliance_reviewed: true,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    } as never);
+    vi.mocked(listSnapshots).mockResolvedValue([] as never);
+    vi.mocked(updateMetricDescription).mockResolvedValue({
+      ...vi.mocked(getMetric).mock.results[0]?.value,
+      description: "每日营收总额",
+      description_source: "manual",
+    } as never);
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "metric:m1", label: "finance_revenue_sum_d", type: "metric", domain: "finance" },
+    });
+    clickHandler?.({ target: { id: "metric:m1" } });
+
+    await waitFor(() => expect(screen.getByText("补充描述")).toBeInTheDocument());
+    await userEvent.click(screen.getByText("补充描述"));
+    await userEvent.type(screen.getByPlaceholderText(/补充指标的业务含义/), "每日营收总额");
+    await userEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    await waitFor(() =>
+      expect(updateMetricDescription).toHaveBeenCalledWith(
+        "finance_revenue_sum_d",
+        "每日营收总额",
+      ),
+    );
   });
 
   it("click table node opens entity detail drawer", async () => {

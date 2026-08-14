@@ -200,6 +200,21 @@ class Metric(Base, BaseModel):
     consumption_guide: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, nullable=True, comment="消费指南"
     )
+    # 治理补充：指标业务描述（对齐 DBCatalog 表级描述模式 TD §12.1，独立于口径/版本）
+    description: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="指标业务描述"
+    )
+    description_source: Mapped[str | None] = mapped_column(
+        Enum("manual", "llm", "schema", name="description_source_enum"),
+        nullable=True,
+        comment="描述来源（manual/llm/schema）",
+    )
+    description_updated_by: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="描述更新人 ID"
+    )
+    description_updated_at: Mapped[datetime | None] = mapped_column(
+        nullable=True, comment="描述更新时间"
+    )
     batch_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="批量注册批次 ID"
     )

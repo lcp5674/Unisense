@@ -149,6 +149,17 @@ class MetricUpdateRequest(BaseModel):
         return _validate_definition_json(v) if v is not None else v
 
 
+class MetricDescriptionUpdateRequest(BaseModel):
+    """指标业务描述更新请求（治理补充 TD §12.1，不触发版本/不参与口径变更）。
+
+    传空串表示清除描述。仅 metric_owner / 域管理员 / 平台管理员可操作。
+    """
+
+    description: str = Field(
+        "", max_length=2000, description="指标业务描述（传空串清除）"
+    )
+
+
 class MetricPublishRequest(BaseModel):
     """发布指标请求（DRAFT → PUBLISHED）。"""
 
@@ -324,6 +335,11 @@ class MetricResponse(BaseModel):
     # 治理追溯：审批人 / 提交人，DB 模型已有，响应透出供目录页显示
     approver_id: int | None = None
     submitted_by: int | None = None
+    # 指标业务描述（TD §12.1 治理补充，独立于口径/版本，资产地图抽屉展示/编辑）
+    description: str | None = None
+    description_source: str | None = None
+    description_updated_by: int | None = None
+    description_updated_at: datetime | None = None
     pii_flag: bool
     compliance_reviewed: bool
     effective_version: int | None
