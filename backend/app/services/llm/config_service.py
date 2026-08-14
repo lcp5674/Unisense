@@ -177,6 +177,11 @@ class LlmConfigService:
         if payload is not None:
             base_url = payload.base_url.strip()
             api_key = payload.api_key.strip()
+            if not api_key:
+                # 前端编辑表单 api_key 留空表示"保持原密钥"（不覆盖）——
+                # 测试连通性时回落到已保存/环境密钥，避免"未配置 api_key"误报。
+                effective = await self.get_effective()
+                api_key = effective["api_key"]
             model = payload.model.strip() or "deepseek-chat"
             timeout = payload.timeout
         else:

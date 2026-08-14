@@ -221,3 +221,22 @@ class TestTestConnection:
         result = await svc.test_connection(payload)
         assert result.ok is False
         assert "未配置" in result.error
+
+    async def test_empty_api_key_falls_back_to_saved_key(self) -> None:
+        """前端表单 api_key 留空（保持原密钥）时，测试应回落已保存密钥。"""
+        svc, s = await self._svc()
+        s.execute.return_value.scalar_one_or_none.return_value = _row()  # DB 已存密钥
+        payload = LlmConfigPayload(
+            base_url="https://api.deepseek.com", api_key="", model="deepseek-chat", timeout=30
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"model": "deepseek-chat"}
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        # ok=True 即证明回落了已保存密钥（否则会返回"未配置 api_key"）
+        assert result.ok is True
