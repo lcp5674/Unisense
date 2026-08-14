@@ -953,6 +953,14 @@ body {
 .compare-modal .ant-table-tbody > tr > td:nth-child(1) {
   min-width: 200px;
 }
+/* 口径定义子字段 diff 高亮：红色左边框 + 淡红背景，扫一眼即知哪些子字段在 A/B 间不同 */
+.def-row-diff {
+  margin-left: -6px;
+  padding-left: 6px;
+  border-left: 3px solid var(--danger, #d64545);
+  background: rgba(214, 69, 69, 0.06);
+  border-radius: 2px;
+}
 
 .notif-meta-item .anticon {
   font-size: 12px;

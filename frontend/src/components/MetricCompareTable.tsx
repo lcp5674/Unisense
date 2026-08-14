@@ -166,10 +166,10 @@ export function MetricCompareTable({
       dataIndex: "a",
       key: "a",
       width: 330,
-      render: (v: unknown, r: { key: string }) => (
+      render: (v: unknown, r: { key: string; a: unknown; b: unknown }) => (
         <div style={{ padding: "2px 0" }}>
           {r.key === "definition" && v && typeof v === "object" ? (
-            <DefinitionView data={v as Record<string, unknown>} />
+            <DefinitionView data={v as Record<string, unknown>} diffWith={r.b as Record<string, unknown> | undefined} />
           ) : (
             renderValue(v)
           )}
@@ -188,10 +188,10 @@ export function MetricCompareTable({
       dataIndex: "b",
       key: "b",
       width: 330,
-      render: (v: unknown, r: { key: string }) => (
+      render: (v: unknown, r: { key: string; a: unknown; b: unknown }) => (
         <div style={{ padding: "2px 0" }}>
           {r.key === "definition" && v && typeof v === "object" ? (
-            <DefinitionView data={v as Record<string, unknown>} />
+            <DefinitionView data={v as Record<string, unknown>} diffWith={r.a as Record<string, unknown> | undefined} />
           ) : (
             renderValue(v)
           )}

@@ -236,11 +236,35 @@ function renderDefValue(key: string, value: unknown, labels: Record<string, stri
   return <span className="mono">{translateByKey(key, String(value))}</span>;
 }
 
+/** 深度比较：用于对比场景下判断两个值是否完全相同（支持 primitive/array/plain object） */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== "object") return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  const ka = Object.keys(a as Record<string, unknown>);
+  const kb = Object.keys(b as Record<string, unknown>);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) return false;
+  }
+  return true;
+}
+
 export function DefinitionView({
   data,
+  diffWith,
   labels = DEF_FIELD_LABEL,
 }: {
   data: Record<string, unknown>;
+  /** 对侧数据：提供时会对每个子字段做 deepEqual 标记，差异行加 data-diff 用于样式高亮 */
+  diffWith?: Record<string, unknown>;
   labels?: Record<string, string>;
 }) {
   const entries = Object.entries(data).filter(([, v]) => v !== null && v !== undefined && v !== "");
@@ -248,26 +272,31 @@ export function DefinitionView({
   if (!entries.length) return <span className="muted">—</span>;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {entries.map(([k, v]) => (
-        <div
-          key={k}
-          style={{ display: "grid", gridTemplateColumns: "84px 1fr", gap: 8, alignItems: "start" }}
-        >
-          <span
-            style={{
-              fontSize: 12,
-              fontWeight: 600,
-              color: "var(--text-secondary)",
-              textAlign: "right",
-              lineHeight: 1.7,
-              paddingTop: 1,
-            }}
+      {entries.map(([k, v]) => {
+        const isDiff = diffWith ? !deepEqual(v, diffWith[k]) : false;
+        return (
+          <div
+            key={k}
+            data-diff={isDiff ? "diff" : undefined}
+            className={isDiff ? "def-row def-row-diff" : "def-row"}
+            style={{ display: "grid", gridTemplateColumns: "84px 1fr", gap: 8, alignItems: "start" }}
           >
-            {labels[k] ?? k}
-          </span>
-          <div style={{ fontSize: 13, lineHeight: 1.7, minWidth: 0 }}>{renderDefValue(k, v, labels)}</div>
-        </div>
-      ))}
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: isDiff ? "var(--danger, #d64545)" : "var(--text-secondary)",
+                textAlign: "right",
+                lineHeight: 1.7,
+                paddingTop: 1,
+              }}
+            >
+              {labels[k] ?? k}
+            </span>
+            <div style={{ fontSize: 13, lineHeight: 1.7, minWidth: 0 }}>{renderDefValue(k, v, labels)}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
