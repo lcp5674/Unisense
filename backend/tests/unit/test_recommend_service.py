@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.models.lineage import LineageEdge
 from app.models.term import Term
+from app.services.glossary.schemas import TermResponse
 from app.services.recommend.service import RecommendService
 
 
@@ -39,6 +40,7 @@ def _edge_repo() -> MagicMock:
     repo.published_terms = AsyncMock(
         return_value=[
             Term(
+                id=1,
                 term_code="t1",
                 name="n",
                 definition="d",
@@ -81,6 +83,34 @@ async def test_recommend_terms() -> None:
     svc, repo = await _svc()
     items = await svc.recommend_terms(10)
     assert len(items) == 1
+    # ORM → TermResponse 转换，保证 API 可序列化（不再 500）
+    assert isinstance(items[0], TermResponse)
+    assert items[0].term_code == "t1"
+
+
+async def test_recommend_terms_api_serializable(client) -> None:
+    """回归：GET /recommend/terms 返回 TermResponse 而非原始 ORM，不再 500。"""
+    term = Term(
+        id=1,
+        term_code="t1",
+        name="n",
+        definition="d",
+        domain="x",
+        synonyms=[],
+        status="PUBLISHED",
+        owner_id=1,
+    )
+    with patch("app.api.recommend.RecommendService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.recommend_terms = AsyncMock(return_value=[TermResponse.from_model(term)])
+
+        resp = await client.get("/api/v1/recommend/terms")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == "OK"
+    assert body["data"]["items"][0]["term_code"] == "t1"
+    assert body["data"]["total"] == 1
 
 
 def _svc_with_profiles(

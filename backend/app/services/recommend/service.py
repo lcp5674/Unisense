@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
 from app.models.tracking import TrackingEvent
+from app.services.glossary.schemas import TermResponse
 from app.services.recommend.repository import RecommendRepository
 
 logger = logging.getLogger(__name__)
@@ -179,5 +180,7 @@ class RecommendService(BaseService):
                     return recommendations
         return recommendations
 
-    async def recommend_terms(self, limit: int) -> list[Any]:
-        return await self._repo.published_terms(limit)
+    async def recommend_terms(self, limit: int) -> list[TermResponse]:
+        """返回已发布术语候选（ORM → TermResponse 转换，避免 Pydantic 序列化 500）。"""
+        terms = await self._repo.published_terms(limit)
+        return [TermResponse.from_model(t) for t in terms]
