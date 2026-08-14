@@ -28,6 +28,7 @@ import {
   SearchOutlined,
   ShareAltOutlined,
   SyncOutlined,
+  ArrowLeftOutlined,
 } from "@ant-design/icons";
 import {
   confirmStaleEdge,
@@ -594,6 +595,14 @@ function ChannelsTab() {
 }
 
 export function LineageView() {
+  const navigate = useNavigate();
+
+  // 统一返回上一入口：优先回退浏览器历史（资产地图等入口），无上一页（URL 直达）时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
+
   const tabItems = [
     { key: "graph", label: <span><ShareAltOutlined /> 血缘图谱</span>, children: <GraphTab /> },
     { key: "impact", label: <span><ApartmentOutlined /> 血缘查询 / 影响分析</span>, children: <ImpactTab /> },
@@ -605,6 +614,9 @@ export function LineageView() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
           <div className="page-kicker">Lineage / Impact</div>
           <h2>血缘视图</h2>
           <p>血缘图谱总览、上下游血缘查询、what-if 变更影响预览、SQL 血缘解析入库、采集通道增量运维。</p>
