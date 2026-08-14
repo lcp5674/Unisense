@@ -1,9 +1,18 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Select, Space, Table, Tag, message, Modal, Input } from "antd";
-import { arbitrateConflict, escalateConflict, listConflicts, UnisenseApiError } from "../api";
-import type { ConflictResponse } from "../types";
+import { Button, Card, Input, Modal, Radio, Select, Space, Table, Tag, message } from "antd";
+import {
+  arbitrateConflict,
+  closeConflict,
+  compareMetrics,
+  escalateConflict,
+  listConflicts,
+  UnisenseApiError,
+} from "../api";
+import type { ConflictResponse, MetricCompareResult } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { MetricCompareTable } from "../components/MetricCompareTable";
 
 const STATUS_LABEL: Record<string, string> = {
   OPEN: "待处理",
@@ -30,11 +39,95 @@ const CONFLICT_TYPE_LABEL: Record<string, string> = {
   pii: "PII 冲突",
 };
 
+// 仲裁决策：choose_existing/choose_candidate 映射后端 choose_canonical；merge/keep_diff 一一对应。
+type ArbitralDecision = "choose_existing" | "choose_candidate" | "merge" | "keep_diff";
+
+interface DecisionOption {
+  value: ArbitralDecision;
+  label: string;
+  desc: string;
+}
+
+// TD §12.4：仲裁 = 选唯一口径 / 合并 / 保留差异。不同冲突类型给出差异化决策集与默认值。
+const DECISION_OPTIONS: Record<string, DecisionOption[]> = {
+  same_name_diff_def: [
+    { value: "choose_existing", label: "采纳现有为权威", desc: "现有口径更准确，候选修正后发布" },
+    { value: "choose_candidate", label: "采纳候选为权威", desc: "候选口径更准确，现有标记废弃" },
+    { value: "keep_diff", label: "保留差异（非真冲突）", desc: "认定非冲突，两者共存" },
+  ],
+  same_def_diff_name: [
+    { value: "merge", label: "合并到现有", desc: "候选并入现有口径，消除重复建设" },
+    { value: "choose_candidate", label: "以候选为权威", desc: "候选口径更准确，现有并入候选" },
+    { value: "keep_diff", label: "保留差异", desc: "认定非冲突，两者共存" },
+  ],
+  grain_unit: [
+    { value: "choose_existing", label: "采纳现有口径", desc: "以现有粒度/单位为准" },
+    { value: "choose_candidate", label: "采纳候选口径", desc: "以候选粒度/单位为准" },
+    { value: "keep_diff", label: "保留差异", desc: "消费方自行绑定正确粒度/单位" },
+  ],
+  cross_domain_same_def: [
+    { value: "merge", label: "合并到现有", desc: "统一口径，明确单一真相源" },
+    { value: "choose_existing", label: "明确现有为权威源", desc: "现有源为权威，候选不启用" },
+    { value: "keep_diff", label: "保留差异", desc: "两域各自维护，不合并" },
+  ],
+  version_conflict: [
+    { value: "choose_existing", label: "采纳现有版本", desc: "以当前生效版本口径为准" },
+    { value: "choose_candidate", label: "采纳候选版本", desc: "以候选新版本口径为准" },
+  ],
+};
+
+// 前端决策 → 后端 arbitrate 入参（decision + canonical_metric_code）
+function toBackendPayload(c: ConflictResponse, d: ArbitralDecision) {
+  const candidate = c.candidate_metric_code ?? "";
+  const existing = c.existing_metric_code ?? "";
+  switch (d) {
+    case "choose_existing":
+      return { decision: "choose_canonical", canonical_metric_code: existing };
+    case "choose_candidate":
+      return { decision: "choose_canonical", canonical_metric_code: candidate };
+    case "merge":
+      return { decision: "merge", canonical_metric_code: existing };
+    case "keep_diff":
+      return { decision: "keep_diff", canonical_metric_code: "" };
+  }
+}
+
+function errText(err: unknown, fallback: string) {
+  return err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : fallback;
+}
+
+/** 弹窗顶部冲突摘要：类型 + 相似度 + 状态 */
+function ConflictSummary({ c }: { c: ConflictResponse }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <Space wrap>
+        <Tag>{CONFLICT_TYPE_LABEL[c.type] ?? c.type}</Tag>
+        <Tag color={STATUS_COLOR[c.status]}>{STATUS_LABEL[c.status] ?? c.status}</Tag>
+        <span className="muted">相似度 {(Number(c.similarity_score) * 100).toFixed(1)}%</span>
+      </Space>
+      {c.description ? <p style={{ marginTop: 8 }}>{c.description}</p> : null}
+    </div>
+  );
+}
+
 export function ReviewWorkbench() {
   const [items, setItems] = useState<ConflictResponse[]>([]);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  // 仲裁弹窗
+  const [arbitrating, setArbitrating] = useState<ConflictResponse | null>(null);
+  const [decision, setDecision] = useState<ArbitralDecision>("choose_existing");
+  const [reason, setReason] = useState("");
+  // 对比数据（仲裁弹窗与只读对比弹窗共用）
+  const [compareResult, setCompareResult] = useState<MetricCompareResult | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareOpen, setCompareOpen] = useState<ConflictResponse | null>(null);
+  // 升级弹窗
+  const [escalating, setEscalating] = useState<ConflictResponse | null>(null);
+  const [escalateNote, setEscalateNote] = useState("");
+
   const navigate = useNavigate();
   const { track } = useTracking();
 
@@ -44,9 +137,7 @@ export function ReviewWorkbench() {
       const res = await listConflicts({ status, page_size: 50 });
       setItems(res.items);
     } catch (err) {
-      message.error(
-        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",
-      );
+      message.error(errText(err, "加载失败"));
     } finally {
       setLoading(false);
     }
@@ -57,73 +148,127 @@ export function ReviewWorkbench() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status]);
 
-  async function handleArbitrate(c: ConflictResponse) {
-    let canonical = "";
-    Modal.confirm({
-      title: `仲裁冲突 ${c.conflict_id}`,
-      content: (
-        <div>
-          <p>候选：{c.candidate_metric_code}</p>
-          <p>现有：{c.existing_metric_code}</p>
-          <Input
-            defaultValue={c.existing_metric_code}
-            onChange={(e) => {
-              canonical = e.target.value;
-            }}
-            placeholder="请输入采纳为权威的编码"
-          />
-        </div>
-      ),
-      onOk: async () => {
-        if (!canonical) return;
-        setBusyId(c.conflict_id);
-        try {
-          await arbitrateConflict(c.conflict_id, "choose_canonical", canonical);
-          message.success(`已仲裁：${c.conflict_id}`);
-          track("review_arbitrate", c.conflict_id, "conflict");
-          load();
-        } catch (err) {
-          message.error(
-            err instanceof UnisenseApiError
-              ? `${err.message}（${err.codeZh}）`
-              : "仲裁失败（仅 compliance_officer/domain_admin）",
-          );
-        } finally {
-          setBusyId(null);
-        }
-      },
-    });
+  async function loadCompare(c: ConflictResponse) {
+    const candidate = c.candidate_metric_code ?? "";
+    const existing = c.existing_metric_code ?? "";
+    if (!candidate || !existing) {
+      setCompareResult(null);
+      return;
+    }
+    setCompareLoading(true);
+    setCompareResult(null);
+    try {
+      setCompareResult(await compareMetrics(candidate, existing));
+    } catch (err) {
+      message.error(errText(err, "加载差异对比失败"));
+    } finally {
+      setCompareLoading(false);
+    }
   }
 
-  async function handleEscalate(c: ConflictResponse) {
-    let note = "";
-    Modal.confirm({
-      title: "升级冲突",
-      content: (
-        <Input
-          placeholder="升级备注"
-          onChange={(e) => {
-            note = e.target.value;
-          }}
-        />
-      ),
-      onOk: async () => {
-        setBusyId(c.conflict_id);
-        try {
-          await escalateConflict(c.conflict_id, note);
-          message.success(`已升级：${c.conflict_id}`);
-          track("review_escalate", c.conflict_id, "conflict");
-          load();
-        } catch (err) {
-          message.error(
-            err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "升级失败",
-          );
-        } finally {
-          setBusyId(null);
-        }
-      },
-    });
+  function openArbitrate(c: ConflictResponse) {
+    setArbitrating(c);
+    setDecision(DECISION_OPTIONS[c.type]?.[0]?.value ?? "choose_existing");
+    setReason("");
+    loadCompare(c);
   }
+
+  function openCompare(c: ConflictResponse) {
+    setCompareOpen(c);
+    loadCompare(c);
+  }
+
+  async function submitArbitrate() {
+    const c = arbitrating;
+    if (!c) return;
+    const payload = toBackendPayload(c, decision);
+    setBusyId(c.conflict_id);
+    try {
+      await arbitrateConflict(c.conflict_id, payload.decision, payload.canonical_metric_code);
+      message.success(`已仲裁：${c.conflict_id}`);
+      track("review_arbitrate", c.conflict_id, "conflict");
+      setArbitrating(null);
+      load();
+    } catch (err) {
+      message.error(errText(err, "仲裁失败（仅 compliance_officer/domain_admin）"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function submitEscalate() {
+    const c = escalating;
+    if (!c) return;
+    setBusyId(c.conflict_id);
+    try {
+      await escalateConflict(c.conflict_id, escalateNote);
+      message.success(`已升级：${c.conflict_id}`);
+      track("review_escalate", c.conflict_id, "conflict");
+      setEscalating(null);
+      load();
+    } catch (err) {
+      message.error(errText(err, "升级失败"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleClose(c: ConflictResponse) {
+    setBusyId(c.conflict_id);
+    try {
+      await closeConflict(c.conflict_id);
+      message.success(`已关闭：${c.conflict_id}`);
+      load();
+    } catch (err) {
+      message.error(errText(err, "关闭失败（仅 RULED 状态可关闭）"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const actionsFor = (c: ConflictResponse) => {
+    if (c.type === "pii") {
+      return <Tag>已转交治理</Tag>;
+    }
+    const actions: ReactNode[] = [];
+    if (c.status !== "CLOSED") {
+      actions.push(
+        <Button type="link" size="small" onClick={() => openCompare(c)}>
+          对比
+        </Button>,
+      );
+    }
+    if (c.status === "OPEN" || c.status === "NEGOTIATING" || c.status === "ESCALATED") {
+      actions.push(
+        <Button
+          type="primary"
+          size="small"
+          disabled={busyId === c.conflict_id}
+          onClick={() => openArbitrate(c)}
+        >
+          仲裁
+        </Button>,
+      );
+    }
+    if (c.status === "OPEN" || c.status === "NEGOTIATING") {
+      actions.push(
+        <Button size="small" danger disabled={busyId === c.conflict_id} onClick={() => {
+          setEscalating(c);
+          setEscalateNote("");
+        }}>
+          升级
+        </Button>,
+      );
+    }
+    if (c.status === "RULED") {
+      actions.push(
+        <Button size="small" disabled={busyId === c.conflict_id} onClick={() => handleClose(c)}>
+          关闭
+        </Button>,
+      );
+    }
+    return actions.length ? <Space>{actions}</Space> : null;
+  };
 
   const columns = [
     { title: "冲突ID", dataIndex: "conflict_id", key: "conflict_id" },
@@ -177,31 +322,11 @@ export function ReviewWorkbench() {
       width: 160,
       render: (_: unknown, r: ConflictResponse) => r.detected_at ?? "",
     },
-    {
-      title: "操作",
-      key: "actions",
-      render: (_: unknown, c: ConflictResponse) =>
-        c.status === "OPEN" ? (
-          <Space>
-            <Button
-              size="small"
-              disabled={busyId === c.conflict_id}
-              onClick={() => handleArbitrate(c)}
-            >
-              仲裁
-            </Button>
-            <Button
-              size="small"
-              danger
-              disabled={busyId === c.conflict_id}
-              onClick={() => handleEscalate(c)}
-            >
-              升级
-            </Button>
-          </Space>
-        ) : null,
-    },
+    { title: "操作", key: "actions", render: (_: unknown, c: ConflictResponse) => actionsFor(c) },
   ];
+
+  const decisionOptions = arbitrating ? DECISION_OPTIONS[arbitrating.type] ?? [] : [];
+  const arbitrateBusy = arbitrating != null && busyId === arbitrating.conflict_id;
 
   return (
     <div>
@@ -233,6 +358,114 @@ export function ReviewWorkbench() {
           locale={{ emptyText: "暂无冲突" }}
         />
       </Card>
+
+      {/* 只读对比弹窗：当前窗口展示候选 vs 现有差异，无需跳转指标目录 */}
+      <Modal
+        title={`差异对比 ${compareOpen?.conflict_id ?? ""}`}
+        open={compareOpen != null}
+        onCancel={() => setCompareOpen(null)}
+        footer={<Button onClick={() => setCompareOpen(null)}>关闭</Button>}
+        width={860}
+      >
+        {compareOpen ? (
+          <>
+            <ConflictSummary c={compareOpen} />
+            {compareLoading ? (
+              <Card loading style={{ minHeight: 160 }} />
+            ) : compareResult ? (
+              <MetricCompareTable
+                result={compareResult}
+                codeA={compareOpen.candidate_metric_code ?? ""}
+                codeB={compareOpen.existing_metric_code ?? ""}
+                size="small"
+              />
+            ) : (
+              <p className="muted">无可对比的指标编码</p>
+            )}
+          </>
+        ) : null}
+      </Modal>
+
+      {/* 仲裁弹窗：差异对比 + 按类型差异化的决策表单 */}
+      <Modal
+        title={`仲裁冲突 ${arbitrating?.conflict_id ?? ""}`}
+        open={arbitrating != null}
+        onCancel={() => setArbitrating(null)}
+        onOk={submitArbitrate}
+        okText="提交裁决"
+        okButtonProps={{ loading: arbitrateBusy, disabled: decisionOptions.length === 0 }}
+        cancelButtonProps={{ disabled: arbitrateBusy }}
+        width={860}
+      >
+        {arbitrating ? (
+          <>
+            <ConflictSummary c={arbitrating} />
+            {compareLoading ? (
+              <Card loading style={{ minHeight: 160 }} />
+            ) : compareResult ? (
+              <MetricCompareTable
+                result={compareResult}
+                codeA={arbitrating.candidate_metric_code ?? ""}
+                codeB={arbitrating.existing_metric_code ?? ""}
+                size="small"
+              />
+            ) : (
+              <p className="muted">无可对比的指标编码</p>
+            )}
+            {decisionOptions.length > 0 ? (
+              <div style={{ marginTop: 16 }}>
+                <p>
+                  <strong>裁决方式</strong>
+                </p>
+                <Radio.Group
+                  value={decision}
+                  onChange={(e) => setDecision(e.target.value)}
+                  disabled={arbitrateBusy}
+                >
+                  <Space direction="vertical">
+                    {decisionOptions.map((opt) => (
+                      <Radio key={opt.value} value={opt.value}>
+                        <span>
+                          {opt.label}
+                          <span className="muted" style={{ marginLeft: 8 }}>
+                            {opt.desc}
+                          </span>
+                        </span>
+                      </Radio>
+                    ))}
+                  </Space>
+                </Radio.Group>
+                <Input.TextArea
+                  style={{ marginTop: 12 }}
+                  rows={2}
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  placeholder="裁决理由（沉淀为规则知识库，建议写明口径依据）"
+                  disabled={arbitrateBusy}
+                />
+              </div>
+            ) : (
+              <p className="muted">该冲突类型已转交治理流程，请在治理中心处理。</p>
+            )}
+          </>
+        ) : null}
+      </Modal>
+
+      {/* 升级弹窗 */}
+      <Modal
+        title={`升级冲突 ${escalating?.conflict_id ?? ""}`}
+        open={escalating != null}
+        onCancel={() => setEscalating(null)}
+        onOk={submitEscalate}
+        okText="确认升级"
+        okButtonProps={{ loading: escalating != null && busyId === escalating.conflict_id }}
+      >
+        <Input
+          placeholder="升级备注（说明协商未决原因，将通知 domain_admin）"
+          value={escalateNote}
+          onChange={(e) => setEscalateNote(e.target.value)}
+        />
+      </Modal>
     </div>
   );
 }
