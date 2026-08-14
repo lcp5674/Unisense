@@ -32,6 +32,7 @@ import type {
   AssetPiiOverview,
   AssetSearchItem,
   AssetTableItem,
+  SchemaColumn,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { ObjectView } from "../utils/display";
@@ -66,10 +67,11 @@ function sensitivityTag(s: string | null | undefined) {
   return <Tag color={color}>{SENSITIVITY_LABEL[s] ?? s}</Tag>;
 }
 
-function renderSchemaSummary(summary: string | Record<string, unknown> | null | undefined) {
+function renderSchemaSummary(summary: SchemaColumn[] | string | null | undefined) {
   if (summary == null || summary === "") return <span className="muted">-</span>;
   if (typeof summary === "string") return <span>{summary}</span>;
-  return <ObjectView data={summary} />;
+  if (Array.isArray(summary)) return <ObjectView data={summary} />;
+  return <span className="muted">-</span>;
 }
 
 type DrillRow = Record<string, unknown>;
