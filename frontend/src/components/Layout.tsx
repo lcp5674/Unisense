@@ -28,6 +28,7 @@ import {
   DatabaseOutlined,
   ScheduleOutlined,
   FileTextOutlined,
+  FundOutlined,
   GlobalOutlined,
   TagsOutlined,
   SettingOutlined,
@@ -37,7 +38,7 @@ import {
 } from "@ant-design/icons";
 import type { CurrentUser, GlobalSearchItem, GlobalSearchType } from "../types";
 import {
-  clearToken,
+  clearAuthTokens,
   fetchGlobalSearch,
   fetchPreferences,
   listNotifications,
@@ -83,6 +84,8 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/templates", label: "指标模板", icon: <FileTextOutlined /> },
       { key: "/create", label: "注册指标", icon: <PlusCircleOutlined /> },
       { key: "/domains", label: "主题域管理", icon: <ApartmentOutlined /> },
+      { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
+      { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
       { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
       { key: "/favorites", label: "我的收藏", icon: <HeartOutlined /> },
       { key: "/assetmap", label: "资产地图", icon: <GlobalOutlined /> },
@@ -99,8 +102,6 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     children: [
       { key: "/review", label: "冲突仲裁", icon: <DeploymentUnitOutlined /> },
       { key: "/quality", label: "质量中心", icon: <ExperimentOutlined /> },
-      { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
-      { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
     ],
   },
   {
@@ -115,6 +116,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     children: [
       { key: "/ai", label: "AI 助手", icon: <RobotOutlined /> },
       { key: "/observability", label: "可观测中心", icon: <LineChartOutlined /> },
+      { key: "/tracking-stats", label: "埋点统计", icon: <FundOutlined /> },
     ],
   },
   {
@@ -355,7 +357,7 @@ export function Layout({ user }: { user: CurrentUser }) {
 
   function handleUserMenu({ key }: { key: string }) {
     if (key === "logout") {
-      clearToken();
+      clearAuthTokens();
       window.location.reload();
     }
   }
