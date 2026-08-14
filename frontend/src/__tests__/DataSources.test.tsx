@@ -27,7 +27,10 @@ vi.mock("../api", () => {
     updateDataSource: vi.fn(),
     testDataSourceConnection: vi.fn(),
     checkDataSourceConnection: vi.fn(),
-    collectSource: vi.fn(),
+    collectSourceNow: vi.fn(),
+    streamCollectionJob: vi.fn(),
+    getCollectionJob: vi.fn(),
+    listDataSourceDatabases: vi.fn(),
     scheduleSource: vi.fn(),
     getSourceHealth: vi.fn(),
     getSourceWatermark: vi.fn(),
@@ -47,6 +50,10 @@ import {
   getSourceHealth,
   getSourceWatermark,
   listDriftLogs,
+  collectSourceNow,
+  streamCollectionJob,
+  getCollectionJob,
+  listDataSourceDatabases,
 } from "../api";
 
 const mockedList = vi.mocked(listDataSources);
@@ -59,6 +66,10 @@ const mockedCheck = vi.mocked(checkDataSourceConnection);
 const mockedHealth = vi.mocked(getSourceHealth);
 const mockedWatermark = vi.mocked(getSourceWatermark);
 const mockedListDriftLogs = vi.mocked(listDriftLogs);
+const mockedCollectNow = vi.mocked(collectSourceNow);
+const mockedStream = vi.mocked(streamCollectionJob);
+const mockedGetJob = vi.mocked(getCollectionJob);
+const mockedListDatabases = vi.mocked(listDataSourceDatabases);
 
 const TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
@@ -124,6 +135,10 @@ describe("DataSources", () => {
     mockedHealth.mockResolvedValue({ source_id: "mysql_finance", health_status: "healthy", last_collected_at: null, last_error: null, last_health_check: null, uptime_check: true });
     mockedWatermark.mockResolvedValue({ source_id: "mysql_finance", last_collected_at: null, mode: "FULL", scanned_count: 10, failed_count: 0 });
     mockedListDriftLogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    mockedCollectNow.mockResolvedValue({ job_id: "job-1", status: "QUEUED", mode: "FULL" });
+    mockedStream.mockReturnValue(() => {});
+    mockedGetJob.mockResolvedValue({ job_id: "job-1", status: "COMPLETED", detail: {} });
+    mockedListDatabases.mockResolvedValue({ databases: ["finance", "orders"], source_type: "mysql" });
   });
 
   it("动态拉取类型元信息并展示中文标签", async () => {
@@ -155,6 +170,67 @@ describe("DataSources", () => {
     });
     expect(mockedTest.mock.calls[0][0].connection_config.host).toBe("10.0.0.1");
     expect(screen.getAllByText(/连接成功/).length).toBeGreaterThan(0);
+  });
+
+  it("测试连接通过后自动枚举数据库并显示目标库选择", async () => {
+    await openCreateModal();
+    fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), { target: { value: "10.0.0.1" } });
+    await selectType("MySQL（mysql）");
+    fireEvent.click(screen.getByText("测试连接"));
+    await waitFor(() => {
+      expect(mockedListDatabases).toHaveBeenCalled();
+    });
+    expect(mockedListDatabases.mock.calls[0][0].connection_config.host).toBe("10.0.0.1");
+    // 连接通过后 database 字段变为选择框（枚举结果渲染为选项）
+    await screen.findByText(/Database（选择目标库）/);
+    fireEvent.mouseDown(screen.getByText("全部库（默认）"));
+    await screen.findByRole("option", { name: "finance" });
+    expect(screen.getByRole("option", { name: "orders" })).toBeTruthy();
+  });
+
+  it("立即采集走异步 collect-now + SSE 实时进度并展示结果明细", async () => {
+    renderSources();
+    await waitFor(() => {
+      expect(screen.getByText("管理")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    fireEvent.click(screen.getByText("立即采集"));
+    await waitFor(() => {
+      expect(mockedCollectNow).toHaveBeenCalledWith("mysql_finance", "FULL");
+    });
+    expect(mockedStream).toHaveBeenCalledWith("job-1", expect.any(Object));
+    // 模拟 SSE 进度事件 + 终态事件
+    const handlers = mockedStream.mock.calls[0][1] as {
+      onProgress?: (s: unknown, p: Record<string, unknown> | null) => void;
+      onDone?: (s: { status: string; detail?: Record<string, unknown> | null }) => void;
+    };
+    handlers.onProgress?.(null, {
+      phase: "registering",
+      index: 1,
+      total: 2,
+      messages: ["注册 1/2：users"],
+    });
+    handlers.onDone?.({
+      status: "COMPLETED",
+      detail: {
+        scanned: 2,
+        registered: 2,
+        pii_registered: 1,
+        failed_count: 0,
+        coverage: 1,
+        mode: "FULL",
+        drift_count: 0,
+        drift_events: [],
+        deprecated_count: 0,
+        entities: [
+          { entity_name: "users", sensitivity_level: "PII", drifted: false, change_type: null },
+          { entity_name: "orders", sensitivity_level: "INTERNAL", drifted: false, change_type: null },
+        ],
+      },
+    });
+    await screen.findByText("采集完成：扫描 2 · 注册 2 · PII 1");
+    expect(screen.getByText("本次采集到的表（2）")).toBeTruthy();
   });
 
   it("创建时省略 source_id（由后端自动生成）", async () => {

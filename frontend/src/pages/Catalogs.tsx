@@ -28,6 +28,7 @@ export function Catalogs() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [sourceId, setSourceId] = useState("");
+  const [sourceStatus, setSourceStatus] = useState<"" | "active" | "deleted">("");
   const [entityType, setEntityType] = useState("");
   const [sensitivity, setSensitivity] = useState("");
   const [keyword, setKeyword] = useState("");
@@ -40,11 +41,16 @@ export function Catalogs() {
   const [sources, setSources] = useState<DataSource[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(false);
 
-  // 支持从全局搜索栏经 ?kw= 直达定位（表/字段级关键词）
+  // 支持从全局搜索栏 / 数据源详情经 ?kw= 或 ?source_id= 直达定位
   useEffect(() => {
     const kw = searchParams.get("kw");
     if (kw) {
       setKeyword(kw);
+      setPage(1);
+    }
+    const sid = searchParams.get("source_id");
+    if (sid) {
+      setSourceId(sid);
       setPage(1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -53,7 +59,15 @@ export function Catalogs() {
   async function load() {
     setLoading(true);
     try {
-      const res = await listCatalogs({ source_id: sourceId || undefined, entity_type: entityType || undefined, sensitivity_level: sensitivity || undefined, keyword: keyword || undefined, page, page_size: 20 });
+      const res = await listCatalogs({
+        source_id: sourceId || undefined,
+        entity_type: entityType || undefined,
+        sensitivity_level: sensitivity || undefined,
+        keyword: keyword || undefined,
+        source_status: sourceStatus || undefined,
+        page,
+        page_size: 20,
+      });
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
@@ -66,7 +80,7 @@ export function Catalogs() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, sourceId, entityType, sensitivity, keyword]);
+  }, [page, sourceId, sourceStatus, entityType, sensitivity, keyword]);
 
   async function loadSources() {
     setSourcesLoading(true);
@@ -113,7 +127,20 @@ export function Catalogs() {
   }
 
   const columns = [
-    { title: "数据源", dataIndex: "source_id", key: "source_id", render: (v: string) => <span className="mono">{v}</span> },
+    {
+      title: "数据源",
+      dataIndex: "source_id",
+      key: "source_id",
+      render: (v: string, r: DBCatalog) => (
+        <span>
+          <span className="mono">{r.source_name ?? v}</span>
+          {r.source_deleted && <Tag color="default" style={{ marginLeft: 6 }}>源已删除</Tag>}
+          {r.source_name && r.source_name !== v && (
+            <div className="muted mono" style={{ fontSize: 11 }}>{v}</div>
+          )}
+        </span>
+      ),
+    },
     { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true, render: (v: string) => <span className="mono">{v}</span> },
     { title: "类型", dataIndex: "entity_type", key: "type", width: 90, render: (v: string) => <Tag>{enumLabel(ENTITY_TYPE_LABEL, v)}</Tag> },
     {
@@ -156,6 +183,17 @@ export function Catalogs() {
             value={sourceId}
             onChange={(e) => setSourceId(e.target.value)}
             onPressEnter={() => { setPage(1); load(); }}
+          />
+          <Select
+            allowClear
+            placeholder="全部源状态"
+            style={{ width: 130 }}
+            value={sourceStatus || undefined}
+            onChange={(v) => { setSourceStatus((v as "" | "active" | "deleted") || ""); setPage(1); }}
+            options={[
+              { value: "active", label: "活跃源" },
+              { value: "deleted", label: "已删除源" },
+            ]}
           />
           <Select
             allowClear

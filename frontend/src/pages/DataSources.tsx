@@ -1,12 +1,14 @@
-import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert } from "antd";
-import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined } from "@ant-design/icons";
+import { useEffect, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse } from "antd";
+import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined } from "@ant-design/icons";
 import {
   listDataSources,
   createDataSource,
   updateDataSource,
-  collectSource,
+  collectSourceNow,
+  streamCollectionJob,
+  getCollectionJob,
   scheduleSource,
   getSourceHealth,
   getSourceWatermark,
@@ -14,14 +16,14 @@ import {
   listDomainTree,
   testDataSourceConnection,
   checkDataSourceConnection,
+  listDataSourceDatabases,
   listDriftLogs,
   UnisenseApiError,
 } from "../api";
-import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest } from "../types";
+import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest, CollectionProgress } from "../types";
 import type { DriftLogItem } from "../api";
 import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
-import { parseMultiStatusResponse } from "../utils/apiErrorHandlers";
 
 const FALLBACK_TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
@@ -71,6 +73,23 @@ const DRIFT_CHANGE_LABEL: Record<string, string> = {
   SCHEMA_CHANGED: "结构变更",
 };
 
+const SENSITIVITY_LABEL: Record<string, string> = {
+  PUBLIC: "公开",
+  INTERNAL: "内部",
+  CONFIDENTIAL: "机密",
+  PII: "PII",
+  NEEDS_REVIEW: "待复核",
+  UNKNOWN: "未知",
+};
+const SENSITIVITY_COLOR: Record<string, string> = {
+  PUBLIC: "default",
+  INTERNAL: "blue",
+  CONFIDENTIAL: "orange",
+  PII: "red",
+  NEEDS_REVIEW: "gold",
+  UNKNOWN: "default",
+};
+
 function previewSourceId(sourceType: string | undefined, cfg: Record<string, unknown>, domain: string): string {
   const base = String(cfg.database || cfg.schema || domain || "default");
   const norm = base.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toLowerCase() || "default";
@@ -88,10 +107,15 @@ function SourceDetailModal({
   onClose: () => void;
   onEdit: (source: DataSource) => void;
 }) {
+  const navigate = useNavigate();
   const [health, setHealth] = useState<SourceHealth | null>(null);
   const [watermark, setWatermark] = useState<Watermark | null>(null);
   const [collecting, setCollecting] = useState(false);
   const [collectResult, setCollectResult] = useState<CollectResult | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<CollectionProgress | null>(null);
+  const [progressMessages, setProgressMessages] = useState<string[]>([]);
+  const abortRef = useRef<(() => void) | null>(null);
   const [cron, setCron] = useState("0 3 * * *");
   const [scheduleMode, setScheduleMode] = useState("FULL");
   const [checking, setChecking] = useState(false);
@@ -106,28 +130,85 @@ function SourceDetailModal({
       .catch(() => setDriftLogs([]));
   }, [source.source_id]);
 
+  // 组件卸载时取消进行中的 SSE 订阅，避免内存泄漏
+  useEffect(() => () => abortRef.current?.(), []);
+
+  // 进度百分比：有实体总数时按 index/total；扫描阶段给 10% 占位
+  const progressPct =
+    progress?.index && progress?.total
+      ? Math.min(100, Math.round((progress.index / progress.total) * 100))
+      : progress?.phase === "scanning"
+        ? 10
+        : 0;
+
+  /** 统一消费终态任务详情 → 更新结果/健康/水位（SSE onDone 与轮询兜底共用）。 */
+  function applyDone(status: { status: string; detail?: Record<string, unknown> | null }) {
+    abortRef.current = null;
+    setCollecting(false);
+    const detail = status.detail ?? {};
+    const result: CollectResult = {
+      source_id: source.source_id,
+      scanned: Number(detail.scanned ?? 0),
+      registered: Number(detail.registered ?? 0),
+      pii_registered: Number(detail.pii_registered ?? 0),
+      failed_count: Number(detail.failed_count ?? 0),
+      failed_specs: (detail.failed_specs as CollectResult["failed_specs"]) ?? [],
+      coverage: Number(detail.coverage ?? 0),
+      mode: String(detail.mode ?? "FULL"),
+      drift_count: Number(detail.drift_count ?? 0),
+      drift_events: (detail.drift_events as CollectResult["drift_events"]) ?? [],
+      deprecated_count: Number(detail.deprecated_count ?? 0),
+      entities: (detail.entities as CollectResult["entities"]) ?? [],
+    };
+    setCollectResult(result);
+    if (status.status === "FAILED") {
+      const errMsg = typeof detail.error === "string" ? detail.error : "采集失败";
+      message.error(`采集失败：${errMsg}`);
+    } else {
+      message.success(
+        `采集完成：扫描 ${result.scanned} · 注册 ${result.registered} · PII ${result.pii_registered}`,
+      );
+    }
+    getSourceHealth(source.source_id).then(setHealth).catch(() => {});
+    getSourceWatermark(source.source_id).then(setWatermark).catch(() => {});
+  }
+
   async function handleCollect() {
+    if (collecting) return;
     setCollecting(true);
+    setCollectResult(null);
+    setProgress(null);
+    setProgressMessages([]);
+    setJobId(null);
     try {
-      const res = await collectSource(source.source_id, "FULL");
-      if (res && (res as any).code === "MULTI_STATUS") {
-        const items = parseMultiStatusResponse(res);
-        const succeeded = items.filter((i) => i.status === "success");
-        const failed = items.filter((i) => i.status === "failed");
-        if (failed.length > 0) {
-          message.warning(`采集部分成功：${succeeded.length} 项成功，${failed.length} 项失败`);
-        } else {
-          message.success(`采集完成：${succeeded.length} 项成功`);
-        }
-        setCollectResult(res as any as CollectResult);
-      } else {
-        setCollectResult(res as any as CollectResult);
-        message.success(`采集完成：扫描 ${res.scanned} · 注册 ${res.registered} · PII ${res.pii_registered}`);
-      }
+      const { job_id } = await collectSourceNow(source.source_id, "FULL");
+      setJobId(job_id);
+      // 订阅 SSE 实时进度；终态事件含完整结果（entities 明细）
+      abortRef.current = streamCollectionJob(job_id, {
+        onProgress: (_status, p) => {
+          if (!p) return;
+          setProgress(p);
+          if (p.messages?.length) setProgressMessages(p.messages);
+        },
+        onDone: (status) => applyDone(status),
+        onError: (msg) => {
+          abortRef.current = null;
+          setCollecting(false);
+          // SSE 中断兜底：任务可能仍在后台完成，轮询一次终态
+          getCollectionJob(job_id)
+            .then((st) => {
+              if (st && (st.status === "COMPLETED" || st.status === "FAILED")) {
+                applyDone(st as { status: string; detail?: Record<string, unknown> | null });
+                return;
+              }
+              message.error(msg);
+            })
+            .catch(() => message.error(msg));
+        },
+      });
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "采集失败");
-    } finally {
       setCollecting(false);
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "采集失败");
     }
   }
 
@@ -203,13 +284,77 @@ function SourceDetailModal({
         />
       )}
       {health?.last_error && <Alert type="error" showIcon style={{ marginBottom: 12 }} message={`最近错误：${health.last_error}`} />}
+      {(collecting || progress) && (
+        <Card size="small" title={collecting ? `正在采集（job: ${jobId ?? "…"}）` : "采集进度"} style={{ marginBottom: 12 }}>
+          <Progress
+            percent={progressPct}
+            status={collecting ? "active" : "success"}
+            format={(p) => (progress?.entity_name ? `${progress.entity_name} · ${p}%` : `${p}%`)}
+          />
+          {progressMessages.length > 0 && (
+            <div style={{ maxHeight: 120, overflow: "auto", marginTop: 8 }}>
+              {progressMessages.slice(-12).map((m, i) => (
+                <div key={i} className="mono" style={{ fontSize: 12, lineHeight: "18px" }}>{m}</div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
       {collectResult && (
         <Alert
           type="success"
           showIcon
           style={{ marginBottom: 12 }}
           message={`采集结果：注册 ${collectResult.registered} · PII ${collectResult.pii_registered} · 漂移 ${collectResult.drift_count}`}
-          description={collectResult.drift_events?.length ? collectResult.drift_events.slice(0, 5).map((d) => `${d.entity_name} (${DRIFT_CHANGE_LABEL[d.change_type] ?? d.change_type})`).join("、") : "无 schema 漂移"}
+          description={
+            <div>
+              <div style={{ marginBottom: 4 }}>
+                {collectResult.drift_events?.length
+                  ? collectResult.drift_events.slice(0, 5).map((d) => `${d.entity_name} (${DRIFT_CHANGE_LABEL[d.change_type] ?? d.change_type})`).join("、")
+                  : "无 schema 漂移"}
+              </div>
+              <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate(`/catalogs?source_id=${encodeURIComponent(source.source_id)}`)}>
+                在采集目录中查看 →
+              </Button>
+            </div>
+          }
+        />
+      )}
+      {collectResult?.entities && collectResult.entities.length > 0 && (
+        <Collapse
+          size="small"
+          style={{ marginBottom: 12 }}
+          items={[
+            {
+              key: "entities",
+              label: `本次采集到的表（${collectResult.entities.length}）`,
+              children: (
+                <Table
+                  size="small"
+                  rowKey="entity_name"
+                  pagination={false}
+                  dataSource={collectResult.entities}
+                  scroll={{ y: 240 }}
+                  columns={[
+                    { title: "表名", dataIndex: "entity_name", ellipsis: true, render: (v: string) => <span className="mono">{v}</span> },
+                    {
+                      title: "敏感度",
+                      dataIndex: "sensitivity_level",
+                      width: 120,
+                      render: (v: string) => <Tag color={SENSITIVITY_COLOR[v]}>{SENSITIVITY_LABEL[v] ?? v}</Tag>,
+                    },
+                    {
+                      title: "漂移",
+                      dataIndex: "drifted",
+                      width: 100,
+                      render: (v: boolean, r: { change_type?: string | null }) =>
+                        v ? <Tag color="warning">{DRIFT_CHANGE_LABEL[r.change_type ?? ""] ?? "已漂移"}</Tag> : <Tag>无</Tag>,
+                    },
+                  ]}
+                />
+              ),
+            },
+          ]}
         />
       )}
 
@@ -289,6 +434,10 @@ export function DataSources() {
   const [detail, setDetail] = useState<DataSource | null>(null);
   const [types, setTypes] = useState<SourceTypeInfo[]>(FALLBACK_TYPES);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 数据库枚举（测试连接通过后自动列出，供选择目标库）
+  const [dbOptions, setDbOptions] = useState<string[]>([]);
+  const [dbLoading, setDbLoading] = useState(false);
+  const [dbEnumerated, setDbEnumerated] = useState(false);
   const [form] = Form.useForm();
   const [searchParams] = useSearchParams();
   const sourceType = Form.useWatch("source_type", form);
@@ -332,11 +481,49 @@ export function DataSources() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyword]);
 
-  // 类型切换时自动带出默认端口
+  // 类型切换时自动带出默认端口，并清空已枚举的数据库列表
   function handleTypeChange(t: string) {
     const info = typeInfo(types, t);
     if (info?.default_port) {
       form.setFieldValue("port", info.default_port);
+    }
+    setDbOptions([]);
+    setDbEnumerated(false);
+  }
+
+  /** 枚举实例下可采集的非系统数据库（需 host/类型已填）。 */
+  async function loadDatabases() {
+    const values = form.getFieldsValue();
+    if (!values.source_type || !values.host) {
+      message.warning("请先填写类型与 Host，再枚举数据库");
+      return;
+    }
+    if (!typeInfo(types, String(values.source_type))?.supports_database) {
+      setDbOptions([]);
+      setDbEnumerated(false);
+      message.info("该类型不支持枚举数据库（可手填）");
+      return;
+    }
+    const cfg = buildConnectionConfig(values);
+    setDbLoading(true);
+    try {
+      const res = await listDataSourceDatabases({
+        source_type: String(values.source_type) as SourceType,
+        connection_config: cfg,
+      });
+      setDbOptions(res.databases);
+      setDbEnumerated(true);
+      if (res.databases.length === 0) {
+        message.info("未发现可采集的数据库（可留空采集全部库）");
+      } else {
+        message.success(`已枚举到 ${res.databases.length} 个数据库`);
+      }
+    } catch (err) {
+      setDbOptions([]);
+      setDbEnumerated(false);
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "枚举数据库失败");
+    } finally {
+      setDbLoading(false);
     }
   }
 
@@ -366,8 +553,12 @@ export function DataSources() {
       });
       if (res.ok) {
         message.success(`连接成功（${res.latency_ms}ms）`);
+        // 连接通过后自动枚举目标数据库，供用户选择
+        loadDatabases();
       } else {
         message.error(`连接失败：${res.error ?? "未知错误"}`);
+        setDbOptions([]);
+        setDbEnumerated(false);
       }
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "测试失败");
@@ -378,6 +569,8 @@ export function DataSources() {
     setEditTarget(null);
     form.resetFields();
     form.setFieldsValue({ source_type: undefined, port: 3306 });
+    setDbOptions([]);
+    setDbEnumerated(false);
     setModalOpen(true);
   }
 
@@ -393,6 +586,8 @@ export function DataSources() {
       cluster_id: source.cluster_id ?? undefined,
       port: typeInfo(types, source.source_type)?.default_port ?? undefined,
     });
+    setDbOptions([]);
+    setDbEnumerated(false);
     setModalOpen(true);
   }
 
@@ -593,11 +788,27 @@ export function DataSources() {
           <Space size={16} style={{ width: "100%" }} align="start">
             <Form.Item
               name="database"
-              label="Database（留空=采集全部库）"
+              label={dbEnumerated && dbOptions.length ? "Database（选择目标库）" : "Database（留空=采集全部库）"}
               style={{ width: "100%" }}
-              tooltip="指定库名则只采集该库；留空则枚举该实例下全部非系统库"
+              tooltip="测试连接通过后可枚举实例下的非系统库；选择指定库则只采集该库，留空则采集全部"
             >
-              <Input className="mono" placeholder="留空则采集全部库" />
+              {dbOptions.length ? (
+                <Select
+                  showSearch
+                  allowClear
+                  placeholder="全部库（默认）"
+                  optionFilterProp="label"
+                  loading={dbLoading}
+                  options={dbOptions.map((d) => ({ value: d, label: d }))}
+                />
+              ) : (
+                <Input className="mono" placeholder="留空则采集全部库" />
+              )}
+            </Form.Item>
+            <Form.Item label=" " style={{ width: 120 }}>
+              <Button icon={<DatabaseOutlined />} loading={dbLoading} onClick={loadDatabases} block>
+                枚举库
+              </Button>
             </Form.Item>
             {selType?.supports_schema && (
               <Form.Item name="schema" label="Schema" style={{ width: "100%" }} tooltip="PostgreSQL 库内 schema，默认 public">

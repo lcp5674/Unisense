@@ -883,6 +883,9 @@ export interface DBCatalog {
   upstream_signature: string;
   content_signature: string | null;
   schema_incomplete: boolean;
+  /** 数据源维度展示信息：源是否已删除 / 源名称 */
+  source_deleted?: boolean;
+  source_name?: string | null;
 }
 
 export interface CollectResult {
@@ -896,6 +899,39 @@ export interface CollectResult {
   mode: string;
   drift_count: number;
   drift_events: Array<{ entity_name: string; change_type: string }>;
+  deprecated_count?: number;
+  /** 本次采集到的实体明细（表名 + 敏感度 + 漂移标记） */
+  entities?: Array<{
+    entity_name: string;
+    sensitivity_level: string;
+    drifted: boolean;
+    change_type: string | null;
+  }>;
+}
+
+/** 数据源实例下的非系统数据库列表。 */
+export interface ListDatabasesResult {
+  databases: string[];
+  source_type: string;
+}
+
+/** 异步立即采集（collect-now）返回。 */
+export interface CollectNowResult {
+  job_id: string;
+  status: string;
+  mode?: string;
+}
+
+/** 采集任务 SSE 进度快照（detail.progress）。 */
+export interface CollectionProgress {
+  phase?: string;
+  message?: string;
+  messages?: string[];
+  index?: number | null;
+  total?: number | null;
+  entity_name?: string | null;
+  scanned?: number | null;
+  sensitivity?: string | null;
 }
 
 export interface ScheduleResult {

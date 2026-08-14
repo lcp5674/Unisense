@@ -23,7 +23,9 @@ import {
   ConflictCheckRequest,
   ConflictCheckResult,
   ClientResponse,
+  CollectNowResult,
   CollectResult,
+  CollectionProgress,
   ConflictListResponse,
   ConflictResponse,
   ConsumptionGuideResponse,
@@ -52,6 +54,7 @@ import {
   GrantResponse,
   ImpactPreview,
   LineageEdgePage,
+  ListDatabasesResult,
   MetricCreateRequest,
   MetricListResponse,
   MetricCompareResult,
@@ -1368,6 +1371,105 @@ export async function collectSource(
   );
 }
 
+/** 枚举实例下可采集的非系统数据库（创建数据源时选择目标库）。 */
+export async function listDataSourceDatabases(req: {
+  source_type: SourceType;
+  connection_config: Record<string, unknown>;
+}): Promise<ListDatabasesResult> {
+  return request<ListDatabasesResult>(`${API_BASE}/data-sources/databases`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+/** 异步立即采集（返回 job_id，进度走 SSE / 轮询任务状态）。 */
+export async function collectSourceNow(
+  sourceId: string,
+  mode = "FULL",
+): Promise<CollectNowResult> {
+  return request<CollectNowResult>(
+    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/collect-now`,
+    {
+      method: "POST",
+      body: JSON.stringify({ collector_type: "information_schema", mode }),
+    },
+  );
+}
+
+/**
+ * SSE 订阅采集任务进度（fetch 流式解析，带鉴权头）。
+ *
+ * @returns 取消函数；流结束或出错时自动清理。
+ */
+export function streamCollectionJob(
+  jobId: string,
+  handlers: {
+    onProgress?: (status: CollectionJob, progress: CollectionProgress | null) => void;
+    onDone?: (status: CollectionJob) => void;
+    onError?: (message: string) => void;
+  },
+): () => void {
+  const controller = new AbortController();
+  let aborted = false;
+  const headers: Record<string, string> = {
+    "X-Api-Key": SEMANTIC_API_KEY,
+  };
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  (async () => {
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}${API_BASE}/data-sources/jobs/${encodeURIComponent(jobId)}/stream`,
+        { headers, signal: controller.signal },
+      );
+      if (!res.ok || !res.body) {
+        handlers.onError?.(`SSE 连接失败 (HTTP ${res.status})`);
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let eventType = "";
+      while (!aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // 以空行分隔 SSE 事件
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const raw = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          let dataStr = "";
+          for (const line of raw.split("\n")) {
+            if (line.startsWith("event:")) eventType = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+          }
+          if (!dataStr) continue;
+          const status = JSON.parse(dataStr) as CollectionJob;
+          if (eventType === "done" || status.status === "COMPLETED" || status.status === "FAILED") {
+            handlers.onDone?.(status);
+            aborted = true;
+            break;
+          }
+          const progress = (status.detail?.progress ?? null) as CollectionProgress | null;
+          handlers.onProgress?.(status, progress);
+        }
+      }
+      reader.releaseLock();
+    } catch (err) {
+      if (!aborted && !controller.signal.aborted) {
+        handlers.onError?.(err instanceof Error ? err.message : "进度推送中断");
+      }
+    }
+  })();
+
+  return () => {
+    aborted = true;
+    controller.abort();
+  };
+}
+
 export async function scheduleSource(
   sourceId: string,
   cron: string,
@@ -1441,6 +1543,8 @@ export async function listCatalogs(params?: {
   entity_type?: string;
   sensitivity_level?: string;
   keyword?: string;
+  /** active=仅活跃源 / deleted=仅已删除源 / 不传=全部 */
+  source_status?: "active" | "deleted";
   page?: number;
   page_size?: number;
 }): Promise<{ items: DBCatalog[]; total: number; page: number; page_size: number }> {
@@ -1449,6 +1553,7 @@ export async function listCatalogs(params?: {
     entity_type: params?.entity_type,
     sensitivity_level: params?.sensitivity_level,
     keyword: params?.keyword,
+    source_status: params?.source_status,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 20,
   });
