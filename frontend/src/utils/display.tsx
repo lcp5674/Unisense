@@ -42,6 +42,8 @@ export const DEF_FIELD_LABEL: Record<string, string> = {
   partition_key: "分区字段",
   measure_columns: "度量列",
   dimensions: "维度",
+  measures: "度量",
+  columns: "度量字段",
   // 表达式模式
   expression: "表达式",
   expr: "表达式",

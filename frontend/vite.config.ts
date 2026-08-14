@@ -7,6 +7,10 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    // 开发环境强制不缓存：避免浏览器沿用旧编译产物导致「改了代码页面无变化」。
+    headers: {
+      "Cache-Control": "no-store",
+    },
     proxy: {
       "/api": {
         target: "http://localhost:8100",
