@@ -32,9 +32,12 @@ class FeedbackResponse(BaseModel):
     target_type: str
     target_id: str | None = None
     rating: int | None = None
+    nps_score: int | None = None
     comment: str | None = None
     status: str = "pending"
     resolution_note: str | None = None
+    resolver_id: int | None = None
+    resolved_at: datetime | None = None
     created_at: datetime | None = None
 
     @classmethod
@@ -45,8 +48,11 @@ class FeedbackResponse(BaseModel):
             target_type=m.target_type,
             target_id=getattr(m, "target_id", None),
             rating=getattr(m, "rating", None),
+            nps_score=getattr(m, "nps_score", None),
             comment=getattr(m, "comment", None),
             status=getattr(m, "status", "pending") or "pending",
             resolution_note=getattr(m, "resolution_note", None),
+            resolver_id=getattr(m, "resolver_id", None),
+            resolved_at=getattr(m, "resolved_at", None),
             created_at=getattr(m, "created_at", None),
         )

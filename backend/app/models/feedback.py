@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
@@ -20,6 +22,9 @@ class Feedback(Base, BaseModel):
     target_id: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="反馈对象 ID")
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="评分 1-5")
     comment: Mapped[str | None] = mapped_column(Text, nullable=True, comment="反馈内容")
+    nps_score: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="NPS 评分 0-10", index=True
+    )
     #: 反馈处理状态（pending/adopted/rejected/in_progress）——此前仅写进 comment
     #: 文本，状态不可查询/过滤，"反馈采纳闭环"未真正落地；现落库可筛。
     status: Mapped[str] = mapped_column(
@@ -31,4 +36,10 @@ class Feedback(Base, BaseModel):
     )
     resolution_note: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="处理说明（resolver 填写）"
+    )
+    resolver_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="处理人 ID"
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="处理时间"
     )

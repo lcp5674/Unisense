@@ -72,13 +72,19 @@ async def list_feedback(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     target_type: str | None = Query(None),
-    limit: int = Query(100, ge=1, le=200),
+    status: str | None = Query(
+        None, description="过滤：adopted/rejected/in_progress/pending"
+    ),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
 ) -> Any:
-    items = await ObservabilityService(db).list_feedback(target_type, limit)
+    data = await ObservabilityService(db).list_feedback(target_type, status, page, page_size)
     return ok(
         data={
-            "items": [FeedbackResponse.from_model(i) for i in items],
-            "total": len(items),
+            "items": [FeedbackResponse.from_model(i) for i in data["items"]],
+            "total": data["total"],
+            "page": data["page"],
+            "page_size": data["page_size"],
         },
         trace_id=trace_id,
     )
@@ -91,6 +97,18 @@ async def quality_metrics(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     return ok(data=await ObservabilityService(db).quality_stats(), trace_id=trace_id)
+
+
+@router.get("/quality-events", dependencies=_READ_DEPS)
+async def quality_events_list(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    limit: int = Query(20, ge=1, le=100),
+) -> Any:
+    """最近质量事件明细：level/status/metric_id/created_at。"""
+    items = await ObservabilityService(db).quality_events(limit)
+    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
 
 
 @router.get("/metrics/api", dependencies=_READ_DEPS)
@@ -161,6 +179,16 @@ async def submit_nps(
     )
     await db.commit()
     return ok(data=FeedbackResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.get("/nps/stats", dependencies=_READ_DEPS)
+async def nps_stats(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """NPS 分布统计：total/promoters/passives/detractors/score。"""
+    return ok(data=await ObservabilityService(db).nps_stats(), trace_id=trace_id)
 
 
 @router.patch(

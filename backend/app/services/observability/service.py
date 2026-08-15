@@ -55,8 +55,24 @@ class ObservabilityService(BaseService):
         await self._repo.commit()
         return result
 
-    async def list_feedback(self, target_type: str | None, limit: int) -> list[Feedback]:
-        return await self._repo.list_feedback(target_type, limit)
+    async def list_feedback(
+        self,
+        target_type: str | None,
+        status: str | None,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any]:
+        """反馈列表（分页 + 状态过滤）。"""
+        if page_size > 100:
+            page_size = 100
+        items, total = await self._repo.list_feedback(target_type, status, page, page_size)
+        return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    async def nps_stats(self) -> dict[str, Any]:
+        return await self._repo.nps_stats()
+
+    async def quality_events(self, limit: int = 20) -> list[dict[str, Any]]:
+        return await self._repo.quality_events(limit)
 
     async def quality_stats(self) -> dict[str, Any]:
         return await self._repo.quality_stats()
@@ -107,7 +123,7 @@ class ObservabilityService(BaseService):
             user_id=user_id,
             target_type=target_type,
             target_id=target_id,
-            rating=score,
+            nps_score=score,
             comment=comment or f"NPS: {score}/10",
         )
         result = await self._repo.save_feedback(feedback)
@@ -155,6 +171,8 @@ class ObservabilityService(BaseService):
         changed = feedback.status != status or resolution_note is not None
         if changed:
             feedback.status = status
+            feedback.resolver_id = resolver_id
+            feedback.resolved_at = datetime.now(UTC)
             if resolution_note is not None:
                 feedback.resolution_note = resolution_note
         # comment 追加状态变更记录（幂等去重：同状态且无新说明/处理人时不重复追加，

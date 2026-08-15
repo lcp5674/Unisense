@@ -41,16 +41,98 @@ class ObservabilityRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_feedback(self, target_type: str | None, limit: int) -> list[Feedback]:
+    async def list_feedback(
+        self,
+        target_type: str | None,
+        status: str | None,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[Feedback], int]:
+        """反馈列表（分页 + 状态过滤），返回 (items, total)。"""
         stmt = select(Feedback)
+        count_stmt = select(func.count()).select_from(Feedback)
         if target_type:
             stmt = stmt.where(Feedback.target_type == target_type)
+            count_stmt = count_stmt.where(Feedback.target_type == target_type)
+        if status:
+            stmt = stmt.where(Feedback.status == status)
+            count_stmt = count_stmt.where(Feedback.status == status)
+        total = (await self._session.execute(count_stmt)).scalar() or 0
         rows = (
-            (await self._session.execute(stmt.order_by(Feedback.id.desc()).limit(limit)))
+            (
+                await self._session.execute(
+                    stmt.order_by(Feedback.id.desc())
+                    .offset((page - 1) * page_size)
+                    .limit(page_size)
+                )
+            )
             .scalars()
             .all()
         )
-        return list(rows)
+        return list(rows), total
+
+    async def nps_stats(self) -> dict[str, Any]:
+        """NPS 分布统计：promoter≥9 / passive 7-8 / detractor≤6，过滤 nps_score 为空。"""
+        total = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Feedback)
+                .where(Feedback.nps_score.is_not(None))
+            )
+        ).scalar() or 0
+        promoters = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Feedback)
+                .where(Feedback.nps_score.is_not(None), Feedback.nps_score >= 9)
+            )
+        ).scalar() or 0
+        passives = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Feedback)
+                .where(
+                    Feedback.nps_score.is_not(None),
+                    Feedback.nps_score.between(7, 8),
+                )
+            )
+        ).scalar() or 0
+        detractors = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Feedback)
+                .where(Feedback.nps_score.is_not(None), Feedback.nps_score <= 6)
+            )
+        ).scalar() or 0
+        score = round((promoters - detractors) / total * 100, 2) if total else 0.0
+        return {
+            "total": total,
+            "promoters": promoters,
+            "passives": passives,
+            "detractors": detractors,
+            "score": score,
+        }
+
+    async def quality_events(self, limit: int = 20) -> list[dict[str, Any]]:
+        """最近质量事件明细（供运营中心明细面板）。"""
+        rows = (
+            await self._session.execute(
+                select(QualityEvent)
+                .order_by(QualityEvent.created_at.desc(), QualityEvent.id.desc())
+                .limit(limit)
+            )
+        ).scalars()
+        events = list(rows)
+        return [
+            {
+                "id": e.id,
+                "level": e.level.value,
+                "status": e.status.value,
+                "metric_id": e.metric_id,
+                "created_at": e.created_at,
+            }
+            for e in events
+        ]
 
     async def quality_stats(self) -> dict[str, Any]:
         by_level = (

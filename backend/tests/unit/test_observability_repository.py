@@ -36,18 +36,82 @@ class TestObservabilityRepository:
         assert result is fb
 
     async def test_list_feedback_no_filter(self, repo: ObservabilityRepository) -> None:
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [Feedback(id=1)]
-        repo._session.execute = AsyncMock(return_value=mock_result)
-        results = await repo.list_feedback(target_type=None, limit=10)
-        assert len(results) == 1
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 7
+        mock_items = MagicMock()
+        mock_items.scalars.return_value.all.return_value = [Feedback(id=1)]
+        repo._session.execute = AsyncMock(side_effect=[mock_count, mock_items])
+        items, total = await repo.list_feedback(
+            target_type=None, status=None, page=1, page_size=20
+        )
+        assert len(items) == 1
+        assert total == 7
 
     async def test_list_feedback_with_filter(self, repo: ObservabilityRepository) -> None:
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 1
+        mock_items = MagicMock()
+        mock_items.scalars.return_value.all.return_value = [Feedback(id=1, target_type="metric")]
+        repo._session.execute = AsyncMock(side_effect=[mock_count, mock_items])
+        items, total = await repo.list_feedback(
+            target_type="metric", status="pending", page=2, page_size=10
+        )
+        assert len(items) == 1
+        assert total == 1
+
+    async def test_nps_stats(self, repo: ObservabilityRepository) -> None:
+        def scalar(v: int) -> MagicMock:
+            m = MagicMock()
+            m.scalar.return_value = v
+            return m
+
+        repo._session.execute = AsyncMock(
+            side_effect=[
+                scalar(100),  # total
+                scalar(60),  # promoters >=9
+                scalar(20),  # passives 7-8
+                scalar(20),  # detractors <=6
+            ]
+        )
+        stats = await repo.nps_stats()
+        assert stats == {
+            "total": 100,
+            "promoters": 60,
+            "passives": 20,
+            "detractors": 20,
+            "score": 40.0,
+        }
+
+    async def test_nps_stats_empty(self, repo: ObservabilityRepository) -> None:
+        def scalar0() -> MagicMock:
+            m = MagicMock()
+            m.scalar.return_value = 0
+            return m
+
+        repo._session.execute = AsyncMock(
+            side_effect=[scalar0(), scalar0(), scalar0(), scalar0()]
+        )
+        stats = await repo.nps_stats()
+        assert stats["total"] == 0
+        assert stats["score"] == 0.0
+
+    async def test_quality_events(self, repo: ObservabilityRepository) -> None:
         mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [Feedback(id=1, target_type="metric")]
+        mock_result.scalars.return_value = iter(
+            [MagicMock(id=1, level=MagicMock(value="P0"), status=MagicMock(value="OPEN"),
+                       metric_id=5, created_at=None)]
+        )
         repo._session.execute = AsyncMock(return_value=mock_result)
-        results = await repo.list_feedback(target_type="metric", limit=10)
-        assert len(results) == 1
+        events = await repo.quality_events(20)
+        assert events == [
+            {
+                "id": 1,
+                "level": "P0",
+                "status": "OPEN",
+                "metric_id": 5,
+                "created_at": None,
+            }
+        ]
 
     async def test_quality_stats(self, repo: ObservabilityRepository) -> None:
         mock_result = MagicMock()

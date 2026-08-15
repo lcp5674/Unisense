@@ -146,8 +146,11 @@ async def test_submit_feedback_and_stats(db_env) -> None:
             )
         )
         assert fb.id is not None
-        feedbacks = await svc.list_feedback(None, 10)
-        assert len(feedbacks) >= 1
+        feedbacks = await svc.list_feedback(None, None, 1, 20)
+        assert len(feedbacks["items"]) >= 1
+        assert feedbacks["total"] >= 1
+        assert isinstance(await svc.nps_stats(), dict)
+        assert isinstance(await svc.quality_events(20), list)
         assert isinstance(await svc.api_stats(), dict)
         assert isinstance(await svc.notification_stats(), dict)
         assert isinstance(await svc.lineage_stats(), dict)

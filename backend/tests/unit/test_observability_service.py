@@ -45,9 +45,25 @@ async def test_submit_feedback_invalid_rating() -> None:
 
 async def test_list_feedback_delegates() -> None:
     svc, repo = await _svc()
-    repo.list_feedback = AsyncMock(return_value=[Feedback(id=1)])
-    out = await svc.list_feedback("term", 10)
-    assert len(out) == 1
+    repo.list_feedback = AsyncMock(return_value=([Feedback(id=1)], 7))
+    out = await svc.list_feedback("term", None, 1, 20)
+    assert out["total"] == 7
+    assert out["page"] == 1
+    assert out["page_size"] == 20
+    assert len(out["items"]) == 1
+
+
+async def test_nps_stats_delegates() -> None:
+    svc, repo = await _svc()
+    repo.nps_stats = AsyncMock(return_value={"total": 3, "score": 33.33})
+    assert await svc.nps_stats() == {"total": 3, "score": 33.33}
+
+
+async def test_quality_events_delegates() -> None:
+    svc, repo = await _svc()
+    repo.quality_events = AsyncMock(return_value=[{"id": 1}])
+    out = await svc.quality_events(20)
+    assert out == [{"id": 1}]
 
 
 async def test_update_feedback_status_valid() -> None:
@@ -133,8 +149,22 @@ async def test_submit_nps_valid() -> None:
     out = await svc.submit_nps(user_id=3, score=9)
     assert out.id == 1
     assert out.comment == "NPS: 9/10"
+    # NPS 语义解耦：0-10 写进 nps_score，rating 保持 None（不再污染 1-5 语义）
+    assert out.nps_score == 9
+    assert out.rating is None
     repo.save_feedback.assert_awaited()
     repo.commit.assert_awaited()
+
+
+async def test_update_feedback_status_sets_resolver_fields() -> None:
+    """状态变化写入 resolver_id / resolved_at。"""
+    svc, repo = await _svc()
+    fb = Feedback(id=1, user_id=1, target_type="term", comment="原始", status="pending")
+    repo.get_feedback = AsyncMock(return_value=fb)
+    out = await svc.update_feedback_status(1, "adopted", resolver_id=9, resolution_note="已采纳")
+    assert out.status == "adopted"
+    assert out.resolver_id == 9
+    assert out.resolved_at is not None
 
 
 async def test_submit_nps_invalid_score() -> None:
