@@ -347,6 +347,29 @@ export interface LineageEdgePage {
   has_more?: boolean;
 }
 
+// SQL 血缘解析结果（后端 lineage/schemas.py 的 LineageParseResponse）——
+// 计数字段 + 本次解析的表级/字段级边明细（供解析页面当页展示）
+export interface LineageTableEdge {
+  source: string;
+  target: string;
+}
+
+export interface LineageFieldEdge {
+  source_table: string;
+  source_column: string | null;
+  target_table: string;
+  target_column: string;
+  expression: string | null;
+}
+
+export interface ParseLineageResult {
+  table_edges: number;
+  field_edges: number;
+  graph_written: boolean;
+  table_lineage: LineageTableEdge[];
+  field_lineage: LineageFieldEdge[];
+}
+
 // 血缘图谱节点/边（后端 lineage/graph 端点返回，与资产地图图谱结构对齐，
 // 可被 assetmap/AssetGraph 力导向图组件直接消费）
 export interface LineageGraphNode {
@@ -413,6 +436,15 @@ export interface StaleEdge {
   provenance: string;
   missing_count: number;
   stale_since?: string | null;
+}
+
+// 血缘候选节点（后端 lineage/schemas.py 的 LineageNodeResponse）——
+// 影响分析/血缘查询选项框的预加载与关键词搜索
+export interface LineageNode {
+  id: string;
+  label: string;
+  type: "table" | "metric" | "field" | "external" | "other";
+  count: number;
 }
 
 // 收藏（backend/app/api/consume.py）：POST/DELETE 返回 FavoriteResponse

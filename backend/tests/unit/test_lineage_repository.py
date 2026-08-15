@@ -504,3 +504,94 @@ async def test_mark_missing_skips_seen_pairs() -> None:
     assert missing == 0
     assert flagged == 0
     assert edge.missing_count == 0
+
+
+# ---- 采集通道总览 / 候选节点（list_channels / list_nodes）----
+
+
+class _AggRow:
+    """支持索引与迭代解包的聚合结果行（对齐 SQLAlchemy Row 访问约定）。"""
+
+    def __init__(self, *values: object) -> None:
+        self._values = values
+
+    def __getitem__(self, index: int) -> object:
+        return self._values[index]
+
+    def __iter__(self):
+        return iter(self._values)
+
+
+class _AggregateDB:
+    """按 SQL 特征返回聚合行的假 db（list_channels / list_nodes 用）。"""
+
+    def __init__(
+        self,
+        *,
+        edge_rows: list[tuple[str, int, int]] | None = None,
+        node_rows: list[tuple[str, str]] | None = None,
+        run: Any | None = None,
+        nodes: list[tuple[str, int]] | None = None,
+    ) -> None:
+        self.edge_rows = edge_rows or []
+        self.node_rows = node_rows or []
+        self.run = run
+        self.nodes = nodes or []
+        self.sqls: list[str] = []
+        self.flushes = 0
+
+    async def execute(self, stmt: object) -> _Result:
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        self.sqls.append(sql)
+        if "lineage_ingest_run" in sql:
+            return _Result(rows=[self.run] if self.run else [], scalar=self.run)
+        if "anon_1.node" in sql:
+            # list_nodes：候选节点聚合（node, count）
+            return _Result(rows=[_AggRow(n, c) for n, c in self.nodes])
+        if "anon_1.p" in sql:
+            # list_channels 节点数聚合（provenance, count）
+            return _Result(rows=[_AggRow(p, c) for p, c in self.node_rows])
+        if "lineage_edge.provenance" in sql:
+            return _Result(rows=[_AggRow(*r) for r in self.edge_rows])
+        return _Result(rows=[])
+
+    async def flush(self) -> None:
+        self.flushes += 1
+
+
+async def test_list_channels_includes_known_channels_when_empty() -> None:
+    """0 边时内置已知通道（dp_csv/sqlglot）仍展示，保证采集通道来源全景完整。"""
+    db = _AggregateDB()
+    repo = LineageRepository(db)
+    channels = await repo.list_channels()
+    sources = [c["source"] for c in channels]
+    assert sources == ["dp_csv", "sqlglot"]
+    assert all(c["edge_count"] == 0 for c in channels)
+    assert all(c["node_count"] == 0 for c in channels)
+
+
+async def test_list_channels_merges_known_channels_with_existing() -> None:
+    """有边来源（如 sqlglot）保留计数，缺失的已知通道（dp_csv）补全为 0。"""
+    db = _AggregateDB(
+        edge_rows=[("sqlglot", 5, 1)],
+        node_rows=[("sqlglot", 3)],
+    )
+    repo = LineageRepository(db)
+    channels = {c["source"]: c for c in await repo.list_channels()}
+    assert channels["sqlglot"]["edge_count"] == 5
+    assert channels["sqlglot"]["node_count"] == 3
+    assert channels["sqlglot"]["stale_count"] == 1
+    assert channels["dp_csv"]["edge_count"] == 0
+    # 有边来源排前（edge_count 倒序）
+    assert (await repo.list_channels())[0]["source"] == "sqlglot"
+
+
+async def test_list_nodes_aggregates_and_filters() -> None:
+    """候选节点：源∪目标去重聚合，带 kw 时按节点 id 模糊过滤。"""
+    db = _AggregateDB(nodes=[("table:orders", 12), ("table:users", 3)])
+    repo = LineageRepository(db)
+    rows = await repo.list_nodes(kw="tab", limit=10)
+    assert rows == [("table:orders", 12), ("table:users", 3)]
+    # 断言 SQL 含 LIKE 模糊过滤与 LIMIT 上限
+    assert any("LIKE" in s for s in db.sqls)
+    assert any("LIMIT 10" in s for s in db.sqls)

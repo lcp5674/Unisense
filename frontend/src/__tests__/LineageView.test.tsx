@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { LineageView, buildSubgraph, resolveRootId } from "../pages/LineageView";
 import { adaptiveBaseRadius } from "../components/assetmap/AssetGraph";
@@ -36,6 +37,10 @@ vi.mock("../api", async (importOriginal) => {
     lineageGraph: vi.fn(),
     getCatalogDetail: vi.fn(),
     parseLineage: vi.fn(),
+    lineageNodes: vi.fn(),
+    lineageImpact: vi.fn(),
+    lineageChannels: vi.fn(),
+    lineageStale: vi.fn(),
     getMetric: vi.fn(),
     getMetricHealth: vi.fn(),
     fetchRelatedMetrics: vi.fn(),
@@ -289,7 +294,16 @@ describe("LineageView SQL 血缘解析 Tab", () => {
     vi.clearAllMocks();
     vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
     vi.mocked(api.getCatalogDetail).mockResolvedValue(tableDetail);
-    vi.mocked(api.parseLineage).mockResolvedValue({ table_edges: 1, field_edges: 2, graph_written: true });
+    vi.mocked(api.parseLineage).mockResolvedValue({
+      table_edges: 1,
+      field_edges: 2,
+      graph_written: true,
+      table_lineage: [{ source: "table:s", target: "table:t" }],
+      field_lineage: [
+        { source_table: "a", source_column: "id", target_table: "t", target_column: "id", expression: null },
+        { source_table: "b", source_column: "amount", target_table: "t", target_column: "amount", expression: "SUM(amount)" },
+      ],
+    });
   });
 
   it("方言下拉支持 Doris 与 ClickHouse，并按所选方言调用解析", async () => {
@@ -316,6 +330,138 @@ describe("LineageView SQL 血缘解析 Tab", () => {
     await waitFor(() =>
       expect(api.parseLineage).toHaveBeenCalledWith("INSERT INTO t SELECT id FROM s", "doris"),
     );
+  });
+
+  it("解析成功后当页展示本次表级/字段级边明细表格（方案 A）", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /SQL 血缘解析/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    fireEvent.change(within(panel).getByPlaceholderText(/粘贴 SQL/), {
+      target: { value: "INSERT INTO t SELECT a.id, SUM(b.amount) FROM a JOIN b" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: /解析血缘/ }));
+    await waitFor(() => expect(api.parseLineage).toHaveBeenCalled());
+    // Alert 统计 + 表级明细表格
+    await waitFor(() => {
+      expect(screen.getByText("本次解析 · 表级血缘（1）")).toBeInTheDocument();
+    });
+    expect(screen.getByText("本次解析 · 字段级血缘（2）")).toBeInTheDocument();
+    // 表级边明细：源表 s → 目标表 t
+    expect(screen.getByText("table:s")).toBeInTheDocument();
+    expect(screen.getByText("table:t")).toBeInTheDocument();
+    // 字段级边明细：a.id → t.id，b.amount → t.amount（带派生表达式）
+    expect(screen.getByText("a.id")).toBeInTheDocument();
+    expect(screen.getByText("t.id")).toBeInTheDocument();
+    expect(screen.getByText("SUM(amount)")).toBeInTheDocument();
+  });
+});
+
+describe("LineageView 血缘查询 / 影响分析 Tab", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
+    vi.mocked(api.lineageNodes).mockResolvedValue([
+      { id: "table:orders", label: "orders", type: "table", count: 12 },
+      { id: "metric:gmv", label: "gmv", type: "metric", count: 8 },
+    ]);
+    vi.mocked(api.lineageImpact).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          source_node: "table:orders",
+          target_node: "table:dws",
+          edge_type: "DERIVED_FROM",
+          granularity: "L1",
+          confidence: 1,
+          provenance: "sqlglot",
+          pii_inherited: false,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+      has_more: false,
+    });
+  });
+
+  it("进入 Tab 预加载候选节点，可从下拉选择节点并查询影响", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /血缘查询/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    // 预加载候选节点（无关键词）
+    await waitFor(() => expect(api.lineageNodes).toHaveBeenCalledWith(undefined, 50));
+    // 打开节点下拉，看到候选（表 / 指标）
+    const nodeSelect = within(panel).getAllByRole("combobox")[0];
+    fireEvent.mouseDown(nodeSelect);
+    await screen.findByText("orders");
+    fireEvent.click(screen.getByText("gmv"));
+    // 查询 → 按所选节点调用影响分析
+    fireEvent.click(within(panel).getByRole("button", { name: /查\s*询/ }));
+    await waitFor(() =>
+      expect(api.lineageImpact).toHaveBeenCalledWith({
+        node: "metric:gmv",
+        direction: "downstream",
+        max_hops: 5,
+      }),
+    );
+    // 展示血缘边结果（限定在面板内，避免与下拉残留选项冲突）
+    await waitFor(() => expect(within(panel).getByText("table:orders")).toBeInTheDocument());
+  });
+
+  it("输入关键词触发远程搜索候选节点，未命中时兜底「使用输入值」", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.lineageNodes).mockResolvedValue([]);
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /血缘查询/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    const nodeSelect = within(panel).getAllByRole("combobox")[0];
+    fireEvent.mouseDown(nodeSelect);
+    // 等待下拉完全打开（open 状态生效后搜索框才可交互）
+    await waitFor(() => {
+      expect(document.querySelector(".ant-select-open")).toBeTruthy();
+    });
+    // 限定在打开的 Select 内取搜索框（页面存在多个 Select 的隐藏 search input）
+    const searchInput = document.querySelector<HTMLInputElement>(".ant-select-open .ant-select-selection-search-input")!;
+    await user.type(searchInput, "external");
+    // 输入关键词 → 远程搜索候选节点（含中间态与最终态调用）
+    await waitFor(() => expect(api.lineageNodes).toHaveBeenCalledWith("external", 50));
+    // 兜底「使用输入值」选项出现，支持自由指定节点
+    await screen.findByText(/使用「external」/);
+  });
+});
+
+describe("LineageView 采集通道 Tab", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
+    vi.mocked(api.lineageChannels).mockResolvedValue([
+      { source: "sqlglot", edge_count: 18, node_count: 28, stale_count: 0, last_run: null },
+      { source: "dp_csv", edge_count: 10553, node_count: 4012, stale_count: 0, last_run: null },
+    ]);
+    vi.mocked(api.lineageStale).mockResolvedValue([]);
+  });
+
+  it("采集通道卡片展示友好名称（SQL 解析 / DP 同步）与原始标识", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /采集通道/ }).click();
+    });
+    await waitFor(() => expect(api.lineageChannels).toHaveBeenCalled());
+    expect(screen.getByText("SQL 解析")).toBeInTheDocument();
+    expect(screen.getByText("DP 同步")).toBeInTheDocument();
+    // 原始 provenance 标识以小字一并展示
+    expect(screen.getByText("sqlglot")).toBeInTheDocument();
+    expect(screen.getByText("dp_csv")).toBeInTheDocument();
   });
 });
 

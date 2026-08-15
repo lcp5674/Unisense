@@ -14,6 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 
+#: 系统内置血缘采集通道：无论当前是否有边都展示，保证「采集通道」视图来源全景完整
+#: （SQL 解析=sqlglot / DP 同步=dp_csv；其余动态来源如 metric_definition 有边时自动出现）。
+_KNOWN_CHANNELS = ("dp_csv", "sqlglot")
+
 
 class LineageRepository:
     """血缘边数据访问。"""
@@ -585,6 +589,19 @@ class LineageRepository:
                     "last_run": await self.latest_ingest_run(source),
                 }
             )
+        # 补全内置已知通道（当前 0 边也展示，如 SQL 解析尚未产生血缘时通道仍可见）
+        existing = {c["source"] for c in channels}
+        for source in _KNOWN_CHANNELS:
+            if source not in existing:
+                channels.append(
+                    {
+                        "source": source,
+                        "edge_count": 0,
+                        "node_count": 0,
+                        "stale_count": 0,
+                        "last_run": await self.latest_ingest_run(source),
+                    }
+                )
         channels.sort(key=lambda c: c["edge_count"], reverse=True)
         return channels
 
@@ -623,3 +640,29 @@ class LineageRepository:
         edge.stale_since = None
         edge.missing_count = 0
         await self._db.flush()
+
+    async def list_nodes(self, kw: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
+        """血缘候选节点：聚合血缘边两端节点（源∪目标去重，软删过滤）。
+
+        无 ``kw`` 时按参与边数倒序返回 top-N（预加载常用节点）；带 ``kw`` 时按
+        节点 id 模糊过滤（用户关键词搜索指定）。
+
+        Returns:
+            ``[(node, count)]``，count 为该节点参与的血缘边数。
+        """
+        src_q = select(LineageEdge.source_node.label("node")).where(
+            LineageEdge.deleted_at.is_(None)
+        )
+        tgt_q = select(LineageEdge.target_node.label("node")).where(
+            LineageEdge.deleted_at.is_(None)
+        )
+        union = src_q.union(tgt_q).subquery()
+        stmt = (
+            select(union.c.node, func.count().label("cnt"))
+            .group_by(union.c.node)
+            .order_by(func.count().desc())
+        )
+        if kw:
+            stmt = stmt.where(union.c.node.like(f"%{kw}%"))
+        rows = (await self._db.execute(stmt.limit(limit))).all()
+        return [(str(r[0]), int(r[1] or 0)) for r in rows]

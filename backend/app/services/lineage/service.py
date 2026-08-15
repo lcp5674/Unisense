@@ -30,14 +30,17 @@ from app.services.lineage.parser import (
 )
 from app.services.lineage.repository import LineageRepository
 from app.services.lineage.schemas import (
+    FieldLineageItem,
     ImpactPreviewResponse,
     LineageChannelResponse,
     LineageEdgeResponse,
     LineageImpactParams,
     LineageIngestRunResponse,
+    LineageNodeResponse,
     LineageParseRequest,
     LineageParseResponse,
     StaleEdgeResponse,
+    TableLineageItem,
 )
 
 logger = get_logger("unisense.lineage.service")
@@ -98,13 +101,24 @@ class LineageService(BaseService):
     async def parse_and_store(
         self, req: LineageParseRequest, actor_id: int
     ) -> LineageParseResponse:
-        """解析 SQL 并持久化血缘边（表级 + 字段级）。"""
+        """解析 SQL 并持久化血缘边（表级 + 字段级）。
+
+        返回本次解析的边**明细**（``table_lineage`` / ``field_lineage``，供前端当页
+        直接展示本次血缘效果）；并按来源通道写一条 ``lineage_ingest_run`` 运行记录
+        （对齐模型注释：dp_csv / quickbi / 数据接口 / SQL 解析均记运行摘要），使
+        「采集通道」视图能展示 SQL 解析的来源新鲜度与变更摘要。
+        """
         table_edges = extract_table_lineage(req.sql, req.dialect)
         field_edges = extract_field_lineage(req.sql, req.dialect)
 
         stored_table = 0
         stored_field = 0
+        added = 0
+        updated = 0
         graph_edges: list[tuple[str, str, str]] = []
+        table_lineage: list[TableLineageItem] = []
+        field_lineage: list[FieldLineageItem] = []
+        run = await self._repo.begin_ingest_run(req.provenance)
 
         for e in table_edges:
             sn = node_table(e.source)
@@ -117,14 +131,20 @@ class LineageService(BaseService):
                     f"血缘边 {sn} → {tn} 将形成循环依赖，已拒绝",
                     ctx={"source_node": sn, "target_node": tn},
                 )
-            await self._repo.upsert_edge(
+            _, created = await self._repo.upsert_edge_with_status(
                 source_node=sn,
                 target_node=tn,
                 edge_type="DERIVED_FROM",
                 granularity="L1",
                 provenance=req.provenance,
+                change_reason="reparse",
             )
             stored_table += 1
+            if created:
+                added += 1
+            else:
+                updated += 1
+            table_lineage.append(TableLineageItem(source=sn, target=tn))
             graph_edges.append((sn, tn, "DERIVED_FROM"))
 
         for fe in field_edges:
@@ -140,14 +160,28 @@ class LineageService(BaseService):
                     f"血缘边 {sn} → {tn} 将形成循环依赖，已拒绝",
                     ctx={"source_node": sn, "target_node": tn},
                 )
-            await self._repo.upsert_edge(
+            _, created = await self._repo.upsert_edge_with_status(
                 source_node=sn,
                 target_node=tn,
                 edge_type="DERIVED_FROM",
                 granularity="L2",
                 provenance=req.provenance,
+                change_reason="reparse",
             )
             stored_field += 1
+            if created:
+                added += 1
+            else:
+                updated += 1
+            field_lineage.append(
+                FieldLineageItem(
+                    source_table=fe.source_table,
+                    source_column=fe.source_column,
+                    target_table=fe.target_table,
+                    target_column=fe.target_column,
+                    expression=fe.expression,
+                )
+            )
             graph_edges.append((sn, tn, "DERIVED_FROM"))
 
         graph_written = False
@@ -158,10 +192,19 @@ class LineageService(BaseService):
                 "lineage_parsed",
                 {"table_edges": stored_table, "field_edges": stored_field},
             )
+        await self._repo.finish_ingest_run(
+            run,
+            status="success",
+            total_edges=stored_table + stored_field,
+            added=added,
+            updated=updated,
+        )
         return LineageParseResponse(
             table_edges=stored_table,
             field_edges=stored_field,
             graph_written=graph_written,
+            table_lineage=table_lineage,
+            field_lineage=field_lineage,
         )
 
     async def query_impact(self, params: LineageImpactParams) -> list[LineageEdgeResponse]:
@@ -223,9 +266,7 @@ class LineageService(BaseService):
             写入的血缘边；无有效底表名时返回 None。
         """
         if not isinstance(source_table, str) or not source_table.strip():
-            logger.warning(
-                "metric_lineage_skip_empty_source_table", metric_code=metric_code
-            )
+            logger.warning("metric_lineage_skip_empty_source_table", metric_code=metric_code)
             return None
         edge = await self._repo.upsert_metric_table_edge(
             metric_code=metric_code,
@@ -520,6 +561,30 @@ class LineageService(BaseService):
         """失效队列：连续未被确认、待人工处置的血缘边。"""
         edges = await self._repo.list_stale_edges(source, limit)
         return [StaleEdgeResponse.model_validate(e) for e in edges]
+
+    async def list_nodes(self, kw: str | None = None, limit: int = 50) -> list[LineageNodeResponse]:
+        """血缘候选节点（影响分析/血缘查询选项框预加载与关键词搜索）。
+
+        无 ``kw`` 时返回参与边数最多的 top-N 节点（预加载常用节点）；带 ``kw`` 时
+        按节点 id 模糊过滤，供用户输入关键词搜索指定节点。
+        """
+        rows = await self._repo.list_nodes(kw=kw, limit=limit)
+        return [self._node_to_response(node, count) for node, count in rows]
+
+    @staticmethod
+    def _node_to_response(node: str, count: int) -> LineageNodeResponse:
+        """将节点 id（如 ``table:db.orders``）映射为展示模型（去前缀 + 类型）。"""
+        for prefix, ntype in (
+            ("table:", "table"),
+            ("metric:", "metric"),
+            ("field:", "field"),
+            ("external:", "external"),
+        ):
+            if node.startswith(prefix):
+                return LineageNodeResponse(
+                    id=node, label=node[len(prefix) :], type=ntype, count=count
+                )
+        return LineageNodeResponse(id=node, label=node, type="other", count=count)
 
     async def confirm_stale_edge(self, edge_id: int) -> StaleEdgeResponse:
         """确认失效边：软删权威存储，并 best-effort 同步删除图存储。"""

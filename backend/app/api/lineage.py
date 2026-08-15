@@ -257,6 +257,27 @@ async def list_stale(
     )
 
 
+@router.get("/nodes", dependencies=_READ_DEPS)
+async def list_nodes(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    kw: str | None = Query(None, max_length=100, description="关键词过滤节点（匹配节点 id）"),
+    limit: int = Query(50, ge=1, le=200, description="返回节点数上限"),
+) -> ApiResponse[Any]:
+    """血缘候选节点：影响分析/血缘查询选项框的预加载与关键词搜索。
+
+    无 ``kw`` 时按参与边数倒序返回 top-N（预加载常用节点）；带 ``kw`` 时按节点 id
+    模糊过滤，供用户输入关键词搜索指定节点（table:/metric:/field: 前缀节点）。
+    """
+    svc = _svc(db)
+    nodes = await svc.list_nodes(kw=kw, limit=limit)
+    return ok(
+        data=[n.model_dump(mode="json") for n in nodes],
+        trace_id=trace_id,
+    )
+
+
 @router.post(
     "/stale/{edge_id}/confirm",
     dependencies=_WRITE_DEPS,

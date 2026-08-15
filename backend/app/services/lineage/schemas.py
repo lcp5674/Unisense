@@ -35,12 +35,35 @@ class LineageEdgeResponse(BaseModel):
     pii_inherited: bool = Field(default=False, description="PII 是否沿血缘继承")
 
 
+class TableLineageItem(BaseModel):
+    """表级血缘边明细（本次解析结果，用于前端当页展示）。"""
+
+    source: str = Field(description="上游表（catalog.db.table 规范化形式）")
+    target: str = Field(description="下游表（写入目标）")
+
+
+class FieldLineageItem(BaseModel):
+    """字段级血缘边明细（本次解析结果，用于前端当页展示）。"""
+
+    source_table: str = Field(description="上游表")
+    source_column: str | None = Field(default=None, description="上游列（SELECT * 降级时为 None）")
+    target_table: str = Field(description="下游表")
+    target_column: str = Field(description="下游列")
+    expression: str | None = Field(default=None, description="派生表达式原文（裸列引用为 None）")
+
+
 class LineageParseResponse(BaseModel):
     """血缘解析结果。"""
 
     table_edges: int
     field_edges: int
     graph_written: bool
+    table_lineage: list[TableLineageItem] = Field(
+        default_factory=list, description="本次解析的表级边明细"
+    )
+    field_lineage: list[FieldLineageItem] = Field(
+        default_factory=list, description="本次解析的字段级边明细"
+    )
 
 
 class ImpactedMetric(BaseModel):
@@ -149,3 +172,12 @@ class LineageStaleParams(BaseModel):
 
     source: str | None = Field(default=None, max_length=32, description="按来源通道过滤")
     limit: int = Field(default=200, ge=1, le=1000, description="返回条数上限")
+
+
+class LineageNodeResponse(BaseModel):
+    """血缘候选节点（影响分析/血缘查询选项框预加载与搜索）。"""
+
+    id: str = Field(description="节点 id，如 table:db.orders / metric:gmv_total")
+    label: str = Field(description="展示名（去类型前缀）")
+    type: str = Field(description="节点类型：table/metric/field/external/other")
+    count: int = Field(default=0, description="该节点参与的血缘边数（预加载排序用）")

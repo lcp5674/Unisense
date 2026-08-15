@@ -42,12 +42,56 @@ class FakeRepo:
         self.impact: list[LineageEdgeResponse] = []
         self.upsert_calls: list[dict[str, Any]] = []
         self.deleted_count = 0
+        self._keys: set[tuple[object, ...]] = set()
+        self.runs: list[SimpleNamespace] = []
 
     async def upsert_edge(self, **kwargs: object) -> SimpleNamespace:
         self.upsert_calls.append(kwargs)
         edge = SimpleNamespace(id=len(self.edges) + 1, **kwargs)
         self.edges.append(edge)
         return edge
+
+    async def upsert_edge_with_status(self, **kwargs: object) -> tuple[SimpleNamespace, bool]:
+        """幂等 upsert 假实现：按唯一键（source/target/edge_type/granularity）判定 created。"""
+        self.upsert_calls.append(kwargs)
+        key = (
+            kwargs.get("source_node"),
+            kwargs.get("target_node"),
+            kwargs.get("edge_type"),
+            kwargs.get("granularity"),
+        )
+        created = key not in self._keys
+        self._keys.add(key)
+        edge = SimpleNamespace(id=len(self.edges) + 1, **kwargs)
+        self.edges.append(edge)
+        return edge, created
+
+    async def begin_ingest_run(self, source: str) -> SimpleNamespace:
+        run = SimpleNamespace(id=len(self.runs) + 1, source=source, status="running")
+        self.runs.append(run)
+        return run
+
+    async def finish_ingest_run(
+        self,
+        run: SimpleNamespace,
+        *,
+        status: str = "success",
+        total_edges: int = 0,
+        added: int = 0,
+        updated: int = 0,
+        missing: int = 0,
+        stale_flagged: int = 0,
+        restored: int = 0,
+        error: str | None = None,
+    ) -> None:
+        run.status = status
+        run.total_edges = total_edges
+        run.added_count = added
+        run.updated_count = updated
+        run.missing_count = missing
+        run.stale_flagged_count = stale_flagged
+        run.restored_count = restored
+        run.error = error
 
     async def would_create_cycle(self, edge: object) -> bool:
         """环检假实现：默认不成环（供 parse_and_store 建边前调用）。"""
@@ -66,6 +110,15 @@ class FakeRepo:
 
     async def soft_delete_by_node(self, node: str) -> int:
         return self.deleted_count
+
+    async def list_nodes(self, kw: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
+        return [
+            ("table:a", 3),
+            ("metric:m1", 2),
+            ("field:a.x", 1),
+            ("external:ext", 4),
+            ("plain_node", 1),
+        ]
 
 
 class FakeGraph:
@@ -124,8 +177,50 @@ async def test_parse_and_store_counts_no_graph() -> None:
         LineageParseRequest(sql="INSERT INTO t SELECT a.id FROM a"), actor_id=1
     )
     assert res.table_edges == 1
+    assert res.field_edges == 1
     assert res.graph_written is False
     assert len(svc._repo.edges) >= 1
+
+
+async def test_parse_and_store_returns_edge_detail() -> None:
+    """方案 A：解析响应带回本次表级/字段级边明细，供前端当页展示。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    res = await svc.parse_and_store(
+        LineageParseRequest(sql="INSERT INTO t SELECT a.id FROM a"), actor_id=1
+    )
+    assert [i.model_dump() for i in res.table_lineage] == [
+        {"source": "table:a", "target": "table:t"}
+    ]
+    assert [i.model_dump() for i in res.field_lineage] == [
+        {
+            "source_table": "a",
+            "source_column": "id",
+            "target_table": "t",
+            "target_column": "id",
+            "expression": None,
+        }
+    ]
+
+
+async def test_parse_and_store_writes_ingest_run() -> None:
+    """SQL 解析也写采集运行记录（source=provenance，added/updated 统计），
+    使「采集通道」视图能展示 SQL 解析的来源新鲜度。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    req = LineageParseRequest(sql="INSERT INTO t SELECT a.id FROM a", provenance="sqlglot")
+    await svc.parse_and_store(req, actor_id=1)
+    assert len(svc._repo.runs) == 1
+    run = svc._repo.runs[0]
+    assert run.source == "sqlglot"
+    assert run.status == "success"
+    assert run.total_edges == 2  # 表级 1 + 字段级 1
+    assert run.added_count == 2
+    assert run.updated_count == 0
+    # 重复解析同一 SQL：命中既有边 → 全部记 updated
+    await svc.parse_and_store(req, actor_id=1)
+    assert svc._repo.runs[1].added_count == 0
+    assert svc._repo.runs[1].updated_count == 2
 
 
 async def test_query_impact_delegates_to_repo() -> None:
@@ -354,6 +449,7 @@ async def test_query_graph_reuses_assetmap_assembly(monkeypatch: Any) -> None:
 
 async def test_query_graph_drops_dangling_edges(monkeypatch: Any) -> None:
     """自包含子图：仅保留两端都在节点集内的边，悬空边（指向未渲染节点）被剔除。"""
+
     async def fake_graph_from_mysql(self, domain, pii_only):
         nodes = [
             {"id": "table:a", "type": "table", "label": "a"},
@@ -602,6 +698,23 @@ async def test_list_stale_maps_to_response() -> None:
     assert len(stale) == 1
     assert stale[0].provenance == "dp_csv"
     assert stale[0].missing_count == 2
+
+
+async def test_list_nodes_maps_types_and_labels() -> None:
+    """候选节点：按 id 前缀映射类型与去前缀展示名（影响分析选项框预加载/搜索）。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    nodes = await svc.list_nodes()
+    by_id = {n.id: n for n in nodes}
+    assert by_id["table:a"].type == "table"
+    assert by_id["table:a"].label == "a"
+    assert by_id["metric:m1"].type == "metric"
+    assert by_id["metric:m1"].label == "m1"
+    assert by_id["field:a.x"].type == "field"
+    assert by_id["external:ext"].type == "external"
+    assert by_id["plain_node"].type == "other"
+    assert by_id["plain_node"].label == "plain_node"
+    assert by_id["table:a"].count == 3
 
 
 async def test_confirm_stale_edge_deletes_and_cleans_graph() -> None:

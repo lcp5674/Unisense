@@ -62,6 +62,8 @@ import {
   LineageEdgePage,
   LineageGraphData,
   LineageIngestRun,
+  LineageNode,
+  ParseLineageResult,
   ListDatabasesResult,
   MetricBatchRegisterRequest,
   MetricBatchRegisterResult,
@@ -914,11 +916,17 @@ export async function lineageGraph(params?: {
 export async function parseLineage(
   sql: string,
   dialect?: string,
-): Promise<{ table_edges: number; field_edges: number; graph_written: boolean }> {
-  return request(`${API_BASE}/lineage/parse`, {
+): Promise<ParseLineageResult> {
+  return request<ParseLineageResult>(`${API_BASE}/lineage/parse`, {
     method: "POST",
     body: JSON.stringify({ sql, dialect: dialect ?? null, provenance: "sqlglot" }),
   });
+}
+
+// 血缘候选节点（影响分析/血缘查询选项框）：无 kw 预加载 top-N，带 kw 按关键词搜索指定
+export async function lineageNodes(kw?: string, limit = 50): Promise<LineageNode[]> {
+  const qs = pageQs({ kw: kw || undefined, limit });
+  return request<LineageNode[]>(`${API_BASE}/lineage/nodes${qs ? `?${qs}` : ""}`);
 }
 
 // 变更影响预览（what-if）
@@ -2348,6 +2356,13 @@ export async function listCollectionJobs(params?: {
   );
 }
 
+/** 查询单个采集任务状态。 */
+export async function getCollectionJob(jobId: string): Promise<CollectionJob | null> {
+  return request<CollectionJob | null>(
+    `${API_BASE}/data-sources/jobs/${encodeURIComponent(jobId)}`,
+  );
+}
+
 /** 采集运行历史：分页列出（采集记录页主视图，持久化历史含失败/排障明细）。 */
 export async function listCollectionRuns(params?: {
   source_id?: string;
@@ -2371,13 +2386,6 @@ export async function listCollectionRuns(params?: {
 /** 采集运行详情（含失败实体 / 漂移事件 / 降级原因明细）。 */
 export async function getCollectionRunDetail(runId: number): Promise<CollectionRun> {
   return request<CollectionRun>(`${API_BASE}/collection-runs/${runId}`);
-}
-
-/** 查询单个采集任务状态。 */
-export async function getCollectionJob(jobId: string): Promise<CollectionJob | null> {
-  return request<CollectionJob | null>(
-    `${API_BASE}/data-sources/jobs/${encodeURIComponent(jobId)}`,
-  );
 }
 
 export async function getSourceWatermark(sourceId: string): Promise<Watermark> {

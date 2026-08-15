@@ -25,7 +25,6 @@ import {
   CodeOutlined,
   DatabaseOutlined,
   ReloadOutlined,
-  SearchOutlined,
   ShareAltOutlined,
   SyncOutlined,
   ArrowLeftOutlined,
@@ -39,12 +38,21 @@ import {
   lineageGraph,
   lineageImpact,
   lineageImpactPreview,
+  lineageNodes,
   lineageStale,
   parseLineage,
   restoreStaleEdge,
   UnisenseApiError,
 } from "../api";
-import type { DBCatalog, LineageChannel, LineageEdge, LineageIngestRun, StaleEdge } from "../types";
+import type {
+  DBCatalog,
+  LineageChannel,
+  LineageEdge,
+  LineageIngestRun,
+  LineageNode,
+  ParseLineageResult,
+  StaleEdge,
+} from "../types";
 import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { MetricDetailDrawer } from "../components/assetmap/MetricDetailDrawer";
 import { useTracking } from "../hooks/useTracking";
@@ -74,6 +82,26 @@ const SQL_DIALECT_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "clickhouse", label: "ClickHouse" },
   { value: "starrocks", label: "StarRocks" },
 ];
+
+/** 血缘采集来源通道友好名称（provenance → 中文标签；未知来源显示原始标识）。 */
+const CHANNEL_LABEL: Record<string, string> = {
+  sqlglot: "SQL 解析",
+  dp_csv: "DP 同步",
+  metric_definition: "指标定义",
+  quickbi: "QuickBI",
+  neo4j: "图同步",
+  manual: "手动登记",
+  external: "外部依赖",
+};
+
+/** 血缘候选节点类型标签（影响分析选项框下拉分组）。 */
+const NODE_TYPE_LABEL: Record<string, string> = {
+  table: "表",
+  metric: "指标",
+  field: "字段",
+  external: "外部",
+  other: "节点",
+};
 
 const SENSITIVITY_COLOR: Record<string, string> = {
   INTERNAL: "default",
@@ -373,12 +401,33 @@ function GraphTab() {
 
 function ImpactTab() {
   const [node, setNode] = useState("");
+  const [nodeOptions, setNodeOptions] = useState<LineageNode[]>([]);
+  const [nodeLoading, setNodeLoading] = useState(false);
+  const [searchWord, setSearchWord] = useState("");
   const [direction, setDirection] = useState<Direction>("downstream");
   const [edges, setEdges] = useState<LineageEdge[]>([]);
   const [total, setTotal] = useState(0);
   const [risk, setRisk] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const { track } = useTracking();
+
+  /** 候选节点：无关键词加载 top-N 预加载，有关键词远程搜索指定节点。 */
+  async function loadNodes(kw?: string) {
+    setNodeLoading(true);
+    try {
+      setNodeOptions(await lineageNodes(kw || undefined, 50));
+    } catch {
+      // 候选节点加载失败不阻断查询（仍可手动输入节点）
+    } finally {
+      setNodeLoading(false);
+    }
+  }
+
+  // 进入 Tab 即预加载候选节点
+  useEffect(() => {
+    void loadNodes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function loadImpact() {
     if (!node.trim()) {
@@ -404,13 +453,15 @@ function ImpactTab() {
   }
 
   async function previewImpact() {
-    if (!node.trim()) {
+    // Select 选择值带 metric: 前缀，预览接口期望裸指标编码，去前缀规范化
+    const code = node.trim().replace(/^metric:/, "");
+    if (!code) {
       message.warning("请输入指标编码");
       return;
     }
     setLoading(true);
     try {
-      const p = await lineageImpactPreview(node.trim(), "schema_drift");
+      const p = await lineageImpactPreview(code, "schema_drift");
       setRisk(
         `受影响指标 ${p.affected_metrics.length} · 物理表 ${p.affected_tables.length} · 消费方 ${p.affected_consumers.length} · 风险等级 ${RISK_LEVEL_LABEL[p.risk_level] ?? p.risk_level}`,
       );
@@ -427,22 +478,53 @@ function ImpactTab() {
     { title: "目标", dataIndex: "target_node", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
     { title: "类型", dataIndex: "edge_type", key: "type", render: (v: string) => <Tag>{EDGE_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "粒度", dataIndex: "granularity", key: "granularity", width: 100, render: (v: string) => enumLabel(GRANULARITY_LABEL, v) },
-    { title: "来源", dataIndex: "provenance", key: "provenance", width: 110, render: (v: string) => <Tag color="blue">{v}</Tag> },
+    { title: "来源", dataIndex: "provenance", key: "provenance", width: 110, render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag> },
     { title: "置信度", dataIndex: "confidence", key: "confidence", width: 90, render: (v: number) => `${(v * 100).toFixed(0)}%` },
     { title: "PII", dataIndex: "pii_inherited", key: "pii", width: 70, render: (v?: boolean) => (v ? <Tag color="red">PII</Tag> : null) },
   ];
 
+  // 搜索词非空且候选里无完全匹配时，兜底提供「使用输入值」选项（支持自由指定节点）
+  const hasExact = nodeOptions.some((n) => n.id === searchWord);
+  const customOption: LineageNode[] =
+    searchWord.trim() && !hasExact
+      ? [{ id: searchWord.trim(), label: `使用「${searchWord.trim()}」`, count: 0, type: "other" }]
+      : [];
+
   return (
     <div>
       <Space style={{ marginBottom: 16 }} wrap>
-        <Input
-          placeholder="节点（table:库.表 / metric:编码 / 指标编码）"
-          value={node}
-          onChange={(e) => setNode(e.target.value)}
-          onPressEnter={loadImpact}
-          prefix={<SearchOutlined />}
+        <Select
+          showSearch
+          allowClear
+          loading={nodeLoading}
+          value={node || undefined}
+          placeholder="选择或搜索节点（表 / 指标 / 字段）"
+          style={{ width: 360 }}
           className="mono"
-          style={{ width: 320 }}
+          filterOption={(input, opt) => {
+            const raw = String(opt?.value ?? "").toLowerCase();
+            const label = String(opt?.label ?? "").toLowerCase();
+            return raw.includes(input.toLowerCase()) || label.includes(input.toLowerCase());
+          }}
+          onSearch={(v) => {
+            setSearchWord(v);
+            // 输入关键词 → 远程搜索候选节点
+            void loadNodes(v);
+          }}
+          onChange={(v) => setNode(v ?? "")}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void loadImpact();
+          }}
+          options={[...nodeOptions, ...customOption].map((n) => ({
+            value: n.id,
+            label: (
+              <span>
+                <Tag style={{ marginRight: 6 }}>{NODE_TYPE_LABEL[n.type] ?? n.type}</Tag>
+                <span>{n.label}</span>
+                <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>{n.count} 边</span>
+              </span>
+            ),
+          }))}
         />
         <Select
           value={direction}
@@ -495,7 +577,7 @@ function ImpactTab() {
 function ParseTab() {
   const [sql, setSql] = useState("");
   const [dialect, setDialect] = useState("mysql");
-  const [result, setResult] = useState<{ table_edges: number; field_edges: number; graph_written: boolean } | null>(null);
+  const [result, setResult] = useState<ParseLineageResult | null>(null);
   const [loading, setLoading] = useState(false);
   const { track } = useTracking();
 
@@ -516,6 +598,21 @@ function ParseTab() {
       setLoading(false);
     }
   }
+
+  const tableColumns = [
+    { title: "源表", dataIndex: "source", key: "source", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "目标表", dataIndex: "target", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+  ];
+  const fieldColumns = [
+    { title: "源字段", dataIndex: "source", key: "source", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "目标字段", dataIndex: "target", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    {
+      title: "派生表达式",
+      dataIndex: "expression",
+      key: "expression",
+      render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12, color: "#8c8c8c" }}>{v}</span> : <span className="muted">—</span>),
+    },
+  ];
 
   return (
     <div>
@@ -545,6 +642,41 @@ function ParseTab() {
           style={{ marginTop: 12 }}
           message="解析结果"
           description={`表级边 ${result.table_edges} · 字段级边 ${result.field_edges} · 图谱写入 ${result.graph_written ? "成功" : "未写入"}`}
+        />
+      )}
+      {result && result.table_lineage.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <h4 style={{ marginBottom: 8 }}>本次解析 · 表级血缘（{result.table_lineage.length}）</h4>
+          <Table
+            size="small"
+            rowKey={(r) => `${r.source}__${r.target}`}
+            dataSource={result.table_lineage}
+            columns={tableColumns}
+            pagination={false}
+          />
+        </div>
+      )}
+      {result && result.field_lineage.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <h4 style={{ marginBottom: 8 }}>本次解析 · 字段级血缘（{result.field_lineage.length}）</h4>
+          <Table
+            size="small"
+            rowKey={(r) => `${r.source}__${r.target}__${r.expression ?? ""}`}
+            dataSource={result.field_lineage.map((f) => ({
+              source: f.source_column ? `${f.source_table}.${f.source_column}` : `${f.source_table}.*`,
+              target: `${f.target_table}.${f.target_column}`,
+              expression: f.expression,
+            }))}
+            columns={fieldColumns}
+            pagination={false}
+          />
+        </div>
+      )}
+      {result && result.table_lineage.length === 0 && result.field_lineage.length === 0 && (
+        <Empty
+          style={{ marginTop: 16 }}
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="本次解析未产生血缘边（SQL 为纯查询或无写入目标）"
         />
       )}
     </div>
@@ -583,6 +715,12 @@ function ChannelsTab() {
       setLoading(false);
     }
   }
+
+  // 进入 Tab 即加载采集通道总览与失效队列（此前仅点「刷新」才加载，易被误认为通道缺失）
+  useEffect(() => {
+    void loadChannels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function loadRuns(source: string) {
     setActiveSource(source);
@@ -671,7 +809,15 @@ function ChannelsTab() {
               <Col xs={24} sm={12} lg={8} key={c.source}>
                 <Card
                   size="small"
-                  title={<Space><DatabaseOutlined /><span className="mono">{c.source}</span></Space>}
+                  title={
+                    <Space>
+                      <DatabaseOutlined />
+                      <span>{CHANNEL_LABEL[c.source] ?? c.source}</span>
+                      {CHANNEL_LABEL[c.source] && (
+                        <span className="muted mono" style={{ fontSize: 12 }}>{c.source}</span>
+                      )}
+                    </Space>
+                  }
                   extra={last ? <Badge status={STALE_STATUS_COLOR[last.status] as "success" | "processing" | "error"} text={CHANNEL_STATUS_LABEL[last.status] ?? last.status} /> : null}
                   onClick={() => loadRuns(c.source)}
                   style={{ cursor: "pointer" }}
