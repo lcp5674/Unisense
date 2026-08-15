@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from app.models.governance import SensitivityLevel
+from app.models.governance import RoleName, SensitivityLevel
 from app.services.governance.policy import (
+    ROLE_ACTIONS,
     Resource,
     Subject,
     decide,
@@ -38,6 +39,22 @@ def _grant(**over: object) -> dict:
 
 
 # ------------------------------------------------------------------ PDP 决策
+
+
+def test_role_name_includes_analyst() -> None:
+    """analyst 是系统真实支持的只读消费者角色（User.role 枚举/deps/policy 均含）。
+
+    对齐 RoleName 与 UserRole/User.role，避免双权威源漂移（7 角色单源）。
+    """
+    assert RoleName.ANALYST.value == "analyst"
+
+
+def test_analyst_role_actions_read_only() -> None:
+    """analyst 在策略默认动作集中为只读（read），与 User.role 枚举一致。"""
+    assert "analyst" in ROLE_ACTIONS
+    assert ROLE_ACTIONS["analyst"] == frozenset({"read"})
+    # 用 RoleName 引用（单源），非硬编码字符串
+    assert ROLE_ACTIONS[RoleName.ANALYST.value] == frozenset({"read"})
 
 
 def test_unknown_action_rejected() -> None:

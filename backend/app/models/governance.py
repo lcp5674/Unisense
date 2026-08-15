@@ -44,13 +44,18 @@ def _values(e: type[enum.Enum]) -> list[str]:
 
 
 class RoleName(enum.StrEnum):
-    """六角色模型（TD §12.5.1 / PRD 4.9.2）。"""
+    """七角色模型（TD §12.5.1 / PRD 4.9.2）。
+
+    与 User.role 数据库枚举、api/users.py UserRole Literal 对齐，
+    analyst 为只读消费者角色（兼容 0001 迁移）。
+    """
 
     PLATFORM_ADMIN = "platform_admin"
     DOMAIN_ADMIN = "domain_admin"
     METRIC_OWNER = "metric_owner"
     REVIEWER = "reviewer"
     COMPLIANCE_OFFICER = "compliance_officer"
+    ANALYST = "analyst"
     VIEWER = "viewer"
 
 

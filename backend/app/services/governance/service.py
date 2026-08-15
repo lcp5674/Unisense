@@ -704,6 +704,13 @@ class GovernanceService(BaseService):
                 "职责分离：合规复核人不得为指标 Owner",
                 ctx={"metric_code": payload.metric_code, "reviewer_id": reviewer.id},
             )
+        if payload.sensitivity_level is SensitivityLevel.UNKNOWN:
+            # UNKNOWN 是分级引擎降级标记（仅落 classification 表），不可作为复核赋值的敏感级别；
+            # 资产终态使用 NEEDS_REVIEW（对齐 db_catalog.sensitivity_level）。
+            raise ValidationError(
+                "敏感级别不可为 UNKNOWN（降级标记），请选择真实级别或 NEEDS_REVIEW",
+                ctx={"metric_code": payload.metric_code},
+            )
 
         approved = payload.decision == "APPROVE"
         masking = payload.masking_policy or policy.masking_for(payload.sensitivity_level)

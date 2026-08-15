@@ -159,9 +159,9 @@ ROLE_ACTIONS: dict[str, frozenset[str]] = {
     RoleName.METRIC_OWNER.value: frozenset({"read", "write"}),
     RoleName.REVIEWER.value: frozenset({"read", "approve"}),
     RoleName.COMPLIANCE_OFFICER.value: frozenset({"read", "review"}),
+    # analyst：只读消费者角色（对齐 User.role 枚举 0001 迁移）
+    RoleName.ANALYST.value: frozenset({"read"}),
     RoleName.VIEWER.value: frozenset({"read"}),
-    # 兼容 0001 初始迁移中的 analyst 角色（只读消费者）
-    "analyst": frozenset({"read"}),
 }
 
 #: PDP 可配置动作白名单：角色权限点配置只能从该集合内勾选（杜绝写入未知动作）。
