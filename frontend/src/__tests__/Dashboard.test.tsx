@@ -327,6 +327,30 @@ describe("Dashboard", () => {
     expect(metricSeg.className).not.toContain("oc-zero");
   });
 
+  it("Owner 图例：构成条下方展示 6 类资产图例，0 值项也显示标签与数量（数据表 0 / 数据源 0）", async () => {
+    const { container } = renderDashboard();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    // cards 按 total 降序：Alice(82) → Bob(52) → Charlie(5)
+    const cards = Array.from(container.querySelectorAll(".owner-card"));
+    const charlieCard = cards[2];
+    const legend = charlieCard!.querySelector(".oc-legend");
+    expect(legend).toBeTruthy();
+    const chips = Array.from(legend!.querySelectorAll(".oc-chip"));
+    expect(chips.length).toBe(6);
+    // 0 值项（数据表/数据源）：图例中显示标签 + 数量（不再只是裸 "0"），且灰显 oc-chip-zero
+    expect(chips[1].textContent).toContain("数据表");
+    expect(chips[1].textContent).toContain("0");
+    expect(chips[1].className).toContain("oc-chip-zero");
+    expect(chips[2].textContent).toContain("数据源");
+    expect(chips[2].textContent).toContain("0");
+    expect(chips[2].className).toContain("oc-chip-zero");
+    // 非 0 项（指标）：正常显示标签 + 数量，无 oc-chip-zero
+    expect(chips[0].textContent).toContain("指标");
+    expect(chips[0].textContent).toContain("5");
+    expect(chips[0].className).not.toContain("oc-chip-zero");
+  });
+
   it("治理指标卡：质量健康渲染严重级分布与待处理", async () => {
     renderDashboard();
     await waitFor(() => expect(screen.getByText("质量健康")).toBeInTheDocument());

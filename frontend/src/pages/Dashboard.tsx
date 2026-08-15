@@ -515,6 +515,33 @@ className={`oc-seg ${m.cls}${isZero ? " oc-zero" : ""}`}
                   );
                 })}
               </span>
+              <span className="oc-legend">
+                {mix.map((m) => {
+                  const isZero = m.count === 0;
+                  return (
+                    <span
+                      key={m.key}
+                      className={`oc-chip ${m.cls}${isZero ? " oc-chip-zero" : ""}`}
+                      title={isZero ? `${m.label} ${m.count}（该责任人名下暂无此类资产）` : `${m.label} ${m.count}，点击查看该责任人名下${m.label}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`${m.href}?owner_id=${id}`);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.stopPropagation();
+                          navigate(`${m.href}?owner_id=${id}`);
+                        }
+                      }}
+                    >
+                      <i className="oc-chip-dot" />
+                      {m.label} {m.count}
+                    </span>
+                  );
+                })}
+              </span>
               <span className="oc-life">
                 {OWNER_STATES.map((s) => {
                   const count = o.metrics.by_status[s.key] ?? 0;

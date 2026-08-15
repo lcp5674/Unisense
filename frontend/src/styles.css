@@ -867,6 +867,54 @@ body {
   color: var(--ink);
 }
 
+/* 资产构成图例：构成条下方完整展示 6 类资产（标签 + 数量），0 值项灰显但标签可见 */
+.owner-card .oc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.owner-card .oc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-2);
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 6px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.owner-card .oc-chip:hover {
+  background: var(--line-soft);
+  color: var(--ink);
+}
+.owner-card .oc-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.owner-card .oc-chip.oc-metric .oc-chip-dot { background: var(--data); }
+.owner-card .oc-chip.oc-table .oc-chip-dot { background: #3a7d44; }
+.owner-card .oc-chip.oc-source .oc-chip-dot { background: #1f8a8c; }
+.owner-card .oc-chip.oc-dim .oc-chip-dot { background: #8b6fd8; }
+.owner-card .oc-chip.oc-term .oc-chip-dot { background: #b07a1f; }
+.owner-card .oc-chip.oc-tpl .oc-chip-dot { background: #4a6fa5; }
+/* 0 值图例项：文字灰显 + 圆点浅灰，仍显示「标签 0」让用户看清全维度 */
+.owner-card .oc-chip.oc-chip-zero {
+  color: rgba(120, 130, 150, 0.8);
+}
+.owner-card .oc-chip.oc-chip-zero .oc-chip-dot {
+  background: rgba(160, 168, 184, 0.42);
+}
+.owner-card .oc-chip.oc-chip-zero:hover {
+  color: var(--ink);
+}
+
 /* 生命周期次级信息：色点 + 标签 + 计数（仅展示非零状态） */
 .owner-card .oc-life {
   display: flex;
