@@ -70,6 +70,15 @@ function siderStorageKey(userId: number): string {
   return `unisense.sider.collapsed.${userId}`;
 }
 
+// 侧边栏宽度：默认 232，可拖动右侧边缘 180~420 自由调整，按用户本地持久化
+const SIDER_DEFAULT_WIDTH = 232;
+const SIDER_MIN_WIDTH = 180;
+const SIDER_MAX_WIDTH = 420;
+
+function siderWidthStorageKey(userId: number): string {
+  return `unisense.sider.width.${userId}`;
+}
+
 // 分组导航：覆盖后端全部功能域
 const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: string; icon: React.ReactNode }> }> = [
   {
@@ -273,6 +282,53 @@ export function Layout({ user }: { user: CurrentUser }) {
       return false;
     }
   });
+  // 侧边栏宽度：默认 232，按用户本地持久化（拖动右侧边缘实时调整）
+  const [siderWidth, setSiderWidth] = useState<number>(() => {
+    try {
+      const v = Number(localStorage.getItem(siderWidthStorageKey(user.id)));
+      if (Number.isFinite(v) && v >= SIDER_MIN_WIDTH && v <= SIDER_MAX_WIDTH) return v;
+    } catch {
+      /* 隐私模式等场景忽略 */
+    }
+    return SIDER_DEFAULT_WIDTH;
+  });
+  // 拖拽调宽：start 时记录起点，move 实时 clamp，up 时持久化并清理监听
+  const resizeStartX = useRef(0);
+  const resizeStartWidth = useRef(SIDER_DEFAULT_WIDTH);
+  // mouseup 监听器注册于拖拽起始渲染的闭包，用 ref 记录实时宽度避免持久化旧值
+  const resizeWidthRef = useRef(SIDER_DEFAULT_WIDTH);
+
+  function onSiderResizeStart(e: React.MouseEvent) {
+    e.preventDefault();
+    resizeStartX.current = e.clientX;
+    resizeStartWidth.current = siderWidth;
+    resizeWidthRef.current = siderWidth;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onSiderResizeMove);
+    window.addEventListener("mouseup", onSiderResizeEnd);
+  }
+
+  function onSiderResizeMove(e: MouseEvent) {
+    const next = Math.min(
+      SIDER_MAX_WIDTH,
+      Math.max(SIDER_MIN_WIDTH, resizeStartWidth.current + (e.clientX - resizeStartX.current)),
+    );
+    resizeWidthRef.current = next;
+    setSiderWidth(next);
+  }
+
+  function onSiderResizeEnd() {
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    window.removeEventListener("mousemove", onSiderResizeMove);
+    window.removeEventListener("mouseup", onSiderResizeEnd);
+    try {
+      localStorage.setItem(siderWidthStorageKey(user.id), String(resizeWidthRef.current));
+    } catch {
+      /* 隐私模式等场景忽略持久化失败 */
+    }
+  }
   const [searchKw, setSearchKw] = useState("");
   // 顶栏实时搜索：防抖聚合下拉的选项与加载态
   const [searchOptions, setSearchOptions] = useState<
@@ -502,10 +558,34 @@ export function Layout({ user }: { user: CurrentUser }) {
         collapsed={collapsed}
         onCollapse={handleCollapse}
         trigger={null}
-        width={232}
+        width={siderWidth}
         theme="dark"
-        style={{ borderRight: "1px solid rgba(255,255,255,0.06)" }}
+        style={{
+          position: "relative",
+          borderRight: "1px solid rgba(255,255,255,0.06)",
+        }}
       >
+        {!collapsed && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖拽调整侧边栏宽度"
+            title="拖拽调整宽度"
+            onMouseDown={onSiderResizeStart}
+            style={{
+              position: "absolute",
+              top: 0,
+              right: 0,
+              bottom: 0,
+              width: 6,
+              cursor: "col-resize",
+              zIndex: 20,
+              background: "transparent",
+              transition: "background 0.2s",
+            }}
+            className="sider-resize-handle"
+          />
+        )}
         <div
           style={{
             height: 56,

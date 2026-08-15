@@ -2065,7 +2065,7 @@ async def test_repo_list_catalogs_source_status_active_uses_join():
     s = MagicMock()
     res = MagicMock()
     cat = SimpleNamespace(source_id="mysql_unisense", entity_name="t1")
-    res.all.return_value = [(cat, None, "MySQL 主库")]
+    res.all.return_value = [(cat, None, "MySQL 主库", "sales")]
     res.scalar.return_value = 1
     s.execute = AsyncMock(return_value=res)
     s.scalar = AsyncMock(return_value=1)
@@ -2083,6 +2083,7 @@ async def test_repo_list_catalogs_source_status_active_uses_join():
     assert total == 1
     assert items[0]._src_deleted is False
     assert items[0]._src_name == "MySQL 主库"
+    assert items[0]._src_domain == "sales"
     compiled = str(
         s.execute.call_args_list[0].args[0].compile(compile_kwargs={"literal_binds": True})
     )
@@ -2614,3 +2615,51 @@ async def test_count_jobs_by_status_queue_unsupported_returns_empty() -> None:
     counts = await svc.count_jobs_by_status()
 
     assert counts == {}
+
+
+async def test_service_list_catalogs_enriches_domain_and_owner_name() -> None:
+    """list_catalogs 生产化补充：批量回填业务域（经数据源继承）与责任人展示名。"""
+    svc, repo = _svc()
+    cat = SimpleNamespace(
+        id=1,
+        source_id="s1",
+        owner_id=5,
+        entity_name="dw.t",
+        entity_type="table",
+        schema_json={"fields": []},
+        etl_sql=None,
+        sensitivity_level="INTERNAL",
+        upstream_signature="sig",
+        content_signature=None,
+        schema_incomplete=False,
+        _src_deleted=None,
+        _src_name=None,
+        _src_domain=None,
+    )
+    repo.list_catalogs = AsyncMock(return_value=([cat], 1))
+    repo.get_sources_meta = AsyncMock(return_value={"s1": ("MySQL 主库", False)})
+    repo.get_sources_domain = AsyncMock(return_value={"s1": "sales"})
+    repo.get_owner_names = AsyncMock(return_value={5: "张三"})
+    repo.get_descriptions_for_catalogs = AsyncMock(return_value={})
+    params = SimpleNamespace(
+        source_id=None,
+        entity_type=None,
+        sensitivity_level=None,
+        keyword=None,
+        domain=None,
+        source_status=None,
+        page=1,
+        page_size=20,
+    )
+
+    resp = await svc.list_catalogs(params)
+
+    assert resp.total == 1
+    item = resp.items[0]
+    assert item.source_name == "MySQL 主库"
+    assert item.domain == "sales"
+    assert item.owner_name == "张三"
+    assert item.owner_id == 5
+    repo.get_sources_domain.assert_awaited_once_with(["s1"])
+    repo.get_owner_names.assert_awaited_once_with([5])
+

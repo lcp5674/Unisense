@@ -218,15 +218,33 @@ function DefinitionsDetail({ def }: { def: Record<string, unknown> }) {
 type DrillRow = Record<string, unknown>;
 
 // 下钻明细列（目录 / 指标 / 孤儿三种口径）
+// 生产化补充（FR-18）：源名称、业务域、责任人中文名、表描述、更新时间——
+// 点击行可继续下钻到实体详情抽屉（onRow 由调用方接入）。
 const CATALOG_COLUMNS: ColumnsType<DrillRow> = [
-  { title: "数据源", dataIndex: "source_id", width: 130 },
-  { title: "实体", dataIndex: "entity_name", ellipsis: true },
+  {
+    title: "数据源",
+    dataIndex: "source_id",
+    width: 150,
+    ellipsis: true,
+    render: (v, r) => {
+      const name = (r as { source_name?: string | null }).source_name;
+      return name && name !== v ? `${name}` : (v as string);
+    },
+  },
+  {
+    title: "实体",
+    dataIndex: "entity_name",
+    ellipsis: true,
+    // 链接样式提示可点击（实际点击走 onRow → 实体详情抽屉）
+    render: (v) => <a style={{ cursor: "pointer" }}>{v as string}</a>,
+  },
   {
     title: "类型",
     dataIndex: "entity_type",
     width: 90,
     render: (v) => ENTITY_TYPE_LABEL[v as string] ?? v,
   },
+  { title: "业务域", dataIndex: "domain", width: 110, render: (v) => v ?? <span className="muted">-</span> },
   {
     title: "敏感度",
     dataIndex: "sensitivity_level",
@@ -236,8 +254,29 @@ const CATALOG_COLUMNS: ColumnsType<DrillRow> = [
   {
     title: "责任人",
     dataIndex: "owner_id",
-    width: 80,
-    render: (v) => (v == null ? <Tag>无</Tag> : v),
+    width: 110,
+    ellipsis: true,
+    render: (v, r) => {
+      const name = (r as { owner_name?: string | null }).owner_name;
+      return v == null ? <Tag>无</Tag> : name || `#${v as number}`;
+    },
+  },
+  {
+    title: "表描述",
+    dataIndex: "description",
+    ellipsis: true,
+    render: (v) =>
+      v ? (
+        <span style={{ color: "rgba(0,0,0,0.65)" }}>{v as string}</span>
+      ) : (
+        <span className="muted">-</span>
+      ),
+  },
+  {
+    title: "更新时间",
+    dataIndex: "updated_at",
+    width: 150,
+    render: (v) => (v ? formatCnTime(v as string) : <span className="muted">-</span>),
   },
 ];
 
@@ -287,6 +326,10 @@ function OverviewTab() {
   const [drillTitle, setDrillTitle] = useState("");
   const [drillColumns, setDrillColumns] = useState<ColumnsType<DrillRow>>([]);
   const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
+  // 下钻行点击 → 实体详情抽屉（FR-18：明细可继续下钻到单表详情）
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -348,6 +391,22 @@ function OverviewTab() {
       const r = await fetchAssetOrphans();
       return r.items as unknown as DrillRow[];
     });
+  }
+
+  // 下钻明细行点击 → 打开单表实体详情抽屉（目录行 id 可用时）
+  function openCatalogDetail(row: DrillRow) {
+    const id = row?.id as number | undefined;
+    if (id == null) {
+      message.warning("该实体缺少详情标识（id），暂无法查看详情");
+      return;
+    }
+    setDetailOpen(true);
+    setDetailLoading(true);
+    setDetail(null);
+    fetchAssetEntityDetail(id)
+      .then((d) => setDetail(d))
+      .catch((err) => message.error(err instanceof Error ? err.message : "加载实体详情失败"))
+      .finally(() => setDetailLoading(false));
   }
 
   // 可点击值渲染：把 Statistic 的 value 包成可点击链接
@@ -463,7 +522,106 @@ function OverviewTab() {
         rows={drillRows}
         loading={drillLoading}
         onClose={() => setDrillOpen(false)}
+        onRow={(row) => ({
+          onClick: () => openCatalogDetail(row),
+        })}
       />
+      <Drawer
+        title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        width={720}
+      >
+        {detailLoading ? (
+          <Spin tip="加载实体详情…" />
+        ) : detail ? (
+          <>
+            <Descriptions column={1} bordered size="small">
+              <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+              <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
+              <Descriptions.Item label="数据源">
+                {detail.source_name ? `${detail.source_name}（${detail.source_id}）` : detail.source_id}
+              </Descriptions.Item>
+              <Descriptions.Item label="业务域">
+                {detail.domain ?? <span className="muted">-</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="敏感度">
+                {sensitivityTag(detail.sensitivity_level)}
+                {Boolean(detail.pii_flag || (detail.sensitivity_level ?? "").includes("PII")) && (
+                  <Tag color="red" style={{ marginLeft: 8 }}>
+                    含 PII
+                  </Tag>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="责任人">
+                {detail.owner_id != null
+                  ? detail.owner_name || `#${detail.owner_id}`
+                  : <Tag>无</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="字段数">
+                {detail.column_count ?? <span className="muted">-</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="表级描述">
+                {detail.description ? (
+                  <span>{detail.description}</span>
+                ) : (
+                  <span className="muted" style={{ fontStyle: "italic" }}>
+                    暂无表级描述
+                  </span>
+                )}
+                {detail.description_source ? descriptionSourceTag(detail.description_source) : null}
+              </Descriptions.Item>
+              <Descriptions.Item label="Schema 状态">
+                {detail.schema_incomplete ? (
+                  <Tag color="orange">不完整</Tag>
+                ) : (
+                  <Tag color="green">完整</Tag>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="源健康">
+                {detail.source_health ? (
+                  <Tag
+                    color={
+                      detail.source_health.health_status === "healthy"
+                        ? "green"
+                        : detail.source_health.health_status === "unhealthy"
+                          ? "red"
+                          : "default"
+                    }
+                  >
+                    {SOURCE_HEALTH_LABEL[detail.source_health.health_status] ??
+                      detail.source_health.health_status}
+                  </Tag>
+                ) : (
+                  <span className="muted">未知</span>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="新鲜度">
+                <div className="muted" style={{ fontSize: 12 }}>
+                  <div>创建：{detail.created_at ? formatCnTime(detail.created_at) : "-"}</div>
+                  <div>更新：{detail.updated_at ? formatCnTime(detail.updated_at) : "-"}</div>
+                </div>
+              </Descriptions.Item>
+            </Descriptions>
+            {detail.lineage_edges && detail.lineage_edges.length > 0 && (
+              <Card title="血缘边明细" size="small" style={{ marginTop: 16 }}>
+                <Table
+                  dataSource={detail.lineage_edges}
+                  rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
+                  size="small"
+                  pagination={false}
+                  columns={[
+                    { title: "源", dataIndex: "source", ellipsis: true },
+                    { title: "目标", dataIndex: "target", ellipsis: true },
+                    { title: "类型", dataIndex: "edge_type", width: 120 },
+                    { title: "粒度", dataIndex: "granularity", width: 80 },
+                  ]}
+                />
+              </Card>
+            )}
+          </>
+        ) : null}
+      </Drawer>
     </div>
   );
 }
@@ -1031,7 +1189,12 @@ function GraphTab() {
             <Descriptions column={1} bordered size="small">
               <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
               <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
-              <Descriptions.Item label="数据源">{detail.source_id}</Descriptions.Item>
+              <Descriptions.Item label="数据源">
+                {detail.source_name ? `${detail.source_name}（${detail.source_id}）` : detail.source_id}
+              </Descriptions.Item>
+              <Descriptions.Item label="业务域">
+                {detail.domain ?? <span className="muted">-</span>}
+              </Descriptions.Item>
               <Descriptions.Item label="敏感度">
                 {sensitivityTag(detail.sensitivity_level)}
                 {detailHasPii && (
@@ -1041,7 +1204,12 @@ function GraphTab() {
                 )}
               </Descriptions.Item>
               <Descriptions.Item label="责任人">
-                {detail.owner_id != null ? `#${detail.owner_id}` : <Tag>无</Tag>}
+                {detail.owner_id != null
+                  ? detail.owner_name || `#${detail.owner_id}`
+                  : <Tag>无</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="字段数">
+                {detail.column_count ?? <span className="muted">-</span>}
               </Descriptions.Item>
               <Descriptions.Item label="Schema 状态">
                 {detail.schema_incomplete ? (
@@ -1982,7 +2150,12 @@ function TablesTab() {
                 </Button>
               </Descriptions.Item>
               <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
-              <Descriptions.Item label="数据源">{detail.source_id}</Descriptions.Item>
+              <Descriptions.Item label="数据源">
+                {detail.source_name ? `${detail.source_name}（${detail.source_id}）` : detail.source_id}
+              </Descriptions.Item>
+              <Descriptions.Item label="业务域">
+                {detail.domain ?? <span className="muted">-</span>}
+              </Descriptions.Item>
               <Descriptions.Item label="敏感度">
                 {sensitivityTag(detail.sensitivity_level)}
                 {hasPii && (
@@ -1992,7 +2165,31 @@ function TablesTab() {
                 )}
               </Descriptions.Item>
               <Descriptions.Item label="责任人">
-                {detail.owner_id != null ? `#${detail.owner_id}` : <Tag>无</Tag>}
+                {detail.owner_id != null
+                  ? detail.owner_name || `#${detail.owner_id}`
+                  : <Tag>无</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="字段数">
+                {detail.column_count ?? <span className="muted">-</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="表级描述">
+                <Space direction="vertical" size={4}>
+                  {detail.description ? (
+                    <span>{detail.description}</span>
+                  ) : (
+                    <span className="muted" style={{ fontStyle: "italic" }}>
+                      暂无表级描述
+                    </span>
+                  )}
+                  <Space size={4} wrap>
+                    {descriptionSourceTag(detail.description_source)}
+                    {detail.description_updated_at ? (
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        更新于 {formatCnTime(detail.description_updated_at)}
+                      </span>
+                    ) : null}
+                  </Space>
+                </Space>
               </Descriptions.Item>
               <Descriptions.Item label="Schema 状态">
                 {detail.schema_incomplete ? (

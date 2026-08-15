@@ -134,11 +134,14 @@ class AssetMapService(BaseService):
     ) -> list[dict[str, Any]]:
         rows = await self._repo.list_tables(source_id, sensitivity, limit)
         # assetmap T-2: 经 to_dict 剔除敏感字段（connection_config 等）
-        return [r.to_dict() for r in rows]
+        items = [r.to_dict() for r in rows]
+        # 生产化补充：源名称 / 业务域 / 责任人名（列表与下钻明细可读）
+        return await self._repo.enrich_catalog_items(items)
 
     async def orphan_assets(self) -> list[dict[str, Any]]:
         rows = await self._repo.orphan_assets()
-        return [r.to_dict() for r in rows]
+        items = [r.to_dict() for r in rows]
+        return await self._repo.enrich_catalog_items(items)
 
     async def get_entity_detail(self, entity_id: int) -> dict[str, Any] | None:
         """资产实体详情：元数据 + 敏感度 + PII + 血缘边数（TD §12.11 流程 #5）。"""

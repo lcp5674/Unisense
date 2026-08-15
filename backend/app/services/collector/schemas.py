@@ -250,6 +250,9 @@ class DBCatalogResponse(BaseModel):
     # 数据源维度展示信息（默认 False/None——源被软删或不存在时 source_deleted=True）
     source_deleted: bool = False
     source_name: str | None = None
+    # 生产化补充：业务域（经 data_source 继承）/ 责任人名（展示可读，非 id）
+    domain: str | None = None
+    owner_name: str | None = None
 
 
 class DBCatalogListParams(BaseModel):

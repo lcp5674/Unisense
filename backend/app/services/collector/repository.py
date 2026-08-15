@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.models.collector_models import CollectionWatermark, SchemaDriftLog
 from app.models.data_source import ColumnDescription, DataSource, DBCatalog
+from app.models.user import User
 from app.services.collector.drift_detector import DriftDetector, compute_content_signature
 from app.services.collector.schemas import BulkDeprecateItem
 
@@ -329,7 +330,7 @@ class CollectorRepository:
         list_catalogs 的返回形态，避免破坏既有调用方。
         """
         base = (
-            select(DBCatalog, DataSource.deleted_at, DataSource.name)
+            select(DBCatalog, DataSource.deleted_at, DataSource.name, DataSource.domain)
             .outerjoin(DataSource, DataSource.source_id == DBCatalog.source_id)
             .where(DBCatalog.deleted_at.is_(None))
         )
@@ -370,9 +371,10 @@ class CollectorRepository:
         cats: list[DBCatalog] = []
         for row in res.all():
             cat = row[0]
-            # 瞬态属性（不入库），供 service 组装 source_deleted / source_name
+            # 瞬态属性（不入库），供 service 组装 source_deleted / source_name / domain
             cat._src_deleted = row[1] is not None
             cat._src_name = row[2]
+            cat._src_domain = row[3]
             cats.append(cat)
         return cats, total
 
@@ -391,6 +393,28 @@ class CollectorRepository:
             )
         )
         return {row[0]: (row[1] or row[0], row[2] is not None) for row in res.all()}
+
+    async def get_sources_domain(self, source_ids: Sequence[str]) -> dict[str, str]:
+        """批量取数据源所属业务域（db_catalog 无 domain 列，经数据源继承）。"""
+        ids = list(source_ids)
+        if not ids:
+            return {}
+        res = await self._db.execute(
+            select(DataSource.source_id, DataSource.domain).where(
+                DataSource.source_id.in_(ids)
+            )
+        )
+        return {row[0]: row[1] for row in res.all()}
+
+    async def get_owner_names(self, user_ids: Sequence[int]) -> dict[int, str]:
+        """批量取用户展示名（display_name 优先，回退 username），供目录责任人列展示。"""
+        ids = list(user_ids)
+        if not ids:
+            return {}
+        res = await self._db.execute(
+            select(User.id, User.display_name, User.username).where(User.id.in_(ids))
+        )
+        return {row[0]: (row[1] or row[2]) for row in res.all()}
 
     async def list_catalog_databases(self, source_id: str | None = None) -> list[str]:
         """目录去重库名列表（entity_name 前缀，供前端库名筛选下拉）。

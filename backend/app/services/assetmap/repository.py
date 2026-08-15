@@ -164,6 +164,8 @@ class AssetMapRepository:
 
         # 源健康/新鲜度：关联 data_source 的最后健康检查与健康状态
         source_health = await self._source_health(row.source_id)
+        # 业务域：db_catalog 无 domain 列，经 data_source 继承（生产详情展示）
+        domain = await self._source_domain(row.source_id)
 
         sens = (row.sensitivity_level or "").upper()
 
@@ -184,8 +186,13 @@ class AssetMapRepository:
             "entity_name": row.entity_name,
             "entity_type": row.entity_type,
             "source_id": row.source_id,
+            "source_name": (source_health or {}).get("source_name"),
+            "domain": domain,
             "sensitivity_level": row.sensitivity_level,
             "owner_id": row.owner_id,
+            # 责任人展示名（display_name 优先，缺省回退 username）——生产场景需可读
+            "owner_name": await self._owner_display_name(row.owner_id),
+            "column_count": len(schema_summary) if isinstance(schema_summary, list) else None,
             "schema_incomplete": row.schema_incomplete,
             "content_signature": row.content_signature,
             "schema_summary": schema_summary,
@@ -280,6 +287,69 @@ class AssetMapRepository:
             "last_health_check": row.last_health_check,
             "source_name": row.name,
         }
+
+    async def _source_domain(self, source_id: str) -> str | None:
+        """数据源所属业务域（db_catalog 无 domain 列，经 data_source 继承）。"""
+        row = (
+            await self._session.execute(
+                select(DataSource.domain).where(
+                    DataSource.source_id == source_id, DataSource.deleted_at.is_(None)
+                )
+            )
+        ).first()
+        return row[0] if row else None
+
+    async def _owner_display_name(self, owner_id: int | None) -> str | None:
+        """责任人可读名（display_name 优先，缺省回退 username）；无归属返回 None。"""
+        if owner_id is None:
+            return None
+        row = (
+            await self._session.execute(
+                select(User.display_name, User.username).where(User.id == owner_id)
+            )
+        ).first()
+        if row is None:
+            return None
+        return row[0] or row[1] or None
+
+    async def enrich_catalog_items(
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """批量给目录条目补源名称/业务域/责任人名（列表下钻与详情展示用，幂等）。"""
+        if not items:
+            return items
+        source_ids = {it.get("source_id") for it in items if it.get("source_id")}
+        owner_ids = {it.get("owner_id") for it in items if it.get("owner_id") is not None}
+        src_map: dict[str, tuple[str | None, str | None]] = {}
+        if source_ids:
+            src_rows = (
+                await self._session.execute(
+                    select(DataSource.source_id, DataSource.name, DataSource.domain).where(
+                        DataSource.source_id.in_(source_ids)
+                    )
+                )
+            ).all()
+            src_map = {r[0]: (r[1], r[2]) for r in src_rows}
+        usr_map: dict[int, str] = {}
+        if owner_ids:
+            usr_rows = (
+                await self._session.execute(
+                    select(User.id, User.display_name, User.username).where(
+                        User.id.in_(owner_ids)
+                    )
+                )
+            ).all()
+            usr_map = {r[0]: (r[1] or r[2]) for r in usr_rows}
+        for it in items:
+            name, domain = src_map.get(it.get("source_id"), (None, None))
+            if it.get("source_name") is None:
+                it["source_name"] = name
+            if it.get("domain") is None:
+                it["domain"] = domain
+            oid = it.get("owner_id")
+            if oid is not None and it.get("owner_name") is None:
+                it["owner_name"] = usr_map.get(oid)
+        return items
 
     async def catalog_summary(self) -> dict[str, Any]:
         total = (

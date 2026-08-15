@@ -72,11 +72,17 @@ class TestGetEntityDetail:
         r4.first.return_value = SimpleNamespace(
             health_status="healthy", last_health_check=None, name="s1"
         )
+        # 业务域（经 data_source 继承）：get_entity_detail 新增 _source_domain 查询
+        r5 = MagicMock()
+        r5.first.return_value = ("sales",)
         # column_descriptions 查询：本用例 schema_summary 为 list，get_entity_detail
         # 会再执行一次 ColumnDescription 查询（并行会话新增，测试需同步 mock）
-        r5 = MagicMock()
-        r5.scalars.return_value.all.return_value = []
-        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5])
+        r6 = MagicMock()
+        r6.scalars.return_value.all.return_value = []
+        # 责任人展示名：_owner_display_name 查询（owner_id=5）
+        r7 = MagicMock()
+        r7.first.return_value = ("李四", "lisi")
+        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5, r6, r7])
 
         out = await repo.get_entity_detail(1)
 
@@ -84,8 +90,12 @@ class TestGetEntityDetail:
         assert out["entity_name"] == "catalog.db.t"
         assert out["entity_type"] == "table"
         assert out["source_id"] == "s1"
+        assert out["source_name"] == "s1"
+        assert out["domain"] == "sales"
         assert out["sensitivity_level"] == "PII"
         assert out["owner_id"] == 5
+        assert out["owner_name"] == "李四"
+        assert out["column_count"] == 1
         assert out["pii_flag"] is True
         assert out["lineage_count"] == 1
         assert out["lineage_edges"][0]["edge_type"] == "DERIVED_FROM"
@@ -135,11 +145,14 @@ class TestGetEntityDetail:
         r3.all.return_value = []
         r4 = MagicMock()
         r4.first.return_value = None
+        # 业务域（经 data_source 继承）：get_entity_detail 新增 _source_domain 查询
+        r5 = MagicMock()
+        r5.first.return_value = ("finance",)
         # schema_json={} 经 _summarize_schema 仍返回空 list，同样触发
         # ColumnDescription 查询（并行会话新增）
-        r5 = MagicMock()
-        r5.scalars.return_value.all.return_value = []
-        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5])
+        r6 = MagicMock()
+        r6.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5, r6])
 
         out = await AssetMapRepository(s).get_entity_detail(2)
 
@@ -148,6 +161,8 @@ class TestGetEntityDetail:
         assert out["lineage_count"] == 0
         assert out["source_health"]["health_status"] == "unknown"
         assert out["owner_id"] is None
+        assert out["domain"] == "finance"
+        assert out["owner_name"] is None
 
 
 class TestSummarizeSchema:

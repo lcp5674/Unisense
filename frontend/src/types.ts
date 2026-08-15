@@ -1236,6 +1236,9 @@ export interface DBCatalog {
   /** 数据源维度展示信息：源是否已删除 / 源名称 */
   source_deleted?: boolean;
   source_name?: string | null;
+  /** 业务域（经数据源继承回填）与责任人展示名 */
+  domain?: string | null;
+  owner_name?: string | null;
   /** 表级业务描述（治理补全，TD §12.1） */
   description?: string | null;
   description_source?: DescriptionSource | null;
@@ -1361,6 +1364,14 @@ export interface AssetTableItem {
   /** 敏感级别；历史 to_dict 曾剥离该字段，按可空处理（渲染端防御） */
   sensitivity_level?: string | null;
   owner_id: number | null;
+  /** 责任人展示名（后端批量回填，display_name 优先） */
+  owner_name?: string | null;
+  /** 源名称（后端批量回填） */
+  source_name?: string | null;
+  /** 业务域（经 data_source 继承回填） */
+  domain?: string | null;
+  /** 表级业务描述 */
+  description?: string | null;
   schema_incomplete: boolean;
   etl_sql?: string | null;
   /** 新鲜度字段（后端 to_dict 透传 created_at/updated_at） */
@@ -1400,8 +1411,16 @@ export interface AssetEntityDetail {
   entity_name: string;
   entity_type: string;
   source_id: string;
+  /** 源名称（经 data_source 回填） */
+  source_name?: string | null;
+  /** 业务域（经 data_source 继承回填） */
+  domain?: string | null;
   sensitivity_level: string | null;
   owner_id: number | null;
+  /** 责任人展示名（display_name 优先） */
+  owner_name?: string | null;
+  /** 字段数（schema_summary 为 list 时的长度） */
+  column_count?: number | null;
   schema_incomplete: boolean;
   content_signature: string | null;
   /** schema 摘要：结构化字段列表或字符串/null */

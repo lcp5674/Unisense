@@ -28,6 +28,8 @@ async def _svc() -> tuple[AssetMapService, MagicMock]:
         ]
     )
     repo.orphan_assets = AsyncMock(return_value=[])
+    # 生产化补充：列表/下钻条目富化（源名/业务域/责任人名）——透传不变
+    repo.enrich_catalog_items = AsyncMock(side_effect=lambda items: items)
     repo.heatmap_aggregation = AsyncMock(return_value={})
     repo.health_summary = AsyncMock(return_value={"healthy": 0})
     # 写能力相关方法默认 AsyncMock（避免 MagicMock 无法 await / 无 assert_awaited）

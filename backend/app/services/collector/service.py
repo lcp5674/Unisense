@@ -1009,6 +1009,14 @@ class CollectorService(BaseService):
         # 批量补源维度信息（名称 / 删除状态）：join 路径已带瞬态属性，普通路径批量查询
         source_ids = {c.source_id for c in cats}
         meta = await self._repo.get_sources_meta(list(source_ids)) if source_ids else {}
+        # 生产化补充：业务域（经数据源继承）+ 责任人展示名
+        domains = (
+            await self._repo.get_sources_domain(list(source_ids)) if source_ids else {}
+        )
+        owner_ids = {c.owner_id for c in cats if c.owner_id is not None}
+        owner_names = (
+            await self._repo.get_owner_names(list(owner_ids)) if owner_ids else {}
+        )
         # 批量合并字段描述（column_descriptions），供字段详情抽屉展示
         desc_map = await self._repo.get_descriptions_for_catalogs([c.id for c in cats])
         items: list[DBCatalogResponse] = []
@@ -1019,10 +1027,13 @@ class CollectorService(BaseService):
             if src_deleted is not None:
                 resp.source_deleted = bool(src_deleted)
                 resp.source_name = getattr(c, "_src_name", None) or c.source_id
+                resp.domain = getattr(c, "_src_domain", None) or domains.get(c.source_id)
             else:
                 name, deleted = meta.get(c.source_id, (None, True))
                 resp.source_deleted = deleted
                 resp.source_name = name or c.source_id
+                resp.domain = domains.get(c.source_id)
+            resp.owner_name = owner_names.get(c.owner_id) if c.owner_id is not None else None
             items.append(resp)
         return DBCatalogListResponse(
             items=items,
