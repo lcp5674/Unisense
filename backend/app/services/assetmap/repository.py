@@ -433,10 +433,10 @@ class AssetMapRepository:
         return out
 
     async def metric_dimension_summary(self) -> dict[str, Any]:
-        """指标体系聚合：指标多维分布（类型/分层/分级/单位/聚合/时间语义/状态/域）+ PII 合规率。
+        """指标体系聚合：指标多维分布 + PII 合规率。
 
-        8 类维度分布构成平台指标体系，每项可下钻对应指标明细。复用 SQL GROUP BY，
-        与热力聚合同源（TD §12.11），避免指标体系口径漂移。
+        13 类维度：类型/粒度/分层/分级/单位/币种/聚合/时间语义/新鲜度/服务模式/可加性/状态/域。
+        复用 SQL GROUP BY，与热力聚合同源（TD §12.11），避免指标体系口径漂移。
         """
         # 合规率：已复核 PII 指标 / 全部 PII 指标
         pii_total = (
@@ -465,11 +465,16 @@ class AssetMapRepository:
 
         return {
             "by_type": await self._metric_distribution(Metric.type),
+            "by_granularity": await self._metric_distribution(Metric.granularity),
             "by_dw_layer": await self._metric_distribution(Metric.dw_layer),
             "by_metric_tier": await self._metric_distribution(Metric.metric_tier),
             "by_unit": await self._metric_distribution(Metric.unit),
+            "by_currency": await self._metric_distribution(Metric.currency),
             "by_aggregation": await self._metric_distribution(Metric.aggregation),
             "by_time_semantics": await self._metric_distribution(Metric.time_semantics),
+            "by_freshness": await self._metric_distribution(Metric.freshness),
+            "by_serving_mode": await self._metric_distribution(Metric.serving_mode),
+            "by_additivity": await self._metric_distribution(Metric.additivity),
             "by_status": await self._metric_distribution(Metric.status),
             "by_domain": await self._metric_distribution(Metric.domain),
             "pii_compliance": {

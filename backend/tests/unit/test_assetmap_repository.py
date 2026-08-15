@@ -658,7 +658,7 @@ class TestAggregations:
         assert out["catalogs"]["items"][0]["owner_name"] == "Bob"
 
     async def test_metric_dimension_summary(self) -> None:
-        """指标体系聚合：8 类维度分布 + PII 合规率。"""
+        """指标体系聚合：13 类维度分布 + PII 合规率。"""
         s = _session()
         repo = AssetMapRepository(s)
 
@@ -673,18 +673,23 @@ class TestAggregations:
         r_pii_reviewed.scalar.return_value = 3
         r_total = MagicMock()
         r_total.scalar.return_value = 10
-        # 顺序：pii_total → pii_reviewed → metric_total → 8 类 distribution
+        # 顺序：pii_total → pii_reviewed → metric_total → 13 类 distribution
         s.execute = AsyncMock(
             side_effect=[
                 r_pii_total,
                 r_pii_reviewed,
                 r_total,
                 dist(("atomic", 7), ("derived", 3)),  # type
+                dist(("day", 6), ("month", 4)),  # granularity
                 dist(("DWS", 6), ("ADS", 4)),  # dw_layer
                 dist(("T1", 3), ("T2", 2), ("T3", 5)),  # tier
                 dist(("CNY", 3), ("cnt", 7)),  # unit
+                dist(("CNY", 3), ("USD", 1)),  # currency
                 dist(("SUM", 8), ("AVG", 2)),  # aggregation
                 dist(("PERIOD", 9), ("YTD", 1)),  # time_semantics
+                dist(("T1", 6), ("HOURLY", 4)),  # freshness
+                dist(("BATCH_ONLY", 7), ("REALTIME_ONLY", 3)),  # serving_mode
+                dist(("ADDITIVE", 8), ("NON_ADDITIVE", 2)),  # additivity
                 dist(("PUBLISHED", 5), ("DRAFT", 3), ("DEPRECATED", 2)),  # status
                 dist(("sales", 6), ("user", 4)),  # domain
             ]
@@ -694,10 +699,16 @@ class TestAggregations:
 
         assert out["total"] == 10
         assert out["by_type"] == {"atomic": 7, "derived": 3}
+        assert out["by_granularity"] == {"day": 6, "month": 4}
         assert out["by_dw_layer"] == {"DWS": 6, "ADS": 4}
         assert out["by_metric_tier"] == {"T1": 3, "T2": 2, "T3": 5}
         assert out["by_unit"] == {"CNY": 3, "cnt": 7}
+        assert out["by_currency"] == {"CNY": 3, "USD": 1}
         assert out["by_aggregation"] == {"SUM": 8, "AVG": 2}
+        assert out["by_time_semantics"] == {"PERIOD": 9, "YTD": 1}
+        assert out["by_freshness"] == {"T1": 6, "HOURLY": 4}
+        assert out["by_serving_mode"] == {"BATCH_ONLY": 7, "REALTIME_ONLY": 3}
+        assert out["by_additivity"] == {"ADDITIVE": 8, "NON_ADDITIVE": 2}
         assert out["by_status"] == {"PUBLISHED": 5, "DRAFT": 3, "DEPRECATED": 2}
         assert out["by_domain"] == {"sales": 6, "user": 4}
         assert out["pii_compliance"]["pii_total"] == 4

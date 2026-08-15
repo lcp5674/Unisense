@@ -415,9 +415,10 @@ export interface StaleEdge {
   stale_since?: string | null;
 }
 
-// 收藏（backend/app/api/consume.py）：GET 返回 string[]，POST 返回 FavoriteResponse
+// 收藏（backend/app/api/consume.py）：POST/DELETE 返回 FavoriteResponse
 export interface FavoriteResponse {
-  metric_code: string;
+  asset_type: string;
+  asset_id: string;
   pinned: boolean;
 }
 
@@ -1383,11 +1384,16 @@ export interface AssetMetricSummary {
 export interface AssetMetricDimensionSummary {
   total: number;
   by_type: Record<string, number>;
+  by_granularity: Record<string, number>;
   by_dw_layer: Record<string, number>;
   by_metric_tier: Record<string, number>;
   by_unit: Record<string, number>;
+  by_currency: Record<string, number>;
   by_aggregation: Record<string, number>;
   by_time_semantics: Record<string, number>;
+  by_freshness: Record<string, number>;
+  by_serving_mode: Record<string, number>;
+  by_additivity: Record<string, number>;
   by_status: Record<string, number>;
   by_domain: Record<string, number>;
   pii_compliance: {

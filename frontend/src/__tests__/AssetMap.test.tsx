@@ -205,11 +205,16 @@ describe("AssetMap", () => {
     vi.mocked(fetchAssetMetricDimensions).mockResolvedValue({
       total: 10,
       by_type: { atomic: 8, derived: 2 },
+      by_granularity: { day: 7, month: 3 },
       by_dw_layer: { DWS: 7, ADS: 3 },
       by_metric_tier: { T1: 3, T2: 2, T3: 5 },
       by_unit: { CNY: 3, cnt: 7 },
+      by_currency: { CNY: 3, USD: 1 },
       by_aggregation: { SUM: 8, AVG: 2 },
       by_time_semantics: { PERIOD: 9, YTD: 1 },
+      by_freshness: { T1: 6, HOURLY: 4 },
+      by_serving_mode: { BATCH_ONLY: 7, REALTIME_ONLY: 3 },
+      by_additivity: { ADDITIVE: 8, NON_ADDITIVE: 2 },
       by_status: { PUBLISHED: 5, DRAFT: 3, DEPRECATED: 2 },
       by_domain: { finance: 6, sales: 4 },
       pii_compliance: { pii_total: 4, pii_reviewed: 3, pii_unreviewed: 1, review_rate: 0.75 },
@@ -826,6 +831,32 @@ describe("AssetMap", () => {
 
     await waitFor(() => expect(listCatalogs).toHaveBeenCalled());
     expect(screen.getByText(/目录资产明细/)).toBeInTheDocument();
+  });
+
+  it("overview 指标体系展示粒度等 13 类维度并可下钻", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(fetchAssetMetricDimensions).toHaveBeenCalled());
+
+    // 指标体系卡片标题
+    expect(screen.getByText("指标体系")).toBeInTheDocument();
+    // 粒度维度组及其值（mock: day 7 / month 3）——Tag 文本为「日 7」拆分节点，用函数匹配
+    expect(screen.getByText("粒度")).toBeInTheDocument();
+    const dayTag = screen.getByText((content) => content.includes("日") && content.includes("7"));
+    expect(dayTag).toBeInTheDocument();
+    // 其它新增维度组也渲染
+    expect(screen.getByText("币种")).toBeInTheDocument();
+    expect(screen.getByText("新鲜度")).toBeInTheDocument();
+    expect(screen.getByText("服务模式")).toBeInTheDocument();
+    expect(screen.getByText("可加性")).toBeInTheDocument();
+
+    // 点击粒度 Tag → 打开分布明细抽屉
+    await user.click(dayTag);
+    await waitFor(() => expect(screen.getByText(/粒度分布明细/)).toBeInTheDocument());
+    expect(screen.getByText("维度值")).toBeInTheDocument();
+    expect(screen.getByText("指标数")).toBeInTheDocument();
   });
 
   it("overview orphan statistic drills into orphan detail", async () => {

@@ -179,18 +179,65 @@ const STATUS_LABEL: Record<string, string> = {
   DEPRECATED: "已废弃",
   DATA_SOURCE_DROPPED: "源下线",
 };
-// 指标体系 8 类维度配置（key 对应 metric_dimensions 响应字段）
+const GRANULARITY_LABEL: Record<string, string> = {
+  second: "秒",
+  minute: "分钟",
+  hour: "小时",
+  day: "日",
+  week: "周",
+  month: "月",
+  quarter: "季度",
+  year: "年",
+  // 兼容大写别名（存量数据可能大写）
+  SECOND: "秒",
+  MINUTE: "分钟",
+  HOUR: "小时",
+  DAY: "日",
+  WEEK: "周",
+  MONTH: "月",
+  QUARTER: "季度",
+  YEAR: "年",
+};
+const CURRENCY_LABEL: Record<string, string> = {
+  CNY: "人民币",
+  USD: "美元",
+  EUR: "欧元",
+  HKD: "港币",
+  JPY: "日元",
+};
+const FRESHNESS_LABEL: Record<string, string> = {
+  REALTIME: "实时",
+  T0: "T+0",
+  T1: "T+1",
+  HOURLY: "小时级",
+};
+const SERVING_MODE_LABEL: Record<string, string> = {
+  BATCH_ONLY: "仅批处理",
+  REALTIME_ONLY: "仅实时",
+  BATCH_REALTIME_DUAL: "批实时双轨",
+};
+const ADDITIVITY_LABEL: Record<string, string> = {
+  ADDITIVE: "可加",
+  SEMI_ADDITIVE: "半可加",
+  NON_ADDITIVE: "不可加",
+};
+// 指标体系 13 类维度配置（key 对应 metric_dimensions 响应字段）
 const METRIC_DIMENSION_GROUPS: Array<{
   key: keyof AssetMetricDimensionSummary;
   label: string;
   map: Record<string, string>;
 }> = [
   { key: "by_type", label: "指标类型", map: METRIC_TYPE_LABEL },
+  { key: "by_granularity", label: "粒度", map: GRANULARITY_LABEL },
   { key: "by_dw_layer", label: "数仓分层", map: DW_LAYER_LABEL },
   { key: "by_metric_tier", label: "指标分级", map: METRIC_TIER_LABEL },
   { key: "by_unit", label: "单位", map: UNIT_LABEL },
+  { key: "by_currency", label: "币种", map: CURRENCY_LABEL },
   { key: "by_aggregation", label: "聚合方式", map: AGG_LABEL },
   { key: "by_time_semantics", label: "时间语义", map: TIME_SEM_LABEL },
+  { key: "by_freshness", label: "新鲜度", map: FRESHNESS_LABEL },
+  { key: "by_serving_mode", label: "服务模式", map: SERVING_MODE_LABEL },
+  { key: "by_additivity", label: "可加性", map: ADDITIVITY_LABEL },
   { key: "by_status", label: "指标状态", map: STATUS_LABEL },
   { key: "by_domain", label: "业务域", map: {} },
 ];
