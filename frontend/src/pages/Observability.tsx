@@ -9,7 +9,7 @@ import {
 } from "../api";
 import type { ObsOverview } from "../types";
 import {
-  QUALITY_LEVEL_LABEL,
+  QUALITY_SEVERITY_LABEL,
   NOTIFY_STATUS_LABEL,
   SOURCE_HEALTH_LABEL,
   METRIC_STATUS_LABEL,
@@ -71,7 +71,7 @@ function MetricsTab() {
           <Card title="质量事件级别分布" size="small">
             {Object.entries(quality?.by_level ?? {}).map(([k, v]) => (
               <div key={k} style={rowStyle}>
-                <Tag color={k === "ERROR" ? "error" : k === "WARN" ? "warning" : "default"}>{QUALITY_LEVEL_LABEL[k] ?? k}</Tag>
+                <Tag color={k === "P0" ? "error" : k === "P1" ? "orange" : "default"}>{QUALITY_SEVERITY_LABEL[k] ?? k}</Tag>
                 <span className="mono">{v}</span>
               </div>
             ))}

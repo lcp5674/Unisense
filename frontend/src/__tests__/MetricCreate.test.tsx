@@ -14,10 +14,11 @@ vi.mock("../api", async () => {
     listCatalogs: vi.fn(),
     batchRegisterMetrics: vi.fn(),
     autoSuggestMetric: vi.fn(),
+    checkConflict: vi.fn(),
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, autoSuggestMetric } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, autoSuggestMetric, checkConflict } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -25,6 +26,7 @@ const mockedDict = vi.mocked(listDictItems);
 const mockedCatalogs = vi.mocked(listCatalogs);
 const mockedBatch = vi.mocked(batchRegisterMetrics);
 const mockedSuggest = vi.mocked(autoSuggestMetric);
+const mockedCheckConflict = vi.mocked(checkConflict);
 
 /** 构造完整 DBCatalog（源表搜索 mock 用），仅 entity_name/source_name 参与渲染。 */
 function makeCatalog(entityName: string, columns?: { name: string; type?: string }[]): DBCatalog {
@@ -453,6 +455,35 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     });
     fireEvent.click(screen.getByText("智能推断并回填字段"));
     await waitFor(() => expect(screen.getByText(/SQL 推断失败/)).toBeTruthy());
+  });
+
+  it("冲突预检：冲突类型显示中文标签（same_name_diff_def→同名不同义，非原始英文）", async () => {
+    mockedCheckConflict.mockResolvedValue({
+      detections: [
+        {
+          conflict_type: "same_name_diff_def",
+          existing_code: "sales_gmv_day",
+          score: 0.9,
+          severity: "high",
+          block_publish: true,
+          reason: "口径定义不一致",
+        },
+      ],
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+
+    // 填指标编码与口径定义（expression 模式默认），再点冲突预检
+    const codeInput = screen.getByLabelText("指标编码") as HTMLInputElement;
+    fireEvent.change(codeInput, { target: { value: "sales_test" } });
+    const defInput = screen.getByLabelText("口径定义 (JSON)") as HTMLTextAreaElement;
+    fireEvent.change(defInput, { target: { value: '{"expr": "sum(amount)"}' } });
+
+    fireEvent.click(screen.getByRole("button", { name: /冲突预检/ }));
+    // 正确映射：后端 ConflictType 值为 same_name_diff_def → 中文「同名不同义」
+    await screen.findByText(/同名不同义/);
+    expect(screen.queryByText(/same_name_diff_def/)).toBeNull();
   });
 });
 

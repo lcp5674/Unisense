@@ -106,4 +106,22 @@ describe("Observability 可观测中心", () => {
     // 技术 action 不应直出
     expect(screen.queryByText("metric.created")).not.toBeInTheDocument();
   });
+
+  it("质量事件级别分布：P0/P1/P2 显示中文标签（对齐后端 QualitySeverity）而非原始级别", async () => {
+    mockedQuality.mockResolvedValue({
+      by_level: { P0: 2, P1: 3, P2: 1 },
+      by_status: { OPEN: 2 },
+      total: 6,
+    } as never);
+    render(<Observability />);
+    await waitFor(() => expect(screen.getByText("平台概览")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("运行指标"));
+
+    await waitFor(() => expect(screen.getByText("质量事件级别分布")).toBeInTheDocument());
+    expect(screen.getByText("P0 紧急")).toBeInTheDocument();
+    expect(screen.getByText("P1 严重")).toBeInTheDocument();
+    expect(screen.getByText("P2 一般")).toBeInTheDocument();
+    // 原始级别不应直出（ERROR/WARN/INFO 是消息重要度，非质量事件严重级）
+    expect(screen.queryByText("ERROR")).not.toBeInTheDocument();
+  });
 });

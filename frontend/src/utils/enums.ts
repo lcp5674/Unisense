@@ -36,14 +36,16 @@ export const TIME_SEMANTICS_LABEL: Record<string, string> = {
   YTD: "年初至今",
   TTM: "滚动 12 月",
   AVG: "期间平均",
+  MOM: "环比",
+  YOY: "同比",
 };
 
+// 对齐后端 models/metric.py freshness_type（REALTIME/T0/T1/HOURLY，无 T2/T3）
 export const FRESHNESS_LABEL: Record<string, string> = {
   REALTIME: "实时",
-  HOURLY: "小时级",
+  T0: "准实时(T0)",
   T1: "T+1",
-  T2: "T+2",
-  T3: "T+3",
+  HOURLY: "小时级",
 };
 
 export const DW_LAYER_LABEL: Record<string, string> = {
@@ -72,6 +74,7 @@ export const METRIC_STATUS_LABEL: Record<string, string> = {
   REVIEW: "审核",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",
+  DATA_SOURCE_DROPPED: "数据源下线",
 };
 
 // ---- 查询消费 ----
@@ -114,10 +117,18 @@ export const COLLECTION_MODE_LABEL: Record<string, string> = {
 
 // ---- 质量 ----
 
+// 消息/事件「重要程度」（人工发送消息等 INFO/WARN/ERROR）
 export const QUALITY_LEVEL_LABEL: Record<string, string> = {
   ERROR: "错误",
   WARN: "警告",
   INFO: "提示",
+};
+
+// 质量事件严重级（backend models/quality.py QualitySeverity：P0/P1/P2）
+export const QUALITY_SEVERITY_LABEL: Record<string, string> = {
+  P0: "P0 紧急",
+  P1: "P1 严重",
+  P2: "P2 一般",
 };
 
 export const RULE_TYPE_LABEL: Record<string, string> = {
@@ -146,20 +157,24 @@ export const QUALITY_EVENT_STATUS_LABEL: Record<string, string> = {
 };
 
 export const RECONCILIATION_STATUS_LABEL: Record<string, string> = {
-  PENDING: "待复核",
+  // 质量对账（models/quality.py：OK/WARN/ALERT/CONFIRMED）
+  OK: "正常",
   ALERT: "偏差告警",
   WARN: "需关注",
   CONFIRMED: "已确认",
+  // 维度对账（models/dimension.py：PENDING/APPROVED/REJECTED）
+  PENDING: "待复核",
+  APPROVED: "已通过",
   REJECTED: "已驳回",
 };
 
 // ---- 通知 / 健康 ----
 
+// 对齐后端 NotifyStatus（PENDING/SENT/FAILED）；已读是 read_at 字段，非状态值
 export const NOTIFY_STATUS_LABEL: Record<string, string> = {
   PENDING: "待发送",
   SENT: "已发送",
   FAILED: "发送失败",
-  READ: "已读",
 };
 
 export const HEALTH_LEVEL_LABEL: Record<string, string> = {
@@ -188,15 +203,78 @@ export const ENTITY_TYPE_LABEL: Record<string, string> = {
   grant: "授权",
   quality_rule: "质量规则",
   notification: "通知",
+  // 审计日志常用
+  user: "用户",
+  auth: "认证",
+  config: "系统配置",
+  audit: "审计归档",
+  classification: "敏感分类",
+  pii: "敏感数据",
+  benchmark: "参照基准",
+  reconciliation: "数据对账",
+  member: "维度成员",
+  catalog: "目录实体",
+  rule: "质量规则",
+  schedule: "采集调度",
+  feedback: "用户反馈",
+  nps: "满意度评价",
+  preference: "用户偏好",
+  secret: "凭据密钥",
+  template: "指标模板",
+  role: "角色",
+  erasure: "数据擦除",
+  llm_config: "LLM 配置",
+  llm: "AI 模型",
+  subject_domain: "主题域",
+  system_dict: "参照数据",
+  scope: "作用域",
+  session: "会话",
+  tracking: "行为追踪",
+  governance: "治理合规",
+  audit_log: "审计日志",
+  data_quality: "数据质量",
+  data_governance: "数据治理",
+  data_security: "数据安全",
+  data_privacy: "数据隐私",
+  data_compliance: "数据合规",
+  data_catalog: "数据目录",
+  data_lineage: "数据血缘",
+  data_masking: "数据脱敏",
+  data_classification: "数据分类",
+  data_erasure: "数据擦除",
+  data_export: "数据导出",
+  data_import: "数据导入",
+  data_backup: "数据备份",
+  data_archive: "数据归档",
+  data_migration: "数据迁移",
+  data_sync: "数据同步",
+  data_transform: "数据转换",
+  data_validation: "数据验证",
+  data_anomaly: "数据异常",
+  data_profiling: "数据剖析",
+  data_sampling: "数据采样",
+  data_quality_rule: "数据质量规则",
+  data_quality_check: "数据质量检查",
+  data_quality_report: "数据质量报告",
+  data_governance_policy: "数据治理策略",
+  data_governance_role: "数据治理角色",
+  data_governance_rule: "数据治理规则",
+  data_governance_process: "数据治理流程",
+  data_security_policy: "数据安全策略",
+  data_security_role: "数据安全角色",
+  data_security_rule: "数据安全规则",
+  data_security_process: "数据安全流程",
 };
 
-// ---- 冲突类型（conflict/schemas.py ConflictType）----
+// ---- 冲突类型（conflict/models.py ConflictType，snake_case 值域）----
 
 export const CONFLICT_TYPE_LABEL: Record<string, string> = {
-  NAME_CONFLICT: "同名不同义",
-  SEMANTIC_DRIFT: "语义漂移",
-  PII_CONFLICT: "PII 冲突",
-  DEFINITION_DIVERGENCE: "定义分歧",
+  same_name_diff_def: "同名不同义",
+  same_def_diff_name: "同义不同名",
+  grain_unit: "粒度/单位冲突",
+  cross_domain_same_def: "跨域同口径异源",
+  version_conflict: "口径版本冲突",
+  pii: "PII 冲突",
 };
 
 // ---- 冲突严重度 ----

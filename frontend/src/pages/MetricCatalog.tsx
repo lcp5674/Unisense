@@ -58,6 +58,7 @@ const STATUS_LABEL: Record<string, string> = {
   REVIEW: "审核",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",
+  DATA_SOURCE_DROPPED: "数据源下线",
 };
 
 // 健康度分级（backend metric_health_score：>=85 EXCELLENT / >=70 GOOD / >=55 WARNING / <55 CRITICAL）

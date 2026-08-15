@@ -60,6 +60,9 @@ const SENSITIVITY_LABEL: Record<string, string> = {
   INTERNAL: "内部",
   CONFIDENTIAL: "机密",
   PII: "PII 敏感",
+  // db_catalog.sensitivity_level 终态（对齐 Catalogs/AssetMap/Dashboard）
+  NEEDS_REVIEW: "待复核",
+  // 兼容旧数据/降级标记展示（classification 表仅存，不可人工赋值）
   UNKNOWN: "未知",
 };
 
@@ -604,7 +607,7 @@ function PiiReviewTab() {
             <Select options={[{ value: "APPROVE", label: "通过（合规复核通过）" }, { value: "REJECT", label: "拒绝（退回）" }]} />
           </Form.Item>
           <Form.Item name="sensitivity_level" label="敏感度" initialValue="PII">
-            <Select options={["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "UNKNOWN"].map((v) => ({ value: v, label: SENSITIVITY_LABEL[v] ?? v }))} />
+            <Select options={["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII"].map((v) => ({ value: v, label: SENSITIVITY_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="masking_policy" label="脱敏策略">
             <Select allowClear options={[{ value: "none", label: "无" }, { value: "mask", label: "掩码" }, { value: "hash", label: "哈希" }, { value: "deny", label: "拒绝访问" }]} />

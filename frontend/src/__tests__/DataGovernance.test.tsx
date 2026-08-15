@@ -144,7 +144,7 @@ describe("Governance 权限治理", () => {
       document.querySelectorAll<HTMLInputElement>(".ant-checkbox-input:not(:disabled)"),
     );
     // viewer 行有 5 个复选框（read/write/approve/export/review），第 2 个即 write
-    const writeBox = enabledBoxes.find((box, idx) => idx === 1);
+    const writeBox = enabledBoxes.find((_box, idx) => idx === 1);
     fireEvent.click(writeBox!);
 
     // 保存按钮启用并点击（platform_admin 行的保存禁用，选启用的 viewer 行）
@@ -253,5 +253,30 @@ describe("Governance 权限治理", () => {
       const calls = mockBatch.mock.calls.filter((c) => c[2] === false);
       expect(calls.length).toBeGreaterThan(0);
     });
+  });
+
+  it("PII 复核：敏感度选项不含 UNKNOWN（降级标记不可人工赋值，与其他页 NEEDS_REVIEW 终态对齐）", async () => {
+    render(<Governance />);
+    await clickTab("PII 复核");
+
+    await userEvent.click(screen.getByRole("button", { name: /PII 人工复核/ }));
+    await screen.findByText("敏感度");
+
+    // 打开敏感度下拉：仅真实级别 PUBLIC/INTERNAL/CONFIDENTIAL/PII，无 UNKNOWN
+    fireEvent.mouseDown(screen.getByLabelText("敏感度"));
+    await waitFor(() => {
+      const dropdown = document.querySelector(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
+      expect(dropdown).toBeTruthy();
+    });
+    const options = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option"),
+    ).map((o) => o.getAttribute("title"));
+
+    expect(options).toContain("公开");
+    expect(options).toContain("内部");
+    expect(options).toContain("机密");
+    expect(options).toContain("PII 敏感");
+    expect(options).not.toContain("未知");
+    expect(options).not.toContain("UNKNOWN");
   });
 });

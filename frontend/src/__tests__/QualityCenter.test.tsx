@@ -32,6 +32,7 @@ import {
   qualityEventConfirmRepair,
   bindBenchmark,
   listMetrics,
+  listReconciliationRecords,
 } from "../api";
 const mockedListRules = vi.mocked(listQualityRules);
 const mockedListEvents = vi.mocked(listQualityEvents);
@@ -40,6 +41,7 @@ const mockedDetect = vi.mocked(qualityEventDetect);
 const mockedRepair = vi.mocked(qualityEventConfirmRepair);
 const mockedBind = vi.mocked(bindBenchmark);
 const mockedListMetrics = vi.mocked(listMetrics);
+const mockedListReconciliations = vi.mocked(listReconciliationRecords);
 
 const metric: MetricResponse = {
   id: 1,
@@ -130,6 +132,7 @@ beforeEach(() => {
   mockedListEvents.mockResolvedValue({ items: [event], total: 1, page: 1, page_size: 20 });
   mockedListBenchmarks.mockResolvedValue({ items: [benchmark], total: 1, page: 1, page_size: 20 });
   mockedListMetrics.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 100 });
+  mockedListReconciliations.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
 });
 
 describe("QualityCenter 质量中心", () => {
@@ -205,6 +208,65 @@ describe("QualityCenter 质量中心", () => {
         tolerance_pct: null,
       }),
     );
+  });
+
+  it("基准对账：OK 状态渲染中文「正常」而非原始英文（跨服务枚举对齐）", async () => {
+    mockedListReconciliations.mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          benchmark_id: 5,
+          metric_code: "sales_gmv_day",
+          metric_value: 1000000,
+          bench_value: 1000000,
+          diff_pct: 0.5,
+          window: "2026-07",
+          status: "OK",
+          owner_note: null,
+          decision: null,
+          confirmed_by: null,
+          checked_at: null,
+          created_at: "2026-08-01T00:00:00",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    });
+    renderQuality();
+    fireEvent.click(screen.getByText("基准对账"));
+    await screen.findByText("正常");
+    // 不应出现原始英文 OK 状态
+    expect(screen.queryByText("OK")).toBeNull();
+  });
+
+  it("基准对账：APPROVED（维度对账）状态也有中文映射「已通过」", async () => {
+    mockedListReconciliations.mockResolvedValue({
+      items: [
+        {
+          id: 2,
+          benchmark_id: 5,
+          metric_code: "sales_gmv_day",
+          metric_value: 1000000,
+          bench_value: 990000,
+          diff_pct: 1.0,
+          window: "2026-07",
+          status: "APPROVED",
+          owner_note: null,
+          decision: "reasonable",
+          confirmed_by: 1,
+          checked_at: "2026-08-01T00:00:00",
+          created_at: "2026-08-01T00:00:00",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    });
+    renderQuality();
+    fireEvent.click(screen.getByText("基准对账"));
+    await screen.findByText("已通过");
+    expect(screen.queryByText("APPROVED")).toBeNull();
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {
