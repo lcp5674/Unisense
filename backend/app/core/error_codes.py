@@ -29,6 +29,8 @@ class ErrorCode(StrEnum):
 
     # ---- 请求校验 ----
     METRIC_NOT_FOUND = "METRIC_NOT_FOUND"
+    # 指标因口径仲裁被作废（软删但带 successor），详情直访时给出友好引导而非裸 404
+    METRIC_ARCHIVED = "METRIC_ARCHIVED"
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
     VERSION_CONFLICT = "VERSION_CONFLICT"

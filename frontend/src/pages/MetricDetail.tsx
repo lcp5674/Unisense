@@ -25,6 +25,7 @@ import {
   RollbackOutlined,
   RiseOutlined,
   ArrowLeftOutlined,
+  ArrowRightOutlined,
 } from "@ant-design/icons";
 import {
   addFavorite,
@@ -184,6 +185,59 @@ function ArbitrationMarkTag({ metric }: { metric: MetricResponse }) {
     >
       <Tag color="green">权威口径</Tag>
     </Tooltip>
+  );
+}
+
+// 仲裁作废指标友好引导（TD §12.4「落败方 metric 转别名/废弃」的可寻址落地）：
+// 历史链接直访被软删的落败方时，展示原指标 + 裁决信息 + 权威指标跳转，而非裸「指标不存在」。
+function ArchivedMetricCard({
+  code,
+  successorCode,
+  mark,
+}: {
+  code: string;
+  successorCode: string;
+  mark: Record<string, unknown> | null;
+}) {
+  const navigate = useNavigate();
+  const conflictId = mark?.conflict_id ? String(mark.conflict_id) : null;
+  const ruledAt = mark?.ruled_at ? String(mark.ruled_at) : null;
+  const decision = mark?.decision ? String(mark.decision) : null;
+  return (
+    <Card>
+      <Alert
+        type="error"
+        showIcon
+        message="该指标已因口径裁决作废"
+        description={
+          <Space direction="vertical" size={4}>
+            <span>
+              原指标：<span className="mono">{code}</span>
+            </span>
+            <span>
+              权威指标：
+              {successorCode ? (
+                <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate(`/detail/${successorCode}`)}>
+                  <span className="mono">{successorCode}</span>
+                  <ArrowRightOutlined style={{ marginLeft: 4 }} />
+                </Button>
+              ) : (
+                <span className="muted">未指定</span>
+              )}
+            </span>
+            {decision && (
+              <span className="muted">
+                裁决方式：{RULING_DECISION_LABEL[decision] ?? decision}
+              </span>
+            )}
+            {conflictId && <span className="muted">相关冲突：{conflictId}</span>}
+            {ruledAt && <span className="muted">裁决时间：{formatCnTime(ruledAt)}</span>}
+            <span className="muted">作废指标不再作为可消费口径，请使用权威指标口径。</span>
+          </Space>
+        }
+        style={{ marginBottom: 16 }}
+      />
+    </Card>
   );
 }
 
@@ -366,6 +420,7 @@ export function MetricDetail() {
   async function load() {
     if (!code) return;
     setLoading(true);
+    setArchived(null);
     try {
       const [m, vs, me, favs, healthRes, userList, subs, rel] = await Promise.all([
         getMetric(code),
@@ -391,6 +446,17 @@ export function MetricDetail() {
       setRelated(rel);
       track("metric_detail_view", code, "metric");
     } catch (err) {
+      // 仲裁作废指标（METRIC_ARCHIVED）：后端返回结构化错误（detail 含 successor_code），
+      // 渲染友好引导页（展示败方 + 跳转权威指标），而非裸「指标不存在」。
+      if (err instanceof UnisenseApiError && err.code === "METRIC_ARCHIVED") {
+        const detail = err.detail ?? {};
+        setArchived({
+          successorCode: String(detail.successor_code ?? ""),
+          mark: (detail.arbitration_mark as Record<string, unknown> | null) ?? null,
+        });
+        setMetric(null);
+        return;
+      }
       // eslint-disable-next-line no-alert
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
@@ -417,9 +483,36 @@ export function MetricDetail() {
   }
 
   if (!metric) {
-    return loading ? (
-      <Card loading />
-    ) : (
+    if (loading) return <Card loading />;
+    if (archived) {
+      return (
+        <div>
+          <div className="page-head">
+            <div>
+              <Button
+                type="link"
+                icon={<ArrowLeftOutlined />}
+                onClick={handleBack}
+                style={{ padding: 0, marginBottom: 4 }}
+              >
+                {backLabel}
+              </Button>
+              <div className="page-kicker">Assets / Detail</div>
+              <h2>指标已作废</h2>
+              <p>
+                <span className="mono">{code}</span>
+              </p>
+            </div>
+          </div>
+          <ArchivedMetricCard
+            code={code ?? ""}
+            successorCode={archived.successorCode}
+            mark={archived.mark}
+          />
+        </div>
+      );
+    }
+    return (
       <Card>
         <Paragraph type="secondary">指标不存在</Paragraph>
       </Card>

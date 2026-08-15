@@ -17,6 +17,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
+from app.core.error_codes import ErrorCode
 from app.core.exceptions import (
     AuthError,
     BusinessError,
@@ -495,6 +496,20 @@ class MetricService(BaseService):
             return MetricResponse.model_validate(cached)
         metric = await self._repo.get_by_code(metric_code)
         if metric is None:
+            # 详情直访的友好作废引导：指标因口径仲裁被软删（deleted_at + successor）时，
+            # 返回结构化 METRIC_ARCHIVED（携带胜方 successor），供前端渲染「作废 + 查看权威」页，
+            # 而非对历史链接直接给出裸 404「指标不存在」。
+            archived = await self._repo.get_archived_by_code(metric_code)
+            if archived is not None and archived.successor_code:
+                raise NotFoundError(
+                    f"指标已因口径裁决作废: {metric_code}",
+                    error_code=ErrorCode.METRIC_ARCHIVED,
+                    ctx={
+                        "metric_code": metric_code,
+                        "successor_code": archived.successor_code,
+                        "arbitration_mark": archived.arbitration_mark,
+                    },
+                )
             raise NotFoundError(f"指标不存在: {metric_code}")
         await self._cache.set(metric)
         return MetricResponse.model_validate(metric)

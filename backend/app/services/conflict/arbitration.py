@@ -157,15 +157,29 @@ async def apply_arbitration_impact(
             loser_code, winner_code, actor_id, role="platform_admin"
         )
         return
-    # 未发布（DRAFT/REVIEW/EXPERIMENTAL）：从未生效，软删作废
+    # 未发布（DRAFT/REVIEW/EXPERIMENTAL）：从未生效，软删作废。
+    # 同条 UPDATE 补写 successor_code（指向胜方）与 defeated 仲裁标记——
+    # 否则落败方被软删后无任何指向胜方的指针，详情直访只能给出裸 404，
+    # 消费方/仲裁人无处可去（TD §12.4「落败方 metric 转别名/废弃」的可寻址落地）。
     await db.execute(
         update(Metric)
         .where(Metric.id == loser.id, Metric.deleted_at.is_(None))
-        .values(deleted_at=datetime.now(UTC))
+        .values(
+            deleted_at=datetime.now(UTC),
+            successor_code=winner_code,
+            arbitration_mark={
+                "status": "defeated",
+                "conflict_id": conflict_id,
+                "decision": decision,
+                "ruled_at": _now_iso(),
+                "opposite_code": winner_code,
+            },
+        )
     )
     logger.info(
         "arbitration_metric_voided",
         metric_code=loser_code,
         conflict_id=conflict_id,
         status=loser.status,
+        successor_code=winner_code,
     )

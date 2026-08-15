@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { MetricDetail } from "../pages/MetricDetail";
 import type { MetricHealth, MetricResponse } from "../types";
@@ -52,6 +52,7 @@ import {
   listUsers,
   listSubscriptions,
   fetchRelatedMetrics,
+  UnisenseApiError,
 } from "../api";
 const mockedGetMetric = vi.mocked(getMetric);
 const mockedListVersions = vi.mocked(listVersions);
@@ -223,5 +224,37 @@ describe("MetricDetail", () => {
     expect(tag).toBeInTheDocument();
     fireEvent.mouseEnter(tag);
     expect(await screen.findByText(/保留差异/)).toBeInTheDocument();
+  });
+
+  it("仲裁作废指标（METRIC_ARCHIVED）直访时展示友好引导页并可跳转权威指标", async () => {
+    const err = Object.assign(new UnisenseApiError("指标已因口径裁决作废: sales_e2e_conflictb_day"), {
+      code: "METRIC_ARCHIVED",
+      codeZh: "该指标已因口径裁决作废，请查看权威指标",
+      detail: {
+        metric_code: "sales_e2e_conflictb_day",
+        successor_code: "sales_e2e_conflicta_day",
+        arbitration_mark: {
+          status: "defeated",
+          conflict_id: "CF-ABC",
+          decision: "merge",
+          ruled_at: "2026-08-15T04:00:00Z",
+          opposite_code: "sales_e2e_conflicta_day",
+        },
+      },
+    });
+    mockedGetMetric.mockRejectedValue(err);
+    renderDetail({ pathname: "/detail/sales_e2e_conflictb_day" });
+
+    // 友好引导而非裸「指标不存在」
+    expect(await screen.findByText("该指标已因口径裁决作废")).toBeInTheDocument();
+    expect(screen.queryByText("指标不存在")).not.toBeInTheDocument();
+    // 展示原指标 + 裁决信息
+    expect(screen.getByText(/原指标：/)).toBeInTheDocument();
+    expect(screen.getAllByText("sales_e2e_conflictb_day").length).toBeGreaterThan(0);
+    expect(screen.getByText(/相关冲突：CF-ABC/)).toBeInTheDocument();
+    // 权威指标跳转按钮 → 点击后以新 code 重新拉取详情
+    const jump = await screen.findByRole("button", { name: /sales_e2e_conflicta_day/ });
+    fireEvent.click(jump);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalledWith("sales_e2e_conflicta_day"));
   });
 });

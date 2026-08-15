@@ -79,6 +79,23 @@ class MetricRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_archived_by_code(self, metric_code: str) -> Metric | None:
+        """根据编码查询已软删指标（含 deleted_at 置位的作废记录）。
+
+        仅供详情直访的「友好作废引导」使用：命中仲裁作废（软删 + successor）
+        的指标时返回其指针信息，避免对历史链接直接给出裸 404。
+
+        Args:
+            metric_code: 指标编码。
+
+        Returns:
+            指标对象（含软删记录）或 None。
+        """
+        result = await self._db.execute(
+            select(Metric).where(Metric.metric_code == metric_code)
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_id(self, metric_id: int) -> Metric | None:
         """根据 ID 查询。
 

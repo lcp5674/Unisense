@@ -1112,8 +1112,53 @@ async def test_get_metric_public_not_found():
     svc._cache = MagicMock()
     svc._cache.get = AsyncMock(return_value=None)
     repo.get_by_code = AsyncMock(return_value=None)
+    repo.get_archived_by_code = AsyncMock(return_value=None)
     with pytest.raises(NotFoundError):
         await svc.get_metric_public("missing")
+
+
+async def test_get_metric_public_archived_raises_metric_archived():
+    """详情直访已作废指标（软删 + successor）→ 结构化 METRIC_ARCHIVED，携带胜方指针。"""
+    from app.core.error_codes import ErrorCode
+
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    repo.get_by_code = AsyncMock(return_value=None)
+    archived = make_metric(
+        metric_code="sales_e2e_conflictb_day",
+        successor_code="sales_e2e_conflicta_day",
+    )
+    archived.deleted_at = None  # 触发 archived 分支仅需 successor 存在；软删态由调用方保证
+    archived.arbitration_mark = {
+        "status": "defeated",
+        "conflict_id": "CF-ABC",
+        "opposite_code": "sales_e2e_conflicta_day",
+    }
+    repo.get_archived_by_code = AsyncMock(return_value=archived)
+
+    with pytest.raises(NotFoundError) as exc_info:
+        await svc.get_metric_public("sales_e2e_conflictb_day")
+
+    assert exc_info.value.error_code == ErrorCode.METRIC_ARCHIVED
+    assert exc_info.value.ctx["successor_code"] == "sales_e2e_conflicta_day"
+    assert exc_info.value.ctx["metric_code"] == "sales_e2e_conflictb_day"
+    assert exc_info.value.ctx["arbitration_mark"]["status"] == "defeated"
+
+
+async def test_get_metric_public_deleted_without_successor_still_not_found():
+    """软删但无 successor（手动删除/其他作废路径）→ 仍按普通 NOT_FOUND 处理。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    repo.get_by_code = AsyncMock(return_value=None)
+    archived = make_metric(metric_code="gone")
+    archived.deleted_at = None  # 软删但无 successor_code（make_metric 默认 None）
+    repo.get_archived_by_code = AsyncMock(return_value=archived)
+
+    with pytest.raises(NotFoundError) as exc_info:
+        await svc.get_metric_public("gone")
+    assert exc_info.value.error_code == "NOT_FOUND"
 
 
 async def test_emergency_publish_success():

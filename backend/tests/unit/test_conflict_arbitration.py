@@ -134,6 +134,11 @@ class TestArbitrationImpact:
         assert db.updated[0]["arbitration_mark"]["status"] == "canonical"
         # 软删：第二条 update 带 deleted_at
         assert db.updated[1]["deleted_at"] is not None
+        # 落败方补写 successor（指向胜方）与 defeated 标记——保证详情直访可友好引导到胜方
+        assert db.updated[1]["successor_code"] == "existing"
+        assert db.updated[1]["arbitration_mark"]["status"] == "defeated"
+        assert db.updated[1]["arbitration_mark"]["opposite_code"] == "existing"
+        assert db.updated[1]["arbitration_mark"]["conflict_id"] == "CF-TEST"
         svc.deprecate_metric.assert_not_awaited()
 
     async def test_keep_diff_both_coexist(self) -> None:
