@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { LineageView, buildSubgraph, resolveRootId } from "../pages/LineageView";
+import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData } from "../pages/LineageView";
 import { adaptiveBaseRadius } from "../components/assetmap/AssetGraph";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
@@ -363,6 +363,28 @@ describe("LineageView SQL 血缘解析 Tab", () => {
     expect(screen.getByText("a.id")).toBeInTheDocument();
     expect(screen.getByText("t.id")).toBeInTheDocument();
     expect(screen.getByText("SUM(amount)")).toBeInTheDocument();
+  });
+
+  it("解析成功后以血缘图谱展示本次解析结果（AssetGraph 图，明细表格为辅）", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /SQL 血缘解析/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    fireEvent.change(within(panel).getByPlaceholderText(/粘贴 SQL/), {
+      target: { value: "INSERT INTO t SELECT a.id, SUM(b.amount) FROM a JOIN b" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: /解析血缘/ }));
+    await waitFor(() => expect(api.parseLineage).toHaveBeenCalled());
+    // 血缘图谱 Card：标题含节点/边计数（表节点 2 + 字段节点 4 = 6，表级 1 + 字段级 2 = 3 边）
+    await waitFor(() => {
+      expect(screen.getByText(/本次解析 · 血缘图谱（6 节点 · 3 条边）/)).toBeInTheDocument();
+    });
+    expect(panel.querySelector('[data-testid="asset-graph-wrap"]')).toBeTruthy();
+    // 明细表格仍在（辅助展示精确映射与表达式）
+    expect(screen.getByText(/本次解析 · 表级血缘（1）/)).toBeInTheDocument();
+    expect(screen.getByText(/本次解析 · 字段级血缘（2）/)).toBeInTheDocument();
   });
 
   it("填写目标表名时，解析调用携带 target_table（方案 A 落点）", async () => {
@@ -748,6 +770,69 @@ describe("buildSubgraph / resolveRootId 单元测试", () => {
     const sub = buildSubgraph(nodes, edges, "metric:nope", 3);
     expect(sub.nodes).toHaveLength(0);
     expect(sub.edges).toHaveLength(0);
+  });
+});
+
+describe("parseResultToGraphData 解析结果转血缘图谱", () => {
+  it("合并表级/字段级边：表节点去 table: 前缀、字段节点拼 field:表.列", () => {
+    const g = parseResultToGraphData({
+      table_edges: 1,
+      field_edges: 2,
+      graph_written: true,
+      table_lineage: [{ source: "table:s", target: "table:t" }],
+      field_lineage: [
+        { source_table: "a", source_column: "id", target_table: "t", target_column: "id", expression: null },
+        { source_table: "b", source_column: "amount", target_table: "t", target_column: "amount", expression: "SUM(amount)" },
+      ],
+      upstream_deps: null,
+    });
+    // 节点：表 2 + 字段 4 = 6；边：表级 1 + 字段级 2 = 3
+    expect(g.nodes).toHaveLength(6);
+    expect(g.edges).toHaveLength(3);
+    // 表节点保留 table: id，label 去前缀展示表名
+    const tableNode = g.nodes.find((n) => n.id === "table:s");
+    expect(tableNode?.type).toBe("table");
+    expect(tableNode?.label).toBe("s");
+    // 字段节点拼 field:表.列，label 展示 表.列
+    const fieldNode = g.nodes.find((n) => n.id === "field:a.id");
+    expect(fieldNode?.type).toBe("field");
+    expect(fieldNode?.label).toBe("a.id");
+    // 表级边与字段级边均透传 source/target 与 DERIVED_FROM 类型
+    expect(g.edges.some((e) => e.source === "table:s" && e.target === "table:t")).toBe(true);
+    expect(
+      g.edges.some((e) => e.source === "field:a.id" && e.target === "field:t.id"),
+    ).toBe(true);
+  });
+
+  it("source_column 为空（SELECT *）时字段源节点用 .* 占位，同表多边节点去重", () => {
+    const g = parseResultToGraphData({
+      table_edges: 0,
+      field_edges: 2,
+      graph_written: true,
+      table_lineage: [],
+      field_lineage: [
+        { source_table: "s", source_column: null, target_table: "t", target_column: "id", expression: null },
+        { source_table: "s", source_column: null, target_table: "t", target_column: "name", expression: null },
+      ],
+      upstream_deps: null,
+    });
+    // 源节点同为 field:s.*（去重），目标节点 field:t.id / field:t.name
+    expect(g.nodes).toHaveLength(3);
+    expect(g.nodes.some((n) => n.id === "field:s.*" && n.label === "s.*")).toBe(true);
+    expect(g.edges).toHaveLength(2);
+  });
+
+  it("无任何血缘边时返回空图（解析页不展示图谱，走上游依赖/空态）", () => {
+    const g = parseResultToGraphData({
+      table_edges: 0,
+      field_edges: 0,
+      graph_written: false,
+      table_lineage: [],
+      field_lineage: [],
+      upstream_deps: null,
+    });
+    expect(g.nodes).toHaveLength(0);
+    expect(g.edges).toHaveLength(0);
   });
 });
 

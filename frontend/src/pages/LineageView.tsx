@@ -197,6 +197,38 @@ export function edgesToGraphData(
   return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
 }
 
+/**
+ * 把本次 SQL 解析的表级/字段级边合并构建为血缘图谱数据（SQL 血缘解析页当页图谱展示）。
+ * - 表级边：源表 → 目标表（后端返回 ``table:`` 前缀节点，label 去前缀展示表名）；
+ * - 字段级边：源字段 → 目标字段（前端拼 ``field:表.列`` 节点，label 展示 表.列）。
+ * 表/字段节点与边合并到同一张图，完整呈现本次解析的血缘流转（源 → 目标方向）。
+ */
+export function parseResultToGraphData(result: ParseLineageResult): {
+  nodes: AssetGraphNode[];
+  edges: AssetGraphEdge[];
+} {
+  const nodeMap = new Map<string, AssetGraphNode>();
+  const graphEdges: AssetGraphEdge[] = [];
+  const addNode = (id: string, type: "table" | "field") => {
+    if (nodeMap.has(id)) return;
+    const colon = id.indexOf(":");
+    nodeMap.set(id, { id, type, label: colon === -1 ? id : id.slice(colon + 1) });
+  };
+  for (const e of result.table_lineage) {
+    addNode(e.source, "table");
+    addNode(e.target, "table");
+    graphEdges.push({ source: e.source, target: e.target, type: "DERIVED_FROM" });
+  }
+  for (const f of result.field_lineage) {
+    const srcId = `field:${f.source_table}${f.source_column ? `.${f.source_column}` : ".*"}`;
+    const dstId = `field:${f.target_table}.${f.target_column}`;
+    addNode(srcId, "field");
+    addNode(dstId, "field");
+    graphEdges.push({ source: srcId, target: dstId, type: "DERIVED_FROM" });
+  }
+  return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
+}
+
 /** 血缘图谱 Tab：进入即加载血缘图谱。指标/表节点点击均在本页以侧边栏
  *  展示详情（指标详情抽屉 / 表详情抽屉），不跳转页面，用户可再决定是否前往完整页面。
  *  支持 URL ``?node=xxx`` 聚焦：从指标详情「在图谱中查看」跳转时，仅展示该节点
@@ -672,6 +704,11 @@ function ParseTab() {
     !showUpstream &&
     result.table_lineage.length === 0 &&
     result.field_lineage.length === 0;
+  // 本次解析血缘图谱：表级/字段级边合并为一张图（有边才展示）
+  const resultGraph =
+    result !== null && (result.table_lineage.length > 0 || result.field_lineage.length > 0)
+      ? parseResultToGraphData(result)
+      : null;
 
   return (
     <div>
@@ -710,6 +747,15 @@ function ParseTab() {
           message="解析结果"
           description={`表级边 ${result.table_edges} · 字段级边 ${result.field_edges} · 图谱写入 ${result.graph_written ? "成功" : "未写入"}`}
         />
+      )}
+      {resultGraph && (
+        <Card
+          size="small"
+          title={`本次解析 · 血缘图谱（${resultGraph.nodes.length} 节点 · ${resultGraph.edges.length} 条边）`}
+          style={{ marginTop: 16 }}
+        >
+          <AssetGraph nodes={resultGraph.nodes} edges={resultGraph.edges} height={420} />
+        </Card>
       )}
       {result && result.table_lineage.length > 0 && (
         <div style={{ marginTop: 16 }}>
