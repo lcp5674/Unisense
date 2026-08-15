@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { Catalogs } from "../pages/Catalogs";
 import type { DBCatalog, DataSource } from "../types";
 
@@ -25,6 +25,11 @@ vi.mock("../api", () => {
     bulkDeprecateCatalogs: vi.fn(),
     listDataSources: vi.fn(),
     listCatalogDatabases: vi.fn(),
+    refreshCatalogEntity: vi.fn(),
+    inferColumnDescription: vi.fn(),
+    inferDescriptions: vi.fn(),
+    updateColumnDescription: vi.fn(),
+    fetchDescriptionCoverage: vi.fn(),
     listFavorites: vi.fn(),
     addFavorite: vi.fn(),
     removeFavorite: vi.fn(),
@@ -32,12 +37,13 @@ vi.mock("../api", () => {
   };
 });
 
-import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, listFavorites } from "../api";
+import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, fetchDescriptionCoverage, inferDescriptions, listFavorites } from "../api";
 
 const mockedList = vi.mocked(listCatalogs);
 const mockedRegister = vi.mocked(registerCatalog);
 const mockedSources = vi.mocked(listDataSources);
 const mockedDatabases = vi.mocked(listCatalogDatabases);
+const mockedRefresh = vi.mocked(refreshCatalogEntity);
 const mockedListFavorites = vi.mocked(listFavorites);
 
 const SOURCES: DataSource[] = [
@@ -77,6 +83,7 @@ const SOURCES: DataSource[] = [
 
 const CATALOGS: DBCatalog[] = [
   {
+    id: 1,
     source_id: "mysql_unisense",
     entity_name: "dwd_finance_order",
     entity_type: "TABLE",
@@ -93,10 +100,19 @@ const CATALOGS: DBCatalog[] = [
 beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue({ items: CATALOGS, total: 1, page: 1, page_size: 20 });
-  mockedListFavorites.mockResolvedValue([]);
   mockedSources.mockResolvedValue({ items: SOURCES, total: 2, page: 1, page_size: 200 });
   mockedDatabases.mockResolvedValue(["unisense", "sales"]);
+  mockedListFavorites.mockResolvedValue([]);
   mockedRegister.mockResolvedValue({ ...CATALOGS[0], sensitivity_level: "INTERNAL" } as DBCatalog);
+  vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+    total_tables: 10,
+    tables_with_desc: 3,
+    tables_missing_desc: 7,
+    total_fields: 40,
+    fields_with_desc: 16,
+    fields_missing_desc: 24,
+    per_table: [],
+  });
 });
 
 describe("Catalogs 页面", () => {
@@ -283,4 +299,211 @@ describe("Catalogs 页面", () => {
     });
   });
 
+  it("字段详情抽屉兼容 schema_json 字段名（历史/旧接口返回），正确展示字段", async () => {
+    const legacyCatalog = {
+      ...CATALOGS[0],
+      schema_def: undefined as unknown as Record<string, unknown>,
+      schema_json: {
+        columns: [
+          { name: "order_id", type: "bigint", comment: "订单ID", nullable: true },
+          { name: "amount", type: "decimal", comment: "", nullable: true },
+        ],
+      },
+    } as unknown as DBCatalog;
+    mockedList.mockResolvedValueOnce({ items: [legacyCatalog], total: 1, page: 1, page_size: 20 });
+    mockedList.mockResolvedValue({ items: [legacyCatalog], total: 1, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("字段详情"));
+    await waitFor(() => {
+      expect(screen.getByText("order_id")).toBeTruthy();
+      expect(screen.getByText("amount")).toBeTruthy();
+      // 空态提示不应出现（字段已解析出来）
+      expect(screen.queryByText(/暂无字段信息/)).toBeNull();
+    });
+  });
+
+  it("采集该表按钮触发单实体刷新并回填最新字段", async () => {
+    // 首次列表：实体无字段（schema 空）→ 抽屉显示空态
+    const emptySchema = { ...CATALOGS[0], schema_def: {} };
+    mockedList.mockResolvedValueOnce({ items: [emptySchema], total: 1, page: 1, page_size: 20 });
+    // 刷新后重拉：实体带字段
+    const withCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          { name: "order_id", type: "bigint", nullable: true },
+          { name: "amount", type: "decimal", nullable: true },
+        ],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [withCols], total: 1, page: 1, page_size: 20 });
+    mockedRefresh.mockResolvedValue({
+      source_id: "mysql_unisense",
+      entity_name: "dwd_finance_order",
+      sensitivity_level: "INTERNAL",
+      drifted: false,
+      columns: 2,
+    });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("字段详情"));
+    expect(screen.getByText(/暂无字段信息/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText("采集该表"));
+    await waitFor(() => {
+      expect(mockedRefresh).toHaveBeenCalledWith("mysql_unisense", "dwd_finance_order");
+    });
+    // 抽屉回填最新字段
+    await waitFor(() => {
+      expect(screen.getByText("order_id")).toBeTruthy();
+    });
+    expect(screen.queryByText(/暂无字段信息/)).toBeNull();
+  });
+
+  it("头部展示描述缺失统计卡（字段覆盖率/缺失字段/缺表描述/表总数）", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("字段描述覆盖率")).toBeTruthy();
+      expect(screen.getByText("缺失字段数")).toBeTruthy();
+      expect(screen.getByText("缺表描述")).toBeTruthy();
+      expect(screen.getByText("目录表总数")).toBeTruthy();
+    });
+    // 覆盖率 40 字段有 16 描述 → 副标题展示 16 / 40 字段有描述
+    expect(screen.getByText("16 / 40 字段有描述")).toBeTruthy();
+    expect(screen.getByText("3 / 10 表已补全")).toBeTruthy();
+    expect(fetchDescriptionCoverage).toHaveBeenCalled();
+  });
+
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/catalogs"]}>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+    await screen.findByText("dwd_finance_order");
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/lineage", "/catalogs"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/catalogs" element={<Catalogs />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("dwd_finance_order");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    render(
+      <MemoryRouter initialEntries={["/catalogs"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/catalogs" element={<Catalogs />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("dwd_finance_order");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
+  });
+
+  it("批量推断进行中退出再进：模块级 Map 拦截，不重发请求", async () => {
+    const withCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          { name: "order_id", type: "bigint", comment: "" },
+          { name: "amount", type: "decimal", comment: "" },
+        ],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [withCols], total: 1, page: 1, page_size: 20 });
+
+    type InferBatchResult = Awaited<ReturnType<typeof inferDescriptions>>;
+    let resolveInfer!: (v: InferBatchResult) => void;
+    const pending = new Promise<InferBatchResult>((r) => {
+      resolveInfer = r;
+    });
+    vi.mocked(inferDescriptions).mockReturnValue(pending);
+
+    const first = render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByText("字段详情"));
+    fireEvent.click(screen.getByRole("button", { name: /批量推断缺失描述/ }));
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledTimes(1));
+
+    // 模拟退出页面：卸载组件（模块级 inferInflight 不随组件卸载重置）
+    first.unmount();
+
+    // 重新进入：再次触发批量推断，应被模块级 Map 拦截，不重发请求
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByText("字段详情"));
+    fireEvent.click(screen.getByRole("button", { name: /批量推断缺失描述/ }));
+    expect(inferDescriptions).toHaveBeenCalledTimes(1);
+
+    // 完成时清理：Map 条目移除后可再次触发
+    resolveInfer({ inferred: [], skipped: [], failed: [] });
+    await waitFor(() => {});
+    fireEvent.click(screen.getByRole("button", { name: /批量推断缺失描述/ }));
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledTimes(2));
+  });
+
+  it("来自变更追踪（?from=变更追踪）时返回按钮显示来源并精确返回 /assetmap?tab=changes", async () => {
+    function LocDisplay() {
+      const loc = useLocation();
+      return <div data-testid="loc">{loc.pathname + loc.search}</div>;
+    }
+    render(
+      <MemoryRouter initialEntries={["/catalogs?from=变更追踪&kw=ods_order"]}>
+        <LocDisplay />
+        <Routes>
+          <Route path="/catalogs" element={<Catalogs />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("返回变更追踪")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("返回变更追踪"));
+    await waitFor(() => expect(screen.getByTestId("loc").textContent).toBe("/assetmap?tab=changes"));
+  });
+
+  it("?focus= 目标行高亮显示（突出定位的表）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/catalogs?focus=dwd_finance_order"]}>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("dwd_finance_order")).toBeInTheDocument());
+    const row = screen.getByText("dwd_finance_order").closest("tr");
+    expect(row?.getAttribute("style") ?? "").toContain("background");
+  });
 });

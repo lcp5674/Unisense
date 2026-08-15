@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty } from "antd";
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, HeartOutlined } from "@ant-design/icons";
-import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, inferColumnDescription, inferDescriptions, updateColumnDescription, listFavorites, addFavorite, removeFavorite, UnisenseApiError } from "../api";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Statistic, Row, Col, Descriptions } from "antd";
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, SyncOutlined, ArrowLeftOutlined, HeartOutlined } from "@ant-design/icons";
+import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, refreshCatalogEntity, inferColumnDescription, inferDescriptions, updateColumnDescription, fetchDescriptionCoverage, listFavorites, addFavorite, removeFavorite, UnisenseApiError } from "../api";
 import type { DBCatalog, DataSource, SchemaColumn } from "../types";
+import type { DescriptionCoverage } from "../api";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 import { SchemaTable } from "../components/SchemaTable";
 
@@ -48,10 +49,16 @@ function isInferInProgress(err: unknown): boolean {
 }
 
 export function Catalogs() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw= / ?source_id=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
   const urlSourceId = searchParams.get("source_id") ?? "";
+  // 来源感知返回（?from=变更追踪 / ?from=资产地图）：从资产地图跳入查看采集记录时，
+  // 返回按钮精确回到来源 Tab，而非笼统回退浏览器历史（历史回退会丢 AssetMap 内部 Tabs 状态）。
+  const urlFrom = searchParams.get("from") ?? "";
+  // 目标行高亮（?focus=实体名）：从资产地图「在采集目录中查看」跳入时，定位并高亮该表
+  const urlFocus = searchParams.get("focus") ?? "";
   // 敏感级别下钻（?sensitivity=，总览仪表「数据表」资产卡片）作为初始筛选
   const urlSensitivity = searchParams.get("sensitivity") ?? "";
   const [items, setItems] = useState<DBCatalog[]>([]);
@@ -63,6 +70,23 @@ export function Catalogs() {
   const [entityType, setEntityType] = useState("");
   const [sensitivity, setSensitivity] = useState(urlSensitivity);
   const [keyword, setKeyword] = useState(urlKw);
+  // 目标行高亮（?focus=）：加载后定位并短暂高亮，3 秒后自动清除
+  const [focusName, setFocusName] = useState(urlFocus);
+  const focusDoneRef = useRef(false);
+  useEffect(() => {
+    if (!focusName || focusDoneRef.current) return;
+    focusDoneRef.current = true;
+    const scrollTimer = window.setTimeout(() => {
+      const el = document.querySelector<HTMLElement>(`tr[data-row-key*="${focusName}"]`);
+      if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 350);
+    const clearTimer = window.setTimeout(() => setFocusName(""), 3000);
+    return () => {
+      window.clearTimeout(scrollTimer);
+      window.clearTimeout(clearTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusName, items]);
   // 库名筛选（随数据源联动）
   const [database, setDatabase] = useState("");
   const [databases, setDatabases] = useState<string[]>([]);
@@ -84,6 +108,11 @@ export function Catalogs() {
   const [fieldColumns, setFieldColumns] = useState<SchemaColumn[]>([]);
   const [inferLoading, setInferLoading] = useState(false);
   const [batchInferLoading, setBatchInferLoading] = useState(false);
+  // 单表采集刷新
+  const [refreshing, setRefreshing] = useState(false);
+  // 描述缺失概览统计卡（TD §12.1）
+  const [coverage, setCoverage] = useState<DescriptionCoverage | null>(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
 
   function openFieldDetail(record: DBCatalog) {
     setFieldDrawerCatalog(record);
@@ -91,9 +120,13 @@ export function Catalogs() {
     setFieldDrawerOpen(true);
   }
 
-  /** 解析 catalog 的 schema_def.columns 为 SchemaColumn[] */
+  /** 解析 catalog 的 schema_def/schema_json.columns 为 SchemaColumn[] */
   function parseSchemaColumns(catalog: DBCatalog): SchemaColumn[] {
-    const schemaDef = catalog.schema_def as Record<string, unknown>;
+    // 兼容两种字段名：规范契约是 schema_def，但部分端点/历史数据返回 schema_json
+    // （FastAPI by_alias 曾把 alias 当输出键）；双读兜底避免字段详情抽屉读不到列。
+    const schemaDef = (catalog.schema_def ?? (catalog as unknown as { schema_json?: unknown }).schema_json) as
+      | Record<string, unknown>
+      | undefined;
     if (!schemaDef || typeof schemaDef !== "object") return [];
     const columns = schemaDef.columns || schemaDef.fields;
     if (!Array.isArray(columns)) return [];
@@ -267,6 +300,22 @@ export function Catalogs() {
     }
   }
 
+  // 来源感知返回：从资产地图（变更追踪/资产地图 Tab）跳入时精确回来源 Tab；
+  // 其他入口（总览资产卡片/血缘视图/数据源详情等）回退浏览器历史，无上一页兜底总览仪表
+  function handleBack() {
+    if (urlFrom === "变更追踪") {
+      navigate("/assetmap?tab=changes");
+      return;
+    }
+    if (urlFrom === "资产地图") {
+      navigate("/assetmap");
+      return;
+    }
+    if (window.history.length > 1) navigate(-1);
+    else navigate("/dashboard");
+  }
+  const backLabel = urlFrom === "变更追踪" ? "返回变更追踪" : urlFrom === "资产地图" ? "返回资产地图" : "返回";
+
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -307,6 +356,21 @@ export function Catalogs() {
     }
   }
 
+  // 描述缺失统计（字段覆盖率 / 缺失表 / 缺失字段）
+  async function loadCoverage() {
+    setCoverageLoading(true);
+    try {
+      setCoverage(await fetchDescriptionCoverage());
+    } catch {
+      // 统计卡为增强信息，加载失败不阻塞主列表
+    } finally {
+      setCoverageLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadCoverage();
+  }, []);
 
   // 库名选项随数据源联动：切换数据源时刷新库名下拉并重置已选库名
   async function loadDatabases() {
@@ -371,39 +435,95 @@ export function Catalogs() {
     }
   }
 
+  /** 只采集当前实体（单表/单实体刷新），成功后重拉最新 schema 回填抽屉 */
+  async function handleRefreshEntity() {
+    if (!fieldDrawerCatalog) return;
+    setRefreshing(true);
+    try {
+      const res = await refreshCatalogEntity(fieldDrawerCatalog.source_id, fieldDrawerCatalog.entity_name);
+      message.success(
+        `「${fieldDrawerCatalog.entity_name}」采集完成：${res.columns} 个字段${res.drifted ? "，检测到 Schema 漂移" : ""}`,
+      );
+      // 重新拉取该实体的最新目录记录（refresh 只返回列数，不回完整 schema）
+      const freshList = await listCatalogs({
+        source_id: fieldDrawerCatalog.source_id,
+        keyword: fieldDrawerCatalog.entity_name,
+        page: 1,
+        page_size: 100,
+      });
+      const fresh = freshList.items.find((i) => i.entity_name === fieldDrawerCatalog?.entity_name);
+      if (fresh) {
+        setFieldDrawerCatalog(fresh);
+        setFieldColumns(parseSchemaColumns(fresh));
+      } else {
+        // 源端已无此表（采集对账后被标记废弃）
+        setFieldDrawerOpen(false);
+        setFieldDrawerCatalog(null);
+        setFieldColumns([]);
+        message.warning("该实体在源端已不存在，可能已被标记废弃");
+      }
+      load();
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError
+          ? `${err.message}（${err.codeZh}）`
+          : "该表采集失败，请确认数据源连接正常后重试",
+      );
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   const columns = [
     {
       title: "数据源",
       dataIndex: "source_id",
       key: "source_id",
+      ellipsis: true,
       render: (v: string, r: DBCatalog) => (
-        <span>
-          <span className="mono">{r.source_name ?? v}</span>
-          {r.source_deleted && <Tag color="default" style={{ marginLeft: 6 }}>源已删除</Tag>}
-          {r.source_name && r.source_name !== v && (
-            <div className="muted mono" style={{ fontSize: 11 }}>{v}</div>
-          )}
-        </span>
+        <Tooltip title={r.source_name && r.source_name !== v ? `${r.source_name}（${v}）` : v}>
+          <span className="mono" style={{ fontSize: 12 }}>
+            {r.source_name ?? v}
+            {r.source_deleted && <Tag color="default" style={{ marginLeft: 6 }}>源已删除</Tag>}
+          </span>
+        </Tooltip>
       ),
     },
-    { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true, render: (v: string) => <span className="mono">{v}</span> },
-    { title: "类型", dataIndex: "entity_type", key: "type", width: 90, render: (v: string) => <Tag>{enumLabel(ENTITY_TYPE_LABEL, v)}</Tag> },
+    {
+      title: "实体",
+      dataIndex: "entity_name",
+      key: "entity_name",
+      ellipsis: true,
+      render: (v: string, r: DBCatalog) => (
+        <Space size={4} wrap={false}>
+          <span className="mono">{v}</span>
+          <Tag>{enumLabel(ENTITY_TYPE_LABEL, r.entity_type)}</Tag>
+          {r.schema_incomplete && <Tag color="warning">schema 缺失</Tag>}
+        </Space>
+      ),
+    },
     {
       title: "敏感度",
       dataIndex: "sensitivity_level",
       key: "sensitivity",
-      width: 110,
+      width: 100,
       render: (v: string) => <Tag color={SENSITIVITY_COLOR[v]}>{SENSITIVITY_LABEL[v] ?? v}</Tag>,
     },
-    { title: "责任人", dataIndex: "owner_id", key: "owner", width: 90, render: (v: number | null) => v ?? <Tag>无</Tag> },
-    { title: "schema 缺失", dataIndex: "schema_incomplete", key: "incomplete", width: 120, render: (v: boolean) => (v ? <Tag color="error">是</Tag> : <Tag color="success">否</Tag>) },
-    { title: "上游签名", dataIndex: "upstream_signature", key: "upstream", width: 130, render: (v: string) => (v ? (
-      <Tooltip title={v}><span className="mono" style={{ fontSize: 11 }}>{v.slice(0, 12)}…</span></Tooltip>
-    ) : <span className="muted">—</span>) },
+    {
+      title: "责任人",
+      dataIndex: "owner_id",
+      key: "owner",
+      width: 100,
+      render: (v: number | null, r: DBCatalog) => (
+        <Tooltip title={v != null ? `owner_id=${v}` : undefined}>
+          <span>{(r.owner_name ?? v) || <Tag>无</Tag>}</span>
+        </Tooltip>
+      ),
+    },
     {
       title: "操作",
       key: "action",
-      width: 100,
+      width: 110,
       render: (_: unknown, record: DBCatalog) => (
         <Space size={2}>
           <Button
@@ -431,12 +551,64 @@ export function Catalogs() {
     <div>
       <div className="page-head">
         <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            {backLabel}
+          </Button>
           <div className="page-kicker">Collection / Catalog</div>
           <h2>采集目录</h2>
           <p>采集器登记的元数据目录——含敏感度分级与 schema 完整性标记。</p>
         </div>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>登记实体</Button>
       </div>
+
+      {coverage && (
+        <Row gutter={12} style={{ marginBottom: 16 }}>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic
+                title="字段描述覆盖率"
+                value={coverage.total_fields > 0 ? Math.round((coverage.fields_with_desc / coverage.total_fields) * 100) : 0}
+                suffix="%"
+                valueStyle={{ color: coverage.fields_with_desc >= coverage.fields_missing_desc ? "#3f8600" : "#cf1322" }}
+                loading={coverageLoading}
+              />
+              <div className="muted" style={{ fontSize: 12 }}>
+                {coverage.fields_with_desc} / {coverage.total_fields} 字段有描述
+              </div>
+            </Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic
+                title="缺失字段数"
+                value={coverage.fields_missing_desc}
+                valueStyle={{ color: coverage.fields_missing_desc > 0 ? "#cf1322" : "#3f8600" }}
+                loading={coverageLoading}
+              />
+              <div className="muted" style={{ fontSize: 12 }}>可 LLM 推断或人工补全</div>
+            </Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic
+                title="缺表描述"
+                value={coverage.tables_missing_desc}
+                valueStyle={{ color: coverage.tables_missing_desc > 0 ? "#cf1322" : "#3f8600" }}
+                loading={coverageLoading}
+              />
+              <div className="muted" style={{ fontSize: 12 }}>
+                {coverage.tables_with_desc} / {coverage.total_tables} 表已补全
+              </div>
+            </Card>
+          </Col>
+          <Col span={6}>
+            <Card size="small">
+              <Statistic title="目录表总数" value={coverage.total_tables} loading={coverageLoading} />
+              <div className="muted" style={{ fontSize: 12 }}>含表 / 视图</div>
+            </Card>
+          </Col>
+        </Row>
+      )}
 
       <Card
         extra={
@@ -512,7 +684,11 @@ export function Catalogs() {
           rowKey={(r) => `${r.source_id}-${r.entity_name}`}
           loading={loading}
           rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
+          onRow={(r) => ({
+            style: focusName && r.entity_name === focusName ? { background: "#fffbe6" } : undefined,
+          })}
           pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
+          scroll={{ x: 900 }}
           locale={{ emptyText: "暂无目录实体" }}
         />
       </Card>
@@ -563,6 +739,101 @@ export function Catalogs() {
 
           return (
             <>
+              <Space style={{ marginBottom: 12 }} align="center">
+                <Button
+                  icon={<SyncOutlined />}
+                  loading={refreshing}
+                  onClick={handleRefreshEntity}
+                  size="small"
+                >
+                  采集该表
+                </Button>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {hasNoSchema ? "从源端采集字段元数据" : "重新采集，同步源端最新字段"}
+                </span>
+              </Space>
+              {/* 表级信息（从列表列收敛到此，避免表格横向滚动）：描述/域/责任人/ETL/签名 */}
+              <Descriptions
+                size="small"
+                column={2}
+                bordered
+                style={{ marginBottom: 16 }}
+                items={[
+                  {
+                    key: "desc",
+                    label: "表描述",
+                    span: 2,
+                    children: fieldDrawerCatalog.description ? (
+                      <>
+                        {fieldDrawerCatalog.description}
+                        {fieldDrawerCatalog.description_source && (
+                          <Tag
+                            style={{ marginLeft: 8 }}
+                            color={fieldDrawerCatalog.description_source === "manual" ? "blue" : "purple"}
+                          >
+                            {fieldDrawerCatalog.description_source === "manual" ? "人工" : "LLM"}
+                          </Tag>
+                        )}
+                      </>
+                    ) : (
+                      <span className="muted">—</span>
+                    ),
+                  },
+                  {
+                    key: "domain",
+                    label: "业务域",
+                    children: fieldDrawerCatalog.domain || <span className="muted">—</span>,
+                  },
+                  {
+                    key: "owner",
+                    label: "责任人",
+                    children:
+                      fieldDrawerCatalog.owner_name ??
+                      (fieldDrawerCatalog.owner_id ?? <span className="muted">—</span>),
+                  },
+                  {
+                    key: "etl",
+                    label: "ETL SQL",
+                    span: 2,
+                    children: fieldDrawerCatalog.etl_sql ? (
+                      <Tooltip title={fieldDrawerCatalog.etl_sql}>
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {fieldDrawerCatalog.etl_sql.slice(0, 120)}
+                          {fieldDrawerCatalog.etl_sql.length > 120 ? "…" : ""}
+                        </span>
+                      </Tooltip>
+                    ) : (
+                      <span className="muted">—</span>
+                    ),
+                  },
+                  {
+                    key: "upstream",
+                    label: "上游签名",
+                    children: fieldDrawerCatalog.upstream_signature ? (
+                      <Tooltip title={fieldDrawerCatalog.upstream_signature}>
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {fieldDrawerCatalog.upstream_signature.slice(0, 20)}…
+                        </span>
+                      </Tooltip>
+                    ) : (
+                      <span className="muted">—</span>
+                    ),
+                  },
+                  {
+                    key: "content",
+                    label: "内容签名",
+                    children: fieldDrawerCatalog.content_signature ? (
+                      <Tooltip title={fieldDrawerCatalog.content_signature}>
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {fieldDrawerCatalog.content_signature.slice(0, 20)}…
+                        </span>
+                      </Tooltip>
+                    ) : (
+                      <span className="muted">—</span>
+                    ),
+                  },
+                ]}
+              />
               {isSchemaIncomplete && !hasNoSchema && (
                 <Alert
                   type="warning"
@@ -572,7 +843,7 @@ export function Catalogs() {
                 />
               )}
               {hasNoSchema ? (
-                <Empty description="暂无字段信息，请先执行采集" />
+                <Empty description="暂无字段信息，可点击「采集该表」从源端获取" />
               ) : (
                 <SchemaTable
                   columns={fieldColumns}
