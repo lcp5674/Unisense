@@ -4,7 +4,7 @@ import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Rate
 import { StarOutlined } from "@ant-design/icons";
 import { listFeedback, submitFeedback, updateFeedbackStatus, submitNps, fetchNpsStats, listUsers, getMetric, UnisenseApiError } from "../api";
 import type { Feedback, NpsStats } from "../types";
-import { formatCnTime, timeAgoCn } from "../utils/timeCn";
+import { formatCnTime, timeAgoCn, parseBackendTime } from "../utils/timeCn";
 
 // ---- 展示映射（value=英文对接后端，label=中文展示） ----
 
@@ -39,6 +39,49 @@ const TYPE_FILTER_OPTIONS = [
   { value: "report", label: "报表" },
   { value: "dashboard", label: "仪表盘" },
 ];
+
+// 反馈分类 → 业务术语 + 颜色（运营按类分派处理）
+const CATEGORY_ZH: Record<string, { label: string; color: string }> = {
+  bug: { label: "缺陷", color: "red" },
+  feature: { label: "功能需求", color: "blue" },
+  improvement: { label: "改进建议", color: "cyan" },
+  question: { label: "咨询", color: "gold" },
+  praise: { label: "表扬", color: "green" },
+};
+
+// 反馈优先级 → 业务术语 + 颜色（排期与 SLA 依据）
+const PRIORITY_ZH: Record<string, { label: string; color: string }> = {
+  high: { label: "高", color: "red" },
+  medium: { label: "中", color: "orange" },
+  low: { label: "低", color: "default" },
+};
+
+const CATEGORY_OPTIONS = [
+  { value: "bug", label: "缺陷" },
+  { value: "feature", label: "功能需求" },
+  { value: "improvement", label: "改进建议" },
+  { value: "question", label: "咨询" },
+  { value: "praise", label: "表扬" },
+];
+
+const PRIORITY_OPTIONS = [
+  { value: "high", label: "高" },
+  { value: "medium", label: "中" },
+  { value: "low", label: "低" },
+];
+
+// 反馈处理时效：created_at → resolved_at 的耗时中文描述（运营效率 SLA 视角）
+function resolveDuration(createdAt: string, resolvedAt: string | null): string | null {
+  if (!resolvedAt) return null;
+  const start = parseBackendTime(createdAt);
+  const end = parseBackendTime(resolvedAt);
+  if (!start || !end) return null;
+  const mins = Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
+  if (mins < 60) return `${mins} 分钟`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return mins % 60 ? `${hours} 小时 ${mins % 60} 分钟` : `${hours} 小时`;
+  return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时`;
+}
 
 const STATUS_FILTER_OPTIONS = [
   { value: "pending", label: "待处理" },
@@ -184,6 +227,26 @@ function FeedbackTab() {
     },
     { title: "评分", dataIndex: "rating", key: "rating", width: 100, render: (v: number | null) => (v !== null ? <Rate disabled defaultValue={v} count={5} /> : <span className="muted">—</span>) },
     {
+      title: "分类",
+      dataIndex: "category",
+      key: "category",
+      width: 96,
+      render: (v: string) => {
+        const c = CATEGORY_ZH[v] ?? { label: v, color: "default" };
+        return <Tag color={c.color}>{c.label}</Tag>;
+      },
+    },
+    {
+      title: "优先级",
+      dataIndex: "priority",
+      key: "priority",
+      width: 76,
+      render: (v: string) => {
+        const p = PRIORITY_ZH[v] ?? { label: v, color: "default" };
+        return <Tag color={p.color}>{p.label}</Tag>;
+      },
+    },
+    {
       title: "内容",
       dataIndex: "comment",
       key: "comment",
@@ -220,6 +283,15 @@ function FeedbackTab() {
       key: "resolved",
       width: 120,
       render: (v: string | null) => (v ? <Tooltip title={formatCnTime(v)}><span>{timeAgoCn(v)}</span></Tooltip> : <span className="muted">—</span>),
+    },
+    {
+      title: "处理时效",
+      key: "resolveDuration",
+      width: 120,
+      render: (_: unknown, f: Feedback) => {
+        const d = resolveDuration(f.created_at, f.resolved_at);
+        return d ? <span>{d}</span> : <span className="muted">—</span>;
+      },
     },
     {
       title: "提交时间",
@@ -323,6 +395,10 @@ function SubmitFeedbackTab() {
         target_id: values.target_id ? String(values.target_id) : null,
         rating: values.rating !== undefined ? Number(values.rating) : null,
         comment: values.comment ? String(values.comment) : null,
+        category: values.category ? String(values.category) : "improvement",
+        priority: values.priority ? String(values.priority) : "medium",
+        // 自动捕获当前页面 URL，便于运营复现问题/了解用户路径
+        source_url: window.location.href,
       });
       message.success("反馈已提交");
       form.resetFields();
@@ -340,12 +416,19 @@ function SubmitFeedbackTab() {
         <Form.Item name="target_id" label="对象 ID">
           <Input className="mono" />
         </Form.Item>
+        <Form.Item name="category" label="分类" initialValue="improvement">
+          <Select options={CATEGORY_OPTIONS} />
+        </Form.Item>
+        <Form.Item name="priority" label="优先级" initialValue="medium">
+          <Select options={PRIORITY_OPTIONS} />
+        </Form.Item>
         <Form.Item name="rating" label="评分">
           <Rate count={5} />
         </Form.Item>
         <Form.Item name="comment" label="意见">
           <Input.TextArea rows={3} />
         </Form.Item>
+        <div className="muted" style={{ marginBottom: 12 }}>来源页面将自动记录（便于运营复现与定位）。</div>
         <Button type="primary" htmlType="submit">提交反馈</Button>
       </Form>
     </Card>

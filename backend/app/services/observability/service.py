@@ -50,6 +50,9 @@ class ObservabilityService(BaseService):
             target_id=data.target_id,
             rating=data.rating,
             comment=data.comment,
+            category=data.category or "improvement",
+            priority=data.priority or "medium",
+            source_url=data.source_url,
         )
         result = await self._repo.save_feedback(feedback)
         await self._repo.commit()

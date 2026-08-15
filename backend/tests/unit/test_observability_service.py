@@ -37,10 +37,41 @@ async def test_submit_feedback_valid() -> None:
     repo.commit.assert_awaited()
 
 
+async def test_submit_feedback_richness_fields() -> None:
+    """反馈丰富度字段透传：category/priority/source_url 落库。"""
+    svc, repo = await _svc()
+    out = await svc.submit_feedback(
+        FeedbackCreate(
+            user_id=3,
+            target_type="metric",
+            comment="加个导出",
+            category="feature",
+            priority="high",
+            source_url="/catalog",
+        )
+    )
+    assert out.category == "feature"
+    assert out.priority == "high"
+    assert out.source_url == "/catalog"
+    # 未显式传时回退默认值
+    out2 = await svc.submit_feedback(FeedbackCreate(user_id=3, target_type="term"))
+    assert out2.category == "improvement"
+    assert out2.priority == "medium"
+    assert out2.source_url is None
+
+
 async def test_submit_feedback_invalid_rating() -> None:
     svc, repo = await _svc()
     with pytest.raises(UnisenseError):
         await svc.submit_feedback(FeedbackCreate(user_id=3, target_type="term", rating=9))
+
+
+async def test_feedback_create_category_priority_fallback() -> None:
+    """非法分类/优先级回退默认，不因脏数据 422。"""
+    c = FeedbackCreate(target_type="term", category="spam", priority="urgent")
+    assert c.category == "improvement"
+    assert c.priority == "medium"
+    assert FeedbackCreate(target_type="term", category="bug", priority="low").category == "bug"
 
 
 async def test_list_feedback_delegates() -> None:

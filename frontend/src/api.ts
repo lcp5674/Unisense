@@ -2010,6 +2010,12 @@ export async function submitFeedback(body: {
   target_id?: string | null;
   rating?: number | null;
   comment?: string | null;
+  /** 反馈分类（bug/feature/improvement/question/praise），默认 improvement */
+  category?: string;
+  /** 反馈优先级（high/medium/low），默认 medium */
+  priority?: string;
+  /** 反馈来源页面 URL（前端自动捕获当前路由，不要求用户填写） */
+  source_url?: string | null;
 }): Promise<Feedback> {
   return request<Feedback>(`${API_BASE}/observability/feedback`, {
     method: "POST",

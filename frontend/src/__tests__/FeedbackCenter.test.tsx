@@ -29,6 +29,9 @@ const feedbacks: Feedback[] = [
     target_id: "sales_gmv",
     rating: 4,
     comment: "口径很清楚",
+    category: "praise",
+    priority: "low",
+    source_url: "/catalog",
     nps_score: null,
     status: "pending",
     resolution_note: null,
@@ -43,6 +46,9 @@ const feedbacks: Feedback[] = [
     target_id: null,
     rating: null,
     comment: "希望增加导出",
+    category: "feature",
+    priority: "high",
+    source_url: null,
     nps_score: null,
     status: "adopted",
     resolution_note: "已排期下版本",
@@ -89,6 +95,13 @@ describe("FeedbackCenter 用户反馈", () => {
     // 处理人列：数字 ID → 用户名
     expect(screen.getByText("审核员")).toBeInTheDocument();
     expect(screen.queryByText("4")).not.toBeInTheDocument();
+    // 分类/优先级列：业务术语展示（表扬/功能需求、低/高）
+    expect(screen.getByText("表扬")).toBeInTheDocument();
+    expect(screen.getByText("功能需求")).toBeInTheDocument();
+    expect(screen.getByText("低")).toBeInTheDocument();
+    expect(screen.getByText("高")).toBeInTheDocument();
+    // 处理时效列：feedback 2（01:00→02:00）显示「1 小时」
+    expect(screen.getByText("1 小时")).toBeInTheDocument();
     // 原始 ISO 串不应直出
     expect(screen.queryByText("2026-08-10T10:00:00")).not.toBeInTheDocument();
     expect(screen.getAllByText(/前|昨天|月\d+日/).length).toBeGreaterThan(0);

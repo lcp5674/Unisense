@@ -9,6 +9,9 @@ from pydantic import BaseModel, field_validator
 
 # observability M-1: 限制 feedback 作用对象类型，防止伪造来源
 _ALLOWED_TARGET_TYPES = {"metric", "term", "report", "dashboard"}
+# 反馈分类 / 优先级合法值（非法值回退默认，容错客户端脏数据）
+_ALLOWED_CATEGORIES = {"bug", "feature", "improvement", "question", "praise"}
+_ALLOWED_PRIORITIES = {"high", "medium", "low"}
 
 
 class FeedbackCreate(BaseModel):
@@ -17,12 +20,32 @@ class FeedbackCreate(BaseModel):
     target_id: str | None = None
     rating: int | None = None
     comment: str | None = None
+    #: 反馈分类（bug/feature/improvement/question/praise），非法值回退 improvement
+    category: str | None = None
+    #: 反馈优先级（high/medium/low），非法值回退 medium
+    priority: str | None = None
+    #: 反馈来源页面 URL（自动捕获，不要求用户填写）
+    source_url: str | None = None
 
     @field_validator("target_type")
     @classmethod
     def _validate_target_type(cls, v: str) -> str:
         if v not in _ALLOWED_TARGET_TYPES:
             raise ValueError(f"非法的反馈对象类型: {v}")
+        return v
+
+    @field_validator("category")
+    @classmethod
+    def _validate_category(cls, v: str | None) -> str | None:
+        if v is not None and v not in _ALLOWED_CATEGORIES:
+            return "improvement"
+        return v
+
+    @field_validator("priority")
+    @classmethod
+    def _validate_priority(cls, v: str | None) -> str | None:
+        if v is not None and v not in _ALLOWED_PRIORITIES:
+            return "medium"
         return v
 
 
@@ -33,6 +56,9 @@ class FeedbackResponse(BaseModel):
     target_id: str | None = None
     rating: int | None = None
     nps_score: int | None = None
+    category: str = "improvement"
+    priority: str = "medium"
+    source_url: str | None = None
     comment: str | None = None
     status: str = "pending"
     resolution_note: str | None = None
@@ -49,6 +75,9 @@ class FeedbackResponse(BaseModel):
             target_id=getattr(m, "target_id", None),
             rating=getattr(m, "rating", None),
             nps_score=getattr(m, "nps_score", None),
+            category=getattr(m, "category", "improvement") or "improvement",
+            priority=getattr(m, "priority", "medium") or "medium",
+            source_url=getattr(m, "source_url", None),
             comment=getattr(m, "comment", None),
             status=getattr(m, "status", "pending") or "pending",
             resolution_note=getattr(m, "resolution_note", None),

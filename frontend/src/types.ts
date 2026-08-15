@@ -1138,6 +1138,12 @@ export interface Feedback {
   target_id: string | null;
   rating: number | null;
   comment: string | null;
+  /** 反馈分类（运营按类分派）：bug/feature/improvement/question/praise */
+  category: string;
+  /** 反馈优先级（排期与 SLA 依据）：high/medium/low */
+  priority: string;
+  /** 反馈来源页面 URL（提交时自动捕获） */
+  source_url: string | null;
   /** NPS 评分（0-10，仅 NPS 采集记录有值） */
   nps_score: number | null;
   /** 采纳闭环状态：pending/in_progress/adopted/rejected */
