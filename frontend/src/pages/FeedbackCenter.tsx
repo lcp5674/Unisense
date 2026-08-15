@@ -109,6 +109,8 @@ function FeedbackTab() {
   // 业务化解析：user_id → 用户名、target_id(metric) → 指标名
   const [usersMap, setUsersMap] = useState<Record<number, string>>({});
   const [metricNames, setMetricNames] = useState<Record<string, string>>({});
+  // 解析失败的指标编码（对象已失效/被删除），展示友好标记而非裸编码
+  const [deadMetricCodes, setDeadMetricCodes] = useState<Set<string>>(() => new Set());
   const navigate = useNavigate();
 
   // 加载用户名单：反馈列表「用户」列展示用户名而非数字 ID
@@ -136,10 +138,17 @@ function FeedbackTab() {
     ).then((metrics) => {
       if (!alive) return;
       const m: Record<string, string> = {};
-      metrics.forEach((metric) => {
+      const dead: Set<string> = new Set();
+      metrics.forEach((metric, i) => {
         if (metric) m[metric.metric_code] = metric.name;
+        else if (codes[i]) dead.add(codes[i]);
       });
       setMetricNames((prev) => ({ ...prev, ...m }));
+      setDeadMetricCodes((prev) => {
+        const next = new Set(prev);
+        dead.forEach((c) => next.add(c));
+        return next;
+      });
     });
     return () => {
       alive = false;
@@ -216,11 +225,23 @@ function FeedbackTab() {
         if (!v) return <span className="muted">—</span>;
         if (f.target_type === "metric") {
           const name = metricNames[v];
-          return (
-            <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate(`/detail/${v}`)}>
-              {name ? `${name}（${v}）` : v}
-            </Button>
-          );
+          const dead = deadMetricCodes.has(v);
+          if (name) {
+            return (
+              <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate(`/detail/${v}`)}>
+                {name}（{v}）
+              </Button>
+            );
+          }
+          if (dead) {
+            // 对象已失效/被删除：保留编码但明确标记，避免运营误认为对象仍存在
+            return (
+              <span>
+                <span className="mono">{v}</span> <Tag style={{ marginLeft: 4 }}>已失效</Tag>
+              </span>
+            );
+          }
+          return <span className="mono">{v}</span>;
         }
         return <span className="mono">{v}</span>;
       },

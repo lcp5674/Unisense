@@ -160,4 +160,12 @@ describe("FeedbackCenter 用户反馈", () => {
       }),
     );
   });
+
+  it("对象已失效（指标不存在）的反馈展示「已失效」标记而非裸编码", async () => {
+    mockedGetMetric.mockRejectedValue(new Error("404"));
+    render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText("已失效")).toBeInTheDocument());
+    // 仍保留编码，但不再显示为可点击的指标链接
+    expect(screen.getByText("sales_gmv")).toBeInTheDocument();
+  });
 });
