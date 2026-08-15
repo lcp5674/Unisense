@@ -18,6 +18,7 @@ const { graphMock } = vi.hoisted(() => ({
     getNeighborNodesData: vi.fn(() => []),
     setElementState: vi.fn(),
     focusElement: vi.fn(),
+    getZoom: vi.fn(() => 1),
   },
 }));
 vi.mock("@antv/g6", () => ({
@@ -223,5 +224,57 @@ describe("AssetGraph 交互", () => {
     const data = lastGraphData();
     expect(data.nodes.length).toBe(2);
     expect(renderCalls).toBe(3);
+  });
+
+  it("大数据量 LOD：缩放低于阈值批量切 compact 状态，放大自动恢复", async () => {
+    // 模拟超过 LOD_LARGE_GRAPH(200) 的节点集 → 初始即紧凑，减轻首帧标签/柔光绘制
+    const bigNodes: AssetGraphNode[] = Array.from({ length: 220 }, (_, i) => ({
+      id: `table:t${i}`,
+      label: `t${i}`,
+      type: "table",
+    }));
+    const bigEdges: AssetGraphEdge[] = [];
+    // 全景 fitView 后缩放 < 阈值 0.6
+    vi.mocked(graphMock.getZoom).mockReturnValue(0.3);
+    graphMock.getNodeData.mockReturnValue(bigNodes.map((n) => ({ id: n.id, data: n })));
+    render(<AssetGraph nodes={bigNodes} edges={bigEdges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+
+    // render 后 applyLod：批量 compact（record 形式，第二参 animation=false）
+    await waitFor(() => {
+      expect(graphMock.setElementState).toHaveBeenCalledWith(
+        expect.objectContaining({ "table:t0": "compact" }),
+        false,
+      );
+    });
+
+    // 滚轮放大到阈值以上 → canvas:wheel 回调触发 applyLod 恢复非 compact
+    const wheelHandler = graphMock.on.mock.calls.find(
+      ([name]) => name === "canvas:wheel",
+    )?.[1] as (() => void) | undefined;
+    expect(wheelHandler).toBeDefined();
+    vi.mocked(graphMock.getZoom).mockReturnValue(1.5);
+    wheelHandler?.();
+    await waitFor(() => {
+      expect(graphMock.setElementState).toHaveBeenCalledWith(
+        expect.objectContaining({ "table:t0": [] }),
+        false,
+      );
+    });
+  });
+
+  it("小图（节点数少）不进入 compact：标签始终显示", async () => {
+    vi.mocked(graphMock.getZoom).mockReturnValue(1);
+    graphMock.getNodeData.mockReturnValue(nodes.map((n) => ({ id: n.id, data: n })));
+    render(<AssetGraph nodes={nodes} edges={edges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+
+    // 节点 3 个 < 200，且 zoom=1 ≥ 0.6 → applyLod 不触发 compact 状态设置
+    await waitFor(() => expect(graphMock.setData).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(graphMock.setElementState).not.toHaveBeenCalledWith(
+      expect.objectContaining({ "metric:revenue": "compact" }),
+      false,
+    );
   });
 });

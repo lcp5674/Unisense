@@ -277,6 +277,13 @@ function ShapeSwatch({ type }: { type: string }) {
 // 超出后按优先级保留核心节点：指标 > 表/视图 > 字段，同一优先级按血缘度降序。
 const MAX_RENDER_NODES = 160;
 
+// —— 大数据量 LOD（Level of Detail）——
+// G6 交互（缩放/平移）时全量重绘 canvas，标签/图标/柔光/投影是最重的绘制层。
+// 缩放低于 LOD_COMPACT_ZOOM 时批量切到 compact 状态（隐藏这些层，只留节点主体+边），
+// 放大自动恢复；节点数超过 LOD_LARGE_GRAPH 时初始即 compact，减轻首帧负担。
+const LOD_COMPACT_ZOOM = 0.6;
+const LOD_LARGE_GRAPH = 200;
+
 function nodeRank(n: AssetGraphNode): number {
   if (n.type === "metric") return 0;
   if (n.type === "table") return 1;
@@ -403,6 +410,40 @@ function GraphCanvas({
   const nodeCountRef = useRef(nodes.length);
   nodeCountRef.current = nodes.length;
 
+  // —— 大数据量 LOD 状态 ——
+  // compactRef：是否处于紧凑模式（隐藏标签/图标/柔光/投影）；大数据量初始即紧凑。
+  // lodAppliedRef：已按当前 compact 应用过状态，避免 wheel 高频事件重复 setElementState。
+  const compactRef = useRef(nodes.length > LOD_LARGE_GRAPH);
+  const lodAppliedRef = useRef(false);
+
+  /** 合并 compact 状态：hover/搜索高亮时保留紧凑模式（否则 setElementState 覆盖会丢失）。 */
+  function stateWithCompact(extra: string | string[]) {
+    if (!compactRef.current) return extra;
+    const arr = Array.isArray(extra) ? extra : [extra];
+    return ["compact", ...arr];
+  }
+
+  /** 按当前缩放批量切换 compact 状态（跨过阈值才触发，节流高频 wheel）。 */
+  function applyLod() {
+    const graph = graphRef.current;
+    if (!graph || graph.destroyed) return;
+    // getZoom 缺失时（降级/测试环境）按非紧凑处理，避免抛错触发降级
+    const compact =
+      typeof graph.getZoom === "function" && graph.getZoom() < LOD_COMPACT_ZOOM;
+    if (compact === lodAppliedRef.current) return;
+    lodAppliedRef.current = compact;
+    compactRef.current = compact;
+    const ids = graph.getNodeData().map((n) => String(n.id));
+    if (ids.length === 0) return;
+    const record: Record<string, string | string[]> = {};
+    for (const id of ids) record[id] = compact ? "compact" : [];
+    try {
+      void graph.setElementState(record, false).catch(() => {});
+    } catch {
+      // 图过渡期瞬时异常静默忽略
+    }
+  }
+
   // 图实例创建：仅挂载时执行（布局切换由父组件 key 强制重挂载本组件，因此无需依赖 layoutMode）
   useEffect(() => {
     const container = containerRef.current;
@@ -417,6 +458,12 @@ function GraphCanvas({
         //  - 全景大图（节点多）→ fitView always：适配填满画布，节点分布均匀。
         autoFit: "center",
         padding: 32,
+        // 大数据量性能优化：
+        //  - animation:false —— 关闭全局动画，缩放/平移/状态切换不再插帧，交互直接重绘最终帧；
+        //  - zoomRange 收窄 —— 限制最小缩放 0.15（避免缩到极小仍全量渲染细节）与最大 8。
+        //  配合下方 compact LOD 状态（缩放低于阈值时隐藏标签/图标/柔光/投影），大幅提升交互帧率。
+        animation: false,
+        zoomRange: [0.15, 8],
         data: { nodes: [], edges: [] },
         node: {
           // 形状按类型区分：指标=圆 / 表=圆角矩形 / 字段=椭圆
@@ -499,6 +546,16 @@ function GraphCanvas({
           state: {
             active: { fill: "#faad14", stroke: "#8c6d00", lineWidth: 2 },
             inactive: { opacity: 0.2 },
+            // 大数据量 LOD：缩放低于阈值（applyLod）时批量置为 compact——
+            // 隐藏标签/图标/柔光/投影，只保留节点主体与边，显著降低 canvas 重绘开销。
+            compact: {
+              labelOpacity: 0,
+              iconOpacity: 0,
+              haloStrokeOpacity: 0,
+              haloOpacity: 0,
+              shadowBlur: 0,
+              shadowOffsetY: 0,
+            },
           },
         },
         edge: {
@@ -543,7 +600,9 @@ function GraphCanvas({
             safeSetElementState(
               graph,
               String(n.id),
-              active.has(String(n.id)) ? "active" : "inactive",
+              active.has(String(n.id))
+                ? stateWithCompact("active")
+                : stateWithCompact("inactive"),
             );
           }
         } catch {
@@ -554,12 +613,16 @@ function GraphCanvas({
         if (!graph || graph.destroyed || !graphReady) return;
         try {
           for (const n of graph.getNodeData()) {
-            safeSetElementState(graph, String(n.id), []);
+            safeSetElementState(graph, String(n.id), stateWithCompact([]));
           }
         } catch {
           // 忽略过渡期状态清理失败
         }
       });
+
+      // 大数据量 LOD：滚轮缩放跨过阈值时批量切换 compact 状态（隐藏标签/图标/柔光/投影），
+      // 提升缩放/平移帧率；放大到阈值以上自动恢复完整样式。applyLod 内部有阈值节流。
+      graph.on("canvas:wheel", () => applyLod());
     } catch (err) {
       console.error("[AssetGraph] G6 初始化失败，降级为表格", err);
       setRenderFailed(true);
@@ -610,6 +673,9 @@ function GraphCanvas({
         } catch {
           /* fitView 偶尔在过渡期失败 */
         }
+        // 大数据量 LOD：fitView 之后按当前缩放应用 compact——
+        // 全景大图会被缩到 zoom<0.6，此时立即隐藏标签/图标/柔光，避免首帧全量绘制卡顿。
+        applyLod();
       })
       .catch((err) => {
         console.error("[AssetGraph] G6 render 失败，降级为表格", err);
@@ -628,7 +694,7 @@ function GraphCanvas({
       const allNodes = graph.getNodeData?.() as unknown;
       const nodeList = Array.isArray(allNodes) ? allNodes : [];
       if (!searchText.trim()) {
-        for (const n of nodeList) safeSetElementState(graph, String(n.id), []);
+        for (const n of nodeList) safeSetElementState(graph, String(n.id), stateWithCompact([]));
         return;
       }
       const kw = searchText.trim().toLowerCase();
@@ -639,7 +705,9 @@ function GraphCanvas({
         safeSetElementState(
           graph,
           String(n.id),
-          matchIds.has(String(n.id)) ? "active" : "inactive",
+          matchIds.has(String(n.id))
+            ? stateWithCompact("active")
+            : stateWithCompact("inactive"),
         );
       }
       if (matchIds.size > 0) {

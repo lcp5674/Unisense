@@ -22,6 +22,7 @@ vi.mock("../api", () => ({
   fetchAssetMyAssets: vi.fn(),
   fetchAssetHealth: vi.fn(),
   fetchAssetPiiOverview: vi.fn(),
+  lineageGraph: vi.fn(),
   assignAssetOwner: vi.fn(),
   reclassifyAssetSensitivity: vi.fn(),
   batchAssignAssetOwner: vi.fn(),
@@ -84,6 +85,7 @@ const { g6GraphMock, heatmapReadyRef } = vi.hoisted(() => ({
     })),
     getNeighborNodesData: vi.fn(() => []),
     setElementState: vi.fn(),
+    getZoom: vi.fn(() => 1),
   },
   heatmapReadyRef: { lastClickHandler: undefined as ((evt: { data?: { data?: { sensKey?: string; domain?: string } } }) => void) | undefined,
     onReady: undefined as
@@ -109,6 +111,7 @@ import {
   fetchAssetMetricSummary,
   fetchAssetMetricDimensions,
   fetchAssetTables,
+  lineageGraph,
   fetchAssetOrphans,
   fetchAssetEntityDetail,
   fetchAssetSearch,
@@ -181,6 +184,19 @@ describe("AssetMap", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(fetchAssetGraph).mockResolvedValue(mockGraphData);
+    vi.mocked(lineageGraph).mockResolvedValue({
+      nodes: [
+        { id: "table:wedw_dwd.tjhis_dic_drug_df", type: "table", label: "tjhis_dic_drug_df" },
+        { id: "table:wedw_dwd.tjhis_all_dic_drug_df", type: "table", label: "tjhis_all_dic_drug_df" },
+      ],
+      edges: [
+        {
+          source: "table:wedw_dwd.tjhis_dic_drug_df",
+          target: "table:wedw_dwd.tjhis_all_dic_drug_df",
+          type: "DERIVED_FROM",
+        },
+      ],
+    });
     vi.mocked(fetchAssetHeatmapMatrix).mockResolvedValue({
       cells: [
         { domain: "sales", sensitivity: "PII", count: 3, pii_count: 3 },
@@ -307,6 +323,44 @@ describe("AssetMap", () => {
 
     await waitFor(() => {
       expect(fetchAssetGraph).toHaveBeenCalled();
+    });
+  });
+
+  it("切换来源到血缘通道：调 lineageGraph 展示完整表级血缘", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+
+    // 默认资产视角：走 fetchAssetGraph
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    // 切到「全部血缘（含 DP/SQL/指标）」
+    const sourceSelect = screen.getByText("来源：").closest(".ant-col") as HTMLElement;
+    await user.click(within(sourceSelect).getByRole("combobox"));
+    await user.click(await screen.findByTitle("全部血缘（含 DP/SQL/指标）"));
+
+    await waitFor(() => {
+      expect(lineageGraph).toHaveBeenCalledWith({
+        provenance: undefined,
+        limit: 2000,
+      });
+    });
+  });
+
+  it("切换来源到指定通道：lineageGraph 带 provenance", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const sourceSelect = screen.getByText("来源：").closest(".ant-col") as HTMLElement;
+    await user.click(within(sourceSelect).getByRole("combobox"));
+    await user.click(await screen.findByTitle("DP 同步血缘"));
+
+    await waitFor(() => {
+      expect(lineageGraph).toHaveBeenCalledWith({
+        provenance: "dp_csv",
+        limit: 2000,
+      });
     });
   });
 

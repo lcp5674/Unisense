@@ -69,6 +69,7 @@ import {
   inferDescriptions,
   inferMetricDescription,
   inferTableDescription,
+  lineageGraph,
   listCatalogs,
   listDomainTree,
   listMetrics,
@@ -129,6 +130,15 @@ const SENSITIVITY_COLOR: Record<string, string> = {
   NEEDS_REVIEW: "gold",
   UNKNOWN: "default",
 };
+
+// 图谱来源视角选项：资产视角=采集目录表+指标（指标为中心收敛）；血缘视角=完整表级血缘（同血缘视图）
+const GRAPH_SOURCE_OPTIONS = [
+  { value: "asset", label: "资产视角（采集目录）" },
+  { value: "all", label: "全部血缘（含 DP/SQL/指标）" },
+  { value: "dp_csv", label: "DP 同步血缘" },
+  { value: "sqlglot", label: "SQL 解析血缘" },
+  { value: "metric_definition", label: "指标定义血缘" },
+];
 
 // ---- 指标体系维度标签映射（概览「指标体系」区块）----
 const METRIC_TYPE_LABEL: Record<string, string> = {
@@ -1331,6 +1341,8 @@ function GraphTab() {
   } | null>(null);
   const [domain, setDomain] = useState<string | undefined>(undefined);
   const [piiOnly, setPiiOnly] = useState(false);
+  // 图谱来源视角：asset=采集目录资产视角（指标为中心 depth 收敛）；血缘通道=完整表级血缘
+  const [graphSource, setGraphSource] = useState<string>("asset");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 实体详情抽屉（table/field 节点下钻）
@@ -1365,9 +1377,21 @@ function GraphTab() {
     setLoading(true);
     setError(null);
     try {
-      // depth=2：从指标出发 2 层收敛，避免 500+ 节点挤成一团（depth 越大展开越多）
-      const data = await fetchAssetGraph({ domain, depth: 2, pii_only: piiOnly });
-      setGraphData(data);
+      if (graphSource === "asset") {
+        // 资产视角：depth=2 从指标出发 2 层收敛，避免 500+ 节点挤成一团（depth 越大展开越多）
+        const data = await fetchAssetGraph({ domain, depth: 2, pii_only: piiOnly });
+        setGraphData(data);
+      } else {
+        // 血缘视角：全通道/指定通道完整表级血缘（与血缘视图血缘图谱同源）
+        const data = await lineageGraph({
+          provenance: graphSource === "all" ? undefined : graphSource,
+          limit: 2000,
+        });
+        setGraphData({
+          nodes: data.nodes as unknown as AssetGraphNode[],
+          edges: data.edges as unknown as AssetGraphEdge[],
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载图谱数据失败");
     } finally {
@@ -1378,7 +1402,7 @@ function GraphTab() {
   useEffect(() => {
     loadGraph();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [domain, piiOnly]);
+  }, [domain, piiOnly, graphSource]);
 
   // AI 推断计时：LLM 生成耗时数秒，展示秒数避免用户误以为卡死
   useEffect(() => {
@@ -1706,6 +1730,15 @@ function GraphTab() {
   return (
     <div>
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }} align="middle">
+        <Col>
+          <span className="muted">来源：</span>
+          <Select
+            style={{ width: 210 }}
+            value={graphSource}
+            onChange={setGraphSource}
+            options={GRAPH_SOURCE_OPTIONS}
+          />
+        </Col>
         <Col>
           <span className="muted">域筛选：</span>
           <Select
