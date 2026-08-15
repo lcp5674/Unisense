@@ -12,7 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.core.exceptions import BusinessError
-from app.core.guard import _is_suspicious, guard_against_injection
+from app.core.guard import (
+    _is_suspicious,
+    guard_against_injection,
+    guard_against_injection_exempt,
+)
 
 
 class TestIsSuspicious:
@@ -130,3 +134,81 @@ class TestScanDeep:
         assert _scan_deep(3.14) is False
         assert _scan_deep(None) is False
         assert _scan_deep(True) is False
+
+
+class TestGuardAgainstInjectionExempt:
+    """guard_against_injection_exempt 字段级豁免（SQL 血缘解析端点场景）。"""
+
+    @staticmethod
+    def _request(body: dict | None = None, query: dict | None = None) -> MagicMock:
+        request = MagicMock()
+        request.query_params = query or {}
+        request.method = "POST"
+        request.json = AsyncMock(return_value=body)
+        return request
+
+    async def test_exempt_field_skips_body_scan(self) -> None:
+        """豁免的 sql 字段含注释/UNION/块注释等合法 SQL，不应被拦截。"""
+        guard = guard_against_injection_exempt("sql")
+        await guard(
+            self._request(
+                {
+                    "sql": (
+                        "SELECT u.id, o.amount FROM db1.users u -- 取用户与订单\n"
+                        "LEFT JOIN db2.orders o /* +SET_VAR(enable_vectorized_engine=false) */\n"
+                        "ON u.id = o.uid\n"
+                        "UNION ALL SELECT id, amount FROM db3.archive"
+                    ),
+                    "dialect": "doris",
+                }
+            )
+        )  # 不应抛异常
+
+    async def test_multistatement_etl_passes(self) -> None:
+        """多语句 ETL SQL（; INSERT INTO ... SELECT ...）也应放行。"""
+        guard = guard_against_injection_exempt("sql")
+        await guard(
+            self._request(
+                {
+                    "sql": (
+                        "DROP TABLE IF EXISTS tmp_stage;\n"
+                        "INSERT INTO dwd.user_daily SELECT id, name FROM ods.users;"
+                    ),
+                    "dialect": "hive",
+                }
+            )
+        )  # 不应抛异常
+
+    async def test_other_fields_still_scanned(self) -> None:
+        """豁免 sql 后，其余字段仍应被注入扫描拦截。"""
+        guard = guard_against_injection_exempt("sql")
+        with pytest.raises(BusinessError):
+            await guard(self._request({"sql": "SELECT 1", "provenance": "x'; drop table users--"}))
+
+    async def test_exempt_only_applies_to_top_level(self) -> None:
+        """豁免仅作用于顶层键，嵌套同名键不豁免（防深层绕过）。"""
+        guard = guard_against_injection_exempt("sql")
+        with pytest.raises(BusinessError):
+            await guard(self._request({"data": {"sql": "-- hidden"}}))
+
+    async def test_query_params_still_blocked(self) -> None:
+        """query 参数不参与豁免，命中仍拦截。"""
+        guard = guard_against_injection_exempt("sql")
+        with pytest.raises(BusinessError):
+            await guard(
+                self._request(
+                    body={"sql": "SELECT 1"},
+                    query={"node": "' OR 1=1 -- "},
+                )
+            )
+
+    async def test_multiple_exempt_fields(self) -> None:
+        """多个豁免字段同时生效。"""
+        guard = guard_against_injection_exempt("sql", "dialect")
+        await guard(self._request({"sql": "-- comment", "dialect": "doris; drop"}))  # 不应抛异常
+
+    async def test_plain_injection_still_blocked_without_exempt(self) -> None:
+        """未豁免 sql 时，含注释的 SQL 仍按注入拦截（守卫默认行为不变）。"""
+        guard = guard_against_injection_exempt("dialect")
+        with pytest.raises(BusinessError):
+            await guard(self._request({"sql": "-- comment"}))

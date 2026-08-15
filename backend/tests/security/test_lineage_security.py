@@ -14,6 +14,7 @@ from httpx import ASGITransport
 
 from app.api import deps
 from app.main import app
+from app.services.lineage.schemas import LineageParseResponse
 
 
 @pytest.fixture
@@ -70,3 +71,45 @@ async def test_injection_keyword_blocked_on_impact(owner_client):
     )
     assert resp.status_code == 400
     assert "INJECTION_DETECTED" in resp.text  # 注入关键字被守卫拦截
+
+
+async def test_parse_accepts_legit_sql_with_comments_and_union(owner_client, monkeypatch):
+    """/parse 的 sql 字段是待解析文本（仅经 sqlglot 纯函数解析），合法 SQL 含
+    -- 注释 / /* */ 块注释 / UNION ALL 不应再被注入守卫误伤为 400。"""
+    client, _ = owner_client
+    svc = AsyncMock()
+    svc.parse_and_store.return_value = LineageParseResponse(
+        table_edges=2, field_edges=0, graph_written=False
+    )
+    monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)
+    resp = await client.post(
+        "/api/v1/lineage/parse",
+        json={
+            "sql": (
+                "SELECT u.id, o.amount FROM db1.users u -- 取用户与订单\n"
+                "JOIN db2.orders o /* +SET_VAR(enable_vectorized_engine=false) */\n"
+                "ON u.id = o.uid\n"
+                "UNION ALL SELECT id, amount FROM db3.archive"
+            ),
+            "dialect": "doris",
+        },
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["table_edges"] == 2
+    svc.parse_and_store.assert_awaited_once()
+
+
+async def test_parse_still_blocks_injection_in_other_fields(owner_client, monkeypatch):
+    """豁免仅作用于 sql 字段；provenance 等其他字段命中注入仍应 400 拦截。"""
+    client, _ = owner_client
+    svc = AsyncMock()
+    monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)
+    resp = await client.post(
+        "/api/v1/lineage/parse",
+        json={"sql": "SELECT 1", "provenance": "x'; drop table users--"},
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 400
+    assert "INJECTION_DETECTED" in resp.text
+    svc.parse_and_store.assert_not_awaited()

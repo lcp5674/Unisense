@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.guard import guard_against_injection
+from app.core.guard import guard_against_injection, guard_against_injection_exempt
 from app.core.resilience import CircuitBreaker
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
@@ -37,6 +37,13 @@ _READ_ROLES = ALL_ROLES
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+# /parse 的 sql 字段就是待解析的 SQL 文本本身：仅经 sqlglot 纯函数解析（不执行、
+# 不拼接进任何 DB 查询），全局注入正则会误伤合法 SQL（-- 注释 / /* */ 块注释 /
+# UNION SELECT / 多语句 ETL），故对该字段豁免；其余字段与 query 参数仍全量扫描。
+_PARSE_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt("sql")),
+]
 
 # Neo4j 驱动持连接池，每请求新建 LineageGraphClient 且从不 dispose 会让 driver
 # 随请求泄漏、连接持续耗尽（P1）。改为模块级单例复用同一 driver：
@@ -71,7 +78,7 @@ async def dispose_graph_client() -> None:
         _graph_client = None
 
 
-@router.post("/parse", dependencies=_WRITE_DEPS)
+@router.post("/parse", dependencies=_PARSE_DEPS)
 async def parse_lineage(
     body: LineageParseRequest,
     request: Request,
