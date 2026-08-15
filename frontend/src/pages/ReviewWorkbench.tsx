@@ -10,12 +10,14 @@ import {
   escalateConflict,
   listConflicts,
   listConflictRulings,
+  listUsers,
   UnisenseApiError,
 } from "../api";
-import type { ConflictResponse, MetricCompareResult, RulingRecord } from "../types";
+import type { ConflictResponse, MetricCompareResult, RulingRecord, UserBrief } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { MetricCompareTable } from "../components/MetricCompareTable";
 import { formatCnTime } from "../utils/timeCn";
+import { RULING_DECISION_LABEL } from "../utils/enums";
 
 const STATUS_LABEL: Record<string, string> = {
   OPEN: "待处理",
@@ -134,9 +136,24 @@ export function ReviewWorkbench() {
   const [rulingsFor, setRulingsFor] = useState<ConflictResponse | null>(null);
   const [rulings, setRulings] = useState<RulingRecord[]>([]);
   const [rulingsLoading, setRulingsLoading] = useState(false);
+  // 仲裁人 ID → 用户名（业务术语化：裁决记录不直出数字 ID，display_name 优先）
+  const [userMap, setUserMap] = useState<Record<string, string>>({});
 
   const navigate = useNavigate();
   const { track } = useTracking();
+
+  // 加载用户名单一次，供裁决记录「仲裁人」列显示中文名；失败时回落原始 ID 不影响主流程
+  useEffect(() => {
+    listUsers()
+      .then((users: UserBrief[]) => {
+        const map: Record<string, string> = {};
+        for (const u of users) map[String(u.id)] = u.display_name || u.username;
+        setUserMap(map);
+      })
+      .catch(() => {
+        // 忽略：裁决记录仍可正常展示
+      });
+  }, []);
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -544,7 +561,7 @@ export function ReviewWorkbench() {
                     dataIndex: "decision",
                     key: "decision",
                     width: 140,
-                    render: (v: string | null) => v ?? "—",
+                    render: (v: string | null) => (v ? RULING_DECISION_LABEL[v] ?? v : "—"),
                   },
                   {
                     title: "理由",
@@ -556,8 +573,9 @@ export function ReviewWorkbench() {
                     title: "仲裁人",
                     dataIndex: "arbitrator_id",
                     key: "arbitrator",
-                    width: 90,
-                    render: (v: number | null) => (v != null ? <span className="mono">#{v}</span> : "—"),
+                    width: 110,
+                    render: (v: number | null) =>
+                      v != null ? userMap[String(v)] ?? <span className="muted">#{v}</span> : "—",
                   },
                   {
                     title: "裁决时间",

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ReviewWorkbench } from "../pages/ReviewWorkbench";
-import type { ConflictListResponse, ConflictResponse, MetricCompareResult, RulingRecord } from "../types";
+import type { ConflictListResponse, ConflictResponse, MetricCompareResult, RulingRecord, UserBrief } from "../types";
 
 vi.mock("../api", () => ({
   listConflicts: vi.fn(),
@@ -11,6 +11,7 @@ vi.mock("../api", () => ({
   closeConflict: vi.fn(),
   compareMetrics: vi.fn(),
   listConflictRulings: vi.fn(),
+  listUsers: vi.fn(),
 }));
 const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
@@ -23,12 +24,14 @@ import {
   closeConflict,
   compareMetrics,
   listConflictRulings,
+  listUsers,
 } from "../api";
 const mockedList = vi.mocked(listConflicts);
 const mockedArbitrate = vi.mocked(arbitrateConflict);
 const mockedClose = vi.mocked(closeConflict);
 const mockedCompare = vi.mocked(compareMetrics);
 const mockedRulings = vi.mocked(listConflictRulings);
+const mockedListUsers = vi.mocked(listUsers);
 
 const baseConflict = (over: Partial<Omit<ConflictResponse, "conflict_type">>): ConflictResponse => {
   const {
@@ -99,6 +102,9 @@ beforeEach(() => {
   mockedCompare.mockResolvedValue(compareResult);
   mockedArbitrate.mockResolvedValue(baseConflict({ status: "RULED" }));
   mockedRulings.mockResolvedValue([]);
+  mockedListUsers.mockResolvedValue([
+    { id: 42, username: "arbiter", display_name: "李仲裁", role: "reviewer", domain: null, status: "active" },
+  ] as unknown as UserBrief[]);
 });
 
 describe("ReviewWorkbench 冲突仲裁", () => {
@@ -229,7 +235,10 @@ describe("ReviewWorkbench 冲突仲裁", () => {
 
     await waitFor(() => expect(mockedRulings).toHaveBeenCalledWith("CF-C"));
     expect(screen.getByText(/裁决记录 CF-C/)).toBeInTheDocument();
-    expect(screen.getByText("choose_canonical")).toBeInTheDocument();
+    // 决策/仲裁人业务术语化：choose_canonical → 选为权威，arbitrator_id 42 → 李仲裁（不直出英文/数字 ID）
+    expect(screen.getByText("选为权威")).toBeInTheDocument();
+    expect(screen.queryByText("choose_canonical")).not.toBeInTheDocument();
+    expect(screen.getByText("李仲裁")).toBeInTheDocument();
     expect(screen.getByText("现有口径更符合业务定义")).toBeInTheDocument();
     expect(screen.getByText("2026年8月12日 18:00")).toBeInTheDocument();
   });

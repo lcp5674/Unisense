@@ -207,6 +207,17 @@ export const CONFLICT_SEVERITY_LABEL: Record<string, string> = {
   low: "低",
 };
 
+// ---- 裁决决策（conflict/schemas.py RulingDecision：choose_canonical / merge / keep_diff）----
+
+export const RULING_DECISION_LABEL: Record<string, string> = {
+  choose_canonical: "选为权威",
+  merge: "合并口径",
+  keep_diff: "保留差异",
+  // 前端决策归一化前的兼容值（service 层 ACCEPT/REJECT 语义映射），按含义归类
+  choose_existing: "选现有为权威",
+  choose_candidate: "选候选为权威",
+};
+
 // ---- 埋点（对齐 frontend track() 上报的事件类型全集）----
 
 export const TRACKING_EVENT_LABEL: Record<string, string> = {
