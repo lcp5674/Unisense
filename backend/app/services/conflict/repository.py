@@ -73,6 +73,17 @@ class ConflictRepository:
         await self._db.flush()
         return conflict
 
+    async def reopen(self, conflict: Conflict) -> Conflict:
+        """将已关闭冲突重新打开为待处理：状态置 OPEN、清除 resolved_at。
+
+        与 close 对称（CLOSED → OPEN），供重新裁决使用；历史裁决记录保留在
+        ``ruling_record`` 表作为知识库，不受影响。
+        """
+        conflict.status = ConflictStatus.OPEN
+        conflict.resolved_at = None
+        await self._db.flush()
+        return conflict
+
     async def create_ruling(self, ruling: RulingRecord) -> RulingRecord:
         self._db.add(ruling)
         await self._db.flush()

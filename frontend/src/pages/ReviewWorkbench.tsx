@@ -11,6 +11,7 @@ import {
   listConflicts,
   listConflictRulings,
   listUsers,
+  reopenConflict,
   UnisenseApiError,
 } from "../api";
 import type { ConflictResponse, MetricCompareResult, RulingRecord, UserBrief } from "../types";
@@ -132,6 +133,8 @@ export function ReviewWorkbench() {
   // 升级弹窗
   const [escalating, setEscalating] = useState<ConflictResponse | null>(null);
   const [escalateNote, setEscalateNote] = useState("");
+  // 重新打开确认弹窗
+  const [reopening, setReopening] = useState<ConflictResponse | null>(null);
   // 裁决记录（历史知识库）弹窗
   const [rulingsFor, setRulingsFor] = useState<ConflictResponse | null>(null);
   const [rulings, setRulings] = useState<RulingRecord[]>([]);
@@ -256,6 +259,23 @@ export function ReviewWorkbench() {
     }
   }
 
+  // 重新打开已关闭冲突（CLOSED → OPEN，重新裁决）；候选指标将重新标记「口径冲突待处理」
+  async function handleReopen(c: ConflictResponse) {
+    if (!c) return;
+    setBusyId(c.conflict_id);
+    try {
+      await reopenConflict(c.conflict_id);
+      message.success(`已重新打开：${c.conflict_id}（待处理，可重新裁决）`);
+      track("review_reopen", c.conflict_id, "conflict");
+      setReopening(null);
+      load();
+    } catch (err) {
+      message.error(errText(err, "重新打开失败（仅 CLOSED 状态可重新打开）"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   // 打开历史裁决记录（知识库条目，GET /conflicts/{id}/rulings）
   async function openRulings(c: ConflictResponse) {
     setRulingsFor(c);
@@ -275,13 +295,12 @@ export function ReviewWorkbench() {
       return <Tag>已转交治理</Tag>;
     }
     const actions: ReactNode[] = [];
-    if (c.status !== "CLOSED") {
-      actions.push(
-        <Button type="link" size="small" onClick={() => openCompare(c)}>
-          对比
-        </Button>,
-      );
-    }
+    // 全状态可对比（含 CLOSED：重新打开前先复看差异）
+    actions.push(
+      <Button type="link" size="small" onClick={() => openCompare(c)}>
+        对比
+      </Button>,
+    );
     if (c.status === "OPEN" || c.status === "NEGOTIATING" || c.status === "ESCALATED") {
       actions.push(
         <Button
@@ -308,6 +327,14 @@ export function ReviewWorkbench() {
       actions.push(
         <Button size="small" disabled={busyId === c.conflict_id} onClick={() => handleClose(c)}>
           关闭
+        </Button>,
+      );
+    }
+    // 已关闭可重新打开重审（CLOSED → OPEN），随后可再次仲裁
+    if (c.status === "CLOSED") {
+      actions.push(
+        <Button size="small" disabled={busyId === c.conflict_id} onClick={() => setReopening(c)}>
+          重新打开
         </Button>,
       );
     }
@@ -531,6 +558,23 @@ export function ReviewWorkbench() {
           value={escalateNote}
           onChange={(e) => setEscalateNote(e.target.value)}
         />
+      </Modal>
+
+      {/* 重新打开确认弹窗：重新打开为治理动作，会重新标记指标冲突待处理，需二次确认 */}
+      <Modal
+        title="重新打开冲突"
+        open={reopening != null}
+        onCancel={() => setReopening(null)}
+        onOk={() => handleReopen(reopening!)}
+        okText="确认重新打开"
+        okButtonProps={{ danger: true, loading: reopening != null && busyId === reopening.conflict_id }}
+        cancelButtonProps={{ disabled: reopening != null && busyId === reopening.conflict_id }}
+      >
+        <p>
+          冲突 <span className="mono">{reopening?.conflict_id}</span> 将从「已关闭」重新打开为「待处理」，
+          候选指标 <span className="mono">{reopening?.candidate_metric_code ?? ""}</span> 将重新标记为
+          「口径冲突待处理」，需再次裁决。历史裁决记录将保留在知识库。
+        </p>
       </Modal>
 
       {/* 历史裁决记录弹窗（知识库） */}

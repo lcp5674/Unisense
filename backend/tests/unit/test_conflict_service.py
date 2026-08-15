@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
+from app.core.exceptions import ConflictError
 from app.models.conflict import Conflict, ConflictStatus, ConflictType, RulingRecord
 from app.services.conflict.schemas import (
     ArbitrateRequest,
@@ -57,6 +60,11 @@ class FakeRepo:
             conflict.resolved_at = datetime.utcnow()
         return conflict
 
+    async def reopen(self, conflict):
+        conflict.status = ConflictStatus.OPEN
+        conflict.resolved_at = None
+        return conflict
+
     async def create_ruling(self, ruling: RulingRecord) -> RulingRecord:
         self._seq += 1
         ruling.id = self._seq
@@ -78,9 +86,27 @@ class FakeClearer:
         self.cleared.append(metric_code)
 
 
-def _svc(clearer: FakeClearer | None = None) -> tuple[ConflictService, FakeRepo, FakeEvents, FakeClearer | None]:
+class FakeMarker:
+    """记录重新打开后回置 pending_conflict 标记的调用（metric_code, conflict）。"""
+
+    def __init__(self) -> None:
+        self.marked: list[tuple[str, Conflict]] = []
+
+    async def __call__(self, metric_code: str, conflict: Conflict) -> None:
+        self.marked.append((metric_code, conflict))
+
+
+def _svc(
+    clearer: FakeClearer | None = None,
+    marker: FakeMarker | None = None,
+) -> tuple[ConflictService, FakeRepo, FakeEvents, FakeClearer | None]:
     fake_clearer = clearer if clearer is not None else FakeClearer()
-    svc = ConflictService(db=object(), metric_conflict_clearer=fake_clearer)
+    fake_marker = marker if marker is not None else FakeMarker()
+    svc = ConflictService(
+        db=object(),
+        metric_conflict_clearer=fake_clearer,
+        metric_conflict_marker=fake_marker,
+    )
     repo = FakeRepo()
     events = FakeEvents()
     svc._repo = repo
@@ -200,3 +226,49 @@ async def test_arbitrate_without_clearer_is_noop() -> None:
     svc._events = events
     conflict = await _ruled_conflict(svc, repo)
     assert conflict.status == ConflictStatus.RULED
+
+
+async def test_reopen_closed_marks_metric_and_transitions_to_open() -> None:
+    svc, repo, events, _ = _svc()
+    conflict = await _ruled_conflict(svc, repo)
+    conflict = await svc.close(conflict.conflict_id)
+    assert conflict.status == ConflictStatus.CLOSED
+    # 重新打开：CLOSED → OPEN、清除 resolved_at、回置指标冲突标记、发事件
+    marker = FakeMarker()
+    svc._metric_conflict_marker = marker
+    reopened = await svc.reopen(conflict.conflict_id)
+    assert reopened.status == ConflictStatus.OPEN
+    assert reopened.resolved_at is None
+    assert marker.marked and marker.marked[0][0] == "gmv_total"
+    assert any(e["event_type"] == "conflict_reopened" for e in events.published)
+
+
+async def test_reopen_non_closed_raises() -> None:
+    svc, repo, _, _ = _svc()
+    conflict = await _ruled_conflict(svc, repo)  # RULED（未关闭）
+    with pytest.raises(ConflictError):
+        await svc.reopen(conflict.conflict_id)
+
+
+async def test_reopen_open_raises() -> None:
+    svc, repo, _, _ = _svc()
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
+        existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
+    )
+    await svc.check(req.candidate, req.existing)  # OPEN（未裁决）
+    with pytest.raises(ConflictError):
+        await svc.reopen(repo.conflicts[0].conflict_id)
+
+
+async def test_reopen_without_marker_is_noop() -> None:
+    svc = ConflictService(db=object())  # 未注入 marker：联动为 no-op
+    repo = FakeRepo()
+    events = FakeEvents()
+    svc._repo = repo
+    svc._events = events
+    conflict = await _ruled_conflict(svc, repo)
+    conflict = await svc.close(conflict.conflict_id)
+    reopened = await svc.reopen(conflict.conflict_id)
+    assert reopened.status == ConflictStatus.OPEN
+    assert reopened.resolved_at is None

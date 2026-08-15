@@ -325,6 +325,9 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
   "GRANT_CREATE": "创建授权",
   "GRANT_REVOKE": "撤销授权",
   "CONFLICT_ESCALATE": "升级冲突",
+  "CONFLICT_ARBITRATE": "仲裁冲突",
+  "CONFLICT_CLOSE": "关闭冲突",
+  "CONFLICT_REOPEN": "重新打开冲突",
   "TEST_CONNECTION": "测试连接",
   "CHECK_CONNECTION": "探活检查",
   "COLLECT": "采集元数据",
@@ -377,6 +380,7 @@ export function auditActionLabel(action: string | null | undefined): string {
     USER_STATUS: "用户状态变更", USER_CREATE: "创建用户",
     GRANT_CREATE: "创建授权", GRANT_REVOKE: "撤销授权",
     CONFLICT_ESCALATE: "升级冲突",
+    CONFLICT_ARBITRATE: "仲裁冲突", CONFLICT_CLOSE: "关闭冲突", CONFLICT_REOPEN: "重新打开冲突",
   };
   return pureMap[action] ?? action;
 }

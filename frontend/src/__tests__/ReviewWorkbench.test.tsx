@@ -9,6 +9,7 @@ vi.mock("../api", () => ({
   arbitrateConflict: vi.fn(),
   escalateConflict: vi.fn(),
   closeConflict: vi.fn(),
+  reopenConflict: vi.fn(),
   compareMetrics: vi.fn(),
   listConflictRulings: vi.fn(),
   listUsers: vi.fn(),
@@ -22,6 +23,7 @@ import {
   listConflicts,
   arbitrateConflict,
   closeConflict,
+  reopenConflict,
   compareMetrics,
   listConflictRulings,
   listUsers,
@@ -29,6 +31,7 @@ import {
 const mockedList = vi.mocked(listConflicts);
 const mockedArbitrate = vi.mocked(arbitrateConflict);
 const mockedClose = vi.mocked(closeConflict);
+const mockedReopen = vi.mocked(reopenConflict);
 const mockedCompare = vi.mocked(compareMetrics);
 const mockedRulings = vi.mocked(listConflictRulings);
 const mockedListUsers = vi.mocked(listUsers);
@@ -146,6 +149,48 @@ describe("ReviewWorkbench 冲突仲裁", () => {
       expect(mockedClose).toHaveBeenCalledWith("CF-C"),
     );
     expect(mockedList).toHaveBeenCalledTimes(2); // 初始 + 关闭后刷新
+  });
+
+  it("CLOSED 冲突提供重新打开入口（可对比复看），不再提供仲裁/关闭", async () => {
+    const withClosed = [...conflicts, baseConflict({ conflict_id: "CF-D", status: "CLOSED" })];
+    mockedList.mockResolvedValue({
+      items: withClosed,
+      total: withClosed.length,
+      page: 1,
+      page_size: 20,
+    } as ConflictListResponse);
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-D")).toBeInTheDocument());
+    const closedRow = screen.getByText("CF-D").closest("tr") as HTMLElement;
+    expect(within(closedRow).getByText("对比")).toBeInTheDocument();
+    expect(within(closedRow).getByRole("button", { name: /重新打开/ })).toBeInTheDocument();
+    expect(within(closedRow).getByRole("button", { name: /裁决记录/ })).toBeInTheDocument();
+    expect(within(closedRow).queryByRole("button", { name: /仲\s*裁/ })).not.toBeInTheDocument();
+    expect(within(closedRow).queryByRole("button", { name: /关\s*闭/ })).not.toBeInTheDocument();
+  });
+
+  it("CLOSED 冲突确认重新打开调用 reopenConflict 并刷新列表", async () => {
+    const withClosed = [...conflicts, baseConflict({ conflict_id: "CF-D", status: "CLOSED" })];
+    mockedList.mockResolvedValue({
+      items: withClosed,
+      total: withClosed.length,
+      page: 1,
+      page_size: 20,
+    } as ConflictListResponse);
+    mockedReopen.mockResolvedValue(baseConflict({ conflict_id: "CF-D", status: "OPEN" }));
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-D")).toBeInTheDocument());
+    const closedRow = screen.getByText("CF-D").closest("tr") as HTMLElement;
+    fireEvent.click(within(closedRow).getByRole("button", { name: /重新打开/ }));
+
+    // 确认弹窗出现（说明重新打开需二次确认，属治理动作）
+    await waitFor(() => expect(screen.getByText(/重新打开冲突/)).toBeInTheDocument());
+    expect(screen.getByText(/将从「已关闭」重新打开为「待处理」/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /确认重新打开/ }));
+    await waitFor(() => expect(mockedReopen).toHaveBeenCalledWith("CF-D"));
+    expect(trackMock).toHaveBeenCalledWith("review_reopen", "CF-D", "conflict");
+    expect(mockedList).toHaveBeenCalledTimes(2); // 初始 + 重新打开后刷新
   });
 
   it("仲裁弹窗展示差异对比与裁决方式，默认按类型给出首个决策", async () => {

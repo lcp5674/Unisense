@@ -840,6 +840,14 @@ export async function closeConflict(conflictId: string): Promise<ConflictRespons
   });
 }
 
+// 重新打开已关闭冲突（CLOSED → OPEN，供重新裁决）：POST /conflicts/{id}/reopen
+export async function reopenConflict(conflictId: string): Promise<ConflictResponse> {
+  return request<ConflictResponse>(`${API_BASE}/conflicts/${conflictId}/reopen`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 // 主动冲突检测：创建指标前的口径冲突扫描（POST /conflicts/check）
 export async function checkConflict(req: ConflictCheckRequest): Promise<ConflictCheckResult> {
   return request<ConflictCheckResult>(`${API_BASE}/conflicts/check`, {

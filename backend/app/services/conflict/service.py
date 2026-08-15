@@ -1,6 +1,6 @@
 """冲突服务编排（TD §12.4 / FR-09）。
 
-职责：四类冲突检测 + 仲裁状态机（OPEN→NEGOTIATING→ESCALATED→RULED→CLOSED）
+职责：四类冲突检测 + 仲裁状态机（OPEN→NEGOTIATING→ESCALATED→RULED→CLOSED，CLOSED→OPEN 可重新打开重审）
 + 裁决知识库沉淀。不修改指标本身，仅写裁决结论 + 发通知。
 PII 冲突特殊路由至 governance.pii_review，不进普通仲裁。
 """
@@ -47,6 +47,7 @@ class ConflictService(BaseService):
         events: ConflictEventPublisher | None = None,
         llm: ConflictLlmClient | None = None,
         metric_conflict_clearer: Callable[[str], Awaitable[None]] | None = None,
+        metric_conflict_marker: Callable[[str, Conflict], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(db)
         self._db = db
@@ -57,6 +58,9 @@ class ConflictService(BaseService):
         # 跨服务一致性（TD §12.4）：仲裁/关闭后清除指标表 pending_conflict 标记的回调。
         # 由上层注入真实实现（更新 Metric 表）；None 时跳过（保持服务解耦、可测）。
         self._metric_conflict_clearer = metric_conflict_clearer
+        # 对称的回置回调：重新打开已关闭冲突后，回置候选指标 pending_conflict 标记
+        # （指标详情页须重新显示「口径冲突待处理」）。None 时跳过。
+        self._metric_conflict_marker = metric_conflict_marker
 
     async def _safe_publish(self, event: dict[str, Any]) -> None:
         """事件发布为 best-effort：通知/治理服务不可达时静默降级，不阻断主流程。
@@ -272,6 +276,50 @@ class ConflictService(BaseService):
         # 兜底联动：覆盖历史冲突（旧代码仲裁时未清标记）关闭时再补清一次（幂等）
         await self._sync_metric_conflict_flag(conflict)
         return conflict
+
+    async def reopen(self, conflict_id: str) -> Conflict:
+        """重新打开已关闭冲突为待处理（CLOSED → OPEN），供重新裁决。
+
+        历史裁决记录保留在 ruling_record 作为知识库；候选指标的
+        pending_conflict 标记对称回置，指标详情页重新显示「口径冲突待处理」。
+        """
+        conflict = await self.get(conflict_id)
+        if conflict.status != ConflictStatus.CLOSED:
+            raise ConflictError(f"仅 CLOSED 状态可重新打开，当前 {conflict.status.value}")
+        conflict = await self._repo.reopen(conflict)
+        await self._mark_metric_conflict(conflict)
+        await self._safe_publish(
+            {
+                "event_type": "conflict_reopened",
+                "payload": {
+                    "conflict_id": conflict.conflict_id,
+                    "candidate": (conflict.metric_codes or {}).get("candidate"),
+                },
+            }
+        )
+        return conflict
+
+    async def _mark_metric_conflict(self, conflict: Conflict) -> None:
+        """重新打开冲突后联动回置候选指标的 pending_conflict 冗余标记。
+
+        与仲裁/关闭时的清除对称：冲突重新打开为待处理，指标详情页须再次显示
+        「口径冲突待处理」。best-effort：标记失败不阻断重新打开（同事件降级语义）。
+        """
+        if self._metric_conflict_marker is None:
+            return
+        codes = conflict.metric_codes or {}
+        candidate = codes.get("candidate")
+        if not candidate:
+            return
+        try:
+            await self._metric_conflict_marker(candidate, conflict)
+            logger.info(
+                "metric_conflict_flag_marked",
+                metric_code=candidate,
+                conflict_id=conflict.conflict_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - 联动回置降级，不阻断重新打开
+            logger.warning("重新打开后同步指标冲突标记失败（best-effort 跳过）：%s", exc)
 
     async def get_rulings(self, conflict_id: str) -> list[RulingRecord]:
         return await self._repo.get_rulings(conflict_id)

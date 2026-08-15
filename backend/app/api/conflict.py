@@ -6,6 +6,7 @@
 - POST /conflicts/{id}/arbitrate   仲裁（GOV-2 裁决记录）
 - POST /conflicts/{id}/escalate    升级（超时前人工升级）
 - POST /conflicts/{id}/close       关闭（RULED → CLOSED）
+- POST /conflicts/{id}/reopen      重新打开（CLOSED → OPEN，重新裁决）
 - GET  /conflicts/{id}/rulings     裁决记录（知识库）
 """
 
@@ -61,11 +62,33 @@ def _svc(db: AsyncSession, request: Request) -> ConflictService:
             .values(pending_conflict=False, pending_conflict_detail=None)
         )
 
+    async def _mark_metric_conflict(metric_code: str, conflict: Any) -> None:
+        """重新打开冲突后回置指标表的 pending_conflict 冗余标记。
+
+        与清除对称：冲突重新打开为待处理，指标详情页须重新显示「口径冲突待处理」。
+        pending_conflict_detail 记录重新打开来源与冲突快照，便于详情页定位。
+        """
+        codes = conflict.metric_codes or {}
+        detail = {
+            "status": "reopened",
+            "conflict_id": conflict.conflict_id,
+            "conflict_type": getattr(conflict.type, "value", None),
+            "score": conflict.similarity_score,
+            "existing_code": codes.get("existing"),
+            "reason": "冲突重新打开，待重新裁决",
+        }
+        await db.execute(
+            update(Metric)
+            .where(Metric.metric_code == metric_code, Metric.deleted_at.is_(None))
+            .values(pending_conflict=True, pending_conflict_detail=detail)
+        )
+
     return ConflictService(
         db,
         events=ConflictEventPublisher(notify_url),
         llm=build_conflict_llm_client(),
         metric_conflict_clearer=_clear_metric_conflict,
+        metric_conflict_marker=_mark_metric_conflict,
     )
 
 
@@ -213,6 +236,33 @@ async def close_conflict(
         db,
         actor_id=user.id,
         action="CONFLICT_CLOSE",
+        entity_type="conflict",
+        entity_id=conflict_id,
+        detail={},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=ConflictResponse.from_model(conflict).model_dump(), trace_id=trace_id)
+
+
+@router.post(
+    "/{conflict_id}/reopen",
+    dependencies=_GOV_DEPS,
+)
+async def reopen_conflict(
+    conflict_id: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    svc = _svc(db, request)
+    conflict = await svc.reopen(conflict_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="CONFLICT_REOPEN",
         entity_type="conflict",
         entity_id=conflict_id,
         detail={},

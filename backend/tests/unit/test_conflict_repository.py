@@ -1,12 +1,13 @@
 """conflict 服务 Repository 单测（补齐覆盖率至 ≥85%）。
 
-针对 conflict/repository.py 的 31% 覆盖率，覆盖全部 6 个方法：
-- create / get_by_conflict_id / list_conflicts（含全部过滤分支）/ update_status
+针对 conflict/repository.py 的 31% 覆盖率，覆盖全部 7 个方法：
+- create / get_by_conflict_id / list_conflicts（含全部过滤分支）/ update_status / reopen
 - create_ruling / get_rulings
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -117,6 +118,23 @@ class TestUpdateStatus:
         assert result.status == ConflictStatus.CLOSED
         assert result.arbitrator_id is None
         assert result.resolved_at is None
+
+
+class TestReopen:
+    """重新打开已关闭冲突：状态 CLOSED → OPEN、清除 resolved_at（供重新裁决）。"""
+
+    async def test_reopen_sets_open_and_clears_resolved_at(
+        self, repo: ConflictRepository
+    ) -> None:
+        conflict = Conflict(
+            conflict_id="c1",
+            status=ConflictStatus.CLOSED,
+            resolved_at=datetime(2026, 8, 14, 12, 0, 0),
+        )
+        result = await repo.reopen(conflict)
+        assert result.status == ConflictStatus.OPEN
+        assert result.resolved_at is None
+        repo._db.flush.assert_awaited_once()
 
 
 class TestRuling:

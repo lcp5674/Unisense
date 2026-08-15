@@ -259,6 +259,7 @@ export const TRACKING_EVENT_LABEL: Record<string, string> = {
   // 治理
   review_arbitrate: "冲突仲裁",
   review_escalate: "冲突升级",
+  review_reopen: "冲突重新打开",
   // AI
   ai_nl2sql: "AI 问数",
 };
