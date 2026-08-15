@@ -204,7 +204,7 @@ _LEVEL_CN: dict[str, str] = {
     "CRITICAL": "严重",
 }
 # 内部/冗余字段，正文中不展示（event_type 已体现在标题）
-_SKIP_FIELDS = {"event_type", "payload"}
+_SKIP_FIELDS = {"event_type", "payload", "recipient_user_id"}
 
 
 def _humanize_event_title(event_type: str) -> str:
@@ -361,6 +361,34 @@ class NotifyService(BaseService):
                 notif.sent_at = datetime.now(UTC)
                 delivered += 1
         event.notified = delivered > 0
+        # 指定接收人定向投递（如反馈提交者）：不依赖订阅，额外通知该用户。
+        # 已通过订阅收到通知的用户不重复发。
+        recipient_raw = (data.payload or {}).get("recipient_user_id")
+        if recipient_raw is not None:
+            try:
+                recipient_id = int(recipient_raw)
+            except (TypeError, ValueError):
+                recipient_id = 0
+            subscriber_ids = {s.user_id for s in subs}
+            if recipient_id and recipient_id not in subscriber_ids:
+                notif = Notification(
+                    subscriber_id=recipient_id,
+                    channel="in_app",
+                    template_code=data.event_type,
+                    title=_humanize_event_title(data.event_type),
+                    body=_humanize_payload(data.payload),
+                    payload=data.payload,
+                    status=NotifyStatus.PENDING.value,
+                    ref_type="event",
+                    ref_id=event.id,
+                )
+                await self._repo.save_notification(notif)
+                created += 1
+                ok = await self._dispatch(notif, "in_app")
+                notif.status = NotifyStatus.SENT.value if ok else NotifyStatus.FAILED.value
+                if ok:
+                    notif.sent_at = datetime.now(UTC)
+                    delivered += 1
         await self._repo.commit()
         return {"event_id": event.id, "notifications": created, "delivered": delivered}
 

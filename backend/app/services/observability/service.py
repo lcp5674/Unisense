@@ -192,7 +192,14 @@ class ObservabilityService(BaseService):
 
         await self._publish_event(
             "feedback.status_updated",
-            {"feedback_id": feedback_id, "status": status, "resolver_id": resolver_id},
+            {
+                "feedback_id": feedback_id,
+                "status": status,
+                "resolver_id": resolver_id,
+                # 通知反馈提交者（notify 消费时识别 recipient_user_id 定向投递）
+                "recipient_user_id": feedback.user_id,
+                "comment": (feedback.comment or "")[:200],
+            },
             actor_id=str(resolver_id or ""),
         )
 

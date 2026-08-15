@@ -51,6 +51,41 @@ async def test_publish_event_fanout() -> None:
     assert repo.save_notification.await_count == 2
 
 
+async def test_publish_event_recipient_direct_delivery() -> None:
+    """反馈处理事件：payload 携带 recipient_user_id 时定向通知提交者（in_app，无需订阅）。"""
+    svc, repo = _svc()
+    out = await svc.publish_event(
+        EventPublish(
+            event_type="feedback.status_updated",
+            payload={"feedback_id": 1, "status": "adopted", "recipient_user_id": 7},
+        )
+    )
+    assert out["notifications"] == 1
+    notif = repo.save_notification.call_args[0][0]
+    assert notif.subscriber_id == 7
+    assert notif.channel == "in_app"
+    assert notif.template_code == "feedback.status_updated"
+
+
+async def test_publish_event_recipient_skips_if_already_subscribed() -> None:
+    """提交者若已通过订阅收到通知，则不重复定向投递。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=7, channel="EMAIL", event_type="feedback.status_updated", enabled=True
+            )
+        ]
+    )
+    out = await svc.publish_event(
+        EventPublish(
+            event_type="feedback.status_updated",
+            payload={"recipient_user_id": 7},
+        )
+    )
+    assert out["notifications"] == 1  # 仅订阅者 1 条，recipient 7 已覆盖不重复
+
+
 async def test_publish_event_title_body_business_terms() -> None:
     """通知标题/正文应从源头业务化——非英文码、非 JSON（TD §12.9 产品化）。"""
     svc, repo = _svc()
