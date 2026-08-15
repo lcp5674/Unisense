@@ -15,6 +15,7 @@ vi.mock("../api", () => ({
   listUsers: vi.fn(),
   UnisenseApiError: class extends Error {
     code: string;
+    traceId: string;
     detail?: Record<string, unknown> | null;
     status: number;
     constructor(
