@@ -206,6 +206,10 @@ _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "classification.changed",
     "classification.done",
     "escalation.triggered",
+    # observability / audit（走 EventBus 的可接入业务事件，TD §5.5）
+    "feedback.status_updated",
+    "nps.submitted",
+    "audit.capacity_warning",
 )
 
 

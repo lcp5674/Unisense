@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { Notifications } from "../pages/Notifications";
+import { Notifications, EVENT_TYPES } from "../pages/Notifications";
 import { NOTIF_CHANGED_EVENT } from "../utils/notifBus";
 import type { Notification } from "../types";
 
@@ -223,6 +223,40 @@ describe("通知中心 - 订阅项对齐", () => {
     expect(screen.queryByText("权限变更")).not.toBeInTheDocument();
     expect(screen.queryByText("血缘变更")).not.toBeInTheDocument();
     expect(screen.queryByText("系统公告")).not.toBeInTheDocument();
+  });
+
+  it("订阅选项含新接入的可订阅事件（反馈/满意度/审计容量），与后端订阅清单对齐", async () => {
+    // EVENT_TYPES 是后端订阅清单（main.py _BUSINESS_EVENT_TYPES）的前端契约镜像
+    expect(EVENT_TYPES).toContain("feedback.status_updated");
+    expect(EVENT_TYPES).toContain("nps.submitted");
+    expect(EVENT_TYPES).toContain("audit.capacity_warning");
+    // 幽灵项（无发布方）不得出现在可订阅集合
+    for (const ghost of [
+      "lineage.change",
+      "system.notice",
+      "governance.grant",
+      "review.pending",
+      "quality.alert",
+      "conflict.detected",
+      "orphan.event",
+    ]) {
+      expect(EVENT_TYPES).not.toContain(ghost);
+    }
+
+    // 渲染验证：新增订阅弹窗的消息类型下拉中「反馈状态更新」可订阅（中文标签）
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    renderPage();
+
+    fireEvent.click(screen.getByRole("tab", { name: "订阅设置" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /新增订阅/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /新增订阅/ }));
+    fireEvent.mouseDown(screen.getByLabelText("消息类型"));
+    await waitFor(() => {
+      const dropdown = document.querySelector(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
+      expect(dropdown).toBeTruthy();
+    });
+    // 英文事件码不应直出
+    expect(screen.queryByText("feedback.status_updated")).not.toBeInTheDocument();
   });
 
   it("sms 渠道已隐藏（后端无短信实现）", async () => {

@@ -40,12 +40,10 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "metric.rolled_back": "指标已回滚",
   "metric.emergency_published": "指标紧急发布",
   "metric.health_critical": "指标健康告警",
-  "conflict.detected": "口径冲突检测",
   "conflict_open": "口径冲突待处理",
   "conflict_ruled": "口径冲突已裁决",
   "conflict_escalated": "口径冲突已升级",
   "pii_conflict": "PII 冲突",
-  "quality.alert": "数据质量告警",
   "quality.anomaly": "数据质量异常告警",
   "reconciliation.alert": "对账告警",
   "benchmark.imported": "参照基准已导入",
@@ -57,7 +55,9 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "classification.changed": "数据分类变更",
   "classification.done": "数据分类完成",
   "escalation.triggered": "告警升级已触发",
-  "review.pending": "审核待办提醒",
+  "feedback.status_updated": "反馈状态更新",
+  "nps.submitted": "满意度已提交",
+  "audit.capacity_warning": "审计容量告警",
 };
 
 // 事件类型兜底：未命中的 ``域.动作`` 拆词为中文（历史数据/新类型都能显示中文）
@@ -247,7 +247,7 @@ const CHANNELS = ["email", "webhook", "in_app"];
 // 订阅可选事件：与后端 EventBus 实际订阅集合对齐（backend/app/main.py _BUSINESS_EVENT_TYPES）。
 // 移除幽灵事件（metric.published / governance.grant / lineage.change / system.notice），
 // 保留 quality/conflict/governance/classification/escalation + metric.* 九种。
-const EVENT_TYPES = [
+export const EVENT_TYPES = [
   "metric.created",
   "metric.submitted",
   "metric.approved",
@@ -272,6 +272,9 @@ const EVENT_TYPES = [
   "classification.changed",
   "classification.done",
   "escalation.triggered",
+  "feedback.status_updated",
+  "nps.submitted",
+  "audit.capacity_warning",
 ];
 
 // 通知状态 → 卡片左侧状态条颜色（沿「校准仪表」设计语言：成功=数据青绿、失败=告警红、待发送=信号琥珀）
