@@ -221,6 +221,18 @@ export interface MetricUpdateRequest {
   change_reason: string; // 必填，min_length=4
 }
 
+// 仲裁改名建议（backend POST /metric-definitions/{code}/suggest-rename）
+export interface RenameSuggestItem {
+  name: string;
+  reason: string;
+  source: "llm" | "rule";
+}
+
+export interface RenameSuggestResponse {
+  suggestions: RenameSuggestItem[];
+  current_name: string;
+}
+
 export interface MetricPublishRequest {
   version?: number;
   change_reason: string; // 必填，min_length=4

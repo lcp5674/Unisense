@@ -28,6 +28,7 @@ import {
   ConflictCheckRequest,
   ConflictCheckResult,
   ClientResponse,
+  RenameSuggestResponse,
   CollectNowResult,
   CollectResult,
   CollectionProgress,
@@ -3090,4 +3091,18 @@ export async function autoSuggestMetric(data: AutoSuggestRequest): Promise<AutoS
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+// 仲裁改名建议：LLM 生成区分性名称候选（best-effort，LLM 不可用降级规则）
+export async function suggestRenameName(
+  metricCode: string,
+  oppositeCode?: string | null,
+): Promise<RenameSuggestResponse> {
+  return request<RenameSuggestResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(metricCode)}/suggest-rename`,
+    {
+      method: "POST",
+      body: JSON.stringify({ opposite_code: oppositeCode ?? undefined }),
+    },
+  );
 }

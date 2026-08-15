@@ -19,6 +19,7 @@ from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.exceptions import ConflictError
 from app.core.guard import guard_against_injection
+from app.core.logging import get_logger
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
 from app.services.collector.infer_guard import InferInflightGuard
@@ -47,6 +48,23 @@ from app.services.semantic.service import MetricService, redact_definition
 from app.services.subject_domain.service import SubjectDomainService
 
 router = APIRouter(prefix="/metric-definitions", tags=["metric-definitions"])
+
+logger = get_logger("unisense.api.metrics")
+
+
+async def _register_metric_l3_lineage(db: AsyncSession, metric: Any) -> None:
+    """指标创建/更新后注册 L3 指标血缘边（``metric:{code} ↔ table:{t}``，幂等）。
+
+    让指标节点进入血缘体系，与 DP 血缘（dp_csv）/ SQL 解析（sqlglot）表级血缘
+    衔接成「源表 → 指标 → 落地表」完整链路。注册失败仅记日志、不阻断主流程
+    （血缘为辅助能力，可事后用 ``scripts/register_metric_lineage.py`` 补注册）。
+    """
+    try:
+        from app.services.lineage.service import LineageService
+
+        await LineageService(db).register_metric_from_definition(metric, commit=False)
+    except Exception:
+        logger.exception("metric_lineage_register_failed", metric_code=metric.metric_code)
 
 
 @contextlib.asynccontextmanager
@@ -114,6 +132,8 @@ async def create_metric(
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
+    # L3 指标血缘：口径定义含 source_table/source_tables 时注册 metric↔table 边（同事务）
+    await _register_metric_l3_lineage(db, metric)
     # PLAT-3: 业务写入 + 审计同事务原子提交（缺 commit 会导致事务随会话关闭被回滚）
     await db.commit()
     return ok(
@@ -257,6 +277,135 @@ async def get_metric(
     return ok(data=data, trace_id=trace_id)
 
 
+@router.post(
+    "/{metric_code}/suggest-rename",
+    response_model=ApiResponse[Any],
+    summary="仲裁改名建议（LLM 生成区分性名称候选，FR-010）",
+    dependencies=_READ_DEPS,
+)
+async def suggest_rename_metric(
+    metric_code: str,
+    request_body: dict[str, Any],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """为仲裁「保留差异+指定改名」生成 AI 建议名称候选（best-effort，LLM 不可用降级规则）。
+
+    结合现有名称、对方指标名称、源表、度量列、所属域，LLM 生成最多 3 个
+    「与对方明显区分」的中文业务名称候选；LLM 不可用/解析失败时降级为规则候选。
+    仅作命名参考，不落库；Owner 在详情页改名弹窗中抉择或编辑后提交正式改名。
+    """
+    import json
+
+    from app.services.semantic.service import MetricService
+
+    service = MetricService(db)
+    # 指标不存在/已作废时由 get_metric_public 抛标准异常（NOT_FOUND / METRIC_ARCHIVED）
+    metric = await service.get_metric_public(metric_code)
+
+    opposite_code = (request_body or {}).get("opposite_code") or None
+    opposite_name: str | None = None
+    if opposite_code:
+        try:
+            opp = await service.get_metric_public(opposite_code)
+            opposite_name = opp.name
+        except Exception:
+            pass  # 对方指标不可读不影响建议（best-effort）
+
+    defn = metric.definition_json or {}
+    source_table = defn.get("source_table") if isinstance(defn, dict) else None
+    measures = (defn or {}).get("measures") or (defn or {}).get("columns") or []
+    measure: str | None = None
+    if isinstance(measures, list) and measures:
+        first = measures[0]
+        if isinstance(first, dict):
+            measure = first.get("name") or first.get("column")
+        elif isinstance(first, str):
+            measure = first
+
+    cur_name = metric.name or metric.metric_code
+    domain = metric.domain or ""
+    suggestions: list[dict[str, Any]] = []
+
+    # 1) LLM 生成（best-effort）：要求返回 JSON 数组，解析失败降级规则
+    try:
+        from app.services.llm.config_service import LlmConfigService
+
+        llm_client = await LlmConfigService(db).build_client()
+        if getattr(llm_client, "enabled", False):
+            prompt = (
+                "为一个需要与另一指标区分命名的指标生成 3 个中文业务名称候选。\n"
+                f"现有名称={cur_name}；对方指标名称={opposite_name or '未知'}；\n"
+                f"所属域={domain or '未知'}；源表={source_table or '未知'}；"
+                f"度量列={measure or '未知'}。\n"
+                "要求：语义准确、与对方名称明显区分、长度 4~12 字、适合作为指标展示名。\n"
+                "严格只返回 JSON 数组，元素为 {\"name\": \"名称\", \"reason\": \"一句理由\"}，"
+                "不要输出其他内容。"
+            )
+            resp = await llm_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+            )
+            raw = (resp.get("content") or "").strip().strip("`").strip()
+            cleaned = raw
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip().strip("`").strip()
+            try:
+                parsed = json.loads(cleaned)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict) and item.get("name"):
+                        suggestions.append(
+                            {
+                                "name": str(item["name"]).strip(),
+                                "reason": str(item.get("reason") or "").strip(),
+                                "source": "llm",
+                            }
+                        )
+    except Exception:
+        pass  # LLM 故障/未配置：降级规则兜底
+
+    # 2) 规则兜底：LLM 未产出有效候选时，基于上下文生成确定性候选
+    if not suggestions:
+        suffixes: list[str] = []
+        if measure:
+            suffixes.append(str(measure))
+        if domain:
+            suffixes.append(domain)
+        if opposite_name:
+            suffixes.append(opposite_name)
+        for s in suffixes[:3]:
+            suggestions.append(
+                {
+                    "name": f"{cur_name}（{s}）",
+                    "reason": f"追加『{s}』以与对方区分同名不同义口径",
+                    "source": "rule",
+                }
+            )
+        if not suggestions:
+            suggestions.append(
+                {
+                    "name": f"{cur_name}·新口径",
+                    "reason": "规则兜底：追加『新口径』以区分同名指标",
+                    "source": "rule",
+                }
+            )
+
+    # 去重 + 截断为最多 3 个候选
+    seen: set[str] = set()
+    uniq: list[dict[str, Any]] = []
+    for cand in suggestions:
+        n = cand["name"]
+        if n in seen:
+            continue
+        seen.add(n)
+        uniq.append(cand)
+    return ok(data={"suggestions": uniq[:3], "current_name": cur_name}, trace_id=trace_id)
+
+
 @router.put(
     "/{metric_code}",
     response_model=ApiResponse[MetricResponse],
@@ -286,6 +435,8 @@ async def update_metric(
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
+    # L3 指标血缘：口径变更后幂等重注册 metric↔table 边（同事务）
+    await _register_metric_l3_lineage(db, metric)
     # PLAT-3: 业务写入 + 审计同事务原子提交
     await db.commit()
     return ok(

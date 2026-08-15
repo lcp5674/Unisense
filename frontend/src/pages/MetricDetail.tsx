@@ -9,6 +9,7 @@ import {
   Input,
   message,
   Modal,
+  Radio,
   Space,
   Tag,
   Tabs,
@@ -27,6 +28,7 @@ import {
   ArrowLeftOutlined,
   ArrowRightOutlined,
   EditOutlined,
+  RobotOutlined,
 } from "@ant-design/icons";
 import {
   addFavorite,
@@ -46,6 +48,7 @@ import {
   removeFavorite,
   rollbackMetric,
   submitReview,
+  suggestRenameName,
   updateMetric,
   upsertSubscription,
   UnisenseApiError,
@@ -57,6 +60,7 @@ import type {
   MetricUpdateRequest,
   MetricVersionResponse,
   RecommendItem,
+  RenameSuggestItem,
   SubscriptionPref,
   UserBrief,
 } from "../types";
@@ -404,6 +408,10 @@ export function MetricDetail() {
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [renameReason, setRenameReason] = useState("");
+  // 仲裁改名建议：LLM 生成区分性名称候选（TD §12.4，用户抉择或编辑后提交）
+  const [suggesting, setSuggesting] = useState(false);
+  const [renameSuggestions, setRenameSuggestions] = useState<RenameSuggestItem[]>([]);
+  const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const { track } = useTracking();
@@ -522,6 +530,33 @@ export function MetricDetail() {
     setRenameOpen(false);
     setRenameValue("");
     setRenameReason("");
+  }
+
+  // 仲裁改名建议：调后端 LLM 生成区分性名称候选（best-effort，LLM 不可用降级规则），
+  // 用户点选候选填入输入框后可继续编辑，也可直接手动输入。
+  async function handleSuggestRename() {
+    if (!metric) return;
+    setSuggesting(true);
+    setRenameSuggestLoaded(false);
+    try {
+      const res = await suggestRenameName(
+        metric.metric_code,
+        metric.arbitration_mark?.rename_opposite_code ?? undefined,
+      );
+      setRenameSuggestions(res.suggestions ?? []);
+      if (res.suggestions && res.suggestions.length > 0) {
+        setRenameValue(res.suggestions[0].name);
+      }
+      setRenameSuggestLoaded(true);
+    } catch (err) {
+      setRenameSuggestions([]);
+      setRenameSuggestLoaded(true);
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "名称建议生成失败",
+      );
+    } finally {
+      setSuggesting(false);
+    }
   }
 
   if (!metric) {
@@ -649,6 +684,8 @@ export function MetricDetail() {
           onClick={() => {
             setRenameValue(metric.name);
             setRenameReason("");
+            setRenameSuggestions([]);
+            setRenameSuggestLoaded(false);
             setRenameOpen(true);
           }}
         >
@@ -866,14 +903,46 @@ export function MetricDetail() {
           <span className="mono">{metric?.arbitration_mark?.conflict_id ?? ""}</span> 仲裁中被指定改名，
           以与{" "}
           <span className="mono">{metric?.arbitration_mark?.rename_opposite_code ?? "对方指标"}</span>{" "}
-          区分同名不同义口径。修改名称后仲裁标记将自动清除。
+          区分同名不同义口径。可先用 AI 生成名称建议，采纳或编辑后提交；修改名称后仲裁标记将自动清除。
         </Paragraph>
-        <Input
-          placeholder="新的指标名称"
-          value={renameValue}
-          onChange={(e) => setRenameValue(e.target.value)}
-          style={{ marginTop: 8 }}
-        />
+        <Space.Compact style={{ width: "100%", marginTop: 8 }}>
+          <Input
+            placeholder="新的指标名称"
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+          />
+          <Button icon={<RobotOutlined />} loading={suggesting} onClick={handleSuggestRename}>
+            AI 生成名称建议
+          </Button>
+        </Space.Compact>
+        {renameSuggestLoaded && renameSuggestions.length > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <Radio.Group
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              style={{ width: "100%" }}
+            >
+              <Space direction="vertical" style={{ width: "100%" }}>
+                {renameSuggestions.map((s, i) => (
+                  <Radio key={`${s.name}-${i}`} value={s.name} style={{ width: "100%" }}>
+                    <Space direction="vertical" size={0}>
+                      <span>{s.name}</span>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {s.source === "llm" ? "AI 生成 · " : "规则兜底 · "}
+                        {s.reason}
+                      </Typography.Text>
+                    </Space>
+                  </Radio>
+                ))}
+              </Space>
+            </Radio.Group>
+          </div>
+        )}
+        {renameSuggestLoaded && renameSuggestions.length === 0 && (
+          <Typography.Text type="secondary" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
+            未生成名称建议，请手动输入新名称。
+          </Typography.Text>
+        )}
         <Input.TextArea
           placeholder="变更原因（至少 4 字，将写入版本记录）"
           value={renameReason}

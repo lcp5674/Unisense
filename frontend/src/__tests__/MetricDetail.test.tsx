@@ -23,6 +23,7 @@ vi.mock("../api", () => ({
   rollbackMetric: vi.fn(),
   submitReview: vi.fn(),
   updateMetric: vi.fn(),
+  suggestRenameName: vi.fn(),
   upsertSubscription: vi.fn(),
   // 详情页子组件依赖
   listQualityEvents: vi.fn().mockResolvedValue({ items: [] }),
@@ -54,9 +55,11 @@ import {
   listSubscriptions,
   fetchRelatedMetrics,
   updateMetric,
+  suggestRenameName,
   UnisenseApiError,
 } from "../api";
 const mockedUpdateMetric = vi.mocked(updateMetric);
+const mockedSuggestRename = vi.mocked(suggestRenameName);
 const mockedGetMetric = vi.mocked(getMetric);
 const mockedListVersions = vi.mocked(listVersions);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
@@ -264,6 +267,62 @@ describe("MetricDetail", () => {
     await waitFor(() =>
       expect(mockedUpdateMetric).toHaveBeenCalledWith("sales_gmv_sum_d", {
         name: "新名称",
+        change_reason: "响应仲裁改名要求",
+      }),
+    );
+  });
+
+  it("仲裁改名弹窗支持 AI 生成名称建议——候选展示、点选填入、可编辑后提交", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      name: "销售金额",
+      arbitration_mark: {
+        status: "coexist",
+        conflict_id: "CF-RENAME",
+        decision: "keep_diff",
+        ruled_at: "2026-08-15T04:00:00Z",
+        opposite_code: "sales_gmv_d",
+        rename_required: true,
+        rename_opposite_code: "sales_gmv_d",
+      },
+    });
+    mockedSuggestRename.mockResolvedValue({
+      current_name: "销售金额",
+      suggestions: [
+        { name: "销售金额（日口径）", reason: "追加统计周期以区分", source: "llm" },
+        { name: "日销售总额", reason: "语义更聚焦日粒度", source: "llm" },
+      ],
+    });
+    mockedUpdateMetric.mockResolvedValue(metric);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+
+    // 打开改名弹窗
+    const renameBtn = await screen.findByRole("button", { name: /去\s*改\s*名/ });
+    fireEvent.click(renameBtn);
+    await screen.findByText("指标改名（响应仲裁要求）");
+
+    // 点击「AI 生成名称建议」→ 展示候选（含 AI 来源与理由）
+    fireEvent.click(screen.getByRole("button", { name: /AI 生成名称建议/ }));
+    expect(await screen.findByText("销售金额（日口径）")).toBeInTheDocument();
+    expect(screen.getByText(/AI 生成 · 追加统计周期以区分/)).toBeInTheDocument();
+    expect(mockedSuggestRename).toHaveBeenCalledWith(
+      "sales_gmv_sum_d",
+      "sales_gmv_d", // rename_opposite_code 作为对方指标
+    );
+
+    // 点选第二个候选 → 名称输入框填入该候选
+    fireEvent.click(screen.getByText("日销售总额"));
+    const nameInput = screen.getByPlaceholderText("新的指标名称") as HTMLInputElement;
+    expect(nameInput.value).toBe("日销售总额");
+
+    // 用户可继续编辑候选 → 提交改名
+    fireEvent.change(nameInput, { target: { value: "日销售总额(新)" } });
+    const reasonInput = screen.getByPlaceholderText(/变更原因/) as HTMLTextAreaElement;
+    fireEvent.change(reasonInput, { target: { value: "响应仲裁改名要求" } });
+    fireEvent.click(screen.getByText("确认改名"));
+    await waitFor(() =>
+      expect(mockedUpdateMetric).toHaveBeenCalledWith("sales_gmv_sum_d", {
+        name: "日销售总额(新)",
         change_reason: "响应仲裁改名要求",
       }),
     );
