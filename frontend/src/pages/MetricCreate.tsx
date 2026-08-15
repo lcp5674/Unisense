@@ -149,6 +149,9 @@ export function MetricCreate() {
   const [batchForm] = Form.useForm();
   const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [batchResult, setBatchResult] = useState<MetricBatchRegisterResult | null>(null);
+  // 批量弹窗：当前源表对应的列选项（选源表后加载，供度量列点选）
+  const [batchColumnOptions, setBatchColumnOptions] = useState<{ value: string; label: string }[]>([]);
+  const [batchColLoading, setBatchColLoading] = useState(false);
 
   useEffect(() => {
     setDomainLoading(true);
@@ -235,31 +238,27 @@ export function MetricCreate() {
     }
   }
 
-  // 选源表后加载该表列信息（供度量列选择）
-  async function loadColumnsForTable(entityName: string) {
+  // 取某表的列选项（name + type + comment），供主表单与批量注册弹窗复用
+  async function fetchColumnsForTable(entityName: string): Promise<{ value: string; label: string }[]> {
     try {
       const res = await listCatalogs({ entity_type: "TABLE", keyword: entityName, page_size: 5, source_status: "active" });
       const catalog = res.items.find((it) => it.entity_name === entityName);
-      if (catalog) {
-        setSelectedTableCatalog(catalog);
-        const cols: ColumnInfo[] = (catalog as any).schema_def?.columns || (catalog as any).schema_json?.columns || [];
-        if (cols.length > 0) {
-          setColumnOptions(
-            cols.map((col) => ({
-              value: col.name,
-              label: col.type ? `${col.name} (${col.type})${col.comment ? " — " + col.comment : ""}` : col.name,
-            }))
-          );
-          return;
-        }
-        setColumnOptions([]);
-        message.info("该表无列信息（schema 未采集完整）");
-        return;
-      }
-      setColumnOptions([]);
+      if (!catalog) return [];
+      const cols: ColumnInfo[] = (catalog as any).schema_def?.columns || (catalog as any).schema_json?.columns || [];
+      return cols.map((col) => ({
+        value: col.name,
+        label: col.type ? `${col.name} (${col.type})${col.comment ? " — " + col.comment : ""}` : col.name,
+      }));
     } catch {
-      setColumnOptions([]);
+      return [];
     }
+  }
+
+  // 选源表后加载该表列信息（供主表单度量列选择）
+  async function loadColumnsForTable(entityName: string) {
+    const opts = await fetchColumnsForTable(entityName);
+    setColumnOptions(opts);
+    if (opts.length === 0) message.info("该表无列信息（schema 未采集完整）");
   }
 
   // 选了源表后：1) 加载该表列信息  2) 触发自动推断（含依赖表）
@@ -490,15 +489,33 @@ export function MetricCreate() {
   function openBatchModal() {
     batchForm.resetFields();
     setBatchResult(null);
+    setBatchColumnOptions([]);
     if (selectedDomain) batchForm.setFieldValue("domain", selectedDomain);
     setBatchOpen(true);
   }
 
+  // 批量弹窗：选源表后加载该表列（供度量列点选，不要求用户手输列名）
+  async function handleBatchSrcTableChange(entityName: string) {
+    if (!entityName) {
+      setBatchColumnOptions([]);
+      return;
+    }
+    setBatchColLoading(true);
+    try {
+      const opts = await fetchColumnsForTable(entityName);
+      setBatchColumnOptions(opts);
+      if (opts.length === 0) message.info("该表无列信息（schema 未采集完整），可手动输入列名");
+    } finally {
+      setBatchColLoading(false);
+    }
+  }
+
   // 提交批量注册：度量列按行拆分，维度映射为可选 JSON，成功/失败明细展示在结果区
   async function handleBatchSubmit(values: Record<string, unknown>) {
-    const measureColumns = String(values.measure_columns || "")
-      .split("\n")
-      .map((s) => s.trim())
+    // tags Select 返回数组；兼容历史手输换行文本
+    const rawMeasure = values.measure_columns;
+    const measureColumns = (Array.isArray(rawMeasure) ? rawMeasure : String(rawMeasure || "").split("\n"))
+      .map((s) => String(s).trim())
       .filter(Boolean);
     if (measureColumns.length === 0) {
       message.warning("请至少填写一个度量列");
@@ -968,6 +985,7 @@ export function MetricCreate() {
                 allowClear
                 placeholder="选择或搜索源宽表（已接入的表可直接选，如 dwd.sales_detail）"
                 onSearch={handleSrcTableSearch}
+                onChange={handleBatchSrcTableChange}
                 onOpenChange={handleSrcTableDropdown}
                 loading={srcTableSearchLoading}
                 notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
@@ -978,13 +996,19 @@ export function MetricCreate() {
             <Form.Item
               name="measure_columns"
               label="度量列"
-              rules={[{ required: true, message: "请至少填写一个度量列" }]}
-              extra="每行一个度量列，系统将逐个创建指标草稿（DRAFT）"
+              rules={[{ required: true, message: "请至少选择一个度量列" }]}
+              extra={batchColumnOptions.length > 0 ? "从该表列中选择（可多选），或输入自定义列名" : "请先选择源表，可自动带出该表列"}
             >
-              <TextArea
-                rows={5}
-                placeholder={"gmv\norder_cnt\nrefund_amt"}
-                className="mono"
+              <Select
+                mode="tags"
+                tokenSeparators={[",", "\n"]}
+                placeholder={batchColumnOptions.length > 0 ? "选择该表列（可多选，也可输入）" : "请先选择源表后自动带出该表列"}
+                options={batchColumnOptions}
+                loading={batchColLoading}
+                notFoundContent={batchColLoading ? <Spin size="small" /> : "无匹配列，可直接输入"}
+                filterOption={(input, option) =>
+                  (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+                }
               />
             </Form.Item>
             <Form.Item

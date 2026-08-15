@@ -27,18 +27,20 @@ const mockedBatch = vi.mocked(batchRegisterMetrics);
 const mockedSuggest = vi.mocked(autoSuggestMetric);
 
 /** 构造完整 DBCatalog（源表搜索 mock 用），仅 entity_name/source_name 参与渲染。 */
-function makeCatalog(entityName: string): DBCatalog {
+function makeCatalog(entityName: string, columns?: { name: string; type?: string }[]): DBCatalog {
   return {
     source_id: "src_test",
     entity_name: entityName,
     entity_type: "TABLE",
-    schema_def: {},
+    schema_def: columns
+      ? { columns: columns.map((c) => ({ name: c.name, type: c.type ?? "", comment: "" })) }
+      : {},
     etl_sql: null,
     sensitivity_level: "L2",
     owner_id: null,
     upstream_signature: "",
     content_signature: null,
-    schema_incomplete: true,
+    schema_incomplete: !columns || columns.length === 0,
     source_name: null,
   };
 }
@@ -119,7 +121,7 @@ async function clickSelectOption(text: string) {
   });
 }
 
-/** 批量表单公共填充：选域（默认「销售 (sales)」）+ 源表搜索选中 + 填写度量列。 */
+/** 批量表单公共填充：选域（默认「销售 (sales)」）+ 源表搜索选中 + 填入度量列（tags 逐个 Enter）。 */
 async function fillBatchForm(modal: HTMLElement, measureColumns: string) {
   fireEvent.mouseDown(within(modal).getByText("选择所属业务域（须为 active 域）"));
   await clickSelectOption("销售 (sales)");
@@ -130,7 +132,16 @@ async function fillBatchForm(modal: HTMLElement, measureColumns: string) {
   fireEvent.change(srcInput, { target: { value: "dwd" } });
   await clickSelectOption("dwd.sales_detail");
 
-  fireEvent.change(within(modal).getByLabelText("度量列"), { target: { value: measureColumns } });
+  // 度量列 tags Select：选源表后已自动带出该表列，展开下拉逐个点选（多选，空白行自动过滤）
+  const cols = measureColumns
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const col of cols) {
+    const input = modal.querySelector(".ant-select-multiple input") as HTMLInputElement;
+    fireEvent.mouseDown(input);
+    await clickSelectOption(col);
+  }
 }
 
 describe("MetricCreate 批量注册指标", () => {
@@ -139,7 +150,13 @@ describe("MetricCreate 批量注册指标", () => {
     mockedTree.mockResolvedValue(TREE);
     mockedDict.mockResolvedValue([]);
     mockedCatalogs.mockResolvedValue({
-      items: [makeCatalog("dwd.sales_detail")],
+      items: [
+        makeCatalog("dwd.sales_detail", [
+          { name: "gmv" },
+          { name: "order_cnt" },
+          { name: "dup" },
+        ]),
+      ],
       total: 1,
       page: 1,
       page_size: 20,
@@ -154,6 +171,33 @@ describe("MetricCreate 批量注册指标", () => {
     expect(within(modal).getByText("源表名")).toBeTruthy();
     expect(within(modal).getByText("度量列")).toBeTruthy();
     expect(within(modal).getByText("提交批量注册")).toBeTruthy();
+  });
+
+  it("选择源表后，度量列自动带出该表列供选择", async () => {
+    renderPage();
+    const modal = await openBatchModal();
+
+    fireEvent.mouseDown(within(modal).getByText("选择所属业务域（须为 active 域）"));
+    await clickSelectOption("销售 (sales)");
+
+    const srcInput = modal.querySelector('input[id="source_table"]') as HTMLInputElement;
+    fireEvent.mouseDown(srcInput);
+    fireEvent.change(srcInput, { target: { value: "dwd" } });
+    await clickSelectOption("dwd.sales_detail");
+
+    // 展开度量列下拉：应自动带出所选源表的列（而非让用户手输列名）
+    const measureInput = modal.querySelector(".ant-select-multiple input") as HTMLInputElement;
+    fireEvent.mouseDown(measureInput);
+    await waitFor(() => {
+      const dropdown = document.querySelector(
+        ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+      ) as HTMLElement | null;
+      const titles = dropdown
+        ? Array.from(dropdown.querySelectorAll(".ant-select-item-option")).map((o) => o.getAttribute("title"))
+        : [];
+      expect(titles).toContain("gmv");
+      expect(titles).toContain("order_cnt");
+    });
   });
 
   it("提交批量注册携带正确 payload（源表/度量列/域/LLM 预填）", async () => {
@@ -224,7 +268,7 @@ describe("MetricCreate 批量注册指标", () => {
     fireEvent.click(within(modal).getByText("提交批量注册"));
 
     await waitFor(() => {
-      expect(screen.getByText("请至少填写一个度量列")).toBeTruthy();
+      expect(screen.getByText("请至少选择一个度量列")).toBeTruthy();
     });
     expect(mockedBatch).not.toHaveBeenCalled();
   });
