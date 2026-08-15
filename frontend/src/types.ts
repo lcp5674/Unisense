@@ -1120,7 +1120,32 @@ export interface Feedback {
   target_id: string | null;
   rating: number | null;
   comment: string | null;
+  /** NPS 评分（0-10，仅 NPS 采集记录有值） */
+  nps_score: number | null;
+  /** 采纳闭环状态：pending/in_progress/adopted/rejected */
+  status: string;
+  resolution_note: string | null;
+  resolver_id: number | null;
+  resolved_at: string | null;
   created_at: string;
+}
+
+/** NPS 分布统计（GET /observability/nps/stats） */
+export interface NpsStats {
+  total: number;
+  promoters: number;
+  passives: number;
+  detractors: number;
+  score: number;
+}
+
+/** 可观测中心最近质量事件明细行（GET /observability/quality-events） */
+export interface QualityEventItem {
+  id: number;
+  level: string;
+  status: string;
+  metric_id: number;
+  created_at: string | null;
 }
 
 export interface ObsMetricsQuality {
@@ -1738,6 +1763,9 @@ export interface AssetEntityDetail {
 
 export interface AssetOwnerView {
   owner_id: number;
+  owner_name?: string | null;
+  role?: string | null;
+  domain?: string | null;
   metrics: {
     total: number;
     published: number;

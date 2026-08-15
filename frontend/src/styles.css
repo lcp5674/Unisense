@@ -1190,6 +1190,15 @@ body {
   line-height: 1.4;
 }
 
+/* 事件类型徽标：标题旁的小字 Tag，帮助用户快速识别通知类型（业务术语） */
+.notif-type {
+  margin-left: 8px;
+  font-size: 11px;
+  line-height: 18px;
+  vertical-align: 1px;
+  flex: 0 0 auto;
+}
+
 .notif-head-right {
   display: flex;
   align-items: center;

@@ -2,13 +2,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { Observability } from "../pages/Observability";
 
-// Mock API（5 个可观测端点）
+// Mock API（可观测端点，含质量事件明细）
 vi.mock("../api", () => ({
   fetchObsMetricsQuality: vi.fn(),
   fetchObsMetricsApi: vi.fn(),
   fetchObsMetricsNotifications: vi.fn(),
   fetchObsMetricsLineage: vi.fn(),
   fetchObsOverview: vi.fn(),
+  fetchObsQualityEvents: vi.fn(),
 }));
 
 import {
@@ -17,6 +18,7 @@ import {
   fetchObsMetricsNotifications,
   fetchObsMetricsLineage,
   fetchObsOverview,
+  fetchObsQualityEvents,
 } from "../api";
 
 const mockedQuality = vi.mocked(fetchObsMetricsQuality);
@@ -24,6 +26,7 @@ const mockedApi = vi.mocked(fetchObsMetricsApi);
 const mockedNotif = vi.mocked(fetchObsMetricsNotifications);
 const mockedLineage = vi.mocked(fetchObsMetricsLineage);
 const mockedOverview = vi.mocked(fetchObsOverview);
+const mockedQualityEvents = vi.mocked(fetchObsQualityEvents);
 
 const overview = {
   sources: { by_health: { healthy: 2, unhealthy: 1 }, total: 3 },
@@ -58,6 +61,7 @@ beforeEach(() => {
     event_notified: 3,
   } as never);
   mockedLineage.mockResolvedValue({ edges: 7 } as never);
+  mockedQualityEvents.mockResolvedValue({ items: [], total: 0 } as never);
 });
 
 describe("Observability 可观测中心", () => {
@@ -123,5 +127,29 @@ describe("Observability 可观测中心", () => {
     expect(screen.getByText("P2 一般")).toBeInTheDocument();
     // 原始级别不应直出（ERROR/WARN/INFO 是消息重要度，非质量事件严重级）
     expect(screen.queryByText("ERROR")).not.toBeInTheDocument();
+  });
+
+  it("运行指标 Tab 展示最近质量事件明细：级别/状态中文 + 指标 ID + 时间", async () => {
+    mockedQualityEvents.mockResolvedValue({
+      items: [
+        { id: 11, level: "P0", status: "OPEN", metric_id: 5, created_at: "2026-08-12T03:00:00" },
+        { id: 12, level: "P2", status: "CLOSED", metric_id: 6, created_at: "2026-08-11T02:00:00" },
+      ],
+      total: 2,
+    } as never);
+    render(<Observability />);
+    await waitFor(() => expect(screen.getByText("平台概览")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("运行指标"));
+
+    await waitFor(() => expect(screen.getByText("最近质量事件")).toBeInTheDocument());
+    expect(screen.getByText("P0 紧急")).toBeInTheDocument();
+    expect(screen.getByText("P2 一般")).toBeInTheDocument();
+    expect(screen.getByText("待处理")).toBeInTheDocument();
+    expect(screen.getByText("已关闭")).toBeInTheDocument();
+    expect(screen.getByText("指标 #5")).toBeInTheDocument();
+    expect(screen.getByText("指标 #6")).toBeInTheDocument();
+    // 原始技术值不应直出
+    expect(screen.queryByText("OPEN")).not.toBeInTheDocument();
+    expect(screen.queryByText("CLOSED")).not.toBeInTheDocument();
   });
 });

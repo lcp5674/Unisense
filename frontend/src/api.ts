@@ -1974,11 +1974,20 @@ export async function upsertSubscription(body: {
 }
 
 // ---- 可观测 ----
-export async function listFeedback(
-  targetType?: string,
-): Promise<{ items: Feedback[]; total: number }> {
-  const qs = targetType ? `?target_type=${encodeURIComponent(targetType)}` : "";
-  return request(`${API_BASE}/observability/feedback${qs}`);
+export async function listFeedback(params?: {
+  target_type?: string;
+  /** 过滤：adopted/rejected/in_progress/pending */
+  status?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: Feedback[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    target_type: params?.target_type,
+    status: params?.status,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/observability/feedback?${qs}`);
 }
 
 export async function submitFeedback(body: {
@@ -2014,6 +2023,18 @@ export async function submitNps(body: {
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/** NPS 分布统计（GET /observability/nps/stats）：total/promoters/passives/detractors/score */
+export async function fetchNpsStats(): Promise<NpsStats> {
+  return request<NpsStats>(`${API_BASE}/observability/nps/stats`);
+}
+
+/** 最近质量事件明细（GET /observability/quality-events，运营大盘明细面板） */
+export async function fetchObsQualityEvents(
+  limit = 20,
+): Promise<{ items: QualityEventItem[]; total: number }> {
+  return request(`${API_BASE}/observability/quality-events?limit=${limit}`);
 }
 
 export async function fetchObsMetricsQuality(): Promise<ObsMetricsQuality> {

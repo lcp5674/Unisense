@@ -1,19 +1,63 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Rate, message, Tabs, Space, Alert, Tooltip } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Rate, message, Tabs, Space, Alert, Tooltip, Row, Col } from "antd";
 import { StarOutlined } from "@ant-design/icons";
-import { listFeedback, submitFeedback, updateFeedbackStatus, submitNps, UnisenseApiError } from "../api";
-import type { Feedback } from "../types";
+import { listFeedback, submitFeedback, updateFeedbackStatus, submitNps, fetchNpsStats, UnisenseApiError } from "../api";
+import type { Feedback, NpsStats } from "../types";
 import { formatCnTime, timeAgoCn } from "../utils/timeCn";
+
+// ---- 展示映射（value=英文对接后端，label=中文展示） ----
+
+const STATUS_ZH: Record<string, { label: string; color: string }> = {
+  pending: { label: "待处理", color: "default" },
+  in_progress: { label: "跟进中", color: "blue" },
+  adopted: { label: "已采纳", color: "green" },
+  rejected: { label: "已驳回", color: "red" },
+};
+
+const TARGET_TYPE_ZH: Record<string, string> = {
+  metric: "指标",
+  term: "术语",
+  report: "报表",
+  dashboard: "仪表盘",
+};
+
+const TYPE_FILTER_OPTIONS = [
+  { value: "metric", label: "指标" },
+  { value: "term", label: "术语" },
+  { value: "report", label: "报表" },
+  { value: "dashboard", label: "仪表盘" },
+];
+
+const STATUS_FILTER_OPTIONS = [
+  { value: "pending", label: "待处理" },
+  { value: "in_progress", label: "跟进中" },
+  { value: "adopted", label: "已采纳" },
+  { value: "rejected", label: "已驳回" },
+];
+
+interface ProcessDraft {
+  feedback: Feedback;
+  status: string;
+  note: string;
+}
 
 function FeedbackTab() {
   const [items, setItems] = useState<Feedback[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [targetType, setTargetType] = useState<string | undefined>();
+  const [status, setStatus] = useState<string | undefined>();
+  const [draft, setDraft] = useState<ProcessDraft | null>(null);
+  const [updateLoading, setUpdateLoading] = useState(false);
 
-  async function load() {
+  async function load(p = page, ps = pageSize, tt = targetType, st = status) {
     setLoading(true);
     try {
-      const res = await listFeedback();
+      const res = await listFeedback({ target_type: tt, status: st, page: p, page_size: ps });
       setItems(res.items);
+      setTotal(res.total);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
@@ -22,46 +66,164 @@ function FeedbackTab() {
   }
 
   useEffect(() => {
-    load();
+    load(1, pageSize);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function handleStatus(f: Feedback, status: string) {
+  function changeType(tt: string | undefined) {
+    setTargetType(tt);
+    setPage(1);
+    load(1, pageSize, tt, status);
+  }
+
+  function changeStatus(st: string | undefined) {
+    setStatus(st);
+    setPage(1);
+    load(1, pageSize, targetType, st);
+  }
+
+  async function confirmProcess() {
+    if (!draft) return;
+    setUpdateLoading(true);
     try {
-      await updateFeedbackStatus(f.id, status, "前台处理");
+      await updateFeedbackStatus(draft.feedback.id, draft.status, draft.note ? draft.note : null);
+      message.success("处理完成");
+      setDraft(null);
       load();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
+    } finally {
+      setUpdateLoading(false);
     }
   }
 
   const columns = [
-    { title: "ID", dataIndex: "id", key: "id", width: 70 },
-    { title: "用户", dataIndex: "user_id", key: "user", width: 80 },
-    { title: "对象类型", dataIndex: "target_type", key: "targetType", width: 110, render: (v: string) => <Tag>{v}</Tag> },
-    { title: "对象 ID", dataIndex: "target_id", key: "targetId", width: 160, render: (v: string | null) => v ?? <span className="muted">—</span> },
+    { title: "ID", dataIndex: "id", key: "id", width: 64 },
+    { title: "用户", dataIndex: "user_id", key: "user", width: 72 },
+    {
+      title: "对象类型",
+      dataIndex: "target_type",
+      key: "targetType",
+      width: 100,
+      render: (v: string) => <Tag>{TARGET_TYPE_ZH[v] ?? v}</Tag>,
+    },
+    { title: "对象 ID", dataIndex: "target_id", key: "targetId", width: 140, render: (v: string | null) => v ?? <span className="muted">—</span> },
     { title: "评分", dataIndex: "rating", key: "rating", width: 100, render: (v: number | null) => (v !== null ? <Rate disabled defaultValue={v} count={5} /> : <span className="muted">—</span>) },
     { title: "内容", dataIndex: "comment", key: "comment", ellipsis: true },
-    { title: "时间", dataIndex: "created_at", key: "created", width: 170, render: (v: string) => (
-      <Tooltip title={formatCnTime(v)}>
-        <span>{timeAgoCn(v)}</span>
-      </Tooltip>
-    ) },
+    {
+      title: "状态",
+      dataIndex: "status",
+      key: "status",
+      width: 94,
+      render: (v: string) => {
+        const s = STATUS_ZH[v] ?? { label: v, color: "default" };
+        return <Tag color={s.color}>{s.label}</Tag>;
+      },
+    },
+    {
+      title: "处理人",
+      dataIndex: "resolver_id",
+      key: "resolver",
+      width: 84,
+      render: (v: number | null) => (v !== null ? <span className="mono">{v}</span> : <span className="muted">—</span>),
+    },
+    {
+      title: "处理时间",
+      dataIndex: "resolved_at",
+      key: "resolved",
+      width: 120,
+      render: (v: string | null) => (v ? <Tooltip title={formatCnTime(v)}><span>{timeAgoCn(v)}</span></Tooltip> : <span className="muted">—</span>),
+    },
+    {
+      title: "提交时间",
+      dataIndex: "created_at",
+      key: "created",
+      width: 120,
+      render: (v: string) => (
+        <Tooltip title={formatCnTime(v)}>
+          <span>{timeAgoCn(v)}</span>
+        </Tooltip>
+      ),
+    },
     {
       title: "处理",
       key: "actions",
-      width: 220,
+      width: 210,
       render: (_: unknown, f: Feedback) => (
         <Space>
-          <Button size="small" onClick={() => handleStatus(f, "in_progress")}>跟进</Button>
-          <Button size="small" type="primary" onClick={() => handleStatus(f, "adopted")}>采纳</Button>
-          <Button size="small" danger onClick={() => handleStatus(f, "rejected")}>驳回</Button>
+          <Button size="small" onClick={() => setDraft({ feedback: f, status: "in_progress", note: "" })}>跟进</Button>
+          <Button size="small" type="primary" onClick={() => setDraft({ feedback: f, status: "adopted", note: "" })}>采纳</Button>
+          <Button size="small" danger onClick={() => setDraft({ feedback: f, status: "rejected", note: "" })}>驳回</Button>
         </Space>
       ),
     },
   ];
 
-  return <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize: 20 }} locale={{ emptyText: "暂无反馈" }} />;
+  return (
+    <div>
+      <Space style={{ marginBottom: 12 }} wrap>
+        <span className="muted">类型：</span>
+        <Select
+          allowClear
+          placeholder="全部类型"
+          style={{ width: 120 }}
+          options={TYPE_FILTER_OPTIONS}
+          value={targetType}
+          onChange={changeType}
+        />
+        <span className="muted">状态：</span>
+        <Select
+          allowClear
+          placeholder="全部状态"
+          style={{ width: 120 }}
+          options={STATUS_FILTER_OPTIONS}
+          value={status}
+          onChange={changeStatus}
+        />
+      </Space>
+
+      <Table
+        dataSource={items}
+        columns={columns}
+        rowKey="id"
+        loading={loading}
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          pageSizeOptions: [10, 20, 50],
+          showTotal: (t) => `共 ${t} 条`,
+          onChange: (p, ps) => {
+            setPage(p);
+            setPageSize(ps);
+            load(p, ps, targetType, status);
+          },
+        }}
+        locale={{ emptyText: "暂无反馈" }}
+      />
+
+      <Modal
+        title={`${STATUS_ZH[draft?.status ?? ""]?.label ?? ""}反馈`}
+        open={draft !== null}
+        onCancel={() => setDraft(null)}
+        onOk={confirmProcess}
+        okText="确认处理"
+        confirmLoading={updateLoading}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <span className="muted">反馈 #{draft?.feedback.id}：{draft?.feedback.comment ?? "（无内容）"}</span>
+        </div>
+        <div className="muted" style={{ marginBottom: 6 }}>处理说明：</div>
+        <Input.TextArea
+          value={draft?.note ?? ""}
+          onChange={(e) => setDraft((d) => (d ? { ...d, note: e.target.value } : d))}
+          placeholder="请输入处理说明（如：已反馈产品，排期支持）"
+          rows={3}
+        />
+      </Modal>
+    </div>
+  );
 }
 
 function SubmitFeedbackTab() {
@@ -86,7 +248,7 @@ function SubmitFeedbackTab() {
     <Card title="提交反馈" size="small">
       <Form form={form} layout="vertical" onFinish={handleSubmit} style={{ maxWidth: 520 }}>
         <Form.Item name="target_type" label="对象类型" rules={[{ required: true }]}>
-          <Select options={["metric", "term", "report", "dashboard"].map((v) => ({ value: v, label: v }))} />
+          <Select options={TYPE_FILTER_OPTIONS} />
         </Form.Item>
         <Form.Item name="target_id" label="对象 ID">
           <Input className="mono" />
@@ -103,10 +265,54 @@ function SubmitFeedbackTab() {
   );
 }
 
+function NpsScores({ stats }: { stats: NpsStats | null }) {
+  const score = stats?.score;
+  const scoreColor = score !== undefined ? (score >= 50 ? "var(--ok)" : score >= 0 ? "var(--signal)" : "var(--danger)") : "var(--text-tertiary)";
+  return (
+    <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+      <Col xs={24} sm={6}>
+        <Card size="small">
+          <div className="muted">NPS 得分</div>
+          <div style={{ fontFamily: "var(--font-display)", fontSize: 40, fontWeight: 700, color: scoreColor }}>
+            {score !== undefined ? score : "—"}
+          </div>
+        </Card>
+      </Col>
+      <Col xs={24} sm={6}>
+        <Card size="small">
+          <div className="muted">推荐者（9-10）</div>
+          <div style={{ fontSize: 28, fontWeight: 600, color: "var(--ok)" }}>{stats?.promoters ?? "—"}</div>
+        </Card>
+      </Col>
+      <Col xs={24} sm={6}>
+        <Card size="small">
+          <div className="muted">被动者（7-8）</div>
+          <div style={{ fontSize: 28, fontWeight: 600, color: "var(--signal)" }}>{stats?.passives ?? "—"}</div>
+        </Card>
+      </Col>
+      <Col xs={24} sm={6}>
+        <Card size="small">
+          <div className="muted">贬损者（0-6）</div>
+          <div style={{ fontSize: 28, fontWeight: 600, color: "var(--danger)" }}>{stats?.detractors ?? "—"}</div>
+        </Card>
+      </Col>
+    </Row>
+  );
+}
+
 function NpsTab() {
   const [modalOpen, setModalOpen] = useState(false);
   const [score, setScore] = useState<number>(8);
+  const [stats, setStats] = useState<NpsStats | null>(null);
   const [form] = Form.useForm();
+
+  function loadStats() {
+    fetchNpsStats().then(setStats).catch(() => {});
+  }
+
+  useEffect(() => {
+    loadStats();
+  }, []);
 
   async function handleSubmit(values: Record<string, unknown>) {
     try {
@@ -119,6 +325,7 @@ function NpsTab() {
       message.success(`NPS ${score}/10 已提交，感谢反馈`);
       setModalOpen(false);
       form.resetFields();
+      loadStats();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交失败");
     }
@@ -127,6 +334,7 @@ function NpsTab() {
   return (
     <div>
       <Alert type="info" showIcon style={{ marginBottom: 12 }} message="净推荐值（NPS）调查——0-10 分，9-10 为推荐者。" />
+      <NpsScores stats={stats} />
       <Button type="primary" icon={<StarOutlined />} onClick={() => setModalOpen(true)}>参与 NPS 调查</Button>
 
       <Modal title="NPS 调查" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="提交">

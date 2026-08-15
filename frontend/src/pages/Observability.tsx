@@ -1,20 +1,23 @@
 import { useEffect, useState } from "react";
-import { Alert, Card, Tag, Tabs, Statistic, Row, Col } from "antd";
+import { Alert, Card, Tag, Tabs, Statistic, Row, Col, Space, Tooltip } from "antd";
 import {
   fetchObsMetricsQuality,
   fetchObsMetricsApi,
   fetchObsMetricsNotifications,
   fetchObsMetricsLineage,
   fetchObsOverview,
+  fetchObsQualityEvents,
 } from "../api";
-import type { ObsOverview } from "../types";
+import type { ObsOverview, QualityEventItem } from "../types";
 import {
   QUALITY_SEVERITY_LABEL,
+  QUALITY_EVENT_STATUS_LABEL,
   NOTIFY_STATUS_LABEL,
   SOURCE_HEALTH_LABEL,
   METRIC_STATUS_LABEL,
 } from "../utils/enums";
 import { auditActionLabel } from "../utils/auditI18n";
+import { formatCnTime, timeAgoCn } from "../utils/timeCn";
 
 const rowStyle = {
   display: "flex",
@@ -28,6 +31,7 @@ function MetricsTab() {
   const [api, setApi] = useState<Record<string, number> | null>(null);
   const [notif, setNotif] = useState<{ by_status: Record<string, number>; event_total: number; event_notified: number } | null>(null);
   const [lineage, setLineage] = useState<{ edges: number } | null>(null);
+  const [events, setEvents] = useState<QualityEventItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -36,12 +40,14 @@ function MetricsTab() {
       fetchObsMetricsApi(),
       fetchObsMetricsNotifications(),
       fetchObsMetricsLineage(),
+      fetchObsQualityEvents(),
     ])
-      .then(([q, a, n, l]) => {
+      .then(([q, a, n, l, e]) => {
         setQuality(q);
         setApi(a);
         setNotif(n);
         setLineage(l);
+        setEvents(e.items ?? []);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -95,6 +101,35 @@ function MetricsTab() {
                 <span className="mono">{v}</span>
               </div>
             ))}
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]} style={{ marginTop: 8 }}>
+        <Col xs={24}>
+          <Card title="最近质量事件" size="small">
+            {events.length === 0 ? (
+              <div style={{ ...rowStyle, borderBottom: "none" }}>暂无质量事件</div>
+            ) : (
+              events.map((e) => (
+                <div key={e.id} style={rowStyle}>
+                  <Space size={8}>
+                    <Tag color={e.level === "P0" ? "error" : e.level === "P1" ? "orange" : "default"}>
+                      {QUALITY_SEVERITY_LABEL[e.level] ?? e.level}
+                    </Tag>
+                    <Tag>{QUALITY_EVENT_STATUS_LABEL[e.status] ?? e.status}</Tag>
+                    <span style={{ fontSize: 12 }}>指标 #{e.metric_id}</span>
+                  </Space>
+                  {e.created_at ? (
+                    <span className="mono" style={{ fontSize: 12 }}>
+                      <Tooltip title={formatCnTime(e.created_at)}>{timeAgoCn(e.created_at)}</Tooltip>
+                    </span>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </div>
+              ))
+            )}
           </Card>
         </Col>
       </Row>
