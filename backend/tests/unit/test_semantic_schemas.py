@@ -148,3 +148,17 @@ def test_definition_update_none_passes():
 
     req = MetricUpdateRequest(change_reason="更新指标名称")
     assert req.definition_json is None
+
+
+def test_template_create_owner_id_validation():
+    """MetricTemplateCreateRequest.owner_id：合法值通过、0 被拒绝（ge=1）。"""
+    from app.services.semantic.schemas import MetricTemplateCreateRequest
+
+    # 合法 owner_id → 通过
+    req = MetricTemplateCreateRequest(name="GMV 模板", domain="fin", owner_id=7)
+    assert req.owner_id == 7
+    # 不传 → None（兼容存量）
+    assert MetricTemplateCreateRequest(name="GMV 模板", domain="fin").owner_id is None
+    # 0 → 422
+    with pytest.raises(ValidationError):
+        MetricTemplateCreateRequest(name="GMV 模板", domain="fin", owner_id=0)

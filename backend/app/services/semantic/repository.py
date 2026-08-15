@@ -613,24 +613,92 @@ class MetricRepository:
         by_domain = {row[0]: row[1] for row in domain_rows}
 
         # ---- 完整指标体系（对齐方案 C：一眼看到几乎全部资产/治理状态）----
-        # 1) Owner 责任分布：join User 一次查询 (owner_id, name, status, count)，Python 组装
-        owner_stmt = (
-            select(
-                Metric.owner_id,
-                User.display_name,
-                Metric.status,
-                func.count().label("cnt"),
-            )
-            .join(User, User.id == Metric.owner_id)
+        # 1) Owner 责任分布（跨资产）：指标/数据表/维度/术语/指标模板按 owner 分组，
+        #    再统一查 User 显示名（兼容"仅有非指标资产"的责任人）
+        owner_metric_stmt = (
+            select(Metric.owner_id, Metric.status, func.count().label("cnt"))
             .where(*conditions)
-            .group_by(Metric.owner_id, User.display_name, Metric.status)
+            .group_by(Metric.owner_id, Metric.status)
         )
-        owner_rows = (await self._db.execute(owner_stmt)).all()
+        owner_metric_rows = (await self._db.execute(owner_metric_stmt)).all()
+
+        owner_table_stmt = (
+            select(DBCatalog.owner_id, func.count().label("cnt"))
+            .where(DBCatalog.owner_id.isnot(None), DBCatalog.deleted_at.is_(None))
+            .group_by(DBCatalog.owner_id)
+        )
+        owner_table_rows = (await self._db.execute(owner_table_stmt)).all()
+
+        owner_dim_stmt = (
+            select(Dimension.owner_id, func.count().label("cnt"))
+            .where(Dimension.deleted_at.is_(None))
+            .group_by(Dimension.owner_id)
+        )
+        owner_dim_rows = (await self._db.execute(owner_dim_stmt)).all()
+
+        owner_term_stmt = (
+            select(Term.owner_id, func.count().label("cnt"))
+            .where(Term.deleted_at.is_(None))
+            .group_by(Term.owner_id)
+        )
+        owner_term_rows = (await self._db.execute(owner_term_stmt)).all()
+
+        owner_tpl_stmt = (
+            select(MetricTemplate.owner_id, func.count().label("cnt"))
+            .where(MetricTemplate.owner_id.isnot(None), MetricTemplate.deleted_at.is_(None))
+            .group_by(MetricTemplate.owner_id)
+        )
+        owner_tpl_rows = (await self._db.execute(owner_tpl_stmt)).all()
+
+        owner_ids = {
+            r[0]
+            for r in (
+                owner_metric_rows
+                + owner_table_rows
+                + owner_dim_rows
+                + owner_term_rows
+                + owner_tpl_rows
+            )
+        }
+        owner_names: dict[int, str] = {}
+        if owner_ids:
+            owner_name_stmt = select(User.id, User.display_name).where(User.id.in_(owner_ids))
+            owner_names = dict((await self._db.execute(owner_name_stmt)).all())
+
+        def _owner_entry(owner_id_: int) -> dict[str, Any]:
+            return {
+                "name": owner_names.get(owner_id_, f"用户 #{owner_id_}"),
+                "total": 0,
+                "metrics": {"total": 0, "by_status": {}},
+                "tables": 0,
+                "dimensions": 0,
+                "terms": 0,
+                "templates": 0,
+            }
+
         by_owner: dict[int, dict[str, Any]] = {}
-        for owner_id_, name, status_, cnt in owner_rows:
-            entry = by_owner.setdefault(owner_id_, {"name": name, "total": 0, "by_status": {}})
-            entry["total"] += cnt
-            entry["by_status"][status_] = entry["by_status"].get(status_, 0) + cnt
+        for owner_id_, status_, cnt in owner_metric_rows:
+            entry = by_owner.setdefault(owner_id_, _owner_entry(owner_id_))
+            entry["metrics"]["total"] += cnt
+            entry["metrics"]["by_status"][status_] = (
+                entry["metrics"]["by_status"].get(status_, 0) + cnt
+            )
+        for owner_id_, cnt in owner_table_rows:
+            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["tables"] = cnt
+        for owner_id_, cnt in owner_dim_rows:
+            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["dimensions"] = cnt
+        for owner_id_, cnt in owner_term_rows:
+            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["terms"] = cnt
+        for owner_id_, cnt in owner_tpl_rows:
+            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["templates"] = cnt
+        for entry in by_owner.values():
+            entry["total"] = (
+                entry["metrics"]["total"]
+                + entry["tables"]
+                + entry["dimensions"]
+                + entry["terms"]
+                + entry["templates"]
+            )
 
         # 2) 质量健康：质量事件按严重级分布 + 待处理（OPEN+ACK）
         quality_sev_stmt = (

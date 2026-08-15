@@ -154,6 +154,7 @@ async def create_template(
         serving_mode=validated.serving_mode,
         additivity=validated.additivity,
         metric_tier=body.get("metric_tier"),
+        owner_id=validated.owner_id,
         created_by=user.id,
     )
     db.add(template)
@@ -164,6 +165,59 @@ async def create_template(
         entity_type="metric_template",
         entity_id=str(template.code),
         detail={"name": template.name, "domain": template.domain},
+        ip=client_ip(request),
+        trace_id=get_trace_id(request),
+    )
+    await db.commit()
+    await db.refresh(template)
+    return ok(data=template.to_dict(), trace_id=get_trace_id(request))
+
+
+@router.patch(
+    "/templates/{template_id}/owner",
+    dependencies=_WRITE_DEPS,
+    response_model=ApiResponse,
+    summary="指派/解除模板责任人",
+)
+async def update_template_owner(
+    user: CurrentUser,
+    template_id: int,
+    request: Request,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db_session),
+) -> Any:
+    """指派或解除指标模板责任人（owner_id=None 解除归属）。
+
+    责任人用于总览仪表 Owner 责任分布的跨资产统计（模板纳入责任维度）。
+    """
+    from app.models.user import User
+
+    q = select(MetricTemplate).where(MetricTemplate.id == template_id)
+    result = await db.execute(q)
+    template = result.scalar_one_or_none()
+    if template is None:
+        from app.core.exceptions import NotFoundError
+
+        raise NotFoundError(f"模板不存在: {template_id}")
+    owner_id = body.get("owner_id")
+    if owner_id is not None:
+        if not isinstance(owner_id, int) or owner_id < 1:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=422, detail="owner_id 必须为正整数")
+        exists = await db.execute(select(User.id).where(User.id == owner_id))
+        if exists.scalar_one_or_none() is None:
+            from app.core.exceptions import NotFoundError
+
+            raise NotFoundError(f"目标用户不存在: {owner_id}")
+    template.owner_id = owner_id
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="template.assign_owner",
+        entity_type="metric_template",
+        entity_id=str(template.code),
+        detail={"owner_id": owner_id},
         ip=client_ip(request),
         trace_id=get_trace_id(request),
     )

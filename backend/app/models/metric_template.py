@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, Enum, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -39,6 +39,7 @@ class MetricTemplate(Base, BaseModel):
         metric_tier: 指标分级预设。
         version: 模板版本号。
         is_active: 是否启用。
+        owner_id: 责任人（Owner）ID（可空，模板负责人）。
         created_by: 创建人 ID。
         published_at: 发布时间（可空）。
     """
@@ -91,12 +92,19 @@ class MetricTemplate(Base, BaseModel):
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, comment="是否启用"
     )
+    owner_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("user.id", name="fk_template_owner"),
+        nullable=True,
+        comment="责任人（Owner）ID",
+    )
     created_by: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="创建人 ID")
     published_at: Mapped[datetime | None] = mapped_column(nullable=True, comment="发布时间")
 
     __table_args__ = (
         Index("idx_template_domain", "domain"),
         Index("idx_template_active", "is_active"),
+        Index("idx_template_owner", "owner_id"),
     )
 
     def to_dict(self, *, include_sensitive: bool = False) -> dict[str, Any]:

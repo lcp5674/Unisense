@@ -532,15 +532,21 @@ def _row_result(total: int, pii_count: int) -> MagicMock:
 
 async def test_aggregate_dashboard_with_filters():
     db = _mock_session()
-    # 顺序：total+pii / by_status / by_tier / by_domain / table / source /
-    #       dimension / term / template / system_dict
+    # 顺序：total+pii / by_status / by_tier / by_domain / owner×5+names /
+    #       quality×2 / compliance / conflict / freshness / 资产总览×6
     db.execute.side_effect = [
         _row_result(total=5, pii_count=2),
         _result(all_=[("PUBLISHED", 3), ("DRAFT", 2)]),  # by_status
         _result(all_=[("T1", 4), ("T2", 1)]),  # by_tier
         _result(all_=[("sales", 5)]),  # by_domain
-        # 治理指标体系（by_owner / quality / compliance / conflict / freshness）
-        _result(all_=[(1, "Alice", "PUBLISHED", 3), (1, "Alice", "DRAFT", 2)]),  # by_owner
+        # Owner 责任分布（跨资产）：指标 / 数据表 / 维度 / 术语 / 模板 / 显示名
+        _result(all_=[(1, "PUBLISHED", 3), (1, "DRAFT", 2)]),  # owner_metric
+        _result(all_=[(1, 5)]),  # owner_table
+        _result(all_=[(1, 2)]),  # owner_dim
+        _result(all_=[(1, 3)]),  # owner_term
+        _result(all_=[(1, 1)]),  # owner_tpl
+        _result(all_=[(1, "Alice")]),  # owner_names
+        # 治理指标体系（quality / compliance / conflict / freshness）
         _result(all_=[("P1", 1)]),  # quality by_severity
         _result(all_=[("OPEN", 1)]),  # quality by_status
         _result(all_=[(True, 4), (False, 1)]),  # compliance
@@ -563,7 +569,19 @@ async def test_aggregate_dashboard_with_filters():
     assert result["by_tier"] == {"T1": 4, "T2": 1}
     assert result["by_domain"] == {"sales": 5}
     assert result["pii_ratio"] == round(2 / 5, 4)
-    assert db.execute.await_count == 16
+    assert db.execute.await_count == 21
+    # Owner 责任分布（跨资产）：指标 5 + 数据表 5 + 维度 2 + 术语 3 + 模板 1 = 16
+    assert result["by_owner"] == {
+        1: {
+            "name": "Alice",
+            "total": 16,
+            "metrics": {"total": 5, "by_status": {"PUBLISHED": 3, "DRAFT": 2}},
+            "tables": 5,
+            "dimensions": 2,
+            "terms": 3,
+            "templates": 1,
+        }
+    }
     # 资产总览：指标复用顶层聚合；其余资产按各自状态列分组
     assert result["assets"]["metric"] == {
         "total": 5,
@@ -584,10 +602,15 @@ async def test_aggregate_dashboard_without_filters_and_zero_total():
     db = _mock_session()
     db.execute.side_effect = [
         _row_result(total=0, pii_count=None),  # pii_count None → or 0
-        _result(all_=[]),
-        _result(all_=[]),
-        _result(all_=[]),
-        _result(all_=[]),  # by_owner
+        _result(all_=[]),  # by_status
+        _result(all_=[]),  # by_tier
+        _result(all_=[]),  # by_domain
+        _result(all_=[]),  # owner_metric
+        _result(all_=[]),  # owner_table
+        _result(all_=[]),  # owner_dim
+        _result(all_=[]),  # owner_term
+        _result(all_=[]),  # owner_tpl
+        # owner_names 跳过（owner_ids 为空）
         _result(all_=[]),  # quality severity
         _result(all_=[]),  # quality status
         _result(all_=[]),  # compliance
@@ -635,13 +658,18 @@ async def test_aggregate_dashboard_governance_indicators():
         _result(all_=[("PUBLISHED", 6), ("DRAFT", 3), ("REVIEW", 1)]),  # by_status
         _result(all_=[("T1", 4), ("T2", 4), ("T3", 2)]),  # by_tier
         _result(all_=[("sales", 6), ("risk", 4)]),  # by_domain
-        # by_owner：join User 一次查询 (owner_id, name, status, count)
+        # Owner 责任分布（跨资产）：指标 / 数据表 / 维度 / 术语 / 模板 / 显示名
         _result(all_=[
-            (1, "Alice", "PUBLISHED", 4),
-            (1, "Alice", "REVIEW", 1),
-            (2, "Bob", "PUBLISHED", 2),
-            (2, "Bob", "DRAFT", 3),
-        ]),
+            (1, "PUBLISHED", 4),
+            (1, "REVIEW", 1),
+            (2, "PUBLISHED", 2),
+            (2, "DRAFT", 3),
+        ]),  # owner_metric (owner_id, status, count)
+        _result(all_=[(1, 6), (2, 2)]),  # owner_table
+        _result(all_=[(1, 3), (2, 1)]),  # owner_dim
+        _result(all_=[(1, 4), (2, 2)]),  # owner_term
+        _result(all_=[(1, 2)]),  # owner_tpl
+        _result(all_=[(1, "Alice"), (2, "Bob")]),  # owner_names
         _result(all_=[("P0", 1), ("P1", 2), ("P2", 3)]),  # quality by_severity
         _result(all_=[("OPEN", 4), ("ACK", 1), ("RESOLVED", 3)]),  # quality by_status
         _result(all_=[(True, 7), (False, 3)]),  # compliance reviewed
@@ -658,10 +686,28 @@ async def test_aggregate_dashboard_governance_indicators():
 
     result = await repo.aggregate_dashboard()
 
-    # Owner 责任分布：按 owner_id 聚合 total + 状态分布，联 User 取显示名
+    # Owner 责任分布（跨资产）：每 owner 汇总指标/数据表/维度/术语/模板计数
+    # Alice：指标 5 + 数据表 6 + 维度 3 + 术语 4 + 模板 2 = 20
+    # Bob：指标 5 + 数据表 2 + 维度 1 + 术语 2 + 模板 0 = 10
     assert result["by_owner"] == {
-        1: {"name": "Alice", "total": 5, "by_status": {"PUBLISHED": 4, "REVIEW": 1}},
-        2: {"name": "Bob", "total": 5, "by_status": {"PUBLISHED": 2, "DRAFT": 3}},
+        1: {
+            "name": "Alice",
+            "total": 20,
+            "metrics": {"total": 5, "by_status": {"PUBLISHED": 4, "REVIEW": 1}},
+            "tables": 6,
+            "dimensions": 3,
+            "terms": 4,
+            "templates": 2,
+        },
+        2: {
+            "name": "Bob",
+            "total": 10,
+            "metrics": {"total": 5, "by_status": {"PUBLISHED": 2, "DRAFT": 3}},
+            "tables": 2,
+            "dimensions": 1,
+            "terms": 2,
+            "templates": 0,
+        },
     }
     # 质量健康：按严重级分布 + 待处理（OPEN+ACK）
     assert result["quality"] == {
@@ -689,4 +735,4 @@ async def test_aggregate_dashboard_governance_indicators():
         "updated_30d": 6,
         "updated_30d_ratio": 0.6,
     }
-    assert db.execute.await_count == 16
+    assert db.execute.await_count == 21

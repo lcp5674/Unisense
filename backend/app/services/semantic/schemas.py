@@ -284,6 +284,7 @@ class MetricTemplateCreateRequest(BaseModel):
     serving_mode: str | None = Field(None, max_length=32, description="服务模式预设")
     additivity: str | None = Field(None, max_length=32, description="可加性预设")
     metric_tier: str | None = Field(None, max_length=8, description="指标分级预设")
+    owner_id: int | None = Field(None, ge=1, description="责任人（Owner）ID")
 
 
 class MetricListParams(BaseModel):
