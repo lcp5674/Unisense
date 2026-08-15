@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.consume import ApiClient, ApiClientStatus
 from app.models.data_source import DataSource, DBCatalog
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 from app.models.metric import Metric
@@ -876,3 +877,199 @@ class LineageRepository:
                 }
             )
         return nodes, edges
+
+    # ---- 消费方节点注册（Task A）----
+
+    async def list_active_consumers_for_metric(self, metric_code: str) -> list[str]:
+        """返回消费指定指标的活动接入方 ``client_id``（消费方节点注册用）。
+
+        命中规则：状态为 ACTIVE、未软删，且 ``metric_whitelist`` 为空（=域内全量）
+        或白名单含该指标。接入方数量级小，拉取活跃接入方后在 Python 侧按白名单过滤，
+        避免 JSON 包含查询的方言耦合。
+
+        Args:
+            metric_code: 指标编码。
+
+        Returns:
+            应建立 ``metric:{code} → consumer:{client_id}`` 边的 client_id 列表。
+        """
+        rows = (
+            await self._db.execute(
+                select(ApiClient.client_id, ApiClient.metric_whitelist).where(
+                    ApiClient.status == ApiClientStatus.ACTIVE,
+                    ApiClient.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        return [
+            r.client_id
+            for r in rows
+            if r.metric_whitelist is None or metric_code in (r.metric_whitelist or [])
+        ]
+
+    # ---- 血缘覆盖率治理（Task B）----
+
+    async def metric_total(self) -> int:
+        """指标总数（soft 删除过滤）。"""
+        n = await self._db.execute(
+            select(func.count(Metric.id)).where(Metric.deleted_at.is_(None))
+        )
+        return int(n.scalar_one_or_none() or 0)
+
+    async def metric_codes_with_lineage(self) -> set[str]:
+        """有血缘边的指标编码集合（血缘边任意一端的 ``metric:`` 节点去重）。"""
+        src_q = select(LineageEdge.source_node.label("n")).where(LineageEdge.deleted_at.is_(None))
+        tgt_q = select(LineageEdge.target_node.label("n")).where(LineageEdge.deleted_at.is_(None))
+        union = src_q.union(tgt_q).subquery()
+        rows = (await self._db.execute(select(union.c.n))).all()
+        return {str(r[0])[len("metric:") :] for r in rows if str(r[0]).startswith("metric:")}
+
+    async def all_metric_rows(self) -> list[tuple[str, str | None]]:
+        """全量指标 ``(metric_code, domain)``（孤儿指标清单用）。"""
+        rows = (
+            await self._db.execute(
+                select(Metric.metric_code, Metric.domain).where(Metric.deleted_at.is_(None))
+            )
+        ).all()
+        return [(r.metric_code, r.domain) for r in rows]
+
+    async def table_total(self) -> int:
+        """采集目录表总数（TABLE/VIEW，soft 删除过滤）。"""
+        n = await self._db.execute(
+            select(func.count(DBCatalog.id)).where(
+                DBCatalog.deleted_at.is_(None),
+                DBCatalog.entity_type.in_(["TABLE", "VIEW"]),
+            )
+        )
+        return int(n.scalar_one_or_none() or 0)
+
+    async def table_no_downstream_count(self) -> int:
+        """无下游血缘的表数：作为血缘边目标、但从未作为边源的 ``table:`` 节点数。"""
+        src_rows = (
+            await self._db.execute(
+                select(func.distinct(LineageEdge.source_node)).where(
+                    LineageEdge.deleted_at.is_(None),
+                    LineageEdge.source_node.like("table:%"),
+                )
+            )
+        ).all()
+        tgt_rows = (
+            await self._db.execute(
+                select(func.distinct(LineageEdge.target_node)).where(
+                    LineageEdge.deleted_at.is_(None),
+                    LineageEdge.target_node.like("table:%"),
+                )
+            )
+        ).all()
+        sources = {str(r[0]) for r in src_rows}
+        targets = {str(r[0]) for r in tgt_rows}
+        return len(targets - sources)
+
+    async def edge_total(self) -> int:
+        """血缘边总数（soft 删除过滤）。"""
+        n = await self._db.execute(
+            select(func.count(LineageEdge.id)).where(LineageEdge.deleted_at.is_(None))
+        )
+        return int(n.scalar_one_or_none() or 0)
+
+    async def list_all_edges(self, limit: int | None = None) -> list[LineageEdge]:
+        """取出全部未删除血缘边（断链校验用，按 id 升序）。"""
+        stmt = select(LineageEdge).where(LineageEdge.deleted_at.is_(None)).order_by(LineageEdge.id)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def coverage_broken_edges(self, limit: int = 200) -> list[dict[str, Any]]:
+        """断链边明细：source 节点对应的目录/指标实体已不存在。
+
+        仅校验 ``metric:``（metrics 表）与 ``table:``（db_catalog 表）；``field:``/
+        ``external:``/``consumer:`` 节点为派生或约定占位，不参与断链判定。
+        返回按 ``limit`` 截断的边明细 dict 列表（自上而下校验）。
+
+        Args:
+            limit: 返回断链边条数上限。
+
+        Returns:
+            断链边 ``[{id, source_node, target_node, edge_type, granularity,
+            confidence, provenance}]``。
+        """
+        edges = await self.list_all_edges()
+        metric_keys = sorted(
+            {s[len("metric:") :] for s in self._edge_sources(edges) if s.startswith("metric:")}
+        )
+        table_keys = sorted(
+            {s[len("table:") :] for s in self._edge_sources(edges) if s.startswith("table:")}
+        )
+        existing_metrics: set[str] = set()
+        if metric_keys:
+            rows = await self._db.execute(
+                select(Metric.metric_code).where(
+                    Metric.metric_code.in_(metric_keys), Metric.deleted_at.is_(None)
+                )
+            )
+            existing_metrics = {r.metric_code for r in rows.all()}
+        existing_tables: set[str] = set()
+        if table_keys:
+            rows = await self._db.execute(
+                select(DBCatalog.entity_name).where(
+                    DBCatalog.entity_name.in_(table_keys), DBCatalog.deleted_at.is_(None)
+                )
+            )
+            existing_tables = {r.entity_name for r in rows.all()}
+        broken: list[dict[str, Any]] = []
+        for e in edges:
+            src = e.source_node
+            metric_break = src.startswith("metric:") and (
+                src[len("metric:") :] not in existing_metrics
+            )
+            table_break = src.startswith("table:") and src[len("table:") :] not in existing_tables
+            if metric_break or table_break:
+                broken.append(self._edge_dict(e))
+            if len(broken) >= limit:
+                break
+        return broken
+
+    @staticmethod
+    def _edge_sources(edges: list[LineageEdge]) -> set[str]:
+        """取边集合的 source 节点集合（断链归集用）。"""
+        return {e.source_node for e in edges}
+
+    @staticmethod
+    def _edge_dict(e: LineageEdge) -> dict[str, Any]:
+        """血缘边 → 响应 dict（断链明细序列化）。"""
+        return {
+            "id": e.id,
+            "source_node": e.source_node,
+            "target_node": e.target_node,
+            "edge_type": e.edge_type,
+            "granularity": e.granularity,
+            "confidence": e.confidence,
+            "provenance": e.provenance,
+        }
+
+    # ---- 血缘边变更历史（Task D）----
+
+    async def edge_history_by_key(
+        self,
+        source_node: str,
+        target_node: str,
+        edge_type: str,
+        granularity: str,
+    ) -> list[LineageEdgeHistory]:
+        """按边唯一键取该边的变更历史快照（按时间倒序）。"""
+        return list(
+            (
+                await self._db.execute(
+                    select(LineageEdgeHistory)
+                    .where(
+                        LineageEdgeHistory.source_node == source_node,
+                        LineageEdgeHistory.target_node == target_node,
+                        LineageEdgeHistory.edge_type == edge_type,
+                        LineageEdgeHistory.granularity == granularity,
+                    )
+                    .order_by(LineageEdgeHistory.created_at.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )

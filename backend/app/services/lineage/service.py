@@ -32,9 +32,14 @@ from app.services.lineage.parser import (
 )
 from app.services.lineage.repository import LineageRepository
 from app.services.lineage.schemas import (
+    CoverageBrokenEdgeItem,
+    CoverageOrphanItem,
     FieldLineageItem,
     ImpactPreviewResponse,
     LineageChannelResponse,
+    LineageCoverageResponse,
+    LineageEdgeDetailResponse,
+    LineageEdgeHistoryResponse,
     LineageEdgeResponse,
     LineageImpactParams,
     LineageIngestRunResponse,
@@ -42,6 +47,7 @@ from app.services.lineage.schemas import (
     LineageNodeResponse,
     LineageParseRequest,
     LineageParseResponse,
+    PiiImpactItem,
     StaleEdgeResponse,
     TableLineageItem,
     UpstreamDeps,
@@ -64,6 +70,17 @@ _INGEST_COMMIT_BATCH = 500
 #: detail_json 是 TEXT 列（64KB），全量边明细在大批量导入时会超长触发
 #: MySQL 1406（Data too long），故只保留前 N 条示例 + 完整计数。
 _DETAIL_EDGE_SAMPLE = 200
+#: 覆盖率断链校验的边扫描上限（治理端点，避免超大批边集全量拉取）。
+_MAX_COVERAGE_BROKEN_SCAN = 2000
+
+
+def node_consumer(client_id: str) -> str:
+    """构造消费方节点标识 ``consumer:{client_id}``（供应商=消费侧接入方）。
+
+    与 ``parser.node_table`` / ``parser.node_metric`` 的节点约定对齐，供
+    ``CONSUMED_BY`` 边两端的消费方节点（Task A）使用。
+    """
+    return f"consumer:{client_id}"
 
 
 def paginate_edges(edges: list[LineageEdgeResponse], page: int, page_size: int) -> dict[str, Any]:
@@ -514,6 +531,185 @@ class LineageService(BaseService):
             frontier = next_frontier
             hops += 1
         return marked
+
+    # ---- 消费方节点注册（Task A）----
+
+    async def register_metric_consumer(
+        self, metric_code: str, client_id: str, *, commit: bool = True
+    ) -> LineageEdge | None:
+        """注册「指标→消费方」血缘边（CONSUMED_BY，粒度 L3，幂等）。
+
+        写入 ``metric:{code}`` → ``consumer:{client_id}``；``client_id`` 为空/非字符串
+        时静默跳过（返回 None），不抛错。由消费侧接入方向（任务说明：显式调用版）
+        在授权指标订阅时调用。
+
+        Args:
+            metric_code: 指标编码。
+            client_id: 消费方接入方 ID（X-Api-Key 用户名）。
+            commit: 是否立即提交（默认 True；批量注册时置 False 由调用方统一提交）。
+
+        Returns:
+            写入的血缘边；无有效 client_id 时返回 None。
+        """
+        if not isinstance(client_id, str) or not client_id.strip():
+            logger.warning("metric_consumer_skip_empty_client", metric_code=metric_code)
+            return None
+        edge = await self._repo.upsert_edge(
+            source_node=f"metric:{metric_code}",
+            target_node=node_consumer(client_id.strip()),
+            edge_type="CONSUMED_BY",
+            granularity="L3",
+            confidence=1.0,
+            provenance="metric_consumer",
+            change_reason="metric_consumer",
+        )
+        if commit:
+            await self._db.commit()
+        return edge
+
+    async def register_metric_consumers_from_db(self, metric_code: str) -> int:
+        """从消费接入方表批量注册该指标的全部消费方血缘边，返回注册边数。
+
+        查询 ApiClient 中活动且（白名单为空=域内全量 / 白名单含该指标）的接入方，
+        逐条注册 ``metric:{code} → consumer:{client_id}``（CONSUMED_BY，L3，幂等）。
+        供消费侧在指标上线/白名单变更时一次性补齐消费方血缘。
+
+        Args:
+            metric_code: 指标编码。
+
+        Returns:
+            注册的消费方边数。
+        """
+        client_ids = await self._repo.list_active_consumers_for_metric(metric_code)
+        if not client_ids:
+            return 0
+        for client_id in client_ids:
+            await self.register_metric_consumer(metric_code, client_id, commit=False)
+        await self._db.commit()
+        return len(client_ids)
+
+    # ---- PII 影响面分析（Task C）----
+
+    async def pii_impact(self, node: str, depth: int = 3) -> list[PiiImpactItem]:
+        """PII 影响面分析：返回受 PII 影响的所有下游节点（供合规审计）。
+
+        沿 ``DERIVED_FROM`` 下游遍历至多 ``depth`` 跳（数据血缘传导，与
+        ``propagate_pii`` 语义一致），但**记录所有边类型**（含 CONSUMED_BY 等
+        消费边）——PII 影响面报表需覆盖数据消费方。同一节点经不同路径可达时
+        各记一条（审计要求保留路径），仅沿 DERIVED_FROM 继续展开以避免消费方
+        子节点扩散。
+
+        Args:
+            node: 起点节点（如 ``table:db.t`` / ``metric:code``）。
+            depth: 最大下探跳数（默认 3）。
+
+        Returns:
+            受 PII 影响的下游 ``PiiImpactItem`` 列表（node/edge_type/path/hops）。
+        """
+        items: list[PiiImpactItem] = []
+        visited: set[str] = {node}
+        frontier: list[tuple[str, list[str]]] = [(node, [node])]
+        hops = 0
+        while frontier and hops < depth:
+            next_frontier: list[tuple[str, list[str]]] = []
+            for n, path in frontier:
+                rows = await self._repo.query_impact(
+                    n, "downstream", max_hops=1, max_edges=_MAX_EDGES
+                )
+                for edge in rows:
+                    target = edge.target_node
+                    new_path = path + [target]
+                    items.append(
+                        PiiImpactItem(
+                            node=target,
+                            edge_type=edge.edge_type,
+                            path=new_path,
+                            hops=hops + 1,
+                        )
+                    )
+                    # 仅沿 DERIVED_FROM（数据血缘）继续传导；消费/断链等边为终点
+                    if edge.edge_type == "DERIVED_FROM" and target not in visited:
+                        visited.add(target)
+                        next_frontier.append((target, new_path))
+            frontier = next_frontier
+            hops += 1
+        return items
+
+    # ---- 血缘覆盖率治理（Task B）----
+
+    async def coverage_stats(self) -> LineageCoverageResponse:
+        """血缘覆盖率统计（治理看板核心）。
+
+        聚合指标/表的血缘完整度、断链边数；孤儿指标数与断链明细另由
+        ``coverage_orphan_metrics`` / ``coverage_broken_edges`` 提供。
+
+        Returns:
+            ``LineageCoverageResponse`` 各类计数。
+        """
+        broken = await self._repo.coverage_broken_edges(limit=_MAX_COVERAGE_BROKEN_SCAN)
+        metric_total = await self._repo.metric_total()
+        metric_with_lineage = len(await self._repo.metric_codes_with_lineage())
+        return LineageCoverageResponse(
+            metric_total=metric_total,
+            metric_with_lineage=metric_with_lineage,
+            metric_orphan=max(0, metric_total - metric_with_lineage),
+            table_total=await self._repo.table_total(),
+            table_no_downstream=await self._repo.table_no_downstream_count(),
+            edge_total=await self._repo.edge_total(),
+            broken_edges=len(broken),
+        )
+
+    async def coverage_orphan_metrics(self) -> list[CoverageOrphanItem]:
+        """无任何血缘边的孤立指标清单（预案式治理对象）。
+
+        Returns:
+            ``[{metric_code, domain}]``。
+        """
+        with_lineage = await self._repo.metric_codes_with_lineage()
+        return [
+            CoverageOrphanItem(metric_code=code, domain=domain)
+            for code, domain in await self._repo.all_metric_rows()
+            if code not in with_lineage
+        ]
+
+    async def coverage_broken_edges(
+        self, limit: int = _MAX_COVERAGE_BROKEN_SCAN
+    ) -> list[CoverageBrokenEdgeItem]:
+        """断链边明细（source 节点对应实体已不存在），供人工修复跳转。
+
+        Args:
+            limit: 返回条数上限。
+
+        Returns:
+            ``[CoverageBrokenEdgeItem, ...]``。
+        """
+        rows = await self._repo.coverage_broken_edges(limit=limit)
+        return [CoverageBrokenEdgeItem.model_validate(r) for r in rows]
+
+    # ---- 血缘边详情（Task D）----
+
+    async def edge_detail(self, edge_id: int) -> LineageEdgeDetailResponse:
+        """单条血缘边 + 其变更历史（边元数据查询）。
+
+        按主键取未删除边；缺失抛 ``NotFoundError``。变更历史按该边唯一键
+        （source/target/edge_type/granularity）倒序取快照。
+
+        Args:
+            edge_id: 血缘边主键。
+
+        Returns:
+            ``LineageEdgeDetailResponse``（edge 当前值 + history 变更历史）。
+        """
+        edge = await self._repo.get_edge(edge_id)
+        if edge is None:
+            raise NotFoundError(f"血缘边不存在或已删除: {edge_id}")
+        history = await self._repo.edge_history_by_key(
+            edge.source_node, edge.target_node, edge.edge_type, edge.granularity
+        )
+        return LineageEdgeDetailResponse(
+            edge=LineageEdgeResponse.model_validate(edge),
+            history=[LineageEdgeHistoryResponse.model_validate(h) for h in history],
+        )
 
     # ---- 增量采集与采集通道（TD §12.2）----
 

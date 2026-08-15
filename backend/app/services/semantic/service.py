@@ -86,6 +86,17 @@ BREAKING_DEF_FIELDS = ("expression", "aggregation", "granularity", "dependencies
 # （对齐 TD §12 metric_version：granularity/unit 变更触发 PENDING_VERSION）
 BREAKING_TOP_LEVEL_FIELDS = ("granularity", "unit")
 
+# 指标间依赖边的 edge_type 映射（register_metric_dependency 由血缘团队负责，
+# 此处按 metric.type 直接写 LineageEdge）。
+# 注意：lineage_edge_type 枚举当前仅含 DERIVED_FROM/LINEAGE_UP/LINEAGE_DOWN/
+# CONSUMED_BY/EXTERNAL_BREAK，不含 COMPOSED_OF（composite 专属）。待血缘模型扩展
+# 枚举后，composite 可单独使用 COMPOSED_OF 表达「组合」语义；当前统一以 DERIVED_FROM
+# 表达（保证 impact_preview 下游遍历一致），避免写入未枚举值导致 MySQL 拒绝落库。
+_METRIC_DEP_EDGE_TYPE: dict[str, str] = {
+    "derived": "DERIVED_FROM",
+    "composite": "DERIVED_FROM",
+}
+
 
 def redact_definition(defn: dict[str, Any]) -> dict[str, Any]:
     """递归脱敏口径定义：保留键结构，所有叶子值替换为 ``"***"``。
@@ -469,6 +480,9 @@ class MetricService(BaseService):
                 metric_code=metric.metric_code,
             )
 
+        # 指标完整血缘注册（表血缘 + 指标间依赖边，best-effort 不阻断创建）
+        await self._register_metric_lineage_full(metric)
+
         return metric
 
     async def get_metric(self, metric_code: str) -> Metric:
@@ -833,6 +847,11 @@ class MetricService(BaseService):
         )
 
         await self._cache.invalidate(metric_code)
+
+        # 口径变更时刷新指标间依赖血缘（表血缘通常不变，但 dependencies 解析需重跑）；
+        # 仅当提交 definition_json 时触发，best-effort 不阻断更新。
+        if request.definition_json is not None:
+            await self._register_metric_lineage_full(metric)
 
         logger.info(
             "metric_updated",
@@ -1653,6 +1672,162 @@ class MetricService(BaseService):
                         exc,
                     )
 
+    async def _register_metric_lineage_full(self, metric: Metric) -> None:
+        """注册指标完整血缘：表血缘(L3) + 指标间依赖边（best-effort）。
+
+        1. 表级血缘：复用 LineageService.register_metric_from_definition
+           解析 definition_json 的 source_table / source_tables，写入指标↔物理底表边。
+        2. 指标间依赖血缘：解析 definition_json.dependencies（依赖指标编码列表），
+           为每个依赖注册 ``metric:{dep} → metric:{code}`` 边；edge_type 按
+           metric.type 映射（composite→COMPOSED_OF / derived→DERIVED_FROM，
+           当前枚举未含 COMPOSED_OF 故二者统一 DERIVED_FROM，见 _METRIC_DEP_EDGE_TYPE）；
+           atomic 无依赖，跳过。
+
+        幂等：底层 LineageRepository.upsert_edge 按唯一键
+        (source/target/edge_type/granularity) 去重，重复注册不产生重复边。
+        失败仅告警，不阻断指标创建/发布/更新主流程。
+
+        Args:
+            metric: 指标 ORM 实体（读取 metric_code / type / definition_json）。
+        """
+        from app.services.lineage.repository import LineageRepository
+        from app.services.lineage.service import LineageService
+
+        try:
+            lineage_svc = LineageService(self._db)
+            # 1) 表级血缘（指标 ↔ 物理底表），不在此提交，交由外层事务统一提交
+            await lineage_svc.register_metric_from_definition(metric, commit=False)
+
+            # 2) 指标间依赖血缘（仅 derived/composite 有 dependencies）
+            definition = metric.definition_json or {}
+            if not isinstance(definition, dict):
+                return
+            dependencies = definition.get("dependencies") or []
+            if not isinstance(dependencies, list) or metric.type == "atomic" or not dependencies:
+                return
+            edge_type = _METRIC_DEP_EDGE_TYPE.get(metric.type, "DERIVED_FROM")
+            repo = LineageRepository(self._db)
+            for dep_code in dependencies:
+                if not isinstance(dep_code, str) or not dep_code:
+                    continue
+                await repo.upsert_edge(
+                    source_node=f"metric:{dep_code}",
+                    target_node=f"metric:{metric.metric_code}",
+                    edge_type=edge_type,
+                    granularity="L3",
+                    provenance="metric_definition",
+                    change_reason="metric_dependency",
+                )
+        except Exception:  # noqa: BLE001 - 血缘注册失败绝不阻断指标主流程
+            logger.warning(
+                "metric_lineage_register_failed",
+                metric_code=metric.metric_code,
+                metric_type=metric.type,
+                exc_info=True,
+            )
+
+    async def _cleanup_metric_lineage(self, metric_code: str) -> None:
+        """清理指标相关血缘边（best-effort，软删）。
+
+        指标废弃 / 作废时，沿血缘将其关联边置 deleted_at，避免已失效指标仍参与
+        下游影响分析（对齐 TD §12 血缘一致性）。软删保留审计上下文，可随指标恢复
+        由血缘团队重新注册。
+
+        Args:
+            metric_code: 指标编码（节点 ``metric:{code}``）。
+        """
+        from app.services.lineage.service import LineageService
+
+        try:
+            deleted = await LineageService(self._db).delete_by_node(f"metric:{metric_code}")
+            logger.info(
+                "metric_lineage_cleaned",
+                metric_code=metric_code,
+                deleted_edges=deleted,
+            )
+        except Exception:  # noqa: BLE001 - 血缘清理失败绝不阻断指标废弃/作废主流程
+            logger.warning(
+                "metric_lineage_cleanup_failed",
+                metric_code=metric_code,
+                exc_info=True,
+            )
+
+    async def notify_lineage_impacted_owners(self, source_node: str) -> int:
+        """上游数据源结构变更时，沿下游血缘通知受影响指标的 Owner（P1 闭环）。
+
+        查询 ``source_node`` 的下游血缘边，过滤出 ``target_node`` 为 ``metric:`` 的
+        受影响指标，反查各指标 owner_id，经 NotifyService.notify_user 定向通知
+        「上游数据源结构变更，你的指标 X 可能受影响」。每个 owner 一次性收到其名下
+        全部受影响指标清单（去重）。
+
+        触发点由调用方整合（collector 的 schema drift 处理 / app/api/lineage.py），
+        本方法仅实现能力；所有 DB / 通知失败均 best-effort，不影响上游变更主流程。
+
+        Args:
+            source_node: 发生结构变更的上游节点（如 ``table:db.orders``）。
+
+        Returns:
+            成功送达通知的 Owner 数（0 表示无受影响指标或查询失败）。
+        """
+        from app.db.mysql import async_session_factory
+        from app.services.lineage.schemas import LineageImpactParams
+        from app.services.lineage.service import LineageService
+        from app.services.notify.service import NotifyService
+
+        try:
+            edges = await LineageService(self._db).query_impact(
+                LineageImpactParams(node=source_node, direction="downstream", max_hops=5)
+            )
+        except Exception:  # noqa: BLE001 - 影响分析失败不阻断上游变更
+            logger.warning(
+                "lineage_impact_query_failed", source_node=source_node, exc_info=True
+            )
+            return 0
+
+        # 收集受影响指标及其 owner（按 code 去重）
+        impacted_by_owner: dict[int, list[str]] = {}
+        seen_codes: set[str] = set()
+        for edge in edges:
+            if not edge.target_node.startswith("metric:"):
+                continue
+            code = edge.target_node[len("metric:") :]
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            metric = await self._repo.get_by_code(code)
+            if metric is None:
+                continue
+            impacted_by_owner.setdefault(metric.owner_id, []).append(code)
+
+        if not impacted_by_owner:
+            return 0
+
+        # 各 owner 定向通知（独立会话，不污染上游变更事务）
+        notified = 0
+        for owner_id, codes in impacted_by_owner.items():
+            async with async_session_factory() as session:
+                try:
+                    await NotifyService(session).notify_user(
+                        user_id=owner_id,
+                        event_type="lineage.change_impacted",
+                        title="血缘变更影响",
+                        payload={
+                            "source_node": source_node,
+                            "impacted_metrics": codes,
+                            "count": len(codes),
+                        },
+                    )
+                    notified += 1
+                except Exception:  # noqa: BLE001 - 单个 owner 通知失败不阻断其余
+                    logger.warning(
+                        "lineage_impacted_notify_failed",
+                        owner_id=owner_id,
+                        source_node=source_node,
+                        impacted_metrics=codes,
+                        exc_info=True,
+                    )
+        return notified
+
     async def deprecate_metric(
         self,
         metric_code: str,
@@ -1717,6 +1892,9 @@ class MetricService(BaseService):
         )
 
         await self._cache.invalidate(metric_code)
+
+        # 废弃即失效：清理指标相关血缘边（best-effort，避免失效指标仍参与下游影响分析）
+        await self._cleanup_metric_lineage(metric_code)
 
         # 发布 metric.deprecated 事件（对齐 FR-015）
         await self._publish_event(
@@ -1784,6 +1962,9 @@ class MetricService(BaseService):
         await self._repo.mark_version_published(metric.id, metric.version, now, status="PUBLISHED")
 
         await self._cache.invalidate(metric_code)
+
+        # 全量发布即正式生效：补全/刷新指标完整血缘（best-effort）
+        await self._register_metric_lineage_full(metric)
 
         # 发布 metric.promoted 事件（对齐 FR-020：lineage+search+notify）
         await self._publish_event(
@@ -2043,6 +2224,9 @@ class MetricService(BaseService):
 
         await self._repo.soft_delete(metric.id)
         await self._cache.invalidate(metric_code)
+
+        # 软删（作废）即失效：清理指标相关血缘边（best-effort）
+        await self._cleanup_metric_lineage(metric_code)
 
         logger.info("metric_deleted", metric_code=metric_code, actor_id=actor_id)
         return metric

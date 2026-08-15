@@ -88,6 +88,8 @@ _EVENT_TITLE_CN: dict[str, str] = {
     # 采集定向通知（collector/service.py 经 notify_user 直发源 Owner）
     "catalog.deprecated": "数据目录已废弃",
     "collect.degraded": "采集降级",
+    # 血缘变更影响闭环（semantic/service.py 经 notify_user 定向通知受影响指标 Owner）
+    "lineage.change_impacted": "血缘变更影响",
     # 核心依赖降级（core/degradation.py，运维感知全平台健康）
     "degradation.state_changed": "系统依赖状态变更",
     # 冲突重开（conflict/service.py 经 _safe_publish 发布）

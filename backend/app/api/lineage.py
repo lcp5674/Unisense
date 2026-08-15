@@ -22,7 +22,11 @@ from app.db.redis import get_redis
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.schemas import (
+    CoverageBrokenEdgeItem,
+    CoverageOrphanItem,
     ImpactPreviewRequest,
+    LineageCoverageResponse,
+    LineageEdgeDetailResponse,
     LineageEdgeListParams,
     LineageImpactParams,
     LineageParseRequest,
@@ -206,6 +210,86 @@ async def delete_edges_by_node(
     )
     await db.commit()
     return ok(data={"deleted": deleted}, trace_id=trace_id)
+
+
+@router.get("/edges/{edge_id}", dependencies=_READ_DEPS)
+async def edge_detail(
+    edge_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[LineageEdgeDetailResponse]:
+    """单条血缘边详情：边当前值 + 变更历史（边元数据查询）。"""
+    detail = await _svc(db).edge_detail(edge_id)
+    return ok(data=detail.model_dump(mode="json"), trace_id=trace_id)
+
+
+@router.post(
+    "/consumers/{metric_code}/sync",
+    dependencies=_WRITE_DEPS,
+)
+async def sync_metric_consumers(
+    metric_code: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """按接入方白名单批量补齐某指标的全部消费方血缘边（CONSUMED_BY）。
+
+    消费侧指标上线/白名单变更后调用，使指标详情血缘图展示其数据消费方。
+    """
+    svc = _svc(db)
+    registered = await svc.register_metric_consumers_from_db(metric_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="LINEAGE_CONSUMER_SYNC",
+        entity_type="lineage",
+        entity_id=f"metric:{metric_code}",
+        detail={"registered_edges": registered},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"metric_code": metric_code, "registered_edges": registered}, trace_id=trace_id)
+
+
+# ---- 血缘覆盖率治理（Task B）----
+
+
+@router.get("/coverage", dependencies=_READ_DEPS)
+async def coverage(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[LineageCoverageResponse]:
+    """血缘覆盖率统计：指标/表血缘完整度、孤儿子数与断链边数（治理看板）。"""
+    stats = await _svc(db).coverage_stats()
+    return ok(data=stats.model_dump(mode="json"), trace_id=trace_id)
+
+
+@router.get("/coverage/orphans", dependencies=_READ_DEPS)
+async def coverage_orphans(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[list[CoverageOrphanItem]]:
+    """无任何血缘边的孤立指标清单（预案式治理。"""
+    orphans = await _svc(db).coverage_orphan_metrics()
+    return ok(data=[o.model_dump(mode="json") for o in orphans], trace_id=trace_id)
+
+
+@router.get("/coverage/broken", dependencies=_READ_DEPS)
+async def coverage_broken(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    limit: int = Query(200, ge=1, le=2000, description="返回断链边条数上限"),
+) -> ApiResponse[list[CoverageBrokenEdgeItem]]:
+    """断链边明细：source 节点对应的目录/指标实体已不存在（供人工修复跳转）。"""
+    broken = await _svc(db).coverage_broken_edges(limit=limit)
+    return ok(data=[b.model_dump(mode="json") for b in broken], trace_id=trace_id)
 
 
 # ---- 血缘采集通道（增量采集运维，TD §12.2）----

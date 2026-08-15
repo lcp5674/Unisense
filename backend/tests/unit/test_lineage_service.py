@@ -8,10 +8,16 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+from app.core.exceptions import NotFoundError
 from app.services.lineage.schemas import (
+    CoverageBrokenEdgeItem,
+    CoverageOrphanItem,
+    LineageCoverageResponse,
+    LineageEdgeDetailResponse,
     LineageEdgeResponse,
     LineageImpactParams,
     LineageParseRequest,
+    PiiImpactItem,
 )
 from app.services.lineage.service import LineageService, paginate_edges
 
@@ -47,6 +53,16 @@ class FakeRepo:
         self.deleted_count = 0
         self._keys: set[tuple[object, ...]] = set()
         self.runs: list[SimpleNamespace] = []
+        self.consumer_ids: list[str] = []
+        # 覆盖率治理（Task B）假数据
+        self.metric_total_count: int = 0
+        self.codes_with_lineage: list[str] = []
+        self.table_total_count: int = 0
+        self.table_no_downstream: int = 0
+        self.metric_rows: list[tuple[str, str | None]] = []
+        self.broken_edges: list[dict[str, Any]] = []
+        # 边详情（Task D）假数据
+        self.history: list[SimpleNamespace] = []
 
     async def upsert_edge(self, **kwargs: object) -> SimpleNamespace:
         self.upsert_calls.append(kwargs)
@@ -126,6 +142,51 @@ class FakeRepo:
 
     async def soft_delete_by_node(self, node: str) -> int:
         return self.deleted_count
+
+    async def list_active_consumers_for_metric(self, metric_code: str) -> list[str]:
+        """消费该指标的 client_id（Task A 批量注册用）；默认无。"""
+        return list(self.consumer_ids)
+
+    # ---- 覆盖率治理（Task B）假实现 ----
+    async def coverage_broken_edges(self, limit: int = 200) -> list[dict[str, Any]]:
+        return list(self.broken_edges[:limit])
+
+    async def metric_total(self) -> int:
+        return self.metric_total_count
+
+    async def metric_codes_with_lineage(self) -> set[str]:
+        return set(self.codes_with_lineage)
+
+    async def table_total(self) -> int:
+        return self.table_total_count
+
+    async def table_no_downstream_count(self) -> int:
+        return self.table_no_downstream
+
+    async def edge_total(self) -> int:
+        return len(self.edges)
+
+    async def all_metric_rows(self) -> list[tuple[str, str | None]]:
+        return list(self.metric_rows)
+
+    # ---- 边详情（Task D）假实现 ----
+    async def get_edge(self, edge_id: int) -> Any | None:
+        for e in self.edges:
+            if getattr(e, "id", None) == edge_id:
+                return e
+        return None
+
+    async def edge_history_by_key(
+        self, source_node: str, target_node: str, edge_type: str, granularity: str
+    ) -> list[Any]:
+        return [
+            h
+            for h in self.history
+            if h.source_node == source_node
+            and h.target_node == target_node
+            and h.edge_type == edge_type
+            and h.granularity == granularity
+        ]
 
     async def list_nodes(self, kw: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
         return [
@@ -966,3 +1027,185 @@ async def test_query_graph_provenance_uses_edge_repo(monkeypatch: Any) -> None:
     assert out["edges"][0]["type"] == "DERIVED_FROM"
     # 边自包含：节点集来自边两端，无需二次过滤
     assert len(out["edges"]) == 1
+
+
+# ---- Task A：消费方节点注册 ----
+
+
+async def test_register_metric_consumer_creates_edge() -> None:
+    """register_metric_consumer 写入 metric:code → consumer:client_id（CONSUMED_BY/L3）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    edge = await svc.register_metric_consumer("gmv_total", "app_a")
+    assert edge is not None
+    kwargs = repo.upsert_calls[-1]
+    assert kwargs["source_node"] == "metric:gmv_total"
+    assert kwargs["target_node"] == "consumer:app_a"
+    assert kwargs["edge_type"] == "CONSUMED_BY"
+    assert kwargs["granularity"] == "L3"
+    assert kwargs["provenance"] == "metric_consumer"
+
+
+async def test_register_metric_consumer_skips_empty_client() -> None:
+    """空/非字符串 client_id 静默跳过，不写边。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    assert await svc.register_metric_consumer("gmv_total", "") is None
+    assert await svc.register_metric_consumer("gmv_total", None) is None  # type: ignore[arg-type]
+    assert repo.upsert_calls == []
+
+
+async def test_register_metric_consumers_from_db() -> None:
+    """register_metric_consumers_from_db 按 ApiClient 白名单批量注册消费方边。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.consumer_ids = ["app_a", "app_b"]
+    svc._repo = repo
+    count = await svc.register_metric_consumers_from_db("gmv_total")
+    assert count == 2
+    targets = {c["target_node"] for c in repo.upsert_calls}
+    assert targets == {"consumer:app_a", "consumer:app_b"}
+
+
+# ---- Task B：血缘覆盖率治理 ----
+
+
+async def test_coverage_stats_aggregates_counts() -> None:
+    """coverage_stats 聚合指标/表/边/断链计数。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.metric_total_count = 10
+    repo.codes_with_lineage = ["a", "b"]
+    repo.table_total_count = 5
+    repo.table_no_downstream = 2
+    repo.broken_edges = [{"id": 1}, {"id": 2}]
+    svc._repo = repo
+    stats = await svc.coverage_stats()
+    assert isinstance(stats, LineageCoverageResponse)
+    assert stats.metric_total == 10
+    assert stats.metric_with_lineage == 2
+    assert stats.metric_orphan == 8
+    assert stats.table_total == 5
+    assert stats.table_no_downstream == 2
+    assert stats.edge_total == 0
+    assert stats.broken_edges == 2
+
+
+async def test_coverage_orphan_metrics() -> None:
+    """coverage_orphan_metrics 返回无血缘边的指标。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.metric_rows = [("a", "dom1"), ("c", None)]
+    repo.codes_with_lineage = ["a"]
+    svc._repo = repo
+    orphans = await svc.coverage_orphan_metrics()
+    assert orphans == [CoverageOrphanItem(metric_code="c", domain=None)]
+
+
+async def test_coverage_broken_edges() -> None:
+    """coverage_broken_edges 按 limit 截断返回断链明细。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.broken_edges = [
+        {
+            "id": 1,
+            "source_node": "metric:x",
+            "target_node": "table:t",
+            "edge_type": "DERIVED_FROM",
+            "granularity": "L3",
+            "confidence": 1.0,
+            "provenance": "sqlglot",
+        },
+        {
+            "id": 2,
+            "source_node": "metric:y",
+            "target_node": "table:t",
+            "edge_type": "DERIVED_FROM",
+            "granularity": "L3",
+            "confidence": 1.0,
+            "provenance": "sqlglot",
+        },
+    ]
+    svc._repo = repo
+    broken = await svc.coverage_broken_edges(limit=1)
+    assert len(broken) == 1
+    assert isinstance(broken[0], CoverageBrokenEdgeItem)
+    assert broken[0].id == 1
+
+
+# ---- Task C：PII 影响面分析 ----
+
+
+async def test_pii_impact_collects_downstream_with_consumers() -> None:
+    """pii_impact 沿下游收集受 PII 影响节点（含 CONSUMED_BY 消费方），仅沿 DERIVED_FROM 传导。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.impact = [
+        LineageEdgeResponse(
+            id=1, source_node="metric:m0", target_node="metric:m1",
+            edge_type="DERIVED_FROM", granularity="L3", confidence=1.0, provenance="x",
+        ),
+        LineageEdgeResponse(
+            id=2, source_node="metric:m0", target_node="consumer:c1",
+            edge_type="CONSUMED_BY", granularity="L3", confidence=1.0, provenance="x",
+        ),
+        LineageEdgeResponse(
+            id=3, source_node="metric:m1", target_node="metric:m2",
+            edge_type="DERIVED_FROM", granularity="L3", confidence=1.0, provenance="x",
+        ),
+    ]
+    svc._repo = repo
+    items = await svc.pii_impact("metric:m0", depth=3)
+    assert {i.node for i in items} == {"metric:m1", "metric:m2", "consumer:c1"}
+    assert all(isinstance(i, PiiImpactItem) for i in items)
+    # 消费方边纳入影响面，但作为终点不继续传导
+    c1 = next(i for i in items if i.node == "consumer:c1")
+    assert c1.edge_type == "CONSUMED_BY"
+    assert c1.path == ["metric:m0", "consumer:c1"]
+    assert c1.hops == 1
+
+
+# ---- Task D：血缘边详情 ----
+
+
+async def test_edge_detail_returns_edge_and_history() -> None:
+    """edge_detail 返回当前边 + 变更历史；缺失抛 NotFoundError。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.edges = [
+        SimpleNamespace(
+            id=1, source_node="metric:m1", target_node="consumer:c1",
+            edge_type="CONSUMED_BY", granularity="L3", confidence=1.0,
+            provenance="metric_consumer", pii_inherited=False,
+        )
+    ]
+    repo.history = [
+        SimpleNamespace(
+            id=1, source_node="metric:m1", target_node="consumer:c1",
+            edge_type="CONSUMED_BY", granularity="L3", confidence=0.9,
+            provenance="metric_consumer", pii_inherited=False,
+            change_reason="rename", created_at=datetime.now(UTC),
+        )
+    ]
+    svc._repo = repo
+    detail = await svc.edge_detail(1)
+    assert isinstance(detail, LineageEdgeDetailResponse)
+    assert detail.edge.id == 1
+    assert detail.edge.target_node == "consumer:c1"
+    assert len(detail.history) == 1
+    assert detail.history[0].change_reason == "rename"
+
+
+async def test_edge_detail_missing_raises() -> None:
+    """缺失边抛 NotFoundError。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    raised = False
+    try:
+        await svc.edge_detail(999)
+    except NotFoundError:
+        raised = True
+    assert raised

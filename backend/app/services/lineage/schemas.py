@@ -224,3 +224,82 @@ class LineageNodeResponse(BaseModel):
     label: str = Field(description="展示名（去类型前缀）")
     type: str = Field(description="节点类型：table/metric/field/external/other")
     count: int = Field(default=0, description="该节点参与的血缘边数（预加载排序用）")
+
+
+# ---- 覆盖率治理（Task B）----
+
+
+class CoverageOrphanItem(BaseModel):
+    """无任何血缘边的指标（预案治理对象）。"""
+
+    metric_code: str = Field(description="指标编码")
+    domain: str | None = Field(default=None, description="指标所属业务域")
+
+
+class LineageCoverageResponse(BaseModel):
+    """血缘覆盖率统计（Task B 治理看板）。
+
+    用于衡量「指标级血缘图谱」的血缘完整度：指标/表有多少接了血缘、多少孤立、
+    有多少断链边（source 节点对应的目录/指标实体已不存在）。
+    """
+
+    metric_total: int = Field(description="指标总数（soft 删除过滤）")
+    metric_with_lineage: int = Field(description="有血缘边的指标数")
+    metric_orphan: int = Field(description="无血缘边的孤立指标数")
+    table_total: int = Field(description="表总数（采集目录 TABLE/VIEW，soft 删除过滤）")
+    table_no_downstream: int = Field(description="无下游血缘的表数（仅作为边目标、从未作为边源）")
+    edge_total: int = Field(description="血缘边总数（soft 删除过滤）")
+    broken_edges: int = Field(description="断链边数（source 节点对应实体已不存在）")
+
+
+class CoverageBrokenEdgeItem(BaseModel):
+    """断链边明细（source 节点对应的目录/指标实体已不存在）。"""
+
+    id: int
+    source_node: str = Field(description="上游节点（已不存在的实体）")
+    target_node: str = Field(description="下游节点")
+    edge_type: str
+    granularity: str
+    confidence: float
+    provenance: str
+
+
+# ---- PII 影响面分析（Task C）----
+
+
+class PiiImpactItem(BaseModel):
+    """受 PII 影响的下游节点（合规审计用）。"""
+
+    node: str = Field(description="受影响下游节点 id，如 metric:m1 / consumer:c1")
+    edge_type: str = Field(description="到达该节点的边类型（DERIVED_FROM/CONSUMED_BY/...）")
+    path: list[str] = Field(description="路径（起点 → ... → 该节点）")
+    hops: int = Field(description="跳数")
+
+
+# ---- 血缘边详情（Task D）----
+
+
+class LineageEdgeHistoryResponse(BaseModel):
+    """血缘边变更历史快照响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source_node: str
+    target_node: str
+    edge_type: str
+    granularity: str
+    confidence: float
+    provenance: str
+    pii_inherited: bool = Field(default=False, description="PII 是否沿血缘继承")
+    change_reason: str = Field(description="变更原因：schema_drift/reparse/manual/rename")
+    created_at: datetime = Field(description="历史快照创建时间（UTC）")
+
+
+class LineageEdgeDetailResponse(BaseModel):
+    """血缘边详情：单条边 + 其 LineageEdgeHistory 变更历史。"""
+
+    edge: LineageEdgeResponse = Field(description="血缘边当前值")
+    history: list[LineageEdgeHistoryResponse] = Field(
+        default_factory=list, description="该边的变更历史（按时间倒序）"
+    )

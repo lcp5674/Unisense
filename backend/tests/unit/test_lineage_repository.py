@@ -37,6 +37,34 @@ class _Row:
         self.owner = owner
 
 
+class _HistRow:
+    """血缘边变更历史行（edge_history_by_key 用）。"""
+
+    def __init__(
+        self,
+        edge_id: int,
+        source_node: str,
+        target_node: str,
+        edge_type: str = "DERIVED_FROM",
+        granularity: str = "L1",
+        confidence: float = 1.0,
+        provenance: str = "sqlglot",
+        pii_inherited: bool = False,
+        change_reason: str = "manual",
+        created_at: Any | None = None,
+    ) -> None:
+        self.id = edge_id
+        self.source_node = source_node
+        self.target_node = target_node
+        self.edge_type = edge_type
+        self.granularity = granularity
+        self.confidence = confidence
+        self.provenance = provenance
+        self.pii_inherited = pii_inherited
+        self.change_reason = change_reason
+        self.created_at = created_at
+
+
 class _Result:
     def __init__(
         self,
@@ -90,9 +118,15 @@ class _MetaRow:
 
 
 class _FakeDB:
-    def __init__(self, rows: list[_Row], meta_rows: list[_MetaRow] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[_Row],
+        meta_rows: list[_MetaRow] | None = None,
+        history_rows: list[_HistRow] | None = None,
+    ) -> None:
         self._rows: list[Any] = list(rows)
         self._meta_rows: list[Any] = list(meta_rows or [])
+        self._history_rows: list[Any] = list(history_rows or [])
         self.added: list[Any] = []
         self.flushed = False
 
@@ -105,6 +139,33 @@ class _FakeDB:
         # 节点元数据：db_catalog join data_source
         if " FROM db_catalog " in sql or " JOIN data_source " in sql:
             return _Result([r for r in self._meta_rows if r.table == "catalog"])
+        # 边变更历史（Task D：edge_history_by_key）按唯一键过滤
+        if " FROM lineage_edge_history " in sql:
+            sn = _extract(sql, "source_node")
+            tn = _extract(sql, "target_node")
+            et = _extract(sql, "edge_type")
+            gr = _extract(sql, "granularity")
+            return _Result(
+                [
+                    h
+                    for h in self._history_rows
+                    if getattr(h, "source_node", None) == sn
+                    and getattr(h, "target_node", None) == tn
+                    and getattr(h, "edge_type", None) == et
+                    and getattr(h, "granularity", None) == gr
+                ]
+            )
+        # 按主键取未删除边（Task D：get_edge）
+        if (
+            " FROM lineage_edge " in sql
+            and "deleted_at IS NULL" in sql
+            and " UNION " not in sql
+            and "id =" in sql
+        ):
+            m = re.search(r"lineage_edge\.id\s*=\s*(\d+)", sql)
+            eid = int(m.group(1)) if m else None
+            matched = [r for r in self._rows if getattr(r, "id", None) == eid]
+            return _Result(matched, scalar=matched[0] if matched else None)
         if sql.lstrip().upper().startswith("DELETE"):
             node = _extract(sql, "source_node")
             matched = [
@@ -797,3 +858,28 @@ async def test_resolve_node_meta_empty_and_unknown() -> None:
         "domain": None,
         "owner": None,
     }
+
+
+# ---- Task D：血缘边详情（get_edge + edge_history_by_key）----
+
+
+async def test_get_edge_by_id_and_missing() -> None:
+    """get_edge 按主键取未删除边；缺失返回 None。"""
+    db = _FakeDB([_Row(1, "metric:a", "table:t", "DERIVED_FROM", "L3")])
+    repo = LineageRepository(db)
+    edge = await repo.get_edge(1)
+    assert edge is not None and edge.id == 1
+    assert await repo.get_edge(999) is None
+
+
+async def test_edge_history_by_key() -> None:
+    """edge_history_by_key 按边唯一键取变更历史快照。"""
+    hist = [
+        _HistRow(10, "metric:a", "table:t", "DERIVED_FROM", "L3", change_reason="rename"),
+        _HistRow(11, "metric:b", "table:t", "DERIVED_FROM", "L3", change_reason="manual"),
+    ]
+    db = _FakeDB([], history_rows=hist)
+    repo = LineageRepository(db)
+    rows = await repo.edge_history_by_key("metric:a", "table:t", "DERIVED_FROM", "L3")
+    assert len(rows) == 1
+    assert rows[0].change_reason == "rename"

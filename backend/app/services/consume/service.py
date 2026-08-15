@@ -373,7 +373,37 @@ class ConsumeService(BaseService):
         )
         # 查询成功即自动保存 WORM 快照（留痕；写入失败仅告警，不阻塞查询响应）
         await self._maybe_save_snapshot(metric, req, result, engine_used)
+
+        # 消费方血缘注册（best-effort，不阻断查询响应）：记录「该接入方消费了此指标」
+        if client is not None:
+            await self._register_consumer_lineage(req.metric_code, client.client_id)
+
         return response
+
+    async def _register_consumer_lineage(self, metric_code: str, client_id: str) -> None:
+        """消费成功后注册消费方血缘边（CONSUMED_BY，best-effort，不阻断响应）。
+
+        写入 ``metric:{metric_code} → consumer:{client_id}`` 边（粒度 L3，
+        edge_type=CONSUMED_BY），供血缘图谱/影响分析展示指标被哪些接入方消费。
+        复用血缘团队提供的公共 API ``LineageService.register_metric_consumer``
+        （按唯一键幂等去重，重复消费不产生重复边）；该接口仅在本模块做 best-effort
+        调用，失败仅告警，不影响指标查询响应。
+
+        Args:
+            metric_code: 被消费指标的编码。
+            client_id: 接入方 client_id（内部用户查询路径 client 为 None，不注册）。
+        """
+        from app.services.lineage.service import LineageService
+
+        try:
+            await LineageService(self._db).register_metric_consumer(metric_code, client_id)
+        except Exception:  # noqa: BLE001 - 血缘注册失败绝不阻断消费响应
+            logger.warning(
+                "consumer_lineage_register_failed",
+                metric_code=metric_code,
+                client_id=client_id,
+                exc_info=True,
+            )
 
     async def _execute_with_fallback(
         self,

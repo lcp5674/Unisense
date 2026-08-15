@@ -2773,3 +2773,130 @@ async def test_deprecated_resubmit_publishes_resubmitted_event():
 
     published = svc._publish_event.call_args.args[0]
     assert published == "metric.resubmitted"
+
+
+# ---- 血缘接入：_register_metric_lineage_full（Task A）----
+
+
+async def test_register_metric_lineage_full_derived_registers_dependency_edges():
+    """derived 指标：注册表级血缘 + 每条 metric:{dep}→metric:{code} 依赖边（DERIVED_FROM/L3）。"""
+    svc, _repo = _svc_with_repo()
+    metric = make_metric(
+        type="derived",
+        definition_json={
+            "expression": "SUM(a)/SUM(b)",
+            "dependencies": ["fct_order", "dim_user"],
+            "source_tables": ["dwd_order"],
+        },
+    )
+    with patch("app.services.lineage.service.LineageService") as MockLS, patch(
+        "app.services.lineage.repository.LineageRepository"
+    ) as MockLR:
+        lineage_svc = MockLS.return_value
+        lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
+        repo_inst = MockLR.return_value
+        repo_inst.upsert_edge = AsyncMock()
+
+        await svc._register_metric_lineage_full(metric)
+
+        # 表级血缘始终注册（commit=False 交由外层指标事务统一提交）
+        lineage_svc.register_metric_from_definition.assert_awaited_once_with(metric, commit=False)
+        # 两个依赖各一条 DERIVED_FROM / L3 边（composite/derived 统一 DERIVED_FROM）
+        assert repo_inst.upsert_edge.await_count == 2
+        calls = {
+            c.kwargs["source_node"]: c.kwargs for c in repo_inst.upsert_edge.call_args_list
+        }
+        assert calls["metric:fct_order"]["target_node"] == "metric:sales_gmv_daily"
+        assert calls["metric:fct_order"]["edge_type"] == "DERIVED_FROM"
+        assert calls["metric:fct_order"]["granularity"] == "L3"
+        assert calls["metric:dim_user"]["target_node"] == "metric:sales_gmv_daily"
+
+
+async def test_register_metric_lineage_full_atomic_skips_dependency_edges():
+    """atomic 指标即使 definition 含 dependencies 也跳过指标间依赖边（仅注册表级血缘）。"""
+    svc, _repo = _svc_with_repo()
+    metric = make_metric(
+        type="atomic",
+        definition_json={
+            "expression": "SUM(x)",
+            "dependencies": ["fct_order"],
+            "source_tables": ["dwd_x"],
+        },
+    )
+    with patch("app.services.lineage.service.LineageService") as MockLS, patch(
+        "app.services.lineage.repository.LineageRepository"
+    ) as MockLR:
+        lineage_svc = MockLS.return_value
+        lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
+        repo_inst = MockLR.return_value
+        repo_inst.upsert_edge = AsyncMock()
+
+        await svc._register_metric_lineage_full(metric)
+
+        lineage_svc.register_metric_from_definition.assert_awaited_once()
+        repo_inst.upsert_edge.assert_not_awaited()  # atomic 无指标间依赖边
+
+
+async def test_register_metric_lineage_full_failure_is_swallowed():
+    """血缘注册抛错不向上传播（best-effort，绝不阻断指标创建/发布/更新主流程）。"""
+    svc, _repo = _svc_with_repo()
+    metric = make_metric(type="composite", definition_json={"dependencies": ["fct_order"]})
+    with patch("app.services.lineage.service.LineageService") as MockLS:
+        MockLS.return_value.register_metric_from_definition = AsyncMock(
+            side_effect=RuntimeError("lineage store down")
+        )
+        # 不应抛异常
+        await svc._register_metric_lineage_full(metric)
+
+
+# ---- 血缘变更影响通知：notify_lineage_impacted_owners（Task C）----
+
+
+async def test_notify_lineage_impacted_owners_notifies_owners():
+    """下游存在受影响指标 → 按 owner 定向通知，event_type=lineage.change_impacted / title=血缘变更影响。"""
+    svc, repo = _svc_with_repo()
+    edges = [
+        MagicMock(target_node="metric:gmv_derived"),
+        MagicMock(target_node="metric:gmv_composite"),
+        MagicMock(target_node="table:db.orders"),  # 非指标节点，应忽略
+    ]
+
+    async def _lookup(code: str) -> Metric:
+        return make_metric(
+            metric_code=code, owner_id=7 if code == "gmv_derived" else 9
+        )
+
+    with patch("app.db.mysql.async_session_factory") as MockFactory, patch(
+        "app.services.lineage.service.LineageService"
+    ) as MockLS, patch("app.services.notify.service.NotifyService") as MockNS:
+        MockFactory.return_value = AsyncMock()  # 独立会话异步上下文管理器
+        lineage_svc = MockLS.return_value
+        lineage_svc.query_impact = AsyncMock(return_value=edges)
+        repo.get_by_code = _lookup  # 按 code 返回对应 owner 的指标
+        notify_inst = MockNS.return_value
+        notify_inst.notify_user = AsyncMock(return_value=None)
+
+        count = await svc.notify_lineage_impacted_owners("table:db.orders")
+
+    assert count == 2
+    assert notify_inst.notify_user.await_count == 2
+    event_types = {c.kwargs["event_type"] for c in notify_inst.notify_user.call_args_list}
+    assert event_types == {"lineage.change_impacted"}
+    titles = {c.kwargs["title"] for c in notify_inst.notify_user.call_args_list}
+    assert titles == {"血缘变更影响"}
+
+
+async def test_notify_lineage_impacted_owners_query_failure_returns_zero():
+    """影响分析查询抛错 → 返回 0，且不发任何通知（best-effort，不阻断上游变更）。"""
+    svc, _repo = _svc_with_repo()
+    with patch("app.services.lineage.service.LineageService") as MockLS, patch(
+        "app.services.notify.service.NotifyService"
+    ) as MockNS:
+        MockLS.return_value.query_impact = AsyncMock(side_effect=RuntimeError("graph down"))
+        notify_inst = MockNS.return_value
+        notify_inst.notify_user = AsyncMock(return_value=None)
+
+        count = await svc.notify_lineage_impacted_owners("table:db.orders")
+
+    assert count == 0
+    notify_inst.notify_user.assert_not_awaited()
