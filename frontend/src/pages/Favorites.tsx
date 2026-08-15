@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Empty, Input, List, message, Segmented, Space, Statistic, Tag } from "antd";
-import { DeleteOutlined, HeartFilled, PlusOutlined } from "@ant-design/icons";
+import { Button, Card, Empty, Input, message, Segmented, Tag } from "antd";
+import {
+  ApartmentOutlined,
+  BookOutlined,
+  DeleteOutlined,
+  FundOutlined,
+  HeartFilled,
+  PlusOutlined,
+  ProfileOutlined,
+  TableOutlined,
+} from "@ant-design/icons";
 import {
   addFavorite,
   listFavoriteDetails,
@@ -24,6 +34,14 @@ const ASSET_TYPE_COLOR: Record<FavoriteAssetType, string> = {
   TERM: "purple",
   DIMENSION: "cyan",
   TEMPLATE: "green",
+};
+// 各资产类型图标（fav-type-icon 的 .t-{type} 色块内展示）
+const TYPE_ICON: Record<FavoriteAssetType, ReactNode> = {
+  METRIC: <FundOutlined />,
+  TABLE: <TableOutlined />,
+  TERM: <BookOutlined />,
+  DIMENSION: <ApartmentOutlined />,
+  TEMPLATE: <ProfileOutlined />,
 };
 
 // 各资产状态/敏感级中文标签（数据表展示敏感级，模板展示启用状态）
@@ -100,6 +118,126 @@ const TABS: { key: FavoriteAssetType | "ALL"; label: string }[] = [
   { key: "DIMENSION", label: "维度" },
   { key: "TEMPLATE", label: "模板" },
 ];
+
+/** 概览统计卡行：每类资产一张卡，一眼看到收藏结构与健康度。 */
+function FavStatsBar({
+  total,
+  byType,
+  dead,
+}: {
+  total: number;
+  byType: Record<string, number>;
+  dead: number;
+}) {
+  return (
+    <div className="fav-stats">
+      <div className="fav-stat-card fav-stat-total">
+        <span className="fav-stat-num">{total}</span>
+        <span className="fav-stat-label">收藏总数</span>
+      </div>
+      {TABS.filter((t) => t.key !== "ALL").map((t) => (
+        <div key={t.key} className="fav-stat-card">
+          <span className="fav-stat-num">{byType[t.key] ?? 0}</span>
+          <span className="fav-stat-label">{t.label}</span>
+        </div>
+      ))}
+      <div className={`fav-stat-card fav-stat-dead${dead ? " has-dead" : ""}`}>
+        <span className="fav-stat-num">{dead}</span>
+        <span className="fav-stat-label">已失效</span>
+      </div>
+    </div>
+  );
+}
+
+/** 工具条：资产类型 Tab + 关键词搜索 + 只看失效开关。 */
+function FavToolbar({
+  tab,
+  onTab,
+  search,
+  onSearch,
+  showDead,
+  onToggleDead,
+}: {
+  tab: FavoriteAssetType | "ALL";
+  onTab: (v: FavoriteAssetType | "ALL") => void;
+  search: string;
+  onSearch: (v: string) => void;
+  showDead: boolean;
+  onToggleDead: () => void;
+}) {
+  return (
+    <div className="fav-toolbar">
+      <Segmented
+        value={tab}
+        onChange={(v) => onTab(v as FavoriteAssetType | "ALL")}
+        options={TABS.map((t) => ({ label: t.label, value: t.key }))}
+      />
+      <Input
+        allowClear
+        placeholder="搜索名称/编码"
+        value={search}
+        onChange={(e) => onSearch(e.target.value)}
+        style={{ width: 220 }}
+      />
+      <Button
+        size="small"
+        type={showDead ? "primary" : "default"}
+        onClick={onToggleDead}
+      >
+        {showDead ? "取消只看失效" : "只看失效"}
+      </Button>
+    </div>
+  );
+}
+
+/** 单条收藏卡片：类型图标 + 名称/标签 + 编码/域/时间 + 定义摘要 + 操作。 */
+function FavCard({
+  f,
+  onOpen,
+  onRemove,
+}: {
+  f: FavoriteDetail;
+  onOpen: () => void;
+  onRemove: () => void;
+}) {
+  const dead = isDead(f);
+  return (
+    <div className={`fav-card${dead ? " fav-card-dead" : ""}`}>
+      <div className={`fav-type-icon t-${f.asset_type.toLowerCase()}`}>
+        {TYPE_ICON[f.asset_type]}
+      </div>
+      <div className="fav-main">
+        <div className="fav-title">
+          <span className="fav-name" onClick={onOpen}>
+            {f.name}
+          </span>
+          <Tag color={ASSET_TYPE_COLOR[f.asset_type]}>
+            {ASSET_TYPE_LABEL[f.asset_type]}
+          </Tag>
+          <Tag color={statusColor(f)}>{statusLabel(f)}</Tag>
+          {f.tier && <Tag>分级 {f.tier}</Tag>}
+          {f.is_pii && <Tag color="red">含 PII</Tag>}
+        </div>
+        <div className="fav-sub">
+          <span className="mono">{f.asset_id}</span>
+          {f.domain && <span className="fav-domain">{f.domain}</span>}
+          {f.created_at && (
+            <span className="fav-time">收藏于 {timeAgo(f.created_at)}</span>
+          )}
+        </div>
+        {f.description && <div className="fav-desc">{f.description}</div>}
+      </div>
+      <div className="fav-actions">
+        <Button type="link" icon={<HeartFilled />} onClick={onOpen}>
+          查看
+        </Button>
+        <Button type="link" danger icon={<DeleteOutlined />} onClick={onRemove}>
+          移除
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 export function Favorites() {
   const [items, setItems] = useState<FavoriteDetail[]>([]);
@@ -190,49 +328,14 @@ export function Favorites() {
 
   return (
     <div>
-      <Card title="我的收藏">
-        {/* 概览统计条 */}
-        <Space wrap style={{ marginBottom: 16 }} size={[28, 8]}>
-          <Statistic title="收藏总数" value={stats.total} />
-          {TABS.filter((t) => t.key !== "ALL").map((t) => (
-            <Statistic
-              key={t.key}
-              title={t.label}
-              value={stats.byType[t.key] ?? 0}
-            />
-          ))}
-          <Statistic
-            title="失效"
-            value={stats.dead}
-            valueStyle={{ color: stats.dead ? "#cf1322" : undefined }}
-          />
-        </Space>
-
-        {/* 工具条：Tab 分区 + 关键词搜索 + 失效开关 */}
-        <Space wrap style={{ marginBottom: 8 }} align="center">
-          <Segmented
-            value={tab}
-            onChange={(v) => setTab(v as FavoriteAssetType | "ALL")}
-            options={TABS.map((t) => ({ label: t.label, value: t.key }))}
-          />
-          <Input
-            allowClear
-            placeholder="搜索名称/编码"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            style={{ width: 200 }}
-          />
-          <Button
-            size="small"
-            type={showDead ? "primary" : "default"}
-            onClick={() => setShowDead(!showDead)}
-          >
-            {showDead ? "取消只看失效" : "只看失效"}
-          </Button>
-        </Space>
-
-        {/* 弱化手输框：次级入口 */}
-        <Space wrap style={{ marginBottom: 16, opacity: 0.72 }} size={8}>
+      {/* 页头：与「校准仪表」设计系统统一（kicker + 标题 + 副标题），右侧弱化手输框 */}
+      <div className="page-head">
+        <div>
+          <div className="page-kicker">FAVORITES · 收藏</div>
+          <h2>我的收藏</h2>
+          <p>集中收藏指标、数据表、术语、维度与指标模板，点击卡片即可直达资产详情。</p>
+        </div>
+        <div className="fav-add-quick">
           <Input
             placeholder="知道编码？直接输入添加（默认按指标）"
             value={newCode}
@@ -245,84 +348,46 @@ export function Favorites() {
             添加
           </Button>
           <span className="muted" style={{ fontSize: 12 }}>
-            或到「指标目录」点心形、详情页点「收藏」收集资产
+            或到「指标目录」点心形、详情页点「收藏」
           </span>
-        </Space>
+        </div>
+      </div>
 
-        <List
-          loading={loading}
-          dataSource={filtered}
-          locale={{
-            emptyText: (
-              <Empty description="暂无收藏">
-                <Button type="primary" onClick={() => navigate("/catalog")}>
-                  去指标目录挑选收藏
-                </Button>
-              </Empty>
-            ),
-          }}
-          renderItem={(f) => (
-            <List.Item
-              className={isDead(f) ? "fav-item-invalid" : undefined}
-              actions={[
-                <Button
-                  type="link"
-                  key="open"
-                  icon={<HeartFilled />}
-                  onClick={() => navigate(assetTarget(f))}
-                >
-                  查看
-                </Button>,
-                <Button
-                  type="link"
-                  key="remove"
-                  danger
-                  icon={<DeleteOutlined />}
-                  onClick={() => handleRemove(f)}
-                >
-                  移除
-                </Button>,
-              ]}
-            >
-              <List.Item.Meta
-                title={
-                  <Space wrap size={8}>
-                    <span
-                      className="fav-name"
-                      style={{ cursor: "pointer" }}
-                      onClick={() => navigate(assetTarget(f))}
-                    >
-                      {f.name}
-                    </span>
-                    <Tag color={ASSET_TYPE_COLOR[f.asset_type]}>
-                      {ASSET_TYPE_LABEL[f.asset_type]}
-                    </Tag>
-                    <Tag color={statusColor(f)}>{statusLabel(f)}</Tag>
-                    {f.tier && <Tag>分级 {f.tier}</Tag>}
-                    {f.is_pii && <Tag color="red">含 PII</Tag>}
-                  </Space>
-                }
-                description={
-                  <div>
-                    <Space size={8} wrap>
-                      <span className="mono">{f.asset_id}</span>
-                      {f.domain && <span className="muted">{f.domain}</span>}
-                      {f.created_at && (
-                        <span className="muted">收藏于 {timeAgo(f.created_at)}</span>
-                      )}
-                    </Space>
-                    {f.description && (
-                      <div className="muted" style={{ marginTop: 4 }}>
-                        {f.description}
-                      </div>
-                    )}
-                  </div>
-                }
-              />
-            </List.Item>
-          )}
-        />
-      </Card>
+      <FavStatsBar total={stats.total} byType={stats.byType} dead={stats.dead} />
+
+      <FavToolbar
+        tab={tab}
+        onTab={setTab}
+        search={search}
+        onSearch={setSearch}
+        showDead={showDead}
+        onToggleDead={() => setShowDead(!showDead)}
+      />
+
+      {filtered.length === 0 ? (
+        loading ? (
+          <Card loading />
+        ) : (
+          <Card className="fav-empty">
+            <Empty description="暂无收藏">
+              <Button type="primary" onClick={() => navigate("/catalog")}>
+                去指标目录挑选收藏
+              </Button>
+            </Empty>
+          </Card>
+        )
+      ) : (
+        <div className="fav-list">
+          {filtered.map((f) => (
+            <FavCard
+              key={`${f.asset_type}:${f.asset_id}`}
+              f={f}
+              onOpen={() => navigate(assetTarget(f))}
+              onRemove={() => handleRemove(f)}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

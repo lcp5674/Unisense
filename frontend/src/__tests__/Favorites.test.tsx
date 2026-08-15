@@ -102,7 +102,7 @@ describe("我的收藏 - 多资产展示", () => {
     expect(screen.getAllByText("数据表").length).toBeGreaterThan(0);
     expect(screen.getAllByText("术语").length).toBeGreaterThan(0);
     // 概览统计：收藏总数 4
-    const totalStat = screen.getByText("收藏总数").closest(".ant-statistic");
+    const totalStat = screen.getByText("收藏总数").closest(".fav-stat-card");
     expect(totalStat).toHaveTextContent("4");
     // 分级与 PII 信息密度
     expect(screen.getByText("分级 T1")).toBeInTheDocument();
