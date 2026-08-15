@@ -64,14 +64,47 @@ def _extract(sql: str, column: str) -> str | None:
     return m.group(1) if m else None
 
 
+class _MetaRow:
+    """节点元数据查询行（resolve_node_meta 用）：metric 或 db_catalog 行。"""
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        metric_code: str | None = None,
+        domain: str | None = None,
+        pii_flag: bool = False,
+        owner_id: int | None = None,
+        catalog_id: int | None = None,
+        entity_name: str | None = None,
+        sensitivity_level: str | None = None,
+    ) -> None:
+        self.table = table
+        self.metric_code = metric_code
+        self.domain = domain
+        self.pii_flag = pii_flag
+        self.owner_id = owner_id
+        self.id = catalog_id
+        self.entity_name = entity_name
+        self.sensitivity_level = sensitivity_level
+
+
 class _FakeDB:
-    def __init__(self, rows: list[_Row]) -> None:
+    def __init__(self, rows: list[_Row], meta_rows: list[_MetaRow] | None = None) -> None:
         self._rows: list[Any] = list(rows)
+        self._meta_rows: list[Any] = list(meta_rows or [])
         self.added: list[Any] = []
         self.flushed = False
 
     async def execute(self, stmt: object) -> _Result:
-        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        # SQLAlchemy 编译产物含换行缩进：折叠空白以便按子串匹配分支
+        sql = re.sub(r"\s+", " ", str(stmt.compile(compile_kwargs={"literal_binds": True})))
+        # 节点元数据：metric 表
+        if " FROM metric " in sql:
+            return _Result([r for r in self._meta_rows if r.table == "metric"])
+        # 节点元数据：db_catalog join data_source
+        if " FROM db_catalog " in sql or " JOIN data_source " in sql:
+            return _Result([r for r in self._meta_rows if r.table == "catalog"])
         if sql.lstrip().upper().startswith("DELETE"):
             node = _extract(sql, "source_node")
             matched = [
@@ -669,3 +702,98 @@ async def test_get_ingest_run_missing_returns_none() -> None:
     """不存在的运行记录返回 None。"""
     repo = LineageRepository(_RunDB(None))
     assert await repo.get_ingest_run(999) is None
+
+
+# ---- 节点元数据解析（resolve_node_meta）----
+
+
+async def test_resolve_node_meta_metric_and_table() -> None:
+    """metric 查 metric 表、table 查 db_catalog join data_source（entity_id/域/PII/Owner）。"""
+    db = _FakeDB(
+        [],
+        meta_rows=[
+            _MetaRow(table="metric", metric_code="gmv", domain="sales", pii_flag=True, owner_id=7),
+            _MetaRow(
+                table="catalog",
+                catalog_id=42,
+                entity_name="orders",
+                domain="sales",
+                sensitivity_level="PII-HIGH",
+                owner_id=3,
+            ),
+        ],
+    )
+    repo = LineageRepository(db)
+    out = await repo.resolve_node_meta({"metric:gmv", "table:orders"})
+    assert out["metric:gmv"] == {
+        "id": "metric:gmv",
+        "type": "metric",
+        "label": "gmv",
+        "entity_id": None,
+        "pii": True,
+        "domain": "sales",
+        "owner": "7",
+    }
+    assert out["table:orders"]["entity_id"] == 42
+    assert out["table:orders"]["pii"] is True  # PII-HIGH 含 PII
+    assert out["table:orders"]["domain"] == "sales"
+    assert out["table:orders"]["owner"] == "3"
+
+
+async def test_resolve_node_meta_field_inherits_table_domain() -> None:
+    """field 节点展示 表.列 并由所属表继承业务域；external/未知节点仅类型与 label。"""
+    db = _FakeDB(
+        [],
+        meta_rows=[
+            _MetaRow(
+                table="catalog",
+                catalog_id=10,
+                entity_name="orders",
+                domain="sales",
+                sensitivity_level="INTERNAL",
+            ),
+        ],
+    )
+    repo = LineageRepository(db)
+    out = await repo.resolve_node_meta(
+        {"field:orders.amount", "field:orders.user_id", "external:api", "plain_node"}
+    )
+    assert out["field:orders.amount"]["type"] == "field"
+    assert out["field:orders.amount"]["label"] == "orders.amount"
+    # 所属表 orders 有目录元数据 → 继承域 sales
+    assert out["field:orders.amount"]["domain"] == "sales"
+    assert out["field:orders.amount"]["entity_id"] is None
+    # 另一个字段同样继承
+    assert out["field:orders.user_id"]["domain"] == "sales"
+    # external / 未知：仅类型与 label，无目录元数据
+    assert out["external:api"]["type"] == "external"
+    assert out["external:api"]["label"] == "api"
+    assert out["external:api"]["domain"] is None
+    assert out["plain_node"]["type"] == "other"
+    assert out["plain_node"]["label"] == "plain_node"
+
+
+async def test_resolve_node_meta_empty_and_unknown() -> None:
+    """空节点集返回空；无目录元数据的 metric/table 仅类型与 label（不抛错）。"""
+    db = _FakeDB([])
+    repo = LineageRepository(db)
+    assert await repo.resolve_node_meta(set()) == {}
+    out = await repo.resolve_node_meta({"metric:ghost", "table:nonexistent"})
+    assert out["metric:ghost"] == {
+        "id": "metric:ghost",
+        "type": "metric",
+        "label": "ghost",
+        "entity_id": None,
+        "pii": False,
+        "domain": None,
+        "owner": None,
+    }
+    assert out["table:nonexistent"] == {
+        "id": "table:nonexistent",
+        "type": "table",
+        "label": "nonexistent",
+        "entity_id": None,
+        "pii": False,
+        "domain": None,
+        "owner": None,
+    }

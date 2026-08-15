@@ -108,6 +108,23 @@ class ImpactPreviewResponse(BaseModel):
     risk_level: str = Field(description="风险等级：critical/high/medium/low")
 
 
+class LineageNodeInfo(BaseModel):
+    """血缘图中单个节点的基础信息（影响分析/边列表响应的 ``nodes`` 字段）。
+
+    与 ``/lineage/graph`` 节点结构对齐（id/type/label/entity_id/pii/domain/owner），
+    供前端血缘查询/影响分析图谱点击节点时在侧边栏展示具体信息（指标详情 / 表详情），
+    并使图节点具备域/PII 属性（按业务域着色、PII 红色描边，与血缘图谱一致）。
+    """
+
+    id: str
+    type: str
+    label: str
+    entity_id: int | None = Field(default=None, description="db_catalog 主键（仅表/视图节点有值）")
+    pii: bool = Field(default=False, description="是否含 PII")
+    domain: str | None = Field(default=None, description="业务域（表从数据源继承）")
+    owner: str | None = Field(default=None, description="Owner ID（字符串）")
+
+
 class LineageImpactParams(BaseModel):
     """影响分析查询参数（query）。"""
 

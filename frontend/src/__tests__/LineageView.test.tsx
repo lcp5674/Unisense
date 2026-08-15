@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData } from "../pages/LineageView";
+import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, edgesToGraphData } from "../pages/LineageView";
 import { adaptiveBaseRadius } from "../components/assetmap/AssetGraph";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
@@ -452,6 +452,10 @@ describe("LineageView 血缘查询 / 影响分析 Tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
+    vi.mocked(api.getCatalogDetail).mockResolvedValue(tableDetail);
+    vi.mocked(api.getMetric).mockResolvedValue(metricDetail);
+    vi.mocked(api.getMetricHealth).mockResolvedValue(null as never);
+    vi.mocked(api.fetchRelatedMetrics).mockResolvedValue([]);
     vi.mocked(api.lineageNodes).mockResolvedValue([
       { id: "table:orders", label: "orders", type: "table", count: 12 },
       { id: "metric:gmv", label: "gmv", type: "metric", count: 8 },
@@ -473,8 +477,38 @@ describe("LineageView 血缘查询 / 影响分析 Tab", () => {
       page: 1,
       page_size: 50,
       has_more: false,
+      // 节点元数据：供影响分析图谱点击节点侧边栏展示详情（entity_id 直达表详情）
+      nodes: [
+        { id: "table:orders", type: "table", label: "orders", entity_id: 42, domain: "sales", pii: true },
+        { id: "table:dws", type: "table", label: "dws", entity_id: 43, domain: "sales" },
+      ],
     });
   });
+
+  // 切换到影响分析 Tab 并查询，返回活跃面板（等待图谱挂载，确保 node:click handler 已注册）
+  async function openImpactTabAndQuery() {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /血缘查询/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    const nodeSelect = within(panel).getAllByRole("combobox")[0];
+    fireEvent.mouseDown(nodeSelect);
+    await screen.findByText("orders");
+    fireEvent.click(screen.getByText("orders"));
+    fireEvent.click(within(panel).getByRole("button", { name: /查\s*询/ }));
+    await waitFor(() => expect(api.lineageImpact).toHaveBeenCalled());
+    await waitFor(() => expect(panel.querySelector('[data-testid="asset-graph-wrap"]')).toBeTruthy());
+    return panel;
+  }
+
+  // 影响分析图谱的 node:click 处理器（最后注册的那个——antd Tabs 保留血缘图谱
+  // Tab 挂载，其 GraphCanvas 先注册；影响分析图后注册，取末位）
+  function impactNodeClickHandler(): ((evt: { target: { id?: string } }) => void) | undefined {
+    const calls = graphMock.on.mock.calls.filter(([evt]) => evt === "node:click");
+    return calls[calls.length - 1]?.[1] as ((evt: { target: { id?: string } }) => void) | undefined;
+  }
 
   it("进入 Tab 预加载候选节点，可从下拉选择节点并查询影响", async () => {
     renderLineage();
@@ -550,6 +584,133 @@ describe("LineageView 血缘查询 / 影响分析 Tab", () => {
     expect(panel.querySelector('[data-testid="asset-graph-wrap"]')).toBeTruthy();
     // 边明细表格仍在（辅助展示）
     expect(within(panel).getByText("table:dws")).toBeInTheDocument();
+  });
+
+  it("点击影响分析图中的指标节点 → 侧边栏展示指标详情（不跳转页面）", async () => {
+    vi.mocked(api.lineageImpact).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          source_node: "table:dws",
+          target_node: "metric:gmv",
+          edge_type: "DERIVED_FROM",
+          granularity: "L1",
+          confidence: 1,
+          provenance: "sqlglot",
+          pii_inherited: false,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+      has_more: false,
+      nodes: [
+        { id: "table:dws", type: "table", label: "dws", entity_id: 43, domain: "sales" },
+        { id: "metric:gmv", type: "metric", label: "gmv", domain: "sales" },
+      ],
+    });
+    graphMock.getNodeData.mockImplementation((id?: string) => {
+      if (id === "metric:gmv") {
+        return { id: "metric:gmv", data: { id: "metric:gmv", type: "metric", label: "gmv" } } as never;
+      }
+      return undefined;
+    });
+    await openImpactTabAndQuery();
+    const handler = impactNodeClickHandler();
+    expect(handler).toBeDefined();
+    await act(async () => {
+      handler?.({ target: { id: "metric:gmv" } });
+    });
+    // 侧边栏加载指标详情并展示（不跳转页面）
+    await waitFor(() => expect(api.getMetric).toHaveBeenCalledWith("gmv"));
+    await waitFor(() => {
+      expect(screen.getByText(/指标详情：营收/)).toBeInTheDocument();
+    });
+    expect(currentPath).toBe("/lineage");
+  });
+
+  it("点击影响分析图中的表节点 → 侧边栏展示表详情（entity_id 直达）", async () => {
+    graphMock.getNodeData.mockImplementation((id?: string) => {
+      if (id === "table:orders") {
+        return { id: "table:orders", data: { id: "table:orders", type: "table", label: "orders", entity_id: 42 } } as never;
+      }
+      return undefined;
+    });
+    await openImpactTabAndQuery();
+    const handler = impactNodeClickHandler();
+    expect(handler).toBeDefined();
+    await act(async () => {
+      handler?.({ target: { id: "table:orders" } });
+    });
+    // 表详情抽屉：entity_id → getCatalogDetail → 展示敏感度等具体信息
+    await waitFor(() => expect(api.getCatalogDetail).toHaveBeenCalledWith(42));
+    await waitFor(() => {
+      expect(screen.getByText(/表 · orders/)).toBeInTheDocument();
+    });
+    expect(screen.getByText("PII-HIGH")).toBeInTheDocument();
+    expect(currentPath).toBe("/lineage");
+  });
+
+  it("点击影响分析图中的字段节点 → 字段信息抽屉（含所属表详情入口）", async () => {
+    vi.mocked(api.lineageImpact).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          source_node: "table:orders",
+          target_node: "table:dws",
+          edge_type: "DERIVED_FROM",
+          granularity: "L1",
+          confidence: 1,
+          provenance: "sqlglot",
+          pii_inherited: false,
+        },
+        {
+          id: 2,
+          source_node: "field:orders.amount",
+          target_node: "field:dws.amount",
+          edge_type: "DERIVED_FROM",
+          granularity: "L2",
+          confidence: 1,
+          provenance: "sqlglot",
+          pii_inherited: false,
+        },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 50,
+      has_more: false,
+      nodes: [
+        { id: "table:orders", type: "table", label: "orders", entity_id: 42, domain: "sales" },
+        { id: "table:dws", type: "table", label: "dws", entity_id: 43, domain: "sales" },
+        { id: "field:orders.amount", type: "field", label: "orders.amount", domain: "sales" },
+        { id: "field:dws.amount", type: "field", label: "dws.amount", domain: "sales" },
+      ],
+    });
+    graphMock.getNodeData.mockImplementation((id?: string) => {
+      if (id === "field:orders.amount") {
+        return { id: "field:orders.amount", data: { id: "field:orders.amount", type: "field", label: "orders.amount", domain: "sales" } } as never;
+      }
+      return undefined;
+    });
+    await openImpactTabAndQuery();
+    const handler = impactNodeClickHandler();
+    expect(handler).toBeDefined();
+    await act(async () => {
+      handler?.({ target: { id: "field:orders.amount" } });
+    });
+    // 字段信息抽屉：字段名 + 业务域 + 所属表（orders 在当前视图）
+    await waitFor(() => expect(screen.getByText("字段信息")).toBeInTheDocument());
+    expect(screen.getByText("orders.amount")).toBeInTheDocument();
+    // 业务域 sales 在抽屉中展示（图谱图例也可能含 sales，故用 getAllByText）
+    expect(screen.getAllByText("sales").length).toBeGreaterThan(0);
+    // 所属表入口 → 打开表详情（entity_id 42）
+    await act(async () => {
+      screen.getByRole("button", { name: /查看所属表详情/ }).click();
+    });
+    await waitFor(() => expect(api.getCatalogDetail).toHaveBeenCalledWith(42));
+    await waitFor(() => {
+      expect(screen.getByText(/表 · orders/)).toBeInTheDocument();
+    });
   });
 });
 
@@ -833,6 +994,42 @@ describe("parseResultToGraphData 解析结果转血缘图谱", () => {
     });
     expect(g.nodes).toHaveLength(0);
     expect(g.edges).toHaveLength(0);
+  });
+});
+
+describe("edgesToGraphData 合并节点元数据", () => {
+  const edge = {
+    id: 1,
+    source_node: "table:a",
+    target_node: "metric:m",
+    edge_type: "DERIVED_FROM",
+    granularity: "L1",
+    confidence: 1,
+    provenance: "sqlglot",
+    pii_inherited: false,
+  };
+
+  it("合并后端节点元数据（entity_id/域/PII/Owner），未命中节点保持默认", () => {
+    const g = edgesToGraphData([edge], [
+      { id: "table:a", type: "table", label: "a", entity_id: 9, domain: "sales", pii: true, owner: "3" },
+      { id: "metric:m", type: "metric", label: "m", domain: "finance" },
+    ]);
+    const tableA = g.nodes.find((n) => n.id === "table:a");
+    expect(tableA?.entity_id).toBe(9);
+    expect(tableA?.domain).toBe("sales");
+    expect(tableA?.pii).toBe(true);
+    expect(tableA?.owner).toBe("3");
+    const metricM = g.nodes.find((n) => n.id === "metric:m");
+    expect(metricM?.domain).toBe("finance");
+    expect(metricM?.entity_id).toBeUndefined();
+  });
+
+  it("未提供节点元数据时构建的节点不含目录属性（向后兼容）", () => {
+    const g = edgesToGraphData([edge]);
+    const tableA = g.nodes.find((n) => n.id === "table:a");
+    expect(tableA?.entity_id).toBeUndefined();
+    expect(tableA?.domain).toBeUndefined();
+    expect(tableA?.pii).toBeUndefined();
   });
 });
 

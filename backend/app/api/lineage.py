@@ -145,10 +145,18 @@ async def impact(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
-    """影响分析：给定节点向上/向下/双向展开血缘（分页返回）。"""
+    """影响分析：给定节点向上/向下/双向展开血缘（分页返回）。
+
+    响应除边列表外携带 ``nodes``（当前页节点的基础元数据，含 entity_id/domain/
+    owner/pii），供前端血缘查询/影响分析图谱点击节点时在侧边栏展示具体信息。
+    """
     svc = _svc(db)
     edges = await svc.query_impact(params)
-    return ok(data=paginate_edges(edges, params.page, params.page_size), trace_id=trace_id)
+    page = paginate_edges(edges, params.page, params.page_size)
+    page["nodes"] = await svc.node_meta(
+        {it["source_node"] for it in page["items"]} | {it["target_node"] for it in page["items"]}
+    )
+    return ok(data=page, trace_id=trace_id)
 
 
 @router.get("/edges", dependencies=_READ_DEPS)
@@ -158,10 +166,18 @@ async def list_edges(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
-    """列出与节点相关的血缘边（分页返回，含 total）。"""
+    """列出与节点相关的血缘边（分页返回，含 total）。
+
+    与 ``/impact`` 一致携带 ``nodes`` 节点元数据（当前页节点），供前端图谱点击
+    节点在侧边栏展示具体信息。
+    """
     svc = _svc(db)
     edges = await svc.list_edges(params.node, params.direction)
-    return ok(data=paginate_edges(edges, params.page, params.page_size), trace_id=trace_id)
+    page = paginate_edges(edges, params.page, params.page_size)
+    page["nodes"] = await svc.node_meta(
+        {it["source_node"] for it in page["items"]} | {it["target_node"] for it in page["items"]}
+    )
+    return ok(data=page, trace_id=trace_id)
 
 
 @router.delete(

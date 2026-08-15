@@ -44,6 +44,9 @@ class _FakeLineageSvc:
     async def list_edges(self, node: object, direction: object) -> list:
         return []
 
+    async def node_meta(self, node_ids: object) -> list:
+        return []
+
 
 async def test_lineage_response_contains_trace_id(owner_client, monkeypatch):
     monkeypatch.setattr(lineage_api, "LineageService", _FakeLineageSvc)

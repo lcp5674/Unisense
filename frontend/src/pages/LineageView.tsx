@@ -51,6 +51,7 @@ import type {
   LineageEdge,
   LineageIngestRun,
   LineageNode,
+  LineageNodeInfo,
   ParseLineageResult,
   StaleEdge,
 } from "../types";
@@ -174,10 +175,14 @@ type Direction = "upstream" | "downstream" | "both";
  * 从血缘边列表构建图谱数据（血缘查询/影响分析结果图形化展示用）。
  * 节点 id 去重、label 去类型前缀、type 由前缀推断（table:/metric:/field: → 对应类型，
  * external:/未知 → other）；边直接透传 source/target/edge_type。
+ * 可选的 ``nodeMeta``（后端 /impact 与 /edges 携带的节点基础元数据）会合并进节点，
+ * 使图节点具备 entity_id/domain/owner/pii——点击表节点可直达目录详情、节点按域/PII 着色。
  */
 export function edgesToGraphData(
   edges: LineageEdge[],
+  nodeMeta?: LineageNodeInfo[],
 ): { nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } {
+  const metaById = new Map((nodeMeta ?? []).map((m) => [m.id, m]));
   const nodeMap = new Map<string, AssetGraphNode>();
   const graphEdges: AssetGraphEdge[] = [];
   const addNode = (id: string) => {
@@ -187,7 +192,16 @@ export function edgesToGraphData(
     const label = colon === -1 ? id : id.slice(colon + 1);
     const type =
       prefix === "table" ? "table" : prefix === "metric" ? "metric" : prefix === "field" ? "field" : "other";
-    nodeMap.set(id, { id, type, label: label || id });
+    const meta = metaById.get(id);
+    nodeMap.set(id, {
+      id,
+      type,
+      label: label || id,
+      entity_id: meta?.entity_id ?? undefined,
+      pii: meta?.pii,
+      domain: meta?.domain ?? undefined,
+      owner: meta?.owner ?? undefined,
+    });
   };
   for (const e of edges) {
     addNode(e.source_node);
@@ -229,12 +243,104 @@ export function parseResultToGraphData(result: ParseLineageResult): {
   return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
 }
 
+/** 表/视图详情侧边栏（血缘图谱与血缘查询/影响分析图谱点击表节点时共用）。
+ *  展示敏感度/所属源/Schema 完整度/字段清单/ETL SQL，并提供「在指标目录中查看」入口。 */
+function TableDetailDrawer({ detail, open, onClose, loading }: {
+  detail: DBCatalog | null;
+  open: boolean;
+  onClose: () => void;
+  loading: boolean;
+}) {
+  const navigate = useNavigate();
+  // schema_json.columns 详细格式：{name, type, nullable, comment, default}
+  const columns = (detail?.schema_def?.columns ?? []) as Array<Record<string, unknown>>;
+  const columnData = columns
+    .map((c, i) => ({
+      key: i,
+      name: String(c.name ?? ""),
+      type: String(c.type ?? ""),
+      nullable: c.nullable ? "是" : "否",
+      comment: String(c.comment ?? ""),
+    }))
+    .filter((c) => c.name);
+
+  function goToCatalog() {
+    if (!detail) return;
+    navigate(`/catalog?kw=${encodeURIComponent(detail.entity_name)}`);
+  }
+
+  return (
+    <Drawer
+      title={detail ? `${detail.entity_type === "VIEW" ? "视图" : "表"} · ${detail.entity_name}` : "表详情"}
+      width={680}
+      open={open}
+      onClose={onClose}
+      loading={loading}
+      extra={
+        <Button type="primary" onClick={goToCatalog} disabled={!detail}>
+          在指标目录中查看
+        </Button>
+      }
+    >
+      {detail && (
+        <div>
+          <Descriptions size="small" column={2} bordered>
+            <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+            <Descriptions.Item label="实体类型">
+              {detail.entity_type === "VIEW" ? "视图" : "表"}
+            </Descriptions.Item>
+            <Descriptions.Item label="敏感度">
+              <Tag color={SENSITIVITY_COLOR[detail.sensitivity_level] ?? "default"}>
+                {detail.sensitivity_level || "未分级"}
+              </Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="所属数据源">
+              {detail.source_name ?? detail.source_id}
+              {detail.source_deleted && <Tag color="red" style={{ marginLeft: 6 }}>源已删除</Tag>}
+            </Descriptions.Item>
+            <Descriptions.Item label="Schema 完整">
+              {detail.schema_incomplete ? <Tag color="orange">不完整</Tag> : "完整"}
+            </Descriptions.Item>
+            <Descriptions.Item label="字段数">{columnData.length}</Descriptions.Item>
+          </Descriptions>
+
+          <h4 style={{ marginTop: 16 }}>字段清单（{columnData.length}）</h4>
+          {columnData.length > 0 ? (
+            <Table
+              size="small"
+              rowKey="key"
+              dataSource={columnData}
+              pagination={false}
+              columns={[
+                { title: "字段名", dataIndex: "name", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+                { title: "类型", dataIndex: "type", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+                { title: "可空", dataIndex: "nullable", width: 60 },
+                { title: "注释", dataIndex: "comment" },
+              ]}
+            />
+          ) : (
+            <Empty description="该实体无字段元数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          )}
+
+          {detail.etl_sql && (
+            <>
+              <h4 style={{ marginTop: 16 }}>ETL SQL</h4>
+              <pre className="mono" style={{ fontSize: 12, background: "#f5f5f5", padding: 12, borderRadius: 6, maxHeight: 240, overflow: "auto" }}>
+                {formatSql(detail.etl_sql)}
+              </pre>
+            </>
+          )}
+        </div>
+      )}
+    </Drawer>
+  );
+}
+
 /** 血缘图谱 Tab：进入即加载血缘图谱。指标/表节点点击均在本页以侧边栏
  *  展示详情（指标详情抽屉 / 表详情抽屉），不跳转页面，用户可再决定是否前往完整页面。
  *  支持 URL ``?node=xxx`` 聚焦：从指标详情「在图谱中查看」跳转时，仅展示该节点
  *  上下游子图（BFS 展开 3 跳），而非全量血缘节点。 */
 function GraphTab() {
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
   const [loading, setLoading] = useState(false);
@@ -321,23 +427,6 @@ function GraphTab() {
     }
   }
 
-  function goToCatalog() {
-    if (!detail) return;
-    navigate(`/catalog?kw=${encodeURIComponent(detail.entity_name)}`);
-  }
-
-  // schema_json.columns 详细格式：{name, type, nullable, comment, default}
-  const columns = (detail?.schema_def?.columns ?? []) as Array<Record<string, unknown>>;
-  const columnData = columns
-    .map((c, i) => ({
-      key: i,
-      name: String(c.name ?? ""),
-      type: String(c.type ?? ""),
-      nullable: c.nullable ? "是" : "否",
-      comment: String(c.comment ?? ""),
-    }))
-    .filter((c) => c.name);
-
   return (
     <div>
       <Space style={{ marginBottom: 12 }} wrap>
@@ -385,69 +474,13 @@ function GraphTab() {
         ))
       )}
 
-      <Drawer
-        title={detail ? `${detail.entity_type === "VIEW" ? "视图" : "表"} · ${detail.entity_name}` : "表详情"}
-        width={680}
+      {/* 表/视图详情侧边栏：点击血缘图谱中的表节点打开（不跳转页面） */}
+      <TableDetailDrawer
+        detail={detail}
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
         loading={detailLoading}
-        extra={
-          <Button type="primary" onClick={goToCatalog} disabled={!detail}>
-            在指标目录中查看
-          </Button>
-        }
-      >
-        {detail && (
-          <div>
-            <Descriptions size="small" column={2} bordered>
-              <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
-              <Descriptions.Item label="实体类型">
-                {detail.entity_type === "VIEW" ? "视图" : "表"}
-              </Descriptions.Item>
-              <Descriptions.Item label="敏感度">
-                <Tag color={SENSITIVITY_COLOR[detail.sensitivity_level] ?? "default"}>
-                  {detail.sensitivity_level || "未分级"}
-                </Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="所属数据源">
-                {detail.source_name ?? detail.source_id}
-                {detail.source_deleted && <Tag color="red" style={{ marginLeft: 6 }}>源已删除</Tag>}
-              </Descriptions.Item>
-              <Descriptions.Item label="Schema 完整">
-                {detail.schema_incomplete ? <Tag color="orange">不完整</Tag> : "完整"}
-              </Descriptions.Item>
-              <Descriptions.Item label="字段数">{columnData.length}</Descriptions.Item>
-            </Descriptions>
-
-            <h4 style={{ marginTop: 16 }}>字段清单（{columnData.length}）</h4>
-            {columnData.length > 0 ? (
-              <Table
-                size="small"
-                rowKey="key"
-                dataSource={columnData}
-                pagination={false}
-                columns={[
-                  { title: "字段名", dataIndex: "name", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
-                  { title: "类型", dataIndex: "type", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
-                  { title: "可空", dataIndex: "nullable", width: 60 },
-                  { title: "注释", dataIndex: "comment" },
-                ]}
-              />
-            ) : (
-              <Empty description="该实体无字段元数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-            )}
-
-            {detail.etl_sql && (
-              <>
-                <h4 style={{ marginTop: 16 }}>ETL SQL</h4>
-                <pre className="mono" style={{ fontSize: 12, background: "#f5f5f5", padding: 12, borderRadius: 6, maxHeight: 240, overflow: "auto" }}>
-                  {formatSql(detail.etl_sql)}
-                </pre>
-              </>
-            )}
-          </div>
-        )}
-      </Drawer>
+      />
 
       {/* 指标节点详情侧边栏：点击血缘图谱中的指标节点打开（不跳转页面） */}
       <MetricDetailDrawer
@@ -474,6 +507,15 @@ function ImpactTab() {
     nodes: AssetGraphNode[];
     edges: AssetGraphEdge[];
   } | null>(null);
+  // 节点详情侧边栏（点击图谱节点展示具体信息，对齐血缘图谱/资产地图交互）
+  const [metricDrawerOpen, setMetricDrawerOpen] = useState(false);
+  const [metricCode, setMetricCode] = useState<string | null>(null);
+  const [detail, setDetail] = useState<DBCatalog | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  // 字段节点信息（field 无独立详情表：展示字段名 + 所属表入口）
+  const [fieldNode, setFieldNode] = useState<AssetGraphNode | null>(null);
+  const [fieldTableNode, setFieldTableNode] = useState<AssetGraphNode | null>(null);
   const { track } = useTracking();
 
   /** 候选节点：无关键词加载 top-N 预加载，有关键词远程搜索指定节点。 */
@@ -508,8 +550,8 @@ function ImpactTab() {
       const items = Array.isArray(data.items) ? data.items : (data as unknown as LineageEdge[]);
       setEdges(items);
       setTotal(data.total ?? items.length);
-      // 构建血缘视图（节点/边），供力导向图展示
-      setGraphData(items.length > 0 ? edgesToGraphData(items) : null);
+      // 构建血缘视图（节点/边），供力导向图展示；合并后端节点元数据（entity_id/域/PII）
+      setGraphData(items.length > 0 ? edgesToGraphData(items, data.nodes) : null);
       track("lineage_query", node.trim(), "node");
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "查询失败");
@@ -539,6 +581,46 @@ function ImpactTab() {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "预览失败");
     } finally {
       setLoading(false);
+    }
+  }
+
+  /** 表/视图详情侧边栏：按 entity_id 拉取目录详情（与血缘图谱交互一致）。 */
+  async function openTableDetail(entityId: number) {
+    setDetailOpen(true);
+    setDetailLoading(true);
+    setDetail(null);
+    try {
+      setDetail(await getCatalogDetail(entityId));
+      track("lineage_table_detail", String(entityId), "table");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载表详情失败");
+      setDetailOpen(false);
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  /** 点击图谱节点 → 侧边栏展示具体信息（指标详情 / 表详情 / 字段信息）。 */
+  function handleNodeClick(clicked: AssetGraphNode) {
+    if (clicked.type === "metric") {
+      // 侧边栏展示指标详情，不跳转页面（保留「前往完整详情」入口）
+      setMetricCode(clicked.id.replace(/^metric:/, ""));
+      setMetricDrawerOpen(true);
+    } else if (clicked.type === "table") {
+      if (clicked.entity_id != null) {
+        void openTableDetail(clicked.entity_id);
+      } else {
+        // 血缘边引用但未在目录中（可能尚未采集）：仅提示，边明细仍可查
+        message.info(`「${clicked.label}」未在元数据目录中（可能尚未采集），仅展示血缘关系`);
+      }
+    } else if (clicked.type === "field") {
+      // field:{table}.{col} → 推导所属表节点，提供表详情入口
+      const tableId = `table:${clicked.id.slice("field:".length).split(".").slice(0, -1).join(".")}`;
+      const tableNode = graphData?.nodes.find((n) => n.id === tableId) ?? null;
+      setFieldNode(clicked);
+      setFieldTableNode(tableNode);
+    } else {
+      message.info(`节点「${clicked.label}」暂不支持查看详情`);
     }
   }
 
@@ -631,7 +713,7 @@ function ImpactTab() {
           }（${graphData.nodes.length} 节点 · ${graphData.edges.length} 条边）`}
           style={{ marginBottom: 16 }}
         >
-          <AssetGraph nodes={graphData.nodes} edges={graphData.edges} height={420} />
+          <AssetGraph nodes={graphData.nodes} edges={graphData.edges} height={420} onNodeClick={handleNodeClick} />
         </Card>
       )}
 
@@ -651,6 +733,60 @@ function ImpactTab() {
           </p>
         )
       )}
+
+      {/* 表/视图详情侧边栏：点击影响分析图中的表节点打开（不跳转页面） */}
+      <TableDetailDrawer
+        detail={detail}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        loading={detailLoading}
+      />
+
+      {/* 指标节点详情侧边栏：点击影响分析图中的指标节点打开（不跳转页面） */}
+      <MetricDetailDrawer
+        open={metricDrawerOpen}
+        metricCode={metricCode}
+        onClose={() => setMetricDrawerOpen(false)}
+      />
+
+      {/* 字段节点信息：field 无独立详情表，展示字段名/所属表，可跳转所属表详情 */}
+      <Drawer
+        title="字段信息"
+        width={480}
+        open={fieldNode != null}
+        onClose={() => setFieldNode(null)}
+      >
+        {fieldNode && (
+          <>
+            <Descriptions column={2} bordered size="small">
+              <Descriptions.Item label="字段名">{fieldNode.label}</Descriptions.Item>
+              <Descriptions.Item label="类型">字段</Descriptions.Item>
+              <Descriptions.Item label="所属表">
+                {fieldTableNode?.label ?? <span className="muted">不在当前视图</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="业务域">
+                {fieldNode.domain ?? <span className="muted">-</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="PII">
+                {fieldNode.pii ? <Tag color="red">含 PII</Tag> : <Tag>否</Tag>}
+              </Descriptions.Item>
+            </Descriptions>
+            {fieldTableNode?.entity_id != null && (
+              <Button
+                type="primary"
+                style={{ marginTop: 16 }}
+                onClick={() => {
+                  const eid = fieldTableNode.entity_id as number;
+                  setFieldNode(null);
+                  void openTableDetail(eid);
+                }}
+              >
+                查看所属表详情
+              </Button>
+            )}
+          </>
+        )}
+      </Drawer>
     </div>
   );
 }

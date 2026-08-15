@@ -13,7 +13,9 @@ from typing import Any
 from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.data_source import DataSource, DBCatalog
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
+from app.models.metric import Metric
 
 #: 系统内置血缘采集通道：无论当前是否有边都展示，保证「采集通道」视图来源全景完整
 #: （SQL 解析=sqlglot / DP 同步=dp_csv；其余动态来源如 metric_definition 有边时自动出现）。
@@ -680,3 +682,125 @@ class LineageRepository:
             stmt = stmt.where(union.c.node.like(f"%{kw}%"))
         rows = (await self._db.execute(stmt.limit(limit))).all()
         return [(str(r[0]), int(r[1] or 0)) for r in rows]
+
+    async def resolve_node_meta(self, node_ids: set[str]) -> dict[str, dict[str, Any]]:
+        """批量解析血缘节点的基础元数据（影响分析/边列表响应的 ``nodes`` 字段）。
+
+        与资产地图 ``graph_from_mysql`` 的节点映射对齐：
+        - ``metric:`` 查 metric 表（domain/pii_flag/owner_id）；
+        - ``table:`` 查 db_catalog join data_source（entity_id/domain/
+          sensitivity→pii/owner_id，软删过滤）；
+        - ``field:`` 无独立元数据表，展示 ``表.列`` 并由所属表继承业务域；
+        - external/未知类型仅回填类型与 label（无目录实体）。
+
+        Args:
+            node_ids: 血缘节点 id 集合（如 ``table:db.orders`` / ``metric:gmv``）。
+
+        Returns:
+            ``{node_id: {id, type, label, entity_id, pii, domain, owner}}``。
+        """
+        result: dict[str, dict[str, Any]] = {}
+        if not node_ids:
+            return result
+        metric_codes: set[str] = set()
+        table_names: set[str] = set()
+        # 字段所属表（继承业务域用）：即使表节点未显式出现在集合中也能解析域
+        field_parents: set[str] = set()
+        for nid in node_ids:
+            if nid.startswith("metric:"):
+                code = nid[len("metric:") :]
+                metric_codes.add(code)
+                result[nid] = self._fallback_node_meta(nid, "metric", code)
+            elif nid.startswith("table:"):
+                name = nid[len("table:") :]
+                table_names.add(name)
+                result[nid] = self._fallback_node_meta(nid, "table", name)
+            elif nid.startswith("field:"):
+                result[nid] = self._fallback_node_meta(nid, "field", nid[len("field:") :])
+                field_parents.add(nid[len("field:") :].rsplit(".", 1)[0])
+            else:
+                prefix = nid.split(":", 1)[0] if ":" in nid else ""
+                ntype = "external" if prefix == "external" else "other"
+                label = nid.split(":", 1)[1] if ":" in nid else nid
+                result[nid] = self._fallback_node_meta(nid, ntype, label)
+        if metric_codes:
+            rows = (
+                await self._db.execute(
+                    select(
+                        Metric.metric_code,
+                        Metric.domain,
+                        Metric.pii_flag,
+                        Metric.owner_id,
+                    ).where(
+                        Metric.metric_code.in_(metric_codes),
+                        Metric.deleted_at.is_(None),
+                    )
+                )
+            ).all()
+            for r in rows:
+                nid = f"metric:{r.metric_code}"
+                result[nid] = {
+                    "id": nid,
+                    "type": "metric",
+                    "label": r.metric_code,
+                    "entity_id": None,
+                    "pii": bool(r.pii_flag),
+                    "domain": r.domain,
+                    "owner": str(r.owner_id) if r.owner_id else None,
+                }
+        # 目录元数据：显式 table 节点 + 字段所属表（后者仅用于字段继承域，不产生条目）
+        catalog_names = table_names | field_parents
+        field_domain: dict[str, str | None] = {}
+        if catalog_names:
+            catalog_rows = (
+                await self._db.execute(
+                    select(
+                        DBCatalog.id,
+                        DBCatalog.entity_name,
+                        DBCatalog.sensitivity_level,
+                        DBCatalog.owner_id,
+                        DataSource.domain,
+                    )
+                    .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                    .where(
+                        DBCatalog.entity_name.in_(catalog_names),
+                        DBCatalog.deleted_at.is_(None),
+                        DBCatalog.entity_type.in_(["TABLE", "VIEW"]),
+                        DataSource.deleted_at.is_(None),
+                    )
+                )
+            ).all()
+            for cr in catalog_rows:
+                field_domain[cr.entity_name] = cr.domain
+                if cr.entity_name in table_names:
+                    nid = f"table:{cr.entity_name}"
+                    result[nid] = {
+                        "id": nid,
+                        "type": "table",
+                        "label": cr.entity_name,
+                        "entity_id": cr.id,
+                        "pii": "PII" in (cr.sensitivity_level or ""),
+                        "domain": cr.domain,
+                        "owner": str(cr.owner_id) if cr.owner_id else None,
+                    }
+        # 字段节点继承所属表业务域（field 无独立元数据，域取自身份上层的表）
+        for nid, meta in result.items():
+            if nid.startswith("field:"):
+                table_part = nid[len("field:") :].rsplit(".", 1)[0]
+                dom = field_domain.get(table_part)
+                if dom:
+                    meta["domain"] = dom
+        return result
+
+    @staticmethod
+    def _fallback_node_meta(nid: str, ntype: str, label: str) -> dict[str, Any]:
+        """节点兜底元数据：未在库中命中目录实体时的类型/label（entity_id 为空）。"""
+        return {
+            "id": nid,
+            "type": ntype,
+            "label": label,
+            "entity_id": None,
+            "pii": False,
+            "domain": None,
+            "owner": None,
+        }

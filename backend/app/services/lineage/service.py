@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,7 @@ from app.services.lineage.schemas import (
     LineageEdgeResponse,
     LineageImpactParams,
     LineageIngestRunResponse,
+    LineageNodeInfo,
     LineageNodeResponse,
     LineageParseRequest,
     LineageParseResponse,
@@ -84,6 +86,8 @@ def paginate_edges(edges: list[LineageEdgeResponse], page: int, page_size: int) 
         "page": page,
         "page_size": page_size,
         "has_more": start + len(items) < total,
+        # 节点元数据（默认空；API 层按需填充当前页节点的基础信息，供图谱点击侧边栏）
+        "nodes": [],
     }
 
 
@@ -264,6 +268,22 @@ class LineageService(BaseService):
         """列出与某节点直接相关的血缘边（一跳，含 ``pii_inherited``）。"""
         edges = await self._repo.query_impact(node, direction, max_hops=1, max_edges=_MAX_EDGES)
         return [LineageEdgeResponse.model_validate(e) for e in edges]
+
+    async def node_meta(self, node_ids: Iterable[str]) -> list[LineageNodeInfo]:
+        """批量解析血缘节点基础信息（影响分析/边列表响应的 ``nodes`` 字段）。
+
+        供前端血缘查询/影响分析图谱点击节点时在侧边栏展示具体信息（指标详情 /
+        表详情），并使图节点具备 domain/pii/entity_id 属性（按业务域着色、
+        PII 红色描边、表详情直达——与血缘图谱交互一致）。
+
+        Args:
+            node_ids: 血缘节点 id 集合（如 ``table:db.orders`` / ``metric:gmv``）。
+
+        Returns:
+            排序后的节点基础信息列表（无目录实体的 external/未知节点仅类型与 label）。
+        """
+        meta = await self._repo.resolve_node_meta(set(node_ids))
+        return [LineageNodeInfo(**meta[nid]) for nid in sorted(meta)]
 
     # ---- 指标级（L3）血缘：注册与查询 ----
 

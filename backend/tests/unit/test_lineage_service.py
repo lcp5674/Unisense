@@ -135,6 +135,23 @@ class FakeRepo:
             ("plain_node", 1),
         ]
 
+    async def resolve_node_meta(self, node_ids: set[str]) -> dict[str, dict[str, Any]]:
+        """节点元数据假实现：类型/标签按前缀推导，无目录实体（供 node_meta 测试）。"""
+        out: dict[str, dict[str, Any]] = {}
+        for nid in node_ids:
+            prefix = nid.split(":", 1)[0] if ":" in nid else "other"
+            label = nid.split(":", 1)[1] if ":" in nid else nid
+            out[nid] = {
+                "id": nid,
+                "type": prefix if prefix in ("table", "metric", "field", "external") else "other",
+                "label": label,
+                "entity_id": None,
+                "pii": False,
+                "domain": None,
+                "owner": None,
+            }
+        return out
+
 
 class FakeGraph:
     """模拟 Neo4j 图读；result=None 表示图不可用降级。"""
@@ -619,6 +636,8 @@ def test_paginate_edges_slices_and_has_more() -> None:
     assert len(page1["items"]) == 10
     assert page1["has_more"] is True
     assert page1["items"][0]["id"] == 1
+    # 节点元数据字段为可选的加法字段（默认空列表，向后兼容）
+    assert page1["nodes"] == []
 
     last = paginate_edges(edges, 3, 10)
     assert len(last["items"]) == 5
@@ -627,6 +646,19 @@ def test_paginate_edges_slices_and_has_more() -> None:
     empty = paginate_edges([], 1, 50)
     assert empty["total"] == 0
     assert empty["has_more"] is False
+    assert empty["nodes"] == []
+
+
+async def test_node_meta_returns_sorted_info() -> None:
+    """node_meta 透传仓库解析结果并按节点 id 排序（供影响分析/边列表响应）。"""
+    svc = LineageService(_FakeSession())
+    svc._repo = FakeRepo()
+    out = await svc.node_meta({"table:b", "metric:a", "plain"})
+    assert [n.id for n in out] == ["metric:a", "plain", "table:b"]
+    assert out[0].type == "metric"
+    assert out[0].label == "a"
+    assert out[2].type == "table"
+    assert out[2].label == "b"
 
 
 def test_risk_level_thresholds() -> None:
