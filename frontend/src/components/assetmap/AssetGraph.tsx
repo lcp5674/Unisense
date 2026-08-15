@@ -32,8 +32,8 @@ interface AssetGraphProps {
   onNodeClick?: (node: AssetGraphNode) => void;
   /** 是否展示字段节点（血缘总览等场景默认隐藏，减少视觉噪声）；默认 true */
   showFields?: boolean;
-  /** 布局策略：auto=检测到真环用力导向否则分层；hierarchy=分层（DAG）；force=力导向。默认 auto */
-  layout?: "auto" | "hierarchy" | "force";
+  /** 布局策略：auto=检测到真环用力导向否则分层；hierarchy=分层（DAG）；force=力导向；radial=血缘度同心圆（依赖引用数高者居中）。默认 auto */
+  layout?: "auto" | "hierarchy" | "force" | "radial";
   /**
    * 语义泳道：把节点按类型锚进三条语义带（表带在上、指标带中、字段带下，与血缘方向一致——
    * 表→指标→字段 的数据流），通过「隐藏锚点 + 锚定边」让 dagre 分层自然聚带；
@@ -315,6 +315,26 @@ function markCycleEdges(edges: RenderEdge[], cycleNodes: Set<string>): RenderEdg
   );
 }
 
+/**
+ * 力导向大图边降采样：节点很多时力导向会因边交叉成网而看不清引用关系。
+ * 按「两端血缘度和」降序保留前 MAX_FORCE_DENSE_EDGES 条——优先保留连接枢纽/骨干节点的边，
+ * 叶子间低价值边被折叠；被折叠边仍可通过悬停节点邻域高亮临时显现（邻域高亮不受此限）。
+ */
+const MAX_FORCE_DENSE_EDGES = 600;
+function filterDenseForceEdges(
+  edges: RenderEdge[],
+  degreeMap: Map<string, number>,
+  forceDense: boolean,
+): RenderEdge[] {
+  if (!forceDense || edges.length <= MAX_FORCE_DENSE_EDGES) return edges;
+  const weighted = edges.map((e) => ({
+    e,
+    w: (degreeMap.get(e.source) ?? 0) + (degreeMap.get(e.target) ?? 0),
+  }));
+  weighted.sort((a, b) => b.w - a.w);
+  return weighted.slice(0, MAX_FORCE_DENSE_EDGES).map((x) => x.e);
+}
+
 // G6 状态更新安全封装：图在数据重载/销毁过渡期，节点可能暂不存在——
 // setElementState 会同步抛错或异步 rejection，统一吞掉避免未捕获异常污染控制台/打断交互。
 function safeSetElementState(
@@ -411,8 +431,8 @@ function pickVisible(
   };
 }
 
-/** 布局配置：分层（DAG 自上而下）或力导向（环/交互定位）。 */
-function layoutConfig(layoutMode: "hierarchy" | "force") {
+/** 布局配置：分层（DAG 自上而下）｜力导向（环/交互定位）｜血缘度径向（同心圆，依赖引用数高者居中）。 */
+function layoutConfig(layoutMode: "hierarchy" | "force" | "radial") {
   if (layoutMode === "hierarchy") {
     // 分层布局：血缘 DAG 自上而下（表→指标），节点多时比力导向清晰得多
     // nodesep/ranksep 大幅加大以容纳「节点下方的完整标签 pill」，避免同 rank 标签互相压字
@@ -422,6 +442,19 @@ function layoutConfig(layoutMode: "hierarchy" | "force") {
       align: "DL",
       nodesep: 110,
       ranksep: 100,
+    };
+  }
+  if (layoutMode === "radial") {
+    // 血缘度径向布局（同心圆）：按依赖引用数（degree）排序——引用数高的枢纽节点居中，
+    // 低引用数的叶子节点排外围，环间等距、防重叠，让「被谁引用 / 引用谁」的层次关系一目了然。
+    // 这是大数据量下比纯力导向清晰得多的替代方案（力导向在几百节点时节点重叠、边交叉成网）。
+    return {
+      type: "concentric",
+      sortBy: "degree",
+      preventOverlap: true,
+      equidistant: true,
+      clockwise: true,
+      maxLevelDiff: 10,
     };
   }
   // 力导向：环图/交互定位用（对循环依赖天然容忍，节点自然分布）
@@ -443,7 +476,7 @@ function layoutConfig(layoutMode: "hierarchy" | "force") {
 interface GraphCanvasProps {
   nodes: AssetGraphNode[];
   edges: RenderEdge[];
-  layoutMode: "hierarchy" | "force";
+  layoutMode: "hierarchy" | "force" | "radial";
   height: number;
   searchText: string;
   onNodeClick: (node: AssetGraphNode) => void;
@@ -1014,7 +1047,9 @@ export function AssetGraph({
   const [showFieldsOn, setShowFieldsOn] = useState(showFields);
   useEffect(() => setShowFieldsOn(showFields), [showFields]);
   // 布局手动覆盖：undefined=跟随 auto 检测；否则强制指定
-  const [layoutOverride, setLayoutOverride] = useState<"hierarchy" | "force" | undefined>(undefined);
+  const [layoutOverride, setLayoutOverride] = useState<
+    "hierarchy" | "force" | "radial" | undefined
+  >(undefined);
   // 布局代际计数器：用户每次点 Select 就 +1（即使选了同一项，也强制重挂载 GraphCanvas）。
   // 解决"hierarchy 默认下用户点了一次 分层布局 没反应"的问题。
   const [layoutTick, setLayoutTick] = useState(0);
@@ -1035,7 +1070,7 @@ export function AssetGraph({
   }, [fullscreenOpen]);
 
   // 布局切换处理：更新 override + 触发代际 + 显示 loading（GraphCanvas onReady 后自动清除）
-  const handleLayoutChange = (v: "hierarchy" | "force" | undefined) => {
+  const handleLayoutChange = (v: "hierarchy" | "force" | "radial" | undefined) => {
     setLayoutOverride(v);
     setLayoutTick((t) => t + 1);
     setLayoutSwitching(true);
@@ -1067,19 +1102,34 @@ export function AssetGraph({
   );
   // 布局策略：泳道模式强制分层（dagre acyclic 翻转环边 + 环标记，环不再毁掉全图秩序）；
   // 否则 auto=有真环用力导向（环图 dagre 渲染异常），无环用分层；手动覆盖优先
-  const layoutMode = useMemo<"hierarchy" | "force">(() => {
+  const layoutMode = useMemo<"hierarchy" | "force" | "radial">(() => {
     if (layoutOverride) return layoutOverride;
     if (lanes) return "hierarchy";
     if (layout === "force") return "force";
     if (layout === "hierarchy") return "hierarchy";
+    if (layout === "radial") return "radial";
     return cycleNodes.size > 0 ? "force" : "hierarchy";
   }, [layout, layoutOverride, cycleNodes, lanes]);
 
+  // 力导向大图边降采样：仅 force 布局 + 边数超阈值时按「两端血缘度和」降序保留枢纽边。
+  // 用「边数」判断（而非节点数）——节点被 160 限流后边可能仍上千，边才是力导向密集的主因。
+  const layoutEdges = useMemo(() => {
+    if (layoutMode !== "force") return renderEdges;
+    const dm = new Map<string, number>();
+    for (const e of renderEdges) {
+      dm.set(e.source, (dm.get(e.source) ?? 0) + 1);
+      dm.set(e.target, (dm.get(e.target) ?? 0) + 1);
+    }
+    return filterDenseForceEdges(renderEdges, dm, renderEdges.length > MAX_FORCE_DENSE_EDGES);
+  }, [layoutMode, renderEdges]);
+
   // 语义泳道：仅分层布局下插入隐藏锚点 + 锚定边（力导向不需要泳道）
   const laneData = useMemo(() => {
-    if (!lanes || layoutMode !== "hierarchy") return { nodes: visibleNodes, edges: renderEdges };
-    return applyLanes(visibleNodes, renderEdges);
-  }, [lanes, layoutMode, visibleNodes, renderEdges]);
+    if (!lanes || layoutMode !== "hierarchy") {
+      return { nodes: visibleNodes, edges: layoutEdges };
+    }
+    return applyLanes(visibleNodes, layoutEdges);
+  }, [lanes, layoutMode, visibleNodes, layoutEdges]);
 
   if (nodes.length === 0) {
     return <Empty description="暂无图谱数据" />;
@@ -1182,6 +1232,7 @@ export function AssetGraph({
           options={[
             { value: "hierarchy", label: "分层布局" },
             { value: "force", label: "力导向布局" },
+            { value: "radial", label: "血缘度径向" },
           ]}
         />
         <Button

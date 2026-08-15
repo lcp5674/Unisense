@@ -402,4 +402,43 @@ describe("AssetGraph 交互", () => {
       r.edges.some((e) => e.source === "__lane_metric__" && e.target === "__lane_field__"),
     ).toBe(true);
   });
+
+  it("血缘度径向布局：layout=radial → concentric + sortBy degree（依赖引用数高者居中）", async () => {
+    render(<AssetGraph nodes={nodes} edges={edges} height={300} layout="radial" />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    const ctorCalls = vi.mocked(Graph).mock.calls;
+    const ctorConfig = ctorCalls[ctorCalls.length - 1][0] as {
+      layout?: { type?: string; sortBy?: string; preventOverlap?: boolean };
+    };
+    expect(ctorConfig.layout?.type).toBe("concentric");
+    expect(ctorConfig.layout?.sortBy).toBe("degree");
+    expect(ctorConfig.layout?.preventOverlap).toBe(true);
+  });
+
+  it("力导向大图边降采样：仅 force 布局 + 边超阈值时按血缘度保留枢纽边", async () => {
+    // 构造 400 节点大图（超过 LOD_LARGE_GRAPH=200），含大量边
+    const bigNodes: AssetGraphNode[] = Array.from({ length: 400 }, (_, i) => ({
+      id: `table:n${i}`,
+      label: `n${i}`,
+      type: "table",
+    }));
+    const bigEdges: AssetGraphEdge[] = [];
+    // 前 50 个节点相互全连（高血缘度），后 350 个各连一条（低血缘度）——总数远超阈值
+    for (let i = 0; i < 50; i++) {
+      for (let j = i + 1; j < 50; j++) {
+        bigEdges.push({ source: `table:n${i}`, target: `table:n${j}`, type: "DERIVED_FROM" });
+      }
+    }
+    for (let i = 50; i < 400; i++) {
+      bigEdges.push({ source: `table:n${i}`, target: `table:n${i - 1}`, type: "DERIVED_FROM" });
+    }
+    render(<AssetGraph nodes={bigNodes} edges={bigEdges} height={300} layout="force" />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    // 降采样后传入图的边数应 ≤ MAX_FORCE_DENSE_EDGES(600)，且保留高血缘度枢纽边
+    const data = lastGraphData();
+    expect(data.edges.length).toBeLessThanOrEqual(600);
+    expect(data.edges.length).toBeGreaterThan(0);
+    // 高血缘度节点 n0（连 49 条）应仍在其保留边中出现
+    expect(data.edges.some((e) => e.source === "table:n0" || e.target === "table:n0")).toBe(true);
+  });
 });
