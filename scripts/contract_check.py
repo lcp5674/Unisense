@@ -72,6 +72,7 @@ TD_SEMANTIC_ALIASES: list[tuple[str, str, str]] = [
     ("/quality-rules", "/api/v1/quality/rules", "TD 连字符命名 → quality/rules"),
     ("/query", "/api/v1/consume/query", "TD 语义名 → consume/query"),
     ("/query/dry-run", "/api/v1/consume/query/dry-run", "同上"),
+    ("/collect", "/api/v1/data-sources/{source_id}/collect", "TD 同步采集 → 数据源采集触发"),
     ("/reconciliation-records", "/api/v1/quality/reconciliation-records", "TD 省略 quality 前缀"),
     ("/reconciliation-records/*", "/api/v1/quality/reconciliation-records*", "同上"),
     ("/reconciliation-records/{id}/confirm", "/api/v1/quality/reconciliation-records/{record_id}/confirm", "同上"),

@@ -130,7 +130,7 @@ modules:
     runbook_path: "docs/runbooks/conflict.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）"
     verified_at: "2026-08-08"
-    note: "四类冲突(SAME_NAME_DIFF_DEF/SAME_DEF_DIFF_NAME/GRAIN_UNIT/CROSS_DOMAIN_SAME_DEF/VERSION_CONFLICT/PII)检测、仲裁状态机(OPEN→NEGOTIATING→ESCALATED→RULED→CLOSED)、裁决知识库沉淀、PII 特殊路由(转交 governance.pii_review 不入库)"
+    note: "四类冲突(SAME_NAME_DIFF_DEF/SAME_DEF_DIFF_NAME/GRAIN_UNIT/CROSS_DOMAIN_SAME_DEF/VERSION_CONFLICT/PII)检测、仲裁状态机(OPEN→NEGOTIATING→ESCALATED→RULED→CLOSED)、裁决知识库沉淀、PII 特殊路由(转交 governance.pii_review 不入库)。仲裁 owner 通知链路修复（2026-08-15）：① 改名通知触发条件——修复前 API 层仅判原始请求体 payload.rename_metric_code，前端传 rename_target（同名冲突下 code 无法区分、按角色定位）时该字段为 None → 改名通知永不触发；改为从 service 解析后的 conflict.decision_json.rename_metric_code 读取，兼容两种传参；② 落败方 owner 定向通知（此前废弃走订阅扇出、owner 不订阅收不到，且 DRAFT/REVIEW 软删作废完全无通知）——仲裁后按落败方实际落库状态定向通知 owner：DEPRECATED → metric.deprecated「指标已废弃」、软删 → metric.voided「指标已作废」（新增事件与订阅清单条目），后继=胜方；强韧性保护（未实际处置）/自我冲突/无 owner 不通知。验证：test_conflict_api 11 项新增全绿 + 冲突/通知相关 75 项全绿 + 全量 2266 passed（4 预存失败语义缓存）+ ruff/mypy 0（conflict.py 自身 0 error）。"
     post_verify_review:
       standard: "DEV_GUIDE §6.3 (2026-08-07 新增约束：开发+验证完成后双视角漏洞审查)"
       performed_at: "2026-08-07"

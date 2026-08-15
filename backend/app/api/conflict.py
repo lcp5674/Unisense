@@ -24,6 +24,7 @@ from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
+from app.models.conflict import Conflict
 from app.models.metric import Metric
 from app.services.conflict.arbitration import apply_arbitration_impact
 from app.services.conflict.events import ConflictEventPublisher
@@ -99,6 +100,102 @@ async def _notify_rename_owner(
         )
     except Exception as exc:  # noqa: BLE001 - 通知降级，不阻断仲裁
         logger.warning("rename_owner_notify_failed: %s", exc)
+
+
+async def _notify_loser_owner(
+    db: AsyncSession,
+    loser_code: str,
+    winner_code: str,
+    conflict_id: str,
+    trace_id: str,
+) -> None:
+    """仲裁落败方指标 Owner 定向通知（废弃/作废，best-effort）。
+
+    判定以落败方指标实际落库状态为准（与 arbitration 联动同源，不重复判定逻辑）：
+    - DEPRECATED → 「已废弃」（event=metric.deprecated，后继=胜方）
+    - 软删（deleted_at 非空）→ 「已作废」（event=metric.voided，后继=胜方）
+    - 其他（强韧性保护未处置/指标缺失/自我冲突）→ 不通知
+
+    与 `_notify_rename_owner` 对称：IN_APP 定向通知，不依赖订阅偏好；
+    失败仅告警，不阻断仲裁主流程。
+    """
+    try:
+        from app.services.notify.service import NotifyService
+
+        row = (
+            await db.execute(select(Metric).where(Metric.metric_code == loser_code))
+        ).scalar_one_or_none()
+        if row is None or row.owner_id is None:
+            logger.warning(
+                "loser_owner_missing metric_code=%s conflict_id=%s", loser_code, conflict_id
+            )
+            return
+        if row.status == "DEPRECATED":
+            event_type, verb = "metric.deprecated", "已废弃"
+        elif row.deleted_at is not None:
+            event_type, verb = "metric.voided", "已作废"
+        else:
+            return  # 强韧性保护跳过/未处置：落败方未实际变化，不通知
+        await NotifyService(db).notify_user(
+            user_id=int(row.owner_id),
+            event_type=event_type,
+            title=f"指标{verb}（口径仲裁）",
+            body=(
+                f"指标 {loser_code} 在冲突 {conflict_id} 仲裁中落败，"
+                f"已{verb}，后继口径为 {winner_code}。"
+            ),
+            payload={
+                "metric_code": loser_code,
+                "successor_code": winner_code,
+                "conflict_id": conflict_id,
+                "source": "conflict",
+            },
+            channel="IN_APP",
+        )
+        logger.info(
+            "loser_owner_notified metric_code=%s conflict_id=%s owner_id=%s trace_id=%s",
+            loser_code,
+            conflict_id,
+            row.owner_id,
+            trace_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - 通知降级，不阻断仲裁
+        logger.warning("loser_owner_notify_failed: %s", exc)
+
+
+async def _notify_arbitration_owners(
+    db: AsyncSession,
+    conflict: Conflict,
+    payload: ArbitrateRequest,
+    trace_id: str,
+) -> None:
+    """仲裁后定向通知受影响指标 Owner（best-effort，不阻断仲裁）。
+
+    覆盖 TD §12.4 两条通知链路：
+    1. 「保留差异+指定一方改名」→ 通知被改名指标 Owner 去详情页改名。
+       rename_code 以 service 层解析结果（decision_json）为准——前端传
+       rename_target（角色）或 rename_metric_code 均已被 service 归一化。
+    2. 选权威 → 通知落败方指标 Owner：指标已被废弃（DEPRECATED）或已作废（软删）。
+    """
+    decision_json = conflict.decision_json or {}
+    rename_code = decision_json.get("rename_metric_code")
+    if rename_code:
+        await _notify_rename_owner(db, rename_code, conflict.conflict_id, trace_id)
+    canonical = payload.canonical_metric_code
+    if not canonical:
+        return  # keep_diff：无落败方，仅改名通知
+    codes = conflict.metric_codes or {}
+    loser_code: str | None
+    winner_code: str | None
+    if canonical == codes.get("candidate"):
+        loser_code, winner_code = codes.get("existing"), codes.get("candidate")
+    elif canonical == codes.get("existing"):
+        loser_code, winner_code = codes.get("candidate"), codes.get("existing")
+    else:
+        return  # 权威方不在冲突双方：不通知
+    if not loser_code or loser_code == winner_code:
+        return  # 自我冲突（双方同码）：无独立落败方
+    await _notify_loser_owner(db, loser_code, winner_code or "", conflict.conflict_id, trace_id)
 
 
 def _svc(db: AsyncSession, request: Request) -> ConflictService:
@@ -284,10 +381,10 @@ async def arbitrate_conflict(
         trace_id=trace_id,
     )
     await db.commit()
-    # 「保留差异+指定一方改名」：定向通知被改名指标的 Owner 去详情页改名
-    # （跨服务一致性：仲裁结论落库后立即通知 Owner，避免改名要求滞留无感知）。
-    if payload.rename_metric_code:
-        await _notify_rename_owner(db, payload.rename_metric_code, conflict_id, trace_id)
+    # 仲裁后定向通知受影响指标 Owner（best-effort，不阻断仲裁）：
+    # 「保留差异+指定改名」→ 通知被改名方 Owner 去详情页改名；
+    # 「选权威」→ 通知落败方 Owner 指标已废弃/作废（后继=胜方）。
+    await _notify_arbitration_owners(db, conflict, payload, trace_id)
     return ok(data=ConflictResponse.from_model(conflict).model_dump(), trace_id=trace_id)
 
 

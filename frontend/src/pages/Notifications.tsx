@@ -36,6 +36,8 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "metric.approved": "指标已通过",
   "metric.rejected": "指标已驳回",
   "metric.deprecated": "指标废弃",
+  "metric.voided": "指标作废",
+  "metric.rename_required": "指标需要改名",
   "metric.promoted": "指标已升级",
   "metric.rolled_back": "指标已回滚",
   "metric.emergency_published": "指标紧急发布",
