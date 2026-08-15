@@ -492,8 +492,20 @@ export interface DashboardData {
   by_domain: Record<string, number>;
   pii_count: number;
   pii_ratio: number;
-  /** Owner 责任分布：{owner_id: {name, total, by_status}} */
-  by_owner?: Record<number, { name: string; total: number; by_status: Record<string, number> }>;
+  /** Owner 责任分布（跨资产）：指标/数据表/维度/术语/指标模板按责任人聚合 */
+  by_owner?: Record<
+    number,
+    {
+      name: string;
+      /** 跨资产总计（指标+数据表+维度+术语+模板） */
+      total: number;
+      metrics: { total: number; by_status: Record<string, number> };
+      tables: number;
+      dimensions: number;
+      terms: number;
+      templates: number;
+    }
+  >;
   /** 质量健康：严重级分布 + 待处理（OPEN+ACK） */
   quality?: { total: number; by_severity: Record<string, number>; pending: number };
   /** 合规：复核率 */
@@ -534,6 +546,7 @@ export interface MetricTemplate {
   additivity: string;
   metric_tier: string;
   is_active: boolean;
+  owner_id: number | null;
   created_by: number;
 }
 

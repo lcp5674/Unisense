@@ -1038,6 +1038,17 @@ export async function getTemplate(templateId: number): Promise<MetricTemplate> {
   return request<MetricTemplate>(`${API_BASE}/semantics/templates/${templateId}`);
 }
 
+// 指派/解除指标模板责任人（PATCH /semantics/templates/{id}/owner，owner_id=null 解除）
+export async function updateTemplateOwner(
+  templateId: number,
+  ownerId: number | null,
+): Promise<MetricTemplate> {
+  return request<MetricTemplate>(`${API_BASE}/semantics/templates/${templateId}/owner`, {
+    method: "PATCH",
+    body: JSON.stringify({ owner_id: ownerId }),
+  });
+}
+
 // 从模板实例化创建指标（POST /semantics/templates/{id}/instantiate，后端合并模板默认口径 + 用户覆盖）
 export async function instantiateTemplate(
   templateId: number,
