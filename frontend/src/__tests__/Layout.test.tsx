@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Layout } from "../components/Layout";
+import { NOTIF_CHANGED_EVENT } from "../utils/notifBus";
+import type { Notification } from "../types";
 
 // Mock API：Layout 挂载时拉取未读通知数与用户偏好（折叠态服务端持久化）；
 // fetchGlobalSearch 供顶栏实时下拉使用（测试中不触发）
@@ -13,7 +15,7 @@ vi.mock("../api", () => ({
   fetchGlobalSearch: vi.fn(),
 }));
 import { listNotifications, fetchPreferences, setPreference } from "../api";
-vi.mocked(listNotifications).mockResolvedValue({ items: [], total: 0 });
+vi.mocked(listNotifications).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
 vi.mocked(fetchPreferences).mockResolvedValue({});
 vi.mocked(setPreference).mockResolvedValue(undefined);
 
@@ -41,7 +43,7 @@ describe("Layout 侧边栏伸缩（按用户持久化）", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
-    vi.mocked(listNotifications).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(listNotifications).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
     vi.mocked(fetchPreferences).mockResolvedValue({});
     vi.mocked(setPreference).mockResolvedValue(undefined);
   });
@@ -122,5 +124,33 @@ describe("Layout 侧边栏伸缩（按用户持久化）", () => {
     // 折叠态菜单项以图标形式保留（antd inline-collapsed），可继续点击
     const navItems = container.querySelectorAll(".ant-menu-item");
     expect(navItems.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Layout 顶栏通知角标", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    vi.mocked(fetchPreferences).mockResolvedValue({});
+    vi.mocked(setPreference).mockResolvedValue(undefined);
+  });
+
+  it("收到通知变更事件后重新拉取未读数并更新角标（已读清零后角标隐藏）", async () => {
+    const unread = { id: 1, read_at: null } as unknown as Notification;
+    // 首次拉取 1 条未读；事件触发后二次拉取 0 未读
+    vi.mocked(listNotifications)
+      .mockResolvedValueOnce({ items: [unread], total: 1, page: 1, page_size: 100 })
+      .mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    const { container } = renderLayout();
+
+    await waitFor(() => {
+      expect(container.querySelector(".ant-badge-count")?.textContent).toContain("1");
+    });
+
+    // 通知中心操作后广播变更事件 → 重新拉取 → 未读清零 → 角标隐藏（antd count=0 不渲染）
+    window.dispatchEvent(new CustomEvent(NOTIF_CHANGED_EVENT));
+    await waitFor(() => {
+      expect(container.querySelector(".ant-badge-count")).toBeNull();
+    });
   });
 });

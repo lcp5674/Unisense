@@ -17,6 +17,7 @@ import {
 import type { Notification, NotifyEventLog, SubscriptionPref } from "../types";
 import { NOTIFY_STATUS_LABEL, QUALITY_LEVEL_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
+import { notifyNotifChanged } from "../utils/notifBus";
 
 // 渠道 = 消息送达方式（面向业务用户，不用 webhook/sms 等英文码）
 const CHANNEL_LABEL: Record<string, string> = {
@@ -312,6 +313,7 @@ function NotifListTab() {
       await markNotificationRead(n.id);
       message.success("已标记为已读");
       load();
+      notifyNotifChanged();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
     }
@@ -322,6 +324,7 @@ function NotifListTab() {
       await markAllNotificationsRead();
       message.success("已全部标记为已读");
       load();
+      notifyNotifChanged();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
     }
@@ -332,6 +335,7 @@ function NotifListTab() {
       await deleteNotification(n.id);
       message.success("已删除该通知");
       load();
+      notifyNotifChanged();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
     }
@@ -342,6 +346,7 @@ function NotifListTab() {
       await deleteAllNotifications();
       message.success("已清空全部通知");
       load();
+      notifyNotifChanged();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
     }

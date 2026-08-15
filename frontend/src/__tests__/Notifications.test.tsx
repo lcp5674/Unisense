@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { Notifications } from "../pages/Notifications";
+import { NOTIF_CHANGED_EVENT } from "../utils/notifBus";
 import type { Notification } from "../types";
 
 vi.mock("../api", () => {
@@ -235,6 +236,65 @@ describe("通知中心 - 订阅项对齐", () => {
     // 渠道下拉：短信不可选
     fireEvent.mouseDown(screen.getByLabelText("送达方式"));
     expect(screen.queryByText("短信")).not.toBeInTheDocument();
+  });
+});
+
+describe("通知中心 - 变更事件广播（顶栏角标实时刷新）", () => {
+  // 各操作成功后都应广播事件，Layout 顶栏据此实时刷新未读数
+  it("标记已读后广播通知变更事件", async () => {
+    const spy = vi.fn();
+    window.addEventListener(NOTIF_CHANGED_EVENT, spy);
+    const n = notif({ id: 7, read_at: null });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+    const card = screen.getByText("指标已通过").closest(".notif-card") as HTMLElement;
+    fireEvent.click(withinCard(card, "标记已读"));
+
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    window.removeEventListener(NOTIF_CHANGED_EVENT, spy);
+  });
+
+  it("全部已读后广播通知变更事件", async () => {
+    const spy = vi.fn();
+    window.addEventListener(NOTIF_CHANGED_EVENT, spy);
+    mockedList.mockResolvedValue({ items: [notif({ read_at: null })], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /全部已读/ }));
+
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    window.removeEventListener(NOTIF_CHANGED_EVENT, spy);
+  });
+
+  it("删除单条后广播通知变更事件", async () => {
+    const spy = vi.fn();
+    window.addEventListener(NOTIF_CHANGED_EVENT, spy);
+    const n = notif({ id: 9 });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+    const card = screen.getByText("指标已通过").closest(".notif-card") as HTMLElement;
+    fireEvent.click(withinCard(card, /删\s*除/));
+
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    window.removeEventListener(NOTIF_CHANGED_EVENT, spy);
+  });
+
+  it("清空后广播通知变更事件", async () => {
+    const spy = vi.fn();
+    window.addEventListener(NOTIF_CHANGED_EVENT, spy);
+    mockedList.mockResolvedValue({ items: [notif({})], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /清\s*空/ }));
+
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    window.removeEventListener(NOTIF_CHANGED_EVENT, spy);
   });
 });
 

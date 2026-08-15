@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
+import { onNotifChanged } from "../utils/notifBus";
 import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme, AutoComplete, Spin, Modal, Form, App as AntApp } from "antd";
 import {
   AppstoreOutlined,
@@ -413,16 +414,22 @@ export function Layout({ user }: { user: CurrentUser }) {
     contentRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [location.pathname]);
 
+  // 未读角标：按 read_at 统计未读（请求较大分页以覆盖常见未读量，已读后可清零）。
+  // 路由切换时刷新；通知中心内已读/删除/清空后由变更事件驱动刷新（同页无路由变化）。
   useEffect(() => {
     let cancelled = false;
-    // 未读角标：按 read_at 统计未读（请求较大分页以覆盖常见未读量，已读后可清零）
-    listNotifications({ page: 1, page_size: 100 })
-      .then((res) => {
-        if (!cancelled) setNotifCount(res.items.filter((n) => !n.read_at).length);
-      })
-      .catch(() => {});
+    const refresh = () => {
+      listNotifications({ page: 1, page_size: 100 })
+        .then((res) => {
+          if (!cancelled) setNotifCount(res.items.filter((n) => !n.read_at).length);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const off = onNotifChanged(refresh);
     return () => {
       cancelled = true;
+      off();
     };
   }, [location.pathname]);
 
