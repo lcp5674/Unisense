@@ -61,11 +61,12 @@ async def list_terms(
     domain: str | None = Query(None),
     status: str | None = Query(None),
     search: str | None = Query(None),
+    owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
     page: int = Query(1),
     page_size: int = Query(20),
 ) -> Any:
     items, total = await GlossaryService(db).list_terms(
-        domain, status, search, page_size, (page - 1) * page_size
+        domain, status, search, page_size, (page - 1) * page_size, owner_id
     )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},

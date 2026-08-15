@@ -539,12 +539,13 @@ async def test_aggregate_dashboard_with_filters():
         _result(all_=[("PUBLISHED", 3), ("DRAFT", 2)]),  # by_status
         _result(all_=[("T1", 4), ("T2", 1)]),  # by_tier
         _result(all_=[("sales", 5)]),  # by_domain
-        # Owner 责任分布（跨资产）：指标 / 数据表 / 维度 / 术语 / 模板 / 显示名
+        # Owner 责任分布（跨资产）：指标 / 数据表 / 维度 / 术语 / 模板 / 数据源 / 显示名
         _result(all_=[(1, "PUBLISHED", 3), (1, "DRAFT", 2)]),  # owner_metric
         _result(all_=[(1, 5)]),  # owner_table
         _result(all_=[(1, 2)]),  # owner_dim
         _result(all_=[(1, 3)]),  # owner_term
         _result(all_=[(1, 1)]),  # owner_tpl
+        _result(all_=[(1, 2)]),  # owner_source
         _result(all_=[(1, "Alice")]),  # owner_names
         # 治理指标体系（quality / compliance / conflict / freshness）
         _result(all_=[("P1", 1)]),  # quality by_severity
@@ -569,14 +570,15 @@ async def test_aggregate_dashboard_with_filters():
     assert result["by_tier"] == {"T1": 4, "T2": 1}
     assert result["by_domain"] == {"sales": 5}
     assert result["pii_ratio"] == round(2 / 5, 4)
-    assert db.execute.await_count == 21
-    # Owner 责任分布（跨资产）：指标 5 + 数据表 5 + 维度 2 + 术语 3 + 模板 1 = 16
+    assert db.execute.await_count == 22
+    # Owner 责任分布（跨资产）：指标 5 + 数据表 5 + 维度 2 + 术语 3 + 模板 1 + 数据源 2 = 18
     assert result["by_owner"] == {
         1: {
             "name": "Alice",
-            "total": 16,
+            "total": 18,
             "metrics": {"total": 5, "by_status": {"PUBLISHED": 3, "DRAFT": 2}},
             "tables": 5,
+            "sources": 2,
             "dimensions": 2,
             "terms": 3,
             "templates": 1,
@@ -610,6 +612,7 @@ async def test_aggregate_dashboard_without_filters_and_zero_total():
         _result(all_=[]),  # owner_dim
         _result(all_=[]),  # owner_term
         _result(all_=[]),  # owner_tpl
+        _result(all_=[]),  # owner_source
         # owner_names 跳过（owner_ids 为空）
         _result(all_=[]),  # quality severity
         _result(all_=[]),  # quality status
@@ -658,7 +661,7 @@ async def test_aggregate_dashboard_governance_indicators():
         _result(all_=[("PUBLISHED", 6), ("DRAFT", 3), ("REVIEW", 1)]),  # by_status
         _result(all_=[("T1", 4), ("T2", 4), ("T3", 2)]),  # by_tier
         _result(all_=[("sales", 6), ("risk", 4)]),  # by_domain
-        # Owner 责任分布（跨资产）：指标 / 数据表 / 维度 / 术语 / 模板 / 显示名
+        # Owner 责任分布（跨资产）：指标 / 数据表 / 维度 / 术语 / 模板 / 数据源 / 显示名
         _result(all_=[
             (1, "PUBLISHED", 4),
             (1, "REVIEW", 1),
@@ -669,6 +672,7 @@ async def test_aggregate_dashboard_governance_indicators():
         _result(all_=[(1, 3), (2, 1)]),  # owner_dim
         _result(all_=[(1, 4), (2, 2)]),  # owner_term
         _result(all_=[(1, 2)]),  # owner_tpl
+        _result(all_=[(1, 1), (2, 1)]),  # owner_source
         _result(all_=[(1, "Alice"), (2, "Bob")]),  # owner_names
         _result(all_=[("P0", 1), ("P1", 2), ("P2", 3)]),  # quality by_severity
         _result(all_=[("OPEN", 4), ("ACK", 1), ("RESOLVED", 3)]),  # quality by_status
@@ -686,24 +690,26 @@ async def test_aggregate_dashboard_governance_indicators():
 
     result = await repo.aggregate_dashboard()
 
-    # Owner 责任分布（跨资产）：每 owner 汇总指标/数据表/维度/术语/模板计数
-    # Alice：指标 5 + 数据表 6 + 维度 3 + 术语 4 + 模板 2 = 20
-    # Bob：指标 5 + 数据表 2 + 维度 1 + 术语 2 + 模板 0 = 10
+    # Owner 责任分布（跨资产）：每 owner 汇总指标/数据表/维度/术语/模板/数据源计数
+    # Alice：指标 5 + 数据表 6 + 维度 3 + 术语 4 + 模板 2 + 数据源 1 = 21
+    # Bob：指标 5 + 数据表 2 + 维度 1 + 术语 2 + 模板 0 + 数据源 1 = 11
     assert result["by_owner"] == {
         1: {
             "name": "Alice",
-            "total": 20,
+            "total": 21,
             "metrics": {"total": 5, "by_status": {"PUBLISHED": 4, "REVIEW": 1}},
             "tables": 6,
+            "sources": 1,
             "dimensions": 3,
             "terms": 4,
             "templates": 2,
         },
         2: {
             "name": "Bob",
-            "total": 10,
+            "total": 11,
             "metrics": {"total": 5, "by_status": {"PUBLISHED": 2, "DRAFT": 3}},
             "tables": 2,
+            "sources": 1,
             "dimensions": 1,
             "terms": 2,
             "templates": 0,
@@ -735,4 +741,4 @@ async def test_aggregate_dashboard_governance_indicators():
         "updated_30d": 6,
         "updated_30d_ratio": 0.6,
     }
-    assert db.execute.await_count == 21
+    assert db.execute.await_count == 22

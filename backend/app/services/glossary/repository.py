@@ -40,12 +40,15 @@ class GlossaryRepository:
         search: str | None,
         limit: int,
         offset: int,
+        owner_id: int | None = None,
     ) -> tuple[Iterable[Term], int]:
         conditions = []
         if domain:
             conditions.append(Term.domain == domain)
         if status:
             conditions.append(Term.status == status)
+        if owner_id is not None:
+            conditions.append(Term.owner_id == owner_id)
         if search:
             like = f"%{search}%"
             conditions.append(

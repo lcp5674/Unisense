@@ -47,14 +47,17 @@ async def list_templates(
     domain: str | None = None,
     is_active: bool | None = None,
     keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
+    owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
     db: AsyncSession = Depends(get_db_session),
 ) -> Any:
-    """列出指标模板，可按域、启用状态和关键词过滤。"""
+    """列出指标模板，可按域、启用状态、责任人和关键词过滤。"""
     q = select(MetricTemplate)
     if domain is not None:
         q = q.where(MetricTemplate.domain == domain)
     if is_active is not None:
         q = q.where(MetricTemplate.is_active == is_active)
+    if owner_id is not None:
+        q = q.where(MetricTemplate.owner_id == owner_id)
     if keyword:
         # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
         escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

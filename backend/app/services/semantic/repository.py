@@ -650,6 +650,13 @@ class MetricRepository:
         )
         owner_tpl_rows = (await self._db.execute(owner_tpl_stmt)).all()
 
+        owner_source_stmt = (
+            select(DataSource.owner_id, func.count().label("cnt"))
+            .where(DataSource.owner_id.isnot(None), DataSource.deleted_at.is_(None))
+            .group_by(DataSource.owner_id)
+        )
+        owner_source_rows = (await self._db.execute(owner_source_stmt)).all()
+
         owner_ids = {
             r[0]
             for r in (
@@ -658,6 +665,7 @@ class MetricRepository:
                 + owner_dim_rows
                 + owner_term_rows
                 + owner_tpl_rows
+                + owner_source_rows
             )
         }
         owner_names: dict[int, str] = {}
@@ -671,6 +679,7 @@ class MetricRepository:
                 "total": 0,
                 "metrics": {"total": 0, "by_status": {}},
                 "tables": 0,
+                "sources": 0,
                 "dimensions": 0,
                 "terms": 0,
                 "templates": 0,
@@ -691,10 +700,13 @@ class MetricRepository:
             by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["terms"] = cnt
         for owner_id_, cnt in owner_tpl_rows:
             by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["templates"] = cnt
+        for owner_id_, cnt in owner_source_rows:
+            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["sources"] = cnt
         for entry in by_owner.values():
             entry["total"] = (
                 entry["metrics"]["total"]
                 + entry["tables"]
+                + entry["sources"]
                 + entry["dimensions"]
                 + entry["terms"]
                 + entry["templates"]

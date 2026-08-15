@@ -117,9 +117,13 @@ class DimensionService(BaseService):
         return dim
 
     async def list_dimensions(
-        self, domain: str | None, status: str | None, keyword: str | None = None
+        self,
+        domain: str | None,
+        status: str | None,
+        keyword: str | None = None,
+        owner_id: int | None = None,
     ) -> list[tuple[Dimension, int]]:
-        return await self._repo.list_dimensions(domain, status, keyword)
+        return await self._repo.list_dimensions(domain, status, keyword, owner_id)
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:
         dim = await self._require(dim_code)

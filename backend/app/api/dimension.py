@@ -72,8 +72,9 @@ async def list_dimensions(
     domain: str | None = Query(None),
     status: str | None = Query(None),
     keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
+    owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
 ) -> Any:
-    items = await DimensionService(db).list_dimensions(domain, status, keyword)
+    items = await DimensionService(db).list_dimensions(domain, status, keyword, owner_id)
     converted = []
     for dim, metric_count in items:
         resp = DimensionResponse.from_model(dim)

@@ -29,7 +29,11 @@ class DimensionRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_dimensions(
-        self, domain: str | None, status: str | None, keyword: str | None = None
+        self,
+        domain: str | None,
+        status: str | None,
+        keyword: str | None = None,
+        owner_id: int | None = None,
     ) -> list[tuple[Dimension, int]]:
         """列出维度并附带绑定指标数（LEFT JOIN 聚合，未绑定的维度计数为 0）。"""
         stmt = (
@@ -41,6 +45,8 @@ class DimensionRepository:
             stmt = stmt.where(Dimension.domain == domain)
         if status:
             stmt = stmt.where(Dimension.status == status)
+        if owner_id is not None:
+            stmt = stmt.where(Dimension.owner_id == owner_id)
         if keyword:
             # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
             escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

@@ -135,8 +135,11 @@ class GlossaryService(BaseService):
         search: str | None,
         limit: int,
         offset: int,
+        owner_id: int | None = None,
     ) -> tuple[list[TermResponse], int]:
-        rows, total = await self._repo.list_terms(domain, status, search, limit, offset)
+        rows, total = await self._repo.list_terms(
+            domain, status, search, limit, offset, owner_id
+        )
         return [TermResponse.from_model(t) for t in rows], total
 
     async def submit_term(self, term_code: str, actor_id: int) -> TermResponse:
