@@ -12,6 +12,7 @@ import {
   Input,
   Popconfirm,
   Row,
+  Segmented,
   Select,
   Space,
   Statistic,
@@ -28,9 +29,14 @@ import {
   ShareAltOutlined,
   SyncOutlined,
   ArrowLeftOutlined,
+  PieChartOutlined,
 } from "@ant-design/icons";
 import {
   confirmStaleEdge,
+  fetchLineageBrokenEdges,
+  fetchLineageCoverage,
+  fetchLineageEdgeDetail,
+  fetchLineageOrphans,
   getCatalogDetail,
   lineageChannelRuns,
   lineageChannels,
@@ -46,9 +52,13 @@ import {
   UnisenseApiError,
 } from "../api";
 import type {
+  CoverageBrokenEdgeItem,
+  CoverageOrphanItem,
   DBCatalog,
   LineageChannel,
+  LineageCoverage,
   LineageEdge,
+  LineageEdgeDetail,
   LineageIngestRun,
   LineageNode,
   LineageNodeInfo,
@@ -96,6 +106,33 @@ const CHANNEL_LABEL: Record<string, string> = {
   manual: "手动登记",
   external: "外部依赖",
 };
+
+/** 边详情页 provenance → 中文口径映射（Task B 边元数据展示）。未列出来源显示原始标识。 */
+const EDGE_PROVENANCE_LABEL: Record<string, string> = {
+  metric_definition: "指标口径",
+  sql_parse: "SQL解析",
+  dp_csv: "DP导入",
+  metric_consumer: "指标消费",
+};
+
+/** 边详情/覆盖率治理：节点前缀 → 层级 Tag（颜色 + 中文类型标签，Task D 分层链路着色）。 */
+const EDGE_NODE_TYPE_TAG: Record<string, { color: string; label: string }> = {
+  metric: { color: "purple", label: "指标" },
+  table: { color: "blue", label: "表" },
+  field: { color: "cyan", label: "字段" },
+  consumer: { color: "green", label: "消费方" },
+  query: { color: "gold", label: "查询" },
+  external: { color: "default", label: "外部" },
+};
+
+/** 解析节点 id（``metric:xxx`` / ``table:xxx``）的层级 Tag，未知前缀返回 null（不渲染）。 */
+function nodeTypeTag(id: string) {
+  const colon = id.indexOf(":");
+  const prefix = colon === -1 ? "" : id.slice(0, colon);
+  const def = EDGE_NODE_TYPE_TAG[prefix];
+  if (!def) return null;
+  return <Tag color={def.color}>{def.label}</Tag>;
+}
 
 /** 血缘候选节点类型标签（影响分析选项框下拉分组）。 */
 const NODE_TYPE_LABEL: Record<string, string> = {
@@ -578,6 +615,9 @@ function ImpactTab() {
   // 字段节点信息（field 无独立详情表：展示字段名 + 所属表入口）
   const [fieldNode, setFieldNode] = useState<AssetGraphNode | null>(null);
   const [fieldTableNode, setFieldTableNode] = useState<AssetGraphNode | null>(null);
+  // 边详情抽屉（Task B）：点击边明细表格某行打开
+  const [edgeDetailId, setEdgeDetailId] = useState<number | null>(null);
+  const [edgeDetailOpen, setEdgeDetailOpen] = useState(false);
   const { track } = useTracking();
 
   /** 候选节点：无关键词加载 top-N 预加载，有关键词远程搜索指定节点。 */
@@ -793,6 +833,13 @@ function ImpactTab() {
           pagination={false}
           size="small"
           footer={() => `共 ${total} 条血缘边`}
+          onRow={(edge: LineageEdge) => ({
+            onClick: () => {
+              setEdgeDetailId(edge.id);
+              setEdgeDetailOpen(true);
+            },
+            style: { cursor: "pointer" },
+          })}
         />
       ) : (
         !loading && (
@@ -855,6 +902,13 @@ function ImpactTab() {
           </>
         )}
       </Drawer>
+
+      {/* 边详情抽屉（Task B）：点击边明细表格某行打开（边元数据 + 变更历史 + 分层着色） */}
+      <EdgeDetailDrawer
+        edgeId={edgeDetailId}
+        open={edgeDetailOpen}
+        onClose={() => setEdgeDetailOpen(false)}
+      />
     </div>
   );
 }
@@ -1400,6 +1454,242 @@ function ChannelsTab() {
   );
 }
 
+/** 血缘边详情抽屉（Task B）：单条边元数据 + 变更历史。
+ *  点击血缘查询结果的某条边打开；provenance 映射中文、节点按前缀分层着色（Task D）。 */
+function EdgeDetailDrawer({
+  edgeId,
+  open,
+  onClose,
+}: {
+  edgeId: number | null;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const [detail, setDetail] = useState<LineageEdgeDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const { track } = useTracking();
+
+  useEffect(() => {
+    if (!open || edgeId == null) {
+      if (!open) setDetail(null);
+      return;
+    }
+    setLoading(true);
+    setDetail(null);
+    fetchLineageEdgeDetail(edgeId)
+      .then((d) => {
+        setDetail(d);
+        track("lineage_edge_detail", String(edgeId), "edge");
+      })
+      .catch((err) => {
+        message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载边详情失败");
+        setDetail(null);
+      })
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, edgeId]);
+
+  const historyColumns = [
+    { title: "变更前", dataIndex: "before_value", key: "before", render: (v?: string) => (v ? <span className="mono" style={{ fontSize: 12 }}>{v}</span> : <span className="muted">—</span>) },
+    { title: "变更原因", dataIndex: "change_reason", key: "reason", render: (v?: string) => (v ? <Tag>{v}</Tag> : <span className="muted">—</span>) },
+    { title: "变更时间", dataIndex: "changed_at", key: "changedAt", render: (v?: string) => <span className="mono" style={{ fontSize: 12 }}>{v ? formatCnTime(v) : "—"}</span> },
+  ];
+
+  return (
+    <Drawer
+      title="血缘边详情"
+      width={640}
+      open={open}
+      onClose={onClose}
+      loading={loading}
+    >
+      {detail && (
+        <div>
+          <Descriptions size="small" column={2} bordered>
+            <Descriptions.Item label="源节点" span={2}>
+              <Space size={6} wrap>
+                {nodeTypeTag(detail.source_node)}
+                <span className="mono" style={{ fontSize: 12 }}>{detail.source_node}</span>
+              </Space>
+            </Descriptions.Item>
+            <Descriptions.Item label="目标节点" span={2}>
+              <Space size={6} wrap>
+                {nodeTypeTag(detail.target_node)}
+                <span className="mono" style={{ fontSize: 12 }}>{detail.target_node}</span>
+              </Space>
+            </Descriptions.Item>
+            <Descriptions.Item label="边类型">{EDGE_TYPE_LABEL[detail.edge_type] ?? detail.edge_type}</Descriptions.Item>
+            <Descriptions.Item label="粒度">{enumLabel(GRANULARITY_LABEL, detail.granularity)}</Descriptions.Item>
+            <Descriptions.Item label="置信度">
+              {detail.confidence != null ? `${(detail.confidence * 100).toFixed(0)}%` : "—"}
+            </Descriptions.Item>
+            <Descriptions.Item label="来源">
+              <Tag color="blue">{EDGE_PROVENANCE_LABEL[detail.provenance ?? ""] ?? detail.provenance ?? "—"}</Tag>
+            </Descriptions.Item>
+            {detail.pii_inherited ? (
+              <Descriptions.Item label="PII"><Tag color="red">继承 PII</Tag></Descriptions.Item>
+            ) : null}
+            <Descriptions.Item label="创建时间">{detail.created_at ? formatCnTime(detail.created_at) : "—"}</Descriptions.Item>
+          </Descriptions>
+
+          <h4 style={{ marginTop: 16 }}>变更历史（{detail.history.length}）</h4>
+          {detail.history.length > 0 ? (
+            <Table
+              size="small"
+              rowKey={(r) => `${r.id ?? r.source_node ?? ""}__${r.changed_at ?? ""}`}
+              dataSource={detail.history}
+              columns={historyColumns}
+              pagination={false}
+            />
+          ) : (
+            <Empty style={{ marginTop: 8 }} image={Empty.PRESENTED_IMAGE_SIMPLE} description="该边暂无变更历史" />
+          )}
+        </div>
+      )}
+    </Drawer>
+  );
+}
+
+/** 血缘覆盖率治理 Tab（Task A，P0）：覆盖率统计卡 + 孤立指标 / 断链边明细。 */
+function CoverageTab() {
+  const [coverage, setCoverage] = useState<LineageCoverage | null>(null);
+  const [orphans, setOrphans] = useState<CoverageOrphanItem[]>([]);
+  const [broken, setBroken] = useState<CoverageBrokenEdgeItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [activeList, setActiveList] = useState<"orphans" | "broken">("orphans");
+  const navigate = useNavigate();
+  const { track } = useTracking();
+
+  async function load() {
+    setLoading(true);
+    try {
+      const [cov, o, b] = await Promise.all([
+        fetchLineageCoverage(),
+        fetchLineageOrphans(),
+        fetchLineageBrokenEdges(50),
+      ]);
+      setCoverage(cov);
+      setOrphans(o.items);
+      setBroken(b.items);
+      track("lineage_coverage_view");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载覆盖率失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const orphanColumns = [
+    {
+      title: "指标编码",
+      dataIndex: "metric_code",
+      key: "code",
+      render: (v: string) => (
+        <Button type="link" style={{ padding: 0 }} onClick={() => navigate(`/detail/${encodeURIComponent(v)}`)}>
+          <span className="mono" style={{ fontSize: 12 }}>{v}</span>
+        </Button>
+      ),
+    },
+    { title: "名称", dataIndex: "name", key: "name", render: (v?: string) => v || <span className="muted">—</span> },
+    { title: "业务域", dataIndex: "domain", key: "domain", render: (v?: string | null) => v || <span className="muted">—</span> },
+    { title: "状态", dataIndex: "status", key: "status", render: (v?: string) => v || <span className="muted">—</span> },
+  ];
+
+  const brokenColumns = [
+    { title: "源", dataIndex: "source_node", key: "source", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "目标", dataIndex: "target_node", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "类型", dataIndex: "edge_type", key: "type", render: (v: string) => <Tag>{EDGE_TYPE_LABEL[v] ?? v}</Tag> },
+    { title: "来源", dataIndex: "provenance", key: "provenance", render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag> },
+  ];
+
+  const emptyBoth = orphans.length === 0 && broken.length === 0;
+
+  return (
+    <div>
+      <Space style={{ marginBottom: 16 }} wrap>
+        <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
+          刷新
+        </Button>
+        <span className="muted" style={{ fontSize: 13 }}>
+          血缘全覆盖治理：有多少指标/表接入了血缘、多少孤立，以及断链的边（人工修复入口）。
+        </span>
+      </Space>
+
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+        <Col xs={12} lg={6}>
+          <Card size="small"><Statistic title="指标总数" value={coverage?.metric_total ?? "—"} /></Card>
+        </Col>
+        <Col xs={12} lg={6}>
+          <Card size="small"><Statistic title="有血缘指标" value={coverage?.metric_with_lineage ?? "—"} /></Card>
+        </Col>
+        <Col xs={12} lg={6}>
+          <Card size="small" style={{ cursor: "pointer", border: orphans.length ? "1px solid #faad14" : undefined }} onClick={() => setActiveList("orphans")}>
+            <Statistic title="孤立指标" value={coverage?.metric_orphan ?? "—"} valueStyle={{ color: coverage?.metric_orphan ? "#faad14" : "#52c41a" }} />
+          </Card>
+        </Col>
+        <Col xs={12} lg={6}>
+          <Card size="small" style={{ cursor: "pointer", border: broken.length ? "1px solid #ff4d4f" : undefined }} onClick={() => setActiveList("broken")}>
+            <Statistic title="断链边" value={coverage?.broken_edges ?? "—"} valueStyle={{ color: coverage?.broken_edges ? "#cf1322" : "#52c41a" }} />
+          </Card>
+        </Col>
+      </Row>
+
+      {emptyBoth ? (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="暂无孤立指标/断链，血缘覆盖良好"
+        />
+      ) : (
+        <Card
+          size="small"
+          title={
+            <Space size="middle">
+              <span>治理明细</span>
+              <Segmented
+                value={activeList}
+                onChange={(k) => setActiveList(k as "orphans" | "broken")}
+                options={[
+                  { value: "orphans", label: `孤立指标（${orphans.length}）` },
+                  { value: "broken", label: `断链边（${broken.length}）` },
+                ]}
+              />
+            </Space>
+          }
+        >
+          {activeList === "orphans" ? (
+            orphans.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无孤立指标，血缘覆盖良好" />
+            ) : (
+              <Table
+                rowKey={(r) => r.metric_code}
+                dataSource={orphans}
+                columns={orphanColumns}
+                size="small"
+                pagination={false}
+              />
+            )
+          ) : broken.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无断链边，血缘覆盖良好" />
+          ) : (
+            <Table
+              rowKey="id"
+              dataSource={broken}
+              columns={brokenColumns}
+              size="small"
+              pagination={{ pageSize: 50, showSizeChanger: false }}
+            />
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}
+
 export function LineageView() {
   const navigate = useNavigate();
 
@@ -1414,6 +1704,7 @@ export function LineageView() {
     { key: "impact", label: <span><ApartmentOutlined /> 血缘查询 / 影响分析</span>, children: <ImpactTab /> },
     { key: "parse", label: <span><CodeOutlined /> SQL 血缘解析</span>, children: <ParseTab /> },
     { key: "channels", label: <span><DatabaseOutlined /> 采集通道</span>, children: <ChannelsTab /> },
+    { key: "coverage", label: <span><PieChartOutlined /> 覆盖治理</span>, children: <CoverageTab /> },
   ];
 
   return (

@@ -46,6 +46,10 @@ vi.mock("../api", async (importOriginal) => {
     getMetric: vi.fn(),
     getMetricHealth: vi.fn(),
     fetchRelatedMetrics: vi.fn(),
+    fetchLineageCoverage: vi.fn(),
+    fetchLineageOrphans: vi.fn(),
+    fetchLineageBrokenEdges: vi.fn(),
+    fetchLineageEdgeDetail: vi.fn(),
   };
 });
 
@@ -152,7 +156,7 @@ describe("LineageView 血缘图谱 Tab", () => {
 
   it("默认选中血缘图谱并加载全量图谱数据", async () => {
     renderLineage();
-    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalledWith({ limit: 2000 }));
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalledWith({ limit: 2000, provenance: "all" }));
     await waitFor(() => {
       expect(screen.getByText(/共 2 节点 · 1 条血缘边/)).toBeInTheDocument();
     });
@@ -845,7 +849,7 @@ describe("LineageView 血缘图谱聚焦（?node= 参数）", () => {
 
   it("URL 带 ?node=gmv 时仅展示该指标上下游子图（不含无关节点）", async () => {
     renderLineageAt("/lineage?node=gmv");
-    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalledWith({ limit: 2000 }));
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalledWith({ limit: 2000, provenance: "all" }));
     // 聚焦标签 + 限定计数（gmv 双向 3 跳 = gmv/gmv_ttm/ods_orders/dws_gmv 4 节点 3 边）
     await waitFor(() => {
       expect(screen.getByText(/聚焦：gmv 的上下游血缘/)).toBeInTheDocument();
@@ -1105,5 +1109,198 @@ describe("adaptiveBaseRadius 自适应节点半径", () => {
     expect(adaptiveBaseRadius(8)).toBe(18);
     expect(adaptiveBaseRadius(25)).toBe(20);
     expect(adaptiveBaseRadius(100)).toBe(24); // 全景大图
+  });
+});
+
+describe("LineageView 覆盖治理 Tab（Task A）", () => {
+  const coverage = {
+    metric_total: 10,
+    metric_with_lineage: 4,
+    metric_orphan: 6,
+    table_total: 274,
+    table_no_downstream: 5,
+    edge_total: 10553,
+    broken_edges: 2,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
+    vi.mocked(api.fetchLineageCoverage).mockResolvedValue(coverage);
+    vi.mocked(api.fetchLineageOrphans).mockResolvedValue({
+      items: [
+        { metric_code: "revenue", name: "营收", domain: "finance", status: "PUBLISHED" },
+        { metric_code: "gmv", name: "GMV", domain: "sales", status: "DRAFT" },
+      ],
+      total: 2,
+    });
+    vi.mocked(api.fetchLineageBrokenEdges).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          source_node: "table:gone",
+          target_node: "metric:revenue",
+          edge_type: "DERIVED_FROM",
+          provenance: "sqlglot",
+        },
+      ],
+      total: 1,
+    });
+  });
+
+  async function openCoverageTab() {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /覆盖治理/ }).click();
+    });
+    await waitFor(() => expect(api.fetchLineageCoverage).toHaveBeenCalled());
+    return screen.findByRole("tabpanel");
+  }
+
+  it("加载覆盖率统计：4 张统计卡展示指标/血缘/孤立/断链", async () => {
+    await openCoverageTab();
+    expect(screen.getByText("指标总数")).toBeInTheDocument();
+    expect(screen.getByText("有血缘指标")).toBeInTheDocument();
+    expect(screen.getByText("孤立指标")).toBeInTheDocument();
+    expect(screen.getByText("断链边")).toBeInTheDocument();
+    // 孤立指标卡与断链边卡按数值高亮（值文本渲染）
+    expect(screen.getAllByText("6").length).toBeGreaterThan(0);
+  });
+
+  it("孤立指标明细：展示编码/名称/域/状态，点击编码跳转指标详情", async () => {
+    const panel = await openCoverageTab();
+    await waitFor(() => expect(within(panel).getByText("revenue")).toBeInTheDocument());
+    expect(within(panel).getByText("营收")).toBeInTheDocument();
+    expect(within(panel).getByText("finance")).toBeInTheDocument();
+    // 点击指标编码 → 跳转详情
+    await act(async () => {
+      within(panel).getByRole("button", { name: /revenue/ }).click();
+    });
+    expect(currentPath).toBe("/detail/revenue");
+  });
+
+  it("断链边明细：点击「断链边」统计卡切换列表并展示边", async () => {
+    const panel = await openCoverageTab();
+    // 点「断链边」卡切换
+    await act(async () => {
+      screen.getByText("断链边").click();
+    });
+    await waitFor(() => expect(within(panel).getByText("table:gone")).toBeInTheDocument());
+    expect(within(panel).getByText("metric:revenue")).toBeInTheDocument();
+  });
+
+  it("无孤立指标与断链时展示整体空态文案", async () => {
+    vi.mocked(api.fetchLineageOrphans).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(api.fetchLineageBrokenEdges).mockResolvedValue({ items: [], total: 0 });
+    await openCoverageTab();
+    expect(screen.getByText(/暂无孤立指标\/断链，血缘覆盖良好/)).toBeInTheDocument();
+  });
+});
+
+describe("LineageView 边详情抽屉（Task B）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
+    vi.mocked(api.getCatalogDetail).mockResolvedValue(tableDetail);
+    vi.mocked(api.getMetric).mockResolvedValue(metricDetail);
+    vi.mocked(api.getMetricHealth).mockResolvedValue(null as never);
+    vi.mocked(api.fetchRelatedMetrics).mockResolvedValue([]);
+    vi.mocked(api.lineageNodes).mockResolvedValue([
+      { id: "metric:gmv", label: "gmv", type: "metric", count: 8 },
+    ]);
+    // 后端嵌套形态：{edge:{...}, history:[{source_node,target_node,change_reason,created_at}]}
+    // 覆盖「用 any 兜底读取并归一化」的 api 层真实结构（mock 直接给嵌套，走 api 归一化）
+    vi.mocked(api.lineageImpact).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          source_node: "metric:gmv",
+          target_node: "table:dws",
+          edge_type: "DERIVED_FROM",
+          granularity: "L2",
+          confidence: 0.9,
+          provenance: "sqlglot",
+          pii_inherited: false,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+      has_more: false,
+      nodes: [],
+    });
+    vi.mocked(api.fetchLineageEdgeDetail).mockResolvedValue({
+      id: 1,
+      source_node: "metric:gmv",
+      target_node: "metric:gmv_ttm",
+      edge_type: "DERIVED_FROM",
+      granularity: "L2",
+      confidence: 0.9,
+      provenance: "metric_definition",
+      created_at: "2026-08-01T10:00:00",
+      history: [
+        { id: 9, source_node: "metric:gmv", target_node: "metric:gmv_ttm", change_reason: "reparse", created_at: "2026-08-02T10:00:00" },
+      ],
+    });
+  });
+
+  async function openImpactAndQuery() {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /血缘查询/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    const nodeSelect = within(panel).getAllByRole("combobox")[0];
+    fireEvent.mouseDown(nodeSelect);
+    await screen.findByText("gmv");
+    fireEvent.click(screen.getByText("gmv"));
+    fireEvent.click(within(panel).getByRole("button", { name: /查\s*询/ }));
+    await waitFor(() => expect(api.lineageImpact).toHaveBeenCalled());
+    return panel;
+  }
+
+  it("点击边明细行打开边详情抽屉：展示元数据、中文来源、分层 Tag 与变更历史", async () => {
+    const panel = await openImpactAndQuery();
+    await waitFor(() => expect(within(panel).getByText("metric:gmv")).toBeInTheDocument());
+    // 点击边明细行（rowKey=id 的行）打开详情抽屉
+    await act(async () => {
+      const row = panel.querySelector(".ant-table-row");
+      fireEvent.click(row!);
+    });
+    await waitFor(() => expect(api.fetchLineageEdgeDetail).toHaveBeenCalledWith(1));
+    // 抽屉标题 + 分层 Tag（metric:→紫色“指标”，consumer 路径在细节中）
+    await waitFor(() => expect(screen.getByText("血缘边详情")).toBeInTheDocument());
+    // provenance 中文映射：metric_definition → 指标口径
+    expect(screen.getByText("指标口径")).toBeInTheDocument();
+    // 变更历史表展示 change_reason 与归一化的变更时间
+    await waitFor(() => expect(screen.getByText("reparse")).toBeInTheDocument());
+    // 源/目标节点仍渲染（节点 id 文本）
+    expect(screen.getAllByText("metric:gmv_ttm").length).toBeGreaterThan(0);
+  });
+
+  it("edgeType 未知来源回退：provenance 未映射时显示原始标识", async () => {
+    vi.mocked(api.fetchLineageEdgeDetail).mockResolvedValue({
+      id: 1,
+      source_node: "metric:gmv",
+      target_node: "table:dws",
+      edge_type: "DERIVED_FROM",
+      granularity: "L2",
+      confidence: 0.9,
+      provenance: "some_unknown_source",
+      created_at: "2026-08-01T10:00:00",
+      history: [],
+    });
+    const panel = await openImpactAndQuery();
+    await waitFor(() => expect(within(panel).getByText("metric:gmv")).toBeInTheDocument());
+    await act(async () => {
+      const row = panel.querySelector(".ant-table-row");
+      fireEvent.click(row!);
+    });
+    await waitFor(() => expect(screen.getByText("血缘边详情")).toBeInTheDocument());
+    expect(screen.getByText("some_unknown_source")).toBeInTheDocument();
+    // 无历史 → 空态提示
+    expect(screen.getByText(/该边暂无变更历史/)).toBeInTheDocument();
   });
 });

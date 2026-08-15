@@ -60,6 +60,10 @@ import {
   GrantResponse,
   ImpactPreview,
   LineageChannel,
+  LineageCoverage,
+  CoverageOrphanList,
+  CoverageBrokenEdgeList,
+  LineageEdgeDetail,
   LineageEdgePage,
   LineageGraphData,
   LineageIngestRun,
@@ -1060,6 +1064,88 @@ export async function confirmStaleEdge(edgeId: number): Promise<StaleEdge> {
 
 export async function restoreStaleEdge(edgeId: number): Promise<StaleEdge> {
   return request<StaleEdge>(`${API_BASE}/lineage/stale/${edgeId}/restore`, { method: "POST" });
+}
+
+// ---- 血缘覆盖率治理（backend/app/api/lineage.py 覆盖率端点）----
+
+// 覆盖率统计：指标/表血缘完整度 + 孤儿子数 + 断链边数（治理看板）
+export async function fetchLineageCoverage(): Promise<LineageCoverage> {
+  return request<LineageCoverage>(`${API_BASE}/lineage/coverage`);
+}
+
+// 孤立指标清单：后端返回纯数组（CoverageOrphanItem），容错兼容 {items,total} 信封，
+// 统一归一化为 CoverageOrphanList 供 UI 消费。
+export async function fetchLineageOrphans(): Promise<CoverageOrphanList> {
+  const data = await request<unknown>(`${API_BASE}/lineage/coverage/orphans`);
+  if (Array.isArray(data)) {
+    const items = data as import("./types").CoverageOrphanItem[];
+    return { items, total: items.length };
+  }
+  const wrapped = data as { items?: import("./types").CoverageOrphanItem[]; total?: number };
+  const items = wrapped.items ?? [];
+  return { items, total: wrapped.total ?? items.length };
+}
+
+// 断链边明细：后端返回纯数组（CoverageBrokenEdgeItem），容错兼容 {items,total} 信封。
+export async function fetchLineageBrokenEdges(limit = 50): Promise<CoverageBrokenEdgeList> {
+  const data = await request<unknown>(
+    `${API_BASE}/lineage/coverage/broken?limit=${encodeURIComponent(limit)}`,
+  );
+  if (Array.isArray(data)) {
+    const items = data as import("./types").CoverageBrokenEdgeItem[];
+    return { items, total: items.length };
+  }
+  const wrapped = data as { items?: import("./types").CoverageBrokenEdgeItem[]; total?: number };
+  const items = wrapped.items ?? [];
+  return { items, total: wrapped.total ?? items.length };
+}
+
+// 单条血缘边详情 + 变更历史：后端返回 {edge:{...}, history:[...]} 嵌套结构，
+// 且 history 项无 before_value（含 source/target/edge_type/change_reason/created_at）。
+// 此处用 any 兜底读取并归一化为扁平 LineageEdgeDetail，不改动后端。
+export async function fetchLineageEdgeDetail(edgeId: number): Promise<LineageEdgeDetail> {
+  const raw = (await request<unknown>(`${API_BASE}/lineage/edges/${edgeId}`)) as {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    edge?: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    history?: any[];
+  } | null;
+  // 已扁平化（契约形态）直接透传
+  if (raw && !("edge" in raw) && Array.isArray((raw as { history?: unknown }).history)) {
+    return raw as unknown as LineageEdgeDetail;
+  }
+  const edge = raw?.edge ?? raw ?? {};
+  const historyRaw = Array.isArray(raw?.history) ? raw.history : [];
+  const history = historyRaw.map((h) => {
+    const c = h ?? {};
+    return {
+      id: c.id,
+      change_reason: c.change_reason,
+      before_value:
+        c.before_value !== undefined
+          ? c.before_value
+          : c.source_node !== undefined && c.target_node !== undefined
+            ? `${c.source_node} → ${c.target_node}`
+            : undefined,
+      changed_at: c.changed_at ?? c.created_at,
+      created_at: c.created_at ?? c.changed_at,
+      source_node: c.source_node,
+      target_node: c.target_node,
+      edge_type: c.edge_type,
+    };
+  });
+  return {
+    id: edge.id,
+    source_node: edge.source_node,
+    target_node: edge.target_node,
+    edge_type: edge.edge_type,
+    granularity: edge.granularity,
+    confidence: edge.confidence,
+    provenance: edge.provenance,
+    pii_inherited: edge.pii_inherited,
+    created_at: edge.created_at,
+    history,
+  };
 }
 
 // ---- 收藏（consume 服务，通用多资产）----

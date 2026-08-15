@@ -546,6 +546,78 @@ export interface LineageNode {
   count: number;
 }
 
+// 血缘覆盖率治理（backend/app/api/lineage.py /coverage）——
+// 指标/表血缘完整度统计看板。
+export interface LineageCoverage {
+  metric_total: number;
+  metric_with_lineage: number;
+  metric_orphan: number;
+  table_total: number;
+  table_no_downstream: number;
+  edge_total: number;
+  broken_edges: number;
+}
+
+// 孤立指标明细（无任何血缘边的指标）。后端仅返回 {metric_code, domain}，
+// name/status 为容错读入（部分实现可能附带），前端偏好字段可选。
+export interface CoverageOrphanItem {
+  metric_code: string;
+  name?: string;
+  domain?: string | null;
+  status?: string;
+}
+
+// 断链边明细（source 节点对应目录/指标实体已不存在）。
+export interface CoverageBrokenEdgeItem {
+  id: number;
+  source_node: string;
+  target_node: string;
+  edge_type: string;
+  granularity?: string;
+  confidence?: number;
+  provenance: string;
+}
+
+// 孤立指标 / 断链边列表（孤立/断链端点兼容「纯数组」与「{items,total}」两种响应，
+// api 层归一化为统一形状，UI 只消费本结构）。
+export interface CoverageOrphanList {
+  items: CoverageOrphanItem[];
+  total: number;
+}
+export interface CoverageBrokenEdgeList {
+  items: CoverageBrokenEdgeItem[];
+  total: number;
+}
+
+// 血缘边变更历史快照项（backend lineage/schemas.py LineageEdgeHistoryResponse）。
+// before_value/changed_at 为契约中的别名，后端实际返回 source/target/.../change_reason/created_at，
+// api 层归一化时把 created_at 映射到 changed_at，before_value 保留可选。
+export interface LineageEdgeHistoryItem {
+  id?: number;
+  before_value?: string;
+  change_reason?: string;
+  changed_at?: string;
+  created_at?: string;
+  source_node?: string;
+  target_node?: string;
+  edge_type?: string;
+}
+
+// 血缘边详情（backend /lineage/edges/{edge_id}）：后端响应嵌套在 .edge 下并携带独立 history，
+// api 层归一化为扁平结构，UI 只消费本形状。
+export interface LineageEdgeDetail {
+  id: number;
+  source_node: string;
+  target_node: string;
+  edge_type: string;
+  granularity?: string;
+  confidence?: number;
+  provenance?: string;
+  pii_inherited?: boolean;
+  created_at?: string;
+  history: LineageEdgeHistoryItem[];
+}
+
 // 收藏（backend/app/api/consume.py）：POST/DELETE 返回 FavoriteResponse
 export interface FavoriteResponse {
   asset_type: string;
