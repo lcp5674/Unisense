@@ -3,12 +3,16 @@ import { useNavigate } from "react-router-dom";
 import { Button, Card, Popconfirm, Row, Col, Spin, Alert, Tag, Empty, Tooltip, message } from "antd";
 import {
   AppstoreOutlined,
+  BarChartOutlined,
+  BookOutlined,
   PlusCircleOutlined,
   ConsoleSqlOutlined,
   GlobalOutlined,
+  ProfileOutlined,
   RobotOutlined,
   DeploymentUnitOutlined,
   ExperimentOutlined,
+  TableOutlined,
   WarningOutlined,
   SafetyCertificateOutlined,
   IssuesCloseOutlined,
@@ -434,6 +438,15 @@ const OWNER_STATES = [
   { key: "DEPRECATED", label: "已废弃", cls: "ob-deprecated" },
 ] as const;
 
+// Owner 名下各资产类型计数块（图标 + 数字），跨资产责任分布
+const OWNER_ASSET_CHIPS = [
+  { key: "metrics", label: "指标", icon: BarChartOutlined, cls: "oa-metric" },
+  { key: "tables", label: "数据表", icon: TableOutlined, cls: "oa-table" },
+  { key: "dimensions", label: "维度", icon: AppstoreOutlined, cls: "oa-dim" },
+  { key: "terms", label: "术语", icon: BookOutlined, cls: "oa-term" },
+  { key: "templates", label: "模板", icon: ProfileOutlined, cls: "oa-tpl" },
+] as const;
+
 function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: (to: string) => void }) {
   const owners = Object.entries(data.by_owner ?? {}).sort((a, b) => b[1].total - a[1].total);
   if (owners.length === 0) return null;
@@ -445,35 +458,34 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
         <span style={{ fontSize: 15, fontWeight: 600 }}>
           Owner 责任分布
           <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
-            按责任人查看指标状态构成，点击下钻责任人指标目录
+            跨资产统计（指标/数据表/维度/术语/模板），点击下钻责任人指标目录
           </span>
         </span>
       }
     >
       <div className="owner-grid">
         {owners.map(([id, o]) => {
-          const review = o.by_status.REVIEW ?? 0;
-          const published = o.by_status.PUBLISHED ?? 0;
+          const review = o.metrics.by_status.REVIEW ?? 0;
           const hot = review > 0;
-          const total = Math.max(o.total, 1);
+          const metricTotal = Math.max(o.metrics.total, 1);
           return (
             <button
               key={id}
               type="button"
               className={`owner-row${hot ? " owner-hot" : ""}`}
               onClick={() => navigate(`/catalog?owner_id=${id}`)}
-              title={`${o.name}：共 ${o.total} 个指标，待审 ${review}，已发布 ${published}`}
+              title={`${o.name}：共 ${o.total} 项资产（指标 ${o.metrics.total} / 数据表 ${o.tables} / 维度 ${o.dimensions} / 术语 ${o.terms} / 模板 ${o.templates}），待审 ${review}`}
             >
               <span className="owner-name"><TeamOutlined /> {o.name}</span>
               <div className="owner-bar" role="img" aria-label={`${o.name} 指标状态构成`}>
                 {OWNER_STATES.map((s) => {
-                  const count = o.by_status[s.key] ?? 0;
+                  const count = o.metrics.by_status[s.key] ?? 0;
                   if (count <= 0) return null;
                   return (
                     <span
                       key={s.key}
                       className={`ob-seg ${s.cls}`}
-                      style={{ width: `${((count / total) * 100).toFixed(2)}%` }}
+                      style={{ width: `${((count / metricTotal) * 100).toFixed(2)}%` }}
                       title={`${s.label} ${count}`}
                     >
                       {s.label}
@@ -481,6 +493,18 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
                   );
                 })}
               </div>
+              <span className="owner-assets">
+                {OWNER_ASSET_CHIPS.map((c) => {
+                  // metrics 为对象（含 by_status），其余资产为纯数字
+                  const count = c.key === "metrics" ? o.metrics.total : ((o as never)[c.key] as number);
+                  return (
+                    <span key={c.key} className={`oa-chip ${c.cls}`} title={`${c.label} ${count}`}>
+                      <c.icon />
+                      <span className="oa-num">{count}</span>
+                    </span>
+                  );
+                })}
+              </span>
               <span className="owner-metric">{o.total}</span>
             </button>
           );

@@ -26,6 +26,8 @@ vi.mock("../api", () => {
     listFavorites: vi.fn(),
     addFavorite: vi.fn(),
     removeFavorite: vi.fn(),
+    listUsers: vi.fn(),
+    updateTemplateOwner: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -34,12 +36,14 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
-import { listTemplates, createMetric, instantiateTemplate, listFavorites } from "../api";
+import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner } from "../api";
 
 const mockedList = vi.mocked(listTemplates);
 const mockedCreate = vi.mocked(createMetric);
 const mockedListFavorites = vi.mocked(listFavorites);
 const mockedInstantiate = vi.mocked(instantiateTemplate);
+const mockedListUsers = vi.mocked(listUsers);
+const mockedUpdateOwner = vi.mocked(updateTemplateOwner);
 
 const CREATED: MetricResponse = {
   id: 1,
@@ -104,6 +108,7 @@ const TPLS: MetricTemplate[] = [
     additivity: "ADDITIVE",
     metric_tier: "T1",
     is_active: true,
+    owner_id: null,
     created_by: 1,
   },
   {
@@ -125,6 +130,7 @@ const TPLS: MetricTemplate[] = [
     additivity: "ADDITIVE",
     metric_tier: "T1",
     is_active: true,
+    owner_id: null,
     created_by: 1,
   },
 ];
@@ -133,6 +139,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue(TPLS);
   mockedListFavorites.mockResolvedValue([]);
+  mockedListUsers.mockResolvedValue([
+    { id: 1, username: "alice", display_name: "Alice", role: "metric_owner", domain: "finance", status: "ACTIVE" },
+    { id: 2, username: "bob", display_name: "Bob", role: "metric_owner", domain: "finance", status: "ACTIVE" },
+  ]);
 });
 
 describe("Templates 页面", () => {
@@ -288,5 +298,28 @@ describe("Templates 页面", () => {
     await screen.findByText("tpl_gmv_daily");
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+
+  it("指派责任人：表格负责人下拉选择用户调用 updateTemplateOwner", async () => {
+    mockedUpdateOwner.mockResolvedValue({ ...TPLS[0], owner_id: 2 });
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    // 打开第一行（GMV 模板）的负责人下拉
+    const selects = document.querySelectorAll(".ant-select");
+    // 找到负责人下拉（带 placeholder 未指派）
+    const ownerSelect = Array.from(selects).find((el) =>
+      el.querySelector(".ant-select-selection-placeholder")?.textContent?.includes("未指派"),
+    );
+    expect(ownerSelect).toBeTruthy();
+    fireEvent.mouseDown(ownerSelect!.querySelector(".ant-select-selector")!);
+    const bobOption = await screen.findByText("Bob");
+    fireEvent.click(bobOption);
+    await waitFor(() => {
+      expect(mockedUpdateOwner).toHaveBeenCalledWith(1, 2);
+    });
   });
 });

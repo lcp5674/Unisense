@@ -724,7 +724,7 @@ body {
 
 .owner-row {
   display: grid;
-  grid-template-columns: 200px 1fr 48px;
+  grid-template-columns: 200px minmax(140px, 1fr) auto 56px;
   align-items: center;
   gap: 14px;
   padding: 12px 16px;
@@ -816,6 +816,55 @@ body {
   font-family: var(--font-mono);
   font-weight: 600;
   white-space: nowrap;
+}
+
+/* 跨资产计数块：指标/数据表/维度/术语/模板 */
+.owner-row .owner-assets {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.owner-row .oa-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.owner-row .oa-chip:hover {
+  border-color: var(--data);
+  color: var(--ink);
+}
+.owner-row .oa-chip .oa-num {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--ink);
+}
+.owner-row .oa-chip.oa-metric {
+  color: var(--data);
+}
+.owner-row .oa-chip.oa-table {
+  color: #3a7d44;
+}
+.owner-row .oa-chip.oa-dim {
+  color: #8b6fd8;
+}
+.owner-row .oa-chip.oa-term {
+  color: #b07a1f;
+}
+.owner-row .oa-chip.oa-tpl {
+  color: #0e7c86;
+}
+.owner-row.owner-hot .oa-chip .oa-num {
+  color: var(--signal);
 }
 
 /* 快速入口 */
@@ -950,6 +999,14 @@ body {
   }
   .owner-row {
     grid-template-columns: 140px 1fr;
+  }
+  .owner-row .owner-bar {
+    grid-column: 2;
+  }
+  .owner-row .owner-assets {
+    grid-column: 1 / -1;
+    flex-wrap: wrap;
+    justify-self: stretch;
   }
   .owner-row .owner-metric {
     grid-column: 2;

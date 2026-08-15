@@ -33,8 +33,24 @@ const mockDashboardData = {
   pii_count: 12,
   pii_ratio: 0.12,
   by_owner: {
-    1: { name: "Alice", total: 60, by_status: { DRAFT: 20, REVIEW: 4, PUBLISHED: 36 } },
-    2: { name: "Bob", total: 40, by_status: { DRAFT: 5, REVIEW: 3, PUBLISHED: 24, EXPERIMENTAL: 3, DEPRECATED: 5 } },
+    1: {
+      name: "Alice",
+      total: 78,
+      metrics: { total: 60, by_status: { DRAFT: 20, REVIEW: 4, PUBLISHED: 36 } },
+      tables: 8,
+      dimensions: 3,
+      terms: 5,
+      templates: 2,
+    },
+    2: {
+      name: "Bob",
+      total: 49,
+      metrics: { total: 40, by_status: { DRAFT: 5, REVIEW: 3, PUBLISHED: 24, EXPERIMENTAL: 3, DEPRECATED: 5 } },
+      tables: 5,
+      dimensions: 1,
+      terms: 2,
+      templates: 1,
+    },
   },
   quality: { total: 9, by_severity: { P0: 2, P1: 3, P2: 4 }, pending: 5 },
   compliance: { total: 100, reviewed: 72, pending: 28, reviewed_ratio: 0.72 },
@@ -180,7 +196,7 @@ describe("Dashboard", () => {
     expect(gaugeLabels).not.toContain("草稿中");
   });
 
-  it("Owner 责任分布：渲染各 Owner 总数/待审积压/已发布，待审>0 高亮", async () => {
+  it("Owner 责任分布：渲染各 Owner 跨资产统计，待审>0 高亮", async () => {
     renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
@@ -190,16 +206,33 @@ describe("Dashboard", () => {
     expect(document.querySelectorAll(".owner-hot").length).toBeGreaterThan(0);
   });
 
-  it("Owner 分布以图表样式展示：堆积条各段宽度与状态构成对应", async () => {
+  it("Owner 责任分布跨资产：每行含 5 类资产计数块与跨资产总计", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
-    // 每个 Owner 一行：名字 + 堆积条 + 总数（Alice total=60 排前）
+    // Alice（total=78 排前）：指标 60 / 数据表 8 / 维度 3 / 术语 5 / 模板 2
+    const aliceRow = container.querySelectorAll(".owner-row")[0];
+    const chips = Array.from(aliceRow!.querySelectorAll(".oa-chip"));
+    expect(chips.length).toBe(5);
+    expect(chips[0].textContent).toContain("60"); // 指标
+    expect(chips[1].textContent).toContain("8"); // 数据表
+    expect(chips[2].textContent).toContain("3"); // 维度
+    expect(chips[3].textContent).toContain("5"); // 术语
+    expect(chips[4].textContent).toContain("2"); // 模板
+    // 跨资产总计（右端）
+    expect(aliceRow!.querySelector(".owner-metric")?.textContent).toBe("78");
+  });
+
+  it("Owner 分布以图表样式展示：堆积条各段宽度与指标状态构成对应", async () => {
+    const { container } = renderDashboard();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    // 每个 Owner 一行：名字 + 堆积条 + 资产块 + 总数（Alice total=78 排前）
     const rows = Array.from(container.querySelectorAll(".owner-row"));
     expect(rows.length).toBe(2);
     const aliceBar = rows[0].querySelector(".owner-bar");
     expect(aliceBar).toBeTruthy();
-    // Alice: DRAFT=20 / REVIEW=4 / PUBLISHED=36，total=60 → 宽度 33.33% / 6.67% / 60%
+    // Alice: DRAFT=20 / REVIEW=4 / PUBLISHED=36，metrics.total=60 → 宽度 33.33% / 6.67% / 60%
     const segs = Array.from(aliceBar!.querySelectorAll(".ob-seg"));
     expect(segs.length).toBe(3);
     expect(segs[0].getAttribute("style")).toContain("33.33%");

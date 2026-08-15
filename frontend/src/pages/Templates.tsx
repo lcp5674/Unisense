@@ -9,9 +9,11 @@ import {
   listFavorites,
   addFavorite,
   removeFavorite,
+  listUsers,
+  updateTemplateOwner,
   UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricTemplate, MetricType } from "../types";
+import type { MetricCreateRequest, MetricTemplate, MetricType, UserBrief } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
 
@@ -30,6 +32,8 @@ export function Templates() {
   const [instantiateTarget, setInstantiateTarget] = useState<MetricTemplate | null>(null);
   // 模板收藏（C 层多资产收藏：TEMPLATE）
   const [favCodes, setFavCodes] = useState<Set<string>>(new Set());
+  // 责任人人选（模板「负责人」指派下拉）
+  const [users, setUsers] = useState<UserBrief[]>([]);
   const [form] = Form.useForm();
   const navigate = useNavigate();
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
@@ -85,6 +89,26 @@ export function Templates() {
   }, []);
 
   // 模板收藏切换（行内心形）
+  // 责任人人选：模板「负责人」指派下拉数据源
+  useEffect(() => {
+    listUsers()
+      .then((u) => setUsers(u))
+      .catch(() => {});
+  }, []);
+
+  // 指派/解除模板责任人（总览仪表 Owner 责任分布跨资产统计的数据来源）
+  async function assignOwner(t: MetricTemplate, ownerId: number | null) {
+    try {
+      const updated = await updateTemplateOwner(t.id, ownerId);
+      setItems((prev) => prev.map((it) => (it.id === updated.id ? updated : it)));
+      message.success(ownerId ? "已指派责任人" : "已解除责任人");
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "指派失败",
+      );
+    }
+  }
+
   async function toggleFavorite(t: MetricTemplate) {
     const fav = favCodes.has(t.code);
     try {
@@ -169,6 +193,25 @@ export function Templates() {
     { title: "模板编码", dataIndex: "code", key: "code", render: (v: string) => <span className="mono">{v}</span> },
     { title: "名称", dataIndex: "name", key: "name" },
     { title: "域", dataIndex: "domain", key: "domain", width: 140 },
+    {
+      title: "负责人",
+      dataIndex: "owner_id",
+      key: "owner_id",
+      width: 150,
+      render: (_: number | null, t: MetricTemplate) => (
+        <Select
+          size="small"
+          style={{ width: 132 }}
+          placeholder="未指派"
+          value={t.owner_id ?? undefined}
+          allowClear
+          options={users
+            .filter((u) => u.status !== "DISABLED")
+            .map((u) => ({ value: u.id, label: u.display_name }))}
+          onChange={(next?: number) => assignOwner(t, next ?? null)}
+        />
+      ),
+    },
     { title: "类型", dataIndex: "type", key: "type", width: 100, render: (v: string) => enumLabel(METRIC_TYPE_LABEL, v) },
     { title: "粒度", dataIndex: "granularity", key: "granularity", width: 100, render: (v: string) => enumLabel(GRANULARITY_LABEL, v) },
     { title: "聚合", dataIndex: "aggregation", key: "aggregation", width: 120, render: (v: string) => enumLabel(AGGREGATION_LABEL, v) },
