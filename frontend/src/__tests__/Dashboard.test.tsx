@@ -190,6 +190,27 @@ describe("Dashboard", () => {
     expect(document.querySelectorAll(".owner-hot").length).toBeGreaterThan(0);
   });
 
+  it("Owner 分布以图表样式展示：堆积条各段宽度与状态构成对应", async () => {
+    const { container } = renderDashboard();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    // 每个 Owner 一行：名字 + 堆积条 + 总数（Alice total=60 排前）
+    const rows = Array.from(container.querySelectorAll(".owner-row"));
+    expect(rows.length).toBe(2);
+    const aliceBar = rows[0].querySelector(".owner-bar");
+    expect(aliceBar).toBeTruthy();
+    // Alice: DRAFT=20 / REVIEW=4 / PUBLISHED=36，total=60 → 宽度 33.33% / 6.67% / 60%
+    const segs = Array.from(aliceBar!.querySelectorAll(".ob-seg"));
+    expect(segs.length).toBe(3);
+    expect(segs[0].getAttribute("style")).toContain("33.33%");
+    expect(segs[1].getAttribute("style")).toContain("6.67%");
+    expect(segs[2].getAttribute("style")).toContain("60%");
+    // 每段标注状态名（可读性，非仅色块）
+    expect(segs[0].textContent).toContain("草稿");
+    expect(segs[1].textContent).toContain("审核");
+    expect(segs[2].textContent).toContain("已发布");
+  });
+
   it("Owner 下钻：点击 Owner 跳转 /catalog?owner_id=", async () => {
     const probe = renderWithLocation();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());

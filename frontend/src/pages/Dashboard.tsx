@@ -372,7 +372,7 @@ function GovernanceCards({ data, navigate }: { data: DashboardData; navigate: (t
       }
     >
       <div className="gov-grid">
-        <button className="gov-card" type="button" onClick={() => navigate("/quality")} title="进入质量中心">
+        <button className="gov-card" data-tone="danger" type="button" onClick={() => navigate("/quality")} title="进入质量中心">
           <div className="gov-head">
             <span className="gov-label"><WarningOutlined /> 质量健康</span>
             <span className="gov-total">{q.total}</span>
@@ -385,7 +385,7 @@ function GovernanceCards({ data, navigate }: { data: DashboardData; navigate: (t
           <div className="gov-sub">{q.pending > 0 ? `待处理 ${q.pending} 项` : "当前无待处理告警"}</div>
         </button>
 
-        <button className="gov-card" type="button" onClick={() => navigate("/catalog")} title="进入指标目录">
+        <button className="gov-card" data-tone="ok" type="button" onClick={() => navigate("/catalog")} title="进入指标目录">
           <div className="gov-head">
             <span className="gov-label"><SafetyCertificateOutlined /> 合规复核</span>
             <span className="gov-total">{Math.round(c.reviewed_ratio * 100)}%</span>
@@ -397,7 +397,7 @@ function GovernanceCards({ data, navigate }: { data: DashboardData; navigate: (t
           <div className="gov-sub">指标合规复核进度</div>
         </button>
 
-        <button className="gov-card" type="button" onClick={() => navigate("/review")} title="进入冲突仲裁">
+        <button className="gov-card" data-tone="warn" type="button" onClick={() => navigate("/review")} title="进入冲突仲裁">
           <div className="gov-head">
             <span className="gov-label"><IssuesCloseOutlined /> 冲突风险</span>
             <span className="gov-total">{cf.total}</span>
@@ -409,7 +409,7 @@ function GovernanceCards({ data, navigate }: { data: DashboardData; navigate: (t
           <div className="gov-sub">未关闭冲突总数</div>
         </button>
 
-        <button className="gov-card" type="button" onClick={() => navigate("/catalog")} title="进入指标目录">
+        <button className="gov-card" data-tone="info" type="button" onClick={() => navigate("/catalog")} title="进入指标目录">
           <div className="gov-head">
             <span className="gov-label"><FieldTimeOutlined /> 近 30 天更新</span>
             <span className="gov-total">{f.updated_30d}</span>
@@ -424,7 +424,16 @@ function GovernanceCards({ data, navigate }: { data: DashboardData; navigate: (t
   );
 }
 
-// ---- Owner 责任分布：每位 Owner 的指标规模 + 待审积压 + 已发布 ----
+// ---- Owner 责任分布：以堆积条形图展示每位 Owner 的指标状态构成 ----
+// 分段颜色与生命周期信号条语义一致：草稿灰 / 实验紫 / 审核橙 / 已发布青 / 已废弃深灰
+const OWNER_STATES = [
+  { key: "DRAFT", label: "草稿", cls: "ob-draft" },
+  { key: "EXPERIMENTAL", label: "实验", cls: "ob-experimental" },
+  { key: "REVIEW", label: "审核", cls: "ob-review" },
+  { key: "PUBLISHED", label: "已发布", cls: "ob-published" },
+  { key: "DEPRECATED", label: "已废弃", cls: "ob-deprecated" },
+] as const;
+
 function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: (to: string) => void }) {
   const owners = Object.entries(data.by_owner ?? {}).sort((a, b) => b[1].total - a[1].total);
   if (owners.length === 0) return null;
@@ -436,7 +445,7 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
         <span style={{ fontSize: 15, fontWeight: 600 }}>
           Owner 责任分布
           <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
-            按责任人查看指标规模与待审积压，点击下钻责任人指标目录
+            按责任人查看指标状态构成，点击下钻责任人指标目录
           </span>
         </span>
       }
@@ -446,6 +455,7 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
           const review = o.by_status.REVIEW ?? 0;
           const published = o.by_status.PUBLISHED ?? 0;
           const hot = review > 0;
+          const total = Math.max(o.total, 1);
           return (
             <button
               key={id}
@@ -455,9 +465,23 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
               title={`${o.name}：共 ${o.total} 个指标，待审 ${review}，已发布 ${published}`}
             >
               <span className="owner-name"><TeamOutlined /> {o.name}</span>
-              <span className="owner-metric">指标 {o.total}</span>
-              <span className="owner-metric">{hot ? `待审 ${review}` : "无积压"}</span>
-              <span className="owner-metric">已发布 {published}</span>
+              <div className="owner-bar" role="img" aria-label={`${o.name} 指标状态构成`}>
+                {OWNER_STATES.map((s) => {
+                  const count = o.by_status[s.key] ?? 0;
+                  if (count <= 0) return null;
+                  return (
+                    <span
+                      key={s.key}
+                      className={`ob-seg ${s.cls}`}
+                      style={{ width: `${((count / total) * 100).toFixed(2)}%` }}
+                      title={`${s.label} ${count}`}
+                    >
+                      {s.label}
+                    </span>
+                  );
+                })}
+              </div>
+              <span className="owner-metric">{o.total}</span>
             </button>
           );
         })}
