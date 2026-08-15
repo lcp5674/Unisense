@@ -547,7 +547,13 @@ export function MetricCreate() {
           批量注册指标
         </Button>
       </Space>
-      <Card>
+      <Spin
+        spinning={sqlInferring}
+        size="large"
+        tip="正在智能推断指标定义，请稍候…"
+        style={{ minHeight: 320 }}
+      >
+        <Card>
         <Form form={form} layout="vertical" onFinish={handleSubmit} initialValues={{
           type: "atomic", granularity: "day", aggregation: "SUM",
           time_semantics: "PERIOD", freshness: "T1", dw_layer: "DWD",
@@ -811,7 +817,8 @@ export function MetricCreate() {
             )}
           </Space>
         </Form>
-      </Card>
+        </Card>
+      </Spin>
 
       {/* 推断结果摘要：SQL 智能推断成功后展示，让用户明确知道识别出了什么（惰性设计：给反馈而非只默默回填） */}
       <Modal

@@ -353,6 +353,43 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     );
   });
 
+  it("SQL 推断进行中：页面中心展示大旋转图标（Spin 遮罩）", async () => {
+    // 手动控制 promise，让推断停留在"进行中"状态以便断言遮罩
+    let resolveSuggest!: (v: unknown) => void;
+    mockedSuggest.mockReturnValue(
+      new Promise((res) => {
+        resolveSuggest = res;
+      }) as never
+    );
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "SELECT SUM(gmv) AS gmv FROM dwd.sales_detail GROUP BY dt, shop_id" },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+
+    // 推断中：中心遮罩 + 大号旋转图标 + 提示文案可见
+    await waitFor(() => {
+      const spinner = document.querySelector(".ant-spin.ant-spin-spinning");
+      expect(spinner).toBeTruthy();
+    });
+    expect(screen.getByText("正在智能推断指标定义，请稍候…")).toBeTruthy();
+
+    // 推断完成：遮罩消失
+    resolveSuggest({
+      fields: {
+        source_table: { value: "dwd.sales_detail", source: "sql_parse" },
+        measure_column: { value: "gmv", source: "sql_parse" },
+      },
+      definition_json: {},
+    } as never);
+    await waitFor(() => {
+      expect(document.querySelector(".ant-spin.ant-spin-spinning")).toBeNull();
+    });
+  });
+
   it("SQL 推断：未选域或未粘贴 SQL 时「智能推断」按钮禁用（惰性引导）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
