@@ -996,6 +996,24 @@ class AssetMapRepository:
             )
         ).scalar_one_or_none()
 
+    async def catalog_id_by_names(self, names: list[str]) -> dict[str, int]:
+        """按 entity_name 批量查未删除的表/视图主键（图谱表节点 entity_id 富集用）。
+
+        返回 ``{entity_name: id}``；不在目录中（未采集/已删除）的名称不出现在结果里。
+        """
+        if not names:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(DBCatalog.id, DBCatalog.entity_name).where(
+                    DBCatalog.entity_name.in_(names),
+                    DBCatalog.deleted_at.is_(None),
+                    DBCatalog.entity_type.in_(["TABLE", "VIEW"]),
+                )
+            )
+        ).all()
+        return {row.entity_name: row.id for row in rows}
+
     async def list_catalog_entities(self, entity_ids: list[int]) -> list[DBCatalog]:
         """按 id 批量获取未删除的目录资产（保持入参顺序，供批量操作）。"""
         if not entity_ids:

@@ -385,7 +385,7 @@ describe("AssetMap", () => {
     );
   });
 
-  it("metric drawer AI 推断：点击 AI 推断 → 调 inferMetricDescription → 刷新描述", async () => {
+  it("metric drawer AI 推断（已有 LLM 描述）：按钮显示「重新生成」，确认后 force=true 重新推断", async () => {
     const baseMetric = {
       id: 1,
       metric_code: "finance_revenue_sum_d",
@@ -432,15 +432,75 @@ describe("AssetMap", () => {
     });
     clickHandler?.({ target: { id: "metric:m1" } });
 
+    // 已有 LLM 描述 → 按钮显示「重新生成」而非「AI 推断」（去重防线）
+    await waitFor(() => expect(screen.getByText("重新生成")).toBeInTheDocument());
+    // 点击不直接调接口，先弹确认框（antd confirm 标题渲染两处 → getAllByText）
+    await userEvent.click(screen.getByText("重新生成"));
+    await waitFor(() =>
+      expect(screen.getAllByText("重新生成指标描述？").length).toBeGreaterThan(0),
+    );
+    expect(inferMetricDescription).not.toHaveBeenCalled();
+    // 确认后以 force=true 重新推断
+    await userEvent.click(screen.getByRole("button", { name: "确认重新生成" }));
+    await waitFor(() =>
+      expect(inferMetricDescription).toHaveBeenCalledWith("finance_revenue_sum_d", {
+        force: true,
+      }),
+    );
+  });
+
+  it("metric drawer AI 推断（无描述）：按钮显示「AI 推断」，直接调用不带 force", async () => {
+    const baseMetric = {
+      id: 1,
+      metric_code: "finance_revenue_sum_d",
+      name: "营收汇总",
+      domain: "finance",
+      type: "atomic",
+      granularity: "day",
+      unit: "yuan",
+      aggregation: "SUM",
+      time_semantics: "PERIOD",
+      freshness: "T1",
+      dw_layer: "DWD",
+      metric_tier: "T2",
+      serving_mode: "BATCH_ONLY",
+      additivity: "ADDITIVE",
+      definition_json: {},
+      version: 1,
+      row_version: 1,
+      status: "PUBLISHED",
+      owner_id: 1,
+      pii_flag: false,
+      compliance_reviewed: true,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    vi.mocked(getMetric).mockResolvedValue({ ...baseMetric, description: null } as never);
+    vi.mocked(listSnapshots).mockResolvedValue([] as never);
+    vi.mocked(inferMetricDescription).mockResolvedValue({
+      ...baseMetric,
+      description: "每日营收汇总",
+      description_source: "llm",
+    } as never);
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "metric:m1", label: "finance_revenue_sum_d", type: "metric", domain: "finance" },
+    });
+    clickHandler?.({ target: { id: "metric:m1" } });
+
+    // 无描述 → 按钮显示「AI 推断」，点击直接调用（无确认框、不带 force）
     await waitFor(() => expect(screen.getByText("AI 推断")).toBeInTheDocument());
     await userEvent.click(screen.getByText("AI 推断"));
-
     await waitFor(() =>
-      expect(inferMetricDescription).toHaveBeenCalledWith("finance_revenue_sum_d"),
+      expect(inferMetricDescription).toHaveBeenCalledWith("finance_revenue_sum_d", { force: false }),
     );
     // 推断成功后刷新描述展示（source=llm）
     await waitFor(() =>
-      expect(screen.getByText("AI 推断的每日营收总额描述")).toBeInTheDocument(),
+      expect(screen.getByText("每日营收汇总")).toBeInTheDocument(),
     );
   });
 
@@ -558,6 +618,64 @@ describe("AssetMap", () => {
     clickHandler?.({ target: { id: "table:sales.ods" } });
 
     await waitFor(() => expect(fetchAssetEntityDetail).toHaveBeenCalledWith(5));
+    expect(screen.getByText(/实体详情/)).toBeInTheDocument();
+  });
+
+  it("click table node without entity_id falls back to catalog lookup", async () => {
+    // Neo4j 图谱路径表节点可能不带 entity_id：按表名回查采集目录后打开详情
+    vi.mocked(fetchAssetGraph).mockResolvedValue({
+      nodes: [
+        { id: "table:ods_orders", label: "ods_orders", type: "table", domain: "sales" },
+      ],
+      edges: [],
+    });
+    vi.mocked(listCatalogs).mockResolvedValue({
+      items: [
+        {
+          id: 42,
+          source_id: "s1",
+          entity_name: "ods_orders",
+          entity_type: "TABLE",
+          schema_def: {},
+          etl_sql: null,
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          upstream_signature: "",
+          content_signature: null,
+          schema_incomplete: false,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 42,
+      entity_name: "ods_orders",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: null,
+      pii_flag: false,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "table:ods_orders", label: "ods_orders", type: "table", domain: "sales" },
+    });
+    clickHandler?.({ target: { id: "table:ods_orders" } });
+
+    await waitFor(() =>
+      expect(listCatalogs).toHaveBeenCalledWith(
+        expect.objectContaining({ keyword: "ods_orders" }),
+      ),
+    );
+    await waitFor(() => expect(fetchAssetEntityDetail).toHaveBeenCalledWith(42));
     expect(screen.getByText(/实体详情/)).toBeInTheDocument();
   });
 

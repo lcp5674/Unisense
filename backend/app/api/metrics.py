@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -310,11 +310,20 @@ async def infer_metric_description(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
+    force: bool = Query(False, description="强制重新推断；默认已存在 LLM 描述时短路返回"),
 ) -> ApiResponse[MetricResponse]:
-    """资产地图/指标详情一键 LLM 推断描述并落库（source=llm）；写审计与业务同事务提交。"""
+    """资产地图/指标详情一键 LLM 推断描述并落库（source=llm）；写审计与业务同事务提交。
+
+    ``force=false``（默认）时若指标已有 LLM 推断描述则短路返回，避免重复调用 LLM；
+    ``force=true`` 忽略已有描述强制重新生成（前端"重新生成"确认后使用）。
+    """
     service = MetricService(db)
     metric = await service.infer_metric_description(
-        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code,
+        actor_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+        force=force,
     )
     await write_audit(
         db,

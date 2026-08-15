@@ -2229,3 +2229,49 @@ async def test_infer_metric_description_not_owner_raises_auth():
     repo.update_with_optimistic_lock.assert_not_called()
 
 
+async def test_infer_metric_description_skips_existing_llm_without_force():
+    """已有 LLM 描述且未 force → 短路返回，不重复调 LLM（去重/省时核心防线）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="PUBLISHED",
+        description="每日成交总额（含退款前）",
+        description_source="llm",
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    with patch.object(
+        svc, "_llm_infer_metric_description", AsyncMock(return_value=None)
+    ) as mock_infer:
+        result = await svc.infer_metric_description(
+            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domain="sales"
+        )
+
+    assert result is existing
+    mock_infer.assert_not_called()
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_infer_metric_description_force_regenerates_existing_llm():
+    """force=True → 忽略已有 LLM 描述，重新调 LLM 生成并覆盖。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="PUBLISHED",
+            description="旧描述",
+            description_source="llm",
+            row_version=5,
+        )
+    )
+    updated = make_metric(description="新描述", description_source="llm")
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+    fake = _llm_client('{"description": "新描述", "confidence": 0.9}')
+    with patch.object(svc, "_build_llm_client", AsyncMock(return_value=fake)):
+        result = await svc.infer_metric_description(
+            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domain="sales", force=True
+        )
+
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["description"] == "新描述"
+    assert kwargs["description_source"] == "llm"
+    assert result is updated
+
+

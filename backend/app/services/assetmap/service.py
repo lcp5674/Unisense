@@ -242,6 +242,16 @@ class AssetMapService(BaseService):
                     _NEO4J_BREAKER.record_success()
                     return {"nodes": [], "edges": []}
 
+                # 表节点富集 entity_id（与 MySQL 降级路径一致）：Neo4j 节点本身不带
+                # db_catalog 主键，需按 entity_name 批量回查目录，使点击表节点可打开
+                # 实体详情抽屉（否则前端拿到 entity_id=None → 提示"暂不支持查看详情"）。
+                table_names = [n["id"].split(":", 1)[1] for n in nodes if n["type"] == "table"]
+                if table_names:
+                    id_map = await self._repo.catalog_id_by_names(table_names)
+                    for n in nodes:
+                        if n["type"] == "table":
+                            n["entity_id"] = id_map.get(n["id"].split(":", 1)[1])
+
                 edge_params: dict[str, Any] = {"node_ids": [n["id"] for n in nodes]}
                 edges_result = await session.run(edge_query, edge_params)
                 edges = []

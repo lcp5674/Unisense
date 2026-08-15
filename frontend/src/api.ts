@@ -533,9 +533,15 @@ export async function updateMetricDescription(
 }
 
 // LLM 推断指标业务描述（治理补充 TD §12.1，source=llm，不触发版本）
-export async function inferMetricDescription(code: string): Promise<MetricResponse> {
+// force=true 强制重新生成；默认已存在 LLM 描述时后端短路返回（避免重复调 LLM）
+export async function inferMetricDescription(
+  code: string,
+  opts?: { force?: boolean },
+): Promise<MetricResponse> {
   return request<MetricResponse>(
-    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/infer-description`,
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/infer-description${
+      opts?.force ? "?force=true" : ""
+    }`,
     { method: "POST" },
   );
 }

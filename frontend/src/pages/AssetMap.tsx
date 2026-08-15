@@ -504,6 +504,7 @@ function GraphTab() {
   const [metricDescDraft, setMetricDescDraft] = useState("");
   const [metricDescSaving, setMetricDescSaving] = useState(false);
   const [metricInferring, setMetricInferring] = useState(false);
+  const [inferElapsed, setInferElapsed] = useState(0);
 
   async function loadGraph() {
     setLoading(true);
@@ -523,6 +524,14 @@ function GraphTab() {
     loadGraph();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [domain, piiOnly]);
+
+  // AI 推断计时：LLM 生成耗时数秒，展示秒数避免用户误以为卡死
+  useEffect(() => {
+    if (!metricInferring) return;
+    setInferElapsed(0);
+    const timer = window.setInterval(() => setInferElapsed((s) => s + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [metricInferring]);
 
   async function openDetail(entityId: number) {
     setDetailOpen(true);
@@ -665,24 +674,75 @@ function GraphTab() {
     }
   }
 
-  async function handleMetricDescInfer() {
+  async function doMetricDescInfer(force: boolean) {
     if (!metricData) return;
     setMetricInferring(true);
+    setInferElapsed(0);
     try {
-      await inferMetricDescription(metricData.metric_code);
-      message.success("指标描述已通过 AI 推断生成");
-      setMetricData(await getMetric(metricData.metric_code));
+      const updated = await inferMetricDescription(metricData.metric_code, { force });
+      message.success(force ? "指标描述已重新生成" : "指标描述已通过 AI 推断生成");
+      setMetricData(updated);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "AI 推断指标描述失败");
     } finally {
       setMetricInferring(false);
+      setInferElapsed(0);
     }
+  }
+
+  function handleMetricDescInfer() {
+    if (!metricData) return;
+    // 去重防线：已有 LLM 推断描述时不直接重复调 LLM，先确认是否重新生成（耗时数秒）
+    if (metricData.description_source === "llm" && metricData.description) {
+      Modal.confirm({
+        title: "重新生成指标描述？",
+        content: "该指标已存在 LLM 推断描述，重新生成将覆盖当前内容，且需要数秒等待。",
+        okText: "确认重新生成",
+        cancelText: "取消",
+        onOk: () => doMetricDescInfer(true),
+      });
+      return;
+    }
+    void doMetricDescInfer(false);
+  }
+
+  async function handleTableNodeClick(node: AssetGraphNode) {
+    if (node.entity_id != null) {
+      openDetail(node.entity_id);
+      return;
+    }
+    // Neo4j 图谱路径表节点可能不带 entity_id：按表名回查采集目录，命中则打开详情
+    const entityName = node.id.startsWith("table:")
+      ? node.id.slice("table:".length)
+      : node.label;
+    try {
+      const res = await listCatalogs({ keyword: entityName, page_size: 20 });
+      const hit = res.items.find((it) => it.entity_name === entityName && it.id != null);
+      if (hit?.id != null) {
+        openDetail(hit.id);
+        return;
+      }
+    } catch {
+      // 查询失败落空态，引导前往采集目录
+    }
+    Modal.confirm({
+      title: "未找到该表详情",
+      content: `「${entityName}」未在元数据目录中找到（可能尚未采集或数据源已删除）。是否前往采集目录查看？`,
+      okText: "前往采集目录",
+      cancelText: "取消",
+      onOk: () => navigate(`/catalog?kw=${encodeURIComponent(entityName)}`),
+    });
   }
 
   function handleNodeClick(node: AssetGraphNode) {
     if (node.type === "metric") {
       // 本页打开指标详情抽屉（明细 + 补充描述），用户可再决定是否跳转指标详情
       openMetric(node.label);
+      return;
+    }
+    if (node.type === "table") {
+      // 表/视图：优先 entity_id 直达详情；缺失时回查目录，再不行引导去采集目录
+      void handleTableNodeClick(node);
       return;
     }
     if (node.entity_id != null) {
@@ -852,7 +912,11 @@ function GraphTab() {
                       loading={metricInferring}
                       onClick={handleMetricDescInfer}
                     >
-                      AI 推断
+                      {metricInferring
+                        ? `AI 推断中… ${inferElapsed}s`
+                        : metricData.description_source === "llm"
+                          ? "重新生成"
+                          : "AI 推断"}
                     </Button>
                     {descriptionSourceTag(metricData.description_source)}
                     {metricData.description_updated_at ? (

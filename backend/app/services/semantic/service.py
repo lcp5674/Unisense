@@ -842,6 +842,7 @@ class MetricService(BaseService):
         actor_id: int,
         role: str,
         user_domain: str | None = None,
+        force: bool = False,
     ) -> Metric:
         """用 LLM 推断指标业务描述并落库（TD §12.1，不触发版本/不参与口径变更）。
 
@@ -853,6 +854,8 @@ class MetricService(BaseService):
             actor_id: 操作人 ID。
             role: 操作人角色。
             user_domain: 操作人所属域（API 层传入）。
+            force: 强制重新推断。默认 False 时若已存在 LLM 推断描述则短路返回
+                （避免重复调用 LLM 造成耗时与成本浪费）；True 时忽略已有描述重新生成。
 
         Raises:
             NotFoundError: 指标不存在。
@@ -875,6 +878,15 @@ class MetricService(BaseService):
                 error_code=decision.error_code or "FORBIDDEN",
                 ctx={"metric_code": metric_code, "actor_id": actor_id},
             )
+
+        # 幂等短路：已存在 LLM 推断描述且未强制重新生成 → 直接返回，避免重复调 LLM
+        if not force and metric.description_source == "llm" and metric.description:
+            logger.info(
+                "metric_description_infer_skipped_existing",
+                metric_code=metric_code,
+                actor_id=actor_id,
+            )
+            return metric
 
         inferred = await self._llm_infer_metric_description(metric)
         if inferred is None:

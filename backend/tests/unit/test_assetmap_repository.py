@@ -447,6 +447,29 @@ class TestGraphFromMysql:
         assert len(edges) == 2
 
 
+class TestCatalogIdByNames:
+    async def test_returns_name_to_id_map(self) -> None:
+        s = _session()
+        r = MagicMock()
+        r.all.return_value = [
+            SimpleNamespace(entity_name="ods_orders", id=42),
+            SimpleNamespace(entity_name="dwd_order", id=43),
+        ]
+        s.execute = AsyncMock(return_value=r)
+
+        out = await AssetMapRepository(s).catalog_id_by_names(
+            ["ods_orders", "dwd_order", "missing_table"]
+        )
+
+        assert out == {"ods_orders": 42, "dwd_order": 43}
+
+    async def test_empty_names_returns_empty_without_query(self) -> None:
+        s = _session()
+        out = await AssetMapRepository(s).catalog_id_by_names([])
+        assert out == {}
+        s.execute.assert_not_called()
+
+
 class TestListTablesAndOrphans:
     async def test_list_tables_with_filters(self) -> None:
         s = _session()

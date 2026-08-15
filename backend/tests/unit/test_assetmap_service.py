@@ -217,6 +217,49 @@ async def test_get_graph_neo4j_success(monkeypatch) -> None:
     assert out["edges"][0]["type"] == "DERIVED_FROM"
 
 
+async def test_get_graph_neo4j_enriches_table_entity_id(monkeypatch) -> None:
+    """Neo4j 路径表节点富集 entity_id：按 entity_name 回查目录，点击表节点可开详情。"""
+    from app.core.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "neo4j_url", "bolt://localhost:7687")
+    monkeypatch.setattr(cfg, "neo4j_password", "pw")
+    monkeypatch.setattr("app.services.assetmap.service._NEO4J_BREAKER", _breaker(True))
+
+    class _TableSession(_FakeSession):
+        async def run(self, query: str, params: dict | None = None):
+            if "RETURN DISTINCT n.id" in query:
+                return _FakeResult(
+                    [
+                        _FakeRecord(
+                            {
+                                "id": "table:ods_orders",
+                                "type": "table",
+                                "label": "ods_orders",
+                                "pii": False,
+                                "domain": "sales",
+                                "owner": "2",
+                            }
+                        )
+                    ]
+                )
+            return _FakeResult(
+                [_FakeRecord({"source": "a", "target": "table:ods_orders", "type": "DERIVED_FROM"})]
+            )
+
+    monkeypatch.setattr(
+        "app.services.assetmap.service._get_neo4j_driver",
+        lambda: type("D", (), {"session": lambda self: _TableSession()})(),
+    )
+
+    svc, repo = await _svc()
+    repo.catalog_id_by_names = AsyncMock(return_value={"ods_orders": 42})
+    out = await svc.get_graph(domain="sales", depth=3, pii_only=False)
+
+    assert out["nodes"][0]["type"] == "table"
+    assert out["nodes"][0]["entity_id"] == 42
+    repo.catalog_id_by_names.assert_awaited_once_with(["ods_orders"])
+
+
 async def test_get_graph_neo4j_error_falls_back(monkeypatch) -> None:
     """Neo4j 查询异常：记失败并降级到 MySQL，不抛异常。"""
     from app.core.config import settings as cfg
