@@ -316,11 +316,17 @@ function layoutConfig(layoutMode: "hierarchy" | "force") {
   }
   // 力导向：环图/交互定位用（对循环依赖天然容忍，节点自然分布）
   // collide/linkDistance 加大避免底部标签被相邻节点压住
+  // 收敛加速：@antv/layout 的 D3ForceLayout.layout() 等待 simulation 'end' 事件
+  //（alpha 降到 alphaMin），默认 alphaDecay≈0.0228 / alphaMin=0.001 需约 300 次 tick 才收敛。
+  // 调大 alphaDecay + 提高 alphaMin 后约 50 次 tick 触发 'end'，布局切换提速约 5 倍，
+  // 力导向是近似布局，视觉差异极小。
   return {
     type: "d3-force",
     linkDistance: 150,
     collide: { radius: 64 },
     manyBody: { strength: -260 },
+    alphaDecay: 0.08,
+    alphaMin: 0.05,
   };
 }
 
