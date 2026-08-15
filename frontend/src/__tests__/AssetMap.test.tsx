@@ -340,7 +340,7 @@ describe("AssetMap", () => {
 
     await waitFor(() => {
       expect(lineageGraph).toHaveBeenCalledWith({
-        provenance: undefined,
+        provenance: "all",
         limit: 2000,
       });
     });

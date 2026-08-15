@@ -1382,9 +1382,11 @@ function GraphTab() {
         const data = await fetchAssetGraph({ domain, depth: 2, pii_only: piiOnly });
         setGraphData(data);
       } else {
-        // 血缘视角：全通道/指定通道完整表级血缘（与血缘视图血缘图谱同源）
+        // 血缘视角：全通道/指定通道完整表级血缘（与血缘视图血缘图谱同源）。
+        // 注意：provenance 直接透传 graphSource——"all" 交给后端走全通道（含 DP/SQL/指标），
+        // 不能转成 undefined（后端对空 provenance 走采集目录视角，只返回指标小图）。
         const data = await lineageGraph({
-          provenance: graphSource === "all" ? undefined : graphSource,
+          provenance: graphSource,
           limit: 2000,
         });
         setGraphData({
