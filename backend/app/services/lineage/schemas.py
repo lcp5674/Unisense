@@ -12,7 +12,10 @@ class LineageParseRequest(BaseModel):
     """血缘解析请求。"""
 
     sql: str = Field(..., min_length=1, max_length=200_000, description="待解析 SQL")
-    dialect: str | None = Field(default=None, description="sqlglot dialect，如 hive/mysql")
+    dialect: str | None = Field(
+        default=None,
+        description="sqlglot dialect，如 mysql/hive/doris/clickhouse（对齐数据源类型）",
+    )
     source_node: str | None = Field(default=None, max_length=512, description="可选上游资产节点")
     provenance: str = Field(default="sqlglot", max_length=32, description="来源通道")
 

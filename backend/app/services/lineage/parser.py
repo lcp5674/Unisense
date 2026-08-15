@@ -145,7 +145,8 @@ def extract_table_lineage(sql: str, dialect: str | None = None) -> list[TableEdg
 
     Args:
         sql: SQL 文本（支持注释/多语句，自动净化）。
-        dialect: sqlglot dialect（可选，如 ``"hive"`` / ``"mysql"`` / ``"doris"``）。
+        dialect: sqlglot dialect（可选，如 ``"mysql"`` / ``"hive"`` / ``"doris"`` /
+            ``"clickhouse"``）。
 
     Returns:
         表级血缘边列表（source -> target）；解析失败或非法 SQL 时返回空列表（降级）。
@@ -512,7 +513,8 @@ def extract_field_lineage(sql: str, dialect: str | None = None) -> list[FieldEdg
 
     Args:
         sql: SQL 文本（支持注释/多语句，自动净化）。
-        dialect: sqlglot dialect（可选，如 ``"hive"`` / ``"doris"`` / ``"starrocks"``）。
+        dialect: sqlglot dialect（可选，如 ``"mysql"`` / ``"hive"`` / ``"doris"`` /
+            ``"clickhouse"`` / ``"starrocks"``）。
 
     Returns:
         字段级血缘边列表（含降级标记）；解析不可用或失败时返回空列表（降级）。

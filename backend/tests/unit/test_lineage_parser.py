@@ -213,9 +213,9 @@ def test_invalid_sql_degrades_empty() -> None:
     assert extract_field_lineage("") == []
 
 
-def test_dialect_doris_and_hive() -> None:
-    """方言透传：doris/hive 均能解析（不因方言差异崩溃）。"""
-    for dialect in ("hive", "doris", "mysql"):
+def test_dialect_doris_clickhouse_and_hive() -> None:
+    """方言透传：doris/clickhouse/hive 等均能解析（不因方言差异崩溃）。"""
+    for dialect in ("hive", "doris", "clickhouse", "mysql"):
         edges = extract_table_lineage("INSERT INTO t SELECT id FROM s", dialect=dialect)
         assert len(edges) == 1
         assert (edges[0].source, edges[0].target) == ("s", "t")
