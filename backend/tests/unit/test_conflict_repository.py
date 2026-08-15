@@ -18,6 +18,7 @@ from app.models.conflict import (
     RulingRecord,
 )
 from app.services.conflict.repository import ConflictRepository
+from app.services.conflict.schemas import RulingRecordResponse
 
 
 @pytest.fixture
@@ -136,3 +137,39 @@ class TestRuling:
         db.execute.return_value = mock_result
         rows = await repo.get_rulings("c1")
         assert len(rows) == 2
+
+
+class TestCountOpenForMetric:
+    async def test_returns_remaining_open(self, repo: ConflictRepository, db: MagicMock) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = 2
+        db.execute.return_value = mock_result
+        total = await repo.count_open_for_metric("gmv_total")
+        assert total == 2
+        db.execute.assert_awaited_once()
+
+    async def test_returns_zero_when_none(self, repo: ConflictRepository, db: MagicMock) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = 0
+        db.execute.return_value = mock_result
+        total = await repo.count_open_for_metric("gmv_total")
+        assert total == 0
+
+
+class TestRulingRecordResponseFromOrm:
+    """GET /conflicts/{id}/rulings 500 回归：ORM 对象可直接 model_validate（from_attributes）。"""
+
+    def test_model_validate_accepts_orm_object(self) -> None:
+        ruling = RulingRecord(
+            id=1,
+            conflict_id="CF-ABC",
+            metric_codes={"candidate": "a", "existing": "b"},
+            decision="choose_canonical",
+            reason="口径一致",
+            arbitrator_id=7,
+        )
+        resp = RulingRecordResponse.model_validate(ruling)
+        assert resp.id == 1
+        assert resp.conflict_id == "CF-ABC"
+        assert resp.decision == "choose_canonical"
+        assert resp.arbitrator_id == 7

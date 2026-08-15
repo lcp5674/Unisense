@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -21,6 +22,7 @@ from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
+from app.models.metric import Metric
 from app.services.conflict.events import ConflictEventPublisher
 from app.services.conflict.llm_client import build_conflict_llm_client
 from app.services.conflict.schemas import (
@@ -47,10 +49,23 @@ _GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injectio
 
 def _svc(db: AsyncSession, request: Request) -> ConflictService:
     notify_url = getattr(request.app.state, "notify_url", None)
+
+    async def _clear_metric_conflict(metric_code: str) -> None:
+        """清除指标表的 pending_conflict 冗余标记（跨服务一致性联动）。
+
+        仅清除冲突标记，不动指标其他字段；用条件更新避免整行读写竞态。
+        """
+        await db.execute(
+            update(Metric)
+            .where(Metric.metric_code == metric_code, Metric.deleted_at.is_(None))
+            .values(pending_conflict=False, pending_conflict_detail=None)
+        )
+
     return ConflictService(
         db,
         events=ConflictEventPublisher(notify_url),
         llm=build_conflict_llm_client(),
+        metric_conflict_clearer=_clear_metric_conflict,
     )
 
 

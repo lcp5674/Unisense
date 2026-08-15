@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.conflict import ConflictStatus, ConflictType
 
@@ -110,6 +110,8 @@ class ConflictResponse(BaseModel):
 
 
 class RulingRecordResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     conflict_id: str
     metric_codes: dict[str, Any] | None = None

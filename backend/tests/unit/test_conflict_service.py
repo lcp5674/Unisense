@@ -27,6 +27,7 @@ class FakeRepo:
         self.conflicts: list[Conflict] = []
         self.rulings: list[RulingRecord] = []
         self._seq = 0
+        self.open_by_metric: dict[str, int] = {}
 
     async def create(self, conflict: Conflict) -> Conflict:
         self._seq += 1
@@ -65,18 +66,30 @@ class FakeRepo:
     async def get_rulings(self, conflict_id: str) -> list[RulingRecord]:
         return [r for r in self.rulings if r.conflict_id == conflict_id]
 
+    async def count_open_for_metric(self, metric_code: str) -> int:
+        return self.open_by_metric.get(metric_code, 0)
 
-def _svc() -> tuple[ConflictService, FakeRepo, FakeEvents]:
-    svc = ConflictService(db=object())  # db 不会被 FakeRepo 使用
+
+class FakeClearer:
+    def __init__(self) -> None:
+        self.cleared: list[str] = []
+
+    async def __call__(self, metric_code: str) -> None:
+        self.cleared.append(metric_code)
+
+
+def _svc(clearer: FakeClearer | None = None) -> tuple[ConflictService, FakeRepo, FakeEvents, FakeClearer | None]:
+    fake_clearer = clearer if clearer is not None else FakeClearer()
+    svc = ConflictService(db=object(), metric_conflict_clearer=fake_clearer)
     repo = FakeRepo()
     events = FakeEvents()
     svc._repo = repo
     svc._events = events
-    return svc, repo, events
+    return svc, repo, events, fake_clearer
 
 
 async def test_check_creates_open_conflict_and_blocks_on_hard() -> None:
-    svc, repo, events = _svc()
+    svc, repo, events, _ = _svc()
     req = ConflictCheckRequest(
         candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
         existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
@@ -91,7 +104,7 @@ async def test_check_creates_open_conflict_and_blocks_on_hard() -> None:
 
 
 async def test_check_pii_routes_to_governance_not_stored() -> None:
-    svc, repo, events = _svc()
+    svc, repo, events, _ = _svc()
     req = ConflictCheckRequest(
         candidate=MetricInput(metric_code="user_pii", domain="sales", definition="x", has_pii=True),
         existing=[MetricInput(metric_code="other", domain="sales", definition="y")],
@@ -103,7 +116,7 @@ async def test_check_pii_routes_to_governance_not_stored() -> None:
 
 
 async def test_arbitrate_transitions_to_ruled_and_records() -> None:
-    svc, repo, events = _svc()
+    svc, repo, events, clearer = _svc()
     req = ConflictCheckRequest(
         candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
         existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
@@ -127,7 +140,7 @@ async def test_arbitrate_transitions_to_ruled_and_records() -> None:
 
 
 async def test_escalate_transitions_to_escalated() -> None:
-    svc, repo, events = _svc()
+    svc, repo, events, _ = _svc()
     req = ConflictCheckRequest(
         candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
         existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
@@ -138,3 +151,52 @@ async def test_escalate_transitions_to_escalated() -> None:
     conflict = await svc.escalate(conflict_id, EscalateRequest(note="超时未协商，升级"))
     assert conflict.status == ConflictStatus.ESCALATED
     assert any(e["event_type"] == "conflict_escalated" for e in events.published)
+
+
+async def _ruled_conflict(svc: ConflictService, repo: FakeRepo) -> Conflict:
+    """构造一条已 RULED 的冲突（含 metric_codes 候选/现有），返回仲裁后的 conflict。"""
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
+        existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
+    )
+    await svc.check(req.candidate, req.existing)
+    conflict_id = repo.conflicts[0].conflict_id
+    return await svc.arbitrate(
+        conflict_id,
+        ArbitrateRequest(decision="choose_canonical", canonical_metric_code="gmv_total", reason="选候选为权威"),
+        actor_id=1,
+    )
+
+
+async def test_arbitrate_clears_metric_pending_conflict_when_no_remaining() -> None:
+    svc, repo, _, clearer = _svc()
+    conflict = await _ruled_conflict(svc, repo)
+    assert conflict.status == ConflictStatus.RULED
+    # 候选指标无其他未决冲突 → 清除标记
+    assert clearer.cleared == ["gmv_total"]
+
+
+async def test_arbitrate_keeps_flag_when_other_open_conflicts() -> None:
+    svc, repo, _, clearer = _svc()
+    repo.open_by_metric["gmv_total"] = 1  # 该指标还有其他未决冲突
+    conflict = await _ruled_conflict(svc, repo)
+    assert conflict.status == ConflictStatus.RULED
+    assert clearer.cleared == []  # 不清除，避免误清
+
+
+async def test_close_triggers_clearer_for_historical_ruled() -> None:
+    svc, repo, _, clearer = _svc()
+    conflict = await _ruled_conflict(svc, repo)
+    clearer.cleared.clear()
+    await svc.close(conflict.conflict_id)
+    assert clearer.cleared == ["gmv_total"]
+
+
+async def test_arbitrate_without_clearer_is_noop() -> None:
+    svc = ConflictService(db=object())  # 未注入 clearer：联动为 no-op
+    repo = FakeRepo()
+    events = FakeEvents()
+    svc._repo = repo
+    svc._events = events
+    conflict = await _ruled_conflict(svc, repo)
+    assert conflict.status == ConflictStatus.RULED

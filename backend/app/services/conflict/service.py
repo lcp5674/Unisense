@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -45,6 +46,7 @@ class ConflictService(BaseService):
         db: AsyncSession,
         events: ConflictEventPublisher | None = None,
         llm: ConflictLlmClient | None = None,
+        metric_conflict_clearer: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(db)
         self._db = db
@@ -52,6 +54,9 @@ class ConflictService(BaseService):
         self._events = events or ConflictEventPublisher()
         # LLM 语义补位客户端：缺省为弃权实现（不调用外部服务，行为等价词法版）
         self._llm = llm or DeterministicFallbackLlmClient()
+        # 跨服务一致性（TD §12.4）：仲裁/关闭后清除指标表 pending_conflict 标记的回调。
+        # 由上层注入真实实现（更新 Metric 表）；None 时跳过（保持服务解耦、可测）。
+        self._metric_conflict_clearer = metric_conflict_clearer
 
     async def _safe_publish(self, event: dict[str, Any]) -> None:
         """事件发布为 best-effort：通知/治理服务不可达时静默降级，不阻断主流程。
@@ -209,7 +214,38 @@ class ConflictService(BaseService):
                 },
             }
         )
+        await self._sync_metric_conflict_flag(conflict)
         return conflict
+
+    async def _sync_metric_conflict_flag(self, conflict: Conflict) -> None:
+        """仲裁/关闭成功后联动清除候选指标的 pending_conflict 冗余标记。
+
+        仅当该候选指标不再有任何未决冲突时清除（避免误清仍关联其他冲突的指标）。
+        best-effort：清除失败不阻断仲裁主流程（同事件发布降级语义），留日志告警。
+        """
+        if self._metric_conflict_clearer is None:
+            return
+        codes = conflict.metric_codes or {}
+        candidate = codes.get("candidate")
+        if not candidate:
+            return
+        try:
+            remaining = await self._repo.count_open_for_metric(candidate)
+            if remaining == 0:
+                await self._metric_conflict_clearer(candidate)
+                logger.info(
+                    "metric_conflict_flag_cleared",
+                    metric_code=candidate,
+                    conflict_id=conflict.conflict_id,
+                )
+            else:
+                logger.info(
+                    "metric_conflict_flag_kept",
+                    metric_code=candidate,
+                    remaining_open_conflicts=remaining,
+                )
+        except Exception as exc:  # noqa: BLE001 - 联动清除降级，不阻断仲裁
+            logger.warning("仲裁后同步指标冲突标记失败（best-effort 跳过）：%s", exc)
 
     async def escalate(self, conflict_id: str, req: EscalateRequest) -> Conflict:
         conflict = await self.get(conflict_id)
@@ -232,7 +268,10 @@ class ConflictService(BaseService):
         conflict = await self.get(conflict_id)
         if conflict.status != ConflictStatus.RULED:
             raise ConflictError(f"仅 RULED 状态可关闭，当前 {conflict.status.value}")
-        return await self._repo.update_status(conflict, ConflictStatus.CLOSED, resolved=True)
+        conflict = await self._repo.update_status(conflict, ConflictStatus.CLOSED, resolved=True)
+        # 兜底联动：覆盖历史冲突（旧代码仲裁时未清标记）关闭时再补清一次（幂等）
+        await self._sync_metric_conflict_flag(conflict)
+        return conflict
 
     async def get_rulings(self, conflict_id: str) -> list[RulingRecord]:
         return await self._repo.get_rulings(conflict_id)

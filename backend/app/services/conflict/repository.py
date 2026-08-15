@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conflict import Conflict, ConflictStatus, ConflictType, RulingRecord
@@ -86,3 +86,30 @@ class ConflictRepository:
             .order_by(RulingRecord.decided_at.desc())
         )
         return list((await self._db.execute(stmt)).scalars().all())
+
+    async def count_open_for_metric(self, metric_code: str) -> int:
+        """统计某指标（作为候选或现有）当前仍处未决状态的冲突数。
+
+        跨服务一致性（TD §12.4）：仲裁/关闭后据此判断是否可清除指标表的
+        ``pending_conflict`` 冗余标记——仅当该指标不再有任何 OPEN/NEGOTIATING/
+        ESCALATED 冲突时才清除，避免误清仍有关联冲突的指标。
+        """
+        cand = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.candidate"))
+        ext = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.existing"))
+        stmt = (
+            select(func.count())
+            .select_from(Conflict)
+            .where(
+                Conflict.deleted_at.is_(None),
+                Conflict.status.in_(
+                    [
+                        ConflictStatus.OPEN,
+                        ConflictStatus.NEGOTIATING,
+                        ConflictStatus.ESCALATED,
+                    ]
+                ),
+                or_(cand == metric_code, ext == metric_code),
+            )
+        )
+        total = int((await self._db.execute(stmt)).scalar() or 0)
+        return total
