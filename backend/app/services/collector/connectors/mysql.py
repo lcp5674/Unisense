@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
 import time
 from typing import Any
@@ -45,6 +46,13 @@ _EXCLUDE_SCHEMAS = frozenset(
         "_impala_builtins",
     }
 )
+
+
+def _matches_any(name: str, patterns: list[str] | None) -> bool:
+    """fnmatch 风格匹配：name 命中任一 pattern 即返回 True。"""
+    if not patterns:
+        return False
+    return any(fnmatch.fnmatchcase(name, p) for p in patterns)
 
 
 class SqlalchemyConnector:
@@ -108,10 +116,30 @@ class InformationSchemaCollector(BaseCollector):
         classifier: SensitivityClassifier | None = None,
         *,
         database: str | None = None,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
     ) -> None:
         super().__init__(classifier)
         self._connector = connector
         self._database = database or None
+        self._include_patterns = include_patterns
+        self._exclude_patterns = exclude_patterns
+
+    def _keep_table(self, entity_name: str) -> bool:
+        """按 include/exclude 白黑名单过滤表（fnmatch 风格，include 优先）。
+
+        - include_patterns 非空且命中：直接保留（即便同时命中黑名单——白名单优先）；
+        - include_patterns 非空且未命中：拒绝；
+        - include_patterns 为空/None：按 exclude_patterns 排除（命中即丢弃）；
+        - 两者均空/None：保留全部。
+        """
+        if self._include_patterns and _matches_any(entity_name, self._include_patterns):
+            return True
+        if self._include_patterns:
+            return False
+        return not (
+            self._exclude_patterns and _matches_any(entity_name, self._exclude_patterns)
+        )
 
     async def _list_schemas(self) -> list[str]:
         """当未指定 database 时枚举全部非系统库（SQL + Python 双重过滤）。"""
@@ -266,6 +294,9 @@ class InformationSchemaCollector(BaseCollector):
                         schema_json=schema_json,
                     )
                 )
+
+        # 治理：按 include/exclude 白黑名单过滤扫描到的表（include 优先）
+        specs = [s for s in specs if self._keep_table(s.entity_name)]
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
 

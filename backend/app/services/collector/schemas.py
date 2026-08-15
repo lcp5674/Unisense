@@ -72,6 +72,19 @@ class DataSourceUpdateRequest(BaseModel):
     domain: str | None = Field(default=None, max_length=64)
     cluster_id: str | None = Field(default=None, max_length=64)
     enabled: bool | None = Field(default=None, description="停用/启用（None 表示不修改）")
+    # 治理字段（PATCH 语义：None 表示不修改）
+    owner_id: int | None = Field(default=None, description="数据源负责人用户 ID")
+    description: str | None = Field(default=None, max_length=2000, description="用途描述")
+    include_patterns: list[str] | None = Field(
+        default=None, description="表级包含白名单（fnmatch 风格，None=不修改）"
+    )
+    exclude_patterns: list[str] | None = Field(
+        default=None, description="表级排除黑名单（fnmatch 风格，None=不修改）"
+    )
+    quota: dict[str, Any] | None = Field(
+        default=None,
+        description="资源配额（max_concurrency/max_scan_rows，None=不修改）",
+    )
 
     @model_validator(mode="after")
     def _validate_connection_config(self) -> DataSourceUpdateRequest:
@@ -159,6 +172,20 @@ class DataSourceResponse(BaseModel):
     created_by: int | None = None
     created_at: Any = None
     updated_at: Any = None
+    # 治理字段
+    owner_id: int | None = None
+    description: str | None = None
+    include_patterns: list[str] | None = None
+    exclude_patterns: list[str] | None = None
+    health_metrics: dict[str, Any] | None = None
+    degraded_since: Any = None
+    # 资源配额（max_concurrency/max_scan_rows，PRD §4.2/§4.11.9）
+    quota: dict[str, Any] = Field(default_factory=dict, description="资源配额")
+    # 列表信号（list_sources 批量回填；详情不依赖）
+    table_count: int | None = None
+    pii_count: int | None = None
+    last_collected_at: Any = None
+    drift_count: int | None = None
 
 
 class DataSourceListResponse(BaseModel):
@@ -205,6 +232,23 @@ class BatchDeleteRequest(BaseModel):
     """批量删除请求（软删，逐条独立处理）。"""
 
     source_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class BatchTestConnectionRequest(BaseModel):
+    """批量探活请求（用已存连接配置逐条探活，207 语义）。
+
+    ``probe_connection`` 必须已实现（registry 探测）；不存在的源标记
+    NOT_FOUND，探活失败标记 PROBE_FAILED 并附错误。
+    """
+
+    source_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class BatchScheduleRequest(BaseModel):
+    """批量设置调度 cron 请求（统一覆盖 schedule_cron）。"""
+
+    source_ids: list[str] = Field(min_length=1, max_length=200)
+    schedule_cron: str = Field(min_length=1, max_length=100, description="cron 表达式")
 
 
 class DBCatalogCreateRequest(BaseModel):
@@ -273,6 +317,8 @@ class DBCatalogListParams(BaseModel):
     )
     # 源状态过滤：active（仅活跃源）/ deleted（仅已删除源）/ all（全部，含已删除源）
     source_status: str | None = Field(default=None, pattern=r"^(active|deleted|all)$")
+    # 责任人（Owner）ID 过滤（总览仪表 Owner 责任分布下钻用）
+    owner_id: int | None = Field(default=None, description="责任人（Owner）ID 过滤")
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=200)
 

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -49,6 +49,10 @@ from app.services.llm.client import (
 )
 
 logger = get_logger("unisense.collector.service")
+
+# PRD §4.13 健康状态机参数：滑动窗口上限与降级成功率阈值
+_HEALTH_WINDOW = 20
+_HEALTH_DEGRADED_RATE = 0.95
 
 # FR-023: 描述推断的 JSON Schema 强约束（strict 模式保证字段名/类型一致），
 # 网关不支持 json_schema 时降级为 json_object（见 _infer_description_structured）。
@@ -149,6 +153,44 @@ class CollectorService(BaseService):
         self._classifier = classifier or SensitivityClassifier()
         self._settings = Settings()
 
+    # ---- 健康状态机（PRD §4.13：ACTIVE → DEGRADED → UNAVAILABLE）----
+
+    @staticmethod
+    def _evaluate_health_after_collect(
+        prev: dict[str, Any] | None, attempted: int, failed: int
+    ) -> tuple[str, dict[str, Any], datetime | None]:
+        """采集后健康状态机：失败率 ≥5% → DEGRADED（黄态），否则 healthy。
+
+        health_metrics 用滑动窗口计数（上限 ``_HEALTH_WINDOW`` 次采样，
+        超限整体减半），近期失败会被放大、历史噪声被稀释。
+
+        Returns:
+            (status, metrics, degraded_since)。恢复 healthy 时 degraded_since
+            为 None（repository 会清空历史值）。
+        """
+        ok_count = int((prev or {}).get("ok_count", 0))
+        fail_count = int((prev or {}).get("fail_count", 0))
+        sample_count = int((prev or {}).get("sample_count", 0))
+        ok_count += max(0, attempted - failed)
+        fail_count += max(0, failed)
+        sample_count += max(0, attempted)
+        if sample_count > _HEALTH_WINDOW:
+            ok_count //= 2
+            fail_count //= 2
+            sample_count //= 2
+        total = ok_count + fail_count
+        success_rate = ok_count / total if total else 1.0
+        status = "degraded" if (total and success_rate < _HEALTH_DEGRADED_RATE) else "healthy"
+        metrics = {
+            "ok_count": ok_count,
+            "fail_count": fail_count,
+            "sample_count": sample_count,
+            "success_rate": round(success_rate, 4),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        degraded_since = datetime.now(UTC) if status == "degraded" else None
+        return status, metrics, degraded_since
+
     @staticmethod
     def _to_source_response(src: DataSource, include_config: bool = False) -> DataSourceResponse:
         """ORM → 响应。
@@ -180,6 +222,13 @@ class CollectorService(BaseService):
             created_by=src.created_by,
             created_at=src.created_at,
             updated_at=src.updated_at,
+            owner_id=getattr(src, "owner_id", None),
+            description=getattr(src, "description", None),
+            include_patterns=getattr(src, "include_patterns", None),
+            exclude_patterns=getattr(src, "exclude_patterns", None),
+            health_metrics=getattr(src, "health_metrics", None),
+            degraded_since=getattr(src, "degraded_since", None),
+            quota=src.quota or {},
         )
 
     async def create_source(
@@ -353,6 +402,7 @@ class CollectorService(BaseService):
         source_type: str | None = None,
         keyword: str | None = None,
         health_status: str | None = None,
+        owner_id: int | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[DataSourceResponse], int]:
@@ -361,10 +411,21 @@ class CollectorService(BaseService):
             source_type=source_type,
             keyword=keyword,
             health_status=health_status,
+            owner_id=owner_id,
             page=page,
             page_size=page_size,
         )
-        return [self._to_source_response(s) for s in sources], total
+        items = [self._to_source_response(s) for s in sources]
+        # 三期：批量回填列表信号（表数/PII 数/最近采集/漂移数），一次聚合避免 N+1
+        signals = await self._repo.list_sources_signals([s.source_id for s in sources])
+        for item in items:
+            sig = signals.get(item.source_id, {})
+            item.table_count = sig.get("table_count")
+            item.pii_count = sig.get("pii_count")
+            last = sig.get("last_collected_at")
+            item.last_collected_at = last.isoformat() if last else None
+            item.drift_count = sig.get("drift_count")
+        return items, total
 
     async def get_source(self, source_id: str) -> DataSourceResponse:
         src = await self._repo.get_source(source_id)
@@ -418,6 +479,22 @@ class CollectorService(BaseService):
             src.cluster_id = req.cluster_id
         if req.enabled is not None:
             src.enabled = req.enabled
+        # 治理字段：owner_id / description / include / exclude patterns（PATCH 语义）
+        if (
+            req.owner_id is not None
+            or req.description is not None
+            or req.include_patterns is not None
+            or req.exclude_patterns is not None
+        ):
+            await self._repo.set_source_governance(
+                source_id,
+                owner_id=req.owner_id,
+                description=req.description,
+                include_patterns=req.include_patterns,
+                exclude_patterns=req.exclude_patterns,
+            )
+        if req.quota is not None:
+            src.quota = req.quota
         # updated_at 由 BaseModel.onupdate 自动维护；连接配置变更后健康状态重置
         # （旧探活结果对新凭据不再可信），并清空历史错误。
         if req.connection_config is not None:
@@ -511,6 +588,111 @@ class CollectorService(BaseService):
                     )
                     continue
                 succeeded.append(BatchSourceItem(source_id=sid, name=src.name, ok=True))
+            except Exception as exc:  # noqa: BLE001 - 批量单条失败不阻断其余（207 语义）
+                failed.append(
+                    BatchSourceItem(
+                        source_id=sid,
+                        ok=False,
+                        error_code="INTERNAL",
+                        message=str(exc),
+                    )
+                )
+        return BatchSourceResult(succeeded=succeeded, failed=failed)
+
+    async def batch_test_sources(
+        self, source_ids: list[str], actor_id: int
+    ) -> BatchSourceResult:
+        """批量探活（207 语义）：用已存连接配置逐条 probe，逐条独立异常隔离。
+
+        探活成功更新 healthy（清空错误），失败更新 unhealthy 并附错误。
+        """
+        succeeded: list[BatchSourceItem] = []
+        failed: list[BatchSourceItem] = []
+        from app.services.collector.connectors import registry
+
+        for sid in source_ids:
+            try:
+                src = await self._repo.get_source(sid)
+                if src is None:
+                    failed.append(
+                        BatchSourceItem(
+                            source_id=sid,
+                            ok=False,
+                            error_code="NOT_FOUND",
+                            message="数据源不存在",
+                        )
+                    )
+                    continue
+                if not src.connection_config:
+                    failed.append(
+                        BatchSourceItem(
+                            source_id=sid,
+                            name=src.name,
+                            ok=False,
+                            error_code="NO_CONFIG",
+                            message="无连接配置",
+                        )
+                    )
+                    continue
+                cfg = self._secrets.decrypt(src.connection_config)
+                collector = registry.build_from_cfg(src.source_type, cfg)
+                try:
+                    probe = await collector.probe()
+                finally:
+                    await collector.dispose()
+                if probe.ok:
+                    await self._repo.update_health_status(sid, "healthy")
+                    succeeded.append(
+                        BatchSourceItem(source_id=sid, name=src.name, ok=True)
+                    )
+                else:
+                    await self._repo.update_health_status(
+                        sid, "unhealthy", error=probe.error
+                    )
+                    failed.append(
+                        BatchSourceItem(
+                            source_id=sid,
+                            name=src.name,
+                            ok=False,
+                            error_code="PROBE_FAILED",
+                            message=probe.error,
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001 - 批量单条失败不阻断其余（207 语义）
+                failed.append(
+                    BatchSourceItem(
+                        source_id=sid,
+                        ok=False,
+                        error_code="PROBE_ERROR",
+                        message=str(exc),
+                    )
+                )
+        return BatchSourceResult(succeeded=succeeded, failed=failed)
+
+    async def batch_schedule_sources(
+        self, source_ids: list[str], schedule_cron: str, actor_id: int
+    ) -> BatchSourceResult:
+        """批量设置调度 cron（207 语义，逐条独立处理）。"""
+        succeeded: list[BatchSourceItem] = []
+        failed: list[BatchSourceItem] = []
+        for sid in source_ids:
+            try:
+                src = await self._repo.get_source(sid)
+                if src is None:
+                    failed.append(
+                        BatchSourceItem(
+                            source_id=sid,
+                            ok=False,
+                            error_code="NOT_FOUND",
+                            message="数据源不存在",
+                        )
+                    )
+                    continue
+                src.schedule_cron = schedule_cron
+                await self._db.flush()
+                succeeded.append(
+                    BatchSourceItem(source_id=sid, name=src.name, ok=True)
+                )
             except Exception as exc:  # noqa: BLE001 - 批量单条失败不阻断其余（207 语义）
                 failed.append(
                     BatchSourceItem(
@@ -1175,6 +1357,11 @@ class CollectorService(BaseService):
         try:
             # P0-6: 注入增量上下文——增量模式且水位有效时连接器只采变更实体
             collector.set_incremental_context(effective_mode, watermark_ts)
+            # 治理：表级 include/exclude 过滤（从 DataSource 读取，注入连接器）
+            if hasattr(src, "include_patterns") and (src.include_patterns or src.exclude_patterns):
+                setter = getattr(collector, "set_table_filter", None)
+                if setter is not None:
+                    setter(src.include_patterns, src.exclude_patterns)
             result: CollectResult = await collector.collect(src)
         except Exception as exc:
             # P0-4: 健康状态更新必须落库——即使采集失败也要记录 unhealthy，
@@ -1299,8 +1486,22 @@ class CollectorService(BaseService):
 
         coverage = await self._repo.recompute_coverage(source_id)
 
-        # US5: 采集成功 → 更新健康状态
-        await self._repo.update_health_status(source_id, "healthy")
+        # P0-4: 合并 collector 层 failed_specs 与 catalog 层 failed_specs
+        all_failed_specs = [
+            {"entity_name": f.entity_name, "error": f.error} for f in result.failed_specs
+        ] + catalog_failed_specs
+
+        # US5: 采集后健康状态机——失败率 >5% 进入 DEGRADED（黄态），否则 healthy
+        attempted = len(result.specs) + len(all_failed_specs)
+        health_status, metrics, degraded_since = self._evaluate_health_after_collect(
+            getattr(src, "health_metrics", None), attempted, len(all_failed_specs)
+        )
+        await self._repo.update_health_status(
+            source_id,
+            health_status,
+            health_metrics=metrics,
+            degraded_since=degraded_since,
+        )
 
         # US3: 更新采集水位
         await self._repo.update_watermark_after_collection(
@@ -1311,10 +1512,6 @@ class CollectorService(BaseService):
             content_fingerprints=content_fingerprints or None,
         )
 
-        # P0-4: 合并 collector 层 failed_specs 与 catalog 层 failed_specs
-        all_failed_specs = [
-            {"entity_name": f.entity_name, "error": f.error} for f in result.failed_specs
-        ] + catalog_failed_specs
         return {
             "source_id": source_id,
             "scanned": len(result.specs),
@@ -1545,6 +1742,7 @@ class CollectorService(BaseService):
 
         P1-3 修复：返回真实 ``last_error`` / ``last_health_check``，
         ``uptime_check`` 为存储态健康判断（离线健康，非实时探活）。
+        三期：DEGRADED（黄态）时附带 health_metrics / degraded_since。
         """
         src = await self._repo.get_source(source_id)
         if src is None:
@@ -1563,7 +1761,18 @@ class CollectorService(BaseService):
                 src.last_health_check.isoformat() if src.last_health_check else None
             ),
             "uptime_check": src.health_status == "healthy",
+            "health_metrics": src.health_metrics,
+            "degraded_since": (
+                src.degraded_since.isoformat() if src.degraded_since else None
+            ),
         }
+
+    async def get_source_overview(self, source_id: str) -> dict[str, Any]:
+        """资产规模概览（详情页头部）：实体类型/PII 分布/字段数/漂移/水位。"""
+        overview = await self._repo.get_source_overview(source_id)
+        if not overview:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+        return overview
 
     async def list_drift_logs(
         self,

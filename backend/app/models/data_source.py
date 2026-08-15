@@ -87,6 +87,12 @@ class DataSource(Base, BaseModel):
         created_by: 创建人 ID。
         schedule_cron: 定时调度 cron 表达式。
         collection_mode: 采集模式（FULL/INCREMENTAL）。
+        owner_id: 数据源负责人（用户 ID）。
+        description: 用途描述。
+        include_patterns: 表级包含白名单（fnmatch 风格，None=全部）。
+        exclude_patterns: 表级排除黑名单（fnmatch 风格）。
+        health_metrics: 健康指标（p95_ms/success_rate/error_count/sample_count/period_hours）。
+        degraded_since: 进入降级态起始时间（UTC）。
     """
 
     __tablename__ = "data_source"
@@ -141,6 +147,30 @@ class DataSource(Base, BaseModel):
         default=True,
         server_default="1",
         comment="是否启用（停用后不参与定时调度与手动采集）",
+    )
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", name="fk_data_source_owner"),
+        nullable=True,
+        comment="数据源负责人（用户 ID）",
+    )
+    description: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="用途描述"
+    )
+    include_patterns: Mapped[list[str] | None] = mapped_column(
+        JSON, nullable=True, comment="表级包含白名单（fnmatch 风格，None=全部）"
+    )
+    exclude_patterns: Mapped[list[str] | None] = mapped_column(
+        JSON, nullable=True, comment="表级排除黑名单（fnmatch 风格）"
+    )
+    health_metrics: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="健康指标（p95_ms/success_rate/error_count/sample_count/period_hours）",
+    )
+    degraded_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="进入降级态起始时间（UTC）",
     )
 
     __table_args__ = (Index("idx_data_source_domain", "domain"),)

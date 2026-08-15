@@ -72,6 +72,8 @@ class BaseCollector(ABC):
 
     def __init__(self, classifier: SensitivityClassifier | None = None) -> None:
         self._classifier = classifier or SensitivityClassifier()
+        self._include_patterns: list[str] | None = None
+        self._exclude_patterns: list[str] | None = None
 
     @abstractmethod
     async def collect(self, source: Any) -> CollectResult:
@@ -106,6 +108,24 @@ class BaseCollector(ABC):
         """
         self._incremental_mode = mode
         self._incremental_watermark = watermark_ts
+
+    def set_table_filter(
+        self,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+    ) -> None:
+        """注入表级采集过滤白黑名单（治理：include/exclude patterns）。
+
+        由 service 层在 collect 前从 ``DataSource.include_patterns`` /
+        ``DataSource.exclude_patterns`` 读取并注入；连接器按 fnmatch 风格过滤
+        扫描到的实体名。默认实现仅保存（供子类 collect 时读取）。
+
+        Args:
+            include_patterns: 包含白名单（任一匹配即保留），空/None 表示不过滤。
+            exclude_patterns: 排除黑名单（任一匹配即丢弃）。
+        """
+        self._include_patterns = include_patterns
+        self._exclude_patterns = exclude_patterns
 
     async def list_databases(self) -> list[str]:
         """枚举该实例下可采集的非系统数据库（创建数据源时选择目标库）。

@@ -2150,6 +2150,7 @@ async def test_list_data_sources_redacts_config() -> None:
     repo.list_sources = AsyncMock(
         return_value=([_make_src_with_config({"host": "h", "password": "p"})], 1)
     )
+    repo.list_sources_signals = AsyncMock(return_value={})
 
     items, total = await svc.list_sources(page=1, page_size=20)
 
@@ -2846,3 +2847,447 @@ async def test_svc_get_collection_run_detail_includes_detail():
     assert result["status"] == "FAILED"
     assert result["detail"] == fake_run.detail_json
     assert result["source_name"] == "MySQL"
+
+
+# ============================================================
+# 三期数据地基：DataSource 治理字段 + 采集 include/exclude 过滤
+# ============================================================
+
+
+def test_data_source_model_governance_columns():
+    """模型字段映射：新增 6 个治理列且类型/外键正确。"""
+    from sqlalchemy.dialects.mysql import JSON
+
+    from app.models.data_source import DataSource
+
+    cols = DataSource.__table__.columns
+    for col in (
+        "owner_id",
+        "description",
+        "include_patterns",
+        "exclude_patterns",
+        "health_metrics",
+        "degraded_since",
+    ):
+        assert col in cols, f"缺失治理列: {col}"
+    # owner_id 为 FK → user.id
+    fks = list(cols["owner_id"].foreign_keys)
+    assert fks and "user" in fks[0].target_fullname
+    # include/exclude/health_metrics 为 JSON 类型
+    assert isinstance(cols["include_patterns"].type, JSON)
+    assert isinstance(cols["exclude_patterns"].type, JSON)
+    assert isinstance(cols["health_metrics"].type, JSON)
+
+
+def test_migration_0052_importable():
+    """迁移可导入且 revision/down_revision/upgrade/downgrade 齐备。"""
+    import importlib.util
+    import os
+
+    path = os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "alembic",
+            "versions",
+            "0052_data_source_governance.py",
+        )
+    )
+    spec = importlib.util.spec_from_file_location("m0052_governance", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.revision == "0052_data_source_governance"
+    # 当前 alembic 链头为 0051，故本迁移前驱指向 0051（保持线性）
+    assert mod.down_revision == "0051_metric_template_owner"
+    assert callable(mod.upgrade)
+    assert callable(mod.downgrade)
+
+
+# ---------- include/exclude 过滤（fnmatch） ----------
+
+
+def _make_filter_collector(include=None, exclude=None):
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    c = InformationSchemaCollector.__new__(InformationSchemaCollector)
+    c._connector = None
+    c._database = None
+    c._include_patterns = include
+    c._exclude_patterns = exclude
+    return c
+
+
+def test_include_exclude_filter_fnmatch_match():
+    """fnmatch 风格匹配：orders* 命中 orders/orders_x，不命中 users。"""
+    c = _make_filter_collector(include=["orders*"], exclude=None)
+    assert c._keep_table("orders") is True
+    assert c._keep_table("orders_2026") is True
+    assert c._keep_table("users") is False
+
+
+def test_include_exclude_filter_schema_dot_naming():
+    """多库实体名 finance.orders 受 include=finance.* 命中。"""
+    c = _make_filter_collector(include=["finance.*"], exclude=None)
+    assert c._keep_table("finance.orders") is True
+    assert c._keep_table("sales.orders") is False
+
+
+def test_include_exclude_filter_empty_no_filter():
+    """空 pattern（None）不过滤：全部保留。"""
+    c = _make_filter_collector(include=None, exclude=None)
+    assert c._keep_table("any_table") is True
+
+
+def test_exclude_pattern_drops_match_without_include():
+    """未设 include 时，exclude 黑名单命中即丢弃。"""
+    c = _make_filter_collector(include=None, exclude=["*_tmp"])
+    assert c._keep_table("orders_tmp") is False
+    assert c._keep_table("orders") is True
+
+
+def test_include_priority_overrides_exclude():
+    """include 优先：同时命中 include 与 exclude 时白名单胜出（保留）。"""
+    c = _make_filter_collector(include=["orders", "users"], exclude=["users"])
+    assert c._keep_table("users") is True  # include 优先于 exclude
+    assert c._keep_table("orders") is True
+    assert c._keep_table("legacy") is False  # 未命中 include 直接拒绝
+
+
+class _IncludeExcludeConnector:
+    """仅返回表名清单的假连接器（采集端到端过滤验证）。"""
+
+    def __init__(self, tables: list[str]) -> None:
+        self._tables = tables
+
+    async def query(self, sql: str, params: dict | None = None) -> list[dict]:
+        if "information_schema.tables" in sql:
+            return [{"table_name": t} for t in self._tables]
+        return []
+
+    async def dispose(self) -> None:
+        return None
+
+
+async def test_collector_collect_applies_include_exclude_patterns():
+    """采集端到端：仅 include 命中的表进入 specs（exclude 冗余亦无碍）。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _IncludeExcludeConnector(["orders", "users", "legacy_table"])
+    collector = InformationSchemaCollector(
+        connector,
+        database="finance",
+        include_patterns=["orders"],
+        exclude_patterns=["users"],
+    )
+    result = await collector.collect(MagicMock(source_id="s"))
+    assert [s.entity_name for s in result.specs] == ["orders"]
+
+
+async def test_collector_collect_include_priority_in_collect():
+    """采集端到端验证 include 优先：users 虽命中黑名单仍被保留。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _IncludeExcludeConnector(["orders", "users"])
+    collector = InformationSchemaCollector(
+        connector,
+        database="finance",
+        include_patterns=["orders", "users"],
+        exclude_patterns=["users"],
+    )
+    result = await collector.collect(MagicMock(source_id="s"))
+    assert sorted(s.entity_name for s in result.specs) == ["orders", "users"]
+
+
+async def test_collector_collect_empty_patterns_no_filter():
+    """采集端到端：未传 patterns 时不过滤（全量）。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _IncludeExcludeConnector(["orders", "users"])
+    collector = InformationSchemaCollector(connector, database="finance")
+    result = await collector.collect(MagicMock(source_id="s"))
+    assert sorted(s.entity_name for s in result.specs) == ["orders", "users"]
+
+
+# ---------- repository.set_source_governance ----------
+
+
+async def test_repo_set_source_governance_updates_fields():
+    src = MagicMock()
+    src.owner_id = None
+    src.description = None
+    src.include_patterns = None
+    src.exclude_patterns = None
+    repo = CollectorRepository(_session(scalar_one_or_none=src))
+    result = await repo.set_source_governance(
+        "s",
+        owner_id=7,
+        description="财务库",
+        include_patterns=["finance.*"],
+        exclude_patterns=["*_tmp"],
+    )
+    assert result is src
+    assert src.owner_id == 7
+    assert src.description == "财务库"
+    assert src.include_patterns == ["finance.*"]
+    assert src.exclude_patterns == ["*_tmp"]
+
+
+async def test_repo_set_source_governance_partial_keeps_untouched():
+    """PATCH 语义：仅更新传入字段，未传保持原值。"""
+    src = MagicMock()
+    src.owner_id = 1
+    src.description = "原描述"
+    src.include_patterns = ["a"]
+    src.exclude_patterns = ["b"]
+    repo = CollectorRepository(_session(scalar_one_or_none=src))
+    await repo.set_source_governance("s", description="新描述")
+    assert src.description == "新描述"
+    assert src.owner_id == 1
+    assert src.include_patterns == ["a"]
+
+
+async def test_repo_set_source_governance_not_found():
+    repo = CollectorRepository(_session(scalar_one_or_none=None))
+    assert await repo.set_source_governance("s", owner_id=1) is None
+
+
+# ---------- service.update_source 治理字段 ----------
+
+
+def _apply_governance(src, **kwargs):
+    for key, value in kwargs.items():
+        if value is not None:
+            setattr(src, key, value)
+    return src
+
+
+async def test_update_source_sets_governance_fields():
+    """update_source 支持 owner_id/description/patterns（经 set_source_governance）。"""
+    from app.models.data_source import DataSource
+
+    svc, repo = _svc()
+    src = DataSource(
+        source_id="src1",
+        name="S",
+        source_type="mysql",
+        connection_config="cipher",
+        domain="d",
+        quota={},
+        created_by=1,
+    )
+    repo.get_source = AsyncMock(return_value=src)
+    repo.set_source_governance = AsyncMock(
+        side_effect=lambda source_id, **kw: _apply_governance(src, **kw)
+    )
+    resp = await svc.update_source(
+        "src1",
+        DataSourceUpdateRequest(
+            owner_id=9,
+            description="用途说明",
+            include_patterns=["t*"],
+            exclude_patterns=["tmp*"],
+        ),
+        actor_id=1,
+    )
+    assert resp.owner_id == 9
+    assert resp.description == "用途说明"
+    assert resp.include_patterns == ["t*"]
+    assert resp.exclude_patterns == ["tmp*"]
+
+
+async def test_update_source_governance_partial_keeps_untouched():
+    """PATCH 语义：仅传 description 时 owner/patterns 保持原值。"""
+    from app.models.data_source import DataSource
+
+    svc, repo = _svc()
+    src = DataSource(
+        source_id="src1",
+        name="S",
+        source_type="mysql",
+        connection_config="cipher",
+        domain="d",
+        quota={},
+        created_by=1,
+        owner_id=3,
+        description="原",
+        include_patterns=["a"],
+        exclude_patterns=["b"],
+    )
+    repo.get_source = AsyncMock(return_value=src)
+    repo.set_source_governance = AsyncMock(
+        side_effect=lambda source_id, **kw: _apply_governance(src, **kw)
+    )
+    await svc.update_source("src1", DataSourceUpdateRequest(description="新"), actor_id=1)
+    assert src.description == "新"
+    assert src.owner_id == 3
+    assert src.include_patterns == ["a"]
+
+
+# ---- 三期：健康状态机 / 列表信号 / 资产概览 / 批量探活 / 批量调度 ----
+
+
+async def test_evaluate_health_all_success_healthy() -> None:
+    """全部成功 → healthy，degraded_since 为 None。"""
+    status, metrics, degraded = CollectorService._evaluate_health_after_collect(
+        None, attempted=10, failed=0
+    )
+    assert status == "healthy"
+    assert metrics["success_rate"] == 1.0
+    assert degraded is None
+
+
+async def test_evaluate_health_high_failure_degraded() -> None:
+    """失败率 ≥5% → DEGRADED，记录 degraded_since。"""
+    status, metrics, degraded = CollectorService._evaluate_health_after_collect(
+        None, attempted=10, failed=2
+    )
+    assert status == "degraded"
+    assert metrics["fail_count"] == 2
+    assert degraded is not None
+
+
+async def test_evaluate_health_recovery_clears_degraded() -> None:
+    """此前降级（90%）后连续成功 → healthy，degraded_since 清空。"""
+    prev = {"ok_count": 9, "fail_count": 1, "sample_count": 10}
+    status, metrics, degraded = CollectorService._evaluate_health_after_collect(
+        prev, attempted=30, failed=0
+    )
+    assert status == "healthy"
+    assert metrics["ok_count"] == 19  # (9+30)//2 窗口减半后
+    assert degraded is None
+
+
+async def test_evaluate_health_window_decay() -> None:
+    """滑动窗口超限整体减半，稀释历史噪声。"""
+    prev = {"ok_count": 100, "fail_count": 100, "sample_count": 200}
+    status, metrics, _degraded = CollectorService._evaluate_health_after_collect(
+        prev, attempted=1, failed=1
+    )
+    assert metrics["ok_count"] <= 51  # (100+0)//2
+    assert metrics["fail_count"] <= 51  # (100+1)//2
+    assert metrics["sample_count"] <= 101
+    assert status in ("healthy", "degraded")
+
+
+async def test_list_sources_backfills_signals() -> None:
+    """列表接口批量回填表数/PII/最近采集/漂移信号。"""
+    svc, repo = _svc()
+    repo.list_sources = AsyncMock(
+        return_value=([_make_src_with_config({"host": "h"})], 1)
+    )
+    repo.list_sources_signals = AsyncMock(
+        return_value={
+            "s1": {
+                "table_count": 5,
+                "pii_count": 2,
+                "last_collected_at": datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
+                "drift_count": 3,
+            }
+        }
+    )
+    items, total = await svc.list_sources(page=1, page_size=20)
+    assert total == 1
+    assert items[0].table_count == 5
+    assert items[0].pii_count == 2
+    assert items[0].last_collected_at == "2026-08-01T12:00:00+00:00"
+    assert items[0].drift_count == 3
+
+
+async def test_get_health_includes_degraded_info() -> None:
+    """健康端点返回 health_metrics 与 degraded_since（黄态展示依据）。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.health_status = "degraded"
+    src.health_metrics = {"success_rate": 0.8, "ok_count": 8, "fail_count": 2}
+    src.degraded_since = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    repo.get_source = AsyncMock(return_value=src)
+    health = await svc.get_health("s1")
+    assert health["health_status"] == "degraded"
+    assert health["health_metrics"]["success_rate"] == 0.8
+    assert health["degraded_since"] == "2026-08-01T12:00:00+00:00"
+    assert health["uptime_check"] is False
+
+
+async def test_get_source_overview_aggregates() -> None:
+    """资产概览聚合返回实体/PII 分布、字段数、漂移、水位。"""
+    svc, repo = _svc()
+    repo.get_source_overview = AsyncMock(
+        return_value={
+            "source_id": "s1",
+            "entity_types": {"TABLE": 5, "VIEW": 1},
+            "by_sensitivity": {"INTERNAL": 4, "PII": 2},
+            "total_fields": 42,
+            "drift_count": 3,
+            "coverage": 0.8,
+            "last_collected_at": "2026-08-01T12:00:00+00:00",
+            "scanned_count": 6,
+            "failed_count": 0,
+        }
+    )
+    overview = await svc.get_source_overview("s1")
+    assert overview["total_fields"] == 42
+    assert overview["by_sensitivity"]["PII"] == 2
+    assert overview["drift_count"] == 3
+
+
+async def test_get_source_overview_not_found() -> None:
+    """概览不存在的数据源 → 404。"""
+    svc, repo = _svc()
+    repo.get_source_overview = AsyncMock(return_value={})
+    with pytest.raises(NotFoundError):
+        await svc.get_source_overview("ghost")
+
+
+async def test_batch_test_sources_probe_ok() -> None:
+    """批量探活：probe 成功 → succeeded + healthy。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    repo.get_source = AsyncMock(return_value=src)
+    repo.update_health_status = AsyncMock()
+    fake_probe = SimpleNamespace(ok=True, error=None, latency_ms=5)
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg"
+    ) as build:
+        collector = MagicMock()
+        collector.probe = AsyncMock(return_value=fake_probe)
+        collector.dispose = AsyncMock()
+        build.return_value = collector
+        result = await svc.batch_test_sources(["s1"], actor_id=1)
+    assert len(result.succeeded) == 1
+    assert len(result.failed) == 0
+    repo.update_health_status.assert_awaited_with("s1", "healthy")
+
+
+async def test_batch_test_sources_probe_failed_and_not_found() -> None:
+    """批量探活：probe 失败 → unhealthy + PROBE_FAILED；不存在 → NOT_FOUND。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    repo.get_source = AsyncMock(side_effect=[src, None])
+    repo.update_health_status = AsyncMock()
+    fake_probe = SimpleNamespace(ok=False, error="connect refused", latency_ms=0)
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg"
+    ) as build:
+        collector = MagicMock()
+        collector.probe = AsyncMock(return_value=fake_probe)
+        collector.dispose = AsyncMock()
+        build.return_value = collector
+        result = await svc.batch_test_sources(["s1", "ghost"], actor_id=1)
+    assert len(result.succeeded) == 0
+    assert len(result.failed) == 2
+    codes = {f.error_code for f in result.failed}
+    assert codes == {"PROBE_FAILED", "NOT_FOUND"}
+    repo.update_health_status.assert_awaited_with(
+        "s1", "unhealthy", error="connect refused"
+    )
+
+
+async def test_batch_schedule_sources_success() -> None:
+    """批量调度：统一设置 schedule_cron 并逐条回执。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    repo.get_source = AsyncMock(return_value=src)
+    result = await svc.batch_schedule_sources(["s1"], "0 2 * * *", actor_id=1)
+    assert len(result.succeeded) == 1
+    assert src.schedule_cron == "0 2 * * *"

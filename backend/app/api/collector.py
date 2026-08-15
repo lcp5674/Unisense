@@ -26,7 +26,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,7 +44,9 @@ from app.services.collector.distributed_lock import CollectionLock
 from app.services.collector.infer_guard import InferInflightGuard
 from app.services.collector.schemas import (
     BatchDeleteRequest,
+    BatchScheduleRequest,
     BatchSourceResult,
+    BatchTestConnectionRequest,
     BatchToggleRequest,
     BulkDeprecateRequest,
     BulkDeprecateResult,
@@ -156,6 +158,7 @@ async def list_data_sources(
     source_type: str | None = None,
     keyword: str | None = None,
     health_status: str | None = None,
+    owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
     page: int = 1,
     page_size: int = 20,
 ) -> ApiResponse[DataSourceListResponse]:
@@ -165,6 +168,7 @@ async def list_data_sources(
         source_type=source_type,
         keyword=keyword,
         health_status=health_status,
+        owner_id=owner_id,
         page=page,
         page_size=page_size,
     )
@@ -286,6 +290,60 @@ async def batch_delete_data_sources(
         entity_type="data_source",
         entity_id=f"items:{len(body.source_ids)}",
         detail={"succeeded": len(result.succeeded), "failed": len(result.failed)},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@source_router.post("/batch-test", dependencies=_WRITE_DEPS)
+async def batch_test_data_sources(
+    body: BatchTestConnectionRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[BatchSourceResult]:
+    """批量探活（207 语义）：用已存连接配置逐条 probe，健康状态随之更新。"""
+    svc = _svc(db)
+    result = await svc.batch_test_sources(body.source_ids, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="BATCH_PROBE",
+        entity_type="data_source",
+        entity_id=f"items:{len(body.source_ids)}",
+        detail={"succeeded": len(result.succeeded), "failed": len(result.failed)},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@source_router.post("/batch-schedule", dependencies=_WRITE_DEPS)
+async def batch_schedule_data_sources(
+    body: BatchScheduleRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[BatchSourceResult]:
+    """批量设置调度 cron（207 语义，统一覆盖 schedule_cron）。"""
+    svc = _svc(db)
+    result = await svc.batch_schedule_sources(body.source_ids, body.schedule_cron, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="BATCH_SCHEDULE",
+        entity_type="data_source",
+        entity_id=f"items:{len(body.source_ids)}",
+        detail={
+            "succeeded": len(result.succeeded),
+            "failed": len(result.failed),
+            "schedule_cron": body.schedule_cron,
+        },
         ip=client_ip(request),
         trace_id=trace_id,
     )
@@ -814,6 +872,19 @@ async def get_health(
     svc = _svc(db)
     health_info = await svc.get_health(source_id)
     return ok(data=health_info, trace_id=trace_id)
+
+
+@source_router.get("/{source_id}/overview", dependencies=_READ_DEPS)
+async def get_source_overview(
+    source_id: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """资产规模概览：实体类型/PII 分布/字段数/漂移/覆盖率/采集水位。"""
+    svc = _svc(db)
+    overview = await svc.get_source_overview(source_id)
+    return ok(data=overview, trace_id=trace_id)
 
 
 @source_router.get("/{source_id}/drift-logs", dependencies=_READ_DEPS)

@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import String, cast, func, or_, select, text, update
+from sqlalchemy import String, case, cast, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -127,6 +127,40 @@ class CollectorRepository:
         await self._db.flush()
         return src
 
+    async def set_source_governance(
+        self,
+        source_id: str,
+        *,
+        owner_id: int | None = None,
+        description: str | None = None,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+    ) -> DataSource | None:
+        """更新数据源治理字段（owner_id/description/include/exclude patterns）。
+
+        PATCH 语义：仅更新传入（非 None）的字段，未传字段保持原值。
+        不存在返回 None。
+
+        Args:
+            owner_id: 数据源负责人用户 ID。
+            description: 用途描述。
+            include_patterns: 表级包含白名单（JSON list[str]）。
+            exclude_patterns: 表级排除黑名单（JSON list[str]）。
+        """
+        src = await self.get_source(source_id)
+        if src is None:
+            return None
+        if owner_id is not None:
+            src.owner_id = owner_id
+        if description is not None:
+            src.description = description
+        if include_patterns is not None:
+            src.include_patterns = include_patterns
+        if exclude_patterns is not None:
+            src.exclude_patterns = exclude_patterns
+        await self._db.flush()
+        return src
+
     async def list_sources(
         self,
         *,
@@ -134,6 +168,7 @@ class CollectorRepository:
         source_type: str | None,
         keyword: str | None,
         health_status: str | None = None,
+        owner_id: int | None = None,
         page: int,
         page_size: int,
     ) -> tuple[Sequence[DataSource], int]:
@@ -148,6 +183,8 @@ class CollectorRepository:
         if health_status:
             # 总览仪表「数据源」资产卡片按健康状态下钻（healthy/unhealthy/unknown）
             base = base.where(DataSource.health_status == health_status)
+        if owner_id is not None:
+            base = base.where(DataSource.owner_id == owner_id)
         count = await self._db.scalar(select(func.count()).select_from(base.subquery()))
         total = int(count) if count is not None else 0
         stmt = base.order_by(DataSource.id).offset((page - 1) * page_size).limit(page_size)
@@ -294,6 +331,9 @@ class CollectorRepository:
             base = base.where(DBCatalog.entity_type == params.entity_type)
         if params.sensitivity_level:
             base = base.where(DBCatalog.sensitivity_level == params.sensitivity_level)
+        owner_id = getattr(params, "owner_id", None)
+        if owner_id is not None:
+            base = base.where(DBCatalog.owner_id == owner_id)
         domain = getattr(params, "domain", None)
         if domain:
             # db_catalog 无 domain 列，经数据源继承过滤（仅活跃源归属明确）
@@ -346,6 +386,9 @@ class CollectorRepository:
             base = base.where(DBCatalog.entity_type == params.entity_type)
         if params.sensitivity_level:
             base = base.where(DBCatalog.sensitivity_level == params.sensitivity_level)
+        owner_id = getattr(params, "owner_id", None)
+        if owner_id is not None:
+            base = base.where(DBCatalog.owner_id == owner_id)
         domain = getattr(params, "domain", None)
         if domain:
             # 已 outerjoin DataSource，直接按源域过滤（已删除源也能按原域匹配）
@@ -684,17 +727,34 @@ class CollectorRepository:
         return watermark
 
     async def update_health_status(
-        self, source_id: str, status: str, error: str | None = None
+        self,
+        source_id: str,
+        status: str,
+        error: str | None = None,
+        *,
+        health_metrics: dict[str, Any] | None = None,
+        degraded_since: datetime | None = None,
     ) -> None:
-        """更新数据源健康状态（P1-3：可附带最近错误信息，供健康端点返回）。"""
+        """更新数据源健康状态（P1-3：可附带最近错误信息，供健康端点返回）。
+
+        Args:
+            health_metrics: 采集后健康指标（success_rate/attempted/failed/p95_ms）。
+            degraded_since: 显式降级起始时间；恢复 healthy 时传 None 自动清空。
+        """
         src = await self.get_source(source_id)
         if src is not None:
             src.health_status = status
             src.last_health_check = datetime.now(UTC)
+            if health_metrics is not None:
+                src.health_metrics = health_metrics
+            if degraded_since is not None:
+                src.degraded_since = degraded_since
+            elif status == "healthy":
+                # 恢复健康时清空降级起始时间与历史错误
+                src.degraded_since = None
             if error is not None:
                 src.last_error = error[:512]
             elif status == "healthy":
-                # 恢复健康时清空历史错误
                 src.last_error = None
             await self._db.flush()
 
@@ -936,3 +996,102 @@ class CollectorRepository:
             "fields_missing_desc": total_fields - fields_with_desc,
             "per_table": per_table,
         }
+
+    # ---- 三期：资产规模概览 / 列表信号 ----
+
+    async def get_source_overview(self, source_id: str) -> dict[str, Any]:
+        """资产规模概览聚合（详情页头部）。
+
+        一次查询汇总：实体类型分布、PII 敏感级分布、字段总数、漂移数、
+        覆盖率、最近采集水位。数据源不存在返回 None 由 service 判定 404。
+        """
+        src = await self.get_source(source_id)
+        if src is None:
+            return {}
+        base = DBCatalog.deleted_at.is_(None)
+        type_rows = await self._db.execute(
+            select(DBCatalog.entity_type, func.count(DBCatalog.id))
+            .where(DBCatalog.source_id == source_id, base)
+            .group_by(DBCatalog.entity_type)
+        )
+        type_dist: dict[str, int] = {k: int(v) for k, v in type_rows.all()}
+        pii_rows = await self._db.execute(
+            select(DBCatalog.sensitivity_level, func.count(DBCatalog.id))
+            .where(DBCatalog.source_id == source_id, base)
+            .group_by(DBCatalog.sensitivity_level)
+        )
+        pii_dist: dict[str, int] = {k: int(v) for k, v in pii_rows.all()}
+        field_row = await self._db.execute(
+            select(
+                func.coalesce(
+                    func.sum(func.json_length(DBCatalog.schema_json["columns"])), 0
+                )
+            ).where(DBCatalog.source_id == source_id, base)
+        )
+        drift_row = await self._db.execute(
+            select(func.count(SchemaDriftLog.id)).where(
+                SchemaDriftLog.source_id == source_id
+            )
+        )
+        watermark = await self.get_watermark(source_id)
+        return {
+            "source_id": source_id,
+            "entity_types": {k: int(v) for k, v in type_dist.items()},
+            "by_sensitivity": {k: int(v) for k, v in pii_dist.items()},
+            "total_fields": int(field_row.scalar() or 0),
+            "drift_count": int(drift_row.scalar() or 0),
+            "coverage": float(src.coverage or 0.0),
+            "last_collected_at": (
+                watermark.last_collected_at.isoformat()
+                if watermark and watermark.last_collected_at
+                else None
+            ),
+            "scanned_count": watermark.scanned_count if watermark else 0,
+            "failed_count": watermark.failed_count if watermark else 0,
+        }
+
+    async def list_sources_signals(
+        self, source_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """批量回填列表信号：表/视图数、PII 数、最近采集、漂移数。
+
+        一次 IN 查询聚合避免 N+1；无目录记录的源保持 0/None 默认。
+        """
+        if not source_ids:
+            return {}
+        default = {
+            "table_count": 0,
+            "pii_count": 0,
+            "last_collected_at": None,
+            "drift_count": 0,
+        }
+        signals = {sid: dict(default) for sid in source_ids}
+        rows = await self._db.execute(
+            select(
+                DBCatalog.source_id,
+                func.count(DBCatalog.id),
+                func.sum(
+                    case((DBCatalog.sensitivity_level == "PII", 1), else_=0)
+                ),
+            )
+            .where(DBCatalog.source_id.in_(source_ids), DBCatalog.deleted_at.is_(None))
+            .group_by(DBCatalog.source_id)
+        )
+        for source_id, table_count, pii_count in rows.all():
+            signals[source_id]["table_count"] = int(table_count or 0)
+            signals[source_id]["pii_count"] = int(pii_count or 0)
+        wm_rows = await self._db.execute(
+            select(
+                CollectionWatermark.source_id, CollectionWatermark.last_collected_at
+            ).where(CollectionWatermark.source_id.in_(source_ids))
+        )
+        for source_id, last in wm_rows.all():
+            signals[source_id]["last_collected_at"] = last
+        drift_rows = await self._db.execute(
+            select(SchemaDriftLog.source_id, func.count(SchemaDriftLog.id))
+            .where(SchemaDriftLog.source_id.in_(source_ids))
+            .group_by(SchemaDriftLog.source_id)
+        )
+        for source_id, count in drift_rows.all():
+            signals[source_id]["drift_count"] = int(count)
+        return signals
