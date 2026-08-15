@@ -84,6 +84,19 @@ class TestServiceRestartRecovery:
         assert status2["source_id"] == "source-2"
 
     @pytest.mark.asyncio
+    async def test_inmemory_queue_count_filters(self):
+        """InMemory count 与 list 同过滤，供服务端分页 total。"""
+        queue = InMemoryCollectionQueue()
+        await queue.enqueue("source-1", actor_id=1)
+        await queue.enqueue("source-2", actor_id=2)
+        await queue.set("job-x", "COMPLETED", {"source_id": "source-1"})
+
+        assert await queue.count() == 3
+        assert await queue.count(source_id="source-1") == 2
+        assert await queue.count(source_id="source-1", status="COMPLETED") == 1
+        assert await queue.count(status="QUEUED") == 2
+
+    @pytest.mark.asyncio
     async def test_arq_queue_recovery_on_restart(self):
         """Arq 队列任务在服务重启后不丢失（Redis 持久化）。
 

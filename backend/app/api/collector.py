@@ -48,6 +48,8 @@ from app.services.collector.schemas import (
     BatchToggleRequest,
     BulkDeprecateRequest,
     BulkDeprecateResult,
+    CollectionRunListResponse,
+    CollectionRunResponse,
     CollectRequest,
     DataSourceCreateRequest,
     DataSourceListResponse,
@@ -80,6 +82,7 @@ logger = get_logger("unisense.collector.api")
 
 source_router = APIRouter(prefix="/data-sources", tags=["collector-source"])
 catalog_router = APIRouter(prefix="/catalogs", tags=["collector-catalog"])
+collection_run_router = APIRouter(prefix="/collection-runs", tags=["collector-run"])
 
 #: 数据源/采集写权限：平台级运维仅管理/域管理员（metric_owner 单域指标负责人不操作平台级数据源）。
 _WRITE_ROLES = ("platform_admin", "domain_admin")
@@ -299,19 +302,26 @@ async def list_collection_jobs(
     offset: int = 0,
     source_id: str | None = None,
     status: str | None = None,
-) -> ApiResponse[list[dict[str, Any]]]:
-    """列出采集任务（按入队逆序分页，采集任务中心入口）。
+) -> ApiResponse[dict[str, Any]]:
+    """列出采集任务（按入队逆序服务端分页，采集任务中心入口）。
 
     可按 ``source_id`` 过滤（任务中心按数据源筛选）；``status`` 供总览仪表
     「采集任务」资产卡片下钻；job 含 ``created_at``（创建时间）与 ``kind``
-    （manual 手动 / scheduled 定时）供前端展示。
+    （manual 手动 / scheduled 定时）供前端展示。返回 ``{items, total, page, page_size}``
+    分页结构（total 修复前端本地切片导致的 50 条上限问题）。
 
     注意：本端点须注册在 ``GET /{source_id}`` 之前——FastAPI 按注册顺序匹配，
     单段静态路径 ``/jobs`` 若在 ``/{source_id}`` 之后会被当作 source_id 吞掉。
     """
     svc = _svc(db)
-    jobs = await svc.list_jobs(limit=limit, offset=offset, source_id=source_id, status=status)
-    return ok(data=jobs, trace_id=trace_id)
+    items, total = await svc.list_jobs_paged(
+        limit=limit, offset=offset, source_id=source_id, status=status
+    )
+    page = offset // limit + 1 if limit else 1
+    return ok(
+        data={"items": items, "total": total, "page": page, "page_size": limit},
+        trace_id=trace_id,
+    )
 
 
 @source_router.get("/{source_id}", dependencies=_READ_DEPS)
@@ -531,19 +541,36 @@ async def collect_source(
         )
 
     try:
+        # 采集运行历史：创建 RUNNING 记录（独立提交，进程崩溃不丢）——同步采集归为 manual 触发
+        run_id = await svc.start_collection_run(
+            source_id=source_id, trigger="manual", mode=body.mode, actor_id=user.id
+        )
+    except Exception:  # noqa: BLE001 - 运行记录创建失败不应阻断采集主流程
+        logger.warning("collection_run_start_failed: source=%s", source_id, exc_info=True)
+        run_id = None
+
+    try:
         # FR-017: asyncio.timeout(300) 保护
         result = await asyncio.wait_for(
             svc.collect_and_register(source_id, collector, user.id, mode=body.mode),
             timeout=300.0,
         )
     except TimeoutError:
+        if run_id is not None:
+            await svc.fail_collection_run(run_id, "采集超时（300秒）")
         raise BusinessError(
             f"数据源 {source_id} 采集超时（300秒），请使用异步调度",
             error_code="COLLECTION_TIMEOUT",
         ) from None
+    except Exception as exc:  # noqa: BLE001 - 采集异常需落 FAILED 记录后上抛
+        if run_id is not None:
+            await svc.fail_collection_run(run_id, str(exc))
+        raise
     finally:
         await lock.release(source_id, owner_id)
         await collector.dispose()
+    if run_id is not None:
+        await svc.complete_collection_run(run_id, result)
     pii_registered = result.get("pii_registered", 0)
     failed_count = result.get("failed_count", 0)
     await write_audit(
@@ -1250,3 +1277,46 @@ async def infer_table_description(
             ),
             trace_id=trace_id,
         )
+
+
+# ---- 采集运行历史端点（采集记录页主视图，TD §12.1）----
+
+
+@collection_run_router.get("", dependencies=_READ_DEPS)
+async def list_collection_runs(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    source_id: str | None = None,
+    status: str | None = None,
+    trigger: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> ApiResponse[CollectionRunListResponse]:
+    """采集运行历史分页列表（按开始时间倒序，可按源/状态/触发方式过滤）。
+
+    采集记录页主视图数据源：区别于 ephemeral 的 job（7 天 TTL），本表为
+    持久化采集历史（含失败与排障明细），满足审计与运维可追溯。
+    """
+    svc = _svc(db)
+    result = await svc.list_collection_runs(
+        source_id=source_id,
+        status=status,
+        trigger=trigger,
+        page=page,
+        page_size=page_size,
+    )
+    return ok(data=CollectionRunListResponse(**result), trace_id=trace_id)
+
+
+@collection_run_router.get("/{run_id}", dependencies=_READ_DEPS)
+async def get_collection_run(
+    run_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[CollectionRunResponse]:
+    """采集运行详情（含失败实体 / 漂移事件 / 降级原因明细）。"""
+    svc = _svc(db)
+    detail = await svc.get_collection_run_detail(run_id)
+    return ok(data=CollectionRunResponse(**detail), trace_id=trace_id)

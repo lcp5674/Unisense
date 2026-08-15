@@ -343,6 +343,45 @@ class DriftLogListResponse(BaseModel):
     page_size: int
 
 
+class CollectionRunResponse(BaseModel):
+    """采集运行历史条目（采集记录页主视图）。
+
+    detail（detail_json 明细）仅详情接口返回，列表保持 None 控制体积。
+    """
+
+    id: int
+    source_id: str
+    source_name: str | None = None
+    job_id: str | None = None
+    trigger: str
+    mode: str
+    effective_mode: str | None = None
+    status: str
+    actor_id: int | None = None
+    actor_name: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_seconds: float | None = None
+    scanned: int
+    registered: int
+    pii_registered: int
+    failed_count: int
+    drift_count: int
+    deprecated_count: int
+    coverage: float | None = None
+    error: str | None = None
+    detail: dict[str, Any] | None = None
+
+
+class CollectionRunListResponse(BaseModel):
+    """采集运行历史分页列表。"""
+
+    items: list[CollectionRunResponse]
+    total: int
+    page: int
+    page_size: int
+
+
 # ---- 字段描述推断 + 人工编辑 Schema ----
 
 

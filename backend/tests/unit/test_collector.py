@@ -2681,3 +2681,161 @@ async def test_service_list_catalogs_enriches_domain_and_owner_name() -> None:
     repo.get_sources_domain.assert_awaited_once_with(["s1"])
     repo.get_owner_names.assert_awaited_once_with([5])
 
+
+
+# ---- 采集运行历史（CollectionRun）repository 测试 ----
+
+async def test_repo_create_collection_run_defaults_running():
+    s = _session()
+    repo = CollectorRepository(s)
+    run = await repo.create_collection_run(
+        source_id="src1", trigger="manual", mode="FULL", actor_id=5
+    )
+    assert run.status == "RUNNING"
+    assert run.trigger == "manual"
+    assert run.mode == "FULL"
+    assert run.actor_id == 5
+    assert run.job_id is None
+    assert run.started_at is not None
+    s.add.assert_called_once()
+
+
+async def test_repo_complete_collection_run_fills_metrics():
+    fake = SimpleNamespace(
+        status="RUNNING",
+        finished_at=None,
+        effective_mode=None,
+        scanned=0,
+        registered=0,
+        pii_registered=0,
+        failed_count=0,
+        drift_count=0,
+        deprecated_count=0,
+        coverage=None,
+        detail_json=None,
+    )
+    repo = CollectorRepository(_session(scalar_one_or_none=fake))
+    result = {
+        "mode": "FULL",
+        "scanned": 10,
+        "registered": 8,
+        "pii_registered": 2,
+        "failed_count": 1,
+        "drift_count": 3,
+        "deprecated_count": 4,
+        "coverage": 0.8,
+        "failed_specs": [{"entity_name": "t1", "error": "e"}],
+        "drift_events": [{"entity_name": "t2", "change_type": "ADD_COLUMN"}],
+    }
+    out = await repo.complete_collection_run(1, result)
+    assert out.status == "COMPLETED"
+    assert out.scanned == 10
+    assert out.drift_count == 3
+    assert out.coverage == 0.8
+    assert out.finished_at is not None
+    assert out.detail_json["failed_specs"] == result["failed_specs"]
+
+
+async def test_repo_fail_collection_run_records_error():
+    fake = SimpleNamespace(status="RUNNING", finished_at=None, error=None)
+    repo = CollectorRepository(_session(scalar_one_or_none=fake))
+    out = await repo.fail_collection_run(1, "boom " * 200)
+    assert out.status == "FAILED"
+    assert len(out.error) <= 512
+    assert out.finished_at is not None
+
+
+async def test_repo_list_collection_runs_paginated():
+    runs = [MagicMock(id=i) for i in range(2)]
+    repo = CollectorRepository(_session(all_rows=runs, scalar=7))
+    out, total = await repo.list_collection_runs(
+        source_id="src1", status="COMPLETED", trigger=None, page=1, page_size=10
+    )
+    assert len(out) == 2
+    assert total == 7
+
+
+# ---- 采集运行历史（CollectionRun）service 测试 ----
+
+async def test_svc_collection_run_lifecycle_commit():
+    svc, repo = _svc()
+    repo.create_collection_run = AsyncMock(return_value=SimpleNamespace(id=42))
+    repo.complete_collection_run = AsyncMock()
+    repo.fail_collection_run = AsyncMock()
+    run_id = await svc.start_collection_run(source_id="s", trigger="scheduled", job_id="j1")
+    assert run_id == 42
+    svc._db.commit.assert_awaited()
+
+    await svc.complete_collection_run(42, {"scanned": 5})
+    repo.complete_collection_run.assert_awaited_once_with(42, {"scanned": 5})
+
+    await svc.fail_collection_run(42, "err")
+    repo.fail_collection_run.assert_awaited_once_with(42, "err")
+
+
+async def test_svc_list_collection_runs_enriched():
+    svc, repo = _svc()
+    fake_run = SimpleNamespace(
+        id=1,
+        source_id="s1",
+        job_id="j1",
+        trigger="manual",
+        mode="FULL",
+        effective_mode="FULL",
+        status="COMPLETED",
+        actor_id=5,
+        started_at=datetime(2026, 8, 1, tzinfo=UTC),
+        finished_at=datetime(2026, 8, 1, 0, 1, tzinfo=UTC),
+        scanned=10,
+        registered=8,
+        pii_registered=1,
+        failed_count=0,
+        drift_count=2,
+        deprecated_count=0,
+        coverage=0.5,
+        error=None,
+        detail_json={"failed_specs": []},
+    )
+    repo.list_collection_runs = AsyncMock(return_value=([fake_run], 1))
+    repo.get_sources_meta = AsyncMock(return_value={"s1": ("MySQL", False)})
+    repo.get_owner_names = AsyncMock(return_value={5: "张三"})
+    result = await svc.list_collection_runs(page=1, page_size=10)
+    assert result["total"] == 1
+    item = result["items"][0]
+    assert item["source_name"] == "MySQL"
+    assert item["actor_name"] == "张三"
+    assert item["duration_seconds"] == 60.0
+    assert item["detail"] is None  # 列表不携带 detail
+    repo.get_sources_meta.assert_awaited_once_with(["s1"])
+
+
+async def test_svc_get_collection_run_detail_includes_detail():
+    svc, repo = _svc()
+    fake_run = SimpleNamespace(
+        id=1,
+        source_id="s1",
+        job_id=None,
+        trigger="manual",
+        mode="FULL",
+        effective_mode=None,
+        status="FAILED",
+        actor_id=None,
+        started_at=datetime(2026, 8, 1, tzinfo=UTC),
+        finished_at=None,
+        scanned=0,
+        registered=0,
+        pii_registered=0,
+        failed_count=0,
+        drift_count=0,
+        deprecated_count=0,
+        coverage=None,
+        error="boom",
+        detail_json={"failed_specs": [{"entity_name": "t", "error": "e"}]},
+    )
+    repo.get_collection_run = AsyncMock(return_value=fake_run)
+    repo.get_sources_meta = AsyncMock(return_value={"s1": ("MySQL", False)})
+    repo.get_owner_names = AsyncMock(return_value={})
+    result = await svc.get_collection_run_detail(1)
+    assert result["status"] == "FAILED"
+    assert result["detail"] == fake_run.detail_json
+    assert result["source_name"] == "MySQL"

@@ -107,6 +107,8 @@ async def run_collection_task(
     collector = ctx.get("collector")
     redis = ctx.get("redis")
     own_session = False
+    # 采集运行历史记录 ID（创建失败时为 None，不阻断采集主流程）
+    run_id: int | None = None
 
     # US4: 幂等检查
     if not await _check_idempotency(redis, job_id):
@@ -135,6 +137,23 @@ async def run_collection_task(
         if collector is None:
             raise RuntimeError(f"采集器不可用: {source_id}")
 
+        # 采集运行历史：创建 RUNNING 记录（独立提交，进程崩溃不丢）。
+        # 触发方式按 job_id 前缀推导：定时调度 collect:sched: / 手动 collect-now。
+        try:
+            trigger = "scheduled" if job_id.startswith("collect:sched:") else "manual"
+            run_id = await svc.start_collection_run(
+                source_id=source_id,
+                trigger=trigger,
+                mode=mode,
+                job_id=job_id,
+                actor_id=actor_id,
+            )
+        except Exception:  # noqa: BLE001 - 运行记录创建失败不应阻断采集主流程
+            logger.warning(
+                "collection_run_start_failed: source=%s job=%s", source_id, job_id, exc_info=True
+            )
+            run_id = None
+
         # 构造进度回调：worker 侧把 RUNNING 进度写入 JobStore，供 SSE 实时推送
         progress_cb = (
             _make_progress_cb(store, job_id, source_id, actor_id) if store is not None else None
@@ -147,12 +166,23 @@ async def run_collection_task(
         if db is not None:
             await db.commit()
 
+        # 采集运行历史：收尾 COMPLETED（回填指标 + 提交）
+        if run_id is not None:
+            await svc.complete_collection_run(run_id, result)
+
         # US5: 成功 → 更新健康状态（service 层已处理）
         if store is not None:
             await store.set(job_id, "COMPLETED", result)
         return result
     except Exception as exc:  # noqa: BLE001 - 任务失败需回写状态并上抛供 arq 重试
         logger.exception("采集任务失败 source=%s job=%s", source_id, job_id)
+
+        # 采集运行历史：失败收尾 FAILED（记录错误 + 提交）
+        if run_id is not None and svc is not None:
+            try:
+                await svc.fail_collection_run(run_id, str(exc))
+            except Exception:  # noqa: BLE001 - 失败收尾异常不影响上抛
+                logger.warning("collection_run_fail_commit_failed: run=%s", run_id)
 
         # US5: 失败 → 更新健康状态
         try:

@@ -115,25 +115,32 @@ async def test_drift_logs_endpoint_returns_paged(
 async def test_list_jobs_returns_jobs(
     collector_client: httpx.AsyncClient,
 ) -> None:
-    """采集任务中心：GET /jobs 返回任务列表（含状态/详情）。"""
+    """采集任务中心：GET /jobs 返回分页任务列表（含状态/详情与 total）。"""
     with patch(
-        "app.api.collector.CollectorService.list_jobs",
+        "app.api.collector.CollectorService.list_jobs_paged",
         new_callable=AsyncMock,
-        return_value=[
-            {
-                "job_id": "job-abc123",
-                "source_id": "mysql_src_1",
-                "status": "QUEUED",
-                "detail": {"mode": "FULL"},
-            }
-        ],
-    ):
+        return_value=(
+            [
+                {
+                    "job_id": "job-abc123",
+                    "source_id": "mysql_src_1",
+                    "status": "QUEUED",
+                    "detail": {"mode": "FULL"},
+                }
+            ],
+            1,
+        ),
+    ) as mock_list:
         resp = await collector_client.get("/api/v1/data-sources/jobs?limit=10&offset=0")
     assert resp.status_code == 200
-    jobs = resp.json()["data"]
-    assert len(jobs) == 1
-    assert jobs[0]["job_id"] == "job-abc123"
-    assert jobs[0]["status"] == "QUEUED"
+    data = resp.json()["data"]
+    assert data["total"] == 1
+    assert len(data["items"]) == 1
+    assert data["items"][0]["job_id"] == "job-abc123"
+    assert data["items"][0]["status"] == "QUEUED"
+    assert data["page"] == 1
+    assert data["page_size"] == 10
+    mock_list.assert_awaited_once()
 
 
 async def test_list_jobs_must_precede_source_id_route(
@@ -142,9 +149,9 @@ async def test_list_jobs_must_precede_source_id_route(
     """GET /jobs 必须命中列表端点而非被 /{source_id} 吞掉（静态路由先注册）。"""
     with (
         patch(
-            "app.api.collector.CollectorService.list_jobs",
+            "app.api.collector.CollectorService.list_jobs_paged",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=([], 0),
         ) as mock_list,
         patch(
             "app.api.collector.CollectorService.get_source",
@@ -578,3 +585,155 @@ async def test_infer_table_description_inflight_conflict(
     assert resp.status_code == 409
     assert resp.json()["code"] == "LLM_INFER_IN_PROGRESS"
     fake_svc._llm_infer_table_description.assert_not_awaited()
+
+
+# ---- 采集运行历史端点（collection-run）----
+
+
+async def test_collection_runs_list(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    fake_svc = MagicMock()
+    fake_svc.list_collection_runs = AsyncMock(
+        return_value={
+            "items": [
+                {
+                    "id": 1,
+                    "source_id": "s1",
+                    "source_name": "MySQL",
+                    "job_id": None,
+                    "trigger": "manual",
+                    "mode": "FULL",
+                    "effective_mode": "FULL",
+                    "status": "COMPLETED",
+                    "actor_id": 5,
+                    "actor_name": "张三",
+                    "started_at": "2026-08-01T00:00:00+00:00",
+                    "finished_at": "2026-08-01T00:01:00+00:00",
+                    "duration_seconds": 60.0,
+                    "scanned": 10,
+                    "registered": 8,
+                    "pii_registered": 1,
+                    "failed_count": 0,
+                    "drift_count": 2,
+                    "deprecated_count": 0,
+                    "coverage": 0.5,
+                    "error": None,
+                    "detail": None,
+                }
+            ],
+            "total": 1,
+            "page": 1,
+            "page_size": 20,
+        }
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc):
+        resp = await collector_client.get("/api/v1/collection-runs?source_id=s1&status=COMPLETED")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total"] == 1
+    assert data["items"][0]["source_name"] == "MySQL"
+    assert data["items"][0]["duration_seconds"] == 60.0
+    fake_svc.list_collection_runs.assert_awaited_once()
+    kwargs = fake_svc.list_collection_runs.await_args.kwargs
+    assert kwargs["source_id"] == "s1"
+    assert kwargs["status"] == "COMPLETED"
+
+
+async def test_collection_run_detail(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    fake_svc = MagicMock()
+    fake_svc.get_collection_run_detail = AsyncMock(
+        return_value={
+            "id": 1,
+            "source_id": "s1",
+            "source_name": "MySQL",
+            "job_id": "job1",
+            "trigger": "scheduled",
+            "mode": "FULL",
+            "effective_mode": "FULL",
+            "status": "FAILED",
+            "actor_id": None,
+            "actor_name": None,
+            "started_at": "2026-08-01T00:00:00+00:00",
+            "finished_at": "2026-08-01T00:01:00+00:00",
+            "duration_seconds": 60.0,
+            "scanned": 3,
+            "registered": 0,
+            "pii_registered": 0,
+            "failed_count": 3,
+            "drift_count": 0,
+            "deprecated_count": 0,
+            "coverage": None,
+            "error": "connection refused",
+            "detail": {"failed_specs": [{"entity_name": "t1", "error": "boom"}]},
+        }
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc):
+        resp = await collector_client.get("/api/v1/collection-runs/1")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["status"] == "FAILED"
+    assert data["detail"]["failed_specs"][0]["entity_name"] == "t1"
+
+
+async def test_collect_sync_creates_and_completes_run(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """同步采集路径：创建 RUNNING 记录 → 成功后收尾 COMPLETED（含指标回填）。"""
+    fake_svc = MagicMock()
+    fake_svc.start_collection_run = AsyncMock(return_value=99)
+    fake_svc.complete_collection_run = AsyncMock()
+    fake_svc.fail_collection_run = AsyncMock()
+    fake_svc.get_source_orm = AsyncMock(
+        return_value=SimpleNamespace(source_type="mysql", connection_config="enc")
+    )
+    fake_svc.collect_and_register = AsyncMock(
+        return_value={
+            "source_id": "s1",
+            "scanned": 5,
+            "registered": 5,
+            "pii_registered": 0,
+            "failed_count": 0,
+            "drift_count": 0,
+            "deprecated_count": 0,
+            "coverage": 1.0,
+            "mode": "FULL",
+        }
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc), patch(
+        "app.api.collector.build_collector",
+        return_value=MagicMock(dispose=AsyncMock()),
+    ):
+        resp = await collector_client.post("/api/v1/data-sources/s1/collect", json={"mode": "FULL"})
+    assert resp.status_code == 200
+    fake_svc.start_collection_run.assert_awaited_once()
+    fake_svc.complete_collection_run.assert_awaited_once()
+    complete_args = fake_svc.complete_collection_run.await_args.args
+    assert complete_args[0] == 99
+    assert complete_args[1]["scanned"] == 5
+    fake_svc.fail_collection_run.assert_not_awaited()
+
+
+async def test_collect_sync_failure_marks_run_failed(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """同步采集失败路径：FAILED 记录落库并携带错误信息。"""
+    fake_svc = MagicMock()
+    fake_svc.start_collection_run = AsyncMock(return_value=7)
+    fake_svc.complete_collection_run = AsyncMock()
+    fake_svc.fail_collection_run = AsyncMock()
+    fake_svc.get_source_orm = AsyncMock(
+        return_value=SimpleNamespace(source_type="mysql", connection_config="enc")
+    )
+    fake_svc.collect_and_register = AsyncMock(side_effect=RuntimeError("conn refused"))
+    with patch("app.api.collector._svc", return_value=fake_svc), patch(
+        "app.api.collector.build_collector",
+        return_value=MagicMock(dispose=AsyncMock()),
+    ):
+        resp = await collector_client.post("/api/v1/data-sources/s1/collect", json={"mode": "FULL"})
+    assert resp.status_code == 500
+    fake_svc.fail_collection_run.assert_awaited_once()
+    assert "conn refused" in fake_svc.fail_collection_run.await_args.args[1]
+    fake_svc.complete_collection_run.assert_not_awaited()

@@ -100,6 +100,9 @@ async def test_run_idempotent_skip_without_store_returns_flag():
 
 async def test_run_success_with_injected_svc_db_collector():
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(return_value={"scanned": 2, "source_id": "src1"})
     db = MagicMock()
     db.commit = AsyncMock()
@@ -131,6 +134,9 @@ async def test_run_success_builds_service_from_injected_db():
     collector = MagicMock()
     collector.dispose = AsyncMock()
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(return_value={"scanned": 3})
 
     with patch("app.services.collector.tasks.CollectorService", return_value=svc) as m_svc:
@@ -143,6 +149,9 @@ async def test_run_success_builds_service_from_injected_db():
 
 async def test_run_success_without_db_skips_commit():
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(return_value={"scanned": 1})
     collector = MagicMock()
     store = MagicMock()
@@ -158,6 +167,9 @@ async def test_run_success_without_db_skips_commit():
 
 async def test_run_success_without_store_returns_result():
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(return_value={"scanned": 1})
     db = MagicMock()
     db.commit = AsyncMock()
@@ -185,6 +197,9 @@ async def test_run_success_production_path_builds_session_and_collector():
     collector.dispose = AsyncMock()
 
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(return_value={"scanned": 5})
 
     repo = MagicMock()
@@ -221,6 +236,9 @@ async def test_run_success_production_path_builds_session_and_collector():
 
 async def test_run_failure_writes_health_and_failed_status():
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(side_effect=RuntimeError("boom"))
     db = MagicMock()
     db.commit = AsyncMock()
@@ -247,6 +265,9 @@ async def test_run_failure_writes_health_and_failed_status():
 
 async def test_run_failure_health_update_error_swallowed():
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(side_effect=RuntimeError("boom"))
     db = MagicMock()
     db.commit = AsyncMock()
@@ -272,6 +293,9 @@ async def test_run_failure_health_update_error_swallowed():
 
 async def test_run_failure_without_db_skips_health_update():
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(side_effect=RuntimeError("boom"))
     store = MagicMock()
     store.set = AsyncMock()
@@ -288,6 +312,9 @@ async def test_run_failure_without_db_skips_health_update():
 
 async def test_run_failure_without_store_reraises():
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(side_effect=RuntimeError("boom"))
     db = MagicMock()
     db.commit = AsyncMock()
@@ -341,6 +368,9 @@ async def test_run_failure_own_session_closes_and_disposes_collector():
     repo.update_health_status = AsyncMock()
 
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(side_effect=RuntimeError("collect failed"))
 
     store = MagicMock()
@@ -364,6 +394,9 @@ async def test_run_failure_own_session_closes_and_disposes_collector():
 
 async def test_run_raises_when_collector_unavailable():
     svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(return_value={})
     db = MagicMock()
     db.commit = AsyncMock()

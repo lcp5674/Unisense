@@ -1,7 +1,7 @@
-"""采集领域扩展模型（SchemaDriftLog + CollectionWatermark）。
+"""采集领域扩展模型（SchemaDriftLog + CollectionWatermark + CollectionRun）。
 
 对齐 TD §12.1 / spec FR-010/FR-011/FR-014。
-新增表用于 Schema Drift 检测历史记录与采集水位追踪。
+新增表用于 Schema Drift 检测历史记录、采集水位追踪与采集运行历史。
 """
 
 from __future__ import annotations
@@ -122,3 +122,102 @@ class CollectionWatermark(Base, BaseModel):
     )
 
     __table_args__ = (Index("idx_watermark_source", "source_id"),)
+
+
+class CollectionRun(Base, BaseModel):
+    """一次采集运行的持久化记录（采集运行历史）。
+
+    采集链路闭环的关键一环：job（JobStore）是 ephemeral 运行时数据（终态 7 天 TTL），
+    而采集运行历史需长期可追溯（审计/运维/排障）。本表每次采集（手动/定时、同步/异步）
+    落一行，状态 RUNNING → COMPLETED/FAILED，含全部关键指标与失败明细。
+
+    Attributes:
+        source_id: 数据源标识。
+        job_id: 关联异步任务 ID（同步采集为 NULL）。
+        trigger: 触发方式（manual 手动 / scheduled 定时）。
+        mode: 请求采集模式（FULL/INCREMENTAL）。
+        effective_mode: 实际执行模式（增量降级为全量后回填）。
+        status: 运行状态（RUNNING/COMPLETED/FAILED）。
+        actor_id: 触发人 ID（定时调度为 NULL）。
+        started_at: 开始时间。
+        finished_at: 结束时间。
+        scanned: 扫描实体数。
+        registered: 注册/更新实体数。
+        pii_registered: PII 实体数。
+        failed_count: 失败实体数。
+        drift_count: Schema 漂移数。
+        deprecated_count: 对账废弃数。
+        coverage: 采集后资产覆盖率（0-1）。
+        error: 失败原因（截断 512）。
+        detail_json: 明细（failed_specs / drift_events / degrade_reason 等）。
+    """
+
+    __tablename__ = "collection_run"
+
+    source_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("data_source.source_id", name="fk_collection_run_source"),
+        nullable=False,
+        comment="数据源标识",
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="关联异步任务 ID（同步采集为 NULL）"
+    )
+    trigger: Mapped[str] = mapped_column(
+        Enum("manual", "scheduled", name="collection_run_trigger_enum"),
+        nullable=False,
+        default="manual",
+        comment="触发方式",
+    )
+    mode: Mapped[str] = mapped_column(
+        Enum("FULL", "INCREMENTAL", name="collection_run_mode_enum"),
+        nullable=False,
+        default="FULL",
+        comment="请求采集模式",
+    )
+    effective_mode: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, comment="实际执行模式（增量降级后回填）"
+    )
+    status: Mapped[str] = mapped_column(
+        Enum("RUNNING", "COMPLETED", "FAILED", name="collection_run_status_enum"),
+        nullable=False,
+        default="RUNNING",
+        comment="运行状态",
+    )
+    actor_id: Mapped[int | None] = mapped_column(
+        nullable=True, comment="触发人 ID（定时调度为 NULL）"
+    )
+    started_at: Mapped[datetime] = mapped_column(DATETIME, nullable=False, comment="开始时间")
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DATETIME, nullable=True, comment="结束时间"
+    )
+    scanned: Mapped[int] = mapped_column(INTEGER, nullable=False, default=0, comment="扫描实体数")
+    registered: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=0, comment="注册/更新实体数"
+    )
+    pii_registered: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=0, comment="PII 实体数"
+    )
+    failed_count: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=0, comment="失败实体数"
+    )
+    drift_count: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=0, comment="Schema 漂移数"
+    )
+    deprecated_count: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=0, comment="对账废弃数"
+    )
+    coverage: Mapped[float | None] = mapped_column(
+        nullable=True, comment="采集后资产覆盖率（0-1）"
+    )
+    error: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, comment="失败原因（截断）"
+    )
+    detail_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="明细（failed_specs/drift_events/degrade_reason）"
+    )
+
+    __table_args__ = (
+        Index("idx_collection_run_source", "source_id", "started_at"),
+        Index("idx_collection_run_status", "status", "started_at"),
+    )

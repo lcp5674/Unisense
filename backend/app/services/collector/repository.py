@@ -17,7 +17,7 @@ from sqlalchemy import String, cast, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
-from app.models.collector_models import CollectionWatermark, SchemaDriftLog
+from app.models.collector_models import CollectionRun, CollectionWatermark, SchemaDriftLog
 from app.models.data_source import ColumnDescription, DataSource, DBCatalog
 from app.models.user import User
 from app.services.collector.drift_detector import DriftDetector, compute_content_signature
@@ -102,6 +102,12 @@ class CollectorRepository:
             await self._db.execute(
                 update(SchemaDriftLog)
                 .where(SchemaDriftLog.source_id == source_id)
+                .values(source_id=new_id)
+            )
+            # 采集运行历史一并改名保留（软删后仍可追溯历史记录）
+            await self._db.execute(
+                update(CollectionRun)
+                .where(CollectionRun.source_id == source_id)
                 .values(source_id=new_id)
             )
             # 释放唯一约束：改名保留软删记录
@@ -512,6 +518,106 @@ class CollectorRepository:
         total = int(count) if count is not None else 0
         stmt = (
             base.order_by(SchemaDriftLog.detected_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        res = await self._db.execute(stmt)
+        return res.scalars().all(), total
+
+    # ---- 采集运行历史相关方法 ----
+
+    async def create_collection_run(
+        self,
+        *,
+        source_id: str,
+        trigger: str,
+        mode: str,
+        job_id: str | None = None,
+        actor_id: int | None = None,
+    ) -> CollectionRun:
+        """创建一次采集运行记录（初始状态 RUNNING）。"""
+        run = CollectionRun(
+            source_id=source_id,
+            job_id=job_id,
+            trigger=trigger,
+            mode=mode,
+            status="RUNNING",
+            actor_id=actor_id,
+            started_at=datetime.now(UTC),
+        )
+        self._db.add(run)
+        await self._db.flush()
+        return run
+
+    async def get_collection_run(self, run_id: int) -> CollectionRun | None:
+        """按主键取采集运行记录（详情接口）。"""
+        return (
+            await self._db.execute(
+                select(CollectionRun).where(
+                    CollectionRun.id == run_id, CollectionRun.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def complete_collection_run(
+        self, run_id: int, result: dict[str, Any]
+    ) -> CollectionRun | None:
+        """采集成功收尾：回填指标与明细，状态 → COMPLETED。"""
+        run = await self.get_collection_run(run_id)
+        if run is None:
+            return None
+        run.status = "COMPLETED"
+        run.finished_at = datetime.now(UTC)
+        run.effective_mode = result.get("mode")
+        run.scanned = int(result.get("scanned") or 0)
+        run.registered = int(result.get("registered") or 0)
+        run.pii_registered = int(result.get("pii_registered") or 0)
+        run.failed_count = int(result.get("failed_count") or 0)
+        run.drift_count = int(result.get("drift_count") or 0)
+        run.deprecated_count = int(result.get("deprecated_count") or 0)
+        coverage = result.get("coverage")
+        run.coverage = float(coverage) if coverage is not None else None
+        # 明细：失败实体 / 漂移事件（明细为采集排障核心信息；entities 全量过大不落库）
+        run.detail_json = {
+            "failed_specs": result.get("failed_specs", []),
+            "drift_events": result.get("drift_events", []),
+            "degrade_reason": result.get("degrade_reason"),
+        }
+        await self._db.flush()
+        return run
+
+    async def fail_collection_run(self, run_id: int, error: str) -> CollectionRun | None:
+        """采集失败收尾：记录错误信息，状态 → FAILED。"""
+        run = await self.get_collection_run(run_id)
+        if run is None:
+            return None
+        run.status = "FAILED"
+        run.finished_at = datetime.now(UTC)
+        run.error = str(error)[:512]
+        await self._db.flush()
+        return run
+
+    async def list_collection_runs(
+        self,
+        *,
+        source_id: str | None,
+        status: str | None,
+        trigger: str | None,
+        page: int,
+        page_size: int,
+    ) -> tuple[Sequence[CollectionRun], int]:
+        """查询采集运行历史（按开始时间倒序，分页；可按 source/status/trigger 过滤）。"""
+        base = select(CollectionRun).where(CollectionRun.deleted_at.is_(None))
+        if source_id:
+            base = base.where(CollectionRun.source_id == source_id)
+        if status:
+            base = base.where(CollectionRun.status == status)
+        if trigger:
+            base = base.where(CollectionRun.trigger == trigger)
+        count = await self._db.scalar(select(func.count()).select_from(base.subquery()))
+        total = int(count) if count is not None else 0
+        stmt = (
+            base.order_by(CollectionRun.started_at.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)
         )

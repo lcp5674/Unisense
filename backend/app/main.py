@@ -21,7 +21,7 @@ from app.api.ai import router as ai_router
 from app.api.assetmap import router as assetmap_router
 from app.api.audit import router as audit_router
 from app.api.auth import router as auth_router
-from app.api.collector import catalog_router, source_router
+from app.api.collector import catalog_router, collection_run_router, source_router
 from app.api.conflict import router as conflict_router
 from app.api.consume import router as consume_router
 from app.api.dimension import router as dimension_router
@@ -279,6 +279,7 @@ def create_app() -> FastAPI:
     app.include_router(metrics_router, prefix="/api/v1")
     app.include_router(source_router, prefix="/api/v1")
     app.include_router(catalog_router, prefix="/api/v1")
+    app.include_router(collection_run_router, prefix="/api/v1")
     app.include_router(lineage_router, prefix="/api/v1")
     app.include_router(conflict_router, prefix="/api/v1")
     app.include_router(governance_router, prefix="/api/v1")

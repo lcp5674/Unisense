@@ -50,6 +50,10 @@ class JobStore(Protocol):
         """列出任务（按入队逆序，供采集任务中心展示；可按 source_id / status 过滤）。"""
         ...
 
+    async def count(self, source_id: str | None = None, status: str | None = None) -> int:
+        """统计匹配任务数（服务端分页 total 用）。"""
+        ...
+
 
 class InMemoryCollectionQueue:
     """进程内采集队列 + 状态存储（默认实现 / 单测载体）。"""
@@ -79,6 +83,12 @@ class InMemoryCollectionQueue:
         job.setdefault("created_at", datetime.now(UTC).isoformat())
         job["status"] = status
         job["detail"] = detail
+        # 同步 detail 中的 source_id/actor_id 到顶层（与 RedisJobStore.get 语义一致：
+        # source_id 来自 detail；保证按源过滤的 count/list 一致）
+        if detail.get("source_id") is not None:
+            job["source_id"] = detail["source_id"]
+        if detail.get("actor_id") is not None:
+            job["actor_id"] = detail["actor_id"]
 
     @staticmethod
     def _kind(job_id: str) -> str:
@@ -124,6 +134,15 @@ class InMemoryCollectionQueue:
             }
             for j in jobs[offset : offset + limit]
         ]
+
+    async def count(self, source_id: str | None = None, status: str | None = None) -> int:
+        """统计匹配任务数（与 list 相同过滤，供服务端分页 total）。"""
+        return sum(
+            1
+            for j in self._jobs.values()
+            if (source_id is None or j.get("source_id") == source_id)
+            and (status is None or j.get("status") == status)
+        )
 
 
 class RedisJobStore:
@@ -245,6 +264,40 @@ class RedisJobStore:
         )
         return jobs[offset : offset + limit]
 
+    async def count(self, source_id: str | None = None, status: str | None = None) -> int:
+        """统计匹配任务数（与 list 相同过滤，服务端分页 total 用）。"""
+        import json
+
+        keys: list[str] = []
+        cursor = 0
+        while True:
+            cursor, batch = await self._redis.scan(cursor, match="collect_job:*", count=200)
+            keys.extend(batch)
+            if not cursor:
+                break
+        n = 0
+        for key in keys:
+            if isinstance(key, bytes):
+                key = key.decode("utf-8", errors="replace")
+            job_id = key.split(":", 1)[1]
+            raw = await self._redis.hgetall(self._key(job_id))
+            if not raw:
+                continue
+            decoded = {
+                (k.decode("utf-8", errors="replace") if isinstance(k, bytes) else k): (
+                    v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
+                )
+                for k, v in raw.items()
+            }
+            detail_raw = decoded.get("detail")
+            detail = json.loads(detail_raw) if detail_raw else {}
+            if source_id is not None and detail.get("source_id") != source_id:
+                continue
+            if status is not None and (decoded.get("status") or "UNKNOWN") != status:
+                continue
+            n += 1
+        return n
+
 
 #: 模块级 arq Redis 连接单例：避免每次 enqueue/get 新建 ArqRedis/AsyncRedis
 #: 且从不 aclose 导致连接池泄漏（P1-9 修复）。
@@ -324,6 +377,12 @@ class ArqCollectionQueue:
         return await RedisJobStore(redis).list(
             limit=limit, offset=offset, source_id=source_id, status=status
         )
+
+    async def count(self, source_id: str | None = None, status: str | None = None) -> int:
+        from app.core.config import settings
+
+        redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
+        return await RedisJobStore(redis).count(source_id=source_id, status=status)
 
 
 _default_queue: InMemoryCollectionQueue | None = None

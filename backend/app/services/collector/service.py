@@ -1458,6 +1458,33 @@ class CollectorService(BaseService):
         )
         return result
 
+    async def list_jobs_paged(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        source_id: str | None = None,
+        status: str | None = None,
+        queue: CollectionQueue | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """采集任务服务端分页：返回 (items, total)。
+
+        total 来自队列 ``count``（与 list 相同过滤），修复前端本地切片导致的
+        「超过 50 条任务永远不可见」问题（job 为 ephemeral 数据但任务中心需完整翻页）。
+        """
+        from app.core.config import settings as _settings
+
+        q = queue or create_collection_queue(redis_url=_settings.redis_url)
+        lister = getattr(q, "list", None)
+        counter = getattr(q, "count", None)
+        if lister is None:
+            return [], 0
+        items: list[dict[str, Any]] = await lister(
+            limit=limit, offset=offset, source_id=source_id, status=status
+        )
+        total = int(await counter(source_id=source_id, status=status)) if counter else len(items)
+        return items, total
+
     async def count_jobs_by_status(self) -> dict[str, int]:
         """按状态统计采集任务数（供总览仪表「采集任务」资产卡片）。
 
@@ -1576,3 +1603,136 @@ class CollectorService(BaseService):
             "page": page,
             "page_size": page_size,
         }
+
+    # ---- 采集运行历史（CollectionRun 持久化，工业级可追溯）----
+
+    @staticmethod
+    def _to_run_response(
+        run: Any,
+        *,
+        src_names: dict[str, tuple[str, bool]] | None = None,
+        owner_names: dict[int, str] | None = None,
+        include_detail: bool = False,
+    ) -> dict[str, Any]:
+        """CollectionRun ORM → 响应 dict。
+
+        Args:
+            run: CollectionRun ORM 对象。
+            src_names: {source_id: (名称, 是否删除)}（批量预取，避免 N+1）。
+            owner_names: {user_id: 展示名}。
+            include_detail: True 时携带 detail_json（详情接口）。
+        """
+        src_names = src_names or {}
+        owner_names = owner_names or {}
+        finished_at = run.finished_at
+        started_at = run.started_at
+        return {
+            "id": run.id,
+            "source_id": run.source_id,
+            "source_name": (src_names.get(run.source_id) or (None, False))[0] or run.source_id,
+            "job_id": run.job_id,
+            "trigger": run.trigger,
+            "mode": run.mode,
+            "effective_mode": run.effective_mode,
+            "status": run.status,
+            "actor_id": run.actor_id,
+            "actor_name": owner_names.get(run.actor_id) if run.actor_id else None,
+            "started_at": started_at.isoformat() if started_at else None,
+            "finished_at": finished_at.isoformat() if finished_at else None,
+            "duration_seconds": (
+                round((finished_at - started_at).total_seconds(), 1)
+                if started_at and finished_at
+                else None
+            ),
+            "scanned": run.scanned,
+            "registered": run.registered,
+            "pii_registered": run.pii_registered,
+            "failed_count": run.failed_count,
+            "drift_count": run.drift_count,
+            "deprecated_count": run.deprecated_count,
+            "coverage": run.coverage,
+            "error": run.error,
+            "detail": run.detail_json if include_detail else None,
+        }
+
+    async def start_collection_run(
+        self,
+        *,
+        source_id: str,
+        trigger: str = "manual",
+        mode: str = "FULL",
+        job_id: str | None = None,
+        actor_id: int | None = None,
+    ) -> int:
+        """创建采集运行记录（RUNNING）并提交——独立记录，立即可见、进程崩溃不丢。"""
+        run = await self._repo.create_collection_run(
+            source_id=source_id,
+            trigger=trigger,
+            mode=mode,
+            job_id=job_id,
+            actor_id=actor_id,
+        )
+        await self._db.commit()
+        return int(run.id)
+
+    async def complete_collection_run(self, run_id: int, result: dict[str, Any]) -> None:
+        """采集成功收尾（回填指标 + COMPLETED）并提交。"""
+        await self._repo.complete_collection_run(run_id, result)
+        await self._db.commit()
+
+    async def fail_collection_run(self, run_id: int, error: str) -> None:
+        """采集失败收尾（记录错误 + FAILED）并提交。"""
+        await self._repo.fail_collection_run(run_id, error)
+        await self._db.commit()
+
+    async def list_collection_runs(
+        self,
+        *,
+        source_id: str | None = None,
+        status: str | None = None,
+        trigger: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """采集运行历史分页列表（按开始时间倒序，批量回填源名/责任人）。"""
+        runs, total = await self._repo.list_collection_runs(
+            source_id=source_id,
+            status=status,
+            trigger=trigger,
+            page=page,
+            page_size=page_size,
+        )
+        source_ids = {r.source_id for r in runs}
+        src_names = await self._repo.get_sources_meta(list(source_ids)) if source_ids else {}
+        actor_ids = {r.actor_id for r in runs if r.actor_id is not None}
+        owner_names = (
+            await self._repo.get_owner_names(list(actor_ids)) if actor_ids else {}
+        )
+        items = [
+            self._to_run_response(r, src_names=src_names, owner_names=owner_names)
+            for r in runs
+        ]
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    async def get_collection_run_detail(self, run_id: int) -> dict[str, Any]:
+        """采集运行详情（含失败/漂移明细）。"""
+        run = await self._repo.get_collection_run(run_id)
+        if run is None:
+            raise NotFoundError(f"采集运行记录不存在: {run_id}")
+        src_names = await self._repo.get_sources_meta([run.source_id])
+        owner_names = (
+            await self._repo.get_owner_names([run.actor_id])
+            if run.actor_id is not None
+            else {}
+        )
+        return self._to_run_response(
+            run,
+            src_names=src_names,
+            owner_names=owner_names,
+            include_detail=True,
+        )
