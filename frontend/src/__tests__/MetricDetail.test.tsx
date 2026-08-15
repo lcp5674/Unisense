@@ -1,4 +1,4 @@
-import { describe, it, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { MetricDetail } from "../pages/MetricDetail";
@@ -169,18 +169,20 @@ describe("MetricDetail", () => {
     await screen.findByText("dashboard-page");
   });
 
-  it("从总览仪表「为你推荐」进入时显示「返回仪表盘」并精确返回仪表盘", async () => {
+  it("从总览仪表「为你推荐」进入时，返回按钮为统一文案并精确返回仪表盘", async () => {
     renderDetail({ pathname: "/detail/sales_gmv_sum_d", state: { from: "dashboard" } });
-    // 来源感知：按钮文案明确指向仪表盘
-    const btn = await screen.findByRole("button", { name: /返回仪表盘/ });
+    // 来源感知影响跳转目标（仪表盘），文案统一为"返回"（与其他页面一致）
+    const btn = await screen.findByRole("button", { name: /返\s*回/ });
+    expect(btn.textContent).not.toMatch(/←/);
     fireEvent.click(btn);
     await screen.findByText("dashboard-page");
   });
 
-  it("从待办中心进入时显示「返回待办中心」并精确返回 /todo", async () => {
+  it("从待办中心进入时，返回按钮为统一文案并精确返回 /todo", async () => {
     renderDetail({ pathname: "/detail/sales_gmv_sum_d", state: { from: "todo" } });
-    // 来源感知：按钮文案明确指向待办中心
-    const btn = await screen.findByRole("button", { name: /返回待办中心/ });
+    // 来源感知影响跳转目标（待办中心），文案统一为"返回"
+    const btn = await screen.findByRole("button", { name: /返\s*回/ });
+    expect(btn.textContent).not.toMatch(/←/);
     fireEvent.click(btn);
     await screen.findByText("todo-page");
   });

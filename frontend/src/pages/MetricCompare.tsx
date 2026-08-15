@@ -48,6 +48,14 @@ export function MetricCompare() {
     <div>
       <div className="page-head">
         <div>
+          <Button
+            type="link"
+            icon={<ArrowLeftOutlined />}
+            onClick={handleBack}
+            style={{ padding: 0, marginBottom: 4 }}
+          >
+            返回
+          </Button>
           <div className="page-kicker">Assets / Compare</div>
           <h2>指标对比</h2>
           <p>
@@ -58,7 +66,6 @@ export function MetricCompare() {
             关键字段并排 diff
           </p>
         </div>
-        <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack}>← 返回</Button>
       </div>
 
       {loading ? (

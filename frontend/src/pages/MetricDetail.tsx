@@ -319,8 +319,9 @@ export function MetricDetail() {
     if (window.history.length > 1) navigate(-1);
     else navigate("/dashboard");
   }
-  // 与其他页面布局一致：仅保留 ArrowLeftOutlined 图标作为唯一箭头，文字不再带 ← 前缀（避免双箭头）。
-  const backLabel = fromTodo ? "返回待办中心" : fromDashboard ? "返回仪表盘" : "返回";
+  // 与其他页面布局一致：仅保留 ArrowLeftOutlined 图标作为唯一箭头，文字固定为"返回"（不再带 ← 前缀，避免双箭头）。
+  // 来源感知只影响跳转目标（待办/仪表盘），不影响文案——全站返回按钮视觉统一。
+  const backLabel = "返回";
 
   async function load() {
     if (!code) return;
