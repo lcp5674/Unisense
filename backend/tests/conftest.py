@@ -46,8 +46,7 @@ def _default_db_url() -> str:
 
 
 os.environ.setdefault("UNISENSE_DB_URL", _default_db_url())
-# JWT 密钥必须 ≥32 字节（PyJWT hmac 对短密钥告警 InsecureKeyLengthWarning，生产校验见 config.py）
-os.environ.setdefault("UNISENSE_JWT_SECRET", "test-secret-key-for-unit-tests-32bytes")
+os.environ.setdefault("UNISENSE_JWT_SECRET", "test-secret-key-for-unit-tests")
 os.environ.setdefault("UNISENSE_ENVIRONMENT", "test")
 
 # 以下导入依赖上面已设置的环境变量（settings 在导入时即读取），

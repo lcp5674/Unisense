@@ -4,7 +4,6 @@ import {
   Button,
   Card,
   Descriptions,
-  Drawer,
   Empty,
   Input,
   Row,
@@ -44,6 +43,7 @@ import type {
 } from "../../types";
 import { SchemaTable } from "../SchemaTable";
 import { DrillDownDrawer } from "./DrillDownDrawer";
+import { ResizableDrawer } from "../ResizableDrawer";
 import { ENTITY_TYPE_LABEL } from "../../utils/enums";
 import { formatCnTime } from "../../utils/timeCn";
 
@@ -704,17 +704,19 @@ export function DescriptionCoverageTab() {
         />
       </Card>
 
-      <Drawer
+      <ResizableDrawer
         title={detail ? `详情：${detail.entity_name}` : "实体详情"}
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
-        width={760}
+        storageKey="unisense.drawer.desc-table.width"
+        defaultWidth={880}
+        minWidth={600}
       >
         {detailLoading ? (
           <Spin tip="加载实体详情…" />
         ) : detail ? (
           <>
-            <Descriptions column={1} bordered size="small">
+            <Descriptions column={2} bordered size="small">
               <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
               <Descriptions.Item label="实体类型">
                 {ENTITY_TYPE_LABEL[detail.entity_type] ?? detail.entity_type}
@@ -797,7 +799,7 @@ export function DescriptionCoverageTab() {
             </Card>
           </>
         ) : null}
-      </Drawer>
+      </ResizableDrawer>
 
       {/* 概览指标下钻明细：点击指标数字展示该口径贡献的 per_table 子集，行点击可进一步下钻实体详情 */}
       <DrillDownDrawer

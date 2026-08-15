@@ -5,7 +5,6 @@ import {
   Button,
   Card,
   Descriptions,
-  Drawer,
   Empty,
   Form,
   Input,
@@ -105,6 +104,7 @@ import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { DescriptionCoverageTab } from "../components/assetmap/DescriptionCoverageTab";
 import { DrillDownDrawer } from "../components/assetmap/DrillDownDrawer";
+import { ResizableDrawer } from "../components/ResizableDrawer";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -540,17 +540,19 @@ function OverviewTab() {
           onClick: () => openCatalogDetail(row),
         })}
       />
-      <Drawer
+      <ResizableDrawer
         title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
-        width={720}
+        storageKey="unisense.drawer.entity.width"
+        defaultWidth={860}
+        minWidth={600}
       >
         {detailLoading ? (
           <Spin tip="加载实体详情…" />
         ) : detail ? (
           <>
-            <Descriptions column={1} bordered size="small">
+            <Descriptions column={2} bordered size="small">
               <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
               <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
               <Descriptions.Item label="数据源">
@@ -635,7 +637,7 @@ function OverviewTab() {
             )}
           </>
         ) : null}
-      </Drawer>
+      </ResizableDrawer>
     </div>
   );
 }
@@ -1055,7 +1057,7 @@ function GraphTab() {
       </Card>
 
       {/* 指标详情抽屉：明细 + 补充描述（TD §12.1） */}
-      <Drawer
+      <ResizableDrawer
         title={
           metricData
             ? `指标详情：${metricData.name}（${metricData.metric_code}）`
@@ -1063,7 +1065,9 @@ function GraphTab() {
         }
         open={metricOpen}
         onClose={() => setMetricOpen(false)}
-        width={760}
+        storageKey="unisense.drawer.metric.width"
+        defaultWidth={880}
+        minWidth={600}
       >
         {metricLoading ? (
           <Spin tip="加载指标详情…" />
@@ -1226,19 +1230,21 @@ function GraphTab() {
             </Card>
           </>
         ) : null}
-      </Drawer>
+      </ResizableDrawer>
 
-       <Drawer
+       <ResizableDrawer
          title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
          open={detailOpen}
          onClose={() => setDetailOpen(false)}
-         width={720}
+         storageKey="unisense.drawer.entity.width"
+         defaultWidth={860}
+         minWidth={600}
        >
         {detailLoading ? (
           <Spin tip="加载实体详情…" />
         ) : detail ? (
           <>
-            <Descriptions column={1} bordered size="small">
+            <Descriptions column={2} bordered size="small">
               <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
               <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
               <Descriptions.Item label="数据源">
@@ -1398,17 +1404,19 @@ function GraphTab() {
             )}
           </>
         ) : null}
-      </Drawer>
+      </ResizableDrawer>
 
-      <Drawer
+      <ResizableDrawer
         title="字段信息"
         open={fieldNode != null}
         onClose={() => setFieldNode(null)}
-        width={440}
+        storageKey="unisense.drawer.field.width"
+        defaultWidth={520}
+        minWidth={460}
       >
         {fieldNode && (
           <>
-            <Descriptions column={1} bordered size="small">
+            <Descriptions column={2} bordered size="small">
               <Descriptions.Item label="字段名">{fieldNode.label}</Descriptions.Item>
               <Descriptions.Item label="类型">字段</Descriptions.Item>
               <Descriptions.Item label="所属表">
@@ -1437,7 +1445,7 @@ function GraphTab() {
             )}
           </>
         )}
-      </Drawer>
+      </ResizableDrawer>
     </div>
   );
 }
@@ -2177,18 +2185,20 @@ function TablesTab() {
           ]}
         />
       )}
-      <Drawer
+      <ResizableDrawer
         title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
-        width={720}
+        storageKey="unisense.drawer.entity.width"
+        defaultWidth={860}
+        minWidth={600}
         destroyOnClose={false}
       >
         {detailLoading ? (
           <Spin tip="加载实体详情…" />
         ) : detail ? (
           <>
-            <Descriptions column={1} bordered size="small">
+            <Descriptions column={2} bordered size="small">
               <Descriptions.Item label="实体名称">
                 {detail.entity_name}
                 <Button
@@ -2372,7 +2382,7 @@ function TablesTab() {
             )}
           </>
         ) : null}
-      </Drawer>
+      </ResizableDrawer>
       <Modal
         title={
           govEntityIds.length > 1

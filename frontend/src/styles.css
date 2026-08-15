@@ -1037,3 +1037,35 @@ body {
   background: rgba(22, 119, 255, 0.5) !important;
   border-right-color: rgba(22, 119, 255, 0.9) !important;
 }
+
+/* ==========================================================================
+   详情抽屉拖拽手柄（ResizableDrawer）：抽屉左边缘，默认浅色可见，hover/拖拽高亮
+   ========================================================================== */
+.resizable-drawer .drawer-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 6px;
+  z-index: 10;
+  cursor: col-resize;
+  background: rgba(0, 0, 0, 0.06);
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+  transition: background 0.2s, border-color 0.2s;
+}
+.resizable-drawer .drawer-resize-handle:hover,
+.resizable-drawer .drawer-resize-handle:active {
+  background: rgba(22, 119, 255, 0.4);
+  border-right-color: rgba(22, 119, 255, 0.7);
+}
+
+/* 详情抽屉内容不紧凑：表格行高 + 描述网格间距舒展一些 */
+.resizable-drawer .ant-table-small .ant-table-cell {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+.resizable-drawer .ant-descriptions-small .ant-descriptions-item-label,
+.resizable-drawer .ant-descriptions-small .ant-descriptions-item-content {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
