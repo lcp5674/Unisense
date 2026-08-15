@@ -45,6 +45,10 @@ export interface MetricResponse {
   backup_owner_id: number | null;
   approver_id: number | null;
   submitted_by: number | null;
+  /** 评审指派（TD §13）：提交评审时指定的评审用户/域评审组，审批页据此校验与展示 */
+  reviewer_id?: number | null;
+  reviewer_type?: "user" | "domain" | null;
+  reviewer_domain?: string | null;
   pii_flag: boolean;
   compliance_reviewed: boolean;
   effective_version: number | null;
@@ -271,6 +275,31 @@ export interface MetricBatchRegisterCandidate {
 export interface MetricBatchRegisterResult {
   batch_id: string;
   candidates: MetricBatchRegisterCandidate[];
+}
+
+// ---- 批量治理（TD §13：提交/通过/打回/下线，逐条收集结果）----
+
+/** 批量提交审核单条项（含评审指派） */
+export interface MetricBatchSubmitItem {
+  metric_code: string;
+  change_reason: string;
+  reviewer_id?: number | null;
+  reviewer_type?: "user" | "domain" | null;
+  reviewer_domain?: string | null;
+}
+
+/** 批量操作单条结果 */
+export interface MetricBatchItemResult {
+  metric_code: string;
+  ok: boolean;
+  message: string;
+}
+
+/** 批量操作响应 data 结构 */
+export interface MetricBatchResult {
+  results: MetricBatchItemResult[];
+  ok_count: number;
+  fail_count: number;
 }
 
 // 冲突（backend/app/services/conflict/schemas.py）

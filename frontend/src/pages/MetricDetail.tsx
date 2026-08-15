@@ -10,6 +10,7 @@ import {
   message,
   Modal,
   Radio,
+  Select,
   Space,
   Tag,
   Tabs,
@@ -427,6 +428,10 @@ export function MetricDetail() {
   const [grayOpen, setGrayOpen] = useState(false);
   const [deprecateOpen, setDeprecateOpen] = useState(false);
   const [successor, setSuccessor] = useState("");
+  // 提交评审弹窗（TD §13）：可指派评审用户或域评审组
+  const [submitOpen, setSubmitOpen] = useState(false);
+  const [submitReviewerType, setSubmitReviewerType] = useState<"user" | "domain" | null>(null);
+  const [submitReviewerId, setSubmitReviewerId] = useState<number | null>(null);
   // 仲裁「保留差异+指定改名」→ Owner 在详情页改名（TD §12.4）
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
@@ -702,7 +707,15 @@ export function MetricDetail() {
   const actions = (
     <Space wrap style={{ marginBottom: 16 }}>
       {(metric.status === "DRAFT" || metric.status === "EXPERIMENTAL") && (
-        <Button icon={<SendOutlined />} loading={busy} onClick={() => runAction(() => submitReview(metric.metric_code), "提交评审")}>
+        <Button
+          icon={<SendOutlined />}
+          loading={busy}
+          onClick={() => {
+            setSubmitReviewerType(null);
+            setSubmitReviewerId(null);
+            setSubmitOpen(true);
+          }}
+        >
           提交评审
         </Button>
       )}
@@ -957,6 +970,67 @@ export function MetricDetail() {
           value={successor}
           onChange={(e) => setSuccessor(e.target.value)}
         />
+      </Modal>
+
+      {/* 提交评审弹窗（TD §13）：可指派评审用户或域评审组，审批页仅被指派者可评审 */}
+      <Modal
+        title="提交评审"
+        open={submitOpen}
+        onOk={() =>
+          runAction(
+            () =>
+              submitReview(metric.metric_code, "提交评审", {
+                reviewer_id: submitReviewerType === "user" ? submitReviewerId : null,
+                reviewer_type: submitReviewerType,
+                reviewer_domain: metric.domain,
+              }),
+            "提交评审",
+          ).then(() => setSubmitOpen(false))
+        }
+        confirmLoading={busy}
+        onCancel={() => setSubmitOpen(false)}
+        okText="提交评审"
+      >
+        <Paragraph type="secondary">
+          提交后将进入评审状态（DRAFT → REVIEW），由指定评审人通过或打回。
+        </Paragraph>
+        <Space wrap style={{ marginTop: 8 }}>
+          <Select
+            style={{ width: 180 }}
+            placeholder="评审指派（可选）"
+            allowClear
+            value={submitReviewerType ?? undefined}
+            onChange={(v) => {
+              setSubmitReviewerType(v ?? null);
+              setSubmitReviewerId(null);
+            }}
+            options={[
+              { value: "user", label: "指定评审用户" },
+              { value: "domain", label: "域评审组" },
+            ]}
+          />
+          {submitReviewerType === "user" && (
+            <Select
+              style={{ width: 220 }}
+              placeholder="选择评审用户"
+              showSearch
+              optionFilterProp="label"
+              value={submitReviewerId ?? undefined}
+              onChange={(v) => setSubmitReviewerId(v ?? null)}
+              options={users.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
+            />
+          )}
+          {submitReviewerType === "domain" && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              由 <b>{metric.domain}</b> 域评审组评审（该域 domain_admin/reviewer 可评审）
+            </span>
+          )}
+          {submitReviewerType === null && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              不指派 → 由域管理员兜底评审
+            </span>
+          )}
+        </Space>
       </Modal>
 
       {/* 仲裁「保留差异+指定改名」：Owner 在详情页改名（TD §12.4，改 name 区分同名不同义） */}

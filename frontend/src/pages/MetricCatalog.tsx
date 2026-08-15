@@ -28,6 +28,9 @@ import {
   removeFavorite,
   submitReview,
   deleteMetric,
+  batchApproveMetrics,
+  batchRejectMetrics,
+  batchDeprecateMetrics,
   UnisenseApiError,
 } from "../api";
 import type { MetricResponse, SubjectDomainTreeNode } from "../types";
@@ -59,6 +62,15 @@ const STATUS_LABEL: Record<string, string> = {
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",
   DATA_SOURCE_DROPPED: "数据源下线",
+};
+
+// 批量操作动作中文名（结果提示用）
+const BATCH_ACTION_LABEL: Record<string, string> = {
+  submit: "提交审核",
+  delete: "删除",
+  approve: "通过",
+  reject: "打回",
+  deprecate: "下线",
 };
 
 // 健康度分级（backend metric_health_score：>=85 EXCELLENT / >=70 GOOD / >=55 WARNING / <55 CRITICAL）
@@ -250,9 +262,18 @@ export function MetricCatalog() {
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   // 只看收藏：客户端过滤当前页（后端 list 无收藏过滤参数）
   const [favoritesOnly, setFavoritesOnly] = useState(false);
-  // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除
-  const [batchAction, setBatchAction] = useState<"submit" | "delete" | null>(null);
+  // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除 /
+  // approve=批量通过 / reject=批量打回 / deprecate=批量下线
+  const [batchAction, setBatchAction] = useState<
+    "submit" | "delete" | "approve" | "reject" | "deprecate" | null
+  >(null);
   const [batchBusy, setBatchBusy] = useState(false);
+  // 批量提交审核的评审指派（TD §13）
+  const [batchReviewerType, setBatchReviewerType] = useState<"user" | "domain" | null>(null);
+  const [batchReviewerId, setBatchReviewerId] = useState<number | null>(null);
+  // 批量打回原因 / 批量下线替代指标映射
+  const [batchRejectReason, setBatchRejectReason] = useState("");
+  const [batchSuccessors, setBatchSuccessors] = useState<Record<string, string>>({});
   // 预览抽屉
   const [previewMetric, setPreviewMetric] = useState<MetricResponse | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -414,32 +435,85 @@ export function MetricCatalog() {
   // 批量操作执行：逐条提交审核 / 删除，收集成功与失败明细
   async function runBatch() {
     if (!batchAction || !selected.length) return;
-    const targets = selected.filter((m) => m.status === "DRAFT");
-    if (!targets.length) {
-      message.warning("勾选的指标中没有草稿状态可操作");
-      setBatchAction(null);
-      return;
-    }
     setBatchBusy(true);
     let ok = 0;
     const errors: string[] = [];
-    for (const m of targets) {
-      try {
-        if (batchAction === "submit") await submitReview(m.metric_code);
-        else await deleteMetric(m.metric_code);
-        ok += 1;
-      } catch (err) {
-        errors.push(
-          `${m.metric_code}: ${err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "失败"}`,
-        );
+    try {
+      if (batchAction === "approve") {
+        const codes = selected.filter((m) => m.status === "REVIEW").map((m) => m.metric_code);
+        if (!codes.length) {
+          message.warning("勾选的指标中没有待评审（REVIEW）状态");
+          return;
+        }
+        const res = await batchApproveMetrics(codes);
+        ok = res.ok_count;
+        res.results.filter((r) => !r.ok).forEach((r) => errors.push(`${r.metric_code}: ${r.message}`));
+      } else if (batchAction === "reject") {
+        if (!batchRejectReason.trim() || batchRejectReason.trim().length < 4) {
+          message.warning("请填写驳回原因（至少 4 字）");
+          return;
+        }
+        const codes = selected.filter((m) => m.status === "REVIEW").map((m) => m.metric_code);
+        if (!codes.length) {
+          message.warning("勾选的指标中没有待评审（REVIEW）状态");
+          return;
+        }
+        const res = await batchRejectMetrics(codes, batchRejectReason.trim());
+        ok = res.ok_count;
+        res.results.filter((r) => !r.ok).forEach((r) => errors.push(`${r.metric_code}: ${r.message}`));
+      } else if (batchAction === "deprecate") {
+        const items = selected
+          .filter((m) => m.status === "PUBLISHED" && batchSuccessors[m.metric_code])
+          .map((m) => ({ metric_code: m.metric_code, successor_code: batchSuccessors[m.metric_code] }));
+        if (!items.length) {
+          message.warning("请为勾选的已发布指标填写替代指标");
+          return;
+        }
+        const res = await batchDeprecateMetrics(items);
+        ok = res.ok_count;
+        res.results.filter((r) => !r.ok).forEach((r) => errors.push(`${r.metric_code}: ${r.message}`));
+      } else {
+        // submit / delete：逐条处理（submit 带评审指派）
+        const targets = selected.filter((m) => m.status === "DRAFT");
+        if (!targets.length) {
+          message.warning("勾选的指标中没有草稿状态可操作");
+          return;
+        }
+        for (const m of targets) {
+          try {
+            if (batchAction === "submit") {
+              await submitReview(m.metric_code, "批量提交审核", {
+                reviewer_id: batchReviewerType === "user" ? batchReviewerId : null,
+                reviewer_type: batchReviewerType,
+                reviewer_domain: m.domain,
+              });
+            } else {
+              await deleteMetric(m.metric_code);
+            }
+            ok += 1;
+          } catch (err) {
+            errors.push(
+              `${m.metric_code}: ${err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "失败"}`,
+            );
+          }
+        }
       }
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量操作失败",
+      );
+    } finally {
+      setBatchBusy(false);
+      setBatchAction(null);
+      if (ok) message.success(`${BATCH_ACTION_LABEL[batchAction] ?? "操作"}成功 ${ok} 个`);
+      if (errors.length) message.error(errors.slice(0, 3).join("；"));
+      setSelected([]);
+      setBatchRejectReason("");
+      setBatchSuccessors({});
+      setBatchReviewerType(null);
+      setBatchReviewerId(null);
+      load();
     }
-    setBatchBusy(false);
-    setBatchAction(null);
-    if (ok) message.success(`${batchAction === "submit" ? "提交审核" : "删除"}成功 ${ok} 个`);
-    if (errors.length) message.error(errors.slice(0, 3).join("；"));
-    setSelected([]);
-    load();
   }
 
   function exportCsv() {
@@ -657,6 +731,24 @@ export function MetricCatalog() {
                   icon: <CheckCircleOutlined />,
                   disabled: !selected.some((m) => m.status === "DRAFT"),
                 },
+                {
+                  key: "approve",
+                  label: "批量通过（评审中）",
+                  icon: <CheckCircleOutlined />,
+                  disabled: !selected.some((m) => m.status === "REVIEW"),
+                },
+                {
+                  key: "reject",
+                  label: "批量打回（评审中）",
+                  icon: <ClockCircleOutlined />,
+                  disabled: !selected.some((m) => m.status === "REVIEW"),
+                },
+                {
+                  key: "deprecate",
+                  label: "批量下线（已发布）",
+                  icon: <DeleteOutlined />,
+                  disabled: !selected.some((m) => m.status === "PUBLISHED"),
+                },
                 { type: "divider" },
                 {
                   key: "delete",
@@ -666,7 +758,7 @@ export function MetricCatalog() {
                   disabled: !selected.some((m) => m.status === "DRAFT"),
                 },
               ],
-              onClick: ({ key }) => setBatchAction(key as "submit" | "delete"),
+              onClick: ({ key }) => setBatchAction(key as "submit" | "delete" | "approve" | "reject" | "deprecate"),
             }}
             trigger={["click"]}
           >
@@ -821,20 +913,123 @@ export function MetricCatalog() {
       </Drawer>
 
       <Modal
-        title={batchAction === "submit" ? "批量提交审核" : "批量删除草稿"}
+        title={
+          batchAction === "submit"
+            ? "批量提交审核"
+            : batchAction === "approve"
+              ? "批量通过"
+              : batchAction === "reject"
+                ? "批量打回"
+                : batchAction === "deprecate"
+                  ? "批量下线"
+                  : "批量删除草稿"
+        }
         open={batchAction !== null}
         confirmLoading={batchBusy}
         onOk={runBatch}
         onCancel={() => setBatchAction(null)}
-        okText={batchAction === "submit" ? "提交" : "删除"}
-        okButtonProps={{ danger: batchAction === "delete" }}
+        okText={
+          batchAction === "submit"
+            ? "提交"
+            : batchAction === "approve"
+              ? "通过"
+              : batchAction === "reject"
+                ? "打回"
+                : batchAction === "deprecate"
+                  ? "下线"
+                  : "删除"
+        }
+        okButtonProps={{ danger: batchAction === "delete" || batchAction === "deprecate" }}
       >
-        {batchAction === "submit" ? (
+        {batchAction === "submit" && (
+          <div>
+            <p>
+              将勾选的 <b>{selected.filter((m) => m.status === "DRAFT").length}</b> 个草稿指标提交审核
+              （DRAFT → REVIEW）。非草稿状态的勾选项将被跳过。
+            </p>
+            <p style={{ marginTop: 12, marginBottom: 4 }}>
+              评审指派（可选）：指定评审用户或域评审组，审批页仅被指派者可评审
+            </p>
+            <Space wrap>
+              <Select
+                style={{ width: 160 }}
+                placeholder="不指派（域管理员兜底）"
+                allowClear
+                value={batchReviewerType ?? undefined}
+                onChange={(v) => setBatchReviewerType(v ?? null)}
+                options={[
+                  { value: "user", label: "指定评审用户" },
+                  { value: "domain", label: "域评审组" },
+                ]}
+              />
+              {batchReviewerType === "user" && (
+                <Select
+                  style={{ width: 220 }}
+                  placeholder="选择评审用户"
+                  showSearch
+                  optionFilterProp="label"
+                  value={batchReviewerId ?? undefined}
+                  onChange={(v) => setBatchReviewerId(v ?? null)}
+                  options={[...userMap.entries()].map(([id, name]) => ({
+                    value: id,
+                    label: `${name}（${id}）`,
+                  }))}
+                />
+              )}
+              {batchReviewerType === "domain" && (
+                <span className="muted" style={{ fontSize: 12 }}>
+                  将按各指标自身域组建评审组（该域 domain_admin/reviewer 可评审）
+                </span>
+              )}
+            </Space>
+          </div>
+        )}
+        {batchAction === "approve" && (
           <p>
-            将勾选的 <b>{selected.filter((m) => m.status === "DRAFT").length}</b> 个草稿指标提交审核
-            （DRAFT → REVIEW）。非草稿状态的勾选项将被跳过。
+            将勾选的 <b>{selected.filter((m) => m.status === "REVIEW").length}</b> 个评审中指标通过并发布
+            （REVIEW → PUBLISHED）。评审人指派校验由后端逐条执行，未通过项显示原因。
           </p>
-        ) : (
+        )}
+        {batchAction === "reject" && (
+          <div>
+            <p>
+              将勾选的 <b>{selected.filter((m) => m.status === "REVIEW").length}</b> 个评审中指标打回草稿
+              （REVIEW → DRAFT）。
+            </p>
+            <Input.TextArea
+              rows={2}
+              placeholder="驳回原因（必填，至少 4 字）"
+              value={batchRejectReason}
+              onChange={(e) => setBatchRejectReason(e.target.value)}
+            />
+          </div>
+        )}
+        {batchAction === "deprecate" && (
+          <div>
+            <p>
+              将勾选的 <b>{selected.filter((m) => m.status === "PUBLISHED").length}</b> 个已发布指标下线
+              （PUBLISHED → DEPRECATED），须为每个指标填写替代指标编码。
+            </p>
+            {selected
+              .filter((m) => m.status === "PUBLISHED")
+              .map((m) => (
+                <div key={m.metric_code} style={{ marginBottom: 8 }}>
+                  <span className="mono" style={{ fontSize: 12, marginRight: 8 }}>
+                    {m.metric_code}
+                  </span>
+                  <Input
+                    style={{ width: 280 }}
+                    placeholder="替代指标编码（须已发布）"
+                    value={batchSuccessors[m.metric_code] ?? ""}
+                    onChange={(e) =>
+                      setBatchSuccessors((prev) => ({ ...prev, [m.metric_code]: e.target.value }))
+                    }
+                  />
+                </div>
+              ))}
+          </div>
+        )}
+        {batchAction === "delete" && (
           <p>
             将删除勾选的 <b>{selected.filter((m) => m.status === "DRAFT").length}</b> 个草稿指标
             （软删除，仅 platform_admin 可执行）。此操作不可恢复。

@@ -413,7 +413,15 @@ describe("MetricCatalog", () => {
     await screen.findByText(/将勾选的/);
     fireEvent.click(screen.getByRole("button", { name: /提\s*交/ }));
     await waitFor(() => {
-      expect(mockedSubmitReview).toHaveBeenCalledWith("sales_gmv_sum_d");
+      expect(mockedSubmitReview).toHaveBeenCalledWith(
+        "sales_gmv_sum_d",
+        "批量提交审核",
+        expect.objectContaining({
+          reviewer_id: null,
+          reviewer_type: null,
+          reviewer_domain: "sales",
+        }),
+      );
     });
   });
 

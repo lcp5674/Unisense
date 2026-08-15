@@ -69,6 +69,8 @@ import {
   ArchivedMetricResponse,
   MetricBatchRegisterRequest,
   MetricBatchRegisterResult,
+  MetricBatchResult,
+  MetricBatchSubmitItem,
   MetricCreateRequest,
   MetricListResponse,
   MetricDimension,
@@ -611,17 +613,72 @@ export async function piiReview(code: string): Promise<MetricResponse> {
 }
 
 // 提交评审：DRAFT → REVIEW；change_reason 缺省"提交评审"（后端 /submit，对齐 FR-003）
+// 评审指派（TD §13）：可传 reviewer_id/reviewer_type/reviewer_domain 指定评审用户或域评审组
 export async function submitReview(
   metricCode: string,
   changeReason = "提交评审",
+  reviewer?: {
+    reviewer_id?: number | null;
+    reviewer_type?: "user" | "domain" | null;
+    reviewer_domain?: string | null;
+  },
 ): Promise<MetricResponse> {
   return request<MetricResponse>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(metricCode)}/submit`,
     {
       method: "POST",
-      body: JSON.stringify({ change_reason: changeReason }),
+      body: JSON.stringify({
+        change_reason: changeReason,
+        reviewer_id: reviewer?.reviewer_id ?? null,
+        reviewer_type: reviewer?.reviewer_type ?? null,
+        reviewer_domain: reviewer?.reviewer_domain ?? null,
+      }),
     },
   );
+}
+
+// ---- 批量治理（TD §13：提交/通过/打回/下线，逐条收集结果不整体失败）----
+
+// 批量提交审核（可带评审指派）
+export async function batchSubmitMetrics(
+  items: MetricBatchSubmitItem[],
+): Promise<MetricBatchResult> {
+  return request<MetricBatchResult>(`${API_BASE}/metric-definitions/batch-submit`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
+// 批量审核通过（= 批量发布）
+export async function batchApproveMetrics(
+  metricCodes: string[],
+  mode: "standard" | "experimental" = "standard",
+): Promise<MetricBatchResult> {
+  return request<MetricBatchResult>(`${API_BASE}/metric-definitions/batch-approve`, {
+    method: "POST",
+    body: JSON.stringify({ metric_codes: metricCodes, mode }),
+  });
+}
+
+// 批量审核驳回
+export async function batchRejectMetrics(
+  metricCodes: string[],
+  reason: string,
+): Promise<MetricBatchResult> {
+  return request<MetricBatchResult>(`${API_BASE}/metric-definitions/batch-reject`, {
+    method: "POST",
+    body: JSON.stringify({ metric_codes: metricCodes, reason }),
+  });
+}
+
+// 批量下线（废弃，每项须带替代指标）
+export async function batchDeprecateMetrics(
+  items: { metric_code: string; successor_code: string }[],
+): Promise<MetricBatchResult> {
+  return request<MetricBatchResult>(`${API_BASE}/metric-definitions/batch-deprecate`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
 }
 
 // 审核通过：REVIEW → PUBLISHED/EXPERIMENTAL（后端 /approve，对齐 FR-004）

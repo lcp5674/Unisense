@@ -25,11 +25,15 @@ vi.mock("../api", () => {
   return {
     listMetrics: vi.fn(),
     reviewMetric: vi.fn(),
+    fetchCurrentUser: vi.fn(),
+    listUsers: vi.fn(),
+    batchApproveMetrics: vi.fn(),
+    batchRejectMetrics: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listMetrics } from "../api";
+import { fetchCurrentUser, listMetrics, listUsers } from "../api";
 const mockedList = vi.mocked(listMetrics);
 
 const metric: MetricResponse = {
@@ -87,6 +91,16 @@ describe("MetricReview 指标审批", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 100 });
+    // 审批页需当前用户身份 + 用户映射（默认平台管理员，可评审任意指标）
+    vi.mocked(fetchCurrentUser).mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "管理员",
+      role: "platform_admin",
+      domain: null,
+      org_id: 1,
+    });
+    vi.mocked(listUsers).mockResolvedValue([]);
   });
 
   it("加载并展示待审核指标", async () => {
