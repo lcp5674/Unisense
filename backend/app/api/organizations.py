@@ -10,7 +10,7 @@
 审计：写操作落 ``audit_log``（action=ORG_CREATE / ORG_UPDATE）。
 
 状态机：active / suspended / deleted。自我保护：
-- 不能将「默认组织」（code=default）置为 deleted；
+- 不能将「默认组织」（code=default）置为 suspended / deleted（防止锁死全平台默认租户）；
 - 不能停用 / 删除当前登录管理员所属组织（防自锁）；
 - 置 deleted 前校验组织下无用户（有用户须先迁移或回收，否则 409）。
 """
@@ -181,7 +181,7 @@ async def update_organization(
 ) -> ApiResponse[OrganizationView]:
     """更新组织（名称/状态）。
 
-    自我保护：默认组织不可删除；不可停用/删除当前管理员所属组织；
+    自我保护：默认组织不可停用/删除；不可停用/删除当前管理员所属组织；
     置 deleted 前须组织下无用户（409）。
     """
     row = (
@@ -195,9 +195,9 @@ async def update_organization(
     if payload.name is not None:
         row.name = payload.name
     if payload.status is not None and payload.status != row.status:
-        if row.code == DEFAULT_ORG_CODE and payload.status == "deleted":
+        if row.code == DEFAULT_ORG_CODE and payload.status in ("suspended", "deleted"):
             raise ValidationError(
-                "默认组织不可删除", error_code="ORG_PROTECTED", ctx={"code": row.code}
+                "默认组织不可停用或删除", error_code="ORG_PROTECTED", ctx={"code": row.code}
             )
         if payload.status in ("suspended", "deleted") and row.id == user.org_id:
             raise ValidationError(
