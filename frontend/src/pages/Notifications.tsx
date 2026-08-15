@@ -175,7 +175,7 @@ const PAYLOAD_FIELD_LABEL_FE: Record<string, string> = {
   org_id: "组织ID",
   org_name: "组织名称",
   status: "状态",
-  source_id: "数据源",
+  source_id: "数据源ID",
   source_name: "数据源名称",
   entity_name: "实体名称",
   table_name: "表名",

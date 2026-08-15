@@ -358,10 +358,10 @@ describe("通知中心 - 信息展示增强", () => {
     await waitFor(() => expect(screen.getByText("目录已废弃")).toBeInTheDocument());
     // body 自然语言（整行展示）
     expect(screen.getByText("目录 销售明细表 已被废弃")).toBeInTheDocument();
-    // payload 补充业务字段未丢弃：实体名称/数据源/状态均展示
+    // payload 补充业务字段未丢弃：实体名称/数据源ID/状态均展示
     expect(screen.getByText("实体名称")).toBeInTheDocument();
     expect(screen.getByText("销售明细表")).toBeInTheDocument();
-    expect(screen.getByText("数据源")).toBeInTheDocument();
+    expect(screen.getByText("数据源ID")).toBeInTheDocument();
     expect(screen.getByText("mysql_unisense")).toBeInTheDocument();
     expect(screen.getByText("状态")).toBeInTheDocument();
     expect(screen.getByText("启用")).toBeInTheDocument();
