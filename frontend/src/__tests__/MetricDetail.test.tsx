@@ -119,6 +119,7 @@ function renderDetail(initialEntry: { pathname: string; state?: { from?: string 
         <Route path="/detail/:code" element={<MetricDetail />} />
         <Route path="/catalog" element={<div>catalog-page</div>} />
         <Route path="/dashboard" element={<div>dashboard-page</div>} />
+        <Route path="/todo" element={<div>todo-page</div>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -174,5 +175,13 @@ describe("MetricDetail", () => {
     const btn = await screen.findByRole("button", { name: /返回仪表盘/ });
     fireEvent.click(btn);
     await screen.findByText("dashboard-page");
+  });
+
+  it("从待办中心进入时显示「返回待办中心」并精确返回 /todo", async () => {
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d", state: { from: "todo" } });
+    // 来源感知：按钮文案明确指向待办中心
+    const btn = await screen.findByRole("button", { name: /返回待办中心/ });
+    fireEvent.click(btn);
+    await screen.findByText("todo-page");
   });
 });
