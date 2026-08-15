@@ -3,6 +3,7 @@ import { Button, Input, Space, Spin, Table, Tag, Tooltip, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { EditOutlined, CheckOutlined, CloseOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import type { SchemaColumn, DescriptionSource } from "../types";
+import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../hooks/usePersistentPageSize";
 
 /** 描述来源 Tag 配置 */
 const SOURCE_TAG_CONFIG: Record<string, { label: string; color: string }> = {
@@ -50,6 +51,12 @@ export function SchemaTable({
   // 推断中
   const [inferringColumn, setInferringColumn] = useState<string | null>(null);
   const [batchInferring, setBatchInferring] = useState(false);
+
+  // 每页条数可切换并持久化（实体详情抽屉字段表）
+  const { pageSize, onShowSizeChange } = usePersistentPageSize(
+    "unisense.schema-table.pageSize",
+    20,
+  );
 
   /** 空描述字段数量（用于批量推断按钮） */
   const emptyDescCount = data.filter(
@@ -205,7 +212,16 @@ export function SchemaTable({
         rowKey={(r) => r.name}
         columns={tableColumns}
         size="small"
-        pagination={data.length > 20 ? { pageSize: 20 } : false}
+        pagination={
+          data.length > 20
+            ? {
+                pageSize,
+                showSizeChanger: true,
+                pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+                onShowSizeChange,
+              }
+            : false
+        }
         locale={{ emptyText: "暂无字段信息" }}
       />
     </Spin>

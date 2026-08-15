@@ -2,6 +2,7 @@ import { Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { GetComponentProps } from "rc-table/lib/interface";
 import { ResizableDrawer } from "../ResizableDrawer";
+import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../../hooks/usePersistentPageSize";
 
 /**
  * 通用明细下钻抽屉：概览指标点击值后展示明细表。
@@ -33,12 +34,17 @@ export function DrillDownDrawer<T extends Record<string, unknown>>({
   onRow,
   storageKey,
 }: DrillDownDrawerProps<T>) {
+  const drillStorageKey = storageKey ?? "unisense.drawer.drill.width";
+  const { pageSize, onShowSizeChange } = usePersistentPageSize(
+    `${drillStorageKey}.pageSize`,
+    20,
+  );
   return (
     <ResizableDrawer
       title={title}
       open={open}
       onClose={onClose}
-      storageKey={storageKey ?? "unisense.drawer.drill.width"}
+      storageKey={drillStorageKey}
       defaultWidth={860}
       minWidth={560}
       destroyOnClose
@@ -50,7 +56,13 @@ export function DrillDownDrawer<T extends Record<string, unknown>>({
         size="middle"
         loading={loading}
         onRow={onRow}
-        pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+        pagination={{
+          pageSize,
+          showSizeChanger: true,
+          pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+          onShowSizeChange,
+          showTotal: (t) => `共 ${t} 条`,
+        }}
       />
     </ResizableDrawer>
   );

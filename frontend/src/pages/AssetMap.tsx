@@ -97,6 +97,7 @@ import type {
   SubjectDomainTreeNode,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { SchemaTable } from "../components/SchemaTable";
 import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
@@ -1881,6 +1882,7 @@ function OrphansTab() {
   const [items, setItems] = useState<AssetTableItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.orphans.pageSize", 20);
 
   useEffect(() => {
     fetchAssetOrphans()
@@ -1906,7 +1908,12 @@ function OrphansTab() {
           dataSource={items}
           rowKey={(r) => `${r.source_id}-${r.entity_name}`}
           size="small"
-          pagination={{ pageSize: 20 }}
+          pagination={{
+            pageSize,
+            showSizeChanger: true,
+            pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+            onShowSizeChange,
+          }}
           columns={[
             { title: "数据源", dataIndex: "source_id", key: "source_id" },
             { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true },
@@ -1939,6 +1946,7 @@ function TablesTab() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.tables.pageSize", 20);
   // 批量行选择（责任人设置 / 敏感度重分类共用）
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   // 责任人下拉候选（后端 /auth/users，Owner 可为 null=解除归属）
@@ -2124,7 +2132,12 @@ function TablesTab() {
           dataSource={items}
           rowKey={(r) => `${r.source_id}-${r.entity_name}`}
           size="small"
-          pagination={{ pageSize: 20 }}
+          pagination={{
+            pageSize,
+            showSizeChanger: true,
+            pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+            onShowSizeChange,
+          }}
           rowSelection={{
             selectedRowKeys,
             onChange: (keys) => setSelectedRowKeys(keys),
@@ -2440,6 +2453,7 @@ function SearchTab() {
   const [searched, setSearched] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.search.pageSize", 20);
 
   async function doSearch() {
     if (!q.trim()) {
@@ -2501,7 +2515,12 @@ function SearchTab() {
             dataSource={items}
             rowKey={(r) => `${r.type}-${r.id}-${r.name}`}
             size="small"
-            pagination={{ pageSize: 20 }}
+            pagination={{
+              pageSize,
+              showSizeChanger: true,
+              pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+              onShowSizeChange,
+            }}
             onRow={(r) => ({
               onClick: () => {
                 if (r.type === "metric") navigate(`/detail/${encodeURIComponent(r.name)}`);
@@ -2794,6 +2813,7 @@ function ChangesTab() {
   const [days, setDays] = useState(7);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.changes.pageSize", 10);
 
   useEffect(() => {
     setLoading(true);
@@ -2829,7 +2849,12 @@ function ChangesTab() {
         dataSource={data.catalogs}
         rowKey={(r) => `c-${r.id}`}
         size="small"
-        pagination={{ pageSize: 10 }}
+        pagination={{
+          pageSize,
+          showSizeChanger: true,
+          pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+          onShowSizeChange,
+        }}
         title={() => <b>目录</b>}
         columns={[
           { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
@@ -2861,7 +2886,12 @@ function ChangesTab() {
         dataSource={data.metrics}
         rowKey={(r) => `m-${r.metric_code}`}
         size="small"
-        pagination={{ pageSize: 10 }}
+        pagination={{
+          pageSize,
+          showSizeChanger: true,
+          pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+          onShowSizeChange,
+        }}
         style={{ marginTop: 16 }}
         title={() => <b>指标</b>}
         onRow={(r) => ({
@@ -2914,6 +2944,7 @@ function MyAssetsTab() {
   const [data, setData] = useState<AssetMyAssets | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.my-assets.pageSize", 10);
 
   useEffect(() => {
     fetchAssetMyAssets()
@@ -2937,7 +2968,12 @@ function MyAssetsTab() {
         dataSource={data.catalogs}
         rowKey={(r) => `c-${r.id}`}
         size="small"
-        pagination={{ pageSize: 10 }}
+        pagination={{
+          pageSize,
+          showSizeChanger: true,
+          pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+          onShowSizeChange,
+        }}
         title={() => <b>我的目录</b>}
         columns={[
           { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
@@ -2962,7 +2998,12 @@ function MyAssetsTab() {
         dataSource={data.metrics}
         rowKey={(r) => `m-${r.metric_code}`}
         size="small"
-        pagination={{ pageSize: 10 }}
+        pagination={{
+          pageSize,
+          showSizeChanger: true,
+          pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+          onShowSizeChange,
+        }}
         style={{ marginTop: 16 }}
         title={() => <b>我的指标</b>}
         onRow={(r) => ({

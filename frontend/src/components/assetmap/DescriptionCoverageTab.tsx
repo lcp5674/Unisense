@@ -46,6 +46,7 @@ import { DrillDownDrawer } from "./DrillDownDrawer";
 import { ResizableDrawer } from "../ResizableDrawer";
 import { ENTITY_TYPE_LABEL } from "../../utils/enums";
 import { formatCnTime } from "../../utils/timeCn";
+import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../../hooks/usePersistentPageSize";
 
 /**
  * 概览指标 → 明细下钻的口径标识。
@@ -386,6 +387,10 @@ export function DescriptionCoverageTab() {
   const [metricDrillColumns, setMetricDrillColumns] = useState<
     ColumnsType<TableCoverageItem>
   >([]);
+  const { pageSize, onShowSizeChange } = usePersistentPageSize(
+    "unisense.desc-coverage.pageSize",
+    20,
+  );
 
   async function load() {
     setLoading(true);
@@ -696,7 +701,13 @@ export function DescriptionCoverageTab() {
           columns={tableCoverageCols}
           rowKey={(r) => r.catalog_id}
           size="small"
-          pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 张表` }}
+          pagination={{
+            pageSize,
+            showSizeChanger: true,
+            pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+            onShowSizeChange,
+            showTotal: (t) => `共 ${t} 张表`,
+          }}
           onRow={(record) => ({
             onClick: () => openDetail(record.catalog_id),
             style: { cursor: "pointer" },
