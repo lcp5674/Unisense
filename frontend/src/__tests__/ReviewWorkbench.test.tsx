@@ -153,6 +153,12 @@ describe("ReviewWorkbench 冲突仲裁", () => {
     // 差异对比被加载展示
     await waitFor(() => expect(mockedCompare).toHaveBeenCalledWith("sales_gmv_day", "sales_gmv_d"));
     expect(screen.getByText("粒度")).toBeInTheDocument();
+    // 对比表头标注候选指标/现有指标身份（弹窗内）
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("候选指标")).toBeInTheDocument();
+    expect(within(dialog).getByText("现有指标")).toBeInTheDocument();
+    expect(within(dialog).getByText("sales_gmv_day")).toBeInTheDocument();
+    expect(within(dialog).getByText("sales_gmv_d")).toBeInTheDocument();
     // 按类型给出裁决选项（同名异义 → 采纳现有为权威为默认）
     expect(screen.getByText("采纳现有为权威")).toBeInTheDocument();
     expect(screen.getByText("保留差异（非真冲突）")).toBeInTheDocument();
@@ -181,6 +187,10 @@ describe("ReviewWorkbench 冲突仲裁", () => {
     await waitFor(() => expect(screen.getByText(/差异对比 CF-A/)).toBeInTheDocument());
     await waitFor(() => expect(mockedCompare).toHaveBeenCalledWith("sales_gmv_day", "sales_gmv_d"));
     expect(screen.getByText("粒度")).toBeInTheDocument();
+    // 对比弹窗同样标注候选/现有身份
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("候选指标")).toBeInTheDocument();
+    expect(within(dialog).getByText("现有指标")).toBeInTheDocument();
   });
 
   it("PII 冲突不提供仲裁，展示已转交治理标记", async () => {

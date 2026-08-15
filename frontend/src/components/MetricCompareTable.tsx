@@ -33,6 +33,29 @@ function renderValue(v: unknown) {
   return <span className="mono">{String(v)}</span>;
 }
 
+/** 侧边标签：标注该列指标的身份（候选指标=蓝强调 / 现有指标=灰中性），仅冲突对比场景传入 */
+function SideTag({ label, tone }: { label: string; tone: "a" | "b" }) {
+  const bg = tone === "a" ? "rgba(47,84,235,0.10)" : "rgba(140,140,140,0.14)";
+  const fg = tone === "a" ? "#2f54eb" : "#6b7280";
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "1px 8px",
+        borderRadius: 6,
+        fontSize: 12,
+        fontWeight: 600,
+        lineHeight: 1.6,
+        background: bg,
+        color: fg,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 /** 差异等级 pill：圆点 + 文字，密度比 antd 默认 Tag 更紧凑、更具信号灯气质 */
 function DiffPill({ level }: { level: keyof typeof DIFF_META }) {
   const m = DIFF_META[level] ?? DIFF_META.identical;
@@ -120,12 +143,17 @@ export function MetricCompareTable({
   result,
   codeA,
   codeB,
+  labelA,
+  labelB,
   size = "middle",
   showSummary = true,
 }: {
   result: MetricCompareResult;
   codeA: string;
   codeB: string;
+  /** 侧边标签（如「候选指标」「现有指标」）：传入时表头以彩色标签标注该列身份 */
+  labelA?: string;
+  labelB?: string;
   size?: "middle" | "small";
   showSummary?: boolean;
 }) {
@@ -151,6 +179,24 @@ export function MetricCompareTable({
     };
   });
 
+  // 表头：传入 label 时显示「候选指标/现有指标」彩色标签 + 编码，否则保持纯编码（独立对比页）
+  const headA = labelA ? (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      <SideTag label={labelA} tone="a" />
+      <span className="mono">{codeA || "指标 A"}</span>
+    </span>
+  ) : (
+    codeA || "指标 A"
+  );
+  const headB = labelB ? (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      <SideTag label={labelB} tone="b" />
+      <span className="mono">{codeB || "指标 B"}</span>
+    </span>
+  ) : (
+    codeB || "指标 B"
+  );
+
   const columns = [
     {
       title: "字段",
@@ -162,7 +208,7 @@ export function MetricCompareTable({
       ),
     },
     {
-      title: codeA || "指标 A",
+      title: headA,
       dataIndex: "a",
       key: "a",
       width: 330,
@@ -184,7 +230,7 @@ export function MetricCompareTable({
       render: (v: keyof typeof DIFF_META) => <DiffPill level={v} />,
     },
     {
-      title: codeB || "指标 B",
+      title: headB,
       dataIndex: "b",
       key: "b",
       width: 330,

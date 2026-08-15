@@ -421,6 +421,8 @@ export function ReviewWorkbench() {
                 result={compareResult}
                 codeA={compareOpen.candidate_metric_code ?? ""}
                 codeB={compareOpen.existing_metric_code ?? ""}
+                labelA="候选指标"
+                labelB="现有指标"
                 size="small"
               />
             ) : (
@@ -452,6 +454,8 @@ export function ReviewWorkbench() {
                 result={compareResult}
                 codeA={arbitrating.candidate_metric_code ?? ""}
                 codeB={arbitrating.existing_metric_code ?? ""}
+                labelA="候选指标"
+                labelB="现有指标"
                 size="small"
               />
             ) : (
