@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -16,7 +16,7 @@ from httpx import ASGITransport
 
 from app.api import deps
 from app.main import app
-from app.models.user import Organization
+from app.models.user import Organization, User
 
 
 def _make_org(**over: object) -> Organization:
@@ -75,6 +75,26 @@ def _scalar_one(value: object) -> MagicMock:
 def _scalar(value: object) -> MagicMock:
     r = MagicMock()
     r.scalar.return_value = value
+    return r
+
+
+def _member(user_id: int, username: str) -> User:
+    """构造组织成员 User 实例（供成员查询 mock 返回）。"""
+    return User(
+        id=user_id,
+        org_id=2,
+        username=username,
+        email=f"{username}@example.com",
+        password_hash="hashed:x",
+        display_name=username,
+        role="viewer",
+        status="active",
+    )
+
+
+def _members_result(members: list[User]) -> MagicMock:
+    r = MagicMock()
+    r.scalars.return_value.all.return_value = members
     return r
 
 
@@ -262,3 +282,117 @@ async def test_viewer_forbidden_from_organizations() -> None:
         resp = await c.get("/api/v1/organizations")
     app.dependency_overrides.clear()
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 组织状态变更定向通知（轨道D：NotifyService.notify_user best-effort）
+# ---------------------------------------------------------------------------
+
+
+async def test_update_org_suspend_notifies_all_members(admin_client: httpx.AsyncClient) -> None:
+    """停用组织 → commit 后对全部成员逐人定向通知 org.status_changed。"""
+    org = _make_org(id=2, code="sales_dept", name="销售事业部")
+    m1, m2 = _member(10, "member1"), _member(11, "member2")
+    session = _make_session([_scalar_one(org), _members_result([m1, m2]), _scalar(2)])
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", org_id=1
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock()
+            resp = await c.patch("/api/v1/organizations/2", json={"status": "suspended"})
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "suspended"
+    assert ns.return_value.notify_user.await_count == 2
+    call_ids = [c.kwargs["user_id"] for c in ns.return_value.notify_user.await_args_list]
+    assert call_ids == [10, 11]
+    for c in ns.return_value.notify_user.await_args_list:
+        assert c.kwargs["event_type"] == "org.status_changed"
+        assert c.kwargs["title"] == "您所属的组织已停用"
+        assert c.kwargs["channel"] == "IN_APP"
+        assert "销售事业部" in c.kwargs["body"]
+
+
+async def test_update_org_activate_notifies_all_members(admin_client: httpx.AsyncClient) -> None:
+    """重新启用组织 → 对全部成员定向通知 org.status_changed（标题「已启用」）。"""
+    org = _make_org(id=2, code="sales_dept", name="销售事业部", status="suspended")
+    m1 = _member(10, "member1")
+    session = _make_session([_scalar_one(org), _members_result([m1]), _scalar(1)])
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", org_id=1
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock()
+            resp = await c.patch("/api/v1/organizations/2", json={"status": "active"})
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    ns.return_value.notify_user.assert_awaited_once()
+    kwargs = ns.return_value.notify_user.await_args.kwargs
+    assert kwargs["event_type"] == "org.status_changed"
+    assert kwargs["title"] == "您所属的组织已启用"
+    assert kwargs["user_id"] == 10
+
+
+async def test_update_org_name_only_no_notification(admin_client: httpx.AsyncClient) -> None:
+    """仅改名称（状态未变）→ 不发通知。"""
+    org = _make_org(id=2, code="sales_dept", name="销售事业部")
+    session = _make_session([_scalar_one(org), _scalar(0)])
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", org_id=1
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock()
+            resp = await c.patch("/api/v1/organizations/2", json={"name": "新名称"})
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    ns.return_value.notify_user.assert_not_awaited()
+
+
+async def test_update_org_suspend_notify_failure_does_not_block(
+    admin_client: httpx.AsyncClient,
+) -> None:
+    """成员通知失败（如 Redis 不可用）不阻断组织状态变更（best-effort）。"""
+    org = _make_org(id=2, code="sales_dept", name="销售事业部")
+    m1 = _member(10, "member1")
+    session = _make_session([_scalar_one(org), _members_result([m1]), _scalar(1)])
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", org_id=1
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock(side_effect=RuntimeError("redis down"))
+            resp = await c.patch("/api/v1/organizations/2", json={"status": "suspended"})
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "suspended"

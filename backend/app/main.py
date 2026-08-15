@@ -215,6 +215,28 @@ _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "feedback.status_updated",
     "nps.submitted",
     "audit.capacity_warning",
+    # 采集/血缘断链修复：collector/lineage 双发 EventBus 的目录血缘事件（TD §5.5）
+    "catalog_registered",
+    "catalog_schema_drifted",
+    "lineage_parsed",
+    "lineage_ingested",
+    # 采集定向通知（collector/service.py 经 notify_user 直发源 Owner，模板注册）
+    "catalog.deprecated",
+    "collect.degraded",
+    "collect.failed",
+    "catalog.connection_failed",
+    # 核心依赖降级（core/degradation.py 已发布 EventBus，供 notify 消费告警）
+    "degradation.state_changed",
+    # 冲突重开（conflict/service.py 经 _safe_publish 发布，原仅存于失效旧 HTTP 通道）
+    "conflict_reopened",
+    # 账号安全/组织（users.py/organizations.py 经 notify_user 定向通知，模板注册）
+    "user.created",
+    "user.status_changed",
+    "user.password_reset",
+    "org.status_changed",
+    # 授权到期提醒 / PII 复核待办（定向通知，模板注册）
+    "grant.expiring_soon",
+    "pii.review_pending",
 )
 
 

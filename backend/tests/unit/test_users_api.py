@@ -429,3 +429,158 @@ async def test_reset_password_not_found(admin_client: httpx.AsyncClient) -> None
             "/api/v1/users/999/reset-password", json={"new_password": "Newsecret123!"}
         )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 账号安全事件定向通知（轨道D：NotifyService.notify_user best-effort）
+# ---------------------------------------------------------------------------
+
+
+async def test_create_user_sends_created_notification(admin_client: httpx.AsyncClient) -> None:
+    """创建用户成功后定向通知新用户本人 user.created，通知体不含明文密码。"""
+    with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
+        "app.api.users._assert_unique", new=AsyncMock()
+    ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
+        "app.api.users._assert_org_active", new=AsyncMock()
+    ), patch("app.services.notify.service.NotifyService") as ns:
+        ns.return_value.notify_user = AsyncMock()
+        resp = await admin_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bob",
+                "email": "bob@example.com",
+                "display_name": "鲍勃",
+                "role": "viewer",
+                "password": "Secret123!",
+            },
+        )
+    assert resp.status_code == 200
+    ns.return_value.notify_user.assert_awaited_once()
+    kwargs = ns.return_value.notify_user.await_args.kwargs
+    assert kwargs["user_id"] == 2  # flush 回填的新用户 id
+    assert kwargs["event_type"] == "user.created"
+    assert kwargs["title"] == "账号已创建"
+    assert kwargs["channel"] == "IN_APP"
+    assert "bob" in kwargs["body"]
+    assert "密码" in kwargs["body"]
+    assert "Secret123!" not in kwargs["body"]  # 初始密码线下交付，不入通知体
+
+
+async def test_create_user_notify_failure_does_not_block(admin_client: httpx.AsyncClient) -> None:
+    """通知失败（如 Redis 不可用）不阻断创建主流程（best-effort）。"""
+    with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
+        "app.api.users._assert_unique", new=AsyncMock()
+    ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
+        "app.api.users._assert_org_active", new=AsyncMock()
+    ), patch("app.services.notify.service.NotifyService") as ns:
+        ns.return_value.notify_user = AsyncMock(side_effect=RuntimeError("redis down"))
+        resp = await admin_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bob",
+                "email": "bob@example.com",
+                "display_name": "鲍勃",
+                "role": "viewer",
+                "password": "Secret123!",
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["username"] == "bob"
+    ns.return_value.notify_user.assert_awaited_once()
+
+
+async def test_disable_user_sends_status_notification(admin_client: httpx.AsyncClient) -> None:
+    """单条禁用 → 定向通知 user.status_changed（标题「账号已禁用」）。"""
+    user = _make_user()
+    with patch("app.api.users._get_user", return_value=user), patch(
+        "app.services.notify.service.NotifyService"
+    ) as ns:
+        ns.return_value.notify_user = AsyncMock()
+        resp = await admin_client.patch("/api/v1/users/2/status", json={"status": "disabled"})
+    assert resp.status_code == 200
+    ns.return_value.notify_user.assert_awaited_once()
+    kwargs = ns.return_value.notify_user.await_args.kwargs
+    assert kwargs["user_id"] == 2
+    assert kwargs["event_type"] == "user.status_changed"
+    assert kwargs["title"] == "账号已禁用"
+    assert kwargs["channel"] == "IN_APP"
+    assert "禁用" in kwargs["body"]
+
+
+async def test_enable_user_sends_status_notification(admin_client: httpx.AsyncClient) -> None:
+    """单条启用 → 定向通知 user.status_changed（标题「账号已启用」）。"""
+    user = _make_user(status="disabled")
+    with patch("app.api.users._get_user", return_value=user), patch(
+        "app.services.notify.service.NotifyService"
+    ) as ns:
+        ns.return_value.notify_user = AsyncMock()
+        resp = await admin_client.patch("/api/v1/users/2/status", json={"status": "active"})
+    assert resp.status_code == 200
+    kwargs = ns.return_value.notify_user.await_args.kwargs
+    assert kwargs["event_type"] == "user.status_changed"
+    assert kwargs["title"] == "账号已启用"
+    assert "启用" in kwargs["body"]
+
+
+async def test_batch_status_notifies_each_succeeded_user() -> None:
+    """批量禁用：仅对 succeeded 用户逐人定向通知 user.status_changed。"""
+    u2 = _make_user(id=2, username="alice")
+    u3 = _make_user(id=3, username="bob")
+    client, _ = await _batch_status_client([u2, u3])
+    async with client:
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock()
+            resp = await client.post(
+                "/api/v1/users/batch-status", json={"user_ids": [2, 3], "status": "disabled"}
+            )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert ns.return_value.notify_user.await_count == 2
+    call_ids = [c.kwargs["user_id"] for c in ns.return_value.notify_user.await_args_list]
+    assert call_ids == [2, 3]
+    for c in ns.return_value.notify_user.await_args_list:
+        assert c.kwargs["event_type"] == "user.status_changed"
+        assert c.kwargs["title"] == "账号已禁用"
+        assert c.kwargs["channel"] == "IN_APP"
+
+
+async def test_batch_status_skips_notification_for_failed_items() -> None:
+    """批量禁用部分失败：仅通知成功项，失败项（自禁/不存在）不通知。"""
+    admin = _make_user(id=1, username="admin", role="platform_admin")
+    u2 = _make_user(id=2, username="alice")
+    client, _ = await _batch_status_client([admin, u2])
+    async with client:
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock()
+            resp = await client.post(
+                "/api/v1/users/batch-status",
+                json={"user_ids": [1, 2, 999], "status": "disabled"},
+            )
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert len(resp.json()["data"]["failed"]) == 2
+    ns.return_value.notify_user.assert_awaited_once()
+    assert ns.return_value.notify_user.await_args.kwargs["user_id"] == 2
+
+
+async def test_reset_password_sends_notification(admin_client: httpx.AsyncClient) -> None:
+    """重置密码 → 定向通知 user.password_reset，提示用临时密码登录，不含明文。"""
+    user = _make_user()
+    with patch("app.api.users._get_user", return_value=user), patch(
+        "app.api.users.hash_password", return_value="hashed:new"
+    ), patch("app.services.notify.service.NotifyService") as ns:
+        ns.return_value.notify_user = AsyncMock()
+        resp = await admin_client.post(
+            "/api/v1/users/2/reset-password", json={"new_password": "Newsecret123!"}
+        )
+    assert resp.status_code == 200
+    ns.return_value.notify_user.assert_awaited_once()
+    kwargs = ns.return_value.notify_user.await_args.kwargs
+    assert kwargs["user_id"] == 2
+    assert kwargs["event_type"] == "user.password_reset"
+    assert kwargs["title"] == "密码已被重置"
+    assert kwargs["channel"] == "IN_APP"
+    assert "临时密码" in kwargs["body"]
+    assert "Newsecret123!" not in kwargs["body"]

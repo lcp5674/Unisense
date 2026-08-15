@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 from app.services.lineage.schemas import (
     LineageEdgeResponse,
@@ -212,6 +213,20 @@ async def test_parse_and_store_counts_no_graph() -> None:
     assert res.field_edges == 1
     assert res.graph_written is False
     assert len(svc._repo.edges) >= 1
+
+
+async def test_parse_and_store_dual_publishes_eventbus() -> None:
+    """SQL 解析写边后双发 EventBus（lineage_parsed），Redis 裸通道保留。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    eventbus = AsyncMock()
+    svc._eventbus = eventbus
+    await svc.parse_and_store(
+        LineageParseRequest(sql="INSERT INTO t SELECT a.id FROM a"), actor_id=1
+    )
+    eventbus.publish.assert_awaited_once_with(
+        "lineage_parsed", {"table_edges": 1, "field_edges": 1}
+    )
 
 
 async def test_parse_and_store_returns_edge_detail() -> None:
@@ -798,6 +813,29 @@ async def test_ingest_batch_returns_change_summary() -> None:
     assert run.status == "success"
     assert run.added_count == 1
     assert run.stale_flagged_count == 1
+
+
+async def test_ingest_batch_dual_publishes_eventbus() -> None:
+    """批量采集后双发 EventBus（lineage_ingested），Redis 裸通道保留。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeIngestRepo()
+    repo.mark_seen_result = (2, 1)
+    repo.mark_missing_result = (3, 1)
+    svc._repo = repo
+    eventbus = AsyncMock()
+    svc._eventbus = eventbus
+    await svc.ingest_batch("dp_csv", {("a", "b"), ("a_new", "c"), ("d", "e")}, threshold=2)
+    eventbus.publish.assert_awaited_once_with(
+        "lineage_ingested",
+        {
+            "source": "dp_csv",
+            "added": 1,
+            "updated": 2,
+            "missing": 3,
+            "stale_flagged": 1,
+            "restored": 1,
+        },
+    )
 
 
 async def test_ingest_batch_threshold_defaults_to_config() -> None:

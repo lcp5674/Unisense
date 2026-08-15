@@ -651,6 +651,14 @@ class CollectorService(BaseService):
                     await self._repo.update_health_status(
                         sid, "unhealthy", error=probe.error
                     )
+                    # 三梯队通知：数据源连接失败定向通知源 Owner（best-effort）
+                    await self._notify_source_owner_failure(
+                        "catalog.connection_failed",
+                        "数据源连接失败",
+                        sid,
+                        reason=str(probe.error)[:500],
+                        src=src,
+                    )
                     failed.append(
                         BatchSourceItem(
                             source_id=sid,
@@ -757,6 +765,8 @@ class CollectorService(BaseService):
                     confidence=confidence,
                     original_sensitivity=rule_sensitivity,
                 )
+                # 三梯队通知：定向通知合规官「PII 复核待办」（best-effort，独立 session）
+                await self._notify_pii_review_pending(req.source_id, req.entity_name)
 
         cat, _created, drift_info = await self._repo.upsert_catalog(
             source_id=req.source_id,
@@ -769,6 +779,15 @@ class CollectorService(BaseService):
         )
         await self._repo.recompute_coverage(req.source_id)
         await self._events.publish(
+            "catalog_registered",
+            {
+                "source_id": req.source_id,
+                "entity_name": req.entity_name,
+                "sensitivity": sensitivity,
+            },
+        )
+        # 通知闭环：双发 EventBus（TD §5.5 订阅式扇出），Redis 裸通道保留不动
+        await self._eventbus.publish(
             "catalog_registered",
             {
                 "source_id": req.source_id,
@@ -1148,6 +1167,15 @@ class CollectorService(BaseService):
                 "diff_json": drift_info.get("diff_json", {}),
             },
         )
+        # 通知闭环：双发 EventBus（TD §5.5 订阅式扇出），Redis 裸通道保留不动
+        await self._eventbus.publish(
+            "catalog_schema_drifted",
+            {
+                "source_id": source_id,
+                "entity_name": entity_name,
+                "change_type": drift_info["change_type"],
+            },
+        )
         # 记录变更历史到 SchemaDriftLog
         drift_log = SchemaDriftLog(
             source_id=source_id,
@@ -1161,6 +1189,200 @@ class CollectorService(BaseService):
             detected_at=datetime.now(UTC),
         )
         await self._repo.save_drift_log(drift_log)
+
+    async def _notify_catalog_deprecated_owner(
+        self, source_id: str, entity_name: str
+    ) -> None:
+        """目录废弃后定向通知目录 Owner（best-effort，不阻断批量废弃主流程）。
+
+        与 conflict.py `_notify_loser_owner` 对称：IN_APP 定向通知，不依赖订阅偏好；
+        owner_id 缺失（孤儿资产）跳过；通知失败仅告警。
+        """
+        try:
+            from sqlalchemy import select
+
+            from app.models.data_source import DBCatalog
+            from app.services.notify.service import NotifyService
+
+            row = (
+                await self._db.execute(
+                    select(DBCatalog).where(
+                        DBCatalog.source_id == source_id,
+                        DBCatalog.entity_name == entity_name,
+                    )
+                )
+            ).scalar_one_or_none()
+            owner_id = getattr(row, "owner_id", None) if row is not None else None
+            if not owner_id:
+                logger.info(
+                    "catalog_deprecated_owner_missing: source=%s entity=%s",
+                    source_id,
+                    entity_name,
+                )
+                return
+            await NotifyService(self._db).notify_user(
+                user_id=int(owner_id),
+                event_type="catalog.deprecated",
+                title="目录已废弃",
+                body=f"目录 {entity_name} 已被废弃",
+                payload={"source_id": source_id, "entity_name": entity_name},
+            )
+            logger.info(
+                "catalog_deprecated_owner_notified: source=%s entity=%s owner_id=%s",
+                source_id,
+                entity_name,
+                owner_id,
+            )
+        except Exception:  # noqa: BLE001 - 通知降级，不阻断废弃主流程
+            logger.warning(
+                "catalog_deprecated_owner_notify_failed: source=%s entity=%s",
+                source_id,
+                entity_name,
+                exc_info=True,
+            )
+
+    async def _notify_source_owner_degraded(
+        self, source_id: str, reason: str, src: DataSource
+    ) -> None:
+        """增量降级为全量后定向通知数据源 Owner（best-effort，不阻断采集主流程）。
+
+        数据源 owner_id 缺失时跳过；通知失败仅告警。
+        """
+        try:
+            from app.services.notify.service import NotifyService
+
+            owner_id = getattr(src, "owner_id", None)
+            if not owner_id:
+                logger.info(
+                    "collect_degraded_owner_missing: source=%s reason=%s",
+                    source_id,
+                    reason,
+                )
+                return
+            await NotifyService(self._db).notify_user(
+                user_id=int(owner_id),
+                event_type="collect.degraded",
+                title="采集已降级为全量",
+                body=f"数据源 {source_id} 增量采集不可用，已降级为全量采集（原因：{reason}）",
+                payload={"source_id": source_id, "reason": reason},
+            )
+            logger.info(
+                "collect_degraded_owner_notified: source=%s owner_id=%s reason=%s",
+                source_id,
+                owner_id,
+                reason,
+            )
+        except Exception:  # noqa: BLE001 - 通知降级，不阻断采集主流程
+            logger.warning(
+                "collect_degraded_owner_notify_failed: source=%s reason=%s",
+                source_id,
+                reason,
+                exc_info=True,
+            )
+
+    async def _notify_source_owner_failure(
+        self,
+        event_type: str,
+        title: str,
+        source_id: str,
+        reason: str,
+        src: DataSource | None = None,
+    ) -> None:
+        """采集任务失败/数据源连接失败定向通知源 Owner（TD §5.5）。
+
+        ``src`` 可直接提供 owner_id（探活循环内）；不可用（如异常早于对象构建）
+        时回退按 ``source_id`` 查库。独立 session 通知，不干扰采集事务；
+        best-effort 失败仅告警，绝不阻断采集主流程。
+        """
+        try:
+            from sqlalchemy import select
+
+            from app.db.mysql import async_session_factory
+            from app.models.data_source import DataSource as DSTable
+            from app.services.notify.service import NotifyService
+
+            owner_id = getattr(src, "owner_id", None) if src is not None else None
+            if not owner_id:
+                async with async_session_factory() as session:
+                    row = (
+                        await session.execute(
+                            select(DSTable).where(DSTable.source_id == source_id)
+                        )
+                    ).scalars().first()
+                    owner_id = getattr(row, "owner_id", None)
+            if not owner_id:
+                logger.info(
+                    "source_owner_failure_owner_missing: source=%s event=%s",
+                    source_id,
+                    event_type,
+                )
+                return
+            async with async_session_factory() as session:
+                await NotifyService(session).notify_user(
+                    user_id=int(owner_id),
+                    event_type=event_type,
+                    title=title,
+                    body=f"数据源 {source_id} 异常（原因：{reason}）",
+                    payload={"source_id": source_id, "reason": reason},
+                )
+            logger.info(
+                "source_owner_failure_notified: source=%s event=%s owner=%s",
+                source_id,
+                event_type,
+                owner_id,
+            )
+        except Exception:  # noqa: BLE001 - 通知降级，不阻断采集主流程
+            logger.warning(
+                "source_owner_failure_notify_failed: source=%s event=%s",
+                source_id,
+                event_type,
+                exc_info=True,
+            )
+
+    async def _notify_pii_review_pending(
+        self, source_id: str, entity_name: str
+    ) -> None:
+        """PII 低置信度标记 NEEDS_REVIEW 后定向通知合规官（TD §5.5）。
+
+        查 active compliance_officer 定向送达（IN_APP，不依赖订阅偏好）。
+        独立 session 通知，不干扰采集事务；best-effort 失败仅告警。
+        """
+        try:
+            from sqlalchemy import select
+
+            from app.db.mysql import async_session_factory
+            from app.models.user import User
+            from app.services.notify.service import NotifyService
+
+            async with async_session_factory() as session:
+                stmt = select(User.id).where(
+                    User.status == "active",
+                    User.role == "compliance_officer",
+                )
+                result = await session.execute(stmt)
+                targets = [r[0] for r in result.all()]
+            for uid in targets:
+                async with async_session_factory() as session:
+                    await NotifyService(session).notify_user(
+                        user_id=int(uid),
+                        event_type="pii.review_pending",
+                        title="PII 复核待办",
+                        body=f"数据实体 {entity_name}（源 {source_id}）敏感级别被低置信度判定，需人工复核",
+                        payload={"source_id": source_id, "entity_name": entity_name},
+                    )
+            logger.info(
+                "pii_review_pending_notified: source=%s entity=%s targets=%d",
+                source_id,
+                entity_name,
+                len(targets),
+            )
+        except Exception:  # noqa: BLE001 - 通知降级，不阻断采集主流程
+            logger.warning(
+                "pii_review_pending_notify_failed: source=%s entity=%s",
+                source_id,
+                entity_name,
+                exc_info=True,
+            )
 
     @staticmethod
     def _merge_descriptions_to_schema(
@@ -1258,6 +1480,14 @@ class CollectorService(BaseService):
                 "catalog_deprecated",
                 {"source_id": it.source_id, "entity_name": it.entity_name},
             )
+            # 通知闭环：双发 EventBus（TD §5.5 订阅式扇出），Redis 裸通道保留不动
+            await self._eventbus.publish(
+                "catalog_deprecated",
+                {"source_id": it.source_id, "entity_name": it.entity_name},
+            )
+            # 定向通知目录 Owner（best-effort；notify_user 内部会 commit，废弃已 flush，
+            # 提前提交语义等价于 API 层 commit，不影响结果）
+            await self._notify_catalog_deprecated_owner(it.source_id, it.entity_name)
         return BulkDeprecateResult(succeeded=succeeded, failed=failed)
 
     @staticmethod
@@ -1350,6 +1580,18 @@ class CollectorService(BaseService):
                     "watermark": watermark_ts.isoformat() if watermark_ts else None,
                 },
             )
+            # 通知闭环：双发 EventBus（TD §5.5 订阅式扇出），Redis 裸通道保留不动
+            await self._eventbus.publish(
+                "collect_degraded",
+                {
+                    "source_id": source_id,
+                    "reason": degrade_reason,
+                    "source_type": src.source_type,
+                    "watermark": watermark_ts.isoformat() if watermark_ts else None,
+                },
+            )
+            # 定向通知数据源 Owner（best-effort；此刻主事务尚无待提交变更）
+            await self._notify_source_owner_degraded(source_id, degrade_reason, src)
 
         # US5: 采集成功后更新健康状态
         await self._emit_progress(
@@ -1370,6 +1612,14 @@ class CollectorService(BaseService):
             # 否则 API/worker 上抛后被 get_db_session 回滚，健康状态永不更新。
             await self._repo.update_health_status(source_id, "unhealthy", error=str(exc))
             await self._db.commit()
+            # 三梯队通知：采集任务失败定向通知源 Owner（best-effort，独立 session）
+            await self._notify_source_owner_failure(
+                "collect.failed",
+                "采集任务失败",
+                source_id,
+                reason=str(exc)[:500],
+                src=locals().get("src"),
+            )
             raise
 
         await self._emit_progress(
@@ -1466,6 +1716,10 @@ class CollectorService(BaseService):
         # FR-024: 发布1次batch事件而非逐条publish
         if batch_payloads:
             await self._events.publish_batch("catalog_registered", batch_payloads)
+            # 通知闭环：双发 EventBus（TD §5.5 订阅式扇出），逐条发布以便通知中心按
+            # 单事件订阅/扇出（Redis 裸通道保留 batch 不动）
+            for item in batch_payloads:
+                await self._eventbus.publish("catalog_registered", item)
 
         # P1-5: 废弃表自动对账——仅在全量采集后执行（增量仅覆盖变更实体，不可对未采集实体误废）。
         # 对比 catalog 中仍存活的实体与本次源端扫描到的实体名，源端已 drop 的标记为 DEPRECATED。

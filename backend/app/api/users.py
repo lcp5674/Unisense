@@ -20,6 +20,7 @@ USER_RESET_PASSWORD/USER_PASSWORD_CHANGE）。
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -38,6 +39,8 @@ from app.models.subject_domain import SubjectDomain
 from app.models.user import Organization, User
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+logger = logging.getLogger("unisense.users.api")
 
 #: 平台可授予的全部内置角色（对齐 User.role Enum 7 值）。
 UserRole = Literal[
@@ -280,6 +283,39 @@ def _to_admin(row: User) -> UserAdmin:
     )
 
 
+async def _notify_user(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    event_type: str,
+    title: str,
+    body: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """账号安全事件定向通知（best-effort，不阻断业务主流程）。
+
+    与冲突仲裁通知范式一致（``conflict.py:_notify_loser_owner``）：
+    ``NotifyService(db).notify_user`` 内部会 commit，调用方必须在端点
+    ``await db.commit()`` **之后**调用本函数；通知失败仅记日志告警。
+    """
+    try:
+        from app.services.notify.service import NotifyService
+
+        await NotifyService(db).notify_user(
+            user_id=user_id,
+            event_type=event_type,
+            title=title,
+            body=body,
+            payload=payload,
+            channel="IN_APP",
+        )
+        logger.info("user_notify_sent event_type=%s user_id=%s", event_type, user_id)
+    except Exception as exc:  # noqa: BLE001 - 通知降级，不阻断业务
+        logger.warning(
+            "user_notify_failed event_type=%s user_id=%s err=%s", event_type, user_id, exc
+        )
+
+
 @router.get("", dependencies=_ADMIN_DEPS)
 async def list_admin_users(
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -373,6 +409,18 @@ async def create_user(
     )
     await db.commit()
     await db.refresh(row)
+    # 定向通知新用户本人「账号已创建」；初始密码由管理员线下交付，通知体不含明文密码
+    await _notify_user(
+        db,
+        user_id=row.id,
+        event_type="user.created",
+        title="账号已创建",
+        body=(
+            f"您的账号 {row.username} 已创建。初始密码由管理员线下交付，"
+            "请尽快登录并立即修改密码。"
+        ),
+        payload={"user_id": row.id, "username": row.username, "source": "user_admin"},
+    )
     return ok(_to_admin(row), trace_id=trace_id)
 
 
@@ -437,6 +485,25 @@ async def batch_set_user_status(
         trace_id=trace_id,
     )
     await db.commit()
+    # 批量启用/禁用：对每个成功变更的用户逐人定向通知（best-effort）
+    status_cn = "已启用" if payload.status == "active" else "已禁用"
+    for item in succeeded:
+        target = by_id.get(item.user_id)
+        if target is None:
+            continue
+        await _notify_user(
+            db,
+            user_id=item.user_id,
+            event_type="user.status_changed",
+            title="账号已启用" if payload.status == "active" else "账号已禁用",
+            body=f"您的账号 {target.username} 已被管理员{status_cn}。",
+            payload={
+                "user_id": item.user_id,
+                "username": target.username,
+                "status": payload.status,
+                "source": "user_admin",
+            },
+        )
     return ok(UserBatchStatusResult(succeeded=succeeded, failed=failed), trace_id=trace_id)
 
 
@@ -555,6 +622,20 @@ async def set_user_status(
     )
     await db.commit()
     await db.refresh(row)
+    # 单条启用/禁用：定向通知被操作用户本人（best-effort）
+    await _notify_user(
+        db,
+        user_id=row.id,
+        event_type="user.status_changed",
+        title="账号已启用" if row.status == "active" else "账号已禁用",
+        body=f"您的账号 {row.username} 已被管理员{'启用' if row.status == 'active' else '禁用'}。",
+        payload={
+            "user_id": row.id,
+            "username": row.username,
+            "status": row.status,
+            "source": "user_admin",
+        },
+    )
     return ok(_to_admin(row), trace_id=trace_id)
 
 
@@ -586,4 +667,16 @@ async def reset_password(
         trace_id=trace_id,
     )
     await db.commit()
+    # 定向通知被重置用户（安全感知，防"被重置"）；不含明文密码
+    await _notify_user(
+        db,
+        user_id=row.id,
+        event_type="user.password_reset",
+        title="密码已被重置",
+        body=(
+            f"您的账号 {row.username} 的密码已被管理员重置。"
+            "请用管理员下发的临时密码登录并立即修改密码。"
+        ),
+        payload={"user_id": row.id, "username": row.username, "source": "user_admin"},
+    )
     return ok({"user_id": row.id, "ok": True}, trace_id=trace_id)

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -34,6 +35,8 @@ from app.db.mysql import get_db_session
 from app.models.user import Organization, User
 
 router = APIRouter(prefix="/organizations", tags=["组织管理"])
+
+logger = logging.getLogger("unisense.organizations.api")
 
 #: 管理依赖：写仅平台管理员 + 注入守卫；读平台管理员/域管理员。
 _ADMIN_DEPS = [Depends(require_roles("platform_admin")), Depends(guard_against_injection)]
@@ -87,6 +90,53 @@ async def _to_view(row: Organization, user_count: int) -> OrganizationView:
         user_count=user_count,
         created_at=row.created_at.isoformat() if row.created_at else None,
     )
+
+
+async def _notify_org_members(
+    db: AsyncSession,
+    org: Organization,
+    *,
+    trace_id: str,
+) -> None:
+    """组织状态变更后向全部成员定向通知（best-effort，不阻断业务主流程）。
+
+    与账号安全通知范式一致（``users.py:_notify_user`` / ``conflict.py:_notify_loser_owner``）：
+    ``NotifyService(db).notify_user`` 内部会 commit，调用方必须在端点 ``await db.commit()``
+    **之后**调用；组织被停用时成员可能已无法登录，通知仍尝试发送（IN_APP 站内信，登录即达）。
+    查询不到成员 / 通知失败均仅记日志告警。
+    """
+    try:
+        from app.services.notify.service import NotifyService
+
+        members = (
+            await db.execute(
+                select(User).where(User.org_id == org.id, User.deleted_at.is_(None))
+            )
+        ).scalars().all()
+        org_status = org.status.value if hasattr(org.status, "value") else org.status
+        verb = "已停用" if org_status == "suspended" else "已启用"
+        for member in members:
+            await NotifyService(db).notify_user(
+                user_id=member.id,
+                event_type="org.status_changed",
+                title=f"您所属的组织{verb}",
+                body=f"您所属的组织「{org.name}」已被管理员{verb}，如有疑问请联系管理员。",
+                payload={
+                    "org_id": org.id,
+                    "org_name": org.name,
+                    "status": org_status,
+                    "source": "org_admin",
+                },
+                channel="IN_APP",
+            )
+        logger.info(
+            "org_status_notify_sent org_id=%s members=%s trace_id=%s",
+            org.id,
+            len(members),
+            trace_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - 通知降级，不阻断业务
+        logger.warning("org_status_notify_failed org_id=%s err=%s", org.id, exc)
 
 
 @router.get("", dependencies=_READ_DEPS)
@@ -192,9 +242,11 @@ async def update_organization(
     if row is None:
         raise NotFoundError("组织不存在", error_code="ORG_NOT_FOUND", ctx={"org_id": org_id})
 
+    status_changed = False
     if payload.name is not None:
         row.name = payload.name
     if payload.status is not None and payload.status != row.status:
+        status_changed = True
         if row.code == DEFAULT_ORG_CODE and payload.status in ("suspended", "deleted"):
             raise ValidationError(
                 "默认组织不可停用或删除", error_code="ORG_PROTECTED", ctx={"code": row.code}
@@ -237,6 +289,9 @@ async def update_organization(
     )
     await db.commit()
     await db.refresh(row)
+    # 组织状态变更（停用/启用）后向全部成员定向通知（best-effort，不阻断业务）
+    if status_changed and row.status in ("active", "suspended"):
+        await _notify_org_members(db, row, trace_id=trace_id)
     user_count = int(
         (
             await db.execute(

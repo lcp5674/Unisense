@@ -68,6 +68,7 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "grant.granted": "权限已授予",
     "grant.revoked": "权限已收回",
     "grant.expired": "权限已过期",
+    "grant.expiring_soon": "权限即将到期",
     "benchmark.imported": "参照基准已导入",
     "pii.propagated": "敏感数据已扩散",
     "pii.reviewed": "敏感数据已复核",
@@ -78,6 +79,28 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "feedback.status_updated": "反馈状态更新",
     "nps.submitted": "满意度已提交",
     "audit.capacity_warning": "审计容量告警",
+    # 采集/血缘断链修复（collector/lineage 双发 EventBus，TD §5.5）
+    "catalog_registered": "数据目录已注册",
+    "catalog_schema_drifted": "目录 Schema 漂移",
+    "lineage_parsed": "血缘已解析",
+    "lineage_ingested": "血缘已接入",
+    # 采集定向通知（collector/service.py 经 notify_user 直发源 Owner）
+    "catalog.deprecated": "数据目录已废弃",
+    "collect.degraded": "采集降级",
+    # 核心依赖降级（core/degradation.py，运维感知全平台健康）
+    "degradation.state_changed": "系统依赖状态变更",
+    # 冲突重开（conflict/service.py 经 _safe_publish 发布）
+    "conflict_reopened": "口径冲突已重开",
+    # 账号安全/组织（users.py/organizations.py 经 notify_user 定向通知）
+    "user.created": "账号已创建",
+    "user.status_changed": "账号状态变更",
+    "user.password_reset": "密码已重置",
+    "org.status_changed": "组织状态变更",
+    # 采集异常定向（collector 源 Owner）
+    "collect.failed": "采集任务失败",
+    "catalog.connection_failed": "数据源连接失败",
+    # PII 复核待办（catalog 标 NEEDS_REVIEW 定向 compliance_officer）
+    "pii.review_pending": "PII 复核待办",
 }
 
 _SOURCE_CN: dict[str, str] = {
@@ -94,6 +117,12 @@ _SOURCE_CN: dict[str, str] = {
     "benchmark": "参照基准",
     "orphan": "孤立实体",
     "review": "审核",
+    # 三梯队通知接入新增来源
+    "catalog": "数据目录",
+    "collect": "采集",
+    "user": "账号",
+    "org": "组织",
+    "degradation": "系统依赖",
 }
 
 _ACTION_CN: dict[str, str] = {

@@ -164,6 +164,28 @@ class FakeRepo:
             g.status = GrantStatus.EXPIRED
         return due
 
+    async def list_expiring_grants(
+        self, window: timedelta, now: datetime | None = None
+    ) -> list[Grant]:
+        ref = now or datetime.now(UTC)
+        deadline = ref + window
+        return [
+            g
+            for g in self.grants
+            if g.status is GrantStatus.ACTIVE
+            and g.expires_at is not None
+            and ref < g.expires_at <= deadline
+            and g.expiring_reminded_at is None
+        ]
+
+    async def mark_expiring_reminded(
+        self, grant_ids: list[int], now: datetime | None = None
+    ) -> None:
+        ref = now or datetime.now(UTC)
+        for g in self.grants:
+            if g.id in grant_ids:
+                g.expiring_reminded_at = ref
+
     # metric
     async def get_metric_by_code(self, metric_code: str) -> FakeMetric | None:
         return self.metrics.get(metric_code)
@@ -895,3 +917,34 @@ async def test_reset_role_permissions_restores_default() -> None:
     assert item["custom_actions"] is None
     assert item["effective_actions"] == ["approve", "read"]
     assert repo.role_permissions == []
+
+
+async def test_remind_expiring_grants_notifies_and_dedupes() -> None:
+    """授权到期提醒（grant.expiring_soon）：即将到期授权定向通知被授权人，二次调用去重。"""
+    from unittest.mock import AsyncMock, patch
+
+    svc, repo, _ = _svc(FakeUser(role="platform_admin"))
+    await svc.grant(_payload(expires_at=_SOON), actor_id=9)
+
+    fake_cm = AsyncMock()
+    fake_cm.__aenter__.return_value = fake_cm
+    fake_cm.execute.return_value.scalars.return_value.first.return_value = None
+    notify = AsyncMock()
+
+    with (
+        patch("app.db.mysql.async_session_factory", return_value=fake_cm),
+        patch(
+            "app.services.notify.service.NotifyService.notify_user",
+            new=notify,
+        ),
+    ):
+        first = await svc.remind_expiring_grants()
+        second = await svc.remind_expiring_grants()
+
+    assert first == 1  # 本轮提醒 1 条
+    assert second == 0  # 已标记提醒，二次调用去重
+    assert notify.await_count == 1
+    assert notify.await_args.kwargs["event_type"] == "grant.expiring_soon"
+    # 标记去重：FakeRepo 记录 expiring_reminded_at
+    reminded = [g for g in repo.grants if g.expiring_reminded_at is not None]
+    assert len(reminded) == 1

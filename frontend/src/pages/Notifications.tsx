@@ -52,6 +52,7 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "grant.granted": "权限已授予",
   "grant.revoked": "权限已收回",
   "grant.expired": "权限已过期",
+  "grant.expiring_soon": "权限即将到期",
   "pii.propagated": "敏感数据已扩散",
   "pii.reviewed": "敏感数据已复核",
   "classification.changed": "数据分类变更",
@@ -60,6 +61,26 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "feedback.status_updated": "反馈状态更新",
   "nps.submitted": "满意度已提交",
   "audit.capacity_warning": "审计容量告警",
+  // 采集/血缘断链修复（collector/lineage 双发 EventBus，TD §5.5）
+  "catalog_registered": "数据目录已注册",
+  "catalog_schema_drifted": "目录 Schema 漂移",
+  "lineage_parsed": "血缘已解析",
+  "lineage_ingested": "血缘已接入",
+  // 采集定向通知（collector 经 notify_user 直发源 Owner）
+  "catalog.deprecated": "数据目录已废弃",
+  "collect.degraded": "采集降级",
+  // 核心依赖降级 / 冲突重开
+  "degradation.state_changed": "系统依赖状态变更",
+  "conflict_reopened": "口径冲突已重开",
+  // 账号安全/组织（users.py/organizations.py 定向通知）
+  "user.created": "账号已创建",
+  "user.status_changed": "账号状态变更",
+  "user.password_reset": "密码已重置",
+  "org.status_changed": "组织状态变更",
+  // 采集异常 / PII 复核待办（定向通知）
+  "collect.failed": "采集任务失败",
+  "catalog.connection_failed": "数据源连接失败",
+  "pii.review_pending": "PII 复核待办",
 };
 
 // 事件类型兜底：未命中的 ``域.动作`` 拆词为中文（历史数据/新类型都能显示中文）
@@ -77,6 +98,12 @@ const EVENT_SOURCE_CN: Record<string, string> = {
   benchmark: "参照基准",
   orphan: "孤立实体",
   review: "审核",
+  // 三梯队通知接入新增来源
+  catalog: "数据目录",
+  collect: "采集",
+  user: "账号",
+  org: "组织",
+  degradation: "系统依赖",
 };
 const EVENT_ACTION_CN: Record<string, string> = {
   created: "创建",
@@ -277,6 +304,13 @@ export const EVENT_TYPES = [
   "feedback.status_updated",
   "nps.submitted",
   "audit.capacity_warning",
+  // 三梯队通知接入：采集/血缘断链 + 降级/冲突重开（走 EventBus 订阅扇出）
+  "catalog_registered",
+  "catalog_schema_drifted",
+  "lineage_parsed",
+  "lineage_ingested",
+  "degradation.state_changed",
+  "conflict_reopened",
 ];
 
 // 通知状态 → 卡片左侧状态条颜色（沿「校准仪表」设计语言：成功=数据青绿、失败=告警红、待发送=信号琥珀）

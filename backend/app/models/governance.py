@@ -152,6 +152,11 @@ class Grant(Base, BaseModel):
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="临时授权 TTL，NULL=永久"
     )
+    expiring_reminded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="授权到期提醒时间（非空=已提醒过，到期提醒 Worker 跳过，TD §5.5）",
+    )
     granted_by: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True, comment="授权操作人 ID"
     )

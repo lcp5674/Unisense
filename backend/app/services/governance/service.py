@@ -518,7 +518,50 @@ class GovernanceService(BaseService):
                     "domain": row.domain,
                 }
             )
+        # 顺带触发「即将到期」提醒（同 Worker 入口，能力闭环）
+        await self.remind_expiring_grants()
         return len(rows)
+
+    async def remind_expiring_grants(self, window: timedelta | None = None) -> int:
+        """授权到期提醒（TD §5.5 grant.expiring_soon，定向通知被授权人）。
+
+        扫描 ``EXPIRING_WINDOW_DAYS``（默认 7 天）内到期且未提醒的授权，
+        定向通知被授权人（IN_APP，不依赖订阅偏好），随后批量标记提醒时间去重。
+        best-effort：单条通知失败不阻断其余；返回本轮提醒条数。
+        """
+        win = window or timedelta(days=EXPIRING_WINDOW_DAYS)
+        rows = await self._repo.list_expiring_grants(win)
+        if not rows:
+            return 0
+        from app.db.mysql import async_session_factory
+        from app.services.notify.service import NotifyService
+
+        reminded: list[int] = []
+        for row in rows:
+            async with async_session_factory() as session:
+                try:
+                    await NotifyService(session).notify_user(
+                        user_id=row.user_id,
+                        event_type="grant.expiring_soon",
+                        title="权限即将到期",
+                        payload={
+                            "grant_id": row.id,
+                            "domain": row.domain or "",
+                            "expires_at": (
+                                row.expires_at.isoformat() if row.expires_at else ""
+                            ),
+                        },
+                    )
+                    reminded.append(row.id)
+                except Exception as exc:  # noqa: BLE001 - best-effort 不阻断
+                    logger.warning(
+                        "grant_expiring_notify_failed grant=%s user=%s err=%s",
+                        row.id,
+                        row.user_id,
+                        exc,
+                    )
+        await self._repo.mark_expiring_reminded(reminded)
+        return len(reminded)
 
     # ----------------------------------------------------------- permissions
 

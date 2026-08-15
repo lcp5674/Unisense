@@ -213,11 +213,11 @@ class LineageService(BaseService):
         graph_written = False
         if self._graph is not None:
             graph_written = await self._graph.write_edges(graph_edges)
+        # 双发：保留 Redis 裸通道（历史兼容），同时发 EventBus 供通知中心消费（best-effort）
+        parsed_payload = {"table_edges": stored_table, "field_edges": stored_field}
         if self._events is not None:
-            await self._events.publish(
-                "lineage_parsed",
-                {"table_edges": stored_table, "field_edges": stored_field},
-            )
+            await self._events.publish("lineage_parsed", parsed_payload)
+        await self._eventbus.publish("lineage_parsed", parsed_payload)
         detail = {
             "kind": "sql_parse",
             "sql": req.sql,
@@ -598,18 +598,18 @@ class LineageService(BaseService):
                 detail=detail,
             )
             await self._db.commit()
+            # 双发：保留 Redis 裸通道（历史兼容），同时发 EventBus 供通知中心消费（best-effort）
+            ingested_payload = {
+                "source": provenance,
+                "added": added,
+                "updated": updated,
+                "missing": missing,
+                "stale_flagged": stale_flagged,
+                "restored": restored,
+            }
             if self._events is not None:
-                await self._events.publish(
-                    "lineage_ingested",
-                    {
-                        "source": provenance,
-                        "added": added,
-                        "updated": updated,
-                        "missing": missing,
-                        "stale_flagged": stale_flagged,
-                        "restored": restored,
-                    },
-                )
+                await self._events.publish("lineage_ingested", ingested_payload)
+            await self._eventbus.publish("lineage_ingested", ingested_payload)
             return {
                 "run_id": run.id,
                 "source": provenance,

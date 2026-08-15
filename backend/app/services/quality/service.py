@@ -354,11 +354,53 @@ class QualityService(BaseService):
                     "rule_mode": rule_mode or rule.rule_mode.value,
                 }
             )
+            # 定向通知规则配置的 Owner（notify_targets.owners，独立 session，best-effort）
+            await self._notify_anomaly_owners(rule, metric_id, str(obs_value), str(bound))
             triggered = event
             break  # 首条（最高严重级）命中即落一条事件（避免重复刷屏）
         if triggered is None:
             return None
         return QualityEventResponse.from_model(triggered)
+
+    async def _notify_anomaly_owners(
+        self,
+        rule: Any,
+        metric_id: int,
+        obs_value: str,
+        bound: str,
+    ) -> None:
+        """质量告警定向通知规则配置的 Owner（``notify_targets.owners``）。
+
+        与 conflict.py ``notify_user`` 范式一致：IN_APP 定向送达，不依赖订阅偏好，
+        规则 Owner 即使未订阅 quality.anomaly 也能收到告警（TD §5.5 质量定向闭环）。
+        独立 session 通知，不干扰业务事务；失败仅告警不阻断检测主流程。
+        """
+        targets = (rule.notify_targets or {}).get("owners") or []
+        if not targets:
+            return
+        from app.db.mysql import async_session_factory
+        from app.services.notify.service import NotifyService
+
+        for uid in targets:
+            async with async_session_factory() as session:
+                try:
+                    await NotifyService(session).notify_user(
+                        user_id=int(uid),
+                        event_type="quality.anomaly",
+                        title="数据质量异常告警",
+                        payload={
+                            "metric_id": metric_id,
+                            "obs_value": obs_value,
+                            "threshold": bound,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 - best-effort 不阻断
+                    logger.warning(
+                        "quality_anomaly_notify_failed metric=%s user=%s err=%s",
+                        metric_id,
+                        uid,
+                        exc,
+                    )
 
     # ---- 观测样本写入（Epic 6）----
     async def record_observation(

@@ -8,7 +8,21 @@ from typing import Any
 from pydantic import BaseModel, field_validator
 
 # PLAT-5: 限制 source/level 取值，防止 client 伪造异常来源或告警级别
-_ALLOWED_SOURCES = {"metric", "lineage", "quality", "governance", "semantic", "system", "scheduler"}
+_ALLOWED_SOURCES = {
+    "metric",
+    "lineage",
+    "quality",
+    "governance",
+    "semantic",
+    "system",
+    "scheduler",
+    # 三梯队通知接入新增来源（采集/血缘断链、账号安全/组织、系统降级）
+    "catalog",
+    "collect",
+    "user",
+    "org",
+    "degradation",
+}
 _ALLOWED_LEVELS = {"INFO", "WARN", "ERROR", "CRITICAL"}
 
 

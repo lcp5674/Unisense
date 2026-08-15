@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -179,6 +179,40 @@ class GovernanceRepository:
         if rows:
             await self._db.flush()
         return rows
+
+    async def list_expiring_grants(
+        self, window: timedelta, now: datetime | None = None
+    ) -> list[Grant]:
+        """扫描「即将到期且未提醒」的授权（TD §5.5 grant.expiring_soon）。
+
+        口径：status=ACTIVE、expires_at 在 (now, now+window] 内、且未提醒过
+        （``expiring_reminded_at IS NULL``）。返回后由 Service 定向通知被授权人，
+        再批量标记提醒时间，避免 Worker 每轮重复提醒。
+        """
+        ref = now or datetime.now(UTC)
+        deadline = ref + window
+        stmt = select(Grant).where(
+            Grant.status == GrantStatus.ACTIVE,
+            Grant.expires_at.is_not(None),
+            Grant.expires_at > ref,
+            Grant.expires_at <= deadline,
+            Grant.expiring_reminded_at.is_(None),
+            Grant.deleted_at.is_(None),
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def mark_expiring_reminded(
+        self, grant_ids: list[int], now: datetime | None = None
+    ) -> None:
+        """批量标记授权已提醒（grant.expiring_soon 去重）。"""
+        if not grant_ids:
+            return
+        ref = now or datetime.now(UTC)
+        stmt = select(Grant).where(Grant.id.in_(grant_ids))
+        rows = list((await self._db.execute(stmt)).scalars().all())
+        for row in rows:
+            row.expiring_reminded_at = ref
+        await self._db.flush()
 
     # ---------------------------------------------------------------- metric
 
