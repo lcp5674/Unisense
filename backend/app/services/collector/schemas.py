@@ -445,18 +445,28 @@ class InferTableDescriptionResponse(BaseModel):
 
 
 class TableCoverageItem(BaseModel):
-    """按表列描述覆盖明细。"""
+    """按表列描述覆盖明细。
+
+    四个下钻口径（字段覆盖率/缺失字段/缺表描述/全部资产）共用该结构，
+    前端按口径各取所需字段差异化展示。
+    """
 
     catalog_id: int
     entity_name: str
     source_id: str
+    source_name: str | None = None  # 数据源名称（join DataSource.name）
     entity_type: str
     domain: str | None = None
     sensitivity_level: str
     table_desc: bool
+    description: str | None = None  # 表级描述内容（缺表描述明细用）
+    description_source: str | None = None  # manual/llm/schema
+    owner_name: str | None = None  # 责任人中文名（缺表描述/全部资产明细用）
     total_fields: int
     covered_fields: int
     missing_fields: int
+    missing_field_names: list[str] = []  # 缺失字段名列表（缺失字段明细用）
+    updated_at: str | None = None  # 表更新时间（全部资产明细用）
 
 
 class DescriptionCoverageResponse(BaseModel):

@@ -15,6 +15,7 @@ import {
   Table,
   Tag,
   Tooltip,
+  Progress,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -44,6 +45,7 @@ import type {
 import { SchemaTable } from "../SchemaTable";
 import { DrillDownDrawer } from "./DrillDownDrawer";
 import { ENTITY_TYPE_LABEL } from "../../utils/enums";
+import { formatCnTime } from "../../utils/timeCn";
 
 /**
  * 概览指标 → 明细下钻的口径标识。
@@ -137,6 +139,223 @@ function descriptionSourceTag(source?: string | null) {
   return <Tag color={cfg.color}>{cfg.label}</Tag>;
 }
 
+// ── 共享列片段（四个下钻口径 + 主表格复用）───────────────────────────────
+
+const colTable: ColumnsType<TableCoverageItem>[number] = {
+  title: "表 / 视图",
+  dataIndex: "entity_name",
+  key: "entity_name",
+  ellipsis: true,
+  render: (v: string) => <span className="mono">{v}</span>,
+};
+
+const colSource: ColumnsType<TableCoverageItem>[number] = {
+  title: "数据源",
+  dataIndex: "source_id",
+  key: "source_id",
+  width: 150,
+  ellipsis: true,
+  render: (v: string, r) =>
+    r.source_name ? (
+      <span>
+        {r.source_name}
+        <span className="muted">（{v}）</span>
+      </span>
+    ) : (
+      v
+    ),
+};
+
+const colDomain: ColumnsType<TableCoverageItem>[number] = {
+  title: "域",
+  dataIndex: "domain",
+  key: "domain",
+  width: 110,
+  render: (v: string | null) => v ?? <span className="muted">-</span>,
+};
+
+const colType: ColumnsType<TableCoverageItem>[number] = {
+  title: "类型",
+  dataIndex: "entity_type",
+  key: "entity_type",
+  width: 90,
+  render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
+};
+
+const colSens: ColumnsType<TableCoverageItem>[number] = {
+  title: "敏感度",
+  dataIndex: "sensitivity_level",
+  key: "sensitivity_level",
+  width: 110,
+  render: sensitivityTag,
+};
+
+const colOwner: ColumnsType<TableCoverageItem>[number] = {
+  title: "责任人",
+  dataIndex: "owner_name",
+  key: "owner_name",
+  width: 100,
+  render: (v: string | null | undefined) => v ?? <span className="muted">-</span>,
+};
+
+const colTotal: ColumnsType<TableCoverageItem>[number] = {
+  title: "字段数",
+  dataIndex: "total_fields",
+  key: "total_fields",
+  width: 80,
+  align: "right",
+  sorter: (a, b) => a.total_fields - b.total_fields,
+};
+
+const colCovered: ColumnsType<TableCoverageItem>[number] = {
+  title: "有描述",
+  dataIndex: "covered_fields",
+  key: "covered_fields",
+  width: 80,
+  align: "right",
+  sorter: (a, b) => a.covered_fields - b.covered_fields,
+};
+
+const colMissing: ColumnsType<TableCoverageItem>[number] = {
+  title: "缺失字段",
+  dataIndex: "missing_fields",
+  key: "missing_fields",
+  width: 90,
+  align: "right",
+  sorter: (a, b) => a.missing_fields - b.missing_fields,
+  render: (v: number) =>
+    v > 0 ? <span style={{ color: "#cf1322" }}>{v}</span> : <span className="muted">{v}</span>,
+};
+
+/** 字段级覆盖进度条（字段描述覆盖率明细用）。 */
+const colCoveragePct: ColumnsType<TableCoverageItem>[number] = {
+  title: "覆盖率",
+  dataIndex: "coverage_pct",
+  key: "coverage_pct",
+  width: 150,
+  sorter: (a, b) => coveragePct(a) - coveragePct(b),
+  render: (_v, r) => {
+    const pct = coveragePct(r);
+    return (
+      <Space size={8}>
+        <Progress
+          percent={pct}
+          size="small"
+          strokeColor={pct >= 80 ? "#52c41a" : pct >= 50 ? "#faad14" : "#f5222d"}
+          style={{ width: 80, margin: 0 }}
+        />
+        <span className={pct >= 80 ? undefined : pct >= 50 ? undefined : "muted"} style={{ fontSize: 12 }}>
+          {pct}%
+        </span>
+      </Space>
+    );
+  },
+};
+
+/** 缺失字段名 Tag 列表（缺失字段明细用，最多展示 10 个后省略）。 */
+const colMissingNames: ColumnsType<TableCoverageItem>[number] = {
+  title: "缺失字段名",
+  dataIndex: "missing_field_names",
+  key: "missing_field_names",
+  ellipsis: true,
+  render: (v: string[] | undefined) => {
+    if (!v || v.length === 0) return <span className="muted">-</span>;
+    return (
+      <Space size={[4, 4]} wrap>
+        {v.slice(0, 10).map((n) => (
+          <Tag key={n} color="red" className="mono">
+            {n}
+          </Tag>
+        ))}
+        {v.length > 10 ? <span className="muted">…{v.length - 10}</span> : null}
+      </Space>
+    );
+  },
+};
+
+/** 表描述内容 + 来源标签（缺表描述明细用）。 */
+const colDesc: ColumnsType<TableCoverageItem>[number] = {
+  title: "表描述",
+  dataIndex: "description",
+  key: "description",
+  ellipsis: true,
+  render: (v: string | null | undefined, r) =>
+    v ? (
+      <span>
+        {v} {descriptionSourceTag(r.description_source)}
+      </span>
+    ) : (
+      <Tag color="orange">缺失</Tag>
+    ),
+};
+
+/** 更新时间（上海时区中文，全部表资产明细用）。 */
+const colUpdated: ColumnsType<TableCoverageItem>[number] = {
+  title: "更新时间",
+  dataIndex: "updated_at",
+  key: "updated_at",
+  width: 150,
+  sorter: (a, b) =>
+    (a.updated_at ? new Date(a.updated_at).getTime() : 0) -
+    (b.updated_at ? new Date(b.updated_at).getTime() : 0),
+  render: (v: string | null | undefined) =>
+    v ? formatCnTime(v) : <span className="muted">-</span>,
+};
+
+/** 字段描述覆盖率（0-100）。 */
+function coveragePct(r: TableCoverageItem): number {
+  return r.total_fields > 0
+    ? Math.round((r.covered_fields / r.total_fields) * 100)
+    : 0;
+}
+
+/**
+ * 四个下钻口径的差异化列：
+ * - fieldCoverage 全局覆盖总览 → 强调覆盖率进度
+ * - fieldsMissing 字段级治理   → 强调具体缺失字段名
+ * - tablesMissing 表级补全     → 强调表描述现状 + 责任人
+ * - totalTables   完整资产盘点 → 强调责任人 + 更新时间
+ */
+function buildMetricColumns(key: CoverageMetricKey): ColumnsType<TableCoverageItem> {
+  switch (key) {
+    case "fieldCoverage":
+      return [colTable, colSource, colDomain, colTotal, colCovered, colMissing, colCoveragePct];
+    case "fieldsMissing":
+      return [colTable, colSource, colDomain, colSens, colMissingNames, colMissing, colTotal];
+    case "tablesMissing":
+      return [colTable, colSource, colDomain, colType, colSens, colDesc, colOwner];
+    case "totalTables":
+    default:
+      return [
+        colTable,
+        colSource,
+        colDomain,
+        colType,
+        colSens,
+        colOwner,
+        colTotal,
+        colCovered,
+        colMissing,
+        colUpdated,
+      ];
+  }
+}
+
+/** 主表格（按表列缺失字段数）完整列。 */
+function buildTableColumns(): ColumnsType<TableCoverageItem> {
+  return [
+    colTable,
+    colSource,
+    colDomain,
+    colType,
+    colSens,
+    colDesc,
+    colTotal,
+    colCovered,
+    colMissing,
+  ];
+}
+
 /**
  * 描述缺失概览（资产地图「描述缺失」tab，TD §12.1）。
  *
@@ -163,6 +382,10 @@ export function DescriptionCoverageTab() {
   const [metricDrillOpen, setMetricDrillOpen] = useState(false);
   const [metricDrillTitle, setMetricDrillTitle] = useState("");
   const [metricDrillRows, setMetricDrillRows] = useState<TableCoverageItem[]>([]);
+  // 各口径差异化列（见 buildMetricColumns）
+  const [metricDrillColumns, setMetricDrillColumns] = useState<
+    ColumnsType<TableCoverageItem>
+  >([]);
 
   async function load() {
     setLoading(true);
@@ -234,6 +457,7 @@ export function DescriptionCoverageTab() {
     }
     setMetricDrillTitle(title);
     setMetricDrillRows(rows);
+    setMetricDrillColumns(buildMetricColumns(key));
     setMetricDrillOpen(true);
   }
 
@@ -356,79 +580,7 @@ export function DescriptionCoverageTab() {
       ? Math.round((coverage.tables_with_desc / coverage.total_tables) * 100)
       : 0;
 
-  const columns: ColumnsType<TableCoverageItem> = [
-    {
-      title: "表 / 视图",
-      dataIndex: "entity_name",
-      key: "entity_name",
-      ellipsis: true,
-      render: (v: string) => <span className="mono">{v}</span>,
-    },
-    {
-      title: "数据源",
-      dataIndex: "source_id",
-      key: "source_id",
-      width: 140,
-      ellipsis: true,
-    },
-    {
-      title: "域",
-      dataIndex: "domain",
-      key: "domain",
-      width: 110,
-      render: (v: string | null) => v ?? <span className="muted">-</span>,
-    },
-    {
-      title: "类型",
-      dataIndex: "entity_type",
-      key: "entity_type",
-      width: 90,
-      render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
-    },
-    {
-      title: "敏感度",
-      dataIndex: "sensitivity_level",
-      key: "sensitivity_level",
-      width: 110,
-      render: sensitivityTag,
-    },
-    {
-      title: "表描述",
-      dataIndex: "table_desc",
-      key: "table_desc",
-      width: 90,
-      render: (v: boolean) =>
-        v ? <Tag color="green">已补全</Tag> : <Tag color="orange">缺失</Tag>,
-    },
-    {
-      title: "字段数",
-      dataIndex: "total_fields",
-      key: "total_fields",
-      width: 80,
-      align: "right",
-      sorter: (a, b) => a.total_fields - b.total_fields,
-    },
-    {
-      title: "有描述",
-      dataIndex: "covered_fields",
-      key: "covered_fields",
-      width: 80,
-      align: "right",
-      sorter: (a, b) => a.covered_fields - b.covered_fields,
-    },
-    {
-      title: "缺失字段",
-      dataIndex: "missing_fields",
-      key: "missing_fields",
-      width: 90,
-      align: "right",
-      sorter: (a, b) => a.missing_fields - b.missing_fields,
-      defaultSortOrder: "descend",
-      render: (v: number) =>
-        v > 0 ? <span style={{ color: "#cf1322" }}>{v}</span> : <span className="muted">{v}</span>,
-    },
-  ];
-
+  const tableCoverageCols: ColumnsType<TableCoverageItem> = buildTableColumns();
   const schemaColumns = Array.isArray(detail?.schema_summary)
     ? detail?.schema_summary
     : [];
@@ -541,7 +693,7 @@ export function DescriptionCoverageTab() {
       >
         <Table<TableCoverageItem>
           dataSource={coverage.per_table}
-          columns={columns}
+          columns={tableCoverageCols}
           rowKey={(r) => r.catalog_id}
           size="small"
           pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 张表` }}
@@ -651,7 +803,7 @@ export function DescriptionCoverageTab() {
       <DrillDownDrawer
         open={metricDrillOpen}
         title={metricDrillTitle}
-        columns={columns as unknown as ColumnsType<Record<string, unknown>>}
+        columns={metricDrillColumns as unknown as ColumnsType<Record<string, unknown>>}
         rows={metricDrillRows as unknown as Record<string, unknown>[]}
         loading={false}
         onClose={() => setMetricDrillOpen(false)}

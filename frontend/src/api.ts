@@ -2484,13 +2484,19 @@ export interface TableCoverageItem {
   catalog_id: number;
   entity_name: string;
   source_id: string;
+  source_name?: string | null;
   entity_type: string;
   domain: string | null;
   sensitivity_level: string;
   table_desc: boolean;
+  description?: string | null;
+  description_source?: string | null;
+  owner_name?: string | null;
   total_fields: number;
   covered_fields: number;
   missing_fields: number;
+  missing_field_names?: string[];
+  updated_at?: string | null;
 }
 
 export interface DescriptionCoverage {

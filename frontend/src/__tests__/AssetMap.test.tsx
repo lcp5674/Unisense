@@ -220,14 +220,18 @@ describe("AssetMap", () => {
       fields_missing_desc: 2,
       per_table: [
         {
-          catalog_id: 1, entity_name: "ods_order", source_id: "s1", entity_type: "TABLE",
-          domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
           total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
         },
         {
-          catalog_id: 2, entity_name: "dwd_user", source_id: "s2", entity_type: "TABLE",
-          domain: "platform", sensitivity_level: "CONFIDENTIAL", table_desc: true,
+          catalog_id: 2, entity_name: "dwd_user", source_id: "s2", source_name: "Platform MySQL",
+          entity_type: "TABLE", domain: "platform", sensitivity_level: "CONFIDENTIAL", table_desc: true,
+          description: "用户明细表", description_source: "manual", owner_name: "张三",
           total_fields: 2, covered_fields: 2, missing_fields: 0,
+          missing_field_names: [], updated_at: "2026-08-14T03:00:00",
         },
       ],
     });
@@ -1146,6 +1150,89 @@ describe("AssetMap", () => {
       expect(screen.getByText("dwd_user")).toBeInTheDocument();
       expect(fetchDescriptionCoverage).toHaveBeenCalled();
     });
+  });
+
+  it("description coverage 字段描述覆盖率明细：展示覆盖率进度列", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+    await user.click(screen.getByText("描述缺失"));
+    await waitFor(() => expect(screen.getByText("字段描述覆盖率")).toBeInTheDocument());
+
+    const card = screen.getByText("字段描述覆盖率").closest(".ant-card") as HTMLElement;
+    await user.click(within(card).getByText("查看明细"));
+
+    await waitFor(() =>
+      expect(screen.getByText(/字段描述覆盖率明细/)).toBeInTheDocument(),
+    );
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    // 差异化列：覆盖率进度（区别于其他明细）
+    expect(within(drawer).getByText("覆盖率")).toBeInTheDocument();
+    expect(within(drawer).getByText("ods_order")).toBeInTheDocument();
+  });
+
+  it("description coverage 缺失字段明细：只列有缺失的表 + 缺失字段名 Tag", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+    await user.click(screen.getByText("描述缺失"));
+    await waitFor(() => expect(screen.getByText("缺失字段数")).toBeInTheDocument());
+
+    const card = screen.getByText("缺失字段数").closest(".ant-card") as HTMLElement;
+    await user.click(within(card).getByText("查看明细"));
+
+    await waitFor(() =>
+      expect(screen.getByText(/缺失字段明细/)).toBeInTheDocument(),
+    );
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    // 差异化列：缺失字段名 Tag（ods_order 缺 id）
+    expect(within(drawer).getByText("缺失字段名")).toBeInTheDocument();
+    expect(within(drawer).getByText("id")).toBeInTheDocument();
+    // 无缺失字段的表（dwd_user）不应出现在此明细
+    expect(within(drawer).queryByText("dwd_user")).not.toBeInTheDocument();
+  });
+
+  it("description coverage 缺表描述明细：展示表描述现状 + 责任人列", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+    await user.click(screen.getByText("描述缺失"));
+    await waitFor(() => expect(screen.getByText("缺表描述")).toBeInTheDocument());
+
+    const card = screen.getByText("缺表描述").closest(".ant-card") as HTMLElement;
+    await user.click(within(card).getByText("查看明细"));
+
+    await waitFor(() =>
+      expect(screen.getByText(/缺表描述明细/)).toBeInTheDocument(),
+    );
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    // 差异化列：责任人 + 表描述「缺失」标记
+    expect(within(drawer).getByText("责任人")).toBeInTheDocument();
+    // ods_order 缺表描述 → 在列；dwd_user 有描述 → 不在列
+    expect(within(drawer).getByText("ods_order")).toBeInTheDocument();
+    expect(within(drawer).queryByText("dwd_user")).not.toBeInTheDocument();
+  });
+
+  it("description coverage 全部表资产明细：展示责任人 + 更新时间（上海时区中文）", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+    await user.click(screen.getByText("描述缺失"));
+    await waitFor(() => expect(screen.getByText("表总数")).toBeInTheDocument());
+
+    const card = screen.getByText("表总数").closest(".ant-card") as HTMLElement;
+    await user.click(within(card).getByText("查看明细"));
+
+    await waitFor(() =>
+      expect(screen.getByText(/全部表资产明细/)).toBeInTheDocument(),
+    );
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    // 差异化列：责任人中文名 + 更新时间（上海时区）
+    expect(within(drawer).getByText("责任人")).toBeInTheDocument();
+    expect(within(drawer).getByText("张三")).toBeInTheDocument();
+    expect(within(drawer).getByText("更新时间")).toBeInTheDocument();
+    // 2026-08-14T02:30:00（UTC）→ 上海 10:30
+    expect(within(drawer).getByText("2026年8月14日 10:30")).toBeInTheDocument();
   });
 
   it("description coverage row click opens detail drawer with table description", async () => {

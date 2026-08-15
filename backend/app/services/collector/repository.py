@@ -762,11 +762,21 @@ class CollectorRepository:
         ).scalars().all()
         srcs = (
             await self._db.execute(
-                select(DataSource.source_id, DataSource.domain)
+                select(DataSource.source_id, DataSource.domain, DataSource.name)
+            )
+        ).all()
+        users = (
+            await self._db.execute(
+                select(User.id, User.display_name, User.username)
             )
         ).all()
 
         domain_map = {row.source_id: row.domain for row in srcs}
+        src_name_map = {row.source_id: row.name for row in srcs}
+        # 责任人展示名：display_name 优先，缺省回退 username
+        owner_map = {
+            row.id: (row.display_name or row.username) for row in users
+        }
         # 仅 manual/llm 记录计入已描述（schema 来源与 comment 等价，避免重复计）
         desc_keys: set[tuple[int, str]] = {
             (d.catalog_id, d.column_name)
@@ -788,13 +798,25 @@ class CollectorRepository:
                     "catalog_id": cat.id,
                     "entity_name": cat.entity_name,
                     "source_id": cat.source_id,
+                    "source_name": src_name_map.get(cat.source_id),
                     "entity_type": cat.entity_type,
                     "domain": domain_map.get(cat.source_id),
                     "sensitivity_level": cat.sensitivity_level,
                     "table_desc": bool(cat.description and cat.description.strip()),
+                    "description": cat.description,
+                    "description_source": cat.description_source,
+                    "owner_name": owner_map.get(cat.owner_id) if cat.owner_id else None,
                     "total_fields": total,
                     "covered_fields": covered,
                     "missing_fields": total - covered,
+                    "missing_field_names": [
+                        c["name"]
+                        for c in columns
+                        if not _column_has_desc(c, cat.id, desc_keys)
+                    ],
+                    "updated_at": (
+                        cat.updated_at.isoformat() if cat.updated_at else None
+                    ),
                 }
             )
 

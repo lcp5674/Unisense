@@ -2530,6 +2530,9 @@ def _coverage_session() -> MagicMock:
         ]
     }
     cat1.description = None
+    cat1.description_source = None
+    cat1.owner_id = None
+    cat1.updated_at = None
 
     cat2 = MagicMock()
     cat2.id = 2
@@ -2544,6 +2547,9 @@ def _coverage_session() -> MagicMock:
         ]
     }
     cat2.description = "用户明细表"
+    cat2.description_source = "manual"
+    cat2.owner_id = 5
+    cat2.updated_at = None
 
     desc = MagicMock()
     desc.catalog_id = 2
@@ -2556,11 +2562,15 @@ def _coverage_session() -> MagicMock:
     res_descs.scalars.return_value.all.return_value = [desc]
     res_srcs = MagicMock()
     res_srcs.all.return_value = [
-        SimpleNamespace(source_id="s1", domain="sales"),
-        SimpleNamespace(source_id="s2", domain="platform"),
+        SimpleNamespace(source_id="s1", domain="sales", name="Sales MySQL"),
+        SimpleNamespace(source_id="s2", domain="platform", name="Platform MySQL"),
+    ]
+    res_users = MagicMock()
+    res_users.all.return_value = [
+        SimpleNamespace(id=5, display_name="张三", username="zhangsan"),
     ]
 
-    s.execute = AsyncMock(side_effect=[res_cats, res_descs, res_srcs])
+    s.execute = AsyncMock(side_effect=[res_cats, res_descs, res_srcs, res_users])
     return s
 
 
@@ -2582,10 +2592,18 @@ async def test_repo_get_description_coverage_stats() -> None:
     assert by_name["ods_order"]["domain"] == "sales"
     assert by_name["ods_order"]["table_desc"] is False
     assert by_name["ods_order"]["sensitivity_level"] == "INTERNAL"
+    assert by_name["ods_order"]["missing_field_names"] == ["id"]
+    assert by_name["ods_order"]["source_name"] == "Sales MySQL"
+    assert by_name["ods_order"]["owner_name"] is None
     assert by_name["dwd_user"]["missing_fields"] == 1
     assert by_name["dwd_user"]["domain"] == "platform"
     assert by_name["dwd_user"]["table_desc"] is True
     assert by_name["dwd_user"]["sensitivity_level"] == "CONFIDENTIAL"
+    assert by_name["dwd_user"]["missing_field_names"] == ["phone"]
+    assert by_name["dwd_user"]["source_name"] == "Platform MySQL"
+    assert by_name["dwd_user"]["owner_name"] == "张三"
+    assert by_name["dwd_user"]["description"] == "用户明细表"
+    assert by_name["dwd_user"]["description_source"] == "manual"
 
 
 async def test_count_jobs_by_status_aggregates() -> None:
