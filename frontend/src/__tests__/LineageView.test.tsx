@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { LineageView } from "../pages/LineageView";
 import * as api from "../api";
@@ -30,7 +30,15 @@ vi.mock("@antv/g6", () => ({
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, lineageGraph: vi.fn(), getCatalogDetail: vi.fn() };
+  return {
+    ...actual,
+    lineageGraph: vi.fn(),
+    getCatalogDetail: vi.fn(),
+    parseLineage: vi.fn(),
+    getMetric: vi.fn(),
+    getMetricHealth: vi.fn(),
+    fetchRelatedMetrics: vi.fn(),
+  };
 });
 
 const graphData: LineageGraphData = {
@@ -40,6 +48,48 @@ const graphData: LineageGraphData = {
   ],
   edges: [{ source: "metric:revenue", target: "table:orders", type: "DERIVED_FROM" }],
 };
+
+const metricDetail = {
+  metric_code: "revenue",
+  name: "营收",
+  domain: "finance",
+  type: "atomic",
+  granularity: "day",
+  unit: "元",
+  currency: null,
+  aggregation: "SUM",
+  time_semantics: "PERIOD",
+  freshness: "T1",
+  sla: null,
+  dw_layer: "DWS",
+  metric_tier: "T1",
+  serving_mode: "BATCH_ONLY",
+  additivity: "ADDITIVE",
+  non_additive_dimensions: null,
+  definition_json: { expression: "SUM(amount)", source_tables: ["dwd_finance_order"] },
+  version: 1,
+  row_version: 1,
+  status: "PUBLISHED",
+  owner_id: 1,
+  backup_owner_id: null,
+  approver_id: null,
+  submitted_by: null,
+  pii_flag: false,
+  compliance_reviewed: false,
+  effective_version: null,
+  consumption_guide: null,
+  successor_code: null,
+  deprecated_at: null,
+  sunset_until: null,
+  emergency_publish: false,
+  emergency_reason: null,
+  gray_tenant_ids: null,
+  pending_conflict: false,
+  pending_conflict_detail: null,
+  pending_version: false,
+  created_at: "2026-08-01T00:00:00",
+  updated_at: "2026-08-01T00:00:00",
+} as never as import("../types").MetricResponse;
 
 const tableDetail = {
   source_id: "mysql_a",
@@ -82,6 +132,9 @@ describe("LineageView 血缘图谱 Tab", () => {
     vi.clearAllMocks();
     vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
     vi.mocked(api.getCatalogDetail).mockResolvedValue(tableDetail);
+    vi.mocked(api.getMetric).mockResolvedValue(metricDetail);
+    vi.mocked(api.getMetricHealth).mockResolvedValue(null as never);
+    vi.mocked(api.fetchRelatedMetrics).mockResolvedValue([]);
     // AssetGraph 点击回调调 graph.getNodeData(id)?.data，需按 id 返回对应节点
     graphMock.getNodeData.mockImplementation((id?: string) => {
       const found = graphData.nodes.find((n) => n.id === String(id));
@@ -97,7 +150,7 @@ describe("LineageView 血缘图谱 Tab", () => {
     });
   });
 
-  it("点击指标节点跳转指标详情", async () => {
+  it("点击指标节点在本页打开指标详情侧边栏（不跳转页面）", async () => {
     renderLineage();
     await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
     const clickHandler = graphMock.on.mock.calls.find(([evt]) => evt === "node:click")?.[1] as
@@ -106,6 +159,31 @@ describe("LineageView 血缘图谱 Tab", () => {
     expect(clickHandler).toBeDefined();
     await act(async () => {
       clickHandler?.({ target: { id: "metric:revenue" } });
+    });
+    // 侧边栏加载指标详情并展示（不再跳转页面）
+    await waitFor(() => expect(api.getMetric).toHaveBeenCalledWith("revenue"));
+    await waitFor(() => {
+      expect(screen.getByText(/指标详情：营收/)).toBeInTheDocument();
+    });
+    expect(screen.getByText("revenue")).toBeInTheDocument();
+    // 未跳转指标详情页
+    expect(currentPath).toBe("/lineage");
+  });
+
+  it("指标详情侧边栏提供「前往完整详情」补充入口", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    const clickHandler = graphMock.on.mock.calls.find(([evt]) => evt === "node:click")?.[1] as
+      | ((evt: unknown) => void)
+      | undefined;
+    await act(async () => {
+      clickHandler?.({ target: { id: "metric:revenue" } });
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/指标详情：营收/)).toBeInTheDocument();
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: /前往完整详情/ }).click();
     });
     expect(currentPath).toBe("/detail/revenue");
   });
@@ -201,6 +279,41 @@ describe("LineageView 血缘图谱 Tab", () => {
     await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
     await waitFor(() =>
       expect(document.querySelector('[data-testid="asset-graph-layout"]')).toBeTruthy(),
+    );
+  });
+});
+
+describe("LineageView SQL 血缘解析 Tab", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
+    vi.mocked(api.getCatalogDetail).mockResolvedValue(tableDetail);
+    vi.mocked(api.parseLineage).mockResolvedValue({ table_edges: 1, field_edges: 2, graph_written: true });
+  });
+
+  it("方言下拉支持 Doris 与 ClickHouse，并按所选方言调用解析", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    // 切到 SQL 血缘解析 Tab（antd 非激活 tabpanel 为 display:none，getByRole 仅命中可见面板）
+    await act(async () => {
+      screen.getByRole("tab", { name: /SQL 血缘解析/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    const dialectSelect = within(panel).getByRole("combobox");
+
+    // 打开方言下拉，确认 Doris 与 ClickHouse 均可选
+    fireEvent.mouseDown(dialectSelect);
+    await screen.findByText("Doris");
+    expect(screen.getByText("ClickHouse")).toBeTruthy();
+    fireEvent.click(screen.getByText("Doris"));
+
+    // 输入 SQL 并解析，校验按所选方言（doris）调用
+    fireEvent.change(within(panel).getByPlaceholderText(/粘贴 SQL/), {
+      target: { value: "INSERT INTO t SELECT id FROM s" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: /解析血缘/ }));
+    await waitFor(() =>
+      expect(api.parseLineage).toHaveBeenCalledWith("INSERT INTO t SELECT id FROM s", "doris"),
     );
   });
 });

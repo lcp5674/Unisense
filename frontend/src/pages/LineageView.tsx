@@ -46,6 +46,7 @@ import {
 } from "../api";
 import type { DBCatalog, LineageChannel, LineageEdge, LineageIngestRun, StaleEdge } from "../types";
 import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
+import { MetricDetailDrawer } from "../components/assetmap/MetricDetailDrawer";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
@@ -63,6 +64,17 @@ const EDGE_TYPE_LABEL: Record<string, string> = {
   CONSUMED_BY: "被消费",
 };
 
+/** SQL 血缘解析支持的数据库方言（对齐后端 SourceTypeEnum 与 sqlglot dialect 名）。 */
+const SQL_DIALECT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "mysql", label: "MySQL" },
+  { value: "postgres", label: "PostgreSQL" },
+  { value: "hive", label: "Hive" },
+  { value: "spark", label: "Spark" },
+  { value: "doris", label: "Doris" },
+  { value: "clickhouse", label: "ClickHouse" },
+  { value: "starrocks", label: "StarRocks" },
+];
+
 const SENSITIVITY_COLOR: Record<string, string> = {
   INTERNAL: "default",
   CONFIDENTIAL: "orange",
@@ -74,12 +86,15 @@ const SENSITIVITY_COLOR: Record<string, string> = {
 
 type Direction = "upstream" | "downstream" | "both";
 
-/** 血缘图谱 Tab：进入即加载全量血缘图谱（力导向图）。指标节点点击跳详情；
- *  表/视图节点点击在本页 Drawer 展示表详情，由用户决定是否跳转指标目录。 */
+/** 血缘图谱 Tab：进入即加载全量血缘图谱（力导向图）。指标/表节点点击均在本页以侧边栏
+ *  展示详情（指标详情抽屉 / 表详情抽屉），不跳转页面，用户可再决定是否前往完整页面。 */
 function GraphTab() {
   const navigate = useNavigate();
   const [data, setData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
   const [loading, setLoading] = useState(false);
+  // 指标节点详情抽屉（侧边栏）
+  const [metricDrawerOpen, setMetricDrawerOpen] = useState(false);
+  const [metricCode, setMetricCode] = useState<string | null>(null);
   // 表节点详情抽屉
   const [detail, setDetail] = useState<DBCatalog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -127,8 +142,9 @@ function GraphTab() {
 
   function handleNodeClick(node: AssetGraphNode) {
     if (node.type === "metric") {
-      const code = node.id.replace(/^metric:/, "");
-      navigate(`/detail/${encodeURIComponent(code)}`);
+      // 本页侧边栏展示指标详情，不跳转页面（保留「前往完整详情」按钮作为补充入口）
+      setMetricCode(node.id.replace(/^metric:/, ""));
+      setMetricDrawerOpen(true);
     } else if (node.type === "table") {
       void openTableDetail(node);
     }
@@ -159,7 +175,7 @@ function GraphTab() {
         </Button>
         <span className="muted" style={{ fontSize: 13 }}>
           {data ? `共 ${data.nodes.length} 节点 · ${data.edges.length} 条血缘边` : "加载血缘图谱…"}
-          ，点击节点：指标 → 指标详情；表/视图 → 本页查看表详情
+          ，点击节点：指标 / 表视图均在本页侧边栏展示详情
         </span>
       </Space>
       {data && data.nodes.length > 0 ? (
@@ -240,6 +256,13 @@ function GraphTab() {
           </div>
         )}
       </Drawer>
+
+      {/* 指标节点详情侧边栏：点击血缘图谱中的指标节点打开（不跳转页面） */}
+      <MetricDetailDrawer
+        open={metricDrawerOpen}
+        metricCode={metricCode}
+        onClose={() => setMetricDrawerOpen(false)}
+      />
     </div>
   );
 }
@@ -397,7 +420,7 @@ function ParseTab() {
           value={dialect}
           onChange={setDialect}
           style={{ width: 160 }}
-          options={["mysql", "postgres", "hive", "spark", "clickhouse", "duckdb"].map((v) => ({ value: v, label: v }))}
+          options={SQL_DIALECT_OPTIONS}
         />
         <Button type="primary" icon={<CodeOutlined />} onClick={handleParse} loading={loading}>
           解析血缘
