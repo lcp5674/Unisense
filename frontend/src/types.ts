@@ -1648,7 +1648,8 @@ export interface SystemDictItem {
 }
 
 export interface DictItemCreateRequest {
-  code: string;
+  /** 编码；缺省由后端按显示名自动生成英文名 */
+  code?: string;
   label: string;
   sort_order?: number;
   description?: string | null;

@@ -64,6 +64,49 @@ class TestCreateItem:
         assert deleted.status == "active"
         assert result is deleted
 
+    async def test_create_item_auto_generate_code(self, svc) -> None:
+        """未传 code：按显示名自动生成英文编码（分钟 → minute）。"""
+        svc._repo.get_item_including_deleted = AsyncMock(return_value=None)
+        svc._repo.code_exists_in_type = AsyncMock(return_value=False)
+        item = MagicMock()
+        item.code = "minute"
+        svc._repo.create = AsyncMock(return_value=item)
+
+        from app.services.system_dict.schemas import DictItemCreate
+
+        data = DictItemCreate(label="分钟", sort_order=7)
+        result = await svc.create_item("granularity", data)
+        assert result.code == "minute"
+        # 自动生成路径：存在性判定按 (dict_type, 候选编码) 查询
+        svc._repo.code_exists_in_type.assert_awaited()
+        created = svc._repo.create.await_args.args[0]
+        assert created.code == "minute"
+
+    async def test_create_item_auto_generate_conflict_suffix(self, svc) -> None:
+        """自动生成编码冲突时追加序号（minute → minute_2）。"""
+        svc._repo.get_item_including_deleted = AsyncMock(return_value=None)
+        # 第一次（minute）冲突、第二次（minute_2）可用
+        svc._repo.code_exists_in_type = AsyncMock(side_effect=[True, False])
+        svc._repo.create = AsyncMock(side_effect=lambda item: item)
+
+        from app.services.system_dict.schemas import DictItemCreate
+
+        data = DictItemCreate(label="分钟")
+        result = await svc.create_item("granularity", data)
+        assert result.code == "minute_2"
+
+    async def test_create_item_auto_generate_fallback(self, svc) -> None:
+        """纯标点/空白显示名无可提取字符：回退 item。"""
+        svc._repo.get_item_including_deleted = AsyncMock(return_value=None)
+        svc._repo.code_exists_in_type = AsyncMock(return_value=False)
+        svc._repo.create = AsyncMock(side_effect=lambda item: item)
+
+        from app.services.system_dict.schemas import DictItemCreate
+
+        data = DictItemCreate(label="￥")
+        result = await svc.create_item("unit", data)
+        assert result.code == "item"
+
 
 class TestDeleteItem:
     async def test_delete_with_references_rejected(self, svc) -> None:

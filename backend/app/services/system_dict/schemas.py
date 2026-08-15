@@ -11,16 +11,23 @@ _DICT_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 class DictItemCreate(BaseModel):
-    """创建字典项请求。"""
+    """创建字典项请求。
 
-    code: str = Field(..., max_length=64, description="字典项编码")
+    ``code`` 可选：未传（或空串）时由后端按显示名自动生成英文编码
+    （术语字典翻译 + 拼音兜底 + 冲突自增后缀），见
+    ``SystemDictService._generate_unique_code``。
+    """
+
+    code: str | None = Field(None, max_length=64, description="字典项编码（缺省自动生成）")
     label: str = Field(..., max_length=128, description="显示名")
     sort_order: int = Field(0, description="排序序号")
     description: str | None = Field(None, max_length=256, description="描述")
 
     @field_validator("code")
     @classmethod
-    def validate_code(cls, v: str) -> str:
+    def validate_code(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         if not _DICT_CODE_PATTERN.match(v):
             raise ValueError("字典项编码仅含字母、数字和下划线")
         return v

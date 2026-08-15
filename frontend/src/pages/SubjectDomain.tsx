@@ -12,7 +12,7 @@ import {
 } from "../api";
 import type { SubjectDomainTreeNode, SubjectDomain } from "../types";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
-import { zhToEn } from "../utils/zhEnDict";
+import { slugifyCode } from "../utils/zhEnDict";
 
 /**
  * 前端编码预览（与后端 codegen.slugify_code 规则对齐）：
@@ -21,40 +21,6 @@ import { zhToEn } from "../utils/zhEnDict";
  * 根域回退 domain / 子域回退 {父域}_sub。仅用于表单预览，
  * 实际编码以后端生成/返回为准。
  */
-function slugifyCode(name: string): string {
-  const tokens: string[] = [];
-  let cur: string[] = [];
-  let cjk: string[] = [];
-  for (const ch of name) {
-    const isCjk = /[\u4e00-\u9fff]/.test(ch);
-    if (isCjk) {
-      if (cur.length > 0) {
-        tokens.push(cur.join(""));
-        cur = [];
-      }
-      cjk.push(ch);
-    } else if (/[a-z0-9]/i.test(ch)) {
-      if (cjk.length > 0) {
-        tokens.push(zhToEn(cjk.join("")));
-        cjk = [];
-      }
-      cur.push(ch.toLowerCase());
-    } else {
-      if (cjk.length > 0) {
-        tokens.push(zhToEn(cjk.join("")));
-        cjk = [];
-      }
-      if (cur.length > 0) {
-        tokens.push(cur.join(""));
-        cur = [];
-      }
-    }
-  }
-  if (cjk.length > 0) tokens.push(zhToEn(cjk.join("")));
-  if (cur.length > 0) tokens.push(cur.join(""));
-  return tokens.join("_").replace(/^_+|_+$/g, "");
-}
-
 export function previewDomainCode(name: string, parentCode?: string | null): string {
   const slug = slugifyCode(name);
   if (slug) return parentCode ? `${parentCode}_${slug}` : slug;

@@ -49,11 +49,15 @@ class SystemDictService:
         编码唯一性以「含软删除」全量判定：软删除行仍占用唯一索引
         （uk_dict_type_code），若命中软删除行则恢复并更新字段，避免
         IntegrityError → 500；命中 active 行则抛 ConflictError。
+        ``data.code`` 未传时按显示名自动生成英文编码（冲突自动追加序号）。
         """
-        existing = await self._repo.get_item_including_deleted(dict_type, data.code)
+        code = data.code
+        if not code:
+            code = await self._generate_unique_code(dict_type, data.label)
+        existing = await self._repo.get_item_including_deleted(dict_type, code)
         if existing is not None and existing.deleted_at is None:
             raise ConflictError(
-                f"字典项已存在: {dict_type}/{data.code}",
+                f"字典项已存在: {dict_type}/{code}",
                 error_code="DUPLICATE_DICT_CODE",
             )
         if existing is not None:
@@ -64,20 +68,59 @@ class SystemDictService:
             existing.sort_order = data.sort_order
             existing.description = data.description
             item = await self._repo.update(existing)
-            logger.info("dict_item_restored", dict_type=dict_type, code=data.code)
+            logger.info(
+                "dict_item_restored",
+                dict_type=dict_type,
+                code=code,
+                auto_generated=not data.code,
+            )
             return item
 
         item = SystemDict(
             dict_type=dict_type,
-            code=data.code,
+            code=code,
             label=data.label,
             sort_order=data.sort_order,
             status="active",
             description=data.description,
         )
         item = await self._repo.create(item)
-        logger.info("dict_item_created", dict_type=dict_type, code=data.code)
+        logger.info(
+            "dict_item_created",
+            dict_type=dict_type,
+            code=code,
+            auto_generated=not data.code,
+        )
         return item
+
+    async def _generate_unique_code(self, dict_type: str, label: str) -> str:
+        """按显示名自动生成唯一字典项编码。
+
+        规则：中文经术语字典翻译（贪心最长匹配）、未覆盖字拼音兜底、
+        ASCII 保留生成 slug（对齐 ``app.core.codegen.slugify_code``）；
+        纯标点/空白等无可提取字符时回退 ``item``；冲突时追加 ``_2/_3/...``
+        后缀（上限 100 次）。与主题域/数据源编码自动生成约定保持一致。
+        """
+        from app.core.codegen import (
+            MAX_CODE_ATTEMPTS,
+            MAX_CODE_LEN,
+            generate_unique_code,
+            slugify_code,
+        )
+
+        base = slugify_code(label) or "item"
+        try:
+            return await generate_unique_code(
+                base,
+                lambda cand: self._repo.code_exists_in_type(dict_type, cand),
+                max_len=MAX_CODE_LEN,
+                max_attempts=MAX_CODE_ATTEMPTS,
+            )
+        except RuntimeError as exc:
+            raise BusinessError(
+                f"无法为 {label} 生成唯一字典项编码，请手动指定",
+                error_code="DICT_CODE_EXHAUSTED",
+            ) from exc
 
     async def update_item(
         self,

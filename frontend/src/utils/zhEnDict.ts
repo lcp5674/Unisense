@@ -355,3 +355,49 @@ function pinyinFallback(ch: string): string {
   const out = pinyin(ch, { toneType: "none" });
   return String(out ?? "").replace(/\s+/g, "");
 }
+
+/**
+ * 显示名 → 编码片段（与后端 ``codegen.slugify_code`` 规则对齐）。
+ *
+ * 连续中文段经中英术语字典翻译（贪心最长匹配）、未覆盖字拼音兜底、
+ * ASCII 保留、空格/标点作为段落分隔符、段落用下划线连接；
+ * 返回空串表示无可提取字符（纯标点/空白名）。
+ *
+ * 供主题域/字典项等「编码自动生成」表单做实时预览——仅用于预览，
+ * 实际编码以后端生成/返回为准（含冲突自增后缀）。
+ *
+ * @param name 显示名（可含中文/ASCII/标点/空白）
+ */
+export function slugifyCode(name: string): string {
+  const tokens: string[] = [];
+  let cur: string[] = []; // 当前 ASCII 字母数字段
+  let cjk: string[] = []; // 当前中文段
+  for (const ch of name) {
+    const isCjk = /[\u4e00-\u9fff]/.test(ch);
+    if (isCjk) {
+      if (cur.length > 0) {
+        tokens.push(cur.join(""));
+        cur = [];
+      }
+      cjk.push(ch);
+    } else if (/[a-z0-9]/i.test(ch)) {
+      if (cjk.length > 0) {
+        tokens.push(zhToEn(cjk.join("")));
+        cjk = [];
+      }
+      cur.push(ch.toLowerCase());
+    } else {
+      if (cjk.length > 0) {
+        tokens.push(zhToEn(cjk.join("")));
+        cjk = [];
+      }
+      if (cur.length > 0) {
+        tokens.push(cur.join(""));
+        cur = [];
+      }
+    }
+  }
+  if (cjk.length > 0) tokens.push(zhToEn(cjk.join("")));
+  if (cur.length > 0) tokens.push(cur.join(""));
+  return tokens.join("_").replace(/^_+|_+$/g, "");
+}

@@ -589,7 +589,7 @@ p2_p3_enhancements:
       - id: DICT-004
         desc: "初始化seed脚本(6域+10类字典项)"
         files: ["backend/scripts/seed_domains_dicts.py"]
-    note: "写操作审计（2026-08-15）：create/update/status/delete 四个写端点全部补 write_audit（action=DICT_CREATE/DICT_UPDATE/DICT_STATUS/DICT_DELETE，含 actor/IP/trace_id），对齐治理全量审计定位。"
+    note: "写操作审计（2026-08-15）：create/update/status/delete 四个写端点全部补 write_audit（action=DICT_CREATE/DICT_UPDATE/DICT_STATUS/DICT_DELETE，含 actor/IP/trace_id），对齐治理全量审计定位。编码自动生成（2026-08-15）：新建参照数据项时编码由自由输入改为按显示名自动生成英文名——后端 DictItemCreate.code 改可选（缺省经 codegen.slugify_code 术语字典翻译+拼音兜底、冲突 generate_unique_code 自增 _2/_3、纯标点回退 item）；前端新增弹窗「编码（自动生成）」disabled 实时预览（复用 zhEnDict.slugifyCode，与主题域同款），提交不传 code 由后端生成。与主题域编码自动生成约定一致。"
 
   auto_fill:
     fr: [FR-010, FR-011, FR-016]

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { App as AntApp } from "antd";
 import { SystemDict } from "../pages/SystemDict";
 import type { SystemDictItem } from "../types";
 
@@ -14,9 +15,10 @@ vi.mock("../api", () => ({
   deleteDictItem: vi.fn(),
 }));
 
-import { listDictTypes, listAllDictItems } from "../api";
+import { listDictTypes, listAllDictItems, createDictItem } from "../api";
 const mockedTypes = vi.mocked(listDictTypes);
 const mockedItems = vi.mocked(listAllDictItems);
+const mockedCreate = vi.mocked(createDictItem);
 
 const ITEMS: SystemDictItem[] = [
   {
@@ -53,9 +55,11 @@ beforeEach(() => {
 
 function renderDict(initialEntry = "/dicts") {
   return render(
-    <MemoryRouter initialEntries={[initialEntry]}>
-      <SystemDict />
-    </MemoryRouter>,
+    <AntApp>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <SystemDict />
+      </MemoryRouter>
+    </AntApp>,
   );
 }
 
@@ -129,5 +133,31 @@ describe("SystemDict 页面", () => {
     await screen.findByText("日");
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+
+  it("新增弹窗：输入显示名后自动生成英文编码预览（分钟 → minute）", async () => {
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    // 初始（未输入显示名）：与后端一致回退 item
+    expect(screen.getByTestId("dict-code-preview")).toHaveValue("item");
+    const labelInput = await screen.findByPlaceholderText("如 人民币元");
+    fireEvent.change(labelInput, { target: { value: "分钟" } });
+    await waitFor(() => expect(screen.getByTestId("dict-code-preview")).toHaveValue("minute"));
+  });
+
+  it("新增提交不传 code，由后端按显示名自动生成", async () => {
+    mockedCreate.mockResolvedValue({} as any);
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    const labelInput = await screen.findByPlaceholderText("如 人民币元");
+    fireEvent.change(labelInput, { target: { value: "人民币元" } });
+    // Modal 未包 ConfigProvider，antd 默认英文 locale → 直接点主按钮提交
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    const callArg = mockedCreate.mock.calls[0][1] as { code?: string; label: string };
+    expect(callArg.label).toBe("人民币元");
+    expect(callArg.code).toBeUndefined();
   });
 });
