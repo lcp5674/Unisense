@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from datetime import UTC, datetime
+
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.notify import EventLog, Notification, SubscriptionPref
@@ -39,6 +41,48 @@ class NotifyRepository:
         if status:
             stmt = stmt.where(Notification.status == status)
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_notifications_page(
+        self,
+        subscriber_id: int,
+        status: str | None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[Notification], int]:
+        """订阅者通知分页查询，返回 ``(items, total)``。
+
+        page/page_size 由 API 层做边界约束（page>=1、page_size<=200），
+        此处按 offset/limit 精确切页；total 供前端分页器计算总页数。
+        """
+        base = select(Notification).where(Notification.subscriber_id == subscriber_id)
+        if status:
+            base = base.where(Notification.status == status)
+        total_stmt = select(func.count()).select_from(base.subquery())
+        total = int((await self._session.execute(total_stmt)).scalar_one() or 0)
+        offset = max(page - 1, 0) * page_size
+        stmt = base.order_by(Notification.id.desc()).offset(offset).limit(page_size)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows), total
+
+    async def mark_all_read(self, subscriber_id: int) -> int:
+        """将订阅者全部未读通知置为已读，返回更新条数。"""
+        now = datetime.now(UTC)
+        stmt = (
+            update(Notification)
+            .where(Notification.subscriber_id == subscriber_id, Notification.read_at.is_(None))
+            .values(read_at=now)
+        )
+        res = await self._session.execute(stmt)
+        return int(res.rowcount or 0)
+
+    async def delete_notification(self, obj: Notification) -> None:
+        await self._session.delete(obj)
+
+    async def delete_all(self, subscriber_id: int) -> int:
+        """删除订阅者全部通知（收件箱清空），返回删除条数。"""
+        stmt = delete(Notification).where(Notification.subscriber_id == subscriber_id)
+        res = await self._session.execute(stmt)
+        return int(res.rowcount or 0)
 
     async def get_notification(self, notif_id: int) -> Notification | None:
         stmt = select(Notification).where(Notification.id == notif_id)

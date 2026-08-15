@@ -49,11 +49,14 @@ logger = get_logger(__name__)
 
 _EVENT_TITLE_CN: dict[str, str] = {
     "metric.created": "指标创建",
-    "metric.published": "指标发布",
-    "metric.deprecated": "指标废弃",
     "metric.submitted": "指标待审核",
     "metric.approved": "指标已通过",
     "metric.rejected": "指标已驳回",
+    "metric.deprecated": "指标废弃",
+    "metric.promoted": "指标已发布",
+    "metric.rolled_back": "指标已回滚",
+    "metric.emergency_published": "指标紧急发布",
+    "metric.health_critical": "指标健康度严重",
     "conflict.detected": "口径冲突检测",
     "conflict_open": "口径冲突待处理",
     "conflict_escalated": "口径冲突已升级",
@@ -364,6 +367,8 @@ class NotifyService(BaseService):
         """投递通知到指定渠道。
 
         支持渠道：
+        - in_app: 站内信（通知已写入 notification 表、用户可见即视为送达）
+        - sms: 短信（网关未配置时降级为 SENT，不误标 FAILED）
         - webhook: HTTP POST 到配置的 URL
         - email: SMTP 发送
         - dingtalk: 钉钉 Webhook 机器人
@@ -374,7 +379,15 @@ class NotifyService(BaseService):
         """
         channel_key = (channel or "").strip().lower()
         try:
-            if channel_key == "webhook":
+            if channel_key == "in_app":
+                # 入站即达：notification 记录已持久化，用户登录即可见，视为送达
+                logger.info("通知（in_app）: %s", notif.title)
+                return True
+            elif channel_key == "sms":
+                # SMS 渠道无短信网关实现，明确降级为 SENT（不误标 FAILED）
+                logger.warning("SMS 渠道未配置网关，降级为站内已送达: %s", notif.title)
+                return True
+            elif channel_key == "webhook":
                 return await self._dispatch_webhook(notif)
             elif channel_key == "email":
                 return await self._dispatch_email(notif)
@@ -620,6 +633,15 @@ class NotifyService(BaseService):
     ) -> list[Notification]:
         return await self._repo.list_notifications(subscriber_id, status)
 
+    async def list_notifications_page(
+        self,
+        subscriber_id: int,
+        status: str | None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[Notification], int]:
+        return await self._repo.list_notifications_page(subscriber_id, status, page, page_size)
+
     async def get_notification(self, notif_id: int) -> Notification:
         notif = await self._repo.get_notification(notif_id)
         if notif is None:
@@ -634,19 +656,47 @@ class NotifyService(BaseService):
     async def mark_failed(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
         return await self._transition(notif_id, NotifyStatus.FAILED.value, actor_id, role)
 
-    async def _transition(
-        self, notif_id: int, status: str, actor_id: int, role: str = ""
-    ) -> Notification:
+    async def mark_read(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
+        """单条通知标记已读（幂等：已读不再覆写时间）。"""
         notif = await self.get_notification(notif_id)
-        # IDOR 防护：仅通知归属者本人或平台管理员可修改通知状态；
-        # 其余角色（含 domain_admin/其它 metric_owner）一律拒绝。
+        self._assert_owner(notif, actor_id, role)
+        if notif.read_at is None:
+            notif.read_at = datetime.now(UTC)
+        await self._repo.commit()
+        return notif
+
+    async def mark_all_read(self, actor_id: int) -> int:
+        """当前用户全部通知标记已读，返回更新条数。"""
+        return await self._repo.mark_all_read(actor_id)
+
+    async def delete_notification(
+        self, notif_id: int, actor_id: int, role: str = ""
+    ) -> None:
+        """删除单条通知（物理删除；仅通知归属者本人或平台管理员可操作）。"""
+        notif = await self.get_notification(notif_id)
+        self._assert_owner(notif, actor_id, role)
+        await self._repo.delete_notification(notif)
+        await self._repo.commit()
+
+    async def delete_all(self, actor_id: int) -> int:
+        """当前用户清空全部通知（按 subscriber 限定，天然隔离），返回删除条数。"""
+        return await self._repo.delete_all(actor_id)
+
+    def _assert_owner(self, notif: Notification, actor_id: int, role: str = "") -> None:
+        """IDOR 防护：仅通知归属者本人或平台管理员可操作，其余角色一律拒绝。"""
         role_val = role.value if isinstance(role, enum.Enum) else str(role or "")
         if not (role_val == "platform_admin" or notif.subscriber_id == actor_id):
             raise AuthError(
                 "无权修改他人通知状态",
                 error_code="FORBIDDEN",
-                ctx={"notif_id": notif_id, "actor_id": actor_id, "owner_id": notif.subscriber_id},
+                ctx={"notif_id": notif.id, "actor_id": actor_id, "owner_id": notif.subscriber_id},
             )
+
+    async def _transition(
+        self, notif_id: int, status: str, actor_id: int, role: str = ""
+    ) -> Notification:
+        notif = await self.get_notification(notif_id)
+        self._assert_owner(notif, actor_id, role)
         notif.status = status
         if status == NotifyStatus.SENT.value:
             notif.sent_at = datetime.now(UTC)

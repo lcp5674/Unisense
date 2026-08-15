@@ -46,6 +46,7 @@ class NotificationResponse(BaseModel):
     sent_at: datetime | None = None
     payload: dict[str, Any] | None = None
     send_at: datetime | None = None
+    read_at: datetime | None = None
     created_at: datetime | None = None
 
     @classmethod
@@ -63,6 +64,7 @@ class NotificationResponse(BaseModel):
             sent_at=getattr(m, "sent_at", None),
             payload=getattr(m, "payload", None),
             send_at=getattr(m, "send_at", None),
+            read_at=getattr(m, "read_at", None),
             created_at=getattr(m, "created_at", None),
         )
 

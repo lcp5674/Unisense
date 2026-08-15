@@ -76,6 +76,9 @@ class Notification(Base, BaseModel):
     sent_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, comment="实际发送时间"
     )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="用户已读时间（NULL 表示未读）", index=True
+    )
     ref_type: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="关联类型")
     ref_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="关联 ID")
 

@@ -172,14 +172,25 @@ def _validate_config() -> None:
     logger.info("config_validation_passed", env=settings.env)
 
 
-#: 业务事件类型（quality/conflict/governance）→ 通知闭环订阅集合（TD §5.5）
+#: 业务事件类型（metric/quality/conflict/governance）→ 通知闭环订阅集合（TD §5.5）
 #: 必须与各服务 EventBus 实际发布的事件类型完全一致，否则事件永不进入通知闭环：
+#:   metric 发布 metric.created/submitted/approved/rejected/deprecated/promoted/
+#:     rolled_back/emergency_published/health_critical（services/semantic/service.py）
 #:   conflict 发布 conflict_open/conflict_ruled/conflict_escalated/pii_conflict
 #:   （services/conflict/service.py）
 #:   governance 发布 grant.*/classification.*/pii.*（services/governance/*）
 #:   quality 发布 quality.anomaly/reconciliation.alert/benchmark.imported
 #:   （services/quality/*）
 _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
+    "metric.created",
+    "metric.submitted",
+    "metric.approved",
+    "metric.rejected",
+    "metric.deprecated",
+    "metric.promoted",
+    "metric.rolled_back",
+    "metric.emergency_published",
+    "metric.health_critical",
     "quality.anomaly",
     "reconciliation.alert",
     "benchmark.imported",

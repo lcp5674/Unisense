@@ -58,11 +58,110 @@ async def list_notifications(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     status: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     # PLAT-2: 以认证身份 user.id 作为 subscriber，禁止 client 伪造 subscriber_id 越权读取
-    notifs = await NotifyService(db).list_notifications(user.id, status)
+    notifs, total = await NotifyService(db).list_notifications_page(user.id, status, page, page_size)
     items = [NotificationResponse.from_model(i) for i in notifs]
-    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+    return ok(
+        data={"items": items, "total": total, "page": page, "page_size": page_size},
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/notifications/{notif_id}/read",
+    dependencies=_WRITE_DEPS,
+)
+async def mark_read(
+    notif_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    resp = await NotifyService(db).mark_read(notif_id, actor_id=user.id, role=user.role)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="notify.mark_read",
+        entity_type="notification",
+        entity_id=str(notif_id),
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=NotificationResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/notifications/read-all",
+    dependencies=_WRITE_DEPS,
+)
+async def mark_all_read(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    updated = await NotifyService(db).mark_all_read(actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="notify.mark_all_read",
+        entity_type="notification",
+        entity_id="",
+        detail={"updated": updated},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"updated": updated}, trace_id=trace_id)
+
+
+@router.delete(
+    "/notifications/{notif_id}",
+    dependencies=_WRITE_DEPS,
+)
+async def delete_notification(
+    notif_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    await NotifyService(db).delete_notification(notif_id, actor_id=user.id, role=user.role)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="notify.delete",
+        entity_type="notification",
+        entity_id=str(notif_id),
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"deleted": True}, trace_id=trace_id)
+
+
+@router.delete(
+    "/notifications",
+    dependencies=_WRITE_DEPS,
+)
+async def delete_all_notifications(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    deleted = await NotifyService(db).delete_all(actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="notify.delete_all",
+        entity_type="notification",
+        entity_id="",
+        detail={"deleted": deleted},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"deleted": deleted}, trace_id=trace_id)
 
 
 @router.post(
