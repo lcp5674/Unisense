@@ -411,7 +411,11 @@ function GraphCanvas({
     try {
       graph = new G6Graph({
         container,
-        autoFit: "view",
+        // autoFit 仅居中不缩放，缩放由 render 完成后的手动 fitView 按节点规模自适应控制：
+        //  - 聚焦场景（?node= 跳转 1-3 节点）→ fitView overflow：不放大，按自然尺寸显示
+        //    （'view' always 会把少量节点放大填满画布，节点硕大突兀——用户反馈的根因）；
+        //  - 全景大图（节点多）→ fitView always：适配填满画布，节点分布均匀。
+        autoFit: "center",
         padding: 32,
         data: { nodes: [], edges: [] },
         node: {
@@ -594,9 +598,15 @@ function GraphCanvas({
         if (graph.destroyed) return;
         setGraphReady(true);
         onReadyRef.current();
-        // 图就绪后强制 fitView（应对布局切换后位置变化），让图充满画布
+        // 按节点规模自适应 fitView：
+        //  - 节点多（全景）→ always 适配填满画布，分布均匀；
+        //  - 节点少（聚焦视图）→ overflow 仅在内容超出视口时裁剪，不把少量节点放大填满画布。
         try {
-          graph.fitView({ when: "always" });
+          graph.fitView(
+            nodeCountRef.current > 5
+              ? { when: "always" }
+              : { when: "overflow" },
+          );
         } catch {
           /* fitView 偶尔在过渡期失败 */
         }
