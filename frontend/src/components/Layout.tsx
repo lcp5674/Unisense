@@ -415,9 +415,10 @@ export function Layout({ user }: { user: CurrentUser }) {
 
   useEffect(() => {
     let cancelled = false;
-    listNotifications()
+    // 未读角标：按 read_at 统计未读（请求较大分页以覆盖常见未读量，已读后可清零）
+    listNotifications({ page: 1, page_size: 100 })
       .then((res) => {
-        if (!cancelled) setNotifCount(res.items.filter((n) => n.status !== "SENT").length);
+        if (!cancelled) setNotifCount(res.items.filter((n) => !n.read_at).length);
       })
       .catch(() => {});
     return () => {

@@ -927,6 +927,8 @@ export interface Notification {
   ref_type: string | null;
   ref_id: number | null;
   created_at: string;
+  /** 已读时间；null 表示未读（Badge 未读计数 / 未读高亮依据） */
+  read_at: string | null;
 }
 
 export interface NotifyEventLog {

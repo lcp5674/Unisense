@@ -966,6 +966,18 @@ export async function removeFavorite(metricCode: string): Promise<FavoriteRespon
   );
 }
 
+export interface FavoriteDetail {
+  metric_code: string;
+  name: string;
+  domain: string | null;
+  status: string;
+}
+
+/** 收藏指标详情聚合（一次查询，避免逐条 getMetric 的 N+1）。 */
+export async function listFavoriteDetails(): Promise<FavoriteDetail[]> {
+  return request<FavoriteDetail[]>(`${API_BASE}/consume/me/favorites/detail`);
+}
+
 // ---- 语义服务（后端为 /semantics，复数）----
 
 // 消费者仪表盘

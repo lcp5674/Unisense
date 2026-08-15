@@ -904,6 +904,43 @@ body {
   gap: 5px;
 }
 
+/* 通知工具栏：未读计数 + 全部已读/清空操作 */
+.notif-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.notif-toolbar > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 未读高亮：左侧强调边 + 标题加深 */
+.notif-card.notif-unread {
+  border-color: #b9d5dc;
+  background: #f3fafb;
+}
+.notif-card.notif-unread .notif-title {
+  color: #0b5a63;
+}
+.notif-card.notif-unread .notif-bar {
+  background: #0e7c86 !important;
+}
+
+/* 卡片内操作区：已读/删除，靠右对齐 */
+.notif-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
 /* ---- 指标对比表：行底色高亮（仪表盘信号灯） ---- */
 .ant-table-tbody > tr.compare-row {
   transition: background-color 0.12s ease;
@@ -976,4 +1013,19 @@ body {
 .notif-pagination {
   margin-top: 16px;
   text-align: right;
+}
+
+/* 我的收藏：名称可点击（跳详情），失效收藏灰显 */
+.fav-name {
+  cursor: pointer;
+  color: var(--ink);
+  font-weight: 600;
+}
+.fav-name:hover {
+  color: #0e7c86;
+}
+.fav-invalid {
+  cursor: not-allowed;
+  color: var(--muted);
+  text-decoration: line-through;
 }

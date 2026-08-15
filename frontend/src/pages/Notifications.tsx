@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination } from "antd";
-import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined } from "@ant-design/icons";
+import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined } from "@ant-design/icons";
 import {
   listNotifications,
   listNotifyEvents,
   listSubscriptions,
   upsertSubscription,
   publishNotifyEvent,
+  markNotificationRead,
+  markAllNotificationsRead,
+  deleteNotification,
+  deleteAllNotifications,
   UnisenseApiError,
 } from "../api";
 import type { Notification, NotifyEventLog, SubscriptionPref } from "../types";
@@ -26,26 +31,32 @@ const CHANNEL_LABEL: Record<string, string> = {
 // 消息类型（业务术语，替代 metric.created 等内部事件码）
 const EVENT_TYPE_LABEL: Record<string, string> = {
   "metric.created": "指标创建",
-  "metric.published": "指标发布",
-  "metric.deprecated": "指标废弃",
   "metric.submitted": "指标待审核",
   "metric.approved": "指标已通过",
   "metric.rejected": "指标已驳回",
+  "metric.deprecated": "指标废弃",
+  "metric.promoted": "指标已升级",
+  "metric.rolled_back": "指标已回滚",
+  "metric.emergency_published": "指标紧急发布",
+  "metric.health_critical": "指标健康告警",
   "conflict.detected": "口径冲突检测",
   "conflict_open": "口径冲突待处理",
+  "conflict_ruled": "口径冲突已裁决",
   "conflict_escalated": "口径冲突已升级",
+  "pii_conflict": "PII 冲突",
   "quality.alert": "数据质量告警",
   "quality.anomaly": "数据质量异常告警",
-  "governance.grant": "权限变更",
+  "reconciliation.alert": "对账告警",
+  "benchmark.imported": "参照基准已导入",
   "grant.granted": "权限已授予",
   "grant.revoked": "权限已收回",
-  "lineage.change": "血缘变更",
-  "benchmark.imported": "参照基准已导入",
-  "orphan.event": "孤立实体告警",
+  "grant.expired": "权限已过期",
   "pii.propagated": "敏感数据已扩散",
   "pii.reviewed": "敏感数据已复核",
+  "classification.changed": "数据分类变更",
+  "classification.done": "数据分类完成",
+  "escalation.triggered": "告警升级已触发",
   "review.pending": "审核待办提醒",
-  "system.notice": "系统公告",
 };
 
 // 事件类型兜底：未命中的 ``域.动作`` 拆词为中文（历史数据/新类型都能显示中文）
@@ -72,16 +83,25 @@ const EVENT_ACTION_CN: Record<string, string> = {
   approved: "已通过",
   rejected: "已驳回",
   deprecated: "废弃",
+  promoted: "升级",
+  rolled_back: "回滚",
+  emergency_published: "紧急发布",
+  health_critical: "健康告警",
   detected: "检测",
   alert: "告警",
   open: "待处理",
+  ruled: "已裁决",
   escalated: "升级",
   imported: "导入",
   granted: "授予",
   revoked: "收回",
+  expired: "过期",
   propagated: "扩散",
   reviewed: "复核",
+  changed: "变更",
+  done: "完成",
   pending: "待办",
+  triggered: "已触发",
   change: "变更",
   notice: "公告",
   anomaly: "异常告警",
@@ -221,8 +241,37 @@ const REF_TYPE_LABEL: Record<string, string> = {
   event: "消息",
 };
 
-const CHANNELS = ["email", "webhook", "sms", "in_app"];
-const EVENT_TYPES = ["metric.created", "metric.published", "metric.deprecated", "quality.anomaly", "conflict_open", "conflict_escalated", "grant.granted", "grant.revoked", "pii.reviewed", "benchmark.imported", "governance.grant", "lineage.change", "system.notice"];
+// 可选渠道：后端无短信实现，不提供 sms（避免订阅了永不投递的渠道）
+const CHANNELS = ["email", "webhook", "in_app"];
+// 订阅可选事件：与后端 EventBus 实际订阅集合对齐（backend/app/main.py _BUSINESS_EVENT_TYPES）。
+// 移除幽灵事件（metric.published / governance.grant / lineage.change / system.notice），
+// 保留 quality/conflict/governance/classification/escalation + metric.* 九种。
+const EVENT_TYPES = [
+  "metric.created",
+  "metric.submitted",
+  "metric.approved",
+  "metric.rejected",
+  "metric.deprecated",
+  "metric.promoted",
+  "metric.rolled_back",
+  "metric.emergency_published",
+  "metric.health_critical",
+  "quality.anomaly",
+  "reconciliation.alert",
+  "benchmark.imported",
+  "conflict_open",
+  "conflict_ruled",
+  "conflict_escalated",
+  "pii_conflict",
+  "grant.granted",
+  "grant.revoked",
+  "grant.expired",
+  "pii.reviewed",
+  "pii.propagated",
+  "classification.changed",
+  "classification.done",
+  "escalation.triggered",
+];
 
 // 通知状态 → 卡片左侧状态条颜色（沿「校准仪表」设计语言：成功=数据青绿、失败=告警红、待发送=信号琥珀）
 const NOTIF_STATUS_BAR: Record<string, string> = {
@@ -237,11 +286,12 @@ function NotifListTab() {
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const navigate = useNavigate();
 
   async function load() {
     setLoading(true);
     try {
-      const res = await listNotifications();
+      const res = await listNotifications({ page, page_size: pageSize });
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
@@ -254,13 +304,77 @@ function NotifListTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [page, pageSize]);
 
-  const start = (page - 1) * pageSize;
-  const pageItems = items.slice(start, start + pageSize);
+  async function handleMarkRead(n: Notification) {
+    if (n.read_at) return;
+    try {
+      await markNotificationRead(n.id);
+      message.success("已标记为已读");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
+  }
+
+  async function handleReadAll() {
+    try {
+      await markAllNotificationsRead();
+      message.success("已全部标记为已读");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
+  }
+
+  async function handleDelete(n: Notification) {
+    try {
+      await deleteNotification(n.id);
+      message.success("已删除该通知");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
+  }
+
+  async function handleClear() {
+    try {
+      await deleteAllNotifications();
+      message.success("已清空全部通知");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
+  }
+
+  // 点击通知深链：指标类→指标详情、冲突类→冲突仲裁，其余优雅降级不跳转
+  function handleOpen(n: Notification) {
+    const tpl = n.template_code ?? "";
+    const payload = (n.payload ?? {}) as Record<string, unknown>;
+    if (tpl.startsWith("metric.") && payload.metric_code) {
+      navigate(`/detail/${String(payload.metric_code)}`);
+      return;
+    }
+    if (tpl.startsWith("conflict")) {
+      navigate("/review");
+      return;
+    }
+    message.info("该通知没有关联的可跳转页面");
+  }
+
+  const unreadCount = items.filter((n) => !n.read_at).length;
 
   return (
     <div>
+      {items.length > 0 && (
+        <div className="notif-toolbar">
+          <span className="muted">未读 {unreadCount} 条</span>
+          <div>
+            <Button size="small" icon={<CheckOutlined />} onClick={handleReadAll} disabled={unreadCount === 0}>全部已读</Button>
+            <Button size="small" danger icon={<DeleteOutlined />} onClick={handleClear}>清空</Button>
+          </div>
+        </div>
+      )}
       {loading ? (
         <div className="notif-loading">
           <Spin />
@@ -271,12 +385,13 @@ function NotifListTab() {
       ) : (
         <>
           <div className="notif-stream">
-            {pageItems.map((n) => {
+            {items.map((n) => {
               const statusKey = n.status ?? "";
               const fields = parseNotifyBodyFields(n.body, n.payload);
               const singleLine = fields.length <= 1;
+              const unread = !n.read_at;
               return (
-                <div key={n.id} className="notif-card">
+                <div key={n.id} className={`notif-card${unread ? " notif-unread" : ""}`} onClick={() => handleOpen(n)}>
                   <div className="notif-bar" style={{ background: NOTIF_STATUS_BAR[statusKey] ?? "#c4cbd6" }} />
                   <div className="notif-main">
                     <div className="notif-head">
@@ -317,6 +432,12 @@ function NotifListTab() {
                       <span className="notif-meta-item">
                         <ClockCircleOutlined /> 触发于 {formatCnTime(n.created_at)}
                       </span>
+                      <div className="notif-actions" onClick={(e) => e.stopPropagation()}>
+                        {unread && (
+                          <Button size="small" type="link" onClick={() => handleMarkRead(n)}>标记已读</Button>
+                        )}
+                        <Button size="small" type="link" danger onClick={() => handleDelete(n)}>删除</Button>
+                      </div>
                     </div>
                   </div>
                 </div>
