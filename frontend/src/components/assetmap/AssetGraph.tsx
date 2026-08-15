@@ -104,8 +104,26 @@ function edgeColor(type?: string): string {
   return "#94a3b8";
 }
 
-function trimLabel(label: string, max = 14): string {
+function trimLabel(label: string, max = 40): string {
+  // 底部标签要"完整展示"，仅对极长名称（>40 字符）截断，一般血缘节点名均完整显示
   return label.length > max ? `${label.slice(0, max)}…` : label;
+}
+
+// 颜色提亮：给定 hex 色，向白色方向提亮 amt（0-255），用于渐变高光
+function lightenHex(hex: string, amt: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  if (Number.isNaN(n)) return hex;
+  const r = Math.min(255, ((n >> 16) & 255) + amt);
+  const g = Math.min(255, ((n >> 8) & 255) + amt);
+  const b = Math.min(255, (n & 255) + amt);
+  return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+}
+
+// 节点类型图标（emoji 渲染在节点中心，标签在节点下方，互不干扰）
+function nodeIconText(type?: string): string {
+  if (type === "table") return "🗂️";
+  if (type === "field") return "🔖";
+  return "📈"; // metric
 }
 
 /** 图边的展示数据（在 AssetGraphEdge 之上叠加渲染语义字段）。 */
@@ -287,22 +305,22 @@ function pickVisible(
 function layoutConfig(layoutMode: "hierarchy" | "force") {
   if (layoutMode === "hierarchy") {
     // 分层布局：血缘 DAG 自上而下（表→指标），节点多时比力导向清晰得多
-    // nodesep/ranksep 加大以容纳放节点内部的标签 + 给边留呼吸空间
+    // nodesep/ranksep 大幅加大以容纳「节点下方的完整标签 pill」，避免同 rank 标签互相压字
     return {
       type: "antv-dagre",
       rankdir: "TB",
       align: "DL",
-      nodesep: 50,
-      ranksep: 72,
+      nodesep: 110,
+      ranksep: 100,
     };
   }
   // 力导向：环图/交互定位用（对循环依赖天然容忍，节点自然分布）
-  // collide 加大避免小图密集时节点圆形互相穿透
+  // collide/linkDistance 加大避免底部标签被相邻节点压住
   return {
     type: "d3-force",
-    linkDistance: 110,
-    collide: { radius: 48 },
-    manyBody: { strength: -300 },
+    linkDistance: 150,
+    collide: { radius: 64 },
+    manyBody: { strength: -260 },
   };
 }
 
@@ -384,12 +402,14 @@ function GraphCanvas({
           style: {
             size: (d: NodeData) => {
               const t = (d.data as AssetGraphNode | undefined)?.type;
-              // 最小半径 24 + 血缘度缩放：节点需容纳「白底 pill + 12px 深字」的标签组合
+              // 最小半径 24 + 血缘度缩放：节点需容纳「中央图标 + 底部完整标签」
               const r = Math.max(24, 20 + (degreeMapRef.current.get(String(d.id)) ?? 0) * 1.4);
               if (t === "table") return [r * 2.0, r * 1.2];
               if (t === "field") return [r * 1.4, r * 0.8];
               return r;
             },
+            // 表节点圆角矩形（radius 仅对 rect 生效，circle/ellipse 自动忽略）
+            radius: 8,
             fill: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
               // 环节点：橙色填充淡出提示（不覆盖域色，仅叠加暖色倾向）
@@ -415,12 +435,29 @@ function GraphCanvas({
             shadowBlur: (d: NodeData) =>
               cycleNodesRef.current.has(String(d.id)) ? 14 : 8,
             shadowOffsetY: 3,
+            // 柔光 halo：节点填充色提亮版作为外圈，让节点从画布上"发光"、更立体
+            halo: true,
+            haloStroke: (d: NodeData) => {
+              const n = d.data as AssetGraphNode | undefined;
+              const base = cycleNodesRef.current.has(String(d.id)) ? "#ff8a80" : domainColor(n);
+              return lightenHex(base, 90);
+            },
+            haloLineWidth: 8,
+            haloStrokeOpacity: 0.4,
+            // 类型图标：指标 📈 / 表 🗂️ / 字段 🔖，渲染在节点中央
+            icon: true,
+            iconText: (d: NodeData) =>
+              nodeIconText((d.data as AssetGraphNode | undefined)?.type),
+            iconFontSize: (d: NodeData) =>
+              (d.data as AssetGraphNode | undefined)?.type === "field" ? 12 : 16,
+            iconFill: "#ffffff",
+            // 标签放节点下方（用户明确要求——放节点中心会遮挡图标且与图例形状语义冲突）。
+            // 配合 layoutConfig 加大 nodesep/ranksep/collide 间距，保证底部完整标签不互相压字。
             labelText: (d: NodeData) =>
               trimLabel((d.data as AssetGraphNode | undefined)?.label ?? String(d.id)),
-            // 标签放节点内部：彻底解决 dagre 横向同 rank 节点标签相互挤压重叠
-            labelPlacement: "center",
-            // 节点内「白底 pill + 深字」：绝对清晰可读，不受节点填充色深浅影响。
-            // 此前去掉 pill 后即便 luminance 自适应，11px 字号 + 节点色叠加仍模糊不清。
+            labelPlacement: "bottom",
+            labelOffset: 10,
+            // 节点下方「白底 pill + 深字」：完整展示节点名，绝对清晰可读，不受节点填充色深浅影响。
             labelBackground: true,
             labelBackgroundFill: "#ffffff",
             labelBackgroundLineWidth: 1,
@@ -665,7 +702,8 @@ function GraphCanvas({
  * 资产地图/血缘图。
  *
  * - 节点：按业务域着色（饱和深色）、按类型区分形状（指标=圆 / 表=圆角矩形 /
- *   字段=椭圆）、PII 红色描边、按血缘度编码大小；标签放节点内白底 pill 提升可读性。
+ *   字段=椭圆）、PII 红色描边、按血缘度编码大小；类型图标渲染在节点中央、
+ *   名称标签放节点下方白底 pill（完整展示、绝对可读）、halo 柔光让节点更立体。
  * - 边：深灰蓝 + 弧线 + 按类型着色，避免浅灰线条在密集图中杂乱无章。
  * - 交互：拖拽画布 / 滚轮缩放 / 拖拽节点 / 悬停邻域高亮 / 点击节点回调 / 重置视图。
  * - 布局切换：GraphCanvas 用 key 强制重挂载（全新容器+实例），根治 G6 同容器重建空白 bug。
