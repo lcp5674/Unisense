@@ -3,21 +3,16 @@ import { useNavigate } from "react-router-dom";
 import { Button, Card, Popconfirm, Row, Col, Spin, Alert, Tag, Empty, Tooltip, message } from "antd";
 import {
   AppstoreOutlined,
-  BarChartOutlined,
-  BookOutlined,
   PlusCircleOutlined,
   ConsoleSqlOutlined,
   GlobalOutlined,
-  ProfileOutlined,
   RobotOutlined,
   DeploymentUnitOutlined,
   ExperimentOutlined,
-  TableOutlined,
   WarningOutlined,
   SafetyCertificateOutlined,
   IssuesCloseOutlined,
   FieldTimeOutlined,
-  TeamOutlined,
 } from "@ant-design/icons";
 import { Pie, Bar } from "@ant-design/charts";
 import { fetchDashboard, fetchRecommendedMetrics, fetchRecommendedTerms } from "../api";
@@ -438,13 +433,13 @@ const OWNER_STATES = [
   { key: "DEPRECATED", label: "已废弃", cls: "ob-deprecated" },
 ] as const;
 
-// Owner 名下各资产类型计数块（图标 + 数字），跨资产责任分布
-const OWNER_ASSET_CHIPS = [
-  { key: "metrics", label: "指标", icon: BarChartOutlined, cls: "oa-metric" },
-  { key: "tables", label: "数据表", icon: TableOutlined, cls: "oa-table" },
-  { key: "dimensions", label: "维度", icon: AppstoreOutlined, cls: "oa-dim" },
-  { key: "terms", label: "术语", icon: BookOutlined, cls: "oa-term" },
-  { key: "templates", label: "模板", icon: ProfileOutlined, cls: "oa-tpl" },
+// Owner 名下各资产类型构成条（跨资产责任分布，比例可视化）——替代原图标计数块
+const OWNER_ASSETS = [
+  { key: "metrics", label: "指标", cls: "oc-metric" },
+  { key: "tables", label: "数据表", cls: "oc-table" },
+  { key: "dimensions", label: "维度", cls: "oc-dim" },
+  { key: "terms", label: "术语", cls: "oc-term" },
+  { key: "templates", label: "模板", cls: "oc-tpl" },
 ] as const;
 
 function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: (to: string) => void }) {
@@ -458,7 +453,7 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
         <span style={{ fontSize: 15, fontWeight: 600 }}>
           Owner 责任分布
           <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
-            跨资产统计（指标/数据表/维度/术语/模板），点击下钻责任人指标目录
+            跨资产构成（指标/数据表/维度/术语/模板），点击卡片下钻责任人指标目录
           </span>
         </span>
       }
@@ -467,45 +462,51 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
         {owners.map(([id, o]) => {
           const review = o.metrics.by_status.REVIEW ?? 0;
           const hot = review > 0;
-          const metricTotal = Math.max(o.metrics.total, 1);
+          // 资产构成：仅展示该 Owner 名下 > 0 的资产类型（按占比着色分段）
+          const mix = OWNER_ASSETS.map((a) => ({
+            ...a,
+            count: a.key === "metrics" ? o.metrics.total : (o as never)[a.key],
+          })).filter((m) => m.count > 0);
+          const total = Math.max(o.total, 1);
+          const initials = (o.name || "?").slice(0, 2);
           return (
             <button
               key={id}
               type="button"
-              className={`owner-row${hot ? " owner-hot" : ""}`}
+              className={`owner-card${hot ? " owner-hot" : ""}`}
               onClick={() => navigate(`/catalog?owner_id=${id}`)}
-              title={`${o.name}：共 ${o.total} 项资产（指标 ${o.metrics.total} / 数据表 ${o.tables} / 维度 ${o.dimensions} / 术语 ${o.terms} / 模板 ${o.templates}），待审 ${review}`}
+              title={`${o.name}：共 ${o.total} 项资产，待审 ${review}。点击查看其指标目录`}
             >
-              <span className="owner-name"><TeamOutlined /> {o.name}</span>
-              <div className="owner-bar" role="img" aria-label={`${o.name} 指标状态构成`}>
+              <span className="oc-head">
+                <span className="oc-avatar">{initials}</span>
+                <span className="oc-name">{o.name}</span>
+                {hot && <span className="oc-hot">待审 {review}</span>}
+                <span className="oc-total">共 {o.total} 项</span>
+              </span>
+              <span className="oc-bar" role="img" aria-label={`${o.name} 资产构成`}>
+                {mix.map((m) => (
+                  <span
+                    key={m.key}
+                    className={`oc-seg ${m.cls}`}
+                    style={{ width: `${((m.count / total) * 100).toFixed(2)}%` }}
+                    title={`${m.label} ${m.count}`}
+                  >
+                    {m.label} {m.count}
+                  </span>
+                ))}
+              </span>
+              <span className="oc-life">
                 {OWNER_STATES.map((s) => {
                   const count = o.metrics.by_status[s.key] ?? 0;
                   if (count <= 0) return null;
                   return (
-                    <span
-                      key={s.key}
-                      className={`ob-seg ${s.cls}`}
-                      style={{ width: `${((count / metricTotal) * 100).toFixed(2)}%` }}
-                      title={`${s.label} ${count}`}
-                    >
-                      {s.label}
-                    </span>
-                  );
-                })}
-              </div>
-              <span className="owner-assets">
-                {OWNER_ASSET_CHIPS.map((c) => {
-                  // metrics 为对象（含 by_status），其余资产为纯数字
-                  const count = c.key === "metrics" ? o.metrics.total : ((o as never)[c.key] as number);
-                  return (
-                    <span key={c.key} className={`oa-chip ${c.cls}`} title={`${c.label} ${count}`}>
-                      <c.icon />
-                      <span className="oa-num">{count}</span>
+                    <span key={s.key} className="oc-life-item" title={`${s.label} ${count}`}>
+                      <i className={`oc-dot ${s.cls}`} />
+                      {s.label} {count}
                     </span>
                   );
                 })}
               </span>
-              <span className="owner-metric">{o.total}</span>
             </button>
           );
         })}
