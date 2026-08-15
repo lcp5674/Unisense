@@ -362,12 +362,19 @@ export interface LineageFieldEdge {
   expression: string | null;
 }
 
+// 只读查询（纯 SELECT 无落点）读取的上游依赖清单（方案 B）
+export interface UpstreamDeps {
+  tables: string[];
+  fields: string[];
+}
+
 export interface ParseLineageResult {
   table_edges: number;
   field_edges: number;
   graph_written: boolean;
   table_lineage: LineageTableEdge[];
   field_lineage: LineageFieldEdge[];
+  upstream_deps?: UpstreamDeps | null;
 }
 
 // 血缘图谱节点/边（后端 lineage/graph 端点返回，与资产地图图谱结构对齐，
@@ -414,6 +421,24 @@ export interface LineageIngestRun {
   stale_flagged_count: number;
   restored_count: number;
   error?: string | null;
+  // 本次运行详情快照（点击运行历史行时从 /lineage/runs/{id} 拉取）：
+  // SQL 解析含 sql/dialect/target_table/table_lineage/field_lineage；批量采集含 added_edges/updated_edges
+  detail?: LineageRunDetail | null;
+}
+
+// 采集运行详情快照（后端 LineageIngestRunResponse.detail）
+export interface LineageRunDetail {
+  kind: "sql_parse" | "batch";
+  sql?: string;
+  dialect?: string | null;
+  target_table?: string | null;
+  source_node?: string | null;
+  actor_id?: number;
+  table_lineage?: LineageTableEdge[];
+  field_lineage?: LineageFieldEdge[];
+  added_edges?: string[][];
+  updated_edges?: string[][];
+  [key: string]: unknown;
 }
 
 // 血缘采集通道总览（后端 LineageChannelResponse）

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -67,7 +69,12 @@ class FakeRepo:
         return edge, created
 
     async def begin_ingest_run(self, source: str) -> SimpleNamespace:
-        run = SimpleNamespace(id=len(self.runs) + 1, source=source, status="running")
+        run = SimpleNamespace(
+            id=len(self.runs) + 1,
+            source=source,
+            status="running",
+            run_at=datetime.now(UTC),
+        )
         self.runs.append(run)
         return run
 
@@ -83,6 +90,7 @@ class FakeRepo:
         stale_flagged: int = 0,
         restored: int = 0,
         error: str | None = None,
+        detail: dict[str, object] | None = None,
     ) -> None:
         run.status = status
         run.total_edges = total_edges
@@ -92,6 +100,13 @@ class FakeRepo:
         run.stale_flagged_count = stale_flagged
         run.restored_count = restored
         run.error = error
+        run.detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
+
+    async def get_ingest_run(self, run_id: int) -> SimpleNamespace | None:
+        for run in self.runs:
+            if run.id == run_id:
+                return run
+        return None
 
     async def would_create_cycle(self, edge: object) -> bool:
         """环检假实现：默认不成环（供 parse_and_store 建边前调用）。"""
@@ -221,6 +236,99 @@ async def test_parse_and_store_writes_ingest_run() -> None:
     await svc.parse_and_store(req, actor_id=1)
     assert svc._repo.runs[1].added_count == 0
     assert svc._repo.runs[1].updated_count == 2
+
+
+async def test_parse_and_store_pure_select_without_target_returns_upstream_deps() -> None:
+    """方案 B：纯 SELECT 未指定落点 → 返回上游依赖、不写图谱、不写运行记录。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    res = await svc.parse_and_store(
+        LineageParseRequest(
+            sql="SELECT o.id, u.name FROM ods_orders o JOIN dim_user u ON o.uid = u.uid"
+        ),
+        actor_id=1,
+    )
+    assert res.table_edges == 0
+    assert res.field_edges == 0
+    assert res.graph_written is False
+    assert res.upstream_deps is not None
+    assert set(res.upstream_deps.tables) == {"ods_orders", "dim_user"}
+    assert "ods_orders.id" in res.upstream_deps.fields
+    # 无落点不写边、不写运行记录
+    assert len(repo.edges) == 0
+    assert len(repo.runs) == 0
+
+
+async def test_parse_and_store_pure_select_with_target_table_writes_edges() -> None:
+    """方案 A：纯 SELECT + 指定落点 → 生成正式血缘边并写运行记录。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    res = await svc.parse_and_store(
+        LineageParseRequest(
+            sql="SELECT o.id, u.name FROM ods_orders o JOIN dim_user u ON o.uid = u.uid",
+            target_table="dws_report",
+        ),
+        actor_id=1,
+    )
+    assert res.table_edges == 2  # ods_orders/dim_user → dws_report
+    assert res.field_edges == 2
+    assert res.graph_written is False  # 无 graph 客户端
+    assert res.upstream_deps is None
+    assert len(svc._repo.edges) >= 4  # 表级 2 + 字段级 2
+    assert len(svc._repo.runs) == 1
+
+
+async def test_parse_and_store_writes_sql_parse_detail() -> None:
+    """运行记录附带 SQL 解析详情快照（SQL 原文/方言/落点/边明细）。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    await svc.parse_and_store(
+        LineageParseRequest(
+            sql="INSERT INTO t SELECT a.id FROM a", dialect="doris", target_table=None
+        ),
+        actor_id=7,
+    )
+    detail = json.loads(svc._repo.runs[0].detail_json or "{}")
+    assert detail["kind"] == "sql_parse"
+    assert detail["sql"] == "INSERT INTO t SELECT a.id FROM a"
+    assert detail["dialect"] == "doris"
+    assert detail["actor_id"] == 7
+    assert detail["table_lineage"] == [{"source": "table:a", "target": "table:t"}]
+    assert detail["field_lineage"][0]["target_column"] == "id"
+
+
+async def test_get_ingest_run_detail_parses_snapshot() -> None:
+    """get_ingest_run_detail 反序列化 detail_json 到响应的 detail 字段。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    await svc.parse_and_store(
+        LineageParseRequest(sql="INSERT INTO t SELECT a.id FROM a"), actor_id=1
+    )
+    run_id = repo.runs[0].id
+    resp = await svc.get_ingest_run_detail(run_id)
+    assert resp.id == run_id
+    assert resp.detail is not None
+    assert resp.detail["kind"] == "sql_parse"
+    assert "SELECT a.id FROM a" in resp.detail["sql"]
+
+
+async def test_ingest_batch_writes_batch_detail() -> None:
+    """批量采集运行记录附带变更边明细（新增/更新边列表）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeIngestRepo()
+    repo.mark_seen_result = (0, 0)
+    repo.mark_missing_result = (0, 0)
+    svc._repo = repo
+
+    edges = {("a", "b"), ("a_new", "c"), ("d", "e")}
+    await svc.ingest_batch("dp_csv", edges, threshold=2)
+    detail = json.loads(repo.runs[0].detail_json or "{}")
+    assert detail["kind"] == "batch"
+    # 仅 a_new 命中新表判定 → 新增边 1 条，其余 2 条记更新
+    assert detail["added_edges"] == [["table:a_new", "table:c"]]
+    assert len(detail["updated_edges"]) == 2
 
 
 async def test_query_impact_delegates_to_repo() -> None:
@@ -547,7 +655,12 @@ class FakeIngestRepo:
         self.ingest_runs: list[object] = []
 
     async def begin_ingest_run(self, source: str) -> SimpleNamespace:
-        run = SimpleNamespace(id=len(self.runs) + 1, source=source, status="running")
+        run = SimpleNamespace(
+            id=len(self.runs) + 1,
+            source=source,
+            status="running",
+            run_at=datetime.now(UTC),
+        )
         self.runs.append(run)
         return run
 
@@ -578,6 +691,7 @@ class FakeIngestRepo:
         stale_flagged: int = 0,
         restored: int = 0,
         error: str | None = None,
+        detail: dict[str, object] | None = None,
     ) -> None:
         run.status = status
         run.total_edges = total_edges
@@ -587,6 +701,13 @@ class FakeIngestRepo:
         run.stale_flagged_count = stale_flagged
         run.restored_count = restored
         run.error = error
+        run.detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
+
+    async def get_ingest_run(self, run_id: int) -> object | None:
+        for run in self.runs:
+            if run.id == run_id:
+                return run
+        return None
 
     async def get_edge(self, edge_id: int) -> object | None:
         return self.edge

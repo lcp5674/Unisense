@@ -916,10 +916,16 @@ export async function lineageGraph(params?: {
 export async function parseLineage(
   sql: string,
   dialect?: string,
+  targetTable?: string,
 ): Promise<ParseLineageResult> {
   return request<ParseLineageResult>(`${API_BASE}/lineage/parse`, {
     method: "POST",
-    body: JSON.stringify({ sql, dialect: dialect ?? null, provenance: "sqlglot" }),
+    body: JSON.stringify({
+      sql,
+      dialect: dialect ?? null,
+      provenance: "sqlglot",
+      target_table: targetTable?.trim() || null,
+    }),
   });
 }
 
@@ -949,6 +955,11 @@ export async function lineageChannelRuns(source: string, limit = 20): Promise<Li
   return request<LineageIngestRun[]>(
     `${API_BASE}/lineage/channels/${encodeURIComponent(source)}/runs?limit=${limit}`,
   );
+}
+
+// 单条采集运行详情（含详情快照 detail：SQL 原文/方言/落点/边明细 或 批量变更边明细）
+export async function lineageRunDetail(runId: number): Promise<LineageIngestRun> {
+  return request<LineageIngestRun>(`${API_BASE}/lineage/runs/${runId}`);
 }
 
 export async function lineageStale(source?: string, limit = 200): Promise<StaleEdge[]> {

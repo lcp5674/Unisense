@@ -9,6 +9,7 @@ from app.services.lineage.parser import (
     _branch_queries,
     extract_field_lineage,
     extract_table_lineage,
+    extract_upstream_deps,
     node_field,
     node_table,
 )
@@ -259,3 +260,75 @@ def test_expression_constant_projection_degrades() -> None:
     edges = extract_field_lineage(sql)
     # 常量投影无源列：允许空结果，但不抛异常
     assert isinstance(edges, list)
+
+
+# ---- 方案 A+B：纯 SELECT 显式落点 / 上游依赖 ----
+
+
+def test_pure_select_with_target_table_lineage() -> None:
+    """纯 SELECT 指定落点：FROM/JOIN 源表 → 目标表（表级边）。"""
+    sql = "SELECT o.id, u.name FROM ods_orders o JOIN dim_user u ON o.uid = u.uid"
+    edges = extract_table_lineage(sql, target_table="dws_report")
+    assert {e.source for e in edges} == {"ods_orders", "dim_user"}
+    assert all(e.target == "dws_report" for e in edges)
+
+
+def test_pure_select_with_target_table_field_lineage() -> None:
+    """纯 SELECT 指定落点：SELECT 投影列 → 目标表列（字段级边）。"""
+    sql = (
+        "SELECT o.id AS order_id, u.name AS user_name "
+        "FROM ods_orders o JOIN dim_user u ON o.uid = u.uid"
+    )
+    edges = extract_field_lineage(sql, target_table="dws_report")
+    mapping = {(e.source_table, e.source_column): (e.target_table, e.target_column) for e in edges}
+    assert mapping.get(("ods_orders", "id")) == ("dws_report", "order_id")
+    assert mapping.get(("dim_user", "name")) == ("dws_report", "user_name")
+
+
+def test_pure_select_without_target_stays_empty() -> None:
+    """纯 SELECT 未指定落点：表级/字段级仍为空（由上层降级展示上游依赖）。"""
+    sql = "SELECT id, name FROM src"
+    assert extract_table_lineage(sql) == []
+    assert extract_field_lineage(sql) == []
+
+
+def test_natural_target_ignores_target_table() -> None:
+    """SQL 自带写入目标时，target_table 不覆盖自然目标（方案 A 兼容既有解析）。"""
+    sql = "INSERT INTO real_target SELECT a.id FROM a"
+    edges = extract_table_lineage(sql, target_table="forced_target")
+    assert all(e.target == "real_target" for e in edges)
+
+
+def test_union_pure_select_with_target_table() -> None:
+    """UNION 纯 SELECT 指定落点：多分支源表/源列均指向目标表。"""
+    sql = "SELECT id FROM x UNION ALL SELECT uid FROM y"
+    table_edges = extract_table_lineage(sql, target_table="t")
+    assert {e.source for e in table_edges} == {"x", "y"}
+    assert all(e.target == "t" for e in table_edges)
+    field_sources = {
+        (e.source_table, e.source_column) for e in extract_field_lineage(sql, target_table="t")
+    }
+    assert ("x", "id") in field_sources
+    assert ("y", "uid") in field_sources
+
+
+def test_upstream_deps_pure_select() -> None:
+    """上游依赖：纯 SELECT 读取的源表与源字段清单（别名解析为真实表名）。"""
+    sql = (
+        "SELECT o.id, u.name FROM ods_orders o JOIN dim_user u ON o.uid = u.uid "
+        "WHERE o.dt = '2026-08-01'"
+    )
+    deps = extract_upstream_deps(sql)
+    assert set(deps.tables) == {"ods_orders", "dim_user"}
+    assert "ods_orders.id" in deps.fields
+    assert "dim_user.name" in deps.fields
+    # 限定列必须解析为真实表名（不得残留别名 o./u.）
+    assert not any(f.startswith("o.") for f in deps.fields)
+    assert not any(f.startswith("u.") for f in deps.fields)
+
+
+def test_upstream_deps_invalid_sql_degrades() -> None:
+    """非法 SQL 上游依赖降级为空（不抛异常）。"""
+    deps = extract_upstream_deps("NOT VALID @@@")
+    assert deps.tables == ()
+    assert deps.fields == ()

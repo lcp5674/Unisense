@@ -39,6 +39,7 @@ import {
   lineageImpact,
   lineageImpactPreview,
   lineageNodes,
+  lineageRunDetail,
   lineageStale,
   parseLineage,
   restoreStaleEdge,
@@ -168,6 +169,33 @@ export function buildSubgraph(
 }
 
 type Direction = "upstream" | "downstream" | "both";
+
+/**
+ * 从血缘边列表构建图谱数据（血缘查询/影响分析结果图形化展示用）。
+ * 节点 id 去重、label 去类型前缀、type 由前缀推断（table:/metric:/field: → 对应类型，
+ * external:/未知 → other）；边直接透传 source/target/edge_type。
+ */
+export function edgesToGraphData(
+  edges: LineageEdge[],
+): { nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } {
+  const nodeMap = new Map<string, AssetGraphNode>();
+  const graphEdges: AssetGraphEdge[] = [];
+  const addNode = (id: string) => {
+    if (nodeMap.has(id)) return;
+    const colon = id.indexOf(":");
+    const prefix = colon === -1 ? "" : id.slice(0, colon);
+    const label = colon === -1 ? id : id.slice(colon + 1);
+    const type =
+      prefix === "table" ? "table" : prefix === "metric" ? "metric" : prefix === "field" ? "field" : "other";
+    nodeMap.set(id, { id, type, label: label || id });
+  };
+  for (const e of edges) {
+    addNode(e.source_node);
+    addNode(e.target_node);
+    graphEdges.push({ source: e.source_node, target: e.target_node, type: e.edge_type });
+  }
+  return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
+}
 
 /** 血缘图谱 Tab：进入即加载血缘图谱。指标/表节点点击均在本页以侧边栏
  *  展示详情（指标详情抽屉 / 表详情抽屉），不跳转页面，用户可再决定是否前往完整页面。
@@ -409,6 +437,11 @@ function ImpactTab() {
   const [total, setTotal] = useState(0);
   const [risk, setRisk] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // 查询结果的血缘视图（图形化展示，替代纯文字边列表为主展示）
+  const [graphData, setGraphData] = useState<{
+    nodes: AssetGraphNode[];
+    edges: AssetGraphEdge[];
+  } | null>(null);
   const { track } = useTracking();
 
   /** 候选节点：无关键词加载 top-N 预加载，有关键词远程搜索指定节点。 */
@@ -440,13 +473,17 @@ function ImpactTab() {
         direction === "downstream"
           ? await lineageImpact({ node: node.trim(), direction, max_hops: 5 })
           : await lineageEdges({ node: node.trim(), direction });
-      setEdges(data.items ?? data);
-      setTotal(data.total ?? (Array.isArray(data) ? data.length : 0));
+      const items = Array.isArray(data.items) ? data.items : (data as unknown as LineageEdge[]);
+      setEdges(items);
+      setTotal(data.total ?? items.length);
+      // 构建血缘视图（节点/边），供力导向图展示
+      setGraphData(items.length > 0 ? edgesToGraphData(items) : null);
       track("lineage_query", node.trim(), "node");
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "查询失败");
       setEdges([]);
       setTotal(0);
+      setGraphData(null);
     } finally {
       setLoading(false);
     }
@@ -554,6 +591,18 @@ function ImpactTab() {
         />
       )}
 
+      {graphData && graphData.nodes.length > 0 && (
+        <Card
+          size="small"
+          title={`血缘视图 · ${node} 的${
+            direction === "upstream" ? "上游来源" : direction === "downstream" ? "下游影响" : "双向关系"
+          }（${graphData.nodes.length} 节点 · ${graphData.edges.length} 条边）`}
+          style={{ marginBottom: 16 }}
+        >
+          <AssetGraph nodes={graphData.nodes} edges={graphData.edges} height={420} />
+        </Card>
+      )}
+
       {edges.length > 0 ? (
         <Table
           dataSource={edges}
@@ -577,6 +626,7 @@ function ImpactTab() {
 function ParseTab() {
   const [sql, setSql] = useState("");
   const [dialect, setDialect] = useState("mysql");
+  const [targetTable, setTargetTable] = useState("");
   const [result, setResult] = useState<ParseLineageResult | null>(null);
   const [loading, setLoading] = useState(false);
   const { track } = useTracking();
@@ -588,7 +638,7 @@ function ParseTab() {
     }
     setLoading(true);
     try {
-      const res = await parseLineage(sql, dialect);
+      const res = await parseLineage(sql, dialect, targetTable);
       setResult(res);
       message.success("血缘解析完成");
       track("lineage_parse", undefined, "sql", { dialect });
@@ -614,6 +664,15 @@ function ParseTab() {
     },
   ];
 
+  // 纯查询无落点：展示「上游依赖」而非空态（方案 B：只读展示读取的表/字段，不写图谱）
+  const showUpstream = result !== null && result.upstream_deps != null;
+  // 真正无血缘（SQL 非法/无 FROM 等，且无落点信息）才展示空态
+  const showEmpty =
+    result !== null &&
+    !showUpstream &&
+    result.table_lineage.length === 0 &&
+    result.field_lineage.length === 0;
+
   return (
     <div>
       <Space style={{ marginBottom: 12 }} wrap>
@@ -622,6 +681,14 @@ function ParseTab() {
           onChange={setDialect}
           style={{ width: 160 }}
           options={SQL_DIALECT_OPTIONS}
+        />
+        <Input
+          allowClear
+          value={targetTable}
+          onChange={(e) => setTargetTable(e.target.value)}
+          placeholder="目标表名（可选）：纯 SELECT 指定落点生成血缘"
+          style={{ width: 300 }}
+          className="mono"
         />
         <Button type="primary" icon={<CodeOutlined />} onClick={handleParse} loading={loading}>
           解析血缘
@@ -632,7 +699,7 @@ function ParseTab() {
         className="mono"
         value={sql}
         onChange={(e) => setSql(e.target.value)}
-        placeholder="-- 粘贴 SQL，解析表级/字段级血缘并写入图谱&#10;SELECT order_id, user_id, amount FROM dwd_finance_order WHERE dt = '2026-08-01'"
+        placeholder="-- 粘贴 SQL，解析表级/字段级血缘并写入图谱。纯 SELECT 可在左侧填写「目标表名」，把查询结果落成正式血缘。&#10;SELECT order_id, user_id, amount FROM dwd_finance_order WHERE dt = '2026-08-01'"
         style={{ fontSize: 13 }}
       />
       {result && (
@@ -672,11 +739,41 @@ function ParseTab() {
           />
         </div>
       )}
-      {result && result.table_lineage.length === 0 && result.field_lineage.length === 0 && (
+      {showUpstream && result?.upstream_deps && (
+        <div style={{ marginTop: 16 }}>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message="该查询为纯 SELECT 且未指定落点，未生成血缘边（未写入图谱）"
+            description="如需把查询结果落成正式血缘，请在「目标表名」填入结果表名后重新解析。"
+          />
+          <h4 style={{ marginBottom: 8 }}>
+            本次查询 · 上游依赖（{result.upstream_deps.tables.length} 表 / {result.upstream_deps.fields.length} 字段）
+          </h4>
+          <div style={{ marginBottom: 8 }}>
+            {result.upstream_deps.tables.map((t) => (
+              <Tag key={`t-${t}`} color="blue" style={{ marginBottom: 4 }}>
+                <DatabaseOutlined /> {t}
+              </Tag>
+            ))}
+            {result.upstream_deps.tables.length === 0 && <span className="muted">未读取任何表</span>}
+          </div>
+          <div>
+            {result.upstream_deps.fields.map((f) => (
+              <Tag key={`f-${f}`} style={{ marginBottom: 4 }}>
+                {f}
+              </Tag>
+            ))}
+            {result.upstream_deps.fields.length === 0 && <span className="muted">未读取任何字段</span>}
+          </div>
+        </div>
+      )}
+      {showEmpty && (
         <Empty
           style={{ marginTop: 16 }}
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="本次解析未产生血缘边（SQL 为纯查询或无写入目标）"
+          description="本次解析未产生血缘边（SQL 无法解析或无可读取源）"
         />
       )}
     </div>
@@ -695,12 +792,145 @@ const STALE_STATUS_COLOR: Record<string, string> = {
   failed: "error",
 };
 
+/**
+ * 采集运行详情主体：运行元信息 + 按运行类型展示的具体信息。
+ * - SQL 解析：解析上下文（方言/落点/资产节点/解析人）+ SQL 原文 + 表级/字段级边明细；
+ * - 批量采集：本次新增/更新边明细；
+ * - 无详情快照：降级提示（仍展示计数摘要）。
+ */
+function RunDetailBody({ run }: { run: LineageIngestRun }) {
+  const detail = run.detail;
+  const isSqlParse = detail?.kind === "sql_parse";
+  const isBatch = detail?.kind === "batch";
+
+  const tableLineage = detail?.table_lineage ?? [];
+  const fieldLineage = detail?.field_lineage ?? [];
+  const addedEdges = detail?.added_edges ?? [];
+  const updatedEdges = detail?.updated_edges ?? [];
+
+  const tableColumns = [
+    { title: "源表", dataIndex: "source", key: "source", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "目标表", dataIndex: "target", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+  ];
+  const fieldColumns = [
+    { title: "源字段", dataIndex: "source", key: "source", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "目标字段", dataIndex: "target", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "派生表达式", dataIndex: "expression", key: "expression", render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12, color: "#8c8c8c" }}>{v}</span> : <span className="muted">—</span>) },
+  ];
+  const edgeColumns = [
+    { title: "源节点", dataIndex: "source", key: "source", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+    { title: "目标节点", dataIndex: "target", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+  ];
+
+  return (
+    <div>
+      <Descriptions size="small" column={2} bordered>
+        <Descriptions.Item label="来源通道">
+          {CHANNEL_LABEL[run.source] ?? run.source}
+          <span className="muted mono" style={{ marginLeft: 6, fontSize: 12 }}>{run.source}</span>
+        </Descriptions.Item>
+        <Descriptions.Item label="运行时间">{formatCnTime(run.run_at)}</Descriptions.Item>
+        <Descriptions.Item label="状态">
+          <Badge status={STALE_STATUS_COLOR[run.status] as "success" | "processing" | "error"} text={CHANNEL_STATUS_LABEL[run.status] ?? run.status} />
+        </Descriptions.Item>
+        <Descriptions.Item label="总边数">{run.total_edges}</Descriptions.Item>
+        <Descriptions.Item label="新增 / 更新">
+          <Tag color="green">+{run.added_count}</Tag>
+          <Tag color="blue">~{run.updated_count}</Tag>
+        </Descriptions.Item>
+        <Descriptions.Item label="未再出现 / 新失效 / 恢复">
+          {run.missing_count} / {run.stale_flagged_count} / {run.restored_count}
+        </Descriptions.Item>
+      </Descriptions>
+
+      {run.error && <Alert type="error" style={{ marginTop: 12 }} message="运行失败" description={run.error} />}
+
+      {isSqlParse && (
+        <>
+          <h4 style={{ marginTop: 16 }}>解析上下文</h4>
+          <Descriptions size="small" column={2}>
+            <Descriptions.Item label="方言">{detail?.dialect || "默认"}</Descriptions.Item>
+            <Descriptions.Item label="目标表（落点）">{detail?.target_table || "—"}</Descriptions.Item>
+            <Descriptions.Item label="上游资产节点">{detail?.source_node || "—"}</Descriptions.Item>
+            <Descriptions.Item label="解析人">#{detail?.actor_id ?? "—"}</Descriptions.Item>
+          </Descriptions>
+
+          {detail?.sql ? (
+            <>
+              <h4 style={{ marginTop: 16 }}>SQL 原文</h4>
+              <pre className="mono" style={{ fontSize: 12, background: "#f5f5f5", padding: 12, borderRadius: 6, maxHeight: 260, overflow: "auto" }}>
+                {formatSql(detail.sql)}
+              </pre>
+            </>
+          ) : null}
+
+          {tableLineage.length > 0 && (
+            <>
+              <h4 style={{ marginTop: 16 }}>本次解析 · 表级边（{tableLineage.length}）</h4>
+              <Table size="small" rowKey={(r) => `${r.source}__${r.target}`} dataSource={tableLineage} columns={tableColumns} pagination={false} />
+            </>
+          )}
+
+          {fieldLineage.length > 0 && (
+            <>
+              <h4 style={{ marginTop: 16 }}>本次解析 · 字段级边（{fieldLineage.length}）</h4>
+              <Table
+                size="small"
+                rowKey={(r) => `${r.source}__${r.target}__${r.expression ?? ""}`}
+                dataSource={fieldLineage.map((f) => ({
+                  source: f.source_column ? `${f.source_table}.${f.source_column}` : `${f.source_table}.*`,
+                  target: `${f.target_table}.${f.target_column}`,
+                  expression: f.expression,
+                }))}
+                columns={fieldColumns}
+                pagination={false}
+              />
+            </>
+          )}
+
+          {tableLineage.length === 0 && fieldLineage.length === 0 && (
+            <Empty style={{ marginTop: 16 }} description="该次解析未落成血缘边（纯 SELECT 未指定落点）" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          )}
+        </>
+      )}
+
+      {isBatch && (
+        <>
+          {addedEdges.length > 0 && (
+            <>
+              <h4 style={{ marginTop: 16 }}>新增边（{addedEdges.length}）</h4>
+              <Table size="small" rowKey={(r) => `${r.source}__${r.target}`} dataSource={addedEdges.map(([s, t]) => ({ source: s, target: t }))} columns={edgeColumns} pagination={false} />
+            </>
+          )}
+          {updatedEdges.length > 0 && (
+            <>
+              <h4 style={{ marginTop: 16 }}>更新边（{updatedEdges.length}）</h4>
+              <Table size="small" rowKey={(r) => `${r.source}__${r.target}`} dataSource={updatedEdges.map(([s, t]) => ({ source: s, target: t }))} columns={edgeColumns} pagination={false} />
+            </>
+          )}
+          {addedEdges.length === 0 && updatedEdges.length === 0 && (
+            <Empty style={{ marginTop: 16 }} description="本次运行无新增/更新边明细（纯统计轮次）" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          )}
+        </>
+      )}
+
+      {!isSqlParse && !isBatch && (
+        <Empty style={{ marginTop: 16 }} description="该运行记录暂无详情快照（历史记录未保存详情）" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      )}
+    </div>
+  );
+}
+
 function ChannelsTab() {
   const [channels, setChannels] = useState<LineageChannel[]>([]);
   const [stale, setStale] = useState<StaleEdge[]>([]);
   const [runs, setRuns] = useState<LineageIngestRun[]>([]);
   const [activeSource, setActiveSource] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // 运行历史行详情（点击行 → 拉取单条运行详情快照 → Drawer 展示具体信息）
+  const [detailRun, setDetailRun] = useState<LineageIngestRun | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const { track } = useTracking();
 
   async function loadChannels() {
@@ -729,6 +959,22 @@ function ChannelsTab() {
       track("lineage_channel_runs", source, "source");
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载运行历史失败");
+    }
+  }
+
+  /** 点击运行历史行：拉取单条运行详情快照（SQL 原文/方言/落点/边明细 或 批量变更边明细）。 */
+  async function openRunDetail(run: LineageIngestRun) {
+    setDetailRun(run);
+    setDetailOpen(true);
+    setDetailLoading(true);
+    try {
+      setDetailRun(await lineageRunDetail(run.id));
+      track("lineage_run_detail", String(run.id), "run");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载运行详情失败");
+      setDetailOpen(false);
+    } finally {
+      setDetailLoading(false);
     }
   }
 
@@ -763,6 +1009,16 @@ function ChannelsTab() {
     { title: "未再出现", dataIndex: "missing_count", key: "missing", width: 80 },
     { title: "新失效", dataIndex: "stale_flagged_count", key: "stale", width: 80, render: (v: number) => (v ? <Tag color="orange">{v}</Tag> : 0) },
     { title: "恢复", dataIndex: "restored_count", key: "restored", width: 70, render: (v: number) => (v ? <Tag color="cyan">{v}</Tag> : 0) },
+    {
+      title: "详情",
+      key: "detail",
+      width: 70,
+      render: (_: unknown, run: LineageIngestRun) => (
+        <Button size="small" type="link" onClick={(e) => { e.stopPropagation(); void openRunDetail(run); }}>
+          查看
+        </Button>
+      ),
+    },
   ];
 
   const staleColumns = [
@@ -840,13 +1096,17 @@ function ChannelsTab() {
       )}
 
       {activeSource && (
-        <Card size="small" title={`运行历史 · ${activeSource}`} style={{ marginTop: 16 }}>
+        <Card size="small" title={`运行历史 · ${CHANNEL_LABEL[activeSource] ?? activeSource}`} style={{ marginTop: 16 }}>
           <Table
             dataSource={runs}
             columns={runColumns}
             rowKey="id"
             size="small"
             pagination={{ pageSize: 10, showSizeChanger: false }}
+            onRow={(run: LineageIngestRun) => ({
+              onClick: () => void openRunDetail(run),
+              style: { cursor: "pointer" },
+            })}
           />
         </Card>
       )}
@@ -864,6 +1124,16 @@ function ChannelsTab() {
           />
         )}
       </Card>
+
+      <Drawer
+        title={detailRun ? `运行详情 · ${CHANNEL_LABEL[detailRun.source] ?? detailRun.source}` : "运行详情"}
+        width={720}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        loading={detailLoading}
+      >
+        {detailRun && <RunDetailBody run={detailRun} />}
+      </Drawer>
     </div>
   );
 }

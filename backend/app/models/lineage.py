@@ -232,6 +232,12 @@ class LineageIngestRun(Base):
     error: Mapped[str | None] = mapped_column(
         Text, nullable=True, default=None, comment="失败原因（status=failed 时）"
     )
+    detail_json: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+        comment="本次运行详情快照（JSON）：SQL 原文/方言/落点/边明细 或 批量变更边明细",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

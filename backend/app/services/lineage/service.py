@@ -24,6 +24,7 @@ from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.parser import (
     extract_field_lineage,
     extract_table_lineage,
+    extract_upstream_deps,
     node_field,
     node_metric,
     node_table,
@@ -41,6 +42,7 @@ from app.services.lineage.schemas import (
     LineageParseResponse,
     StaleEdgeResponse,
     TableLineageItem,
+    UpstreamDeps,
 )
 
 logger = get_logger("unisense.lineage.service")
@@ -106,10 +108,26 @@ class LineageService(BaseService):
         返回本次解析的边**明细**（``table_lineage`` / ``field_lineage``，供前端当页
         直接展示本次血缘效果）；并按来源通道写一条 ``lineage_ingest_run`` 运行记录
         （对齐模型注释：dp_csv / quickbi / 数据接口 / SQL 解析均记运行摘要），使
-        「采集通道」视图能展示 SQL 解析的来源新鲜度与变更摘要。
+        「采集通道」视图能展示 SQL 解析的来源新鲜度与变更摘要，运行记录附带本次
+        详情快照（SQL 原文/方言/落点/边明细），点击运行历史行可查看具体信息。
+
+        纯 SELECT 语义（方案 A+B）：
+        - 指定 ``target_table`` 时把查询读取的源表/投影列指向该落点，生成正式血缘并
+          写入图谱（与自带 INSERT/CTAS 的解析结果一致）；
+        - 无落点（未指定且 SQL 无写入目标）时**不写图谱、不写运行记录**，改为返回
+          上游依赖清单（``upstream_deps``，只读展示该查询读取的表/字段）。
         """
-        table_edges = extract_table_lineage(req.sql, req.dialect)
-        field_edges = extract_field_lineage(req.sql, req.dialect)
+        table_edges = extract_table_lineage(req.sql, req.dialect, target_table=req.target_table)
+        field_edges = extract_field_lineage(req.sql, req.dialect, target_table=req.target_table)
+        if not table_edges and not field_edges:
+            # 纯 SELECT 无落点：不构成血缘边，仅返回上游依赖（方案 B），不写图谱/运行记录
+            deps = extract_upstream_deps(req.sql, req.dialect)
+            return LineageParseResponse(
+                table_edges=0,
+                field_edges=0,
+                graph_written=False,
+                upstream_deps=UpstreamDeps(tables=list(deps.tables), fields=list(deps.fields)),
+            )
 
         stored_table = 0
         stored_field = 0
@@ -192,12 +210,23 @@ class LineageService(BaseService):
                 "lineage_parsed",
                 {"table_edges": stored_table, "field_edges": stored_field},
             )
+        detail = {
+            "kind": "sql_parse",
+            "sql": req.sql,
+            "dialect": req.dialect,
+            "target_table": req.target_table,
+            "source_node": req.source_node,
+            "actor_id": actor_id,
+            "table_lineage": [i.model_dump() for i in table_lineage],
+            "field_lineage": [i.model_dump() for i in field_lineage],
+        }
         await self._repo.finish_ingest_run(
             run,
             status="success",
             total_edges=stored_table + stored_field,
             added=added,
             updated=updated,
+            detail=detail,
         )
         return LineageParseResponse(
             table_edges=stored_table,
@@ -483,27 +512,35 @@ class LineageService(BaseService):
         run = await self._repo.begin_ingest_run(provenance)
         added = 0
         updated = 0
+        added_edges: list[list[str]] = []
+        updated_edges: list[list[str]] = []
         seen: set[tuple[str, str]] = set()
         try:
             for source, target in sorted(edges):
+                src_node = node_table(source)
+                tgt_node = node_table(target)
                 _, created = await self._repo.upsert_edge_with_status(
-                    source_node=node_table(source),
-                    target_node=node_table(target),
+                    source_node=src_node,
+                    target_node=tgt_node,
                     edge_type="DERIVED_FROM",
                     granularity="L1",
                     confidence=1.0,
                     provenance=provenance,
                     change_reason=change_reason,
                 )
-                seen.add((node_table(source), node_table(target)))
+                seen.add((src_node, tgt_node))
                 if created:
                     added += 1
+                    added_edges.append([src_node, tgt_node])
                 else:
                     updated += 1
+                    updated_edges.append([src_node, tgt_node])
                 if (added + updated) % _INGEST_COMMIT_BATCH == 0:
                     await self._db.commit()
             confirmed, restored = await self._repo.mark_seen(provenance, seen)
             missing, stale_flagged = await self._repo.mark_missing(provenance, seen, threshold)
+            # 运行详情快照：记录本次新增/更新的具体边明细，供「运行历史行 → 详情」查看
+            detail = {"kind": "batch", "added_edges": added_edges, "updated_edges": updated_edges}
             await self._repo.finish_ingest_run(
                 run,
                 status="success",
@@ -513,6 +550,7 @@ class LineageService(BaseService):
                 missing=missing,
                 stale_flagged=stale_flagged,
                 restored=restored,
+                detail=detail,
             )
             await self._db.commit()
             if self._events is not None:
@@ -554,6 +592,25 @@ class LineageService(BaseService):
         """某来源通道的采集运行历史（按时间倒序）。"""
         runs = await self._repo.list_ingest_runs(source, limit)
         return [LineageIngestRunResponse.model_validate(r) for r in runs]
+
+    async def get_ingest_run_detail(self, run_id: int) -> LineageIngestRunResponse:
+        """取单条采集运行记录（含详情快照），供「运行历史行 → 详情」展示。
+
+        运行记录以 ``detail_json`` 文本列存结构化快照（SQL 解析：SQL 原文/方言/落点/
+        边明细；批量采集：变更边明细），此处反序列化到响应的 ``detail`` 字段；
+        快照缺失/损坏时降级为 None（仍返回计数摘要，不抛错）。
+        """
+        run = await self._repo.get_ingest_run(run_id)
+        if run is None:
+            raise NotFoundError(f"采集运行记录不存在: {run_id}")
+        resp = LineageIngestRunResponse.model_validate(run)
+        if run.detail_json:
+            try:
+                resp.detail = json.loads(run.detail_json)
+            except (TypeError, ValueError):
+                logger.warning("lineage_run_detail_decode_failed", run_id=run_id)
+                resp.detail = None
+        return resp
 
     async def list_stale(
         self, source: str | None = None, limit: int = 200

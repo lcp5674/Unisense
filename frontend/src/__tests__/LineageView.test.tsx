@@ -41,6 +41,8 @@ vi.mock("../api", async (importOriginal) => {
     lineageImpact: vi.fn(),
     lineageChannels: vi.fn(),
     lineageStale: vi.fn(),
+    lineageChannelRuns: vi.fn(),
+    lineageRunDetail: vi.fn(),
     getMetric: vi.fn(),
     getMetricHealth: vi.fn(),
     fetchRelatedMetrics: vi.fn(),
@@ -303,6 +305,7 @@ describe("LineageView SQL 血缘解析 Tab", () => {
         { source_table: "a", source_column: "id", target_table: "t", target_column: "id", expression: null },
         { source_table: "b", source_column: "amount", target_table: "t", target_column: "amount", expression: "SUM(amount)" },
       ],
+      upstream_deps: null,
     });
   });
 
@@ -328,7 +331,11 @@ describe("LineageView SQL 血缘解析 Tab", () => {
     });
     fireEvent.click(within(panel).getByRole("button", { name: /解析血缘/ }));
     await waitFor(() =>
-      expect(api.parseLineage).toHaveBeenCalledWith("INSERT INTO t SELECT id FROM s", "doris"),
+      expect(api.parseLineage).toHaveBeenCalledWith(
+        "INSERT INTO t SELECT id FROM s",
+        "doris",
+        "",
+      ),
     );
   });
 
@@ -356,6 +363,66 @@ describe("LineageView SQL 血缘解析 Tab", () => {
     expect(screen.getByText("a.id")).toBeInTheDocument();
     expect(screen.getByText("t.id")).toBeInTheDocument();
     expect(screen.getByText("SUM(amount)")).toBeInTheDocument();
+  });
+
+  it("填写目标表名时，解析调用携带 target_table（方案 A 落点）", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /SQL 血缘解析/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    fireEvent.change(within(panel).getByPlaceholderText(/目标表名（可选）/), {
+      target: { value: "dws_report" },
+    });
+    fireEvent.change(within(panel).getByPlaceholderText(/粘贴 SQL/), {
+      target: { value: "SELECT id, name FROM ods_orders" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: /解析血缘/ }));
+    await waitFor(() =>
+      expect(api.parseLineage).toHaveBeenCalledWith(
+        "SELECT id, name FROM ods_orders",
+        "mysql",
+        "dws_report",
+      ),
+    );
+  });
+
+  it("纯 SELECT 未指定落点时展示上游依赖清单（方案 B，不写图谱）", async () => {
+    vi.mocked(api.parseLineage).mockResolvedValue({
+      table_edges: 0,
+      field_edges: 0,
+      graph_written: false,
+      table_lineage: [],
+      field_lineage: [],
+      upstream_deps: {
+        tables: ["ods_orders", "dim_user"],
+        fields: ["ods_orders.id", "dim_user.name"],
+      },
+    });
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /SQL 血缘解析/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    fireEvent.change(within(panel).getByPlaceholderText(/粘贴 SQL/), {
+      target: {
+        value: "SELECT o.id, u.name FROM ods_orders o JOIN dim_user u ON o.uid = u.uid",
+      },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: /解析血缘/ }));
+    await waitFor(() => expect(api.parseLineage).toHaveBeenCalled());
+    // 展示上游依赖：源表 + 源字段
+    await waitFor(() => {
+      expect(screen.getByText(/上游依赖（2 表 \/ 2 字段）/)).toBeInTheDocument();
+    });
+    expect(screen.getByText("ods_orders")).toBeInTheDocument();
+    expect(screen.getByText("dim_user")).toBeInTheDocument();
+    expect(screen.getByText("ods_orders.id")).toBeInTheDocument();
+    expect(screen.getByText("dim_user.name")).toBeInTheDocument();
+    // 提示纯 SELECT 未生成血缘边、未写图谱
+    expect(screen.getByText(/未生成血缘边（未写入图谱）/)).toBeInTheDocument();
   });
 });
 
@@ -437,6 +504,31 @@ describe("LineageView 血缘查询 / 影响分析 Tab", () => {
     // 兜底「使用输入值」选项出现，支持自由指定节点
     await screen.findByText(/使用「external」/);
   });
+
+  it("查询结果以血缘视图（力导向图）展示，边明细表格为辅", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /血缘查询/ }).click();
+    });
+    const panel = await screen.findByRole("tabpanel");
+    // 从下拉选择节点
+    const nodeSelect = within(panel).getAllByRole("combobox")[0];
+    fireEvent.mouseDown(nodeSelect);
+    await screen.findByText("orders");
+    fireEvent.click(screen.getByText("orders"));
+    fireEvent.click(within(panel).getByRole("button", { name: /查\s*询/ }));
+    await waitFor(() => expect(api.lineageImpact).toHaveBeenCalled());
+    // 血缘视图：AssetGraph 画布渲染（G6 mock），图标题含节点/边计数
+    await waitFor(() => {
+      expect(
+        screen.getByText(/血缘视图 · table:orders 的下游影响（2 节点 · 1 条边）/),
+      ).toBeInTheDocument();
+    });
+    expect(panel.querySelector('[data-testid="asset-graph-wrap"]')).toBeTruthy();
+    // 边明细表格仍在（辅助展示）
+    expect(within(panel).getByText("table:dws")).toBeInTheDocument();
+  });
 });
 
 describe("LineageView 采集通道 Tab", () => {
@@ -462,6 +554,71 @@ describe("LineageView 采集通道 Tab", () => {
     // 原始 provenance 标识以小字一并展示
     expect(screen.getByText("sqlglot")).toBeInTheDocument();
     expect(screen.getByText("dp_csv")).toBeInTheDocument();
+  });
+
+  it("点击运行历史「查看」展示该次运行的具体信息（SQL 原文 / 边明细）", async () => {
+    const run = {
+      id: 1,
+      source: "sqlglot",
+      run_at: "2026-08-01T10:00:00",
+      status: "success",
+      total_edges: 2,
+      added_count: 2,
+      updated_count: 0,
+      missing_count: 0,
+      stale_flagged_count: 0,
+      restored_count: 0,
+      error: null,
+    };
+    vi.mocked(api.lineageChannels).mockResolvedValue([
+      { source: "sqlglot", edge_count: 18, node_count: 28, stale_count: 0, last_run: run },
+    ]);
+    vi.mocked(api.lineageChannelRuns).mockResolvedValue([run]);
+    vi.mocked(api.lineageRunDetail).mockResolvedValue({
+      ...run,
+      detail: {
+        kind: "sql_parse",
+        sql: "INSERT INTO t SELECT id, name FROM s",
+        dialect: "mysql",
+        target_table: null,
+        source_node: null,
+        actor_id: 7,
+        table_lineage: [{ source: "table:s", target: "table:t" }],
+        field_lineage: [
+          { source_table: "s", source_column: "id", target_table: "t", target_column: "id", expression: null },
+          { source_table: "s", source_column: "name", target_table: "t", target_column: "name", expression: null },
+        ],
+      },
+    });
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /采集通道/ }).click();
+    });
+    await waitFor(() => expect(api.lineageChannels).toHaveBeenCalled());
+    // 点击通道卡片 → 加载运行历史
+    fireEvent.click(screen.getByText("SQL 解析"));
+    await waitFor(() => expect(api.lineageChannelRuns).toHaveBeenCalledWith("sqlglot"));
+    await waitFor(() => {
+      expect(screen.getByText(/运行历史 · SQL 解析/)).toBeInTheDocument();
+    });
+    // 点击「查看」→ 拉取单条运行详情 → Drawer 展示
+    fireEvent.click(screen.getByRole("button", { name: /查看/ }));
+    await waitFor(() => expect(api.lineageRunDetail).toHaveBeenCalledWith(1));
+    await waitFor(() => {
+      expect(screen.getByText(/运行详情 · SQL 解析/)).toBeInTheDocument();
+    });
+    // 具体信息：解析上下文（方言）、SQL 原文、表级/字段级边明细
+    expect(screen.getByText("解析上下文")).toBeInTheDocument();
+    expect(screen.getByText("方言")).toBeInTheDocument();
+    expect(screen.getByText(/本次解析 · 表级边（1）/)).toBeInTheDocument();
+    expect(screen.getByText(/本次解析 · 字段级边（2）/)).toBeInTheDocument();
+    expect(screen.getByText("table:s")).toBeInTheDocument();
+    expect(screen.getByText("table:t")).toBeInTheDocument();
+    // SQL 原文以格式化 pre 展示（formatSql 换行排版）
+    const pre = document.querySelector("pre");
+    expect(pre?.textContent).toContain("INSERT");
+    expect(pre?.textContent).toContain("FROM s");
   });
 });
 

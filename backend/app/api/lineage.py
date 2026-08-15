@@ -241,6 +241,23 @@ async def list_channel_runs(
     )
 
 
+@router.get("/runs/{run_id}", dependencies=_READ_DEPS)
+async def run_detail(
+    run_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """单条采集运行详情（含详情快照 detail）。
+
+    SQL 解析运行含 SQL 原文 / dialect / target_table / source_node / 表级与字段级
+    边明细；批量采集运行含新增/更新边明细。供「运行历史行 → 详情」展示具体信息。
+    """
+    svc = _svc(db)
+    run = await svc.get_ingest_run_detail(run_id)
+    return ok(data=run.model_dump(mode="json"), trace_id=trace_id)
+
+
 @router.get("/stale", dependencies=_READ_DEPS)
 async def list_stale(
     params: Annotated[LineageStaleParams, Depends()],

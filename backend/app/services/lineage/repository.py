@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -506,8 +507,14 @@ class LineageRepository:
         stale_flagged: int = 0,
         restored: int = 0,
         error: str | None = None,
+        detail: dict[str, Any] | None = None,
     ) -> None:
-        """结束增量采集运行，回写变更摘要与状态。"""
+        """结束增量采集运行，回写变更摘要与状态。
+
+        Args:
+            detail: 本次运行详情快照（dict 序列化为 ``detail_json`` 文本列）。
+                SQL 解析存 SQL 原文/方言/落点/边明细；批量采集存变更边明细。
+        """
         run.status = status
         run.total_edges = total_edges
         run.added_count = added
@@ -516,7 +523,14 @@ class LineageRepository:
         run.stale_flagged_count = stale_flagged
         run.restored_count = restored
         run.error = error
+        run.detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
         await self._db.flush()
+
+    async def get_ingest_run(self, run_id: int) -> LineageIngestRun | None:
+        """按主键取采集运行记录（含 ``detail_json``，由上层解析展示）。"""
+        return (
+            await self._db.execute(select(LineageIngestRun).where(LineageIngestRun.id == run_id))
+        ).scalar_one_or_none()
 
     async def latest_ingest_run(self, source: str) -> LineageIngestRun | None:
         """取某来源通道最近一次运行记录（无记录返回 None）。"""

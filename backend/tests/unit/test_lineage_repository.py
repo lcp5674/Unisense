@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
-from app.models.lineage import LineageEdge, LineageEdgeHistory
+from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 from app.services.lineage.repository import LineageRepository
 
 
@@ -595,3 +596,76 @@ async def test_list_nodes_aggregates_and_filters() -> None:
     # 断言 SQL 含 LIKE 模糊过滤与 LIMIT 上限
     assert any("LIKE" in s for s in db.sqls)
     assert any("LIMIT 10" in s for s in db.sqls)
+
+
+# ---- 运行记录详情快照（detail_json / get_ingest_run）----
+
+
+class _RunDB:
+    """面向 finish_ingest_run / get_ingest_run 的假 db。"""
+
+    def __init__(self, run: LineageIngestRun | None = None) -> None:
+        self._run = run
+        self.flushes = 0
+
+    async def execute(self, stmt: object) -> _Result:
+        return _Result([self._run] if self._run else [], scalar=self._run)
+
+    async def flush(self) -> None:
+        self.flushes += 1
+
+
+def _ingest_run() -> LineageIngestRun:
+    run = LineageIngestRun(source="sqlglot", status="running")
+    run.id = 1
+    return run
+
+
+async def test_finish_ingest_run_writes_detail_json() -> None:
+    """finish_ingest_run 把详情快照序列化写入 detail_json 列。"""
+    run = _ingest_run()
+    repo = LineageRepository(_RunDB())
+    await repo.finish_ingest_run(
+        run,
+        status="success",
+        total_edges=2,
+        added=1,
+        updated=1,
+        detail={
+            "kind": "sql_parse",
+            "sql": "SELECT 1",
+            "table_lineage": [{"source": "a", "target": "t"}],
+        },
+    )
+    assert run.status == "success"
+    assert run.added_count == 1
+    assert run.detail_json is not None
+    payload = json.loads(run.detail_json)
+    assert payload["kind"] == "sql_parse"
+    assert payload["sql"] == "SELECT 1"
+
+
+async def test_finish_ingest_run_without_detail_leaves_null() -> None:
+    """未传详情时 detail_json 保持 None（兼容既有采集路径）。"""
+    run = _ingest_run()
+    repo = LineageRepository(_RunDB())
+    await repo.finish_ingest_run(run, status="success", total_edges=1)
+    assert run.detail_json is None
+
+
+async def test_get_ingest_run_returns_run() -> None:
+    """get_ingest_run 按主键返回运行记录（含 detail_json）。"""
+    run = _ingest_run()
+    run.detail_json = '{"kind":"batch","added_edges":[["table:a","table:b"]]}'
+    repo = LineageRepository(_RunDB(run))
+    got = await repo.get_ingest_run(1)
+    assert got is not None
+    assert got.id == 1
+    assert got.source == "sqlglot"
+    assert '"added_edges"' in (got.detail_json or "")
+
+
+async def test_get_ingest_run_missing_returns_none() -> None:
+    """不存在的运行记录返回 None。"""
+    repo = LineageRepository(_RunDB(None))
+    assert await repo.get_ingest_run(999) is None

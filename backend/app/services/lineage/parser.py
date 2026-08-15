@@ -47,6 +47,18 @@ class FieldEdge:
     degraded: bool = False
 
 
+@dataclass(frozen=True)
+class UpstreamDeps:
+    """只读查询（纯 SELECT 无写入目标）读取的上游依赖清单。
+
+    不构成血缘边（无下游落点），仅用于「本次查询读取了哪些表/字段」的只读展示，
+    区别于正式血缘（写图谱、可影响分析）。
+    """
+
+    tables: tuple[str, ...]
+    fields: tuple[str, ...]
+
+
 #: 字段血缘递归解析最大深度（防止 CTE/子查询自引用导致的无限递归）。
 _MAX_DEPTH = 8
 
@@ -140,13 +152,39 @@ def _table_edges(ast: Any) -> list[TableEdge]:
     return edges
 
 
-def extract_table_lineage(sql: str, dialect: str | None = None) -> list[TableEdge]:
+def _select_table_edges(ast: Any, target_name: str) -> list[TableEdge]:
+    """纯 SELECT 指定落点（方案 A+B）：FROM/JOIN 源表 → target_name 表级边。
+
+    与 ``_table_edges`` 的区别：查询本身无写入目标（``_find_target`` 返回 None），
+    但调用方显式指定了落点表，此时把查询读取的全部源表指向该落点，构成正式血缘
+    （写图谱、可影响分析）。落点表自身出现在 FROM/JOIN 中时跳过，避免自环。
+    """
+    edges: list[TableEdge] = []
+    seen: set[tuple[str, str]] = set()
+    for tbl in ast.find_all(exp.Table):
+        src = _norm_table(tbl)
+        if not src or src == target_name:
+            continue
+        key = (src, target_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append(TableEdge(source=src, target=target_name))
+    return edges
+
+
+def extract_table_lineage(
+    sql: str, dialect: str | None = None, target_table: str | None = None
+) -> list[TableEdge]:
     """抽取表级血缘。
 
     Args:
         sql: SQL 文本（支持注释/多语句，自动净化）。
         dialect: sqlglot dialect（可选，如 ``"mysql"`` / ``"hive"`` / ``"doris"`` /
             ``"clickhouse"``）。
+        target_table: 可选落点表（方案 A+B）。SQL 自身无写入目标（纯 SELECT）但指定
+            了该值时，把 FROM/JOIN 源表 → ``target_table`` 生成表级边；未指定时纯
+            SELECT 保持无成边（返回空，由调用方降级展示上游依赖）。
 
     Returns:
         表级血缘边列表（source -> target）；解析失败或非法 SQL 时返回空列表（降级）。
@@ -159,7 +197,11 @@ def extract_table_lineage(sql: str, dialect: str | None = None) -> list[TableEdg
         except Exception:
             # 非 SQL / 语法错误：跳过该语句，整体降级（不抛异常）
             continue
-        for edge in _table_edges(ast):
+        stmt_edges = _table_edges(ast)
+        if not stmt_edges and target_table:
+            # 纯 SELECT 显式落点：FROM/JOIN 源表 → 目标表
+            stmt_edges = _select_table_edges(ast, target_table)
+        for edge in stmt_edges:
             key = (edge.source, edge.target)
             if key in seen:
                 continue
@@ -503,7 +545,25 @@ def _extract_field_edges(ast: Any, dialect: str | None) -> list[FieldEdge]:
     return edges
 
 
-def extract_field_lineage(sql: str, dialect: str | None = None) -> list[FieldEdge]:
+def _select_field_edges(ast: Any, target_name: str, dialect: str | None) -> list[FieldEdge]:
+    """纯 SELECT 指定落点（方案 A+B）：SELECT 投影列 → target_name 字段级边。
+
+    复用 ``_extract_branch_edges`` 的分支展开 + 作用域列解析链路，仅把目标表替换为
+    显式落点。SELECT 为普通查询时单分支，UNION 多分支逐分支解析。
+    """
+    cte_map = _collect_ctes(ast)
+    edges: list[FieldEdge] = []
+    for branch in _branch_queries(ast):
+        scope = _try_build_scope(branch)
+        if scope is None:
+            continue
+        _extract_branch_edges(branch, scope, ast, target_name, cte_map, dialect, edges)
+    return edges
+
+
+def extract_field_lineage(
+    sql: str, dialect: str | None = None, target_table: str | None = None
+) -> list[FieldEdge]:
     """抽取字段级血缘（深度解析：CTE / 子查询 / 表达式 / MERGE / UNION）。
 
     基于 sqlglot ``build_scope`` 递归展开作用域，将每个目标投影列解析到其真实源列
@@ -515,6 +575,9 @@ def extract_field_lineage(sql: str, dialect: str | None = None) -> list[FieldEdg
         sql: SQL 文本（支持注释/多语句，自动净化）。
         dialect: sqlglot dialect（可选，如 ``"mysql"`` / ``"hive"`` / ``"doris"`` /
             ``"clickhouse"`` / ``"starrocks"``）。
+        target_table: 可选落点表（方案 A+B）。SQL 自身无写入目标（纯 SELECT）但指定
+            了该值时，把 SELECT 投影列 → ``target_table`` 对应列生成字段级边；未指定
+            时纯 SELECT 保持无成边（返回空，由调用方降级展示上游依赖）。
 
     Returns:
         字段级血缘边列表（含降级标记）；解析不可用或失败时返回空列表（降级）。
@@ -526,7 +589,11 @@ def extract_field_lineage(sql: str, dialect: str | None = None) -> list[FieldEdg
             ast = sqlglot.parse_one(stmt, dialect=dialect)
         except Exception:
             continue
-        for edge in _extract_field_edges(ast, dialect):
+        stmt_edges = _extract_field_edges(ast, dialect)
+        if not stmt_edges and target_table:
+            # 纯 SELECT 显式落点：投影列 → 目标表列
+            stmt_edges = _select_field_edges(ast, target_table, dialect)
+        for edge in stmt_edges:
             key = (
                 edge.source_table,
                 edge.source_column,
@@ -540,6 +607,44 @@ def extract_field_lineage(sql: str, dialect: str | None = None) -> list[FieldEdg
             seen.add(key)
             edges.append(edge)
     return edges
+
+
+def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
+    """提取只读查询（纯 SELECT 无落点）读取的上游表与字段清单。
+
+    血缘边要求下游落点；纯 SELECT 不构成边。本函数返回该查询读取的源表
+    （FROM/JOIN/CTE 定义中的表）与源字段（投影/条件中的列引用，限定列解析为
+    ``真实表名.列名``，未限定列保留裸列名），供「本次查询的上游依赖」只读展示，
+    不写图谱、不参与影响分析。
+
+    Args:
+        sql: SQL 文本（支持注释/多语句，自动净化）。
+        dialect: sqlglot dialect（可选）。
+
+    Returns:
+        ``UpstreamDeps``：去重排序的 ``tables`` / ``fields``；解析失败降级为空。
+    """
+    tables: set[str] = set()
+    fields: set[str] = set()
+    for stmt in _split_statements(sql):
+        try:
+            ast: Any = sqlglot.parse_one(stmt, dialect=dialect)
+        except Exception:
+            continue
+        alias_map = _build_alias_map(ast)
+        for tbl in ast.find_all(exp.Table):
+            name = _norm_table(tbl)
+            if name:
+                tables.add(name)
+        for col in ast.find_all(exp.Column):
+            if col.table:
+                fields.add(f"{alias_map.get(col.table, col.table)}.{col.name}")
+            else:
+                fields.add(col.name)
+    return UpstreamDeps(
+        tables=tuple(sorted(tables)),
+        fields=tuple(sorted(fields)),
+    )
 
 
 def node_table(name: str) -> str:

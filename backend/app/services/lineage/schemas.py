@@ -18,6 +18,14 @@ class LineageParseRequest(BaseModel):
     )
     source_node: str | None = Field(default=None, max_length=512, description="可选上游资产节点")
     provenance: str = Field(default="sqlglot", max_length=32, description="来源通道")
+    target_table: str | None = Field(
+        default=None,
+        max_length=512,
+        description=(
+            "可选落点表（方案 A+B）：纯 SELECT 无写入目标时，指定该值即把查询读取的"
+            "源表/投影列指向该表，生成正式血缘并写入图谱"
+        ),
+    )
 
 
 class LineageEdgeResponse(BaseModel):
@@ -52,6 +60,16 @@ class FieldLineageItem(BaseModel):
     expression: str | None = Field(default=None, description="派生表达式原文（裸列引用为 None）")
 
 
+class UpstreamDeps(BaseModel):
+    """只读查询（纯 SELECT 无落点）读取的上游依赖清单（方案 B）。"""
+
+    tables: list[str] = Field(default_factory=list, description="读取的源表（去重排序）")
+    fields: list[str] = Field(
+        default_factory=list,
+        description="读取的源字段（真实表名.列名，未限定列保留裸列名）",
+    )
+
+
 class LineageParseResponse(BaseModel):
     """血缘解析结果。"""
 
@@ -63,6 +81,10 @@ class LineageParseResponse(BaseModel):
     )
     field_lineage: list[FieldLineageItem] = Field(
         default_factory=list, description="本次解析的字段级边明细"
+    )
+    upstream_deps: UpstreamDeps | None = Field(
+        default=None,
+        description="纯 SELECT 无落点时的上游依赖清单（只读展示，不写图谱）",
     )
 
 
@@ -137,6 +159,10 @@ class LineageIngestRunResponse(BaseModel):
     stale_flagged_count: int
     restored_count: int
     error: str | None = None
+    detail: dict[str, Any] | None = Field(
+        default=None,
+        description="本次运行详情快照（SQL 解析：SQL 原文/方言/落点/边明细；批量采集：变更边明细）",
+    )
 
 
 class LineageChannelResponse(BaseModel):
