@@ -146,6 +146,17 @@ describe("SystemDict 页面", () => {
     await waitFor(() => expect(screen.getByTestId("dict-code-preview")).toHaveValue("minute"));
   });
 
+  it("新增弹窗：编码与已有项冲突时预览自动追加序号（分钟 → minute_2）", async () => {
+    // 当前类型下已存在 code=minute 的项（非软删）→ 预览应显示后端将生成的 minute_2
+    mockedItems.mockResolvedValue([...ITEMS, { ...ITEMS[0], id: 3, code: "minute", label: "分钟（已存在）" }]);
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    const labelInput = await screen.findByPlaceholderText("如 人民币元");
+    fireEvent.change(labelInput, { target: { value: "分钟" } });
+    await waitFor(() => expect(screen.getByTestId("dict-code-preview")).toHaveValue("minute_2"));
+  });
+
   it("新增提交不传 code，由后端按显示名自动生成", async () => {
     mockedCreate.mockResolvedValue({} as any);
     renderDict();

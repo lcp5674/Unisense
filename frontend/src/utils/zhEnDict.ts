@@ -399,5 +399,39 @@ export function slugifyCode(name: string): string {
   }
   if (cjk.length > 0) tokens.push(zhToEn(cjk.join("")));
   if (cur.length > 0) tokens.push(cur.join(""));
-  return tokens.join("_").replace(/^_+|_+$/g, "");
+  // 过滤空 token（zhToEn 对「无字典命中且无拼音」的字返回空串），与后端
+  // codegen.slugify_code 的 `"_".join(t for t in tokens if t)` 保持一致，
+  // 避免极端场景下出现中段双下划线（如 `a__b`）。
+  return tokens.filter(Boolean).join("_").replace(/^_+|_+$/g, "");
+}
+
+//: 编码最大长度（对齐后端 codegen.MAX_CODE_LEN，模型列 String(64)）
+const MAX_CODE_LEN = 64;
+//: 冲突自增后缀上限（对齐后端 codegen.MAX_CODE_ATTEMPTS，防止死循环）
+const MAX_CODE_ATTEMPTS = 100;
+
+/**
+ * 在已有编码集合上解析唯一编码：base 冲突时追加 ``_2/_3/...`` 后缀。
+ *
+ * 与后端 ``codegen.generate_unique_code`` 规则逐字节对齐（截断 64、自增上限 100），
+ * 供「编码自动生成」表单实时预览——预览仅需把当前已加载（非软删）项编码作为
+ * existingCodes 传入，即可在提交前预判后端将生成的最终编码（含冲突后缀）。
+ *
+ * 与后端差异：后端超上限抛 ``RuntimeError``（转 ``DICT_CODE_EXHAUSTED``），
+ * 此处为纯函数预览，超上限时回退返回 base（调用方 UI 可据此提示「无法自动生成」）。
+ *
+ * @param base 基础编码（通常为 ``slugifyCode(name)`` 结果，非空）
+ * @param existingCodes 已存在的编码集合（应为当前类型下非软删项编码）
+ */
+export function resolveUniqueCode(base: string, existingCodes: Iterable<string>): string {
+  const used = new Set(existingCodes);
+  let candidate = base.slice(0, MAX_CODE_LEN);
+  let n = 2;
+  while (used.has(candidate)) {
+    const suffix = `_${n}`;
+    candidate = `${base.slice(0, MAX_CODE_LEN - suffix.length)}${suffix}`;
+    n += 1;
+    if (n > MAX_CODE_ATTEMPTS) return base;
+  }
+  return candidate;
 }

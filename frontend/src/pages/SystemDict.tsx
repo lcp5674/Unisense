@@ -9,7 +9,7 @@ import {
   deactivateDictItem, activateDictItem, deleteDictItem,
 } from "../api";
 import type { SystemDictItem } from "../types";
-import { slugifyCode } from "../utils/zhEnDict";
+import { slugifyCode, resolveUniqueCode } from "../utils/zhEnDict";
 
 const DICT_TYPE_LABELS: Record<string, string> = {
   granularity: "粒度",
@@ -47,10 +47,15 @@ export function SystemDict() {
   const [editItem, setEditItem] = useState<SystemDictItem | null>(null);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
-  // 编码自动生成预览：监听显示名（与后端 codegen.slugify_code 规则对齐；
-  // 纯标点/空白名无可提取字符时与后端一致回退 item）
+  // 编码自动生成预览：监听显示名，与后端 codegen 规则对齐——
+  // slugify_code 生成 base（纯标点/空白名回退 item），再对当前类型已加载
+  // （非软删）项编码做冲突自增（resolveUniqueCode，与 generate_unique_code
+  // 逐字节一致），预览即后端将生成的最终编码。
   const watchLabel = Form.useWatch("label", createForm);
-  const codePreview = slugifyCode(watchLabel ?? "") || "item";
+  const codePreview = useMemo(() => {
+    const base = slugifyCode(watchLabel ?? "") || "item";
+    return resolveUniqueCode(base, items.map((i) => i.code));
+  }, [watchLabel, items]);
 
   // 状态筛选为客户端过滤（数据字典按类型 Tabs 一次性加载全部项）
   const visibleItems = useMemo(
@@ -205,7 +210,7 @@ export function SystemDict() {
           <Form.Item name="label" label="显示名" rules={[{ required: true }]}>
             <Input placeholder="如 人民币元" />
           </Form.Item>
-          <Form.Item label="编码（自动生成）" tooltip="系统根据显示名自动生成英文编码，冲突时自动追加序号；提交后以后端返回为准">
+          <Form.Item label="编码（自动生成）" tooltip="系统根据显示名自动生成英文编码，与已有编码冲突时自动追加序号（如 minute_2）；若无法自动生成可手动指定编码后重试">
             <Space.Compact style={{ width: "100%" }}>
               <Input value={codePreview} disabled data-testid="dict-code-preview" />
               <Tag color="blue" style={{ lineHeight: "30px", margin: 0 }}>自动生成</Tag>
