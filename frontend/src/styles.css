@@ -1043,11 +1043,18 @@ body {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 12px;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
 .fav-stat-card:hover {
   border-color: var(--signal);
   box-shadow: 0 4px 16px rgba(232, 134, 45, 0.1);
+  transform: translateY(-1px);
+}
+.fav-stat-card.active {
+  border-color: var(--signal);
+  background: linear-gradient(135deg, rgba(232, 134, 45, 0.1), transparent);
+  box-shadow: 0 4px 16px rgba(232, 134, 45, 0.16);
 }
 .fav-stat-num {
   font-family: var(--font-mono);
@@ -1094,6 +1101,7 @@ body {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 12px;
+  cursor: pointer;
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 .fav-card:hover {

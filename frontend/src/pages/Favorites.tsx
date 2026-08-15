@@ -119,29 +119,54 @@ const TABS: { key: FavoriteAssetType | "ALL"; label: string }[] = [
   { key: "TEMPLATE", label: "模板" },
 ];
 
-/** 概览统计卡行：每类资产一张卡，一眼看到收藏结构与健康度。 */
+/** 概览统计卡行：每类资产一张卡，一眼看到收藏结构与健康度；点击卡片即切换筛选（Tab）。 */
 function FavStatsBar({
   total,
   byType,
   dead,
+  active,
+  showDead,
+  onSelect,
 }: {
   total: number;
   byType: Record<string, number>;
   dead: number;
+  active: FavoriteAssetType | "ALL";
+  showDead: boolean;
+  onSelect: (key: FavoriteAssetType | "ALL" | "DEAD") => void;
 }) {
   return (
     <div className="fav-stats">
-      <div className="fav-stat-card fav-stat-total">
+      <div
+        className={`fav-stat-card fav-stat-total${active === "ALL" && !showDead ? " active" : ""}`}
+        role="button"
+        tabIndex={0}
+        onClick={() => onSelect("ALL")}
+        onKeyDown={(e) => e.key === "Enter" && onSelect("ALL")}
+      >
         <span className="fav-stat-num">{total}</span>
         <span className="fav-stat-label">收藏总数</span>
       </div>
       {TABS.filter((t) => t.key !== "ALL").map((t) => (
-        <div key={t.key} className="fav-stat-card">
+        <div
+          key={t.key}
+          className={`fav-stat-card${active === t.key ? " active" : ""}`}
+          role="button"
+          tabIndex={0}
+          onClick={() => onSelect(t.key)}
+          onKeyDown={(e) => e.key === "Enter" && onSelect(t.key)}
+        >
           <span className="fav-stat-num">{byType[t.key] ?? 0}</span>
           <span className="fav-stat-label">{t.label}</span>
         </div>
       ))}
-      <div className={`fav-stat-card fav-stat-dead${dead ? " has-dead" : ""}`}>
+      <div
+        className={`fav-stat-card fav-stat-dead${dead ? " has-dead" : ""}${showDead ? " active" : ""}`}
+        role="button"
+        tabIndex={0}
+        onClick={() => onSelect("DEAD")}
+        onKeyDown={(e) => e.key === "Enter" && onSelect("DEAD")}
+      >
         <span className="fav-stat-num">{dead}</span>
         <span className="fav-stat-label">已失效</span>
       </div>
@@ -190,7 +215,7 @@ function FavToolbar({
   );
 }
 
-/** 单条收藏卡片：类型图标 + 名称/标签 + 编码/域/时间 + 定义摘要 + 操作。 */
+/** 单条收藏卡片：类型图标 + 名称/标签 + 编码/域/时间 + 定义摘要 + 操作。点击卡片任意区域跳转资产详情。 */
 function FavCard({
   f,
   onOpen,
@@ -202,15 +227,19 @@ function FavCard({
 }) {
   const dead = isDead(f);
   return (
-    <div className={`fav-card${dead ? " fav-card-dead" : ""}`}>
+    <div
+      className={`fav-card${dead ? " fav-card-dead" : ""}`}
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => e.key === "Enter" && onOpen()}
+    >
       <div className={`fav-type-icon t-${f.asset_type.toLowerCase()}`}>
         {TYPE_ICON[f.asset_type]}
       </div>
       <div className="fav-main">
         <div className="fav-title">
-          <span className="fav-name" onClick={onOpen}>
-            {f.name}
-          </span>
+          <span className="fav-name">{f.name}</span>
           <Tag color={ASSET_TYPE_COLOR[f.asset_type]}>
             {ASSET_TYPE_LABEL[f.asset_type]}
           </Tag>
@@ -228,10 +257,25 @@ function FavCard({
         {f.description && <div className="fav-desc">{f.description}</div>}
       </div>
       <div className="fav-actions">
-        <Button type="link" icon={<HeartFilled />} onClick={onOpen}>
+        <Button
+          type="link"
+          icon={<HeartFilled />}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen();
+          }}
+        >
           查看
         </Button>
-        <Button type="link" danger icon={<DeleteOutlined />} onClick={onRemove}>
+        <Button
+          type="link"
+          danger
+          icon={<DeleteOutlined />}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+        >
           移除
         </Button>
       </div>
@@ -326,6 +370,17 @@ export function Favorites() {
     });
   }, [items, tab, search, showDead]);
 
+  // 统计卡点击：切换到对应类型 Tab；「已失效」只看失效；「收藏总数」回到全部
+  function handleStatSelect(key: FavoriteAssetType | "ALL" | "DEAD") {
+    if (key === "DEAD") {
+      setShowDead(true);
+      setTab("ALL");
+    } else {
+      setTab(key);
+      setShowDead(false);
+    }
+  }
+
   return (
     <div>
       {/* 页头：与「校准仪表」设计系统统一（kicker + 标题 + 副标题），右侧弱化手输框 */}
@@ -353,7 +408,14 @@ export function Favorites() {
         </div>
       </div>
 
-      <FavStatsBar total={stats.total} byType={stats.byType} dead={stats.dead} />
+      <FavStatsBar
+        total={stats.total}
+        byType={stats.byType}
+        dead={stats.dead}
+        active={tab}
+        showDead={showDead}
+        onSelect={handleStatSelect}
+      />
 
       <FavToolbar
         tab={tab}

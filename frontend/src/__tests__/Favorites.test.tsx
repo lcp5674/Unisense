@@ -59,6 +59,23 @@ function nameEl(name: string) {
   return el.closest(".fav-name") ?? el;
 }
 
+/** 定位概览统计卡（.fav-stat-card），按卡内标签文本匹配。 */
+function statCard(label: string) {
+  const el = screen
+    .getAllByText(label)
+    .map((node) => node.closest(".fav-stat-card"))
+    .find(Boolean);
+  if (!el) throw new Error(`找不到统计卡: ${label}`);
+  return el;
+}
+
+/** 定位卡片内「移除」按钮（卡片整体也是 role=button，需精确定位到真实按钮）。 */
+function removeBtn() {
+  const btn = screen.getByText("移除").closest("button");
+  if (!btn) throw new Error("找不到移除按钮");
+  return btn;
+}
+
 function fav(partial: Partial<FavoriteDetail> & { asset_id: string }): FavoriteDetail {
   return {
     asset_type: "METRIC",
@@ -190,7 +207,7 @@ describe("我的收藏 - 操作", () => {
     renderPage();
     await screen.findByText("机密");
 
-    fireEvent.click(screen.getByRole("button", { name: /移除/ }));
+    fireEvent.click(removeBtn());
     await waitFor(() => expect(mockedRemove).toHaveBeenCalledWith("TABLE", "dw.sales"));
   });
 
@@ -219,5 +236,72 @@ describe("我的收藏 - 操作", () => {
     const goBtn = await screen.findByRole("button", { name: /去指标目录挑选收藏/ });
     fireEvent.click(goBtn);
     await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/catalog"));
+  });
+});
+
+describe("我的收藏 - 统计卡点击切换 Tab", () => {
+  it("点击「指标」统计卡切换到指标类型", async () => {
+    mockedList.mockResolvedValue(MOCK_ITEMS);
+    renderPage();
+    await screen.findByText("成交总额");
+
+    fireEvent.click(statCard("指标"));
+    // 只剩指标（GMV / GHOST），数据表与术语隐藏
+    expect(screen.getByText("成交总额")).toBeInTheDocument();
+    expect(screen.getAllByText("GHOST").length).toBeGreaterThan(0);
+    expect(screen.queryByText("客单价")).not.toBeInTheDocument();
+  });
+
+  it("点击「数据表」统计卡切换到数据表类型", async () => {
+    mockedList.mockResolvedValue(MOCK_ITEMS);
+    renderPage();
+    await screen.findByText("成交总额");
+
+    fireEvent.click(statCard("数据表"));
+    expect(screen.getAllByText("dw.sales").length).toBeGreaterThan(0);
+    expect(screen.queryByText("成交总额")).not.toBeInTheDocument();
+  });
+
+  it("点击「已失效」统计卡只看失效项", async () => {
+    mockedList.mockResolvedValue(MOCK_ITEMS);
+    renderPage();
+    await screen.findByText("成交总额");
+
+    fireEvent.click(statCard("已失效"));
+    expect(screen.getAllByText("GHOST").length).toBeGreaterThan(0);
+    expect(screen.queryByText("成交总额")).not.toBeInTheDocument();
+  });
+
+  it("点击「收藏总数」统计卡回到全部", async () => {
+    mockedList.mockResolvedValue(MOCK_ITEMS);
+    renderPage();
+    await screen.findByText("成交总额");
+
+    fireEvent.click(statCard("数据表"));
+    fireEvent.click(statCard("收藏总数"));
+    expect(screen.getByText("成交总额")).toBeInTheDocument();
+    expect(screen.getByText("客单价")).toBeInTheDocument();
+  });
+});
+
+describe("我的收藏 - 卡片主体点击", () => {
+  it("点击收藏卡片主体（非名称）跳转资产详情", async () => {
+    mockedList.mockResolvedValue([MOCK_ITEMS[0]]);
+    renderPage();
+    await screen.findByText("成交总额");
+
+    fireEvent.click(screen.getByText("成交总额").closest(".fav-card")!);
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/detail/GMV"));
+  });
+
+  it("点击卡片内「移除」不触发跳转", async () => {
+    mockedList.mockResolvedValue([MOCK_ITEMS[1]]);
+    renderPage();
+    await screen.findByText("机密");
+
+    fireEvent.click(removeBtn());
+    await waitFor(() => expect(mockedRemove).toHaveBeenCalledWith("TABLE", "dw.sales"));
+    // 未触发卡片整体跳转：仍停留在收藏页（标题在），而非 /detail
+    expect(screen.getByText("我的收藏")).toBeInTheDocument();
   });
 });
