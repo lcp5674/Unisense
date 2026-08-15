@@ -163,6 +163,62 @@ async def _notify_loser_owner(
         logger.warning("loser_owner_notify_failed: %s", exc)
 
 
+async def _notify_reopen_owners(
+    db: AsyncSession,
+    conflict: Conflict,
+    trace_id: str,
+) -> None:
+    """重新打开冲突后定向通知双方指标 Owner（best-effort，不阻断 reopen）。
+
+    与 `_notify_rename_owner`/`_notify_loser_owner` 对称：IN_APP 定向通知，
+    不依赖订阅偏好（owner 未订阅也能收到）；失败仅告警，不阻断主流程。
+
+    为什么需要定向：`conflict_reopened` 事件虽已纳入 EventBus 白名单并走订阅扇出，
+    但冲突重开是强相关场景——双方 Owner 必须知道要重新裁决，不应依赖其手动订阅。
+    """
+    try:
+        from app.services.notify.service import NotifyService
+
+        codes = conflict.metric_codes or {}
+        for code in (codes.get("candidate"), codes.get("existing")):
+            if not code:
+                continue
+            row = (
+                await db.execute(select(Metric).where(Metric.metric_code == code))
+            ).scalar_one_or_none()
+            if row is None or row.owner_id is None:
+                logger.warning(
+                    "reopen_owner_missing metric_code=%s conflict_id=%s",
+                    code,
+                    conflict.conflict_id,
+                )
+                continue
+            await NotifyService(db).notify_user(
+                user_id=int(row.owner_id),
+                event_type="conflict_reopened",
+                title="口径冲突已重开",
+                body=(
+                    f"冲突 {conflict.conflict_id} 已重新打开，涉及指标 {code}，"
+                    "请在冲突仲裁中重新裁决。"
+                ),
+                payload={
+                    "metric_code": code,
+                    "conflict_id": conflict.conflict_id,
+                    "source": "conflict",
+                },
+                channel="IN_APP",
+            )
+            logger.info(
+                "reopen_owner_notified metric_code=%s conflict_id=%s owner_id=%s trace_id=%s",
+                code,
+                conflict.conflict_id,
+                row.owner_id,
+                trace_id,
+            )
+    except Exception as exc:  # noqa: BLE001 - 通知降级，不阻断 reopen
+        logger.warning("reopen_owner_notify_failed: %s", exc)
+
+
 async def _notify_arbitration_owners(
     db: AsyncSession,
     conflict: Conflict,
@@ -467,6 +523,8 @@ async def reopen_conflict(
         trace_id=trace_id,
     )
     await db.commit()
+    # 冲突重开强相关：定向通知双方指标 Owner（IN_APP，不依赖订阅偏好）
+    await _notify_reopen_owners(db, conflict, trace_id)
     return ok(data=ConflictResponse.from_model(conflict).model_dump(), trace_id=trace_id)
 
 

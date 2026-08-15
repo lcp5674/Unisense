@@ -195,3 +195,51 @@ class TestNotifyLoserOwner:
             ns.return_value.notify_user = AsyncMock()
             await conflict_api._notify_loser_owner(FakeDb(None), "ghost", "exist", "CF-TEST", "tid")
         ns.return_value.notify_user.assert_not_awaited()
+
+
+class TestNotifyReopenOwners:
+    """冲突重开定向通知：双方指标 Owner 各收一条 conflict_reopened（IN_APP 不依赖订阅）。"""
+
+    async def test_both_owners_notified(self) -> None:
+        """candidate/existing 双方 owner 各收一条 conflict_reopened。"""
+        row = _metric("cand", "PUBLISHED", owner_id=7)
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock()
+            conflict = _conflict("cand", "exist")
+            await conflict_api._notify_reopen_owners(FakeDb(row), conflict, "tid")
+        assert ns.return_value.notify_user.await_count == 2
+        for call in ns.return_value.notify_user.await_args_list:
+            kwargs = call.kwargs
+            assert kwargs["event_type"] == "conflict_reopened"
+            assert kwargs["user_id"] == 7
+            assert kwargs["channel"] == "IN_APP"
+            assert kwargs["payload"]["conflict_id"] == "CF-TEST"
+            assert kwargs["payload"]["metric_code"] in ("cand", "exist")
+
+    async def test_owner_missing_skips_that_side(self) -> None:
+        """指标无 owner → 该侧不通知（FakeDb 恒返回同一 row → 两侧都跳过）。"""
+        row = _metric("cand", "PUBLISHED", owner_id=None)
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock()
+            conflict = _conflict("cand", "exist")
+            await conflict_api._notify_reopen_owners(FakeDb(row), conflict, "tid")
+        ns.return_value.notify_user.assert_not_awaited()
+
+    async def test_metric_missing_not_notified(self) -> None:
+        """指标不存在 → 不通知。"""
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock()
+            conflict = _conflict("cand", "exist")
+            await conflict_api._notify_reopen_owners(FakeDb(None), conflict, "tid")
+        ns.return_value.notify_user.assert_not_awaited()
+
+    async def test_empty_metric_codes_not_notified(self) -> None:
+        """metric_codes 为空 → 无 code 可查，不通知。"""
+        conflict = _conflict("cand", "exist")
+        conflict.metric_codes = None
+        with patch("app.services.notify.service.NotifyService") as ns:
+            ns.return_value.notify_user = AsyncMock()
+            await conflict_api._notify_reopen_owners(
+                FakeDb(_metric("cand", "PUBLISHED", owner_id=7)), conflict, "tid"
+            )
+        ns.return_value.notify_user.assert_not_awaited()
