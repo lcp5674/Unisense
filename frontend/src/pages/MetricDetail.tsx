@@ -81,6 +81,7 @@ const STATUS_LABEL: Record<string, string> = {
   REVIEW: "审核",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",
+  DATA_SOURCE_DROPPED: "数据源下线",
 };
 
 // 推荐/血缘边类型 → 中文（与 Dashboard 的推荐流展示口径一致）
@@ -318,7 +319,8 @@ export function MetricDetail() {
     if (window.history.length > 1) navigate(-1);
     else navigate("/dashboard");
   }
-  const backLabel = fromTodo ? "← 返回待办中心" : fromDashboard ? "← 返回仪表盘" : "← 返回";
+  // 与其他页面布局一致：仅保留 ArrowLeftOutlined 图标作为唯一箭头，文字不再带 ← 前缀（避免双箭头）。
+  const backLabel = fromTodo ? "返回待办中心" : fromDashboard ? "返回仪表盘" : "返回";
 
   async function load() {
     if (!code) return;
