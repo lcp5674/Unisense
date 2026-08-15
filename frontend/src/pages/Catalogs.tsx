@@ -102,6 +102,11 @@ export function Catalogs() {
           name: String(c.name || c.column || ""),
           type: c.type ? String(c.type) : c.data_type ? String(c.data_type) : undefined,
           comment: c.comment ? String(c.comment) : undefined,
+          // 后端已把 column_descriptions 合并进 schema_def.columns[]（推断/人工编辑的描述）
+          description: c.description ? String(c.description) : undefined,
+          description_source: c.description_source
+            ? (c.description_source as SchemaColumn["description_source"])
+            : undefined,
           nullable: c.nullable != null ? Boolean(c.nullable) : undefined,
           default: c.default != null ? String(c.default) : undefined,
         } as SchemaColumn;
