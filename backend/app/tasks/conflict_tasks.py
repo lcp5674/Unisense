@@ -61,7 +61,7 @@ async def conflict_escalation_task(ctx: dict[str, Any]) -> dict[str, Any]:
             bus = get_eventbus()
             for row in rows:
                 await bus.publish(
-                    "conflict.escalated",
+                    "conflict_escalated",
                     {
                         "conflict_id": row.id,
                         "conflict_type": getattr(row, "conflict_type", "unknown"),
