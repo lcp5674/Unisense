@@ -1066,13 +1066,34 @@ export function DataSources() {
       ),
     },
     {
-      title: "资产（表 / PII / 漂移）",
+      title: "覆盖度",
+      key: "coverage",
+      width: 100,
+      render: (_: unknown, s: DataSource) => {
+        const c = Math.round((s.coverage ?? 0) * 100);
+        return (
+          <Progress
+            percent={c}
+            size="small"
+            strokeColor={c > 0 ? undefined : "#d9d9d9"}
+            format={(p) => `${p}%`}
+          />
+        );
+      },
+    },
+    {
+      title: "资产 / 采集",
       key: "assets",
-      width: 150,
+      width: 180,
       render: (_: unknown, s: DataSource) => (
-        <span className="mono" style={{ fontSize: 12 }}>
-          {s.table_count ?? 0} 表 · PII {s.pii_count ?? 0} · 漂移 {s.drift_count ?? 0}
-        </span>
+        <div style={{ fontSize: 12 }}>
+          <div className="mono">
+            {s.table_count ?? 0} 表 · PII {s.pii_count ?? 0} · 漂移 {s.drift_count ?? 0}
+          </div>
+          <div className="mono" style={{ color: (s.failed_count ?? 0) > 0 ? "var(--danger)" : "rgba(0,0,0,0.45)" }}>
+            累计扫描 {s.scanned_count ?? 0} · 失败 {s.failed_count ?? 0}
+          </div>
+        </div>
       ),
     },
     {
@@ -1081,6 +1102,13 @@ export function DataSources() {
       key: "last_collected",
       width: 130,
       render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span className="muted">—</span>),
+    },
+    {
+      title: "采集模式",
+      dataIndex: "collection_mode",
+      key: "mode",
+      width: 96,
+      render: (v: string) => <Tag color={v === "FULL" ? "blue" : "purple"}>{COLLECTION_MODE_LABEL[v] ?? v}</Tag>,
     },
     { title: "调度", dataIndex: "schedule_cron", key: "schedule", width: 110, render: (v: string | null) => (v ? <span className="mono">{v}</span> : <span className="muted">—</span>) },
     {

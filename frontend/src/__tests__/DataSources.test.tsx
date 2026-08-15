@@ -127,6 +127,11 @@ const source: DataSource = {
   created_by: 1,
   created_at: "2026-08-01T00:00:00",
   updated_at: "2026-08-01T00:00:00",
+  table_count: 5,
+  pii_count: 2,
+  drift_count: 0,
+  scanned_count: 10,
+  failed_count: 0,
 };
 
 async function openCreateModal() {
@@ -642,6 +647,18 @@ describe("DataSources", () => {
     expect(screen.getByText("5 / 1")).toBeTruthy(); // 表 / 视图
     expect(screen.getByText("42")).toBeTruthy(); // 字段总数
     expect(mockedOverview).toHaveBeenCalledWith("mysql_finance");
+  });
+
+  it("列表直接展示覆盖度/采集模式/累计扫描/失败指标（无需点开详情）", async () => {
+    renderSources();
+    await screen.findByText("财务库");
+    // 覆盖度（Progress 百分比）
+    expect(screen.getByText("50%")).toBeTruthy();
+    // 采集模式 Tag
+    expect(screen.getByText("全量采集")).toBeTruthy();
+    // 资产/采集信号两行
+    expect(screen.getByText("5 表 · PII 2 · 漂移 0")).toBeTruthy();
+    expect(screen.getByText("累计扫描 10 · 失败 0")).toBeTruthy();
   });
 
   it("多选行后「批量探活」调用批量接口并提示成功", async () => {

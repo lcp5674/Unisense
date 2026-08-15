@@ -1053,9 +1053,9 @@ class CollectorRepository:
     async def list_sources_signals(
         self, source_ids: list[str]
     ) -> dict[str, dict[str, Any]]:
-        """批量回填列表信号：表/视图数、PII 数、最近采集、漂移数。
+        """批量回填列表信号：表/视图数、PII 数、最近采集、漂移数、累计扫描/失败。
 
-        一次 IN 查询聚合避免 N+1；无目录记录的源保持 0/None 默认。
+        一次 IN 查询聚合避免 N+1；无目录/水位记录的源保持 0/None 默认。
         """
         if not source_ids:
             return {}
@@ -1064,6 +1064,8 @@ class CollectorRepository:
             "pii_count": 0,
             "last_collected_at": None,
             "drift_count": 0,
+            "scanned_count": 0,
+            "failed_count": 0,
         }
         signals = {sid: dict(default) for sid in source_ids}
         rows = await self._db.execute(
@@ -1082,11 +1084,16 @@ class CollectorRepository:
             signals[source_id]["pii_count"] = int(pii_count or 0)
         wm_rows = await self._db.execute(
             select(
-                CollectionWatermark.source_id, CollectionWatermark.last_collected_at
+                CollectionWatermark.source_id,
+                CollectionWatermark.last_collected_at,
+                CollectionWatermark.scanned_count,
+                CollectionWatermark.failed_count,
             ).where(CollectionWatermark.source_id.in_(source_ids))
         )
-        for source_id, last in wm_rows.all():
+        for source_id, last, scanned, failed in wm_rows.all():
             signals[source_id]["last_collected_at"] = last
+            signals[source_id]["scanned_count"] = int(scanned or 0)
+            signals[source_id]["failed_count"] = int(failed or 0)
         drift_rows = await self._db.execute(
             select(SchemaDriftLog.source_id, func.count(SchemaDriftLog.id))
             .where(SchemaDriftLog.source_id.in_(source_ids))

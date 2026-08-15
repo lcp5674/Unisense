@@ -1319,6 +1319,8 @@ export interface DataSource {
   pii_count?: number | null;
   last_collected_at?: string | null;
   drift_count?: number | null;
+  scanned_count?: number | null;
+  failed_count?: number | null;
 }
 
 export interface DataSourceListResponse {

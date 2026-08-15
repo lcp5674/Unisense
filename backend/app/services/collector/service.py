@@ -425,6 +425,8 @@ class CollectorService(BaseService):
             last = sig.get("last_collected_at")
             item.last_collected_at = last.isoformat() if last else None
             item.drift_count = sig.get("drift_count")
+            item.scanned_count = sig.get("scanned_count")
+            item.failed_count = sig.get("failed_count")
         return items, total
 
     async def get_source(self, source_id: str) -> DataSourceResponse:

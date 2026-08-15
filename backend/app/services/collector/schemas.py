@@ -186,6 +186,8 @@ class DataSourceResponse(BaseModel):
     pii_count: int | None = None
     last_collected_at: Any = None
     drift_count: int | None = None
+    scanned_count: int | None = None
+    failed_count: int | None = None
 
 
 class DataSourceListResponse(BaseModel):
