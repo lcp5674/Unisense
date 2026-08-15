@@ -809,9 +809,14 @@ class AssetMapRepository:
         todo = await self._owner_todo(owner_id)
         catalogs = await self._owner_catalog_items(owner_id)
         snapshot_covered = await self._owner_snapshot_covered(owner_id)
+        # 责任人档案：姓名/角色/所属域（真实姓名优先，回退 username）
+        owner_profile = await self._owner_profile(owner_id)
 
         return {
             "owner_id": owner_id,
+            "owner_name": owner_profile[0],
+            "role": owner_profile[1],
+            "domain": owner_profile[2],
             "metrics": {
                 "total": metric_stats.total or 0,
                 "published": int(metric_stats.published or 0),
@@ -825,6 +830,21 @@ class AssetMapRepository:
             },
             "catalogs": {"total": len(catalogs), "items": catalogs},
         }
+
+    async def _owner_profile(self, owner_id: int) -> tuple[str | None, str | None, str | None]:
+        """责任人档案：``(display_name|username, role, domain)``；
+        用户不存在返回 ``(None, None, None)``。"""
+        row = (
+            await self._session.execute(
+                select(User.display_name, User.username, User.role, User.domain).where(
+                    User.id == owner_id
+                )
+            )
+        ).first()
+        if row is None:
+            return None, None, None
+        name = row[0] or row[1] or None
+        return name, row[2], row[3]
 
     async def _owner_metric_stats(self, owner_id: int) -> Any:
         """责任人指标核心统计（总量/发布/草稿/PII）。"""

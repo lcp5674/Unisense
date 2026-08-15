@@ -625,6 +625,8 @@ class TestAggregations:
         r_metric_codes.scalars.return_value.all.return_value = ["m1", "m2", "m3", "m4"]
         r_snap_codes = MagicMock()
         r_snap_codes.scalars.return_value.all.return_value = ["m1"]
+        r_profile = MagicMock()
+        r_profile.first.return_value = ("Bob", "bob", "metric_owner", "sales")
         s.execute = AsyncMock(
             side_effect=[
                 r_stats,
@@ -638,12 +640,16 @@ class TestAggregations:
                 r_usr,
                 r_metric_codes,
                 r_snap_codes,
+                r_profile,
             ]
         )
 
         out = await repo.owner_aggregation(owner_id=9)
 
         assert out["owner_id"] == 9
+        assert out["owner_name"] == "Bob"
+        assert out["role"] == "metric_owner"
+        assert out["domain"] == "sales"
         assert out["metrics"]["total"] == 4
         assert out["metrics"]["published"] == 2
         assert out["metrics"]["by_domain"] == {"sales": 4}
