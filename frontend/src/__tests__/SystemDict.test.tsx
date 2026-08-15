@@ -183,23 +183,27 @@ describe("SystemDict 页面", () => {
 
   it("静默刷新 TTL 防抖：TTL 内重复打开不重复请求，超 TTL 才刷新", async () => {
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000_000_000);
-    renderDict();
-    await screen.findByText("日");
-    // 首次打开（距上次刷新 0 → 远超 TTL）→ 静默刷新 1 次（初始加载 1 + 刷新 1 = 2）
-    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
-    await waitFor(() => expect(mockedItems).toHaveBeenCalledTimes(2));
-    // 关闭弹窗
-    fireEvent.click(document.querySelector(".ant-modal-close") as HTMLElement);
-    // TTL 内（+20s < 30s）再次打开 → 直接用缓存，不额外请求
-    nowSpy.mockReturnValue(1_000_000_000 + 20_000);
-    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
-    expect(mockedItems).toHaveBeenCalledTimes(2);
-    // 关闭后再过（累计 > TTL）→ 重新静默刷新
-    fireEvent.click(document.querySelector(".ant-modal-close") as HTMLElement);
-    nowSpy.mockReturnValue(1_000_000_000 + QUIET_REFRESH_TTL_MS + 1_000);
-    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
-    await waitFor(() => expect(mockedItems).toHaveBeenCalledTimes(3));
-    nowSpy.mockRestore();
+    try {
+      renderDict();
+      await screen.findByText("日");
+      // 首次打开（距上次刷新 0 → 远超 TTL）→ 静默刷新 1 次（初始加载 1 + 刷新 1 = 2）
+      fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+      await waitFor(() => expect(mockedItems).toHaveBeenCalledTimes(2));
+      // 关闭弹窗
+      fireEvent.click(document.querySelector(".ant-modal-close") as HTMLElement);
+      // TTL 内（+20s < 30s）再次打开 → 直接用缓存，不额外请求
+      nowSpy.mockReturnValue(1_000_000_000 + 20_000);
+      fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+      expect(mockedItems).toHaveBeenCalledTimes(2);
+      // 关闭后再过（累计 > TTL）→ 重新静默刷新
+      fireEvent.click(document.querySelector(".ant-modal-close") as HTMLElement);
+      nowSpy.mockReturnValue(1_000_000_000 + QUIET_REFRESH_TTL_MS + 1_000);
+      fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+      await waitFor(() => expect(mockedItems).toHaveBeenCalledTimes(3));
+    } finally {
+      // 断言中途失败也确保 restore，避免 Date.now spy 泄漏污染后续用例
+      nowSpy.mockRestore();
+    }
   });
 
   it("打开新增弹窗产生被过滤的 act 警告：setup 过滤机制正向验证", async () => {
