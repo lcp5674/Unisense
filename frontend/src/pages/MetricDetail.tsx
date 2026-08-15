@@ -706,7 +706,7 @@ export function MetricDetail() {
 
   const actions = (
     <Space wrap style={{ marginBottom: 16 }}>
-      {(metric.status === "DRAFT" || metric.status === "EXPERIMENTAL") && (
+      {(metric.status === "DRAFT" || metric.status === "EXPERIMENTAL" || metric.status === "DEPRECATED") && (
         <Button
           icon={<SendOutlined />}
           loading={busy}
@@ -716,7 +716,7 @@ export function MetricDetail() {
             setSubmitOpen(true);
           }}
         >
-          提交评审
+          {metric.status === "DEPRECATED" ? "重新提交评审" : "提交评审"}
         </Button>
       )}
       {metric.status === "REVIEW" && isAdmin && (

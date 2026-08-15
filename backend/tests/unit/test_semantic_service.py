@@ -2645,3 +2645,96 @@ async def test_infer_metric_description_force_regenerates_existing_llm():
     assert kwargs["description"] == "新描述"
     assert kwargs["description_source"] == "llm"
     assert result is updated
+
+
+# ---- 废弃指标重新发起评审（DEPRECATED → REVIEW 闭环）----
+
+
+async def test_deprecated_metric_can_resubmit_for_review():
+    """废弃指标可重新提交评审（DEPRECATED → REVIEW），并清除废弃标记。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="DEPRECATED",
+            owner_id=1,
+            successor_code="sales_gmv_v2",
+            deprecated_at="2026-08-01T00:00:00+00:00",
+        )
+    )
+    updated = make_metric(status="REVIEW")
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+
+    result = await svc.submit_metric(
+        "sales_gmv_daily",
+        MetricSubmitRequest(change_reason="废弃后重新评审"),
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+    )
+
+    assert result.status == "REVIEW"
+    kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert kwargs["status"] == "REVIEW"
+    assert kwargs["successor_code"] is None  # 重评审清除废弃标记
+    assert kwargs["deprecated_at"] is None
+    assert kwargs["sunset_until"] is None
+
+
+async def test_published_metric_resubmit_still_blocked():
+    """PUBLISHED 状态提交评审仍被拒（状态机约束不放松）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", owner_id=1))
+    with pytest.raises(ConflictError) as exc:
+        await svc.submit_metric(
+            "sales_gmv_daily",
+            MetricSubmitRequest(change_reason="不应允许"),
+            actor_id=1,
+            role="metric_owner",
+            user_domain="sales",
+        )
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+# ---- 发起评审通知指定评审人/团队 ----
+
+
+async def test_submit_notifies_specific_reviewer_when_assigned():
+    """指定评审用户（reviewer_type=user）时，仅通知该评审人（非整个域）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1, domain="sales"))
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="REVIEW"))
+
+    await svc.submit_metric(
+        "sales_gmv_daily",
+        MetricSubmitRequest(change_reason="提交审核，指定评审人", reviewer_type="user", reviewer_id=99),
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+    )
+
+    call = svc._notify_metric_stakeholders.call_args
+    assert call.args[0] == "metric.submitted"
+    # 指定评审人时 payload 携带 reviewer_id + reviewer_type，通知目标按指定人
+    assert call.kwargs["payload"]["reviewer_id"] == 99
+    assert call.kwargs["payload"]["reviewer_type"] == "user"
+
+
+async def test_deprecated_resubmit_publishes_resubmitted_event():
+    """废弃指标重评审时发布 metric.resubmitted 事件（区别于首次提交）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="DEPRECATED", owner_id=1)
+    )
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="REVIEW"))
+    svc._publish_event = AsyncMock()
+
+    await svc.submit_metric(
+        "sales_gmv_daily",
+        MetricSubmitRequest(change_reason="重新评审"),
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+    )
+
+    published = svc._publish_event.call_args.args[0]
+    assert published == "metric.resubmitted"

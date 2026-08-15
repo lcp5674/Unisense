@@ -16,6 +16,7 @@
     EXPERIMENTAL      → PUBLISHED           (rollback)
     DATA_SOURCE_DROPPED → PUBLISHED         (source_recovered)
     DATA_SOURCE_DROPPED → DEPRECATED        (confirm_deprecated)
+    DEPRECATED        → REVIEW              (resubmit)  # 状态闭环：废弃后可重评审
 """
 
 from __future__ import annotations
@@ -61,6 +62,11 @@ class MetricStateMachine:
         MetricState.PUBLISHED: {
             MetricState.DEPRECATED: "deprecate",
         },
+        MetricState.DEPRECATED: {
+            # TD §13 状态闭环：废弃指标可重新发起评审（DEPRECATED → REVIEW），
+            # 审核通过后经 REVIEW → PUBLISHED 恢复发布（重评审）。
+            MetricState.REVIEW: "resubmit",
+        },
         MetricState.EXPERIMENTAL: {
             MetricState.PUBLISHED: "promote",
         },
@@ -77,7 +83,9 @@ class MetricStateMachine:
         ("DRAFT", "EXPERIMENTAL"): "须先 submit→REVIEW，再 approve 灰度模式",
         ("PUBLISHED", "DRAFT"): "已发布指标不可回退到 DRAFT",
         ("PUBLISHED", "REVIEW"): "已发布指标不可回退到 REVIEW",
-        ("DEPRECATED", "PUBLISHED"): "已废弃指标不可恢复为 PUBLISHED",
+        ("DEPRECATED", "PUBLISHED"): (
+            "已废弃指标不可直接恢复为 PUBLISHED，须先重新发起评审（DEPRECATED→REVIEW→PUBLISHED）"
+        ),
         ("DEPRECATED", "DRAFT"): "已废弃指标不可回退到 DRAFT",
         ("REVIEW", "DEPRECATED"): "仅 PUBLISHED 状态可废弃，须先 approve",
     }

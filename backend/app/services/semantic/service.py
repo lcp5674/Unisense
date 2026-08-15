@@ -1159,7 +1159,9 @@ class MetricService(BaseService):
                 ctx={"metric_code": metric_code, "actor_id": actor_id},
             )
 
-        # 状态机校验：DRAFT→REVIEW
+        # 状态机校验：DRAFT→REVIEW；DEPRECATED→REVIEW（废弃指标重评审闭环，TD §13）。
+        # 重评审时标记 is_resubmit，用于事件类型区分（metric.resubmitted）与废弃标记清除。
+        is_resubmit = metric.status == "DEPRECATED"
         invalid = MetricStateMachine.validate_transition(metric.status, "REVIEW")
         if invalid is not None:
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
@@ -1193,13 +1195,21 @@ class MetricService(BaseService):
             metric.row_version,
             status="REVIEW",
             submitted_by=actor_id,
+            # 重评审（DEPRECATED→REVIEW）：清除废弃标记，恢复为普通待审指标；
+            # 审核通过后再走 REVIEW→PUBLISHED 恢复发布（状态闭环）。
+            **(
+                {"successor_code": None, "deprecated_at": None, "sunset_until": None}
+                if is_resubmit
+                else {}
+            ),
             **reviewer_updates,
         )
         await self._cache.invalidate(metric_code)
 
-        # 发布 metric.submitted 事件（对齐 FR-003：通知 domain_admin 待审）
+        # 发布提交事件：首次提交用 metric.submitted；废弃重评审用 metric.resubmitted（TD §13 闭环）
+        submit_event = "metric.resubmitted" if is_resubmit else "metric.submitted"
         await self._publish_event(
-            "metric.submitted",
+            submit_event,
             {
                 "metric_code": metric_code,
                 "domain": metric.domain,
@@ -1211,15 +1221,16 @@ class MetricService(BaseService):
             },
             actor_id=str(actor_id),
         )
-        # 审批流定向闭环：定向通知该域审核人「待审核」（独立 session，不依赖订阅）
-        await self._notify_metric_stakeholders(
-            "metric.submitted",
-            "指标待审核",
-            metric_code=metric_code,
-            domain=metric.domain,
-            submitter_id=actor_id,
-            to_reviewers=True,
-            payload={
+        # 审批流定向闭环：定向通知「待审核」。优先通知被指定的评审人/域评审组；
+        # 未指派时通知该域审核人（TD §13：发起评审联通通知中心）。
+        assigned_reviewer = reviewer_updates["reviewer_id"]
+        notify_targets = {
+            "metric_code": metric_code,
+            "domain": metric.domain,
+            "submitter_id": actor_id,
+            "to_reviewers": not assigned_reviewer,  # 已指定评审人时只通知本人，不广播全域
+            "assigned_reviewer_id": assigned_reviewer,
+            "payload": {
                 "metric_code": metric_code,
                 "domain": metric.domain,
                 "change_reason": request.change_reason,
@@ -1227,6 +1238,11 @@ class MetricService(BaseService):
                 "reviewer_type": reviewer_updates["reviewer_type"],
                 "reviewer_domain": reviewer_updates["reviewer_domain"],
             },
+        }
+        await self._notify_metric_stakeholders(
+            submit_event,
+            "指标待评审" if assigned_reviewer else "指标待审核",
+            **notify_targets,
         )
 
         logger.info(
@@ -1579,11 +1595,13 @@ class MetricService(BaseService):
         domain: str | None,
         submitter_id: int | None,
         to_reviewers: bool = False,
+        assigned_reviewer_id: int | None = None,
         payload: dict[str, Any] | None = None,
     ) -> None:
         """审批流定向通知（独立 session，不干扰业务事务；best-effort）。
 
         与 conflict.py ``notify_user`` 范式一致：IN_APP 定向送达，不依赖订阅偏好。
+        - ``assigned_reviewer_id`` 非空：仅通知被指定的评审人（TD §13 指定评审闭环）；
         - ``to_reviewers=True``：通知该域下可审核角色（domain_admin/reviewer，active），
           供「指标待审核」场景（TD §5.5 审批流定向闭环）；
         - 否则通知指标提交人（submitted_by），供「已通过/已驳回」场景。
@@ -1593,7 +1611,11 @@ class MetricService(BaseService):
         from app.services.notify.service import NotifyService
 
         targets: list[int] = []
-        if to_reviewers:
+        if assigned_reviewer_id is not None:
+            # 指定评审人优先：仅通知该评审人（不含提交人本人）
+            if submitter_id is None or assigned_reviewer_id != submitter_id:
+                targets = [assigned_reviewer_id]
+        elif to_reviewers:
             from sqlalchemy import select
 
             from app.models.user import User

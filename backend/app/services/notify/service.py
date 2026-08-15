@@ -50,6 +50,7 @@ logger = get_logger(__name__)
 _EVENT_TITLE_CN: dict[str, str] = {
     "metric.created": "指标创建",
     "metric.submitted": "指标待审核",
+    "metric.resubmitted": "指标重评审待审核",
     "metric.approved": "指标已通过",
     "metric.rejected": "指标已驳回",
     "metric.deprecated": "指标废弃",

@@ -94,9 +94,10 @@ class TestGetAllowedTransitions:
         assert MetricState.DEPRECATED in allowed
         assert len(allowed) == 1
 
-    def test_deprecated_allows_nothing(self) -> None:
+    def test_deprecated_allows_review_resubmit(self) -> None:
+        """DEPRECATED 允许重评审闭环跃迁（DEPRECATED→REVIEW，TD §13 resubmit）。"""
         allowed = MetricStateMachine.get_allowed_transitions("DEPRECATED")
-        assert len(allowed) == 0
+        assert allowed == [MetricState.REVIEW]
 
     def test_experimental_allows_published(self) -> None:
         allowed = MetricStateMachine.get_allowed_transitions("EXPERIMENTAL")

@@ -184,6 +184,7 @@ def _validate_config() -> None:
 _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "metric.created",
     "metric.submitted",
+    "metric.resubmitted",
     "metric.approved",
     "metric.rejected",
     "metric.deprecated",

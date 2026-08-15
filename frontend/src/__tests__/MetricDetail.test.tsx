@@ -58,6 +58,7 @@ import {
   fetchRelatedMetrics,
   updateMetric,
   suggestRenameName,
+  submitReview,
   UnisenseApiError,
 } from "../api";
 const mockedUpdateMetric = vi.mocked(updateMetric);
@@ -71,6 +72,7 @@ const mockedHealth = vi.mocked(getMetricHealth);
 const mockedUsers = vi.mocked(listUsers);
 const mockedSubs = vi.mocked(listSubscriptions);
 const mockedRelated = vi.mocked(fetchRelatedMetrics);
+const mockedSubmitReview = vi.mocked(submitReview);
 
 const metric: MetricResponse = {
   id: 1,
@@ -372,5 +374,32 @@ describe("MetricDetail", () => {
     const jump = screen.getByRole("button", { name: /sales_e2e_conflicta_day/ });
     fireEvent.click(jump);
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalledWith("sales_e2e_conflicta_day"));
+  });
+
+  it("废弃指标显示「重新提交评审」，提交后走重评审闭环（DEPRECATED→REVIEW，TD §13）", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DEPRECATED",
+      successor_code: "sales_gmv_sum_w",
+      deprecated_at: "2026-08-10T00:00:00",
+      sunset_until: "2026-08-20T00:00:00",
+    } as MetricResponse);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    // DEPRECATED 状态下显示「重新提交评审」按钮（而非「提交评审」）
+    const btn = await screen.findByRole("button", { name: /重新提交评审/ });
+    fireEvent.click(btn);
+    // 提交评审弹窗打开
+    expect(
+      screen.getByText("提交后将进入评审状态（DRAFT → REVIEW），由指定评审人通过或打回。"),
+    ).toBeInTheDocument();
+    // 提交 → submitReview 以重评审语义调用（未指派 → reviewer_type null）
+    fireEvent.click(screen.getByRole("button", { name: "提交评审" }));
+    await waitFor(() =>
+      expect(mockedSubmitReview).toHaveBeenCalledWith("sales_gmv_sum_d", "提交评审", {
+        reviewer_id: null,
+        reviewer_type: null,
+        reviewer_domain: "sales",
+      }),
+    );
   });
 });
