@@ -580,6 +580,28 @@ class CollectorRepository:
         )
         return res.scalars().all()
 
+    async def get_descriptions_for_catalogs(
+        self, catalog_ids: Sequence[int]
+    ) -> dict[int, list[ColumnDescription]]:
+        """批量按 catalog_id 查询字段描述（列表接口合并用，避免 N+1）。
+
+        Returns:
+            ``{catalog_id: [ColumnDescription, ...]}``；无记录时返回空 dict。
+        """
+        ids = list(catalog_ids)
+        if not ids:
+            return {}
+        res = await self._db.execute(
+            select(ColumnDescription).where(
+                ColumnDescription.catalog_id.in_(ids),
+                ColumnDescription.deleted_at.is_(None),
+            )
+        )
+        out: dict[int, list[ColumnDescription]] = {}
+        for d in res.scalars().all():
+            out.setdefault(d.catalog_id, []).append(d)
+        return out
+
     async def upsert_description(
         self,
         catalog_id: int,

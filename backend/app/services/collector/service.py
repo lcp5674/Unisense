@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -20,7 +20,7 @@ from app.core.logging import get_logger
 from app.core.secrets import SecretManager
 from app.db.redis import get_redis
 from app.models.collector_models import SchemaDriftLog
-from app.models.data_source import DataSource
+from app.models.data_source import ColumnDescription, DataSource
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.events import CatalogEventPublisher
 from app.services.collector.queue import CollectionQueue, create_collection_queue
@@ -978,14 +978,43 @@ class CollectorService(BaseService):
         )
         await self._repo.save_drift_log(drift_log)
 
+    @staticmethod
+    def _merge_descriptions_to_schema(
+        resp: DBCatalogResponse, descriptions: Sequence[ColumnDescription]
+    ) -> None:
+        """将 column_descriptions 合并到 resp.schema_def.columns[] 的 description 字段。
+
+        字段描述存 column_descriptions 表（不回写 schema_json.comment），采集目录
+        字段详情（SchemaTable）靠该合并展示 LLM 推断/人工编辑的描述，与
+        assetmap ``_merge_descriptions`` 语义一致（manual > llm > schema comment）。
+        """
+        desc_map = {d.column_name: d for d in descriptions}
+        schema = resp.schema_def if isinstance(resp.schema_def, dict) else {}
+        columns = schema.get("columns") or schema.get("fields") or []
+        if not isinstance(columns, list):
+            return
+        for col in columns:
+            if not isinstance(col, dict):
+                continue
+            name = col.get("name") or col.get("column")
+            if not name:
+                continue
+            d = desc_map.get(str(name))
+            if d is not None:
+                col["description"] = d.description
+                col["description_source"] = d.source
+
     async def list_catalogs(self, params: DBCatalogListParams) -> DBCatalogListResponse:
         cats, total = await self._repo.list_catalogs(params)
         # 批量补源维度信息（名称 / 删除状态）：join 路径已带瞬态属性，普通路径批量查询
         source_ids = {c.source_id for c in cats}
         meta = await self._repo.get_sources_meta(list(source_ids)) if source_ids else {}
+        # 批量合并字段描述（column_descriptions），供字段详情抽屉展示
+        desc_map = await self._repo.get_descriptions_for_catalogs([c.id for c in cats])
         items: list[DBCatalogResponse] = []
         for c in cats:
             resp = DBCatalogResponse.model_validate(c)
+            self._merge_descriptions_to_schema(resp, desc_map.get(c.id, []))
             src_deleted = getattr(c, "_src_deleted", None)
             if src_deleted is not None:
                 resp.source_deleted = bool(src_deleted)
@@ -1016,6 +1045,10 @@ class CollectorService(BaseService):
         if cat is None:
             raise NotFoundError(f"目录实体不存在: {catalog_id}")
         resp = DBCatalogResponse.model_validate(cat)
+        # 合并字段描述（column_descriptions），字段详情抽屉展示 LLM 推断/人工编辑描述
+        self._merge_descriptions_to_schema(
+            resp, await self._repo.get_descriptions(catalog_id)
+        )
         name, deleted = (await self._repo.get_sources_meta([cat.source_id])).get(
             cat.source_id, (None, True)
         )

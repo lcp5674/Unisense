@@ -2401,6 +2401,7 @@ async def test_service_get_catalog_detail_enriches_source_meta() -> None:
     svc, repo = _svc()
     repo.get_catalog_by_id = AsyncMock(return_value=_FakeCatalog("PII-HIGH"))
     repo.get_sources_meta = AsyncMock(return_value={"src1": ("MySQL 主库", False)})
+    repo.get_descriptions = AsyncMock(return_value=[])
 
     resp = await svc.get_catalog_detail(42)
 
@@ -2409,6 +2410,47 @@ async def test_service_get_catalog_detail_enriches_source_meta() -> None:
     assert resp.source_name == "MySQL 主库"
     assert resp.source_deleted is False
     assert resp.sensitivity_level == "PII-HIGH"
+
+
+async def test_service_get_catalog_detail_merges_column_descriptions() -> None:
+    """字段详情合并 column_descriptions：LLM 推断/人工编辑的描述随 schema_def.columns[] 返回。
+
+    回归：描述存 column_descriptions 表（不回写 schema_json.comment），详情接口必须
+    合并注入 ``description``/``description_source``，否则采集目录字段详情抽屉看不到。
+    """
+    from app.models.data_source import ColumnDescription
+
+    fake = _FakeCatalog("INTERNAL")
+    fake.schema_json = {
+        "columns": [
+            {"name": "id", "type": "bigint", "comment": ""},
+            {"name": "user_name", "type": "varchar", "comment": ""},
+        ]
+    }
+
+    svc, repo = _svc()
+    repo.get_catalog_by_id = AsyncMock(return_value=fake)
+    repo.get_sources_meta = AsyncMock(return_value={"src1": ("MySQL 主库", False)})
+    repo.get_descriptions = AsyncMock(
+        return_value=[
+            ColumnDescription(
+                catalog_id=1,
+                column_name="user_name",
+                description="用户登录名",
+                source="llm",
+            )
+        ]
+    )
+
+    resp = await svc.get_catalog_detail(42)
+
+    cols = resp.schema_def["columns"]
+    by_name = {c["name"]: c for c in cols}
+    # 有 column_descriptions 记录 → 合并描述
+    assert by_name["user_name"]["description"] == "用户登录名"
+    assert by_name["user_name"]["description_source"] == "llm"
+    # 无记录 → 不注入 description（前端回退 comment）
+    assert "description" not in by_name["id"]
 
 
 async def test_dbcatalog_response_serializes_schema_def_not_schema_json() -> None:
