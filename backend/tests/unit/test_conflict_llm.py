@@ -100,6 +100,9 @@ def _make_service(llm: _FakeLlm) -> ConflictService:
     svc = ConflictService(db=MagicMock(), events=MagicMock(), llm=llm)
     svc._repo = MagicMock()
     svc._repo.create = AsyncMock(return_value=MagicMock())
+    # 自我引用过滤/重复去重依赖的仓储方法（候选码未落库 → 保留比对；无重复）
+    svc._repo.resolve_active_metric_id = AsyncMock(return_value=None)
+    svc._repo.count_open_for_pair = AsyncMock(return_value=0)
     return svc
 
 

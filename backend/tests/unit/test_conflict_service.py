@@ -31,12 +31,22 @@ class FakeRepo:
         self.rulings: list[RulingRecord] = []
         self._seq = 0
         self.open_by_metric: dict[str, int] = {}
+        # code -> 活动指标行 id（默认空 = 候选码尚未落库，属「新提交」形态）
+        self.metric_ids: dict[str, int] = {}
+        # (candidate, existing) -> 已有未决冲突（重复冲突去重）
+        self.open_pairs: set[tuple[str, str]] = set()
 
     async def create(self, conflict: Conflict) -> Conflict:
         self._seq += 1
         conflict.id = self._seq
         self.conflicts.append(conflict)
         return conflict
+
+    async def resolve_active_metric_id(self, metric_code: str) -> int | None:
+        return self.metric_ids.get(metric_code)
+
+    async def count_open_for_pair(self, candidate_code: str, existing_code: str) -> int:
+        return 1 if (candidate_code, existing_code) in self.open_pairs else 0
 
     async def get_by_conflict_id(self, conflict_id: str) -> Conflict | None:
         for c in self.conflicts:
@@ -163,6 +173,88 @@ async def test_check_pii_routes_to_governance_not_stored() -> None:
     assert result.blocked is True
     assert len(repo.conflicts) == 0  # PII 不入普通冲突表
     assert any(e["event_type"] == "pii_conflict" for e in events.published)
+
+
+async def test_check_drops_self_reference_by_metric_id() -> None:
+    """候选/现有携带同一 metric_id（同一条指标行）→ 自我引用被剔除，不落库。"""
+    svc, repo, events, _, _ = _svc()
+    repo.metric_ids["gmv_total"] = 7
+    req = ConflictCheckRequest(
+        candidate=MetricInput(
+            metric_code="gmv_total", domain="sales", definition="sum(amount)", metric_id=7
+        ),
+        existing=[
+            MetricInput(
+                metric_code="gmv_total", domain="finance", definition="sum(price)", metric_id=7
+            )
+        ],
+    )
+    result = await svc.check(req.candidate, req.existing)
+    assert len(repo.conflicts) == 0  # 同一行不构成冲突，绝不落库
+    assert result.detections == []
+    assert result.blocked is False
+    assert not any(e["event_type"] == "conflict_open" for e in events.published)
+
+
+async def test_check_drops_self_reference_by_code_resolution() -> None:
+    """候选/现有同码且都解析到同一活动指标行（调用方未传 metric_id）→ 剔除。
+
+    这是真实事故形态：check 时把已存在的候选自身塞进 existing，两码相同、
+    均解析到同一行——必须拦截，否则冲突表会出现永远无法正常裁决的自我冲突。
+    """
+    svc, repo, events, _, _ = _svc()
+    repo.metric_ids["sales_conflicta_day"] = 11
+    req = ConflictCheckRequest(
+        candidate=MetricInput(
+            metric_code="sales_conflicta_day", domain="sales", definition="sum(amount)"
+        ),
+        existing=[
+            MetricInput(
+                metric_code="sales_conflicta_day", domain="sales", definition="sum(price)"
+            ),
+            MetricInput(metric_code="sales_conflictb_day", domain="sales", definition="sum(x)"),
+        ],
+    )
+    result = await svc.check(req.candidate, req.existing)
+    # 自我引用被剔除：检测结果只针对合法对（conflictb_day），绝不含自我引用
+    assert [d.existing_code for d in result.detections] == ["sales_conflictb_day"]
+    assert len(repo.conflicts) == 1
+    assert repo.conflicts[0].metric_codes == {
+        "candidate": "sales_conflicta_day",
+        "existing": "sales_conflictb_day",
+    }
+    # 只为合法对发冲突事件；被剔除的自我引用不产生任何事件
+    opens = [e for e in events.published if e["event_type"] == "conflict_open"]
+    assert len(opens) == 1
+
+
+async def test_check_keeps_legit_same_name_diff_def_when_candidate_new() -> None:
+    """候选码未落库（新提交）时，与同码已存在行构成合法同名不同义 → 照常落库。"""
+    svc, repo, _, _, _ = _svc()
+    # metric_ids 为空 → 候选解析为 None（新提交形态），保留同码条目
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
+        existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
+    )
+    result = await svc.check(req.candidate, req.existing)
+    assert result.blocked is True
+    assert len(repo.conflicts) == 1
+    assert repo.conflicts[0].type == ConflictType.SAME_NAME_DIFF_DEF
+
+
+async def test_check_skips_duplicate_open_conflict_for_same_pair() -> None:
+    """同一（候选, 现有）对已有未决冲突 → 不重复落库，但检测结果仍上报。"""
+    svc, repo, _, _, _ = _svc()
+    repo.open_pairs.add(("gmv_total", "gmv_total"))
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
+        existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
+    )
+    result = await svc.check(req.candidate, req.existing)
+    # 检测照常上报（blocked 语义不变），但不重复创建 OPEN 冲突
+    assert result.blocked is True
+    assert len(result.detections) == 1
+    assert len(repo.conflicts) == 0
 
 
 async def test_arbitrate_transitions_to_ruled_and_records() -> None:

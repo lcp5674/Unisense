@@ -174,6 +174,46 @@ class TestCountOpenForMetric:
         assert total == 0
 
 
+class TestCountOpenForPair:
+    async def test_counts_unresolved_pair(self, repo: ConflictRepository, db: MagicMock) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = 1
+        db.execute.return_value = mock_result
+        total = await repo.count_open_for_pair("sales_a", "sales_b")
+        assert total == 1
+        db.execute.assert_awaited_once()
+
+    async def test_zero_when_no_open_pair(self, repo: ConflictRepository, db: MagicMock) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = 0
+        db.execute.return_value = mock_result
+        total = await repo.count_open_for_pair("sales_a", "sales_b")
+        assert total == 0
+
+
+class TestResolveActiveMetricId:
+    async def test_returns_id_for_active_row(
+        self, repo: ConflictRepository, db: MagicMock
+    ) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = 42
+        db.execute.return_value = mock_result
+        rid = await repo.resolve_active_metric_id("gmv_total")
+        assert rid == 42
+        db.execute.assert_awaited_once()
+
+    async def test_none_for_missing_or_deleted(
+        self, repo: ConflictRepository, db: MagicMock
+    ) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        db.execute.return_value = mock_result
+        assert await repo.resolve_active_metric_id("gmv_total") is None
+
+    async def test_none_for_empty_code(self, repo: ConflictRepository) -> None:
+        assert await repo.resolve_active_metric_id("") is None
+
+
 class TestRulingRecordResponseFromOrm:
     """GET /conflicts/{id}/rulings 500 回归：ORM 对象可直接 model_validate（from_attributes）。"""
 

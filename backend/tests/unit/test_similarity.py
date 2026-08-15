@@ -73,3 +73,24 @@ def test_detect_no_conflict_when_dissimilar() -> None:
     cand = {"metric_code": "orders_cnt", "domain": "sales", "definition": "count(id)"}
     existing = {"metric_code": "refund_amt", "domain": "sales", "definition": "sum(refund)"}
     assert detect_conflict(cand, existing) is None
+
+
+def test_detect_self_same_metric_id_returns_none() -> None:
+    """候选与现有携带同一指标行 ID（同一条真实指标）→ 不构成冲突。
+
+    自我引用防御：指标与自身比对（无论域/定义如何）永远不该产出冲突，
+    否则仲裁联动会把"落败方"（=胜方自身）作废，导致数据被误删。
+    """
+    cand = {
+        "metric_code": "gmv_total",
+        "domain": "sales",
+        "definition": "sum(amount)",
+        "metric_id": 7,
+    }
+    existing = {
+        "metric_code": "gmv_total",
+        "domain": "finance",
+        "definition": "sum(price)",
+        "metric_id": 7,
+    }
+    assert detect_conflict(cand, existing) is None

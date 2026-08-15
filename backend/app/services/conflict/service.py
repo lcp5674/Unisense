@@ -101,6 +101,7 @@ class ConflictService(BaseService):
     ) -> ConflictCheckResult:
         detections: list[DetectionOut] = []
         blocked = False
+        existing_list = await self._drop_self_references(candidate, existing_list)
         for ex in existing_list:
             cand_dict = candidate.model_dump()
             ext_dict = ex.model_dump()
@@ -146,6 +147,15 @@ class ConflictService(BaseService):
                     }
                 )
                 continue
+            # 去重（冲突表完整性）：同一对指标已有未决冲突时不重复落库，
+            # 但检测结果仍上报调用方（blocked 语义不变）。
+            if await self._repo.count_open_for_pair(candidate.metric_code, det.existing_code) > 0:
+                logger.warning(
+                    "conflict_duplicate_skipped 冲突 %s/%s 已有未决冲突，不重复落库",
+                    candidate.metric_code,
+                    det.existing_code,
+                )
+                continue
             conflict = Conflict(
                 conflict_id=_new_conflict_id(),
                 type=det.conflict_type,
@@ -167,6 +177,54 @@ class ConflictService(BaseService):
                 }
             )
         return ConflictCheckResult(detections=detections, blocked=blocked)
+
+    async def _drop_self_references(
+        self, candidate: MetricInput, existing_list: list[MetricInput]
+    ) -> list[MetricInput]:
+        """剔除 existing 中与候选指向同一条真实指标的条目（自我冲突防御）。
+
+        ``metric_code`` 在指标表全局唯一——候选与现有同码时，若两者都解析到
+        同一条活动指标行，即是「指标与自身比对」的自我引用，不构成合法冲突；
+        同名不同义的合法形态是「新提交 vs 已存在行」：候选码尚未落库、解析为
+        None，此时保留该条目照常检测。被剔除条目记 warning（不落库、不阻断、
+        不上报检测），避免在冲突表落一条永远无法正常裁决的自我冲突——
+        仲裁联动曾因此误删胜方指标（successor 死循环，见 conflict.arbitration）。
+        """
+        cand_code = candidate.metric_code or ""
+        cand_row: int | None = None
+        # 仅当存在同码条目时才解析候选行（前端预检常只传 candidate，避免空转查询）
+        if existing_list and cand_code:
+            cand_row = await self._repo.resolve_active_metric_id(cand_code)
+        filtered: list[MetricInput] = []
+        for ex in existing_list:
+            if ex.metric_code != cand_code:
+                filtered.append(ex)
+                continue
+            # 调用方已携带同一 metric_id → 同一行，直接剔除
+            if (
+                candidate.metric_id is not None
+                and ex.metric_id is not None
+                and candidate.metric_id == ex.metric_id
+            ):
+                logger.warning(
+                    "conflict_self_reference_skipped 候选/现有同码同行 %s（metric_id=%s）",
+                    cand_code,
+                    candidate.metric_id,
+                )
+                continue
+            if cand_row is not None:
+                ex_row = await self._repo.resolve_active_metric_id(ex.metric_code)
+                if ex_row == cand_row:
+                    logger.warning(
+                        "conflict_self_reference_skipped 候选 %s 与现有 %s 解析为同一"
+                        "活动指标行（id=%s）",
+                        cand_code,
+                        ex.metric_code,
+                        cand_row,
+                    )
+                    continue
+            filtered.append(ex)
+        return filtered
 
     async def list_conflicts(self, params: Any) -> tuple[list[Conflict], int]:
         return await self._repo.list_conflicts(

@@ -129,6 +129,13 @@ def detect_conflict(
     ext_def = existing.get("definition", "")
     ext_src = existing.get("source_tables", []) or []
     ext_id = existing.get("metric_id") or existing.get("id")
+    cand_id = candidate.get("metric_id") or candidate.get("id")
+
+    # 自我引用防御：候选与现有携带同一指标行 ID（同一条真实指标）→ 不构成冲突。
+    # 指标与自身比对（无论域/定义如何）永远不该产出冲突——否则仲裁联动会
+    # 把"落败方"（=胜方自身）作废，导致数据被误删（TD §12.4 自我冲突事故根因）。
+    if cand_id is not None and ext_id is not None and cand_id == ext_id:
+        return None
 
     # PII 特殊路由：含 PII 且未授权 → 不进普通仲裁，转交 governance.pii_review
     if candidate.get("has_pii") and not candidate.get("pii_authorized"):

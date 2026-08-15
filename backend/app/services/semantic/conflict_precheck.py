@@ -178,6 +178,9 @@ class ConflictPrechecker:
             return None
 
         # ① 语义冲突（同名不同义 / PII / 重复建设），复用 conflict 服务相似度规则
+        # 注意：不与候选同码条目做排除——同名不同义的合法形态恰是「新提交 vs
+        # 已存在同码行」；precheck 仅在创建后调用，此时同码条目即刚创建的自身行，
+        # 定义一致不会触发误报（自我冲突防御落在 check 创建入口，见 conflict.service）。
         for ext in existing_list:
             det = detect_conflict(candidate, ext)
             if det is not None:

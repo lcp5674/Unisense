@@ -9,6 +9,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conflict import Conflict, ConflictStatus, ConflictType, RulingRecord
+from app.models.metric import Metric
 
 
 class ConflictRepository:
@@ -124,3 +125,49 @@ class ConflictRepository:
         )
         total = int((await self._db.execute(stmt)).scalar() or 0)
         return total
+
+    async def count_open_for_pair(self, candidate_code: str, existing_code: str) -> int:
+        """统计同一（候选, 现有）有序对当前仍处未决状态的冲突数。
+
+        冲突表完整性（TD §12.4）：同一对指标重复调用 check 不应堆积多条 OPEN
+        冲突——检测结果仍上报调用方，但仅在无未决冲突时才落库新记录。
+        """
+        cand = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.candidate"))
+        ext = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.existing"))
+        stmt = (
+            select(func.count())
+            .select_from(Conflict)
+            .where(
+                Conflict.deleted_at.is_(None),
+                Conflict.status.in_(
+                    [
+                        ConflictStatus.OPEN,
+                        ConflictStatus.NEGOTIATING,
+                        ConflictStatus.ESCALATED,
+                    ]
+                ),
+                cand == candidate_code,
+                ext == existing_code,
+            )
+        )
+        total = int((await self._db.execute(stmt)).scalar() or 0)
+        return total
+
+    async def resolve_active_metric_id(self, metric_code: str) -> int | None:
+        """解析活动（未软删）指标行 ID；不存在返回 None。
+
+        自我冲突防御（TD §12.4）：``metric_code`` 在指标表全局唯一——候选与
+        现有同码时若都解析到同一条活动行，即是「指标与自身比对」的自我引用，
+        不构成合法冲突（同名不同义的合法形态是「新提交 vs 已存在行」：候选码
+        尚未落库、解析为 None）。仅返回 id 避免整行读写竞态。
+        """
+        if not metric_code:
+            return None
+        row = (
+            await self._db.execute(
+                select(Metric.id).where(
+                    Metric.metric_code == metric_code, Metric.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        return row if row is not None else None
