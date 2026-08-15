@@ -42,29 +42,31 @@ const TYPE_LABEL: Record<string, string> = {
 
 const TYPE_OPTIONS = Object.entries(TYPE_LABEL).map(([value, label]) => ({ value, label }));
 
-// 业务域配色：12 色高饱和明亮色板（Tailwind 500/600 段），在白色画布上醒目且色相分离大，
-// 减少 hash 冲突导致的"一片玫红"。所有色值的饱和度与亮度都经过对比测试。
+// 业务域配色：12 色高饱和浓烈色板（Material Design 700 段 + Tailwind 600/700）。
+// 选 MD/Tailwind 700 段而非 500 段的原因：500 段偏亮（如翠绿 #10b981），白字在上面对比度仅 ~2:1，
+// 节点名称几乎不可读；700 段在白色画布上视觉"鲜艳浓烈"、色相饱和度极高，
+// 且与文字的对比度普遍 >4:1（WCAG AA）。同时配合 labelBackground 白底 pill 兜底可读性。
 const DOMAIN_PALETTE = [
-  "#3b82f6", // 蓝
-  "#10b981", // 翠绿
-  "#f59e0b", // 琥珀
-  "#ef4444", // 红
-  "#8b5cf6", // 紫
-  "#06b6d4", // 青
-  "#ec4899", // 粉
-  "#14b8a6", // 青绿
-  "#f97316", // 橙
-  "#a855f7", // 紫罗兰
-  "#22c55e", // 草绿
-  "#0ea5e9", // 天蓝
+  "#1976d2", // 蓝（blue 700）
+  "#00897b", // 青绿（teal 700）
+  "#43a047", // 绿（green 700）
+  "#fb8c00", // 橙（orange 700）
+  "#e53935", // 红（red 600）
+  "#8e24aa", // 紫（purple 700）
+  "#039be5", // 天蓝（light blue 700）
+  "#d81b60", // 粉（pink 700）
+  "#f57c00", // 橙黄（orange 800）
+  "#3949ab", // 靛蓝（indigo 700）
+  "#7b1fa2", // 深紫（purple 800）
+  "#00acc1", // 青（cyan 700）
 ];
 
 // 节点类型兜底色（节点 domain 缺失时使用，按类型区分保证视觉差异）
 const TYPE_FALLBACK_COLOR: Record<string, string> = {
-  metric: "#8b5cf6", // 紫（指标）
-  table: "#3b82f6", // 蓝（表/视图）
-  field: "#06b6d4", // 青（字段）
-  unknown: "#94a3b8", // 中性灰蓝
+  metric: "#7b1fa2", // 紫（指标）
+  table: "#1976d2", // 蓝（表/视图）
+  field: "#00897b", // 青绿（字段）
+  unknown: "#546e7a", // 中性灰蓝
 };
 
 // 边类型配色：偏亮深灰蓝，不同类型区分（血缘总览里 DERIVED_FROM 占绝大多数）
@@ -102,7 +104,7 @@ function edgeColor(type?: string): string {
   return "#94a3b8";
 }
 
-function trimLabel(label: string, max = 20): string {
+function trimLabel(label: string, max = 14): string {
   return label.length > max ? `${label.slice(0, max)}…` : label;
 }
 
@@ -281,107 +283,86 @@ function pickVisible(
   };
 }
 
+/** 布局配置：分层（DAG 自上而下）或力导向（环/交互定位）。 */
+function layoutConfig(layoutMode: "hierarchy" | "force") {
+  if (layoutMode === "hierarchy") {
+    // 分层布局：血缘 DAG 自上而下（表→指标），节点多时比力导向清晰得多
+    // nodesep/ranksep 加大以容纳放节点内部的标签 + 给边留呼吸空间
+    return {
+      type: "antv-dagre",
+      rankdir: "TB",
+      align: "DL",
+      nodesep: 50,
+      ranksep: 72,
+    };
+  }
+  // 力导向：环图/交互定位用（对循环依赖天然容忍，节点自然分布）
+  // collide 加大避免小图密集时节点圆形互相穿透
+  return {
+    type: "d3-force",
+    linkDistance: 110,
+    collide: { radius: 48 },
+    manyBody: { strength: -300 },
+  };
+}
+
+interface GraphCanvasProps {
+  nodes: AssetGraphNode[];
+  edges: RenderEdge[];
+  layoutMode: "hierarchy" | "force";
+  height: number;
+  searchText: string;
+  onNodeClick: (node: AssetGraphNode) => void;
+  /** 图渲染完成回调（父组件用于清除布局切换 loading） */
+  onReady: () => void;
+}
+
 /**
- * 资产地图/血缘力导向图。
+ * 图渲染子组件：持有 G6 实例，独立挂载/卸载。
  *
- * - 节点：按业务域着色（饱和深色）、按类型区分形状（指标=圆 / 表=圆角矩形 /
- *   字段=椭圆）、PII 红色描边、按血缘度编码大小；标签带白底 pill 提升可读性。
- * - 边：深灰蓝 + 弧线 + 按类型着色，避免浅灰线条在密集图中杂乱无章。
- * - 交互：拖拽画布 / 滚轮缩放 / 拖拽节点 / 悬停邻域高亮 / 点击节点回调 / 重置视图。
- * - 可读性：节点过多时按优先级限流渲染 + 提示筛选；``showFields=false`` 时隐藏字段节点。
- * - 兜底：canvas 不可用（jsdom/弱环境）时降级为表格，保证数据可浏览。
+ * 关键设计：父组件用 `key={layoutMode-tick}` 渲染本组件——**每次布局切换都卸载旧容器、
+ * 挂载全新容器与全新 G6 实例**。此前在同一 DOM 容器上「destroy 旧实例 + new 新实例 + render」
+ * 会触发 G6 v5 内部 bug（render promise 永不 resolve，图永久空白、切换后无反馈）。
+ * 全新容器 + 全新实例彻底绕开该问题，保证布局切换后图必然重渲染。
  */
-export function AssetGraph({
+function GraphCanvas({
   nodes,
   edges,
-  height = 600,
+  layoutMode,
+  height,
+  searchText,
   onNodeClick,
-  showFields = true,
-  layout = "auto",
-}: AssetGraphProps) {
+  onReady,
+}: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<G6Graph | null>(null);
   const onNodeClickRef = useRef(onNodeClick);
-  const [renderFailed, setRenderFailed] = useState(false);
-  const [showAll, setShowAll] = useState(false);
-  // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
-  const [typeFilter, setTypeFilter] = useState<string[]>([]);
-  const [searchText, setSearchText] = useState("");
-  // 布局手动覆盖：undefined=跟随 auto 检测；否则强制指定
-  const [layoutOverride, setLayoutOverride] = useState<"hierarchy" | "force" | undefined>(undefined);
-  // 布局代际计数器：用户每次点 Select 就 +1（即使选了同一项，也强制销毁重建图实例）。
-  // 解决"hierarchy 默认下用户点了一次 分层布局 没反应"的问题。
-  const [layoutTick, setLayoutTick] = useState(0);
-  // 布局切换瞬态标记：用户点击切换 Select 后立即置 true，图实例重建并完成 render 后置 false，
-  // 期间叠加 Spin 让用户明确感知到"正在重新计算布局"，避免在节点多时误以为"点了没反应"
-  const [layoutSwitching, setLayoutSwitching] = useState(false);
   onNodeClickRef.current = onNodeClick;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+  const [renderFailed, setRenderFailed] = useState(false);
+  // 图是否渲染完成（state 驱动搜索高亮 effect 在重挂载后自动重跑）
+  const [graphReady, setGraphReady] = useState(false);
 
-  // 布局切换处理：更新 override + 触发代际 + 显示 loading + 切换完成后强制 fitView 让图充满画布
-  const handleLayoutChange = (v: "hierarchy" | "force" | undefined) => {
-    setLayoutOverride(v);
-    setLayoutTick((t) => t + 1);
-    setLayoutSwitching(true);
-  };
-
-  // 类型筛选（空 = 全部）；showFields=false 时剔除字段节点（血缘总览降噪）
-  const filteredNodes = useMemo(() => {
-    let list = typeFilter.length === 0 ? nodes : nodes.filter((n) => typeFilter.includes(n.type));
-    if (showFields === false) list = list.filter((n) => n.type !== "field");
-    return list;
-  }, [nodes, typeFilter, showFields]);
-
-  // 限流渲染：优先保留核心节点，超出阈值时默认隐藏附属字段节点
-  const {
-    visible: visibleNodes,
-    visibleEdges,
-    hidden,
-  } = useMemo(() => pickVisible(filteredNodes, edges, showAll), [filteredNodes, edges, showAll]);
-
-  // 环检测 + 双向边合并：A↔B 合并为双箭头减少视觉噪声；SCC>2 的真环单独标记
-  const mergedEdges = useMemo(() => mergeBidirectionalEdges(visibleEdges), [visibleEdges]);
-  const cycleNodes = useMemo(
-    () => findTrueCycles(mergedEdges, visibleNodes.map((n) => n.id)),
-    [mergedEdges, visibleNodes],
-  );
-  const renderEdges = useMemo(
-    () => markCycleEdges(mergedEdges, cycleNodes),
-    [mergedEdges, cycleNodes],
-  );
-  // 布局策略：auto=有真环用力导向（环图 dagre 渲染异常），无环用分层；手动覆盖优先
-  const layoutMode = useMemo<"hierarchy" | "force">(() => {
-    if (layoutOverride) return layoutOverride;
-    if (layout === "force") return "force";
-    if (layout === "hierarchy") return "hierarchy";
-    return cycleNodes.size > 0 ? "force" : "hierarchy";
-  }, [layout, layoutOverride, cycleNodes]);
-
-  // 血缘度：节点关联边数 → 编码节点大小
+  // 血缘度与环检测：style 回调通过 ref 读取最新值（避免闭包捕获旧值）
   const degreeMap = useMemo(() => {
     const m = new Map<string, number>();
-    for (const e of visibleEdges) {
+    for (const e of edges) {
       m.set(e.source, (m.get(e.source) ?? 0) + 1);
       m.set(e.target, (m.get(e.target) ?? 0) + 1);
     }
     return m;
-  }, [visibleEdges]);
-  // 图实例仅创建一次，节点大小回调需通过 ref 读取最新度图（避免闭包捕获旧值）
+  }, [edges]);
+  const cycleNodes = useMemo(
+    () => findTrueCycles(edges, nodes.map((n) => n.id)),
+    [edges, nodes],
+  );
   const degreeMapRef = useRef(degreeMap);
   degreeMapRef.current = degreeMap;
-  // 环检测结果同样通过 ref 穿透到 graph 样式回调（节点描边区分环节点）
   const cycleNodesRef = useRef(cycleNodes);
   cycleNodesRef.current = cycleNodes;
-  // G6 图实例在首次 render() 的异步 prepare 中才初始化 context.element——
-  // 在此之前调用 setElementState 会因 context.element 为 undefined 崩溃。此标志标记「图已就绪」。
-  const graphReadyRef = useRef(false);
-  // 渲染串行链：setData+render 排队执行，前一次渲染完成后再进行下一次，
-  // 避免数据快速变化（如 PII/域筛选切换）时 setData 与前一次渲染重叠触发 G6 内部 Node not found。
-  const renderChainRef = useRef<Promise<void>>(Promise.resolve());
-  const renderSeqRef = useRef(0);
 
-  // 图实例创建：layoutMode 变化（含 auto 检测结果改变）时销毁重建。
-  // 复用实例避免「每次数据变化都 destroy + 重建」——G6 d3-force 仿真在 destroy 后
-  // 仍可能派发在途 tick/事件，访问已被清空的 context 会抛 `Cannot read ... of undefined (reading 'draw')`。
+  // 图实例创建：仅挂载时执行（布局切换由父组件 key 强制重挂载本组件，因此无需依赖 layoutMode）
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -403,8 +384,8 @@ export function AssetGraph({
           style: {
             size: (d: NodeData) => {
               const t = (d.data as AssetGraphNode | undefined)?.type;
-              // 最小半径 18 + 血缘度缩放，让标签在节点内有充足空间
-              const r = Math.max(18, 16 + (degreeMapRef.current.get(String(d.id)) ?? 0) * 1.4);
+              // 最小半径 24 + 血缘度缩放：节点需容纳「白底 pill + 12px 深字」的标签组合
+              const r = Math.max(24, 20 + (degreeMapRef.current.get(String(d.id)) ?? 0) * 1.4);
               if (t === "table") return [r * 2.0, r * 1.2];
               if (t === "field") return [r * 1.4, r * 0.8];
               return r;
@@ -424,7 +405,7 @@ export function AssetGraph({
             lineWidth: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
               if (n && cycleNodesRef.current.has(String(d.id))) return 3.5;
-              return n?.pii ? 3 : 1.5;
+              return n?.pii ? 3 : 2;
             },
             // 投影让节点从画布上"浮起"，减少平铺感；环节点用橙色投影强调
             shadowColor: (d: NodeData) =>
@@ -437,19 +418,16 @@ export function AssetGraph({
             labelText: (d: NodeData) =>
               trimLabel((d.data as AssetGraphNode | undefined)?.label ?? String(d.id)),
             // 标签放节点内部：彻底解决 dagre 横向同 rank 节点标签相互挤压重叠
-            // （之前 labelPlacement: "bottom" + 长 pill 越过节点边界碰撞）
             labelPlacement: "center",
-            // 节点内部文字色根据节点 fill 亮度自适应：域色太深时用白字、太浅用深字
-            labelFill: (d: NodeData) => {
-              const n = d.data as AssetGraphNode | undefined;
-              // 环节点浅橙底用深字，其他一律白字（在所有明亮域色上对比度足够）
-              if (n && cycleNodesRef.current.has(String(d.id))) return "#7c2d12";
-              return "#ffffff";
-            },
-            labelFontSize: 10,
+            // 节点内「白底 pill + 深字」：绝对清晰可读，不受节点填充色深浅影响。
+            // 此前去掉 pill 后即便 luminance 自适应，11px 字号 + 节点色叠加仍模糊不清。
+            labelBackground: true,
+            labelBackgroundFill: "#ffffff",
+            labelBackgroundLineWidth: 1,
+            labelBackgroundPadding: 4,
+            labelFill: "#1f2937", // 深字（白底上对比度最高，不受节点色影响）
+            labelFontSize: 12,
             labelFontWeight: 600,
-            // 节点内不放背景 pill（避免文字与背景叠加模糊），背景节点色已足够对比
-            labelBackground: false,
             cursor: "pointer",
           },
           state: {
@@ -472,27 +450,7 @@ export function AssetGraph({
             radius: 10,
           },
         },
-        layout: (() => {
-          if (layoutMode === "hierarchy") {
-            // 分层布局：血缘 DAG 自上而下（表→指标），节点多时比力导向清晰得多
-            // nodesep/ranksep 加大以容纳放节点内部的标签 + 给边留呼吸空间
-            return {
-              type: "antv-dagre",
-              rankdir: "TB",
-              align: "DL",
-              nodesep: 50,
-              ranksep: 72,
-            };
-          }
-          // 力导向：环图/交互定位用（对循环依赖天然容忍，节点自然分布）
-          // collide 加大避免小图密集时节点圆形互相穿透
-          return {
-            type: "d3-force",
-            linkDistance: 110,
-            collide: { radius: 48 },
-            manyBody: { strength: -300 },
-          };
-        })(),
+        layout: layoutConfig(layoutMode),
         behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
       });
       graphRef.current = graph;
@@ -508,7 +466,7 @@ export function AssetGraph({
 
       // 悬停邻域高亮：相邻节点高亮，其余淡化（图销毁/渲染过渡期的在途事件一律忽略）
       graph.on<IElementEvent>("node:pointerenter", (evt) => {
-        if (!graph || graph.destroyed || !graphReadyRef.current) return;
+        if (!graph || graph.destroyed || !graphReady) return;
         const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
         const id = raw?.id ?? raw?.__data__?.id;
         if (!id) return;
@@ -527,7 +485,7 @@ export function AssetGraph({
         }
       });
       graph.on("node:pointerleave", () => {
-        if (!graph || graph.destroyed || !graphReadyRef.current) return;
+        if (!graph || graph.destroyed || !graphReady) return;
         try {
           for (const n of graph.getNodeData()) {
             safeSetElementState(graph, String(n.id), []);
@@ -539,6 +497,7 @@ export function AssetGraph({
     } catch (err) {
       console.error("[AssetGraph] G6 初始化失败，降级为表格", err);
       setRenderFailed(true);
+      onReadyRef.current();
     }
 
     return () => {
@@ -549,58 +508,50 @@ export function AssetGraph({
         // 销毁异常不阻断卸载
       }
       if (graphRef.current === graph) graphRef.current = null;
-      // 布局切换/卸载时重置渲染串行链：旧图 destroy 后其 in-flight render promise
-      // 可能永不 resolve（G6 v5 在 destroy 后不完成在途 d3-force 仿真 tick），
-      // 若不重置，新图的 setData 会永远排队在后、图空白（布局 force→hierarchy 复现）。
-      // 递增序号同时作废旧在途渲染（其 then 内 seq 检查会 return）。
-      renderSeqRef.current += 1;
-      renderChainRef.current = Promise.resolve();
     };
-  }, [layoutMode, layoutTick]);
+    // 布局切换由父组件 key 强制重挂载，实例只随挂载/卸载创建销毁
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // 数据更新：复用图实例，串行 setData + render（不再销毁重建）。
-  // render 为异步（prepare 内 initRuntime/重建元素），期间调用 setElementState 会因元素未就绪
-  // 抛 `Node not found`——渲染开始即标记未就绪，渲染完成后才允许状态操作。
+  // 数据渲染：挂载后首次 + 数据变化时复用实例 setData+render
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph || graph.destroyed) return;
-    const seq = ++renderSeqRef.current;
-    graphReadyRef.current = false;
+    setGraphReady(false);
     const data: GraphData =
-      visibleNodes.length === 0
+      nodes.length === 0
         ? { nodes: [], edges: [] }
         : {
-            nodes: visibleNodes.map((n) => ({ id: n.id, data: n })),
-            edges: renderEdges.map((e) => ({ source: e.source, target: e.target, data: e })),
+            nodes: nodes.map((n) => ({ id: n.id, data: n })),
+            edges: edges.map((e) => ({ source: e.source, target: e.target, data: e })),
           };
-    renderChainRef.current = renderChainRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        const g = graphRef.current;
-        if (!g || g.destroyed || seq !== renderSeqRef.current) return;
+    graph.setData(data);
+    graph
+      .render()
+      .then(() => {
+        if (graph.destroyed) return;
+        setGraphReady(true);
+        onReadyRef.current();
+        // 图就绪后强制 fitView（应对布局切换后位置变化），让图充满画布
         try {
-          g.setData(data);
-          await g.render();
-          // 图就绪后强制 fitView（应对布局切换后位置变化），同时清除切换 loading
-          if (seq === renderSeqRef.current) {
-            graphReadyRef.current = true;
-            setLayoutSwitching(false);
-            try { g.fitView({ when: "always" }); } catch { /* fitView 偶尔在过渡期失败 */ }
-          }
-        } catch (err) {
-          console.error("[AssetGraph] G6 render 失败，降级为表格", err);
-          setRenderFailed(true);
-          setLayoutSwitching(false);
+          graph.fitView({ when: "always" });
+        } catch {
+          /* fitView 偶尔在过渡期失败 */
         }
+      })
+      .catch((err) => {
+        console.error("[AssetGraph] G6 render 失败，降级为表格", err);
+        setRenderFailed(true);
+        onReadyRef.current();
       });
     setRenderFailed(false);
-  }, [visibleNodes, renderEdges, degreeMap, layoutMode]);
+  }, [nodes, edges]);
 
   // 搜索定位：匹配 label 的节点高亮 + 聚焦首个匹配；清空时恢复全量状态。
-  // 图未就绪（渲染中/未初始化）时跳过——否则 setElementState 会崩溃或抛 Node not found
+  // graphReady 变化（含重挂载后重新渲染完成）时自动重跑，保证布局切换后搜索仍生效。
   useEffect(() => {
     const graph = graphRef.current;
-    if (!graph || graph.destroyed || !graphReadyRef.current) return;
+    if (!graph || graph.destroyed || !graphReady) return;
     try {
       const allNodes = graph.getNodeData?.() as unknown;
       const nodeList = Array.isArray(allNodes) ? allNodes : [];
@@ -610,7 +561,7 @@ export function AssetGraph({
       }
       const kw = searchText.trim().toLowerCase();
       const matchIds = new Set(
-        visibleNodes.filter((n) => n.label.toLowerCase().includes(kw)).map((n) => n.id),
+        nodes.filter((n) => n.label.toLowerCase().includes(kw)).map((n) => n.id),
       );
       for (const n of nodeList) {
         safeSetElementState(
@@ -625,7 +576,7 @@ export function AssetGraph({
     } catch {
       // 图状态变化导致的瞬时异常（如数据重载中）静默忽略，避免崩溃
     }
-  }, [searchText, visibleNodes]);
+  }, [searchText, graphReady, nodes]);
 
   // G6 内部 setData 的异步 batch 在数据过渡期可能抛 `Node not found` 未处理 rejection——
   // 这是库在节点被替换时的已知瞬时噪音，不影响渲染结果，作用域内抑制以免污染控制台。
@@ -637,10 +588,6 @@ export function AssetGraph({
     window.addEventListener("unhandledrejection", handler);
     return () => window.removeEventListener("unhandledrejection", handler);
   }, []);
-
-  if (nodes.length === 0) {
-    return <Empty description="暂无图谱数据" />;
-  }
 
   if (renderFailed) {
     return (
@@ -693,6 +640,102 @@ export function AssetGraph({
         />
       </div>
     );
+  }
+
+  return (
+    <div style={{ position: "relative", width: "100%" }} data-testid="asset-graph-wrap">
+      <div ref={containerRef} style={{ height, width: "100%" }} data-testid="asset-graph-canvas" />
+      <div style={{ marginTop: 6, textAlign: "right" }}>
+        <Button
+          size="small"
+          icon={<FullscreenOutlined />}
+          onClick={() => {
+            const g = graphRef.current;
+            if (g && !g.destroyed) g.fitView();
+          }}
+        >
+          重置视图
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 资产地图/血缘图。
+ *
+ * - 节点：按业务域着色（饱和深色）、按类型区分形状（指标=圆 / 表=圆角矩形 /
+ *   字段=椭圆）、PII 红色描边、按血缘度编码大小；标签放节点内白底 pill 提升可读性。
+ * - 边：深灰蓝 + 弧线 + 按类型着色，避免浅灰线条在密集图中杂乱无章。
+ * - 交互：拖拽画布 / 滚轮缩放 / 拖拽节点 / 悬停邻域高亮 / 点击节点回调 / 重置视图。
+ * - 布局切换：GraphCanvas 用 key 强制重挂载（全新容器+实例），根治 G6 同容器重建空白 bug。
+ * - 可读性：节点过多时按优先级限流渲染 + 提示筛选；``showFields=false`` 时隐藏字段节点。
+ * - 兜底：canvas 不可用（jsdom/弱环境）时降级为表格，保证数据可浏览。
+ */
+export function AssetGraph({
+  nodes,
+  edges,
+  height = 600,
+  onNodeClick,
+  showFields = true,
+  layout = "auto",
+}: AssetGraphProps) {
+  const onNodeClickRef = useRef(onNodeClick);
+  onNodeClickRef.current = onNodeClick;
+  const [showAll, setShowAll] = useState(false);
+  // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
+  const [typeFilter, setTypeFilter] = useState<string[]>([]);
+  const [searchText, setSearchText] = useState("");
+  // 布局手动覆盖：undefined=跟随 auto 检测；否则强制指定
+  const [layoutOverride, setLayoutOverride] = useState<"hierarchy" | "force" | undefined>(undefined);
+  // 布局代际计数器：用户每次点 Select 就 +1（即使选了同一项，也强制重挂载 GraphCanvas）。
+  // 解决"hierarchy 默认下用户点了一次 分层布局 没反应"的问题。
+  const [layoutTick, setLayoutTick] = useState(0);
+  // 布局切换瞬态标记：用户点击切换 Select 后立即置 true，GraphCanvas 重挂载并完成 render 后置 false，
+  // 期间叠加 Spin 让用户明确感知到"正在重新计算布局"，避免在节点多时误以为"点了没反应"
+  const [layoutSwitching, setLayoutSwitching] = useState(false);
+
+  // 布局切换处理：更新 override + 触发代际 + 显示 loading（GraphCanvas onReady 后自动清除）
+  const handleLayoutChange = (v: "hierarchy" | "force" | undefined) => {
+    setLayoutOverride(v);
+    setLayoutTick((t) => t + 1);
+    setLayoutSwitching(true);
+  };
+
+  // 类型筛选（空 = 全部）；showFields=false 时剔除字段节点（血缘总览降噪）
+  const filteredNodes = useMemo(() => {
+    let list = typeFilter.length === 0 ? nodes : nodes.filter((n) => typeFilter.includes(n.type));
+    if (showFields === false) list = list.filter((n) => n.type !== "field");
+    return list;
+  }, [nodes, typeFilter, showFields]);
+
+  // 限流渲染：优先保留核心节点，超出阈值时默认隐藏附属字段节点
+  const {
+    visible: visibleNodes,
+    visibleEdges,
+    hidden,
+  } = useMemo(() => pickVisible(filteredNodes, edges, showAll), [filteredNodes, edges, showAll]);
+
+  // 环检测 + 双向边合并：A↔B 合并为双箭头减少视觉噪声；SCC>2 的真环单独标记
+  const mergedEdges = useMemo(() => mergeBidirectionalEdges(visibleEdges), [visibleEdges]);
+  const cycleNodes = useMemo(
+    () => findTrueCycles(mergedEdges, visibleNodes.map((n) => n.id)),
+    [mergedEdges, visibleNodes],
+  );
+  const renderEdges = useMemo(
+    () => markCycleEdges(mergedEdges, cycleNodes),
+    [mergedEdges, cycleNodes],
+  );
+  // 布局策略：auto=有真环用力导向（环图 dagre 渲染异常），无环用分层；手动覆盖优先
+  const layoutMode = useMemo<"hierarchy" | "force">(() => {
+    if (layoutOverride) return layoutOverride;
+    if (layout === "force") return "force";
+    if (layout === "hierarchy") return "hierarchy";
+    return cycleNodes.size > 0 ? "force" : "hierarchy";
+  }, [layout, layoutOverride, cycleNodes]);
+
+  if (nodes.length === 0) {
+    return <Empty description="暂无图谱数据" />;
   }
 
   const domains = [...new Set(nodes.map((n) => n.domain).filter(Boolean))] as string[];
@@ -792,8 +835,17 @@ export function AssetGraph({
           ]}
         />
       </div>
-      <div style={{ position: "relative", width: "100%" }} data-testid="asset-graph-wrap">
-        <div ref={containerRef} style={{ height, width: "100%" }} data-testid="asset-graph-canvas" />
+      <div style={{ position: "relative", width: "100%" }}>
+        <GraphCanvas
+          key={`${layoutMode}-${layoutTick}`}
+          nodes={visibleNodes}
+          edges={renderEdges}
+          layoutMode={layoutMode}
+          height={height}
+          searchText={searchText}
+          onNodeClick={(n) => onNodeClickRef.current?.(n)}
+          onReady={() => setLayoutSwitching(false)}
+        />
         {layoutSwitching && (
           <div
             style={{
@@ -900,16 +952,6 @@ export function AssetGraph({
             环边（红色虚线）
           </span>
         </div>
-        <Button
-          size="small"
-          icon={<FullscreenOutlined />}
-          onClick={() => {
-            const g = graphRef.current;
-            if (g && !g.destroyed) g.fitView();
-          }}
-        >
-          重置视图
-        </Button>
       </div>
     </div>
   );
