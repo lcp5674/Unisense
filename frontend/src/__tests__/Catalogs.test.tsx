@@ -506,4 +506,27 @@ describe("Catalogs 页面", () => {
     const row = screen.getByText("dwd_finance_order").closest("tr");
     expect(row?.getAttribute("style") ?? "").toContain("background");
   });
+
+  it("列表展示字段数与描述覆盖率（产品化布局信息丰富度）", async () => {
+    const withCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          { name: "order_id", type: "bigint", comment: "订单ID" },
+          { name: "amount", type: "decimal", comment: "" },
+          { name: "qty", type: "int", description: "LLM 推断描述" },
+        ],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [withCols], total: 1, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 3 字段：order_id 有 comment、qty 有 description → 2 已描述（67%）
+    await screen.findByText("3 字段 · 2 已描述（67%）");
+  });
 });

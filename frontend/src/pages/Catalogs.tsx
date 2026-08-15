@@ -481,10 +481,31 @@ export function Catalogs() {
 
   const columns = [
     {
+      title: "实体",
+      dataIndex: "entity_name",
+      key: "entity_name",
+      minWidth: 320,
+      render: (v: string, r: DBCatalog) => (
+        <div>
+          <Space size={4} wrap={false}>
+            <span className="mono" style={{ fontWeight: 500 }}>{v}</span>
+            <Tag>{enumLabel(ENTITY_TYPE_LABEL, r.entity_type)}</Tag>
+            {r.schema_incomplete && <Tag color="warning">schema 缺失</Tag>}
+          </Space>
+          <div
+            className="muted"
+            style={{ fontSize: 12, lineHeight: "18px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 480 }}
+          >
+            {r.description || (r.domain ? `域：${r.domain}` : "（无表描述，可在字段详情中补全）")}
+          </div>
+        </div>
+      ),
+    },
+    {
       title: "数据源",
       dataIndex: "source_id",
       key: "source_id",
-      ellipsis: true,
+      width: 170,
       render: (v: string, r: DBCatalog) => (
         <Tooltip title={r.source_name && r.source_name !== v ? `${r.source_name}（${v}）` : v}>
           <span className="mono" style={{ fontSize: 12 }}>
@@ -495,23 +516,27 @@ export function Catalogs() {
       ),
     },
     {
-      title: "实体",
-      dataIndex: "entity_name",
-      key: "entity_name",
-      ellipsis: true,
-      render: (v: string, r: DBCatalog) => (
-        <Space size={4} wrap={false}>
-          <span className="mono">{v}</span>
-          <Tag>{enumLabel(ENTITY_TYPE_LABEL, r.entity_type)}</Tag>
-          {r.schema_incomplete && <Tag color="warning">schema 缺失</Tag>}
-        </Space>
-      ),
+      title: "字段",
+      key: "fields",
+      width: 110,
+      render: (_: unknown, r: DBCatalog) => {
+        if (r.schema_incomplete) return <span className="muted">—</span>;
+        const cols = parseSchemaColumns(r);
+        if (!cols.length) return <span className="muted">—</span>;
+        const described = cols.filter((c) => c.description || c.comment).length;
+        const pct = Math.round((described / cols.length) * 100);
+        return (
+          <span style={{ fontSize: 12, color: pct >= 80 ? "#3f8600" : pct > 0 ? "#d48806" : "#cf1322" }}>
+            {cols.length} 字段 · {described} 已描述（{pct}%）
+          </span>
+        );
+      },
     },
     {
       title: "敏感度",
       dataIndex: "sensitivity_level",
       key: "sensitivity",
-      width: 100,
+      width: 96,
       render: (v: string) => <Tag color={SENSITIVITY_COLOR[v]}>{SENSITIVITY_LABEL[v] ?? v}</Tag>,
     },
     {
@@ -528,17 +553,18 @@ export function Catalogs() {
     {
       title: "操作",
       key: "action",
-      width: 110,
+      width: 100,
       render: (_: unknown, record: DBCatalog) => (
-        <Space size={2}>
-          <Button
-            type="link"
-            size="small"
-            icon={<HeartOutlined style={{ color: favNames.has(record.entity_name) ? "#eb2f96" : undefined }} />}
-            onClick={() => toggleFavorite(record)}
-          >
-            {favNames.has(record.entity_name) ? "已收藏" : "收藏"}
-          </Button>
+        <Space size={0}>
+          <Tooltip title={favNames.has(record.entity_name) ? "取消收藏" : "收藏"}>
+            <Button
+              type="text"
+              size="small"
+              icon={<HeartOutlined style={{ color: favNames.has(record.entity_name) ? "#eb2f96" : undefined }} />}
+              onClick={() => toggleFavorite(record)}
+              aria-label={favNames.has(record.entity_name) ? "取消收藏" : "收藏"}
+            />
+          </Tooltip>
           <Button
             type="link"
             size="small"
