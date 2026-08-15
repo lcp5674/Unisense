@@ -104,6 +104,21 @@ beforeEach(() => {
 });
 
 describe("Dimensions 页面", () => {
+  it("绑定指标候选：listMetrics 请求 page_size 不超过后端上限 100（避免 422）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("dim_channel");
+    const calls = vi.mocked(listMetrics).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]?.page_size).toBeLessThanOrEqual(100);
+    }
+  });
+
   it("从全局搜索 ?kw=xxx 直达：所有查询都携带关键词过滤（避免全量首查竞态覆盖）", async () => {
     render(
       <MemoryRouter initialEntries={["/dimensions?kw=渠道"]}>

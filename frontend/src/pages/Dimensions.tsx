@@ -162,7 +162,8 @@ function DimensionsTab() {
 
   // 绑定指标候选（指标列表，失败静默不影响列表主流程）；同时加载业务域树供选项框使用
   useEffect(() => {
-    listMetrics({ page_size: 200 })
+    // page_size 取后端上限（semantic MetricQuery le=100），避免 422
+    listMetrics({ page_size: 100 })
       .then((r) => setMetrics(r.items))
       .catch(() => {});
     listDomainTree()
@@ -386,7 +387,7 @@ function DimensionsTab() {
                 setBindTarget(d);
                 // 打开时重新加载指标候选（确保与指标目录一致，带状态标签可区分）
                 try {
-                  const r = await listMetrics({ page_size: 200 });
+                  const r = await listMetrics({ page_size: 100 });
                   setMetrics(r.items);
                 } catch { /* 静默：已有候选可降级 */ }
                 // 加载该维度成员作为「默认成员」下拉候选

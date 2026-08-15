@@ -547,7 +547,23 @@ className={`oc-seg ${m.cls}${isZero ? " oc-zero" : ""}`}
                   const count = o.metrics.by_status[s.key] ?? 0;
                   if (count <= 0) return null;
                   return (
-                    <span key={s.key} className="oc-life-item" title={`${s.label} ${count}`}>
+                    <span
+                      key={s.key}
+                      className="oc-life-item"
+                      title={`${s.label} ${count}，点击查看该责任人名下${s.label}指标`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`/catalog?status=${s.key}&owner_id=${id}`);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.stopPropagation();
+                          navigate(`/catalog?status=${s.key}&owner_id=${id}`);
+                        }
+                      }}
+                    >
                       <i className={`oc-dot ${s.cls}`} />
                       {s.label} {count}
                     </span>

@@ -297,6 +297,19 @@ describe("Dashboard", () => {
     expect(probe.location()?.search).toContain("owner_id=1");
   });
 
+  it("Owner 生命周期色点：点击「草稿」色点跳 /catalog 并携带 status=DRAFT + owner_id 过滤", async () => {
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    // Alice 卡片（total=82 排前）生命周期色点：草稿 20 / 审核 4 / 已发布 36
+    const aliceCard = document.querySelectorAll(".owner-card")[0];
+    const lifeItems = Array.from(aliceCard!.querySelectorAll(".oc-life-item"));
+    fireEvent.click(lifeItems[0]); // 草稿 20
+    expect(probe.location()?.pathname).toBe("/catalog");
+    expect(probe.location()?.search).toContain("status=DRAFT");
+    expect(probe.location()?.search).toContain("owner_id=1");
+  });
+
   it("Owner 卡片：含 0 值资产类型仍完整渲染 6 段（数据表/数据源为 0 不被过滤）", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
