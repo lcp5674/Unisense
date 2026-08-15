@@ -2348,13 +2348,6 @@ export async function listCollectionJobs(params?: {
   );
 }
 
-/** 查询单个采集任务状态。 */
-export async function getCollectionJob(jobId: string): Promise<CollectionJob | null> {
-  return request<CollectionJob | null>(
-    `${API_BASE}/data-sources/jobs/${encodeURIComponent(jobId)}`,
-  );
-}
-
 /** 采集运行历史：分页列出（采集记录页主视图，持久化历史含失败/排障明细）。 */
 export async function listCollectionRuns(params?: {
   source_id?: string;
