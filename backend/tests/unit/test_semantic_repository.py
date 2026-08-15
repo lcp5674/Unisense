@@ -539,6 +539,13 @@ async def test_aggregate_dashboard_with_filters():
         _result(all_=[("PUBLISHED", 3), ("DRAFT", 2)]),  # by_status
         _result(all_=[("T1", 4), ("T2", 1)]),  # by_tier
         _result(all_=[("sales", 5)]),  # by_domain
+        # 治理指标体系（by_owner / quality / compliance / conflict / freshness）
+        _result(all_=[(1, "Alice", "PUBLISHED", 3), (1, "Alice", "DRAFT", 2)]),  # by_owner
+        _result(all_=[("P1", 1)]),  # quality by_severity
+        _result(all_=[("OPEN", 1)]),  # quality by_status
+        _result(all_=[(True, 4), (False, 1)]),  # compliance
+        _result(all_=[("OPEN", 2)]),  # conflict
+        _result(scalar=3),  # freshness updated_30d
         _result(all_=[("INTERNAL", 10), ("PII", 3)]),  # table: sensitivity_level
         _result(all_=[("healthy", 4), ("unknown", 1)]),  # source: health_status
         _result(all_=[("PUBLISHED", 2)]),  # dimension: status
@@ -556,7 +563,7 @@ async def test_aggregate_dashboard_with_filters():
     assert result["by_tier"] == {"T1": 4, "T2": 1}
     assert result["by_domain"] == {"sales": 5}
     assert result["pii_ratio"] == round(2 / 5, 4)
-    assert db.execute.await_count == 10
+    assert db.execute.await_count == 16
     # 资产总览：指标复用顶层聚合；其余资产按各自状态列分组
     assert result["assets"]["metric"] == {
         "total": 5,
@@ -580,6 +587,12 @@ async def test_aggregate_dashboard_without_filters_and_zero_total():
         _result(all_=[]),
         _result(all_=[]),
         _result(all_=[]),
+        _result(all_=[]),  # by_owner
+        _result(all_=[]),  # quality severity
+        _result(all_=[]),  # quality status
+        _result(all_=[]),  # compliance
+        _result(all_=[]),  # conflict
+        _result(scalar=0),  # freshness
         _result(all_=[]),  # table
         _result(all_=[]),  # source
         _result(all_=[]),  # dimension
@@ -597,9 +610,83 @@ async def test_aggregate_dashboard_without_filters_and_zero_total():
     assert result["by_tier"] == {}
     assert result["by_domain"] == {}
     assert result["pii_ratio"] == 0.0
+    assert result["by_owner"] == {}
+    assert result["quality"] == {"total": 0, "by_severity": {}, "pending": 0}
+    assert result["compliance"] == {"total": 0, "reviewed": 0, "pending": 0, "reviewed_ratio": 0.0}
+    assert result["conflict"] == {"total": 0, "open": 0, "escalated": 0, "by_status": {}}
+    assert result["freshness"] == {"total": 0, "updated_30d": 0, "updated_30d_ratio": 0.0}
     assert result["assets"]["metric"] == {"total": 0, "by_status": {}}
     assert result["assets"]["template"] == {"total": 0, "by_status": {"active": 0, "inactive": 0}}
     assert result["assets"]["system_dict"] == {
         "total": 0,
         "by_status": {"active": 0, "inactive": 0},
     }
+
+
+async def test_aggregate_dashboard_governance_indicators():
+    """总览仪表完整指标体系：by_owner 责任分布 + 质量/合规/冲突/新鲜度聚合。
+
+    新增 6 次查询（插在 domain 之后、资产聚合之前）：
+    by_owner / quality_severity / quality_status / compliance / conflict_status / freshness。
+    """
+    db = _mock_session()
+    db.execute.side_effect = [
+        _row_result(total=10, pii_count=3),  # total + pii
+        _result(all_=[("PUBLISHED", 6), ("DRAFT", 3), ("REVIEW", 1)]),  # by_status
+        _result(all_=[("T1", 4), ("T2", 4), ("T3", 2)]),  # by_tier
+        _result(all_=[("sales", 6), ("risk", 4)]),  # by_domain
+        # by_owner：join User 一次查询 (owner_id, name, status, count)
+        _result(all_=[
+            (1, "Alice", "PUBLISHED", 4),
+            (1, "Alice", "REVIEW", 1),
+            (2, "Bob", "PUBLISHED", 2),
+            (2, "Bob", "DRAFT", 3),
+        ]),
+        _result(all_=[("P0", 1), ("P1", 2), ("P2", 3)]),  # quality by_severity
+        _result(all_=[("OPEN", 4), ("ACK", 1), ("RESOLVED", 3)]),  # quality by_status
+        _result(all_=[(True, 7), (False, 3)]),  # compliance reviewed
+        _result(all_=[("OPEN", 2), ("NEGOTIATING", 1), ("ESCALATED", 1), ("RULED", 1)]),  # conflict
+        _result(scalar=6),  # freshness updated_30d
+        _result(all_=[("INTERNAL", 5), ("PII", 2)]),  # table
+        _result(all_=[("healthy", 3)]),  # source
+        _result(all_=[("PUBLISHED", 4)]),  # dimension
+        _result(all_=[("PUBLISHED", 5), ("DRAFT", 1)]),  # term
+        _result(all_=[(True, 5), (False, 2)]),  # template
+        _result(all_=[("active", 6), ("inactive", 1)]),  # system_dict
+    ]
+    repo = MetricRepository(db)
+
+    result = await repo.aggregate_dashboard()
+
+    # Owner 责任分布：按 owner_id 聚合 total + 状态分布，联 User 取显示名
+    assert result["by_owner"] == {
+        1: {"name": "Alice", "total": 5, "by_status": {"PUBLISHED": 4, "REVIEW": 1}},
+        2: {"name": "Bob", "total": 5, "by_status": {"PUBLISHED": 2, "DRAFT": 3}},
+    }
+    # 质量健康：按严重级分布 + 待处理（OPEN+ACK）
+    assert result["quality"] == {
+        "total": 6,
+        "by_severity": {"P0": 1, "P1": 2, "P2": 3},
+        "pending": 5,
+    }
+    # 合规：复核率
+    assert result["compliance"] == {
+        "total": 10,
+        "reviewed": 7,
+        "pending": 3,
+        "reviewed_ratio": 0.7,
+    }
+    # 冲突风险：待仲裁 + 升级中
+    assert result["conflict"] == {
+        "total": 5,
+        "open": 3,
+        "escalated": 1,
+        "by_status": {"OPEN": 2, "NEGOTIATING": 1, "ESCALATED": 1, "RULED": 1},
+    }
+    # 新鲜度：近 30 天更新
+    assert result["freshness"] == {
+        "total": 10,
+        "updated_30d": 6,
+        "updated_30d_ratio": 0.6,
+    }
+    assert db.execute.await_count == 16

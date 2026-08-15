@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import ColumnElement, func, select, update
@@ -14,14 +14,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.exceptions import SystemError as AppSystemError
+from app.models.conflict import Conflict
 from app.models.data_source import DataSource, DBCatalog
 from app.models.dimension import Dimension
 from app.models.metric import Metric
 from app.models.metric_health import MetricHealthScore
 from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion, PendingVersionConfirmation
+from app.models.quality import QualityEvent
 from app.models.system_dict import SystemDict
 from app.models.term import Term
+from app.models.user import User
 
 
 class MetricRepository:
@@ -609,6 +612,69 @@ class MetricRepository:
         domain_rows = (await self._db.execute(domain_stmt)).all()
         by_domain = {row[0]: row[1] for row in domain_rows}
 
+        # ---- 完整指标体系（对齐方案 C：一眼看到几乎全部资产/治理状态）----
+        # 1) Owner 责任分布：join User 一次查询 (owner_id, name, status, count)，Python 组装
+        owner_stmt = (
+            select(
+                Metric.owner_id,
+                User.display_name,
+                Metric.status,
+                func.count().label("cnt"),
+            )
+            .join(User, User.id == Metric.owner_id)
+            .where(*conditions)
+            .group_by(Metric.owner_id, User.display_name, Metric.status)
+        )
+        owner_rows = (await self._db.execute(owner_stmt)).all()
+        by_owner: dict[int, dict[str, Any]] = {}
+        for owner_id_, name, status_, cnt in owner_rows:
+            entry = by_owner.setdefault(owner_id_, {"name": name, "total": 0, "by_status": {}})
+            entry["total"] += cnt
+            entry["by_status"][status_] = entry["by_status"].get(status_, 0) + cnt
+
+        # 2) 质量健康：质量事件按严重级分布 + 待处理（OPEN+ACK）
+        quality_sev_stmt = (
+            select(QualityEvent.level, func.count().label("cnt"))
+            .where(QualityEvent.deleted_at.is_(None))
+            .group_by(QualityEvent.level)
+        )
+        quality_sev_rows = (await self._db.execute(quality_sev_stmt)).all()
+        by_severity = {row[0]: row[1] for row in quality_sev_rows}
+        quality_status_stmt = (
+            select(QualityEvent.status, func.count().label("cnt"))
+            .where(QualityEvent.deleted_at.is_(None))
+            .group_by(QualityEvent.status)
+        )
+        quality_status_rows = (await self._db.execute(quality_status_stmt)).all()
+        quality_by_status = {row[0]: row[1] for row in quality_status_rows}
+        quality_pending = quality_by_status.get("OPEN", 0) + quality_by_status.get("ACK", 0)
+
+        # 3) 合规：已合规复核指标数（软删过滤 + 当前筛选条件）
+        compliance_stmt = (
+            select(Metric.compliance_reviewed, func.count().label("cnt"))
+            .where(*conditions)
+            .group_by(Metric.compliance_reviewed)
+        )
+        compliance_rows = (await self._db.execute(compliance_stmt)).all()
+        compliance_reviewed = dict(compliance_rows).get(True, 0)
+
+        # 4) 冲突风险：未关闭冲突按状态分布（软删过滤）
+        conflict_stmt = (
+            select(Conflict.status, func.count().label("cnt"))
+            .where(Conflict.deleted_at.is_(None))
+            .group_by(Conflict.status)
+        )
+        conflict_rows = (await self._db.execute(conflict_stmt)).all()
+        conflict_by_status = {row[0]: row[1] for row in conflict_rows}
+
+        # 5) 新鲜度：近 30 天更新的指标数
+        cutoff = datetime.now() - timedelta(days=30)
+        freshness_stmt = select(func.count()).where(
+            Metric.deleted_at.is_(None),
+            Metric.updated_at >= cutoff,
+        )
+        updated_30d = (await self._db.execute(freshness_stmt)).scalar() or 0
+
         return {
             "total": total,
             "by_status": by_status,
@@ -616,6 +682,30 @@ class MetricRepository:
             "by_domain": by_domain,
             "pii_count": pii_count,
             "pii_ratio": round(pii_count / max(total, 1), 4),
+            "by_owner": by_owner,
+            "quality": {
+                "total": sum(by_severity.values()),
+                "by_severity": by_severity,
+                "pending": quality_pending,
+            },
+            "compliance": {
+                "total": total,
+                "reviewed": compliance_reviewed,
+                "pending": max(total - compliance_reviewed, 0),
+                "reviewed_ratio": round(compliance_reviewed / max(total, 1), 4),
+            },
+            "conflict": {
+                "total": sum(conflict_by_status.values()),
+                "open": conflict_by_status.get("OPEN", 0)
+                + conflict_by_status.get("NEGOTIATING", 0),
+                "escalated": conflict_by_status.get("ESCALATED", 0),
+                "by_status": conflict_by_status,
+            },
+            "freshness": {
+                "total": total,
+                "updated_30d": updated_30d,
+                "updated_30d_ratio": round(updated_30d / max(total, 1), 4),
+            },
             "assets": {
                 "metric": {"total": total, "by_status": by_status},
                 **await self._aggregate_assets(),
