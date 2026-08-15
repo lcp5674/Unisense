@@ -188,6 +188,23 @@ class Metric(Base, BaseModel):
         nullable=True,
         comment="提交评审人 ID（approve/reject 时禁止自审）",
     )
+    # 评审指派（TD §13 治理闭环）：提交评审时可指定评审用户或域评审组；
+    # approve/reject 仅被指派评审人（或 platform_admin 兜底）可操作。
+    reviewer_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment="指定评审用户 ID（reviewer_type=user 时生效）",
+    )
+    reviewer_type: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+        comment="评审指派类型: user(指定用户)/domain(域评审组)",
+    )
+    reviewer_domain: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="评审团队所在域（reviewer_type=domain 时生效）",
+    )
     pii_flag: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, comment="是否含 PII"
     )

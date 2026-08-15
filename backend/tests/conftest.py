@@ -182,6 +182,12 @@ async def client():
         # write_audit / ORM 以同步方式调用 session.add（不被 await），用普通 Mock 避免
         # AsyncMock 自动生成协程导致的「coroutine never awaited」告警
         session.add = MagicMock()
+        # list_metrics 等端点会经 db.execute 批量查 pending/health（.scalars().all()/.all()）；
+        # AsyncMock 的 execute 默认返回协程，会让 .scalars()/.all() 链崩溃——模拟空结果集。
+        empty_result = MagicMock()
+        empty_result.scalars.return_value.all.return_value = []
+        empty_result.all.return_value = []
+        session.execute = AsyncMock(return_value=empty_result)
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db

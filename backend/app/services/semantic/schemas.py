@@ -178,9 +178,106 @@ class MetricDeprecateRequest(BaseModel):
 
 
 class MetricSubmitRequest(BaseModel):
-    """提交审核请求（DRAFT → REVIEW，对齐 FR-003）。"""
+    """提交审核请求（DRAFT → REVIEW，对齐 FR-003）。
+
+    评审指派（TD §13）：可指定评审用户（reviewer_type=user + reviewer_id）或
+    域评审组（reviewer_type=domain + reviewer_domain，缺省用指标自身域）。
+    均不传则未指派——由域管理员兜底评审。
+    """
 
     change_reason: str = Field(..., min_length=4, description="提交审核说明")
+    reviewer_id: int | None = Field(
+        None, description="指定评审用户 ID（reviewer_type=user 时必填）"
+    )
+    reviewer_type: Literal["user", "domain"] | None = Field(
+        None, description="评审指派类型: user(指定用户)/domain(域评审组)"
+    )
+    reviewer_domain: str | None = Field(
+        None,
+        max_length=64,
+        description="域评审组所在域（reviewer_type=domain 时生效，缺省用指标自身域）",
+    )
+
+    @field_validator("reviewer_id", "reviewer_domain", mode="after")
+    @classmethod
+    def _empty_to_none(cls, v: Any) -> Any:
+        """空字符串/0 归一为 None，前端未选择时传空串/0 不致校验失败。"""
+        if v is None:
+            return v
+        if isinstance(v, str) and not v.strip():
+            return None
+        if isinstance(v, int) and v <= 0:
+            return None
+        return v
+
+
+# ---- 批量操作 Schema（TD §13 批量治理：提交/通过/打回/下线，逐条收集结果不整体失败）----
+
+
+class MetricBatchSubmitItem(BaseModel):
+    """批量提交审核的单条项（含评审指派）。"""
+
+    metric_code: str = Field(..., max_length=64, description="指标编码")
+    change_reason: str = Field(..., min_length=4, description="提交审核说明")
+    reviewer_id: int | None = Field(None, description="指定评审用户 ID（reviewer_type=user）")
+    reviewer_type: Literal["user", "domain"] | None = Field(
+        None, description="评审指派类型: user(指定用户)/domain(域评审组)"
+    )
+    reviewer_domain: str | None = Field(
+        None, max_length=64, description="域评审组所在域（缺省用指标自身域）"
+    )
+
+
+class MetricBatchSubmitRequest(BaseModel):
+    """批量提交审核请求。"""
+
+    items: list[MetricBatchSubmitItem] = Field(..., min_length=1, max_length=100)
+
+
+class MetricBatchApproveRequest(BaseModel):
+    """批量审核通过请求（REVIEW → PUBLISHED/EXPERIMENTAL，即批量发布）。"""
+
+    metric_codes: list[str] = Field(..., min_length=1, max_length=100)
+    mode: Literal["standard", "experimental"] = Field(
+        "standard", description="发布模式: standard(全量)/experimental(灰度)"
+    )
+    gray_tenant_ids: list[int] | None = Field(None, description="灰度白名单租户 ID")
+
+
+class MetricBatchRejectRequest(BaseModel):
+    """批量审核驳回请求（REVIEW → DRAFT）。"""
+
+    metric_codes: list[str] = Field(..., min_length=1, max_length=100)
+    reason: str = Field(..., min_length=4, description="驳回原因")
+
+
+class MetricBatchDeprecateItem(BaseModel):
+    """批量下线（废弃）的单条项。"""
+
+    metric_code: str = Field(..., max_length=64, description="指标编码")
+    successor_code: str = Field(..., max_length=64, description="替代指标编码（须已发布）")
+
+
+class MetricBatchDeprecateRequest(BaseModel):
+    """批量下线（废弃）请求。"""
+
+    items: list[MetricBatchDeprecateItem] = Field(..., min_length=1, max_length=100)
+
+
+class MetricBatchItemResult(BaseModel):
+    """批量操作的单条结果（逐条收集，不因单条失败整体回滚）。"""
+
+    metric_code: str
+    ok: bool
+    message: str = ""
+
+
+class MetricBatchResponse(BaseModel):
+    """批量操作响应。"""
+
+    results: list[MetricBatchItemResult]
+    ok_count: int
+    fail_count: int
 
 
 class MetricApproveRequest(BaseModel):
@@ -336,6 +433,10 @@ class MetricResponse(BaseModel):
     # 治理追溯：审批人 / 提交人，DB 模型已有，响应透出供目录页显示
     approver_id: int | None = None
     submitted_by: int | None = None
+    # 评审指派（TD §13）：提交评审时指定的评审用户/域评审组，审批页据此校验与展示
+    reviewer_id: int | None = None
+    reviewer_type: str | None = None
+    reviewer_domain: str | None = None
     # 指标业务描述（TD §12.1 治理补充，独立于口径/版本，资产地图抽屉展示/编辑）
     description: str | None = None
     description_source: str | None = None

@@ -1164,8 +1164,36 @@ class MetricService(BaseService):
         if invalid is not None:
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
 
+        # 评审指派解析与校验（TD §13）：user 类型须带 reviewer_id；domain 类型
+        # 缺省用指标自身域；均不传则未指派（域管理员兜底评审）。
+        reviewer_updates: dict[str, Any] = {
+            "reviewer_id": None,
+            "reviewer_type": None,
+            "reviewer_domain": None,
+        }
+        rtype = request.reviewer_type
+        if rtype == "user":
+            if not request.reviewer_id:
+                raise BusinessError(
+                    "指定评审用户时须填写评审人",
+                    error_code="REVIEWER_ASSIGN_INVALID",
+                )
+            reviewer_updates["reviewer_id"] = request.reviewer_id
+            reviewer_updates["reviewer_type"] = "user"
+        elif rtype == "domain":
+            reviewer_updates["reviewer_type"] = "domain"
+            reviewer_updates["reviewer_domain"] = request.reviewer_domain or metric.domain
+        elif request.reviewer_id:
+            # 兼容旧调用：仅传 reviewer_id（未显式声明类型）按 user 处理
+            reviewer_updates["reviewer_id"] = request.reviewer_id
+            reviewer_updates["reviewer_type"] = "user"
+
         updated = await self._repo.update_with_optimistic_lock(
-            metric.id, metric.row_version, status="REVIEW", submitted_by=actor_id
+            metric.id,
+            metric.row_version,
+            status="REVIEW",
+            submitted_by=actor_id,
+            **reviewer_updates,
         )
         await self._cache.invalidate(metric_code)
 
@@ -1177,8 +1205,28 @@ class MetricService(BaseService):
                 "domain": metric.domain,
                 "submitter_id": actor_id,
                 "change_reason": request.change_reason,
+                "reviewer_id": reviewer_updates["reviewer_id"],
+                "reviewer_type": reviewer_updates["reviewer_type"],
+                "reviewer_domain": reviewer_updates["reviewer_domain"],
             },
             actor_id=str(actor_id),
+        )
+        # 审批流定向闭环：定向通知该域审核人「待审核」（独立 session，不依赖订阅）
+        await self._notify_metric_stakeholders(
+            "metric.submitted",
+            "指标待审核",
+            metric_code=metric_code,
+            domain=metric.domain,
+            submitter_id=actor_id,
+            to_reviewers=True,
+            payload={
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                "change_reason": request.change_reason,
+                "reviewer_id": reviewer_updates["reviewer_id"],
+                "reviewer_type": reviewer_updates["reviewer_type"],
+                "reviewer_domain": reviewer_updates["reviewer_domain"],
+            },
         )
 
         logger.info(
@@ -1297,6 +1345,9 @@ class MetricService(BaseService):
         """
         metric = await self.get_metric(metric_code)
 
+        # 评审人身份校验（TD §13）：仅被指派评审人（或 platform_admin 兜底）可通过
+        self._assert_reviewer_authorized(metric, actor_id, role or "", user_domain)
+
         # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人；管理员豁免
         if (
             role not in ("platform_admin", "domain_admin")
@@ -1410,6 +1461,19 @@ class MetricService(BaseService):
             event_payload,
             actor_id=str(actor_id),
         )
+        # 审批流定向闭环：定向通知提交人「已通过」（独立 session，不依赖订阅）
+        await self._notify_metric_stakeholders(
+            "metric.approved",
+            "指标已通过",
+            metric_code=metric_code,
+            domain=metric.domain,
+            submitter_id=metric.submitted_by,
+            payload={
+                "metric_code": metric_code,
+                "version": target_version,
+                "domain": metric.domain,
+            },
+        )
 
         logger.info(
             "metric_approved",
@@ -1426,6 +1490,7 @@ class MetricService(BaseService):
         request: MetricRejectRequest,
         actor_id: int,
         role: str | None = None,
+        user_domain: str | None = None,
     ) -> Metric:
         """审核驳回指标（REVIEW → DRAFT，对齐 FR-005）。
 
@@ -1434,6 +1499,7 @@ class MetricService(BaseService):
             request: 驳回请求（含 reason）。
             actor_id: 操作人 ID。
             role: 操作人角色（platform_admin/domain_admin 豁免自审禁止，同 approve_metric）。
+            user_domain: 操作人所属域（评审人身份校验用）。
 
         Returns:
             驳回后的指标。
@@ -1444,6 +1510,9 @@ class MetricService(BaseService):
             BusinessError: 非管理员自审。
         """
         metric = await self.get_metric(metric_code)
+
+        # 评审人身份校验（TD §13）：仅被指派评审人（或 platform_admin 兜底）可打回
+        self._assert_reviewer_authorized(metric, actor_id, role or "", user_domain)
 
         # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人；管理员豁免
         if (
@@ -1479,6 +1548,19 @@ class MetricService(BaseService):
             },
             actor_id=str(actor_id),
         )
+        # 审批流定向闭环：定向通知提交人「已驳回」（独立 session，不依赖订阅）
+        await self._notify_metric_stakeholders(
+            "metric.rejected",
+            "指标已驳回",
+            metric_code=metric_code,
+            domain=metric.domain,
+            submitter_id=metric.submitted_by,
+            payload={
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                "reason": request.reason,
+            },
+        )
 
         logger.info(
             "metric_rejected",
@@ -1487,6 +1569,67 @@ class MetricService(BaseService):
             actor_id=actor_id,
         )
         return updated
+
+    async def _notify_metric_stakeholders(
+        self,
+        event_type: str,
+        title: str,
+        *,
+        metric_code: str,
+        domain: str | None,
+        submitter_id: int | None,
+        to_reviewers: bool = False,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """审批流定向通知（独立 session，不干扰业务事务；best-effort）。
+
+        与 conflict.py ``notify_user`` 范式一致：IN_APP 定向送达，不依赖订阅偏好。
+        - ``to_reviewers=True``：通知该域下可审核角色（domain_admin/reviewer，active），
+          供「指标待审核」场景（TD §5.5 审批流定向闭环）；
+        - 否则通知指标提交人（submitted_by），供「已通过/已驳回」场景。
+        失败仅告警，不阻断审批主流程。
+        """
+        from app.db.mysql import async_session_factory
+        from app.services.notify.service import NotifyService
+
+        targets: list[int] = []
+        if to_reviewers:
+            from sqlalchemy import select
+
+            from app.models.user import User
+
+            async with async_session_factory() as session:
+                stmt = select(User.id).where(
+                    User.status == "active",
+                    User.role.in_(("domain_admin", "reviewer")),
+                )
+                if domain:
+                    stmt = stmt.where(User.domain == domain)
+                result = await session.execute(stmt)
+                targets = [r[0] for r in result.all()]
+            # 排除提交人本人（自审已被禁止，通知列表亦不应包含自己）
+            if submitter_id is not None:
+                targets = [uid for uid in targets if uid != submitter_id]
+        elif submitter_id is not None:
+            targets = [submitter_id]
+
+        for uid in targets:
+            async with async_session_factory() as session:
+                try:
+                    await NotifyService(session).notify_user(
+                        user_id=uid,
+                        event_type=event_type,
+                        title=title,
+                        payload=payload,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "metric_stakeholder_notify_failed event_type=%s metric=%s user=%s err=%s",
+                        event_type,
+                        metric_code,
+                        uid,
+                        exc,
+                    )
 
     async def deprecate_metric(
         self,
@@ -2173,6 +2316,70 @@ class MetricService(BaseService):
             error_code="FORBIDDEN",
             ctx={"metric_code": metric.metric_code, "role": role},
         )
+
+    def _assert_reviewer_authorized(
+        self,
+        metric: Metric,
+        actor_id: int,
+        role: str,
+        user_domain: str | None,
+    ) -> None:
+        """评审人身份校验：仅被指派评审人可通过/打回指标（TD §13 治理闭环）。
+
+        - ``platform_admin``：始终可审（最终兜底）。
+        - ``reviewer_type=user``：仅 ``reviewer_id`` 指定的用户可审。
+        - ``reviewer_type=domain``：仅该域 ``domain_admin``/``reviewer`` 角色用户可审。
+        - 未指派：``domain_admin`` 兜底可审（保持既有语义）。
+
+        端点角色门禁已放宽至含 ``reviewer``，此处为服务层最终判定；
+        跨域指派（域不匹配）由 PDP 的域/授权闸门再行校验，双层防御。
+
+        Args:
+            metric: 指标对象。
+            actor_id: 操作人 ID。
+            role: 操作人角色。
+            user_domain: 操作人所属域。
+
+        Raises:
+            AuthError: 非被指派评审人。
+        """
+        if role == "platform_admin":
+            return
+
+        if metric.reviewer_type == "user" and metric.reviewer_id is not None:
+            if actor_id != metric.reviewer_id:
+                raise AuthError(
+                    "该指标已指派给指定评审人，仅被指派者可通过/打回",
+                    error_code="FORBIDDEN_REVIEWER",
+                    ctx={"metric_code": metric.metric_code, "reviewer_id": metric.reviewer_id},
+                )
+            return
+
+        if metric.reviewer_type == "domain" and metric.reviewer_domain:
+            if role not in ("domain_admin", "reviewer"):
+                raise AuthError(
+                    "该指标已指派给域评审组，仅域管理员/评审员可通过/打回",
+                    error_code="FORBIDDEN_REVIEWER",
+                    ctx={
+                        "metric_code": metric.metric_code,
+                        "reviewer_domain": metric.reviewer_domain,
+                    },
+                )
+            if user_domain != metric.reviewer_domain:
+                raise AuthError(
+                    f"仅 {metric.reviewer_domain} 域评审组成员可评审该指标",
+                    error_code="FORBIDDEN_REVIEWER",
+                    ctx={"metric_code": metric.metric_code, "user_domain": user_domain},
+                )
+            return
+
+        # 未指派：域管理员兜底（保持既有"仅管理角色可审"语义）
+        if role != "domain_admin":
+            raise AuthError(
+                "未指派评审人，仅域管理员可评审该指标",
+                error_code="FORBIDDEN_REVIEWER",
+                ctx={"metric_code": metric.metric_code, "role": role},
+            )
 
     async def _publish(self, metric: Metric, target_version: int, actor_id: int) -> Metric:
         """执行发布落库：PII 合规闸门 + 状态/生效版本转正 + 版本标记 + 缓存失效。

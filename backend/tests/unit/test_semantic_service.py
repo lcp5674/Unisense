@@ -45,6 +45,9 @@ def _svc_with_repo() -> tuple[MetricService, MagicMock]:
     )
     with patch("app.services.semantic.service.MetricRepository") as mock_repo_cls:
         svc = MetricService(db=MagicMock(), governance_svc=mock_gov_svc)
+        # submit 路径会经 _notify_metric_stakeholders 开独立 DB 会话做定向通知，
+        # 单元测试中会跨事件循环连库产生 RuntimeError——统一 mock 掉（通知行为另有集成测试）。
+        svc._notify_metric_stakeholders = AsyncMock(return_value=None)
         return svc, mock_repo_cls.return_value
 
 
@@ -241,7 +244,7 @@ async def test_publish_metric_success():
         "sales_gmv_daily",
         MetricPublishRequest(version=1, change_reason="首次发布"),
         actor_id=1,
-        role="metric_owner",
+        role="domain_admin",
     )
 
     assert result.status == "PUBLISHED"
@@ -262,7 +265,7 @@ async def test_publish_metric_pii_blocked_without_compliance():
             "sales_gmv_daily",
             MetricPublishRequest(version=1, change_reason="发布含 PII 指标"),
             actor_id=1,
-            role="metric_owner",
+            role="domain_admin",
         )
     assert exc.value.error_code == "COMPLIANCE_BLOCKED"
 
@@ -534,9 +537,25 @@ async def test_create_metric_explicit_code_still_validated():
 # ---- approve/reject 自审豁免（管理员可审核自己提交的指标，普通角色仍禁止）----
 
 
-def _svc_approve_ready(svc, repo, *, submitted_by: int = 1, status: str = "REVIEW"):
+def _svc_approve_ready(
+    svc,
+    repo,
+    *,
+    submitted_by: int = 1,
+    status: str = "REVIEW",
+    reviewer_id: int | None = None,
+    reviewer_type: str | None = None,
+    reviewer_domain: str | None = None,
+):
     """准备 approve/reject 所需的 mock 环境，返回指标。"""
-    metric = make_metric(status=status, submitted_by=submitted_by, owner_id=2)
+    metric = make_metric(
+        status=status,
+        submitted_by=submitted_by,
+        owner_id=2,
+        reviewer_id=reviewer_id,
+        reviewer_type=reviewer_type,
+        reviewer_domain=reviewer_domain,
+    )
     repo.get_by_code = AsyncMock(return_value=metric)
     repo.get_version = AsyncMock(return_value=MagicMock(id=1, version=1))
     repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
@@ -578,9 +597,9 @@ async def test_approve_metric_domain_admin_can_self_review():
 
 
 async def test_approve_metric_non_admin_self_review_blocked():
-    """普通角色（reviewer）自审仍被禁止。"""
+    """普通角色（reviewer）即便被指派为评审人，自审仍被禁止。"""
     svc, repo = _svc_with_repo()
-    _svc_approve_ready(svc, repo, submitted_by=1)
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_id=1, reviewer_type="user")
 
     with pytest.raises(BusinessError) as exc:
         await svc.approve_metric(
@@ -596,7 +615,7 @@ async def test_approve_metric_non_admin_self_review_blocked():
 async def test_approve_metric_no_role_self_review_blocked():
     """role 缺省（None）按严格模式处理——向后兼容不传 role 的调用方。"""
     svc, repo = _svc_with_repo()
-    _svc_approve_ready(svc, repo, submitted_by=1)
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_id=1, reviewer_type="user")
 
     with pytest.raises(BusinessError) as exc:
         await svc.approve_metric(
@@ -608,9 +627,9 @@ async def test_approve_metric_no_role_self_review_blocked():
 
 
 async def test_approve_metric_different_actor_still_allowed():
-    """提交人与审核人不同时，任何角色均可审核（不触发自审分支）。"""
+    """被指派评审人（非提交人）审核通过——评审人校验放行 + 不触发自审。"""
     svc, repo = _svc_with_repo()
-    _svc_approve_ready(svc, repo, submitted_by=1)
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_id=99, reviewer_type="user")
 
     result = await svc.approve_metric(
         "sales_gmv_daily",
@@ -620,6 +639,167 @@ async def test_approve_metric_different_actor_still_allowed():
     )
 
     assert result.status == "PUBLISHED"
+
+
+# ---- 评审指派（TD §13）：提交保存指派 + 仅被指派评审人可通过/打回 ----
+
+
+async def test_submit_metric_saves_user_reviewer():
+    """提交评审指定用户评审人：reviewer_id/reviewer_type 落库。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="REVIEW"))
+    svc._publish_event = AsyncMock()
+
+    await svc.submit_metric(
+        "sales_gmv_daily",
+        MetricSubmitRequest(
+            change_reason="提交审核", reviewer_id=7, reviewer_type="user"
+        ),
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+    )
+    kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert kwargs["reviewer_id"] == 7
+    assert kwargs["reviewer_type"] == "user"
+    assert kwargs["reviewer_domain"] is None
+
+
+async def test_submit_metric_domain_reviewer_defaults_to_metric_domain():
+    """域评审组未指定域时缺省用指标自身域。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="DRAFT", owner_id=1, domain="sales")
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="REVIEW"))
+    svc._publish_event = AsyncMock()
+
+    await svc.submit_metric(
+        "sales_gmv_daily",
+        MetricSubmitRequest(change_reason="提交审核", reviewer_type="domain"),
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+    )
+    kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert kwargs["reviewer_type"] == "domain"
+    assert kwargs["reviewer_domain"] == "sales"
+
+
+async def test_submit_metric_user_reviewer_without_id_rejected():
+    """指定 user 评审类型但未填评审人 → REVIEWER_ASSIGN_INVALID。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.submit_metric(
+            "sales_gmv_daily",
+            MetricSubmitRequest(change_reason="提交审核", reviewer_type="user"),
+            actor_id=1,
+            role="metric_owner",
+        )
+    assert exc.value.error_code == "REVIEWER_ASSIGN_INVALID"
+
+
+async def test_approve_metric_non_assigned_reviewer_rejected():
+    """已指派评审用户，非被指派者（且非 platform_admin）通过 → FORBIDDEN_REVIEWER。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_id=7, reviewer_type="user")
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily",
+            MetricApproveRequest(mode="standard", target_version=1),
+            actor_id=99,
+            role="reviewer",
+        )
+    assert exc.value.error_code == "FORBIDDEN_REVIEWER"
+    repo.update_with_optimistic_lock.assert_not_awaited()
+
+
+async def test_approve_metric_domain_team_same_domain_allowed():
+    """域评审组：同域 reviewer 角色可通过。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(
+        svc, repo, submitted_by=1, reviewer_type="domain", reviewer_domain="sales"
+    )
+
+    result = await svc.approve_metric(
+        "sales_gmv_daily",
+        MetricApproveRequest(mode="standard", target_version=1),
+        actor_id=50,
+        role="reviewer",
+        user_domain="sales",
+    )
+    assert result.status == "PUBLISHED"
+
+
+async def test_approve_metric_domain_team_wrong_domain_rejected():
+    """域评审组：非该域用户（即便 reviewer 角色）→ FORBIDDEN_REVIEWER。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(
+        svc, repo, submitted_by=1, reviewer_type="domain", reviewer_domain="sales"
+    )
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily",
+            MetricApproveRequest(mode="standard", target_version=1),
+            actor_id=50,
+            role="reviewer",
+            user_domain="finance",
+        )
+    assert exc.value.error_code == "FORBIDDEN_REVIEWER"
+
+
+async def test_approve_metric_domain_team_non_reviewer_role_rejected():
+    """域评审组：非 domain_admin/reviewer 角色（如 metric_owner）→ FORBIDDEN_REVIEWER。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(
+        svc, repo, submitted_by=1, reviewer_type="domain", reviewer_domain="sales"
+    )
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily",
+            MetricApproveRequest(mode="standard", target_version=1),
+            actor_id=50,
+            role="metric_owner",
+            user_domain="sales",
+        )
+    assert exc.value.error_code == "FORBIDDEN_REVIEWER"
+
+
+async def test_approve_metric_unassigned_non_domain_admin_rejected():
+    """未指派评审人：非 domain_admin（reviewer 角色）→ FORBIDDEN_REVIEWER。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1)
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily",
+            MetricApproveRequest(mode="standard", target_version=1),
+            actor_id=50,
+            role="reviewer",
+            user_domain="sales",
+        )
+    assert exc.value.error_code == "FORBIDDEN_REVIEWER"
+
+
+async def test_reject_metric_non_assigned_reviewer_rejected():
+    """已指派评审用户，非被指派者打回 → FORBIDDEN_REVIEWER。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_id=7, reviewer_type="user")
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.reject_metric(
+            "sales_gmv_daily",
+            MetricRejectRequest(reason="口径需调整"),
+            actor_id=99,
+            role="reviewer",
+        )
+    assert exc.value.error_code == "FORBIDDEN_REVIEWER"
+    repo.update_with_optimistic_lock.assert_not_awaited()
 
 
 async def test_reject_metric_admin_can_self_review():
@@ -639,9 +819,9 @@ async def test_reject_metric_admin_can_self_review():
 
 
 async def test_reject_metric_non_admin_self_review_blocked():
-    """普通角色自驳回仍被禁止。"""
+    """普通角色即便被指派为评审人，自驳回仍被禁止。"""
     svc, repo = _svc_with_repo()
-    _svc_approve_ready(svc, repo, submitted_by=1)
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_id=1, reviewer_type="user")
 
     with pytest.raises(BusinessError) as exc:
         await svc.reject_metric(
@@ -807,7 +987,9 @@ async def test_approve_metric_experimental_mode():
 
 async def test_approve_metric_self_review_blocked():
     svc, repo = _svc_with_repo()
-    metric = make_metric(status="REVIEW", owner_id=1)
+    metric = make_metric(
+        status="REVIEW", owner_id=1, reviewer_id=1, reviewer_type="user"
+    )
     metric.submitted_by = 1
     repo.get_by_code = AsyncMock(return_value=metric)
     with pytest.raises(BusinessError) as exc:

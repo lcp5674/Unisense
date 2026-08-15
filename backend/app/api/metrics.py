@@ -25,7 +25,13 @@ from app.db.redis import get_redis
 from app.services.collector.infer_guard import InferInflightGuard
 from app.services.semantic.schemas import (
     MetricApproveRequest,
+    MetricBatchApproveRequest,
+    MetricBatchDeprecateRequest,
+    MetricBatchItemResult,
     MetricBatchRegisterRequest,
+    MetricBatchRejectRequest,
+    MetricBatchResponse,
+    MetricBatchSubmitRequest,
     MetricCompareRequest,
     MetricCreateRequest,
     MetricDeprecateRequest,
@@ -94,6 +100,9 @@ async def _metric_infer_inflight(metric_code: str) -> AsyncIterator[None]:
 
 # 语义定义写操作允许的角色（对齐 RBAC：平台/域管理员 + 指标 Owner）
 _WRITE_ROLES = ("platform_admin", "domain_admin", "metric_owner")
+# 评审角色（TD §13 评审指派）：除管理角色外，被指派的评审员（reviewer 角色）
+# 也可通过/打回指标——具体能否评审由 service 层按指派校验，此处仅放开入口
+_REVIEW_ROLES = ("platform_admin", "domain_admin", "reviewer")
 # PII 合规复核须由合规/域管理员执行，禁止指标 Owner 自审
 # （对齐治理 COMPL-2 / governance._COMPLIANCE_ROLES）
 _PII_REVIEW_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
@@ -694,7 +703,7 @@ async def submit_metric(
     "/{metric_code}/approve",
     response_model=ApiResponse[MetricResponse],
     summary="审核通过指标（FR-004，REVIEW → PUBLISHED/EXPERIMENTAL）",
-    dependencies=[Depends(require_roles(*_PII_REVIEW_ROLES)), Depends(guard_against_injection)],
+    dependencies=[Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)],
 )
 async def approve_metric(
     metric_code: str,
@@ -730,7 +739,7 @@ async def approve_metric(
     "/{metric_code}/reject",
     response_model=ApiResponse[MetricResponse],
     summary="审核驳回指标（FR-005，REVIEW → DRAFT）",
-    dependencies=[Depends(require_roles(*_PII_REVIEW_ROLES)), Depends(guard_against_injection)],
+    dependencies=[Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)],
 )
 async def reject_metric(
     metric_code: str,
@@ -742,7 +751,9 @@ async def reject_metric(
 ) -> ApiResponse[MetricResponse]:
     """REVIEW → DRAFT，驳回审核。须填驳回原因，通知 Owner。"""
     service = MetricService(db)
-    metric = await service.reject_metric(metric_code, request, actor_id=user.id, role=user.role)
+    metric = await service.reject_metric(
+        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -1319,3 +1330,193 @@ async def auto_suggest_metric(
 
     result["related_tables"] = related_tables
     return ok(data=result, trace_id=trace_id)
+
+
+# ---- 批量治理端点（TD §13：提交/通过/打回/下线，逐条收集结果不整体失败）----
+
+
+def _batch_response(results: list[MetricBatchItemResult]) -> MetricBatchResponse:
+    """组装批量响应（统计成功/失败数）。"""
+    return MetricBatchResponse(
+        results=results,
+        ok_count=sum(1 for r in results if r.ok),
+        fail_count=sum(1 for r in results if not r.ok),
+    )
+
+
+@router.post(
+    "/batch-submit",
+    response_model=ApiResponse[MetricBatchResponse],
+    summary="批量提交指标审核（可带评审指派，TD §13）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_submit_metrics(
+    request: MetricBatchSubmitRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricBatchResponse]:
+    """逐条 DRAFT→REVIEW；单条失败不阻断其余（返回逐条结果）。"""
+    service = MetricService(db)
+    results: list[MetricBatchItemResult] = []
+    for item in request.items:
+        try:
+            await service.submit_metric(
+                item.metric_code,
+                MetricSubmitRequest(
+                    change_reason=item.change_reason,
+                    reviewer_id=item.reviewer_id,
+                    reviewer_type=item.reviewer_type,
+                    reviewer_domain=item.reviewer_domain,
+                ),
+                actor_id=user.id,
+                role=user.role,
+                user_domain=user.domain,
+            )
+            results.append(MetricBatchItemResult(metric_code=item.metric_code, ok=True))
+        except Exception as exc:  # noqa: BLE001 - 批量逐条容错，单条失败不整体回滚
+            results.append(
+                MetricBatchItemResult(metric_code=item.metric_code, ok=False, message=str(exc))
+            )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="BATCH_SUBMIT",
+        entity_type="metric_definition",
+        entity_id=f"batch:{len(request.items)}",
+        detail={"ok": sum(1 for r in results if r.ok), "fail": sum(1 for r in results if not r.ok)},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=_batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-approve",
+    response_model=ApiResponse[MetricBatchResponse],
+    summary="批量审核通过（REVIEW → PUBLISHED/EXPERIMENTAL，即批量发布）",
+    dependencies=[Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)],
+)
+async def batch_approve_metrics(
+    request: MetricBatchApproveRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricBatchResponse]:
+    """逐条 REVIEW→PUBLISHED/EXPERIMENTAL；评审人指派校验由 service 层逐条执行。"""
+    service = MetricService(db)
+    results: list[MetricBatchItemResult] = []
+    for code in request.metric_codes:
+        try:
+            await service.approve_metric(
+                code,
+                MetricApproveRequest(
+                    mode=request.mode, gray_tenant_ids=request.gray_tenant_ids
+                ),
+                actor_id=user.id,
+                role=user.role,
+                user_domain=user.domain,
+            )
+            results.append(MetricBatchItemResult(metric_code=code, ok=True))
+        except Exception as exc:  # noqa: BLE001 - 批量逐条容错
+            results.append(MetricBatchItemResult(metric_code=code, ok=False, message=str(exc)))
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="BATCH_APPROVE",
+        entity_type="metric_definition",
+        entity_id=f"batch:{len(request.metric_codes)}",
+        detail={"mode": request.mode, "ok": sum(1 for r in results if r.ok)},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=_batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-reject",
+    response_model=ApiResponse[MetricBatchResponse],
+    summary="批量审核驳回（REVIEW → DRAFT）",
+    dependencies=[Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)],
+)
+async def batch_reject_metrics(
+    request: MetricBatchRejectRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricBatchResponse]:
+    """逐条 REVIEW→DRAFT；评审人指派校验由 service 层逐条执行。"""
+    service = MetricService(db)
+    results: list[MetricBatchItemResult] = []
+    for code in request.metric_codes:
+        try:
+            await service.reject_metric(
+                code,
+                MetricRejectRequest(reason=request.reason),
+                actor_id=user.id,
+                role=user.role,
+                user_domain=user.domain,
+            )
+            results.append(MetricBatchItemResult(metric_code=code, ok=True))
+        except Exception as exc:  # noqa: BLE001 - 批量逐条容错
+            results.append(MetricBatchItemResult(metric_code=code, ok=False, message=str(exc)))
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="BATCH_REJECT",
+        entity_type="metric_definition",
+        entity_id=f"batch:{len(request.metric_codes)}",
+        detail={"ok": sum(1 for r in results if r.ok)},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=_batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-deprecate",
+    response_model=ApiResponse[MetricBatchResponse],
+    summary="批量下线（废弃）指标（PUBLISHED → DEPRECATED）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_deprecate_metrics(
+    request: MetricBatchDeprecateRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricBatchResponse]:
+    """逐条 PUBLISHED→DEPRECATED（每项须带替代指标）；单条失败不阻断其余。"""
+    service = MetricService(db)
+    results: list[MetricBatchItemResult] = []
+    for item in request.items:
+        try:
+            await service.deprecate_metric(
+                item.metric_code,
+                item.successor_code,
+                actor_id=user.id,
+                role=user.role,
+            )
+            results.append(MetricBatchItemResult(metric_code=item.metric_code, ok=True))
+        except Exception as exc:  # noqa: BLE001 - 批量逐条容错
+            results.append(
+                MetricBatchItemResult(metric_code=item.metric_code, ok=False, message=str(exc))
+            )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="BATCH_DEPRECATE",
+        entity_type="metric_definition",
+        entity_id=f"batch:{len(request.items)}",
+        detail={"ok": sum(1 for r in results if r.ok)},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=_batch_response(results), trace_id=trace_id)
