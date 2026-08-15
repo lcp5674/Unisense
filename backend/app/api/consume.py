@@ -307,11 +307,11 @@ async def list_metric_snapshots(
     return ok(data=await svc.list_snapshots(code, limit, offset))
 
 
-@router.get("/consume/me/favorites", response_model=ApiResponse[list[str]])
+@router.get("/consume/me/favorites", response_model=ApiResponse[list[dict[str, str]]])
 async def get_favorites(
     user: CurrentUser,
     db: AsyncSession = Depends(get_db_session),
-) -> ApiResponse[list[str]]:
+) -> ApiResponse[list[dict[str, str]]]:
     svc = ConsumeService(db)
     return ok(data=await svc.list_favorites(user.id))
 
