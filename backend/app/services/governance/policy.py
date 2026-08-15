@@ -294,6 +294,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "audit:view", "domains:view", "domain:create", "dicts:view", "dict:create",
             "api-clients:view", "system-config:view", "observability:view",
             "tracking-stats:view", "feedback:view", "guide:view",
+            "pii:review",
         }
     ),
     RoleName.METRIC_OWNER.value: frozenset(

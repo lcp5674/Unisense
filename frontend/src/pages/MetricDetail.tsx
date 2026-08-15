@@ -31,6 +31,7 @@ import {
   EditOutlined,
   RobotOutlined,
 } from "@ant-design/icons";
+import { usePermission } from "../hooks/usePermission";
 import {
   addFavorite,
   approveMetric,
@@ -674,8 +675,21 @@ export function MetricDetail() {
   const role = currentUser?.role || "";
   const isAdmin = role === "platform_admin" || role === "domain_admin";
   const isOwnerOrAdmin = isAdmin || role === "metric_owner";
-  const canPiiReview = isAdmin && metric.pii_flag;
   const piiMasked = metric.pii_flag && !SENSITIVE_ROLES.includes(role);
+
+  // 按钮级权限点（细粒度管控，方案 C）：与后端 require_roles 对齐——
+  // 提交评审=metric:create、发布/灰度=metric:approve、PII 复核=pii:review、
+  // 紧急发布=metric:emergency-publish、废弃=metric:deprecate、
+  // 全量发布/回滚/改名=metric:edit（写操作，owner 归属由后端 PDP 强制）。
+  // can() 控制按钮可见性；后端接口强制仍为最终边界，二者不互相替代。
+  const { can } = usePermission();
+  const canApprove = can("metric:approve");
+  const canDeprecate = can("metric:deprecate");
+  const canEdit = can("metric:edit");
+  const canPii = can("pii:review");
+  const canEmergency = can("metric:emergency-publish");
+  const canCreate = can("metric:create");
+  const piiUnreviewed = metric.pii_flag && !metric.compliance_reviewed;
 
   const headerActions = (
     <Space wrap>
@@ -706,7 +720,7 @@ export function MetricDetail() {
 
   const actions = (
     <Space wrap style={{ marginBottom: 16 }}>
-      {(metric.status === "DRAFT" || metric.status === "EXPERIMENTAL" || metric.status === "DEPRECATED") && (
+      {(metric.status === "DRAFT" || metric.status === "EXPERIMENTAL" || metric.status === "DEPRECATED") && canCreate && (
         <Button
           icon={<SendOutlined />}
           loading={busy}
@@ -719,22 +733,22 @@ export function MetricDetail() {
           {metric.status === "DEPRECATED" ? "重新提交评审" : "提交评审"}
         </Button>
       )}
-      {metric.status === "REVIEW" && isAdmin && (
+      {metric.status === "REVIEW" && canApprove && (
         <Button
           type="primary"
           loading={busy}
           onClick={() => runAction(() => approveMetric(metric.metric_code, {}), "正式发布")}
-          disabled={metric.pii_flag && !metric.compliance_reviewed}
+          disabled={piiUnreviewed}
         >
-          正式发布{metric.pii_flag && !metric.compliance_reviewed ? "（需先 PII 复核）" : ""}
+          正式发布{piiUnreviewed ? "（需先 PII 复核）" : ""}
         </Button>
       )}
-      {metric.status === "REVIEW" && isAdmin && (
+      {metric.status === "REVIEW" && canApprove && (
         <Button icon={<ExperimentOutlined />} loading={busy} onClick={() => setGrayOpen(true)}>
           灰度发布
         </Button>
       )}
-      {metric.status === "EXPERIMENTAL" && isOwnerOrAdmin && (
+      {metric.status === "EXPERIMENTAL" && isOwnerOrAdmin && canEdit && (
         <>
           <Button icon={<RiseOutlined />} loading={busy} onClick={() => runAction(() => promoteMetric(metric.metric_code), "全量发布")}>
             全量发布
@@ -744,22 +758,22 @@ export function MetricDetail() {
           </Button>
         </>
       )}
-      {canPiiReview && !metric.compliance_reviewed && (
+      {canPii && piiUnreviewed && (
         <Button loading={busy} onClick={() => runAction(() => piiReview(metric.metric_code), "PII 复核")}>
           PII 合规复核
         </Button>
       )}
-      {(metric.status === "DRAFT" || metric.status === "REVIEW") && isAdmin && (
+      {(metric.status === "DRAFT" || metric.status === "REVIEW") && canEmergency && (
         <Button danger icon={<ThunderboltOutlined />} loading={busy} onClick={() => setEmergencyOpen(true)}>
           紧急发布
         </Button>
       )}
-      {metric.status !== "DEPRECATED" && isOwnerOrAdmin && (
+      {metric.status !== "DEPRECATED" && isOwnerOrAdmin && canDeprecate && (
         <Button danger loading={busy} onClick={() => setDeprecateOpen(true)}>
           废弃
         </Button>
       )}
-      {metric.arbitration_mark?.rename_required && isOwnerOrAdmin && (
+      {metric.arbitration_mark?.rename_required && isOwnerOrAdmin && canEdit && (
         <Button
           type="primary"
           icon={<EditOutlined />}

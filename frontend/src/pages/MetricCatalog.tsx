@@ -36,6 +36,7 @@ import {
 import type { MetricResponse, SubjectDomainTreeNode } from "../types";
 import type { ColumnsType } from "antd/es/table";
 import { useTracking } from "../hooks/useTracking";
+import { usePermission } from "../hooks/usePermission";
 import {
   AGGREGATION_LABEL,
   DW_LAYER_LABEL,
@@ -262,6 +263,10 @@ export function MetricCatalog() {
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   // 只看收藏：客户端过滤当前页（后端 list 无收藏过滤参数）
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  // 批量操作权限点（方案 C 按钮级管控）：提交/删除=metric:create、通过/打回=metric:approve、
+  // 下线=metric:deprecate。can() 控制批量操作按钮可用性；后端接口强制仍为最终边界。
+  const { can } = usePermission();
+  const canBatchManage = can("metric:create") || can("metric:approve") || can("metric:deprecate");
   // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除 /
   // approve=批量通过 / reject=批量打回 / deprecate=批量下线
   const [batchAction, setBatchAction] = useState<
@@ -762,7 +767,7 @@ export function MetricCatalog() {
             }}
             trigger={["click"]}
           >
-            <Button icon={<ThunderboltOutlined />} disabled={!selected.length}>
+            <Button icon={<ThunderboltOutlined />} disabled={!selected.length || !canBatchManage}>
               批量操作
             </Button>
           </Dropdown>

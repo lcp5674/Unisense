@@ -14,6 +14,7 @@ vi.mock("../api", () => ({
   removeFavorite: vi.fn(),
   submitReview: vi.fn(),
   deleteMetric: vi.fn(),
+  fetchMyPermissions: vi.fn(),
 }));
 const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
@@ -31,8 +32,10 @@ import {
   removeFavorite,
   submitReview,
   deleteMetric,
+  fetchMyPermissions,
 } from "../api";
 import type { MetricResponse, MetricListResponse } from "../types";
+import { PermissionProvider } from "../hooks/usePermission";
 const mockedList = vi.mocked(listMetrics);
 const mockedDashboard = vi.mocked(fetchDashboard);
 const mockedUsers = vi.mocked(listUsers);
@@ -43,6 +46,7 @@ const mockedAddFavorite = vi.mocked(addFavorite);
 const mockedRemoveFavorite = vi.mocked(removeFavorite);
 const mockedSubmitReview = vi.mocked(submitReview);
 const mockedDeleteMetric = vi.mocked(deleteMetric);
+const mockedPermissions = vi.mocked(fetchMyPermissions);
 
 const metric: MetricResponse = {
   id: 1,
@@ -439,6 +443,72 @@ describe("MetricCatalog", () => {
     fireEvent.click(screen.getByRole("button", { name: "删 除" }));
     await waitFor(() => {
       expect(mockedDeleteMetric).toHaveBeenCalledWith("sales_gmv_sum_d");
+    });
+  });
+});
+
+describe("MetricCatalog - 按钮级权限点过滤", () => {
+  function renderWithPerm(uiActions: string[]) {
+    mockedPermissions.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: uiActions,
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    const user = {
+      id: 1,
+      username: "zhangsan",
+      display_name: "张三",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    };
+    return render(
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route
+            path="/catalog"
+            element={
+              <PermissionProvider user={user}>
+                <MetricCatalog />
+              </PermissionProvider>
+            }
+          />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("无按钮级权限点时批量操作按钮禁用", async () => {
+    const draft = { ...metric, status: "DRAFT" as const };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    renderWithPerm([]);
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    await waitFor(() => {
+      const btn = screen.getByRole("button", { name: /批量操作/ }) as HTMLButtonElement;
+      expect(btn.disabled).toBe(true);
+    });
+  });
+
+  it("具备 metric:approve 权限点时批量操作按钮可用", async () => {
+    const draft = { ...metric, status: "DRAFT" as const };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    renderWithPerm(["metric:approve"]);
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    await waitFor(() => {
+      const btn = screen.getByRole("button", { name: /批量操作/ }) as HTMLButtonElement;
+      expect(btn.disabled).toBe(false);
     });
   });
 });

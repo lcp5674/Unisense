@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { MetricDetail } from "../pages/MetricDetail";
+import { PermissionProvider } from "../hooks/usePermission";
 import type { MetricHealth, MetricResponse } from "../types";
 
 vi.mock("../api", () => ({
@@ -9,6 +10,7 @@ vi.mock("../api", () => ({
   fetchArchivedMetric: vi.fn(),
   listVersions: vi.fn(),
   fetchCurrentUser: vi.fn(),
+  fetchMyPermissions: vi.fn(),
   listFavorites: vi.fn(),
   getMetricHealth: vi.fn(),
   listUsers: vi.fn(),
@@ -51,6 +53,7 @@ import {
   fetchArchivedMetric,
   listVersions,
   fetchCurrentUser,
+  fetchMyPermissions,
   listFavorites,
   getMetricHealth,
   listUsers,
@@ -66,6 +69,7 @@ const mockedSuggestRename = vi.mocked(suggestRenameName);
 const mockedGetMetric = vi.mocked(getMetric);
 const mockedFetchArchived = vi.mocked(fetchArchivedMetric);
 const mockedListVersions = vi.mocked(listVersions);
+const mockedMyPerms = vi.mocked(fetchMyPermissions);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedHealth = vi.mocked(getMetricHealth);
@@ -401,5 +405,62 @@ describe("MetricDetail", () => {
         reviewer_domain: "sales",
       }),
     );
+  });
+});
+
+describe("MetricDetail 按钮级权限过滤", () => {
+  function renderWithPerms(ui_actions: string[]) {
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "custom",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions,
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    return render(
+      <MemoryRouter initialEntries={[{ pathname: "/detail/sales_gmv_sum_d" }]}>
+        <Routes>
+          <Route
+            path="/detail/:code"
+            element={
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: "sales", org_id: 1 }}>
+                <MetricDetail />
+              </PermissionProvider>
+            }
+          />
+          <Route path="/catalog" element={<div>catalog-page</div>} />
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("有 metric:approve 权限点时 REVIEW 状态显示正式/灰度发布按钮", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: false });
+    renderWithPerms(["metric:approve", "metric:emergency-publish"]);
+    expect(await screen.findByText("正式发布")).toBeInTheDocument();
+    expect(screen.getByText("灰度发布")).toBeInTheDocument();
+    expect(screen.getByText("紧急发布")).toBeInTheDocument();
+  });
+
+  it("无 metric:approve 权限点时 REVIEW 状态不显示发布按钮", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: false });
+    renderWithPerms(["metric:view"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    // 等待权限快照加载后断言按钮隐藏
+    await waitFor(() => expect(screen.queryByText("正式发布")).not.toBeInTheDocument());
+    expect(screen.queryByText("灰度发布")).not.toBeInTheDocument();
+    expect(screen.queryByText("紧急发布")).not.toBeInTheDocument();
+  });
+
+  it("无 metric:deprecate 权限点时 PUBLISHED 状态不显示废弃按钮", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "PUBLISHED", pii_flag: false });
+    renderWithPerms(["metric:view"]);
+    await waitFor(() => expect(screen.queryByText("废弃")).not.toBeInTheDocument());
   });
 });
