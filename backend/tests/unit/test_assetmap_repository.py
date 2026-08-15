@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -597,9 +598,48 @@ class TestAggregations:
         r_stats.one.return_value = SimpleNamespace(total=4, published=2, draft=1, pii_count=1)
         r_domain = MagicMock()
         r_domain.all.return_value = [("sales", 4)]
-        r_catalog = MagicMock()
-        r_catalog.scalar.return_value = 7
-        s.execute = AsyncMock(side_effect=[r_stats, r_domain, r_catalog])
+        r_type = MagicMock()
+        r_type.all.return_value = [("atomic", 3), ("derived", 1)]
+        r_tier = MagicMock()
+        r_tier.all.return_value = [("T1", 2), ("T3", 2)]
+        r_pii = MagicMock()
+        r_pii.scalar.return_value = 1
+        r_dep = MagicMock()
+        r_dep.scalar.return_value = 0
+        r_cat = MagicMock()
+        r_cat.all.return_value = [
+            SimpleNamespace(
+                id=1,
+                entity_name="catalog.db.t",
+                entity_type="table",
+                sensitivity_level="PII",
+                source_id="s1",
+                updated_at=None,
+            )
+        ]
+        r_src = MagicMock()
+        r_src.all.return_value = [("s1", "Source A", "sales")]
+        r_usr = MagicMock()
+        r_usr.all.return_value = [(9, "Bob", "bob")]
+        r_metric_codes = MagicMock()
+        r_metric_codes.scalars.return_value.all.return_value = ["m1", "m2", "m3", "m4"]
+        r_snap_codes = MagicMock()
+        r_snap_codes.scalars.return_value.all.return_value = ["m1"]
+        s.execute = AsyncMock(
+            side_effect=[
+                r_stats,
+                r_domain,
+                r_type,
+                r_tier,
+                r_pii,
+                r_dep,
+                r_cat,
+                r_src,
+                r_usr,
+                r_metric_codes,
+                r_snap_codes,
+            ]
+        )
 
         out = await repo.owner_aggregation(owner_id=9)
 
@@ -607,7 +647,63 @@ class TestAggregations:
         assert out["metrics"]["total"] == 4
         assert out["metrics"]["published"] == 2
         assert out["metrics"]["by_domain"] == {"sales": 4}
-        assert out["catalogs"]["total"] == 7
+        assert out["metrics"]["by_type"] == {"atomic": 3, "derived": 1}
+        assert out["metrics"]["by_metric_tier"] == {"T1": 2, "T3": 2}
+        assert out["metrics"]["snapshot_covered"] == 1
+        assert out["metrics"]["todo"]["pii_unreviewed"] == 1
+        # 目录明细（可下钻，替代纯数字）
+        assert out["catalogs"]["total"] == 1
+        assert out["catalogs"]["items"][0]["entity_name"] == "catalog.db.t"
+        assert out["catalogs"]["items"][0]["source_name"] == "Source A"
+        assert out["catalogs"]["items"][0]["owner_name"] == "Bob"
+
+    async def test_metric_dimension_summary(self) -> None:
+        """指标体系聚合：8 类维度分布 + PII 合规率。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+
+        def dist(*pairs: tuple[str, int]) -> MagicMock:
+            r = MagicMock()
+            r.all.return_value = list(pairs)
+            return r
+
+        r_pii_total = MagicMock()
+        r_pii_total.scalar.return_value = 4
+        r_pii_reviewed = MagicMock()
+        r_pii_reviewed.scalar.return_value = 3
+        r_total = MagicMock()
+        r_total.scalar.return_value = 10
+        # 顺序：pii_total → pii_reviewed → metric_total → 8 类 distribution
+        s.execute = AsyncMock(
+            side_effect=[
+                r_pii_total,
+                r_pii_reviewed,
+                r_total,
+                dist(("atomic", 7), ("derived", 3)),  # type
+                dist(("DWS", 6), ("ADS", 4)),  # dw_layer
+                dist(("T1", 3), ("T2", 2), ("T3", 5)),  # tier
+                dist(("CNY", 3), ("cnt", 7)),  # unit
+                dist(("SUM", 8), ("AVG", 2)),  # aggregation
+                dist(("PERIOD", 9), ("YTD", 1)),  # time_semantics
+                dist(("PUBLISHED", 5), ("DRAFT", 3), ("DEPRECATED", 2)),  # status
+                dist(("sales", 6), ("user", 4)),  # domain
+            ]
+        )
+
+        out = await repo.metric_dimension_summary()
+
+        assert out["total"] == 10
+        assert out["by_type"] == {"atomic": 7, "derived": 3}
+        assert out["by_dw_layer"] == {"DWS": 6, "ADS": 4}
+        assert out["by_metric_tier"] == {"T1": 3, "T2": 2, "T3": 5}
+        assert out["by_unit"] == {"CNY": 3, "cnt": 7}
+        assert out["by_aggregation"] == {"SUM": 8, "AVG": 2}
+        assert out["by_status"] == {"PUBLISHED": 5, "DRAFT": 3, "DEPRECATED": 2}
+        assert out["by_domain"] == {"sales": 6, "user": 4}
+        assert out["pii_compliance"]["pii_total"] == 4
+        assert out["pii_compliance"]["pii_reviewed"] == 3
+        assert out["pii_compliance"]["pii_unreviewed"] == 1
+        assert out["pii_compliance"]["review_rate"] == 0.75
 
     async def test_heatmap_matrix(self) -> None:
         """二维热力矩阵：域 × 敏感级别聚合，含 join/group_by 与 PII 判定。"""
@@ -678,6 +774,10 @@ class TestSearchAssets:
             entity_type="table",
             sensitivity_level="INTERNAL",
             owner_id=2,
+            source_id="s1",
+            description="订单表",
+            schema_json={"fields": [{"name": "order_id", "type": "bigint"}]},
+            updated_at=None,
         )
 
     def _metric(self, code: str = "sales_gmv_amount_day") -> SimpleNamespace:
@@ -689,7 +789,34 @@ class TestSearchAssets:
             domain="sales",
             owner_id=2,
             status="PUBLISHED",
+            type="atomic",
+            granularity="day",
+            unit="CNY",
+            aggregation="SUM",
+            time_semantics="PERIOD",
+            freshness="T1",
+            dw_layer="DWS",
+            metric_tier="T1",
+            additivity="ADDITIVE",
+            serving_mode="BATCH_ONLY",
+            description="每日成交总额",
+            updated_at=None,
         )
+
+    def _src(self) -> MagicMock:
+        r = MagicMock()
+        r.all.return_value = [("s1", "Source A", "sales")]
+        return r
+
+    def _usr(self) -> MagicMock:
+        r = MagicMock()
+        r.all.return_value = [(2, "Alice", "alice")]
+        return r
+
+    def _empty_scalars(self) -> MagicMock:
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        return r
 
     async def test_search_both_types(self) -> None:
         s = _session()
@@ -698,47 +825,75 @@ class TestSearchAssets:
         r_cat.scalars.return_value.all.return_value = [self._catalog()]
         r_met = MagicMock()
         r_met.scalars.return_value.all.return_value = [self._metric()]
-        s.execute = AsyncMock(side_effect=[r_cat, r_met])
+        # catalog 表查询 → enrich(src/usr) → field 扫描(空) → metric 查询 → metric usr
+        s.execute = AsyncMock(
+            side_effect=[r_cat, self._src(), self._usr(), self._empty_scalars(), r_met, self._usr()]
+        )
 
         out = await repo.search_assets("sales", None, 20)
 
         assert len(out) == 2
         assert out[0]["type"] == "catalog"
+        assert out[0]["source_name"] == "Source A"
+        assert out[0]["owner_name"] == "Alice"
+        assert out[0]["column_count"] == 1
+        assert out[0]["description"] == "订单表"
         assert out[1]["type"] == "metric"
+        assert out[1]["metric_type"] == "atomic"
+        assert out[1]["granularity"] == "day"
+        assert out[1]["unit"] == "CNY"
+        assert out[1]["freshness"] == "T1"
         assert out[1]["sensitivity_level"] == "INTERNAL"
         # 查询含转义后的 LIKE
         cat_stmt = s.execute.call_args_list[0].args[0]
         compiled = str(cat_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "LIKE" in compiled.upper()
 
+    async def test_search_field_type(self) -> None:
+        """限定 field 时只扫字段，返回 ``table.field`` 项（字段级搜索）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        cat = self._catalog()
+        r_field = MagicMock()
+        r_field.scalars.return_value.all.return_value = [cat]
+        s.execute = AsyncMock(side_effect=[r_field, self._src(), self._usr()])
+
+        out = await repo.search_assets("order_id", "field", 20)
+
+        assert len(out) == 1
+        assert out[0]["type"] == "field"
+        assert out[0]["name"] == "catalog.db.orders.order_id"
+        assert out[0]["entity_type"] == "field"
+
     async def test_search_metric_only(self) -> None:
-        """限定 metric 时只查指标，不查目录（分流查询）。"""
+        """限定 metric 时只查指标，不查目录/字段（分流查询）。"""
         s = _session()
         repo = AssetMapRepository(s)
         r_met = MagicMock()
         r_met.scalars.return_value.all.return_value = [self._metric()]
-        s.execute = AsyncMock(return_value=r_met)
+        s.execute = AsyncMock(side_effect=[r_met, self._usr()])
 
         out = await repo.search_assets("sales", "metric", 20)
 
         assert len(out) == 1
         assert out[0]["type"] == "metric"
-        # 只执行一次查询（指标）
-        s.execute.assert_awaited_once()
+        assert out[0]["owner_name"] == "Alice"
+        # 只执行两次查询（指标 + 责任人名）
+        assert s.execute.await_count == 2
 
     async def test_search_table_only_skips_metrics(self) -> None:
-        """限定 table 时只查目录，不查指标。"""
+        """限定 table 时只查目录，不查指标/字段。"""
         s = _session()
         repo = AssetMapRepository(s)
         r_cat = MagicMock()
         r_cat.scalars.return_value.all.return_value = [self._catalog()]
-        s.execute = AsyncMock(return_value=r_cat)
+        s.execute = AsyncMock(side_effect=[r_cat, self._src(), self._usr()])
 
         out = await repo.search_assets("orders", "table", 20)
 
         assert len(out) == 1
         assert out[0]["type"] == "catalog"
-        s.execute.assert_awaited_once()
+        assert s.execute.await_count == 3
 
     async def test_search_pii_metric_flagged(self) -> None:
         s = _session()
@@ -755,9 +910,24 @@ class TestSearchAssets:
                 domain="sales",
                 owner_id=2,
                 status="PUBLISHED",
+                type="atomic",
+                granularity="day",
+                unit="cnt",
+                aggregation="COUNT_DISTINCT",
+                time_semantics="PERIOD",
+                freshness="T1",
+                dw_layer="DWS",
+                metric_tier="T2",
+                additivity="NON_ADDITIVE",
+                serving_mode="BATCH_ONLY",
+                description=None,
+                updated_at=None,
             )
         ]
-        s.execute = AsyncMock(side_effect=[r_cat, r_met])
+        # catalog(空) → field(空) → metric → metric usr
+        s.execute = AsyncMock(
+            side_effect=[r_cat, self._empty_scalars(), r_met, self._usr()]
+        )
 
         out = await repo.search_assets("phone", None, 20)
 
@@ -784,7 +954,40 @@ class TestHealthSummary:
         r_orphan.scalar.return_value = 2
         r_stale = MagicMock()
         r_stale.all.return_value = [SimpleNamespace(id=2, entity_name="old", updated_at=None)]
-        s.execute = AsyncMock(side_effect=[r_unhealthy, r_incomplete, r_orphan, r_stale])
+        # 表/字段描述体检：返回 (description, schema_json) 行
+        r_desc = MagicMock()
+        r_desc.all.return_value = [
+            SimpleNamespace(
+                description=None,
+                schema_json={"fields": [{"name": "a"}, {"name": "b"}]},
+            ),
+            SimpleNamespace(description="有描述", schema_json={"fields": [{"name": "c"}]}),
+        ]
+        r_covered = MagicMock()
+        r_covered.scalar.return_value = 2
+        # 指标体检：PII 未复核 / 快照 codes / 无快照 rows / 废弃未替换
+        r_pii = MagicMock()
+        r_pii.all.return_value = [SimpleNamespace(metric_code="m1", name="M1", owner_id=1)]
+        r_snap = MagicMock()
+        r_snap.scalars.return_value.all.return_value = ["m1"]
+        r_no_snap = MagicMock()
+        r_no_snap.all.return_value = [SimpleNamespace(metric_code="m2", name="M2")]
+        r_dep = MagicMock()
+        r_dep.all.return_value = [SimpleNamespace(metric_code="m3", name="M3")]
+        s.execute = AsyncMock(
+            side_effect=[
+                r_unhealthy,
+                r_incomplete,
+                r_orphan,
+                r_stale,
+                r_desc,
+                r_covered,
+                r_pii,
+                r_snap,
+                r_no_snap,
+                r_dep,
+            ]
+        )
 
         out = await repo.health_summary()
 
@@ -793,6 +996,27 @@ class TestHealthSummary:
         assert out["orphan_assets"] == 2
         assert len(out["stale_assets"]) == 1
         assert out["stale_days"] == 7
+        # 9 项体检
+        assert len(out["checks"]) == 9
+        assert out["checks"][0]["key"] == "unhealthy_sources"
+        # 字段描述缺失：3 字段 - 2 已覆盖 = 1
+        assert out["checks"][5]["key"] == "fields_missing_desc"
+        assert out["checks"][5]["count"] == 1
+        # PII 未复核 1 项 → 扣 5；废弃未替换 1 项 → 扣 3
+        assert out["checks"][6]["key"] == "pii_unreviewed"
+        assert out["pii_unreviewed"][0]["metric_code"] == "m1"
+        assert out["metrics_without_snapshot"][0]["metric_code"] == "m2"
+        assert out["deprecated_without_successor"][0]["metric_code"] == "m3"
+        # 100 - 5(unhealthy) - 2(schema) - 1(stale) - 5(pii) - 2(no_snapshot) - 3(dep) = 82 → good
+        assert out["score"] == 82
+        assert out["level"] == "good"
+
+    async def test_score_floor_and_levels(self) -> None:
+        """评分下限 0，且分档映射正确。"""
+        assert AssetMapRepository._health_level(95) == "excellent"
+        assert AssetMapRepository._health_level(80) == "good"
+        assert AssetMapRepository._health_level(65) == "fair"
+        assert AssetMapRepository._health_level(30) == "poor"
 
 
 class TestPiiOverview:
@@ -822,6 +1046,7 @@ class TestRecentChanges:
             sensitivity_level="INTERNAL",
             owner_id=2,
             source_id="s1",
+            created_at=None,
             updated_at=None,
         )
 
@@ -832,8 +1057,21 @@ class TestRecentChanges:
             status="PUBLISHED",
             domain="sales",
             pii_flag=False,
+            version=3,
+            description="每日成交总额",
+            owner_id=2,
             updated_at=None,
         )
+
+    def _src(self) -> MagicMock:
+        r = MagicMock()
+        r.all.return_value = [("s1", "Source A", "sales")]
+        return r
+
+    def _usr(self) -> MagicMock:
+        r = MagicMock()
+        r.all.return_value = [(2, "Alice", "alice")]
+        return r
 
     async def test_recent_catalogs_and_metrics(self) -> None:
         s = _session()
@@ -842,14 +1080,53 @@ class TestRecentChanges:
         r_cat.all.return_value = [self._catalog_row()]
         r_met = MagicMock()
         r_met.all.return_value = [self._metric_row()]
-        s.execute = AsyncMock(side_effect=[r_cat, r_met])
+        r_drift = MagicMock()
+        r_drift.all.return_value = []
+        # catalog → enrich(src/usr) → metric → metric usr → drift
+        s.execute = AsyncMock(
+            side_effect=[r_cat, self._src(), self._usr(), r_met, self._usr(), r_drift]
+        )
 
         out = await repo.recent_changes(days=7, limit=50)
 
         assert out["days"] == 7
         assert out["catalogs"][0]["entity_name"] == "catalog.db.t"
+        assert out["catalogs"][0]["source_name"] == "Source A"
+        assert out["catalogs"][0]["owner_name"] == "Alice"
+        assert out["catalogs"][0]["change_type"] == "updated"
         assert out["metrics"][0]["metric_code"] == "sales_gmv_amount_day"
         assert out["metrics"][0]["pii_flag"] is False
+        assert out["metrics"][0]["version"] == 3
+        assert out["metrics"][0]["change_type"] == "updated"
+        assert out["drift"] == []
+
+    async def test_recent_changes_created_detection(self) -> None:
+        """created_at 接近 updated_at（3s 内）→ change_type=created。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_cat = MagicMock()
+        r_cat.all.return_value = [
+            SimpleNamespace(
+                id=2,
+                entity_name="catalog.db.new",
+                entity_type="table",
+                sensitivity_level="PII",
+                owner_id=None,
+                source_id=None,
+                created_at=datetime(2026, 8, 1, 0, 0, 0),
+                updated_at=datetime(2026, 8, 1, 0, 0, 1),
+            )
+        ]
+        r_met = MagicMock()
+        r_met.all.return_value = []
+        r_drift = MagicMock()
+        r_drift.all.return_value = []
+        # catalog(无 source/owner → enrich 不查) → metric → drift
+        s.execute = AsyncMock(side_effect=[r_cat, r_met, r_drift])
+
+        out = await repo.recent_changes(days=7, limit=50)
+
+        assert out["catalogs"][0]["change_type"] == "created"
 
 
 class TestMyAssets:
@@ -860,6 +1137,10 @@ class TestMyAssets:
             entity_type="table",
             sensitivity_level="PII",
             source_id="s1",
+            owner_id=2,
+            description="订单表",
+            schema_json={"fields": [{"name": "order_id"}]},
+            updated_at=None,
         )
 
     def _metric_row(self) -> SimpleNamespace:
@@ -869,6 +1150,12 @@ class TestMyAssets:
             status="PUBLISHED",
             domain="sales",
             pii_flag=True,
+            type="atomic",
+            granularity="day",
+            unit="CNY",
+            metric_tier="T1",
+            description="每日成交总额",
+            updated_at=None,
         )
 
     async def test_my_assets(self) -> None:
@@ -878,13 +1165,34 @@ class TestMyAssets:
         r_cat.all.return_value = [self._catalog_row()]
         r_met = MagicMock()
         r_met.all.return_value = [self._metric_row()]
-        s.execute = AsyncMock(side_effect=[r_cat, r_met])
+        r_src = MagicMock()
+        r_src.all.return_value = [("s1", "Source A", "sales")]
+        r_usr = MagicMock()
+        r_usr.all.return_value = [(2, "Alice", "alice")]
+        r_snap = MagicMock()
+        r_snap.scalars.return_value.all.return_value = ["sales_gmv_amount_day"]
+        r_claim = MagicMock()
+        r_claim.scalar.return_value = 5
+        # catalog → enrich(src/usr) → metric → snapshot → claimable
+        s.execute = AsyncMock(
+            side_effect=[r_cat, r_src, r_usr, r_met, r_snap, r_claim]
+        )
 
         out = await repo.my_assets(owner_id=2, limit=50)
 
         assert out["owner_id"] == 2
         assert out["catalogs"][0]["sensitivity_level"] == "PII"
+        assert out["catalogs"][0]["source_name"] == "Source A"
+        assert out["catalogs"][0]["column_count"] == 1
         assert out["metrics"][0]["pii_flag"] is True
+        assert out["metrics"][0]["metric_tier"] == "T1"
+        # summary 统计
+        assert out["summary"]["catalog_count"] == 1
+        assert out["summary"]["metric_count"] == 1
+        assert out["summary"]["snapshot_covered"] == 1
+        assert out["summary"]["pii_count"] == 1
+        # 待认领孤儿
+        assert out["claimable_orphans"] == 5
         cat_stmt = s.execute.call_args_list[0].args[0]
         compiled = str(cat_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "owner_id" in compiled

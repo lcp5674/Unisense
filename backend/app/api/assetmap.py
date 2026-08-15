@@ -65,6 +65,19 @@ async def metric_summary(
     return ok(data=await AssetMapService(db).metric_summary(), trace_id=trace_id)
 
 
+@router.get("/metric-dimensions", dependencies=_READ_DEPS)
+async def metric_dimension_summary(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """指标体系聚合：指标类型/分层/分级/单位/聚合/时间语义/状态/域分布 + PII 合规率。
+
+    概览 Tab「指标体系」区块数据源，每类分布可下钻对应指标明细。
+    """
+    return ok(data=await AssetMapService(db).metric_dimension_summary(), trace_id=trace_id)
+
+
 @router.get("/tables", dependencies=_READ_DEPS)
 async def list_tables(
     db: Annotated[AsyncSession, Depends(get_db_session)],

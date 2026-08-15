@@ -15,6 +15,8 @@ from typing import Any, cast
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.collector_models import SchemaDriftLog
+from app.models.consume import MetricValueSnapshot
 from app.models.data_source import ColumnDescription, DataSource, DBCatalog
 from app.models.enums import SensitivityLevelEnum
 from app.models.governance import Classification
@@ -341,7 +343,8 @@ class AssetMapRepository:
             ).all()
             usr_map = {r[0]: (r[1] or r[2]) for r in usr_rows}
         for it in items:
-            name, domain = src_map.get(it.get("source_id"), (None, None))
+            sid = it.get("source_id")
+            name, domain = src_map.get(sid, (None, None)) if sid is not None else (None, None)
             if it.get("source_name") is None:
                 it["source_name"] = name
             if it.get("domain") is None:
@@ -414,6 +417,70 @@ class AssetMapRepository:
             "by_domain": dict(cast("Sequence[tuple[Any, Any]]", by_domain)),
             "by_status": dict(cast("Sequence[tuple[Any, Any]]", by_status)),
         }
+
+    async def _metric_distribution(self, column: Any) -> dict[str, int]:
+        """按指定列聚合指标分布（null 值归入 ``__null__``，前端可显式展示）。"""
+        rows = (
+            await self._session.execute(
+                select(column, func.count())
+                .where(Metric.deleted_at.is_(None))
+                .group_by(column)
+            )
+        ).all()
+        out: dict[str, int] = {}
+        for key, cnt in rows:
+            out[str(key) if key is not None else "__null__"] = int(cnt or 0)
+        return out
+
+    async def metric_dimension_summary(self) -> dict[str, Any]:
+        """指标体系聚合：指标多维分布（类型/分层/分级/单位/聚合/时间语义/状态/域）+ PII 合规率。
+
+        8 类维度分布构成平台指标体系，每项可下钻对应指标明细。复用 SQL GROUP BY，
+        与热力聚合同源（TD §12.11），避免指标体系口径漂移。
+        """
+        # 合规率：已复核 PII 指标 / 全部 PII 指标
+        pii_total = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Metric)
+                .where(Metric.deleted_at.is_(None), Metric.pii_flag.is_(True))
+            )
+        ).scalar() or 0
+        pii_reviewed = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Metric)
+                .where(
+                    Metric.deleted_at.is_(None),
+                    Metric.pii_flag.is_(True),
+                    Metric.compliance_reviewed.is_(True),
+                )
+            )
+        ).scalar() or 0
+        metric_total = (
+            await self._session.execute(
+                select(func.count()).select_from(Metric).where(Metric.deleted_at.is_(None))
+            )
+        ).scalar() or 0
+
+        return {
+            "by_type": await self._metric_distribution(Metric.type),
+            "by_dw_layer": await self._metric_distribution(Metric.dw_layer),
+            "by_metric_tier": await self._metric_distribution(Metric.metric_tier),
+            "by_unit": await self._metric_distribution(Metric.unit),
+            "by_aggregation": await self._metric_distribution(Metric.aggregation),
+            "by_time_semantics": await self._metric_distribution(Metric.time_semantics),
+            "by_status": await self._metric_distribution(Metric.status),
+            "by_domain": await self._metric_distribution(Metric.domain),
+            "pii_compliance": {
+                "pii_total": int(pii_total),
+                "pii_reviewed": int(pii_reviewed),
+                "pii_unreviewed": int(pii_total - pii_reviewed),
+                "review_rate": round(float(pii_reviewed) / pii_total, 4) if pii_total else 0.0,
+            },
+            "total": int(metric_total),
+        }
+
 
     # ----------------------------------------------------------------
     # P2 Enhancement: 图谱降级、热力聚合、责任人视图
@@ -642,7 +709,7 @@ class AssetMapRepository:
                 for r in rows
             ]
             return {"cells": cells, "columns": ["INTERNAL", "PII"]}
-        rows = (
+        catalog_rows = (
             await self._session.execute(
                 select(
                     DataSource.domain,
@@ -661,7 +728,7 @@ class AssetMapRepository:
                 "count": r[2],
                 "pii_count": r[2] if (r[1] and "PII" in r[1]) else 0,
             }
-            for r in rows
+            for r in catalog_rows
         ]
         return {
             "cells": cells,
@@ -723,9 +790,40 @@ class AssetMapRepository:
         return {"dimension": dimension, "buckets": buckets}
 
     async def owner_aggregation(self, owner_id: int) -> dict[str, Any]:
-        """按责任人聚合资产统计。"""
-        # 指标统计
-        metric_stats = (
+        """按责任人聚合资产统计（指标多维度分布 + 目录明细 + 待办）。
+
+        Returns:
+            ``{owner_id, metrics:{total,published,draft,pii_count,by_domain,
+            by_type,by_metric_tier,snapshot_covered,todo}, catalogs:{total,
+            items:[...]}}``。``catalogs.items`` 为目录明细（可下钻），替代纯数字。
+        """
+        metric_stats = await self._owner_metric_stats(owner_id)
+        by_domain = await self._owner_distribution(owner_id, Metric.domain)
+        by_type = await self._owner_distribution(owner_id, Metric.type)
+        by_tier = await self._owner_distribution(owner_id, Metric.metric_tier)
+        todo = await self._owner_todo(owner_id)
+        catalogs = await self._owner_catalog_items(owner_id)
+        snapshot_covered = await self._owner_snapshot_covered(owner_id)
+
+        return {
+            "owner_id": owner_id,
+            "metrics": {
+                "total": metric_stats.total or 0,
+                "published": int(metric_stats.published or 0),
+                "draft": int(metric_stats.draft or 0),
+                "pii_count": int(metric_stats.pii_count or 0),
+                "by_domain": dict(cast("Sequence[tuple[Any, Any]]", by_domain)),
+                "by_type": dict(cast("Sequence[tuple[Any, Any]]", by_type)),
+                "by_metric_tier": dict(cast("Sequence[tuple[Any, Any]]", by_tier)),
+                "snapshot_covered": snapshot_covered,
+                "todo": todo,
+            },
+            "catalogs": {"total": len(catalogs), "items": catalogs},
+        }
+
+    async def _owner_metric_stats(self, owner_id: int) -> Any:
+        """责任人指标核心统计（总量/发布/草稿/PII）。"""
+        return (
             await self._session.execute(
                 select(
                     func.count().label("total"),
@@ -736,35 +834,105 @@ class AssetMapRepository:
             )
         ).one()
 
-        # 域分布
-        domain_rows = (
+    async def _owner_distribution(self, owner_id: int, column: Any) -> list[Any]:
+        """责任人指标按列分布（域/类型/分级）。"""
+        rows = (
             await self._session.execute(
-                select(Metric.domain, func.count())
+                select(column, func.count())
                 .where(Metric.owner_id == owner_id, Metric.deleted_at.is_(None))
-                .group_by(Metric.domain)
+                .group_by(column)
             )
         ).all()
+        return list(rows)
 
-        # 目录统计
-        catalog_count = (
+    async def _owner_todo(self, owner_id: int) -> dict[str, Any]:
+        """责任人待办：PII 未复核、废弃未替换、无快照指标数。"""
+        unreviewed = (
             await self._session.execute(
                 select(func.count())
-                .select_from(DBCatalog)
-                .where(DBCatalog.owner_id == owner_id, DBCatalog.deleted_at.is_(None))
+                .select_from(Metric)
+                .where(
+                    Metric.owner_id == owner_id,
+                    Metric.deleted_at.is_(None),
+                    Metric.pii_flag.is_(True),
+                    Metric.compliance_reviewed.is_(False),
+                )
             )
         ).scalar() or 0
-
+        deprecated_orphan = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Metric)
+                .where(
+                    Metric.owner_id == owner_id,
+                    Metric.deleted_at.is_(None),
+                    Metric.status == "DEPRECATED",
+                    Metric.successor_code.is_(None),
+                )
+            )
+        ).scalar() or 0
         return {
-            "owner_id": owner_id,
-            "metrics": {
-                "total": metric_stats.total or 0,
-                "published": int(metric_stats.published or 0),
-                "draft": int(metric_stats.draft or 0),
-                "pii_count": int(metric_stats.pii_count or 0),
-                "by_domain": dict(cast("Sequence[tuple[Any, Any]]", domain_rows)),
-            },
-            "catalogs": {"total": catalog_count},
+            "pii_unreviewed": int(unreviewed),
+            "deprecated_without_successor": int(deprecated_orphan),
         }
+
+    async def _owner_catalog_items(self, owner_id: int) -> list[dict[str, Any]]:
+        """责任人目录明细（entity_name/类型/敏感度/源/更新时间，可下钻）。"""
+        rows = (
+            await self._session.execute(
+                select(
+                    DBCatalog.id,
+                    DBCatalog.entity_name,
+                    DBCatalog.entity_type,
+                    DBCatalog.sensitivity_level,
+                    DBCatalog.source_id,
+                    DBCatalog.updated_at,
+                )
+                .where(DBCatalog.owner_id == owner_id, DBCatalog.deleted_at.is_(None))
+                .limit(100)
+            )
+        ).all()
+        items = [
+            {
+                "id": r.id,
+                "entity_name": r.entity_name,
+                "entity_type": r.entity_type,
+                "sensitivity_level": r.sensitivity_level,
+                "source_id": r.source_id,
+                "owner_id": owner_id,
+                "updated_at": r.updated_at,
+            }
+            for r in rows
+        ]
+        return await self.enrich_catalog_items(items)
+
+    async def _owner_snapshot_covered(self, owner_id: int) -> int:
+        """责任人指标中有快照的数量（覆盖度分子）。"""
+        codes = set(
+            (
+                await self._session.execute(
+                    select(Metric.metric_code).where(
+                        Metric.owner_id == owner_id, Metric.deleted_at.is_(None)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not codes:
+            return 0
+        covered = set(
+            (
+                await self._session.execute(
+                    select(MetricValueSnapshot.metric_code)
+                    .where(MetricValueSnapshot.metric_code.in_(codes))
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return len(covered)
 
     # ----------------------------------------------------------------
     # 产品补充（FR-18 生产化）：全局搜索 / 健康 / PII / 变更 / 我的资产
@@ -778,81 +946,267 @@ class AssetMapRepository:
     async def search_assets(
         self, q: str, entity_type: str | None, limit: int
     ) -> list[dict[str, Any]]:
-        """全局资产搜索：目录（表/字段）+ 指标，按名称模糊匹配。
+        """全局资产搜索：表/字段/指标三级，返回完整信息（源/责任人/口径/描述）。
 
-        统一返回 ``{type, id, name, sensitivity, domain, owner_id, status}`` 结构，
-        供前端全局搜索框消费。LIKE 通配符已转义（防模糊放大）。
+        Returns:
+            统一 ``{type, id, name, entity_type, sensitivity_level, domain, owner_id,
+            owner_name, source_id, source_name, description, updated_at, status}``
+            结构；metric 额外带 type/granularity/unit/aggregation/freshness/
+            metric_tier/dw_layer。LIKE 通配符已转义（防模糊放大）。
         """
         if not q.strip():
             return []
         needle = f"%{self._escape_like(q.strip())}%"
         results: list[dict[str, Any]] = []
+        want_table = entity_type is None or entity_type in ("table", "view")
+        want_field = entity_type is None or entity_type == "field"
+        want_metric = entity_type is None or entity_type == "metric"
 
-        # 目录：entity_name 模糊匹配（表/字段）——仅当未限定类型或限定目录类型时
-        if entity_type is None or entity_type in ("table", "field"):
-            catalog_stmt = select(DBCatalog).where(
-                DBCatalog.deleted_at.is_(None), DBCatalog.entity_name.like(needle)
-            )
-            if entity_type:
-                catalog_stmt = catalog_stmt.where(DBCatalog.entity_type == entity_type)
-            catalog_rows = (await self._session.execute(catalog_stmt.limit(limit))).scalars().all()
-            for r in catalog_rows:
-                results.append(
-                    {
-                        "type": "catalog",
-                        "id": r.id,
-                        "name": r.entity_name,
-                        "entity_type": r.entity_type,
-                        "sensitivity_level": r.sensitivity_level,
-                        "domain": None,
-                        "owner_id": r.owner_id,
-                        "status": None,
-                    }
-                )
-
-        # 指标：metric_code / name 模糊匹配（仅当未限定目录类型或限定 metric 时）
-        if entity_type is None or entity_type == "metric":
-            metric_stmt = select(Metric).where(
-                Metric.deleted_at.is_(None),
-                or_(Metric.metric_code.like(needle), Metric.name.like(needle)),
-            )
-            metric_rows = (await self._session.execute(metric_stmt.limit(limit))).scalars().all()
-            for m in metric_rows:
-                results.append(
-                    {
-                        "type": "metric",
-                        "id": m.id,
-                        "name": m.metric_code,
-                        "entity_type": "metric",
-                        "sensitivity_level": "PII" if m.pii_flag else "INTERNAL",
-                        "domain": m.domain,
-                        "owner_id": m.owner_id,
-                        "status": m.status,
-                    }
-                )
+        # 表级（entity_name 模糊）
+        if want_table:
+            results.extend(await self._search_catalog_tables(needle, entity_type, limit))
+        # 字段级（schema_json 字段名模糊）
+        if want_field:
+            results.extend(await self._search_fields(q, limit))
+        # 指标级（metric_code / name 模糊）
+        if want_metric:
+            results.extend(await self._search_metrics(needle, limit))
         return results
 
+    async def _search_catalog_tables(
+        self, needle: str, entity_type: str | None, limit: int
+    ) -> list[dict[str, Any]]:
+        """表/视图级搜索结果（含源/责任人/描述/字段数富集）。"""
+        stmt = select(DBCatalog).where(
+            DBCatalog.deleted_at.is_(None), DBCatalog.entity_name.like(needle)
+        )
+        if entity_type:
+            stmt = stmt.where(DBCatalog.entity_type == entity_type)
+        rows = (await self._session.execute(stmt.limit(limit))).scalars().all()
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            schema = r.schema_json if isinstance(r.schema_json, dict) else {}
+            fields = schema.get("fields") or schema.get("columns") or []
+            items.append(
+                {
+                    "type": "catalog",
+                    "id": r.id,
+                    "name": r.entity_name,
+                    "entity_type": r.entity_type,
+                    "sensitivity_level": r.sensitivity_level,
+                    "domain": None,
+                    "owner_id": r.owner_id,
+                    "source_id": r.source_id,
+                    "description": r.description,
+                    "column_count": len(fields) if isinstance(fields, list) else None,
+                    "updated_at": r.updated_at,
+                    "status": None,
+                }
+            )
+        return await self.enrich_catalog_items(items)
+
+    async def _search_fields(self, q: str, limit: int) -> list[dict[str, Any]]:
+        """字段级搜索结果：扫 schema_json 字段名，返回 ``{table}.{field}`` 项。
+
+        字段名匹配用原始关键词（不转义 LIKE 通配符），因为这里走内存包含判断
+        而非 SQL LIKE——``_escape_like`` 会把 `_` 转成 `\\_` 导致匹配失败。
+        """
+        q_lower = q.strip().lower()
+        if not q_lower:
+            return []
+        rows = (
+            await self._session.execute(
+                select(DBCatalog).where(DBCatalog.deleted_at.is_(None)).limit(1000)
+            )
+        ).scalars().all()
+        results: list[dict[str, Any]] = []
+        for r in rows:
+            schema = r.schema_json if isinstance(r.schema_json, dict) else {}
+            fields = schema.get("fields") or schema.get("columns") or []
+            if not isinstance(fields, list):
+                continue
+            for f in fields:
+                if not isinstance(f, dict):
+                    continue
+                col = str(f.get("name") or f.get("column") or "")
+                if col and q_lower in col.lower():
+                    results.append(
+                        {
+                            "type": "field",
+                            "id": r.id,
+                            "name": f"{r.entity_name}.{col}",
+                            "entity_type": "field",
+                            "sensitivity_level": r.sensitivity_level,
+                            "domain": None,
+                            "owner_id": r.owner_id,
+                            "source_id": r.source_id,
+                            "description": f.get("comment"),
+                            "column_count": None,
+                            "updated_at": r.updated_at,
+                            "status": None,
+                        }
+                    )
+                    if len(results) >= limit:
+                        return await self.enrich_catalog_items(results)
+        return await self.enrich_catalog_items(results)
+
+    async def _search_metrics(self, needle: str, limit: int) -> list[dict[str, Any]]:
+        """指标级搜索结果（含治理一等字段：类型/粒度/单位/聚合/新鲜度/分级/分层）。"""
+        stmt = select(Metric).where(
+            Metric.deleted_at.is_(None),
+            or_(Metric.metric_code.like(needle), Metric.name.like(needle)),
+        )
+        rows = (await self._session.execute(stmt.limit(limit))).scalars().all()
+        owner_ids = {m.owner_id for m in rows if m.owner_id is not None}
+        usr_map: dict[int, str] = {}
+        if owner_ids:
+            usr_rows = (
+                await self._session.execute(
+                    select(User.id, User.display_name, User.username).where(
+                        User.id.in_(owner_ids)
+                    )
+                )
+            ).all()
+            usr_map = {r[0]: (r[1] or r[2]) for r in usr_rows}
+        return [
+            {
+                "type": "metric",
+                "id": m.id,
+                "name": m.metric_code,
+                "entity_type": "metric",
+                "sensitivity_level": "PII" if m.pii_flag else "INTERNAL",
+                "domain": m.domain,
+                "owner_id": m.owner_id,
+                "owner_name": usr_map.get(m.owner_id),
+                "status": m.status,
+                "metric_type": m.type,
+                "granularity": m.granularity,
+                "unit": m.unit,
+                "aggregation": m.aggregation,
+                "time_semantics": m.time_semantics,
+                "freshness": m.freshness,
+                "dw_layer": m.dw_layer,
+                "metric_tier": m.metric_tier,
+                "additivity": m.additivity,
+                "serving_mode": m.serving_mode,
+                "description": m.description,
+                "updated_at": m.updated_at,
+            }
+            for m in rows
+        ]
+
     async def health_summary(self) -> dict[str, Any]:
-        """资产健康视图：源健康、schema 不完整、孤儿、陈旧资产聚合。
+        """资产健康视图：9 项体检 + 健康评分。
 
         Returns:
-            ``{unhealthy_sources, schema_incomplete, orphans, stale_assets, updated_at}``
+            ``{score, level, checks, unhealthy_sources, schema_incomplete,
+            orphan_assets, stale_assets, stale_days}``。
+            ``checks`` 为逐项体检明细（name/count/deduct/details），前端据此渲染
+            健康报告与下钻。评分规则见 ``_health_level``。
         """
-        # 不健康数据源
-        unhealthy_rows = (
+        checks: list[dict[str, Any]] = []
+        score = 100
+
+        # 体检 1：不健康数据源
+        unhealthy = await self._health_unhealthy_sources()
+        score -= min(len(unhealthy) * 5, 15)
+        checks.append({"key": "unhealthy_sources", "count": len(unhealthy), "deduct": 0})
+
+        # 体检 2：schema 不完整目录
+        incomplete = await self._health_schema_incomplete()
+        score -= min(len(incomplete) * 2, 10)
+        checks.append({"key": "schema_incomplete", "count": len(incomplete), "deduct": 0})
+
+        # 体检 3：孤儿资产
+        orphan_count = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(DBCatalog)
+                .where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
+            )
+        ).scalar() or 0
+        score -= min(int(orphan_count) // 10, 10)
+        checks.append({"key": "orphan_assets", "count": int(orphan_count), "deduct": 0})
+
+        # 体检 4：陈旧资产（7 天未更新）
+        stale_days = 7
+        stale = await self._health_stale_assets(stale_days)
+        score -= min(len(stale), 10)
+        checks.append({"key": "stale_assets", "count": len(stale), "deduct": 0})
+
+        # 体检 5/6：表描述缺失 / 字段描述缺失
+        desc_missing, field_missing, field_total = await self._health_descriptions()
+        score -= min(desc_missing // 10, 10)
+        checks.append({"key": "tables_missing_desc", "count": desc_missing, "deduct": 0})
+        score -= min(field_missing // 100, 10)
+        checks.append(
+            {
+                "key": "fields_missing_desc",
+                "count": field_missing,
+                "field_total": field_total,
+                "deduct": 0,
+            }
+        )
+
+        # 体检 7/8/9：PII 未复核 / 无快照 / 废弃未替换
+        pii_unreviewed, no_snapshot, deprecated_orphan = await self._health_metric_checks()
+        score -= min(len(pii_unreviewed) * 5, 15)
+        checks.append({"key": "pii_unreviewed", "count": len(pii_unreviewed), "deduct": 0})
+        score -= min(len(no_snapshot) * 2, 10)
+        checks.append(
+            {"key": "metrics_without_snapshot", "count": len(no_snapshot), "deduct": 0}
+        )
+        score -= min(len(deprecated_orphan) * 3, 10)
+        checks.append(
+            {
+                "key": "deprecated_without_successor",
+                "count": len(deprecated_orphan),
+                "deduct": 0,
+            }
+        )
+
+        return {
+            "score": max(score, 0),
+            "level": self._health_level(score),
+            "checks": checks,
+            "unhealthy_sources": unhealthy,
+            "schema_incomplete": incomplete,
+            "orphan_assets": int(orphan_count),
+            "stale_assets": stale,
+            "stale_days": stale_days,
+            "pii_unreviewed": pii_unreviewed,
+            "metrics_without_snapshot": no_snapshot,
+            "deprecated_without_successor": deprecated_orphan,
+        }
+
+    @staticmethod
+    def _health_level(score: int) -> str:
+        """健康评分分档：>=90 优 / >=75 良 / >=60 中 / <60 差。"""
+        if score >= 90:
+            return "excellent"
+        if score >= 75:
+            return "good"
+        if score >= 60:
+            return "fair"
+        return "poor"
+
+    async def _health_unhealthy_sources(self) -> list[dict[str, Any]]:
+        """体检 1：健康状态为 unhealthy 的数据源列表。"""
+        rows = (
             await self._session.execute(
                 select(DataSource.source_id, DataSource.name, DataSource.health_status).where(
                     DataSource.health_status == "unhealthy", DataSource.deleted_at.is_(None)
                 )
             )
         ).all()
-        unhealthy_sources = [
+        return [
             {"source_id": r.source_id, "name": r.name, "health_status": r.health_status}
-            for r in unhealthy_rows
+            for r in rows
         ]
 
-        # schema 不完整目录
-        incomplete_rows = (
+    async def _health_schema_incomplete(self) -> list[dict[str, Any]]:
+        """体检 2：schema 不完整（缺列元数据）的目录列表。"""
+        rows = (
             await self._session.execute(
                 select(DBCatalog.id, DBCatalog.entity_name, DBCatalog.source_id)
                 .where(
@@ -862,23 +1216,15 @@ class AssetMapRepository:
                 .limit(100)
             )
         ).all()
-        schema_incomplete = [
+        return [
             {"id": r.id, "entity_name": r.entity_name, "source_id": r.source_id}
-            for r in incomplete_rows
+            for r in rows
         ]
 
-        # 孤儿资产
-        orphan_count = (
-            await self._session.execute(
-                select(func.count())
-                .select_from(DBCatalog)
-                .where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
-            )
-        ).scalar() or 0
-
-        # 陈旧资产：7 天未更新（数据源采集停滞的间接信号）
-        stale_cutoff = datetime.now(UTC) - timedelta(days=7)
-        stale_rows = (
+    async def _health_stale_assets(self, days: int) -> list[dict[str, Any]]:
+        """体检 4：N 天未更新的陈旧目录资产（数据源采集停滞信号）。"""
+        stale_cutoff = datetime.now(UTC) - timedelta(days=days)
+        rows = (
             await self._session.execute(
                 select(DBCatalog.id, DBCatalog.entity_name, DBCatalog.updated_at)
                 .where(
@@ -888,18 +1234,101 @@ class AssetMapRepository:
                 .limit(100)
             )
         ).all()
-        stale_assets = [
+        return [
             {"id": r.id, "entity_name": r.entity_name, "updated_at": r.updated_at}
-            for r in stale_rows
+            for r in rows
         ]
 
-        return {
-            "unhealthy_sources": unhealthy_sources,
-            "schema_incomplete": schema_incomplete,
-            "orphan_assets": int(orphan_count),
-            "stale_assets": stale_assets,
-            "stale_days": 7,
-        }
+    async def _health_descriptions(self) -> tuple[int, int, int]:
+        """体检 5/6：表描述缺失数 / 字段描述缺失数 / 字段总数。
+
+        表级：``db_catalog.description`` 为空；字段级：schema_json 字段总数减去
+        column_descriptions 已覆盖数（一次全表扫描，30s 缓存兜底性能）。
+        """
+        rows = (
+            await self._session.execute(
+                select(DBCatalog.description, DBCatalog.schema_json).where(
+                    DBCatalog.deleted_at.is_(None)
+                )
+            )
+        ).all()
+        tables_missing = sum(1 for r in rows if not r.description)
+        field_total = 0
+        for r in rows:
+            schema = r.schema_json if isinstance(r.schema_json, dict) else {}
+            fields = schema.get("fields") or schema.get("columns") or []
+            if isinstance(fields, list):
+                field_total += len(fields)
+        covered = (
+            await self._session.execute(
+                select(func.count()).select_from(ColumnDescription).where(
+                    ColumnDescription.deleted_at.is_(None)
+                )
+            )
+        ).scalar() or 0
+        return tables_missing, max(field_total - int(covered), 0), int(field_total)
+
+    async def _health_metric_checks(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """体检 7/8/9：PII 未复核 / 无快照 / 废弃未替换指标列表。
+
+        无快照判断：以存在任何快照记录的指标码集合为基准，未命中的视为无快照。
+        """
+        pii_unreviewed_rows = (
+            await self._session.execute(
+                select(Metric.metric_code, Metric.name, Metric.owner_id)
+                .where(
+                    Metric.deleted_at.is_(None),
+                    Metric.pii_flag.is_(True),
+                    Metric.compliance_reviewed.is_(False),
+                )
+                .limit(100)
+            )
+        ).all()
+        pii_unreviewed = [
+            {"metric_code": r.metric_code, "name": r.name, "owner_id": r.owner_id}
+            for r in pii_unreviewed_rows
+        ]
+
+        snapshot_codes = set(
+            (
+                await self._session.execute(
+                    select(MetricValueSnapshot.metric_code).distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        no_snapshot_rows = (
+            await self._session.execute(
+                select(Metric.metric_code, Metric.name)
+                .where(Metric.deleted_at.is_(None))
+                .limit(500)
+            )
+        ).all()
+        no_snapshot = [
+            {"metric_code": r.metric_code, "name": r.name}
+            for r in no_snapshot_rows
+            if r.metric_code not in snapshot_codes
+        ]
+
+        deprecated_rows = (
+            await self._session.execute(
+                select(Metric.metric_code, Metric.name)
+                .where(
+                    Metric.deleted_at.is_(None),
+                    Metric.status == "DEPRECATED",
+                    Metric.successor_code.is_(None),
+                )
+                .limit(100)
+            )
+        ).all()
+        deprecated_orphan = [
+            {"metric_code": r.metric_code, "name": r.name} for r in deprecated_rows
+        ]
+        return pii_unreviewed, no_snapshot, deprecated_orphan
+
 
     async def pii_overview(self) -> dict[str, Any]:
         """PII 合规资产视图：按敏感级/域聚合 PII 资产。
@@ -937,11 +1366,24 @@ class AssetMapRepository:
     async def recent_changes(self, days: int, limit: int) -> dict[str, Any]:
         """变更追踪流：最近 N 天新增/变更的目录与指标。
 
+        富化：目录带 created_at 推断 ``change_type``（created/updated）+ 源/责任人名；
+        指标带版本号/描述/状态推断变更类型；接入 ``schema_drift_log`` 变更内容
+        （列增删/类型变更 diff）。
+
         Returns:
-            ``{catalogs, metrics, days}``
+            ``{catalogs, metrics, drift, days}``
         """
         cutoff = datetime.now(UTC) - timedelta(days=days)
-        catalog_rows = (
+        catalogs = await self._recent_catalog_changes(cutoff, limit)
+        metrics = await self._recent_metric_changes(cutoff, limit)
+        drift = await self._recent_drift(cutoff, limit)
+        return {"catalogs": catalogs, "metrics": metrics, "drift": drift, "days": days}
+
+    async def _recent_catalog_changes(
+        self, cutoff: datetime, limit: int
+    ) -> list[dict[str, Any]]:
+        """最近变更的目录资产（created/updated 由 created_at vs updated_at 推断）。"""
+        rows = (
             await self._session.execute(
                 select(
                     DBCatalog.id,
@@ -950,6 +1392,7 @@ class AssetMapRepository:
                     DBCatalog.sensitivity_level,
                     DBCatalog.owner_id,
                     DBCatalog.source_id,
+                    DBCatalog.created_at,
                     DBCatalog.updated_at,
                 )
                 .where(
@@ -960,7 +1403,7 @@ class AssetMapRepository:
                 .limit(limit)
             )
         ).all()
-        catalogs = [
+        items = [
             {
                 "id": r.id,
                 "entity_name": r.entity_name,
@@ -968,12 +1411,26 @@ class AssetMapRepository:
                 "sensitivity_level": r.sensitivity_level,
                 "owner_id": r.owner_id,
                 "source_id": r.source_id,
+                "created_at": r.created_at,
                 "updated_at": r.updated_at,
+                # 变更类型：创建时间接近更新时间（3s 内）视为新增，否则为更新
+                "change_type": (
+                    "created"
+                    if r.created_at
+                    and r.updated_at
+                    and abs((r.updated_at - r.created_at).total_seconds()) < 3
+                    else "updated"
+                ),
             }
-            for r in catalog_rows
+            for r in rows
         ]
+        return await self.enrich_catalog_items(items)
 
-        metric_rows = (
+    async def _recent_metric_changes(
+        self, cutoff: datetime, limit: int
+    ) -> list[dict[str, Any]]:
+        """最近变更的指标（change_type 由状态机推断：废弃/新增/更新）。"""
+        rows = (
             await self._session.execute(
                 select(
                     Metric.metric_code,
@@ -981,6 +1438,9 @@ class AssetMapRepository:
                     Metric.status,
                     Metric.domain,
                     Metric.pii_flag,
+                    Metric.version,
+                    Metric.description,
+                    Metric.owner_id,
                     Metric.updated_at,
                 )
                 .where(Metric.deleted_at.is_(None), Metric.updated_at >= cutoff)
@@ -988,22 +1448,111 @@ class AssetMapRepository:
                 .limit(limit)
             )
         ).all()
-        metrics = [
+        owner_ids = {r.owner_id for r in rows if r.owner_id is not None}
+        usr_map: dict[int, str] = {}
+        if owner_ids:
+            usr_rows = (
+                await self._session.execute(
+                    select(User.id, User.display_name, User.username).where(
+                        User.id.in_(owner_ids)
+                    )
+                )
+            ).all()
+            usr_map = {r[0]: (r[1] or r[2]) for r in usr_rows}
+        return [
             {
                 "metric_code": r.metric_code,
                 "name": r.name,
                 "status": r.status,
                 "domain": r.domain,
                 "pii_flag": bool(r.pii_flag),
+                "version": r.version,
+                "description": r.description,
+                "owner_id": r.owner_id,
+                "owner_name": usr_map.get(r.owner_id),
+                "change_type": (
+                    "deprecated"
+                    if r.status == "DEPRECATED"
+                    else "created"
+                    if r.version == 1
+                    else "updated"
+                ),
                 "updated_at": r.updated_at,
             }
-            for r in metric_rows
+            for r in rows
         ]
-        return {"catalogs": catalogs, "metrics": metrics, "days": days}
+
+    async def _recent_drift(self, cutoff: datetime, limit: int) -> list[dict[str, Any]]:
+        """最近 schema 漂移记录（列增删/类型变更 diff，TD §12.1 变更审计）。"""
+        rows = (
+            await self._session.execute(
+                select(
+                    SchemaDriftLog.id,
+                    SchemaDriftLog.source_id,
+                    SchemaDriftLog.entity_name,
+                    SchemaDriftLog.change_type,
+                    SchemaDriftLog.diff_json,
+                    SchemaDriftLog.created_at,
+                )
+                .where(SchemaDriftLog.created_at >= cutoff)
+                .order_by(SchemaDriftLog.created_at.desc())
+                .limit(limit)
+            )
+        ).all()
+        return [
+            {
+                "id": r.id,
+                "source_id": r.source_id,
+                "entity_name": r.entity_name,
+                "change_type": r.change_type,
+                "diff_json": r.diff_json,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ]
 
     async def my_assets(self, owner_id: int, limit: int) -> dict[str, Any]:
-        """我的资产：当前用户负责的目录与指标（个人工作台视角）。"""
-        catalog_rows = (
+        """我的资产：当前用户负责的目录与指标（个人工作台视角）。
+
+        Returns:
+            ``{owner_id, catalogs, metrics, summary, claimable_orphans}``。
+            ``summary`` 含目录/指标/草稿/PII/快照覆盖统计；``claimable_orphans``
+            为全局待认领孤儿数（无主资产归属引导）。
+        """
+        catalogs = await self._my_catalog_items(owner_id, limit)
+        metrics = await self._my_metric_items(owner_id, limit)
+
+        draft_count = sum(1 for m in metrics if m["status"] == "DRAFT")
+        pii_count = sum(1 for m in metrics if m["pii_flag"])
+        snapshot_count = await self._my_snapshot_count(metrics)
+        claimable = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(DBCatalog)
+                .where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
+            )
+        ).scalar() or 0
+
+        return {
+            "owner_id": owner_id,
+            "catalogs": catalogs,
+            "metrics": metrics,
+            "summary": {
+                "catalog_count": len(catalogs),
+                "metric_count": len(metrics),
+                "draft_count": draft_count,
+                "pii_count": pii_count,
+                "snapshot_covered": snapshot_count,
+                "snapshot_total": len(metrics),
+            },
+            "claimable_orphans": int(claimable),
+        }
+
+    async def _my_catalog_items(
+        self, owner_id: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """我的目录资产（含描述/字段数/更新时间 + 源/责任人名）。"""
+        rows = (
             await self._session.execute(
                 select(
                     DBCatalog.id,
@@ -1011,23 +1560,39 @@ class AssetMapRepository:
                     DBCatalog.entity_type,
                     DBCatalog.sensitivity_level,
                     DBCatalog.source_id,
+                    DBCatalog.owner_id,
+                    DBCatalog.description,
+                    DBCatalog.schema_json,
+                    DBCatalog.updated_at,
                 )
                 .where(DBCatalog.deleted_at.is_(None), DBCatalog.owner_id == owner_id)
                 .limit(limit)
             )
         ).all()
-        catalogs = [
-            {
-                "id": r.id,
-                "entity_name": r.entity_name,
-                "entity_type": r.entity_type,
-                "sensitivity_level": r.sensitivity_level,
-                "source_id": r.source_id,
-            }
-            for r in catalog_rows
-        ]
+        items = []
+        for r in rows:
+            schema = r.schema_json if isinstance(r.schema_json, dict) else {}
+            fields = schema.get("fields") or schema.get("columns") or []
+            items.append(
+                {
+                    "id": r.id,
+                    "entity_name": r.entity_name,
+                    "entity_type": r.entity_type,
+                    "sensitivity_level": r.sensitivity_level,
+                    "source_id": r.source_id,
+                    "owner_id": r.owner_id,
+                    "description": r.description,
+                    "column_count": len(fields) if isinstance(fields, list) else None,
+                    "updated_at": r.updated_at,
+                }
+            )
+        return await self.enrich_catalog_items(items)
 
-        metric_rows = (
+    async def _my_metric_items(
+        self, owner_id: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """我的指标资产（含治理一等字段 + 描述 + 快照覆盖标记）。"""
+        rows = (
             await self._session.execute(
                 select(
                     Metric.metric_code,
@@ -1035,22 +1600,51 @@ class AssetMapRepository:
                     Metric.status,
                     Metric.domain,
                     Metric.pii_flag,
+                    Metric.type,
+                    Metric.granularity,
+                    Metric.unit,
+                    Metric.metric_tier,
+                    Metric.description,
+                    Metric.updated_at,
                 )
                 .where(Metric.deleted_at.is_(None), Metric.owner_id == owner_id)
                 .limit(limit)
             )
         ).all()
-        metrics = [
+        return [
             {
                 "metric_code": r.metric_code,
                 "name": r.name,
                 "status": r.status,
                 "domain": r.domain,
                 "pii_flag": bool(r.pii_flag),
+                "type": r.type,
+                "granularity": r.granularity,
+                "unit": r.unit,
+                "metric_tier": r.metric_tier,
+                "description": r.description,
+                "updated_at": r.updated_at,
             }
-            for r in metric_rows
+            for r in rows
         ]
-        return {"owner_id": owner_id, "catalogs": catalogs, "metrics": metrics}
+
+    async def _my_snapshot_count(self, metrics: list[dict[str, Any]]) -> int:
+        """我的指标中有快照记录的数量（快照覆盖度）。"""
+        codes = [m["metric_code"] for m in metrics]
+        if not codes:
+            return 0
+        covered = set(
+            (
+                await self._session.execute(
+                    select(MetricValueSnapshot.metric_code)
+                    .where(MetricValueSnapshot.metric_code.in_(codes))
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return len(covered)
 
     # ----------------------------------------------------------------
     # 写能力（FR-18 资产工作台）：认领/转让归属、敏感级重分类、批量操作

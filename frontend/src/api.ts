@@ -11,6 +11,7 @@ import {
   AssetHealthSummary,
   AssetHeatmapMatrix,
   AssetMetricSummary,
+  AssetMetricDimensionSummary,
   AssetMyAssets,
   AssetOwnerView,
   AssetPiiOverview,
@@ -2577,6 +2578,10 @@ export async function fetchAssetClassification(): Promise<AssetClassificationSum
 
 export async function fetchAssetMetricSummary(): Promise<AssetMetricSummary> {
   return request<AssetMetricSummary>(`${API_BASE}/assetmap/metrics`);
+}
+
+export async function fetchAssetMetricDimensions(): Promise<AssetMetricDimensionSummary> {
+  return request<AssetMetricDimensionSummary>(`${API_BASE}/assetmap/metric-dimensions`);
 }
 
 export async function fetchAssetTables(params?: {

@@ -55,6 +55,7 @@ import {
   fetchAssetGraph,
   fetchAssetHealth,
   fetchAssetHeatmapMatrix,
+  fetchAssetMetricDimensions,
   fetchAssetMetricSummary,
   fetchAssetMyAssets,
   fetchAssetOrphans,
@@ -86,6 +87,7 @@ import type {
   AssetHealthSummary,
   AssetHeatmapMatrix,
   AssetMetricSummary,
+  AssetMetricDimensionSummary,
   AssetMyAssets,
   AssetOwnerView,
   AssetPiiOverview,
@@ -123,6 +125,104 @@ const SENSITIVITY_COLOR: Record<string, string> = {
   PII: "red",
   NEEDS_REVIEW: "gold",
   UNKNOWN: "default",
+};
+
+// ---- 指标体系维度标签映射（概览「指标体系」区块）----
+const METRIC_TYPE_LABEL: Record<string, string> = {
+  atomic: "原子指标",
+  derived: "派生指标",
+  composite: "复合指标",
+};
+const DW_LAYER_LABEL: Record<string, string> = {
+  ODS: "ODS",
+  DWD: "DWD",
+  DWS: "DWS",
+  ADS: "ADS",
+  DM: "DM",
+};
+const METRIC_TIER_LABEL: Record<string, string> = {
+  T1: "T1",
+  T2: "T2",
+  T3: "T3",
+};
+const UNIT_LABEL: Record<string, string> = {
+  CNY: "元",
+  cnt: "次",
+  PERSON: "人",
+  PERCENT: "%",
+  MINUTE: "分钟",
+};
+const AGG_LABEL: Record<string, string> = {
+  SUM: "求和",
+  AVG: "均值",
+  COUNT: "计数",
+  COUNT_DISTINCT: "去重计数",
+  LAST_VALUE: "末值",
+  MAX: "最大值",
+  MIN: "最小值",
+  MEDIAN: "中位数",
+  PERCENTILE: "分位",
+};
+const TIME_SEM_LABEL: Record<string, string> = {
+  PERIOD: "周期",
+  YTD: "年初至今",
+  TTM: "滚动12月",
+  AVG: "平均",
+  MOM: "环比",
+  YOY: "同比",
+};
+const STATUS_LABEL: Record<string, string> = {
+  DRAFT: "草稿",
+  REVIEW: "评审中",
+  PUBLISHED: "已发布",
+  EXPERIMENTAL: "实验",
+  DEPRECATED: "已废弃",
+  DATA_SOURCE_DROPPED: "源下线",
+};
+// 指标体系 8 类维度配置（key 对应 metric_dimensions 响应字段）
+const METRIC_DIMENSION_GROUPS: Array<{
+  key: keyof AssetMetricDimensionSummary;
+  label: string;
+  map: Record<string, string>;
+}> = [
+  { key: "by_type", label: "指标类型", map: METRIC_TYPE_LABEL },
+  { key: "by_dw_layer", label: "数仓分层", map: DW_LAYER_LABEL },
+  { key: "by_metric_tier", label: "指标分级", map: METRIC_TIER_LABEL },
+  { key: "by_unit", label: "单位", map: UNIT_LABEL },
+  { key: "by_aggregation", label: "聚合方式", map: AGG_LABEL },
+  { key: "by_time_semantics", label: "时间语义", map: TIME_SEM_LABEL },
+  { key: "by_status", label: "指标状态", map: STATUS_LABEL },
+  { key: "by_domain", label: "业务域", map: {} },
+];
+
+// 维度值中文映射（未知值原样显示）
+function dimLabel(map: Record<string, string>, key: string): string {
+  return map[key] ?? key;
+}
+
+// ---- 资产健康（HealthTab）：评分分档 + 9 项体检 ----
+const HEALTH_LEVEL_META: Record<string, { label: string; color: string }> = {
+  excellent: { label: "优", color: "green" },
+  good: { label: "良", color: "blue" },
+  fair: { label: "中", color: "orange" },
+  poor: { label: "差", color: "red" },
+};
+const HEALTH_CHECK_LABEL: Record<string, string> = {
+  unhealthy_sources: "不健康数据源",
+  schema_incomplete: "Schema 不完整",
+  orphan_assets: "孤儿资产",
+  stale_assets: "陈旧资产",
+  tables_missing_desc: "表描述缺失",
+  fields_missing_desc: "字段描述缺失",
+  pii_unreviewed: "PII 未复核",
+  metrics_without_snapshot: "无快照指标",
+  deprecated_without_successor: "废弃未替换指标",
+};
+// 变更类型（ChangesTab）
+const CHANGE_TYPE_META: Record<string, { label: string; color: string }> = {
+  created: { label: "新增", color: "green" },
+  updated: { label: "更新", color: "blue" },
+  deprecated: { label: "废弃", color: "red" },
 };
 
 // 敏感度渲染：历史后端 to_dict 曾剥离该字段，值可能为 null/undefined，此处做防御；
@@ -333,6 +433,7 @@ const ORPHAN_COLUMNS: ColumnsType<DrillRow> = [
 function OverviewTab() {
   const [summary, setSummary] = useState<AssetCatalogSummary | null>(null);
   const [metricSummary, setMetricSummary] = useState<AssetMetricSummary | null>(null);
+  const [metricDims, setMetricDims] = useState<AssetMetricDimensionSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // 明细下钻抽屉状态（指标点击值 → 明细表）
@@ -351,9 +452,14 @@ function OverviewTab() {
       setLoading(true);
       setError(null);
       try {
-        const [s, m] = await Promise.all([fetchAssetSummary(), fetchAssetMetricSummary()]);
+        const [s, m, d] = await Promise.all([
+          fetchAssetSummary(),
+          fetchAssetMetricSummary(),
+          fetchAssetMetricDimensions(),
+        ]);
         setSummary(s);
         setMetricSummary(m);
+        setMetricDims(d);
       } catch (err) {
         setError(err instanceof Error ? err.message : "加载资产概览失败");
       } finally {
@@ -441,6 +547,19 @@ function OverviewTab() {
         {node}
       </a>
     );
+  }
+
+  // 指标体系：打开某维度分布明细（维度 → 数量两列）
+  function openDimensionDrill(title: string, data: Record<string, number> | undefined) {
+    const rows: DrillRow[] = Object.entries(data ?? {}).map(([k, v]) => ({
+      key: k,
+      value: v,
+    }));
+    const columns: ColumnsType<DrillRow> = [
+      { title: "维度值", dataIndex: "key" },
+      { title: "指标数", dataIndex: "value" },
+    ];
+    openDrill(title, columns, async () => rows);
   }
 
   if (loading) return <Spin />;
@@ -532,6 +651,63 @@ function OverviewTab() {
           </Card>
         </Col>
       </Row>
+
+      <Card
+        title="指标体系"
+        size="small"
+        style={{ marginTop: 16 }}
+        extra={
+          <span className="muted" style={{ fontSize: 12 }}>
+            共 {metricDims?.total ?? 0} 个指标
+          </span>
+        }
+      >
+        <Row gutter={[12, 12]}>
+          {METRIC_DIMENSION_GROUPS.map((g) => {
+            const data = ((metricDims ?? {})[g.key] ?? {}) as Record<string, number>;
+            const entries = Object.entries(data);
+            if (entries.length === 0) return null;
+            return (
+              <Col xs={24} sm={12} lg={6} key={g.key}>
+                <Card size="small" title={g.label} styles={{ body: { padding: "8px 12px" } }}>
+                  <Space size={[6, 6]} wrap>
+                    {entries.map(([k, v]) => (
+                      <Tag
+                        key={k}
+                        color="blue"
+                        style={{ cursor: "pointer", margin: 0 }}
+                        onClick={() => openDimensionDrill(`${g.label}分布明细`, data)}
+                      >
+                        {dimLabel(g.map, k)} {v}
+                      </Tag>
+                    ))}
+                  </Space>
+                </Card>
+              </Col>
+            );
+          })}
+          <Col xs={24} sm={12} lg={6}>
+            <Card size="small" title="PII 合规" styles={{ body: { padding: "8px 12px" } }}>
+              <Statistic
+                title="合规率"
+                value={
+                  metricDims?.pii_compliance?.review_rate != null
+                    ? Math.round(metricDims.pii_compliance.review_rate * 100)
+                    : 0
+                }
+                suffix="%"
+                valueStyle={{
+                  color: (metricDims?.pii_compliance?.review_rate ?? 0) >= 0.8 ? "#2e9e5b" : "#d64545",
+                }}
+              />
+              <div className="muted" style={{ fontSize: 12 }}>
+                已复核 {metricDims?.pii_compliance?.pii_reviewed ?? 0} /{" "}
+                {metricDims?.pii_compliance?.pii_total ?? 0} 个 PII 指标
+              </div>
+            </Card>
+          </Col>
+        </Row>
+      </Card>
 
       <DrillDownDrawer
         open={drillOpen}
@@ -1808,13 +1984,14 @@ function OwnerTab() {
         ) : !view ? (
           <Empty description="请选择责任人" />
         ) : (
-          <Row gutter={[16, 16]}>
-            <Col span={6}>
-              <Statistic
-                title="指标总数"
-                value={view.metrics.total}
-                valueRender={clickableValue(() => drillMetrics())}
-              />
+          <>
+            <Row gutter={[16, 16]}>
+              <Col span={6}>
+                <Statistic
+                  title="指标总数"
+                  value={view.metrics.total}
+                  valueRender={clickableValue(() => drillMetrics())}
+                />
             </Col>
             <Col span={6}>
               <Statistic
@@ -1839,8 +2016,10 @@ function OwnerTab() {
                 valueRender={clickableValue(() => drillMetrics({ piiFlag: true }))}
               />
             </Col>
-            <Col span={12}>
-              <div style={{ marginTop: 8 }}>
+          </Row>
+          <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+            <Col span={8}>
+              <div>
                 <span className="muted" style={{ fontSize: 13 }}>
                   域分布（点击查看该域明细）
                 </span>
@@ -1857,17 +2036,117 @@ function OwnerTab() {
                 </Row>
               </div>
             </Col>
-            <Col span={12}>
-              <div style={{ marginTop: 8 }}>
+            <Col span={8}>
+              <div>
                 <span className="muted" style={{ fontSize: 13 }}>
-                  目录资产
+                  类型分布
                 </span>
-                <div style={{ fontSize: 28, fontWeight: 600, fontFamily: "var(--font-display)" }}>
-                  {view.catalogs.total}
-                </div>
+                <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+                  {Object.entries(view.metrics.by_type ?? {}).map(([k, v]) => (
+                    <Col span={8} key={k}>
+                      <Statistic title={METRIC_TYPE_LABEL[k] ?? k} value={v} />
+                    </Col>
+                  ))}
+                </Row>
+              </div>
+            </Col>
+            <Col span={8}>
+              <div>
+                <span className="muted" style={{ fontSize: 13 }}>
+                  指标分级
+                </span>
+                <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+                  {Object.entries(view.metrics.by_metric_tier ?? {}).map(([k, v]) => (
+                    <Col span={8} key={k}>
+                      <Statistic title={k} value={v} />
+                    </Col>
+                  ))}
+                </Row>
               </div>
             </Col>
           </Row>
+          <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+            <Col span={6}>
+              <Statistic
+                title="快照覆盖"
+                value={view.metrics.snapshot_covered}
+                suffix={`/ ${view.metrics.total}`}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="PII 未复核"
+                value={view.metrics.todo?.pii_unreviewed ?? 0}
+                valueStyle={{
+                  color: (view.metrics.todo?.pii_unreviewed ?? 0) > 0 ? "#d64545" : undefined,
+                }}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic
+                title="废弃未替换"
+                value={view.metrics.todo?.deprecated_without_successor ?? 0}
+                valueStyle={{
+                  color:
+                    (view.metrics.todo?.deprecated_without_successor ?? 0) > 0
+                      ? "#d46b08"
+                      : undefined,
+                }}
+              />
+            </Col>
+            <Col span={6}>
+              <Statistic title="目录资产" value={view.catalogs.total} />
+            </Col>
+          </Row>
+          <Card
+            title={`目录资产明细（${view.catalogs.items?.length ?? 0}）`}
+            size="small"
+            style={{ marginTop: 16 }}
+          >
+            {(view.catalogs.items ?? []).length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无目录资产" />
+            ) : (
+              <Table
+                dataSource={view.catalogs.items ?? []}
+                rowKey={(r) => `c-${r.id}`}
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
+                  {
+                    title: "类型",
+                    dataIndex: "entity_type",
+                    key: "type",
+                    width: 90,
+                    render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
+                  },
+                  {
+                    title: "敏感度",
+                    dataIndex: "sensitivity_level",
+                    key: "sensitivity",
+                    width: 110,
+                    render: (s: string | null) => sensitivityTag(s),
+                  },
+                  {
+                    title: "数据源",
+                    key: "source",
+                    width: 150,
+                    ellipsis: true,
+                    render: (_, r) =>
+                      r.source_name ? `${r.source_name}（${r.source_id}）` : r.source_id,
+                  },
+                  {
+                    title: "更新时间",
+                    dataIndex: "updated_at",
+                    key: "updated",
+                    width: 170,
+                    render: (v: string | null) => (v ? formatCnTime(v) : "-"),
+                  },
+                ]}
+              />
+            )}
+          </Card>
+          </>
         )}
       </Card>
       <DrillDownDrawer
@@ -2537,29 +2816,43 @@ function SearchTab() {
                 dataIndex: "type",
                 key: "type",
                 width: 90,
-                render: (t: string) => (
-                  <Tag color={t === "metric" ? "purple" : "blue"}>
-                    {t === "metric" ? "指标" : "目录"}
-                  </Tag>
-                ),
+                render: (t: string) => {
+                  const meta =
+                    t === "metric"
+                      ? { label: "指标", color: "purple" }
+                      : t === "field"
+                        ? { label: "字段", color: "cyan" }
+                        : { label: "目录", color: "blue" };
+                  return <Tag color={meta.color}>{meta.label}</Tag>;
+                },
               },
               {
                 title: "名称",
                 dataIndex: "name",
                 key: "name",
                 ellipsis: true,
-                render: (v: string, r: AssetSearchItem) =>
-                  r.type === "metric" ? (
-                    <a
-                      className="mono"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate(`/detail/${encodeURIComponent(v)}`);
-                      }}
-                    >
-                      {v}
-                    </a>
-                  ) : v,
+                render: (v: string, r: AssetSearchItem) => (
+                  <div>
+                    {r.type === "metric" ? (
+                      <a
+                        className="mono"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(`/detail/${encodeURIComponent(v)}`);
+                        }}
+                      >
+                        {v}
+                      </a>
+                    ) : (
+                      <span className="mono">{v}</span>
+                    )}
+                    {r.description ? (
+                      <div className="muted" style={{ fontSize: 12 }} title={r.description}>
+                        {r.description}
+                      </div>
+                    ) : null}
+                  </div>
+                ),
               },
               {
                 title: "实体类型",
@@ -2576,18 +2869,45 @@ function SearchTab() {
                 render: (s: string | null) => sensitivityTag(s),
               },
               {
-                title: "域",
-                dataIndex: "domain",
-                key: "domain",
-                width: 120,
-                render: (v: string | null) => v ?? "-",
+                title: "数据源",
+                key: "source",
+                width: 140,
+                ellipsis: true,
+                render: (_, r) =>
+                  r.source_name ? `${r.source_name}（${r.source_id}）` : r.source_id ?? "-",
               },
               {
-                title: "状态",
-                dataIndex: "status",
-                key: "status",
+                title: "责任人",
+                key: "owner",
                 width: 110,
-                render: (v: string | null) => v ?? "-",
+                ellipsis: true,
+                render: (_, r) =>
+                  r.owner_name ?? (r.owner_id != null ? `#${r.owner_id}` : <Tag>无</Tag>),
+              },
+              {
+                title: "口径",
+                key: "metric_info",
+                width: 220,
+                render: (_, r) =>
+                  r.type === "metric" ? (
+                    <Space size={[4, 4]} wrap>
+                      <Tag>{METRIC_TYPE_LABEL[r.metric_type ?? ""] ?? r.metric_type ?? "-"}</Tag>
+                      <Tag>粒度 {r.granularity ?? "-"}</Tag>
+                      <Tag>单位 {UNIT_LABEL[r.unit ?? ""] ?? r.unit ?? "-"}</Tag>
+                      <Tag>{AGG_LABEL[r.aggregation ?? ""] ?? r.aggregation ?? "-"}</Tag>
+                    </Space>
+                  ) : r.column_count != null ? (
+                    <span className="muted">{r.column_count} 字段</span>
+                  ) : (
+                    "-"
+                  ),
+              },
+              {
+                title: "更新时间",
+                dataIndex: "updated_at",
+                key: "updated",
+                width: 170,
+                render: (v: string | null | undefined) => (v ? formatCnTime(v) : "-"),
               },
             ]}
           />
@@ -2615,11 +2935,28 @@ function HealthTab() {
 
   const unhealthyCount = data.unhealthy_sources.length;
   const incompleteCount = data.schema_incomplete.length;
-  const staleCount = data.stale_assets.length;
+  const levelMeta = HEALTH_LEVEL_META[data.level] ?? { label: data.level, color: "default" };
+  const scoreColor =
+    data.score >= 75 ? "#3f8600" : data.score >= 60 ? "#d46b08" : "#cf1322";
+  const checkRows = (data.checks ?? []).map((c) => ({
+    key: c.key,
+    name: HEALTH_CHECK_LABEL[c.key] ?? c.key,
+    count: c.count,
+    field_total: c.field_total,
+    healthy: c.count === 0,
+  }));
 
   return (
     <div>
       <Row gutter={16} style={{ marginBottom: 16 }}>
+        <Col span={6}>
+          <Card size="small" style={{ textAlign: "center" }}>
+            <Statistic title="健康评分" value={data.score} valueStyle={{ color: scoreColor }} />
+            <Tag color={levelMeta.color} style={{ marginTop: 4 }}>
+              健康等级：{levelMeta.label}
+            </Tag>
+          </Card>
+        </Col>
         <Col span={6}>
           <Card size="small">
             <Statistic
@@ -2647,16 +2984,34 @@ function HealthTab() {
             />
           </Card>
         </Col>
-        <Col span={6}>
-          <Card size="small">
-            <Statistic
-              title={`${data.stale_days} 天未更新`}
-              value={staleCount}
-              valueStyle={{ color: staleCount > 0 ? "#d46b08" : "#3f8600" }}
-            />
-          </Card>
-        </Col>
       </Row>
+
+      <Card title="体检项（9 项）" size="small" style={{ marginBottom: 16 }}>
+        <Table
+          dataSource={checkRows}
+          rowKey="key"
+          size="small"
+          pagination={false}
+          columns={[
+            { title: "体检项", dataIndex: "name", key: "name" },
+            {
+              title: "数量",
+              dataIndex: "count",
+              key: "count",
+              width: 120,
+              render: (v: number, r) =>
+                r.key === "fields_missing_desc" && r.field_total ? `${v} / ${r.field_total}` : v,
+            },
+            {
+              title: "状态",
+              key: "status",
+              width: 120,
+              render: (_, r) =>
+                r.healthy ? <Tag color="green">正常</Tag> : <Tag color="orange">需关注</Tag>,
+            },
+          ]}
+        />
+      </Card>
 
       <Row gutter={16}>
         <Col span={8}>
@@ -2721,6 +3076,63 @@ function HealthTab() {
                     width: 170,
                     render: (v: string) => formatCnTime(v),
                   },
+                ]}
+              />
+            )}
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={16} style={{ marginTop: 16 }}>
+        <Col span={8}>
+          <Card title="PII 未复核指标" size="small">
+            {data.pii_unreviewed?.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无" />
+            ) : (
+              <Table
+                dataSource={data.pii_unreviewed ?? []}
+                rowKey={(r) => r.metric_code}
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "编码", dataIndex: "metric_code", key: "code", ellipsis: true },
+                  { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
+                ]}
+              />
+            )}
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card title="无快照指标" size="small">
+            {data.metrics_without_snapshot?.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无" />
+            ) : (
+              <Table
+                dataSource={data.metrics_without_snapshot ?? []}
+                rowKey={(r) => r.metric_code}
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "编码", dataIndex: "metric_code", key: "code", ellipsis: true },
+                  { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
+                ]}
+              />
+            )}
+          </Card>
+        </Col>
+        <Col span={8}>
+          <Card title="废弃未替换指标" size="small">
+            {data.deprecated_without_successor?.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无" />
+            ) : (
+              <Table
+                dataSource={data.deprecated_without_successor ?? []}
+                rowKey={(r) => r.metric_code}
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "编码", dataIndex: "metric_code", key: "code", ellipsis: true },
+                  { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
                 ]}
               />
             )}
@@ -2845,9 +3257,10 @@ function ChangesTab() {
         />
       }
     >
-      <Descriptions column={2} size="small" style={{ marginBottom: 16 }}>
+      <Descriptions column={3} size="small" style={{ marginBottom: 16 }}>
         <Descriptions.Item label="新增/变更目录">{data.catalogs.length}</Descriptions.Item>
         <Descriptions.Item label="新增/变更指标">{data.metrics.length}</Descriptions.Item>
+        <Descriptions.Item label="Schema 漂移">{data.drift?.length ?? 0}</Descriptions.Item>
       </Descriptions>
       <Table
         dataSource={data.catalogs}
@@ -2870,13 +3283,36 @@ function ChangesTab() {
             render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
           },
           {
+            title: "变更",
+            dataIndex: "change_type",
+            key: "change",
+            width: 80,
+            render: (v: string) => {
+              const meta = CHANGE_TYPE_META[v];
+              return meta ? <Tag color={meta.color}>{meta.label}</Tag> : v;
+            },
+          },
+          {
             title: "敏感度",
             dataIndex: "sensitivity_level",
             key: "sensitivity",
             width: 110,
             render: (s: string | null) => sensitivityTag(s),
           },
-          { title: "源", dataIndex: "source_id", key: "source", width: 120 },
+          {
+            title: "数据源",
+            key: "source",
+            width: 150,
+            ellipsis: true,
+            render: (_, r) => (r.source_name ? `${r.source_name}（${r.source_id}）` : r.source_id),
+          },
+          {
+            title: "责任人",
+            key: "owner",
+            width: 110,
+            ellipsis: true,
+            render: (_, r) => r.owner_name ?? (r.owner_id != null ? `#${r.owner_id}` : <Tag>无</Tag>),
+          },
           {
             title: "更新时间",
             dataIndex: "updated_at",
@@ -2921,14 +3357,32 @@ function ChangesTab() {
             ),
           },
           { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
-          { title: "状态", dataIndex: "status", key: "status", width: 110 },
-          { title: "域", dataIndex: "domain", key: "domain", width: 110 },
+          {
+            title: "变更",
+            dataIndex: "change_type",
+            key: "change",
+            width: 80,
+            render: (v: string) => {
+              const meta = CHANGE_TYPE_META[v];
+              return meta ? <Tag color={meta.color}>{meta.label}</Tag> : v;
+            },
+          },
+          { title: "状态", dataIndex: "status", key: "status", width: 100 },
+          { title: "版本", dataIndex: "version", key: "version", width: 70 },
+          { title: "域", dataIndex: "domain", key: "domain", width: 100 },
           {
             title: "PII",
             dataIndex: "pii_flag",
             key: "pii",
             width: 70,
             render: (v: boolean) => (v ? <Tag color="red">PII</Tag> : null),
+          },
+          {
+            title: "责任人",
+            key: "owner",
+            width: 110,
+            ellipsis: true,
+            render: (_, r) => r.owner_name ?? (r.owner_id != null ? `#${r.owner_id}` : <Tag>无</Tag>),
           },
           {
             title: "更新时间",
@@ -2939,6 +3393,37 @@ function ChangesTab() {
           },
         ]}
       />
+      {data.drift && data.drift.length > 0 && (
+        <Table
+          dataSource={data.drift}
+          rowKey={(r) => `d-${r.id}`}
+          size="small"
+          pagination={{ pageSize, showSizeChanger: true, pageSizeOptions: [...PAGE_SIZE_OPTIONS] }}
+          style={{ marginTop: 16 }}
+          title={() => <b>Schema 漂移明细</b>}
+          columns={[
+            { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
+            { title: "变更类型", dataIndex: "change_type", key: "type", width: 140 },
+            {
+              title: "变更内容",
+              key: "diff",
+              ellipsis: true,
+              render: (_, r) => (
+                <span className="mono" style={{ fontSize: 12 }}>
+                  {r.diff_json ? JSON.stringify(r.diff_json) : "-"}
+                </span>
+              ),
+            },
+            {
+              title: "时间",
+              dataIndex: "created_at",
+              key: "created",
+              width: 180,
+              render: (v: string) => formatCnTime(v),
+            },
+          ]}
+        />
+      )}
     </Card>
   );
 }
@@ -2961,13 +3446,65 @@ function MyAssetsTab() {
   if (error) return <Alert type="error" message={error} />;
   if (!data) return <Empty />;
 
+  const s = data.summary ?? {
+    catalog_count: data.catalogs.length,
+    metric_count: data.metrics.length,
+    draft_count: 0,
+    pii_count: 0,
+    snapshot_covered: 0,
+    snapshot_total: 0,
+  };
+
   return (
     <div>
-      <Descriptions column={3} size="small" style={{ marginBottom: 16 }}>
-        <Descriptions.Item label="我的目录">{data.catalogs.length}</Descriptions.Item>
-        <Descriptions.Item label="我的指标">{data.metrics.length}</Descriptions.Item>
-        <Descriptions.Item label="责任人 ID">#{data.owner_id}</Descriptions.Item>
-      </Descriptions>
+      {data.claimable_orphans > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="有待认领资产"
+          description={`当前有 ${data.claimable_orphans} 个孤儿资产（无责任人）。可在「孤儿资产」或「概览」页查看并认领，认领后即可在此工作台统一管理。`}
+        />
+      )}
+      <Row gutter={16} style={{ marginBottom: 16 }}>
+        <Col xs={12} md={4}>
+          <Card size="small">
+            <Statistic title="我的目录" value={s.catalog_count} />
+          </Card>
+        </Col>
+        <Col xs={12} md={4}>
+          <Card size="small">
+            <Statistic title="我的指标" value={s.metric_count} />
+          </Card>
+        </Col>
+        <Col xs={12} md={4}>
+          <Card size="small">
+            <Statistic
+              title="草稿待发布"
+              value={s.draft_count}
+              valueStyle={{ color: s.draft_count > 0 ? "#d46b08" : undefined }}
+            />
+          </Card>
+        </Col>
+        <Col xs={12} md={4}>
+          <Card size="small">
+            <Statistic
+              title="PII 指标"
+              value={s.pii_count}
+              valueStyle={{ color: s.pii_count > 0 ? "#cf1322" : undefined }}
+            />
+          </Card>
+        </Col>
+        <Col xs={12} md={4}>
+          <Card size="small">
+            <Statistic
+              title="快照覆盖"
+              value={s.snapshot_covered}
+              suffix={`/ ${s.snapshot_total}`}
+            />
+          </Card>
+        </Col>
+      </Row>
       <Table
         dataSource={data.catalogs}
         rowKey={(r) => `c-${r.id}`}
@@ -2993,9 +3530,37 @@ function MyAssetsTab() {
             dataIndex: "sensitivity_level",
             key: "sensitivity",
             width: 110,
-            render: (s: string | null) => sensitivityTag(s),
+            render: (s2: string | null) => sensitivityTag(s2),
           },
-          { title: "源", dataIndex: "source_id", key: "source", width: 120 },
+          {
+            title: "数据源",
+            key: "source",
+            width: 140,
+            ellipsis: true,
+            render: (_, r) => (r.source_name ? `${r.source_name}（${r.source_id}）` : r.source_id),
+          },
+          {
+            title: "字段数",
+            dataIndex: "column_count",
+            key: "columns",
+            width: 80,
+            render: (v: number | null | undefined) => v ?? "-",
+          },
+          {
+            title: "描述",
+            dataIndex: "description",
+            key: "desc",
+            ellipsis: true,
+            render: (v: string | null | undefined) =>
+              v ?? <span className="muted">暂无</span>,
+          },
+          {
+            title: "更新时间",
+            dataIndex: "updated_at",
+            key: "updated",
+            width: 170,
+            render: (v: string | null | undefined) => (v ? formatCnTime(v) : "-"),
+          },
         ]}
       />
       <Table
@@ -3033,14 +3598,49 @@ function MyAssetsTab() {
             ),
           },
           { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
-          { title: "状态", dataIndex: "status", key: "status", width: 110 },
-          { title: "域", dataIndex: "domain", key: "domain", width: 110 },
+          { title: "状态", dataIndex: "status", key: "status", width: 100 },
+          {
+            title: "类型",
+            dataIndex: "type",
+            key: "type",
+            width: 90,
+            render: (v: string | undefined) => METRIC_TYPE_LABEL[v ?? ""] ?? v ?? "-",
+          },
+          {
+            title: "粒度",
+            dataIndex: "granularity",
+            key: "granularity",
+            width: 90,
+            render: (v: string | undefined) => v ?? "-",
+          },
+          {
+            title: "单位",
+            dataIndex: "unit",
+            key: "unit",
+            width: 80,
+            render: (v: string | undefined) => UNIT_LABEL[v ?? ""] ?? v ?? "-",
+          },
+          {
+            title: "分级",
+            dataIndex: "metric_tier",
+            key: "tier",
+            width: 70,
+            render: (v: string | undefined) => <Tag color="blue">{v ?? "-"}</Tag>,
+          },
           {
             title: "PII",
             dataIndex: "pii_flag",
             key: "pii",
             width: 70,
             render: (v: boolean) => (v ? <Tag color="red">PII</Tag> : null),
+          },
+          {
+            title: "描述",
+            dataIndex: "description",
+            key: "desc",
+            ellipsis: true,
+            render: (v: string | null | undefined) =>
+              v ?? <span className="muted">暂无</span>,
           },
         ]}
       />

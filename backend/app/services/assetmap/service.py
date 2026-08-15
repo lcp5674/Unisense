@@ -129,6 +129,12 @@ class AssetMapService(BaseService):
     async def metric_summary(self) -> dict[str, Any]:
         return await _agg_cached("metric_summary", self._repo.metric_summary)
 
+    async def metric_dimension_summary(self) -> dict[str, Any]:
+        """指标体系聚合：指标多维分布 + PII 合规率（概览 Tab 指标体系区块数据源）。"""
+        return await _agg_cached(
+            "metric_dimension_summary", self._repo.metric_dimension_summary
+        )
+
     async def list_tables(
         self, source_id: str | None, sensitivity: str | None, limit: int
     ) -> list[dict[str, Any]]:

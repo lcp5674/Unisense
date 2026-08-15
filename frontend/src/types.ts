@@ -1377,6 +1377,25 @@ export interface AssetMetricSummary {
   by_status: Record<string, number>;
 }
 
+// 指标体系聚合（GET /assetmap/metric-dimensions）：8 类维度分布 + PII 合规率
+export interface AssetMetricDimensionSummary {
+  total: number;
+  by_type: Record<string, number>;
+  by_dw_layer: Record<string, number>;
+  by_metric_tier: Record<string, number>;
+  by_unit: Record<string, number>;
+  by_aggregation: Record<string, number>;
+  by_time_semantics: Record<string, number>;
+  by_status: Record<string, number>;
+  by_domain: Record<string, number>;
+  pii_compliance: {
+    pii_total: number;
+    pii_reviewed: number;
+    pii_unreviewed: number;
+    review_rate: number;
+  };
+}
+
 export interface AssetTableItem {
   /** 目录主键（db_catalog.id），用于实体详情下钻；后端 to_dict 保留 id */
   id?: number;
@@ -1485,8 +1504,27 @@ export interface AssetOwnerView {
     draft: number;
     pii_count: number;
     by_domain: Record<string, number>;
+    by_type: Record<string, number>;
+    by_metric_tier: Record<string, number>;
+    snapshot_covered: number;
+    todo: {
+      pii_unreviewed: number;
+      deprecated_without_successor: number;
+    };
   };
-  catalogs: { total: number };
+  catalogs: {
+    total: number;
+    items: Array<{
+      id: number;
+      entity_name: string;
+      entity_type: string;
+      sensitivity_level: string | null;
+      source_id: string;
+      source_name?: string | null;
+      owner_name?: string | null;
+      updated_at: string | null;
+    }>;
+  };
 }
 
 // 二维热力矩阵（GET /assetmap/heatmap-matrix?asset_type=）
@@ -1503,25 +1541,53 @@ export interface AssetHeatmapMatrix {
 
 // ---- 产品补充（FR-18 生产化）：搜索 / 健康 / PII / 变更 / 我的资产 ----
 
-// 全局搜索（GET /assetmap/search）
+// 全局搜索（GET /assetmap/search）——富化：源/责任人/描述/字段数 + 指标口径字段
 export interface AssetSearchItem {
-  type: "catalog" | "metric";
+  type: "catalog" | "field" | "metric";
   id: number;
   name: string;
   entity_type: string;
   sensitivity_level: string | null;
   domain: string | null;
   owner_id: number | null;
+  owner_name?: string | null;
+  source_id?: string | null;
+  source_name?: string | null;
+  description?: string | null;
+  column_count?: number | null;
+  updated_at?: string | null;
   status: string | null;
+  /** 以下为指标专属字段（type=metric 时有值） */
+  metric_type?: string;
+  granularity?: string;
+  unit?: string;
+  aggregation?: string;
+  time_semantics?: string;
+  freshness?: string;
+  dw_layer?: string;
+  metric_tier?: string;
+  additivity?: string;
+  serving_mode?: string;
 }
 
-// 资产健康视图（GET /assetmap/health）
+// 资产健康视图（GET /assetmap/health）——升级：评分 + 9 项体检
 export interface AssetHealthSummary {
+  score: number;
+  level: "excellent" | "good" | "fair" | "poor";
+  checks: Array<{
+    key: string;
+    count: number;
+    deduct: number;
+    field_total?: number;
+  }>;
   unhealthy_sources: Array<{ source_id: string; name: string; health_status: string }>;
   schema_incomplete: Array<{ id: number; entity_name: string; source_id: string }>;
   orphan_assets: number;
   stale_assets: Array<{ id: number; entity_name: string; updated_at: string }>;
   stale_days: number;
+  pii_unreviewed: Array<{ metric_code: string; name: string; owner_id: number | null }>;
+  metrics_without_snapshot: Array<{ metric_code: string; name: string }>;
+  deprecated_without_successor: Array<{ metric_code: string; name: string }>;
 }
 
 // PII 合规视图（GET /assetmap/pii）
@@ -1532,15 +1598,19 @@ export interface AssetPiiOverview {
   pii_catalog_count: number;
 }
 
-// 变更追踪（GET /assetmap/changes）
+// 变更追踪（GET /assetmap/changes）——富化：变更类型/责任人/版本 + drift 明细
 export interface AssetChangeItem {
   id: number;
   entity_name: string;
   entity_type: string;
   sensitivity_level: string;
   owner_id: number | null;
+  owner_name?: string | null;
   source_id: string;
+  source_name?: string | null;
+  created_at: string | null;
   updated_at: string;
+  change_type: "created" | "updated";
 }
 export interface AssetChangeMetric {
   metric_code: string;
@@ -1548,15 +1618,29 @@ export interface AssetChangeMetric {
   status: string;
   domain: string;
   pii_flag: boolean;
+  version: number;
+  description?: string | null;
+  owner_id: number | null;
+  owner_name?: string | null;
+  change_type: "created" | "updated" | "deprecated";
   updated_at: string;
+}
+export interface AssetDriftItem {
+  id: number;
+  source_id: string;
+  entity_name: string;
+  change_type: string;
+  diff_json: Record<string, unknown> | null;
+  created_at: string;
 }
 export interface AssetChanges {
   catalogs: AssetChangeItem[];
   metrics: AssetChangeMetric[];
+  drift: AssetDriftItem[];
   days: number;
 }
 
-// 我的资产（GET /assetmap/my-assets）
+// 我的资产（GET /assetmap/my-assets）——富化：统计卡/口径摘要/快照覆盖/待认领
 export interface AssetMyAssets {
   owner_id: number;
   catalogs: Array<{
@@ -1565,6 +1649,11 @@ export interface AssetMyAssets {
     entity_type: string;
     sensitivity_level: string;
     source_id: string;
+    source_name?: string | null;
+    owner_name?: string | null;
+    description?: string | null;
+    column_count?: number | null;
+    updated_at?: string | null;
   }>;
   metrics: Array<{
     metric_code: string;
@@ -1572,7 +1661,22 @@ export interface AssetMyAssets {
     status: string;
     domain: string;
     pii_flag: boolean;
+    type?: string;
+    granularity?: string;
+    unit?: string;
+    metric_tier?: string;
+    description?: string | null;
+    updated_at?: string | null;
   }>;
+  summary: {
+    catalog_count: number;
+    metric_count: number;
+    draft_count: number;
+    pii_count: number;
+    snapshot_covered: number;
+    snapshot_total: number;
+  };
+  claimable_orphans: number;
 }
 
 export const API_BASE = "/api/v1";

@@ -13,6 +13,7 @@ vi.mock("../api", () => ({
   fetchAssetSummary: vi.fn(),
   fetchAssetClassification: vi.fn(),
   fetchAssetMetricSummary: vi.fn(),
+  fetchAssetMetricDimensions: vi.fn(),
   fetchAssetTables: vi.fn(),
   fetchAssetOrphans: vi.fn(),
   fetchAssetEntityDetail: vi.fn(),
@@ -106,6 +107,7 @@ import {
   fetchAssetSummary,
   fetchAssetClassification,
   fetchAssetMetricSummary,
+  fetchAssetMetricDimensions,
   fetchAssetTables,
   fetchAssetOrphans,
   fetchAssetEntityDetail,
@@ -146,8 +148,25 @@ const mockOwnerViewData = {
     draft: 10,
     pii_count: 5,
     by_domain: { finance: 40, marketing: 10 },
+    by_type: { atomic: 45, derived: 5 },
+    by_metric_tier: { T1: 20, T2: 20, T3: 10 },
+    snapshot_covered: 25,
+    todo: { pii_unreviewed: 2, deprecated_without_successor: 1 },
   },
-  catalogs: { total: 8 },
+  catalogs: {
+    total: 8,
+    items: [
+      {
+        id: 1,
+        entity_name: "catalog.db.orders",
+        entity_type: "table",
+        sensitivity_level: "PII",
+        source_id: "s1",
+        source_name: "Source A",
+        updated_at: null,
+      },
+    ],
+  },
 };
 
 function renderAssetMap() {
@@ -183,6 +202,18 @@ describe("AssetMap", () => {
       by_domain: { finance: 2 },
       by_status: { PUBLISHED: 1 },
     });
+    vi.mocked(fetchAssetMetricDimensions).mockResolvedValue({
+      total: 10,
+      by_type: { atomic: 8, derived: 2 },
+      by_dw_layer: { DWS: 7, ADS: 3 },
+      by_metric_tier: { T1: 3, T2: 2, T3: 5 },
+      by_unit: { CNY: 3, cnt: 7 },
+      by_aggregation: { SUM: 8, AVG: 2 },
+      by_time_semantics: { PERIOD: 9, YTD: 1 },
+      by_status: { PUBLISHED: 5, DRAFT: 3, DEPRECATED: 2 },
+      by_domain: { finance: 6, sales: 4 },
+      pii_compliance: { pii_total: 4, pii_reviewed: 3, pii_unreviewed: 1, review_rate: 0.75 },
+    });
     vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
     vi.mocked(fetchAssetOrphans).mockResolvedValue({ items: [], total: 0 });
     // 数据表 tab 治理设置的责任人候选（Owner 下拉选项）
@@ -196,8 +227,26 @@ describe("AssetMap", () => {
         status: "active",
       },
     ]);
-    vi.mocked(fetchAssetChanges).mockResolvedValue({ catalogs: [], metrics: [], days: 7 });
-    vi.mocked(fetchAssetMyAssets).mockResolvedValue({ owner_id: 1, catalogs: [], metrics: [] });
+    vi.mocked(fetchAssetChanges).mockResolvedValue({
+      catalogs: [],
+      metrics: [],
+      drift: [],
+      days: 7,
+    });
+    vi.mocked(fetchAssetMyAssets).mockResolvedValue({
+      owner_id: 1,
+      catalogs: [],
+      metrics: [],
+      summary: {
+        catalog_count: 0,
+        metric_count: 0,
+        draft_count: 0,
+        pii_count: 0,
+        snapshot_covered: 0,
+        snapshot_total: 0,
+      },
+      claimable_orphans: 0,
+    });
     vi.mocked(listCatalogs).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
     vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
     // 默认域树（含中文名，供热力 Tab 中文域展示断言）
@@ -989,9 +1038,13 @@ describe("AssetMap", () => {
           status: "PUBLISHED",
           domain: "finance",
           pii_flag: false,
+          version: 3,
+          owner_id: 1,
+          change_type: "updated",
           updated_at: "2026-08-01T00:00:00Z",
         },
       ],
+      drift: [],
       days: 7,
     });
     renderAssetMap();
@@ -1019,6 +1072,15 @@ describe("AssetMap", () => {
           pii_flag: false,
         },
       ],
+      summary: {
+        catalog_count: 0,
+        metric_count: 1,
+        draft_count: 1,
+        pii_count: 0,
+        snapshot_covered: 0,
+        snapshot_total: 1,
+      },
+      claimable_orphans: 0,
     });
     renderAssetMap();
 
