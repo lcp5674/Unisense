@@ -178,15 +178,31 @@ export function MetricCreate() {
       .finally(() => setDictLoading(false));
   }, []);
 
-  // 口径定义区：关联数据表搜索
+  // 口径定义区：关联数据表搜索（与源表名一致的惰性交互——空关键词加载平台已采集的表，可关键词搜索）
   async function searchTables(q: string) {
-    if (!q.trim()) return;
     setTableSearching(true);
     try {
-      const res = await listCatalogs({ entity_type: "TABLE", keyword: q.trim(), page_size: 20 });
-      setTableOptions(res.items.map((it) => ({ value: it.entity_name, label: it.entity_name })));
+      const res = await listCatalogs({
+        entity_type: "TABLE",
+        keyword: q.trim() || undefined,
+        page_size: 20,
+        source_status: "active",
+      });
+      setTableOptions(
+        res.items.map((it) => ({
+          value: it.entity_name,
+          label: it.source_name ? `${it.entity_name}（${it.source_name}）` : it.entity_name,
+        }))
+      );
     } catch { setTableOptions([]); }
     finally { setTableSearching(false); }
+  }
+
+  // 关联数据表下拉展开/聚焦时若无选项，先加载平台已采集的表供选择（惰性设计：不让用户凭空输入）
+  function handleTableDropdown(open: boolean) {
+    if (open && tableOptions.length === 0 && !tableSearching) {
+      void searchTables("");
+    }
   }
 
   // 自动推断区：源表名模糊搜索（防抖 300ms）；空关键词时加载平台已采集的默认表列表
@@ -756,12 +772,13 @@ export function MetricCreate() {
               <Form.Item label="关联数据表">
                 <Select
                   mode="multiple" allowClear showSearch
-                  placeholder="搜索并选择口径引用的数据表"
+                  placeholder="展开浏览已接入表，或输入关键词搜索（支持多选）"
                   value={sourceTables}
                   onChange={(v: string[]) => setSourceTables(v)}
                   onSearch={searchTables}
+                  onOpenChange={handleTableDropdown}
                   loading={tableSearching}
-                  notFoundContent={tableSearching ? <Spin size="small" /> : null}
+                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表"}
                   options={tableOptions}
                   filterOption={false}
                 />

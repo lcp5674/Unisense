@@ -442,4 +442,33 @@ describe("MetricCreate 源表选择惰性化", () => {
     await waitFor(() => expect(screen.getAllByText("dwd.sales_order").length).toBeGreaterThan(0));
     await waitFor(() => expect(screen.getAllByText("dwd.shop_dim").length).toBeGreaterThan(0));
   });
+
+  it("关联数据表（口径定义区）下拉展开时同样自动加载平台已采集的表", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    // 展开「口径定义 → 关联数据表」多选下拉
+    const relatedSelect = screen.getByText(/展开浏览已接入表/);
+    fireEvent.mouseDown(relatedSelect);
+    // 展开即触发加载（onOpenChange → 空关键词加载默认表列表，与源表名一致）
+    await waitFor(() => expect(mockedCatalogs).toHaveBeenCalledWith(
+      expect.objectContaining({ entity_type: "TABLE", source_status: "active", page_size: 20 })
+    ));
+    await waitFor(() => expect(screen.getAllByText("dwd.sales_order").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("dwd.shop_dim").length).toBeGreaterThan(0));
+  });
+
+  it("关联数据表（口径定义区）支持关键词搜索加载", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    const relatedSelect = screen.getByText(/展开浏览已接入表/);
+    fireEvent.mouseDown(relatedSelect);
+    // 关联数据表是多选 Select（.ant-select-multiple），其搜索输入框在容器内；源表/度量列等单选不受影响
+    const relatedSearchInput = document.querySelector(
+      ".ant-select-multiple .ant-select-selection-search-input"
+    ) as HTMLInputElement;
+    fireEvent.change(relatedSearchInput, { target: { value: "dwd.sales" } });
+    await waitFor(() => expect(mockedCatalogs).toHaveBeenCalledWith(
+      expect.objectContaining({ keyword: "dwd.sales", source_status: "active" })
+    ));
+  });
 });
