@@ -35,6 +35,7 @@ import {
   approveMetric,
   deprecateMetric,
   emergencyPublishMetric,
+  fetchArchivedMetric,
   fetchCurrentUser,
   fetchRelatedMetrics,
   getMetric,
@@ -54,6 +55,7 @@ import {
   UnisenseApiError,
 } from "../api";
 import type {
+  ArchivedMetricResponse,
   CurrentUser,
   MetricHealth,
   MetricResponse,
@@ -200,8 +202,9 @@ function ArbitrationMarkTag({ metric }: { metric: MetricResponse }) {
   );
 }
 
-// 仲裁作废指标友好引导（TD §12.4「落败方 metric 转别名/废弃」的可寻址落地）：
-// 历史链接直访被软删的落败方时，展示原指标 + 裁决信息 + 权威指标跳转，而非裸「指标不存在」。
+// 仲裁作废指标醒目引导（TD §12.4「落败方 metric 转别名/废弃」的可寻址落地）：
+// 历史链接直访被软删的落败方时，以「非错误风格」展示作废原因 + 权威指标跳转，
+// 而非红色错误卡片 / 裸「指标不存在」。
 function ArchivedMetricCard({
   code,
   successorCode,
@@ -216,39 +219,56 @@ function ArchivedMetricCard({
   const ruledAt = mark?.ruled_at ? String(mark.ruled_at) : null;
   const decision = mark?.decision ? String(mark.decision) : null;
   return (
-    <Card>
-      <Alert
-        type="error"
-        showIcon
-        message="该指标已因口径裁决作废"
-        description={
-          <Space direction="vertical" size={4}>
-            <span>
-              原指标：<span className="mono">{code}</span>
-            </span>
-            <span>
-              权威指标：
-              {successorCode ? (
-                <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate(`/detail/${successorCode}`)}>
-                  <span className="mono">{successorCode}</span>
-                  <ArrowRightOutlined style={{ marginLeft: 4 }} />
-                </Button>
-              ) : (
-                <span className="muted">未指定</span>
-              )}
-            </span>
-            {decision && (
-              <span className="muted">
-                裁决方式：{RULING_DECISION_LABEL[decision] ?? decision}
-              </span>
-            )}
-            {conflictId && <span className="muted">相关冲突：{conflictId}</span>}
-            {ruledAt && <span className="muted">裁决时间：{formatCnTime(ruledAt)}</span>}
-            <span className="muted">作废指标不再作为可消费口径，请使用权威指标口径。</span>
-          </Space>
-        }
-        style={{ marginBottom: 16 }}
-      />
+    <Alert
+      type="warning"
+      showIcon
+      message={`指标「${code}」已因口径裁决作废`}
+      description={
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <div className="muted">
+            该指标在冲突仲裁中被裁定为落败方
+            {decision ? `（${RULING_DECISION_LABEL[decision] ?? decision} 决策）` : "（已作废）"}
+            {conflictId ? `，相关冲突 ${conflictId}` : ""}
+            {ruledAt ? `，裁决于 ${formatCnTime(ruledAt)}` : ""}。
+            作废指标不再作为可消费口径，下方历史详情仅供追溯。
+          </div>
+          {successorCode ? (
+            <Button
+              type="primary"
+              icon={<ArrowRightOutlined />}
+              onClick={() => navigate(`/detail/${successorCode}`)}
+            >
+              查看权威指标：{successorCode}
+            </Button>
+          ) : (
+            <span className="muted">该作废指标未指定权威替代指标（无可消费口径）。</span>
+          )}
+        </Space>
+      }
+      style={{ marginBottom: 16 }}
+    />
+  );
+}
+
+// 作废指标历史详情：展示历史口径定义，供追溯（作废不可消费，但历史口径应可见）
+function ArchivedDetailPanel({ detail }: { detail: ArchivedMetricResponse | null }) {
+  if (!detail?.metric) return null;
+  const m = detail.metric;
+  return (
+    <Card title="作废指标历史详情（仅供追溯）" size="small" style={{ marginBottom: 16 }}>
+      <Descriptions column={2} size="small" bordered style={{ marginBottom: 12 }}>
+        <Descriptions.Item label="指标编码">
+          <span className="mono">{m.metric_code}</span>
+        </Descriptions.Item>
+        <Descriptions.Item label="指标名称">{m.name}</Descriptions.Item>
+        <Descriptions.Item label="业务域">{m.domain}</Descriptions.Item>
+        <Descriptions.Item label="粒度">{m.granularity}</Descriptions.Item>
+        <Descriptions.Item label="指标类型">{METRIC_TYPE_LABEL[m.type] ?? m.type}</Descriptions.Item>
+        <Descriptions.Item label="状态">
+          <Tag color="orange">已作废</Tag>
+        </Descriptions.Item>
+      </Descriptions>
+      <DefinitionCard metric={m} />
     </Card>
   );
 }
@@ -386,11 +406,14 @@ export function MetricDetail() {
   const navigate = useNavigate();
   const location = useLocation();
   const [metric, setMetric] = useState<MetricResponse | null>(null);
-  // 仲裁作废指标（METRIC_ARCHIVED）：软删 + successor 的历史链接直访时，展示友好引导而非裸 404
+  // 仲裁作废指标（METRIC_ARCHIVED）：软删 + successor 的历史链接直访时，
+  // 展示「醒目引导 + 历史详情 + 跳转权威指标」，而非仅一张错误卡片
   const [archived, setArchived] = useState<{
     successorCode: string;
     mark: Record<string, unknown> | null;
+    detail: ArchivedMetricResponse | null;
   } | null>(null);
+  const [showArchivedModal, setShowArchivedModal] = useState(false);
   const [versions, setVersions] = useState<MetricVersionResponse[]>([]);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<UserBrief[]>([]);
@@ -473,14 +496,30 @@ export function MetricDetail() {
       track("metric_detail_view", code, "metric");
     } catch (err) {
       // 仲裁作废指标（METRIC_ARCHIVED）：后端返回结构化错误（detail 含 successor_code），
-      // 渲染友好引导页（展示败方 + 跳转权威指标），而非裸「指标不存在」。
+      // 渲染「醒目引导 + 历史详情 + 跳转权威指标」，而非裸「指标不存在」。
       if (err instanceof UnisenseApiError && err.code === "METRIC_ARCHIVED") {
         const detail = err.detail ?? {};
-        setArchived({
-          successorCode: String(detail.successor_code ?? ""),
-          mark: (detail.arbitration_mark as Record<string, unknown> | null) ?? null,
-        });
+        const mark = (detail.arbitration_mark as Record<string, unknown> | null) ?? null;
+        // 双保险读取权威指标：detail.successor_code 优先，arbitration_mark 兜底
+        // （兼容旧版错误响应 / 历史数据未写独立 successor_code 列的场景）
+        const successorCode = String(
+          detail.successor_code ?? (mark?.successor_code ? mark.successor_code : "") ?? "",
+        );
+        setArchived({ successorCode, mark, detail: null });
         setMetric(null);
+        // 并行拉取作废指标的历史详情（口径定义/版本），供页面主体展示（best-effort）
+        fetchArchivedMetric(code)
+          .then((d) => {
+            setArchived((prev) =>
+              prev ? { ...prev, detail: d } : { successorCode: d.successor_code ?? successorCode, mark: d.arbitration_mark ?? mark, detail: d },
+            );
+          })
+          .catch(() => {
+            /* 详情拉取失败不阻塞引导展示 */
+          });
+        // 首次进入作废页弹出醒目引导（localStorage 记住「不再提示」）
+        const dismissed = localStorage.getItem("unisense:archived_banner_dismissed") === "1";
+        if (!dismissed) setShowArchivedModal(true);
         return;
       }
       // eslint-disable-next-line no-alert
@@ -586,6 +625,37 @@ export function MetricDetail() {
             successorCode={archived.successorCode}
             mark={archived.mark}
           />
+          <ArchivedDetailPanel detail={archived.detail} />
+          {/* 首次进入作废页的醒目引导弹窗：告知作废原因 + 一键跳转权威指标 */}
+          <Modal
+            open={showArchivedModal}
+            title="指标已作废"
+            okText={archived.successorCode ? "查看权威指标" : "知道了"}
+            cancelText="留在本页"
+            okButtonProps={{ disabled: false }}
+            onOk={() => {
+              if (archived.successorCode) navigate(`/detail/${archived.successorCode}`);
+              else setShowArchivedModal(false);
+            }}
+            onCancel={() => setShowArchivedModal(false)}
+            afterClose={() => setShowArchivedModal(false)}
+          >
+            <Space direction="vertical" size={8}>
+              <span>
+                该指标已因口径裁决作废，不再作为可消费口径。
+                {archived.successorCode
+                  ? `权威指标为「${archived.successorCode}」，请使用权威指标口径。`
+                  : "该作废指标未指定权威替代指标。"}
+              </span>
+              <Checkbox
+                onChange={(e) => {
+                  if (e.target.checked) localStorage.setItem("unisense:archived_banner_dismissed", "1");
+                }}
+              >
+                不再提示
+              </Checkbox>
+            </Space>
+          </Modal>
         </div>
       );
     }

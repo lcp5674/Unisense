@@ -1190,6 +1190,45 @@ async def test_get_metric_public_archived_raises_metric_archived():
     assert exc_info.value.ctx["arbitration_mark"]["status"] == "defeated"
 
 
+async def test_get_archived_metric_public_returns_detail_with_successor():
+    """作废详情端点：返回完整历史口径 + successor 指针 + 裁决标记（供作废引导页展示）。"""
+    svc, repo = _svc_with_repo()
+    archived = make_metric(
+        metric_code="sales_e2e_conflictb_day",
+        name="E2E 冲突指标 B",
+        successor_code="sales_e2e_conflicta_day",
+        definition_json={"expression": "sum(order_amount)", "sql": "SELECT 1"},
+    )
+    archived.arbitration_mark = {
+        "status": "defeated",
+        "decision": "merge",
+        "conflict_id": "CF-ABC",
+        "opposite_code": "sales_e2e_conflicta_day",
+    }
+    repo.get_archived_by_code = AsyncMock(return_value=archived)
+
+    data = await svc.get_archived_metric_public("sales_e2e_conflictb_day")
+
+    assert data["successor_code"] == "sales_e2e_conflicta_day"
+    assert data["arbitration_mark"]["decision"] == "merge"
+    assert data["metric"].metric_code == "sales_e2e_conflictb_day"
+    assert data["metric"].name == "E2E 冲突指标 B"
+    assert data["metric"].definition_json["expression"] == "sum(order_amount)"
+    repo.get_archived_by_code.assert_awaited_once_with("sales_e2e_conflictb_day")
+
+
+async def test_get_archived_metric_public_missing_raises_not_found():
+    """作废详情端点：指标不存在或未作废 → 仍抛 NOT_FOUND（非 METRIC_ARCHIVED）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_archived_by_code = AsyncMock(return_value=None)
+
+    with pytest.raises(NotFoundError) as exc_info:
+        await svc.get_archived_metric_public("missing")
+
+    assert exc_info.value.error_code == "NOT_FOUND"
+
+
+
 async def test_get_metric_public_deleted_without_successor_still_not_found():
     """软删但无 successor（手动删除/其他作废路径）→ 仍按普通 NOT_FOUND 处理。"""
     svc, repo = _svc_with_repo()

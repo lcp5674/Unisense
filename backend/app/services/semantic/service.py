@@ -527,6 +527,31 @@ class MetricService(BaseService):
         await self._cache.set(metric)
         return MetricResponse.model_validate(metric)
 
+    async def get_archived_metric_public(self, metric_code: str) -> dict[str, Any]:
+        """作废指标详情（含 successor 指针与历史口径），供作废引导页展示。
+
+        对因口径仲裁被软删（deleted_at + successor）的指标，返回其完整历史
+        口径定义与裁决指针——前端据此渲染「作废指标详情 + 跳转权威指标」，
+        而非仅凭错误码展示一张错误卡片。
+
+        Args:
+            metric_code: 作废指标编码。
+
+        Returns:
+            {"metric": MetricResponse, "successor_code": str|None, "arbitration_mark": dict|None}。
+
+        Raises:
+            NotFoundError: 指标不存在或未作废。
+        """
+        archived = await self._repo.get_archived_by_code(metric_code)
+        if archived is None:
+            raise NotFoundError(f"指标不存在: {metric_code}")
+        return {
+            "metric": MetricResponse.model_validate(archived),
+            "successor_code": archived.successor_code,
+            "arbitration_mark": archived.arbitration_mark,
+        }
+
     async def list_metrics(self, params: MetricListParams) -> tuple[list[Metric], int]:
         """分页查询指标列表。
 

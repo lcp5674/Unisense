@@ -66,6 +66,7 @@ import {
   LineageNode,
   ParseLineageResult,
   ListDatabasesResult,
+  ArchivedMetricResponse,
   MetricBatchRegisterRequest,
   MetricBatchRegisterResult,
   MetricCreateRequest,
@@ -495,6 +496,13 @@ export async function listMetrics(params: {
 
 export async function getMetric(code: string): Promise<MetricResponse> {
   return request<MetricResponse>(`${API_BASE}/metric-definitions/${encodeURIComponent(code)}`);
+}
+
+// 作废指标详情（供作废引导页展示历史口径 + 跳转权威指标）
+export async function fetchArchivedMetric(code: string): Promise<ArchivedMetricResponse> {
+  return request<ArchivedMetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/archived`,
+  );
 }
 
 export async function createMetric(req: MetricCreateRequest): Promise<MetricResponse> {

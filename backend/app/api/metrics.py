@@ -277,6 +277,54 @@ async def get_metric(
     return ok(data=data, trace_id=trace_id)
 
 
+@router.get(
+    "/{metric_code}/archived",
+    response_model=ApiResponse[Any],
+    summary="作废指标详情（含 successor 指针与历史口径，供作废引导页展示）",
+    dependencies=_READ_DEPS,
+)
+async def get_archived_metric(
+    metric_code: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """读取因口径仲裁作废指标的完整历史详情（口径定义/版本/裁决指针）。
+
+    详情直访（GET /{code}）对作废指标返回 METRIC_ARCHIVED 错误码；本端点补充
+    返回作废指标的**可读详情**（历史口径 + successor 指针 + 裁决标记），供前端
+    作废引导页展示「指标详情 + 跳转权威指标」，而非仅一张错误卡片。
+    """
+    service = MetricService(db)
+    data = await service.get_archived_metric_public(metric_code)
+    metric = data["metric"]
+    # PII 访问审计（对齐详情端点语义，标记 archived 来源）
+    if metric.pii_flag:
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="READ",
+            entity_type="metric",
+            entity_id=metric_code,
+            detail={"data_classification": "PII", "metric_code": metric_code, "archived": True},
+            ip=client_ip(request),
+            trace_id=trace_id,
+            pii_access=True,
+        )
+    # PLAT-3: PII 访问审计须提交持久化
+    await db.commit()
+    # PII 读分级：非敏感角色脱敏口径（保留键结构，值替换为 ***）
+    if metric.pii_flag and user.role not in _SENSITIVE_ROLES:
+        data = {
+            **data,
+            "metric": metric.model_copy(
+                update={"definition_json": redact_definition(metric.definition_json)}
+            ),
+        }
+    return ok(data=data, trace_id=trace_id)
+
+
 @router.post(
     "/{metric_code}/suggest-rename",
     response_model=ApiResponse[Any],

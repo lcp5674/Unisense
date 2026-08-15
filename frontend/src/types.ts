@@ -12,6 +12,13 @@ export type MetricType = "atomic" | "derived" | "composite";
 export type MetricStatus = "DRAFT" | "EXPERIMENTAL" | "REVIEW" | "PUBLISHED" | "DEPRECATED";
 export type MetricTier = "T1" | "T2" | "T3";
 
+// 作废指标详情（GET /metric-definitions/{code}/archived）：完整历史口径 + 裁决指针
+export interface ArchivedMetricResponse {
+  metric: MetricResponse;
+  successor_code: string | null;
+  arbitration_mark: Record<string, unknown> | null;
+}
+
 export interface MetricResponse {
   id: number;
   metric_code: string;

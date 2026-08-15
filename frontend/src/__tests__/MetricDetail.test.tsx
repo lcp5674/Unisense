@@ -6,6 +6,7 @@ import type { MetricHealth, MetricResponse } from "../types";
 
 vi.mock("../api", () => ({
   getMetric: vi.fn(),
+  fetchArchivedMetric: vi.fn(),
   listVersions: vi.fn(),
   fetchCurrentUser: vi.fn(),
   listFavorites: vi.fn(),
@@ -47,6 +48,7 @@ vi.mock("../hooks/useTracking", () => ({
 
 import {
   getMetric,
+  fetchArchivedMetric,
   listVersions,
   fetchCurrentUser,
   listFavorites,
@@ -61,6 +63,7 @@ import {
 const mockedUpdateMetric = vi.mocked(updateMetric);
 const mockedSuggestRename = vi.mocked(suggestRenameName);
 const mockedGetMetric = vi.mocked(getMetric);
+const mockedFetchArchived = vi.mocked(fetchArchivedMetric);
 const mockedListVersions = vi.mocked(listVersions);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 const mockedFavorites = vi.mocked(listFavorites);
@@ -328,7 +331,8 @@ describe("MetricDetail", () => {
     );
   });
 
-  it("仲裁作废指标（METRIC_ARCHIVED）直访时展示友好引导页并可跳转权威指标", async () => {
+  it("仲裁作废指标（METRIC_ARCHIVED）直访时展示醒目引导 + 历史详情并可跳转权威指标", async () => {
+    localStorage.removeItem("unisense:archived_banner_dismissed");
     const err = Object.assign(
       new UnisenseApiError("指标已因口径裁决作废: sales_e2e_conflictb_day", "METRIC_ARCHIVED", 404, "test-trace"),
       {
@@ -348,17 +352,24 @@ describe("MetricDetail", () => {
       },
     );
     mockedGetMetric.mockRejectedValue(err);
+    // 作废历史详情（供追溯面板）
+    mockedFetchArchived.mockResolvedValue({
+      metric: { ...metric, metric_code: "sales_e2e_conflictb_day", name: "E2E 冲突指标 B" },
+      successor_code: "sales_e2e_conflicta_day",
+      arbitration_mark: { decision: "merge" },
+    });
     renderDetail({ pathname: "/detail/sales_e2e_conflictb_day" });
 
-    // 友好引导而非裸「指标不存在」
-    expect(await screen.findByText("该指标已因口径裁决作废")).toBeInTheDocument();
+    // 醒目引导（warning）而非裸「指标不存在」
+    expect(await screen.findByRole("button", { name: /sales_e2e_conflicta_day/ })).toBeInTheDocument();
     expect(screen.queryByText("指标不存在")).not.toBeInTheDocument();
-    // 展示原指标 + 裁决信息
-    expect(screen.getByText(/原指标：/)).toBeInTheDocument();
-    expect(screen.getAllByText("sales_e2e_conflictb_day").length).toBeGreaterThan(0);
-    expect(screen.getByText(/相关冲突：CF-ABC/)).toBeInTheDocument();
+    // 历史详情面板展示作废指标详情
+    expect(await screen.findByText("作废指标历史详情（仅供追溯）")).toBeInTheDocument();
+    expect(screen.getByText("E2E 冲突指标 B")).toBeInTheDocument();
+    // 首次进入弹出醒目引导（标题「指标已作废」——page-head + Modal 两处）
+    expect(screen.getAllByText("指标已作废").length).toBeGreaterThan(0);
     // 权威指标跳转按钮 → 点击后以新 code 重新拉取详情
-    const jump = await screen.findByRole("button", { name: /sales_e2e_conflicta_day/ });
+    const jump = screen.getByRole("button", { name: /sales_e2e_conflicta_day/ });
     fireEvent.click(jump);
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalledWith("sales_e2e_conflicta_day"));
   });
