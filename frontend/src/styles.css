@@ -845,6 +845,9 @@ body {
 .owner-card .oc-seg.oc-table {
   background: #3a7d44;
 }
+.owner-card .oc-seg.oc-source {
+  background: #1f8a8c;
+}
 .owner-card .oc-seg.oc-dim {
   background: #8b6fd8;
 }

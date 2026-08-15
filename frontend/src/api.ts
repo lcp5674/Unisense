@@ -1049,11 +1049,13 @@ export async function listTemplates(params?: {
   domain?: string;
   is_active?: boolean;
   keyword?: string;
+  owner_id?: number;
 }): Promise<MetricTemplate[]> {
   const qs = pageQs({
     domain: params?.domain,
     is_active: params?.is_active === undefined ? undefined : params.is_active ? "true" : "false",
     keyword: params?.keyword,
+    owner_id: params?.owner_id,
   });
   return request<MetricTemplate[]>(`${API_BASE}/semantics/templates?${qs}`);
 }
@@ -1186,8 +1188,14 @@ export async function listDimensions(params?: {
   domain?: string;
   status?: string;
   keyword?: string;
+  owner_id?: number;
 }): Promise<{ items: Dimension[]; total: number }> {
-  const qs = pageQs({ domain: params?.domain, status: params?.status, keyword: params?.keyword });
+  const qs = pageQs({
+    domain: params?.domain,
+    status: params?.status,
+    keyword: params?.keyword,
+    owner_id: params?.owner_id,
+  });
   return request(`${API_BASE}/dimensions?${qs}`);
 }
 
@@ -1396,6 +1404,7 @@ export async function listTerms(params?: {
   domain?: string;
   status?: string;
   search?: string;
+  owner_id?: number;
   page?: number;
   page_size?: number;
 }): Promise<{ items: GlossaryTerm[]; total: number; page: number; page_size: number }> {
@@ -1403,6 +1412,7 @@ export async function listTerms(params?: {
     domain: params?.domain,
     status: params?.status,
     search: params?.search,
+    owner_id: params?.owner_id,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 20,
   });
@@ -2152,6 +2162,7 @@ export async function listDataSources(params?: {
     source_type: params?.source_type,
     keyword: params?.keyword,
     health_status: params?.health,
+    owner_id: params?.owner_id,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 100,
   });
@@ -2464,6 +2475,8 @@ export async function listCatalogs(params?: {
   keyword?: string;
   /** active=仅活跃源 / deleted=仅已删除源 / 不传=全部 */
   source_status?: "active" | "deleted";
+  /** 责任人（Owner）ID 过滤（总览仪表 Owner 责任分布下钻） */
+  owner_id?: number;
   page?: number;
   page_size?: number;
 }): Promise<{ items: DBCatalog[]; total: number; page: number; page_size: number }> {
@@ -2475,6 +2488,7 @@ export async function listCatalogs(params?: {
     database: params?.database,
     keyword: params?.keyword,
     source_status: params?.source_status,
+    owner_id: params?.owner_id,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 20,
   });

@@ -134,6 +134,21 @@ describe("Dimensions 页面", () => {
     }
   });
 
+  it("从总览仪表 Owner 责任分布 ?owner_id= 直达：所有查询都携带责任人过滤", async () => {
+    render(
+      <MemoryRouter initialEntries={["/dimensions?owner_id=2"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("dim_channel");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ owner_id: 2 });
+    }
+  });
+
   it("URL 直达时搜索框预填关键词（?kw=）", async () => {
     render(
       <MemoryRouter initialEntries={["/dimensions?kw=渠道"]}>

@@ -355,6 +355,22 @@ export interface LineageEdgePage {
   page: number;
   page_size: number;
   has_more?: boolean;
+  /** 当前页节点的基础元数据（后端 /impact 与 /edges 携带，与 /lineage/graph 节点结构对齐） */
+  nodes?: LineageNodeInfo[];
+}
+
+// 血缘节点基础元数据（影响分析/边列表响应的 nodes 字段）——供血缘查询/影响分析
+// 图谱点击节点在侧边栏展示具体信息（指标详情/表详情），并使节点具备域/PII 属性
+// （按业务域着色、PII 红色描边，与血缘图谱交互一致）。
+export interface LineageNodeInfo {
+  id: string;
+  type: string;
+  label: string;
+  /** db_catalog 主键（仅表/视图节点有值，用于表详情直达） */
+  entity_id?: number | null;
+  pii?: boolean;
+  domain?: string | null;
+  owner?: string | null;
 }
 
 // SQL 血缘解析结果（后端 lineage/schemas.py 的 LineageParseResponse）——
@@ -527,15 +543,16 @@ export interface DashboardData {
   by_domain: Record<string, number>;
   pii_count: number;
   pii_ratio: number;
-  /** Owner 责任分布（跨资产）：指标/数据表/维度/术语/指标模板按责任人聚合 */
+  /** Owner 责任分布（跨资产）：指标/数据表/数据源/维度/术语/指标模板按责任人聚合 */
   by_owner?: Record<
     number,
     {
       name: string;
-      /** 跨资产总计（指标+数据表+维度+术语+模板） */
+      /** 跨资产总计（指标+数据表+数据源+维度+术语+模板） */
       total: number;
       metrics: { total: number; by_status: Record<string, number> };
       tables: number;
+      sources: number;
       dimensions: number;
       terms: number;
       templates: number;

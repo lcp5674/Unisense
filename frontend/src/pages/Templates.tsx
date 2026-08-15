@@ -24,9 +24,14 @@ export function Templates() {
   // 启用状态下钻（?is_active=，总览仪表「指标模板」资产卡片）作为初始筛选；
   // 默认仅展示启用模板（与原有行为一致），inactive 下钻展示停用模板
   const urlIsActive = searchParams.get("is_active") ?? "";
+  // 责任人（Owner）下钻（?owner_id=，总览仪表 Owner 责任分布）
+  const urlOwnerId = searchParams.get("owner_id");
   const [items, setItems] = useState<MetricTemplate[]>([]);
   const [keyword, setKeyword] = useState(urlKw);
   const [isActive, setIsActive] = useState<string>(urlIsActive === "inactive" ? "inactive" : "active");
+  const [ownerId, setOwnerId] = useState<number | undefined>(
+    urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
+  );
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [instantiateTarget, setInstantiateTarget] = useState<MetricTemplate | null>(null);
@@ -54,12 +59,24 @@ export function Templates() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlIsActive]);
 
+  // 响应 URL 责任人参数变化（Owner 责任分布二次下钻）；ownerId 在 load 依赖中自动重查
+  useEffect(() => {
+    if (urlOwnerId && /^\d+$/.test(urlOwnerId) && Number(urlOwnerId) !== ownerId) {
+      setOwnerId(Number(urlOwnerId));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlOwnerId]);
+
   async function load() {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
       // 默认仅展示启用模板；inactive 时展示停用模板（总览仪表下钻）
-      const res = await listTemplates({ is_active: isActive !== "inactive", keyword: keyword || undefined });
+      const res = await listTemplates({
+        is_active: isActive !== "inactive",
+        keyword: keyword || undefined,
+        owner_id: ownerId,
+      });
       // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
       if (seq !== loadSeq.current) return;
       setItems(res);
@@ -135,7 +152,7 @@ export function Templates() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, isActive]);
+  }, [keyword, isActive, ownerId]);
 
   async function handleCreate(values: Record<string, unknown>) {
     setLoading(true);

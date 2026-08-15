@@ -87,9 +87,14 @@ function DimensionsTab() {
   const urlKw = searchParams.get("kw") ?? "";
   // 生命周期状态下钻（?status=，总览仪表「维度」资产卡片）作为初始筛选
   const urlStatus = searchParams.get("status") ?? "";
+  // 责任人（Owner）下钻（?owner_id=，总览仪表 Owner 责任分布）
+  const urlOwnerId = searchParams.get("owner_id");
   const [items, setItems] = useState<Dimension[]>([]);
   const [keyword, setKeyword] = useState(urlKw);
   const [status, setStatus] = useState(urlStatus);
+  const [ownerId, setOwnerId] = useState<number | undefined>(
+    urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
+  );
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   // 维度收藏（C 层多资产收藏：DIMENSION）
@@ -133,6 +138,14 @@ function DimensionsTab() {
     if (urlStatus && urlStatus !== status) setStatus(urlStatus);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlStatus]);
+
+  // 响应 URL 责任人参数变化（Owner 责任分布二次下钻）；ownerId 在 load 依赖中自动重查
+  useEffect(() => {
+    if (urlOwnerId && /^\d+$/.test(urlOwnerId) && Number(urlOwnerId) !== ownerId) {
+      setOwnerId(Number(urlOwnerId));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlOwnerId]);
 
   // 编辑 Modal 打开时预填当前维度值（基于列表行，getDimension 拉最新后覆盖）
   useEffect(() => {
@@ -202,6 +215,7 @@ function DimensionsTab() {
       const res = await listDimensions({
         keyword: keyword || undefined,
         status: status || undefined,
+        owner_id: ownerId,
       });
       // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
       if (seq !== loadSeq.current) return;
@@ -217,7 +231,7 @@ function DimensionsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, status]);
+  }, [keyword, status, ownerId]);
 
   async function handleCreate(values: Record<string, unknown>) {
     try {

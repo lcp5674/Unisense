@@ -85,6 +85,8 @@ export function Catalogs() {
   const urlFocus = searchParams.get("focus") ?? "";
   // 敏感级别下钻（?sensitivity=，总览仪表「数据表」资产卡片）作为初始筛选
   const urlSensitivity = searchParams.get("sensitivity") ?? "";
+  // 责任人（Owner）下钻（?owner_id=，总览仪表 Owner 责任分布）
+  const urlOwnerId = searchParams.get("owner_id");
   const [items, setItems] = useState<DBCatalog[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -95,6 +97,9 @@ export function Catalogs() {
   const [sourceStatus, setSourceStatus] = useState<"" | "active" | "deleted">("");
   const [entityType, setEntityType] = useState("");
   const [sensitivity, setSensitivity] = useState(urlSensitivity);
+  const [ownerId, setOwnerId] = useState<number | undefined>(
+    urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
+  );
   const [keyword, setKeyword] = useState(urlKw);
   // 目标行高亮（?focus=）：数据就绪后定位并短暂高亮，定位成功 3 秒后自动清除
   const [focusName, setFocusName] = useState(urlFocus);
@@ -305,6 +310,15 @@ export function Catalogs() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlSensitivity]);
 
+  // 响应 URL 责任人参数变化（Owner 责任分布二次下钻）；ownerId 在 load 依赖中自动重查
+  useEffect(() => {
+    if (urlOwnerId && /^\d+$/.test(urlOwnerId) && Number(urlOwnerId) !== ownerId) {
+      setOwnerId(Number(urlOwnerId));
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlOwnerId]);
+
   async function load() {
     const seq = ++loadSeq.current;
     setLoading(true);
@@ -316,6 +330,7 @@ export function Catalogs() {
         database: database || undefined,
         keyword: keyword || undefined,
         source_status: sourceStatus || undefined,
+        owner_id: ownerId,
         page,
         page_size: pageSize,
       });
@@ -350,7 +365,7 @@ export function Catalogs() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, sourceId, sourceStatus, entityType, sensitivity, keyword, database]);
+  }, [page, pageSize, sourceId, sourceStatus, entityType, sensitivity, keyword, database, ownerId]);
 
   // 当前用户数据表收藏（TABLE）供行内收藏按钮判断
   useEffect(() => {

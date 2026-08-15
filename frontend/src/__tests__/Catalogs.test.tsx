@@ -229,6 +229,21 @@ describe("Catalogs 页面", () => {
     }
   });
 
+  it("从总览仪表 Owner 责任分布 ?owner_id= 直达：所有查询都携带责任人过滤", async () => {
+    render(
+      <MemoryRouter initialEntries={["/catalogs?owner_id=1"]}>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("共 1 条");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ owner_id: 1 });
+    }
+  });
+
   it("从总览仪表 ?sensitivity=xxx 直达：所有查询都携带敏感级别过滤（资产卡片下钻）", async () => {
     render(
       <MemoryRouter initialEntries={["/catalogs?sensitivity=PII"]}>

@@ -434,12 +434,14 @@ const OWNER_STATES = [
 ] as const;
 
 // Owner 名下各资产类型构成条（跨资产责任分布，比例可视化）——替代原图标计数块
+// href 为该类资产的目录页路由（点击资产段 → 跳对应页面并带 owner_id 过滤）
 const OWNER_ASSETS = [
-  { key: "metrics", label: "指标", cls: "oc-metric" },
-  { key: "tables", label: "数据表", cls: "oc-table" },
-  { key: "dimensions", label: "维度", cls: "oc-dim" },
-  { key: "terms", label: "术语", cls: "oc-term" },
-  { key: "templates", label: "模板", cls: "oc-tpl" },
+  { key: "metrics", label: "指标", cls: "oc-metric", href: "/catalog" },
+  { key: "tables", label: "数据表", cls: "oc-table", href: "/catalogs" },
+  { key: "sources", label: "数据源", cls: "oc-source", href: "/data-sources" },
+  { key: "dimensions", label: "维度", cls: "oc-dim", href: "/dimensions" },
+  { key: "terms", label: "术语", cls: "oc-term", href: "/glossary" },
+  { key: "templates", label: "模板", cls: "oc-tpl", href: "/templates" },
 ] as const;
 
 function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: (to: string) => void }) {
@@ -453,7 +455,7 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
         <span style={{ fontSize: 15, fontWeight: 600 }}>
           Owner 责任分布
           <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
-            跨资产构成（指标/数据表/维度/术语/模板），点击卡片下钻责任人指标目录
+            跨资产构成（指标/数据表/数据源/维度/术语/模板），点击资产段直达对应目录、点卡片查看其指标目录
           </span>
         </span>
       }
@@ -489,7 +491,19 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
                     key={m.key}
                     className={`oc-seg ${m.cls}`}
                     style={{ width: `${((m.count / total) * 100).toFixed(2)}%` }}
-                    title={`${m.label} ${m.count}`}
+                    title={`${m.label} ${m.count}，点击查看该责任人名下${m.label}`}
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`${m.href}?owner_id=${id}`);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.stopPropagation();
+                        navigate(`${m.href}?owner_id=${id}`);
+                      }
+                    }}
                   >
                     {m.label} {m.count}
                   </span>

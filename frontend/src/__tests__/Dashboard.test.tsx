@@ -35,18 +35,20 @@ const mockDashboardData = {
   by_owner: {
     1: {
       name: "Alice",
-      total: 78,
+      total: 82,
       metrics: { total: 60, by_status: { DRAFT: 20, REVIEW: 4, PUBLISHED: 36 } },
       tables: 8,
+      sources: 4,
       dimensions: 3,
       terms: 5,
       templates: 2,
     },
     2: {
       name: "Bob",
-      total: 49,
+      total: 52,
       metrics: { total: 40, by_status: { DRAFT: 5, REVIEW: 3, PUBLISHED: 24, EXPERIMENTAL: 3, DEPRECATED: 5 } },
       tables: 5,
+      sources: 3,
       dimensions: 1,
       terms: 2,
       templates: 1,
@@ -206,51 +208,73 @@ describe("Dashboard", () => {
     expect(document.querySelectorAll(".owner-card.owner-hot").length).toBeGreaterThan(0);
   });
 
-  it("Owner 责任分布跨资产：卡片含 5 类资产构成条与跨资产总计", async () => {
+  it("Owner 责任分布跨资产：卡片含 6 类资产构成条与跨资产总计", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
-    // Alice（total=78 排前）：指标 60 / 数据表 8 / 维度 3 / 术语 5 / 模板 2
+    // Alice（total=82 排前）：指标 60 / 数据表 8 / 数据源 4 / 维度 3 / 术语 5 / 模板 2
     const aliceCard = container.querySelectorAll(".owner-card")[0];
     const segs = Array.from(aliceCard!.querySelectorAll(".oc-seg"));
-    expect(segs.length).toBe(5);
+    expect(segs.length).toBe(6);
     expect(segs[0].textContent).toContain("指标");
     expect(segs[0].textContent).toContain("60");
     expect(segs[1].textContent).toContain("数据表");
     expect(segs[1].textContent).toContain("8");
-    expect(segs[2].textContent).toContain("维度");
-    expect(segs[2].textContent).toContain("3");
-    expect(segs[3].textContent).toContain("术语");
-    expect(segs[3].textContent).toContain("5");
-    expect(segs[4].textContent).toContain("模板");
-    expect(segs[4].textContent).toContain("2");
+    expect(segs[2].textContent).toContain("数据源");
+    expect(segs[2].textContent).toContain("4");
+    expect(segs[3].textContent).toContain("维度");
+    expect(segs[3].textContent).toContain("3");
+    expect(segs[4].textContent).toContain("术语");
+    expect(segs[4].textContent).toContain("5");
+    expect(segs[5].textContent).toContain("模板");
+    expect(segs[5].textContent).toContain("2");
     // 跨资产总计（卡片头部）
-    expect(aliceCard!.querySelector(".oc-total")?.textContent).toContain("78");
+    expect(aliceCard!.querySelector(".oc-total")?.textContent).toContain("82");
   });
 
   it("Owner 分布以图表样式展示：资产构成条各段宽度与占比对应", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
-    // 每个 Owner 一张卡片：头像 + 名字 + 资产构成条 + 生命周期（Alice total=78 排前）
+    // 每个 Owner 一张卡片：头像 + 名字 + 资产构成条 + 生命周期（Alice total=82 排前）
     const cards = Array.from(container.querySelectorAll(".owner-card"));
     expect(cards.length).toBe(2);
     const aliceBar = cards[0].querySelector(".oc-bar");
     expect(aliceBar).toBeTruthy();
-    // Alice: 指标 60 / 数据表 8 / 维度 3 / 术语 5 / 模板 2，total=78 → 宽度 76.92% / 10.26% / 3.85% / 6.41% / 2.56%
+    // Alice: 指标 60 / 数据表 8 / 数据源 4 / 维度 3 / 术语 5 / 模板 2，total=82
     const segs = Array.from(aliceBar!.querySelectorAll(".oc-seg"));
-    expect(segs.length).toBe(5);
-    expect(segs[0].getAttribute("style")).toContain("76.92%");
-    expect(segs[1].getAttribute("style")).toContain("10.26%");
-    expect(segs[2].getAttribute("style")).toContain("3.85%");
-    expect(segs[3].getAttribute("style")).toContain("6.41%");
-    expect(segs[4].getAttribute("style")).toContain("2.56%");
+    expect(segs.length).toBe(6);
+    expect(segs[0].getAttribute("style")).toContain("73.17%");
+    expect(segs[1].getAttribute("style")).toContain("9.76%");
+    expect(segs[2].getAttribute("style")).toContain("4.88%");
+    expect(segs[3].getAttribute("style")).toContain("3.66%");
+    // jsdom 的 CSSStyleDeclaration 会归一化尾随零（6.10% → 6.1%），用无尾零形式断言
+    expect(segs[4].getAttribute("style")).toContain("6.1%");
+    expect(segs[5].getAttribute("style")).toContain("2.44%");
     // 生命周期作为次级信息展示（色点 + 标签 + 计数）
     const life = cards[0].querySelector(".oc-life");
     expect(life?.textContent).toContain("草稿");
     expect(life?.textContent).toContain("20");
     expect(life?.textContent).toContain("已发布");
     expect(life?.textContent).toContain("36");
+  });
+
+  it("Owner 资产段跳转：点击「数据表」段跳 /catalogs?owner_id=、点「维度」段跳 /dimensions?owner_id=", async () => {
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    // Alice 卡片（total=82 排前）的第 2 段 = 数据表
+    const aliceCard = document.querySelectorAll(".owner-card")[0];
+    const segs = Array.from(aliceCard!.querySelectorAll(".oc-seg"));
+    fireEvent.click(segs[1]); // 数据表
+    expect(probe.location()?.pathname).toBe("/catalogs");
+    expect(probe.location()?.search).toContain("owner_id=1");
+
+    // 再点击「维度」段（第 4 段）→ /dimensions?owner_id=1
+    const segs2 = Array.from(document.querySelectorAll(".owner-card")[0].querySelectorAll(".oc-seg"));
+    fireEvent.click(segs2[3]); // 维度
+    expect(probe.location()?.pathname).toBe("/dimensions");
+    expect(probe.location()?.search).toContain("owner_id=1");
   });
 
   it("Owner 下钻：点击 Owner 跳转 /catalog?owner_id=", async () => {

@@ -47,7 +47,12 @@ function TermsTab() {
   const [searchParams] = useSearchParams();
   // 生命周期状态下钻（?status=，总览仪表「术语」资产卡片）作为初始筛选
   const urlStatus = searchParams.get("status") ?? "";
+  // 责任人（Owner）下钻（?owner_id=，总览仪表 Owner 责任分布）
+  const urlOwnerId = searchParams.get("owner_id");
   const [status, setStatus] = useState(urlStatus);
+  const [ownerId, setOwnerId] = useState<number | undefined>(
+    urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
+  );
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   // 术语收藏（C 层多资产收藏：TERM）
@@ -71,7 +76,13 @@ function TermsTab() {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await listTerms({ search: overSearch ?? search, status, page, page_size: pageSize });
+      const res = await listTerms({
+        search: overSearch ?? search,
+        status,
+        owner_id: ownerId,
+        page,
+        page_size: pageSize,
+      });
       // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
       if (seq !== loadSeq.current) return;
       setItems(res.items);
@@ -106,10 +117,19 @@ function TermsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlStatus]);
 
+  // 响应 URL 责任人参数变化（Owner 责任分布二次下钻）；ownerId 在 load 依赖中自动重查
+  useEffect(() => {
+    if (urlOwnerId && /^\d+$/.test(urlOwnerId) && Number(urlOwnerId) !== ownerId) {
+      setOwnerId(Number(urlOwnerId));
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlOwnerId]);
+
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, status]);
+  }, [page, pageSize, status, ownerId]);
 
   // 加载当前用户术语收藏（TERM 类型）供行内收藏按钮判断
   useEffect(() => {
