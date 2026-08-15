@@ -2142,6 +2142,8 @@ export async function listDataSources(params?: {
   keyword?: string;
   /** 健康状态过滤（总览仪表「数据源」资产卡片下钻：healthy/unhealthy/unknown） */
   health?: string;
+  /** 责任人（Owner）ID 过滤（总览仪表 Owner 责任分布下钻） */
+  owner_id?: number;
   page?: number;
   page_size?: number;
 }): Promise<DataSourceListResponse> {
