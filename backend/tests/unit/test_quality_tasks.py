@@ -153,6 +153,37 @@ class TestRunQualityChecks:
         detect.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_naive_obs_time_handled(
+        self,
+        ctx: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # MySQL DATETIME(timezone=True) 读出为 naive datetime（驱动不保留时区），
+        # 与 aware now 比较不应抛 TypeError——历史 bug：worker 整轮检测崩溃。
+        latest = _obs("0.5")
+        latest.obs_time = latest.obs_time.replace(tzinfo=None)  # 模拟驱动读出 naive
+        result, detect = await _run(
+            monkeypatch, rules=[_rule()], latest_obs=latest, detect_result=None
+        )
+        assert result["evaluated"] == 1
+        assert result["skipped_no_obs"] == 0
+        detect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_naive_stale_obs_skipped(
+        self,
+        ctx: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # naive 且超过新鲜度窗口 → 同样正确跳过（不崩溃、不误评估）
+        latest = _obs("0.5", age_hours=100)
+        latest.obs_time = latest.obs_time.replace(tzinfo=None)
+        result, detect = await _run(monkeypatch, rules=[_rule()], latest_obs=latest)
+        assert result["skipped_no_obs"] == 1
+        assert result["evaluated"] == 0
+        detect.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_same_combo_deduped(
         self,
         ctx: dict,

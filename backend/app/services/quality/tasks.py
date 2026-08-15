@@ -55,7 +55,15 @@ async def run_quality_checks(ctx: dict[str, Any]) -> dict[str, int]:
         for metric_id, rule_type in combos:
             # 取该指标最近一次观测（最新，非升序前 N 条的末条）
             latest = await repo.latest_observation(metric_id)
-            if latest is None or latest.obs_time < now - _OBS_FRESH_WINDOW:
+            if latest is None:
+                skipped_no_obs += 1
+                continue
+            # MySQL DATETIME(timezone=True) 读出为 naive：统一按 UTC 解释再与 aware now 比较，
+            # 避免 offset-naive vs offset-aware TypeError（曾导致整轮自动检测崩溃）。
+            obs_time = latest.obs_time
+            if obs_time.tzinfo is None:
+                obs_time = obs_time.replace(tzinfo=UTC)
+            if obs_time < now - _OBS_FRESH_WINDOW:
                 skipped_no_obs += 1
                 continue
             try:
