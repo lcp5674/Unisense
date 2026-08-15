@@ -332,3 +332,57 @@ async def test_arbitrate_without_applier_is_noop() -> None:
     svc._events = events
     conflict = await _ruled_conflict(svc, repo)
     assert conflict.status == ConflictStatus.RULED
+
+
+# ---- reopen 跨服务一致性：关联指标已作废时拒绝重新打开 ----
+
+
+class _ArchivedChecker:
+    """模拟「指标已因仲裁软删作废」校验器：记录被检查的指标，按集合判定是否作废。"""
+
+    def __init__(self, archived: set[str]) -> None:
+        self.archived = archived
+        self.checked: list[str] = []
+
+    async def __call__(self, metric_code: str) -> bool:
+        self.checked.append(metric_code)
+        return metric_code in self.archived
+
+
+async def test_reopen_rejects_when_linked_metric_archived() -> None:
+    """跨服务一致性：关联指标已因仲裁软删作废时，reopen 拒绝并保持 CLOSED。"""
+    svc, repo, _, _, _ = _svc()
+    conflict = await _ruled_conflict(svc, repo)
+    conflict = await svc.close(conflict.conflict_id)
+    codes = conflict.metric_codes or {}
+    checker = _ArchivedChecker({codes["candidate"]})
+    svc._metric_archived_checker = checker
+    with pytest.raises(ConflictError) as excinfo:
+        await svc.reopen(conflict.conflict_id)
+    assert "已因仲裁作废" in str(excinfo.value)
+    # 冲突状态未被破坏（仍 CLOSED，未产生「OPEN 引用已作废指标」的矛盾状态）
+    assert repo.conflicts[-1].status == ConflictStatus.CLOSED
+    # 候选指标被校验器检查过
+    assert codes["candidate"] in checker.checked
+
+
+async def test_reopen_allows_when_linked_metrics_active() -> None:
+    """关联指标均有效（未作废）时，reopen 正常放行。"""
+    svc, repo, _, _, _ = _svc()
+    conflict = await _ruled_conflict(svc, repo)
+    conflict = await svc.close(conflict.conflict_id)
+    checker = _ArchivedChecker(set())
+    svc._metric_archived_checker = checker
+    reopened = await svc.reopen(conflict.conflict_id)
+    assert reopened.status == ConflictStatus.OPEN
+    assert checker.checked  # 校验器被调用过（候选/现有均检查）
+
+
+async def test_reopen_skips_check_when_checker_missing() -> None:
+    """未注入校验器时 reopen 行为不变（向后兼容）。"""
+    svc, repo, _, _, _ = _svc()  # 不注入 metric_archived_checker
+    conflict = await _ruled_conflict(svc, repo)
+    conflict = await svc.close(conflict.conflict_id)
+    reopened = await svc.reopen(conflict.conflict_id)
+    assert reopened.status == ConflictStatus.OPEN
+    assert reopened.resolved_at is None

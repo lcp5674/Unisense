@@ -193,6 +193,18 @@ export function ReviewWorkbench() {
     try {
       setCompareResult(await compareMetrics(candidate, existing));
     } catch (err) {
+      // 跨服务一致性：关联指标已因仲裁作废（METRIC_ARCHIVED）时给出友好引导，
+      // 而非报错「指标不存在」——历史裁决已沉淀在裁决记录知识库。
+      if (err instanceof UnisenseApiError && err.code === "METRIC_ARCHIVED") {
+        const succ = String(
+          (err.detail as { successor_code?: unknown } | undefined)?.successor_code ?? "",
+        );
+        setCompareResult(null);
+        message.warning(
+          `该冲突的关联指标已因仲裁作废${succ ? `，替代指标：${succ}` : ""}。可在「裁决记录」查看历史裁决。`,
+        );
+        return;
+      }
       message.error(errText(err, "加载差异对比失败"));
     } finally {
       setCompareLoading(false);

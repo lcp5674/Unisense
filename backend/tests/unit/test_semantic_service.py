@@ -380,6 +380,29 @@ async def test_compare_metrics_different():
     assert defn_diff["difference_level"] == "different"
 
 
+async def test_compare_metrics_archived_metric_raises_metric_archived():
+    """跨服务一致性：对比中关联指标已因仲裁软删作废 → 抛 METRIC_ARCHIVED（携带 successor），
+    而非对冲突仲裁弹窗直出裸「指标不存在」。"""
+    svc, repo = _svc_with_repo()
+    m2 = make_metric(metric_code="m2", definition_json={"expression": "SUM(y)"})
+    # get_by_code 对 m1 返回 None（软删后不可见）；get_archived_by_code 命中软删 + successor
+    repo.get_by_code = AsyncMock(side_effect=[None, m2])
+    archived_m1 = make_metric(
+        metric_code="m1",
+        successor_code="m2",
+    )
+    archived_m1.arbitration_mark = {"status": "defeated"}
+    repo.get_archived_by_code = AsyncMock(return_value=archived_m1)
+
+    from app.core.error_codes import ErrorCode
+
+    with pytest.raises(NotFoundError) as exc_info:
+        await svc.compare_metrics("m1", "m2")
+    assert exc_info.value.error_code == ErrorCode.METRIC_ARCHIVED
+    assert exc_info.value.ctx["successor_code"] == "m2"
+    assert exc_info.value.ctx["arbitration_mark"]["status"] == "defeated"
+
+
 async def test_batch_register_success():
     """批量注册：全部成功。"""
     svc, repo = _svc_with_repo()

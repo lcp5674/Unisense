@@ -13,6 +13,28 @@ vi.mock("../api", () => ({
   compareMetrics: vi.fn(),
   listConflictRulings: vi.fn(),
   listUsers: vi.fn(),
+  UnisenseApiError: class extends Error {
+    code: string;
+    detail?: Record<string, unknown> | null;
+    status: number;
+    constructor(
+      message: string,
+      code: string,
+      status = 0,
+      traceId = "",
+      detail?: Record<string, unknown> | null,
+    ) {
+      super(message);
+      this.name = "UnisenseApiError";
+      this.code = code;
+      this.status = status;
+      this.traceId = traceId;
+      this.detail = detail;
+    }
+    get codeZh() {
+      return this.code;
+    }
+  },
 }));
 const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
@@ -27,6 +49,7 @@ import {
   compareMetrics,
   listConflictRulings,
   listUsers,
+  UnisenseApiError,
 } from "../api";
 const mockedList = vi.mocked(listConflicts);
 const mockedArbitrate = vi.mocked(arbitrateConflict);
@@ -213,6 +236,32 @@ describe("ReviewWorkbench 冲突仲裁", () => {
     // 按类型给出裁决选项（同名异义 → 采纳现有为权威为默认）
     expect(screen.getByText("采纳现有为权威")).toBeInTheDocument();
     expect(screen.getByText("保留差异（非真冲突）")).toBeInTheDocument();
+  });
+
+  it("关联指标已因仲裁作废时对比加载展示友好引导（非报错）", async () => {
+    // 跨服务一致性：对比中关联指标已软删作废 → 后端抛 METRIC_ARCHIVED（含 successor），
+    // 前端应展示「已作废 + 替代指标」引导，而非报错「加载差异对比失败」。
+    mockedCompare.mockRejectedValueOnce(
+      new UnisenseApiError(
+        "指标已因口径裁决作废: sales_gmv_day",
+        "METRIC_ARCHIVED",
+        404,
+        "trace-id",
+        { successor_code: "sales_gmv_d" },
+      ),
+    );
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-A")).toBeInTheDocument());
+    const row = screen.getByText("CF-A").closest("tr") as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: /仲\s*裁/ }));
+
+    await waitFor(() => expect(screen.getByText(/仲裁冲突 CF-A/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/该冲突的关联指标已因仲裁作废/)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/替代指标：sales_gmv_d/)).toBeInTheDocument();
+    // 不渲染对比表（加载失败降级）
+    expect(screen.queryByText("粒度")).not.toBeInTheDocument();
   });
 
   it("提交仲裁以默认决策调用后端（choose_canonical + 现有编码）", async () => {

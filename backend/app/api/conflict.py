@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -101,6 +101,21 @@ def _svc(db: AsyncSession, request: Request) -> ConflictService:
             metric_svc=MetricService(db),
         )
 
+    async def _is_metric_archived(metric_code: str) -> bool:
+        """跨服务一致性：判断关联指标是否已被仲裁软删作废（deleted_at 置位）。
+
+        供 ConflictService.reopen 前置校验使用——仲裁联动把落败方软删后，
+        冲突状态与指标状态须同步，已作废指标无法再参与重新仲裁。
+        """
+        row = (
+            await db.execute(
+                select(Metric).where(
+                    Metric.metric_code == metric_code, Metric.deleted_at.is_not(None)
+                )
+            )
+        ).scalar_one_or_none()
+        return row is not None
+
     return ConflictService(
         db,
         events=ConflictEventPublisher(notify_url),
@@ -108,6 +123,7 @@ def _svc(db: AsyncSession, request: Request) -> ConflictService:
         metric_conflict_clearer=_clear_metric_conflict,
         metric_conflict_marker=_mark_metric_conflict,
         arbitration_applier=_apply_arbitration,
+        metric_archived_checker=_is_metric_archived,
     )
 
 

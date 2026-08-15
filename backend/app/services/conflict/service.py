@@ -52,6 +52,7 @@ class ConflictService(BaseService):
         arbitration_applier: Callable[
             [Conflict, str, str | None, int], Awaitable[None]
         ] | None = None,
+        metric_archived_checker: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__(db)
         self._db = db
@@ -69,6 +70,11 @@ class ConflictService(BaseService):
         # 由上层注入真实实现（见 conflict.arbitration.apply_arbitration_impact）；
         # None 时跳过（仲裁仍完成，仅不联动指标）。
         self._arbitration_applier = arbitration_applier
+        # 跨服务一致性：重新打开冲突（reopen）前置校验——关联指标是否已因仲裁
+        # 被软删作废（deleted_at + successor）。仲裁联动把落败方作废后，冲突状态
+        # 与指标状态必须同步：已作废指标无法再参与仲裁，reopen 应拒绝而非产生
+        # 「OPEN 冲突引用已作废指标」的矛盾状态。None 时跳过（保持服务解耦）。
+        self._metric_archived_checker = metric_archived_checker
 
     async def _safe_publish(self, event: dict[str, Any]) -> None:
         """事件发布为 best-effort：通知/治理服务不可达时静默降级，不阻断主流程。
@@ -318,10 +324,14 @@ class ConflictService(BaseService):
 
         历史裁决记录保留在 ruling_record 作为知识库；候选指标的
         pending_conflict 标记对称回置，指标详情页重新显示「口径冲突待处理」。
+
+        Raises:
+            ConflictError: 关联指标已因仲裁作废时拒绝重新打开（跨服务一致性）。
         """
         conflict = await self.get(conflict_id)
         if conflict.status != ConflictStatus.CLOSED:
             raise ConflictError(f"仅 CLOSED 状态可重新打开，当前 {conflict.status.value}")
+        await self._ensure_linked_metrics_active(conflict)
         conflict = await self._repo.reopen(conflict)
         await self._mark_metric_conflict(conflict)
         await self._safe_publish(
@@ -334,6 +344,34 @@ class ConflictService(BaseService):
             }
         )
         return conflict
+
+    async def _ensure_linked_metrics_active(self, conflict: Conflict) -> None:
+        """reopen 前置校验：关联指标若已被仲裁作废（软删）则拒绝重新打开。
+
+        跨服务一致性（TD §12.4）：冲突状态与指标状态须同步。仲裁联动已把
+        落败方软删作废（successor 指向胜方）时，若把冲突拉回 OPEN 会产生
+        「OPEN 冲突引用已作废指标」的矛盾状态——仲裁弹窗/对比将裸 404。
+        已作废指标无法再参与仲裁，故拒绝 reopen，引导查看裁决记录知识库。
+        """
+        if self._metric_archived_checker is None:
+            return
+        codes = conflict.metric_codes or {}
+        for role, code in (
+            ("候选", codes.get("candidate")),
+            ("现有", codes.get("existing")),
+        ):
+            if not code:
+                continue
+            try:
+                archived = await self._metric_archived_checker(code)
+            except Exception as exc:  # noqa: BLE001 - 校验失败降级放行，不阻断 reopen
+                logger.warning("reopen 关联指标校验失败（降级放行）：%s", exc)
+                continue
+            if archived:
+                raise ConflictError(
+                    f"关联{role}指标 {code} 已因仲裁作废，无法重新打开；"
+                    "历史裁决记录已沉淀在裁决记录知识库，可先恢复该指标或新建冲突。"
+                )
 
     async def _mark_metric_conflict(self, conflict: Conflict) -> None:
         """重新打开冲突后联动回置候选指标的 pending_conflict 冗余标记。

@@ -2278,6 +2278,33 @@ class MetricService(BaseService):
 
     # ---- US9: 指标对比 ----
 
+    async def _get_metric_for_compare(self, metric_code: str) -> Metric:
+        """读取用于对比的指标；对已作废指标返回友好 METRIC_ARCHIVED。
+
+        对比弹窗由冲突仲裁/差异查看触发，关联指标可能已被上一轮仲裁软删作废
+        （deleted_at + successor）。此时不应抛裸「指标不存在」，而应复用详情页
+        的 METRIC_ARCHIVED 错误码（携带胜方 successor），供前端渲染
+        「已作废 → 查看权威」引导，保证冲突/指标跨服务状态一致可读。
+
+        Raises:
+            NotFoundError: 指标不存在（METRIC_ARCHIVED 表示已因仲裁作废）。
+        """
+        metric = await self._repo.get_by_code(metric_code)
+        if metric is not None:
+            return metric
+        archived = await self._repo.get_archived_by_code(metric_code)
+        if archived is not None and archived.successor_code:
+            raise NotFoundError(
+                f"指标已因口径裁决作废: {metric_code}",
+                error_code=ErrorCode.METRIC_ARCHIVED,
+                ctx={
+                    "metric_code": metric_code,
+                    "successor_code": archived.successor_code,
+                    "arbitration_mark": archived.arbitration_mark,
+                },
+            )
+        raise NotFoundError(f"指标不存在: {metric_code}")
+
     async def compare_metrics(self, code_a: str, code_b: str) -> dict[str, Any]:
         """两指标关键字段并排对比。
 
@@ -2287,10 +2314,13 @@ class MetricService(BaseService):
 
         Returns:
             并排对比结果，含差异标记。
+
+        Raises:
+            NotFoundError: 指标不存在（METRIC_ARCHIVED 表示已因仲裁作废）。
         """
         # 权限校验：需对两指标都有读权限（PII 指标需合规角色，对齐 T049）
-        a = await self.get_metric(code_a)
-        b = await self.get_metric(code_b)
+        a = await self._get_metric_for_compare(code_a)
+        b = await self._get_metric_for_compare(code_b)
 
         def _diff_level(va: Any, vb: Any) -> str:
             if va == vb:
