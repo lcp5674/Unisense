@@ -170,6 +170,25 @@ const PAYLOAD_FIELD_LABEL_FE: Record<string, string> = {
   note: "说明",
   reason: "原因",
   notify_targets: "通知对象",
+  // 业务字段（定向通知 payload：账号/组织/采集/血缘/权限/冲突）
+  username: "账号",
+  org_id: "组织ID",
+  org_name: "组织名称",
+  status: "状态",
+  source_id: "数据源",
+  source_name: "数据源名称",
+  entity_name: "实体名称",
+  table_name: "表名",
+  successor_code: "后继指标",
+  candidate: "候选指标",
+  existing: "现有指标",
+  severity: "严重级别",
+  window: "统计周期",
+  source_table: "源表",
+  target_table: "目标表",
+  pii_columns: "敏感字段",
+  reviewer_id: "审核人ID",
+  reviewer: "审核人",
 };
 const RULE_TYPE_CN_FE: Record<string, string> = {
   COMPLETENESS: "完整性",
@@ -191,12 +210,20 @@ const LEVEL_CN_FE: Record<string, string> = {
   CRITICAL: "严重",
 };
 
+const STATUS_CN_FE: Record<string, string> = {
+  active: "启用",
+  disabled: "禁用",
+  suspended: "停用",
+  deleted: "已删除",
+};
+
 function humanizeFeValue(key: string, v: unknown): string {
   if (v === null || v === undefined) return "无";
   if (typeof v === "boolean") return v ? "是" : "否";
-  if (key === "level") return LEVEL_CN_FE[String(v)] ?? String(v);
+  if (key === "level" || key === "severity") return LEVEL_CN_FE[String(v)] ?? String(v);
   if (key === "rule_type") return RULE_TYPE_CN_FE[String(v)] ?? String(v);
   if (key === "grant_type") return v === "READ" ? "只读" : v === "READ_WRITE" ? "读写" : String(v);
+  if (key === "status") return STATUS_CN_FE[String(v)] ?? String(v);
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
 }
@@ -218,25 +245,41 @@ function formatNotifyBody(body: string | null): string {
   return body;
 }
 
-// 把正文解析为结构化字段（{标签, 值}），供卡片网格化展示——每条信息一目了然、完整呈现
+// 把正文解析为结构化字段（{标签, 值}），供卡片网格化展示——每条信息一目了然、完整呈现。
+// body 优先（已是「标签：值」多行或自然语言）；payload 中未在 body 展示的业务字段
+// （定向通知补充信息：entity_name/org_name/source_id/username/successor_code 等）合并追加，
+// 不再因 body 非空而被丢弃。
 function parseNotifyBodyFields(body: string | null, payload: Record<string, unknown> | null): { label: string; value: string }[] {
   const text = formatNotifyBody(body);
+  const fields: { label: string; value: string }[] = [];
+  const seenLabels = new Set<string>();
   if (text) {
-    return text
-      .split("\n")
-      .map((line) => {
-        const idx = line.indexOf("：");
-        if (idx > 0) return { label: line.slice(0, idx), value: line.slice(idx + 1) };
-        return { label: "", value: line };
-      })
-      .filter((f) => f.value !== "" && f.value !== "无");
+    for (const line of text.split("\n")) {
+      const idx = line.indexOf("：");
+      if (idx > 0) {
+        const label = line.slice(0, idx);
+        const value = line.slice(idx + 1);
+        if (value !== "" && value !== "无") {
+          fields.push({ label, value });
+          seenLabels.add(label);
+        }
+      } else if (line !== "") {
+        fields.push({ label: "", value: line });
+      }
+    }
   }
   if (payload && Object.keys(payload).length > 0) {
-    return Object.entries(payload)
-      .filter(([k]) => k !== "event_type" && k !== "payload")
-      .map(([k, v]) => ({ label: PAYLOAD_FIELD_LABEL_FE[k] ?? k, value: humanizeFeValue(k, v) }));
+    const skipKeys = new Set(["event_type", "payload", "source", "note"]);
+    for (const [k, v] of Object.entries(payload)) {
+      if (skipKeys.has(k)) continue;
+      const label = PAYLOAD_FIELD_LABEL_FE[k] ?? k;
+      if (seenLabels.has(label)) continue; // body 已展示该字段，不重复
+      const value = humanizeFeValue(k, v);
+      if (value === "无") continue;
+      fields.push({ label, value });
+    }
   }
-  return [];
+  return fields;
 }
 
 // 所属模块（业务术语）
@@ -391,7 +434,8 @@ function NotifListTab() {
     }
   }
 
-  // 点击通知深链：指标类→指标详情、冲突类→冲突仲裁，其余优雅降级不跳转
+  // 点击通知深链：按事件类型路由到对应业务页面（指标→详情、冲突→仲裁、
+  // 账号→用户管理、组织→组织管理、采集→数据源、授权/PII→治理）；其余优雅降级不跳转
   function handleOpen(n: Notification) {
     const tpl = n.template_code ?? "";
     const payload = (n.payload ?? {}) as Record<string, unknown>;
@@ -401,6 +445,22 @@ function NotifListTab() {
     }
     if (tpl.startsWith("conflict")) {
       navigate("/review");
+      return;
+    }
+    if (tpl.startsWith("user.")) {
+      navigate("/users");
+      return;
+    }
+    if (tpl === "org.status_changed") {
+      navigate("/organizations");
+      return;
+    }
+    if (tpl.startsWith("collect.") || tpl.startsWith("catalog.")) {
+      navigate("/data-sources");
+      return;
+    }
+    if (tpl.startsWith("grant.") || tpl.startsWith("pii.") || tpl.startsWith("classification.")) {
+      navigate("/governance");
       return;
     }
     message.info("该通知没有关联的可跳转页面");
@@ -440,6 +500,9 @@ function NotifListTab() {
                   <div className="notif-main">
                     <div className="notif-head">
                       <span className="notif-title">{eventTypeLabel(n.title)}</span>
+                      {n.template_code && eventTypeLabel(n.template_code) !== eventTypeLabel(n.title) && (
+                        <Tag className="notif-type" color="geekblue">{eventTypeLabel(n.template_code)}</Tag>
+                      )}
                       <div className="notif-head-right">
                         {n.sent_at && <span className="notif-sent-time">已送达 {formatCnTime(n.sent_at)}</span>}
                         <Tag

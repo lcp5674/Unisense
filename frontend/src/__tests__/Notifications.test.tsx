@@ -342,3 +342,104 @@ function withinCard(card: HTMLElement, text: string | RegExp) {
   if (!btn) throw new Error(`卡片内未找到按钮 ${text}`);
   return btn;
 }
+
+describe("通知中心 - 信息展示增强", () => {
+  it("payload 业务字段合并展示——body 为自然语言时补充实体名称/状态", async () => {
+    const n = notif({
+      id: 20,
+      template_code: "catalog.deprecated",
+      title: "目录已废弃",
+      body: "目录 销售明细表 已被废弃",
+      payload: { source_id: "mysql_unisense", entity_name: "销售明细表", status: "active" },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("目录已废弃")).toBeInTheDocument());
+    // body 自然语言（整行展示）
+    expect(screen.getByText("目录 销售明细表 已被废弃")).toBeInTheDocument();
+    // payload 补充业务字段未丢弃：实体名称/数据源/状态均展示
+    expect(screen.getByText("实体名称")).toBeInTheDocument();
+    expect(screen.getByText("销售明细表")).toBeInTheDocument();
+    expect(screen.getByText("数据源")).toBeInTheDocument();
+    expect(screen.getByText("mysql_unisense")).toBeInTheDocument();
+    expect(screen.getByText("状态")).toBeInTheDocument();
+    expect(screen.getByText("启用")).toBeInTheDocument();
+  });
+
+  it("body 已含某字段时 payload 同字段不重复展示", async () => {
+    const n = notif({
+      id: 21,
+      body: "指标编码：sales_gmv\n业务域：零售",
+      payload: { metric_code: "sales_gmv", domain: "零售", note: "补充说明" },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+    // metric_code/domain 在 body 已展示（不重复），note 被跳过——合计 2 个字段
+    expect(screen.getByText("指标编码")).toBeInTheDocument();
+    expect(screen.getAllByText("sales_gmv").length).toBe(1);
+    expect(screen.getAllByText("零售").length).toBe(1);
+    expect(screen.queryByText("补充说明")).not.toBeInTheDocument();
+  });
+
+  it("事件类型徽标——title 为自然语言时显示类型 Tag", async () => {
+    const n = notif({
+      id: 22,
+      template_code: "user.password_reset",
+      title: "您的账号 admin 已被管理员重置密码",
+      body: "您的账号 admin 已被管理员重置密码，请尽快重新登录。",
+      payload: { user_id: 5, username: "admin" },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("您的账号 admin 已被管理员重置密码")).toBeInTheDocument());
+    // 类型徽标显示「密码已重置」（与自然语言 title 不同）
+    expect(screen.getByText("密码已重置")).toBeInTheDocument();
+    // 账号业务字段也展示
+    expect(screen.getByText("账号")).toBeInTheDocument();
+    expect(screen.getByText("admin")).toBeInTheDocument();
+  });
+
+  it("账号事件点击跳转用户管理页", async () => {
+    const n = notif({ id: 23, template_code: "user.status_changed", title: "账号已禁用", payload: { user_id: 5, username: "admin" } });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("账号已禁用")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("账号已禁用"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/users"));
+  });
+
+  it("组织事件点击跳转组织管理页", async () => {
+    const n = notif({ id: 24, template_code: "org.status_changed", title: "您所属的组织已停用", payload: { org_id: 1, org_name: "销售部", status: "suspended" } });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("您所属的组织已停用")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("您所属的组织已停用"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/organizations"));
+  });
+
+  it("采集事件点击跳转数据源页", async () => {
+    const n = notif({ id: 25, template_code: "collect.failed", title: "采集任务失败", payload: { source_id: "mysql_unisense", reason: "连接超时" } });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("采集任务失败")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("采集任务失败"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/data-sources"));
+  });
+
+  it("授权事件点击跳转治理页", async () => {
+    const n = notif({ id: 26, template_code: "grant.expiring_soon", title: "权限即将到期", payload: { grant_id: 8, grant_type: "READ" } });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("权限即将到期")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("权限即将到期"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/governance"));
+  });
+});
