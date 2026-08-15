@@ -70,21 +70,26 @@ export function Catalogs() {
   const [entityType, setEntityType] = useState("");
   const [sensitivity, setSensitivity] = useState(urlSensitivity);
   const [keyword, setKeyword] = useState(urlKw);
-  // 目标行高亮（?focus=）：加载后定位并短暂高亮，3 秒后自动清除
+  // 目标行高亮（?focus=）：数据就绪后定位并短暂高亮，定位成功 3 秒后自动清除
   const [focusName, setFocusName] = useState(urlFocus);
   const focusDoneRef = useRef(false);
   useEffect(() => {
     if (!focusName || focusDoneRef.current) return;
-    focusDoneRef.current = true;
-    const scrollTimer = window.setTimeout(() => {
-      const el = document.querySelector<HTMLElement>(`tr[data-row-key*="${focusName}"]`);
-      if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
-    }, 350);
+    // 列表尚未加载完成：等 items 就绪后再尝试定位（避免首次空列表时锁死，加载慢场景滚动定位失效）
+    if (items.length === 0) return;
+    const el = document.querySelector<HTMLElement>(`tr[data-row-key*="${focusName}"]`);
+    if (el) {
+      // 只有真正找到目标行才停止重试
+      focusDoneRef.current = true;
+      try {
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+      } catch {
+        // jsdom 等环境未实现 scrollIntoView：滚动降级为 no-op，不影响行高亮
+      }
+    }
+    // 数据就绪后统一启动 3 秒高亮倒计时（找不到也清除，避免 focusName 永驻）
     const clearTimer = window.setTimeout(() => setFocusName(""), 3000);
-    return () => {
-      window.clearTimeout(scrollTimer);
-      window.clearTimeout(clearTimer);
-    };
+    return () => window.clearTimeout(clearTimer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusName, items]);
   // 库名筛选（随数据源联动）
