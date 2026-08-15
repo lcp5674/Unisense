@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination } from "antd";
-import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined, ArrowLeftOutlined } from "@ant-design/icons";
+import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined } from "@ant-design/icons";
 import {
   listNotifications,
   listNotifyEvents,
@@ -610,7 +610,6 @@ function PublishTab() {
 }
 
 export function Notifications() {
-  const navigate = useNavigate();
   const tabItems = [
     { key: "list", label: "我的通知", children: <NotifListTab /> },
     { key: "subs", label: "订阅设置", children: <SubscriptionsTab /> },
@@ -618,21 +617,9 @@ export function Notifications() {
     { key: "publish", label: "发送消息", children: <PublishTab /> },
   ];
 
-  // 返回上一入口（任意来源，浏览器历史天然覆盖）；无上一页时兜底总览仪表
-  function handleBack() {
-    if (window.history.length > 1) {
-      navigate(-1);
-    } else {
-      navigate("/dashboard");
-    }
-  }
-
   return (
     <div>
       <div className="page-head">
-        <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
-          返回
-        </Button>
         <div>
           <div className="page-kicker">Collaboration / Notifications</div>
           <h2>通知中心</h2>

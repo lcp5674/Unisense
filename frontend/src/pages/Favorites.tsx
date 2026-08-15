@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button, Card, Input, List, message, Space, Tag } from "antd";
-import { ArrowLeftOutlined, HeartOutlined, DeleteOutlined, PlusOutlined } from "@ant-design/icons";
+import { HeartOutlined, DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import { addFavorite, removeFavorite, listFavoriteDetails, UnisenseApiError } from "../api";
 import type { FavoriteDetail } from "../api";
 import { useTracking } from "../hooks/useTracking";
@@ -47,15 +47,6 @@ export function Favorites() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 返回上一入口（任意来源，浏览器历史天然覆盖）；无上一页时兜底总览仪表
-  function handleBack() {
-    if (window.history.length > 1) {
-      navigate(-1);
-    } else {
-      navigate("/dashboard");
-    }
-  }
-
   async function handleAdd() {
     if (!newCode.trim()) return;
     try {
@@ -84,9 +75,6 @@ export function Favorites() {
 
   return (
     <div>
-      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
-        返回
-      </Button>
       <Card title="我的收藏">
       <Space style={{ marginBottom: 16 }} wrap>
         <Input
