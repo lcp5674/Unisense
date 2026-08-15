@@ -1,8 +1,9 @@
 """冲突服务编排（TD §12.4 / FR-09）。
 
-职责：四类冲突检测 + 仲裁状态机（OPEN→NEGOTIATING→ESCALATED→RULED→CLOSED，CLOSED→OPEN 可重新打开重审）
-+ 裁决知识库沉淀。不修改指标本身，仅写裁决结论 + 发通知。
-PII 冲突特殊路由至 governance.pii_review，不进普通仲裁。
+职责：四类冲突检测 + 仲裁状态机（OPEN→NEGOTIATING→ESCALATED→RULED→CLOSED，
+CLOSED→OPEN 可重新打开重审）+ 裁决知识库沉淀。仲裁结论写入 conflict 表，并通过
+注入回调联动指标侧（落败方废弃/作废、胜方标记权威，见 conflict.arbitration），
+保证口径收敛。PII 冲突特殊路由至 governance.pii_review，不进普通仲裁。
 """
 
 from __future__ import annotations
@@ -48,6 +49,9 @@ class ConflictService(BaseService):
         llm: ConflictLlmClient | None = None,
         metric_conflict_clearer: Callable[[str], Awaitable[None]] | None = None,
         metric_conflict_marker: Callable[[str, Conflict], Awaitable[None]] | None = None,
+        arbitration_applier: Callable[
+            [Conflict, str, str | None, int], Awaitable[None]
+        ] | None = None,
     ) -> None:
         super().__init__(db)
         self._db = db
@@ -61,6 +65,10 @@ class ConflictService(BaseService):
         # 对称的回置回调：重新打开已关闭冲突后，回置候选指标 pending_conflict 标记
         # （指标详情页须重新显示「口径冲突待处理」）。None 时跳过。
         self._metric_conflict_marker = metric_conflict_marker
+        # 仲裁联动指标的回调（TD §12.4）：落败方废弃/作废、胜方标记权威。
+        # 由上层注入真实实现（见 conflict.arbitration.apply_arbitration_impact）；
+        # None 时跳过（仲裁仍完成，仅不联动指标）。
+        self._arbitration_applier = arbitration_applier
 
     async def _safe_publish(self, event: dict[str, Any]) -> None:
         """事件发布为 best-effort：通知/治理服务不可达时静默降级，不阻断主流程。
@@ -219,6 +227,7 @@ class ConflictService(BaseService):
             }
         )
         await self._sync_metric_conflict_flag(conflict)
+        await self._apply_arbitration(conflict, decision, req.canonical_metric_code, arbitrator_id)
         return conflict
 
     async def _sync_metric_conflict_flag(self, conflict: Conflict) -> None:
@@ -250,6 +259,33 @@ class ConflictService(BaseService):
                 )
         except Exception as exc:  # noqa: BLE001 - 联动清除降级，不阻断仲裁
             logger.warning("仲裁后同步指标冲突标记失败（best-effort 跳过）：%s", exc)
+
+    async def _apply_arbitration(
+        self,
+        conflict: Conflict,
+        decision: str,
+        canonical_code: str | None,
+        arbitrator_id: int,
+    ) -> None:
+        """仲裁成功后联动指标（TD §12.4）：落败方废弃/作废、胜方标记权威。
+
+        由注入的 arbitration_applier 回调执行（API 层组合真实实现）；best-effort：
+        联动失败不阻断仲裁主流程（仲裁结论已落库），留日志告警。
+        """
+        if self._arbitration_applier is None:
+            return
+        try:
+            await self._arbitration_applier(
+                conflict, decision, canonical_code, arbitrator_id
+            )
+            logger.info(
+                "arbitration_metric_applied",
+                conflict_id=conflict.conflict_id,
+                canonical=canonical_code,
+                decision=decision,
+            )
+        except Exception as exc:  # noqa: BLE001 - 联动降级，不阻断仲裁
+            logger.warning("仲裁后联动指标失败（best-effort 跳过）：%s", exc)
 
     async def escalate(self, conflict_id: str, req: EscalateRequest) -> Conflict:
         conflict = await self.get(conflict_id)

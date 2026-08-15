@@ -50,6 +50,8 @@ export interface MetricResponse {
   gray_tenant_ids: number[] | null;
   pending_conflict: boolean;
   pending_conflict_detail: Record<string, unknown> | null;
+  /** 仲裁裁决标记（TD §12.4）：canonical=权威口径 / coexist=已裁定共存，详情页据此展示 */
+  arbitration_mark?: { status: "canonical" | "coexist"; conflict_id?: string; decision?: string; ruled_at?: string; opposite_code?: string } | null;
   pending_version: boolean;
   /** 指标业务描述（治理补充 TD §12.1，资产地图/详情展示与编辑） */
   description?: string | null;

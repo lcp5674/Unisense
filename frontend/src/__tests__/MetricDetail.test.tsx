@@ -186,4 +186,42 @@ describe("MetricDetail", () => {
     fireEvent.click(btn);
     await screen.findByText("todo-page");
   });
+
+  it("仲裁为权威口径时展示绿色「权威口径」Tag（TD §12.4）", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      arbitration_mark: {
+        status: "canonical",
+        conflict_id: "CF-ABC",
+        decision: "merge",
+        ruled_at: "2026-08-15T04:00:00Z",
+        opposite_code: "sales_gmv_d",
+      },
+    });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    const tag = await screen.findByText("权威口径");
+    expect(tag).toBeInTheDocument();
+    // 悬停 Tooltip 展示裁决明细（决策中文 + 落败方）
+    fireEvent.mouseEnter(tag);
+    expect(await screen.findByText(/合并口径/)).toBeInTheDocument();
+    expect(screen.getByText(/落败方 sales_gmv_d/)).toBeInTheDocument();
+  });
+
+  it("仲裁保留差异时展示蓝色「已裁定共存」Tag", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      arbitration_mark: {
+        status: "coexist",
+        conflict_id: "CF-DEF",
+        decision: "keep_diff",
+        ruled_at: "2026-08-15T04:00:00Z",
+        opposite_code: "sales_gmv_d",
+      },
+    });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    const tag = await screen.findByText("已裁定共存");
+    expect(tag).toBeInTheDocument();
+    fireEvent.mouseEnter(tag);
+    expect(await screen.findByText(/保留差异/)).toBeInTheDocument();
+  });
 });

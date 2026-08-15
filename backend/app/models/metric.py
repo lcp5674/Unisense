@@ -250,6 +250,11 @@ class Metric(Base, BaseModel):
     pending_conflict_detail: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, nullable=True, comment="冲突详情"
     )
+    # 仲裁裁决标记（TD §12.4）：canonical（胜方）/ coexist（保留差异共存）。
+    # 详情页据此展示「权威口径」/「已裁定共存」；落败方另走废弃/作废。
+    arbitration_mark: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="仲裁裁决标记"
+    )
 
     # ---- 关系 ----
     versions: Mapped[list[MetricVersion]] = relationship(

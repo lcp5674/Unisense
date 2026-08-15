@@ -12,6 +12,7 @@ import {
   Space,
   Tag,
   Tabs,
+  Tooltip,
   Typography,
 } from "antd";
 import {
@@ -56,7 +57,7 @@ import type {
   UserBrief,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
-import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL } from "../utils/enums";
+import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL, RULING_DECISION_LABEL } from "../utils/enums";
 import { formatCnTime, formatCnDate } from "../utils/timeCn";
 import { HealthCard } from "./metric/HealthCard";
 import { QualitySnapshot } from "./metric/QualitySnapshot";
@@ -149,6 +150,40 @@ function DeprecatedChain({ metric }: { metric: MetricResponse }) {
       }
       style={{ marginBottom: 16 }}
     />
+  );
+}
+
+// 仲裁裁决标记（TD §12.4）：胜方「权威口径」/ 共存方「已裁定共存」，悬停展示裁决明细
+function ArbitrationMarkTag({ metric }: { metric: MetricResponse }) {
+  const mark = metric.arbitration_mark;
+  if (!mark) return null;
+  if (mark.status === "coexist") {
+    return (
+      <Tooltip
+        title={
+          <Space direction="vertical" size={0}>
+            <span>冲突 {mark.conflict_id} · 裁决：保留差异</span>
+            <span className="muted">与 {mark.opposite_code ?? "对方"} 共存，均非唯一权威</span>
+            {mark.ruled_at && <span className="muted">{formatCnTime(mark.ruled_at)}</span>}
+          </Space>
+        }
+      >
+        <Tag color="blue">已裁定共存</Tag>
+      </Tooltip>
+    );
+  }
+  return (
+    <Tooltip
+      title={
+        <Space direction="vertical" size={0}>
+          <span>冲突 {mark.conflict_id} · 裁决：{RULING_DECISION_LABEL[mark.decision ?? ""] ?? mark.decision ?? "选为权威"}</span>
+          <span className="muted">权威口径，落败方 {mark.opposite_code ?? "—"} 已废弃/作废</span>
+          {mark.ruled_at && <span className="muted">{formatCnTime(mark.ruled_at)}</span>}
+        </Space>
+      }
+    >
+      <Tag color="green">权威口径</Tag>
+    </Tooltip>
   );
 }
 
@@ -476,6 +511,7 @@ export function MetricDetail() {
       )}
       {metric.emergency_publish && <Tag color="volcano">紧急发布</Tag>}
       {metric.pending_conflict && <Tag color="orange">口径冲突待处理</Tag>}
+      <ArbitrationMarkTag metric={metric} />
       {metric.gray_tenant_ids && metric.gray_tenant_ids.length > 0 && (
         <Tag color="purple">灰度 {metric.gray_tenant_ids.length} 租户</Tag>
       )}

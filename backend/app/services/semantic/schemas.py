@@ -353,6 +353,8 @@ class MetricResponse(BaseModel):
     gray_tenant_ids: list[int] | None = None
     pending_conflict: bool = False
     pending_conflict_detail: dict[str, Any] | None = None
+    # 仲裁裁决标记（TD §12.4）：canonical（权威口径）/ coexist（已裁定共存），详情页据此展示
+    arbitration_mark: dict[str, Any] | None = None
     # 版本待确认：PUBLISHED+破坏性变更后，消费方需在 14 天内确认
     pending_version: bool = False
     # 健康度信号：列表接口经 metric_health_score 批量回填（无记录时为 None，目录页显示"未评分"）

@@ -24,6 +24,7 @@ from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.models.metric import Metric
+from app.services.conflict.arbitration import apply_arbitration_impact
 from app.services.conflict.events import ConflictEventPublisher
 from app.services.conflict.llm_client import build_conflict_llm_client
 from app.services.conflict.schemas import (
@@ -35,6 +36,7 @@ from app.services.conflict.schemas import (
     RulingRecordResponse,
 )
 from app.services.conflict.service import ConflictService
+from app.services.semantic.service import MetricService
 
 router = APIRouter(prefix="/conflicts", tags=["conflict"])
 
@@ -83,12 +85,29 @@ def _svc(db: AsyncSession, request: Request) -> ConflictService:
             .values(pending_conflict=True, pending_conflict_detail=detail)
         )
 
+    async def _apply_arbitration(
+        conflict: Any, decision: str, canonical_code: str | None, actor_id: int
+    ) -> None:
+        """仲裁联动指标（TD §12.4）：落败方废弃/作废、胜方标记权威、共存标记。
+
+        与 conflict 主流程同事务：本端点随后的 db.commit() 一并落库。
+        """
+        await apply_arbitration_impact(
+            db,
+            conflict,
+            decision,
+            canonical_code,
+            actor_id,
+            metric_svc=MetricService(db),
+        )
+
     return ConflictService(
         db,
         events=ConflictEventPublisher(notify_url),
         llm=build_conflict_llm_client(),
         metric_conflict_clearer=_clear_metric_conflict,
         metric_conflict_marker=_mark_metric_conflict,
+        arbitration_applier=_apply_arbitration,
     )
 
 
