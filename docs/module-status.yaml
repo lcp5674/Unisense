@@ -88,6 +88,7 @@ modules:
       verdict: "0 High → 满足 released：runbook 已建 + 迁移可逆 + 双视角0High + 13门禁全绿(secret/supply_chain 经 gitleaks/pip-audit 复验)；仅余 §1.5 人工 ratify"
     pr: ""
     owner: ""
+    note11: "资产地图接入全通道血缘 + AssetGraph 大图 LOD 性能优化(2026-08-15 5f21829)：用户诉求①资产地图图谱也接入完整血缘②血缘图谱边/节点多时缩放平移卡顿。① AssetMap GraphTab 新增「来源」筛选（资产视角（采集目录）/全部血缘（含 DP/SQL/指标）/DP 同步血缘/SQL 解析血缘/指标定义血缘），血缘视角复用 lineageGraph（provenance+limit 2000 与血缘视图同源），节点点击（指标详情抽屉/表实体抽屉/字段抽屉）不变。② AssetGraph LOD 性能优化：a. 全局 animation:false（关闭缩放/平移插帧）+ zoomRange:[0.15,8]（限最小缩放）；b. compact LOD 状态（隐藏标签/图标/柔光/投影）——canvas:wheel 监听 + getZoom() 跨阈值 0.6 批量 setElementState(record,false)（阈值节流）；c. 节点>200 首帧 fitView 后即 compact；d. hover/搜索高亮合并 compact（stateWithCompact 防覆盖丢失）。验证：前端 tsc 0 + 全量 536 通过（仅 2 项并行会话 LineageView provenance 固有失败）；AssetMap 来源切换 2 项 + AssetGraph LOD 3 项全绿。"
     updated: "2026-08-15"
 
   semantic:
