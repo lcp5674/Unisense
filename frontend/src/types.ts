@@ -560,7 +560,11 @@ export interface CurrentUser {
   display_name: string;
   role: string;
   domain: string | null;
+  /** 所属域中文名（后端 /auth/me 回填，个人中心展示） */
+  domain_name?: string | null;
   org_id: number;
+  /** 组织中文名（后端 /auth/me 回填，个人中心展示） */
+  org_name?: string | null;
   /** 是否首次登录需强制改密（后端登录/me 响应携带，前端据此弹不可关闭的改密弹窗） */
   must_change_password?: boolean;
 }
@@ -872,7 +876,19 @@ export interface RolePermissionItem {
   default_actions: string[];
   custom_actions: string[] | null;
   effective_actions: string[];
+  ui_default_actions: string[];
+  ui_custom_actions: string[] | null;
+  ui_effective_actions: string[];
   protected: boolean;
+  is_custom: boolean;
+}
+
+/** 动作点注册表项（GET /governance/action-registry，角色管理可视化配置数据源）。 */
+export interface ActionRegistryItem {
+  action: string;
+  module: string;
+  label: string;
+  description: string;
 }
 
 export interface OrganizationView {
@@ -943,6 +959,8 @@ export interface PermissionSnapshot {
   role: string;
   home_domain: string | null;
   allowed_actions: string[];
+  /** UI 权限点（模块:功能），前端 usePermission 消费；默认+role_permission 覆盖合并 */
+  ui_actions: string[];
   granted_domains: string[];
   metric_whitelist: string[];
   row_level_restricted: boolean;

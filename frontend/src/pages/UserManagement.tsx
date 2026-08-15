@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -30,6 +30,7 @@ import {
   listAdminUsers,
   listDomainTree,
   listOrganizations,
+  listRolePermissions,
   resetUserPassword,
   setUserStatus,
   updateUser,
@@ -120,6 +121,8 @@ export function UserManagement() {
   const [resetForm] = Form.useForm();
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [orgOptions, setOrgOptions] = useState<Array<{ value: number; label: string }>>([]);
+  // 自定义角色（方案 A：后端 GET /roles 返回 is_custom 标记；创建/编辑用户角色下拉合并展示）
+  const [customRoles, setCustomRoles] = useState<string[]>([]);
   const [generatedPassword, setGeneratedPassword] = useState("");
   const [createdResult, setCreatedResult] = useState<{ username: string; password: string } | null>(
     null,
@@ -172,6 +175,22 @@ export function UserManagement() {
       )
       .catch(() => setOrgOptions([]));
   }, []);
+
+  useEffect(() => {
+    // 自定义角色下拉：GET /roles 返回全部角色（内置 + 自定义，is_custom 标记）
+    listRolePermissions()
+      .then((items) => setCustomRoles(items.filter((i) => i.is_custom).map((i) => i.role)))
+      .catch(() => setCustomRoles([]));
+  }, []);
+
+  // 角色下拉 = 内置七角色 + 自定义角色（带「自定义」后缀，便于区分）
+  const roleOptions = useMemo(
+    () => [
+      ...ROLE_OPTIONS,
+      ...customRoles.map((r) => ({ value: r, label: `${r}（自定义）` })),
+    ],
+    [customRoles],
+  );
 
   useEffect(() => {
     load();
@@ -387,7 +406,7 @@ export function UserManagement() {
             style={{ width: 150 }}
             value={role || undefined}
             onChange={(v) => { setRole(v || ""); setPage(1); }}
-            options={ROLE_OPTIONS}
+            options={roleOptions}
           />
           <Select
             allowClear
@@ -491,7 +510,7 @@ export function UserManagement() {
           </Form.Item>
           <Space size={16} style={{ width: "100%" }}>
             <Form.Item name="role" label="角色" initialValue="viewer" rules={[{ required: true }]} style={{ width: 180 }}>
-              <Select options={ROLE_OPTIONS} />
+              <Select options={roleOptions} />
             </Form.Item>
             <Form.Item name="domain" label="所属域（可留空）" style={{ width: 240 }}>
               <Select
@@ -557,7 +576,7 @@ export function UserManagement() {
             <Input className="mono" />
           </Form.Item>
           <Form.Item name="role" label="角色" rules={[{ required: true }]}>
-            <Select options={ROLE_OPTIONS} />
+            <Select options={roleOptions} />
           </Form.Item>
           <Form.Item name="domain" label="所属域（留空为无）">
             <Select

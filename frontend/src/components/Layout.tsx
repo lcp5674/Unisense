@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { onNotifChanged } from "../utils/notifBus";
+import { ROUTE_PERM, usePermission } from "../hooks/usePermission";
 import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme, AutoComplete, Spin, Modal, Form, App as AntApp } from "antd";
 import {
   AppstoreOutlined,
@@ -157,23 +158,6 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
 ];
 
 const ALL_NAV_KEYS = NAV_GROUPS.flatMap((g) => g.children.map((c) => c.key));
-
-// 管理类菜单：仅 platform_admin / domain_admin 可见，其余角色隐藏
-const ADMIN_ONLY_NAV_KEYS = new Set([
-  "/users",
-  "/organizations",
-  "/governance",
-  "/audit",
-  "/dicts",
-  "/system-config",
-  "/tracking-stats",
-  "/api-clients",
-  "/observability",
-]);
-
-function isAdminRole(role: string): boolean {
-  return role === "platform_admin" || role === "domain_admin";
-}
 
 // 修改密码弹窗：force=true 为首次登录强制改密（不可关闭），否则为普通自助改密。
 // 两态复用同一表单与提交逻辑。
@@ -515,6 +499,11 @@ export function Layout({ user }: { user: CurrentUser }) {
     },
     { type: "divider" as const },
     {
+      key: "account",
+      label: "个人中心",
+      icon: <UserOutlined />,
+    },
+    {
       key: "password",
       label: "修改密码",
       icon: <KeyOutlined />,
@@ -528,6 +517,10 @@ export function Layout({ user }: { user: CurrentUser }) {
   ];
 
   async function handleUserMenu({ key }: { key: string }) {
+    if (key === "account") {
+      navigate("/account");
+      return;
+    }
     if (key === "password") {
       setPwdModalOpen(true);
       return;
@@ -541,17 +534,22 @@ export function Layout({ user }: { user: CurrentUser }) {
     }
   }
 
-  // 按角色过滤导航菜单：非管理员隐藏管理类入口；某组过滤后为空则整组隐藏
+  // 按权限点过滤导航菜单（细粒度管控：替代原 ADMIN_ONLY 角色二值过滤）：
+  // 菜单项映射到 ``ROUTE_PERM[path]`` 权限点，用户无该权限点则隐藏；
+  // 某组过滤后为空则整组隐藏。无映射的菜单项默认放行（保持向后兼容）。
+  const { can } = usePermission();
   const menuItems = useMemo(() => {
-    const isAdmin = isAdminRole(user.role);
     return NAV_GROUPS.map((g) => ({
       type: "group" as const,
       label: g.label,
       children: g.children
-        .filter((c) => isAdmin || !ADMIN_ONLY_NAV_KEYS.has(c.key))
+        .filter((c) => {
+          const perm = ROUTE_PERM[c.key];
+          return perm ? can(perm) : true;
+        })
         .map((c) => ({ key: c.key, icon: c.icon, label: c.label })),
     })).filter((g) => g.children.length > 0);
-  }, [user.role]);
+  }, [can, user.role]);
 
   // 首次登录强制改密：必须修改成功才消失（force 弹窗不可关闭）
   const forceChangeRequired = user.must_change_password === true && !forcePwdDone;

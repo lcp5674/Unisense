@@ -21,6 +21,7 @@ vi.mock("../api", () => {
     listAdminUsers: vi.fn(),
     listDomainTree: vi.fn(),
     listOrganizations: vi.fn(),
+    listRolePermissions: vi.fn(),
     createUser: vi.fn(),
     updateUser: vi.fn(),
     setUserStatus: vi.fn(),
@@ -35,6 +36,7 @@ import {
   listAdminUsers,
   listDomainTree,
   listOrganizations,
+  listRolePermissions,
   createUser,
   updateUser,
   setUserStatus,
@@ -46,6 +48,7 @@ const mockMe = vi.mocked(fetchCurrentUser);
 const mockList = vi.mocked(listAdminUsers);
 const mockDomains = vi.mocked(listDomainTree);
 const mockOrgs = vi.mocked(listOrganizations);
+const mockRoles = vi.mocked(listRolePermissions);
 const mockCreate = vi.mocked(createUser);
 const mockUpdate = vi.mocked(updateUser);
 const mockStatus = vi.mocked(setUserStatus);
@@ -91,6 +94,7 @@ describe("UserManagement 用户管理", () => {
     mockList.mockReset();
     mockDomains.mockReset();
     mockOrgs.mockReset();
+    mockRoles.mockReset();
     mockCreate.mockReset();
     mockUpdate.mockReset();
     mockStatus.mockReset();
@@ -98,6 +102,7 @@ describe("UserManagement 用户管理", () => {
     mockReset.mockReset();
     mockDomains.mockResolvedValue([]);
     mockOrgs.mockResolvedValue({ total: 0, page: 1, page_size: 200, items: [] });
+    mockRoles.mockResolvedValue([]);
   });
 
   it("platform_admin：渲染用户列表与全部管理操作", async () => {
@@ -167,8 +172,7 @@ describe("UserManagement 用户管理", () => {
 
   it("创建用户：打开弹窗自动预填强随机密码，可直接提交", async () => {
     mockMe.mockResolvedValue(ADMIN);
-    mockList.mockResolvedValue(USERS);
-    mockCreate.mockResolvedValue(USERS.items[1]);
+    mockList.mockResolvedValue(USERS);    mockCreate.mockResolvedValue(USERS.items[1]);
     render(<UserManagement />);
     await screen.findByText("alice");
 
@@ -309,5 +313,34 @@ describe("UserManagement 用户管理", () => {
     expect(screen.queryByText("批量启用")).toBeNull();
     // 无 rowSelection 复选框列
     expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+
+  it("创建用户：角色下拉含自定义角色（自定义后缀）", async () => {
+    mockMe.mockResolvedValue(ADMIN);
+    mockList.mockResolvedValue(USERS);
+    mockRoles.mockResolvedValue([
+      {
+        role: "data_analyst",
+        default_actions: [],
+        custom_actions: null,
+        effective_actions: [],
+        ui_default_actions: [],
+        ui_custom_actions: null,
+        ui_effective_actions: [],
+        protected: false,
+        is_custom: true,
+      },
+    ]);
+    render(<UserManagement />);
+    await screen.findByText("alice");
+
+    fireEvent.click(screen.getByText("创建用户"));
+    // 打开角色下拉：内置角色 + 自定义角色（带「自定义」后缀）
+    fireEvent.mouseDown(screen.getByLabelText("角色"));
+    await clickSelectOption("data_analyst（自定义）");
+    // 选中后表单角色值为自定义角色（下拉项与选中项均含该文本，用 getAllByText 判定）
+    await waitFor(() =>
+      expect(screen.getAllByText("data_analyst（自定义）").length).toBeGreaterThan(0),
+    );
   });
 });

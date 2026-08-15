@@ -25,6 +25,9 @@ vi.mock("../api", () => {
     listRolePermissions: vi.fn(),
     setRolePermissions: vi.fn(),
     resetRolePermissions: vi.fn(),
+    deleteRole: vi.fn(),
+    createRole: vi.fn(),
+    listActionRegistry: vi.fn(),
     checkPermission: vi.fn(),
     piiReviewAction: vi.fn(),
     classificationRescan: vi.fn(),
@@ -41,6 +44,9 @@ import {
   listRolePermissions,
   setRolePermissions,
   resetRolePermissions,
+  listActionRegistry,
+  deleteRole,
+  createRole,
   batchGrant,
   listUsers,
   listDomainTree,
@@ -51,9 +57,18 @@ const mockGrants = vi.mocked(listGrants);
 const mockRoles = vi.mocked(listRolePermissions);
 const mockSetRoles = vi.mocked(setRolePermissions);
 const mockResetRoles = vi.mocked(resetRolePermissions);
+const mockDeleteRole = vi.mocked(deleteRole);
+const mockCreateRole = vi.mocked(createRole);
+const mockActionRegistry = vi.mocked(listActionRegistry);
 const mockBatch = vi.mocked(batchGrant);
 const mockUsers = vi.mocked(listUsers);
 const mockDomains = vi.mocked(listDomainTree);
+
+const ACTION_REGISTRY = [
+  { action: "catalog:view", module: "指标", label: "查看指标目录", description: "访问指标目录" },
+  { action: "metric:create", module: "指标", label: "创建指标", description: "新增指标" },
+  { action: "user:disable", module: "账号", label: "启停用户", description: "启用/禁用用户" },
+];
 
 const ROLE_PERMISSIONS = [
   {
@@ -61,14 +76,22 @@ const ROLE_PERMISSIONS = [
     default_actions: ["read"],
     custom_actions: ["read"],
     effective_actions: ["read"],
+    ui_default_actions: ["catalog:view", "dashboard:view"],
+    ui_custom_actions: null,
+    ui_effective_actions: ["catalog:view", "dashboard:view"],
     protected: false,
+    is_custom: false,
   },
   {
     role: "platform_admin",
     default_actions: ["read", "write", "approve", "export", "review"],
     custom_actions: null,
     effective_actions: ["read", "write", "approve", "export", "review"],
+    ui_default_actions: ["*"],
+    ui_custom_actions: null,
+    ui_effective_actions: ["*"],
     protected: true,
+    is_custom: false,
   },
 ];
 
@@ -89,6 +112,9 @@ describe("Governance 权限治理", () => {
     mockRoles.mockReset();
     mockSetRoles.mockReset();
     mockResetRoles.mockReset();
+    mockDeleteRole.mockReset();
+    mockCreateRole.mockReset();
+    mockActionRegistry.mockReset();
     mockBatch.mockReset();
     mockUsers.mockReset();
     mockDomains.mockReset();
@@ -97,6 +123,7 @@ describe("Governance 权限治理", () => {
       role: "platform_admin",
       home_domain: null,
       allowed_actions: ["read", "write", "approve", "export", "review"],
+      ui_actions: ["*"],
       granted_domains: [],
       metric_whitelist: [],
       row_level_restricted: false,
@@ -105,6 +132,9 @@ describe("Governance 权限治理", () => {
     });
     mockGrants.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
     mockRoles.mockResolvedValue(ROLE_PERMISSIONS);
+    mockActionRegistry.mockResolvedValue(ACTION_REGISTRY);
+    mockDeleteRole.mockResolvedValue({ role: "x", deleted: true });
+    mockCreateRole.mockResolvedValue({ id: 99, name: "x", description: null });
     mockUsers.mockResolvedValue(USERS);
     mockDomains.mockResolvedValue([]);
   });
@@ -133,7 +163,11 @@ describe("Governance 权限治理", () => {
       default_actions: ["read"],
       custom_actions: ["read", "write"],
       effective_actions: ["read", "write"],
+      ui_default_actions: ["catalog:view"],
+      ui_custom_actions: null,
+      ui_effective_actions: ["catalog:view"],
       protected: false,
+      is_custom: false,
     });
     render(<Governance />);
     await clickTab("角色管理");
@@ -164,7 +198,11 @@ describe("Governance 权限治理", () => {
       default_actions: ["read"],
       custom_actions: null,
       effective_actions: ["read"],
+      ui_default_actions: ["catalog:view"],
+      ui_custom_actions: null,
+      ui_effective_actions: ["catalog:view"],
       protected: false,
+      is_custom: false,
     });
     render(<Governance />);
     await clickTab("角色管理");
@@ -278,5 +316,89 @@ describe("Governance 权限治理", () => {
     expect(options).toContain("PII 敏感");
     expect(options).not.toContain("未知");
     expect(options).not.toContain("UNKNOWN");
+  });
+
+  it("角色管理：新建自定义角色 → 配置按钮级权限点 → 删除", async () => {
+    mockCreateRole.mockResolvedValue({ id: 99, name: "data_analyst", description: null });
+    const withCustom = [
+      ...ROLE_PERMISSIONS,
+      {
+        role: "data_analyst",
+        default_actions: [],
+        custom_actions: null,
+        effective_actions: [],
+        ui_default_actions: [],
+        ui_custom_actions: null,
+        ui_effective_actions: [],
+        protected: false,
+        is_custom: true,
+      },
+    ];
+    // 首次加载返回内置角色；创建后刷新返回含自定义角色（delete 刷新复用 withCustom）
+    mockRoles.mockReset();
+    mockRoles.mockResolvedValueOnce(ROLE_PERMISSIONS).mockResolvedValue(withCustom);
+    mockSetRoles.mockResolvedValue({
+      role: "data_analyst",
+      default_actions: [],
+      custom_actions: null,
+      effective_actions: [],
+      ui_default_actions: [],
+      ui_custom_actions: ["metric:create"],
+      ui_effective_actions: ["metric:create"],
+      protected: false,
+      is_custom: true,
+    });
+
+    render(<Governance />);
+    await clickTab("角色管理");
+    await screen.findByText("只读用户");
+
+    // 新建自定义角色
+    await userEvent.click(screen.getByRole("button", { name: /新建自定义角色/ }));
+    await userEvent.type(screen.getByLabelText("角色名"), "data_analyst");
+    await userEvent.click(screen.getByRole("button", { name: /创\s*建/ }));
+    await waitFor(() =>
+      expect(mockCreateRole).toHaveBeenCalledWith({
+        name: "data_analyst",
+        description: null,
+        is_custom: true,
+      }),
+    );
+    expect(await screen.findByText("data_analyst")).toBeTruthy();
+    expect(screen.getAllByText("自定义").length).toBeGreaterThan(0);
+
+    // 打开 data_analyst 行的「配置」→ 按钮级权限点弹窗 → 勾选「创建指标」→ 保存
+    const configBtns = screen.getAllByRole("button", { name: /配\s*置/ });
+    await userEvent.click(configBtns[configBtns.length - 1]);
+    expect(await screen.findByText("创建指标")).toBeTruthy();
+    const wrapper = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-checkbox-wrapper"),
+    ).find((el) => el.textContent?.includes("创建指标"));
+    const cb = wrapper?.querySelector("input.ant-checkbox-input");
+    fireEvent.click(cb!);
+    const saveBtn = screen
+      .getAllByRole("button", { name: /保\s*存/ })
+      .find((b) => !(b as HTMLButtonElement).disabled);
+    await userEvent.click(saveBtn!);
+    await waitFor(() =>
+      expect(mockSetRoles).toHaveBeenCalledWith(
+        "data_analyst",
+        expect.arrayContaining(["metric:create"]),
+      ),
+    );
+
+    // 删除自定义角色（Popconfirm 确认：antd 默认 locale 下确定按钮为 primary）
+    const delBtn = screen
+      .getAllByRole("button", { name: /删\s*除/ })
+      .find((b) => !(b as HTMLButtonElement).disabled);
+    await userEvent.click(delBtn!);
+    await waitFor(() => {
+      const okBtn = document.querySelector(
+        ".ant-popconfirm-buttons .ant-btn-primary",
+      ) as HTMLElement | null;
+      expect(okBtn).toBeTruthy();
+      if (okBtn) fireEvent.click(okBtn);
+    });
+    await waitFor(() => expect(mockDeleteRole).toHaveBeenCalledWith("data_analyst"));
   });
 });

@@ -40,6 +40,7 @@ import {
   markAllNotificationsRead,
   deleteNotification,
   deleteAllNotifications,
+  upsertSubscription,
 } from "../api";
 
 const mockedList = vi.mocked(listNotifications);
@@ -403,24 +404,24 @@ describe("通知中心 - 信息展示增强", () => {
     expect(screen.getByText("admin")).toBeInTheDocument();
   });
 
-  it("账号事件点击跳转用户管理页", async () => {
+  it("账号事件点击跳转个人中心（本人视角，方案 C）", async () => {
     const n = notif({ id: 23, template_code: "user.status_changed", title: "账号已禁用", payload: { user_id: 5, username: "admin" } });
     mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
 
     renderPage();
     await waitFor(() => expect(screen.getByText("账号已禁用")).toBeInTheDocument());
     fireEvent.click(screen.getByText("账号已禁用"));
-    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/users"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/account"));
   });
 
-  it("组织事件点击跳转组织管理页", async () => {
+  it("组织事件点击跳转个人中心（本人视角，方案 C）", async () => {
     const n = notif({ id: 24, template_code: "org.status_changed", title: "您所属的组织已停用", payload: { org_id: 1, org_name: "销售部", status: "suspended" } });
     mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
 
     renderPage();
     await waitFor(() => expect(screen.getByText("您所属的组织已停用")).toBeInTheDocument());
     fireEvent.click(screen.getByText("您所属的组织已停用"));
-    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/organizations"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/account"));
   });
 
   it("采集事件点击跳转数据源页", async () => {
@@ -433,13 +434,13 @@ describe("通知中心 - 信息展示增强", () => {
     await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/data-sources"));
   });
 
-  it("授权事件点击跳转治理页", async () => {
+  it("授权事件点击跳转个人中心（我的授权，方案 C）", async () => {
     const n = notif({ id: 26, template_code: "grant.expiring_soon", title: "权限即将到期", payload: { grant_id: 8, grant_type: "READ" } });
     mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
 
     renderPage();
     await waitFor(() => expect(screen.getByText("权限即将到期")).toBeInTheDocument());
     fireEvent.click(screen.getByText("权限即将到期"));
-    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/governance"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/account"));
   });
 });

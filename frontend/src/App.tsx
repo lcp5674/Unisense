@@ -4,6 +4,7 @@ import { Button, Input, App as AntApp } from "antd";
 import { apiLogin, clearAuthTokens, fetchCurrentUser, getToken, UnisenseApiError } from "./api";
 import type { CurrentUser } from "./types";
 import { Layout } from "./components/Layout";
+import { PermissionProvider, RequirePerm, ROUTE_PERM } from "./hooks/usePermission";
 import { MetricCatalog } from "./pages/MetricCatalog";
 import { GlobalSearch } from "./pages/GlobalSearch";
 import { MetricDetail } from "./pages/MetricDetail";
@@ -39,28 +40,10 @@ import { CollectionTasks } from "./pages/CollectionTasks";
 import { CollectionHistory } from "./pages/CollectionHistory";
 import { SubjectDomain } from "./pages/SubjectDomain";
 import { SystemDict } from "./pages/SystemDict";
+import { Account } from "./pages/Account";
 import { TrackingProvider } from "./components/TrackingProvider";
 
 const { useApp } = AntApp;
-
-// 管理类路由允许的角色（与后端 RBAC 对齐）
-const ADMIN_ROLES = ["platform_admin", "domain_admin"];
-
-// 角色守卫：用户角色不在 allowedRoles 内时重定向到总览仪表（页面本身亦有只读/403 兜底）
-function RequireRole({
-  user,
-  allowedRoles,
-  children,
-}: {
-  user: CurrentUser;
-  allowedRoles: string[];
-  children: React.ReactNode;
-}) {
-  if (!allowedRoles.includes(user.role)) {
-    return <Navigate to="/dashboard" replace />;
-  }
-  return <>{children}</>;
-}
 
 // 登录页：左 55% 墨蓝机箱 + 发丝计量网格 + 品牌价值点；右 45% 纸上表单
 function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
@@ -205,49 +188,52 @@ export default function App() {
 
   return (
     <TrackingProvider user={user}>
-      <BrowserRouter>
-        <Routes>
-          <Route element={<Layout user={user} />}>
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/todo" element={<TodoCenter />} />
-            <Route path="/notifications" element={<Notifications />} />
-            <Route path="/catalog" element={<MetricCatalog />} />
-            <Route path="/search" element={<GlobalSearch />} />
-            <Route path="/templates" element={<Templates />} />
-            <Route path="/detail/:code" element={<MetricDetail />} />
-            <Route path="/compare" element={<MetricCompare />} />
-            <Route path="/create" element={<MetricCreate />} />
-            <Route path="/metrics/review" element={<MetricReview />} />
-            <Route path="/favorites" element={<Favorites />} />
-            <Route path="/assetmap" element={<AssetMap />} />
-            <Route path="/lineage" element={<LineageView />} />
-            <Route path="/review" element={<ReviewWorkbench />} />
-            <Route path="/quality" element={<QualityCenter />} />
-            <Route path="/dimensions" element={<Dimensions />} />
-            <Route path="/glossary" element={<Glossary />} />
-            <Route path="/governance" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><Governance /></RequireRole>} />
-            <Route path="/audit" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><AuditLog /></RequireRole>} />
-            <Route path="/query" element={<QueryWorkspace />} />
-            <Route path="/api-clients" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><ApiClients /></RequireRole>} />
-            <Route path="/ai" element={<AiAssistant />} />
-            <Route path="/system-config" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><SystemConfig /></RequireRole>} />
-            <Route path="/users" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><UserManagement /></RequireRole>} />
-            <Route path="/organizations" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><OrgManagement /></RequireRole>} />
-            <Route path="/observability" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><Observability /></RequireRole>} />
-            <Route path="/feedback" element={<FeedbackCenter />} />
-            <Route path="/tracking-stats" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><TrackingStats /></RequireRole>} />
-            <Route path="/data-sources" element={<DataSources />} />
-            <Route path="/catalogs" element={<Catalogs />} />
-            <Route path="/collection-tasks" element={<CollectionTasks />} />
-            <Route path="/collection-history" element={<CollectionHistory />} />
-            <Route path="/domains" element={<SubjectDomain />} />
-            <Route path="/dicts" element={<SystemDict />} />
-            <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
+      <PermissionProvider user={user}>
+        <BrowserRouter>
+          <Routes>
+            <Route element={<Layout user={user} />}>
+              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/todo" element={<TodoCenter />} />
+              <Route path="/notifications" element={<Notifications />} />
+              <Route path="/catalog" element={<MetricCatalog />} />
+              <Route path="/search" element={<GlobalSearch />} />
+              <Route path="/templates" element={<Templates />} />
+              <Route path="/detail/:code" element={<MetricDetail />} />
+              <Route path="/compare" element={<MetricCompare />} />
+              <Route path="/create" element={<MetricCreate />} />
+              <Route path="/metrics/review" element={<MetricReview />} />
+              <Route path="/favorites" element={<Favorites />} />
+              <Route path="/assetmap" element={<AssetMap />} />
+              <Route path="/lineage" element={<LineageView />} />
+              <Route path="/review" element={<ReviewWorkbench />} />
+              <Route path="/quality" element={<QualityCenter />} />
+              <Route path="/dimensions" element={<Dimensions />} />
+              <Route path="/glossary" element={<Glossary />} />
+              <Route path="/governance" element={<RequirePerm perm={ROUTE_PERM["/governance"]}><Governance /></RequirePerm>} />
+              <Route path="/audit" element={<RequirePerm perm={ROUTE_PERM["/audit"]}><AuditLog /></RequirePerm>} />
+              <Route path="/query" element={<QueryWorkspace />} />
+              <Route path="/api-clients" element={<RequirePerm perm={ROUTE_PERM["/api-clients"]}><ApiClients /></RequirePerm>} />
+              <Route path="/ai" element={<AiAssistant />} />
+              <Route path="/system-config" element={<RequirePerm perm={ROUTE_PERM["/system-config"]}><SystemConfig /></RequirePerm>} />
+              <Route path="/users" element={<RequirePerm perm={ROUTE_PERM["/users"]}><UserManagement /></RequirePerm>} />
+              <Route path="/organizations" element={<RequirePerm perm={ROUTE_PERM["/organizations"]}><OrgManagement /></RequirePerm>} />
+              <Route path="/observability" element={<RequirePerm perm={ROUTE_PERM["/observability"]}><Observability /></RequirePerm>} />
+              <Route path="/feedback" element={<FeedbackCenter />} />
+              <Route path="/tracking-stats" element={<RequirePerm perm={ROUTE_PERM["/tracking-stats"]}><TrackingStats /></RequirePerm>} />
+              <Route path="/data-sources" element={<DataSources />} />
+              <Route path="/catalogs" element={<Catalogs />} />
+              <Route path="/collection-tasks" element={<CollectionTasks />} />
+              <Route path="/collection-history" element={<CollectionHistory />} />
+              <Route path="/domains" element={<SubjectDomain />} />
+              <Route path="/dicts" element={<SystemDict />} />
+              <Route path="/account" element={<Account />} />
+              <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </PermissionProvider>
     </TrackingProvider>
   );
 }

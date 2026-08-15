@@ -110,6 +110,7 @@ import {
   ReconciliationRecord,
   RolePermissionItem,
   RoleResponse,
+  ActionRegistryItem,
   OrganizationView,
   RulingRecord,
   ScheduleResult,
@@ -1576,11 +1577,25 @@ export async function resolveTermConflict(
 export async function createRole(body: {
   name: string;
   description?: string | null;
+  is_custom?: boolean;
 }): Promise<RoleResponse> {
   return request<RoleResponse>(`${API_BASE}/roles`, {
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/** 删除自定义角色（backend DELETE /api/v1/roles/{role}；内置/占用角色后端拒绝）。 */
+export async function deleteRole(role: string): Promise<{ role: string; deleted: boolean }> {
+  return request<{ role: string; deleted: boolean }>(
+    `${API_BASE}/roles/${encodeURIComponent(role)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** 动作点注册表（backend GET /api/v1/roles/action-registry；角色管理可视化配置数据源）。 */
+export async function listActionRegistry(): Promise<ActionRegistryItem[]> {
+  return request<ActionRegistryItem[]>(`${API_BASE}/roles/action-registry`);
 }
 
 // ---- 角色权限点配置（RBAC 可配置化，backend /api/v1/roles/*）----

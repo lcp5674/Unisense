@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Alert, Descriptions, Checkbox } from "antd";
-import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined, AuditOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Alert, Descriptions, Checkbox, Popconfirm, Tooltip } from "antd";
+import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined, AuditOutlined, DeleteOutlined, SettingOutlined } from "@ant-design/icons";
 import {
   fetchMyPermissions,
   listGrants,
@@ -10,6 +10,9 @@ import {
   listRolePermissions,
   setRolePermissions,
   resetRolePermissions,
+  deleteRole,
+  listActionRegistry,
+  createRole,
   checkPermission,
   piiReviewAction,
   classificationRescan,
@@ -18,7 +21,7 @@ import {
   listDomainTree,
   UnisenseApiError,
 } from "../api";
-import type { GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RolePermissionItem, SubjectDomainTreeNode, UserBrief } from "../types";
+import type { ActionRegistryItem, GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RolePermissionItem, SubjectDomainTreeNode, UserBrief } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 
 // 主题域树 → 扁平化下拉选项（保留层级缩进，与用户管理/数据源页「业务域」下拉同款实现）
@@ -421,39 +424,95 @@ const ROLE_LABEL: Record<string, string> = {
 
 const ACTION_ORDER = ["read", "write", "approve", "export", "review"];
 
+/** 动作点注册表按模块分组（可视化配置弹窗渲染用）。 */
+function groupRegistry(
+  registry: ActionRegistryItem[],
+): Array<{ module: string; items: ActionRegistryItem[] }> {
+  const byModule = new Map<string, ActionRegistryItem[]>();
+  for (const item of registry) {
+    const arr = byModule.get(item.module) ?? [];
+    arr.push(item);
+    byModule.set(item.module, arr);
+  }
+  return Array.from(byModule.entries())
+    .map(([module, moduleItems]) => ({
+      module,
+      items: moduleItems.sort((a, b) => a.action.localeCompare(b.action)),
+    }))
+    .sort((a, b) => a.module.localeCompare(b.module));
+}
+
 function RolesTab() {
   const [items, setItems] = useState<RolePermissionItem[]>([]);
+  const [registry, setRegistry] = useState<ActionRegistryItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [savingRole, setSavingRole] = useState<string | null>(null);
-  // 草稿：role → 勾选中的权限点集合（未编辑的角色无草稿）
+  // 草稿：role → 勾选中的资源动作集合（read/write/approve/export/review，未编辑无草稿）
   const [draft, setDraft] = useState<Record<string, string[]>>({});
+  // UI 权限点草稿：role → 勾选中的按钮级权限点集合
+  const [uiDraft, setUiDraft] = useState<Record<string, string[]>>({});
+  const [createOpen, setCreateOpen] = useState(false);
+  const [uiConfigRole, setUiConfigRole] = useState<string | null>(null);
+  const [createForm] = Form.useForm<{ name: string; description?: string }>();
 
   useEffect(() => {
     setLoading(true);
-    listRolePermissions()
-      .then(setItems)
+    Promise.all([listRolePermissions(), listActionRegistry()])
+      .then(([roleItems, reg]) => {
+        setItems(roleItems);
+        setRegistry(reg);
+      })
       .catch((err) => {
         message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
       })
       .finally(() => setLoading(false));
   }, []);
 
-  // 当前角色的勾选值：草稿优先，未编辑取生效配置
   function checkedActions(role: string): string[] {
     return draft[role] ?? items.find((i) => i.role === role)?.effective_actions ?? [];
+  }
+
+  function checkedUiActions(role: string): string[] {
+    return uiDraft[role] ?? items.find((i) => i.role === role)?.ui_effective_actions ?? [];
+  }
+
+  // 提交时合并资源动作 + UI 权限点（后端 role_permission 整表替换，二者须一并写入）
+  function combinedActions(role: string): string[] {
+    return [...new Set([...checkedActions(role), ...checkedUiActions(role)])];
+  }
+
+  async function refreshItems() {
+    try {
+      setItems(await listRolePermissions());
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "刷新失败");
+    }
+  }
+
+  function clearDrafts(role: string) {
+    setDraft((prev) => {
+      const next = { ...prev };
+      delete next[role];
+      return next;
+    });
+    setUiDraft((prev) => {
+      const next = { ...prev };
+      delete next[role];
+      return next;
+    });
   }
 
   async function handleSave(role: string) {
     setSavingRole(role);
     try {
-      const updated = await setRolePermissions(role, draft[role] ?? []);
+      const updated = await setRolePermissions(role, combinedActions(role));
       message.success(`已更新「${ROLE_LABEL[role] ?? role}」的权限点`);
-      setDraft((prev) => {
-        const next = { ...prev };
-        delete next[role];
-        return next;
-      });
-      setItems((prev) => prev.map((i) => (i.role === role ? { ...updated, protected: i.protected } : i)));
+      clearDrafts(role);
+      setItems((prev) =>
+        prev.map((i) =>
+          i.role === role ? { ...updated, protected: i.protected, is_custom: i.is_custom } : i,
+        ),
+      );
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "保存失败");
     } finally {
@@ -466,12 +525,12 @@ function RolesTab() {
     try {
       const updated = await resetRolePermissions(role);
       message.success(`已恢复「${ROLE_LABEL[role] ?? role}」默认权限点`);
-      setDraft((prev) => {
-        const next = { ...prev };
-        delete next[role];
-        return next;
-      });
-      setItems((prev) => prev.map((i) => (i.role === role ? { ...updated, protected: i.protected } : i)));
+      clearDrafts(role);
+      setItems((prev) =>
+        prev.map((i) =>
+          i.role === role ? { ...updated, protected: i.protected, is_custom: i.is_custom } : i,
+        ),
+      );
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "重置失败");
     } finally {
@@ -479,15 +538,55 @@ function RolesTab() {
     }
   }
 
+  async function handleDelete(role: string) {
+    try {
+      await deleteRole(role);
+      message.success(`已删除自定义角色「${role}」`);
+      await refreshItems();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "删除失败");
+    }
+  }
+
+  async function handleCreateCustom() {
+    const values = await createForm.validateFields().catch(() => null);
+    if (!values) return;
+    try {
+      await createRole({ name: values.name, description: values.description ?? null, is_custom: true });
+      message.success(`已创建自定义角色「${values.name}」，请勾选权限点后保存`);
+      createForm.resetFields();
+      setCreateOpen(false);
+      await refreshItems();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+    }
+  }
+
   const columns = [
-    { title: "角色", dataIndex: "role", key: "role", width: 180, render: (v: string, r: RolePermissionItem) => (
-      <Space direction="vertical" size={2}>
-        <Tag color={v === "platform_admin" ? "gold" : undefined}>{ROLE_LABEL[v] ?? v}</Tag>
-        <span className="muted" style={{ fontSize: 12 }}>{r.protected ? "受保护角色 · 不可配置" : `默认：${r.default_actions.map((a) => ACTION_LABEL[a] ?? a).join("、") || "无"}`}</span>
-      </Space>
-    ) },
     {
-      title: "本域权限点",
+      title: "角色",
+      dataIndex: "role",
+      key: "role",
+      width: 220,
+      render: (v: string, r: RolePermissionItem) => (
+        <Space direction="vertical" size={2}>
+          <Space size={4}>
+            <Tag color={v === "platform_admin" ? "gold" : undefined}>{ROLE_LABEL[v] ?? v}</Tag>
+            {r.is_custom && <Tag color="blue">自定义</Tag>}
+            {r.protected && <Tag color="red">受保护</Tag>}
+          </Space>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {r.protected
+              ? "受保护角色 · 不可配置"
+              : r.is_custom
+                ? `已配置 UI 权限点 ${r.ui_effective_actions.length} 个`
+                : `默认资源动作：${r.default_actions.map((a) => ACTION_LABEL[a] ?? a).join("、") || "无"}`}
+          </span>
+        </Space>
+      ),
+    },
+    {
+      title: "本域权限点（资源级）",
       key: "actions",
       render: (_: unknown, r: RolePermissionItem) => (
         <Checkbox.Group
@@ -497,18 +596,48 @@ function RolesTab() {
         >
           <Space wrap>
             {ACTION_ORDER.map((a) => (
-              <Checkbox key={a} value={a} onClick={(e) => e.stopPropagation()}>{ACTION_LABEL[a] ?? a}</Checkbox>
+              <Checkbox key={a} value={a} onClick={(e) => e.stopPropagation()}>
+                {ACTION_LABEL[a] ?? a}
+              </Checkbox>
             ))}
           </Space>
         </Checkbox.Group>
       ),
     },
     {
+      title: "按钮级权限点",
+      key: "ui",
+      width: 260,
+      render: (_: unknown, r: RolePermissionItem) => {
+        const uis = checkedUiActions(r.role);
+        return (
+          <Space direction="vertical" size={4}>
+            <Space size={4} wrap>
+              {uis.length === 0 ? (
+                <span className="muted">未配置</span>
+              ) : (
+                uis.slice(0, 4).map((a) => <Tag key={a} style={{ maxWidth: 150 }}>{a}</Tag>)
+              )}
+              {uis.length > 4 && <Tag>+{uis.length - 4}</Tag>}
+            </Space>
+            <Button
+              size="small"
+              icon={<SettingOutlined />}
+              disabled={r.protected}
+              onClick={() => setUiConfigRole(r.role)}
+            >
+              配置
+            </Button>
+          </Space>
+        );
+      },
+    },
+    {
       title: "操作",
       key: "ops",
-      width: 200,
+      width: 230,
       render: (_: unknown, r: RolePermissionItem) => {
-        const dirty = draft[r.role] !== undefined;
+        const dirty = draft[r.role] !== undefined || uiDraft[r.role] !== undefined;
         return (
           <Space>
             <Button
@@ -522,16 +651,29 @@ function RolesTab() {
             </Button>
             <Button
               size="small"
-              disabled={r.protected || (!dirty && r.custom_actions === null)}
+              disabled={r.protected || (!dirty && r.custom_actions === null && r.ui_custom_actions === null)}
               onClick={() => handleReset(r.role)}
             >
               恢复默认
             </Button>
+            <Popconfirm
+              title={`删除自定义角色「${r.role}」？`}
+              description="该角色的权限点配置将被清除，占用该角色的用户需先改派。"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleDelete(r.role)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />} disabled={!r.is_custom}>
+                删除
+              </Button>
+            </Popconfirm>
           </Space>
         );
       },
     },
   ];
+
+  const grouped = groupRegistry(registry);
 
   return (
     <div>
@@ -539,8 +681,13 @@ function RolesTab() {
         type="info"
         showIcon
         style={{ marginBottom: 12 }}
-        message="RBAC 权限点可配置化——勾选本域动作并保存即生效（PDP 决策实时读取）。platform_admin 为受保护角色（跨域运维直通，不可配置）；恢复默认回到系统基线。"
+        message="细粒度权限管控：按模块/按钮勾选权限点并保存即生效（前端 usePermission 实时读取；后端写接口仍按内置角色强制，二者不互相替代）。platform_admin 为受保护角色（跨域运维直通，不可配置）；可新建自定义角色并为其分配按钮级权限点。"
       />
+      <Space style={{ marginBottom: 12 }}>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+          新建自定义角色
+        </Button>
+      </Space>
       <Table
         dataSource={items}
         columns={columns}
@@ -550,6 +697,75 @@ function RolesTab() {
         locale={{ emptyText: "暂无角色配置" }}
         size="small"
       />
+
+      {/* 新建自定义角色 */}
+      <Modal
+        title="新建自定义角色"
+        open={createOpen}
+        onCancel={() => setCreateOpen(false)}
+        onOk={handleCreateCustom}
+        okText="创建"
+      >
+        <Form form={createForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="角色名"
+            rules={[
+              { required: true, message: "请输入角色名" },
+              {
+                pattern: /^[a-z][a-z0-9_]{1,31}$/,
+                message: "小写字母开头，含小写字母/数字/下划线，2-32 位",
+              },
+            ]}
+          >
+            <Input placeholder="如 data_analyst" autoFocus />
+          </Form.Item>
+          <Form.Item name="description" label="角色说明">
+            <Input.TextArea rows={2} placeholder="说明该角色的职责范围" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 按钮级权限点可视化配置 */}
+      <Modal
+        title={`配置「${ROLE_LABEL[uiConfigRole ?? ""] ?? uiConfigRole}」按钮级权限点`}
+        open={uiConfigRole !== null}
+        onCancel={() => setUiConfigRole(null)}
+        onOk={() => {
+          if (uiConfigRole) void handleSave(uiConfigRole);
+        }}
+        okText="保存"
+        width={780}
+        okButtonProps={{ loading: uiConfigRole !== null && savingRole === uiConfigRole }}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="按模块勾选按钮级权限点（菜单显隐 / 页面按钮 / 组件）。保存后写入 role_permission 覆盖表并即时生效；资源级本域权限点在上一列配置，二者保存时一并提交。"
+        />
+        <div style={{ maxHeight: 420, overflow: "auto" }}>
+          {grouped.map((g) => (
+            <div key={g.module} style={{ marginBottom: 14 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>{g.module}</div>
+              <Checkbox.Group
+                value={uiConfigRole ? checkedUiActions(uiConfigRole) : []}
+                onChange={(vals) => {
+                  if (uiConfigRole) setUiDraft((prev) => ({ ...prev, [uiConfigRole]: [...vals] as string[] }));
+                }}
+              >
+                <Space wrap>
+                  {g.items.map((it) => (
+                    <Tooltip key={it.action} title={it.description}>
+                      <Checkbox value={it.action}>{it.label}</Checkbox>
+                    </Tooltip>
+                  ))}
+                </Space>
+              </Checkbox.Group>
+            </div>
+          ))}
+        </div>
+      </Modal>
     </div>
   );
 }

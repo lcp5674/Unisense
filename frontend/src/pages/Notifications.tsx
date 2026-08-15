@@ -435,7 +435,9 @@ function NotifListTab() {
   }
 
   // 点击通知深链：按事件类型路由到对应业务页面（指标→详情、冲突→仲裁、
-  // 账号→用户管理、组织→组织管理、采集→数据源、授权/PII→治理）；其余优雅降级不跳转
+  // 账号/组织/授权→个人中心（本人视角）、采集→数据源、PII/分类→权限治理）；
+  // 其余优雅降级不跳转。个人中心（方案 C）：user.*/org.*/grant.* 收件人为用户本人，
+  // 不再指向管理员管理列表页（普通用户无权限访问 /users、/organizations）。
   function handleOpen(n: Notification) {
     const tpl = n.template_code ?? "";
     const payload = (n.payload ?? {}) as Record<string, unknown>;
@@ -447,19 +449,17 @@ function NotifListTab() {
       navigate("/review");
       return;
     }
-    if (tpl.startsWith("user.")) {
-      navigate("/users");
-      return;
-    }
-    if (tpl === "org.status_changed") {
-      navigate("/organizations");
+    // 账号安全 / 组织状态 / 授权变更 → 个人中心（用户本人视角：我的账号 / 我的授权）
+    if (tpl.startsWith("user.") || tpl.startsWith("org.") || tpl.startsWith("grant.")) {
+      navigate("/account");
       return;
     }
     if (tpl.startsWith("collect.") || tpl.startsWith("catalog.")) {
       navigate("/data-sources");
       return;
     }
-    if (tpl.startsWith("grant.") || tpl.startsWith("pii.") || tpl.startsWith("classification.")) {
+    // PII / 分级分类 → 权限治理（compliance_officer 经 governance:view 权限点可访问）
+    if (tpl.startsWith("pii.") || tpl.startsWith("classification.")) {
       navigate("/governance");
       return;
     }
@@ -595,13 +595,23 @@ function SubscriptionsTab() {
 
   async function handleCreate(values: Record<string, unknown>) {
     try {
-      await upsertSubscription({
-        channel: String(values.channel),
-        event_type: String(values.event_type),
-        enabled: true,
-        threshold: values.threshold !== undefined && values.threshold !== null ? Number(values.threshold) : null,
-      });
-      message.success("订阅已保存");
+      // 支持多选消息类型：对每个选中的事件类型各建一条订阅（同渠道不同事件=多行，后端幂等 upsert）
+      const eventTypes = Array.isArray(values.event_type)
+        ? (values.event_type as string[])
+        : [String(values.event_type)];
+      if (eventTypes.length === 0) {
+        message.warning("请至少选择一个消息类型");
+        return;
+      }
+      for (const et of eventTypes) {
+        await upsertSubscription({
+          channel: String(values.channel),
+          event_type: et,
+          enabled: true,
+          threshold: values.threshold !== undefined && values.threshold !== null ? Number(values.threshold) : null,
+        });
+      }
+      message.success(`已保存 ${eventTypes.length} 个订阅`);
       setModalOpen(false);
       form.resetFields();
       load();
@@ -629,8 +639,18 @@ function SubscriptionsTab() {
           <Form.Item name="channel" label="送达方式" rules={[{ required: true }]}>
             <Select options={CHANNELS.map((c) => ({ value: c, label: CHANNEL_LABEL[c] ?? c }))} />
           </Form.Item>
-          <Form.Item name="event_type" label="消息类型" rules={[{ required: true }]}>
-            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: eventTypeLabel(c) }))} />
+          <Form.Item
+            name="event_type"
+            label="消息类型"
+            rules={[{ required: true, message: "请至少选择一个消息类型" }]}
+          >
+            <Select
+              mode="multiple"
+              allowClear
+              placeholder="可多选消息类型"
+              optionFilterProp="label"
+              options={EVENT_TYPES.map((c) => ({ value: c, label: eventTypeLabel(c) }))}
+            />
           </Form.Item>
           <Form.Item name="threshold" label="告警阈值（可选）" extra="用于数据质量告警，达到该阈值时才推送。">
             <InputNumber min={1} style={{ width: 200 }} />
