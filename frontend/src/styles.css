@@ -857,6 +857,15 @@ body {
 .owner-card .oc-seg.oc-tpl {
   background: #4a6fa5;
 }
+/* 0 值资产段：灰色弱化，最小占位宽度，让 6 类完整可见但不抢视觉 */
+.owner-card .oc-seg.oc-zero {
+  background: rgba(160, 168, 184, 0.42);
+  color: rgba(120, 130, 150, 0.85);
+}
+.owner-card .oc-seg.oc-zero:hover {
+  background: rgba(160, 168, 184, 0.62);
+  color: var(--ink);
+}
 
 /* 生命周期次级信息：色点 + 标签 + 计数（仅展示非零状态） */
 .owner-card .oc-life {

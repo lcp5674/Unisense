@@ -464,11 +464,12 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
         {owners.map(([id, o]) => {
           const review = o.metrics.by_status.REVIEW ?? 0;
           const hot = review > 0;
-          // 资产构成：仅展示该 Owner 名下 > 0 的资产类型（按占比着色分段）
-          const mix = OWNER_ASSETS.map((a) => ({
+// 资产构成：完整渲染 6 类（指标/数据表/数据源/维度/术语/模板）——即使 count=0 也保留为窄灰段，
+// 让 Owner 一眼看清全维度资产分布（0 值段也能看到，确认该责任人确实没有此类资产）
+const mix = OWNER_ASSETS.map((a) => ({
             ...a,
             count: a.key === "metrics" ? o.metrics.total : (o as never)[a.key],
-          })).filter((m) => m.count > 0);
+          }));
           const total = Math.max(o.total, 1);
           const initials = (o.name || "?").slice(0, 2);
           return (
@@ -486,12 +487,16 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
                 <span className="oc-total">共 {o.total} 项</span>
               </span>
               <span className="oc-bar" role="img" aria-label={`${o.name} 资产构成`}>
-                {mix.map((m) => (
-                  <span
-                    key={m.key}
-                    className={`oc-seg ${m.cls}`}
-                    style={{ width: `${((m.count / total) * 100).toFixed(2)}%` }}
-                    title={`${m.label} ${m.count}，点击查看该责任人名下${m.label}`}
+                {mix.map((m) => {
+                  const isZero = m.count === 0;
+                  // 0 值段：最小占位宽度 1.5%（让 6 类完整可见，但不抢视觉权重）
+                  const w = isZero ? 1.5 : (m.count / total) * 100;
+                  return (
+                    <span
+                      key={m.key}
+className={`oc-seg ${m.cls}${isZero ? " oc-zero" : ""}`}
+                    style={{ width: `${w.toFixed(2)}%` }}
+                    title={isZero ? `${m.label} ${m.count}（该责任人名下暂无此类资产）` : `${m.label} ${m.count}，点击查看该责任人名下${m.label}`}
                     role="button"
                     tabIndex={0}
                     onClick={(e) => {
@@ -505,9 +510,10 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
                       }
                     }}
                   >
-                    {m.label} {m.count}
+                    {isZero ? "0" : `${m.label} ${m.count}`}
                   </span>
-                ))}
+                  );
+                })}
               </span>
               <span className="oc-life">
                 {OWNER_STATES.map((s) => {

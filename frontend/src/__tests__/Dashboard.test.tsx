@@ -53,6 +53,17 @@ const mockDashboardData = {
       terms: 2,
       templates: 1,
     },
+    // Charlie 名下仅 5 条指标，无数据表/数据源/维度/术语/模板——验证 0 值资产段不被过滤
+    3: {
+      name: "Charlie",
+      total: 5,
+      metrics: { total: 5, by_status: { DRAFT: 5 } },
+      tables: 0,
+      sources: 0,
+      dimensions: 0,
+      terms: 0,
+      templates: 0,
+    },
   },
   quality: { total: 9, by_severity: { P0: 2, P1: 3, P2: 4 }, pending: 5 },
   compliance: { total: 100, reviewed: 72, pending: 28, reviewed_ratio: 0.72 },
@@ -236,9 +247,9 @@ describe("Dashboard", () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
-    // 每个 Owner 一张卡片：头像 + 名字 + 资产构成条 + 生命周期（Alice total=82 排前）
+    // 每个 Owner 一张卡片：头像 + 名字 + 资产构成条 + 生命周期（Alice/Bob/Charlie 共 3 张）
     const cards = Array.from(container.querySelectorAll(".owner-card"));
-    expect(cards.length).toBe(2);
+    expect(cards.length).toBe(3);
     const aliceBar = cards[0].querySelector(".oc-bar");
     expect(aliceBar).toBeTruthy();
     // Alice: 指标 60 / 数据表 8 / 数据源 4 / 维度 3 / 术语 5 / 模板 2，total=82
@@ -284,6 +295,36 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByText("Alice"));
     expect(probe.location()?.pathname).toBe("/catalog");
     expect(probe.location()?.search).toContain("owner_id=1");
+  });
+
+  it("Owner 卡片：含 0 值资产类型仍完整渲染 6 段（数据表/数据源为 0 不被过滤）", async () => {
+    const { container } = renderDashboard();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    // cards 按 total 降序：Alice(82) → Bob(52) → Charlie(5)
+    const cards = Array.from(container.querySelectorAll(".owner-card"));
+    const charlieCard = cards[2];
+    expect(charlieCard).toBeTruthy();
+    const segs = Array.from(charlieCard!.querySelectorAll(".oc-seg"));
+    // 6 类全渲染（含 0 值的 tables/sources/dimensions/terms/templates）
+    expect(segs.length).toBe(6);
+    // 数据表段（index=1）：count=0，含 oc-zero 类，宽度为最小占位 1.5%——文字仅显示 "0"（标签在 title 提示）
+    const tableSeg = segs[1];
+    expect(tableSeg.textContent).toBe("0");
+    expect(tableSeg.className).toContain("oc-zero");
+    expect(tableSeg.getAttribute("style") ?? "").toMatch(/1[.,]5/);
+    expect(tableSeg.getAttribute("title") ?? "").toContain("数据表");
+    expect(tableSeg.getAttribute("title") ?? "").toContain("暂无");
+    // 数据源段（index=2）：同样 0 + oc-zero + 仅显示 "0"
+    const sourceSeg = segs[2];
+    expect(sourceSeg.textContent).toBe("0");
+    expect(sourceSeg.className).toContain("oc-zero");
+    expect(sourceSeg.getAttribute("title") ?? "").toContain("数据源");
+    // 指标段（index=0）：count=5（>0），无 oc-zero 类
+    const metricSeg = segs[0];
+    expect(metricSeg.textContent).toContain("指标");
+    expect(metricSeg.textContent).toContain("5");
+    expect(metricSeg.className).not.toContain("oc-zero");
   });
 
   it("治理指标卡：质量健康渲染严重级分布与待处理", async () => {
