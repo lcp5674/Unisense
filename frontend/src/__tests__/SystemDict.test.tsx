@@ -207,4 +207,29 @@ describe("SystemDict 页面", () => {
     expect(arg.code).toBe("item_101");
     // 101 项大列表渲染 + 全量并行下耗时较长，单独放宽超时
   }, 15000);
+
+  it("超上限手动编码后改显示名不再冲突：切回自动生成且不残留旧 code", async () => {
+    // 构造超上限场景（base=item 编码链被全部占用）→ 输入手动 code
+    const exhausted: SystemDictItem[] = [{ ...ITEMS[0], id: 3, code: "item" }];
+    for (let n = 2; n <= 100; n += 1) {
+      exhausted.push({ ...ITEMS[0], id: 100 + n, code: `item_${n}` });
+    }
+    mockedItems.mockResolvedValue(exhausted);
+    mockedCreate.mockResolvedValue({} as any);
+    renderDict();
+    fireEvent.click(await screen.findByRole("button", { name: /新增参照数据项/ }));
+    const labelInput = await screen.findByPlaceholderText("如 人民币元");
+    fireEvent.change(labelInput, { target: { value: "!!!" } });
+    fireEvent.change(await screen.findByTestId("dict-code-manual"), { target: { value: "item_101" } });
+    // 改显示名为「分钟」→ base=minute（不在 used）→ 切回自动生成预览
+    fireEvent.change(labelInput, { target: { value: "分钟" } });
+    await waitFor(() => expect(screen.getByTestId("dict-code-preview")).toHaveValue("minute"));
+    expect(screen.queryByTestId("dict-code-manual")).toBeNull();
+    // preserve=false：字段卸载时值被清除 → 提交不残留旧 code
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    const arg = mockedCreate.mock.calls[0][1] as { code?: string; label: string };
+    expect(arg.code).toBeUndefined();
+    // 101 项大列表渲染 + 全量并行下耗时较长，单独放宽超时
+  }, 15000);
 });

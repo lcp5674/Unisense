@@ -231,6 +231,7 @@ export function SystemDict() {
           {codeExhausted ? (
             <Form.Item
               name="code"
+              preserve={false}
               label="编码（需手动指定）"
               tooltip="已存在大量同名编码（如 x、x_2 … x_100），无法自动生成唯一编码；请手动指定一个未占用的编码，或修改显示名后重试"
               rules={[{ required: true, pattern: /^[A-Za-z0-9_]+$/, message: "编码仅支持字母、数字、下划线" }]}
