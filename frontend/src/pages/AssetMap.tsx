@@ -2,13 +2,16 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert,
+  Avatar,
   Button,
   Card,
   Descriptions,
+  Divider,
   Empty,
   Form,
   Input,
   Modal,
+  Progress,
   Row,
   Col,
   Segmented,
@@ -2422,6 +2425,11 @@ function OwnerTab() {
   const [drillLoading, setDrillLoading] = useState(false);
   const [drillTitle, setDrillTitle] = useState("");
   const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
+  // 目录资产行点击 → 实体详情抽屉
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.owner.catalogs.pageSize", 10);
 
   useEffect(() => {
     fetchAssetGraph({ depth: 1 })
@@ -2462,7 +2470,8 @@ function OwnerTab() {
     ]
       .filter(Boolean)
       .join(" · ");
-    setDrillTitle(`责任人 #${ownerId} 指标明细${parts ? `（${parts}）` : ""}`);
+    const ownerLabel = view?.owner_name ?? `#${ownerId}`;
+    setDrillTitle(`${ownerLabel} 指标明细${parts ? `（${parts}）` : ""}`);
     setDrillOpen(true);
     setDrillLoading(true);
     setDrillRows([]);
@@ -2482,6 +2491,19 @@ function OwnerTab() {
     }
   }
 
+  async function openDetail(entityId: number) {
+    setDetailOpen(true);
+    setDetailLoading(true);
+    setDetail(null);
+    try {
+      setDetail(await fetchAssetEntityDetail(entityId));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载实体详情失败");
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
   // 可点击值渲染：把 Statistic 的 value 包成可点击链接（对齐 OverviewTab 模式）
   function clickableValue(onClick: () => void) {
     return (node: ReactNode) => (
@@ -2497,6 +2519,23 @@ function OwnerTab() {
       </a>
     );
   }
+
+  const ownerName = view?.owner_name ?? `责任人 #${ownerId}`;
+  const total = view?.metrics.total ?? 0;
+  const published = view?.metrics.published ?? 0;
+  const draft = view?.metrics.draft ?? 0;
+  const publishedPct = total > 0 ? Math.round((published / total) * 100) : 0;
+  const catalogCount = view?.catalogs.items?.length ?? 0;
+
+  // 分布图数据（域=横向条形 / 类型=环形）
+  const domainBarData = Object.entries(view?.metrics.by_domain ?? {}).map(([k, v]) => ({
+    domain: k,
+    count: v,
+  }));
+  const typePieData = Object.entries(view?.metrics.by_type ?? {}).map(([k, v]) => ({
+    type: METRIC_TYPE_LABEL[k] ?? k,
+    value: v,
+  }));
 
   return (
     <div>
@@ -2524,167 +2563,245 @@ function OwnerTab() {
           <Empty description="请选择责任人" />
         ) : (
           <>
+            {/* 责任人档案卡：头像 + 姓名 + 角色/域 + 概览 */}
+            <Card size="small" style={{ marginBottom: 16, background: "var(--bg-elevated, #fafafa)" }}>
+              <Space align="center" size={16} wrap>
+                <Avatar size={48} style={{ background: "#1976d2" }}>
+                  {(ownerName ?? "?").charAt(0).toUpperCase()}
+                </Avatar>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 600 }}>{ownerName}</div>
+                  <Space size={8} wrap>
+                    {view.role && <Tag color="blue">{view.role}</Tag>}
+                    {view.domain && <Tag>{view.domain}</Tag>}
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      责任人 ID：{view.owner_id}
+                    </span>
+                  </Space>
+                </div>
+                <Divider type="vertical" />
+                <Statistic title="总指标" value={total} />
+                <Statistic title="总目录资产" value={catalogCount} />
+                <Statistic title="快照覆盖" value={view.metrics.snapshot_covered} suffix={`/ ${total}`} />
+              </Space>
+            </Card>
+
+            {/* 4 指标大卡 */}
             <Row gutter={[16, 16]}>
               <Col span={6}>
-                <Statistic
-                  title="指标总数"
-                  value={view.metrics.total}
-                  valueRender={clickableValue(() => drillMetrics())}
+                <Card size="small">
+                  <Statistic
+                    title="指标总数"
+                    value={total}
+                    valueRender={clickableValue(() => drillMetrics())}
+                  />
+                </Card>
+              </Col>
+              <Col span={6}>
+                <Card size="small">
+                  <Statistic
+                    title="已发布"
+                    value={published}
+                    valueStyle={{ color: "#2e9e5b" }}
+                    valueRender={clickableValue(() => drillMetrics({ status: "PUBLISHED" }))}
+                  />
+                  <Progress percent={publishedPct} size="small" strokeColor="#2e9e5b" />
+                </Card>
+              </Col>
+              <Col span={6}>
+                <Card size="small">
+                  <Statistic
+                    title="草稿"
+                    value={draft}
+                    valueRender={clickableValue(() => drillMetrics({ status: "DRAFT" }))}
+                  />
+                  <Progress
+                    percent={total > 0 ? Math.round((draft / total) * 100) : 0}
+                    size="small"
+                    strokeColor="#fa8c16"
+                  />
+                </Card>
+              </Col>
+              <Col span={6}>
+                <Card size="small">
+                  <Statistic
+                    title="PII 指标"
+                    value={view.metrics.pii_count}
+                    valueStyle={{ color: "#d64545" }}
+                    valueRender={clickableValue(() => drillMetrics({ piiFlag: true }))}
+                  />
+                </Card>
+              </Col>
+            </Row>
+
+            {/* 3 维分布：域条形图 / 类型环形图 / 分级 Tag */}
+            <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+              <Col span={8}>
+                <Card size="small" title="域分布">
+                  {domainBarData.length === 0 ? (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无分布数据" />
+                  ) : (
+                    <Bar
+                      data={domainBarData}
+                      xField="count"
+                      yField="domain"
+                      height={180}
+                      color="#1976d2"
+                      label={{ position: "right", formatter: (d: { count: number }) => String(d.count) }}
+                      interactions={[{ type: "element-active" }] as any}
+                      onReady={(plot) => {
+                        plot.on(
+                          "element:click",
+                          (evt: { data?: { data?: { domain?: string } } }) => {
+                            const k = evt?.data?.data?.domain;
+                            if (k) drillMetrics({ domain: k });
+                          },
+                        );
+                      }}
+                    />
+                  )}
+                </Card>
+              </Col>
+              <Col span={8}>
+                <Card size="small" title="类型分布">
+                  {typePieData.length === 0 ? (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无分布数据" />
+                  ) : (
+                    <Pie
+                      data={typePieData}
+                      angleField="value"
+                      colorField="type"
+                      height={180}
+                      radius={0.8}
+                      label={{ text: "type", position: "outside" }}
+                      legend={false}
+                    />
+                  )}
+                </Card>
+              </Col>
+              <Col span={8}>
+                <Card size="small" title="指标分级">
+                  {Object.keys(view.metrics.by_metric_tier ?? {}).length === 0 ? (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无分布数据" />
+                  ) : (
+                    <Space direction="vertical" style={{ width: "100%" }}>
+                      {Object.entries(view.metrics.by_metric_tier).map(([k, v]) => (
+                        <div key={k} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <Tag color="blue" style={{ minWidth: 40, textAlign: "center" }}>{k}</Tag>
+                          <Progress percent={total > 0 ? Math.round((v / total) * 100) : 0} size="small" />
+                          <span style={{ minWidth: 24, textAlign: "right" }}>{v}</span>
+                        </div>
+                      ))}
+                    </Space>
+                  )}
+                </Card>
+              </Col>
+            </Row>
+
+            {/* 待办区：可钻取 */}
+            <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+              <Col span={12}>
+                <Card size="small" styles={{ body: { padding: 12 } }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <span>PII 未复核</span>
+                    <a
+                      href="#"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        drillMetrics({ piiFlag: true });
+                      }}
+                    >
+                      {view.metrics.todo?.pii_unreviewed ?? 0} 项
+                    </a>
+                  </div>
+                </Card>
+              </Col>
+              <Col span={12}>
+                <Card size="small" styles={{ body: { padding: 12 } }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <span>废弃未替换</span>
+                    <a
+                      href="#"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        drillMetrics({ status: "DEPRECATED" });
+                      }}
+                    >
+                      {view.metrics.todo?.deprecated_without_successor ?? 0} 项
+                    </a>
+                  </div>
+                </Card>
+              </Col>
+            </Row>
+
+            {/* 目录资产明细表：分页 + 行点击进详情 */}
+            <Card
+              title={`目录资产明细（${catalogCount}）`}
+              size="small"
+              style={{ marginTop: 16 }}
+            >
+              {catalogCount === 0 ? (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无目录资产" />
+              ) : (
+                <Table
+                  dataSource={view.catalogs.items ?? []}
+                  rowKey={(r) => `c-${r.id}`}
+                  size="small"
+                  pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }}
+                  onRow={(r) => ({ onClick: () => openDetail(r.id), style: { cursor: "pointer" } })}
+                  columns={[
+                    {
+                      title: "实体",
+                      dataIndex: "entity_name",
+                      key: "name",
+                      ellipsis: true,
+                      render: (v: string) => <a onClick={(e) => e.stopPropagation()}>{v}</a>,
+                    },
+                    {
+                      title: "类型",
+                      dataIndex: "entity_type",
+                      key: "type",
+                      width: 90,
+                      render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
+                    },
+                    {
+                      title: "敏感度",
+                      dataIndex: "sensitivity_level",
+                      key: "sensitivity",
+                      width: 110,
+                      render: (s: string | null) => sensitivityTag(s),
+                    },
+                    {
+                      title: "数据源",
+                      key: "source",
+                      width: 150,
+                      ellipsis: true,
+                      render: (_, r) =>
+                        r.source_name ? `${r.source_name}（${r.source_id}）` : r.source_id,
+                    },
+                    {
+                      title: "更新时间",
+                      dataIndex: "updated_at",
+                      key: "updated",
+                      width: 170,
+                      render: (v: string | null) => (v ? formatCnTime(v) : "-"),
+                    },
+                  ]}
                 />
-            </Col>
-            <Col span={6}>
-              <Statistic
-                title="已发布"
-                value={view.metrics.published}
-                valueStyle={{ color: "#2e9e5b" }}
-                valueRender={clickableValue(() => drillMetrics({ status: "PUBLISHED" }))}
-              />
-            </Col>
-            <Col span={6}>
-              <Statistic
-                title="草稿"
-                value={view.metrics.draft}
-                valueRender={clickableValue(() => drillMetrics({ status: "DRAFT" }))}
-              />
-            </Col>
-            <Col span={6}>
-              <Statistic
-                title="PII 指标"
-                value={view.metrics.pii_count}
-                valueStyle={{ color: "#d64545" }}
-                valueRender={clickableValue(() => drillMetrics({ piiFlag: true }))}
-              />
-            </Col>
-          </Row>
-          <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-            <Col span={8}>
-              <div>
-                <span className="muted" style={{ fontSize: 13 }}>
-                  域分布（点击查看该域明细）
-                </span>
-                <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
-                  {Object.entries(view.metrics.by_domain ?? {}).map(([k, v]) => (
-                    <Col span={8} key={k}>
-                      <Statistic
-                        title={k}
-                        value={v}
-                        valueRender={clickableValue(() => drillMetrics({ domain: k }))}
-                      />
-                    </Col>
-                  ))}
-                </Row>
-              </div>
-            </Col>
-            <Col span={8}>
-              <div>
-                <span className="muted" style={{ fontSize: 13 }}>
-                  类型分布
-                </span>
-                <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
-                  {Object.entries(view.metrics.by_type ?? {}).map(([k, v]) => (
-                    <Col span={8} key={k}>
-                      <Statistic title={METRIC_TYPE_LABEL[k] ?? k} value={v} />
-                    </Col>
-                  ))}
-                </Row>
-              </div>
-            </Col>
-            <Col span={8}>
-              <div>
-                <span className="muted" style={{ fontSize: 13 }}>
-                  指标分级
-                </span>
-                <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
-                  {Object.entries(view.metrics.by_metric_tier ?? {}).map(([k, v]) => (
-                    <Col span={8} key={k}>
-                      <Statistic title={k} value={v} />
-                    </Col>
-                  ))}
-                </Row>
-              </div>
-            </Col>
-          </Row>
-          <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-            <Col span={6}>
-              <Statistic
-                title="快照覆盖"
-                value={view.metrics.snapshot_covered}
-                suffix={`/ ${view.metrics.total}`}
-              />
-            </Col>
-            <Col span={6}>
-              <Statistic
-                title="PII 未复核"
-                value={view.metrics.todo?.pii_unreviewed ?? 0}
-                valueStyle={{
-                  color: (view.metrics.todo?.pii_unreviewed ?? 0) > 0 ? "#d64545" : undefined,
-                }}
-              />
-            </Col>
-            <Col span={6}>
-              <Statistic
-                title="废弃未替换"
-                value={view.metrics.todo?.deprecated_without_successor ?? 0}
-                valueStyle={{
-                  color:
-                    (view.metrics.todo?.deprecated_without_successor ?? 0) > 0
-                      ? "#d46b08"
-                      : undefined,
-                }}
-              />
-            </Col>
-            <Col span={6}>
-              <Statistic title="目录资产" value={view.catalogs.total} />
-            </Col>
-          </Row>
-          <Card
-            title={`目录资产明细（${view.catalogs.items?.length ?? 0}）`}
-            size="small"
-            style={{ marginTop: 16 }}
-          >
-            {(view.catalogs.items ?? []).length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无目录资产" />
-            ) : (
-              <Table
-                dataSource={view.catalogs.items ?? []}
-                rowKey={(r) => `c-${r.id}`}
-                size="small"
-                pagination={false}
-                columns={[
-                  { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
-                  {
-                    title: "类型",
-                    dataIndex: "entity_type",
-                    key: "type",
-                    width: 90,
-                    render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
-                  },
-                  {
-                    title: "敏感度",
-                    dataIndex: "sensitivity_level",
-                    key: "sensitivity",
-                    width: 110,
-                    render: (s: string | null) => sensitivityTag(s),
-                  },
-                  {
-                    title: "数据源",
-                    key: "source",
-                    width: 150,
-                    ellipsis: true,
-                    render: (_, r) =>
-                      r.source_name ? `${r.source_name}（${r.source_id}）` : r.source_id,
-                  },
-                  {
-                    title: "更新时间",
-                    dataIndex: "updated_at",
-                    key: "updated",
-                    width: 170,
-                    render: (v: string | null) => (v ? formatCnTime(v) : "-"),
-                  },
-                ]}
-              />
-            )}
-          </Card>
+              )}
+            </Card>
           </>
         )}
       </Card>
@@ -2696,6 +2813,41 @@ function OwnerTab() {
         loading={drillLoading}
         onClose={() => setDrillOpen(false)}
       />
+      {/* 实体详情抽屉：目录资产行点击下钻 */}
+      <ResizableDrawer
+        title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        storageKey="unisense.drawer.owner.entity.width"
+        defaultWidth={760}
+        minWidth={560}
+      >
+        {detailLoading ? (
+          <Spin tip="加载实体详情…" />
+        ) : detail ? (
+          <>
+            <Descriptions column={2} bordered size="small" style={{ marginBottom: 12 }}>
+              <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+              <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
+              <Descriptions.Item label="数据源">
+                {detail.source_name ? `${detail.source_name}（${detail.source_id}）` : detail.source_id}
+              </Descriptions.Item>
+              <Descriptions.Item label="敏感度">{sensitivityTag(detail.sensitivity_level)}</Descriptions.Item>
+              <Descriptions.Item label="责任人">
+                {detail.owner_name ?? (detail.owner_id ? `#${detail.owner_id}` : <Tag>无</Tag>)}
+              </Descriptions.Item>
+              <Descriptions.Item label="字段数">
+                {Array.isArray(detail.schema_summary) ? detail.schema_summary.length : "—"}
+              </Descriptions.Item>
+            </Descriptions>
+            {Array.isArray(detail.schema_summary) && detail.schema_summary.length > 0 && (
+              <Card size="small" title="字段信息">
+                <SchemaTable columns={detail.schema_summary} editable={false} />
+              </Card>
+            )}
+          </>
+        ) : null}
+      </ResizableDrawer>
     </div>
   );
 }

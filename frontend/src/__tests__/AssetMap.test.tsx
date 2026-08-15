@@ -145,6 +145,9 @@ const mockGraphData = {
 
 const mockOwnerViewData = {
   owner_id: 1,
+  owner_name: "Bob",
+  role: "metric_owner",
+  domain: "sales",
   metrics: {
     total: 50,
     published: 30,
@@ -1468,7 +1471,7 @@ describe("AssetMap", () => {
         expect.objectContaining({ owner_id: 1, status: "PUBLISHED" }),
       ),
     );
-    expect(screen.getByText(/责任人 #1 指标明细（状态：PUBLISHED）/)).toBeInTheDocument();
+    expect(screen.getByText(/Bob 指标明细（状态：PUBLISHED）/)).toBeInTheDocument();
   });
 
   it("description coverage tab shows stats and per-table rows", async () => {
