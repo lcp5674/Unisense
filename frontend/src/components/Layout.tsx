@@ -583,8 +583,10 @@ export function Layout({ user }: { user: CurrentUser }) {
               width: 6,
               cursor: "col-resize",
               zIndex: 20,
-              background: "transparent",
-              transition: "background 0.2s",
+              // 默认浅色边线（让用户能看到拖拽点）；hover/拖拽时通过 class 变蓝
+              background: "rgba(255,255,255,0.08)",
+              borderRight: "1px solid rgba(255,255,255,0.15)",
+              transition: "background 0.2s, border-color 0.2s",
             }}
             className="sider-resize-handle"
           />

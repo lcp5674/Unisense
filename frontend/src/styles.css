@@ -1029,3 +1029,11 @@ body {
   color: var(--muted);
   text-decoration: line-through;
 }
+
+/* 侧边栏拖拽手柄：hover/拖拽时高亮（默认浅色已在 Layout.tsx 内联） */
+.sider-resize-handle:hover,
+.sider-resize-handle:active,
+.sider-resize-handle.is-resizing {
+  background: rgba(22, 119, 255, 0.5) !important;
+  border-right-color: rgba(22, 119, 255, 0.9) !important;
+}
