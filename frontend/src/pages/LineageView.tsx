@@ -243,6 +243,31 @@ export function parseResultToGraphData(result: ParseLineageResult): {
   return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
 }
 
+/** 把纯 SELECT（无落点）的上游依赖清单构建为「本次查询 → 源表/字段」的上游依赖图谱。
+ *  - 中心虚拟节点「本次查询」作为本次查询动作的落点；
+ *  - FROM/JOIN 源表与读取字段为外围节点，依赖边统一指向中心（仅展示，不写图谱）。
+ */
+export function upstreamDepsToGraphData(deps: UpstreamDeps): {
+  nodes: AssetGraphNode[];
+  edges: AssetGraphEdge[];
+} {
+  const nodeMap = new Map<string, AssetGraphNode>();
+  const graphEdges: AssetGraphEdge[] = [];
+  const QUERY_ID = "query:本次查询";
+  nodeMap.set(QUERY_ID, { id: QUERY_ID, type: "metric", label: "本次查询" });
+  for (const t of deps.tables) {
+    const id = `table:${t}`;
+    if (!nodeMap.has(id)) nodeMap.set(id, { id, type: "table", label: t });
+    graphEdges.push({ source: id, target: QUERY_ID, type: "READS_FROM" });
+  }
+  for (const f of deps.fields) {
+    const id = `field:${f}`;
+    if (!nodeMap.has(id)) nodeMap.set(id, { id, type: "field", label: f });
+    graphEdges.push({ source: id, target: QUERY_ID, type: "READS_FROM" });
+  }
+  return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
+}
+
 /** 表/视图详情侧边栏（血缘图谱与血缘查询/影响分析图谱点击表节点时共用）。
  *  展示敏感度/所属源/Schema 完整度/字段清单/ETL SQL，并提供「在指标目录中查看」入口。 */
 function TableDetailDrawer({ detail, open, onClose, loading }: {
@@ -344,6 +369,9 @@ function GraphTab() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
   const [loading, setLoading] = useState(false);
+  // 来源通道筛选：all=全通道表级血缘（默认，含 DP 同步/SQL 解析/指标定义）；
+  // 具体通道名=仅该通道；空=采集目录视角（指标+采集目录表小图）
+  const [provenance, setProvenance] = useState<string>("all");
   // 聚焦节点：URL ?node= 参数（指标详情「在图谱中查看」跳转来源），限定该指标/表上下游
   const focusNode = searchParams.get("node")?.trim() || null;
   // 聚焦节点不在图谱中（无血缘数据）时的空态标记
@@ -361,7 +389,7 @@ function GraphTab() {
     setLoading(true);
     setFocusMiss(false);
     try {
-      const d = await lineageGraph({ limit: 2000 });
+      const d = await lineageGraph({ limit: 2000, provenance: provenance || undefined });
       let nodes = d.nodes as AssetGraphNode[];
       let edges = d.edges as AssetGraphEdge[];
       if (focusNode) {
@@ -390,7 +418,7 @@ function GraphTab() {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusNode]);
+  }, [focusNode, provenance]);
 
   /** 清除聚焦：回到全量图谱并移除 URL node 参数（保持地址与视图一致）。 */
   function clearFocus() {
@@ -433,6 +461,18 @@ function GraphTab() {
         <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
           刷新
         </Button>
+        <Select
+          value={provenance}
+          onChange={setProvenance}
+          style={{ width: 180 }}
+          options={[
+            { value: "all", label: "全部血缘（含 DP/SQL/指标）" },
+            { value: "dp_csv", label: "DP 同步血缘" },
+            { value: "sqlglot", label: "SQL 解析血缘" },
+            { value: "metric_definition", label: "指标定义血缘" },
+            { value: "", label: "采集目录视角（指标+目录表）" },
+          ]}
+        />
         {focusNode && (
           <Tag color="blue" style={{ padding: "3px 10px", fontSize: 13 }}>
             聚焦：{focusNode} 的上下游血缘
@@ -845,6 +885,9 @@ function ParseTab() {
     result !== null && (result.table_lineage.length > 0 || result.field_lineage.length > 0)
       ? parseResultToGraphData(result)
       : null;
+  // 纯 SELECT 无落点：上游依赖也画成图谱（中心「本次查询」+ 源表/字段，仅展示不写图谱）
+  const upstreamGraph =
+    showUpstream && result?.upstream_deps ? upstreamDepsToGraphData(result.upstream_deps) : null;
 
   return (
     <div>
@@ -930,6 +973,15 @@ function ParseTab() {
             message="该查询为纯 SELECT 且未指定落点，未生成血缘边（未写入图谱）"
             description="如需把查询结果落成正式血缘，请在「目标表名」填入结果表名后重新解析。"
           />
+          {upstreamGraph && (
+            <Card
+              size="small"
+              title={`本次查询 · 上游依赖图谱（${upstreamGraph.nodes.length} 节点 · ${upstreamGraph.edges.length} 条边）`}
+              style={{ marginTop: 16, marginBottom: 16 }}
+            >
+              <AssetGraph nodes={upstreamGraph.nodes} edges={upstreamGraph.edges} height={360} />
+            </Card>
+          )}
           <h4 style={{ marginBottom: 8 }}>
             本次查询 · 上游依赖（{result.upstream_deps.tables.length} 表 / {result.upstream_deps.fields.length} 字段）
           </h4>

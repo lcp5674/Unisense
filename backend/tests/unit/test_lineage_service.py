@@ -892,3 +892,39 @@ async def test_restore_stale_edge_clears_flag() -> None:
     edge = await svc.restore_stale_edge(3)
     assert edge.id == 3
     assert repo.restored == 1
+
+
+async def test_query_graph_provenance_uses_edge_repo(monkeypatch: Any) -> None:
+    """指定 provenance 时走血缘边仓库直接构建表级图谱（不依赖采集目录交集）。"""
+    fake_repo = FakeRepo()
+
+    async def fake_graph_from_edges(self, *, provenance, limit):
+        assert provenance == "dp_csv"
+        assert limit == 500
+        nodes = [
+            {
+                "id": "table:wedw_dwd.tjhis_all_dic_drug_df",
+                "type": "table",
+                "label": "wedw_dwd.tjhis_all_dic_drug_df",
+                "entity_id": None,
+            },
+            {"id": "metric:gmv", "type": "metric", "label": "gmv", "entity_id": None},
+        ]
+        edges = [
+            {
+                "source": "table:di_tjhqdzg.dic_drug",
+                "target": "table:wedw_dwd.tjhis_all_dic_drug_df",
+                "type": "DERIVED_FROM",
+            },
+        ]
+        return (nodes, edges)
+
+    fake_repo.graph_from_edges = fake_graph_from_edges.__get__(fake_repo, FakeRepo)
+    svc = LineageService(db=_FakeSession())
+    svc._repo = fake_repo
+
+    out = await svc.query_graph(provenance="dp_csv", limit=500)
+    assert out["nodes"][0]["id"] == "table:wedw_dwd.tjhis_all_dic_drug_df"
+    assert out["edges"][0]["type"] == "DERIVED_FROM"
+    # 边自包含：节点集来自边两端，无需二次过滤
+    assert len(out["edges"]) == 1

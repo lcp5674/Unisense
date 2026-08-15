@@ -918,11 +918,14 @@ export async function lineageGraph(params?: {
   domain?: string;
   pii_only?: boolean;
   limit?: number;
+  /** 来源通道过滤：dp_csv/sqlglot/metric_definition；为空=采集目录视角图谱 */
+  provenance?: string;
 }): Promise<LineageGraphData> {
   const qs = pageQs({
     domain: params?.domain,
     pii_only: params?.pii_only === undefined ? undefined : String(params.pii_only),
     limit: params?.limit,
+    provenance: params?.provenance,
   });
   return request<LineageGraphData>(`${API_BASE}/lineage/graph${qs ? `?${qs}` : ""}`);
 }

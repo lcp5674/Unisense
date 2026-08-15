@@ -219,9 +219,22 @@ async def lineage_graph(
     domain: str | None = Query(None, description="按业务域过滤节点"),
     pii_only: bool = Query(False, description="仅返回含 PII 标记的节点"),
     limit: int = Query(1000, ge=1, le=5000, description="返回边数上限"),
+    provenance: str | None = Query(
+        None,
+        description=(
+            "来源通道过滤（dp_csv/sqlglot/metric_definition）；为空=采集目录视角，"
+            "指定=该通道完整表级血缘"
+        ),
+    ),
 ) -> ApiResponse[Any]:
-    """血缘图谱：返回节点+边数据，前端力导向图渲染（血缘视图默认 Tab）。"""
-    data = await _svc(db).query_graph(domain=domain, pii_only=pii_only, limit=limit)
+    """血缘图谱：返回节点+边数据，前端力导向图渲染（血缘视图默认 Tab）。
+
+    ``provenance`` 指定时从血缘边直接构建表级血缘（DP/SQL 通道导入的表完整可见，
+    不再受采集目录交集限制）；为空时复用资产地图采集目录视角图谱。
+    """
+    data = await _svc(db).query_graph(
+        domain=domain, pii_only=pii_only, limit=limit, provenance=provenance
+    )
     return ok(data=data, trace_id=trace_id)
 
 

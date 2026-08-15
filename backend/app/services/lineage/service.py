@@ -384,24 +384,39 @@ class LineageService(BaseService):
         domain: str | None = None,
         pii_only: bool = False,
         limit: int = 1000,
+        provenance: str | None = None,
     ) -> dict[str, Any]:
         """血缘图谱：返回 ``nodes + edges``（力导向图渲染数据）。
 
-        复用资产地图的图谱拼接（``AssetMapRepository.graph_from_mysql``）——它从
-        MySQL ``lineage_edge``（血缘边）+ ``metric`` + ``db_catalog`` 拼装血缘专属
-        图谱（表/指标/字段节点 + DERIVED_FROM 等血缘边），纯查询无副作用，避免
-        血缘与资产两套图谱逻辑漂移。
+        两种构建路径：
+        - ``provenance`` 为空（默认）：复用资产地图的图谱拼接
+          （``AssetMapRepository.graph_from_mysql``）——从 MySQL ``lineage_edge``
+          + ``metric`` + ``db_catalog`` 拼装血缘专属图谱，节点以采集目录表 +
+          指标为主。**注意**：DP 元数据导入的表（``wedw_dwd.tjhis_*`` 等）不在
+          采集目录中时不会出现在该视图。
+        - ``provenance`` 指定（如 ``dp_csv``）：从 ``lineage_edge`` 权威存储
+          直接构建表级血缘图谱（``repo.graph_from_edges``），节点 = 血缘边两端的
+          所有表/指标/字段（去重 + 目录元数据富集）——DP 同步 / SQL 解析等通道
+          导入的表级血缘完整可见，不再受采集目录交集限制。
 
         Args:
-            domain: 按业务域过滤节点。
-            pii_only: 仅返回含 PII 标记的节点（不展示字段级节点）。
-            limit: 返回边数软上限（``graph_from_mysql`` 内置 1000 条上限，
-                前端力导向图另行限流节点数，保证可读性）。
+            domain: 按业务域过滤节点（仅默认路径生效）。
+            pii_only: 仅返回含 PII 标记的节点（仅默认路径生效）。
+            limit: 返回边数软上限。
+            provenance: 来源通道过滤（dp_csv / sqlglot / metric_definition）。
 
         Returns:
             ``{"nodes": [...], "edges": [...]}``——边为**自包含子图**（仅保留
             两端都在节点集内的边），保证返回边数与图谱实际渲染一致。
         """
+        if provenance:
+            # "all"=全通道表级血缘；具体通道名=仅该通道
+            nodes, edges = await self._repo.graph_from_edges(
+                provenance=None if provenance == "all" else provenance,
+                limit=limit,
+            )
+            return {"nodes": nodes, "edges": edges}
+
         from app.services.assetmap.repository import AssetMapRepository
 
         nodes, edges = await AssetMapRepository(self._db).graph_from_mysql(domain, pii_only)

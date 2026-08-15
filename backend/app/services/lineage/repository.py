@@ -804,3 +804,75 @@ class LineageRepository:
             "domain": None,
             "owner": None,
         }
+
+    async def graph_from_edges(
+        self,
+        *,
+        provenance: str | None = None,
+        limit: int = 2000,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """从血缘边直接构建表级血缘图谱（不依赖 db_catalog 交集）。
+
+        与 ``AssetMapRepository.graph_from_mysql`` 不同：该方法是资产视角——
+        节点只取 db_catalog（采集目录）里的表 + 指标，DP 元数据导入的表（如
+        ``wedw_dwd.tjhis_*``）不在采集目录就进不了图。本方法从 ``lineage_edge``
+        权威存储出发：节点 = 血缘边两端的所有 ``table:``/``metric:``/``field:``
+        节点（去重），再经 ``resolve_node_meta`` 富集目录元数据（命中 db_catalog
+        则带 entity_id/domain/pii/owner；未命中保留基础 label，供搜索定位）。
+
+        Args:
+            provenance: 按来源通道过滤（dp_csv / sqlglot / metric_definition）；
+                为 ``None`` 时返回全部通道血缘。
+            limit: 边数上限（默认 2000，前端力导向图另行限流节点数）。
+
+        Returns:
+            ``(nodes, edges)``——边为**自包含子图**（节点集来自边两端，天然自包含）。
+        """
+        stmt = select(
+            LineageEdge.source_node,
+            LineageEdge.target_node,
+            LineageEdge.edge_type,
+        ).where(LineageEdge.deleted_at.is_(None))
+        if provenance:
+            stmt = stmt.where(LineageEdge.provenance == provenance)
+        rows = (await self._db.execute(stmt.limit(limit))).all()
+        if not rows:
+            return [], []
+
+        node_ids: set[str] = set()
+        edges: list[dict[str, Any]] = []
+        for r in rows:
+            node_ids.add(str(r.source_node))
+            node_ids.add(str(r.target_node))
+            edges.append(
+                {
+                    "source": str(r.source_node),
+                    "target": str(r.target_node),
+                    "type": str(r.edge_type),
+                }
+            )
+
+        meta = await self.resolve_node_meta(node_ids)
+        nodes: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for nid in sorted(node_ids):
+            if nid in seen:
+                continue
+            seen.add(nid)
+            m = meta.get(nid) or self._fallback_node_meta(
+                nid,
+                "metric" if nid.startswith("metric:") else "table",
+                nid.split(":", 1)[1] if ":" in nid else nid,
+            )
+            nodes.append(
+                {
+                    "id": nid,
+                    "type": m["type"],
+                    "label": m["label"],
+                    "entity_id": m.get("entity_id"),
+                    "pii": bool(m.get("pii")),
+                    "domain": m.get("domain"),
+                    "owner": m.get("owner"),
+                }
+            )
+        return nodes, edges
