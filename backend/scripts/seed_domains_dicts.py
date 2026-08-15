@@ -44,6 +44,7 @@ STANDARD_DOMAINS: list[dict[str, Any]] = [
 # ---- 10 类字典项 ----
 DICT_SEEDS: dict[str, list[dict[str, Any]]] = {
     "granularity": [
+        # 时间粒度
         {"code": "minute", "label": "分钟", "sort_order": 0},
         {"code": "hour", "label": "小时", "sort_order": 1},
         {"code": "day", "label": "天", "sort_order": 2},
@@ -52,6 +53,17 @@ DICT_SEEDS: dict[str, list[dict[str, Any]]] = {
         {"code": "quarter", "label": "季", "sort_order": 5},
         {"code": "year", "label": "年", "sort_order": 6},
         {"code": "realtime", "label": "实时", "sort_order": 7},
+        # 业务实体粒度（生产场景：指标按业务主体统计，非仅时间维度）
+        {"code": "order", "label": "订单粒度", "sort_order": 20},
+        {"code": "merchant", "label": "商户粒度", "sort_order": 21},
+        {"code": "store", "label": "门店粒度", "sort_order": 22},
+        {"code": "user", "label": "用户粒度", "sort_order": 23},
+        {"code": "product", "label": "商品粒度", "sort_order": 24},
+        {"code": "supplier", "label": "供应商粒度", "sort_order": 25},
+        {"code": "employee", "label": "员工粒度", "sort_order": 26},
+        {"code": "warehouse", "label": "仓库粒度", "sort_order": 27},
+        {"code": "customer", "label": "客户粒度", "sort_order": 28},
+        {"code": "sku", "label": "SKU 粒度", "sort_order": 29},
     ],
     "unit": [
         {"code": "CNY", "label": "人民币元", "sort_order": 1},

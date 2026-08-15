@@ -601,7 +601,33 @@ def infer_metric(
     name_field = _infer_name(profile, grain_field["value"], llm_name=llm_name)
     definition_field, mode_field = _infer_definition(profile, agg_field)
 
+    # 源表/度量列：优先用户显式输入，其次 SQL 解析结果（供前端回填到 Step 2）
+    sql_profile: SqlProfile | None = profile.get("sql_profile")
+    eff_table = profile.get("source_table") or (
+        sql_profile.source_tables[0] if sql_profile and sql_profile.source_tables else None
+    )
+    eff_measure = profile.get("measure_column") or (
+        sql_profile.measures[0]["column"] if sql_profile and sql_profile.measures else None
+    )
+    table_field = (
+        _field(eff_table, "sql_parse" if eff_table != profile.get("source_table") else "input", 0.9,
+               "SQL 解析源表" if eff_table != profile.get("source_table") else "用户指定源表")
+        if eff_table else _field(None, "fallback", 0.0, "未识别源表")
+    )
+    measure_field = (
+        _field(
+            eff_measure,
+            "sql_parse" if eff_measure != profile.get("measure_column") else "input",
+            0.9,
+            "SQL 解析度量列" if eff_measure != profile.get("measure_column") else "用户指定度量列",
+        )
+        if eff_measure
+        else _field(None, "fallback", 0.0, "未识别度量列")
+    )
+
     fields: dict[str, SuggestionField] = {
+        "source_table": table_field,
+        "measure_column": measure_field,
         "name": name_field,
         "type": type_field,
         "granularity": grain_field,
@@ -629,7 +655,6 @@ def infer_metric(
     source_table = profile.get("source_table")
     measure_column = profile.get("measure_column")
     period = profile.get("period")
-    sql_profile: SqlProfile | None = profile.get("sql_profile")
     if not source_table and sql_profile and sql_profile.source_tables:
         source_table = sql_profile.source_tables[0]
     metric_code: str | None = None

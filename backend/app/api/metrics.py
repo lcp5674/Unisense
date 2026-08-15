@@ -1095,4 +1095,28 @@ async def auto_suggest_metric(
             "confidence": 0.7,
             "reason": "AI 依据表结构/SQL 生成的业务命名",
         }
+
+    # 依赖表推断：从血缘图中提取源表的上游/下游关联表，供「口径定义 → 关联数据表」自动填充
+    related_tables: list[str] = []
+    if effective_table:
+        try:
+            from app.services.lineage.parser import node_table
+            from app.services.lineage.repository import LineageRepository
+
+            edges = await LineageRepository(db).edges_for_node(
+                node_table(effective_table), direction="both"
+            )
+            self_node = node_table(effective_table)
+            seen: set[str] = set()
+            for edge in edges:
+                for node in (edge.source_node, edge.target_node):
+                    if node.startswith("table:") and node != self_node:
+                        name = node[len("table:"):]
+                        if name not in seen:
+                            seen.add(name)
+                            related_tables.append(name)
+        except Exception:
+            pass  # 血缘不可用/无关联边 → 不阻断推断
+
+    result["related_tables"] = related_tables
     return ok(data=result, trace_id=trace_id)

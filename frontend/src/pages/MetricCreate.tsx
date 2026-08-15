@@ -140,6 +140,9 @@ export function MetricCreate() {
   // 推断结果回填：各字段来源徽标 + 自动生成的口径定义预览
   const [inferred, setInferred] = useState<Record<string, SuggestionField>>({});
   const [inferredDefinition, setInferredDefinition] = useState<{ json: Record<string, unknown> | null; mode: string | null }>({ json: null, mode: null });
+  // 推断结果友好摘要（SQL 智能推断成功后展示，让用户明确知道推断出了什么）
+  const [inferSummary, setInferSummary] = useState<AutoSuggestResponse | null>(null);
+  const [inferSummaryOpen, setInferSummaryOpen] = useState(false);
 
   // 批量注册指标弹窗状态（POST /metric-definitions/batch-register）
   const [batchOpen, setBatchOpen] = useState(false);
@@ -186,14 +189,18 @@ export function MetricCreate() {
     finally { setTableSearching(false); }
   }
 
-  // 自动推断区：源表名模糊搜索（防抖 300ms）
+  // 自动推断区：源表名模糊搜索（防抖 300ms）；空关键词时加载平台已采集的默认表列表
   function handleSrcTableSearch(q: string) {
     if (srcTableSearchTimer.current) clearTimeout(srcTableSearchTimer.current);
-    if (!q.trim()) { setSrcTableSearchOptions([]); return; }
     srcTableSearchTimer.current = setTimeout(async () => {
       setSrcTableSearchLoading(true);
       try {
-        const res = await listCatalogs({ entity_type: "TABLE", keyword: q.trim(), page_size: 20, source_status: "active" });
+        const res = await listCatalogs({
+          entity_type: "TABLE",
+          keyword: q.trim() || undefined,
+          page_size: 20,
+          source_status: "active",
+        });
         setSrcTableSearchOptions(
           res.items.map((it) => ({
             value: it.entity_name,
@@ -202,17 +209,18 @@ export function MetricCreate() {
         );
       } catch { setSrcTableSearchOptions([]); }
       finally { setSrcTableSearchLoading(false); }
-    }, 300);
+    }, q.trim() ? 300 : 0);
   }
 
-  // 选了源表后：1) 加载该表列信息  2) 触发自动推断
-  async function handleSrcTableSelect(entityName: string) {
-    if (!entityName) {
-      setSelectedTableCatalog(null);
-      setColumnOptions([]);
-      handleAutoSuggest();
-      return;
+  // 下拉展开/聚焦时若无选项，先加载平台已采集的表供选择（惰性设计：不让用户凭空输入）
+  function handleSrcTableDropdown(open: boolean) {
+    if (open && srcTableSearchOptions.length === 0 && !srcTableSearchLoading) {
+      handleSrcTableSearch("");
     }
+  }
+
+  // 选源表后加载该表列信息（供度量列选择）
+  async function loadColumnsForTable(entityName: string) {
     try {
       const res = await listCatalogs({ entity_type: "TABLE", keyword: entityName, page_size: 5, source_status: "active" });
       const catalog = res.items.find((it) => it.entity_name === entityName);
@@ -226,16 +234,27 @@ export function MetricCreate() {
               label: col.type ? `${col.name} (${col.type})${col.comment ? " — " + col.comment : ""}` : col.name,
             }))
           );
-        } else {
-          setColumnOptions([]);
-          message.info("该表无列信息（schema 未采集完整）");
+          return;
         }
-      } else {
         setColumnOptions([]);
+        message.info("该表无列信息（schema 未采集完整）");
+        return;
       }
+      setColumnOptions([]);
     } catch {
       setColumnOptions([]);
     }
+  }
+
+  // 选了源表后：1) 加载该表列信息  2) 触发自动推断（含依赖表）
+  async function handleSrcTableSelect(entityName: string) {
+    if (!entityName) {
+      setSelectedTableCatalog(null);
+      setColumnOptions([]);
+      handleAutoSuggest();
+      return;
+    }
+    await loadColumnsForTable(entityName);
     form.setFieldValue("source_table", entityName);
     handleAutoSuggest();
   }
@@ -270,6 +289,33 @@ export function MetricCreate() {
       json: (defField?.value as Record<string, unknown>) ?? null,
       mode: (modeField?.value as string) ?? null,
     });
+
+    // 源表被推断出来后联动加载该表列（供度量列选择，避免用户手动输入）
+    const srcTable = merged.source_table;
+    if (typeof srcTable === "string" && srcTable) {
+      void loadColumnsForTable(srcTable);
+      // 保证 Select 能显示回填的源表（options 无该表时下拉会显示空白）
+      setSrcTableSearchOptions((prev) =>
+        prev.some((o) => o.value === srcTable) ? prev : [{ value: srcTable, label: srcTable }, ...prev]
+      );
+    }
+    // 依赖表（血缘推断的关联表）自动填充到「口径定义 → 关联数据表」，并合并保留用户已选
+    const related = (result as unknown as { related_tables?: string[] }).related_tables;
+    if (Array.isArray(related) && related.length > 0) {
+      setSourceTables((prev) => Array.from(new Set([...(prev || []), ...related])));
+    }
+    // 推断口径定义回填到实际表单（expression → definition JSON；sql → sqlText）
+    const defJson = (defField?.value as Record<string, unknown>) ?? null;
+    const defMode = (modeField?.value as string) ?? null;
+    if (defJson) {
+      if (defMode === "sql") {
+        setMode("sql");
+        setSqlText(String(defJson.sql ?? JSON.stringify(defJson, null, 2)));
+      } else {
+        setMode("expression");
+        form.setFieldValue("definition", JSON.stringify(defJson, null, 2));
+      }
+    }
   }
 
   async function handleDomainChange(value: string[], _selectedOptions: any) {
@@ -297,7 +343,8 @@ export function MetricCreate() {
 
   // 粘贴 SQL 智能推断（独立入口：仅用于推断并回填属性，与最终「口径定义」相互独立）
   async function handleSqlInfer() {
-    if (!selectedDomain || !sqlInferText.trim()) return;
+    if (!selectedDomain) { message.warning("请先选择业务域"); return; }
+    if (!sqlInferText.trim()) { message.warning("请先粘贴指标 SQL"); return; }
     setSqlInferring(true);
     try {
       const result = await autoSuggestMetric({
@@ -305,9 +352,26 @@ export function MetricCreate() {
         sql: sqlInferText.trim(),
       });
       applySuggestion(result);
-      message.success("已从 SQL 推断并回填字段");
-    } catch {
-      message.error("SQL 推断失败，请检查语法或稍后重试");
+      setInferSummary(result);
+      setInferSummaryOpen(true);
+      const srcTable = (result.fields?.source_table?.value as string) || null;
+      const measure = (result.fields?.measure_column?.value as string) || null;
+      if (srcTable || measure) {
+        message.success(
+          srcTable && measure
+            ? `已从 SQL 识别：源表 ${srcTable} · 度量列 ${measure}`
+            : srcTable
+              ? `已从 SQL 识别源表：${srcTable}`
+              : `已从 SQL 识别度量列：${measure}`
+        );
+      } else {
+        message.success("已完成 SQL 解析，字段已按规则推断回填");
+      }
+    } catch (err) {
+      const detail = err instanceof UnisenseApiError ? err.message : "";
+      message.error(
+        detail ? `SQL 推断失败：${detail}` : "SQL 推断失败，请检查 SQL 语法（须含 SELECT + 聚合 + FROM）或稍后重试"
+      );
     } finally {
       setSqlInferring(false);
     }
@@ -538,9 +602,10 @@ export function MetricCreate() {
                     <Select
                       showSearch
                       allowClear
-                      placeholder="搜索并选择源表（如 sales_detail）"
+                      placeholder="选择或搜索源表（已接入的表可直接选，如 dwd.sales_detail）"
                       onSearch={handleSrcTableSearch}
                       onChange={handleSrcTableSelect}
+                      onOpenChange={handleSrcTableDropdown}
                       loading={srcTableSearchLoading}
                       notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
                       options={srcTableSearchOptions}
@@ -748,6 +813,73 @@ export function MetricCreate() {
         </Form>
       </Card>
 
+      {/* 推断结果摘要：SQL 智能推断成功后展示，让用户明确知道识别出了什么（惰性设计：给反馈而非只默默回填） */}
+      <Modal
+        title="SQL 智能推断结果"
+        open={inferSummaryOpen}
+        onCancel={() => setInferSummaryOpen(false)}
+        footer={
+          <Space>
+            <Button onClick={() => setInferSummaryOpen(false)}>知道了</Button>
+          </Space>
+        }
+        width={640}
+      >
+        {inferSummary && (
+          <div>
+            <Alert
+              type="success"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="已根据 SQL 自动回填以下字段，可到②③④步确认或覆盖"
+            />
+            <Row gutter={[8, 4]}>
+              {[
+                ["source_table", "源表"],
+                ["measure_column", "度量列"],
+                ["name", "名称"],
+                ["type", "类型"],
+                ["granularity", "粒度"],
+                ["unit", "单位"],
+                ["aggregation", "聚合"],
+                ["time_semantics", "时间语义"],
+                ["freshness", "新鲜度"],
+                ["dw_layer", "数仓层"],
+                ["additivity", "可加性"],
+                ["serving_mode", "服务模式"],
+                ["metric_tier", "分级"],
+              ].map(([key, label]) => {
+                const sf = inferSummary.fields?.[key];
+                if (!sf || sf.value === null || sf.value === undefined) return null;
+                return (
+                  <Col span={12} key={key}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "2px 0" }}>
+                      <Typography.Text type="secondary" style={{ flex: "0 0 56px", fontSize: 12 }}>
+                        {label}
+                      </Typography.Text>
+                      <Typography.Text strong style={{ fontSize: 13 }} className="mono">
+                        {typeof sf.value === "object" ? JSON.stringify(sf.value) : String(sf.value)}
+                      </Typography.Text>
+                      <InferBadge field={sf} />
+                    </div>
+                  </Col>
+                );
+              })}
+            </Row>
+            {(inferSummary as unknown as { related_tables?: string[] }).related_tables?.length ? (
+              <div style={{ marginTop: 12 }}>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>关联数据表（来自血缘推断）：</Typography.Text>
+                <div style={{ marginTop: 6 }}>
+                  {(inferSummary as unknown as { related_tables: string[] }).related_tables.map((t) => (
+                    <Tag key={t} className="mono" style={{ marginBottom: 4 }}>{t}</Tag>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </Modal>
+
       {/* 批量注册指标弹窗：源宽表 + 多个度量列 → 批量创建 DRAFT（对齐 FR-030） */}
       <Modal
         title="批量注册指标"
@@ -810,8 +942,9 @@ export function MetricCreate() {
               <Select
                 showSearch
                 allowClear
-                placeholder="搜索并选择源宽表（如 dwd.sales_detail）"
+                placeholder="选择或搜索源宽表（已接入的表可直接选，如 dwd.sales_detail）"
                 onSearch={handleSrcTableSearch}
+                onOpenChange={handleSrcTableDropdown}
                 loading={srcTableSearchLoading}
                 notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
                 options={srcTableSearchOptions}

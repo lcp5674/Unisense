@@ -13,16 +13,18 @@ vi.mock("../api", async () => {
     listDictItems: vi.fn(),
     listCatalogs: vi.fn(),
     batchRegisterMetrics: vi.fn(),
+    autoSuggestMetric: vi.fn(),
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, autoSuggestMetric } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
 const mockedDict = vi.mocked(listDictItems);
 const mockedCatalogs = vi.mocked(listCatalogs);
 const mockedBatch = vi.mocked(batchRegisterMetrics);
+const mockedSuggest = vi.mocked(autoSuggestMetric);
 
 /** 构造完整 DBCatalog（源表搜索 mock 用），仅 entity_name/source_name 参与渲染。 */
 function makeCatalog(entityName: string): DBCatalog {
@@ -265,5 +267,142 @@ describe("MetricCreate 批量注册指标", () => {
     await screen.findByText("注册指标（草稿）");
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+});
+
+describe("MetricCreate 粘贴 SQL 智能推断", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedTree.mockResolvedValue(TREE);
+    mockedDict.mockResolvedValue([]);
+    mockedCatalogs.mockResolvedValue({
+      items: [makeCatalog("dwd.sales_detail")],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+  });
+
+  /** 选择业务域（Cascader 弹出面板点第一层「销售 (sales)」）。 */
+  async function pickDomain() {
+    const cascaderInput = document.querySelector(".ant-cascader input") as HTMLInputElement;
+    fireEvent.mouseDown(cascaderInput);
+    await waitFor(() => {
+      const item = document.querySelector(".ant-cascader-menu-item[title='销售 (sales)']");
+      expect(item).toBeTruthy();
+      if (item) fireEvent.click(item);
+    });
+  }
+
+  it("SQL 推断成功：回填源表/度量列 + 展示推断摘要（含来源徽标）", async () => {
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "sales_order_gmv_day",
+      segments: { domain: "sales", biz_object: "order", measure: "gmv", period: "day" },
+      fields: {
+        source_table: { value: "dwd.sales_detail", source: "sql_parse", confidence: 0.9, reason: "SQL 解析源表" },
+        measure_column: { value: "gmv", source: "sql_parse", confidence: 0.9, reason: "SQL 解析度量列" },
+        name: { value: "订单销售额", source: "sql_parse", confidence: 0.8 },
+        type: { value: "atomic", source: "sql_parse", confidence: 0.85 },
+        granularity: { value: "day", source: "sql_parse", confidence: 0.9 },
+        unit: { value: "CNY", source: "rule", confidence: 0.68 },
+        aggregation: { value: "SUM", source: "sql_parse", confidence: 0.95 },
+        time_semantics: { value: "PERIOD", source: "sql_parse", confidence: 0.6 },
+        freshness: { value: "T1", source: "rule", confidence: 0.5 },
+        dw_layer: { value: "DWD", source: "sql_parse", confidence: 0.8 },
+        additivity: { value: "ADDITIVE", source: "rule", confidence: 0.6 },
+        serving_mode: { value: "BATCH_ONLY", source: "sql_parse", confidence: 0.7 },
+        metric_tier: { value: "T3", source: "fallback", confidence: 0.4 },
+        definition_json: {
+          value: { expression: "SUM(gmv)", source_fields: [{ table: "dwd.sales_detail", column: "gmv" }] },
+          source: "sql_parse",
+          confidence: 0.9,
+        },
+        definition_mode: { value: "expression", source: "sql_parse", confidence: 0.9 },
+      },
+      definition_json: { expression: "SUM(gmv)", source_fields: [{ table: "dwd.sales_detail", column: "gmv" }] },
+      definition_mode: "expression",
+      related_tables: ["dwd.sales_order", "dwd.shop_dim"],
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "SELECT SUM(gmv) AS gmv FROM dwd.sales_detail GROUP BY dt, shop_id" },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+
+    // 推断摘要 Modal 弹出，展示识别字段
+    await screen.findByText("SQL 智能推断结果");
+    expect(screen.getAllByText("dwd.sales_detail").length).toBeGreaterThan(0);
+    expect(screen.getByText("订单销售额")).toBeTruthy();
+    // 关联表（血缘推断）展示
+    await waitFor(() => expect(screen.getAllByText("dwd.sales_order").length).toBeGreaterThan(0));
+    // 关闭摘要
+    fireEvent.click(screen.getByText("知道了"));
+
+    // 源表/度量列已回填到②自动推断区（Select 显示选中值）
+    await waitFor(() => {
+      const srcInput = document.querySelector('input[id="source_table"]');
+      const container = srcInput?.closest(".ant-select") as HTMLElement | null;
+      expect(container?.textContent).toContain("dwd.sales_detail");
+    });
+    // 度量列下拉因回填 source_table 联动加载了列
+    expect(mockedCatalogs).toHaveBeenCalledWith(
+      expect.objectContaining({ entity_type: "TABLE", keyword: "dwd.sales_detail" })
+    );
+  });
+
+  it("SQL 推断：未选域或未粘贴 SQL 时「智能推断」按钮禁用（惰性引导）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    // 未选域时按钮 disabled，点击不触发请求
+    const btn = screen.getByText("智能推断并回填字段").closest("button") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(mockedSuggest).not.toHaveBeenCalled();
+  });
+
+  it("SQL 推断失败：展示明确错误原因", async () => {
+    mockedSuggest.mockRejectedValue(new Error("invalid SQL syntax"));
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "SELECT FROM WHERE" },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+    await waitFor(() => expect(screen.getByText(/SQL 推断失败/)).toBeTruthy());
+  });
+});
+
+describe("MetricCreate 源表选择惰性化", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedTree.mockResolvedValue(TREE);
+    mockedDict.mockResolvedValue([]);
+    mockedCatalogs.mockResolvedValue({
+      items: [
+        makeCatalog("dwd.sales_detail"),
+        makeCatalog("dwd.sales_order"),
+        makeCatalog("dwd.shop_dim"),
+      ],
+      total: 3,
+      page: 1,
+      page_size: 20,
+    });
+  });
+
+  it("源表下拉展开时自动加载平台已采集的表（无需先输入关键词）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    // 点击源表 Select 展开下拉（id 在内部 input 上）
+    const srcInput = document.querySelector('input[id="source_table"]') as HTMLInputElement;
+    fireEvent.mouseDown(srcInput);
+    // 展开即触发加载（onOpenChange → 空关键词加载默认表列表）
+    await waitFor(() => expect(mockedCatalogs).toHaveBeenCalledWith(
+      expect.objectContaining({ entity_type: "TABLE", page_size: 20 })
+    ));
+    await waitFor(() => expect(screen.getAllByText("dwd.sales_order").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("dwd.shop_dim").length).toBeGreaterThan(0));
   });
 });

@@ -137,6 +137,34 @@ class TestInferMetricSql:
         assert f["name"]["value"] == "日订单金额"
         assert f["name"]["source"] == "column_meta"
 
+    def test_fields_include_source_table_and_measure_column(self) -> None:
+        """fields 须回填 source_table/measure_column（SQL 解析来源），供前端回填 Step 2。"""
+        sql = """
+        SELECT dt, SUM(gmv) AS gmv
+        FROM dwd.sales_detail
+        WHERE dt >= '2024-01-01'
+        GROUP BY dt
+        """
+        profile = build_profile(sql=sql, period="day")
+        profile["domain_code"] = ""
+        result = infer_metric(profile)
+        f = result["fields"]
+        assert f["source_table"]["value"] == "dwd.sales_detail"
+        assert f["source_table"]["source"] == "sql_parse"
+        assert f["measure_column"]["value"] == "gmv"
+        assert f["measure_column"]["source"] == "sql_parse"
+
+    def test_fields_source_table_from_input(self) -> None:
+        """显式传入 source_table/measure_column 时，fields 原样回填且来源为 input。"""
+        profile = build_profile(source_table="dws.account_balance", measure_column="end_bal", period="day")
+        profile["domain_code"] = ""
+        result = infer_metric(profile)
+        f = result["fields"]
+        assert f["source_table"]["value"] == "dws.account_balance"
+        assert f["source_table"]["source"] == "input"
+        assert f["measure_column"]["value"] == "end_bal"
+        assert f["measure_column"]["source"] == "input"
+
     def test_count_distinct_from_sql(self) -> None:
         sql = "SELECT dt, COUNT(DISTINCT user_id) AS uv FROM dwd.user_active GROUP BY dt"
         profile = build_profile(sql=sql, period="day")
