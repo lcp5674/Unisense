@@ -11,12 +11,15 @@ from datetime import UTC, datetime, timedelta
 from app.models.governance import RoleName, SensitivityLevel
 from app.services.governance.policy import (
     ROLE_ACTIONS,
+    ROLE_UI_ACTIONS,
+    UI_ACTION_REGISTRY,
     Resource,
     Subject,
     decide,
     detect_pii_columns,
     infer_sensitivity,
     is_grant_effective,
+    is_ui_action,
     masking_for,
 )
 
@@ -297,3 +300,63 @@ def test_role_actions_unknown_role_still_denied() -> None:
         role_actions=overrides,
     )
     assert d2.allow is False
+
+
+# ------------------------------------------------------------------- UI 权限点注册表完整性
+
+
+def test_ui_action_registry_keys_wellformed_and_unique() -> None:
+    """注册表键须符合 ``模块:功能`` 格式且无重复（防止拼写漂移/脏键）。"""
+    keys = list(UI_ACTION_REGISTRY)
+    assert len(keys) == len(set(keys)), "存在重复权限点键"
+    for k in keys:
+        assert k.count(":") == 1, f"权限点须为 模块:功能 单冒号格式: {k}"
+        module, func = k.split(":", 1)
+        assert module.islower() and func.islower(), f"权限点须全小写: {k}"
+        assert module and func, f"权限点模块/功能不可为空: {k}"
+
+
+def test_ui_action_registry_entries_have_metadata() -> None:
+    """每个权限点须带 module/label/description（供前端分组渲染与 Tooltip）。"""
+    for key, meta in UI_ACTION_REGISTRY.items():
+        assert isinstance(meta, dict), f"{key} 元数据须为 dict"
+        assert meta.get("module"), f"{key} 缺 module"
+        assert meta.get("label"), f"{key} 缺 label"
+        assert meta.get("description"), f"{key} 缺 description"
+
+
+def test_ui_action_registry_no_placeholder_residue() -> None:
+    """注册表不允许占位/清理残留键（如 templates:view_extra）。"""
+    assert "templates:view_extra" not in UI_ACTION_REGISTRY
+    # 不允许空 dict 元数据（占位键特征）
+    for key, meta in UI_ACTION_REGISTRY.items():
+        assert meta, f"{key} 为空元数据（疑似占位残留）"
+
+
+def test_role_ui_actions_references_all_exist() -> None:
+    """ROLE_UI_ACTIONS 引用的每个权限点必须真实存在于注册表（防悬空）。"""
+    registry = set(UI_ACTION_REGISTRY)
+    for role, actions in ROLE_UI_ACTIONS.items():
+        missing = [a for a in actions if a not in registry]
+        assert not missing, f"角色 {role} 引用了未注册权限点: {missing}"
+
+
+def test_every_ui_action_covered_by_some_role() -> None:
+    """每个权限点至少被一个内置角色默认覆盖（无孤儿权限点）。"""
+    registry = set(UI_ACTION_REGISTRY)
+    covered = set().union(*ROLE_UI_ACTIONS.values())
+    orphans = registry - covered
+    assert not orphans, f"未分配给任何内置角色的权限点: {sorted(orphans)}"
+
+
+def test_is_ui_action_matches_registry() -> None:
+    """is_ui_action 与注册表键集一致（资源动词与 UI 权限点正交）。"""
+    for key in UI_ACTION_REGISTRY:
+        assert is_ui_action(key), f"{key} 应在 is_ui_action 命中"
+    for v in ("read", "write", "approve", "export", "review"):
+        assert not is_ui_action(v), f"资源动词 {v} 不应被判为 UI 权限点"
+
+
+def test_ui_action_registry_not_under_10() -> None:
+    """注册表规模不低于 10（防误删导致注册表塌缩的浅层防御）。"""
+    assert len(UI_ACTION_REGISTRY) >= 10, "UI 权限点注册表规模异常偏小"

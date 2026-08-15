@@ -222,7 +222,6 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "ai:view": {"module": "分析", "label": "AI 助手", "description": "访问 AI 助手"},
     "dimensions:view": {"module": "分析", "label": "查看维度", "description": "访问维度管理"},
     "glossary:view": {"module": "分析", "label": "查看术语表", "description": "访问术语表"},
-    "templates:view_extra": {},  # 占位保持分组稳定（勿用）
     # ---- 数据源 / 采集
     "data-sources:view": {"module": "采集", "label": "查看数据源", "description": "访问数据源管理"},
     "data-source:create": {"module": "采集", "label": "新增数据源", "description": "创建数据源连接"},  # noqa: E501
@@ -272,9 +271,6 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "feedback:view": {"module": "总览", "label": "查看用户反馈", "description": "访问用户反馈"},
     "guide:view": {"module": "总览", "label": "查看使用指南", "description": "访问使用指南"},
 }
-
-#: 占位键清理（保持注册表纯净）。
-UI_ACTION_REGISTRY.pop("templates:view_extra", None)
 
 #: 角色 → UI 权限点默认基线（与 ``ROLE_ACTIONS`` 正交：前者供前端 UI 管控，
 #: 后者供 PDP 资源级判定；``role_permission`` 表可对两者分别覆盖）。

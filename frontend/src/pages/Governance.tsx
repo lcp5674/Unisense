@@ -23,6 +23,7 @@ import {
 } from "../api";
 import type { ActionRegistryItem, GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RolePermissionItem, SubjectDomainTreeNode, UserBrief } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { usePermission } from "../hooks/usePermission";
 
 // 主题域树 → 扁平化下拉选项（保留层级缩进，与用户管理/数据源页「业务域」下拉同款实现）
 function flattenDomains(
@@ -943,14 +944,25 @@ function ErasureTab() {
 }
 
 export function Governance() {
-  const tabItems = [
+  // 组件级权限点过滤：每个 Tab 挂载「需具备任一权限点」才可见（方案 C：按组件管控）。
+  // 我的权限/权限检查对全部治理页访问者开放；管理/合规 Tab 按对应功能权限点收敛。
+  const { can } = usePermission();
+  const rawTabs: Array<{
+    key: string;
+    label: string;
+    children: React.ReactNode;
+    perm?: string[];
+  }> = [
     { key: "perms", label: "我的权限", children: <PermissionsTab /> },
-    { key: "grants", label: "授权管理", children: <GrantsTab /> },
-    { key: "roles", label: "角色管理", children: <RolesTab /> },
-    { key: "pii", label: "PII 复核", children: <PiiReviewTab /> },
+    { key: "grants", label: "授权管理", children: <GrantsTab />, perm: ["grant:create", "grant:revoke", "grant:export"] },
+    { key: "roles", label: "角色管理", children: <RolesTab />, perm: ["role:create", "role:edit", "role:delete"] },
+    { key: "pii", label: "PII 复核", children: <PiiReviewTab />, perm: ["pii:review", "pii:validate", "classification:rescan"] },
     { key: "check", label: "权限检查", children: <CheckTab /> },
-    { key: "erasure", label: "数据擦除", children: <ErasureTab /> },
+    { key: "erasure", label: "数据擦除", children: <ErasureTab />, perm: ["erasure:execute"] },
   ];
+  const tabItems = rawTabs
+    .filter((t) => !t.perm || t.perm.some((p) => can(p)))
+    .map(({ perm: _perm, ...rest }) => rest);
 
   return (
     <div>

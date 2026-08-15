@@ -245,6 +245,54 @@ def check_contract_with_code(td_text: str) -> None:
     for p in missing:
         errors.append(f"[contract] TD 声明的接口路径在后端无实现且未在映射/豁免台账: {p}")
 
+
+def check_ui_action_consistency() -> None:
+    """校验前端引用的 UI 权限点 ⊆ 后端注册表（防拼写漂移/悬空权限点）。
+
+    扫描 ``frontend/src`` 下所有 ``can(...)``/``canAny(...)``/``ROUTE_PERM``/``perm=``
+    引用的 ``模块:功能`` 权限点，逐一断言存在于后端 ``UI_ACTION_REGISTRY``；
+    任何未注册权限点即契约失败（前端将拿到恒 false 的隐形拒绝，须尽早暴露）。
+    """
+    backend_py = ROOT / "backend" / "app" / "services" / "governance" / "policy.py"
+    if not backend_py.exists():
+        return
+    text = backend_py.read_text(encoding="utf-8")
+    registry = set(re.findall(r'"([a-z0-9-]+:[a-z0-9-]+)":\s*\{\s*"module"', text))
+    if not registry:
+        errors.append("[permission] 后端 UI_ACTION_REGISTRY 解析为空（脚本正则漂移或注册表塌缩）")
+        return
+
+    fe_root = ROOT / "frontend" / "src"
+    fe_refs: set[str] = set()
+    if fe_root.exists():
+        # 只在权限点调用上下文匹配（can()/canAny()/canAll()/RequirePerm perm=/
+        # ROUTE_PERM 字典值），避免把事件名(canvas:wheel)、数据键(table:orders)、
+        # localStorage 键(unisense:*-col-widths) 等冒号串误当权限点。
+        # canAny/canAll 支持数组形式 canAny(["a:view","b:edit"])。
+        perm_lit = r"[a-z0-9-]+:[a-z0-9-]+"
+        # 1) can/canAny/canAll(...) 调用段（含数组参数）
+        call_re = re.compile(r"can(?:Any|All)?\([^)]*\)")
+        # 2) ROUTE_PERM 字典定义值 "…": "perm:view"（RequirePerm/路由守卫共用）
+        dict_perm_re = re.compile(r"['\"](?:/[a-z0-9/:.-]*)?['\"]\s*:\s*['\"](%s)['\"]" % perm_lit)
+        for py in fe_root.rglob("*.ts*"):
+            body = py.read_text(encoding="utf-8", errors="ignore")
+            # 从 can*() 调用段提取所有权限点（含数组多值）
+            for seg in call_re.findall(body):
+                fe_refs.update(re.findall(perm_lit, seg))
+            fe_refs.update(re.findall(dict_perm_re, body))
+
+    missing = sorted(fe_refs - registry)
+    if missing:
+        errors.append(
+            "[permission] 前端引用了后端未注册的 UI 权限点（前端将恒 false，需后端注册或改前端）: "
+            + ", ".join(missing)
+        )
+    print(
+        f"[permission] 前端权限点引用 {len(fe_refs)} 个，后端注册表 {len(registry)} 个，"
+        f"未注册引用 {len(missing)} 个"
+    )
+
+
 errors: list[str] = []
 
 
@@ -344,6 +392,7 @@ def main() -> int:
     if args.mode == "contract":
         td_text = TD.read_text(encoding="utf-8") if TD.exists() else ""
         check_contract_with_code(td_text)
+        check_ui_action_consistency()
     elif args.mode == "doc_sync":
         check_doc_sync(status)
     elif args.mode == "gateways_verify":

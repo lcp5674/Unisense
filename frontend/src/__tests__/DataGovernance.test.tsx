@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Governance } from "../pages/Governance";
+import { PermissionProvider } from "../hooks/usePermission";
 
 vi.mock("../api", () => {
   class UnisenseApiError extends Error {
@@ -400,5 +401,57 @@ describe("Governance 权限治理", () => {
       if (okBtn) fireEvent.click(okBtn);
     });
     await waitFor(() => expect(mockDeleteRole).toHaveBeenCalledWith("data_analyst"));
+  });
+});
+
+describe("Governance Tab 级权限过滤", () => {
+  function renderWithPerms(ui_actions: string[]) {
+    mockPerms.mockResolvedValue({
+      user_id: 1,
+      role: "custom",
+      home_domain: null,
+      allowed_actions: ["read"],
+      ui_actions,
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    return render(
+      <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: null, org_id: 1 }}>
+        <Governance />
+      </PermissionProvider>,
+    );
+  }
+
+  it("无管理权限点时只显示我的权限/权限检查", async () => {
+    renderWithPerms(["governance:view"]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "我的权限" })).toBeInTheDocument());
+    expect(screen.queryByRole("tab", { name: "授权管理" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "角色管理" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "PII 复核" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "数据擦除" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "权限检查" })).toBeInTheDocument();
+  });
+
+  it("有授权权限点时显示授权管理 Tab", async () => {
+    renderWithPerms(["governance:view", "grant:create"]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "我的权限" })).toBeInTheDocument());
+    expect(screen.getByRole("tab", { name: "授权管理" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "角色管理" })).not.toBeInTheDocument();
+  });
+
+  it("合规官角色显示 PII 复核 Tab", async () => {
+    renderWithPerms(["governance:view", "pii:review"]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "我的权限" })).toBeInTheDocument());
+    expect(screen.getByRole("tab", { name: "PII 复核" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "授权管理" })).not.toBeInTheDocument();
+  });
+
+  it("有擦除权限点时显示数据擦除 Tab", async () => {
+    renderWithPerms(["governance:view", "erasure:execute"]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "我的权限" })).toBeInTheDocument());
+    expect(screen.getByRole("tab", { name: "数据擦除" })).toBeInTheDocument();
   });
 });
