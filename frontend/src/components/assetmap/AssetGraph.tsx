@@ -523,6 +523,23 @@ function GraphCanvas({
     }
     return m;
   }, [edges]);
+  // 依赖引用数拆分：inDegreeMap =「被多少下游引用」（目标端），outDegreeMap =「依赖多少上游」
+  //（源端）。血缘边方向 source→target（source 是上游/被依赖方）。badge 显示总血缘度，
+  // tooltip 细分「依赖 N 项（上游）/ 被 M 项引用（下游）」，便于用户理解引用关系。
+  const inDegreeMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of edges) m.set(e.target, (m.get(e.target) ?? 0) + 1);
+    return m;
+  }, [edges]);
+  const outDegreeMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of edges) m.set(e.source, (m.get(e.source) ?? 0) + 1);
+    return m;
+  }, [edges]);
+  const inDegreeMapRef = useRef(inDegreeMap);
+  inDegreeMapRef.current = inDegreeMap;
+  const outDegreeMapRef = useRef(outDegreeMap);
+  outDegreeMapRef.current = outDegreeMap;
   const cycleNodes = useMemo(
     () => findTrueCycles(edges, nodes.map((n) => n.id)),
     [edges, nodes],
@@ -712,6 +729,24 @@ function GraphCanvas({
             iconFontSize: (d: NodeData) =>
               (d.data as AssetGraphNode | undefined)?.type === "field" ? 12 : 16,
             iconFill: "#ffffff",
+            // 依赖引用数角标（血缘度 badge）：节点右上角显示该节点被引用的次数，
+            // 用户一眼看出哪些是枢纽节点（高血缘度）。compact LOD 模式下隐藏（大图性能）。
+            badge: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
+            badgeText: (d: NodeData) => {
+              const deg = degreeMapRef.current.get(String(d.id)) ?? 0;
+              return deg > 0 ? String(deg) : "";
+            },
+            badgePosition: "right-top",
+            badgeFill: (d: NodeData) =>
+              (degreeMapRef.current.get(String(d.id)) ?? 0) >= 5
+                ? "#e65100" // 高血缘度（≥5）：橙色醒目，标识枢纽
+                : (degreeMapRef.current.get(String(d.id)) ?? 0) >= 2
+                  ? "#1a73e8" // 中血缘度：蓝
+                  : "#546e7a", // 低血缘度：灰蓝
+            badgeFontSize: 10,
+            badgeTextFill: "#ffffff",
+            badgePadding: [2, 4],
+            badgeOpacity: 0.95,
             // 标签放节点下方（用户明确要求——放节点中心会遮挡图标且与图例形状语义冲突）。
             // 配合 layoutConfig 加大 nodesep/ranksep/collide 间距，保证底部完整标签不互相压字。
             labelText: (d: NodeData) => {
@@ -735,7 +770,7 @@ function GraphCanvas({
             active: { fill: "#faad14", stroke: "#8c6d00", lineWidth: 2 },
             inactive: { opacity: 0.2 },
             // 大数据量 LOD：缩放低于阈值（applyLod）时批量置为 compact——
-            // 隐藏标签/图标/柔光/投影，只保留节点主体与边，显著降低 canvas 重绘开销。
+            // 隐藏标签/图标/柔光/投影/badge，只保留节点主体与边，显著降低 canvas 重绘开销。
             compact: {
               labelOpacity: 0,
               iconOpacity: 0,
@@ -743,6 +778,7 @@ function GraphCanvas({
               haloOpacity: 0,
               shadowBlur: 0,
               shadowOffsetY: 0,
+              badgeOpacity: 0,
             },
           },
         },
@@ -781,6 +817,30 @@ function GraphCanvas({
         },
         layout: layoutConfig(layoutMode),
         behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
+        // 血缘度提示：悬停节点显示「依赖 N 项（上游）/ 被 M 项引用（下游）」，
+        // 与右上角 badge 角标互补——badge 快速看总数，tooltip 细分方向。
+        plugins: [
+          {
+            type: "tooltip",
+            trigger: "hover",
+            getContent: (evt: IElementEvent) => {
+              const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
+              const id = raw?.id ?? raw?.__data__?.id;
+              const node = id
+                ? (graph?.getNodeData(String(id))?.data as AssetGraphNode | undefined)
+                : undefined;
+              const label = node?.label ?? id ?? "";
+              const up = id ? (outDegreeMapRef.current.get(String(id)) ?? 0) : 0; // 依赖的上游
+              const down = id ? (inDegreeMapRef.current.get(String(id)) ?? 0) : 0; // 被引用的下游
+              const total = up + down;
+              const div = document.createElement("div");
+              div.style.fontSize = "12px";
+              div.style.lineHeight = "1.6";
+              div.innerHTML = `<b>${label}</b><br/>依赖 ${up} 项（上游）<br/>被 ${down} 项引用（下游）<br/><span style="color:#e65100">血缘度 ${total}</span>`;
+              return div;
+            },
+          },
+        ],
       });
       graphRef.current = graph;
 
@@ -1043,6 +1103,8 @@ export function AssetGraph({
   // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
+  // 血缘度筛选：仅展示依赖引用数 ≥ 阈值的节点（聚焦枢纽，隐藏低价值叶子）
+  const [minDegreeFilter, setMinDegreeFilter] = useState(0);
   // 字段折叠：showFields 作为初始值并受控同步（父组件可动态改），控制条可切换
   const [showFieldsOn, setShowFieldsOn] = useState(showFields);
   useEffect(() => setShowFieldsOn(showFields), [showFields]);
@@ -1083,12 +1145,27 @@ export function AssetGraph({
     return list;
   }, [nodes, typeFilter, showFieldsOn]);
 
+  // 血缘度筛选（聚焦枢纽）：仅保留依赖引用数 ≥ 阈值的节点。度统计基于完整 edges
+  //（含被 typeFilter/字段折叠隐藏的节点），保证「枢纽」判断不被筛选顺序影响。
+  const degreeFilteredNodes = useMemo(() => {
+    if (minDegreeFilter <= 0) return filteredNodes;
+    const dm = new Map<string, number>();
+    for (const e of edges) {
+      dm.set(e.source, (dm.get(e.source) ?? 0) + 1);
+      dm.set(e.target, (dm.get(e.target) ?? 0) + 1);
+    }
+    return filteredNodes.filter((n) => (dm.get(n.id) ?? 0) >= minDegreeFilter);
+  }, [filteredNodes, edges, minDegreeFilter]);
+
   // 限流渲染：优先保留核心节点，超出阈值时默认隐藏附属字段节点
   const {
     visible: visibleNodes,
     visibleEdges,
     hidden,
-  } = useMemo(() => pickVisible(filteredNodes, edges, showAll), [filteredNodes, edges, showAll]);
+  } = useMemo(
+    () => pickVisible(degreeFilteredNodes, edges, showAll),
+    [degreeFilteredNodes, edges, showAll],
+  );
 
   // 环检测 + 双向边合并：A↔B 合并为双箭头减少视觉噪声；SCC>2 的真环单独标记
   const mergedEdges = useMemo(() => mergeBidirectionalEdges(visibleEdges), [visibleEdges]);
@@ -1212,6 +1289,22 @@ export function AssetGraph({
           options={TYPE_OPTIONS}
           maxTagCount="responsive"
           data-testid="asset-graph-type-filter"
+        />
+        <Select
+          allowClear
+          placeholder="依赖 ≥ 0"
+          style={{ minWidth: 130 }}
+          value={minDegreeFilter === 0 ? undefined : minDegreeFilter}
+          onChange={(v: number | undefined) => setMinDegreeFilter(v ?? 0)}
+          data-testid="asset-graph-min-degree"
+          options={[
+            { value: 0, label: "依赖 ≥ 0（全部）" },
+            { value: 1, label: "依赖 ≥ 1" },
+            { value: 2, label: "依赖 ≥ 2" },
+            { value: 3, label: "依赖 ≥ 3" },
+            { value: 5, label: "依赖 ≥ 5（枢纽）" },
+            { value: 10, label: "依赖 ≥ 10" },
+          ]}
         />
         <Input
           allowClear
@@ -1338,7 +1431,7 @@ export function AssetGraph({
               marginRight: 4,
             }}
           />
-          <span className="muted">PII 描边 · 节点大小=血缘度 · 圆形/矩形/椭圆=指标/表/字段</span>
+          <span className="muted">PII 描边 · 节点大小=血缘度 · 圆形/矩形/椭圆=指标/表/字段 · 右上角数字=依赖引用数</span>
         </div>
         {hasLayerNodes && (
           <div>

@@ -441,4 +441,43 @@ describe("AssetGraph 交互", () => {
     // 高血缘度节点 n0（连 49 条）应仍在其保留边中出现
     expect(data.edges.some((e) => e.source === "table:n0" || e.target === "table:n0")).toBe(true);
   });
+
+  it("血缘度筛选：依赖 ≥ 阈值时仅保留枢纽节点（隐藏低价值叶子）", async () => {
+    const user = userEvent.setup();
+    // 5 节点：hub 连接全部（血缘度 4），leaf1-4 各连 hub（血缘度 1）
+    const hubNodes: AssetGraphNode[] = [
+      { id: "table:hub", label: "hub", type: "table" },
+      { id: "table:l1", label: "l1", type: "table" },
+      { id: "table:l2", label: "l2", type: "table" },
+      { id: "table:l3", label: "l3", type: "table" },
+      { id: "table:l4", label: "l4", type: "table" },
+    ];
+    const hubEdges: AssetGraphEdge[] = [
+      { source: "table:hub", target: "table:l1", type: "DERIVED_FROM" },
+      { source: "table:hub", target: "table:l2", type: "DERIVED_FROM" },
+      { source: "table:hub", target: "table:l3", type: "DERIVED_FROM" },
+      { source: "table:hub", target: "table:l4", type: "DERIVED_FROM" },
+    ];
+    render(<AssetGraph nodes={hubNodes} edges={hubEdges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    // 默认显示全部 5 节点
+    expect(lastGraphData().nodes).toHaveLength(5);
+
+    // 血缘度筛选「依赖 ≥ 2」：只有 hub（度 4）保留，4 个叶子（度 1）被过滤
+    const select = screen.getByTestId("asset-graph-min-degree");
+    fireEvent.mouseDown(select.querySelector(".ant-select-selector") as Element);
+    await user.click(await screen.findByText("依赖 ≥ 2"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      const data = lastGraphData();
+      expect(data.nodes).toHaveLength(1);
+      expect(data.nodes[0].id).toBe("table:hub");
+    });
+
+    // 清空筛选（选「依赖 ≥ 0 全部」）恢复全部
+    fireEvent.mouseDown(select.querySelector(".ant-select-selector") as Element);
+    await user.click(await screen.findByText("依赖 ≥ 0（全部）"));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(lastGraphData().nodes).toHaveLength(5));
+  });
 });
