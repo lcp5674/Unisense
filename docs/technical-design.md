@@ -2057,6 +2057,15 @@ Owner       ·    ·   审/写  裁   读    管     ·    ·   处    读   管
 - **优先级链**：manual > llm > schema_json 原始 comment。`upsert_description` 保护高优先级不被低优先级覆盖。
 - **合并展示**：`assetmap.get_entity_detail` 查询 `column_descriptions` 并按优先级合并 `description`/`description_source` 到 `schema_summary` 每条字段。
 
+**采集运行历史（collection_run，工业级可追溯）**：
+- 采集任务（job）为 ephemeral 运行时数据（JobStore 内存/Redis，终态 7 天 TTL）；**采集运行历史**持久化于 `collection_run` 表（迁移 0049），每次采集（同步 `POST /collect`、异步 worker `run_collection_task`、手动/定时）落一行，状态 `RUNNING → COMPLETED/FAILED`。
+- 字段：`source_id/job_id/trigger(manual|scheduled)/mode/effective_mode(增量降级回填)/status/actor_id/started_at/finished_at/scanned/registered/pii_registered/failed_count/drift_count/deprecated_count/coverage/error(截断512)/detail_json(failed_specs/drift_events/degrade_reason)`。
+- 生命周期：`start_collection_run`（RUNNING 独立提交，进程崩溃不丢）→ 采集 → `complete_collection_run`/`fail_collection_run`（终态提交）；超时/失败均正确收尾；软删数据源级联改名保留历史。
+- 查询接口：`GET /collection-runs`（分页 + `source_id/status/trigger` 过滤 + 批量回填源名/责任人 + `duration_seconds`）、`GET /collection-runs/{id}`（含 `detail` 明细）。
+
+**采集任务中心（服务端分页）**：
+- `GET /data-sources/jobs` 返回 `{items, total, page, page_size}` 分页结构（`JobStore.count` 与 `list` 同过滤；InMemory/Redis/Arq 三实现），修复前端本地切片 50 条上限；`?status=` 供总览仪表「采集任务」资产卡片下钻。
+
 **数据流转**：
 ```
 源端(只读) --元数据--> collector --upsert(upstream_signature)--> MySQL.db_catalog
