@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -591,7 +591,11 @@ function ChangeCatalogDetailDrawer({
             <Button
               type="primary"
               icon={<SearchOutlined />}
-              onClick={() => navigate(`/catalog?kw=${encodeURIComponent(item.entity_name)}`)}
+              onClick={() =>
+                navigate(
+                  `/catalogs?kw=${encodeURIComponent(item.entity_name)}&focus=${encodeURIComponent(item.entity_name)}&from=变更追踪`,
+                )
+              }
             >
               在采集目录中查看
             </Button>
@@ -807,7 +811,11 @@ function ChangeMetricDetailDrawer({
         metric ? (
           <Button
             type="primary"
-            onClick={() => navigate(`/detail/${encodeURIComponent(metric.metric_code)}`)}
+            onClick={() =>
+              navigate(`/detail/${encodeURIComponent(metric.metric_code)}`, {
+                state: { from: "assetmap-changes" },
+              })
+            }
           >
             前往指标详情 →
           </Button>
@@ -1615,7 +1623,10 @@ function GraphTab() {
       content: `「${entityName}」未在元数据目录中找到（可能尚未采集或数据源已删除）。是否前往采集目录查看？`,
       okText: "前往采集目录",
       cancelText: "取消",
-      onOk: () => navigate(`/catalog?kw=${encodeURIComponent(entityName)}`),
+      onOk: () =>
+        navigate(
+          `/catalogs?kw=${encodeURIComponent(entityName)}&focus=${encodeURIComponent(entityName)}&from=资产地图`,
+        ),
     });
   }
 
@@ -3849,7 +3860,9 @@ function ChangesTab() {
                 className="mono"
                 onClick={(e) => {
                   e.stopPropagation();
-                  navigate(`/detail/${encodeURIComponent(v)}`);
+                  navigate(`/detail/${encodeURIComponent(v)}`, {
+                    state: { from: "assetmap-changes" },
+                  });
                 }}
               >
                 {v}
@@ -4156,9 +4169,17 @@ function MyAssetsTab() {
 }
 
 export function AssetMap() {
-  const [activeTab, setActiveTab] = useState("graph");
   const { track } = useTracking();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  // 支持 ?tab= URL 直达（如从采集目录「返回变更追踪」跳回 ?tab=changes），
+  // 避免返回时组件重新挂载丢失内部 Tabs 状态、永远回到默认「资产地图」。
+  const urlTab = searchParams.get("tab") ?? "";
+  const [activeTab, setActiveTab] = useState(
+    urlTab && ["overview", "search", "graph", "heatmap", "description", "health", "pii", "changes", "mine", "owner", "orphans", "tables"].includes(urlTab)
+      ? urlTab
+      : "graph",
+  );
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {

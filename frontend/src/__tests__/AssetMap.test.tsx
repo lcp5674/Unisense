@@ -1192,6 +1192,56 @@ describe("AssetMap", () => {
     await waitFor(() => expect(screen.getByText("order_id")).toBeInTheDocument());
   });
 
+  it("changes tab catalog drawer jumps to /catalogs with from/focus params", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetChanges).mockResolvedValue({
+      catalogs: [
+        {
+          id: 42,
+          entity_name: "ods_order",
+          entity_type: "table",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          source_id: "s1",
+          source_name: "Source A",
+          created_at: null,
+          updated_at: "2026-08-01T00:00:00Z",
+          change_type: "updated",
+        },
+      ],
+      metrics: [],
+      drift: [],
+      days: 7,
+    });
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 42,
+      entity_name: "ods_order",
+      entity_type: "table",
+      source_id: "s1",
+      source_name: "Source A",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      schema_summary: [],
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-08-01T00:00:00Z",
+    } as never);
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /变更追踪/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /变更追踪/ }));
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
+    await user.click(screen.getByText("ods_order"));
+    await waitFor(() => expect(screen.getByText(/变更目录详情：ods_order/)).toBeInTheDocument());
+    // 抽屉「在采集目录中查看」→ 应跳采集目录（/catalogs，非指标目录 /catalog）并带来源/定位参数
+    await user.click(screen.getByText("在采集目录中查看"));
+    await waitFor(() => expect(window.location.pathname).toBe("/catalogs"));
+    const qs = new URLSearchParams(window.location.search);
+    expect(qs.get("kw")).toBe("ods_order");
+    expect(qs.get("focus")).toBe("ods_order");
+    expect(qs.get("from")).toBe("变更追踪");
+  });
+
   it("changes tab drift row click opens drift diff drawer", async () => {
     const user = userEvent.setup();
     vi.mocked(fetchAssetChanges).mockResolvedValue({

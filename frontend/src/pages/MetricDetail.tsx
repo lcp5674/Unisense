@@ -401,6 +401,8 @@ export function MetricDetail() {
   const fromState = (location.state as { from?: string } | null)?.from;
   const fromDashboard = fromState === "dashboard";
   const fromTodo = fromState === "todo";
+  // 资产地图-变更追踪跳入：精确回到变更追踪 Tab（?tab=changes），避免 history.back 丢内部 Tabs 状态
+  const fromAssetmapChanges = fromState === "assetmap-changes";
   function handleBack() {
     if (fromDashboard) {
       navigate("/dashboard");
@@ -408,6 +410,10 @@ export function MetricDetail() {
     }
     if (fromTodo) {
       navigate("/todo");
+      return;
+    }
+    if (fromAssetmapChanges) {
+      navigate("/assetmap?tab=changes");
       return;
     }
     if (window.history.length > 1) navigate(-1);
