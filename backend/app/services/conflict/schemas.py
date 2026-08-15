@@ -46,7 +46,11 @@ class ArbitrateRequest(BaseModel):
     canonical_metric_code: str | None = None
     # 同名不同义「保留差异+指定一方改名」（TD §12.4 扩展）：仲裁者认定两指标
     # 语义确有差异、需共存，但同名会造成混淆——指定候选或现有指标改名以区分。
-    # 取值须为冲突双方之一（candidate/existing），由 service 层校验。
+    # rename_target 用「角色」标识改名方（candidate/existing）——同名冲突下
+    # candidate 与 existing 的 metric_code 天然相同（检测以 cand_code==ext_code 触发），
+    # 用 code 无法区分，故以角色定位；rename_metric_code 为兼容旧调用保留（取
+    # 冲突双方之一），二者同时提供时以 rename_target 为准。
+    rename_target: Literal["candidate", "existing"] | None = None
     rename_metric_code: str | None = None
     arbitrator_id: int | None = None  # PLAT-2: 以服务端认证身份为准，客户端可不传
     reason: str = ""

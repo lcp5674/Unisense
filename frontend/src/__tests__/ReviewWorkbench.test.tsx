@@ -279,7 +279,7 @@ describe("ReviewWorkbench 冲突仲裁", () => {
     expect(trackMock).toHaveBeenCalledWith("review_arbitrate", "CF-A", "conflict");
   });
 
-  it("保留差异+指定一方改名：选择改名方后提交 rename_metric_code", async () => {
+  it("保留差异+指定一方改名：选择改名方后提交 rename_target 角色", async () => {
     renderWorkbench();
     await waitFor(() => expect(screen.getByText("CF-A")).toBeInTheDocument());
     const row = screen.getByText("CF-A").closest("tr") as HTMLElement;
@@ -293,7 +293,7 @@ describe("ReviewWorkbench 冲突仲裁", () => {
     await waitFor(() => expect(screen.getByText(/请指定需要改名的指标/)).toBeInTheDocument());
     expect(mockedArbitrate).not.toHaveBeenCalled();
 
-    // 指定候选指标改名后提交
+    // 指定候选指标改名后提交：传 rename_target 角色（同名冲突下 code 相同无法区分）
     const select = screen.getByText("选择需要改名的指标").closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(select.querySelector("input") as HTMLElement);
     await waitFor(() =>
@@ -306,7 +306,7 @@ describe("ReviewWorkbench 冲突仲裁", () => {
         "CF-A",
         "keep_diff",
         "",
-        "sales_gmv_day",
+        "candidate",
       ),
     );
   });

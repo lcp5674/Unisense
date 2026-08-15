@@ -88,7 +88,9 @@ const DECISION_OPTIONS: Record<string, DecisionOption[]> = {
   ],
 };
 
-// 前端决策 → 后端 arbitrate 入参（decision + canonical_metric_code + rename_metric_code）
+// 前端决策 → 后端 arbitrate 入参（decision + canonical_metric_code + rename_target）
+// 改名目标以「角色」（candidate/existing）标识：同名冲突下候选/现有 code 相同，
+// 用 code 无法区分，故前端选角色、后端据此定位 metric_code。
 function toBackendPayload(c: ConflictResponse, d: ArbitralDecision, renameTarget = "") {
   const candidate = c.candidate_metric_code ?? "";
   const existing = c.existing_metric_code ?? "";
@@ -100,8 +102,8 @@ function toBackendPayload(c: ConflictResponse, d: ArbitralDecision, renameTarget
     case "merge":
       return { decision: "merge", canonical_metric_code: existing };
     case "keep_diff_rename":
-      // 保留差异 + 指定一方改名：canonical 留空（不选权威），rename_metric_code 指定改名方
-      return { decision: "keep_diff", canonical_metric_code: "", rename_metric_code: renameTarget };
+      // 保留差异 + 指定一方改名：canonical 留空（不选权威），rename_target 指定改名方角色
+      return { decision: "keep_diff", canonical_metric_code: "", rename_target: renameTarget };
     case "keep_diff":
       return { decision: "keep_diff", canonical_metric_code: "" };
   }
@@ -250,7 +252,7 @@ export function ReviewWorkbench() {
         c.conflict_id,
         payload.decision,
         payload.canonical_metric_code,
-        payload.rename_metric_code ?? "",
+        payload.rename_target ?? "",
       );
       message.success(`已仲裁：${c.conflict_id}`);
       track("review_arbitrate", c.conflict_id, "conflict");
@@ -577,11 +579,11 @@ export function ReviewWorkbench() {
                       disabled={arbitrateBusy}
                       options={[
                         {
-                          value: arbitrating?.candidate_metric_code ?? "",
+                          value: "candidate",
                           label: `候选指标：${arbitrating?.candidate_metric_code ?? ""}`,
                         },
                         {
-                          value: arbitrating?.existing_metric_code ?? "",
+                          value: "existing",
                           label: `现有指标：${arbitrating?.existing_metric_code ?? ""}`,
                         },
                       ]}

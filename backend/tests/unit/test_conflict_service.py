@@ -446,6 +446,60 @@ async def test_arbitrate_rename_target_must_be_conflict_party() -> None:
         )
 
 
+async def test_arbitrate_rename_target_role_resolves_same_name_conflict() -> None:
+    """同名冲突（candidate/existing 同码）下 rename_target 角色定位改名方。
+
+    检测以 cand_code==ext_code 触发同名冲突，候选/现有 metric_code 天然相同——
+    用 code 无法区分改名目标，须以角色（candidate/existing）定位。这是
+    「仲裁弹窗指定改名方只能选现有、切不了候选」缺陷的直接回归证据。
+    """
+    svc, repo, events, _, applier = _svc()
+    req = ConflictCheckRequest(
+        candidate=MetricInput(
+            metric_code="sales_conflict_day", domain="sales", definition="sum(amount)"
+        ),
+        existing=[
+            MetricInput(
+                metric_code="sales_conflict_day", domain="finance", definition="sum(price)"
+            )
+        ],
+    )
+    await svc.check(req.candidate, req.existing)
+    conflict_id = repo.conflicts[0].conflict_id
+    # 角色指定候选为改名方：即使 candidate==existing 同码，也能精确区分
+    conflict = await svc.arbitrate(
+        conflict_id,
+        ArbitrateRequest(
+            decision="keep_diff",
+            rename_target="candidate",
+            reason="同名不同义，指定候选指标改名",
+        ),
+        actor_id=1,
+    )
+    assert conflict.status == ConflictStatus.RULED
+    assert conflict.decision_json["rename_metric_code"] == "sales_conflict_day"
+    assert conflict.decision_json["rename_target"] == "candidate"
+    # 联动回调收到改名目标 code（按角色解析）
+    assert applier is not None and applier.applied
+    _conflict, _decision, _canonical, _actor, rename = applier.applied[-1]
+    assert rename == "sales_conflict_day"
+    # 事件携带 rename_target 角色（供通知/裁决记录溯源）
+    ruled = [e for e in events.published if e["event_type"] == "conflict_ruled"]
+    assert ruled and ruled[-1]["payload"].get("rename_metric_code") == "sales_conflict_day"
+
+
+async def test_arbitrate_rename_target_invalid_role_rejected() -> None:
+    """rename_target 角色非法（非 candidate/existing）→ schema 层即拒绝（fail-fast）。"""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ArbitrateRequest(
+            decision="keep_diff",
+            rename_target="other",
+            reason="非法角色",
+        )
+
+
 async def test_arbitrate_rename_requires_keep_diff_decision() -> None:
     """改名目标仅在保留差异决策下有意义：choose_canonical 指定改名 → 拒绝。"""
     svc, repo, _, _, _ = _svc()

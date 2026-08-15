@@ -201,11 +201,23 @@ class ConflictService(BaseService):
             decision = "keep_diff"
         # PLAT-2: 以服务端认证身份 actor_id 为权威归因，忽略客户端伪造的 req.arbitrator_id
         arbitrator_id = actor_id if actor_id is not None else req.arbitrator_id
-        # 「保留差异+指定一方改名」（TD §12.4 扩展）：rename_metric_code 须是冲突双方之一，
-        # 且仅 keep_diff 语义下有意义——否则改名目标歧义/无意义，拒绝裁决。
+        # 「保留差异+指定一方改名」（TD §12.4 扩展）：改名目标须是冲突双方之一。
+        # 同名不同义冲突下 candidate/existing 的 metric_code 天然相同（检测以
+        # cand_code==ext_code 触发），用 code 无法区分 → 优先以 rename_target 角色定位，
+        # rename_metric_code 作为兼容旧调用的后备（仍校验须命中双方之一）。
+        # 二者均未提供 → 无改名语义；仅 keep_diff 决策下可指定改名。
+        codes = conflict.metric_codes or {}
         rename_code = req.rename_metric_code
+        rename_target = req.rename_target
+        if rename_target is not None:
+            if rename_target not in ("candidate", "existing"):
+                raise ConflictError(f"改名目标角色非法: {rename_target}")
+            rename_code = codes.get(rename_target)
+            if not rename_code:
+                raise ConflictError(
+                    f"冲突 {conflict.conflict_id} 缺少 {rename_target} 指标，无法指定改名"
+                )
         if rename_code:
-            codes = conflict.metric_codes or {}
             if rename_code not in (codes.get("candidate"), codes.get("existing")):
                 raise ConflictError(
                     f"改名目标 {rename_code} 不在冲突双方（候选/现有）中，无法指定改名"
@@ -222,6 +234,8 @@ class ConflictService(BaseService):
         }
         if rename_code:
             decision_json["rename_metric_code"] = rename_code
+            if rename_target is not None:
+                decision_json["rename_target"] = rename_target
         conflict = await self._repo.update_status(
             conflict,
             ConflictStatus.RULED,

@@ -821,15 +821,22 @@ export async function arbitrateConflict(
   conflictId: string,
   decision: string,
   canonicalMetricCode: string,
-  renameMetricCode = "",
+  renameTargetOrCode = "",
 ): Promise<ConflictResponse> {
+  // renameTargetOrCode 为「角色」（candidate/existing）或兼容旧调用的 metric_code：
+  // 同名冲突下候选/现有 code 相同，须以角色区分，故优先按角色解析。
+  const body: Record<string, string> = {
+    decision,
+    canonical_metric_code: canonicalMetricCode,
+  };
+  if (renameTargetOrCode === "candidate" || renameTargetOrCode === "existing") {
+    body.rename_target = renameTargetOrCode;
+  } else if (renameTargetOrCode) {
+    body.rename_metric_code = renameTargetOrCode;
+  }
   return request<ConflictResponse>(`${API_BASE}/conflicts/${conflictId}/arbitrate`, {
     method: "POST",
-    body: JSON.stringify({
-      decision,
-      canonical_metric_code: canonicalMetricCode,
-      ...(renameMetricCode ? { rename_metric_code: renameMetricCode } : {}),
-    }),
+    body: JSON.stringify(body),
   });
 }
 
