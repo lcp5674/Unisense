@@ -127,13 +127,25 @@ export function TodoCenter() {
         loading={loading}
         dataSource={todos}
         locale={{ emptyText: "暂无待办" }}
-        renderItem={(t) => (
+        renderItem={(t) => {
+          const target = KIND_META[t.kind].target(t);
+          return (
           <List.Item
+            style={{ cursor: "pointer" }}
+            onClick={() => {
+              // 整行可点击：传 from="todo" 让目标页（如 MetricDetail）知道来源，便于返回
+              navigate(target, { state: { from: "todo" } });
+            }}
+            data-testid={`todo-item-${t.kind}`}
             actions={[
               <Button
                 type="link"
                 key="open"
-                onClick={() => navigate(KIND_META[t.kind].target(t))}
+                onClick={(e) => {
+                  // 按钮点击时不触发整行导航（避免双重跳转）
+                  e.stopPropagation();
+                  navigate(target, { state: { from: "todo" } });
+                }}
               >
                 {KIND_META[t.kind].action}
               </Button>,
@@ -145,7 +157,8 @@ export function TodoCenter() {
               description={t.meta}
             />
           </List.Item>
-        )}
+          );
+        }}
       />
       </Card>
     </div>

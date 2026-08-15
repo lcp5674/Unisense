@@ -174,4 +174,31 @@ describe("待办中心 - 聚合与跳转", () => {
     fireEvent.click(screen.getByRole("button", { name: /去处理/ }));
     await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/quality"));
   });
+
+  it("点击草稿行（item body）触发整行跳转指标详情", async () => {
+    renderPage();
+    await screen.findByText(/草稿待完善/);
+    const item = await screen.findByTestId("todo-item-draft");
+    fireEvent.click(item);
+    await waitFor(() =>
+      expect(screen.getByTestId("path").textContent).toBe("/detail/GMV_DRAFT"),
+    );
+  });
+
+  it("点击冲突行（item body）触发整行跳转冲突仲裁页", async () => {
+    mockedConflicts.mockResolvedValue({
+      items: [
+        { conflict_id: "C-1", candidate_metric_code: "A", existing_metric_code: "B", type: "same_name_diff_def", status: "OPEN" } as unknown as ConflictListResponse["items"][number],
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    } as ConflictListResponse);
+
+    renderPage();
+    await screen.findByText(/冲突待仲裁/);
+    const item = await screen.findByTestId("todo-item-conflict");
+    fireEvent.click(item);
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/review"));
+  });
 });
