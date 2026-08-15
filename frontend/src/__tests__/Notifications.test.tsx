@@ -40,6 +40,7 @@ import {
   markAllNotificationsRead,
   deleteNotification,
   deleteAllNotifications,
+  upsertSubscription,
 } from "../api";
 
 const mockedList = vi.mocked(listNotifications);
@@ -270,6 +271,46 @@ describe("通知中心 - 订阅项对齐", () => {
     // 渠道下拉：短信不可选
     fireEvent.mouseDown(screen.getByLabelText("送达方式"));
     expect(screen.queryByText("短信")).not.toBeInTheDocument();
+  });
+
+  it("新增订阅支持多选消息类型：选多个事件 → 每个事件各建一条订阅", async () => {
+    const mockedUpsert = vi.mocked(upsertSubscription);
+    mockedUpsert.mockResolvedValue({ id: 1 } as never);
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    renderPage();
+
+    fireEvent.click(screen.getByRole("tab", { name: "订阅设置" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /新增订阅/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /新增订阅/ }));
+
+    // 送达方式：email
+    fireEvent.mouseDown(screen.getByLabelText("送达方式"));
+    fireEvent.click(await screen.findByText("邮件"));
+    // 消息类型多选：展开 dropdown，在 dropdown 容器内连续点选选项
+    //（antd 多选在 jsdom 中下拉保持打开，但选项与已选 tag 文本重复，须限定在 dropdown 内）
+    const typeLabel = screen.getByLabelText("消息类型");
+    fireEvent.mouseDown(typeLabel);
+    const dropdown = () =>
+      document.querySelector(".ant-select-dropdown:not(.ant-select-dropdown-hidden)") as HTMLElement;
+    await waitFor(() => expect(dropdown()).toBeTruthy());
+    const optionOf = (label: string) =>
+      [...(dropdown().querySelectorAll(".ant-select-item-option") ?? [])].find(
+        (el) => el.textContent?.includes(label),
+      ) as HTMLElement;
+    fireEvent.click(optionOf("指标创建"));
+    fireEvent.click(optionOf("数据质量异常告警"));
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockedUpsert).toHaveBeenCalledTimes(2);
+      expect(mockedUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({ channel: "email", event_type: "metric.created", enabled: true }),
+      );
+      expect(mockedUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({ channel: "email", event_type: "quality.anomaly" }),
+      );
+    });
   });
 });
 
