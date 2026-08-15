@@ -244,9 +244,12 @@ export function parseResultToGraphData(result: ParseLineageResult): {
   return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
 }
 
-/** 把纯 SELECT（无落点）的上游依赖清单构建为「本次查询 → 源表/字段」的上游依赖图谱。
- *  - 中心虚拟节点「本次查询」作为本次查询动作的落点；
- *  - FROM/JOIN 源表与读取字段为外围节点，依赖边统一指向中心（仅展示，不写图谱）。
+/** 把纯 SELECT（无落点）的上游依赖清单构建为「本次查询 → 表 → 字段」三层的上游依赖图谱。
+ *  - 中心虚拟节点「本次查询」为最上层（本次查询动作的汇聚点）；
+ *  - FROM/JOIN 源表挂在中心之下（本次查询 → 表）；
+ *  - 读取字段挂在所属表之下（表 → 字段），形成「本次查询-表-字段」层级；
+ *  - 无表前缀的裸列名（未限定列）直接挂在中心之下。
+ * 边方向即血缘 DAG 方向（源在上、目标在下），仅展示，不写图谱。
  */
 export function upstreamDepsToGraphData(deps: UpstreamDeps): {
   nodes: AssetGraphNode[];
@@ -257,15 +260,31 @@ export function upstreamDepsToGraphData(deps: UpstreamDeps): {
   const seenEdges = new Set<string>();
   const QUERY_ID = "query:本次查询";
   nodeMap.set(QUERY_ID, { id: QUERY_ID, type: "metric", label: "本次查询" });
-  const addDependency = (id: string, type: "table" | "field") => {
+  const addNode = (id: string, type: "table" | "field"): string => {
     if (!nodeMap.has(id)) nodeMap.set(id, { id, type, label: id.slice(id.indexOf(":") + 1) });
-    const key = `${id}__${QUERY_ID}`;
+    return id;
+  };
+  const addEdge = (source: string, target: string) => {
+    const key = `${source}__${target}`;
     if (seenEdges.has(key)) return;
     seenEdges.add(key);
-    graphEdges.push({ source: id, target: QUERY_ID, type: "READS_FROM" });
+    graphEdges.push({ source, target, type: "READS_FROM" });
   };
-  for (const t of deps.tables) addDependency(`table:${t}`, "table");
-  for (const f of deps.fields) addDependency(`field:${f}`, "field");
+  // 第一层：本次查询 → 源表
+  for (const t of deps.tables) addEdge(QUERY_ID, addNode(`table:${t}`, "table"));
+  // 第二层：表 → 所属字段；裸列名（无表前缀）直接挂中心
+  for (const f of deps.fields) {
+    const fieldId = addNode(`field:${f}`, "field");
+    const dot = f.indexOf(".");
+    if (dot > 0) {
+      // 字段限定列（表.列）：挂到所属表下；即使该表未出现在 tables 也补建表节点
+      const tableId = addNode(`table:${f.slice(0, dot)}`, "table");
+      addEdge(QUERY_ID, tableId);
+      addEdge(tableId, fieldId);
+    } else {
+      addEdge(QUERY_ID, fieldId);
+    }
+  }
   return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
 }
 

@@ -1002,12 +1002,12 @@ describe("parseResultToGraphData 解析结果转血缘图谱", () => {
 });
 
 describe("upstreamDepsToGraphData 上游依赖转图谱", () => {
-  it("中心「本次查询」+ 源表/字段节点，依赖边指向中心", () => {
+  it("「本次查询 → 表 → 字段」三层层级，字段挂所属表下", () => {
     const g = upstreamDepsToGraphData({
       tables: ["ods_orders", "dim_user"],
       fields: ["ods_orders.id", "dim_user.name"],
     });
-    // 节点：中心 1 + 表 2 + 字段 2 = 5；边：4 条依赖边
+    // 节点：中心 1 + 表 2 + 字段 2 = 5；边：查询→表 2 + 表→字段 2 = 4
     expect(g.nodes).toHaveLength(5);
     expect(g.edges).toHaveLength(4);
     const query = g.nodes.find((n) => n.id === "query:本次查询");
@@ -1016,11 +1016,39 @@ describe("upstreamDepsToGraphData 上游依赖转图谱", () => {
       g.nodes.some((n) => n.id === "table:ods_orders" && n.label === "ods_orders" && n.type === "table"),
     ).toBe(true);
     expect(g.nodes.some((n) => n.id === "field:ods_orders.id" && n.type === "field")).toBe(true);
-    // 所有依赖边统一指向中心节点
-    for (const e of g.edges) {
-      expect(e.target).toBe("query:本次查询");
-      expect(e.type).toBe("READS_FROM");
-    }
+    // 第一层：本次查询 → 源表
+    expect(g.edges.some((e) => e.source === "query:本次查询" && e.target === "table:ods_orders")).toBe(true);
+    expect(g.edges.some((e) => e.source === "query:本次查询" && e.target === "table:dim_user")).toBe(true);
+    // 第二层：表 → 所属字段
+    expect(g.edges.some((e) => e.source === "table:ods_orders" && e.target === "field:ods_orders.id")).toBe(true);
+    expect(g.edges.some((e) => e.source === "table:dim_user" && e.target === "field:dim_user.name")).toBe(true);
+    // 字段不应直接连中心（保证层次：本次查询-表-字段）
+    expect(g.edges.some((e) => e.target === "query:本次查询")).toBe(false);
+    for (const e of g.edges) expect(e.type).toBe("READS_FROM");
+  });
+
+  it("字段所属表未出现在 tables 时也补建表节点挂中心", () => {
+    const g = upstreamDepsToGraphData({
+      tables: ["dim_user"],
+      fields: ["ods_orders.id"],
+    });
+    // 中心 1 + 表 2（dim_user + 补建的 ods_orders）+ 字段 1 = 4
+    expect(g.nodes).toHaveLength(4);
+    expect(g.nodes.some((n) => n.id === "table:ods_orders")).toBe(true);
+    // 边：查询→dim_user、查询→ods_orders（补建）、ods_orders→字段 = 3
+    expect(g.edges).toHaveLength(3);
+    expect(g.edges.some((e) => e.source === "table:ods_orders" && e.target === "field:ods_orders.id")).toBe(true);
+  });
+
+  it("裸列名（无表前缀）直接挂中心", () => {
+    const g = upstreamDepsToGraphData({
+      tables: [],
+      fields: ["order_id"],
+    });
+    // 中心 1 + 字段 1 = 2；边：查询→字段 = 1
+    expect(g.nodes).toHaveLength(2);
+    expect(g.edges).toHaveLength(1);
+    expect(g.edges.some((e) => e.source === "query:本次查询" && e.target === "field:order_id")).toBe(true);
   });
 
   it("重复表/字段节点去重", () => {
@@ -1028,7 +1056,7 @@ describe("upstreamDepsToGraphData 上游依赖转图谱", () => {
       tables: ["ods_orders", "ods_orders"],
       fields: ["ods_orders.id", "ods_orders.id"],
     });
-    // 中心 1 + 表 1 + 字段 1 = 3；边 2 条
+    // 中心 1 + 表 1 + 字段 1 = 3；边：查询→表 1 + 表→字段 1 = 2
     expect(g.nodes).toHaveLength(3);
     expect(g.edges).toHaveLength(2);
   });
