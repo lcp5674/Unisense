@@ -52,10 +52,14 @@ export function SystemDict() {
   // （非软删）项编码做冲突自增（resolveUniqueCode，与 generate_unique_code
   // 逐字节一致），预览即后端将生成的最终编码。
   const watchLabel = Form.useWatch("label", createForm);
+  const usedCodes = useMemo(() => items.map((i) => i.code), [items]);
   const codePreview = useMemo(() => {
     const base = slugifyCode(watchLabel ?? "") || "item";
-    return resolveUniqueCode(base, items.map((i) => i.code));
-  }, [watchLabel, items]);
+    return resolveUniqueCode(base, usedCodes);
+  }, [watchLabel, usedCodes]);
+  // 超上限回退 base（resolveUniqueCode 返回的 base 必然仍被占用）→ 无法自动
+  // 生成唯一编码，切换为手动指定（后端对应抛 DICT_CODE_EXHAUSTED）。
+  const codeExhausted = usedCodes.includes(codePreview);
 
   // 状态筛选为客户端过滤（数据字典按类型 Tabs 一次性加载全部项）
   const visibleItems = useMemo(
@@ -87,9 +91,23 @@ export function SystemDict() {
       .finally(() => setLoading(false));
   }
 
-  async function handleCreate(values: { label: string; sort_order?: number; description?: string }) {
+  // 静默刷新项列表：不置 loading，仅更新 items（打开新增弹窗时调用）
+  function refreshItemsQuietly() {
+    if (!activeType) return;
+    listAllDictItems(activeType).then(setItems).catch(() => {});
+  }
+
+  function openCreate() {
+    setCreateOpen(true);
+    // 打开弹窗时基于最新项列表重算编码预览，缩小「他端新增同名编码但本页未
+    // 刷新」导致的预览滞后窗口（提交仍以后端权威判定为准）。
+    refreshItemsQuietly();
+  }
+
+  async function handleCreate(values: { code?: string; label: string; sort_order?: number; description?: string }) {
     try {
-      // code 不传：由后端按显示名自动生成英文编码（冲突自动追加序号）
+      // code 不传由后端按显示名自动生成英文编码（冲突自动追加序号）；
+      // 仅「无法自动生成」时手动指定 code 才随表单透传。
       await createDictItem(activeType, { ...values, sort_order: values.sort_order ?? 0 });
       message.success("新增成功");
       setCreateOpen(false);
@@ -182,7 +200,7 @@ export function SystemDict() {
         }))}
       />
       <div style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center" }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新增参照数据项</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增参照数据项</Button>
         <Select
           allowClear
           placeholder="全部状态"
@@ -210,12 +228,26 @@ export function SystemDict() {
           <Form.Item name="label" label="显示名" rules={[{ required: true }]}>
             <Input placeholder="如 人民币元" />
           </Form.Item>
-          <Form.Item label="编码（自动生成）" tooltip="系统根据显示名自动生成英文编码，与已有编码冲突时自动追加序号（如 minute_2）；若无法自动生成可手动指定编码后重试">
-            <Space.Compact style={{ width: "100%" }}>
-              <Input value={codePreview} disabled data-testid="dict-code-preview" />
-              <Tag color="blue" style={{ lineHeight: "30px", margin: 0 }}>自动生成</Tag>
-            </Space.Compact>
-          </Form.Item>
+          {codeExhausted ? (
+            <Form.Item
+              name="code"
+              label="编码（需手动指定）"
+              tooltip="已存在大量同名编码（如 x、x_2 … x_100），无法自动生成唯一编码；请手动指定一个未占用的编码，或修改显示名后重试"
+              rules={[{ required: true, pattern: /^[A-Za-z0-9_]+$/, message: "编码仅支持字母、数字、下划线" }]}
+            >
+              <Space.Compact style={{ width: "100%" }}>
+                <Input placeholder="如 item_101" data-testid="dict-code-manual" />
+                <Tag color="orange" style={{ lineHeight: "30px", margin: 0 }}>需手动指定</Tag>
+              </Space.Compact>
+            </Form.Item>
+          ) : (
+            <Form.Item label="编码（自动生成）" tooltip="系统根据显示名自动生成英文编码，与已有编码冲突时自动追加序号（如 minute_2）；若无法自动生成可手动指定编码后重试">
+              <Space.Compact style={{ width: "100%" }}>
+                <Input value={codePreview} disabled data-testid="dict-code-preview" />
+                <Tag color="blue" style={{ lineHeight: "30px", margin: 0 }}>自动生成</Tag>
+              </Space.Compact>
+            </Form.Item>
+          )}
           <Form.Item name="sort_order" label="排序" initialValue={0}>
             <InputNumber min={0} />
           </Form.Item>

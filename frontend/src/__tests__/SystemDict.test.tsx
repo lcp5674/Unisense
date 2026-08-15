@@ -171,4 +171,40 @@ describe("SystemDict 页面", () => {
     expect(callArg.label).toBe("人民币元");
     expect(callArg.code).toBeUndefined();
   });
+
+  it("新增弹窗打开时静默刷新项列表（缩小并发滞后窗口）", async () => {
+    renderDict();
+    await screen.findByText("日");
+    const callsBefore = mockedItems.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    // openCreate 触发一次静默刷新（不置 loading），供编码预览基于最新项重算
+    await waitFor(() => expect(mockedItems.mock.calls.length).toBeGreaterThan(callsBefore));
+  });
+
+  it("同名编码超上限：预览切换为「需手动指定」并可输入编码透传提交", async () => {
+    // base=item 的编码链被全部占用（item、item_2 … item_100 共 101 个）→
+    // resolveUniqueCode 超上限回退 base（item 仍被占用）→ 需手动指定编码
+    const exhausted: SystemDictItem[] = [{ ...ITEMS[0], id: 3, code: "item" }];
+    for (let n = 2; n <= 100; n += 1) {
+      exhausted.push({ ...ITEMS[0], id: 100 + n, code: `item_${n}` });
+    }
+    mockedItems.mockResolvedValue(exhausted);
+    mockedCreate.mockResolvedValue({} as any);
+    renderDict();
+    // 101 项大列表渲染较慢，直接等「新增」按钮（不遍历表格行）
+    fireEvent.click(await screen.findByRole("button", { name: /新增参照数据项/ }));
+    // 纯标点显示名 → slugifyCode 回退 item → 超上限 → 切换为手动指定
+    const labelInput = await screen.findByPlaceholderText("如 人民币元");
+    fireEvent.change(labelInput, { target: { value: "!!!" } });
+    expect(await screen.findByTestId("dict-code-manual")).toBeTruthy();
+    expect(screen.queryByTestId("dict-code-preview")).toBeNull();
+    expect(screen.getByText("需手动指定")).toBeTruthy();
+    // 手动输入编码并提交 → code 随表单透传（后端不再自动生成）
+    fireEvent.change(screen.getByTestId("dict-code-manual"), { target: { value: "item_101" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    const arg = mockedCreate.mock.calls[0][1] as { code?: string; label: string };
+    expect(arg.code).toBe("item_101");
+    // 101 项大列表渲染 + 全量并行下耗时较长，单独放宽超时
+  }, 15000);
 });

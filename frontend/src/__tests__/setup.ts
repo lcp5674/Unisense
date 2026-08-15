@@ -1,5 +1,30 @@
 import "@testing-library/jest-dom";
 
+// antd/rc-motion 出入场动画与 App.message 通知在 jsdom 中依赖 transitionend/
+// requestAnimationFrame 推进，测试在动画完成前结束即触发 React 的 act() 警告
+// （"not wrapped in act(...)"，组件为 CSSMotion/ForwardRef/Notifications）。
+// 这类警告源自动画生命周期，与组件功能无关，且测试断言仍会捕获真实异步问题
+// （若 UI 未按预期更新，断言照样失败，只是少了诊断堆栈）。统一过滤 act 警告
+// 以保持测试输出整洁，其余 console.error 原样保留。
+const origConsoleError = console.error;
+console.error = (...args: unknown[]) => {
+  const text = args
+    .map((a) => {
+      if (typeof a === "string") return a;
+      if (a instanceof Error) return a.message;
+      if (a && typeof a === "object") {
+        const s = (a as { componentStack?: unknown }).componentStack;
+        return typeof s === "string" ? s : "";
+      }
+      return "";
+    })
+    .join("\n");
+  if (text.includes("not wrapped in act(")) {
+    return;
+  }
+  origConsoleError.apply(console, args as Parameters<typeof console.error>);
+};
+
 // antd v5 响应式组件在 jsdom 中依赖 window.matchMedia，测试环境需补齐
 if (typeof window !== "undefined" && !window.matchMedia) {
   Object.defineProperty(window, "matchMedia", {
