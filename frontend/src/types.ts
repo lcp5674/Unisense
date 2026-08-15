@@ -1311,6 +1311,8 @@ export interface DBCatalog {
   description_source?: DescriptionSource | null;
   description_updated_by?: number | null;
   description_updated_at?: string | null;
+  /** 元数据实体最近更新时间（采集刷新/治理补全时更新；资产目录「最近更新」列用） */
+  updated_at?: string | null;
 }
 
 export interface CollectResult {

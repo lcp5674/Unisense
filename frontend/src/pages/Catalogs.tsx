@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Statistic, Row, Col, Descriptions } from "antd";
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, SyncOutlined, ArrowLeftOutlined, HeartOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Statistic, Row, Col, Descriptions, Dropdown, Checkbox } from "antd";
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, SyncOutlined, ArrowLeftOutlined, HeartOutlined, SettingOutlined } from "@ant-design/icons";
 import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, refreshCatalogEntity, inferColumnDescription, inferDescriptions, updateColumnDescription, fetchDescriptionCoverage, listFavorites, addFavorite, removeFavorite, UnisenseApiError } from "../api";
 import type { DBCatalog, DataSource, SchemaColumn } from "../types";
 import type { DescriptionCoverage } from "../api";
@@ -24,6 +24,30 @@ const SENSITIVITY_COLOR: Record<string, string> = {
   NEEDS_REVIEW: "gold",
   UNKNOWN: "default",
 };
+
+/** 列显示开关选项（实体/操作列固定展示，不参与开关）。 */
+const COLUMN_OPTIONS = [
+  { label: "数据源", value: "source" },
+  { label: "字段覆盖", value: "fields" },
+  { label: "业务域", value: "domain" },
+  { label: "敏感度", value: "sensitivity" },
+  { label: "责任人", value: "owner" },
+  { label: "最近更新", value: "updated_at" },
+];
+const ALL_COLUMN_VALUES = COLUMN_OPTIONS.map((o) => o.value);
+
+/** 相对时间（资产「最近更新」列）：刚刚/N 分钟前/N 小时前/N 天前/日期。 */
+function formatRelative(iso?: string | null): string {
+  if (!iso) return "—";
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return "—";
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return "刚刚";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+  return new Date(iso).toLocaleDateString("zh-CN");
+}
 
 /**
  * 模块级推断去重：退出页面再进入时组件内 loading 会丢失，但该 Map 跨组件实例保留，
@@ -65,6 +89,8 @@ export function Catalogs() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // 列显示开关（DataHub 式：默认全开，实体/操作列固定不可关）
+  const [visibleCols, setVisibleCols] = useState<string[]>(ALL_COLUMN_VALUES);
   const [sourceId, setSourceId] = useState(urlSourceId);
   const [sourceStatus, setSourceStatus] = useState<"" | "active" | "deleted">("");
   const [entityType, setEntityType] = useState("");
@@ -484,7 +510,8 @@ export function Catalogs() {
       title: "实体",
       dataIndex: "entity_name",
       key: "entity_name",
-      minWidth: 320,
+      // 不设 width：tableLayout=fixed 下该列吸收表格剩余宽度，宽屏一屏放下、列间距均匀
+      ellipsis: true,
       render: (v: string, r: DBCatalog) => (
         <div>
           <Space size={4} wrap={false}>
@@ -494,7 +521,7 @@ export function Catalogs() {
           </Space>
           <div
             className="muted"
-            style={{ fontSize: 12, lineHeight: "18px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 480 }}
+            style={{ fontSize: 12, lineHeight: "18px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" }}
           >
             {r.description || (r.domain ? `域：${r.domain}` : "（无表描述，可在字段详情中补全）")}
           </div>
@@ -504,8 +531,9 @@ export function Catalogs() {
     {
       title: "数据源",
       dataIndex: "source_id",
-      key: "source_id",
+      key: "source",
       width: 170,
+      ellipsis: true,
       render: (v: string, r: DBCatalog) => (
         <Tooltip title={r.source_name && r.source_name !== v ? `${r.source_name}（${v}）` : v}>
           <span className="mono" style={{ fontSize: 12 }}>
@@ -519,6 +547,7 @@ export function Catalogs() {
       title: "字段",
       key: "fields",
       width: 110,
+      ellipsis: true,
       render: (_: unknown, r: DBCatalog) => {
         if (r.schema_incomplete) return <span className="muted">—</span>;
         const cols = parseSchemaColumns(r);
@@ -533,10 +562,20 @@ export function Catalogs() {
       },
     },
     {
+      title: "业务域",
+      dataIndex: "domain",
+      key: "domain",
+      width: 110,
+      ellipsis: true,
+      render: (v: string | null | undefined) =>
+        v ? <Tag color="geekblue">{v}</Tag> : <span className="muted">—</span>,
+    },
+    {
       title: "敏感度",
       dataIndex: "sensitivity_level",
       key: "sensitivity",
       width: 96,
+      ellipsis: true,
       render: (v: string) => <Tag color={SENSITIVITY_COLOR[v]}>{SENSITIVITY_LABEL[v] ?? v}</Tag>,
     },
     {
@@ -544,11 +583,27 @@ export function Catalogs() {
       dataIndex: "owner_id",
       key: "owner",
       width: 100,
+      ellipsis: true,
       render: (v: number | null, r: DBCatalog) => (
         <Tooltip title={v != null ? `owner_id=${v}` : undefined}>
           <span>{(r.owner_name ?? v) || <Tag>无</Tag>}</span>
         </Tooltip>
       ),
+    },
+    {
+      title: "最近更新",
+      dataIndex: "updated_at",
+      key: "updated_at",
+      width: 130,
+      ellipsis: true,
+      render: (v: string | null | undefined) =>
+        v ? (
+          <Tooltip title={new Date(v).toLocaleString("zh-CN")}>
+            <span className="muted" style={{ fontSize: 12 }}>{formatRelative(v)}</span>
+          </Tooltip>
+        ) : (
+          <span className="muted">—</span>
+        ),
     },
     {
       title: "操作",
@@ -577,6 +632,10 @@ export function Catalogs() {
       ),
     },
   ];
+  // 列显示开关过滤：实体/操作列固定展示，其余按用户开关
+  const visibleColumns = columns.filter(
+    (c) => c.key === "entity_name" || c.key === "action" || visibleCols.includes(c.key),
+  );
 
   return (
     <div>
@@ -707,19 +766,36 @@ export function Catalogs() {
               批量废弃（{selectedRowKeys.length}）
             </Button>
           )}
+          <Dropdown
+            trigger={["click"]}
+            dropdownRender={() => (
+              <Card size="small" style={{ boxShadow: "0 2px 8px rgba(0,0,0,.15)", minWidth: 140 }}>
+                <Checkbox.Group
+                  style={{ display: "flex", flexDirection: "column", gap: 6 }}
+                  value={visibleCols}
+                  onChange={(vals) => setVisibleCols(vals as string[])}
+                  options={COLUMN_OPTIONS}
+                />
+              </Card>
+            )}
+          >
+            <Button icon={<SettingOutlined />}>列设置</Button>
+          </Dropdown>
         </Space>
 
         <Table
           dataSource={items}
-          columns={columns}
+          columns={visibleColumns}
           rowKey={(r) => `${r.source_id}-${r.entity_name}`}
           loading={loading}
+          // fixed 布局：未设宽度的「实体」列吸收剩余空间，宽屏一屏放下、列间距均匀
+          tableLayout="fixed"
           rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
           onRow={(r) => ({
             style: focusName && r.entity_name === focusName ? { background: "#fffbe6" } : undefined,
           })}
           pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
-          scroll={{ x: 900 }}
+          scroll={{ x: "max" }}
           locale={{ emptyText: "暂无目录实体" }}
         />
       </Card>

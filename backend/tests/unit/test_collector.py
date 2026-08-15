@@ -69,6 +69,7 @@ class _FakeCatalog:
         self.upstream_signature = "sig"
         self.content_signature = None
         self.schema_incomplete = False
+        self.updated_at = None
 
 
 class _FakeConnector:
@@ -2463,11 +2464,17 @@ async def test_dbcatalog_response_serializes_schema_def_not_schema_json() -> Non
     """
     from app.services.collector.schemas import DBCatalogResponse
 
-    resp = DBCatalogResponse.model_validate(_FakeCatalog("INTERNAL"))
+    fake = _FakeCatalog("INTERNAL")
+    from datetime import UTC, datetime
+
+    fake.updated_at = datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC)
+    resp = DBCatalogResponse.model_validate(fake)
     dump = resp.model_dump(by_alias=True)  # 模拟 FastAPI 响应序列化
     assert "schema_def" in dump
     assert "schema_json" not in dump
     assert dump["schema_def"] == {"columns": ["user_name"]}
+    # 最近更新时间随响应透出（前端「最近更新」列数据源；FastAPI 序列化时转 ISO 字符串）
+    assert dump["updated_at"] == datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC)
 
 
 async def test_service_get_catalog_detail_not_found() -> None:

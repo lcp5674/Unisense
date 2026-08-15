@@ -247,6 +247,8 @@ class DBCatalogResponse(BaseModel):
     description_source: str | None = None
     description_updated_by: int | None = None
     description_updated_at: Any = None
+    # 元数据实体最近更新时间（采集刷新/治理补全时更新；资产目录「最近更新」列用）
+    updated_at: Any = None
     # 数据源维度展示信息（默认 False/None——源被软删或不存在时 source_deleted=True）
     source_deleted: bool = False
     source_name: str | None = None

@@ -94,6 +94,10 @@ const CATALOGS: DBCatalog[] = [
     upstream_signature: "sig1",
     content_signature: null,
     schema_incomplete: false,
+    domain: "sales",
+    owner_name: "Alice",
+    description: "订单事实表",
+    updated_at: "2026-08-15T10:00:00",
   },
 ];
 
@@ -528,5 +532,40 @@ describe("Catalogs 页面", () => {
 
     // 3 字段：order_id 有 comment、qty 有 description → 2 已描述（67%）
     await screen.findByText("3 字段 · 2 已描述（67%）");
+  });
+
+  it("业务域与最近更新列展示治理信号（产品化布局信息丰富度）", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+    await screen.findByText("dwd_finance_order");
+    // 业务域 Tag（来自 data_source 继承回填）
+    expect(screen.getByText("sales")).toBeTruthy();
+    // 最近更新列显示相对时间（2026-08-15T10:00 距当前为 N 小时前/分钟前）
+    expect(screen.getByText(/刚刚|分钟前|小时前|天前/)).toBeTruthy();
+  });
+
+  it("列设置可开关列显示：取消「最近更新」后该列隐藏，实体列固定保留", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+    await screen.findByText("dwd_finance_order");
+    // 默认最近更新列可见
+    expect(screen.getByText(/刚刚|分钟前|小时前|天前/)).toBeTruthy();
+
+    // 打开「列设置」下拉，取消「最近更新」
+    fireEvent.click(screen.getByText("列设置"));
+    fireEvent.click(screen.getByLabelText("最近更新"));
+
+    await waitFor(() => {
+      expect(screen.queryByText(/刚刚|分钟前|小时前|天前/)).toBeNull();
+    });
+    // 实体/数据源列固定保留（不可关）
+    expect(screen.getByText("dwd_finance_order")).toBeTruthy();
+    expect(screen.getByText("mysql_unisense")).toBeTruthy();
   });
 });
