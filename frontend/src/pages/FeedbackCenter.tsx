@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Rate, message, Tabs, Space, Alert, Tooltip, Row, Col } from "antd";
 import { StarOutlined } from "@ant-design/icons";
-import { listFeedback, submitFeedback, updateFeedbackStatus, submitNps, fetchNpsStats, UnisenseApiError } from "../api";
+import { listFeedback, submitFeedback, updateFeedbackStatus, submitNps, fetchNpsStats, listUsers, getMetric, UnisenseApiError } from "../api";
 import type { Feedback, NpsStats } from "../types";
 import { formatCnTime, timeAgoCn } from "../utils/timeCn";
 
@@ -14,11 +15,22 @@ const STATUS_ZH: Record<string, { label: string; color: string }> = {
   rejected: { label: "已驳回", color: "red" },
 };
 
+// 反馈对象类型 → 业务术语（覆盖全站可反馈对象，含平台/表/字段等）
 const TARGET_TYPE_ZH: Record<string, string> = {
   metric: "指标",
   term: "术语",
   report: "报表",
   dashboard: "仪表盘",
+  platform: "平台",
+  table: "数据表",
+  field: "字段",
+  source: "数据源",
+  template: "指标模板",
+  dimension: "维度",
+  favorite: "收藏",
+  todo: "待办",
+  conflict: "口径冲突",
+  nps: "满意度",
 };
 
 const TYPE_FILTER_OPTIONS = [
@@ -51,6 +63,45 @@ function FeedbackTab() {
   const [status, setStatus] = useState<string | undefined>();
   const [draft, setDraft] = useState<ProcessDraft | null>(null);
   const [updateLoading, setUpdateLoading] = useState(false);
+  // 业务化解析：user_id → 用户名、target_id(metric) → 指标名
+  const [usersMap, setUsersMap] = useState<Record<number, string>>({});
+  const [metricNames, setMetricNames] = useState<Record<string, string>>({});
+  const navigate = useNavigate();
+
+  // 加载用户名单：反馈列表「用户」列展示用户名而非数字 ID
+  useEffect(() => {
+    listUsers()
+      .then((us) => {
+        const m: Record<number, string> = {};
+        for (const u of us) m[u.id] = u.display_name || u.username;
+        setUsersMap(m);
+      })
+      .catch(() => {});
+  }, []);
+
+  // 加载当前页指标类反馈的指标名（对象 ID → 业务含义）
+  useEffect(() => {
+    const codes = Array.from(
+      new Set(
+        items.filter((f) => f.target_type === "metric" && f.target_id).map((f) => f.target_id as string),
+      ),
+    );
+    if (!codes.length) return;
+    let alive = true;
+    Promise.all(
+      codes.map((code) => getMetric(code).catch(() => null)),
+    ).then((metrics) => {
+      if (!alive) return;
+      const m: Record<string, string> = {};
+      metrics.forEach((metric) => {
+        if (metric) m[metric.metric_code] = metric.name;
+      });
+      setMetricNames((prev) => ({ ...prev, ...m }));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [items]);
 
   async function load(p = page, ps = pageSize, tt = targetType, st = status) {
     setLoading(true);
@@ -99,7 +150,13 @@ function FeedbackTab() {
 
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 64 },
-    { title: "用户", dataIndex: "user_id", key: "user", width: 72 },
+    {
+      title: "用户",
+      dataIndex: "user_id",
+      key: "user",
+      width: 100,
+      render: (v: number) => usersMap[v] ?? <span className="muted">#{v}</span>,
+    },
     {
       title: "对象类型",
       dataIndex: "target_type",
@@ -107,9 +164,39 @@ function FeedbackTab() {
       width: 100,
       render: (v: string) => <Tag>{TARGET_TYPE_ZH[v] ?? v}</Tag>,
     },
-    { title: "对象 ID", dataIndex: "target_id", key: "targetId", width: 140, render: (v: string | null) => v ?? <span className="muted">—</span> },
+    {
+      title: "对象",
+      dataIndex: "target_id",
+      key: "targetId",
+      width: 200,
+      render: (v: string | null, f: Feedback) => {
+        if (!v) return <span className="muted">—</span>;
+        if (f.target_type === "metric") {
+          const name = metricNames[v];
+          return (
+            <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate(`/detail/${v}`)}>
+              {name ? `${name}（${v}）` : v}
+            </Button>
+          );
+        }
+        return <span className="mono">{v}</span>;
+      },
+    },
     { title: "评分", dataIndex: "rating", key: "rating", width: 100, render: (v: number | null) => (v !== null ? <Rate disabled defaultValue={v} count={5} /> : <span className="muted">—</span>) },
-    { title: "内容", dataIndex: "comment", key: "comment", ellipsis: true },
+    {
+      title: "内容",
+      dataIndex: "comment",
+      key: "comment",
+      ellipsis: true,
+      render: (v: string | null) =>
+        v ? (
+          <Tooltip title={v} placement="topLeft">
+            <span>{v}</span>
+          </Tooltip>
+        ) : (
+          <span className="muted">—</span>
+        ),
+    },
     {
       title: "状态",
       dataIndex: "status",
@@ -124,8 +211,8 @@ function FeedbackTab() {
       title: "处理人",
       dataIndex: "resolver_id",
       key: "resolver",
-      width: 84,
-      render: (v: number | null) => (v !== null ? <span className="mono">{v}</span> : <span className="muted">—</span>),
+      width: 100,
+      render: (v: number | null) => (v !== null ? usersMap[v] ?? <span className="mono">#{v}</span> : <span className="muted">—</span>),
     },
     {
       title: "处理时间",

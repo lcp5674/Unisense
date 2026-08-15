@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { FeedbackCenter } from "../pages/FeedbackCenter";
 import type { Feedback } from "../types";
 
@@ -9,12 +10,16 @@ vi.mock("../api", () => ({
   submitFeedback: vi.fn(),
   submitNps: vi.fn(),
   fetchNpsStats: vi.fn(),
+  listUsers: vi.fn(),
+  getMetric: vi.fn(),
   UnisenseApiError: class extends Error {},
 }));
 
-import { listFeedback, updateFeedbackStatus } from "../api";
+import { listFeedback, updateFeedbackStatus, listUsers, getMetric } from "../api";
 const mockedList = vi.mocked(listFeedback);
 const mockedUpdate = vi.mocked(updateFeedbackStatus);
+const mockedUsers = vi.mocked(listUsers);
+const mockedGetMetric = vi.mocked(getMetric);
 
 const feedbacks: Feedback[] = [
   {
@@ -56,37 +61,52 @@ beforeEach(() => {
     page_size: 20,
   } as never);
   mockedUpdate.mockResolvedValue(feedbacks[0] as never);
+  // 用户名单：id=7→爱丽丝、id=4→审核员；id=9 无 display_name 回落 username
+  mockedUsers.mockResolvedValue([
+    { id: 7, username: "alice", display_name: "爱丽丝", role: "analyst", domain: null, status: "active" },
+    { id: 9, username: "bob", display_name: "", role: "viewer", domain: null, status: "active" },
+    { id: 4, username: "reviewer1", display_name: "审核员", role: "reviewer", domain: null, status: "active" },
+  ] as never);
+  // 指标对象解析：sales_gmv → 销售GMV
+  mockedGetMetric.mockResolvedValue({
+    metric_code: "sales_gmv",
+    name: "销售GMV",
+  } as never);
 });
 
 describe("FeedbackCenter 用户反馈", () => {
   it("加载并渲染反馈列表，状态/处理人/处理时间中文展示", async () => {
-    render(<FeedbackCenter />);
-    await waitFor(() => expect(screen.getByText("sales_gmv")).toBeInTheDocument());
+    render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
     expect(screen.getByText("口径很清楚")).toBeInTheDocument();
     expect(screen.getByText("希望增加导出")).toBeInTheDocument();
+    // 用户列：ID → 用户名（爱丽丝 / bob 回落 username）
+    expect(screen.getByText("爱丽丝")).toBeInTheDocument();
+    expect(screen.getByText("bob")).toBeInTheDocument();
     // 状态列：待处理 + 已采纳
     expect(screen.getByText("待处理")).toBeInTheDocument();
     expect(screen.getByText("已采纳")).toBeInTheDocument();
-    // 处理人列
-    expect(screen.getByText("4")).toBeInTheDocument();
+    // 处理人列：数字 ID → 用户名
+    expect(screen.getByText("审核员")).toBeInTheDocument();
+    expect(screen.queryByText("4")).not.toBeInTheDocument();
     // 原始 ISO 串不应直出
     expect(screen.queryByText("2026-08-10T10:00:00")).not.toBeInTheDocument();
     expect(screen.getAllByText(/前|昨天|月\d+日/).length).toBeGreaterThan(0);
   });
 
   it("反馈行提供跟进/采纳/驳回处理按钮", async () => {
-    render(<FeedbackCenter />);
-    await waitFor(() => expect(screen.getByText("sales_gmv")).toBeInTheDocument());
-    const row = screen.getByText("sales_gmv").closest("tr") as HTMLElement;
+    render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
+    const row = screen.getByText(/销售GMV/).closest("tr") as HTMLElement;
     expect(within(row).getByText(/跟\s*进/)).toBeInTheDocument();
     expect(within(row).getByText(/采\s*纳/)).toBeInTheDocument();
     expect(within(row).getByText(/驳\s*回/)).toBeInTheDocument();
   });
 
   it("点击采纳打开处理弹窗，输入处理说明后调用 updateFeedbackStatus(id, status, note)", async () => {
-    render(<FeedbackCenter />);
-    await waitFor(() => expect(screen.getByText("sales_gmv")).toBeInTheDocument());
-    const row = screen.getByText("sales_gmv").closest("tr") as HTMLElement;
+    render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
+    const row = screen.getByText(/销售GMV/).closest("tr") as HTMLElement;
     fireEvent.click(within(row).getByText(/采\s*纳/));
 
     // 弹窗出现，含反馈内容与处理说明输入框
@@ -102,9 +122,9 @@ describe("FeedbackCenter 用户反馈", () => {
   });
 
   it("驳回时不传说明则调用 updateFeedbackStatus(id, rejected, null)", async () => {
-    render(<FeedbackCenter />);
-    await waitFor(() => expect(screen.getByText("sales_gmv")).toBeInTheDocument());
-    const row = screen.getByText("sales_gmv").closest("tr") as HTMLElement;
+    render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
+    const row = screen.getByText(/销售GMV/).closest("tr") as HTMLElement;
     fireEvent.click(within(row).getByText(/驳\s*回/));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByText(/确\s*认\s*处\s*理/));
@@ -112,8 +132,8 @@ describe("FeedbackCenter 用户反馈", () => {
   });
 
   it("按类型筛选：切换下拉后按 target_type 调用 listFeedback", async () => {
-    render(<FeedbackCenter />);
-    await waitFor(() => expect(screen.getByText("sales_gmv")).toBeInTheDocument());
+    render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
     fireEvent.mouseDown(screen.getByText("全部类型"));
     const opt = await screen.findByTitle("指标");
     fireEvent.click(opt);
