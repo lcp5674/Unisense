@@ -1367,7 +1367,10 @@ class CollectorService(BaseService):
                         user_id=int(uid),
                         event_type="pii.review_pending",
                         title="PII 复核待办",
-                        body=f"数据实体 {entity_name}（源 {source_id}）敏感级别被低置信度判定，需人工复核",
+                        body=(
+                            f"数据实体 {entity_name}（源 {source_id}）敏感级别被"
+                            "低置信度判定，需人工复核"
+                        ),
                         payload={"source_id": source_id, "entity_name": entity_name},
                     )
             logger.info(
@@ -1482,7 +1485,7 @@ class CollectorService(BaseService):
             )
             # 通知闭环：双发 EventBus（TD §5.5 订阅式扇出），Redis 裸通道保留不动
             await self._eventbus.publish(
-                "catalog_deprecated",
+                "catalog.deprecated",
                 {"source_id": it.source_id, "entity_name": it.entity_name},
             )
             # 定向通知目录 Owner（best-effort；notify_user 内部会 commit，废弃已 flush，
@@ -1582,7 +1585,7 @@ class CollectorService(BaseService):
             )
             # 通知闭环：双发 EventBus（TD §5.5 订阅式扇出），Redis 裸通道保留不动
             await self._eventbus.publish(
-                "collect_degraded",
+                "collect.degraded",
                 {
                     "source_id": source_id,
                     "reason": degrade_reason,
