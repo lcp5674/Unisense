@@ -82,7 +82,10 @@ import {
 } from "../api";
 import type {
   AssetCatalogSummary,
+  AssetChangeItem,
+  AssetChangeMetric,
   AssetChanges,
+  AssetDriftItem,
   AssetEntityDetail,
   AssetHealthSummary,
   AssetHeatmapMatrix,
@@ -477,6 +480,447 @@ const ORPHAN_COLUMNS: ColumnsType<DrillRow> = [
     render: (s) => sensitivityTag(s as string | null | undefined),
   },
 ];
+
+// ─── 变更追踪：行点击 → 本页侧边栏详情抽屉 ─────────────────────────────
+// 目录行 → 实体详情；指标行 → 指标详情（口径/快照）；漂移行 → before/after diff。
+
+/** 漂移 diff 渲染：diff_json 含 before_schema/after_schema 时左右对照展示，否则平铺键值。 */
+function renderDriftDiff(diff: Record<string, unknown>) {
+  const before = diff.before_schema ?? diff.before ?? null;
+  const after = diff.after_schema ?? diff.after ?? null;
+  const fields = Object.entries(diff).filter(
+    ([k]) => !["before_schema", "after_schema", "before", "after"].includes(k),
+  );
+  return (
+    <div>
+      {fields.length > 0 ? (
+        <Descriptions column={1} size="small" bordered style={{ marginBottom: 12 }}>
+          {fields.map(([k, v]) => (
+            <Descriptions.Item key={k} label={k}>
+              <span className="mono" style={{ fontSize: 12 }}>
+                {typeof v === "object" && v != null ? JSON.stringify(v) : String(v ?? "")}
+              </span>
+            </Descriptions.Item>
+          ))}
+        </Descriptions>
+      ) : null}
+      {before || after ? (
+        <Row gutter={12}>
+          <Col span={12}>
+            <Card size="small" type="inner" title="变更前" style={{ marginBottom: 12 }}>
+              {before ? (
+                <pre
+                  className="mono"
+                  style={{
+                    fontSize: 11,
+                    maxHeight: 340,
+                    overflow: "auto",
+                    margin: 0,
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {JSON.stringify(before, null, 2)}
+                </pre>
+              ) : (
+                <span className="muted">（首次创建）</span>
+              )}
+            </Card>
+          </Col>
+          <Col span={12}>
+            <Card size="small" type="inner" title="变更后" style={{ marginBottom: 12 }}>
+              {after ? (
+                <pre
+                  className="mono"
+                  style={{
+                    fontSize: 11,
+                    maxHeight: 340,
+                    overflow: "auto",
+                    margin: 0,
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {JSON.stringify(after, null, 2)}
+                </pre>
+              ) : (
+                <span className="muted">（已删除）</span>
+              )}
+            </Card>
+          </Col>
+        </Row>
+      ) : null}
+    </div>
+  );
+}
+
+/** 变更追踪-目录行详情抽屉：按 catalog id 拉实体详情（字段清单/血缘/关联指标/源健康）。 */
+function ChangeCatalogDetailDrawer({
+  item,
+  onClose,
+}: {
+  item: AssetChangeItem | null;
+  onClose: () => void;
+}) {
+  const navigate = useNavigate();
+  const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!item) {
+      setDetail(null);
+      return;
+    }
+    setLoading(true);
+    setDetail(null);
+    fetchAssetEntityDetail(item.id)
+      .then(setDetail)
+      .catch((err) => message.error(err instanceof Error ? err.message : "加载实体详情失败"))
+      .finally(() => setLoading(false));
+  }, [item]);
+
+  return (
+    <ResizableDrawer
+      title={item ? `变更目录详情：${item.entity_name}` : "变更目录详情"}
+      open={item != null}
+      onClose={onClose}
+      storageKey="unisense.drawer.changes.catalog.width"
+      defaultWidth={860}
+      minWidth={600}
+      footer={
+        item && detail ? (
+          <Space>
+            <Button
+              type="primary"
+              icon={<SearchOutlined />}
+              onClick={() => navigate(`/catalog?kw=${encodeURIComponent(item.entity_name)}`)}
+            >
+              在采集目录中查看
+            </Button>
+          </Space>
+        ) : null
+      }
+    >
+      {loading ? (
+        <Spin tip="加载实体详情…" />
+      ) : detail ? (
+        <>
+          <Descriptions column={2} bordered size="small">
+            <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+            <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
+            <Descriptions.Item label="数据源">
+              {detail.source_name ? `${detail.source_name}（${detail.source_id}）` : detail.source_id}
+            </Descriptions.Item>
+            <Descriptions.Item label="业务域">
+              {detail.domain ?? <span className="muted">-</span>}
+            </Descriptions.Item>
+            <Descriptions.Item label="敏感度">
+              {sensitivityTag(detail.sensitivity_level)}
+              {Boolean(detail.pii_flag || (detail.sensitivity_level ?? "").includes("PII")) && (
+                <Tag color="red" style={{ marginLeft: 8 }}>
+                  含 PII
+                </Tag>
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="责任人">
+              {detail.owner_id != null
+                ? detail.owner_name || `#${detail.owner_id}`
+                : <Tag>无</Tag>}
+            </Descriptions.Item>
+            <Descriptions.Item label="字段数">
+              {detail.column_count ?? <span className="muted">-</span>}
+            </Descriptions.Item>
+            <Descriptions.Item label="表级描述">
+              {detail.description ? (
+                <span>{detail.description}</span>
+              ) : (
+                <span className="muted" style={{ fontStyle: "italic" }}>
+                  暂无表级描述
+                </span>
+              )}
+              {detail.description_source ? descriptionSourceTag(detail.description_source) : null}
+            </Descriptions.Item>
+            <Descriptions.Item label="变更类型">
+              {item && CHANGE_TYPE_META[item.change_type] ? (
+                <Tag color={CHANGE_TYPE_META[item.change_type].color}>
+                  {CHANGE_TYPE_META[item.change_type].label}
+                </Tag>
+              ) : (
+                item?.change_type ?? "-"
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="变更时间">
+              {item?.updated_at ? formatCnTime(item.updated_at) : "-"}
+            </Descriptions.Item>
+            <Descriptions.Item label="Schema 状态">
+              {detail.schema_incomplete ? (
+                <Tag color="orange">不完整</Tag>
+              ) : (
+                <Tag color="green">完整</Tag>
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="源健康">
+              {detail.source_health ? (
+                <Tag
+                  color={
+                    detail.source_health.health_status === "healthy"
+                      ? "green"
+                      : detail.source_health.health_status === "unhealthy"
+                        ? "red"
+                        : "default"
+                  }
+                >
+                  {SOURCE_HEALTH_LABEL[detail.source_health.health_status] ??
+                    detail.source_health.health_status}
+                </Tag>
+              ) : (
+                <span className="muted">未知</span>
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="新鲜度">
+              <div className="muted" style={{ fontSize: 12 }}>
+                <div>创建：{detail.created_at ? formatCnTime(detail.created_at) : "-"}</div>
+                <div>更新：{detail.updated_at ? formatCnTime(detail.updated_at) : "-"}</div>
+              </div>
+            </Descriptions.Item>
+          </Descriptions>
+
+          {detail.schema_summary ? (
+            <Card size="small" title="字段清单" style={{ marginTop: 16 }}>
+              {renderSchemaSummary(detail.schema_summary)}
+            </Card>
+          ) : null}
+
+          {detail.lineage_edges && detail.lineage_edges.length > 0 && (
+            <Card size="small" title="血缘边明细" style={{ marginTop: 16 }}>
+              <Table
+                dataSource={detail.lineage_edges}
+                rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "源", dataIndex: "source", ellipsis: true },
+                  { title: "目标", dataIndex: "target", ellipsis: true },
+                  { title: "类型", dataIndex: "edge_type", width: 120 },
+                  { title: "粒度", dataIndex: "granularity", width: 80 },
+                ]}
+              />
+            </Card>
+          )}
+
+          {detail.related_metrics && detail.related_metrics.length > 0 && (
+            <Card size="small" title="关联指标" style={{ marginTop: 16 }}>
+              <Table
+                dataSource={detail.related_metrics}
+                rowKey={(r, i) => `${r.metric_node}-${i}`}
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "指标节点", dataIndex: "metric_node", ellipsis: true },
+                  { title: "关系", dataIndex: "edge_type", width: 140 },
+                ]}
+              />
+            </Card>
+          )}
+        </>
+      ) : item ? (
+        <Alert type="warning" message="未获取到该实体的详情（可能已删除或未采集）" />
+      ) : null}
+    </ResizableDrawer>
+  );
+}
+
+/** 变更追踪-指标行详情抽屉：按编码拉指标详情（业务描述/口径明细/数值快照）。 */
+function ChangeMetricDetailDrawer({
+  item,
+  onClose,
+}: {
+  item: AssetChangeMetric | null;
+  onClose: () => void;
+}) {
+  const navigate = useNavigate();
+  const [metric, setMetric] = useState<MetricResponse | null>(null);
+  const [snapshots, setSnapshots] = useState<SnapshotResponse[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!item) {
+      setMetric(null);
+      setSnapshots([]);
+      return;
+    }
+    setLoading(true);
+    setMetric(null);
+    setSnapshots([]);
+    Promise.all([
+      getMetric(item.metric_code),
+      listSnapshots(item.metric_code, 50).catch(() => []),
+    ])
+      .then(([m, snaps]) => {
+        setMetric(m);
+        setSnapshots(snaps);
+      })
+      .catch((err) => message.error(err instanceof Error ? err.message : "加载指标详情失败"))
+      .finally(() => setLoading(false));
+  }, [item]);
+
+  const snapshotColumns: ColumnsType<SnapshotResponse> = [
+    { title: "周期", dataIndex: "date_range", key: "date_range", width: 150 },
+    {
+      title: "维度",
+      dataIndex: "dims",
+      key: "dims",
+      width: 160,
+      render: (v: Record<string, unknown>) =>
+        v && typeof v === "object" && Object.keys(v).length ? JSON.stringify(v) : "—",
+    },
+    {
+      title: "数值",
+      dataIndex: "value_json",
+      key: "value_json",
+      render: (v: Record<string, unknown>) =>
+        v && typeof v === "object" && Object.keys(v).length ? JSON.stringify(v) : "—",
+    },
+    {
+      title: "质量",
+      dataIndex: "quality_flag",
+      key: "quality_flag",
+      width: 80,
+      render: (v: string | null) => v ?? "—",
+    },
+    {
+      title: "生成时间",
+      dataIndex: "generated_at",
+      key: "generated_at",
+      width: 170,
+      render: (v: string) => formatCnTime(v),
+    },
+  ];
+
+  return (
+    <ResizableDrawer
+      title={item ? `变更指标详情：${item.name}（${item.metric_code}）` : "变更指标详情"}
+      open={item != null}
+      onClose={onClose}
+      storageKey="unisense.drawer.changes.metric.width"
+      defaultWidth={880}
+      minWidth={600}
+      footer={
+        metric ? (
+          <Button
+            type="primary"
+            onClick={() => navigate(`/detail/${encodeURIComponent(metric.metric_code)}`)}
+          >
+            前往指标详情 →
+          </Button>
+        ) : null
+      }
+    >
+      {loading ? (
+        <Spin tip="加载指标详情…" />
+      ) : metric ? (
+        <>
+          <Card size="small" title="业务描述" style={{ marginBottom: 16 }}>
+            {metric.description ? (
+              <div style={{ whiteSpace: "pre-wrap" }}>{metric.description}</div>
+            ) : (
+              <span className="muted">暂无描述</span>
+            )}
+            {metric.description_source ? descriptionSourceTag(metric.description_source) : null}
+          </Card>
+          <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="指标名称">{metric.name}</Descriptions.Item>
+            <Descriptions.Item label="指标编码">{metric.metric_code}</Descriptions.Item>
+            <Descriptions.Item label="所属域">{metric.domain}</Descriptions.Item>
+            <Descriptions.Item label="类型">{metric.type}</Descriptions.Item>
+            <Descriptions.Item label="粒度">{metric.granularity}</Descriptions.Item>
+            <Descriptions.Item label="单位">{metric.unit}</Descriptions.Item>
+            <Descriptions.Item label="聚合方式">{metric.aggregation}</Descriptions.Item>
+            <Descriptions.Item label="时间语义">{metric.time_semantics}</Descriptions.Item>
+            <Descriptions.Item label="新鲜度">{metric.freshness}</Descriptions.Item>
+            <Descriptions.Item label="数仓层">{metric.dw_layer}</Descriptions.Item>
+            <Descriptions.Item label="指标分级">{metric.metric_tier}</Descriptions.Item>
+            <Descriptions.Item label="状态">{metric.status}</Descriptions.Item>
+            <Descriptions.Item label="可加性">{metric.additivity}</Descriptions.Item>
+            <Descriptions.Item label="PII">
+              {metric.pii_flag ? <Tag color="red">PII</Tag> : "否"}
+            </Descriptions.Item>
+            <Descriptions.Item label="版本">{metric.version}</Descriptions.Item>
+            <Descriptions.Item label="变更类型">
+              {item && CHANGE_TYPE_META[item.change_type] ? (
+                <Tag color={CHANGE_TYPE_META[item.change_type].color}>
+                  {CHANGE_TYPE_META[item.change_type].label}
+                </Tag>
+              ) : (
+                item?.change_type ?? "-"
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="变更时间">
+              {item?.updated_at ? formatCnTime(item.updated_at) : "-"}
+            </Descriptions.Item>
+          </Descriptions>
+          <Card size="small" title="口径明细" style={{ marginBottom: 16 }}>
+            <DefinitionsDetail def={metric.definition_json} />
+          </Card>
+          <Card size="small" title="数值快照">
+            {snapshots.length === 0 ? (
+              <Empty description="暂无查询快照" />
+            ) : (
+              <Table
+                size="small"
+                rowKey="id"
+                dataSource={snapshots}
+                columns={snapshotColumns}
+                pagination={false}
+              />
+            )}
+          </Card>
+        </>
+      ) : item ? (
+        <Alert type="warning" message="未获取到该指标的详情" />
+      ) : null}
+    </ResizableDrawer>
+  );
+}
+
+/** 变更追踪-漂移行详情抽屉：展示 diff_json 的 before/after 对照。 */
+function ChangeDriftDetailDrawer({
+  item,
+  onClose,
+}: {
+  item: AssetDriftItem | null;
+  onClose: () => void;
+}) {
+  const isDrop = item ? /drop|remove|delete/i.test(item.change_type) : false;
+  return (
+    <ResizableDrawer
+      title={item ? `Schema 漂移详情：${item.entity_name}` : "Schema 漂移详情"}
+      open={item != null}
+      onClose={onClose}
+      storageKey="unisense.drawer.changes.drift.width"
+      defaultWidth={760}
+      minWidth={560}
+    >
+      {item ? (
+        <>
+          <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="实体">{item.entity_name}</Descriptions.Item>
+            <Descriptions.Item label="数据源">{item.source_id}</Descriptions.Item>
+            <Descriptions.Item label="变更类型">
+              <Tag color={isDrop ? "red" : "orange"}>{item.change_type}</Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="时间">{formatCnTime(item.created_at)}</Descriptions.Item>
+          </Descriptions>
+          {item.diff_json ? (
+            <Card size="small" title="变更内容（before → after）">
+              {renderDriftDiff(item.diff_json)}
+            </Card>
+          ) : (
+            <Alert type="info" message="该漂移记录无 diff 明细" />
+          )}
+        </>
+      ) : null}
+    </ResizableDrawer>
+  );
+}
 
 function OverviewTab() {
   const [summary, setSummary] = useState<AssetCatalogSummary | null>(null);
@@ -3277,6 +3721,10 @@ function ChangesTab() {
   const [days, setDays] = useState(7);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 行点击 → 侧边栏详情（目录/指标/漂移三类）
+  const [catalogItem, setCatalogItem] = useState<AssetChangeItem | null>(null);
+  const [metricItem, setMetricItem] = useState<AssetChangeMetric | null>(null);
+  const [driftItem, setDriftItem] = useState<AssetDriftItem | null>(null);
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.changes.pageSize", 10);
 
   useEffect(() => {
@@ -3321,6 +3769,10 @@ function ChangesTab() {
           onShowSizeChange,
         }}
         title={() => <b>目录</b>}
+        onRow={(r) => ({
+          onClick: () => setCatalogItem(r),
+          style: { cursor: "pointer" },
+        })}
         columns={[
           { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
           {
@@ -3383,7 +3835,7 @@ function ChangesTab() {
         style={{ marginTop: 16 }}
         title={() => <b>指标</b>}
         onRow={(r) => ({
-          onClick: () => navigate(`/detail/${encodeURIComponent(r.metric_code)}`),
+          onClick: () => setMetricItem(r),
           style: { cursor: "pointer" },
         })}
         columns={[
@@ -3449,6 +3901,10 @@ function ChangesTab() {
           pagination={{ pageSize, showSizeChanger: true, pageSizeOptions: [...PAGE_SIZE_OPTIONS] }}
           style={{ marginTop: 16 }}
           title={() => <b>Schema 漂移明细</b>}
+          onRow={(r) => ({
+            onClick: () => setDriftItem(r),
+            style: { cursor: "pointer" },
+          })}
           columns={[
             { title: "实体", dataIndex: "entity_name", key: "name", ellipsis: true },
             { title: "变更类型", dataIndex: "change_type", key: "type", width: 140 },
@@ -3472,6 +3928,9 @@ function ChangesTab() {
           ]}
         />
       )}
+      <ChangeCatalogDetailDrawer item={catalogItem} onClose={() => setCatalogItem(null)} />
+      <ChangeMetricDetailDrawer item={metricItem} onClose={() => setMetricItem(null)} />
+      <ChangeDriftDetailDrawer item={driftItem} onClose={() => setDriftItem(null)} />
     </Card>
   );
 }

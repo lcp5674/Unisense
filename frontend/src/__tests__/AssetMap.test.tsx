@@ -1089,6 +1089,143 @@ describe("AssetMap", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/detail/finance_revenue_sum_d"));
   });
 
+  it("changes tab metric row click opens metric detail drawer", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetChanges).mockResolvedValue({
+      catalogs: [],
+      metrics: [
+        {
+          metric_code: "finance_revenue_sum_d",
+          name: "收入",
+          status: "PUBLISHED",
+          domain: "finance",
+          pii_flag: false,
+          version: 3,
+          owner_id: 1,
+          change_type: "updated",
+          updated_at: "2026-08-01T00:00:00Z",
+        },
+      ],
+      drift: [],
+      days: 7,
+    });
+    vi.mocked(getMetric).mockResolvedValue({
+      id: 1,
+      metric_code: "finance_revenue_sum_d",
+      name: "收入",
+      domain: "finance",
+      type: "atomic",
+      granularity: "day",
+      unit: "yuan",
+      aggregation: "SUM",
+      time_semantics: "PERIOD",
+      freshness: "T1",
+      dw_layer: "DWD",
+      metric_tier: "T2",
+      serving_mode: "BATCH_ONLY",
+      additivity: "ADDITIVE",
+      definition_json: { sql: "SELECT SUM(amount) FROM ods_order" },
+      version: 3,
+      status: "PUBLISHED",
+      owner_id: 1,
+      pii_flag: false,
+    } as never);
+    vi.mocked(listSnapshots).mockResolvedValue([] as never);
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /变更追踪/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /变更追踪/ }));
+    await waitFor(() => expect(screen.getByText("收入")).toBeInTheDocument());
+    // 点击行（名称单元格，非编码链接）→ 本页打开指标详情侧边栏抽屉，不跳转
+    const beforePath = window.location.pathname;
+    await user.click(screen.getByText("收入"));
+    await waitFor(() => expect(screen.getByText(/变更指标详情：收入/)).toBeInTheDocument());
+    expect(window.location.pathname).toBe(beforePath);
+  });
+
+  it("changes tab catalog row click opens entity detail drawer", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetChanges).mockResolvedValue({
+      catalogs: [
+        {
+          id: 42,
+          entity_name: "ods_order",
+          entity_type: "table",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          source_id: "s1",
+          source_name: "Source A",
+          created_at: null,
+          updated_at: "2026-08-01T00:00:00Z",
+          change_type: "updated",
+        },
+      ],
+      metrics: [],
+      drift: [],
+      days: 7,
+    });
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 42,
+      entity_name: "ods_order",
+      entity_type: "table",
+      source_id: "s1",
+      source_name: "Source A",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      schema_summary: [
+        { name: "order_id", type: "bigint", comment: "订单ID" },
+        { name: "amount", type: "decimal(18,2)", comment: "金额" },
+      ],
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-08-01T00:00:00Z",
+    } as never);
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /变更追踪/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /变更追踪/ }));
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
+    await user.click(screen.getByText("ods_order"));
+    await waitFor(() => expect(screen.getByText(/变更目录详情：ods_order/)).toBeInTheDocument());
+    expect(fetchAssetEntityDetail).toHaveBeenCalledWith(42);
+    // 字段清单随详情加载展示
+    await waitFor(() => expect(screen.getByText("order_id")).toBeInTheDocument());
+  });
+
+  it("changes tab drift row click opens drift diff drawer", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetChanges).mockResolvedValue({
+      catalogs: [],
+      metrics: [],
+      drift: [
+        {
+          id: 7,
+          source_id: "s1",
+          entity_name: "ods_order",
+          change_type: "column_add",
+          diff_json: {
+            change_type: "column_add",
+            diff_json: { columns_added: ["channel"] },
+            before_schema: { columns: ["order_id", "amount"] },
+            after_schema: { columns: ["order_id", "amount", "channel"] },
+          },
+          created_at: "2026-08-01T00:00:00Z",
+        },
+      ],
+      days: 7,
+    });
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /变更追踪/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /变更追踪/ }));
+    await waitFor(() => expect(screen.getByText("column_add")).toBeInTheDocument());
+    await user.click(screen.getByText("column_add"));
+    await waitFor(() => expect(screen.getByText(/Schema 漂移详情：ods_order/)).toBeInTheDocument());
+    // before/after 对照展示
+    await waitFor(() => expect(screen.getByText("变更前")).toBeInTheDocument());
+    expect(screen.getByText("变更后")).toBeInTheDocument();
+  });
+
   it("my assets tab metric row click navigates to metric detail", async () => {
     const user = userEvent.setup();
     vi.mocked(fetchAssetMyAssets).mockResolvedValue({
