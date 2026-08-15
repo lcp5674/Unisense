@@ -25,16 +25,20 @@ vi.mock("../api", () => {
     bulkDeprecateCatalogs: vi.fn(),
     listDataSources: vi.fn(),
     listCatalogDatabases: vi.fn(),
+    listFavorites: vi.fn(),
+    addFavorite: vi.fn(),
+    removeFavorite: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases } from "../api";
+import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, listFavorites } from "../api";
 
 const mockedList = vi.mocked(listCatalogs);
 const mockedRegister = vi.mocked(registerCatalog);
 const mockedSources = vi.mocked(listDataSources);
 const mockedDatabases = vi.mocked(listCatalogDatabases);
+const mockedListFavorites = vi.mocked(listFavorites);
 
 const SOURCES: DataSource[] = [
   {
@@ -89,6 +93,7 @@ const CATALOGS: DBCatalog[] = [
 beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue({ items: CATALOGS, total: 1, page: 1, page_size: 20 });
+  mockedListFavorites.mockResolvedValue([]);
   mockedSources.mockResolvedValue({ items: SOURCES, total: 2, page: 1, page_size: 200 });
   mockedDatabases.mockResolvedValue(["unisense", "sales"]);
   mockedRegister.mockResolvedValue({ ...CATALOGS[0], sensitivity_level: "INTERNAL" } as DBCatalog);
