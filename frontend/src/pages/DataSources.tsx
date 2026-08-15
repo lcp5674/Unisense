@@ -35,6 +35,7 @@ import type { DriftLogItem } from "../api";
 import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
+import { useResizableColumns } from "../components/ResizableTable";
 
 const FALLBACK_TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
@@ -1036,6 +1037,7 @@ export function DataSources() {
       title: "名称",
       dataIndex: "name",
       key: "name",
+      minWidth: 240,
       ellipsis: true,
       render: (v: string, s: DataSource) => (
         <div>
@@ -1097,6 +1099,11 @@ export function DataSources() {
       ),
     },
   ];
+
+  const { columns: resizableColumns, components: resizableComponents } = useResizableColumns<DataSource>(
+    columns,
+    "unisense:data-sources-col-widths",
+  );
 
   return (
     <div>
@@ -1190,8 +1197,11 @@ export function DataSources() {
         </Space>
         <Table
           dataSource={items}
-          columns={columns}
+          columns={resizableColumns}
+          components={resizableComponents}
           rowKey="source_id"
+          tableLayout="fixed"
+          scroll={{ x: "max" }}
           loading={loading}
           rowSelection={{
             selectedRowKeys,

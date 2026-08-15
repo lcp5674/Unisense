@@ -7,6 +7,7 @@ import type { DBCatalog, DataSource, SchemaColumn } from "../types";
 import type { DescriptionCoverage } from "../api";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 import { SchemaTable } from "../components/SchemaTable";
+import { useResizableColumns } from "../components/ResizableTable";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -526,6 +527,7 @@ export function Catalogs() {
       dataIndex: "entity_name",
       key: "entity_name",
       // 不设 width：tableLayout=fixed 下该列吸收表格剩余宽度，宽屏一屏放下、列间距均匀
+      minWidth: 260,
       ellipsis: true,
       render: (v: string, r: DBCatalog) => (
         <div>
@@ -547,7 +549,7 @@ export function Catalogs() {
       title: "数据源",
       dataIndex: "source_id",
       key: "source",
-      width: 170,
+      width: 190,
       ellipsis: true,
       render: (v: string, r: DBCatalog) => (
         <Tooltip title={r.source_name && r.source_name !== v ? `${r.source_name}（${v}）` : v}>
@@ -561,7 +563,7 @@ export function Catalogs() {
     {
       title: "字段",
       key: "fields",
-      width: 110,
+      width: 130,
       ellipsis: true,
       render: (_: unknown, r: DBCatalog) => {
         if (r.schema_incomplete) return <span className="muted">—</span>;
@@ -650,6 +652,11 @@ export function Catalogs() {
   // 列显示开关过滤：实体/操作列固定展示，其余按用户开关
   const visibleColumns = columns.filter(
     (c) => c.key === "entity_name" || c.key === "action" || visibleCols.includes(c.key),
+  );
+
+  const { columns: resizableColumns, components: resizableComponents } = useResizableColumns<DBCatalog>(
+    visibleColumns,
+    "unisense:catalogs-col-widths",
   );
 
   return (
@@ -800,7 +807,8 @@ export function Catalogs() {
 
         <Table
           dataSource={items}
-          columns={visibleColumns}
+          columns={resizableColumns}
+          components={resizableComponents}
           rowKey={(r) => `${r.source_id}-${r.entity_name}`}
           loading={loading}
           // fixed 布局：未设宽度的「实体」列吸收剩余空间，宽屏一屏放下、列间距均匀

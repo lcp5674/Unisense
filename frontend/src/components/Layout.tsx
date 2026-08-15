@@ -94,7 +94,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
   {
     label: "数据采集",
     children: [
-      { key: "/data-sources", label: "数据源", icon: <CloudServerOutlined /> },
+      { key: "/data-sources", label: "数据源管理", icon: <CloudServerOutlined /> },
       { key: "/catalogs", label: "采集目录", icon: <DatabaseOutlined /> },
       { key: "/collection-tasks", label: "采集任务", icon: <ScheduleOutlined /> },
       { key: "/collection-history", label: "采集记录", icon: <AuditOutlined /> },
