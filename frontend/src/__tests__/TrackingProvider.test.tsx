@@ -80,3 +80,33 @@ describe("TrackingProvider 同事件节流", () => {
     expect(trackEvent).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("TrackingProvider 超长字段钳制", () => {
+  it("超长 target_id 发送前截断到 36（对齐后端 schema，避免 422）", () => {
+    const longId = `table:${"x".repeat(60)}`; // 66 字符 > 36
+    renderProbe({ type: "clip_id", targetId: longId });
+    fireEvent.click(screen.getByText("go"));
+    const sent = vi.mocked(trackEvent).mock.calls[0][0];
+    expect(sent.target_id?.length).toBe(36);
+    expect(sent.target_id).toBe(longId.slice(0, 36));
+    // 本地事件同样截断
+    const localEvent = addEventMock.mock.calls[0][0];
+    expect(localEvent.target_id?.length).toBe(36);
+  });
+
+  it("超长 event_type 截断到 32", () => {
+    const longType = `lineage_${"y".repeat(40)}`;
+    renderProbe({ type: longType });
+    fireEvent.click(screen.getByText("go"));
+    const sent = vi.mocked(trackEvent).mock.calls[0][0];
+    expect(sent.event_type.length).toBe(32);
+  });
+
+  it("正常长度字段原样发送", () => {
+    renderProbe({ type: "ok_type", targetId: "table:orders" });
+    fireEvent.click(screen.getByText("go"));
+    const sent = vi.mocked(trackEvent).mock.calls[0][0];
+    expect(sent.event_type).toBe("ok_type");
+    expect(sent.target_id).toBe("table:orders");
+  });
+});
