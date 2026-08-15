@@ -250,6 +250,9 @@ describe("我的收藏 - 统计卡点击切换 Tab", () => {
     expect(screen.getByText("成交总额")).toBeInTheDocument();
     expect(screen.getAllByText("GHOST").length).toBeGreaterThan(0);
     expect(screen.queryByText("客单价")).not.toBeInTheDocument();
+    // 切到「指标」后，收藏总数卡不应再保持选中高亮（回归：fav-stat-total 曾无条件高亮）
+    expect(statCard("收藏总数")).not.toHaveClass("active");
+    expect(statCard("指标")).toHaveClass("active");
   });
 
   it("点击「数据表」统计卡切换到数据表类型", async () => {

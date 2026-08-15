@@ -1442,10 +1442,8 @@ body {
   font-size: 12px;
   color: var(--muted);
 }
-.fav-stat-total {
-  border-color: var(--signal);
-  background: linear-gradient(135deg, rgba(232, 134, 45, 0.06), transparent);
-}
+/* 收藏总数卡：默认与其他统计卡一致，仅当「全部」Tab 且未开失效过滤时才高亮（.active），
+   避免切换 Tab 后它仍显示为选中态。橙色数字保留作品牌区分。 */
 .fav-stat-total .fav-stat-num {
   color: var(--signal);
 }
