@@ -1135,6 +1135,8 @@ export interface TrackingStatsRow {
 /** 埋点统计响应（backend tracking.py TrackingStatsResponse）。 */
 export interface TrackingStatsResponse {
   stats: TrackingStatsRow[];
+  /** 当前过滤条件下全量去重用户数（不随分组变化）；缺失时前端降级为各组 unique_actors 之和 */
+  total_unique_actors?: number;
 }
 
 /** 埋点统计允许的分组字段（对齐后端 _GROUP_BY_ALLOWED 白名单）。 */

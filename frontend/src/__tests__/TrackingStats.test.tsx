@@ -25,6 +25,8 @@ const mockStats = {
     { group_key: "metric_view", event_count: 120, unique_actors: 30 },
     { group_key: "consume_query", event_count: 80, unique_actors: 20 },
   ],
+  // 全量去重用户数：两组用户有重叠，全量仅 40（≠ 各组之和 50）
+  total_unique_actors: 40,
 };
 
 function renderPage() {
@@ -64,8 +66,9 @@ describe("TrackingStats", () => {
     });
     // 事件总数 = 120 + 80
     expect(screen.getByText("200")).toBeInTheDocument();
-    // 去重用户数 = 30 + 20
-    expect(screen.getByText("50")).toBeInTheDocument();
+    // 去重用户数 = 后端全量 total_unique_actors（40），而非各组相加（30+20=50）
+    expect(screen.getByText("40")).toBeInTheDocument();
+    expect(screen.queryByText("50")).not.toBeInTheDocument();
     // 表格行渲染（事件类型英文值转中文标签）
     expect(screen.getByText("指标查看")).toBeInTheDocument();
     expect(screen.getByText("消费查询")).toBeInTheDocument();

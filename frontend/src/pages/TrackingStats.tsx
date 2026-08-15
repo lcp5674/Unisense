@@ -109,11 +109,14 @@ export function TrackingStats() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupBy]);
 
-  // 汇总指标：总事件数 / 去重用户数 / 分组行数（按当前过滤结果实时计算）
+  // 汇总指标：总事件数 / 去重用户数 / 分组行数（按当前过滤结果实时计算）。
+  // 去重用户数优先用后端全量值 total_unique_actors（同一用户跨分组只计一次），
+  // 缺失（旧后端）时降级为各组 unique_actors 之和——分组内去重数相加会重复计数。
   const totals = useMemo(() => {
     const rows = data?.stats ?? [];
     const eventCount = rows.reduce((a, r) => a + r.event_count, 0);
-    const uniqueActors = rows.reduce((a, r) => a + r.unique_actors, 0);
+    const uniqueActors =
+      data?.total_unique_actors ?? rows.reduce((a, r) => a + r.unique_actors, 0);
     return { eventCount, uniqueActors, rows: rows.length };
   }, [data]);
 

@@ -59,9 +59,14 @@ class TrackEventResponse(BaseModel):
 
 
 class TrackingStatsResponse(BaseModel):
-    """埋点统计响应。"""
+    """埋点统计响应。
+
+    ``total_unique_actors`` 为当前过滤条件下全量去重用户数（不随分组变化）；
+    ``stats[].unique_actors`` 仅为各分组内去重用户数，直接相加会重复计数。
+    """
 
     stats: list[dict[str, Any]]
+    total_unique_actors: int = 0
 
 
 # ---- Endpoints ----
@@ -121,24 +126,32 @@ async def get_stats(
         )
 
     group_col = getattr(TrackingEvent, group_field)
-    query = select(
-        group_col.label("group_key"),
-        func.count(TrackingEvent.id).label("event_count"),
-        func.count(func.distinct(TrackingEvent.actor_id)).label("unique_actors"),
-    )
 
+    # 过滤条件（分组统计与全量去重用户数共用，保证口径一致）
+    clauses: list[Any] = []
     if event_type:
-        query = query.where(TrackingEvent.event_type == event_type)
-
+        clauses.append(TrackingEvent.event_type == event_type)
     if start_date:
         start_dt = _parse_stats_date(start_date, field="start_date")
-        query = query.where(TrackingEvent.created_at >= start_dt)
-
+        clauses.append(TrackingEvent.created_at >= start_dt)
     if end_date:
         end_dt = _parse_stats_date(end_date, field="end_date")
-        query = query.where(TrackingEvent.created_at <= end_dt)
+        clauses.append(TrackingEvent.created_at <= end_dt)
 
-    query = query.group_by(group_col)
+    # 全量去重用户数：相同过滤条件下 COUNT(DISTINCT actor_id)，与分组无关，
+    # 避免前端把各组 unique_actors 相加导致同一用户跨分组重复计数。
+    total_query = select(func.count(func.distinct(TrackingEvent.actor_id))).where(*clauses)
+    total_unique_actors = (await db.execute(total_query)).scalar() or 0
+
+    query = (
+        select(
+            group_col.label("group_key"),
+            func.count(TrackingEvent.id).label("event_count"),
+            func.count(func.distinct(TrackingEvent.actor_id)).label("unique_actors"),
+        )
+        .where(*clauses)
+        .group_by(group_col)
+    )
     result = await db.execute(query)
     rows = result.all()
 
@@ -151,4 +164,6 @@ async def get_stats(
         for row in rows
     ]
 
-    return ok(data=TrackingStatsResponse(stats=stats))
+    return ok(
+        data=TrackingStatsResponse(stats=stats, total_unique_actors=total_unique_actors)
+    )
