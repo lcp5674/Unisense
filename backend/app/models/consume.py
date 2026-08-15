@@ -14,7 +14,7 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, Enum, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, DateTime, Enum, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
@@ -116,10 +116,61 @@ class MetricValueSnapshot(Base, TimestampMixin):
     )
 
 
-class UserPreference(Base, BaseModel):
-    """用户偏好/收藏（TD §5.4 user_preference）。
+class FavoriteAssetType(enum.StrEnum):
+    """可收藏资产类型（C 层多资产收藏，对齐总览全资产方向）。
 
-    preference_key 区分 default_domain / pinned_metrics / search_scope / theme。
+    asset_id 统一使用各资产的**业务编码**（非数据库 id，删除/重建不受影响）：
+    - METRIC → Metric.metric_code
+    - TABLE → DBCatalog.entity_name（库.表）
+    - TERM → Term.term_code
+    - DIMENSION → Dimension.dim_code
+    - TEMPLATE → MetricTemplate.code
+    """
+
+    METRIC = "METRIC"
+    TABLE = "TABLE"
+    TERM = "TERM"
+    DIMENSION = "DIMENSION"
+    TEMPLATE = "TEMPLATE"
+
+
+class Favorite(Base, BaseModel):
+    """用户收藏（TD §5.4 favorite，通用多资产收藏模型）。
+
+    取代 UserPreference.pinned_metrics 的 JSON 数组存储，演进为独立行模型：
+    每行 = 用户 × 资产类型 × 资产业务编码，天然支持收藏时间（created_at）、
+    软删除与唯一约束。asset_type/asset_id 组合唯一。
+    """
+
+    __tablename__ = "favorite"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True, comment="用户 ID")
+    asset_type: Mapped[FavoriteAssetType] = mapped_column(
+        Enum(FavoriteAssetType, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+        index=True,
+        comment="资产类型",
+    )
+    asset_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment=(
+            "资产业务编码（metric_code / entity_name / "
+            "term_code / dim_code / code）"
+        ),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "asset_type", "asset_id", name="uk_fav_user_asset"),
+        # 同资产类型下按收藏时间排序的常用查询路径
+        Index("ix_fav_user_type_time", "user_id", "asset_type", "created_at"),
+    )
+
+
+class UserPreference(Base, BaseModel):
+    """用户偏好（TD §5.4 user_preference）。
+
+    preference_key 区分 default_domain / search_scope / theme 等；收藏已迁移至 favorite 表。
     """
 
     __tablename__ = "user_preference"

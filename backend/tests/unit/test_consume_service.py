@@ -22,6 +22,7 @@ from app.core.security import hash_password
 from app.models.consume import (
     ApiClient,
     ApiClientStatus,
+    FavoriteAssetType,
     MetricValueSnapshot,
     SnapshotGeneratedBy,
 )
@@ -613,73 +614,163 @@ async def test_list_snapshots() -> None:
     svc._snapshots.list_by_metric.assert_awaited_once_with("gmv", 10, 0)
 
 
-# ---- 收藏 ----
-async def test_add_favorite_new() -> None:
+# ---- 收藏（通用多资产，C 层）----
+def _fav_row(asset_type: str, asset_id: str, created: datetime | None = None) -> SimpleNamespace:
+    """构造 Favorite 行的简化对象（service 层仅读 asset_type/asset_id/created_at）。"""
+    return SimpleNamespace(
+        asset_type=SimpleNamespace(value=asset_type),
+        asset_id=asset_id,
+        created_at=created or datetime(2026, 8, 15, tzinfo=UTC),
+    )
+
+
+def _exec_scalars(rows) -> MagicMock:
+    """构造 db.execute(...).scalars().all() 返回 rows 的 mock。"""
+    result = MagicMock()
+    scalars = MagicMock()
+    scalars.all.return_value = rows
+    result.scalars.return_value = scalars
+    return result
+
+
+async def test_add_favorite_metric() -> None:
     svc = _svc(await _client())
-    svc._db.scalar = AsyncMock(return_value=_metric(code="gmv"))
-    svc._fav.list_pinned = AsyncMock(return_value=[])
-    svc._fav.upsert_pinned = AsyncMock()
-    resp = await svc.add_favorite(1, "gmv")
+    svc._ensure_asset = AsyncMock()
+    svc._fav.get = AsyncMock(return_value=None)
+    svc._fav.add = AsyncMock()
+    resp = await svc.add_favorite(1, FavoriteAssetType.METRIC, "gmv")
     assert resp.pinned is True
-    svc._fav.upsert_pinned.assert_awaited_once_with(1, ["gmv"])
+    assert resp.asset_type == "METRIC"
+    assert resp.asset_id == "gmv"
+    svc._ensure_asset.assert_awaited_once_with(FavoriteAssetType.METRIC, "gmv")
+    svc._fav.add.assert_awaited_once_with(1, "METRIC", "gmv")
 
 
 async def test_add_favorite_already_pinned() -> None:
     svc = _svc(await _client())
-    svc._db.scalar = AsyncMock(return_value=_metric(code="gmv"))
-    svc._fav.list_pinned = AsyncMock(return_value=["gmv"])
-    svc._fav.upsert_pinned = AsyncMock()
-    resp = await svc.add_favorite(1, "gmv")
+    svc._ensure_asset = AsyncMock()
+    svc._fav.get = AsyncMock(return_value=_fav_row("METRIC", "gmv"))
+    svc._fav.add = AsyncMock()
+    resp = await svc.add_favorite(1, FavoriteAssetType.METRIC, "gmv")
     assert resp.pinned is True
-    svc._fav.upsert_pinned.assert_not_awaited()
+    svc._fav.add.assert_not_awaited()
 
 
-async def test_add_favorite_metric_not_found() -> None:
+async def test_add_favorite_asset_not_found() -> None:
     svc = _svc(await _client())
-    svc._db.scalar = AsyncMock(return_value=None)
-    svc._fav.list_pinned = AsyncMock(return_value=[])
-    svc._fav.upsert_pinned = AsyncMock()
+    svc._ensure_asset = AsyncMock(side_effect=NotFoundError("资产不存在: ghost"))
+    svc._fav.add = AsyncMock()
     with pytest.raises(NotFoundError):
-        await svc.add_favorite(1, "ghost_code")
-    svc._fav.upsert_pinned.assert_not_awaited()
-
-
-async def test_list_favorite_details_aggregates_in_one_query() -> None:
-    svc = _svc(await _client())
-    svc._fav.list_pinned = AsyncMock(return_value=["gmv", "revenue", "ghost"])
-    svc._db.scalars = AsyncMock(
-        return_value=[_metric(code="gmv", domain="sales", status="PUBLISHED"), _metric(code="revenue", domain="finance", status="DRAFT")]
-    )
-    out = await svc.list_favorite_details(1)
-    assert out == [
-        {"metric_code": "gmv", "name": "gmv", "domain": "sales", "status": "PUBLISHED"},
-        {"metric_code": "revenue", "name": "revenue", "domain": "finance", "status": "DRAFT"},
-        # 失效收藏：保留编码位，标记 UNKNOWN 供前端灰显
-        {"metric_code": "ghost", "name": "ghost", "domain": None, "status": "UNKNOWN"},
-    ]
-
-
-async def test_list_favorite_details_empty() -> None:
-    svc = _svc(await _client())
-    svc._fav.list_pinned = AsyncMock(return_value=[])
-    svc._db.scalars = AsyncMock()
-    assert await svc.list_favorite_details(1) == []
-    svc._db.scalars.assert_not_awaited()
+        await svc.add_favorite(1, FavoriteAssetType.METRIC, "ghost")
+    svc._fav.add.assert_not_awaited()
 
 
 async def test_remove_favorite() -> None:
     svc = _svc(await _client())
-    svc._fav.list_pinned = AsyncMock(return_value=["gmv", "revenue"])
-    svc._fav.upsert_pinned = AsyncMock()
-    resp = await svc.remove_favorite(1, "gmv")
+    svc._fav.remove = AsyncMock(return_value=True)
+    resp = await svc.remove_favorite(1, FavoriteAssetType.METRIC, "gmv")
     assert resp.pinned is False
-    svc._fav.upsert_pinned.assert_awaited_once_with(1, ["revenue"])
+    assert resp.asset_id == "gmv"
+    svc._fav.remove.assert_awaited_once_with(1, "METRIC", "gmv")
 
 
-async def test_list_favorites() -> None:
+async def test_list_favorites_returns_generic_structure() -> None:
     svc = _svc(await _client())
-    svc._fav.list_pinned = AsyncMock(return_value=["gmv", "revenue"])
-    assert await svc.list_favorites(1) == ["gmv", "revenue"]
+    svc._fav.list = AsyncMock(
+        return_value=[_fav_row("METRIC", "gmv"), _fav_row("TABLE", "dw.sales")]
+    )
+    out = await svc.list_favorites(1)
+    assert out == [
+        {"asset_type": "METRIC", "asset_id": "gmv"},
+        {"asset_type": "TABLE", "asset_id": "dw.sales"},
+    ]
+
+
+async def test_list_favorite_details_multi_asset() -> None:
+    """多资产聚合：按收藏时间倒序，带详情 + created_at + dead 标记。"""
+    svc = _svc(await _client())
+    # repo.list 已按收藏时间倒序：TABLE(8-15) 在 METRIC(8-14) 之前
+    favs = [
+        _fav_row("TABLE", "dw.sales", datetime(2026, 8, 15, tzinfo=UTC)),
+        _fav_row("METRIC", "gmv", datetime(2026, 8, 14, tzinfo=UTC)),
+    ]
+    svc._fav.list = AsyncMock(return_value=favs)
+    svc._load_asset_details = AsyncMock(
+        return_value={
+            ("METRIC", "gmv"): {
+                "name": "成交总额", "description": "订单总额", "domain": "sales",
+                "status": "PUBLISHED", "tier": "T1", "is_pii": False,
+            },
+            ("TABLE", "dw.sales"): {
+                "name": "dw.sales", "description": "销售明细", "domain": "sales",
+                "status": "PUBLISHED", "tier": None, "is_pii": False,
+            },
+        }
+    )
+    out = await svc.list_favorite_details(1)
+    assert out[0]["asset_type"] == "TABLE"  # 最近收藏在前
+    assert out[0]["asset_id"] == "dw.sales"
+    assert out[1]["name"] == "成交总额"
+    assert out[1]["tier"] == "T1"
+    assert out[1]["dead"] is False
+    assert "created_at" in out[0]
+
+
+async def test_list_favorite_details_soft_deleted_marks_dead() -> None:
+    """软删除 bug 修复：资产查不到（含 deleted_at 过滤）→ 保留条目 + dead=True + status UNKNOWN。"""
+    svc = _svc(await _client())
+    svc._fav.list = AsyncMock(return_value=[_fav_row("METRIC", "gone")])
+    svc._load_asset_details = AsyncMock(return_value={})  # 查不到 → 软删除/已不存在
+    out = await svc.list_favorite_details(1)
+    assert out[0]["asset_id"] == "gone"
+    assert out[0]["dead"] is True
+    assert out[0]["status"] == "UNKNOWN"
+
+
+async def test_list_favorite_details_empty() -> None:
+    svc = _svc(await _client())
+    svc._fav.list = AsyncMock(return_value=[])
+    assert await svc.list_favorite_details(1) == []
+
+
+async def test_ensure_asset_metric_exists() -> None:
+    svc = _svc(await _client())
+    svc._db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: _metric(code="gmv")))
+    await svc._ensure_asset(FavoriteAssetType.METRIC, "gmv")  # 不抛异常
+
+
+async def test_ensure_asset_missing_raises() -> None:
+    svc = _svc(await _client())
+    svc._db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: None))
+    with pytest.raises(NotFoundError):
+        await svc._ensure_asset(FavoriteAssetType.METRIC, "ghost")
+
+
+async def test_load_asset_details_filters_soft_deleted() -> None:
+    """_load_asset_details 查询带 deleted_at 过滤：软删除资产不进入 lookup → 上层标记 dead。"""
+    svc = _svc(await _client())
+    svc._db.execute = AsyncMock(return_value=_exec_scalars([]))  # 无结果（模拟软删除被过滤）
+    lookup = await svc._load_asset_details({"METRIC": ["gmv", "gone"]})
+    assert ("METRIC", "gmv") not in lookup
+    assert ("METRIC", "gone") not in lookup
+
+
+async def test_load_asset_details_table_joins_source_domain() -> None:
+    """TABLE 详情关联数据源取域（一次批量查询消除 N+1）。"""
+    svc = _svc(await _client())
+    table = SimpleNamespace(entity_name="dw.sales", description="销售", source_id="mysql-1",
+                            sensitivity_level="CONFIDENTIAL")
+    svc._db.execute = AsyncMock(
+        side_effect=[
+            _exec_scalars([table]),  # DBCatalog 查询
+            _exec_scalars([SimpleNamespace(source_id="mysql-1", domain="sales")]),  # DataSource 查询
+        ]
+    )
+    lookup = await svc._load_asset_details({"TABLE": ["dw.sales"]})
+    detail = lookup[("TABLE", "dw.sales")]
+    assert detail["name"] == "dw.sales"
+    assert detail["status"] == "CONFIDENTIAL"
+    assert detail["domain"] == "sales"
 
 
 # ---- 版本消费方确认回调 ----

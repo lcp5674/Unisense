@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.models.consume import ApiClient, MetricValueSnapshot, UserPreference
+from app.models.consume import ApiClient, Favorite, MetricValueSnapshot
 from app.services.consume.repository import ApiClientRepo, FavoriteRepo, SnapshotRepo
 
 
@@ -128,65 +128,85 @@ class TestFavoriteRepo:
         repo = FavoriteRepo(db)
         assert repo._db is db
 
+    async def test_add(self, db: MagicMock) -> None:
+        repo = FavoriteRepo(db)
+        fav = await repo.add(user_id=1, asset_type="METRIC", asset_id="gmv")
+        assert fav.user_id == 1
+        assert fav.asset_type == "METRIC"
+        assert fav.asset_id == "gmv"
+        db.add.assert_called_once()
+        db.flush.assert_awaited_once()
+
     async def test_get_found(self, db: MagicMock) -> None:
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = UserPreference(
-            user_id=1, preference_key="pinned_metrics"
+        mock_result.scalar_one_or_none.return_value = Favorite(
+            user_id=1, asset_type="METRIC", asset_id="gmv"
         )
         db.execute = AsyncMock(return_value=mock_result)
         repo = FavoriteRepo(db)
-        result = await repo.get(user_id=1, key="pinned_metrics")
+        result = await repo.get(user_id=1, asset_type="METRIC", asset_id="gmv")
         assert result is not None
+        assert result.asset_id == "gmv"
 
     async def test_get_not_found(self, db: MagicMock) -> None:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         db.execute = AsyncMock(return_value=mock_result)
         repo = FavoriteRepo(db)
-        result = await repo.get(user_id=999, key="pinned_metrics")
+        result = await repo.get(user_id=999, asset_type="METRIC", asset_id="ghost")
         assert result is None
 
-    async def test_list_pinned_empty(self, db: MagicMock) -> None:
+    async def test_remove_existing_soft_deletes(self, db: MagicMock) -> None:
+        fav = Favorite(user_id=1, asset_type="METRIC", asset_id="gmv")
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = fav
+        db.execute = AsyncMock(return_value=mock_result)
+        repo = FavoriteRepo(db)
+        removed = await repo.remove(user_id=1, asset_type="METRIC", asset_id="gmv")
+        assert removed is True
+        assert fav.deleted_at is not None  # 软删除
+        db.flush.assert_awaited_once()
+
+    async def test_remove_not_found(self, db: MagicMock) -> None:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         db.execute = AsyncMock(return_value=mock_result)
         repo = FavoriteRepo(db)
-        results = await repo.list_pinned(user_id=1)
-        assert results == []
+        removed = await repo.remove(user_id=1, asset_type="METRIC", asset_id="ghost")
+        assert removed is False
 
-    async def test_list_pinned_with_data(self, db: MagicMock) -> None:
+    async def test_list_empty(self, db: MagicMock) -> None:
         mock_result = MagicMock()
-        pref = UserPreference(
-            user_id=1,
-            preference_key="pinned_metrics",
-            preference_value={"metrics": ["M1", "M2"]},
-        )
-        mock_result.scalar_one_or_none.return_value = pref
+        scalars = MagicMock()
+        scalars.all.return_value = []
+        mock_result.scalars.return_value = scalars
         db.execute = AsyncMock(return_value=mock_result)
         repo = FavoriteRepo(db)
-        results = await repo.list_pinned(user_id=1)
-        assert results == ["M1", "M2"]
+        assert await repo.list(user_id=1) == []
 
-    async def test_upsert_pinned_creates_new(self, db: MagicMock) -> None:
+    async def test_list_with_data(self, db: MagicMock) -> None:
+        favs = [
+            Favorite(user_id=1, asset_type="METRIC", asset_id="gmv"),
+            Favorite(user_id=1, asset_type="TABLE", asset_id="dw.sales"),
+        ]
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
+        scalars = MagicMock()
+        scalars.all.return_value = favs
+        mock_result.scalars.return_value = scalars
         db.execute = AsyncMock(return_value=mock_result)
         repo = FavoriteRepo(db)
-        result = await repo.upsert_pinned(user_id=1, metric_codes=["M1"])
-        assert result.preference_value == {"metrics": ["M1"]}
-        db.add.assert_called_once()
+        results = await repo.list(user_id=1)
+        assert len(results) == 2
+        assert results[0].asset_id == "gmv"
 
-    async def test_upsert_pinned_updates_existing(self, db: MagicMock) -> None:
-        existing = UserPreference(
-            user_id=1,
-            preference_key="pinned_metrics",
-            preference_value={"metrics": ["M1"]},
-        )
+    async def test_list_by_types_filters(self, db: MagicMock) -> None:
+        favs = [Favorite(user_id=1, asset_type="METRIC", asset_id="gmv")]
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = existing
+        scalars = MagicMock()
+        scalars.all.return_value = favs
+        mock_result.scalars.return_value = scalars
         db.execute = AsyncMock(return_value=mock_result)
         repo = FavoriteRepo(db)
-        result = await repo.upsert_pinned(user_id=1, metric_codes=["M1", "M2"])
-        assert result.preference_value == {"metrics": ["M1", "M2"]}
-        # update path calls add but should not create a new record
-        assert db.add.call_count == 1
+        results = await repo.list_by_types(user_id=1, asset_types=["METRIC"])
+        assert len(results) == 1
+        assert results[0].asset_type == "METRIC"

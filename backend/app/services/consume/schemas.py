@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.models.consume import ApiClientStatus, SnapshotGeneratedBy
+from app.models.consume import ApiClientStatus, FavoriteAssetType, SnapshotGeneratedBy
 
 
 class DimensionExpr(BaseModel):
@@ -108,15 +108,22 @@ class SnapshotResponse(BaseModel):
 
 
 class FavoriteRequest(BaseModel):
-    """收藏/取消收藏请求。"""
+    """收藏/取消收藏请求（通用多资产收藏）。
 
-    metric_code: str = Field(..., description="指标码")
+    asset_id 统一为资产业务编码：指标码 / 库.表 / 术语码 / 维度码 / 模板码。
+    """
+
+    asset_type: FavoriteAssetType = Field(
+        default=FavoriteAssetType.METRIC, description="资产类型"
+    )
+    asset_id: str = Field(..., description="资产业务编码", examples=["sales_gmv"])
 
 
 class FavoriteResponse(BaseModel):
     """收藏响应。"""
 
-    metric_code: str
+    asset_type: str
+    asset_id: str
     pinned: bool
 
 

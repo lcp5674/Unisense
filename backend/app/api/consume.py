@@ -22,11 +22,11 @@ from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import write_audit
 from app.core.error_codes import ErrorCode
-from app.core.exceptions import BusinessError
+from app.core.exceptions import BusinessError, ValidationError
 from app.core.guard import guard_against_injection
 from app.core.security import create_access_token, hash_password
 from app.db.mysql import get_db_session
-from app.models.consume import ApiClient, ApiClientStatus
+from app.models.consume import ApiClient, ApiClientStatus, FavoriteAssetType
 from app.models.user import User
 from app.services.consume.repository import ApiClientRepo
 from app.services.consume.schemas import (
@@ -333,19 +333,27 @@ async def add_favorite(
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiResponse[FavoriteResponse]:
     svc = ConsumeService(db)
-    res = await svc.add_favorite(user.id, req.metric_code)
+    res = await svc.add_favorite(user.id, req.asset_type, req.asset_id)
     await db.commit()
     return ok(data=res)
 
 
-@router.delete("/consume/me/favorites/{code}", response_model=ApiResponse[FavoriteResponse])
+@router.delete(
+    "/consume/me/favorites/{asset_type}/{asset_id}",
+    response_model=ApiResponse[FavoriteResponse],
+)
 async def del_favorite(
-    code: str,
+    asset_type: str,
+    asset_id: str,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiResponse[FavoriteResponse]:
     svc = ConsumeService(db)
-    res = await svc.remove_favorite(user.id, code)
+    try:
+        asset_type_enum = FavoriteAssetType(asset_type)
+    except ValueError as exc:
+        raise ValidationError(f"不支持的资产类型: {asset_type}") from exc
+    res = await svc.remove_favorite(user.id, asset_type_enum, asset_id)
     await db.commit()
     return ok(data=res)
 

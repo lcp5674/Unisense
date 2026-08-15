@@ -24,11 +24,16 @@ from app.core.security import verify_password
 from app.models.consume import (
     ApiClient,
     ApiClientStatus,
+    FavoriteAssetType,
     MetricValueSnapshot,
     SnapshotGeneratedBy,
 )
+from app.models.data_source import DataSource, DBCatalog
+from app.models.dimension import Dimension
 from app.models.metric import Metric
+from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion
+from app.models.term import Term
 from app.models.user import User
 from app.services.consume.rate_limiter import (
     get_rate_limiter,
@@ -502,46 +507,166 @@ class ConsumeService(BaseService):
         rows = await self._snapshots.list_by_metric(metric_code, limit, offset)
         return [self._to_snap(r) for r in rows]
 
-    # ---- 收藏 ----
-    async def add_favorite(self, user_id: int, metric_code: str) -> FavoriteResponse:
-        # 校验指标存在，避免收藏死码（前端 getMetric 取名会退化为显示编码，产生死链）
-        metric = await self._db.scalar(select(Metric).where(Metric.metric_code == metric_code))
-        if metric is None:
-            raise NotFoundError(f"指标不存在: {metric_code}")
-        codes = await self._fav.list_pinned(user_id)
-        if metric_code not in codes:
-            codes.append(metric_code)
-            await self._fav.upsert_pinned(user_id, codes)
-        return FavoriteResponse(metric_code=metric_code, pinned=True)
+    # ---- 收藏（通用多资产，TD §5.4 favorite）----
+    # 各资产类型的 ORM 模型 + 业务编码列（asset_id 统一为业务编码，非数据库 id）
+    _ASSET_MODEL: dict[FavoriteAssetType, tuple[Any, str]] = {
+        FavoriteAssetType.METRIC: (Metric, "metric_code"),
+        FavoriteAssetType.TABLE: (DBCatalog, "entity_name"),
+        FavoriteAssetType.TERM: (Term, "term_code"),
+        FavoriteAssetType.DIMENSION: (Dimension, "dim_code"),
+        FavoriteAssetType.TEMPLATE: (MetricTemplate, "code"),
+    }
 
-    async def remove_favorite(self, user_id: int, metric_code: str) -> FavoriteResponse:
-        codes = await self._fav.list_pinned(user_id)
-        codes = [c for c in codes if c != metric_code]
-        await self._fav.upsert_pinned(user_id, codes)
-        return FavoriteResponse(metric_code=metric_code, pinned=False)
+    async def add_favorite(
+        self, user_id: int, asset_type: FavoriteAssetType, asset_id: str
+    ) -> FavoriteResponse:
+        # 校验资产存在（含软删除过滤），避免收藏死码/死链
+        await self._ensure_asset(asset_type, asset_id)
+        existing = await self._fav.get(user_id, asset_type.value, asset_id)
+        if existing is None:
+            await self._fav.add(user_id, asset_type.value, asset_id)
+        return FavoriteResponse(asset_type=asset_type.value, asset_id=asset_id, pinned=True)
 
-    async def list_favorites(self, user_id: int) -> list[str]:
-        return await self._fav.list_pinned(user_id)
+    async def remove_favorite(
+        self, user_id: int, asset_type: FavoriteAssetType, asset_id: str
+    ) -> FavoriteResponse:
+        await self._fav.remove(user_id, asset_type.value, asset_id)
+        return FavoriteResponse(asset_type=asset_type.value, asset_id=asset_id, pinned=False)
+
+    async def list_favorites(self, user_id: int) -> list[dict[str, str]]:
+        """返回用户收藏（通用结构，供各页判断收藏状态）。"""
+        favs = await self._fav.list(user_id)
+        return [
+            {"asset_type": f.asset_type.value, "asset_id": f.asset_id} for f in favs
+        ]
 
     async def list_favorite_details(self, user_id: int) -> list[dict[str, Any]]:
-        """批量返回收藏指标详情（一次查询聚合，避免前端逐条 getMetric 的 N+1）。
+        """多资产收藏详情聚合（按类型分组批量查询，消除逐条取名 N+1）。
 
-        已失效/被删除的指标保留编码位并标记 status 为 UNKNOWN，供前端灰显提示。
+        - 含收藏时间（created_at），按最近收藏排序；
+        - 软删除/已不存在的资产保留条目并标记 dead=True（前端灰显），
+          修复原实现未过滤 deleted_at 导致软删除指标显示为有效的 bug。
         """
-        codes = await self._fav.list_pinned(user_id)
-        if not codes:
+        favs = await self._fav.list(user_id)
+        if not favs:
             return []
-        rows = await self._db.scalars(select(Metric).where(Metric.metric_code.in_(codes)))
-        by_code = {m.metric_code: m for m in rows}
-        return [
-            {
-                "metric_code": c,
-                "name": by_code[c].name if c in by_code else c,
-                "domain": by_code[c].domain if c in by_code else None,
-                "status": by_code[c].status if c in by_code else "UNKNOWN",
+        by_type: dict[str, list[str]] = {}
+        for f in favs:
+            by_type.setdefault(f.asset_type.value, []).append(f.asset_id)
+        lookup = await self._load_asset_details(by_type)
+        result: list[dict[str, Any]] = []
+        for f in favs:
+            key = (f.asset_type.value, f.asset_id)
+            detail = lookup.get(key)
+            result.append(
+                {
+                    "asset_type": f.asset_type.value,
+                    "asset_id": f.asset_id,
+                    "name": detail["name"] if detail else f.asset_id,
+                    "description": detail["description"] if detail else None,
+                    "domain": detail["domain"] if detail else None,
+                    "status": detail["status"] if detail else "UNKNOWN",
+                    "tier": detail["tier"] if detail else None,
+                    "is_pii": detail["is_pii"] if detail else False,
+                    "created_at": f.created_at.isoformat(),
+                    "dead": detail is None,
+                }
+            )
+        return result
+
+    async def _load_asset_details(
+        self, by_type: dict[str, list[str]]
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        """按资产类型批量加载摘要（各类型一次 IN 查询；TABLE 关联数据源取域）。"""
+        lookup: dict[tuple[str, str], dict[str, Any]] = {}
+        source_domains: dict[str, str] = {}
+        for type_value, ids in by_type.items():
+            asset_type = FavoriteAssetType(type_value)
+            model, id_attr = self._ASSET_MODEL[asset_type]
+            stmt = select(model).where(
+                getattr(model, id_attr).in_(ids), model.deleted_at.is_(None)
+            )
+            rows = (await self._db.execute(stmt)).scalars().all()
+            for row in rows:
+                code = getattr(row, id_attr)
+                if asset_type == FavoriteAssetType.TABLE and getattr(row, "source_id", None):
+                    source_domains.setdefault(row.source_id, "")
+                lookup[(type_value, code)] = self._asset_summary(asset_type, row)
+        # TABLE 域：一次批量关联数据源
+        if source_domains:
+            srcs = (
+                await self._db.execute(
+                    select(DataSource).where(DataSource.source_id.in_(source_domains.keys()))
+                )
+            ).scalars().all()
+            for s in srcs:
+                source_domains[s.source_id] = s.domain
+            for key, detail in lookup.items():
+                if key[0] == FavoriteAssetType.TABLE.value and not detail["domain"]:
+                    detail["domain"] = source_domains.get(detail["source_id"])
+        return lookup
+
+    async def _ensure_asset(
+        self, asset_type: FavoriteAssetType, asset_id: str
+    ) -> None:
+        model, id_attr = self._ASSET_MODEL[asset_type]
+        stmt = select(model).where(
+            getattr(model, id_attr) == asset_id, model.deleted_at.is_(None)
+        )
+        exists = (await self._db.execute(stmt)).scalar_one_or_none() is not None
+        if not exists:
+            raise NotFoundError(f"资产不存在: {asset_id}")
+
+    def _asset_summary(
+        self, asset_type: FavoriteAssetType, row: Any
+    ) -> dict[str, Any]:
+        """统一抽取各资产摘要字段（name/description/domain/status/tier/is_pii）。"""
+        if asset_type == FavoriteAssetType.METRIC:
+            return {
+                "name": row.name,
+                "description": getattr(row, "description", None),
+                "domain": row.domain,
+                "status": row.status,
+                "tier": getattr(row, "metric_tier", None),
+                "is_pii": bool(getattr(row, "pii_flag", False)),
             }
-            for c in codes
-        ]
+        if asset_type == FavoriteAssetType.TABLE:
+            return {
+                "name": row.entity_name,
+                "description": getattr(row, "description", None),
+                "domain": None,
+                "status": row.sensitivity_level,
+                "tier": None,
+                "is_pii": False,
+                "source_id": getattr(row, "source_id", None),
+            }
+        if asset_type == FavoriteAssetType.TERM:
+            return {
+                "name": row.name,
+                "description": row.definition,
+                "domain": row.domain,
+                "status": row.status,
+                "tier": None,
+                "is_pii": False,
+            }
+        if asset_type == FavoriteAssetType.DIMENSION:
+            return {
+                "name": row.name,
+                "description": getattr(row, "description", None),
+                "domain": row.domain,
+                "status": row.status,
+                "tier": None,
+                "is_pii": False,
+            }
+        # TEMPLATE
+        return {
+            "name": row.name,
+            "description": getattr(row, "description", None),
+            "domain": row.domain,
+            "status": "ACTIVE" if getattr(row, "is_active", False) else "INACTIVE",
+            "tier": None,
+            "is_pii": False,
+        }
 
     # ---- 版本消费方确认回调 ----
     async def confirm_version(self, version_id: int, user_id: int) -> None:

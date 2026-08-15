@@ -9,7 +9,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.consume import ApiClient, MetricValueSnapshot, UserPreference
+from app.models.consume import ApiClient, Favorite, MetricValueSnapshot
 
 
 class ApiClientRepo:
@@ -77,38 +77,64 @@ class SnapshotRepo:
 
 
 class FavoriteRepo:
-    """用户偏好/收藏仓储（key=pinned_metrics 承载收藏指标码列表）。"""
+    """通用收藏仓储（favorite 表：user_id × asset_type × asset_id）。
 
-    PINNED_KEY = "pinned_metrics"
+    取代原 pinned_metrics JSON 数组存储；多资产类型统一由 asset_type 区分。
+    仅做数据访问，资产存在性校验在 service 层。
+    """
 
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
 
-    async def upsert_pinned(self, user_id: int, metric_codes: list[str]) -> UserPreference:
-        pref = await self.get(user_id, self.PINNED_KEY)
-        if pref is None:
-            pref = UserPreference(
-                user_id=user_id,
-                preference_key=self.PINNED_KEY,
-                preference_value={"metrics": metric_codes},
-            )
-            self._db.add(pref)
-        else:
-            pref.preference_value = {"metrics": metric_codes}
-            self._db.add(pref)
+    async def add(self, user_id: int, asset_type: str, asset_id: str) -> Favorite:
+        fav = Favorite(user_id=user_id, asset_type=asset_type, asset_id=asset_id)
+        self._db.add(fav)
         await self._db.flush()
-        return pref
+        return fav
 
-    async def get(self, user_id: int, key: str) -> UserPreference | None:
-        stmt = select(UserPreference).where(
-            UserPreference.user_id == user_id,
-            UserPreference.preference_key == key,
-            UserPreference.deleted_at.is_(None),
+    async def remove(self, user_id: int, asset_type: str, asset_id: str) -> bool:
+        stmt = select(Favorite).where(
+            Favorite.user_id == user_id,
+            Favorite.asset_type == asset_type,
+            Favorite.asset_id == asset_id,
+            Favorite.deleted_at.is_(None),
+        )
+        fav = (await self._db.execute(stmt)).scalar_one_or_none()
+        if fav is None:
+            return False
+        fav.deleted_at = func.now()
+        await self._db.flush()
+        return True
+
+    async def get(self, user_id: int, asset_type: str, asset_id: str) -> Favorite | None:
+        stmt = select(Favorite).where(
+            Favorite.user_id == user_id,
+            Favorite.asset_type == asset_type,
+            Favorite.asset_id == asset_id,
+            Favorite.deleted_at.is_(None),
         )
         return (await self._db.execute(stmt)).scalar_one_or_none()
 
-    async def list_pinned(self, user_id: int) -> list[str]:
-        pref = await self.get(user_id, self.PINNED_KEY)
-        if pref is None:
-            return []
-        return list(pref.preference_value.get("metrics", []))
+    async def list(self, user_id: int) -> list[Favorite]:
+        """按收藏时间倒序返回用户全部收藏。"""
+        stmt = (
+            select(Favorite)
+            .where(Favorite.user_id == user_id, Favorite.deleted_at.is_(None))
+            .order_by(Favorite.created_at.desc())
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def list_by_types(
+        self, user_id: int, asset_types: list[str]
+    ) -> list[Favorite]:
+        """按资产类型过滤收藏（详情聚合用，仍按收藏时间倒序）。"""
+        stmt = (
+            select(Favorite)
+            .where(
+                Favorite.user_id == user_id,
+                Favorite.asset_type.in_(asset_types),
+                Favorite.deleted_at.is_(None),
+            )
+            .order_by(Favorite.created_at.desc())
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
