@@ -244,6 +244,7 @@ const METRIC_DIMENSION_GROUPS: Array<{
 
 // 维度值中文映射（未知值原样显示）
 function dimLabel(map: Record<string, string>, key: string): string {
+  if (key === "__null__") return "未设置";
   return map[key] ?? key;
 }
 
