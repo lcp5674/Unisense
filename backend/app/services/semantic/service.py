@@ -1688,7 +1688,10 @@ class MetricService(BaseService):
         if invalid is not None:
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
 
-        # 替代指标校验：存在且已发布（对齐 FR-039）
+        # 替代指标校验：存在且已发布（对齐 FR-039）。
+        # 空字符串视为「未指定替代」——前端未填替代指标时不应报「替代指标不存在:（空）」。
+        if successor_code is not None and not str(successor_code).strip():
+            successor_code = None
         if successor_code is not None:
             successor = await self._repo.get_by_code(successor_code)
             if successor is None:

@@ -90,6 +90,7 @@ import {
   LlmModelsResult,
   Notification,
   NotifyEventLog,
+  NpsStats,
   ObsMetricsNotifications,
   ObsMetricsQuality,
   ObsOverview,
@@ -98,6 +99,7 @@ import {
   PiiReviewResult,
   QualityBenchmark,
   QualityEvent,
+  QualityEventItem,
   QualityObservation,
   QualityRule,
   QualityRuleCreate,
@@ -586,7 +588,9 @@ export async function deprecateMetric(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/deprecate`,
     {
       method: "POST",
-      body: JSON.stringify({ successor_code }),
+      // 空替代指标：传 undefined 使 JSON 序列化省略该字段（后端 Optional 接受），
+      // 避免空串触发「替代指标不存在:（空）」的误导性错误。
+      body: JSON.stringify({ successor_code: successor_code || undefined }),
     },
   );
 }

@@ -300,6 +300,41 @@ async def test_deprecate_metric_success_sets_sunset():
     assert called["sunset_until"] is not None
 
 
+async def test_deprecate_metric_empty_successor_direct_deprecate():
+    """空替代指标（空串/None）直接废弃，不触发「替代指标不存在:（空）」误导错误。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    deprecated = make_metric(status="DEPRECATED", successor_code=None)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=deprecated)
+
+    # 空串（前端未填替代指标提交）→ 应视为无替代直接废弃
+    result = await svc.deprecate_metric(
+        "sales_gmv_daily", "", actor_id=1, role="metric_owner"
+    )
+
+    assert result.status == "DEPRECATED"
+    called = repo.update_with_optimistic_lock.call_args.kwargs
+    assert called["successor_code"] is None  # 空串归一化为 None 落库
+    # 未因空串触发替代指标不存在错误
+    repo.get_by_code.assert_called_once()  # 仅查被废弃指标自身
+
+
+async def test_deprecate_metric_none_successor_direct_deprecate():
+    """None 替代指标直接废弃（无替代下线合法场景）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    deprecated = make_metric(status="DEPRECATED", successor_code=None)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=deprecated)
+
+    result = await svc.deprecate_metric(
+        "sales_gmv_daily", None, actor_id=1, role="metric_owner"
+    )
+
+    assert result.status == "DEPRECATED"
+    called = repo.update_with_optimistic_lock.call_args.kwargs
+    assert called["successor_code"] is None
+
+
 async def test_deprecate_metric_already_deprecated_rejected():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DEPRECATED"))

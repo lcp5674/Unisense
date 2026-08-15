@@ -306,7 +306,15 @@ export function ReviewWorkbench() {
       setReopening(null);
       load();
     } catch (err) {
-      message.error(errText(err, "重新打开失败（仅 CLOSED 状态可重新打开）"));
+      // 失败原因优先展示后端 message（如「关联指标已因仲裁作废，无法重新打开」），
+      // 并提供「查看裁决记录」引导，避免用户困惑为何无法重新打开。
+      message.error({
+        content: errText(
+          err,
+          "重新打开失败：关联指标可能已作废，可先查看裁决记录或新建冲突",
+        ),
+        onClick: () => openRulings(c),
+      });
     } finally {
       setBusyId(null);
     }

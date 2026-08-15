@@ -168,12 +168,16 @@ class MetricPublishRequest(BaseModel):
 
 
 class MetricDeprecateRequest(BaseModel):
-    """废弃指标请求（successor_code 必填，对齐 FR-039）。"""
+    """废弃指标请求（successor_code 选填，对齐 FR-039/FR-002）。
 
-    successor_code: str = Field(
-        ...,
+    替代指标选填：存在「指标因口径失效被下线、无替代」的合法场景。
+    为空时表示无替代（后端不校验替代，指标直接废弃）。
+    """
+
+    successor_code: str | None = Field(
+        default=None,
         max_length=64,
-        description="替代指标编码（必填，须为已 PUBLISHED 指标）",
+        description="替代指标编码（选填，须为已 PUBLISHED 指标；留空表示无替代）",
     )
 
 

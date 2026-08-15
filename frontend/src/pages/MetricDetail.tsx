@@ -966,10 +966,13 @@ export function MetricDetail() {
         okButtonProps={{ danger: true }}
       >
         <Input
-          placeholder="替代指标编码（必填，须为已发布指标）"
+          placeholder="替代指标编码（选填，须为已发布指标；留空表示无替代）"
           value={successor}
           onChange={(e) => setSuccessor(e.target.value)}
         />
+        <p className="muted" style={{ marginTop: 8 }}>
+          留空表示该指标无替代（直接废弃下线）；填写后废弃指标的消费方会看到「替代指标」引导。
+        </p>
       </Modal>
 
       {/* 提交评审弹窗（TD §13）：可指派评审用户或域评审组，审批页仅被指派者可评审 */}
