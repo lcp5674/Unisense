@@ -194,6 +194,23 @@ async def test_update_default_org_delete_protected(admin_client: httpx.AsyncClie
     assert "ORG_PROTECTED" in resp.json().get("code", "")
 
 
+async def test_update_default_org_suspend_protected(admin_client: httpx.AsyncClient) -> None:
+    """默认组织不可停用（suspended）→ 422 ORG_PROTECTED（防止锁死默认租户）。"""
+    org = _make_org(code="default")
+
+    async def fake_db():
+        yield _make_session([_scalar_one(org)])
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    resp = await admin_client.patch(
+        "/api/v1/organizations/1",
+        json={"status": "suspended"},
+    )
+    app.dependency_overrides.pop(deps.get_db_session, None)
+    assert resp.status_code == 422
+    assert "ORG_PROTECTED" in resp.json().get("code", "")
+
+
 async def test_update_self_org_suspend_protected(admin_client: httpx.AsyncClient) -> None:
     """不能停用当前管理员所属组织 → 422 ORG_SELF_LOCK。"""
     org = _make_org(id=1, code="main_dept")  # user.org_id=1
