@@ -227,21 +227,24 @@ describe("MetricDetail", () => {
   });
 
   it("仲裁作废指标（METRIC_ARCHIVED）直访时展示友好引导页并可跳转权威指标", async () => {
-    const err = Object.assign(new UnisenseApiError("指标已因口径裁决作废: sales_e2e_conflictb_day"), {
-      code: "METRIC_ARCHIVED",
-      codeZh: "该指标已因口径裁决作废，请查看权威指标",
-      detail: {
-        metric_code: "sales_e2e_conflictb_day",
-        successor_code: "sales_e2e_conflicta_day",
-        arbitration_mark: {
-          status: "defeated",
-          conflict_id: "CF-ABC",
-          decision: "merge",
-          ruled_at: "2026-08-15T04:00:00Z",
-          opposite_code: "sales_e2e_conflicta_day",
+    const err = Object.assign(
+      new UnisenseApiError("指标已因口径裁决作废: sales_e2e_conflictb_day", "METRIC_ARCHIVED", 404, "test-trace"),
+      {
+        code: "METRIC_ARCHIVED",
+        codeZh: "该指标已因口径裁决作废，请查看权威指标",
+        detail: {
+          metric_code: "sales_e2e_conflictb_day",
+          successor_code: "sales_e2e_conflicta_day",
+          arbitration_mark: {
+            status: "defeated",
+            conflict_id: "CF-ABC",
+            decision: "merge",
+            ruled_at: "2026-08-15T04:00:00Z",
+            opposite_code: "sales_e2e_conflicta_day",
+          },
         },
       },
-    });
+    );
     mockedGetMetric.mockRejectedValue(err);
     renderDetail({ pathname: "/detail/sales_e2e_conflictb_day" });
 
