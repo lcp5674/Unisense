@@ -19,6 +19,7 @@ from app.models.governance import (
     GrantType,
     Role,
     RoleName,
+    RolePermission,
     SensitivityLevel,
 )
 from app.models.metric import Metric
@@ -41,6 +42,48 @@ class GovernanceRepository:
         await self._db.flush()
         await self._db.refresh(role)
         return role
+
+    # -------------------------------------------------------- role permission
+
+    async def list_role_permissions(self) -> list[RolePermission]:
+        """列出全部未删除的角色权限点覆盖行（按角色/动作排序）。"""
+        stmt = (
+            select(RolePermission)
+            .where(RolePermission.deleted_at.is_(None))
+            .order_by(RolePermission.role, RolePermission.action)
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def replace_role_permissions(self, role: str, actions: list[str]) -> None:
+        """整表替换某角色的权限点覆盖（先软删既有行，再插入新集合）。"""
+        now = datetime.now(UTC)
+        stmt = (
+            update(RolePermission)
+            .where(RolePermission.role == role, RolePermission.deleted_at.is_(None))
+            .values(deleted_at=now)
+        )
+        await self._db.execute(stmt)
+        for action in actions:
+            self._db.add(RolePermission(role=role, action=action))
+        await self._db.flush()
+
+    async def reset_role_permissions(self, role: str) -> int:
+        """清除某角色全部权限点覆盖（软删），返回清除行数；此后沿用默认基线。"""
+        count_stmt = (
+            select(func.count())
+            .select_from(RolePermission)
+            .where(RolePermission.role == role, RolePermission.deleted_at.is_(None))
+        )
+        affected = int((await self._db.execute(count_stmt)).scalar() or 0)
+        now = datetime.now(UTC)
+        stmt = (
+            update(RolePermission)
+            .where(RolePermission.role == role, RolePermission.deleted_at.is_(None))
+            .values(deleted_at=now)
+        )
+        await self._db.execute(stmt)
+        await self._db.flush()
+        return affected
 
     # ----------------------------------------------------------------- grant
 

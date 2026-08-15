@@ -31,6 +31,7 @@ import { TrackingStats } from "./pages/TrackingStats";
 import { AiAssistant } from "./pages/AiAssistant";
 import { SystemConfig } from "./pages/SystemConfig";
 import { UserManagement } from "./pages/UserManagement";
+import { OrgManagement } from "./pages/OrgManagement";
 import { AuditLog } from "./pages/AuditLog";
 import { DataSources } from "./pages/DataSources";
 import { Catalogs } from "./pages/Catalogs";
@@ -231,6 +232,7 @@ export default function App() {
             <Route path="/ai" element={<AiAssistant />} />
             <Route path="/system-config" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><SystemConfig /></RequireRole>} />
             <Route path="/users" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><UserManagement /></RequireRole>} />
+            <Route path="/organizations" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><OrgManagement /></RequireRole>} />
             <Route path="/observability" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><Observability /></RequireRole>} />
             <Route path="/feedback" element={<FeedbackCenter />} />
             <Route path="/tracking-stats" element={<RequireRole user={user} allowedRoles={ADMIN_ROLES}><TrackingStats /></RequireRole>} />

@@ -81,6 +81,98 @@ async def test_list_audit_logs_with_filters(audit_client: httpx.AsyncClient) -> 
     assert resp.json()["data"]["page_size"] == 20
 
 
+# ------------------------------------------------------------------- 导出（合规留档）
+
+def _export_session() -> MagicMock:
+    """export 端点专用 mock：单次主查询 + write_audit(仅 add) + commit。"""
+    session = MagicMock()
+    rows_result = MagicMock()
+    rows_result.all.return_value = [(_make_log(), "平台管理员")]
+    session.execute = AsyncMock(return_value=rows_result)
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+    return session
+
+
+async def test_export_audit_csv() -> None:
+    """CSV 导出：text/csv + UTF-8 BOM + 列头与中文 action_desc。"""
+    session = _export_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/audit/export")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/csv")
+    assert "attachment" in resp.headers.get("content-disposition", "")
+    assert resp.text.startswith("\ufeff")  # BOM（Excel 打开不乱码）
+    assert "action_desc" in resp.text
+    assert "创建了指标定义" in resp.text
+    # 导出动作本身落审计
+    entry = session.add.call_args.args[0]
+    assert entry.action == "AUDIT_EXPORT"
+
+
+async def test_export_audit_json() -> None:
+    """JSON 导出：application/json + 数组含 enrich 字段。"""
+    session = _export_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/audit/export", params={"format": "json"})
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    records = resp.json()
+    assert isinstance(records, list)
+    assert records[0]["entity_type"] == "metric_definition"
+    assert records[0]["action_desc"] == "创建了指标定义"
+
+
+async def test_export_audit_limited() -> None:
+    """导出上限：limit 参数生效（请求带 limit=1 仍成功）。"""
+    session = _export_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/audit/export", params={"format": "json", "limit": 1})
+    app.dependency_overrides.clear()
+    assert resp.status_code == 200
+
+
+async def test_export_audit_viewer_forbidden() -> None:
+    """viewer 无审计读权限 → 403。"""
+    session = _export_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=9, role="viewer")
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/audit/export")
+    app.dependency_overrides.clear()
+    assert resp.status_code == 403
+
+
 class TestClientIp:
     """client_ip 分支覆盖（audit.py 15-22）：None 请求 / X-Forwarded-For 拆分 / 直连地址。"""
 

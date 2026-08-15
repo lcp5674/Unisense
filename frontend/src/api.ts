@@ -99,7 +99,9 @@ import {
   RecommendItem,
   Reconciliation,
   ReconciliationRecord,
+  RolePermissionItem,
   RoleResponse,
+  OrganizationView,
   RulingRecord,
   ScheduleResult,
   SnapshotResponse,
@@ -1417,6 +1419,29 @@ export async function createRole(body: {
   });
 }
 
+// ---- 角色权限点配置（RBAC 可配置化，backend /api/v1/roles/*）----
+
+export async function listRolePermissions(): Promise<RolePermissionItem[]> {
+  return request<RolePermissionItem[]>(`${API_BASE}/roles`);
+}
+
+export async function setRolePermissions(
+  role: string,
+  actions: string[],
+): Promise<RolePermissionItem> {
+  return request<RolePermissionItem>(`${API_BASE}/roles/${encodeURIComponent(role)}/permissions`, {
+    method: "PUT",
+    body: JSON.stringify({ actions }),
+  });
+}
+
+export async function resetRolePermissions(role: string): Promise<RolePermissionItem> {
+  return request<RolePermissionItem>(
+    `${API_BASE}/roles/${encodeURIComponent(role)}/permissions`,
+    { method: "DELETE" },
+  );
+}
+
 export async function listGrants(params?: {
   user_id?: number;
   domain?: string;
@@ -1925,6 +1950,43 @@ export async function listAudit(params?: {
     page_size: params?.page_size ?? 20,
   });
   return request(`${API_BASE}/audit?${qs}`);
+}
+
+// 审计日志导出（CSV/JSON，合规留档；下载文件）
+export async function exportAudit(params?: {
+  actor_id?: number;
+  entity_type?: string;
+  entity_id?: string;
+  trace_id?: string;
+  pii_access?: boolean;
+  format?: "csv" | "json";
+  limit?: number;
+}): Promise<void> {
+  const qs = pageQs({
+    actor_id: params?.actor_id,
+    entity_type: params?.entity_type,
+    entity_id: params?.entity_id,
+    trace_id_filter: params?.trace_id,
+    pii_access: params?.pii_access === undefined ? undefined : params.pii_access ? "true" : "false",
+    format: params?.format ?? "csv",
+    limit: params?.limit ?? 5000,
+  });
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE_URL}${API_BASE}/audit/export?${qs}`, { headers });
+  if (!res.ok) {
+    throw new UnisenseApiError(`导出失败 (HTTP ${res.status})`, "HTTP_ERROR", res.status, "");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `audit_export_${new Date().toISOString().slice(0, 10)}.${params?.format ?? "csv"}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // ---- 埋点事件 ----
@@ -2654,6 +2716,43 @@ export async function listDomainTree(status?: string): Promise<SubjectDomainTree
 
 export async function getDomain(code: string): Promise<SubjectDomain> {
   return request<SubjectDomain>(`${API_BASE}/domains/${encodeURIComponent(code)}`);
+}
+
+// ---- 组织（租户）管理（backend /api/v1/organizations/*）----
+
+export async function listOrganizations(params?: {
+  keyword?: string;
+  status?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: OrganizationView[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    keyword: params?.keyword,
+    status: params?.status,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 50,
+  });
+  return request(`${API_BASE}/organizations?${qs}`);
+}
+
+export async function createOrganization(body: {
+  name: string;
+  code: string;
+}): Promise<OrganizationView> {
+  return request<OrganizationView>(`${API_BASE}/organizations`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateOrganization(
+  orgId: number,
+  body: { name?: string; status?: string },
+): Promise<OrganizationView> {
+  return request<OrganizationView>(`${API_BASE}/organizations/${orgId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function createDomain(data: SubjectDomainCreateRequest): Promise<SubjectDomain> {

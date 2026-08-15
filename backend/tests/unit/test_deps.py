@@ -14,7 +14,7 @@ import pytest
 from app.api import deps
 from app.core.config import settings
 from app.core.exceptions import AuthError
-from app.models.user import User
+from app.models.user import Organization, User
 
 
 def _make_user(uid: int = 1, role: str = "metric_owner") -> User:
@@ -65,14 +65,47 @@ class TestGetCurrentUser:
 
     async def test_valid_user_returns(self) -> None:
         user = _make_user()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = user
+        org = Organization(id=1, name="默认组织", code="default", status="active")
+        user_result = MagicMock()
+        user_result.scalar_one_or_none.return_value = user
+        org_result = MagicMock()
+        org_result.scalar_one_or_none.return_value = org
         db = MagicMock()
-        db.execute = AsyncMock(return_value=mock_result)
+        db.execute = AsyncMock(side_effect=[user_result, org_result])
         creds = MagicMock(credentials=_valid_token())
         result = await deps.get_current_user(db, creds)
         assert result.id == 1
         assert result.role == "metric_owner"
+
+    async def test_org_suspended_blocks_login(self) -> None:
+        """多租户隔离：所属组织 suspended → AuthError ORG_DISABLED（登录阻断）。"""
+        user = _make_user()
+        org = Organization(id=1, name="停用组织", code="sus", status="suspended")
+        user_result = MagicMock()
+        user_result.scalar_one_or_none.return_value = user
+        org_result = MagicMock()
+        org_result.scalar_one_or_none.return_value = org
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=[user_result, org_result])
+        creds = MagicMock(credentials=_valid_token())
+        with pytest.raises(AuthError) as exc:
+            await deps.get_current_user(db, creds)
+        assert exc.value.error_code == "ORG_DISABLED"
+
+    async def test_org_deleted_blocks_login(self) -> None:
+        """多租户隔离：所属组织 deleted → AuthError ORG_DISABLED（登录阻断）。"""
+        user = _make_user()
+        org = Organization(id=1, name="已删组织", code="gone", status="deleted")
+        user_result = MagicMock()
+        user_result.scalar_one_or_none.return_value = user
+        org_result = MagicMock()
+        org_result.scalar_one_or_none.return_value = org
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=[user_result, org_result])
+        creds = MagicMock(credentials=_valid_token())
+        with pytest.raises(AuthError) as exc:
+            await deps.get_current_user(db, creds)
+        assert exc.value.error_code == "ORG_DISABLED"
 
     async def test_blacklisted_token_raises_revoked(self) -> None:
         """登出撤销（jti 黑名单命中）的 token → AuthError AUTH_TOKEN_REVOKED（P0）。"""

@@ -146,6 +146,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     label: "系统管理",
     children: [
       { key: "/users", label: "用户管理", icon: <TeamOutlined /> },
+      { key: "/organizations", label: "组织管理", icon: <ApartmentOutlined /> },
       { key: "/governance", label: "权限治理", icon: <SafetyCertificateOutlined /> },
       { key: "/audit", label: "审计日志", icon: <FileSearchOutlined /> },
       { key: "/dicts", label: "数据字典", icon: <TagsOutlined /> },
@@ -159,6 +160,7 @@ const ALL_NAV_KEYS = NAV_GROUPS.flatMap((g) => g.children.map((c) => c.key));
 // 管理类菜单：仅 platform_admin / domain_admin 可见，其余角色隐藏
 const ADMIN_ONLY_NAV_KEYS = new Set([
   "/users",
+  "/organizations",
   "/governance",
   "/audit",
   "/dicts",

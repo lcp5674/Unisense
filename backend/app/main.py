@@ -33,6 +33,7 @@ from app.api.lineage import router as lineage_router
 from app.api.metrics import router as metrics_router
 from app.api.notify import router as notify_router
 from app.api.observability import router as observability_router
+from app.api.organizations import router as organizations_router
 from app.api.preferences import router as preferences_router
 from app.api.quality import router as quality_router
 from app.api.recommend import router as recommend_router
@@ -272,6 +273,7 @@ def create_app() -> FastAPI:
     app.include_router(dimension_router, prefix="/api/v1")
     app.include_router(notify_router, prefix="/api/v1")
     app.include_router(observability_router, prefix="/api/v1")
+    app.include_router(organizations_router, prefix="/api/v1")
     app.include_router(preferences_router, prefix="/api/v1")
     app.include_router(assetmap_router, prefix="/api/v1")
     app.include_router(recommend_router, prefix="/api/v1")

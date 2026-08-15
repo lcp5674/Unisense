@@ -27,6 +27,32 @@ class RoleResponse(BaseModel):
     description: str | None = None
 
 
+class RolePermissionItem(BaseModel):
+    """角色 × 权限点配置项（RBAC 可配置化）。
+
+    Attributes:
+        role: 角色名。
+        default_actions: 默认基线动作（``policy.ROLE_ACTIONS``）。
+        custom_actions: ``role_permission`` 表覆盖动作；未覆盖为 None。
+        effective_actions: 生效动作（覆盖优先，无覆盖取默认）。
+        protected: 受保护角色（platform_admin），权限点不可配置。
+    """
+
+    role: str
+    default_actions: list[str]
+    custom_actions: list[str] | None = None
+    effective_actions: list[str]
+    protected: bool = False
+
+
+class RolePermissionUpdate(BaseModel):
+    """``PUT /roles/{role}/permissions`` 请求体：覆盖某角色的权限点集合。"""
+
+    actions: list[str] = Field(
+        min_length=0, max_length=8, description="权限点集合（空数组=全部回收）"
+    )
+
+
 class GrantCreate(BaseModel):
     """``POST /grants`` 请求体（对齐 TD §3.5 Schema 示例）。"""
 

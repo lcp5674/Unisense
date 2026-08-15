@@ -370,7 +370,7 @@ GET    /me/permissions               # 当前用户权限快照
 ### 3.5a 用户管理（users · platform_admin 专属，FR-13a 补齐）
 ```
 GET    /users?role=&status=&keyword=&page=&page_size=   # 用户管理列表（含 email/最后登录/创建时间；platform_admin 专属，响应不暴露 password_hash）
-POST   /users                        # 创建用户（username/email/display_name/role/domain/初始密码；用户名邮箱唯一，密码 bcrypt 落库；domain 须为存在且 active 的主题域 code，否则 USER_DOMAIN_INVALID=422）
+POST   /users                        # 创建用户（username/email/display_name/role/domain/org_id(可空)/初始密码；用户名邮箱唯一，密码 bcrypt 落库；domain 须为存在且 active 的主题域 code，否则 USER_DOMAIN_INVALID=422；org_id 缺省归入当前管理员组织，须为存在且 active 的组织，否则 ORG_NOT_FOUND=404 / ORG_DISABLED=401，§4.1）
 POST   /users/batch-status           # 批量启用/禁用（user_ids 1~200；207 语义逐项标注失败原因、不影响其余；禁止禁用当前登录账号；单条汇总审计 USER_STATUS_BATCH）
 POST   /users/me/password            # 自助改密（任意登录角色；校验当前密码 + 新密码复杂度；成功清除 must_change_password 标记；审计 USER_PASSWORD_CHANGE）
 PUT    /users/{id}                   # 编辑用户（显示名/邮箱/角色/域全量覆盖；禁止自降级 platform_admin；domain 同创建，须为 active 主题域 code）
@@ -1459,6 +1459,7 @@ CLOSED ──错误率超阈──▶ OPEN ──冷却期满──▶ HALF_OPEN
 401  AUTH_TOKEN_REVOKED        Token 已撤销（登出后 jti 入黑名单，剩余有效期内拒绝）
 401  AUTH_INVALID_CREDENTIALS  用户名/密码错误（不区分用户不存在，防枚举）
 401  PASSWORD_INCORRECT        自助改密时当前密码校验失败（§3.5a）
+401  ORG_DISABLED              所属组织已停用/删除，禁止登录（多租户隔离，§12.5）
 403  FORBIDDEN                 越权（域/白名单不匹配，必入审计）
 403  FORBIDDEN_DOMAIN          无权访问目标域（申请 domain_grant）
 403  FORBIDDEN_METRIC          无权访问目标指标（申请指标权限）
@@ -1489,6 +1490,13 @@ CLOSED ──错误率超阈──▶ OPEN ──冷却期满──▶ HALF_OPEN
 422  USER_DOMAIN_INVALID       用户所属域非存在且 active 的主题域 code（创建/编辑用户，§3.5a）
 422  PASSWORD_WEAK              密码不满足复杂度（≥8 位且含大小写/数字/特殊字符至少 3 类，创建/重置/自助改密）
 422  PASSWORD_SAME              新密码与当前密码相同（自助改密）
+422  ROLE_PERMISSION_INVALID    角色权限点配置含未知动作或角色不存在（RBAC 可配置化，§12.5）
+422  ROLE_PERMISSION_PROTECTED  platform_admin 为受保护角色，权限点不可配置（RBAC 可配置化，§12.5）
+422  ORG_PROTECTED              默认组织（code=default）不可删除（组织管理，§4.1）
+422  ORG_SELF_LOCK              不能停用/删除当前管理员所属组织（防自锁）
+409  ORG_EXISTS                 组织编码已被占用（组织管理，§4.1）
+404  ORG_NOT_FOUND              组织不存在
+409  ORG_HAS_USERS              组织下仍有用户，无法删除（先迁移或回收）
 207  BATCH_PARTIAL_FAILURE     批量操作部分成功部分失败（检查响应体每条结果）
 
 ────────── 限流与降级 ──────────
@@ -2659,7 +2667,9 @@ governance --分级结果--> assetmap(热力) + classification(落库)
 - 分级引擎降级见 §5.5，不影响注册/发布主链路。
 
 **实现偏差同步（2026-08-07，governance 模块落地）**：
-- **PDP 决策引擎**：本期以 `app/services/governance/policy.py` 中的**纯函数 `decide()`** 实现（角色-动作矩阵 `ROLE_ACTIONS` + 授权类型-动作矩阵 `GRANT_TYPE_ACTIONS` + 跨域 `find_active_grant` 判定 + PII 门禁 + 默认 Deny/fail-closed）。**未落地** TD§12.5 描述的 `policy` 表 + ABAC JSON 条件表达式求值 + Redis `pdp:decision:{hash}` 决策缓存（PRD 4.9.9）。即：策略以代码常量形式固化，未做可配置化与 60s TTL 缓存；后续若需热更新策略或缓解 PDP 性能瓶颈，再按 TD 补 `policy` 表与 Redis 缓存层。
+- **PDP 决策引擎**：本期以 `app/services/governance/policy.py` 中的**纯函数 `decide()`** 实现（角色-动作矩阵 `ROLE_ACTIONS` + 授权类型-动作矩阵 `GRANT_TYPE_ACTIONS` + 跨域 `find_active_grant` 判定 + PII 门禁 + 默认 Deny/fail-closed）。**未落地** TD§12.5 描述的 ABAC JSON 条件表达式求值 + Redis `pdp:decision:{hash}` 决策缓存（PRD 4.9.9）。即：策略以代码常量固化，未做可配置化与 60s TTL 缓存；后续若需热更新策略或缓解 PDP 性能瓶颈，再按 TD 补 ABAC 表达式与 Redis 缓存层。
+- **RBAC 权限点可配置化（2026-08-15）**：`ROLE_ACTIONS` 默认基线之上新增 `role_permission` 覆盖表（`(role, action)` 唯一）。`GET /roles` 返回各角色默认/自定义/生效动作与受保护标记；`PUT /roles/{role}/permissions` 覆盖权限点（仅 platform_admin，空数组=全部回收）；`DELETE /roles/{role}/permissions` 恢复默认。`decide(subject, action, resource, role_actions=None)` 保持纯函数——由 `GovernanceService.load_role_actions()` 合并默认+覆盖后传入各决策入口（check_permission / check_metric_permission / check_internal_read_permission / my_permissions）。platform_admin 为受保护角色（跨域直通硬编码，不可配置）；未知动作 422 ROLE_PERMISSION_INVALID、受保护角色 422 ROLE_PERMISSION_PROTECTED。
+- **组织（租户）管理闭环（2026-08-15）**：`organization` 表管理 API（GET/POST /organizations + PATCH /organizations/{id}，platform_admin 写 / 管理员读，含用户数统计与 ORG_CREATE/ORG_UPDATE 审计）。多租户隔离：`get_current_user` 校验所属组织状态，suspended/deleted 拒绝登录（401 ORG_DISABLED）；创建用户可选 org_id（缺省当前管理员组织，须 active，404 ORG_NOT_FOUND / 422 ORG_DISABLED）；自我保护——默认组织（code=default）不可删除、不能停用/删除当前管理员所属组织（422 ORG_SELF_LOCK）、有用户的组织不可删除（409 ORG_HAS_USERS）。前端新增「组织管理」页（/organizations）。
 - **内部用户查询接入 PDP（2026-08-15）**：`POST /consume/metrics/{code}/query` 此前 internal_user 分支跳过一切鉴权（可对任意域任意指标执行真实查询）。现接入 `GovernanceService.check_internal_read_permission`（PDP 决策：platform_admin 直通 / 本域角色按 ROLE_ACTIONS / 跨域须命中 ACTIVE 未过期 grants，含 metric_whitelist / row_level），拒绝返回 `403 FORBIDDEN`（决策原因入 ctx + 审计）；restricted 授权命中时结果行按 metric_whitelist 过滤。接入方（API 客户端）路径不变（scope_domain + metric_whitelist + 限流闸门）。
 - **授权幂等**：因 `grants.metric_whitelist` 为 JSON 列无法建唯一索引（见 §4.1 注释），幂等由 `GovernanceService.grant()` 服务层保证（同 (user,role,domain,grant_type) 已生效授权做白名单合并/延期），而非 DB 唯一约束。
 - **TTL 回收**：`grants.status`（ACTIVE/EXPIRED）软回收替代物理删除，`expire_due_grants()` 定时将到期授权置 EXPIRED，`my_permissions()` 快照据此排除并另列 `expiring_soon`。

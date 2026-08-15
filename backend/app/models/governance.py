@@ -30,6 +30,7 @@ from sqlalchemy import (
     Enum,
     Index,
     String,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -91,6 +92,30 @@ class Role(Base, BaseModel):
         comment="角色名（对齐 PRD 4.9.2）",
     )
     description: Mapped[str | None] = mapped_column(String(256), nullable=True, comment="角色说明")
+
+
+class RolePermission(Base, BaseModel):
+    """角色权限点覆盖表（RBAC 可配置化，TD §12.5 增强）。
+
+    记录对 ``policy.ROLE_ACTIONS`` 默认基线的**覆盖**：某角色在该表中出现的动作集合
+    即该角色的生效权限点；未出现的角色沿用默认基线。``(role, action)`` 唯一，
+    覆盖以「整表替换该角色动作」语义更新（先删该角色全部行，再插入新集合）。
+
+    Attributes:
+        role: 角色名（对齐 User.role 7 值，含 analyst）。
+        action: 权限点（read/write/approve/export/review，取自
+            ``policy.CONFIGURABLE_ACTIONS`` 白名单）。
+    """
+
+    __tablename__ = "role_permission"
+
+    role: Mapped[str] = mapped_column(String(32), nullable=False, comment="角色名")
+    action: Mapped[str] = mapped_column(String(32), nullable=False, comment="权限点（动作）")
+
+    __table_args__ = (
+        Index("idx_role_permission_role", "role"),
+        UniqueConstraint("role", "action", name="uk_role_permission_role_action"),
+    )
 
 
 class Grant(Base, BaseModel):

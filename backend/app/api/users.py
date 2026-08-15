@@ -35,7 +35,7 @@ from app.core.guard import guard_against_injection
 from app.core.security import hash_password, verify_password
 from app.db.mysql import get_db_session
 from app.models.subject_domain import SubjectDomain
-from app.models.user import User
+from app.models.user import Organization, User
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -97,6 +97,9 @@ class UserCreateRequest(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=128, description="显示名称")
     role: UserRole = Field(default="viewer", description="角色")
     domain: str | None = Field(default=None, max_length=64, description="所属域")
+    org_id: int | None = Field(
+        default=None, gt=0, description="所属组织 ID（缺省归入当前管理员组织）"
+    )
     password: str = Field(..., min_length=8, max_length=128, description="初始密码")
 
 
@@ -209,6 +212,29 @@ async def _assert_domain_active(db: AsyncSession, domain: str | None) -> None:
         )
 
 
+async def _assert_org_active(db: AsyncSession, org_id: int) -> None:
+    """校验组织存在且 active（多租户：停用/删除组织不可新建用户）。
+
+    Raises:
+        NotFoundError: 组织不存在（ORG_NOT_FOUND）。
+        ValidationError: 组织未启用（ORG_DISABLED）。
+    """
+    org = (
+        await db.execute(
+            select(Organization).where(Organization.id == org_id, Organization.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if org is None:
+        raise NotFoundError("组织不存在", error_code="ORG_NOT_FOUND", ctx={"org_id": org_id})
+    org_status = str(org.status.value if hasattr(org.status, "value") else org.status)
+    if org_status != "active":
+        raise ValidationError(
+            "组织未启用，不能创建用户",
+            error_code="ORG_DISABLED",
+            ctx={"org_id": org_id, "status": org_status},
+        )
+
+
 def _password_category_count(password: str) -> int:
     """统计密码命中的字符类别数（大写/小写/数字/特殊字符，每类至多 1 分）。"""
     return sum(
@@ -314,8 +340,10 @@ async def create_user(
     _validate_password_complexity(payload.password)
     await _assert_unique(db, username=payload.username, email=payload.email)
     await _assert_domain_active(db, payload.domain)
+    org_id = payload.org_id or user.org_id
+    await _assert_org_active(db, org_id)
     row = User(
-        org_id=user.org_id,
+        org_id=org_id,
         username=payload.username,
         email=payload.email,
         display_name=payload.display_name,
@@ -338,6 +366,7 @@ async def create_user(
             "display_name": row.display_name,
             "role": row.role,
             "domain": row.domain,
+            "org_id": row.org_id,
         },
         ip=client_ip(request),
         trace_id=trace_id,

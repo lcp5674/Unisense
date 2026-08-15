@@ -1,19 +1,24 @@
 """审计日志查询 API（对齐 TD §12.10 / FR-16）。
 
-提供审计日志的检索能力，供合规官/审计员查询。
-所有查询端点均须认证（require_roles），且仅支持分页只读查询。
+提供审计日志的检索与合规导出能力，供合规官/审计员查询。
+所有查询端点均须认证（require_roles），列表仅支持分页只读查询；
+导出端点（``GET /audit/export``）支持 CSV/JSON，供合规留档。
 """
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
+from app.core.audit import client_ip, write_audit
 from app.core.audit_i18n import describe_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
@@ -25,6 +30,38 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 #: 审计读权限：管理/合规角色（viewer 等只读角色不可见含 actor/detail/PII 标记的完整审计）。
 _READ_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+
+#: 导出单次上限：防一次性拉取全表压垮 DB/网络（合规留档按需分批）。
+_EXPORT_LIMIT_MAX = 10_000
+
+
+def _apply_filters(
+    stmt: Any,
+    count_stmt: Any,
+    *,
+    actor_id: int | None,
+    entity_type: str | None,
+    entity_id: str | None,
+    trace_id_filter: str | None,
+    pii_access: bool | None,
+) -> tuple[Any, Any]:
+    """公共过滤条件（列表与导出共用，避免两处漂移）。"""
+    if actor_id is not None:
+        stmt = stmt.where(AuditLog.actor_id == actor_id)
+        count_stmt = count_stmt.where(AuditLog.actor_id == actor_id)
+    if entity_type is not None:
+        stmt = stmt.where(AuditLog.entity_type == entity_type)
+        count_stmt = count_stmt.where(AuditLog.entity_type == entity_type)
+    if entity_id is not None:
+        stmt = stmt.where(AuditLog.entity_id == entity_id)
+        count_stmt = count_stmt.where(AuditLog.entity_id == entity_id)
+    if trace_id_filter is not None:
+        stmt = stmt.where(AuditLog.trace_id == trace_id_filter)
+        count_stmt = count_stmt.where(AuditLog.trace_id == trace_id_filter)
+    if pii_access is not None:
+        stmt = stmt.where(AuditLog.pii_access == pii_access)
+        count_stmt = count_stmt.where(AuditLog.pii_access == pii_access)
+    return stmt, count_stmt
 
 
 @router.get("", dependencies=_READ_DEPS)
@@ -52,21 +89,15 @@ async def list_audit_logs(
     )
     count_stmt = select(func.count()).select_from(AuditLog)
 
-    if actor_id is not None:
-        stmt = stmt.where(AuditLog.actor_id == actor_id)
-        count_stmt = count_stmt.where(AuditLog.actor_id == actor_id)
-    if entity_type is not None:
-        stmt = stmt.where(AuditLog.entity_type == entity_type)
-        count_stmt = count_stmt.where(AuditLog.entity_type == entity_type)
-    if entity_id is not None:
-        stmt = stmt.where(AuditLog.entity_id == entity_id)
-        count_stmt = count_stmt.where(AuditLog.entity_id == entity_id)
-    if trace_id_filter is not None:
-        stmt = stmt.where(AuditLog.trace_id == trace_id_filter)
-        count_stmt = count_stmt.where(AuditLog.trace_id == trace_id_filter)
-    if pii_access is not None:
-        stmt = stmt.where(AuditLog.pii_access == pii_access)
-        count_stmt = count_stmt.where(AuditLog.pii_access == pii_access)
+    stmt, count_stmt = _apply_filters(
+        stmt,
+        count_stmt,
+        actor_id=actor_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        trace_id_filter=trace_id_filter,
+        pii_access=pii_access,
+    )
 
     total = (await db.execute(count_stmt)).scalar_one() or 0
     stmt = stmt.order_by(AuditLog.created_at.desc()).offset(offset).limit(page_size)
@@ -87,4 +118,116 @@ async def list_audit_logs(
             "page_size": page_size,
         },
         trace_id=trace_id,
+    )
+
+
+@router.get("/export", dependencies=_READ_DEPS)
+async def export_audit_logs(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    request: Request,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    actor_id: int | None = Query(None, description="操作人 ID"),
+    entity_type: str | None = Query(None, description="实体类型"),
+    entity_id: str | None = Query(None, description="实体 ID（精确匹配，如指标编码）"),
+    trace_id_filter: str | None = Query(None, description="链路追踪 ID"),
+    pii_access: bool | None = Query(None, description="是否 PII 访问"),
+    export_format: str = Query(
+        "csv", alias="format", pattern="^(csv|json)$", description="导出格式"
+    ),
+    limit: int = Query(5000, ge=1, le=_EXPORT_LIMIT_MAX, description="导出条数上限"),
+) -> Response:
+    """导出审计日志（CSV/JSON，供合规留档；导出动作本身落审计）。
+
+    与列表共用过滤条件，但不受分页限制（上限 ``limit`` 防全表拉取）。
+    CSV 输出带 UTF-8 BOM（Excel 直接打开不乱码）；JSON 输出数组。
+    """
+    stmt = select(AuditLog, User.display_name).join(
+        User, User.id == AuditLog.actor_id, isouter=True
+    )
+    stmt, _ = _apply_filters(
+        stmt,
+        select(func.count()).select_from(AuditLog),
+        actor_id=actor_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        trace_id_filter=trace_id_filter,
+        pii_access=pii_access,
+    )
+    rows = (
+        await db.execute(stmt.order_by(AuditLog.created_at.desc()).limit(limit))
+    ).all()
+
+    records: list[dict[str, Any]] = []
+    for log, display_name in rows:
+        item = log.to_dict()
+        item["actor_display"] = display_name or f"用户 #{log.actor_id}"
+        item["action_desc"] = describe_audit(log.action, log.entity_type, log.detail_json)
+        records.append(item)
+
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="AUDIT_EXPORT",
+        entity_type="audit_log",
+        entity_id=f"items:{len(records)}",
+        detail={"format": export_format, "rows": len(records)},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+
+    filename = f"audit_export_{trace_id or 'all'}.{export_format}"
+    if export_format == "json":
+        body = json.dumps(records, ensure_ascii=False, default=str)
+        return Response(
+            content=body,
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    columns = [
+        "id",
+        "actor_id",
+        "actor_display",
+        "action",
+        "action_desc",
+        "entity_type",
+        "entity_id",
+        "detail_json",
+        "ip",
+        "trace_id",
+        "pii_access",
+        "archived",
+        "created_at",
+    ]
+    writer.writerow(columns)
+    for rec in records:
+        writer.writerow(
+            [
+                rec.get("id"),
+                rec.get("actor_id"),
+                rec.get("actor_display"),
+                rec.get("action"),
+                rec.get("action_desc"),
+                rec.get("entity_type"),
+                rec.get("entity_id"),
+                json.dumps(rec.get("detail_json"), ensure_ascii=False, default=str)
+                if rec.get("detail_json")
+                else "",
+                rec.get("ip"),
+                rec.get("trace_id"),
+                rec.get("pii_access"),
+                rec.get("archived"),
+                rec.get("created_at"),
+            ]
+        )
+    # UTF-8 BOM：Excel 打开避免中文乱码
+    body = "\ufeff" + buffer.getvalue()
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

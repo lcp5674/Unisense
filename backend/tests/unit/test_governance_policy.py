@@ -229,3 +229,54 @@ def test_masking_mapping() -> None:
     assert masking_for("CONFIDENTIAL") == "mask"
     assert masking_for(SensitivityLevel.PII) == "hash"
     assert masking_for("WHATEVER") == "mask"
+
+
+# ------------------------------------------------- RBAC 可配置化（role_actions 参数）
+
+def test_role_actions_override_enables_action() -> None:
+    """覆盖映射为 reviewer 追加 export 后，本域可导出（默认 reviewer 无 export）。"""
+    subject = Subject(1, "reviewer", domain="sales")
+    resource = Resource(domain="sales")
+    # 默认：reviewer 不可导出
+    assert decide(subject, "export", resource).allow is False
+    # 覆盖后：reviewer 可导出
+    overrides = {
+        "reviewer": frozenset({"read", "approve", "export"}),
+    }
+    d = decide(subject, "export", resource, role_actions=overrides)
+    assert d.allow is True
+
+
+def test_role_actions_override_revokes_action() -> None:
+    """覆盖映射将 metric_owner 的 write 收窄后，本域写被拒绝（权限点可回收）。"""
+    subject = Subject(7, "metric_owner", domain="sales")
+    resource = Resource(domain="sales", metric_code="m1", owner_id=7)
+    # 默认：本人负责指标可写
+    assert decide(subject, "write", resource).allow is True
+    # 覆盖为仅 read：write 被回收
+    overrides = {"metric_owner": frozenset({"read"})}
+    d = decide(subject, "write", resource, role_actions=overrides)
+    assert d.allow is False
+
+
+def test_role_actions_does_not_affect_platform_admin_direct() -> None:
+    """platform_admin 跨域直通为硬编码保护，不因覆盖映射收窄。"""
+    subject = Subject(1, "platform_admin", domain="ops")
+    resource = Resource(domain="sales")
+    overrides = {"platform_admin": frozenset({"read"})}
+    d = decide(subject, "write", resource, role_actions=overrides)
+    assert d.allow is True
+
+
+def test_role_actions_unknown_role_still_denied() -> None:
+    """覆盖映射不含的角色按映射缺失处理（fail-closed 保持）。"""
+    d = decide(Subject(1, "viewer", domain="sales"), "write", Resource(domain="sales"))
+    assert d.allow is False
+    overrides = {"reviewer": frozenset({"read", "write"})}
+    d2 = decide(
+        Subject(1, "viewer", domain="sales"),
+        "write",
+        Resource(domain="sales"),
+        role_actions=overrides,
+    )
+    assert d2.allow is False

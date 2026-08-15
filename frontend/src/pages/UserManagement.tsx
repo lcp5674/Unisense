@@ -29,6 +29,7 @@ import {
   fetchCurrentUser,
   listAdminUsers,
   listDomainTree,
+  listOrganizations,
   resetUserPassword,
   setUserStatus,
   updateUser,
@@ -118,6 +119,7 @@ export function UserManagement() {
   const [editForm] = Form.useForm();
   const [resetForm] = Form.useForm();
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [orgOptions, setOrgOptions] = useState<Array<{ value: number; label: string }>>([]);
   const [generatedPassword, setGeneratedPassword] = useState("");
   const [createdResult, setCreatedResult] = useState<{ username: string; password: string } | null>(
     null,
@@ -159,6 +161,19 @@ export function UserManagement() {
   }, []);
 
   useEffect(() => {
+    // 组织下拉：仅展示启用中的组织（多租户；停用组织不可新建用户）
+    listOrganizations({ page: 1, page_size: 200 })
+      .then((res) =>
+        setOrgOptions(
+          res.items
+            .filter((o) => o.status === "active")
+            .map((o) => ({ value: o.id, label: `${o.name}（${o.code}）` })),
+        ),
+      )
+      .catch(() => setOrgOptions([]));
+  }, []);
+
+  useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, role, status]);
@@ -172,6 +187,7 @@ export function UserManagement() {
         display_name: String(values.display_name),
         role: String(values.role ?? "viewer"),
         domain: values.domain ? String(values.domain) : null,
+        org_id: values.org_id ? Number(values.org_id) : undefined,
         password: String(values.password),
       };
       await createUser(payload);
@@ -487,6 +503,15 @@ export function UserManagement() {
               />
             </Form.Item>
           </Space>
+          <Form.Item name="org_id" label="所属组织" extra="缺省归入当前管理员组织；停用组织不可选">
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择组织（缺省当前管理员组织）"
+              options={orgOptions}
+            />
+          </Form.Item>
           <Form.Item
             name="password"
             label="初始密码"

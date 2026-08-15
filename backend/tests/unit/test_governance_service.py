@@ -12,7 +12,15 @@ from typing import Any
 import pytest
 
 from app.core.exceptions import AuthError, NotFoundError, ValidationError
-from app.models.governance import Grant, GrantStatus, GrantType, Role, RoleName, SensitivityLevel
+from app.models.governance import (
+    Grant,
+    GrantStatus,
+    GrantType,
+    Role,
+    RoleName,
+    RolePermission,
+    SensitivityLevel,
+)
 from app.services.governance.schemas import (
     ClassificationRescanRequest,
     GrantBatchRequest,
@@ -70,6 +78,7 @@ class FakeRepo:
     def __init__(self) -> None:
         self.grants: list[Grant] = []
         self.roles: list[Role] = []
+        self.role_permissions: list[RolePermission] = []
         self.metrics: dict[str, FakeMetric] = {}
         self.catalogs: list[FakeCatalog] = []
         self.classifications: list[dict[str, Any]] = []
@@ -85,6 +94,23 @@ class FakeRepo:
         role.id = self._seq
         self.roles.append(role)
         return role
+
+    # role permission (RBAC 可配置化)
+    async def list_role_permissions(self) -> list[RolePermission]:
+        return list(self.role_permissions)
+
+    async def replace_role_permissions(self, role: str, actions: list[str]) -> None:
+        self.role_permissions = [rp for rp in self.role_permissions if rp.role != role]
+        for action in actions:
+            self._seq += 1
+            rp = RolePermission(role=role, action=action)
+            rp.id = self._seq
+            self.role_permissions.append(rp)
+
+    async def reset_role_permissions(self, role: str) -> int:
+        before = len(self.role_permissions)
+        self.role_permissions = [rp for rp in self.role_permissions if rp.role != role]
+        return before - len(self.role_permissions)
 
     # grant
     async def create_grant(self, grant: Grant) -> Grant:
@@ -765,3 +791,87 @@ async def test_check_metric_permission_skip_pii_gate_allows_submit_flow() -> Non
         skip_pii_gate=True,
     )
     assert cross.allow is False
+
+
+
+# ------------------------------------------- RBAC 可配置化（角色权限点覆盖）
+
+async def test_list_role_permissions_default_view() -> None:
+    """默认（无覆盖）：全部角色显示默认动作、custom=None、effective=默认。"""
+    svc, _repo, _ = _svc()
+    items = await svc.list_role_permissions()
+    by_role = {i["role"]: i for i in items}
+    assert "platform_admin" in by_role and "viewer" in by_role and "analyst" in by_role
+    viewer = by_role["viewer"]
+    assert viewer["custom_actions"] is None
+    assert viewer["effective_actions"] == ["read"]
+    assert viewer["protected"] is False
+    assert by_role["platform_admin"]["protected"] is True
+
+
+async def test_set_role_permissions_overrides_effective_and_decision() -> None:
+    """覆盖 reviewer 追加 export：effective 变化 + check_metric_permission 本域可导出。"""
+    svc, repo, _ = _svc()
+    repo.metrics["m1"] = FakeMetric(
+        metric_code="m1", domain="sales", owner_id=1, compliance_reviewed=True
+    )
+
+    # 默认 reviewer 不可导出（基线无 export）
+    denied = await svc.check_metric_permission(
+        metric_code="m1", action="export", user_id=1, role="reviewer", user_domain="sales"
+    )
+    assert denied.allow is False
+    # 覆盖 reviewer 追加 export
+    item = await svc.set_role_permissions("reviewer", ["read", "approve", "export"])
+    assert item["custom_actions"] == ["approve", "export", "read"]
+    assert item["effective_actions"] == ["approve", "export", "read"]
+
+    # 覆盖后 reviewer 本域可导出（load_role_actions 合并生效）
+    allowed = await svc.check_metric_permission(
+        metric_code="m1", action="export", user_id=1, role="reviewer", user_domain="sales"
+    )
+    assert allowed.allow is True
+
+
+async def test_set_role_permissions_revokes_action() -> None:
+    """覆盖将 domain_admin 的 write 收窄后，本域写被回收。"""
+    svc, repo, _ = _svc()
+    repo.metrics["m1"] = FakeMetric(
+        metric_code="m1", domain="sales", owner_id=1, compliance_reviewed=True
+    )
+    await svc.set_role_permissions("domain_admin", ["read", "approve", "export"])
+    d = await svc.check_metric_permission(
+        metric_code="m1", action="write", user_id=1, role="domain_admin", user_domain="sales"
+    )
+    assert d.allow is False
+    # 本域 read 仍放行
+    d2 = await svc.check_metric_permission(
+        metric_code="m1", action="read", user_id=1, role="domain_admin", user_domain="sales"
+    )
+    assert d2.allow is True
+
+
+async def test_set_role_permissions_rejects_unknown_action() -> None:
+    """未知权限点 → ValidationError（ROLE_PERMISSION_INVALID）。"""
+    svc, _repo, _ = _svc()
+    with pytest.raises(ValidationError) as exc:
+        await svc.set_role_permissions("viewer", ["read", "sudo"])
+    assert exc.value.error_code == "ROLE_PERMISSION_INVALID"
+
+
+async def test_set_role_permissions_rejects_protected_role() -> None:
+    """platform_admin 受保护：配置其权限点 → ValidationError（ROLE_PERMISSION_PROTECTED）。"""
+    svc, _repo, _ = _svc()
+    with pytest.raises(ValidationError) as exc:
+        await svc.set_role_permissions("platform_admin", ["read"])
+    assert exc.value.error_code == "ROLE_PERMISSION_PROTECTED"
+
+
+async def test_reset_role_permissions_restores_default() -> None:
+    """重置覆盖后恢复默认基线。"""
+    svc, repo, _ = _svc()
+    await svc.set_role_permissions("reviewer", ["read", "write"])
+    item = await svc.reset_role_permissions("reviewer")
+    assert item["custom_actions"] is None
+    assert item["effective_actions"] == ["approve", "read"]
+    assert repo.role_permissions == []

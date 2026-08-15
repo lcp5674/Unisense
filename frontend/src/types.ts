@@ -145,6 +145,7 @@ export interface UserCreateRequest {
   display_name: string;
   role: string;
   domain?: string | null;
+  org_id?: number | null;
   password: string;
 }
 
@@ -706,6 +707,23 @@ export interface RoleResponse {
   id: number;
   name: string;
   description: string | null;
+}
+
+export interface RolePermissionItem {
+  role: string;
+  default_actions: string[];
+  custom_actions: string[] | null;
+  effective_actions: string[];
+  protected: boolean;
+}
+
+export interface OrganizationView {
+  id: number;
+  name: string;
+  code: string;
+  status: string;
+  user_count: number;
+  created_at: string | null;
 }
 
 export interface GrantResponse {

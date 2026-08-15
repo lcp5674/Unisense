@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
+from app.core.exceptions import ValidationError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.governance.events import GovernanceEventPublisher
@@ -41,6 +42,8 @@ from app.services.governance.schemas import (
     PermissionCheckRequest,
     PiiReviewRequest,
     RoleCreate,
+    RolePermissionItem,
+    RolePermissionUpdate,
     RoleResponse,
 )
 from app.services.governance.service import GovernanceService
@@ -87,6 +90,86 @@ async def create_role(
     )
     await db.commit()
     return ok(data=RoleResponse.model_validate(role).model_dump(), trace_id=trace_id)
+
+
+@router.get("/roles", dependencies=_GRANT_ADMIN_DEPS)
+async def list_role_permissions(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """角色 × 权限点配置列表（默认基线 + ``role_permission`` 覆盖的合并视图）。
+
+    RBAC 可配置化（TD §12.5 增强）：前端据此渲染角色权限点矩阵，只读。
+    """
+    svc = _svc(db, request)
+    items = await svc.list_role_permissions()
+    data = [RolePermissionItem.model_validate(i).model_dump() for i in items]
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.put("/roles/{role}/permissions", dependencies=_ROLE_ADMIN_DEPS)
+async def set_role_permissions(
+    role: str,
+    payload: RolePermissionUpdate,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """覆盖某角色的权限点（RBAC 可配置化）。
+
+    仅 ``platform_admin`` 可配置；platform_admin 角色本身受保护（硬编码跨域直通），
+    覆盖其权限点会被拒绝。写操作落审计。
+    """
+    if role not in ALL_ROLES:
+        raise ValidationError(
+            f"未知角色: {role}", error_code="ROLE_PERMISSION_INVALID", ctx={"role": role}
+        )
+    svc = _svc(db, request)
+    item = await svc.set_role_permissions(role, payload.actions)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ROLE_PERMISSION_UPDATE",
+        entity_type="role",
+        entity_id=role,
+        detail={"actions": payload.actions},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=item, trace_id=trace_id)
+
+
+@router.delete("/roles/{role}/permissions", dependencies=_ROLE_ADMIN_DEPS)
+async def reset_role_permissions(
+    role: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """清除某角色的权限点覆盖，恢复 ``policy.ROLE_ACTIONS`` 默认基线。"""
+    if role not in ALL_ROLES:
+        raise ValidationError(
+            f"未知角色: {role}", error_code="ROLE_PERMISSION_INVALID", ctx={"role": role}
+        )
+    svc = _svc(db, request)
+    item = await svc.reset_role_permissions(role)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ROLE_PERMISSION_RESET",
+        entity_type="role",
+        entity_id=role,
+        detail={"reset": True},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=item, trace_id=trace_id)
 
 
 @router.post("/grants", dependencies=_GRANT_ADMIN_DEPS)

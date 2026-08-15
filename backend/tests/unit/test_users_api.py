@@ -142,7 +142,11 @@ async def test_list_users_returns_paginated() -> None:
 async def test_create_user_success(admin_client: httpx.AsyncClient) -> None:
     with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
         "app.api.users._assert_unique", new=AsyncMock()
-    ), patch("app.api.users._assert_domain_active", new=AsyncMock()):
+    ), patch(
+        "app.api.users._assert_domain_active", new=AsyncMock()
+    ), patch(
+        "app.api.users._assert_org_active", new=AsyncMock()
+    ):
         resp = await admin_client.post(
             "/api/v1/users",
             json={

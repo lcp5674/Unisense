@@ -134,6 +134,95 @@ class GovernanceService(BaseService):
             Role(name=payload.name, description=payload.description)
         )
 
+    # --------------------------------------------- role permission (RBAC 可配置化)
+
+    async def list_role_permissions(self) -> list[dict[str, Any]]:
+        """角色 × 权限点配置列表（默认基线 + ``role_permission`` 表覆盖的合并视图）。
+
+        Returns:
+            每项含 ``role`` / ``default_actions`` / ``custom_actions``（未覆盖为 None）/
+            ``effective_actions``（生效动作）/ ``protected``（受保护角色不可配置）。
+        """
+        overrides = await self._repo.list_role_permissions()
+        by_role: dict[str, set[str]] = {}
+        for row in overrides:
+            by_role.setdefault(row.role, set()).add(row.action)
+        roles = sorted(
+            set(policy.ROLE_ACTIONS.keys()) | set(by_role.keys()),
+            key=lambda r: (r not in policy.PROTECTED_ROLES, r),  # 受保护角色（平台管理员）置顶
+        )
+        items: list[dict[str, Any]] = []
+        for r in roles:
+            default_actions = sorted(policy.ROLE_ACTIONS.get(r, frozenset()))
+            custom_actions = sorted(by_role[r]) if r in by_role else None
+            items.append(
+                {
+                    "role": r,
+                    "default_actions": default_actions,
+                    "custom_actions": custom_actions,
+                    "effective_actions": custom_actions or default_actions,
+                    "protected": r in policy.PROTECTED_ROLES,
+                }
+            )
+        return items
+
+    async def load_role_actions(self) -> dict[str, frozenset[str]]:
+        """合并默认基线 + 覆盖，产出供 ``policy.decide`` 的 ``role_actions`` 映射。
+
+        每次决策前调用（低频配置查询，RBAC 配置化场景可接受）；被覆盖的角色以
+        ``role_permission`` 表为准，未覆盖的沿用 ``policy.ROLE_ACTIONS`` 默认。
+        """
+        merged = dict(policy.ROLE_ACTIONS)
+        by_role: dict[str, set[str]] = {}
+        for row in await self._repo.list_role_permissions():
+            by_role.setdefault(row.role, set()).add(row.action)
+        for role, actions in by_role.items():
+            merged[role] = frozenset(actions)
+        return merged
+
+    async def set_role_permissions(self, role: str, actions: list[str]) -> dict[str, Any]:
+        """覆盖某角色的权限点（RBAC 配置化）。
+
+        Raises:
+            ValidationError: 角色为受保护角色（platform_admin）或含未知动作。
+        """
+        if role in policy.PROTECTED_ROLES:
+            raise ValidationError(
+                "platform_admin 为受保护角色，权限点不可配置（硬编码跨域直通）",
+                error_code="ROLE_PERMISSION_PROTECTED",
+                ctx={"role": role},
+            )
+        unknown = sorted(set(actions) - set(policy.CONFIGURABLE_ACTIONS))
+        if unknown:
+            raise ValidationError(
+                f"包含未知权限点: {', '.join(unknown)}",
+                error_code="ROLE_PERMISSION_INVALID",
+                ctx={"role": role, "unknown": unknown},
+            )
+        await self._repo.replace_role_permissions(role, sorted(set(actions)))
+        for item in await self.list_role_permissions():
+            if item["role"] == role:
+                return item
+        raise NotFoundError("角色不存在", ctx={"role": role})
+
+    async def reset_role_permissions(self, role: str) -> dict[str, Any]:
+        """清除某角色的权限点覆盖，恢复默认基线。
+
+        Raises:
+            ValidationError: 角色为受保护角色（platform_admin）。
+        """
+        if role in policy.PROTECTED_ROLES:
+            raise ValidationError(
+                "platform_admin 为受保护角色，权限点不可配置（硬编码跨域直通）",
+                error_code="ROLE_PERMISSION_PROTECTED",
+                ctx={"role": role},
+            )
+        await self._repo.reset_role_permissions(role)
+        for item in await self.list_role_permissions():
+            if item["role"] == role:
+                return item
+        raise NotFoundError("角色不存在", ctx={"role": role})
+
     # ----------------------------------------------------------------- grant
 
     async def grant(self, payload: GrantCreate, actor_id: int) -> Grant:
@@ -448,11 +537,12 @@ class GovernanceService(BaseService):
             if g.domain:
                 domains.add(g.domain)
         role_s = _role_to_str(user.role)
+        role_actions = await self.load_role_actions()
         return PermissionSnapshot(
             user_id=user.id,
             role=role_s,
             home_domain=user.domain,
-            allowed_actions=sorted(policy.ROLE_ACTIONS.get(role_s, frozenset())),
+            allowed_actions=sorted(role_actions.get(role_s, frozenset())),
             granted_domains=sorted(domains),
             metric_whitelist=sorted(whitelist),
             row_level_restricted=any(g.row_level for g in effective),
@@ -486,7 +576,9 @@ class GovernanceService(BaseService):
                 compliance_reviewed=bool(metric.compliance_reviewed),
                 owner_id=metric.owner_id,
             )
-        decision = policy.decide(subject, req.action, resource)
+        decision = policy.decide(
+            subject, req.action, resource, role_actions=await self.load_role_actions()
+        )
         return PermissionCheckResult(
             allow=decision.allow,
             reason=decision.reason,
@@ -544,7 +636,9 @@ class GovernanceService(BaseService):
             domain=user_domain,
             grants=(),
         )
-        return policy.decide(subject, action, resource)
+        return policy.decide(
+            subject, action, resource, role_actions=await self.load_role_actions()
+        )
 
     async def check_internal_read_permission(
         self,
@@ -583,7 +677,9 @@ class GovernanceService(BaseService):
             compliance_reviewed=bool(metric.compliance_reviewed),
             owner_id=metric.owner_id,
         )
-        decision = policy.decide(subject, "read", resource)
+        decision = policy.decide(
+            subject, "read", resource, role_actions=await self.load_role_actions()
+        )
         matched = (
             policy._match_grant(subject.grants, "read", resource)
             if decision.allow and decision.restricted

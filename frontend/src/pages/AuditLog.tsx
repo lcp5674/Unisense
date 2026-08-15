@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card, Table, Tag, Input, Select, Button, Space, Tooltip, message } from "antd";
-import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
-import { listAudit, UnisenseApiError } from "../api";
+import { DownloadOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
+import { exportAudit, listAudit, UnisenseApiError } from "../api";
 import type { AuditEntry } from "../types";
 import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel, auditActionLabel } from "../utils/auditI18n";
 import { formatCnTime } from "../utils/timeCn";
@@ -14,6 +14,7 @@ export function AuditLog() {
   const [actorId, setActorId] = useState("");
   const [piiOnly, setPiiOnly] = useState<boolean | undefined>(undefined);
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -30,6 +31,25 @@ export function AuditLog() {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
+    }
+  }
+
+  // 导出当前过滤条件下的审计（CSV，合规留档；导出动作本身落审计）
+  async function handleExport() {
+    setExporting(true);
+    try {
+      await exportAudit({
+        entity_type: entityType || undefined,
+        actor_id: actorId ? Number(actorId) : undefined,
+        pii_access: piiOnly,
+        format: "csv",
+        limit: 5000,
+      });
+      message.success("已导出 CSV（当前过滤条件下最多 5000 条）");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "导出失败");
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -143,9 +163,14 @@ export function AuditLog() {
 
       <Card
         extra={
-          <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
-            刷新
-          </Button>
+          <Space>
+            <Button icon={<DownloadOutlined />} onClick={handleExport} loading={exporting}>
+              导出 CSV
+            </Button>
+            <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
+              刷新
+            </Button>
+          </Space>
         }
       >
         <Space style={{ marginBottom: 12 }} wrap>

@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AuthError
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
-from app.models.user import User
+from app.models.user import Organization, User
 
 #: 全部已定义角色：任何已登录用户均可读参考/目录类数据（列表与查询端点统一授权）。
 ALL_ROLES = (
@@ -85,10 +85,24 @@ async def get_current_user(
     if jti and await is_token_blacklisted(jti):
         raise AuthError("Token 已撤销，请重新登录", error_code="AUTH_TOKEN_REVOKED")
 
-    result = await db.execute(select(User).where(User.id == user_id, User.status == "active"))
+    result = await db.execute(
+        select(User).where(User.id == user_id, User.status == "active")
+    )
     user = result.scalar_one_or_none()
     if user is None:
         raise AuthError("用户不存在或已禁用", error_code="AUTH_TOKEN_INVALID")
+
+    # 多租户隔离（TD §4.1 organization）：所属组织停用/删除后禁止登录。
+    org = (
+        await db.execute(
+            select(Organization).where(Organization.id == user.org_id)
+        )
+    ).scalar_one_or_none()
+    if org is None:
+        raise AuthError("所属组织已停用，无法登录", error_code="ORG_DISABLED")
+    org_status = str(org.status.value if hasattr(org.status, "value") else org.status)
+    if org_status in ("suspended", "deleted"):
+        raise AuthError("所属组织已停用，无法登录", error_code="ORG_DISABLED")
 
     return user
 

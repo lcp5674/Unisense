@@ -149,6 +149,10 @@ def masking_for(level: SensitivityLevel | str) -> str:
 # ------------------------------------------------------------------- PDP 决策
 
 #: 角色 → 本域内允许的动作集合（跨域须另有 grants 授权）。
+#:
+#: 这是**默认基线**：``role_permission`` 表（RBAC 可配置化，见 GovernanceService
+#: ``list_role_permissions`` / ``set_role_permissions``）可对其做覆盖，``decide()``
+#: 通过 ``role_actions`` 参数接收合并后的映射；未配置覆盖的角色沿用本默认值。
 ROLE_ACTIONS: dict[str, frozenset[str]] = {
     RoleName.PLATFORM_ADMIN.value: frozenset({"read", "write", "approve", "export", "review"}),
     RoleName.DOMAIN_ADMIN.value: frozenset({"read", "write", "approve", "export"}),
@@ -159,6 +163,13 @@ ROLE_ACTIONS: dict[str, frozenset[str]] = {
     # 兼容 0001 初始迁移中的 analyst 角色（只读消费者）
     "analyst": frozenset({"read"}),
 }
+
+#: PDP 可配置动作白名单：角色权限点配置只能从该集合内勾选（杜绝写入未知动作）。
+CONFIGURABLE_ACTIONS: frozenset[str] = frozenset({"read", "write", "approve", "export", "review"})
+
+#: 禁止通过配置收窄的平台级保护角色（权限点配置对这些角色不生效，防自锁/提权失控）。
+#: platform_admin 在 ``decide`` 中本就硬编码跨域直通，不受 role_actions 影响。
+PROTECTED_ROLES: frozenset[str] = frozenset({RoleName.PLATFORM_ADMIN.value})
 
 #: 授权类型 → 允许的动作集合。
 GRANT_TYPE_ACTIONS: dict[str, frozenset[str]] = {
@@ -210,7 +221,12 @@ class Decision:
     masking: str = "none"
 
 
-def decide(subject: Subject, action: str, resource: Resource) -> Decision:
+def decide(
+    subject: Subject,
+    action: str,
+    resource: Resource,
+    role_actions: dict[str, frozenset[str]] | None = None,
+) -> Decision:
     """权限决策入口，默认拒绝（fail-closed）。
 
     判定顺序：动作合法性 → PII 合规门禁 → platform_admin 直通 → 本域角色 → 跨域授权 → 拒绝。
@@ -219,12 +235,14 @@ def decide(subject: Subject, action: str, resource: Resource) -> Decision:
         subject: 主体属性。
         action: 动作，取值 read/write/approve/export/review。
         resource: 客体属性。
+        role_actions: 可配置的角色动作映射（RBAC 配置化，来自 ``role_permission`` 表
+            与默认基线的合并）。缺省使用模块级 ``ROLE_ACTIONS``，保持纯函数与既有调用兼容。
 
     Returns:
         决策结果，``allow=False`` 时 ``error_code`` 给出拒绝原因码。
     """
     act = (action or "").strip().lower()
-    if act not in {"read", "write", "approve", "export", "review"}:
+    if act not in CONFIGURABLE_ACTIONS:
         return Decision(False, f"未知动作 {action!r}", error_code="VALIDATION_ERROR")
 
     masking = masking_for(resource.sensitivity)
@@ -240,7 +258,8 @@ def decide(subject: Subject, action: str, resource: Resource) -> Decision:
                 masking=masking,
             )
 
-    role_actions = ROLE_ACTIONS.get(subject.role, frozenset())
+    effective_actions = role_actions if role_actions is not None else ROLE_ACTIONS
+    role_actions_for_role = effective_actions.get(subject.role, frozenset())
 
     if subject.role == RoleName.PLATFORM_ADMIN.value:
         return Decision(True, "platform_admin 跨域运维直通", masking=masking)
@@ -250,7 +269,7 @@ def decide(subject: Subject, action: str, resource: Resource) -> Decision:
         and resource.domain is not None
         and subject.domain == resource.domain
     )
-    if same_domain and act in role_actions:
+    if same_domain and act in role_actions_for_role:
         owner_mismatch = (
             subject.role == RoleName.METRIC_OWNER.value
             and act == "write"

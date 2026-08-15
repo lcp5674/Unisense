@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Alert, Descriptions } from "antd";
-import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Alert, Descriptions, Checkbox } from "antd";
+import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined, AuditOutlined } from "@ant-design/icons";
 import {
   fetchMyPermissions,
   listGrants,
   createGrant,
   revokeGrant,
-  createRole,
+  batchGrant,
+  listRolePermissions,
+  setRolePermissions,
+  resetRolePermissions,
   checkPermission,
   piiReviewAction,
   classificationRescan,
@@ -15,7 +18,7 @@ import {
   listDomainTree,
   UnisenseApiError,
 } from "../api";
-import type { GrantResponse, PermissionSnapshot, SubjectDomainTreeNode, UserBrief } from "../types";
+import type { GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RolePermissionItem, SubjectDomainTreeNode, UserBrief } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 
 // 主题域树 → 扁平化下拉选项（保留层级缩进，与用户管理/数据源页「业务域」下拉同款实现）
@@ -125,6 +128,11 @@ function GrantsTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  // 批量授权（接线后端 POST /grants/batch，dry-run 预览后确认）
+  const [batchModalOpen, setBatchModalOpen] = useState(false);
+  const [batchPreview, setBatchPreview] = useState<GrantBatchResult | null>(null);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchForm] = Form.useForm();
 
   useEffect(() => {
     listUsers()
@@ -183,6 +191,59 @@ function GrantsTab() {
     }
   }
 
+  // 批量授权：将同一授权参数应用到多个用户，生成 GrantCreate 列表
+  function buildBatchItems(values: Record<string, unknown>): GrantCreate[] {
+    const users = Array.isArray(values.user_ids) ? values.user_ids.map(Number) : [];
+    const whitelist = values.metric_whitelist
+      ? String(values.metric_whitelist).split(",").map((s) => s.trim()).filter(Boolean)
+      : null;
+    return users.map((uid) => ({
+      user_id: uid,
+      role_id: null,
+      domain: values.domain ? String(values.domain) : null,
+      metric_whitelist: whitelist,
+      grant_type: String(values.grant_type ?? "READ"),
+      row_level: Boolean(values.row_level),
+      reason: values.reason ? String(values.reason) : null,
+    }));
+  }
+
+  async function handleBatchPreview() {
+    const values = await batchForm.validateFields().catch(() => null);
+    if (!values) return;
+    if (!Array.isArray(values.user_ids) || values.user_ids.length === 0) {
+      message.warning("请选择至少一个用户");
+      return;
+    }
+    setBatchLoading(true);
+    try {
+      const res = await batchGrant(buildBatchItems(values), "grant", true);
+      setBatchPreview(res);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "预览失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
+  async function handleBatchConfirm() {
+    const values = await batchForm.validateFields().catch(() => null);
+    if (!values) return;
+    setBatchLoading(true);
+    try {
+      const res = await batchGrant(buildBatchItems(values), "grant", false);
+      message.success(`批量授权完成：成功 ${res.succeeded} · 失败 ${res.failed}`);
+      setBatchModalOpen(false);
+      setBatchPreview(null);
+      batchForm.resetFields();
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量授权失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "用户", dataIndex: "user_id", key: "user", width: 80 },
@@ -218,6 +279,7 @@ function GrantsTab() {
           options={[{ value: "ACTIVE", label: "生效" }, { value: "EXPIRED", label: "过期" }, { value: "REVOKED", label: "已回收" }]}
         />
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建授权</Button>
+        <Button icon={<AuditOutlined />} onClick={() => { setBatchModalOpen(true); setBatchPreview(null); }}>批量授权</Button>
       </Space>
       <Table
         dataSource={items}
@@ -272,49 +334,219 @@ function GrantsTab() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <Modal
+        title="批量授权（同一参数应用到多个用户）"
+        open={batchModalOpen}
+        onCancel={() => { setBatchModalOpen(false); setBatchPreview(null); }}
+        width={680}
+        footer={[
+          <Button key="cancel" onClick={() => { setBatchModalOpen(false); setBatchPreview(null); }}>取消</Button>,
+          <Button key="preview" icon={<SearchOutlined />} loading={batchLoading} onClick={handleBatchPreview}>预览影响</Button>,
+          <Button key="confirm" type="primary" disabled={!batchPreview} loading={batchLoading} onClick={handleBatchConfirm}>确认授权</Button>,
+        ]}
+      >
+        <Form form={batchForm} layout="vertical" style={{ marginTop: 8 }}>
+          <Form.Item name="user_ids" label="授权用户（可多选）" rules={[{ required: true, message: "请选择至少一个用户" }]}>
+            <Select
+              mode="multiple"
+              showSearch
+              optionFilterProp="label"
+              placeholder="按用户名 / 显示名搜索"
+              options={users.map((u) => ({
+                value: u.id,
+                label: `${u.username}（${u.display_name}）`,
+              }))}
+            />
+          </Form.Item>
+          <Space size={16} style={{ width: "100%" }}>
+            <Form.Item name="grant_type" label="授权类型" initialValue="READ">
+              <Select style={{ width: 160 }} options={[{ value: "READ", label: "只读" }, { value: "WRITE", label: "写" }, { value: "READ_WRITE", label: "读写" }]} />
+            </Form.Item>
+            <Form.Item name="row_level" label="行级受限">
+              <Select style={{ width: 160 }} options={[{ value: false, label: "否" }, { value: true, label: "是" }]} />
+            </Form.Item>
+          </Space>
+          <Form.Item name="domain" label="授权域（留空为全部）">
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择主题域"
+              options={domainOptions}
+            />
+          </Form.Item>
+          <Form.Item name="metric_whitelist" label="指标白名单（逗号分隔）">
+            <Input className="mono" />
+          </Form.Item>
+          <Form.Item name="reason" label="授权原因">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+        </Form>
+        {batchPreview && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginTop: 8 }}
+            message={`预览：影响 ${batchPreview.affected_users} 个用户 · ${batchPreview.affected_metrics} 个指标 · 可执行 ${batchPreview.succeeded} · 不可执行 ${batchPreview.failed}`}
+            description={
+              <div style={{ maxHeight: 160, overflow: "auto" }}>
+                {batchPreview.items.map((it) => (
+                  <div key={`${it.user_id}-${it.domain ?? "all"}`} style={{ fontSize: 12, marginBottom: 4 }}>
+                    <Tag color={it.ok ? "success" : "error"}>#{it.user_id}</Tag>
+                    <span className="mono">{it.detail}</span>
+                  </div>
+                ))}
+              </div>
+            }
+          />
+        )}
+      </Modal>
     </div>
   );
 }
 
-function RolesTab() {
-  const [modalOpen, setModalOpen] = useState(false);
-  const [form] = Form.useForm();
+const ROLE_LABEL: Record<string, string> = {
+  platform_admin: "平台管理员",
+  domain_admin: "域管理员",
+  metric_owner: "指标负责人",
+  reviewer: "评审员",
+  compliance_officer: "合规官",
+  analyst: "分析师（存量兼容）",
+  viewer: "只读用户",
+};
 
-  async function handleCreate(values: Record<string, unknown>) {
+const ACTION_ORDER = ["read", "write", "approve", "export", "review"];
+
+function RolesTab() {
+  const [items, setItems] = useState<RolePermissionItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [savingRole, setSavingRole] = useState<string | null>(null);
+  // 草稿：role → 勾选中的权限点集合（未编辑的角色无草稿）
+  const [draft, setDraft] = useState<Record<string, string[]>>({});
+
+  useEffect(() => {
+    setLoading(true);
+    listRolePermissions()
+      .then(setItems)
+      .catch((err) => {
+        message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  // 当前角色的勾选值：草稿优先，未编辑取生效配置
+  function checkedActions(role: string): string[] {
+    return draft[role] ?? items.find((i) => i.role === role)?.effective_actions ?? [];
+  }
+
+  async function handleSave(role: string) {
+    setSavingRole(role);
     try {
-      await createRole({ name: String(values.name), description: values.description ? String(values.description) : null });
-      message.success("角色已创建（幂等）");
-      setModalOpen(false);
-      form.resetFields();
+      const updated = await setRolePermissions(role, draft[role] ?? []);
+      message.success(`已更新「${ROLE_LABEL[role] ?? role}」的权限点`);
+      setDraft((prev) => {
+        const next = { ...prev };
+        delete next[role];
+        return next;
+      });
+      setItems((prev) => prev.map((i) => (i.role === role ? { ...updated, protected: i.protected } : i)));
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "保存失败");
+    } finally {
+      setSavingRole(null);
     }
   }
 
+  async function handleReset(role: string) {
+    setSavingRole(role);
+    try {
+      const updated = await resetRolePermissions(role);
+      message.success(`已恢复「${ROLE_LABEL[role] ?? role}」默认权限点`);
+      setDraft((prev) => {
+        const next = { ...prev };
+        delete next[role];
+        return next;
+      });
+      setItems((prev) => prev.map((i) => (i.role === role ? { ...updated, protected: i.protected } : i)));
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "重置失败");
+    } finally {
+      setSavingRole(null);
+    }
+  }
+
+  const columns = [
+    { title: "角色", dataIndex: "role", key: "role", width: 180, render: (v: string, r: RolePermissionItem) => (
+      <Space direction="vertical" size={2}>
+        <Tag color={v === "platform_admin" ? "gold" : undefined}>{ROLE_LABEL[v] ?? v}</Tag>
+        <span className="muted" style={{ fontSize: 12 }}>{r.protected ? "受保护角色 · 不可配置" : `默认：${r.default_actions.map((a) => ACTION_LABEL[a] ?? a).join("、") || "无"}`}</span>
+      </Space>
+    ) },
+    {
+      title: "本域权限点",
+      key: "actions",
+      render: (_: unknown, r: RolePermissionItem) => (
+        <Checkbox.Group
+          disabled={r.protected}
+          value={checkedActions(r.role)}
+          onChange={(vals) => setDraft((prev) => ({ ...prev, [r.role]: [...vals].sort() }))}
+        >
+          <Space wrap>
+            {ACTION_ORDER.map((a) => (
+              <Checkbox key={a} value={a} onClick={(e) => e.stopPropagation()}>{ACTION_LABEL[a] ?? a}</Checkbox>
+            ))}
+          </Space>
+        </Checkbox.Group>
+      ),
+    },
+    {
+      title: "操作",
+      key: "ops",
+      width: 200,
+      render: (_: unknown, r: RolePermissionItem) => {
+        const dirty = draft[r.role] !== undefined;
+        return (
+          <Space>
+            <Button
+              type="primary"
+              size="small"
+              disabled={r.protected || !dirty}
+              loading={savingRole === r.role}
+              onClick={() => handleSave(r.role)}
+            >
+              保存
+            </Button>
+            <Button
+              size="small"
+              disabled={r.protected || (!dirty && r.custom_actions === null)}
+              onClick={() => handleReset(r.role)}
+            >
+              恢复默认
+            </Button>
+          </Space>
+        );
+      },
+    },
+  ];
+
   return (
     <div>
-      <Alert type="info" showIcon style={{ marginBottom: 12 }} message="角色为内置枚举（platform_admin / domain_admin / metric_owner / reviewer / compliance_officer / analyst / viewer），创建角色用于授予绑定。" />
-      <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>创建角色</Button>
-      <Modal title="创建角色" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
-        <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
-          <Form.Item name="name" label="角色名" rules={[{ required: true }]}>
-            <Select
-              options={[
-                { value: "platform_admin", label: "platform_admin 平台管理员" },
-                { value: "domain_admin", label: "domain_admin 域管理员" },
-                { value: "metric_owner", label: "metric_owner 指标负责人" },
-                { value: "reviewer", label: "reviewer 评审员" },
-                { value: "compliance_officer", label: "compliance_officer 合规官" },
-                { value: "analyst", label: "analyst 分析师（存量兼容）" },
-                { value: "viewer", label: "viewer 只读" },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea rows={2} />
-          </Form.Item>
-        </Form>
-      </Modal>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="RBAC 权限点可配置化——勾选本域动作并保存即生效（PDP 决策实时读取）。platform_admin 为受保护角色（跨域运维直通，不可配置）；恢复默认回到系统基线。"
+      />
+      <Table
+        dataSource={items}
+        columns={columns}
+        rowKey="role"
+        loading={loading}
+        pagination={false}
+        locale={{ emptyText: "暂无角色配置" }}
+        size="small"
+      />
     </div>
   );
 }

@@ -20,6 +20,7 @@ vi.mock("../api", () => {
     fetchCurrentUser: vi.fn(),
     listAdminUsers: vi.fn(),
     listDomainTree: vi.fn(),
+    listOrganizations: vi.fn(),
     createUser: vi.fn(),
     updateUser: vi.fn(),
     setUserStatus: vi.fn(),
@@ -33,6 +34,7 @@ import {
   fetchCurrentUser,
   listAdminUsers,
   listDomainTree,
+  listOrganizations,
   createUser,
   updateUser,
   setUserStatus,
@@ -43,6 +45,7 @@ import {
 const mockMe = vi.mocked(fetchCurrentUser);
 const mockList = vi.mocked(listAdminUsers);
 const mockDomains = vi.mocked(listDomainTree);
+const mockOrgs = vi.mocked(listOrganizations);
 const mockCreate = vi.mocked(createUser);
 const mockUpdate = vi.mocked(updateUser);
 const mockStatus = vi.mocked(setUserStatus);
@@ -87,12 +90,14 @@ describe("UserManagement 用户管理", () => {
     mockMe.mockReset();
     mockList.mockReset();
     mockDomains.mockReset();
+    mockOrgs.mockReset();
     mockCreate.mockReset();
     mockUpdate.mockReset();
     mockStatus.mockReset();
     mockBatchStatus.mockReset();
     mockReset.mockReset();
     mockDomains.mockResolvedValue([]);
+    mockOrgs.mockResolvedValue({ total: 0, page: 1, page_size: 200, items: [] });
   });
 
   it("platform_admin：渲染用户列表与全部管理操作", async () => {
