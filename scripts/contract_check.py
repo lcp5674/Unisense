@@ -14,6 +14,11 @@ import re
 import sys
 from pathlib import Path
 
+if sys.version_info[0] < 3:
+    # 仓库系统默认 python 可能是 Python 2（实测 macOS 上 /usr/bin/python 为 Py2），
+    # 直接报错而非误跑产生假阳性，避免契约门禁被 Python 2 语法错误悄悄跳过。
+    raise SystemExit("contract_check.py 需要 Python 3，请用 python3 运行（仓库系统默认 python 为 Python 2）")
+
 ROOT = Path(__file__).resolve().parent.parent
 TD = ROOT / "docs" / "technical-design.md"
 STATUS = ROOT / "docs" / "module-status.yaml"
@@ -143,6 +148,7 @@ def _collect_backend_routes() -> set[str]:
 
 def _path_pattern(path: str) -> str:
     """将路径归一化为匹配模式：参数段（{param}/:param）→ [^/]+，`|` 分隔的备选拆开。"""
+    path = path.rstrip("/") or "/"
     p = re.sub(r"\{[^}]+\}|:[A-Za-z_]+", "[^/]+", path)
     return p
 
@@ -152,7 +158,10 @@ def _pattern_eq(path: str, pattern: str) -> bool:
 
     含 `*` 通配的模式仅当两侧字面相同（同为 `*` 通配）时等价；
     具体路径模式（如 `/asset-map/{entity}`）不被 `/asset-map/*` 顶替。
+    尾斜杠变体（/api/v1/metrics vs /api/v1/metrics/）视为等价。
     """
+    path = path.rstrip("/") or "/"
+    pattern = pattern.rstrip("/") or "/"
     if "*" in path or "*" in pattern:
         return path == pattern
     rx = re.compile("^" + _path_pattern(pattern) + "$")
@@ -162,7 +171,7 @@ def _pattern_eq(path: str, pattern: str) -> bool:
 def _matches_any(path: str, routes: set[str]) -> bool:
     """模式路径是否命中后端路由（支持 /api/v1 前缀补全、通配 `*` 结尾、`|` 备选）。"""
     for part in path.split("|"):
-        part = part.strip()
+        part = part.strip().rstrip("/") or "/"
         if not part:
             continue
         candidates: list[re.Pattern[str]] = []
@@ -206,7 +215,7 @@ def check_contract_with_code(td_text: str) -> None:
         if "?" in raw:
             raw = raw.split("?", 1)[0]
         _meth, _sep, path = raw.partition(" ")
-        td_paths.add(path.strip())
+        td_paths.add(path.strip().rstrip("/") or "/")
 
     routes = _collect_backend_routes()
     direct: list[str] = []

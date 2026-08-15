@@ -46,11 +46,12 @@ jobs:
       - name: Install deps
         run: pip install pyyaml
       - name: Contract check
-        run: python scripts/contract_check.py --mode contract
+        # 显式 python3：脚本含 Py3-only 语法 + 版本守卫，系统默认 python 可能是 Py2
+        run: python3 scripts/contract_check.py --mode contract
       - name: Doc sync check
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: python scripts/contract_check.py --mode doc_sync
+        run: python3 scripts/contract_check.py --mode doc_sync
 
   # ---- 后端全量门禁（backend/ 存在后启用）----
   backend-gateways:

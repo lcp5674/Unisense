@@ -38,13 +38,13 @@
 | 供应链 | pip-audit | 0 高危 CVE |
 | 单测 | pytest | 核心算法 ≥90% / CRUD ≥70% 覆盖 |
 | 集成 | pytest + testcontainers | 双写/事件总线/幂等通过 |
-| 契约 | `scripts/contract_check.py --mode contract` | TD §3/§4 与代码/状态一致 |
+| 契约 | `python3 scripts/contract_check.py --mode contract`（须 `python3`，仓库系统默认 `python` 为 Python 2，脚本含版本守卫） | TD §3/§4 与代码/状态一致 |
 | 安全反向 | pytest security | 越权 403 / 注入拦截 / PII 审计 |
 | 混沌 | pytest chaos | Redis/Neo4j/ES/OLAP 任一宕机核心链路 200 |
 | 性能基线 | k6 | 对照各模块 `perf_contract` |
 | 迁移可逆 | alembic | up+down 无损 |
 | 可观测 | pytest observability | trace_id 透传 / 指标非零 |
-| 文档同步 | `scripts/contract_check.py --mode doc_sync` | PR 填 TD 影响章节 |
+| 文档同步 | `python3 scripts/contract_check.py --mode doc_sync`（同上，须 `python3`） | PR 填 TD 影响章节 |
 
 ---
 
@@ -128,6 +128,7 @@
 **独立复核（对齐 §1.5）**：
 - 开发方声明 `verified` 后，须由独立复核方（另一 agent / 人）重新独立运行全部门禁。
 - 复核结论（复核方/日期/门禁重跑结果/evidence 核对）写入 `CHANGELOG_MODULES.md`，无记录视为未复核。
+- **等价重提交验证用 delta 比对**：当同一改动因并行 rebase/回退被重新提交（如 `A` 原始提交、`B` 等价重提交），**不得**用 `git diff A B` 做整树比对断言「应为空」——两 commit parent 不同，整树必然存在差异（合并并行会话内容/祖先差异），会产生误报。正确口径：分别比对 `A^..A` 与 `B^..B` 的**增量（delta）**，逐文件、逐字节一致即视为等价重提交；同时确认提交内不含并行会话文件。
 
 ### 6.3 交付后双视角漏洞审查（强制约束，新增于 2026-08-07）
 
