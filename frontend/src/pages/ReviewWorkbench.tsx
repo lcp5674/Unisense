@@ -46,7 +46,8 @@ const CONFLICT_TYPE_LABEL: Record<string, string> = {
 };
 
 // 仲裁决策：choose_existing/choose_candidate 映射后端 choose_canonical；merge/keep_diff 一一对应。
-type ArbitralDecision = "choose_existing" | "choose_candidate" | "merge" | "keep_diff";
+// keep_diff_rename：保留差异 + 指定一方改名（同名不同义时区分口径，TD §12.4）。
+type ArbitralDecision = "choose_existing" | "choose_candidate" | "merge" | "keep_diff" | "keep_diff_rename";
 
 interface DecisionOption {
   value: ArbitralDecision;
@@ -60,6 +61,11 @@ const DECISION_OPTIONS: Record<string, DecisionOption[]> = {
     { value: "choose_existing", label: "采纳现有为权威", desc: "现有口径更准确，候选修正后发布" },
     { value: "choose_candidate", label: "采纳候选为权威", desc: "候选口径更准确，现有标记废弃" },
     { value: "keep_diff", label: "保留差异（非真冲突）", desc: "认定非冲突，两者共存" },
+    {
+      value: "keep_diff_rename",
+      label: "保留差异 + 指定一方改名",
+      desc: "两者共存，但让候选/现有改名以区分同名不同义口径，通知对应 Owner 在详情页改名",
+    },
   ],
   same_def_diff_name: [
     { value: "merge", label: "合并到现有", desc: "候选并入现有口径，消除重复建设" },
@@ -82,8 +88,8 @@ const DECISION_OPTIONS: Record<string, DecisionOption[]> = {
   ],
 };
 
-// 前端决策 → 后端 arbitrate 入参（decision + canonical_metric_code）
-function toBackendPayload(c: ConflictResponse, d: ArbitralDecision) {
+// 前端决策 → 后端 arbitrate 入参（decision + canonical_metric_code + rename_metric_code）
+function toBackendPayload(c: ConflictResponse, d: ArbitralDecision, renameTarget = "") {
   const candidate = c.candidate_metric_code ?? "";
   const existing = c.existing_metric_code ?? "";
   switch (d) {
@@ -93,6 +99,9 @@ function toBackendPayload(c: ConflictResponse, d: ArbitralDecision) {
       return { decision: "choose_canonical", canonical_metric_code: candidate };
     case "merge":
       return { decision: "merge", canonical_metric_code: existing };
+    case "keep_diff_rename":
+      // 保留差异 + 指定一方改名：canonical 留空（不选权威），rename_metric_code 指定改名方
+      return { decision: "keep_diff", canonical_metric_code: "", rename_metric_code: renameTarget };
     case "keep_diff":
       return { decision: "keep_diff", canonical_metric_code: "" };
   }
@@ -125,6 +134,8 @@ export function ReviewWorkbench() {
   // 仲裁弹窗
   const [arbitrating, setArbitrating] = useState<ConflictResponse | null>(null);
   const [decision, setDecision] = useState<ArbitralDecision>("choose_existing");
+  // 「保留差异+指定改名」时指定改名方（候选/现有）
+  const [renameTarget, setRenameTarget] = useState("");
   const [reason, setReason] = useState("");
   // 对比数据（仲裁弹窗与只读对比弹窗共用）
   const [compareResult, setCompareResult] = useState<MetricCompareResult | null>(null);
@@ -214,6 +225,7 @@ export function ReviewWorkbench() {
   function openArbitrate(c: ConflictResponse) {
     setArbitrating(c);
     setDecision(DECISION_OPTIONS[c.type]?.[0]?.value ?? "choose_existing");
+    setRenameTarget("");
     setReason("");
     loadCompare(c);
   }
@@ -226,10 +238,20 @@ export function ReviewWorkbench() {
   async function submitArbitrate() {
     const c = arbitrating;
     if (!c) return;
-    const payload = toBackendPayload(c, decision);
+    // 「保留差异+指定改名」必须指定改名方（候选或现有），否则无法提交
+    if (decision === "keep_diff_rename" && !renameTarget) {
+      message.warning("请指定需要改名的指标（候选或现有）");
+      return;
+    }
+    const payload = toBackendPayload(c, decision, renameTarget);
     setBusyId(c.conflict_id);
     try {
-      await arbitrateConflict(c.conflict_id, payload.decision, payload.canonical_metric_code);
+      await arbitrateConflict(
+        c.conflict_id,
+        payload.decision,
+        payload.canonical_metric_code,
+        payload.rename_metric_code ?? "",
+      );
       message.success(`已仲裁：${c.conflict_id}`);
       track("review_arbitrate", c.conflict_id, "conflict");
       setArbitrating(null);
@@ -524,7 +546,11 @@ export function ReviewWorkbench() {
                 </p>
                 <Radio.Group
                   value={decision}
-                  onChange={(e) => setDecision(e.target.value)}
+                  onChange={(e) => {
+                    setDecision(e.target.value);
+                    // 切换决策时清空改名目标，避免残留误提交
+                    setRenameTarget("");
+                  }}
                   disabled={arbitrateBusy}
                 >
                   <Space direction="vertical">
@@ -540,6 +566,28 @@ export function ReviewWorkbench() {
                     ))}
                   </Space>
                 </Radio.Group>
+                {decision === "keep_diff_rename" && (
+                  <div style={{ marginTop: 8 }}>
+                    <span className="muted">指定需要改名的指标（通知其 Owner 在详情页改名）：</span>
+                    <Select
+                      style={{ width: 260, marginTop: 4 }}
+                      placeholder="选择需要改名的指标"
+                      value={renameTarget || undefined}
+                      onChange={setRenameTarget}
+                      disabled={arbitrateBusy}
+                      options={[
+                        {
+                          value: arbitrating?.candidate_metric_code ?? "",
+                          label: `候选指标：${arbitrating?.candidate_metric_code ?? ""}`,
+                        },
+                        {
+                          value: arbitrating?.existing_metric_code ?? "",
+                          label: `现有指标：${arbitrating?.existing_metric_code ?? ""}`,
+                        },
+                      ]}
+                    />
+                  </div>
+                )}
                 <Input.TextArea
                   style={{ marginTop: 12 }}
                   rows={2}

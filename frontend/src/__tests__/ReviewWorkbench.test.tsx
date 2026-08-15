@@ -274,9 +274,41 @@ describe("ReviewWorkbench 冲突仲裁", () => {
 
     fireEvent.click(screen.getByText("提交裁决"));
     await waitFor(() =>
-      expect(mockedArbitrate).toHaveBeenCalledWith("CF-A", "choose_canonical", "sales_gmv_d"),
+      expect(mockedArbitrate).toHaveBeenCalledWith("CF-A", "choose_canonical", "sales_gmv_d", ""),
     );
     expect(trackMock).toHaveBeenCalledWith("review_arbitrate", "CF-A", "conflict");
+  });
+
+  it("保留差异+指定一方改名：选择改名方后提交 rename_metric_code", async () => {
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-A")).toBeInTheDocument());
+    const row = screen.getByText("CF-A").closest("tr") as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: /仲\s*裁/ }));
+    await waitFor(() => expect(screen.getByText(/仲裁冲突 CF-A/)).toBeInTheDocument());
+
+    // 选择「保留差异 + 指定一方改名」
+    fireEvent.click(screen.getByText("保留差异 + 指定一方改名"));
+    // 未指定改名方时提交 → 提示且不调后端
+    fireEvent.click(screen.getByText("提交裁决"));
+    await waitFor(() => expect(screen.getByText(/请指定需要改名的指标/)).toBeInTheDocument());
+    expect(mockedArbitrate).not.toHaveBeenCalled();
+
+    // 指定候选指标改名后提交
+    const select = screen.getByText("选择需要改名的指标").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(select.querySelector("input") as HTMLElement);
+    await waitFor(() =>
+      expect(screen.getByTitle("候选指标：sales_gmv_day")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByTitle("候选指标：sales_gmv_day"));
+    fireEvent.click(screen.getByText("提交裁决"));
+    await waitFor(() =>
+      expect(mockedArbitrate).toHaveBeenCalledWith(
+        "CF-A",
+        "keep_diff",
+        "",
+        "sales_gmv_day",
+      ),
+    );
   });
 
   it("只读对比弹窗展示候选 vs 现有差异", async () => {

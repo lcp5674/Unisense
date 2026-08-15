@@ -22,6 +22,7 @@ vi.mock("../api", () => ({
   promoteMetric: vi.fn(),
   rollbackMetric: vi.fn(),
   submitReview: vi.fn(),
+  updateMetric: vi.fn(),
   upsertSubscription: vi.fn(),
   // 详情页子组件依赖
   listQualityEvents: vi.fn().mockResolvedValue({ items: [] }),
@@ -52,8 +53,10 @@ import {
   listUsers,
   listSubscriptions,
   fetchRelatedMetrics,
+  updateMetric,
   UnisenseApiError,
 } from "../api";
+const mockedUpdateMetric = vi.mocked(updateMetric);
 const mockedGetMetric = vi.mocked(getMetric);
 const mockedListVersions = vi.mocked(listVersions);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
@@ -224,6 +227,46 @@ describe("MetricDetail", () => {
     expect(tag).toBeInTheDocument();
     fireEvent.mouseEnter(tag);
     expect(await screen.findByText(/保留差异/)).toBeInTheDocument();
+  });
+
+  it("仲裁「保留差异+指定改名」时展示橙色待改名 Tag，Owner 可去改名并清除标记", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      name: "旧名称",
+      arbitration_mark: {
+        status: "coexist",
+        conflict_id: "CF-RENAME",
+        decision: "keep_diff",
+        ruled_at: "2026-08-15T04:00:00Z",
+        opposite_code: "sales_gmv_d",
+        rename_required: true,
+        rename_opposite_code: "sales_gmv_d",
+      },
+    });
+    mockedUpdateMetric.mockResolvedValue(metric);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+
+    // 待改名 Tag 展示
+    const tag = await screen.findByText("仲裁要求改名");
+    expect(tag).toBeInTheDocument();
+
+    // Owner 可点击「去改名」打开弹窗
+    const renameBtn = screen.getByRole("button", { name: /去\s*改\s*名/ });
+    fireEvent.click(renameBtn);
+    await screen.findByText("指标改名（响应仲裁要求）");
+
+    // 输入新名称 + 原因后提交 → 调 updateMetric（name + change_reason）
+    const nameInput = screen.getByPlaceholderText("新的指标名称") as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "新名称" } });
+    const reasonInput = screen.getByPlaceholderText(/变更原因/) as HTMLTextAreaElement;
+    fireEvent.change(reasonInput, { target: { value: "响应仲裁改名要求" } });
+    fireEvent.click(screen.getByText("确认改名"));
+    await waitFor(() =>
+      expect(mockedUpdateMetric).toHaveBeenCalledWith("sales_gmv_sum_d", {
+        name: "新名称",
+        change_reason: "响应仲裁改名要求",
+      }),
+    );
   });
 
   it("仲裁作废指标（METRIC_ARCHIVED）直访时展示友好引导页并可跳转权威指标", async () => {

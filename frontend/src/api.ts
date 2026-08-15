@@ -821,10 +821,15 @@ export async function arbitrateConflict(
   conflictId: string,
   decision: string,
   canonicalMetricCode: string,
+  renameMetricCode = "",
 ): Promise<ConflictResponse> {
   return request<ConflictResponse>(`${API_BASE}/conflicts/${conflictId}/arbitrate`, {
     method: "POST",
-    body: JSON.stringify({ decision, canonical_metric_code: canonicalMetricCode }),
+    body: JSON.stringify({
+      decision,
+      canonical_metric_code: canonicalMetricCode,
+      ...(renameMetricCode ? { rename_metric_code: renameMetricCode } : {}),
+    }),
   });
 }
 

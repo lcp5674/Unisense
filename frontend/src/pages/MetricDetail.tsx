@@ -26,6 +26,7 @@ import {
   RiseOutlined,
   ArrowLeftOutlined,
   ArrowRightOutlined,
+  EditOutlined,
 } from "@ant-design/icons";
 import {
   addFavorite,
@@ -45,6 +46,7 @@ import {
   removeFavorite,
   rollbackMetric,
   submitReview,
+  updateMetric,
   upsertSubscription,
   UnisenseApiError,
 } from "../api";
@@ -52,6 +54,7 @@ import type {
   CurrentUser,
   MetricHealth,
   MetricResponse,
+  MetricUpdateRequest,
   MetricVersionResponse,
   RecommendItem,
   SubscriptionPref,
@@ -165,11 +168,16 @@ function ArbitrationMarkTag({ metric }: { metric: MetricResponse }) {
           <Space direction="vertical" size={0}>
             <span>冲突 {mark.conflict_id} · 裁决：保留差异</span>
             <span className="muted">与 {mark.opposite_code ?? "对方"} 共存，均非唯一权威</span>
+            {mark.rename_required && (
+              <span className="muted">仲裁要求本指标改名以区分口径，请点击「去改名」</span>
+            )}
             {mark.ruled_at && <span className="muted">{formatCnTime(mark.ruled_at)}</span>}
           </Space>
         }
       >
-        <Tag color="blue">已裁定共存</Tag>
+        <Tag color={mark.rename_required ? "orange" : "blue"}>
+          {mark.rename_required ? "仲裁要求改名" : "已裁定共存"}
+        </Tag>
       </Tooltip>
     );
   }
@@ -392,6 +400,10 @@ export function MetricDetail() {
   const [grayOpen, setGrayOpen] = useState(false);
   const [deprecateOpen, setDeprecateOpen] = useState(false);
   const [successor, setSuccessor] = useState("");
+  // 仲裁「保留差异+指定改名」→ Owner 在详情页改名（TD §12.4）
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameReason, setRenameReason] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const { track } = useTracking();
@@ -486,6 +498,30 @@ export function MetricDetail() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // 响应仲裁「保留差异+指定改名」：修改指标名称并清除 rename_required 标记
+  // （后端 update_metric 检测到 name 变更 + rename_required 时自动清除并记录 resolved_at）。
+  async function handleRename() {
+    if (!metric) return;
+    const name = renameValue.trim();
+    if (!name) {
+      message.warning("请输入新的指标名称");
+      return;
+    }
+    if (name === metric.name) {
+      message.warning("新名称与当前名称一致，无需改名");
+      return;
+    }
+    if (renameReason.trim().length < 4) {
+      message.warning("请填写变更原因（至少 4 字）");
+      return;
+    }
+    const req: MetricUpdateRequest = { name, change_reason: renameReason.trim() };
+    await runAction(() => updateMetric(metric.metric_code, req), "指标改名");
+    setRenameOpen(false);
+    setRenameValue("");
+    setRenameReason("");
   }
 
   if (!metric) {
@@ -603,6 +639,20 @@ export function MetricDetail() {
       {metric.status !== "DEPRECATED" && isOwnerOrAdmin && (
         <Button danger loading={busy} onClick={() => setDeprecateOpen(true)}>
           废弃
+        </Button>
+      )}
+      {metric.arbitration_mark?.rename_required && isOwnerOrAdmin && (
+        <Button
+          type="primary"
+          icon={<EditOutlined />}
+          loading={busy}
+          onClick={() => {
+            setRenameValue(metric.name);
+            setRenameReason("");
+            setRenameOpen(true);
+          }}
+        >
+          去改名
         </Button>
       )}
     </Space>
@@ -799,6 +849,37 @@ export function MetricDetail() {
           placeholder="替代指标编码（必填，须为已发布指标）"
           value={successor}
           onChange={(e) => setSuccessor(e.target.value)}
+        />
+      </Modal>
+
+      {/* 仲裁「保留差异+指定改名」：Owner 在详情页改名（TD §12.4，改 name 区分同名不同义） */}
+      <Modal
+        title="指标改名（响应仲裁要求）"
+        open={renameOpen}
+        onOk={handleRename}
+        confirmLoading={busy}
+        onCancel={() => setRenameOpen(false)}
+        okText="确认改名"
+      >
+        <Paragraph type="secondary">
+          该指标在冲突{" "}
+          <span className="mono">{metric?.arbitration_mark?.conflict_id ?? ""}</span> 仲裁中被指定改名，
+          以与{" "}
+          <span className="mono">{metric?.arbitration_mark?.rename_opposite_code ?? "对方指标"}</span>{" "}
+          区分同名不同义口径。修改名称后仲裁标记将自动清除。
+        </Paragraph>
+        <Input
+          placeholder="新的指标名称"
+          value={renameValue}
+          onChange={(e) => setRenameValue(e.target.value)}
+          style={{ marginTop: 8 }}
+        />
+        <Input.TextArea
+          placeholder="变更原因（至少 4 字，将写入版本记录）"
+          value={renameReason}
+          onChange={(e) => setRenameReason(e.target.value)}
+          rows={2}
+          style={{ marginTop: 8 }}
         />
       </Modal>
     </div>
