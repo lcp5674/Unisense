@@ -107,6 +107,7 @@ import {
   ScheduleResult,
   SnapshotResponse,
   CollectionJob,
+  CollectionRun,
   SourceHealth,
   SourceType,
   SourceTypeInfo,
@@ -2328,21 +2329,55 @@ export async function listDriftLogs(
   );
 }
 
-/** 采集任务中心：列出异步采集任务（按入队逆序分页；可按 source_id 过滤）。 */
+/** 采集任务中心：服务端分页列出异步采集任务（按入队逆序；可按 source_id 过滤）。 */
 export async function listCollectionJobs(params?: {
   limit?: number;
   offset?: number;
   source_id?: string;
   /** 任务状态下钻（总览仪表「采集任务」资产卡片：QUEUED/RUNNING/COMPLETED/FAILED） */
   status?: string;
-}): Promise<CollectionJob[]> {
+}): Promise<{ items: CollectionJob[]; total: number; page: number; page_size: number }> {
   const qs = pageQs({
     limit: params?.limit ?? 50,
     offset: params?.offset ?? 0,
     source_id: params?.source_id ?? undefined,
     status: params?.status ?? undefined,
   });
-  return request<CollectionJob[]>(`${API_BASE}/data-sources/jobs?${qs}`);
+  return request<{ items: CollectionJob[]; total: number; page: number; page_size: number }>(
+    `${API_BASE}/data-sources/jobs?${qs}`,
+  );
+}
+
+/** 查询单个采集任务状态。 */
+export async function getCollectionJob(jobId: string): Promise<CollectionJob | null> {
+  return request<CollectionJob | null>(
+    `${API_BASE}/data-sources/jobs/${encodeURIComponent(jobId)}`,
+  );
+}
+
+/** 采集运行历史：分页列出（采集记录页主视图，持久化历史含失败/排障明细）。 */
+export async function listCollectionRuns(params?: {
+  source_id?: string;
+  status?: string;
+  trigger?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: CollectionRun[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    source_id: params?.source_id ?? undefined,
+    status: params?.status ?? undefined,
+    trigger: params?.trigger ?? undefined,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request<{ items: CollectionRun[]; total: number; page: number; page_size: number }>(
+    `${API_BASE}/collection-runs?${qs}`,
+  );
+}
+
+/** 采集运行详情（含失败实体 / 漂移事件 / 降级原因明细）。 */
+export async function getCollectionRunDetail(runId: number): Promise<CollectionRun> {
+  return request<CollectionRun>(`${API_BASE}/collection-runs/${runId}`);
 }
 
 /** 查询单个采集任务状态。 */

@@ -1360,6 +1360,41 @@ export interface CollectionJob {
   kind?: "manual" | "scheduled";
 }
 
+/** 一次采集运行的持久化历史记录（采集记录页主视图，TD §12.1）。 */
+export interface CollectionRun {
+  id: number;
+  source_id: string;
+  source_name?: string | null;
+  job_id?: string | null;
+  /** 触发方式：manual 手动 / scheduled 定时 */
+  trigger: "manual" | "scheduled" | string;
+  /** 请求采集模式 */
+  mode: string;
+  /** 实际执行模式（增量降级为全量后回填） */
+  effective_mode?: string | null;
+  status: "RUNNING" | "COMPLETED" | "FAILED" | string;
+  actor_id?: number | null;
+  actor_name?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  /** 耗时（秒） */
+  duration_seconds?: number | null;
+  scanned: number;
+  registered: number;
+  pii_registered: number;
+  failed_count: number;
+  drift_count: number;
+  deprecated_count: number;
+  coverage?: number | null;
+  error?: string | null;
+  /** 明细（详情接口返回）：failed_specs / drift_events / degrade_reason */
+  detail?: {
+    failed_specs?: Array<{ entity_name: string; error: string }>;
+    drift_events?: Array<{ entity_name: string; change_type: string }>;
+    degrade_reason?: string | null;
+  } | null;
+}
+
 // ============================================================================
 // 资产地图（backend /api/v1/assetmap/*）
 // ============================================================================

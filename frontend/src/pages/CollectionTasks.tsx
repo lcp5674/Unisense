@@ -1,8 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Button, Card, Select, Space, Table, Tag, Tooltip, message } from "antd";
-import { ReloadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
-import { listCollectionJobs, listDataSources, UnisenseApiError } from "../api";
+import {
+  Button,
+  Card,
+  Descriptions,
+  Drawer,
+  Empty,
+  Select,
+  Space,
+  Table,
+  Tag,
+  Tooltip,
+  message,
+} from "antd";
+import { ReloadOutlined, ArrowLeftOutlined, RedoOutlined, EyeOutlined } from "@ant-design/icons";
+import { listCollectionJobs, getCollectionJob, collectSourceNow, listDataSources, UnisenseApiError } from "../api";
 import type { CollectionJob, DataSource } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 
@@ -49,23 +61,37 @@ export function CollectionTasks() {
   const [searchParams] = useSearchParams();
   // 任务状态下钻（?status=，总览仪表「采集任务」资产卡片）作为初始筛选
   const urlStatus = searchParams.get("status") ?? "";
-  const [jobs, setJobs] = useState<CollectionJob[]>([]);
+  const [items, setItems] = useState<CollectionJob[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [sources, setSources] = useState<DataSource[]>([]);
   const [sourceId, setSourceId] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string>(urlStatus);
   const [loading, setLoading] = useState(false);
+  const [retrying, setRetrying] = useState<string | null>(null);
+  // 任务详情抽屉
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailJob, setDetailJob] = useState<CollectionJob | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const res = await listCollectionJobs({ limit: 50, source_id: sourceId, status: status || undefined });
-      setJobs(res);
+      const res = await listCollectionJobs({
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+        source_id: sourceId,
+        status: status || undefined,
+      });
+      setItems(res.items);
+      setTotal(res.total);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
       setLoading(false);
     }
-  }, [sourceId, status]);
+  }, [sourceId, status, page, pageSize]);
 
   // 统一返回上一入口：优先回退浏览器历史（总览资产卡片等入口），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -89,6 +115,41 @@ export function CollectionTasks() {
       .then((res) => setSources(res.items))
       .catch(() => setSources([]));
   }, []);
+
+  /** 打开任务详情抽屉：拉取最新状态（含完整 error / 进度消息列表）。 */
+  async function openDetail(job: CollectionJob) {
+    setDetailJob(job);
+    setDetailOpen(true);
+    setDetailLoading(true);
+    try {
+      const fresh = await getCollectionJob(job.job_id);
+      if (fresh) setDetailJob(fresh);
+    } catch {
+      /* 详情刷新失败保留列表行数据 */
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  /** 失败任务重试：复用 collect-now 重新投递采集。 */
+  async function handleRetry(job: CollectionJob) {
+    if (!job.source_id) {
+      message.warning("该任务缺少数据源标识，无法重试");
+      return;
+    }
+    setRetrying(job.job_id);
+    try {
+      await collectSourceNow(job.source_id);
+      message.success("已重新投递采集任务，可在列表中查看新任务");
+      load();
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "重试失败",
+      );
+    } finally {
+      setRetrying(null);
+    }
+  }
 
   const columns = [
     {
@@ -132,6 +193,30 @@ export function CollectionTasks() {
       render: (v?: string | null) =>
         v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span style={{ color: "#999" }}>—</span>,
     },
+    {
+      title: "操作",
+      key: "action",
+      width: 140,
+      render: (_: unknown, r: CollectionJob) => (
+        <Space size={0}>
+          <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => openDetail(r)}>
+            详情
+          </Button>
+          {r.status === "FAILED" && (
+            <Button
+              type="link"
+              size="small"
+              danger
+              icon={<RedoOutlined />}
+              loading={retrying === r.job_id}
+              onClick={() => handleRetry(r)}
+            >
+              重试
+            </Button>
+          )}
+        </Space>
+      ),
+    },
   ];
 
   return (
@@ -161,7 +246,7 @@ export function CollectionTasks() {
             placeholder="按数据源筛选"
             style={{ width: 260 }}
             value={sourceId}
-            onChange={(v?: string) => setSourceId(v || undefined)}
+            onChange={(v?: string) => { setSourceId(v || undefined); setPage(1); }}
             options={sources.map((s) => ({
               value: s.source_id,
               label: `${s.name}（${s.source_id}）`,
@@ -173,7 +258,7 @@ export function CollectionTasks() {
             placeholder="全部状态"
             style={{ width: 130 }}
             value={status || undefined}
-            onChange={(v?: string) => setStatus(v ?? "")}
+            onChange={(v?: string) => { setStatus(v ?? ""); setPage(1); }}
             options={["QUEUED", "RUNNING", "COMPLETED", "FAILED"].map((s) => ({
               value: s,
               label: STATUS_LABEL[s] ?? s,
@@ -183,13 +268,89 @@ export function CollectionTasks() {
         <Table<CollectionJob>
           rowKey="job_id"
           loading={loading}
-          dataSource={jobs}
+          dataSource={items}
           columns={columns}
           size="middle"
-          pagination={jobs.length > 10 ? { pageSize: 10 } : false}
+          pagination={{
+            current: page,
+            pageSize,
+            total,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50, 100],
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+          }}
         />
       </Space>
     </Card>
+
+      <Drawer
+        title="采集任务详情"
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        width={640}
+      >
+        {detailJob && (
+          <Descriptions
+            size="small"
+            column={1}
+            bordered
+            items={[
+              { key: "job", label: "任务 ID", children: <span className="mono">{detailJob.job_id}</span> },
+              {
+                key: "source",
+                label: "数据源",
+                children: detailJob.source_id ? (
+                  <span className="mono">{detailJob.source_id}</span>
+                ) : (
+                  <span className="muted">—</span>
+                ),
+              },
+              { key: "kind", label: "类型", children: kindTag(detailJob.kind) },
+              { key: "status", label: "状态", children: statusTag(detailJob.status) },
+              {
+                key: "created",
+                label: "创建时间",
+                children: detailJob.created_at ? formatCnTime(detailJob.created_at) : "—",
+              },
+              {
+                key: "actor",
+                label: "触发人 ID",
+                children: detailJob.actor_id != null ? detailJob.actor_id : <span className="muted">—</span>,
+              },
+              {
+                key: "error",
+                label: "错误信息",
+                children: detailJob.detail?.error ? (
+                  <span className="mono" style={{ color: "#cf1322", whiteSpace: "pre-wrap" }}>
+                    {String(detailJob.detail.error)}
+                  </span>
+                ) : (
+                  <span className="muted">—</span>
+                ),
+              },
+              {
+                key: "progress",
+                label: "进度消息",
+                children: (() => {
+                  const msgs = (detailJob.detail?.progress as { messages?: string[] } | undefined)?.messages;
+                  if (!msgs || msgs.length === 0) {
+                    return detailLoading ? <span className="muted">加载中…</span> : <span className="muted">—</span>;
+                  }
+                  return (
+                    <ul style={{ margin: 0, paddingLeft: 16, maxHeight: 260, overflow: "auto" }}>
+                      {msgs.map((m, i) => (
+                        <li key={i} style={{ fontSize: 12 }}>{m}</li>
+                      ))}
+                    </ul>
+                  );
+                })(),
+              },
+            ]}
+          />
+        )}
+        {!detailJob && <Empty description="无任务数据" />}
+      </Drawer>
     </div>
   );
 }

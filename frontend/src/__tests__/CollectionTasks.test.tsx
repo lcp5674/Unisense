@@ -21,14 +21,18 @@ vi.mock("../api", () => {
   }
   return {
     listCollectionJobs: vi.fn(),
+    getCollectionJob: vi.fn(),
+    collectSourceNow: vi.fn(),
     listDataSources: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listCollectionJobs, listDataSources } from "../api";
+import { listCollectionJobs, getCollectionJob, collectSourceNow, listDataSources } from "../api";
 
 const mockedJobs = vi.mocked(listCollectionJobs);
+const mockedGetJob = vi.mocked(getCollectionJob);
+const mockedCollectNow = vi.mocked(collectSourceNow);
 const mockedSources = vi.mocked(listDataSources);
 
 const source: DataSource = {
@@ -72,7 +76,9 @@ const jobs: CollectionJob[] = [
 describe("CollectionTasks", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedJobs.mockResolvedValue(jobs);
+    mockedJobs.mockResolvedValue({ items: jobs, total: jobs.length, page: 1, page_size: 10 });
+    mockedGetJob.mockResolvedValue(jobs[0]);
+    mockedCollectNow.mockResolvedValue({ job_id: "job-retry-1", status: "QUEUED" });
     mockedSources.mockResolvedValue({ items: [source], total: 1, page: 1, page_size: 100 });
   });
 
@@ -99,7 +105,11 @@ describe("CollectionTasks", () => {
     await screen.findByText("财务库（mysql_finance）");
     fireEvent.click(screen.getByText("财务库（mysql_finance）"));
     await waitFor(() => {
-      expect(mockedJobs).toHaveBeenCalledWith({ limit: 50, source_id: "mysql_finance" });
+      expect(mockedJobs).toHaveBeenCalledWith({
+        limit: 10,
+        offset: 0,
+        source_id: "mysql_finance",
+      });
     });
   });
 
@@ -112,7 +122,7 @@ describe("CollectionTasks", () => {
     await screen.findByText("采集任务中心");
     await waitFor(() => {
       expect(mockedJobs).toHaveBeenCalledWith(
-        expect.objectContaining({ status: "RUNNING", limit: 50 }),
+        expect.objectContaining({ status: "RUNNING", limit: 10, offset: 0 }),
       );
     });
   });
@@ -151,5 +161,32 @@ describe("CollectionTasks", () => {
     await screen.findByText("采集任务中心");
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+
+  it("点击详情：拉取最新任务状态并展示完整信息抽屉", async () => {
+    render(<MemoryRouter><CollectionTasks /></MemoryRouter>);
+    await screen.findByText("采集任务中心");
+    fireEvent.click(screen.getAllByRole("button", { name: /详\s*情/ })[0]);
+    await screen.findByText("采集任务详情");
+    expect(mockedGetJob).toHaveBeenCalledWith("collect:mysql_finance:abc123");
+    // 抽屉展示任务 ID（表格行 + 抽屉两处）与状态（两处）
+    expect(screen.getAllByText("collect:mysql_finance:abc123").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("已完成").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("失败任务可重试：调用 collect-now 重新投递并刷新列表", async () => {
+    const failedJob: CollectionJob = {
+      ...jobs[0],
+      job_id: "collect:mysql_finance:failed1",
+      status: "FAILED",
+      detail: { error: "connection refused", source_id: "mysql_finance" },
+    };
+    mockedJobs.mockResolvedValue({ items: [failedJob], total: 1, page: 1, page_size: 10 });
+    render(<MemoryRouter><CollectionTasks /></MemoryRouter>);
+    await screen.findByText("采集任务中心");
+    fireEvent.click(screen.getAllByRole("button", { name: /重\s*试/ })[0]);
+    await waitFor(() => {
+      expect(mockedCollectNow).toHaveBeenCalledWith("mysql_finance");
+    });
   });
 });
