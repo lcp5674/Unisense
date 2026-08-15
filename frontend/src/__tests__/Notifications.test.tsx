@@ -40,7 +40,6 @@ import {
   markAllNotificationsRead,
   deleteNotification,
   deleteAllNotifications,
-  upsertSubscription,
 } from "../api";
 
 const mockedList = vi.mocked(listNotifications);
