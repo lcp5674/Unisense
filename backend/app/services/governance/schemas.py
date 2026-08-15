@@ -7,14 +7,21 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.governance import GrantType, RoleName, SensitivityLevel
+from app.models.governance import GrantType, SensitivityLevel
 
 
 class RoleCreate(BaseModel):
-    """``POST /roles`` 请求体。"""
+    """``POST /roles`` 请求体（内置角色名或自定义角色名）。"""
 
-    name: RoleName = Field(description="角色名（六角色枚举）")
+    name: str = Field(
+        ...,
+        min_length=2,
+        max_length=32,
+        pattern=r"^[a-z][a-z0-9_]{1,31}$",
+        description="角色名（内置七角色或自定义角色，小写字母/数字/下划线）",
+    )
     description: str | None = Field(default=None, max_length=256, description="角色说明")
+    is_custom: bool = Field(default=False, description="是否自定义角色（True 走自定义创建校验）")
 
 
 class RoleResponse(BaseModel):
@@ -25,6 +32,7 @@ class RoleResponse(BaseModel):
     id: int
     name: str
     description: str | None = None
+    is_custom: bool = False
 
 
 class RolePermissionItem(BaseModel):
@@ -32,17 +40,41 @@ class RolePermissionItem(BaseModel):
 
     Attributes:
         role: 角色名。
-        default_actions: 默认基线动作（``policy.ROLE_ACTIONS``）。
-        custom_actions: ``role_permission`` 表覆盖动作；未覆盖为 None。
-        effective_actions: 生效动作（覆盖优先，无覆盖取默认）。
+        default_actions: 默认基线资源动作（``policy.ROLE_ACTIONS``）。
+        custom_actions: ``role_permission`` 表覆盖的资源动作；未覆盖为 None。
+        effective_actions: 生效资源动作（覆盖优先，无覆盖取默认）。
+        ui_default_actions: 默认基线 UI 权限点（``policy.ROLE_UI_ACTIONS``）。
+        ui_custom_actions: 覆盖的 UI 权限点；未覆盖为 None。
+        ui_effective_actions: 生效 UI 权限点。
         protected: 受保护角色（platform_admin），权限点不可配置。
+        is_custom: 是否自定义角色。
     """
 
     role: str
     default_actions: list[str]
     custom_actions: list[str] | None = None
     effective_actions: list[str]
+    ui_default_actions: list[str] = Field(default_factory=list)
+    ui_custom_actions: list[str] | None = None
+    ui_effective_actions: list[str] = Field(default_factory=list)
     protected: bool = False
+    is_custom: bool = False
+
+
+class ActionRegistryItem(BaseModel):
+    """动作点注册表项（``GET /action-registry``，角色管理可视化配置数据源）。
+
+    Attributes:
+        action: 权限点键（``模块:功能``）。
+        module: 所属模块（前端分组渲染）。
+        label: 中文名。
+        description: 配置悬停说明。
+    """
+
+    action: str
+    module: str
+    label: str
+    description: str = ""
 
 
 class RolePermissionUpdate(BaseModel):
@@ -223,6 +255,10 @@ class PermissionSnapshot(BaseModel):
     role: str
     home_domain: str | None = None
     allowed_actions: list[str]
+    ui_actions: list[str] = Field(
+        default_factory=list,
+        description="UI 权限点（模块:功能，前端 usePermission 消费；默认+覆盖合并）",
+    )
     granted_domains: list[str]
     metric_whitelist: list[str]
     row_level_restricted: bool

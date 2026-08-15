@@ -86,17 +86,25 @@ class SensitivityLevel(enum.StrEnum):
 
 
 class Role(Base, BaseModel):
-    """角色表（TD §4.1 ``role``）。"""
+    """角色表（TD §4.1 ``role``）。
+
+    内置七角色（``RoleName``）为系统枚举，仅登记；自定义角色（``is_custom=True``）
+    由平台管理员经「权限治理 → 角色管理」创建，名称写入 ``user.role`` 字符串列承载
+    （方案 A：单角色字段放宽为 String(32)），权限点经 ``role_permission`` 配置。
+    """
 
     __tablename__ = "role"
 
-    name: Mapped[RoleName] = mapped_column(
-        Enum(RoleName, values_callable=_values),
+    name: Mapped[str] = mapped_column(
+        String(32),
         nullable=False,
         unique=True,
-        comment="角色名（对齐 PRD 4.9.2）",
+        comment="角色名（内置七角色或自定义角色名）",
     )
     description: Mapped[str | None] = mapped_column(String(256), nullable=True, comment="角色说明")
+    is_custom: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="是否自定义角色"
+    )
 
 
 class RolePermission(Base, BaseModel):

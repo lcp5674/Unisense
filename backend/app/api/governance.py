@@ -32,6 +32,7 @@ from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.governance.events import GovernanceEventPublisher
 from app.services.governance.schemas import (
+    ActionRegistryItem,
     ClassificationRescanRequest,
     ErasureRequestCreate,
     ErasureResult,
@@ -67,6 +68,22 @@ def _svc(db: AsyncSession, request: Request) -> GovernanceService:
     return GovernanceService(db, events=GovernanceEventPublisher(notify_url))
 
 
+async def _is_manageable_role(db: AsyncSession, role: str) -> bool:
+    """角色是否可配置权限点：内置七角色 或 已登记的自定义角色。"""
+    from sqlalchemy import select
+
+    from app.models.governance import Role
+
+    if role in ALL_ROLES:
+        return True
+    row = (
+        await db.execute(
+            select(Role).where(Role.name == role, Role.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
 @router.post("/roles", dependencies=_ROLE_ADMIN_DEPS)
 async def create_role(
     payload: RoleCreate,
@@ -75,21 +92,73 @@ async def create_role(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
-    """登记角色（幂等：同名角色返回既有记录）。"""
+    """登记角色（幂等：同名角色返回既有记录）。
+
+    自定义角色（``is_custom=True``）走细粒度权限管控的创建校验：名称须为
+    ``[a-z][a-z0-9_]{2,32}`` 且不得与内置角色重名；创建后可经
+    ``PUT /roles/{role}/permissions`` 可视化配置按钮级权限点。
+    """
     svc = _svc(db, request)
-    role = await svc.create_role(payload)
+    if payload.is_custom:
+        role = await svc.create_custom_role(payload.name, payload.description)
+    else:
+        role = await svc.create_role(payload)
     await write_audit(
         db,
         actor_id=user.id,
         action="ROLE_CREATE",
         entity_type="role",
         entity_id=str(role.id),
-        detail={"name": str(role.name)},
+        detail={"name": str(role.name), "is_custom": bool(getattr(role, "is_custom", False))},
         ip=client_ip(request),
         trace_id=trace_id,
     )
     await db.commit()
     return ok(data=RoleResponse.model_validate(role).model_dump(), trace_id=trace_id)
+
+
+@router.get("/action-registry", dependencies=_ROLE_ADMIN_DEPS)
+async def list_action_registry(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """动作点注册表（按钮级权限点清单，角色管理可视化配置数据源）。"""
+    svc = _svc(db, request)
+    items = await svc.action_registry()
+    return ok(
+        data=[ActionRegistryItem.model_validate(i).model_dump() for i in items],
+        trace_id=trace_id,
+    )
+
+
+@router.delete("/roles/{role}", dependencies=_ROLE_ADMIN_DEPS)
+async def delete_role(
+    role: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """删除自定义角色（内置角色 / 仍被用户占用的角色不可删除）。
+
+    删除为软删；被占用时返回 ``ROLE_IN_USE``，需先改派用户角色。
+    """
+    svc = _svc(db, request)
+    await svc.delete_custom_role(role)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ROLE_DELETE",
+        entity_type="role",
+        entity_id=role,
+        detail={"role": role, "is_custom": True},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok({"role": role, "deleted": True}, trace_id=trace_id)
 
 
 @router.get("/roles", dependencies=_GRANT_ADMIN_DEPS)
@@ -121,9 +190,9 @@ async def set_role_permissions(
     """覆盖某角色的权限点（RBAC 可配置化）。
 
     仅 ``platform_admin`` 可配置；platform_admin 角色本身受保护（硬编码跨域直通），
-    覆盖其权限点会被拒绝。写操作落审计。
+    覆盖其权限点会被拒绝。支持内置角色与自定义角色。写操作落审计。
     """
-    if role not in ALL_ROLES:
+    if not await _is_manageable_role(db, role):
         raise ValidationError(
             f"未知角色: {role}", error_code="ROLE_PERMISSION_INVALID", ctx={"role": role}
         )
@@ -152,7 +221,7 @@ async def reset_role_permissions(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
     """清除某角色的权限点覆盖，恢复 ``policy.ROLE_ACTIONS`` 默认基线。"""
-    if role not in ALL_ROLES:
+    if not await _is_manageable_role(db, role):
         raise ValidationError(
             f"未知角色: {role}", error_code="ROLE_PERMISSION_INVALID", ctx={"role": role}
         )

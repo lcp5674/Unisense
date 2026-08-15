@@ -86,14 +86,23 @@ class FakeRepo:
         self._seq = 0
 
     # role
-    async def get_role_by_name(self, name: RoleName) -> Role | None:
-        return next((r for r in self.roles if r.name == name), None)
+    async def get_role_by_name(self, name: str) -> Role | None:
+        return next((r for r in self.roles if str(r.name) == str(name)), None)
 
     async def create_role(self, role: Role) -> Role:
         self._seq += 1
         role.id = self._seq
         self.roles.append(role)
         return role
+
+    async def list_custom_roles(self) -> list[Role]:
+        return [r for r in self.roles if getattr(r, "is_custom", False)]
+
+    async def count_users_by_role(self, role: str) -> int:
+        return int(getattr(self, "user_role_counts", {}).get(role, 0))
+
+    async def delete_role(self, role: Role) -> None:
+        self.roles = [r for r in self.roles if r is not role]
 
     # role permission (RBAC 可配置化)
     async def list_role_permissions(self) -> list[RolePermission]:
@@ -948,3 +957,99 @@ async def test_remind_expiring_grants_notifies_and_dedupes() -> None:
     # 标记去重：FakeRepo 记录 expiring_reminded_at
     reminded = [g for g in repo.grants if g.expiring_reminded_at is not None]
     assert len(reminded) == 1
+
+
+# --------------------------------------------- 自定义角色（方案 A）与动作点注册表
+
+async def test_create_custom_role_ok() -> None:
+    """创建自定义角色：写入 role 表（is_custom=True），权限点默认为空集。"""
+    svc, repo, _ = _svc()
+    role = await svc.create_custom_role("data_analyst", "数据分析员")
+    assert str(role.name) == "data_analyst"
+    assert getattr(role, "is_custom", False) is True
+    assert repo.roles and repo.roles[0] is role
+    # 列表含自定义角色且 is_custom=True
+    items = await svc.list_role_permissions()
+    by_role = {i["role"]: i for i in items}
+    assert "data_analyst" in by_role
+    assert by_role["data_analyst"]["is_custom"] is True
+    assert by_role["data_analyst"]["ui_effective_actions"] == []
+
+
+async def test_create_custom_role_rejects_reserved_and_invalid() -> None:
+    """自定义角色名与内置角色重名 / 格式非法 → ValidationError。"""
+    svc, _repo, _ = _svc()
+    with pytest.raises(ValidationError) as exc1:
+        await svc.create_custom_role("platform_admin", "x")
+    assert exc1.value.error_code == "ROLE_NAME_RESERVED"
+    with pytest.raises(ValidationError) as exc2:
+        await svc.create_custom_role("Bad Role!", "x")
+    assert exc2.value.error_code == "ROLE_NAME_INVALID"
+
+
+async def test_delete_custom_role_ok() -> None:
+    """删除自定义角色：软删，角色从列表消失。"""
+    svc, repo, _ = _svc()
+    await svc.create_custom_role("temp_role", "临时")
+    await svc.delete_custom_role("temp_role")
+    items = await svc.list_role_permissions()
+    assert "temp_role" not in {i["role"] for i in items}
+
+
+async def test_delete_custom_role_in_use_rejected() -> None:
+    """自定义角色仍被用户占用 → ROLE_IN_USE。"""
+    svc, repo, _ = _svc()
+    await svc.create_custom_role("busy_role", "占用")
+    repo.user_role_counts = {"busy_role": 3}
+    with pytest.raises(ValidationError) as exc:
+        await svc.delete_custom_role("busy_role")
+    assert exc.value.error_code == "ROLE_IN_USE"
+
+
+async def test_delete_builtin_role_rejected() -> None:
+    """内置角色不可删除（ROLE_NAME_RESERVED）。"""
+    svc, _repo, _ = _svc()
+    with pytest.raises(ValidationError) as exc:
+        await svc.delete_custom_role("viewer")
+    assert exc.value.error_code == "ROLE_NAME_RESERVED"
+
+
+async def test_action_registry_returns_grouped_items() -> None:
+    """动作点注册表：含 module/label/description，按模块分组排序。"""
+    svc, _repo, _ = _svc()
+    items = await svc.action_registry()
+    assert len(items) >= 40  # 按钮级权限点足够细
+    keys = {i["action"] for i in items}
+    assert "metric:create" in keys and "user:disable" in keys and "catalog:view" in keys
+    assert all(i["module"] and i["label"] for i in items)
+    # 排序：按 (module, action)
+    modules = [i["module"] for i in items]
+    assert modules == sorted(modules)
+
+
+async def test_my_permissions_includes_ui_actions() -> None:
+    """权限快照含 ui_actions（前端 usePermission 消费）；viewer 默认只读。"""
+    svc, _repo, _ = _svc()
+    snap = await svc.my_permissions(FakeUser(uid=1, role="viewer"))  # type: ignore[arg-type]
+    assert "catalog:view" in snap.ui_actions
+    assert "metric:create" not in snap.ui_actions
+    assert "read" in snap.allowed_actions  # 资源级动词保持兼容
+
+
+async def test_custom_role_ui_actions_via_override() -> None:
+    """自定义角色经 set_role_permissions 配置 UI 权限点后，快照生效动作随之更新。"""
+
+    svc, repo, _ = _svc()
+    await svc.create_custom_role("data_analyst", "数据分析员")
+    await svc.set_role_permissions("data_analyst", ["catalog:view", "metric:create", "query:view"])
+    item = await svc.list_role_permissions()
+    by_role = {i["role"]: i for i in item}
+    assert by_role["data_analyst"]["ui_effective_actions"] == [
+        "catalog:view",
+        "metric:create",
+        "query:view",
+    ]
+    snap = await svc.my_permissions(FakeUser(uid=1, role="data_analyst"))  # type: ignore[arg-type]
+    assert snap.ui_actions == ["catalog:view", "metric:create", "query:view"]
+    # 自定义角色未配置资源级动词 → PDP 默认拒绝（fail-closed）
+    assert snap.allowed_actions == []

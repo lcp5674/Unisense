@@ -110,7 +110,7 @@ async def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-def require_roles(*allowed_roles: str) -> Callable[[CurrentUser], Awaitable[User]]:
+def require_roles(*allowed_roles: str) -> Callable[..., Awaitable[User]]:
     """角色校验依赖工厂。
 
     Args:
@@ -124,16 +124,53 @@ def require_roles(*allowed_roles: str) -> Callable[[CurrentUser], Awaitable[User
         ...     "/metrics",
         ...     dependencies=[Depends(require_roles("platform_admin", "domain_admin"))],
         ... )
+        ...
+
+    Notes:
+        自定义角色（方案 A：``user.role`` 为自定义角色名）在「任意登录用户可读」
+        门禁（``allowed_roles == ALL_ROLES``）下放行——即自定义角色用户与内置角色
+        一样可访问只读/参考类端点；管理类写端点仍须显式列出内置角色，自定义角色
+        不会被默认放行（fail-closed，防提权）。
     """
 
-    async def _check_role(user: CurrentUser) -> User:
+    #: 任意登录用户可读门禁：仅当放行集合恰为 ALL_ROLES 时对自定义角色放行。
+    is_any_active_gate = set(allowed_roles) == set(ALL_ROLES)
+
+    async def _check_role(
+        user: CurrentUser,
+        db: Annotated[AsyncSession, Depends(get_db_session)],
+    ) -> User:
         role_val = user.role.value if isinstance(user.role, enum.Enum) else user.role
-        if role_val not in allowed_roles:
-            raise AuthError(
-                f"无权操作，需要角色: {', '.join(allowed_roles)}",
-                error_code="FORBIDDEN",
-                ctx={"user_role": user.role},
-            )
-        return user
+        role_val = str(role_val)
+        if role_val in allowed_roles:
+            return user
+        if is_any_active_gate and await _is_custom_role(db, role_val):
+            return user
+        raise AuthError(
+            f"无权操作，需要角色: {', '.join(allowed_roles)}",
+            error_code="FORBIDDEN",
+            ctx={"user_role": role_val},
+        )
 
     return _check_role
+
+
+async def _is_custom_role(db: AsyncSession, role: str) -> bool:
+    """判断角色名是否为已登记的自定义角色（``role`` 表 ``is_custom=True``）。
+
+    仅用于「任意登录用户可读」门禁的放行判定；管理类写门禁不调用本函数。
+    """
+    from sqlalchemy import select
+
+    from app.models.governance import Role
+
+    row = (
+        await db.execute(
+            select(Role).where(
+                Role.name == role,
+                Role.is_custom.is_(True),
+                Role.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    return row is not None

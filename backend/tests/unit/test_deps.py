@@ -128,11 +128,12 @@ class TestRequireRoles:
     async def test_allowed_role_passes(self) -> None:
         user = _make_user(role="platform_admin")
         check = deps.require_roles("platform_admin", "domain_admin")
-        result = await check(user)
+        # 放行路径不查库，db 传 MagicMock 即可（require_roles 依赖注入 db 判定自定义角色）
+        result = await check(user, MagicMock())
         assert result is user
 
     async def test_denied_role_raises(self) -> None:
         user = _make_user(role="viewer")
         check = deps.require_roles("platform_admin", "domain_admin")
         with pytest.raises(AuthError):
-            await check(user)
+            await check(user, MagicMock())

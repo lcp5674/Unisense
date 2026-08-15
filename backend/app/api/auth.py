@@ -64,7 +64,9 @@ class UserInfo(BaseModel):
     display_name: str
     role: str
     domain: str | None
+    domain_name: str | None = None
     org_id: int
+    org_name: str | None = None
 
 
 class UserBrief(BaseModel):
@@ -131,8 +133,27 @@ async def login(
 
 
 @router.get("/me")
-async def me(user: CurrentUser) -> ApiResponse[UserInfo]:
-    """查询当前登录用户基本信息（需 Bearer Token）。"""
+async def me(
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ApiResponse[UserInfo]:
+    """查询当前登录用户基本信息（需 Bearer Token，含组织名 / 域名中文名回填）。"""
+    from app.models.subject_domain import SubjectDomain
+    from app.models.user import Organization
+
+    org_name: str | None = None
+    domain_name: str | None = None
+    org = (
+        await db.execute(select(Organization).where(Organization.id == user.org_id))
+    ).scalar_one_or_none()
+    if org is not None:
+        org_name = org.name
+    if user.domain:
+        dom = (
+            await db.execute(select(SubjectDomain).where(SubjectDomain.code == user.domain))
+        ).scalar_one_or_none()
+        if dom is not None:
+            domain_name = dom.name
     return ok(
         UserInfo(
             id=user.id,
@@ -140,7 +161,9 @@ async def me(user: CurrentUser) -> ApiResponse[UserInfo]:
             display_name=user.display_name,
             role=user.role,
             domain=user.domain,
+            domain_name=domain_name,
             org_id=user.org_id,
+            org_name=org_name,
         )
     )
 

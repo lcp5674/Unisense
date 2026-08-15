@@ -42,8 +42,9 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 logger = logging.getLogger("unisense.users.api")
 
-#: 平台可授予的全部内置角色（对齐 User.role Enum 7 值）。
-UserRole = Literal[
+#: 平台可授予的全部内置角色（对齐 User.role 历史 7 值；自定义角色经 role 表校验）。
+#: 注：``role`` 字段已放宽为 str（方案 A），内置角色名保持历史值不变。
+BUILTIN_ROLES: tuple[str, ...] = (
     "platform_admin",
     "domain_admin",
     "metric_owner",
@@ -51,7 +52,7 @@ UserRole = Literal[
     "compliance_officer",
     "analyst",
     "viewer",
-]
+)
 
 #: 管理端点依赖：仅平台管理员 + 注入守卫（纵深防御，ORM 参数化兜底之外拦截注入 payload）。
 _ADMIN_DEPS = [Depends(require_roles("platform_admin")), Depends(guard_against_injection)]
@@ -98,7 +99,7 @@ class UserCreateRequest(BaseModel):
         description="邮箱（全局唯一）",
     )
     display_name: str = Field(..., min_length=1, max_length=128, description="显示名称")
-    role: UserRole = Field(default="viewer", description="角色")
+    role: str = Field(default="viewer", max_length=32, description="角色（内置或自定义角色名）")
     domain: str | None = Field(default=None, max_length=64, description="所属域")
     org_id: int | None = Field(
         default=None, gt=0, description="所属组织 ID（缺省归入当前管理员组织）"
@@ -119,7 +120,7 @@ class UserUpdateRequest(BaseModel):
         max_length=128,
         description="邮箱（全局唯一）",
     )
-    role: UserRole = Field(..., description="角色")
+    role: str = Field(..., max_length=32, description="角色（内置或自定义角色名）")
     domain: str | None = Field(default=None, max_length=64, description="所属域（可空）")
 
 
@@ -235,6 +236,36 @@ async def _assert_org_active(db: AsyncSession, org_id: int) -> None:
             "组织未启用，不能创建用户",
             error_code="ORG_DISABLED",
             ctx={"org_id": org_id, "status": org_status},
+        )
+
+
+async def _assert_role_valid(db: AsyncSession, role: str) -> None:
+    """校验角色：内置七角色 或 已登记的自定义角色（方案 A）。
+
+    自定义角色名必须存在于 ``role`` 表（``is_custom=True``），防止绕过 UI
+    直接写接口注入任意角色名（与主题域强校验同款 fail-closed 设计）。
+
+    Raises:
+        ValidationError: 未知角色（USER_ROLE_INVALID）。
+    """
+    if role in BUILTIN_ROLES:
+        return
+    from app.models.governance import Role
+
+    row = (
+        await db.execute(
+            select(Role).where(
+                Role.name == role,
+                Role.is_custom.is_(True),
+                Role.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise ValidationError(
+            f"未知角色: {role}（内置角色或已登记的自定义角色）",
+            error_code="USER_ROLE_INVALID",
+            ctx={"role": role},
         )
 
 
@@ -376,6 +407,7 @@ async def create_user(
     _validate_password_complexity(payload.password)
     await _assert_unique(db, username=payload.username, email=payload.email)
     await _assert_domain_active(db, payload.domain)
+    await _assert_role_valid(db, payload.role)
     org_id = payload.org_id or user.org_id
     await _assert_org_active(db, org_id)
     row = User(
@@ -561,6 +593,7 @@ async def update_user(
         raise NotFoundError("用户不存在", error_code="USER_NOT_FOUND")
     await _assert_unique(db, username=row.username, email=payload.email, exclude_id=row.id)
     await _assert_domain_active(db, payload.domain)
+    await _assert_role_valid(db, payload.role)
     if row.id == user.id and payload.role != "platform_admin":
         raise ValidationError(
             "不能降级当前登录的平台管理员角色", error_code="SELF_DEMOTE_FORBIDDEN"

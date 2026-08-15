@@ -178,6 +178,187 @@ GRANT_TYPE_ACTIONS: dict[str, frozenset[str]] = {
     GrantType.READ_WRITE.value: frozenset({"read", "write", "export"}),
 }
 
+# --------------------------------------------------------------- UI 权限点注册表
+#
+# 资源级动作（read/write/approve/export/review）用于 PDP 指标资源判定；
+# 此处新增的 ``模块:功能`` UI 权限点用于**前端按模块/组件/按钮级管控**
+# （路由守卫 / 菜单显隐 / 页面 Tab / 按钮），由 ``GET /action-registry`` 暴露给
+# 角色管理做**可视化配置**，经 ``role_permission`` 表覆盖（``ROLE_UI_ACTIONS`` 为默认基线）。
+
+#: UI 权限点注册表：``动作键 -> {module, label, description}``。
+#: 键命名 ``模块:功能[:子项]``；``module`` 用于前端分组渲染，``label`` 为中文名，
+#: ``description`` 为配置时的悬停说明。
+UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
+    # ---- 总览 / 待办 / 通知
+    "dashboard:view": {"module": "总览", "label": "查看总览", "description": "访问总览仪表盘"},
+    "todo:view": {"module": "总览", "label": "查看待办", "description": "访问待办列表"},
+    "notifications:view": {"module": "总览", "label": "查看通知", "description": "访问通知中心"},
+    "favorites:view": {"module": "总览", "label": "查看收藏", "description": "访问我的收藏"},
+    # ---- 指标
+    "catalog:view": {"module": "指标", "label": "查看指标目录", "description": "访问指标目录列表"},
+    "compare:view": {"module": "指标", "label": "指标对比", "description": "访问指标对比页"},
+    "templates:view": {"module": "指标", "label": "查看指标模板", "description": "访问指标模板页"},
+    "metric:create": {"module": "指标", "label": "创建指标", "description": "新增指标（含口径定义）"},  # noqa: E501
+    "metric:edit": {"module": "指标", "label": "编辑指标", "description": "修改指标口径 / 描述"},
+    "metric:approve": {"module": "指标", "label": "审批指标", "description": "通过 / 驳回指标审核"},
+    "metric:deprecate": {"module": "指标", "label": "废弃指标", "description": "下线并废弃指标"},
+    "metric:export": {"module": "指标", "label": "导出指标", "description": "导出指标清单"},
+    "metric:review": {"module": "指标", "label": "评审指标", "description": "参与指标口径评审"},
+    "metric:emergency-publish": {"module": "指标", "label": "紧急发布", "description": "跳过常规流程紧急发布"},  # noqa: E501
+    "metric:rollback": {"module": "指标", "label": "指标回滚", "description": "回滚已发布指标版本"},
+    "metric:import": {"module": "指标", "label": "批量导入", "description": "批量注册 / 导入指标"},
+    # ---- 资产地图 / 血缘
+    "assetmap:view": {"module": "资产地图", "label": "查看资产地图", "description": "访问资产地图"},
+    "assetmap:edit": {"module": "资产地图", "label": "编辑资产", "description": "修改资产描述 / 元数据"},  # noqa: E501
+    "assetmap:export": {"module": "资产地图", "label": "导出资产", "description": "导出资产清单"},
+    "lineage:view": {"module": "资产地图", "label": "查看血缘", "description": "访问血缘图谱"},
+    # ---- 质量 / 冲突
+    "quality:view": {"module": "质量中心", "label": "查看质量中心", "description": "访问质量中心"},
+    "quality:run-check": {"module": "质量中心", "label": "执行质量校验", "description": "运行数据质量规则"},  # noqa: E501
+    "quality:config-rule": {"module": "质量中心", "label": "配置质量规则", "description": "新增 / 编辑质量规则"},  # noqa: E501
+    "review:view": {"module": "质量中心", "label": "查看冲突仲裁", "description": "访问口径冲突仲裁页"},  # noqa: E501
+    # ---- 查询 / AI / 维度 / 术语
+    "query:view": {"module": "分析", "label": "指标查询", "description": "访问指标查询工作台"},
+    "ai:view": {"module": "分析", "label": "AI 助手", "description": "访问 AI 助手"},
+    "dimensions:view": {"module": "分析", "label": "查看维度", "description": "访问维度管理"},
+    "glossary:view": {"module": "分析", "label": "查看术语表", "description": "访问术语表"},
+    "templates:view_extra": {},  # 占位保持分组稳定（勿用）
+    # ---- 数据源 / 采集
+    "data-sources:view": {"module": "采集", "label": "查看数据源", "description": "访问数据源管理"},
+    "data-source:create": {"module": "采集", "label": "新增数据源", "description": "创建数据源连接"},  # noqa: E501
+    "data-source:edit": {"module": "采集", "label": "编辑数据源", "description": "修改数据源连接配置"},  # noqa: E501
+    "data-source:delete": {"module": "采集", "label": "删除数据源", "description": "删除数据源连接"},  # noqa: E501
+    "data-source:test-connection": {"module": "采集", "label": "测试连接", "description": "测试数据源连通性"},  # noqa: E501
+    "data-source:collect": {"module": "采集", "label": "执行采集", "description": "触发采集任务"},
+    "catalogs:view": {"module": "采集", "label": "查看采集目录", "description": "访问采集目录"},
+    "collection-tasks:view": {"module": "采集", "label": "查看采集任务", "description": "访问采集任务中心"},  # noqa: E501
+    "collection-history:view": {"module": "采集", "label": "查看采集记录", "description": "访问采集历史"},  # noqa: E501
+    "catalog:deprecate": {"module": "采集", "label": "废弃目录", "description": "废弃采集到的目录表"},  # noqa: E501
+    "catalog:edit-description": {"module": "采集", "label": "编辑字段描述", "description": "编辑目录字段描述"},  # noqa: E501
+    # ---- 用户 / 组织
+    "users:view": {"module": "账号", "label": "查看用户管理", "description": "访问用户管理页"},
+    "user:create": {"module": "账号", "label": "创建用户", "description": "新增用户账号"},
+    "user:edit": {"module": "账号", "label": "编辑用户", "description": "修改用户信息 / 角色"},
+    "user:disable": {"module": "账号", "label": "启停用户", "description": "启用 / 禁用用户"},
+    "user:reset-password": {"module": "账号", "label": "重置密码", "description": "重置用户密码"},
+    "user:batch-status": {"module": "账号", "label": "批量启停", "description": "批量启用 / 禁用用户"},  # noqa: E501
+    "organizations:view": {"module": "账号", "label": "查看组织管理", "description": "访问组织管理页"},  # noqa: E501
+    "org:create": {"module": "账号", "label": "创建组织", "description": "新增组织（租户）"},
+    "org:edit": {"module": "账号", "label": "编辑组织", "description": "修改组织信息 / 状态"},
+    "org:disable": {"module": "账号", "label": "启停组织", "description": "启用 / 停用组织"},
+    # ---- 权限治理 / 审计 / 配置
+    "governance:view": {"module": "治理", "label": "查看权限治理", "description": "访问权限治理页"},
+    "grant:create": {"module": "治理", "label": "创建授权", "description": "域授权 / 指标白名单授权"},  # noqa: E501
+    "grant:revoke": {"module": "治理", "label": "回收授权", "description": "回收既有授权"},
+    "grant:export": {"module": "治理", "label": "导出授权", "description": "导出授权清单"},
+    "role:create": {"module": "治理", "label": "创建角色", "description": "新建自定义角色"},
+    "role:edit": {"module": "治理", "label": "配置角色权限", "description": "配置角色权限点"},
+    "role:delete": {"module": "治理", "label": "删除角色", "description": "删除自定义角色"},
+    "pii:review": {"module": "治理", "label": "PII 合规复核", "description": "复核敏感指标"},
+    "pii:validate": {"module": "治理", "label": "PII 二次校验", "description": "字段级脱敏校验"},
+    "classification:rescan": {"module": "治理", "label": "分级重扫", "description": "重算资产敏感级别"},  # noqa: E501
+    "erasure:execute": {"module": "治理", "label": "执行被遗忘权", "description": "数据主体删除请求"},  # noqa: E501
+    "audit:view": {"module": "治理", "label": "查看审计日志", "description": "访问审计日志"},
+    "audit:export": {"module": "治理", "label": "导出审计", "description": "导出审计日志"},
+    "domains:view": {"module": "治理", "label": "查看主题域", "description": "访问主题域管理"},
+    "domain:create": {"module": "治理", "label": "管理主题域", "description": "新增 / 启停主题域"},
+    "dicts:view": {"module": "治理", "label": "查看系统字典", "description": "访问系统字典"},
+    "dict:create": {"module": "治理", "label": "管理字典", "description": "新增 / 编辑字典项"},
+    "api-clients:view": {"module": "治理", "label": "查看接入方", "description": "访问 API 客户端"},
+    "system-config:view": {"module": "治理", "label": "查看系统配置", "description": "访问系统配置"},  # noqa: E501
+    "system-config:edit": {"module": "治理", "label": "编辑系统配置", "description": "修改系统配置（LLM Key 等）"},  # noqa: E501
+    "observability:view": {"module": "治理", "label": "查看可观测", "description": "访问可观测性"},
+    "tracking-stats:view": {"module": "治理", "label": "查看埋点统计", "description": "访问埋点统计"},  # noqa: E501
+    "feedback:view": {"module": "总览", "label": "查看用户反馈", "description": "访问用户反馈"},
+    "guide:view": {"module": "总览", "label": "查看使用指南", "description": "访问使用指南"},
+}
+
+#: 占位键清理（保持注册表纯净）。
+UI_ACTION_REGISTRY.pop("templates:view_extra", None)
+
+#: 角色 → UI 权限点默认基线（与 ``ROLE_ACTIONS`` 正交：前者供前端 UI 管控，
+#: 后者供 PDP 资源级判定；``role_permission`` 表可对两者分别覆盖）。
+ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
+    RoleName.PLATFORM_ADMIN.value: frozenset(UI_ACTION_REGISTRY.keys()),
+    RoleName.DOMAIN_ADMIN.value: frozenset(
+        {
+            "dashboard:view", "todo:view", "notifications:view", "favorites:view",
+            "catalog:view", "compare:view", "templates:view", "metric:create", "metric:edit",
+            "metric:approve", "metric:deprecate", "metric:export", "metric:review",
+            "metric:emergency-publish", "metric:rollback", "metric:import",
+            "assetmap:view", "assetmap:edit", "assetmap:export", "lineage:view",
+            "quality:view", "quality:run-check", "quality:config-rule", "review:view",
+            "query:view", "ai:view", "dimensions:view", "glossary:view",
+            "data-sources:view", "data-source:create", "data-source:edit",
+            "data-source:delete", "data-source:test-connection", "data-source:collect",
+            "catalogs:view", "collection-tasks:view", "collection-history:view",
+            "catalog:deprecate", "catalog:edit-description",
+            "organizations:view", "org:create", "org:edit", "org:disable",
+            "governance:view", "grant:create", "grant:revoke", "grant:export",
+            "audit:view", "domains:view", "domain:create", "dicts:view", "dict:create",
+            "api-clients:view", "system-config:view", "observability:view",
+            "tracking-stats:view", "feedback:view", "guide:view",
+        }
+    ),
+    RoleName.METRIC_OWNER.value: frozenset(
+        {
+            "dashboard:view", "todo:view", "notifications:view", "favorites:view",
+            "catalog:view", "compare:view", "metric:create", "metric:edit",
+            "metric:deprecate", "metric:export", "metric:review",
+            "assetmap:view", "lineage:view", "quality:view", "review:view",
+            "query:view", "ai:view", "dimensions:view", "glossary:view",
+            "data-sources:view", "catalogs:view", "collection-tasks:view",
+            "collection-history:view", "feedback:view", "guide:view",
+        }
+    ),
+    RoleName.REVIEWER.value: frozenset(
+        {
+            "dashboard:view", "todo:view", "notifications:view", "favorites:view",
+            "catalog:view", "compare:view", "metric:review", "metric:approve",
+            "quality:view", "review:view", "query:view", "ai:view",
+            "dimensions:view", "glossary:view", "feedback:view", "guide:view",
+        }
+    ),
+    RoleName.COMPLIANCE_OFFICER.value: frozenset(
+        {
+            "dashboard:view", "todo:view", "notifications:view", "favorites:view",
+            "catalog:view", "compare:view", "assetmap:view", "lineage:view",
+            "quality:view", "query:view", "ai:view", "dimensions:view", "glossary:view",
+            "governance:view", "pii:review", "pii:validate", "classification:rescan",
+            "erasure:execute", "audit:view", "audit:export",
+            "feedback:view", "guide:view",
+        }
+    ),
+    RoleName.ANALYST.value: frozenset(
+        {
+            "dashboard:view", "todo:view", "notifications:view", "favorites:view",
+            "catalog:view", "compare:view", "assetmap:view", "lineage:view",
+            "quality:view", "query:view", "ai:view", "dimensions:view", "glossary:view",
+            "feedback:view", "guide:view",
+        }
+    ),
+    RoleName.VIEWER.value: frozenset(
+        {
+            "dashboard:view", "todo:view", "notifications:view", "favorites:view",
+            "catalog:view", "compare:view", "quality:view", "query:view",
+            "dimensions:view", "glossary:view", "guide:view",
+        }
+    ),
+}
+
+#: UI 权限点可配置白名单：角色权限点可视化配置只能从该集合勾选。
+CONFIGURABLE_UI_ACTIONS: frozenset[str] = frozenset(UI_ACTION_REGISTRY.keys())
+
+
+def is_ui_action(action: str) -> bool:
+    """判断动作是否为 UI 权限点（``模块:功能`` 形态），而非资源级动词。"""
+    return action in CONFIGURABLE_UI_ACTIONS
+
+
+def all_configurable_actions() -> frozenset[str]:
+    """全部可配置权限点 = 资源级动词 ∪ UI 权限点（角色权限点配置的合法集合）。"""
+    return CONFIGURABLE_ACTIONS | CONFIGURABLE_UI_ACTIONS
+
 
 @dataclass(frozen=True, slots=True)
 class Subject:

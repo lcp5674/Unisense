@@ -134,6 +134,90 @@ class GovernanceService(BaseService):
             Role(name=payload.name, description=payload.description)
         )
 
+    # -------------------------------------------------------- custom role CRUD
+
+    async def create_custom_role(self, name: str, description: str | None) -> Role:
+        """创建自定义角色（方案 A：自定义角色名写入 role 表 + user.role 字符串承载）。
+
+        校验规则：
+        - 名称须为 ``[a-z][a-z0-9_]{1,31}``（小写，32 位内）；
+        - 不得与内置角色同名（内置角色名不可被覆盖为自定义）；
+        - 同名角色已存在时幂等返回既有记录。
+
+        Raises:
+            ValidationError: 名称格式非法 / 与内置角色重名。
+        """
+        if name in policy.ROLE_ACTIONS or name in policy.ROLE_UI_ACTIONS:
+            raise ValidationError(
+                f"角色名 {name} 为内置角色，不可创建自定义角色", error_code="ROLE_NAME_RESERVED"
+            )
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,31}", name):
+            raise ValidationError(
+                f"自定义角色名非法: {name}（须小写字母开头，含小写字母/数字/下划线，2-32 位）",
+                error_code="ROLE_NAME_INVALID",
+                ctx={"name": name},
+            )
+        existing = await self._repo.get_role_by_name(name)
+        if existing is not None:
+            return existing
+        return await self._repo.create_role(
+            Role(name=name, description=description, is_custom=True)
+        )
+
+    async def delete_custom_role(self, name: str) -> None:
+        """删除自定义角色（软删）。
+
+        保护：
+        - 内置角色不可删除（须先放开平台管理的该角色权限点覆盖？不——内置角色由系统管理）；
+        - 仍被用户占用的角色不可删除（先改派用户或迁移权限）。
+
+        Raises:
+            ValidationError: 内置角色 / 仍被用户占用。
+            NotFoundError: 自定义角色不存在。
+        """
+        if name in policy.ROLE_ACTIONS or name in policy.ROLE_UI_ACTIONS:
+            raise ValidationError(
+                f"角色 {name} 为内置角色，不可删除", error_code="ROLE_NAME_RESERVED"
+            )
+        row = await self._repo.get_role_by_name(name)
+        if row is None:
+            raise NotFoundError("角色不存在", ctx={"role": name})
+        if not getattr(row, "is_custom", False):
+            raise ValidationError(
+                f"角色 {name} 非自定义角色，不可删除", error_code="ROLE_NAME_RESERVED"
+            )
+        used = await self._repo.count_users_by_role(name)
+        if used > 0:
+            raise ValidationError(
+                f"角色 {name} 仍被 {used} 个用户使用，请先改派用户角色",
+                error_code="ROLE_IN_USE",
+                ctx={"role": name, "users": used},
+            )
+        await self._repo.delete_role(row)
+
+    async def list_custom_roles(self) -> list[Role]:
+        """列出全部自定义角色（用户管理角色下拉数据源）。"""
+        return await self._repo.list_custom_roles()
+
+    async def action_registry(self) -> list[dict[str, str]]:
+        """动作点注册表（前端角色管理可视化配置数据源）。
+
+        Returns:
+            每项含 ``action``（权限点键）/ ``module``（分组）/ ``label``（中文名）/
+            ``description``（说明），按模块名分组排序。
+        """
+        items = [
+            {
+                "action": action,
+                "module": meta["module"],
+                "label": meta["label"],
+                "description": meta["description"],
+            }
+            for action, meta in policy.UI_ACTION_REGISTRY.items()
+        ]
+        items.sort(key=lambda i: (i["module"], i["action"]))
+        return items
+
     # --------------------------------------------- role permission (RBAC 可配置化)
 
     async def list_role_permissions(self) -> list[dict[str, Any]]:
@@ -141,27 +225,40 @@ class GovernanceService(BaseService):
 
         Returns:
             每项含 ``role`` / ``default_actions`` / ``custom_actions``（未覆盖为 None）/
-            ``effective_actions``（生效动作）/ ``protected``（受保护角色不可配置）。
+            ``effective_actions``（生效动作）/ ``protected``（受保护角色不可配置），
+            以及 UI 权限点三态（``ui_default_actions`` / ``ui_custom_actions`` /
+            ``ui_effective_actions``）与 ``is_custom``（自定义角色标记）。
         """
         overrides = await self._repo.list_role_permissions()
         by_role: dict[str, set[str]] = {}
         for row in overrides:
             by_role.setdefault(row.role, set()).add(row.action)
+        custom_roles = await self._repo.list_custom_roles()
         roles = sorted(
-            set(policy.ROLE_ACTIONS.keys()) | set(by_role.keys()),
+            set(policy.ROLE_ACTIONS.keys())
+            | set(policy.ROLE_UI_ACTIONS.keys())
+            | set(by_role.keys())
+            | {str(r.name) for r in custom_roles},
             key=lambda r: (r not in policy.PROTECTED_ROLES, r),  # 受保护角色（平台管理员）置顶
         )
         items: list[dict[str, Any]] = []
         for r in roles:
             default_actions = sorted(policy.ROLE_ACTIONS.get(r, frozenset()))
-            custom_actions = sorted(by_role[r]) if r in by_role else None
+            ui_default_actions = sorted(policy.ROLE_UI_ACTIONS.get(r, frozenset()))
+            raw_custom = by_role.get(r, set())
+            custom_actions = sorted(a for a in raw_custom if not policy.is_ui_action(a)) or None
+            ui_custom_actions = sorted(a for a in raw_custom if policy.is_ui_action(a)) or None
             items.append(
                 {
                     "role": r,
                     "default_actions": default_actions,
                     "custom_actions": custom_actions,
                     "effective_actions": custom_actions or default_actions,
+                    "ui_default_actions": ui_default_actions,
+                    "ui_custom_actions": ui_custom_actions,
+                    "ui_effective_actions": ui_custom_actions or ui_default_actions,
                     "protected": r in policy.PROTECTED_ROLES,
+                    "is_custom": r in {str(c.name) for c in custom_roles},
                 }
             )
         return items
@@ -169,6 +266,8 @@ class GovernanceService(BaseService):
     async def load_role_actions(self) -> dict[str, frozenset[str]]:
         """合并默认基线 + 覆盖，产出供 ``policy.decide`` 的 ``role_actions`` 映射。
 
+        仅合并**资源级动词**（read/write/approve/export/review）覆盖；UI 权限点
+        （``模块:功能``）经 ``load_ui_role_actions`` 独立合并，避免 UI 配置误伤 PDP 判定。
         每次决策前调用（低频配置查询，RBAC 配置化场景可接受）；被覆盖的角色以
         ``role_permission`` 表为准，未覆盖的沿用 ``policy.ROLE_ACTIONS`` 默认。
         """
@@ -177,7 +276,25 @@ class GovernanceService(BaseService):
         for row in await self._repo.list_role_permissions():
             by_role.setdefault(row.role, set()).add(row.action)
         for role, actions in by_role.items():
-            merged[role] = frozenset(actions)
+            resource_actions = frozenset(a for a in actions if not policy.is_ui_action(a))
+            if resource_actions:
+                merged[role] = resource_actions
+        return merged
+
+    async def load_ui_role_actions(self) -> dict[str, frozenset[str]]:
+        """合并默认基线 + 覆盖，产出供前端 ``usePermission`` 消费的 UI 权限点映射。
+
+        仅合并 UI 权限点（``模块:功能``）覆盖；自定义角色无默认基线，生效动作
+        完全来自 ``role_permission`` 覆盖（未配置即为空集，fail-closed）。
+        """
+        merged = dict(policy.ROLE_UI_ACTIONS)
+        by_role: dict[str, set[str]] = {}
+        for row in await self._repo.list_role_permissions():
+            by_role.setdefault(row.role, set()).add(row.action)
+        for role, actions in by_role.items():
+            ui_actions = frozenset(a for a in actions if policy.is_ui_action(a))
+            if ui_actions:
+                merged[role] = ui_actions
         return merged
 
     async def set_role_permissions(self, role: str, actions: list[str]) -> dict[str, Any]:
@@ -192,7 +309,7 @@ class GovernanceService(BaseService):
                 error_code="ROLE_PERMISSION_PROTECTED",
                 ctx={"role": role},
             )
-        unknown = sorted(set(actions) - set(policy.CONFIGURABLE_ACTIONS))
+        unknown = sorted(set(actions) - set(policy.all_configurable_actions()))
         if unknown:
             raise ValidationError(
                 f"包含未知权限点: {', '.join(unknown)}",
@@ -581,11 +698,13 @@ class GovernanceService(BaseService):
                 domains.add(g.domain)
         role_s = _role_to_str(user.role)
         role_actions = await self.load_role_actions()
+        ui_role_actions = await self.load_ui_role_actions()
         return PermissionSnapshot(
             user_id=user.id,
             role=role_s,
             home_domain=user.domain,
             allowed_actions=sorted(role_actions.get(role_s, frozenset())),
+            ui_actions=sorted(ui_role_actions.get(role_s, frozenset())),
             granted_domains=sorted(domains),
             metric_whitelist=sorted(whitelist),
             row_level_restricted=any(g.row_level for g in effective),

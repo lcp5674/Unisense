@@ -74,19 +74,10 @@ class User(Base, BaseModel):
     )
     display_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="显示名称")
     role: Mapped[str] = mapped_column(
-        Enum(
-            "platform_admin",
-            "domain_admin",
-            "metric_owner",
-            "reviewer",
-            "compliance_officer",
-            "analyst",
-            "viewer",
-            name="user_role",
-        ),
+        String(32),
         nullable=False,
         default="viewer",
-        comment="用户角色",
+        comment="用户角色（内置七角色或自定义角色名，方案 A：String 承载）",
     )
     domain: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="所属域")
     status: Mapped[str] = mapped_column(

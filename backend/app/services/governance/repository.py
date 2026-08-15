@@ -18,7 +18,6 @@ from app.models.governance import (
     GrantStatus,
     GrantType,
     Role,
-    RoleName,
     RolePermission,
     SensitivityLevel,
 )
@@ -33,7 +32,7 @@ class GovernanceRepository:
 
     # ------------------------------------------------------------------ role
 
-    async def get_role_by_name(self, name: RoleName) -> Role | None:
+    async def get_role_by_name(self, name: str) -> Role | None:
         stmt = select(Role).where(Role.name == name, Role.deleted_at.is_(None))
         return (await self._db.execute(stmt)).scalar_one_or_none()
 
@@ -42,6 +41,32 @@ class GovernanceRepository:
         await self._db.flush()
         await self._db.refresh(role)
         return role
+
+    async def list_custom_roles(self) -> list[Role]:
+        """列出全部自定义角色（``is_custom=True``，按名称排序）。"""
+        stmt = (
+            select(Role)
+            .where(Role.is_custom.is_(True), Role.deleted_at.is_(None))
+            .order_by(Role.name)
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def count_users_by_role(self, role: str) -> int:
+        """统计使用该角色的用户数（删除自定义角色前的占用校验）。"""
+        from app.models.user import User
+
+        stmt = (
+            select(func.count())
+            .select_from(User)
+            .where(User.role == role, User.deleted_at.is_(None))
+        )
+        return int((await self._db.execute(stmt)).scalar() or 0)
+
+    async def delete_role(self, role: Role) -> None:
+        """软删角色行（自定义角色删除）。"""
+        now = datetime.now(UTC)
+        role.deleted_at = now
+        await self._db.flush()
 
     # -------------------------------------------------------- role permission
 
