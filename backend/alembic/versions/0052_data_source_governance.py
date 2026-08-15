@@ -28,7 +28,8 @@ depends_on = None
 def upgrade() -> None:
     op.add_column(
         "data_source",
-        sa.Column("owner_id", sa.Integer(), nullable=True, comment="数据源负责人（用户 ID）"),
+        # user.id 为 BIGINT，owner_id 必须同类型才能建 FK（生产验证：Integer 报 3780）
+        sa.Column("owner_id", sa.BigInteger(), nullable=True, comment="数据源负责人（用户 ID）"),
     )
     op.create_foreign_key(
         "fk_data_source_owner", "data_source", "user", ["owner_id"], ["id"]
