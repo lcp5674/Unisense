@@ -463,4 +463,17 @@ describe("MetricDetail 按钮级权限过滤", () => {
     renderWithPerms(["metric:view"]);
     await waitFor(() => expect(screen.queryByText("废弃")).not.toBeInTheDocument());
   });
+
+  it("具备 pii:review 权限点且 PII 未复核时显示 PII 合规复核按钮", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: true, compliance_reviewed: false });
+    renderWithPerms(["pii:review"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText("PII 合规复核")).toBeInTheDocument());
+  });
+
+  it("无 pii:review 权限点时即使 PII 未复核也不显示 PII 复核按钮", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: true, compliance_reviewed: false });
+    renderWithPerms(["metric:view"]);
+    await waitFor(() => expect(screen.queryByText("PII 合规复核")).not.toBeInTheDocument());
+  });
 });
