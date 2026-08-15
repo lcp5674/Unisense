@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { LineageView, buildSubgraph, resolveRootId } from "../pages/LineageView";
+import { adaptiveBaseRadius } from "../components/assetmap/AssetGraph";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
 
@@ -444,5 +445,15 @@ describe("buildSubgraph / resolveRootId 单元测试", () => {
     const sub = buildSubgraph(nodes, edges, "metric:nope", 3);
     expect(sub.nodes).toHaveLength(0);
     expect(sub.edges).toHaveLength(0);
+  });
+});
+
+describe("adaptiveBaseRadius 自适应节点半径", () => {
+  it("聚焦视图（节点少）用小半径，全景大图维持可读半径", () => {
+    expect(adaptiveBaseRadius(1)).toBe(16); // 从指标目录跳转聚焦：1-3 节点
+    expect(adaptiveBaseRadius(3)).toBe(16);
+    expect(adaptiveBaseRadius(8)).toBe(18);
+    expect(adaptiveBaseRadius(25)).toBe(20);
+    expect(adaptiveBaseRadius(100)).toBe(24); // 全景大图
   });
 });

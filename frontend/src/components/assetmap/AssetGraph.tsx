@@ -109,6 +109,19 @@ function trimLabel(label: string, max = 40): string {
   return label.length > max ? `${label.slice(0, max)}…` : label;
 }
 
+/**
+ * 自适应节点基准半径：按图规模动态缩放。
+ * 聚焦视图（如从指标目录跳转 ?node= 只看 1-3 个节点的上下游）节点少，
+ * 若仍用全景的大半径（24）会显得图标硕大突兀；节点越少半径越小，越多越大。
+ * 同时保留血缘度缩放，且下限 14 保证「中央图标 + 底部完整标签」仍可容纳。
+ */
+export function adaptiveBaseRadius(nodeCount: number): number {
+  if (nodeCount <= 3) return 16; // 聚焦视图：精致小节点
+  if (nodeCount <= 10) return 18;
+  if (nodeCount <= 30) return 20;
+  return 24; // 全景大图：维持可读性优先
+}
+
 // 颜色提亮：给定 hex 色，向白色方向提亮 amt（0-255），用于渐变高光
 function lightenHex(hex: string, amt: number): string {
   const n = parseInt(hex.slice(1), 16);
@@ -385,6 +398,10 @@ function GraphCanvas({
   degreeMapRef.current = degreeMap;
   const cycleNodesRef = useRef(cycleNodes);
   cycleNodesRef.current = cycleNodes;
+  // 节点总数：size 回调（G6 style 函数，render 时求值）经 ref 读取最新值，
+  // 使聚焦/清除切换（nodes 变化但组件不重挂载时）节点大小随规模自适应
+  const nodeCountRef = useRef(nodes.length);
+  nodeCountRef.current = nodes.length;
 
   // 图实例创建：仅挂载时执行（布局切换由父组件 key 强制重挂载本组件，因此无需依赖 layoutMode）
   useEffect(() => {
@@ -408,8 +425,10 @@ function GraphCanvas({
           style: {
             size: (d: NodeData) => {
               const t = (d.data as AssetGraphNode | undefined)?.type;
-              // 最小半径 24 + 血缘度缩放：节点需容纳「中央图标 + 底部完整标签」
-              const r = Math.max(24, 20 + (degreeMapRef.current.get(String(d.id)) ?? 0) * 1.4);
+              // 自适应基准半径（按节点总数缩放：聚焦视图小节点、全景大图维持可读）
+              // + 血缘度缩放。下限 12 保证「中央图标 + 底部完整标签」仍可容纳。
+              const base = adaptiveBaseRadius(nodeCountRef.current);
+              const r = Math.max(base, 12 + (degreeMapRef.current.get(String(d.id)) ?? 0) * 1.2);
               if (t === "table") return [r * 2.0, r * 1.2];
               if (t === "field") return [r * 1.4, r * 0.8];
               return r;
