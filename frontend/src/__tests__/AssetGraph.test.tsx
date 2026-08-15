@@ -3,6 +3,8 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   AssetGraph,
+  applyLanes,
+  layerOf,
   type AssetGraphNode,
   type AssetGraphEdge,
 } from "../components/assetmap/AssetGraph";
@@ -276,5 +278,128 @@ describe("AssetGraph 交互", () => {
       expect.objectContaining({ "metric:revenue": "compact" }),
       false,
     );
+  });
+
+  it("lanes 语义泳道：插入隐藏锚点节点与锚定边（默认关闭不插入）", async () => {
+    // 默认 lanes=false：不插入锚点
+    const { unmount } = render(<AssetGraph nodes={nodes} edges={edges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    expect(lastGraphData().nodes).toHaveLength(3);
+    expect(lastGraphData().edges).toHaveLength(1);
+    unmount();
+    vi.clearAllMocks();
+    vi.mocked(graphMock.render).mockImplementation(() => Promise.resolve(undefined));
+
+    // lanes=true：表/指标/字段三类均存在 → 3 锚点 + 3 真实节点，锚定边链 + 挂载边
+    render(<AssetGraph nodes={nodes} edges={edges} height={300} lanes />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    const data = lastGraphData();
+    const anchors = data.nodes.filter((n) => (n.data as AssetGraphNode | undefined)?.anchor);
+    expect(anchors.map((a) => a.id).sort()).toEqual(["__lane_field__", "__lane_metric__", "__lane_table__"]);
+    expect(data.nodes).toHaveLength(6);
+    // 锚定边：锚点链（表→指标→字段）+ 每个真实节点的挂载边
+    const anchorEdges = data.edges.filter((e) => (e.data as AssetGraphEdge | undefined)?.anchorEdge);
+    expect(anchorEdges).toHaveLength(2 + 3); // 2 条锚点链边 + 3 条挂载边
+    expect(anchorEdges.some((e) => e.source === "__lane_table__" && e.target === "table:orders")).toBe(true);
+    expect(anchorEdges.some((e) => e.source === "__lane_metric__" && e.target === "metric:revenue")).toBe(true);
+  });
+
+  it("lanes 泳道：字段折叠（showFields=false）时不插入字段锚", async () => {
+    render(<AssetGraph nodes={nodes} edges={edges} height={300} lanes showFields={false} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    const data = lastGraphData();
+    expect(data.nodes.some((n) => n.id === "__lane_field__")).toBe(false);
+    // 表 + 指标两类 → 2 锚点 + 2 真实节点 = 4
+    expect(data.nodes).toHaveLength(4);
+  });
+
+  it("lanes 泳道：有真环时仍强制分层（dagre acyclic 翻转环边）", async () => {
+    const cycNodes: AssetGraphNode[] = [
+      { id: "table:a", label: "a", type: "table", domain: "sales" },
+      { id: "table:b", label: "b", type: "table", domain: "sales" },
+      { id: "metric:m", label: "m", type: "metric", domain: "sales" },
+    ];
+    const cycEdges: AssetGraphEdge[] = [
+      { source: "table:a", target: "table:b", type: "DERIVED_FROM" },
+      { source: "table:b", target: "table:a", type: "DERIVED_FROM" },
+      { source: "table:a", target: "metric:m", type: "DERIVED_FROM" },
+    ];
+    render(<AssetGraph nodes={cycNodes} edges={cycEdges} height={300} lanes />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    // lanes 模式：即使有环（a↔b 双向 + 无 SCC>2）也走分层布局
+    const ctorCalls = vi.mocked(Graph).mock.calls;
+    const ctorConfig = ctorCalls[ctorCalls.length - 1][0] as { layout?: { type?: string } };
+    expect(ctorConfig.layout?.type).toBe("antv-dagre");
+  });
+
+  it("全屏：点击全屏按钮打开 overlay，退出按钮关闭", async () => {
+    const user = userEvent.setup();
+    render(<AssetGraph nodes={nodes} edges={edges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+
+    await user.click(screen.getByTestId("asset-graph-fullscreen-btn"));
+    expect(await screen.findByTestId("asset-graph-fullscreen")).toBeTruthy();
+    expect(screen.getByText("图谱全屏")).toBeTruthy();
+
+    await user.click(screen.getByText("退出全屏"));
+    await waitFor(() => expect(screen.queryByTestId("asset-graph-fullscreen")).toBeNull());
+  });
+
+  it("字段折叠：控制条切换隐藏/显示字段节点", async () => {
+    const user = userEvent.setup();
+    render(<AssetGraph nodes={nodes} edges={edges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    expect(lastGraphData().nodes).toHaveLength(3); // 默认显示字段
+
+    await user.click(screen.getByTestId("asset-graph-show-fields"));
+    await waitFor(() => {
+      const data = lastGraphData();
+      expect(data.nodes).toHaveLength(2);
+      expect(
+        data.nodes.every((n) => (n.data as AssetGraphNode | undefined)?.type !== "field"),
+      ).toBe(true);
+    });
+
+    await user.click(screen.getByTestId("asset-graph-show-fields"));
+    await waitFor(() => expect(lastGraphData().nodes).toHaveLength(3));
+  });
+
+  it("layerOf 数仓分层推断：表按前缀、指标按 dw_layer、未知返回 null", () => {
+    const ods = { id: "table:o", label: "ods_orders", type: "table" as const };
+    const dwd = { id: "table:d", label: "dwd_orders_detail", type: "table" as const };
+    const noLayer = { id: "table:x", label: "orders", type: "table" as const };
+    const metricLayer = { id: "metric:gmv", label: "gmv", type: "metric" as const, dw_layer: "dws" };
+    const metricNoLayer = { id: "metric:gmv", label: "gmv", type: "metric" as const };
+    expect(layerOf(ods)).toBe("ods");
+    expect(layerOf(dwd)).toBe("dwd");
+    expect(layerOf(noLayer)).toBeNull();
+    expect(layerOf(metricLayer)).toBe("dws");
+    expect(layerOf(metricNoLayer)).toBeNull();
+  });
+
+  it("applyLanes 单测：单类型不插锚点、other 类型不挂锚、锚点链按表→指标→字段", () => {
+    const onlyTable: AssetGraphNode[] = [
+      { id: "table:a", label: "a", type: "table" },
+      { id: "table:b", label: "b", type: "table" },
+    ];
+    expect(applyLanes(onlyTable, []).nodes).toHaveLength(2); // 单类型不插锚
+
+    const mixed: AssetGraphNode[] = [
+      { id: "table:a", label: "a", type: "table" },
+      { id: "metric:m", label: "m", type: "metric" },
+      { id: "field:a.x", label: "a.x", type: "field" },
+      { id: "other:q", label: "q", type: "other" },
+    ];
+    const r = applyLanes(mixed, []);
+    expect(r.nodes).toHaveLength(3 + 4); // 3 锚点 + 4 真实节点
+    // other 节点不挂锚（无挂载边）
+    expect(r.edges.some((e) => e.target === "other:q")).toBe(false);
+    // 锚点链方向：表锚 → 指标锚 → 字段锚
+    expect(
+      r.edges.some((e) => e.source === "__lane_table__" && e.target === "__lane_metric__"),
+    ).toBe(true);
+    expect(
+      r.edges.some((e) => e.source === "__lane_metric__" && e.target === "__lane_field__"),
+    ).toBe(true);
   });
 });

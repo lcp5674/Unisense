@@ -518,6 +518,8 @@ function GraphTab() {
           onNodeClick={handleNodeClick}
           // 血缘总览默认隐藏字段节点，聚焦子图同样隐藏，聚焦指标/表主干
           showFields={false}
+          // 语义泳道：指标/表分带（表带在上、指标带下），表→指标血缘方向自然分层
+          lanes
         />
       ) : (
         !loading &&
@@ -773,7 +775,13 @@ function ImpactTab() {
           }（${graphData.nodes.length} 节点 · ${graphData.edges.length} 条边）`}
           style={{ marginBottom: 16 }}
         >
-          <AssetGraph nodes={graphData.nodes} edges={graphData.edges} height={420} onNodeClick={handleNodeClick} />
+          <AssetGraph
+            nodes={graphData.nodes}
+            edges={graphData.edges}
+            height={420}
+            onNodeClick={handleNodeClick}
+            lanes
+          />
         </Card>
       )}
 
@@ -953,7 +961,7 @@ function ParseTab() {
           title={`本次解析 · 血缘图谱（${resultGraph.nodes.length} 节点 · ${resultGraph.edges.length} 条边）`}
           style={{ marginTop: 16 }}
         >
-          <AssetGraph nodes={resultGraph.nodes} edges={resultGraph.edges} height={420} />
+          <AssetGraph nodes={resultGraph.nodes} edges={resultGraph.edges} height={420} lanes />
         </Card>
       )}
       {result && result.table_lineage.length > 0 && (
@@ -999,7 +1007,7 @@ function ParseTab() {
               title={`本次查询 · 上游依赖图谱（${upstreamGraph.nodes.length} 节点 · ${upstreamGraph.edges.length} 条边）`}
               style={{ marginTop: 16, marginBottom: 16 }}
             >
-              <AssetGraph nodes={upstreamGraph.nodes} edges={upstreamGraph.edges} height={360} />
+              <AssetGraph nodes={upstreamGraph.nodes} edges={upstreamGraph.edges} height={360} lanes />
             </Card>
           )}
           <h4 style={{ marginBottom: 8 }}>

@@ -1772,6 +1772,7 @@ function GraphTab() {
           onNodeClick={handleNodeClick}
           showFields={false}
           layout="auto"
+          lanes
         />
       </Card>
 

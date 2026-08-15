@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Button, Empty, Input, Select, Spin, Table, Tag } from "antd";
-import { FullscreenOutlined, SearchOutlined } from "@ant-design/icons";
+import { FullscreenOutlined, FullscreenExitOutlined, SearchOutlined } from "@ant-design/icons";
 import { Graph as G6Graph } from "@antv/g6";
 import type { GraphData, IElementEvent, NodeData } from "@antv/g6";
 
@@ -14,6 +15,8 @@ export interface AssetGraphNode extends Record<string, unknown> {
   pii?: boolean;
   domain?: string;
   owner?: string;
+  /** 语义泳道的隐藏锚点节点（渲染为不可见、不响应交互） */
+  anchor?: boolean;
 }
 
 export interface AssetGraphEdge extends Record<string, unknown> {
@@ -31,6 +34,17 @@ interface AssetGraphProps {
   showFields?: boolean;
   /** 布局策略：auto=检测到真环用力导向否则分层；hierarchy=分层（DAG）；force=力导向。默认 auto */
   layout?: "auto" | "hierarchy" | "force";
+  /**
+   * 语义泳道：把节点按类型锚进三条语义带（表带在上、指标带中、字段带下，与血缘方向一致——
+   * 表→指标→字段 的数据流），通过「隐藏锚点 + 锚定边」让 dagre 分层自然聚带；
+   * 开启后即使检测到真环也强制分层（dagre acyclic 翻转环边 + 环标记），不再整图回退力导向。
+   * 默认 false（保持既有行为）；血缘图谱/资产地图/影响分析等大图建议开启。
+   */
+  lanes?: boolean;
+  /** 是否显示数仓分层徽标（表节点按 ods_/dwd_/dws_/ads_/dm_ 前缀描边着色）。默认 true */
+  layerBadges?: boolean;
+  /** 是否提供「全屏」按钮（图谱全屏展示）。默认 true */
+  fullscreenable?: boolean;
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -145,6 +159,82 @@ interface RenderEdge extends AssetGraphEdge {
   bidirectional?: boolean;
   /** 属于真实循环（SCC 尺寸>2）的边 */
   inCycle?: boolean;
+  /** 语义泳道的隐藏锚定边（锚点间连线 / 锚点→真实节点挂载边，渲染时不可见） */
+  anchorEdge?: boolean;
+}
+
+// —— 数仓分层徽标 ——
+// 表节点按命名前缀推断数仓分层（ods→dwd→dws→ads），加工链的"层级"通过描边色一眼可见。
+// 优先级低于 PII（红）与环（橙）：仅当两者都不命中时用层色描边。
+const LAYER_STROKE: Record<string, string> = {
+  ods: "#2e7d32", // 操作数据层（绿）
+  dwd: "#1565c0", // 明细数据层（蓝）
+  dws: "#6a1b9a", // 汇总数据层（紫）
+  ads: "#ef6c00", // 应用数据层（橙）
+  dm: "#00695c", // 数据集市（青）
+};
+
+/** 推断节点数仓分层：表按名称前缀，指标按 dw_layer 属性（后端可选返回）。 */
+export function layerOf(n: AssetGraphNode): string | null {
+  if (n.type === "table") {
+    const name = (n.label || n.id).toLowerCase();
+    for (const layer of Object.keys(LAYER_STROKE)) {
+      if (name.startsWith(`${layer}_`) || name.startsWith(`${layer}.`)) return layer;
+    }
+    return null;
+  }
+  if (n.type === "metric") {
+    const l = (n as { dw_layer?: unknown }).dw_layer;
+    if (typeof l === "string" && LAYER_STROKE[l]) return l;
+    return null;
+  }
+  return null;
+}
+
+/**
+ * 语义泳道：为 dagre 分层插入隐藏锚点节点与锚定边，把节点按类型聚进三条语义带。
+ * - 锚点链按血缘方向（表锚 → 指标锚 → 字段锚）连锚定边，dagre 自然把表放最上、指标中、字段下；
+ * - 每类真实节点经「锚 → 节点」挂载边锚到对应泳道（同类型带内仍按血缘边纵向分层，表→表加工链保留）；
+ * - other/unknown 类型不挂锚（自由参与分层，如上游依赖图的中心节点保持在最上方）。
+ * 锚点与锚定边由 GraphCanvas 按 anchor/anchorEdge 标记渲染为不可见、不响应交互。
+ */
+export function applyLanes(
+  nodes: AssetGraphNode[],
+  edges: RenderEdge[],
+): { nodes: AssetGraphNode[]; edges: RenderEdge[] } {
+  // 泳道顺序与血缘方向一致：表（源头）→ 指标（加工产物）→ 字段（列级流转）
+  const order = ["table", "metric", "field"] as const;
+  const present = order.filter((t) => nodes.some((n) => n.type === t));
+  // 少于两类时泳道无意义（单类型带内 dagre 已天然分层），直接透传
+  if (present.length < 2) return { nodes, edges };
+
+  const anchorIds = present.map((t) => `__lane_${t}__`);
+  const anchorNodes: AssetGraphNode[] = present.map((_, i) => ({
+    id: anchorIds[i],
+    type: "anchor",
+    label: "",
+    anchor: true,
+  }));
+  const anchorEdges: RenderEdge[] = [];
+  // 锚点链：表锚 → 指标锚 → 字段锚（dagre 强制泳道顺序）
+  for (let i = 0; i < present.length - 1; i += 1) {
+    anchorEdges.push({
+      source: anchorIds[i],
+      target: anchorIds[i + 1],
+      type: "ANCHOR",
+      anchorEdge: true,
+    });
+  }
+  // 挂载边：锚 → 该类型的每个真实节点
+  for (const t of present) {
+    const anchorId = `__lane_${t}__`;
+    for (const n of nodes) {
+      if (n.type === t) {
+        anchorEdges.push({ source: anchorId, target: n.id, type: "ANCHOR", anchorEdge: true });
+      }
+    }
+  }
+  return { nodes: [...anchorNodes, ...nodes], edges: [...anchorEdges, ...edges] };
 }
 
 /** 合并 A↔B 双向边为一条双箭头边，减少大图的视觉噪声（796/1000 边是双向边）。 */
@@ -359,6 +449,8 @@ interface GraphCanvasProps {
   onNodeClick: (node: AssetGraphNode) => void;
   /** 图渲染完成回调（父组件用于清除布局切换 loading） */
   onReady: () => void;
+  /** 是否启用数仓分层徽标描边（非 PII 非环时按表名前缀用层色描边） */
+  layerBadges?: boolean;
 }
 
 /**
@@ -377,6 +469,7 @@ function GraphCanvas({
   searchText,
   onNodeClick,
   onReady,
+  layerBadges = true,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<G6Graph | null>(null);
@@ -405,10 +498,63 @@ function GraphCanvas({
   degreeMapRef.current = degreeMap;
   const cycleNodesRef = useRef(cycleNodes);
   cycleNodesRef.current = cycleNodes;
+  // 数仓分层映射：节点 id → 层名（layerBadges 关闭时为全空）。style 回调经 ref 读取，
+  // 使非 PII/环节点按表名前缀用层色描边，加工链层级一眼可见。
+  const layerMap = useMemo(() => {
+    const m = new Map<string, string>();
+    if (layerBadges) {
+      for (const n of nodes) {
+        const l = layerOf(n);
+        if (l) m.set(n.id, l);
+      }
+    }
+    return m;
+  }, [nodes, layerBadges]);
+  const layerMapRef = useRef(layerMap);
+  layerMapRef.current = layerMap;
   // 节点总数：size 回调（G6 style 函数，render 时求值）经 ref 读取最新值，
   // 使聚焦/清除切换（nodes 变化但组件不重挂载时）节点大小随规模自适应
   const nodeCountRef = useRef(nodes.length);
   nodeCountRef.current = nodes.length;
+
+  // —— 节点样式预计算缓存（性能优化）——
+  // 原实现：size/fill/stroke/lineWidth/shadow/halo/icon 均为 G6 每帧求值的函数式回调，
+  // 大图（160+ 节点）缩放/平移时每帧重算全部样式（含 domainColor/lightenHex 等较重计算），
+  // 是 rAF 卡顿的重要来源。此处用 useMemo 预计算为 id → style 的 Map，style 回调改为 O(1) 查表；
+  // degreeMap/cycleNodes/layerMap 变化时自动重建。
+  const nodeStyleCache = useMemo(() => {
+    const base = adaptiveBaseRadius(nodeCountRef.current);
+    const map = new Map<string, Record<string, unknown>>();
+    for (const n of nodes) {
+      const id = String(n.id);
+      const t = n?.type;
+      const cyc = cycleNodesRef.current.has(id);
+      const layer = layerMapRef.current.get(id);
+      const d = degreeMapRef.current.get(id) ?? 0;
+      // 血缘度缩放（与渲染一致性）：原始 r = max(base, 12 + degree*1.2)，表*2.0/字段*1.3
+      const r = Math.max(base, 12 + d * 1.2);
+      const size =
+        t === "table" ? [r * 2.0, r * 1.2] : t === "field" ? [r * 1.3, r * 0.7] : r;
+      const fill = cyc
+        ? "#ff8a80"
+        : n?.domain
+          ? _allocateDomainColor(n.domain)
+          : TYPE_FALLBACK_COLOR[n?.type ?? "unknown"] ?? TYPE_FALLBACK_COLOR.unknown;
+      const stroke = cyc
+        ? "#e65100"
+        : n?.pii
+          ? "#c62828"
+          : layer
+            ? (LAYER_STROKE[layer] ?? "#ffffff")
+            : "#ffffff";
+      const lineWidth = cyc ? 3.5 : n?.pii ? 3 : layer ? 2.5 : 2;
+      map.set(id, { size, fill, stroke, lineWidth });
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, degreeMap, cycleNodes, layerMap]);
+  const nodeStyleCacheRef = useRef(nodeStyleCache);
+  nodeStyleCacheRef.current = nodeStyleCache;
 
   // —— 大数据量 LOD 状态 ——
   // compactRef：是否处于紧凑模式（隐藏标签/图标/柔光/投影）；大数据量初始即紧凑。
@@ -423,25 +569,30 @@ function GraphCanvas({
     return ["compact", ...arr];
   }
 
-  /** 按当前缩放批量切换 compact 状态（跨过阈值才触发，节流高频 wheel）。 */
+  /** 按当前缩放批量切换 compact 状态（跨过阈值才触发，rAF 节流高频 wheel）。 */
+  let lodRaf = 0;
   function applyLod() {
-    const graph = graphRef.current;
-    if (!graph || graph.destroyed) return;
-    // getZoom 缺失时（降级/测试环境）按非紧凑处理，避免抛错触发降级
-    const compact =
-      typeof graph.getZoom === "function" && graph.getZoom() < LOD_COMPACT_ZOOM;
-    if (compact === lodAppliedRef.current) return;
-    lodAppliedRef.current = compact;
-    compactRef.current = compact;
-    const ids = graph.getNodeData().map((n) => String(n.id));
-    if (ids.length === 0) return;
-    const record: Record<string, string | string[]> = {};
-    for (const id of ids) record[id] = compact ? "compact" : [];
-    try {
-      void graph.setElementState(record, false).catch(() => {});
-    } catch {
-      // 图过渡期瞬时异常静默忽略
-    }
+    if (lodRaf) return; // 已有待执行帧，忽略本次（rAF 节流）
+    lodRaf = requestAnimationFrame(() => {
+      lodRaf = 0;
+      const graph = graphRef.current;
+      if (!graph || graph.destroyed) return;
+      // getZoom 缺失时（降级/测试环境）按非紧凑处理，避免抛错触发降级
+      const compact =
+        typeof graph.getZoom === "function" && graph.getZoom() < LOD_COMPACT_ZOOM;
+      if (compact === lodAppliedRef.current) return;
+      lodAppliedRef.current = compact;
+      compactRef.current = compact;
+      const ids = graph.getNodeData().map((n) => String(n.id));
+      if (ids.length === 0) return;
+      const record: Record<string, string | string[]> = {};
+      for (const id of ids) record[id] = compact ? "compact" : [];
+      try {
+        void graph.setElementState(record, false).catch(() => {});
+      } catch {
+        // 图过渡期瞬时异常静默忽略
+      }
+    });
   }
 
   // 图实例创建：仅挂载时执行（布局切换由父组件 key 强制重挂载本组件，因此无需依赖 layoutMode）
@@ -468,40 +619,38 @@ function GraphCanvas({
         node: {
           // 形状按类型区分：指标=圆 / 表=圆角矩形 / 字段=椭圆
           type: (d: NodeData) => {
-            const t = (d.data as AssetGraphNode | undefined)?.type;
+            const n = d.data as AssetGraphNode | undefined;
+            if (n?.anchor) return "circle"; // 泳道锚点：极小圆形，不可见
+            const t = n?.type;
             if (t === "table") return "rect";
             if (t === "field") return "ellipse";
             return "circle";
           },
           style: {
             size: (d: NodeData) => {
-              const t = (d.data as AssetGraphNode | undefined)?.type;
-              // 自适应基准半径（按节点总数缩放：聚焦视图小节点、全景大图维持可读）
-              // + 血缘度缩放。下限 12 保证「中央图标 + 底部完整标签」仍可容纳。
-              const base = adaptiveBaseRadius(nodeCountRef.current);
-              const r = Math.max(base, 12 + (degreeMapRef.current.get(String(d.id)) ?? 0) * 1.2);
-              if (t === "table") return [r * 2.0, r * 1.2];
-              if (t === "field") return [r * 1.4, r * 0.8];
-              return r;
+              const n = d.data as AssetGraphNode | undefined;
+              if (n?.anchor) return 1; // 锚点尺寸极小，不撑大 dagre 层间距
+              // 预计算缓存查表（性能优化：避免每帧重算血缘度/域色/分层）
+              return (nodeStyleCacheRef.current.get(String(d.id))?.size as
+                | number
+                | [number, number]) ?? 12;
             },
             // 表节点圆角矩形（radius 仅对 rect 生效，circle/ellipse 自动忽略）
             radius: 8,
             fill: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
-              // 环节点：橙色填充淡出提示（不覆盖域色，仅叠加暖色倾向）
-              if (n && cycleNodesRef.current.has(String(d.id))) return "#ff8a80";
-              return domainColor(n);
+              if (n?.anchor) return "transparent"; // 泳道锚点不可见
+              return (nodeStyleCacheRef.current.get(String(d.id))?.fill as string) ?? "#94a3b8";
             },
             stroke: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
-              // 环节点：橙色粗描边（区别于 PII 红色）；PII 红色优先保留语义
-              if (n && cycleNodesRef.current.has(String(d.id))) return "#e65100";
-              return n?.pii ? "#c62828" : "#ffffff";
+              if (n?.anchor) return "transparent";
+              return (nodeStyleCacheRef.current.get(String(d.id))?.stroke as string) ?? "#ffffff";
             },
             lineWidth: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
-              if (n && cycleNodesRef.current.has(String(d.id))) return 3.5;
-              return n?.pii ? 3 : 2;
+              if (n?.anchor) return 0;
+              return (nodeStyleCacheRef.current.get(String(d.id))?.lineWidth as number) ?? 1.5;
             },
             // 投影让节点从画布上"浮起"，减少平铺感；环节点用橙色投影强调
             shadowColor: (d: NodeData) =>
@@ -509,10 +658,13 @@ function GraphCanvas({
                 ? "rgba(230,81,0,0.5)"
                 : "rgba(0,0,0,0.28)",
             shadowBlur: (d: NodeData) =>
-              cycleNodesRef.current.has(String(d.id)) ? 14 : 8,
-            shadowOffsetY: 3,
+              (d.data as AssetGraphNode | undefined)?.anchor || cycleNodesRef.current.has(String(d.id))
+                ? 0
+                : 8,
+            shadowOffsetY: (d: NodeData) =>
+              (d.data as AssetGraphNode | undefined)?.anchor ? 0 : 3,
             // 柔光 halo：节点填充色提亮版作为外圈，让节点从画布上"发光"、更立体
-            halo: true,
+            halo: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
             haloStroke: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
               const base = cycleNodesRef.current.has(String(d.id)) ? "#ff8a80" : domainColor(n);
@@ -521,7 +673,7 @@ function GraphCanvas({
             haloLineWidth: 8,
             haloStrokeOpacity: 0.4,
             // 类型图标：指标 📈 / 表 🗂️ / 字段 🔖，渲染在节点中央
-            icon: true,
+            icon: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
             iconText: (d: NodeData) =>
               nodeIconText((d.data as AssetGraphNode | undefined)?.type),
             iconFontSize: (d: NodeData) =>
@@ -529,8 +681,11 @@ function GraphCanvas({
             iconFill: "#ffffff",
             // 标签放节点下方（用户明确要求——放节点中心会遮挡图标且与图例形状语义冲突）。
             // 配合 layoutConfig 加大 nodesep/ranksep/collide 间距，保证底部完整标签不互相压字。
-            labelText: (d: NodeData) =>
-              trimLabel((d.data as AssetGraphNode | undefined)?.label ?? String(d.id)),
+            labelText: (d: NodeData) => {
+              const n = d.data as AssetGraphNode | undefined;
+              if (n?.anchor) return ""; // 锚点无标签
+              return trimLabel(n?.label ?? String(d.id));
+            },
             labelPlacement: "bottom",
             labelOffset: 10,
             // 节点下方「白底 pill + 深字」：完整展示节点名，绝对清晰可读，不受节点填充色深浅影响。
@@ -560,16 +715,34 @@ function GraphCanvas({
         },
         edge: {
           style: {
-            stroke: (e) =>
-              (e.data as RenderEdge | undefined)?.inCycle
+            stroke: (e) => {
+              const d = e.data as RenderEdge | undefined;
+              if (d?.anchorEdge) return "transparent"; // 泳道锚定边不可见
+              return d?.inCycle
                 ? "#e53935" // 真环：红色虚线醒目提示
-                : edgeColor((e.data as AssetGraphEdge | undefined)?.type),
-            lineWidth: (e) => ((e.data as RenderEdge | undefined)?.inCycle ? 2.4 : 1.3),
-            strokeOpacity: (e) =>
-              (e.data as RenderEdge | undefined)?.inCycle ? 1 : 0.72,
-            lineDash: (e) => ((e.data as RenderEdge | undefined)?.inCycle ? [6, 4] : undefined),
-            endArrow: true,
-            startArrow: (e) => ((e.data as RenderEdge | undefined)?.bidirectional ? true : false),
+                : edgeColor(d?.type);
+            },
+            lineWidth: (e) => {
+              const d = e.data as RenderEdge | undefined;
+              if (d?.anchorEdge) return 0;
+              return d?.inCycle ? 2.4 : 1.3;
+            },
+            strokeOpacity: (e) => {
+              const d = e.data as RenderEdge | undefined;
+              if (d?.anchorEdge) return 0;
+              return d?.inCycle ? 1 : 0.72;
+            },
+            lineDash: (e) => {
+              const d = e.data as RenderEdge | undefined;
+              if (d?.anchorEdge) return undefined;
+              return d?.inCycle ? [6, 4] : undefined;
+            },
+            endArrow: (e) => !(e.data as RenderEdge | undefined)?.anchorEdge,
+            startArrow: (e) => {
+              const d = e.data as RenderEdge | undefined;
+              if (d?.anchorEdge) return false;
+              return d?.bidirectional ? true : false;
+            },
             radius: 10,
           },
         },
@@ -584,37 +757,44 @@ function GraphCanvas({
         const id = raw?.id ?? raw?.__data__?.id;
         if (!id) return;
         const node = graph.getNodeData(String(id))?.data as AssetGraphNode | undefined;
-        if (node) onNodeClickRef.current?.(node);
+        if (node && !node.anchor) onNodeClickRef.current?.(node); // 泳道锚点不响应点击
       });
 
-      // 悬停邻域高亮：相邻节点高亮，其余淡化（图销毁/渲染过渡期的在途事件一律忽略）
+      // 悬停邻域高亮：相邻节点高亮，其余淡化（图销毁/渲染过渡期的在途事件一律忽略）。
+      // 性能优化：pointerenter 高频触发（跨节点移动），用 rAF 节流到每帧只处理最后一次；
+      // setElementState 改为**批量 record**（单次调用），替代逐节点循环（160+ 次调用 + 全量重绘
+      // 是 rAF 550ms 卡顿的直接来源）。
+      let hoverRaf = 0;
       graph.on<IElementEvent>("node:pointerenter", (evt) => {
         if (!graph || graph.destroyed || !graphReady) return;
         const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
         const id = raw?.id ?? raw?.__data__?.id;
         if (!id) return;
-        try {
-          const neighbors = graph.getNeighborNodesData(String(id));
-          const active = new Set<string>([String(id), ...neighbors.map((n) => String(n.id))]);
-          for (const n of graph.getNodeData()) {
-            safeSetElementState(
-              graph,
-              String(n.id),
-              active.has(String(n.id))
+        cancelAnimationFrame(hoverRaf);
+        hoverRaf = requestAnimationFrame(() => {
+          if (!graph || graph.destroyed) return;
+          try {
+            const neighbors = graph.getNeighborNodesData(String(id));
+            const active = new Set<string>([String(id), ...neighbors.map((n) => String(n.id))]);
+            const record: Record<string, string | string[]> = {};
+            for (const n of graph.getNodeData()) {
+              record[String(n.id)] = active.has(String(n.id))
                 ? stateWithCompact("active")
-                : stateWithCompact("inactive"),
-            );
+                : stateWithCompact("inactive");
+            }
+            void graph.setElementState(record, false).catch(() => {});
+          } catch {
+            // 高亮为装饰性交互，过渡期失败静默忽略
           }
-        } catch {
-          // 高亮为装饰性交互，过渡期失败静默忽略
-        }
+        });
       });
       graph.on("node:pointerleave", () => {
         if (!graph || graph.destroyed || !graphReady) return;
+        cancelAnimationFrame(hoverRaf);
         try {
-          for (const n of graph.getNodeData()) {
-            safeSetElementState(graph, String(n.id), stateWithCompact([]));
-          }
+          const record: Record<string, string | string[]> = {};
+          for (const n of graph.getNodeData()) record[String(n.id)] = stateWithCompact([]);
+          void graph.setElementState(record, false).catch(() => {});
         } catch {
           // 忽略过渡期状态清理失败
         }
@@ -820,6 +1000,9 @@ export function AssetGraph({
   onNodeClick,
   showFields = true,
   layout = "auto",
+  lanes = false,
+  layerBadges = true,
+  fullscreenable = true,
 }: AssetGraphProps) {
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
@@ -827,6 +1010,9 @@ export function AssetGraph({
   // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
+  // 字段折叠：showFields 作为初始值并受控同步（父组件可动态改），控制条可切换
+  const [showFieldsOn, setShowFieldsOn] = useState(showFields);
+  useEffect(() => setShowFieldsOn(showFields), [showFields]);
   // 布局手动覆盖：undefined=跟随 auto 检测；否则强制指定
   const [layoutOverride, setLayoutOverride] = useState<"hierarchy" | "force" | undefined>(undefined);
   // 布局代际计数器：用户每次点 Select 就 +1（即使选了同一项，也强制重挂载 GraphCanvas）。
@@ -835,6 +1021,18 @@ export function AssetGraph({
   // 布局切换瞬态标记：用户点击切换 Select 后立即置 true，GraphCanvas 重挂载并完成 render 后置 false，
   // 期间叠加 Spin 让用户明确感知到"正在重新计算布局"，避免在节点多时误以为"点了没反应"
   const [layoutSwitching, setLayoutSwitching] = useState(false);
+  // 全屏展示：portal 到 body 的 fixed overlay（复用同一实例 UI 状态，筛选/搜索/布局不丢失）
+  const [fullscreenOpen, setFullscreenOpen] = useState(false);
+
+  // 全屏 Esc 退出
+  useEffect(() => {
+    if (!fullscreenOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFullscreenOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullscreenOpen]);
 
   // 布局切换处理：更新 override + 触发代际 + 显示 loading（GraphCanvas onReady 后自动清除）
   const handleLayoutChange = (v: "hierarchy" | "force" | undefined) => {
@@ -843,12 +1041,12 @@ export function AssetGraph({
     setLayoutSwitching(true);
   };
 
-  // 类型筛选（空 = 全部）；showFields=false 时剔除字段节点（血缘总览降噪）
+  // 类型筛选（空 = 全部）；字段折叠（showFieldsOn=false）时剔除字段节点（血缘总览降噪）
   const filteredNodes = useMemo(() => {
     let list = typeFilter.length === 0 ? nodes : nodes.filter((n) => typeFilter.includes(n.type));
-    if (showFields === false) list = list.filter((n) => n.type !== "field");
+    if (showFieldsOn === false) list = list.filter((n) => n.type !== "field");
     return list;
-  }, [nodes, typeFilter, showFields]);
+  }, [nodes, typeFilter, showFieldsOn]);
 
   // 限流渲染：优先保留核心节点，超出阈值时默认隐藏附属字段节点
   const {
@@ -867,13 +1065,21 @@ export function AssetGraph({
     () => markCycleEdges(mergedEdges, cycleNodes),
     [mergedEdges, cycleNodes],
   );
-  // 布局策略：auto=有真环用力导向（环图 dagre 渲染异常），无环用分层；手动覆盖优先
+  // 布局策略：泳道模式强制分层（dagre acyclic 翻转环边 + 环标记，环不再毁掉全图秩序）；
+  // 否则 auto=有真环用力导向（环图 dagre 渲染异常），无环用分层；手动覆盖优先
   const layoutMode = useMemo<"hierarchy" | "force">(() => {
     if (layoutOverride) return layoutOverride;
+    if (lanes) return "hierarchy";
     if (layout === "force") return "force";
     if (layout === "hierarchy") return "hierarchy";
     return cycleNodes.size > 0 ? "force" : "hierarchy";
-  }, [layout, layoutOverride, cycleNodes]);
+  }, [layout, layoutOverride, cycleNodes, lanes]);
+
+  // 语义泳道：仅分层布局下插入隐藏锚点 + 锚定边（力导向不需要泳道）
+  const laneData = useMemo(() => {
+    if (!lanes || layoutMode !== "hierarchy") return { nodes: visibleNodes, edges: renderEdges };
+    return applyLanes(visibleNodes, renderEdges);
+  }, [lanes, layoutMode, visibleNodes, renderEdges]);
 
   if (nodes.length === 0) {
     return <Empty description="暂无图谱数据" />;
@@ -885,7 +1091,10 @@ export function AssetGraph({
     return acc;
   }, {});
 
-  return (
+  const hasLayerNodes = layerBadges && nodes.some((n) => layerOf(n) !== null);
+
+  // 图谱主体渲染（主视图与全屏视图共用，UI 状态共享——切换全屏不丢失筛选/搜索/布局）
+  const renderBody = (h: number) => (
     <div>
       {hidden > 0 && (
         <div
@@ -975,17 +1184,36 @@ export function AssetGraph({
             { value: "force", label: "力导向布局" },
           ]}
         />
+        <Button
+          size="middle"
+          data-testid="asset-graph-show-fields"
+          type={showFieldsOn ? "primary" : "default"}
+          onClick={() => setShowFieldsOn((v) => !v)}
+        >
+          {showFieldsOn ? "隐藏字段" : "显示字段"}
+        </Button>
+        {fullscreenable && (
+          <Button
+            size="middle"
+            icon={<FullscreenOutlined />}
+            data-testid="asset-graph-fullscreen-btn"
+            onClick={() => setFullscreenOpen(true)}
+          >
+            全屏
+          </Button>
+        )}
       </div>
       <div style={{ position: "relative", width: "100%" }}>
         <GraphCanvas
           key={`${layoutMode}-${layoutTick}`}
-          nodes={visibleNodes}
-          edges={renderEdges}
+          nodes={laneData.nodes}
+          edges={laneData.edges}
           layoutMode={layoutMode}
-          height={height}
+          height={h}
           searchText={searchText}
           onNodeClick={(n) => onNodeClickRef.current?.(n)}
           onReady={() => setLayoutSwitching(false)}
+          layerBadges={layerBadges}
         />
         {layoutSwitching && (
           <div
@@ -1061,6 +1289,28 @@ export function AssetGraph({
           />
           <span className="muted">PII 描边 · 节点大小=血缘度 · 圆形/矩形/椭圆=指标/表/字段</span>
         </div>
+        {hasLayerNodes && (
+          <div>
+            <span className="muted">数仓层：</span>
+            {Object.entries(LAYER_STROKE).map(([layer, color]) => (
+              <span key={layer} style={{ marginRight: 8 }}>
+                <span
+                  style={{
+                    display: "inline-block",
+                    width: 10,
+                    height: 10,
+                    borderRadius: 3,
+                    border: `2.5px solid ${color}`,
+                    background: "rgba(0,0,0,0.06)",
+                    marginRight: 4,
+                    verticalAlign: "middle",
+                  }}
+                />
+                {layer.toUpperCase()}
+              </span>
+            ))}
+          </div>
+        )}
         <div>
           <span
             style={{
@@ -1096,4 +1346,39 @@ export function AssetGraph({
       </div>
     </div>
   );
+
+  // 全屏：portal 到 body 的 fixed overlay，复用同一实例状态（筛选/搜索/布局不丢失）
+  if (fullscreenOpen) {
+    return createPortal(
+      <div
+        data-testid="asset-graph-fullscreen"
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 1000,
+          background: "#fff",
+          padding: 16,
+          overflow: "auto",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 8,
+          }}
+        >
+          <h3 style={{ margin: 0 }}>图谱全屏</h3>
+          <Button icon={<FullscreenExitOutlined />} onClick={() => setFullscreenOpen(false)}>
+            退出全屏
+          </Button>
+        </div>
+        {renderBody(typeof window !== "undefined" ? Math.max(480, window.innerHeight - 120) : 600)}
+      </div>,
+      document.body,
+    );
+  }
+
+  return renderBody(height);
 }
