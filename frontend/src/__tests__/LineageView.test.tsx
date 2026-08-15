@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { LineageView } from "../pages/LineageView";
+import { LineageView, buildSubgraph, resolveRootId } from "../pages/LineageView";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
 
@@ -315,5 +315,134 @@ describe("LineageView SQL 血缘解析 Tab", () => {
     await waitFor(() =>
       expect(api.parseLineage).toHaveBeenCalledWith("INSERT INTO t SELECT id FROM s", "doris"),
     );
+  });
+});
+
+describe("LineageView 血缘图谱聚焦（?node= 参数）", () => {
+  // 较大图：metric:gmv 上游(表)->表->指标，下游->ttm；无关指标链不与 gmv 连通
+  const bigGraph: LineageGraphData = {
+    nodes: [
+      { id: "metric:gmv", type: "metric", label: "GMV", domain: "sales" },
+      { id: "metric:gmv_ttm", type: "metric", label: "GMV TTM", domain: "sales" },
+      { id: "table:ods_orders", type: "table", label: "订单明细", domain: "sales" },
+      { id: "table:dws_gmv", type: "table", label: "GMV 汇总", domain: "sales" },
+      { id: "metric:other", type: "metric", label: "无关指标", domain: "finance" },
+      { id: "table:dim_shop", type: "table", label: "门店维度", domain: "finance" },
+    ],
+    edges: [
+      { source: "table:ods_orders", target: "table:dws_gmv", type: "DERIVED_FROM" },
+      { source: "table:dws_gmv", target: "metric:gmv", type: "DERIVED_FROM" },
+      { source: "metric:gmv", target: "metric:gmv_ttm", type: "DERIVED_FROM" },
+      // 无关指标链（finance 域），不与 gmv 连通
+      { source: "table:dim_shop", target: "metric:other", type: "DERIVED_FROM" },
+    ],
+  };
+
+  async function renderLineageAt(path: string) {
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <LineageView />
+        <PathProbe />
+      </MemoryRouter>,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.lineageGraph).mockResolvedValue(bigGraph);
+  });
+
+  it("URL 带 ?node=gmv 时仅展示该指标上下游子图（不含无关节点）", async () => {
+    renderLineageAt("/lineage?node=gmv");
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalledWith({ limit: 2000 }));
+    // 聚焦标签 + 限定计数（gmv 双向 3 跳 = gmv/gmv_ttm/ods_orders/dws_gmv 4 节点 3 边）
+    await waitFor(() => {
+      expect(screen.getByText(/聚焦：gmv 的上下游血缘/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/已限定为 4 节点 · 3 条血缘边/)).toBeInTheDocument();
+    // 无关指标链（finance 域）不在子图内
+    expect(screen.queryByText("无关指标")).not.toBeInTheDocument();
+    expect(screen.queryByText("门店维度")).not.toBeInTheDocument();
+  });
+
+  it("支持完整节点 id 形态（?node=metric:gmv）", async () => {
+    renderLineageAt("/lineage?node=metric:gmv");
+    await waitFor(() => {
+      expect(screen.getByText(/聚焦：metric:gmv 的上下游血缘/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/已限定为 4 节点 · 3 条血缘边/)).toBeInTheDocument();
+  });
+
+  it("聚焦节点不在图谱中时展示空态，并可一键查看全量", async () => {
+    renderLineageAt("/lineage?node=not_exist");
+    await waitFor(() => {
+      expect(screen.getByText(/「not_exist」暂无血缘数据/)).toBeInTheDocument();
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: /查看全量血缘图谱/ }).click();
+    });
+    // 清除聚焦：URL node 参数移除，回到全量
+    expect(currentPath).toBe("/lineage");
+    await waitFor(() => {
+      expect(screen.getByText(/共 6 节点 · 4 条血缘边/)).toBeInTheDocument();
+    });
+  });
+
+  it("点击「清除」退出聚焦并移除 URL node 参数", async () => {
+    renderLineageAt("/lineage?node=gmv");
+    await waitFor(() => {
+      expect(screen.getByText(/聚焦：gmv 的上下游血缘/)).toBeInTheDocument();
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: /清除/ }).click();
+    });
+    expect(currentPath).toBe("/lineage");
+    await waitFor(() => {
+      expect(screen.getByText(/共 6 节点 · 4 条血缘边/)).toBeInTheDocument();
+    });
+  });
+});
+
+describe("buildSubgraph / resolveRootId 单元测试", () => {
+  const nodes = [
+    { id: "metric:gmv", type: "metric", label: "GMV" },
+    { id: "metric:gmv_ttm", type: "metric", label: "GMV TTM" },
+    { id: "table:ods_orders", type: "table", label: "订单明细" },
+    { id: "table:dws_gmv", type: "table", label: "GMV 汇总" },
+    { id: "metric:other", type: "metric", label: "无关指标" },
+  ] as never as import("../components/assetmap/AssetGraph").AssetGraphNode[];
+  const edges = [
+    { source: "table:ods_orders", target: "table:dws_gmv", type: "DERIVED_FROM" },
+    { source: "table:dws_gmv", target: "metric:gmv", type: "DERIVED_FROM" },
+    { source: "metric:gmv", target: "metric:gmv_ttm", type: "DERIVED_FROM" },
+    { source: "metric:other", target: "metric:gmv", type: "DERIVED_FROM" },
+  ] as never as import("../components/assetmap/AssetGraph").AssetGraphEdge[];
+
+  it("resolveRootId 支持完整 id / 裸编码 / 不存在", () => {
+    expect(resolveRootId("metric:gmv", nodes)).toBe("metric:gmv");
+    expect(resolveRootId("gmv", nodes)).toBe("metric:gmv");
+    expect(resolveRootId("nope", nodes)).toBeNull();
+  });
+
+  it("buildSubgraph 从根节点双向 BFS 展开指定跳数，保留自包含边", () => {
+    // 1 跳：gmv 的上下游 = gmv/ttm/dws_gmv/other（4 节点，4 边全包含）
+    const sub1 = buildSubgraph(nodes, edges, "metric:gmv", 1);
+    expect(sub1.nodes.map((n) => n.id).sort()).toEqual([
+      "metric:gmv",
+      "metric:gmv_ttm",
+      "metric:other",
+      "table:dws_gmv",
+    ]);
+    expect(sub1.edges).toHaveLength(3);
+    // 2 跳：dws_gmv 的上游 ods_orders 也进入子图
+    const sub2 = buildSubgraph(nodes, edges, "metric:gmv", 2);
+    expect(sub2.nodes.map((n) => n.id).sort()).toContain("table:ods_orders");
+    expect(sub2.edges).toHaveLength(4);
+  });
+
+  it("buildSubgraph 根节点不存在时返回空", () => {
+    const sub = buildSubgraph(nodes, edges, "metric:nope", 3);
+    expect(sub.nodes).toHaveLength(0);
+    expect(sub.edges).toHaveLength(0);
   });
 });

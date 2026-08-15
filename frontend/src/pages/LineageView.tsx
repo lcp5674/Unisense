@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert,
   Badge,
@@ -84,14 +84,76 @@ const SENSITIVITY_COLOR: Record<string, string> = {
   "PII-HIGH": "red",
 };
 
+/**
+ * 图谱聚焦节点解析：node 参数可能是完整 id（``metric:xxx`` / ``table:xxx``）或裸编码
+ * （指标详情「在图谱中查看」跳转只带裸 metric_code）。返回图中实际存在的节点 id。
+ */
+export function resolveRootId(node: string, nodes: AssetGraphNode[]): string | null {
+  if (nodes.some((n) => n.id === node)) return node;
+  for (const prefix of ["metric:", "table:", "field:"]) {
+    const candidate = `${prefix}${node}`;
+    if (nodes.some((n) => n.id === candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * 以 root 节点为中心，沿血缘边双向 BFS 展开 maxHops 跳，返回自包含子图
+ * （仅保留两端都在子图内的边）。用于「从指标详情跳转图谱时限定该指标上下游」，
+ * 避免展示全量血缘节点。
+ */
+export function buildSubgraph(
+  nodes: AssetGraphNode[],
+  edges: AssetGraphEdge[],
+  rootId: string,
+  maxHops: number,
+): { nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } {
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  if (!nodeById.has(rootId)) return { nodes: [], edges: [] };
+  const visited = new Set<string>([rootId]);
+  let frontier: string[] = [rootId];
+  const subEdges: AssetGraphEdge[] = [];
+  const seen = new Set<string>();
+  for (let hop = 0; hop < maxHops && frontier.length > 0; hop++) {
+    const next: string[] = [];
+    for (const nid of frontier) {
+      for (const e of edges) {
+        if (e.source !== nid && e.target !== nid) continue;
+        const key = `${e.source}__${e.target}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          subEdges.push(e);
+        }
+        const other = e.source === nid ? e.target : e.source;
+        if (!visited.has(other)) {
+          visited.add(other);
+          next.push(other);
+        }
+      }
+    }
+    frontier = next;
+  }
+  const subNodes = Array.from(visited)
+    .map((id) => nodeById.get(id))
+    .filter((n): n is AssetGraphNode => Boolean(n));
+  return { nodes: subNodes, edges: subEdges };
+}
+
 type Direction = "upstream" | "downstream" | "both";
 
-/** 血缘图谱 Tab：进入即加载全量血缘图谱（力导向图）。指标/表节点点击均在本页以侧边栏
- *  展示详情（指标详情抽屉 / 表详情抽屉），不跳转页面，用户可再决定是否前往完整页面。 */
+/** 血缘图谱 Tab：进入即加载血缘图谱。指标/表节点点击均在本页以侧边栏
+ *  展示详情（指标详情抽屉 / 表详情抽屉），不跳转页面，用户可再决定是否前往完整页面。
+ *  支持 URL ``?node=xxx`` 聚焦：从指标详情「在图谱中查看」跳转时，仅展示该节点
+ *  上下游子图（BFS 展开 3 跳），而非全量血缘节点。 */
 function GraphTab() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
   const [loading, setLoading] = useState(false);
+  // 聚焦节点：URL ?node= 参数（指标详情「在图谱中查看」跳转来源），限定该指标/表上下游
+  const focusNode = searchParams.get("node")?.trim() || null;
+  // 聚焦节点不在图谱中（无血缘数据）时的空态标记
+  const [focusMiss, setFocusMiss] = useState(false);
   // 指标节点详情抽屉（侧边栏）
   const [metricDrawerOpen, setMetricDrawerOpen] = useState(false);
   const [metricCode, setMetricCode] = useState<string | null>(null);
@@ -103,9 +165,25 @@ function GraphTab() {
 
   async function load() {
     setLoading(true);
+    setFocusMiss(false);
     try {
       const d = await lineageGraph({ limit: 2000 });
-      setData({ nodes: d.nodes as AssetGraphNode[], edges: d.edges as AssetGraphEdge[] });
+      let nodes = d.nodes as AssetGraphNode[];
+      let edges = d.edges as AssetGraphEdge[];
+      if (focusNode) {
+        const rootId = resolveRootId(focusNode, nodes);
+        if (!rootId) {
+          // 聚焦节点不存在于血缘图中：展示空态而非全量
+          setFocusMiss(true);
+          setData({ nodes: [], edges: [] });
+          return;
+        }
+        const sub = buildSubgraph(nodes, edges, rootId, 3);
+        nodes = sub.nodes;
+        edges = sub.edges;
+        if (nodes.length === 0) setFocusMiss(true);
+      }
+      setData({ nodes, edges });
       track("lineage_graph_view");
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载血缘图谱失败");
@@ -118,7 +196,12 @@ function GraphTab() {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [focusNode]);
+
+  /** 清除聚焦：回到全量图谱并移除 URL node 参数（保持地址与视图一致）。 */
+  function clearFocus() {
+    setSearchParams({}, { replace: true });
+  }
 
   async function openTableDetail(node: AssetGraphNode) {
     const entityId = node.entity_id;
@@ -173,8 +256,20 @@ function GraphTab() {
         <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
           刷新
         </Button>
+        {focusNode && (
+          <Tag color="blue" style={{ padding: "3px 10px", fontSize: 13 }}>
+            聚焦：{focusNode} 的上下游血缘
+            <Button type="link" size="small" style={{ padding: 0, marginLeft: 6 }} onClick={clearFocus}>
+              清除
+            </Button>
+          </Tag>
+        )}
         <span className="muted" style={{ fontSize: 13 }}>
-          {data ? `共 ${data.nodes.length} 节点 · ${data.edges.length} 条血缘边` : "加载血缘图谱…"}
+          {data
+            ? focusNode
+              ? `已限定为 ${data.nodes.length} 节点 · ${data.edges.length} 条血缘边`
+              : `共 ${data.nodes.length} 节点 · ${data.edges.length} 条血缘边`
+            : "加载血缘图谱…"}
           ，点击节点：指标 / 表视图均在本页侧边栏展示详情
         </span>
       </Space>
@@ -184,13 +279,22 @@ function GraphTab() {
           edges={data.edges}
           height={560}
           onNodeClick={handleNodeClick}
-          // 血缘总览默认隐藏字段节点，聚焦表/指标主干，减少视觉噪声
+          // 血缘总览默认隐藏字段节点，聚焦子图同样隐藏，聚焦指标/表主干
           showFields={false}
         />
       ) : (
-        !loading && (
+        !loading &&
+        (focusMiss ? (
+          <Empty
+            description={`「${focusNode}」暂无血缘数据。可在「SQL 血缘解析」粘贴 SQL 入库，或运行 scripts/import_dp_lineage.py 导入。`}
+          >
+            <Button type="primary" onClick={clearFocus}>
+              查看全量血缘图谱
+            </Button>
+          </Empty>
+        ) : (
           <Empty description="暂无血缘图谱数据。可在「SQL 血缘解析」粘贴 SQL 入库，或运行 scripts/import_dp_lineage.py 导入。" />
-        )
+        ))
       )}
 
       <Drawer
