@@ -787,6 +787,22 @@ class MetricService(BaseService):
         # 注意：change_reason 仅写入 MetricVersion 快照（上方），metric 主表无该列，
         # 不能写入 updates，否则 update(Metric).values(change_reason=...) 抛 CompileError。
 
+        # 「保留差异+指定一方改名」（TD §12.4）：Owner 在详情页改名后，清除
+        # arbitration_mark.rename_required 标记并记录 resolved_at，完成治理闭环。
+        # 仅在仲裁要求改名且本次确实变更了 name 时触发（幂等：已清除不再写）。
+        if updates.get("name") is not None and updates["name"] != metric.name:
+            mark = metric.arbitration_mark or {}
+            if mark.get("rename_required"):
+                mark["rename_required"] = False
+                mark["resolved_at"] = datetime.now(UTC).isoformat()
+                updates["arbitration_mark"] = mark
+                logger.info(
+                    "metric_rename_resolved",
+                    metric_code=metric_code,
+                    old_name=metric.name,
+                    new_name=updates["name"],
+                )
+
         updated = await self._repo.update_with_optimistic_lock(
             metric.id, metric.row_version, **updates
         )
@@ -959,9 +975,7 @@ class MetricService(BaseService):
 
             return build_llm_client()
 
-    async def _llm_infer_metric_description(
-        self, metric: Metric
-    ) -> dict[str, Any] | None:
+    async def _llm_infer_metric_description(self, metric: Metric) -> dict[str, Any] | None:
         """使用 LLM 推断指标业务描述，返回结构化结果（失败返回 None）。
 
         复用 ``LlmConfigService.build_client``（DB 配置优先 + 路由/熔断），
@@ -1018,9 +1032,7 @@ class MetricService(BaseService):
                         )
                     except Exception:  # noqa: BLE001 - LLM 网关错误按格式失败降级重试
                         continue
-                    description, confidence = parse_description_result(
-                        result.get("content", "")
-                    )
+                    description, confidence = parse_description_result(result.get("content", ""))
                     if description is not None and confidence is not None:
                         return {"description": description, "confidence": confidence}
             logger.warning("llm_infer_metric_desc_all_formats_failed")

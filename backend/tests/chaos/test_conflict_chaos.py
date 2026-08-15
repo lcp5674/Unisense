@@ -70,7 +70,7 @@ async def test_check_degrades_when_notify_fails():
 
 
 class _BoomService:
-    def __init__(self, db, events=None, llm=None) -> None:
+    def __init__(self, db, events=None, llm=None, **kwargs) -> None:
         pass
 
     async def arbitrate(self, cid, req, actor_id=None):

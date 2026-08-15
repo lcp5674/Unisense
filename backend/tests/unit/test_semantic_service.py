@@ -1466,6 +1466,72 @@ async def test_update_metric_collects_optional_fields():
     assert kwargs["backup_owner_id"] == 5
 
 
+async def test_update_metric_rename_clears_rename_required_mark():
+    """仲裁「保留差异+指定改名」的指标，Owner 改名后清除 rename_required 标记（TD §12.4）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="DRAFT",
+        row_version=1,
+        version=1,
+        name="旧名称",
+        arbitration_mark={
+            "status": "coexist",
+            "conflict_id": "CF-RENAME",
+            "rename_required": True,
+            "rename_opposite_code": "gmv_total",
+        },
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=2, name="新名称")
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(name="新名称", change_reason="响应仲裁改名要求"),
+        actor_id=1,
+        role="metric_owner",
+    )
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["name"] == "新名称"
+    # rename_required 被清除并记录 resolved_at（幂等闭环）
+    mark = kwargs["arbitration_mark"]
+    assert mark["rename_required"] is False
+    assert mark["resolved_at"]
+
+
+async def test_update_metric_rename_keeps_mark_when_name_unchanged():
+    """未改名（name 不变）时不误清 rename_required 标记——仅真正改名才触发清除。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="DRAFT",
+        row_version=1,
+        version=1,
+        name="原名称",
+        arbitration_mark={
+            "status": "coexist",
+            "conflict_id": "CF-RENAME",
+            "rename_required": True,
+            "rename_opposite_code": "gmv_total",
+        },
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(name="原名称", change_reason="仅同步其他字段"),
+        actor_id=1,
+        role="metric_owner",
+    )
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert "arbitration_mark" not in kwargs  # 未改名 → 不触碰仲裁标记
+
+
 # ---- 状态机非法跃迁（submit/review/reject/promote/rollback/deprecate）----
 
 
@@ -2269,9 +2335,7 @@ async def test_infer_metric_description_llm_unavailable_raises_business():
         patch.object(svc, "_build_llm_client", AsyncMock(return_value=fake)),
         pytest.raises(BusinessError) as ei,
     ):
-        await svc.infer_metric_description(
-            "sales_gmv_daily", actor_id=1, role="metric_owner"
-        )
+        await svc.infer_metric_description("sales_gmv_daily", actor_id=1, role="metric_owner")
     assert ei.value.error_code == "LLM_INFER_UNAVAILABLE"
     repo.update_with_optimistic_lock.assert_not_called()
 
@@ -2285,9 +2349,7 @@ async def test_infer_metric_description_parse_fail_raises_business():
         patch.object(svc, "_build_llm_client", AsyncMock(return_value=fake)),
         pytest.raises(BusinessError) as ei,
     ):
-        await svc.infer_metric_description(
-            "sales_gmv_daily", actor_id=1, role="metric_owner"
-        )
+        await svc.infer_metric_description("sales_gmv_daily", actor_id=1, role="metric_owner")
     assert ei.value.error_code == "LLM_INFER_UNAVAILABLE"
     repo.update_with_optimistic_lock.assert_not_called()
 
@@ -2362,5 +2424,3 @@ async def test_infer_metric_description_force_regenerates_existing_llm():
     assert kwargs["description"] == "新描述"
     assert kwargs["description_source"] == "llm"
     assert result is updated
-
-

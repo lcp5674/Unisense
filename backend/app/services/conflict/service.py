@@ -49,9 +49,12 @@ class ConflictService(BaseService):
         llm: ConflictLlmClient | None = None,
         metric_conflict_clearer: Callable[[str], Awaitable[None]] | None = None,
         metric_conflict_marker: Callable[[str, Conflict], Awaitable[None]] | None = None,
-        arbitration_applier: Callable[
-            [Conflict, str, str | None, int], Awaitable[None]
-        ] | None = None,
+        # 仲裁联动指标回调（TD §12.4）：落败方废弃/作废、胜方标记权威；
+        # 支持「保留差异+指定一方改名」时传入 rename_code（可选关键字参数）。
+        # 由上层注入真实实现（见 conflict.arbitration.apply_arbitration_impact）；
+        # None 时跳过（仲裁仍完成，仅不联动指标）。
+        # Callable[..., ...] 放宽签名以兼容带/不带 rename_code 的实现。
+        arbitration_applier: Callable[..., Awaitable[None]] | None = None,
         metric_archived_checker: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__(db)
@@ -198,12 +201,27 @@ class ConflictService(BaseService):
             decision = "keep_diff"
         # PLAT-2: 以服务端认证身份 actor_id 为权威归因，忽略客户端伪造的 req.arbitrator_id
         arbitrator_id = actor_id if actor_id is not None else req.arbitrator_id
+        # 「保留差异+指定一方改名」（TD §12.4 扩展）：rename_metric_code 须是冲突双方之一，
+        # 且仅 keep_diff 语义下有意义——否则改名目标歧义/无意义，拒绝裁决。
+        rename_code = req.rename_metric_code
+        if rename_code:
+            codes = conflict.metric_codes or {}
+            if rename_code not in (codes.get("candidate"), codes.get("existing")):
+                raise ConflictError(
+                    f"改名目标 {rename_code} 不在冲突双方（候选/现有）中，无法指定改名"
+                )
+            if decision != "keep_diff":
+                raise ConflictError(
+                    "仅在「保留差异」决策下可指定一方改名，请选择保留差异后指定改名目标"
+                )
         decision_json = {
             "decision": decision,
             "canonical_metric_code": req.canonical_metric_code,
             "reason": req.reason,
             "rule_template": req.rule_template,
         }
+        if rename_code:
+            decision_json["rename_metric_code"] = rename_code
         conflict = await self._repo.update_status(
             conflict,
             ConflictStatus.RULED,
@@ -229,11 +247,14 @@ class ConflictService(BaseService):
                     "conflict_id": conflict.conflict_id,
                     "canonical": req.canonical_metric_code,
                     "decision": decision,
+                    "rename_metric_code": rename_code,
                 },
             }
         )
         await self._sync_metric_conflict_flag(conflict)
-        await self._apply_arbitration(conflict, decision, req.canonical_metric_code, arbitrator_id)
+        await self._apply_arbitration(
+            conflict, decision, req.canonical_metric_code, arbitrator_id, rename_code=rename_code
+        )
         return conflict
 
     async def _sync_metric_conflict_flag(self, conflict: Conflict) -> None:
@@ -272,6 +293,8 @@ class ConflictService(BaseService):
         decision: str,
         canonical_code: str | None,
         arbitrator_id: int,
+        *,
+        rename_code: str | None = None,
     ) -> None:
         """仲裁成功后联动指标（TD §12.4）：落败方废弃/作废、胜方标记权威。
 
@@ -282,13 +305,14 @@ class ConflictService(BaseService):
             return
         try:
             await self._arbitration_applier(
-                conflict, decision, canonical_code, arbitrator_id
+                conflict, decision, canonical_code, arbitrator_id, rename_code=rename_code
             )
             logger.info(
-                "arbitration_metric_applied",
-                conflict_id=conflict.conflict_id,
-                canonical=canonical_code,
-                decision=decision,
+                "arbitration_metric_applied conflict_id=%s canonical=%s decision=%s rename_code=%s",
+                conflict.conflict_id,
+                canonical_code,
+                decision,
+                rename_code,
             )
         except Exception as exc:  # noqa: BLE001 - 联动降级，不阻断仲裁
             logger.warning("仲裁后联动指标失败（best-effort 跳过）：%s", exc)

@@ -44,6 +44,10 @@ class ConflictCheckResult(BaseModel):
 class ArbitrateRequest(BaseModel):
     decision: Literal["choose_canonical", "merge", "keep_diff"]
     canonical_metric_code: str | None = None
+    # 同名不同义「保留差异+指定一方改名」（TD §12.4 扩展）：仲裁者认定两指标
+    # 语义确有差异、需共存，但同名会造成混淆——指定候选或现有指标改名以区分。
+    # 取值须为冲突双方之一（candidate/existing），由 service 层校验。
+    rename_metric_code: str | None = None
     arbitrator_id: int | None = None  # PLAT-2: 以服务端认证身份为准，客户端可不传
     reason: str = ""
     rule_template: str | None = None

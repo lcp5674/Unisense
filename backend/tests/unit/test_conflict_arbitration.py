@@ -254,3 +254,43 @@ class TestArbitrationImpact:
         )
         assert len(db.updated) == 2
         svc.invalidate_cache.assert_awaited_once_with(["candidate", "existing"])
+
+
+class TestKeepDiffRename:
+    """「保留差异+指定一方改名」：被改名方额外写 rename_required 标记（TD §12.4）。"""
+
+    async def test_rename_target_gets_rename_required_mark(self) -> None:
+        """keep_diff + rename_code=候选 → 候选标记 coexist+rename_required，现有仅 coexist。"""
+        db = FakeDb()
+        conflict = _conflict(candidate="cand", existing="exist")
+        await apply_arbitration_impact(db, conflict, "keep_diff", None, 1, rename_code="cand")
+        assert len(db.updated) == 2
+        # _write_mark 按 candidate → existing 顺序执行，values 仅含 arbitration_mark
+        cand_mark = db.updated[0]["arbitration_mark"]
+        exist_mark = db.updated[1]["arbitration_mark"]
+        assert cand_mark["status"] == "coexist"
+        assert cand_mark["rename_required"] is True
+        assert cand_mark["rename_opposite_code"] == "exist"
+        assert exist_mark["status"] == "coexist"
+        assert not exist_mark.get("rename_required")
+
+    async def test_rename_target_existing_marks_existing(self) -> None:
+        """keep_diff + rename_code=现有 → 现有标记 rename_required。"""
+        db = FakeDb()
+        conflict = _conflict(candidate="cand", existing="exist")
+        await apply_arbitration_impact(db, conflict, "keep_diff", None, 1, rename_code="exist")
+        cand_mark = db.updated[0]["arbitration_mark"]
+        exist_mark = db.updated[1]["arbitration_mark"]
+        assert exist_mark["rename_required"] is True
+        assert exist_mark["rename_opposite_code"] == "cand"
+        assert "rename_required" not in cand_mark
+
+    async def test_keep_diff_without_rename_marks_coexist_only(self) -> None:
+        """keep_diff 未指定改名 → 双方仅 coexist 标记（向后兼容，无 rename_required）。"""
+        db = FakeDb()
+        conflict = _conflict(candidate="cand", existing="exist")
+        await apply_arbitration_impact(db, conflict, "keep_diff", None, 1)
+        cand_mark = db.updated[0]["arbitration_mark"]
+        exist_mark = db.updated[1]["arbitration_mark"]
+        assert "rename_required" not in cand_mark
+        assert "rename_required" not in exist_mark

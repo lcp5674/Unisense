@@ -75,6 +75,8 @@ async def apply_arbitration_impact(
     canonical_code: str | None,
     actor_id: int,
     metric_svc: Any | None = None,
+    *,
+    rename_code: str | None = None,
 ) -> None:
     """仲裁裁决联动指标（best-effort，失败仅告警不阻断仲裁）。
 
@@ -86,6 +88,9 @@ async def apply_arbitration_impact(
         actor_id: 仲裁人 ID（服务端认证身份）。
         metric_svc: 指标服务实例；落败方 PUBLISHED 废弃时用于 deprecate_metric。
             为 None 时跳过废弃（其余标记/作废仍执行）。
+        rename_code: 「保留差异+指定一方改名」时被指定改名的指标编码（可选）。
+            非空时该指标额外写 rename_required 标记，指标详情页据此展示
+            「仲裁要求改名」引导，Owner 改名后由 update_metric 清除。
     """
     codes = conflict.metric_codes or {}
     candidate = codes.get("candidate")
@@ -98,17 +103,19 @@ async def apply_arbitration_impact(
     # ---- keep_diff：双方保留，标记已裁定共存 ----
     if not canonical_code:
         for code in (candidate, existing):
-            await _write_mark(
-                db,
-                code,
-                {
-                    "status": "coexist",
-                    "conflict_id": conflict_id,
-                    "decision": decision,
-                    "ruled_at": _now_iso(),
-                    "opposite_code": existing if code == candidate else candidate,
-                },
-            )
+            mark: dict[str, Any] = {
+                "status": "coexist",
+                "conflict_id": conflict_id,
+                "decision": decision,
+                "ruled_at": _now_iso(),
+                "opposite_code": existing if code == candidate else candidate,
+            }
+            # 「保留差异+指定一方改名」：被指定方标记 rename_required，
+            # 指标详情页据此展示「仲裁要求改名」引导（含对方编码便于区分）。
+            if rename_code and code == rename_code:
+                mark["rename_required"] = True
+                mark["rename_opposite_code"] = existing if code == candidate else candidate
+            await _write_mark(db, code, mark)
         await _invalidate_affected(metric_svc, [candidate, existing])
         return
 
@@ -149,9 +156,7 @@ async def apply_arbitration_impact(
 
     winner = (
         await db.execute(
-            select(Metric).where(
-                Metric.metric_code == winner_code, Metric.deleted_at.is_(None)
-            )
+            select(Metric).where(Metric.metric_code == winner_code, Metric.deleted_at.is_(None))
         )
     ).scalar_one_or_none()
     loser = (
@@ -197,9 +202,7 @@ async def apply_arbitration_impact(
             await _invalidate_affected(metric_svc, [winner_code])
             return
         # 以平台治理权限执行落败方废弃（仲裁本身为 GOV 动作；successor 指向胜方）
-        await metric_svc.deprecate_metric(
-            loser_code, winner_code, actor_id, role="platform_admin"
-        )
+        await metric_svc.deprecate_metric(loser_code, winner_code, actor_id, role="platform_admin")
         await _invalidate_affected(metric_svc, [winner_code, loser_code])
         return
     # 未发布（DRAFT/REVIEW/EXPERIMENTAL）：从未生效，软删作废。

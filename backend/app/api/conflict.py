@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -48,6 +49,56 @@ _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_inject
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 _GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
+
+logger = logging.getLogger("unisense.conflict.api")
+
+
+async def _notify_rename_owner(
+    db: AsyncSession,
+    rename_metric_code: str,
+    conflict_id: str,
+    trace_id: str,
+) -> None:
+    """仲裁「保留差异+指定一方改名」后定向通知被改名指标的 Owner。
+
+    Owner 据此在指标详情页看到「仲裁要求改名」引导并执行改名（跨服务一致性闭环：
+    仲裁 → 标记 rename_required → 通知 Owner → 详情页改名 → 清除标记）。best-effort：
+    指标不存在/通知失败均不阻断仲裁主流程，留日志告警。
+    """
+    try:
+        from app.services.notify.service import NotifyService
+        from app.services.semantic.service import MetricService
+
+        metric_svc = MetricService(db)
+        metric = await metric_svc.get_metric_public(rename_metric_code)
+        owner_id = getattr(metric, "owner_id", None)
+        if not owner_id:
+            logger.warning("rename_owner_missing metric_code=%s", rename_metric_code)
+            return
+        await NotifyService(db).notify_user(
+            user_id=int(owner_id),
+            event_type="metric.rename_required",
+            title="指标需要改名（口径冲突裁决）",
+            body=(
+                f"指标 {rename_metric_code} 在冲突 {conflict_id} 仲裁中被指定改名，"
+                "请在指标详情页完成改名以区分同名不同义口径。"
+            ),
+            payload={
+                "metric_code": rename_metric_code,
+                "conflict_id": conflict_id,
+                "source": "conflict",
+            },
+            channel="IN_APP",
+        )
+        logger.info(
+            "rename_owner_notified metric_code=%s conflict_id=%s owner_id=%s trace_id=%s",
+            rename_metric_code,
+            conflict_id,
+            owner_id,
+            trace_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - 通知降级，不阻断仲裁
+        logger.warning("rename_owner_notify_failed: %s", exc)
 
 
 def _svc(db: AsyncSession, request: Request) -> ConflictService:
@@ -86,7 +137,12 @@ def _svc(db: AsyncSession, request: Request) -> ConflictService:
         )
 
     async def _apply_arbitration(
-        conflict: Any, decision: str, canonical_code: str | None, actor_id: int
+        conflict: Any,
+        decision: str,
+        canonical_code: str | None,
+        actor_id: int,
+        *,
+        rename_code: str | None = None,
     ) -> None:
         """仲裁联动指标（TD §12.4）：落败方废弃/作废、胜方标记权威、共存标记。
 
@@ -99,6 +155,7 @@ def _svc(db: AsyncSession, request: Request) -> ConflictService:
             canonical_code,
             actor_id,
             metric_svc=MetricService(db),
+            rename_code=rename_code,
         )
 
     async def _is_metric_archived(metric_code: str) -> bool:
@@ -218,11 +275,19 @@ async def arbitrate_conflict(
         action="CONFLICT_ARBITRATE",
         entity_type="conflict",
         entity_id=conflict_id,
-        detail={"decision": payload.decision, "canonical": payload.canonical_metric_code},
+        detail={
+            "decision": payload.decision,
+            "canonical": payload.canonical_metric_code,
+            "rename_metric_code": payload.rename_metric_code,
+        },
         ip=client_ip(request),
         trace_id=trace_id,
     )
     await db.commit()
+    # 「保留差异+指定一方改名」：定向通知被改名指标的 Owner 去详情页改名
+    # （跨服务一致性：仲裁结论落库后立即通知 Owner，避免改名要求滞留无感知）。
+    if payload.rename_metric_code:
+        await _notify_rename_owner(db, payload.rename_metric_code, conflict_id, trace_id)
     return ok(data=ConflictResponse.from_model(conflict).model_dump(), trace_id=trace_id)
 
 

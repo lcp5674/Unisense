@@ -100,15 +100,21 @@ class FakeApplier:
     """记录仲裁联动指标回调的调用（conflict, decision, canonical_code, actor_id）。"""
 
     def __init__(self) -> None:
-        self.applied: list[tuple[Conflict, str, str | None, int]] = []
+        self.applied: list[tuple[Conflict, str, str | None, int, str | None]] = []
         self.fail = False
 
     async def __call__(
-        self, conflict: Conflict, decision: str, canonical_code: str | None, actor_id: int
+        self,
+        conflict: Conflict,
+        decision: str,
+        canonical_code: str | None,
+        actor_id: int,
+        *,
+        rename_code: str | None = None,
     ) -> None:
         if self.fail:
             raise RuntimeError("联动失败（降级测试）")
-        self.applied.append((conflict, decision, canonical_code, actor_id))
+        self.applied.append((conflict, decision, canonical_code, actor_id, rename_code))
 
 
 def _svc(
@@ -305,11 +311,12 @@ async def test_arbitrate_triggers_arbitration_applier() -> None:
     conflict = await _ruled_conflict(svc, repo)
     assert applier is not None
     assert len(applier.applied) == 1
-    applied_conflict, decision, canonical, actor = applier.applied[0]
+    applied_conflict, decision, canonical, actor, _rename = applier.applied[0]
     assert applied_conflict.conflict_id == conflict.conflict_id
     assert decision == "choose_canonical"
     assert canonical == "gmv_total"
     assert actor == 1  # actor_id 透传
+    assert _rename is None  # 未指定改名目标
 
 
 async def test_arbitrate_applier_exception_degrades() -> None:
@@ -386,3 +393,76 @@ async def test_reopen_skips_check_when_checker_missing() -> None:
     reopened = await svc.reopen(conflict.conflict_id)
     assert reopened.status == ConflictStatus.OPEN
     assert reopened.resolved_at is None
+
+
+async def test_arbitrate_keep_diff_rename_writes_mark_and_passes_rename_code() -> None:
+    """「保留差异+指定一方改名」：rename_code 透传给联动回调，decision_json 记录改名目标。"""
+    svc, repo, events, _, applier = _svc()
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
+        existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
+    )
+    await svc.check(req.candidate, req.existing)
+    conflict_id = repo.conflicts[0].conflict_id
+    conflict = await svc.arbitrate(
+        conflict_id,
+        ArbitrateRequest(
+            decision="keep_diff",
+            rename_metric_code="gmv_total",
+            reason="同名不同义，保留差异并让候选改名",
+        ),
+        actor_id=1,
+    )
+    assert conflict.status == ConflictStatus.RULED
+    assert conflict.decision_json["rename_metric_code"] == "gmv_total"
+    # 联动回调收到 rename_code
+    assert applier is not None
+    assert applier.applied
+    _conflict, _decision, _canonical, _actor, rename = applier.applied[-1]
+    assert rename == "gmv_total"
+    # 事件携带 rename_metric_code
+    ruled = [e for e in events.published if e["event_type"] == "conflict_ruled"]
+    assert ruled and ruled[-1]["payload"].get("rename_metric_code") == "gmv_total"
+
+
+async def test_arbitrate_rename_target_must_be_conflict_party() -> None:
+    """改名目标不在冲突双方中 → 拒绝仲裁（ConflictError）。"""
+    svc, repo, _, _, _ = _svc()
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
+        existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
+    )
+    await svc.check(req.candidate, req.existing)
+    conflict_id = repo.conflicts[0].conflict_id
+    with pytest.raises(ConflictError):
+        await svc.arbitrate(
+            conflict_id,
+            ArbitrateRequest(
+                decision="keep_diff",
+                rename_metric_code="outside_metric",
+                reason="非法改名目标",
+            ),
+            actor_id=1,
+        )
+
+
+async def test_arbitrate_rename_requires_keep_diff_decision() -> None:
+    """改名目标仅在保留差异决策下有意义：choose_canonical 指定改名 → 拒绝。"""
+    svc, repo, _, _, _ = _svc()
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
+        existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
+    )
+    await svc.check(req.candidate, req.existing)
+    conflict_id = repo.conflicts[0].conflict_id
+    with pytest.raises(ConflictError):
+        await svc.arbitrate(
+            conflict_id,
+            ArbitrateRequest(
+                decision="choose_canonical",
+                canonical_metric_code="gmv_total",
+                rename_metric_code="gmv_total",
+                reason="非法组合",
+            ),
+            actor_id=1,
+        )

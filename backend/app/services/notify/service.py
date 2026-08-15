@@ -57,6 +57,7 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "metric.rolled_back": "指标已回滚",
     "metric.emergency_published": "指标紧急发布",
     "metric.health_critical": "指标健康度严重",
+    "metric.rename_required": "指标需要改名",
     "conflict_open": "口径冲突待处理",
     "conflict_ruled": "口径冲突已裁决",
     "conflict_escalated": "口径冲突已升级",
@@ -632,6 +633,51 @@ class NotifyService(BaseService):
             logger.error("邮件投递失败: %s", exc)
             return False
 
+    async def notify_user(
+        self,
+        user_id: int,
+        event_type: str,
+        title: str,
+        body: str | None = None,
+        payload: dict[str, Any] | None = None,
+        *,
+        channel: str = "IN_APP",
+    ) -> Notification:
+        """定向通知指定用户（不依赖订阅偏好）：直接为该用户创建并投递通知。
+
+        与 ``publish_event``（按订阅扇出）不同，本方法面向"必须送达特定角色/Owner"
+        的场景（如冲突仲裁要求指标 Owner 改名）——订阅偏好缺省时也会送达，
+        保证关键治理动作不被订阅遗漏。
+
+        Args:
+            user_id: 目标用户 ID（订阅人）。
+            event_type: 事件类型（模板编码）。
+            title: 通知标题（业务可读）。
+            body: 正文（可选）。
+            payload: 扩展负载（可选）。
+            channel: 通知渠道，默认站内信（IN_APP，入站即达）。
+
+        Returns:
+            已创建的 Notification。
+        """
+        notif = Notification(
+            subscriber_id=user_id,
+            channel=(channel or "IN_APP").strip().lower(),
+            template_code=event_type,
+            title=title,
+            body=body,
+            payload=payload,
+            status=NotifyStatus.PENDING.value,
+            ref_type="event",
+        )
+        await self._repo.save_notification(notif)
+        ok = await self._dispatch(notif, notif.channel)
+        notif.status = NotifyStatus.SENT.value if ok else NotifyStatus.FAILED.value
+        if ok:
+            notif.sent_at = datetime.now(UTC)
+        await self._repo.commit()
+        return notif
+
     async def list_notifications(
         self, subscriber_id: int, status: str | None
     ) -> list[Notification]:
@@ -673,9 +719,7 @@ class NotifyService(BaseService):
         """当前用户全部通知标记已读，返回更新条数。"""
         return await self._repo.mark_all_read(actor_id)
 
-    async def delete_notification(
-        self, notif_id: int, actor_id: int, role: str = ""
-    ) -> None:
+    async def delete_notification(self, notif_id: int, actor_id: int, role: str = "") -> None:
         """删除单条通知（物理删除；仅通知归属者本人或平台管理员可操作）。"""
         notif = await self.get_notification(notif_id)
         self._assert_owner(notif, actor_id, role)

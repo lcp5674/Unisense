@@ -191,6 +191,8 @@ _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "metric.rolled_back",
     "metric.emergency_published",
     "metric.health_critical",
+    # 冲突仲裁「保留差异+指定一方改名」→ 定向通知指标 Owner 去详情页改名（TD §12.4）
+    "metric.rename_required",
     "quality.anomaly",
     "reconciliation.alert",
     "benchmark.imported",

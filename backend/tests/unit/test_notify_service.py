@@ -223,3 +223,35 @@ class TestDispatchChannelNormalization:
         svc, _ = _svc()
         ok = await svc._dispatch(self._notif(), "slack")  # noqa: SLF001
         assert ok is False
+
+
+async def test_notify_user_direct_delivery() -> None:
+    """定向通知指定用户：不依赖订阅、直接为指定 subscriber 创建 IN_APP 通知并投递。"""
+    svc, repo = _svc()
+    # 模拟站内信渠道投递成功
+    svc._dispatch = AsyncMock(return_value=True)  # noqa: SLF001
+    notif = await svc.notify_user(
+        user_id=7,
+        event_type="metric.rename_required",
+        title="指标需要改名",
+        body="请在详情页改名",
+        payload={"metric_code": "sales_gmv_daily", "conflict_id": "CF-1"},
+    )
+    assert notif.subscriber_id == 7
+    assert notif.channel == "in_app"
+    assert notif.template_code == "metric.rename_required"
+    assert notif.status == "SENT"
+    assert notif.sent_at is not None
+    # 不调用 list_enabled_subscriptions（定向，非订阅广播）
+    repo.list_enabled_subscriptions.assert_not_called()
+    repo.commit.assert_awaited()
+    svc._dispatch.assert_awaited_once_with(notif, "in_app")  # noqa: SLF001
+
+
+async def test_notify_user_marks_failed_when_dispatch_fails() -> None:
+    """投递失败时标记 FAILED（不误标 SENT）。"""
+    svc, repo = _svc()
+    svc._dispatch = AsyncMock(return_value=False)  # noqa: SLF001
+    notif = await svc.notify_user(user_id=7, event_type="metric.rename_required", title="t")
+    assert notif.status == "FAILED"
+    assert notif.sent_at is None
