@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty } from "antd";
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined } from "@ant-design/icons";
-import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, inferColumnDescription, inferDescriptions, updateColumnDescription, UnisenseApiError } from "../api";
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, HeartOutlined } from "@ant-design/icons";
+import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, inferColumnDescription, inferDescriptions, updateColumnDescription, listFavorites, addFavorite, removeFavorite, UnisenseApiError } from "../api";
 import type { DBCatalog, DataSource, SchemaColumn } from "../types";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 import { SchemaTable } from "../components/SchemaTable";
@@ -70,6 +70,8 @@ export function Catalogs() {
   const [loading, setLoading] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
+  // 数据表收藏（C 层多资产收藏：TABLE，以 entity_name 为业务编码）
+  const [favNames, setFavNames] = useState<Set<string>>(new Set());
   const [form] = Form.useForm();
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
@@ -270,6 +272,42 @@ export function Catalogs() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, sourceId, sourceStatus, entityType, sensitivity, keyword, database]);
 
+  // 当前用户数据表收藏（TABLE）供行内收藏按钮判断
+  useEffect(() => {
+    listFavorites()
+      .then((favs) =>
+        setFavNames(
+          new Set(favs.filter((f) => f.asset_type === "TABLE").map((f) => f.asset_id)),
+        ),
+      )
+      .catch(() => {});
+  }, []);
+
+  // 数据表收藏切换（行内心形，以 entity_name 为业务编码）
+  async function toggleFavorite(record: DBCatalog) {
+    const fav = favNames.has(record.entity_name);
+    try {
+      if (fav) {
+        await removeFavorite("TABLE", record.entity_name);
+        setFavNames((prev) => {
+          const next = new Set(prev);
+          next.delete(record.entity_name);
+          return next;
+        });
+        message.success("已取消收藏");
+      } else {
+        await addFavorite("TABLE", record.entity_name);
+        setFavNames((prev) => new Set(prev).add(record.entity_name));
+        message.success("已收藏");
+      }
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "收藏操作失败",
+      );
+    }
+  }
+
+
   // 库名选项随数据源联动：切换数据源时刷新库名下拉并重置已选库名
   async function loadDatabases() {
     setDatabasesLoading(true);
@@ -367,14 +405,24 @@ export function Catalogs() {
       key: "action",
       width: 100,
       render: (_: unknown, record: DBCatalog) => (
-        <Button
-          type="link"
-          size="small"
-          icon={<EyeOutlined />}
-          onClick={() => openFieldDetail(record)}
-        >
-          字段详情
-        </Button>
+        <Space size={2}>
+          <Button
+            type="link"
+            size="small"
+            icon={<HeartOutlined style={{ color: favNames.has(record.entity_name) ? "#eb2f96" : undefined }} />}
+            onClick={() => toggleFavorite(record)}
+          >
+            {favNames.has(record.entity_name) ? "已收藏" : "收藏"}
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            icon={<EyeOutlined />}
+            onClick={() => openFieldDetail(record)}
+          >
+            字段详情
+          </Button>
+        </Space>
       ),
     },
   ];
