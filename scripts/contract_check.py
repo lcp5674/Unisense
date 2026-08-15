@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """Unisense 契约 / 文档同步 / 门禁真实性校验。
 
 模式：
