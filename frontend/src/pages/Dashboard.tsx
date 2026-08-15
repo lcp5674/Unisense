@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Popconfirm, Row, Col, Spin, Alert, Tag, Empty, Tooltip } from "antd";
+import { Button, Card, Popconfirm, Row, Col, Spin, Alert, Tag, Empty, Tooltip, message } from "antd";
 import {
   AppstoreOutlined,
   PlusCircleOutlined,
@@ -372,16 +372,26 @@ export function Dashboard() {
     setRecommended((prev) => prev.filter((r) => r.metric_id !== metricId));
   }
 
-  // 查看更多推荐：拉取更多并去重合并（保留已有 reason/via 展示）
+  // 查看更多推荐：拉取更多并去重合并（保留已有 reason/via 展示）。
+  // 注意：候选集可能很小（如库中 PUBLISHED 指标本身少于 limit），去重后无新增即
+  // 判定"已展示全部"，避免按钮永远显示「查看更多」却点了没反应。
   const [expandingRec, setExpandingRec] = useState(false);
+  const [allRecLoaded, setAllRecLoaded] = useState(false);
   async function handleExpandRecommend() {
-    if (expandingRec) return;
+    if (expandingRec || allRecLoaded) return;
     setExpandingRec(true);
     try {
       const more = await fetchRecommendedMetrics(RECOMMEND_EXPAND_LIMIT);
       setRecommended((prev) => {
         const seen = new Set(prev.map((r) => r.metric_id));
-        return [...prev, ...more.filter((r) => !seen.has(r.metric_id))];
+        const fresh = more.filter((r) => !seen.has(r.metric_id));
+        if (fresh.length === 0) {
+          // 已到底：无新增候选，明确告知用户，避免"点了没反应"
+          setAllRecLoaded(true);
+          message.info("已展示全部推荐指标");
+          return prev;
+        }
+        return [...prev, ...fresh];
       });
     } catch (e) {
       console.warn("[Dashboard] 展开推荐指标失败", e);
@@ -602,8 +612,16 @@ export function Dashboard() {
             )}
             {recommended.length > 0 && (
               <div style={{ textAlign: "center", paddingTop: 10 }}>
-                <Button type="link" size="small" loading={expandingRec} onClick={handleExpandRecommend}>
-                  {recommended.length >= RECOMMEND_EXPAND_LIMIT ? "已展示全部推荐" : "查看更多推荐"}
+                <Button
+                  type="link"
+                  size="small"
+                  loading={expandingRec}
+                  disabled={allRecLoaded}
+                  onClick={handleExpandRecommend}
+                >
+                  {allRecLoaded || recommended.length >= RECOMMEND_EXPAND_LIMIT
+                    ? "已展示全部推荐"
+                    : "查看更多推荐"}
                 </Button>
               </div>
             )}

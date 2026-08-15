@@ -234,4 +234,30 @@ describe("Dashboard 推荐卡片", () => {
     expect(screen.getAllByText("m1")).toHaveLength(1);
     expect(screen.getByText("m6")).toBeInTheDocument();
   });
+
+  it("查看更多无新增候选时判定已展示全部（不再显示查看更多）", async () => {
+    // 后端候选集很小：两次请求返回同一批指标（如库中 PUBLISHED 指标本身少于 limit）
+    vi.mocked(fetchRecommendedMetrics)
+      .mockResolvedValueOnce([
+        { metric_id: "m1", via: "latest_published", edge_type: "RECENT", reason: "最新发布指标" },
+        { metric_id: "m2", via: "latest_published", edge_type: "RECENT", reason: "最新发布指标" },
+      ])
+      .mockResolvedValueOnce([
+        { metric_id: "m1", via: "latest_published", edge_type: "RECENT", reason: "最新发布指标" },
+        { metric_id: "m2", via: "latest_published", edge_type: "RECENT", reason: "最新发布指标" },
+      ]);
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("m1")).toBeInTheDocument());
+
+    const moreBtn = screen.getByRole("button", { name: /查看更多推荐/ });
+    fireEvent.click(moreBtn);
+
+    // 去重后无新增 → 按钮变为「已展示全部推荐」且禁用，不再"点了没反应"
+    await waitFor(() => {
+      const btn = screen.getByRole("button", { name: /已展示全部推荐/ });
+      expect(btn).toBeDisabled();
+    });
+    // 列表无新增重复项
+    expect(screen.getAllByText("m1")).toHaveLength(1);
+  });
 });
