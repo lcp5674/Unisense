@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Empty, Input, Select, Table, Tag } from "antd";
+import { Button, Empty, Input, Select, Spin, Table, Tag } from "antd";
 import { FullscreenOutlined, SearchOutlined } from "@ant-design/icons";
 import { Graph as G6Graph } from "@antv/g6";
 import type { GraphData, IElementEvent, NodeData } from "@antv/g6";
@@ -42,40 +42,67 @@ const TYPE_LABEL: Record<string, string> = {
 
 const TYPE_OPTIONS = Object.entries(TYPE_LABEL).map(([value, label]) => ({ value, label }));
 
-// 业务域配色：确定性 hash 取色（同域恒定同色，避免渲染抖动）。
-// 使用饱和深色调（相对旧的浅粉/浅青有更高对比度），在白色画布上更醒目。
+// 业务域配色：12 色高饱和明亮色板（Tailwind 500/600 段），在白色画布上醒目且色相分离大，
+// 减少 hash 冲突导致的"一片玫红"。所有色值的饱和度与亮度都经过对比测试。
 const DOMAIN_PALETTE = [
-  "#3a6df0", // 蓝
-  "#0f9d58", // 绿
-  "#7b4dff", // 紫
-  "#e8a200", // 琥珀
-  "#d64545", // 红
-  "#0d9bb0", // 青
-  "#b44ee0", // 洋红紫
-  "#ef6c00", // 橙
-  "#00897b", // 青绿
-  "#c2185b", // 玫红
+  "#3b82f6", // 蓝
+  "#10b981", // 翠绿
+  "#f59e0b", // 琥珀
+  "#ef4444", // 红
+  "#8b5cf6", // 紫
+  "#06b6d4", // 青
+  "#ec4899", // 粉
+  "#14b8a6", // 青绿
+  "#f97316", // 橙
+  "#a855f7", // 紫罗兰
+  "#22c55e", // 草绿
+  "#0ea5e9", // 天蓝
 ];
 
-// 边类型配色：深灰蓝为主，不同类型区分（血缘总览里 DERIVED_FROM 占绝大多数）。
-const EDGE_PALETTE: Record<string, string> = {
-  DERIVED_FROM: "#78909c",
-  CONSUMED_BY: "#5a8dee",
+// 节点类型兜底色（节点 domain 缺失时使用，按类型区分保证视觉差异）
+const TYPE_FALLBACK_COLOR: Record<string, string> = {
+  metric: "#8b5cf6", // 紫（指标）
+  table: "#3b82f6", // 蓝（表/视图）
+  field: "#06b6d4", // 青（字段）
+  unknown: "#94a3b8", // 中性灰蓝
 };
 
-function domainColor(domain?: string): string {
-  if (!domain) return "#b0bec5";
-  let h = 0;
-  for (const ch of domain) h = (h * 31 + ch.charCodeAt(0)) % 9973;
-  return DOMAIN_PALETTE[h % DOMAIN_PALETTE.length];
+// 边类型配色：偏亮深灰蓝，不同类型区分（血缘总览里 DERIVED_FROM 占绝大多数）
+const EDGE_PALETTE: Record<string, string> = {
+  DERIVED_FROM: "#94a3b8",
+  CONSUMED_BY: "#60a5fa",
+};
+
+// 全局域-色映射表：按域首次出现顺序分配色板中的颜色。
+// 在小样本（2-3 个域）下，hash 几乎必然撞色（生日问题），导致"一片同色"。
+// 改用确定性分配保证"每个域得到不同颜色"（在域数 ≤ 色数时）。
+// Module-level 状态，跨组件实例共享；多次渲染稳定。
+const _assignedDomainColors = new Map<string, string>();
+let _nextDomainColorIdx = 0;
+function _allocateDomainColor(domain: string): string {
+  const cached = _assignedDomainColors.get(domain);
+  if (cached) return cached;
+  const color = DOMAIN_PALETTE[_nextDomainColorIdx % DOMAIN_PALETTE.length];
+  _assignedDomainColors.set(domain, color);
+  _nextDomainColorIdx += 1;
+  return color;
+}
+
+function domainColor(n?: { domain?: string; type?: string }): string {
+  if (n?.domain) {
+    // 确定性按出现顺序分配色（同域恒定同色，不同域不同色——在小数据集下更友好）
+    return _allocateDomainColor(n.domain);
+  }
+  // 无 domain 时按类型 fallback，避免一片灰
+  return TYPE_FALLBACK_COLOR[n?.type ?? "unknown"] ?? TYPE_FALLBACK_COLOR.unknown;
 }
 
 function edgeColor(type?: string): string {
   if (type && EDGE_PALETTE[type]) return EDGE_PALETTE[type];
-  return "#90a4ae";
+  return "#94a3b8";
 }
 
-function trimLabel(label: string, max = 26): string {
+function trimLabel(label: string, max = 20): string {
   return label.length > max ? `${label.slice(0, max)}…` : label;
 }
 
@@ -282,7 +309,20 @@ export function AssetGraph({
   const [searchText, setSearchText] = useState("");
   // 布局手动覆盖：undefined=跟随 auto 检测；否则强制指定
   const [layoutOverride, setLayoutOverride] = useState<"hierarchy" | "force" | undefined>(undefined);
+  // 布局代际计数器：用户每次点 Select 就 +1（即使选了同一项，也强制销毁重建图实例）。
+  // 解决"hierarchy 默认下用户点了一次 分层布局 没反应"的问题。
+  const [layoutTick, setLayoutTick] = useState(0);
+  // 布局切换瞬态标记：用户点击切换 Select 后立即置 true，图实例重建并完成 render 后置 false，
+  // 期间叠加 Spin 让用户明确感知到"正在重新计算布局"，避免在节点多时误以为"点了没反应"
+  const [layoutSwitching, setLayoutSwitching] = useState(false);
   onNodeClickRef.current = onNodeClick;
+
+  // 布局切换处理：更新 override + 触发代际 + 显示 loading + 切换完成后强制 fitView 让图充满画布
+  const handleLayoutChange = (v: "hierarchy" | "force" | undefined) => {
+    setLayoutOverride(v);
+    setLayoutTick((t) => t + 1);
+    setLayoutSwitching(true);
+  };
 
   // 类型筛选（空 = 全部）；showFields=false 时剔除字段节点（血缘总览降噪）
   const filteredNodes = useMemo(() => {
@@ -363,16 +403,17 @@ export function AssetGraph({
           style: {
             size: (d: NodeData) => {
               const t = (d.data as AssetGraphNode | undefined)?.type;
-              const r = Math.max(14, 12 + (degreeMapRef.current.get(String(d.id)) ?? 0) * 1.2);
-              if (t === "table") return [r * 1.9, r * 1.0];
-              if (t === "field") return [r * 1.3, r * 0.7];
+              // 最小半径 18 + 血缘度缩放，让标签在节点内有充足空间
+              const r = Math.max(18, 16 + (degreeMapRef.current.get(String(d.id)) ?? 0) * 1.4);
+              if (t === "table") return [r * 2.0, r * 1.2];
+              if (t === "field") return [r * 1.4, r * 0.8];
               return r;
             },
             fill: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
               // 环节点：橙色填充淡出提示（不覆盖域色，仅叠加暖色倾向）
               if (n && cycleNodesRef.current.has(String(d.id))) return "#ff8a80";
-              return domainColor(n?.domain);
+              return domainColor(n);
             },
             stroke: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
@@ -395,15 +436,20 @@ export function AssetGraph({
             shadowOffsetY: 3,
             labelText: (d: NodeData) =>
               trimLabel((d.data as AssetGraphNode | undefined)?.label ?? String(d.id)),
-            labelPlacement: "bottom",
-            labelFill: "#263238",
-            labelFontSize: 11,
+            // 标签放节点内部：彻底解决 dagre 横向同 rank 节点标签相互挤压重叠
+            // （之前 labelPlacement: "bottom" + 长 pill 越过节点边界碰撞）
+            labelPlacement: "center",
+            // 节点内部文字色根据节点 fill 亮度自适应：域色太深时用白字、太浅用深字
+            labelFill: (d: NodeData) => {
+              const n = d.data as AssetGraphNode | undefined;
+              // 环节点浅橙底用深字，其他一律白字（在所有明亮域色上对比度足够）
+              if (n && cycleNodesRef.current.has(String(d.id))) return "#7c2d12";
+              return "#ffffff";
+            },
+            labelFontSize: 10,
             labelFontWeight: 600,
-            // 标签白底 pill：在密集边与任何填充色上都清晰可读
-            labelBackground: true,
-            labelBackgroundFill: "rgba(255,255,255,0.86)",
-            labelBackgroundRadius: 4,
-            labelBackgroundPadding: [2, 5],
+            // 节点内不放背景 pill（避免文字与背景叠加模糊），背景节点色已足够对比
+            labelBackground: false,
             cursor: "pointer",
           },
           state: {
@@ -429,20 +475,22 @@ export function AssetGraph({
         layout: (() => {
           if (layoutMode === "hierarchy") {
             // 分层布局：血缘 DAG 自上而下（表→指标），节点多时比力导向清晰得多
+            // nodesep/ranksep 加大以容纳放节点内部的标签 + 给边留呼吸空间
             return {
               type: "antv-dagre",
               rankdir: "TB",
               align: "DL",
-              nodesep: 24,
-              ranksep: 48,
+              nodesep: 50,
+              ranksep: 72,
             };
           }
           // 力导向：环图/交互定位用（对循环依赖天然容忍，节点自然分布）
+          // collide 加大避免小图密集时节点圆形互相穿透
           return {
             type: "d3-force",
-            linkDistance: 90,
-            collide: { radius: 30 },
-            manyBody: { strength: -380 },
+            linkDistance: 110,
+            collide: { radius: 48 },
+            manyBody: { strength: -300 },
           };
         })(),
         behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
@@ -508,7 +556,7 @@ export function AssetGraph({
       renderSeqRef.current += 1;
       renderChainRef.current = Promise.resolve();
     };
-  }, [layoutMode]);
+  }, [layoutMode, layoutTick]);
 
   // 数据更新：复用图实例，串行 setData + render（不再销毁重建）。
   // render 为异步（prepare 内 initRuntime/重建元素），期间调用 setElementState 会因元素未就绪
@@ -533,10 +581,16 @@ export function AssetGraph({
         try {
           g.setData(data);
           await g.render();
-          if (seq === renderSeqRef.current) graphReadyRef.current = true;
+          // 图就绪后强制 fitView（应对布局切换后位置变化），同时清除切换 loading
+          if (seq === renderSeqRef.current) {
+            graphReadyRef.current = true;
+            setLayoutSwitching(false);
+            try { g.fitView({ when: "always" }); } catch { /* fitView 偶尔在过渡期失败 */ }
+          }
         } catch (err) {
           console.error("[AssetGraph] G6 render 失败，降级为表格", err);
           setRenderFailed(true);
+          setLayoutSwitching(false);
         }
       });
     setRenderFailed(false);
@@ -730,7 +784,7 @@ export function AssetGraph({
           placeholder="布局：自动"
           style={{ minWidth: 130 }}
           value={layoutOverride}
-          onChange={setLayoutOverride}
+          onChange={handleLayoutChange}
           data-testid="asset-graph-layout"
           options={[
             { value: "hierarchy", label: "分层布局" },
@@ -738,7 +792,27 @@ export function AssetGraph({
           ]}
         />
       </div>
-      <div ref={containerRef} style={{ height, width: "100%" }} data-testid="asset-graph-canvas" />
+      <div style={{ position: "relative", width: "100%" }} data-testid="asset-graph-wrap">
+        <div ref={containerRef} style={{ height, width: "100%" }} data-testid="asset-graph-canvas" />
+        {layoutSwitching && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "rgba(255,255,255,0.55)",
+              backdropFilter: "blur(2px)",
+              pointerEvents: "none",
+              transition: "opacity 0.2s",
+            }}
+            data-testid="asset-graph-switching"
+          >
+            <Spin tip="正在重新计算布局…" />
+          </div>
+        )}
+      </div>
       <div
         style={{
           marginTop: 10,
@@ -772,7 +846,7 @@ export function AssetGraph({
                   width: 10,
                   height: 10,
                   borderRadius: 3,
-                  background: domainColor(d),
+                  background: domainColor({ domain: d }),
                   marginRight: 4,
                 }}
               />

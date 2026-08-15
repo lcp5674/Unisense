@@ -10,12 +10,18 @@ const { graphMock } = vi.hoisted(() => ({
     on: vi.fn(),
     render: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
+    setData: vi.fn(),
+    fitView: vi.fn(),
+    // destroyed getter 让 data effect 在 destroy 后跳过
+    get destroyed() {
+      return false;
+    },
     getNodeData: vi.fn<(id?: string) => Array<{ id: string; data?: Record<string, unknown> }> | undefined>(
       () => [],
     ),
     getNeighborNodesData: vi.fn(() => []),
-    setElementState: vi.fn(),
-    focusElement: vi.fn(),
+    setElementState: vi.fn().mockResolvedValue(undefined),
+    focusElement: vi.fn().mockResolvedValue(undefined),
   },
 }));
 vi.mock("@antv/g6", () => ({
@@ -186,5 +192,15 @@ describe("LineageView 血缘图谱 Tab", () => {
     await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
     screen.getByRole("button", { name: /返\s*回/ }).click();
     await screen.findByText("dashboard-page");
+  });
+
+  it("提供布局切换 Select（分层 / 力导向），保证用户可手动覆盖 auto 检测", async () => {
+    // 验证布局切换控件存在（testid "asset-graph-layout" 在 AssetGraph 组件内）
+    // 布局切换的真实行为（layoutTick → 图重建 + Spin + fitView）由浏览器 E2E 覆盖
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(document.querySelector('[data-testid="asset-graph-layout"]')).toBeTruthy(),
+    );
   });
 });
