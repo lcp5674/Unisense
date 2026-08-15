@@ -227,10 +227,12 @@ export function MetricCatalog() {
   const { track } = useTracking();
   const urlKw = searchParams.get("kw") ?? "";
   const urlStatus = searchParams.get("status") ?? "";
+  const urlOwnerId = searchParams.get("owner_id") ?? "";
   const [items, setItems] = useState<MetricResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [keyword, setKeyword] = useState(urlKw);
   const [status, setStatus] = useState(urlStatus);
+  const [ownerFilter, setOwnerFilter] = useState(urlOwnerId);
   const [domain, setDomain] = useState("");
   const [tier, setTier] = useState("");
   const [sortBy, setSortBy] = useState<"updated_at" | "created_at" | "version" | "metric_code" | "name">("updated_at");
@@ -300,8 +302,9 @@ export function MetricCatalog() {
   useEffect(() => {
     if (urlKw && urlKw !== keyword) setKeyword(urlKw);
     if (urlStatus && urlStatus !== status) setStatus(urlStatus);
-    if (urlKw || urlStatus) setPage(1);
-  }, [urlKw, urlStatus]);
+    if (urlOwnerId && urlOwnerId !== ownerFilter) setOwnerFilter(urlOwnerId);
+    if (urlKw || urlStatus || urlOwnerId) setPage(1);
+  }, [urlKw, urlStatus, urlOwnerId]);
 
   async function load() {
     const seq = ++loadSeq.current;
@@ -312,7 +315,7 @@ export function MetricCatalog() {
         status,
         domain: domain || undefined,
         metric_tier: tier || undefined,
-        owner_id: myMetricsOnly ? currentUserId : undefined,
+        owner_id: ownerFilter ? Number(ownerFilter) : myMetricsOnly ? currentUserId : undefined,
         sort_by: sortBy,
         sort_order: sortOrder,
         page,
@@ -334,7 +337,7 @@ export function MetricCatalog() {
 
   useEffect(() => {
     load();
-  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, currentUserId]);
+  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, currentUserId, ownerFilter]);
 
   function handleSearch() {
     if (keyword) {

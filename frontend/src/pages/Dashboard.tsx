@@ -9,6 +9,11 @@ import {
   RobotOutlined,
   DeploymentUnitOutlined,
   ExperimentOutlined,
+  WarningOutlined,
+  SafetyCertificateOutlined,
+  IssuesCloseOutlined,
+  FieldTimeOutlined,
+  TeamOutlined,
 } from "@ant-design/icons";
 import { Pie, Bar } from "@ant-design/charts";
 import { fetchDashboard, fetchRecommendedMetrics, fetchRecommendedTerms } from "../api";
@@ -345,6 +350,122 @@ function AssetCard({
   );
 }
 
+// ---- 治理指标体系：质量健康 / 合规复核 / 冲突风险 / 近 30 天更新 ----
+function GovernanceCards({ data, navigate }: { data: DashboardData; navigate: (to: string) => void }) {
+  const q = data.quality ?? { total: 0, by_severity: {}, pending: 0 };
+  const c = data.compliance ?? { total: 0, reviewed: 0, pending: 0, reviewed_ratio: 0 };
+  const cf = data.conflict ?? { total: 0, open: 0, escalated: 0, by_status: {} };
+  const f = data.freshness ?? { total: 0, updated_30d: 0, updated_30d_ratio: 0 };
+  const sevOrder = ["P0", "P1", "P2"] as const;
+
+  return (
+    <Card
+      style={{ marginBottom: 20 }}
+      styles={{ body: { paddingTop: 16, paddingBottom: 16 } }}
+      title={
+        <span style={{ fontSize: 15, fontWeight: 600 }}>
+          治理指标体系
+          <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+            质量 · 合规 · 冲突 · 新鲜度 —— 点击卡片进入对应工作台
+          </span>
+        </span>
+      }
+    >
+      <div className="gov-grid">
+        <button className="gov-card" type="button" onClick={() => navigate("/quality")} title="进入质量中心">
+          <div className="gov-head">
+            <span className="gov-label"><WarningOutlined /> 质量健康</span>
+            <span className="gov-total">{q.total}</span>
+          </div>
+          <div className="gov-sevs">
+            {sevOrder.map((s) => (
+              <span key={s} className="gov-sev" data-sev={s}><b>{s}</b> {q.by_severity[s] ?? 0}</span>
+            ))}
+          </div>
+          <div className="gov-sub">{q.pending > 0 ? `待处理 ${q.pending} 项` : "当前无待处理告警"}</div>
+        </button>
+
+        <button className="gov-card" type="button" onClick={() => navigate("/catalog")} title="进入指标目录">
+          <div className="gov-head">
+            <span className="gov-label"><SafetyCertificateOutlined /> 合规复核</span>
+            <span className="gov-total">{Math.round(c.reviewed_ratio * 100)}%</span>
+          </div>
+          <div className="gov-sevs">
+            <span className="gov-sev">已复核 <b>{c.reviewed}</b></span>
+            <span className="gov-sev">待复核 <b>{c.pending}</b></span>
+          </div>
+          <div className="gov-sub">指标合规复核进度</div>
+        </button>
+
+        <button className="gov-card" type="button" onClick={() => navigate("/review")} title="进入冲突仲裁">
+          <div className="gov-head">
+            <span className="gov-label"><IssuesCloseOutlined /> 冲突风险</span>
+            <span className="gov-total">{cf.total}</span>
+          </div>
+          <div className="gov-sevs">
+            <span className="gov-sev">待仲裁 <b>{cf.open}</b></span>
+            <span className="gov-sev">升级中 <b>{cf.escalated}</b></span>
+          </div>
+          <div className="gov-sub">未关闭冲突总数</div>
+        </button>
+
+        <button className="gov-card" type="button" onClick={() => navigate("/catalog")} title="进入指标目录">
+          <div className="gov-head">
+            <span className="gov-label"><FieldTimeOutlined /> 近 30 天更新</span>
+            <span className="gov-total">{f.updated_30d}</span>
+          </div>
+          <div className="gov-sevs">
+            <span className="gov-sev">更新占比 <b>{Math.round(f.updated_30d_ratio * 100)}%</b></span>
+          </div>
+          <div className="gov-sub">近 30 天有更新的指标数</div>
+        </button>
+      </div>
+    </Card>
+  );
+}
+
+// ---- Owner 责任分布：每位 Owner 的指标规模 + 待审积压 + 已发布 ----
+function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: (to: string) => void }) {
+  const owners = Object.entries(data.by_owner ?? {}).sort((a, b) => b[1].total - a[1].total);
+  if (owners.length === 0) return null;
+  return (
+    <Card
+      style={{ marginBottom: 20 }}
+      styles={{ body: { paddingTop: 16, paddingBottom: 16 } }}
+      title={
+        <span style={{ fontSize: 15, fontWeight: 600 }}>
+          Owner 责任分布
+          <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+            按责任人查看指标规模与待审积压，点击下钻责任人指标目录
+          </span>
+        </span>
+      }
+    >
+      <div className="owner-grid">
+        {owners.map(([id, o]) => {
+          const review = o.by_status.REVIEW ?? 0;
+          const published = o.by_status.PUBLISHED ?? 0;
+          const hot = review > 0;
+          return (
+            <button
+              key={id}
+              type="button"
+              className={`owner-row${hot ? " owner-hot" : ""}`}
+              onClick={() => navigate(`/catalog?owner_id=${id}`)}
+              title={`${o.name}：共 ${o.total} 个指标，待审 ${review}，已发布 ${published}`}
+            >
+              <span className="owner-name"><TeamOutlined /> {o.name}</span>
+              <span className="owner-metric">指标 {o.total}</span>
+              <span className="owner-metric">{hot ? `待审 ${review}` : "无积压"}</span>
+              <span className="owner-metric">已发布 {published}</span>
+            </button>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [recommended, setRecommended] = useState<RecommendItem[]>([]);
@@ -438,10 +559,9 @@ export function Dashboard() {
   if (!data) return null;
 
   const reviewCount = data.by_status.REVIEW ?? 0;
-  const draftCount = data.by_status.DRAFT ?? 0;
-  const publishedCount = data.by_status.PUBLISHED ?? 0;
   const piiRatio = Math.round(data.pii_ratio * 100);
   const domainCount = Object.keys(data.by_domain ?? {}).length;
+  const assetTypeCount = Object.keys(data.assets ?? {}).length;
 
   return (
     <div>
@@ -472,6 +592,12 @@ export function Dashboard() {
         <LifecycleSignalBar data={data} />
       </Card>
 
+      {/* 治理指标体系：质量健康 / 合规复核 / 冲突风险 / 近 30 天更新 */}
+      <GovernanceCards data={data} navigate={navigate} />
+
+      {/* Owner 责任分布：按责任人查看指标规模与待审积压 */}
+      <OwnerDistribution data={data} navigate={navigate} />
+
       {/* 资产总览：全资产计数 + 状态下钻（与生命周期信号条一致的交互） */}
       <Card
         style={{ marginBottom: 20 }}
@@ -492,12 +618,18 @@ export function Dashboard() {
         </div>
       </Card>
 
-      {/* KPI 读数格 */}
+      {/* KPI 读数格：与信号条去重后的汇总指标（不再重复已发布/待审核/草稿中） */}
       <div className="gauge-grid" style={{ marginBottom: 20 }}>
         <GaugeCell label="指标总数" value={data.total} accent="data" sub={`覆盖 ${domainCount} 个业务域`} />
-        <GaugeCell label="已发布" value={publishedCount} accent="ok" sub={`${Math.round((publishedCount / Math.max(data.total, 1)) * 100)}% 已对外可用`} />
-        <GaugeCell label="待审核" value={reviewCount} accent={reviewCount > 0 ? "signal" : "data"} sub={reviewCount > 0 ? "需要你的校准" : "当前无积压"} />
-        <GaugeCell label="草稿中" value={draftCount} accent={draftCount > 0 ? "warn" : "data"} sub="未进入评审流程" small />
+        <GaugeCell label="覆盖业务域" value={domainCount} accent="data" sub="已接入指标的业务域数" />
+        <GaugeCell
+          label="PII 占比"
+          value={`${piiRatio}%`}
+          accent={piiRatio > 30 ? "danger" : piiRatio > 10 ? "warn" : "ok"}
+          sub={`${data.pii_count} 个指标含 PII`}
+          small
+        />
+        <GaugeCell label="资产类型" value={assetTypeCount} accent="data" sub="总览覆盖的资产种类" />
       </div>
 
       {/* 告警带 */}

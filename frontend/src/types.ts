@@ -492,6 +492,16 @@ export interface DashboardData {
   by_domain: Record<string, number>;
   pii_count: number;
   pii_ratio: number;
+  /** Owner 责任分布：{owner_id: {name, total, by_status}} */
+  by_owner?: Record<number, { name: string; total: number; by_status: Record<string, number> }>;
+  /** 质量健康：严重级分布 + 待处理（OPEN+ACK） */
+  quality?: { total: number; by_severity: Record<string, number>; pending: number };
+  /** 合规：复核率 */
+  compliance?: { total: number; reviewed: number; pending: number; reviewed_ratio: number };
+  /** 冲突风险：待仲裁 + 升级中 */
+  conflict?: { total: number; open: number; escalated: number; by_status: Record<string, number> };
+  /** 新鲜度：近 30 天更新 */
+  freshness?: { total: number; updated_30d: number; updated_30d_ratio: number };
   /** 全资产总览：指标/数据表/数据源/维度/术语/指标模板/采集任务/数据字典 */
   assets?: {
     metric: AssetStat;

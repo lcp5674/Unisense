@@ -263,6 +263,24 @@ describe("MetricCatalog", () => {
     }
   });
 
+  it("从总览 Owner 责任分布 ?owner_id=xx 直达：所有查询都携带责任人过滤", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    render(
+      <MemoryRouter initialEntries={["/catalog?owner_id=2"]}>
+        <Routes>
+          <Route path="/catalog" element={<MetricCatalog />} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findAllByText("共 1 条");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ owner_id: 2 });
+    }
+  });
+
   it("防竞态：迟到的全量响应不覆盖已筛选结果", async () => {
     let resolveFull!: (v: MetricListResponse) => void;
     const fullPromise = new Promise<MetricListResponse>((r) => {

@@ -32,6 +32,14 @@ const mockDashboardData = {
   by_domain: { finance: 40, marketing: 30, growth: 20, risk: 10 },
   pii_count: 12,
   pii_ratio: 0.12,
+  by_owner: {
+    1: { name: "Alice", total: 60, by_status: { DRAFT: 20, REVIEW: 4, PUBLISHED: 36 } },
+    2: { name: "Bob", total: 40, by_status: { DRAFT: 5, REVIEW: 3, PUBLISHED: 24, EXPERIMENTAL: 3, DEPRECATED: 5 } },
+  },
+  quality: { total: 9, by_severity: { P0: 2, P1: 3, P2: 4 }, pending: 5 },
+  compliance: { total: 100, reviewed: 72, pending: 28, reviewed_ratio: 0.72 },
+  conflict: { total: 4, open: 3, escalated: 1, by_status: { OPEN: 2, NEGOTIATING: 1, ESCALATED: 1 } },
+  freshness: { total: 100, updated_30d: 34, updated_30d_ratio: 0.34 },
   assets: {
     metric: { total: 100, by_status: { DRAFT: 25, EXPERIMENTAL: 3, REVIEW: 7, PUBLISHED: 60, DEPRECATED: 5 } },
     table: { total: 40, by_status: { PUBLIC: 5, INTERNAL: 25, CONFIDENTIAL: 6, PII: 3, NEEDS_REVIEW: 1 } },
@@ -113,16 +121,17 @@ describe("Dashboard", () => {
   });
 
   it("资产总览：渲染全部 8 类资产卡片与计数", async () => {
-    renderDashboard();
+    const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("资产总览")).toBeInTheDocument());
 
     // 8 类资产名称
     for (const label of ["指标", "数据表", "数据源", "维度", "术语", "指标模板", "采集任务", "数据字典"]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
-    // 各资产总数（asset-card 内的 ac-total）
+    // 各资产总数（仅限资产卡 .ac-total，避免与 Owner 分布/治理卡的重复数字歧义）
+    const acTotals = Array.from(container.querySelectorAll(".ac-total")).map((el) => el.textContent);
     for (const total of ["40", "8", "15", "22", "10", "30"]) {
-      expect(screen.getByText(total)).toBeInTheDocument();
+      expect(acTotals).toContain(total);
     }
     // 数据表 INTERNAL=25（与指标 DRAFT=25 重复出现，用 getAllByText）
     expect(screen.getAllByText("25").length).toBeGreaterThan(0);
@@ -156,6 +165,79 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByText("采集中"));
     expect(probe.location()?.pathname).toBe("/collection-tasks");
     expect(probe.location()?.search).toContain("status=RUNNING");
+  });
+
+  it("KPI 读数格去重：不再展示与信号条重复的已发布/待审核/草稿中", async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("指标总数")).toBeInTheDocument());
+
+    // 信号条仍展示（生命周期五站保留）
+    expect(document.querySelector(".lifecycle-track")).toBeTruthy();
+    // KPI 读数格（.g-label）不再有这三个重复读数
+    const gaugeLabels = Array.from(document.querySelectorAll(".g-label")).map((el) => el.textContent);
+    expect(gaugeLabels).not.toContain("已发布");
+    expect(gaugeLabels).not.toContain("待审核");
+    expect(gaugeLabels).not.toContain("草稿中");
+  });
+
+  it("Owner 责任分布：渲染各 Owner 总数/待审积压/已发布，待审>0 高亮", async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    expect(screen.getByText("Alice")).toBeInTheDocument();
+    expect(screen.getByText("Bob")).toBeInTheDocument();
+    // 待审积压 > 0 的 Owner 行高亮（Alice REVIEW=4 / Bob REVIEW=3 都有）
+    expect(document.querySelectorAll(".owner-hot").length).toBeGreaterThan(0);
+  });
+
+  it("Owner 下钻：点击 Owner 跳转 /catalog?owner_id=", async () => {
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Alice"));
+    expect(probe.location()?.pathname).toBe("/catalog");
+    expect(probe.location()?.search).toContain("owner_id=1");
+  });
+
+  it("治理指标卡：质量健康渲染严重级分布与待处理", async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("质量健康")).toBeInTheDocument());
+
+    expect(screen.getByText("P0")).toBeInTheDocument();
+    expect(screen.getByText("P1")).toBeInTheDocument();
+    expect(screen.getByText("P2")).toBeInTheDocument();
+    expect(screen.getByText(/待处理/)).toBeInTheDocument();
+  });
+
+  it("治理指标卡：合规渲染复核率", async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("合规复核")).toBeInTheDocument());
+
+    // 72% 复核率（compliance 卡内）
+    expect(screen.getByText("72%")).toBeInTheDocument();
+  });
+
+  it("治理指标卡：冲突风险渲染待仲裁与升级中", async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("冲突风险")).toBeInTheDocument());
+
+    expect(screen.getByText(/待仲裁/)).toBeInTheDocument();
+    expect(screen.getByText(/升级中/)).toBeInTheDocument();
+  });
+
+  it("治理指标卡：新鲜度渲染近 30 天更新", async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("近 30 天更新")).toBeInTheDocument());
+
+    expect(screen.getByText("34")).toBeInTheDocument();
+  });
+
+  it("治理指标卡下钻：质量→/quality、冲突→/review", async () => {
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("质量健康")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("质量健康"));
+    expect(probe.location()?.pathname).toBe("/quality");
   });
 });
 
