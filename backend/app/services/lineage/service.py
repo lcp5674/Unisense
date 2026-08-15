@@ -58,6 +58,10 @@ _CACHE_KEY_PREFIX = "lineage:impact:"
 _RISKY_CHANGE_TYPES = frozenset({"BREAKING", "DROP", "DELETE", "REMOVE"})
 #: 增量采集分批提交大小（控制单事务规模，大批量导入时分批 commit）。
 _INGEST_COMMIT_BATCH = 500
+#: 运行详情快照中保留的边明细示例条数（上限）。
+#: detail_json 是 TEXT 列（64KB），全量边明细在大批量导入时会超长触发
+#: MySQL 1406（Data too long），故只保留前 N 条示例 + 完整计数。
+_DETAIL_EDGE_SAMPLE = 200
 
 
 def paginate_edges(edges: list[LineageEdgeResponse], page: int, page_size: int) -> dict[str, Any]:
@@ -539,8 +543,14 @@ class LineageService(BaseService):
                     await self._db.commit()
             confirmed, restored = await self._repo.mark_seen(provenance, seen)
             missing, stale_flagged = await self._repo.mark_missing(provenance, seen, threshold)
-            # 运行详情快照：记录本次新增/更新的具体边明细，供「运行历史行 → 详情」查看
-            detail = {"kind": "batch", "added_edges": added_edges, "updated_edges": updated_edges}
+            # 运行详情快照：记录本次新增/更新的具体边明细，供「运行历史行 → 详情」查看。
+            # 大批量导入只保留前 N 条示例（完整计数在 added/updated 字段），
+            # 避免全量明细序列化超 detail_json TEXT 列上限（MySQL 1406）。
+            detail = {
+                "kind": "batch",
+                "added_edges": added_edges[:_DETAIL_EDGE_SAMPLE],
+                "updated_edges": updated_edges[:_DETAIL_EDGE_SAMPLE],
+            }
             await self._repo.finish_ingest_run(
                 run,
                 status="success",
