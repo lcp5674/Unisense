@@ -415,6 +415,9 @@ function OverviewTab() {
       message.warning("该实体缺少详情标识（id），暂无法查看详情");
       return;
     }
+    // 关闭下钻明细抽屉：从「明细列表」下钻到「单表详情」时列表让位，
+    // 避免两个 Drawer 同时挂 body Portal 导致详情被明细覆盖。
+    setDrillOpen(false);
     setDetailOpen(true);
     setDetailLoading(true);
     setDetail(null);
@@ -548,6 +551,7 @@ function OverviewTab() {
         storageKey="unisense.drawer.entity.width"
         defaultWidth={860}
         minWidth={600}
+        zIndex={1050}
       >
         {detailLoading ? (
           <Spin tip="加载实体详情…" />

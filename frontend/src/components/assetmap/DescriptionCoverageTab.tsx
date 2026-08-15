@@ -409,6 +409,9 @@ export function DescriptionCoverageTab() {
   }, []);
 
   async function openDetail(catalogId: number) {
+    // 关闭下钻明细抽屉：从「明细列表」下钻到「单表详情」时，列表抽屉让位，
+    // 避免两个 Drawer 同时打开（antd 均挂 body Portal）导致详情被明细盖住无法查看。
+    setMetricDrillOpen(false);
     setDetailOpen(true);
     setDetailLoading(true);
     setDetail(null);
@@ -722,6 +725,7 @@ export function DescriptionCoverageTab() {
         storageKey="unisense.drawer.desc-table.width"
         defaultWidth={880}
         minWidth={600}
+        zIndex={1050}
       >
         {detailLoading ? (
           <Spin tip="加载实体详情…" />

@@ -1266,6 +1266,45 @@ describe("AssetMap", () => {
     });
   });
 
+  it("description coverage 下钻明细行点击：打开实体详情并关闭明细抽屉（防覆盖）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "ods_order",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: "sig1",
+      schema_summary: [{ name: "id", type: "bigint", description: "主键" }],
+      description: "订单明细表",
+      description_source: "manual",
+    } as any);
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+    await user.click(screen.getByText("描述缺失"));
+    await waitFor(() => expect(screen.getByText("缺表描述")).toBeInTheDocument());
+
+    // 打开「缺表描述明细」抽屉
+    const card = screen.getByText("缺表描述").closest(".ant-card") as HTMLElement;
+    await user.click(within(card).getByText("查看明细"));
+    await waitFor(() => expect(screen.getByText(/缺表描述明细/)).toBeInTheDocument());
+    const drillDrawer = screen.getByRole("dialog") as HTMLElement;
+    expect(within(drillDrawer).getByText("ods_order")).toBeInTheDocument();
+
+    // 点击明细中的行 → 打开实体详情抽屉；明细抽屉应关闭（让位，避免详情被覆盖）
+    await user.click(within(drillDrawer).getByText("ods_order"));
+
+    await waitFor(() => {
+      expect(fetchAssetEntityDetail).toHaveBeenCalled();
+      expect(screen.getByText(/订单明细表/)).toBeInTheDocument();
+    });
+    // 明细抽屉已关闭（标题不再渲染），详情抽屉成为唯一可见抽屉
+    expect(screen.queryByText(/缺表描述明细/)).not.toBeInTheDocument();
+  });
+
   it("description coverage edit table description saves", async () => {
     const user = userEvent.setup();
     vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
