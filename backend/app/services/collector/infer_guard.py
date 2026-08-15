@@ -43,14 +43,14 @@ class InferInflightGuard:
         self._redis = redis
 
     @staticmethod
-    def _key(kind: str, catalog_id: int, column: str | None = None) -> str:
-        """锁 key：kind 区分 column/batch/table，column 为 None 时以 * 表示整表/整批。"""
-        return f"infer_inflight:{kind}:{catalog_id}:{column or '*'}"
+    def _key(kind: str, entity_id: int | str, column: str | None = None) -> str:
+        """锁 key：kind 区分 column/batch/table/metric，column 为 None 时以 * 表示整表/整批。"""
+        return f"infer_inflight:{kind}:{entity_id}:{column or '*'}"
 
     async def acquire(
         self,
         kind: str,
-        catalog_id: int,
+        entity_id: int | str,
         column: str | None = None,
         *,
         owner: str | None = None,
@@ -59,8 +59,8 @@ class InferInflightGuard:
         """尝试获取推断权。
 
         Args:
-            kind: 推断类型（column/batch/table）。
-            catalog_id: 目录实体 ID。
+            kind: 推断类型（column/batch/table/metric）。
+            entity_id: 目录实体 ID（int）或指标编码（str）。
             column: 字段名（仅 kind=column 时使用）。
             owner: 持有者标识（API 层传 api-{user}-{uuid}）。
             ttl: 锁超时时间（秒）。
@@ -68,7 +68,7 @@ class InferInflightGuard:
         Returns:
             True 表示本请求获得推断权；False 表示已有推断进行中。
         """
-        key = self._key(kind, catalog_id, column)
+        key = self._key(kind, entity_id, column)
         owner_id = owner or "default"
         if self._redis is not None:
             try:
@@ -90,13 +90,13 @@ class InferInflightGuard:
     async def release(
         self,
         kind: str,
-        catalog_id: int,
+        entity_id: int | str,
         column: str | None = None,
         *,
         owner: str | None = None,
     ) -> bool:
         """释放推断权（仅 owner 可释放；Redis 用 Lua，进程内比对 owner）。"""
-        key = self._key(kind, catalog_id, column)
+        key = self._key(kind, entity_id, column)
         owner_id = owner or "default"
         if self._redis is not None:
             try:
@@ -117,11 +117,11 @@ class InferInflightGuard:
     async def is_locked(
         self,
         kind: str,
-        catalog_id: int,
+        entity_id: int | str,
         column: str | None = None,
     ) -> bool:
         """检查推断是否进行中（供前端/可观测性使用）。"""
-        key = self._key(kind, catalog_id, column)
+        key = self._key(kind, entity_id, column)
         if self._redis is not None:
             try:
                 return bool(await self._redis.exists(key))

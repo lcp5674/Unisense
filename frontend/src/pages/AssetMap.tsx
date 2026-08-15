@@ -152,6 +152,20 @@ function descriptionSourceTag(source?: string | null) {
   return <Tag color={cfg.color}>{cfg.label}</Tag>;
 }
 
+/**
+ * LLM 推断 in-flight 去重：进行中的推断完成后才移除，拦截「退出再进」/重复点击的重复调用。
+ * 该 Map 挂在模块级（跨组件实例共享），后端另有 Redis/进程内幂等兜底（409）。
+ */
+const inferInflight = new Map<string, Promise<unknown>>();
+
+/** 若 key 对应的推断已在途中则返回 null（拦截）；否则执行并登记，完成时清理。 */
+function runInflight<T>(key: string, task: () => Promise<T>): Promise<T> | null {
+  if (inferInflight.has(key)) return null;
+  const p = task().finally(() => inferInflight.delete(key));
+  inferInflight.set(key, p);
+  return p;
+}
+
 // 指标口径明细：definition_json 结构化解构（SQL/表达式 + 度量 + 维度 + 源表 + 周期）
 function DefinitionsDetail({ def }: { def: Record<string, unknown> }) {
   const sql = typeof def?.sql === "string" ? def.sql : undefined;
@@ -717,14 +731,35 @@ function GraphTab() {
     await refreshDetail();
   }
 
-  async function handleFieldInfer(col: SchemaColumn) {
+  function handleFieldInfer(col: SchemaColumn) {
     if (!detail) return;
-    await inferColumnDescription(detail.id, col.name, {
-      entity_name: detail.entity_name,
-      column_type: col.type,
-    });
-    message.success(`字段「${col.name}」描述已生成`);
-    await refreshDetail();
+    const existing = (detail.schema_summary as SchemaColumn[] | undefined)?.find(
+      (c) => c.name === col.name,
+    );
+    const doInfer = (force: boolean) => {
+      const p = runInflight(`column:${detail.id}:${col.name}`, async () => {
+        await inferColumnDescription(detail.id, col.name, {
+          entity_name: detail.entity_name,
+          column_type: col.type,
+          force,
+        });
+        message.success(`字段「${col.name}」描述已生成`);
+        await refreshDetail();
+      });
+      if (p === null) message.info("该字段的 LLM 推断正在进行中，请稍候");
+    };
+    // 去重防线：已有 LLM 推断描述时不直接重复调 LLM，先确认是否重新生成
+    if (existing?.description && existing.description_source === "llm") {
+      Modal.confirm({
+        title: "重新生成字段描述？",
+        content: `字段「${col.name}」已存在 LLM 推断描述，重新生成将覆盖当前内容，且需要数秒等待。`,
+        okText: "确认重新生成",
+        cancelText: "取消",
+        onOk: () => doInfer(true),
+      });
+      return;
+    }
+    doInfer(false);
   }
 
   async function handleBatchInfer() {
@@ -751,21 +786,38 @@ function GraphTab() {
     }
   }
 
-  async function handleTableDescInfer() {
+  function handleTableDescInfer() {
     if (!detail) return;
-    setTableInferring(true);
-    try {
-      const fields = Array.isArray(detail.schema_summary)
-        ? detail.schema_summary.map((c) => ({ name: c.name, type: c.type }))
-        : [];
-      await inferTableDescription(detail.id, fields);
-      message.success("表级描述已生成");
-      await refreshDetail();
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : "推断表描述失败");
-    } finally {
-      setTableInferring(false);
+    const doInfer = (force: boolean) => {
+      const p = runInflight(`table:${detail.id}`, async () => {
+        setTableInferring(true);
+        try {
+          const fields = Array.isArray(detail.schema_summary)
+            ? detail.schema_summary.map((c) => ({ name: c.name, type: c.type }))
+            : [];
+          await inferTableDescription(detail.id, fields, force);
+          message.success("表级描述已生成");
+          await refreshDetail();
+        } catch (err) {
+          message.error(err instanceof Error ? err.message : "推断表描述失败");
+        } finally {
+          setTableInferring(false);
+        }
+      });
+      if (p === null) message.info("该表的 LLM 推断正在进行中，请稍候");
+    };
+    // 去重防线：已有 LLM 推断描述时不直接重复调 LLM，先确认是否重新生成
+    if (detail.description && detail.description_source === "llm") {
+      Modal.confirm({
+        title: "重新生成表级描述？",
+        content: "该表已存在 LLM 推断描述，重新生成将覆盖当前内容，且需要数秒等待。",
+        okText: "确认重新生成",
+        cancelText: "取消",
+        onOk: () => doInfer(true),
+      });
+      return;
     }
+    doInfer(false);
   }
 
   async function openMetric(code: string) {

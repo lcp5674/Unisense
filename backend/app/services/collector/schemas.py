@@ -364,6 +364,9 @@ class InferDescriptionRequest(BaseModel):
     column_type: str | None = Field(
         default=None, max_length=128, description="字段类型（供 LLM 推断上下文）"
     )
+    force: bool = Field(
+        default=False, description="强制重新推断；默认已存在 LLM 描述时短路返回"
+    )
 
 
 class InferDescriptionResponse(BaseModel):
@@ -426,6 +429,9 @@ class InferTableDescriptionRequest(BaseModel):
 
     fields: list[dict[str, Any]] | None = Field(
         default=None, description="字段清单（空则服务端取 schema_json）"
+    )
+    force: bool = Field(
+        default=False, description="强制重新推断；默认已存在 LLM 描述时短路返回"
     )
 
 

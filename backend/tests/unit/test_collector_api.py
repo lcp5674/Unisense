@@ -278,6 +278,8 @@ async def test_infer_column_description_inflight_conflict(
         return_value={"description": "订单ID", "confidence": 0.9}
     )
     fake_svc._repo.upsert_description = AsyncMock()
+    # 幂等短路查询：无已有 LLM 描述 → 继续走 in-flight 锁
+    fake_svc._repo.get_description = AsyncMock(return_value=None)
     mock_guard = MagicMock()
     mock_guard.acquire = AsyncMock(return_value=False)
     mock_guard.release = AsyncMock(return_value=True)
@@ -293,6 +295,138 @@ async def test_infer_column_description_inflight_conflict(
     # 推断未执行（被去重拦截）
     fake_svc._llm_infer_column_description.assert_not_awaited()
     mock_guard.acquire.assert_awaited_once()
+
+
+async def test_infer_table_description_shortcircuits_existing_llm(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """幂等短路：已有 LLM 表描述且未 force → 直接返回现有描述，不调 LLM。"""
+    cat = SimpleNamespace(
+        id=1,
+        entity_name="ods_order",
+        schema_json={},
+        description="已有表描述",
+        description_source="llm",
+        description_updated_by=None,
+        description_updated_at=None,
+    )
+    session = MagicMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = cat
+    session.execute = AsyncMock(return_value=exec_result)
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    async def fake_db() -> AsyncIterator[MagicMock]:
+        yield session
+
+    fake_svc = MagicMock()
+    fake_svc._llm_infer_table_description = AsyncMock(
+        return_value={"description": "新描述", "confidence": 0.9}
+    )
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    try:
+        with patch("app.api.collector._svc", return_value=fake_svc):
+            resp = await collector_client.post(
+                "/api/v1/catalogs/1/infer-table-description",
+                json={"fields": []},
+            )
+    finally:
+        app.dependency_overrides.pop(deps.get_db_session, None)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["description"] == "已有表描述"
+    assert data["source"] == "llm"
+    fake_svc._llm_infer_table_description.assert_not_awaited()
+
+
+async def test_infer_table_description_force_regenerates(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """force=true 时即使已有 LLM 表描述也重新推断。"""
+    cat = SimpleNamespace(
+        id=1,
+        entity_name="ods_order",
+        schema_json={},
+        description="已有表描述",
+        description_source="llm",
+        description_updated_by=None,
+        description_updated_at=None,
+    )
+    session = MagicMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = cat
+    session.execute = AsyncMock(return_value=exec_result)
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    async def fake_db() -> AsyncIterator[MagicMock]:
+        yield session
+
+    fake_svc = MagicMock()
+    fake_svc._llm_infer_table_description = AsyncMock(
+        return_value={"description": "新描述", "confidence": 0.9}
+    )
+    fake_svc._repo.update_table_description = AsyncMock(
+        return_value=SimpleNamespace(
+            id=1,
+            description="新描述",
+            description_source="llm",
+            description_updated_by=None,
+            description_updated_at=None,
+        )
+    )
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    try:
+        with patch("app.api.collector._svc", return_value=fake_svc):
+            resp = await collector_client.post(
+                "/api/v1/catalogs/1/infer-table-description",
+                json={"fields": [], "force": True},
+            )
+    finally:
+        app.dependency_overrides.pop(deps.get_db_session, None)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["description"] == "新描述"
+    fake_svc._llm_infer_table_description.assert_awaited_once()
+
+
+async def test_infer_column_description_shortcircuits_existing_llm(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """幂等短路：已有 LLM 字段描述且未 force → 直接返回现有描述，不调 LLM。"""
+    cat = SimpleNamespace(id=1, entity_name="ods_order", schema_json={})
+    session = MagicMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = cat
+    session.execute = AsyncMock(return_value=exec_result)
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    async def fake_db() -> AsyncIterator[MagicMock]:
+        yield session
+
+    fake_svc = MagicMock()
+    fake_svc._llm_infer_column_description = AsyncMock(
+        return_value={"description": "新字段描述", "confidence": 0.9}
+    )
+    fake_svc._repo.get_description = AsyncMock(
+        return_value=SimpleNamespace(source="llm", description="已有字段描述")
+    )
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    try:
+        with patch("app.api.collector._svc", return_value=fake_svc):
+            resp = await collector_client.post(
+                "/api/v1/catalogs/1/columns/id/infer-description",
+                json={"entity_name": "ods_order", "column_type": "bigint"},
+            )
+    finally:
+        app.dependency_overrides.pop(deps.get_db_session, None)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["description"] == "已有字段描述"
+    assert data["source"] == "llm"
+    fake_svc._llm_infer_column_description.assert_not_awaited()
 
 
 async def test_infer_descriptions_batch_inflight_conflict(

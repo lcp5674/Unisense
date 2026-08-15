@@ -1,0 +1,66 @@
+"""指标描述推断 API 契约测试（FR-023 防重补齐）。
+
+覆盖：首次并发（都还没有描述）时 in-flight 锁拒绝重复请求 → 409 LLM_INFER_IN_PROGRESS。
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+from httpx import ASGITransport
+
+from app.api import deps
+from app.main import app
+
+
+@pytest.fixture
+async def metrics_client() -> AsyncIterator[httpx.AsyncClient]:
+    """覆盖 DB 会话与当前用户依赖（平台管理员，写端点放行）。"""
+
+    async def fake_db() -> AsyncIterator[MagicMock]:
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.commit = AsyncMock()
+        session.rollback = AsyncMock()
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", domain=None
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+    app.dependency_overrides.clear()
+
+
+async def test_infer_metric_description_inflight_conflict(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """FR-023: 指标推断进行中时，重复请求返回 409 LLM_INFER_IN_PROGRESS。
+
+    关键场景：首次并发点击推断（都还没有描述、无法靠幂等短路拦截），
+    必须有 in-flight 锁挡住第二个请求，避免双调 LLM。
+    """
+    mock_guard = MagicMock()
+    mock_guard.acquire = AsyncMock(return_value=False)
+    mock_guard.release = AsyncMock(return_value=True)
+    with patch(
+        "app.api.metrics.InferInflightGuard", return_value=mock_guard
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sales_gmv_daily/infer-description",
+            params={"force": False},
+        )
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "LLM_INFER_IN_PROGRESS"
+    # 锁以 (kind=metric, metric_code) 为键获取，owner 为随机值
+    mock_guard.acquire.assert_awaited_once()
+    args, kwargs = mock_guard.acquire.await_args
+    assert args == ("metric", "sales_gmv_daily")
+    assert "owner" in kwargs
+    # 未获得锁 → 直接抛 409，不进入 try，release 不被调用
+    mock_guard.release.assert_not_awaited()

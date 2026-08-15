@@ -914,9 +914,23 @@ async def infer_column_description(
     if cat is None:
         raise NotFoundError(f"目录实体不存在: {catalog_id}")
 
+    svc = _svc(db)
+    # 幂等短路：已存在 LLM 推断描述且未强制重新生成 → 直接返回现有描述，避免重复调 LLM
+    if not body.force:
+        existing = await svc._repo.get_description(catalog_id, column_name)
+        if existing is not None and existing.source == "llm":
+            return ok(
+                data=InferDescriptionResponse(
+                    column_name=column_name,
+                    description=existing.description,
+                    source="llm",
+                    confidence=1.0,
+                ),
+                trace_id=trace_id,
+            )
+
     # FR-023: in-flight 去重——同一字段推断进行中时拒绝重复请求（409）
     async with _infer_inflight("column", catalog_id, column_name):
-        svc = _svc(db)
         result = await svc._llm_infer_column_description(
             entity_name=cat.entity_name,
             column_name=column_name,
@@ -1177,6 +1191,19 @@ async def infer_table_description(
     ).scalar_one_or_none()
     if cat is None:
         raise NotFoundError(f"目录实体不存在: {catalog_id}")
+
+    force = bool(body and body.force)
+    # 幂等短路：已存在 LLM 推断描述且未强制重新生成 → 直接返回现有描述，避免重复调 LLM
+    if not force and cat.description_source == "llm" and cat.description:
+        return ok(
+            data=InferTableDescriptionResponse(
+                catalog_id=catalog_id,
+                description=cat.description,
+                source="llm",
+                confidence=1.0,
+            ),
+            trace_id=trace_id,
+        )
 
     # FR-023: in-flight 去重——表级推断进行中时拒绝重复请求（409）
     async with _infer_inflight("table", catalog_id):

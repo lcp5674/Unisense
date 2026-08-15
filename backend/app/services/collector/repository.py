@@ -604,6 +604,20 @@ class CollectorRepository:
         )
         return res.scalars().all()
 
+    async def get_description(
+        self, catalog_id: int, column_name: str
+    ) -> ColumnDescription | None:
+        """获取单条字段描述（推断幂等短路用，避免重复调 LLM）。"""
+        return (
+            await self._db.execute(
+                select(ColumnDescription).where(
+                    ColumnDescription.catalog_id == catalog_id,
+                    ColumnDescription.column_name == column_name,
+                    ColumnDescription.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+
     async def get_descriptions_for_catalogs(
         self, catalog_ids: Sequence[int]
     ) -> dict[int, list[ColumnDescription]]:

@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -14,8 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
+from app.core.exceptions import ConflictError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
+from app.db.redis import get_redis
+from app.services.collector.infer_guard import InferInflightGuard
 from app.services.semantic.schemas import (
     MetricApproveRequest,
     MetricBatchRegisterRequest,
@@ -41,6 +47,32 @@ from app.services.semantic.service import MetricService, redact_definition
 from app.services.subject_domain.service import SubjectDomainService
 
 router = APIRouter(prefix="/metric-definitions", tags=["metric-definitions"])
+
+
+@contextlib.asynccontextmanager
+async def _metric_infer_inflight(metric_code: str) -> AsyncIterator[None]:
+    """指标描述 LLM 推断 in-flight 去重（复用 collector 的 InferInflightGuard）。
+
+    Redis 可用时 SET NX EX 跨进程去重；不可用降级为进程内去重。
+    已有推断进行中时抛 409（LLM_INFER_IN_PROGRESS），前端据此提示「正在进行中」。
+    关键场景：首次并发点击推断（都还没有描述）时避免双调 LLM。
+    """
+    owner_id = f"infer-metric-{uuid.uuid4().hex[:8]}"
+    redis = None
+    with contextlib.suppress(RuntimeError):
+        redis = get_redis()  # Redis 不可用时降级为进程内去重
+    guard = InferInflightGuard(redis)
+    acquired = await guard.acquire("metric", metric_code, owner=owner_id)
+    if not acquired:
+        raise ConflictError(
+            "该指标的 LLM 推断正在进行中，请稍后重试",
+            error_code="LLM_INFER_IN_PROGRESS",
+        )
+    try:
+        yield
+    finally:
+        await guard.release("metric", metric_code, owner=owner_id)
+
 
 # 语义定义写操作允许的角色（对齐 RBAC：平台/域管理员 + 指标 Owner）
 _WRITE_ROLES = ("platform_admin", "domain_admin", "metric_owner")
@@ -318,13 +350,15 @@ async def infer_metric_description(
     ``force=true`` 忽略已有描述强制重新生成（前端"重新生成"确认后使用）。
     """
     service = MetricService(db)
-    metric = await service.infer_metric_description(
-        metric_code,
-        actor_id=user.id,
-        role=user.role,
-        user_domain=user.domain,
-        force=force,
-    )
+    # FR-023: in-flight 去重——同一指标推断进行中时拒绝重复请求（409）
+    async with _metric_infer_inflight(metric_code):
+        metric = await service.infer_metric_description(
+            metric_code,
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+            force=force,
+        )
     await write_audit(
         db,
         actor_id=user.id,

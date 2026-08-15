@@ -621,6 +621,86 @@ describe("AssetMap", () => {
     expect(screen.getByText(/实体详情/)).toBeInTheDocument();
   });
 
+  it("实体详情抽屉：表已有 LLM 描述时点「推断」先确认，确认后 force=true 重新生成", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 5,
+      entity_name: "sales.ods",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "PII",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: null,
+      pii_flag: true,
+      schema_summary: [
+        { name: "id", type: "bigint", description: "主键", description_source: "schema" },
+      ],
+      description: "已有 LLM 表描述",
+      description_source: "llm",
+    } as any);
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "table:sales.ods", label: "sales.ods", type: "table", entity_id: 5 },
+    });
+    clickHandler?.({ target: { id: "table:sales.ods" } });
+    await waitFor(() => expect(screen.getByText(/实体详情/)).toBeInTheDocument());
+
+    // 已有 LLM 表描述 → 点「推断」不直接调接口，先弹确认框
+    await user.click(screen.getByRole("button", { name: /推\s*断/ }));
+    await waitFor(() =>
+      expect(screen.getAllByText("重新生成表级描述？").length).toBeGreaterThan(0),
+    );
+    expect(inferTableDescription).not.toHaveBeenCalled();
+    // 确认后以 force=true 重新生成
+    await user.click(screen.getByRole("button", { name: "确认重新生成" }));
+    await waitFor(() =>
+      expect(inferTableDescription).toHaveBeenCalledWith(
+        5,
+        [{ name: "id", type: "bigint" }],
+        true,
+      ),
+    );
+  });
+
+  it("实体详情抽屉：表无 LLM 描述时点「推断」直接调用（force=false）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 5,
+      entity_name: "sales.ods",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "PII",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: null,
+      pii_flag: true,
+      schema_summary: [],
+      description: null,
+      description_source: null,
+    } as any);
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: { id: "table:sales.ods", label: "sales.ods", type: "table", entity_id: 5 },
+    });
+    clickHandler?.({ target: { id: "table:sales.ods" } });
+    await waitFor(() => expect(screen.getByText(/实体详情/)).toBeInTheDocument());
+
+    // 无 LLM 描述 → 直接调用（force=false，无确认框）
+    await user.click(screen.getByRole("button", { name: /推\s*断/ }));
+    await waitFor(() =>
+      expect(inferTableDescription).toHaveBeenCalledWith(5, [], false),
+    );
+  });
+
   it("click table node without entity_id falls back to catalog lookup", async () => {
     // Neo4j 图谱路径表节点可能不带 entity_id：按表名回查采集目录后打开详情
     vi.mocked(fetchAssetGraph).mockResolvedValue({

@@ -1733,11 +1733,45 @@ export async function confirmReconciliation(
 }
 
 // ---- 通知 ----
-export async function listNotifications(
-  status?: string,
-): Promise<{ items: Notification[]; total: number }> {
-  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
-  return request(`${API_BASE}/notify/notifications${qs}`);
+export async function listNotifications(params?: {
+  status?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: Notification[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    status: params?.status,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 10,
+  });
+  return request(`${API_BASE}/notify/notifications${qs ? `?${qs}` : ""}`);
+}
+
+/** 单条标记已读（POST /notify/notifications/{id}/read），返回更新后的通知。 */
+export async function markNotificationRead(id: number): Promise<Notification> {
+  return request<Notification>(`${API_BASE}/notify/notifications/${id}/read`, {
+    method: "POST",
+  });
+}
+
+/** 当前用户全部标记已读（POST /notify/notifications/read-all）。 */
+export async function markAllNotificationsRead(): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`${API_BASE}/notify/notifications/read-all`, {
+    method: "POST",
+  });
+}
+
+/** 删除单条通知（DELETE /notify/notifications/{id}）。 */
+export async function deleteNotification(id: number): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`${API_BASE}/notify/notifications/${id}`, {
+    method: "DELETE",
+  });
+}
+
+/** 清空当前用户全部通知（DELETE /notify/notifications）。 */
+export async function deleteAllNotifications(): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`${API_BASE}/notify/notifications`, {
+    method: "DELETE",
+  });
 }
 
 export async function listNotifyEvents(
@@ -2398,7 +2432,7 @@ export interface UpdateDescriptionResult {
 export async function inferColumnDescription(
   catalogId: number,
   columnName: string,
-  params: { entity_name: string; column_type?: string },
+  params: { entity_name: string; column_type?: string; force?: boolean },
 ): Promise<InferDescriptionResult> {
   return request<InferDescriptionResult>(
     `${API_BASE}/catalogs/${catalogId}/columns/${encodeURIComponent(columnName)}/infer-description`,
@@ -2495,12 +2529,13 @@ export async function updateTableDescription(
 export async function inferTableDescription(
   catalogId: number,
   fields?: Array<{ name?: string; type?: string }>,
+  force?: boolean,
 ): Promise<InferTableDescriptionResult> {
   return request<InferTableDescriptionResult>(
     `${API_BASE}/catalogs/${catalogId}/infer-table-description`,
     {
       method: "POST",
-      body: JSON.stringify({ fields: fields ?? [] }),
+      body: JSON.stringify({ fields: fields ?? [], force: force ?? false }),
     },
   );
 }
