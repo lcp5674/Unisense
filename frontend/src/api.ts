@@ -111,6 +111,7 @@ import {
   CollectionJob,
   CollectionRun,
   SourceHealth,
+  SourceOverview,
   SourceType,
   SourceTypeInfo,
   StaleEdge,
@@ -2194,6 +2195,30 @@ export async function batchDeleteDataSources(sourceIds: string[]): Promise<Batch
     method: "POST",
     body: JSON.stringify({ source_ids: sourceIds } satisfies BatchDeleteRequest),
   });
+}
+
+/** 批量探活（用已存连接配置逐条 probe，207 语义） */
+export async function batchTestDataSources(sourceIds: string[]): Promise<BatchSourceResult> {
+  return request<BatchSourceResult>(`${API_BASE}/data-sources/batch-test`, {
+    method: "POST",
+    body: JSON.stringify({ source_ids: sourceIds }),
+  });
+}
+
+/** 批量设置调度 cron（207 语义） */
+export async function batchScheduleDataSources(
+  sourceIds: string[],
+  scheduleCron: string,
+): Promise<BatchSourceResult> {
+  return request<BatchSourceResult>(`${API_BASE}/data-sources/batch-schedule`, {
+    method: "POST",
+    body: JSON.stringify({ source_ids: sourceIds, schedule_cron: scheduleCron }),
+  });
+}
+
+/** 数据源资产规模概览（实体/PII 分布、字段数、漂移、水位） */
+export async function getSourceOverview(sourceId: string): Promise<SourceOverview> {
+  return request<SourceOverview>(`${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/overview`);
 }
 
 export async function listDataSourceTypes(): Promise<SourceTypeInfo[]> {

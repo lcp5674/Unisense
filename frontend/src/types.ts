@@ -1275,6 +1275,21 @@ export interface DataSource {
   created_by: number | null;
   created_at: string;
   updated_at: string;
+  // ---- 三期治理字段 ----
+  owner_id?: number | null;
+  owner_name?: string | null;
+  description?: string | null;
+  include_patterns?: string[] | null;
+  exclude_patterns?: string[] | null;
+  health_metrics?: Record<string, unknown> | null;
+  degraded_since?: string | null;
+  /** 资源配额（max_concurrency/max_scan_rows） */
+  quota?: Record<string, unknown>;
+  // ---- 列表信号（list_sources 批量回填）----
+  table_count?: number | null;
+  pii_count?: number | null;
+  last_collected_at?: string | null;
+  drift_count?: number | null;
 }
 
 export interface DataSourceListResponse {
@@ -1325,6 +1340,26 @@ export interface DataSourceUpdateRequest {
   cluster_id?: string | null;
   /** 停用/启用：undefined 表示不修改 */
   enabled?: boolean;
+  // ---- 三期治理字段 ----
+  owner_id?: number | null;
+  description?: string | null;
+  include_patterns?: string[] | null;
+  exclude_patterns?: string[] | null;
+  /** 资源配额（max_concurrency/max_scan_rows） */
+  quota?: Record<string, unknown>;
+}
+
+/** 数据源资产规模概览（GET /data-sources/{id}/overview） */
+export interface SourceOverview {
+  source_id: string;
+  entity_types: Record<string, number>;
+  by_sensitivity: Record<string, number>;
+  total_fields: number;
+  drift_count: number;
+  coverage: number;
+  last_collected_at: string | null;
+  scanned_count: number;
+  failed_count: number;
 }
 
 export interface TestConnectionResult {
@@ -1438,6 +1473,9 @@ export interface SourceHealth {
   last_error: string | null;
   last_health_check: string | null;
   uptime_check: boolean;
+  /** 三期：DEGRADED（黄态）健康指标与降级起始时间 */
+  health_metrics?: Record<string, unknown> | null;
+  degraded_since?: string | null;
 }
 
 /** 异步采集任务（采集任务中心）。 */

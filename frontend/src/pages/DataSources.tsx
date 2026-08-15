@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm, Switch } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm, Switch, Divider } from "antd";
 import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined, DeleteOutlined, StopOutlined, PlayCircleOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   listDataSources,
@@ -10,21 +10,27 @@ import {
   deleteDataSource,
   batchToggleDataSources,
   batchDeleteDataSources,
+  batchTestDataSources,
+  batchScheduleDataSources,
   collectSourceNow,
   streamCollectionJob,
   getCollectionJob,
   scheduleSource,
   getSourceHealth,
+  getSourceOverview,
   getSourceWatermark,
+  listCollectionRuns,
+  listAudit,
   listDataSourceTypes,
   listDomainTree,
   testDataSourceConnection,
   checkDataSourceConnection,
   listDataSourceDatabases,
   listDriftLogs,
+  listUsers,
   UnisenseApiError,
 } from "../api";
-import type { DataSource, SourceHealth, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest, CollectionProgress, BatchSourceResult } from "../types";
+import type { DataSource, SourceHealth, SourceOverview, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest, CollectionProgress, BatchSourceResult, CollectionRun, UserBrief, AuditEntry } from "../types";
 import type { DriftLogItem } from "../api";
 import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
@@ -134,10 +140,20 @@ function SourceDetailModal({
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<TestConnectionResult | null>(null);
   const [driftLogs, setDriftLogs] = useState<DriftLogItem[]>([]);
+  const [overview, setOverview] = useState<SourceOverview | null>(null);
+  const [runs, setRuns] = useState<CollectionRun[]>([]);
+  const [audits, setAudits] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
     getSourceHealth(source.source_id).then(setHealth).catch(() => {});
     getSourceWatermark(source.source_id).then(setWatermark).catch(() => {});
+    getSourceOverview(source.source_id).then(setOverview).catch(() => {});
+    listCollectionRuns({ source_id: source.source_id, page: 1, page_size: 5 })
+      .then((res) => setRuns(res.items))
+      .catch(() => setRuns([]));
+    listAudit({ entity_type: "data_source", entity_id: source.source_id, page: 1, page_size: 8 })
+      .then((res) => setAudits(res.items))
+      .catch(() => setAudits([]));
     listDriftLogs(source.source_id, { page: 1, page_size: 10 })
       .then((res) => setDriftLogs(res.items))
       .catch(() => setDriftLogs([]));
@@ -293,6 +309,30 @@ function SourceDetailModal({
         </Col>
       </Row>
 
+      {health?.health_status === "degraded" && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`健康降级（DEGRADED）：近 ${overview?.entity_types ? "" : ""}${health.health_metrics ? `成功率 ${Math.round((Number((health.health_metrics as Record<string, unknown>).success_rate) ?? 0) * 100)}%` : "采集失败率偏高"}，源仍可用但需关注`}
+          description={
+            health.degraded_since ? `降级起始：${formatCnTime(health.degraded_since)}` : undefined
+          }
+        />
+      )}
+      {health?.last_error && <Alert type="error" showIcon style={{ marginBottom: 12 }} message={`最近错误：${health.last_error}`} />}
+
+      {overview && (
+        <Card size="small" title="资产规模概览" style={{ marginBottom: 12 }}>
+          <Row gutter={[16, 16]}>
+            <Col span={6}><Statistic title="表 / 视图" value={`${overview.entity_types.TABLE ?? 0} / ${overview.entity_types.VIEW ?? 0}`} valueStyle={{ fontSize: 16 }} /></Col>
+            <Col span={6}><Statistic title="字段总数" value={overview.total_fields} valueStyle={{ fontSize: 16 }} /></Col>
+            <Col span={6}><Statistic title="PII 资产" value={overview.by_sensitivity.PII ?? 0} valueStyle={{ fontSize: 16, color: (overview.by_sensitivity.PII ?? 0) > 0 ? "var(--danger)" : undefined }} /></Col>
+            <Col span={6}><Statistic title="Schema 漂移" value={overview.drift_count} valueStyle={{ fontSize: 16, color: overview.drift_count > 0 ? "var(--warning)" : undefined }} /></Col>
+          </Row>
+        </Card>
+      )}
+
       {checkResult && (
         <Alert
           type={checkResult.ok ? "success" : "error"}
@@ -417,6 +457,56 @@ function SourceDetailModal({
         </Card>
       )}
 
+      {(runs.length > 0 || audits.length > 0) && (
+        <Collapse
+          size="small"
+          style={{ marginBottom: 12 }}
+          items={[
+            ...(runs.length > 0
+              ? [{
+                  key: "runs",
+                  label: `采集运行历史（${runs.length}）`,
+                  children: (
+                    <Table
+                      size="small"
+                      rowKey="id"
+                      pagination={false}
+                      dataSource={runs}
+                      columns={[
+                        { title: "触发", dataIndex: "trigger", width: 70, render: (v: string) => (v === "manual" ? "手动" : v === "scheduled" ? "定时" : v) },
+                        { title: "状态", dataIndex: "status", width: 90, render: (v: string) => <Tag color={v === "COMPLETED" ? "success" : v === "FAILED" ? "error" : "processing"}>{v === "COMPLETED" ? "成功" : v === "FAILED" ? "失败" : "进行中"}</Tag> },
+                        { title: "扫描", dataIndex: "scanned", width: 60 },
+                        { title: "注册", dataIndex: "registered", width: 60 },
+                        { title: "耗时", dataIndex: "duration_seconds", width: 80, render: (v: number | null) => (v != null ? `${v}s` : "—") },
+                        { title: "时间", dataIndex: "started_at", render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
+                      ]}
+                    />
+                  ),
+                }]
+              : []),
+            ...(audits.length > 0
+              ? [{
+                  key: "audits",
+                  label: `操作审计时间线（${audits.length}）`,
+                  children: (
+                    <Table
+                      size="small"
+                      rowKey="id"
+                      pagination={false}
+                      dataSource={audits}
+                      columns={[
+                        { title: "操作", dataIndex: "action", width: 120, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+                        { title: "操作人", dataIndex: "actor_name", width: 90, render: (v: string | null) => v ?? "—" },
+                        { title: "时间", dataIndex: "created_at", render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
+                      ]}
+                    />
+                  ),
+                }]
+              : []),
+          ]}
+        />
+      )}
+
       <Space wrap>
         <Button type="primary" icon={<EditOutlined />} onClick={() => onEdit(source)}>
           编辑
@@ -451,6 +541,12 @@ function SourceDetailModal({
         />
         <Select value={scheduleMode} onChange={setScheduleMode} style={{ width: 130 }} options={[{ value: "FULL", label: "全量" }, { value: "INCREMENTAL", label: "增量" }]} />
         <Button icon={<ScheduleOutlined />} onClick={handleSchedule}>设置调度</Button>
+        <Button type="link" onClick={() => navigate(`/collection-tasks?source_id=${encodeURIComponent(source.source_id)}`)}>
+          采集任务 →
+        </Button>
+        <Button type="link" onClick={() => navigate(`/lineage?source=${encodeURIComponent(source.source_id)}`)}>
+          血缘图 →
+        </Button>
         <Popconfirm
           title="删除数据源"
           description={`确定删除「${source.name}」？其采集目录、水位、漂移日志将一并清理，删除后原 ID 可重建同名数据源。`}
@@ -473,12 +569,17 @@ export function DataSources() {
   const urlKw = searchParams.get("kw") ?? "";
   // 健康状态下钻（?health=，总览仪表「数据源」资产卡片）作为初始筛选
   const urlHealth = searchParams.get("health") ?? "";
+  // 责任人（Owner）下钻（?owner_id=，总览仪表 Owner 责任分布）
+  const urlOwnerId = searchParams.get("owner_id");
   const [items, setItems] = useState<DataSource[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [keyword, setKeyword] = useState(urlKw);
   const [health, setHealth] = useState<string>(urlHealth);
+  const [ownerId, setOwnerId] = useState<number | undefined>(
+    urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
+  );
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<DataSource | null>(null);
@@ -488,12 +589,17 @@ export function DataSources() {
   // 批量启停/删除：多选行 + 请求进行中标记
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [batchLoading, setBatchLoading] = useState(false);
+  // 批量调度：cron 输入弹窗
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
+  const [batchCron, setBatchCron] = useState("0 3 * * *");
   const [types, setTypes] = useState<SourceTypeInfo[]>(FALLBACK_TYPES);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 数据库枚举（测试连接通过后自动列出，供选择目标库）
   const [dbOptions, setDbOptions] = useState<string[]>([]);
   const [dbLoading, setDbLoading] = useState(false);
   const [dbEnumerated, setDbEnumerated] = useState(false);
+  // Owner 选择：用户列表（GET /auth/users）
+  const [userOptions, setUserOptions] = useState<UserBrief[]>([]);
   const [form] = Form.useForm();
   // 编辑回显时的连接配置明文快照（用于判断用户是否实际修改了连接字段）
   const editConfigRef = useRef<Record<string, unknown> | null>(null);
@@ -523,6 +629,15 @@ export function DataSources() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlHealth]);
 
+  // 响应 URL 责任人参数变化（Owner 责任分布二次下钻）；ownerId 在 load 依赖中自动重查
+  useEffect(() => {
+    if (urlOwnerId && /^\d+$/.test(urlOwnerId) && Number(urlOwnerId) !== ownerId) {
+      setOwnerId(Number(urlOwnerId));
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlOwnerId]);
+
   async function load(nextPage = page, nextPageSize = pageSize) {
     const seq = ++loadSeq.current;
     setLoading(true);
@@ -531,6 +646,7 @@ export function DataSources() {
       const resp = await listDataSources({
         keyword: keyword || undefined,
         health: health || undefined,
+        owner_id: ownerId,
         page: nextPage,
         page_size: nextPageSize,
       });
@@ -562,7 +678,7 @@ export function DataSources() {
       .then((tree) => setDomainOptions(flattenDomains(tree)))
       .catch(() => setDomainOptions([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, health]);
+  }, [keyword, health, ownerId]);
 
   // 类型切换时自动带出默认端口，并清空已枚举的数据库列表
   function handleTypeChange(t: string) {
@@ -740,6 +856,47 @@ export function DataSources() {
     }
   }
 
+  async function handleBatchTest() {
+    if (selectedRowKeys.length === 0) return;
+    setBatchLoading(true);
+    try {
+      const ids = selectedRowKeys.map(String);
+      const result = await batchTestDataSources(ids);
+      if (result.failed.length > 0) {
+        message.warning(`探活成功 ${result.succeeded.length} 个，失败 ${result.failed.length} 个：${batchFailSummary(result)}`);
+      } else {
+        message.success(`探活正常：${result.succeeded.length} 个数据源连接可用`);
+      }
+      setSelectedRowKeys([]);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量探活失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
+  async function handleBatchSchedule() {
+    if (selectedRowKeys.length === 0) return;
+    setBatchLoading(true);
+    setScheduleModalOpen(false);
+    try {
+      const ids = selectedRowKeys.map(String);
+      const result = await batchScheduleDataSources(ids, batchCron);
+      if (result.failed.length > 0) {
+        message.warning(`调度设置成功 ${result.succeeded.length} 个，失败 ${result.failed.length} 个：${batchFailSummary(result)}`);
+      } else {
+        message.success(`已为 ${result.succeeded.length} 个数据源设置调度 ${batchCron}`);
+      }
+      setSelectedRowKeys([]);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量调度失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
   function openEdit(source: DataSource) {
     setEditTarget(source);
     form.resetFields();
@@ -757,6 +914,19 @@ export function DataSources() {
     setDbOptions([]);
     setDbEnumerated(false);
     setModalOpen(true);
+    // 治理字段回显（创建时留空）
+    if (source.description != null) form.setFieldsValue({ description: source.description });
+    if (source.owner_id != null) form.setFieldsValue({ owner_id: source.owner_id });
+    if (source.include_patterns?.length) form.setFieldsValue({ include_patterns: source.include_patterns.join("\n") });
+    if (source.exclude_patterns?.length) form.setFieldsValue({ exclude_patterns: source.exclude_patterns.join("\n") });
+    if (source.quota) {
+      form.setFieldsValue({
+        quota_max_concurrency: (source.quota as Record<string, unknown>).max_concurrency,
+        quota_max_scan_rows: (source.quota as Record<string, unknown>).max_scan_rows,
+      });
+    }
+    // Owner 候选用户列表
+    listUsers().then(setUserOptions).catch(() => setUserOptions([]));
     // 编辑回显：拉取详情中的明文连接配置并预填连接字段（未修改的连接字段保持原配置）。
     getDataSource(source.source_id)
       .then((d) => {
@@ -794,6 +964,27 @@ export function DataSources() {
         if (values.cluster_id != null) payload.cluster_id = String(values.cluster_id);
         // 停用/启用：编辑表单开关显式提交（区别于不传的 PATCH 语义）
         payload.enabled = Boolean(values.enabled);
+        // 治理字段（PATCH 语义：仅提交用户填写项）
+        if (typeof values.description === "string" && values.description.trim()) {
+          payload.description = values.description.trim();
+        }
+        if (values.owner_id != null && values.owner_id !== "") {
+          payload.owner_id = Number(values.owner_id);
+        }
+        const parsePatterns = (raw: unknown): string[] | undefined => {
+          if (typeof raw !== "string" || !raw.trim()) return undefined;
+          return raw.split(/[\n,，]/).map((s) => s.trim()).filter(Boolean);
+        };
+        const includePatterns = parsePatterns(values.include_patterns);
+        const excludePatterns = parsePatterns(values.exclude_patterns);
+        if (includePatterns) payload.include_patterns = includePatterns;
+        if (excludePatterns) payload.exclude_patterns = excludePatterns;
+        if (values.quota_max_concurrency != null || values.quota_max_scan_rows != null) {
+          payload.quota = {
+            max_concurrency: values.quota_max_concurrency != null ? Number(values.quota_max_concurrency) : undefined,
+            max_scan_rows: values.quota_max_scan_rows != null ? Number(values.quota_max_scan_rows) : undefined,
+          };
+        }
         // 连接配置已回显明文：仅当表单值与原始配置快照不同（即用户实际修改了连接字段）
         // 才提交覆盖，避免纯改名/改域时误覆盖配置并重置健康状态。
         const prev = editConfigRef.current;
@@ -841,30 +1032,60 @@ export function DataSources() {
   const generated = previewSourceId(sourceType, { database: watchedDatabase, schema: watchedSchema }, domainWatch);
 
   const columns = [
-    { title: "Source ID", dataIndex: "source_id", key: "source_id", render: (v: string) => <span className="mono">{v}</span> },
-    { title: "名称", dataIndex: "name", key: "name" },
+    {
+      title: "名称",
+      dataIndex: "name",
+      key: "name",
+      ellipsis: true,
+      render: (v: string, s: DataSource) => (
+        <div>
+          <div>{v}</div>
+          <div className="muted" style={{ fontSize: 12, fontFamily: "monospace" }}>{s.source_id}</div>
+        </div>
+      ),
+    },
     {
       title: "类型",
       dataIndex: "source_type",
       key: "type",
-      width: 130,
+      width: 120,
       render: (v: string) => <Tag>{typeInfo(types, v)?.label ?? v}</Tag>,
     },
-    { title: "域", dataIndex: "domain", key: "domain", width: 130 },
+    { title: "域", dataIndex: "domain", key: "domain", width: 110, ellipsis: true },
     {
       title: "健康",
       dataIndex: "health_status",
       key: "health",
-      width: 100,
-      render: (v: string) => <Tag color={v === "healthy" ? "success" : v === "unhealthy" ? "error" : "default"}>{SOURCE_HEALTH_LABEL[v] ?? v}</Tag>,
+      width: 96,
+      render: (v: string) => (
+        <Tag color={v === "healthy" ? "success" : v === "degraded" ? "warning" : v === "unhealthy" ? "error" : "default"}>
+          {SOURCE_HEALTH_LABEL[v] ?? v}
+        </Tag>
+      ),
     },
-    { title: "覆盖度", dataIndex: "coverage", key: "coverage", width: 90, render: (v: number) => `${Math.round(v * 100)}%` },
+    {
+      title: "资产（表 / PII / 漂移）",
+      key: "assets",
+      width: 150,
+      render: (_: unknown, s: DataSource) => (
+        <span className="mono" style={{ fontSize: 12 }}>
+          {s.table_count ?? 0} 表 · PII {s.pii_count ?? 0} · 漂移 {s.drift_count ?? 0}
+        </span>
+      ),
+    },
+    {
+      title: "最近采集",
+      dataIndex: "last_collected_at",
+      key: "last_collected",
+      width: 130,
+      render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span className="muted">—</span>),
+    },
     { title: "调度", dataIndex: "schedule_cron", key: "schedule", width: 110, render: (v: string | null) => (v ? <span className="mono">{v}</span> : <span className="muted">—</span>) },
     {
       title: "状态",
       dataIndex: "enabled",
       key: "enabled",
-      width: 90,
+      width: 80,
       render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "启用" : "停用"}</Tag>,
     },
     {
@@ -948,6 +1169,24 @@ export function DataSources() {
               批量删除
             </Button>
           </Popconfirm>
+          <Popconfirm
+            title="批量探活"
+            description={`用已存连接配置逐条探测选中的 ${selectedRowKeys.length} 个数据源，并更新健康状态。`}
+            okText="开始探活"
+            onConfirm={handleBatchTest}
+            disabled={selectedRowKeys.length === 0 || batchLoading}
+          >
+            <Button icon={<ApiOutlined />} disabled={selectedRowKeys.length === 0 || batchLoading}>
+              批量探活
+            </Button>
+          </Popconfirm>
+          <Button
+            icon={<ScheduleOutlined />}
+            onClick={() => setScheduleModalOpen(true)}
+            disabled={selectedRowKeys.length === 0 || batchLoading}
+          >
+            批量调度
+          </Button>
         </Space>
         <Table
           dataSource={items}
@@ -1100,6 +1339,45 @@ export function DataSources() {
               <Input.Password className="mono" placeholder="连接密码" />
             </Form.Item>
           </Space>
+          <Divider style={{ margin: "8px 0" }} />
+          <Form.Item name="description" label="用途描述" style={{ width: "100%" }}>
+            <Input.TextArea rows={2} placeholder="该数据源的业务用途、责任范围（治理信息，不参与采集）" maxLength={2000} showCount />
+          </Form.Item>
+          <Space style={{ width: "100%" }}>
+            <Form.Item name="owner_id" label="负责人" style={{ width: 220 }}>
+              <Select
+                allowClear
+                showSearch
+                placeholder="选择数据源负责人"
+                optionFilterProp="label"
+                options={userOptions
+                  .filter((u) => u.status === "active")
+                  .map((u) => ({ value: u.id, label: `${u.display_name}（${u.username}）` }))}
+              />
+            </Form.Item>
+            <Form.Item name="quota_max_concurrency" label="并发上限" tooltip="扫描并发数（max_concurrency）" style={{ width: 120 }}>
+              <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item name="quota_max_scan_rows" label="扫描行上限" tooltip="单次扫描行数上限（max_scan_rows），超出拒绝采集" style={{ width: 140 }}>
+              <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
+            </Form.Item>
+          </Space>
+          <Form.Item
+            name="include_patterns"
+            label="表级白名单"
+            tooltip="fnmatch 风格，每行一个；填写后仅采集匹配的表（如 orders_*, dim_*）。留空=采集全部"
+            style={{ width: "100%" }}
+          >
+            <Input.TextArea rows={2} placeholder={"每行一个模式，如：\nods_*\ndwd_*\ndim_*}".replace("}*", "*}")} />
+          </Form.Item>
+          <Form.Item
+            name="exclude_patterns"
+            label="表级黑名单"
+            tooltip="fnmatch 风格，每行一个；命中即排除（如 tmp_*, *_bak）。白名单优先于黑名单"
+            style={{ width: "100%" }}
+          >
+            <Input.TextArea rows={2} placeholder={"每行一个模式，如：\ntmp_*\n*_bak".replace("_*}", "")} />
+          </Form.Item>
           <Space style={{ marginBottom: 8 }}>
             <Button icon={<ApiOutlined />} onClick={handleTest}>
               测试连接
@@ -1146,6 +1424,39 @@ export function DataSources() {
         <p>
           数据源已更新。是否立即重新采集，以刷新该数据源下的元数据？旧配置采集的表会在下次全量采集后自动标记为「已废弃」。
         </p>
+      </Modal>
+
+      {/* 批量调度：统一设置 cron */}
+      <Modal
+        title={`批量设置调度（${selectedRowKeys.length} 个数据源）`}
+        open={scheduleModalOpen}
+        onCancel={() => setScheduleModalOpen(false)}
+        onOk={handleBatchSchedule}
+        okText="批量设置"
+        confirmLoading={batchLoading}
+      >
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Select
+            value={batchCron}
+            onChange={(v) => setBatchCron(v)}
+            style={{ width: "100%" }}
+            options={[
+              { value: "0 3 * * *", label: "每日 03:00（0 3 * * *）" },
+              { value: "0 */6 * * *", label: "每 6 小时（0 */6 * * *）" },
+              { value: "30 1 * * 1", label: "每周一 01:30（30 1 * * 1）" },
+              { value: "0 1 1 * *", label: "每月 1 日 01:00（0 1 1 * *）" },
+            ]}
+          />
+          <Input
+            className="mono"
+            value={batchCron}
+            onChange={(e) => setBatchCron(e.target.value)}
+            placeholder="自定义 cron 表达式"
+          />
+          <span className="muted" style={{ fontSize: 12 }}>
+            将为选中的数据源统一覆盖调度表达式；停用的数据源不会触发定时采集。
+          </span>
+        </Space>
       </Modal>
     </div>
   );

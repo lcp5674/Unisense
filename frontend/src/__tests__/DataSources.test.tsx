@@ -38,7 +38,13 @@ vi.mock("../api", () => {
     scheduleSource: vi.fn(),
     getSourceHealth: vi.fn(),
     getSourceWatermark: vi.fn(),
+    getSourceOverview: vi.fn(),
     listDriftLogs: vi.fn(),
+    listCollectionRuns: vi.fn(),
+    listAudit: vi.fn(),
+    listUsers: vi.fn(),
+    batchTestDataSources: vi.fn(),
+    batchScheduleDataSources: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -57,7 +63,13 @@ import {
   checkDataSourceConnection,
   getSourceHealth,
   getSourceWatermark,
+  getSourceOverview,
   listDriftLogs,
+  listCollectionRuns,
+  listAudit,
+  listUsers,
+  batchTestDataSources,
+  batchScheduleDataSources,
   collectSourceNow,
   streamCollectionJob,
   getCollectionJob,
@@ -82,7 +94,12 @@ const mockedCollectNow = vi.mocked(collectSourceNow);
 const mockedStream = vi.mocked(streamCollectionJob);
 const mockedGetJob = vi.mocked(getCollectionJob);
 const mockedListDatabases = vi.mocked(listDataSourceDatabases);
-
+const mockedOverview = vi.mocked(getSourceOverview);
+const mockedRuns = vi.mocked(listCollectionRuns);
+const mockedAudits = vi.mocked(listAudit);
+const mockedUsers = vi.mocked(listUsers);
+const mockedBatchTest = vi.mocked(batchTestDataSources);
+const mockedBatchSchedule = vi.mocked(batchScheduleDataSources);
 const TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
   { source_type: "postgres", label: "PostgreSQL", default_port: 5432, supports_database: true, supports_schema: true, description: "关系型数据库" },
@@ -156,6 +173,22 @@ describe("DataSources", () => {
     mockedListDatabases.mockResolvedValue({ databases: ["finance", "orders"], source_type: "mysql" });
     mockedBatchToggle.mockResolvedValue({ succeeded: [], failed: [] });
     mockedBatchDelete.mockResolvedValue({ succeeded: [], failed: [] });
+    mockedOverview.mockResolvedValue({
+      source_id: "mysql_finance",
+      entity_types: { TABLE: 5, VIEW: 1 },
+      by_sensitivity: { INTERNAL: 4, PII: 2 },
+      total_fields: 42,
+      drift_count: 0,
+      coverage: 0.5,
+      last_collected_at: null,
+      scanned_count: 10,
+      failed_count: 0,
+    });
+    mockedRuns.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 5 });
+    mockedAudits.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 8 });
+    mockedUsers.mockResolvedValue([]);
+    mockedBatchTest.mockResolvedValue({ succeeded: [], failed: [] });
+    mockedBatchSchedule.mockResolvedValue({ succeeded: [], failed: [] });
   });
 
   it("动态拉取类型元信息并展示中文标签", async () => {
@@ -441,6 +474,20 @@ describe("DataSources", () => {
     }
   });
 
+  it("从总览仪表 Owner 责任分布 ?owner_id= 直达：所有查询都携带责任人过滤", async () => {
+    render(
+      <MemoryRouter initialEntries={["/data-sources?owner_id=1"]}>
+        <DataSources />
+      </MemoryRouter>,
+    );
+    await screen.findByText("mysql_finance");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      expect(c[0]).toMatchObject({ owner_id: 1 });
+    }
+  });
+
   it("从总览仪表 ?health=xxx 直达：所有查询都携带健康状态过滤（资产卡片下钻）", async () => {
     render(
       <MemoryRouter initialEntries={["/data-sources?health=unhealthy"]}>
@@ -585,5 +632,70 @@ describe("DataSources", () => {
     await screen.findByText("mysql_finance");
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+
+  it("详情弹窗展示资产规模概览（表/字段/PII/漂移）", async () => {
+    renderSources();
+    await screen.findByText("mysql_finance");
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText("资产规模概览");
+    expect(screen.getByText("5 / 1")).toBeTruthy(); // 表 / 视图
+    expect(screen.getByText("42")).toBeTruthy(); // 字段总数
+    expect(mockedOverview).toHaveBeenCalledWith("mysql_finance");
+  });
+
+  it("多选行后「批量探活」调用批量接口并提示成功", async () => {
+    mockedBatchTest.mockResolvedValue({
+      succeeded: [{ source_id: "mysql_finance", name: "财务库", ok: true, error_code: null, message: null }],
+      failed: [],
+    });
+    renderSources();
+    await screen.findByText("mysql_finance");
+    const row = screen.getByRole("row", { name: /mysql_finance/ });
+    fireEvent.click(within(row).getByRole("checkbox"));
+    await screen.findByText("已选 1 项");
+    fireEvent.click(screen.getByText("批量探活"));
+    await screen.findByRole("button", { name: "开始探活" });
+    fireEvent.click(screen.getByRole("button", { name: "开始探活" }));
+    await waitFor(() => {
+      expect(mockedBatchTest).toHaveBeenCalledWith(["mysql_finance"]);
+    });
+    expect(await screen.findByText("探活正常：1 个数据源连接可用")).toBeTruthy();
+  });
+
+  it("多选行后「批量调度」弹窗设置 cron 并调用批量接口", async () => {
+    mockedBatchSchedule.mockResolvedValue({
+      succeeded: [{ source_id: "mysql_finance", name: "财务库", ok: true, error_code: null, message: null }],
+      failed: [],
+    });
+    renderSources();
+    await screen.findByText("mysql_finance");
+    const row = screen.getByRole("row", { name: /mysql_finance/ });
+    fireEvent.click(within(row).getByRole("checkbox"));
+    await screen.findByText("已选 1 项");
+    fireEvent.click(screen.getByText("批量调度"));
+    await screen.findByText("批量设置调度（1 个数据源）");
+    fireEvent.click(screen.getByText("批量设置"));
+    await waitFor(() => {
+      expect(mockedBatchSchedule).toHaveBeenCalledWith(["mysql_finance"], "0 3 * * *");
+    });
+  });
+
+  it("编辑时提交治理字段（用途描述/负责人/配额）", async () => {
+    mockedUpdate.mockResolvedValue(source);
+    renderSources();
+    await screen.findByText("mysql_finance");
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText("数据源：财务库（mysql_finance）");
+    fireEvent.click(screen.getByText("编辑"));
+    await screen.findByText("用途描述");
+    fireEvent.change(screen.getByLabelText("用途描述"), { target: { value: "财务域主库" } });
+    fireEvent.click(await screen.findByRole("button", { name: "保 存" }));
+    await waitFor(() => {
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        "mysql_finance",
+        expect.objectContaining({ description: "财务域主库" }),
+      );
+    });
   });
 });
