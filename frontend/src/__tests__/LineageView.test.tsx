@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, edgesToGraphData } from "../pages/LineageView";
+import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, upstreamDepsToGraphData, edgesToGraphData } from "../pages/LineageView";
 import { adaptiveBaseRadius } from "../components/assetmap/AssetGraph";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
@@ -435,6 +435,10 @@ describe("LineageView SQL 血缘解析 Tab", () => {
     });
     fireEvent.click(within(panel).getByRole("button", { name: /解析血缘/ }));
     await waitFor(() => expect(api.parseLineage).toHaveBeenCalled());
+    // 上游依赖也画成图谱（中心「本次查询」+ 源表/字段节点）
+    await waitFor(() => {
+      expect(screen.getByText(/本次查询 · 上游依赖图谱（5 节点 · 4 条边）/)).toBeInTheDocument();
+    });
     // 展示上游依赖：源表 + 源字段
     await waitFor(() => {
       expect(screen.getByText(/上游依赖（2 表 \/ 2 字段）/)).toBeInTheDocument();
@@ -994,6 +998,39 @@ describe("parseResultToGraphData 解析结果转血缘图谱", () => {
     });
     expect(g.nodes).toHaveLength(0);
     expect(g.edges).toHaveLength(0);
+  });
+});
+
+describe("upstreamDepsToGraphData 上游依赖转图谱", () => {
+  it("中心「本次查询」+ 源表/字段节点，依赖边指向中心", () => {
+    const g = upstreamDepsToGraphData({
+      tables: ["ods_orders", "dim_user"],
+      fields: ["ods_orders.id", "dim_user.name"],
+    });
+    // 节点：中心 1 + 表 2 + 字段 2 = 5；边：4 条依赖边
+    expect(g.nodes).toHaveLength(5);
+    expect(g.edges).toHaveLength(4);
+    const query = g.nodes.find((n) => n.id === "query:本次查询");
+    expect(query?.label).toBe("本次查询");
+    expect(
+      g.nodes.some((n) => n.id === "table:ods_orders" && n.label === "ods_orders" && n.type === "table"),
+    ).toBe(true);
+    expect(g.nodes.some((n) => n.id === "field:ods_orders.id" && n.type === "field")).toBe(true);
+    // 所有依赖边统一指向中心节点
+    for (const e of g.edges) {
+      expect(e.target).toBe("query:本次查询");
+      expect(e.type).toBe("READS_FROM");
+    }
+  });
+
+  it("重复表/字段节点去重", () => {
+    const g = upstreamDepsToGraphData({
+      tables: ["ods_orders", "ods_orders"],
+      fields: ["ods_orders.id", "ods_orders.id"],
+    });
+    // 中心 1 + 表 1 + 字段 1 = 3；边 2 条
+    expect(g.nodes).toHaveLength(3);
+    expect(g.edges).toHaveLength(2);
   });
 });
 

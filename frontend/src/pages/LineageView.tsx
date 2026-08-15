@@ -54,6 +54,7 @@ import type {
   LineageNodeInfo,
   ParseLineageResult,
   StaleEdge,
+  UpstreamDeps,
 } from "../types";
 import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { MetricDetailDrawer } from "../components/assetmap/MetricDetailDrawer";
@@ -253,18 +254,18 @@ export function upstreamDepsToGraphData(deps: UpstreamDeps): {
 } {
   const nodeMap = new Map<string, AssetGraphNode>();
   const graphEdges: AssetGraphEdge[] = [];
+  const seenEdges = new Set<string>();
   const QUERY_ID = "query:本次查询";
   nodeMap.set(QUERY_ID, { id: QUERY_ID, type: "metric", label: "本次查询" });
-  for (const t of deps.tables) {
-    const id = `table:${t}`;
-    if (!nodeMap.has(id)) nodeMap.set(id, { id, type: "table", label: t });
+  const addDependency = (id: string, type: "table" | "field") => {
+    if (!nodeMap.has(id)) nodeMap.set(id, { id, type, label: id.slice(id.indexOf(":") + 1) });
+    const key = `${id}__${QUERY_ID}`;
+    if (seenEdges.has(key)) return;
+    seenEdges.add(key);
     graphEdges.push({ source: id, target: QUERY_ID, type: "READS_FROM" });
-  }
-  for (const f of deps.fields) {
-    const id = `field:${f}`;
-    if (!nodeMap.has(id)) nodeMap.set(id, { id, type: "field", label: f });
-    graphEdges.push({ source: id, target: QUERY_ID, type: "READS_FROM" });
-  }
+  };
+  for (const t of deps.tables) addDependency(`table:${t}`, "table");
+  for (const f of deps.fields) addDependency(`field:${f}`, "field");
   return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
 }
 
