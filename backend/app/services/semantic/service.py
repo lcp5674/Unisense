@@ -1891,8 +1891,14 @@ class MetricService(BaseService):
 
         Returns:
             版本列表。
+
+        Raises:
+            NotFoundError: 指标不存在（METRIC_ARCHIVED 表示已因仲裁作废）。
         """
-        metric = await self.get_metric(metric_code)
+        # 与详情/对比/健康读路径一致：命中「软删 + successor」的作废指标时返回
+        # 结构化 METRIC_ARCHIVED（携带胜方指针），而非裸「指标不存在」——详情页
+        # 并行加载 versions 时若裸 404 会覆盖友好引导（跨服务一致性）。
+        metric = await self._get_metric_for_compare(metric_code)
         return await self._repo.list_versions(metric.id)
 
     # ---- PENDING_VERSION 版本确认期（FR-007/FR-008）----
