@@ -987,6 +987,27 @@ async def test_get_metric_health_critical_emits_event(monkeypatch):
     assert svc._publish_event.call_args.args[0] == "metric.health_critical"
 
 
+async def test_get_metric_health_archived_raises_metric_archived():
+    """health 直访已作废指标（软删 + successor）→ 结构化 METRIC_ARCHIVED（与详情读路径一致）。"""
+    from app.core.error_codes import ErrorCode
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    archived = make_metric(
+        metric_code="sales_e2e_conflictb_day",
+        successor_code="sales_e2e_conflicta_day",
+    )
+    archived.deleted_at = None  # 软删态由调用方保证；命中 archived 分支仅需 successor 存在
+    archived.arbitration_mark = {"status": "defeated"}
+    repo.get_archived_by_code = AsyncMock(return_value=archived)
+
+    with pytest.raises(NotFoundError) as exc_info:
+        await svc.get_metric_health("sales_e2e_conflictb_day")
+    assert exc_info.value.error_code == ErrorCode.METRIC_ARCHIVED
+    assert exc_info.value.ctx["successor_code"] == "sales_e2e_conflicta_day"
+    assert exc_info.value.ctx["arbitration_mark"]["status"] == "defeated"
+
+
 async def test_get_consumption_guide_generates_and_caches():
     svc, repo = _svc_with_repo()
     svc._cache = MagicMock()

@@ -42,6 +42,23 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+async def _invalidate_affected(metric_svc: Any | None, codes: list[str]) -> None:
+    """失效受影响指标的读缓存（best-effort）。
+
+    仲裁联动对指标做了软删/废弃/标记，须主动失效 Redis 缓存，否则详情/健康
+    读接口（cache-aside）会继续返回旧数据，与 DB 不一致（时效性/一致性要求）。
+    """
+    if not codes:
+        return
+    invalidator = getattr(metric_svc, "invalidate_cache", None)
+    if invalidator is None:
+        return
+    try:
+        await invalidator(list(dict.fromkeys(codes)))
+    except Exception:
+        logger.warning("arbitration_cache_invalidate_failed", codes=codes)
+
+
 async def _write_mark(db: AsyncSession, metric_code: str, mark: dict[str, Any]) -> None:
     """写仲裁裁决标记（幂等，多次裁决后次覆盖为最新）。"""
     await db.execute(
@@ -92,6 +109,7 @@ async def apply_arbitration_impact(
                     "opposite_code": existing if code == candidate else candidate,
                 },
             )
+        await _invalidate_affected(metric_svc, [candidate, existing])
         return
 
     # ---- 确定胜方/落败方 ----
@@ -105,6 +123,29 @@ async def apply_arbitration_impact(
         return
     winner_code = canonical_code
     loser_code = existing if canonical_code == candidate else candidate
+
+    if winner_code == loser_code:
+        # 自我冲突（existing == candidate 同码）：胜方即落败方。
+        # 仅标记权威，不作废唯一指标——否则会把胜方自己软删作废，产生
+        # successor 指向自身的死循环（曾致真实胜方指标被误删、详情引导失效）。
+        await _write_mark(
+            db,
+            winner_code,
+            {
+                "status": "canonical",
+                "conflict_id": conflict_id,
+                "decision": decision,
+                "ruled_at": _now_iso(),
+                "opposite_code": loser_code,
+            },
+        )
+        logger.warning(
+            "仲裁联动跳过落败方处置：冲突 %s 双方同码 %s（自我冲突），仅标记权威",
+            conflict_id,
+            winner_code,
+        )
+        await _invalidate_affected(metric_svc, [winner_code])
+        return
 
     winner = (
         await db.execute(
@@ -137,6 +178,7 @@ async def apply_arbitration_impact(
 
     # ---- 落败方处置 ----
     if loser.status == "DEPRECATED":
+        await _invalidate_affected(metric_svc, [winner_code])
         return
     if loser.status == "PUBLISHED":
         if winner.status != "PUBLISHED":
@@ -148,14 +190,17 @@ async def apply_arbitration_impact(
                 winner.status,
                 loser_code,
             )
+            await _invalidate_affected(metric_svc, [winner_code])
             return
         if metric_svc is None:
             logger.warning("仲裁联动：缺少 metric_svc，跳过落败方 %s 废弃", loser_code)
+            await _invalidate_affected(metric_svc, [winner_code])
             return
         # 以平台治理权限执行落败方废弃（仲裁本身为 GOV 动作；successor 指向胜方）
         await metric_svc.deprecate_metric(
             loser_code, winner_code, actor_id, role="platform_admin"
         )
+        await _invalidate_affected(metric_svc, [winner_code, loser_code])
         return
     # 未发布（DRAFT/REVIEW/EXPERIMENTAL）：从未生效，软删作废。
     # 同条 UPDATE 补写 successor_code（指向胜方）与 defeated 仲裁标记——
@@ -183,3 +228,4 @@ async def apply_arbitration_impact(
         status=loser.status,
         successor_code=winner_code,
     )
+    await _invalidate_affected(metric_svc, [winner_code, loser_code])

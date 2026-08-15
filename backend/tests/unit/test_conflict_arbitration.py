@@ -210,3 +210,47 @@ class TestArbitrationImpact:
         conflict = _conflict(candidate="ghost", existing="ghost2")
         await apply_arbitration_impact(db, conflict, "choose_canonical", "ghost", 1)
         assert db.updated == []
+
+    async def test_self_conflict_only_marks_canonical(self) -> None:
+        """自我冲突（existing == candidate 同码）：仅标记权威，不作废唯一指标。
+
+        曾致真实胜方被自己软删作废（successor 死循环指向自身），详情引导失效。
+        """
+        db = FakeDb(winner=None, loser=None)
+        conflict = _conflict(candidate="sales", existing="sales")
+        await apply_arbitration_impact(db, conflict, "choose_canonical", "sales", 1)
+        # 仅写胜方标记（canonical），无软删 UPDATE（无 deleted_at/successor_code）
+        assert len(db.updated) == 1
+        assert db.updated[0]["arbitration_mark"]["status"] == "canonical"
+        assert "deleted_at" not in db.updated[0]
+        assert "successor_code" not in db.updated[0]
+
+    async def test_void_loser_invalidates_cache(self) -> None:
+        """软删作废后失效受影响指标的读缓存（保证详情/健康读数即时一致）。"""
+        svc = AsyncMock()
+        svc.deprecate_metric = AsyncMock()
+        svc.invalidate_cache = AsyncMock()
+        db, _ = await _applied(
+            winner=_metric("existing", "PUBLISHED"),
+            loser=_metric("candidate", "DRAFT"),
+            canonical_code="existing",
+            decision="merge",
+            metric_svc=svc,
+        )
+        assert db.updated[1]["deleted_at"] is not None
+        svc.invalidate_cache.assert_awaited_once_with(["existing", "candidate"])
+
+    async def test_keep_diff_invalidates_both(self) -> None:
+        """keep_diff 双方标记后失效两方缓存。"""
+        svc = AsyncMock()
+        svc.deprecate_metric = AsyncMock()
+        svc.invalidate_cache = AsyncMock()
+        db, _ = await _applied(
+            winner=_metric("candidate", "PUBLISHED"),
+            loser=_metric("existing", "PUBLISHED"),
+            canonical_code=None,
+            decision="keep_diff",
+            metric_svc=svc,
+        )
+        assert len(db.updated) == 2
+        svc.invalidate_cache.assert_awaited_once_with(["candidate", "existing"])

@@ -164,6 +164,19 @@ class MetricService(BaseService):
 
         return GovernanceService(self._db)
 
+    async def invalidate_cache(self, metric_codes: list[str]) -> None:
+        """批量失效指标读缓存（best-effort，失败仅告警）。
+
+        供跨服务联动使用（如冲突仲裁软删/废弃/标记指标后主动失效缓存，
+        保证详情/健康读数与 DB 即时一致，避免 cache-aside 旧数据残留）。
+        """
+        if not metric_codes:
+            return
+        try:
+            await self._cache.invalidate_batch(metric_codes)
+        except Exception:
+            logger.warning("metric_cache_invalidate_batch_failed", codes=metric_codes)
+
     # ---- 字典校验辅助方法（对齐 spec FR-008/FR-009, plan.md D2）----
 
     async def _validate_domain_active(self, domain_code: str) -> None:
@@ -2231,7 +2244,22 @@ class MetricService(BaseService):
         """
         from app.services.semantic.health_scorer import HealthScorer
 
-        metric = await self.get_metric(metric_code)
+        metric = await self._repo.get_by_code(metric_code)
+        if metric is None:
+            # 与详情读路径一致：命中「软删 + successor」的作废指标时返回结构化
+            # METRIC_ARCHIVED（携带胜方指针），而非对历史链接直出裸「指标不存在」。
+            archived = await self._repo.get_archived_by_code(metric_code)
+            if archived is not None and archived.successor_code:
+                raise NotFoundError(
+                    f"指标已因口径裁决作废: {metric_code}",
+                    error_code=ErrorCode.METRIC_ARCHIVED,
+                    ctx={
+                        "metric_code": metric_code,
+                        "successor_code": archived.successor_code,
+                        "arbitration_mark": archived.arbitration_mark,
+                    },
+                )
+            raise NotFoundError(f"指标不存在: {metric_code}")
         scorer = HealthScorer(self._db)
         health = await scorer.calculate(metric.id)
         # 红橙指标进整改待办
