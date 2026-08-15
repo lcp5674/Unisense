@@ -273,7 +273,13 @@ export function MetricCatalog() {
         setDomainMap(m);
       }),
       fetchCurrentUser().then((u) => setCurrentUserId(u.id)).catch(() => {}),
-      listFavorites().then((codes) => setFavorites(new Set(codes))).catch(() => {}),
+      listFavorites()
+        .then((favs) =>
+          setFavorites(
+            new Set(favs.filter((f) => f.asset_type === "METRIC").map((f) => f.asset_id)),
+          ),
+        )
+        .catch(() => {}),
     ]).catch(() => {});
   }, []);
 
@@ -379,7 +385,7 @@ export function MetricCatalog() {
     const fav = favorites.has(code);
     try {
       if (fav) {
-        await removeFavorite(code);
+        await removeFavorite("METRIC", code);
         setFavorites((prev) => {
           const next = new Set(prev);
           next.delete(code);
@@ -387,7 +393,7 @@ export function MetricCatalog() {
         });
         message.success("已取消收藏");
       } else {
-        await addFavorite(code);
+        await addFavorite("METRIC", code);
         setFavorites((prev) => new Set(prev).add(code));
         message.success("已收藏");
       }

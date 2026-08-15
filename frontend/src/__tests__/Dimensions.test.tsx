@@ -44,13 +44,17 @@ vi.mock("../api", () => {
     listMetrics: vi.fn(),
     listUsers: vi.fn(),
     listDomainTree: vi.fn(),
+    listFavorites: vi.fn(),
+    addFavorite: vi.fn(),
+    removeFavorite: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
+const mockedListFavorites = vi.mocked(listFavorites);
 
 const DIMS: Dimension[] = [
   {
@@ -82,6 +86,7 @@ const DIMS: Dimension[] = [
 beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue({ items: DIMS, total: 2 });
+  mockedListFavorites.mockResolvedValue([]);
   // 维度列表 Tab 挂载即拉取指标候选（绑定指标下拉），默认返回空列表
   vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
   // 业务域树（新建/编辑维度业务域选项框）：finance → 财务域

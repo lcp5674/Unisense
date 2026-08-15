@@ -359,20 +359,22 @@ describe("MetricCatalog", () => {
     const favBtn = screen.getByRole("button", { name: "收藏" });
     fireEvent.click(favBtn);
     await waitFor(() => {
-      expect(mockedAddFavorite).toHaveBeenCalledWith("sales_gmv_sum_d");
+      expect(mockedAddFavorite).toHaveBeenCalledWith("METRIC", "sales_gmv_sum_d");
     });
     expect(screen.getByRole("button", { name: "取消收藏" })).toBeTruthy();
   });
 
   it("收藏：再次点击已收藏的心形调用 removeFavorite", async () => {
-    mockedFavorites.mockResolvedValue(["sales_gmv_sum_d"]);
+    mockedFavorites.mockResolvedValue([
+      { asset_type: "METRIC" as const, asset_id: "sales_gmv_sum_d" },
+    ]);
     mockedRemoveFavorite.mockResolvedValue({} as never);
     renderCatalog();
     await screen.findByText("sales_gmv_sum_d");
     const unfavBtn = screen.getByRole("button", { name: "取消收藏" });
     fireEvent.click(unfavBtn);
     await waitFor(() => {
-      expect(mockedRemoveFavorite).toHaveBeenCalledWith("sales_gmv_sum_d");
+      expect(mockedRemoveFavorite).toHaveBeenCalledWith("METRIC", "sales_gmv_sum_d");
     });
     expect(screen.getByRole("button", { name: "收藏" })).toBeTruthy();
   });

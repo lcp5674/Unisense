@@ -29,15 +29,19 @@ vi.mock("../api", () => {
     deprecateTerm: vi.fn(),
     listTermConflicts: vi.fn(),
     resolveTermConflict: vi.fn(),
+    listFavorites: vi.fn(),
+    addFavorite: vi.fn(),
+    removeFavorite: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listTerms, listTermConflicts, getTerm, updateTerm, createTermRelation } from "../api";
+import { listTerms, listTermConflicts, getTerm, updateTerm, createTermRelation, listFavorites } from "../api";
 
 const mockedList = vi.mocked(listTerms);
 const mockedConflicts = vi.mocked(listTermConflicts);
 const mockedGet = vi.mocked(getTerm);
+const mockedListFavorites = vi.mocked(listFavorites);
 const mockedUpdate = vi.mocked(updateTerm);
 const mockedRelation = vi.mocked(createTermRelation);
 
@@ -76,6 +80,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue({ items: TERMS, total: 2, page: 1, page_size: 20 });
   mockedConflicts.mockResolvedValue({ items: [], total: 0 });
+  mockedListFavorites.mockResolvedValue([]);
 });
 
 describe("Glossary 页面", () => {

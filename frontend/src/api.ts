@@ -206,6 +206,7 @@ const ERROR_CODE_ZH: Record<string, string> = {
   SELF_REVIEW_BLOCKED: "不能审核自己提交的指标",
   INVALID_TRANSITION: "当前状态不允许该操作",
   NOT_FOUND: "资源不存在或已被删除",
+  METRIC_ARCHIVED: "该指标已因口径裁决作废，请查看权威指标",
   VALIDATION_ERROR: "输入校验未通过",
   INTERNAL_ERROR: "系统内部错误，请稍后重试",
   DEPENDENCY_UNPUBLISHED: "依赖指标尚未发布",
@@ -954,21 +955,28 @@ export async function restoreStaleEdge(edgeId: number): Promise<StaleEdge> {
   return request<StaleEdge>(`${API_BASE}/lineage/stale/${edgeId}/restore`, { method: "POST" });
 }
 
-// ---- 收藏（consume 服务）----
-export async function listFavorites(): Promise<string[]> {
-  return request<string[]>(`${API_BASE}/consume/me/favorites`);
+// ---- 收藏（consume 服务，通用多资产）----
+export type FavoriteAssetType = "METRIC" | "TABLE" | "TERM" | "DIMENSION" | "TEMPLATE";
+
+export interface FavoriteItem {
+  asset_type: FavoriteAssetType;
+  asset_id: string;
 }
 
-export async function addFavorite(metricCode: string): Promise<FavoriteResponse> {
+export async function listFavorites(): Promise<FavoriteItem[]> {
+  return request<FavoriteItem[]>(`${API_BASE}/consume/me/favorites`);
+}
+
+export async function addFavorite(assetType: FavoriteAssetType, assetId: string): Promise<FavoriteResponse> {
   return request<FavoriteResponse>(`${API_BASE}/consume/me/favorites`, {
     method: "POST",
-    body: JSON.stringify({ metric_code: metricCode }),
+    body: JSON.stringify({ asset_type: assetType, asset_id: assetId }),
   });
 }
 
-export async function removeFavorite(metricCode: string): Promise<FavoriteResponse> {
+export async function removeFavorite(assetType: FavoriteAssetType, assetId: string): Promise<FavoriteResponse> {
   return request<FavoriteResponse>(
-    `${API_BASE}/consume/me/favorites/${encodeURIComponent(metricCode)}`,
+    `${API_BASE}/consume/me/favorites/${encodeURIComponent(assetType)}/${encodeURIComponent(assetId)}`,
     {
       method: "DELETE",
     },
@@ -976,13 +984,21 @@ export async function removeFavorite(metricCode: string): Promise<FavoriteRespon
 }
 
 export interface FavoriteDetail {
-  metric_code: string;
+  asset_type: FavoriteAssetType;
+  asset_id: string;
   name: string;
+  description: string | null;
   domain: string | null;
   status: string;
+  tier: string | null;
+  is_pii: boolean;
+  /** 收藏时间（ISO 字符串） */
+  created_at: string;
+  /** 资产已软删除/不存在 */
+  dead: boolean;
 }
 
-/** 收藏指标详情聚合（一次查询，避免逐条 getMetric 的 N+1）。 */
+/** 收藏详情聚合（一次查询，避免逐条取名的 N+1；含收藏时间与失效标记）。 */
 export async function listFavoriteDetails(): Promise<FavoriteDetail[]> {
   return request<FavoriteDetail[]>(`${API_BASE}/consume/me/favorites/detail`);
 }

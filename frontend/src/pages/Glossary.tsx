@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Descriptions, InputNumber } from "antd";
-import { PlusOutlined, SendOutlined, ArrowLeftOutlined } from "@ant-design/icons";
+import { PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined } from "@ant-design/icons";
 import {
   listTerms,
   createTerm,
@@ -12,6 +12,9 @@ import {
   deprecateTerm,
   listTermConflicts,
   resolveTermConflict,
+  listFavorites,
+  addFavorite,
+  removeFavorite,
   UnisenseApiError,
 } from "../api";
 import type { GlossaryTerm, GlossaryConflict } from "../types";
@@ -47,6 +50,8 @@ function TermsTab() {
   const [status, setStatus] = useState(urlStatus);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  // 术语收藏（C 层多资产收藏：TERM）
+  const [favCodes, setFavCodes] = useState<Set<string>>(new Set());
   const [form] = Form.useForm();
   // 详情/编辑/关系管理：详情为只读弹窗，编辑与关系用独立 Form 避免与新建表单互相污染
   const [detailTerm, setDetailTerm] = useState<GlossaryTerm | null>(null);
@@ -105,6 +110,41 @@ function TermsTab() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, status]);
+
+  // 加载当前用户术语收藏（TERM 类型）供行内收藏按钮判断
+  useEffect(() => {
+    listFavorites()
+      .then((favs) =>
+        setFavCodes(
+          new Set(favs.filter((f) => f.asset_type === "TERM").map((f) => f.asset_id)),
+        ),
+      )
+      .catch(() => {});
+  }, []);
+
+  // 术语收藏切换（行内心形）
+  async function toggleFavorite(t: GlossaryTerm) {
+    const fav = favCodes.has(t.term_code);
+    try {
+      if (fav) {
+        await removeFavorite("TERM", t.term_code);
+        setFavCodes((prev) => {
+          const next = new Set(prev);
+          next.delete(t.term_code);
+          return next;
+        });
+        message.success("已取消收藏");
+      } else {
+        await addFavorite("TERM", t.term_code);
+        setFavCodes((prev) => new Set(prev).add(t.term_code));
+        message.success("已收藏");
+      }
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "收藏操作失败",
+      );
+    }
+  }
 
   async function handleCreate(values: Record<string, unknown>) {
     try {
@@ -229,6 +269,14 @@ function TermsTab() {
           <Button size="small" type="link" onClick={() => openDetail(t)}>详情</Button>
           <Button size="small" type="link" onClick={() => openEdit(t)}>编辑</Button>
           <Button size="small" type="link" onClick={() => openRelation(t)}>关系</Button>
+          <Button
+            size="small"
+            type="link"
+            icon={<HeartOutlined style={{ color: favCodes.has(t.term_code) ? "#eb2f96" : undefined }} />}
+            onClick={() => toggleFavorite(t)}
+          >
+            {favCodes.has(t.term_code) ? "已收藏" : "收藏"}
+          </Button>
           {t.status === "DRAFT" && (
             <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => handleSubmit(t)}>提交</Button>
           )}

@@ -320,6 +320,11 @@ export function MetricDetail() {
   const navigate = useNavigate();
   const location = useLocation();
   const [metric, setMetric] = useState<MetricResponse | null>(null);
+  // 仲裁作废指标（METRIC_ARCHIVED）：软删 + successor 的历史链接直访时，展示友好引导而非裸 404
+  const [archived, setArchived] = useState<{
+    successorCode: string;
+    mark: Record<string, unknown> | null;
+  } | null>(null);
   const [versions, setVersions] = useState<MetricVersionResponse[]>([]);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<UserBrief[]>([]);
@@ -366,7 +371,7 @@ export function MetricDetail() {
         getMetric(code),
         listVersions(code),
         fetchCurrentUser(),
-        listFavorites().catch(() => [] as string[]),
+        listFavorites().catch(() => [] as { asset_type: string; asset_id: string }[]),
         getMetricHealth(code).catch(() => null),
         listUsers().catch(() => [] as UserBrief[]),
         listSubscriptions().catch(() => ({ items: [] as SubscriptionPref[] })),
@@ -375,7 +380,7 @@ export function MetricDetail() {
       setMetric(m);
       setVersions(vs);
       setCurrentUser(me);
-      setFavorited(favs.includes(code));
+      setFavorited(favs.some((f) => f.asset_type === "METRIC" && f.asset_id === code));
       setHealth(healthRes);
       setUsers(userList);
       setSubscribed(
@@ -434,7 +439,7 @@ export function MetricDetail() {
         icon={<HeartOutlined />}
         onClick={() =>
           runAction(
-            () => (favorited ? removeFavorite(metric.metric_code) : addFavorite(metric.metric_code)),
+            () => (favorited ? removeFavorite("METRIC", metric.metric_code) : addFavorite("METRIC", metric.metric_code)),
             favorited ? "取消收藏" : "收藏",
           )
         }

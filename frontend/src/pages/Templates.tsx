@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space } from "antd";
-import { PlusOutlined, ArrowLeftOutlined } from "@ant-design/icons";
-import { listTemplates, createMetric, instantiateTemplate, UnisenseApiError } from "../api";
+import { PlusOutlined, ArrowLeftOutlined, HeartOutlined } from "@ant-design/icons";
+import {
+  listTemplates,
+  createMetric,
+  instantiateTemplate,
+  listFavorites,
+  addFavorite,
+  removeFavorite,
+  UnisenseApiError,
+} from "../api";
 import type { MetricCreateRequest, MetricTemplate, MetricType } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
@@ -20,6 +28,8 @@ export function Templates() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [instantiateTarget, setInstantiateTarget] = useState<MetricTemplate | null>(null);
+  // 模板收藏（C 层多资产收藏：TEMPLATE）
+  const [favCodes, setFavCodes] = useState<Set<string>>(new Set());
   const [form] = Form.useForm();
   const navigate = useNavigate();
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
@@ -61,6 +71,41 @@ export function Templates() {
   function handleBack() {
     if (window.history.length > 1) navigate(-1);
     else navigate("/dashboard");
+  }
+
+  // 当前用户模板收藏（TEMPLATE）供行内收藏按钮判断
+  useEffect(() => {
+    listFavorites()
+      .then((favs) =>
+        setFavCodes(
+          new Set(favs.filter((f) => f.asset_type === "TEMPLATE").map((f) => f.asset_id)),
+        ),
+      )
+      .catch(() => {});
+  }, []);
+
+  // 模板收藏切换（行内心形）
+  async function toggleFavorite(t: MetricTemplate) {
+    const fav = favCodes.has(t.code);
+    try {
+      if (fav) {
+        await removeFavorite("TEMPLATE", t.code);
+        setFavCodes((prev) => {
+          const next = new Set(prev);
+          next.delete(t.code);
+          return next;
+        });
+        message.success("已取消收藏");
+      } else {
+        await addFavorite("TEMPLATE", t.code);
+        setFavCodes((prev) => new Set(prev).add(t.code));
+        message.success("已收藏");
+      }
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "收藏操作失败",
+      );
+    }
   }
 
   useEffect(() => {
@@ -137,7 +182,16 @@ export function Templates() {
       key: "actions",
       width: 140,
       render: (_: unknown, t: MetricTemplate) => (
-        <Button type="link" onClick={() => openInstantiate(t)}>实例化指标</Button>
+        <Space size={4} wrap>
+          <Button
+            type="link"
+            icon={<HeartOutlined style={{ color: favCodes.has(t.code) ? "#eb2f96" : undefined }} />}
+            onClick={() => toggleFavorite(t)}
+          >
+            {favCodes.has(t.code) ? "已收藏" : "收藏"}
+          </Button>
+          <Button type="link" onClick={() => openInstantiate(t)}>实例化指标</Button>
+        </Space>
       ),
     },
   ];

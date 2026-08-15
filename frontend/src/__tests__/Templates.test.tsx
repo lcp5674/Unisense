@@ -23,6 +23,9 @@ vi.mock("../api", () => {
     listTemplates: vi.fn(),
     createMetric: vi.fn(),
     instantiateTemplate: vi.fn(),
+    listFavorites: vi.fn(),
+    addFavorite: vi.fn(),
+    removeFavorite: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -31,10 +34,11 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
-import { listTemplates, createMetric, instantiateTemplate } from "../api";
+import { listTemplates, createMetric, instantiateTemplate, listFavorites } from "../api";
 
 const mockedList = vi.mocked(listTemplates);
 const mockedCreate = vi.mocked(createMetric);
+const mockedListFavorites = vi.mocked(listFavorites);
 const mockedInstantiate = vi.mocked(instantiateTemplate);
 
 const CREATED: MetricResponse = {
@@ -128,6 +132,7 @@ const TPLS: MetricTemplate[] = [
 beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue(TPLS);
+  mockedListFavorites.mockResolvedValue([]);
 });
 
 describe("Templates 页面", () => {

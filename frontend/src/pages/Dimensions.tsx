@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm } from "antd";
-import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, ArrowLeftOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined } from "@ant-design/icons";
 import {
   listDimensions,
   createDimension,
@@ -25,6 +25,9 @@ import {
   listMetrics,
   listDomainTree,
   listUsers,
+  listFavorites,
+  addFavorite,
+  removeFavorite,
   UnisenseApiError,
 } from "../api";
 import type {
@@ -89,6 +92,8 @@ function DimensionsTab() {
   const [status, setStatus] = useState(urlStatus);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  // 维度收藏（C 层多资产收藏：DIMENSION）
+  const [favCodes, setFavCodes] = useState<Set<string>>(new Set());
   const [form] = Form.useForm();
   // 编辑态：复用新建表单布局，打开时预填当前维度值
   const [editTarget, setEditTarget] = useState<Dimension | null>(null);
@@ -156,7 +161,39 @@ function DimensionsTab() {
       .catch(() => {});
     // 责任人候选（失败静默：责任人列回退「用户 #id」）
     listUsers().then(setUsers).catch(() => {});
+    // 当前用户维度收藏（DIMENSION）供行内收藏按钮判断
+    listFavorites()
+      .then((favs) =>
+        setFavCodes(
+          new Set(favs.filter((f) => f.asset_type === "DIMENSION").map((f) => f.asset_id)),
+        ),
+      )
+      .catch(() => {});
   }, []);
+
+  // 维度收藏切换（行内心形）
+  async function toggleFavorite(d: Dimension) {
+    const fav = favCodes.has(d.dim_code);
+    try {
+      if (fav) {
+        await removeFavorite("DIMENSION", d.dim_code);
+        setFavCodes((prev) => {
+          const next = new Set(prev);
+          next.delete(d.dim_code);
+          return next;
+        });
+        message.success("已取消收藏");
+      } else {
+        await addFavorite("DIMENSION", d.dim_code);
+        setFavCodes((prev) => new Set(prev).add(d.dim_code));
+        message.success("已收藏");
+      }
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "收藏操作失败",
+      );
+    }
+  }
 
   async function load() {
     const seq = ++loadSeq.current;
@@ -318,6 +355,14 @@ function DimensionsTab() {
       render: (_: unknown, d: Dimension) =>
         d.status !== "DEPRECATED" ? (
           <Space size={4} wrap>
+            <Button
+              size="small"
+              type="link"
+              icon={<HeartOutlined style={{ color: favCodes.has(d.dim_code) ? "#eb2f96" : undefined }} />}
+              onClick={() => toggleFavorite(d)}
+            >
+              {favCodes.has(d.dim_code) ? "已收藏" : "收藏"}
+            </Button>
             <Button size="small" onClick={() => openDetail(d)}>详情</Button>
             <Button size="small" onClick={() => openEdit(d)}>编辑</Button>
             <Button
@@ -346,6 +391,14 @@ function DimensionsTab() {
           </Space>
         ) : (
           <Space size={4} wrap>
+            <Button
+              size="small"
+              type="link"
+              icon={<HeartOutlined style={{ color: favCodes.has(d.dim_code) ? "#eb2f96" : undefined }} />}
+              onClick={() => toggleFavorite(d)}
+            >
+              {favCodes.has(d.dim_code) ? "已收藏" : "收藏"}
+            </Button>
             <Button size="small" onClick={() => openDetail(d)}>详情</Button>
             <Tag>已停用</Tag>
           </Space>
