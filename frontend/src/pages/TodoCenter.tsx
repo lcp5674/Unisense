@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Button, List, Tag, Space, message } from "antd";
+import { ArrowLeftOutlined } from "@ant-design/icons";
 import { listConflicts, listMetrics, listQualityEvents, UnisenseApiError } from "../api";
 import { useTracking } from "../hooks/useTracking";
 
@@ -110,11 +111,24 @@ export function TodoCenter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 返回上一入口（任意来源，浏览器历史天然覆盖）；无上一页时兜底总览仪表
+  function handleBack() {
+    if (window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate("/dashboard");
+    }
+  }
+
   // 各类计数（用于分类汇总展示）
   const countByKind = (kind: Todo["kind"]) => todos.filter((t) => t.kind === kind).length;
 
   return (
-    <Card title="待办中心">
+    <div>
+      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
+        返回
+      </Button>
+      <Card title="待办中心">
       <Space size={[8, 8]} wrap style={{ marginBottom: 16 }}>
         {(["conflict", "draft", "review", "quality"] as const).map((kind) => (
           <Tag key={kind} color={KIND_META[kind].color} data-testid={`todo-count-${kind}`}>
@@ -146,6 +160,7 @@ export function TodoCenter() {
           </List.Item>
         )}
       />
-    </Card>
+      </Card>
+    </div>
   );
 }

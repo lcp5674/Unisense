@@ -238,6 +238,51 @@ describe("通知中心 - 订阅项对齐", () => {
   });
 });
 
+describe("通知中心 - 返回按钮", () => {
+  it("提供统一的返回按钮（返回上一入口）", async () => {
+    mockedList.mockResolvedValue({ items: [notif({})], total: 1, page: 1, page_size: 10 });
+    render(
+      <MemoryRouter initialEntries={["/notifications"]}>
+        <Notifications />
+      </MemoryRouter>,
+    );
+    await screen.findByText("指标已通过");
+    expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
+  });
+
+  it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
+    mockedList.mockResolvedValue({ items: [notif({})], total: 1, page: 1, page_size: 10 });
+    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
+    render(
+      <MemoryRouter initialEntries={["/lineage", "/notifications"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/notifications" element={<Notifications />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("指标已通过");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("lineage-page");
+    lengthSpy.mockRestore();
+  });
+
+  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
+    mockedList.mockResolvedValue({ items: [notif({})], total: 1, page: 1, page_size: 10 });
+    render(
+      <MemoryRouter initialEntries={["/notifications"]}>
+        <Routes>
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+          <Route path="/notifications" element={<Notifications />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText("指标已通过");
+    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
+    await screen.findByText("dashboard-page");
+  });
+});
+
 // 在单条卡片内定位按钮：antd 双字按钮会插入空格（如「删 除」）
 function withinCard(card: HTMLElement, text: string | RegExp) {
   const btn = Array.from(card.querySelectorAll("button")).find((b) => {
