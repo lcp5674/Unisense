@@ -316,6 +316,16 @@ async def get_favorites(
     return ok(data=await svc.list_favorites(user.id))
 
 
+@router.get("/consume/me/favorites/detail", response_model=ApiResponse[list[dict]])
+async def get_favorite_details(
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_db_session),
+) -> ApiResponse[list[dict]]:
+    """收藏指标详情聚合（一次查询，消除前端逐条取名 N+1）。"""
+    svc = ConsumeService(db)
+    return ok(data=await svc.list_favorite_details(user.id))
+
+
 @router.post("/consume/me/favorites", response_model=ApiResponse[FavoriteResponse])
 async def add_favorite(
     req: FavoriteRequest,

@@ -504,6 +504,10 @@ class ConsumeService(BaseService):
 
     # ---- 收藏 ----
     async def add_favorite(self, user_id: int, metric_code: str) -> FavoriteResponse:
+        # 校验指标存在，避免收藏死码（前端 getMetric 取名会退化为显示编码，产生死链）
+        metric = await self._db.scalar(select(Metric).where(Metric.metric_code == metric_code))
+        if metric is None:
+            raise NotFoundError(f"指标不存在: {metric_code}")
         codes = await self._fav.list_pinned(user_id)
         if metric_code not in codes:
             codes.append(metric_code)
@@ -518,6 +522,26 @@ class ConsumeService(BaseService):
 
     async def list_favorites(self, user_id: int) -> list[str]:
         return await self._fav.list_pinned(user_id)
+
+    async def list_favorite_details(self, user_id: int) -> list[dict[str, Any]]:
+        """批量返回收藏指标详情（一次查询聚合，避免前端逐条 getMetric 的 N+1）。
+
+        已失效/被删除的指标保留编码位并标记 status 为 UNKNOWN，供前端灰显提示。
+        """
+        codes = await self._fav.list_pinned(user_id)
+        if not codes:
+            return []
+        rows = await self._db.scalars(select(Metric).where(Metric.metric_code.in_(codes)))
+        by_code = {m.metric_code: m for m in rows}
+        return [
+            {
+                "metric_code": c,
+                "name": by_code[c].name if c in by_code else c,
+                "domain": by_code[c].domain if c in by_code else None,
+                "status": by_code[c].status if c in by_code else "UNKNOWN",
+            }
+            for c in codes
+        ]
 
     # ---- 版本消费方确认回调 ----
     async def confirm_version(self, version_id: int, user_id: int) -> None:

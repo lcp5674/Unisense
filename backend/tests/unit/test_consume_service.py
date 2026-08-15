@@ -59,6 +59,7 @@ def _metric(
     expr="SUM(x)",
     grain="day",
     domain: str | None = "sales",
+    name: str | None = None,
     pii: bool = False,
     pii_flag: bool = False,
     compliance_reviewed: bool = False,
@@ -68,6 +69,7 @@ def _metric(
     m.status = status
     m.owner_org = 1
     m.domain = domain
+    m.name = name or code
     m.pii_flag = pii_flag
     m.compliance_reviewed = compliance_reviewed
     m.definition_json = {
@@ -614,6 +616,7 @@ async def test_list_snapshots() -> None:
 # ---- 收藏 ----
 async def test_add_favorite_new() -> None:
     svc = _svc(await _client())
+    svc._db.scalar = AsyncMock(return_value=_metric(code="gmv"))
     svc._fav.list_pinned = AsyncMock(return_value=[])
     svc._fav.upsert_pinned = AsyncMock()
     resp = await svc.add_favorite(1, "gmv")
@@ -623,11 +626,45 @@ async def test_add_favorite_new() -> None:
 
 async def test_add_favorite_already_pinned() -> None:
     svc = _svc(await _client())
+    svc._db.scalar = AsyncMock(return_value=_metric(code="gmv"))
     svc._fav.list_pinned = AsyncMock(return_value=["gmv"])
     svc._fav.upsert_pinned = AsyncMock()
     resp = await svc.add_favorite(1, "gmv")
     assert resp.pinned is True
     svc._fav.upsert_pinned.assert_not_awaited()
+
+
+async def test_add_favorite_metric_not_found() -> None:
+    svc = _svc(await _client())
+    svc._db.scalar = AsyncMock(return_value=None)
+    svc._fav.list_pinned = AsyncMock(return_value=[])
+    svc._fav.upsert_pinned = AsyncMock()
+    with pytest.raises(NotFoundError):
+        await svc.add_favorite(1, "ghost_code")
+    svc._fav.upsert_pinned.assert_not_awaited()
+
+
+async def test_list_favorite_details_aggregates_in_one_query() -> None:
+    svc = _svc(await _client())
+    svc._fav.list_pinned = AsyncMock(return_value=["gmv", "revenue", "ghost"])
+    svc._db.scalars = AsyncMock(
+        return_value=[_metric(code="gmv", domain="sales", status="PUBLISHED"), _metric(code="revenue", domain="finance", status="DRAFT")]
+    )
+    out = await svc.list_favorite_details(1)
+    assert out == [
+        {"metric_code": "gmv", "name": "gmv", "domain": "sales", "status": "PUBLISHED"},
+        {"metric_code": "revenue", "name": "revenue", "domain": "finance", "status": "DRAFT"},
+        # 失效收藏：保留编码位，标记 UNKNOWN 供前端灰显
+        {"metric_code": "ghost", "name": "ghost", "domain": None, "status": "UNKNOWN"},
+    ]
+
+
+async def test_list_favorite_details_empty() -> None:
+    svc = _svc(await _client())
+    svc._fav.list_pinned = AsyncMock(return_value=[])
+    svc._db.scalars = AsyncMock()
+    assert await svc.list_favorite_details(1) == []
+    svc._db.scalars.assert_not_awaited()
 
 
 async def test_remove_favorite() -> None:
