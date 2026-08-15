@@ -6,6 +6,17 @@ import "@testing-library/jest-dom";
 // 这类警告源自动画生命周期，与组件功能无关，且测试断言仍会捕获真实异步问题
 // （若 UI 未按预期更新，断言照样失败，只是少了诊断堆栈）。统一过滤 act 警告
 // 以保持测试输出整洁，其余 console.error 原样保留。
+//
+// 过滤计数 window.__ACT_FILTERED 供测试「正向验证」：断言某操作（如打开/关闭
+// 带动画的 Modal）确实产生了被过滤的 act 警告且计数增加，证明过滤机制在工作，
+// 而非「无警告=未过滤/过滤坏了」的不可观测状态。
+declare global {
+  interface Window {
+    __ACT_FILTERED?: number;
+  }
+}
+if (typeof window !== "undefined") window.__ACT_FILTERED = 0;
+
 const origConsoleError = console.error;
 console.error = (...args: unknown[]) => {
   const text = args
@@ -20,6 +31,7 @@ console.error = (...args: unknown[]) => {
     })
     .join("\n");
   if (text.includes("not wrapped in act(")) {
+    if (typeof window !== "undefined") window.__ACT_FILTERED = (window.__ACT_FILTERED ?? 0) + 1;
     return;
   }
   origConsoleError.apply(console, args as Parameters<typeof console.error>);

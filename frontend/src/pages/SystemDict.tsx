@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Card, Tabs, Table, Button, Modal, Form, Input, InputNumber, Space, Tag, Select, App as AntApp,
@@ -24,6 +24,11 @@ const DICT_TYPE_LABELS: Record<string, string> = {
   metric_tier: "指标分级",
 };
 
+// 打开新增弹窗时静默刷新的最小间隔（毫秒）：TTL 内重复打开直接用缓存，避免
+// 无并发场景下每次打开都多发一次 listAllDictItems 请求；超 TTL 才刷新，以
+// 缩小「他端新增同名编码但本页未刷新」导致的预览滞后窗口。
+export const QUIET_REFRESH_TTL_MS = 30_000;
+
 export function SystemDict() {
   const { message, modal } = AntApp.useApp();
   const navigate = useNavigate();
@@ -47,6 +52,8 @@ export function SystemDict() {
   const [editItem, setEditItem] = useState<SystemDictItem | null>(null);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
+  // 静默刷新的上次执行时间（TTL 防抖：QUIET_REFRESH_TTL_MS 内不重复请求）
+  const lastQuietRefreshRef = useRef(0);
   // 编码自动生成预览：监听显示名，与后端 codegen 规则对齐——
   // slugify_code 生成 base（纯标点/空白名回退 item），再对当前类型已加载
   // （非软删）项编码做冲突自增（resolveUniqueCode，与 generate_unique_code
@@ -91,9 +98,13 @@ export function SystemDict() {
       .finally(() => setLoading(false));
   }
 
-  // 静默刷新项列表：不置 loading，仅更新 items（打开新增弹窗时调用）
+  // 静默刷新项列表：不置 loading，仅更新 items（打开新增弹窗时调用）。
+  // TTL 防抖——QUIET_REFRESH_TTL_MS 内重复打开直接用缓存，超 TTL 才刷新。
   function refreshItemsQuietly() {
     if (!activeType) return;
+    const now = Date.now();
+    if (now - lastQuietRefreshRef.current < QUIET_REFRESH_TTL_MS) return;
+    lastQuietRefreshRef.current = now;
     listAllDictItems(activeType).then(setItems).catch(() => {});
   }
 

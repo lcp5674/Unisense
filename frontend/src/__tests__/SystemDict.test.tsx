@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { App as AntApp } from "antd";
-import { SystemDict } from "../pages/SystemDict";
+import { SystemDict, QUIET_REFRESH_TTL_MS } from "../pages/SystemDict";
 import type { SystemDictItem } from "../types";
 
 vi.mock("../api", () => ({
@@ -179,6 +179,44 @@ describe("SystemDict 页面", () => {
     fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
     // openCreate 触发一次静默刷新（不置 loading），供编码预览基于最新项重算
     await waitFor(() => expect(mockedItems.mock.calls.length).toBeGreaterThan(callsBefore));
+  });
+
+  it("静默刷新 TTL 防抖：TTL 内重复打开不重复请求，超 TTL 才刷新", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000_000_000);
+    renderDict();
+    await screen.findByText("日");
+    // 首次打开（距上次刷新 0 → 远超 TTL）→ 静默刷新 1 次（初始加载 1 + 刷新 1 = 2）
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    await waitFor(() => expect(mockedItems).toHaveBeenCalledTimes(2));
+    // 关闭弹窗
+    fireEvent.click(document.querySelector(".ant-modal-close") as HTMLElement);
+    // TTL 内（+20s < 30s）再次打开 → 直接用缓存，不额外请求
+    nowSpy.mockReturnValue(1_000_000_000 + 20_000);
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    expect(mockedItems).toHaveBeenCalledTimes(2);
+    // 关闭后再过（累计 > TTL）→ 重新静默刷新
+    fireEvent.click(document.querySelector(".ant-modal-close") as HTMLElement);
+    nowSpy.mockReturnValue(1_000_000_000 + QUIET_REFRESH_TTL_MS + 1_000);
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    await waitFor(() => expect(mockedItems).toHaveBeenCalledTimes(3));
+    nowSpy.mockRestore();
+  });
+
+  it("打开新增弹窗产生被过滤的 act 警告：setup 过滤机制正向验证", async () => {
+    renderDict();
+    await screen.findByText("日");
+    const before = (window as unknown as { __ACT_FILTERED?: number }).__ACT_FILTERED ?? 0;
+    // 打开 Modal 触发 rc-motion 出入场动画 → jsdom 下必然产生 act 警告 → setup
+    // 计数增加（证明过滤机制在工作，而非「无警告=过滤坏了」的不可观测状态）。
+    // 若未来 antd/jsdom 不再触发该警告，此断言会失败——恰提醒过滤可能已不需要。
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    // rc-motion 动画启动需真实 macrotask 让出事件循环才推进 React 渲染队列并
+    // 触发 act 警告；waitFor 轮询（被 testing-library 包在 act 内）不推进该队列，
+    // 故先让出一帧使警告落地，再用 waitFor 兜底后续异步。
+    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() =>
+      expect((window as unknown as { __ACT_FILTERED?: number }).__ACT_FILTERED ?? 0).toBeGreaterThan(before),
+    );
   });
 
   it("同名编码超上限：预览切换为「需手动指定」并可输入编码透传提交", async () => {
