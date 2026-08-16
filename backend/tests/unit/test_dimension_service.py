@@ -995,3 +995,46 @@ async def test_deprecate_member_leaf_ok() -> None:
         SimpleNamespace(parent_code=None),  # 无子成员
     ])
     await svc.deprecate_member("dim_c", "c1")
+
+
+async def test_bind_rejects_draft_default_member() -> None:
+    """绑定指标时默认成员须已发布——DRAFT 成员作默认值被拒（跨服务一致性）。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
+    repo.get_member = AsyncMock(side_effect=lambda d, c: SimpleNamespace(
+        status="DRAFT" if c == "c_draft" else None))
+    try:
+        await svc.bind_metric_dimension(MetricDimensionBind(
+            metric_id=42, dim_code="region", role="FILTER", default_member="c_draft"))
+        assert False, "应拒绝 DRAFT 成员作默认值"
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "DEFAULT_MEMBER_NOT_PUBLISHED"
+
+
+async def test_bind_rejects_deprecated_default_member() -> None:
+    """绑定指标时默认成员须已发布——DEPRECATED 成员作默认值被拒。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
+    repo.get_member = AsyncMock(side_effect=lambda d, c: SimpleNamespace(
+        status="DEPRECATED" if c == "c_old" else None))
+    try:
+        await svc.bind_metric_dimension(MetricDimensionBind(
+            metric_id=42, dim_code="region", role="FILTER", default_member="c_old"))
+        assert False, "应拒绝 DEPRECATED 成员作默认值"
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "DEFAULT_MEMBER_NOT_PUBLISHED"
+
+
+async def test_bind_allows_published_default_member() -> None:
+    """绑定指标时已发布成员可作默认值（合法场景放行）。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
+    repo.get_member = AsyncMock(side_effect=lambda d, c: SimpleNamespace(
+        status="PUBLISHED" if c == "c_pub" else None))
+    repo.save_metric_dimension = AsyncMock(side_effect=lambda b: b)
+    metric = _metric_with_dims("DRAFT", ["existing_dim"])
+    svc._session.execute = AsyncMock(return_value=_bind_result(metric))
+    binding = await svc.bind_metric_dimension(MetricDimensionBind(
+        metric_id=42, dim_code="region", role="FILTER", default_member="c_pub"))
+    assert binding.default_member == "c_pub"
+    assert metric.definition_json["dimensions"] == ["existing_dim", "region"]

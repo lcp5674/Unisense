@@ -543,6 +543,17 @@ class DimensionService(BaseService):
                 f"默认成员不存在: {data.dim_code}/{data.default_member}",
                 ctx={"default_member": data.default_member},
             )
+        # 默认成员状态校验（跨服务一致性）：仅 PUBLISHED 可作默认值——
+        # DRAFT 未发布不可被引用、DEPRECATED 已废弃不再使用（对齐维度主体
+        # "未发布/已废弃不可消费"语义；存量绑定不受影响，仅 bind 新增时校验）
+        if data.default_member is not None:
+            dm = await self._repo.get_member(data.dim_code, data.default_member)
+            if dm is not None and dm.status != DimensionStatus.PUBLISHED.value:
+                raise ConflictError(
+                    f"默认成员状态非法（须已发布，当前 {dm.status}）: "
+                    f"{data.dim_code}/{data.default_member}",
+                    error_code="DEFAULT_MEMBER_NOT_PUBLISHED",
+                )
         binding = MetricDimension(
             metric_id=data.metric_id,
             dim_code=data.dim_code,
