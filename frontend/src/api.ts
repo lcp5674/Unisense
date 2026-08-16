@@ -1469,6 +1469,7 @@ export async function listDimensions(params?: {
   status?: string;
   keyword?: string;
   owner_id?: number;
+  page?: number;
   page_size?: number;
 }): Promise<{ items: Dimension[]; total: number }> {
   const qs = pageQs({
@@ -1476,6 +1477,7 @@ export async function listDimensions(params?: {
     status: params?.status,
     keyword: params?.keyword,
     owner_id: params?.owner_id,
+    page: params?.page,
     page_size: params?.page_size ?? 50,
   });
   return request(`${API_BASE}/dimensions?${qs}`);

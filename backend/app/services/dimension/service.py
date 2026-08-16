@@ -130,8 +130,16 @@ class DimensionService(BaseService):
         status: str | None,
         keyword: str | None = None,
         owner_id: int | None = None,
-    ) -> list[tuple[Dimension, int]]:
-        return await self._repo.list_dimensions(domain, status, keyword, owner_id)
+        *,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[tuple[Dimension, int]], int]:
+        """分页列出维度，返回 (列表, total)（服务端分页，对齐 glossary）。"""
+        limit = min(max(page_size, 1), 200)
+        offset = (max(page, 1) - 1) * limit
+        return await self._repo.list_dimensions(
+            domain, status, keyword, owner_id, limit=limit, offset=offset
+        )
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:
         dim = await self._require(dim_code)

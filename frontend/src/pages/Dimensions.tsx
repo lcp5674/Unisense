@@ -116,6 +116,8 @@ function DimensionsTab() {
   const { can } = usePermission();
   // 主表每页条数（持久化，用户可自定义）
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.dimensions.pageSize", 20);
+  // 主表当前页（服务端分页）
+  const [page, setPage] = useState(1);
   // URL 直达参数（?kw=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
   // 生命周期状态下钻（?status=，总览仪表「维度」资产卡片）作为初始筛选
@@ -123,6 +125,7 @@ function DimensionsTab() {
   // 责任人（Owner）下钻（?owner_id=，总览仪表 Owner 责任分布）
   const urlOwnerId = searchParams.get("owner_id");
   const [items, setItems] = useState<Dimension[]>([]);
+  const [total, setTotal] = useState(0);
   const [keyword, setKeyword] = useState(urlKw);
   // 搜索输入框即时显示值：与过滤值 keyword 分离——输入不打断浏览/不发请求，回车确认才过滤
   const [inputValue, setInputValue] = useState(urlKw);
@@ -256,10 +259,13 @@ function DimensionsTab() {
         keyword: (overrideKeyword ?? keyword) || undefined,
         status: status || undefined,
         owner_id: ownerId,
+        page,
+        page_size: pageSize,
       });
       // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
       if (seq !== loadSeq.current) return;
       setItems(res.items);
+      setTotal(res.total);
     } catch (err) {
       if (seq !== loadSeq.current) return;
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
@@ -271,7 +277,7 @@ function DimensionsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, status, ownerId]);
+  }, [keyword, status, ownerId, page]);
 
   async function handleCreate(values: Record<string, unknown>) {
     if (saving) return;
@@ -523,9 +529,15 @@ function DimensionsTab() {
         rowKey="dim_code"
         loading={loading}
         pagination={{
+          current: page,
           pageSize,
+          total,
           showSizeChanger: true,
-          onShowSizeChange,
+          onShowSizeChange: (p: number, ps: number) => {
+            setPage(1);
+            onShowSizeChange(p, ps);
+          },
+          onChange: (p: number) => setPage(p),
           pageSizeOptions: [10, 20, 50, 100],
           showTotal: (t: number) => `共 ${t} 条`,
         }}
@@ -844,7 +856,7 @@ function MembersTab() {
   const [importProgress, setImportProgress] = useState<{ ok: number; failed: number; done: number; total: number } | null>(null);
 
   useEffect(() => {
-    listDimensions().then((r) => setDims(r.items)).catch(() => {});
+    listDimensions({ page_size: 200 }).then((r) => setDims(r.items)).catch(() => {});
     listDataSources({ page_size: 100 })
       .then((r) => setDataSources(r.items))
       .catch(() => setDataSources([]));
@@ -1297,7 +1309,7 @@ function MappingsTab() {
 
   useEffect(() => {
     load();
-    listDimensions().then((r) => setDims(r.items)).catch(() => {});
+    listDimensions({ page_size: 200 }).then((r) => setDims(r.items)).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

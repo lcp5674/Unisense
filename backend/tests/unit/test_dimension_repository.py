@@ -23,6 +23,9 @@ class _FakeResult:
     def scalar_one_or_none(self) -> object | None:
         return self._row
 
+    def scalar(self) -> object | None:
+        return self._row
+
     def scalars(self) -> _FakeResult:
         return self
 
@@ -51,6 +54,12 @@ def _first_stmt(session: AsyncMock):
     return str(stmt.compile(compile_kwargs={"literal_binds": True}))
 
 
+def _rows_stmt(session: AsyncMock):
+    """取第 2 次 execute（rows 查询）的语句——count 查询在第 1 次。"""
+    stmt = session.execute.call_args_list[1][0][0]
+    return str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+
 class TestDimensionCRUD:
     async def test_save_dimension_adds_and_flushes(self, repo, session) -> None:
         dim = SimpleNamespace(dim_code="region")
@@ -74,39 +83,45 @@ class TestDimensionCRUD:
     async def test_list_dimensions_no_filter(self, repo, session) -> None:
         dims = [SimpleNamespace(dim_code="a"), SimpleNamespace(dim_code="b")]
         # list_dimensions 返回 (维度, 绑定指标数) 二元组（LEFT JOIN 聚合）
-        session.execute = AsyncMock(return_value=_FakeResult(rows=[(d, 0) for d in dims]))
+        session.execute = AsyncMock(
+            side_effect=[
+                _FakeResult(row=len(dims)),
+                _FakeResult(rows=[(d, 0) for d in dims]),
+            ]
+        )
 
-        out = await repo.list_dimensions(None, None)
-        assert [d for d, _ in out] == dims
-        stmt = _first_stmt(session)
+        items, total = await repo.list_dimensions(None, None)
+        assert [d for d, _ in items] == dims
+        assert total == len(dims)
+        stmt = _rows_stmt(session)
         assert "dimension" in stmt
 
     async def test_list_dimensions_filters_deleted(self, repo, session) -> None:
         """软删维度不出现在列表（deleted_at IS NULL 过滤）。"""
-        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
         await repo.list_dimensions(None, None)
-        stmt = _first_stmt(session)
+        stmt = _rows_stmt(session)
         assert "deleted_at IS NULL" in stmt
 
     async def test_list_dimensions_with_domain_and_status(self, repo, session) -> None:
-        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
         await repo.list_dimensions("sales", "PUBLISHED")
-        stmt = _first_stmt(session)
+        stmt = _rows_stmt(session)
         assert "'sales'" in stmt
         assert "'PUBLISHED'" in stmt
 
     async def test_list_dimensions_with_keyword(self, repo, session) -> None:
         """keyword 命中编码/名称/描述 LIKE 条件。"""
-        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
         await repo.list_dimensions(None, None, "region")
-        stmt = _first_stmt(session)
+        stmt = _rows_stmt(session)
         assert "%region%" in stmt
 
     async def test_list_dimensions_keyword_escapes_wildcards(self, repo, session) -> None:
         """LIKE 通配符（% / _）须转义，防模糊放大。"""
-        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
         await repo.list_dimensions(None, None, "100%_x")
-        stmt = _first_stmt(session)
+        stmt = _rows_stmt(session)
         # 转义符为 /：% → /% 、_ → /_，并生成 ESCAPE '/' 子句（防模糊放大）
         assert "100/%/_x" in stmt
         assert "ESCAPE '/'" in stmt

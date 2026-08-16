@@ -34,34 +34,51 @@ class DimensionRepository:
         status: str | None,
         keyword: str | None = None,
         owner_id: int | None = None,
-    ) -> list[tuple[Dimension, int]]:
-        """列出维度并附带绑定指标数（LEFT JOIN 聚合，未绑定的维度计数为 0）。"""
-        stmt = (
-            select(Dimension, func.count(MetricDimension.id))
-            .outerjoin(MetricDimension, MetricDimension.dim_code == Dimension.dim_code)
-            .group_by(Dimension.id)
-            .where(Dimension.deleted_at.is_(None))
-        )
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[tuple[Dimension, int]], int]:
+        """分页列出维度并附带绑定指标数，返回 (列表, total)。
+
+        - LEFT JOIN 聚合取绑定指标数（未绑定计数 0）
+        - total 用独立 count（不含 JOIN），与列表共用同一过滤条件，保证分页一致性
+        - 对齐 glossary 的服务端分页（page/page_size），消除全量拉回的性能隐患
+        """
+        conditions = [Dimension.deleted_at.is_(None)]
         if domain:
-            stmt = stmt.where(Dimension.domain == domain)
+            conditions.append(Dimension.domain == domain)
         if status:
-            stmt = stmt.where(Dimension.status == status)
+            conditions.append(Dimension.status == status)
         if owner_id is not None:
-            stmt = stmt.where(Dimension.owner_id == owner_id)
+            conditions.append(Dimension.owner_id == owner_id)
         if keyword:
             # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
             escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
-            stmt = stmt.where(
+            conditions.append(
                 or_(
                     Dimension.dim_code.like(f"%{escaped}%", escape="/"),
                     Dimension.name.like(f"%{escaped}%", escape="/"),
                     Dimension.description.like(f"%{escaped}%", escape="/"),
                 )
             )
+        stmt = (
+            select(Dimension, func.count(MetricDimension.id))
+            .outerjoin(MetricDimension, MetricDimension.dim_code == Dimension.dim_code)
+            .group_by(Dimension.id)
+            .where(*conditions)
+        )
+        count_stmt = (
+            select(func.count())
+            .select_from(Dimension)
+            .where(*conditions)
+        )
+        total = (await self._session.execute(count_stmt)).scalar() or 0
         rows = (
-            await self._session.execute(stmt.order_by(Dimension.id.asc()))
+            await self._session.execute(
+                stmt.order_by(Dimension.id.asc()).limit(limit).offset(offset)
+            )
         ).all()
-        return [(dim, count) for dim, count in rows]
+        return [(dim, count) for dim, count in rows], total
 
     async def save_member(self, obj: DimensionMember) -> DimensionMember:
         self._session.add(obj)

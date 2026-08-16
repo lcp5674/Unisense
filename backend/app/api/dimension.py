@@ -75,15 +75,19 @@ async def list_dimensions(
     status: str | None = Query(None),
     keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
     owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
-    items = await DimensionService(db).list_dimensions(domain, status, keyword, owner_id)
+    items, total = await DimensionService(db).list_dimensions(
+        domain, status, keyword, owner_id, page=page, page_size=page_size
+    )
     converted = []
     for dim, metric_count in items:
         resp = DimensionResponse.from_model(dim)
         resp.metric_count = metric_count
         converted.append(resp)
     return ok(
-        data={"items": converted, "total": len(converted)},
+        data={"items": converted, "total": total, "page": page, "page_size": page_size},
         trace_id=trace_id,
     )
 
