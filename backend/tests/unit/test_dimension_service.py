@@ -11,13 +11,16 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.dimension import (
     Dimension,
     DimensionMember,
+    MetricDimension,
     Reconciliation,
 )
+from app.models.metric import Metric
 from app.services.dimension.schemas import (
     DimensionCreate,
     DimensionMemberCreate,
     DimensionMemberUpdate,
     DimensionUpdate,
+    MetricDimensionBind,
 )
 from app.services.dimension.service import DimensionService
 
@@ -629,3 +632,105 @@ async def test_preview_column_values_queries_source() -> None:
     assert result["values"] == ["app", "web", "app"]
     assert result["total"] == 3
     assert result["truncated"] is False
+
+
+# ---- 跨服务打通：绑定指标后回写指标声明维度（方案③ 单向打通）----
+def _metric_with_dims(status: str, dims: list[str], metric_id: int = 42) -> Metric:
+    m = Metric()
+    m.id = metric_id
+    m.status = status
+    m.definition_json = {
+        "expression": "SUM(x)",
+        "dependencies": ["fct_order"],
+        "dimensions": list(dims),
+        "grain": "day",
+    }
+    return m
+
+
+def _bind_result(metric: Metric) -> MagicMock:
+    """构造 svc._session.execute 的返回：scalar_one_or_none → metric。"""
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = metric
+    return result
+
+
+async def test_bind_metric_dimension_writes_back_draft_dimension() -> None:
+    """绑定指标（DRAFT）成功后，dim_code 被追加进 metric.definition_json.dimensions。
+
+    这是打通信息孤岛的核心：此前绑定只写 metric_dimension 表，消费链路读不到；
+    现回写声明维度，消费校验（consume 服务）即可放行。
+    """
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
+    repo.get_member = AsyncMock(return_value=None)
+    repo.save_metric_dimension = AsyncMock(side_effect=lambda b: b)
+    metric = _metric_with_dims("DRAFT", ["existing_dim"])
+    svc._session.execute = AsyncMock(return_value=_bind_result(metric))
+
+    binding = await svc.bind_metric_dimension(
+        MetricDimensionBind(metric_id=42, dim_code="region", role="FILTER")
+    )
+
+    assert isinstance(binding, MetricDimension)
+    # 回写生效：声明维度新增 region
+    assert metric.definition_json["dimensions"] == ["existing_dim", "region"]
+    repo.save_metric_dimension.assert_awaited()
+    # DRAFT 直接回写 → 已提交
+    repo.commit.assert_awaited()
+
+
+async def test_bind_metric_dimension_idempotent_no_duplicate() -> None:
+    """dim_code 已在声明维度中：幂等跳过，不重复追加，也不多余 commit。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
+    repo.get_member = AsyncMock(return_value=None)
+    repo.save_metric_dimension = AsyncMock(side_effect=lambda b: b)
+    metric = _metric_with_dims("DRAFT", ["region"])
+    svc._session.execute = AsyncMock(return_value=_bind_result(metric))
+
+    await svc.bind_metric_dimension(
+        MetricDimensionBind(metric_id=42, dim_code="region", role="PARTITION")
+    )
+
+    # 未追加、未重复
+    assert metric.definition_json["dimensions"] == ["region"]
+    # 幂等跳过早于 commit → 本次未产生 commit
+    repo.commit.assert_not_awaited()
+
+
+async def test_bind_metric_dimension_published_also_writes_back() -> None:
+    """PUBLISHED 指标（已发布口径）绑定：仍回写声明维度（告警由日志承载，不过度设计）。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="city"))
+    repo.get_member = AsyncMock(return_value=None)
+    repo.save_metric_dimension = AsyncMock(side_effect=lambda b: b)
+    metric = _metric_with_dims("PUBLISHED", ["region"])
+    svc._session.execute = AsyncMock(return_value=_bind_result(metric))
+
+    await svc.bind_metric_dimension(
+        MetricDimensionBind(metric_id=42, dim_code="city", role="SPLICE")
+    )
+
+    assert metric.definition_json["dimensions"] == ["region", "city"]
+    repo.commit.assert_awaited()
+
+
+async def test_bind_metric_dimension_missing_metric_skips_sync() -> None:
+    """绑定引用的指标查不到：仅告警跳过回写，不阻断绑定本身、不抛错。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
+    repo.get_member = AsyncMock(return_value=None)
+    repo.save_metric_dimension = AsyncMock(side_effect=lambda b: b)
+    # scalar_one_or_none 返回 None（指标不存在）
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    svc._session.execute = AsyncMock(return_value=result)
+
+    binding = await svc.bind_metric_dimension(
+        MetricDimensionBind(metric_id=999, dim_code="region", role="FILTER")
+    )
+    assert isinstance(binding, MetricDimension)
+    # 指标缺失 → 不回写、不 commit
+    repo.commit.assert_not_awaited()
+

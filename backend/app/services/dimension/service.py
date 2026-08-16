@@ -14,6 +14,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
@@ -24,6 +25,7 @@ from app.core.exceptions import (
     UnisenseError,
     ValidationError,
 )
+from app.core.logging import get_logger
 from app.models.dimension import (
     Dimension,
     DimensionMapping,
@@ -49,6 +51,8 @@ from app.services.dimension.schemas import (
     ReconciliationReview,
     ReconciliationSubmit,
 )
+
+logger = get_logger("unisense.dimension")
 
 #: 维度成员层级深度上限（含根，1 层 = 根；防止深链/环导致的递归遍历风险）。
 _MAX_MEMBER_DEPTH = 10
@@ -465,7 +469,12 @@ class DimensionService(BaseService):
             role=MetricDimensionRole(data.role).value,
             default_member=data.default_member,
         )
-        return await self._repo.save_metric_dimension(binding)
+        saved = await self._repo.save_metric_dimension(binding)
+        # 单向打通：绑定成功后回写指标声明维度（definition_json.dimensions），
+        # 使「维度管理-绑定指标」对消费链路真正生效（此前 metric_dimension 是信息孤岛，
+        # 绑定只对绑定表生效，消费查询实际校验的是 definition_json.dimensions）。
+        await self._sync_dimension_to_metric(data.metric_id, data.dim_code)
+        return saved
 
     async def list_metric_dimensions(self, metric_id: int) -> list[MetricDimension]:
         return await self._repo.list_metric_dimensions(metric_id)
@@ -516,6 +525,42 @@ class DimensionService(BaseService):
         rec.reviewed_at = datetime.now(UTC)
         await self._repo.commit()
         return rec
+
+    async def _sync_dimension_to_metric(self, metric_id: int, dim_code: str) -> None:
+        """回写指标声明维度：让绑定关系对消费链路生效（打通信息孤岛）。
+
+        消费查询（consume 服务）真正校验的是 ``metric.definition_json.dimensions``，
+        ``metric_dimension`` 绑定表此前只有本服务读写，对消费无影响。此处绑定成功后
+        把 ``dim_code`` 追加进该字段，使绑定即生效。
+
+        - 幂等：``dim_code`` 已存在于声明维度则跳过，不重复追加。
+        - DRAFT / EXPERIMENTAL 指标：直接回写，无版本影响。
+        - PUBLISHED 等已发布口径：属口径变更，理想应走版本审批流（pending_version）；
+          此处不过度设计——仅回写并告警，生产环境应经版本审批（TD §12.6 FR）。
+        """
+        stmt = select(Metric).where(Metric.id == metric_id)
+        result = await self._session.execute(stmt)
+        metric = result.scalar_one_or_none()
+        if metric is None:
+            # 绑定表已存指标引用，但指标查不到：仅告警跳过回写，不阻断绑定本身
+            logger.warning("bind_metric_dimension_metric_missing", metric_id=metric_id)
+            return
+        defn = dict(metric.definition_json or {})
+        dims = list(defn.get("dimensions") or [])
+        if dim_code in dims:
+            return  # 幂等：已在声明维度中，跳过
+        dims.append(dim_code)
+        defn["dimensions"] = dims
+        metric.definition_json = defn
+        if metric.status not in ("DRAFT", "EXPERIMENTAL"):
+            # 已发布口径变更：告警提示应走版本审批（此处仅回写，不触发版本流程）
+            logger.warning(
+                "bind_metric_dimension_rewrites_published_metric",
+                metric_id=metric_id,
+                dim_code=dim_code,
+                status=metric.status,
+            )
+        await self._repo.commit()
 
     async def _require(self, dim_code: str) -> Dimension:
         dim = await self._repo.get_dimension(dim_code)

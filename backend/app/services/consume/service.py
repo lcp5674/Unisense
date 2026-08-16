@@ -29,7 +29,7 @@ from app.models.consume import (
     SnapshotGeneratedBy,
 )
 from app.models.data_source import DataSource, DBCatalog
-from app.models.dimension import Dimension
+from app.models.dimension import Dimension, MetricDimension
 from app.models.metric import Metric
 from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion
@@ -105,7 +105,9 @@ class ConsumeService(BaseService):
         self._fav = FavoriteRepo(db)
 
     # ---- 真实物理口径 SQL 构建 ----
-    def _build_query_sql(self, req: QueryRequest, metric: Any) -> tuple[str, dict[str, Any]]:
+    def _build_query_sql(
+        self, req: QueryRequest, metric: Any, bound_dims: set[str] | None = None
+    ) -> tuple[str, dict[str, Any]]:
         """将查询请求编译为参数化的 OLAP SQL。
 
         基于指标口径来源字段（definition_json.source_table，缺省用指标编码做表名），
@@ -143,7 +145,11 @@ class ConsumeService(BaseService):
             # 维度名属 SQL 标识符（无法参数化），故必须收敛到口径声明的维度集。
             # 过去仅 dry-run 校验，execute_query 路径未校验 → 越权列访问 / 标识符注入缺口。
             # guard 仅扫描字符串 *值*，不防御标识符；此处为纵深防御的最内层。
+            # 允许维度集：以 definition_json.dimensions 为主来源，再补充
+            # metric_dimension 绑定表（打通维度管理「绑定指标」到消费链路，方案③）。
             allowed_dims = set((metric.definition_json or {}).get("dimensions", []))
+            if bound_dims:
+                allowed_dims |= bound_dims
             if dim.name not in allowed_dims:
                 raise BusinessError(
                     f"维度 {dim.name} 不在指标可用维度内",
@@ -271,7 +277,9 @@ class ConsumeService(BaseService):
         checks.append({"check": "granularity", "ok": True, "detail": f"指标粒度 {grain}"})
         expr = (metric.definition_json or {}).get("expression", "")
         # 构建真实物理口径 SQL（参数化），而非占位注释；维度授权收敛在 _build_query_sql 内。
-        sql, sql_params = self._build_query_sql(req, metric)
+        # 维度允许集补充 metric_dimension 绑定表来源（打通维度管理绑定到消费链路）。
+        bound_dims = await self._get_bound_dimensions(metric.id)
+        sql, sql_params = self._build_query_sql(req, metric, bound_dims)
         plan = {
             "metric_code": req.metric_code,
             "expression_ast": {"raw": expr},
@@ -347,7 +355,9 @@ class ConsumeService(BaseService):
                 row_grant = matched_grant
 
         # 构建执行 SQL（真实物理口径，而非占位查询）
-        sql, params = self._build_query_sql(req, metric)
+        # 维度允许集补充 metric_dimension 绑定表来源（打通维度管理绑定到消费链路）。
+        bound_dims = await self._get_bound_dimensions(metric.id)
+        sql, params = self._build_query_sql(req, metric, bound_dims)
 
         # 引擎选择：OLAP 优先，失败/未配置时降级 MySQL 只读执行器
         result, engine_used = await self._execute_with_fallback(req, sql, params)
@@ -720,6 +730,22 @@ class ConsumeService(BaseService):
         await self._db.flush()
 
     # ---- helpers ----
+    async def _get_bound_dimensions(self, metric_id: int | None) -> set[str]:
+        """查 metric_dimension 绑定表，取该指标已绑定维度编码集合（消费校验补充来源）。
+
+        与 ``definition_json.dimensions`` 取并集，使「维度管理-绑定指标」真正对消费链路
+        生效（此前绑定表是信息孤岛）。``metric_id`` 为 None（脱库/异常）时返回空集，
+        降级为仅 definition_json 来源，向后兼容。
+        """
+        if metric_id is None:
+            return set()
+        stmt = select(MetricDimension.dim_code).where(
+            MetricDimension.metric_id == metric_id
+        )
+        result = await self._db.execute(stmt)
+        rows = result.scalars().all()
+        return {row for row in rows if row}
+
     async def _get_metric(self, code: str) -> Metric | None:
         stmt = select(Metric).where(Metric.metric_code == code, Metric.deleted_at.is_(None))
         return (await self._db.execute(stmt)).scalar_one_or_none()

@@ -99,6 +99,11 @@ def _svc(client: ApiClient) -> ConsumeService:
     svc = ConsumeService(MagicMock())
     svc._clients = MagicMock()
     svc._clients.get_by_client_id = AsyncMock(return_value=client)
+    # 默认 DB 查询（覆盖 _get_bound_dimensions 等）返回空集，避免裸 MagicMock 迭代挂死；
+    # 需要真实行集的测试自行覆盖 svc._db.execute。
+    defn_res = MagicMock()
+    defn_res.scalars.return_value.all.return_value = []
+    svc._db.execute = AsyncMock(return_value=defn_res)
     return svc
 
 
@@ -227,6 +232,49 @@ async def test_dry_run_dimension_violation() -> None:
         )
     # 维度未声明于口径 → FORBIDDEN_DIMENSION
     assert exc.value.error_code == ErrorCode.FORBIDDEN_DIMENSION
+
+
+async def test_dry_run_allows_dimension_from_binding_table() -> None:
+    """跨服务打通（方案③）：维度不在 definition_json.dimensions，但已通过 metric_dimension
+    绑定表绑定该指标 → 消费校验放行（绑定即生效，不再是信息孤岛）。"""
+    svc = _svc(await _client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    metric = _metric(dims=("region",))  # 口径未声明 city
+    metric.id = 1
+    svc._get_metric = AsyncMock(return_value=metric)
+    # 模拟 metric_dimension 绑定表查询：该指标已绑定 city
+    bound_res = MagicMock()
+    bound_res.scalars.return_value.all.return_value = ["city"]
+    svc._db.execute = AsyncMock(return_value=bound_res)
+
+    res = await svc.dry_run_query(
+        QueryRequest(
+            metric_code="gmv", date_range="", dimensions=[{"name": "city", "value": "BJ"}]
+        ),
+        client,
+    )
+    assert res.status == "ok"
+    # 真实物理口径 SQL 含 city 维度过滤（绑定来源被纳入允许集）
+    assert "city" in res.execution_plan["dialect_sql"]
+
+
+async def test_dry_run_rejects_dimension_neither_declared_nor_bound() -> None:
+    """既未在口径声明、也未绑定表的维度 → 仍拒绝 FORBIDDEN_DIMENSION（向后兼容）。"""
+    svc = _svc(await _client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    metric = _metric(dims=("region",))  # 口径只有 region
+    metric.id = 1
+    svc._get_metric = AsyncMock(return_value=metric)
+    # 绑定表为空（默认 _svc mock 返回 []），secret_col 既未声明也未绑定
+    with pytest.raises(BusinessError) as exc:
+        await svc.dry_run_query(
+            QueryRequest(
+                metric_code="gmv", date_range="", dimensions=[{"name": "secret_col", "value": "v"}]
+            ),
+            client,
+        )
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_DIMENSION
+
 
 
 # ---- 查询降级 ----
@@ -735,7 +783,8 @@ async def test_list_favorite_details_empty() -> None:
 
 async def test_ensure_asset_metric_exists() -> None:
     svc = _svc(await _client())
-    svc._db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: _metric(code="gmv")))
+    exists = SimpleNamespace(scalar_one_or_none=lambda: _metric(code="gmv"))
+    svc._db.execute = AsyncMock(return_value=exists)
     await svc._ensure_asset(FavoriteAssetType.METRIC, "gmv")  # 不抛异常
 
 
@@ -760,10 +809,11 @@ async def test_load_asset_details_table_joins_source_domain() -> None:
     svc = _svc(await _client())
     table = SimpleNamespace(entity_name="dw.sales", description="销售", source_id="mysql-1",
                             sensitivity_level="CONFIDENTIAL")
+    ds = SimpleNamespace(source_id="mysql-1", domain="sales")
     svc._db.execute = AsyncMock(
         side_effect=[
             _exec_scalars([table]),  # DBCatalog 查询
-            _exec_scalars([SimpleNamespace(source_id="mysql-1", domain="sales")]),  # DataSource 查询
+            _exec_scalars([ds]),  # DataSource 查询
         ]
     )
     lookup = await svc._load_asset_details({"TABLE": ["dw.sales"]})
