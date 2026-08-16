@@ -263,6 +263,15 @@ async def export_tables(
 
     output = io.StringIO()
     writer = csv.writer(output)
+
+    # CSV 注入防护（OWASP）：单元格以 = / + / - / @ 开头时 Excel/WPS 会当作公式执行，
+    # 采集的 entity_name/source_id 等可能被注入，导出前统一前缀单引号消毒。
+    def _sanitize(v: object) -> str:
+        s = "" if v is None else str(v)
+        if s.startswith(("=", "+", "-", "@")):
+            return "'" + s
+        return s
+
     writer.writerow(
         [
             "entity_name",
@@ -278,14 +287,14 @@ async def export_tables(
     for it in items:
         writer.writerow(
             [
-                it.get("entity_name", ""),
-                it.get("entity_type", ""),
-                it.get("source_id", ""),
-                it.get("sensitivity_level", ""),
-                it.get("owner_id", ""),
-                it.get("schema_incomplete", ""),
-                it.get("created_at", ""),
-                it.get("updated_at", ""),
+                _sanitize(it.get("entity_name", "")),
+                _sanitize(it.get("entity_type", "")),
+                _sanitize(it.get("source_id", "")),
+                _sanitize(it.get("sensitivity_level", "")),
+                _sanitize(it.get("owner_id", "")),
+                _sanitize(it.get("schema_incomplete", "")),
+                _sanitize(it.get("created_at", "")),
+                _sanitize(it.get("updated_at", "")),
             ]
         )
     # UTF-8 BOM 便于 Excel 正确识别中文

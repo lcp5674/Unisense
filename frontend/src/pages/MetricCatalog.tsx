@@ -631,6 +631,13 @@ export function MetricCatalog() {
       "aggregation", "granularity", "unit", "dw_layer", "metric_tier",
       "pii_flag", "version", "created_at", "updated_at",
     ];
+    // CSV 注入防护（OWASP）：单元格以 = / + / - / @ 开头时，Excel/WPS 会当作公式执行。
+    // 指标名/域名等用户可写字段可能被注入恶意公式，导出时统一前缀单引号消毒。
+    const sanitize = (v: unknown) => {
+      const s = String(v ?? "");
+      if (/^[=+\-@]/.test(s)) return `'${s}`;
+      return s;
+    };
     const rows = items.map((m) =>
       [
         m.metric_code, m.name, domainName(m.domain), userName(m.owner_id), m.type,
@@ -640,7 +647,7 @@ export function MetricCatalog() {
         m.unit && UNIT_LABEL[m.unit] ? UNIT_LABEL[m.unit] : m.unit, DW_LAYER_LABEL[m.dw_layer] ?? m.dw_layer, METRIC_TIER_LABEL[m.metric_tier] ?? m.metric_tier,
         m.pii_flag ? "PII" : "", m.version, formatCnTime(m.created_at), formatCnTime(m.updated_at),
       ]
-        .map((c) => `"${String(c).replace(/"/g, '""')}"`)
+        .map((c) => `"${sanitize(c).replace(/"/g, '""')}"`)
         .join(","),
     );
     const blob = new Blob([[header.join(","), ...rows].join("\n")], { type: "text/csv;charset=utf-8" });
