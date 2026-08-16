@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button, Descriptions, Input, Modal, Table, Tag, message } from "antd";
+import { CheckCircleOutlined } from "@ant-design/icons";
 import {
   confirmMetricVersion,
   extendMetricVersion,
@@ -49,10 +50,12 @@ function VersionDefinition({ record }: { record: MetricVersionResponse }) {
 export function VersionHistory({
   metricCode,
   versions,
+  effectiveVersion,
   onChanged,
 }: {
   metricCode: string;
   versions: MetricVersionResponse[];
+  effectiveVersion?: number | null;
   onChanged: () => void;
 }) {
   const [rejecting, setRejecting] = useState<MetricVersionResponse | null>(null);
@@ -110,7 +113,12 @@ export function VersionHistory({
       dataIndex: "status",
       key: "status",
       width: 120,
-      render: (s: string) => <Tag color={VERSION_STATUS_META[s]?.color}>{VERSION_STATUS_META[s]?.label ?? s}</Tag>,
+      render: (s: string, r: MetricVersionResponse) =>
+        r.version === effectiveVersion ? (
+          <Tag color="green" icon={<CheckCircleOutlined />}>生效中</Tag>
+        ) : (
+          <Tag color={VERSION_STATUS_META[s]?.color}>{VERSION_STATUS_META[s]?.label ?? s}</Tag>
+        ),
     },
     { title: "时间", dataIndex: "created_at", key: "created", width: 170, render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
     {

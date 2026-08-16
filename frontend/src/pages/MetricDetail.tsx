@@ -1093,7 +1093,7 @@ export function MetricDetail() {
           items={[
             { key: "quality", label: "质量快照", children: <QualitySnapshot metricId={metric.id} metricCode={metric.metric_code} /> },
             { key: "lineage", label: "血缘影响", children: <LineageImpact metricCode={metric.metric_code} /> },
-            { key: "versions", label: `版本历史 (${versions.length})`, children: <VersionHistory metricCode={metric.metric_code} versions={versions} onChanged={load} /> },
+            { key: "versions", label: `版本历史 (${versions.length})`, children: <VersionHistory metricCode={metric.metric_code} versions={versions} effectiveVersion={metric.effective_version} onChanged={load} /> },
             { key: "dims", label: "关联维度", children: <RelatedDimensions metricId={metric.id} /> },
             { key: "audit", label: "变更审计", children: <AuditTimeline metricCode={metric.metric_code} /> },
           ]}
