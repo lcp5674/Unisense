@@ -441,6 +441,11 @@ export function MetricCatalog() {
       setTotal(res.total);
       setSelected([]);
       setLoadError(null);
+      // 空页回退：删除/批量操作后当前页无数据且非首页时回退上一页（total>0 说明数据仍在、仅页码超界）
+      if (res.items.length === 0 && page > 1 && res.total > 0) {
+        setPage(page - 1);
+        return;
+      }
     } catch (err) {
       if (seq !== loadSeq.current) return;
       // 用特征检查而非 instanceof：UnisenseApiError 跨 mock/打包边界不可靠（测试 mock 未导出该类会抛错）
