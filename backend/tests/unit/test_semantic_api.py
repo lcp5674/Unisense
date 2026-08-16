@@ -41,7 +41,7 @@ async def test_template_owner_assign_and_errors() -> None:
     db.execute = AsyncMock(side_effect=[r1, u])
     user = MagicMock(id=1)
     req = MagicMock()
-    resp = await update_template_owner(
+    await update_template_owner(
         user=user, template_id=1, request=req, body={"owner_id": 2}, db=db
     )
     assert template.owner_id == 2
@@ -126,10 +126,8 @@ async def test_list_templates_escapes_wildcards_and_sorts_stably() -> None:
 
 
 async def test_instantiate_required_fields_satisfied_by_template_default() -> None:
-    """required_fields 校验应对齐 merged：模板 defaults_json 提供的必填字段应算已满足（仅查 body 会误拒）。"""
+    """required_fields 校验应对齐 merged：模板默认值亦满足必填（仅查 body 会误拒）。"""
     from unittest.mock import patch
-
-    from fastapi import HTTPException
 
     from app.api.semantic import instantiate_template
     from app.core.exceptions import ValidationError
