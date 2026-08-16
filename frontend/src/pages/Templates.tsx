@@ -425,7 +425,7 @@ export function Templates() {
             <Form.Item name="type" label="类型" style={{ width: 240 }}>
               <Select options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} />
             </Form.Item>
-            <Form.Item name="granularity" label="粒度" style={{ width: 240 }}>
+            <Form.Item name="granularity" label="粒度" rules={[{ required: true, message: "请选择粒度" }]} style={{ width: 240 }}>
               <Select
                 options={granularityOptions.length ? granularityOptions : undefined}
                 showSearch
@@ -433,7 +433,7 @@ export function Templates() {
                 allowClear
               />
             </Form.Item>
-            <Form.Item name="unit" label="单位" style={{ width: 240 }}>
+            <Form.Item name="unit" label="单位" rules={[{ required: true, message: "请选择单位" }]} style={{ width: 240 }}>
               <Select
                 options={unitOptions.length ? unitOptions : undefined}
                 showSearch
@@ -441,16 +441,16 @@ export function Templates() {
                 allowClear
               />
             </Form.Item>
-            <Form.Item name="aggregation" label="聚合" style={{ width: 240 }}>
-              <Select options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE"].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }))} />
+            <Form.Item name="aggregation" label="聚合" rules={[{ required: true, message: "请选择聚合方式" }]} style={{ width: 240 }}>
+              <Select options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }))} />
             </Form.Item>
-            <Form.Item name="time_semantics" label="时间语义" style={{ width: 240 }}>
-              <Select options={["PERIOD", "YTD", "TTM", "AVG"].map((v) => ({ value: v, label: TIME_SEMANTICS_LABEL[v] ?? v }))} />
+            <Form.Item name="time_semantics" label="时间语义" rules={[{ required: true, message: "请选择时间语义" }]} style={{ width: 240 }}>
+              <Select options={["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"].map((v) => ({ value: v, label: TIME_SEMANTICS_LABEL[v] ?? v }))} />
             </Form.Item>
-            <Form.Item name="freshness" label="新鲜度" style={{ width: 240 }}>
-              <Select options={["REALTIME", "T1", "HOURLY"].map((v) => ({ value: v, label: FRESHNESS_LABEL[v] ?? v }))} />
+            <Form.Item name="freshness" label="新鲜度" rules={[{ required: true, message: "请选择新鲜度" }]} style={{ width: 240 }}>
+              <Select options={["REALTIME", "T0", "T1", "HOURLY"].map((v) => ({ value: v, label: FRESHNESS_LABEL[v] ?? v }))} />
             </Form.Item>
-            <Form.Item name="dw_layer" label="数仓层" style={{ width: 240 }}>
+            <Form.Item name="dw_layer" label="数仓层" rules={[{ required: true, message: "请选择数仓层" }]} style={{ width: 240 }}>
               <Select options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} />
             </Form.Item>
           </Space>
