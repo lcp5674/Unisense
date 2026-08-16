@@ -647,9 +647,14 @@ export function MetricCatalog() {
       dataIndex: "status",
       key: "status",
       width: 100,
-      render: (s: string) => (
-        <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>
-      ),
+      render: (s: string) =>
+        s === "DATA_SOURCE_DROPPED" ? (
+          <Tooltip title="该指标的数据源已下线，可在指标详情页「源已恢复」或「确认退役」处理">
+            <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>
+          </Tooltip>
+        ) : (
+          <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>
+        ),
     },
     {
       title: "口径摘要",
