@@ -280,6 +280,9 @@ export function MetricCatalog() {
     "submit" | "delete" | "approve" | "reject" | "deprecate" | null
   >(null);
   const [batchBusy, setBatchBusy] = useState(false);
+  // 批量操作失败明细：超 3 条时提供「查看明细」弹窗（避免 message 截断导致用户看不到全部失败）
+  const [batchErrors, setBatchErrors] = useState<string[]>([]);
+  const [batchErrorsOpen, setBatchErrorsOpen] = useState(false);
   // 批量提交审核的评审指派（TD §13）
   const [batchReviewerType, setBatchReviewerType] = useState<"user" | "domain" | null>(null);
   const [batchReviewerId, setBatchReviewerId] = useState<number | null>(null);
@@ -529,7 +532,15 @@ export function MetricCatalog() {
       setBatchBusy(false);
       setBatchAction(null);
       if (ok) message.success(`${BATCH_ACTION_LABEL[batchAction] ?? "操作"}成功 ${ok} 个`);
-      if (errors.length) message.error(errors.slice(0, 3).join("；"));
+      if (errors.length) {
+        setBatchErrors(errors);
+        if (errors.length <= 3) {
+          message.error(errors.join("；"));
+        } else {
+          message.error(`批量操作失败 ${errors.length} 条（前 3 条：${errors.slice(0, 3).join("；")}…），点击「查看失败明细」查看全部`);
+          setBatchErrorsOpen(true);
+        }
+      }
       setSelected([]);
       setBatchRejectReason("");
       setBatchSuccessors({});
@@ -1090,6 +1101,24 @@ export function MetricCatalog() {
             （软删除，仅 platform_admin 可执行）。此操作不可恢复。
           </p>
         )}
+      </Modal>
+
+      {/* 批量操作失败明细弹窗：完整展示所有失败项，避免 message 截断 */}
+      <Modal
+        title="批量操作失败明细"
+        open={batchErrorsOpen}
+        onCancel={() => setBatchErrorsOpen(false)}
+        footer={
+          <Button onClick={() => setBatchErrorsOpen(false)}>关闭</Button>
+        }
+      >
+        <ul style={{ maxHeight: 320, overflow: "auto", paddingLeft: 18 }}>
+          {batchErrors.map((e, i) => (
+            <li key={i} className="mono" style={{ marginBottom: 6, fontSize: 12 }}>
+              {e}
+            </li>
+          ))}
+        </ul>
       </Modal>
     </div>
   );
