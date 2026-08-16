@@ -506,10 +506,19 @@ function TermsTab() {
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
             <Input placeholder="如 成交总额" />
           </Form.Item>
-          <Form.Item label="AI 推断" style={{ marginBottom: 12 }}>
+          <Form.Item
+            label="AI 推断"
+            style={{ marginBottom: 12 }}
+            extra={
+              can("glossary:infer")
+                ? undefined
+                : "无 glossary:infer 权限，AI 推断不可用（消耗 LLM 资源）"
+            }
+          >
             <Button
               icon={inferring ? <LoadingOutlined /> : <ThunderboltOutlined />}
               loading={inferring}
+              disabled={!can("glossary:infer")}
               onClick={() => inferFromName(form, setInferring)}
             >
               根据名称生成定义 / 同义词 / 边界建议
