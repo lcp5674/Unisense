@@ -140,6 +140,14 @@ class DimensionRepository:
         rows = (await self._session.execute(stmt)).all()
         return [(binding, metric) for binding, metric in rows]
 
+    async def count_metric_dimensions(self, dim_code: str) -> int:
+        """统计维度被多少指标绑定（废弃保护：被绑定维度禁止废弃）。"""
+        stmt = (
+            select(func.count(MetricDimension.id))
+            .where(MetricDimension.dim_code == dim_code)
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
+
     async def save_reconciliation(self, obj: Reconciliation) -> Reconciliation:
         self._session.add(obj)
         await self._session.flush()

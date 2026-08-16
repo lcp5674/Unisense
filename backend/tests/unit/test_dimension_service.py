@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -784,3 +785,37 @@ async def test_unbind_metric_dimension_missing_binding_raises() -> None:
         assert "ghost" in str(exc)
     else:
         raise AssertionError("should raise NotFoundError")
+
+
+async def test_deprecate_dimension_blocked_when_bound_by_metrics() -> None:
+    """维度被指标绑定时禁止废弃（跨服务一致性：防指标维度声明悬空）。"""
+    from app.core.exceptions import BusinessError
+
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=SimpleNamespace(dim_code="region", status="PUBLISHED")
+    )
+    repo.count_metric_dimensions = AsyncMock(return_value=3)
+
+    try:
+        await svc.deprecate_dimension("region")
+    except BusinessError as exc:
+        assert "3 个指标绑定" in str(exc)
+        assert exc.error_code == "DIMENSION_BOUND_BY_METRICS"
+    else:
+        raise AssertionError("should raise BusinessError")
+    # 不应触碰状态/提交
+    repo.commit.assert_not_awaited()
+
+
+async def test_deprecate_dimension_allowed_when_unbound() -> None:
+    """维度未被绑定（或已全部解绑）时可正常废弃。"""
+    svc, repo = await _svc()
+    dim = SimpleNamespace(dim_code="region", status="PUBLISHED")
+    repo.get_dimension = AsyncMock(return_value=dim)
+    repo.count_metric_dimensions = AsyncMock(return_value=0)
+
+    result = await svc.deprecate_dimension("region")
+
+    assert result.status == "DEPRECATED"
+    repo.commit.assert_awaited()

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
 from app.core.exceptions import (
+    BusinessError,
     ConflictError,
     ExternalDependencyError,
     NotFoundError,
@@ -177,6 +178,14 @@ class DimensionService(BaseService):
 
     async def deprecate_dimension(self, dim_code: str) -> Dimension:
         dim = await self._require(dim_code)
+        # 废弃保护（跨服务一致性）：被指标绑定的维度禁止废弃——否则指标维度声明
+        # 悬空（dimension:{code} 血缘节点无对应维度），消费校验也失去维度权威来源。
+        bound = await self._repo.count_metric_dimensions(dim_code)
+        if bound > 0:
+            raise BusinessError(
+                f"维度 {dim_code} 正被 {bound} 个指标绑定，无法废弃；请先解绑相关指标",
+                error_code="DIMENSION_BOUND_BY_METRICS",
+            )
         dim.status = DimensionStatus.DEPRECATED.value
         await self._repo.commit()
         return dim
