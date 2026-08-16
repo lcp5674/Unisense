@@ -1188,7 +1188,7 @@ export function MetricCreate() {
                             style={{ width: 220 }}
                           />
                         </Form.Item>
-                        <Button type="text" danger icon={<MinusCircleOutlined />} onClick={() => remove(name)} />
+                        <Button type="text" danger icon={<MinusCircleOutlined />} aria-label="删除该维度映射行" onClick={() => remove(name)} />
                       </Space>
                     ))}
                     <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>

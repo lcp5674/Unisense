@@ -776,7 +776,7 @@ export function MetricCatalog() {
         <p className="muted">{hasFilter ? "没有匹配的指标，试试放宽或清除筛选条件" : "目录还是空的，创建第一个指标或从模板开始"}</p>
         <Space>
           {hasFilter ? (
-            <Button icon={<ColumnWidthOutlined />} onClick={() => {
+            <Button icon={<ColumnWidthOutlined />} aria-label="清除筛选" onClick={() => {
               setKeyword("");
               setStatus("");
               setDomain("");
