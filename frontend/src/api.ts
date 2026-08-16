@@ -68,6 +68,7 @@ import {
   LineageGraphData,
   LineageIngestRun,
   LineageNode,
+  ManualLineageEdgeResult,
   ParseLineageResult,
   ListDatabasesResult,
   ArchivedMetricResponse,
@@ -1148,7 +1149,40 @@ export async function fetchLineageEdgeDetail(edgeId: number): Promise<LineageEdg
   };
 }
 
-// ---- 收藏（consume 服务，通用多资产）----
+// 手动登记一条血缘边（人工治理：自动解析覆盖不到的业务依赖）。
+// source_node 为上游、target_node 为下游，均须带前缀（metric:/table:/column:/dimension:/consumer:/external:）。
+export async function addManualLineageEdge(req: {
+  source_node: string;
+  target_node: string;
+  edge_type?: string;
+  note?: string;
+}): Promise<ManualLineageEdgeResult> {
+  return request<ManualLineageEdgeResult>(`${API_BASE}/lineage/edges/manual`, {
+    method: "POST",
+    body: JSON.stringify({
+      source_node: req.source_node,
+      target_node: req.target_node,
+      edge_type: req.edge_type ?? "DERIVED_FROM",
+      note: req.note?.trim() || undefined,
+    }),
+  });
+}
+
+// 单条血缘边软删（人工治理：误登记/断链修复的单边删除）
+export async function deleteLineageEdge(edgeId: number): Promise<{
+  edge_id: number;
+  source_node: string;
+  target_node: string;
+}> {
+  return request(`${API_BASE}/lineage/edges/${edgeId}`, { method: "DELETE" });
+}
+
+// 同步某指标的消费方血缘边（CONSUMED_BY）：按接入方白名单补齐消费方节点
+export async function syncMetricConsumers(metricCode: string): Promise<{ registered_edges: number }> {
+  return request(`${API_BASE}/lineage/consumers/${encodeURIComponent(metricCode)}/sync`, {
+    method: "POST",
+  });
+}
 export type FavoriteAssetType = "METRIC" | "TABLE" | "TERM" | "DIMENSION" | "TEMPLATE";
 
 export interface FavoriteItem {

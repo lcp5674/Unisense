@@ -23,16 +23,20 @@ import {
 } from "antd";
 import {
   ApartmentOutlined,
+  ArrowDownOutlined,
+  ArrowLeftOutlined,
+  ArrowUpOutlined,
   CodeOutlined,
   DatabaseOutlined,
+  PieChartOutlined,
+  PlusOutlined,
   ReloadOutlined,
   ShareAltOutlined,
   SyncOutlined,
-  ArrowLeftOutlined,
-  PieChartOutlined,
 } from "@ant-design/icons";
 import {
   confirmStaleEdge,
+  deleteLineageEdge,
   fetchLineageBrokenEdges,
   fetchLineageCoverage,
   fetchLineageEdgeDetail,
@@ -68,6 +72,7 @@ import type {
 } from "../types";
 import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { MetricDetailDrawer } from "../components/assetmap/MetricDetailDrawer";
+import { ManualEdgeModal } from "../components/lineage/ManualEdgeModal";
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
@@ -345,6 +350,9 @@ function TableDetailDrawer({ detail, open, onClose, loading }: {
   loading: boolean;
 }) {
   const navigate = useNavigate();
+  // 手动添加上下游（人工治理）
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualDirection, setManualDirection] = useState<"upstream" | "downstream">("downstream");
   // schema_json.columns 详细格式：{name, type, nullable, comment, default}
   const columns = (detail?.schema_def?.columns ?? []) as Array<Record<string, unknown>>;
   const columnData = columns
@@ -423,6 +431,34 @@ function TableDetailDrawer({ detail, open, onClose, loading }: {
               </pre>
             </>
           )}
+
+          <Space style={{ marginTop: 16 }}>
+            <Button
+              icon={<ArrowUpOutlined />}
+              onClick={() => {
+                setManualDirection("upstream");
+                setManualOpen(true);
+              }}
+            >
+              添加上游
+            </Button>
+            <Button
+              icon={<ArrowDownOutlined />}
+              onClick={() => {
+                setManualDirection("downstream");
+                setManualOpen(true);
+              }}
+            >
+              添加下游
+            </Button>
+          </Space>
+          <ManualEdgeModal
+            open={manualOpen}
+            onClose={() => setManualOpen(false)}
+            baseNode={`table:${detail.entity_name}`}
+            baseLabel={detail.entity_name}
+            defaultDirection={manualDirection}
+          />
         </div>
       )}
     </Drawer>
@@ -919,6 +955,7 @@ function ImpactTab() {
         edgeId={edgeDetailId}
         open={edgeDetailOpen}
         onClose={() => setEdgeDetailOpen(false)}
+        onDeleted={() => void loadImpact()}
       />
     </div>
   );
@@ -1471,13 +1508,16 @@ function EdgeDetailDrawer({
   edgeId,
   open,
   onClose,
+  onDeleted,
 }: {
   edgeId: number | null;
   open: boolean;
   onClose: () => void;
+  onDeleted?: () => void;
 }) {
   const [detail, setDetail] = useState<LineageEdgeDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const { track } = useTracking();
 
   useEffect(() => {
@@ -1506,11 +1546,43 @@ function EdgeDetailDrawer({
     { title: "变更时间", dataIndex: "changed_at", key: "changedAt", render: (v?: string) => <span className="mono" style={{ fontSize: 12 }}>{v ? formatCnTime(v) : "—"}</span> },
   ];
 
+  async function handleDelete() {
+    if (edgeId == null) return;
+    setDeleting(true);
+    try {
+      await deleteLineageEdge(edgeId);
+      message.success("该血缘边已删除（仅删除此边，不影响关联节点）");
+      onClose();
+      onDeleted?.();
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "删除血缘边失败",
+      );
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <Drawer
       title="血缘边详情"
       width={640}
       open={open}
+      footer={
+        detail ? (
+          <div style={{ textAlign: "right" }}>
+            <Popconfirm
+              title="删除此血缘边"
+              description={`确定删除「${detail.source_node} → ${detail.target_node}」？仅删除这条边，不影响关联节点。`}
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={handleDelete}
+            >
+              <Button danger loading={deleting}>删除此边</Button>
+            </Popconfirm>
+          </div>
+        ) : null
+      }
       onClose={onClose}
       loading={loading}
     >
@@ -1570,6 +1642,9 @@ function CoverageTab() {
   const [activeList, setActiveList] = useState<"orphans" | "broken">("orphans");
   const navigate = useNavigate();
   const { track } = useTracking();
+  // 断链边人工修复：以断链 source 节点为目标打开手动登记弹窗
+  const [repairOpen, setRepairOpen] = useState(false);
+  const [repairNode, setRepairNode] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -1616,6 +1691,25 @@ function CoverageTab() {
     { title: "目标", dataIndex: "target_node", key: "target", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
     { title: "类型", dataIndex: "edge_type", key: "type", render: (v: string) => <Tag>{EDGE_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "来源", dataIndex: "provenance", key: "provenance", render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag> },
+    {
+      title: "操作",
+      key: "action",
+      width: 90,
+      render: (_: unknown, r: CoverageBrokenEdgeItem) => (
+        <Button
+          type="link"
+          size="small"
+          style={{ padding: 0 }}
+          icon={<PlusOutlined />}
+          onClick={() => {
+            setRepairNode(r.source_node);
+            setRepairOpen(true);
+          }}
+        >
+          修复
+        </Button>
+      ),
+    },
   ];
 
   const emptyBoth = orphans.length === 0 && broken.length === 0;
@@ -1696,6 +1790,16 @@ function CoverageTab() {
             />
           )}
         </Card>
+      )}
+      {repairNode && (
+        <ManualEdgeModal
+          open={repairOpen}
+          onClose={() => setRepairOpen(false)}
+          baseNode={repairNode}
+          baseLabel="断链节点"
+          defaultDirection="downstream"
+          onSuccess={() => void load()}
+        />
       )}
     </div>
   );

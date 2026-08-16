@@ -295,12 +295,13 @@ describe("AssetGraph 交互", () => {
     await waitFor(() => expect(Graph).toHaveBeenCalled());
     const data = lastGraphData();
     const anchors = data.nodes.filter((n) => (n.data as AssetGraphNode | undefined)?.anchor);
-    expect(anchors.map((a) => a.id).sort()).toEqual(["__lane_field__", "__lane_metric__", "__lane_table__"]);
+    // 数仓分层泳道：table:orders（label=ods_orders）归 ODS 带，metric/field 各一带
+    expect(anchors.map((a) => a.id).sort()).toEqual(["__lane_field__", "__lane_metric__", "__lane_ods__"]);
     expect(data.nodes).toHaveLength(6);
-    // 锚定边：锚点链（表→指标→字段）+ 每个真实节点的挂载边
+    // 锚定边：锚点链（ODS→指标→字段）+ 每个真实节点的挂载边
     const anchorEdges = data.edges.filter((e) => (e.data as AssetGraphEdge | undefined)?.anchorEdge);
     expect(anchorEdges).toHaveLength(2 + 3); // 2 条锚点链边 + 3 条挂载边
-    expect(anchorEdges.some((e) => e.source === "__lane_table__" && e.target === "table:orders")).toBe(true);
+    expect(anchorEdges.some((e) => e.source === "__lane_ods__" && e.target === "table:orders")).toBe(true);
     expect(anchorEdges.some((e) => e.source === "__lane_metric__" && e.target === "metric:revenue")).toBe(true);
   });
 

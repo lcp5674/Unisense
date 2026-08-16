@@ -192,9 +192,13 @@ export function layerOf(n: AssetGraphNode): string | null {
 }
 
 /**
- * 语义泳道：为 dagre 分层插入隐藏锚点节点与锚定边，把节点按类型聚进三条语义带。
- * - 锚点链按血缘方向（表锚 → 指标锚 → 字段锚）连锚定边，dagre 自然把表放最上、指标中、字段下；
- * - 每类真实节点经「锚 → 节点」挂载边锚到对应泳道（同类型带内仍按血缘边纵向分层，表→表加工链保留）；
+ * 数仓分层泳道：为 dagre 分层插入隐藏锚点节点与锚定边，把节点按「数仓分层 + 语义带」
+ * 聚进多条泳道（血缘方向：ODS → DWD → DWS → ADS/DM → 其他表 → 指标 → 字段）。
+ * - 表节点按其名称前缀/指标 dw_layer 推断分层（复用 layerOf）；未识别层级的表归入
+ *   ``table`` 带（放在应用层之下、指标之上，避免未分层表打散加工链）；
+ * - 锚点链按血缘方向连锚定边，dagre 自然把源（ODS）放最上、字段放最下；
+ * - 每类真实节点经「锚 → 节点」挂载边锚到对应泳道（同层带内仍按血缘边纵向分层，
+ *   表→表加工链在层带内保留）；
  * - other/unknown 类型不挂锚（自由参与分层，如上游依赖图的中心节点保持在最上方）。
  * 锚点与锚定边由 GraphCanvas 按 anchor/anchorEdge 标记渲染为不可见、不响应交互。
  */
@@ -202,9 +206,19 @@ export function applyLanes(
   nodes: AssetGraphNode[],
   edges: RenderEdge[],
 ): { nodes: AssetGraphNode[]; edges: RenderEdge[] } {
-  // 泳道顺序与血缘方向一致：表（源头）→ 指标（加工产物）→ 字段（列级流转）
-  const order = ["table", "metric", "field"] as const;
-  const present = order.filter((t) => nodes.some((n) => n.type === t));
+  // 泳道顺序与血缘方向一致：数仓分层（源头→应用）→ 其他表 → 指标 → 字段
+  const order = ["ods", "dwd", "dws", "ads", "dm", "table", "metric", "field"] as const;
+  const laneOf = (n: AssetGraphNode): string => {
+    if (n.type === "table") {
+      const l = layerOf(n);
+      if (l) return l;
+      return "table";
+    }
+    if (n.type === "metric") return "metric";
+    if (n.type === "field" || String(n.type).indexOf("column") === 0) return "field";
+    return "";
+  };
+  const present = order.filter((l) => nodes.some((n) => laneOf(n) === l));
   // 少于两类时泳道无意义（单类型带内 dagre 已天然分层），直接透传
   if (present.length < 2) return { nodes, edges };
 
@@ -216,7 +230,7 @@ export function applyLanes(
     anchor: true,
   }));
   const anchorEdges: RenderEdge[] = [];
-  // 锚点链：表锚 → 指标锚 → 字段锚（dagre 强制泳道顺序）
+  // 锚点链：ODS锚 → DWD锚 → DWS锚 → ADS锚 → DM锚 → 表锚 → 指标锚 → 字段锚（dagre 强制泳道顺序）
   for (let i = 0; i < present.length - 1; i += 1) {
     anchorEdges.push({
       source: anchorIds[i],
@@ -225,11 +239,11 @@ export function applyLanes(
       anchorEdge: true,
     });
   }
-  // 挂载边：锚 → 该类型的每个真实节点
+  // 挂载边：锚 → 该泳道的每个真实节点
   for (const t of present) {
     const anchorId = `__lane_${t}__`;
     for (const n of nodes) {
-      if (n.type === t) {
+      if (laneOf(n) === t) {
         anchorEdges.push({ source: anchorId, target: n.id, type: "ANCHOR", anchorEdge: true });
       }
     }

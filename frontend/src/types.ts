@@ -549,6 +549,12 @@ export interface LineageNode {
   count: number;
 }
 
+// 手动登记血缘边结果（POST /lineage/edges/manual）。
+export interface ManualLineageEdgeResult {
+  edge: LineageEdge;
+  created: boolean;
+}
+
 // 血缘覆盖率治理（backend/app/api/lineage.py /coverage）——
 // 指标/表血缘完整度统计看板。
 export interface LineageCoverage {

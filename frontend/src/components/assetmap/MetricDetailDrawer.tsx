@@ -1,10 +1,22 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Descriptions, Empty, Space, Spin, Tag } from "antd";
-import { ArrowRightOutlined } from "@ant-design/icons";
-import { fetchRelatedMetrics, getMetric, getMetricHealth, UnisenseApiError } from "../../api";
+import { Button, Card, Descriptions, Empty, Space, Spin, Tag, message } from "antd";
+import {
+  ArrowRightOutlined,
+  ArrowUpOutlined,
+  ArrowDownOutlined,
+  SyncOutlined,
+} from "@ant-design/icons";
+import {
+  fetchRelatedMetrics,
+  getMetric,
+  getMetricHealth,
+  syncMetricConsumers,
+  UnisenseApiError,
+} from "../../api";
 import type { MetricHealth, MetricResponse, RecommendItem } from "../../types";
 import { ResizableDrawer } from "../ResizableDrawer";
+import { ManualEdgeModal } from "../lineage/ManualEdgeModal";
 import { AGGREGATION_LABEL, DW_LAYER_LABEL, FRESHNESS_LABEL, GRANULARITY_LABEL, METRIC_TIER_LABEL } from "../../utils/enums";
 
 const STATUS_COLOR: Record<string, string> = {
@@ -127,6 +139,10 @@ export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDr
   const [related, setRelated] = useState<RecommendItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 手动添加上下游 / 同步消费方（人工治理 + 消费方血缘）
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualDirection, setManualDirection] = useState<"upstream" | "downstream">("downstream");
+  const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
     if (!open || !metricCode) return;
@@ -244,6 +260,58 @@ export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDr
           >
             前往完整详情
           </Button>
+          <Space style={{ marginTop: 12, display: "flex", flexWrap: "wrap" }}>
+            <Button
+              icon={<ArrowUpOutlined />}
+              onClick={() => {
+                setManualDirection("upstream");
+                setManualOpen(true);
+              }}
+            >
+              添加上游
+            </Button>
+            <Button
+              icon={<ArrowDownOutlined />}
+              onClick={() => {
+                setManualDirection("downstream");
+                setManualOpen(true);
+              }}
+            >
+              添加下游
+            </Button>
+            <Button
+              icon={<SyncOutlined />}
+              loading={syncing}
+              onClick={async () => {
+                setSyncing(true);
+                try {
+                  const res = await syncMetricConsumers(metric.metric_code);
+                  message.success(
+                    res.registered_edges > 0
+                      ? `已同步 ${res.registered_edges} 条消费方血缘边`
+                      : "暂无可同步的消费方（接入方白名单未配置该指标）",
+                  );
+                } catch (err) {
+                  message.error(
+                    err instanceof UnisenseApiError
+                      ? `${err.message}（${err.codeZh}）`
+                      : "同步消费方失败",
+                  );
+                } finally {
+                  setSyncing(false);
+                }
+              }}
+            >
+              同步消费方
+            </Button>
+          </Space>
+          <ManualEdgeModal
+            open={manualOpen}
+            onClose={() => setManualOpen(false)}
+            baseNode={`metric:${metric.metric_code}`}
+            baseLabel={metric.name}
+            defaultDirection={manualDirection}
+          />
         </div>
       ) : null}
     </ResizableDrawer>
