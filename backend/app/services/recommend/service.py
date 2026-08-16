@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
+from app.models.metric import Metric
 from app.models.tracking import TrackingEvent
 from app.services.glossary.schemas import TermResponse
 from app.services.recommend.repository import METRIC_EVENT_TYPES, RecommendRepository
@@ -87,11 +88,13 @@ class RecommendService(BaseService):
         dismissed = await self._repo.dismissed_metrics(str(user_id))
         # 1. 协同过滤（个性化最强，优先）
         cf_results = await self._collaborative_filtering(user_id, limit, dismissed)
+        cf_results = await self._filter_consumable(cf_results)
         if cf_results:
             return cf_results
 
         # 2. 血缘扩展兜底
         lineage = await self._lineage_fallback(user_id, limit, dismissed)
+        lineage = await self._filter_consumable(lineage)
         if lineage:
             return lineage
 
@@ -99,9 +102,36 @@ class RecommendService(BaseService):
         seeds = await self._get_user_metric_actions(str(user_id))
         exclude = seeds | dismissed
         popular = await self._global_popular(limit, exclude)
+        popular = await self._filter_consumable(popular)
         if popular:
             return popular
         return await self._latest_published(limit, exclude)
+
+    async def _filter_consumable(
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """过滤不可消费的推荐指标（软删作废 + 已废弃），避免推荐"点进去是作废/404"。
+
+        协同过滤/血缘扩展/全局热门基于行为数据（tracking_events/lineage_edge）返回指标
+        编码，不校验指标当前状态——用户曾交互的指标后来被废弃/作废后，仍会出现在推荐
+        列表。此处统一按 Metric 表过滤（deleted_at IS NULL 且 status != DEPRECATED），
+        与 ``_latest_published``（recent_published_metrics 已过滤 PUBLISHED）保持一致。
+        空列表时调用方自动落入下一层兜底，保证面板不空白。
+        """
+        if not items:
+            return items
+        codes = [str(it.get("metric_id")) for it in items if it.get("metric_id")]
+        if not codes:
+            return items
+        rows = await self._session.execute(
+            select(Metric.metric_code).where(
+                Metric.metric_code.in_(codes),
+                Metric.deleted_at.is_(None),
+                Metric.status != "DEPRECATED",
+            )
+        )
+        valid = {str(r) for r in rows.scalars().all()}
+        return [it for it in items if str(it.get("metric_id")) in valid]
 
     async def _collaborative_filtering(
         self, user_id: int, limit: int, dismissed: set[str] | None = None

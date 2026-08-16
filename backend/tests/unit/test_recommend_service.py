@@ -32,6 +32,27 @@ def _dual_result(scalar_rows: list, all_rows: list) -> MagicMock:
     return res
 
 
+#: 本文件测试涉及的推荐指标编码（_filter_consumable 的 Metric 过滤查询返回的超集，
+#: 等价于"所有推荐项均可消费"，使测试聚焦推荐分层逻辑本身而非消费过滤）。
+_VALID_CODES = ["m1", "m2", "m3", "m5", "m9", "m10"]
+
+
+def _metric_aware_session(
+    scalar_rows: list, all_rows: list, valid_codes: list[str] | None = None
+) -> MagicMock:
+    """构造 session：Metric 表过滤查询（metric_code IN）返回超集，其余返回画像数据。"""
+    valid = valid_codes if valid_codes is not None else _VALID_CODES
+    session = MagicMock()
+
+    async def _execute(stmt: object) -> MagicMock:
+        if "metric_code IN" in str(stmt):
+            return _dual_result(list(valid), [])
+        return _dual_result(scalar_rows, all_rows)
+
+    session.execute = AsyncMock(side_effect=_execute)
+    return session
+
+
 def _edge_repo() -> MagicMock:
     repo = MagicMock()
     repo.related_edges = AsyncMock(
@@ -61,8 +82,7 @@ async def _svc() -> tuple[RecommendService, MagicMock]:
     repo = _edge_repo()
     svc._repo = repo  # noqa: SLF001
     # 当前用户画像 = {m1}，全量画像为空 → 协同过滤无结果 → 血缘兜底以 m1 为种子
-    svc._session = MagicMock()
-    svc._session.execute = AsyncMock(return_value=_dual_result(["m1"], []))
+    svc._session = _metric_aware_session(["m1"], [])
     return svc, repo
 
 
@@ -126,15 +146,13 @@ def _svc_with_profiles(
     repo.published_terms = AsyncMock(return_value=[])
     repo.dismissed_metrics = AsyncMock(return_value=set())
     svc._repo = repo
-    svc._session = MagicMock()
-    svc._session.execute = AsyncMock(return_value=_dual_result(my_actions, profile_rows))
+    svc._session = _metric_aware_session(my_actions, profile_rows)
     return svc, repo
 
 
 def _seed_session(svc: RecommendService, seeds: list[str]) -> None:
     """血缘兜底测试：session 仅返回用户画像种子，全量画像为空。"""
-    svc._session = MagicMock()
-    svc._session.execute = AsyncMock(return_value=_dual_result(seeds, []))
+    svc._session = _metric_aware_session(seeds, [])
 
 
 def _fallback_repo(edge_side_effect) -> MagicMock:
@@ -252,8 +270,7 @@ async def test_recommend_metrics_global_popular_fallback() -> None:
     """协同过滤与血缘均无可推时，回退到全站热门指标。"""
     svc = RecommendService(MagicMock())
     svc._repo = _fallback_repo(lambda node, limit: [])
-    svc._session = MagicMock()
-    svc._session.execute = AsyncMock(return_value=_dual_result([], []))
+    svc._session = _metric_aware_session([], [], ["m_hot_1", "m_hot_2"])
     svc._repo.popular_metrics = AsyncMock(return_value=[("m_hot_1", 12), ("m_hot_2", 5)])
     items = await svc.recommend_metrics(7, 6)
     assert items
@@ -266,8 +283,7 @@ async def test_recommend_metrics_global_popular_excludes_seeds() -> None:
     """全局热门应排除用户已交互过的指标，避免重复推荐。"""
     svc = RecommendService(MagicMock())
     svc._repo = _fallback_repo(lambda node, limit: [])
-    svc._session = MagicMock()
-    svc._session.execute = AsyncMock(return_value=_dual_result(["m_hot_1"], []))
+    svc._session = _metric_aware_session(["m_hot_1"], [], ["m_hot_1", "m_hot_2"])
     svc._repo.popular_metrics = AsyncMock(return_value=[("m_hot_1", 12), ("m_hot_2", 5)])
     items = await svc.recommend_metrics(7, 6)
     assert [i["metric_id"] for i in items] == ["m_hot_2"]
@@ -277,8 +293,7 @@ async def test_recommend_metrics_latest_published_fallback() -> None:
     """全站无任何行为信号时，回退到最新发布指标，保证面板非空。"""
     svc = RecommendService(MagicMock())
     svc._repo = _fallback_repo(lambda node, limit: [])
-    svc._session = MagicMock()
-    svc._session.execute = AsyncMock(return_value=_dual_result([], []))
+    svc._session = _metric_aware_session([], [], ["m_new_1", "m_new_2"])
     svc._repo.popular_metrics = AsyncMock(return_value=[])
     svc._repo.recent_published_metrics = AsyncMock(return_value=["m_new_1", "m_new_2"])
     items = await svc.recommend_metrics(7, 6)
@@ -307,8 +322,7 @@ async def test_recommend_metrics_latest_published_excludes_seeds() -> None:
     """最新发布兜底同样排除用户已交互指标，避免重复推荐。"""
     svc = RecommendService(MagicMock())
     svc._repo = _fallback_repo(lambda node, limit: [])
-    svc._session = MagicMock()
-    svc._session.execute = AsyncMock(return_value=_dual_result(["m_new_1"], []))
+    svc._session = _metric_aware_session(["m_new_1"], [], ["m_new_1", "m_new_2"])
     svc._repo.popular_metrics = AsyncMock(return_value=[])
     svc._repo.recent_published_metrics = AsyncMock(return_value=["m_new_1", "m_new_2"])
     items = await svc.recommend_metrics(7, 6)
@@ -319,8 +333,7 @@ async def test_recommend_metrics_popular_excluded_falls_to_latest() -> None:
     """全局热门候选全被排除时，继续下探到最新发布，面板仍非空。"""
     svc = RecommendService(MagicMock())
     svc._repo = _fallback_repo(lambda node, limit: [])
-    svc._session = MagicMock()
-    svc._session.execute = AsyncMock(return_value=_dual_result(["m_hot_1"], []))
+    svc._session = _metric_aware_session(["m_hot_1"], [], ["m_fresh_1"])
     svc._repo.popular_metrics = AsyncMock(return_value=[("m_hot_1", 12)])
     svc._repo.recent_published_metrics = AsyncMock(return_value=["m_fresh_1"])
     items = await svc.recommend_metrics(7, 6)
@@ -359,9 +372,29 @@ async def test_recommend_metrics_excludes_dismissed() -> None:
     repo = _fallback_repo(lambda node, limit: [])
     repo.dismissed_metrics = AsyncMock(return_value={"m_hot_1"})
     svc._repo = repo
-    svc._session = MagicMock()
-    svc._session.execute = AsyncMock(return_value=_dual_result([], []))
+    svc._session = _metric_aware_session([], [], ["m_hot_1", "m_hot_2"])
     repo.popular_metrics = AsyncMock(return_value=[("m_hot_1", 12), ("m_hot_2", 8)])
     repo.recent_published_metrics = AsyncMock(return_value=["m_fresh_1"])
     items = await svc.recommend_metrics(7, 6)
     assert [i["metric_id"] for i in items] == ["m_hot_2"]  # m_hot_1 被排除
+
+
+async def test_recommend_metrics_filters_non_consumable() -> None:
+    """消费过滤：已作废/已废弃指标不出现在推荐结果（分层结果过 Metric 表校验）。
+
+    构造 valid_codes 为空（等价于所有候选均已被软删/废弃），协同过滤命中但
+    全部被过滤 → 继续下探血缘/热门/最新兜底，面板不返回不可消费指标。
+    """
+    rows = [
+        SimpleNamespace(actor_id="1", target_id="m1"),
+        SimpleNamespace(actor_id="2", target_id="m1"),
+        SimpleNamespace(actor_id="2", target_id="m2"),
+    ]
+    svc, _ = _svc_with_profiles(["m1", "m2"], rows)
+    # 覆盖 session：Metric 过滤查询返回空（所有推荐项不可消费），画像数据不变
+    svc._session = _metric_aware_session(["m1", "m2"], rows, valid_codes=[])
+    svc._repo.popular_metrics = AsyncMock(return_value=[])
+    svc._repo.recent_published_metrics = AsyncMock(return_value=[])
+    items = await svc.recommend_metrics(1, 10)
+    # 协同过滤命中 m2/m3 但均不可消费 → 全部过滤，不返回软删/废弃指标
+    assert all(i["metric_id"] not in ("m2", "m3") for i in items)
