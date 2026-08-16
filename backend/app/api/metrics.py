@@ -1262,9 +1262,11 @@ async def auto_suggest_metric(
     if effective_table and effective_measure:
         try:
             norm_table = effective_table.split(".")[-1]
+            # 通配符转义（对齐 FR-035）：表名用户可控，含 %/_ 时防模糊放大
+            esc_table = norm_table.replace("/", "//").replace("%", "/%").replace("_", "/_")
             stmt = (
                 select(DBCatalog)
-                .where(DBCatalog.entity_name.like(f"%{norm_table}"))
+                .where(DBCatalog.entity_name.like(f"%{esc_table}", escape="/"))
                 .where(DBCatalog.deleted_at.is_(None))
                 .limit(5)
             )
