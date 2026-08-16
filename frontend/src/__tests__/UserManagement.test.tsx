@@ -83,8 +83,8 @@ const USERS = {
   page: 1,
   page_size: 20,
   items: [
-    { id: 1, username: "admin", email: "admin@example.com", display_name: "平台管理员", role: "platform_admin", domain: null, status: "active", last_login_at: "2026-08-14T10:00:00", created_at: "2026-08-01T10:00:00" },
-    { id: 2, username: "alice", email: "alice@example.com", display_name: "爱丽丝", role: "viewer", domain: "finance", status: "disabled", last_login_at: null, created_at: "2026-08-02T10:00:00" },
+    { id: 1, username: "admin", email: "admin@example.com", display_name: "平台管理员", role: "platform_admin", domain: null, org_id: 1, org_name: "默认团队", status: "active", last_login_at: "2026-08-14T10:00:00", created_at: "2026-08-01T10:00:00" },
+    { id: 2, username: "alice", email: "alice@example.com", display_name: "爱丽丝", role: "viewer", domain: "finance", org_id: 1, org_name: "默认团队", status: "disabled", last_login_at: null, created_at: "2026-08-02T10:00:00" },
   ],
 };
 
@@ -133,12 +133,17 @@ describe("UserManagement 用户管理", () => {
     expect(screen.getByText(/当前账号为只读视图/)).toBeTruthy();
   });
 
-  it("创建用户：手动输入密码、选择主题域，创建成功后一次性展示明文", async () => {
+  it("创建用户：选择所属团队（域自动继承），创建成功后一次性展示明文", async () => {
     mockMe.mockResolvedValue(ADMIN);
     mockList.mockResolvedValue(USERS);
-    mockDomains.mockResolvedValue([
-      { id: 1, code: "finance", name: "财务域", level: 1, parent_id: null, sort_order: 1, status: "active", metric_count: 0, children: [] },
-    ]);
+    mockOrgs.mockResolvedValue({
+      total: 1,
+      page: 1,
+      page_size: 200,
+      items: [
+        { id: 1, name: "默认团队", code: "default", status: "active", domain: "finance", user_count: 2, created_at: "2026-08-01T10:00:00" },
+      ],
+    });
     mockCreate.mockResolvedValue(USERS.items[1]);
     render(<UserManagement />);
     await screen.findByText("alice");
@@ -149,9 +154,12 @@ describe("UserManagement 用户管理", () => {
     fireEvent.change(screen.getByPlaceholderText("如 张三"), { target: { value: "鲍勃" } });
     fireEvent.change(screen.getByPlaceholderText("至少 8 位"), { target: { value: "secret123" } });
 
-    // 所属域下拉：从主题域列表选择（复用 listDomainTree(active)）
-    fireEvent.mouseDown(screen.getByText("选择主题域"));
-    await clickSelectOption("财务域（finance）");
+    // 所属团队下拉：选择团队（业务域自动继承，不再单独选择域）
+    fireEvent.mouseDown(screen.getByText("选择所属团队（业务域自动继承）"));
+    await clickSelectOption("默认团队（default） · 域：finance");
+    // 选项已选中（下拉项 + 回显可能同时存在）+ 继承域提示出现（Form.useWatch 异步重渲染）
+    expect((await screen.findAllByText("默认团队（default） · 域：finance")).length).toBeGreaterThan(0);
+    expect(await screen.findByText(/绑定业务域/)).toBeTruthy();
 
     fireEvent.click(screen.getByText("创 建"));
     await waitFor(() => expect(mockCreate).toHaveBeenCalled());
@@ -160,7 +168,7 @@ describe("UserManagement 用户管理", () => {
       email: "bob@example.com",
       display_name: "鲍勃",
       role: "viewer",
-      domain: "finance",
+      org_id: 1,
       password: "secret123",
     });
 
@@ -222,6 +230,30 @@ describe("UserManagement 用户管理", () => {
     fireEvent.change(input, { target: { value: "newsecret123" } });
     fireEvent.click(screen.getByText("重 置"));
     await waitFor(() => expect(mockReset).toHaveBeenCalledWith(2, "newsecret123"));
+  });
+
+  it("重置密码：可自动生成随机强密码，重置成功后一次性展示明文", async () => {
+    mockMe.mockResolvedValue(ADMIN);
+    mockList.mockResolvedValue(USERS);
+    mockReset.mockResolvedValue({ user_id: 2, ok: true });
+    render(<UserManagement />);
+    await screen.findByText("alice");
+
+    fireEvent.click(screen.getAllByText("重置密码")[1]); // alice（id=2）行
+    fireEvent.click(await screen.findByText("生成随机密码"));
+
+    const input = await screen.findByPlaceholderText("至少 8 位");
+    const val = (input as HTMLInputElement).value;
+    // 已自动预填强密码（含大小写/数字/符号）
+    expect(val).toMatch(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/);
+
+    fireEvent.click(screen.getByText("重 置"));
+    await waitFor(() => expect(mockReset).toHaveBeenCalledWith(2, val));
+
+    // 重置成功后一次性展示明文密码（可复制交付，不落日志）
+    expect(await screen.findByText("密码重置成功")).toBeTruthy();
+    expect(screen.getByText(val)).toBeTruthy();
+    expect(screen.getByText(/仅在此展示一次/)).toBeTruthy();
   });
 
   it("切换每页条数后按新 page_size 重新请求（不固化为 20 条/页）", async () => {

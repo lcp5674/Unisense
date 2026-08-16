@@ -28,7 +28,6 @@ import {
   createUser,
   fetchCurrentUser,
   listAdminUsers,
-  listDomainTree,
   listOrganizations,
   listRolePermissions,
   resetUserPassword,
@@ -38,7 +37,6 @@ import {
 import type {
   AdminUser,
   CurrentUser,
-  SubjectDomainTreeNode,
   UserBatchStatusResult,
   UserCreateRequest,
   UserUpdateRequest,
@@ -56,20 +54,6 @@ const ROLE_LABEL: Record<string, string> = {
 };
 
 const ROLE_OPTIONS = Object.entries(ROLE_LABEL).map(([value, label]) => ({ value, label }));
-
-// 主题域树 → 扁平化下拉选项（保留层级缩进，与数据源页「业务域」下拉同款实现）
-function flattenDomains(
-  nodes: SubjectDomainTreeNode[],
-  depth = 0,
-  out: Array<{ value: string; label: string }> = [],
-): Array<{ value: string; label: string }> {
-  for (const n of nodes) {
-    const indent = depth > 0 ? `${"　".repeat(depth)}` : "";
-    out.push({ value: n.code, label: `${indent}${n.name}（${n.code}）` });
-    if (n.children?.length) flattenDomains(n.children, depth + 1, out);
-  }
-  return out;
-}
 
 // 强随机密码：crypto.getRandomValues，保证大小写/数字/符号各至少 1 个（后端要求 ≥8 位）
 function generateStrongPassword(length = 16): string {
@@ -119,17 +103,27 @@ export function UserManagement() {
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
   const [resetForm] = Form.useForm();
-  const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
-  const [orgOptions, setOrgOptions] = useState<Array<{ value: number; label: string }>>([]);
+  // 团队下拉（方案 B：所属域由团队自动继承，不再单独选择）；带 domain 供「继承域」提示
+  const [orgOptions, setOrgOptions] = useState<Array<{ value: number; label: string; domain: string | null }>>([]);
   // 自定义角色（方案 A：后端 GET /roles 返回 is_custom 标记；创建/编辑用户角色下拉合并展示）
   const [customRoles, setCustomRoles] = useState<string[]>([]);
   const [generatedPassword, setGeneratedPassword] = useState("");
   const [createdResult, setCreatedResult] = useState<{ username: string; password: string } | null>(
     null,
   );
+  // 重置密码成功：一次性展示明文（同创建用户，便于安全交付）
+  const [resetResult, setResetResult] = useState<{ username: string; password: string } | null>(
+    null,
+  );
   // 批量启用/停用：多选行 + 请求进行中标记
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [batchLoading, setBatchLoading] = useState(false);
+
+  // 监听团队选择（方案 B：所属域由团队自动继承，提示所选团队绑定的域）
+  const createOrgId = Form.useWatch("org_id", createForm);
+  const editOrgId = Form.useWatch("org_id", editForm);
+  const inheritedDomainOf = (orgId: number | undefined): string | null =>
+    orgOptions.find((o) => o.value === orgId)?.domain ?? null;
 
   const canManage = me?.role === "platform_admin";
 
@@ -157,20 +151,17 @@ export function UserManagement() {
   }, []);
 
   useEffect(() => {
-    // 所属域下拉：仅展示启用中的主题域（与数据源页「业务域」下拉同源）
-    listDomainTree("active")
-      .then((tree) => setDomainOptions(flattenDomains(tree)))
-      .catch(() => setDomainOptions([]));
-  }, []);
-
-  useEffect(() => {
-    // 组织下拉：仅展示启用中的组织（多租户；停用组织不可新建用户）
+    // 团队下拉：仅展示启用中的团队（停用团队不可新建/换入用户）；domain 用于「继承域」提示
     listOrganizations({ page: 1, page_size: 200 })
       .then((res) =>
         setOrgOptions(
           res.items
             .filter((o) => o.status === "active")
-            .map((o) => ({ value: o.id, label: `${o.name}（${o.code}）` })),
+            .map((o) => ({
+              value: o.id,
+              label: `${o.name}（${o.code}）${o.domain ? ` · 域：${o.domain}` : ""}`,
+              domain: o.domain,
+            })),
         ),
       )
       .catch(() => setOrgOptions([]));
@@ -205,7 +196,6 @@ export function UserManagement() {
         email: String(values.email),
         display_name: String(values.display_name),
         role: String(values.role ?? "viewer"),
-        domain: values.domain ? String(values.domain) : null,
         org_id: values.org_id ? Number(values.org_id) : undefined,
         password: String(values.password),
       };
@@ -231,7 +221,7 @@ export function UserManagement() {
         display_name: String(values.display_name),
         email: String(values.email),
         role: String(values.role),
-        domain: values.domain ? String(values.domain) : null,
+        org_id: values.org_id ? Number(values.org_id) : undefined,
       };
       await updateUser(editTarget.id, payload);
       message.success("用户已更新");
@@ -291,6 +281,11 @@ export function UserManagement() {
     try {
       await resetUserPassword(resetTarget.id, String(values.new_password));
       message.success(`已重置「${resetTarget.username}」的密码`);
+      // 重置成功：一次性展示明文密码（仅内存，可复制交付，不落日志）
+      setResetResult({
+        username: resetTarget.username,
+        password: String(values.new_password),
+      });
       setResetTarget(null);
       resetForm.resetFields();
     } catch (err) {
@@ -306,7 +301,7 @@ export function UserManagement() {
       display_name: u.display_name,
       email: u.email,
       role: u.role,
-      domain: u.domain ?? undefined,
+      org_id: u.org_id ?? undefined,
     });
   }
 
@@ -332,7 +327,13 @@ export function UserManagement() {
       render: (v: string) => <Tag>{ROLE_LABEL[v] ?? v}</Tag>,
     },
     {
-      title: "域",
+      title: "所属团队",
+      dataIndex: "org_name",
+      key: "org_name",
+      render: (v: string | null) => v ?? <span className="muted">—</span>,
+    },
+    {
+      title: "业务域",
       dataIndex: "domain",
       key: "domain",
       render: (v: string | null) => v ?? <span className="muted">—</span>,
@@ -512,25 +513,23 @@ export function UserManagement() {
             <Form.Item name="role" label="角色" initialValue="viewer" rules={[{ required: true }]} style={{ width: 180 }}>
               <Select options={roleOptions} />
             </Form.Item>
-            <Form.Item name="domain" label="所属域（可留空）" style={{ width: 240 }}>
+            <Form.Item name="org_id" label="所属团队" style={{ width: 280 }} extra={undefined}>
               <Select
                 allowClear
                 showSearch
                 optionFilterProp="label"
-                placeholder="选择主题域"
-                options={domainOptions}
+                placeholder="选择所属团队（业务域自动继承）"
+                options={orgOptions}
               />
             </Form.Item>
           </Space>
-          <Form.Item name="org_id" label="所属组织" extra="缺省归入当前管理员组织；停用组织不可选">
-            <Select
-              allowClear
-              showSearch
-              optionFilterProp="label"
-              placeholder="选择组织（缺省当前管理员组织）"
-              options={orgOptions}
-            />
-          </Form.Item>
+          {createOrgId ? (
+            <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>
+              {inheritedDomainOf(createOrgId)
+                ? <>该团队绑定业务域「<span className="mono">{inheritedDomainOf(createOrgId)}</span>」，新成员将自动继承该域。</>
+                : <>该团队未绑定业务域，新成员无默认业务域（需经授权才能访问指标）。</>}
+            </div>
+          ) : null}
           <Form.Item
             name="password"
             label="初始密码"
@@ -578,16 +577,26 @@ export function UserManagement() {
           <Form.Item name="role" label="角色" rules={[{ required: true }]}>
             <Select options={roleOptions} />
           </Form.Item>
-          <Form.Item name="domain" label="所属域（留空为无）">
+          <Form.Item
+            name="org_id"
+            label="所属团队"
+            extra={
+              editOrgId ? (
+                inheritedDomainOf(editOrgId)
+                  ? <>该团队绑定业务域「<span className="mono">{inheritedDomainOf(editOrgId)}</span>」，保存后该用户域将自动切换继承。</>
+                  : <>该团队未绑定业务域，保存后该用户将无默认业务域（需经授权访问指标）。</>
+              ) : undefined
+            }
+          >
             <Select
               allowClear
               showSearch
               optionFilterProp="label"
-              placeholder="选择主题域"
-              options={domainOptions}
+              placeholder="选择所属团队（业务域自动继承）"
+              options={orgOptions}
             />
           </Form.Item>
-          <div className="muted" style={{ fontSize: 12 }}>用户名不可修改；密码请使用「重置密码」单独操作。</div>
+          <div className="muted" style={{ fontSize: 12 }}>用户名不可修改；业务域由所属团队自动继承；密码请使用「重置密码」单独操作。</div>
         </Form>
       </Modal>
 
@@ -601,11 +610,75 @@ export function UserManagement() {
         confirmLoading={saving}
       >
         <Form form={resetForm} layout="vertical" onFinish={handleReset} style={{ marginTop: 8 }}>
-          <Form.Item name="new_password" label="新密码" rules={[{ required: true, min: 8, message: "至少 8 位" }]}>
+          <Form.Item
+            name="new_password"
+            label="新密码"
+            extra={
+              <Space size={8} style={{ marginTop: 4 }}>
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0 }}
+                  icon={<ReloadOutlined />}
+                  onClick={() => {
+                    const pwd = generateStrongPassword();
+                    setGeneratedPassword(pwd);
+                    resetForm.setFieldsValue({ new_password: pwd });
+                  }}
+                >
+                  生成随机密码
+                </Button>
+                {generatedPassword ? <span className="muted">已自动预填强密码（含大小写/数字/符号）</span> : null}
+              </Space>
+            }
+            rules={[{ required: true, min: 8, message: "至少 8 位" }]}
+          >
             <Input.Password autoComplete="new-password" placeholder="至少 8 位" />
           </Form.Item>
-          <Alert type="warning" showIcon message="重置后将立即生效，请通知该用户使用新密码登录。" />
+          <Alert type="warning" showIcon message="重置后将立即生效并强制该用户首登改密；新密码仅展示一次，请安全交付。" />
         </Form>
+      </Modal>
+
+      {/* 重置成功：一次性展示新密码明文（仅内存，可复制交付，不落日志） */}
+      <Modal
+        title="密码重置成功"
+        open={!!resetResult}
+        onCancel={() => setResetResult(null)}
+        footer={[
+          <Button
+            key="copy"
+            type="primary"
+            icon={<CopyOutlined />}
+            onClick={() => {
+              navigator.clipboard?.writeText(resetResult?.password ?? "");
+              message.success("新密码已复制");
+            }}
+          >
+            复制密码
+          </Button>,
+          <Button key="close" onClick={() => setResetResult(null)}>关闭</Button>,
+        ]}
+      >
+        <Alert
+          type="success"
+          showIcon
+          message={`用户「${resetResult?.username ?? ""}」的密码已重置`}
+          description="新密码仅在此展示一次，请立即安全地交给该用户；关闭后无法再次查看明文。该用户首次登录将被要求修改密码。"
+        />
+        <div
+          className="mono"
+          style={{
+            marginTop: 12,
+            padding: "12px 16px",
+            background: "#fafafa",
+            border: "1px solid #f0f0f0",
+            borderRadius: 6,
+            fontSize: 14,
+            wordBreak: "break-all",
+          }}
+        >
+          {resetResult?.password}
+        </div>
       </Modal>
 
       {/* 创建成功：一次性展示初始密码明文（仅内存，可复制交付，不落日志） */}

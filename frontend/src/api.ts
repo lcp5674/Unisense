@@ -3132,6 +3132,7 @@ export async function listOrganizations(params?: {
 export async function createOrganization(body: {
   name: string;
   code: string;
+  domain?: string | null;
 }): Promise<OrganizationView> {
   return request<OrganizationView>(`${API_BASE}/organizations`, {
     method: "POST",
@@ -3141,7 +3142,7 @@ export async function createOrganization(body: {
 
 export async function updateOrganization(
   orgId: number,
-  body: { name?: string; status?: string },
+  body: { name?: string; status?: string; domain?: string | null },
 ): Promise<OrganizationView> {
   return request<OrganizationView>(`${API_BASE}/organizations/${orgId}`, {
     method: "PATCH",

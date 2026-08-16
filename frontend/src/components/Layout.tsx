@@ -148,7 +148,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     label: "系统管理",
     children: [
       { key: "/users", label: "用户管理", icon: <TeamOutlined /> },
-      { key: "/organizations", label: "组织管理", icon: <ApartmentOutlined /> },
+      { key: "/organizations", label: "团队管理", icon: <ApartmentOutlined /> },
       { key: "/governance", label: "权限治理", icon: <SafetyCertificateOutlined /> },
       { key: "/audit", label: "审计日志", icon: <FileSearchOutlined /> },
       { key: "/dicts", label: "数据字典", icon: <TagsOutlined /> },

@@ -137,6 +137,8 @@ export interface AdminUser {
   display_name: string;
   role: string;
   domain: string | null;
+  org_id: number | null;
+  org_name: string | null;
   status: string;
   last_login_at: string | null;
   created_at: string | null;
@@ -177,6 +179,7 @@ export interface UserUpdateRequest {
   email: string;
   role: string;
   domain?: string | null;
+  org_id?: number | null;
 }
 
 export interface MetricListResponse {
@@ -968,6 +971,7 @@ export interface OrganizationView {
   name: string;
   code: string;
   status: string;
+  domain: string | null;
   user_count: number;
   created_at: string | null;
 }
