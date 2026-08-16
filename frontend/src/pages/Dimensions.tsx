@@ -505,7 +505,7 @@ function DimensionsTab() {
       />
 
       <Modal title="新建维度" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={saving}>
-        <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
+        <Form form={form} layout="vertical" scrollToFirstError onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="dim_code" label="维度编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>}>
             <Input className="mono" placeholder="留空自动生成" />
           </Form.Item>
@@ -543,7 +543,7 @@ function DimensionsTab() {
         okText="保存"
         confirmLoading={editSaving}
       >
-        <Form form={editForm} layout="vertical" onFinish={handleEdit} style={{ marginTop: 8 }}>
+        <Form form={editForm} layout="vertical" scrollToFirstError onFinish={handleEdit} style={{ marginTop: 8 }}>
           <Form.Item
             name="dim_code"
             label="维度编码"
@@ -594,7 +594,7 @@ function DimensionsTab() {
       >
         <Form
           form={bindForm}
-          layout="vertical"
+          layout="vertical" scrollToFirstError
           initialValues={{ role: "FILTER" }}
           onFinish={handleBind}
           style={{ marginTop: 8 }}
@@ -1034,7 +1034,7 @@ function MembersTab() {
       />
 
       <Modal title="新增维度成员" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={saving}>
-        <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
+        <Form form={form} layout="vertical" scrollToFirstError onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="member_code" label="成员编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>}>
             <Input className="mono" placeholder="留空自动生成" />
           </Form.Item>
@@ -1069,7 +1069,7 @@ function MembersTab() {
       >
         <Form
           form={autoForm}
-          layout="vertical"
+          layout="vertical" scrollToFirstError
           onFinish={handlePreview}
           style={{ marginTop: 8 }}
           initialValues={{ limit: 200 }}
@@ -1172,7 +1172,7 @@ function MembersTab() {
         okText="保存"
         confirmLoading={editSaving}
       >
-        <Form form={editForm} layout="vertical" onFinish={handleEdit} style={{ marginTop: 8 }}>
+        <Form form={editForm} layout="vertical" scrollToFirstError onFinish={handleEdit} style={{ marginTop: 8 }}>
           <Form.Item name="member_name" label="成员名称" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
@@ -1359,7 +1359,7 @@ function MappingsTab() {
       <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }} locale={{ emptyText: "暂无维度映射" }} />
 
       <Modal title="新建维度映射" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={saving}>
-        <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
+        <Form form={form} layout="vertical" scrollToFirstError onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="source_dim_code" label="源维度" rules={[{ required: true }]}>
             <Select
               showSearch
@@ -1406,7 +1406,7 @@ function MappingsTab() {
         okText="保存"
         confirmLoading={editSaving}
       >
-        <Form form={editForm} layout="vertical" onFinish={handleEditMapping} style={{ marginTop: 8 }}>
+        <Form form={editForm} layout="vertical" scrollToFirstError onFinish={handleEditMapping} style={{ marginTop: 8 }}>
           <Form.Item
             name="mapping_type"
             label="映射类型"
@@ -1562,7 +1562,7 @@ function ReconciliationsTab() {
       <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }} locale={{ emptyText: "暂无对账记录" }} />
 
       <Modal title="提交维度对账" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="提交" confirmLoading={saving}>
-        <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
+        <Form form={form} layout="vertical" scrollToFirstError onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="metric_id" label="指标" rules={[{ required: true }]}>
             <Select showSearch options={metrics.map((m) => ({ value: m.id, label: `${m.metric_code} · ${m.name}` }))} placeholder="选择指标" />
           </Form.Item>

@@ -462,7 +462,7 @@ export function SubjectDomain() {
 
       {/* 创建弹窗 */}
       <Modal title={createTitle} open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => createForm.submit()} confirmLoading={saving}>
-        <Form form={createForm} onFinish={handleCreate} layout="vertical">
+        <Form form={createForm} onFinish={handleCreate} layout="vertical" scrollToFirstError>
           <Form.Item name="parent_id" label="上级域" initialValue={null}>
             <TreeSelect
               allowClear
@@ -493,7 +493,7 @@ export function SubjectDomain() {
 
       {/* 编辑弹窗 */}
       <Modal title="编辑主题域" open={editOpen} onCancel={() => setEditOpen(false)} onOk={() => editForm.submit()} confirmLoading={saving}>
-        <Form form={editForm} onFinish={handleEdit} layout="vertical">
+        <Form form={editForm} onFinish={handleEdit} layout="vertical" scrollToFirstError>
           <Form.Item name="name" label="显示名" rules={[{ required: true }]}>
             <Input status={editDup ? "error" : undefined} />
           </Form.Item>
@@ -509,7 +509,7 @@ export function SubjectDomain() {
 
       {/* 默认值弹窗 */}
       <Modal title="配置域默认值" open={defaultsOpen} onCancel={() => setDefaultsOpen(false)} onOk={() => defaultsForm.submit()} width={600} confirmLoading={saving}>
-        <Form form={defaultsForm} onFinish={handleSaveDefaults} layout="vertical">
+        <Form form={defaultsForm} onFinish={handleSaveDefaults} layout="vertical" scrollToFirstError>
           {DICT_FIELDS.map(f => {
             const dictType = f.key === "type" ? "metric_type" : f.key;
             const opts = dictOptions[dictType];

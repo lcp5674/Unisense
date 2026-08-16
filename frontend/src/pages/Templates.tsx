@@ -386,7 +386,7 @@ export function Templates() {
         confirmLoading={loading}
         width={560}
       >
-        <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
+        <Form form={form} layout="vertical" scrollToFirstError onFinish={handleCreate} style={{ marginTop: 8 }}>
           {instantiateTarget?.required_fields?.length ? (
             <div style={{ marginBottom: 12 }}>
               <Tag color="orange">本模板必填字段</Tag>

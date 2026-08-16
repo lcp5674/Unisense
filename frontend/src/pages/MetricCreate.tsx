@@ -683,7 +683,7 @@ export function MetricCreate() {
         style={{ minHeight: 320 }}
       >
         <Card>
-        <Form form={form} layout="vertical" onFinish={handleSubmit} initialValues={{
+        <Form form={form} layout="vertical" scrollToFirstError onFinish={handleSubmit} initialValues={{
           type: "atomic", granularity: "day", aggregation: "SUM",
           time_semantics: "PERIOD", freshness: "T1", dw_layer: "DWD",
           metric_tier: "T3", serving_mode: "BATCH_ONLY", additivity: "ADDITIVE",
@@ -1117,7 +1117,7 @@ export function MetricCreate() {
             </Space>
           </div>
         ) : (
-          <Form form={batchForm} layout="vertical" onFinish={handleBatchSubmit}>
+          <Form form={batchForm} layout="vertical" scrollToFirstError onFinish={handleBatchSubmit}>
             <Form.Item
               name="domain"
               label="业务域"
