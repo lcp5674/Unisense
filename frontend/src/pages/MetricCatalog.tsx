@@ -246,18 +246,23 @@ function ExpandContent({
 export function MetricCatalog() {
   const navigate = useNavigate();
   const location = useLocation();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { track } = useTracking();
   const urlKw = searchParams.get("kw") ?? "";
   const urlStatus = searchParams.get("status") ?? "";
   const urlOwnerId = searchParams.get("owner_id") ?? "";
+  const urlDomain = searchParams.get("domain") ?? "";
+  const urlTier = searchParams.get("tier") ?? "";
+  const urlLifecycle = searchParams.get("lifecycle") ?? "";
+  // URL 同步筛选状态（replace 模式，不产生历史堆栈）：业务域/分级/生命周期快筛也进 URL，
+  // 让"销售域+已发布+最近7天创建"这类筛选视图可分享、刷新保持（TD §3 协作体验）
   const [items, setItems] = useState<MetricResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [keyword, setKeyword] = useState(urlKw);
   const [status, setStatus] = useState(urlStatus);
   const [ownerFilter, setOwnerFilter] = useState(urlOwnerId);
-  const [domain, setDomain] = useState("");
-  const [tier, setTier] = useState("");
+  const [domain, setDomain] = useState(urlDomain);
+  const [tier, setTier] = useState(urlTier);
   const [sortBy, setSortBy] = useState<"updated_at" | "created_at" | "version" | "metric_code" | "name">("updated_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
@@ -273,7 +278,38 @@ export function MetricCatalog() {
   const [currentUserId, setCurrentUserId] = useState<number | undefined>(undefined);
   const [currentUserRole, setCurrentUserRole] = useState<string>("");
   const [myMetricsOnly, setMyMetricsOnly] = useState(false);
-  const [lifecycleFilter, setLifecycleFilter] = useState<string | null>(null);
+  const [lifecycleFilter, setLifecycleFilter] = useState<string | null>(urlLifecycle || null);
+  const [urlSynced, setUrlSynced] = useState(false);
+  useEffect(() => {
+    if (!urlSynced) {
+      setUrlSynced(true);
+      return; // 首帧用 URL 初始值，不覆盖
+    }
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (keyword) next.set("kw", keyword); else next.delete("kw");
+        if (status) next.set("status", status); else next.delete("status");
+        if (domain) next.set("domain", domain); else next.delete("domain");
+        if (tier) next.set("tier", tier); else next.delete("tier");
+        if (lifecycleFilter) next.set("lifecycle", lifecycleFilter); else next.delete("lifecycle");
+        return next;
+      },
+      { replace: true },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyword, status, domain, tier, lifecycleFilter]);
+
+  // URL 直达 ?lifecycle= 时（分享/刷新），按快筛 key 计算真实日期区间；
+  // 与 handleLifecycle 交互共用同一日期口径（created_7d=7天前起 / stale_30d=30天前止）
+  useEffect(() => {
+    if (lifecycleFilter === "created_7d" && !lifecycleDate.created_after) {
+      setLifecycleDate({ created_after: new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString() });
+    } else if (lifecycleFilter === "stale_30d" && !lifecycleDate.updated_before) {
+      setLifecycleDate({ updated_before: new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString() });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lifecycleFilter]);
   // 生命周期快筛的真实日期区间（TD §13）：created_7d=7 天前起 / stale_30d=30 天前止
   const [lifecycleDate, setLifecycleDate] = useState<{ created_after?: string; updated_before?: string }>({});
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
@@ -356,8 +392,11 @@ export function MetricCatalog() {
     if (urlKw && urlKw !== keyword) setKeyword(urlKw);
     if (urlStatus && urlStatus !== status) setStatus(urlStatus);
     if (urlOwnerId && urlOwnerId !== ownerFilter) setOwnerFilter(urlOwnerId);
-    if (urlKw || urlStatus || urlOwnerId) setPage(1);
-  }, [urlKw, urlStatus, urlOwnerId]);
+    if (urlDomain && urlDomain !== domain) setDomain(urlDomain);
+    if (urlTier && urlTier !== tier) setTier(urlTier);
+    if (urlLifecycle && urlLifecycle !== lifecycleFilter) setLifecycleFilter(urlLifecycle);
+    if (urlKw || urlStatus || urlOwnerId || urlDomain || urlTier || urlLifecycle) setPage(1);
+  }, [urlKw, urlStatus, urlOwnerId, urlDomain, urlTier, urlLifecycle]);
 
   async function load() {
     const seq = ++loadSeq.current;

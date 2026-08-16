@@ -570,3 +570,52 @@ describe("MetricCatalog - 按钮级权限点过滤", () => {
     });
   });
 });
+
+describe("MetricCatalog URL 筛选直达（分享/刷新保持）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDashboard.mockResolvedValue({ total: 0, by_domain: {}, counts: {} } as any);
+    mockedDomains.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, role: "platform_admin" } as any);
+    mockedFavorites.mockResolvedValue([]);
+    mockedUsers.mockResolvedValue([]);
+    fetchMyPermissions.mockResolvedValue({});
+  });
+
+  it("带 ?domain=sales&lifecycle=created_7d 直达时，列表按域过滤且 created_after 生效", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    render(
+      <MemoryRouter initialEntries={["/catalog?domain=sales&lifecycle=created_7d"]}>
+        <Routes>
+          <Route path="/catalog" element={<MetricCatalog />} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    // 首次 load 后 lifecycleDate effect 会触发二次 load（依赖含 lifecycleDate）；
+    // 断言存在同时带 domain=sales 且 created_after 已计算的调用（URL 直达的生命周期快筛真正生效）
+    await waitFor(() => {
+      const call = mockedList.mock.calls.find(
+        (c) => c[0]?.domain === "sales" && typeof c[0]?.created_after === "string",
+      );
+      expect(call).toBeTruthy();
+    });
+  });
+
+  it("带 ?status=PUBLISHED&tier=T1 直达时，状态与分级过滤生效", async () => {
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
+    render(
+      <MemoryRouter initialEntries={["/catalog?status=PUBLISHED&tier=T1"]}>
+        <Routes>
+          <Route path="/catalog" element={<MetricCatalog />} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      const call = mockedList.mock.calls.find((c) => c[0]?.status === "PUBLISHED");
+      expect(call).toBeTruthy();
+      expect(call?.[0]?.metric_tier).toBe("T1");
+    });
+  });
+});
