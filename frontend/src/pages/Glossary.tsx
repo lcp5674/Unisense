@@ -24,6 +24,7 @@ import {
 } from "../api";
 import type { GlossaryTerm, GlossaryConflict, SubjectDomainTreeNode, TermRelationViewItem } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { usePermission } from "../hooks/usePermission";
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
@@ -143,6 +144,7 @@ function TermsTab() {
   const loadSeq = useRef(0);
   // 搜索框初始值承接 URL 关键词（首查即带过滤）
   const [search, setSearch] = useState(urlKw);
+  const { can } = usePermission();
 
   async function load(overSearch?: string) {
     const seq = ++loadSeq.current;
@@ -425,9 +427,13 @@ function TermsTab() {
       render: (_: unknown, t: GlossaryTerm) => (
         <Space wrap>
           <Button size="small" type="link" onClick={() => openDetail(t)}>详情</Button>
-          <Button size="small" type="link" onClick={() => openEdit(t)}>编辑</Button>
+          {can("glossary:edit") && (
+            <Button size="small" type="link" onClick={() => openEdit(t)}>编辑</Button>
+          )}
           <Button size="small" type="link" icon={<ApartmentOutlined />} onClick={() => openRelationView(t)}>关系</Button>
-          <Button size="small" type="link" onClick={() => openRelation(t)}>建立关系</Button>
+          {can("glossary:create") && (
+            <Button size="small" type="link" onClick={() => openRelation(t)}>建立关系</Button>
+          )}
           <Button
             size="small"
             type="link"
@@ -436,13 +442,13 @@ function TermsTab() {
           >
             {favCodes.has(t.term_code) ? "已收藏" : "收藏"}
           </Button>
-          {t.status === "DRAFT" && (
+          {t.status === "DRAFT" && can("glossary:edit") && (
             <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => handleSubmit(t)}>提交</Button>
           )}
-          {t.status === "DEPRECATED" && (
+          {t.status === "DEPRECATED" && can("glossary:edit") && (
             <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => handleSubmit(t)}>再次发布</Button>
           )}
-          {t.status !== "DEPRECATED" && (
+          {t.status !== "DEPRECATED" && can("glossary:deprecate") && (
             <Button size="small" danger onClick={() => handleDeprecate(t)}>废弃</Button>
           )}
         </Space>
@@ -469,11 +475,13 @@ function TermsTab() {
           onChange={(v) => { setStatus(v || ""); setPage(1); }}
           options={[{ value: "DRAFT", label: "草稿" }, { value: "PUBLISHED", label: "已发布" }, { value: "DEPRECATED", label: "已废弃" }]}
         />
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建术语</Button>
-        <Button icon={<SendOutlined />} disabled={!selectedRowKeys.length} onClick={() => setBatchAction("submit")}>
+        {can("glossary:create") && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建术语</Button>
+        )}
+        <Button icon={<SendOutlined />} disabled={!selectedRowKeys.length || !can("glossary:edit")} onClick={() => setBatchAction("submit")}>
           批量发布
         </Button>
-        <Button danger icon={<PlusOutlined rotate={45} />} disabled={!selectedRowKeys.length} onClick={() => setBatchAction("deprecate")}>
+        <Button danger icon={<PlusOutlined rotate={45} />} disabled={!selectedRowKeys.length || !can("glossary:deprecate")} onClick={() => setBatchAction("deprecate")}>
           批量废弃
         </Button>
         <span className="muted">共 {total} 条</span>
@@ -616,20 +624,22 @@ function TermsTab() {
         onCancel={() => setRelationViewTerm(null)}
         width={720}
         footer={[
-          <Button
-            key="add"
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={() => {
-              if (relationViewTerm) {
-                const t = relationViewTerm;
-                setRelationViewTerm(null);
-                openRelation(t);
-              }
-            }}
-          >
-            建立关系
-          </Button>,
+          can("glossary:create") ? (
+            <Button
+              key="add"
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => {
+                if (relationViewTerm) {
+                  const t = relationViewTerm;
+                  setRelationViewTerm(null);
+                  openRelation(t);
+                }
+              }}
+            >
+              建立关系
+            </Button>
+          ) : null,
           <Button key="close" onClick={() => setRelationViewTerm(null)}>关闭</Button>,
         ]}
       >
@@ -836,6 +846,7 @@ function TermsTab() {
 function ConflictsTab() {
   const [items, setItems] = useState<GlossaryConflict[]>([]);
   const [loading, setLoading] = useState(false);
+  const { can } = usePermission();
 
   async function load() {
     setLoading(true);
@@ -884,8 +895,8 @@ function ConflictsTab() {
       render: (_: unknown, c: GlossaryConflict) =>
         c.status === "OPEN" ? (
           <Space>
-            <Button size="small" type="primary" onClick={() => handleResolve(c, "RESOLVED")}>解决</Button>
-            <Button size="small" onClick={() => handleResolve(c, "IGNORED")}>忽略</Button>
+            <Button size="small" type="primary" disabled={!can("glossary:deprecate")} onClick={() => handleResolve(c, "RESOLVED")}>解决</Button>
+            <Button size="small" disabled={!can("glossary:deprecate")} onClick={() => handleResolve(c, "IGNORED")}>忽略</Button>
           </Space>
         ) : (
           <Tag>已处理</Tag>

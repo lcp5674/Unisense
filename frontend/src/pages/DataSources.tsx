@@ -36,6 +36,7 @@ import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
 import { useResizableColumns } from "../components/ResizableTable";
+import { usePermission } from "../hooks/usePermission";
 
 const FALLBACK_TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
@@ -128,6 +129,7 @@ function SourceDetailModal({
   toggling: boolean;
 }) {
   const navigate = useNavigate();
+  const { can } = usePermission();
   const [health, setHealth] = useState<SourceHealth | null>(null);
   const [watermark, setWatermark] = useState<Watermark | null>(null);
   const [collecting, setCollecting] = useState(false);
@@ -509,30 +511,38 @@ function SourceDetailModal({
       )}
 
       <Space wrap>
-        <Button type="primary" icon={<EditOutlined />} onClick={() => onEdit(source)}>
-          编辑
-        </Button>
-        <Popconfirm
-          title={source.enabled ? "停用数据源" : "启用数据源"}
-          description={
-            source.enabled
-              ? `停用「${source.name}」后不再参与定时调度与手动采集，采集目录与历史血缘保留。`
-              : `启用「${source.name}」后恢复参与定时调度与手动采集。`
-          }
-          okText={source.enabled ? "确认停用" : "确认启用"}
-          cancelText="取消"
-          onConfirm={() => onToggleEnabled(source)}
-        >
-          <Button icon={source.enabled ? <StopOutlined /> : <PlayCircleOutlined />} loading={toggling}>
-            {source.enabled ? "停用" : "启用"}
+        {can("data-source:edit") && (
+          <Button type="primary" icon={<EditOutlined />} onClick={() => onEdit(source)}>
+            编辑
           </Button>
-        </Popconfirm>
-        <Button type="primary" icon={<ThunderboltOutlined />} loading={collecting} onClick={handleCollect}>
-          立即采集
-        </Button>
-        <Button icon={<ApiOutlined />} loading={checking} onClick={handleCheck}>
-          测试连接
-        </Button>
+        )}
+        {can("data-source:edit") && (
+          <Popconfirm
+            title={source.enabled ? "停用数据源" : "启用数据源"}
+            description={
+              source.enabled
+                ? `停用「${source.name}」后不再参与定时调度与手动采集，采集目录与历史血缘保留。`
+                : `启用「${source.name}」后恢复参与定时调度与手动采集。`
+            }
+            okText={source.enabled ? "确认停用" : "确认启用"}
+            cancelText="取消"
+            onConfirm={() => onToggleEnabled(source)}
+          >
+            <Button icon={source.enabled ? <StopOutlined /> : <PlayCircleOutlined />} loading={toggling}>
+              {source.enabled ? "停用" : "启用"}
+            </Button>
+          </Popconfirm>
+        )}
+        {can("data-source:collect") && (
+          <Button type="primary" icon={<ThunderboltOutlined />} loading={collecting} onClick={handleCollect}>
+            立即采集
+          </Button>
+        )}
+        {can("data-source:test-connection") && (
+          <Button icon={<ApiOutlined />} loading={checking} onClick={handleCheck}>
+            测试连接
+          </Button>
+        )}
         <Input
           className="mono"
           value={cron}
@@ -541,23 +551,27 @@ function SourceDetailModal({
           placeholder="cron"
         />
         <Select value={scheduleMode} onChange={setScheduleMode} style={{ width: 130 }} options={[{ value: "FULL", label: "全量" }, { value: "INCREMENTAL", label: "增量" }]} />
-        <Button icon={<ScheduleOutlined />} onClick={handleSchedule}>设置调度</Button>
+        {can("data-source:collect") && (
+          <Button icon={<ScheduleOutlined />} onClick={handleSchedule}>设置调度</Button>
+        )}
         <Button type="link" onClick={() => navigate(`/collection-tasks?source_id=${encodeURIComponent(source.source_id)}`)}>
           采集任务 →
         </Button>
         <Button type="link" onClick={() => navigate(`/lineage?source=${encodeURIComponent(source.source_id)}`)}>
           血缘图 →
         </Button>
-        <Popconfirm
-          title="删除数据源"
-          description={`确定删除「${source.name}」？其采集目录、水位、漂移日志将一并清理，删除后原 ID 可重建同名数据源。`}
-          okText="确认删除"
-          okButtonProps={{ danger: true }}
-          cancelText="取消"
-          onConfirm={() => onDelete(source)}
-        >
-          <Button danger icon={<DeleteOutlined />} loading={deleting}>删除</Button>
-        </Popconfirm>
+        {can("data-source:delete") && (
+          <Popconfirm
+            title="删除数据源"
+            description={`确定删除「${source.name}」？其采集目录、水位、漂移日志将一并清理，删除后原 ID 可重建同名数据源。`}
+            okText="确认删除"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+            onConfirm={() => onDelete(source)}
+          >
+            <Button danger icon={<DeleteOutlined />} loading={deleting}>删除</Button>
+          </Popconfirm>
+        )}
       </Space>
     </Modal>
   );
@@ -565,6 +579,7 @@ function SourceDetailModal({
 
 export function DataSources() {
   const navigate = useNavigate();
+  const { can } = usePermission();
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
@@ -1144,7 +1159,9 @@ export function DataSources() {
           <h2>数据源管理</h2>
           <p>接入数据源、测试连接、采集元数据并持续发现 schema 漂移。Database 留空时采集该实例下全部非系统库。</p>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建数据源</Button>
+        {can("data-source:create") && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建数据源</Button>
+        )}
       </div>
 
       <Card extra={<Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>刷新</Button>}>
@@ -1177,7 +1194,7 @@ export function DataSources() {
           <Button
             icon={<PlayCircleOutlined />}
             onClick={() => handleBatchToggle(true)}
-            disabled={selectedRowKeys.length === 0 || batchLoading}
+            disabled={!can("data-source:edit") || selectedRowKeys.length === 0 || batchLoading}
           >
             批量启用
           </Button>
@@ -1186,9 +1203,9 @@ export function DataSources() {
             description={`确定停用选中的 ${selectedRowKeys.length} 个数据源？停用后不再参与定时调度与手动采集，采集目录与历史血缘保留。`}
             okText="确认停用"
             onConfirm={() => handleBatchToggle(false)}
-            disabled={selectedRowKeys.length === 0 || batchLoading}
+            disabled={!can("data-source:edit") || selectedRowKeys.length === 0 || batchLoading}
           >
-            <Button icon={<StopOutlined />} disabled={selectedRowKeys.length === 0 || batchLoading}>
+            <Button icon={<StopOutlined />} disabled={!can("data-source:edit") || selectedRowKeys.length === 0 || batchLoading}>
               批量停用
             </Button>
           </Popconfirm>
@@ -1198,9 +1215,9 @@ export function DataSources() {
             okText="确认删除"
             okButtonProps={{ danger: true }}
             onConfirm={handleBatchDelete}
-            disabled={selectedRowKeys.length === 0 || batchLoading}
+            disabled={!can("data-source:delete") || selectedRowKeys.length === 0 || batchLoading}
           >
-            <Button danger icon={<DeleteOutlined />} disabled={selectedRowKeys.length === 0 || batchLoading}>
+            <Button danger icon={<DeleteOutlined />} disabled={!can("data-source:delete") || selectedRowKeys.length === 0 || batchLoading}>
               批量删除
             </Button>
           </Popconfirm>
@@ -1209,16 +1226,16 @@ export function DataSources() {
             description={`用已存连接配置逐条探测选中的 ${selectedRowKeys.length} 个数据源，并更新健康状态。`}
             okText="开始探活"
             onConfirm={handleBatchTest}
-            disabled={selectedRowKeys.length === 0 || batchLoading}
+            disabled={!can("data-source:test-connection") || selectedRowKeys.length === 0 || batchLoading}
           >
-            <Button icon={<ApiOutlined />} disabled={selectedRowKeys.length === 0 || batchLoading}>
+            <Button icon={<ApiOutlined />} disabled={!can("data-source:test-connection") || selectedRowKeys.length === 0 || batchLoading}>
               批量探活
             </Button>
           </Popconfirm>
           <Button
             icon={<ScheduleOutlined />}
             onClick={() => setScheduleModalOpen(true)}
-            disabled={selectedRowKeys.length === 0 || batchLoading}
+            disabled={!can("data-source:collect") || selectedRowKeys.length === 0 || batchLoading}
           >
             批量调度
           </Button>
@@ -1417,9 +1434,11 @@ export function DataSources() {
             <Input.TextArea rows={2} placeholder={"每行一个模式，如：\ntmp_*\n*_bak".replace("_*}", "")} />
           </Form.Item>
           <Space style={{ marginBottom: 8 }}>
-            <Button icon={<ApiOutlined />} onClick={handleTest}>
-              测试连接
-            </Button>
+            {can("data-source:test-connection") && (
+              <Button icon={<ApiOutlined />} onClick={handleTest}>
+                测试连接
+              </Button>
+            )}
             <span className="muted" style={{ fontSize: 12 }}>创建前验证 Host / 端口 / 凭据可达性</span>
           </Space>
         </Form>
@@ -1438,7 +1457,8 @@ export function DataSources() {
         />
       )}
 
-      {/* 编辑保存且连接配置变更 → 引导重新采集 */}
+      {/* 编辑保存且连接配置变更 → 引导重新采集（需 data-source:collect） */}
+      {can("data-source:collect") && (
       <Modal
         title="连接配置已变更"
         open={recollectSource !== null}
@@ -1463,6 +1483,7 @@ export function DataSources() {
           数据源已更新。是否立即重新采集，以刷新该数据源下的元数据？旧配置采集的表会在下次全量采集后自动标记为「已废弃」。
         </p>
       </Modal>
+      )}
 
       {/* 批量调度：统一设置 cron */}
       <Modal

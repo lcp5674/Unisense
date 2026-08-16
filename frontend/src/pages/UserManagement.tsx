@@ -42,6 +42,7 @@ import type {
   UserUpdateRequest,
 } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { usePermission } from "../hooks/usePermission";
 
 const ROLE_LABEL: Record<string, string> = {
   platform_admin: "平台管理员",
@@ -87,7 +88,8 @@ const STATUS_LABEL: Record<string, { text: string; color: string }> = {
 };
 
 export function UserManagement() {
-  const [me, setMe] = useState<CurrentUser | null>(null);
+  // 当前用户信息（fetchCurrentUser）：权限判断已迁移到 usePermission，此处仅保留拉取副作用
+  const [, setMe] = useState<CurrentUser | null>(null);
   const [items, setItems] = useState<AdminUser[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -125,7 +127,13 @@ export function UserManagement() {
   const inheritedDomainOf = (orgId: number | undefined): string | null =>
     orgOptions.find((o) => o.value === orgId)?.domain ?? null;
 
-  const canManage = me?.role === "platform_admin";
+  const { can } = usePermission();
+  const canManage =
+    can("user:create") ||
+    can("user:edit") ||
+    can("user:disable") ||
+    can("user:batch-status") ||
+    can("user:reset-password");
 
   async function load() {
     setLoading(true);
@@ -362,19 +370,25 @@ export function UserManagement() {
       render: (_: unknown, u: AdminUser) =>
         canManage ? (
           <Space size={4}>
-            <Button size="small" onClick={() => openEdit(u)}>编辑</Button>
-            <Button size="small" icon={<LockOutlined />} onClick={() => { setResetTarget(u); resetForm.resetFields(); }}>
-              重置密码
-            </Button>
-            <Popconfirm
-              title={u.status === "active" ? `禁用用户 ${u.username}？` : `启用用户 ${u.username}？`}
-              description={u.status === "active" ? "禁用后该用户将无法登录" : undefined}
-              okText="确认"
-              cancelText="取消"
-              onConfirm={() => handleToggleStatus(u)}
-            >
-              <Button size="small" danger={u.status === "active"}>{u.status === "active" ? "禁用" : "启用"}</Button>
-            </Popconfirm>
+            {can("user:edit") && (
+              <Button size="small" onClick={() => openEdit(u)}>编辑</Button>
+            )}
+            {can("user:reset-password") && (
+              <Button size="small" icon={<LockOutlined />} onClick={() => { setResetTarget(u); resetForm.resetFields(); }}>
+                重置密码
+              </Button>
+            )}
+            {can("user:disable") && (
+              <Popconfirm
+                title={u.status === "active" ? `禁用用户 ${u.username}？` : `启用用户 ${u.username}？`}
+                description={u.status === "active" ? "禁用后该用户将无法登录" : undefined}
+                okText="确认"
+                cancelText="取消"
+                onConfirm={() => handleToggleStatus(u)}
+              >
+                <Button size="small" danger={u.status === "active"}>{u.status === "active" ? "禁用" : "启用"}</Button>
+              </Popconfirm>
+            )}
           </Space>
         ) : null,
     },
@@ -427,7 +441,7 @@ export function UserManagement() {
             style={{ width: 240 }}
             onSearch={(v) => { setKeyword(v); setPage(1); }}
           />
-          {canManage && (
+          {can("user:create") && (
             <Button
               type="primary"
               icon={<PlusOutlined />}
@@ -442,7 +456,7 @@ export function UserManagement() {
               创建用户
             </Button>
           )}
-          {canManage && (
+          {can("user:batch-status") && (
             <>
               {selectedRowKeys.length > 0 && (
                 <span style={{ color: "rgba(0,0,0,0.45)", fontSize: 13 }}>

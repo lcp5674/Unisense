@@ -49,6 +49,7 @@ import type {
   LlmConfigPayload,
   LlmConfigTestResult,
 } from "../types";
+import { usePermission } from "../hooks/usePermission";
 
 // OpenAI 协议兼容提供商的预设（对齐后端 services/llm/config_service.py PROVIDER_DEFAULTS）
 const PROVIDER_PRESETS: Record<string, { label: string; base_url: string; model: string }> = {
@@ -557,7 +558,9 @@ export function SystemConfig() {
     }
   }
 
-  const canEdit = data?.can_edit ?? false;
+  const { can } = usePermission();
+  // 保留后端 can_edit 字段兜底 + 叠加 system-config:edit 权限点（自定义角色被授权后也能看到写按钮）
+  const canEdit = (data?.can_edit ?? false) || can("system-config:edit");
   // P1-5：同优先级冲突计数（仅数据库实例）
   const priorityCount = new Map<number, number>();
   (data?.items ?? [])

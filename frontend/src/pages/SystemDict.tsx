@@ -10,6 +10,7 @@ import {
 } from "../api";
 import type { SystemDictItem } from "../types";
 import { slugifyCode, resolveUniqueCode } from "../utils/zhEnDict";
+import { usePermission } from "../hooks/usePermission";
 
 const DICT_TYPE_LABELS: Record<string, string> = {
   granularity: "粒度",
@@ -31,6 +32,7 @@ export const QUIET_REFRESH_TTL_MS = 30_000;
 
 export function SystemDict() {
   const { message, modal } = AntApp.useApp();
+  const { can } = usePermission();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   // 启用状态下钻（?status=，总览仪表「数据字典」资产卡片）作为初始筛选
@@ -186,11 +188,13 @@ export function SystemDict() {
       title: "操作", key: "action", width: 200,
       render: (_: unknown, record: SystemDictItem) => (
         <Space size="small">
-          <Button size="small" icon={<EditOutlined />} onClick={() => { setEditItem(record); editForm.setFieldsValue({ label: record.label, sort_order: record.sort_order, description: record.description }); setEditOpen(true); }}>编辑</Button>
-          <Button size="small" icon={record.status === "active" ? <StopOutlined /> : <CheckCircleOutlined />} onClick={() => handleToggle(record)}>
-            {record.status === "active" ? "停用" : "启用"}
-          </Button>
-          <Button size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(record)} />
+          {can("dict:create") && <Button size="small" icon={<EditOutlined />} onClick={() => { setEditItem(record); editForm.setFieldsValue({ label: record.label, sort_order: record.sort_order, description: record.description }); setEditOpen(true); }}>编辑</Button>}
+          {can("dict:create") && (
+            <Button size="small" icon={record.status === "active" ? <StopOutlined /> : <CheckCircleOutlined />} onClick={() => handleToggle(record)}>
+              {record.status === "active" ? "停用" : "启用"}
+            </Button>
+          )}
+          {can("dict:create") && <Button size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(record)} />}
         </Space>
       ),
     },
@@ -211,7 +215,9 @@ export function SystemDict() {
         }))}
       />
       <div style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center" }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增参照数据项</Button>
+        {can("dict:create") && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增参照数据项</Button>
+        )}
         <Select
           allowClear
           placeholder="全部状态"

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { UserManagement } from "../pages/UserManagement";
+import { PermissionProvider } from "../hooks/usePermission";
 
 vi.mock("../api", () => {
   class UnisenseApiError extends Error {
@@ -18,6 +19,7 @@ vi.mock("../api", () => {
   }
   return {
     fetchCurrentUser: vi.fn(),
+    fetchMyPermissions: vi.fn(),
     listAdminUsers: vi.fn(),
     listDomainTree: vi.fn(),
     listOrganizations: vi.fn(),
@@ -33,6 +35,7 @@ vi.mock("../api", () => {
 
 import {
   fetchCurrentUser,
+  fetchMyPermissions,
   listAdminUsers,
   listDomainTree,
   listOrganizations,
@@ -45,6 +48,7 @@ import {
 } from "../api";
 
 const mockMe = vi.mocked(fetchCurrentUser);
+const mockPerms = vi.mocked(fetchMyPermissions);
 const mockList = vi.mocked(listAdminUsers);
 const mockDomains = vi.mocked(listDomainTree);
 const mockOrgs = vi.mocked(listOrganizations);
@@ -77,6 +81,27 @@ const ADMIN = {
   domain: null,
   org_id: 1,
 };
+
+/** 渲染并注入权限上下文（viewer 基线：无任何 user:* 管理权限点）。 */
+function renderViewer() {
+  mockPerms.mockResolvedValue({
+    user_id: 2,
+    role: "viewer",
+    home_domain: null,
+    allowed_actions: ["read"],
+    ui_actions: ["dashboard:view", "catalog:view", "quality:view", "guide:view"],
+    granted_domains: [],
+    metric_whitelist: [],
+    row_level_restricted: false,
+    grants: [],
+    expiring_soon: [],
+  } as never);
+  return render(
+    <PermissionProvider user={{ ...ADMIN, role: "viewer" } as never}>
+      <UserManagement />
+    </PermissionProvider>,
+  );
+}
 
 const USERS = {
   total: 2,
@@ -125,7 +150,7 @@ describe("UserManagement 用户管理", () => {
   it("viewer：只读视图，无管理操作与创建按钮", async () => {
     mockMe.mockResolvedValue({ ...ADMIN, role: "viewer" });
     mockList.mockResolvedValue(USERS);
-    render(<UserManagement />);
+    renderViewer();
 
     expect(await screen.findByText("alice")).toBeTruthy();
     expect(screen.queryByText("创建用户")).toBeNull();
@@ -338,7 +363,7 @@ describe("UserManagement 用户管理", () => {
   it("viewer：只读视图无批量操作按钮与复选框", async () => {
     mockMe.mockResolvedValue({ ...ADMIN, role: "viewer" });
     mockList.mockResolvedValue(USERS);
-    render(<UserManagement />);
+    renderViewer();
     await screen.findByText("alice");
 
     expect(screen.queryByText("批量停用")).toBeNull();

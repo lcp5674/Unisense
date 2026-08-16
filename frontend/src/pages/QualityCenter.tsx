@@ -26,6 +26,7 @@ import type { MetricResponse, QualityRule, QualityEvent, QualityBenchmark, Recon
 import { ThresholdSummary } from "../utils/display";
 import { RULE_TYPE_LABEL, RULE_MODE_LABEL, RECONCILIATION_STATUS_LABEL } from "../utils/enums";
 import { formatCnTime, formatCnDate } from "../utils/timeCn";
+import { usePermission } from "../hooks/usePermission";
 
 const RULE_TYPES = ["COMPLETENESS", "ACCURACY", "TIMELINESS", "CONSISTENCY", "UNIQUENESS", "VALIDITY", "WAVE_DIFF", "CROSS_SOURCE"];
 const SEVERITY_COLOR: Record<string, string> = { P0: "red", P1: "orange", P2: "default" };
@@ -53,6 +54,8 @@ function RulesTab() {
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
   const metrics = useMetrics();
+  const { can } = usePermission();
+  const canConfigRule = can("quality:config-rule");
 
   async function load() {
     setLoading(true);
@@ -137,8 +140,8 @@ function RulesTab() {
       width: 150,
       render: (_: unknown, r: QualityRule) => (
         <Space>
-          <Button size="small" onClick={() => handleToggle(r)}>{r.enabled ? "停用" : "启用"}</Button>
-          <Button size="small" danger onClick={() => handleDelete(r)}>删除</Button>
+          {canConfigRule && <Button size="small" onClick={() => handleToggle(r)}>{r.enabled ? "停用" : "启用"}</Button>}
+          {canConfigRule && <Button size="small" danger onClick={() => handleDelete(r)}>删除</Button>}
         </Space>
       ),
     },
@@ -148,7 +151,7 @@ function RulesTab() {
     <div>
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
         <Alert type="info" showIcon style={{ flex: 1 }} message="规则随指标 PUBLISHED 注册，按 T1/T2/T3 与数仓层差异化生效。" />
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)} style={{ marginLeft: 12 }}>新建规则</Button>
+        {canConfigRule && <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)} style={{ marginLeft: 12 }}>新建规则</Button>}
       </div>
       <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }} locale={{ emptyText: "暂无质量规则" }} />
 
@@ -186,6 +189,8 @@ function EventsTab() {
   const [detectOpen, setDetectOpen] = useState(false);
   const [detectForm] = Form.useForm();
   const metrics = useMetrics();
+  const { can } = usePermission();
+  const canRunCheck = can("quality:run-check");
 
   async function load() {
     setLoading(true);
@@ -258,11 +263,11 @@ function EventsTab() {
       width: 280,
       render: (_: unknown, e: QualityEvent) => (
         <Space>
-          {e.status === "OPEN" && <Button size="small" onClick={() => act(e.id, qualityEventAck, "已确认")}>确认</Button>}
-          {(e.status === "OPEN" || e.status === "ACK") && <Button size="small" type="primary" onClick={() => act(e.id, qualityEventResolve, "已解决")}>解决</Button>}
+          {canRunCheck && e.status === "OPEN" && <Button size="small" onClick={() => act(e.id, qualityEventAck, "已确认")}>确认</Button>}
+          {canRunCheck && (e.status === "OPEN" || e.status === "ACK") && <Button size="small" type="primary" onClick={() => act(e.id, qualityEventResolve, "已解决")}>解决</Button>}
           {/* 修复确认：Owner 已线下修复留痕（后端仅 OPEN 状态允许） */}
-          {e.status === "OPEN" && <Button size="small" onClick={() => act(e.id, qualityEventConfirmRepair, "已确认修复")}>修复确认</Button>}
-          {e.status !== "CLOSED" && <Button size="small" onClick={() => act(e.id, qualityEventClose, "已关闭")}>关闭</Button>}
+          {canRunCheck && e.status === "OPEN" && <Button size="small" onClick={() => act(e.id, qualityEventConfirmRepair, "已确认修复")}>修复确认</Button>}
+          {canRunCheck && e.status !== "CLOSED" && <Button size="small" onClick={() => act(e.id, qualityEventClose, "已关闭")}>关闭</Button>}
         </Space>
       ),
     },
@@ -279,7 +284,7 @@ function EventsTab() {
           onChange={(v) => { setStatus(v || ""); setPage(1); }}
           options={Object.entries(EVENT_STATUS).map(([k, v]) => ({ value: k, label: v.label }))}
         />
-        <Button type="primary" icon={<ThunderboltOutlined />} onClick={() => setDetectOpen(true)}>手动检测</Button>
+        {canRunCheck && <Button type="primary" icon={<ThunderboltOutlined />} onClick={() => setDetectOpen(true)}>手动检测</Button>}
       </div>
       <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }} locale={{ emptyText: "暂无质量事件" }} />
 
@@ -312,6 +317,8 @@ function BenchmarksTab() {
   // 基准绑定弹窗
   const [bindTarget, setBindTarget] = useState<QualityBenchmark | null>(null);
   const [bindForm] = Form.useForm();
+  const { can } = usePermission();
+  const canConfigRule = can("quality:config-rule");
 
   async function load() {
     setLoading(true);
@@ -380,7 +387,7 @@ function BenchmarksTab() {
       key: "actions",
       width: 110,
       render: (_: unknown, b: QualityBenchmark) => (
-        <Button size="small" icon={<LinkOutlined />} onClick={() => setBindTarget(b)}>绑定</Button>
+        <>{canConfigRule && <Button size="small" icon={<LinkOutlined />} onClick={() => setBindTarget(b)}>绑定</Button>}</>
       ),
     },
   ];
@@ -388,7 +395,7 @@ function BenchmarksTab() {
   return (
     <div>
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>导入基准</Button>
+        {canConfigRule && <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>导入基准</Button>}
       </div>
       <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={false} locale={{ emptyText: "暂无基准" }} />
 
@@ -445,6 +452,8 @@ function ReconciliationTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  const { can } = usePermission();
+  const canRunCheck = can("quality:run-check");
 
   async function load() {
     setLoading(true);
@@ -511,8 +520,8 @@ function ReconciliationTab() {
       render: (_: unknown, r: ReconciliationRecord) =>
         r.status !== "CONFIRMED" ? (
           <Space>
-            <Button size="small" type="primary" onClick={() => handleConfirm(r, "reasonable")}>合理</Button>
-            <Button size="small" danger onClick={() => handleConfirm(r, "caliber_error")}>口径错误</Button>
+            {canRunCheck && <Button size="small" type="primary" onClick={() => handleConfirm(r, "reasonable")}>合理</Button>}
+            {canRunCheck && <Button size="small" danger onClick={() => handleConfirm(r, "caliber_error")}>口径错误</Button>}
           </Space>
         ) : (
           <Tag color="success">已确认</Tag>
@@ -523,7 +532,7 @@ function ReconciliationTab() {
   return (
     <div>
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
-        <Button type="primary" icon={<ReloadOutlined />} onClick={() => setModalOpen(true)}>执行对账</Button>
+        {canRunCheck && <Button type="primary" icon={<ReloadOutlined />} onClick={() => setModalOpen(true)}>执行对账</Button>}
       </div>
       <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={false} locale={{ emptyText: "暂无对账记录" }} />
 

@@ -74,6 +74,7 @@ import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetm
 import { MetricDetailDrawer } from "../components/assetmap/MetricDetailDrawer";
 import { ManualEdgeModal } from "../components/lineage/ManualEdgeModal";
 import { useTracking } from "../hooks/useTracking";
+import { usePermission } from "../hooks/usePermission";
 import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
 import { formatSql } from "../utils/sqlFormat";
@@ -350,6 +351,7 @@ function TableDetailDrawer({ detail, open, onClose, loading }: {
   loading: boolean;
 }) {
   const navigate = useNavigate();
+  const { can } = usePermission();
   // 手动添加上下游（人工治理）
   const [manualOpen, setManualOpen] = useState(false);
   const [manualDirection, setManualDirection] = useState<"upstream" | "downstream">("downstream");
@@ -435,6 +437,7 @@ function TableDetailDrawer({ detail, open, onClose, loading }: {
           <Space style={{ marginTop: 16 }}>
             <Button
               icon={<ArrowUpOutlined />}
+              disabled={!can("lineage:write")}
               onClick={() => {
                 setManualDirection("upstream");
                 setManualOpen(true);
@@ -444,6 +447,7 @@ function TableDetailDrawer({ detail, open, onClose, loading }: {
             </Button>
             <Button
               icon={<ArrowDownOutlined />}
+              disabled={!can("lineage:write")}
               onClick={() => {
                 setManualDirection("downstream");
                 setManualOpen(true);
@@ -498,6 +502,7 @@ function GraphTab() {
   const [metaManualOpen, setMetaManualOpen] = useState(false);
   const [metaManualDir, setMetaManualDir] = useState<"upstream" | "downstream">("downstream");
   const { track } = useTracking();
+  const { can } = usePermission();
 
   async function load() {
     setLoading(true);
@@ -687,6 +692,7 @@ function GraphTab() {
               <Space>
                 <Button
                   icon={<ArrowUpOutlined />}
+                  disabled={!can("lineage:write")}
                   onClick={() => {
                     setFieldManualDir("upstream");
                     setFieldManualOpen(true);
@@ -696,6 +702,7 @@ function GraphTab() {
                 </Button>
                 <Button
                   icon={<ArrowDownOutlined />}
+                  disabled={!can("lineage:write")}
                   onClick={() => {
                     setFieldManualDir("downstream");
                     setFieldManualOpen(true);
@@ -748,6 +755,7 @@ function GraphTab() {
             <Space style={{ marginTop: 8 }}>
               <Button
                 icon={<ArrowUpOutlined />}
+                disabled={!can("lineage:write")}
                 onClick={() => {
                   setMetaManualDir("upstream");
                   setMetaManualOpen(true);
@@ -757,6 +765,7 @@ function GraphTab() {
               </Button>
               <Button
                 icon={<ArrowDownOutlined />}
+                disabled={!can("lineage:write")}
                 onClick={() => {
                   setMetaManualDir("downstream");
                   setMetaManualOpen(true);
@@ -1117,6 +1126,7 @@ function ParseTab() {
   const [result, setResult] = useState<ParseLineageResult | null>(null);
   const [loading, setLoading] = useState(false);
   const { track } = useTracking();
+  const { can } = usePermission();
 
   async function handleParse() {
     if (!sql.trim()) {
@@ -1185,7 +1195,7 @@ function ParseTab() {
           style={{ width: 300 }}
           className="mono"
         />
-        <Button type="primary" icon={<CodeOutlined />} onClick={handleParse} loading={loading}>
+        <Button type="primary" icon={<CodeOutlined />} onClick={handleParse} loading={loading} disabled={!can("lineage:write")}>
           解析血缘
         </Button>
       </Space>
@@ -1445,6 +1455,7 @@ function ChannelsTab() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const { track } = useTracking();
+  const { can } = usePermission();
 
   async function loadChannels() {
     setLoading(true);
@@ -1547,10 +1558,10 @@ function ChannelsTab() {
       render: (_: unknown, edge: StaleEdge) => (
         <Space>
           <Popconfirm title="确认删除该失效血缘边？" onConfirm={() => handleConfirm(edge)}>
-            <Button size="small" danger>确认删除</Button>
+            <Button size="small" danger disabled={!can("lineage:manage-edge")}>确认删除</Button>
           </Popconfirm>
           <Popconfirm title="恢复该血缘边？" onConfirm={() => handleRestore(edge)}>
-            <Button size="small">恢复</Button>
+            <Button size="small" disabled={!can("lineage:manage-edge")}>恢复</Button>
           </Popconfirm>
         </Space>
       ),
@@ -1668,6 +1679,7 @@ function EdgeDetailDrawer({
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const { track } = useTracking();
+  const { can } = usePermission();
 
   useEffect(() => {
     if (!open || edgeId == null) {
@@ -1727,7 +1739,7 @@ function EdgeDetailDrawer({
               okButtonProps={{ danger: true }}
               onConfirm={handleDelete}
             >
-              <Button danger loading={deleting}>删除此边</Button>
+              <Button danger loading={deleting} disabled={!can("lineage:manage-edge")}>删除此边</Button>
             </Popconfirm>
           </div>
         ) : null
@@ -1791,6 +1803,7 @@ function CoverageTab() {
   const [activeList, setActiveList] = useState<"orphans" | "broken">("orphans");
   const navigate = useNavigate();
   const { track } = useTracking();
+  const { can } = usePermission();
   // 断链边人工修复：以断链 source 节点为目标打开手动登记弹窗
   const [repairOpen, setRepairOpen] = useState(false);
   const [repairNode, setRepairNode] = useState<string | null>(null);
@@ -1850,6 +1863,7 @@ function CoverageTab() {
           size="small"
           style={{ padding: 0 }}
           icon={<PlusOutlined />}
+          disabled={!can("lineage:write")}
           onClick={() => {
             setRepairNode(r.source_node);
             setRepairOpen(true);

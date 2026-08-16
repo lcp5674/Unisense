@@ -17,6 +17,7 @@ import { ReloadOutlined, ArrowLeftOutlined, RedoOutlined, EyeOutlined } from "@a
 import { listCollectionJobs, getCollectionJob, collectSourceNow, listDataSources, UnisenseApiError } from "../api";
 import type { CollectionJob, DataSource } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { usePermission } from "../hooks/usePermission";
 
 const STATUS_LABEL: Record<string, string> = {
   QUEUED: "排队中",
@@ -58,6 +59,7 @@ function detailText(detail: Record<string, unknown> | undefined): string {
 
 export function CollectionTasks() {
   const navigate = useNavigate();
+  const canCollect = usePermission().can("data-source:collect");
   const [searchParams] = useSearchParams();
   // 任务状态下钻（?status=，总览仪表「采集任务」资产卡片）作为初始筛选
   const urlStatus = searchParams.get("status") ?? "";
@@ -202,7 +204,7 @@ export function CollectionTasks() {
           <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => openDetail(r)}>
             详情
           </Button>
-          {r.status === "FAILED" && (
+          {r.status === "FAILED" && canCollect && (
             <Button
               type="link"
               size="small"

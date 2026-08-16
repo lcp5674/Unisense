@@ -1349,9 +1349,12 @@ function OverviewTab() {
 
 function GraphTab() {
   const navigate = useNavigate();
-  // 按钮级权限点：无对应权限点时隐藏 LLM 推断按钮（后端强制兜底）
+  // 按钮级权限点：无对应权限点时隐藏按钮（后端强制兜底）
   const canInferCatalog = usePermission().can("catalog:infer-description");
   const canInferMetric = usePermission().can("metric:infer-description");
+  const canDeprecate = usePermission().can("catalog:deprecate");
+  const canEditDesc = usePermission().can("catalog:edit-description");
+  const canEditMetric = usePermission().can("metric:edit");
   const [graphData, setGraphData] = useState<{
     nodes: AssetGraphNode[];
     edges: AssetGraphEdge[];
@@ -1850,16 +1853,18 @@ function GraphTab() {
                     )}
                   </div>
                   <Space size={8} style={{ marginTop: 8 }}>
-                    <Button
-                      size="small"
-                      icon={<EditOutlined />}
-                      onClick={() => {
-                        setMetricDescEditing(true);
-                        setMetricDescDraft(metricData.description ?? "");
-                      }}
-                    >
-                      补充描述
-                    </Button>
+                    {canEditMetric && (
+                      <Button
+                        size="small"
+                        icon={<EditOutlined />}
+                        onClick={() => {
+                          setMetricDescEditing(true);
+                          setMetricDescDraft(metricData.description ?? "");
+                        }}
+                      >
+                        补充描述
+                      </Button>
+                    )}
                     {canInferMetric && (
                       <Button
                         size="small"
@@ -2084,7 +2089,7 @@ function GraphTab() {
               <Descriptions.Item label="字段描述">
                 <SchemaTable
                   columns={Array.isArray(detail.schema_summary) ? detail.schema_summary : []}
-                  editable
+                  editable={canEditDesc}
                   inferable
                   canInfer={canInferCatalog}
                   onEdit={handleFieldEdit}
@@ -2111,7 +2116,7 @@ function GraphTab() {
                 )}
               </Descriptions.Item>
             </Descriptions>
-            {detail.entity_type === "TABLE" && (
+            {detail.entity_type === "TABLE" && canDeprecate && (
               <Space style={{ marginTop: 12 }} wrap>
                 <Popconfirm
                   title={`废弃资产「${detail.entity_name}」？`}
@@ -2482,6 +2487,7 @@ function OwnerTab() {
   // 单实体废弃（资产地图「手动下线」治理入口）
   const [deprecating, setDeprecating] = useState(false);
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.owner.catalogs.pageSize", 10);
+  const canDeprecate = usePermission().can("catalog:deprecate");
 
   useEffect(() => {
     fetchAssetGraph({ depth: 1 })
@@ -2892,7 +2898,7 @@ function OwnerTab() {
                 {Array.isArray(detail.schema_summary) ? detail.schema_summary.length : "—"}
               </Descriptions.Item>
             </Descriptions>
-            {detail.entity_type === "TABLE" && (
+            {detail.entity_type === "TABLE" && canDeprecate && (
               <Space style={{ marginTop: 12, marginBottom: 8 }} wrap>
                 <Popconfirm
                   title={`废弃资产「${detail.entity_name}」？`}
@@ -3015,6 +3021,9 @@ function TablesTab() {
   const [govSaving, setGovSaving] = useState(false);
   const [govOnSaved, setGovOnSaved] = useState<(() => void) | null>(null);
   const [govForm] = Form.useForm();
+  const canDeprecate = usePermission().can("catalog:deprecate");
+  const canEdit = usePermission().can("assetmap:edit");
+  const canExport = usePermission().can("assetmap:export");
 
   async function load() {
     setLoading(true);
@@ -3161,23 +3170,27 @@ function TablesTab() {
               label: SENSITIVITY_LABEL[k],
             }))}
           />
-          <Button icon={<DownloadOutlined />} onClick={handleExport}>
-            导出 CSV
-          </Button>
-          <Button
-            icon={<SettingOutlined />}
-            disabled={selectedRowKeys.length === 0}
-            onClick={() => {
-              const ids = selectedEntityIds();
-              if (ids.length === 0) {
-                message.warning("所选资产缺少详情标识（id），无法批量设置");
-                return;
-              }
-              openGov(ids);
-            }}
-          >
-            批量设置
-          </Button>
+          {canExport && (
+            <Button icon={<DownloadOutlined />} onClick={handleExport}>
+              导出 CSV
+            </Button>
+          )}
+          {canEdit && (
+            <Button
+              icon={<SettingOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              onClick={() => {
+                const ids = selectedEntityIds();
+                if (ids.length === 0) {
+                  message.warning("所选资产缺少详情标识（id），无法批量设置");
+                  return;
+                }
+                openGov(ids);
+              }}
+            >
+              批量设置
+            </Button>
+          )}
         </Space>
       }
     >
@@ -3239,17 +3252,19 @@ function TablesTab() {
                   >
                     详情
                   </Button>
-                  <Button
-                    type="link"
-                    size="small"
-                    icon={<SettingOutlined />}
-                    disabled={record.id == null}
-                    onClick={() => {
-                      if (record.id != null) openGov([record.id]);
-                    }}
-                  >
-                    设置
-                  </Button>
+                  {canEdit && (
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<SettingOutlined />}
+                      disabled={record.id == null}
+                      onClick={() => {
+                        if (record.id != null) openGov([record.id]);
+                      }}
+                    >
+                      设置
+                    </Button>
+                  )}
                 </Space>
               ),
             },
@@ -3272,15 +3287,17 @@ function TablesTab() {
             <Descriptions column={2} bordered size="small">
               <Descriptions.Item label="实体名称">
                 {detail.entity_name}
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<SettingOutlined />}
-                  style={{ paddingLeft: 8 }}
-                  onClick={() => openGov([detail.id], refreshDetail)}
-                >
-                  设置
-                </Button>
+                {canEdit && (
+                  <Button
+                    type="link"
+                    size="small"
+                    icon={<SettingOutlined />}
+                    style={{ paddingLeft: 8 }}
+                    onClick={() => openGov([detail.id], refreshDetail)}
+                  >
+                    设置
+                  </Button>
+                )}
               </Descriptions.Item>
               <Descriptions.Item label="实体类型">{detail.entity_type}</Descriptions.Item>
               <Descriptions.Item label="数据源">
@@ -3391,7 +3408,7 @@ function TablesTab() {
                 </div>
               </Descriptions.Item>
             </Descriptions>
-            {detail.entity_type === "TABLE" && (
+            {detail.entity_type === "TABLE" && canDeprecate && (
               <Space style={{ marginTop: 12 }} wrap>
                 <Popconfirm
                   title={`废弃资产「${detail.entity_name}」？`}

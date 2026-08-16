@@ -10,6 +10,7 @@ import {
 } from "../api";
 import type { OrganizationView, SubjectDomainTreeNode } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { usePermission } from "../hooks/usePermission";
 
 const ORG_STATUS_LABEL: Record<string, { text: string; color: string }> = {
   active: { text: "正常", color: "success" },
@@ -32,6 +33,7 @@ function flattenDomains(
 }
 
 export function OrgManagement() {
+  const { can } = usePermission();
   const [items, setItems] = useState<OrganizationView[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -138,15 +140,15 @@ export function OrgManagement() {
       width: 240,
       render: (_: unknown, org: OrganizationView) => (
         <Space>
-          <Button size="small" onClick={() => openEdit(org)}>编辑</Button>
-          {org.status === "active" ? (
+          {can("org:edit") && <Button size="small" onClick={() => openEdit(org)}>编辑</Button>}
+          {can("org:disable") && (org.status === "active" ? (
             <Popconfirm title={`确认停用组织「${org.name}」？停用后其下用户将无法登录`} onConfirm={() => handleStatus(org, "suspended")}>
               <Button size="small">停用</Button>
             </Popconfirm>
           ) : (
             <Button size="small" onClick={() => handleStatus(org, "active")}>启用</Button>
-          )}
-          {org.status !== "deleted" && org.user_count === 0 && (
+          ))}
+          {can("org:disable") && org.status !== "deleted" && org.user_count === 0 && (
             <Popconfirm title={`确认删除组织「${org.name}」？`} onConfirm={() => handleStatus(org, "deleted")}>
               <Button size="small" danger>删除</Button>
             </Popconfirm>
@@ -169,7 +171,9 @@ export function OrgManagement() {
       <Card
         extra={
           <Space>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>创建团队</Button>
+            {can("org:create") && (
+              <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>创建团队</Button>
+            )}
             <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
           </Space>
         }

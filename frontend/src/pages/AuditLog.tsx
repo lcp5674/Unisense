@@ -5,8 +5,10 @@ import { exportAudit, listAudit, UnisenseApiError } from "../api";
 import type { AuditEntry } from "../types";
 import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel, auditActionLabel } from "../utils/auditI18n";
 import { formatCnTime } from "../utils/timeCn";
+import { usePermission } from "../hooks/usePermission";
 
 export function AuditLog() {
+  const { can } = usePermission();
   const [items, setItems] = useState<AuditEntry[]>([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -164,9 +166,11 @@ export function AuditLog() {
       <Card
         extra={
           <Space>
-            <Button icon={<DownloadOutlined />} onClick={handleExport} loading={exporting}>
-              导出 CSV
-            </Button>
+            {can("audit:export") && (
+              <Button icon={<DownloadOutlined />} onClick={handleExport} loading={exporting}>
+                导出 CSV
+              </Button>
+            )}
             <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
               刷新
             </Button>

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { SystemConfig } from "../pages/SystemConfig";
+import { PermissionProvider } from "../hooks/usePermission";
 
 vi.mock("../api", () => {
   class UnisenseApiError extends Error {
@@ -31,6 +32,7 @@ vi.mock("../api", () => {
     deleteLlmConfig: vi.fn(),
     testLlmConfig: vi.fn(),
     fetchLlmModels: vi.fn(),
+    fetchMyPermissions: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -39,6 +41,7 @@ import {
   createLlmConfig,
   deleteLlmConfig,
   fetchLlmModels,
+  fetchMyPermissions,
   getLlmConfigs,
   getLlmConfigSecret,
   testLlmConfig,
@@ -52,6 +55,7 @@ const mockUpdate = vi.mocked(updateLlmConfig);
 const mockDelete = vi.mocked(deleteLlmConfig);
 const mockTest = vi.mocked(testLlmConfig);
 const mockFetchModels = vi.mocked(fetchLlmModels);
+const mockPerms = vi.mocked(fetchMyPermissions);
 
 function listData(overrides: {
   canEdit?: boolean;
@@ -114,7 +118,24 @@ describe("SystemConfig LLM 路由配置", () => {
     mockGet.mockResolvedValue(
       listData({ canEdit: false, items: [{ ...PRIMARY_ITEM, source: "env" }] }) as never,
     );
-    render(<SystemConfig />);
+    // 无 system-config:edit 权限点 → 即使后端 can_edit=false 且 fail-open 也保持只读
+    mockPerms.mockResolvedValue({
+      user_id: 2,
+      role: "viewer",
+      home_domain: null,
+      allowed_actions: ["read"],
+      ui_actions: ["system-config:view", "dashboard:view"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    } as never);
+    render(
+      <PermissionProvider user={{ id: 2, username: "viewer", display_name: "访客", role: "viewer", domain: null, org_id: 1 } as never}>
+        <SystemConfig />
+      </PermissionProvider>,
+    );
     await screen.findByText("LLM 路由配置");
     await waitFor(() => {
       expect(screen.queryByText("新增 LLM 实例")).toBeNull();

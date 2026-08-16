@@ -108,9 +108,11 @@ function InferBadge({ field }: { field: SuggestionField }) {
 export function MetricCreate() {
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
-  // 批量注册按钮级权限：写角色（platform_admin/domain_admin/metric_owner）可用，后端接口强制为最终边界
+  // 批量注册按钮级权限：批量注册权限点（metric:import），后端接口强制为最终边界
   const { can } = usePermission();
-  const canBatchRegister = can("metric:create");
+  const canBatchRegister = can("metric:import");
+  const canCreate = can("metric:create");
+  const canInferDesc = can("metric:infer-description");
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
 
@@ -637,14 +639,16 @@ export function MetricCreate() {
                   className="mono"
                 />
               </Form.Item>
-              <Button
-                type="dashed"
-                block
-                onClick={handleSqlInfer}
-                disabled={!selectedDomain || !sqlInferText.trim()}
-              >
-                智能推断并回填字段
-              </Button>
+              {canInferDesc && (
+                <Button
+                  type="dashed"
+                  block
+                  onClick={handleSqlInfer}
+                  disabled={!selectedDomain || !sqlInferText.trim()}
+                >
+                  智能推断并回填字段
+                </Button>
+              )}
             </Card>
 
             {/* Step 2: 自动推断 */}
@@ -842,7 +846,7 @@ export function MetricCreate() {
 
             <Form.Item>
               <Space>
-                <Button type="primary" htmlType="submit" loading={loading} size="large">创建草稿</Button>
+                {canCreate && <Button type="primary" htmlType="submit" loading={loading} size="large">创建草稿</Button>}
                 <Button onClick={handlePrecheck} loading={prechecking} size="large">冲突预检</Button>
               </Space>
             </Form.Item>

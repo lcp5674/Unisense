@@ -76,8 +76,12 @@ function isInferInProgress(err: unknown): boolean {
 
 export function Catalogs() {
   const navigate = useNavigate();
-  // 按钮级权限点：无 catalog:infer-description 时隐藏 LLM 推断按钮（后端强制兜底）
-  const canInferCatalog = usePermission().can("catalog:infer-description");
+  // 按钮级权限点：无对应权限时隐藏/禁用按钮（后端强制兜底）
+  const { can } = usePermission();
+  const canInferCatalog = can("catalog:infer-description");
+  const canEditCatalog = can("catalog:edit-description");
+  const canDeprecateCatalog = can("catalog:deprecate");
+  const canCollectCatalog = can("data-source:collect");
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw= / ?source_id=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
@@ -673,7 +677,9 @@ export function Catalogs() {
           <h2>采集目录</h2>
           <p>采集器登记的元数据目录——含敏感度分级与 schema 完整性标记。</p>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>登记实体</Button>
+        {canEditCatalog && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>登记实体</Button>
+        )}
       </div>
 
       {coverage && (
@@ -786,7 +792,7 @@ export function Catalogs() {
             onChange={(e) => setKeyword(e.target.value)}
             onSearch={() => { setPage(1); load(); }}
           />
-          {selectedRowKeys.length > 0 && (
+          {canDeprecateCatalog && selectedRowKeys.length > 0 && (
             <Button danger icon={<DeleteOutlined />} onClick={handleBulkDeprecate}>
               批量废弃（{selectedRowKeys.length}）
             </Button>
@@ -873,14 +879,16 @@ export function Catalogs() {
           return (
             <>
               <Space style={{ marginBottom: 12 }} align="center">
-                <Button
-                  icon={<SyncOutlined />}
-                  loading={refreshing}
-                  onClick={handleRefreshEntity}
-                  size="small"
-                >
-                  采集该表
-                </Button>
+                {canCollectCatalog && (
+                  <Button
+                    icon={<SyncOutlined />}
+                    loading={refreshing}
+                    onClick={handleRefreshEntity}
+                    size="small"
+                  >
+                    采集该表
+                  </Button>
+                )}
                 <span className="muted" style={{ fontSize: 12 }}>
                   {hasNoSchema ? "从源端采集字段元数据" : "重新采集，同步源端最新字段"}
                 </span>
@@ -980,7 +988,7 @@ export function Catalogs() {
               ) : (
                 <SchemaTable
                   columns={fieldColumns}
-                  editable={true}
+                  editable={canEditCatalog}
                   inferable={true}
                   canInfer={canInferCatalog}
                   onEdit={handleEdit}

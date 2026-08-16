@@ -16,6 +16,7 @@ import {
 } from "../api";
 import type { ConflictResponse, MetricCompareResult, RulingRecord, UserBrief } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { usePermission } from "../hooks/usePermission";
 import { MetricCompareTable } from "../components/MetricCompareTable";
 import { formatCnTime } from "../utils/timeCn";
 import { RULING_DECISION_LABEL } from "../utils/enums";
@@ -157,6 +158,7 @@ export function ReviewWorkbench() {
 
   const navigate = useNavigate();
   const { track } = useTracking();
+  const { can } = usePermission();
 
   // 加载用户名单一次，供裁决记录「仲裁人」列显示中文名；失败时回落原始 ID 不影响主流程
   useEffect(() => {
@@ -350,7 +352,7 @@ export function ReviewWorkbench() {
         <Button
           type="primary"
           size="small"
-          disabled={busyId === c.conflict_id}
+          disabled={busyId === c.conflict_id || !can("review:arbitrate")}
           onClick={() => openArbitrate(c)}
         >
           仲裁
@@ -359,7 +361,7 @@ export function ReviewWorkbench() {
     }
     if (c.status === "OPEN" || c.status === "NEGOTIATING") {
       actions.push(
-        <Button size="small" danger disabled={busyId === c.conflict_id} onClick={() => {
+        <Button size="small" danger disabled={busyId === c.conflict_id || !can("review:escalate")} onClick={() => {
           setEscalating(c);
           setEscalateNote("");
         }}>
@@ -369,7 +371,7 @@ export function ReviewWorkbench() {
     }
     if (c.status === "RULED") {
       actions.push(
-        <Button size="small" disabled={busyId === c.conflict_id} onClick={() => handleClose(c)}>
+        <Button size="small" disabled={busyId === c.conflict_id || !can("review:close")} onClick={() => handleClose(c)}>
           关闭
         </Button>,
       );
@@ -377,7 +379,7 @@ export function ReviewWorkbench() {
     // 已关闭可重新打开重审（CLOSED → OPEN），随后可再次仲裁
     if (c.status === "CLOSED") {
       actions.push(
-        <Button size="small" disabled={busyId === c.conflict_id} onClick={() => setReopening(c)}>
+        <Button size="small" disabled={busyId === c.conflict_id || !can("review:reopen")} onClick={() => setReopening(c)}>
           重新打开
         </Button>,
       );
@@ -528,7 +530,7 @@ export function ReviewWorkbench() {
         onCancel={() => setArbitrating(null)}
         onOk={submitArbitrate}
         okText="提交裁决"
-        okButtonProps={{ loading: arbitrateBusy, disabled: decisionOptions.length === 0 }}
+        okButtonProps={{ loading: arbitrateBusy, disabled: decisionOptions.length === 0 || !can("review:arbitrate") }}
         cancelButtonProps={{ disabled: arbitrateBusy }}
         width={1120}
       >
@@ -621,7 +623,7 @@ export function ReviewWorkbench() {
         onCancel={() => setEscalating(null)}
         onOk={submitEscalate}
         okText="确认升级"
-        okButtonProps={{ loading: escalating != null && busyId === escalating.conflict_id }}
+        okButtonProps={{ loading: escalating != null && busyId === escalating.conflict_id, disabled: !can("review:escalate") }}
       >
         <Input
           placeholder="升级备注（说明协商未决原因，将通知 domain_admin）"
@@ -637,7 +639,7 @@ export function ReviewWorkbench() {
         onCancel={() => setReopening(null)}
         onOk={() => handleReopen(reopening!)}
         okText="确认重新打开"
-        okButtonProps={{ danger: true, loading: reopening != null && busyId === reopening.conflict_id }}
+        okButtonProps={{ danger: true, loading: reopening != null && busyId === reopening.conflict_id, disabled: !can("review:reopen") }}
         cancelButtonProps={{ disabled: reopening != null && busyId === reopening.conflict_id }}
       >
         <p>
