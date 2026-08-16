@@ -107,7 +107,13 @@ describe("MetricReview 指标审批", () => {
     renderReview();
     await screen.findByText("sales_gmv_day");
     // 分页参数（默认第 1 页、每页 20 条）
-    expect(mockedList).toHaveBeenCalledWith({ status: "REVIEW", page: 1, page_size: 20 });
+    expect(mockedList).toHaveBeenCalledWith({
+      status: "REVIEW",
+      page: 1,
+      page_size: 20,
+      sort_by: "updated_at",
+      sort_order: "asc",
+    });
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

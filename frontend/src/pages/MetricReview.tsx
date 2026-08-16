@@ -113,7 +113,14 @@ export function MetricReview() {
   async function load() {
     setLoading(true);
     try {
-      const res = await listMetrics({ status: "REVIEW", page, page_size: pageSize });
+      const res = await listMetrics({
+        status: "REVIEW",
+        page,
+        page_size: pageSize,
+        // 审批工作台 FIFO：最旧待审优先，避免积压（默认后端 updated_at desc 会新单优先）
+        sort_by: "updated_at",
+        sort_order: "asc",
+      });
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
