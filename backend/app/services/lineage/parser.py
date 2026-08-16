@@ -305,7 +305,8 @@ def _branch_queries(query: exp.Expression) -> list[exp.Select]:
     """将源查询展开为多个 SELECT 分支（UNION 拆开，普通 SELECT 单个）。"""
     if isinstance(query, exp.Union):
         # sqlglot 的 Expression.flatten 泛化成生成器后过滤 SELECT 分支
-        branches: list[Any] = list(query.flatten())
+        # （25.x 的 flatten 无类型标注，忽略 no-untyped-call）
+        branches: list[Any] = list(query.flatten())  # type: ignore[no-untyped-call]
         return [b for b in branches if isinstance(b, exp.Select)]
     if isinstance(query, exp.Select):
         return [query]
@@ -592,10 +593,14 @@ def _extract_merge_edges(
     scope = _merge_source_scope(using) if isinstance(using, (exp.Subquery, exp.Table)) else None
     if scope is None:
         return
-    # sqlglot 30.x：MERGE 的 WHEN 分支存放在 args["whens"]（Whens 容器节点），
-    # 而非 ast.expressions——旧写法遍历空列表导致 MERGE 字段级血缘全丢。
+    # sqlglot 双版本兼容：30.x 的 WHEN 分支存放于 args["whens"]（Whens 容器节点），
+    # 25.x 直接存于 ast.expressions（列表）——按版本择一遍历，否则字段级血缘全丢。
     whens = ast.args.get("whens")
-    for when in getattr(whens, "expressions", None) or []:
+    if whens is None:
+        when_iter: Any = ast.expressions
+    else:
+        when_iter = getattr(whens, "expressions", None) or []
+    for when in when_iter:
         then = when.args.get("then")
         if isinstance(then, exp.Update):
             for eq in getattr(then, "expressions", None) or []:

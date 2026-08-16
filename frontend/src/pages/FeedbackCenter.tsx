@@ -33,12 +33,11 @@ const TARGET_TYPE_ZH: Record<string, string> = {
   nps: "满意度",
 };
 
-const TYPE_FILTER_OPTIONS = [
-  { value: "metric", label: "指标" },
-  { value: "term", label: "术语" },
-  { value: "report", label: "报表" },
-  { value: "dashboard", label: "仪表盘" },
-];
+// 对象类型筛选/提交/NPS 弹窗共用选项（对齐 TARGET_TYPE_ZH 全量可反馈对象）
+const TYPE_FILTER_OPTIONS = Object.entries(TARGET_TYPE_ZH).map(([value, label]) => ({
+  value,
+  label,
+}));
 
 // 反馈分类 → 业务术语 + 颜色（运营按类分派处理）
 const CATEGORY_ZH: Record<string, { label: string; color: string }> = {
@@ -96,7 +95,7 @@ interface ProcessDraft {
   note: string;
 }
 
-function FeedbackTab() {
+function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
   const [items, setItems] = useState<Feedback[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -171,7 +170,7 @@ function FeedbackTab() {
   useEffect(() => {
     load(1, pageSize);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshToken]);
 
   function changeType(tt: string | undefined) {
     setTargetType(tt);
@@ -329,13 +328,29 @@ function FeedbackTab() {
       title: "处理",
       key: "actions",
       width: 210,
-      render: (_: unknown, f: Feedback) => (
-        <Space>
-          <Button size="small" onClick={() => setDraft({ feedback: f, status: "in_progress", note: "" })}>跟进</Button>
-          <Button size="small" type="primary" onClick={() => setDraft({ feedback: f, status: "adopted", note: "" })}>采纳</Button>
-          <Button size="small" danger onClick={() => setDraft({ feedback: f, status: "rejected", note: "" })}>驳回</Button>
-        </Space>
-      ),
+      render: (_: unknown, f: Feedback) => {
+        // 终态（已采纳/已驳回）：处理结果已由状态列展示，操作列留空避免重复
+        if (f.status === "adopted" || f.status === "rejected") {
+          return <span className="muted">—</span>;
+        }
+        return (
+          <Space>
+            <Button
+              size="small"
+              disabled={f.status === "in_progress"}
+              onClick={() => setDraft({ feedback: f, status: "in_progress", note: "" })}
+            >
+              跟进
+            </Button>
+            <Button size="small" type="primary" onClick={() => setDraft({ feedback: f, status: "adopted", note: "" })}>
+              采纳
+            </Button>
+            <Button size="small" danger onClick={() => setDraft({ feedback: f, status: "rejected", note: "" })}>
+              驳回
+            </Button>
+          </Space>
+        );
+      },
     },
   ];
 
@@ -406,14 +421,13 @@ function FeedbackTab() {
   );
 }
 
-function SubmitFeedbackTab() {
+function SubmitFeedbackTab({ onSubmitted }: { onSubmitted?: () => void }) {
   const [form] = Form.useForm();
 
   async function handleSubmit(values: Record<string, unknown>) {
     try {
       await submitFeedback({
         target_type: String(values.target_type),
-        target_id: values.target_id ? String(values.target_id) : null,
         rating: values.rating !== undefined ? Number(values.rating) : null,
         comment: values.comment ? String(values.comment) : null,
         category: values.category ? String(values.category) : "improvement",
@@ -423,6 +437,8 @@ function SubmitFeedbackTab() {
       });
       message.success("反馈已提交");
       form.resetFields();
+      // 提交成功 → 切回「用户反馈」列表并刷新，让新反馈立即可见
+      onSubmitted?.();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交失败");
     }
@@ -431,11 +447,8 @@ function SubmitFeedbackTab() {
   return (
     <Card title="提交反馈" size="small">
       <Form form={form} layout="vertical" onFinish={handleSubmit} style={{ maxWidth: 520 }}>
-        <Form.Item name="target_type" label="对象类型" rules={[{ required: true }]}>
+        <Form.Item name="target_type" label="对象类型" rules={[{ required: true }]} initialValue="metric">
           <Select options={TYPE_FILTER_OPTIONS} />
-        </Form.Item>
-        <Form.Item name="target_id" label="对象 ID">
-          <Input className="mono" />
         </Form.Item>
         <Form.Item name="category" label="分类" initialValue="improvement">
           <Select options={CATEGORY_OPTIONS} />
@@ -446,8 +459,8 @@ function SubmitFeedbackTab() {
         <Form.Item name="rating" label="评分">
           <Rate count={5} />
         </Form.Item>
-        <Form.Item name="comment" label="意见">
-          <Input.TextArea rows={3} />
+        <Form.Item name="comment" label="意见" rules={[{ required: true, message: "请填写反馈意见" }]}>
+          <Input.TextArea rows={3} placeholder="请描述你的问题或建议（便于运营分派处理）" />
         </Form.Item>
         <div className="muted" style={{ marginBottom: 12 }}>来源页面将自动记录（便于运营复现与定位）。</div>
         <Button type="primary" htmlType="submit">提交反馈</Button>
@@ -538,7 +551,7 @@ function NpsTab() {
         </div>
         <Form form={form} layout="vertical" onFinish={handleSubmit}>
           <Form.Item name="target_type" label="对象类型" initialValue="platform">
-            <Select options={[{ value: "platform", label: "平台" }, { value: "metric", label: "指标" }, { value: "dashboard", label: "仪表盘" }]} />
+            <Select options={TYPE_FILTER_OPTIONS} />
           </Form.Item>
           <Form.Item name="comment" label="原因（可选）">
             <Input.TextArea rows={2} />
@@ -550,9 +563,23 @@ function NpsTab() {
 }
 
 export function FeedbackCenter() {
+  // 提交反馈成功后自动切回列表并刷新（避免用户需手动刷新才能看到新反馈）
+  const [activeTab, setActiveTab] = useState("feedback");
+  const [refreshToken, setRefreshToken] = useState(0);
   const tabItems = [
-    { key: "feedback", label: "用户反馈", children: <FeedbackTab /> },
-    { key: "submit", label: "提交反馈", children: <SubmitFeedbackTab /> },
+    { key: "feedback", label: "用户反馈", children: <FeedbackTab refreshToken={refreshToken} /> },
+    {
+      key: "submit",
+      label: "提交反馈",
+      children: (
+        <SubmitFeedbackTab
+          onSubmitted={() => {
+            setRefreshToken((t) => t + 1);
+            setActiveTab("feedback");
+          }}
+        />
+      ),
+    },
     { key: "nps", label: "NPS 调查", children: <NpsTab /> },
   ];
 
@@ -566,7 +593,7 @@ export function FeedbackCenter() {
         </div>
       </div>
       <Card styles={{ body: { paddingTop: 8 } }}>
-        <Tabs items={tabItems} />
+        <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems} />
       </Card>
     </div>
   );

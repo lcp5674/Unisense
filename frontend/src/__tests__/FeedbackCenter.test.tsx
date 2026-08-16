@@ -15,11 +15,12 @@ vi.mock("../api", () => ({
   UnisenseApiError: class extends Error {},
 }));
 
-import { listFeedback, updateFeedbackStatus, listUsers, getMetric } from "../api";
+import { listFeedback, updateFeedbackStatus, listUsers, getMetric, submitFeedback } from "../api";
 const mockedList = vi.mocked(listFeedback);
 const mockedUpdate = vi.mocked(updateFeedbackStatus);
 const mockedUsers = vi.mocked(listUsers);
 const mockedGetMetric = vi.mocked(getMetric);
+const mockedSubmit = vi.mocked(submitFeedback);
 
 const feedbacks: Feedback[] = [
   {
@@ -67,6 +68,20 @@ beforeEach(() => {
     page_size: 20,
   } as never);
   mockedUpdate.mockResolvedValue(feedbacks[0] as never);
+  mockedSubmit.mockResolvedValue({
+    id: 99,
+    user_id: 3,
+    target_type: "metric",
+    target_id: null,
+    rating: null,
+    comment: "新反馈",
+    nps_score: null,
+    status: "pending",
+    resolution_note: null,
+    resolver_id: null,
+    resolved_at: null,
+    created_at: "2026-08-16T00:00:00",
+  } as never);
   // 用户名单：id=7→爱丽丝、id=4→审核员；id=9 无 display_name 回落 username
   mockedUsers.mockResolvedValue([
     { id: 7, username: "alice", display_name: "爱丽丝", role: "analyst", domain: null, status: "active" },
@@ -167,5 +182,41 @@ describe("FeedbackCenter 用户反馈", () => {
     await waitFor(() => expect(screen.getByText("已失效")).toBeInTheDocument());
     // 仍保留编码，但不再显示为可点击的指标链接
     expect(screen.getByText("sales_gmv")).toBeInTheDocument();
+  });
+
+  it("处理按钮按反馈状态差异化：跟进中反馈跟进禁用，已采纳反馈不再提供处理按钮", async () => {
+    const withInProgress = [
+      ...feedbacks,
+      { ...feedbacks[0], id: 5, status: "in_progress" },
+    ];
+    mockedList.mockResolvedValue({ items: withInProgress, total: 3, page: 1, page_size: 20 } as never);
+    render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
+    await waitFor(() => expect(screen.getAllByText(/销售GMV/).length).toBeGreaterThan(0));
+
+    // in_progress 行（id=5）：跟进按钮禁用，采纳/驳回仍可用
+    const ipRow = screen.getByText("5").closest("tr") as HTMLElement;
+    expect(within(ipRow).getByRole("button", { name: /跟\s*进/ })).toBeDisabled();
+    expect(within(ipRow).getByRole("button", { name: /采\s*纳/ })).not.toBeDisabled();
+
+    // adopted 行（id=2，dashboard）：不再提供处理按钮（操作列留空）
+    const adoptedRow = screen.getByText("2").closest("tr") as HTMLElement;
+    expect(within(adoptedRow).queryByRole("button", { name: /采\s*纳/ })).not.toBeInTheDocument();
+    expect(within(adoptedRow).queryByRole("button", { name: /驳\s*回/ })).not.toBeInTheDocument();
+  });
+
+  it("提交反馈后自动切回列表并刷新（无需手动刷新即可看到新反馈）", async () => {
+    render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
+    const submitCountBefore = mockedList.mock.calls.length;
+
+    // 切到「提交反馈」Tab（表单 textarea 出现即切换成功）
+    fireEvent.click(screen.getByRole("tab", { name: /提交反馈/ }));
+    const textarea = await screen.findByPlaceholderText(/描述你的问题/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "新增导出功能" } });
+    fireEvent.click(screen.getByRole("button", { name: /提交反馈/ }));
+
+    // 提交成功 → 切回「用户反馈」Tab 并刷新列表
+    await waitFor(() => expect(mockedSubmit).toHaveBeenCalled());
+    await waitFor(() => expect(mockedList.mock.calls.length).toBeGreaterThan(submitCountBefore));
   });
 });
