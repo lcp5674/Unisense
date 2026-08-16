@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Descriptions, InputNumber } from "antd";
-import { PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Descriptions } from "antd";
+import { PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, ThunderboltOutlined, LoadingOutlined } from "@ant-design/icons";
 import {
   listTerms,
   createTerm,
@@ -10,6 +10,10 @@ import {
   createTermRelation,
   submitTerm,
   deprecateTerm,
+  batchSubmitTerms,
+  batchDeprecateTerms,
+  inferTermSuggestion,
+  listDomainTree,
   listTermConflicts,
   resolveTermConflict,
   listFavorites,
@@ -17,16 +21,21 @@ import {
   removeFavorite,
   UnisenseApiError,
 } from "../api";
-import type { GlossaryTerm, GlossaryConflict } from "../types";
+import type { GlossaryTerm, GlossaryConflict, SubjectDomainTreeNode } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
+// 关系类型 8 种（产品丰富增强，对齐后端 TermRelationType 枚举）
 const RELATION_TYPE_LABEL: Record<string, string> = {
   SYNONYM_OF: "同义（SYNONYM_OF）",
   BROADER_THAN: "上位（BROADER_THAN）",
   NARROWER_THAN: "下位（NARROWER_THAN）",
   RELATED_TO: "相关（RELATED_TO）",
+  ANTONYM_OF: "反义（ANTONYM_OF）",
+  DEPENDS_ON: "依赖（DEPENDS_ON）",
+  DERIVED_FROM: "派生（DERIVED_FROM）",
+  INSTANCE_OF: "实例（INSTANCE_OF）",
 };
 const CONFLICT_TYPE_LABEL: Record<string, string> = {
   alias_overlap: "同义别名冲突",
@@ -38,6 +47,44 @@ const CONFLICT_STATUS_LABEL: Record<string, string> = {
   RESOLVED: "已解决",
   IGNORED: "已忽略",
 };
+
+/** 主题域树展平为 Select 选项（含层级缩进；code 为提交值）。 */
+function flattenDomains(nodes: SubjectDomainTreeNode[], depth = 0): { value: string; label: string }[] {
+  const out: { value: string; label: string }[] = [];
+  for (const n of nodes) {
+    out.push({ value: n.code, label: `${"　".repeat(depth)}${n.name}（${n.code}）` });
+    if (n.children?.length) out.push(...flattenDomains(n.children, depth + 1));
+  }
+  return out;
+}
+
+/** 根据名称用 LLM 推断定义/同义词/边界，回填指定 Form。 */
+async function inferFromName(
+  form: ReturnType<typeof Form.useForm>[0],
+  setInferring: (v: boolean) => void,
+) {
+  const name = String(form.getFieldValue("name") ?? "").trim();
+  if (!name) {
+    message.warning("请先填写术语名称，再进行 AI 推断");
+    return;
+  }
+  setInferring(true);
+  try {
+    const res = await inferTermSuggestion(name);
+    form.setFieldsValue({
+      definition: res.definition,
+      synonyms: (res.synonyms ?? []).join(", "),
+      boundary: res.boundary ?? "",
+    });
+    message.success(
+      `已根据「${name}」生成建议${res.confidence != null ? `（置信度 ${Math.round(res.confidence * 100)}%）` : ""}`,
+    );
+  } catch (err) {
+    message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "AI 推断失败");
+  } finally {
+    setInferring(false);
+  }
+}
 
 function TermsTab() {
   const [items, setItems] = useState<GlossaryTerm[]>([]);
@@ -58,6 +105,15 @@ function TermsTab() {
   // 术语收藏（C 层多资产收藏：TERM）
   const [favCodes, setFavCodes] = useState<Set<string>>(new Set());
   const [form] = Form.useForm();
+  // 业务域选项（主题域树，不手造）+ AI 推断中标记
+  const [domainOptions, setDomainOptions] = useState<{ value: string; label: string }[]>([]);
+  const [inferring, setInferring] = useState(false);
+  // 批量状态流转（多选行 + 确认弹窗）
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchAction, setBatchAction] = useState<"submit" | "deprecate" | null>(null);
+  // 关系目标术语选项（Select 搜索）
+  const [relationOptions, setRelationOptions] = useState<{ value: number; label: string }[]>([]);
+  const [relationLoading, setRelationLoading] = useState(false);
   // 详情/编辑/关系管理：详情为只读弹窗，编辑与关系用独立 Form 避免与新建表单互相污染
   const [detailTerm, setDetailTerm] = useState<GlossaryTerm | null>(null);
   const [editTarget, setEditTarget] = useState<GlossaryTerm | null>(null);
@@ -142,6 +198,54 @@ function TermsTab() {
       .catch(() => {});
   }, []);
 
+  // 加载主题域树作为业务域选项（新建/编辑不手造）
+  useEffect(() => {
+    listDomainTree("active")
+      .then((tree) => setDomainOptions(flattenDomains(tree)))
+      .catch(() => {});
+  }, []);
+
+  // 加载术语候选供关系目标搜索（Select showSearch）
+  async function loadRelationOptions(searchKw?: string) {
+    setRelationLoading(true);
+    try {
+      const res = await listTerms({ search: searchKw || undefined, page: 1, page_size: 100 });
+      setRelationOptions(
+        res.items.map((t) => ({
+          value: t.id,
+          label: `${t.term_code} - ${t.name}`,
+        })),
+      );
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载术语列表失败");
+    } finally {
+      setRelationLoading(false);
+    }
+  }
+
+  // 批量发布/废弃（207 语义：成功/失败逐条反馈）
+  async function handleBatch(action: "submit" | "deprecate") {
+    if (!selectedRowKeys.length) return;
+    const codes = selectedRowKeys.map(String);
+    try {
+      const results =
+        action === "submit"
+          ? await batchSubmitTerms(codes)
+          : await batchDeprecateTerms(codes);
+      const okCount = results.filter((r) => r.ok).length;
+      const failCount = results.length - okCount;
+      message[okCount > 0 ? "success" : "error"](
+        `批量${action === "submit" ? "发布" : "废弃"}完成：成功 ${okCount} 条` +
+          (failCount ? `，失败 ${failCount} 条（已跳过不影响成功项）` : ""),
+      );
+      setSelectedRowKeys([]);
+      setBatchAction(null);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量操作失败");
+    }
+  }
+
   // 术语收藏切换（行内心形）
   async function toggleFavorite(t: GlossaryTerm) {
     const fav = favCodes.has(t.term_code);
@@ -216,10 +320,11 @@ function TermsTab() {
     }
   }
 
-  // 编辑：回填当前值（同义词逗号连接还原为表单输入格式）
+  // 编辑：回填当前值（同义词逗号连接还原为表单输入格式；编码可编辑）
   function openEdit(t: GlossaryTerm) {
     setEditTarget(t);
     editForm.setFieldsValue({
+      term_code: t.term_code,
       name: t.name,
       definition: t.definition,
       domain: t.domain,
@@ -232,6 +337,7 @@ function TermsTab() {
     if (!editTarget) return;
     try {
       await updateTerm(editTarget.term_code, {
+        term_code: values.term_code ? String(values.term_code) : undefined,
         name: String(values.name),
         definition: String(values.definition),
         domain: String(values.domain),
@@ -246,11 +352,12 @@ function TermsTab() {
     }
   }
 
-  // 关系管理：为当前术语建立与另一术语的关系（目标按数据库 id 定位）
+  // 关系管理：为当前术语建立与另一术语的关系（目标按关键词搜索选择，不手输 ID）
   function openRelation(t: GlossaryTerm) {
     setRelationTarget(t);
     relationForm.resetFields();
     relationForm.setFieldsValue({ relation_type: "RELATED_TO" });
+    loadRelationOptions();
   }
 
   async function handleCreateRelation(values: Record<string, unknown>) {
@@ -300,7 +407,12 @@ function TermsTab() {
           {t.status === "DRAFT" && (
             <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => handleSubmit(t)}>提交</Button>
           )}
-          <Button size="small" danger onClick={() => handleDeprecate(t)}>废弃</Button>
+          {t.status === "DEPRECATED" && (
+            <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => handleSubmit(t)}>再次发布</Button>
+          )}
+          {t.status !== "DEPRECATED" && (
+            <Button size="small" danger onClick={() => handleDeprecate(t)}>废弃</Button>
+          )}
         </Space>
       ),
     },
@@ -326,6 +438,12 @@ function TermsTab() {
           options={[{ value: "DRAFT", label: "草稿" }, { value: "PUBLISHED", label: "已发布" }, { value: "DEPRECATED", label: "已废弃" }]}
         />
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建术语</Button>
+        <Button icon={<SendOutlined />} disabled={!selectedRowKeys.length} onClick={() => setBatchAction("submit")}>
+          批量发布
+        </Button>
+        <Button danger icon={<PlusOutlined rotate={45} />} disabled={!selectedRowKeys.length} onClick={() => setBatchAction("deprecate")}>
+          批量废弃
+        </Button>
         <span className="muted">共 {total} 条</span>
       </Space>
 
@@ -334,6 +452,7 @@ function TermsTab() {
         columns={columns}
         rowKey="term_code"
         loading={loading}
+        rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
         pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
         locale={{ emptyText: "暂无术语" }}
         rowClassName={(r) => (focusCode && r.term_code === focusCode ? "ant-table-row-selected" : "")}
@@ -347,8 +466,23 @@ function TermsTab() {
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
             <Input placeholder="如 成交总额" />
           </Form.Item>
+          <Form.Item label="AI 推断" style={{ marginBottom: 12 }}>
+            <Button
+              icon={inferring ? <LoadingOutlined /> : <ThunderboltOutlined />}
+              loading={inferring}
+              onClick={() => inferFromName(form, setInferring)}
+            >
+              根据名称生成定义 / 同义词 / 边界建议
+            </Button>
+          </Form.Item>
           <Form.Item name="domain" label="业务域" rules={[{ required: true }]}>
-            <Input placeholder="如 finance" />
+            <Select
+              showSearch
+              placeholder="请选择业务域"
+              options={domainOptions}
+              optionFilterProp="label"
+              notFoundContent={domainOptions.length ? undefined : "暂无启用中的主题域"}
+            />
           </Form.Item>
           <Form.Item name="definition" label="定义" rules={[{ required: true }]}>
             <Input.TextArea rows={3} />
@@ -395,11 +529,29 @@ function TermsTab() {
         okText="保存"
       >
         <Form form={editForm} layout="vertical" onFinish={handleUpdate} style={{ marginTop: 8 }}>
+          <Form.Item name="term_code" label="术语编码" rules={[{ required: true }]}>
+            <Input className="mono" />
+          </Form.Item>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
+          <Form.Item label="AI 推断" style={{ marginBottom: 12 }}>
+            <Button
+              icon={inferring ? <LoadingOutlined /> : <ThunderboltOutlined />}
+              loading={inferring}
+              onClick={() => inferFromName(editForm, setInferring)}
+            >
+              根据名称重新生成定义 / 同义词 / 边界建议
+            </Button>
+          </Form.Item>
           <Form.Item name="domain" label="业务域" rules={[{ required: true }]}>
-            <Input />
+            <Select
+              showSearch
+              placeholder="请选择业务域"
+              options={domainOptions}
+              optionFilterProp="label"
+              notFoundContent={domainOptions.length ? undefined : "暂无启用中的主题域"}
+            />
           </Form.Item>
           <Form.Item name="definition" label="定义" rules={[{ required: true }]}>
             <Input.TextArea rows={3} />
@@ -424,16 +576,41 @@ function TermsTab() {
         <Form form={relationForm} layout="vertical" onFinish={handleCreateRelation} style={{ marginTop: 8 }}>
           <Form.Item
             name="target_term_id"
-            label="目标术语 ID"
-            extra={<span className="muted">目标术语的数据库 id，可在其详情弹窗查看</span>}
-            rules={[{ required: true, message: "请输入目标术语 ID" }]}
+            label="关联目标术语"
+            extra={<span className="muted">按编码 / 名称搜索选择，无需手输 ID</span>}
+            rules={[{ required: true, message: "请选择关联目标术语" }]}
           >
-            <InputNumber className="mono" min={1} style={{ width: "100%" }} placeholder="如 3" />
+            <Select
+              showSearch
+              loading={relationLoading}
+              placeholder="搜索术语编码或名称…"
+              options={relationOptions}
+              filterOption={false}
+              onSearch={(kw) => loadRelationOptions(kw)}
+              onFocus={() => loadRelationOptions()}
+              optionFilterProp="label"
+            />
           </Form.Item>
           <Form.Item name="relation_type" label="关系类型" rules={[{ required: true }]}>
             <Select options={Object.entries(RELATION_TYPE_LABEL).map(([v, label]) => ({ value: v, label }))} />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 批量状态流转确认弹窗（可控 Modal，明确展示操作数量） */}
+      <Modal
+        title={batchAction === "submit" ? "批量发布术语" : "批量废弃术语"}
+        open={batchAction !== null}
+        onCancel={() => setBatchAction(null)}
+        onOk={() => handleBatch(batchAction as "submit" | "deprecate")}
+        okText={batchAction === "submit" ? "发布" : "废弃"}
+        okButtonProps={{ danger: batchAction === "deprecate" }}
+        confirmLoading={false}
+      >
+        <p style={{ marginBottom: 0 }}>
+          确定{batchAction === "submit" ? "发布" : "废弃"}选中的 <b>{selectedRowKeys.length}</b> 个术语吗？
+          {batchAction === "deprecate" ? "废弃后可通过「再次发布」重新发布。" : "草稿 / 已废弃术语可发布；已发布将幂等跳过。"}
+        </p>
       </Modal>
     </div>
   );

@@ -26,12 +26,25 @@ class TermCreate(BaseModel):
     owner_id: int | None = None
 
 
+class TermNameInfer(BaseModel):
+    """术语 LLM 推断请求：仅需术语名称。"""
+
+    name: str
+
+
 class TermUpdate(BaseModel):
+    term_code: str | None = None  # 编码编辑（唯一性校验，见 update_term）
     name: str | None = None
     definition: str | None = None
     domain: str | None = None
     synonyms: list[str] | None = None
     boundary: str | None = None
+
+
+class TermBatchOp(BaseModel):
+    """批量状态流转请求（submit / deprecate 共用）。"""
+
+    term_codes: list[str]
 
 
 class TermResponse(BaseModel):

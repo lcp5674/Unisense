@@ -41,6 +41,11 @@ class TermRelationType(enum.StrEnum):
     BROADER_THAN = "BROADER_THAN"
     NARROWER_THAN = "NARROWER_THAN"
     RELATED_TO = "RELATED_TO"
+    # 增强（产品：覆盖业务反义/依赖/派生/实例语义）
+    ANTONYM_OF = "ANTONYM_OF"
+    DEPENDS_ON = "DEPENDS_ON"
+    DERIVED_FROM = "DERIVED_FROM"
+    INSTANCE_OF = "INSTANCE_OF"
 
 
 class TermSourceType(enum.StrEnum):

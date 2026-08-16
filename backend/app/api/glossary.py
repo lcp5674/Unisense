@@ -14,7 +14,9 @@ from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.glossary.schemas import (
     ConflictResolve,
+    TermBatchOp,
     TermCreate,
+    TermNameInfer,
     TermRelationCreate,
     TermUpdate,
 )
@@ -51,6 +53,72 @@ async def create_term(
     )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)
+
+
+@router.post("/infer", dependencies=_WRITE_DEPS)
+async def infer_term_suggestion(
+    payload: TermNameInfer,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """基于术语名称用 LLM 推断定义/同义词/边界说明（建议，不落库）。"""
+    data = await GlossaryService(db).infer_term_suggestion(payload.name)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.infer",
+        entity_type="term",
+        entity_id=payload.name[:64],
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.post("/batch-submit", dependencies=_WRITE_DEPS)
+async def batch_submit_terms(
+    payload: TermBatchOp,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """批量发布术语（207 语义：逐条处理，部分失败不阻断成功项）。"""
+    data = await GlossaryService(db).batch_submit_terms(payload.term_codes, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.batch_submit",
+        entity_type="term",
+        entity_id=f"count={len(payload.term_codes)}",
+        detail={"term_codes": payload.term_codes},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.post("/batch-deprecate", dependencies=_WRITE_DEPS)
+async def batch_deprecate_terms(
+    payload: TermBatchOp,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """批量废弃术语（207 语义：逐条处理，部分失败不阻断成功项）。"""
+    data = await GlossaryService(db).batch_deprecate_terms(payload.term_codes, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.batch_deprecate",
+        entity_type="term",
+        entity_id=f"count={len(payload.term_codes)}",
+        detail={"term_codes": payload.term_codes},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
 
 
 @router.get("", dependencies=_READ_DEPS)

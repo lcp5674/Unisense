@@ -333,7 +333,7 @@ modules:
     pr: ""
     owner: ""
     note: "§6.3 High(1)/Med(5)/Low(5) 已全部修复：① PLAT-2 feedback user_id 强制来自 user.id；② PLAT-3 审计与业务同事务原子提交；③ observability M-1 feedback target_type 白名单校验；④ 所有读端点补 require_roles RBAC 闸门(PLAT-1) + security_reverse 反向测试。security_reverse 门禁恢复有效。待办: §1.5 人工 ratify"
-    updated: "2026-08-10"
+    updated: "2026-08-16"
 
   assetmap:
     fr: [FR-18]
@@ -392,6 +392,7 @@ modules:
     pr: ""
     owner: ""
     note: "§6.3 High(3)/Med(10)/Low(7) 已全部修复：① PLAT-2 冲突裁决 resolver_id 强制来自 user.id（忽略 client 伪造）；② PLAT-3 审计与业务同事务（写入在 commit 前）；③ PLAT-4 删除 _tx 死代码；④ 全部写端点补审计留痕与 RBAC 写闸门。security_reverse 门禁恢复有效。Medium(M-1 最小版本保留)为增强项，非安全阻断。待办: §1.5 人工 ratify"
+    note2: "术语表产品增强（2026-08-16）：① 编辑支持改编码（TermUpdate.term_code + 唯一性校验）；② 新建/编辑 AI 推断定义/同义词/边界（POST /terms/infer，LLM 结构化输出）；③ 关系目标改为关键词搜索选择（不手输 ID）；④ 关系类型 4→8 种（新增反义/依赖/派生/实例，迁移 0061）；⑤ 状态流程废弃后可再次发布；⑥ 批量发布/废弃端点（207 语义 + 审计）；⑦ 业务域改主题域树选项框。验证：后端 glossary 38 项全绿 + ruff/mypy 0；前端 Glossary 18 项全绿 + 全量 620 通过 + tsc 0。"
     updated: "2026-08-10"
 
   dimension:

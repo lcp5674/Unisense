@@ -1645,10 +1645,11 @@ export async function getTerm(termCode: string): Promise<GlossaryTerm> {
   return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}`);
 }
 
-// 更新术语（PUT /terms/{term_code}，字段缺省则不更新）
+// 更新术语（PUT /terms/{term_code}，字段缺省则不更新；term_code 可编辑编码）
 export async function updateTerm(
   termCode: string,
   body: {
+    term_code?: string;
     name?: string;
     definition?: string;
     domain?: string;
@@ -1659,6 +1660,43 @@ export async function updateTerm(
   return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}`, {
     method: "PUT",
     body: JSON.stringify(body),
+  });
+}
+
+// 术语 LLM 推断（POST /terms/infer，根据名称推断定义/同义词/边界，不落库）
+export interface TermInferResult {
+  definition: string;
+  synonyms: string[];
+  boundary: string | null;
+  confidence: number;
+}
+
+export async function inferTermSuggestion(name: string): Promise<TermInferResult> {
+  return request<TermInferResult>(`${API_BASE}/terms/infer`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+// 批量发布/废弃术语（POST /terms/batch-submit | batch-deprecate，207 语义逐条结果）
+export type TermBatchResultItem = {
+  term_code: string;
+  ok: boolean;
+  status?: string;
+  error?: string;
+};
+
+export async function batchSubmitTerms(termCodes: string[]): Promise<TermBatchResultItem[]> {
+  return request<TermBatchResultItem[]>(`${API_BASE}/terms/batch-submit`, {
+    method: "POST",
+    body: JSON.stringify({ term_codes: termCodes }),
+  });
+}
+
+export async function batchDeprecateTerms(termCodes: string[]): Promise<TermBatchResultItem[]> {
+  return request<TermBatchResultItem[]>(`${API_BASE}/terms/batch-deprecate`, {
+    method: "POST",
+    body: JSON.stringify({ term_codes: termCodes }),
   });
 }
 

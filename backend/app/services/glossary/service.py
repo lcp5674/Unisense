@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import unicodedata
 from typing import Any
 
@@ -17,11 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.base_service import BaseService
 from app.core.config import settings
 from app.core.exceptions import (
+    BusinessError,
     ConflictError,
     NotFoundError,
-    UnisenseError,
     ValidationError,
 )
+from app.core.logging import get_logger
 from app.models.glossary import (
     GlossaryConflict,
     GlossaryConflictStatus,
@@ -41,14 +43,34 @@ from app.services.glossary.schemas import (
     TermStatus,
 )
 
+logger = get_logger("unisense.glossary.service")
+
 
 def _normalize(token: str) -> str:
     return unicodedata.normalize("NFKC", token.strip().lower())
-
-
 #: 合法关系类型 / 来源类型取值（DB Enum 列，非法值须在服务层转 4xx，而非 DB 500）。
 _VALID_RELATION_TYPES = {e.value for e in TermRelationType}
 _VALID_SOURCE_TYPES = {e.value for e in TermSourceType}
+
+#: 术语推断的 LLM 响应格式（对齐指标/采集描述推断：json_schema 强约束优先 + json_object 降级）。
+_TERM_INFER_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "term_infer",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "definition": {"type": "string"},
+                "synonyms": {"type": "array", "items": {"type": "string"}},
+                "boundary": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+            "required": ["definition", "confidence"],
+        },
+    },
+}
+_TERM_JSON_OBJECT_FORMAT: dict[str, Any] = {"type": "json_object"}
+_TERM_STRICT_JSON_HINT = "请严格只输出符合 JSON Schema 的 JSON，不要任何额外文字。"
 
 
 def _overlap_ratio(a: list[str], b: list[str]) -> float:
@@ -144,9 +166,13 @@ class GlossaryService(BaseService):
 
     async def submit_term(self, term_code: str, actor_id: int) -> TermResponse:
         term = await self._require_term(term_code)
-        if term.status != TermStatus.DRAFT.value:
-            raise UnisenseError(
-                f"仅 DRAFT 术语可提交，当前: {term.status}", error_code="INVALID_STATE"
+        # 状态机：DRAFT→PUBLISHED（首次发布）；DEPRECATED→PUBLISHED（废弃后可重新发布）。
+        # 已发布重复提交幂等（返回当前），避免重复点击报错。
+        if term.status == TermStatus.PUBLISHED.value:
+            return TermResponse.from_model(term)
+        if term.status not in (TermStatus.DRAFT.value, TermStatus.DEPRECATED.value):
+            raise BusinessError(
+                f"当前状态不可发布: {term.status}", error_code="INVALID_STATE"
             )
         term.status = TermStatus.PUBLISHED.value
         await self._snapshot(term, actor_id, "submit")
@@ -155,6 +181,12 @@ class GlossaryService(BaseService):
 
     async def update_term(self, term_code: str, data: Any, actor_id: int) -> TermResponse:
         term = await self._require_term(term_code)
+        if data.term_code is not None and data.term_code != term.term_code:
+            # 编码编辑唯一性校验（防与其他术语冲突）
+            existing = await self._repo.get_term(data.term_code)
+            if existing is not None:
+                raise ConflictError(f"术语编码已存在: {data.term_code}", error_code="TERM_EXISTS")
+            term.term_code = data.term_code
         if data.name is not None:
             term.name = data.name
         if data.definition is not None:
@@ -170,10 +202,40 @@ class GlossaryService(BaseService):
         await self._repo.commit()
         return TermResponse.from_model(term)
 
+    async def batch_submit_terms(
+        self, term_codes: list[str], actor_id: int
+    ) -> list[dict[str, Any]]:
+        """批量发布（207 语义：逐条处理，部分失败不阻断成功项）。"""
+        results: list[dict[str, Any]] = []
+        for code in term_codes:
+            try:
+                resp = await self.submit_term(code, actor_id)
+                results.append(
+                    {"term_code": code, "ok": True, "status": resp.status.value}
+                )
+            except Exception as exc:  # noqa: BLE001 - 批量逐条容错
+                results.append({"term_code": code, "ok": False, "error": str(exc)})
+        return results
+
+    async def batch_deprecate_terms(
+        self, term_codes: list[str], actor_id: int
+    ) -> list[dict[str, Any]]:
+        """批量废弃（207 语义：逐条处理，部分失败不阻断成功项）。"""
+        results: list[dict[str, Any]] = []
+        for code in term_codes:
+            try:
+                resp = await self.deprecate_term(code, actor_id)
+                results.append(
+                    {"term_code": code, "ok": True, "status": resp.status.value}
+                )
+            except Exception as exc:  # noqa: BLE001 - 批量逐条容错
+                results.append({"term_code": code, "ok": False, "error": str(exc)})
+        return results
+
     async def deprecate_term(self, term_code: str, actor_id: int) -> TermResponse:
         term = await self._require_term(term_code)
         if term.status == TermStatus.DEPRECATED.value:
-            raise UnisenseError("术语已废弃", error_code="INVALID_STATE")
+            raise BusinessError("术语已废弃", error_code="INVALID_STATE")
         term.status = TermStatus.DEPRECATED.value
         await self._snapshot(term, actor_id, "deprecate")
         await self._repo.commit()
@@ -191,7 +253,7 @@ class GlossaryService(BaseService):
             GlossaryConflictStatus.RESOLVED.value,
             GlossaryConflictStatus.IGNORED.value,
         ):
-            raise UnisenseError(f"未知裁决: {decision}", error_code="INVALID_DECISION")
+            raise BusinessError(f"未知裁决: {decision}", error_code="INVALID_DECISION")
         conflict.status = GlossaryConflictStatus(decision)
         conflict.resolver = resolver_id
         await self._repo.commit()
@@ -240,12 +302,89 @@ class GlossaryService(BaseService):
         await self._repo.commit()
         return TermRelationResponse.from_model(relation)
 
+    async def infer_term_suggestion(self, name: str) -> dict[str, Any]:
+        """基于术语名称用 LLM 推断定义/同义词/边界说明（返回结构化建议）。
+
+        复用 ``LlmConfigService.build_client``（DB 配置优先 + 路由/熔断）；
+        LLM 不可用/超时/解析失败时抛 ``UnisenseError``（前端据此提示而非静默）。
+        推断结果仅作建议，不落库（由用户在弹窗确认后经 create/update 提交）。
+        """
+        client = None
+        try:
+            client = await self._build_llm_client()
+            if not getattr(client, "enabled", False):
+                raise BusinessError(
+                    "LLM 未配置，无法推断术语建议",
+                    error_code="LLM_INFER_UNAVAILABLE",
+                )
+            from app.services.llm.parse import parse_term_infer_result
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是企业数据术语治理专家。根据术语名称，推断该业务术语的定义、同义词与边界说明。\n"
+                        "返回 JSON 格式：{\n"
+                        '  "definition": "术语的中文定义，20-100字",\n'
+                        '  "synonyms": ["英文/别名同义词", ...],\n'
+                        '  "boundary": "边界说明（排除范围，如 不含xxx，可空）",\n'
+                        '  "confidence": 0.0-1.0\n'
+                        "}\n"
+                        "要求：定义准确、口径明确；同义词不超过 5 个；confidence < 0.5 表示不确定"
+                    ),
+                },
+                {"role": "user", "content": f"术语名称: {name}"},
+            ]
+            for attempt in (0, 1):
+                aug = messages
+                if attempt:
+                    aug = [*messages, {"role": "user", "content": _TERM_STRICT_JSON_HINT}]
+                for fmt in (_TERM_INFER_FORMAT, _TERM_JSON_OBJECT_FORMAT):
+                    try:
+                        result = await client.chat(
+                            aug, temperature=0.0, max_tokens=400, response_format=fmt
+                        )
+                    except Exception:  # noqa: BLE001 - LLM 网关错误按格式失败降级重试
+                        continue
+                    parsed = parse_term_infer_result(result.get("content", ""))
+                    if parsed is not None:
+                        return parsed
+            logger.warning("llm_infer_term_all_formats_failed", name=name)
+            raise BusinessError(
+                "LLM 推断失败，请稍后重试或手动填写", error_code="LLM_INFER_UNAVAILABLE"
+            )
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            logger.warning("llm_infer_term_timeout_error: %s", exc)
+            raise BusinessError(
+                "LLM 服务不可用，请稍后重试或手动填写", error_code="LLM_INFER_UNAVAILABLE"
+            ) from exc
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.warning("llm_infer_term_format_error: %s", exc)
+            raise BusinessError(
+                "LLM 返回格式异常，请手动填写", error_code="LLM_INFER_UNAVAILABLE"
+            ) from exc
+        except RuntimeError as exc:
+            logger.warning("llm_infer_term_runtime_error: %s", exc)
+            raise BusinessError(
+                "LLM 运行时错误，请手动填写", error_code="LLM_INFER_UNAVAILABLE"
+            ) from exc
+        finally:
+            if client is not None:
+                with contextlib.suppress(Exception):  # noqa: BLE001 - 关闭失败不阻断
+                    await client.close()
+
     # ---- 内部辅助 ----
     async def _require_term(self, term_code: str) -> Term:
         term = await self._repo.get_term(term_code)
         if term is None:
             raise NotFoundError(f"术语不存在: {term_code}")
         return term
+
+    async def _build_llm_client(self) -> Any:
+        """构建 LLM 客户端（DB 配置优先 + 路由/熔断；未配置返回禁用客户端）。"""
+        from app.services.llm.config_service import LlmConfigService
+
+        return await LlmConfigService(self._session).build_client()
 
     async def _snapshot(self, term: Term, actor_id: int, note: str) -> None:
         existing_count = await self._repo.count_term_versions(term.id)

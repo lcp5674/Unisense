@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, useNavigate, Routes, Route } from "react-router-dom";
 import { Glossary } from "../pages/Glossary";
 import type { GlossaryTerm } from "../types";
@@ -27,6 +27,10 @@ vi.mock("../api", () => {
     createTermRelation: vi.fn(),
     submitTerm: vi.fn(),
     deprecateTerm: vi.fn(),
+    batchSubmitTerms: vi.fn(),
+    batchDeprecateTerms: vi.fn(),
+    inferTermSuggestion: vi.fn(),
+    listDomainTree: vi.fn(),
     listTermConflicts: vi.fn(),
     resolveTermConflict: vi.fn(),
     listFavorites: vi.fn(),
@@ -36,7 +40,18 @@ vi.mock("../api", () => {
   };
 });
 
-import { listTerms, listTermConflicts, getTerm, updateTerm, createTermRelation, listFavorites } from "../api";
+import {
+  listTerms,
+  listTermConflicts,
+  getTerm,
+  updateTerm,
+  createTermRelation,
+  listFavorites,
+  batchSubmitTerms,
+  batchDeprecateTerms,
+  inferTermSuggestion,
+  listDomainTree,
+} from "../api";
 
 const mockedList = vi.mocked(listTerms);
 const mockedConflicts = vi.mocked(listTermConflicts);
@@ -44,6 +59,10 @@ const mockedGet = vi.mocked(getTerm);
 const mockedListFavorites = vi.mocked(listFavorites);
 const mockedUpdate = vi.mocked(updateTerm);
 const mockedRelation = vi.mocked(createTermRelation);
+const mockedBatchSubmit = vi.mocked(batchSubmitTerms);
+const mockedBatchDeprecate = vi.mocked(batchDeprecateTerms);
+const mockedInfer = vi.mocked(inferTermSuggestion);
+const mockedDomainTree = vi.mocked(listDomainTree);
 
 const TERMS: GlossaryTerm[] = [
   {
@@ -81,6 +100,7 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ items: TERMS, total: 2, page: 1, page_size: 20 });
   mockedConflicts.mockResolvedValue({ items: [], total: 0 });
   mockedListFavorites.mockResolvedValue([]);
+  mockedDomainTree.mockResolvedValue([]);
 });
 
 describe("Glossary 页面", () => {
@@ -252,9 +272,10 @@ describe("Glossary 页面", () => {
     fireEvent.click(screen.getAllByText("关系")[0]);
 
     await screen.findByText("建立关系：GMV");
-    // 目标术语 ID（InputNumber 实际渲染为文本框，用占位符定位）+ 关系类型
-    const idInput = screen.getByPlaceholderText("如 3");
-    fireEvent.change(idInput, { target: { value: "2" } });
+    // 关联目标术语（Select 搜索：下拉选项来自 listTerms；按编码/名称搜索，无需手输 ID）+ 关系类型
+    fireEvent.mouseDown(screen.getByLabelText("关联目标术语"));
+    await screen.findByText("AOV - 客单价");
+    fireEvent.click(screen.getByText("AOV - 客单价"));
     fireEvent.mouseDown(screen.getByText("相关（RELATED_TO）"));
     fireEvent.click(screen.getByRole("button", { name: /建\s*立/ }));
 
@@ -304,5 +325,135 @@ describe("Glossary 页面", () => {
     await screen.findAllByText("共 2 条");
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+
+  it("编辑弹窗支持编辑术语编码（updateTerm 携带 term_code）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByText("编辑")[0]);
+    await screen.findByText("编辑术语：GMV");
+    // 编码字段已回填且可编辑
+    const codeInput = screen.getByLabelText("术语编码") as HTMLInputElement;
+    expect(codeInput.value).toBe("GMV");
+    fireEvent.change(codeInput, { target: { value: "GMV_V2" } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        "GMV",
+        expect.objectContaining({ term_code: "GMV_V2" }),
+      );
+    });
+  });
+
+  it("新建弹窗：AI 推断根据名称生成定义/同义词/边界并回填", async () => {
+    mockedInfer.mockResolvedValue({
+      definition: "成交总额是某周期内订单金额合计",
+      synonyms: ["GMV", "gross merchandise volume"],
+      boundary: "不含退款订单",
+      confidence: 0.9,
+    });
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findAllByText("共 2 条");
+    fireEvent.click(screen.getAllByText("新建术语")[0]);
+    await screen.findByPlaceholderText("如 成交总额");
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "成交总额" } });
+    fireEvent.click(screen.getByText(/根据名称生成定义/));
+    await waitFor(() => {
+      expect(mockedInfer).toHaveBeenCalledWith("成交总额");
+    });
+    // 回填定义/同义词/边界
+    await screen.findByDisplayValue("成交总额是某周期内订单金额合计");
+    expect((screen.getByLabelText("同义词（逗号分隔）") as HTMLInputElement).value).toBe(
+      "GMV, gross merchandise volume",
+    );
+  });
+
+  it("新建弹窗：业务域为下拉选择（来自主题域树，不手造）", async () => {
+    mockedDomainTree.mockResolvedValue([
+      {
+        id: 1, code: "finance", name: "财务域", parent_id: null, level: 1,
+        sort_order: 0, status: "active", metric_count: 0, children: [],
+      },
+    ]);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findAllByText("共 2 条");
+    fireEvent.click(screen.getAllByText("新建术语")[0]);
+    await screen.findByPlaceholderText("如 成交总额");
+    fireEvent.mouseDown(screen.getByLabelText("业务域"));
+    await screen.findByText("财务域（finance）");
+    fireEvent.click(screen.getByText("财务域（finance）"));
+    // 选中后选项文本作为选中值保留（dropdown 关闭后仍可见）
+    await waitFor(() => {
+      expect(screen.getAllByText("财务域（finance）").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("批量操作：勾选行后批量发布按钮可用，提交调用 batchSubmitTerms", async () => {
+    mockedBatchSubmit.mockResolvedValue([{ term_code: "GMV", ok: true, status: "PUBLISHED" }]);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findAllByText("共 2 条");
+    const submitBtn = screen.getByRole("button", { name: /批量发布/ }) as HTMLButtonElement;
+    expect(submitBtn.disabled).toBe(true);
+    // 勾选第一行（[0] 是表头全选，[1] 是第一行）
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    expect(submitBtn.disabled).toBe(false);
+    fireEvent.click(submitBtn);
+    // 可控确认弹窗（文本被 <b> 数字拆分，用前缀匹配；ok 按钮 antd 双字加空格）
+    await screen.findByText(/确定发布选中的/);
+    fireEvent.click(screen.getByRole("button", { name: "发 布" }));
+    await waitFor(() => {
+      expect(mockedBatchSubmit).toHaveBeenCalledWith(["GMV"]);
+    });
+  });
+
+  it("批量废弃：勾选行 → 确认弹窗 → 调用 batchDeprecateTerms", async () => {
+    mockedBatchDeprecate.mockResolvedValue([
+      { term_code: "GMV", ok: true, status: "DEPRECATED" },
+    ]);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findAllByText("共 2 条");
+    const depBtn = screen.getByRole("button", { name: /批量废弃/ }) as HTMLButtonElement;
+    expect(depBtn.disabled).toBe(true);
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    expect(depBtn.disabled).toBe(false);
+    fireEvent.click(depBtn);
+    await screen.findByText(/确定废弃选中的/);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "废 弃" }));
+    await waitFor(() => {
+      expect(mockedBatchDeprecate).toHaveBeenCalledWith(["GMV"]);
+    });
+  });
+
+  it("已废弃术语显示「再次发布」按钮（状态流程：废弃后可重新发布）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("客单价");
+    // TERMS[1] 是 DEPRECATED → 应显示「再次发布」
+    const buttons = screen.getAllByRole("button", { name: /再次发布/ });
+    expect(buttons.length).toBeGreaterThan(0);
   });
 });
