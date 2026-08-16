@@ -44,6 +44,8 @@ import type {
   DataSource,
 } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
+import { usePermission } from "../hooks/usePermission";
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
@@ -85,7 +87,11 @@ function flattenDomainNames(nodes: SubjectDomainTreeNode[], acc: Map<string, str
 }
 
 function DimensionsTab() {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const { can } = usePermission();
+  // 主表每页条数（持久化，用户可自定义）
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.dimensions.pageSize", 20);
   // URL 直达参数（?kw=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
   // 生命周期状态下钻（?status=，总览仪表「维度」资产卡片）作为初始筛选
@@ -386,30 +392,32 @@ function DimensionsTab() {
               {favCodes.has(d.dim_code) ? "已收藏" : "收藏"}
             </Button>
             <Button size="small" onClick={() => openDetail(d)}>详情</Button>
-            <Button size="small" onClick={() => openEdit(d)}>编辑</Button>
-            <Button
-              size="small"
-              onClick={async () => {
-                bindForm.resetFields();
-                setBindTarget(d);
-                // 打开时重新加载指标候选（确保与指标目录一致，带状态标签可区分）
-                try {
-                  const r = await listMetrics({ page_size: 100 });
-                  setMetrics(r.items);
-                } catch { /* 静默：已有候选可降级 */ }
-                // 加载该维度成员作为「默认成员」下拉候选
-                try {
-                  const r = await listDimensionMembers(d.dim_code);
-                  setBindMembers(r.items);
-                } catch {
-                  setBindMembers([]);
-                }
-              }}
-            >
-              绑定指标
-            </Button>
-            {d.status !== "PUBLISHED" && <Button size="small" type="primary" onClick={() => handlePublish(d)}>发布</Button>}
-            <Button size="small" danger onClick={() => handleDeprecate(d)}>废弃</Button>
+            {can("dimension:edit") && <Button size="small" onClick={() => openEdit(d)}>编辑</Button>}
+            {can("dimension:edit") && (
+              <Button
+                size="small"
+                onClick={async () => {
+                  bindForm.resetFields();
+                  setBindTarget(d);
+                  // 打开时重新加载指标候选（确保与指标目录一致，带状态标签可区分）
+                  try {
+                    const r = await listMetrics({ page_size: 100 });
+                    setMetrics(r.items);
+                  } catch { /* 静默：已有候选可降级 */ }
+                  // 加载该维度成员作为「默认成员」下拉候选
+                  try {
+                    const r = await listDimensionMembers(d.dim_code);
+                    setBindMembers(r.items);
+                  } catch {
+                    setBindMembers([]);
+                  }
+                }}
+              >
+                绑定指标
+              </Button>
+            )}
+            {d.status !== "PUBLISHED" && can("dimension:edit") && <Button size="small" type="primary" onClick={() => handlePublish(d)}>发布</Button>}
+            {can("dimension:deprecate") && <Button size="small" danger onClick={() => handleDeprecate(d)}>废弃</Button>}
           </Space>
         ) : (
           <Space size={4} wrap>
@@ -451,14 +459,16 @@ function DimensionsTab() {
             { value: "DEPRECATED", label: "已废弃" },
           ]}
         />
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建维度</Button>
+        {can("dimension:create") && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建维度</Button>
+        )}
       </Space>
       <Table
         dataSource={items}
         columns={columns}
         rowKey="dim_code"
         loading={loading}
-        pagination={false}
+        pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }}
         locale={{ emptyText: "暂无维度" }}
         onRow={(d) => ({
           onClick: (e) => {
@@ -626,8 +636,22 @@ function DimensionsTab() {
               pagination={false}
               locale={{ emptyText: "暂无绑定指标" }}
               columns={[
-                { title: "指标编码", dataIndex: "metric_code", key: "code", render: (v: string) => <span className="mono">{v}</span> },
-                { title: "指标名称", dataIndex: "metric_name", key: "name" },
+                {
+                  title: "指标编码",
+                  dataIndex: "metric_code",
+                  key: "code",
+                  render: (v: string) => (
+                    <a className="mono" onClick={() => navigate(`/detail/${encodeURIComponent(v)}`)}>{v}</a>
+                  ),
+                },
+                {
+                  title: "指标名称",
+                  dataIndex: "metric_name",
+                  key: "name",
+                  render: (v: string, r: { metric_code: string }) => (
+                    <a onClick={() => navigate(`/detail/${encodeURIComponent(r.metric_code)}`)}>{v ?? "—"}</a>
+                  ),
+                },
                 { title: "角色", dataIndex: "role", key: "role", render: (v: string) => ROLE_LABEL[v] ?? v },
                 { title: "默认成员", dataIndex: "default_member", key: "dm", render: (v: string | null) => v ?? <span className="muted">—</span> },
                 { title: "指标状态", dataIndex: "metric_status", key: "status", width: 100, render: (s: string) => <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag> },
@@ -717,6 +741,7 @@ function buildMemberTree(members: DimensionMember[]): MemberTreeNode[] {
 }
 
 function MembersTab() {
+  const { can } = usePermission();
   const [dims, setDims] = useState<Dimension[]>([]);
   const [dimCode, setDimCode] = useState<string | undefined>(undefined);
   const [members, setMembers] = useState<DimensionMember[]>([]);
@@ -900,6 +925,8 @@ function MembersTab() {
         维度值 = 该维度允许的<b>业务取值集合</b>（如「渠道」维度的值：线上 / 线下 / 小程序），
         用于指标按此维度分组/过滤时校验合法性。这里管理的<b>不是系统用户账号</b>，
         而是维度自身的枚举取值，可手动新增或从数据源表列自动导入。
+        <br />
+        维度值需与指标口径声明的维度保持一致——指标在维度管理绑定后，消费查询即按此维度校验过滤。
       </div>
       <Space style={{ marginBottom: 12 }}>
         <Select
@@ -909,19 +936,23 @@ function MembersTab() {
           onChange={setDimCode}
           options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}
         />
-        <Button icon={<PlusOutlined />} disabled={!dimCode} onClick={() => setModalOpen(true)}>新增值</Button>
-        <Button
-          icon={<DatabaseOutlined />}
-          disabled={!dimCode}
-          onClick={() => {
-            autoForm.resetFields();
-            setPreviewValues([]);
-            setPreviewTruncated(false);
-            setAutoOpen(true);
-          }}
-        >
-          从表自动获取
-        </Button>
+        {can("dimension:create") && (
+          <Button icon={<PlusOutlined />} disabled={!dimCode} onClick={() => setModalOpen(true)}>新增值</Button>
+        )}
+        {can("dimension:create") && (
+          <Button
+            icon={<DatabaseOutlined />}
+            disabled={!dimCode}
+            onClick={() => {
+              autoForm.resetFields();
+              setPreviewValues([]);
+              setPreviewTruncated(false);
+              setAutoOpen(true);
+            }}
+          >
+            从表自动获取
+          </Button>
+        )}
       </Space>
       <Table
         dataSource={buildMemberTree(members)}
@@ -948,17 +979,21 @@ function MembersTab() {
             width: 160,
             render: (_: unknown, m: DimensionMember) => (
               <Space size={4} wrap>
-                <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(m)}>编辑</Button>
-                <Popconfirm
-                  title="删除该成员？"
-                  description="若存在子成员将级联删除整个子树"
-                  okText="删除"
-                  okButtonProps={{ danger: true }}
-                  trigger="click"
-                  onConfirm={() => handleDeleteMember(m)}
-                >
-                  <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-                </Popconfirm>
+                {can("dimension:edit") && (
+                  <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(m)}>编辑</Button>
+                )}
+                {can("dimension:edit") && (
+                  <Popconfirm
+                    title="删除该成员？"
+                    description="若存在子成员将级联删除整个子树"
+                    okText="删除"
+                    okButtonProps={{ danger: true }}
+                    trigger="click"
+                    onConfirm={() => handleDeleteMember(m)}
+                  >
+                    <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+                  </Popconfirm>
+                )}
               </Space>
             ),
           },
@@ -1079,14 +1114,16 @@ function MembersTab() {
                 </Tag>
               ))}
             </div>
-            <Button
-              type="primary"
-              loading={importing}
-              onClick={handleImportValues}
-              icon={<PlusOutlined />}
-            >
-              导入全部为维度值
-            </Button>
+            {can("dimension:create") && (
+              <Button
+                type="primary"
+                loading={importing}
+                onClick={handleImportValues}
+                icon={<PlusOutlined />}
+              >
+                导入全部为维度值
+              </Button>
+            )}
           </div>
         )}
       </Modal>
@@ -1133,10 +1170,13 @@ function MembersTab() {
 }
 
 function MappingsTab() {
+  const { can } = usePermission();
   const [items, setItems] = useState<DimensionMapping[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  // 映射表每页条数（持久化，用户可自定义）
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.mappings.pageSize", 20);
   // 维度下拉候选（源/目标维度选项框）
   const [dims, setDims] = useState<Dimension[]>([]);
   // 编辑态：复用新建布局，打开时预填当前映射值
@@ -1229,16 +1269,20 @@ function MappingsTab() {
       width: 150,
       render: (_: unknown, m: DimensionMapping) => (
         <Space size={4} wrap>
-          <Button size="small" icon={<EditOutlined />} onClick={() => openEditMapping(m)}>编辑</Button>
-          <Popconfirm
-            title="删除该映射？"
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            trigger="click"
-            onConfirm={() => handleDeleteMapping(m)}
-          >
-            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-          </Popconfirm>
+          {can("dimension:mapping") && (
+            <Button size="small" icon={<EditOutlined />} onClick={() => openEditMapping(m)}>编辑</Button>
+          )}
+          {can("dimension:mapping") && (
+            <Popconfirm
+              title="删除该映射？"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              trigger="click"
+              onConfirm={() => handleDeleteMapping(m)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+            </Popconfirm>
+          )}
         </Space>
       ),
     },
@@ -1270,9 +1314,11 @@ function MappingsTab() {
         </span>
       </div>
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建映射</Button>
+        {can("dimension:mapping") && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建映射</Button>
+        )}
       </div>
-      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={false} locale={{ emptyText: "暂无维度映射" }} />
+      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }} locale={{ emptyText: "暂无维度映射" }} />
 
       <Modal title="新建维度映射" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
@@ -1301,8 +1347,12 @@ function MappingsTab() {
           >
             <Select options={[{ value: "EQUIVALENT", label: "等价" }, { value: "PARTIAL", label: "部分" }]} />
           </Form.Item>
-          <Form.Item name="expression" label="映射表达式">
-            <Input.TextArea rows={2} className="mono" placeholder="如 CASE WHEN ..." />
+          <Form.Item
+            name="expression"
+            label="映射表达式"
+            extra={<span className="muted" style={{ fontSize: 12 }}>支持键值对（app=APP）或 SQL 片段（CASE WHEN ...）</span>}
+          >
+            <Input.TextArea rows={2} className="mono" placeholder="如 app=APP;web=PC" />
           </Form.Item>
         </Form>
       </Modal>
@@ -1326,8 +1376,12 @@ function MappingsTab() {
           >
             <Select options={[{ value: "EQUIVALENT", label: "等价" }, { value: "PARTIAL", label: "部分" }]} />
           </Form.Item>
-          <Form.Item name="expression" label="映射表达式">
-            <Input.TextArea rows={2} className="mono" placeholder="如 CASE WHEN ..." />
+          <Form.Item
+            name="expression"
+            label="映射表达式"
+            extra={<span className="muted" style={{ fontSize: 12 }}>支持键值对（app=APP）或 SQL 片段（CASE WHEN ...）</span>}
+          >
+            <Input.TextArea rows={2} className="mono" placeholder="如 app=APP;web=PC" />
           </Form.Item>
         </Form>
       </Modal>
@@ -1336,11 +1390,14 @@ function MappingsTab() {
 }
 
 function ReconciliationsTab() {
+  const { can } = usePermission();
   const [items, setItems] = useState<Reconciliation[]>([]);
   const [metrics, setMetrics] = useState<MetricResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  // 对账表每页条数（持久化，用户可自定义）
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.reconciliations.pageSize", 20);
 
   async function load() {
     setLoading(true);
@@ -1417,8 +1474,8 @@ function ReconciliationsTab() {
       render: (_: unknown, r: Reconciliation) =>
         r.status === "PENDING" ? (
           <Space>
-            <Button size="small" type="primary" onClick={() => handleReview(r, "APPROVED")}>通过</Button>
-            <Button size="small" danger onClick={() => handleReview(r, "REJECTED")}>驳回</Button>
+            <Button size="small" type="primary" disabled={!can("dimension:reconcile")} onClick={() => handleReview(r, "APPROVED")}>通过</Button>
+            <Button size="small" danger disabled={!can("dimension:reconcile")} onClick={() => handleReview(r, "REJECTED")}>驳回</Button>
           </Space>
         ) : null,
     },
@@ -1449,9 +1506,11 @@ function ReconciliationsTab() {
         </span>
       </div>
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
-        <Button type="primary" icon={<SendOutlined />} onClick={() => setModalOpen(true)}>提交对账</Button>
+        {can("dimension:reconcile") && (
+          <Button type="primary" icon={<SendOutlined />} onClick={() => setModalOpen(true)}>提交对账</Button>
+        )}
       </div>
-      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={false} locale={{ emptyText: "暂无对账记录" }} />
+      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }} locale={{ emptyText: "暂无对账记录" }} />
 
       <Modal title="提交维度对账" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="提交">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>

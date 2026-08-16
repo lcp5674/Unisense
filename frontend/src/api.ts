@@ -1544,7 +1544,7 @@ export async function getDimension(dimCode: string): Promise<Dimension> {
   return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}`);
 }
 
-/** 更新维度基础信息（PUT /dimensions/{dim_code}，仅 name/domain/type/description 可改） */
+/** 更新维度基础信息（PUT /dimensions/{dim_code}，可改 name/domain/type/description/dim_code；dim_code 仅 DRAFT 状态可改，由后端强校验） */
 export async function updateDimension(
   dimCode: string,
   body: {
@@ -1552,6 +1552,7 @@ export async function updateDimension(
     domain?: string;
     type?: string;
     description?: string | null;
+    dim_code?: string;
   },
 ): Promise<Dimension> {
   return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}`, {
@@ -2123,6 +2124,7 @@ export async function listNotifications(params?: {
   template_code?: string;
   todo_only?: boolean;
   days?: number;
+  object_key?: string;
   page?: number;
   page_size?: number;
 }): Promise<{ items: Notification[]; total: number; page: number; page_size: number }> {
@@ -2132,6 +2134,7 @@ export async function listNotifications(params?: {
     template_code: params?.template_code,
     todo_only: params?.todo_only ? "true" : undefined,
     days: params?.days,
+    object_key: params?.object_key,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 10,
   });
@@ -2163,6 +2166,20 @@ export async function deleteNotification(id: number): Promise<{ ok: boolean }> {
 export async function deleteAllNotifications(): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`${API_BASE}/notify/notifications`, {
     method: "DELETE",
+  });
+}
+
+/** 重试投递失败的站内通知（POST /notify/notifications/{id}/retry），返回更新后的通知。 */
+export async function retryNotification(id: number): Promise<Notification> {
+  return request<Notification>(`${API_BASE}/notify/notifications/${id}/retry`, {
+    method: "POST",
+  });
+}
+
+/** 标记待办类通知为「已处理」（POST /notify/notifications/{id}/handled）。 */
+export async function markNotificationHandled(id: number): Promise<Notification> {
+  return request<Notification>(`${API_BASE}/notify/notifications/${id}/handled`, {
+    method: "POST",
   });
 }
 
