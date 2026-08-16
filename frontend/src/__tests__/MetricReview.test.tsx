@@ -25,6 +25,7 @@ vi.mock("../api", () => {
   return {
     listMetrics: vi.fn(),
     reviewMetric: vi.fn(),
+    approveMetric: vi.fn(),
     fetchCurrentUser: vi.fn(),
     listUsers: vi.fn(),
     listDomainTree: vi.fn(),
@@ -34,8 +35,15 @@ vi.mock("../api", () => {
   };
 });
 
-import { fetchCurrentUser, listDomainTree, listMetrics, listUsers } from "../api";
+import {
+  approveMetric,
+  fetchCurrentUser,
+  listDomainTree,
+  listMetrics,
+  listUsers,
+} from "../api";
 const mockedList = vi.mocked(listMetrics);
+const mockedApprove = vi.mocked(approveMetric);
 
 const metric: MetricResponse = {
   id: 1,
@@ -207,5 +215,29 @@ describe("MetricReview 指标审批", () => {
     });
     // 回退后列表仍显示数据（非空页）
     expect(await screen.findByText("sales_gmv_day")).toBeTruthy();
+  });
+
+  it("审批通过默认标准发布，弹窗可选灰度发布并携带灰度租户", async () => {
+    mockedApprove.mockResolvedValue(metric);
+    renderReview();
+    await screen.findByText("sales_gmv_day");
+    // 点「通过」→ 弹窗含发布模式选择（标准/灰度）
+    fireEvent.click(screen.getAllByRole("button", { name: /^通\s*过$/ })[0]);
+    await waitFor(() => {
+      expect(screen.getByText("标准发布（全部消费方）")).toBeTruthy();
+      expect(screen.getByText("灰度发布（仅指定租户）")).toBeTruthy();
+    });
+    // 默认标准发布提交 → approveMetric 带 mode=standard、无灰度租户
+    const confirmBtn = document.querySelector(
+      ".ant-modal-confirm-btns .ant-btn-primary",
+    ) as HTMLElement;
+    expect(confirmBtn).toBeTruthy();
+    fireEvent.click(confirmBtn);
+    await waitFor(() => {
+      expect(mockedApprove).toHaveBeenCalledWith("sales_gmv_day", {
+        mode: "standard",
+        gray_tenant_ids: undefined,
+      });
+    });
   });
 });

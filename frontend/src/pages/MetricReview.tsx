@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Input, Modal, Segmented, Space, Table, Tag, Tooltip, message } from "antd";
+import { Button, Card, Input, Modal, Radio, Segmented, Space, Table, Tag, Tooltip, message } from "antd";
 import { ArrowLeftOutlined, CheckCircleOutlined, ClockCircleOutlined } from "@ant-design/icons";
 import {
   listMetrics,
   reviewMetric,
+  approveMetric,
   fetchCurrentUser,
   listUsers,
   listDomainTree,
@@ -20,18 +21,42 @@ import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 function openReviewModal(
   metric: MetricResponse,
   approved: boolean,
-  onOk: (reason: string) => Promise<void>,
+  onOk: (reason: string, mode?: "standard" | "experimental", grayTenants?: number[]) => Promise<void>,
 ) {
   let reason = "";
+  let mode = "standard" as "standard" | "experimental";
+  let grayTenants = "";
   Modal.confirm({
     title: approved ? `通过评审：${metric.metric_code}` : `驳回：${metric.metric_code}`,
     content: (
       <div>
         <p style={{ marginBottom: 12 }}>
           {approved
-            ? "通过后该指标将进入已发布状态。"
+            ? "通过后该指标将进入已发布状态；也可选择灰度发布（评审通过但先对指定租户生效）。"
             : "驳回后该指标将退回草稿状态，请填写驳回原因（提交人据此修改重提）。"}
         </p>
+        {approved && (
+          <div style={{ marginBottom: 12 }}>
+            <Radio.Group
+              value={mode}
+              onChange={(e) => {
+                mode = e.target.value as "standard" | "experimental";
+              }}
+              style={{ marginBottom: 8 }}
+            >
+              <Radio value="standard">标准发布（全部消费方）</Radio>
+              <Radio value="experimental">灰度发布（仅指定租户）</Radio>
+            </Radio.Group>
+            {mode === "experimental" && (
+              <Input
+                placeholder="灰度租户 ID（逗号分隔，如 101,102；留空则灰度但不指定租户）"
+                onChange={(e) => {
+                  grayTenants = e.target.value;
+                }}
+              />
+            )}
+          </div>
+        )}
         <Input.TextArea
           rows={3}
           placeholder={approved ? "变更原因（可选）" : "驳回原因（必填，至少 4 字）"}
@@ -53,7 +78,15 @@ function openReviewModal(
           return;
         }
         resolve();
-      }).then(() => onOk(reason)),
+      }).then(() => {
+        const tenants = grayTenants
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map(Number)
+          .filter((n) => !Number.isNaN(n));
+        return onOk(reason, approved ? mode : undefined, approved && mode === "experimental" ? tenants : undefined);
+      }),
   });
 }
 
@@ -186,11 +219,28 @@ export function MetricReview() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, view, currentUser?.id]);
 
-  async function handleReview(metric: MetricResponse, approved: boolean, reason: string) {
+  async function handleReview(
+    metric: MetricResponse,
+    approved: boolean,
+    reason: string,
+    mode?: "standard" | "experimental",
+    grayTenants?: number[],
+  ) {
     setBusyCode(metric.metric_code);
     try {
-      await reviewMetric(metric.metric_code, approved, reason);
-      message.success(approved ? `已通过：${metric.metric_code}` : `已驳回：${metric.metric_code}`);
+      if (approved) {
+        await approveMetric(metric.metric_code, {
+          mode,
+          gray_tenant_ids: mode === "experimental" ? grayTenants ?? [] : undefined,
+        });
+      } else {
+        await reviewMetric(metric.metric_code, false, reason);
+      }
+      message.success(
+        approved
+          ? `已通过：${metric.metric_code}${mode === "experimental" ? "（灰度）" : ""}`
+          : `已驳回：${metric.metric_code}`,
+      );
       load();
     } catch (err) {
       message.error(
@@ -302,7 +352,11 @@ export function MetricReview() {
               size="small"
               type="primary"
               disabled={!allowed || piiPending || busyCode === r.metric_code}
-              onClick={() => openReviewModal(r, true, (reason) => handleReview(r, true, reason))}
+              onClick={() =>
+                openReviewModal(r, true, (reason, mode, grayTenants) =>
+                  handleReview(r, true, reason, mode, grayTenants),
+                )
+              }
             >
               通过
             </Button>
