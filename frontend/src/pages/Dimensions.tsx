@@ -71,6 +71,10 @@ const SCD_TYPE_OPTIONS = [
   { value: "SCD4", label: "历史表 (SCD4)" },
   { value: "SCD6", label: "混合 (SCD6)" },
 ];
+// 缓慢变化维类型反查中文（列表「类型」列展示，与新建下拉同源，避免裸枚举）
+function scdTypeLabel(v: string): string {
+  return SCD_TYPE_OPTIONS.find((o) => o.value === v)?.label ?? v;
+}
 
 // 指标-维度关联角色（对齐后端 MetricDimensionRole 枚举，业务术语化：中文优先 + 英文溯源）
 const ROLE_OPTIONS = [
@@ -378,7 +382,7 @@ function DimensionsTab() {
     { title: "名称", dataIndex: "name", key: "name" },
     { title: "业务域", dataIndex: "domain", key: "domain", width: 130, render: (v: string) => domainMap.get(v) ?? v },
     { title: "责任人", dataIndex: "owner_id", key: "owner", width: 120, render: (v: number) => ownerName(v) },
-    { title: "类型", dataIndex: "type", key: "type", width: 90, render: (v: string) => <Tag>{v}</Tag> },
+    { title: "类型", dataIndex: "type", key: "type", width: 130, render: (v: string) => <Tag>{scdTypeLabel(v)}</Tag> },
     { title: "绑定指标", dataIndex: "metric_count", key: "metric_count", width: 90, render: (v?: number) => (v ?? 0) > 0 ? v : <span className="muted">0</span> },
     {
       title: "状态",
