@@ -146,6 +146,8 @@ export function MetricCreate() {
 
   const [mode, setMode] = useState<"expression" | "sql">("expression");
   const [sqlText, setSqlText] = useState("");
+  // R5: 口径定义 JSON 即时校验（输入时实时检测语法，内联显示错误）
+  const [definitionError, setDefinitionError] = useState<string | null>(null);
   const [sourceTables, setSourceTables] = useState<string[]>([]);
   const [tableOptions, setTableOptions] = useState<{ value: string; label: string }[]>([]);
   const [tableSearching, setTableSearching] = useState(false);
@@ -993,9 +995,31 @@ export function MetricCreate() {
                   <Form.Item
                     name="definition"
                     label="口径定义 (JSON)"
-                    extra="结构：expression（聚合表达式）、dependencies（已在上方选择）、source_tables（来源表）、dimensions（已在上方选择）。"
+                    validateStatus={definitionError ? "error" : undefined}
+                    help={definitionError || "结构：expression（聚合表达式）、dependencies（已在上方选择）、source_tables（来源表）、dimensions（已在上方选择）。"}
+                    extra={
+                      <Space size={8}>
+                        <Button size="small" onClick={() => {
+                          const v = form.getFieldValue("definition");
+                          if (!v) { message.info("口径定义为空，无需格式化"); return; }
+                          try { form.setFieldValue("definition", JSON.stringify(JSON.parse(String(v)), null, 2)); message.success("已格式化"); }
+                          catch { message.error("JSON 格式错误，无法格式化"); }
+                        }}>格式化 JSON</Button>
+                        <span className="muted" style={{ fontSize: 12 }}>输入时实时校验语法（R5）</span>
+                      </Space>
+                    }
                   >
-                    <TextArea rows={5} placeholder='{"expression": "sum(amount)", "dependencies": [], "source_tables": []}' className="mono" />
+                    <TextArea
+                      rows={5}
+                      placeholder='{"expression": "sum(amount)", "dependencies": [], "source_tables": []}'
+                      className="mono"
+                      onChange={(e) => {
+                        const v = e.target.value.trim();
+                        if (!v) { setDefinitionError(null); return; }
+                        try { JSON.parse(v); setDefinitionError(null); }
+                        catch { setDefinitionError("口径定义 JSON 语法错误"); }
+                      }}
+                    />
                   </Form.Item>
                 </>
               ) : (
