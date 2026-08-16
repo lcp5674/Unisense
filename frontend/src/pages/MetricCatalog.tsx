@@ -697,7 +697,9 @@ export function MetricCatalog() {
     },
   ];
 
-  const hasFilter = Boolean(keyword || status || domain || tier || myMetricsOnly || lifecycleFilter || favoritesOnly);
+  const hasFilter = Boolean(
+    keyword || status || domain || tier || ownerFilter || myMetricsOnly || lifecycleFilter || favoritesOnly,
+  );
   const emptyGuide = useMemo(
     () => (
       <div style={{ padding: "16px 0", textAlign: "center" }}>
