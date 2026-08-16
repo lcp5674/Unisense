@@ -189,6 +189,16 @@ const PAYLOAD_FIELD_LABEL_FE: Record<string, string> = {
   pii_columns: "敏感字段",
   reviewer_id: "审核人ID",
   reviewer: "审核人",
+  // 指标类（健康度/废弃/审批）
+  score: "健康得分",
+  missing_dimensions: "缺失治理项",
+  deprecated_at: "废弃时间",
+  version: "版本",
+  type: "指标类型",
+  definition_json: "口径定义",
+  // 血缘类
+  table_edges: "表血缘",
+  field_edges: "字段血缘",
 };
 const RULE_TYPE_CN_FE: Record<string, string> = {
   COMPLETENESS: "完整性",
@@ -206,8 +216,30 @@ const LEVEL_CN_FE: Record<string, string> = {
   P2: "中",
   INFO: "提示",
   WARN: "警告",
+  WARNING: "警告",
   ERROR: "错误",
   CRITICAL: "严重",
+};
+// 健康等级（后端 health_scorer：EXCELLENT/GOOD/WARNING/CRITICAL）
+const HEALTH_LEVEL_CN_FE: Record<string, string> = {
+  EXCELLENT: "优秀",
+  GOOD: "良好",
+  WARNING: "警告",
+  CRITICAL: "严重",
+};
+// 指标类型（atomic/derived/composite）
+const METRIC_TYPE_CN_FE: Record<string, string> = {
+  atomic: "原子指标",
+  derived: "派生指标",
+  composite: "复合指标",
+};
+// 健康度缺失治理维度 → 中文（missing_dimensions 数组元素）
+const DIMENSION_CN_FE: Record<string, string> = {
+  sla: "SLA",
+  lineage_coverage: "血缘覆盖",
+  quality: "质量规则",
+  activity: "活跃度",
+  owner_response: "负责人响应",
 };
 
 const STATUS_CN_FE: Record<string, string> = {
@@ -224,6 +256,28 @@ function humanizeFeValue(key: string, v: unknown): string {
   if (key === "rule_type") return RULE_TYPE_CN_FE[String(v)] ?? String(v);
   if (key === "grant_type") return v === "READ" ? "只读" : v === "READ_WRITE" ? "读写" : String(v);
   if (key === "status") return STATUS_CN_FE[String(v)] ?? String(v);
+  if (key === "type") return METRIC_TYPE_CN_FE[String(v)] ?? String(v);
+  if (key === "health_level") return HEALTH_LEVEL_CN_FE[String(v)] ?? String(v);
+  if (key === "score" && typeof v === "number") return `${v} 分`;
+  if (key === "table_edges" || key === "field_edges") return `${String(v)} 条`;
+  if (key === "missing_dimensions" && Array.isArray(v)) {
+    return v.length ? v.map((d) => DIMENSION_CN_FE[String(d)] ?? String(d)).join("、") : "无";
+  }
+  if ((key === "deprecated_at" || key === "expires_at") && typeof v === "string") {
+    return formatCnTime(v);
+  }
+  if (key === "definition_json" && typeof v === "object" && v !== null) {
+    const o = v as Record<string, unknown>;
+    const parts: string[] = [];
+    if (o.expression) parts.push(`表达式 ${String(o.expression)}`);
+    if (o.sql) {
+      const sql = String(o.sql);
+      parts.push(sql.length > 60 ? `${sql.slice(0, 60)}…` : sql);
+    }
+    const src = o.source_tables ?? o.source_table;
+    if (Array.isArray(src) && src.length) parts.push(`源表 ${src.join("、")}`);
+    return parts.length ? parts.join(" · ") : "已定义";
+  }
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
 }
@@ -245,38 +299,41 @@ function formatNotifyBody(body: string | null): string {
   return body;
 }
 
-// 把正文解析为结构化字段（{标签, 值}），供卡片网格化展示——每条信息一目了然、完整呈现。
-// body 优先（已是「标签：值」多行或自然语言）；payload 中未在 body 展示的业务字段
-// （定向通知补充信息：entity_name/org_name/source_id/username/successor_code 等）合并追加，
-// 不再因 body 非空而被丢弃。
+// 把正文解析为结构化字段（{标签, 值}），供卡片网格化展示。
+// 策略：payload 字段优先（保留原始类型做枚举/时间/数组渲染，值更友好）；
+// body 文本补充——自然语言整行保留展示，结构化行若字段未被 payload 覆盖则补充，
+// 已知英文 key 做二次中文映射。
 function parseNotifyBodyFields(body: string | null, payload: Record<string, unknown> | null): { label: string; value: string }[] {
-  const text = formatNotifyBody(body);
   const fields: { label: string; value: string }[] = [];
   const seenLabels = new Set<string>();
-  if (text) {
-    for (const line of text.split("\n")) {
-      const idx = line.indexOf("：");
-      if (idx > 0) {
-        const label = line.slice(0, idx);
-        const value = line.slice(idx + 1);
-        if (value !== "" && value !== "无") {
-          fields.push({ label, value });
-          seenLabels.add(label);
-        }
-      } else if (line !== "") {
-        fields.push({ label: "", value: line });
-      }
-    }
-  }
   if (payload && Object.keys(payload).length > 0) {
     const skipKeys = new Set(["event_type", "payload", "source", "note"]);
     for (const [k, v] of Object.entries(payload)) {
       if (skipKeys.has(k)) continue;
+      if (v === null || v === undefined) continue;
       const label = PAYLOAD_FIELD_LABEL_FE[k] ?? k;
-      if (seenLabels.has(label)) continue; // body 已展示该字段，不重复
       const value = humanizeFeValue(k, v);
-      if (value === "无") continue;
+      if (value === "" || value === "无") continue;
       fields.push({ label, value });
+      seenLabels.add(label);
+    }
+  }
+  const text = formatNotifyBody(body);
+  if (text) {
+    for (const line of text.split("\n")) {
+      const idx = line.indexOf("：");
+      if (idx > 0) {
+        const rawLabel = line.slice(0, idx);
+        const label = PAYLOAD_FIELD_LABEL_FE[rawLabel] ?? rawLabel;
+        if (seenLabels.has(label)) continue; // payload 已渲染（值更友好）
+        const rawValue = line.slice(idx + 1);
+        if (rawValue !== "" && rawValue !== "无") {
+          fields.push({ label, value: rawValue });
+          seenLabels.add(label);
+        }
+      } else if (line !== "") {
+        fields.push({ label: "", value: line }); // 自然语言整行
+      }
     }
   }
   return fields;
@@ -499,11 +556,11 @@ function NotifListTab() {
                   <div className="notif-bar" style={{ background: NOTIF_STATUS_BAR[statusKey] ?? "#c4cbd6" }} />
                   <div className="notif-main">
                     <div className="notif-head">
-                      <span className="notif-title">{eventTypeLabel(n.title)}</span>
-                      {n.template_code && eventTypeLabel(n.template_code) !== eventTypeLabel(n.title) && (
-                        <Tag className="notif-type" color="geekblue">{eventTypeLabel(n.template_code)}</Tag>
-                      )}
-                      <div className="notif-head-right">
+                    <span className="notif-title">{eventTypeLabel(n.title)}</span>
+                    {n.template_code && eventTypeLabel(n.template_code) !== eventTypeLabel(n.title) && (
+                      <Tag className="notif-type" color="geekblue">{eventTypeLabel(n.template_code)}</Tag>
+                    )}
+                    <div className="notif-head-right">
                         {n.sent_at && <span className="notif-sent-time">已送达 {formatCnTime(n.sent_at)}</span>}
                         <Tag
                           className="notif-status"

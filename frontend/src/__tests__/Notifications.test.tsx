@@ -483,4 +483,44 @@ describe("通知中心 - 信息展示增强", () => {
     fireEvent.click(screen.getByText("权限即将到期"));
     await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/account"));
   });
+
+  it("指标健康告警：字段中文术语化 + 值渲染增强（健康得分/缺失治理项/等级）", async () => {
+    const n = notif({
+      id: 30,
+      template_code: "metric.health_critical",
+      title: "指标健康度严重",
+      body: "指标编码：sales_e2e_gmv_day\nscore：64\n重要程度：WARNING\nmissing_dimensions：[\"sla\", \"lineage_coverage\"]",
+      payload: { level: "WARNING", score: 64, metric_code: "sales_e2e_gmv_day", missing_dimensions: ["sla", "lineage_coverage"] },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标健康度严重")).toBeInTheDocument());
+    // 英文 key → 中文标签
+    expect(screen.getByText("健康得分")).toBeInTheDocument();
+    expect(screen.getByText("缺失治理项")).toBeInTheDocument();
+    // 枚举值转中文（WARNING → 警告）
+    expect(screen.getByText("警告")).toBeInTheDocument();
+    // 数组转中文列表
+    expect(screen.getByText("SLA、血缘覆盖")).toBeInTheDocument();
+    // 分数渲染
+    expect(screen.getByText("64 分")).toBeInTheDocument();
+  });
+
+  it("血缘解析：技术字段 table_edges/field_edges 转中文并带条数", async () => {
+    const n = notif({
+      id: 31,
+      template_code: "lineage_parsed",
+      title: "血缘已解析",
+      body: "table_edges：1\nfield_edges：1",
+      payload: { table_edges: 1, field_edges: 1 },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("血缘已解析")).toBeInTheDocument());
+    expect(screen.getByText("表血缘")).toBeInTheDocument();
+    expect(screen.getByText("字段血缘")).toBeInTheDocument();
+    expect(screen.getAllByText("1 条").length).toBe(2); // 表 + 字段各 1 条
+  });
 });
