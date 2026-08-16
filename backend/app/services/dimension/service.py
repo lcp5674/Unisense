@@ -670,6 +670,20 @@ class DimensionService(BaseService):
                 f"维度不存在: {data.dim_code}",
                 ctx={"dim_code": data.dim_code},
             )
+        # 指标存在性校验（跨服务一致性，对齐 bind_metric_dimension）：metric_id
+        # 裸 BigInteger 无外键，不校验则对账引用不存在/已软删指标形成孤儿记录。
+        metric = (
+            await self._session.execute(
+                select(Metric).where(
+                    Metric.id == data.metric_id, Metric.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        if metric is None:
+            raise NotFoundError(
+                f"指标不存在或已删除: {data.metric_id}",
+                ctx={"metric_id": data.metric_id},
+            )
         rec = Reconciliation(
             metric_id=data.metric_id,
             dim_code=data.dim_code,

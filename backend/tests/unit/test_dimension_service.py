@@ -22,6 +22,7 @@ from app.services.dimension.schemas import (
     DimensionMemberUpdate,
     DimensionUpdate,
     MetricDimensionBind,
+    ReconciliationSubmit,
 )
 from app.services.dimension.service import DimensionService
 
@@ -101,6 +102,28 @@ async def test_review_reconciliation_sets_status() -> None:
     assert out.reviewed_by == 2
     assert isinstance(out.reviewed_at, datetime)
     repo.commit.assert_awaited()
+
+
+async def test_submit_reconciliation_missing_metric_rejected() -> None:
+    """对账引用的指标不存在 → 拒绝提交（防孤儿对账，跨服务一致性）。
+
+    此前 metric_id 裸 BigInteger 无外键、不校验——对账引用不存在/已软删指标
+    仍创建成功（维度对账记录显示悬空指标）。现校验未软删指标存在，缺失抛 404。
+    """
+    svc, repo = await _svc()
+    repo.save_reconciliation = AsyncMock(side_effect=lambda r: r)
+    # scalar_one_or_none 返回 None（指标不存在）
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    svc._session.execute = AsyncMock(return_value=result)
+    try:
+        await svc.submit_reconciliation(
+            ReconciliationSubmit(metric_id=999, expected_expr="a", actual_expr="b")
+        )
+        raise AssertionError("应拒绝指标不存在的对账提交")
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "NOT_FOUND"
+    repo.save_reconciliation.assert_not_awaited()
 
 
 async def test_create_dimension_auto_generates_code() -> None:
