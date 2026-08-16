@@ -17,6 +17,7 @@ from app.core.exceptions import (
     ConflictError,
     NotFoundError,
 )
+from app.models.metric import Metric
 from app.services.governance.policy import Decision
 from app.services.semantic.schemas import (
     MetricApproveRequest,
@@ -338,9 +339,7 @@ async def test_deprecate_metric_empty_successor_direct_deprecate():
     repo.update_with_optimistic_lock = AsyncMock(return_value=deprecated)
 
     # 空串（前端未填替代指标提交）→ 应视为无替代直接废弃
-    result = await svc.deprecate_metric(
-        "sales_gmv_daily", "", actor_id=1, role="metric_owner"
-    )
+    result = await svc.deprecate_metric("sales_gmv_daily", "", actor_id=1, role="metric_owner")
 
     assert result.status == "DEPRECATED"
     called = repo.update_with_optimistic_lock.call_args.kwargs
@@ -356,9 +355,7 @@ async def test_deprecate_metric_none_successor_direct_deprecate():
     deprecated = make_metric(status="DEPRECATED", successor_code=None)
     repo.update_with_optimistic_lock = AsyncMock(return_value=deprecated)
 
-    result = await svc.deprecate_metric(
-        "sales_gmv_daily", None, actor_id=1, role="metric_owner"
-    )
+    result = await svc.deprecate_metric("sales_gmv_daily", None, actor_id=1, role="metric_owner")
 
     assert result.status == "DEPRECATED"
     called = repo.update_with_optimistic_lock.call_args.kwargs
@@ -736,9 +733,7 @@ async def test_submit_metric_saves_user_reviewer():
 
     await svc.submit_metric(
         "sales_gmv_daily",
-        MetricSubmitRequest(
-            change_reason="提交审核", reviewer_id=7, reviewer_type="user"
-        ),
+        MetricSubmitRequest(change_reason="提交审核", reviewer_id=7, reviewer_type="user"),
         actor_id=1,
         role="metric_owner",
         user_domain="sales",
@@ -803,9 +798,7 @@ async def test_approve_metric_non_assigned_reviewer_rejected():
 async def test_approve_metric_domain_team_same_domain_allowed():
     """域评审组：同域 reviewer 角色可通过。"""
     svc, repo = _svc_with_repo()
-    _svc_approve_ready(
-        svc, repo, submitted_by=1, reviewer_type="domain", reviewer_domain="sales"
-    )
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_type="domain", reviewer_domain="sales")
 
     result = await svc.approve_metric(
         "sales_gmv_daily",
@@ -820,9 +813,7 @@ async def test_approve_metric_domain_team_same_domain_allowed():
 async def test_approve_metric_domain_team_wrong_domain_rejected():
     """域评审组：非该域用户（即便 reviewer 角色）→ FORBIDDEN_REVIEWER。"""
     svc, repo = _svc_with_repo()
-    _svc_approve_ready(
-        svc, repo, submitted_by=1, reviewer_type="domain", reviewer_domain="sales"
-    )
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_type="domain", reviewer_domain="sales")
 
     with pytest.raises(BusinessError) as exc:
         await svc.approve_metric(
@@ -838,9 +829,7 @@ async def test_approve_metric_domain_team_wrong_domain_rejected():
 async def test_approve_metric_domain_team_non_reviewer_role_rejected():
     """域评审组：非 domain_admin/reviewer 角色（如 metric_owner）→ FORBIDDEN_REVIEWER。"""
     svc, repo = _svc_with_repo()
-    _svc_approve_ready(
-        svc, repo, submitted_by=1, reviewer_type="domain", reviewer_domain="sales"
-    )
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_type="domain", reviewer_domain="sales")
 
     with pytest.raises(BusinessError) as exc:
         await svc.approve_metric(
@@ -954,6 +943,7 @@ async def test_submit_metric_success():
     )
     assert result.status == "REVIEW"
     assert repo.update_with_optimistic_lock.call_args.kwargs["submitted_by"] == 1
+
 
 async def test_submit_metric_blocked_when_definition_empty():
     """空心指标（无表达式/无SQL/无源表）提交评审被拦截——口径完整性校验（FR-012）。"""
@@ -1088,9 +1078,7 @@ async def test_approve_metric_experimental_mode():
 
 async def test_approve_metric_self_review_blocked():
     svc, repo = _svc_with_repo()
-    metric = make_metric(
-        status="REVIEW", owner_id=1, reviewer_id=1, reviewer_type="user"
-    )
+    metric = make_metric(status="REVIEW", owner_id=1, reviewer_id=1, reviewer_type="user")
     metric.submitted_by = 1
     repo.get_by_code = AsyncMock(return_value=metric)
     with pytest.raises(BusinessError) as exc:
@@ -1547,7 +1535,6 @@ async def test_get_archived_metric_public_missing_raises_not_found():
         await svc.get_archived_metric_public("missing")
 
     assert exc_info.value.error_code == "NOT_FOUND"
-
 
 
 async def test_get_metric_public_deleted_without_successor_still_not_found():
@@ -2153,6 +2140,20 @@ async def test_confirm_version_no_mine():
     with pytest.raises(ConflictError) as exc:
         await svc.confirm_version("sales_gmv_daily", version=1, consumer_id=888)
     assert exc.value.error_code == "NO_PENDING_CONFIRMATION"
+
+
+async def test_confirm_version_rejected_cannot_reconfirm():
+    """已拒绝的消费方不可再次确认——拒绝决定不可静默撤销（防 CANCELLED 版本误转正）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[MagicMock(id=1, consumer_id=9, status="REJECTED")]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    with pytest.raises(ConflictError) as exc:
+        await svc.confirm_version("sales_gmv_daily", version=1, consumer_id=9)
+    assert exc.value.error_code == "NO_PENDING_CONFIRMATION"
+    repo.update_confirmation_status.assert_not_called()
 
 
 async def test_confirm_version_already_confirmed_idempotent():
@@ -2840,12 +2841,16 @@ async def test_published_metric_resubmit_still_blocked():
 async def test_submit_notifies_specific_reviewer_when_assigned():
     """指定评审用户（reviewer_type=user）时，仅通知该评审人（非整个域）。"""
     svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1, domain="sales"))
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", owner_id=1, domain="sales")
+    )
     repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="REVIEW"))
 
     await svc.submit_metric(
         "sales_gmv_daily",
-        MetricSubmitRequest(change_reason="提交审核，指定评审人", reviewer_type="user", reviewer_id=99),
+        MetricSubmitRequest(
+            change_reason="提交审核，指定评审人", reviewer_type="user", reviewer_id=99
+        ),
         actor_id=1,
         role="metric_owner",
         user_domain="sales",
@@ -2861,9 +2866,7 @@ async def test_submit_notifies_specific_reviewer_when_assigned():
 async def test_deprecated_resubmit_publishes_resubmitted_event():
     """废弃指标重评审时发布 metric.resubmitted 事件（区别于首次提交）。"""
     svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(
-        return_value=make_metric(status="DEPRECATED", owner_id=1)
-    )
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DEPRECATED", owner_id=1))
     repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="REVIEW"))
     svc._publish_event = AsyncMock()
 
@@ -2893,12 +2896,13 @@ async def test_register_metric_lineage_full_derived_registers_dependency_edges()
             "source_tables": ["dwd_order"],
         },
     )
-    with patch("app.services.lineage.service.LineageService") as MockLS, patch(
-        "app.services.lineage.repository.LineageRepository"
-    ) as MockLR:
-        lineage_svc = MockLS.return_value
+    with (
+        patch("app.services.lineage.service.LineageService") as mock_ls,
+        patch("app.services.lineage.repository.LineageRepository") as mock_lr,
+    ):
+        lineage_svc = mock_ls.return_value
         lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
-        repo_inst = MockLR.return_value
+        repo_inst = mock_lr.return_value
         repo_inst.upsert_edge = AsyncMock()
 
         await svc._register_metric_lineage_full(metric)
@@ -2907,9 +2911,7 @@ async def test_register_metric_lineage_full_derived_registers_dependency_edges()
         lineage_svc.register_metric_from_definition.assert_awaited_once_with(metric, commit=False)
         # 两个依赖各一条 DERIVED_FROM / L3 边（composite/derived 统一 DERIVED_FROM）
         assert repo_inst.upsert_edge.await_count == 2
-        calls = {
-            c.kwargs["source_node"]: c.kwargs for c in repo_inst.upsert_edge.call_args_list
-        }
+        calls = {c.kwargs["source_node"]: c.kwargs for c in repo_inst.upsert_edge.call_args_list}
         assert calls["metric:fct_order"]["target_node"] == "metric:sales_gmv_daily"
         assert calls["metric:fct_order"]["edge_type"] == "DERIVED_FROM"
         assert calls["metric:fct_order"]["granularity"] == "L3"
@@ -2927,12 +2929,13 @@ async def test_register_metric_lineage_full_atomic_skips_dependency_edges():
             "source_tables": ["dwd_x"],
         },
     )
-    with patch("app.services.lineage.service.LineageService") as MockLS, patch(
-        "app.services.lineage.repository.LineageRepository"
-    ) as MockLR:
-        lineage_svc = MockLS.return_value
+    with (
+        patch("app.services.lineage.service.LineageService") as mock_ls,
+        patch("app.services.lineage.repository.LineageRepository") as mock_lr,
+    ):
+        lineage_svc = mock_ls.return_value
         lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
-        repo_inst = MockLR.return_value
+        repo_inst = mock_lr.return_value
         repo_inst.upsert_edge = AsyncMock()
 
         await svc._register_metric_lineage_full(metric)
@@ -2945,8 +2948,8 @@ async def test_register_metric_lineage_full_failure_is_swallowed():
     """血缘注册抛错不向上传播（best-effort，绝不阻断指标创建/发布/更新主流程）。"""
     svc, _repo = _svc_with_repo()
     metric = make_metric(type="composite", definition_json={"dependencies": ["fct_order"]})
-    with patch("app.services.lineage.service.LineageService") as MockLS:
-        MockLS.return_value.register_metric_from_definition = AsyncMock(
+    with patch("app.services.lineage.service.LineageService") as mock_ls:
+        mock_ls.return_value.register_metric_from_definition = AsyncMock(
             side_effect=RuntimeError("lineage store down")
         )
         # 不应抛异常
@@ -2957,7 +2960,7 @@ async def test_register_metric_lineage_full_failure_is_swallowed():
 
 
 async def test_notify_lineage_impacted_owners_notifies_owners():
-    """下游存在受影响指标 → 按 owner 定向通知，event_type=lineage.change_impacted / title=血缘变更影响。"""
+    """下游存在受影响指标 → 按 owner 定向通知，event_type=lineage.change_impacted / title=血缘变更影响。"""# noqa: E501
     svc, repo = _svc_with_repo()
     edges = [
         MagicMock(target_node="metric:gmv_derived"),
@@ -2966,18 +2969,18 @@ async def test_notify_lineage_impacted_owners_notifies_owners():
     ]
 
     async def _lookup(code: str) -> Metric:
-        return make_metric(
-            metric_code=code, owner_id=7 if code == "gmv_derived" else 9
-        )
+        return make_metric(metric_code=code, owner_id=7 if code == "gmv_derived" else 9)
 
-    with patch("app.db.mysql.async_session_factory") as MockFactory, patch(
-        "app.services.lineage.service.LineageService"
-    ) as MockLS, patch("app.services.notify.service.NotifyService") as MockNS:
-        MockFactory.return_value = AsyncMock()  # 独立会话异步上下文管理器
-        lineage_svc = MockLS.return_value
+    with (
+        patch("app.db.mysql.async_session_factory") as mock_factory,
+        patch("app.services.lineage.service.LineageService") as mock_ls,
+        patch("app.services.notify.service.NotifyService") as mock_ns,
+    ):
+        mock_factory.return_value = AsyncMock()  # 独立会话异步上下文管理器
+        lineage_svc = mock_ls.return_value
         lineage_svc.query_impact = AsyncMock(return_value=edges)
         repo.get_by_code = _lookup  # 按 code 返回对应 owner 的指标
-        notify_inst = MockNS.return_value
+        notify_inst = mock_ns.return_value
         notify_inst.notify_user = AsyncMock(return_value=None)
 
         count = await svc.notify_lineage_impacted_owners("table:db.orders")
@@ -2993,11 +2996,12 @@ async def test_notify_lineage_impacted_owners_notifies_owners():
 async def test_notify_lineage_impacted_owners_query_failure_returns_zero():
     """影响分析查询抛错 → 返回 0，且不发任何通知（best-effort，不阻断上游变更）。"""
     svc, _repo = _svc_with_repo()
-    with patch("app.services.lineage.service.LineageService") as MockLS, patch(
-        "app.services.notify.service.NotifyService"
-    ) as MockNS:
-        MockLS.return_value.query_impact = AsyncMock(side_effect=RuntimeError("graph down"))
-        notify_inst = MockNS.return_value
+    with (
+        patch("app.services.lineage.service.LineageService") as mock_ls,
+        patch("app.services.notify.service.NotifyService") as mock_ns,
+    ):
+        mock_ls.return_value.query_impact = AsyncMock(side_effect=RuntimeError("graph down"))
+        notify_inst = mock_ns.return_value
         notify_inst.notify_user = AsyncMock(return_value=None)
 
         count = await svc.notify_lineage_impacted_owners("table:db.orders")

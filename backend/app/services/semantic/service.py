@@ -2454,6 +2454,12 @@ class MetricService(BaseService):
             raise ConflictError(
                 "当前用户无该版本的待确认记录", error_code="NO_PENDING_CONFIRMATION"
             )
+        if mine.status == "REJECTED":
+            # 已拒绝的消费方不可再次确认：拒绝决定不可静默撤销，
+            # 防止将已 CANCELLED 的版本重新转正（状态机矛盾）。
+            raise ConflictError(
+                "该版本已被您拒绝，不可再次确认", error_code="NO_PENDING_CONFIRMATION"
+            )
         if mine.status == "CONFIRMED":
             return metric  # 幂等：已确认直接返回
         await self._repo.update_confirmation_status(mine.id, "CONFIRMED")
