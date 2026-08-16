@@ -247,7 +247,10 @@ export function Templates() {
       const payload: MetricCreateRequest = {
         metric_code: values.metric_code ? String(values.metric_code) : undefined,
         name: String(values.name),
-        domain: String(values.domain),
+        // 域取自 Cascader 路径叶子（如 ["sales","order"] → "order"），对齐注册指标页 selectedDomain 语义
+        domain: Array.isArray(values.domain)
+          ? String(values.domain[values.domain.length - 1])
+          : String(values.domain),
         type: (String(values.type) as MetricType) ?? "atomic",
         granularity: String(values.granularity || "day"),
         unit: String(values.unit || ""),
@@ -292,7 +295,8 @@ export function Templates() {
     form.setFieldsValue({
       metric_code: tpl.code,
       name: tpl.name,
-      domain: tpl.domain,
+      // Cascader 值须为路径数组（叶子在最末）；模板域为叶子码
+      domain: tpl.domain ? [tpl.domain] : undefined,
       type: tpl.type ?? "atomic",
       granularity: tpl.granularity ?? "day",
       unit: tpl.unit ?? "",
