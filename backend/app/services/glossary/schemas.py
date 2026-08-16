@@ -6,7 +6,7 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TermStatus(enum.StrEnum):
@@ -44,7 +44,7 @@ class TermUpdate(BaseModel):
 class TermBatchOp(BaseModel):
     """批量状态流转请求（submit / deprecate 共用）。"""
 
-    term_codes: list[str]
+    term_codes: list[str] = Field(..., min_length=1, max_length=100, description="术语编码列表")
 
 
 class TermResponse(BaseModel):
