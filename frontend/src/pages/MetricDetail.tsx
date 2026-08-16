@@ -1159,6 +1159,13 @@ export function MetricDetail() {
               )}
             </span>
           }
+          action={
+            canCreate && isOwnerOrAdmin ? (
+              <Button size="small" icon={<EditOutlined />} onClick={openEdit}>
+                去修改
+              </Button>
+            ) : undefined
+          }
           style={{ marginBottom: 16 }}
         />
       )}
