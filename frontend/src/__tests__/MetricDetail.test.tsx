@@ -62,6 +62,7 @@ import {
   updateMetric,
   suggestRenameName,
   submitReview,
+  emergencyPublishMetric,
   UnisenseApiError,
 } from "../api";
 const mockedUpdateMetric = vi.mocked(updateMetric);
@@ -132,7 +133,14 @@ function renderDetail(initialEntry: { pathname: string; state?: { from?: string 
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
-        <Route path="/detail/:code" element={<MetricDetail />} />
+        <Route
+          path="/detail/:code"
+          element={
+            <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}>
+              <MetricDetail />
+            </PermissionProvider>
+          }
+        />
         <Route path="/catalog" element={<div>catalog-page</div>} />
         <Route path="/dashboard" element={<div>dashboard-page</div>} />
         <Route path="/todo" element={<div>todo-page</div>} />
@@ -159,6 +167,19 @@ describe("MetricDetail", () => {
     mockedUsers.mockResolvedValue([]);
     mockedSubs.mockResolvedValue({ items: [], total: 0 });
     mockedRelated.mockResolvedValue([]);
+    // renderDetail 也用 PermissionProvider 包裹：默认给 metric_owner 基础权限，让按钮按权限正常渲染
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create", "metric:edit", "metric:deprecate", "catalog:view"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
   });
 
   it("提供统一的返回按钮，从指标目录进入（历史栈有上一页）时回退到指标目录", async () => {
@@ -475,5 +496,59 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: true, compliance_reviewed: false });
     renderWithPerms(["metric:view"]);
     await waitFor(() => expect(screen.queryByText("PII 合规复核")).not.toBeInTheDocument());
+  });
+
+  it("紧急发布原因不足 10 字时前端拦截，不调用 API（避免 422 甩给后端）", async () => {
+    const emergencySpy = vi.fn();
+    vi.mocked(emergencyPublishMetric).mockImplementation(emergencySpy);
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: false });
+    renderWithPerms(["metric:emergency-publish", "metric:approve"]);
+    await screen.findByText("紧急发布");
+    fireEvent.click(screen.getByText("紧急发布"));
+    // 打开弹窗，输入不足 10 字的原因
+    await screen.findByText("确认紧急发布");
+    fireEvent.change(screen.getByPlaceholderText(/紧急发布原因/), { target: { value: "太短" } });
+    fireEvent.click(screen.getByText("确认紧急发布"));
+    await waitFor(() => expect(screen.getByText(/至少 10 字/)).toBeInTheDocument());
+    expect(emergencySpy).not.toHaveBeenCalled();
+  });
+
+  it("REVIEW 状态不显示「废弃」按钮（产品语义：仅已发布/灰度可废弃）", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: false });
+    renderWithPerms(["metric:deprecate", "metric:approve"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText("废弃")).not.toBeInTheDocument());
+  });
+
+  it("权限快照加载完成前不显示「审批通过」按钮（fail-open 消除）", async () => {
+    // 快照挂起（模拟慢加载），Provider 一直处于 loading
+    mockedMyPerms.mockReturnValue(new Promise(() => {}));
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: false });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/detail/sales_gmv_sum_d" }]}>
+        <Routes>
+          <Route
+            path="/detail/:code"
+            element={
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: "sales", org_id: 1 }}>
+                <MetricDetail />
+              </PermissionProvider>
+            }
+          />
+          <Route path="/catalog" element={<div>catalog-page</div>} />
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    // 快照未加载完（loading=true），审批按钮不应渲染（后端会拒绝，UI 也不该短暂可见）
+    expect(screen.queryByText("审批通过")).not.toBeInTheDocument();
+    expect(screen.queryByText("废弃")).not.toBeInTheDocument();
+  });
+
+  it("REVIEW 状态标签显示「审核中」而非「审核」", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: false });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    expect(await screen.findByText("审核中")).toBeInTheDocument();
   });
 });

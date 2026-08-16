@@ -35,7 +35,7 @@ const RECOMMEND_EXPAND_LIMIT = 20;
 const STATIONS = [
   { key: "DRAFT", name: "草稿", hotPriority: 2 },
   { key: "EXPERIMENTAL", name: "实验", hotPriority: 3 },
-  { key: "REVIEW", name: "审核", hotPriority: 1 },
+  { key: "REVIEW", name: "审核中", hotPriority: 1 },
   { key: "PUBLISHED", name: "已发布", hotPriority: 4 },
   { key: "DEPRECATED", name: "已废弃", hotPriority: 5 },
 ] as const;
@@ -221,7 +221,7 @@ const ASSET_CONFIGS: AssetConfig[] = [
     statuses: [
       { value: "DRAFT", label: "草稿" },
       { value: "EXPERIMENTAL", label: "实验" },
-      { value: "REVIEW", label: "审核" },
+      { value: "REVIEW", label: "审核中" },
       { value: "PUBLISHED", label: "已发布" },
       { value: "DEPRECATED", label: "已废弃" },
     ],
@@ -428,7 +428,7 @@ function GovernanceCards({ data, navigate }: { data: DashboardData; navigate: (t
 const OWNER_STATES = [
   { key: "DRAFT", label: "草稿", cls: "ob-draft" },
   { key: "EXPERIMENTAL", label: "实验", cls: "ob-experimental" },
-  { key: "REVIEW", label: "审核", cls: "ob-review" },
+  { key: "REVIEW", label: "审核中", cls: "ob-review" },
   { key: "PUBLISHED", label: "已发布", cls: "ob-published" },
   { key: "DEPRECATED", label: "已废弃", cls: "ob-deprecated" },
 ] as const;

@@ -91,7 +91,7 @@ const STATUS_COLOR: Record<string, string> = {
 const STATUS_LABEL: Record<string, string> = {
   DRAFT: "草稿",
   EXPERIMENTAL: "实验",
-  REVIEW: "审核",
+  REVIEW: "审核中",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",
   DATA_SOURCE_DROPPED: "数据源下线",
@@ -682,13 +682,15 @@ export function MetricDetail() {
   // 紧急发布=metric:emergency-publish、废弃=metric:deprecate、
   // 全量发布/回滚/改名=metric:edit（写操作，owner 归属由后端 PDP 强制）。
   // can() 控制按钮可见性；后端接口强制仍为最终边界，二者不互相替代。
-  const { can } = usePermission();
-  const canApprove = can("metric:approve");
-  const canDeprecate = can("metric:deprecate");
-  const canEdit = can("metric:edit");
-  const canPii = can("pii:review");
-  const canEmergency = can("metric:emergency-publish");
-  const canCreate = can("metric:create");
+  const { can, loading: permLoading } = usePermission();
+  // 权限快照加载完成前按钮一律不渲染（避免 fail-open 让无权用户短暂看到「审批通过」等）
+  const permReady = !permLoading;
+  const canApprove = permReady && can("metric:approve");
+  const canDeprecate = permReady && can("metric:deprecate");
+  const canEdit = permReady && can("metric:edit");
+  const canPii = permReady && can("pii:review");
+  const canEmergency = permReady && can("metric:emergency-publish");
+  const canCreate = permReady && can("metric:create");
   const piiUnreviewed = metric.pii_flag && !metric.compliance_reviewed;
 
   const headerActions = (
@@ -768,7 +770,7 @@ export function MetricDetail() {
           紧急发布
         </Button>
       )}
-      {metric.status !== "DEPRECATED" && isOwnerOrAdmin && canDeprecate && (
+      {(metric.status === "PUBLISHED" || metric.status === "EXPERIMENTAL") && isOwnerOrAdmin && canDeprecate && (
         <Button danger loading={busy} onClick={() => setDeprecateOpen(true)}>
           废弃
         </Button>
@@ -929,12 +931,19 @@ export function MetricDetail() {
       <Modal
         title="紧急发布（跳过评审，PII 门禁不可跳）"
         open={emergencyOpen}
-        onOk={() =>
-          runAction(() => emergencyPublishMetric(metric.metric_code, emergencyReason), "紧急发布").then(() => {
+        onOk={() => {
+          // 前端拦截：原因必填且至少 10 字（与后端 MetricEmergencyPublishRequest 一致），
+          // 避免把 422 校验错误甩给后端接口
+          const reason = emergencyReason.trim();
+          if (reason.length < 10) {
+            message.warning("紧急发布原因至少 10 字");
+            return;
+          }
+          runAction(() => emergencyPublishMetric(metric.metric_code, reason), "紧急发布").then(() => {
             setEmergencyOpen(false);
             setEmergencyReason("");
-          })
-        }
+          });
+        }}
         confirmLoading={busy}
         onCancel={() => setEmergencyOpen(false)}
         okText="确认紧急发布"
