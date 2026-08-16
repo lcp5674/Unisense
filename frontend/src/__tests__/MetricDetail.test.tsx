@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { MetricDetail } from "../pages/MetricDetail";
 import { PermissionProvider } from "../hooks/usePermission";
-import type { MetricHealth, MetricResponse } from "../types";
+import type { MetricHealth, MetricResponse, SystemDictItem } from "../types";
 
 vi.mock("../api", () => ({
   getMetric: vi.fn(),
@@ -490,7 +490,45 @@ describe("MetricDetail", () => {
     });
     expect(screen.getByText(/粒度 day 与口径定义不符/)).toBeInTheDocument();
   });
+  it("编辑弹窗聚合方式独立字段：回填 + 提交直接携带（非治理属性，走口径变更语义）", async () => {
+    // 聚合方式（SUM/AVG）本质是口径变更，与粒度/单位同级——编辑弹窗应独立回填并提交，
+    // 而非混入治理属性 dirty 机制（后端据此触发版本确认，修复 aggregation 判定矛盾）。
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT", aggregation: "SUM" });
+    // 聚合字典 mock 含 AVG/SUM，使聚合方式下拉可展开选择 AVG（beforeEach 默认空字典无选项）
+    mockedDictItems.mockResolvedValue([
+      { code: "AVG", label: "平均 (AVG)", status: "active" } as SystemDictItem,
+      { code: "SUM", label: "求和 (SUM)", status: "active" } as SystemDictItem,
+    ]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    fireEvent.click(await screen.findByText("编辑"));
+    await screen.findByText("编辑指标");
+    // 聚合方式独立回填 SUM（聚合 "SUM" 是聚合字段独有值——其他字段回填 day/元/PERIOD 等不含它）
+    let agSelect: HTMLElement | null = null;
+    await waitFor(() => {
+      const items = Array.from(document.querySelectorAll(".ant-modal .ant-select-selection-item")) as HTMLElement[];
+      const hit = items.find((e) => (e.textContent ?? "").includes("SUM"));
+      expect(hit).toBeTruthy();
+      agSelect = hit?.closest(".ant-select") as HTMLElement | null;
+    });
+    // 修改聚合方式为 AVG
+    fireEvent.mouseDown((agSelect as unknown as HTMLElement).querySelector(".ant-select-selector") as HTMLElement);
+    await waitFor(() => {
+      const opt = document.querySelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option[title*="AVG"]') as HTMLElement;
+      expect(opt).toBeTruthy();
+      fireEvent.click(opt);
+    });
+    // 填变更原因并保存 → payload 直接携带 aggregation: "AVG"（非 govPayload 展开）
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "聚合方式从求和改为平均" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
+      expect(lastCall).toMatchObject({ aggregation: "AVG", change_reason: expect.any(String) });
+    });
+  });
+
 });
+
 
 describe("MetricDetail 按钮级权限过滤", () => {
   function renderWithPerms(ui_actions: string[], role = "custom") {

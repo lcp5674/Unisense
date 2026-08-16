@@ -757,7 +757,7 @@ export function MetricDetail() {
     setEditSourceTableDirty(false);
     // 治理属性回填 + 遗留值兜底（字典未收录的历史值可显示可保留，防静默清空）
     const govInit: Record<string, string> = {};
-    for (const f of ["dw_layer", "freshness", "time_semantics", "metric_tier", "aggregation"]) {
+    for (const f of ["dw_layer", "freshness", "time_semantics", "metric_tier"]) {
       const v = (metric as unknown as Record<string, unknown>)[f];
       if (typeof v === "string") {
         govInit[f] = v;
@@ -768,12 +768,21 @@ export function MetricDetail() {
       }
     }
     if (metric.currency) govInit.currency = metric.currency;
+    // 聚合方式独立字段（口径变更，与粒度/单位同级）：其选项也需当前值兜底
+    // （字典未收录的历史聚合值可显示可保留，防静默清空——对齐治理字段 ensureInOptions）
+    if (metric.aggregation) {
+      setEditGovOptions((prev) => ({
+        ...prev,
+        aggregation: ensureInOptions(prev.aggregation ?? [], metric.aggregation),
+      }));
+    }
     setEditGovValues(govInit);
     setEditGovDirty(new Set());
     editForm.setFieldsValue({
       name: metric.name,
       granularity: metric.granularity,
       unit: metric.unit,
+      aggregation: metric.aggregation, // 聚合方式属口径变更，与粒度/单位同级回填
       definition_json: Object.keys(def).length ? JSON.stringify(def, null, 2) : "",
     });
     setEditDims(rawDims);
@@ -838,7 +847,7 @@ export function MetricDetail() {
         }
       }
       const govPayload: Record<string, string> = {};
-      for (const f of ["currency", "dw_layer", "freshness", "time_semantics", "metric_tier", "aggregation"]) {
+      for (const f of ["currency", "dw_layer", "freshness", "time_semantics", "metric_tier"]) {
         // 用户改过的治理字段才传（未改不传 → 后端保留原值；dirty+空值 → 不传保留原值）
         if (editGovDirty.has(f) && editGovValues[f]) govPayload[f] = editGovValues[f];
       }
@@ -846,6 +855,7 @@ export function MetricDetail() {
         name: String(values.name).trim(),
         granularity: values.granularity,
         unit: values.unit,
+        aggregation: values.aggregation, // 聚合方式属口径变更，与粒度/单位同级（后端触发版本确认）
         ...govPayload,
         definition_json: definitionJson,
         change_reason: String(values.change_reason ?? "").trim(),
@@ -1745,6 +1755,20 @@ export function MetricDetail() {
                 optionFilterProp="label"
               />
             </Form.Item>
+            <Form.Item
+              name="aggregation"
+              label="聚合方式"
+              style={{ marginBottom: 8, flex: 1 }}
+              tooltip="聚合方式（SUM/AVG 等）属口径变更——修改后需消费方确认（版本 PENDING），与粒度/单位同级；非普通治理属性"
+            >
+              <Select
+                allowClear
+                placeholder="选择聚合方式"
+                options={editGovOptions.aggregation ?? []}
+                showSearch
+                optionFilterProp="label"
+              />
+            </Form.Item>
           </Space>
           {/* 治理属性（非破坏性变更，不触发版本递增）：创建后治理字段此前不可改，
               现可编辑——币种修正/数仓层纠正/时效调整/时间语义变更/分级晋升/聚合调整 */}
@@ -1765,7 +1789,6 @@ export function MetricDetail() {
                 ["freshness", "新鲜度"],
                 ["time_semantics", "时间语义"],
                 ["metric_tier", "指标分级"],
-                ["aggregation", "聚合方式"],
               ] as const
             ).map(([field, label]) => (
               <Form.Item key={field} label={label} style={{ marginBottom: 8, flex: 1, minWidth: 160 }}>

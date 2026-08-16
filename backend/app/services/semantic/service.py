@@ -84,7 +84,10 @@ BREAKING_DEF_FIELDS = ("expression", "aggregation", "granularity", "dependencies
 
 # Top-level 破坏性变更字段：直接修改 metric 表上的这些字段等同于口径变更
 # （对齐 TD §12 metric_version：granularity/unit 变更触发 PENDING_VERSION）
-BREAKING_TOP_LEVEL_FIELDS = ("granularity", "unit")
+# aggregation（聚合方式）语义上就是"怎么算"，SUM→AVG 是完全不同的口径——
+# 必须与 granularity/unit 同级触发 PENDING_VERSION（此前误归治理属性静默更新，
+# 与 definition_json 路径的 BREAKING_DEF_FIELDS 判定矛盾，R40 修复）。
+BREAKING_TOP_LEVEL_FIELDS = ("granularity", "unit", "aggregation")
 
 # 指标间依赖边的 edge_type 映射（register_metric_dependency 由血缘团队负责，
 # 此处按 metric.type 直接写 LineageEdge）。
@@ -699,9 +702,12 @@ class MetricService(BaseService):
 
         # 收集更新字段
         updates: dict[str, Any] = {}
-        # 治理属性（currency/aggregation/time_semantics/freshness/dw_layer/metric_tier/
+        # 治理属性（currency/time_semantics/freshness/dw_layer/metric_tier/
         # serving_mode/additivity/non_additive_dimensions）：非破坏性变更，仅更新主表
         # 治理列、不触发版本递增/PENDING 期（不在 BREAKING_TOP_LEVEL_FIELDS）。
+        # aggregation（聚合方式）本质是口径变更（SUM→AVG 口径不同），已并入
+        # BREAKING_TOP_LEVEL_FIELDS 与 granularity/unit 同级触发 PENDING_VERSION，
+        # 不再属于治理属性（R40 修复其与 definition_json 判定矛盾）。
         # 修复前：指标创建后治理字段不可改（分层纠正/时效调整/分级晋升/币种修正
         # 等生产高频场景只能重建指标），与注册页可选字段契约不一致。
         for field in (

@@ -1904,6 +1904,52 @@ async def test_update_metric_published_top_level_breaking_creates_pending():
     assert result.row_version == 2
 
 
+async def test_update_metric_published_aggregation_breaking_creates_pending():
+    """PUBLISHED + 直接改 aggregation（聚合方式）→ 触发 PENDING_CONFIRMATION。
+
+    修复前：aggregation 被误归治理属性（BREAKING_TOP_LEVEL_FIELDS 不含它），
+    直接修改静默更新主表、不触发版本确认——而 definition_json 路径的
+    BREAKING_DEF_FIELDS 判 aggregation 为 BREAKING，两条路径判定矛盾
+    （SUM→AVG 本质是口径变更）。R40 修复后与 granularity/unit 同级触发 PENDING。
+    """
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="PUBLISHED",
+        row_version=1,
+        version=1,
+        aggregation="SUM",
+        backup_owner_id=2,
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    fake_pvm = MagicMock()
+    fake_pvm.create_pending = AsyncMock()
+
+    with patch(
+        "app.services.semantic.pending_version_manager.PendingVersionManager",
+        return_value=fake_pvm,
+    ):
+        result = await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(aggregation="AVG", change_reason="聚合方式调整"),
+            actor_id=1,
+            role="metric_owner",
+        )
+
+    version_arg = repo.create_version.call_args.args[0]
+    assert version_arg.status == "PENDING_CONFIRMATION"
+    assert version_arg.change_type == "BREAKING"
+    assert version_arg.diff_json["aggregation"]["before"] == "SUM"
+    assert version_arg.diff_json["aggregation"]["after"] == "AVG"
+    # 主表 aggregation 不应被直写（进入 PENDING，等消费方确认后转正）
+    assert repo.update_with_optimistic_lock.await_args.kwargs.get("aggregation") is None
+    assert result.row_version == 2
+
+
+
 async def test_update_metric_syncs_pii_flag_from_definition():
     """definition_json 显式声明 pii=True 时，pii_flag 以权威源同步到 updates。"""
     svc, repo = _svc_with_repo()
