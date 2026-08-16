@@ -156,6 +156,8 @@ export function SubjectDomain() {
   const { can } = usePermission();
   const navigate = useNavigate();
   const [treeData, setTreeData] = useState<SubjectDomainTreeNode[]>([]);
+  // R9: 主题域树搜索（名称过滤，命中的祖先路径自动展开）
+  const [searchValue, setSearchValue] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
@@ -216,6 +218,18 @@ export function SubjectDomain() {
   // 编码自动生成预览：监听显示名 + 上级域
   const watchName = Form.useWatch("name", createForm);
   const watchParentId = Form.useWatch("parent_id", createForm);
+  // 搜索过滤：保留名称命中的节点及其祖先链（保证可导航到命中节点），返回原始节点树
+  function filterDomainNodes(nodes: SubjectDomainTreeNode[], q: string): SubjectDomainTreeNode[] {
+    const lower = q.toLowerCase();
+    const out: SubjectDomainTreeNode[] = [];
+    for (const n of nodes) {
+      const self = n.name.toLowerCase().includes(lower);
+      const children = filterDomainNodes(n.children, q);
+      if (self || children.length) out.push({ ...n, children });
+    }
+    return out;
+  }
+
   const codeMap = collectCodeMap(treeData);
   const codePreview = previewDomainCode(watchName ?? "", watchParentId ? codeMap[watchParentId] : null);
 
@@ -401,13 +415,29 @@ export function SubjectDomain() {
         <Col span={10}>
           <Card title="主题域树" extra={can("domain:create") && <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate(true)}>新建根域</Button>} style={{ minHeight: 500 }}>
             {loading ? <Spin /> : treeData.length === 0 ? <Empty description="暂无主题域" /> : (
-              <Tree
-                showLine
-                defaultExpandAll
-                treeData={treeDataToNodes(treeData, (n) => openCreate(false, n), treeData, can("domain:create"))}
-                onSelect={handleSelect}
-                selectedKeys={selectedCode ? [selectedCode] : []}
-              />
+              <>
+                {searchValue.trim() && (
+                  <Input
+                    allowClear
+                    placeholder="搜索主题域名称…"
+                    style={{ marginBottom: 8 }}
+                    value={searchValue}
+                    onChange={(e) => setSearchValue(e.target.value)}
+                  />
+                )}
+                <Tree
+                  showLine
+                  defaultExpandAll
+                  treeData={treeDataToNodes(
+                    searchValue.trim() ? filterDomainNodes(treeData, searchValue) : treeData,
+                    (n) => openCreate(false, n),
+                    treeData,
+                    can("domain:create"),
+                  )}
+                  onSelect={handleSelect}
+                  selectedKeys={selectedCode ? [selectedCode] : []}
+                />
+              </>
             )}
           </Card>
         </Col>
