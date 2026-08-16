@@ -69,6 +69,38 @@ async def test_create_metric_happy_path():
     assert result.row_version == 1
 
 
+async def test_create_metric_merges_source_table_into_definition():
+    """top-level source_table/measure_column 须合入 definition_json（血缘差异同步的消费键）。
+
+    修复前：批量注册/后端构造路径只传 top-level source_table，definition_json 无
+    source_table/measure_column → register_metric_from_definition 建不出「指标↔落地表」边
+    （与前端单条 buildDefinitionJson 合入 ②源表/度量列的行为不一致）。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.create_metric(
+        MetricCreateRequest(
+            **make_create_payload(
+                source_table="dwd.sales_detail",
+                measure_column="order_amount",
+                definition_json={"expression": "SUM(order_amount)", "dependencies": []},
+            )
+        ),
+        owner_id=1,
+    )
+
+    captured = repo.create.call_args[0][0]
+    defn = captured.definition_json
+    assert defn["source_table"] == "dwd.sales_detail"
+    assert defn["measure_column"] == "order_amount"
+    # 显式声明的 source_tables 不被覆盖（保留调用方提供的源表集）
+    assert "source_tables" not in defn
+
+
 async def test_create_metric_duplicate_code_raises_conflict():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric())

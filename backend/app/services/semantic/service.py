@@ -347,6 +347,19 @@ class MetricService(BaseService):
         # 3. 校验字典字段值存在于 SystemDict（对齐 FR-009）
         await self._validate_dict_fields(request)
 
+        # 3b. 口径完整性：把 top-level 的 source_table/measure_column 合入 definition_json。
+        # 血缘差异同步（register_metric_from_definition）读 definition.source_table /
+        # measure_column 建「指标↔落地表」边——但批量注册/模板实例化等后端构造路径此前
+        # 不写这两个键，导致请求传了 source_table 却无血缘边（与前端单条 buildDefinitionJson
+        # 合入 ②源表/度量列的行为不一致）。此处后端统一兜底，覆盖全部创建路径。
+        if request.source_table or request.measure_column:
+            _defn = dict(request.definition_json or {})
+            if request.source_table and not _defn.get("source_table"):
+                _defn["source_table"] = request.source_table
+            if request.measure_column and not _defn.get("measure_column"):
+                _defn["measure_column"] = request.measure_column
+            request.definition_json = _defn
+
         # PII 双源归一化：definition_json.pii 与 pii_flag 保持一致（pii_flag 为权威源）
         definition, pii_flag = _normalize_pii(request.definition_json, request.pii_flag)
 
