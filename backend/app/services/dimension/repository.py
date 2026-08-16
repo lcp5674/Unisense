@@ -142,5 +142,38 @@ class DimensionRepository:
         stmt = select(Reconciliation).where(Reconciliation.id == rec_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def rename_dimension_references(self, old_code: str, new_code: str) -> None:
+        """级联重命名维度编码在引用表中的全部引用（事务内）。
+
+        维度编码被 3 张表引用（字符串外键，非 DB FK 约束）：
+        - ``dimension_member.dim_code``：维度成员归属
+        - ``dimension_mapping.source_dim_code`` / ``target_dim_code``：映射两端
+        - ``metric_dimension.dim_code``：指标-维度绑定
+
+        编辑维度编码时须同步更新这些引用，否则会留下悬挂引用。
+        """
+        from sqlalchemy import update
+
+        await self._session.execute(
+            update(DimensionMember)
+            .where(DimensionMember.dim_code == old_code)
+            .values(dim_code=new_code)
+        )
+        await self._session.execute(
+            update(DimensionMapping)
+            .where(DimensionMapping.source_dim_code == old_code)
+            .values(source_dim_code=new_code)
+        )
+        await self._session.execute(
+            update(DimensionMapping)
+            .where(DimensionMapping.target_dim_code == old_code)
+            .values(target_dim_code=new_code)
+        )
+        await self._session.execute(
+            update(MetricDimension)
+            .where(MetricDimension.dim_code == old_code)
+            .values(dim_code=new_code)
+        )
+
     async def commit(self) -> None:
         await self._session.commit()

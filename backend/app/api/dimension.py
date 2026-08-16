@@ -25,6 +25,8 @@ from app.services.dimension.schemas import (
     DimensionUpdate,
     MetricDimensionBind,
     MetricDimensionResponse,
+    PreviewValuesRequest,
+    PreviewValuesResponse,
     ReconciliationResponse,
     ReconciliationReview,
     ReconciliationSubmit,
@@ -227,6 +229,23 @@ async def review_reconciliation(
     )
     await db.commit()
     return ok(data=ReconciliationResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post("/preview-values", dependencies=_WRITE_DEPS)
+async def preview_dimension_values(
+    payload: PreviewValuesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """从数据源表列拉取去重枚举值（维度值自动获取的预览）。"""
+    resp = await DimensionService(db).preview_column_values(
+        source_id=payload.source_id,
+        table=payload.table,
+        column=payload.column,
+        limit=payload.limit,
+    )
+    return ok(data=PreviewValuesResponse(**resp), trace_id=trace_id)
 
 
 @router.get("/{dim_code}", dependencies=[Depends(require_roles(*_READ_ROLES))])

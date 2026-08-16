@@ -17,6 +17,7 @@ from app.services.dimension.schemas import (
     DimensionCreate,
     DimensionMemberCreate,
     DimensionMemberUpdate,
+    DimensionUpdate,
 )
 from app.services.dimension.service import DimensionService
 
@@ -527,3 +528,104 @@ async def test_list_dimensions_returns_count_tuples() -> None:
     repo.list_dimensions = AsyncMock(return_value=[(dim, 3)])
     result = await svc.list_dimensions(None, None)
     assert result == [(dim, 3)]
+
+
+async def test_update_dimension_renames_code_and_cascades() -> None:
+    """编辑维度改编码：DRAFT 允许，且级联更新引用表。"""
+    svc, repo = await _svc()
+    dim = Dimension(
+        id=1,
+        dim_code="dim_old",
+        name="渠道",
+        domain="sales",
+        type="SCD1",
+        owner_id=1,
+        status="DRAFT",
+    )
+    repo.get_dimension = AsyncMock(side_effect=lambda code: dim if code == "dim_old" else None)
+    repo.rename_dimension_references = AsyncMock()
+    payload = DimensionUpdate(dim_code="dim_new", name="渠道（新）")
+    resp = await svc.update_dimension("dim_old", payload)
+    assert resp.dim_code == "dim_new"
+    assert resp.name == "渠道（新）"
+    repo.rename_dimension_references.assert_awaited_once_with("dim_old", "dim_new")
+    repo.commit.assert_awaited()
+
+
+async def test_update_dimension_rename_rejected_when_published() -> None:
+    """已发布/已废弃维度禁止改编码（避免破坏线上引用）。"""
+    from app.core.exceptions import UnisenseError
+
+    svc, repo = await _svc()
+    dim = Dimension(
+        id=1,
+        dim_code="dim_pub",
+        name="渠道",
+        domain="sales",
+        type="SCD1",
+        owner_id=1,
+        status="PUBLISHED",
+    )
+    repo.get_dimension = AsyncMock(return_value=dim)
+    payload = DimensionUpdate(dim_code="dim_new")
+    try:
+        await svc.update_dimension("dim_pub", payload)
+        raise AssertionError("应拒绝已发布维度改编码")
+    except UnisenseError as exc:
+        assert "仅 DRAFT 状态可修改编码" in str(exc)
+
+
+async def test_update_dimension_rename_conflict() -> None:
+    """新编码与既有维度冲突时拒绝（DIM_EXISTS）。"""
+    from app.core.exceptions import ConflictError
+
+    svc, repo = await _svc()
+    dim = Dimension(
+        id=1,
+        dim_code="dim_a",
+        name="A",
+        domain="sales",
+        type="SCD1",
+        owner_id=1,
+        status="DRAFT",
+    )
+    repo.get_dimension = AsyncMock(
+        side_effect=lambda code: dim if code == "dim_a" else object()
+    )
+    payload = DimensionUpdate(dim_code="dim_b")
+    try:
+        await svc.update_dimension("dim_a", payload)
+        raise AssertionError("应拒绝冲突编码")
+    except ConflictError as exc:
+        assert "已存在" in str(exc)
+
+
+async def test_preview_column_values_queries_source() -> None:
+    """从数据源表列拉取去重枚举值：构建采集器 + SELECT DISTINCT。"""
+
+    from unittest.mock import patch
+
+    svc, repo = await _svc()
+    src_mock = MagicMock(source_id="s1", source_type="mysql", connection_config="encrypted")
+    # svc._db.execute 返回 AsyncMock 结果，其 scalar_one_or_none 是同步方法返回 DataSource
+    db_exec = AsyncMock()
+    db_exec_result = MagicMock()
+    db_exec_result.scalar_one_or_none.return_value = src_mock
+    db_exec.return_value = db_exec_result
+    svc._db.execute = db_exec
+
+    fake_collector = MagicMock()
+    fake_collector.query = AsyncMock(
+        return_value=[{"channel": "app"}, {"channel": "web"}, {"channel": "app"}]
+    )
+    fake_collector.dispose = AsyncMock()
+    with patch(
+        "app.services.collector.connectors.registry.build", return_value=fake_collector
+    ) as mock_build:
+        result = await svc.preview_column_values("s1", "dwd.sales", "channel", limit=100)
+
+    assert mock_build.called
+    fake_collector.query.assert_awaited()
+    assert result["values"] == ["app", "web", "app"]
+    assert result["total"] == 3
+    assert result["truncated"] is False

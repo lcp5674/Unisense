@@ -10,13 +10,16 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
 from app.core.exceptions import (
     ConflictError,
+    ExternalDependencyError,
     NotFoundError,
     UnisenseError,
     ValidationError,
@@ -129,6 +132,18 @@ class DimensionService(BaseService):
         dim = await self._require(dim_code)
         if dim.status == DimensionStatus.DEPRECATED.value:
             raise UnisenseError(f"已废弃维度不可更新: {dim_code}", error_code="INVALID_STATE")
+        # 改编码：仅 DRAFT 状态允许（已发布/已废弃维度改编码会破坏线上引用）；
+        # 校验新编码唯一，事务内级联更新成员/映射/绑定引用。
+        if data.dim_code is not None and data.dim_code != dim_code:
+            if dim.status != DimensionStatus.DRAFT.value:
+                raise UnisenseError(
+                    f"仅 DRAFT 状态可修改编码，当前 {dim.status}；已发布维度请先废弃重建",
+                    error_code="INVALID_STATE",
+                )
+            if await self._repo.get_dimension(data.dim_code) is not None:
+                raise ConflictError(f"维度编码已存在: {data.dim_code}", error_code="DIM_EXISTS")
+            await self._repo.rename_dimension_references(dim_code, data.dim_code)
+            dim.dim_code = data.dim_code
         if data.name is not None:
             dim.name = data.name
         if data.domain is not None:
@@ -507,3 +522,66 @@ class DimensionService(BaseService):
         if dim is None:
             raise NotFoundError(f"维度不存在: {dim_code}")
         return dim
+
+    async def preview_column_values(
+        self, source_id: str, table: str, column: str, limit: int = 200
+    ) -> dict[str, Any]:
+        """从已注册数据源的指定表列拉取去重枚举值（维度值自动获取）。
+
+        用数据源存储的加密连接配置构建采集器，执行
+        ``SELECT DISTINCT `col` FROM `table` LIMIT n`` 并返回去重值。
+
+        Args:
+            source_id: 数据源 ID（须已注册）。
+            table: 表名（可带库前缀，如 ``dwd.sales``）。
+            column: 列名。
+            limit: 去重值上限（1-1000）。
+
+        Returns:
+            ``{"values": [...], "total": n, "truncated": bool}``。
+
+        Raises:
+            NotFoundError: 数据源不存在。
+            ExternalDependencyError: 连接/查询失败（源库不可达）。
+        """
+        from sqlalchemy import select as sa_select
+
+        from app.models.data_source import DataSource
+        from app.services.collector.connectors import registry
+
+        src = (
+            await self._db.execute(sa_select(DataSource).where(DataSource.source_id == source_id))
+        ).scalar_one_or_none()
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+        # 校验表名/列名为合法标识符（防注入：只允许字母数字下划线点，且逐段非数字开头）
+        _id_re = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$")
+        if not _id_re.match(table) or not _id_re.match(column):
+            raise ValidationError("表名/列名不合法（仅允许字母数字下划线，可用点分隔库前缀）")
+        # 反引号包裹标识符（MySQL 保留字安全），列名在 SELECT 里限定，避免拼接到表名
+        safe_table = ".".join(f"`{p}`" for p in table.split("."))
+        safe_col = f"`{column}`"
+        sql = f"SELECT DISTINCT {safe_col} FROM {safe_table} LIMIT {int(limit)}"
+
+        collector = registry.build(src.source_type, src.connection_config)
+        try:
+            rows = await collector.query(sql)
+        except ExternalDependencyError:
+            raise  # 外部依赖错误（连接/查询超时）已语义化，交由 API 层映射
+        except Exception as exc:
+            # DBAPIError/OperationalError 等驱动异常带必需构造参数，不能 type(exc)(msg) 重抛
+            raise UnisenseError(f"拉取维度枚举值失败: {exc}") from exc
+        finally:
+            await collector.dispose()
+
+        col_key = column.lower()
+        values = [
+            str(r.get(col_key, "")).strip()
+            for r in rows
+            if r.get(col_key) is not None
+        ]
+        return {
+            "values": values,
+            "total": len(values),
+            "truncated": len(values) >= limit,
+        }

@@ -157,6 +157,15 @@ class InformationSchemaCollector(BaseCollector):
         """枚举实例下全部非系统数据库（复用 _list_schemas，供创建时选择目标库）。"""
         return await self._list_schemas()
 
+    async def query(
+        self, sql: str, params: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """执行任意只读查询（委托 SqlalchemyConnector，供维度枚举值拉取等复用）。
+
+        SQL 须为只读 SELECT；连接复用 ``_connector`` 的超时与连接池配置。
+        """
+        return await self._connector.query(sql, params)
+
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
         """单表元数据刷新：仅查询目标表的列元数据，不触发全源扫描。
 

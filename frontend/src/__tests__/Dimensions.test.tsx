@@ -47,11 +47,13 @@ vi.mock("../api", () => {
     listFavorites: vi.fn(),
     addFavorite: vi.fn(),
     removeFavorite: vi.fn(),
+    listDataSources: vi.fn(),
+    previewColumnValues: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 const mockedListFavorites = vi.mocked(listFavorites);
@@ -97,6 +99,8 @@ beforeEach(() => {
   vi.mocked(listDimensionMembers).mockResolvedValue({ items: [], total: 0 });
   // 用户选择器（维度 Owner 下拉），默认空
   vi.mocked(listUsers).mockResolvedValue([]);
+  vi.mocked(listDataSources).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+  vi.mocked(previewColumnValues).mockResolvedValue({ values: [], total: 0, truncated: false });
   // 详情抽屉/成员删除/映射编辑等新功能默认值（避免组件内 .then 到 undefined）
   vi.mocked(listDimensionMetrics).mockResolvedValue({ items: [], total: 0 });
   vi.mocked(listDimensionMappings).mockResolvedValue({ items: [], total: 0 });
@@ -327,14 +331,14 @@ describe("Dimensions 页面", () => {
     );
 
     // 切到「成员管理」Tab
-    await user.click(screen.getByRole("tab", { name: /成员管理/ }));
+    await user.click(screen.getByRole("tab", { name: /维度值管理/ }));
     // 选择维度（Tab 内唯一的 Select combobox）
     const dimSelect = await screen.findByRole("combobox");
     fireEvent.mouseDown(dimSelect);
     await user.click(await screen.findByText("dim_channel · 渠道"));
 
-    // 打开新增成员，父级应为 Select（选项来自成员列表）
-    await user.click(screen.getByRole("button", { name: /新增成员/ }));
+    // 打开新增值，父级应为 Select（选项来自成员列表）
+    await user.click(screen.getByRole("button", { name: /新增值/ }));
     const dialog = screen.getByRole("dialog");
     const parentItem = within(dialog).getByText("父级编码").closest(".ant-form-item") as HTMLElement;
     fireEvent.mouseDown(within(parentItem).getByRole("combobox"));
@@ -365,7 +369,7 @@ describe("Dimensions 页面", () => {
         <Dimensions />
       </MemoryRouter>,
     );
-    await user.click(screen.getByRole("tab", { name: /成员管理/ }));
+    await user.click(screen.getByRole("tab", { name: /维度值管理/ }));
     const dimSelect = await screen.findByRole("combobox");
     fireEvent.mouseDown(dimSelect);
     await user.click(await screen.findByText("dim_channel · 渠道"));
@@ -448,7 +452,7 @@ describe("Dimensions 页面", () => {
       </MemoryRouter>,
     );
 
-    await user.click(screen.getByRole("tab", { name: /成员管理/ }));
+    await user.click(screen.getByRole("tab", { name: /维度值管理/ }));
     // 先选择维度（Tab 内唯一的 Select combobox），成员列表才会加载
     const dimSelect = await screen.findByRole("combobox");
     fireEvent.mouseDown(dimSelect);

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm } from "antd";
-import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm, Divider } from "antd";
+import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, DatabaseOutlined } from "@ant-design/icons";
 import {
   listDimensions,
   createDimension,
@@ -28,6 +28,8 @@ import {
   listFavorites,
   addFavorite,
   removeFavorite,
+  listDataSources,
+  previewColumnValues,
   UnisenseApiError,
 } from "../api";
 import type {
@@ -39,6 +41,7 @@ import type {
   MetricResponse,
   SubjectDomainTreeNode,
   UserBrief,
+  DataSource,
 } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 
@@ -279,6 +282,7 @@ function DimensionsTab() {
     try {
       const fresh = await getDimension(d.dim_code);
       editForm.setFieldsValue({
+        dim_code: fresh.dim_code,
         name: fresh.name,
         domain: fresh.domain,
         type: fresh.type,
@@ -293,7 +297,10 @@ function DimensionsTab() {
     if (!editTarget) return;
     setEditSaving(true);
     try {
+      // 编码仅 DRAFT 状态可改（后端强校验）；非 DRAFT 时不传编码，避免误改
+      const canEditCode = editTarget.status === "DRAFT";
       await updateDimension(editTarget.dim_code, {
+        ...(canEditCode && values.dim_code ? { dim_code: String(values.dim_code) } : {}),
         name: values.name ? String(values.name) : undefined,
         domain: values.domain ? String(values.domain) : undefined,
         type: values.type ? String(values.type) : undefined,
@@ -502,6 +509,23 @@ function DimensionsTab() {
         confirmLoading={editSaving}
       >
         <Form form={editForm} layout="vertical" onFinish={handleEdit} style={{ marginTop: 8 }}>
+          <Form.Item
+            name="dim_code"
+            label="维度编码"
+            extra={
+              editTarget?.status === "DRAFT" ? (
+                <span style={{ color: "#0E7C86" }}>草稿状态可修改；已发布/已废弃禁止</span>
+              ) : (
+                <span className="muted">已发布/已废弃维度编码不可修改</span>
+              )
+            }
+            rules={[
+              { required: true, message: "请输入维度编码" },
+              { pattern: /^[a-z][a-z0-9_]*$/, message: "仅小写字母/数字/下划线，且不以数字开头" },
+            ]}
+          >
+            <Input className="mono" disabled={editTarget?.status !== "DRAFT"} />
+          </Form.Item>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
             <Input placeholder="如 渠道" />
           </Form.Item>
@@ -704,9 +728,20 @@ function MembersTab() {
   const [editOpen, setEditOpen] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
   const [editForm] = Form.useForm();
+  // 从表自动获取枚举值：数据源列表 + 弹窗 + 预览结果
+  const [dataSources, setDataSources] = useState<DataSource[]>([]);
+  const [autoOpen, setAutoOpen] = useState(false);
+  const [autoLoading, setAutoLoading] = useState(false);
+  const [autoForm] = Form.useForm();
+  const [previewValues, setPreviewValues] = useState<string[]>([]);
+  const [previewTruncated, setPreviewTruncated] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     listDimensions().then((r) => setDims(r.items)).catch(() => {});
+    listDataSources({ page_size: 100 })
+      .then((r) => setDataSources(r.items))
+      .catch(() => setDataSources([]));
   }, []);
 
   useEffect(() => {
@@ -740,6 +775,57 @@ function MembersTab() {
       reload();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+    }
+  }
+
+  // 拉取预览：根据所选数据源/表/列，调后端获取去重枚举值
+  async function handlePreview(values: Record<string, unknown>) {
+    if (!dimCode) return;
+    setAutoLoading(true);
+    setPreviewValues([]);
+    setPreviewTruncated(false);
+    try {
+      const r = await previewColumnValues({
+        source_id: String(values.source_id),
+        table: String(values.table),
+        column: String(values.column),
+        limit: 200,
+      });
+      setPreviewValues(r.values);
+      setPreviewTruncated(r.truncated);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "拉取枚举值失败");
+    } finally {
+      setAutoLoading(false);
+    }
+  }
+
+  // 导入预览值为维度成员（member_code = 枚举值本身，member_name = 枚举值）
+  async function handleImportValues() {
+    if (!dimCode || previewValues.length === 0) return;
+    setImporting(true);
+    let ok = 0;
+    let failed = 0;
+    try {
+      for (const v of previewValues) {
+        try {
+          await createDimensionMember({
+            dim_code: dimCode,
+            member_code: v,
+            member_name: v,
+          });
+          ok += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      message.success(`已导入 ${ok} 个维度值${failed > 0 ? `，跳过 ${failed} 个（已存在或失败）` : ""}`);
+      setAutoOpen(false);
+      autoForm.resetFields();
+      setPreviewValues([]);
+      reload();
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -799,6 +885,22 @@ function MembersTab() {
 
   return (
     <div>
+      {/* 维度值说明：区分「维度的取值」与「系统用户账号」，避免概念混淆 */}
+      <div
+        style={{
+          marginBottom: 12,
+          padding: "8px 12px",
+          background: "var(--bg-elevated, #fafafa)",
+          border: "1px solid var(--line-soft, #eef1f5)",
+          borderRadius: 6,
+          fontSize: 13,
+          color: "var(--text-2)",
+        }}
+      >
+        维度值 = 该维度允许的<b>业务取值集合</b>（如「渠道」维度的值：线上 / 线下 / 小程序），
+        用于指标按此维度分组/过滤时校验合法性。这里管理的<b>不是系统用户账号</b>，
+        而是维度自身的枚举取值，可手动新增或从数据源表列自动导入。
+      </div>
       <Space style={{ marginBottom: 12 }}>
         <Select
           placeholder="选择维度"
@@ -807,7 +909,19 @@ function MembersTab() {
           onChange={setDimCode}
           options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}
         />
-        <Button icon={<PlusOutlined />} disabled={!dimCode} onClick={() => setModalOpen(true)}>新增成员</Button>
+        <Button icon={<PlusOutlined />} disabled={!dimCode} onClick={() => setModalOpen(true)}>新增值</Button>
+        <Button
+          icon={<DatabaseOutlined />}
+          disabled={!dimCode}
+          onClick={() => {
+            autoForm.resetFields();
+            setPreviewValues([]);
+            setPreviewTruncated(false);
+            setAutoOpen(true);
+          }}
+        >
+          从表自动获取
+        </Button>
       </Space>
       <Table
         dataSource={buildMemberTree(members)}
@@ -871,6 +985,110 @@ function MembersTab() {
           </Form.Item>
           <PathPreview form={form} members={members} />
         </Form>
+      </Modal>
+
+      {/* 从表自动获取枚举值：选数据源→表→列，拉取去重值预览后批量导入为维度值 */}
+      <Modal
+        title={`从表自动获取维度值 → ${dimCode ?? ""}`}
+        open={autoOpen}
+        onCancel={() => {
+          setAutoOpen(false);
+          autoForm.resetFields();
+          setPreviewValues([]);
+        }}
+        width={640}
+        footer={null}
+      >
+        <Form
+          form={autoForm}
+          layout="vertical"
+          onFinish={handlePreview}
+          style={{ marginTop: 8 }}
+          initialValues={{ limit: 200 }}
+        >
+          <Form.Item
+            label="数据源"
+            name="source_id"
+            rules={[{ required: true, message: "请选择数据源" }]}
+          >
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择数据源（须已注册）"
+              options={dataSources.map((s) => ({
+                value: s.source_id,
+                label: `${s.name}（${s.source_id}）`,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item
+            label="表名"
+            name="table"
+            extra={<span className="muted" style={{ fontSize: 12 }}>可带库前缀，如 dwd.sales</span>}
+            rules={[
+              { required: true, message: "请输入表名" },
+              { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$/, message: "表名不合法" },
+            ]}
+          >
+            <Input className="mono" placeholder="如 dwd.sales" />
+          </Form.Item>
+          <Form.Item
+            label="列名"
+            name="column"
+            rules={[
+              { required: true, message: "请输入列名" },
+              { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*$/, message: "列名不合法" },
+            ]}
+          >
+            <Input className="mono" placeholder="如 channel" />
+          </Form.Item>
+          <Form.Item>
+            <Space>
+              <Button type="primary" htmlType="submit" loading={autoLoading} icon={<DatabaseOutlined />}>
+                拉取去重值
+              </Button>
+              <span className="muted" style={{ fontSize: 12 }}>
+                将执行 <code className="mono">SELECT DISTINCT</code> 读取该列全部取值
+              </span>
+            </Space>
+          </Form.Item>
+        </Form>
+
+        {previewValues.length > 0 && (
+          <div>
+            <Divider style={{ margin: "12px 0" }} />
+            <div style={{ marginBottom: 8 }}>
+              <span className="muted">已获取 {previewValues.length} 个去重值</span>
+              {previewTruncated && (
+                <Tag color="orange" style={{ marginLeft: 8 }}>结果已达上限，可能不完整</Tag>
+              )}
+            </div>
+            <div
+              style={{
+                maxHeight: 200,
+                overflow: "auto",
+                border: "1px solid var(--line, #e3e7ee)",
+                borderRadius: 6,
+                padding: 8,
+                marginBottom: 12,
+              }}
+            >
+              {previewValues.map((v) => (
+                <Tag key={v} className="mono" style={{ marginBottom: 4 }}>
+                  {v}
+                </Tag>
+              ))}
+            </div>
+            <Button
+              type="primary"
+              loading={importing}
+              onClick={handleImportValues}
+              icon={<PlusOutlined />}
+            >
+              导入全部为维度值
+            </Button>
+          </div>
+        )}
       </Modal>
 
       <Modal
@@ -1028,6 +1246,29 @@ function MappingsTab() {
 
   return (
     <div>
+      {/* 维度映射说明 + 示例引导：解释映射解决什么问题、如何用 */}
+      <div
+        style={{
+          marginBottom: 12,
+          padding: "10px 12px",
+          background: "var(--bg-elevated, #fafafa)",
+          border: "1px solid var(--line-soft, #eef1f5)",
+          borderRadius: 6,
+          fontSize: 13,
+          color: "var(--text-2)",
+          lineHeight: 1.7,
+        }}
+      >
+        <b>维度映射</b>表达不同系统间<b>维度取值的对应关系</b>——同一业务概念在不同系统里编码不同，
+        指标跨系统对账时需要知道它们等价。
+        <br />
+        <span className="muted">
+          示例：业务库维度 <code className="mono">channel</code>（取值 app / web） ↔ 数仓维度{" "}
+          <code className="mono">渠道</code>（取值 APP / PC）。
+          创建一条 <Tag color="success">等价</Tag> 映射（source=channel, target=渠道），即可让指标在
+          「渠道」维度上正确对账。
+        </span>
+      </div>
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建映射</Button>
       </div>
@@ -1053,7 +1294,11 @@ function MappingsTab() {
               options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}
             />
           </Form.Item>
-          <Form.Item name="mapping_type" label="映射类型">
+          <Form.Item
+            name="mapping_type"
+            label="映射类型"
+            extra={<span className="muted" style={{ fontSize: 12 }}>等价 = 源/目标取值一一对应（如 app↔APP）；部分 = 存在一对多或需表达式换算</span>}
+          >
             <Select options={[{ value: "EQUIVALENT", label: "等价" }, { value: "PARTIAL", label: "部分" }]} />
           </Form.Item>
           <Form.Item name="expression" label="映射表达式">
@@ -1074,7 +1319,11 @@ function MappingsTab() {
         confirmLoading={editSaving}
       >
         <Form form={editForm} layout="vertical" onFinish={handleEditMapping} style={{ marginTop: 8 }}>
-          <Form.Item name="mapping_type" label="映射类型">
+          <Form.Item
+            name="mapping_type"
+            label="映射类型"
+            extra={<span className="muted" style={{ fontSize: 12 }}>等价 = 源/目标取值一一对应（如 app↔APP）；部分 = 存在一对多或需表达式换算</span>}
+          >
             <Select options={[{ value: "EQUIVALENT", label: "等价" }, { value: "PARTIAL", label: "部分" }]} />
           </Form.Item>
           <Form.Item name="expression" label="映射表达式">
@@ -1177,6 +1426,28 @@ function ReconciliationsTab() {
 
   return (
     <div>
+      {/* 对账用途说明：对比语义端与应用端口径是否一致，保证数据可信 */}
+      <div
+        style={{
+          marginBottom: 12,
+          padding: "10px 12px",
+          background: "var(--bg-elevated, #fafafa)",
+          border: "1px solid var(--line-soft, #eef1f5)",
+          borderRadius: 6,
+          fontSize: 13,
+          color: "var(--text-2)",
+          lineHeight: 1.7,
+        }}
+      >
+        <b>口径对账</b>用于校验<b>同一指标在"语义端"与"业务端"计算口径是否一致</b>——
+        防止指标定义与业务实际执行发生漂移（如语义端口径改了、业务端还是旧的）。
+        <br />
+        <span className="muted">
+          提交后由治理人员在「待复核」中通过（口径一致）或驳回（存在漂移需修正）。
+          状态含义：<Tag color="warning">待复核</Tag>等待治理确认 ·{" "}
+          <Tag color="success">已通过</Tag>口径一致 · <Tag color="error">已驳回</Tag>存在漂移。
+        </span>
+      </div>
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
         <Button type="primary" icon={<SendOutlined />} onClick={() => setModalOpen(true)}>提交对账</Button>
       </div>
@@ -1213,7 +1484,11 @@ export function Dimensions() {
 
   const tabItems = [
     { key: "dims", label: "维度列表", children: <DimensionsTab /> },
-    { key: "members", label: "成员管理", children: <MembersTab /> },
+    {
+      key: "members",
+      label: "维度值管理",
+      children: <MembersTab />,
+    },
     { key: "mappings", label: "维度映射", children: <MappingsTab /> },
     { key: "reconcile", label: "对账记录", children: <ReconciliationsTab /> },
   ];

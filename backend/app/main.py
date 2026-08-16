@@ -221,6 +221,8 @@ _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "catalog_schema_drifted",
     "lineage_parsed",
     "lineage_ingested",
+    # 血缘变更影响（semantic/service.py 变更指标血缘时发布，标题映射见 notify/service.py）
+    "lineage.change_impacted",
     # 采集定向通知（collector/service.py 经 notify_user 直发源 Owner，模板注册）
     "catalog.deprecated",
     "collect.degraded",

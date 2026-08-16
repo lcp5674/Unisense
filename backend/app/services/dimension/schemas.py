@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DimensionCreate(BaseModel):
@@ -19,6 +19,14 @@ class DimensionCreate(BaseModel):
 
 
 class DimensionUpdate(BaseModel):
+    # 编辑可改编码（仅 DRAFT 状态允许，PUBLISHED/DEPRECATED 由 service 层拦截）；
+    # 格式与创建时一致（小写字母/数字/下划线，且不以数字开头）。
+    dim_code: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_]*$",
+        max_length=64,
+        description="维度编码（可选，DRAFT 可改，已发布/已废弃禁止）",
+    )
     name: str | None = None
     domain: str | None = None
     type: str | None = None
@@ -221,3 +229,20 @@ class ReconciliationResponse(BaseModel):
             metric_code=getattr(m, "metric_code", None),
             metric_name=getattr(m, "metric_name", None),
         )
+
+
+class PreviewValuesRequest(BaseModel):
+    """从数据源表列拉取去重枚举值（维度值自动获取）。"""
+
+    source_id: str = Field(..., max_length=128, description="数据源 ID")
+    table: str = Field(..., max_length=256, description="表名（可带库前缀，如 dwd.sales）")
+    column: str = Field(..., max_length=256, description="列名")
+    limit: int = Field(default=200, ge=1, le=1000, description="去重值上限")
+
+
+class PreviewValuesResponse(BaseModel):
+    """表列去重枚举值预览结果。"""
+
+    values: list[str] = Field(default_factory=list, description="去重后的枚举值")
+    total: int = Field(default=0, description="实际获取条数")
+    truncated: bool = Field(default=False, description="是否因达到 limit 被截断（结果不完整）")
