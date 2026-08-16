@@ -649,6 +649,7 @@ export function MetricCreate() {
       llm_prefill: Boolean(values.llm_prefill),
       dimension_mapping: dimensionMapping,
     };
+    setBatchResult(null);
     setBatchSubmitting(true);
     try {
       const result = await batchRegisterMetrics(req);
