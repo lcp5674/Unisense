@@ -65,8 +65,8 @@ class ConflictListParams(BaseModel):
     status: ConflictStatus | None = None
     type: ConflictType | None = None
     domain: str | None = None
-    page: int = 1
-    page_size: int = 20
+    page: int = Field(1, ge=1)
+    page_size: int = Field(20, ge=1, le=200)
 
 
 class ConflictResponse(BaseModel):
