@@ -1009,7 +1009,7 @@ export function MetricDetail() {
                 编辑描述
               </Button>
             )}
-            {canInferDesc ? (
+            {canInferDesc && !piiMasked ? (
               <Button
                 size="small"
                 icon={<RobotOutlined />}
