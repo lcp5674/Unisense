@@ -284,7 +284,7 @@ function ArchivedDetailPanel({
           {domainName(m.domain)}
           {domainInactive(m.domain) && <Tag style={{ marginLeft: 6 }} color="default">已停用</Tag>}
         </Descriptions.Item>
-        <Descriptions.Item label="粒度">{m.granularity}</Descriptions.Item>
+        <Descriptions.Item label="粒度">{GRANULARITY_LABEL[m.granularity] ?? m.granularity}</Descriptions.Item>
         <Descriptions.Item label="指标类型">{METRIC_TYPE_LABEL[m.type] ?? m.type}</Descriptions.Item>
         <Descriptions.Item label="状态">
           <Tag color="orange">已作废</Tag>
