@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm, Divider } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm, Divider, Tooltip } from "antd";
 import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, DatabaseOutlined } from "@ant-design/icons";
 import {
   listDimensions,
@@ -1081,9 +1081,14 @@ function MembersTab() {
             width: 160,
             render: (_: unknown, m: DimensionMember) => (
               <Space size={4} wrap>
-                {can("dimension:edit") && (
-                  <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(m)}>编辑</Button>
-                )}
+                {can("dimension:edit") &&
+                  (m.status === "DEPRECATED" ? (
+                    <Tooltip title="已废弃成员为终态，不可编辑">
+                      <Button size="small" icon={<EditOutlined />} disabled>编辑</Button>
+                    </Tooltip>
+                  ) : (
+                    <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(m)}>编辑</Button>
+                  ))}
                 {can("dimension:edit") && (
                   <Popconfirm
                     title="删除该成员？"
@@ -1252,10 +1257,21 @@ function MembersTab() {
           <Form.Item name="member_name" label="成员名称" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Form.Item name="parent_code" label="父级编码" extra={<span className="muted" style={{ fontSize: 12 }}>清空则置为根成员，层级路径自动重算</span>}>
+          <Form.Item
+            name="parent_code"
+            label="父级编码"
+            extra={
+              <span className="muted" style={{ fontSize: 12 }}>
+                {editTarget?.status === "PUBLISHED"
+                  ? "已发布成员不可变更父级（层级为下游权威来源，须先废弃重建）"
+                  : "清空则置为根成员，层级路径自动重算"}
+              </span>
+            }
+          >
             <Select
               allowClear
               showSearch
+              disabled={editTarget?.status === "PUBLISHED"}
               optionFilterProp="label"
               placeholder="选择父级成员"
               notFoundContent={members.length === 0 ? "当前维度暂无成员" : "无匹配成员"}
