@@ -440,6 +440,8 @@ export function MetricDetail() {
   const navigate = useNavigate();
   const location = useLocation();
   const [metric, setMetric] = useState<MetricResponse | null>(null);
+  // 主数据加载失败信息（区分「加载失败可重试」与「指标不存在」——网络/500 不应误导为不存在）
+  const [loadError, setLoadError] = useState<string | null>(null);
   // 主题域 code → 中文名 / 状态（供业务域展示中文名 + 停用标识，与目录页一致）
   const [domainMap, setDomainMap] = useState<Map<string, string>>(new Map());
   const [domainStatusMap, setDomainStatusMap] = useState<Map<string, string>>(new Map());
@@ -516,6 +518,7 @@ export function MetricDetail() {
     if (!code) return;
     setLoading(true);
     setArchived(null);
+    setLoadError(null);
     try {
       const [m, vs, me, favs, healthRes, userList, domainTree, subs, rel] = await Promise.all([
         getMetric(code),
@@ -584,7 +587,11 @@ export function MetricDetail() {
         return;
       }
       // eslint-disable-next-line no-alert
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
+      const reason = err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败，请稍后重试";
+      message.error(reason);
+      // 记录失败原因（非「指标不存在」的临时故障），供页面级失败态展示与重试
+      setMetric(null);
+      setLoadError(reason);
     } finally {
       setLoading(false);
     }
@@ -722,7 +729,14 @@ export function MetricDetail() {
     }
     return (
       <Card>
-        <Paragraph type="secondary">指标不存在</Paragraph>
+        {loadError ? (
+          <div style={{ padding: "24px 0", textAlign: "center" }}>
+            <Paragraph type="secondary">指标加载失败：{loadError}</Paragraph>
+            <Button type="primary" onClick={() => { setLoadError(null); void load(); }}>重试</Button>
+          </div>
+        ) : (
+          <Paragraph type="secondary">指标不存在</Paragraph>
+        )}
       </Card>
     );
   }

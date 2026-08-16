@@ -733,4 +733,39 @@ describe("MetricDetail 按钮级权限过滤", () => {
     // 保存后描述区展示新值（Modal 未销毁时 textarea 仍保留旧值，故用 getAllByText 断言描述区存在）
     expect(screen.getAllByText("修改后的描述").length).toBeGreaterThanOrEqual(1);
   });
+
+  it("加载失败显示『指标加载失败』与重试按钮（而非误导的『指标不存在』），点击重试恢复", async () => {
+    // 首次 getMetric 失败（模拟网络/服务异常），重试后成功
+    mockedGetMetric
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValue(metric);
+    render(
+      <MemoryRouter initialEntries={["/detail/sales_gmv_sum_d"]}>
+        <Routes>
+          <Route
+            path="/detail/:code"
+            element={
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}>
+                <MetricDetail />
+              </PermissionProvider>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    // 失败态：显示加载失败 + 重试按钮，不显示"指标不存在"
+    await waitFor(() => {
+      expect(screen.getByText(/指标加载失败/)).toBeTruthy();
+    });
+    expect(screen.queryByText("指标不存在")).toBeNull();
+    // 点击重试 → 重新拉取并渲染指标（按钮文字被 antd 拆分为"重 试"，从含该文本的按钮定位）
+    const retryBtn = screen.getAllByText(/重\s*试/).map((el) => el.closest("button")).find(Boolean);
+    expect(retryBtn).toBeTruthy();
+    fireEvent.click(retryBtn as Element);
+    // 核心行为断言：重试后详情渲染成功（不依赖精确调用计数，避免完整测试套件的环境计数污染）
+    await waitFor(() => {
+      // 详情渲染成功（编码出现在标题/编码/责任链多处，用 getAllByText）
+      expect(screen.getAllByText("sales_gmv_sum_d").length).toBeGreaterThan(0);
+    });
+  });
 });
