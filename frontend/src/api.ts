@@ -228,6 +228,7 @@ const ERROR_CODE_ZH: Record<string, string> = {
   INTERNAL_ERROR: "系统内部错误，请稍后重试",
   DEPENDENCY_UNPUBLISHED: "依赖指标尚未发布",
   CONFLICT: "存在冲突，需协商或裁决后继续",
+  METRIC_CODE_EXISTS: "指标编码已存在，请修改编码后重试",
   PII_REVIEW_REQUIRED: "该指标含个人信息，需先完成合规复核",
   GRANULARITY_VIOLATION: "查询粒度与指标定义不符",
   ADDITIVITY_VIOLATION: "查询可加性与指标定义不符",

@@ -315,7 +315,8 @@ class MetricService(BaseService):
         if existing is not None:
             raise ConflictError(
                 f"指标编码已存在: {request.metric_code}",
-                ctx={"code": "CONFLICT", "metric_code": request.metric_code},
+                error_code="METRIC_CODE_EXISTS",
+                ctx={"code": "METRIC_CODE_EXISTS", "metric_code": request.metric_code},
             )
 
         # ---- 字典校验 + 自动推断（对齐 spec FR-008/FR-009/FR-011）----
