@@ -461,7 +461,7 @@ async def _issue_quickbi_ticket(
     if not is_feature_enabled_or_default("quickbi"):
         raise AuthError(
             "QuickBI 报表嵌入能力已被平台管理员关闭",
-            error_code="FORBIDDEN",
+            error_code="FEATURE_DISABLED",
             ctx={"feature_flag": "quickbi"},
         )
 

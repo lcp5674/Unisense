@@ -1100,7 +1100,7 @@ async def emergency_publish_metric(
     if not is_feature_enabled_or_default("emergency_publish"):
         raise AuthError(
             "紧急发布能力已被平台管理员关闭，请走常规评审发布流程",
-            error_code="FORBIDDEN",
+            error_code="FEATURE_DISABLED",
             ctx={"feature_flag": "emergency_publish"},
         )
     service = MetricService(db)

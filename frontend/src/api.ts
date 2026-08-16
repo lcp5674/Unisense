@@ -211,6 +211,7 @@ const ERROR_CODE_ZH: Record<string, string> = {
   AUTH_APIKEY_MISSING: "缺少访问密钥（X-Api-Key）",
   AUTH_APIKEY_INVALID: "访问密钥无效或已吊销",
   FORBIDDEN: "您无权执行该操作",
+  FEATURE_DISABLED: "该功能已被平台管理员关闭，请走常规流程",
   FORBIDDEN_DOMAIN: "您无权访问该数据域",
   FORBIDDEN_METRIC: "您无权访问该指标",
   FORBIDDEN_DIMENSION: "您无权访问该维度",

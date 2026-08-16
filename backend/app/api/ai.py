@@ -59,7 +59,7 @@ async def nl2sql(
     if not is_feature_enabled_or_default("ai.nl2sql"):
         raise AuthError(
             "AI 问数能力已被平台管理员关闭",
-            error_code="FORBIDDEN",
+            error_code="FEATURE_DISABLED",
             ctx={"feature_flag": "ai.nl2sql"},
         )
     cfg = LlmConfigService(db)
