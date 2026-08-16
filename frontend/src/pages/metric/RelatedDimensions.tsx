@@ -6,9 +6,9 @@ import type { MetricDimension } from "../../types";
 
 // 指标-维度绑定角色中文标签（对齐后端 MetricDimensionRole 枚举，与 Dimensions.tsx 保持一致）
 const ROLE_LABEL: Record<string, string> = {
-  PARTITION: "PARTITION 分区",
-  SPLICE: "SPLICE 拼接",
-  FILTER: "FILTER 过滤",
+  PARTITION: "分区",
+  SPLICE: "拼接",
+  FILTER: "过滤",
 };
 
 const ROLE_COLOR: Record<string, string> = {
