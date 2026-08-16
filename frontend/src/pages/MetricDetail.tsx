@@ -706,6 +706,15 @@ export function MetricDetail() {
   // （乐观锁 row_version + 变更原因必填）。DRAFT/REVIEW 草稿借此可修改后重提。
   function openEdit() {
     if (!metric) return;
+    // 遗留值兜底：存量指标的粒度/单位可能是字典未收录的历史值（如 granularity="daily"），
+    // 若不在选项中将作为兜底选项加入——避免 Select 显示空、保存时被静默清空（数据丢失）。
+    const ensureInOptions = (
+      opts: Array<{ value: string; label: string }>,
+      val: string | undefined,
+    ) =>
+      val && !opts.some((o) => o.value === val) ? [{ value: val, label: val }, ...opts] : opts;
+    setEditGranularityOptions((prev) => ensureInOptions(prev, metric.granularity));
+    setEditUnitOptions((prev) => ensureInOptions(prev, metric.unit));
     const def = metric.definition_json ?? {};
     const rawDims = Array.isArray(def.dimensions) ? def.dimensions.map((d) => String(d)) : [];
     editForm.setFieldsValue({
