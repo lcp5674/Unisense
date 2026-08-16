@@ -383,6 +383,11 @@ export function MetricCreate() {
     const domainCode = value[value.length - 1];
     setSelectedDomain(domainCode);
     if (!domainCode) return;
+    // 切换域先清空上一域的推断建议（编码/字段徽标/口径定义预览），
+    // 避免推断失败时残留旧域建议导致提交用错域的自动生成编码
+    setSuggestedCode(null);
+    setInferred({});
+    setInferredDefinition({ json: null, mode: null });
     setSuggesting(true);
     try {
       const sourceTable = form.getFieldValue("source_table");
