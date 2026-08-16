@@ -38,6 +38,7 @@ function dictToOptions(items: Array<{ code: string; label: string; status: strin
 
 export function Templates() {
   const [searchParams] = useSearchParams();
+  const { can } = usePermission();
   // URL 直达参数（?kw=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
   // 启用状态下钻（?is_active=，总览仪表「指标模板」资产卡片）作为初始筛选；
@@ -63,7 +64,6 @@ export function Templates() {
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
   const { track } = useTracking();
-  const { can } = usePermission();
   // 实例化弹窗选项：域树 + 粒度/单位字典（对齐注册指标页惰性选择，避免手输漂移）
   const [domainOptions, setDomainOptions] = useState<any[]>([]);
   const [granularityOptions, setGranularityOptions] = useState<Array<{ value: string; label: string }>>([]);
