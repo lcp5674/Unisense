@@ -55,28 +55,28 @@ const RECON_STATUS_LABEL: Record<string, string> = {
   APPROVED: "已通过",
   REJECTED: "已驳回",
 };
-// 指标-维度绑定角色中文标签（对齐后端 MetricDimensionRole 枚举）
+// 指标-维度绑定角色中文标签（对齐后端 MetricDimensionRole 枚举，业务术语化：中文优先 + 英文溯源）
 const ROLE_LABEL: Record<string, string> = {
-  PARTITION: "PARTITION 分区",
-  SPLICE: "SPLICE 拼接",
-  FILTER: "FILTER 过滤",
+  PARTITION: "分区",
+  SPLICE: "拼接",
+  FILTER: "过滤",
 };
 
-// 缓慢变化维类型全集（对齐后端 DimensionType 枚举：SCD0-SCD6）
+// 缓慢变化维类型全集（对齐后端 DimensionType 枚举：SCD0-SCD6，业务术语化：中文优先 + 英文溯源）
 const SCD_TYPE_OPTIONS = [
-  { value: "SCD0", label: "SCD0 原样保留" },
-  { value: "SCD1", label: "SCD1 覆盖旧值" },
-  { value: "SCD2", label: "SCD2 保留历史" },
-  { value: "SCD3", label: "SCD3 有限历史" },
-  { value: "SCD4", label: "SCD4 历史表" },
-  { value: "SCD6", label: "SCD6 混合" },
+  { value: "SCD0", label: "原样保留 (SCD0)" },
+  { value: "SCD1", label: "覆盖旧值 (SCD1)" },
+  { value: "SCD2", label: "保留历史 (SCD2)" },
+  { value: "SCD3", label: "有限历史 (SCD3)" },
+  { value: "SCD4", label: "历史表 (SCD4)" },
+  { value: "SCD6", label: "混合 (SCD6)" },
 ];
 
-// 指标-维度关联角色（对齐后端 MetricDimensionRole 枚举）
+// 指标-维度关联角色（对齐后端 MetricDimensionRole 枚举，业务术语化：中文优先 + 英文溯源）
 const ROLE_OPTIONS = [
-  { value: "PARTITION", label: "PARTITION 分区" },
-  { value: "SPLICE", label: "SPLICE 拼接" },
-  { value: "FILTER", label: "FILTER 过滤" },
+  { value: "PARTITION", label: "分区 (PARTITION)" },
+  { value: "SPLICE", label: "拼接 (SPLICE)" },
+  { value: "FILTER", label: "过滤 (FILTER)" },
 ];
 
 // 递归展平主题域树 → code → 中文名映射（业务域选项框用）

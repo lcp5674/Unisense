@@ -443,7 +443,7 @@ describe("Dimensions 页面", () => {
       expect(listDimensionMetrics).toHaveBeenCalledWith("dim_channel");
     });
     expect(await screen.findByText("sales_gmv")).toBeInTheDocument();
-    expect(screen.getByText(/PARTITION 分区/)).toBeInTheDocument();
+    expect(screen.getByText(/分区/)).toBeInTheDocument();
     expect(screen.getByText(/成交额/)).toBeInTheDocument();
   });
 
