@@ -189,6 +189,7 @@ const PAYLOAD_FIELD_LABEL_FE: Record<string, string> = {
   pii_columns: "敏感字段",
   reviewer_id: "审核人ID",
   reviewer: "审核人",
+  resolver_id: "处理人",
   // 反馈类
   feedback_id: "反馈编号",
   comment: "反馈内容",
@@ -326,7 +327,11 @@ function formatNotifyBody(body: string | null): string {
 // 策略：payload 字段优先（保留原始类型做枚举/时间/数组渲染，值更友好）；
 // body 文本补充——自然语言整行保留展示，结构化行若字段未被 payload 覆盖则补充，
 // 已知英文 key 做二次中文映射。
-function parseNotifyBodyFields(body: string | null, payload: Record<string, unknown> | null): { label: string; value: string }[] {
+function parseNotifyBodyFields(
+  body: string | null,
+  payload: Record<string, unknown> | null,
+  templateCode?: string | null,
+): { label: string; value: string }[] {
   const fields: { label: string; value: string }[] = [];
   const seenLabels = new Set<string>();
   if (payload && Object.keys(payload).length > 0) {
@@ -343,15 +348,23 @@ function parseNotifyBodyFields(body: string | null, payload: Record<string, unkn
       "resolver_id",
     ]);
     for (const [k, v] of Object.entries(payload)) {
-      if (skipKeys.has(k)) continue;
-      if (v === null || v === undefined) continue;
       const label = PAYLOAD_FIELD_LABEL_FE[k] ?? k;
+      if (skipKeys.has(k)) {
+        seenLabels.add(label); // 标记已处理，避免 body 重复补回
+        continue;
+      }
+      if (v === null || v === undefined) continue;
       const value = humanizeFeValue(k, v);
-      if (value === "" || value === "无") continue;
+      if (value === "" || value === "无") {
+        seenLabels.add(label);
+        continue;
+      }
       fields.push({ label, value });
       seenLabels.add(label);
     }
   }
+  // 反馈通知：comment 已在 payload 剥离历史，body 不再补充（避免重复/残留）
+  if (templateCode && templateCode.startsWith("feedback.")) return fields;
   const text = formatNotifyBody(body);
   if (text) {
     for (const line of text.split("\n")) {
@@ -366,7 +379,9 @@ function parseNotifyBodyFields(body: string | null, payload: Record<string, unkn
           seenLabels.add(label);
         }
       } else if (line !== "") {
-        fields.push({ label: "", value: line }); // 自然语言整行
+        // 自然语言整行：剥离反馈历史（[时间戳] status=...）后保留
+        const cleaned = cleanFeedbackComment(line);
+        if (cleaned) fields.push({ label: "", value: cleaned });
       }
     }
   }
@@ -631,7 +646,7 @@ function NotifListTab() {
           <div className="notif-stream">
             {items.map((n) => {
               const statusKey = n.status ?? "";
-              const fields = parseNotifyBodyFields(n.body, n.payload);
+              const fields = parseNotifyBodyFields(n.body, n.payload, n.template_code);
               const singleLine = fields.length <= 1;
               const unread = !n.read_at;
               return (
