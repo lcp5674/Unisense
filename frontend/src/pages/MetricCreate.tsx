@@ -794,7 +794,7 @@ export function MetricCreate() {
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="granularity" label={<span>粒度{fieldBadge("granularity")}</span>}>
+                  <Form.Item name="granularity" label={<span>粒度{fieldBadge("granularity")}</span>} rules={[{ required: true, message: "请选择粒度" }]}>
                     {dictSelect("granularity", "granularity", "选择粒度")}
                   </Form.Item>
                 </Col>
@@ -807,17 +807,17 @@ export function MetricCreate() {
 
               <Row gutter={16}>
                 <Col span={8}>
-                  <Form.Item name="aggregation" label={<span>聚合{fieldBadge("aggregation")}</span>}>
+                  <Form.Item name="aggregation" label={<span>聚合{fieldBadge("aggregation")}</span>} rules={[{ required: true, message: "请选择聚合方式" }]}>
                     {dictSelect("aggregation", "aggregation", "选择聚合方式")}
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="time_semantics" label={<span>时间语义{fieldBadge("time_semantics")}</span>}>
+                  <Form.Item name="time_semantics" label={<span>时间语义{fieldBadge("time_semantics")}</span>} rules={[{ required: true, message: "请选择时间语义" }]}>
                     {dictSelect("time_semantics", "time_semantics", "选择时间语义")}
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="freshness" label={<span>新鲜度{fieldBadge("freshness")}</span>}>
+                  <Form.Item name="freshness" label={<span>新鲜度{fieldBadge("freshness")}</span>} rules={[{ required: true, message: "请选择新鲜度" }]}>
                     {dictSelect("freshness", "freshness", "选择新鲜度")}
                   </Form.Item>
                 </Col>
@@ -825,7 +825,7 @@ export function MetricCreate() {
 
               <Row gutter={16}>
                 <Col span={8}>
-                  <Form.Item name="dw_layer" label={<span>数仓层{fieldBadge("dw_layer")}</span>}>
+                  <Form.Item name="dw_layer" label={<span>数仓层{fieldBadge("dw_layer")}</span>} rules={[{ required: true, message: "请选择数仓层" }]}>
                     {dictSelect("dw_layer", "dw_layer", "选择数仓层")}
                   </Form.Item>
                 </Col>
