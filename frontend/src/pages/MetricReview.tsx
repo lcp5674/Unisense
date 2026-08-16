@@ -155,8 +155,11 @@ export function MetricReview() {
   }
 
   useEffect(() => {
-    load();
     fetchCurrentUser().then(setCurrentUser).catch(() => {});
+    // 「我审过的」视角依赖 currentUser 过滤：未就绪时不发无 approver 过滤的全量首查
+    // （此前会在 mount 时多发一次全量请求，虽被 loadSeq 丢弃但不产生无意义查询）
+    if (view === "reviewed" && !currentUser) return;
+    load();
     listUsers()
       .then((u) => setUserMap(new Map(u.map((x) => [x.id, x.display_name || x.username]))))
       .catch(() => {});
