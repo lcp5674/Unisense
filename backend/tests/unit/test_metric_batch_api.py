@@ -120,6 +120,36 @@ async def test_batch_approve_mixed_results(client):
     assert "合规" in by_code["pii_metric"]["message"]
 
 
+async def test_batch_approve_audit_includes_failed_codes(client):
+    """批量审计 detail 含失败明细（编码+原因），合规可逐条追溯。"""
+    with (
+        patch("app.api.metrics.MetricService") as mock_svc,
+        patch("app.api.metrics.write_audit") as mock_audit,
+    ):
+        instance = mock_svc.return_value
+        published = make_metric(status="PUBLISHED")
+
+        async def fake_approve(code, request, **kwargs):
+            if code == "pii_metric":
+                raise BusinessError("PII 指标须先通过合规审核", error_code="COMPLIANCE_BLOCKED")
+            return published
+
+        instance.approve_metric = AsyncMock(side_effect=fake_approve)
+
+        with _as_reviewer():
+            resp = await client.post(
+                "/api/v1/metric-definitions/batch-approve",
+                json={"metric_codes": ["sales_gmv_daily", "pii_metric"], "mode": "standard"},
+            )
+
+    assert resp.status_code == 200
+    assert mock_audit.called
+    detail = mock_audit.call_args.kwargs["detail"]
+    assert "failed_codes" in detail
+    assert any("pii_metric" in fc and "合规" in fc for fc in detail["failed_codes"])
+    assert detail["ok"] == 1
+
+
 async def test_batch_reject_mixed_results(client):
     """批量打回：逐条收集，成功与失败并存。"""
     with patch("app.api.metrics.MetricService") as mock_svc:

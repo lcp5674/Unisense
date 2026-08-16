@@ -1377,6 +1377,11 @@ def _batch_response(results: list[MetricBatchItemResult]) -> MetricBatchResponse
     )
 
 
+def _batch_failed_codes(results: list[MetricBatchItemResult]) -> list[str]:
+    """批量操作的失败明细（编码+原因），供审计逐条追溯；截断 20 条防审计膨胀。"""
+    return [f"{r.metric_code}: {r.message}" for r in results if not r.ok][:20]
+
+
 @router.post(
     "/batch-submit",
     response_model=ApiResponse[MetricBatchResponse],
@@ -1418,7 +1423,11 @@ async def batch_submit_metrics(
         action="BATCH_SUBMIT",
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.items)}",
-        detail={"ok": sum(1 for r in results if r.ok), "fail": sum(1 for r in results if not r.ok)},
+        detail={
+            "failed_codes": _batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+            "fail": sum(1 for r in results if not r.ok),
+        },
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
@@ -1462,7 +1471,11 @@ async def batch_approve_metrics(
         action="BATCH_APPROVE",
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.metric_codes)}",
-        detail={"mode": request.mode, "ok": sum(1 for r in results if r.ok)},
+        detail={
+            "mode": request.mode,
+            "failed_codes": _batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
@@ -1504,7 +1517,10 @@ async def batch_reject_metrics(
         action="BATCH_REJECT",
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.metric_codes)}",
-        detail={"ok": sum(1 for r in results if r.ok)},
+        detail={
+            "failed_codes": _batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
@@ -1548,7 +1564,10 @@ async def batch_deprecate_metrics(
         action="BATCH_DEPRECATE",
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.items)}",
-        detail={"ok": sum(1 for r in results if r.ok)},
+        detail={
+            "failed_codes": _batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
