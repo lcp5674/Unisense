@@ -230,6 +230,27 @@ describe("MetricCatalog", () => {
     });
   });
 
+  it("有筛选时的空态给出「清除筛选」而非创建引导", async () => {
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
+    // 用 ?status=DRAFT 直达制造"有筛选但无结果"状态
+    render(
+      <MemoryRouter initialEntries={["/catalog?status=DRAFT"]}>
+        <Routes>
+          <Route path="/catalog" element={<MetricCatalog />} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("清除筛选")).toBeTruthy();
+    });
+    // 清除筛选后恢复创建引导（断言按钮切换回创建/模板）
+    fireEvent.click(screen.getByText("清除筛选"));
+    await waitFor(() => {
+      expect(screen.getAllByText("创建指标").length).toBeGreaterThan(0);
+    });
+  });
+
   it("从生命周期信号条 ?status=DRAFT 直达：所有查询都携带状态过滤（避免全量首查竞态覆盖）", async () => {
     mockedList.mockResolvedValue({ items: [metric], total: 2, page: 1, page_size: 20 });
     render(

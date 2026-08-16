@@ -322,9 +322,13 @@ export function MetricCatalog() {
     () => (code: string) => (code ? (domainMap.get(code) ?? code) : "—"),
     [domainMap],
   );
-  // 域筛选下拉选项也使用中文名
+  // 域筛选下拉选项也使用中文名；dashboard 域集合与 domain_tree 不一致时兜底保留原 code（避免空 label）
   const domainFilterOptions = useMemo(
-    () => domainOptions.map((d) => ({ value: d.value, label: domainName(d.value) })),
+    () =>
+      domainOptions.map((d) => ({
+        value: d.value,
+        label: domainName(d.value) || d.value,
+      })),
     [domainOptions, domainName],
   );
 
@@ -695,14 +699,34 @@ export function MetricCatalog() {
   const emptyGuide = useMemo(
     () => (
       <div style={{ padding: "16px 0", textAlign: "center" }}>
-        <p className="muted">{hasFilter ? "没有匹配的指标，试试放宽筛选条件" : "目录还是空的，创建第一个指标或从模板开始"}</p>
+        <p className="muted">{hasFilter ? "没有匹配的指标，试试放宽或清除筛选条件" : "目录还是空的，创建第一个指标或从模板开始"}</p>
         <Space>
-          <Button type="primary" icon={<PlusCircleOutlined />} onClick={() => navigate("/create")}>
-            创建指标
-          </Button>
-          <Button icon={<FileTextOutlined />} onClick={() => navigate("/templates")}>
-            从模板创建
-          </Button>
+          {hasFilter ? (
+            <Button icon={<ColumnWidthOutlined />} onClick={() => {
+              setKeyword("");
+              setStatus("");
+              setDomain("");
+              setTier("");
+              setLifecycleFilter(null);
+              setLifecycleDate({});
+              setMyMetricsOnly(false);
+              setFavoritesOnly(false);
+              setSortBy("updated_at");
+              setSortOrder("desc");
+              setPage(1);
+            }}>
+              清除筛选
+            </Button>
+          ) : (
+            <>
+              <Button type="primary" icon={<PlusCircleOutlined />} onClick={() => navigate("/create")}>
+                创建指标
+              </Button>
+              <Button icon={<FileTextOutlined />} onClick={() => navigate("/templates")}>
+                从模板创建
+              </Button>
+            </>
+          )}
         </Space>
       </div>
     ),
@@ -716,7 +740,7 @@ export function MetricCatalog() {
           <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
             返回
           </Button>
-          <div className="page-kicker">Assets / Catalog</div>
+          <div className="page-kicker">指标资产 / 指标目录</div>
           <h2>指标目录</h2>
           <p>全量指标定义——按状态/域/分级/关键词检索；展开行查看口径与治理追溯。</p>
         </div>
