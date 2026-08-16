@@ -850,4 +850,17 @@ describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
     fireEvent.click(await screen.findByRole("button", { name: /恢复/ }));
     await waitFor(() => expect(restoreMock).toHaveBeenCalledWith(metric.metric_code));
   });
+
+  it("DRAFT 且存在 reject_reason 时状态列显示「被驳回」标识（FR-005 可追溯）", async () => {
+    mockedList.mockResolvedValue({
+      items: [{ ...metric, status: "DRAFT", reject_reason: "粒度与口径不符，请修正" }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    expect(screen.getByText("被驳回")).toBeInTheDocument();
+  });
+
 });
