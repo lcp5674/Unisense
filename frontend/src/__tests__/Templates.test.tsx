@@ -141,7 +141,7 @@ const TPLS: MetricTemplate[] = [
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockedList.mockResolvedValue(TPLS);
+  mockedList.mockResolvedValue({ items: TPLS, total: TPLS.length });
   mockedListFavorites.mockResolvedValue([]);
   mockedDomainTree.mockResolvedValue([]);
   mockedDictItems.mockResolvedValue([]);
@@ -209,14 +209,14 @@ describe("Templates 页面", () => {
   });
 
   it("防竞态：迟到的首查响应不覆盖最新筛选结果", async () => {
-    let resolveFull!: (v: MetricTemplate[]) => void;
-    const fullPromise = new Promise<MetricTemplate[]>((r) => {
+    let resolveFull!: (v: { items: MetricTemplate[]; total: number }) => void;
+    const fullPromise = new Promise<{ items: MetricTemplate[]; total: number }>((r) => {
       resolveFull = r;
     });
     // 首查（挂起）；随后输入关键词触发二次查询立即返回 1 条；兜底返回全量 2 条
     mockedList.mockImplementationOnce(() => fullPromise);
-    mockedList.mockResolvedValueOnce([TPLS[0]]);
-    mockedList.mockResolvedValue(TPLS);
+    mockedList.mockResolvedValueOnce({ items: [TPLS[0]], total: 1 });
+    mockedList.mockResolvedValue({ items: TPLS, total: TPLS.length });
 
     render(
       <MemoryRouter>
@@ -231,7 +231,7 @@ describe("Templates 页面", () => {
     await screen.findByText("tpl_gmv_daily");
 
     // 迟到的首查此刻才返回：若被应用会覆盖筛选结果（tpl_aov_weekly 也会出现）
-    resolveFull(TPLS);
+    resolveFull({ items: TPLS, total: TPLS.length });
     // 先给 React 处理迟到响应的时间，再断言未被覆盖（避免 waitFor 在更新前假绿）
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.queryByText("tpl_aov_weekly")).toBeNull();

@@ -1273,14 +1273,20 @@ export async function listTemplates(params?: {
   is_active?: boolean;
   keyword?: string;
   owner_id?: number;
-}): Promise<MetricTemplate[]> {
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: MetricTemplate[]; total: number }> {
   const qs = pageQs({
     domain: params?.domain,
     is_active: params?.is_active === undefined ? undefined : params.is_active ? "true" : "false",
     keyword: params?.keyword,
     owner_id: params?.owner_id,
+    page: params?.page,
+    page_size: params?.page_size,
   });
-  return request<MetricTemplate[]>(`${API_BASE}/semantics/templates?${qs}`);
+  return request<{ items: MetricTemplate[]; total: number }>(
+    `${API_BASE}/semantics/templates?${qs}`,
+  );
 }
 
 export async function getTemplate(templateId: number): Promise<MetricTemplate> {

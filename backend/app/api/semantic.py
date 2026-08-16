@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -48,9 +48,11 @@ async def list_templates(
     is_active: bool | None = None,
     keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
     owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=200, description="每页条数"),
     db: AsyncSession = Depends(get_db_session),
 ) -> Any:
-    """列出指标模板，可按域、启用状态、责任人和关键词过滤。"""
+    """列出指标模板，可按域、启用状态、责任人和关键词过滤（分页）。"""
     q = select(MetricTemplate)
     if domain is not None:
         q = q.where(MetricTemplate.domain == domain)
@@ -68,10 +70,24 @@ async def list_templates(
                 MetricTemplate.description.like(f"%{escaped}%"),
             )
         )
-    q = q.order_by(MetricTemplate.domain, MetricTemplate.name)
+    total_q = select(func.count()).select_from(q.subquery())
+    total = (await db.execute(total_q)).scalar_one() or 0
+    q = (
+        q.order_by(MetricTemplate.domain, MetricTemplate.name)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
     result = await db.execute(q)
     templates = result.scalars().all()
-    return ok(data=[t.to_dict() for t in templates], trace_id=get_trace_id(request))
+    return ok(
+        data={
+            "items": [t.to_dict() for t in templates],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        },
+        trace_id=get_trace_id(request),
+    )
 
 
 @router.get(

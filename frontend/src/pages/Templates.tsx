@@ -55,6 +55,9 @@ export function Templates() {
     urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
   );
   const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
   const [modalOpen, setModalOpen] = useState(false);
   const [instantiateTarget, setInstantiateTarget] = useState<MetricTemplate | null>(null);
   // 模板收藏（C 层多资产收藏：TEMPLATE）
@@ -107,6 +110,7 @@ export function Templates() {
   useEffect(() => {
     if (urlOwnerId && /^\d+$/.test(urlOwnerId) && Number(urlOwnerId) !== ownerId) {
       setOwnerId(Number(urlOwnerId));
+      setPage(1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlOwnerId]);
@@ -120,10 +124,13 @@ export function Templates() {
         is_active: isActive !== "inactive",
         keyword: (overrideKeyword ?? keyword) || undefined,
         owner_id: ownerId,
+        page,
+        page_size: pageSize,
       });
       // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
       if (seq !== loadSeq.current) return;
-      setItems(res);
+      setItems(res.items);
+      setTotal(res.total);
     } catch (err) {
       if (seq !== loadSeq.current) return;
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载模板失败");
@@ -196,7 +203,7 @@ export function Templates() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, isActive, ownerId]);
+  }, [keyword, isActive, ownerId, page, pageSize]);
 
   async function handleCreate(values: Record<string, unknown>) {
     setLoading(true);
@@ -326,16 +333,23 @@ export function Templates() {
             style={{ width: 280 }}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            onSearch={() => setKeyword(inputValue)}
+            onSearch={() => {
+              setKeyword(inputValue);
+              setPage(1);
+            }}
             onClear={() => {
               setInputValue("");
               setKeyword("");
+              setPage(1);
             }}
           />
           <Select
             style={{ width: 130 }}
             value={isActive}
-            onChange={(v?: string) => setIsActive(v ?? "active")}
+            onChange={(v?: string) => {
+              setIsActive(v ?? "active");
+              setPage(1);
+            }}
             options={[
               { value: "active", label: "启用" },
               { value: "inactive", label: "停用" },
@@ -347,7 +361,18 @@ export function Templates() {
           columns={columns}
           rowKey="id"
           loading={loading}
-          pagination={false}
+          pagination={{
+            current: page,
+            pageSize,
+            total,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50, 100],
+            showTotal: (t: number) => `共 ${t} 条`,
+            onChange: (p: number, ps: number) => {
+              setPage(p);
+              setPageSize(ps);
+            },
+          }}
           locale={{ emptyText: "暂无模板" }}
         />
       </Card>
