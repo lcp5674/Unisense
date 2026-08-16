@@ -300,6 +300,36 @@ async def test_deprecate_metric_success_sets_sunset():
     assert called["sunset_until"] is not None
 
 
+async def test_deprecate_metric_blocked_by_pdp_cross_domain():
+    """domain_admin 跨域废弃被 PDP 拒绝（deprecate 补 PDP 域校验，修复域隔离漏洞）。
+
+    场景：domain_admin 已通过 _assert_owner_or_admin（admin 放行），但 PDP 以跨域越权
+    拒绝——验证 deprecate 与 update/approve 一致的域权限闸门生效。
+    """
+    mock_gov_svc = MagicMock()
+    mock_gov_svc.check_metric_permission = AsyncMock(
+        return_value=Decision(
+            allow=False, reason="跨域越权，无权废弃他域指标", error_code="FORBIDDEN_DOMAIN"
+        )
+    )
+    with patch("app.services.semantic.service.MetricRepository") as mock_repo_cls:
+        svc = MetricService(db=MagicMock(), governance_svc=mock_gov_svc)
+        repo = mock_repo_cls.return_value
+        repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+        repo.update_with_optimistic_lock = AsyncMock()
+
+        with pytest.raises(BusinessError) as exc:
+            await svc.deprecate_metric(
+                "sales_gmv_daily",
+                "sales_gmv_v2",
+                actor_id=2,
+                role="domain_admin",
+                user_domain="finance",  # 跨域：指标在 sales 域
+            )
+        assert exc.value.error_code == "FORBIDDEN_DOMAIN"
+        repo.update_with_optimistic_lock.assert_not_called()
+
+
 async def test_deprecate_metric_empty_successor_direct_deprecate():
     """空替代指标（空串/None）直接废弃，不触发「替代指标不存在:（空）」误导错误。"""
     svc, repo = _svc_with_repo()

@@ -1838,6 +1838,7 @@ class MetricService(BaseService):
         successor_code: str | None,
         actor_id: int,
         role: str,
+        user_domain: str | None = None,
     ) -> Metric:
         """废弃指标（PUBLISHED → DEPRECATED，对齐 FR-002/FR-039）。
 
@@ -1861,6 +1862,21 @@ class MetricService(BaseService):
         """
         metric = await self.get_metric(metric_code)
         self._assert_owner_or_admin(metric, actor_id, role)
+        # PDP 域权限闸门：deprecate 为写操作，domain_admin 须同域（对齐 update/approve 的
+        # check_metric_permission 域校验，修复 domain_admin 可跨域废弃的域隔离漏洞）
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+            skip_pii_gate=True,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权废弃该指标",
+                error_code=decision.error_code or "FORBIDDEN",
+            )
 
         # 状态机校验：仅 PUBLISHED 可废弃（对齐 FR-002）
         invalid = MetricStateMachine.validate_transition(metric.status, "DEPRECATED")

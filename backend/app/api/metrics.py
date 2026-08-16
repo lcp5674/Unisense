@@ -646,6 +646,7 @@ async def deprecate_metric(
         successor_code=request.successor_code,
         actor_id=user.id,
         role=user.role,
+        user_domain=user.domain,
     )
     await write_audit(
         db,
@@ -1503,6 +1504,7 @@ async def batch_deprecate_metrics(
                 item.successor_code,
                 actor_id=user.id,
                 role=user.role,
+                user_domain=user.domain,
             )
             results.append(MetricBatchItemResult(metric_code=item.metric_code, ok=True))
         except Exception as exc:  # noqa: BLE001 - 批量逐条容错
