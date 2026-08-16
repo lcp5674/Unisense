@@ -430,6 +430,32 @@ async def bind_metric_dimension(
     return ok(data=MetricDimensionResponse.from_model(resp), trace_id=trace_id)
 
 
+@router.delete(
+    "/{dim_code}/metrics/{metric_id}",
+    dependencies=_WRITE_DEPS,
+)
+async def unbind_metric_dimension(
+    dim_code: str,
+    metric_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """解除指标-维度绑定（撤销误绑/改绑）：删除绑定记录 + 同步移除指标声明维度。"""
+    await DimensionService(db).unbind_metric_dimension(metric_id, dim_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.metric.unbind",
+        entity_type="metric_dimension",
+        entity_id=f"{metric_id}:{dim_code}",
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=None, trace_id=trace_id)
+
+
 @router.get("/{dim_code}/metrics", dependencies=_READ_DEPS)
 async def list_dimension_metrics(
     dim_code: str,

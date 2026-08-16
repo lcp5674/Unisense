@@ -479,6 +479,31 @@ class DimensionService(BaseService):
     async def list_metric_dimensions(self, metric_id: int) -> list[MetricDimension]:
         return await self._repo.list_metric_dimensions(metric_id)
 
+    async def unbind_metric_dimension(self, metric_id: int, dim_code: str) -> None:
+        """解除指标-维度绑定（与 bind 对称）：删除绑定记录 + 从指标声明维度移除。
+
+        绑定是单向关系，解绑是撤销误绑/改绑的唯一路径；解绑后消费链路
+        （definition_json.dimensions）同步移除该维度，避免声明维度与绑定表不一致。
+        """
+        binding = await self._repo.delete_metric_dimension(metric_id, dim_code)
+        if binding is None:
+            raise NotFoundError(f"绑定关系不存在: metric={metric_id}/dim={dim_code}")
+        # 反向同步：从指标声明维度移除 dim_code（绑定表与消费声明保持一致）
+        stmt = select(Metric).where(Metric.id == metric_id)
+        metric = (await self._session.execute(stmt)).scalar_one_or_none()
+        if metric is not None:
+            defn = dict(metric.definition_json or {})
+            dims = [d for d in (defn.get("dimensions") or []) if d != dim_code]
+            defn["dimensions"] = dims
+            metric.definition_json = defn
+            if metric.status not in ("DRAFT", "EXPERIMENTAL"):
+                logger.warning(
+                    "unbind_metric_dimension_rewrites_published_metric",
+                    metric_id=metric_id,
+                    dim_code=dim_code,
+                )
+        await self._session.flush()
+
     async def list_dimension_metrics(
         self, dim_code: str
     ) -> list[tuple[MetricDimension, Metric]]:

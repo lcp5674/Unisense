@@ -734,3 +734,35 @@ async def test_bind_metric_dimension_missing_metric_skips_sync() -> None:
     # 指标缺失 → 不回写、不 commit
     repo.commit.assert_not_awaited()
 
+
+
+async def test_unbind_metric_dimension_removes_binding_and_dim() -> None:
+    """解绑成功：删除绑定记录 + 从指标声明维度移除 dim_code（与 bind 对称反向）。"""
+    svc, repo = await _svc()
+    binding = MetricDimension(metric_id=42, dim_code="region", role="FILTER")
+    repo.delete_metric_dimension = AsyncMock(return_value=binding)
+    metric = _metric_with_dims("DRAFT", ["existing_dim", "region"])
+    svc._session.execute = AsyncMock(return_value=_bind_result(metric))
+    svc._session.flush = AsyncMock()
+
+    await svc.unbind_metric_dimension(42, "region")
+
+    repo.delete_metric_dimension.assert_awaited_with(42, "region")
+    # 反向同步：声明维度移除 region，保留 existing_dim
+    assert metric.definition_json["dimensions"] == ["existing_dim"]
+    svc._session.flush.assert_awaited()
+
+
+async def test_unbind_metric_dimension_missing_binding_raises() -> None:
+    """绑定关系不存在：抛 NotFoundError（防止静默误判解绑成功）。"""
+    svc, repo = await _svc()
+    repo.delete_metric_dimension = AsyncMock(return_value=None)
+
+    from app.core.exceptions import NotFoundError
+
+    try:
+        await svc.unbind_metric_dimension(42, "ghost")
+    except NotFoundError as exc:
+        assert "ghost" in str(exc)
+    else:
+        raise AssertionError("should raise NotFoundError")

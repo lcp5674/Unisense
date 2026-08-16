@@ -1619,6 +1619,14 @@ export async function bindMetricDimension(body: {
   );
 }
 
+/** 解除指标-维度绑定（DELETE /dimensions/{dim_code}/metrics/{metric_id}） */
+export async function unbindMetricDimension(dimCode: string, metricId: number): Promise<void> {
+  return request<void>(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/metrics/${metricId}`,
+    { method: "DELETE" },
+  );
+}
+
 /** 查询某指标已绑定的维度（GET /dimensions/{metric_id}/metric-dimensions） */
 export async function listMetricDimensions(
   metricId: number,

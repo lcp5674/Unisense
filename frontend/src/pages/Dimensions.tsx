@@ -10,6 +10,7 @@ import {
   publishDimension,
   deprecateDimension,
   bindMetricDimension,
+  unbindMetricDimension,
   listDimensionMappings,
   createDimensionMapping,
   updateDimensionMapping,
@@ -391,6 +392,22 @@ function DimensionsTab() {
     }).catch(() => setDetailMappings([])).finally(() => setDetailLoading(false));
   }
 
+  // 解绑指标（撤销误绑/改绑）：删除绑定 + 从指标声明维度移除，刷新详情绑定列表
+  async function handleUnbindMetric(metricId: number, metricCode: string) {
+    if (!detailTarget) return;
+    try {
+      await unbindMetricDimension(detailTarget.dim_code, metricId);
+      message.success(`已解除绑定：${metricCode}`);
+      // 刷新详情绑定指标列表（其余区块无需刷新）
+      const r = await listDimensionMetrics(detailTarget.dim_code);
+      setDetailMetrics(r.items);
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "解绑失败",
+      );
+    }
+  }
+
   // 责任人 ID → 中文名（无记录回退「用户 #id」）
   const ownerName = (ownerId: number) =>
     users.find((u) => u.id === ownerId)?.display_name ?? `用户 #${ownerId}`;
@@ -671,7 +688,7 @@ function DimensionsTab() {
             </Descriptions>
 
             <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>绑定指标（{detailMetrics.length}）</div>
-            <Table
+            <Table<DimensionMetricBinding>
               dataSource={detailMetrics}
               rowKey="metric_id"
               size="small"
@@ -698,6 +715,22 @@ function DimensionsTab() {
                 { title: "角色", dataIndex: "role", key: "role", render: (v: string) => ROLE_LABEL[v] ?? v },
                 { title: "默认成员", dataIndex: "default_member", key: "dm", render: (v: string | null) => v ?? <span className="muted">—</span> },
                 { title: "指标状态", dataIndex: "metric_status", key: "status", width: 100, render: (s: string) => <Tag color={METRIC_STATUS_COLOR[s]}>{METRIC_STATUS_LABEL[s] ?? s}</Tag> },
+                {
+                  title: "操作",
+                  key: "actions",
+                  width: 80,
+                  render: (_: unknown, r: DimensionMetricBinding) => (
+                    <Popconfirm
+                      title={`解除与 ${r.metric_code} 的绑定？`}
+                      description="解绑后该指标口径中不再声明此维度（撤销误绑/改绑）"
+                      okText="解绑"
+                      cancelText="取消"
+                      onConfirm={() => handleUnbindMetric(r.metric_id, r.metric_code)}
+                    >
+                      <Button size="small" type="link" danger>解绑</Button>
+                    </Popconfirm>
+                  ),
+                },
               ]}
             />
 

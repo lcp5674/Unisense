@@ -111,6 +111,22 @@ class DimensionRepository:
         stmt = select(MetricDimension).where(MetricDimension.metric_id == metric_id)
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def delete_metric_dimension(
+        self, metric_id: int, dim_code: str
+    ) -> MetricDimension | None:
+        """删除指标-维度绑定关系（解绑）；不存在返回 None。"""
+        stmt = select(MetricDimension).where(
+            MetricDimension.metric_id == metric_id,
+            MetricDimension.dim_code == dim_code,
+        )
+        obj = (await self._session.execute(stmt)).scalar_one_or_none()
+        if obj is None:
+            return None
+        await self._session.delete(obj)
+        await self._session.flush()
+        return obj
+
+
     async def list_dimension_metrics(self, dim_code: str) -> list[tuple[MetricDimension, Metric]]:
         """按维度查绑定指标：join Metric 拿 metric_code/name/status（治理追溯）。"""
         stmt = (
