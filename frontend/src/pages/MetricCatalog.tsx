@@ -873,7 +873,14 @@ export function MetricCatalog() {
           {r.emergency_publish && <Tag color="volcano">紧急</Tag>}
           {r.pending_conflict && <Tag color="orange">冲突</Tag>}
           {r.pending_version && <Tag color="purple" icon={<ThunderboltOutlined />}>版本待确认</Tag>}
-          {r.gray_tenant_ids && r.gray_tenant_ids.length > 0 && <Tag color="purple">灰度</Tag>}
+          {r.gray_tenant_ids && r.gray_tenant_ids.length > 0 && (
+            <Tooltip
+              title={`灰度租户：${r.gray_tenant_ids.join("、")}`}
+              placement="top"
+            >
+              <Tag color="purple">灰度 {r.gray_tenant_ids.length} 租户</Tag>
+            </Tooltip>
+          )}
           {!r.pii_flag && !r.emergency_publish && !r.pending_conflict && !r.pending_version && !r.gray_tenant_ids && <span className="muted">—</span>}
         </Space>
       ),

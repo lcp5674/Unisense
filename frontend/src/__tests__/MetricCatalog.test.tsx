@@ -158,7 +158,7 @@ describe("MetricCatalog", () => {
       expect(screen.getByText("sales_gmv_sum_d")).toBeTruthy();
     });
     expect(screen.getByText("紧急")).toBeTruthy();
-    expect(screen.getByText("灰度")).toBeTruthy();
+    expect(screen.getByText(/^灰度 \d+ 租户$/)).toBeTruthy();
     expect(screen.getByText("PII 已复核")).toBeTruthy();
   });
 
