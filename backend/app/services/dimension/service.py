@@ -375,6 +375,14 @@ class DimensionService(BaseService):
                 f"成员 {member_code} 存在子成员，无法废弃；请先废弃或迁移子成员",
                 error_code="MEMBER_HAS_CHILDREN",
             )
+        # 绑定引用保护（跨服务一致性，对称于 deprecate_dimension）：
+        # 成员被指标绑定为默认值时禁止废弃——否则指标绑定 default_member 悬空
+        bound = await self._repo.count_bindings_by_default_member(dim_code, member_code)
+        if bound > 0:
+            raise BusinessError(
+                f"成员 {member_code} 正被 {bound} 个指标绑定为默认值，无法废弃；请先解绑相关指标",
+                error_code="MEMBER_BOUND_BY_METRICS",
+            )
         member.status = DimensionStatus.DEPRECATED.value
         await self._repo.commit()
         return member

@@ -994,6 +994,7 @@ async def test_deprecate_member_leaf_ok() -> None:
     repo.list_members = AsyncMock(return_value=[
         SimpleNamespace(parent_code=None),  # 无子成员
     ])
+    repo.count_bindings_by_default_member = AsyncMock(return_value=0)
     await svc.deprecate_member("dim_c", "c1")
 
 
@@ -1038,3 +1039,19 @@ async def test_bind_allows_published_default_member() -> None:
         metric_id=42, dim_code="region", role="FILTER", default_member="c_pub"))
     assert binding.default_member == "c_pub"
     assert metric.definition_json["dimensions"] == ["existing_dim", "region"]
+
+
+async def test_deprecate_member_bound_as_default_rejected() -> None:
+    """成员被指标绑定为默认值时禁止废弃（对称于 deprecate_dimension 绑定保护）。"""
+    svc, repo = await _svc()
+    repo.get_member = AsyncMock(return_value=SimpleNamespace(
+        dim_code="dim_c", member_code="c1", status="PUBLISHED", parent_code=None))
+    repo.list_members = AsyncMock(return_value=[
+        SimpleNamespace(parent_code=None),
+    ])
+    repo.count_bindings_by_default_member = AsyncMock(return_value=2)
+    try:
+        await svc.deprecate_member("dim_c", "c1")
+        assert False, "应拒绝废弃被绑定为默认值的成员"
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "MEMBER_BOUND_BY_METRICS"

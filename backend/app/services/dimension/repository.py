@@ -174,6 +174,23 @@ class DimensionRepository:
         )
         return int((await self._session.execute(stmt)).scalar_one() or 0)
 
+    async def count_bindings_by_default_member(
+        self, dim_code: str, member_code: str
+    ) -> int:
+        """统计维度成员被多少指标绑定为默认成员（废弃保护：被引用成员禁止废弃）。
+
+        对称于 ``count_metric_dimensions``：废弃维度主体受绑定保护，
+        废弃成员同样受"被绑定为默认值"保护——否则指标绑定悬空。
+        """
+        stmt = (
+            select(func.count(MetricDimension.id))
+            .where(
+                MetricDimension.dim_code == dim_code,
+                MetricDimension.default_member == member_code,
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
+
     async def save_reconciliation(self, obj: Reconciliation) -> Reconciliation:
         self._session.add(obj)
         await self._session.flush()
