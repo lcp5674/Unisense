@@ -61,6 +61,7 @@ class MetricStateMachine:
         },
         MetricState.PUBLISHED: {
             MetricState.DEPRECATED: "deprecate",
+            MetricState.DATA_SOURCE_DROPPED: "source_dropped",
         },
         MetricState.DEPRECATED: {
             # TD §13 状态闭环：废弃指标可重新发起评审（DEPRECATED → REVIEW），

@@ -601,6 +601,28 @@ export async function deprecateMetric(
   );
 }
 
+// 数据源下线指标恢复（DSD → PUBLISHED，源恢复/确认误报）
+export async function recoverSourceDropped(code: string): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/recover-source-dropped`,
+    { method: "POST" },
+  );
+}
+
+// 确认数据源下线指标退役（DSD → DEPRECATED，须填替代指标）
+export async function confirmDeprecateDropped(
+  code: string,
+  successor_code: string,
+): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/confirm-deprecate-dropped`,
+    {
+      method: "POST",
+      body: JSON.stringify({ successor_code: successor_code || undefined }),
+    },
+  );
+}
+
 // 删除指标（软删除，仅 DRAFT 状态；仅 platform_admin）
 export async function deleteMetric(code: string): Promise<{ deleted: boolean }> {
   return request<{ deleted: boolean }>(
@@ -1559,6 +1581,19 @@ export async function listDimensionMetrics(
   dimCode: string,
 ): Promise<{ items: DimensionMetricBinding[]; total: number }> {
   return request(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/metrics`);
+}
+
+/** 从数据源表列拉取去重枚举值（POST /dimensions/preview-values，维度值自动获取） */
+export async function previewColumnValues(req: {
+  source_id: string;
+  table: string;
+  column: string;
+  limit?: number;
+}): Promise<{ values: string[]; total: number; truncated: boolean }> {
+  return request<{ values: string[]; total: number; truncated: boolean }>(
+    `${API_BASE}/dimensions/preview-values`,
+    { method: "POST", body: JSON.stringify(req) },
+  );
 }
 
 /** 删除维度成员（DELETE /dimensions/{dim_code}/members/{member_code}，可能级联删除子树） */

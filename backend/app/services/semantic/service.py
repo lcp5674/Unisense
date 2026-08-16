@@ -3009,3 +3009,174 @@ class MetricService(BaseService):
         result = await self._db.execute(stmt)
         count = result.scalar() or 0
         return count > 0
+
+    # ------------------------------------------------------------------
+    # DATA_SOURCE_DROPPED 状态闭环（TD §12.3 / PRD R5-01、R3-04④）
+    #   数据源断连（源表 DROP/不可达）→ PUBLISHED 指标置 DSD；
+    #   DSD → PUBLISHED（源恢复/确认误报）；DSD → DEPRECATED（确认退役）。
+    # ------------------------------------------------------------------
+
+    async def mark_source_dropped(self, source_ids: list[str], actor_id: int) -> int:
+        """数据源 DROP/不可达 → 血缘下游 PUBLISHED 指标批量置 DATA_SOURCE_DROPPED。
+
+        对齐 PRD R3-04④：采集检测到源表 DROP 后调用本方法，沿血缘把引用该
+        数据源表的下游指标标记为 DSD（非直接 DEPRECATED，避免误退役），生成
+        Owner 待办（7 天处理期）。
+
+        Args:
+            source_ids: 已 DROP 的数据源 ID 集合（采集侧确认不可达的源）。
+            actor_id: 触发人 ID（采集/运维）。
+
+        Returns:
+            被标记为 DSD 的指标数（0 表示无血缘下游指标或均已处理）。
+
+        实现：查血缘 ``table:`` 下游节点，再按 source_id 关联 DBCatalog 过滤——
+        精确到「该数据源表」的下游指标，避免误伤同域其他源。best-effort，
+        血缘缺失不影响已发布指标继续可用。
+        """
+        from sqlalchemy import select
+
+        from app.models.data_source import DBCatalog
+        from app.services.lineage.schemas import LineageImpactParams
+        from app.services.lineage.service import LineageService
+
+        # 1) 数据源 → 该源下的表（entity_name 集合）：仅活跃未删表
+        if not source_ids:
+            return 0
+        stmt = (
+            select(DBCatalog.entity_name)
+            .where(
+                DBCatalog.source_id.in_(source_ids),
+                DBCatalog.deleted_at.is_(None),
+                DBCatalog.entity_type.in_(["TABLE", "VIEW"]),
+            )
+        )
+        table_rows = (await self._db.execute(stmt)).scalars().all()
+        if not table_rows:
+            return 0
+
+        # 2) 沿血缘查每张表的下游指标（metric: 节点）
+        impacted_codes: set[str] = set()
+        for table in table_rows:
+            node = f"table:{table}"
+            try:
+                edges = await LineageService(self._db).query_impact(
+                    LineageImpactParams(node=node, direction="downstream", max_hops=5)
+                )
+            except Exception:
+                continue  # best-effort：单表血缘失败不阻断其余
+            for e in edges:
+                target = getattr(e, "target_node", None)
+                target = str(target) if target is not None else ""
+                if target.startswith("metric:"):
+                    impacted_codes.add(target.removeprefix("metric:"))
+        if not impacted_codes:
+            return 0
+
+        # 2) 血缘命中的指标需为 PUBLISHED 才标记（已 DSD/DEPRECATED 跳过）
+        count = 0
+        for code in impacted_codes:
+            metric = await self.get_metric(code)
+            if metric is None or metric.status != "PUBLISHED":
+                continue
+            invalid = MetricStateMachine.validate_transition(metric.status, "DATA_SOURCE_DROPPED")
+            if invalid is not None:
+                continue
+            await self._repo.update_with_optimistic_lock(
+                metric.id,
+                metric.row_version,
+                status="DATA_SOURCE_DROPPED",
+            )
+            await self._cache.invalidate(code)
+            await self._publish_event(
+                "metric.source_dropped",
+                {"metric_code": code, "domain": metric.domain, "source_ids": source_ids},
+                actor_id=str(actor_id),
+            )
+            count += 1
+        return count
+
+    async def recover_source_dropped(
+        self, metric_code: str, actor_id: int, role: str
+    ) -> Metric:
+        """DSD → PUBLISHED（源恢复 / 确认误报，对齐 PRD R5-01）。
+
+        Owner 确认源表恢复或标记为误报后，取消 DSD 回到 PUBLISHED。
+        """
+        metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+
+        # 仅 DATA_SOURCE_DROPPED 可恢复（同态/其他状态转移不适用本语义）
+        if metric.status != "DATA_SOURCE_DROPPED":
+            raise ConflictError(
+                f"仅 DATA_SOURCE_DROPPED 状态可恢复发布，当前 {metric.status}",
+                error_code="INVALID_TRANSITION",
+            )
+
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id, metric.row_version, status="PUBLISHED"
+        )
+        await self._cache.invalidate(metric_code)
+        await self._publish_event(
+            "metric.source_recovered",
+            {"metric_code": metric_code, "domain": metric.domain},
+            actor_id=str(actor_id),
+        )
+        return updated
+
+    async def confirm_deprecate_dropped(
+        self, metric_code: str, successor_code: str | None, actor_id: int, role: str
+    ) -> Metric:
+        """DSD → DEPRECATED（确认退役，对齐 PRD R5-01）。
+
+        Owner 判断源表无法恢复 → 标 DEPRECATED 并填替代指标（可选，但推荐）。
+        触发 metric.deprecated 事件 → notify 下游消费方。
+        """
+        metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+
+        # 仅 DATA_SOURCE_DROPPED 可确认退役
+        if metric.status != "DATA_SOURCE_DROPPED":
+            raise ConflictError(
+                f"仅 DATA_SOURCE_DROPPED 状态可确认退役，当前 {metric.status}",
+                error_code="INVALID_TRANSITION",
+            )
+
+        # 替代指标校验（可选）：若填了须为已 PUBLISHED
+        if successor_code is not None and not str(successor_code).strip():
+            successor_code = None
+        if successor_code is not None:
+            successor = await self._repo.get_by_code(successor_code)
+            if successor is None:
+                raise NotFoundError(f"替代指标不存在: {successor_code}")
+            if successor.status != "PUBLISHED":
+                raise BusinessError(
+                    f"替代指标 {successor_code} 未发布，无法作为替代",
+                    error_code="VALIDATION_ERROR",
+                )
+
+        from datetime import timedelta
+
+        sunset_days = self._settings.metric_sunset_days
+        now = datetime.now(UTC)
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id,
+            metric.row_version,
+            status="DEPRECATED",
+            successor_code=successor_code,
+            deprecated_at=now,
+            sunset_until=(now + timedelta(days=sunset_days)).date(),
+        )
+        await self._cache.invalidate(metric_code)
+        await self._cleanup_metric_lineage(metric_code)
+        await self._publish_event(
+            "metric.deprecated",
+            {
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                "successor_code": successor_code,
+                "deprecated_at": now.isoformat(),
+            },
+            actor_id=str(actor_id),
+        )
+        return updated

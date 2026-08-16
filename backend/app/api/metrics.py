@@ -43,6 +43,7 @@ from app.services.semantic.schemas import (
     MetricPublishRequest,
     MetricRejectRequest,
     MetricResponse,
+    MetricSourceDroppedRequest,
     MetricSubmitRequest,
     MetricUpdateRequest,
     MetricVersionResponse,
@@ -1520,3 +1521,111 @@ async def batch_deprecate_metrics(
     )
     await db.commit()
     return ok(data=_batch_response(results), trace_id=trace_id)
+
+
+# ------------------------------------------------------------------
+# DATA_SOURCE_DROPPED 状态闭环（TD §12.3 / PRD R5-01）
+#   recover-source-dropped : DSD → PUBLISHED（源恢复/误报）
+#   confirm-deprecate-dropped : DSD → DEPRECATED（确认退役）
+#   mark-source-dropped    : 数据源 DROP → 下游指标置 DSD（采集侧批量）
+# ------------------------------------------------------------------
+
+
+@router.post(
+    "/{metric_code}/recover-source-dropped",
+    response_model=ApiResponse[MetricResponse],
+    summary="恢复数据源下线指标（DSD → PUBLISHED，源恢复/确认误报）",
+    dependencies=_WRITE_DEPS,
+)
+async def recover_source_dropped(
+    metric_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """数据源恢复/确认误报后，取消 DATA_SOURCE_DROPPED 回到 PUBLISHED。"""
+    service = MetricService(db)
+    metric = await service.recover_source_dropped(
+        metric_code, actor_id=user.id, role=user.role
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="RECOVER_SOURCE_DROPPED",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={"from": "DATA_SOURCE_DROPPED", "to": "PUBLISHED"},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=MetricResponse.model_validate(metric), trace_id=trace_id)
+
+
+@router.post(
+    "/{metric_code}/confirm-deprecate-dropped",
+    response_model=ApiResponse[MetricResponse],
+    summary="确认数据源下线指标退役（DSD → DEPRECATED）",
+    dependencies=_WRITE_DEPS,
+)
+async def confirm_deprecate_dropped(
+    metric_code: str,
+    request: MetricDeprecateRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """源无法恢复，确认退役（DSD → DEPRECATED），可填替代指标。"""
+    service = MetricService(db)
+    metric = await service.confirm_deprecate_dropped(
+        metric_code,
+        successor_code=request.successor_code,
+        actor_id=user.id,
+        role=user.role,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="CONFIRM_DEPRECATE_DROPPED",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={"successor_code": request.successor_code},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=MetricResponse.model_validate(metric), trace_id=trace_id)
+
+
+@router.post(
+    "/mark-source-dropped",
+    response_model=ApiResponse[dict[str, int]],
+    summary="数据源 DROP → 血缘下游指标批量置 DATA_SOURCE_DROPPED（采集侧触发）",
+    dependencies=_WRITE_DEPS,
+)
+async def mark_source_dropped(
+    request: MetricSourceDroppedRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[dict[str, int]]:
+    """采集检测到源表 DROP 后批量标记下游指标（owner 生成 7 天待办）。"""
+    service = MetricService(db)
+    count = await service.mark_source_dropped(
+        source_ids=request.source_ids, actor_id=user.id
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="MARK_SOURCE_DROPPED",
+        entity_type="metric_definition",
+        entity_id=f"source:{len(request.source_ids)}",
+        detail={"source_ids": request.source_ids, "metrics_marked": count},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"marked": count}, trace_id=trace_id)

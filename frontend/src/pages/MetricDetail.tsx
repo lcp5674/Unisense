@@ -36,6 +36,8 @@ import {
   addFavorite,
   approveMetric,
   deprecateMetric,
+  recoverSourceDropped,
+  confirmDeprecateDropped,
   emergencyPublishMetric,
   fetchArchivedMetric,
   fetchCurrentUser,
@@ -776,6 +778,20 @@ export function MetricDetail() {
           废弃
         </Button>
       )}
+      {metric.status === "DATA_SOURCE_DROPPED" && isOwnerOrAdmin && canDeprecate && (
+        <>
+          <Button
+            icon={<RiseOutlined />}
+            loading={busy}
+            onClick={() => runAction(() => recoverSourceDropped(metric.metric_code), "源已恢复")}
+          >
+            源已恢复
+          </Button>
+          <Button danger loading={busy} onClick={() => setDeprecateOpen(true)}>
+            确认退役
+          </Button>
+        </>
+      )}
       {metric.arbitration_mark?.rename_required && isOwnerOrAdmin && canEdit && (
         <Button
           type="primary"
@@ -976,14 +992,18 @@ export function MetricDetail() {
       </Modal>
 
       <Modal
-        title="废弃指标"
+        title={metric.status === "DATA_SOURCE_DROPPED" ? "确认退役（数据源下线）" : "废弃指标"}
         open={deprecateOpen}
-        onOk={() =>
-          runAction(() => deprecateMetric(metric.metric_code, successor), "废弃").then(() => {
+        onOk={() => {
+          const action =
+            metric.status === "DATA_SOURCE_DROPPED"
+              ? () => confirmDeprecateDropped(metric.metric_code, successor)
+              : () => deprecateMetric(metric.metric_code, successor);
+          runAction(action, "确认退役").then(() => {
             setDeprecateOpen(false);
             setSuccessor("");
-          })
-        }
+          });
+        }}
         confirmLoading={busy}
         onCancel={() => setDeprecateOpen(false)}
         okText="确认废弃"

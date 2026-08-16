@@ -20,6 +20,8 @@ vi.mock("../api", () => ({
   removeFavorite: vi.fn(),
   approveMetric: vi.fn(),
   deprecateMetric: vi.fn(),
+  recoverSourceDropped: vi.fn(),
+  confirmDeprecateDropped: vi.fn(),
   emergencyPublishMetric: vi.fn(),
   piiReview: vi.fn(),
   promoteMetric: vi.fn(),
@@ -63,6 +65,8 @@ import {
   suggestRenameName,
   submitReview,
   emergencyPublishMetric,
+  recoverSourceDropped,
+  confirmDeprecateDropped,
   UnisenseApiError,
 } from "../api";
 const mockedUpdateMetric = vi.mocked(updateMetric);
@@ -646,5 +650,34 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
     fireEvent.click(await screen.findByText("去改名"));
     await waitFor(() => expect(screen.queryByText("AI 生成名称建议")).not.toBeInTheDocument());
+  });
+
+  it("DATA_SOURCE_DROPPED 状态显示「源已恢复」和「确认退役」按钮", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DATA_SOURCE_DROPPED", pii_flag: false });
+    renderWithPerms(["metric:deprecate", "metric:edit"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    expect(await screen.findByText("源已恢复")).toBeInTheDocument();
+    expect(screen.getByText("确认退役")).toBeInTheDocument();
+  });
+
+  it("点「源已恢复」调用 recoverSourceDropped 并刷新", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DATA_SOURCE_DROPPED", pii_flag: false });
+    renderWithPerms(["metric:deprecate", "metric:edit"]);
+    fireEvent.click(await screen.findByText("源已恢复"));
+    await waitFor(() =>
+      expect(vi.mocked(recoverSourceDropped)).toHaveBeenCalledWith("sales_gmv_sum_d"),
+    );
+  });
+
+  it("DSD 状态「确认退役」弹窗提交调 confirmDeprecateDropped", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DATA_SOURCE_DROPPED", pii_flag: false });
+    renderWithPerms(["metric:deprecate", "metric:edit"]);
+    fireEvent.click(await screen.findByText("确认退役"));
+    await screen.findByText("确认退役（数据源下线）");
+    // 弹窗内确认按钮 okText 为「确认废弃」（退役本质是废弃）：用 role 定位避免与页面「确认退役」按钮歧义
+    fireEvent.click(screen.getByRole("button", { name: /确\s*认\s*废\s*弃/ }));
+    await waitFor(() =>
+      expect(vi.mocked(confirmDeprecateDropped)).toHaveBeenCalledWith("sales_gmv_sum_d", ""),
+    );
   });
 });

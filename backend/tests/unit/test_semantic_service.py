@@ -2900,3 +2900,122 @@ async def test_notify_lineage_impacted_owners_query_failure_returns_zero():
 
     assert count == 0
     notify_inst.notify_user.assert_not_awaited()
+
+
+# ============================================================
+# DATA_SOURCE_DROPPED 状态闭环（TD §12.3 / PRD R5-01）
+#   mark_source_dropped     : 数据源 DROP → 下游 PUBLISHED 指标置 DSD
+#   recover_source_dropped  : DSD → PUBLISHED（源恢复/误报）
+#   confirm_deprecate_dropped : DSD → DEPRECATED（确认退役，须填替代指标）
+# ============================================================
+
+
+async def test_mark_source_dropped_marks_published_metrics():
+    """数据源 DROP → 血缘下游 PUBLISHED 指标批量置 DATA_SOURCE_DROPPED。"""
+    svc, repo = _svc_with_repo()
+    m1 = make_metric(metric_code="gmv", status="PUBLISHED", row_version=1)
+    m2 = make_metric(metric_code="aov", status="PUBLISHED", row_version=1)
+    # 1) 数据源 → 该源下 2 张表（DBCatalog 查询）
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = ["dwd_orders", "dwd_pay"]
+    svc._db.execute = AsyncMock(return_value=result)
+    # 2) 血缘下游：每张表返回对应 metric 节点
+    with patch("app.services.lineage.service.LineageService") as mock_ls:
+        mock_ls.return_value.query_impact = AsyncMock(
+            side_effect=[
+                [MagicMock(target_node="metric:gmv")],
+                [MagicMock(target_node="metric:aov")],
+            ]
+        )
+        repo.get_by_code = AsyncMock(side_effect=[m1, m2])
+        repo.update_with_optimistic_lock = AsyncMock(return_value=m1)
+        svc._publish_event = AsyncMock(return_value=None)
+        svc._cache.invalidate = AsyncMock(return_value=None)
+
+        count = await svc.mark_source_dropped(["mysql_orders"], actor_id=1)
+
+    assert count == 2
+    assert repo.update_with_optimistic_lock.await_count == 2
+    # 目标状态是 DATA_SOURCE_DROPPED
+    calls = repo.update_with_optimistic_lock.call_args_list
+    for c in calls:
+        assert c.kwargs["status"] == "DATA_SOURCE_DROPPED"
+
+
+async def test_recover_source_dropped_returns_to_published():
+    """DSD → PUBLISHED（源恢复/确认误报），状态机合法。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(metric_code="gmv", status="DATA_SOURCE_DROPPED", row_version=1)
+    updated = make_metric(metric_code="gmv", status="PUBLISHED", row_version=2)
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+    svc._cache.invalidate = AsyncMock(return_value=None)
+    svc._publish_event = AsyncMock(return_value=None)
+
+    result = await svc.recover_source_dropped("gmv", actor_id=1, role="platform_admin")
+
+    assert result.status == "PUBLISHED"
+    assert repo.update_with_optimistic_lock.await_count == 1
+    assert repo.update_with_optimistic_lock.call_args.kwargs["status"] == "PUBLISHED"
+
+
+async def test_recover_source_dropped_rejects_non_dsd():
+    """非 DSD 状态调 recover → 409 非法跃迁。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(metric_code="gmv", status="PUBLISHED", row_version=1)
+    repo.get_by_code = AsyncMock(return_value=metric)
+
+    with pytest.raises(ConflictError):
+        await svc.recover_source_dropped("gmv", actor_id=1, role="platform_admin")
+
+
+async def test_confirm_deprecate_dropped_invalid_successor_raises():
+    """DSD → DEPRECATED 填了不存在的替代指标 → 404。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(metric_code="gmv", status="DATA_SOURCE_DROPPED", row_version=1)
+    repo.get_by_code = AsyncMock(side_effect=[metric, None])
+
+    with pytest.raises(NotFoundError):
+        await svc.confirm_deprecate_dropped(
+            "gmv", successor_code="no_such_metric", actor_id=1, role="platform_admin"
+        )
+
+
+async def test_confirm_deprecate_dropped_allows_no_successor():
+    """DSD → DEPRECATED 无替代指标也可退役（可选替代）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(metric_code="gmv", status="DATA_SOURCE_DROPPED", row_version=1)
+    dep = make_metric(metric_code="gmv", status="DEPRECATED", row_version=2)
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=dep)
+    svc._publish_event = AsyncMock(return_value=None)
+    svc._cleanup_metric_lineage = AsyncMock(return_value=None)
+    svc._cache.invalidate = AsyncMock(return_value=None)
+
+    result = await svc.confirm_deprecate_dropped(
+        "gmv", successor_code=None, actor_id=1, role="platform_admin"
+    )
+
+    assert result.status == "DEPRECATED"
+    assert repo.update_with_optimistic_lock.call_args.kwargs["successor_code"] is None
+
+
+async def test_confirm_deprecate_dropped_success():
+    """DSD → DEPRECATED（确认退役），带替代指标 + 事件。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(metric_code="gmv", status="DATA_SOURCE_DROPPED", row_version=1)
+    successor = make_metric(metric_code="gmv_v2", status="PUBLISHED", row_version=1)
+    dep = make_metric(metric_code="gmv", status="DEPRECATED", row_version=2)
+    repo.get_by_code = AsyncMock(side_effect=[metric, successor])
+    repo.update_with_optimistic_lock = AsyncMock(return_value=dep)
+    svc._publish_event = AsyncMock(return_value=None)
+    svc._cleanup_metric_lineage = AsyncMock(return_value=None)
+    svc._cache.invalidate = AsyncMock(return_value=None)
+
+    result = await svc.confirm_deprecate_dropped(
+        "gmv", successor_code="gmv_v2", actor_id=1, role="platform_admin"
+    )
+
+    assert result.status == "DEPRECATED"
+    svc._publish_event.assert_awaited_once()
+    assert svc._publish_event.call_args.args[0] == "metric.deprecated"

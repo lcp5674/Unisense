@@ -9,7 +9,7 @@ export interface ApiError {
 }
 
 export type MetricType = "atomic" | "derived" | "composite";
-export type MetricStatus = "DRAFT" | "EXPERIMENTAL" | "REVIEW" | "PUBLISHED" | "DEPRECATED";
+export type MetricStatus = "DRAFT" | "EXPERIMENTAL" | "REVIEW" | "PUBLISHED" | "DEPRECATED" | "DATA_SOURCE_DROPPED";
 export type MetricTier = "T1" | "T2" | "T3";
 
 // 作废指标详情（GET /metric-definitions/{code}/archived）：完整历史口径 + 裁决指针

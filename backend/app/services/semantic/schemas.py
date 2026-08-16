@@ -523,3 +523,12 @@ class MetricHealthResponse(BaseModel):
     calculated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class MetricSourceDroppedRequest(BaseModel):
+    """数据源 DROP → 批量标记下游指标 DSD（采集侧触发，TD §12.3 / PRD R3-04④）。
+
+    source_ids 为采集检测到已 DROP/不可达的数据源 ID 集合。
+    """
+
+    source_ids: list[str] = Field(..., min_length=1, max_length=200)
