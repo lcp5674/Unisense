@@ -824,3 +824,39 @@ def test_except_with_target_table() -> None:
     assert {("ods.a", "id", "id"), ("ods.b", "v", "v")} <= {
         (e.source_table, e.source_column, e.target_column) for e in field_edges
     }
+
+
+def test_multi_table_update_cross_set_field_bidirectional() -> None:
+    """多表 UPDATE 跨 SET 字段级双向血缘：每项 SET 的目标表独立判定为 LHS 所属表。
+
+    ``UPDATE t1 JOIN t2 SET t1.v=t2.v, t2.w=t1.x`` 中 t1 与 t2 均被 SET 更新，字段级
+    应产 ``t2.v→t1.v`` 与 ``t1.x→t2.w`` 双向（旧实现全局取首表 t1，把 t2.w=t1.x 的
+    t1 当自引用跳过致 t1→t2 方向丢失）。表级受血缘图 DAG 约束取主目标（首个被 SET
+    更新表 t1）单方向 ``t2→t1``——互刷方向不入表级图谱（避免循环依赖 409）。
+    """
+    sql = "UPDATE t1 JOIN t2 ON t1.id = t2.id SET t1.v = t2.v, t2.w = t1.x"
+    table_edges = extract_table_lineage(sql, dialect="mysql")
+    assert {(e.source, e.target) for e in table_edges} == {("t2", "t1")}
+    field_edges = extract_field_lineage(sql, dialect="mysql")
+    mapped = {
+        (e.source_table, e.source_column, e.target_table, e.target_column) for e in field_edges
+    }
+    assert mapped == {("t2", "v", "t1", "v"), ("t1", "x", "t2", "w")}
+
+
+def test_multi_table_update_cross_set_field_three() -> None:
+    """三表 UPDATE 跨 SET：字段级各被更新列归属正确（t1.v←t2.v、t3.w←t1.x）。"""
+    sql = "UPDATE t1 JOIN t2 ON t1.id = t2.id JOIN t3 ON t1.id = t3.id SET t1.v = t2.v, t3.w = t1.x"
+    table_edges = extract_table_lineage(sql, dialect="mysql")
+    # 表级主目标 t1（首个被 SET 更新表）：t2/t3 均指向 t1，无自环
+    targets = {e.target for e in table_edges}
+    assert targets == {"t1"}
+    assert ("t2", "t1") in {(e.source, e.target) for e in table_edges}
+    assert ("t3", "t1") in {(e.source, e.target) for e in table_edges}
+    assert all(e.source != e.target for e in table_edges)
+    field_edges = extract_field_lineage(sql, dialect="mysql")
+    mapped = {
+        (e.source_table, e.source_column, e.target_table, e.target_column) for e in field_edges
+    }
+    assert ("t2", "v", "t1", "v") in mapped
+    assert ("t1", "x", "t3", "w") in mapped

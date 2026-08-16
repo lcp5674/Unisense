@@ -730,18 +730,28 @@ def _extract_update_edges(
     - ``SET v = (SELECT MAX(x) FROM src ...)`` 子查询值：解析子查询内部投影列
     - ``WITH s AS (...) UPDATE tgt SET v = s.v FROM s``（CTE 来源）：穿透 CTE 定义
       解析到真实表（``s.v`` → ``ods_src.v``），不产生伪表 ``s``
+    多表 UPDATE 跨 SET（``UPDATE t1 JOIN t2 SET t1.v=t2.v, t2.w=t1.x``）时，每个 SET
+    项的目标表独立判定为 LHS 列所属表——字段级血缘完整双向（``t2.v→t1.v`` 与
+    ``t1.x→t2.w``，字段节点不同不构成环）。表级血缘受血缘图 DAG 约束保持单目标
+    （主目标 = 首个被 SET 更新表），互刷方向不入表级图谱。
     自引用（值列与目标同属目标表 / 无来源表限定的列）不产生跨表字段边。
     """
     amap = _build_alias_map(update)
     # CTE 引用（``FROM s`` 的 ``s``）不是真实表：从别名映射中剔除，避免伪表边
     amap = {k: v for k, v in amap.items() if k not in cte_map}
-    target_alias = update.this.alias_or_name if isinstance(update.this, exp.Table) else ""
     for eq in getattr(update, "expressions", None) or []:
         if not isinstance(eq, exp.EQ):
             continue
-        target_col = _column_name(eq.this)
+        lhs = eq.this
+        target_col = _column_name(lhs)
         if not target_col:
             continue
+        # 目标表按 SET 项独立判定：LHS 列所属表（多表 UPDATE 跨 SET 时各被更新表
+        # 都是目标，不能全局取首表）；LHS 无表限定（单表 UPDATE）时用主目标兜底
+        lhs_alias = lhs.table if isinstance(lhs, exp.Column) else None
+        item_target = amap.get(lhs_alias) if lhs_alias else target_name
+        if not item_target:
+            item_target = target_name
         val = eq.expression
         if isinstance(val, exp.Subquery):
             # SET 值为子查询：子查询 SELECT 的投影列 → 目标列（无别名时用目标列名）
@@ -750,19 +760,20 @@ def _extract_update_edges(
                 continue
             for projection in getattr(val.this, "selects", None) or []:
                 if _projection_has_star(projection):
-                    edges.append(_star_edge(projection, sub, update, target_name))
+                    edges.append(_star_edge(projection, sub, update, item_target))
                     continue
                 sub_col = _projection_name(projection) or target_col
                 is_bare = _is_bare_column_projection(projection)
                 _emit_leaf_edges(
-                    sub, projection, cte_map, dialect, target_name, sub_col, is_bare, edges
+                    sub, projection, cte_map, dialect, item_target, sub_col, is_bare, edges
                 )
             continue
         # 普通表达式：逐个解析值中的列引用到来源表
         is_bare = isinstance(val, exp.Column)
         expr_sql = None if is_bare else val.sql(dialect=dialect)
         for leaf in val.find_all(exp.Column):
-            if not leaf.table or leaf.table == target_alias:
+            # 自引用：源列与 LHS 同属一张被更新表（如 ``t1.v = t1.v * 2``）→ 跳过
+            if not leaf.table or leaf.table == lhs_alias:
                 continue
             if leaf.table in cte_map:
                 # 穿透 CTE：进入定义 SELECT 找同名投影列，解析到真实来源表
@@ -778,7 +789,7 @@ def _extract_update_edges(
                             FieldEdge(
                                 source_table=rt,
                                 source_column=rc,
-                                target_table=target_name,
+                                target_table=item_target,
                                 target_column=target_col,
                                 expression=expr_sql,
                             )
@@ -786,13 +797,13 @@ def _extract_update_edges(
                     break
                 continue
             src_t = amap.get(leaf.table)
-            if not src_t or src_t == target_name:
+            if not src_t or src_t == item_target:
                 continue
             edges.append(
                 FieldEdge(
                     source_table=src_t,
                     source_column=leaf.name,
-                    target_table=target_name,
+                    target_table=item_target,
                     target_column=target_col,
                     expression=expr_sql,
                 )
