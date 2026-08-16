@@ -27,13 +27,14 @@ vi.mock("../api", () => {
     reviewMetric: vi.fn(),
     fetchCurrentUser: vi.fn(),
     listUsers: vi.fn(),
+    listDomainTree: vi.fn(),
     batchApproveMetrics: vi.fn(),
     batchRejectMetrics: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { fetchCurrentUser, listMetrics, listUsers } from "../api";
+import { fetchCurrentUser, listDomainTree, listMetrics, listUsers } from "../api";
 const mockedList = vi.mocked(listMetrics);
 
 const metric: MetricResponse = {
@@ -101,6 +102,7 @@ describe("MetricReview 指标审批", () => {
       org_id: 1,
     });
     vi.mocked(listUsers).mockResolvedValue([]);
+    vi.mocked(listDomainTree).mockResolvedValue([]);
   });
 
   it("加载并展示待审核指标", async () => {

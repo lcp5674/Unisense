@@ -7,11 +7,12 @@ import {
   reviewMetric,
   fetchCurrentUser,
   listUsers,
+  listDomainTree,
   batchApproveMetrics,
   batchRejectMetrics,
   UnisenseApiError,
 } from "../api";
-import type { CurrentUser, MetricResponse } from "../types";
+import type { CurrentUser, MetricResponse, SubjectDomainTreeNode } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
@@ -95,6 +96,8 @@ export function MetricReview() {
   const [busyCode, setBusyCode] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
+  // 域 code → 中文名（「域」列显示中文名，与指标目录一致）
+  const [domainMap, setDomainMap] = useState<Record<string, string>>({});
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
   // 审批工作台视角：pending=待我审（REVIEW）；reviewed=我审过的（按 approver_id 过滤）
@@ -154,6 +157,19 @@ export function MetricReview() {
     fetchCurrentUser().then(setCurrentUser).catch(() => {});
     listUsers()
       .then((u) => setUserMap(new Map(u.map((x) => [x.id, x.display_name || x.username]))))
+      .catch(() => {});
+    listDomainTree()
+      .then((tree) => {
+        const m: Record<string, string> = {};
+        const walk = (nodes: SubjectDomainTreeNode[]) => {
+          for (const n of nodes) {
+            m[n.code] = n.name;
+            if (n.children?.length) walk(n.children);
+          }
+        };
+        walk(tree);
+        setDomainMap(m);
+      })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, view, currentUser?.id]);
@@ -219,7 +235,7 @@ export function MetricReview() {
       ),
     },
     { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
-    { title: "域", dataIndex: "domain", key: "domain" },
+    { title: "域", dataIndex: "domain", key: "domain", render: (v: string) => domainMap[v] ?? v },
     {
       title: "PII",
       key: "pii",
