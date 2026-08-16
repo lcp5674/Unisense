@@ -894,6 +894,8 @@ export interface MetricDimension {
   dim_code: string;
   role: string;
   default_member: string | null;
+  /** 维度当前状态（DRAFT/PUBLISHED/DEPRECATED）——指标详情「关联维度」展示维度废弃态 */
+  dim_status?: string | null;
 }
 
 /** 按维度查绑定指标（GET /dimensions/{dim_code}/metrics，role 为 PARTITION/SPLICE/FILTER） */

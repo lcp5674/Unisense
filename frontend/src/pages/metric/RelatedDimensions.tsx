@@ -17,6 +17,18 @@ const ROLE_COLOR: Record<string, string> = {
   FILTER: "cyan",
 };
 
+// 维度状态 → 中文/颜色（对齐 Dimensions.tsx 的 STATUS_LABEL/STATUS_COLOR）
+const DIM_STATUS_LABEL: Record<string, string> = {
+  DRAFT: "草稿",
+  PUBLISHED: "已发布",
+  DEPRECATED: "已废弃",
+};
+const DIM_STATUS_COLOR: Record<string, string> = {
+  DRAFT: "default",
+  PUBLISHED: "success",
+  DEPRECATED: "error",
+};
+
 /** 指标详情页「关联维度」：展示该指标已绑定的维度及角色（治理追溯，TD §12.6） */
 export function RelatedDimensions({ metricId }: { metricId: number }) {
   const navigate = useNavigate();
@@ -62,6 +74,18 @@ export function RelatedDimensions({ metricId }: { metricId: number }) {
       dataIndex: "default_member",
       key: "default_member",
       render: (v: string | null) => (v ? <span className="mono">{v}</span> : <span className="muted">—</span>),
+    },
+    {
+      title: "维度状态",
+      dataIndex: "dim_status",
+      key: "dim_status",
+      width: 110,
+      render: (v: string | null | undefined) =>
+        v ? (
+          <Tag color={DIM_STATUS_COLOR[v] ?? "default"}>{DIM_STATUS_LABEL[v] ?? v}</Tag>
+        ) : (
+          <span className="muted">—</span>
+        ),
     },
   ];
 

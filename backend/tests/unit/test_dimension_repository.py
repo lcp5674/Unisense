@@ -184,7 +184,7 @@ class TestMetricDimensionCRUD:
         session.add.assert_called_once_with(md)
 
     async def test_list_metric_dimensions_filters_by_metric_id(self, repo, session) -> None:
-        rows = [SimpleNamespace(dim_code="region")]
+        rows = [(SimpleNamespace(dim_code="region"), SimpleNamespace(status="PUBLISHED"))]
         session.execute = AsyncMock(return_value=_FakeResult(rows=rows))
         out = await repo.list_metric_dimensions(42)
         assert out == rows

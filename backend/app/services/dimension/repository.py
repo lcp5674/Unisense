@@ -127,9 +127,20 @@ class DimensionRepository:
         await self._session.flush()
         return obj
 
-    async def list_metric_dimensions(self, metric_id: int) -> list[MetricDimension]:
-        stmt = select(MetricDimension).where(MetricDimension.metric_id == metric_id)
-        return list((await self._session.execute(stmt)).scalars().all())
+    async def list_metric_dimensions(
+        self, metric_id: int
+    ) -> list[tuple[MetricDimension, Dimension]]:
+        """按指标查绑定维度：join Dimension 拿 dim_code/status（治理追溯，对齐
+        ``list_dimension_metrics`` 的 join 模式）。返回 ``(binding, dimension)`` 元组，
+        供指标详情「关联维度」展示维度状态（未 join 前无法区分维度已废弃与否）。
+        """
+        stmt = (
+            select(MetricDimension, Dimension)
+            .join(Dimension, Dimension.dim_code == MetricDimension.dim_code)
+            .where(MetricDimension.metric_id == metric_id)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(binding, dimension) for binding, dimension in rows]
 
     async def list_metrics_by_dimension(self, dim_code: str) -> list[Metric]:
         """查询绑定指定维度的全部指标（改编码联动回写口径声明用）。"""

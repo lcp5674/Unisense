@@ -88,7 +88,8 @@ class DimensionMemberCreate(BaseModel):
     parent_code: str | None = Field(None, max_length=64)
     path: str | None = Field(None, max_length=512)  # 缺省由服务端按父级路径自动推测
     attributes: dict[str, Any] | None = None
-    status: str = "DRAFT"  # 默认草稿：新成员先进入未发布态（对齐维度主体/指标/术语的状态机起点），显式发布后才被下游消费
+    status: str = "DRAFT"  # 默认草稿：新成员先进入未发布态（对齐维度主体/指标/术语
+    # 的状态机起点），显式发布后才被下游消费
 
     @field_validator("member_name")
     @classmethod
@@ -185,15 +186,30 @@ class MetricDimensionResponse(BaseModel):
     dim_code: str
     role: str
     default_member: str | None = None
+    #: 维度当前状态（DRAFT/PUBLISHED/DEPRECATED）——指标详情「关联维度」展示用；
+    #: 来自 repository list_metric_dimensions 的 join Dimension，可能为空（旧调用契约）。
+    dim_status: str | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> MetricDimensionResponse:
+        # 兼容两种入参：绑定对象 或 (binding, dimension) 元组（join 后带维度状态）
+        if isinstance(m, tuple):
+            binding, dimension = m
+            return cls(
+                id=binding.id,
+                metric_id=binding.metric_id,
+                dim_code=binding.dim_code,
+                role=binding.role,
+                default_member=getattr(binding, "default_member", None),
+                dim_status=getattr(dimension, "status", None),
+            )
         return cls(
             id=m.id,
             metric_id=m.metric_id,
             dim_code=m.dim_code,
             role=m.role,
             default_member=getattr(m, "default_member", None),
+            dim_status=None,
         )
 
 
