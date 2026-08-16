@@ -189,6 +189,9 @@ const PAYLOAD_FIELD_LABEL_FE: Record<string, string> = {
   pii_columns: "敏感字段",
   reviewer_id: "审核人ID",
   reviewer: "审核人",
+  // 反馈类
+  feedback_id: "反馈编号",
+  comment: "反馈内容",
   // 指标类（健康度/废弃/审批）
   score: "健康得分",
   missing_dimensions: "缺失治理项",
@@ -248,6 +251,25 @@ const STATUS_CN_FE: Record<string, string> = {
   suspended: "停用",
   deleted: "已删除",
 };
+// 反馈处理状态（feedback.status：pending/in_progress/adopted/rejected）
+const FEEDBACK_STATUS_CN_FE: Record<string, string> = {
+  pending: "待处理",
+  in_progress: "跟进中",
+  adopted: "已采纳",
+  rejected: "已驳回",
+};
+
+// 剥离反馈 comment 中后端追加的状态变更历史（[时间戳] status=... note=... by=...），
+// 支持历史独立成行或内嵌行尾两种形态——只保留用户提交的原始反馈内容，
+// 否则通知里塞满处理日志，既不直观也难读懂。
+function cleanFeedbackComment(comment: string): string {
+  return comment
+    .split("\n")
+    .map((l) => l.replace(/\s*\[\d{4}-\d{2}-\d{2}T[\dTZ:.+\-]+\]\s*status=.*$/, "").trimEnd())
+    .filter((l) => l.trim() !== "")
+    .join("\n")
+    .trim();
+}
 
 function humanizeFeValue(key: string, v: unknown): string {
   if (v === null || v === undefined) return "无";
@@ -255,8 +277,9 @@ function humanizeFeValue(key: string, v: unknown): string {
   if (key === "level" || key === "severity") return LEVEL_CN_FE[String(v)] ?? String(v);
   if (key === "rule_type") return RULE_TYPE_CN_FE[String(v)] ?? String(v);
   if (key === "grant_type") return v === "READ" ? "只读" : v === "READ_WRITE" ? "读写" : String(v);
-  if (key === "status") return STATUS_CN_FE[String(v)] ?? String(v);
+  if (key === "status") return FEEDBACK_STATUS_CN_FE[String(v)] ?? STATUS_CN_FE[String(v)] ?? String(v);
   if (key === "type") return METRIC_TYPE_CN_FE[String(v)] ?? String(v);
+  if (key === "comment" && typeof v === "string") return cleanFeedbackComment(v) || "无";
   if (key === "health_level") return HEALTH_LEVEL_CN_FE[String(v)] ?? String(v);
   if (key === "score" && typeof v === "number") return `${v} 分`;
   if (key === "table_edges" || key === "field_edges") return `${String(v)} 条`;
@@ -307,7 +330,18 @@ function parseNotifyBodyFields(body: string | null, payload: Record<string, unkn
   const fields: { label: string; value: string }[] = [];
   const seenLabels = new Set<string>();
   if (payload && Object.keys(payload).length > 0) {
-    const skipKeys = new Set(["event_type", "payload", "source", "note"]);
+    const skipKeys = new Set([
+      "event_type",
+      "payload",
+      "source",
+      "note",
+      // 投递控制字段（不展示给用户）
+      "recipient_user_id",
+      "actor_id",
+      "actor_name",
+      // 处理人已由 meta 区「操作者」展示，payload 里的数字 ID 不重复展示
+      "resolver_id",
+    ]);
     for (const [k, v] of Object.entries(payload)) {
       if (skipKeys.has(k)) continue;
       if (v === null || v === undefined) continue;

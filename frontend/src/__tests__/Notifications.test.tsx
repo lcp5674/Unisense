@@ -568,4 +568,32 @@ describe("通知中心 - 信息展示增强", () => {
     await waitFor(() => expect(screen.getByText("血缘已解析")).toBeInTheDocument());
     expect(screen.queryByText(/操作人/)).not.toBeInTheDocument();
   });
+
+  it("反馈状态更新通知：状态中文、反馈内容剥离处理历史、投递控制字段隐藏", async () => {
+    const n = notif({
+      id: 60,
+      template_code: "feedback.status_updated",
+      title: "反馈状态更新",
+      payload: {
+        feedback_id: 8,
+        status: "adopted",
+        comment: "1111 [2026-08-16T09:22:02.727087+00:00] status=adopted note=验证 by=3\n[2026-08-16T09:25:00.000000+00:00] status=in_progress note=跟进 by=3",
+        resolver_id: 3,
+        recipient_user_id: 3,
+      },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("反馈状态更新")).toBeInTheDocument());
+    // 状态英文枚举 → 中文（adopted → 已采纳）
+    expect(screen.getByText("已采纳")).toBeInTheDocument();
+    expect(screen.queryByText("adopted")).not.toBeInTheDocument();
+    // 反馈内容：剥离后端追加的处理历史，只显示用户提交的原始内容
+    expect(screen.getByText("1111")).toBeInTheDocument();
+    expect(screen.queryByText(/status=adopted/)).not.toBeInTheDocument();
+    // 投递控制字段（recipient_user_id）与重复字段（resolver_id）不展示
+    expect(screen.queryByText("recipient_user_id")).not.toBeInTheDocument();
+    expect(screen.queryByText("resolver_id")).not.toBeInTheDocument();
+  });
 });
