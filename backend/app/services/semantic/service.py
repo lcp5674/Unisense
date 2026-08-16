@@ -1980,6 +1980,13 @@ class MetricService(BaseService):
         if successor_code is not None and not str(successor_code).strip():
             successor_code = None
         if successor_code is not None:
+            # 自废弃防护：替代指标不得为自身（废弃指标指向自己作替代属语义矛盾，
+            # 详情页废弃链会展示"替代指标"指向自身）。
+            if str(successor_code) == metric_code:
+                raise BusinessError(
+                    "替代指标不能为指标自身，请指定其他已发布指标或留空",
+                    error_code="VALIDATION_ERROR",
+                )
             successor = await self._repo.get_by_code(successor_code)
             if successor is None:
                 raise NotFoundError(f"替代指标不存在: {successor_code}")
@@ -3315,6 +3322,12 @@ class MetricService(BaseService):
         if successor_code is not None and not str(successor_code).strip():
             successor_code = None
         if successor_code is not None:
+            # 自废弃防护：替代指标不得为自身（语义矛盾，废弃链会展示指向自身）
+            if str(successor_code) == metric_code:
+                raise BusinessError(
+                    "替代指标不能为指标自身，请指定其他已发布指标或留空",
+                    error_code="VALIDATION_ERROR",
+                )
             successor = await self._repo.get_by_code(successor_code)
             if successor is None:
                 raise NotFoundError(f"替代指标不存在: {successor_code}")

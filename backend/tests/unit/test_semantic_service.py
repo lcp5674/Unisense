@@ -332,6 +332,22 @@ async def test_deprecate_metric_success_sets_sunset():
     assert called["sunset_until"] is not None
 
 
+async def test_deprecate_metric_self_successor_rejected():
+    """自废弃防护：替代指标为指标自身时拒绝（废弃链不应指向自身，语义矛盾）。"""
+    import pytest as _pytest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+
+    with _pytest.raises(BusinessError) as exc:
+        await svc.deprecate_metric(
+            "sales_gmv_daily", "sales_gmv_daily", actor_id=1, role="metric_owner"
+        )
+    assert exc.value.error_code == "VALIDATION_ERROR"
+    # 自废弃在替代指标查询之前拦截：get_by_code 仅被调用一次（取指标自身），未查替代
+    repo.get_by_code.assert_awaited_once()
+
+
 async def test_deprecate_metric_blocked_by_pdp_cross_domain():
     """domain_admin 跨域废弃被 PDP 拒绝（deprecate 补 PDP 域校验，修复域隔离漏洞）。
 
