@@ -49,11 +49,12 @@ vi.mock("../api", () => {
     removeFavorite: vi.fn(),
     listDataSources: vi.fn(),
     previewColumnValues: vi.fn(),
+    fetchCurrentUser: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 const mockedListFavorites = vi.mocked(listFavorites);
@@ -99,6 +100,15 @@ beforeEach(() => {
   vi.mocked(listDimensionMembers).mockResolvedValue({ items: [], total: 0 });
   // 用户选择器（维度 Owner 下拉），默认空
   vi.mocked(listUsers).mockResolvedValue([]);
+  // 当前用户（对账复核需治理角色）：默认平台管理员，使复核按钮可用
+  vi.mocked(fetchCurrentUser).mockResolvedValue({
+    id: 1,
+    username: "admin",
+    display_name: "管理员",
+    role: "platform_admin",
+    domain: null,
+    org_id: 1,
+  });
   vi.mocked(listDataSources).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
   vi.mocked(previewColumnValues).mockResolvedValue({ values: [], total: 0, truncated: false });
   // 详情抽屉/成员删除/映射编辑等新功能默认值（避免组件内 .then 到 undefined）
@@ -517,6 +527,36 @@ describe("Dimensions 页面", () => {
     expect(screen.getByText("sales_gmv · 成交额")).toBeInTheDocument();
     // 不应再显示裸 #id
     expect(screen.queryByText("#7")).not.toBeInTheDocument();
+  });
+
+  it("对账复核权限对齐后端 _GOV_DEPS：非治理角色（metric_owner）复核按钮禁用", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchCurrentUser).mockResolvedValue({
+      id: 5,
+      username: "owner",
+      display_name: "指标Owner",
+      role: "metric_owner",
+      domain: "finance",
+      org_id: 1,
+    });
+    vi.mocked(listReconciliations).mockResolvedValue({
+      items: [
+        { id: 2, metric_id: 7, metric_code: "sales_gmv", metric_name: "成交额", dim_code: "dim_channel", expected_expr: "a", actual_expr: "b", diff_summary: null, status: "PENDING", reviewed_by: null, reviewed_at: null, created_at: "2026-08-01T00:00:00" },
+      ],
+      total: 1,
+    });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole("tab", { name: /对账/ }));
+    await screen.findByText(/sales_gmv/);
+    // metric_owner 无治理角色：复核按钮（通过/驳回）均应禁用
+    const approveBtn = screen.getAllByRole("button", { name: /通\s*过/ })[0];
+    expect((approveBtn as HTMLButtonElement).disabled).toBe(true);
+    const rejectBtn = screen.getAllByRole("button", { name: /驳\s*回/ })[0];
+    expect((rejectBtn as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

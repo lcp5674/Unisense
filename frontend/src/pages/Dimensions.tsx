@@ -30,6 +30,7 @@ import {
   removeFavorite,
   listDataSources,
   previewColumnValues,
+  fetchCurrentUser,
   UnisenseApiError,
 } from "../api";
 import type {
@@ -1396,6 +1397,9 @@ function ReconciliationsTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  // 复核需治理角色（对齐后端 _GOV_DEPS = domain_admin/platform_admin）；
+  // 提交对账用 dimension:reconcile（metric_owner 等可提交，但不能复核他人对账）
+  const [isGov, setIsGov] = useState(false);
   // 对账表每页条数（持久化，用户可自定义）
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.reconciliations.pageSize", 20);
 
@@ -1414,6 +1418,9 @@ function ReconciliationsTab() {
   useEffect(() => {
     load();
     listMetrics({ page_size: 100 }).then((r) => setMetrics(r.items)).catch(() => {});
+    fetchCurrentUser()
+      .then((u) => setIsGov(u.role === "domain_admin" || u.role === "platform_admin"))
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1474,8 +1481,8 @@ function ReconciliationsTab() {
       render: (_: unknown, r: Reconciliation) =>
         r.status === "PENDING" ? (
           <Space>
-            <Button size="small" type="primary" disabled={!can("dimension:reconcile")} onClick={() => handleReview(r, "APPROVED")}>通过</Button>
-            <Button size="small" danger disabled={!can("dimension:reconcile")} onClick={() => handleReview(r, "REJECTED")}>驳回</Button>
+            <Button size="small" type="primary" disabled={!isGov} onClick={() => handleReview(r, "APPROVED")}>通过</Button>
+            <Button size="small" danger disabled={!isGov} onClick={() => handleReview(r, "REJECTED")}>驳回</Button>
           </Space>
         ) : null,
     },
