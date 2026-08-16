@@ -368,9 +368,16 @@ export function SubjectDomain() {
 
   return (
     <div>
-      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
-        返回
-      </Button>
+      <div className="page-head">
+        <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
+          <div className="page-kicker">指标资产 / 主题域管理</div>
+          <h2>主题域管理</h2>
+          <p>业务域树形组织——新建子域、配置域默认值，指标按域归类。</p>
+        </div>
+      </div>
       <Row gutter={16}>
         <Col span={10}>
           <Card title="主题域树" extra={can("domain:create") && <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate(true)}>新建根域</Button>} style={{ minHeight: 500 }}>
@@ -418,9 +425,18 @@ export function SubjectDomain() {
                 <div style={{ marginTop: 16 }}>
                   <h4>域默认值预设</h4>
                   <Descriptions column={2} bordered size="small">
-                    {DICT_FIELDS.filter(f => defaults[f.key]).map(f => (
-                      <Descriptions.Item key={f.key} label={f.label}>{enumLabel(DICT_FIELD_MAPS[f.key] ?? {}, String(defaults[f.key]))}</Descriptions.Item>
-                    ))}
+                    {DICT_FIELDS.filter(f => defaults[f.key]).map(f => {
+                      const dictType = f.key === "type" ? "metric_type" : f.key;
+                      // 优先从字典选项反查中文（与默认值弹窗同源，避免单位等未硬编码枚举展示裸 code）；
+                      // 字典未加载时回退 enumLabel 硬编码映射
+                      const opt = (dictOptions[dictType] ?? []).find((o) => o.value === String(defaults[f.key]));
+                      const label = opt?.label
+                        ?? enumLabel(DICT_FIELD_MAPS[f.key] ?? {}, String(defaults[f.key]))
+                        ?? String(defaults[f.key]);
+                      return (
+                        <Descriptions.Item key={f.key} label={f.label}>{label}</Descriptions.Item>
+                      );
+                    })}
                   </Descriptions>
                 </div>
               )}
