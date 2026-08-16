@@ -997,7 +997,7 @@ export function MetricDetail() {
         title="业务描述"
         extra={
           <Space size={8}>
-            {isOwnerOrAdmin && (
+            {isOwnerOrAdmin && !piiMasked && (
               <Button
                 size="small"
                 icon={<EditOutlined />}

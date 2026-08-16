@@ -741,7 +741,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       domain: "sales",
       org_id: 1,
     });
-    mockedGetMetric.mockResolvedValue({ ...metric, description: "原描述" });
+    mockedGetMetric.mockResolvedValue({ ...metric, pii_flag: false, description: "原描述" });
     mockedUpdateDesc.mockResolvedValue({ ...metric, description: "修改后的描述" });
     renderWithPerms(["metric:create"]);
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
@@ -792,4 +792,24 @@ describe("MetricDetail 按钮级权限过滤", () => {
       expect(screen.getAllByText("sales_gmv_sum_d").length).toBeGreaterThan(0);
     });
   });
+  it("PII 指标对非敏感角色隐藏「编辑描述」与「AI 生成描述」按钮（消除编辑空描述清空原文风险）", async () => {
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "zhangsan",
+      display_name: "张三",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    // pii_flag=true 保持默认：metric_owner 属非敏感角色 → piiMasked=true
+    mockedGetMetric.mockResolvedValue({ ...metric, description: "PII 指标描述" });
+    renderWithPerms(["metric:create", "metric:infer-description"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    await screen.findByText(/业务描述已隐藏/);
+    expect(screen.queryByText("编辑描述")).toBeNull();
+    expect(screen.queryByText("AI 生成描述")).toBeNull();
+  });
+
+
 });
+
