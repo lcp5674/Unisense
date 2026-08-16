@@ -2,17 +2,19 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Button, Card, Col, Row, Tree, Descriptions, Modal, Form, Input, InputNumber,
-  Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip, Alert,
+  Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip, Alert, Select,
 } from "antd";
 import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, SettingOutlined, BranchesOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
 import {
   listDomainTree, getDomain, createDomain, updateDomain, deactivateDomain,
   activateDomain, deleteDomain, getDomainDefaults, updateDomainDefaults,
+  listDictItems,
 } from "../api";
 import type { SubjectDomainTreeNode, SubjectDomain } from "../types";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
 import { slugifyCode } from "../utils/zhEnDict";
+import { usePermission } from "../hooks/usePermission";
 
 /**
  * 前端编码预览（与后端 codegen.slugify_code 规则对齐）：
@@ -122,7 +124,7 @@ function _nodeDepth(nodes: SubjectDomainTreeNode[], targetId: number, depth: num
   return 0;
 }
 
-function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: SubjectDomainTreeNode) => void, allNodes: SubjectDomainTreeNode[]): DataNode[] {
+function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: SubjectDomainTreeNode) => void, allNodes: SubjectDomainTreeNode[], canAddChild: boolean): DataNode[] {
   return nodes.map((n) => ({
     key: n.code,
     title: (
@@ -130,7 +132,7 @@ function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: Subject
       <span className="tree-node-title">
         {n.name} <Tag color={n.status === "active" ? "green" : "red"} style={{ marginLeft: 4, fontSize: 10 }}>{n.status === "active" ? "启用" : "停用"}</Tag>
         {n.metric_count > 0 && <Tag color="blue" style={{ marginLeft: 4, fontSize: 10 }}>{n.metric_count}指标</Tag>}
-        {_nodeDepth(allNodes, n.id) < 3 && (
+        {canAddChild && _nodeDepth(allNodes, n.id) < 3 && (
           <Tooltip title={`在「${n.name}」下新建子域`}>
             <Button
               type="text"
@@ -145,18 +147,53 @@ function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: Subject
         )}
       </span>
     ),
-    children: n.children.length > 0 ? treeDataToNodes(n.children, onAddChild, allNodes) : undefined,
+    children: n.children.length > 0 ? treeDataToNodes(n.children, onAddChild, allNodes, canAddChild) : undefined,
   }));
 }
 
 export function SubjectDomain() {
   const { message, modal } = AntApp.useApp();
+  const { can } = usePermission();
   const navigate = useNavigate();
   const [treeData, setTreeData] = useState<SubjectDomainTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [detail, setDetail] = useState<SubjectDomain | null>(null);
   const [defaults, setDefaults] = useState<Record<string, unknown>>({});
+  // 域默认值弹窗：各字段从字典下拉选择（惰性选择，避免手输非法枚举值）
+  const [dictOptions, setDictOptions] = useState<Record<string, Array<{ value: string; label: string }>>>({});
+
+  // 加载域默认值相关字典（粒度/单位/聚合/时间语义/新鲜度/数仓层/类型/服务模式/可加性/分级）
+  useEffect(() => {
+    const dictTypeOf: Record<string, string> = {
+      granularity: "granularity",
+      unit: "unit",
+      aggregation: "aggregation",
+      time_semantics: "time_semantics",
+      freshness: "freshness",
+      dw_layer: "dw_layer",
+      type: "metric_type",
+      serving_mode: "serving_mode",
+      additivity: "additivity",
+      metric_tier: "metric_tier",
+    };
+    Promise.all(
+      Object.values(dictTypeOf).map((dt) =>
+        listDictItems(dt)
+          .then((items) => ({
+            dt,
+            options: items
+              .filter((it) => it.status === "active")
+              .map((it) => ({ value: it.code, label: `${it.label}（${it.code}）` })),
+          }))
+          .catch(() => ({ dt, options: [] as Array<{ value: string; label: string }> })),
+      ),
+    ).then((results) => {
+      const map: Record<string, Array<{ value: string; label: string }>> = {};
+      for (const r of results) map[r.dt] = r.options;
+      setDictOptions(map);
+    });
+  }, []);
 
   // 统一返回上一入口：优先回退浏览器历史（全局搜索等入口），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -336,12 +373,12 @@ export function SubjectDomain() {
       </Button>
       <Row gutter={16}>
         <Col span={10}>
-          <Card title="主题域树" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate(true)}>新建根域</Button>} style={{ minHeight: 500 }}>
+          <Card title="主题域树" extra={can("domain:create") && <Button type="primary" icon={<PlusOutlined />} onClick={() => openCreate(true)}>新建根域</Button>} style={{ minHeight: 500 }}>
             {loading ? <Spin /> : treeData.length === 0 ? <Empty description="暂无主题域" /> : (
               <Tree
                 showLine
                 defaultExpandAll
-                treeData={treeDataToNodes(treeData, (n) => openCreate(false, n), treeData)}
+                treeData={treeDataToNodes(treeData, (n) => openCreate(false, n), treeData, can("domain:create"))}
                 onSelect={handleSelect}
                 selectedKeys={selectedCode ? [selectedCode] : []}
               />
@@ -352,12 +389,20 @@ export function SubjectDomain() {
           {detail ? (
             <Card title={`域详情: ${detail.name}`} extra={
               <Space>
-                <Button icon={<SettingOutlined />} onClick={() => { defaultsForm.setFieldsValue(defaults); setDefaultsOpen(true); }}>默认值</Button>
-                <Button icon={<EditOutlined />} onClick={() => { editForm.setFieldsValue({ name: detail.name, sort_order: detail.sort_order, description: detail.description }); setEditOpen(true); }}>编辑</Button>
-                <Button icon={detail.status === "active" ? <StopOutlined /> : <CheckCircleOutlined />} onClick={handleToggle}>
-                  {detail.status === "active" ? "停用" : "启用"}
-                </Button>
-                <Button danger icon={<DeleteOutlined />} onClick={handleDelete}>删除</Button>
+                {can("domain:create") && (
+                  <Button icon={<SettingOutlined />} onClick={() => { defaultsForm.setFieldsValue(defaults); setDefaultsOpen(true); }}>默认值</Button>
+                )}
+                {can("domain:create") && (
+                  <Button icon={<EditOutlined />} onClick={() => { editForm.setFieldsValue({ name: detail.name, sort_order: detail.sort_order, description: detail.description }); setEditOpen(true); }}>编辑</Button>
+                )}
+                {can("domain:create") && (
+                  <Button icon={detail.status === "active" ? <StopOutlined /> : <CheckCircleOutlined />} onClick={handleToggle}>
+                    {detail.status === "active" ? "停用" : "启用"}
+                  </Button>
+                )}
+                {can("domain:create") && (
+                  <Button danger icon={<DeleteOutlined />} onClick={handleDelete}>删除</Button>
+                )}
               </Space>
             }>
               <Descriptions column={2} bordered size="small">
@@ -436,11 +481,25 @@ export function SubjectDomain() {
       {/* 默认值弹窗 */}
       <Modal title="配置域默认值" open={defaultsOpen} onCancel={() => setDefaultsOpen(false)} onOk={() => defaultsForm.submit()} width={600}>
         <Form form={defaultsForm} onFinish={handleSaveDefaults} layout="vertical">
-          {DICT_FIELDS.map(f => (
-            <Form.Item key={f.key} name={f.key} label={f.label}>
-              <Input placeholder={`默认${f.label}值`} />
-            </Form.Item>
-          ))}
+          {DICT_FIELDS.map(f => {
+            const dictType = f.key === "type" ? "metric_type" : f.key;
+            const opts = dictOptions[dictType];
+            return (
+              <Form.Item key={f.key} name={f.key} label={f.label}>
+                {opts && opts.length > 0 ? (
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder={`选择默认${f.label}`}
+                    options={opts}
+                  />
+                ) : (
+                  <Input placeholder={`默认${f.label}值`} />
+                )}
+              </Form.Item>
+            );
+          })}
         </Form>
       </Modal>
     </div>

@@ -15,15 +15,17 @@ vi.mock("../api", () => ({
   deleteDomain: vi.fn(),
   getDomainDefaults: vi.fn(),
   updateDomainDefaults: vi.fn(),
+  listDictItems: vi.fn(),
 }));
 
-import { listDomainTree, createDomain, getDomain, getDomainDefaults, updateDomain } from "../api";
+import { listDomainTree, createDomain, getDomain, getDomainDefaults, updateDomain, listDictItems } from "../api";
 
 const mockedList = vi.mocked(listDomainTree);
 const mockedCreate = vi.mocked(createDomain);
 const mockedGet = vi.mocked(getDomain);
 const mockedDefaults = vi.mocked(getDomainDefaults);
 const mockedUpdate = vi.mocked(updateDomain);
+const mockedDictItems = vi.mocked(listDictItems);
 
 /** 组件依赖 AntApp.useApp() 的 message/modal，渲染时需包 <App> 提供真实 context；组件用 useNavigate 需配路由。 */
 function renderPage() {
@@ -80,6 +82,8 @@ describe("SubjectDomain 页面", () => {
     mockedCreate.mockResolvedValue({ id: 4, code: "risk", name: "风控", parent_id: null, level: 1, path: "4", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 0, created_at: "", updated_at: "" });
     mockedGet.mockResolvedValue({ id: 1, code: "sales", name: "销售", parent_id: null, level: 1, path: "1", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 3, created_at: "", updated_at: "" });
     mockedDefaults.mockResolvedValue({});
+    // 域默认值字典：默认返回空（下拉回退输入框），不影响既有测试
+    mockedDictItems.mockResolvedValue([]);
   });
 
   it("渲染域树与「新建根域」按钮", async () => {
@@ -248,5 +252,32 @@ describe("SubjectDomain 页面", () => {
     await screen.findByText("销售");
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+
+  it("域默认值弹窗：字典字段渲染下拉选项而非自由文本（对齐字典枚举，避免手输非法值）", async () => {
+    // 粒度字典返回「日（day）」「月（month）」等选项
+    mockedDictItems.mockImplementation((dictType: string) =>
+      Promise.resolve(
+        dictType === "granularity"
+          ? [
+              { id: 1, dict_type: "granularity", code: "day", label: "日", sort_order: 0, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+              { id: 2, dict_type: "granularity", code: "month", label: "月", sort_order: 1, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+            ]
+          : [],
+      ),
+    );
+    renderPage();
+    // 点击树节点「销售」→ 加载详情卡（默认值按钮在详情卡内）
+    fireEvent.click(await screen.findByText("销售"));
+    await screen.findByRole("button", { name: /默\s*认\s*值/ });
+    // 打开默认值弹窗（详情卡内「默认值」按钮）
+    fireEvent.click(screen.getByRole("button", { name: /默\s*认\s*值/ }));
+    await screen.findByText("配置域默认值");
+    // 粒度字段应渲染为 Select（含「日（day）」选项），而非 Input
+    const granularitySelect = document.querySelector(".ant-select");
+    expect(granularitySelect).toBeTruthy();
+    // 确认字典项以「日（day）」标签出现（仅当下拉展开时可见；此处验证 Select 已渲染而非 Input）
+    expect(document.querySelectorAll(".ant-select").length).toBeGreaterThan(0);
+    expect(document.querySelector("input[placeholder*='默认粒度值']")).toBeNull();
   });
 });
