@@ -1432,7 +1432,7 @@ function MappingsTab() {
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建映射</Button>
         )}
       </div>
-      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }} locale={{ emptyText: "暂无维度映射" }} />
+      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], showTotal: (t: number) => `共 ${t} 条`, onShowSizeChange }} locale={{ emptyText: "暂无维度映射" }} />
 
       <Modal title="新建维度映射" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={saving}>
         <Form form={form} layout="vertical" scrollToFirstError onFinish={handleCreate} style={{ marginTop: 8 }}>
@@ -1635,7 +1635,7 @@ function ReconciliationsTab() {
           <Button type="primary" icon={<SendOutlined />} onClick={() => setModalOpen(true)}>提交对账</Button>
         )}
       </div>
-      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }} locale={{ emptyText: "暂无对账记录" }} />
+      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], showTotal: (t: number) => `共 ${t} 条`, onShowSizeChange }} locale={{ emptyText: "暂无对账记录" }} />
 
       <Modal title="提交维度对账" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="提交" confirmLoading={saving}>
         <Form form={form} layout="vertical" scrollToFirstError onFinish={handleCreate} style={{ marginTop: 8 }}>
