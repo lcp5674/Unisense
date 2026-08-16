@@ -198,13 +198,19 @@ class MetricRepository:
             "name": Metric.name,
         }
         sort_col = sort_columns.get(sort_by, Metric.updated_at)
-        sort_order_clause = sort_col.asc() if sort_order == "asc" else sort_col.desc()
+        # 排序稳定性：单字段排序在同值（如同日批量创建/编辑的 updated_at）时翻页会重复/遗漏，
+        # 追加主键 id 作为次级排序（与主排序同向），保证分页记录不重不漏（工业级排序稳定性）。
+        asc_order = sort_order == "asc"
+        if asc_order:
+            sort_order_clause = (sort_col.asc(), Metric.id.asc())
+        else:
+            sort_order_clause = (sort_col.desc(), Metric.id.desc())
 
         # 列表
         stmt = (
             select(Metric)
             .where(*conditions)
-            .order_by(sort_order_clause)
+            .order_by(*sort_order_clause)
             .offset(offset)
             .limit(limit)
         )
