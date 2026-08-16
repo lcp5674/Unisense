@@ -144,4 +144,21 @@ describe("MetricReview 指标审批", () => {
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await waitFor(() => expect(screen.getByText("dashboard-page")).toBeInTheDocument());
   });
+
+  it("PII 待复核指标：禁用『通过』并展示待复核标签（对齐后端 COMPLIANCE_BLOCKED 拦截）", async () => {
+    const piiPending: MetricResponse = {
+      ...metric,
+      metric_code: "pii_metric_day",
+      pii_flag: true,
+      compliance_reviewed: false,
+    };
+    mockedList.mockResolvedValue({ items: [piiPending], total: 1, page: 1, page_size: 100 });
+    renderReview();
+    await screen.findByText("pii_metric_day");
+    // 「通过」按钮应禁用
+    const approveBtn = screen.getAllByRole("button", { name: /通\s*过/ })[0];
+    expect((approveBtn as HTMLButtonElement).disabled).toBe(true);
+    // PII 待复核标签可见（PII 列）
+    expect(screen.getAllByText("待复核").length).toBeGreaterThan(0);
+  });
 });

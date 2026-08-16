@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Input, Modal, Space, Table, Tag, message } from "antd";
+import { Button, Card, Input, Modal, Space, Table, Tag, Tooltip, message } from "antd";
 import { ArrowLeftOutlined, CheckCircleOutlined, ClockCircleOutlined } from "@ant-design/icons";
 import {
   listMetrics,
@@ -13,6 +13,7 @@ import {
 } from "../api";
 import type { CurrentUser, MetricResponse } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { usePermission } from "../hooks/usePermission";
 
 function openReviewModal(
   metric: MetricResponse,
@@ -87,6 +88,8 @@ export function MetricReview() {
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
   const navigate = useNavigate();
+  const { can } = usePermission();
+  const canApprove = can("metric:approve");
 
   // 统一返回上一入口：优先回退浏览器历史，无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -220,13 +223,16 @@ export function MetricReview() {
       title: "操作",
       key: "actions",
       render: (_: unknown, r: MetricResponse) => {
-        const allowed = canReview(r, currentUser);
+        // 同时满足权限点与行级/域级评审人身份才允许操作
+        const allowed = canApprove && canReview(r, currentUser);
+        // PII 待复核：后端 approve 会拦 COMPLIANCE_BLOCKED，前端直接禁用「通过」并提示先完成合规复核
+        const piiPending = r.pii_flag && !r.compliance_reviewed;
         return (
           <Space>
             <Button
               size="small"
               type="primary"
-              disabled={!allowed || busyCode === r.metric_code}
+              disabled={!allowed || piiPending || busyCode === r.metric_code}
               onClick={() => openReviewModal(r, true, (reason) => handleReview(r, true, reason))}
             >
               通过
@@ -239,6 +245,11 @@ export function MetricReview() {
             >
               驳回
             </Button>
+            {piiPending ? (
+              <Tooltip title="该指标含 PII，需先在详情页完成合规复核后方可通过">
+                <Tag color="orange" style={{ cursor: "help" }}>PII 待复核</Tag>
+              </Tooltip>
+            ) : null}
           </Space>
         );
       },
@@ -257,7 +268,7 @@ export function MetricReview() {
             <Button
               size="small"
               icon={<CheckCircleOutlined />}
-              disabled={!selectedKeys.length || batchBusy}
+              disabled={!selectedKeys.length || batchBusy || !canApprove}
               onClick={() => runBatch(true)}
             >
               批量通过
@@ -266,7 +277,7 @@ export function MetricReview() {
               size="small"
               danger
               icon={<ClockCircleOutlined />}
-              disabled={!selectedKeys.length || batchBusy}
+              disabled={!selectedKeys.length || batchBusy || !canApprove}
               onClick={() => runBatch(false)}
             >
               批量打回
@@ -286,9 +297,15 @@ export function MetricReview() {
           rowSelection={{
             selectedRowKeys: selectedKeys,
             onChange: (keys) => setSelectedKeys(keys),
+            // 仅允许勾选当前用户可评审的项（避免批量时"均非指派"空操作）
+            getCheckboxProps: (r: MetricResponse) => ({
+              disabled: !canReview(r, currentUser),
+            }),
           }}
           locale={{ emptyText: "暂无待评审指标" }}
-          footer={() => `共 ${total} 条待评审`}
+          footer={() =>
+            total > 100 ? `共 ${total} 条待评审，仅显示前 100 条` : `共 ${total} 条待评审`
+          }
         />
       </Card>
     </div>
