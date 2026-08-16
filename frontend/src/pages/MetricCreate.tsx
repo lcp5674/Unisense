@@ -542,7 +542,7 @@ export function MetricCreate() {
         message.warning(`检测到 ${result.detections.length} 项潜在冲突`);
       }
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.code}）` : "冲突预检失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "冲突预检失败");
     } finally {
       setPrechecking(false);
     }
@@ -575,7 +575,7 @@ export function MetricCreate() {
       message.success(`创建草稿成功：${created.metric_code}`);
       navigate(`/detail/${created.metric_code}`);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.code}）` : "创建失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
     } finally {
       setLoading(false);
     }
@@ -642,7 +642,7 @@ export function MetricCreate() {
       const result = await batchRegisterMetrics(req);
       setBatchResult(result);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.code}）` : "批量注册失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量注册失败");
     } finally {
       setBatchSubmitting(false);
     }
