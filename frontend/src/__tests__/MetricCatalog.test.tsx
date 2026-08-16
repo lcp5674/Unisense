@@ -626,6 +626,43 @@ describe("MetricCatalog URL 筛选直达（分享/刷新保持）", () => {
   });
 });
 
+describe("MetricCatalog 已应用筛选回显（非空态可感知子集）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDashboard.mockResolvedValue({ total: 0, by_domain: {}, counts: {} } as any);
+    mockedDomains.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, role: "platform_admin" } as any);
+    mockedFavorites.mockResolvedValue([]);
+    mockedUsers.mockResolvedValue([]);
+    (fetchMyPermissions as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({});
+  });
+
+  it("带 ?status=PUBLISHED&tier=T1 直达且有数据时，表上方回显已应用筛选 Tag，可一键关闭", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    render(
+      <PermissionProvider user={{ id: 1, role: "platform_admin" } as any}>
+        <MemoryRouter initialEntries={["/catalog?status=PUBLISHED&tier=T1"]}>
+          <Routes>
+            <Route path="/catalog" element={<MetricCatalog />} />
+            <Route path="/detail/:code" element={<div>detail</div>} />
+          </Routes>
+        </MemoryRouter>
+      </PermissionProvider>,
+    );
+    await screen.findByText("sales_gmv_sum_d");
+    // 非空态下显示"已应用筛选"回显条（区别于仅空态才出现的清除按钮）
+    expect(screen.getByText("已应用筛选：")).toBeTruthy();
+    expect(screen.getByText(/状态：已发布/)).toBeTruthy();
+    expect(screen.getByText(/分级：T1/)).toBeTruthy();
+    // 关闭分级 Tag 后，后续请求不再携带 tier
+    fireEvent.click(screen.getByText(/分级：T1/).closest(".ant-tag") as Element);
+    await waitFor(() => {
+      const call = mockedList.mock.calls.find((c) => c[0]?.tier === undefined || c[0]?.tier === "");
+      expect(call).toBeTruthy();
+    });
+  });
+});
+
 describe("MetricCatalog 加载失败降级", () => {
   beforeEach(() => {
     vi.clearAllMocks();

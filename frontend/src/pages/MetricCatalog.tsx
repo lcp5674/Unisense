@@ -1128,6 +1128,24 @@ export function MetricCatalog() {
         </span>
       </Space>
 
+      {hasFilter && !deletedView && (
+        <Space wrap size={[6, 4]} style={{ margin: "8px 0", width: "100%" }}>
+          <span className="muted" style={{ fontSize: 12 }}>已应用筛选：</span>
+          {keyword && <Tag closable onClose={() => { setKeyword(""); setInputValue(""); setPage(1); }}>关键词：{keyword}</Tag>}
+          {status && <Tag closable onClose={() => { setStatus(""); setPage(1); }}>状态：{STATUS_LABEL[status] ?? status}</Tag>}
+          {domain && <Tag closable onClose={() => { setDomain(""); setPage(1); }}>域：{domainName(domain)}</Tag>}
+          {tier && <Tag closable onClose={() => { setTier(""); setPage(1); }}>分级：{METRIC_TIER_LABEL[tier] ?? tier}</Tag>}
+          {lifecycleFilter && (
+            <Tag closable onClose={() => { setLifecycleFilter(null); setStatus(""); setLifecycleDate({}); setSortBy("updated_at"); setPage(1); }}>
+              {LIFECYCLE_PRESETS.find((p) => p.key === lifecycleFilter)?.label ?? lifecycleFilter}
+            </Tag>
+          )}
+          {ownerFilter && <Tag closable onClose={() => { setOwnerFilter(""); setPage(1); }}>责任人下钻</Tag>}
+          {myMetricsOnly && <Tag closable onClose={() => { setMyMetricsOnly(false); setPage(1); }}>我的指标</Tag>}
+          {favoritesOnly && <Tag closable onClose={() => { setFavoritesOnly(false); }}>只看收藏</Tag>}
+        </Space>
+      )}
+
       <Table
         dataSource={displayItems}
         columns={columns}
