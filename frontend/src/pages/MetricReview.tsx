@@ -102,7 +102,8 @@ export function MetricReview() {
   const [domainMap, setDomainMap] = useState<Record<string, string>>({});
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
-  // 审批工作台视角：pending=待我审（REVIEW）；reviewed=我审过的（按 approver_id 过滤）
+  // 审批工作台视角：pending=待我审（REVIEW）；reviewed=我审过的（按 reviewed_by 过滤，
+  // 命中审批通过或驳回——评审历史完整不丢驳回记录）
   const [view, setView] = useState<"pending" | "reviewed">("pending");
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果（对齐目录/Dimensions/Templates）
   const loadSeq = useRef(0);
@@ -123,7 +124,7 @@ export function MetricReview() {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      // pending=待我审（REVIEW）；reviewed=我审过的（按 approver_id 过滤，无状态限制以便回看通过/驳回记录）
+      // pending=待我审（REVIEW）；reviewed=我审过的（按 reviewed_by 过滤——通过或驳回都回看）
       const res = await listMetrics(
         view === "pending"
           ? {
@@ -135,7 +136,7 @@ export function MetricReview() {
               sort_order: "asc",
             }
           : {
-              approver_id: currentUser?.id,
+              reviewed_by: currentUser?.id,
               page,
               page_size: pageSize,
               sort_by: "updated_at",

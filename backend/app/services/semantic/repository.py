@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, func, select, update
+from sqlalchemy import ColumnElement, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -126,6 +126,7 @@ class MetricRepository:
         keyword: str | None = None,
         owner_id: int | None = None,
         approver_id: int | None = None,
+        reviewed_by: int | None = None,
         pii_flag: bool | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
@@ -168,6 +169,11 @@ class MetricRepository:
             conditions.append(Metric.owner_id == owner_id)
         if approver_id is not None:
             conditions.append(Metric.approver_id == approver_id)
+        if reviewed_by is not None:
+            # 评审历史完整视图：通过(approver_id) 或 驳回(reject_reviewer_id) 任一命中
+            conditions.append(
+                or_(Metric.approver_id == reviewed_by, Metric.reject_reviewer_id == reviewed_by)
+            )
         if pii_flag is not None:
             conditions.append(Metric.pii_flag.is_(pii_flag))
         if created_after is not None:

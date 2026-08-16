@@ -326,6 +326,29 @@ async def test_list_metrics_wildcard_escape_generates_escape_clause():
     assert "/_" in literal_sql
 
 
+async def test_list_metrics_reviewed_by_or_filter():
+    """评审历史过滤（reviewed_by）命中 审批通过(approver_id) 或 驳回(reject_reviewer_id) 任一。
+
+    「我审过的」完整视图：评审人通过 + 驳回的记录都应可见，不得丢驳回历史。
+    """
+    from sqlalchemy.dialects import mysql
+
+    db = _mock_session()
+    db.execute.side_effect = [
+        _result(scalar=0),
+        _result(all_=[]),
+    ]
+    repo = MetricRepository(db)
+
+    await repo.list_metrics(reviewed_by=7, offset=0, limit=10)
+
+    list_stmt = db.execute.call_args_list[1].args[0]
+    sql = str(list_stmt.compile(dialect=mysql.dialect()))
+    # OR 条件同时覆盖 approver_id 与 reject_reviewer_id
+    assert "approver_id" in sql and "reject_reviewer_id" in sql
+    assert "OR" in sql.upper()
+
+
 async def test_list_metrics_asc_sort_and_whitelist_fallback():
     db = _mock_session()
     db.execute.side_effect = [

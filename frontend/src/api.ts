@@ -529,6 +529,9 @@ export async function listMetrics(params: {
   updated_before?: string;
   /** 审批人（Approver）ID 过滤（审批工作台「我审过的」视图） */
   approver_id?: number;
+  /** 评审历史过滤：命中 审批通过(approver_id) 或 驳回(reject_reviewer_id) 任一
+   *  （「我审过的」完整视图——评审人通过+驳回的记录都可见，不丢驳回历史） */
+  reviewed_by?: number;
   /** 仅查已软删（回收站）指标：true 时展示已删除草稿供恢复 */
   deleted?: boolean;
   sort_by?: "updated_at" | "created_at" | "version" | "metric_code" | "name";
@@ -543,6 +546,7 @@ export async function listMetrics(params: {
     keyword: params.keyword,
     owner_id: params.owner_id,
     approver_id: params.approver_id,
+    reviewed_by: params.reviewed_by,
     pii_flag: params.pii_flag === undefined ? undefined : String(params.pii_flag),
     created_after: params.created_after,
     updated_before: params.updated_before,

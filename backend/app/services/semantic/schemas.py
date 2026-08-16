@@ -417,6 +417,11 @@ class MetricListParams(BaseModel):
     owner_id: int | None = Field(None, ge=1, description="责任人（Owner）ID 过滤")
     # 审批人过滤（审批工作台「我审过的」视图）
     approver_id: int | None = Field(None, ge=1, description="审批人（Approver）ID 过滤")
+    # 评审历史过滤（「我审过的」完整视图）：命中 审批通过(approver_id)
+    # 或 驳回(reject_reviewer_id) 任一（审批工作台评审历史不丢驳回记录）
+    reviewed_by: int | None = Field(
+        None, ge=1, description="评审历史过滤（通过或驳回过该指标的用户 ID）"
+    )
     # PII 过滤（热力指标视角下钻：PII 格子 / 非 PII 格子）
     pii_flag: bool | None = Field(None, description="仅 PII / 仅非 PII 指标")
     # 已删除过滤（回收站视角）：true 时仅查软删（deleted_at 置位）的草稿指标，供恢复

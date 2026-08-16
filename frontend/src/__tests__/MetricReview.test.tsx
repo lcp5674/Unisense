@@ -171,7 +171,7 @@ describe("MetricReview 指标审批", () => {
     expect(screen.getAllByText(/PII 待复核/).length).toBeGreaterThan(0);
   });
 
-  it("「我审过的」视图：按 approver_id 查询、无操作按钮、无批量按钮", async () => {
+  it("「我审过的」视图：按 reviewed_by 查询（含驳回历史）、无操作按钮、无批量按钮", async () => {
     const reviewed: MetricResponse = {
       ...metric,
       status: "PUBLISHED",
@@ -182,9 +182,9 @@ describe("MetricReview 指标审批", () => {
     // 切换到「我审过的」
     fireEvent.click(await screen.findByRole("radio", { name: /我审过的/ }));
     await screen.findByText("sales_gmv_day");
-    // 携带 approver_id 查询
+    // 携带 reviewed_by 查询（命中审批通过或驳回——评审历史完整）
     expect(mockedList).toHaveBeenCalledWith(
-      expect.objectContaining({ approver_id: 1 }),
+      expect.objectContaining({ reviewed_by: 1 }),
     );
     // 无「通过」操作、无批量通过按钮
     expect(screen.queryAllByRole("button", { name: /通\s*过/ }).length).toBe(0);
@@ -193,14 +193,12 @@ describe("MetricReview 指标审批", () => {
   });
 
   it("深页空结果自动回退上一页（审批后列表缩短不致空页）", async () => {
-    // 第 1 页有数据、共 200 条（多页可分页）；第 2 页返回空（total>0 → 触发回退到第 1 页重查）
-    mockedList.mockImplementation(async (params) => {
-      if (params.page === 2) return { items: [], total: 1, page: 2, page_size: params.page_size };
-      return { items: [metric], total: 200, page: 1, page_size: params.page_size };
-    });
+    // 默认第 1 页有数据、共 200 条（多页可分页）；第 2 页请求返回空（total>0 → 触发回退重查）
+    mockedList.mockResolvedValue({ items: [metric], total: 200, page: 1, page_size: 20 });
     renderReview();
     await screen.findByText("sales_gmv_day");
-    // 翻到第 2 页 → 第 2 页为空（total>0）→ 自动回退第 1 页重查
+    // 翻到第 2 页：该页请求返回空（total>0）→ 自动回退第 1 页重查
+    mockedList.mockResolvedValueOnce({ items: [], total: 1, page: 2, page_size: 20 });
     fireEvent.click(document.querySelector(".ant-pagination-item-2") as HTMLElement);
     await waitFor(() => {
       const pages = mockedList.mock.calls.map((c) => c[0]?.page);

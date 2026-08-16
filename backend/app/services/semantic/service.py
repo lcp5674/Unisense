@@ -585,6 +585,7 @@ class MetricService(BaseService):
             keyword=params.keyword,
             owner_id=params.owner_id,
             approver_id=params.approver_id,
+            reviewed_by=params.reviewed_by,
             pii_flag=params.pii_flag,
             created_after=params.created_after,
             created_before=params.created_before,
