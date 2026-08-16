@@ -570,3 +570,116 @@ def test_upstream_deps_excludes_write_target() -> None:
     # 纯 SELECT 仍正常返回
     deps = extract_upstream_deps("SELECT id FROM src")
     assert deps.tables == ("src",)
+
+
+def test_merge_insert_values_no_column_list_field_lineage() -> None:
+    """MERGE 无列清单 INSERT VALUES（this=None）：值中裸列引用列名近似目标列。"""
+    sql = """
+    MERGE INTO dws.target t
+    USING ods.src s ON t.id = s.id
+    WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.name)
+    """
+    edges = extract_field_lineage(sql, dialect="hive")
+    mapped = {(e.source_table, e.source_column, e.target_table, e.target_column) for e in edges}
+    assert ("ods.src", "id", "dws.target", "id") in mapped
+    assert ("ods.src", "name", "dws.target", "name") in mapped
+    assert len(edges) == 2
+
+
+def test_select_into_table_and_field_lineage() -> None:
+    """PG SELECT ... INTO newtbl：等价 CTAS，产表级 + 字段级血缘。"""
+    sql = "SELECT id, name INTO dws.newtbl FROM ods.src"
+    table_edges = extract_table_lineage(sql, dialect="postgres")
+    assert len(table_edges) == 1
+    assert (table_edges[0].source, table_edges[0].target) == ("ods.src", "dws.newtbl")
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    mapped = {
+        (e.source_table, e.source_column, e.target_table, e.target_column) for e in field_edges
+    }
+    assert ("ods.src", "id", "dws.newtbl", "id") in mapped
+    assert ("ods.src", "name", "dws.newtbl", "name") in mapped
+    assert len(field_edges) == 2
+
+
+def test_mysql_select_into_var_not_target() -> None:
+    """MySQL SELECT ... INTO @var：变量赋值（Into.this 为 Parameter），不构成血缘目标。"""
+    sql = "SELECT id INTO @v FROM ods.src"
+    assert extract_table_lineage(sql, dialect="mysql") == []
+    assert extract_field_lineage(sql, dialect="mysql") == []
+
+
+def test_update_from_field_lineage() -> None:
+    """PG UPDATE ... FROM：SET 列 ← FROM 来源表列，产字段级血缘。"""
+    sql = "UPDATE dws.tgt SET v = s.v, name = s.name FROM ods.src s WHERE tgt.id = s.id"
+    edges = extract_field_lineage(sql, dialect="postgres")
+    mapped = {(e.source_table, e.source_column, e.target_table, e.target_column) for e in edges}
+    assert ("ods.src", "v", "dws.tgt", "v") in mapped
+    assert ("ods.src", "name", "dws.tgt", "name") in mapped
+    assert len(edges) == 2
+
+
+def test_update_join_field_lineage() -> None:
+    """MySQL UPDATE tgt JOIN src：JOIN 表为来源，SET 目标列产字段血缘。"""
+    sql = "UPDATE dws.tgt t JOIN ods.src s ON t.id = s.id SET t.v = s.v"
+    edges = extract_field_lineage(sql, dialect="mysql")
+    assert len(edges) == 1
+    e = edges[0]
+    assert (e.source_table, e.source_column, e.target_table, e.target_column) == (
+        "ods.src",
+        "v",
+        "dws.tgt",
+        "v",
+    )
+
+
+def test_update_set_subquery_field_lineage() -> None:
+    """UPDATE SET 值为子查询：子查询投影列 → 目标列。"""
+    sql = "UPDATE ods.tgt t SET t.v = (SELECT MAX(v) FROM ods.src WHERE src.id = t.id)"
+    edges = extract_field_lineage(sql, dialect="mysql")
+    assert len(edges) == 1
+    e = edges[0]
+    assert (e.source_table, e.source_column, e.target_table, e.target_column) == (
+        "ods.src",
+        "v",
+        "ods.tgt",
+        "v",
+    )
+
+
+def test_update_self_update_no_cross_field_lineage() -> None:
+    """UPDATE 自更新（无来源表）：不产跨表字段边；静态值同样无来源。"""
+    sql1 = "UPDATE dws.tgt SET v = v * 1.1 WHERE id > 100"
+    assert extract_field_lineage(sql1, dialect="mysql") == []
+    sql2 = "UPDATE dws.tgt SET status = 'done' WHERE id = 1"
+    assert extract_field_lineage(sql2, dialect="hive") == []
+
+
+def test_select_into_dialects_parametrized() -> None:
+    """SELECT INTO 在支持该语法的方言（postgres/tsql）均产血缘。"""
+    cases = [
+        ("postgres", "SELECT id INTO dws.newtbl FROM ods.src", "ods.src", "dws.newtbl"),
+        ("tsql", "SELECT id INTO dws.newtbl FROM ods.src", "ods.src", "dws.newtbl"),
+    ]
+    for dialect, sql, expect_src, expect_tgt in cases:
+        edges = extract_table_lineage(sql, dialect=dialect)
+        assert len(edges) == 1, f"[{dialect}] 未产表级边"
+        assert (edges[0].source, edges[0].target) == (expect_src, expect_tgt)
+        field_edges = extract_field_lineage(sql, dialect=dialect)
+        assert {e.source_table for e in field_edges} == {expect_src}
+        assert {e.target_table for e in field_edges} == {expect_tgt}
+
+
+def test_ctas_with_column_list_field_mapping() -> None:
+    """CTAS 带列清单：字段映射按位置取列清单（x→a/y→b），与 INSERT 列清单一致。"""
+    sql = "CREATE TABLE dws.tgt (a INT, b VARCHAR(20)) AS SELECT x, y FROM ods.src"
+    edges = extract_field_lineage(sql, dialect="mysql")
+    mapped = {(e.source_column, e.target_column) for e in edges}
+    assert ("x", "a") in mapped
+    assert ("y", "b") in mapped
+    assert len(edges) == 2
+    # 无列清单时仍用投影别名
+    sql2 = "CREATE TABLE dws.tgt AS SELECT x AS a, y AS b FROM ods.src"
+    edges2 = extract_field_lineage(sql2, dialect="mysql")
+    mapped2 = {(e.source_column, e.target_column) for e in edges2}
+    assert ("x", "a") in mapped2
+    assert ("y", "b") in mapped2

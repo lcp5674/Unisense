@@ -105,12 +105,21 @@ def _update_set_target(update: exp.Update) -> exp.Table | None:
 
 
 def _find_target(ast: exp.Expression) -> exp.Table | None:
-    """定位写入目标表（INSERT / CREATE TABLE|VIEW AS / UPDATE / MERGE）。"""
+    """定位写入目标表（INSERT / CREATE TABLE|VIEW AS / UPDATE / MERGE / SELECT INTO）。"""
     for node in ast.walk():
         is_target_node = isinstance(node, (exp.Insert, exp.Update, exp.Merge)) or (
             isinstance(node, exp.Create) and node.kind and node.kind.upper() in ("TABLE", "VIEW")
         )
         if not is_target_node:
+            # SELECT INTO（PG/SQL Server 建表式赋值）：``SELECT ... INTO newtbl FROM ...``
+            # 的 ``Into.this`` 为 Table；MySQL ``SELECT ... INTO @var`` 是变量赋值
+            # （``Into.this`` 为 Table 但内部 this 是 Parameter），不构成血缘目标。
+            if isinstance(node, exp.Select):
+                into_this = getattr(node.args.get("into"), "this", None)
+                if isinstance(into_this, exp.Table) and not isinstance(
+                    into_this.this, exp.Parameter
+                ):
+                    return into_this
             continue
         if isinstance(node, exp.Update):
             updated = _update_set_target(node)
@@ -283,6 +292,12 @@ def _find_source_query(ast: exp.Expression) -> exp.Expression | None:
             return q
     if isinstance(ast, exp.Merge):
         return ast.args.get("using")
+    # SELECT INTO（``SELECT ... INTO newtbl FROM ...``）：查询自身即源查询。
+    # MySQL ``SELECT ... INTO @var`` 是变量赋值，不作为血缘源查询。
+    if isinstance(ast, exp.Select) and ast.args.get("into"):
+        into_this = ast.args["into"].this
+        if isinstance(into_this, exp.Table) and not isinstance(into_this.this, exp.Parameter):
+            return ast
     return None
 
 
@@ -487,14 +502,17 @@ def _emit_leaf_edges(
 
 
 def _insert_column_list(ast: exp.Expression) -> list[str]:
-    """INSERT 显式列清单（``INSERT INTO t (a, b) SELECT ...``），无则空。
+    """写入目标显式列清单（``INSERT INTO t (a, b) SELECT ...`` /
+    ``CREATE TABLE t (a, b) AS ...``），无则空。
 
-    目标列名来自列清单而非 SELECT 投影别名——``INSERT INTO t (a,b) SELECT x,y``
-    中字段血缘应为 ``x→a, y→b``（按位置对应投影），否则 target 列名错位。
+    目标列名来自列清单而非 SELECT 投影别名——``INSERT INTO t (a,b) SELECT x,y`` 与
+    ``CREATE TABLE t (a,b) AS SELECT x,y`` 中字段血缘应均为 ``x→a, y→b``（按位置对应
+    投影），否则 target 列名错位。Insert 的 Schema expressions 是 Identifier，
+    Create 的 Schema expressions 是 ColumnDef（取 ``.name``）。
     """
     for node in ast.walk():
-        if isinstance(node, exp.Insert) and isinstance(node.this, exp.Schema):
-            return [c.name for c in node.this.expressions if isinstance(c, exp.Identifier)]
+        if isinstance(node, (exp.Insert, exp.Create)) and isinstance(node.this, exp.Schema):
+            return [c.name for c in node.this.expressions if hasattr(c, "name")]
     return []
 
 
@@ -574,7 +592,10 @@ def _extract_merge_edges(
     scope = _merge_source_scope(using) if isinstance(using, (exp.Subquery, exp.Table)) else None
     if scope is None:
         return
-    for when in ast.expressions:
+    # sqlglot 30.x：MERGE 的 WHEN 分支存放在 args["whens"]（Whens 容器节点），
+    # 而非 ast.expressions——旧写法遍历空列表导致 MERGE 字段级血缘全丢。
+    whens = ast.args.get("whens")
+    for when in getattr(whens, "expressions", None) or []:
         then = when.args.get("then")
         if isinstance(then, exp.Update):
             for eq in getattr(then, "expressions", None) or []:
@@ -587,9 +608,26 @@ def _extract_merge_edges(
                 _emit_leaf_edges(
                     scope, eq.expression, cte_map, dialect, target_name, target_col, is_bare, edges
                 )
-        elif isinstance(then, exp.Insert) and isinstance(then.this, exp.Tuple):
-            keys = getattr(then.this, "expressions", None) or []
-            values = getattr(then.expression, "expressions", None) or []
+        elif isinstance(then, exp.Insert):
+            # INSERT 分支：有列清单时 ``this`` 为 Tuple(keys)、``expression`` 为
+            # Tuple(values)；无列清单（``INSERT VALUES (s.id, s.name)``）时 ``this``
+            # 为 None、``expression`` 为 Tuple(values)——目标列名不可显式获得，
+            # 用值中裸列引用的列名近似（``s.id`` → 目标列 ``id``）。
+            keys_node = then.this if isinstance(then.this, exp.Tuple) else None
+            values_node = then.expression if isinstance(then.expression, exp.Tuple) else None
+            keys = getattr(keys_node, "expressions", None) or []
+            values = getattr(values_node, "expressions", None) or []
+            if not values:
+                continue
+            if not keys:
+                for val_expr in values:
+                    if not isinstance(val_expr, exp.Column):
+                        continue
+                    target_col = val_expr.name
+                    _emit_leaf_edges(
+                        scope, val_expr, cte_map, dialect, target_name, target_col, True, edges
+                    )
+                continue
             for col_expr, val_expr in zip(keys, values, strict=False):
                 target_col = _column_name(col_expr)
                 if not target_col:
@@ -598,6 +636,65 @@ def _extract_merge_edges(
                 _emit_leaf_edges(
                     scope, val_expr, cte_map, dialect, target_name, target_col, is_bare, edges
                 )
+
+
+def _extract_update_edges(
+    update: exp.Update,
+    target_name: str,
+    cte_map: dict[str, exp.CTE],
+    dialect: str | None,
+    edges: list[FieldEdge],
+) -> None:
+    """Update 的字段级血缘：SET 目标列 ← 值表达式中的来源列。
+
+    来源解析两类生产语法（sqlglot 的 build_scope 不支持 Update，此处手动解析）：
+    - PG ``UPDATE tgt SET v = s.v FROM src s``（FROM 子句表为来源）
+    - MySQL ``UPDATE tgt JOIN src ON ... SET tgt.v = src.v``（JOIN 表为来源）
+    - ``SET v = (SELECT MAX(x) FROM src ...)`` 子查询值：解析子查询内部投影列
+    自引用（值列与目标同属目标表 / 无来源表限定的列）不产生跨表字段边。
+    """
+    amap = _build_alias_map(update)
+    target_alias = update.this.alias_or_name if isinstance(update.this, exp.Table) else ""
+    for eq in getattr(update, "expressions", None) or []:
+        if not isinstance(eq, exp.EQ):
+            continue
+        target_col = _column_name(eq.this)
+        if not target_col:
+            continue
+        val = eq.expression
+        if isinstance(val, exp.Subquery):
+            # SET 值为子查询：子查询 SELECT 的投影列 → 目标列（无别名时用目标列名）
+            sub = _try_build_scope(val.this)
+            if sub is None:
+                continue
+            for projection in getattr(val.this, "selects", None) or []:
+                if _projection_has_star(projection):
+                    edges.append(_star_edge(projection, sub, update, target_name))
+                    continue
+                sub_col = _projection_name(projection) or target_col
+                is_bare = _is_bare_column_projection(projection)
+                _emit_leaf_edges(
+                    sub, projection, cte_map, dialect, target_name, sub_col, is_bare, edges
+                )
+            continue
+        # 普通表达式：逐个解析值中的列引用到来源表
+        is_bare = isinstance(val, exp.Column)
+        expr_sql = None if is_bare else val.sql(dialect=dialect)
+        for leaf in val.find_all(exp.Column):
+            if not leaf.table or leaf.table == target_alias:
+                continue
+            src_t = amap.get(leaf.table)
+            if not src_t or src_t == target_name:
+                continue
+            edges.append(
+                FieldEdge(
+                    source_table=src_t,
+                    source_column=leaf.name,
+                    target_table=target_name,
+                    target_column=target_col,
+                    expression=expr_sql,
+                )
+            )
 
 
 def _extract_field_edges(ast: Any, dialect: str | None) -> list[FieldEdge]:
@@ -611,6 +708,9 @@ def _extract_field_edges(ast: Any, dialect: str | None) -> list[FieldEdge]:
     cte_map = _collect_ctes(ast)
     if isinstance(ast, exp.Merge):
         _extract_merge_edges(ast, target_name, cte_map, dialect, edges)
+        return edges
+    if isinstance(ast, exp.Update):
+        _extract_update_edges(ast, target_name, cte_map, dialect, edges)
         return edges
     query = _find_source_query(ast)
     if query is None:
