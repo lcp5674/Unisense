@@ -50,6 +50,7 @@ import {
   listDimensions,
   listDomainTree,
   listFavorites,
+  listMetrics,
   listSubscriptions,
   listUsers,
   listVersions,
@@ -503,18 +504,29 @@ export function MetricDetail() {
     Array<{ value: string; label: string }>
   >([]);
   const [editDims, setEditDims] = useState<string[]>([]);
+  // 编辑弹窗依赖指标（派生/复合指标）：从已发布指标选择，写入口径 dependencies
+  const [editDepOptions, setEditDepOptions] = useState<Array<{ value: string; label: string }>>(
+    [],
+  );
+  const [editDeps, setEditDeps] = useState<string[]>([]);
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const { track } = useTracking();
 
-  // 编辑弹窗字典（粒度/单位）+ 平台维度清单：挂载时加载一次，失败静默（编辑弹窗降级为手输）
+  // 编辑弹窗字典（粒度/单位）+ 平台维度清单 + 已发布指标（依赖选项）：挂载时加载一次
   useEffect(() => {
     Promise.all([
       listDictItems("granularity").catch(() => [] as SystemDictItem[]),
       listDictItems("unit").catch(() => [] as SystemDictItem[]),
       listDimensions({ page_size: 100 }).catch(() => ({ items: [] as Dimension[] })),
-    ]).then(([g, u, dims]) => {
+      listMetrics({ page_size: 100, status: "PUBLISHED" }).catch(() => ({
+        items: [] as MetricResponse[],
+        total: 0,
+        page: 1,
+        page_size: 100,
+      })),
+    ]).then(([g, u, dims, metrics]) => {
       const opts = (items: SystemDictItem[]) =>
         items
           .filter((it) => it.status === "active")
@@ -525,6 +537,9 @@ export function MetricDetail() {
         (dims.items ?? [])
           .filter((d) => d.status === "PUBLISHED")
           .map((d) => ({ value: d.dim_code, label: d.name })),
+      );
+      setEditDepOptions(
+        (metrics.items ?? []).map((m) => ({ value: m.metric_code, label: m.name })),
       );
     });
   }, []);
@@ -698,6 +713,11 @@ export function MetricDetail() {
       definition_json: Object.keys(def).length ? JSON.stringify(def, null, 2) : "",
     });
     setEditDims(rawDims);
+    setEditDeps(
+      metric.type === "atomic"
+        ? []
+        : (Array.isArray(def.dependencies) ? def.dependencies.map((d) => String(d)) : []),
+    );
     setEditOpen(true);
   }
 
@@ -722,6 +742,10 @@ export function MetricDetail() {
         const next = { ...definitionJson };
         delete next.dimensions;
         definitionJson = next;
+      }
+      // 依赖指标选择器合入 definition_json.dependencies（非原子指标，血缘生成原子→衍生边）
+      if (metric.type !== "atomic" && editDeps.length) {
+        definitionJson = { ...(definitionJson ?? {}), dependencies: editDeps };
       }
       const req: MetricUpdateRequest = {
         name: String(values.name).trim(),
@@ -1571,6 +1595,24 @@ export function MetricDetail() {
               allowClear
             />
           </Form.Item>
+          {metric?.type !== "atomic" && (
+            <Form.Item
+              label="依赖指标"
+              extra="派生/复合指标的上游（从已发布指标选择）；血缘图谱据此生成 原子→衍生 边。"
+              style={{ marginBottom: 8 }}
+            >
+              <Select
+                mode="multiple"
+                value={editDeps}
+                onChange={setEditDeps}
+                placeholder="选择依赖指标（可搜索）"
+                options={editDepOptions}
+                showSearch
+                optionFilterProp="label"
+                allowClear
+              />
+            </Form.Item>
+          )}
           <Form.Item
             name="definition_json"
             label="口径定义（JSON）"
