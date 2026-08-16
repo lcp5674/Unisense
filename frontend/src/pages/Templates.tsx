@@ -255,10 +255,22 @@ export function Templates() {
         time_semantics: (String(values.time_semantics) as MetricCreateRequest["time_semantics"]) ?? "PERIOD",
         freshness: (String(values.freshness) as MetricCreateRequest["freshness"]) ?? "T1",
         dw_layer: (String(values.dw_layer) as MetricCreateRequest["dw_layer"]) ?? "DWS",
-        // 模板默认口径优先保留（defaults_json.definition_json）；缺省时补空对象满足后端必填
-        definition_json:
-          (instantiateTarget?.defaults_json?.definition_json as Record<string, unknown>) ?? {},
+        definition_json: {},
       };
+      // 口径：弹窗输入优先（用户可接受模板默认或自行补充）；非法 JSON 拦截，避免静默创建"空心/错乱"指标
+      const rawDef = values.definition_json ? String(values.definition_json).trim() : "";
+      if (rawDef) {
+        try {
+          payload.definition_json = JSON.parse(rawDef) as Record<string, unknown>;
+        } catch {
+          setLoading(false);
+          message.error("口径定义 JSON 格式错误，请修正后再提交");
+          return;
+        }
+      } else {
+        payload.definition_json =
+          (instantiateTarget?.defaults_json?.definition_json as Record<string, unknown>) ?? {};
+      }
       // 从模板实例化：调用专用接口（后端合并模板默认字段）；无模板上下文时退回普通创建指标
       const created = instantiateTarget
         ? await instantiateTemplate(instantiateTarget.id, payload)
@@ -288,6 +300,10 @@ export function Templates() {
       time_semantics: tpl.time_semantics ?? "PERIOD",
       freshness: tpl.freshness ?? "T1",
       dw_layer: tpl.dw_layer ?? "DWS",
+      // 口径预填模板默认（若模板未定义口径则为空，用户可在弹窗内补充——避免实例化出"空心"指标无血缘）
+      definition_json: tpl.defaults_json?.definition_json
+        ? JSON.stringify(tpl.defaults_json.definition_json, null, 2)
+        : "",
     });
     setModalOpen(true);
   }
@@ -495,6 +511,17 @@ export function Templates() {
             </Form.Item>
             <Form.Item name="dw_layer" label="数仓层" rules={[{ required: true, message: "请选择数仓层" }]} style={{ width: 240 }}>
               <Select options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} />
+            </Form.Item>
+            <Form.Item
+              name="definition_json"
+              label="口径定义（JSON，可留空用模板默认）"
+              style={{ width: "100%", marginBottom: 8 }}
+            >
+              <Input.TextArea
+                rows={3}
+                placeholder='{"expression": "sum(amount)", "source_tables": ["dwd_order_di"]}'
+                className="mono"
+              />
             </Form.Item>
           </Space>
         </Form>
