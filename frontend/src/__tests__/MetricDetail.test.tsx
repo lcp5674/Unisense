@@ -13,6 +13,7 @@ vi.mock("../api", () => ({
   fetchMyPermissions: vi.fn(),
   listFavorites: vi.fn(),
   listMetrics: vi.fn(),
+  listCatalogs: vi.fn().mockResolvedValue({ items: [] }),
   getMetricHealth: vi.fn(),
   listDictItems: vi.fn(),
   listDimensions: vi.fn(),
@@ -67,6 +68,7 @@ import {
   listDimensions,
   listFavorites,
   listMetrics,
+  listCatalogs,
   getMetricHealth,
   listUsers,
   listSubscriptions,
@@ -93,6 +95,7 @@ const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 const mockedDomainTree = vi.mocked(listDomainTree);
 const mockedDictItems = vi.mocked(listDictItems);
 const mockedDimensions = vi.mocked(listDimensions);
+const mockedCatalogs = vi.mocked(listCatalogs);
 const mockedListMetrics = vi.mocked(listMetrics);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedHealth = vi.mocked(getMetricHealth);
@@ -1008,6 +1011,69 @@ describe("MetricDetail 按钮级权限过滤", () => {
       expect(mockedUpdateMetric).toHaveBeenCalledWith(
         "sales_gmv_sum_d",
         expect.objectContaining({ definition_json: expect.objectContaining({ dependencies: ["sales_gmv_day"] }) }),
+      );
+    });
+  });
+
+  it("编辑弹窗落地表（source_table）回填并保存时保留在 definition_json", async () => {
+    // 指标 definition_json 含落地表 → openEdit 回填；保存时 source_table 保留合入口径
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      definition_json: { expression: "sum(gmv)", source_table: "dwd.legacy_sales" },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedCatalogs.mockResolvedValue({
+      items: [{ entity_name: "dwd.sales_detail", source_name: "数仓", entity_type: "TABLE" }] as unknown as Array<import("../types").DBCatalog>,
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // AutoComplete 用 data-testid 精确定位（antd AutoComplete 渲染为 .ant-select-auto-complete）
+    const acInput = document.querySelector(
+      '[data-testid="editSourceTable"] input',
+    ) as HTMLInputElement | null;
+    expect(acInput).toBeTruthy();
+    // 修改为新的落地表（模拟选择）
+    // 落地表已回填当前定义值（dwd.legacy_sales）；此测试验证「打开编辑弹窗 → 保存」
+    // 时 source_table 保留在 definition_json（openEdit 回填 + handleSubmitEdit 合入路径）；
+    // 「修改落地表」的 onSearch/onSelect 更新逻辑由页面实现（手输/选择均同步 state+dirty）
+    expect((acInput as HTMLInputElement).value).toBe("dwd.legacy_sales");
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "修正口径描述" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      expect(mockedUpdateMetric).toHaveBeenCalledWith(
+        "sales_gmv_sum_d",
+        expect.objectContaining({ definition_json: expect.objectContaining({ source_table: "dwd.legacy_sales" }) }),
       );
     });
   });

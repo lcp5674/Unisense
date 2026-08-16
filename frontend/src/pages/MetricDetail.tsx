@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
+  AutoComplete,
   Button,
   Card,
   Checkbox,
@@ -46,6 +47,7 @@ import {
   getMetric,
   getMetricHealth,
   inferMetricDescription,
+  listCatalogs,
   listDictItems,
   listDimensions,
   listDomainTree,
@@ -513,6 +515,13 @@ export function MetricDetail() {
   // 未改 → 保留原口径；清空（dirty + 空）→ 从口径移除对应键（与解绑能力对称）
   const [editDimsDirty, setEditDimsDirty] = useState(false);
   const [editDepsDirty, setEditDepsDirty] = useState(false);
+  // 编辑弹窗「落地表（source_table）」可搜索选择：血缘差异同步建「指标↔落地表」边，
+  // 注册页②有源表选择、编辑弹窗此前缺失——用户无法改指标落地表（只能手写 JSON）
+  const [editSourceTable, setEditSourceTable] = useState("");
+  const [editSourceTableOptions, setEditSourceTableOptions] = useState<
+    Array<{ value: string; label: string }>
+  >([]);
+  const [editSourceTableDirty, setEditSourceTableDirty] = useState(false);
   // 编辑弹窗口径 JSON 即时校验（对齐注册页惰性设计）：输入即报错，避免提交时才发现语法问题
   const [editDefinitionError, setEditDefinitionError] = useState<string | null>(null);
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
@@ -721,6 +730,11 @@ export function MetricDetail() {
     setEditUnitOptions((prev) => ensureInOptions(prev, metric.unit));
     const def = metric.definition_json ?? {};
     const rawDims = Array.isArray(def.dimensions) ? def.dimensions.map((d) => String(d)) : [];
+    // 落地表回填 + 当前值兜底选项（遗留值可显示可保留）
+    const rawSrcTable = typeof def.source_table === "string" ? def.source_table : "";
+    setEditSourceTable(rawSrcTable);
+    setEditSourceTableOptions((prev) => ensureInOptions(prev, rawSrcTable || undefined));
+    setEditSourceTableDirty(false);
     editForm.setFieldsValue({
       name: metric.name,
       granularity: metric.granularity,
@@ -776,6 +790,18 @@ export function MetricDetail() {
           definitionJson = next;
         }
       }
+      // 落地表（source_table）选择器合入 definition_json（血缘差异同步建「指标↔落地表」边）：
+      // dirty 区分"未改保留"与"清空移除"（清空即解除指标↔落地表关系）
+      if (editSourceTableDirty) {
+        if (editSourceTable.trim()) {
+          definitionJson = { ...(definitionJson ?? {}), source_table: editSourceTable.trim() };
+        } else {
+          const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
+          const next = { ...base };
+          delete next.source_table;
+          definitionJson = next;
+        }
+      }
       const req: MetricUpdateRequest = {
         name: String(values.name).trim(),
         granularity: values.granularity,
@@ -798,6 +824,24 @@ export function MetricDetail() {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
     } finally {
       setEditSaving(false);
+    }
+  }
+
+  // 落地表搜索（对齐注册页②源表惰性搜索）：空关键词展开加载平台已采集表，输入即按关键词过滤
+  async function handleEditSrcSearch(q: string) {
+    try {
+      const res = await listCatalogs({ keyword: q.trim() || undefined, source_status: "active" });
+      const items = Array.isArray(res) ? res : res.items ?? [];
+      const opts = items
+        .filter((c: { entity_type?: string }) => !c.entity_type || c.entity_type === "TABLE")
+        .map((c: { entity_name: string; source_name?: string | null }) => ({
+          value: c.entity_name,
+          label: c.source_name ? `${c.entity_name}（${c.source_name}）` : c.entity_name,
+        }));
+      setEditSourceTableOptions(opts);
+    } catch {
+      // 搜索失败静默：不影响编辑主流程（可手输落地表）
+    } finally {
     }
   }
 
@@ -1661,6 +1705,38 @@ export function MetricDetail() {
               />
             </Form.Item>
           </Space>
+          <Form.Item
+            label="落地表（source_table）"
+            extra="选择指标物理落地表，血缘图谱据此生成指标↔落地表边；可搜索平台已采集表或直接输入，清空则解除落地表关系。"
+            style={{ marginBottom: 8 }}
+          >
+            <AutoComplete
+              data-testid="editSourceTable"
+              value={editSourceTable}
+              options={editSourceTableOptions}
+              // antd AutoComplete：onChange 仅在「选中选项」时触发，手输走 onSearch——
+              // 两者都同步 state+dirty，保证手输与选择两种方式保存都生效
+              onSearch={(v) => {
+                setEditSourceTable(v);
+                setEditSourceTableDirty(true);
+                if (v.trim()) handleEditSrcSearch(v.trim());
+              }}
+              onSelect={(v) => {
+                setEditSourceTable(v);
+                setEditSourceTableDirty(true);
+              }}
+              onChange={(v) => {
+                setEditSourceTable(v);
+                setEditSourceTableDirty(true);
+              }}
+              onOpenChange={(open) => {
+                if (open && !editSourceTableOptions.length) handleEditSrcSearch("");
+              }}
+              placeholder="搜索或输入落地表（如 dwd.sales_detail）"
+              allowClear
+              style={{ width: "100%" }}
+            />
+          </Form.Item>
           <Form.Item
             label="关联维度"
             extra="从平台维度清单选择，将写入口径定义 dimensions；血缘图谱据此生成指标↔维度边。"
