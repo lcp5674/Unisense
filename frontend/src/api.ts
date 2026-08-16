@@ -1580,7 +1580,7 @@ export async function createDimensionMember(body: {
   member_code?: string;
   member_name: string;
   parent_code?: string | null;
-  path?: string | null;
+  // path 由服务端按父级独占推导，前端不传
   attributes?: Record<string, unknown> | null;
 }): Promise<DimensionMember> {
   return request<DimensionMember>(
@@ -1598,7 +1598,7 @@ export async function updateDimensionMember(body: {
   member_code: string;
   member_name?: string;
   parent_code?: string | null;
-  path?: string | null;
+  // path 由服务端按父级独占推导，前端不传
   attributes?: Record<string, unknown> | null;
   status?: string;
 }): Promise<DimensionMember> {
