@@ -30,6 +30,8 @@ vi.mock("../api", () => {
     markAllNotificationsRead: vi.fn(),
     deleteNotification: vi.fn(),
     deleteAllNotifications: vi.fn(),
+    retryNotification: vi.fn(),
+    markNotificationHandled: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -41,6 +43,8 @@ import {
   deleteNotification,
   deleteAllNotifications,
   upsertSubscription,
+  retryNotification,
+  markNotificationHandled,
 } from "../api";
 
 const mockedList = vi.mocked(listNotifications);
@@ -48,6 +52,8 @@ const mockedMarkRead = vi.mocked(markNotificationRead);
 const mockedReadAll = vi.mocked(markAllNotificationsRead);
 const mockedDelete = vi.mocked(deleteNotification);
 const mockedClear = vi.mocked(deleteAllNotifications);
+const mockedRetry = vi.mocked(retryNotification);
+const mockedHandled = vi.mocked(markNotificationHandled);
 
 function notif(partial: Partial<Notification>): Notification {
   return {
@@ -67,6 +73,8 @@ function notif(partial: Partial<Notification>): Notification {
     read_at: null,
     actor_id: null,
     actor_name: null,
+    last_error: null,
+    handled_at: null,
     ...partial,
   };
 }
@@ -95,6 +103,8 @@ beforeEach(() => {
   mockedReadAll.mockResolvedValue({ ok: true });
   mockedDelete.mockResolvedValue({ ok: true });
   mockedClear.mockResolvedValue({ ok: true });
+  mockedRetry.mockResolvedValue(notif({ status: "SENT", last_error: null }));
+  mockedHandled.mockResolvedValue(notif({ handled_at: "2026-08-16T10:00:00" }));
 });
 
 describe("通知中心 - 列表与未读", () => {
@@ -738,5 +748,61 @@ describe("通知中心 - 收件箱增强（点击已读 / 筛选 / 聚合 / 待�
     const card = screen.getByText("指标健康告警").closest(".notif-card") as HTMLElement;
     expect(card.classList.contains("notif-level-error")).toBe(true);
     expect(screen.getByText("错误")).toBeInTheDocument(); // level Tag（ERROR → 错误）
+  });
+});
+
+describe("通知中心 - 送达失败处置 / 待办闭环 / 对象聚焦", () => {
+  it("FAILED 通知展示失败原因，重试按钮调用 retryNotification 并刷新", async () => {
+    const n = notif({ id: 20, status: "FAILED", last_error: "连接超时", title: "采集降级", template_code: "collect.degraded" });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("采集降级")).toBeInTheDocument());
+
+    expect(screen.getByText("连接超时")).toBeInTheDocument(); // 失败原因展示
+    const card = screen.getByText("采集降级").closest(".notif-card") as HTMLElement;
+    expect(card.classList.contains("notif-handled")).toBe(false);
+    fireEvent.click(withinCard(card, /重\s*试/));
+    await waitFor(() => expect(mockedRetry).toHaveBeenCalledWith(20));
+    expect(mockedList).toHaveBeenCalledTimes(2); // 重试后刷新
+  });
+
+  it("待处理通知标记已处理：调用 markNotificationHandled，卡片进入已处理态", async () => {
+    const n = notif({ id: 21, template_code: "conflict_open", title: "口径冲突待处理", payload: { conflict_id: "C-1" } });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("口径冲突待处理")).toBeInTheDocument());
+
+    const card = screen.getByText("口径冲突待处理").closest(".notif-card") as HTMLElement;
+    fireEvent.click(withinCard(card, /标\s*记\s*已\s*处\s*理/));
+    await waitFor(() => expect(mockedHandled).toHaveBeenCalledWith(21));
+    expect(mockedList).toHaveBeenCalledTimes(2); // 标记后刷新
+  });
+
+  it("已处理通知：显示「已处理」Tag、淡化类、不再显示行动按钮", async () => {
+    const n = notif({ id: 22, template_code: "conflict_open", title: "口径冲突待处理", handled_at: "2026-08-16T09:00:00" });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("口径冲突待处理")).toBeInTheDocument());
+
+    expect(screen.getByText("已处理")).toBeInTheDocument();
+    const card = screen.getByText("口径冲突待处理").closest(".notif-card") as HTMLElement;
+    expect(card.classList.contains("notif-handled")).toBe(true);
+    // 已办结：不再显示「标记已处理」行动按钮（用 query 断言不存在，不抛错）
+    const handledBtns = Array.from(card.querySelectorAll("button")).filter(
+      (b) => /标\s*记\s*已\s*处\s*理/.test((b.textContent || "").replace(/\s+/g, " ")),
+    );
+    expect(handledBtns.length).toBe(0);
+  });
+
+  it("对象级聚焦：输入业务对象编码后按 object_key 重新加载", async () => {
+    mockedList.mockResolvedValue({ items: [notif({})], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+
+    const input = screen.getByPlaceholderText(/聚焦对象/) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "sales_gmv" } });
+    await waitFor(() =>
+      expect(mockedList).toHaveBeenLastCalledWith(expect.objectContaining({ object_key: "sales_gmv", page: 1 })),
+    );
   });
 });

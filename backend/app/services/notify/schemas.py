@@ -66,6 +66,8 @@ class NotificationResponse(BaseModel):
     created_at: datetime | None = None
     actor_id: int | None = None
     actor_name: str | None = None
+    last_error: str | None = None
+    handled_at: datetime | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> NotificationResponse:
@@ -86,6 +88,8 @@ class NotificationResponse(BaseModel):
             created_at=getattr(m, "created_at", None),
             actor_id=getattr(m, "actor_id", None),
             actor_name=getattr(m, "actor_name", None),
+            last_error=getattr(m, "last_error", None),
+            handled_at=getattr(m, "handled_at", None),
         )
 
 

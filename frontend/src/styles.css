@@ -1396,6 +1396,29 @@ body {
   background: #0e7c86 !important;
 }
 
+/* 已处理（待办闭环）：淡化卡片、左侧灰条，弱化打扰 */
+.notif-card.notif-handled {
+  opacity: 0.72;
+  background: #fafbfc;
+}
+.notif-card.notif-handled .notif-bar {
+  background: #b9c0cc !important;
+}
+
+/* 送达失败原因：红字弱化提示（仅 FAILED 卡片出现） */
+.notif-impact.notif-fail-reason .notif-impact-label {
+  color: #d64545;
+}
+.notif-impact.notif-fail-reason .notif-impact-text {
+  color: #d64545;
+  font-size: 12px;
+}
+
+/* 对象级聚焦输入框：与筛选栏同视觉层级 */
+.notif-object-focus .ant-input {
+  font-size: 12px;
+}
+
 /* 卡片内操作区：已读/删除，靠右对齐 */
 .notif-actions {
   display: inline-flex;

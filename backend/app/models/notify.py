@@ -87,6 +87,12 @@ class Notification(Base, BaseModel):
     actor_name: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="操作人姓名快照（展示用，历史通知不受后续改名影响）"
     )
+    last_error: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="最近一次投递失败原因（重试成功后清空）"
+    )
+    handled_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="待办已处理时间（NULL=未处理）", index=True
+    )
 
 
 class EventLog(Base, BaseModel):

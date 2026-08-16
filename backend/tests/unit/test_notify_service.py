@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-from app.models.notify import EventLog, SubscriptionPref
+from app.models.notify import EventLog, Notification, SubscriptionPref
 from app.services.notify.schemas import EventPublish, SubscriptionUpsert
 from app.services.notify.service import NotifyService
 
@@ -20,6 +20,7 @@ def _svc() -> tuple[NotifyService, MagicMock]:
     repo.save_subscription = AsyncMock(side_effect=lambda s: s)
     repo.list_subscriptions = AsyncMock(return_value=[])
     repo.get_user_display_name = AsyncMock(return_value="操作者")
+    repo.find_recent_notification = AsyncMock(return_value=None)
     repo.commit = AsyncMock()
     svc._repo = repo  # noqa: SLF001
     return svc, repo
@@ -291,3 +292,98 @@ async def test_notify_user_marks_failed_when_dispatch_fails() -> None:
     notif = await svc.notify_user(user_id=7, event_type="metric.rename_required", title="t")
     assert notif.status == "FAILED"
     assert notif.sent_at is None
+
+
+# ---- 送达失败处置：retry_delivery / mark_handled / 去重防风暴 ----
+
+async def test_retry_delivery_failed_to_sent() -> None:
+    """FAILED 通知重试成功 → SENT + sent_at + last_error 清空。"""
+    svc, repo = _svc()
+    notif = Notification(
+        subscriber_id=7,
+        channel="webhook",
+        template_code="quality.anomaly",
+        title="数据质量异常告警",
+        status="FAILED",
+        last_error="连接超时",
+    )
+    repo.get_notification = AsyncMock(return_value=notif)
+    svc._dispatch = AsyncMock(return_value=True)  # noqa: SLF001
+    out = await svc.retry_delivery(7, actor_id=7)
+    assert out.status == "SENT"
+    assert out.sent_at is not None
+    assert out.last_error is None
+    svc._dispatch.assert_awaited_once_with(notif, "webhook")  # noqa: SLF001
+
+
+async def test_retry_delivery_still_failed_keeps_error() -> None:
+    """重试仍失败 → 保持 FAILED，last_error 更新（由 _dispatch 写入）。"""
+    svc, repo = _svc()
+    notif = Notification(
+        subscriber_id=7, channel="webhook", template_code="q.x", title="t", status="FAILED"
+    )
+    repo.get_notification = AsyncMock(return_value=notif)
+
+    async def _fail(_n, _c):  # noqa: ANN001
+        _n.last_error = "网关 500"
+        return False
+
+    svc._dispatch = _fail  # noqa: SLF001
+    out = await svc.retry_delivery(7, actor_id=7)
+    assert out.status == "FAILED"
+    assert out.last_error == "网关 500"
+    assert out.sent_at is None
+
+
+async def test_retry_delivery_rejects_non_failed() -> None:
+    """非 FAILED 状态重试 → INVALID_TRANSITION。"""
+    from app.core.exceptions import UnisenseError
+
+    svc, repo = _svc()
+    notif = Notification(
+        subscriber_id=7, channel="in_app", template_code="q.x", title="t", status="SENT"
+    )
+    repo.get_notification = AsyncMock(return_value=notif)
+    try:
+        await svc.retry_delivery(7, actor_id=7)
+        raise AssertionError("应抛 INVALID_TRANSITION")
+    except UnisenseError as exc:
+        assert exc.error_code == "INVALID_TRANSITION"
+
+
+async def test_mark_handled_sets_handled_at() -> None:
+    """mark_handled → handled_at 落库（幂等：重复调用不覆写）。"""
+    svc, repo = _svc()
+    notif = Notification(
+        subscriber_id=7, channel="in_app", template_code="conflict_open", title="t"
+    )
+    repo.get_notification = AsyncMock(return_value=notif)
+    out = await svc.mark_handled(7, actor_id=7)
+    assert out.handled_at is not None
+    first = out.handled_at
+    out2 = await svc.mark_handled(7, actor_id=7)
+    assert out2.handled_at == first
+
+
+async def test_publish_event_dedup_skips_recent() -> None:
+    """去重防风暴：窗口内已存在同类型未处理通知 → 跳过创建新通知。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=10,
+                channel="EMAIL",
+                event_type="collect.degraded",
+                enabled=True,
+            )
+        ]
+    )
+    repo.find_recent_notification = AsyncMock(
+        return_value=Notification(
+            subscriber_id=10, channel="EMAIL", template_code="collect.degraded", title="t"
+        )
+    )
+    out = await svc.publish_event(EventPublish(event_type="collect.degraded", source="collect"))
+    assert out["notifications"] == 0
+    assert out["delivered"] == 0
+    repo.save_notification.assert_not_called()

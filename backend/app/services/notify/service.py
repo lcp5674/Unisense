@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
 from app.core.config import settings
-from app.core.exceptions import AuthError
+from app.core.exceptions import AuthError, UnisenseError
 from app.core.logging import get_logger
 from app.models.notify import (
     EventLevel,
@@ -276,6 +276,9 @@ _HTTP_CLIENT: httpx.AsyncClient | None = None
 # 重试仅针对传输层异常（httpx.HTTPError / SMTPException），4xx/5xx 响应视为终态不重试。
 _DELIVERY_MAX_ATTEMPTS = 3
 _DELIVERY_BACKOFF_BASE = 0.2  # 秒，指数退避基数
+# 去重防风暴窗口（秒）：同类型通知在窗口内对同一订阅人只保留一条。
+# 采集降级/质量告警等高频事件反复触发时，避免逐条刷屏（TD §12.9 通知风暴治理）。
+_DEDUP_WINDOW_SECONDS = 60
 # SMTP 单次投递超时（避免 aiosmtplib 无超时导致协程永久挂起阻塞 fan-out）
 _SMTP_TIMEOUT = 10
 
@@ -351,6 +354,18 @@ class NotifyService(BaseService):
         created = 0
         delivered = 0
         for sub in subs:
+            # 去重防风暴：窗口内已存在同类型未处理通知则跳过（高频事件只保留一条）
+            recent = await self._repo.find_recent_notification(
+                sub.user_id, data.event_type, _DEDUP_WINDOW_SECONDS
+            )
+            if recent is not None:
+                logger.info(
+                    "notify_dedup_skipped",
+                    subscriber_id=sub.user_id,
+                    event_type=data.event_type,
+                    recent_id=recent.id,
+                )
+                continue
             notif = Notification(
                 subscriber_id=sub.user_id,
                 channel=sub.channel,
@@ -383,26 +398,38 @@ class NotifyService(BaseService):
                 recipient_id = 0
             subscriber_ids = {s.user_id for s in subs}
             if recipient_id and recipient_id not in subscriber_ids:
-                notif = Notification(
-                    subscriber_id=recipient_id,
-                    channel="in_app",
-                    template_code=data.event_type,
-                    title=_humanize_event_title(data.event_type),
-                    body=_humanize_payload(data.payload),
-                    payload=data.payload,
-                    status=NotifyStatus.PENDING.value,
-                    ref_type="event",
-                    ref_id=event.id,
-                    actor_id=actor_id,
-                    actor_name=actor_name,
+                # 定向投递同样受去重窗口约束：窗口内已收到同类型通知则不重复打扰
+                recent = await self._repo.find_recent_notification(
+                    recipient_id, data.event_type, _DEDUP_WINDOW_SECONDS
                 )
-                await self._repo.save_notification(notif)
-                created += 1
-                ok = await self._dispatch(notif, "in_app")
-                notif.status = NotifyStatus.SENT.value if ok else NotifyStatus.FAILED.value
-                if ok:
-                    notif.sent_at = datetime.now(UTC)
-                    delivered += 1
+                if recent is not None:
+                    logger.info(
+                        "notify_dedup_skipped_recipient",
+                        subscriber_id=recipient_id,
+                        event_type=data.event_type,
+                        recent_id=recent.id,
+                    )
+                else:
+                    notif = Notification(
+                        subscriber_id=recipient_id,
+                        channel="in_app",
+                        template_code=data.event_type,
+                        title=_humanize_event_title(data.event_type),
+                        body=_humanize_payload(data.payload),
+                        payload=data.payload,
+                        status=NotifyStatus.PENDING.value,
+                        ref_type="event",
+                        ref_id=event.id,
+                        actor_id=actor_id,
+                        actor_name=actor_name,
+                    )
+                    await self._repo.save_notification(notif)
+                    created += 1
+                    ok = await self._dispatch(notif, "in_app")
+                    notif.status = NotifyStatus.SENT.value if ok else NotifyStatus.FAILED.value
+                    if ok:
+                        notif.sent_at = datetime.now(UTC)
+                        delivered += 1
         await self._repo.commit()
         return {"event_id": event.id, "notifications": created, "delivered": delivered}
 
@@ -483,8 +510,11 @@ class NotifyService(BaseService):
                 return True
             else:
                 logger.warning("未知通知渠道: %s", channel)
+                notif.last_error = f"未知通知渠道: {channel}"
                 return False
         except Exception as exc:  # noqa: BLE001
+            # 记录失败原因供 FAILED 卡片展示与运营定位（重试成功后由 retry_delivery 清空）
+            notif.last_error = str(exc)[:500]
             logger.error("通知投递失败: %s", exc)
             return False
 
@@ -773,9 +803,18 @@ class NotifyService(BaseService):
         days: int | None = None,
         page: int = 1,
         page_size: int = 20,
+        object_key: str | None = None,
     ) -> tuple[list[Notification], int]:
         return await self._repo.list_notifications_page(
-            subscriber_id, status, read_state, template_code, todo_only, days, page, page_size
+            subscriber_id,
+            status,
+            read_state,
+            template_code,
+            todo_only,
+            days,
+            page,
+            page_size,
+            object_key,
         )
 
     async def get_notification(self, notif_id: int) -> Notification:
@@ -791,6 +830,51 @@ class NotifyService(BaseService):
 
     async def mark_failed(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
         return await self._transition(notif_id, NotifyStatus.FAILED.value, actor_id, role)
+
+    async def retry_delivery(
+        self, notif_id: int, actor_id: int, role: str = ""
+    ) -> Notification:
+        """重试投递失败的站内通知（送达失败处置）。
+
+        仅 FAILED 状态可重试（PENDING/SENT 重试无意义）；按存储的渠道与 payload
+        重新投递，成功 → SENT + sent_at + 清空 last_error，失败 → 保持 FAILED + 更新原因。
+        """
+        notif = await self.get_notification(notif_id)
+        self._assert_owner(notif, actor_id, role)
+        if notif.status != NotifyStatus.FAILED.value:
+            raise UnisenseError(
+                f"仅发送失败的通知可重试（当前 {notif.status}）",
+                error_code="INVALID_TRANSITION",
+                ctx={"notif_id": notif.id, "status": notif.status},
+            )
+        ok = await self._dispatch(notif, notif.channel)
+        notif.status = NotifyStatus.SENT.value if ok else NotifyStatus.FAILED.value
+        if ok:
+            notif.sent_at = datetime.now(UTC)
+            notif.last_error = None
+        else:
+            # 失败原因已由 _dispatch 写入 last_error（渠道未配置/HTTP 状态/异常）
+            logger.error(
+                "notify_retry_failed",
+                notif_id=notif.id,
+                channel=notif.channel,
+                error=notif.last_error,
+            )
+        await self._repo.commit()
+        return notif
+
+    async def mark_handled(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
+        """标记待办类通知为「已处理」（待办闭环）。
+
+        用户点「去仲裁/去审批」等行动按钮处理完成后，回标记办结——通知不再出现在
+        「仅待处理」筛选，避免处理完仍提示待办的快照残留。
+        """
+        notif = await self.get_notification(notif_id)
+        self._assert_owner(notif, actor_id, role)
+        if notif.handled_at is None:
+            notif.handled_at = datetime.now(UTC)
+        await self._repo.commit()
+        return notif
 
     async def mark_read(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
         """单条通知标记已读（幂等：已读不再覆写时间）。"""

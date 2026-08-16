@@ -210,3 +210,44 @@ class TestNotifyRepository:
         sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "created_at" in sql
         assert ">=" in sql
+
+    async def test_list_page_todo_only_excludes_handled(self, repo: NotifyRepository) -> None:
+        """todo_only → 排除已标记处理的（handled_at IS NULL 条件）。"""
+        repo._session.execute = self._page_mocks()
+        await repo.list_notifications_page(1, None, todo_only=True)
+        select_stmt = repo._session.execute.call_args_list[0].args[0]
+        sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "handled_at IS NULL" in sql
+
+    async def test_list_page_object_key_filter(self, repo: NotifyRepository) -> None:
+        """object_key → payload 业务对象键 JSON 精确匹配（json_extract）。"""
+        repo._session.execute = self._page_mocks()
+        await repo.list_notifications_page(1, None, object_key="sales_gmv")
+        select_stmt = repo._session.execute.call_args_list[0].args[0]
+        sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "json_extract" in sql
+        assert "metric_code" in sql
+        assert "sales_gmv" in sql
+
+    async def test_list_page_object_key_numeric_matches_ref_id(
+        self, repo: NotifyRepository
+    ) -> None:
+        """数字 object_key → 额外匹配 ref_id 精确相等。"""
+        repo._session.execute = self._page_mocks()
+        await repo.list_notifications_page(1, None, object_key="123")
+        select_stmt = repo._session.execute.call_args_list[0].args[0]
+        sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "ref_id" in sql
+        assert "123" in sql
+
+    async def test_find_recent_notification(self, repo: NotifyRepository) -> None:
+        """find_recent_notification → 近窗口同类型通知查询（时间下界 + 未处理）。"""
+        mock = MagicMock()
+        mock.scalar_one_or_none.return_value = None
+        repo._session.execute = AsyncMock(return_value=mock)
+        out = await repo.find_recent_notification(7, "collect.degraded", 60)
+        assert out is None
+        select_stmt = repo._session.execute.call_args.args[0]
+        sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "collect.degraded" in sql
+        assert "handled_at IS NULL" in sql

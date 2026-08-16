@@ -65,12 +65,13 @@ async def list_notifications(
     template_code: str | None = Query(None, description="按消息类型过滤"),
     todo_only: bool = Query(False, description="仅待处理类事件"),
     days: int | None = Query(None, ge=1, le=365, description="近 N 天"),
+    object_key: str | None = Query(None, description="对象级聚焦：指标编码/冲突编号等"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     # PLAT-2: 以认证身份 user.id 作为 subscriber，禁止 client 伪造 subscriber_id 越权读取
     notifs, total = await NotifyService(db).list_notifications_page(
-        user.id, status, read_state, template_code, todo_only, days, page, page_size
+        user.id, status, read_state, template_code, todo_only, days, page, page_size, object_key
     )
     items = [NotificationResponse.from_model(i) for i in notifs]
     return ok(
@@ -212,6 +213,56 @@ async def mark_failed(
         db,
         actor_id=user.id,
         action="notify.mark_failed",
+        entity_type="notification",
+        entity_id=str(notif_id),
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=NotificationResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/notifications/{notif_id}/retry",
+    dependencies=_WRITE_DEPS,
+)
+async def retry_delivery(
+    notif_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """重试投递失败的站内通知（送达失败处置，仅 FAILED 可重试）。"""
+    resp = await NotifyService(db).retry_delivery(notif_id, actor_id=user.id, role=user.role)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="notify.retry_delivery",
+        entity_type="notification",
+        entity_id=str(notif_id),
+        detail={"status": resp.status},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=NotificationResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/notifications/{notif_id}/handled",
+    dependencies=_WRITE_DEPS,
+)
+async def mark_handled(
+    notif_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """标记待办类通知为「已处理」（待办闭环：处理后不再出现在仅待处理）。"""
+    resp = await NotifyService(db).mark_handled(notif_id, actor_id=user.id, role=user.role)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="notify.mark_handled",
         entity_type="notification",
         entity_id=str(notif_id),
         detail={},

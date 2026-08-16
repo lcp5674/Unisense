@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination } from "antd";
-import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined, UserOutlined, StarOutlined } from "@ant-design/icons";
+import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined, UserOutlined, StarOutlined, SearchOutlined } from "@ant-design/icons";
 import {
   listNotifications,
   listNotifyEvents,
@@ -12,6 +12,8 @@ import {
   markAllNotificationsRead,
   deleteNotification,
   deleteAllNotifications,
+  retryNotification,
+  markNotificationHandled,
   UnisenseApiError,
 } from "../api";
 import type { Notification, NotifyEventLog, SubscriptionPref } from "../types";
@@ -649,11 +651,13 @@ function NotifListTab() {
   const [readFilter, setReadFilter] = useState<string | undefined>();
   const [timeFilter, setTimeFilter] = useState<number | undefined>();
   const [todoOnly, setTodoOnly] = useState(false);
+  // 对象级聚焦：按指标编码/冲突编号等业务对象过滤（Task D）
+  const [objectKey, setObjectKey] = useState<string | undefined>();
   // 同类聚合开关：相同消息类型合并为一张卡片（避免刷屏）
   const [grouped, setGrouped] = useState(false);
   const navigate = useNavigate();
 
-  async function load(p = page, ps = pageSize, tt = typeFilter, rf = readFilter, tf = timeFilter, to = todoOnly) {
+  async function load(p = page, ps = pageSize, tt = typeFilter, rf = readFilter, tf = timeFilter, to = todoOnly, ok = objectKey) {
     setLoading(true);
     try {
       const res = await listNotifications({
@@ -661,6 +665,7 @@ function NotifListTab() {
         read_state: rf,
         days: tf,
         todo_only: to,
+        object_key: ok,
         page: p,
         page_size: ps,
       });
@@ -676,7 +681,7 @@ function NotifListTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, typeFilter, readFilter, timeFilter, todoOnly]);
+  }, [page, pageSize, typeFilter, readFilter, timeFilter, todoOnly, objectKey]);
 
   // 筛选变化 → 回到第一页（page 与筛选 state 批量更新，单一 effect 只触发一次加载，避免重复请求）
   function changeType(v?: string) {
@@ -697,6 +702,34 @@ function NotifListTab() {
   }
   function changeGrouped(v: boolean) {
     setGrouped(v);
+  }
+  function changeObjectKey(v?: string) {
+    setPage(1);
+    setObjectKey(v || undefined);
+  }
+
+  // 重试投递失败的通知（Task A）：成功后刷新并同步全局角标
+  async function handleRetry(n: Notification) {
+    try {
+      const updated = await retryNotification(n.id);
+      message.success(updated.status === "SENT" ? "重试成功，已重新投递" : "重试失败，请查看原因");
+      load();
+      notifyNotifChanged();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "重试失败");
+    }
+  }
+
+  // 标记待办类通知为「已处理」（Task B）：处理后不再出现在「仅待处理」
+  async function handleMarkHandled(n: Notification) {
+    try {
+      await markNotificationHandled(n.id);
+      message.success("已标记为已处理");
+      load();
+      notifyNotifChanged();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
   }
 
   async function handleMarkRead(n: Notification) {
@@ -808,11 +841,14 @@ function NotifListTab() {
     const fields = parseNotifyBodyFields(n.body, n.payload, n.template_code);
     const singleLine = fields.length <= 1;
     const unread = !n.read_at;
+    const handled = !!n.handled_at;
     const needsAction = NEEDS_ACTION.has(n.template_code ?? "");
     const action = actionFor(n.template_code ?? "", payload);
+    const failed = n.status === "FAILED";
     const cls = [
       "notif-card",
       unread ? "notif-unread" : "",
+      handled ? "notif-handled" : "",
       levelHigh ? "notif-level-error" : levelWarn ? "notif-level-warn" : "",
     ]
       .filter(Boolean)
@@ -832,6 +868,7 @@ function NotifListTab() {
             )}
             <div className="notif-head-right">
               {n.sent_at && <span className="notif-sent-time">已送达 {formatCnTime(n.sent_at)}</span>}
+              {handled && needsAction && <Tag color="success">已处理</Tag>}
               <Tag
                 className="notif-status"
                 color={n.status === "SENT" ? "success" : n.status === "FAILED" ? "error" : "warning"}
@@ -844,6 +881,12 @@ function NotifListTab() {
             <div className="notif-impact">
               <span className="notif-impact-label">影响</span>
               <span className="notif-impact-text">{IMPACT_TEXT[n.template_code ?? ""]}</span>
+            </div>
+          )}
+          {failed && n.last_error && (
+            <div className="notif-impact notif-fail-reason">
+              <span className="notif-impact-label">失败原因</span>
+              <span className="notif-impact-text">{n.last_error}</span>
             </div>
           )}
           {fields.length > 0 && (
@@ -896,8 +939,14 @@ function NotifListTab() {
               <ClockCircleOutlined /> 触发于 {formatCnTime(n.created_at)}
             </span>
             <div className="notif-actions" onClick={(e) => e.stopPropagation()}>
-              {needsAction && action && (
+              {needsAction && action && !handled && (
                 <Button size="small" type="primary" ghost onClick={() => navigate(action.target)}>{action.label}</Button>
+              )}
+              {needsAction && !handled && (
+                <Button size="small" type="link" onClick={() => handleMarkHandled(n)}>标记已处理</Button>
+              )}
+              {failed && (
+                <Button size="small" type="link" onClick={() => handleRetry(n)}>重试投递</Button>
               )}
               {unread && (
                 <Button size="small" type="link" onClick={() => handleMarkRead(n)}>标记已读</Button>
@@ -947,6 +996,16 @@ function NotifListTab() {
             { value: 30, label: "近 30 天" },
             { value: 90, label: "近 90 天" },
           ]}
+        />
+        <Input
+          size="small"
+          allowClear
+          className="notif-object-focus"
+          placeholder="聚焦对象：指标编码/冲突编号…"
+          value={objectKey}
+          onChange={(e) => changeObjectKey(e.target.value)}
+          style={{ width: 190 }}
+          prefix={<SearchOutlined />}
         />
         <Tag.CheckableTag checked={todoOnly} onChange={changeTodo}>仅待处理</Tag.CheckableTag>
         <Tag.CheckableTag checked={grouped} onChange={changeGrouped}>同类聚合</Tag.CheckableTag>

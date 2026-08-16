@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.notify import EventLog, Notification, SubscriptionPref
@@ -33,6 +33,19 @@ TODO_EVENT_TYPES = frozenset(
         "grant.expiring_soon",
         "grant.expired",
     }
+)
+
+# 对象级聚焦（Task D）：按 payload 中常见业务对象键精确过滤。
+# 覆盖指标编码/冲突编号/反馈编号/数据源名/表名等，供「只看某个业务对象」场景。
+OBJECT_KEY_FIELDS = (
+    "metric_code",
+    "conflict_id",
+    "feedback_id",
+    "source_id",
+    "source_name",
+    "table_name",
+    "catalog_id",
+    "grant_id",
 )
 
 
@@ -77,6 +90,7 @@ class NotifyRepository:
         days: int | None = None,
         page: int = 1,
         page_size: int = 20,
+        object_key: str | None = None,
     ) -> tuple[list[Notification], int]:
         """订阅者通知分页查询，返回 ``(items, total)``。
 
@@ -86,8 +100,9 @@ class NotifyRepository:
         筛选能力（产品化收件箱）：
         - read_state: unread（未读）/ read（已读）
         - template_code: 按消息类型精确过滤
-        - todo_only: 仅待处理类事件（TODO_EVENT_TYPES）
+        - todo_only: 仅待处理类事件（TODO_EVENT_TYPES），且排除已标记处理的
         - days: 近 N 天（created_at >= now - N 天）
+        - object_key: 对象级聚焦——匹配 payload 常见业务对象键（指标编码/冲突编号等）
         """
         base = select(Notification).where(Notification.subscriber_id == subscriber_id)
         if status:
@@ -99,16 +114,55 @@ class NotifyRepository:
         if template_code:
             base = base.where(Notification.template_code == template_code)
         if todo_only:
-            base = base.where(Notification.template_code.in_(TODO_EVENT_TYPES))
+            # 仅待处理：TODO 事件集 + 尚未标记「已处理」（handled_at 为空）——闭环后不再打扰
+            base = base.where(
+                Notification.template_code.in_(TODO_EVENT_TYPES),
+                Notification.handled_at.is_(None),
+            )
         if days is not None and days > 0:
             since = datetime.now(UTC) - timedelta(days=days)
             base = base.where(Notification.created_at >= since)
+        if object_key:
+            # 对象级聚焦：精确匹配 payload 中任意业务对象键；数字 key 亦回退匹配 ref_id
+            conds = [
+                func.json_unquote(func.json_extract(Notification.payload, f"$.{k}"))
+                == object_key
+                for k in OBJECT_KEY_FIELDS
+            ]
+            if object_key.isdigit():
+                conds.append(Notification.ref_id == int(object_key))
+            base = base.where(or_(*conds))
         total_stmt = select(func.count()).select_from(base.subquery())
         total = int((await self._session.execute(total_stmt)).scalar_one() or 0)
         offset = max(page - 1, 0) * page_size
         stmt = base.order_by(Notification.id.desc()).offset(offset).limit(page_size)
         rows = (await self._session.execute(stmt)).scalars().all()
         return list(rows), total
+
+    async def find_recent_notification(
+        self,
+        subscriber_id: int,
+        template_code: str,
+        window_seconds: int,
+    ) -> Notification | None:
+        """查询订阅者近 N 秒内是否已有同类型通知（去重防风暴）。
+
+        采集降级等高频事件在窗口内反复触发时，避免逐条刷屏：返回最近一条供发布方
+        决定跳过（计数合并到已有通知），而非创建新通知。
+        """
+        since = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        stmt = (
+            select(Notification)
+            .where(
+                Notification.subscriber_id == subscriber_id,
+                Notification.template_code == template_code,
+                Notification.created_at >= since,
+                Notification.handled_at.is_(None),
+            )
+            .order_by(Notification.id.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def mark_all_read(self, subscriber_id: int) -> int:
         """将订阅者全部未读通知置为已读，返回更新条数。"""

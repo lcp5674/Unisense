@@ -1211,6 +1211,10 @@ export interface Notification {
   actor_id: number | null;
   /** 操作人姓名快照（服务端解析，历史通知稳定展示） */
   actor_name: string | null;
+  /** 最近一次投递失败原因（仅 FAILED 状态有值，重试成功后清空） */
+  last_error: string | null;
+  /** 待办已处理时间；null 表示未处理（「仅待处理」筛选排除非空项） */
+  handled_at: string | null;
 }
 
 export interface NotifyEventLog {
