@@ -400,6 +400,21 @@ def _cte_outputs_column(cte: exp.CTE, col_name: str) -> bool:
     return any(_projection_name(p) == col_name for p in selects)
 
 
+def _unnest_outputs_column(unnest: exp.Unnest, col_name: str) -> bool:
+    """UNNEST 展开表是否输出指定列名。
+
+    PG ``UNNEST(a.items) AS u(v)`` 的列别名列表是 ``[v]``；无列别名时
+    （``AS u``）展开列名默认等于表别名 ``u``。
+    """
+    alias = unnest.args.get("alias")
+    if not isinstance(alias, exp.TableAlias):
+        return False
+    cols = alias.args.get("columns") or []
+    if cols:
+        return any(c.name == col_name for c in cols)
+    return alias.name == col_name
+
+
 def _resolve_projection(
     scope: Any,
     projection: exp.Expression,
@@ -438,7 +453,19 @@ def _resolve_column(
     if qualifier:
         src = sources.get(qualifier)
     if src is None:
-        # 未限定列：优先真实表（非 CTE 引用）。CTE 引用可能不含该列——
+        # 未限定列：**优先** UNNEST 展开表的显式列名声明（PG ``UNNEST(a.items) AS u``
+        # 明确声明展开列名 u，``SELECT u`` 即数组元素列）。真实表的命中仅是"表存在"
+        # 猜测（可能指向不存在的列），故排在 Unnest 显式声明之后。
+        for _name, s in sources.items():
+            if (
+                isinstance(s, Scope)
+                and isinstance(s.expression, exp.Unnest)
+                and _unnest_outputs_column(s.expression, col.name)
+            ):
+                src = s
+                break
+    if src is None:
+        # 未限定列：其次真实表（非 CTE 引用）。CTE 引用可能不含该列——
         # 如 ``SELECT id FROM c1 JOIN ods.b USING(id)`` 里 ``max(v)`` 的 v 实际
         # 来自 ods.b，而 c1 只输出 id；若取第一个来源（CTE c1）会错误解析为空。
         for _name, s in sources.items():
@@ -446,7 +473,7 @@ def _resolve_column(
                 src = s
                 break
         if src is None:
-            # 其次：输出该列的 CTE 引用（穿透定义解析）
+            # 再次：输出该列的 CTE 引用（穿透定义解析）
             for _name, s in sources.items():
                 if (
                     isinstance(s, exp.Table)
@@ -456,6 +483,7 @@ def _resolve_column(
                     src = s
                     break
         if src is None:
+            # 最后：输出该列的子查询/派生表（推断列，优先级最低）
             for _name, s in sources.items():
                 if isinstance(s, Scope) and _scope_outputs_column(s.expression, col.name):
                     src = s
@@ -479,6 +507,11 @@ def _resolve_column(
         return [(name, col.name)]
 
     if isinstance(src, Scope):
+        if isinstance(src.expression, exp.Unnest):
+            # UNNEST 展开表（PG 数组展开）：展开列的血缘来源是 Unnest 表达式
+            # 的叶子列——``UNNEST(a.items) AS u(v)`` 的 ``u.v`` 应归属 ``a.items``，
+            # 而非当作 ``a`` 的真实列或丢弃。
+            return _resolve_projection(scope, src.expression, cte_map, dialect, depth + 1)
         for p in getattr(src.expression, "selects", []):
             if _projection_name(p) == col.name:
                 return _resolve_projection(src, p, cte_map, dialect, depth + 1)

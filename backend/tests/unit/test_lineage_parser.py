@@ -860,3 +860,55 @@ def test_multi_table_update_cross_set_field_three() -> None:
     }
     assert ("t2", "v", "t1", "v") in mapped
     assert ("t1", "x", "t3", "w") in mapped
+
+
+# ---- 第七轮：UNNEST 数组展开 / 无 FROM 常量 / MAX_DEPTH 边界 ----
+
+
+def test_unnest_field_lineage_resolves_to_array_column() -> None:
+    """PG UNNEST 展开列血缘：``UNNEST(a.items) AS u(v)`` 的 ``u.v`` 归属 ``a.items``。
+
+    第七轮核查发现：UNNEST 是 Scope(Unnest) 而非普通子查询，旧实现 Scope 分支按
+    ``selects`` 匹配列名（Unnest 的 selects 是 Identifier 非 Alias/Column）导致
+    ``u.v`` 无法解析而丢边。修复后展开列来源取 Unnest 表达式的叶子列。
+    """
+    sql = "INSERT INTO dws.t SELECT u.v, a.id FROM ods.a a CROSS JOIN UNNEST(a.items) AS u(v)"
+    edges = extract_field_lineage(sql, dialect="postgres")
+    mapped = {(e.source_table, e.source_column, e.target_column) for e in edges}
+    # 展开列 v 归属数组来源列 items；普通列 id 不受影响
+    assert ("ods.a", "items", "v") in mapped
+    assert ("ods.a", "id", "id") in mapped
+
+
+def test_unnest_no_column_alias_defaults_to_table_alias() -> None:
+    """UNNEST 无列别名（``AS u``）：未限定列 ``SELECT u`` 归属展开表达式。
+
+    无列别名时展开列名默认等于表别名 u，未限定列解析应命中 Unnest 显式列名声明
+    （而非猜测真实表 a 的列 u）。
+    """
+    sql = "INSERT INTO dws.t SELECT u, a.id FROM ods.a a CROSS JOIN UNNEST(a.items) AS u"
+    edges = extract_field_lineage(sql, dialect="postgres")
+    mapped = {(e.source_table, e.source_column, e.target_column) for e in edges}
+    assert ("ods.a", "items", "u") in mapped
+
+
+def test_constant_projection_no_field_lineage() -> None:
+    """无源表常量投影：INSERT 纯常量不产字段边、纯 SELECT 常量上游依赖为空。"""
+    assert extract_field_lineage("INSERT INTO dws.t SELECT 1 AS a, 'x' AS b") == []
+    assert extract_table_lineage("INSERT INTO dws.t SELECT 1 AS a") == []
+    ud = extract_upstream_deps("SELECT 1 AS a, 'x' AS b")
+    assert ud.tables == () and ud.fields == ()
+
+
+def test_deep_cte_chain_beyond_max_depth_table_kept() -> None:
+    """超 MAX_DEPTH 的 CTE 链：表级血缘保留，字段级合理降级为空（防无限递归）。"""
+    ctes = []
+    prev = "ods.a"
+    for i in range(1, 10):
+        ctes.append(f"c{i} AS (SELECT id, v FROM {prev})")
+        prev = f"c{i}"
+    sql = "WITH " + ", ".join(ctes) + " INSERT INTO dws.t SELECT c9.id, c9.v FROM c9"
+    table_edges = extract_table_lineage(sql)
+    assert {(e.source, e.target) for e in table_edges} == {("ods.a", "dws.t")}
+    # 字段级受 _MAX_DEPTH 保护降级（不抛异常、不产伪边）
+    assert extract_field_lineage(sql) == []
