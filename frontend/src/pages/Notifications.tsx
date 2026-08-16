@@ -371,6 +371,55 @@ const REF_TYPE_LABEL: Record<string, string> = {
   event: "消息",
 };
 
+// 影响/待办提示：每条通知对接收者的业务含义——「对我意味着什么、需要我做什么」。
+// 从产品角度让用户一眼看到通知的意图，而非只看到"发生了什么事件"。
+const IMPACT_TEXT: Record<string, string> = {
+  "metric.created": "新指标已创建，下一步提交审核。",
+  "metric.submitted": "指标已提交审核，等待审批结果。",
+  "metric.approved": "指标已通过审核，可对外发布使用。",
+  "metric.rejected": "指标审核未通过，请查看原因并修改后重新提交。",
+  "metric.deprecated": "指标已废弃，消费方应改用后继指标。",
+  "metric.voided": "指标已作废，不再提供服务。",
+  "metric.promoted": "指标已升级发布，口径版本已更新。",
+  "metric.rolled_back": "指标已回滚至上一生效版本。",
+  "metric.emergency_published": "指标已紧急发布，请注意补审确认。",
+  "metric.health_critical": "指标健康度偏低，请及时补充缺失治理项。",
+  "metric.rename_required": "指标命名不合规，请尽快修改编码。",
+  conflict_open: "有新的口径冲突待处理，请及时仲裁。",
+  conflict_ruled: "口径冲突已裁决，请以权威口径为准。",
+  conflict_escalated: "口径冲突已升级，需上级介入裁决。",
+  conflict_reopened: "口径冲突已重新打开，需再次仲裁。",
+  "quality.anomaly": "数据质量异常，请及时核查处理。",
+  "reconciliation.alert": "数据对账发现偏差，请确认口径一致性。",
+  "grant.granted": "权限已授予，可访问对应资源。",
+  "grant.revoked": "权限已收回，将无法访问对应资源。",
+  "grant.expired": "授权已过期，如需继续访问请联系管理员续期。",
+  "grant.expiring_soon": "授权即将到期，请提前联系管理员续期。",
+  "pii.propagated": "敏感数据已扩散，请关注合规风险。",
+  "pii.reviewed": "敏感数据已完成合规复核。",
+  "pii.review_pending": "有 PII 复核待办，请及时处理。",
+  "classification.changed": "数据分类已变更，请关注权限影响。",
+  "classification.done": "数据分类已完成。",
+  "escalation.triggered": "告警已升级，请优先处理。",
+  "feedback.status_updated": "反馈状态已更新，请查看处理结果。",
+  "nps.submitted": "新的满意度评价已提交。",
+  "benchmark.imported": "参照基准已导入，可用于口径对比。",
+  "audit.capacity_warning": "审计存储容量告警，请关注归档清理。",
+  catalog_registered: "新数据目录已注册，可接入资产。",
+  catalog_schema_drifted: "目录结构发生漂移，请核对字段映射。",
+  lineage_parsed: "血缘关系已解析，可查看影响链路。",
+  lineage_ingested: "血缘关系已接入，影响链路已更新。",
+  "catalog.deprecated": "数据目录已废弃，相关消费请迁移。",
+  "collect.degraded": "采集降级，数据时效可能受影响。",
+  "collect.failed": "采集任务失败，请检查数据源连接。",
+  "catalog.connection_failed": "数据源连接失败，请检查配置与网络。",
+  "degradation.state_changed": "系统依赖状态变更，请关注服务可用性。",
+  "user.created": "账号已创建，可登录使用平台。",
+  "user.status_changed": "账号状态已变更，请关注访问权限。",
+  "user.password_reset": "密码已重置，请使用新密码登录。",
+  "org.status_changed": "组织状态已变更，请关注成员权限。",
+};
+
 // 可选渠道：后端无短信实现，不提供 sms（避免订阅了永不投递的渠道）
 const CHANNELS = ["email", "webhook", "in_app"];
 // 订阅可选事件：与后端 EventBus 实际订阅集合对齐（backend/app/main.py _BUSINESS_EVENT_TYPES）。
@@ -570,6 +619,12 @@ function NotifListTab() {
                         </Tag>
                       </div>
                     </div>
+                    {IMPACT_TEXT[n.template_code ?? ""] && (
+                      <div className="notif-impact">
+                        <span className="notif-impact-label">影响</span>
+                        <span className="notif-impact-text">{IMPACT_TEXT[n.template_code ?? ""]}</span>
+                      </div>
+                    )}
                     {fields.length > 0 && (
                       <div className={`notif-body${singleLine ? " notif-body-single" : ""}`}>
                         {fields.map((f, i) =>

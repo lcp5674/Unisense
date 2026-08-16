@@ -523,4 +523,14 @@ describe("通知中心 - 信息展示增强", () => {
     expect(screen.getByText("字段血缘")).toBeInTheDocument();
     expect(screen.getAllByText("1 条").length).toBe(2); // 表 + 字段各 1 条
   });
+
+  it("通知卡片展示影响/待办提示（产品语义：对我意味着什么/需要我做什么）", async () => {
+    const n = notif({ id: 40, template_code: "metric.approved", title: "指标已通过", payload: { metric_code: "sales_gmv" } });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+    expect(screen.getByText("影响")).toBeInTheDocument();
+    expect(screen.getByText("指标已通过审核，可对外发布使用。")).toBeInTheDocument();
+  });
 });

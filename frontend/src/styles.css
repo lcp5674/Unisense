@@ -1216,6 +1216,46 @@ body {
   flex: 0 0 auto;
 }
 
+/* 影响/待办提示行：通知对接收者的业务含义——「对我意味着什么、需要我做什么」 */
+.notif-impact {
+  margin-top: 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  background: rgba(232, 134, 45, 0.07);
+  border-left: 3px solid var(--signal);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.notif-impact-label {
+  flex: 0 0 auto;
+  color: var(--signal);
+  font-weight: 700;
+}
+
+.notif-impact-text {
+  color: var(--ink);
+  word-break: break-word;
+}
+
+/* 操作者行：谁发起了这个操作（审计语义） */
+.notif-actor {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.notif-actor-name {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 /* 正文：结构化字段网格（替代纯文本堆叠）——每条信息一目了然、完整呈现 */
 .notif-body {
   margin-top: 8px;
