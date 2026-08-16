@@ -37,6 +37,7 @@ import type { MetricResponse, SubjectDomainTreeNode } from "../types";
 import type { ColumnsType } from "antd/es/table";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
+import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import {
   AGGREGATION_LABEL,
   DW_LAYER_LABEL,
@@ -254,7 +255,8 @@ export function MetricCatalog() {
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  // 每页条数持久化（对齐 AssetMap/Dimensions 的 usePersistentPageSize 跨页记忆）
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.catalog.pageSize", 20);
   const [selected, setSelected] = useState<MetricResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
@@ -935,7 +937,7 @@ export function MetricCatalog() {
           total,
           showSizeChanger: true,
           pageSizeOptions: [10, 20, 50, 100],
-          onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+          onChange: (p, ps) => { setPage(p); onShowSizeChange(p, ps); },
           showTotal: (t) => `共 ${t} 条`,
         }}
         onRow={(record) => ({

@@ -14,6 +14,7 @@ import {
 import type { CurrentUser, MetricResponse } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 
 function openReviewModal(
   metric: MetricResponse,
@@ -97,7 +98,8 @@ export function MetricReview() {
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  // 每页条数持久化（对齐指标目录/Dimensions 的 usePersistentPageSize 跨页记忆）
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.review.pageSize", 20);
   const navigate = useNavigate();
   const { can } = usePermission();
   const canApprove = can("metric:approve");
@@ -326,7 +328,7 @@ export function MetricReview() {
             total,
             showSizeChanger: true,
             pageSizeOptions: [10, 20, 50],
-            onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+            onChange: (p, ps) => { setPage(p); onShowSizeChange(p, ps); },
             showTotal: (t) => `共 ${t} 条待评审`,
           }}
           locale={{ emptyText: "暂无待评审指标" }}
