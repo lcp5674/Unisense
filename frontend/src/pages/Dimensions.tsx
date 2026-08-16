@@ -690,7 +690,7 @@ function DimensionsTab() {
               columns={[
                 { title: "成员编码", dataIndex: "member_code", key: "code", render: (v: string) => <span className="mono">{v}</span> },
                 { title: "名称", dataIndex: "member_name", key: "name" },
-                { title: "路径", dataIndex: "path", key: "path", render: (v: string | null) => v && <span className="mono">{v}</span> },
+                { title: "路径", dataIndex: "path", key: "path", render: (v: string | null) => v ? <span className="mono">{v}</span> : <span className="muted">—</span> },
               ]}
             />
 
