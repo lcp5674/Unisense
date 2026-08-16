@@ -556,6 +556,21 @@ class DimensionService(BaseService):
 
     async def bind_metric_dimension(self, data: MetricDimensionBind) -> MetricDimension:
         await self._require(data.dim_code)
+        # 指标存在性校验（跨服务一致性，对齐 default_member 已校验存在性）：
+        # metric_id 须指向未软删的指标，防孤儿绑定——此前裸 BigInteger 无外键、
+        # 不校验则绑定到不存在/已作废指标仍成功（维度详情显示悬空绑定）。
+        metric = (
+            await self._session.execute(
+                select(Metric).where(
+                    Metric.id == data.metric_id, Metric.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        if metric is None:
+            raise NotFoundError(
+                f"指标不存在或已删除: {data.metric_id}",
+                ctx={"metric_id": data.metric_id},
+            )
         # role enum 显式校验（非法值 → 4xx，而非 DB Enum 500）
         if data.role not in _VALID_ROLES:
             raise ValidationError(

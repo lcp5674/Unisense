@@ -737,8 +737,12 @@ async def test_bind_metric_dimension_published_also_writes_back() -> None:
     repo.commit.assert_awaited()
 
 
-async def test_bind_metric_dimension_missing_metric_skips_sync() -> None:
-    """绑定引用的指标查不到：仅告警跳过回写，不阻断绑定本身、不抛错。"""
+async def test_bind_metric_dimension_missing_metric_rejected() -> None:
+    """绑定引用的指标不存在 → 拒绝绑定（防孤儿绑定，跨服务一致性）。
+
+    此前裸 BigInteger 无外键、不校验指标存在性——metric_id 指向不存在/已软删
+    指标时绑定仍成功，维度详情显示悬空绑定。现校验未软删指标存在，缺失抛 404。
+    """
     svc, repo = await _svc()
     repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
     repo.get_member = AsyncMock(return_value=None)
@@ -748,11 +752,15 @@ async def test_bind_metric_dimension_missing_metric_skips_sync() -> None:
     result.scalar_one_or_none.return_value = None
     svc._session.execute = AsyncMock(return_value=result)
 
-    binding = await svc.bind_metric_dimension(
-        MetricDimensionBind(metric_id=999, dim_code="region", role="FILTER")
-    )
-    assert isinstance(binding, MetricDimension)
-    # 指标缺失 → 不回写、不 commit
+    try:
+        await svc.bind_metric_dimension(
+            MetricDimensionBind(metric_id=999, dim_code="region", role="FILTER")
+        )
+        raise AssertionError("应拒绝绑定不存在的指标")
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "NOT_FOUND"
+    # 指标缺失 → 不落绑定、不 commit
+    repo.save_metric_dimension.assert_not_awaited()
     repo.commit.assert_not_awaited()
 
 
@@ -965,7 +973,7 @@ async def test_publish_member_deprecated_rejected() -> None:
     repo.get_member = AsyncMock(return_value=m)
     try:
         await svc.publish_member("dim_c", "c1")
-        assert False, "应拒绝发布已废弃成员"
+        raise AssertionError("应拒绝发布已废弃成员")
     except Exception as exc:
         assert getattr(exc, "error_code", None) == "INVALID_STATE"
 
@@ -981,7 +989,7 @@ async def test_deprecate_member_with_children_rejected() -> None:
     ])
     try:
         await svc.deprecate_member("dim_c", "c1")
-        assert False, "应拒绝废弃含子成员的成员"
+        raise AssertionError("应拒绝废弃含子成员的成员")
     except Exception as exc:
         assert getattr(exc, "error_code", None) == "MEMBER_HAS_CHILDREN"
 
@@ -1004,10 +1012,14 @@ async def test_bind_rejects_draft_default_member() -> None:
     repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
     repo.get_member = AsyncMock(side_effect=lambda d, c: SimpleNamespace(
         status="DRAFT" if c == "c_draft" else None))
+    # 指标存在（通过存在性校验），命中默认成员状态校验
+    svc._session.execute = AsyncMock(
+        return_value=_bind_result(_metric_with_dims("PUBLISHED", []))
+    )
     try:
         await svc.bind_metric_dimension(MetricDimensionBind(
             metric_id=42, dim_code="region", role="FILTER", default_member="c_draft"))
-        assert False, "应拒绝 DRAFT 成员作默认值"
+        raise AssertionError("应拒绝 DRAFT 成员作默认值")
     except Exception as exc:
         assert getattr(exc, "error_code", None) == "DEFAULT_MEMBER_NOT_PUBLISHED"
 
@@ -1018,10 +1030,14 @@ async def test_bind_rejects_deprecated_default_member() -> None:
     repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
     repo.get_member = AsyncMock(side_effect=lambda d, c: SimpleNamespace(
         status="DEPRECATED" if c == "c_old" else None))
+    # 指标存在（通过存在性校验），命中默认成员状态校验
+    svc._session.execute = AsyncMock(
+        return_value=_bind_result(_metric_with_dims("PUBLISHED", []))
+    )
     try:
         await svc.bind_metric_dimension(MetricDimensionBind(
             metric_id=42, dim_code="region", role="FILTER", default_member="c_old"))
-        assert False, "应拒绝 DEPRECATED 成员作默认值"
+        raise AssertionError("应拒绝 DEPRECATED 成员作默认值")
     except Exception as exc:
         assert getattr(exc, "error_code", None) == "DEFAULT_MEMBER_NOT_PUBLISHED"
 
@@ -1052,7 +1068,7 @@ async def test_deprecate_member_bound_as_default_rejected() -> None:
     repo.count_bindings_by_default_member = AsyncMock(return_value=2)
     try:
         await svc.deprecate_member("dim_c", "c1")
-        assert False, "应拒绝废弃被绑定为默认值的成员"
+        raise AssertionError("应拒绝废弃被绑定为默认值的成员")
     except Exception as exc:
         assert getattr(exc, "error_code", None) == "MEMBER_BOUND_BY_METRICS"
 
