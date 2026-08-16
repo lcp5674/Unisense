@@ -170,7 +170,11 @@ describe("MetricReview 指标审批", () => {
   });
 
   it("「我审过的」视图：按 approver_id 查询、无操作按钮、无批量按钮", async () => {
-    const reviewed = { ...metric, status: "PUBLISHED", approver_id: 1 };
+    const reviewed: MetricResponse = {
+      ...metric,
+      status: "PUBLISHED",
+      approver_id: 1,
+    };
     mockedList.mockResolvedValue({ items: [reviewed], total: 1, page: 1, page_size: 20 });
     renderReview();
     // 切换到「我审过的」

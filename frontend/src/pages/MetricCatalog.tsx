@@ -578,6 +578,11 @@ export function MetricCatalog() {
         for (const m of targets) {
           try {
             if (batchAction === "submit") {
+              // 双保险：指定评审用户但未选用户（按钮已禁用，此处兜底防程序化触发）
+              if (batchReviewerType === "user" && !batchReviewerId) {
+                message.warning("已选择「指定评审用户」，请先选择具体评审人");
+                return;
+              }
               await submitReview(m.metric_code, "批量提交审核", {
                 reviewer_id: batchReviewerType === "user" ? batchReviewerId : null,
                 reviewer_type: batchReviewerType,
@@ -1095,7 +1100,12 @@ export function MetricCatalog() {
                   ? "下线"
                   : "删除"
         }
-        okButtonProps={{ danger: batchAction === "delete" || batchAction === "deprecate" }}
+        okButtonProps={{
+          danger: batchAction === "delete" || batchAction === "deprecate",
+          // 指定评审用户但未选用户时禁止提交（后端校验 user 类型须有 reviewer_id，前置拦截提升体验）
+          disabled:
+            batchAction === "submit" && batchReviewerType === "user" && !batchReviewerId,
+        }}
       >
         {batchAction === "submit" && (
           <div>
