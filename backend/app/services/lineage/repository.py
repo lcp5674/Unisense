@@ -17,6 +17,7 @@ from app.models.consume import ApiClient, ApiClientStatus
 from app.models.data_source import DataSource, DBCatalog
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 from app.models.metric import Metric
+from app.services.lineage.parser import node_dimension
 
 #: 系统内置血缘采集通道：无论当前是否有边都展示，保证「采集通道」视图来源全景完整
 #: （SQL 解析=sqlglot / DP 同步=dp_csv；其余动态来源如 metric_definition 有边时自动出现）。
@@ -297,6 +298,50 @@ class LineageRepository:
             provenance=provenance,
             change_reason=change_reason,
         )
+
+    async def sync_metric_dimension_edges(
+        self, metric_code: str, current_dim_codes: list[str]
+    ) -> tuple[int, int]:
+        """差异同步「指标↔维度」血缘边（软删缺失 + 注册新增，返回 (删除数, 新增数)）。
+
+        ``register_metric_dimension_edges`` 是纯追加语义（upsert 不删缺失边），
+        指标编辑时维度从多变少（或清空）会导致已解绑维度的 USES_DIMENSION 边残留，
+        血缘图仍显示指标在使用已解绑维度。本方法以 ``definition_json.dimensions``
+        为唯一事实源：软删不再声明的维度边、注册新增维度边，保证血缘与声明集一致。
+
+        Args:
+            metric_code: 指标编码。
+            current_dim_codes: 当前声明的维度编码列表（definition_json.dimensions）。
+
+        Returns:
+            ``(deleted_count, added_count)``。
+        """
+        current = {c for c in current_dim_codes if isinstance(c, str) and c}
+        node = f"metric:{metric_code}"
+        deleted = 0
+        # 1) 软删不再声明的维度边
+        for edge in await self.edges_for_node(node, direction="downstream"):
+            if edge.edge_type != "USES_DIMENSION" or not edge.target_node.startswith("dimension:"):
+                continue
+            dim_code = edge.target_node[len("dimension:") :]
+            if dim_code not in current:
+                await self.soft_delete_edge_by_key(node, edge.target_node, edge.edge_type)
+                deleted += 1
+        # 2) 注册新增的维度边（created 标记真正新增，已存在不计）
+        added = 0
+        for code in current:
+            _, created = await self._upsert_with_created(
+                source_node=f"metric:{metric_code}",
+                target_node=node_dimension(code),
+                edge_type="USES_DIMENSION",
+                granularity="L3",
+                confidence=1.0,
+                provenance="metric_definition",
+                change_reason="metric_definition",
+            )
+            if created:
+                added += 1
+        return deleted, added
 
     async def upsert_metric_column_edge(
         self,

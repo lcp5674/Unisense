@@ -1789,11 +1789,13 @@ class MetricService(BaseService):
             if not isinstance(definition, dict):
                 return
             dimensions = definition.get("dimensions") or []
-            if isinstance(dimensions, list) and dimensions:
-                await lineage_svc.register_metric_dimension_edges(
+            if isinstance(dimensions, list):
+                # 差异同步：以 definition_json.dimensions 为唯一事实源，软删不再
+                # 声明的维度边 + 注册新增边（register_metric_dimension_edges 是纯追加
+                # 语义，编辑减维度/清空时陈旧 USES_DIMENSION 边会残留）
+                await lineage_svc.sync_metric_dimension_edges(
                     metric.metric_code,
                     [d for d in dimensions if isinstance(d, str)],
-                    commit=False,
                 )
 
             # 3) 指标间依赖血缘（仅 derived/composite 有 dependencies）

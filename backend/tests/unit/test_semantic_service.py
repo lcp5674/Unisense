@@ -3017,6 +3017,7 @@ async def test_register_metric_lineage_full_derived_registers_dependency_edges()
     ):
         lineage_svc = mock_ls.return_value
         lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
+        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
         repo_inst = mock_lr.return_value
         repo_inst.upsert_edge = AsyncMock()
 
@@ -3050,6 +3051,7 @@ async def test_register_metric_lineage_full_atomic_skips_dependency_edges():
     ):
         lineage_svc = mock_ls.return_value
         lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
+        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
         repo_inst = mock_lr.return_value
         repo_inst.upsert_edge = AsyncMock()
 
@@ -3060,7 +3062,7 @@ async def test_register_metric_lineage_full_atomic_skips_dependency_edges():
 
 
 async def test_register_metric_lineage_full_registers_dimension_edges():
-    """含 dimensions 的指标：注册 USES_DIMENSION 血缘边（L3，commit=False 交外层事务）。"""
+    """含 dimensions 的指标：差异同步 USES_DIMENSION 血缘边（L3）。"""
     svc, _repo = _svc_with_repo()
     metric = make_metric(
         type="atomic",
@@ -3073,18 +3075,19 @@ async def test_register_metric_lineage_full_registers_dimension_edges():
     with patch("app.services.lineage.service.LineageService") as mock_ls:
         lineage_svc = mock_ls.return_value
         lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
-        lineage_svc.register_metric_dimension_edges = AsyncMock(return_value=[])
+        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
+        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 2))
 
         await svc._register_metric_lineage_full(metric)
 
         lineage_svc.register_metric_from_definition.assert_awaited_once_with(metric, commit=False)
-        lineage_svc.register_metric_dimension_edges.assert_awaited_once_with(
-            "sales_gmv_daily", ["dim_store", "dim_channel"], commit=False
+        lineage_svc.sync_metric_dimension_edges.assert_awaited_once_with(
+            "sales_gmv_daily", ["dim_store", "dim_channel"]
         )
 
 
-async def test_register_metric_lineage_full_skips_dimension_edges_when_absent():
-    """definition 不含 dimensions 时不注册维度边（避免空调用）。"""
+async def test_register_metric_lineage_full_clears_dimension_edges_when_absent():
+    """definition 不含 dimensions（视为空声明）时差异同步清空维度边（清除残留）。"""
     svc, _repo = _svc_with_repo()
     metric = make_metric(
         type="atomic",
@@ -3093,12 +3096,14 @@ async def test_register_metric_lineage_full_skips_dimension_edges_when_absent():
     with patch("app.services.lineage.service.LineageService") as mock_ls:
         lineage_svc = mock_ls.return_value
         lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
-        lineage_svc.register_metric_dimension_edges = AsyncMock(return_value=[])
+        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
+        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
 
         await svc._register_metric_lineage_full(metric)
 
         lineage_svc.register_metric_from_definition.assert_awaited_once_with(metric, commit=False)
-        lineage_svc.register_metric_dimension_edges.assert_not_awaited()
+        # dimensions 缺失 = 空声明 → 差异同步清理全部残留维度边（不再声明即不再使用）
+        lineage_svc.sync_metric_dimension_edges.assert_awaited_once_with("sales_gmv_daily", [])
 
 
 async def test_register_metric_lineage_full_failure_is_swallowed():

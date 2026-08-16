@@ -25,6 +25,7 @@ class _Row:
         provenance: str = "sqlglot",
         pii_inherited: bool = False,
         owner: str | None = None,
+        deleted_at: Any | None = None,
     ) -> None:
         self.id = edge_id
         self.source_node = source_node
@@ -35,6 +36,7 @@ class _Row:
         self.provenance = provenance
         self.pii_inherited = pii_inherited
         self.owner = owner
+        self.deleted_at = deleted_at
 
 
 class _HistRow:
@@ -177,15 +179,29 @@ class _FakeDB:
             for r in matched:
                 self._rows.remove(r)
             return _Result([], rowcount=len(matched))
-        # 软删：UPDATE ... SET deleted_at 按 source/target 匹配（软删语义=从活跃行移除）
+        # 软删：UPDATE ... SET deleted_at 从活跃行移除（软删语义）
+        #  - soft_delete_edge_by_key：WHERE 含 (source AND target AND edge_type)，精确单条
+        #  - soft_delete_by_node：WHERE 仅 source/target（无 edge_type），级联整节点
         if sql.lstrip().upper().startswith("UPDATE") and "deleted_at" in sql:
-            node = _extract(sql, "source_node")
-            matched = [
-                r
-                for r in self._rows
-                if getattr(r, "source_node", None) == node
-                or getattr(r, "target_node", None) == node
-            ]
+            etype = _extract(sql, "edge_type")
+            if etype is not None:
+                src = _extract(sql, "source_node")
+                dst = _extract(sql, "target_node")
+                matched = [
+                    r
+                    for r in self._rows
+                    if getattr(r, "source_node", None) == src
+                    and getattr(r, "target_node", None) == dst
+                    and getattr(r, "edge_type", None) == etype
+                ]
+            else:
+                node = _extract(sql, "source_node")
+                matched = [
+                    r
+                    for r in self._rows
+                    if getattr(r, "source_node", None) == node
+                    or getattr(r, "target_node", None) == node
+                ]
             # 恢复（SET deleted_at = NULL）：仅统计命中行，不移除（与软删对称）
             if "DELETED_AT=NULL" in sql.upper().replace(" ", ""):
                 return _Result([], rowcount=len(matched))
@@ -209,10 +225,36 @@ class _FakeDB:
             return _Result(rows, scalar=rows[0] if len(rows) == 1 else None)
         src = _extract(sql, "source_node")
         if src is not None:
-            return _Result([r for r in self._rows if r.source_node == src])
+            dst = _extract(sql, "target_node")
+            etype = _extract(sql, "edge_type")
+            if dst is not None and etype is not None:
+                # soft_delete_edge_by_key：按 (source, target, edge_type) 精确取单条并给 scalar
+                rows = [
+                    r
+                    for r in self._rows
+                    if r.source_node == src
+                    and r.target_node == dst
+                    and r.edge_type == etype
+                    and getattr(r, "deleted_at", None) is None
+                ]
+                return _Result(rows, scalar=rows[0] if len(rows) == 1 else None)
+            # edges_for_node 等：按 source 匹配（deleted_at IS NULL 已由 WHERE 表达）
+            return _Result(
+                [
+                    r
+                    for r in self._rows
+                    if r.source_node == src and getattr(r, "deleted_at", None) is None
+                ]
+            )
         dst = _extract(sql, "target_node")
         if dst is not None:
-            return _Result([r for r in self._rows if r.target_node == dst])
+            return _Result(
+                [
+                    r
+                    for r in self._rows
+                    if r.target_node == dst and getattr(r, "deleted_at", None) is None
+                ]
+            )
         return _Result([])
 
     def add(self, obj: Any) -> None:
@@ -223,6 +265,8 @@ class _FakeDB:
 
     async def flush(self) -> None:
         self.flushed = True
+        # 模拟 SQLAlchemy flush 持久化：软删行（deleted_at 已置）从活跃集合移除
+        self._rows = [r for r in self._rows if getattr(r, "deleted_at", None) is None]
 
 
 def _histories(db: _FakeDB) -> list[LineageEdgeHistory]:
@@ -901,3 +945,38 @@ async def test_edge_history_by_key() -> None:
     rows = await repo.edge_history_by_key("metric:a", "table:t", "DERIVED_FROM", "L3")
     assert len(rows) == 1
     assert rows[0].change_reason == "rename"
+
+
+async def test_sync_metric_dimension_edges_removes_stale_and_adds_new() -> None:
+    """sync_metric_dimension_edges 差异同步：软删不再声明的维度边、注册新增边。"""
+    db = _FakeDB(
+        [
+            _Row(1, "metric:m", "dimension:dim_store", "USES_DIMENSION", "L3"),
+            _Row(2, "metric:m", "dimension:dim_region", "USES_DIMENSION", "L3"),
+            # 非维度边（其他边类型）不受维度差异同步影响
+            _Row(3, "metric:m", "table:dwd_order", "DERIVED_FROM", "L3"),
+        ]
+    )
+    repo = LineageRepository(db)
+    deleted, added = await repo.sync_metric_dimension_edges("m", ["dim_store", "dim_new"])
+    assert deleted == 1  # dim_region 不再声明 → 软删
+    assert added == 1  # dim_new 新增（dim_store 已存在不计）
+    remaining = [r for r in db._rows if r.source_node == "metric:m"]
+    targets = sorted(r.target_node for r in remaining)
+    # dim_region 已删；dim_store 保留；dim_new 新增；DERIVED_FROM 表边不受影响
+    assert targets == ["dimension:dim_new", "dimension:dim_store", "table:dwd_order"]
+
+
+async def test_sync_metric_dimension_edges_empty_current_clears_all() -> None:
+    """sync 空声明集：清理全部残留维度边（指标不再声明任何维度）。"""
+    db = _FakeDB(
+        [
+            _Row(1, "metric:m", "dimension:dim_store", "USES_DIMENSION", "L3"),
+            _Row(2, "metric:m", "dimension:dim_region", "USES_DIMENSION", "L3"),
+        ]
+    )
+    repo = LineageRepository(db)
+    deleted, added = await repo.sync_metric_dimension_edges("m", [])
+    assert deleted == 2
+    assert added == 0
+    assert not [r for r in db._rows if r.source_node == "metric:m"]

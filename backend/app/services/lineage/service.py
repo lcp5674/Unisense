@@ -504,6 +504,26 @@ class LineageService(BaseService):
             await self._db.commit()
         return edges
 
+    async def sync_metric_dimension_edges(
+        self, metric_code: str, current_dim_codes: list[str]
+    ) -> tuple[int, int]:
+        """差异同步「指标↔维度」血缘边（软删缺失 + 注册新增）。
+
+        供指标创建/编辑/发布时以 ``definition_json.dimensions`` 为唯一事实源同步
+        血缘——编辑减维度/清空时清除陈旧 USES_DIMENSION 边（区别于纯追加的
+        ``register_metric_dimension_edges``）。
+
+        Args:
+            metric_code: 指标编码。
+            current_dim_codes: 当前声明的维度编码列表。
+
+        Returns:
+            ``(deleted_count, added_count)``（血缘变更不提交，交由调用方事务统一提交）。
+        """
+        return await self._repo.sync_metric_dimension_edges(
+            metric_code, current_dim_codes
+        )
+
     async def register_metric_column_edge(
         self,
         metric_code: str,
