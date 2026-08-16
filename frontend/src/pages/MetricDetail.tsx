@@ -743,7 +743,9 @@ export function MetricDetail() {
 
   const actions = (
     <Space wrap style={{ marginBottom: 16 }}>
-      {(metric.status === "DRAFT" || metric.status === "EXPERIMENTAL" || metric.status === "DEPRECATED") && canCreate && (
+      {/* 提交评审仅 DRAFT / DEPRECATED（重新评审）：后端状态机 EXPERIMENTAL 无 →REVIEW 跃迁
+          （灰度指标只能 promote 转正式 / rollback 回滚，不能退回评审） */}
+      {(metric.status === "DRAFT" || metric.status === "DEPRECATED") && canCreate && (
         <Button
           icon={<SendOutlined />}
           loading={busy}
@@ -798,7 +800,9 @@ export function MetricDetail() {
           紧急发布
         </Button>
       )}
-      {(metric.status === "PUBLISHED" || metric.status === "EXPERIMENTAL") && isOwnerOrAdmin && canDeprecate && (
+      {/* 废弃仅对 PUBLISHED：后端状态机 EXPERIMENTAL 无 →DEPRECATED 跃迁（只有 promote 转正式），
+          对灰度指标显示废弃按钮会被 409 拒绝——灰度指标的退出路径是「回滚」而非废弃 */}
+      {metric.status === "PUBLISHED" && isOwnerOrAdmin && canDeprecate && (
         <Button danger loading={busy} onClick={() => setDeprecateOpen(true)}>
           废弃
         </Button>

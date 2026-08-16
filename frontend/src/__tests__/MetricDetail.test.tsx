@@ -530,6 +530,21 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() => expect(screen.queryByText("废弃")).not.toBeInTheDocument());
   });
 
+  it("EXPERIMENTAL（灰度）状态不显示「废弃」与「提交评审」——后端状态机仅支持 promote/rollback，防止 409 拒绝", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "EXPERIMENTAL", pii_flag: false });
+    renderWithPerms(["metric:deprecate", "metric:create", "metric:edit"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.queryByText("废弃")).not.toBeInTheDocument();
+      expect(screen.queryByText("提交评审")).not.toBeInTheDocument();
+    });
+    // 灰度状态应有「全量发布 / 回滚」退出路径
+    await waitFor(() => {
+      expect(screen.getByText("全量发布")).toBeTruthy();
+      expect(screen.getByText("回滚")).toBeTruthy();
+    });
+  });
+
   it("权限快照加载完成前不显示「审批通过」按钮（fail-open 消除）", async () => {
     // 快照挂起（模拟慢加载），Provider 一直处于 loading
     mockedMyPerms.mockReturnValue(new Promise(() => {}));
