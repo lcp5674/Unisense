@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, UnisenseError, ValidationError
 from app.models.dimension import (
     Dimension,
     DimensionMember,
@@ -326,7 +326,7 @@ async def test_update_member_reparent_resolves_path() -> None:
         member_name="子级",
         parent_code=None,
         path="/child",
-        status="PUBLISHED",
+        status="DRAFT",
     )
     repo.get_member = AsyncMock(return_value=member)
     repo.list_members = AsyncMock(
@@ -363,7 +363,7 @@ async def test_update_member_clear_parent_to_root() -> None:
         member_name="子级",
         parent_code="parent",
         path="/parent/child",
-        status="PUBLISHED",
+        status="DRAFT",
     )
     repo.get_member = AsyncMock(return_value=member)
     repo.list_members = AsyncMock(return_value=[member])
@@ -382,7 +382,7 @@ async def test_update_member_rejects_cycle() -> None:
         member_name="根",
         parent_code=None,
         path="/root",
-        status="PUBLISHED",
+        status="DRAFT",
     )
     descendant = DimensionMember(
         id=2,
@@ -820,3 +820,68 @@ async def test_deprecate_dimension_allowed_when_unbound() -> None:
 
     assert result.status == "DEPRECATED"
     repo.commit.assert_awaited()
+
+
+async def test_update_member_deprecated_rejected() -> None:
+    """状态机保护：已废弃成员拒绝任何更新（防止静默复活/篡改）。"""
+    svc, repo = await _svc()
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="child",
+        member_name="子级",
+        parent_code=None,
+        path="/child",
+        status="DEPRECATED",
+    )
+    repo.get_member = AsyncMock(return_value=member)
+    from app.services.dimension.schemas import DimensionMemberUpdate
+
+    with pytest.raises(UnisenseError) as ei:
+        await svc.update_member(
+            "geo_region", "child", DimensionMemberUpdate(member_name="改名")
+        )
+    assert ei.value.error_code == "INVALID_STATE"
+
+
+async def test_update_member_published_reparent_rejected() -> None:
+    """状态机保护：已发布成员禁止变更父级（层级是下游权威来源，须废弃重建）。"""
+    svc, repo = await _svc()
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="child",
+        member_name="子级",
+        parent_code=None,
+        path="/child",
+        status="PUBLISHED",
+    )
+    repo.get_member = AsyncMock(return_value=member)
+    from app.services.dimension.schemas import DimensionMemberUpdate
+
+    with pytest.raises(UnisenseError) as ei:
+        await svc.update_member(
+            "geo_region", "child", DimensionMemberUpdate(parent_code="newparent")
+        )
+    assert ei.value.error_code == "INVALID_STATE"
+
+
+async def test_update_member_published_rename_allowed() -> None:
+    """状态机保护：已发布成员可改非破坏性字段（名称），对齐维度主体语义。"""
+    svc, repo = await _svc()
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="child",
+        member_name="子级",
+        parent_code=None,
+        path="/child",
+        status="PUBLISHED",
+    )
+    repo.get_member = AsyncMock(return_value=member)
+    from app.services.dimension.schemas import DimensionMemberUpdate
+
+    result = await svc.update_member(
+        "geo_region", "child", DimensionMemberUpdate(member_name="改名")
+    )
+    assert result.member_name == "改名"

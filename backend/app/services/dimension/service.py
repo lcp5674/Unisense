@@ -294,6 +294,23 @@ class DimensionService(BaseService):
                 error_code="INVALID_MEMBER_STATUS",
                 ctx={"status": data.status},
             )
+        # 状态机跃迁保护（对齐维度主体 update_dimension 语义）：
+        # - 已废弃成员为终态，拒绝任何更新（防止静默复活/篡改）
+        # - 已发布成员禁止变更父级（层级是下游消费/血缘的权威来源，须废弃重建）
+        if member.status == DimensionStatus.DEPRECATED.value:
+            raise UnisenseError(
+                f"已废弃成员不可更新: {dim_code}/{member_code}",
+                error_code="INVALID_STATE",
+            )
+        if (
+            data.parent_code is not None
+            and member.status == DimensionStatus.PUBLISHED.value
+            and (data.parent_code or None) != member.parent_code
+        ):
+            raise UnisenseError(
+                f"已发布成员不可变更父级，请先废弃再重建层级: {dim_code}/{member_code}",
+                error_code="INVALID_STATE",
+            )
         if data.member_name is not None:
             member.member_name = data.member_name
         if data.attributes is not None:
