@@ -3105,3 +3105,52 @@ async def test_confirm_deprecate_dropped_success():
     assert result.status == "DEPRECATED"
     svc._publish_event.assert_awaited_once()
     assert svc._publish_event.call_args.args[0] == "metric.deprecated"
+
+
+async def test_update_metric_row_version_conflict_raises_409():
+    """跨请求乐观锁：前端回传 row_version 与当前不一致 → ConflictError（防静默覆盖）。"""
+    from app.core.exceptions import ConflictError
+
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=5, version=1)
+    repo.get_by_code = AsyncMock(return_value=existing)
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                name="新名称",
+                change_reason="调整元数据",
+                row_version=3,  # 客户端持有的旧版本号
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+    assert exc.value.error_code == "OPTIMISTIC_LOCK_CONFLICT"
+    assert exc.value.ctx["current_row_version"] == 5
+    # 冲突时不应触达落库
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_update_metric_row_version_match_passes():
+    """跨请求乐观锁：row_version 一致时正常更新。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=5, version=1)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=6, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(
+            name="新名称",
+            change_reason="调整元数据",
+            row_version=5,  # 与当前一致
+        ),
+        actor_id=1,
+        role="metric_owner",
+    )
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["name"] == "新名称"

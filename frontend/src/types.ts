@@ -233,6 +233,7 @@ export interface MetricUpdateRequest {
   consumption_guide?: Record<string, unknown>;
   backup_owner_id?: number | null;
   change_reason: string; // 必填，min_length=4
+  row_version?: number; // 跨请求乐观锁：编辑时回传当前版本号，他人已改则 409 拒绝
 }
 
 // 仲裁改名建议（backend POST /metric-definitions/{code}/suggest-rename）

@@ -141,6 +141,14 @@ class MetricUpdateRequest(BaseModel):
     consumption_guide: dict[str, Any] | None = Field(None, description="消费指南")
     backup_owner_id: int | None = Field(None, description="副 Owner ID")
     change_reason: str = Field(..., min_length=4, description="变更原因")
+    row_version: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "乐观锁版本号（编辑时回传当前 row_version；"
+            "不传则向后兼容，不启用跨请求乐观锁校验）"
+        ),
+    )
 
     @field_validator("definition_json")
     @classmethod

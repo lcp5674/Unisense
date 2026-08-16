@@ -632,7 +632,11 @@ export function MetricDetail() {
       message.warning("请填写变更原因（至少 4 字）");
       return;
     }
-    const req: MetricUpdateRequest = { name, change_reason: renameReason.trim() };
+    const req: MetricUpdateRequest = {
+      name,
+      change_reason: renameReason.trim(),
+      row_version: metric.row_version, // 跨请求乐观锁：他人已改则 409 拒绝（防静默覆盖）
+    };
     await runAction(() => updateMetric(metric.metric_code, req), "指标改名");
     setRenameOpen(false);
     setRenameValue("");

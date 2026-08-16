@@ -628,6 +628,20 @@ class MetricService(BaseService):
         metric = await self.get_metric(metric_code)
         self._assert_owner_or_admin(metric, actor_id, role)
 
+        # 跨请求乐观锁（TD §4.1）：前端编辑弹窗回传 row_version，
+        # 若与当前值不一致说明数据已被他人修改 → 409 拒绝（防静默覆盖）。
+        expected = getattr(request, "row_version", None)
+        if expected is not None and expected != metric.row_version:
+            raise ConflictError(
+                "指标已被他人修改，请刷新后重试",
+                error_code="OPTIMISTIC_LOCK_CONFLICT",
+                ctx={
+                    "metric_code": metric_code,
+                    "current_row_version": metric.row_version,
+                    "expected_row_version": expected,
+                },
+            )
+
         # PII 合规闸门（COMPL-1）：未经合规复核的 PII 指标，禁止 update
         # 修复前：update 操作不校验 compliance_reviewed，pii_flag=1 且未复核的指标可被修改
         if metric.pii_flag and not metric.compliance_reviewed:

@@ -314,6 +314,7 @@ describe("MetricDetail", () => {
       expect(mockedUpdateMetric).toHaveBeenCalledWith("sales_gmv_sum_d", {
         name: "新名称",
         change_reason: "响应仲裁改名要求",
+        row_version: 1,
       }),
     );
   });
@@ -370,6 +371,7 @@ describe("MetricDetail", () => {
       expect(mockedUpdateMetric).toHaveBeenCalledWith("sales_gmv_sum_d", {
         name: "日销售总额(新)",
         change_reason: "响应仲裁改名要求",
+        row_version: 1,
       }),
     );
   });
