@@ -289,8 +289,8 @@ async def test_create_member_auto_resolves_child_path() -> None:
     assert out.path == "/east/east_nanjing"
 
 
-async def test_create_member_explicit_path_kept() -> None:
-    """客户端显式提供 path 时服务端不覆盖（保留手工路径）。"""
+async def test_create_member_client_path_ignored_server_derives() -> None:
+    """客户端直传 path 被忽略，服务端按父级独占推导（防层级错位）。"""
     svc, repo = await _svc()
     repo.get_dimension = AsyncMock(
         return_value=Dimension(
@@ -311,7 +311,8 @@ async def test_create_member_explicit_path_kept() -> None:
         status="PUBLISHED",
     )
     out = await svc.create_member(payload)
-    assert out.path == "/自定义/路径"
+    # path 为服务端派生字段：父级为唯一事实源，客户端直传 path 被忽略（防止层级错位）
+    assert out.path == "/east"
 
 
 # ---- 成员编辑 ----

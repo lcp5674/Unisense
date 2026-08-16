@@ -255,9 +255,8 @@ class DimensionService(BaseService):
                     ctx={"parent_code": data.parent_code},
                 )
 
-        # 层级路径自动推测：未显式提供时按父路径拼接（生产兜底，避免手工路径错位）
-        if data.path is None:
-            data.path = self._resolve_member_path(parent, data.member_code)
+        # 层级路径服务端独占推导：父级为唯一事实源，忽略客户端直传 path 防止层级错位
+        data.path = self._resolve_member_path(parent, data.member_code)
         if data.path.count("/") >= _MAX_MEMBER_DEPTH:
             raise ConflictError(
                 f"维度成员层级超过上限（{_MAX_MEMBER_DEPTH} 层）",
@@ -300,13 +299,11 @@ class DimensionService(BaseService):
         if data.attributes is not None:
             member.attributes = data.attributes
 
-        # 父级变更（含置根）：重新推导 path
+        # 父级变更（含置根）：重新推导 path（path 为服务端派生字段，不接受客户端直传）
         if data.parent_code is not None:
             new_parent_code = data.parent_code or None  # "" → 置根
             if new_parent_code != member.parent_code:
                 await self._validate_reparent(member, new_parent_code, dim_code)
-        elif data.path is not None:
-            member.path = data.path
 
         if member.path and member.path.count("/") >= _MAX_MEMBER_DEPTH:
             raise ConflictError(
