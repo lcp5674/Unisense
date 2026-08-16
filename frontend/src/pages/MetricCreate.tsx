@@ -5,7 +5,7 @@ import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, listDimensions, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, listDimensions, listMetrics, UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog, SuggestionField, AutoSuggestResponse, Dimension } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
@@ -132,6 +132,11 @@ export function MetricCreate() {
   const [dimensionOptions, setDimensionOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 主表单口径定义区选中的维度（合入 definition_json.dimensions，避免手写 JSON 编码错误）
   const [selectedDims, setSelectedDims] = useState<string[]>([]);
+  // 依赖指标（dependencies）：派生/复合指标的上游，从已发布指标搜索选择
+  const [depOptions, setDepOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [depSearching, setDepSearching] = useState(false);
+  const depSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const [selectedDeps, setSelectedDeps] = useState<string[]>([]);
 
   const [suggesting, setSuggesting] = useState(false);
   const [suggestedCode, setSuggestedCode] = useState<string | null>(null);
@@ -211,6 +216,12 @@ export function MetricCreate() {
         ),
       )
       .catch(() => setDimensionOptions([]));
+    // 初始加载已发布指标作为依赖选项（派生/复合指标上游）
+    setDepSearching(true);
+    listMetrics({ status: "PUBLISHED", page_size: 50 })
+      .then((res) => setDepOptions((res.items ?? []).map((m) => ({ value: m.metric_code, label: `${m.name} (${m.metric_code})` }))))
+      .catch(() => setDepOptions([]))
+      .finally(() => setDepSearching(false));
   }, []);
 
   // 口径定义区：关联数据表搜索（与源表名一致的惰性交互——空关键词加载平台已采集的表，可关键词搜索）
@@ -442,6 +453,18 @@ export function MetricCreate() {
     finally { setSuggesting(false); }
   }
 
+  // 依赖指标远程搜索（防抖）：listMetrics 按关键词搜已发布指标
+  function handleDepSearch(q: string) {
+    if (depSearchTimer.current) clearTimeout(depSearchTimer.current);
+    depSearchTimer.current = setTimeout(() => {
+      setDepSearching(true);
+      listMetrics({ status: "PUBLISHED", keyword: q.trim() || undefined, page_size: 50 })
+        .then((res) => setDepOptions((res.items ?? []).map((m) => ({ value: m.metric_code, label: `${m.name} (${m.metric_code})` }))))
+        .catch(() => {})
+        .finally(() => setDepSearching(false));
+    }, 300);
+  }
+
   function buildDefinitionJson(values: Record<string, unknown>): Record<string, unknown> | null {
     const tables = sourceTables.length ? { source_tables: sourceTables } : {};
     // ②自动推断区选定的源表/度量列 → 口径定义（血缘注册读 definition.source_table 建「指标↔落地表」边）
@@ -451,15 +474,17 @@ export function MetricCreate() {
     const measureField = measure ? { measure_column: measure } : {};
     // 主表单选中的维度 → definition_json.dimensions（血缘注册指标↔维度边）
     const dimsField = selectedDims.length ? { dimensions: selectedDims } : {};
+    // 依赖指标 → definition_json.dependencies（血缘注册原子→衍生指标边）
+    const depsField = selectedDeps.length ? { dependencies: selectedDeps } : {};
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
-      return { sql, ...tables, ...srcField, ...measureField, ...dimsField };
+      return { sql, ...tables, ...srcField, ...measureField, ...dimsField, ...depsField };
     }
     let def: Record<string, unknown>;
     try { def = values.definition ? JSON.parse(String(values.definition)) : {}; }
     catch { message.error("口径定义需为合法 JSON"); return null; }
-    return { ...def, ...tables, ...srcField, ...measureField, ...dimsField };
+    return { ...def, ...tables, ...srcField, ...measureField, ...dimsField, ...depsField };
   }
 
   async function handlePrecheck() {
@@ -884,9 +909,27 @@ export function MetricCreate() {
                     />
                   </Form.Item>
                   <Form.Item
+                    label="依赖指标（可选）"
+                    extra="选择该指标基于的上游指标（原子→衍生/复合血缘）；可输入关键词搜索已发布指标。"
+                  >
+                    <Select
+                      mode="multiple"
+                      showSearch
+                      filterOption={false}
+                      onSearch={handleDepSearch}
+                      loading={depSearching}
+                      placeholder="搜索并选择依赖指标"
+                      style={{ width: "100%" }}
+                      value={selectedDeps}
+                      onChange={setSelectedDeps}
+                      options={depOptions}
+                      allowClear
+                    />
+                  </Form.Item>
+                  <Form.Item
                     name="definition"
                     label="口径定义 (JSON)"
-                    extra="结构：expression（聚合表达式）、dependencies（依赖指标编码）、source_tables（来源表）、dimensions（已在上方选择）。"
+                    extra="结构：expression（聚合表达式）、dependencies（已在上方选择）、source_tables（来源表）、dimensions（已在上方选择）。"
                   >
                     <TextArea rows={5} placeholder='{"expression": "sum(amount)", "dependencies": [], "source_tables": []}' className="mono" />
                   </Form.Item>
