@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm, Divider, Tooltip } from "antd";
-import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, DatabaseOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, DatabaseOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import {
   listDimensions,
   createDimension,
@@ -24,6 +24,7 @@ import {
   deleteDimensionMember,
   publishDimensionMember,
   deprecateDimensionMember,
+  publishAllDimensionMembers,
   listDimensionMetrics,
   listMetrics,
   listDomainTree,
@@ -860,6 +861,7 @@ function MembersTab() {
   const [previewValues, setPreviewValues] = useState<string[]>([]);
   const [previewTruncated, setPreviewTruncated] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [batchPublishing, setBatchPublishing] = useState(false);
   // 导入进度感知：当前处理序号/总数（消除"点了没反应"的长等待）
   const [importProgress, setImportProgress] = useState<{ ok: number; failed: number; done: number; total: number } | null>(null);
 
@@ -1017,6 +1019,20 @@ function MembersTab() {
     }
   }
 
+  async function handlePublishAllMembers() {
+    if (!dimCode) return;
+    setBatchPublishing(true);
+    try {
+      const res = await publishAllDimensionMembers(dimCode);
+      message.success(`已发布 ${res.published} 个成员${res.skipped ? `（跳过 ${res.skipped} 个非草稿）` : ""}`);
+      reload();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量发布失败");
+    } finally {
+      setBatchPublishing(false);
+    }
+  }
+
   async function handleDeprecateMember(m: DimensionMember) {
     if (!dimCode) return;
     try {
@@ -1069,6 +1085,16 @@ function MembersTab() {
         <Space>
           {can("dimension:create") && (
             <Button icon={<PlusOutlined />} disabled={!dimCode} onClick={() => setModalOpen(true)}>新增值</Button>
+          )}
+          {can("dimension:create") && (
+            <Button
+              icon={<ThunderboltOutlined />}
+              disabled={!dimCode}
+              loading={batchPublishing}
+              onClick={() => handlePublishAllMembers()}
+            >
+              全部发布
+            </Button>
           )}
           {can("dimension:create") && (
             <Button

@@ -1706,6 +1706,16 @@ export async function publishDimensionMember(
   );
 }
 
+/** 批量发布维度全部 DRAFT 成员（POST /dimensions/{dim}/members/batch-publish，从表导入闭环） */
+export async function publishAllDimensionMembers(
+  dimCode: string,
+): Promise<{ published: number; skipped: number }> {
+  return request<{ published: number; skipped: number }>(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members/batch-publish`,
+    { method: "POST" },
+  );
+}
+
 /** 废弃维度成员（POST /dimensions/{dim}/members/{code}/deprecate，→ DEPRECATED） */
 export async function deprecateDimensionMember(
   dimCode: string,

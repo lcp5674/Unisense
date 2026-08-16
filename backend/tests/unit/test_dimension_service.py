@@ -1055,3 +1055,30 @@ async def test_deprecate_member_bound_as_default_rejected() -> None:
         assert False, "应拒绝废弃被绑定为默认值的成员"
     except Exception as exc:
         assert getattr(exc, "error_code", None) == "MEMBER_BOUND_BY_METRICS"
+
+
+async def test_publish_all_members_bulk() -> None:
+    """批量发布：DRAFT 成员全部置 PUBLISHED，非 DRAFT 跳过。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="dim_c"))
+    repo.list_members = AsyncMock(return_value=[
+        SimpleNamespace(status="DRAFT"),
+        SimpleNamespace(status="DRAFT"),
+        SimpleNamespace(status="PUBLISHED"),
+        SimpleNamespace(status="DEPRECATED"),
+    ])
+    result = await svc.publish_all_members("dim_c")
+    assert result == {"published": 2, "skipped": 2}
+    repo.commit.assert_awaited()
+
+
+async def test_publish_all_members_no_draft_no_commit() -> None:
+    """无 DRAFT 成员时不提交（幂等无副作用）。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="dim_c"))
+    repo.list_members = AsyncMock(return_value=[
+        SimpleNamespace(status="PUBLISHED"),
+    ])
+    result = await svc.publish_all_members("dim_c")
+    assert result == {"published": 0, "skipped": 1}
+    repo.commit.assert_not_awaited()

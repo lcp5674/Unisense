@@ -467,6 +467,26 @@ class DimensionService(BaseService):
         await self._require(dim_code)
         return await self._repo.list_members(dim_code)
 
+    async def publish_all_members(self, dim_code: str) -> dict[str, int]:
+        """批量发布维度全部 DRAFT 成员（从表导入工作流的闭环）。
+
+        一次性将 DRAFT 成员置 PUBLISHED（DEPRECATED 终态跳过、PUBLISHED 幂等），
+        返回 ``{"published": n, "skipped": m}``。
+        """
+        await self._require(dim_code)
+        members = await self._repo.list_members(dim_code)
+        published = 0
+        skipped = 0
+        for m in members:
+            if m.status == DimensionStatus.DRAFT.value:
+                m.status = DimensionStatus.PUBLISHED.value
+                published += 1
+            else:
+                skipped += 1
+        if published:
+            await self._repo.commit()
+        return {"published": published, "skipped": skipped}
+
     async def create_mapping(
         self, data: DimensionMappingCreate, actor_id: int | None = None
     ) -> DimensionMapping:

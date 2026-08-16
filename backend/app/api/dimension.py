@@ -436,6 +436,31 @@ async def publish_member(
 
 
 @router.post(
+    "/{dim_code}/members/batch-publish",
+    dependencies=_WRITE_DEPS,
+)
+async def publish_all_members(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """批量发布维度全部 DRAFT 成员（从表导入工作流闭环）。"""
+    result = await DimensionService(db).publish_all_members(dim_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.member.batch_publish",
+        entity_type="dimension_member",
+        entity_id=dim_code,
+        detail=result,
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
     "/{dim_code}/members/{member_code}/deprecate",
     dependencies=_WRITE_DEPS,
 )
