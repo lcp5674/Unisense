@@ -145,6 +145,12 @@ export function MetricReview() {
       if (seq !== loadSeq.current) return;
       setItems(res.items);
       setTotal(res.total);
+      // 空页回退：深页审批/打回后列表缩短，当前页无数据且非首页时回退上一页
+      // （依赖 page 变化自动重查；与指标目录的空页回退语义一致）
+      if (page > 1 && res.items.length === 0 && res.total > 0) {
+        setPage(Math.max(1, page - 1));
+        return;
+      }
     } catch (err) {
       message.error(
         err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",

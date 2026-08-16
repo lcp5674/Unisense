@@ -191,4 +191,23 @@ describe("MetricReview 指标审批", () => {
     // 「已处理」标记可见
     expect(screen.getByText("已处理")).toBeTruthy();
   });
+
+  it("深页空结果自动回退上一页（审批后列表缩短不致空页）", async () => {
+    // 第 1 页有数据、共 200 条（多页可分页）；第 2 页返回空（total>0 → 触发回退到第 1 页重查）
+    mockedList.mockImplementation(async (params) => {
+      if (params.page === 2) return { items: [], total: 1, page: 2, page_size: params.page_size };
+      return { items: [metric], total: 200, page: 1, page_size: params.page_size };
+    });
+    renderReview();
+    await screen.findByText("sales_gmv_day");
+    // 翻到第 2 页 → 第 2 页为空（total>0）→ 自动回退第 1 页重查
+    fireEvent.click(document.querySelector(".ant-pagination-item-2") as HTMLElement);
+    await waitFor(() => {
+      const pages = mockedList.mock.calls.map((c) => c[0]?.page);
+      expect(pages).toContain(2); // 发起过第 2 页查询
+      expect(pages.filter((p) => p === 1).length).toBeGreaterThanOrEqual(2); // 回退后再次查第 1 页
+    });
+    // 回退后列表仍显示数据（非空页）
+    expect(await screen.findByText("sales_gmv_day")).toBeTruthy();
+  });
 });
