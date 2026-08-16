@@ -297,6 +297,7 @@ function ArchivedDetailPanel({
 
 // 口径定义结构化展示：表达式 / 关联数据表 / 依赖 / 来源字段 / ETL SQL
 function DefinitionCard({ metric }: { metric: MetricResponse }) {
+  const navigate = useNavigate();
   const def = metric.definition_json ?? {};
   const expression = typeof def.expression === "string" ? def.expression : undefined;
   const dependencies = Array.isArray(def.dependencies) ? def.dependencies : [];
@@ -330,9 +331,20 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
         )}
         {dependencies.length > 0 && (
           <Descriptions.Item label="依赖指标">
-            {dependencies.map((d) => (
-              <Tag key={String(d)}>{String(d)}</Tag>
-            ))}
+            {dependencies.map((d) => {
+              const depCode = String(d);
+              return (
+                <Tag
+                  key={depCode}
+                  className="mono"
+                  style={{ cursor: "pointer", marginRight: 4 }}
+                  onClick={() => navigate(`/detail/${encodeURIComponent(depCode)}`)}
+                  title={`查看依赖指标 ${depCode}`}
+                >
+                  {depCode}
+                </Tag>
+              );
+            })}
           </Descriptions.Item>
         )}
         {sourceFields.length > 0 && (
