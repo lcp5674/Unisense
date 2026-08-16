@@ -325,6 +325,8 @@ export function MetricCatalog() {
   // 生命周期快筛的真实日期区间（TD §13）：created_7d=7 天前起 / stale_30d=30 天前止
   const [lifecycleDate, setLifecycleDate] = useState<{ created_after?: string; updated_before?: string }>({});
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
+  // 收藏操作连点防重：per-code busy 集合，请求进行中忽略再次点击（避免并发乱序致最终状态与最后点击相反）
+  const [favBusy, setFavBusy] = useState<Set<string>>(new Set());
   // 只看收藏：客户端过滤当前页（后端 list 无收藏过滤参数）
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   // 回收站视图：true 时仅展示已软删草稿（提供恢复入口）
@@ -541,6 +543,8 @@ export function MetricCatalog() {
 
   // 收藏切换（心形列）
   async function toggleFavorite(code: string) {
+    if (favBusy.has(code)) return; // 连点防重：请求进行中忽略再次点击
+    setFavBusy((prev) => new Set(prev).add(code));
     const fav = favorites.has(code);
     try {
       if (fav) {
@@ -558,6 +562,12 @@ export function MetricCatalog() {
       }
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "收藏操作失败");
+    } finally {
+      setFavBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(code);
+        return next;
+      });
     }
   }
 
@@ -743,6 +753,8 @@ export function MetricCatalog() {
         <Button
           type="text"
           size="small"
+          loading={favBusy.has(r.metric_code)}
+          disabled={favBusy.has(r.metric_code)}
           aria-label={favorites.has(r.metric_code) ? "取消收藏" : "收藏"}
           icon={
             favorites.has(r.metric_code) ? (
