@@ -418,22 +418,23 @@ class LineageService(BaseService):
             return []
         edges: list[LineageEdge] = []
         metric_code = metric.metric_code
-        for table in definition.get("source_tables") or []:
-            if isinstance(table, str) and table:
-                edges.append(
-                    await self._repo.upsert_metric_table_edge(
-                        metric_code=metric_code,
-                        table_node=node_table(table),
-                        direction="upstream",
-                        change_reason="metric_definition",
-                    )
-                )
+        # 指标↔表：差异同步（软删不再声明的落地表/源表边 + 注册新增），
+        # 编辑改 source_table/source_tables 后不留残留（纯追加此前导致旧表边残留）
         source_table = definition.get("source_table")
-        if isinstance(source_table, str) and source_table:
+        source_table_clean = (
+            source_table if isinstance(source_table, str) and source_table else None
+        )
+        upstream_tables = [
+            t for t in (definition.get("source_tables") or []) if isinstance(t, str) and t
+        ]
+        await self._repo.sync_metric_table_edges(
+            metric_code, source_table_clean, upstream_tables
+        )
+        if source_table_clean:
             edges.append(
                 await self._repo.upsert_metric_table_edge(
                     metric_code=metric_code,
-                    table_node=node_table(source_table),
+                    table_node=node_table(source_table_clean),
                     direction="downstream",
                     change_reason="metric_definition",
                 )

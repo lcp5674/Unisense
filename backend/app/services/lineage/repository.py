@@ -17,7 +17,7 @@ from app.models.consume import ApiClient, ApiClientStatus
 from app.models.data_source import DataSource, DBCatalog
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 from app.models.metric import Metric
-from app.services.lineage.parser import node_column, node_dimension
+from app.services.lineage.parser import node_column, node_dimension, node_table
 
 #: 系统内置血缘采集通道：无论当前是否有边都展示，保证「采集通道」视图来源全景完整
 #: （SQL 解析=sqlglot / DP 同步=dp_csv；其余动态来源如 metric_definition 有边时自动出现）。
@@ -386,6 +386,76 @@ class LineageRepository:
                 source_node=node_column(table, col),
                 target_node=node,
                 edge_type="READS_COLUMN",
+                granularity="L3",
+                confidence=1.0,
+                provenance="metric_definition",
+                change_reason="metric_definition",
+            )
+            if created:
+                added += 1
+        return deleted, added
+
+    async def sync_metric_table_edges(
+        self,
+        metric_code: str,
+        downstream_table: str | None,
+        upstream_tables: list[str],
+    ) -> tuple[int, int]:
+        """差异同步「指标↔表」血缘边（软删缺失 + 注册新增，返回 (删除数, 新增数)）。
+
+        与 ``sync_metric_dimension_edges``/``sync_metric_column_edges`` 同款：
+        ``register_metric_from_definition`` 的表边是纯追加语义，指标编辑改
+        ``source_table``（落地表）/``source_tables``（源表集）后，旧表边会残留，
+        血缘图仍显示指标产出/来源于已不使用的表。以当前声明为唯一事实源：
+        软删不再声明的表边、注册新增表边。
+
+        Args:
+            metric_code: 指标编码。
+            downstream_table: 当前落地表（``definition_json.source_table``，可为 None）。
+            upstream_tables: 当前源表列表（``definition_json.source_tables``）。
+
+        Returns:
+            ``(deleted_count, added_count)``。
+        """
+        node = f"metric:{metric_code}"
+        current_down = {node_table(downstream_table)} if downstream_table else set()
+        current_up = {
+            node_table(t) for t in upstream_tables if isinstance(t, str) and t
+        }
+        deleted = 0
+        # 1a) 软删不再声明的落地表边（metric:{code} → table:{tbl}，DERIVED_FROM）
+        for edge in await self.edges_for_node(node, direction="downstream"):
+            if edge.edge_type != "DERIVED_FROM" or not edge.target_node.startswith("table:"):
+                continue  # 仅处理 table 节点，跳过指标依赖边（metric:*）
+            if edge.target_node not in current_down:
+                await self.soft_delete_edge_by_key(node, edge.target_node, edge.edge_type)
+                deleted += 1
+        # 1b) 软删不再声明的源表边（table:{tbl} → metric:{code}，DERIVED_FROM）
+        for edge in await self.edges_for_node(node, direction="upstream"):
+            if edge.edge_type != "DERIVED_FROM" or not edge.source_node.startswith("table:"):
+                continue
+            if edge.source_node not in current_up:
+                await self.soft_delete_edge_by_key(edge.source_node, node, edge.edge_type)
+                deleted += 1
+        # 2) 注册新增的表边（created 标记真正新增，已存在不计）
+        added = 0
+        for tn in current_down:
+            _, created = await self._upsert_with_created(
+                source_node=node,
+                target_node=tn,
+                edge_type="DERIVED_FROM",
+                granularity="L3",
+                confidence=1.0,
+                provenance="metric_definition",
+                change_reason="metric_definition",
+            )
+            if created:
+                added += 1
+        for sn in current_up:
+            _, created = await self._upsert_with_created(
+                source_node=sn,
+                target_node=node,
+                edge_type="DERIVED_FROM",
                 granularity="L3",
                 confidence=1.0,
                 provenance="metric_definition",

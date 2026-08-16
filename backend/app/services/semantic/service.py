@@ -1779,26 +1779,11 @@ class MetricService(BaseService):
             # 1) 表级血缘（指标 ↔ 物理底表），不在此提交，交由外层事务统一提交
             await lineage_svc.register_metric_from_definition(metric, commit=False)
 
-            # 2) 指标↔维度血缘（USES_DIMENSION，L3）——所有类型均可能有维度绑定
-            # 此前维度绑定仅写 definition_json.dimensions，血缘图不生成
-            # USES_DIMENSION 边（register_metric_dimension_edges 为死方法）；
-            # 补齐后指标创建/编辑/发布含维度绑定时，血缘「指标↔维度」自动注册。
-            # 注意：必须置于依赖边 return 之前——atomic 指标无依赖边会提前 return，
-            # 但 atomic 指标同样有维度绑定（此前误放 return 后导致 atomic 维度边缺失）。
+            # 2) 指标间依赖血缘（仅 derived/composite 有 dependencies）——
+            # 表/维度/字段血缘已由 register_metric_from_definition 差异同步处理
             definition = metric.definition_json or {}
             if not isinstance(definition, dict):
                 return
-            dimensions = definition.get("dimensions") or []
-            if isinstance(dimensions, list):
-                # 差异同步：以 definition_json.dimensions 为唯一事实源，软删不再
-                # 声明的维度边 + 注册新增边（register_metric_dimension_edges 是纯追加
-                # 语义，编辑减维度/清空时陈旧 USES_DIMENSION 边会残留）
-                await lineage_svc.sync_metric_dimension_edges(
-                    metric.metric_code,
-                    [d for d in dimensions if isinstance(d, str)],
-                )
-
-            # 3) 指标间依赖血缘（仅 derived/composite 有 dependencies）
             dependencies = definition.get("dependencies") or []
             if not isinstance(dependencies, list) or metric.type == "atomic" or not dependencies:
                 return

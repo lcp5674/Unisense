@@ -116,6 +116,23 @@ class FakeRepo:
         )
         return 0, len([(t, c) for t, c in current_fields if t and c])
 
+    async def sync_metric_table_edges(
+        self,
+        metric_code: str,
+        downstream_table: str | None,
+        upstream_tables: list[str],
+    ) -> tuple[int, int]:
+        """表边差异同步假实现：记录声明落地表/源表集。"""
+        self.upsert_calls.append(
+            {
+                "op": "sync_metric_table_edges",
+                "metric_code": metric_code,
+                "downstream": downstream_table,
+                "upstream": upstream_tables,
+            }
+        )
+        return 0, len(upstream_tables) + (1 if downstream_table else 0)
+
     async def upsert_metric_column_edge(
         self,
         *,

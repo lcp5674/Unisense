@@ -1019,3 +1019,56 @@ async def test_sync_metric_column_edges_empty_current_clears_all() -> None:
     assert not [
         r for r in db._rows if r.target_node == "metric:m" and r.edge_type == "READS_COLUMN"
     ]
+
+
+async def test_sync_metric_table_edges_removes_stale_and_adds_new() -> None:
+    """sync_metric_table_edges 差异同步：软删不再声明的落地表/源表边、注册新增。"""
+    db = _FakeDB(
+        [
+            # 落地表边：metric:m → table  (downstream)
+            _Row(1, "metric:m", "table:dws.gmv_v1", "DERIVED_FROM", "L3"),
+            _Row(2, "metric:m", "table:dws.gmv_v2", "DERIVED_FROM", "L3"),
+            # 源表边：table → metric:m  (upstream)
+            _Row(3, "table:ods.order", "metric:m", "DERIVED_FROM", "L3"),
+            _Row(4, "table:ods.user", "metric:m", "DERIVED_FROM", "L3"),
+            # 指标依赖边（metric:* 节点）不应被表差异同步误删
+            _Row(5, "metric:dep_a", "metric:m", "DERIVED_FROM", "L3"),
+        ]
+    )
+    repo = LineageRepository(db)
+    deleted, added = await repo.sync_metric_table_edges(
+        "m", "dws.gmv_v2", ["ods.order", "ods.item"]
+    )
+    assert deleted == 2  # 落地表 gmv_v1 + 源表 ods.user 不再声明 → 软删
+    assert added == 1  # 源表 ods.item 新增（gmv_v2 与 ods.order 已存在不计）
+    remaining = [
+        r for r in db._rows
+        if r.source_node == "metric:m" or r.target_node == "metric:m"
+    ]
+    keys = sorted((r.source_node, r.target_node) for r in remaining)
+    # gmv_v2(落地表) + ods.order(源表) + ods.item(源表) + 依赖边 metric:dep_a 保留
+    assert keys == [
+        ("metric:dep_a", "metric:m"),
+        ("metric:m", "table:dws.gmv_v2"),
+        ("table:ods.item", "metric:m"),
+        ("table:ods.order", "metric:m"),
+    ]
+
+
+async def test_sync_metric_table_edges_no_tables_clears_all() -> None:
+    """sync 无声明表：清理全部残留表边（指标不再声明任何表）。"""
+    db = _FakeDB(
+        [
+            _Row(1, "metric:m", "table:dws.gmv_v1", "DERIVED_FROM", "L3"),
+            _Row(2, "table:ods.order", "metric:m", "DERIVED_FROM", "L3"),
+        ]
+    )
+    repo = LineageRepository(db)
+    deleted, added = await repo.sync_metric_table_edges("m", None, [])
+    assert deleted == 2
+    assert added == 0
+    assert not [
+        r for r in db._rows
+        if (r.source_node == "metric:m" and r.target_node.startswith("table:"))
+        or (r.target_node == "metric:m" and r.source_node.startswith("table:"))
+    ]

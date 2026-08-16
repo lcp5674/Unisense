@@ -3062,7 +3062,7 @@ async def test_register_metric_lineage_full_atomic_skips_dependency_edges():
 
 
 async def test_register_metric_lineage_full_registers_dimension_edges():
-    """含 dimensions 的指标：差异同步 USES_DIMENSION 血缘边（L3）。"""
+    """atomic 指标含 dimensions：维度边差异同步由 register_metric_from_definition 内完成。"""
     svc, _repo = _svc_with_repo()
     metric = make_metric(
         type="atomic",
@@ -3076,18 +3076,17 @@ async def test_register_metric_lineage_full_registers_dimension_edges():
         lineage_svc = mock_ls.return_value
         lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
         lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
-        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 2))
 
         await svc._register_metric_lineage_full(metric)
 
+        # 表/维度/字段血缘统一由 register_metric_from_definition 差异同步
         lineage_svc.register_metric_from_definition.assert_awaited_once_with(metric, commit=False)
-        lineage_svc.sync_metric_dimension_edges.assert_awaited_once_with(
-            "sales_gmv_daily", ["dim_store", "dim_channel"]
-        )
+        # atomic 无依赖边，不调用依赖注册（register_metric_from_definition 在依赖边前执行）
+        lineage_svc.sync_metric_dimension_edges.assert_not_awaited()
 
 
 async def test_register_metric_lineage_full_clears_dimension_edges_when_absent():
-    """definition 不含 dimensions（视为空声明）时差异同步清空维度边（清除残留）。"""
+    """atomic 无维度：仍调用 register_metric_from_definition（其内部差异同步清残留）。"""
     svc, _repo = _svc_with_repo()
     metric = make_metric(
         type="atomic",
@@ -3097,13 +3096,11 @@ async def test_register_metric_lineage_full_clears_dimension_edges_when_absent()
         lineage_svc = mock_ls.return_value
         lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
         lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
-        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
 
         await svc._register_metric_lineage_full(metric)
 
         lineage_svc.register_metric_from_definition.assert_awaited_once_with(metric, commit=False)
-        # dimensions 缺失 = 空声明 → 差异同步清理全部残留维度边（不再声明即不再使用）
-        lineage_svc.sync_metric_dimension_edges.assert_awaited_once_with("sales_gmv_daily", [])
+        lineage_svc.sync_metric_dimension_edges.assert_not_awaited()
 
 
 async def test_register_metric_lineage_full_failure_is_swallowed():
