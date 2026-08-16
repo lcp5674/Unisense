@@ -1484,8 +1484,12 @@ export function MetricDetail() {
       <Modal
         title="提交评审"
         open={submitOpen}
-        onOk={() =>
-          runAction(
+        onOk={() => {
+          if (submitReviewerType === "user" && submitReviewerId == null) {
+            message.warning("选择「指定评审用户」后请选择具体评审人");
+            return;
+          }
+          return runAction(
             () =>
               submitReview(metric.metric_code, "提交评审", {
                 reviewer_id: submitReviewerType === "user" ? submitReviewerId : null,
@@ -1493,8 +1497,8 @@ export function MetricDetail() {
                 reviewer_domain: metric.domain,
               }),
             "提交评审",
-          ).then(() => setSubmitOpen(false))
-        }
+          ).then(() => setSubmitOpen(false));
+        }}
         confirmLoading={busy}
         onCancel={() => setSubmitOpen(false)}
         okText="提交评审"
