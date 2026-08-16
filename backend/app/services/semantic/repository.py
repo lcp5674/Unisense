@@ -179,10 +179,14 @@ class MetricRepository:
         if updated_before is not None:
             conditions.append(Metric.updated_at <= updated_before)
         if keyword:
-            # LIKE 通配符转义（对齐 FR-035：% 和 _ 须转义）
-            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            # LIKE 通配符转义（对齐 FR-035：% 和 _ 须转义）。
+            # 修复前：手动 replace 成 \%/\_ 但 contains() 不生成 ESCAPE 子句，
+            # MySQL 默认把 \ 当普通字符、%/_ 仍当通配符 → 转义实际失效，
+            # 搜含 %/_ 的关键词（如 order_cnt、100%）会模糊放大匹配。
+            # autoescape=True 由 SQLAlchemy 自动转义 %/_/\ 并生成 ESCAPE '\\' 子句。
             conditions.append(
-                (Metric.metric_code.contains(escaped)) | (Metric.name.contains(escaped))
+                (Metric.metric_code.contains(keyword, autoescape=True))
+                | (Metric.name.contains(keyword, autoescape=True))
             )
 
         # 总数

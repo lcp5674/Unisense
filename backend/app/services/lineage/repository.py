@@ -752,7 +752,9 @@ class LineageRepository:
             .order_by(func.count().desc())
         )
         if kw:
-            stmt = stmt.where(union.c.node.like(f"%{kw}%"))
+            # 通配符转义（对齐 FR-035）：kw 含 %/_ 时须转义防模糊放大
+            escaped = kw.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            stmt = stmt.where(union.c.node.like(f"%{escaped}%", escape="/"))
         rows = (await self._db.execute(stmt.limit(limit))).all()
         return [(str(r[0]), int(r[1] or 0)) for r in rows]
 

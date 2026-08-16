@@ -86,7 +86,8 @@ def _domain(code: str = "sales") -> SimpleNamespace:
 
 class TestEscapeLike:
     def test_escapes_wildcards(self) -> None:
-        assert _escape_like("a%b_c") == "a\\%b\\_c"
+        assert _escape_like("a%b_c") == "a/%b/_c"
+        assert _escape_like("a/b") == "a//b"
         assert _escape_like("plain") == "plain"
 
 
@@ -168,7 +169,9 @@ class TestGlobalSearchRepository:
         await repo.search("100%", limit=5)
         metric_stmt = s.execute.call_args_list[0].args[0]
         compiled = str(metric_stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "\\%" in compiled
+        # 转义符为 /：% 转义为 /% （100% → 100/%），并生成 ESCAPE '/' 子句
+        assert "/%" in compiled
+        assert "ESCAPE '/'" in compiled
 
 
 class TestGlobalSearchService:

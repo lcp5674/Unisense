@@ -297,6 +297,35 @@ async def test_list_metrics_escapes_like_wildcards():
     assert items == []
 
 
+async def test_list_metrics_wildcard_escape_generates_escape_clause():
+    """含 %/_ 的关键词必须生成 ESCAPE 子句（FR-035 防模糊放大）。
+
+    修复前：手动 replace 成 \\% 但 contains() 不生成 ESCAPE，MySQL 默认把 \\
+    当普通字符、%/_ 仍当通配符 → 转义实际失效（搜 order_cnt 会匹配所有含 order）。
+    autoescape=True 由 SQLAlchemy 自动转义并生成 ESCAPE '/' 子句。
+    """
+    from sqlalchemy.dialects import mysql
+
+    db = _mock_session()
+    db.execute.side_effect = [
+        _result(scalar=0),
+        _result(all_=[]),
+    ]
+    repo = MetricRepository(db)
+
+    await repo.list_metrics(keyword="order_cnt", offset=0, limit=10)
+
+    # 第二个 execute 是列表查询（第一个是 count），取其 SELECT 语句编译为 MySQL 方言
+    list_stmt = db.execute.call_args_list[1].args[0]
+    sql = str(list_stmt.compile(dialect=mysql.dialect()))
+    assert "ESCAPE" in sql
+    # autoescape 把关键词中的下划线转义为 /_（编译时内联字面量可见），而非裸 _ 通配符
+    literal_sql = str(
+        list_stmt.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "/_" in literal_sql
+
+
 async def test_list_metrics_asc_sort_and_whitelist_fallback():
     db = _mock_session()
     db.execute.side_effect = [

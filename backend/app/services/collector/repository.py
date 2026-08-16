@@ -179,7 +179,9 @@ class CollectorRepository:
             base = base.where(DataSource.source_type == source_type)
         if keyword:
             # 参数化 LIKE（值经绑定，无字符串拼接 SQL）
-            base = base.where(DataSource.name.ilike(f"%{keyword}%"))
+            # 通配符转义（对齐 FR-035）：keyword 含 %/_ 时须转义，否则模糊放大匹配
+            escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            base = base.where(DataSource.name.ilike(f"%{escaped}%", escape="/"))
         if health_status:
             # 总览仪表「数据源」资产卡片按健康状态下钻（healthy/unhealthy/unknown）
             base = base.where(DataSource.health_status == health_status)
@@ -344,16 +346,19 @@ class CollectorRepository:
         db_name = getattr(params, "database", None)
         if db_name:
             # 库名 = entity_name 前缀（库.表）；LIKE 通配符转义防模糊放大
-            esc_db = db_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            base = base.where(DBCatalog.entity_name.ilike(f"{esc_db}.%"))
+            esc_db = db_name.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            base = base.where(DBCatalog.entity_name.ilike(f"{esc_db}.%", escape="/"))
         if params.keyword:
             # 表+字段级搜索：entity_name 模糊 OR schema_json 字段名/注释模糊（CAST 跨方言）
-            # LIKE 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
-            escaped = params.keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            # LIKE 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）。
+            # 修复前：转义为 \\% 但 ilike() 无 escape 参数不生成 ESCAPE 子句，
+            # MySQL 默认把 \\ 当普通字符、%/_ 仍当通配符 → 转义实际失效。
+            # 改用 / 作转义符 + 显式 escape="/"（SQLAlchemy 生成 ESCAPE '/'）。
+            escaped = params.keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
             base = base.where(
                 or_(
-                    DBCatalog.entity_name.ilike(f"%{escaped}%"),
-                    cast(DBCatalog.schema_json, String).ilike(f"%{escaped}%"),
+                    DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"),
+                    cast(DBCatalog.schema_json, String).ilike(f"%{escaped}%", escape="/"),
                 )
             )
         count = await self._db.scalar(select(func.count()).select_from(base.subquery()))
@@ -395,14 +400,15 @@ class CollectorRepository:
             base = base.where(DataSource.domain == domain)
         db_name = getattr(params, "database", None)
         if db_name:
-            esc_db = db_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            base = base.where(DBCatalog.entity_name.ilike(f"{esc_db}.%"))
+            esc_db = db_name.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            base = base.where(DBCatalog.entity_name.ilike(f"{esc_db}.%", escape="/"))
         if params.keyword:
-            escaped = params.keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            # 同款修复：/ 作转义符 + 显式 escape="/"（对齐 FR-035，防模糊放大）
+            escaped = params.keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
             base = base.where(
                 or_(
-                    DBCatalog.entity_name.ilike(f"%{escaped}%"),
-                    cast(DBCatalog.schema_json, String).ilike(f"%{escaped}%"),
+                    DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"),
+                    cast(DBCatalog.schema_json, String).ilike(f"%{escaped}%", escape="/"),
                 )
             )
         if params.source_status == "active":

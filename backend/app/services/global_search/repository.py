@@ -27,8 +27,13 @@ from app.models.term import Term
 
 
 def _escape_like(text: str) -> str:
-    """转义 LIKE 通配符，防止用户输入 ``%``/``_`` 做全表模糊放大。"""
-    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    """转义 LIKE 通配符，防止用户输入 ``%``/``_`` 做全表模糊放大。
+
+    修复前：转义为 \\% 但调用方 like() 无 escape 参数不生成 ESCAPE 子句，
+    MySQL 默认把 \\ 当普通字符、%/_ 仍当通配符 → 转义实际失效。
+    现用 / 作转义符（转义 //、/% 和 /_），配合 like(..., escape="/")。
+    """
+    return text.replace("/", "//").replace("%", "/%").replace("_", "/_")
 
 
 class GlobalSearchRepository:
@@ -94,7 +99,10 @@ class GlobalSearchRepository:
             select(Metric)
             .where(
                 Metric.deleted_at.is_(None),
-                or_(Metric.metric_code.like(needle), Metric.name.like(needle)),
+                or_(
+                        Metric.metric_code.like(needle, escape="/"),
+                        Metric.name.like(needle, escape="/"),
+                    ),
             )
             .limit(limit)
         )
@@ -118,9 +126,9 @@ class GlobalSearchRepository:
             .where(
                 Dimension.deleted_at.is_(None),
                 or_(
-                    Dimension.dim_code.like(needle),
-                    Dimension.name.like(needle),
-                    Dimension.description.like(needle),
+                    Dimension.dim_code.like(needle, escape="/"),
+                    Dimension.name.like(needle, escape="/"),
+                    Dimension.description.like(needle, escape="/"),
                 ),
             )
             .limit(limit)
@@ -144,9 +152,9 @@ class GlobalSearchRepository:
             .where(
                 Term.deleted_at.is_(None),
                 or_(
-                    Term.term_code.like(needle),
-                    Term.name.like(needle),
-                    Term.definition.like(needle),
+                    Term.term_code.like(needle, escape="/"),
+                    Term.name.like(needle, escape="/"),
+                    Term.definition.like(needle, escape="/"),
                 ),
             )
             .limit(limit)
@@ -170,9 +178,9 @@ class GlobalSearchRepository:
             .where(
                 MetricTemplate.deleted_at.is_(None),
                 or_(
-                    MetricTemplate.code.like(needle),
-                    MetricTemplate.name.like(needle),
-                    MetricTemplate.description.like(needle),
+                    MetricTemplate.code.like(needle, escape="/"),
+                    MetricTemplate.name.like(needle, escape="/"),
+                    MetricTemplate.description.like(needle, escape="/"),
                 ),
             )
             .limit(limit)
@@ -194,7 +202,12 @@ class GlobalSearchRepository:
         stmt = (
             select(DataSource)
             .where(DataSource.deleted_at.is_(None))
-            .where(or_(DataSource.name.like(needle), DataSource.source_id.like(needle)))
+            .where(
+                or_(
+                    DataSource.name.like(needle, escape="/"),
+                    DataSource.source_id.like(needle, escape="/"),
+                )
+            )
             .limit(limit)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
@@ -215,7 +228,7 @@ class GlobalSearchRepository:
         """表级搜索：entity_name 模糊匹配（表/视图/字段实体，表名列命中）。"""
         stmt = (
             select(DBCatalog)
-            .where(DBCatalog.deleted_at.is_(None), DBCatalog.entity_name.like(needle))
+            .where(DBCatalog.deleted_at.is_(None), DBCatalog.entity_name.like(needle, escape="/"))
             .limit(limit)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
@@ -281,7 +294,10 @@ class GlobalSearchRepository:
             select(SubjectDomain)
             .where(
                 SubjectDomain.deleted_at.is_(None),
-                or_(SubjectDomain.code.like(needle), SubjectDomain.name.like(needle)),
+                or_(
+                    SubjectDomain.code.like(needle, escape="/"),
+                    SubjectDomain.name.like(needle, escape="/"),
+                ),
             )
             .limit(limit)
         )
