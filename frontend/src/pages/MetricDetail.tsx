@@ -847,9 +847,14 @@ export function MetricDetail() {
         }
       }
       const govPayload: Record<string, string> = {};
-      for (const f of ["currency", "dw_layer", "freshness", "time_semantics", "metric_tier"]) {
-        // 用户改过的治理字段才传（未改不传 → 后端保留原值；dirty+空值 → 不传保留原值）
+      for (const f of ["dw_layer", "freshness", "time_semantics", "metric_tier"]) {
+        // 枚举治理字段：用户改过且非空才传（必选枚举无需清空；未改不传 → 后端保留原值）
         if (editGovDirty.has(f) && editGovValues[f]) govPayload[f] = editGovValues[f];
+      }
+      // currency（币种）为可选字段：dirty 时空串也传（清空币种合法终态，后端 str 字段接受空串）
+      // 修复前：allowClear 清空币种后保存被 `&& value` 过滤 → 静默保留原币种（清空意图失效）
+      if (editGovDirty.has("currency")) {
+        govPayload.currency = editGovValues.currency ?? "";
       }
       const req: MetricUpdateRequest = {
         name: String(values.name).trim(),

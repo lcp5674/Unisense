@@ -1176,6 +1176,58 @@ describe("MetricDetail 按钮级权限过滤", () => {
     expect(lastCall).not.toHaveProperty("currency");
   });
 
+  it("编辑弹窗清空币种（allowClear 后保存 currency 传空串，不再静默保留原币种）", async () => {
+    // currency 是可选字段（str|None），清空是合法终态（非币种指标）。
+    // 修复前：allowClear 清空后被 `&& value` 过滤 → 不提交 → 币种静默保留（清空意图失效）。
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      currency: "CNY",
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 币种回填 CNY
+    const currencyInput = document.querySelector('.ant-modal input[placeholder*="CNY"]') as HTMLInputElement;
+    expect(currencyInput).toBeTruthy();
+    // 清空币种（allowClear 语义）→ dirty 标记 currency
+    fireEvent.change(currencyInput, { target: { value: "" } });
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "清空币种（该指标非币种口径）" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      expect(mockedUpdateMetric).toHaveBeenCalled();
+    });
+    const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1][1];
+    expect(lastCall).toHaveProperty("currency", ""); // 空串提交 → 后端清空币种（修复核心）
+  });
+
   it("编辑弹窗遗留粒度/单位值兜底（字典未收录时仍显示并保留，防静默清空）", async () => {
     // 存量指标粒度 "daily" 不在字典（字典为空），openEdit 应将其作为兜底选项加入，
     // 保存时 granularity/unit 不被静默清空（数据丢失防护）。
