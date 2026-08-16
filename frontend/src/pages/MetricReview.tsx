@@ -87,6 +87,8 @@ export function MetricReview() {
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const navigate = useNavigate();
   const { can } = usePermission();
   const canApprove = can("metric:approve");
@@ -100,7 +102,7 @@ export function MetricReview() {
   async function load() {
     setLoading(true);
     try {
-      const res = await listMetrics({ status: "REVIEW", page_size: 100 });
+      const res = await listMetrics({ status: "REVIEW", page, page_size: pageSize });
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
@@ -119,7 +121,7 @@ export function MetricReview() {
       .then((u) => setUserMap(new Map(u.map((x) => [x.id, x.display_name || x.username]))))
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [page, pageSize]);
 
   async function handleReview(metric: MetricResponse, approved: boolean, reason: string) {
     setBusyCode(metric.metric_code);
@@ -258,17 +260,25 @@ export function MetricReview() {
 
   return (
     <div>
-      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
-        返回
-      </Button>
+      <div className="page-head">
+        <div>
+          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+            返回
+          </Button>
+          <div className="page-kicker">指标资产 / 指标审批</div>
+          <h2>指标审批</h2>
+          <p>待评审指标——仅被指派评审人/域评审组可通过或打回。</p>
+        </div>
+      </div>
       <Card
-        title="指标审批"
+        title="待评审指标"
         extra={
           <Space>
+            {/* 批量按钮：仅在勾选中有当前用户可评审的项时可用（避免"均非指派"空操作） */}
             <Button
               size="small"
               icon={<CheckCircleOutlined />}
-              disabled={!selectedKeys.length || batchBusy || !canApprove}
+              disabled={!selectedKeys.length || batchBusy || !canApprove || !items.some((m) => selectedKeys.includes(m.metric_code) && canReview(m, currentUser))}
               onClick={() => runBatch(true)}
             >
               批量通过
@@ -277,7 +287,7 @@ export function MetricReview() {
               size="small"
               danger
               icon={<ClockCircleOutlined />}
-              disabled={!selectedKeys.length || batchBusy || !canApprove}
+              disabled={!selectedKeys.length || batchBusy || !canApprove || !items.some((m) => selectedKeys.includes(m.metric_code) && canReview(m, currentUser))}
               onClick={() => runBatch(false)}
             >
               批量打回
@@ -293,7 +303,6 @@ export function MetricReview() {
           columns={columns}
           rowKey="metric_code"
           loading={loading}
-          pagination={false}
           rowSelection={{
             selectedRowKeys: selectedKeys,
             onChange: (keys) => setSelectedKeys(keys),
@@ -302,10 +311,16 @@ export function MetricReview() {
               disabled: !canReview(r, currentUser),
             }),
           }}
+          pagination={{
+            current: page,
+            pageSize,
+            total,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50],
+            onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+            showTotal: (t) => `共 ${t} 条待评审`,
+          }}
           locale={{ emptyText: "暂无待评审指标" }}
-          footer={() =>
-            total > 100 ? `共 ${total} 条待评审，仅显示前 100 条` : `共 ${total} 条待评审`
-          }
         />
       </Card>
     </div>
