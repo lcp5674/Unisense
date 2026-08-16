@@ -332,3 +332,47 @@ def test_upstream_deps_invalid_sql_degrades() -> None:
     deps = extract_upstream_deps("NOT VALID @@@")
     assert deps.tables == ()
     assert deps.fields == ()
+
+
+def test_upstream_deps_hive_subquery_alias_not_leaked() -> None:
+    """Hive 上游依赖：子查询别名（t2）不得泄漏为表/字段，投影列正确归属真实来源表。"""
+    sql = (
+        "SELECT t1.hosp_id, t1.hosp_name, t3.expert_id, t3.expert_name "
+        "FROM wedw_dw.wy_zh_hospital_std_df t1 "
+        "JOIN (SELECT tag_id, hospital_id FROM wedw_dwd.hospital_tag_df "
+        "      WHERE date_id = '2026-08-13' AND tag_id = 1151 AND state = 0 "
+        "      GROUP BY tag_id, hospital_id) t2 "
+        "ON t1.hosp_id = t2.hospital_id "
+        "JOIN wedw_dw.wy_zh_hosp_dept_expert_relation_df t3 "
+        "ON t1.hosp_id = t3.hosp_id AND t3.status_id = 1 AND t1.status_id = 1"
+    )
+    deps = extract_upstream_deps(sql, dialect="hive")
+    # 上游表：两个显式源表 + 子查询内部表，不含子查询别名 t2
+    assert set(deps.tables) == {
+        "wedw_dw.wy_zh_hospital_std_df",
+        "wedw_dwd.hospital_tag_df",
+        "wedw_dw.wy_zh_hosp_dept_expert_relation_df",
+    }
+    assert not any(f.startswith("t2.") for f in deps.fields)
+    # 投影列正确归属真实来源表（不得残留别名 t1./t3.）
+    assert "wedw_dw.wy_zh_hospital_std_df.hosp_id" in deps.fields
+    assert "wedw_dw.wy_zh_hospital_std_df.hosp_name" in deps.fields
+    assert "wedw_dw.wy_zh_hosp_dept_expert_relation_df.expert_id" in deps.fields
+    assert "wedw_dw.wy_zh_hosp_dept_expert_relation_df.expert_name" in deps.fields
+    # 条件列（ON/WHERE/GROUP BY）不进入字段清单，避免污染血缘
+    assert not any(f.endswith(".status_id") for f in deps.fields)
+    assert not any(f.endswith(".tag_id") for f in deps.fields)
+    assert not any(f.endswith(".date_id") for f in deps.fields)
+
+
+def test_upstream_deps_projection_through_subquery() -> None:
+    """上游依赖：投影引用子查询输出列时穿透到子查询内部真实来源表。"""
+    sql = (
+        "SELECT t2.hospital_id, t2.tag_id FROM ("
+        "SELECT tag_id, hospital_id FROM wedw_dwd.hospital_tag_df "
+        "WHERE date_id = '2026-08-13') t2"
+    )
+    deps = extract_upstream_deps(sql, dialect="hive")
+    assert "wedw_dwd.hospital_tag_df.hospital_id" in deps.fields
+    assert "wedw_dwd.hospital_tag_df.tag_id" in deps.fields
+    assert not any(f.startswith("t2.") for f in deps.fields)

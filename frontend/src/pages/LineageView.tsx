@@ -309,10 +309,12 @@ export function upstreamDepsToGraphData(deps: UpstreamDeps): {
   };
   // 第一层：本次查询 → 源表
   for (const t of deps.tables) addEdge(QUERY_ID, addNode(`table:${t}`, "table"));
-  // 第二层：表 → 所属字段；裸列名（无表前缀）直接挂中心
+  // 第二层：表 → 所属字段；裸列名（无表前缀）直接挂中心。
+  // 表名可能带库前缀（如 wedw_dw.wy_zh_hospital_std_df.hosp_id），须按最后一个点
+  // 拆分（列名不含点），避免把库名拆成表节点导致字段挂错表。
   for (const f of deps.fields) {
     const fieldId = addNode(`field:${f}`, "field");
-    const dot = f.indexOf(".");
+    const dot = f.lastIndexOf(".");
     if (dot > 0) {
       // 字段限定列（表.列）：挂到所属表下；即使该表未出现在 tables 也补建表节点
       const tableId = addNode(`table:${f.slice(0, dot)}`, "table");

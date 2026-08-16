@@ -1064,6 +1064,36 @@ describe("upstreamDepsToGraphData 上游依赖转图谱", () => {
     expect(g.nodes).toHaveLength(3);
     expect(g.edges).toHaveLength(2);
   });
+
+  it("带库名表名的字段按最后一个点拆分（不把库名拆成表节点）", () => {
+    const g = upstreamDepsToGraphData({
+      tables: ["wedw_dw.wy_zh_hospital_std_df", "wedw_dwd.hospital_tag_df"],
+      fields: [
+        "wedw_dw.wy_zh_hospital_std_df.hosp_id",
+        "wedw_dwd.hospital_tag_df.hospital_id",
+      ],
+    });
+    // 中心 1 + 表 2 + 字段 2 = 5；边：查询→表 2 + 表→字段 2 = 4
+    expect(g.nodes).toHaveLength(5);
+    expect(g.edges).toHaveLength(4);
+    // 表节点完整保留库名（不得拆出 wedw / wedw_dwd 伪表节点）
+    expect(
+      g.nodes.some(
+        (n) => n.id === "table:wedw_dw.wy_zh_hospital_std_df" && n.label === "wedw_dw.wy_zh_hospital_std_df",
+      ),
+    ).toBe(true);
+    expect(g.nodes.some((n) => n.id === "table:wedw")).toBe(false);
+    expect(g.nodes.some((n) => n.id === "table:wedw_dwd")).toBe(false);
+    // 字段节点 id 完整、挂到完整表名下
+    expect(g.nodes.some((n) => n.id === "field:wedw_dw.wy_zh_hospital_std_df.hosp_id")).toBe(true);
+    expect(
+      g.edges.some(
+        (e) =>
+          e.source === "table:wedw_dw.wy_zh_hospital_std_df" &&
+          e.target === "field:wedw_dw.wy_zh_hospital_std_df.hosp_id",
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("edgesToGraphData 合并节点元数据", () => {

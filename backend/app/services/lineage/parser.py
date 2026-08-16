@@ -613,9 +613,13 @@ def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
     """提取只读查询（纯 SELECT 无落点）读取的上游表与字段清单。
 
     血缘边要求下游落点；纯 SELECT 不构成边。本函数返回该查询读取的源表
-    （FROM/JOIN/CTE 定义中的表）与源字段（投影/条件中的列引用，限定列解析为
-    ``真实表名.列名``，未限定列保留裸列名），供「本次查询的上游依赖」只读展示，
-    不写图谱、不参与影响分析。
+    （FROM/JOIN/CTE 定义中的表）与**投影列**（SELECT 输出的列，经作用域递归解析
+    为 ``真实表名.列名``，子查询别名/CTE 均追溯到真实来源表），供「本次查询的
+    上游依赖」只读展示，不写图谱、不参与影响分析。
+
+    字段清单仅取投影列，不收集 ON/WHERE/GROUP BY 等条件列：条件列属于查询内部
+    的连接/过滤逻辑，且子查询别名列（如 ``t2.hospital_id``）若直接暴露会污染血缘
+    （前端将其误判为 ``t2`` 表节点）。
 
     Args:
         sql: SQL 文本（支持注释/多语句，自动净化）。
@@ -631,16 +635,23 @@ def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
             ast: Any = sqlglot.parse_one(stmt, dialect=dialect)
         except Exception:
             continue
-        alias_map = _build_alias_map(ast)
         for tbl in ast.find_all(exp.Table):
             name = _norm_table(tbl)
             if name:
                 tables.add(name)
-        for col in ast.find_all(exp.Column):
-            if col.table:
-                fields.add(f"{alias_map.get(col.table, col.table)}.{col.name}")
-            else:
-                fields.add(col.name)
+        cte_map = _collect_ctes(ast)
+        for branch in _branch_queries(ast):
+            scope = _try_build_scope(branch)
+            if scope is None:
+                continue
+            for projection in getattr(branch, "selects", None) or []:
+                # 星号投影无法枚举具体字段，跳过（表级依赖不受影响）
+                if _projection_has_star(projection):
+                    continue
+                for real_table, real_col in _resolve_projection(
+                    scope, projection, cte_map, dialect, 0
+                ):
+                    fields.add(f"{real_table}.{real_col}")
     return UpstreamDeps(
         tables=tuple(sorted(tables)),
         fields=tuple(sorted(fields)),
