@@ -559,6 +559,7 @@ export function MetricCreate() {
       type: String(values.type) as MetricType,
       granularity: String(values.granularity),
       unit: String(values.unit),
+      currency: values.currency ? String(values.currency) : undefined,
       aggregation: String(values.aggregation) as MetricCreateRequest["aggregation"],
       time_semantics: String(values.time_semantics) as MetricCreateRequest["time_semantics"],
       freshness: String(values.freshness) as MetricCreateRequest["freshness"],
@@ -822,6 +823,11 @@ export function MetricCreate() {
                 <Col span={8}>
                   <Form.Item name="unit" label={<span>单位{fieldBadge("unit")}</span>} rules={[{ required: true, message: "请选择单位" }]}>
                     {dictSelect("unit", "unit", "选择单位")}
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="currency" label="币种（选填）" extra="如 CNY（人民币）/ USD（美元），仅交易类指标需要">
+                    <Input placeholder="CNY" maxLength={16} allowClear />
                   </Form.Item>
                 </Col>
               </Row>
