@@ -260,6 +260,8 @@ export function MetricCatalog() {
   const [items, setItems] = useState<MetricResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [keyword, setKeyword] = useState(urlKw);
+  // 搜索输入框的即时显示值：与过滤值 keyword 分离——输入不打断浏览/不发请求，确认（回车/搜索按钮）才触发过滤
+  const [inputValue, setInputValue] = useState(urlKw);
   const [status, setStatus] = useState(urlStatus);
   const [ownerFilter, setOwnerFilter] = useState(urlOwnerId);
   const [domain, setDomain] = useState(urlDomain);
@@ -392,7 +394,10 @@ export function MetricCatalog() {
   );
 
   useEffect(() => {
-    if (urlKw && urlKw !== keyword) setKeyword(urlKw);
+    if (urlKw && urlKw !== keyword) {
+      setKeyword(urlKw);
+      setInputValue(urlKw);
+    }
     if (urlStatus && urlStatus !== status) setStatus(urlStatus);
     if (urlOwnerId && urlOwnerId !== ownerFilter) setOwnerFilter(urlOwnerId);
     if (urlDomain && urlDomain !== domain) setDomain(urlDomain);
@@ -401,12 +406,12 @@ export function MetricCatalog() {
     if (urlKw || urlStatus || urlOwnerId || urlDomain || urlTier || urlLifecycle) setPage(1);
   }, [urlKw, urlStatus, urlOwnerId, urlDomain, urlTier, urlLifecycle]);
 
-  async function load() {
+  async function load(overrideKeyword?: string) {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const res = await listMetrics({
-        keyword,
+        keyword: overrideKeyword ?? keyword,
         status,
         domain: domain || undefined,
         metric_tier: tier || undefined,
@@ -442,11 +447,13 @@ export function MetricCatalog() {
   }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, currentUserId, ownerFilter, lifecycleDate]);
 
   function handleSearch() {
-    if (keyword) {
-      track("metric_search", undefined, "metric", { keyword });
+    const kw = inputValue;
+    setKeyword(kw);
+    if (kw) {
+      track("metric_search", undefined, "metric", { keyword: kw });
     }
     setPage(1);
-    load();
+    load(kw);
   }
 
   // 统一返回上一入口：优先按来源标记精确返回（总览仪表/推荐流/血缘视图等入口），
@@ -468,6 +475,7 @@ export function MetricCatalog() {
     if (key === "created_7d") {
       const from = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
       setKeyword("");
+      setInputValue("");
       setStatus("");
       setLifecycleDate({ created_after: from.toISOString() });
       setLifecycleFilter(key);
@@ -476,6 +484,7 @@ export function MetricCatalog() {
     } else if (key === "stale_30d") {
       const until = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
       setKeyword("");
+      setInputValue("");
       setStatus("");
       setLifecycleDate({ updated_before: until.toISOString() });
       setLifecycleFilter(key);
@@ -483,6 +492,7 @@ export function MetricCatalog() {
       setSortOrder("asc");
     } else if (key === "deprecating") {
       setKeyword("");
+      setInputValue("");
       setStatus("DEPRECATED");
       setLifecycleDate({});
       setLifecycleFilter(key);
@@ -793,6 +803,7 @@ export function MetricCatalog() {
           {hasFilter ? (
             <Button icon={<ColumnWidthOutlined />} aria-label="清除筛选" onClick={() => {
               setKeyword("");
+      setInputValue("");
               setStatus("");
               setDomain("");
               setTier("");
@@ -911,8 +922,8 @@ export function MetricCatalog() {
       <Space style={{ marginBottom: 16 }} wrap>
         <Input
           placeholder="搜索指标名/编码"
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
           onPressEnter={handleSearch}
           prefix={<SearchOutlined />}
           style={{ width: 220 }}

@@ -663,4 +663,29 @@ describe("MetricCatalog 加载失败降级", () => {
     });
     expect(screen.getByText(metric.name)).toBeTruthy();
   });
+
+  it("搜索输入不立即触发请求——回车/点搜索确认后才过滤（防抖惰性搜索）", async () => {
+    render(
+      <PermissionProvider user={{ id: 1, role: "platform_admin" } as any}>
+        <MemoryRouter initialEntries={["/catalog"]}>
+          <Routes>
+            <Route path="/catalog" element={<MetricCatalog />} />
+            <Route path="/detail/:code" element={<div>detail</div>} />
+          </Routes>
+        </MemoryRouter>
+      </PermissionProvider>,
+    );
+    await screen.findByText(metric.name);
+    mockedList.mockClear();
+    // 输入关键词：仅更新输入框显示，不发请求
+    const searchInput = screen.getByPlaceholderText("搜索指标名/编码");
+    fireEvent.change(searchInput, { target: { value: "gmv" } });
+    await waitFor(() => expect((searchInput as HTMLInputElement).value).toBe("gmv"));
+    expect(mockedList).not.toHaveBeenCalled();
+    // 回车确认：触发一次过滤请求（携带 keyword）
+    fireEvent.keyDown(searchInput, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ keyword: "gmv" }));
+    });
+  });
 });
