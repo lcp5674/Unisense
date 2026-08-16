@@ -511,4 +511,32 @@ describe("MetricCatalog - 按钮级权限点过滤", () => {
       expect(btn.disabled).toBe(false);
     });
   });
+
+  it("metric_owner 组合（create+deprecate，无 approve）时批量操作按钮可用", async () => {
+    // 指标负责人可批量提交审核（create）与删除草稿（deprecate），无需 approve——
+    // 验证 canBatchManage 的 OR 逻辑对 owner 角色组合正确放行。
+    const draft = { ...metric, status: "DRAFT" as const };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    renderWithPerm(["metric:create", "metric:deprecate", "metric:edit"]);
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    await waitFor(() => {
+      const btn = screen.getByRole("button", { name: /批量操作/ }) as HTMLButtonElement;
+      expect(btn.disabled).toBe(false);
+    });
+  });
+
+  it("domain_admin 组合（create+approve+deprecate 全量）时批量操作按钮可用", async () => {
+    const draft = { ...metric, status: "DRAFT" as const };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    renderWithPerm(["metric:create", "metric:approve", "metric:deprecate", "metric:edit"]);
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    await waitFor(() => {
+      const btn = screen.getByRole("button", { name: /批量操作/ }) as HTMLButtonElement;
+      expect(btn.disabled).toBe(false);
+    });
+  });
 });
