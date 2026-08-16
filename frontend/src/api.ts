@@ -134,7 +134,7 @@ import {
   SubjectDomainUpdateRequest,
   SystemDictItem,
   TermRelation,
-  TermRelationViewItem,
+  TermRelationView,
   TestConnectionResult,
   TrackingGroupBy,
   TrackingStatsResponse,
@@ -1751,8 +1751,8 @@ export async function createTermRelation(
 }
 
 // 查某术语的全部关系（作为源或目标），供术语关系图谱展示（GET /terms/{code}/relations）
-export async function listTermRelations(termCode: string): Promise<TermRelationViewItem[]> {
-  return request<TermRelationViewItem[]>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/relations`);
+export async function listTermRelations(termCode: string): Promise<TermRelationView> {
+  return request<TermRelationView>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/relations`);
 }
 
 export async function listTermConflicts(

@@ -104,7 +104,7 @@ beforeEach(() => {
   mockedConflicts.mockResolvedValue({ items: [], total: 0 });
   mockedListFavorites.mockResolvedValue([]);
   mockedDomainTree.mockResolvedValue([]);
-  mockedListRelations.mockResolvedValue([]);
+  mockedListRelations.mockResolvedValue({ items: [], total: 0 });
 });
 
 describe("Glossary 页面", () => {
@@ -463,18 +463,21 @@ describe("Glossary 页面", () => {
   });
 
   it("关系图谱：点击「关系」查看该术语的上游/下游关系", async () => {
-    mockedListRelations.mockResolvedValue([
-      {
-        relation_type: "SYNONYM_OF",
-        direction: "outgoing",
-        peer: { id: 3, term_code: "GMV_TOTAL", name: "总成交额", domain: "finance", status: "PUBLISHED" },
-      },
-      {
-        relation_type: "BROADER_THAN",
-        direction: "incoming",
-        peer: { id: 4, term_code: "GMV_CN", name: "成交额(中国)", domain: "finance", status: "PUBLISHED" },
-      },
-    ]);
+    mockedListRelations.mockResolvedValue({
+      items: [
+        {
+          relation_type: "SYNONYM_OF",
+          direction: "outgoing",
+          peer: { id: 3, term_code: "GMV_TOTAL", name: "总成交额", domain: "finance", status: "PUBLISHED" },
+        },
+        {
+          relation_type: "BROADER_THAN",
+          direction: "incoming",
+          peer: { id: 4, term_code: "GMV_CN", name: "成交额(中国)", domain: "finance", status: "PUBLISHED" },
+        },
+      ],
+      total: 2,
+    });
     render(
       <MemoryRouter initialEntries={["/glossary"]}>
         <Glossary />
@@ -497,7 +500,7 @@ describe("Glossary 页面", () => {
   });
 
   it("关系图谱：无关系时展示空态，且可从图谱弹窗进入「建立关系」", async () => {
-    mockedListRelations.mockResolvedValue([]);
+    mockedListRelations.mockResolvedValue({ items: [], total: 0 });
     render(
       <MemoryRouter initialEntries={["/glossary"]}>
         <Glossary />

@@ -956,6 +956,12 @@ export interface TermRelationViewItem {
   };
 }
 
+// 术语关系图谱响应（GET /terms/{term_code}/relations 的 data 结构）
+export interface TermRelationView {
+  items: TermRelationViewItem[];
+  total: number;
+}
+
 // ============================================================================
 // 治理（backend /api/v1/governance + grants + roles + pii + erasure）
 // ============================================================================

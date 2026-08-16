@@ -363,8 +363,8 @@ function TermsTab() {
     setRelationViewItems([]);
     setRelationViewLoading(true);
     try {
-      const items = await listTermRelations(t.term_code);
-      setRelationViewItems(items);
+      const res = await listTermRelations(t.term_code);
+      setRelationViewItems(res.items);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载关系失败");
     } finally {
