@@ -2122,6 +2122,7 @@ export interface SubjectDomainTreeNode {
   sort_order: number;
   status: string;
   metric_count: number;
+  dimension_count?: number;
   children: SubjectDomainTreeNode[];
 }
 

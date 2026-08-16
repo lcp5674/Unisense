@@ -6,6 +6,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.dimension import Dimension
 from app.models.metric import Metric
 from app.models.subject_domain import SubjectDomain
 
@@ -63,6 +64,19 @@ class SubjectDomainRepository:
             .where(
                 Metric.domain == domain_code,
                 Metric.deleted_at.is_(None),
+            )
+        )
+        result = await self._db.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_dimension_count(self, domain_code: str) -> int:
+        """按业务域统计维度数（排除已废弃维度，对齐指标数排除软删的口径）。"""
+        stmt = (
+            select(func.count())
+            .select_from(Dimension)
+            .where(
+                Dimension.domain == domain_code,
+                Dimension.status != "DEPRECATED",
             )
         )
         result = await self._db.execute(stmt)

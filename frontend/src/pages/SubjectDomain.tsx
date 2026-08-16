@@ -132,6 +132,7 @@ function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: Subject
       <span className="tree-node-title">
         {n.name} <Tag color={n.status === "active" ? "green" : "red"} style={{ marginLeft: 4, fontSize: 10 }}>{n.status === "active" ? "启用" : "停用"}</Tag>
         {n.metric_count > 0 && <Tag color="blue" style={{ marginLeft: 4, fontSize: 10 }}>{n.metric_count}指标</Tag>}
+        {(n.dimension_count ?? 0) > 0 && <Tag color="geekblue" style={{ marginLeft: 4, fontSize: 10 }}>{n.dimension_count}维度</Tag>}
         {canAddChild && _nodeDepth(allNodes, n.id) < 3 && (
           <Tooltip title={`在「${n.name}」下新建子域`}>
             <Button

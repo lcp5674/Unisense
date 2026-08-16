@@ -75,6 +75,7 @@ class SubjectDomainResponse(BaseModel):
     description: str | None
     owner_id: int
     metric_count: int = 0
+    dimension_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -92,6 +93,7 @@ class SubjectDomainTreeNode(BaseModel):
     sort_order: int
     status: str
     metric_count: int = 0
+    dimension_count: int = 0
     children: list[SubjectDomainTreeNode] = []
 
     model_config = {"from_attributes": True}

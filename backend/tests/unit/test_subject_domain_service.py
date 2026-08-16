@@ -182,6 +182,7 @@ class TestDeleteDomain:
         domain.code = "sales"
         svc._repo.get_by_code = AsyncMock(return_value=domain)
         svc._repo.get_metric_count = AsyncMock(return_value=20)
+        svc._repo.get_dimension_count = AsyncMock(return_value=5)
 
         with pytest.raises(BusinessError, match="关联指标"):
             await svc.delete_domain("sales")
@@ -193,6 +194,7 @@ class TestDeleteDomain:
         domain.id = 1
         svc._repo.get_by_code = AsyncMock(return_value=domain)
         svc._repo.get_metric_count = AsyncMock(return_value=0)
+        svc._repo.get_dimension_count = AsyncMock(return_value=0)
         svc._repo.count_children = AsyncMock(return_value=3)
 
         with pytest.raises(BusinessError, match="子域"):
@@ -250,6 +252,7 @@ class TestGetDomainWithCount:
         domain.updated_at = datetime.now(UTC)
         svc._repo.get_by_code = AsyncMock(return_value=domain)
         svc._repo.get_metric_count = AsyncMock(return_value=7)
+        svc._repo.get_dimension_count = AsyncMock(return_value=2)
 
         resp = await svc.get_domain_with_count("sales")
         assert resp.code == "sales"
@@ -278,12 +281,16 @@ class TestListTree:
 
         svc._repo.list_all = AsyncMock(return_value=[root, child])
         svc._repo.get_metric_count = AsyncMock(side_effect=[3, 5])
+        svc._repo.get_dimension_count = AsyncMock(side_effect=[2, 4])
 
         tree = await svc.list_tree()
         assert len(tree) == 1
         assert tree[0].code == "sales"
+        assert tree[0].metric_count == 3
+        assert tree[0].dimension_count == 2
         assert len(tree[0].children) == 1
         assert tree[0].children[0].code == "sales_order"
+        assert tree[0].children[0].dimension_count == 4
 
 
 class TestUpdateDomain:

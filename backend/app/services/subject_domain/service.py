@@ -58,6 +58,7 @@ class SubjectDomainService:
     async def get_domain_with_count(self, code: str) -> SubjectDomainResponse:
         domain = await self.get_domain(code)
         count = await self._repo.get_metric_count(code)
+        dim_count = await self._repo.get_dimension_count(code)
         return SubjectDomainResponse(
             id=domain.id,
             code=domain.code,
@@ -71,6 +72,7 @@ class SubjectDomainService:
             description=domain.description,
             owner_id=domain.owner_id,
             metric_count=count,
+            dimension_count=dim_count,
             created_at=domain.created_at,
             updated_at=domain.updated_at,
         )
@@ -79,8 +81,10 @@ class SubjectDomainService:
         """获取域树（3层）。"""
         all_domains = await self._repo.list_all(status)
         count_map: dict[str, int] = {}
+        dim_count_map: dict[str, int] = {}
         for d in all_domains:
             count_map[d.code] = await self._repo.get_metric_count(d.code)
+            dim_count_map[d.code] = await self._repo.get_dimension_count(d.code)
 
         id_map: dict[int, SubjectDomainTreeNode] = {}
         for d in all_domains:
@@ -93,6 +97,7 @@ class SubjectDomainService:
                 sort_order=d.sort_order,
                 status=d.status,
                 metric_count=count_map.get(d.code, 0),
+                dimension_count=dim_count_map.get(d.code, 0),
                 children=[],
             )
 
