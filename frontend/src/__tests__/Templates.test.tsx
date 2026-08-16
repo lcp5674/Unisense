@@ -224,9 +224,10 @@ describe("Templates 页面", () => {
       </MemoryRouter>,
     );
 
-    // 首查挂起，搜索框可用后输入关键词触发二次查询
+    // 首查挂起，搜索框可用后输入关键词并回车（惰性搜索：确认才触发二次查询）
     const searchInput = await screen.findByPlaceholderText("搜索模板编码 / 名称 / 描述");
     fireEvent.change(searchInput, { target: { value: "GMV" } });
+    fireEvent.keyDown(searchInput, { key: "Enter", code: "Enter" });
     await screen.findByText("tpl_gmv_daily");
 
     // 迟到的首查此刻才返回：若被应用会覆盖筛选结果（tpl_aov_weekly 也会出现）

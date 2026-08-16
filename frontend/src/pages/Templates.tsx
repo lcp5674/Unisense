@@ -48,6 +48,8 @@ export function Templates() {
   const urlOwnerId = searchParams.get("owner_id");
   const [items, setItems] = useState<MetricTemplate[]>([]);
   const [keyword, setKeyword] = useState(urlKw);
+  // 搜索输入框即时显示值：与过滤值 keyword 分离——输入不打断浏览/不发请求，回车确认才过滤
+  const [inputValue, setInputValue] = useState(urlKw);
   const [isActive, setIsActive] = useState<string>(urlIsActive === "inactive" ? "inactive" : "active");
   const [ownerId, setOwnerId] = useState<number | undefined>(
     urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
@@ -87,7 +89,10 @@ export function Templates() {
   // 支持从全局搜索栏经 ?kw= 直达定位；初始值已由 useState 承接，
   // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
   useEffect(() => {
-    if (urlKw && urlKw !== keyword) setKeyword(urlKw);
+    if (urlKw && urlKw !== keyword) {
+      setKeyword(urlKw);
+      setInputValue(urlKw);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKw]);
 
@@ -106,14 +111,14 @@ export function Templates() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlOwnerId]);
 
-  async function load() {
+  async function load(overrideKeyword?: string) {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
       // 默认仅展示启用模板；inactive 时展示停用模板（总览仪表下钻）
       const res = await listTemplates({
         is_active: isActive !== "inactive",
-        keyword: keyword || undefined,
+        keyword: (overrideKeyword ?? keyword) || undefined,
         owner_id: ownerId,
       });
       // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
@@ -310,7 +315,7 @@ export function Templates() {
           <h2>指标模板</h2>
           <p>标准化的指标创建模板——一键实例化，默认口径自动合并。</p>
         </div>
-        <Button icon={<PlusOutlined />} onClick={load} loading={loading}>刷新</Button>
+        <Button icon={<PlusOutlined />} onClick={() => load()} loading={loading}>刷新</Button>
       </div>
 
       <Card>
@@ -319,9 +324,13 @@ export function Templates() {
             placeholder="搜索模板编码 / 名称 / 描述"
             allowClear
             style={{ width: 280 }}
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            onSearch={() => load()}
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onSearch={() => setKeyword(inputValue)}
+            onClear={() => {
+              setInputValue("");
+              setKeyword("");
+            }}
           />
           <Select
             style={{ width: 130 }}
@@ -374,10 +383,10 @@ export function Templates() {
               }
               style={{ width: 240 }}
             >
-              <Input className="mono" placeholder="留空自动生成" />
+              <Input className="mono" placeholder="留空自动生成" maxLength={64} showCount />
             </Form.Item>
-            <Form.Item name="name" label="名称" rules={[{ required: true }]} style={{ width: 260 }}>
-              <Input />
+            <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128, message: "名称最长 128 字符" }]} style={{ width: 260 }}>
+              <Input maxLength={128} showCount />
             </Form.Item>
             <Form.Item name="domain" label="业务域" rules={[{ required: true }]} style={{ width: 240 }}>
               <Cascader

@@ -101,6 +101,8 @@ function DimensionsTab() {
   const urlOwnerId = searchParams.get("owner_id");
   const [items, setItems] = useState<Dimension[]>([]);
   const [keyword, setKeyword] = useState(urlKw);
+  // 搜索输入框即时显示值：与过滤值 keyword 分离——输入不打断浏览/不发请求，回车确认才过滤
+  const [inputValue, setInputValue] = useState(urlKw);
   const [status, setStatus] = useState(urlStatus);
   const [ownerId, setOwnerId] = useState<number | undefined>(
     urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
@@ -140,7 +142,10 @@ function DimensionsTab() {
   // 支持从全局搜索栏经 ?kw= 直达定位；初始值已由 useState 承接，
   // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
   useEffect(() => {
-    if (urlKw && urlKw !== keyword) setKeyword(urlKw);
+    if (urlKw && urlKw !== keyword) {
+      setKeyword(urlKw);
+      setInputValue(urlKw);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlKw]);
 
@@ -220,12 +225,12 @@ function DimensionsTab() {
     }
   }
 
-  async function load() {
+  async function load(overrideKeyword?: string) {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const res = await listDimensions({
-        keyword: keyword || undefined,
+        keyword: (overrideKeyword ?? keyword) || undefined,
         status: status || undefined,
         owner_id: ownerId,
       });
@@ -449,9 +454,13 @@ function DimensionsTab() {
           placeholder="搜索维度编码 / 名称 / 描述"
           allowClear
           style={{ width: 260 }}
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
-          onSearch={() => load()}
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onSearch={() => setKeyword(inputValue)}
+          onClear={() => {
+            setInputValue("");
+            setKeyword("");
+          }}
         />
         <Select
           placeholder="状态筛选"
