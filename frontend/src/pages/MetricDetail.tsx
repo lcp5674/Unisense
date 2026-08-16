@@ -760,7 +760,11 @@ export function MetricDetail() {
       };
       setEditSaving(true);
       await updateMetric(metric.metric_code, req);
-      message.success("指标已更新");
+      if (metric.status === "REVIEW") {
+        message.success("修改已保存，指标已退回草稿，请重新提交评审");
+      } else {
+        message.success("指标已更新");
+      }
       setEditOpen(false);
       await load();
     } catch (err) {

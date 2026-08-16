@@ -863,6 +863,15 @@ class MetricService(BaseService):
                     new_name=updates["name"],
                 )
 
+        # REVIEW 状态编辑即撤回重提（FR-005 闭环）：评审中的指标被修改后重置为
+        # DRAFT 并清空评审指派——否则评审人看到的是已提交旧版本，修改静默不生效
+        # 且无重新提审。提交人编辑后需重新提交评审（触发新指派与通知）。
+        if metric.status == "REVIEW":
+            updates["status"] = "DRAFT"
+            updates["reviewer_id"] = None
+            updates["reviewer_type"] = None
+            updates["reviewer_domain"] = None
+
         updated = await self._repo.update_with_optimistic_lock(
             metric.id, metric.row_version, **updates
         )

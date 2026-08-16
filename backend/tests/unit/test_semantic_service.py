@@ -3195,3 +3195,27 @@ async def test_update_metric_description_row_version_conflict_raises_409():
         )
     assert exc.value.error_code == "OPTIMISTIC_LOCK_CONFLICT"
     repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_update_metric_review_edit_resets_to_draft():
+    """REVIEW 状态编辑即撤回重提（FR-005 闭环）：重置 DRAFT 并清空评审指派。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="REVIEW", row_version=1, version=1, reviewer_id=3, reviewer_type="user"
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="DRAFT"))
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(name="销售 GMV 改", change_reason="修正名称"),
+        actor_id=1,
+        role="metric_owner",
+    )
+
+    call_args = repo.update_with_optimistic_lock.call_args
+    updates = call_args.kwargs
+    assert updates["status"] == "DRAFT"
+    assert updates["reviewer_id"] is None
+    assert updates["reviewer_type"] is None
+    assert updates["reviewer_domain"] is None
