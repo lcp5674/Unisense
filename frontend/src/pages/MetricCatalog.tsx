@@ -336,6 +336,9 @@ export function MetricCatalog() {
   // 下线=metric:deprecate。can() 控制批量操作按钮可用性；后端接口强制仍为最终边界。
   const { can } = usePermission();
   const canBatchManage = can("metric:create") || can("metric:approve") || can("metric:deprecate");
+  // 批量操作菜单项级权限：各操作对应独立权限点，避免仅有部分权限的用户看到并点击无权限项（后端仍为最终边界）
+  const canApprove = can("metric:approve");
+  const canDeprecate = can("metric:deprecate");
   // 空态引导权限感知：无创建权限的用户不显示「创建/从模板创建」（点击后会被后端 403），改为引导联系管理员
   const canCreate = can("metric:create");
   // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除 /
@@ -984,25 +987,25 @@ export function MetricCatalog() {
                   key: "submit",
                   label: "批量提交审核（草稿）",
                   icon: <CheckCircleOutlined />,
-                  disabled: !selected.some((m) => m.status === "DRAFT"),
+                  disabled: !selected.some((m) => m.status === "DRAFT") || !canCreate,
                 },
                 {
                   key: "approve",
                   label: "批量通过（评审中）",
                   icon: <CheckCircleOutlined />,
-                  disabled: !selected.some((m) => m.status === "REVIEW"),
+                  disabled: !selected.some((m) => m.status === "REVIEW") || !canApprove,
                 },
                 {
                   key: "reject",
                   label: "批量打回（评审中）",
                   icon: <ClockCircleOutlined />,
-                  disabled: !selected.some((m) => m.status === "REVIEW"),
+                  disabled: !selected.some((m) => m.status === "REVIEW") || !canApprove,
                 },
                 {
                   key: "deprecate",
                   label: "批量下线（已发布）",
                   icon: <DeleteOutlined />,
-                  disabled: !selected.some((m) => m.status === "PUBLISHED"),
+                  disabled: !selected.some((m) => m.status === "PUBLISHED") || !canDeprecate,
                 },
                 { type: "divider" },
                 {
