@@ -486,15 +486,16 @@ describe("Glossary 页面", () => {
     await screen.findByText("成交总额");
     fireEvent.click(screen.getAllByText("关系")[0]);
 
-    // 弹窗标题 + 中心术语 + 下游/上游分组
-    await screen.findByText("术语关系图谱：GMV");
-    expect(screen.getByText("▲ 上游（引用本术语）")).toBeTruthy();
-    expect(screen.getByText("▼ 下游（本术语引用）")).toBeTruthy();
+    // 弹窗标题 + 中心术语 + 统计条（上游/下游计数）+ 关系卡片短标签
+    await screen.findByText(/术语关系图谱/);
+    expect(screen.getAllByText("GMV").length).toBeGreaterThan(0);
+    expect(screen.getByText((_c, el) => el?.textContent?.trim() === "上游 1")).toBeTruthy();
+    expect(screen.getByText((_c, el) => el?.textContent?.trim() === "下游 1")).toBeTruthy();
     expect(screen.getByText("总成交额")).toBeTruthy();
     expect(screen.getByText("成交额(中国)")).toBeTruthy();
-    // 关系类型 Tag
-    expect(screen.getByText(/同义（SYNONYM_OF）/)).toBeTruthy();
-    expect(screen.getByText(/上位（BROADER_THAN）/)).toBeTruthy();
+    // 关系类型短标签（图谱元数据）
+    expect(screen.getByText("同义")).toBeTruthy();
+    expect(screen.getByText("上位")).toBeTruthy();
     // 调用接口
     expect(mockedListRelations).toHaveBeenCalledWith("GMV");
   });
@@ -509,7 +510,7 @@ describe("Glossary 页面", () => {
     await screen.findByText("成交总额");
     fireEvent.click(screen.getAllByText("关系")[0]);
 
-    await screen.findByText("术语关系图谱：GMV");
+    await screen.findByText(/术语关系图谱/);
     expect(screen.getByText(/暂无关联术语/)).toBeTruthy();
     // 从图谱弹窗内点「建立关系」→ 打开建立关系弹窗（限定在弹窗容器内）
     const graphDialog = await screen.findByRole("dialog");

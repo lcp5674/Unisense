@@ -38,6 +38,17 @@ const RELATION_TYPE_LABEL: Record<string, string> = {
   DERIVED_FROM: "派生（DERIVED_FROM）",
   INSTANCE_OF: "实例（INSTANCE_OF）",
 };
+// 关系类型图谱元数据：语义符号 + 专属色（hex，antd Tag 自适应文字）+ 短标签
+const RELATION_TYPE_META: Record<string, { symbol: string; color: string; label: string }> = {
+  SYNONYM_OF: { symbol: "≡", color: "#2f54eb", label: "同义" },
+  BROADER_THAN: { symbol: "⊇", color: "#722ed1", label: "上位" },
+  NARROWER_THAN: { symbol: "⊆", color: "#13c2c2", label: "下位" },
+  RELATED_TO: { symbol: "↔", color: "#1677ff", label: "相关" },
+  ANTONYM_OF: { symbol: "≠", color: "#f5222d", label: "反义" },
+  DEPENDS_ON: { symbol: "⛓", color: "#fa8c16", label: "依赖" },
+  DERIVED_FROM: { symbol: "→", color: "#52c41a", label: "派生" },
+  INSTANCE_OF: { symbol: "◈", color: "#eb2f96", label: "实例" },
+};
 const CONFLICT_TYPE_LABEL: Record<string, string> = {
   alias_overlap: "同义别名冲突",
   name_overlap: "同名冲突",
@@ -588,7 +599,19 @@ function TermsTab() {
 
       {/* 术语关系图谱：中心术语 + 上游（对端→本术语）+ 下游（本术语→对端），展示相互关系 */}
       <Modal
-        title={relationViewTerm ? `术语关系图谱：${relationViewTerm.term_code}` : "术语关系图谱"}
+        title={
+          <Space>
+            <ApartmentOutlined style={{ color: "#1677ff" }} />
+            <span>
+              术语关系图谱
+              {relationViewTerm ? (
+                <span className="mono muted" style={{ fontSize: 12, marginLeft: 8 }}>
+                  {relationViewTerm.name}（{relationViewTerm.term_code}）
+                </span>
+              ) : null}
+            </span>
+          </Space>
+        }
         open={relationViewTerm !== null}
         onCancel={() => setRelationViewTerm(null)}
         width={720}
@@ -612,57 +635,146 @@ function TermsTab() {
       >
         {relationViewTerm && (
           <div style={{ marginTop: 8 }}>
-            {/* 中心术语 */}
-            <div style={{ textAlign: "center", marginBottom: 16 }}>
-              <Tag color="geekblue" style={{ fontSize: 14, padding: "4px 14px" }}>
-                {relationViewTerm.name} <span className="mono">（{relationViewTerm.term_code}）</span>
-              </Tag>
-              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                域：{relationViewTerm.domain ?? "—"} · {STATUS_LABEL[relationViewTerm.status] ?? relationViewTerm.status}
+            {/* 统计条：一眼看到整体关系规模 */}
+            {!relationViewLoading && relationViewItems.length > 0 && (
+              <div
+                style={{
+                  display: "flex", justifyContent: "center", gap: 28, marginBottom: 18,
+                  padding: "6px 0", background: "var(--bg-elevated, #fafafa)", borderRadius: 6,
+                }}
+              >
+                <span className="muted" style={{ fontSize: 13 }}>
+                  关联 <b style={{ color: "var(--text-1)" }}>{relationViewItems.length}</b> 个术语
+                </span>
+                <span className="muted" style={{ fontSize: 13 }}>
+                  上游 <b style={{ color: "#2f54eb" }}>{relationViewItems.filter((i) => i.direction === "incoming").length}</b>
+                </span>
+                <span className="muted" style={{ fontSize: 13 }}>
+                  下游 <b style={{ color: "#52c41a" }}>{relationViewItems.filter((i) => i.direction === "outgoing").length}</b>
+                </span>
               </div>
-            </div>
+            )}
 
             {relationViewLoading ? (
-              <div style={{ textAlign: "center", padding: 24 }}>
-                <LoadingOutlined /> 加载关系中…
+              <div style={{ textAlign: "center", padding: 32 }}>
+                <LoadingOutlined style={{ marginRight: 8 }} /> 加载关系中…
               </div>
             ) : relationViewItems.length === 0 ? (
-              <div className="muted" style={{ textAlign: "center", padding: 24 }}>
-                暂无关联术语，点击右下角「建立关系」添加。
+              <div style={{ textAlign: "center", padding: 36 }}>
+                <div style={{ fontSize: 40, marginBottom: 12 }}>🗂️</div>
+                <div style={{ fontWeight: 500 }}>暂无关联术语</div>
+                <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+                  点击右下角「建立关系」添加第一个关联
+                </div>
               </div>
             ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                {/* 上游：对端 → 本术语 */}
-                <div>
-                  <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>▲ 上游（引用本术语）</div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 210px 1fr",
+                  alignItems: "center",
+                  gap: 12,
+                }}
+              >
+                {/* 上游：对端 → 本术语（卡片右对齐，箭头指向中心） */}
+                <div style={{ minWidth: 0 }}>
+                  {relationViewItems.filter((i) => i.direction === "incoming").length === 0 && (
+                    <div className="muted" style={{ textAlign: "center", fontSize: 12, padding: "20px 0" }}>
+                      无上游
+                    </div>
+                  )}
                   {relationViewItems
                     .filter((i) => i.direction === "incoming")
-                    .map((i) => (
-                      <div key={i.peer.id} style={{ border: "1px solid #eef1f4", borderRadius: 6, padding: 8, marginBottom: 8 }}>
-                        <Tag color="blue">{RELATION_TYPE_LABEL[i.relation_type] ?? i.relation_type}</Tag>
-                        <div style={{ marginTop: 4 }}>{i.peer.name}</div>
-                        <div className="mono muted" style={{ fontSize: 12 }}>{i.peer.term_code}</div>
-                      </div>
-                    ))}
-                  {!relationViewItems.some((i) => i.direction === "incoming") && (
-                    <div className="muted" style={{ fontSize: 12 }}>无上游</div>
-                  )}
+                    .map((i) => {
+                      const meta = RELATION_TYPE_META[i.relation_type] ?? { symbol: "•", color: "#8c8c8c", label: i.relation_type };
+                      return (
+                        <div key={i.peer.id} style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", marginBottom: 10 }}>
+                          <div
+                            style={{
+                              flex: 1, maxWidth: 330, border: "1px solid #eef1f4", borderLeft: `3px solid ${meta.color}`,
+                              borderRadius: 8, padding: "8px 12px", background: "#fff", boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
+                            }}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span style={{ color: meta.color, fontWeight: 600 }}>{meta.symbol}</span>
+                              <Tag color={meta.color} style={{ marginRight: 0 }}>{meta.label}</Tag>
+                            </div>
+                            <div style={{ marginTop: 4, fontWeight: 500 }}>{i.peer.name}</div>
+                            <div className="mono muted" style={{ fontSize: 12 }}>
+                              {i.peer.term_code}
+                              {i.peer.domain ? ` · ${i.peer.domain}` : ""}
+                            </div>
+                          </div>
+                          <div style={{ color: meta.color, fontSize: 18, width: 20, textAlign: "center", fontWeight: 600 }}>←</div>
+                        </div>
+                      );
+                    })}
                 </div>
-                {/* 下游：本术语 → 对端 */}
-                <div>
-                  <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>▼ 下游（本术语引用）</div>
+
+                {/* 中心节点：视觉核心 */}
+                <div style={{ textAlign: "center", padding: "4px 4px" }}>
+                  <div
+                    style={{
+                      width: 92, height: 92, margin: "0 auto", borderRadius: "50%",
+                      background: "linear-gradient(135deg, #1677ff 0%, #0958d9 100%)",
+                      color: "#fff", display: "flex", flexDirection: "column",
+                      alignItems: "center", justifyContent: "center",
+                      boxShadow: "0 8px 24px rgba(22,119,255,0.35)",
+                    }}
+                  >
+                    <span style={{ fontSize: 28, fontWeight: 600, lineHeight: 1.1 }}>
+                      {relationViewTerm.name.slice(0, 2)}
+                    </span>
+                  </div>
+                  <div style={{ marginTop: 10, fontWeight: 600, fontSize: 14, lineHeight: 1.3 }}>
+                    {relationViewTerm.name}
+                  </div>
+                  <div className="mono muted" style={{ fontSize: 12 }}>{relationViewTerm.term_code}</div>
+                  <div style={{ marginTop: 6 }}>
+                    <Space size={4}>
+                      <Tag color={relationViewTerm.domain ? "blue" : "default"}>
+                        {relationViewTerm.domain ?? "未设域"}
+                      </Tag>
+                      <Tag color={STATUS_COLOR[relationViewTerm.status] ?? "default"}>
+                        {STATUS_LABEL[relationViewTerm.status] ?? relationViewTerm.status}
+                      </Tag>
+                    </Space>
+                  </div>
+                </div>
+
+                {/* 下游：本术语 → 对端（卡片左对齐，箭头从中心指出） */}
+                <div style={{ minWidth: 0 }}>
+                  {relationViewItems.filter((i) => i.direction === "outgoing").length === 0 && (
+                    <div className="muted" style={{ textAlign: "center", fontSize: 12, padding: "20px 0" }}>
+                      无下游
+                    </div>
+                  )}
                   {relationViewItems
                     .filter((i) => i.direction === "outgoing")
-                    .map((i) => (
-                      <div key={i.peer.id} style={{ border: "1px solid #eef1f4", borderRadius: 6, padding: 8, marginBottom: 8 }}>
-                        <Tag color="green">{RELATION_TYPE_LABEL[i.relation_type] ?? i.relation_type}</Tag>
-                        <div style={{ marginTop: 4 }}>{i.peer.name}</div>
-                        <div className="mono muted" style={{ fontSize: 12 }}>{i.peer.term_code}</div>
-                      </div>
-                    ))}
-                  {!relationViewItems.some((i) => i.direction === "outgoing") && (
-                    <div className="muted" style={{ fontSize: 12 }}>无下游</div>
-                  )}
+                    .map((i) => {
+                      const meta = RELATION_TYPE_META[i.relation_type] ?? { symbol: "•", color: "#8c8c8c", label: i.relation_type };
+                      return (
+                        <div key={i.peer.id} style={{ display: "flex", alignItems: "center", justifyContent: "flex-start", marginBottom: 10 }}>
+                          <div style={{ color: meta.color, fontSize: 18, width: 20, textAlign: "center", fontWeight: 600 }}>→</div>
+                          <div
+                            style={{
+                              flex: 1, maxWidth: 330, border: "1px solid #eef1f4", borderLeft: `3px solid ${meta.color}`,
+                              borderRadius: 8, padding: "8px 12px", background: "#fff", boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
+                            }}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span style={{ color: meta.color, fontWeight: 600 }}>{meta.symbol}</span>
+                              <Tag color={meta.color} style={{ marginRight: 0 }}>{meta.label}</Tag>
+                            </div>
+                            <div style={{ marginTop: 4, fontWeight: 500 }}>{i.peer.name}</div>
+                            <div className="mono muted" style={{ fontSize: 12 }}>
+                              {i.peer.term_code}
+                              {i.peer.domain ? ` · ${i.peer.domain}` : ""}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                 </div>
               </div>
             )}
