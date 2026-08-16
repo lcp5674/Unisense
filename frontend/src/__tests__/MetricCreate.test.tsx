@@ -603,3 +603,31 @@ describe("MetricCreate 源表选择惰性化", () => {
     ));
   });
 });
+
+describe("MetricCreate 指标类型级联（atomic 禁用依赖指标）", () => {
+  it("选择 atomic 类型后，依赖指标选择器禁用并提示原子无需依赖", async () => {
+    // 类型字典返回 atomic 项（其他字典为空），便于在类型 Select 中选择
+    mockedDict.mockImplementation(async (dictType: string) => {
+      if (dictType === "metric_type") {
+        // 测试环境只关心 code/label；其余 SystemDictItem 字段以 any 放宽（列表接口运行时也只需这两字段渲染选项）
+        return [{ code: "atomic", label: "原子", status: "active" }] as any;
+      }
+      return [];
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+
+    // 展开类型下拉（类型 Form.Item name="type" → 内部 input id="type"）并选择 atomic
+    const typeInput = document.querySelector('input[id="type"]') as HTMLInputElement;
+    fireEvent.mouseDown(typeInput);
+    await clickSelectOption("原子 (atomic)");
+
+    // 依赖指标选择器应禁用，placeholder 提示"原子指标无需依赖指标"
+    // （antd 多选 Select 的 placeholder 渲染在 .ant-select-selection-placeholder 元素，用 getByText 断言）
+    await waitFor(() => {
+      expect(screen.getByText("原子指标无需依赖指标")).toBeTruthy();
+    });
+    // disabled 的多选 Select（依赖指标）应出现
+    expect(document.querySelectorAll(".ant-select-multiple.ant-select-disabled").length).toBeGreaterThan(0);
+  });
+});

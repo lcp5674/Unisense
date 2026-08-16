@@ -115,6 +115,9 @@ export function MetricCreate() {
   const canInferDesc = can("metric:infer-description");
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
+  // 指标类型联动：atomic（原子）基于源表直接聚合，不应有上游依赖指标；derived/composite 才有
+  const metricType = Form.useWatch("type", form);
+  const isAtomic = metricType === "atomic";
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -475,7 +478,9 @@ export function MetricCreate() {
     // 主表单选中的维度 → definition_json.dimensions（血缘注册指标↔维度边）
     const dimsField = selectedDims.length ? { dimensions: selectedDims } : {};
     // 依赖指标 → definition_json.dependencies（血缘注册原子→衍生指标边）
-    const depsField = selectedDeps.length ? { dependencies: selectedDeps } : {};
+    // 原子指标基于源表直接聚合，不应携带上游依赖（后端血缘对 atomic 跳过）
+    const depsField =
+      !isAtomic && selectedDeps.length ? { dependencies: selectedDeps } : {};
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
@@ -910,7 +915,11 @@ export function MetricCreate() {
                   </Form.Item>
                   <Form.Item
                     label="依赖指标（可选）"
-                    extra="选择该指标基于的上游指标（原子→衍生/复合血缘）；可输入关键词搜索已发布指标。"
+                    extra={
+                      isAtomic
+                        ? "原子指标基于源表直接聚合，无需依赖上游指标。请先在上方将类型改为「衍生/复合」以配置依赖。"
+                        : "选择该指标基于的上游指标（原子→衍生/复合血缘）；可输入关键词搜索已发布指标。"
+                    }
                   >
                     <Select
                       mode="multiple"
@@ -918,12 +927,13 @@ export function MetricCreate() {
                       filterOption={false}
                       onSearch={handleDepSearch}
                       loading={depSearching}
-                      placeholder="搜索并选择依赖指标"
+                      placeholder={isAtomic ? "原子指标无需依赖指标" : "搜索并选择依赖指标"}
                       style={{ width: "100%" }}
-                      value={selectedDeps}
-                      onChange={setSelectedDeps}
+                      value={isAtomic ? [] : selectedDeps}
+                      onChange={isAtomic ? undefined : setSelectedDeps}
                       options={depOptions}
-                      allowClear
+                      disabled={isAtomic}
+                      allowClear={!isAtomic}
                     />
                   </Form.Item>
                   <Form.Item
