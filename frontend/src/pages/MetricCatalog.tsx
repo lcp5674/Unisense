@@ -1047,7 +1047,7 @@ export function MetricCatalog() {
 
       <Space style={{ marginBottom: 16 }} wrap>
         <Input
-          placeholder="搜索指标名/编码"
+          placeholder="搜索指标名 / 编码 / 描述"
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           onPressEnter={handleSearch}

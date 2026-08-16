@@ -184,9 +184,12 @@ class MetricRepository:
             # MySQL 默认把 \ 当普通字符、%/_ 仍当通配符 → 转义实际失效，
             # 搜含 %/_ 的关键词（如 order_cnt、100%）会模糊放大匹配。
             # autoescape=True 由 SQLAlchemy 自动转义 %/_/\ 并生成 ESCAPE '\\' 子句。
+            # keyword 同时匹配描述（对齐维度/模板的"编码/名称/描述"搜索契约，
+            # 用户常记得业务描述而非编码——"记得描述搜不到指标"是高频断点）。
             conditions.append(
                 (Metric.metric_code.contains(keyword, autoescape=True))
                 | (Metric.name.contains(keyword, autoescape=True))
+                | (Metric.description.contains(keyword, autoescape=True))
             )
 
         # 总数
