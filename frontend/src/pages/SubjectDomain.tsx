@@ -157,6 +157,7 @@ export function SubjectDomain() {
   const navigate = useNavigate();
   const [treeData, setTreeData] = useState<SubjectDomainTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [detail, setDetail] = useState<SubjectDomain | null>(null);
   const [defaults, setDefaults] = useState<Record<string, unknown>>({});
@@ -269,6 +270,8 @@ export function SubjectDomain() {
       message.warning(createDupWarning!);
       return;
     }
+    if (saving) return;
+    setSaving(true);
     try {
       // code 不传：由后端按显示名自动生成；owner_id 由后端以创建人认证身份覆盖（P2-3 修复硬编码）
       await createDomain({ ...values, parent_id: values.parent_id ?? null, sort_order: values.sort_order ?? 0 });
@@ -278,6 +281,8 @@ export function SubjectDomain() {
       loadTree();
     } catch (err: any) {
       message.error(err?.message || "创建失败");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -302,6 +307,8 @@ export function SubjectDomain() {
       message.warning(editDupWarning!);
       return;
     }
+    if (saving) return;
+    setSaving(true);
     try {
       await updateDomain(selectedCode, values);
       message.success("更新成功");
@@ -311,6 +318,8 @@ export function SubjectDomain() {
       loadTree();
     } catch (err: any) {
       message.error(err?.message || "更新失败");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -356,6 +365,8 @@ export function SubjectDomain() {
   // 保存默认值
   async function handleSaveDefaults(values: Record<string, string>) {
     if (!selectedCode) return;
+    if (saving) return;
+    setSaving(true);
     try {
       await updateDomainDefaults(selectedCode, values);
       message.success("默认值已保存");
@@ -363,6 +374,8 @@ export function SubjectDomain() {
       loadDetail(selectedCode);
     } catch (err: any) {
       message.error(err?.message || "保存失败");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -448,7 +461,7 @@ export function SubjectDomain() {
       </Row>
 
       {/* 创建弹窗 */}
-      <Modal title={createTitle} open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => createForm.submit()}>
+      <Modal title={createTitle} open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => createForm.submit()} confirmLoading={saving}>
         <Form form={createForm} onFinish={handleCreate} layout="vertical">
           <Form.Item name="parent_id" label="上级域" initialValue={null}>
             <TreeSelect
@@ -479,7 +492,7 @@ export function SubjectDomain() {
       </Modal>
 
       {/* 编辑弹窗 */}
-      <Modal title="编辑主题域" open={editOpen} onCancel={() => setEditOpen(false)} onOk={() => editForm.submit()}>
+      <Modal title="编辑主题域" open={editOpen} onCancel={() => setEditOpen(false)} onOk={() => editForm.submit()} confirmLoading={saving}>
         <Form form={editForm} onFinish={handleEdit} layout="vertical">
           <Form.Item name="name" label="显示名" rules={[{ required: true }]}>
             <Input status={editDup ? "error" : undefined} />
@@ -495,7 +508,7 @@ export function SubjectDomain() {
       </Modal>
 
       {/* 默认值弹窗 */}
-      <Modal title="配置域默认值" open={defaultsOpen} onCancel={() => setDefaultsOpen(false)} onOk={() => defaultsForm.submit()} width={600}>
+      <Modal title="配置域默认值" open={defaultsOpen} onCancel={() => setDefaultsOpen(false)} onOk={() => defaultsForm.submit()} width={600} confirmLoading={saving}>
         <Form form={defaultsForm} onFinish={handleSaveDefaults} layout="vertical">
           {DICT_FIELDS.map(f => {
             const dictType = f.key === "type" ? "metric_type" : f.key;
