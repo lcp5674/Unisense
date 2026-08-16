@@ -509,6 +509,10 @@ export function MetricDetail() {
     [],
   );
   const [editDeps, setEditDeps] = useState<string[]>([]);
+  // 编辑弹窗维度/依赖多选是否被用户修改（区分"未改保留"与"清空移除"）：
+  // 未改 → 保留原口径；清空（dirty + 空）→ 从口径移除对应键（与解绑能力对称）
+  const [editDimsDirty, setEditDimsDirty] = useState(false);
+  const [editDepsDirty, setEditDepsDirty] = useState(false);
   // 编辑弹窗口径 JSON 即时校验（对齐注册页惰性设计）：输入即报错，避免提交时才发现语法问题
   const [editDefinitionError, setEditDefinitionError] = useState<string | null>(null);
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
@@ -729,6 +733,8 @@ export function MetricDetail() {
         ? []
         : (Array.isArray(def.dependencies) ? def.dependencies.map((d) => String(d)) : []),
     );
+    setEditDimsDirty(false);
+    setEditDepsDirty(false);
     setEditDefinitionError(null);
     setEditOpen(true);
   }
@@ -747,17 +753,28 @@ export function MetricDetail() {
           return;
         }
       }
-      // 关联维度选择器合入 definition_json.dimensions（对齐注册页，血缘生成指标↔维度边）
-      if (editDims.length) {
-        definitionJson = { ...(definitionJson ?? {}), dimensions: editDims };
-      } else if (definitionJson && "dimensions" in definitionJson) {
-        const next = { ...definitionJson };
-        delete next.dimensions;
-        definitionJson = next;
+      // 关联维度选择器合入 definition_json.dimensions（对齐注册页，血缘生成指标↔维度边）：
+      // 用户修改过才生效——非空写入、清空则从口径移除（dirty 区分"未改保留"与"清空移除"）
+      if (editDimsDirty) {
+        if (editDims.length) {
+          definitionJson = { ...(definitionJson ?? {}), dimensions: editDims };
+        } else {
+          const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
+          const next = { ...base };
+          delete next.dimensions;
+          definitionJson = next;
+        }
       }
       // 依赖指标选择器合入 definition_json.dependencies（非原子指标，血缘生成原子→衍生边）
-      if (metric.type !== "atomic" && editDeps.length) {
-        definitionJson = { ...(definitionJson ?? {}), dependencies: editDeps };
+      if (metric.type !== "atomic" && editDepsDirty) {
+        if (editDeps.length) {
+          definitionJson = { ...(definitionJson ?? {}), dependencies: editDeps };
+        } else {
+          const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
+          const next = { ...base };
+          delete next.dependencies;
+          definitionJson = next;
+        }
       }
       const req: MetricUpdateRequest = {
         name: String(values.name).trim(),
@@ -1638,7 +1655,10 @@ export function MetricDetail() {
             <Select
               mode="multiple"
               value={editDims}
-              onChange={setEditDims}
+              onChange={(v) => {
+                setEditDims(v);
+                setEditDimsDirty(true);
+              }}
               placeholder="选择关联维度（可搜索）"
               options={editDimensionOptions}
               showSearch
@@ -1655,7 +1675,10 @@ export function MetricDetail() {
               <Select
                 mode="multiple"
                 value={editDeps}
-                onChange={setEditDeps}
+                onChange={(v) => {
+                  setEditDeps(v);
+                  setEditDepsDirty(true);
+                }}
                 placeholder="选择依赖指标（可搜索）"
                 options={editDepOptions}
                 showSearch

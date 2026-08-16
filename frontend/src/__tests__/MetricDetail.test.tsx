@@ -1067,4 +1067,62 @@ describe("MetricDetail 按钮级权限过滤", () => {
     });
   });
 
+  it("编辑弹窗清空关联维度即从口径移除（dirty 语义：清空≠未改保留）", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      definition_json: { expression: "sum(gmv)", dimensions: ["dim_channel"] },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({
+      items: [{ id: 1, dim_code: "dim_channel", name: "渠道", domain: "sales", type: "SCD1", description: "渠道维度", owner_id: 1, status: "PUBLISHED", created_at: "", updated_at: "" }],
+      total: 1,
+    });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 清空"关联维度"多选（点击已选 Tag 的清除图标 → dirty=true 且为空）
+    const clearIcons = document.querySelectorAll(
+      '.ant-modal .ant-select-multiple .ant-select-selection-item-remove',
+    );
+    if (clearIcons.length) {
+      fireEvent.click(clearIcons[0] as HTMLElement);
+    }
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "移除关联维度" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      expect(mockedUpdateMetric).toHaveBeenCalledWith(
+        "sales_gmv_sum_d",
+        expect.objectContaining({
+          definition_json: expect.not.objectContaining({ dimensions: expect.anything() }),
+        }),
+      );
+    });
+  });
+
 });
