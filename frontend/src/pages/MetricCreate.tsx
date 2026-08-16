@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { BarsOutlined, ArrowLeftOutlined } from "@ant-design/icons";
+import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined } from "@ant-design/icons";
 import {
   Alert, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
@@ -426,15 +426,20 @@ export function MetricCreate() {
 
   function buildDefinitionJson(values: Record<string, unknown>): Record<string, unknown> | null {
     const tables = sourceTables.length ? { source_tables: sourceTables } : {};
+    // ②自动推断区选定的源表/度量列 → 口径定义（血缘注册读 definition.source_table 建「指标↔落地表」边）
+    const src = String(values.source_table || "").trim();
+    const srcField = src ? { source_table: src } : {};
+    const measure = String(values.measure_column || "").trim();
+    const measureField = measure ? { measure_column: measure } : {};
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
-      return { sql, ...tables };
+      return { sql, ...tables, ...srcField, ...measureField };
     }
     let def: Record<string, unknown>;
     try { def = values.definition ? JSON.parse(String(values.definition)) : {}; }
     catch { message.error("口径定义需为合法 JSON"); return null; }
-    return { ...def, ...tables };
+    return { ...def, ...tables, ...srcField, ...measureField };
   }
 
   async function handlePrecheck() {
@@ -536,18 +541,17 @@ export function MetricCreate() {
       return;
     }
     let dimensionMapping: Record<string, string> | undefined;
-    const mappingText = String(values.dimension_mapping || "").trim();
-    if (mappingText) {
-      try {
-        const parsed: unknown = JSON.parse(mappingText);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          dimensionMapping = parsed as Record<string, string>;
-        } else {
-          message.warning("维度映射需为 JSON 对象，已忽略");
-        }
-      } catch {
-        message.warning("维度映射不是合法 JSON，已忽略");
-      }
+    const mappingRows = (Array.isArray(values.dimension_mapping_list) ? values.dimension_mapping_list : []) as Array<{
+      dim_name?: string;
+      col_name?: string;
+    }>;
+    const validRows = mappingRows.filter(
+      (r) => r && String(r.dim_name || "").trim() && String(r.col_name || "").trim(),
+    );
+    if (validRows.length > 0) {
+      dimensionMapping = Object.fromEntries(
+        validRows.map((r) => [String(r.dim_name).trim(), String(r.col_name).trim()]),
+      );
     }
     const req: MetricBatchRegisterRequest = {
       source_table: String(values.source_table).trim(),
@@ -1049,11 +1053,46 @@ export function MetricCreate() {
               />
             </Form.Item>
             <Form.Item
-              name="dimension_mapping"
               label="维度列映射（可选）"
-              extra='JSON 对象，如 {"date": "dt", "shop": "shop_id"}；解析失败将被忽略'
+              extra="每行一个：维度名 + 该维度在源表对应的列（列名从源表列选择）"
             >
-              <TextArea rows={2} placeholder='{"date": "dt"}' className="mono" />
+              <Form.List name="dimension_mapping_list">
+                {(fields, { add, remove }) => (
+                  <>
+                    {fields.map(({ key, name, ...restField }) => (
+                      <Space key={key} style={{ display: "flex", marginBottom: 6 }} align="baseline">
+                        <Form.Item
+                          {...restField}
+                          name={[name, "dim_name"]}
+                          rules={[{ required: true, message: "维度名" }]}
+                          style={{ marginBottom: 0 }}
+                        >
+                          <Input placeholder="维度名，如 date / shop" style={{ width: 160 }} />
+                        </Form.Item>
+                        <Form.Item
+                          {...restField}
+                          name={[name, "col_name"]}
+                          rules={[{ required: true, message: "列名" }]}
+                          style={{ marginBottom: 0 }}
+                        >
+                          <Select
+                            showSearch
+                            allowClear
+                            placeholder={batchColumnOptions.length > 0 ? "选择源表列" : "先选源表后可选列"}
+                            options={batchColumnOptions}
+                            loading={batchColLoading}
+                            style={{ width: 220 }}
+                          />
+                        </Form.Item>
+                        <Button type="text" danger icon={<MinusCircleOutlined />} onClick={() => remove(name)} />
+                      </Space>
+                    ))}
+                    <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>
+                      添加维度映射
+                    </Button>
+                  </>
+                )}
+              </Form.List>
             </Form.Item>
             <Form.Item name="llm_prefill" label="LLM 预填" valuePropName="checked" initialValue={true}>
               <Switch checkedChildren="开启" unCheckedChildren="手动" />
