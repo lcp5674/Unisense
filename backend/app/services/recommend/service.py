@@ -110,12 +110,13 @@ class RecommendService(BaseService):
     async def _filter_consumable(
         self, items: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """过滤不可消费的推荐指标（软删作废 + 已废弃），避免推荐"点进去是作废/404"。
+        """过滤不可消费的推荐指标（软删作废 + 非已发布），避免推荐"点进去是作废/灰度中"。
 
         协同过滤/血缘扩展/全局热门基于行为数据（tracking_events/lineage_edge）返回指标
         编码，不校验指标当前状态——用户曾交互的指标后来被废弃/作废后，仍会出现在推荐
-        列表。此处统一按 Metric 表过滤（deleted_at IS NULL 且 status != DEPRECATED），
-        与 ``_latest_published``（recent_published_metrics 已过滤 PUBLISHED）保持一致。
+        列表；灰度（EXPERIMENTAL）指标仅对指定租户可见，也不应进入全局推荐。此处统一
+        按 Metric 表过滤为 **PUBLISHED**（deleted_at IS NULL 且 status == PUBLISHED），
+        与 ``_latest_published``（recent_published_metrics 已过滤 PUBLISHED）完全一致。
         空列表时调用方自动落入下一层兜底，保证面板不空白。
         """
         if not items:
@@ -127,7 +128,7 @@ class RecommendService(BaseService):
             select(Metric.metric_code).where(
                 Metric.metric_code.in_(codes),
                 Metric.deleted_at.is_(None),
-                Metric.status != "DEPRECATED",
+                Metric.status == "PUBLISHED",
             )
         )
         valid = {str(r) for r in rows.scalars().all()}

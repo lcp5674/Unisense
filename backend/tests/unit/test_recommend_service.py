@@ -398,3 +398,32 @@ async def test_recommend_metrics_filters_non_consumable() -> None:
     items = await svc.recommend_metrics(1, 10)
     # 协同过滤命中 m2/m3 但均不可消费 → 全部过滤，不返回软删/废弃指标
     assert all(i["metric_id"] not in ("m2", "m3") for i in items)
+
+
+async def test_recommend_metrics_filters_gray_metric() -> None:
+    """消费过滤：灰度（EXPERIMENTAL）指标不进入推荐（仅 PUBLISHED 可消费）。
+
+    全局热门层命中一个灰度指标编码（不在可消费白名单 valid_codes）——新条件
+    status == "PUBLISHED" 将其过滤，落入最新发布兜底；面板不返回灰度指标。
+    """
+    svc, _ = _svc_with_profiles([], [])
+    # 热门层返回灰度指标 m_gray（EXPERIMENTAL）+ 已发布 m_new_1；
+    # Metric 过滤白名单仅 m_new_1（等价于 m_gray 非 PUBLISHED 被过滤）
+    svc._session = _metric_aware_session([], [], ["m_new_1"])
+    svc._repo.popular_metrics = AsyncMock(
+        return_value=[("m_gray", 5), ("m_new_1", 3)]
+    )
+    svc._repo.recent_published_metrics = AsyncMock(
+        return_value=[
+            {
+                "metric_id": "m_new_1",
+                "metric_code": "m_new_1",
+                "name": "最新",
+                "reason": "最新发布指标",
+            }
+        ]
+    )
+    items = await svc.recommend_metrics(1, 10)
+    # 灰度指标 m_gray 被过滤（不可消费），只返回已发布兜底 m_new_1
+    assert all(i["metric_id"] != "m_gray" for i in items)
+    assert any(i["metric_id"] == "m_new_1" for i in items)
