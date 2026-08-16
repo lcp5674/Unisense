@@ -202,7 +202,7 @@ export function Templates() {
         name: String(values.name),
         domain: String(values.domain),
         type: (String(values.type) as MetricType) ?? "atomic",
-        granularity: String(values.granularity || "daily"),
+        granularity: String(values.granularity || "day"),
         unit: String(values.unit || ""),
         aggregation: (String(values.aggregation) as MetricCreateRequest["aggregation"]) ?? "SUM",
         time_semantics: (String(values.time_semantics) as MetricCreateRequest["time_semantics"]) ?? "PERIOD",
@@ -235,7 +235,7 @@ export function Templates() {
       name: tpl.name,
       domain: tpl.domain,
       type: tpl.type ?? "atomic",
-      granularity: tpl.granularity ?? "daily",
+      granularity: tpl.granularity ?? "day",
       unit: tpl.unit ?? "",
       aggregation: tpl.aggregation ?? "SUM",
       time_semantics: tpl.time_semantics ?? "PERIOD",
@@ -306,7 +306,7 @@ export function Templates() {
           <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
             返回
           </Button>
-          <div className="page-kicker">Assets / Templates</div>
+          <div className="page-kicker">指标资产 / 指标模板</div>
           <h2>指标模板</h2>
           <p>标准化的指标创建模板——一键实例化，默认口径自动合并。</p>
         </div>
@@ -360,7 +360,20 @@ export function Templates() {
             </div>
           ) : null}
           <Space style={{ width: "100%" }} wrap>
-            <Form.Item name="metric_code" label="指标编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>} style={{ width: 240 }}>
+            <Form.Item
+              name="metric_code"
+              label="指标编码"
+              extra={
+                instantiateTarget ? (
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    已预填模板编码，若与现有指标重复请修改（如加业务后缀）
+                  </span>
+                ) : (
+                  <span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>
+                )
+              }
+              style={{ width: 240 }}
+            >
               <Input className="mono" placeholder="留空自动生成" />
             </Form.Item>
             <Form.Item name="name" label="名称" rules={[{ required: true }]} style={{ width: 260 }}>
