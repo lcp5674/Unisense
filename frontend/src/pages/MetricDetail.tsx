@@ -509,6 +509,8 @@ export function MetricDetail() {
     [],
   );
   const [editDeps, setEditDeps] = useState<string[]>([]);
+  // 编辑弹窗口径 JSON 即时校验（对齐注册页惰性设计）：输入即报错，避免提交时才发现语法问题
+  const [editDefinitionError, setEditDefinitionError] = useState<string | null>(null);
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -718,6 +720,7 @@ export function MetricDetail() {
         ? []
         : (Array.isArray(def.dependencies) ? def.dependencies.map((d) => String(d)) : []),
     );
+    setEditDefinitionError(null);
     setEditOpen(true);
   }
 
@@ -765,6 +768,34 @@ export function MetricDetail() {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
     } finally {
       setEditSaving(false);
+    }
+  }
+
+  // 口径 JSON 即时校验（对齐注册页惰性设计）：输入即校验语法，避免提交时才发现
+  function handleEditJsonChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    const raw = e.target.value;
+    editForm.setFieldValue("definition_json", raw);
+    if (!raw.trim()) {
+      setEditDefinitionError(null);
+      return;
+    }
+    try {
+      JSON.parse(raw);
+      setEditDefinitionError(null);
+    } catch {
+      setEditDefinitionError("口径定义不是合法 JSON");
+    }
+  }
+
+  // 一键格式化 JSON（对齐注册页），非法时提示
+  function handleFormatEditJson() {
+    const raw = String(editForm.getFieldValue("definition_json") ?? "").trim();
+    if (!raw) return;
+    try {
+      editForm.setFieldValue("definition_json", JSON.stringify(JSON.parse(raw), null, 2));
+      setEditDefinitionError(null);
+    } catch {
+      setEditDefinitionError("口径定义不是合法 JSON，无法格式化");
     }
   }
 
@@ -1616,10 +1647,23 @@ export function MetricDetail() {
           <Form.Item
             name="definition_json"
             label="口径定义（JSON）"
-            extra="留空表示不修改口径。修改口径将触发破坏性变更校验与版本递增。"
+            validateStatus={editDefinitionError ? "error" : undefined}
+            help={editDefinitionError || "留空表示不修改口径。修改口径将触发破坏性变更校验与版本递增。"}
+            extra={
+              <Space wrap size={8}>
+                <Button size="small" icon={<RobotOutlined />} onClick={handleFormatEditJson}>
+                  格式化 JSON
+                </Button>
+              </Space>
+            }
             style={{ marginBottom: 8 }}
           >
-            <Input.TextArea rows={6} className="mono" placeholder={'{"expression": "sum(amount)", "source_tables": ["dwd.sales_detail"]}'} />
+            <Input.TextArea
+              rows={6}
+              className="mono"
+              onChange={handleEditJsonChange}
+              placeholder={'{"expression": "sum(amount)", "source_tables": ["dwd.sales_detail"]}'}
+            />
           </Form.Item>
           <Form.Item
             name="change_reason"
