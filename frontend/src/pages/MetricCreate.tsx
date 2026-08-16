@@ -346,9 +346,13 @@ export function MetricCreate() {
       if (protectedFields && protectedFields.has(key)) continue;
       if (sf && sf.value !== null && sf.value !== undefined) merged[key] = sf.value;
     }
-    if (result.metric_code_suggestion) merged.metric_code = result.metric_code_suggestion;
+    // 用户已手输指标编码时不被推断建议覆盖（尊重显式输入；留空才用建议）
+    // 用「当前值非空」判断而非 isFieldTouched（后者在 setFieldsValue 后行为不稳定）
+    const curCode = String(form.getFieldValue("metric_code") ?? "").trim();
+    const shouldSetCode = result.metric_code_suggestion && curCode === "";
+    if (shouldSetCode) merged.metric_code = result.metric_code_suggestion;
     if (Object.keys(merged).length > 0) form.setFieldsValue(merged);
-    if (result.metric_code_suggestion) setSuggestedCode(result.metric_code_suggestion);
+    if (shouldSetCode) setSuggestedCode(result.metric_code_suggestion);
     setInferred(fields);
     const defField = fields.definition_json;
     const modeField = fields.definition_mode;
