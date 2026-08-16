@@ -81,6 +81,8 @@ class UserAdmin(BaseModel):
     display_name: str
     role: str
     domain: str | None
+    org_id: int | None = None
+    org_name: str | None = None
     status: str
     last_login_at: str | None = None
     created_at: str | None = None
@@ -100,9 +102,14 @@ class UserCreateRequest(BaseModel):
     )
     display_name: str = Field(..., min_length=1, max_length=128, description="显示名称")
     role: str = Field(default="viewer", max_length=32, description="角色（内置或自定义角色名）")
-    domain: str | None = Field(default=None, max_length=64, description="所属域")
+    #: 方案 B：所属域不再由用户直接维护，改由所属团队（org_id）自动继承——
+    #: 团队绑定域则成员继承团队域，否则可显式指定（兼容旧客户端）；前端已合并为
+    #: 「所属团队」单一下拉。后端按 ``org.domain or payload.domain`` 解析。
+    domain: str | None = Field(
+        default=None, max_length=64, description="所属域（由团队继承的兜底）"
+    )
     org_id: int | None = Field(
-        default=None, gt=0, description="所属组织 ID（缺省归入当前管理员组织）"
+        default=None, gt=0, description="所属团队 ID（缺省归入当前管理员团队）"
     )
     password: str = Field(..., min_length=8, max_length=128, description="初始密码")
 
@@ -121,7 +128,11 @@ class UserUpdateRequest(BaseModel):
         description="邮箱（全局唯一）",
     )
     role: str = Field(..., max_length=32, description="角色（内置或自定义角色名）")
-    domain: str | None = Field(default=None, max_length=64, description="所属域（可空）")
+    #: 方案 B：所属域由所属团队自动继承（同创建）；org_id 缺省保持不变（不换团队）。
+    domain: str | None = Field(
+        default=None, max_length=64, description="所属域（由团队继承的兜底）"
+    )
+    org_id: int | None = Field(default=None, gt=0, description="所属团队 ID（缺省保持原团队）")
 
 
 class UserStatusRequest(BaseModel):
@@ -216,9 +227,11 @@ async def _assert_domain_active(db: AsyncSession, domain: str | None) -> None:
         )
 
 
-async def _assert_org_active(db: AsyncSession, org_id: int) -> None:
+async def _assert_org_active(db: AsyncSession, org_id: int) -> Organization:
     """校验组织存在且 active（多租户：停用/删除组织不可新建用户）。
 
+    Returns:
+        校验通过的组织行（供团队绑定域继承）。
     Raises:
         NotFoundError: 组织不存在（ORG_NOT_FOUND）。
         ValidationError: 组织未启用（ORG_DISABLED）。
@@ -237,6 +250,16 @@ async def _assert_org_active(db: AsyncSession, org_id: int) -> None:
             error_code="ORG_DISABLED",
             ctx={"org_id": org_id, "status": org_status},
         )
+    return org
+
+
+def _resolve_team_domain(org: Organization, fallback: str | None) -> str | None:
+    """方案 B：用户所属域由所属团队（组织）继承。
+
+    团队绑定业务域则成员自动继承团队域；团队不限域时允许显式兜底域（兼容旧客户端），
+    否则为 None（不限定域，需经 grants 授权才能操作指标）。
+    """
+    return org.domain or fallback or None
 
 
 async def _assert_role_valid(db: AsyncSession, role: str) -> None:
@@ -299,8 +322,8 @@ def _validate_password_complexity(password: str) -> None:
         )
 
 
-def _to_admin(row: User) -> UserAdmin:
-    """ORM → 管理视图（created_at 序列化为 ISO 字符串）。"""
+def _to_admin(row: User, org_name: str | None = None) -> UserAdmin:
+    """ORM → 管理视图（created_at 序列化为 ISO 字符串，可带团队名）。"""
     return UserAdmin(
         id=row.id,
         username=row.username,
@@ -308,6 +331,8 @@ def _to_admin(row: User) -> UserAdmin:
         display_name=row.display_name,
         role=row.role.value if hasattr(row.role, "value") else row.role,
         domain=row.domain,
+        org_id=row.org_id,
+        org_name=org_name,
         status=row.status,
         last_login_at=row.last_login_at.isoformat() if row.last_login_at else None,
         created_at=row.created_at.isoformat() if row.created_at else None,
@@ -380,12 +405,21 @@ async def list_admin_users(
         .limit(page_size)
     )
     rows = (await db.execute(stmt)).scalars().all()
+    org_ids = {r.org_id for r in rows if r.org_id}
+    org_names: dict[int, str] = {}
+    if org_ids:
+        org_rows = (
+            await db.execute(
+                select(Organization.id, Organization.name).where(Organization.id.in_(org_ids))
+            )
+        ).all()
+        org_names = dict(org_rows)
     return ok(
         {
             "total": int(total),
             "page": page,
             "page_size": page_size,
-            "items": [_to_admin(r) for r in rows],
+            "items": [_to_admin(r, org_names.get(r.org_id)) for r in rows],
         },
         trace_id=trace_id,
     )
@@ -406,17 +440,19 @@ async def create_user(
     """
     _validate_password_complexity(payload.password)
     await _assert_unique(db, username=payload.username, email=payload.email)
-    await _assert_domain_active(db, payload.domain)
     await _assert_role_valid(db, payload.role)
     org_id = payload.org_id or user.org_id
-    await _assert_org_active(db, org_id)
+    org = await _assert_org_active(db, org_id)
+    # 方案 B：所属域由所属团队继承（团队绑定域则自动继承，否则用显式兜底）
+    domain = _resolve_team_domain(org, payload.domain)
+    await _assert_domain_active(db, domain)
     row = User(
         org_id=org_id,
         username=payload.username,
         email=payload.email,
         display_name=payload.display_name,
         role=payload.role,
-        domain=payload.domain or None,
+        domain=domain,
         status="active",
         must_change_password=True,
         password_hash=await hash_password(payload.password),
@@ -592,17 +628,36 @@ async def update_user(
     if row is None:
         raise NotFoundError("用户不存在", error_code="USER_NOT_FOUND")
     await _assert_unique(db, username=row.username, email=payload.email, exclude_id=row.id)
-    await _assert_domain_active(db, payload.domain)
     await _assert_role_valid(db, payload.role)
     if row.id == user.id and payload.role != "platform_admin":
         raise ValidationError(
             "不能降级当前登录的平台管理员角色", error_code="SELF_DEMOTE_FORBIDDEN"
         )
 
+    # 方案 B：换团队（org_id 提供时）或保持原团队，域由团队继承
+    org_name: str | None = None
+    if payload.org_id is not None:
+        org = await _assert_org_active(db, payload.org_id)
+        row.org_id = org.id
+        org_name = org.name
+        domain = _resolve_team_domain(org, payload.domain)
+    else:
+        cur_org = (
+            await db.execute(
+                select(Organization).where(
+                    Organization.id == row.org_id, Organization.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        if cur_org is not None:
+            org_name = cur_org.name
+        domain = _resolve_team_domain(cur_org, payload.domain) if cur_org else payload.domain
+    await _assert_domain_active(db, domain)
+
     row.display_name = payload.display_name
     row.email = payload.email
     row.role = payload.role
-    row.domain = payload.domain or None
+    row.domain = domain
     await write_audit(
         db,
         actor_id=user.id,
@@ -614,13 +669,14 @@ async def update_user(
             "display_name": row.display_name,
             "role": row.role,
             "domain": row.domain,
+            "org_id": row.org_id,
         },
         ip=client_ip(request),
         trace_id=trace_id,
     )
     await db.commit()
     await db.refresh(row)
-    return ok(_to_admin(row), trace_id=trace_id)
+    return ok(_to_admin(row, org_name), trace_id=trace_id)
 
 
 @router.patch("/{user_id}/status", dependencies=_ADMIN_DEPS)

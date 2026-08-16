@@ -32,6 +32,7 @@ from app.core.audit import client_ip, write_audit
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
+from app.models.subject_domain import SubjectDomain
 from app.models.user import Organization, User
 
 router = APIRouter(prefix="/organizations", tags=["组织管理"])
@@ -49,6 +50,30 @@ _READ_DEPS = [
 DEFAULT_ORG_CODE = "default"
 
 
+async def _assert_domain_active(db: AsyncSession, domain: str | None) -> None:
+    """校验团队绑定域：若提供，必须是存在且 active 的主题域 code。
+
+    与用户管理（``users.py:_assert_domain_active``）同口径——团队绑定域后其成员
+    自动继承该域，须防止绕过 UI 写入任意域值（错误码 USER_DOMAIN_INVALID 兼容）。
+    """
+    if not domain:
+        return
+    row = (
+        await db.execute(
+            select(SubjectDomain).where(
+                SubjectDomain.code == domain,
+                SubjectDomain.status == "active",
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise ValidationError(
+            f"所属域不存在或未启用: {domain}",
+            error_code="USER_DOMAIN_INVALID",
+            ctx={"domain": domain},
+        )
+
+
 class OrganizationCreate(BaseModel):
     """``POST /organizations`` 请求体。"""
 
@@ -59,15 +84,22 @@ class OrganizationCreate(BaseModel):
         pattern=r"^[a-z0-9][a-z0-9_-]*$",
         description="组织编码（唯一，小写字母/数字/下划线/连字符）",
     )
+    domain: str | None = Field(
+        default=None, max_length=64, description="所属业务域（可空=不限域，成员自动继承）"
+    )
 
 
 class OrganizationUpdate(BaseModel):
-    """``PATCH /organizations/{id}`` 请求体（名称与状态可独立更新）。"""
+    """``PATCH /organizations/{id}`` 请求体（名称 / 状态 / 绑定域可独立更新）。
+
+    ``domain`` 传空串表示清除团队绑定域（成员将不再自动继承域）。
+    """
 
     name: str | None = Field(default=None, min_length=1, max_length=128, description="组织名称")
     status: Literal["active", "suspended", "deleted"] | None = Field(
         default=None, description="组织状态"
     )
+    domain: str | None = Field(default=None, max_length=64, description="所属业务域（空串=清除）")
 
 
 class OrganizationView(BaseModel):
@@ -77,6 +109,7 @@ class OrganizationView(BaseModel):
     name: str
     code: str
     status: str
+    domain: str | None = None
     user_count: int = 0
     created_at: str | None = None
 
@@ -87,6 +120,7 @@ async def _to_view(row: Organization, user_count: int) -> OrganizationView:
         name=row.name,
         code=row.code,
         status=row.status.value if hasattr(row.status, "value") else row.status,
+        domain=row.domain,
         user_count=user_count,
         created_at=row.created_at.isoformat() if row.created_at else None,
     )
@@ -202,7 +236,13 @@ async def create_organization(
         raise ConflictError(
             f"组织编码已被占用: {payload.code}", error_code="ORG_EXISTS", ctx={"code": payload.code}
         )
-    row = Organization(name=payload.name, code=payload.code, status="active")
+    await _assert_domain_active(db, payload.domain)
+    row = Organization(
+        name=payload.name,
+        code=payload.code,
+        status="active",
+        domain=payload.domain or None,
+    )
     db.add(row)
     await db.flush()
     await write_audit(
@@ -243,8 +283,16 @@ async def update_organization(
         raise NotFoundError("组织不存在", error_code="ORG_NOT_FOUND", ctx={"org_id": org_id})
 
     status_changed = False
+    domain_changed = False
     if payload.name is not None:
         row.name = payload.name
+    if payload.domain is not None:
+        # 空串 = 清除团队绑定域；非空须校验为 active 主题域
+        new_domain = payload.domain.strip() or None
+        await _assert_domain_active(db, new_domain)
+        if row.domain != new_domain:
+            row.domain = new_domain
+            domain_changed = True
     if payload.status is not None and payload.status != row.status:
         status_changed = True
         if row.code == DEFAULT_ORG_CODE and payload.status in ("suspended", "deleted"):
@@ -283,10 +331,34 @@ async def update_organization(
         action="ORG_UPDATE",
         entity_type="organization",
         entity_id=str(row.id),
-        detail={"name": row.name, "code": row.code, "status": row.status},
+        detail={
+            "name": row.name,
+            "code": row.code,
+            "status": row.status,
+            "domain": row.domain,
+            "domain_changed": domain_changed,
+        },
         ip=client_ip(request),
         trace_id=trace_id,
     )
+    # 团队绑定域变更 → 实时传播到全部成员（user.domain 与权限域隔离保持一致；
+    # 域是 PDP 同域判定的核心，成员域须跟随团队，否则权限隔离失真）
+    if domain_changed:
+        members = (
+            await db.execute(
+                select(User).where(User.org_id == row.id, User.deleted_at.is_(None))
+            )
+        ).scalars().all()
+        for member in members:
+            member.domain = row.domain
+        if members:
+            logger.info(
+                "org_domain_propagated org_id=%s domain=%r members=%s trace_id=%s",
+                row.id,
+                row.domain,
+                len(members),
+                trace_id,
+            )
     await db.commit()
     await db.refresh(row)
     # 组织状态变更（停用/启用）后向全部成员定向通知（best-effort，不阻断业务）

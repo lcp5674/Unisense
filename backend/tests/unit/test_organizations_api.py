@@ -396,3 +396,45 @@ async def test_update_org_suspend_notify_failure_does_not_block(
 
     assert resp.status_code == 200
     assert resp.json()["data"]["status"] == "suspended"
+
+
+# ---------------------------------------------------------------------------
+# 方案 B：团队绑定业务域（org.domain）+ 域变更传播到成员
+# ---------------------------------------------------------------------------
+
+
+async def test_create_organization_with_domain(admin_client: httpx.AsyncClient) -> None:
+    """创建团队可绑定业务域（domain 可选）。"""
+    with patch("app.api.organizations._assert_domain_active", new=AsyncMock()):
+        resp = await admin_client.post(
+            "/api/v1/organizations",
+            json={"name": "金融事业部", "code": "finance_dept", "domain": "finance"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["domain"] == "finance"
+
+
+async def test_update_organization_domain_propagates_to_members(
+    admin_client: httpx.AsyncClient,
+) -> None:
+    """团队绑定域变更 → 全部成员 user.domain 实时传播（权限域隔离保持一致）。"""
+    org = _make_org(domain="old")
+    u1 = _member(1, "alice")
+    u2 = _member(2, "bob")
+    session = _make_session([_scalar_one(org), _members_result([u1, u2]), _scalar(0)])
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    with patch("app.api.organizations._assert_domain_active", new=AsyncMock()):
+        resp = await admin_client.patch(
+            "/api/v1/organizations/1", json={"domain": "finance"}
+        )
+    app.dependency_overrides.pop(deps.get_db_session, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["domain"] == "finance"
+    assert u1.domain == "finance"
+    assert u2.domain == "finance"

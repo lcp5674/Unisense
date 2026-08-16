@@ -14,7 +14,20 @@ from httpx import ASGITransport
 
 from app.api import deps
 from app.main import app
-from app.models.user import User
+from app.models.user import Organization, User
+
+
+def _make_org(**overrides: object) -> Organization:
+    """构造 Organization ORM 实例（方案 B：团队绑定域继承数据源）。"""
+    base: dict[str, object] = {
+        "id": 1,
+        "name": "默认团队",
+        "code": "default",
+        "status": "active",
+        "domain": None,
+    }
+    base.update(overrides)
+    return Organization(**base)  # type: ignore[arg-type]
 
 
 def _make_session() -> MagicMock:
@@ -113,7 +126,9 @@ async def test_list_users_returns_paginated() -> None:
     total_result.scalar.return_value = 2
     rows_result = MagicMock()
     rows_result.scalars.return_value.all.return_value = [u1, u2]
-    session.execute = AsyncMock(side_effect=[total_result, rows_result])
+    org_result = MagicMock()
+    org_result.all.return_value = [(1, "默认团队")]
+    session.execute = AsyncMock(side_effect=[total_result, rows_result, org_result])
 
     async def fake_db():
         yield session
@@ -145,7 +160,8 @@ async def test_create_user_success(admin_client: httpx.AsyncClient) -> None:
     ), patch(
         "app.api.users._assert_domain_active", new=AsyncMock()
     ), patch(
-        "app.api.users._assert_org_active", new=AsyncMock()
+        "app.api.users._assert_org_active",
+        new=AsyncMock(return_value=_make_org()),
     ):
         resp = await admin_client.post(
             "/api/v1/users",
@@ -155,6 +171,7 @@ async def test_create_user_success(admin_client: httpx.AsyncClient) -> None:
                 "display_name": "鲍勃",
                 "role": "viewer",
                 "domain": "finance",
+                "org_id": 1,
                 "password": "Secret123!",
             },
         )
@@ -192,7 +209,9 @@ async def test_create_user_weak_password(admin_client: httpx.AsyncClient) -> Non
 
 async def test_create_user_invalid_domain_rejected(admin_client: httpx.AsyncClient) -> None:
     """domain 非 active 主题域 code → 422 USER_DOMAIN_INVALID（防绕过 UI 注入任意域值）。"""
-    with patch("app.api.users._assert_unique", new=AsyncMock()):
+    with patch("app.api.users._assert_unique", new=AsyncMock()), patch(
+        "app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())
+    ):
         resp = await admin_client.post(
             "/api/v1/users",
             json={
@@ -201,6 +220,7 @@ async def test_create_user_invalid_domain_rejected(admin_client: httpx.AsyncClie
                 "display_name": "鲍勃",
                 "role": "viewer",
                 "domain": "ghost_domain",
+                "org_id": 1,
                 "password": "Secret123!",
             },
         )
@@ -441,7 +461,7 @@ async def test_create_user_sends_created_notification(admin_client: httpx.AsyncC
     with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
         "app.api.users._assert_unique", new=AsyncMock()
     ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
-        "app.api.users._assert_org_active", new=AsyncMock()
+        "app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())
     ), patch("app.services.notify.service.NotifyService") as ns:
         ns.return_value.notify_user = AsyncMock()
         resp = await admin_client.post(
@@ -451,6 +471,7 @@ async def test_create_user_sends_created_notification(admin_client: httpx.AsyncC
                 "email": "bob@example.com",
                 "display_name": "鲍勃",
                 "role": "viewer",
+                "org_id": 1,
                 "password": "Secret123!",
             },
         )
@@ -471,7 +492,7 @@ async def test_create_user_notify_failure_does_not_block(admin_client: httpx.Asy
     with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
         "app.api.users._assert_unique", new=AsyncMock()
     ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
-        "app.api.users._assert_org_active", new=AsyncMock()
+        "app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())
     ), patch("app.services.notify.service.NotifyService") as ns:
         ns.return_value.notify_user = AsyncMock(side_effect=RuntimeError("redis down"))
         resp = await admin_client.post(
@@ -481,6 +502,7 @@ async def test_create_user_notify_failure_does_not_block(admin_client: httpx.Asy
                 "email": "bob@example.com",
                 "display_name": "鲍勃",
                 "role": "viewer",
+                "org_id": 1,
                 "password": "Secret123!",
             },
         )
@@ -584,3 +606,57 @@ async def test_reset_password_sends_notification(admin_client: httpx.AsyncClient
     assert kwargs["channel"] == "IN_APP"
     assert "临时密码" in kwargs["body"]
     assert "Newsecret123!" not in kwargs["body"]
+
+
+# ---------------------------------------------------------------------------
+# 方案 B：团队绑定域继承（user.domain 由 org.domain 自动继承）
+# ---------------------------------------------------------------------------
+
+
+async def test_create_user_inherits_team_domain(admin_client: httpx.AsyncClient) -> None:
+    """创建用户：团队绑定域（org.domain=sales）时，用户自动继承团队域（不传 domain）。"""
+    with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
+        "app.api.users._assert_unique", new=AsyncMock()
+    ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
+        "app.api.users._assert_org_active",
+        new=AsyncMock(return_value=_make_org(domain="sales")),
+    ):
+        resp = await admin_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bob",
+                "email": "bob@example.com",
+                "display_name": "鲍勃",
+                "role": "viewer",
+                "org_id": 1,
+                "password": "Secret123!",
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["domain"] == "sales"
+    assert resp.json()["data"]["org_id"] == 1
+
+
+async def test_update_user_change_team_inherits_new_domain(admin_client: httpx.AsyncClient) -> None:
+    """编辑用户换团队：新团队绑定域（domain=finance）时，用户域自动切换为新团队域。"""
+    user = _make_user(org_id=1, domain="sales")
+    with patch("app.api.users._get_user", return_value=user), patch(
+        "app.api.users._assert_unique", new=AsyncMock()
+    ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
+        "app.api.users._assert_org_active",
+        new=AsyncMock(return_value=_make_org(id=2, name="金融团队", code="fin", domain="finance")),
+    ):
+        resp = await admin_client.put(
+            "/api/v1/users/2",
+            json={
+                "display_name": "爱丽丝·新",
+                "email": "alice@example.com",
+                "role": "metric_owner",
+                "org_id": 2,
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["org_id"] == 2
+    assert data["org_name"] == "金融团队"
+    assert data["domain"] == "finance"
