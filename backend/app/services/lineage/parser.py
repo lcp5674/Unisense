@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -79,14 +80,42 @@ def _norm_table(table: exp.Table) -> str:
     return ".".join(parts)
 
 
+def _update_set_target(update: exp.Update) -> exp.Table | None:
+    """多表 UPDATE 的写入目标：SET 中被更新列所属的表。
+
+    单表 UPDATE（无 JOIN）返回其 ``this``；多表 UPDATE（``UPDATE t1 JOIN t2 ...``）
+    取 SET 子句中第一个被更新列所属的 JOIN 表（实践中单条 UPDATE 通常只更新一张表；
+    若 SET 列分散在多个表，退回首表近似）。
+    """
+    this = update.this
+    if not isinstance(this, exp.Table):
+        return None
+    joins = this.args.get("joins") or []
+    if not joins:
+        return this
+    tables = [this] + [j.this for j in joins if isinstance(j.this, exp.Table)]
+    for eq in getattr(update, "expressions", None) or []:
+        col = eq.this if isinstance(eq, exp.EQ) else None
+        if not isinstance(col, exp.Column) or not col.table:
+            continue
+        for t in tables:
+            if t.alias_or_name == col.table:
+                return t
+    return this
+
+
 def _find_target(ast: exp.Expression) -> exp.Table | None:
-    """定位写入目标表（INSERT / CREATE TABLE AS / UPDATE / MERGE）。"""
+    """定位写入目标表（INSERT / CREATE TABLE|VIEW AS / UPDATE / MERGE）。"""
     for node in ast.walk():
         is_target_node = isinstance(node, (exp.Insert, exp.Update, exp.Merge)) or (
-            isinstance(node, exp.Create) and node.kind and node.kind.upper() == "TABLE"
+            isinstance(node, exp.Create) and node.kind and node.kind.upper() in ("TABLE", "VIEW")
         )
         if not is_target_node:
             continue
+        if isinstance(node, exp.Update):
+            updated = _update_set_target(node)
+            if updated is not None:
+                return updated
         this = node.this
         if isinstance(this, exp.Table):
             return this
@@ -108,6 +137,27 @@ def _build_alias_map(ast: exp.Expression) -> dict[str, str]:
     for tbl in ast.find_all(exp.Table):
         amap[tbl.alias_or_name] = _norm_table(tbl)
     return amap
+
+
+def _preprocess_dialect(sql: str, dialect: str | None) -> str:
+    """方言级语法归一化（解析前预处理，血缘语义不变）。
+
+    sqlglot 30.x 对部分生产高频方言语法不支持（降级为 ``Command`` 或抛解析异常），
+    这里在解析前做等价改写：
+    - mysql/doris/starrocks：``REPLACE INTO ... SELECT`` → ``INSERT INTO ... SELECT``
+      （sqlglot 不支持 REPLACE；血缘语义等价——REPLACE 即覆盖式插入，来源表/列映射
+      完全一致，仅写入动作不同）。
+    - doris/starrocks：剥离 ``INSERT INTO t WITH LABEL 'xxx' SELECT ...`` 中的
+      ``WITH LABEL 'xxx'`` 片段（sqlglot 不支持 Doris 的 LABEL 标记）。
+    """
+    if not sql or not sql.strip():
+        return sql
+    d = (dialect or "").lower()
+    if d in ("mysql", "doris", "starrocks"):
+        sql = re.sub(r"\bREPLACE\s+INTO\b", "INSERT INTO", sql, flags=re.IGNORECASE)
+    if d in ("doris", "starrocks"):
+        sql = re.sub(r"\bWITH\s+LABEL\s+('[^']*'|\S+)", " ", sql, flags=re.IGNORECASE)
+    return sql
 
 
 def _split_statements(sql: str) -> list[str]:
@@ -195,6 +245,7 @@ def extract_table_lineage(
     """
     edges: list[TableEdge] = []
     seen: set[tuple[str, str]] = set()
+    sql = _preprocess_dialect(sql, dialect)
     for stmt in _split_statements(sql):
         try:
             ast = sqlglot.parse_one(stmt, dialect=dialect)
@@ -202,8 +253,9 @@ def extract_table_lineage(
             # 非 SQL / 语法错误：跳过该语句，整体降级（不抛异常）
             continue
         stmt_edges = _table_edges(ast)
-        if not stmt_edges and target_table:
-            # 纯 SELECT 显式落点：FROM/JOIN 源表 → 目标表
+        if not stmt_edges and target_table and isinstance(ast, (exp.Select, exp.Union)):
+            # 纯 SELECT 显式落点：FROM/JOIN 源表 → 目标表（写入语句如 INSERT
+            # OVERWRITE DIRECTORY 目标非表时不做纯查询落点回退）
             stmt_edges = _select_table_edges(ast, target_table)
         for edge in stmt_edges:
             key = (edge.source, edge.target)
@@ -225,7 +277,7 @@ def _find_source_query(ast: exp.Expression) -> exp.Expression | None:
         q = ast.expression
         if isinstance(q, (exp.Select, exp.Union)):
             return q
-    if isinstance(ast, exp.Create) and ast.kind and ast.kind.upper() == "TABLE":
+    if isinstance(ast, exp.Create) and ast.kind and ast.kind.upper() in ("TABLE", "VIEW"):
         q = ast.expression
         if isinstance(q, (exp.Select, exp.Union)):
             return q
@@ -434,6 +486,18 @@ def _emit_leaf_edges(
         )
 
 
+def _insert_column_list(ast: exp.Expression) -> list[str]:
+    """INSERT 显式列清单（``INSERT INTO t (a, b) SELECT ...``），无则空。
+
+    目标列名来自列清单而非 SELECT 投影别名——``INSERT INTO t (a,b) SELECT x,y``
+    中字段血缘应为 ``x→a, y→b``（按位置对应投影），否则 target 列名错位。
+    """
+    for node in ast.walk():
+        if isinstance(node, exp.Insert) and isinstance(node.this, exp.Schema):
+            return [c.name for c in node.this.expressions if isinstance(c, exp.Identifier)]
+    return []
+
+
 def _extract_branch_edges(
     branch: exp.Select,
     scope: Any,
@@ -442,13 +506,20 @@ def _extract_branch_edges(
     cte_map: dict[str, exp.CTE],
     dialect: str | None,
     edges: list[FieldEdge],
+    target_cols: list[str] | None = None,
 ) -> None:
-    """展开单个 SELECT 分支的投影：星号降级标记 + 常规列边 + 表达式边。"""
-    for projection in getattr(branch, "selects", None) or []:
+    """展开单个 SELECT 分支的投影：星号降级标记 + 常规列边 + 表达式边。
+
+    ``target_cols`` 为 INSERT 显式列清单（按位置对应投影）；未提供时目标列名取
+    投影别名（``INSERT INTO t SELECT x AS a`` → 目标列 ``a``）。
+    """
+    for i, projection in enumerate(getattr(branch, "selects", None) or []):
         if _projection_has_star(projection):
             edges.append(_star_edge(projection, scope, ast, target_name))
             continue
         target_col = _projection_name(projection)
+        if target_cols is not None and i < len(target_cols):
+            target_col = target_cols[i]
         if not target_col:
             continue
         leaf_cols = list(projection.find_all(exp.Column))
@@ -533,19 +604,23 @@ def _extract_field_edges(ast: Any, dialect: str | None) -> list[FieldEdge]:
     """单条已解析语句的字段级血缘边（含 MERGE 专用路径与星号降级标记）。"""
     target = _find_target(ast)
     target_name = _norm_table(target) if target is not None else ""
-    cte_map = _collect_ctes(ast)
     edges: list[FieldEdge] = []
+    if target is None and isinstance(ast, (exp.Insert, exp.Update, exp.Merge, exp.Create)):
+        # 写入语句但目标非表（如 Hive INSERT OVERWRITE DIRECTORY）：无表目标，不产字段边
+        return edges
+    cte_map = _collect_ctes(ast)
     if isinstance(ast, exp.Merge):
         _extract_merge_edges(ast, target_name, cte_map, dialect, edges)
         return edges
     query = _find_source_query(ast)
     if query is None:
         return edges
+    target_cols = _insert_column_list(ast)
     for branch in _branch_queries(query):
         scope = _try_build_scope(branch)
         if scope is None:
             continue
-        _extract_branch_edges(branch, scope, ast, target_name, cte_map, dialect, edges)
+        _extract_branch_edges(branch, scope, ast, target_name, cte_map, dialect, edges, target_cols)
     return edges
 
 
@@ -588,14 +663,15 @@ def extract_field_lineage(
     """
     edges: list[FieldEdge] = []
     seen: set[tuple[object, ...]] = set()
+    sql = _preprocess_dialect(sql, dialect)
     for stmt in _split_statements(sql):
         try:
             ast = sqlglot.parse_one(stmt, dialect=dialect)
         except Exception:
             continue
         stmt_edges = _extract_field_edges(ast, dialect)
-        if not stmt_edges and target_table:
-            # 纯 SELECT 显式落点：投影列 → 目标表列
+        if not stmt_edges and target_table and isinstance(ast, (exp.Select, exp.Union)):
+            # 纯 SELECT 显式落点：投影列 → 目标表列（写入语句目标非表时不回退）
             stmt_edges = _select_field_edges(ast, target_table, dialect)
         for edge in stmt_edges:
             key = (
@@ -634,10 +710,15 @@ def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
     """
     tables: set[str] = set()
     fields: set[str] = set()
+    sql = _preprocess_dialect(sql, dialect)
     for stmt in _split_statements(sql):
         try:
             ast: Any = sqlglot.parse_one(stmt, dialect=dialect)
         except Exception:
+            continue
+        if _find_target(ast) is not None:
+            # 写入语句（INSERT/UPDATE/MERGE/CREATE）不是「纯 SELECT 无落点」场景：
+            # 其目标表不属上游依赖，直接跳过（避免把写入目标误收为读取来源）
             continue
         cte_map = _collect_ctes(ast)
         for tbl in ast.find_all(exp.Table):

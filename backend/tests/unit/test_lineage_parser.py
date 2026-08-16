@@ -442,3 +442,131 @@ def test_select_target_table_cte_not_leaked() -> None:
     field_edges = extract_field_lineage(sql, dialect="hive", target_table="dws.result")
     assert {e.source_table for e in field_edges} == {"db1.src1"}
     assert {e.target_table for e in field_edges} == {"dws.result"}
+
+
+# ---- 生产场景语法覆盖补强（7 方言核查） ----
+
+
+def test_insert_column_list_field_mapping() -> None:
+    """INSERT 带显式列清单：字段级目标列按位置取列清单（x→a, y→b），非投影别名。"""
+    sql = "INSERT INTO tgt (a, b) SELECT x, y FROM src"
+    edges = extract_field_lineage(sql, dialect="mysql")
+    mapping = {(e.source_table, e.source_column): (e.target_table, e.target_column) for e in edges}
+    assert mapping.get(("src", "x")) == ("tgt", "a")
+    assert mapping.get(("src", "y")) == ("tgt", "b")
+    assert not any(e.target_column in ("x", "y") for e in edges)
+
+
+def test_insert_column_list_field_mapping_all_dialects() -> None:
+    """INSERT 列清单字段映射在全部受支持方言下一致（列清单按位置覆盖投影别名）。"""
+    sql = "INSERT INTO tgt (a, b) SELECT x, y FROM src"
+    for dialect in ("mysql", "postgres", "hive", "spark", "doris", "clickhouse", "starrocks"):
+        mapping = {
+            (e.source_table, e.source_column): (e.target_table, e.target_column)
+            for e in extract_field_lineage(sql, dialect=dialect)
+        }
+        assert mapping.get(("src", "x")) == ("tgt", "a"), f"[{dialect}] x 映射错位"
+        assert mapping.get(("src", "y")) == ("tgt", "b"), f"[{dialect}] y 映射错位"
+        got_cols = [e.target_column for e in extract_field_lineage(sql, dialect=dialect)]
+        assert not any(c in ("x", "y") for c in got_cols), f"[{dialect}] 目标列未取列清单"
+
+
+def test_insert_column_list_union_mapping() -> None:
+    """INSERT 列清单 + UNION：两分支投影均按列清单映射到目标列。"""
+    sql = "INSERT INTO tgt (a, b) SELECT x, y FROM s1 UNION ALL SELECT u, v FROM s2"
+    edges = extract_field_lineage(sql, dialect="mysql")
+    mapping = {(e.source_table, e.source_column): (e.target_table, e.target_column) for e in edges}
+    assert mapping.get(("s1", "x")) == ("tgt", "a")
+    assert mapping.get(("s1", "y")) == ("tgt", "b")
+    assert mapping.get(("s2", "u")) == ("tgt", "a")
+    assert mapping.get(("s2", "v")) == ("tgt", "b")
+
+
+def test_replace_into_treated_as_insert() -> None:
+    """MySQL REPLACE INTO ... SELECT：sqlglot 不支持 REPLACE，预处理为 INSERT 后血缘等价。"""
+    sql = "REPLACE INTO tgt SELECT id, name FROM src"
+    table_edges = extract_table_lineage(sql, dialect="mysql")
+    assert len(table_edges) == 1
+    assert (table_edges[0].source, table_edges[0].target) == ("src", "tgt")
+    field_sources = {
+        (e.source_table, e.source_column): (e.target_table, e.target_column)
+        for e in extract_field_lineage(sql, dialect="mysql")
+    }
+    assert field_sources.get(("src", "id")) == ("tgt", "id")
+    assert field_sources.get(("src", "name")) == ("tgt", "name")
+
+
+def test_doris_insert_with_label() -> None:
+    """Doris/StarRocks INSERT ... WITH LABEL 'xxx'：剥离 LABEL 片段后正常解析血缘。"""
+    sql = "INSERT INTO tgt WITH LABEL 'lbl1' SELECT id FROM src"
+    table_edges = extract_table_lineage(sql, dialect="doris")
+    assert len(table_edges) == 1
+    assert (table_edges[0].source, table_edges[0].target) == ("src", "tgt")
+    field_edges = extract_field_lineage(sql, dialect="doris")
+    assert {e.source_table for e in field_edges} == {"src"}
+    assert {e.target_table for e in field_edges} == {"tgt"}
+    # StarRocks 同样支持
+    assert len(extract_table_lineage(sql, dialect="starrocks")) == 1
+
+
+def test_insert_overwrite_directory_no_dirty_edge() -> None:
+    """Hive INSERT OVERWRITE DIRECTORY：目标非表，表级/字段级均不产脏边（无空目标列）。"""
+    sql = "INSERT OVERWRITE DIRECTORY '/tmp/out' SELECT id FROM ods.src"
+    assert extract_table_lineage(sql, dialect="hive") == []
+    field_edges = extract_field_lineage(sql, dialect="hive")
+    assert field_edges == []
+    # 即使显式传入 target_table，写入语句也不回退为纯查询落点
+    assert extract_table_lineage(sql, dialect="hive", target_table="forced") == []
+    assert extract_field_lineage(sql, dialect="hive", target_table="forced") == []
+
+
+def test_create_view_table_lineage() -> None:
+    """CREATE VIEW AS SELECT：视图作为逻辑表产血缘（TD§12.2 明确要求）。"""
+    sql = "CREATE VIEW v_tgt AS SELECT id FROM src"
+    table_edges = extract_table_lineage(sql, dialect="mysql")
+    assert len(table_edges) == 1
+    assert (table_edges[0].source, table_edges[0].target) == ("src", "v_tgt")
+    field_edges = extract_field_lineage(sql, dialect="mysql")
+    assert {e.source_table for e in field_edges} == {"src"}
+    assert {e.target_table for e in field_edges} == {"v_tgt"}
+
+
+def test_create_view_variants_table_lineage() -> None:
+    """视图变体（OR REPLACE / MATERIALIZED / TEMPORARY）均归一为 VIEW 目标产血缘。"""
+    cases = [
+        ("CREATE OR REPLACE VIEW v AS SELECT id FROM src", "spark", "v"),
+        ("CREATE MATERIALIZED VIEW mv AS SELECT id FROM src", "clickhouse", "mv"),
+        ("CREATE TEMPORARY VIEW tv AS SELECT id FROM src", "spark", "tv"),
+        ("CREATE VIEW dws.v AS SELECT id, name FROM ods.src", "mysql", "dws.v"),
+    ]
+    for sql, dialect, expect_target in cases:
+        edges = extract_table_lineage(sql, dialect=dialect)
+        assert len(edges) == 1, f"[{dialect}] {sql} 未产表级边"
+        expect_source = "src" if dialect != "mysql" else "ods.src"
+        assert (edges[0].source, edges[0].target) == (expect_source, expect_target)
+        # 字段级同样解析
+        field_edges = extract_field_lineage(sql, dialect=dialect)
+        assert {e.source_table for e in field_edges} == {edges[0].source}
+        assert {e.target_table for e in field_edges} == {edges[0].target}
+
+
+def test_multi_table_update_set_target() -> None:
+    """多表 UPDATE：目标取 SET 中被更新列所属表（而非首表）。"""
+    sql = "UPDATE t1 JOIN t2 ON t1.id = t2.id SET t2.v = t1.v"
+    edges = extract_table_lineage(sql, dialect="mysql")
+    assert len(edges) == 1
+    assert (edges[0].source, edges[0].target) == ("t1", "t2")
+    # SET 首表（常见写法）仍正确
+    sql2 = "UPDATE tgt JOIN src ON tgt.id = src.id SET tgt.v = src.v"
+    edges2 = extract_table_lineage(sql2, dialect="mysql")
+    assert (edges2[0].source, edges2[0].target) == ("src", "tgt")
+
+
+def test_upstream_deps_excludes_write_target() -> None:
+    """上游依赖只服务纯 SELECT：写入语句（含 INSERT VALUES）不把目标表误收为来源。"""
+    assert extract_upstream_deps("INSERT INTO tgt SELECT id FROM src").tables == ()
+    assert extract_upstream_deps("INSERT INTO tgt (a, b) VALUES (1, 2)").tables == ()
+    assert extract_upstream_deps("UPDATE tgt SET x = 1 WHERE id = 2").tables == ()
+    # 纯 SELECT 仍正常返回
+    deps = extract_upstream_deps("SELECT id FROM src")
+    assert deps.tables == ("src",)
