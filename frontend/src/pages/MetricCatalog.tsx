@@ -992,11 +992,11 @@ export function MetricCatalog() {
               </Button>
             </>
           )}
-          <Tooltip title={canExport ? "将当前筛选结果导出为 CSV" : "无导出权限（metric:export）"}>
+          <Tooltip title={deletedView ? "回收站数据不可导出（含已软删指标，避免误用为正式数据）" : (canExport ? "将当前筛选结果导出为 CSV" : "无导出权限（metric:export）")}>
             <Button
               icon={<DownloadOutlined />}
               onClick={exportCsv}
-              disabled={!items.length || !canExport}
+              disabled={!items.length || !canExport || deletedView}
             >
               导出
             </Button>

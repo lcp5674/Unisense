@@ -818,7 +818,7 @@ describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
     mockedFavorites.mockResolvedValue([]);
     mockedUsers.mockResolvedValue([]);
     (fetchMyPermissions as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      user_id: 1, role: "platform_admin", home_domain: "", allowed_actions: [], ui_actions: ["metric:create", "metric:deprecate", "metric:edit"],
+      user_id: 1, role: "platform_admin", home_domain: "", allowed_actions: [], ui_actions: ["metric:create", "metric:deprecate", "metric:edit", "metric:export"],
       granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
     });
   });
@@ -856,6 +856,25 @@ describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
     fireEvent.click(await screen.findByRole("button", { name: /回收站/ }));
     fireEvent.click(await screen.findByRole("button", { name: /恢复/ }));
     await waitFor(() => expect(restoreMock).toHaveBeenCalledWith(metric.metric_code));
+  });
+
+  it("回收站视图导出按钮禁用（含已软删指标，避免误用为正式数据）", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    const user = { id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: null, org_id: 1 };
+    render(
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route path="/catalog" element={<PermissionProvider user={user}><MetricCatalog /></PermissionProvider>} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /回收站/ }));
+    await waitFor(() => {
+      expect(mockedList.mock.calls.some((c) => c[0]?.deleted === true)).toBe(true);
+    });
+    const btn = screen.getByRole("button", { name: /导出/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
   });
 
   it("DRAFT 且存在 reject_reason 时状态列显示「被驳回」标识（FR-005 可追溯）", async () => {
