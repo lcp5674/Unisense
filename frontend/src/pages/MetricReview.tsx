@@ -78,13 +78,15 @@ function canReview(metric: MetricResponse, user: CurrentUser | null): boolean {
 function reviewerLabel(
   metric: MetricResponse,
   userMap: Map<number, string>,
+  domainMap: Record<string, string>,
 ): React.ReactNode {
   if (metric.reviewer_type === "user" && metric.reviewer_id != null) {
     const name = userMap.get(metric.reviewer_id);
     return <Tag color="blue">{name ? `${name}（指定）` : `用户#${metric.reviewer_id}`}</Tag>;
   }
   if (metric.reviewer_type === "domain" && metric.reviewer_domain) {
-    return <Tag color="geekblue">{metric.reviewer_domain} 域评审组</Tag>;
+    const dn = domainMap[metric.reviewer_domain] ?? metric.reviewer_domain;
+    return <Tag color="geekblue">{dn} 域评审组</Tag>;
   }
   return <span className="muted">域管理员（未指派）</span>;
 }
@@ -251,7 +253,7 @@ export function MetricReview() {
     {
       title: "指派评审人",
       key: "reviewer",
-      render: (_: unknown, r: MetricResponse) => reviewerLabel(r, userMap),
+      render: (_: unknown, r: MetricResponse) => reviewerLabel(r, userMap, domainMap),
     },
     {
       title: "版本",
