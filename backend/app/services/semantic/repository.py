@@ -119,6 +119,7 @@ class MetricRepository:
     async def list_metrics(
         self,
         *,
+        deleted: bool = False,
         domain: str | None = None,
         status: str | None = None,
         metric_tier: str | None = None,
@@ -154,7 +155,9 @@ class MetricRepository:
         Returns:
             (指标列表, 总数)。
         """
-        conditions: list[ColumnElement[bool]] = [Metric.deleted_at.is_(None)]
+        conditions: list[ColumnElement[bool]] = (
+            [Metric.deleted_at.is_not(None)] if deleted else [Metric.deleted_at.is_(None)]
+        )
         if domain:
             conditions.append(Metric.domain == domain)
         if status:
@@ -277,6 +280,24 @@ class MetricRepository:
         result = await self._db.execute(stmt)
         if result.rowcount == 0:  # type: ignore[attr-defined]  # CursorResult.rowcount；SQLA 静态类型缺失，运行时存在
             raise NotFoundError(f"指标不存在: {metric_id}")
+
+    async def restore_metric(self, metric_id: int) -> None:
+        """恢复软删指标：清除 deleted_at（回收站恢复）。
+
+        Args:
+            metric_id: 指标 ID。
+
+        Raises:
+            NotFoundError: 指标不存在或未处于软删状态。
+        """
+        stmt = (
+            update(Metric)
+            .where(Metric.id == metric_id, Metric.deleted_at.is_not(None))
+            .values(deleted_at=None)
+        )
+        result = await self._db.execute(stmt)
+        if result.rowcount == 0:  # type: ignore[attr-defined]  # CursorResult.rowcount；SQLA 静态类型缺失，运行时存在
+            raise NotFoundError(f"指标不存在或未处于已删除状态: {metric_id}")
 
     # ---- 版本相关 ----
 

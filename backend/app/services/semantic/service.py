@@ -577,6 +577,7 @@ class MetricService(BaseService):
         """
         offset = (params.page - 1) * params.page_size
         return await self._repo.list_metrics(
+            deleted=params.deleted,
             domain=params.domain,
             status=params.status,
             metric_tier=params.metric_tier,
@@ -2250,6 +2251,49 @@ class MetricService(BaseService):
         await self._cleanup_metric_lineage(metric_code)
 
         logger.info("metric_deleted", metric_code=metric_code, actor_id=actor_id)
+        return metric
+
+    async def restore_metric(self, metric_code: str, actor_id: int, role: str) -> Metric:
+        """恢复软删指标（回收站恢复，仅 DRAFT 且已删状态）。
+
+        清除 deleted_at 使指标重新进入正常列表；血缘边随后续指标更新/发布
+        由 ``_register_metric_lineage_full`` 重新注册（对齐 TD §12 血缘一致性）。
+
+        Args:
+            metric_code: 指标编码。
+            actor_id: 操作人 ID。
+            role: 操作人角色。
+
+        Returns:
+            恢复后的指标。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            BusinessError: 指标未处于已删状态 / 非 DRAFT / 无恢复权限。
+        """
+        metric = await self._repo.get_archived_by_code(metric_code)
+        if metric is None:
+            raise NotFoundError(f"指标不存在: {metric_code}")
+        if metric.deleted_at is None:
+            raise BusinessError(
+                f"指标 {metric_code} 未处于已删除状态，无需恢复",
+                error_code="VALIDATION_ERROR",
+            )
+        if metric.status != "DRAFT":
+            raise BusinessError(
+                f"仅 DRAFT 状态的已删指标可恢复，当前状态 {metric.status}",
+                error_code="VALIDATION_ERROR",
+            )
+        # 权限：仅平台管理员或原 owner（对齐删除语义；PDP 由 API 层角色门禁兜底）
+        if role != "platform_admin" and metric.owner_id != actor_id:
+            raise BusinessError(
+                "仅平台管理员或指标原 Owner 可恢复",
+                error_code="FORBIDDEN",
+            )
+
+        await self._repo.restore_metric(metric.id)
+        await self._cache.invalidate(metric_code)
+        logger.info("metric_restored", metric_code=metric_code, actor_id=actor_id, role=role)
         return metric
 
     async def review_compliance(self, metric_code: str, actor_id: int, role: str) -> Metric:

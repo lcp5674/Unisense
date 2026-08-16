@@ -401,6 +401,8 @@ class MetricListParams(BaseModel):
     approver_id: int | None = Field(None, ge=1, description="审批人（Approver）ID 过滤")
     # PII 过滤（热力指标视角下钻：PII 格子 / 非 PII 格子）
     pii_flag: bool | None = Field(None, description="仅 PII / 仅非 PII 指标")
+    # 已删除过滤（回收站视角）：true 时仅查软删（deleted_at 置位）的草稿指标，供恢复
+    deleted: bool = Field(False, description="仅查已软删（回收站）指标")
     # 生命周期快筛（TD §13）：按创建/更新时间区间过滤（ISO 日期或 datetime）
     created_after: datetime | None = Field(None, description="创建时间 ≥ 该值（生命周期快筛）")
     created_before: datetime | None = Field(None, description="创建时间 ≤ 该值")

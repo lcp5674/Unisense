@@ -29,6 +29,7 @@ import {
   removeFavorite,
   submitReview,
   deleteMetric,
+  restoreMetric,
   batchApproveMetrics,
   batchRejectMetrics,
   batchDeprecateMetrics,
@@ -326,6 +327,9 @@ export function MetricCatalog() {
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   // 只看收藏：客户端过滤当前页（后端 list 无收藏过滤参数）
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  // 回收站视图：true 时仅展示已软删草稿（提供恢复入口）
+  const [deletedView, setDeletedView] = useState(false);
+  const [restoring, setRestoring] = useState<string | null>(null);
   // 批量操作权限点（方案 C 按钮级管控）：提交/删除=metric:create、通过/打回=metric:approve、
   // 下线=metric:deprecate。can() 控制批量操作按钮可用性；后端接口强制仍为最终边界。
   const { can } = usePermission();
@@ -426,6 +430,7 @@ export function MetricCatalog() {
         owner_id: ownerFilter ? Number(ownerFilter) : myMetricsOnly ? currentUserId : undefined,
         created_after: lifecycleDate.created_after,
         updated_before: lifecycleDate.updated_before,
+        deleted: deletedView,
         sort_by: sortBy,
         sort_order: sortOrder,
         page,
@@ -450,9 +455,30 @@ export function MetricCatalog() {
     }
   }
 
+  // 回收站恢复草稿指标：成功后退出回收站视图并刷新
+  async function handleRestore(metricCode: string) {
+    setRestoring(metricCode);
+    try {
+      await restoreMetric(metricCode);
+      message.success(`已恢复指标 ${metricCode}`);
+      if (items.length <= 1) setDeletedView(false);
+      else setPage(1);
+      load();
+    } catch (err) {
+      const e = err as { message?: string; codeZh?: string };
+      const text =
+        e && typeof e === "object" && typeof e.codeZh === "string" && typeof e.message === "string"
+          ? `${e.message}（${e.codeZh}）`
+          : "恢复失败";
+      message.error(text);
+    } finally {
+      setRestoring(null);
+    }
+  }
+
   useEffect(() => {
     load();
-  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, currentUserId, ownerFilter, lifecycleDate]);
+  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, currentUserId, ownerFilter, lifecycleDate, deletedView]);
 
   function handleSearch() {
     const kw = inputValue;
@@ -680,6 +706,29 @@ export function MetricCatalog() {
       ),
     },
     { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
+    ...(deletedView
+      ? [
+          {
+            title: "操作",
+            key: "restore",
+            width: 90,
+            align: "center" as const,
+            render: (_: unknown, r: MetricResponse) => (
+              <Button
+                type="link"
+                size="small"
+                disabled={restoring === r.metric_code}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleRestore(r.metric_code);
+                }}
+              >
+                恢复
+              </Button>
+            ),
+          },
+        ]
+      : []),
     {
       title: "收藏",
       key: "fav",
@@ -891,6 +940,16 @@ export function MetricCatalog() {
           <Tooltip title="刷新列表（其他用户的新发布/状态变更会在此同步）">
             <Button icon={<ReloadOutlined />} onClick={() => { setLoadError(null); load(); }} loading={loading}>
               刷新
+            </Button>
+          </Tooltip>
+          <Tooltip title={deletedView ? "返回正常指标列表" : "查看已软删的草稿指标（回收站，可恢复）"}>
+            <Button
+              icon={<DeleteOutlined />}
+              type={deletedView ? "primary" : "default"}
+              danger={deletedView}
+              onClick={() => { setPage(1); setDeletedView((v) => !v); }}
+            >
+              {deletedView ? "返回列表" : "回收站"}
             </Button>
           </Tooltip>
           <Button

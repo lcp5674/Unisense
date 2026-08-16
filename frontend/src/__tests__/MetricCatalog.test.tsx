@@ -14,6 +14,7 @@ vi.mock("../api", () => ({
   removeFavorite: vi.fn(),
   submitReview: vi.fn(),
   deleteMetric: vi.fn(),
+  restoreMetric: vi.fn(),
   fetchMyPermissions: vi.fn(),
 }));
 const trackMock = vi.fn();
@@ -32,6 +33,7 @@ import {
   removeFavorite,
   submitReview,
   deleteMetric,
+  restoreMetric,
   fetchMyPermissions,
 } from "../api";
 import type { MetricResponse, MetricListResponse } from "../types";
@@ -735,5 +737,55 @@ describe("MetricCatalog 空态权限感知", () => {
     // 权限引导出现（canCreate=false）后，不应再出现「创建指标 / 从模板创建」按钮
     expect(screen.queryAllByText("创建指标").length).toBe(0);
     expect(screen.queryAllByText("从模板创建").length).toBe(0);
+  });
+});
+
+describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDashboard.mockResolvedValue({ total: 0, by_domain: {}, counts: {} } as any);
+    mockedDomains.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, role: "platform_admin" } as any);
+    mockedFavorites.mockResolvedValue([]);
+    mockedUsers.mockResolvedValue([]);
+    (fetchMyPermissions as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      user_id: 1, role: "platform_admin", home_domain: "", allowed_actions: [], ui_actions: ["metric:create", "metric:deprecate", "metric:edit"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
+    });
+  });
+
+  it("回收站视图下拉取已删除草稿（deleted=true）并展示恢复按钮", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    const user = { id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: null, org_id: 1 };
+    render(
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route path="/catalog" element={<PermissionProvider user={user}><MetricCatalog /></PermissionProvider>} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /回收站/ }));
+    await waitFor(() => {
+      expect(mockedList.mock.calls.some((c) => c[0]?.deleted === true)).toBe(true);
+    });
+    expect(screen.getByRole("button", { name: /恢复/ })).toBeTruthy();
+  });
+
+  it("点击恢复调用 restoreMetric", async () => {
+    const restoreMock = vi.mocked(restoreMetric).mockResolvedValue(metric as any);
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    const user = { id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: null, org_id: 1 };
+    render(
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route path="/catalog" element={<PermissionProvider user={user}><MetricCatalog /></PermissionProvider>} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /回收站/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /恢复/ }));
+    await waitFor(() => expect(restoreMock).toHaveBeenCalledWith(metric.metric_code));
   });
 });

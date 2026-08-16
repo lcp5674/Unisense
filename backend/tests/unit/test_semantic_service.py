@@ -1151,6 +1151,44 @@ async def test_delete_metric_success_and_reject():
         await svc.delete_metric("sales_gmv_daily", actor_id=1)
 
 
+async def test_restore_metric_success_and_guards():
+    # 平台管理员恢复已删草稿
+    svc, repo = _svc_with_repo()
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", owner_id=2, deleted_at="2026-08-01T00:00:00")
+    )
+    repo.restore_metric = AsyncMock()
+    result = await svc.restore_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
+    assert result.status == "DRAFT"
+    repo.restore_metric.assert_awaited_once()
+
+    # 原 owner（非管理员）也可恢复
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", owner_id=2, deleted_at="2026-08-01T00:00:00")
+    )
+    await svc.restore_metric("sales_gmv_daily", actor_id=2, role="metric_owner")
+
+    # 非 owner 非管理员 → 拒绝
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", owner_id=2, deleted_at="2026-08-01T00:00:00")
+    )
+    with pytest.raises(BusinessError) as e:
+        await svc.restore_metric("sales_gmv_daily", actor_id=9, role="metric_owner")
+    assert "仅平台管理员或指标原 Owner" in str(e.value)
+
+    # 未删状态 → 拒绝
+    repo.get_archived_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+    with pytest.raises(BusinessError):
+        await svc.restore_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
+
+    # 非 DRAFT 已删 → 拒绝
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", owner_id=1, deleted_at="2026-08-01T00:00:00")
+    )
+    with pytest.raises(BusinessError):
+        await svc.restore_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
+
+
 async def test_get_versions():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric())

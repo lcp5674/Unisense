@@ -491,6 +491,8 @@ export async function listMetrics(params: {
   updated_before?: string;
   /** 审批人（Approver）ID 过滤（审批工作台「我审过的」视图） */
   approver_id?: number;
+  /** 仅查已软删（回收站）指标：true 时展示已删除草稿供恢复 */
+  deleted?: boolean;
   sort_by?: "updated_at" | "created_at" | "version" | "metric_code" | "name";
   sort_order?: "asc" | "desc";
   page?: number;
@@ -638,6 +640,14 @@ export async function deleteMetric(code: string): Promise<{ deleted: boolean }> 
   return request<{ deleted: boolean }>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}`,
     { method: "DELETE" },
+  );
+}
+
+// 恢复已软删指标（回收站恢复，仅 DRAFT 且已删状态；平台管理员或原 Owner）
+export async function restoreMetric(code: string): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/restore`,
+    { method: "POST" },
   );
 }
 

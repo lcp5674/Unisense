@@ -909,6 +909,37 @@ async def delete_metric(
 
 
 @router.post(
+    "/{metric_code}/restore",
+    response_model=ApiResponse[MetricResponse],
+    summary="恢复已软删指标（回收站恢复，仅 DRAFT 且已删状态）",
+    dependencies=_WRITE_DEPS,
+)
+async def restore_metric(
+    metric_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """恢复软删草稿指标；仅平台管理员或指标原 Owner 可恢复（service 层校验）。"""
+    service = MetricService(db)
+    metric = await service.restore_metric(metric_code, actor_id=user.id, role=user.role)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="RESTORE",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={"status": metric.status, "actor_role": user.role},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    # PLAT-3: 业务写入 + 审计同事务原子提交
+    await db.commit()
+    return ok(data=MetricResponse.model_validate(metric), trace_id=trace_id)
+
+
+@router.post(
     "/{metric_code}/promote",
     response_model=ApiResponse[MetricResponse],
     summary="灰度全量发布（FR-020，EXPERIMENTAL → PUBLISHED）",
