@@ -726,3 +726,59 @@ def test_upstream_deps_ignores_non_select_statements() -> None:
     ud = extract_upstream_deps("SELECT id FROM ods.a", dialect="mysql")
     assert ud.tables == ("ods.a",)
     assert ud.fields == ("ods.a.id",)
+
+
+def test_doris_ctas_physical_attrs_stripped() -> None:
+    """Doris/StarRocks CTAS 带 DISTRIBUTED BY/PROPERTIES/ENGINE：剥离物理属性后正常产血缘。
+
+    sqlglot 25.x 对 ``CREATE TABLE t DISTRIBUTED BY ... AS SELECT`` 整体降级为
+    Command 致血缘全丢；这些子句仅描述物理布局，剥离后血缘语义不变。
+    """
+    sql = (
+        "CREATE TABLE dws.t DISTRIBUTED BY HASH(id) BUCKETS 10 "
+        'PROPERTIES("replication_num"="1") AS SELECT id, v FROM ods.s'
+    )
+    table_edges = extract_table_lineage(sql, dialect="doris")
+    assert [(e.source, e.target) for e in table_edges] == [("ods.s", "dws.t")]
+    field_edges = extract_field_lineage(sql, dialect="doris")
+    assert [(e.source_table, e.source_column, e.target_column) for e in field_edges] == [
+        ("ods.s", "id", "id"),
+        ("ods.s", "v", "v"),
+    ]
+    # StarRocks 同构
+    sql_sr = "CREATE TABLE dws.t ENGINE=OLAP DISTRIBUTED BY HASH(id) AS SELECT id FROM ods.s"
+    assert [(e.source, e.target) for e in extract_table_lineage(sql_sr, dialect="starrocks")] == [
+        ("ods.s", "dws.t")
+    ]
+
+
+def test_cte_name_shadowing_real_table() -> None:
+    """CTE 名与真实表同名：带 schema 前缀的引用（ods.cte1）是真实表，不被 CTE 遮蔽排除。"""
+    sql = (
+        "WITH cte1 AS (SELECT id FROM ods.a) "
+        "INSERT INTO dws.t SELECT cte1.id, c.v FROM cte1 JOIN ods.cte1 c ON cte1.id = c.id"
+    )
+    table_edges = extract_table_lineage(sql, dialect="hive")
+    sources = {e.source for e in table_edges}
+    assert "ods.cte1" in sources, "带 schema 前缀的同名真实表应保留为来源"
+    assert "ods.a" in sources
+    assert "cte1" not in sources, "裸 CTE 引用不应成为伪表"
+
+
+def test_cte_chain_aggregate_column_resolved() -> None:
+    """CTE 链式 + 聚合 + JOIN：未限定列避开不含该列的 CTE，解析到真实来源表。
+
+    ``c2.v = MAX(v)`` 的 v 来自 JOIN 的 ods.b（c1 仅输出 id），应解析到 ods.b.v
+    而非因选中不含 v 的 CTE c1 而落空。
+    """
+    sql = (
+        "WITH c1 AS (SELECT id FROM ods.a), "
+        "c2 AS (SELECT id, MAX(v) AS v FROM c1 JOIN ods.b USING(id) GROUP BY id) "
+        "INSERT INTO dws.t SELECT id, v FROM c2"
+    )
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    assert [
+        (e.source_table, e.source_column, e.target_column)
+        for e in field_edges
+        if e.target_column == "v"
+    ] == [("ods.b", "v", "v")], "MAX(v) 的 v 应穿透 CTE 解析到 ods.b.v"

@@ -158,6 +158,11 @@ def _preprocess_dialect(sql: str, dialect: str | None) -> str:
       完全一致，仅写入动作不同）。
     - doris/starrocks：剥离 ``INSERT INTO t WITH LABEL 'xxx' SELECT ...`` 中的
       ``WITH LABEL 'xxx'`` 片段（sqlglot 不支持 Doris 的 LABEL 标记）。
+    - doris/starrocks：剥离 ``CREATE TABLE ... AS SELECT`` 的物理分布/副本属性
+      （``DISTRIBUTED BY ... [BUCKETS n]``、``PROPERTIES(...)``、``ENGINE=``）——
+      sqlglot 25.x 对 ``CREATE TABLE t DISTRIBUTED BY HASH(id) BUCKETS 10 AS SELECT``
+      整体降级为 Command 致血缘全丢；这些子句仅描述物理布局，不影响 SELECT 源与
+      目标表，剥离后血缘语义不变。
     """
     if not sql or not sql.strip():
         return sql
@@ -166,6 +171,15 @@ def _preprocess_dialect(sql: str, dialect: str | None) -> str:
         sql = re.sub(r"\bREPLACE\s+INTO\b", "INSERT INTO", sql, flags=re.IGNORECASE)
     if d in ("doris", "starrocks"):
         sql = re.sub(r"\bWITH\s+LABEL\s+('[^']*'|\S+)", " ", sql, flags=re.IGNORECASE)
+        sql = re.sub(
+            r"\bDISTRIBUTED\s+BY\b.*?(?=\bAS\b|$)",
+            " ",
+            sql,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        sql = re.sub(r"\bPROPERTIES\s*\(.*?\)", " ", sql, flags=re.IGNORECASE | re.DOTALL)
+        sql = re.sub(r"\bENGINE\s*=\s*\w+", " ", sql, flags=re.IGNORECASE)
+        sql = re.sub(r"\bBUCKETS\s+\d+", " ", sql, flags=re.IGNORECASE)
     return sql
 
 
@@ -207,7 +221,7 @@ def _table_edges(ast: Any) -> list[TableEdge]:
     for tbl in ast.find_all(exp.Table):
         src = _norm_table(tbl)
         # 排除 CTE 引用（``FROM cte1`` 中的 ``cte1`` 不是真实表，避免伪源表节点）
-        if not src or src == target_name or tbl.name in cte_names:
+        if not src or src == target_name or _is_cte_ref(tbl, cte_names):
             continue
         key = (src, target_name)
         if key in seen:
@@ -230,7 +244,7 @@ def _select_table_edges(ast: Any, target_name: str) -> list[TableEdge]:
     for tbl in ast.find_all(exp.Table):
         src = _norm_table(tbl)
         # 排除 CTE 引用（同 ``_table_edges``，避免伪源表节点）
-        if not src or src == target_name or tbl.name in cte_names:
+        if not src or src == target_name or _is_cte_ref(tbl, cte_names):
             continue
         key = (src, target_name)
         if key in seen:
@@ -337,6 +351,18 @@ def _collect_ctes(query: exp.Expression) -> dict[str, exp.CTE]:
     return ctes
 
 
+def _is_cte_ref(tbl: exp.Table, cte_names: dict[str, Any] | set[str]) -> bool:
+    """判断表引用是否为 CTE（而非真实表）。
+
+    仅当表名命中 CTE 集合且**无 schema/db/catalog 前缀**时才算 CTE 引用：
+    ``FROM cte1`` 的 ``cte1`` 是 CTE，而 ``JOIN ods.cte1``（带 schema）是真实表
+    （CTE 不携带库前缀），避免 CTE 名与真实表同名时误排除后者。
+    """
+    if tbl.name not in cte_names:
+        return False
+    return not tbl.catalog and not tbl.db
+
+
 def _projection_name(projection: exp.Expression) -> str | None:
     """取投影的目标列名（Alias 取别名，裸 Column 取列名，其余为 None）。"""
     if isinstance(projection, exp.Alias):
@@ -351,6 +377,12 @@ def _scope_outputs_column(scope: Any, col_name: str) -> bool:
     selects = getattr(scope, "selects", None)
     if not selects:
         return False
+    return any(_projection_name(p) == col_name for p in selects)
+
+
+def _cte_outputs_column(cte: exp.CTE, col_name: str) -> bool:
+    """CTE 定义 SELECT 是否输出指定列名（用于未限定列解析时判定某 CTE 是否含该列）。"""
+    selects = getattr(cte.this, "selects", None) or []
     return any(_projection_name(p) == col_name for p in selects)
 
 
@@ -392,11 +424,23 @@ def _resolve_column(
     if qualifier:
         src = sources.get(qualifier)
     if src is None:
-        # 未限定列：优先匹配真实表来源，其次匹配输出该列的子查询来源
+        # 未限定列：优先真实表（非 CTE 引用）。CTE 引用可能不含该列——
+        # 如 ``SELECT id FROM c1 JOIN ods.b USING(id)`` 里 ``max(v)`` 的 v 实际
+        # 来自 ods.b，而 c1 只输出 id；若取第一个来源（CTE c1）会错误解析为空。
         for _name, s in sources.items():
-            if isinstance(s, exp.Table):
+            if isinstance(s, exp.Table) and s.name not in cte_map:
                 src = s
                 break
+        if src is None:
+            # 其次：输出该列的 CTE 引用（穿透定义解析）
+            for _name, s in sources.items():
+                if (
+                    isinstance(s, exp.Table)
+                    and s.name in cte_map
+                    and _cte_outputs_column(cte_map[s.name], col.name)
+                ):
+                    src = s
+                    break
         if src is None:
             for _name, s in sources.items():
                 if isinstance(s, Scope) and _scope_outputs_column(s.expression, col.name):
@@ -871,8 +915,9 @@ def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
         cte_map = _collect_ctes(ast)
         for tbl in ast.find_all(exp.Table):
             name = _norm_table(tbl)
-            # 排除 CTE 引用（``FROM cte1`` 的 ``cte1`` 非真实表，避免伪表节点）
-            if name and tbl.name not in cte_map:
+            # 排除 CTE 引用（``FROM cte1`` 的 ``cte1`` 非真实表，避免伪表节点；
+            # 带 schema 前缀的 ``ods.cte1`` 是真实表，不排除）
+            if name and not _is_cte_ref(tbl, set(cte_map)):
                 tables.add(name)
         for branch in _branch_queries(ast):
             scope = _try_build_scope(branch)
