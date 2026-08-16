@@ -964,6 +964,13 @@ function MembersTab() {
     }
   }
 
+  // 新建成员（可选预填父级="添加下级"）：打开时重置表单避免残留旧值
+  function openCreateMember(prefillParent?: string) {
+    form.resetFields();
+    if (prefillParent) form.setFieldsValue({ parent_code: prefillParent });
+    setModalOpen(true);
+  }
+
   function openEdit(m: DimensionMember) {
     setEditTarget(m);
     setEditOpen(true);
@@ -1084,7 +1091,7 @@ function MembersTab() {
         />
         <Space>
           {can("dimension:create") && (
-            <Button icon={<PlusOutlined />} disabled={!dimCode} onClick={() => setModalOpen(true)}>新增值</Button>
+            <Button icon={<PlusOutlined />} disabled={!dimCode} onClick={() => openCreateMember()}>新增值</Button>
           )}
           {can("dimension:create") && (
             <Button
@@ -1137,6 +1144,11 @@ function MembersTab() {
             width: 160,
             render: (_: unknown, m: DimensionMember) => (
               <Space size={4} wrap>
+                {can("dimension:create") && (
+                  <Tooltip title={`在该成员下添加子成员`}>
+                    <Button size="small" icon={<PlusOutlined />} onClick={() => openCreateMember(m.member_code)}>添加下级</Button>
+                  </Tooltip>
+                )}
                 {can("dimension:edit") &&
                   (m.status === "DEPRECATED" ? (
                     <Tooltip title="已废弃成员为终态，不可编辑">
