@@ -1094,6 +1094,37 @@ describe("upstreamDepsToGraphData 上游依赖转图谱", () => {
       ),
     ).toBe(true);
   });
+
+  it("三层表名（catalog.schema.table）不拆错：表节点保留完整三层、字段挂第三层表", () => {
+    const g = upstreamDepsToGraphData({
+      tables: ["spark_catalog.ods_db.ods_orders"],
+      fields: ["spark_catalog.ods_db.ods_orders.id"],
+    });
+    // 中心 1 + 表 1 + 字段 1 = 3；边：查询→表 1 + 表→字段 1 = 2
+    expect(g.nodes).toHaveLength(3);
+    expect(g.edges).toHaveLength(2);
+    // 表节点 id/label 保留完整三层（不得拆出 spark_catalog / spark_catalog.ods_db 伪表）
+    expect(
+      g.nodes.some(
+        (n) =>
+          n.id === "table:spark_catalog.ods_db.ods_orders" &&
+          n.label === "spark_catalog.ods_db.ods_orders",
+      ),
+    ).toBe(true);
+    expect(g.nodes.some((n) => n.id === "table:spark_catalog")).toBe(false);
+    expect(g.nodes.some((n) => n.id === "table:spark_catalog.ods_db")).toBe(false);
+    // 字段节点完整三层，挂到完整表下
+    expect(
+      g.nodes.some((n) => n.id === "field:spark_catalog.ods_db.ods_orders.id"),
+    ).toBe(true);
+    expect(
+      g.edges.some(
+        (e) =>
+          e.source === "table:spark_catalog.ods_db.ods_orders" &&
+          e.target === "field:spark_catalog.ods_db.ods_orders.id",
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("edgesToGraphData 合并节点元数据", () => {

@@ -139,10 +139,12 @@ def _table_edges(ast: Any) -> list[TableEdge]:
     if target_name is None:
         # 纯查询语句无写入目标，无成边条件
         return edges
+    cte_names = _collect_ctes(ast)
     seen: set[tuple[str, str]] = set()
     for tbl in ast.find_all(exp.Table):
         src = _norm_table(tbl)
-        if src == target_name:
+        # 排除 CTE 引用（``FROM cte1`` 中的 ``cte1`` 不是真实表，避免伪源表节点）
+        if not src or src == target_name or tbl.name in cte_names:
             continue
         key = (src, target_name)
         if key in seen:
@@ -161,9 +163,11 @@ def _select_table_edges(ast: Any, target_name: str) -> list[TableEdge]:
     """
     edges: list[TableEdge] = []
     seen: set[tuple[str, str]] = set()
+    cte_names = _collect_ctes(ast)
     for tbl in ast.find_all(exp.Table):
         src = _norm_table(tbl)
-        if not src or src == target_name:
+        # 排除 CTE 引用（同 ``_table_edges``，避免伪源表节点）
+        if not src or src == target_name or tbl.name in cte_names:
             continue
         key = (src, target_name)
         if key in seen:
@@ -635,11 +639,12 @@ def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
             ast: Any = sqlglot.parse_one(stmt, dialect=dialect)
         except Exception:
             continue
+        cte_map = _collect_ctes(ast)
         for tbl in ast.find_all(exp.Table):
             name = _norm_table(tbl)
-            if name:
+            # 排除 CTE 引用（``FROM cte1`` 的 ``cte1`` 非真实表，避免伪表节点）
+            if name and tbl.name not in cte_map:
                 tables.add(name)
-        cte_map = _collect_ctes(ast)
         for branch in _branch_queries(ast):
             scope = _try_build_scope(branch)
             if scope is None:

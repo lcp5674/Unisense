@@ -376,3 +376,69 @@ def test_upstream_deps_projection_through_subquery() -> None:
     assert "wedw_dwd.hospital_tag_df.hospital_id" in deps.fields
     assert "wedw_dwd.hospital_tag_df.tag_id" in deps.fields
     assert not any(f.startswith("t2.") for f in deps.fields)
+
+
+def test_upstream_deps_cte_reference_not_leaked() -> None:
+    """上游依赖：CTE 引用（``FROM cte1`` 的 ``cte1``）不得泄漏为伪表，仅保留真实表。"""
+    sql = (
+        "WITH cte1 AS (SELECT id, name FROM wedw_dwd.hospital_tag_df "
+        "WHERE date_id = '2026-08-13') "
+        "SELECT cte1.id, t3.expert_id FROM cte1 "
+        "JOIN wedw_dw.wy_zh_hosp_dept_expert_relation_df t3 ON cte1.id = t3.hosp_id"
+    )
+    deps = extract_upstream_deps(sql, dialect="hive")
+    # 表清单只含真实表（CTE 定义内部表 + JOIN 显式表），不含 cte1
+    assert set(deps.tables) == {
+        "wedw_dwd.hospital_tag_df",
+        "wedw_dw.wy_zh_hosp_dept_expert_relation_df",
+    }
+    # 投影列穿透 CTE 到内部真实来源表，且不残留 cte1. 前缀
+    assert "wedw_dwd.hospital_tag_df.id" in deps.fields
+    assert "wedw_dw.wy_zh_hosp_dept_expert_relation_df.expert_id" in deps.fields
+    assert not any(f.startswith("cte1.") for f in deps.fields)
+
+
+def test_upstream_deps_cte_not_leaked_all_dialects() -> None:
+    """上游依赖：CTE 引用不泄漏在所有受支持数据源方言下均成立。"""
+    sql = (
+        "WITH cte1 AS (SELECT x AS c FROM db1.t1) "
+        "SELECT cte1.c FROM cte1 JOIN db3.t3 ON cte1.c = t3.k"
+    )
+    for dialect in ("mysql", "postgres", "hive", "spark", "doris", "clickhouse", "starrocks"):
+        deps = extract_upstream_deps(sql, dialect=dialect)
+        assert "cte1" not in deps.tables, f"[{dialect}] CTE 引用泄漏为伪表"
+        assert {"db1.t1", "db3.t3"}.issubset(set(deps.tables)), f"[{dialect}] 真实表缺失"
+        assert not any(f.startswith("cte1.") for f in deps.fields), f"[{dialect}] CTE 列泄漏"
+        assert "db1.t1.x" in deps.fields, f"[{dialect}] 投影列未穿透 CTE"
+
+
+def test_table_lineage_cte_reference_not_leaked() -> None:
+    """表级血缘：INSERT + CTE 时 CTE 引用不得作为伪源表（正式血缘不污染）。"""
+    sql = (
+        "WITH cte1 AS (SELECT id, name FROM db1.src1 WHERE dt = '2026-08-13') "
+        "INSERT INTO dws.result "
+        "SELECT c.id, c.name, t2.extra FROM cte1 c "
+        "JOIN db2.src2 t2 ON c.id = t2.id"
+    )
+    edges = extract_table_lineage(sql, dialect="hive")
+    sources = {e.source for e in edges}
+    targets = {e.target for e in edges}
+    assert targets == {"dws.result"}
+    assert sources == {"db1.src1", "db2.src2"}  # 无 cte1
+    assert "cte1" not in sources
+
+
+def test_select_target_table_cte_not_leaked() -> None:
+    """纯 SELECT 显式落点 + CTE：落点血缘源表不含 CTE 引用（方案 A+B）。"""
+    sql = (
+        "WITH cte1 AS (SELECT id, name FROM db1.src1) "
+        "SELECT c.id, c.name FROM cte1 c WHERE c.id > 0"
+    )
+    edges = extract_table_lineage(sql, dialect="hive", target_table="dws.result")
+    sources = {e.source for e in edges}
+    assert sources == {"db1.src1"}
+    assert "cte1" not in sources
+    # 字段级落点血缘同样穿透 CTE
+    field_edges = extract_field_lineage(sql, dialect="hive", target_table="dws.result")
+    assert {e.source_table for e in field_edges} == {"db1.src1"}
+    assert {e.target_table for e in field_edges} == {"dws.result"}
