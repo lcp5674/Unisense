@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { Governance } from "../pages/Governance";
 import { PermissionProvider } from "../hooks/usePermission";
 
@@ -35,6 +36,7 @@ vi.mock("../api", () => {
     requestErasure: vi.fn(),
     listUsers: vi.fn(),
     listDomainTree: vi.fn(),
+    listMetrics: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -51,6 +53,7 @@ import {
   batchGrant,
   listUsers,
   listDomainTree,
+  listMetrics,
 } from "../api";
 
 const mockPerms = vi.mocked(fetchMyPermissions);
@@ -64,6 +67,7 @@ const mockActionRegistry = vi.mocked(listActionRegistry);
 const mockBatch = vi.mocked(batchGrant);
 const mockUsers = vi.mocked(listUsers);
 const mockDomains = vi.mocked(listDomainTree);
+const mockMetrics = vi.mocked(listMetrics);
 
 const ACTION_REGISTRY = [
   { action: "catalog:view", module: "指标", label: "查看指标目录", description: "访问指标目录" },
@@ -106,6 +110,15 @@ async function clickTab(name: string) {
   await userEvent.click(tab);
 }
 
+/** 渲染 Governance（GrantsTab 用 useNavigate，须包 Router）。 */
+function renderGov() {
+  return render(
+    <MemoryRouter>
+      <Governance />
+    </MemoryRouter>,
+  );
+}
+
 describe("Governance 权限治理", () => {
   beforeEach(() => {
     mockPerms.mockReset();
@@ -119,6 +132,7 @@ describe("Governance 权限治理", () => {
     mockBatch.mockReset();
     mockUsers.mockReset();
     mockDomains.mockReset();
+    mockMetrics.mockReset();
     mockPerms.mockResolvedValue({
       user_id: 1,
       role: "platform_admin",
@@ -138,10 +152,11 @@ describe("Governance 权限治理", () => {
     mockCreateRole.mockResolvedValue({ id: 99, name: "x", description: null });
     mockUsers.mockResolvedValue(USERS);
     mockDomains.mockResolvedValue([]);
+    mockMetrics.mockResolvedValue({ total: 0, page: 1, page_size: 1000, items: [] });
   });
 
   it("角色管理：渲染权限点矩阵，platform_admin 受保护不可编辑", async () => {
-    render(<Governance />);
+    renderGov();
     await clickTab("角色管理");
 
     // viewer 行：默认仅 read
@@ -170,7 +185,7 @@ describe("Governance 权限治理", () => {
       protected: false,
       is_custom: false,
     });
-    render(<Governance />);
+    renderGov();
     await clickTab("角色管理");
 
     await screen.findByText("只读用户");
@@ -205,7 +220,7 @@ describe("Governance 权限治理", () => {
       protected: false,
       is_custom: false,
     });
-    render(<Governance />);
+    renderGov();
     await clickTab("角色管理");
 
     await screen.findByText("只读用户");
@@ -232,7 +247,7 @@ describe("Governance 权限治理", () => {
         { user_id: 2, domain: "finance", action: "grant", ok: true, detail: "将新建授权" },
       ],
     });
-    render(<Governance />);
+    renderGov();
     await clickTab("授权管理");
 
     await screen.findByText("新建授权");
@@ -295,7 +310,7 @@ describe("Governance 权限治理", () => {
   });
 
   it("PII 复核：敏感度选项不含 UNKNOWN（降级标记不可人工赋值，与其他页 NEEDS_REVIEW 终态对齐）", async () => {
-    render(<Governance />);
+    renderGov();
     await clickTab("PII 复核");
 
     await userEvent.click(screen.getByRole("button", { name: /PII 人工复核/ }));
@@ -350,7 +365,7 @@ describe("Governance 权限治理", () => {
       is_custom: true,
     });
 
-    render(<Governance />);
+    renderGov();
     await clickTab("角色管理");
     await screen.findByText("只读用户");
 
@@ -402,6 +417,51 @@ describe("Governance 权限治理", () => {
     });
     await waitFor(() => expect(mockDeleteRole).toHaveBeenCalledWith("data_analyst"));
   });
+
+  it("授权管理：用户列显示用户名、指标白名单为选项框、可跳转管理用户", async () => {
+    mockGrants.mockResolvedValue({
+      total: 1,
+      page: 1,
+      page_size: 20,
+      items: [
+        {
+          id: 11,
+          user_id: 1,
+          role_id: null,
+          domain: "finance",
+          metric_whitelist: ["sales_gmv"],
+          grant_type: "READ",
+          row_level: false,
+          status: "ACTIVE",
+          expires_at: null,
+          granted_by: null,
+          reason: null,
+        },
+      ],
+    });
+    mockMetrics.mockResolvedValue({
+      total: 1,
+      page: 1,
+      page_size: 1000,
+      items: [
+        { metric_code: "sales_gmv", name: "销售 GMV" } as never,
+      ],
+    });
+
+    renderGov();
+    await clickTab("授权管理");
+    await screen.findByText(/爱丽丝/); // 用户列显示用户名（user_id → username 映射，display_name 带括号）
+
+    // 操作列有「管理用户」按钮
+    expect(screen.getAllByText("管理用户").length).toBeGreaterThan(0);
+    // 指标白名单列展示
+    expect(screen.getByText("sales_gmv")).toBeTruthy();
+
+    // 新建授权弹窗：指标白名单为多选选项框（不再手动逗号输入）
+    await userEvent.click(screen.getByRole("button", { name: /新建授权/ }));
+    expect(await screen.findByText("搜索并选择指标编码")).toBeTruthy();
+    expect(screen.queryByPlaceholderText("指标白名单（逗号分隔）")).toBeNull();
+  });
 });
 
 describe("Governance Tab 级权限过滤", () => {
@@ -419,9 +479,11 @@ describe("Governance Tab 级权限过滤", () => {
       expiring_soon: [],
     });
     return render(
-      <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: null, org_id: 1 }}>
-        <Governance />
-      </PermissionProvider>,
+      <MemoryRouter>
+        <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: null, org_id: 1 }}>
+          <Governance />
+        </PermissionProvider>
+      </MemoryRouter>,
     );
   }
 

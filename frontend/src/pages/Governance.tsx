@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Alert, Descriptions, Checkbox, Popconfirm, Tooltip } from "antd";
-import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined, AuditOutlined, DeleteOutlined, SettingOutlined } from "@ant-design/icons";
+import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined, AuditOutlined, DeleteOutlined, SettingOutlined, TeamOutlined } from "@ant-design/icons";
+import { useNavigate } from "react-router-dom";
 import {
   fetchMyPermissions,
   listGrants,
@@ -19,6 +20,7 @@ import {
   requestErasure,
   listUsers,
   listDomainTree,
+  listMetrics,
   UnisenseApiError,
 } from "../api";
 import type { ActionRegistryItem, GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RolePermissionItem, SubjectDomainTreeNode, UserBrief } from "../types";
@@ -37,6 +39,78 @@ function flattenDomains(
     if (n.children?.length) flattenDomains(n.children, depth + 1, out);
   }
   return out;
+}
+
+// ---- 可拖拽列宽（无额外依赖）：表头单元格渲染拖拽手柄，mouse 事件调整列宽 ----
+interface ResizeHandleProps extends React.HTMLAttributes<HTMLTableHeaderCellElement> {
+  onResize?: (width: number) => void;
+  width?: number;
+}
+
+function ResizableTitle(props: ResizeHandleProps) {
+  const { onResize, width, ...restProps } = props;
+  if (!width) return <th {...restProps} />;
+  return (
+    <th
+      {...restProps}
+      style={{ ...(restProps.style ?? {}), position: "relative" }}
+    >
+      {restProps.children}
+      <div
+        onMouseDown={(e) => {
+          e.preventDefault();
+          const startX = e.clientX;
+          const startW = width;
+          const onMove = (ev: MouseEvent) => {
+            const next = Math.max(60, startW + ev.clientX - startX);
+            onResize?.(Math.round(next));
+          };
+          const onUp = () => {
+            document.removeEventListener("mousemove", onMove);
+            document.removeEventListener("mouseup", onUp);
+          };
+          document.addEventListener("mousemove", onMove);
+          document.addEventListener("mouseup", onUp);
+        }}
+        style={{
+          position: "absolute",
+          right: 0,
+          top: 0,
+          bottom: 0,
+          width: 8,
+          cursor: "col-resize",
+          userSelect: "none",
+          touchAction: "none",
+        }}
+      />
+    </th>
+  );
+}
+
+interface ResizableColumn {
+  key: string;
+  width?: number;
+}
+
+/** 为列集附加可拖拽能力：返回 [新列, 表格 components 配置]。宽度变更由调用方 state 持有。 */
+function useResizableColumns<T extends ResizableColumn>(
+  base: T[],
+  widths: Record<string, number>,
+  setWidths: (updater: (prev: Record<string, number>) => Record<string, number>) => void,
+): [T[], { header: { cell: typeof ResizableTitle } }] {
+  const cols = base.map((c) => {
+    const key = c.key;
+    const width = widths[key] ?? c.width;
+    return {
+      ...c,
+      width,
+      onHeaderCell: (col: ResizableColumn) => ({
+        width: widths[col.key] ?? col.width,
+        onResize: (w: number) => setWidths((prev) => ({ ...prev, [col.key]: w })),
+      }),
+    };
+  });
+  return [cols as T[], { header: { cell: ResizableTitle } }];
 }
 
 const GRANT_TYPE_LABEL: Record<string, string> = {
@@ -82,6 +156,18 @@ const DECISION_LABEL: Record<string, string> = {
   REJECT: "拒绝",
 };
 
+// PII 复核可选字段（对齐后端 PII_RULES 常见敏感字段，替代手动逗号输入）
+const PII_FIELD_OPTIONS = [
+  { value: "user_phone", label: "手机号" },
+  { value: "id_card", label: "身份证号" },
+  { value: "email", label: "邮箱" },
+  { value: "bank_card", label: "银行卡号" },
+  { value: "real_name", label: "真实姓名" },
+  { value: "address", label: "住址" },
+  { value: "passport", label: "护照号" },
+  { value: "gps", label: "定位/GPS" },
+].map((o) => ({ value: o.value, label: `${o.value}（${o.label}）` }));
+
 function PermissionsTab() {
   const [snap, setSnap] = useState<PermissionSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -125,6 +211,7 @@ function PermissionsTab() {
 }
 
 function GrantsTab() {
+  const navigate = useNavigate();
   const [items, setItems] = useState<GrantResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -132,6 +219,10 @@ function GrantsTab() {
   const [status, setStatus] = useState("");
   const [users, setUsers] = useState<UserBrief[]>([]);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 指标白名单选项（供授权弹窗选项框选择，替代手动逗号输入）
+  const [metricOptions, setMetricOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 可拖拽列宽（用户可手动左右调整）
+  const [colWidths, setColWidths] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
@@ -148,7 +239,22 @@ function GrantsTab() {
     listDomainTree("active")
       .then((tree) => setDomainOptions(flattenDomains(tree)))
       .catch(() => setDomainOptions([]));
+    // 指标白名单选项：拉取已发布指标（编码 + 名称，供搜索选择）
+    listMetrics({ status: "PUBLISHED", page: 1, page_size: 1000 })
+      .then((res) =>
+        setMetricOptions(
+          res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code}（${m.name}）` })),
+        ),
+      )
+      .catch(() => setMetricOptions([]));
   }, []);
+
+  // user_id → 用户名/显示名 映射（授权记录归属可读）
+  const userMap = useMemo(() => {
+    const m = new Map<number, UserBrief>();
+    for (const u of users) m.set(u.id, u);
+    return m;
+  }, [users]);
 
   async function load() {
     setLoading(true);
@@ -174,7 +280,10 @@ function GrantsTab() {
         user_id: Number(values.user_id),
         role_id: values.role_id ? Number(values.role_id) : null,
         domain: values.domain ? String(values.domain) : null,
-        metric_whitelist: values.metric_whitelist ? String(values.metric_whitelist).split(",").map((s) => s.trim()).filter(Boolean) : null,
+        metric_whitelist:
+          Array.isArray(values.metric_whitelist) && values.metric_whitelist.length
+            ? values.metric_whitelist.map(String)
+            : null,
         grant_type: String(values.grant_type ?? "READ"),
         row_level: Boolean(values.row_level),
         reason: values.reason ? String(values.reason) : null,
@@ -201,9 +310,10 @@ function GrantsTab() {
   // 批量授权：将同一授权参数应用到多个用户，生成 GrantCreate 列表
   function buildBatchItems(values: Record<string, unknown>): GrantCreate[] {
     const users = Array.isArray(values.user_ids) ? values.user_ids.map(Number) : [];
-    const whitelist = values.metric_whitelist
-      ? String(values.metric_whitelist).split(",").map((s) => s.trim()).filter(Boolean)
-      : null;
+    const whitelist =
+      Array.isArray(values.metric_whitelist) && values.metric_whitelist.length
+        ? values.metric_whitelist.map(String)
+        : null;
     return users.map((uid) => ({
       user_id: uid,
       role_id: null,
@@ -253,9 +363,25 @@ function GrantsTab() {
 
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
-    { title: "用户", dataIndex: "user_id", key: "user", width: 80 },
-    { title: "角色", dataIndex: "role_id", key: "role", width: 90, render: (v: number | null) => v ? <span className="mono">#{v}</span> : <Tag>角色挂起</Tag> },
-    { title: "域", dataIndex: "domain", key: "domain", render: (v: string | null) => v ?? <span className="muted">全部</span> },
+    {
+      title: "用户",
+      dataIndex: "user_id",
+      key: "user",
+      width: 200,
+      render: (v: number) => {
+        const u = userMap.get(v);
+        return u ? (
+          <Space size={4}>
+            <span>{u.username}</span>
+            <span className="muted" style={{ fontSize: 12 }}>（{u.display_name}）</span>
+          </Space>
+        ) : (
+          <span className="mono">#{v}</span>
+        );
+      },
+    },
+    { title: "角色", dataIndex: "role_id", key: "role", width: 100, render: (v: number | null) => v ? <span className="mono">#{v}</span> : <Tag>角色挂起</Tag> },
+    { title: "域", dataIndex: "domain", key: "domain", width: 120, render: (v: string | null) => v ?? <span className="muted">全部</span> },
     { title: "授权类型", dataIndex: "grant_type", key: "type", width: 110, render: (v: string) => <Tag color={v === "READ_WRITE" ? "warning" : v === "WRITE" ? "orange" : "default"}>{GRANT_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "行级", dataIndex: "row_level", key: "row", width: 70, render: (v: boolean) => (v ? "是" : "否") },
     {
@@ -267,12 +393,32 @@ function GrantsTab() {
     },
     { title: "到期", dataIndex: "expires_at", key: "expires", width: 160, render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : <span className="muted">长期</span>) },
     {
+      title: "指标白名单",
+      dataIndex: "metric_whitelist",
+      key: "whitelist",
+      width: 160,
+      render: (v: string[] | null) =>
+        v && v.length ? (
+          <span className="mono" style={{ fontSize: 12 }}>{v.join(", ")}</span>
+        ) : (
+          <span className="muted">全部</span>
+        ),
+    },
+    {
       title: "操作",
       key: "actions",
-      width: 90,
-      render: (_: unknown, g: GrantResponse) => (g.status === "ACTIVE" ? <Button size="small" danger onClick={() => handleRevoke(g)}>回收</Button> : null),
+      width: 150,
+      render: (_: unknown, g: GrantResponse) => (
+        <Space size={4}>
+          <Button size="small" icon={<TeamOutlined />} onClick={() => navigate("/users")}>管理用户</Button>
+          {g.status === "ACTIVE" ? <Button size="small" danger onClick={() => handleRevoke(g)}>回收</Button> : null}
+        </Space>
+      ),
     },
   ];
+
+  // 可拖拽列宽（手动左右调整列宽，间距自适应）
+  const [resizableColumns, resizableComponents] = useResizableColumns(columns, colWidths, setColWidths);
 
   return (
     <div>
@@ -290,9 +436,11 @@ function GrantsTab() {
       </Space>
       <Table
         dataSource={items}
-        columns={columns}
+        columns={resizableColumns}
+        components={resizableComponents}
         rowKey="id"
         loading={loading}
+        scroll={{ x: 1100 }}
         pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
         locale={{ emptyText: "暂无授权记录" }}
       />
@@ -333,8 +481,20 @@ function GrantsTab() {
               options={domainOptions}
             />
           </Form.Item>
-          <Form.Item name="metric_whitelist" label="指标白名单（逗号分隔）">
-            <Input className="mono" />
+          <Form.Item
+            name="metric_whitelist"
+            label="指标白名单（可多选，留空=不限制）"
+            extra="从已发布指标中选择，替代手动输入编码"
+          >
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="搜索并选择指标编码"
+              options={metricOptions}
+              tokenSeparators={[","]}
+            />
           </Form.Item>
           <Form.Item name="reason" label="授权原因">
             <Input.TextArea rows={2} />
@@ -383,8 +543,20 @@ function GrantsTab() {
               options={domainOptions}
             />
           </Form.Item>
-          <Form.Item name="metric_whitelist" label="指标白名单（逗号分隔）">
-            <Input className="mono" />
+          <Form.Item
+            name="metric_whitelist"
+            label="指标白名单（可多选，留空=不限制）"
+            extra="从已发布指标中选择，替代手动输入编码"
+          >
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="搜索并选择指标编码"
+              options={metricOptions}
+              tokenSeparators={[","]}
+            />
           </Form.Item>
           <Form.Item name="reason" label="授权原因">
             <Input.TextArea rows={2} />
@@ -775,6 +947,18 @@ function PiiReviewTab() {
   const [modalOpen, setModalOpen] = useState(false);
   const [rescanLoading, setRescanLoading] = useState(false);
   const [form] = Form.useForm();
+  // 指标编码选项（PII 复核目标从已发布指标选择，替代手动输入）
+  const [metricOptions, setMetricOptions] = useState<Array<{ value: string; label: string }>>([]);
+
+  useEffect(() => {
+    listMetrics({ status: "PUBLISHED", page: 1, page_size: 1000 })
+      .then((res) =>
+        setMetricOptions(
+          res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code}（${m.name}）` })),
+        ),
+      )
+      .catch(() => setMetricOptions([]));
+  }, []);
 
   async function handleReview(values: Record<string, unknown>) {
     try {
@@ -783,7 +967,10 @@ function PiiReviewTab() {
         decision: String(values.decision) as "APPROVE" | "REJECT",
         sensitivity_level: String(values.sensitivity_level ?? "PII"),
         masking_policy: values.masking_policy ? String(values.masking_policy) : null,
-        pii_columns: values.pii_columns ? String(values.pii_columns).split(",").map((s) => s.trim()).filter(Boolean) : null,
+        pii_columns:
+          Array.isArray(values.pii_columns) && values.pii_columns.length
+            ? values.pii_columns.map(String)
+            : null,
         comment: String(values.comment),
       });
       message.success(`复核完成：${DECISION_LABEL[res.decision] ?? res.decision}`);
@@ -817,8 +1004,13 @@ function PiiReviewTab() {
 
       <Modal title="PII 人工复核" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="提交复核">
         <Form form={form} layout="vertical" onFinish={handleReview} style={{ marginTop: 8 }}>
-          <Form.Item name="metric_code" label="指标编码" rules={[{ required: true }]}>
-            <Input className="mono" />
+          <Form.Item name="metric_code" label="指标" rules={[{ required: true, message: "请选择指标" }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="从已发布指标选择（搜索编码/名称）"
+              options={metricOptions}
+            />
           </Form.Item>
           <Form.Item name="decision" label="决定" rules={[{ required: true }]} initialValue="APPROVE">
             <Select options={[{ value: "APPROVE", label: "通过（合规复核通过）" }, { value: "REJECT", label: "拒绝（退回）" }]} />
@@ -829,8 +1021,16 @@ function PiiReviewTab() {
           <Form.Item name="masking_policy" label="脱敏策略">
             <Select allowClear options={[{ value: "none", label: "无" }, { value: "mask", label: "掩码" }, { value: "hash", label: "哈希" }, { value: "deny", label: "拒绝访问" }]} />
           </Form.Item>
-          <Form.Item name="pii_columns" label="PII 字段（逗号分隔）">
-            <Input className="mono" placeholder="如 user_phone, id_card" />
+          <Form.Item name="pii_columns" label="PII 字段（可多选，留空=沿用识别结果）">
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="搜索并选择敏感字段"
+              options={PII_FIELD_OPTIONS}
+              tokenSeparators={[","]}
+            />
           </Form.Item>
           <Form.Item name="comment" label="复核意见" rules={[{ required: true, min: 1 }]}>
             <Input.TextArea rows={2} />
@@ -844,12 +1044,24 @@ function PiiReviewTab() {
 function CheckTab() {
   const [result, setResult] = useState<{ allow: boolean; reason: string; masking: string; restricted: boolean } | null>(null);
   const [users, setUsers] = useState<UserBrief[]>([]);
+  const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [metricOptions, setMetricOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [form] = Form.useForm();
 
   useEffect(() => {
     listUsers()
       .then(setUsers)
       .catch(() => setUsers([]));
+    listDomainTree("active")
+      .then((tree) => setDomainOptions(flattenDomains(tree)))
+      .catch(() => setDomainOptions([]));
+    listMetrics({ status: "PUBLISHED", page: 1, page_size: 1000 })
+      .then((res) =>
+        setMetricOptions(
+          res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code}（${m.name}）` })),
+        ),
+      )
+      .catch(() => setMetricOptions([]));
   }, []);
 
   async function handleCheck(values: Record<string, unknown>) {
@@ -885,10 +1097,24 @@ function CheckTab() {
           <Select style={{ width: 130 }} options={["read", "write", "approve", "export", "review"].map((v) => ({ value: v, label: ACTION_LABEL[v] ?? v }))} />
         </Form.Item>
         <Form.Item name="domain" label="域">
-          <Input style={{ width: 140 }} />
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            style={{ width: 160 }}
+            placeholder="全部域"
+            options={domainOptions}
+          />
         </Form.Item>
         <Form.Item name="metric_code" label="指标">
-          <Input className="mono" style={{ width: 180 }} />
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            style={{ width: 220 }}
+            placeholder="不限（从已发布指标选择）"
+            options={metricOptions}
+          />
         </Form.Item>
         <Form.Item>
           <Button type="primary" htmlType="submit" icon={<SearchOutlined />}>检查</Button>
@@ -909,7 +1135,15 @@ function CheckTab() {
 
 function ErasureTab() {
   const [modalOpen, setModalOpen] = useState(false);
+  const [users, setUsers] = useState<UserBrief[]>([]);
   const [form] = Form.useForm();
+
+  useEffect(() => {
+    // 数据主体从用户列表选择（替代手动输入用户 ID）
+    listUsers()
+      .then(setUsers)
+      .catch(() => setUsers([]));
+  }, []);
 
   async function handleCreate(values: Record<string, unknown>) {
     try {
@@ -931,8 +1165,16 @@ function ErasureTab() {
       <Button type="primary" danger icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>发起擦除请求</Button>
       <Modal title="发起数据擦除" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="提交">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
-          <Form.Item name="subject_user_id" label="数据主体用户 ID" rules={[{ required: true }]}>
-            <InputNumber min={1} style={{ width: 200 }} />
+          <Form.Item name="subject_user_id" label="数据主体用户" rules={[{ required: true, message: "请选择数据主体用户" }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="按用户名 / 显示名搜索（对该用户全部个人数据执行擦除）"
+              options={users.map((u) => ({
+                value: u.id,
+                label: `${u.username}（${u.display_name}）`,
+              }))}
+            />
           </Form.Item>
           <Form.Item name="reason" label="擦除原因">
             <Input.TextArea rows={2} />
