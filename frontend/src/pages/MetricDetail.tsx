@@ -1425,13 +1425,18 @@ export function MetricDetail() {
         okText="确认废弃"
         okButtonProps={{ danger: true }}
       >
-        <Input
-          placeholder="替代指标编码（选填，须为已发布指标；留空表示无替代）"
-          value={successor}
-          onChange={(e) => setSuccessor(e.target.value)}
+        <Select
+          allowClear
+          showSearch
+          optionFilterProp="label"
+          placeholder="替代指标（选填，须为已发布指标；留空表示无替代）"
+          value={successor || undefined}
+          onChange={(v) => setSuccessor(v ?? "")}
+          options={editDepOptions.filter((o) => o.value !== metric.metric_code)}
+          notFoundContent="无已发布指标可作替代"
         />
         <p className="muted" style={{ marginTop: 8 }}>
-          留空表示该指标无替代（直接废弃下线）；填写后废弃指标的消费方会看到「替代指标」引导。
+          留空表示该指标无替代（直接废弃下线）；填写后废弃指标的消费方会看到「替代指标」引导。可从已发布指标搜索选择，无需手输编码。
         </p>
       </Modal>
 
