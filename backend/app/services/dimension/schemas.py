@@ -9,9 +9,14 @@ from pydantic import BaseModel, Field
 
 
 class DimensionCreate(BaseModel):
-    dim_code: str | None = None  # 缺省由系统自动生成（domain_name slug）
-    name: str
-    domain: str
+    # 长度对齐模型列（name=128 / domain=64 / dim_code=64），超长提交 422 而非 MySQL 500
+    dim_code: str | None = Field(
+        default=None,
+        max_length=64,
+        description="维度编码（可选，缺省自动生成，格式小写字母开头）",
+    )
+    name: str = Field(..., max_length=128)
+    domain: str = Field(..., max_length=64)
     type: str = "SCD1"
     description: str | None = None
     # PLAT-2: owner_id 允许客户端省略，服务端以认证身份覆盖（防越权指定责任人）。
@@ -27,8 +32,8 @@ class DimensionUpdate(BaseModel):
         max_length=64,
         description="维度编码（可选，DRAFT 可改，已发布/已废弃禁止）",
     )
-    name: str | None = None
-    domain: str | None = None
+    name: str | None = Field(None, max_length=128)
+    domain: str | None = Field(None, max_length=64)
     type: str | None = None
     description: str | None = None
 
@@ -65,11 +70,16 @@ class DimensionResponse(BaseModel):
 
 
 class DimensionMemberCreate(BaseModel):
-    dim_code: str
-    member_code: str | None = None  # 缺省由系统自动生成（member_name slug，维度内唯一）
-    member_name: str
-    parent_code: str | None = None
-    path: str | None = None  # 缺省由服务端按父级路径自动推测（父 path + / + member_code）
+    # 长度对齐模型列（member_code=64 / member_name=128 / parent_code=64 / path=512）
+    dim_code: str = Field(..., max_length=64)
+    member_code: str | None = Field(
+        default=None,
+        max_length=64,
+        description="成员编码（可选，缺省自动生成，维度内唯一）",
+    )
+    member_name: str = Field(..., max_length=128)
+    parent_code: str | None = Field(None, max_length=64)
+    path: str | None = Field(None, max_length=512)  # 缺省由服务端按父级路径自动推测
     attributes: dict[str, Any] | None = None
     status: str = "PUBLISHED"
 
@@ -77,9 +87,9 @@ class DimensionMemberCreate(BaseModel):
 class DimensionMemberUpdate(BaseModel):
     """维度成员编辑（member_code 为业务标识，不可变更；仅改名称/父级/属性/状态）。"""
 
-    member_name: str | None = None
-    parent_code: str | None = None  # 变更父级时服务端自动重算 path
-    path: str | None = None
+    member_name: str | None = Field(None, max_length=128)
+    parent_code: str | None = Field(None, max_length=64)  # 变更父级时服务端自动重算 path
+    path: str | None = Field(None, max_length=512)
     attributes: dict[str, Any] | None = None
     status: str | None = None
 
