@@ -275,12 +275,31 @@ class LineageService(BaseService):
         读取顺序：Redis 缓存 -> Neo4j 图遍历 -> MySQL BFS。缓存/图任一不可用
         均静默降级，不抛错、不阻塞主流程（对齐 TD §11 韧性）。
 
+        无前缀输入（如裸指标编码/表名）自动展开为 ``metric:/table:/field:``
+        候选节点逐个查询合并——用户常直接输入指标编码而不带前缀（读取侧容错，
+        写入侧手动登记仍强制前缀校验，两者不冲突）。
+
         Args:
             params: 影响分析参数（node/direction/max_hops）。
 
         Returns:
             血缘边响应列表（含 ``pii_inherited``）。
         """
+        candidates = self._resolve_query_nodes(params.node)
+        if len(candidates) > 1:
+            # 无前缀容错路径：逐个候选查询合并去重，不写缓存（避免空结果污染主键）。
+            merged: list[LineageEdgeResponse] = []
+            seen: set[tuple[str, str, str]] = set()
+            for cand in candidates:
+                sub = LineageImpactParams(
+                    node=cand, direction=params.direction, max_hops=params.max_hops
+                )
+                for e in await self._query_impact_sources(sub):
+                    key = (e.source_node, e.target_node, e.edge_type)
+                    if key not in seen:
+                        seen.add(key)
+                        merged.append(e)
+            return merged
         cache_key = self._impact_cache_key(params.node, params.direction, params.max_hops)
         cached = await self._impact_cache_get(cache_key)
         if cached is not None:
@@ -289,10 +308,33 @@ class LineageService(BaseService):
         await self._impact_cache_set(cache_key, edges)
         return edges
 
+    @staticmethod
+    def _resolve_query_nodes(node: str) -> list[str]:
+        """查询节点归一化：无前缀输入展开为候选前缀节点（``metric:/table:/field:``）。
+
+        带前缀的输入（``metric:xxx``/``table:db.t``）原样返回；无前缀时返回
+        候选列表供查询侧逐个尝试。与手动登记/解析的「写入侧强制前缀」校验解耦。
+        """
+        if not node or ":" in node:
+            return [node]
+        return [f"metric:{node}", f"table:{node}", f"field:{node}"]
+
     async def list_edges(self, node: str, direction: str = "both") -> list[LineageEdgeResponse]:
-        """列出与某节点直接相关的血缘边（一跳，含 ``pii_inherited``）。"""
-        edges = await self._repo.query_impact(node, direction, max_hops=1, max_edges=_MAX_EDGES)
-        return [LineageEdgeResponse.model_validate(e) for e in edges]
+        """列出与某节点直接相关的血缘边（一跳，含 ``pii_inherited``）。
+
+        与 ``query_impact`` 一致，对无前缀输入展开候选节点合并，避免裸编码查空。
+        """
+        merged: list[LineageEdgeResponse] = []
+        seen: set[tuple[str, str, str]] = set()
+        for cand in self._resolve_query_nodes(node):
+            edges = await self._repo.query_impact(cand, direction, max_hops=1, max_edges=_MAX_EDGES)
+            for e in edges:
+                resp = LineageEdgeResponse.model_validate(e)
+                key = (resp.source_node, resp.target_node, resp.edge_type)
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(resp)
+        return merged
 
     async def node_meta(self, node_ids: Iterable[str]) -> list[LineageNodeInfo]:
         """批量解析血缘节点基础信息（影响分析/边列表响应的 ``nodes`` 字段）。

@@ -1551,3 +1551,45 @@ async def test_delete_edge_by_id_not_found() -> None:
     svc._repo = FakeRepo()
     with pytest.raises(NotFoundError):
         await svc.delete_edge_by_id(999)
+
+
+async def test_resolve_query_nodes_expands_prefix_candidates() -> None:
+    """无前缀输入展开为 metric:/table:/field: 候选；带前缀原样返回（第 9 轮）。"""
+    assert LineageService._resolve_query_nodes("gmv_day") == [
+        "metric:gmv_day",
+        "table:gmv_day",
+        "field:gmv_day",
+    ]
+    assert LineageService._resolve_query_nodes("metric:gmv_day") == ["metric:gmv_day"]
+    assert LineageService._resolve_query_nodes("table:db.orders") == ["table:db.orders"]
+
+
+async def test_query_impact_without_prefix_expands_candidates() -> None:
+    """无前缀裸编码查询：展开候选节点，指标边与表边均命中合并（第 9 轮）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.impact = [
+        make_edge(i=1, source="metric:gmv_day", target="metric:gmv_week"),
+        make_edge(i=2, source="table:dwd.order", target="metric:gmv_day"),
+    ]
+    svc._repo = repo
+    svc._graph = None  # 强制走 MySQL（FakeRepo）路径
+    edges = await svc.query_impact(
+        LineageImpactParams(node="gmv_day", direction="downstream", max_hops=5)
+    )
+    # 裸编码展开为 metric:gmv_day（下游命中 1 条）与 table:gmv_day/field:gmv_day（无）→ 合并 1 条
+    assert len(edges) == 1
+    assert edges[0].source_node == "metric:gmv_day"
+
+
+async def test_list_edges_without_prefix_expands_candidates() -> None:
+    """边列表同样对无前缀输入展开候选节点（第 9 轮）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.impact = [
+        make_edge(i=3, source="metric:gmv_day", target="consumer:app_a", edge_type="CONSUMED_BY"),
+    ]
+    svc._repo = repo
+    edges = await svc.list_edges("gmv_day", direction="downstream")
+    assert len(edges) == 1
+    assert edges[0].target_node == "consumer:app_a"
