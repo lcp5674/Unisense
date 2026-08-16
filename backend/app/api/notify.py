@@ -61,12 +61,16 @@ async def list_notifications(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     status: str | None = Query(None),
+    read_state: str | None = Query(None, description="unread=未读 / read=已读"),
+    template_code: str | None = Query(None, description="按消息类型过滤"),
+    todo_only: bool = Query(False, description="仅待处理类事件"),
+    days: int | None = Query(None, ge=1, le=365, description="近 N 天"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     # PLAT-2: 以认证身份 user.id 作为 subscriber，禁止 client 伪造 subscriber_id 越权读取
     notifs, total = await NotifyService(db).list_notifications_page(
-        user.id, status, page, page_size
+        user.id, status, read_state, template_code, todo_only, days, page, page_size
     )
     items = [NotificationResponse.from_model(i) for i in notifs]
     return ok(

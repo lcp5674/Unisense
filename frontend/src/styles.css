@@ -1336,6 +1336,54 @@ body {
   gap: 8px;
 }
 
+/* 收件箱筛选栏：消息类型 / 已读状态 / 时间段 / 待处理 / 聚合 */
+.notif-filterbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.notif-filterbar .ant-tag-checkable {
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1px 10px;
+  font-size: 12px;
+  line-height: 22px;
+  background: var(--surface);
+}
+.notif-filterbar .ant-tag-checkable-checked {
+  background: #0e7c86;
+  border-color: #0e7c86;
+  color: #fff;
+}
+
+/* 同类聚合计数：×N 徽标 */
+.notif-count {
+  margin-left: 0;
+}
+
+/* 高优通知视觉区分（payload.level/severity）：ERROR/CRITICAL 红边 + 淡红底，WARN 琥珀 */
+.notif-card.notif-level-error {
+  border-color: #e8b4b4;
+  background: #fdf5f5;
+}
+.notif-card.notif-level-error .notif-bar {
+  background: #d64545 !important;
+}
+.notif-card.notif-level-warn {
+  border-color: #eecfa8;
+  background: #fdf8f0;
+}
+.notif-card.notif-level-warn .notif-bar {
+  background: #e8862d !important;
+}
+
 /* 未读高亮：左侧强调边 + 标题加深 */
 .notif-card.notif-unread {
   border-color: #b9d5dc;

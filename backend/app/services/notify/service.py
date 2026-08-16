@@ -767,10 +767,16 @@ class NotifyService(BaseService):
         self,
         subscriber_id: int,
         status: str | None,
+        read_state: str | None = None,
+        template_code: str | None = None,
+        todo_only: bool = False,
+        days: int | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[Notification], int]:
-        return await self._repo.list_notifications_page(subscriber_id, status, page, page_size)
+        return await self._repo.list_notifications_page(
+            subscriber_id, status, read_state, template_code, todo_only, days, page, page_size
+        )
 
     async def get_notification(self, notif_id: int) -> Notification:
         notif = await self._repo.get_notification(notif_id)

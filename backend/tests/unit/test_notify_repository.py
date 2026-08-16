@@ -156,3 +156,57 @@ class TestNotifyRepository:
         repo._session.execute = AsyncMock(return_value=mock_result)
         name = await repo.get_user_display_name(999)
         assert name is None
+
+    # ---- list_notifications_page 产品化筛选（read_state / template_code / todo_only / days）----
+
+    def _page_mocks(self) -> AsyncMock:
+        """count + rows 两次 execute。"""
+        mock_count = MagicMock()
+        mock_count.scalar_one.return_value = 0
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = []
+        return AsyncMock(side_effect=[mock_count, mock_rows])
+
+    async def test_list_page_unread_filter(self, repo: NotifyRepository) -> None:
+        """read_state=unread → SQL 含 read_at IS NULL。"""
+        repo._session.execute = self._page_mocks()
+        await repo.list_notifications_page(1, None, read_state="unread")
+        select_stmt = repo._session.execute.call_args_list[0].args[0]
+        sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "read_at IS NULL" in sql
+
+    async def test_list_page_read_filter(self, repo: NotifyRepository) -> None:
+        """read_state=read → SQL 含 read_at IS NOT NULL。"""
+        repo._session.execute = self._page_mocks()
+        await repo.list_notifications_page(1, None, read_state="read")
+        select_stmt = repo._session.execute.call_args_list[0].args[0]
+        sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "read_at IS NOT NULL" in sql
+
+    async def test_list_page_template_code_filter(self, repo: NotifyRepository) -> None:
+        """template_code 精确过滤。"""
+        repo._session.execute = self._page_mocks()
+        await repo.list_notifications_page(1, None, template_code="metric.approved")
+        select_stmt = repo._session.execute.call_args_list[0].args[0]
+        sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "template_code" in sql
+        assert "metric.approved" in sql
+
+    async def test_list_page_todo_only_filter(self, repo: NotifyRepository) -> None:
+        """todo_only → template_code IN (待处理事件集)。"""
+        repo._session.execute = self._page_mocks()
+        await repo.list_notifications_page(1, None, todo_only=True)
+        select_stmt = repo._session.execute.call_args_list[0].args[0]
+        sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "template_code IN" in sql
+        assert "conflict_open" in sql  # 待处理集中事件出现
+        assert "metric.approved" not in sql  # 非待处理事件不出现
+
+    async def test_list_page_days_filter(self, repo: NotifyRepository) -> None:
+        """days=N → created_at 近 N 天过滤。"""
+        repo._session.execute = self._page_mocks()
+        await repo.list_notifications_page(1, None, days=7)
+        select_stmt = repo._session.execute.call_args_list[0].args[0]
+        sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "created_at" in sql
+        assert ">=" in sql

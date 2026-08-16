@@ -2,13 +2,38 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.notify import EventLog, Notification, SubscriptionPref
 from app.models.user import User
+
+# 待处理类事件（TD §12.9 通知闭环：接收者需要采取行动，而非仅被告知）。
+# 供「仅看待处理」筛选与前端「需处理」语义标记使用；集中维护避免散落。
+TODO_EVENT_TYPES = frozenset(
+    {
+        "metric.submitted",
+        "metric.rename_required",
+        "metric.health_critical",
+        "conflict_open",
+        "conflict_escalated",
+        "conflict_reopened",
+        "pii_conflict",
+        "pii.review_pending",
+        "quality.anomaly",
+        "reconciliation.alert",
+        "escalation.triggered",
+        "audit.capacity_warning",
+        "catalog_schema_drifted",
+        "collect.degraded",
+        "collect.failed",
+        "catalog.connection_failed",
+        "grant.expiring_soon",
+        "grant.expired",
+    }
+)
 
 
 class NotifyRepository:
@@ -46,6 +71,10 @@ class NotifyRepository:
         self,
         subscriber_id: int,
         status: str | None,
+        read_state: str | None = None,
+        template_code: str | None = None,
+        todo_only: bool = False,
+        days: int | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[Notification], int]:
@@ -53,10 +82,27 @@ class NotifyRepository:
 
         page/page_size 由 API 层做边界约束（page>=1、page_size<=200），
         此处按 offset/limit 精确切页；total 供前端分页器计算总页数。
+
+        筛选能力（产品化收件箱）：
+        - read_state: unread（未读）/ read（已读）
+        - template_code: 按消息类型精确过滤
+        - todo_only: 仅待处理类事件（TODO_EVENT_TYPES）
+        - days: 近 N 天（created_at >= now - N 天）
         """
         base = select(Notification).where(Notification.subscriber_id == subscriber_id)
         if status:
             base = base.where(Notification.status == status)
+        if read_state == "unread":
+            base = base.where(Notification.read_at.is_(None))
+        elif read_state == "read":
+            base = base.where(Notification.read_at.is_not(None))
+        if template_code:
+            base = base.where(Notification.template_code == template_code)
+        if todo_only:
+            base = base.where(Notification.template_code.in_(TODO_EVENT_TYPES))
+        if days is not None and days > 0:
+            since = datetime.now(UTC) - timedelta(days=days)
+            base = base.where(Notification.created_at >= since)
         total_stmt = select(func.count()).select_from(base.subquery())
         total = int((await self._session.execute(total_stmt)).scalar_one() or 0)
         offset = max(page - 1, 0) * page_size

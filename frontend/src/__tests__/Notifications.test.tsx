@@ -106,8 +106,8 @@ describe("通知中心 - 列表与未读", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
 
-    // 初始请求带服务端分页参数
-    expect(mockedList).toHaveBeenCalledWith({ page: 1, page_size: 10 });
+    // 初始请求带服务端分页参数（筛选参数为默认空值）
+    expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ page: 1, page_size: 10 }));
     // 未读（read_at 为 null）卡片带高亮类，已读卡片不带
     const unreadCard = screen.getByText("指标已通过").closest(".notif-card") as HTMLElement;
     const readCard = screen.getByText("指标已驳回").closest(".notif-card") as HTMLElement;
@@ -121,7 +121,7 @@ describe("通知中心 - 列表与未读", () => {
     await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
 
     fireEvent.click(screen.getByTitle("2"));
-    await waitFor(() => expect(mockedList).toHaveBeenCalledWith({ page: 2, page_size: 10 }));
+    await waitFor(() => expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ page: 2, page_size: 10 })));
   });
 });
 
@@ -275,7 +275,7 @@ describe("通知中心 - 订阅项对齐", () => {
     expect(screen.queryByText("短信")).not.toBeInTheDocument();
   });
 
-  it("新增订阅支持多选消息类型：选多个事件 → 每个事件各建一条订阅", async () => {
+  it("新增订阅：按模块分组下拉选择事件 → 保存创建订阅（分组 OptGroup）", async () => {
     const mockedUpsert = vi.mocked(upsertSubscription);
     mockedUpsert.mockResolvedValue({ id: 1 } as never);
     mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
@@ -288,8 +288,7 @@ describe("通知中心 - 订阅项对齐", () => {
     // 送达方式：email
     fireEvent.mouseDown(screen.getByLabelText("送达方式"));
     fireEvent.click(await screen.findByText("邮件"));
-    // 消息类型多选：展开 dropdown，在 dropdown 容器内连续点选选项
-    //（antd 多选在 jsdom 中下拉保持打开，但选项与已选 tag 文本重复，须限定在 dropdown 内）
+    // 消息类型多选：展开 dropdown，在 dropdown 容器内点选「指标创建」
     const typeLabel = screen.getByLabelText("消息类型");
     fireEvent.mouseDown(typeLabel);
     const dropdown = () =>
@@ -300,17 +299,50 @@ describe("通知中心 - 订阅项对齐", () => {
         (el) => el.textContent?.includes(label),
       ) as HTMLElement;
     fireEvent.click(optionOf("指标创建"));
-    fireEvent.click(optionOf("数据质量异常告警"));
     fireEvent.keyDown(document.body, { key: "Escape" });
 
     fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
     await waitFor(() => {
-      expect(mockedUpsert).toHaveBeenCalledTimes(2);
+      expect(mockedUpsert).toHaveBeenCalledTimes(1);
       expect(mockedUpsert).toHaveBeenCalledWith(
         expect.objectContaining({ channel: "email", event_type: "metric.created", enabled: true }),
       );
+    });
+  });
+
+  it("订阅消息类型下拉按业务模块分组（OptGroup 组头中文）", async () => {
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    renderPage();
+
+    fireEvent.click(screen.getByRole("tab", { name: "订阅设置" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /新增订阅/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /新增订阅/ }));
+    fireEvent.mouseDown(screen.getByLabelText("消息类型"));
+    const dropdown = () =>
+      document.querySelector(".ant-select-dropdown:not(.ant-select-dropdown-hidden)") as HTMLElement;
+    await waitFor(() => expect(dropdown()).toBeTruthy());
+    // 分组生效：下拉中存在组头元素，且首个组头为「指标生命周期」（而非 35 项平铺）
+    const groupHeads = [...(dropdown().querySelectorAll(".ant-select-item-group") ?? [])].map(
+      (el) => el.textContent?.trim(),
+    );
+    expect(groupHeads.length).toBeGreaterThan(0);
+    expect(groupHeads[0]).toBe("指标生命周期");
+  });
+
+  it("一键推荐订阅：批量订阅推荐事件（幂等 upsert）", async () => {
+    const mockedUpsert = vi.mocked(upsertSubscription);
+    mockedUpsert.mockResolvedValue({ id: 1 } as never);
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    renderPage();
+
+    fireEvent.click(screen.getByRole("tab", { name: "订阅设置" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /一键推荐订阅/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /一键推荐订阅/ }));
+    await waitFor(() => {
+      // 推荐集 12 项，每项 in_app 渠道一次 upsert
+      expect(mockedUpsert).toHaveBeenCalledTimes(12);
       expect(mockedUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({ channel: "email", event_type: "quality.anomaly" }),
+        expect.objectContaining({ channel: "in_app", event_type: "conflict_open", enabled: true }),
       );
     });
   });
@@ -595,5 +627,116 @@ describe("通知中心 - 信息展示增强", () => {
     // 投递控制字段（recipient_user_id）与重复字段（resolver_id）不展示
     expect(screen.queryByText("recipient_user_id")).not.toBeInTheDocument();
     expect(screen.queryByText("resolver_id")).not.toBeInTheDocument();
+  });
+});
+
+describe("通知中心 - 收件箱增强（点击已读 / 筛选 / 聚合 / 待处理 / 对象可点击）", () => {
+  it("点击未读通知自动标记已读并刷新", async () => {
+    const n = notif({ id: 5, read_at: null, body: "指标编码：sales_gmv" });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("指标已通过"));
+    await waitFor(() => expect(mockedMarkRead).toHaveBeenCalledWith(5));
+    expect(mockedList).toHaveBeenCalledTimes(2); // 初始 + 标记后刷新
+  });
+
+  it("已读通知点击不再调用标记已读（避免无谓请求）", async () => {
+    const n = notif({ id: 6, read_at: "2026-08-11T08:00:00", body: "指标编码：sales_gmv" });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("指标已通过"));
+    expect(mockedMarkRead).not.toHaveBeenCalled();
+  });
+
+  it("类型筛选：选择消息类型后按 template_code 请求并回到第一页", async () => {
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    renderPage();
+    // 等待筛选栏出现（antd Select 占位符是 div 非 input attribute，不用 getByPlaceholderText）
+    await waitFor(() => expect(document.querySelector(".notif-filterbar")).toBeTruthy());
+
+    // antd Select：占位符 span pointer-events:none，需点 .ant-select-selector 容器打开下拉
+    const filterbar = document.querySelector(".notif-filterbar") as HTMLElement;
+    fireEvent.mouseDown(filterbar.querySelector(".ant-select-selector") as HTMLElement);
+    fireEvent.click(await screen.findByText("指标创建"));
+    await waitFor(() =>
+      expect(mockedList).toHaveBeenLastCalledWith(
+        expect.objectContaining({ template_code: "metric.created", page: 1 }),
+      ),
+    );
+  });
+
+  it("仅待处理：切换后按 todo_only=true 请求（与待办中心同语义）", async () => {
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("仅待处理")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("仅待处理"));
+    await waitFor(() =>
+      expect(mockedList).toHaveBeenLastCalledWith(expect.objectContaining({ todo_only: true })),
+    );
+  });
+
+  it("待处理通知带行动按钮：冲突待处理 → 去仲裁直达", async () => {
+    const n = notif({ id: 8, template_code: "conflict_open", title: "口径冲突待处理", payload: { conflict_id: "C-1" } });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("口径冲突待处理")).toBeInTheDocument());
+
+    const card = screen.getByText("口径冲突待处理").closest(".notif-card") as HTMLElement;
+    fireEvent.click(withinCard(card, "去仲裁"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/review"));
+  });
+
+  it("非待处理通知不显示行动按钮", async () => {
+    const n = notif({ id: 9, template_code: "metric.approved", title: "指标已通过" });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+
+    const card = screen.getByText("指标已通过").closest(".notif-card") as HTMLElement;
+    expect(card.querySelector(".ant-btn-primary")).toBeNull();
+  });
+
+  it("字段关联对象可点击：指标编码字段直达指标详情", async () => {
+    const n = notif({
+      id: 10,
+      template_code: "metric.approved",
+      title: "指标已通过",
+      body: "指标编码：sales_gmv",
+      payload: { metric_code: "sales_gmv" },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "sales_gmv" }));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/detail/sales_gmv"));
+  });
+
+  it("同类聚合：相同消息类型合并为一张卡片并显示 ×N", async () => {
+    const a = notif({ id: 11, template_code: "metric.health_critical", title: "指标健康告警", payload: { level: "ERROR" } });
+    const b = notif({ id: 12, template_code: "metric.health_critical", title: "指标健康告警", payload: { level: "ERROR" } });
+    mockedList.mockResolvedValue({ items: [a, b], total: 2, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getAllByText("指标健康告警").length).toBe(2));
+
+    fireEvent.click(screen.getByText("同类聚合"));
+    await waitFor(() => expect(screen.getByText("×2")).toBeInTheDocument());
+    expect(screen.getAllByText("指标健康告警").length).toBe(1); // 合并为一张
+  });
+
+  it("高优通知视觉区分：ERROR level 卡片带红强调类 + 重要程度 Tag", async () => {
+    const n = notif({ id: 13, template_code: "metric.health_critical", title: "指标健康告警", payload: { level: "ERROR" } });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标健康告警")).toBeInTheDocument());
+
+    const card = screen.getByText("指标健康告警").closest(".notif-card") as HTMLElement;
+    expect(card.classList.contains("notif-level-error")).toBe(true);
+    expect(screen.getByText("错误")).toBeInTheDocument(); // level Tag（ERROR → 错误）
   });
 });

@@ -134,6 +134,7 @@ import {
   SubjectDomainUpdateRequest,
   SystemDictItem,
   TermRelation,
+  TermRelationViewItem,
   TestConnectionResult,
   TrackingGroupBy,
   TrackingStatsResponse,
@@ -1749,6 +1750,11 @@ export async function createTermRelation(
   });
 }
 
+// 查某术语的全部关系（作为源或目标），供术语关系图谱展示（GET /terms/{code}/relations）
+export async function listTermRelations(termCode: string): Promise<TermRelationViewItem[]> {
+  return request<TermRelationViewItem[]>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/relations`);
+}
+
 export async function listTermConflicts(
   status?: string,
 ): Promise<{ items: GlossaryConflict[]; total: number }> {
@@ -2107,11 +2113,19 @@ export async function confirmReconciliation(
 // ---- 通知 ----
 export async function listNotifications(params?: {
   status?: string;
+  read_state?: string;
+  template_code?: string;
+  todo_only?: boolean;
+  days?: number;
   page?: number;
   page_size?: number;
 }): Promise<{ items: Notification[]; total: number; page: number; page_size: number }> {
   const qs = pageQs({
     status: params?.status,
+    read_state: params?.read_state,
+    template_code: params?.template_code,
+    todo_only: params?.todo_only ? "true" : undefined,
+    days: params?.days,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 10,
   });

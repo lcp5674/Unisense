@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination } from "antd";
-import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined, UserOutlined } from "@ant-design/icons";
+import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined, UserOutlined, StarOutlined } from "@ant-design/icons";
 import {
   listNotifications,
   listNotifyEvents,
@@ -331,8 +331,8 @@ function parseNotifyBodyFields(
   body: string | null,
   payload: Record<string, unknown> | null,
   templateCode?: string | null,
-): { label: string; value: string }[] {
-  const fields: { label: string; value: string }[] = [];
+): { label: string; value: string; target?: string | null }[] {
+  const fields: { label: string; value: string; target?: string | null }[] = [];
   const seenLabels = new Set<string>();
   if (payload && Object.keys(payload).length > 0) {
     const skipKeys = new Set([
@@ -346,6 +346,9 @@ function parseNotifyBodyFields(
       "actor_name",
       // 处理人已由 meta 区「操作者」展示，payload 里的数字 ID 不重复展示
       "resolver_id",
+      // 重要程度已由卡片头部 level Tag 展示，正文不重复
+      "level",
+      "severity",
     ]);
     for (const [k, v] of Object.entries(payload)) {
       const label = PAYLOAD_FIELD_LABEL_FE[k] ?? k;
@@ -359,7 +362,7 @@ function parseNotifyBodyFields(
         seenLabels.add(label);
         continue;
       }
-      fields.push({ label, value });
+      fields.push({ label, value, target: fieldTarget(k, value) });
       seenLabels.add(label);
     }
   }
@@ -375,7 +378,7 @@ function parseNotifyBodyFields(
         if (seenLabels.has(label)) continue; // payload 已渲染（值更友好）
         const rawValue = line.slice(idx + 1);
         if (rawValue !== "" && rawValue !== "无") {
-          fields.push({ label, value: rawValue });
+          fields.push({ label, value: rawValue, target: fieldTarget(label, rawValue) });
           seenLabels.add(label);
         }
       } else if (line !== "") {
@@ -469,6 +472,74 @@ const IMPACT_TEXT: Record<string, string> = {
   "org.status_changed": "组织状态已变更，请关注成员权限。",
 };
 
+// 待处理类事件（与后端 TODO_EVENT_TYPES 对齐）：接收者需要采取行动，而非仅被告知。
+// 这类通知卡片加「待处理」标记 + 行动按钮；也可用「仅看待处理」筛选聚焦。
+const NEEDS_ACTION = new Set<string>([
+  "metric.submitted",
+  "metric.rename_required",
+  "metric.health_critical",
+  "conflict_open",
+  "conflict_escalated",
+  "conflict_reopened",
+  "pii_conflict",
+  "pii.review_pending",
+  "quality.anomaly",
+  "reconciliation.alert",
+  "escalation.triggered",
+  "audit.capacity_warning",
+  "catalog_schema_drifted",
+  "collect.degraded",
+  "collect.failed",
+  "catalog.connection_failed",
+  "grant.expiring_soon",
+  "grant.expired",
+]);
+
+// 待处理通知的行动按钮：一句话告诉用户「去做什么」（label + 跳转目标）。
+// 有 metric_code 的优先直达指标详情，其余跳对应业务页。
+function actionFor(templateCode: string, payload: Record<string, unknown>): { label: string; target: string } | null {
+  const code = payload.metric_code ? `/detail/${encodeURIComponent(String(payload.metric_code))}` : null;
+  switch (templateCode) {
+    case "metric.submitted":
+      return { label: "去审批", target: code ?? "/metrics/review" };
+    case "metric.rename_required":
+    case "metric.health_critical":
+      return { label: "去处理", target: code ?? "/detail" };
+    case "conflict_open":
+    case "conflict_escalated":
+    case "conflict_reopened":
+      return { label: "去仲裁", target: "/review" };
+    case "pii_conflict":
+    case "pii.review_pending":
+      return { label: "去复核", target: "/governance" };
+    case "quality.anomaly":
+    case "reconciliation.alert":
+    case "escalation.triggered":
+      return { label: "去处理", target: "/quality" };
+    case "audit.capacity_warning":
+      return { label: "去清理", target: "/audit" };
+    case "catalog_schema_drifted":
+    case "collect.degraded":
+    case "collect.failed":
+    case "catalog.connection_failed":
+      return { label: "去检查", target: "/data-sources" };
+    case "grant.expiring_soon":
+    case "grant.expired":
+      return { label: "去续期", target: "/account" };
+    default:
+      return null;
+  }
+}
+
+// 字段值 → 跳转目标：关联对象在通知里可直接点击直达（指标→详情、冲突→仲裁、反馈→反馈中心）。
+function fieldTarget(key: string, value: string): string | null {
+  if (key === "metric_code" || key === "指标编码") return `/detail/${encodeURIComponent(value)}`;
+  if (key === "conflict_id" || key === "冲突编号") return "/review";
+  if (key === "feedback_id" || key === "反馈编号") return "/feedback";
+  if (key === "source_id" || key === "数据源ID") return "/data-sources";
+  return null;
+}
+
 // 可选渠道：后端无短信实现，不提供 sms（避免订阅了永不投递的渠道）
 const CHANNELS = ["email", "webhook", "in_app"];
 // 订阅可选事件：与后端 EventBus 实际订阅集合对齐（backend/app/main.py _BUSINESS_EVENT_TYPES）。
@@ -511,6 +582,55 @@ export const EVENT_TYPES = [
   "conflict_reopened",
 ];
 
+// 订阅消息类型按业务模块分组（新增订阅弹窗下拉用 OptGroup，避免 35 项平铺难找）
+export const EVENT_TYPE_GROUPS: { label: string; options: { value: string; label: string }[] }[] = [
+  {
+    label: "指标生命周期",
+    options: ["metric.created", "metric.submitted", "metric.approved", "metric.rejected", "metric.deprecated", "metric.promoted", "metric.rolled_back", "metric.emergency_published", "metric.health_critical"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+  },
+  {
+    label: "口径冲突",
+    options: ["conflict_open", "conflict_ruled", "conflict_escalated", "conflict_reopened"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+  },
+  {
+    label: "数据质量",
+    options: ["quality.anomaly", "reconciliation.alert", "audit.capacity_warning"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+  },
+  {
+    label: "权限与安全",
+    options: ["grant.granted", "grant.revoked", "grant.expired", "pii_conflict", "pii.reviewed", "pii.propagated", "classification.changed", "classification.done", "escalation.triggered"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+  },
+  {
+    label: "采集与血缘",
+    options: ["catalog_registered", "catalog_schema_drifted", "lineage_parsed", "lineage_ingested"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+  },
+  {
+    label: "反馈与满意度",
+    options: ["feedback.status_updated", "nps.submitted", "benchmark.imported"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+  },
+  {
+    label: "系统",
+    options: ["degradation.state_changed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+  },
+];
+
+// 一键推荐订阅：对绝大多数用户都有价值的核心事件（审批/冲突/质量/权限到期/反馈）。
+// 幂等 upsert——已有订阅覆盖为启用，无订阅新建 in_app。
+const RECOMMENDED_EVENTS = [
+  "metric.submitted",
+  "metric.approved",
+  "metric.rejected",
+  "metric.health_critical",
+  "conflict_open",
+  "conflict_ruled",
+  "conflict_escalated",
+  "quality.anomaly",
+  "reconciliation.alert",
+  "grant.expired",
+  "grant.expiring_soon",
+  "feedback.status_updated",
+];
+
 // 通知状态 → 卡片左侧状态条颜色（沿「校准仪表」设计语言：成功=数据青绿、失败=告警红、待发送=信号琥珀）
 const NOTIF_STATUS_BAR: Record<string, string> = {
   SENT: "#0e7c86",
@@ -524,12 +644,26 @@ function NotifListTab() {
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  // 收件箱筛选：类型 / 已读状态 / 时间段 / 仅待处理（产品化，对应后端筛选参数）
+  const [typeFilter, setTypeFilter] = useState<string | undefined>();
+  const [readFilter, setReadFilter] = useState<string | undefined>();
+  const [timeFilter, setTimeFilter] = useState<number | undefined>();
+  const [todoOnly, setTodoOnly] = useState(false);
+  // 同类聚合开关：相同消息类型合并为一张卡片（避免刷屏）
+  const [grouped, setGrouped] = useState(false);
   const navigate = useNavigate();
 
-  async function load() {
+  async function load(p = page, ps = pageSize, tt = typeFilter, rf = readFilter, tf = timeFilter, to = todoOnly) {
     setLoading(true);
     try {
-      const res = await listNotifications({ page, page_size: pageSize });
+      const res = await listNotifications({
+        template_code: tt,
+        read_state: rf,
+        days: tf,
+        todo_only: to,
+        page: p,
+        page_size: ps,
+      });
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
@@ -542,7 +676,28 @@ function NotifListTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize]);
+  }, [page, pageSize, typeFilter, readFilter, timeFilter, todoOnly]);
+
+  // 筛选变化 → 回到第一页（page 与筛选 state 批量更新，单一 effect 只触发一次加载，避免重复请求）
+  function changeType(v?: string) {
+    setPage(1);
+    setTypeFilter(v);
+  }
+  function changeRead(v?: string) {
+    setPage(1);
+    setReadFilter(v);
+  }
+  function changeTime(v?: number) {
+    setPage(1);
+    setTimeFilter(v);
+  }
+  function changeTodo(v: boolean) {
+    setPage(1);
+    setTodoOnly(v);
+  }
+  function changeGrouped(v: boolean) {
+    setGrouped(v);
+  }
 
   async function handleMarkRead(n: Notification) {
     if (n.read_at) return;
@@ -589,11 +744,17 @@ function NotifListTab() {
     }
   }
 
-  // 点击通知深链：按事件类型路由到对应业务页面（指标→详情、冲突→仲裁、
-  // 账号/组织/授权→个人中心（本人视角）、采集→数据源、PII/分类→权限治理）；
-  // 其余优雅降级不跳转。个人中心（方案 C）：user.*/org.*/grant.* 收件人为用户本人，
-  // 不再指向管理员管理列表页（普通用户无权限访问 /users、/organizations）。
+  // 点击通知：未读先自动标记已读（消除全局角标红点），再深链到对应业务页。
+  // 跳转与标记已读并行不阻塞——mark 失败不影响跳转（best-effort）。
   function handleOpen(n: Notification) {
+    if (!n.read_at) {
+      markNotificationRead(n.id)
+        .then(() => {
+          notifyNotifChanged();
+          load();
+        })
+        .catch(() => {});
+    }
     const tpl = n.template_code ?? "";
     const payload = (n.payload ?? {}) as Record<string, unknown>;
     if (tpl.startsWith("metric.") && payload.metric_code) {
@@ -623,8 +784,173 @@ function NotifListTab() {
 
   const unreadCount = items.filter((n) => !n.read_at).length;
 
+  // 聚合模式：相同消息类型合并为一张卡片（×N 计数），避免同类通知刷屏。
+  // 仅合并当前页内同类项（分页语义内准确，不跨页误并）。
+  const groups = useMemo(() => {
+    const m = new Map<string, Notification[]>();
+    for (const n of items) {
+      const key = n.template_code ?? n.title;
+      const arr = m.get(key) ?? [];
+      arr.push(n);
+      m.set(key, arr);
+    }
+    return [...m.entries()].map(([key, list]) => ({ key, list }));
+  }, [items]);
+  const displayGroups = grouped ? groups : items.map((n) => ({ key: String(n.id), list: [n] }));
+
+  // 单卡片渲染：状态条 / 标题 / 重要程度 / 影响 / 字段（关联对象可点击）/ 待处理行动按钮
+  function renderCard(n: Notification, extraCount?: number) {
+    const statusKey = n.status ?? "";
+    const payload = (n.payload ?? {}) as Record<string, unknown>;
+    const levelRaw = String(payload.level ?? payload.severity ?? "");
+    const levelHigh = ["ERROR", "CRITICAL", "P0", "P1"].includes(levelRaw);
+    const levelWarn = ["WARN", "WARNING", "P2"].includes(levelRaw);
+    const fields = parseNotifyBodyFields(n.body, n.payload, n.template_code);
+    const singleLine = fields.length <= 1;
+    const unread = !n.read_at;
+    const needsAction = NEEDS_ACTION.has(n.template_code ?? "");
+    const action = actionFor(n.template_code ?? "", payload);
+    const cls = [
+      "notif-card",
+      unread ? "notif-unread" : "",
+      levelHigh ? "notif-level-error" : levelWarn ? "notif-level-warn" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return (
+      <div key={n.id} className={cls} onClick={() => handleOpen(n)}>
+        <div className="notif-bar" style={{ background: NOTIF_STATUS_BAR[statusKey] ?? "#c4cbd6" }} />
+        <div className="notif-main">
+          <div className="notif-head">
+            <span className="notif-title">{eventTypeLabel(n.title)}</span>
+            {extraCount && extraCount > 1 && <Tag className="notif-count" color="cyan">×{extraCount}</Tag>}
+            {levelRaw && LEVEL_CN_FE[levelRaw] && (
+              <Tag color={levelHigh ? "error" : levelWarn ? "warning" : "default"}>{LEVEL_CN_FE[levelRaw]}</Tag>
+            )}
+            {n.template_code && eventTypeLabel(n.template_code) !== eventTypeLabel(n.title) && (
+              <Tag className="notif-type" color="geekblue">{eventTypeLabel(n.template_code)}</Tag>
+            )}
+            <div className="notif-head-right">
+              {n.sent_at && <span className="notif-sent-time">已送达 {formatCnTime(n.sent_at)}</span>}
+              <Tag
+                className="notif-status"
+                color={n.status === "SENT" ? "success" : n.status === "FAILED" ? "error" : "warning"}
+              >
+                {NOTIFY_STATUS_LABEL[n.status] ?? n.status}
+              </Tag>
+            </div>
+          </div>
+          {IMPACT_TEXT[n.template_code ?? ""] && (
+            <div className="notif-impact">
+              <span className="notif-impact-label">影响</span>
+              <span className="notif-impact-text">{IMPACT_TEXT[n.template_code ?? ""]}</span>
+            </div>
+          )}
+          {fields.length > 0 && (
+            <div className={`notif-body${singleLine ? " notif-body-single" : ""}`}>
+              {fields.map((f, i) =>
+                f.label ? (
+                  <div key={i} className="notif-body-field">
+                    <span className="notif-body-label">{f.label}</span>
+                    {f.target ? (
+                      <Button
+                        type="link"
+                        size="small"
+                        style={{ padding: 0, height: "auto", lineHeight: "inherit" }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(f.target as string);
+                        }}
+                      >
+                        {f.value}
+                      </Button>
+                    ) : (
+                      <span className="notif-body-value">{f.value}</span>
+                    )}
+                  </div>
+                ) : (
+                  <div key={i} className="notif-body-full">{f.value}</div>
+                ),
+              )}
+            </div>
+          )}
+          <div className="notif-meta">
+            <span className="notif-meta-item">
+              <SendOutlined /> {CHANNEL_LABEL[(n.channel ?? "").toLowerCase()] ?? n.channel}
+            </span>
+            {n.ref_type && n.ref_id != null && (
+              <span className="notif-meta-item">
+                <LinkOutlined /> {REF_TYPE_LABEL[n.ref_type] ?? n.ref_type} #{n.ref_id}
+              </span>
+            )}
+            {n.actor_name ? (
+              <span className="notif-meta-item" title={`操作人 #${n.actor_id ?? ""}`}>
+                <UserOutlined /> {n.actor_name}
+              </span>
+            ) : n.actor_id != null ? (
+              <span className="notif-meta-item">
+                <UserOutlined /> #{n.actor_id}
+              </span>
+            ) : null}
+            <span className="notif-meta-item">
+              <ClockCircleOutlined /> 触发于 {formatCnTime(n.created_at)}
+            </span>
+            <div className="notif-actions" onClick={(e) => e.stopPropagation()}>
+              {needsAction && action && (
+                <Button size="small" type="primary" ghost onClick={() => navigate(action.target)}>{action.label}</Button>
+              )}
+              {unread && (
+                <Button size="small" type="link" onClick={() => handleMarkRead(n)}>标记已读</Button>
+              )}
+              <Button size="small" type="link" danger onClick={() => handleDelete(n)}>删除</Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
+      {/* 收件箱筛选：消息类型 / 已读状态 / 时间段 / 仅待处理 / 同类聚合 */}
+      <div className="notif-filterbar">
+        <Select
+          size="small"
+          allowClear
+          placeholder="全部类型"
+          value={typeFilter}
+          onChange={changeType}
+          style={{ minWidth: 170 }}
+          options={EVENT_TYPES.map((c) => ({ value: c, label: eventTypeLabel(c) }))}
+        />
+        <Select
+          size="small"
+          allowClear
+          placeholder="全部状态"
+          value={readFilter}
+          onChange={changeRead}
+          style={{ minWidth: 120 }}
+          options={[
+            { value: "unread", label: "未读" },
+            { value: "read", label: "已读" },
+          ]}
+        />
+        <Select
+          size="small"
+          allowClear
+          placeholder="全部时间"
+          value={timeFilter}
+          onChange={changeTime}
+          style={{ minWidth: 120 }}
+          options={[
+            { value: 7, label: "近 7 天" },
+            { value: 30, label: "近 30 天" },
+            { value: 90, label: "近 90 天" },
+          ]}
+        />
+        <Tag.CheckableTag checked={todoOnly} onChange={changeTodo}>仅待处理</Tag.CheckableTag>
+        <Tag.CheckableTag checked={grouped} onChange={changeGrouped}>同类聚合</Tag.CheckableTag>
+      </div>
       {items.length > 0 && (
         <div className="notif-toolbar">
           <span className="muted">未读 {unreadCount} 条</span>
@@ -644,82 +970,7 @@ function NotifListTab() {
       ) : (
         <>
           <div className="notif-stream">
-            {items.map((n) => {
-              const statusKey = n.status ?? "";
-              const fields = parseNotifyBodyFields(n.body, n.payload, n.template_code);
-              const singleLine = fields.length <= 1;
-              const unread = !n.read_at;
-              return (
-                <div key={n.id} className={`notif-card${unread ? " notif-unread" : ""}`} onClick={() => handleOpen(n)}>
-                  <div className="notif-bar" style={{ background: NOTIF_STATUS_BAR[statusKey] ?? "#c4cbd6" }} />
-                  <div className="notif-main">
-                    <div className="notif-head">
-                    <span className="notif-title">{eventTypeLabel(n.title)}</span>
-                    {n.template_code && eventTypeLabel(n.template_code) !== eventTypeLabel(n.title) && (
-                      <Tag className="notif-type" color="geekblue">{eventTypeLabel(n.template_code)}</Tag>
-                    )}
-                    <div className="notif-head-right">
-                        {n.sent_at && <span className="notif-sent-time">已送达 {formatCnTime(n.sent_at)}</span>}
-                        <Tag
-                          className="notif-status"
-                          color={n.status === "SENT" ? "success" : n.status === "FAILED" ? "error" : "warning"}
-                        >
-                          {NOTIFY_STATUS_LABEL[n.status] ?? n.status}
-                        </Tag>
-                      </div>
-                    </div>
-                    {IMPACT_TEXT[n.template_code ?? ""] && (
-                      <div className="notif-impact">
-                        <span className="notif-impact-label">影响</span>
-                        <span className="notif-impact-text">{IMPACT_TEXT[n.template_code ?? ""]}</span>
-                      </div>
-                    )}
-                    {fields.length > 0 && (
-                      <div className={`notif-body${singleLine ? " notif-body-single" : ""}`}>
-                        {fields.map((f, i) =>
-                          f.label ? (
-                            <div key={i} className="notif-body-field">
-                              <span className="notif-body-label">{f.label}</span>
-                              <span className="notif-body-value">{f.value}</span>
-                            </div>
-                          ) : (
-                            <div key={i} className="notif-body-full">{f.value}</div>
-                          ),
-                        )}
-                      </div>
-                    )}
-                    <div className="notif-meta">
-                      <span className="notif-meta-item">
-                        <SendOutlined /> {CHANNEL_LABEL[(n.channel ?? "").toLowerCase()] ?? n.channel}
-                      </span>
-                      {n.ref_type && n.ref_id != null && (
-                        <span className="notif-meta-item">
-                          <LinkOutlined /> {REF_TYPE_LABEL[n.ref_type] ?? n.ref_type} #{n.ref_id}
-                        </span>
-                      )}
-                      {n.actor_name ? (
-                        <span className="notif-meta-item" title={`操作人 #${n.actor_id ?? ""}`}>
-                          <UserOutlined /> {n.actor_name}
-                        </span>
-                      ) : n.actor_id != null ? (
-                        <span className="notif-meta-item">
-                          <UserOutlined /> #{n.actor_id}
-                        </span>
-                      ) : null}
-                      <span className="notif-meta-item">
-                        <ClockCircleOutlined /> 触发于 {formatCnTime(n.created_at)}
-                      </span>
-                      <div className="notif-actions" onClick={(e) => e.stopPropagation()}>
-                        {unread && (
-                          <Button size="small" type="link" onClick={() => handleMarkRead(n)}>标记已读</Button>
-                        )}
-                        <Button size="small" type="link" danger onClick={() => handleDelete(n)}>删除</Button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+            {displayGroups.map((g) => renderCard(g.list[0], grouped ? g.list.length : undefined))}
           </div>
           <Pagination
             className="notif-pagination"
@@ -790,6 +1041,23 @@ function SubscriptionsTab() {
     }
   }
 
+  // 一键推荐订阅：批量启用推荐事件（in_app 渠道，幂等 upsert）
+  const [recommending, setRecommending] = useState(false);
+  async function handleRecommend() {
+    setRecommending(true);
+    try {
+      for (const et of RECOMMENDED_EVENTS) {
+        await upsertSubscription({ channel: "in_app", event_type: et, enabled: true });
+      }
+      message.success(`已为你订阅 ${RECOMMENDED_EVENTS.length} 项推荐消息`);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "推荐订阅失败");
+    } finally {
+      setRecommending(false);
+    }
+  }
+
   const columns = [
     { title: "送达方式", dataIndex: "channel", key: "channel", width: 130, render: (v: string) => <Tag>{CHANNEL_LABEL[(v ?? "").toLowerCase()] ?? v}</Tag> },
     { title: "消息类型", dataIndex: "event_type", key: "event", render: (v: string) => eventTypeLabel(v) },
@@ -799,8 +1067,12 @@ function SubscriptionsTab() {
 
   return (
     <div>
-      <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新增订阅</Button>
+      <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <Alert type="info" showIcon style={{ flex: 1, minWidth: 260 }} message="推荐订阅：覆盖指标审批 / 冲突仲裁 / 质量告警 / 权限到期等核心事件，一键开启即可收到站内通知。" />
+        <div style={{ display: "flex", gap: 8 }}>
+          <Button icon={<StarOutlined />} loading={recommending} onClick={handleRecommend}>一键推荐订阅</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新增订阅</Button>
+        </div>
       </div>
       <Table dataSource={items} columns={columns} rowKey={(r) => `${r.user_id}-${r.channel}-${r.event_type}`} loading={loading} pagination={false} locale={{ emptyText: "暂无订阅" }} />
 
@@ -817,9 +1089,9 @@ function SubscriptionsTab() {
             <Select
               mode="multiple"
               allowClear
-              placeholder="可多选消息类型"
+              placeholder="按模块选择消息类型"
               optionFilterProp="label"
-              options={EVENT_TYPES.map((c) => ({ value: c, label: eventTypeLabel(c) }))}
+              options={EVENT_TYPE_GROUPS.map((g) => ({ label: g.label, options: g.options }))}
             />
           </Form.Item>
           <Form.Item name="threshold" label="告警阈值（可选）" extra="用于数据质量告警，达到该阈值时才推送。">
