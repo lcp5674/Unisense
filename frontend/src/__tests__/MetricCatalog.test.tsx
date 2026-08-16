@@ -742,7 +742,7 @@ describe("MetricCatalog 加载失败降级", () => {
     await screen.findByText(metric.name);
     mockedList.mockClear();
     // 输入关键词：仅更新输入框显示，不发请求
-    const searchInput = screen.getByPlaceholderText("搜索指标名/编码");
+    const searchInput = screen.getByPlaceholderText("搜索指标名 / 编码 / 描述");
     fireEvent.change(searchInput, { target: { value: "gmv" } });
     await waitFor(() => expect((searchInput as HTMLInputElement).value).toBe("gmv"));
     expect(mockedList).not.toHaveBeenCalled();
