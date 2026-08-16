@@ -166,6 +166,14 @@ class MetricDescriptionUpdateRequest(BaseModel):
     description: str = Field(
         "", max_length=2000, description="指标业务描述（传空串清除）"
     )
+    row_version: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "乐观锁版本号（编辑时回传当前 row_version；"
+            "不传则向后兼容，不启用跨请求乐观锁校验）"
+        ),
+    )
 
 
 class MetricPublishRequest(BaseModel):

@@ -3154,3 +3154,22 @@ async def test_update_metric_row_version_match_passes():
     )
     _, kwargs = repo.update_with_optimistic_lock.call_args
     assert kwargs["name"] == "新名称"
+
+
+async def test_update_metric_description_row_version_conflict_raises_409():
+    """描述编辑跨请求乐观锁：row_version 不一致 → ConflictError（防静默覆盖）。"""
+    from app.core.exceptions import ConflictError
+
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="PUBLISHED", row_version=4, version=2)
+    repo.get_by_code = AsyncMock(return_value=existing)
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_metric_description(
+            "sales_gmv_daily",
+            MetricDescriptionUpdateRequest(description="新描述", row_version=2),
+            actor_id=1,
+            role="metric_owner",
+        )
+    assert exc.value.error_code == "OPTIMISTIC_LOCK_CONFLICT"
+    repo.update_with_optimistic_lock.assert_not_called()

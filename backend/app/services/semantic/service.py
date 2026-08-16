@@ -911,6 +911,19 @@ class MetricService(BaseService):
         metric = await self.get_metric(metric_code)
         self._assert_owner_or_admin(metric, actor_id, role)
 
+        # 跨请求乐观锁（TD §4.1）：描述编辑回传 row_version，他人已改则 409（防静默覆盖）
+        expected = getattr(request, "row_version", None)
+        if expected is not None and expected != metric.row_version:
+            raise ConflictError(
+                "指标已被他人修改，请刷新后重试",
+                error_code="OPTIMISTIC_LOCK_CONFLICT",
+                ctx={
+                    "metric_code": metric_code,
+                    "current_row_version": metric.row_version,
+                    "expected_row_version": expected,
+                },
+            )
+
         decision = await self._gov_svc().check_metric_permission(
             metric_code=metric_code,
             action="write",

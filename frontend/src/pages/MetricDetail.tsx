@@ -1182,7 +1182,11 @@ export function MetricDetail() {
         onOk={async () => {
           setDescSaving(true);
           try {
-            const updated = await updateMetricDescription(metric.metric_code, descDraft.trim());
+            const updated = await updateMetricDescription(
+              metric.metric_code,
+              descDraft.trim(),
+              metric.row_version, // 跨请求乐观锁：他人已改则 409 拒绝（防静默覆盖）
+            );
             message.success("业务描述已更新");
             setMetric(updated);
             setDescEditOpen(false);

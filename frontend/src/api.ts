@@ -583,12 +583,13 @@ export async function updateMetric(
 export async function updateMetricDescription(
   code: string,
   description: string,
+  rowVersion?: number,
 ): Promise<MetricResponse> {
   return request<MetricResponse>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/description`,
     {
       method: "PUT",
-      body: JSON.stringify({ description }),
+      body: JSON.stringify({ description, row_version: rowVersion ?? undefined }),
     },
   );
 }

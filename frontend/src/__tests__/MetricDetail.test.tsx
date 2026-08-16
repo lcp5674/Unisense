@@ -731,7 +731,9 @@ describe("MetricDetail 按钮级权限过滤", () => {
     expect(textarea).toBeTruthy();
     fireEvent.change(textarea, { target: { value: "修改后的描述" } });
     fireEvent.click(screen.getByRole("button", { name: /保存描述/ }));
-    await waitFor(() => expect(mockedUpdateDesc).toHaveBeenCalledWith("sales_gmv_sum_d", "修改后的描述"));
+    await waitFor(() =>
+      expect(mockedUpdateDesc).toHaveBeenCalledWith("sales_gmv_sum_d", "修改后的描述", 1),
+    );
     // 保存后描述区展示新值（Modal 未销毁时 textarea 仍保留旧值，故用 getAllByText 断言描述区存在）
     expect(screen.getAllByText("修改后的描述").length).toBeGreaterThanOrEqual(1);
   });
