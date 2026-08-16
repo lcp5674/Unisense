@@ -14,6 +14,7 @@ from httpx import ASGITransport
 
 from app.api import deps
 from app.main import app
+from tests.conftest import make_metric
 
 
 @pytest.fixture
@@ -126,3 +127,54 @@ async def test_get_metric_redacts_description_for_pii_non_sensitive(
     # 业务描述与口径同级脱敏
     assert data["description"] is None
     mocked_get.assert_awaited_once()
+
+
+async def test_update_metric_audit_records_governance_changed(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """治理字段变更时 UPDATE 审计 detail 记录 governance_changed（合规可追溯）。
+
+    修复前：治理字段（数仓层/时效/分级等）编辑后审计只记 change_reason，无法追溯
+    具体改了哪个治理字段、改成了什么——分层纠正/时效调整等治理动作在审计中不可见。
+    """
+    mock_svc = MagicMock()
+    fake_metric = make_metric(metric_code="sales_gmv_daily")
+    mock_svc.update_metric = AsyncMock(return_value=fake_metric)
+    mock_audit = AsyncMock()
+    with patch("app.api.metrics.MetricService", return_value=mock_svc), patch(
+        "app.api.metrics.write_audit", mock_audit
+    ), patch("app.api.metrics._register_metric_l3_lineage", AsyncMock(return_value=None)):
+        resp = await metrics_client.put(
+            "/api/v1/metric-definitions/sales_gmv_daily",
+            json={
+                "name": "新名称",
+                "dw_layer": "DWS",
+                "freshness": "T0",
+                "change_reason": "治理字段调整：分层纠正+时效调整",
+            },
+        )
+    assert resp.status_code == 200
+    detail = mock_audit.call_args.kwargs["detail"]
+    assert detail["governance_changed"] == {"dw_layer": "DWS", "freshness": "T0"}
+    assert detail["change_reason"] == "治理字段调整：分层纠正+时效调整"
+
+
+async def test_update_metric_audit_no_governance_when_unchanged(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """未提交治理字段时，审计 detail 不含 governance_changed（避免空记录噪音）。"""
+    mock_svc = MagicMock()
+    fake_metric = make_metric(metric_code="sales_gmv_daily")
+    mock_svc.update_metric = AsyncMock(return_value=fake_metric)
+    mock_audit = AsyncMock()
+    with patch("app.api.metrics.MetricService", return_value=mock_svc), patch(
+        "app.api.metrics.write_audit", mock_audit
+    ), patch("app.api.metrics._register_metric_l3_lineage", AsyncMock(return_value=None)):
+        resp = await metrics_client.put(
+            "/api/v1/metric-definitions/sales_gmv_daily",
+            json={"name": "新名称", "change_reason": "仅调整名称"},
+        )
+    assert resp.status_code == 200
+    detail = mock_audit.call_args.kwargs["detail"]
+    assert "governance_changed" not in detail
+

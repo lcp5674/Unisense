@@ -496,13 +496,36 @@ async def update_metric(
     metric = await service.update_metric(
         metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
     )
+    # 审计 detail 补充「治理属性变更」：指标创建后治理字段（数仓层/时效/时间语义/
+    # 分级/聚合/币种）现可编辑（R39 补全），审计需记录本次更新了哪些治理字段及新值，
+    # 否则分层纠正/时效调整/分级晋升等治理动作在合规审计中不可追溯（只记变更原因）。
+    _gov_fields = (
+        "currency",
+        "aggregation",
+        "time_semantics",
+        "freshness",
+        "dw_layer",
+        "metric_tier",
+        "serving_mode",
+        "additivity",
+        "non_additive_dimensions",
+    )
+    gov_changed: dict[str, Any] = {}
+    for _f in _gov_fields:
+        _v = getattr(request, _f, None)
+        if _v is not None:
+            gov_changed[_f] = _v
+    detail: dict[str, Any] = {"change_reason": request.change_reason, "pii_flag": metric.pii_flag}
+    if gov_changed:
+        detail["governance_changed"] = gov_changed
+
     await write_audit(
         db,
         actor_id=user.id,
         action="UPDATE",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
-        detail={"change_reason": request.change_reason, "pii_flag": metric.pii_flag},
+        detail=detail,
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
