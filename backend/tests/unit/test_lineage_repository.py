@@ -186,6 +186,9 @@ class _FakeDB:
                 if getattr(r, "source_node", None) == node
                 or getattr(r, "target_node", None) == node
             ]
+            # 恢复（SET deleted_at = NULL）：仅统计命中行，不移除（与软删对称）
+            if "DELETED_AT=NULL" in sql.upper().replace(" ", ""):
+                return _Result([], rowcount=len(matched))
             for r in matched:
                 self._rows.remove(r)
             return _Result([], rowcount=len(matched))
@@ -506,6 +509,21 @@ async def test_soft_delete_by_node() -> None:
     assert n == 2
     assert db.flushed is True
     assert len(db._rows) == 0
+
+
+async def test_restore_by_node() -> None:
+    """restore_by_node 与 soft_delete_by_node 对称：仅清软删行的 deleted_at，统计命中数。"""
+    rows = [
+        _Row(1, "metric:a", "table:t"),
+        _Row(2, "table:t", "metric:b"),
+    ]
+    db = _FakeDB(rows)
+    repo = LineageRepository(db)
+    n = await repo.restore_by_node("metric:a")
+    assert n == 1
+    assert db.flushed is True
+    # 恢复不移除行（软删语义对称：活跃行集合不变）
+    assert len(db._rows) == 2
 
 
 # ---- 增量采集 / 失效管理（mark_seen / mark_missing）----

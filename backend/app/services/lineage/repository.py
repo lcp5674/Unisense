@@ -459,6 +459,25 @@ class LineageRepository:
         await self._db.flush()
         return int(getattr(result, "rowcount", 0) or 0)
 
+    async def restore_by_node(self, node: str) -> int:
+        """级联恢复某节点相关的全部软删血缘边（指标回收站恢复时对称重建）。
+
+        与 ``soft_delete_by_node`` 对称：清除 ``deleted_at`` 使已失效边重新参与
+        影响分析，避免恢复的指标血缘为空直到下次编辑/发布（TD §12 血缘一致性）。
+        """
+        stmt = (
+            update(LineageEdge)
+            .where(
+                (LineageEdge.source_node == node) | (LineageEdge.target_node == node),
+                LineageEdge.deleted_at.is_not(None),
+            )
+            .values(deleted_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        result = await self._db.execute(stmt)
+        await self._db.flush()
+        return int(getattr(result, "rowcount", 0) or 0)
+
     # ---- 增量采集与失效管理（TD §12.2 血缘采集通道）----
 
     async def _source_l1_edges(self, source: str) -> list[LineageEdge]:

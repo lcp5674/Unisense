@@ -1786,6 +1786,31 @@ class MetricService(BaseService):
                 exc_info=True,
             )
 
+    async def _restore_metric_lineage(self, metric_code: str) -> None:
+        """恢复指标相关软删血缘边（best-effort，回收站恢复时对称重建）。
+
+        与 ``_cleanup_metric_lineage`` 对称：清除 ``deleted_at`` 使已失效边重新
+        参与影响分析，保证恢复的指标血缘立即可见（TD §12 血缘一致性）。
+
+        Args:
+            metric_code: 指标编码（节点 ``metric:{code}``）。
+        """
+        from app.services.lineage.service import LineageService
+
+        try:
+            restored = await LineageService(self._db).restore_by_node(f"metric:{metric_code}")
+            logger.info(
+                "metric_lineage_restored",
+                metric_code=metric_code,
+                restored_edges=restored,
+            )
+        except Exception:  # noqa: BLE001 - 血缘恢复失败绝不阻断指标恢复主流程
+            logger.warning(
+                "metric_lineage_restore_failed",
+                metric_code=metric_code,
+                exc_info=True,
+            )
+
     async def notify_lineage_impacted_owners(self, source_node: str) -> int:
         """上游数据源结构变更时，沿下游血缘通知受影响指标的 Owner（P1 闭环）。
 
@@ -2321,6 +2346,9 @@ class MetricService(BaseService):
 
         await self._repo.restore_metric(metric.id)
         await self._cache.invalidate(metric_code)
+        # 对称恢复血缘：删除时 _cleanup_metric_lineage 软删了相关边，恢复时一并还原
+        # （否则恢复的指标血缘为空直到下次编辑/发布，TD §12 血缘一致性）
+        await self._restore_metric_lineage(metric_code)
         logger.info("metric_restored", metric_code=metric_code, actor_id=actor_id, role=role)
         return metric
 

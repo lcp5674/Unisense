@@ -540,6 +540,10 @@ class LineageService(BaseService):
         """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。"""
         return await self._repo.soft_delete_by_node(node)
 
+    async def restore_by_node(self, node: str) -> int:
+        """级联恢复某节点相关的全部软删血缘边（指标回收站恢复时对称重建）。"""
+        return await self._repo.restore_by_node(node)
+
     # ---- 人工治理：手动登记 / 单边删除（TD §12.2）----
 
     @staticmethod
