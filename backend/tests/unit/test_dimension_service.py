@@ -42,6 +42,7 @@ async def _svc() -> tuple[DimensionService, MagicMock]:
     repo.get_member = AsyncMock(return_value=None)
     repo.get_reconciliation = AsyncMock(return_value=None)
     repo.save_reconciliation = AsyncMock(side_effect=lambda r: r)
+    repo.list_metrics_by_dimension = AsyncMock(return_value=[])
     repo.commit = AsyncMock()
     svc._repo = repo  # noqa: SLF001
     return svc, repo
@@ -897,3 +898,21 @@ async def test_create_member_default_draft() -> None:
         parent_code=None,
     )
     assert req.status == "DRAFT"
+
+
+async def test_update_dimension_rename_rewrites_metric_definitions() -> None:
+    """维度改编码联动回写指标口径声明（definition_json.dimensions 旧→新）——防消费/血缘悬空。"""
+    svc, repo = await _svc()
+    dim = Dimension(
+        id=1, dim_code="dim_old", name="渠道", domain="sales",
+        type="SCD1", owner_id=1, status="DRAFT",
+    )
+    repo.get_dimension = AsyncMock(side_effect=lambda code: dim if code == "dim_old" else None)
+    repo.rename_dimension_references = AsyncMock()
+    m1 = SimpleNamespace(id=1, definition_json={"dimensions": ["dim_old", "dim_region"]})
+    repo.list_metrics_by_dimension = AsyncMock(return_value=[m1])
+    from app.services.dimension.schemas import DimensionUpdate
+
+    await svc.update_dimension("dim_old", DimensionUpdate(dim_code="dim_new"))
+    assert m1.definition_json["dimensions"] == ["dim_new", "dim_region"]
+    assert repo.list_metrics_by_dimension.await_args.args[0] == "dim_old"

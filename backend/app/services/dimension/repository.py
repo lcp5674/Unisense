@@ -131,6 +131,15 @@ class DimensionRepository:
         stmt = select(MetricDimension).where(MetricDimension.metric_id == metric_id)
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def list_metrics_by_dimension(self, dim_code: str) -> list[Metric]:
+        """查询绑定指定维度的全部指标（改编码联动回写口径声明用）。"""
+        stmt = (
+            select(Metric)
+            .join(MetricDimension, MetricDimension.metric_id == Metric.id)
+            .where(MetricDimension.dim_code == dim_code)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def delete_metric_dimension(
         self, metric_id: int, dim_code: str
     ) -> MetricDimension | None:

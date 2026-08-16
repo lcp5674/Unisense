@@ -156,6 +156,9 @@ class DimensionService(BaseService):
             if await self._repo.get_dimension(data.dim_code) is not None:
                 raise ConflictError(f"维度编码已存在: {data.dim_code}", error_code="DIM_EXISTS")
             await self._repo.rename_dimension_references(dim_code, data.dim_code)
+            # 跨服务一致：同步已绑定指标口径里的维度声明（definition_json.dimensions 旧→新）。
+            # 否则消费校验/血缘 USES_DIMENSION 边仍指向旧码 → 悬空。
+            await self._rename_dimension_in_metric_definitions(dim_code, data.dim_code)
             dim.dim_code = data.dim_code
         if data.name is not None:
             dim.name = data.name
@@ -617,6 +620,26 @@ class DimensionService(BaseService):
                 status=metric.status,
             )
         await self._repo.commit()
+
+    async def _rename_dimension_in_metric_definitions(
+        self, old_code: str, new_code: str
+    ) -> None:
+        """维度改编码后，同步更新绑定指标口径声明里的维度编码（旧→新）。
+
+        消费校验与血缘 USES_DIMENSION 边的权威来源是 ``metric.definition_json.dimensions``
+        （bind 时由 ``_sync_dimension_to_metric`` 写入）。维度改编码只更新了绑定表/成员/映射，
+        若不同步指标口径，已发布指标的消费维度白名单与血缘边将指向旧码 → 悬空。
+        """
+        metrics = await self._repo.list_metrics_by_dimension(old_code)
+        for metric in metrics:
+            defn = dict(metric.definition_json or {})
+            dims = list(defn.get("dimensions") or [])
+            if old_code not in dims:
+                continue
+            defn["dimensions"] = [new_code if d == old_code else d for d in dims]
+            metric.definition_json = defn
+        if metrics:
+            await self._repo.commit()
 
     async def _require(self, dim_code: str) -> Dimension:
         dim = await self._repo.get_dimension(dim_code)
