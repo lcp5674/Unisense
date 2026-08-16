@@ -433,6 +433,15 @@ describe("MetricCatalog", () => {
     const draft = { ...metric, status: "DRAFT" as const };
     mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
     mockedDeleteMetric.mockResolvedValue({} as never);
+    // 批量删除仅平台管理员可用（对齐后端 DELETE require_roles(platform_admin)）
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "管理员",
+      role: "platform_admin",
+      domain: null,
+      org_id: 1,
+    });
     renderCatalog();
     await screen.findByText("sales_gmv_sum_d");
     const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;

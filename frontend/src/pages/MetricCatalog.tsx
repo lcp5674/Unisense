@@ -258,6 +258,7 @@ export function MetricCatalog() {
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
   const [domainMap, setDomainMap] = useState<Map<string, string>>(new Map());
   const [currentUserId, setCurrentUserId] = useState<number | undefined>(undefined);
+  const [currentUserRole, setCurrentUserRole] = useState<string>("");
   const [myMetricsOnly, setMyMetricsOnly] = useState(false);
   const [lifecycleFilter, setLifecycleFilter] = useState<string | null>(null);
   // 生命周期快筛的真实日期区间（TD §13）：created_7d=7 天前起 / stale_30d=30 天前止
@@ -302,7 +303,7 @@ export function MetricCatalog() {
         flattenDomains(tree, m);
         setDomainMap(m);
       }),
-      fetchCurrentUser().then((u) => setCurrentUserId(u.id)).catch(() => {}),
+      fetchCurrentUser().then((u) => { setCurrentUserId(u.id); setCurrentUserRole(u.role); }).catch(() => {}),
       listFavorites()
         .then((favs) =>
           setFavorites(
@@ -772,7 +773,8 @@ export function MetricCatalog() {
                   label: "批量删除（草稿）",
                   icon: <DeleteOutlined />,
                   danger: true,
-                  disabled: !selected.some((m) => m.status === "DRAFT"),
+                  // 后端 DELETE 仅 platform_admin 可执行；非平台管理员禁用，避免 403
+                  disabled: !selected.some((m) => m.status === "DRAFT") || currentUserRole !== "platform_admin",
                 },
               ],
               onClick: ({ key }) => setBatchAction(key as "submit" | "delete" | "approve" | "reject" | "deprecate"),
