@@ -27,6 +27,7 @@ vi.mock("../api", () => ({
   reclassifyAssetSensitivity: vi.fn(),
   batchAssignAssetOwner: vi.fn(),
   batchReclassifyAssetSensitivity: vi.fn(),
+  bulkDeprecateCatalogs: vi.fn(),
   listUsers: vi.fn(),
   fetchDescriptionCoverage: vi.fn(),
   inferColumnDescription: vi.fn(),
@@ -124,6 +125,7 @@ import {
   reclassifyAssetSensitivity,
   batchAssignAssetOwner,
   batchReclassifyAssetSensitivity,
+  bulkDeprecateCatalogs,
   listUsers,
   listCatalogs,
   listDomainTree,
@@ -731,6 +733,49 @@ describe("AssetMap", () => {
 
     await waitFor(() => expect(fetchAssetEntityDetail).toHaveBeenCalledWith(5));
     expect(screen.getByText(/实体详情/)).toBeInTheDocument();
+  });
+
+  it("实体详情抽屉：废弃此资产调用单实体废弃接口并刷新", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 5,
+      entity_name: "sales.ods",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: null,
+    });
+    vi.mocked(bulkDeprecateCatalogs).mockResolvedValue({
+      succeeded: [{ source_id: "s1", entity_name: "sales.ods" }],
+      failed: [],
+    });
+    renderAssetMap();
+    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+
+    const clickHandler = g6GraphMock.on.mock.calls.find(([name]) => name === "node:click")?.[1] as
+      ((evt: { target?: { id?: string } }) => void) | undefined;
+    g6GraphMock.getNodeData.mockReturnValue({
+      data: {
+        id: "table:sales.ods",
+        label: "sales.ods",
+        type: "table",
+        entity_id: 5,
+        domain: "sales",
+      },
+    });
+    clickHandler?.({ target: { id: "table:sales.ods" } });
+
+    await waitFor(() => expect(screen.getByText(/实体详情/)).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /废弃此资产/ }));
+    await user.click(screen.getByRole("button", { name: /确认废弃/ }));
+
+    await waitFor(() => {
+      expect(bulkDeprecateCatalogs).toHaveBeenCalledWith([
+        { source_id: "s1", entity_name: "sales.ods" },
+      ]);
+    });
   });
 
   it("实体详情抽屉：表已有 LLM 描述时点「推断」先确认，确认后 force=true 重新生成", async () => {

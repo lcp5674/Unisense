@@ -11,6 +11,7 @@ import {
   Form,
   Input,
   Modal,
+  Popconfirm,
   Progress,
   Row,
   Col,
@@ -52,6 +53,7 @@ import {
   assignAssetOwner,
   batchAssignAssetOwner,
   batchReclassifyAssetSensitivity,
+  bulkDeprecateCatalogs,
   downloadAssetExport,
   fetchAssetChanges,
   fetchAssetEntityDetail,
@@ -132,6 +134,19 @@ const SENSITIVITY_COLOR: Record<string, string> = {
   NEEDS_REVIEW: "gold",
   UNKNOWN: "default",
 };
+
+/** 单实体废弃：复用批量废弃接口传单项（资产地图「单实体下线」治理入口）。
+ *  成功返回 true；失败抛错由调用方 message 展示。 */
+async function deprecateEntity(
+  sourceId: string,
+  entityName: string,
+): Promise<boolean> {
+  const res = await bulkDeprecateCatalogs([{ source_id: sourceId, entity_name: entityName }]);
+  if (res.failed && res.failed.length > 0) {
+    throw new Error((res.failed[0] as Record<string, unknown>).reason as string || "废弃失败");
+  }
+  return true;
+}
 
 // 图谱来源视角选项（方案A：资产地图聚焦「资产盘点」，血缘深挖引导去血缘视图）
 // 资产视角=采集目录表+指标（指标为中心 depth 收敛）；血缘视角（完整表级血缘）已在血缘视图承接，
@@ -1347,6 +1362,8 @@ function GraphTab() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  // 单实体废弃（资产地图「手动下线」治理入口）
+  const [deprecating, setDeprecating] = useState(false);
   // 表级描述编辑态（治理补全，TD §12.1）
   const [tableDescEditing, setTableDescEditing] = useState(false);
   const [tableDescDraft, setTableDescDraft] = useState("");
@@ -2085,6 +2102,34 @@ function GraphTab() {
                 )}
               </Descriptions.Item>
             </Descriptions>
+            {detail.entity_type === "TABLE" && (
+              <Space style={{ marginTop: 12 }} wrap>
+                <Popconfirm
+                  title={`废弃资产「${detail.entity_name}」？`}
+                  description="废弃后该资产不再作为可消费目录，血缘边随之失效；可在采集目录重新采集恢复。"
+                  okText="确认废弃"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={async () => {
+                    setDeprecating(true);
+                    try {
+                      await deprecateEntity(detail.source_id, detail.entity_name);
+                      message.success(`已废弃 ${detail.entity_name}`);
+                      setDetailOpen(false);
+                      setDetail(null);
+                      loadGraph();
+                    } catch (err) {
+                      message.error(err instanceof Error ? err.message : "废弃失败");
+                    } finally {
+                      setDeprecating(false);
+                    }
+                  }}
+                >
+                  <Button danger icon={<DeleteOutlined />} loading={deprecating}>
+                    废弃此资产
+                  </Button>
+                </Popconfirm>
+              </Space>
+            )}
             {(detail.lineage_edges?.length ?? 0) > 0 && (
               <Card title="血缘边明细" size="small" style={{ marginTop: 16 }}>
                 <Table
@@ -2425,6 +2470,8 @@ function OwnerTab() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  // 单实体废弃（资产地图「手动下线」治理入口）
+  const [deprecating, setDeprecating] = useState(false);
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.owner.catalogs.pageSize", 10);
 
   useEffect(() => {
@@ -2836,6 +2883,36 @@ function OwnerTab() {
                 {Array.isArray(detail.schema_summary) ? detail.schema_summary.length : "—"}
               </Descriptions.Item>
             </Descriptions>
+            {detail.entity_type === "TABLE" && (
+              <Space style={{ marginTop: 12, marginBottom: 8 }} wrap>
+                <Popconfirm
+                  title={`废弃资产「${detail.entity_name}」？`}
+                  description="废弃后该资产不再作为可消费目录，血缘边随之失效；可在采集目录重新采集恢复。"
+                  okText="确认废弃"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={async () => {
+                    setDeprecating(true);
+                    try {
+                      await deprecateEntity(detail.source_id, detail.entity_name);
+                      message.success(`已废弃 ${detail.entity_name}`);
+                      setDetailOpen(false);
+                      setDetail(null);
+                      if (ownerId) {
+                        fetchAssetOwnerView(ownerId).then(setView).catch(() => {});
+                      }
+                    } catch (err) {
+                      message.error(err instanceof Error ? err.message : "废弃失败");
+                    } finally {
+                      setDeprecating(false);
+                    }
+                  }}
+                >
+                  <Button danger icon={<DeleteOutlined />} loading={deprecating}>
+                    废弃此资产
+                  </Button>
+                </Popconfirm>
+              </Space>
+            )}
             {Array.isArray(detail.schema_summary) && detail.schema_summary.length > 0 && (
               <Card size="small" title="字段信息">
                 <SchemaTable columns={detail.schema_summary} editable={false} />
@@ -2916,6 +2993,8 @@ function TablesTab() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  // 单实体废弃（资产地图「手动下线」治理入口）
+  const [deprecating, setDeprecating] = useState(false);
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.tables.pageSize", 20);
   // 批量行选择（责任人设置 / 敏感度重分类共用）
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
@@ -3303,6 +3382,34 @@ function TablesTab() {
                 </div>
               </Descriptions.Item>
             </Descriptions>
+            {detail.entity_type === "TABLE" && (
+              <Space style={{ marginTop: 12 }} wrap>
+                <Popconfirm
+                  title={`废弃资产「${detail.entity_name}」？`}
+                  description="废弃后该资产不再作为可消费目录，血缘边随之失效；可在采集目录重新采集恢复。"
+                  okText="确认废弃"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={async () => {
+                    setDeprecating(true);
+                    try {
+                      await deprecateEntity(detail.source_id, detail.entity_name);
+                      message.success(`已废弃 ${detail.entity_name}`);
+                      setDetailOpen(false);
+                      setDetail(null);
+                      load();
+                    } catch (err) {
+                      message.error(err instanceof Error ? err.message : "废弃失败");
+                    } finally {
+                      setDeprecating(false);
+                    }
+                  }}
+                >
+                  <Button danger icon={<DeleteOutlined />} loading={deprecating}>
+                    废弃此资产
+                  </Button>
+                </Popconfirm>
+              </Space>
+            )}
             {(detail.lineage_edges?.length ?? 0) > 0 && (
               <Card title="血缘边明细" size="small" style={{ marginTop: 16 }}>
                 <Table

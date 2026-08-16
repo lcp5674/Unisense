@@ -487,6 +487,16 @@ function GraphTab() {
   const [detail, setDetail] = useState<DBCatalog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
+  // 字段节点手动治理（Task：补齐所有节点类型入口）
+  const [fieldNode, setFieldNode] = useState<AssetGraphNode | null>(null);
+  const [fieldTableNode, setFieldTableNode] = useState<AssetGraphNode | null>(null);
+  const [fieldManualOpen, setFieldManualOpen] = useState(false);
+  const [fieldManualDir, setFieldManualDir] = useState<"upstream" | "downstream">("downstream");
+  // 维度/消费方节点轻量详情 + 手动治理（Task：补齐所有节点类型入口）
+  const [metaNode, setMetaNode] = useState<{ id: string; label: string; kind: "dimension" | "consumer"; domain?: string } | null>(null);
+  const [metaNodeOpen, setMetaNodeOpen] = useState(false);
+  const [metaManualOpen, setMetaManualOpen] = useState(false);
+  const [metaManualDir, setMetaManualDir] = useState<"upstream" | "downstream">("downstream");
   const { track } = useTracking();
 
   async function load() {
@@ -556,6 +566,19 @@ function GraphTab() {
       setMetricDrawerOpen(true);
     } else if (node.type === "table") {
       void openTableDetail(node);
+    } else if (node.type === "dimension") {
+      // 维度节点：轻量抽屉展示详情 + 手动添加上下游
+      setMetaNode({ id: node.id, label: node.label, kind: "dimension", domain: node.domain });
+      setMetaNodeOpen(true);
+    } else if (node.type === "consumer") {
+      // 消费方节点：轻量抽屉展示详情 + 手动添加上下游
+      setMetaNode({ id: node.id, label: node.label, kind: "consumer", domain: node.domain });
+      setMetaNodeOpen(true);
+    } else if (node.type === "field" || node.type === "column") {
+      // 字段节点：展示字段名 + 所属表入口 + 手动添加上下游（baseNode=column:）
+      setFieldNode(node);
+      const tbl = node.label.split(".").slice(0, -1).join(".");
+      setFieldTableNode({ ...node, label: tbl } as AssetGraphNode);
     }
   }
 
@@ -634,6 +657,127 @@ function GraphTab() {
         metricCode={metricCode}
         onClose={() => setMetricDrawerOpen(false)}
       />
+
+      {/* 字段节点信息：展示字段名 + 所属表入口 + 手动添加上下游（Task：补齐所有节点类型入口） */}
+      <Drawer
+        title="字段信息"
+        width={480}
+        open={fieldNode != null}
+        onClose={() => setFieldNode(null)}
+      >
+        {fieldNode && (
+          <>
+            <Descriptions column={2} bordered size="small">
+              <Descriptions.Item label="字段名">{fieldNode.label}</Descriptions.Item>
+              <Descriptions.Item label="类型">字段</Descriptions.Item>
+              <Descriptions.Item label="所属表">
+                {fieldTableNode?.label ?? <span className="muted">不在当前视图</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="业务域">
+                {fieldNode.domain ?? <span className="muted">-</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="PII">
+                {fieldNode.pii ? <Tag color="red">含 PII</Tag> : <Tag>否</Tag>}
+              </Descriptions.Item>
+            </Descriptions>
+            <Space style={{ marginTop: 16 }} direction="vertical">
+              <span className="muted" style={{ fontSize: 13 }}>
+                手动登记该字段的血缘关系：
+              </span>
+              <Space>
+                <Button
+                  icon={<ArrowUpOutlined />}
+                  onClick={() => {
+                    setFieldManualDir("upstream");
+                    setFieldManualOpen(true);
+                  }}
+                >
+                  添加上游
+                </Button>
+                <Button
+                  icon={<ArrowDownOutlined />}
+                  onClick={() => {
+                    setFieldManualDir("downstream");
+                    setFieldManualOpen(true);
+                  }}
+                >
+                  添加下游
+                </Button>
+              </Space>
+            </Space>
+          </>
+        )}
+      </Drawer>
+      {fieldNode && (
+        <ManualEdgeModal
+          open={fieldManualOpen}
+          onClose={() => setFieldManualOpen(false)}
+          baseNode={fieldNode.id}
+          baseLabel={fieldNode.label}
+          defaultDirection={fieldManualDir}
+          onSuccess={() => void load()}
+        />
+      )}
+
+      {/* 维度 / 消费方节点轻量详情抽屉 + 手动治理（Task：补齐所有节点类型入口） */}
+      <Drawer
+        title={metaNode ? `${metaNode.kind === "dimension" ? "维度" : "消费方"} · ${metaNode.label}` : "节点详情"}
+        width={480}
+        open={metaNodeOpen}
+        onClose={() => setMetaNodeOpen(false)}
+      >
+        {metaNode && (
+          <>
+            <Descriptions column={2} bordered size="small">
+              <Descriptions.Item label="节点类型">
+                <Tag color={metaNode.kind === "dimension" ? "geekblue" : "green"}>
+                  {metaNode.kind === "dimension" ? "维度" : "消费方"}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="节点标识">
+                <span className="mono">{metaNode.id}</span>
+              </Descriptions.Item>
+              <Descriptions.Item label="名称">{metaNode.label}</Descriptions.Item>
+              <Descriptions.Item label="业务域">
+                {metaNode.domain ?? <span className="muted">-</span>}
+              </Descriptions.Item>
+            </Descriptions>
+            <span className="muted" style={{ display: "block", marginTop: 16, fontSize: 13 }}>
+              手动登记该{metaNode.kind === "dimension" ? "维度" : "消费方"}的血缘关系：
+            </span>
+            <Space style={{ marginTop: 8 }}>
+              <Button
+                icon={<ArrowUpOutlined />}
+                onClick={() => {
+                  setMetaManualDir("upstream");
+                  setMetaManualOpen(true);
+                }}
+              >
+                添加上游
+              </Button>
+              <Button
+                icon={<ArrowDownOutlined />}
+                onClick={() => {
+                  setMetaManualDir("downstream");
+                  setMetaManualOpen(true);
+                }}
+              >
+                添加下游
+              </Button>
+            </Space>
+          </>
+        )}
+      </Drawer>
+      {metaNode && (
+        <ManualEdgeModal
+          open={metaManualOpen}
+          onClose={() => setMetaManualOpen(false)}
+          baseNode={metaNode.id}
+          baseLabel={metaNode.label}
+          defaultDirection={metaManualDir}
+          onSuccess={() => void load()}
+        />
+      )}
     </div>
   );
 }
@@ -768,6 +912,11 @@ function ImpactTab() {
       const tableNode = graphData?.nodes.find((n) => n.id === tableId) ?? null;
       setFieldNode(clicked);
       setFieldTableNode(tableNode);
+    } else if (clicked.type === "dimension" || clicked.type === "consumer") {
+      // 影响图中维度/消费方节点：引导去血缘图谱查看详情/手动登记
+      message.info(
+        `「${clicked.label}」是${clicked.type === "dimension" ? "维度" : "消费方"}节点，详情与手动登记血缘请在「血缘图谱」Tab 中点击该节点操作`,
+      );
     } else {
       message.info(`节点「${clicked.label}」暂不支持查看详情`);
     }
