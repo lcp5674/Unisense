@@ -789,6 +789,8 @@ function MembersTab() {
   const [previewValues, setPreviewValues] = useState<string[]>([]);
   const [previewTruncated, setPreviewTruncated] = useState(false);
   const [importing, setImporting] = useState(false);
+  // 导入进度感知：当前处理序号/总数（消除"点了没反应"的长等待）
+  const [importProgress, setImportProgress] = useState<{ ok: number; failed: number; done: number; total: number } | null>(null);
 
   useEffect(() => {
     listDimensions().then((r) => setDims(r.items)).catch(() => {});
@@ -862,8 +864,10 @@ function MembersTab() {
     setImporting(true);
     let ok = 0;
     let failed = 0;
+    const total = previewValues.length;
     try {
-      for (const v of previewValues) {
+      for (let i = 0; i < previewValues.length; i++) {
+        const v = previewValues[i];
         try {
           await createDimensionMember({
             dim_code: dimCode,
@@ -874,6 +878,7 @@ function MembersTab() {
         } catch {
           failed += 1;
         }
+        setImportProgress({ ok, failed, done: i + 1, total });
       }
       message.success(`已导入 ${ok} 个维度值${failed > 0 ? `，跳过 ${failed} 个（已存在或失败）` : ""}`);
       setAutoOpen(false);
@@ -882,6 +887,7 @@ function MembersTab() {
       reload();
     } finally {
       setImporting(false);
+      setImportProgress(null);
     }
   }
 
@@ -1148,14 +1154,21 @@ function MembersTab() {
               ))}
             </div>
             {can("dimension:create") && (
-              <Button
-                type="primary"
-                loading={importing}
-                onClick={handleImportValues}
-                icon={<PlusOutlined />}
-              >
-                导入全部为维度值
-              </Button>
+              <>
+                <Button
+                  type="primary"
+                  loading={importing}
+                  onClick={handleImportValues}
+                  icon={<PlusOutlined />}
+                >
+                  导入全部为维度值
+                </Button>
+                {importProgress && (
+                  <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+                    {`正在导入 ${importProgress.done}/${importProgress.total} · 成功 ${importProgress.ok} · 跳过 ${importProgress.failed}`}
+                  </span>
+                )}
+              </>
             )}
           </div>
         )}
