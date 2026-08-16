@@ -587,6 +587,15 @@ describe("MetricCatalog - 按钮级权限点过滤", () => {
     const btn = screen.getByRole("button", { name: /导出/ }) as HTMLButtonElement;
     expect(btn.disabled).toBe(false);
   });
+
+  it("收藏列表加载失败时「我的收藏」按钮禁用（避免静默空集误导为无收藏）", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    mockedFavorites.mockRejectedValue(new Error("network"));
+    renderWithPerm(["metric:create", "metric:export"]);
+    await screen.findByText("sales_gmv_sum_d");
+    const btn = screen.getByRole("button", { name: /我的收藏/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
 });
 
 describe("MetricCatalog URL 筛选直达（分享/刷新保持）", () => {

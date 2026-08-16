@@ -329,6 +329,8 @@ export function MetricCatalog() {
   const [favBusy, setFavBusy] = useState<Set<string>>(new Set());
   // 只看收藏：客户端过滤当前页（后端 list 无收藏过滤参数）
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  // 收藏列表加载失败标记：失败时禁用"只看收藏"并提示（避免静默空集误导为"无收藏"）
+  const [favoritesError, setFavoritesError] = useState(false);
   // 回收站视图：true 时仅展示已软删草稿（提供恢复入口）
   const [deletedView, setDeletedView] = useState(false);
   const [restoring, setRestoring] = useState<string | null>(null);
@@ -388,12 +390,13 @@ export function MetricCatalog() {
       }),
       fetchCurrentUser().then((u) => { setCurrentUserId(u.id); setCurrentUserRole(u.role); }).catch(() => {}),
       listFavorites()
-        .then((favs) =>
+        .then((favs) => {
           setFavorites(
             new Set(favs.filter((f) => f.asset_type === "METRIC").map((f) => f.asset_id)),
-          ),
-        )
-        .catch(() => {}),
+          );
+          setFavoritesError(false);
+        })
+        .catch(() => setFavoritesError(true)),
     ]).catch(() => {});
   }, []);
 
@@ -1107,10 +1110,19 @@ export function MetricCatalog() {
             {myMetricsOnly ? "我的指标" : "全部指标"}
           </Button>
         )}
-        <Tooltip title={favoritesOnly ? "仅过滤当前页命中的收藏，可在搜索框输入关键字缩小范围" : "只看我收藏的指标（当前页内过滤）"}>
+        <Tooltip
+          title={
+            favoritesError
+              ? "收藏列表加载失败，无法使用「只看收藏」过滤"
+              : favoritesOnly
+                ? "仅过滤当前页命中的收藏，可在搜索框输入关键字缩小范围"
+                : "只看我收藏的指标（当前页内过滤）"
+          }
+        >
           <Button
             type={favoritesOnly ? "primary" : "default"}
             icon={favoritesOnly ? <HeartFilled style={{ color: "#eb2f96" }} /> : <HeartOutlined />}
+            disabled={favoritesError}
             onClick={() => setFavoritesOnly(!favoritesOnly)}
           >
             {favoritesOnly ? "只看收藏" : "我的收藏"}
