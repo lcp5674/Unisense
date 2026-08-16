@@ -699,7 +699,28 @@ class MetricService(BaseService):
 
         # 收集更新字段
         updates: dict[str, Any] = {}
-        for field in ("name", "granularity", "unit", "sla", "consumption_guide", "backup_owner_id"):
+        # 治理属性（currency/aggregation/time_semantics/freshness/dw_layer/metric_tier/
+        # serving_mode/additivity/non_additive_dimensions）：非破坏性变更，仅更新主表
+        # 治理列、不触发版本递增/PENDING 期（不在 BREAKING_TOP_LEVEL_FIELDS）。
+        # 修复前：指标创建后治理字段不可改（分层纠正/时效调整/分级晋升/币种修正
+        # 等生产高频场景只能重建指标），与注册页可选字段契约不一致。
+        for field in (
+            "name",
+            "granularity",
+            "unit",
+            "currency",
+            "aggregation",
+            "time_semantics",
+            "freshness",
+            "dw_layer",
+            "metric_tier",
+            "serving_mode",
+            "additivity",
+            "non_additive_dimensions",
+            "sla",
+            "consumption_guide",
+            "backup_owner_id",
+        ):
             val = getattr(request, field, None)
             if val is not None:
                 updates[field] = val

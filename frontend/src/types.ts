@@ -232,6 +232,15 @@ export interface MetricUpdateRequest {
   name?: string;
   granularity?: string;
   unit?: string;
+  currency?: string; // 治理属性（非破坏性，不触发版本递增）
+  aggregation?: string; // 治理属性：聚合方式
+  time_semantics?: string; // 治理属性：时间语义
+  freshness?: string; // 治理属性：新鲜度
+  dw_layer?: string; // 治理属性：数仓分层
+  metric_tier?: string; // 治理属性：指标分级
+  serving_mode?: string; // 治理属性：服务模式
+  additivity?: string; // 治理属性：可加性
+  non_additive_dimensions?: string[]; // 治理属性：不可加维度
   definition_json?: Record<string, unknown>;
   sla?: string | null;
   consumption_guide?: Record<string, unknown>;

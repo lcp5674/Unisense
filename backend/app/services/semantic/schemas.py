@@ -136,6 +136,31 @@ class MetricUpdateRequest(BaseModel):
     name: str | None = Field(None, max_length=128)
     granularity: str | None = Field(None, max_length=64)
     unit: str | None = Field(None, max_length=32)
+    currency: str | None = Field(None, max_length=16, description="币种（治理属性，非破坏性变更）")
+    # ---- 治理属性（TD §12.1 治理补充，非破坏性变更——不触发版本递增/PENDING 期）----
+    # 指标创建后治理字段（数仓分层/时效/时间语义/分级/聚合/服务模式/可加性）常需调整
+    # （分层纠正、时效调整、分级晋升、币种修正等生产高频场景），此前只能重建指标。
+    # 修复：更新请求支持治理字段，service 直接更新主表治理列（不改变口径定义，非破坏性）。
+    aggregation: Literal[
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+    ] | None = Field(None, description="聚合方式（治理属性）")
+    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
+        None, description="时间语义（治理属性）"
+    )
+    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] | None = Field(
+        None, description="新鲜度（治理属性）"
+    )
+    dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] | None = Field(
+        None, description="数仓分层（治理属性）"
+    )
+    metric_tier: Literal["T1", "T2", "T3"] | None = Field(None, description="指标分级（治理属性）")
+    serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] | None = Field(
+        None, description="服务模式（治理属性）"
+    )
+    additivity: Literal["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] | None = Field(
+        None, description="可加性（治理属性）"
+    )
+    non_additive_dimensions: list[str] | None = Field(None, description="不可加维度（治理属性）")
     definition_json: dict[str, Any] | None = Field(None, description="口径定义")
     sla: str | None = Field(None, max_length=128)
     consumption_guide: dict[str, Any] | None = Field(None, description="消费指南")

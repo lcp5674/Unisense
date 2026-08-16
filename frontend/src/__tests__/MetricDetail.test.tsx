@@ -1078,6 +1078,66 @@ describe("MetricDetail 按钮级权限过滤", () => {
     });
   });
 
+
+  it("编辑弹窗治理字段回填（数仓层/时效/分级/币种），未改保存不传（dirty 机制保留原值）", async () => {
+    // 指标治理字段（dw_layer/freshness/metric_tier/currency）在 openEdit 回填；
+    // 未修改时保存 payload 不含治理字段（dirty 未改不传 → 后端保留原值，防误覆盖）
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      dw_layer: "DWD",
+      freshness: "T1",
+      metric_tier: "T2",
+      currency: "CNY",
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]); // 字典为空 → 遗留治理值必须兜底显示
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 币种输入框回填 CNY（治理字段回填）
+    const currencyInput = document.querySelector('.ant-modal input[placeholder*="CNY"]') as HTMLInputElement;
+    expect(currencyInput).toBeTruthy();
+    expect(currencyInput.value).toBe("CNY");
+    // 未改治理字段 → 保存 payload 不含治理字段（dirty 未改不传，后端保留原值）
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "仅调整名称，治理字段不动" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      expect(mockedUpdateMetric).toHaveBeenCalledWith(
+        "sales_gmv_sum_d",
+        expect.objectContaining({ change_reason: expect.any(String) }),
+      );
+    });
+    const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1][1];
+    expect(lastCall).not.toHaveProperty("dw_layer");
+    expect(lastCall).not.toHaveProperty("currency");
+  });
+
   it("编辑弹窗遗留粒度/单位值兜底（字典未收录时仍显示并保留，防静默清空）", async () => {
     // 存量指标粒度 "daily" 不在字典（字典为空），openEdit 应将其作为兜底选项加入，
     // 保存时 granularity/unit 不被静默清空（数据丢失防护）。

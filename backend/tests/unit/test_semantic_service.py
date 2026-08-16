@@ -1960,6 +1960,39 @@ async def test_update_metric_collects_optional_fields():
     assert kwargs["backup_owner_id"] == 5
 
 
+async def test_update_metric_applies_governance_fields_without_version():
+    """治理字段（dw_layer/freshness/metric_tier/currency 等）更新主表治理列，
+    不触发版本递增（非破坏性变更）——修复创建后治理字段不可改的缺口。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=1, version=1)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(
+            dw_layer="DWS",
+            freshness="T0",
+            metric_tier="T1",
+            currency="CNY",
+            change_reason="治理字段调整：分层纠正+时效调整+分级晋升+币种修正",
+        ),
+        actor_id=1,
+        role="metric_owner",
+    )
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["dw_layer"] == "DWS"
+    assert kwargs["freshness"] == "T0"
+    assert kwargs["metric_tier"] == "T1"
+    assert kwargs["currency"] == "CNY"
+    # 非破坏性治理变更不触发版本递增（不在 BREAKING_TOP_LEVEL_FIELDS）
+    assert "version" not in kwargs
+    repo.create_version.assert_not_called()
+
+
 async def test_update_metric_rename_clears_rename_required_mark():
     """仲裁「保留差异+指定改名」的指标，Owner 改名后清除 rename_required 标记（TD §12.4）。"""
     svc, repo = _svc_with_repo()

@@ -522,6 +522,14 @@ export function MetricDetail() {
     Array<{ value: string; label: string }>
   >([]);
   const [editSourceTableDirty, setEditSourceTableDirty] = useState(false);
+  // 编辑弹窗「治理属性」（币种/聚合/时间语义/新鲜度/数仓层/分级）：
+  // 指标创建后治理字段此前不可改（分层纠正/时效调整/分级晋升/币种修正只能重建指标）。
+  // 后端 MetricUpdateRequest 已支持（非破坏性，不触发版本递增），前端补齐编辑入口。
+  const [editGovValues, setEditGovValues] = useState<Record<string, string>>({});
+  const [editGovDirty, setEditGovDirty] = useState<Set<string>>(new Set());
+  const [editGovOptions, setEditGovOptions] = useState<
+    Record<string, Array<{ value: string; label: string }>>
+  >({});
   // 编辑弹窗口径 JSON 即时校验（对齐注册页惰性设计）：输入即报错，避免提交时才发现语法问题
   const [editDefinitionError, setEditDefinitionError] = useState<string | null>(null);
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
@@ -529,11 +537,16 @@ export function MetricDetail() {
   const [busy, setBusy] = useState(false);
   const { track } = useTracking();
 
-  // 编辑弹窗字典（粒度/单位）+ 平台维度清单 + 已发布指标（依赖选项）：挂载时加载一次
+  // 编辑弹窗字典（粒度/单位/治理）+ 平台维度清单 + 已发布指标（依赖选项）：挂载时加载一次
   useEffect(() => {
     Promise.all([
       listDictItems("granularity").catch(() => [] as SystemDictItem[]),
       listDictItems("unit").catch(() => [] as SystemDictItem[]),
+      listDictItems("dw_layer").catch(() => [] as SystemDictItem[]),
+      listDictItems("freshness").catch(() => [] as SystemDictItem[]),
+      listDictItems("time_semantics").catch(() => [] as SystemDictItem[]),
+      listDictItems("metric_tier").catch(() => [] as SystemDictItem[]),
+      listDictItems("aggregation").catch(() => [] as SystemDictItem[]),
       listDimensions({ page_size: 100 }).catch(() => ({ items: [] as Dimension[] })),
       listMetrics({ page_size: 100, status: "PUBLISHED" }).catch(() => ({
         items: [] as MetricResponse[],
@@ -541,13 +554,20 @@ export function MetricDetail() {
         page: 1,
         page_size: 100,
       })),
-    ]).then(([g, u, dims, metrics]) => {
+    ]).then(([g, u, dl, fr, ts, mt, ag, dims, metrics]) => {
       const opts = (items: SystemDictItem[]) =>
         items
           .filter((it) => it.status === "active")
           .map((it) => ({ value: it.code, label: `${it.label} (${it.code})` }));
       setEditGranularityOptions(opts(g));
       setEditUnitOptions(opts(u));
+      setEditGovOptions({
+        dw_layer: opts(dl),
+        freshness: opts(fr),
+        time_semantics: opts(ts),
+        metric_tier: opts(mt),
+        aggregation: opts(ag),
+      });
       setEditDimensionOptions(
         (dims.items ?? [])
           .filter((d) => d.status === "PUBLISHED")
@@ -735,6 +755,21 @@ export function MetricDetail() {
     setEditSourceTable(rawSrcTable);
     setEditSourceTableOptions((prev) => ensureInOptions(prev, rawSrcTable || undefined));
     setEditSourceTableDirty(false);
+    // 治理属性回填 + 遗留值兜底（字典未收录的历史值可显示可保留，防静默清空）
+    const govInit: Record<string, string> = {};
+    for (const f of ["dw_layer", "freshness", "time_semantics", "metric_tier", "aggregation"]) {
+      const v = (metric as unknown as Record<string, unknown>)[f];
+      if (typeof v === "string") {
+        govInit[f] = v;
+        setEditGovOptions((prev) => ({
+          ...prev,
+          [f]: ensureInOptions(prev[f] ?? [], v),
+        }));
+      }
+    }
+    if (metric.currency) govInit.currency = metric.currency;
+    setEditGovValues(govInit);
+    setEditGovDirty(new Set());
     editForm.setFieldsValue({
       name: metric.name,
       granularity: metric.granularity,
@@ -802,10 +837,16 @@ export function MetricDetail() {
           definitionJson = next;
         }
       }
+      const govPayload: Record<string, string> = {};
+      for (const f of ["currency", "dw_layer", "freshness", "time_semantics", "metric_tier", "aggregation"]) {
+        // 用户改过的治理字段才传（未改不传 → 后端保留原值；dirty+空值 → 不传保留原值）
+        if (editGovDirty.has(f) && editGovValues[f]) govPayload[f] = editGovValues[f];
+      }
       const req: MetricUpdateRequest = {
         name: String(values.name).trim(),
         granularity: values.granularity,
         unit: values.unit,
+        ...govPayload,
         definition_json: definitionJson,
         change_reason: String(values.change_reason ?? "").trim(),
         row_version: metric.row_version, // 跨请求乐观锁：他人已改则 409 拒绝
@@ -1704,6 +1745,44 @@ export function MetricDetail() {
                 optionFilterProp="label"
               />
             </Form.Item>
+          </Space>
+          {/* 治理属性（非破坏性变更，不触发版本递增）：创建后治理字段此前不可改，
+              现可编辑——币种修正/数仓层纠正/时效调整/时间语义变更/分级晋升/聚合调整 */}
+          <Space wrap size={12} style={{ width: "100%" }}>
+            <Form.Item label="币种" style={{ marginBottom: 8, flex: 1, minWidth: 140 }}>
+              <Input
+                placeholder="如 CNY / USD（留空清除）"
+                value={editGovValues.currency ?? ""}
+                onChange={(e) => {
+                  setEditGovValues((p) => ({ ...p, currency: e.target.value }));
+                  setEditGovDirty((p) => new Set(p).add("currency"));
+                }}
+              />
+            </Form.Item>
+            {(
+              [
+                ["dw_layer", "数仓层"],
+                ["freshness", "新鲜度"],
+                ["time_semantics", "时间语义"],
+                ["metric_tier", "指标分级"],
+                ["aggregation", "聚合方式"],
+              ] as const
+            ).map(([field, label]) => (
+              <Form.Item key={field} label={label} style={{ marginBottom: 8, flex: 1, minWidth: 160 }}>
+                <Select
+                  allowClear
+                  placeholder={`选择${label}`}
+                  options={editGovOptions[field] ?? []}
+                  showSearch
+                  optionFilterProp="label"
+                  value={editGovValues[field]}
+                  onChange={(v) => {
+                    setEditGovValues((p) => ({ ...p, [field]: v ?? "" }));
+                    setEditGovDirty((p) => new Set(p).add(field));
+                  }}
+                />
+              </Form.Item>
+            ))}
           </Space>
           <Form.Item
             label="落地表（source_table）"
