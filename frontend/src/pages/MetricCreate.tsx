@@ -2,12 +2,12 @@ import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined } from "@ant-design/icons";
 import {
-  Alert, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
+  Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, listDimensions, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog, SuggestionField, AutoSuggestResponse } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog, SuggestionField, AutoSuggestResponse, Dimension } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { usePermission } from "../hooks/usePermission";
 
@@ -128,6 +128,8 @@ export function MetricCreate() {
 
   const [dictOptions, setDictOptions] = useState<Record<string, Array<{ value: string; label: string }>>>({});
   const [dictLoading, setDictLoading] = useState(false);
+  // 平台维度清单（维度映射下拉）：来自维度管理模块，支持搜索 + 手动输入兜底
+  const [dimensionOptions, setDimensionOptions] = useState<Array<{ value: string; label: string }>>([]);
 
   const [suggesting, setSuggesting] = useState(false);
   const [suggestedCode, setSuggestedCode] = useState<string | null>(null);
@@ -193,6 +195,20 @@ export function MetricCreate() {
         setDictOptions(map);
       })
       .finally(() => setDictLoading(false));
+  }, []);
+
+  // 加载平台活跃维度（维度映射下拉的数据源，来自维度管理模块）
+  useEffect(() => {
+    listDimensions({ status: "active", page_size: 200 })
+      .then((res) =>
+        setDimensionOptions(
+          (res.items ?? []).map((d: Dimension) => ({
+            value: d.dim_code,
+            label: `${d.name} (${d.dim_code})`,
+          })),
+        ),
+      )
+      .catch(() => setDimensionOptions([]));
   }, []);
 
   // 口径定义区：关联数据表搜索（与源表名一致的惰性交互——空关键词加载平台已采集的表，可关键词搜索）
@@ -1067,7 +1083,17 @@ export function MetricCreate() {
                           rules={[{ required: true, message: "维度名" }]}
                           style={{ marginBottom: 0 }}
                         >
-                          <Input placeholder="维度名，如 date / shop" style={{ width: 160 }} />
+                          <AutoComplete
+                            data-testid="dim-name-auto"
+                            placeholder="维度名（可搜索平台维度或手输）"
+                            style={{ width: 200 }}
+                            options={dimensionOptions}
+                            filterOption={(input, option) =>
+                              String(option?.value ?? "")
+                                .toLowerCase()
+                                .includes(input.toLowerCase())
+                            }
+                          />
                         </Form.Item>
                         <Form.Item
                           {...restField}

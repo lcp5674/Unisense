@@ -235,6 +235,36 @@ describe("MetricCreate 批量注册指标", () => {
     });
   });
 
+  it("维度列映射以可视化键值对填写并组装为对象", async () => {
+    mockedBatch.mockResolvedValue({
+      batch_id: "batch_map1",
+      candidates: [{ metric_code: "sales_gmv_day", status: "DRAFT", validation_errors: null }],
+    });
+    renderPage();
+    const modal = await openBatchModal();
+
+    await fillBatchForm(modal, "gmv");
+
+    // 添加维度映射行：维度名（AutoComplete 可搜平台维度）+ 列名（源表列 Select）
+    fireEvent.click(within(modal).getByText("添加维度映射"));
+    const dimInput = modal.querySelector('[data-testid="dim-name-auto"] input') as HTMLInputElement;
+    expect(dimInput).toBeTruthy();
+    fireEvent.change(dimInput, { target: { value: "date" } });
+    const colInput = modal.querySelector(".ant-select-multiple input") as HTMLInputElement;
+    void colInput;
+    // 列名 Select 是普通单选（非 multiple），用其占位符展开下拉选择源表列
+    const colSelect = within(modal).getByText("选择源表列");
+    fireEvent.mouseDown(colSelect);
+    await clickSelectOption("gmv");
+
+    fireEvent.click(within(modal).getByText("提交批量注册"));
+    await waitFor(() => {
+      expect(mockedBatch).toHaveBeenCalledWith(
+        expect.objectContaining({ dimension_mapping: { date: "gmv" } }),
+      );
+    });
+  });
+
   it("部分失败时展示失败原因明细", async () => {
     mockedBatch.mockResolvedValue({
       batch_id: "batch_fail1",
