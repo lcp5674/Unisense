@@ -158,7 +158,7 @@ describe("MetricReview 指标审批", () => {
     // 「通过」按钮应禁用
     const approveBtn = screen.getAllByRole("button", { name: /通\s*过/ })[0];
     expect((approveBtn as HTMLButtonElement).disabled).toBe(true);
-    // PII 待复核标签可见（PII 列）
-    expect(screen.getAllByText("待复核").length).toBeGreaterThan(0);
+    // PII 待复核标签可见（PII 列，与指标目录一致）
+    expect(screen.getAllByText(/PII 待复核/).length).toBeGreaterThan(0);
   });
 });

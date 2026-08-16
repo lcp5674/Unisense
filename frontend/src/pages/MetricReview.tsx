@@ -189,7 +189,7 @@ export function MetricReview() {
       render: (_: unknown, r: MetricResponse) =>
         r.pii_flag ? (
           <Tag color={r.compliance_reviewed ? "green" : "orange"}>
-            {r.compliance_reviewed ? "已复核" : "待复核"}
+            {r.compliance_reviewed ? "PII 已复核" : "PII 待复核"}
           </Tag>
         ) : (
           <Tag>否</Tag>
