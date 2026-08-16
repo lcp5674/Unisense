@@ -870,6 +870,12 @@ export function MetricDetail() {
       await updateMetric(metric.metric_code, req);
       if (metric.status === "REVIEW") {
         message.success("修改已保存，指标已退回草稿，请重新提交评审");
+      } else if (metric.status === "PUBLISHED") {
+        // 已发布指标：破坏性变更（粒度/单位/聚合/口径）触发 PENDING 确认期，
+        // 治理属性变更直接生效——后端返回后提示用户进入确认流程
+        message.success(
+          "变更已提交：破坏性修改进入消费方确认期（确认后新口径生效），治理属性已直接更新",
+        );
       } else {
         message.success("指标已更新");
       }
@@ -1112,12 +1118,17 @@ export function MetricDetail() {
         </Button>
       )}
       {/* 编辑入口（TD §13）：DRAFT/REVIEW 草稿可修改名称/粒度/单位/口径后重提——
-          消除"驳回后只能原样重提或删了重建"的闭环缺口（仅 owner/admin + 创建权限） */}
-      {(metric.status === "DRAFT" || metric.status === "REVIEW") && canCreate && isOwnerOrAdmin && (
-        <Button icon={<EditOutlined />} loading={busy} onClick={openEdit}>
-          编辑
-        </Button>
-      )}
+          消除"驳回后只能原样重提或删了重建"的闭环缺口；PUBLISHED 已发布指标经此
+          「发起变更申请」（后端破坏性字段触发 PENDING_VERSION 消费方确认、治理属性
+          直接生效）——修复前 PUBLISHED 无编辑入口，后端 update_metric 的发布态变更
+          能力前端不可达（仅 owner/admin + 创建权限） */}
+      {(metric.status === "DRAFT" || metric.status === "REVIEW" || metric.status === "PUBLISHED") &&
+        canCreate &&
+        isOwnerOrAdmin && (
+          <Button icon={<EditOutlined />} loading={busy} onClick={openEdit}>
+            {metric.status === "PUBLISHED" ? "发起变更申请" : "编辑"}
+          </Button>
+        )}
       {metric.status === "REVIEW" && canApprove && (
         <Button
           type="primary"
@@ -1733,6 +1744,21 @@ export function MetricDetail() {
         okText="保存"
         width={560}
       >
+        {metric.status === "PUBLISHED" && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="该指标已发布：变更可能触发口径版本确认"
+            description={
+              <span>
+                修改<b>粒度/单位/聚合方式/口径定义</b>（破坏性变更）将进入{" "}
+                <b>PENDING 确认期</b>，需消费方确认后新口径才生效；仅修改治理属性
+                （数仓层/时效/分级/币种等）与名称将直接生效、不触发版本确认。
+              </span>
+            }
+          />
+        )}
         <Form form={editForm} layout="vertical" scrollToFirstError>
           <Form.Item
             name="name"

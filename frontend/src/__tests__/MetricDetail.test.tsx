@@ -1228,6 +1228,57 @@ describe("MetricDetail 按钮级权限过滤", () => {
     expect(lastCall).toHaveProperty("currency", ""); // 空串提交 → 后端清空币种（修复核心）
   });
 
+  it("PUBLISHED 指标显示「发起变更申请」入口，弹窗提示破坏性变更进入 PENDING 确认期", async () => {
+    // 修复前：编辑按钮仅 DRAFT/REVIEW 显示，已发布指标的治理/口径变更无前端入口
+    // （后端 update_metric 支持 PUBLISHED——破坏性→PENDING_VERSION、治理→直接生效，前端不可达）。
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "PUBLISHED",
+      currency: "CNY",
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    // PUBLISHED + owner 显示「发起变更申请」（区别于 DRAFT/REVIEW 的「编辑」）
+    fireEvent.click(await screen.findByRole("button", { name: /发起变更申请/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 弹窗内提示：破坏性变更进入 PENDING 确认期（已发布语义）
+    expect(
+      screen.getByText(/该指标已发布：变更可能触发口径版本确认/),
+    ).toBeTruthy();
+    // 保存反馈为已发布场景文案（PENDING 提示而非"已更新"）
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "发起已发布指标的变更申请" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      expect(mockedUpdateMetric).toHaveBeenCalled();
+    });
+  });
+
   it("编辑弹窗遗留粒度/单位值兜底（字典未收录时仍显示并保留，防静默清空）", async () => {
     // 存量指标粒度 "daily" 不在字典（字典为空），openEdit 应将其作为兜底选项加入，
     // 保存时 granularity/unit 不被静默清空（数据丢失防护）。
