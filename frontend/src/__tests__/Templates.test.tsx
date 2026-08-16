@@ -28,6 +28,8 @@ vi.mock("../api", () => {
     removeFavorite: vi.fn(),
     listUsers: vi.fn(),
     updateTemplateOwner: vi.fn(),
+    listDomainTree: vi.fn(),
+    listDictItems: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -36,7 +38,7 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
-import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner } from "../api";
+import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner, listDomainTree, listDictItems } from "../api";
 
 const mockedList = vi.mocked(listTemplates);
 const mockedCreate = vi.mocked(createMetric);
@@ -44,6 +46,8 @@ const mockedListFavorites = vi.mocked(listFavorites);
 const mockedInstantiate = vi.mocked(instantiateTemplate);
 const mockedListUsers = vi.mocked(listUsers);
 const mockedUpdateOwner = vi.mocked(updateTemplateOwner);
+const mockedDomainTree = vi.mocked(listDomainTree);
+const mockedDictItems = vi.mocked(listDictItems);
 
 const CREATED: MetricResponse = {
   id: 1,
@@ -139,6 +143,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue(TPLS);
   mockedListFavorites.mockResolvedValue([]);
+  mockedDomainTree.mockResolvedValue([]);
+  mockedDictItems.mockResolvedValue([]);
   mockedListUsers.mockResolvedValue([
     { id: 1, username: "alice", display_name: "Alice", role: "metric_owner", domain: "finance", status: "ACTIVE" },
     { id: 2, username: "bob", display_name: "Bob", role: "metric_owner", domain: "finance", status: "ACTIVE" },
@@ -335,6 +341,28 @@ describe("Templates 页面", () => {
     fireEvent.click(bobOption);
     await waitFor(() => {
       expect(mockedUpdateOwner).toHaveBeenCalledWith(1, 2);
+    });
+  });
+
+  it("模板详情弹窗：展示描述、必填字段与默认属性（点击行内『详情』打开）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    // 点击行内「详情」按钮
+    const detailButtons = screen.getAllByText("详情");
+    fireEvent.click(detailButtons[0]);
+    // 断言详情弹窗展示描述与必填字段
+    await screen.findByText("模板详情：GMV 日汇总模板");
+    expect(screen.getByText("按日汇总 GMV")).toBeTruthy();
+    expect(screen.getAllByText("metric_code").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("finance").length).toBeGreaterThan(0);
+    // 关闭弹窗
+    fireEvent.click(screen.getByRole("button", { name: /关\s*闭/ }));
+    await waitFor(() => {
+      expect(screen.queryByText("模板详情：GMV 日汇总模板")).toBeNull();
     });
   });
 });

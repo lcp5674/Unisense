@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space } from "antd";
-import { PlusOutlined, ArrowLeftOutlined, HeartOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions } from "antd";
+import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined } from "@ant-design/icons";
 import {
   listTemplates,
   createMetric,
@@ -11,11 +11,30 @@ import {
   removeFavorite,
   listUsers,
   updateTemplateOwner,
+  listDomainTree,
+  listDictItems,
   UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricTemplate, MetricType, UserBrief } from "../types";
+import type { MetricCreateRequest, MetricTemplate, MetricType, UserBrief, SubjectDomainTreeNode } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { usePermission } from "../hooks/usePermission";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
+
+// 域树 → Cascader 选项（对齐注册指标页：树形选择，避免手输域编码）
+function treeToCascaderOptions(nodes: SubjectDomainTreeNode[]): any[] {
+  return nodes.map((n) => ({
+    value: n.code,
+    label: `${n.name} (${n.code})`,
+    children: n.children.length > 0 ? treeToCascaderOptions(n.children) : undefined,
+  }));
+}
+
+// 字典项 → Select 选项（对齐注册指标页：粒度/单位等从字典下拉选择，避免手输漂移）
+function dictToOptions(items: Array<{ code: string; label: string; status: string }>) {
+  return items
+    .filter((it) => it.status === "active")
+    .map((it) => ({ value: it.code, label: `${it.label} (${it.code})` }));
+}
 
 export function Templates() {
   const [searchParams] = useSearchParams();
@@ -44,6 +63,26 @@ export function Templates() {
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
   const { track } = useTracking();
+  const { can } = usePermission();
+  // 实例化弹窗选项：域树 + 粒度/单位字典（对齐注册指标页惰性选择，避免手输漂移）
+  const [domainOptions, setDomainOptions] = useState<any[]>([]);
+  const [granularityOptions, setGranularityOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [unitOptions, setUnitOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 模板详情弹窗（默认口径 / 必填字段 / 描述）
+  const [detailTpl, setDetailTpl] = useState<MetricTemplate | null>(null);
+
+  // 加载域树与字典项，供实例化弹窗选项（惰性选择原则）
+  useEffect(() => {
+    listDomainTree()
+      .then((tree) => setDomainOptions(treeToCascaderOptions(tree)))
+      .catch(() => {});
+    listDictItems("granularity")
+      .then((items) => setGranularityOptions(dictToOptions(items)))
+      .catch(() => {});
+    listDictItems("unit")
+      .then((items) => setUnitOptions(dictToOptions(items)))
+      .catch(() => {});
+  }, []);
 
   // 支持从全局搜索栏经 ?kw= 直达定位；初始值已由 useState 承接，
   // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
@@ -222,6 +261,7 @@ export function Templates() {
           placeholder="未指派"
           value={t.owner_id ?? undefined}
           allowClear
+          disabled={!can("template:assign-owner")}
           options={users
             .filter((u) => u.status !== "DISABLED")
             .map((u) => ({ value: u.id, label: u.display_name }))}
@@ -250,7 +290,10 @@ export function Templates() {
           >
             {favCodes.has(t.code) ? "已收藏" : "收藏"}
           </Button>
-          <Button type="link" onClick={() => openInstantiate(t)}>实例化指标</Button>
+          <Button type="link" icon={<ReadOutlined />} onClick={() => setDetailTpl(t)}>详情</Button>
+          {can("template:instantiate") && (
+            <Button type="link" onClick={() => openInstantiate(t)}>实例化指标</Button>
+          )}
         </Space>
       ),
     },
@@ -310,6 +353,12 @@ export function Templates() {
         width={560}
       >
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
+          {instantiateTarget?.required_fields?.length ? (
+            <div style={{ marginBottom: 12 }}>
+              <Tag color="orange">本模板必填字段</Tag>
+              <span className="muted">{instantiateTarget.required_fields.join("、")}</span>
+            </div>
+          ) : null}
           <Space style={{ width: "100%" }} wrap>
             <Form.Item name="metric_code" label="指标编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>} style={{ width: 240 }}>
               <Input className="mono" placeholder="留空自动生成" />
@@ -318,16 +367,32 @@ export function Templates() {
               <Input />
             </Form.Item>
             <Form.Item name="domain" label="业务域" rules={[{ required: true }]} style={{ width: 240 }}>
-              <Input />
+              <Cascader
+                options={domainOptions}
+                placeholder="选择业务域（树形）"
+                showSearch
+                loading={!domainOptions.length}
+                allowClear
+              />
             </Form.Item>
             <Form.Item name="type" label="类型" style={{ width: 240 }}>
               <Select options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="granularity" label="粒度" style={{ width: 240 }}>
-              <Input />
+              <Select
+                options={granularityOptions.length ? granularityOptions : undefined}
+                showSearch
+                placeholder={granularityOptions.length ? "选择粒度" : "输入粒度（字典未加载）"}
+                allowClear
+              />
             </Form.Item>
             <Form.Item name="unit" label="单位" style={{ width: 240 }}>
-              <Input />
+              <Select
+                options={unitOptions.length ? unitOptions : undefined}
+                showSearch
+                placeholder={unitOptions.length ? "选择单位" : "输入单位（字典未加载）"}
+                allowClear
+              />
             </Form.Item>
             <Form.Item name="aggregation" label="聚合" style={{ width: 240 }}>
               <Select options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE"].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }))} />
@@ -343,6 +408,45 @@ export function Templates() {
             </Form.Item>
           </Space>
         </Form>
+      </Modal>
+
+      {/* 模板详情：描述 / 必填字段 / 默认口径 / 默认属性（数据行已含，无需额外接口） */}
+      <Modal
+        title={detailTpl ? `模板详情：${detailTpl.name}` : "模板详情"}
+        open={!!detailTpl}
+        onCancel={() => setDetailTpl(null)}
+        footer={<Button onClick={() => setDetailTpl(null)}>关闭</Button>}
+        width={620}
+        destroyOnHidden
+      >
+        {detailTpl ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Descriptions column={2} size="small" bordered>
+              <Descriptions.Item label="模板编码"><span className="mono">{detailTpl.code}</span></Descriptions.Item>
+              <Descriptions.Item label="业务域"><span className="mono">{detailTpl.domain}</span></Descriptions.Item>
+              <Descriptions.Item label="类型">{enumLabel(METRIC_TYPE_LABEL, detailTpl.type) ?? detailTpl.type}</Descriptions.Item>
+              <Descriptions.Item label="粒度">{enumLabel(GRANULARITY_LABEL, detailTpl.granularity) ?? detailTpl.granularity}</Descriptions.Item>
+              <Descriptions.Item label="聚合">{enumLabel(AGGREGATION_LABEL, detailTpl.aggregation) ?? detailTpl.aggregation}</Descriptions.Item>
+              <Descriptions.Item label="数仓层">{enumLabel(DW_LAYER_LABEL, detailTpl.dw_layer) ?? detailTpl.dw_layer}</Descriptions.Item>
+              <Descriptions.Item label="新鲜度">{enumLabel(FRESHNESS_LABEL, detailTpl.freshness) ?? detailTpl.freshness}</Descriptions.Item>
+              <Descriptions.Item label="状态">{detailTpl.is_active ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>}</Descriptions.Item>
+              <Descriptions.Item label="必填字段" span={2}>
+                {detailTpl.required_fields?.length ? detailTpl.required_fields.join("、") : <span className="muted">—</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="描述" span={2}>
+                {detailTpl.description || <span className="muted">—</span>}
+              </Descriptions.Item>
+            </Descriptions>
+            {detailTpl.defaults_json?.definition_json ? (
+              <div>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>默认口径（实例化时自动合并）</div>
+                <pre className="mono" style={{ fontSize: 12, maxHeight: 200, overflow: "auto", background: "#fafafa", padding: 8, borderRadius: 6, margin: 0 }}>
+                  {JSON.stringify(detailTpl.defaults_json.definition_json, null, 2)}
+                </pre>
+              </div>
+            ) : null}
+          </Space>
+        ) : null}
       </Modal>
     </div>
   );
