@@ -885,3 +885,15 @@ async def test_update_member_published_rename_allowed() -> None:
         "geo_region", "child", DimensionMemberUpdate(member_name="改名")
     )
     assert result.member_name == "改名"
+
+
+async def test_create_member_default_draft() -> None:
+    """新成员默认 DRAFT（对齐维度主体/指标/术语状态机起点），须显式发布后才被下游消费。"""
+    from app.services.dimension.schemas import DimensionMemberCreate
+
+    req = DimensionMemberCreate(
+        dim_code="geo_region",
+        member_name="华东",
+        parent_code=None,
+    )
+    assert req.status == "DRAFT"

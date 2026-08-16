@@ -88,7 +88,7 @@ class DimensionMemberCreate(BaseModel):
     parent_code: str | None = Field(None, max_length=64)
     path: str | None = Field(None, max_length=512)  # 缺省由服务端按父级路径自动推测
     attributes: dict[str, Any] | None = None
-    status: str = "PUBLISHED"
+    status: str = "DRAFT"  # 默认草稿：新成员先进入未发布态（对齐维度主体/指标/术语的状态机起点），显式发布后才被下游消费
 
     @field_validator("member_name")
     @classmethod
