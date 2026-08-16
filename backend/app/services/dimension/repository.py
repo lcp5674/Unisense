@@ -49,15 +49,17 @@ class DimensionRepository:
             stmt = stmt.where(Dimension.owner_id == owner_id)
         if keyword:
             # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
-            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
             stmt = stmt.where(
                 or_(
-                    Dimension.dim_code.like(f"%{escaped}%"),
-                    Dimension.name.like(f"%{escaped}%"),
-                    Dimension.description.like(f"%{escaped}%"),
+                    Dimension.dim_code.like(f"%{escaped}%", escape="/"),
+                    Dimension.name.like(f"%{escaped}%", escape="/"),
+                    Dimension.description.like(f"%{escaped}%", escape="/"),
                 )
             )
-        rows = (await self._session.execute(stmt)).all()
+        rows = (
+            await self._session.execute(stmt.order_by(Dimension.id.asc()))
+        ).all()
         return [(dim, count) for dim, count in rows]
 
     async def save_member(self, obj: DimensionMember) -> DimensionMember:

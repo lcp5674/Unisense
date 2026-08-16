@@ -100,7 +100,9 @@ class TestDimensionCRUD:
         session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
         await repo.list_dimensions(None, None, "100%_x")
         stmt = _first_stmt(session)
-        assert "100\\%\\_x" in stmt
+        # 转义符为 /：% → /% 、_ → /_，并生成 ESCAPE '/' 子句（防模糊放大）
+        assert "100/%/_x" in stmt
+        assert "ESCAPE '/'" in stmt
 
 
 class TestMemberCRUD:
