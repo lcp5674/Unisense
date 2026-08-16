@@ -9,6 +9,7 @@ import {
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog, SuggestionField, AutoSuggestResponse } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
+import { usePermission } from "../hooks/usePermission";
 
 const { Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -21,10 +22,13 @@ function treeToCascaderOptions(nodes: SubjectDomainTreeNode[]): any[] {
   }));
 }
 
-// 批量注册弹窗：域树扁平化（父子域均可选，域编码作为请求体 domain）
+// 批量注册弹窗：域树扁平化（仅 active 域可选，域编码作为请求体 domain）。
+// 与主表单 Cascader 语义对齐——停用/非 active 域不提供选择，避免选到后端拒绝的域。
 function flattenDomainOptions(nodes: SubjectDomainTreeNode[]): Array<{ value: string; label: string }> {
   return nodes.flatMap((n) => [
-    { value: n.code, label: `${n.name} (${n.code})` },
+    ...(n.status === "active"
+      ? [{ value: n.code, label: `${n.name} (${n.code})` }]
+      : []),
     ...flattenDomainOptions(n.children),
   ]);
 }
@@ -60,7 +64,12 @@ const DICT_FIELD_MAP: Array<{ dictType: string; field: string; label: string }> 
   { dictType: "metric_tier", field: "metric_tier", label: "分级" },
 ];
 
+// 统计周期选项：与粒度字典（granularity dict）对齐，避免同一"周期"概念两套数据源漂移。
+// 字典种子含 minute/hour/day/week/month/quarter/year/realtime（见 seed_domains_dicts.py）。
 const PERIOD_OPTIONS = [
+  { value: "realtime", label: "实时 (realtime)" },
+  { value: "minute", label: "分钟 (minute)" },
+  { value: "hour", label: "小时 (hour)" },
   { value: "day", label: "日 (day)" },
   { value: "week", label: "周 (week)" },
   { value: "month", label: "月 (month)" },
@@ -99,6 +108,9 @@ function InferBadge({ field }: { field: SuggestionField }) {
 export function MetricCreate() {
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
+  // 批量注册按钮级权限：写角色（platform_admin/domain_admin/metric_owner）可用，后端接口强制为最终边界
+  const { can } = usePermission();
+  const canBatchRegister = can("metric:create");
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
 
@@ -576,9 +588,11 @@ export function MetricCreate() {
       </Button>
       <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }} align="center">
         <Title level={3} style={{ margin: 0 }}>注册指标（草稿）</Title>
-        <Button type="dashed" icon={<BarsOutlined />} onClick={openBatchModal}>
-          批量注册指标
-        </Button>
+        <Tooltip title={canBatchRegister ? "批量注册（宽表多度量列 → 批量 DRAFT）" : "仅平台/域管理员与指标 Owner 可批量注册"}>
+          <Button type="dashed" icon={<BarsOutlined />} onClick={openBatchModal} disabled={!canBatchRegister}>
+            批量注册指标
+          </Button>
+        </Tooltip>
       </Space>
       <Spin
         spinning={sqlInferring}
@@ -811,8 +825,12 @@ export function MetricCreate() {
                 />
               </Form.Item>
               {mode === "expression" ? (
-                <Form.Item name="definition" label="口径定义 (JSON)">
-                  <TextArea rows={5} placeholder='{"expr": "sum(amount)", "filters": []}' />
+                <Form.Item
+                  name="definition"
+                  label="口径定义 (JSON)"
+                  extra="结构：expression（聚合表达式）、dependencies（依赖指标编码）、source_tables（来源表）、dimensions（维度编码）。"
+                >
+                  <TextArea rows={5} placeholder='{"expression": "sum(amount)", "dependencies": [], "source_tables": []}' className="mono" />
                 </Form.Item>
               ) : (
                 <Form.Item label="口径 SQL">
