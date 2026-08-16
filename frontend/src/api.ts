@@ -1695,6 +1695,28 @@ export async function deleteDimensionMember(
   );
 }
 
+/** 发布维度成员（POST /dimensions/{dim}/members/{code}/publish，DRAFT → PUBLISHED） */
+export async function publishDimensionMember(
+  dimCode: string,
+  memberCode: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members/${encodeURIComponent(memberCode)}/publish`,
+    { method: "POST" },
+  );
+}
+
+/** 废弃维度成员（POST /dimensions/{dim}/members/{code}/deprecate，→ DEPRECATED） */
+export async function deprecateDimensionMember(
+  dimCode: string,
+  memberCode: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members/${encodeURIComponent(memberCode)}/deprecate`,
+    { method: "POST" },
+  );
+}
+
 /** 编辑维度映射（PUT /dimensions/mappings/{mapping_id}，仅 mapping_type/expression 可改） */
 export async function updateDimensionMapping(
   mappingId: number,

@@ -22,6 +22,8 @@ import {
   createDimensionMember,
   updateDimensionMember,
   deleteDimensionMember,
+  publishDimensionMember,
+  deprecateDimensionMember,
   listDimensionMetrics,
   listMetrics,
   listDomainTree,
@@ -998,6 +1000,28 @@ function MembersTab() {
     }
   }
 
+  async function handlePublishMember(m: DimensionMember) {
+    if (!dimCode) return;
+    try {
+      await publishDimensionMember(dimCode, m.member_code);
+      message.success(`成员「${m.member_name}」已发布`);
+      reload();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "发布失败");
+    }
+  }
+
+  async function handleDeprecateMember(m: DimensionMember) {
+    if (!dimCode) return;
+    try {
+      await deprecateDimensionMember(dimCode, m.member_code);
+      message.success(`成员「${m.member_name}」已废弃`);
+      reload();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "废弃失败");
+    }
+  }
+
   // 成员下拉选项（父级选择框）：展示路径 + 名称，便于识别层级
   function memberOptions(excludeCode?: string) {
     return members
@@ -1089,6 +1113,21 @@ function MembersTab() {
                   ) : (
                     <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(m)}>编辑</Button>
                   ))}
+                {can("dimension:edit") && m.status === "DRAFT" && (
+                  <Button size="small" type="primary" onClick={() => handlePublishMember(m)}>发布</Button>
+                )}
+                {can("dimension:edit") && m.status !== "DEPRECATED" && (
+                  <Popconfirm
+                    title="废弃该成员？"
+                    description="已废弃成员为终态，不可恢复；存在子成员时无法废弃"
+                    okText="废弃"
+                    okButtonProps={{ danger: true }}
+                    trigger="click"
+                    onConfirm={() => handleDeprecateMember(m)}
+                  >
+                    <Button size="small" danger>废弃</Button>
+                  </Popconfirm>
+                )}
                 {can("dimension:edit") && (
                   <Popconfirm
                     title="删除该成员？"

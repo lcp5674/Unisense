@@ -333,6 +333,52 @@ class DimensionService(BaseService):
         await self._repo.commit()
         return member
 
+    async def publish_member(self, dim_code: str, member_code: str) -> DimensionMember:
+        """发布维度成员（DRAFT → PUBLISHED），对齐维度主体状态机。
+
+        仅 DRAFT 可发布；DEPRECATED 为终态不可复活，PUBLISHED 幂等放行。
+        """
+        member = await self._repo.get_member(dim_code, member_code)
+        if member is None:
+            raise NotFoundError(
+                f"维度成员不存在: {dim_code}/{member_code}",
+                ctx={"member_code": member_code},
+            )
+        if member.status == DimensionStatus.DEPRECATED.value:
+            raise UnisenseError(
+                f"已废弃成员不可发布: {dim_code}/{member_code}",
+                error_code="INVALID_STATE",
+            )
+        if member.status == DimensionStatus.PUBLISHED.value:
+            return member
+        member.status = DimensionStatus.PUBLISHED.value
+        await self._repo.commit()
+        return member
+
+    async def deprecate_member(self, dim_code: str, member_code: str) -> DimensionMember:
+        """废弃维度成员（PUBLISHED/DRAFT → DEPRECATED），对齐维度主体状态机。
+
+        废弃保护：存在子成员时禁止废弃——否则子树成员父级悬空（层级权威来源失效）。
+        """
+        member = await self._repo.get_member(dim_code, member_code)
+        if member is None:
+            raise NotFoundError(
+                f"维度成员不存在: {dim_code}/{member_code}",
+                ctx={"member_code": member_code},
+            )
+        if member.status == DimensionStatus.DEPRECATED.value:
+            return member
+        children = await self._repo.list_members(dim_code)
+        has_children = any(m.parent_code == member_code for m in children)
+        if has_children:
+            raise BusinessError(
+                f"成员 {member_code} 存在子成员，无法废弃；请先废弃或迁移子成员",
+                error_code="MEMBER_HAS_CHILDREN",
+            )
+        member.status = DimensionStatus.DEPRECATED.value
+        await self._repo.commit()
+        return member
+
     async def _validate_reparent(
         self,
         member: DimensionMember,

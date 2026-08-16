@@ -410,6 +410,58 @@ async def delete_member(
 
 
 @router.post(
+    "/{dim_code}/members/{member_code}/publish",
+    dependencies=_WRITE_DEPS,
+)
+async def publish_member(
+    dim_code: str,
+    member_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """发布维度成员（DRAFT → PUBLISHED），对齐维度主体状态机。"""
+    resp = await DimensionService(db).publish_member(dim_code, member_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.member.publish",
+        entity_type="dimension_member",
+        entity_id=f"{dim_code}:{member_code}",
+        detail={"status": resp.status},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=None, trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/members/{member_code}/deprecate",
+    dependencies=_WRITE_DEPS,
+)
+async def deprecate_member(
+    dim_code: str,
+    member_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """废弃维度成员（→ DEPRECATED）；存在子成员时拒绝（层级权威保护）。"""
+    resp = await DimensionService(db).deprecate_member(dim_code, member_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.member.deprecate",
+        entity_type="dimension_member",
+        entity_id=f"{dim_code}:{member_code}",
+        detail={"status": resp.status},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=None, trace_id=trace_id)
+
+
+@router.post(
     "/{dim_code}/metrics",
     dependencies=_WRITE_DEPS,
 )

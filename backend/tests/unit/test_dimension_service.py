@@ -934,3 +934,64 @@ async def test_unbind_removes_lineage_dimension_edge() -> None:
     ):
         await svc.unbind_metric_dimension(1, "dim_old")
     assert m.definition_json["dimensions"] == []
+
+
+async def test_publish_member_draft_to_published() -> None:
+    """发布成员：DRAFT → PUBLISHED（对齐维度主体状态机）。"""
+    svc, repo = await _svc()
+    m = SimpleNamespace(dim_code="dim_c", member_code="c1", member_name="线上",
+                        status="DRAFT", parent_code=None)
+    repo.get_member = AsyncMock(return_value=m)
+    await svc.publish_member("dim_c", "c1")
+    assert m.status == "PUBLISHED"
+    repo.commit.assert_awaited()
+
+
+async def test_publish_member_already_published_idempotent() -> None:
+    """已发布成员发布幂等放行（不重复提交）。"""
+    svc, repo = await _svc()
+    m = SimpleNamespace(dim_code="dim_c", member_code="c1", status="PUBLISHED",
+                        parent_code=None)
+    repo.get_member = AsyncMock(return_value=m)
+    await svc.publish_member("dim_c", "c1")
+    assert m.status == "PUBLISHED"
+
+
+async def test_publish_member_deprecated_rejected() -> None:
+    """已废弃成员（终态）禁止发布。"""
+    svc, repo = await _svc()
+    m = SimpleNamespace(dim_code="dim_c", member_code="c1", status="DEPRECATED",
+                        parent_code=None)
+    repo.get_member = AsyncMock(return_value=m)
+    try:
+        await svc.publish_member("dim_c", "c1")
+        assert False, "应拒绝发布已废弃成员"
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "INVALID_STATE"
+
+
+async def test_deprecate_member_with_children_rejected() -> None:
+    """存在子成员时禁止废弃（层级权威保护）。"""
+    svc, repo = await _svc()
+    repo.get_member = AsyncMock(return_value=SimpleNamespace(
+        dim_code="dim_c", member_code="c1", status="PUBLISHED", parent_code=None))
+    repo.list_members = AsyncMock(return_value=[
+        SimpleNamespace(parent_code="c1"),
+        SimpleNamespace(parent_code=None),
+    ])
+    try:
+        await svc.deprecate_member("dim_c", "c1")
+        assert False, "应拒绝废弃含子成员的成员"
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "MEMBER_HAS_CHILDREN"
+
+
+async def test_deprecate_member_leaf_ok() -> None:
+    """叶子成员可废弃；DEPRECATED 幂等。"""
+    svc, repo = await _svc()
+    repo.get_member = AsyncMock(return_value=SimpleNamespace(
+        dim_code="dim_c", member_code="c1", status="PUBLISHED", parent_code=None))
+    repo.list_members = AsyncMock(return_value=[
+        SimpleNamespace(parent_code=None),  # 无子成员
+    ])
+    await svc.deprecate_member("dim_c", "c1")
