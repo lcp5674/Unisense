@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Rate, message, Tabs, Space, Alert, Tooltip, Row, Col } from "antd";
 import { StarOutlined } from "@ant-design/icons";
-import { listFeedback, submitFeedback, updateFeedbackStatus, submitNps, fetchNpsStats, listUsers, getMetric, UnisenseApiError } from "../api";
+import { listFeedback, submitFeedback, updateFeedbackStatus, submitNps, fetchNpsStats, listUsers, UnisenseApiError } from "../api";
 import type { Feedback, NpsStats } from "../types";
 import { formatCnTime, timeAgoCn, parseBackendTime } from "../utils/timeCn";
 
@@ -105,11 +105,8 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
   const [status, setStatus] = useState<string | undefined>();
   const [draft, setDraft] = useState<ProcessDraft | null>(null);
   const [updateLoading, setUpdateLoading] = useState(false);
-  // 业务化解析：user_id → 用户名、target_id(metric) → 指标名
+  // 业务化解析：user_id → 用户名（对象名称由服务端 target_name 直接提供，前端不再逐条探测）
   const [usersMap, setUsersMap] = useState<Record<number, string>>({});
-  const [metricNames, setMetricNames] = useState<Record<string, string>>({});
-  // 解析失败的指标编码（对象已失效/被删除），展示友好标记而非裸编码
-  const [deadMetricCodes, setDeadMetricCodes] = useState<Set<string>>(() => new Set());
   const navigate = useNavigate();
 
   // 加载用户名单：反馈列表「用户」列展示用户名而非数字 ID
@@ -122,37 +119,6 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
       })
       .catch(() => {});
   }, []);
-
-  // 加载当前页指标类反馈的指标名（对象 ID → 业务含义）
-  useEffect(() => {
-    const codes = Array.from(
-      new Set(
-        items.filter((f) => f.target_type === "metric" && f.target_id).map((f) => f.target_id as string),
-      ),
-    );
-    if (!codes.length) return;
-    let alive = true;
-    Promise.all(
-      codes.map((code) => getMetric(code).catch(() => null)),
-    ).then((metrics) => {
-      if (!alive) return;
-      const m: Record<string, string> = {};
-      const dead: Set<string> = new Set();
-      metrics.forEach((metric, i) => {
-        if (metric) m[metric.metric_code] = metric.name;
-        else if (codes[i]) dead.add(codes[i]);
-      });
-      setMetricNames((prev) => ({ ...prev, ...m }));
-      setDeadMetricCodes((prev) => {
-        const next = new Set(prev);
-        dead.forEach((c) => next.add(c));
-        return next;
-      });
-    });
-    return () => {
-      alive = false;
-    };
-  }, [items]);
 
   async function load(p = page, ps = pageSize, tt = targetType, st = status) {
     setLoading(true);
@@ -223,24 +189,20 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
       render: (v: string | null, f: Feedback) => {
         if (!v) return <span className="muted">—</span>;
         if (f.target_type === "metric") {
-          const name = metricNames[v];
-          const dead = deadMetricCodes.has(v);
-          if (name) {
+          // 对象名称由服务端批量解析（target_name），null 表示对象已失效/被删除
+          if (f.target_name) {
             return (
               <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate(`/detail/${v}`)}>
-                {name}（{v}）
+                {f.target_name}（{v}）
               </Button>
             );
           }
-          if (dead) {
-            // 对象已失效/被删除：保留编码但明确标记，避免运营误认为对象仍存在
-            return (
-              <span>
-                <span className="mono">{v}</span> <Tag style={{ marginLeft: 4 }}>已失效</Tag>
-              </span>
-            );
-          }
-          return <span className="mono">{v}</span>;
+          // 保留编码但明确标记，避免运营误认为对象仍存在
+          return (
+            <span>
+              <span className="mono">{v}</span> <Tag style={{ marginLeft: 4 }}>已失效</Tag>
+            </span>
+          );
         }
         return <span className="mono">{v}</span>;
       },

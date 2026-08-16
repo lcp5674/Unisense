@@ -109,7 +109,8 @@ async def test_response_contains_trace_id(
     reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def fake_list(self: ObservabilityService, *args: object, **kwargs: object) -> object:
-        return []
+        # 与 service.list_feedback 返回结构对齐（items/total/page/page_size/target_names）
+        return {"items": [], "total": 0, "page": 1, "page_size": 20, "target_names": {}}
 
     monkeypatch.setattr(ObservabilityService, "list_feedback", fake_list)
     resp = await reader_client.get("/api/v1/observability/feedback")

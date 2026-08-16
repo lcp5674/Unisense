@@ -48,9 +48,12 @@ class ObservabilityRepository:
         page: int,
         page_size: int,
     ) -> tuple[list[Feedback], int]:
-        """反馈列表（分页 + 状态过滤），返回 (items, total)。"""
-        stmt = select(Feedback)
-        count_stmt = select(func.count()).select_from(Feedback)
+        """反馈列表（分页 + 状态过滤 + 软删过滤），返回 (items, total)。"""
+        # 与其它模块一致的软删语义：deleted_at IS NULL 的记录才展示
+        stmt = select(Feedback).where(Feedback.deleted_at.is_(None))
+        count_stmt = (
+            select(func.count()).select_from(Feedback).where(Feedback.deleted_at.is_(None))
+        )
         if target_type:
             stmt = stmt.where(Feedback.target_type == target_type)
             count_stmt = count_stmt.where(Feedback.target_type == target_type)
@@ -70,6 +73,34 @@ class ObservabilityRepository:
             .all()
         )
         return list(rows), total
+
+    async def resolve_target_names(self, items: list[Feedback]) -> dict[int, str | None]:
+        """批量解析反馈对象名称（当前支持 metric 类），供前端直显。
+
+        返回 ``{feedback_id: 对象名称}``；对象不存在/已软删/非 metric 类时该 id 为
+        None（前端据此标记「已失效」）。一次批量查询，避免前端逐条探测详情接口
+        产生 N+1 请求与 404 噪音。
+        """
+        if not items:
+            return {}
+        metric_codes = {
+            f.target_id for f in items if f.target_type == "metric" and f.target_id
+        }
+        names: dict[str, str] = {}
+        if metric_codes:
+            rows = (
+                await self._session.execute(
+                    select(Metric.metric_code, Metric.name).where(
+                        Metric.metric_code.in_(metric_codes),
+                        Metric.deleted_at.is_(None),
+                    )
+                )
+            ).all()
+            names = {code: name for code, name in rows}
+        return {
+            f.id: (names.get(f.target_id) if f.target_type == "metric" and f.target_id else None)
+            for f in items
+        }
 
     async def nps_stats(self) -> dict[str, Any]:
         """NPS 分布统计：promoter≥9 / passive 7-8 / detractor≤6，过滤 nps_score 为空。"""

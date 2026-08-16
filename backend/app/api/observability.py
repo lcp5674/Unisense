@@ -79,9 +79,15 @@ async def list_feedback(
     page_size: int = Query(20, ge=1, le=100),
 ) -> Any:
     data = await ObservabilityService(db).list_feedback(target_type, status, page, page_size)
+    target_names = data.get("target_names", {})
+    items = []
+    for i in data["items"]:
+        resp = FeedbackResponse.from_model(i)
+        resp.target_name = target_names.get(i.id)
+        items.append(resp)
     return ok(
         data={
-            "items": [FeedbackResponse.from_model(i) for i in data["items"]],
+            "items": items,
             "total": data["total"],
             "page": data["page"],
             "page_size": data["page_size"],

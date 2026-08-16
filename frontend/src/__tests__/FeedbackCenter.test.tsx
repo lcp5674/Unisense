@@ -28,6 +28,7 @@ const feedbacks: Feedback[] = [
     user_id: 7,
     target_type: "metric",
     target_id: "sales_gmv",
+    target_name: "销售GMV",
     rating: 4,
     comment: "口径很清楚",
     category: "praise",
@@ -120,6 +121,8 @@ describe("FeedbackCenter 用户反馈", () => {
     // 原始 ISO 串不应直出
     expect(screen.queryByText("2026-08-10T10:00:00")).not.toBeInTheDocument();
     expect(screen.getAllByText(/前|昨天|月\d+日/).length).toBeGreaterThan(0);
+    // 对象名称由服务端 target_name 提供，前端不再逐条 getMetric 探测（消除 404 噪音）
+    expect(mockedGetMetric).not.toHaveBeenCalled();
   });
 
   it("反馈行提供跟进/采纳/驳回处理按钮", async () => {
@@ -176,12 +179,18 @@ describe("FeedbackCenter 用户反馈", () => {
     );
   });
 
-  it("对象已失效（指标不存在）的反馈展示「已失效」标记而非裸编码", async () => {
-    mockedGetMetric.mockRejectedValue(new Error("404"));
+  it("对象已失效（指标不存在）的反馈展示「已失效」标记，且不再触发指标探测请求", async () => {
+    // 服务端 target_name=null 表示对象失效；前端应直显「已失效」，而非逐条探测详情接口
+    const withDeadTarget = feedbacks.map((f) =>
+      f.id === 1 ? { ...f, target_name: null } : f,
+    );
+    mockedList.mockResolvedValue({ items: withDeadTarget, total: 2, page: 1, page_size: 20 } as never);
     render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
     await waitFor(() => expect(screen.getByText("已失效")).toBeInTheDocument());
     // 仍保留编码，但不再显示为可点击的指标链接
     expect(screen.getByText("sales_gmv")).toBeInTheDocument();
+    // 关键：不再逐条 getMetric 探测（此前每次加载列表都产生 404 噪音）
+    expect(mockedGetMetric).not.toHaveBeenCalled();
   });
 
   it("处理按钮按反馈状态差异化：跟进中反馈跟进禁用，已采纳反馈不再提供处理按钮", async () => {

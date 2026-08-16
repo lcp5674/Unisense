@@ -65,11 +65,19 @@ class ObservabilityService(BaseService):
         page: int,
         page_size: int,
     ) -> dict[str, Any]:
-        """反馈列表（分页 + 状态过滤）。"""
+        """反馈列表（分页 + 状态过滤），附服务端解析的对象名称映射。"""
         if page_size > 100:
             page_size = 100
         items, total = await self._repo.list_feedback(target_type, status, page, page_size)
-        return {"items": items, "total": total, "page": page, "page_size": page_size}
+        # 服务端批量解析对象名称：前端直显，避免逐条探测详情接口的 N+1 请求与 404 噪音
+        target_names = await self._repo.resolve_target_names(items)
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "target_names": target_names,
+        }
 
     async def nps_stats(self) -> dict[str, Any]:
         return await self._repo.nps_stats()

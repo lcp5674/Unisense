@@ -1218,6 +1218,8 @@ export interface Feedback {
   user_id: number;
   target_type: string;
   target_id: string | null;
+  /** 反馈对象名称（服务端批量解析；对象失效/删除时为 null，前端标记「已失效」） */
+  target_name?: string | null;
   rating: number | null;
   comment: string | null;
   /** 反馈分类（运营按类分派）：bug/feature/improvement/question/praise */

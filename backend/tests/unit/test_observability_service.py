@@ -8,7 +8,7 @@ import pytest
 
 from app.core.exceptions import NotFoundError, UnisenseError
 from app.models.feedback import Feedback
-from app.services.observability.schemas import FeedbackCreate
+from app.services.observability.schemas import FeedbackCreate, FeedbackResponse
 from app.services.observability.service import ObservabilityService
 
 
@@ -76,12 +76,28 @@ async def test_feedback_create_category_priority_fallback() -> None:
 
 async def test_list_feedback_delegates() -> None:
     svc, repo = await _svc()
-    repo.list_feedback = AsyncMock(return_value=([Feedback(id=1)], 7))
+    repo.list_feedback = AsyncMock(
+        return_value=([Feedback(id=1, target_type="metric", target_id="m1")], 7)
+    )
+    repo.resolve_target_names = AsyncMock(return_value={1: "指标1"})
     out = await svc.list_feedback("term", None, 1, 20)
     assert out["total"] == 7
     assert out["page"] == 1
     assert out["page_size"] == 20
     assert len(out["items"]) == 1
+    # 服务端解析的对象名称映射一并返回（前端直显，避免 N+1 探测）
+    assert out["target_names"] == {1: "指标1"}
+    repo.resolve_target_names.assert_awaited_once()
+
+
+async def test_feedback_response_target_name_field() -> None:
+    """FeedbackResponse 透出 target_name（前端直显对象名称）。"""
+    resp = FeedbackResponse.from_model(
+        Feedback(id=1, user_id=3, target_type="metric", target_id="m1")
+    )
+    resp.target_name = "指标1"
+    assert resp.target_name == "指标1"
+    assert resp.model_dump()["target_name"] == "指标1"
 
 
 async def test_nps_stats_delegates() -> None:

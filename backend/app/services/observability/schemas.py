@@ -54,6 +54,8 @@ class FeedbackResponse(BaseModel):
     user_id: int
     target_type: str
     target_id: str | None = None
+    #: 反馈对象名称（服务端批量解析，前端直显避免 N+1 探测；对象失效/删除时为 None）
+    target_name: str | None = None
     rating: int | None = None
     nps_score: int | None = None
     category: str = "improvement"
