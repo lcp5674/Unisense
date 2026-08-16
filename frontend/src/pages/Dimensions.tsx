@@ -50,6 +50,24 @@ import { usePermission } from "../hooks/usePermission";
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
+// 指标 6 状态中文标签/颜色（区别于维度 3 状态）：绑定指标列表列渲染使用，
+// 避免用维度状态映射渲染指标状态导致 EXPERIMENTAL/REVIEW/DATA_SOURCE_DROPPED 直出英文。
+const METRIC_STATUS_LABEL: Record<string, string> = {
+  DRAFT: "草稿",
+  EXPERIMENTAL: "实验",
+  REVIEW: "审核中",
+  PUBLISHED: "已发布",
+  DEPRECATED: "已废弃",
+  DATA_SOURCE_DROPPED: "数据源下线",
+};
+const METRIC_STATUS_COLOR: Record<string, string> = {
+  DRAFT: "default",
+  EXPERIMENTAL: "processing",
+  REVIEW: "warning",
+  PUBLISHED: "success",
+  DEPRECATED: "error",
+  DATA_SOURCE_DROPPED: "error",
+};
 const RECON_STATUS_LABEL: Record<string, string> = {
   PENDING: "待复核",
   APPROVED: "已通过",
@@ -679,7 +697,7 @@ function DimensionsTab() {
                 },
                 { title: "角色", dataIndex: "role", key: "role", render: (v: string) => ROLE_LABEL[v] ?? v },
                 { title: "默认成员", dataIndex: "default_member", key: "dm", render: (v: string | null) => v ?? <span className="muted">—</span> },
-                { title: "指标状态", dataIndex: "metric_status", key: "status", width: 100, render: (s: string) => <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag> },
+                { title: "指标状态", dataIndex: "metric_status", key: "status", width: 100, render: (s: string) => <Tag color={METRIC_STATUS_COLOR[s]}>{METRIC_STATUS_LABEL[s] ?? s}</Tag> },
               ]}
             />
 
