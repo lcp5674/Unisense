@@ -718,12 +718,12 @@ export function MetricCreate() {
                       )
                     }
                   >
-                    <Input placeholder={suggestedCode ? `点击右侧「一键采纳」使用 ${suggestedCode}` : "4段式: 域_业务对象_度量_周期（留空自动生成）"} />
+                    <Input placeholder={suggestedCode ? `点击右侧「一键采纳」使用 ${suggestedCode}` : "4段式: 域_业务对象_度量_周期（留空自动生成）"} maxLength={64} showCount />
                   </Form.Item>
                 </Col>
                 <Col span={12}>
-                  <Form.Item name="name" label={<span>名称{fieldBadge("name")}</span>} rules={[{ required: true }]}>
-                    <Input placeholder="指标显示名称" />
+                  <Form.Item name="name" label={<span>名称{fieldBadge("name")}</span>} rules={[{ required: true }, { max: 128, message: "名称最长 128 字符" }]}>
+                    <Input placeholder="指标显示名称" maxLength={128} showCount />
                   </Form.Item>
                 </Col>
               </Row>
