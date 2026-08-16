@@ -418,7 +418,7 @@ describe("Governance 权限治理", () => {
     await waitFor(() => expect(mockDeleteRole).toHaveBeenCalledWith("data_analyst"));
   });
 
-  it("授权管理：用户列显示用户名、指标白名单为选项框、可跳转管理用户", async () => {
+  it("授权管理：用户列显示用户名、指标白名单为选项框、可在页内给该用户授权", async () => {
     mockGrants.mockResolvedValue({
       total: 1,
       page: 1,
@@ -442,7 +442,7 @@ describe("Governance 权限治理", () => {
     mockMetrics.mockResolvedValue({
       total: 1,
       page: 1,
-      page_size: 1000,
+      page_size: 100,
       items: [
         { metric_code: "sales_gmv", name: "销售 GMV" } as never,
       ],
@@ -452,13 +452,19 @@ describe("Governance 权限治理", () => {
     await clickTab("授权管理");
     await screen.findByText(/爱丽丝/); // 用户列显示用户名（user_id → username 映射，display_name 带括号）
 
-    // 操作列有「管理用户」按钮
-    expect(screen.getAllByText("管理用户").length).toBeGreaterThan(0);
+    // 操作列有「给该用户授权」按钮（在授权页内直接授权，不再跳转用户管理全局页）
+    const grantBtn = screen
+      .getAllByRole("button", { name: /给该用户授权/ })
+      .find((b) => !(b as HTMLButtonElement).disabled);
+    expect(grantBtn).toBeTruthy();
     // 指标白名单列展示
     expect(screen.getByText("sales_gmv")).toBeTruthy();
 
-    // 新建授权弹窗：指标白名单为多选选项框（不再手动逗号输入）
-    await userEvent.click(screen.getByRole("button", { name: /新建授权/ }));
+    // 点击「给该用户授权」→ 打开批量授权弹窗并预填该用户（user_ids=[1]）
+    await userEvent.click(grantBtn!);
+    expect(await screen.findByText("批量授权（同一参数应用到多个用户）")).toBeInTheDocument();
+    expect(screen.getByText("alice（爱丽丝）")).toBeTruthy();
+    // 批量弹窗内指标白名单为多选选项框（不再手动逗号输入；此时仅批量弹窗打开，placeholder 唯一）
     expect(await screen.findByText("搜索并选择指标编码")).toBeTruthy();
     expect(screen.queryByPlaceholderText("指标白名单（逗号分隔）")).toBeNull();
   });

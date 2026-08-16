@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Alert, Descriptions, Checkbox, Popconfirm, Tooltip } from "antd";
 import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined, AuditOutlined, DeleteOutlined, SettingOutlined, TeamOutlined } from "@ant-design/icons";
-import { useNavigate } from "react-router-dom";
 import {
   fetchMyPermissions,
   listGrants,
@@ -211,7 +210,6 @@ function PermissionsTab() {
 }
 
 function GrantsTab() {
-  const navigate = useNavigate();
   const [items, setItems] = useState<GrantResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -231,6 +229,21 @@ function GrantsTab() {
   const [batchPreview, setBatchPreview] = useState<GrantBatchResult | null>(null);
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchForm] = Form.useForm();
+  // 授权表格行选择（勾选后可在页内直接为该用户/多用户授权，不跳转用户管理）
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  // 「管理用户」→ 在页内打开预填该用户的批量授权弹窗
+  function openGrantForUser(userId: number) {
+    batchForm.setFieldsValue({ user_ids: [userId] });
+    setBatchPreview(null);
+    setBatchModalOpen(true);
+  }
+  // 「批量授权」→ 预填表格勾选用户（若有），否则清空让用户自行选择
+  function openBatchForSelection() {
+    const keys = selectedRowKeys.map(Number);
+    batchForm.setFieldsValue({ user_ids: keys.length ? keys : [] });
+    setBatchPreview(null);
+    setBatchModalOpen(true);
+  }
 
   useEffect(() => {
     listUsers()
@@ -240,7 +253,7 @@ function GrantsTab() {
       .then((tree) => setDomainOptions(flattenDomains(tree)))
       .catch(() => setDomainOptions([]));
     // 指标白名单选项：拉取已发布指标（编码 + 名称，供搜索选择）
-    listMetrics({ status: "PUBLISHED", page: 1, page_size: 1000 })
+    listMetrics({ status: "PUBLISHED", page: 1, page_size: 100 })
       .then((res) =>
         setMetricOptions(
           res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code}（${m.name}）` })),
@@ -410,7 +423,7 @@ function GrantsTab() {
       width: 150,
       render: (_: unknown, g: GrantResponse) => (
         <Space size={4}>
-          <Button size="small" icon={<TeamOutlined />} onClick={() => navigate("/users")}>管理用户</Button>
+          <Button size="small" icon={<TeamOutlined />} onClick={() => openGrantForUser(g.user_id)}>给该用户授权</Button>
           {g.status === "ACTIVE" ? <Button size="small" danger onClick={() => handleRevoke(g)}>回收</Button> : null}
         </Space>
       ),
@@ -431,14 +444,19 @@ function GrantsTab() {
           onChange={(v) => { setStatus(v || ""); setPage(1); }}
           options={[{ value: "ACTIVE", label: "生效" }, { value: "EXPIRED", label: "过期" }, { value: "REVOKED", label: "已回收" }]}
         />
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建授权</Button>
-        <Button icon={<AuditOutlined />} onClick={() => { setBatchModalOpen(true); setBatchPreview(null); }}>批量授权</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => { setModalOpen(true); }}>新建授权</Button>
+        <Button icon={<AuditOutlined />} onClick={openBatchForSelection}>批量授权{selectedRowKeys.length ? `（${selectedRowKeys.length}）` : ""}</Button>
       </Space>
       <Table
         dataSource={items}
         columns={resizableColumns}
         components={resizableComponents}
         rowKey="id"
+        rowSelection={{
+          selectedRowKeys,
+          onChange: setSelectedRowKeys,
+          preserveSelectedRowKeys: true,
+        }}
         loading={loading}
         scroll={{ x: 1100 }}
         pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
@@ -951,7 +969,7 @@ function PiiReviewTab() {
   const [metricOptions, setMetricOptions] = useState<Array<{ value: string; label: string }>>([]);
 
   useEffect(() => {
-    listMetrics({ status: "PUBLISHED", page: 1, page_size: 1000 })
+    listMetrics({ status: "PUBLISHED", page: 1, page_size: 100 })
       .then((res) =>
         setMetricOptions(
           res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code}（${m.name}）` })),
@@ -1055,7 +1073,7 @@ function CheckTab() {
     listDomainTree("active")
       .then((tree) => setDomainOptions(flattenDomains(tree)))
       .catch(() => setDomainOptions([]));
-    listMetrics({ status: "PUBLISHED", page: 1, page_size: 1000 })
+    listMetrics({ status: "PUBLISHED", page: 1, page_size: 100 })
       .then((res) =>
         setMetricOptions(
           res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code}（${m.name}）` })),
