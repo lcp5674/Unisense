@@ -1302,7 +1302,7 @@ export function MetricCatalog() {
         {batchAction === "delete" && (
           <p>
             将删除勾选的 <b>{selected.filter((m) => m.status === "DRAFT").length}</b> 个草稿指标
-            （软删除，仅 platform_admin 可执行）。此操作不可恢复。
+            （软删除，仅 platform_admin 可执行）。如需找回，可在右上角「回收站」中恢复。
           </p>
         )}
       </Modal>
