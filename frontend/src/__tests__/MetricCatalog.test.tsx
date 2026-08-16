@@ -267,7 +267,10 @@ describe("MetricCatalog", () => {
     const calls = mockedList.mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     // 任何一次查询都不得丢失 URL 带来的状态过滤
+    // （跳过批量下线替代指标探针：listMetrics({page_size:100, status:"PUBLISHED"}) 仅 2 键）
     for (const c of calls) {
+      const p = c[0] ?? {};
+      if (Object.keys(p).length === 2 && p.page_size === 100 && p.status === "PUBLISHED") continue;
       expect(c[0]).toMatchObject({ status: "DRAFT" });
     }
   });
@@ -286,6 +289,8 @@ describe("MetricCatalog", () => {
     const calls = mockedList.mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     for (const c of calls) {
+      const p = c[0] ?? {};
+      if (Object.keys(p).length === 2 && p.page_size === 100 && p.status === "PUBLISHED") continue;
       expect(c[0]).toMatchObject({ keyword: "GMV" });
     }
   });
@@ -304,6 +309,8 @@ describe("MetricCatalog", () => {
     const calls = mockedList.mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     for (const c of calls) {
+      const p = c[0] ?? {};
+      if (Object.keys(p).length === 2 && p.page_size === 100 && p.status === "PUBLISHED") continue;
       expect(c[0]).toMatchObject({ owner_id: 2 });
     }
   });

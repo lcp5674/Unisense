@@ -364,6 +364,21 @@ export function MetricCatalog() {
   // 批量打回原因 / 批量下线替代指标映射
   const [batchRejectReason, setBatchRejectReason] = useState("");
   const [batchSuccessors, setBatchSuccessors] = useState<Record<string, string>>({});
+  // 批量下线替代指标选项：已发布指标（排除勾选集内编码，防替代自身/互替代）
+  const [batchSuccessorOptions, setBatchSuccessorOptions] = useState<
+    Array<{ value: string; label: string }>
+  >([]);
+  // 批量下线替代指标选项（惰性：仅在打开批量下线面板时加载一次已发布指标，避免挂载时多余查询）
+  function loadSuccessorOptions() {
+    if (batchSuccessorOptions.length) return;
+    listMetrics({ page_size: 100, status: "PUBLISHED" })
+      .then((r) =>
+        setBatchSuccessorOptions(
+          (r.items ?? []).map((m) => ({ value: m.metric_code, label: `${m.name} (${m.metric_code})` })),
+        ),
+      )
+      .catch(() => setBatchSuccessorOptions([]));
+  }
   // 预览抽屉
   const [previewMetric, setPreviewMetric] = useState<MetricResponse | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -1039,7 +1054,11 @@ export function MetricCatalog() {
                   disabled: !selected.some((m) => m.status === "DRAFT") || currentUserRole !== "platform_admin",
                 },
               ],
-              onClick: ({ key }) => setBatchAction(key as "submit" | "delete" | "approve" | "reject" | "deprecate"),
+              onClick: ({ key }) => {
+                const act = key as "submit" | "delete" | "approve" | "reject" | "deprecate";
+                if (act === "deprecate") loadSuccessorOptions();
+                setBatchAction(act);
+              },
             }}
             trigger={["click"]}
           >
@@ -1336,13 +1355,20 @@ export function MetricCatalog() {
                   <span className="mono" style={{ fontSize: 12, marginRight: 8 }}>
                     {m.metric_code}
                   </span>
-                  <Input
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
                     style={{ width: 280 }}
-                    placeholder="替代指标编码（须已发布）"
-                    value={batchSuccessors[m.metric_code] ?? ""}
-                    onChange={(e) =>
-                      setBatchSuccessors((prev) => ({ ...prev, [m.metric_code]: e.target.value }))
+                    placeholder="选择替代指标（须已发布）"
+                    value={batchSuccessors[m.metric_code] || undefined}
+                    onChange={(v) =>
+                      setBatchSuccessors((prev) => ({ ...prev, [m.metric_code]: v ?? "" }))
                     }
+                    options={batchSuccessorOptions.filter(
+                      (o) => !selected.some((s) => s.metric_code === o.value),
+                    )}
+                    notFoundContent="无已发布指标可作替代"
                   />
                 </div>
               ))}
