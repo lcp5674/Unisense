@@ -266,8 +266,12 @@ export function MetricCatalog() {
   const [ownerFilter, setOwnerFilter] = useState(urlOwnerId);
   const [domain, setDomain] = useState(urlDomain);
   const [tier, setTier] = useState(urlTier);
-  const [sortBy, setSortBy] = useState<"updated_at" | "created_at" | "version" | "metric_code" | "name">("updated_at");
-  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [sortBy, setSortBy] = useState<"updated_at" | "created_at" | "version" | "metric_code" | "name">(
+    (searchParams.get("sort_by") as "updated_at" | "created_at" | "version" | "metric_code" | "name") ?? "updated_at",
+  );
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">(
+    searchParams.get("sort_order") === "asc" ? "asc" : "desc",
+  );
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 主题域 code → status（active/inactive），供域下拉标识停用域
   const [domainStatusMap, setDomainStatusMap] = useState<Map<string, string>>(new Map());
@@ -298,12 +302,14 @@ export function MetricCatalog() {
         if (domain) next.set("domain", domain); else next.delete("domain");
         if (tier) next.set("tier", tier); else next.delete("tier");
         if (lifecycleFilter) next.set("lifecycle", lifecycleFilter); else next.delete("lifecycle");
+        if (sortBy !== "updated_at") next.set("sort_by", sortBy); else next.delete("sort_by");
+        if (sortOrder !== "desc") next.set("sort_order", sortOrder); else next.delete("sort_order");
         return next;
       },
       { replace: true },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, status, domain, tier, lifecycleFilter]);
+  }, [keyword, status, domain, tier, lifecycleFilter, sortBy, sortOrder]);
 
   // URL 直达 ?lifecycle= 时（分享/刷新），按快筛 key 计算真实日期区间；
   // 与 handleLifecycle 交互共用同一日期口径（created_7d=7天前起 / stale_30d=30天前止）
