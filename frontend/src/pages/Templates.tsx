@@ -13,6 +13,7 @@ import {
   updateTemplateOwner,
   listDomainTree,
   listDictItems,
+  getDomainDefaults,
   UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricTemplate, MetricType, UserBrief, SubjectDomainTreeNode } from "../types";
@@ -217,6 +218,27 @@ export function Templates() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyword, isActive, ownerId, page, pageSize]);
+
+  // 实例化选域后预填域默认值（对齐注册指标页 R8）：模板默认口径优先，仅补空字段；
+  // 域默认值是可选项，用户可随时覆盖（惰性设计）
+  async function handleInstantiateDomainChange(value: (string | number)[]) {
+    const code = value?.length ? String(value[value.length - 1]) : "";
+    if (!code) return;
+    try {
+      const defaults = await getDomainDefaults(code);
+      if (!defaults || typeof defaults !== "object") return;
+      const prefill: Record<string, string> = {};
+      for (const [k, v] of Object.entries(defaults)) {
+        if (typeof v !== "string" || !v) continue;
+        // 仅补当前为空/未填的字典字段（模板默认值优先，不覆盖）
+        const current = form.getFieldValue(k);
+        if (current === undefined || current === null || current === "") prefill[k] = v;
+      }
+      if (Object.keys(prefill).length) form.setFieldsValue(prefill);
+    } catch {
+      /* 域默认值加载失败不影响实例化（模板默认兜底） */
+    }
+  }
 
   async function handleCreate(values: Record<string, unknown>) {
     setLoading(true);
@@ -440,6 +462,7 @@ export function Templates() {
                 showSearch
                 loading={!domainOptions.length}
                 allowClear
+                onChange={(v) => void handleInstantiateDomainChange(v ?? [])}
               />
             </Form.Item>
             <Form.Item name="type" label="类型" style={{ width: 240 }}>
