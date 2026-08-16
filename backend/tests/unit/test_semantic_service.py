@@ -3059,6 +3059,48 @@ async def test_register_metric_lineage_full_atomic_skips_dependency_edges():
         repo_inst.upsert_edge.assert_not_awaited()  # atomic 无指标间依赖边
 
 
+async def test_register_metric_lineage_full_registers_dimension_edges():
+    """含 dimensions 的指标：注册 USES_DIMENSION 血缘边（L3，commit=False 交外层事务）。"""
+    svc, _repo = _svc_with_repo()
+    metric = make_metric(
+        type="atomic",
+        definition_json={
+            "expression": "SUM(gmv)",
+            "dimensions": ["dim_store", "dim_channel"],
+            "source_tables": ["dwd_order"],
+        },
+    )
+    with patch("app.services.lineage.service.LineageService") as mock_ls:
+        lineage_svc = mock_ls.return_value
+        lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
+        lineage_svc.register_metric_dimension_edges = AsyncMock(return_value=[])
+
+        await svc._register_metric_lineage_full(metric)
+
+        lineage_svc.register_metric_from_definition.assert_awaited_once_with(metric, commit=False)
+        lineage_svc.register_metric_dimension_edges.assert_awaited_once_with(
+            "sales_gmv_daily", ["dim_store", "dim_channel"], commit=False
+        )
+
+
+async def test_register_metric_lineage_full_skips_dimension_edges_when_absent():
+    """definition 不含 dimensions 时不注册维度边（避免空调用）。"""
+    svc, _repo = _svc_with_repo()
+    metric = make_metric(
+        type="atomic",
+        definition_json={"expression": "SUM(gmv)", "source_tables": ["dwd_order"]},
+    )
+    with patch("app.services.lineage.service.LineageService") as mock_ls:
+        lineage_svc = mock_ls.return_value
+        lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
+        lineage_svc.register_metric_dimension_edges = AsyncMock(return_value=[])
+
+        await svc._register_metric_lineage_full(metric)
+
+        lineage_svc.register_metric_from_definition.assert_awaited_once_with(metric, commit=False)
+        lineage_svc.register_metric_dimension_edges.assert_not_awaited()
+
+
 async def test_register_metric_lineage_full_failure_is_swallowed():
     """血缘注册抛错不向上传播（best-effort，绝不阻断指标创建/发布/更新主流程）。"""
     svc, _repo = _svc_with_repo()
