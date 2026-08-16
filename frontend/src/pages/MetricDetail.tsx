@@ -1014,18 +1014,43 @@ export function MetricDetail() {
                 size="small"
                 icon={<RobotOutlined />}
                 loading={descInferring}
-                onClick={async () => {
-                  setDescInferring(true);
-                  try {
-                    const updated = await inferMetricDescription(metric.metric_code);
-                    message.success(updated.description ? "AI 已生成业务描述" : "暂无可用信息生成描述");
-                    if (updated.description) setMetric(updated);
-                  } catch (err) {
-                    message.error(
-                      err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "生成描述失败",
-                    );
-                  } finally {
-                    setDescInferring(false);
+                onClick={() => {
+                  // 已有 LLM 描述时：后端 force=false 会静默短路返回旧值，
+                  // 前端若直接调用会误报"已生成"却未真正重新生成。故区分：
+                  // 已有 AI 描述 → 确认后 force=true 强制重新生成；
+                  // 无描述/手动描述 → 直接生成（无需确认）。
+                  const hasLlmDesc = metric.description_source === "llm" && !!metric.description;
+                  const run = async () => {
+                    setDescInferring(true);
+                    try {
+                      const updated = await inferMetricDescription(
+                        metric.metric_code,
+                        hasLlmDesc ? { force: true } : undefined,
+                      );
+                      message.success(
+                        updated.description ? "AI 已生成业务描述" : "暂无可用信息生成描述",
+                      );
+                      if (updated.description) setMetric(updated);
+                    } catch (err) {
+                      message.error(
+                        err instanceof UnisenseApiError
+                          ? `${err.message}（${err.codeZh}）`
+                          : "生成描述失败",
+                      );
+                    } finally {
+                      setDescInferring(false);
+                    }
+                  };
+                  if (hasLlmDesc) {
+                    Modal.confirm({
+                      title: "重新生成 AI 描述",
+                      content: "该指标已有 AI 生成描述，重新生成将覆盖当前内容。",
+                      okText: "重新生成",
+                      cancelText: "取消",
+                      onOk: run,
+                    });
+                  } else {
+                    void run();
                   }
                 }}
               >
