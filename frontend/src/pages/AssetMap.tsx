@@ -72,7 +72,6 @@ import {
   inferDescriptions,
   inferMetricDescription,
   inferTableDescription,
-  lineageGraph,
   listCatalogs,
   listDomainTree,
   listMetrics,
@@ -134,14 +133,10 @@ const SENSITIVITY_COLOR: Record<string, string> = {
   UNKNOWN: "default",
 };
 
-// 图谱来源视角选项：资产视角=采集目录表+指标（指标为中心收敛）；血缘视角=完整表级血缘（同血缘视图）
-const GRAPH_SOURCE_OPTIONS = [
-  { value: "asset", label: "资产视角（采集目录）" },
-  { value: "all", label: "全部血缘（含 DP/SQL/指标）" },
-  { value: "dp_csv", label: "DP 同步血缘" },
-  { value: "sqlglot", label: "SQL 解析血缘" },
-  { value: "metric_definition", label: "指标定义血缘" },
-];
+// 图谱来源视角选项（方案A：资产地图聚焦「资产盘点」，血缘深挖引导去血缘视图）
+// 资产视角=采集目录表+指标（指标为中心 depth 收敛）；血缘视角（完整表级血缘）已在血缘视图承接，
+// 不再在此重复提供通道切换，避免与血缘视图同源图造成"重复"困惑。
+const GRAPH_SOURCE_OPTIONS = [{ value: "asset", label: "资产视角（采集目录）" }];
 
 // ---- 指标体系维度标签映射（概览「指标体系」区块）----
 const METRIC_TYPE_LABEL: Record<string, string> = {
@@ -1385,17 +1380,11 @@ function GraphTab() {
         const data = await fetchAssetGraph({ domain, depth: 2, pii_only: piiOnly });
         setGraphData(data);
       } else {
-        // 血缘视角：全通道/指定通道完整表级血缘（与血缘视图血缘图谱同源）。
-        // 注意：provenance 直接透传 graphSource——"all" 交给后端走全通道（含 DP/SQL/指标），
-        // 不能转成 undefined（后端对空 provenance 走采集目录视角，只返回指标小图）。
-        const data = await lineageGraph({
-          provenance: graphSource,
-          limit: 2000,
-        });
-        setGraphData({
-          nodes: data.nodes as unknown as AssetGraphNode[],
-          edges: data.edges as unknown as AssetGraphEdge[],
-        });
+        // 血缘视角分支：方案A 已收敛为「资产视角」默认，通道切换/完整血缘移至血缘视图（/lineage）。
+        // 此分支作为防御保留（历史 URL 可能带 graphSource 参数），非资产视角时提示跳转血缘视图。
+        message.info("完整血缘图谱已移至「血缘与影响」视图");
+        navigate("/lineage");
+        return;
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载图谱数据失败");
@@ -1743,6 +1732,13 @@ function GraphTab() {
             onChange={setGraphSource}
             options={GRAPH_SOURCE_OPTIONS}
           />
+        </Col>
+        <Col>
+          <Tooltip title="要查看完整血缘（含 DP/SQL/指标通道、手动登记、覆盖率治理、数仓分层泳道），请前往「血缘与影响」视图">
+            <Button type="link" size="small" onClick={() => navigate("/lineage")}>
+              完整血缘图谱 →
+            </Button>
+          </Tooltip>
         </Col>
         <Col>
           <span className="muted">域筛选：</span>

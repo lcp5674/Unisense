@@ -329,42 +329,39 @@ describe("AssetMap", () => {
     });
   });
 
-  it("切换来源到血缘通道：调 lineageGraph 展示完整表级血缘", async () => {
+  it("来源下拉锁定资产视角：不再提供血缘通道切换选项（方案A）", async () => {
     const user = userEvent.setup();
     renderAssetMap();
 
-    // 默认资产视角：走 fetchAssetGraph
+    // 默认资产视角：走 fetchAssetGraph，不调用 lineageGraph
     await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
+    expect(lineageGraph).not.toHaveBeenCalled();
 
-    // 切到「全部血缘（含 DP/SQL/指标）」
+    // 展开来源下拉：只有「资产视角」，无血缘通道选项
     const sourceSelect = screen.getByText("来源：").closest(".ant-col") as HTMLElement;
     await user.click(within(sourceSelect).getByRole("combobox"));
-    await user.click(await screen.findByTitle("全部血缘（含 DP/SQL/指标）"));
-
-    await waitFor(() => {
-      expect(lineageGraph).toHaveBeenCalledWith({
-        provenance: "all",
-        limit: 2000,
-      });
-    });
+    // 下拉与触发区都含「资产视角（采集目录）」（≥1 处即存在）
+    const assetLabels = await screen.findAllByText("资产视角（采集目录）");
+    expect(assetLabels.length).toBeGreaterThan(0);
+    // 血缘通道选项已移除（下拉中不应出现）
+    expect(screen.queryByText("全部血缘（含 DP/SQL/指标）")).not.toBeInTheDocument();
+    expect(screen.queryByText("DP 同步血缘")).not.toBeInTheDocument();
   });
 
-  it("切换来源到指定通道：lineageGraph 带 provenance", async () => {
+  it("点击完整血缘引导：跳转血缘视图（/lineage）", async () => {
     const user = userEvent.setup();
-    renderAssetMap();
+    render(
+      <MemoryRouter initialEntries={["/assetmap"]}>
+        <Routes>
+          <Route path="/lineage" element={<div>lineage-page</div>} />
+          <Route path="/assetmap" element={<AssetMap />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByRole("heading", { name: "资产地图" })).toBeInTheDocument());
 
-    await waitFor(() => expect(fetchAssetGraph).toHaveBeenCalled());
-
-    const sourceSelect = screen.getByText("来源：").closest(".ant-col") as HTMLElement;
-    await user.click(within(sourceSelect).getByRole("combobox"));
-    await user.click(await screen.findByTitle("DP 同步血缘"));
-
-    await waitFor(() => {
-      expect(lineageGraph).toHaveBeenCalledWith({
-        provenance: "dp_csv",
-        limit: 2000,
-      });
-    });
+    await user.click(screen.getByRole("button", { name: /完整血缘图谱/ }));
+    await screen.findByText("lineage-page");
   });
 
   it("switches to heatmap tab", async () => {
