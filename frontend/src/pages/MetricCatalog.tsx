@@ -16,6 +16,7 @@ import {
   ClockCircleOutlined,
   ExclamationCircleOutlined,
   ThunderboltOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
 import {
   fetchCurrentUser,
@@ -844,6 +845,11 @@ export function MetricCatalog() {
           <Tooltip title="将当前筛选结果导出为 CSV">
             <Button icon={<DownloadOutlined />} onClick={exportCsv} disabled={!items.length}>
               导出
+            </Button>
+          </Tooltip>
+          <Tooltip title="刷新列表（其他用户的新发布/状态变更会在此同步）">
+            <Button icon={<ReloadOutlined />} onClick={() => { setLoadError(null); load(); }} loading={loading}>
+              刷新
             </Button>
           </Tooltip>
           <Button
