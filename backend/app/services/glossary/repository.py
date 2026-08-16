@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.glossary import GlossaryConflict, TermRelation, TermVersion
@@ -104,6 +105,46 @@ class GlossaryRepository:
         self._session.add(relation)
         await self._session.flush()
         return relation
+
+    async def list_term_relations(self, term_id: int) -> list[dict[str, Any]]:
+        """查某术语的全部关系（作为源或目标），带对端术语信息（名称/编码）。
+
+        Returns:
+            每个元素 ``{relation, peer_term, relation_type}``——``peer_term`` 为对端
+            ``Term``（源时对端是 target，目标时对端是 source）；``relation_type`` 为
+            关系方向归一化（source→target 时原样，target←source 时记录 ``REVERSED`` 语义）。
+        """
+        stmt = select(TermRelation).where(
+            or_(
+                TermRelation.source_term_id == term_id,
+                TermRelation.target_term_id == term_id,
+            ),
+            TermRelation.deleted_at.is_(None),
+        )
+        relations = list((await self._session.execute(stmt)).scalars().all())
+        if not relations:
+            return []
+        # 收集对端术语 ID → 批量取术语名/编码
+        peer_ids = {
+            rel.target_term_id if rel.source_term_id == term_id else rel.source_term_id
+            for rel in relations
+        }
+        peers: dict[int, Term] = {}
+        if peer_ids:
+            peers_stmt = select(Term).where(Term.id.in_(peer_ids))
+            peers = {t.id: t for t in (await self._session.execute(peers_stmt)).scalars().all()}
+        out: list[dict[str, Any]] = []
+        for rel in relations:
+            peer_id = rel.target_term_id if rel.source_term_id == term_id else rel.source_term_id
+            peer = peers.get(peer_id)
+            out.append(
+                {
+                    "relation": rel,
+                    "relation_type": rel.relation_type,
+                    "peer": peer,
+                }
+            )
+        return out
 
     async def commit(self) -> None:
         await self._session.commit()

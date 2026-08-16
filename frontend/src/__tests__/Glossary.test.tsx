@@ -25,6 +25,7 @@ vi.mock("../api", () => {
     getTerm: vi.fn(),
     updateTerm: vi.fn(),
     createTermRelation: vi.fn(),
+    listTermRelations: vi.fn(),
     submitTerm: vi.fn(),
     deprecateTerm: vi.fn(),
     batchSubmitTerms: vi.fn(),
@@ -46,6 +47,7 @@ import {
   getTerm,
   updateTerm,
   createTermRelation,
+  listTermRelations,
   listFavorites,
   batchSubmitTerms,
   batchDeprecateTerms,
@@ -59,6 +61,7 @@ const mockedGet = vi.mocked(getTerm);
 const mockedListFavorites = vi.mocked(listFavorites);
 const mockedUpdate = vi.mocked(updateTerm);
 const mockedRelation = vi.mocked(createTermRelation);
+const mockedListRelations = vi.mocked(listTermRelations);
 const mockedBatchSubmit = vi.mocked(batchSubmitTerms);
 const mockedBatchDeprecate = vi.mocked(batchDeprecateTerms);
 const mockedInfer = vi.mocked(inferTermSuggestion);
@@ -101,6 +104,7 @@ beforeEach(() => {
   mockedConflicts.mockResolvedValue({ items: [], total: 0 });
   mockedListFavorites.mockResolvedValue([]);
   mockedDomainTree.mockResolvedValue([]);
+  mockedListRelations.mockResolvedValue([]);
 });
 
 describe("Glossary 页面", () => {
@@ -269,7 +273,7 @@ describe("Glossary 页面", () => {
     );
 
     await screen.findByText("成交总额");
-    fireEvent.click(screen.getAllByText("关系")[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: /建\s*立\s*关\s*系/ })[0]);
 
     await screen.findByText("建立关系：GMV");
     // 关联目标术语（Select 搜索：下拉选项来自 listTerms；按编码/名称搜索，无需手输 ID）+ 关系类型
@@ -277,7 +281,8 @@ describe("Glossary 页面", () => {
     await screen.findByText("AOV - 客单价");
     fireEvent.click(screen.getByText("AOV - 客单价"));
     fireEvent.mouseDown(screen.getByText("相关（RELATED_TO）"));
-    fireEvent.click(screen.getByRole("button", { name: /建\s*立/ }));
+    // ok 按钮 antd 双字加空格「建 立」，精确匹配建立关系弹窗的提交按钮（不撞「建立关系」行内按钮）
+    fireEvent.click(screen.getByRole("button", { name: "建 立" }));
 
     await waitFor(() => {
       expect(mockedRelation).toHaveBeenCalledWith(
@@ -455,5 +460,57 @@ describe("Glossary 页面", () => {
     // TERMS[1] 是 DEPRECATED → 应显示「再次发布」
     const buttons = screen.getAllByRole("button", { name: /再次发布/ });
     expect(buttons.length).toBeGreaterThan(0);
+  });
+
+  it("关系图谱：点击「关系」查看该术语的上游/下游关系", async () => {
+    mockedListRelations.mockResolvedValue([
+      {
+        relation_type: "SYNONYM_OF",
+        direction: "outgoing",
+        peer: { id: 3, term_code: "GMV_TOTAL", name: "总成交额", domain: "finance", status: "PUBLISHED" },
+      },
+      {
+        relation_type: "BROADER_THAN",
+        direction: "incoming",
+        peer: { id: 4, term_code: "GMV_CN", name: "成交额(中国)", domain: "finance", status: "PUBLISHED" },
+      },
+    ]);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByText("关系")[0]);
+
+    // 弹窗标题 + 中心术语 + 下游/上游分组
+    await screen.findByText("术语关系图谱：GMV");
+    expect(screen.getByText("▲ 上游（引用本术语）")).toBeTruthy();
+    expect(screen.getByText("▼ 下游（本术语引用）")).toBeTruthy();
+    expect(screen.getByText("总成交额")).toBeTruthy();
+    expect(screen.getByText("成交额(中国)")).toBeTruthy();
+    // 关系类型 Tag
+    expect(screen.getByText(/同义（SYNONYM_OF）/)).toBeTruthy();
+    expect(screen.getByText(/上位（BROADER_THAN）/)).toBeTruthy();
+    // 调用接口
+    expect(mockedListRelations).toHaveBeenCalledWith("GMV");
+  });
+
+  it("关系图谱：无关系时展示空态，且可从图谱弹窗进入「建立关系」", async () => {
+    mockedListRelations.mockResolvedValue([]);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByText("关系")[0]);
+
+    await screen.findByText("术语关系图谱：GMV");
+    expect(screen.getByText(/暂无关联术语/)).toBeTruthy();
+    // 从图谱弹窗内点「建立关系」→ 打开建立关系弹窗（限定在弹窗容器内）
+    const graphDialog = await screen.findByRole("dialog");
+    fireEvent.click(within(graphDialog).getByRole("button", { name: /建\s*立\s*关\s*系/ }));
+    await screen.findByText("建立关系：GMV");
   });
 });

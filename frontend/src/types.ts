@@ -942,6 +942,20 @@ export interface TermRelation {
   confirmed_at: string | null;
 }
 
+// 术语关系图谱元素（backend GET /terms/{term_code}/relations 返回）
+// direction：outgoing=本术语→对端（下游）；incoming=对端→本术语（上游）
+export interface TermRelationViewItem {
+  relation_type: string;
+  direction: "outgoing" | "incoming";
+  peer: {
+    id: number;
+    term_code: string;
+    name: string;
+    domain: string | null;
+    status: string;
+  };
+}
+
 // ============================================================================
 // 治理（backend /api/v1/governance + grants + roles + pii + erasure）
 // ============================================================================

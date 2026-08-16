@@ -302,6 +302,38 @@ class GlossaryService(BaseService):
         await self._repo.commit()
         return TermRelationResponse.from_model(relation)
 
+    async def list_term_relations(self, term_code: str) -> list[dict[str, Any]]:
+        """查某术语的全部关系（作为源或目标），供前端关系图谱/详情展示。
+
+        Returns:
+            每个元素 ``{relation_type, direction, peer: {id, term_code, name, domain, status}}``
+            ——``direction`` 为 ``outgoing``（本术语→对端）/ ``incoming``（对端→本术语），
+            前端据此区分箭头方向并渲染关系标签。
+        """
+        term = await self._require_term(term_code)
+        rows = await self._repo.list_term_relations(term.id)
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            relation = row["relation"]
+            peer = row["peer"]
+            if peer is None:
+                continue
+            is_source = relation.source_term_id == term.id
+            out.append(
+                {
+                    "relation_type": row["relation_type"],
+                    "direction": "outgoing" if is_source else "incoming",
+                    "peer": {
+                        "id": peer.id,
+                        "term_code": peer.term_code,
+                        "name": peer.name,
+                        "domain": peer.domain,
+                        "status": peer.status,
+                    },
+                }
+            )
+        return out
+
     async def infer_term_suggestion(self, name: str) -> dict[str, Any]:
         """基于术语名称用 LLM 推断定义/同义词/边界说明（返回结构化建议）。
 

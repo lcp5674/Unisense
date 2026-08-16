@@ -272,3 +272,15 @@ async def create_relation(
     )
     await db.commit()
     return ok(data=resp, trace_id=trace_id)
+
+
+@router.get("/{term_code}/relations", dependencies=_READ_DEPS)
+async def list_term_relations(
+    term_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """查某术语的全部关系（作为源或目标），供前端关系图谱/详情展示。"""
+    data = await GlossaryService(db).list_term_relations(term_code)
+    return ok(data={"items": data, "total": len(data)}, trace_id=trace_id)

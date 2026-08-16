@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Descriptions } from "antd";
-import { PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, ThunderboltOutlined, LoadingOutlined } from "@ant-design/icons";
+import { PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, ThunderboltOutlined, LoadingOutlined, ApartmentOutlined } from "@ant-design/icons";
 import {
   listTerms,
   createTerm,
   getTerm,
   updateTerm,
   createTermRelation,
+  listTermRelations,
   submitTerm,
   deprecateTerm,
   batchSubmitTerms,
@@ -21,7 +22,7 @@ import {
   removeFavorite,
   UnisenseApiError,
 } from "../api";
-import type { GlossaryTerm, GlossaryConflict, SubjectDomainTreeNode } from "../types";
+import type { GlossaryTerm, GlossaryConflict, SubjectDomainTreeNode, TermRelationViewItem } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 
 const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
@@ -114,6 +115,10 @@ function TermsTab() {
   // 关系目标术语选项（Select 搜索）
   const [relationOptions, setRelationOptions] = useState<{ value: number; label: string }[]>([]);
   const [relationLoading, setRelationLoading] = useState(false);
+  // 术语关系图谱查看：中心术语 + 上游/下游关系列表
+  const [relationViewTerm, setRelationViewTerm] = useState<GlossaryTerm | null>(null);
+  const [relationViewItems, setRelationViewItems] = useState<TermRelationViewItem[]>([]);
+  const [relationViewLoading, setRelationViewLoading] = useState(false);
   // 详情/编辑/关系管理：详情为只读弹窗，编辑与关系用独立 Form 避免与新建表单互相污染
   const [detailTerm, setDetailTerm] = useState<GlossaryTerm | null>(null);
   const [editTarget, setEditTarget] = useState<GlossaryTerm | null>(null);
@@ -352,6 +357,21 @@ function TermsTab() {
     }
   }
 
+  // 关系图谱查看：加载该术语的全部关系（上游 incoming / 下游 outgoing）
+  async function openRelationView(t: GlossaryTerm) {
+    setRelationViewTerm(t);
+    setRelationViewItems([]);
+    setRelationViewLoading(true);
+    try {
+      const items = await listTermRelations(t.term_code);
+      setRelationViewItems(items);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载关系失败");
+    } finally {
+      setRelationViewLoading(false);
+    }
+  }
+
   // 关系管理：为当前术语建立与另一术语的关系（目标按关键词搜索选择，不手输 ID）
   function openRelation(t: GlossaryTerm) {
     setRelationTarget(t);
@@ -390,12 +410,13 @@ function TermsTab() {
     {
       title: "操作",
       key: "actions",
-      width: 340,
+      width: 420,
       render: (_: unknown, t: GlossaryTerm) => (
         <Space wrap>
           <Button size="small" type="link" onClick={() => openDetail(t)}>详情</Button>
           <Button size="small" type="link" onClick={() => openEdit(t)}>编辑</Button>
-          <Button size="small" type="link" onClick={() => openRelation(t)}>关系</Button>
+          <Button size="small" type="link" icon={<ApartmentOutlined />} onClick={() => openRelationView(t)}>关系</Button>
+          <Button size="small" type="link" onClick={() => openRelation(t)}>建立关系</Button>
           <Button
             size="small"
             type="link"
@@ -563,6 +584,90 @@ function TermsTab() {
             <Input.TextArea rows={2} placeholder="如：不含退款订单" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 术语关系图谱：中心术语 + 上游（对端→本术语）+ 下游（本术语→对端），展示相互关系 */}
+      <Modal
+        title={relationViewTerm ? `术语关系图谱：${relationViewTerm.term_code}` : "术语关系图谱"}
+        open={relationViewTerm !== null}
+        onCancel={() => setRelationViewTerm(null)}
+        width={720}
+        footer={[
+          <Button
+            key="add"
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => {
+              if (relationViewTerm) {
+                const t = relationViewTerm;
+                setRelationViewTerm(null);
+                openRelation(t);
+              }
+            }}
+          >
+            建立关系
+          </Button>,
+          <Button key="close" onClick={() => setRelationViewTerm(null)}>关闭</Button>,
+        ]}
+      >
+        {relationViewTerm && (
+          <div style={{ marginTop: 8 }}>
+            {/* 中心术语 */}
+            <div style={{ textAlign: "center", marginBottom: 16 }}>
+              <Tag color="geekblue" style={{ fontSize: 14, padding: "4px 14px" }}>
+                {relationViewTerm.name} <span className="mono">（{relationViewTerm.term_code}）</span>
+              </Tag>
+              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                域：{relationViewTerm.domain ?? "—"} · {STATUS_LABEL[relationViewTerm.status] ?? relationViewTerm.status}
+              </div>
+            </div>
+
+            {relationViewLoading ? (
+              <div style={{ textAlign: "center", padding: 24 }}>
+                <LoadingOutlined /> 加载关系中…
+              </div>
+            ) : relationViewItems.length === 0 ? (
+              <div className="muted" style={{ textAlign: "center", padding: 24 }}>
+                暂无关联术语，点击右下角「建立关系」添加。
+              </div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                {/* 上游：对端 → 本术语 */}
+                <div>
+                  <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>▲ 上游（引用本术语）</div>
+                  {relationViewItems
+                    .filter((i) => i.direction === "incoming")
+                    .map((i) => (
+                      <div key={i.peer.id} style={{ border: "1px solid #eef1f4", borderRadius: 6, padding: 8, marginBottom: 8 }}>
+                        <Tag color="blue">{RELATION_TYPE_LABEL[i.relation_type] ?? i.relation_type}</Tag>
+                        <div style={{ marginTop: 4 }}>{i.peer.name}</div>
+                        <div className="mono muted" style={{ fontSize: 12 }}>{i.peer.term_code}</div>
+                      </div>
+                    ))}
+                  {!relationViewItems.some((i) => i.direction === "incoming") && (
+                    <div className="muted" style={{ fontSize: 12 }}>无上游</div>
+                  )}
+                </div>
+                {/* 下游：本术语 → 对端 */}
+                <div>
+                  <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>▼ 下游（本术语引用）</div>
+                  {relationViewItems
+                    .filter((i) => i.direction === "outgoing")
+                    .map((i) => (
+                      <div key={i.peer.id} style={{ border: "1px solid #eef1f4", borderRadius: 6, padding: 8, marginBottom: 8 }}>
+                        <Tag color="green">{RELATION_TYPE_LABEL[i.relation_type] ?? i.relation_type}</Tag>
+                        <div style={{ marginTop: 4 }}>{i.peer.name}</div>
+                        <div className="mono muted" style={{ fontSize: 12 }}>{i.peer.term_code}</div>
+                      </div>
+                    ))}
+                  {!relationViewItems.some((i) => i.direction === "outgoing") && (
+                    <div className="muted" style={{ fontSize: 12 }}>无下游</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </Modal>
 
       {/* 关系管理：为目标术语建立术语间关系（目标按数据库 id 定位） */}

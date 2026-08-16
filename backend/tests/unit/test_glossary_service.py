@@ -429,3 +429,46 @@ def test_relation_type_enum_has_eight_values() -> None:
         "DERIVED_FROM",
         "INSTANCE_OF",
     }
+
+
+async def test_list_term_relations_outgoing_and_incoming() -> None:
+    """查术语关系：出向（本术语→对端）与入向（对端→本术语）都返回，带对端信息。"""
+    from unittest.mock import MagicMock
+
+    from app.models.glossary import TermRelation
+
+    db = MagicMock()
+    svc = GlossaryService(db)
+    repo = MagicMock()
+
+    term = _make_term()
+    term.id = 1
+    repo.get_term = AsyncMock(return_value=term)
+
+    peer_src = _make_term()
+    peer_src.id = 2
+    peer_src.term_code = "c2"
+    peer_src.name = "源头术语"
+    peer_tgt = _make_term()
+    peer_tgt.id = 3
+    peer_tgt.term_code = "c3"
+    peer_tgt.name = "目标术语"
+
+    rel_out = TermRelation(id=10, source_term_id=1, target_term_id=3, relation_type="RELATED_TO")
+    rel_in = TermRelation(id=11, source_term_id=2, target_term_id=1, relation_type="BROADER_THAN")
+    repo.list_term_relations = AsyncMock(
+        return_value=[
+            {"relation": rel_out, "relation_type": "RELATED_TO", "peer": peer_tgt},
+            {"relation": rel_in, "relation_type": "BROADER_THAN", "peer": peer_src},
+        ]
+    )
+    svc._repo = repo
+
+    out = await svc.list_term_relations("c1")
+    assert len(out) == 2
+    assert out[0]["direction"] == "outgoing"  # 源是 term → 对端是 target
+    assert out[0]["relation_type"] == "RELATED_TO"
+    assert out[0]["peer"]["term_code"] == "c3"
+    assert out[1]["direction"] == "incoming"  # 对端是 source → 本术语是 target
+    assert out[1]["relation_type"] == "BROADER_THAN"
+    assert out[1]["peer"]["name"] == "源头术语"
