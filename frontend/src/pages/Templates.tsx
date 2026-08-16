@@ -260,6 +260,13 @@ export function Templates() {
   const columns = [
     { title: "模板编码", dataIndex: "code", key: "code", render: (v: string) => <span className="mono">{v}</span> },
     { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
+    {
+      title: "状态",
+      dataIndex: "is_active",
+      key: "is_active",
+      width: 90,
+      render: (v: boolean) => (v ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>),
+    },
     { title: "域", dataIndex: "domain", key: "domain", width: 140 },
     {
       title: "负责人",
