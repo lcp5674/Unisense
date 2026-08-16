@@ -75,11 +75,24 @@ export function Templates() {
   const [unitOptions, setUnitOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 模板详情弹窗（默认口径 / 必填字段 / 描述）
   const [detailTpl, setDetailTpl] = useState<MetricTemplate | null>(null);
+  // 域 code → 中文名映射（列表「域」列显示中文名，与指标目录一致）
+  const [domainMap, setDomainMap] = useState<Record<string, string>>({});
 
   // 加载域树与字典项，供实例化弹窗选项（惰性选择原则）
   useEffect(() => {
     listDomainTree()
-      .then((tree) => setDomainOptions(treeToCascaderOptions(tree)))
+      .then((tree) => {
+        setDomainOptions(treeToCascaderOptions(tree));
+        const m: Record<string, string> = {};
+        const walk = (nodes: SubjectDomainTreeNode[]) => {
+          for (const n of nodes) {
+            m[n.code] = n.name;
+            if (n.children?.length) walk(n.children);
+          }
+        };
+        walk(tree);
+        setDomainMap(m);
+      })
       .catch(() => {});
     listDictItems("granularity")
       .then((items) => setGranularityOptions(dictToOptions(items)))
@@ -267,7 +280,7 @@ export function Templates() {
       width: 90,
       render: (v: boolean) => (v ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>),
     },
-    { title: "域", dataIndex: "domain", key: "domain", width: 140 },
+    { title: "域", dataIndex: "domain", key: "domain", width: 140, render: (v: string) => domainMap[v] ?? v },
     {
       title: "负责人",
       dataIndex: "owner_id",
