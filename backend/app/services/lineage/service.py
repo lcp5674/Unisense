@@ -438,6 +438,21 @@ class LineageService(BaseService):
                     change_reason="metric_definition",
                 )
             )
+        # 指标间血缘（原子→衍生/复合）：definition_json.dependencies（指标编码数组）
+        # → metric:{依赖} → metric:{当前}（DERIVED_FROM，L3）。注册后血缘图可展示
+        # 「基于哪些指标构建」的完整派生链；依赖非字符串或为空时静默跳过。
+        for dep in definition.get("dependencies") or []:
+            dep_code = dep.get("code") or dep.get("metric_code") if isinstance(dep, dict) else dep
+            if isinstance(dep_code, str) and dep_code and dep_code != metric_code:
+                edges.append(
+                    await self._repo.upsert_metric_edge(
+                        from_metric=dep_code,
+                        to_metric=metric_code,
+                        edge_type="DERIVED_FROM",
+                        provenance="metric_definition",
+                        change_reason="metric_definition",
+                    )
+                )
         # 指标↔维度：definition_json.dimensions（字符串数组或 {code,role} 对象数组）
         for dim in definition.get("dimensions") or []:
             dim_code = dim.get("code") or dim.get("dim_code") if isinstance(dim, dict) else dim
