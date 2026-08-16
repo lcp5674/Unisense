@@ -14,6 +14,7 @@ vi.mock("../api", () => ({
   listFavorites: vi.fn(),
   getMetricHealth: vi.fn(),
   listDictItems: vi.fn(),
+  listDimensions: vi.fn(),
   listDomainTree: vi.fn(),
   listUsers: vi.fn(),
   listSubscriptions: vi.fn(),
@@ -62,6 +63,7 @@ import {
   fetchMyPermissions,
   listDomainTree,
   listDictItems,
+  listDimensions,
   listFavorites,
   getMetricHealth,
   listUsers,
@@ -88,6 +90,7 @@ const mockedMyPerms = vi.mocked(fetchMyPermissions);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 const mockedDomainTree = vi.mocked(listDomainTree);
 const mockedDictItems = vi.mocked(listDictItems);
+const mockedDimensions = vi.mocked(listDimensions);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedHealth = vi.mocked(getMetricHealth);
 const mockedUsers = vi.mocked(listUsers);
@@ -171,6 +174,7 @@ describe("MetricDetail", () => {
     mockedGetMetric.mockResolvedValue(metric);
     mockedListVersions.mockResolvedValue([]);
     mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
     mockedDomainTree.mockResolvedValue([
       { id: 1, code: "sales", name: "销售域", parent_id: null, level: 1, sort_order: 0, status: "active", metric_count: 0, children: [] },
     ]);
@@ -848,6 +852,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT" });
     mockedListVersions.mockResolvedValue([]);
     mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
     mockedDomainTree.mockResolvedValue([
       { id: 1, code: "sales", name: "销售域", parent_id: null, level: 1, sort_order: 0, status: "active", metric_count: 0, children: [] },
     ]);
@@ -895,6 +900,56 @@ describe("MetricDetail 按钮级权限过滤", () => {
       expect(mockedUpdateMetric).toHaveBeenCalledWith(
         "sales_gmv_sum_d",
         expect.objectContaining({ name: "销售 GMV", change_reason: "修正口径描述", row_version: metric.row_version }),
+      );
+    });
+  });
+
+  it("编辑弹窗关联维度回填并合入口径 definition_json.dimensions", async () => {
+    // 第二个 describe 无 beforeEach，显式补全 Promise.all 依赖
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      definition_json: { expression: "sum(gmv)", dimensions: ["dim_channel"] },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({
+      items: [{ id: 1, dim_code: "dim_channel", name: "渠道", domain: "sales", type: "SCD1", owner_id: 1, status: "PUBLISHED", created_at: "", updated_at: "" }],
+      total: 1,
+    });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 填变更原因并保存 → definition_json.dimensions 保留回填的维度
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "修正口径" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      expect(mockedUpdateMetric).toHaveBeenCalledWith(
+        "sales_gmv_sum_d",
+        expect.objectContaining({ definition_json: expect.objectContaining({ dimensions: ["dim_channel"] }) }),
       );
     });
   });

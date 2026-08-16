@@ -47,6 +47,7 @@ import {
   getMetricHealth,
   inferMetricDescription,
   listDictItems,
+  listDimensions,
   listDomainTree,
   listFavorites,
   listSubscriptions,
@@ -67,6 +68,7 @@ import type {
   ArchivedMetricResponse,
   SubjectDomainTreeNode,
   CurrentUser,
+  Dimension,
   MetricHealth,
   MetricResponse,
   MetricUpdateRequest,
@@ -496,23 +498,34 @@ export function MetricDetail() {
   const [editUnitOptions, setEditUnitOptions] = useState<Array<{ value: string; label: string }>>(
     [],
   );
+  // 编辑弹窗关联维度（对齐注册页惰性选择）：从平台维度清单多选，写入口径 dimensions
+  const [editDimensionOptions, setEditDimensionOptions] = useState<
+    Array<{ value: string; label: string }>
+  >([]);
+  const [editDims, setEditDims] = useState<string[]>([]);
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const { track } = useTracking();
 
-  // 编辑弹窗字典（粒度/单位）：挂载时加载一次，失败静默（编辑弹窗下拉降级为手输）
+  // 编辑弹窗字典（粒度/单位）+ 平台维度清单：挂载时加载一次，失败静默（编辑弹窗降级为手输）
   useEffect(() => {
     Promise.all([
       listDictItems("granularity").catch(() => [] as SystemDictItem[]),
       listDictItems("unit").catch(() => [] as SystemDictItem[]),
-    ]).then(([g, u]) => {
+      listDimensions({ page_size: 100 }).catch(() => ({ items: [] as Dimension[] })),
+    ]).then(([g, u, dims]) => {
       const opts = (items: SystemDictItem[]) =>
         items
           .filter((it) => it.status === "active")
           .map((it) => ({ value: it.code, label: `${it.label} (${it.code})` }));
       setEditGranularityOptions(opts(g));
       setEditUnitOptions(opts(u));
+      setEditDimensionOptions(
+        (dims.items ?? [])
+          .filter((d) => d.status === "PUBLISHED")
+          .map((d) => ({ value: d.dim_code, label: d.name })),
+      );
     });
   }, []);
 
@@ -677,12 +690,14 @@ export function MetricDetail() {
   function openEdit() {
     if (!metric) return;
     const def = metric.definition_json ?? {};
+    const rawDims = Array.isArray(def.dimensions) ? def.dimensions.map((d) => String(d)) : [];
     editForm.setFieldsValue({
       name: metric.name,
       granularity: metric.granularity,
       unit: metric.unit,
       definition_json: Object.keys(def).length ? JSON.stringify(def, null, 2) : "",
     });
+    setEditDims(rawDims);
     setEditOpen(true);
   }
 
@@ -699,6 +714,14 @@ export function MetricDetail() {
           message.error("口径定义不是合法 JSON，请修正后重试");
           return;
         }
+      }
+      // 关联维度选择器合入 definition_json.dimensions（对齐注册页，血缘生成指标↔维度边）
+      if (editDims.length) {
+        definitionJson = { ...(definitionJson ?? {}), dimensions: editDims };
+      } else if (definitionJson && "dimensions" in definitionJson) {
+        const next = { ...definitionJson };
+        delete next.dimensions;
+        definitionJson = next;
       }
       const req: MetricUpdateRequest = {
         name: String(values.name).trim(),
@@ -1532,6 +1555,22 @@ export function MetricDetail() {
               />
             </Form.Item>
           </Space>
+          <Form.Item
+            label="关联维度"
+            extra="从平台维度清单选择，将写入口径定义 dimensions；血缘图谱据此生成指标↔维度边。"
+            style={{ marginBottom: 8 }}
+          >
+            <Select
+              mode="multiple"
+              value={editDims}
+              onChange={setEditDims}
+              placeholder="选择关联维度（可搜索）"
+              options={editDimensionOptions}
+              showSearch
+              optionFilterProp="label"
+              allowClear
+            />
+          </Form.Item>
           <Form.Item
             name="definition_json"
             label="口径定义（JSON）"
