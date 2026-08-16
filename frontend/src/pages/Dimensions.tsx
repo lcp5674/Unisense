@@ -665,6 +665,7 @@ function DimensionsTab() {
               rowKey="member_code"
               size="small"
               pagination={false}
+              loading={detailLoading}
               locale={{ emptyText: "暂无成员" }}
               columns={[
                 { title: "成员编码", dataIndex: "member_code", key: "code", render: (v: string) => <span className="mono">{v}</span> },
@@ -679,6 +680,7 @@ function DimensionsTab() {
               rowKey="id"
               size="small"
               pagination={false}
+              loading={detailLoading}
               locale={{ emptyText: "暂无相关映射" }}
               columns={[
                 { title: "源维度", dataIndex: "source_dim_code", key: "src", render: (v: string) => <span className="mono">{v}</span> },
@@ -929,7 +931,7 @@ function MembersTab() {
         <br />
         维度值需与指标口径声明的维度保持一致——指标在维度管理绑定后，消费查询即按此维度校验过滤。
       </div>
-      <Space style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <Select
           placeholder="选择维度"
           style={{ width: 260 }}
@@ -937,24 +939,26 @@ function MembersTab() {
           onChange={setDimCode}
           options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}
         />
-        {can("dimension:create") && (
-          <Button icon={<PlusOutlined />} disabled={!dimCode} onClick={() => setModalOpen(true)}>新增值</Button>
-        )}
-        {can("dimension:create") && (
-          <Button
-            icon={<DatabaseOutlined />}
-            disabled={!dimCode}
-            onClick={() => {
-              autoForm.resetFields();
-              setPreviewValues([]);
-              setPreviewTruncated(false);
-              setAutoOpen(true);
-            }}
-          >
-            从表自动获取
-          </Button>
-        )}
-      </Space>
+        <Space>
+          {can("dimension:create") && (
+            <Button icon={<PlusOutlined />} disabled={!dimCode} onClick={() => setModalOpen(true)}>新增值</Button>
+          )}
+          {can("dimension:create") && (
+            <Button
+              icon={<DatabaseOutlined />}
+              disabled={!dimCode}
+              onClick={() => {
+                autoForm.resetFields();
+                setPreviewValues([]);
+                setPreviewTruncated(false);
+                setAutoOpen(true);
+              }}
+            >
+              从表自动获取
+            </Button>
+          )}
+        </Space>
+      </div>
       <Table
         dataSource={buildMemberTree(members)}
         rowKey="member_code"
@@ -1566,7 +1570,7 @@ export function Dimensions() {
           <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
             返回
           </Button>
-          <div className="page-kicker">Governance / Dimensions</div>
+          <div className="page-kicker">指标资产 / 维度管理</div>
           <h2>维度管理</h2>
           <p>维度定义、成员、跨维度映射与口径对账——保证维度语义一致。</p>
         </div>
