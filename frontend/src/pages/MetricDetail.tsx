@@ -1111,7 +1111,12 @@ export function MetricDetail() {
       {metric.pending_conflict && <Tag color="orange">口径冲突待处理</Tag>}
       <ArbitrationMarkTag metric={metric} />
       {metric.gray_tenant_ids && metric.gray_tenant_ids.length > 0 && (
-        <Tag color="purple">灰度 {metric.gray_tenant_ids.length} 租户</Tag>
+        <Tooltip
+          title={`灰度租户：${metric.gray_tenant_ids.join("、")}`}
+          placement="top"
+        >
+          <Tag color="purple">灰度 {metric.gray_tenant_ids.length} 租户</Tag>
+        </Tooltip>
       )}
     </Space>
   );
