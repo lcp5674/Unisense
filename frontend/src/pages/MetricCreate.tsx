@@ -130,6 +130,8 @@ export function MetricCreate() {
   const [dictLoading, setDictLoading] = useState(false);
   // 平台维度清单（维度映射下拉）：来自维度管理模块，支持搜索 + 手动输入兜底
   const [dimensionOptions, setDimensionOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 主表单口径定义区选中的维度（合入 definition_json.dimensions，避免手写 JSON 编码错误）
+  const [selectedDims, setSelectedDims] = useState<string[]>([]);
 
   const [suggesting, setSuggesting] = useState(false);
   const [suggestedCode, setSuggestedCode] = useState<string | null>(null);
@@ -447,15 +449,17 @@ export function MetricCreate() {
     const srcField = src ? { source_table: src } : {};
     const measure = String(values.measure_column || "").trim();
     const measureField = measure ? { measure_column: measure } : {};
+    // 主表单选中的维度 → definition_json.dimensions（血缘注册指标↔维度边）
+    const dimsField = selectedDims.length ? { dimensions: selectedDims } : {};
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
-      return { sql, ...tables, ...srcField, ...measureField };
+      return { sql, ...tables, ...srcField, ...measureField, ...dimsField };
     }
     let def: Record<string, unknown>;
     try { def = values.definition ? JSON.parse(String(values.definition)) : {}; }
     catch { message.error("口径定义需为合法 JSON"); return null; }
-    return { ...def, ...tables, ...srcField, ...measureField };
+    return { ...def, ...tables, ...srcField, ...measureField, ...dimsField };
   }
 
   async function handlePrecheck() {
@@ -864,13 +868,29 @@ export function MetricCreate() {
                 />
               </Form.Item>
               {mode === "expression" ? (
-                <Form.Item
-                  name="definition"
-                  label="口径定义 (JSON)"
-                  extra="结构：expression（聚合表达式）、dependencies（依赖指标编码）、source_tables（来源表）、dimensions（维度编码）。"
-                >
-                  <TextArea rows={5} placeholder='{"expression": "sum(amount)", "dependencies": [], "source_tables": []}' className="mono" />
-                </Form.Item>
+                <>
+                  <Form.Item
+                    label="关联维度（可选）"
+                    extra="从平台维度清单选择，将写入口径定义 dimensions；血缘图谱据此生成指标↔维度边。"
+                  >
+                    <Select
+                      mode="multiple"
+                      placeholder="选择平台维度（可搜索）"
+                      style={{ width: "100%" }}
+                      value={selectedDims}
+                      onChange={setSelectedDims}
+                      options={dimensionOptions}
+                      allowClear
+                    />
+                  </Form.Item>
+                  <Form.Item
+                    name="definition"
+                    label="口径定义 (JSON)"
+                    extra="结构：expression（聚合表达式）、dependencies（依赖指标编码）、source_tables（来源表）、dimensions（已在上方选择）。"
+                  >
+                    <TextArea rows={5} placeholder='{"expression": "sum(amount)", "dependencies": [], "source_tables": []}' className="mono" />
+                  </Form.Item>
+                </>
               ) : (
                 <Form.Item label="口径 SQL">
                   <TextArea rows={5} value={sqlText} onChange={(e) => setSqlText(e.target.value)} placeholder="SELECT SUM(amount) AS gmv\nFROM catalog.sales.orders" className="mono" />
