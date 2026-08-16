@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Button, Card, Col, Row, Tree, Descriptions, Modal, Form, Input, InputNumber,
@@ -159,6 +159,8 @@ export function SubjectDomain() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  // 并发查询防竞态：快速切换树节点时只有最后一次的详情请求允许落地（避免旧节点覆盖新节点）
+  const detailSeq = useRef(0);
   const [detail, setDetail] = useState<SubjectDomain | null>(null);
   const [defaults, setDefaults] = useState<Record<string, unknown>>({});
   // 域默认值弹窗：各字段从字典下拉选择（惰性选择，避免手输非法枚举值）
@@ -244,10 +246,14 @@ export function SubjectDomain() {
   }
 
   async function loadDetail(code: string) {
+    const seq = ++detailSeq.current;
     try {
       const d = await getDomain(code);
+      if (seq !== detailSeq.current) return;
+      if (seq !== detailSeq.current) return;
       setDetail(d);
       const defs = await getDomainDefaults(code);
+      if (seq !== detailSeq.current) return;
       setDefaults(defs);
     } catch { message.error("加载域详情失败"); }
   }
