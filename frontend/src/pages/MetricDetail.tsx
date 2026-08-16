@@ -44,6 +44,7 @@ import {
   fetchRelatedMetrics,
   getMetric,
   getMetricHealth,
+  inferMetricDescription,
   listFavorites,
   listSubscriptions,
   listUsers,
@@ -410,6 +411,8 @@ export function MetricDetail() {
   const navigate = useNavigate();
   const location = useLocation();
   const [metric, setMetric] = useState<MetricResponse | null>(null);
+  // 业务描述 LLM 推断 loading（第 8 轮：详情页补描述生成入口）
+  const [descInferring, setDescInferring] = useState(false);
   // 仲裁作废指标（METRIC_ARCHIVED）：软删 + successor 的历史链接直访时，
   // 展示「醒目引导 + 历史详情 + 跳转权威指标」，而非仅一张错误卡片
   const [archived, setArchived] = useState<{
@@ -908,6 +911,44 @@ export function MetricDetail() {
           </Descriptions.Item>
           <Descriptions.Item label="版本">v{metric.version}</Descriptions.Item>
         </Descriptions>
+      </Card>
+
+      {/* 业务描述（治理补充）：展示已有描述；有权限时可 LLM 推断生成（能力对齐资产地图） */}
+      <Card
+        size="small"
+        style={{ marginBottom: 16 }}
+        title="业务描述"
+        extra={
+          canInferDesc ? (
+            <Button
+              size="small"
+              icon={<RobotOutlined />}
+              loading={descInferring}
+              onClick={async () => {
+                setDescInferring(true);
+                try {
+                  const updated = await inferMetricDescription(metric.metric_code);
+                  message.success(updated.description ? "AI 已生成业务描述" : "暂无可用信息生成描述");
+                  if (updated.description) setMetric(updated);
+                } catch (err) {
+                  message.error(
+                    err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "生成描述失败",
+                  );
+                } finally {
+                  setDescInferring(false);
+                }
+              }}
+            >
+              AI 生成描述
+            </Button>
+          ) : null
+        }
+      >
+        {metric.description ? (
+          <Paragraph style={{ margin: 0, whiteSpace: "pre-wrap" }}>{metric.description}</Paragraph>
+        ) : (
+          <span className="muted">暂无业务描述{canInferDesc ? "，可点击右上角「AI 生成描述」自动生成" : ""}</span>
+        )}
       </Card>
 
       <Card size="small" title="Owner 责任链" style={{ marginBottom: 16 }}>

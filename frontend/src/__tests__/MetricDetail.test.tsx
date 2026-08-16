@@ -29,6 +29,7 @@ vi.mock("../api", () => ({
   submitReview: vi.fn(),
   updateMetric: vi.fn(),
   suggestRenameName: vi.fn(),
+  inferMetricDescription: vi.fn(),
   upsertSubscription: vi.fn(),
   // 详情页子组件依赖
   listQualityEvents: vi.fn().mockResolvedValue({ items: [] }),
@@ -63,6 +64,7 @@ import {
   fetchRelatedMetrics,
   updateMetric,
   suggestRenameName,
+  inferMetricDescription,
   submitReview,
   emergencyPublishMetric,
   recoverSourceDropped,
@@ -71,6 +73,7 @@ import {
 } from "../api";
 const mockedUpdateMetric = vi.mocked(updateMetric);
 const mockedSuggestRename = vi.mocked(suggestRenameName);
+const mockedInferDesc = vi.mocked(inferMetricDescription);
 const mockedGetMetric = vi.mocked(getMetric);
 const mockedFetchArchived = vi.mocked(fetchArchivedMetric);
 const mockedListVersions = vi.mocked(listVersions);
@@ -679,5 +682,15 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() =>
       expect(vi.mocked(confirmDeprecateDropped)).toHaveBeenCalledWith("sales_gmv_sum_d", ""),
     );
+  });
+
+  it("有 infer-description 权限时显示「AI 生成描述」，点击调用接口并展示生成描述", async () => {
+    mockedGetMetric.mockResolvedValue(metric);
+    mockedInferDesc.mockResolvedValue({ ...metric, description: "由 AI 生成的业务描述" });
+    renderWithPerms(["metric:infer-description"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    fireEvent.click(await screen.findByText("AI 生成描述"));
+    await waitFor(() => expect(mockedInferDesc).toHaveBeenCalledWith("sales_gmv_sum_d"));
+    expect(await screen.findByText("由 AI 生成的业务描述")).toBeInTheDocument();
   });
 });
