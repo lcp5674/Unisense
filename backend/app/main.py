@@ -186,6 +186,7 @@ _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "metric.submitted",
     "metric.resubmitted",
     "metric.approved",
+    "metric.gray_published",
     "metric.rejected",
     "metric.deprecated",
     "metric.promoted",

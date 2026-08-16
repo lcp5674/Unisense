@@ -1546,7 +1546,12 @@ class MetricService(BaseService):
 
         await self._cache.invalidate(metric_code)
 
-        # 发布 metric.approved 事件（对齐 FR-014：lineage(Neo4j)/search(ES)/notify）
+        # 发布审批通过事件（对齐 FR-014：lineage(Neo4j)/search(ES)/notify）。
+        # 灰度发布（EXPERIMENTAL，仅指定租户试点）与标准发布（PUBLISHED）语义不同，
+        # 事件/通知须区分，避免 stakeholders 收到「指标已通过」却实际仅灰度试点。
+        is_gray = target_status == "EXPERIMENTAL"
+        event_type = "metric.gray_published" if is_gray else "metric.approved"
+        notify_title = "指标灰度发布" if is_gray else "指标已通过"
         event_payload: dict[str, Any] = {
             "metric_code": metric_code,
             "version": target_version,
@@ -1555,18 +1560,20 @@ class MetricService(BaseService):
             "definition_json": metric.definition_json,
             "mode": request.mode,
         }
+        if is_gray:
+            event_payload["gray_tenant_ids"] = request.gray_tenant_ids or []
         if metric.type in ("derived", "composite"):
             event_payload["dependencies"] = metric.definition_json.get("dependencies", [])
 
         await self._publish_event(
-            "metric.approved",
+            event_type,
             event_payload,
             actor_id=str(actor_id),
         )
-        # 审批流定向闭环：定向通知提交人「已通过」（独立 session，不依赖订阅）
+        # 审批流定向闭环：定向通知提交人「已通过/灰度发布」（独立 session，不依赖订阅）
         await self._notify_metric_stakeholders(
-            "metric.approved",
-            "指标已通过",
+            event_type,
+            notify_title,
             metric_code=metric_code,
             domain=metric.domain,
             submitter_id=metric.submitted_by,
@@ -1574,6 +1581,7 @@ class MetricService(BaseService):
                 "metric_code": metric_code,
                 "version": target_version,
                 "domain": metric.domain,
+                "mode": request.mode,
             },
         )
 
@@ -1583,6 +1591,7 @@ class MetricService(BaseService):
             target_status=target_status,
             version=target_version,
             actor_id=actor_id,
+            is_gray=is_gray,
         )
         return updated
 

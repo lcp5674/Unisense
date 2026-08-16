@@ -52,6 +52,7 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "metric.submitted": "指标待审核",
     "metric.resubmitted": "指标重评审待审核",
     "metric.approved": "指标已通过",
+    "metric.gray_published": "指标灰度发布",
     "metric.rejected": "指标已驳回",
     "metric.deprecated": "指标废弃",
     "metric.voided": "指标作废",

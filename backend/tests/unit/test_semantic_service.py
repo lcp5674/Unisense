@@ -768,6 +768,46 @@ async def test_approve_metric_different_actor_still_allowed():
     assert result.status == "PUBLISHED"
 
 
+async def test_approve_metric_gray_publishes_gray_event():
+    """灰度发布（mode=experimental）→ 状态 EXPERIMENTAL + 发 metric.gray_published 事件（含租户）。
+
+    灰度仅试点指定租户，通知语义须与标准发布区分，避免 stakeholders 收到
+    「指标已通过」却实际仅灰度。R35 修复：灰度发独立事件与标题。
+    """
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_id=99, reviewer_type="user")
+    svc._publish_event = AsyncMock()
+
+    result = await svc.approve_metric(
+        "sales_gmv_daily",
+        MetricApproveRequest(mode="experimental", gray_tenant_ids=[101, 102], target_version=1),
+        actor_id=99,
+        role="reviewer",
+    )
+
+    assert result is not None  # mock 固定返回 PUBLISHED，此处仅验证事件语义
+    event_type, payload = svc._publish_event.call_args.args[:2]
+    assert event_type == "metric.gray_published"
+    assert payload["gray_tenant_ids"] == [101, 102]
+
+
+async def test_approve_metric_standard_publishes_approved_event():
+    """标准发布（mode=standard）→ 发 metric.approved 事件（灰度事件不误发）。"""
+    svc, repo = _svc_with_repo()
+    _svc_approve_ready(svc, repo, submitted_by=1, reviewer_id=99, reviewer_type="user")
+    svc._publish_event = AsyncMock()
+
+    await svc.approve_metric(
+        "sales_gmv_daily",
+        MetricApproveRequest(mode="standard", target_version=1),
+        actor_id=99,
+        role="reviewer",
+    )
+
+    event_type = svc._publish_event.call_args.args[0]
+    assert event_type == "metric.approved"
+
+
 # ---- 评审指派（TD §13）：提交保存指派 + 仅被指派评审人可通过/打回 ----
 
 
