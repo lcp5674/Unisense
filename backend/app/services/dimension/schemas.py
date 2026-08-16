@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class DimensionCreate(BaseModel):
@@ -21,6 +21,13 @@ class DimensionCreate(BaseModel):
     description: str | None = None
     # PLAT-2: owner_id 允许客户端省略，服务端以认证身份覆盖（防越权指定责任人）。
     owner_id: int | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("维度名称不能为空")
+        return v
 
 
 class DimensionUpdate(BaseModel):
@@ -82,6 +89,13 @@ class DimensionMemberCreate(BaseModel):
     path: str | None = Field(None, max_length=512)  # 缺省由服务端按父级路径自动推测
     attributes: dict[str, Any] | None = None
     status: str = "PUBLISHED"
+
+    @field_validator("member_name")
+    @classmethod
+    def _member_name_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("成员名称不能为空")
+        return v
 
 
 class DimensionMemberUpdate(BaseModel):

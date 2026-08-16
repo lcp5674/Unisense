@@ -36,6 +36,13 @@ class SubjectDomainCreate(BaseModel):
             raise ValueError("域编码须以小写字母开头，仅含小写字母、数字和下划线")
         return v
 
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("域显示名不能为空")
+        return v
+
 
 class SubjectDomainUpdate(BaseModel):
     """更新主题域请求。"""

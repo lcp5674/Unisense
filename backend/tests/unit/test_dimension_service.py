@@ -54,6 +54,24 @@ async def test_create_dimension_persists() -> None:
     repo.save_dimension.assert_awaited()
 
 
+async def test_create_dimension_rejects_blank_name() -> None:
+    """维度名空/纯空白在 schema 层即拒绝（422），不落库空白名。"""
+    from pydantic import ValidationError
+
+    for bad in ("", "   ", "\t\n"):
+        with pytest.raises(ValidationError):
+            DimensionCreate(dim_code="dim1", name=bad, domain="geo")
+
+
+async def test_create_member_rejects_blank_name() -> None:
+    """维度成员名空/纯空白在 schema 层即拒绝（422），不落库空白成员。"""
+    from pydantic import ValidationError
+
+    for bad in ("", "   "):
+        with pytest.raises(ValidationError):
+            DimensionMemberCreate(dim_code="dim1", member_name=bad)
+
+
 async def test_create_dimension_conflict() -> None:
     svc, repo = await _svc()
     repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="dim1"))
