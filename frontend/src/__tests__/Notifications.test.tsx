@@ -65,6 +65,8 @@ function notif(partial: Partial<Notification>): Notification {
     ref_id: 101,
     created_at: "2026-08-10T09:59:00",
     read_at: null,
+    actor_id: null,
+    actor_name: null,
     ...partial,
   };
 }
@@ -532,5 +534,38 @@ describe("通知中心 - 信息展示增强", () => {
     await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
     expect(screen.getByText("影响")).toBeInTheDocument();
     expect(screen.getByText("指标已通过审核，可对外发布使用。")).toBeInTheDocument();
+  });
+
+  it("操作者展示——有姓名快照时显示用户名（谁发起的操作，审计语义）", async () => {
+    const n = notif({
+      id: 50,
+      template_code: "metric.rejected",
+      title: "指标已驳回",
+      actor_id: 3,
+      actor_name: "审核员",
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已驳回")).toBeInTheDocument());
+    expect(screen.getByText("审核员")).toBeInTheDocument();
+  });
+
+  it("操作者展示——仅有 ID 无姓名快照时回落 #ID（用户已删除等场景）", async () => {
+    const n = notif({ id: 51, template_code: "quality.anomaly", title: "数据质量异常", actor_id: 9, actor_name: null });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("数据质量异常")).toBeInTheDocument());
+    expect(screen.getByText("#9")).toBeInTheDocument();
+  });
+
+  it("操作者展示——系统/定时任务事件无 actor，不渲染操作者项", async () => {
+    const n = notif({ id: 52, template_code: "lineage_parsed", title: "血缘已解析" });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("血缘已解析")).toBeInTheDocument());
+    expect(screen.queryByText(/操作人/)).not.toBeInTheDocument();
   });
 });

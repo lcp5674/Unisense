@@ -122,6 +122,18 @@ class NotifyRepository:
         stmt = select(User.email).where(User.id == user_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def get_user_display_name(self, user_id: int) -> str | None:
+        """按用户 ID 解析展示姓名（操作人快照用）：display_name 优先，回落 username。
+
+        用户不存在/已删除时返回 None——通知仍是历史记录，前端回落显示 ID 或隐藏。
+        """
+        stmt = select(User.display_name, User.username).where(User.id == user_id)
+        row = (await self._session.execute(stmt)).first()
+        if row is None:
+            return None
+        display_name, username = row
+        return display_name or username
+
     async def list_event_logs(self, event_type: str | None, limit: int) -> list[EventLog]:
         stmt = select(EventLog)
         if event_type:

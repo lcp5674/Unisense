@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination } from "antd";
-import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined } from "@ant-design/icons";
+import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined, UserOutlined } from "@ant-design/icons";
 import {
   listNotifications,
   listNotifyEvents,
@@ -648,6 +648,15 @@ function NotifListTab() {
                           <LinkOutlined /> {REF_TYPE_LABEL[n.ref_type] ?? n.ref_type} #{n.ref_id}
                         </span>
                       )}
+                      {n.actor_name ? (
+                        <span className="notif-meta-item" title={`操作人 #${n.actor_id ?? ""}`}>
+                          <UserOutlined /> {n.actor_name}
+                        </span>
+                      ) : n.actor_id != null ? (
+                        <span className="notif-meta-item">
+                          <UserOutlined /> #{n.actor_id}
+                        </span>
+                      ) : null}
                       <span className="notif-meta-item">
                         <ClockCircleOutlined /> 触发于 {formatCnTime(n.created_at)}
                       </span>

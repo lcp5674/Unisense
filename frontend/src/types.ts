@@ -1187,6 +1187,10 @@ export interface Notification {
   created_at: string;
   /** 已读时间；null 表示未读（Badge 未读计数 / 未读高亮依据） */
   read_at: string | null;
+  /** 操作人 ID（谁发起的操作；null=系统/定时任务） */
+  actor_id: number | null;
+  /** 操作人姓名快照（服务端解析，历史通知稳定展示） */
+  actor_name: string | null;
 }
 
 export interface NotifyEventLog {
@@ -1197,6 +1201,8 @@ export interface NotifyEventLog {
   level: string;
   notified: boolean;
   created_at: string;
+  actor_id: number | null;
+  actor_name: string | null;
 }
 
 export interface SubscriptionPref {

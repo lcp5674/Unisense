@@ -130,3 +130,29 @@ class TestNotifyRepository:
     async def test_commit(self, repo: NotifyRepository) -> None:
         await repo.commit()
         repo._session.commit.assert_called_once()
+
+    async def test_get_user_display_name_prefers_display(self, repo: NotifyRepository) -> None:
+        """操作人姓名快照：display_name 优先。"""
+        mock_result = MagicMock()
+        mock_result.first.return_value = ("爱丽丝", "alice")
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        name = await repo.get_user_display_name(7)
+        assert name == "爱丽丝"
+
+    async def test_get_user_display_name_falls_back_to_username(
+        self, repo: NotifyRepository
+    ) -> None:
+        """display_name 为空时回落 username。"""
+        mock_result = MagicMock()
+        mock_result.first.return_value = ("", "bob")
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        name = await repo.get_user_display_name(9)
+        assert name == "bob"
+
+    async def test_get_user_display_name_unknown_user(self, repo: NotifyRepository) -> None:
+        """用户不存在/已删除：返回 None（通知仍是历史记录，前端回落展示）。"""
+        mock_result = MagicMock()
+        mock_result.first.return_value = None
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        name = await repo.get_user_display_name(999)
+        assert name is None

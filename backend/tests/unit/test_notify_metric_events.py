@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.main import _BUSINESS_EVENT_TYPES
 from app.models.notify import EventLog, SubscriptionPref
-from app.services.notify.service import _EVENT_TITLE_CN, _humanize_event_title, NotifyService
+from app.services.notify.service import _EVENT_TITLE_CN, NotifyService, _humanize_event_title
 
 #: 语义服务真实发布的全部 metric.* 事件（services/semantic/service.py）
 _REAL_METRIC_EVENTS = (
@@ -76,6 +76,7 @@ def _svc() -> tuple[NotifyService, MagicMock]:
         ]
     )
     repo.save_notification = AsyncMock(side_effect=lambda n: n)
+    repo.get_user_display_name = AsyncMock(return_value="审核员")
     repo.commit = AsyncMock()
     svc._repo = repo  # noqa: SLF001
     return svc, repo
@@ -101,7 +102,29 @@ async def test_metric_approved_flows_through_notify() -> None:
     event = repo.save_event.call_args.args[0]
     assert event.event_type == "metric.approved"
     assert event.source == "metric"
+    # 操作人链路：actor_id 透传 + 姓名快照反查（「谁在何时做了什么」审计语义）
+    assert event.actor_id == 3
+    assert event.actor_name == "审核员"
+    repo.get_user_display_name.assert_awaited_once_with(3)
     # Notification 标题为业务中文（指标已通过），模板编码为事件名
     notif = repo.save_notification.call_args.args[0]
     assert notif.template_code == "metric.approved"
     assert notif.title == "指标已通过"
+    assert notif.actor_id == 3
+    assert notif.actor_name == "审核员"
+
+
+async def test_system_event_without_actor_no_actor_name_resolution() -> None:
+    """系统/定时任务事件无 actor_id：不反查姓名，EventLog/Notification actor 为 None。"""
+    svc, repo = _svc()
+    out = await svc.handle_business_event(
+        {
+            "event_type": "metric.health_critical",
+            "payload": {"metric_code": "sales_gmv_daily", "score": 60, "level": "WARN"},
+        }
+    )
+    assert out["notifications"] == 1
+    event = repo.save_event.call_args.args[0]
+    assert event.actor_id is None
+    assert event.actor_name is None
+    repo.get_user_display_name.assert_not_awaited()

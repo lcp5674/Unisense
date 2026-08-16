@@ -81,6 +81,12 @@ class Notification(Base, BaseModel):
     )
     ref_type: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="关联类型")
     ref_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, comment="关联 ID")
+    actor_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="操作人 ID（谁发起，NULL=系统/定时任务）", index=True
+    )
+    actor_name: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="操作人姓名快照（展示用，历史通知不受后续改名影响）"
+    )
 
 
 class EventLog(Base, BaseModel):
@@ -91,6 +97,12 @@ class EventLog(Base, BaseModel):
         String(64), nullable=False, comment="事件类型", index=True
     )
     source: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="事件来源")
+    actor_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="操作人 ID（谁发起，NULL=系统/定时任务）", index=True
+    )
+    actor_name: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="操作人姓名快照"
+    )
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True, comment="事件负载")
     level: Mapped[str] = mapped_column(
         Enum(EventLevel, values_callable=lambda e: [m.value for m in e]),

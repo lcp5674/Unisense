@@ -331,12 +331,20 @@ class NotifyService(BaseService):
         self._http_client = _get_http_client()
 
     async def publish_event(self, data: EventPublish) -> dict[str, int]:
+        # 操作人姓名快照：一次解析复用（EventLog + 全部 Notification），
+        # 避免每个通知重复反查用户表。actor_id 缺失（系统/定时任务）时为 None。
+        actor_id = data.actor_id
+        actor_name = data.actor_name
+        if actor_id is not None and not actor_name:
+            actor_name = await self._repo.get_user_display_name(actor_id)
         event = EventLog(
             event_type=data.event_type,
             source=data.source,
             payload=data.payload,
             level=data.level if data.level else EventLevel.INFO.value,
             notified=False,
+            actor_id=actor_id,
+            actor_name=actor_name,
         )
         await self._repo.save_event(event)
         subs = await self._repo.list_enabled_subscriptions(data.event_type)
@@ -353,6 +361,8 @@ class NotifyService(BaseService):
                 status=NotifyStatus.PENDING.value,
                 ref_type="event",
                 ref_id=event.id,
+                actor_id=actor_id,
+                actor_name=actor_name,
             )
             await self._repo.save_notification(notif)
             created += 1
@@ -383,6 +393,8 @@ class NotifyService(BaseService):
                     status=NotifyStatus.PENDING.value,
                     ref_type="event",
                     ref_id=event.id,
+                    actor_id=actor_id,
+                    actor_name=actor_name,
                 )
                 await self._repo.save_notification(notif)
                 created += 1
@@ -416,6 +428,12 @@ class NotifyService(BaseService):
             source = "semantic"
         if source not in _ALLOWED_SOURCES:
             source = "system"
+        # 操作人：EventBus 事件顶层携带 actor_id（{event_type, payload, actor_id}），
+        # 补齐「谁发起的操作」审计语义；缺失（系统/定时任务）时为 None。
+        try:
+            actor_id = int(event.get("actor_id") or 0) or None
+        except (TypeError, ValueError):
+            actor_id = None
         try:
             return await self.publish_event(
                 EventPublish(
@@ -423,6 +441,7 @@ class NotifyService(BaseService):
                     source=source,
                     payload=payload or None,
                     level=level,
+                    actor_id=actor_id,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - best-effort 不阻断业务

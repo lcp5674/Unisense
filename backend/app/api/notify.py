@@ -37,6 +37,9 @@ async def publish_event(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
+    # PLAT-2: 操作人一律以服务端认证身份为准，忽略 client 传入的 actor_id 防止伪造
+    payload.actor_id = user.id
+    payload.actor_name = None  # 姓名快照由 service 反查，防止 client 伪造展示名
     resp = await NotifyService(db).publish_event(payload)
     await write_audit(
         db,
@@ -62,7 +65,9 @@ async def list_notifications(
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     # PLAT-2: 以认证身份 user.id 作为 subscriber，禁止 client 伪造 subscriber_id 越权读取
-    notifs, total = await NotifyService(db).list_notifications_page(user.id, status, page, page_size)
+    notifs, total = await NotifyService(db).list_notifications_page(
+        user.id, status, page, page_size
+    )
     items = [NotificationResponse.from_model(i) for i in notifs]
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},

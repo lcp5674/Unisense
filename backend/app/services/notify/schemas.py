@@ -31,6 +31,8 @@ class EventPublish(BaseModel):
     source: str | None = None
     payload: dict[str, Any] | None = None
     level: str = "INFO"
+    actor_id: int | None = None
+    actor_name: str | None = None
 
     @field_validator("source")
     @classmethod
@@ -62,6 +64,8 @@ class NotificationResponse(BaseModel):
     send_at: datetime | None = None
     read_at: datetime | None = None
     created_at: datetime | None = None
+    actor_id: int | None = None
+    actor_name: str | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> NotificationResponse:
@@ -80,6 +84,8 @@ class NotificationResponse(BaseModel):
             send_at=getattr(m, "send_at", None),
             read_at=getattr(m, "read_at", None),
             created_at=getattr(m, "created_at", None),
+            actor_id=getattr(m, "actor_id", None),
+            actor_name=getattr(m, "actor_name", None),
         )
 
 
@@ -91,6 +97,8 @@ class EventLogResponse(BaseModel):
     level: str
     notified: bool
     created_at: datetime | None = None
+    actor_id: int | None = None
+    actor_name: str | None = None
 
     @classmethod
     def from_model(cls, m: Any) -> EventLogResponse:
@@ -102,6 +110,8 @@ class EventLogResponse(BaseModel):
             level=m.level,
             notified=getattr(m, "notified", False),
             created_at=getattr(m, "created_at", None),
+            actor_id=getattr(m, "actor_id", None),
+            actor_name=getattr(m, "actor_name", None),
         )
 
 

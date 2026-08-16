@@ -19,6 +19,7 @@ def _svc() -> tuple[NotifyService, MagicMock]:
     repo.find_subscription = AsyncMock(return_value=None)
     repo.save_subscription = AsyncMock(side_effect=lambda s: s)
     repo.list_subscriptions = AsyncMock(return_value=[])
+    repo.get_user_display_name = AsyncMock(return_value="操作者")
     repo.commit = AsyncMock()
     svc._repo = repo  # noqa: SLF001
     return svc, repo
