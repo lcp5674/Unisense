@@ -330,6 +330,8 @@ export function MetricCatalog() {
   // 下线=metric:deprecate。can() 控制批量操作按钮可用性；后端接口强制仍为最终边界。
   const { can } = usePermission();
   const canBatchManage = can("metric:create") || can("metric:approve") || can("metric:deprecate");
+  // 空态引导权限感知：无创建权限的用户不显示「创建/从模板创建」（点击后会被后端 403），改为引导联系管理员
+  const canCreate = can("metric:create");
   // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除 /
   // approve=批量通过 / reject=批量打回 / deprecate=批量下线
   const [batchAction, setBatchAction] = useState<
@@ -837,12 +839,18 @@ export function MetricCatalog() {
             </Button>
           ) : (
             <>
-              <Button type="primary" icon={<PlusCircleOutlined />} onClick={() => navigate("/create")}>
-                创建指标
-              </Button>
-              <Button icon={<FileTextOutlined />} onClick={() => navigate("/templates")}>
-                从模板创建
-              </Button>
+              {canCreate ? (
+                <Space>
+                  <Button type="primary" icon={<PlusCircleOutlined />} onClick={() => navigate("/create")}>
+                    创建指标
+                  </Button>
+                  <Button icon={<FileTextOutlined />} onClick={() => navigate("/templates")}>
+                    从模板创建
+                  </Button>
+                </Space>
+              ) : (
+                <span className="muted">如需创建指标，请联系域管理员或平台管理员</span>
+              )}
             </>
           )}
         </Space>
@@ -850,7 +858,7 @@ export function MetricCatalog() {
           )}
       </div>
     ),
-    [hasFilter, loadError],
+    [hasFilter, loadError, canCreate],
   );
 
   return (
@@ -865,12 +873,16 @@ export function MetricCatalog() {
           <p>全量指标定义——按状态/域/分级/关键词检索；展开行查看口径与治理追溯。</p>
         </div>
         <Space wrap>
-          <Button type="primary" icon={<PlusCircleOutlined />} onClick={() => navigate("/create")}>
-            创建指标
-          </Button>
-          <Button icon={<FileTextOutlined />} onClick={() => navigate("/templates")}>
-            从模板创建
-          </Button>
+          {canCreate && (
+            <>
+              <Button type="primary" icon={<PlusCircleOutlined />} onClick={() => navigate("/create")}>
+                创建指标
+              </Button>
+              <Button icon={<FileTextOutlined />} onClick={() => navigate("/templates")}>
+                从模板创建
+              </Button>
+            </>
+          )}
           <Tooltip title="将当前筛选结果导出为 CSV">
             <Button icon={<DownloadOutlined />} onClick={exportCsv} disabled={!items.length}>
               导出

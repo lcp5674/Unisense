@@ -689,3 +689,51 @@ describe("MetricCatalog 加载失败降级", () => {
     });
   });
 });
+
+describe("MetricCatalog 空态权限感知", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDashboard.mockResolvedValue({ total: 0, by_domain: {}, counts: {} } as any);
+    mockedDomains.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, role: "viewer" } as any);
+    mockedFavorites.mockResolvedValue([]);
+    mockedUsers.mockResolvedValue([]);
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
+    // 无任何创建权限（viewer/analyst）——用与真实 API 一致的结构（ui_actions 空数组）
+    (fetchMyPermissions as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      user_id: 1, role: "viewer", home_domain: "", allowed_actions: [], ui_actions: [],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false,
+      grants: [], expiring_soon: [],
+    });
+  });
+
+  it("无创建权限时空态不显示创建按钮，改为引导联系管理员", async () => {
+    const user = { id: 1, username: "zhangsan", display_name: "张三", role: "viewer", domain: "sales", org_id: 1 };
+    render(
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route
+            path="/catalog"
+            element={
+              <PermissionProvider user={user}>
+                <MetricCatalog />
+              </PermissionProvider>
+            }
+          />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    // 先等空态出现（列表为空），再等权限加载完成（can() 在 snapshot 为 null 时默认放行，
+    // 需等 fetchMyPermissions 生效后权限引导才出现）
+    await waitFor(() => {
+      expect(screen.getByText("目录还是空的，创建第一个指标或从模板开始")).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("如需创建指标，请联系域管理员或平台管理员")).toBeTruthy();
+    });
+    // 权限引导出现（canCreate=false）后，不应再出现「创建指标 / 从模板创建」按钮
+    expect(screen.queryAllByText("创建指标").length).toBe(0);
+    expect(screen.queryAllByText("从模板创建").length).toBe(0);
+  });
+});
