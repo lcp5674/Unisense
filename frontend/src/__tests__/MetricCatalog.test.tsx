@@ -579,7 +579,7 @@ describe("MetricCatalog URL 筛选直达（分享/刷新保持）", () => {
     mockedCurrentUser.mockResolvedValue({ id: 1, role: "platform_admin" } as any);
     mockedFavorites.mockResolvedValue([]);
     mockedUsers.mockResolvedValue([]);
-    fetchMyPermissions.mockResolvedValue({});
+    (fetchMyPermissions as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({});
   });
 
   it("带 ?domain=sales&lifecycle=created_7d 直达时，列表按域过滤且 created_after 生效", async () => {
