@@ -255,6 +255,37 @@ async def test_publish_metric_success():
     repo.mark_version_published.assert_awaited_once()
 
 
+async def test_publish_clears_reject_reason():
+    """指标一经发布清空历史驳回原因（生命周期闭环，走 _publish 统一路径）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="REVIEW",
+            pii_flag=False,
+            reject_reason="粒度与口径不符",
+            reject_reviewer_id=3,
+            rejected_at="2026-08-01 10:00:00",
+        )
+    )
+    published = make_metric(status="PUBLISHED")
+    repo.update_with_optimistic_lock = AsyncMock(return_value=published)
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.mark_version_published = AsyncMock()
+
+    result = await svc.publish_metric(
+        "sales_gmv_daily",
+        MetricPublishRequest(version=1, change_reason="修正后发布"),
+        actor_id=1,
+        role="domain_admin",
+    )
+
+    assert result.status == "PUBLISHED"
+    called = repo.update_with_optimistic_lock.call_args.kwargs
+    assert called["reject_reason"] is None
+    assert called["reject_reviewer_id"] is None
+    assert called["rejected_at"] is None
+
+
 async def test_publish_metric_pii_blocked_without_compliance():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(
@@ -742,6 +773,34 @@ async def test_submit_metric_saves_user_reviewer():
     assert kwargs["reviewer_id"] == 7
     assert kwargs["reviewer_type"] == "user"
     assert kwargs["reviewer_domain"] is None
+
+
+async def test_submit_metric_clears_reject_reason():
+    """被驳回草稿重新提审时清空历史驳回原因（生命周期闭环）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="DRAFT",
+            owner_id=1,
+            reject_reason="粒度与口径不符",
+            reject_reviewer_id=3,
+            rejected_at="2026-08-01 10:00:00",
+        )
+    )
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="REVIEW"))
+    svc._publish_event = AsyncMock()
+
+    await svc.submit_metric(
+        "sales_gmv_daily",
+        MetricSubmitRequest(change_reason="已修正粒度，重新提审"),
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+    )
+    kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert kwargs["reject_reason"] is None
+    assert kwargs["reject_reviewer_id"] is None
+    assert kwargs["rejected_at"] is None
 
 
 async def test_submit_metric_domain_reviewer_defaults_to_metric_domain():

@@ -1277,6 +1277,11 @@ class MetricService(BaseService):
                 if is_resubmit
                 else {}
             ),
+            # 重新提审即清空历史驳回原因（生命周期闭环）：被驳回草稿经修改重提后
+            # 不再残留"被驳回"标识；目录/详情据此区分"当前被驳回"与"曾驳回已重提"。
+            reject_reason=None,
+            reject_reviewer_id=None,
+            rejected_at=None,
             **reviewer_updates,
         )
         await self._cache.invalidate(metric_code)
@@ -1524,6 +1529,11 @@ class MetricService(BaseService):
             status=target_status,
             approver_id=actor_id,
             effective_version=target_version,
+            # 审批通过（PUBLISHED/灰度 EXPERIMENTAL）即清空历史驳回原因：
+            # 驳回已解决，不再残留"被驳回"状态（生命周期闭环）。
+            reject_reason=None,
+            reject_reviewer_id=None,
+            rejected_at=None,
             **extra_updates,
         )
 
@@ -2781,6 +2791,11 @@ class MetricService(BaseService):
             status="PUBLISHED",
             approver_id=actor_id,
             effective_version=target_version,
+            # 发布即清空历史驳回原因（生命周期闭环）：指标一经发布不再残留
+            # "被驳回"历史状态，避免已发布指标仍显示驳回标识。
+            reject_reason=None,
+            reject_reviewer_id=None,
+            rejected_at=None,
         )
 
         # 版本转正：将指定版本标记为 PUBLISHED 并记录发布时间
