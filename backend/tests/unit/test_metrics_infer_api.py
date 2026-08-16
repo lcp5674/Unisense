@@ -11,10 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from httpx import ASGITransport
+from tests.conftest import make_metric
 
 from app.api import deps
 from app.main import app
-from tests.conftest import make_metric
 
 
 @pytest.fixture
