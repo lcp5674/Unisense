@@ -213,18 +213,34 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "assetmap:edit": {"module": "资产地图", "label": "编辑资产", "description": "修改资产描述 / 元数据"},  # noqa: E501
     "assetmap:export": {"module": "资产地图", "label": "导出资产", "description": "导出资产清单"},
     "lineage:view": {"module": "资产地图", "label": "查看血缘", "description": "访问血缘图谱"},
+    "lineage:write": {"module": "资产地图", "label": "解析 / 登记血缘", "description": "触发血缘解析入库 / 手动登记血缘边"},  # noqa: E501
+    "lineage:manage-edge": {"module": "资产地图", "label": "治理血缘边", "description": "删除 / 失效 / 恢复血缘边"},  # noqa: E501
     # ---- 质量 / 冲突
     "quality:view": {"module": "质量中心", "label": "查看质量中心", "description": "访问质量中心"},
     "quality:run-check": {"module": "质量中心", "label": "执行质量校验", "description": "运行数据质量规则"},  # noqa: E501
     "quality:config-rule": {"module": "质量中心", "label": "配置质量规则", "description": "新增 / 编辑质量规则"},  # noqa: E501
     "review:view": {"module": "质量中心", "label": "查看冲突仲裁", "description": "访问口径冲突仲裁页"},  # noqa: E501
+    "review:arbitrate": {"module": "质量中心", "label": "仲裁冲突", "description": "裁定冲突口径（选权威 / 合并 / 保留差异）"},  # noqa: E501
+    "review:escalate": {"module": "质量中心", "label": "升级冲突", "description": "超时前人工升级冲突"},  # noqa: E501
+    "review:close": {"module": "质量中心", "label": "关闭冲突", "description": "关闭已裁决冲突"},
+    "review:reopen": {"module": "质量中心", "label": "重开冲突", "description": "重新打开已关闭冲突"},  # noqa: E501
     # ---- 查询 / AI / 维度 / 术语
     "query:view": {"module": "分析", "label": "指标查询", "description": "访问指标查询工作台"},
     "ai:view": {"module": "分析", "label": "AI 助手", "description": "访问 AI 助手"},
     "ai:nl2sql": {"module": "分析", "label": "AI 问数", "description": "用自然语言查询指标（NL2SQL）"},  # noqa: E501
     "dimensions:view": {"module": "分析", "label": "查看维度", "description": "访问维度管理"},
+    "dimension:create": {"module": "分析", "label": "新建维度", "description": "创建维度及其成员"},
+    "dimension:edit": {"module": "分析", "label": "编辑维度", "description": "编辑维度 / 成员 / 绑定指标"},  # noqa: E501
+    "dimension:deprecate": {"module": "分析", "label": "废弃维度", "description": "废弃维度及成员"},
+    "dimension:mapping": {"module": "分析", "label": "管理维度映射", "description": "新建 / 编辑 / 删除维度映射"},  # noqa: E501
+    "dimension:reconcile": {"module": "分析", "label": "维度对账", "description": "提交 / 通过 / 驳回维度对账"},  # noqa: E501
     "glossary:view": {"module": "分析", "label": "查看术语表", "description": "访问术语表"},
     "glossary:infer": {"module": "分析", "label": "术语 AI 推断", "description": "用 LLM 推断业务术语定义"},  # noqa: E501
+    "glossary:create": {"module": "分析", "label": "新建术语", "description": "创建 / 建立关系术语"},  # noqa: E501
+    "glossary:edit": {"module": "分析", "label": "编辑术语", "description": "编辑 / 提交 / 发布术语"},  # noqa: E501
+    "glossary:deprecate": {"module": "分析", "label": "废弃术语", "description": "废弃 / 批量废弃术语"},  # noqa: E501
+    "template:instantiate": {"module": "指标", "label": "实例化模板", "description": "从指标模板创建实例"},  # noqa: E501
+    "template:assign-owner": {"module": "指标", "label": "设置模板负责人", "description": "为指标模板指派负责人"},  # noqa: E501
     # ---- 数据源 / 采集
     "data-sources:view": {"module": "采集", "label": "查看数据源", "description": "访问数据源管理"},
     "data-source:create": {"module": "采集", "label": "新增数据源", "description": "创建数据源连接"},  # noqa: E501
@@ -288,13 +304,19 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "metric:emergency-publish", "metric:rollback", "metric:import",
             "metric:infer-description",
             "assetmap:view", "assetmap:edit", "assetmap:export", "lineage:view",
+            "lineage:write", "lineage:manage-edge",
             "quality:view", "quality:run-check", "quality:config-rule", "review:view",
-            "query:view", "ai:view", "ai:nl2sql", "dimensions:view", "glossary:view",
-            "glossary:infer",
+            "review:arbitrate", "review:escalate", "review:close", "review:reopen",
+            "query:view", "ai:view", "ai:nl2sql", "dimensions:view",
+            "dimension:create", "dimension:edit", "dimension:deprecate",
+            "dimension:mapping", "dimension:reconcile",
+            "glossary:view", "glossary:infer", "glossary:create", "glossary:edit",
+            "glossary:deprecate",
             "data-sources:view", "data-source:create", "data-source:edit",
             "data-source:delete", "data-source:test-connection", "data-source:collect",
             "catalogs:view", "collection-tasks:view", "collection-history:view",
             "catalog:deprecate", "catalog:edit-description", "catalog:infer-description",
+            "template:instantiate", "template:assign-owner",
             "organizations:view", "org:create", "org:edit", "org:disable",
             "governance:view", "grant:create", "grant:revoke", "grant:export",
             "audit:view", "domains:view", "domain:create", "dicts:view", "dict:create",
@@ -309,11 +331,17 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "catalog:view", "compare:view", "metric:create", "metric:edit",
             "metric:deprecate", "metric:export", "metric:review",
             "metric:infer-description",
-            "assetmap:view", "lineage:view", "quality:view", "review:view",
-            "query:view", "ai:view", "ai:nl2sql", "dimensions:view", "glossary:view",
-            "glossary:infer",
+            "assetmap:view", "lineage:view", "lineage:write", "lineage:manage-edge",
+            "quality:view", "review:view", "review:escalate", "review:close",
+            "review:reopen",
+            "query:view", "ai:view", "ai:nl2sql", "dimensions:view",
+            "dimension:create", "dimension:edit", "dimension:deprecate",
+            "dimension:mapping", "dimension:reconcile",
+            "glossary:view", "glossary:infer", "glossary:create", "glossary:edit",
+            "glossary:deprecate",
             "data-sources:view", "catalogs:view", "collection-tasks:view",
-            "collection-history:view", "feedback:view", "guide:view",
+            "collection-history:view", "template:instantiate", "template:assign-owner",
+            "feedback:view", "guide:view",
         }
     ),
     RoleName.REVIEWER.value: frozenset(
@@ -329,6 +357,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "dashboard:view", "todo:view", "notifications:view", "favorites:view",
             "catalog:view", "compare:view", "assetmap:view", "lineage:view",
             "quality:view", "query:view", "ai:view", "dimensions:view", "glossary:view",
+            "review:view", "review:arbitrate",
             "governance:view", "pii:review", "pii:validate", "classification:rescan",
             "erasure:execute", "audit:view", "audit:export",
             "feedback:view", "guide:view",
