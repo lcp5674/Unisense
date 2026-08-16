@@ -273,6 +273,8 @@ export function MetricCatalog() {
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.catalog.pageSize", 20);
   const [selected, setSelected] = useState<MetricResponse[]>([]);
   const [loading, setLoading] = useState(false);
+  // 列表加载失败的错误信息（区别于空结果：失败显示重试空态，空结果显示原空态引导）
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
   const [domainMap, setDomainMap] = useState<Map<string, string>>(new Map());
   const [currentUserId, setCurrentUserId] = useState<number | undefined>(undefined);
@@ -419,11 +421,16 @@ export function MetricCatalog() {
       setItems(res.items);
       setTotal(res.total);
       setSelected([]);
+      setLoadError(null);
     } catch (err) {
       if (seq !== loadSeq.current) return;
-      message.error(
-        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败",
-      );
+      // 用特征检查而非 instanceof：UnisenseApiError 跨 mock/打包边界不可靠（测试 mock 未导出该类会抛错）
+      const e = err as { message?: string; codeZh?: string };
+      const text =
+        e && typeof e === "object" && typeof e.codeZh === "string" && typeof e.message === "string"
+          ? `${e.message}（${e.codeZh}）`
+          : "加载失败";
+      setLoadError(text);
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
@@ -773,8 +780,15 @@ export function MetricCatalog() {
   const emptyGuide = useMemo(
     () => (
       <div style={{ padding: "16px 0", textAlign: "center" }}>
-        <p className="muted">{hasFilter ? "没有匹配的指标，试试放宽或清除筛选条件" : "目录还是空的，创建第一个指标或从模板开始"}</p>
-        <Space>
+        {loadError ? (
+          <>
+            <p className="muted">加载指标列表失败：{loadError}</p>
+            <Button onClick={() => { setLoadError(null); void load(); }}>重试</Button>
+          </>
+        ) : (
+          <>
+            <p className="muted">{hasFilter ? "没有匹配的指标，试试放宽或清除筛选条件" : "目录还是空的，创建第一个指标或从模板开始"}</p>
+            <Space>
           {hasFilter ? (
             <Button icon={<ColumnWidthOutlined />} aria-label="清除筛选" onClick={() => {
               setKeyword("");
@@ -802,9 +816,11 @@ export function MetricCatalog() {
             </>
           )}
         </Space>
+            </>
+          )}
       </div>
     ),
-    [hasFilter],
+    [hasFilter, loadError],
   );
 
   return (

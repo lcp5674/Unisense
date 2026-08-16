@@ -585,12 +585,14 @@ describe("MetricCatalog URL 筛选直达（分享/刷新保持）", () => {
   it("带 ?domain=sales&lifecycle=created_7d 直达时，列表按域过滤且 created_after 生效", async () => {
     mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
     render(
+      <PermissionProvider user={{ id: 1, role: "platform_admin" } as any}>
       <MemoryRouter initialEntries={["/catalog?domain=sales&lifecycle=created_7d"]}>
         <Routes>
           <Route path="/catalog" element={<MetricCatalog />} />
           <Route path="/detail/:code" element={<div>detail</div>} />
-        </Routes>
-      </MemoryRouter>,
+          </Routes>
+        </MemoryRouter>
+      </PermissionProvider>,
     );
     // 首次 load 后 lifecycleDate effect 会触发二次 load（依赖含 lifecycleDate）；
     // 断言存在同时带 domain=sales 且 created_after 已计算的调用（URL 直达的生命周期快筛真正生效）
@@ -605,17 +607,60 @@ describe("MetricCatalog URL 筛选直达（分享/刷新保持）", () => {
   it("带 ?status=PUBLISHED&tier=T1 直达时，状态与分级过滤生效", async () => {
     mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
     render(
+      <PermissionProvider user={{ id: 1, role: "platform_admin" } as any}>
       <MemoryRouter initialEntries={["/catalog?status=PUBLISHED&tier=T1"]}>
         <Routes>
           <Route path="/catalog" element={<MetricCatalog />} />
           <Route path="/detail/:code" element={<div>detail</div>} />
-        </Routes>
-      </MemoryRouter>,
+          </Routes>
+        </MemoryRouter>
+      </PermissionProvider>,
     );
     await waitFor(() => {
       const call = mockedList.mock.calls.find((c) => c[0]?.status === "PUBLISHED");
       expect(call).toBeTruthy();
       expect(call?.[0]?.metric_tier).toBe("T1");
     });
+  });
+});
+
+describe("MetricCatalog 加载失败降级", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDashboard.mockResolvedValue({ total: 0, by_domain: {}, counts: {} } as any);
+    mockedDomains.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, role: "platform_admin" } as any);
+    mockedFavorites.mockResolvedValue([]);
+    mockedUsers.mockResolvedValue([]);
+    (fetchMyPermissions as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({});
+  });
+
+  it("列表加载失败时显示失败提示与重试按钮，重试后恢复列表", async () => {
+    // 初始渲染 + fetchCurrentUser 就绪会触发前两次 load（都会失败）；点重试后（第 3 次）成功
+    let callNo = 0;
+    mockedList.mockImplementation(() => {
+      callNo += 1;
+      if (callNo <= 2) return Promise.reject(new Error("network down"));
+      return Promise.resolve({ items: [metric], total: 1, page: 1, page_size: 20 });
+    });
+    render(
+      <PermissionProvider user={{ id: 1, role: "platform_admin" } as any}>
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route path="/catalog" element={<MetricCatalog />} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>
+      </PermissionProvider>,
+    );
+    // 失败后显示重试空态（区别于"空结果"引导）
+    const retry = await screen.findByRole("button", { name: /重\s*试/ });
+    expect(screen.getByText(/加载指标列表失败/)).toBeTruthy();
+    fireEvent.click(retry);
+    // 重试成功后恢复列表（不再显示失败提示）
+    await waitFor(() => {
+      expect(screen.queryByText(/加载指标列表失败/)).toBeNull();
+    });
+    expect(screen.getByText(metric.name)).toBeTruthy();
   });
 });
