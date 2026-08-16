@@ -117,7 +117,7 @@ async def create_role(
     return ok(data=RoleResponse.model_validate(role).model_dump(), trace_id=trace_id)
 
 
-@router.get("/action-registry", dependencies=_ROLE_ADMIN_DEPS)
+@router.get("/roles/action-registry", dependencies=_ROLE_ADMIN_DEPS)
 async def list_action_registry(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
