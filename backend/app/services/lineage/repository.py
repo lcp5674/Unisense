@@ -323,6 +323,9 @@ class LineageRepository:
         for edge in await self.edges_for_node(node, direction="downstream"):
             if edge.edge_type != "USES_DIMENSION" or not edge.target_node.startswith("dimension:"):
                 continue
+            # 仅清理自动注册边（provenance=metric_definition），保留手动/导入边
+            if edge.provenance != "metric_definition":
+                continue
             dim_code = edge.target_node[len("dimension:") :]
             if dim_code not in current:
                 await self.soft_delete_edge_by_key(node, edge.target_node, edge.edge_type)
@@ -371,6 +374,9 @@ class LineageRepository:
         # 1) 软删不再声明的字段边（column:{table}.{col} → metric:{code}）
         for edge in await self.edges_for_node(node, direction="upstream"):
             if edge.edge_type != "READS_COLUMN" or not edge.source_node.startswith("column:"):
+                continue
+            # 仅清理自动注册边，保留手动/导入边
+            if edge.provenance != "metric_definition":
                 continue
             # node_column 构造为 column:{table}.{column}（table 可能含点如 db.table）
             parts = edge.source_node[len("column:") :].rsplit(".", 1)
@@ -427,12 +433,17 @@ class LineageRepository:
         for edge in await self.edges_for_node(node, direction="downstream"):
             if edge.edge_type != "DERIVED_FROM" or not edge.target_node.startswith("table:"):
                 continue  # 仅处理 table 节点，跳过指标依赖边（metric:*）
+            # 仅清理自动注册边，保留手动/导入边
+            if edge.provenance != "metric_definition":
+                continue
             if edge.target_node not in current_down:
                 await self.soft_delete_edge_by_key(node, edge.target_node, edge.edge_type)
                 deleted += 1
         # 1b) 软删不再声明的源表边（table:{tbl} → metric:{code}，DERIVED_FROM）
         for edge in await self.edges_for_node(node, direction="upstream"):
             if edge.edge_type != "DERIVED_FROM" or not edge.source_node.startswith("table:"):
+                continue
+            if edge.provenance != "metric_definition":
                 continue
             if edge.source_node not in current_up:
                 await self.soft_delete_edge_by_key(edge.source_node, node, edge.edge_type)

@@ -951,10 +951,31 @@ async def test_sync_metric_dimension_edges_removes_stale_and_adds_new() -> None:
     """sync_metric_dimension_edges 差异同步：软删不再声明的维度边、注册新增边。"""
     db = _FakeDB(
         [
-            _Row(1, "metric:m", "dimension:dim_store", "USES_DIMENSION", "L3"),
-            _Row(2, "metric:m", "dimension:dim_region", "USES_DIMENSION", "L3"),
+            _Row(
+                1,
+                "metric:m",
+                "dimension:dim_store",
+                "USES_DIMENSION",
+                "L3",
+                provenance="metric_definition",
+            ),
+            _Row(
+                2,
+                "metric:m",
+                "dimension:dim_region",
+                "USES_DIMENSION",
+                "L3",
+                provenance="metric_definition",
+            ),
             # 非维度边（其他边类型）不受维度差异同步影响
-            _Row(3, "metric:m", "table:dwd_order", "DERIVED_FROM", "L3"),
+            _Row(
+                3,
+                "metric:m",
+                "table:dwd_order",
+                "DERIVED_FROM",
+                "L3",
+                provenance="metric_definition",
+            ),
         ]
     )
     repo = LineageRepository(db)
@@ -971,8 +992,22 @@ async def test_sync_metric_dimension_edges_empty_current_clears_all() -> None:
     """sync 空声明集：清理全部残留维度边（指标不再声明任何维度）。"""
     db = _FakeDB(
         [
-            _Row(1, "metric:m", "dimension:dim_store", "USES_DIMENSION", "L3"),
-            _Row(2, "metric:m", "dimension:dim_region", "USES_DIMENSION", "L3"),
+            _Row(
+                1,
+                "metric:m",
+                "dimension:dim_store",
+                "USES_DIMENSION",
+                "L3",
+                provenance="metric_definition",
+            ),
+            _Row(
+                2,
+                "metric:m",
+                "dimension:dim_region",
+                "USES_DIMENSION",
+                "L3",
+                provenance="metric_definition",
+            ),
         ]
     )
     repo = LineageRepository(db)
@@ -987,10 +1022,26 @@ async def test_sync_metric_column_edges_removes_stale_and_adds_new() -> None:
     db = _FakeDB(
         [
             # 入边：column:{table}.{col} → metric:m（READS_COLUMN）
-            _Row(1, "column:dws.gmv.amount", "metric:m", "READS_COLUMN", "L3"),
-            _Row(2, "column:dws.gmv.cnt", "metric:m", "READS_COLUMN", "L3"),
+            _Row(
+                1,
+                "column:dws.gmv.amount",
+                "metric:m",
+                "READS_COLUMN",
+                "L3",
+                provenance="metric_definition",
+            ),
+            _Row(
+                2,
+                "column:dws.gmv.cnt",
+                "metric:m",
+                "READS_COLUMN",
+                "L3",
+                provenance="metric_definition",
+            ),
             # 其他边类型不受影响
-            _Row(3, "metric:other", "metric:m", "DERIVED_FROM", "L3"),
+            _Row(
+                3, "metric:other", "metric:m", "DERIVED_FROM", "L3", provenance="metric_definition"
+            ),
         ]
     )
     repo = LineageRepository(db)
@@ -1008,8 +1059,22 @@ async def test_sync_metric_column_edges_empty_current_clears_all() -> None:
     """sync 空字段集：清理全部残留字段边（指标不再声明任何字段）。"""
     db = _FakeDB(
         [
-            _Row(1, "column:dws.gmv.amount", "metric:m", "READS_COLUMN", "L3"),
-            _Row(2, "column:dws.gmv.cnt", "metric:m", "READS_COLUMN", "L3"),
+            _Row(
+                1,
+                "column:dws.gmv.amount",
+                "metric:m",
+                "READS_COLUMN",
+                "L3",
+                provenance="metric_definition",
+            ),
+            _Row(
+                2,
+                "column:dws.gmv.cnt",
+                "metric:m",
+                "READS_COLUMN",
+                "L3",
+                provenance="metric_definition",
+            ),
         ]
     )
     repo = LineageRepository(db)
@@ -1026,13 +1091,43 @@ async def test_sync_metric_table_edges_removes_stale_and_adds_new() -> None:
     db = _FakeDB(
         [
             # 落地表边：metric:m → table  (downstream)
-            _Row(1, "metric:m", "table:dws.gmv_v1", "DERIVED_FROM", "L3"),
-            _Row(2, "metric:m", "table:dws.gmv_v2", "DERIVED_FROM", "L3"),
+            _Row(
+                1,
+                "metric:m",
+                "table:dws.gmv_v1",
+                "DERIVED_FROM",
+                "L3",
+                provenance="metric_definition",
+            ),
+            _Row(
+                2,
+                "metric:m",
+                "table:dws.gmv_v2",
+                "DERIVED_FROM",
+                "L3",
+                provenance="metric_definition",
+            ),
             # 源表边：table → metric:m  (upstream)
-            _Row(3, "table:ods.order", "metric:m", "DERIVED_FROM", "L3"),
-            _Row(4, "table:ods.user", "metric:m", "DERIVED_FROM", "L3"),
+            _Row(
+                3,
+                "table:ods.order",
+                "metric:m",
+                "DERIVED_FROM",
+                "L3",
+                provenance="metric_definition",
+            ),
+            _Row(
+                4,
+                "table:ods.user",
+                "metric:m",
+                "DERIVED_FROM",
+                "L3",
+                provenance="metric_definition",
+            ),
             # 指标依赖边（metric:* 节点）不应被表差异同步误删
-            _Row(5, "metric:dep_a", "metric:m", "DERIVED_FROM", "L3"),
+            _Row(
+                5, "metric:dep_a", "metric:m", "DERIVED_FROM", "L3", provenance="metric_definition"
+            ),
         ]
     )
     repo = LineageRepository(db)
@@ -1041,10 +1136,7 @@ async def test_sync_metric_table_edges_removes_stale_and_adds_new() -> None:
     )
     assert deleted == 2  # 落地表 gmv_v1 + 源表 ods.user 不再声明 → 软删
     assert added == 1  # 源表 ods.item 新增（gmv_v2 与 ods.order 已存在不计）
-    remaining = [
-        r for r in db._rows
-        if r.source_node == "metric:m" or r.target_node == "metric:m"
-    ]
+    remaining = [r for r in db._rows if r.source_node == "metric:m" or r.target_node == "metric:m"]
     keys = sorted((r.source_node, r.target_node) for r in remaining)
     # gmv_v2(落地表) + ods.order(源表) + ods.item(源表) + 依赖边 metric:dep_a 保留
     assert keys == [
@@ -1059,8 +1151,22 @@ async def test_sync_metric_table_edges_no_tables_clears_all() -> None:
     """sync 无声明表：清理全部残留表边（指标不再声明任何表）。"""
     db = _FakeDB(
         [
-            _Row(1, "metric:m", "table:dws.gmv_v1", "DERIVED_FROM", "L3"),
-            _Row(2, "table:ods.order", "metric:m", "DERIVED_FROM", "L3"),
+            _Row(
+                1,
+                "metric:m",
+                "table:dws.gmv_v1",
+                "DERIVED_FROM",
+                "L3",
+                provenance="metric_definition",
+            ),
+            _Row(
+                2,
+                "table:ods.order",
+                "metric:m",
+                "DERIVED_FROM",
+                "L3",
+                provenance="metric_definition",
+            ),
         ]
     )
     repo = LineageRepository(db)
@@ -1068,7 +1174,52 @@ async def test_sync_metric_table_edges_no_tables_clears_all() -> None:
     assert deleted == 2
     assert added == 0
     assert not [
-        r for r in db._rows
+        r
+        for r in db._rows
         if (r.source_node == "metric:m" and r.target_node.startswith("table:"))
         or (r.target_node == "metric:m" and r.source_node.startswith("table:"))
     ]
+
+
+async def test_sync_metric_edges_preserves_manual_edges() -> None:
+    """差异同步仅清理自动注册边(provenance=metric_definition)，保留手动/导入边。"""
+    db = _FakeDB(
+        [
+            # 自动注册的落地表边（应被差异同步清理）
+            _Row(
+                1,
+                "metric:m",
+                "table:dws.gmv_v1",
+                "DERIVED_FROM",
+                "L3",
+                provenance="metric_definition",
+            ),
+            # 手动登记的落地表边（应保留，即使不在声明集中）
+            _Row(
+                2,
+                "metric:m",
+                "table:dws.legacy_manual",
+                "DERIVED_FROM",
+                "L3",
+                provenance="manual",
+            ),
+            # 手动登记的维度边（应保留）
+            _Row(
+                3,
+                "metric:m",
+                "dimension:dim_manual",
+                "USES_DIMENSION",
+                "L3",
+                provenance="manual",
+            ),
+        ]
+    )
+    repo = LineageRepository(db)
+    # 表差异同步：新落地表 gmv_v2（v1 自动边被清理、manual 边保留）
+    deleted, _ = await repo.sync_metric_table_edges("m", "dws.gmv_v2", [])
+    assert deleted == 1  # 仅自动注册的 gmv_v1 被清理
+    # 维度差异同步：空声明（自动维度边被清理、manual 维度边保留）
+    deleted2, _ = await repo.sync_metric_dimension_edges("m", [])
+    assert deleted2 == 0  # 无自动维度边，manual 边保留
+    targets = sorted(r.target_node for r in db._rows if r.source_node == "metric:m")
+    assert targets == ["dimension:dim_manual", "table:dws.gmv_v2", "table:dws.legacy_manual"]
