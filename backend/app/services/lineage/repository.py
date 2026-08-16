@@ -268,6 +268,65 @@ class LineageRepository:
             change_reason=change_reason,
         )
 
+    async def upsert_metric_dimension_edge(
+        self,
+        *,
+        metric_code: str,
+        dim_node: str,
+        edge_type: str = "USES_DIMENSION",
+        confidence: float = 1.0,
+        provenance: str = "metric_definition",
+        change_reason: str = "metric_definition",
+    ) -> LineageEdge:
+        """写入「指标↔维度」血缘边（粒度 L3，幂等）。
+
+        ``metric:{code}`` → ``dimension:{dim_code}``（USES_DIMENSION），表示该指标
+        基于此维度进行分析/下钻。幂等性由 ``_upsert`` 唯一键保证。
+
+        Args:
+            metric_code: 指标编码。
+            dim_node: 维度节点（``dimension:{code}``，由调用方经 ``node_dimension`` 构造）。
+            edge_type: 默认 ``USES_DIMENSION``（保留参数供未来扩展）。
+        """
+        return await self._upsert(
+            source_node=f"metric:{metric_code}",
+            target_node=dim_node,
+            edge_type=edge_type,
+            granularity="L3",
+            confidence=confidence,
+            provenance=provenance,
+            change_reason=change_reason,
+        )
+
+    async def upsert_metric_column_edge(
+        self,
+        *,
+        metric_code: str,
+        column_node: str,
+        edge_type: str = "READS_COLUMN",
+        confidence: float = 1.0,
+        provenance: str = "metric_definition",
+        change_reason: str = "metric_definition",
+    ) -> LineageEdge:
+        """写入「指标↔字段」血缘边（粒度 L3，幂等）。
+
+        ``column:{db}.{tbl}.{col}`` → ``metric:{code}``（READS_COLUMN），表示该指标
+        来源于表的某个具体字段（度量列/维度列）。幂等性由 ``_upsert`` 唯一键保证。
+
+        Args:
+            metric_code: 指标编码。
+            column_node: 字段节点（``column:{tbl}.{col}``，由调用方经 ``node_column`` 构造）。
+        """
+        return await self._upsert(
+            source_node=column_node,
+            target_node=f"metric:{metric_code}",
+            edge_type=edge_type,
+            granularity="L3",
+            confidence=confidence,
+            provenance=provenance,
+            change_reason=change_reason,
+        )
+
     async def register_break(
         self,
         *,

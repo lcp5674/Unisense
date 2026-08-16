@@ -7,6 +7,8 @@ Neo4j 作为图存储用于影响分析（best-effort，可降级）。
 - DERIVED_FROM：A 由 B 派生（字段级 L2 / 表级 L1 / 指标级 L3 通用）
 - LINEAGE_UP / LINEAGE_DOWN / CONSUMED_BY：方向性血缘关系
 - EXTERNAL_BREAK：断链登记（源或目标一侧为 external:{system} 占位节点）
+- USES_DIMENSION：指标 ↔ 维度（L3，指标基于维度分析，dimension:{code} 节点）
+- READS_COLUMN：指标 ↔ 字段（L3，指标来源于表的具体字段，column:{db}.{tbl}.{col} 节点）
 
 粒度（granularity）：
 - L1：表级血缘
@@ -53,6 +55,8 @@ class LineageEdge(Base, BaseModel):
             "LINEAGE_DOWN",
             "CONSUMED_BY",
             "EXTERNAL_BREAK",
+            "USES_DIMENSION",
+            "READS_COLUMN",
             name="lineage_edge_type",
         ),
         nullable=False,
@@ -147,6 +151,8 @@ class LineageEdgeHistory(Base):
             "LINEAGE_DOWN",
             "CONSUMED_BY",
             "EXTERNAL_BREAK",
+            "USES_DIMENSION",
+            "READS_COLUMN",
             name="lineage_edge_type",
         ),
         nullable=False,

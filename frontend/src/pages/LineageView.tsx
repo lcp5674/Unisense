@@ -83,6 +83,11 @@ const RISK_LEVEL_LABEL: Record<string, string> = {
 const EDGE_TYPE_LABEL: Record<string, string> = {
   DERIVED_FROM: "派生自",
   CONSUMED_BY: "被消费",
+  LINEAGE_UP: "上游关联",
+  LINEAGE_DOWN: "下游关联",
+  EXTERNAL_BREAK: "断链",
+  USES_DIMENSION: "使用维度",
+  READS_COLUMN: "读取字段",
 };
 
 /** SQL 血缘解析支持的数据库方言（对齐后端 SourceTypeEnum 与 sqlglot dialect 名）。 */
@@ -120,6 +125,8 @@ const EDGE_NODE_TYPE_TAG: Record<string, { color: string; label: string }> = {
   metric: { color: "purple", label: "指标" },
   table: { color: "blue", label: "表" },
   field: { color: "cyan", label: "字段" },
+  column: { color: "cyan", label: "字段" },
+  dimension: { color: "geekblue", label: "维度" },
   consumer: { color: "green", label: "消费方" },
   query: { color: "gold", label: "查询" },
   external: { color: "default", label: "外部" },
@@ -139,6 +146,8 @@ const NODE_TYPE_LABEL: Record<string, string> = {
   table: "表",
   metric: "指标",
   field: "字段",
+  column: "字段",
+  dimension: "维度",
   external: "外部",
   other: "节点",
 };

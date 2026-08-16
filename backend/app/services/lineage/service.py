@@ -26,6 +26,8 @@ from app.services.lineage.parser import (
     extract_field_lineage,
     extract_table_lineage,
     extract_upstream_deps,
+    node_column,
+    node_dimension,
     node_field,
     node_metric,
     node_table,
@@ -388,9 +390,103 @@ class LineageService(BaseService):
                     change_reason="metric_definition",
                 )
             )
+        # 指标↔维度：definition_json.dimensions（字符串数组或 {code,role} 对象数组）
+        for dim in definition.get("dimensions") or []:
+            dim_code = dim.get("code") or dim.get("dim_code") if isinstance(dim, dict) else dim
+            if isinstance(dim_code, str) and dim_code:
+                edges.append(
+                    await self._repo.upsert_metric_dimension_edge(
+                        metric_code=metric_code,
+                        dim_node=node_dimension(dim_code),
+                        change_reason="metric_definition",
+                    )
+                )
+        # 指标↔字段：measure_column + measures + source_table → column 节点
+        measure_column = definition.get("measure_column")
+        if (
+            isinstance(source_table, str)
+            and source_table
+            and isinstance(measure_column, str)
+            and measure_column
+        ):
+            edges.append(
+                await self._repo.upsert_metric_column_edge(
+                    metric_code=metric_code,
+                    column_node=node_column(source_table, measure_column),
+                    change_reason="metric_definition",
+                )
+            )
+        for m in definition.get("measures") or []:
+            col = m.get("name") or m.get("column") if isinstance(m, dict) else m
+            if isinstance(col, str) and col and isinstance(source_table, str) and source_table:
+                edges.append(
+                    await self._repo.upsert_metric_column_edge(
+                        metric_code=metric_code,
+                        column_node=node_column(source_table, col),
+                        change_reason="metric_definition",
+                    )
+                )
         if commit and edges:
             await self._db.commit()
         return edges
+
+    async def register_metric_dimension_edges(
+        self, metric_code: str, dim_codes: list[str], *, commit: bool = True
+    ) -> list[LineageEdge]:
+        """注册「指标↔维度」血缘边（L3，幂等）。
+
+        供维度绑定（``MetricDimension`` 落库处）与存量回填脚本调用；空编码静默跳过。
+
+        Args:
+            metric_code: 指标编码。
+            dim_codes: 维度编码列表。
+            commit: 是否立即提交（默认 True）。
+        """
+        edges: list[LineageEdge] = []
+        for code in dim_codes:
+            if isinstance(code, str) and code:
+                edges.append(
+                    await self._repo.upsert_metric_dimension_edge(
+                        metric_code=metric_code,
+                        dim_node=node_dimension(code),
+                        change_reason="metric_dimension_binding",
+                    )
+                )
+        if commit and edges:
+            await self._db.commit()
+        return edges
+
+    async def register_metric_column_edge(
+        self,
+        metric_code: str,
+        table: str,
+        column: str,
+        *,
+        commit: bool = True,
+    ) -> LineageEdge | None:
+        """注册「指标↔字段」血缘边（L3，幂等）。
+
+        表示指标来源于 ``table`` 表的 ``column`` 字段（度量列/维度列）。
+
+        Args:
+            metric_code: 指标编码。
+            table: 底表名（如 ``dws_metric_gmv`` 或 ``db.table``）。
+            column: 字段名。
+            commit: 是否立即提交（默认 True）。
+
+        Returns:
+            写入的血缘边；表/字段为空时返回 None。
+        """
+        if not table or not column:
+            return None
+        edge = await self._repo.upsert_metric_column_edge(
+            metric_code=metric_code,
+            column_node=node_column(table, column),
+            change_reason="metric_definition",
+        )
+        if commit:
+            await self._db.commit()
+        return edge
 
     async def delete_by_node(self, node: str) -> int:
         """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。"""
@@ -918,9 +1014,22 @@ class LineageService(BaseService):
                 params.node, params.direction, params.max_hops, _MAX_EDGES
             )
             if graph_edges is not None and graph_edges:
-                return [
-                    self._graph_edge_to_response(src, tgt, etype) for src, tgt, etype in graph_edges
+                merged = [
+                    self._graph_edge_to_response(src, tgt, etype)
+                    for src, tgt, etype in graph_edges
                 ]
+                # 补充图存储未覆盖的「指标↔维度/字段」边（仅 MySQL 权威存储，L3）。
+                # 图边以表/指标/消费方为主；维度/字段边由指标定义/回填写入 MySQL，
+                # 图路径需合并权威库结果，否则影响分析与血缘图谱会漏掉这两类关系。
+                seen = {(e.source_node, e.target_node, e.edge_type) for e in merged}
+                for e in await self._repo.edges_for_node(params.node, params.direction):
+                    if e.edge_type in ("USES_DIMENSION", "READS_COLUMN"):
+                        resp = LineageEdgeResponse.model_validate(e)
+                        key = (resp.source_node, resp.target_node, resp.edge_type)
+                        if key not in seen:
+                            seen.add(key)
+                            merged.append(resp)
+                return merged
         rows = await self._repo.query_impact(
             params.node, params.direction, params.max_hops, max_edges=_MAX_EDGES
         )

@@ -668,6 +668,16 @@ def node_metric(code: str) -> str:
     return f"metric:{code}"
 
 
+def node_dimension(code: str) -> str:
+    """构造维度节点标识（指标↔维度血缘，``dimension:{dim_code}``）。"""
+    return f"dimension:{code}"
+
+
+def node_column(table: str, column: str) -> str:
+    """构造字段节点标识（指标↔字段血缘，``column:{db}.{tbl}.{col}``）。"""
+    return f"column:{table}.{column}"
+
+
 def node_field(table: str, column: str) -> str:
     """构造字段节点标识。"""
     return f"field:{table}.{column}"

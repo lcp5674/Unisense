@@ -70,6 +70,62 @@ class FakeRepo:
         self.edges.append(edge)
         return edge
 
+    async def upsert_metric_dimension_edge(
+        self,
+        *,
+        metric_code: str,
+        dim_node: str,
+        edge_type: str = "USES_DIMENSION",
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        """指标↔维度边假实现：构造 metric→dimension 节点后记录。"""
+        return await self.upsert_edge(
+            source_node=f"metric:{metric_code}",
+            target_node=dim_node,
+            edge_type=edge_type,
+            granularity="L3",
+            **kwargs,
+        )
+
+    async def upsert_metric_column_edge(
+        self,
+        *,
+        metric_code: str,
+        column_node: str,
+        edge_type: str = "READS_COLUMN",
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        """指标↔字段边假实现：构造 column→metric 节点后记录。"""
+        return await self.upsert_edge(
+            source_node=column_node,
+            target_node=f"metric:{metric_code}",
+            edge_type=edge_type,
+            granularity="L3",
+            **kwargs,
+        )
+
+    async def upsert_metric_table_edge(
+        self,
+        *,
+        metric_code: str,
+        table_node: str,
+        direction: str = "downstream",
+        edge_type: str = "DERIVED_FROM",
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        """指标↔表边假实现：按 direction 构造节点后记录。"""
+        if direction == "upstream":
+            src, tgt = table_node, f"metric:{metric_code}"
+        else:
+            src, tgt = f"metric:{metric_code}", table_node
+        return await self.upsert_edge(
+            source_node=src,
+            target_node=tgt,
+            edge_type=edge_type,
+            granularity="L3",
+            **kwargs,
+        )
+
     async def upsert_edge_with_status(self, **kwargs: object) -> tuple[SimpleNamespace, bool]:
         """幂等 upsert 假实现：按唯一键（source/target/edge_type/granularity）判定 created。"""
         self.upsert_calls.append(kwargs)
@@ -128,6 +184,10 @@ class FakeRepo:
     async def would_create_cycle(self, edge: object) -> bool:
         """环检假实现：默认不成环（供 parse_and_store 建边前调用）。"""
         return False
+
+    async def edges_for_node(self, node: str, direction: str = "both") -> list[Any]:
+        """按节点返回血缘边（图路径合并 MySQL 新类型边时使用）；默认返回空。"""
+        return []
 
     async def query_impact(
         self, node: str, direction: str, max_hops: int, max_edges: int = 5000
@@ -1209,3 +1269,111 @@ async def test_edge_detail_missing_raises() -> None:
     except NotFoundError:
         raised = True
     assert raised
+
+
+# ---- 指标↔维度 / 指标↔字段 血缘（枚举扩展后新增） ----
+
+
+async def test_register_metric_dimension_edges() -> None:
+    """register_metric_dimension_edges 注册 USES_DIMENSION 边（L3，幂等）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    edges = await svc.register_metric_dimension_edges("gmv_total", ["store", "region"])
+    assert len(edges) == 2
+    targets = {c["target_node"] for c in repo.upsert_calls}
+    assert targets == {"dimension:store", "dimension:region"}
+    for call in repo.upsert_calls:
+        assert call["source_node"] == "metric:gmv_total"
+        assert call["edge_type"] == "USES_DIMENSION"
+        assert call["granularity"] == "L3"
+
+
+async def test_register_metric_dimension_edges_skips_empty() -> None:
+    """空/非字符串维度编码静默跳过，不产生边。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    edges = await svc.register_metric_dimension_edges("gmv_total", ["", None, 123])
+    assert edges == []
+    assert repo.upsert_calls == []
+
+
+async def test_register_metric_column_edge() -> None:
+    """register_metric_column_edge 注册 READS_COLUMN 边（column -> metric，L3）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    edge = await svc.register_metric_column_edge("gmv_total", "dws.gmv", "amount")
+    assert edge is not None
+    call = repo.upsert_calls[0]
+    assert call["source_node"] == "column:dws.gmv.amount"
+    assert call["target_node"] == "metric:gmv_total"
+    assert call["edge_type"] == "READS_COLUMN"
+    assert call["granularity"] == "L3"
+
+
+async def test_register_metric_column_edge_skips_empty() -> None:
+    """表/字段为空时返回 None，不注册边。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    assert await svc.register_metric_column_edge("gmv_total", "", "amount") is None
+    assert await svc.register_metric_column_edge("gmv_total", "t", "") is None
+    assert repo.upsert_calls == []
+
+
+async def test_register_metric_from_definition_includes_dim_and_column() -> None:
+    """register_metric_from_definition 从 definition_json 解析维度/字段边。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    metric = SimpleNamespace(
+        metric_code="gmv_total",
+        definition_json={
+            "source_table": "dws.gmv",
+            "measure_column": "amount",
+            "dimensions": [{"code": "store"}, "region"],
+            "measures": [{"name": "cnt"}],
+        },
+    )
+    edges = await svc.register_metric_from_definition(metric)
+    assert len(edges) == 5  # 1 落地表 + 2 维度 + 2 字段(measure_column + measures[0])
+    calls = repo.upsert_calls
+    assert any(c["edge_type"] == "USES_DIMENSION" and c["target_node"] == "dimension:store" for c in calls)
+    assert any(c["edge_type"] == "USES_DIMENSION" and c["target_node"] == "dimension:region" for c in calls)
+    assert any(c["edge_type"] == "READS_COLUMN" and c["source_node"] == "column:dws.gmv.amount" for c in calls)
+    assert any(c["edge_type"] == "READS_COLUMN" and c["source_node"] == "column:dws.gmv.cnt" for c in calls)
+
+
+async def test_query_impact_merges_dimension_column_edges_from_mysql() -> None:
+    """图路径返回时合并 MySQL 权威库的 USES_DIMENSION/READS_COLUMN 边。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    svc._graph = FakeGraph(
+        result=[("metric:gmv_total", "metric:gmv_derived", "DERIVED_FROM")]
+    )
+
+    async def _extra(node: str, direction: str = "both") -> list[Any]:
+        return [
+            SimpleNamespace(
+                id=1, source_node="metric:gmv_total", target_node="dimension:store",
+                edge_type="USES_DIMENSION", granularity="L3", confidence=1.0,
+                provenance="metric_definition", pii_inherited=False,
+            ),
+            SimpleNamespace(
+                id=2, source_node="column:dws.gmv.amount", target_node="metric:gmv_total",
+                edge_type="READS_COLUMN", granularity="L3", confidence=1.0,
+                provenance="metric_definition", pii_inherited=False,
+            ),
+        ]
+
+    repo.edges_for_node = _extra  # type: ignore[method-assign]
+    params = LineageImpactParams(node="metric:gmv_total", direction="both", max_hops=3)
+    edges = await svc.query_impact(params)
+    types = {e.edge_type for e in edges}
+    assert "DERIVED_FROM" in types
+    assert "USES_DIMENSION" in types
+    assert "READS_COLUMN" in types
+    assert len(edges) == 3
