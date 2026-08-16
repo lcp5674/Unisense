@@ -186,3 +186,58 @@ async def test_instantiate_required_fields_satisfied_by_template_default() -> No
         await instantiate_template(
             user=user, template_id=2, request=req, body={"name": "x", "domain": "s"}, db=db2
         )
+
+
+async def test_template_active_toggle_and_errors() -> None:
+    """启用/停用模板 + 404/422（直接调用 API 函数，对齐 owner 端点测试模式）。"""
+    from fastapi import HTTPException
+
+    from app.api.semantic import update_template_active
+
+    user = MagicMock(id=1)
+    req = MagicMock()
+
+    # 1) 停用模板（is_active=False）
+    template = _make_template()
+    template.is_active = True
+    r1 = MagicMock()
+    r1.scalar_one_or_none.return_value = template
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    db.execute = AsyncMock(side_effect=[r1])
+    await update_template_active(
+        user=user, template_id=1, request=req, body={"is_active": False}, db=db
+    )
+    assert template.is_active is False
+    db.commit.assert_awaited_once()
+
+    # 2) 重新启用
+    template2 = _make_template()
+    template2.is_active = False
+    r2 = MagicMock()
+    r2.scalar_one_or_none.return_value = template2
+    db.execute = AsyncMock(side_effect=[r2])
+    await update_template_active(
+        user=user, template_id=1, request=req, body={"is_active": True}, db=db
+    )
+    assert template2.is_active is True
+
+    # 3) 模板不存在 → NotFoundError
+    r3 = MagicMock()
+    r3.scalar_one_or_none.return_value = None
+    db.execute = AsyncMock(side_effect=[r3])
+    with pytest.raises(NotFoundError):
+        await update_template_active(
+            user=user, template_id=999, request=req, body={"is_active": True}, db=db
+        )
+
+    # 4) is_active 非布尔 → HTTPException 422
+    r4 = MagicMock()
+    r4.scalar_one_or_none.return_value = _make_template()
+    db.execute = AsyncMock(side_effect=[r4])
+    with pytest.raises(HTTPException) as exc:
+        await update_template_active(
+            user=user, template_id=1, request=req, body={"is_active": "yes"}, db=db
+        )
+    assert exc.value.status_code == 422

@@ -1355,6 +1355,17 @@ export async function updateTemplateOwner(
   });
 }
 
+// 启用/停用指标模板（PATCH /semantics/templates/{id}/active，is_active=false 停止新实例化）
+export async function setTemplateActive(
+  templateId: number,
+  isActive: boolean,
+): Promise<MetricTemplate> {
+  return request<MetricTemplate>(`${API_BASE}/semantics/templates/${templateId}/active`, {
+    method: "PATCH",
+    body: JSON.stringify({ is_active: isActive }),
+  });
+}
+
 // 从模板实例化创建指标（POST /semantics/templates/{id}/instantiate，后端合并模板默认口径 + 用户覆盖）
 export async function instantiateTemplate(
   templateId: number,

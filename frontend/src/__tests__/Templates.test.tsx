@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, useNavigate, Routes, Route } from "react-router-dom";
 import { Templates } from "../pages/Templates";
 import type { MetricTemplate, MetricResponse } from "../types";
@@ -28,6 +28,7 @@ vi.mock("../api", () => {
     removeFavorite: vi.fn(),
     listUsers: vi.fn(),
     updateTemplateOwner: vi.fn(),
+    setTemplateActive: vi.fn(),
     listDomainTree: vi.fn(),
     listDictItems: vi.fn(),
     UnisenseApiError,
@@ -38,7 +39,7 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
-import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner, listDomainTree, listDictItems } from "../api";
+import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner, setTemplateActive, listDomainTree, listDictItems } from "../api";
 
 const mockedList = vi.mocked(listTemplates);
 const mockedCreate = vi.mocked(createMetric);
@@ -46,6 +47,7 @@ const mockedListFavorites = vi.mocked(listFavorites);
 const mockedInstantiate = vi.mocked(instantiateTemplate);
 const mockedListUsers = vi.mocked(listUsers);
 const mockedUpdateOwner = vi.mocked(updateTemplateOwner);
+const mockedSetActive = vi.mocked(setTemplateActive);
 const mockedDomainTree = vi.mocked(listDomainTree);
 const mockedDictItems = vi.mocked(listDictItems);
 
@@ -367,3 +369,20 @@ describe("Templates 页面", () => {
     });
   });
 });
+
+  it("启用/停用模板：点状态 Tag 确认后调用 setTemplateActive 并刷新行状态", async () => {
+    mockedSetActive.mockResolvedValue({ ...TPLS[0], is_active: false });
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText(TPLS[0].code);
+    // 定位 TPLS[0] 所在行，点该行状态 Tag（避免跨行同名匹配）
+    const row = screen.getByText(TPLS[0].code).closest("tr") as HTMLElement;
+    const tag = within(row).getByText("启用", { selector: ".ant-tag" });
+    fireEvent.click(tag);
+    await screen.findByText("停用此模板？");
+    fireEvent.click(screen.getByRole("button", { name: "停 用" }));
+    await waitFor(() => expect(mockedSetActive).toHaveBeenCalledWith(TPLS[0].id, false));
+  });

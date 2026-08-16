@@ -246,6 +246,51 @@ async def update_template_owner(
     return ok(data=template.to_dict(), trace_id=get_trace_id(request))
 
 
+@router.patch(
+    "/templates/{template_id}/active",
+    dependencies=_WRITE_DEPS,
+    response_model=ApiResponse,
+    summary="启用/停用指标模板",
+)
+async def update_template_active(
+    user: CurrentUser,
+    template_id: int,
+    request: Request,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db_session),
+) -> Any:
+    """启用或停用指标模板（is_active=False 停止新实例化，保留存量）。
+
+    停用模板不可再被实例化（instantiate 端点校验 is_active），但列表/详情仍可查。
+    """
+    q = select(MetricTemplate).where(MetricTemplate.id == template_id)
+    result = await db.execute(q)
+    template = result.scalar_one_or_none()
+    if template is None:
+        from app.core.exceptions import NotFoundError
+
+        raise NotFoundError(f"模板不存在: {template_id}")
+    is_active = body.get("is_active")
+    if not isinstance(is_active, bool):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=422, detail="is_active 必须为布尔值")
+    template.is_active = is_active
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="template.set_active",
+        entity_type="metric_template",
+        entity_id=str(template.code),
+        detail={"is_active": is_active},
+        ip=client_ip(request),
+        trace_id=get_trace_id(request),
+    )
+    await db.commit()
+    await db.refresh(template)
+    return ok(data=template.to_dict(), trace_id=get_trace_id(request))
+
+
 @router.post(
     "/templates/{template_id}/instantiate",
     dependencies=_WRITE_DEPS,

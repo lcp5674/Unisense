@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm } from "antd";
 import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined } from "@ant-design/icons";
 import {
   listTemplates,
@@ -11,6 +11,7 @@ import {
   removeFavorite,
   listUsers,
   updateTemplateOwner,
+  setTemplateActive,
   listDomainTree,
   listDictItems,
   getDomainDefaults,
@@ -191,6 +192,24 @@ export function Templates() {
     }
   }
 
+  // 启用/停用模板（is_active=false 停止新实例化，保留存量模板与列表展示）
+  const [activeBusyId, setActiveBusyId] = useState<number | null>(null);
+  async function handleToggleActive(t: MetricTemplate) {
+    setActiveBusyId(t.id);
+    try {
+      const next = !t.is_active;
+      const updated = await setTemplateActive(t.id, next);
+      setItems((prev) => prev.map((it) => (it.id === updated.id ? updated : it)));
+      message.success(next ? `已启用模板「${t.name || t.code}」` : `已停用模板「${t.name || t.code}」`);
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败",
+      );
+    } finally {
+      setActiveBusyId(null);
+    }
+  }
+
   async function toggleFavorite(t: MetricTemplate) {
     const fav = favCodes.has(t.code);
     try {
@@ -319,8 +338,23 @@ export function Templates() {
       title: "状态",
       dataIndex: "is_active",
       key: "is_active",
-      width: 90,
-      render: (v: boolean) => (v ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>),
+      width: 120,
+      render: (v: boolean, t: MetricTemplate) =>
+        can("template:assign-owner") ? (
+          <Popconfirm
+            title={v ? "停用此模板？" : "启用此模板？"}
+            description={v ? "停用后不可再实例化新指标，存量模板保留。" : "启用后可正常实例化。"}
+            okText={v ? "停用" : "启用"}
+            okButtonProps={{ danger: v, loading: activeBusyId === t.id }}
+            onConfirm={() => handleToggleActive(t)}
+          >
+            {v ? <Tag color="green" style={{ cursor: "pointer" }}>启用</Tag> : <Tag style={{ cursor: "pointer" }}>停用</Tag>}
+          </Popconfirm>
+        ) : v ? (
+          <Tag color="green">启用</Tag>
+        ) : (
+          <Tag>停用</Tag>
+        ),
     },
     { title: "域", dataIndex: "domain", key: "domain", width: 140, render: (v: string) => domainMap[v] ?? v },
     {
