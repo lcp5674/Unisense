@@ -156,6 +156,9 @@ export function MetricCreate() {
   const [_selectedTableCatalog, setSelectedTableCatalog] = useState<DBCatalog | null>(null);
   const [columnOptions, setColumnOptions] = useState<{ value: string; label: string }[]>([]);
   const srcTableSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+  // 域默认值预填字段集合（TD §3.8）：选域触发 autoSuggest 时这些字段不被推断覆盖
+  // （管理员显式配置的域默认值优先于自动推断），SQL 推断等用户主动操作可正常覆盖。
+  const domainPrefillRef = useRef<Set<string>>(new Set());
 
   const [prechecking, setPrechecking] = useState(false);
   const [precheckResult, setPrecheckResult] = useState<ConflictCheckResult | null>(null);
@@ -333,11 +336,14 @@ export function MetricCreate() {
   }
 
   // 将后端推断结果回填到表单：属性字段 + 指标编码，并保存来源徽标与口径定义预览
-  function applySuggestion(result: AutoSuggestResponse) {
+  // respectPrefill=true（选域触发）：跳过已被域默认值预填的字段，域配置优先于自动推断
+  function applySuggestion(result: AutoSuggestResponse, respectPrefill = false) {
     const fields = result.fields || {};
     const merged: Record<string, unknown> = {};
+    const protectedFields = respectPrefill ? domainPrefillRef.current : null;
     for (const [key, sf] of Object.entries(fields)) {
       if (key === "definition_json" || key === "definition_mode") continue;
+      if (protectedFields && protectedFields.has(key)) continue;
       if (sf && sf.value !== null && sf.value !== undefined) merged[key] = sf.value;
     }
     if (result.metric_code_suggestion) merged.metric_code = result.metric_code_suggestion;
@@ -405,9 +411,15 @@ export function MetricCreate() {
           prefill[f] = v;
         }
       }
-      if (Object.keys(prefill).length) form.setFieldsValue(prefill);
+      if (Object.keys(prefill).length) {
+        domainPrefillRef.current = new Set(Object.keys(prefill));
+        form.setFieldsValue(prefill);
+      } else {
+        domainPrefillRef.current = new Set();
+      }
     } catch {
       // 域默认值拉取失败不阻断选域流程（推断仍进行）
+      domainPrefillRef.current = new Set();
     }
     setSuggesting(true);
     try {
@@ -420,7 +432,7 @@ export function MetricCreate() {
         measure_column: measureColumn || undefined,
         period,
       });
-      applySuggestion(result);
+      applySuggestion(result, true);
     } catch {
       // 推断失败不阻断
     } finally {
