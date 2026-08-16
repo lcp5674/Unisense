@@ -938,7 +938,7 @@ export function MetricDetail() {
           <div className="page-kicker">Assets / Detail</div>
           <h2>
             {metric.name}{" "}
-            <Tag color={STATUS_COLOR[metric.status]}>{STATUS_LABEL[metric.status]}</Tag>
+            <Tag color={STATUS_COLOR[metric.status]}>{STATUS_LABEL[metric.status] ?? metric.status}</Tag>
             {metric.metric_tier && <Tag>{METRIC_TIER_LABEL[metric.metric_tier] ?? metric.metric_tier}</Tag>}
             {badgeArea}
           </h2>
