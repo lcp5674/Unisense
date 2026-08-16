@@ -912,3 +912,49 @@ def test_deep_cte_chain_beyond_max_depth_table_kept() -> None:
     assert {(e.source, e.target) for e in table_edges} == {("ods.a", "dws.t")}
     # 字段级受 _MAX_DEPTH 保护降级（不抛异常、不产伪边）
     assert extract_field_lineage(sql) == []
+
+
+def test_nested_set_operation_derived_column() -> None:
+    """嵌套集合运算派生表的列解析：``SELECT x FROM (SELECT ... UNION SELECT ...) u``。
+
+    UNION 子查询的 scope 不聚合分支 sources，列 x 需逐分支解析——合并列同时来自
+    多分支（a.id AS x / b.uid AS x），收集所有分支来源。
+    """
+    sql = (
+        "INSERT INTO dws.t SELECT x FROM "
+        "(SELECT a.id AS x FROM ods.a UNION ALL SELECT b.uid AS x FROM ods.b) u"
+    )
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    assert {("ods.a", "id", "x"), ("ods.b", "uid", "x")} == {
+        (e.source_table, e.source_column, e.target_column) for e in field_edges
+    }
+    table_edges = extract_table_lineage(sql, dialect="postgres")
+    assert {e.source for e in table_edges} == {"ods.a", "ods.b"}
+
+
+def test_nested_set_operation_derived_multi_col() -> None:
+    """嵌套集合运算派生表多列引用：每个输出列收集全部分支来源。"""
+    sql = (
+        "INSERT INTO dws.t SELECT u.x, u.y FROM "
+        "(SELECT a.id AS x, a.v AS y FROM ods.a "
+        "UNION ALL SELECT b.uid AS x, b.w AS y FROM ods.b) u"
+    )
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    assert {
+        ("ods.a", "id", "x"),
+        ("ods.b", "uid", "x"),
+        ("ods.a", "v", "y"),
+        ("ods.b", "w", "y"),
+    } == {(e.source_table, e.source_column, e.target_column) for e in field_edges}
+
+
+def test_nested_except_derived_column() -> None:
+    """嵌套 EXCEPT 派生表列解析同样支持（SetOperation 统一处理）。"""
+    sql = (
+        "INSERT INTO dws.t SELECT x FROM "
+        "(SELECT a.id AS x FROM ods.a EXCEPT SELECT b.uid AS x FROM ods.b) u"
+    )
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    assert {("ods.a", "id", "x"), ("ods.b", "uid", "x")} == {
+        (e.source_table, e.source_column, e.target_column) for e in field_edges
+    }

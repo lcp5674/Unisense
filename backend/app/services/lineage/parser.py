@@ -387,7 +387,19 @@ def _projection_name(projection: exp.Expression) -> str | None:
 
 
 def _scope_outputs_column(scope: Any, col_name: str) -> bool:
-    """判断某 scope 的表达式是否输出指定列名。"""
+    """判断某 scope 的表达式是否输出指定列名。
+
+    集合运算子查询（``UNION/EXCEPT/INTERSECT``）的 scope 不聚合分支 sources，
+    需展开各分支检查（如 ``SELECT x FROM (SELECT a.id AS x ... UNION SELECT b.uid AS x ...) u``
+    的 x 在任一分支输出即算）。
+    """
+    expr = getattr(scope, "expression", None)
+    if isinstance(expr, exp.SetOperation):
+        return any(
+            _projection_name(p) == col_name
+            for branch in _branch_queries(expr)
+            for p in (getattr(branch, "selects", None) or [])
+        )
     selects = getattr(scope, "selects", None)
     if not selects:
         return False
@@ -512,6 +524,22 @@ def _resolve_column(
             # 的叶子列——``UNNEST(a.items) AS u(v)`` 的 ``u.v`` 应归属 ``a.items``，
             # 而非当作 ``a`` 的真实列或丢弃。
             return _resolve_projection(scope, src.expression, cte_map, dialect, depth + 1)
+        if isinstance(src.expression, exp.SetOperation):
+            # 集合运算子查询（``SELECT x FROM (... UNION ...) u``）：Union scope
+            # 不聚合分支 sources，需逐分支找含该列的投影递归解析。UNION 合并列同时
+            # 来自多个分支（``a.id AS x`` / ``b.uid AS x``），收集所有分支的来源。
+            out: list[tuple[str, str]] = []
+            for branch in _branch_queries(src.expression):
+                branch_scope = _try_build_scope(branch)
+                if branch_scope is None:
+                    continue
+                for p in getattr(branch, "selects", None) or []:
+                    if _projection_name(p) == col.name:
+                        out.extend(
+                            _resolve_projection(branch_scope, p, cte_map, dialect, depth + 1)
+                        )
+                        break
+            return out
         for p in getattr(src.expression, "selects", []):
             if _projection_name(p) == col.name:
                 return _resolve_projection(src, p, cte_map, dialect, depth + 1)
