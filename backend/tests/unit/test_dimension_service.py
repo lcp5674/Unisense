@@ -900,7 +900,30 @@ async def test_deprecate_dimension_allowed_when_unbound() -> None:
     repo.get_dimension = AsyncMock(return_value=dim)
     repo.count_metric_dimensions = AsyncMock(return_value=0)
 
-    result = await svc.deprecate_dimension("region")
+    with patch(
+        "app.services.lineage.service.LineageService.delete_by_node",
+        new=AsyncMock(return_value=0),
+    ) as mock_del:
+        result = await svc.deprecate_dimension("region")
+        mock_del.assert_awaited_once_with("dimension:region")
+
+    assert result.status == "DEPRECATED"
+    repo.commit.assert_awaited()
+
+
+async def test_deprecate_dimension_lineage_cleanup_failure_is_best_effort() -> None:
+    """血缘清理失败不阻断维度废弃（best-effort，与指标废弃边清理容错一致）。"""
+    svc, repo = await _svc()
+    dim = SimpleNamespace(dim_code="region", status="PUBLISHED")
+    repo.get_dimension = AsyncMock(return_value=dim)
+    repo.count_metric_dimensions = AsyncMock(return_value=0)
+
+    with patch(
+        "app.services.lineage.service.LineageService.delete_by_node",
+        new=AsyncMock(side_effect=RuntimeError("lineage store down")),
+    ):
+        # 不应抛异常——血缘清理失败仅告警，维度仍正常废弃
+        result = await svc.deprecate_dimension("region")
 
     assert result.status == "DEPRECATED"
     repo.commit.assert_awaited()

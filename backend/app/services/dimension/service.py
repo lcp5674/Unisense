@@ -198,6 +198,17 @@ class DimensionService(BaseService):
                 error_code="DIMENSION_BOUND_BY_METRICS",
             )
         dim.status = DimensionStatus.DEPRECATED.value
+        # 防御性清理：维度废弃后不再可用，其相关血缘边（历史存量/异常路径残留，
+        # 正常绑定已由 unbind 即时清理）级联软删——对称于指标废弃时
+        # semantic._cleanup_metric_lineage 的边清理。被绑定的维度已在上面被保护，
+        # 此处清理不影响任何有效绑定。
+        try:
+            from app.services.lineage.parser import node_dimension
+            from app.services.lineage.service import LineageService
+
+            await LineageService(self._session).delete_by_node(node_dimension(dim_code))
+        except Exception:  # noqa: BLE001 - 血缘清理失败不阻断维度废弃
+            logger.warning("deprecate_dimension_lineage_cleanup_failed", dim_code=dim_code)
         await self._repo.commit()
         return dim
 
