@@ -77,6 +77,19 @@ function openReviewModal(
           reject();
           return;
         }
+        // 灰度发布：租户 ID 须为数字（此前非数字被静默丢弃，用户误以为全部生效）
+        if (approved && mode === "experimental" && grayTenants.trim()) {
+          const invalid = grayTenants
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .filter((t) => !/^\d+$/.test(t));
+          if (invalid.length) {
+            message.warning(`灰度租户 ID 须为数字：${invalid.join("、")}，请修正后重试`);
+            reject();
+            return;
+          }
+        }
         resolve();
       }).then(() => {
         const tenants = grayTenants

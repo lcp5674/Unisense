@@ -240,4 +240,33 @@ describe("MetricReview 指标审批", () => {
       });
     });
   });
+
+  it("灰度发布输入非数字租户 ID 时提示且不提交", async () => {
+    mockedApprove.mockResolvedValue(metric);
+    renderReview();
+    await screen.findByText("sales_gmv_day");
+    fireEvent.click(screen.getAllByRole("button", { name: /^通\s*过$/ })[0]);
+    await waitFor(() => {
+      expect(screen.getByText("灰度发布（仅指定租户）")).toBeTruthy();
+    });
+    // 切换为灰度发布
+    fireEvent.click(screen.getByText("灰度发布（仅指定租户）"));
+    // 输入含非数字租户 ID
+    const input = document.querySelector(
+      ".ant-modal-confirm-content input",
+    ) as HTMLInputElement;
+    expect(input).toBeTruthy();
+    fireEvent.change(input, { target: { value: "101,abc,102" } });
+    const confirmBtn = document.querySelector(
+      ".ant-modal-confirm-btns .ant-btn-primary",
+    ) as HTMLElement;
+    fireEvent.click(confirmBtn);
+    // 非数字被拒绝 → 不提交、弹窗不关闭
+    await waitFor(() => {
+      expect(mockedApprove).not.toHaveBeenCalled();
+    });
+    expect(
+      document.querySelector(".ant-modal-confirm-btns .ant-btn-primary"),
+    ).toBeTruthy();
+  });
 });
