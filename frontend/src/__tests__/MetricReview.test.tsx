@@ -168,4 +168,21 @@ describe("MetricReview 指标审批", () => {
     // PII 待复核标签可见（PII 列，与指标目录一致）
     expect(screen.getAllByText(/PII 待复核/).length).toBeGreaterThan(0);
   });
+
+  it("「我审过的」视图：按 approver_id 查询、无操作按钮、无批量按钮", async () => {
+    const reviewed = { ...metric, status: "PUBLISHED", approver_id: 1 };
+    mockedList.mockResolvedValue({ items: [reviewed], total: 1, page: 1, page_size: 20 });
+    renderReview();
+    // 切换到「我审过的」
+    fireEvent.click(await screen.findByRole("radio", { name: /我审过的/ }));
+    await screen.findByText("sales_gmv_day");
+    // 携带 approver_id 查询
+    expect(mockedList).toHaveBeenCalledWith(
+      expect.objectContaining({ approver_id: 1 }),
+    );
+    // 无「通过」操作、无批量通过按钮
+    expect(screen.queryAllByRole("button", { name: /通\s*过/ }).length).toBe(0);
+    // 「已处理」标记可见
+    expect(screen.getByText("已处理")).toBeTruthy();
+  });
 });

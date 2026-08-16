@@ -397,6 +397,8 @@ class MetricListParams(BaseModel):
     keyword: str | None = None
     # 责任人过滤（资产地图 Owner 视图下钻）
     owner_id: int | None = Field(None, ge=1, description="责任人（Owner）ID 过滤")
+    # 审批人过滤（审批工作台「我审过的」视图）
+    approver_id: int | None = Field(None, ge=1, description="审批人（Approver）ID 过滤")
     # PII 过滤（热力指标视角下钻：PII 格子 / 非 PII 格子）
     pii_flag: bool | None = Field(None, description="仅 PII / 仅非 PII 指标")
     # 生命周期快筛（TD §13）：按创建/更新时间区间过滤（ISO 日期或 datetime）

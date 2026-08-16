@@ -124,6 +124,7 @@ class MetricRepository:
         metric_tier: str | None = None,
         keyword: str | None = None,
         owner_id: int | None = None,
+        approver_id: int | None = None,
         pii_flag: bool | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
@@ -162,6 +163,8 @@ class MetricRepository:
             conditions.append(Metric.metric_tier == metric_tier)
         if owner_id is not None:
             conditions.append(Metric.owner_id == owner_id)
+        if approver_id is not None:
+            conditions.append(Metric.approver_id == approver_id)
         if pii_flag is not None:
             conditions.append(Metric.pii_flag.is_(pii_flag))
         if created_after is not None:

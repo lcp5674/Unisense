@@ -489,6 +489,8 @@ export async function listMetrics(params: {
   created_after?: string;
   /** 生命周期快筛：仅返回 updated_at 早于该时间（ISO）的指标 */
   updated_before?: string;
+  /** 审批人（Approver）ID 过滤（审批工作台「我审过的」视图） */
+  approver_id?: number;
   sort_by?: "updated_at" | "created_at" | "version" | "metric_code" | "name";
   sort_order?: "asc" | "desc";
   page?: number;
@@ -500,6 +502,7 @@ export async function listMetrics(params: {
     metric_tier: params.metric_tier,
     keyword: params.keyword,
     owner_id: params.owner_id,
+    approver_id: params.approver_id,
     pii_flag: params.pii_flag === undefined ? undefined : String(params.pii_flag),
     created_after: params.created_after,
     updated_before: params.updated_before,

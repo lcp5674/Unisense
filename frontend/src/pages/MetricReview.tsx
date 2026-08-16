@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Input, Modal, Space, Table, Tag, Tooltip, message } from "antd";
+import { Button, Card, Input, Modal, Segmented, Space, Table, Tag, Tooltip, message } from "antd";
 import { ArrowLeftOutlined, CheckCircleOutlined, ClockCircleOutlined } from "@ant-design/icons";
 import {
   listMetrics,
@@ -97,6 +97,8 @@ export function MetricReview() {
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
+  // 审批工作台视角：pending=待我审（REVIEW）；reviewed=我审过的（按 approver_id 过滤）
+  const [view, setView] = useState<"pending" | "reviewed">("pending");
   const [page, setPage] = useState(1);
   // 每页条数持久化（对齐指标目录/Dimensions 的 usePersistentPageSize 跨页记忆）
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.review.pageSize", 20);
@@ -113,14 +115,25 @@ export function MetricReview() {
   async function load() {
     setLoading(true);
     try {
-      const res = await listMetrics({
-        status: "REVIEW",
-        page,
-        page_size: pageSize,
-        // 审批工作台 FIFO：最旧待审优先，避免积压（默认后端 updated_at desc 会新单优先）
-        sort_by: "updated_at",
-        sort_order: "asc",
-      });
+      // pending=待我审（REVIEW）；reviewed=我审过的（按 approver_id 过滤，无状态限制以便回看通过/驳回记录）
+      const res = await listMetrics(
+        view === "pending"
+          ? {
+              status: "REVIEW",
+              page,
+              page_size: pageSize,
+              // 审批工作台 FIFO：最旧待审优先，避免积压（默认后端 updated_at desc 会新单优先）
+              sort_by: "updated_at",
+              sort_order: "asc",
+            }
+          : {
+              approver_id: currentUser?.id,
+              page,
+              page_size: pageSize,
+              sort_by: "updated_at",
+              sort_order: "desc",
+            },
+      );
       setItems(res.items);
       setTotal(res.total);
     } catch (err) {
@@ -139,7 +152,7 @@ export function MetricReview() {
       .then((u) => setUserMap(new Map(u.map((x) => [x.id, x.display_name || x.username]))))
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize]);
+  }, [page, pageSize, view, currentUser?.id]);
 
   async function handleReview(metric: MetricResponse, approved: boolean, reason: string) {
     setBusyCode(metric.metric_code);
@@ -243,6 +256,10 @@ export function MetricReview() {
       title: "操作",
       key: "actions",
       render: (_: unknown, r: MetricResponse) => {
+        // 「我审过的」视图仅回看，不再提供操作
+        if (view === "reviewed") {
+          return <Tag>已处理</Tag>;
+        }
         // 同时满足权限点与行级/域级评审人身份才允许操作
         const allowed = canApprove && canReview(r, currentUser);
         // PII 待复核：后端 approve 会拦 COMPLIANCE_BLOCKED，前端直接禁用「通过」并提示先完成合规复核
@@ -289,27 +306,43 @@ export function MetricReview() {
         </div>
       </div>
       <Card
-        title="待评审指标"
+        title="指标审批"
         extra={
           <Space>
-            {/* 批量按钮：仅在勾选中有当前用户可评审的项时可用（避免"均非指派"空操作） */}
-            <Button
-              size="small"
-              icon={<CheckCircleOutlined />}
-              disabled={!selectedKeys.length || batchBusy || !canApprove || !items.some((m) => selectedKeys.includes(m.metric_code) && canReview(m, currentUser))}
-              onClick={() => runBatch(true)}
-            >
-              批量通过
-            </Button>
-            <Button
-              size="small"
-              danger
-              icon={<ClockCircleOutlined />}
-              disabled={!selectedKeys.length || batchBusy || !canApprove || !items.some((m) => selectedKeys.includes(m.metric_code) && canReview(m, currentUser))}
-              onClick={() => runBatch(false)}
-            >
-              批量打回
-            </Button>
+            <Segmented
+              value={view}
+              onChange={(v) => {
+                setView(v as "pending" | "reviewed");
+                setPage(1);
+                setSelectedKeys([]);
+              }}
+              options={[
+                { label: "待我审", value: "pending" },
+                { label: "我审过的", value: "reviewed" },
+              ]}
+            />
+            {/* 批量按钮：仅待我审视图下展示；在勾选中有当前用户可评审的项时可用（避免"均非指派"空操作） */}
+            {view === "pending" && (
+              <>
+                <Button
+                  size="small"
+                  icon={<CheckCircleOutlined />}
+                  disabled={!selectedKeys.length || batchBusy || !canApprove || !items.some((m) => selectedKeys.includes(m.metric_code) && canReview(m, currentUser))}
+                  onClick={() => runBatch(true)}
+                >
+                  批量通过
+                </Button>
+                <Button
+                  size="small"
+                  danger
+                  icon={<ClockCircleOutlined />}
+                  disabled={!selectedKeys.length || batchBusy || !canApprove || !items.some((m) => selectedKeys.includes(m.metric_code) && canReview(m, currentUser))}
+                  onClick={() => runBatch(false)}
+                >
+                  批量打回
+                </Button>
+              </>
+            )}
             <Button size="small" onClick={load} loading={loading}>
               刷新
             </Button>
@@ -321,14 +354,18 @@ export function MetricReview() {
           columns={columns}
           rowKey="metric_code"
           loading={loading}
-          rowSelection={{
-            selectedRowKeys: selectedKeys,
-            onChange: (keys) => setSelectedKeys(keys),
-            // 仅允许勾选当前用户可评审的项（避免批量时"均非指派"空操作）
-            getCheckboxProps: (r: MetricResponse) => ({
-              disabled: !canReview(r, currentUser),
-            }),
-          }}
+          rowSelection={
+            view === "pending"
+              ? {
+                  selectedRowKeys: selectedKeys,
+                  onChange: (keys) => setSelectedKeys(keys),
+                  // 仅允许勾选当前用户可评审的项（避免批量时"均非指派"空操作）
+                  getCheckboxProps: (r: MetricResponse) => ({
+                    disabled: !canReview(r, currentUser),
+                  }),
+                }
+              : undefined
+          }
           pagination={{
             current: page,
             pageSize,
