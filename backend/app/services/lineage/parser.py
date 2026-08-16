@@ -212,7 +212,7 @@ def _table_edges(ast: Any) -> list[TableEdge]:
     if target_name is None:
         # 纯查询语句无写入目标，无成边条件
         return edges
-    if isinstance(ast, exp.Create) and not isinstance(ast.expression, (exp.Select, exp.Union)):
+    if isinstance(ast, exp.Create) and not _is_query_node(ast.expression):
         # CREATE TABLE ... LIKE ...（结构复制，无数据流转）与纯 DDL（无 AS SELECT）：
         # 无 SELECT 数据源，不构成血缘边（LIKE 的源表仅是结构模板）
         return edges
@@ -280,9 +280,9 @@ def extract_table_lineage(
             # 非 SQL / 语法错误：跳过该语句，整体降级（不抛异常）
             continue
         stmt_edges = _table_edges(ast)
-        if not stmt_edges and target_table and isinstance(ast, (exp.Select, exp.Union)):
-            # 纯 SELECT 显式落点：FROM/JOIN 源表 → 目标表（写入语句如 INSERT
-            # OVERWRITE DIRECTORY 目标非表时不做纯查询落点回退）
+        if not stmt_edges and target_table and _is_query_node(ast):
+            # 纯 SELECT/集合运算显式落点：FROM/JOIN 源表 → 目标表（写入语句如
+            # INSERT OVERWRITE DIRECTORY 目标非表时不做纯查询落点回退）
             stmt_edges = _select_table_edges(ast, target_table)
         for edge in stmt_edges:
             key = (edge.source, edge.target)
@@ -301,12 +301,12 @@ def _find_source_query(ast: exp.Expression) -> exp.Expression | None:
     节点，由调用方逐分支解析。其余情况退化为 None，由调用方降级处理。
     """
     if isinstance(ast, exp.Insert):
-        q = ast.expression
-        if isinstance(q, (exp.Select, exp.Union)):
+        q: exp.Expression | None = ast.expression
+        if _is_query_node(q):
             return q
     if isinstance(ast, exp.Create) and ast.kind and ast.kind.upper() in ("TABLE", "VIEW"):
         q = ast.expression
-        if isinstance(q, (exp.Select, exp.Union)):
+        if _is_query_node(q):
             return q
     if isinstance(ast, exp.Merge):
         return ast.args.get("using")
@@ -319,13 +319,27 @@ def _find_source_query(ast: exp.Expression) -> exp.Expression | None:
     return None
 
 
+def _is_query_node(node: exp.Expression | None) -> bool:
+    """节点是否为查询语句/查询表达式（SELECT 或集合运算 UNION/EXCEPT/INTERSECT）。
+
+    ``exp.SetOperation`` 是 Union/Except/Intersect 的公共基类；集合运算（如
+    ``SELECT ... EXCEPT SELECT ...``）是生产常见语法，字段级/上游依赖均需展开
+    各分支解析，不能当作非查询语句跳过。
+    """
+    return isinstance(node, (exp.Select, exp.SetOperation))
+
+
 def _branch_queries(query: exp.Expression) -> list[exp.Select]:
-    """将源查询展开为多个 SELECT 分支（UNION 拆开，普通 SELECT 单个）。"""
-    if isinstance(query, exp.Union):
-        # sqlglot 的 Expression.flatten 泛化成生成器后过滤 SELECT 分支
-        # （25.x 的 flatten 无类型标注，忽略 no-untyped-call）
-        branches: list[Any] = list(query.flatten())  # type: ignore[no-untyped-call]
-        return [b for b in branches if isinstance(b, exp.Select)]
+    """将源查询展开为多个 SELECT 分支（UNION/EXCEPT/INTERSECT 拆开，普通 SELECT 单个）。"""
+    if isinstance(query, exp.SetOperation):
+        # 集合运算：this/expression 是左右分支（可能是嵌套集合运算，递归展开）
+        branches: list[exp.Select] = []
+        for side in (query.args.get("this"), query.args.get("expression")):
+            if isinstance(side, exp.Select):
+                branches.append(side)
+            elif isinstance(side, exp.SetOperation):
+                branches.extend(_branch_queries(side))
+        return branches
     if isinstance(query, exp.Select):
         return [query]
     return []
@@ -858,8 +872,8 @@ def extract_field_lineage(
         except Exception:
             continue
         stmt_edges = _extract_field_edges(ast, dialect)
-        if not stmt_edges and target_table and isinstance(ast, (exp.Select, exp.Union)):
-            # 纯 SELECT 显式落点：投影列 → 目标表列（写入语句目标非表时不回退）
+        if not stmt_edges and target_table and _is_query_node(ast):
+            # 纯 SELECT/集合运算显式落点：投影列 → 目标表列（写入语句目标非表时不回退）
             stmt_edges = _select_field_edges(ast, target_table, dialect)
         for edge in stmt_edges:
             key = (
@@ -908,7 +922,7 @@ def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
             # 写入语句（INSERT/UPDATE/MERGE/CREATE）不是「纯 SELECT 无落点」场景：
             # 其目标表不属上游依赖，直接跳过（避免把写入目标误收为读取来源）
             continue
-        if not isinstance(ast, (exp.Select, exp.Union)):
+        if not _is_query_node(ast):
             # 非查询语句（ALTER/DROP/TRUNCATE/DELETE/COPY/USE 等）不是血缘读取：
             # 不产上游依赖，避免把 DDL/DML 的目标表（如 DELETE FROM t 的 t）误收为来源
             continue

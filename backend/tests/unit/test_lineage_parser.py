@@ -782,3 +782,45 @@ def test_cte_chain_aggregate_column_resolved() -> None:
         for e in field_edges
         if e.target_column == "v"
     ] == [("ods.b", "v", "v")], "MAX(v) 的 v 应穿透 CTE 解析到 ods.b.v"
+
+
+def test_except_field_lineage() -> None:
+    """INSERT 源 EXCEPT：字段级血缘覆盖两个分支（此前 _branch_queries 只认 Union）。"""
+    sql = "INSERT INTO dws.t SELECT id, v FROM ods.a EXCEPT SELECT id, v FROM ods.b"
+    table_edges = extract_table_lineage(sql, dialect="postgres")
+    assert {e.source for e in table_edges} == {"ods.a", "ods.b"}
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    assert [(e.source_table, e.source_column, e.target_column) for e in field_edges] == [
+        ("ods.a", "id", "id"),
+        ("ods.a", "v", "v"),
+        ("ods.b", "id", "id"),
+        ("ods.b", "v", "v"),
+    ]
+
+
+def test_intersect_field_lineage() -> None:
+    """INSERT 源 INTERSECT：字段级血缘覆盖两个分支。"""
+    sql = "INSERT INTO dws.t SELECT id FROM ods.a INTERSECT SELECT id FROM ods.b"
+    field_edges = extract_field_lineage(sql, dialect="spark")
+    assert {("ods.a", "id", "id"), ("ods.b", "id", "id")} == {
+        (e.source_table, e.source_column, e.target_column) for e in field_edges
+    }
+
+
+def test_upstream_deps_except() -> None:
+    """纯 SELECT EXCEPT（无落点）：上游依赖收集左右两分支的表与字段。"""
+    ud = extract_upstream_deps("SELECT id FROM ods.a EXCEPT SELECT id FROM ods.b", dialect="hive")
+    assert ud.tables == ("ods.a", "ods.b")
+    assert ud.fields == ("ods.a.id", "ods.b.id")
+
+
+def test_except_with_target_table() -> None:
+    """纯 SELECT EXCEPT + 显式落点（方案 A+B）：源表 → 目标表 表级/字段级边。"""
+    sql = "SELECT id, v FROM ods.a EXCEPT SELECT id, v FROM ods.b"
+    table_edges = extract_table_lineage(sql, dialect="postgres", target_table="dws.t")
+    assert {e.source for e in table_edges} == {"ods.a", "ods.b"}
+    assert all(e.target == "dws.t" for e in table_edges)
+    field_edges = extract_field_lineage(sql, dialect="postgres", target_table="dws.t")
+    assert {("ods.a", "id", "id"), ("ods.b", "v", "v")} <= {
+        (e.source_table, e.source_column, e.target_column) for e in field_edges
+    }
