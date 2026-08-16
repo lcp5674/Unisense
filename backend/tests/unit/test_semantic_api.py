@@ -88,3 +88,38 @@ async def test_template_owner_assign_and_errors() -> None:
             user=user, template_id=1, request=req, body={"owner_id": 0}, db=db
         )
     assert exc.value.status_code == 422
+
+
+async def test_list_templates_escapes_wildcards_and_sorts_stably() -> None:
+    """模板列表：LIKE 通配符转义（FR-035）+ 排序确定性（domain,name,id 次级，防翻页重漏）。"""
+    from sqlalchemy.dialects import mysql
+
+    from app.api.semantic import list_templates
+
+    db = MagicMock()
+    r1 = MagicMock()
+    r1.scalar_one_or_none.return_value = 0
+    r2 = MagicMock()
+    r2.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(side_effect=[r1, r2])
+
+    await list_templates(
+        request=MagicMock(),
+        _user=MagicMock(),
+        domain=None,
+        is_active=None,
+        keyword="100%_x",
+        owner_id=None,
+        page=1,
+        page_size=20,
+        db=db,
+    )
+
+    # 第二个 execute 是列表查询：编译为 MySQL 方言验证 ESCAPE 与排序
+    list_stmt = db.execute.call_args_list[1].args[0]
+    literal_sql = str(
+        list_stmt.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "ESCAPE '/'" in literal_sql
+    assert "100%_x" not in literal_sql  # 原始关键词（含裸 %/_）不得出现
+    assert "metric_template.id" in literal_sql  # 主键次级排序（排序确定性）

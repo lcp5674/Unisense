@@ -61,19 +61,20 @@ async def list_templates(
     if owner_id is not None:
         q = q.where(MetricTemplate.owner_id == owner_id)
     if keyword:
-        # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
-        escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）。
+        # 转义符 / 配合 escape="/"（修复前 \\% 无 ESCAPE 子句致转义失效）
+        escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
         q = q.where(
             or_(
-                MetricTemplate.code.like(f"%{escaped}%"),
-                MetricTemplate.name.like(f"%{escaped}%"),
-                MetricTemplate.description.like(f"%{escaped}%"),
+                MetricTemplate.code.like(f"%{escaped}%", escape="/"),
+                MetricTemplate.name.like(f"%{escaped}%", escape="/"),
+                MetricTemplate.description.like(f"%{escaped}%", escape="/"),
             )
         )
     total_q = select(func.count()).select_from(q.subquery())
     total = (await db.execute(total_q)).scalar_one() or 0
     q = (
-        q.order_by(MetricTemplate.domain, MetricTemplate.name)
+        q.order_by(MetricTemplate.domain, MetricTemplate.name, MetricTemplate.id)
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
