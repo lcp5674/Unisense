@@ -45,6 +45,7 @@ import {
   getMetric,
   getMetricHealth,
   inferMetricDescription,
+  listDomainTree,
   listFavorites,
   listSubscriptions,
   listUsers,
@@ -62,6 +63,7 @@ import {
 } from "../api";
 import type {
   ArchivedMetricResponse,
+  SubjectDomainTreeNode,
   CurrentUser,
   MetricHealth,
   MetricResponse,
@@ -257,7 +259,15 @@ function ArchivedMetricCard({
 }
 
 // 作废指标历史详情：展示历史口径定义，供追溯（作废不可消费，但历史口径应可见）
-function ArchivedDetailPanel({ detail }: { detail: ArchivedMetricResponse | null }) {
+function ArchivedDetailPanel({
+  detail,
+  domainName,
+  domainInactive,
+}: {
+  detail: ArchivedMetricResponse | null;
+  domainName: (code: string) => string;
+  domainInactive: (code: string) => boolean;
+}) {
   if (!detail?.metric) return null;
   const m = detail.metric;
   return (
@@ -267,7 +277,10 @@ function ArchivedDetailPanel({ detail }: { detail: ArchivedMetricResponse | null
           <span className="mono">{m.metric_code}</span>
         </Descriptions.Item>
         <Descriptions.Item label="指标名称">{m.name}</Descriptions.Item>
-        <Descriptions.Item label="业务域">{m.domain}</Descriptions.Item>
+        <Descriptions.Item label="业务域">
+          {domainName(m.domain)}
+          {domainInactive(m.domain) && <Tag style={{ marginLeft: 6 }} color="default">已停用</Tag>}
+        </Descriptions.Item>
         <Descriptions.Item label="粒度">{m.granularity}</Descriptions.Item>
         <Descriptions.Item label="指标类型">{METRIC_TYPE_LABEL[m.type] ?? m.type}</Descriptions.Item>
         <Descriptions.Item label="状态">
@@ -412,6 +425,9 @@ export function MetricDetail() {
   const navigate = useNavigate();
   const location = useLocation();
   const [metric, setMetric] = useState<MetricResponse | null>(null);
+  // 主题域 code → 中文名 / 状态（供业务域展示中文名 + 停用标识，与目录页一致）
+  const [domainMap, setDomainMap] = useState<Map<string, string>>(new Map());
+  const [domainStatusMap, setDomainStatusMap] = useState<Map<string, string>>(new Map());
   // 业务描述 LLM 推断 loading（第 8 轮：详情页补描述生成入口）
   const [descInferring, setDescInferring] = useState(false);
   const [descEditOpen, setDescEditOpen] = useState(false);
@@ -486,13 +502,14 @@ export function MetricDetail() {
     setLoading(true);
     setArchived(null);
     try {
-      const [m, vs, me, favs, healthRes, userList, subs, rel] = await Promise.all([
+      const [m, vs, me, favs, healthRes, userList, domainTree, subs, rel] = await Promise.all([
         getMetric(code),
         listVersions(code),
         fetchCurrentUser(),
         listFavorites().catch(() => [] as { asset_type: string; asset_id: string }[]),
         getMetricHealth(code).catch(() => null),
         listUsers().catch(() => [] as UserBrief[]),
+        listDomainTree().catch(() => [] as SubjectDomainTreeNode[]),
         listSubscriptions().catch(() => ({ items: [] as SubscriptionPref[] })),
         fetchRelatedMetrics(code).catch(() => [] as RecommendItem[]),
       ]);
@@ -508,6 +525,20 @@ export function MetricDetail() {
         ),
       );
       setRelated(rel);
+      {
+        const dMap = new Map<string, string>();
+        const stMap = new Map<string, string>();
+        const walk = (nodes: SubjectDomainTreeNode[]) => {
+          for (const n of nodes) {
+            dMap.set(n.code, n.name);
+            if (n.status) stMap.set(n.code, n.status);
+            if (n.children?.length) walk(n.children);
+          }
+        };
+        walk(domainTree);
+        setDomainMap(dMap);
+        setDomainStatusMap(stMap);
+      }
       track("metric_detail_view", code, "metric");
     } catch (err) {
       // 仲裁作废指标（METRIC_ARCHIVED）：后端返回结构化错误（detail 含 successor_code），
@@ -640,7 +671,7 @@ export function MetricDetail() {
             successorCode={archived.successorCode}
             mark={archived.mark}
           />
-          <ArchivedDetailPanel detail={archived.detail} />
+          <ArchivedDetailPanel detail={archived.detail} domainName={(c) => domainMap.get(c) ?? c} domainInactive={(c) => domainStatusMap.get(c) === "inactive"} />
           {/* 首次进入作废页的醒目引导弹窗：告知作废原因 + 一键跳转权威指标 */}
           <Modal
             open={showArchivedModal}

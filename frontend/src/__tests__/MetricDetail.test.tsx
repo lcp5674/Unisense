@@ -13,6 +13,7 @@ vi.mock("../api", () => ({
   fetchMyPermissions: vi.fn(),
   listFavorites: vi.fn(),
   getMetricHealth: vi.fn(),
+  listDomainTree: vi.fn(),
   listUsers: vi.fn(),
   listSubscriptions: vi.fn(),
   fetchRelatedMetrics: vi.fn(),
@@ -58,6 +59,7 @@ import {
   listVersions,
   fetchCurrentUser,
   fetchMyPermissions,
+  listDomainTree,
   listFavorites,
   getMetricHealth,
   listUsers,
@@ -82,6 +84,7 @@ const mockedFetchArchived = vi.mocked(fetchArchivedMetric);
 const mockedListVersions = vi.mocked(listVersions);
 const mockedMyPerms = vi.mocked(fetchMyPermissions);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
+const mockedDomainTree = vi.mocked(listDomainTree);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedHealth = vi.mocked(getMetricHealth);
 const mockedUsers = vi.mocked(listUsers);
@@ -164,6 +167,9 @@ describe("MetricDetail", () => {
     vi.clearAllMocks();
     mockedGetMetric.mockResolvedValue(metric);
     mockedListVersions.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([
+      { id: 1, code: "sales", name: "销售域", parent_id: null, level: 1, sort_order: 0, status: "active", metric_count: 0, children: [] },
+    ]);
     mockedCurrentUser.mockResolvedValue({
       id: 1,
       username: "zhangsan",
