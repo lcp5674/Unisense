@@ -303,3 +303,61 @@ class LineageEdgeDetailResponse(BaseModel):
     history: list[LineageEdgeHistoryResponse] = Field(
         default_factory=list, description="该边的变更历史（按时间倒序）"
     )
+
+
+# ---- 手动登记血缘边（人工治理，TD §12.2）----
+
+
+#: 支持人工登记的节点前缀（上游/下游均须为以下类型之一）。
+#: 每类节点对应一种命名约定（前缀:值）与语义：
+#: - ``metric:{code}``        指标编码（口径定义登记）
+#: - ``table:{db}.{tbl}``     数据表（含 schema 前缀，如 table:wedw_ods.xxx）
+#: - ``column:{db}.{tbl}.{col}`` 表字段（列级血缘）
+#: - ``dimension:{code}``     维度编码（指标↔维度绑定）
+#: - ``consumer:{client_id}`` 数据消费方（报表/接口/接入方）
+#: - ``external:{name}``      外部依赖（文档/系统边界，仅登记不作处理）
+MANUAL_NODE_PREFIXES = frozenset(
+    {"metric", "table", "column", "dimension", "consumer", "external"}
+)
+
+#: 手动登记允许的边类型（对齐 lineage_edge_type 枚举，排除内部流转方向标记）。
+MANUAL_EDGE_TYPES = frozenset(
+    {"DERIVED_FROM", "CONSUMED_BY", "USES_DIMENSION", "READS_COLUMN", "EXTERNAL_BREAK"}
+)
+
+
+class ManualEdgeCreateRequest(BaseModel):
+    """手动登记一条血缘边（人工治理）。
+
+    上游/下游节点须带前缀（``metric:``/``table:``/``column:``/``dimension:``/
+    ``consumer:``/``external:``）；方向语义：source_node 为上游（被依赖方），
+    target_node 为下游（消费/加工方）。
+    """
+
+    source_node: str = Field(..., min_length=3, max_length=512, description="上游节点（带前缀）")
+    target_node: str = Field(..., min_length=3, max_length=512, description="下游节点（带前缀）")
+    edge_type: str = Field(
+        default="DERIVED_FROM",
+        description=(
+            "边类型：DERIVED_FROM / CONSUMED_BY / USES_DIMENSION / "
+            "READS_COLUMN / EXTERNAL_BREAK"
+        ),
+    )
+    note: str | None = Field(
+        default=None, max_length=500, description="登记说明（写入变更历史 change_reason）"
+    )
+
+
+class ManualEdgeCreateResponse(BaseModel):
+    """手动登记结果。"""
+
+    edge: LineageEdgeResponse = Field(description="登记后的血缘边")
+    created: bool = Field(description="是否新建（False=更新既有边）")
+
+
+class EdgeDeleteResult(BaseModel):
+    """单条血缘边软删结果。"""
+
+    edge_id: int = Field(description="被删除的边 ID")
+    source_node: str = Field(description="上游节点")
+    target_node: str = Field(description="下游节点")

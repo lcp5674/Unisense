@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
 from app.core.config import settings
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.error_codes import ErrorCode
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.models.lineage import LineageEdge
 from app.models.metric import Metric
@@ -34,8 +35,11 @@ from app.services.lineage.parser import (
 )
 from app.services.lineage.repository import LineageRepository
 from app.services.lineage.schemas import (
+    MANUAL_EDGE_TYPES,
+    MANUAL_NODE_PREFIXES,
     CoverageBrokenEdgeItem,
     CoverageOrphanItem,
+    EdgeDeleteResult,
     FieldLineageItem,
     ImpactPreviewResponse,
     LineageChannelResponse,
@@ -49,6 +53,8 @@ from app.services.lineage.schemas import (
     LineageNodeResponse,
     LineageParseRequest,
     LineageParseResponse,
+    ManualEdgeCreateRequest,
+    ManualEdgeCreateResponse,
     PiiImpactItem,
     StaleEdgeResponse,
     TableLineageItem,
@@ -491,6 +497,99 @@ class LineageService(BaseService):
     async def delete_by_node(self, node: str) -> int:
         """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。"""
         return await self._repo.soft_delete_by_node(node)
+
+    # ---- 人工治理：手动登记 / 单边删除（TD §12.2）----
+
+    @staticmethod
+    def _validate_manual_node(node: str, field_name: str) -> None:
+        """校验手动登记节点格式：须带受支持前缀（``metric:``/``table:``/...）。
+
+        节点命名约定与后端血缘节点格式一致（``parser.node_*`` / ``node_consumer``），
+        每类节点承载的信息：
+        - ``metric:{code}``          指标编码
+        - ``table:{db}.{tbl}``       数据表（含 schema）
+        - ``column:{db}.{tbl}.{col}`` 表字段
+        - ``dimension:{code}``       维度编码
+        - ``consumer:{client_id}``   消费方接入方 ID
+        - ``external:{name}``        外部依赖标识
+        """
+        if ":" not in node:
+            raise ValidationError(
+                f"{field_name} 节点须带类型前缀（如 table:db.orders / metric:code）",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+        prefix, _, value = node.partition(":")
+        if prefix not in MANUAL_NODE_PREFIXES:
+            raise ValidationError(
+                f"{field_name} 节点前缀 {prefix!r} 不受支持，允许："
+                f"{sorted(MANUAL_NODE_PREFIXES)}",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+        if not value.strip():
+            raise ValidationError(
+                f"{field_name} 节点 {field_name} 缺少实体标识",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+
+    async def add_manual_edge(
+        self, req: ManualEdgeCreateRequest, actor_id: int
+    ) -> ManualEdgeCreateResponse:
+        """手动登记一条血缘边（provenance=manual, confidence=1.0, owner=登记人）。
+
+        人工治理入口：覆盖自动解析不到的业务依赖（外部报表/文档记载/手工 ETL 之外
+        的语义关系），并在登记时写入 ``LineageEdgeHistory``（change_reason 含备注）。
+        """
+        self._validate_manual_node(req.source_node, "source_node")
+        self._validate_manual_node(req.target_node, "target_node")
+        if req.edge_type not in MANUAL_EDGE_TYPES:
+            raise ValidationError(
+                f"边类型 {req.edge_type!r} 不受支持，允许：{sorted(MANUAL_EDGE_TYPES)}",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+        if req.source_node == req.target_node:
+            raise ValidationError(
+                "上游与下游不能是同一节点（自环血缘无意义）",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+        granularity = self._manual_granularity(req.source_node, req.target_node)
+        note = req.note.strip() if req.note else ""
+        edge, created = await self._repo.upsert_edge_with_status(
+            source_node=req.source_node,
+            target_node=req.target_node,
+            edge_type=req.edge_type,
+            granularity=granularity,
+            confidence=1.0,
+            provenance="manual",
+            change_reason=f"manual: {note}" if note else "manual",
+        )
+        # owner 仅登记人工边（现有 upsert 不写 owner，手动补充；getattr 兼容替身/历史行）
+        if getattr(edge, "owner", None) != str(actor_id):
+            edge.owner = str(actor_id)
+        await self._db.flush()
+        return ManualEdgeCreateResponse(
+            edge=LineageEdgeResponse.model_validate(edge), created=created
+        )
+
+    @staticmethod
+    def _manual_granularity(source: str, target: str) -> str:
+        """按节点类型推断手动登记边的粒度：含字段节点→L2，含指标节点→L3，否则 L1。"""
+        if "column:" in source or "column:" in target:
+            return "L2"
+        if "metric:" in source or "metric:" in target:
+            return "L3"
+        return "L1"
+
+    async def delete_edge_by_id(self, edge_id: int) -> EdgeDeleteResult:
+        """按主键软删单条血缘边（人工治理：误登记/断链修复的单边删除）。"""
+        edge = await self._repo.soft_delete_edge(edge_id)
+        if edge is None:
+            raise NotFoundError(f"血缘边不存在或已删除: id={edge_id}")
+        return EdgeDeleteResult(
+            edge_id=edge.id,
+            source_node=edge.source_node,
+            target_node=edge.target_node,
+        )
+
 
     async def query_graph(
         self,

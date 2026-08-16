@@ -705,6 +705,19 @@ class LineageRepository:
             )
         ).scalar_one_or_none()
 
+    async def soft_delete_edge(self, edge_id: int) -> LineageEdge | None:
+        """按主键软删单条血缘边（置 deleted_at），返回被删边；不存在返回 None。
+
+        区别于 ``soft_delete_by_node``（级联删整节点），用于人工治理的单边删除
+        （误登记/断链修复），保留 ``lineage_edge_history`` 审计上下文。
+        """
+        edge = await self.get_edge(edge_id)
+        if edge is None:
+            return None
+        edge.deleted_at = datetime.now(UTC)
+        await self._db.flush()
+        return edge
+
     async def confirm_stale(self, edge: LineageEdge) -> None:
         """确认失效边：软删（置 deleted_at），不再参与血缘查询。"""
         edge.deleted_at = datetime.now(UTC)

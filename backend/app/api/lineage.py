@@ -24,6 +24,7 @@ from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.schemas import (
     CoverageBrokenEdgeItem,
     CoverageOrphanItem,
+    EdgeDeleteResult,
     ImpactPreviewRequest,
     LineageCoverageResponse,
     LineageEdgeDetailResponse,
@@ -31,6 +32,8 @@ from app.services.lineage.schemas import (
     LineageImpactParams,
     LineageParseRequest,
     LineageStaleParams,
+    ManualEdgeCreateRequest,
+    ManualEdgeCreateResponse,
 )
 from app.services.lineage.service import LineageService, paginate_edges
 
@@ -222,6 +225,78 @@ async def edge_detail(
     """单条血缘边详情：边当前值 + 变更历史（边元数据查询）。"""
     detail = await _svc(db).edge_detail(edge_id)
     return ok(data=detail.model_dump(mode="json"), trace_id=trace_id)
+
+
+@router.post(
+    "/edges/manual",
+    dependencies=[
+        Depends(require_roles(*_WRITE_ROLES)),
+        Depends(guard_against_injection),
+    ],
+)
+async def add_manual_edge(
+    body: ManualEdgeCreateRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[ManualEdgeCreateResponse]:
+    """手动登记一条血缘边（人工治理：自动解析覆盖不到的业务依赖）。
+
+    ``source_node`` 为上游、``target_node`` 为下游，均须带受支持前缀
+    （``metric:``/``table:``/``column:``/``dimension:``/``consumer:``/``external:``）。
+    登记边 provenance=manual、owner=登记人，幂等（重复提交更新既有边）。
+    """
+    svc = _svc(db)
+    result = await svc.add_manual_edge(body, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="LINEAGE_MANUAL_ADD",
+        entity_type="lineage",
+        entity_id=f"{result.edge.source_node}->{result.edge.target_node}",
+        detail={
+            "edge_type": result.edge.edge_type,
+            "granularity": result.edge.granularity,
+            "created": result.created,
+            "note": body.note,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.delete(
+    "/edges/{edge_id}",
+    dependencies=[
+        Depends(require_roles(*_WRITE_ROLES)),
+        Depends(guard_against_injection),
+    ],
+)
+async def delete_single_edge(
+    edge_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[EdgeDeleteResult]:
+    """单条血缘边软删（人工治理：误登记/断链修复的单边删除，非整节点级联删）。"""
+    svc = _svc(db)
+    result = await svc.delete_edge_by_id(edge_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="LINEAGE_EDGE_DELETE",
+        entity_type="lineage",
+        entity_id=f"{result.source_node}->{result.target_node}",
+        detail={"edge_id": edge_id},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
 
 
 @router.post(

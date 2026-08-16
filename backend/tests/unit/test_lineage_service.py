@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
-from app.core.exceptions import NotFoundError
+import pytest
+
+from app.core.exceptions import NotFoundError, ValidationError
 from app.services.lineage.schemas import (
     CoverageBrokenEdgeItem,
     CoverageOrphanItem,
@@ -17,6 +19,7 @@ from app.services.lineage.schemas import (
     LineageEdgeResponse,
     LineageImpactParams,
     LineageParseRequest,
+    ManualEdgeCreateRequest,
     PiiImpactItem,
 )
 from app.services.lineage.service import LineageService, paginate_edges
@@ -203,6 +206,13 @@ class FakeRepo:
     async def soft_delete_by_node(self, node: str) -> int:
         return self.deleted_count
 
+    async def soft_delete_edge(self, edge_id: int) -> object | None:
+        """单条边软删假实现：按 id 从 self.edges 中移除并返回；不存在返回 None。"""
+        for i, e in enumerate(self.edges):
+            if getattr(e, "id", None) == edge_id:
+                return self.edges.pop(i)
+        return None
+
     async def list_active_consumers_for_metric(self, metric_code: str) -> list[str]:
         """消费该指标的 client_id（Task A 批量注册用）；默认无。"""
         return list(self.consumer_ids)
@@ -322,6 +332,9 @@ class _FakeSession:
 
     async def rollback(self) -> None:
         self.rollbacks += 1
+
+    async def flush(self) -> None:
+        """假 flush：无实际作用（手动登记边 owner 写入后调用）。"""
 
 
 async def test_parse_and_store_counts_no_graph() -> None:
@@ -1340,10 +1353,22 @@ async def test_register_metric_from_definition_includes_dim_and_column() -> None
     edges = await svc.register_metric_from_definition(metric)
     assert len(edges) == 5  # 1 落地表 + 2 维度 + 2 字段(measure_column + measures[0])
     calls = repo.upsert_calls
-    assert any(c["edge_type"] == "USES_DIMENSION" and c["target_node"] == "dimension:store" for c in calls)
-    assert any(c["edge_type"] == "USES_DIMENSION" and c["target_node"] == "dimension:region" for c in calls)
-    assert any(c["edge_type"] == "READS_COLUMN" and c["source_node"] == "column:dws.gmv.amount" for c in calls)
-    assert any(c["edge_type"] == "READS_COLUMN" and c["source_node"] == "column:dws.gmv.cnt" for c in calls)
+    assert any(
+        c["edge_type"] == "USES_DIMENSION" and c["target_node"] == "dimension:store"
+        for c in calls
+    )
+    assert any(
+        c["edge_type"] == "USES_DIMENSION" and c["target_node"] == "dimension:region"
+        for c in calls
+    )
+    assert any(
+        c["edge_type"] == "READS_COLUMN" and c["source_node"] == "column:dws.gmv.amount"
+        for c in calls
+    )
+    assert any(
+        c["edge_type"] == "READS_COLUMN" and c["source_node"] == "column:dws.gmv.cnt"
+        for c in calls
+    )
 
 
 async def test_query_impact_merges_dimension_column_edges_from_mysql() -> None:
@@ -1377,3 +1402,152 @@ async def test_query_impact_merges_dimension_column_edges_from_mysql() -> None:
     assert "USES_DIMENSION" in types
     assert "READS_COLUMN" in types
     assert len(edges) == 3
+
+
+# ---- 人工治理：手动登记 / 单边删除 ----
+
+
+async def test_add_manual_edge_creates_manual_edge() -> None:
+    """手动登记：provenance=manual、owner=登记人、粒度按节点类型推断。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    result = await svc.add_manual_edge(
+        ManualEdgeCreateRequest(
+            source_node="table:ods.orders",
+            target_node="metric:gmv_total",
+            edge_type="DERIVED_FROM",
+            note="活动口径关联",
+        ),
+        actor_id=7,
+    )
+    assert result.created is True
+    kwargs = repo.upsert_calls[-1]
+    assert kwargs["source_node"] == "table:ods.orders"
+    assert kwargs["target_node"] == "metric:gmv_total"
+    assert kwargs["provenance"] == "manual"
+    assert kwargs["confidence"] == 1.0
+    assert kwargs["change_reason"] == "manual: 活动口径关联"
+    # 含指标节点 → L3
+    assert kwargs["granularity"] == "L3"
+
+
+async def test_add_manual_edge_granularity_by_node_type() -> None:
+    """粒度推断：含字段节点→L2，纯表→L1。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+
+    await svc.add_manual_edge(
+        ManualEdgeCreateRequest(
+            source_node="column:ods.orders.amount",
+            target_node="table:dwd.order_amt",
+        ),
+        actor_id=1,
+    )
+    assert repo.upsert_calls[-1]["granularity"] == "L2"
+
+    await svc.add_manual_edge(
+        ManualEdgeCreateRequest(
+            source_node="table:ods.orders",
+            target_node="table:dwd.order_amt",
+        ),
+        actor_id=1,
+    )
+    assert repo.upsert_calls[-1]["granularity"] == "L1"
+
+
+async def test_add_manual_edge_rejects_unsupported_prefix() -> None:
+    """非法节点前缀拒绝（fail-fast，不写边）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    with pytest.raises(ValidationError):
+        await svc.add_manual_edge(
+            ManualEdgeCreateRequest(
+                source_node="hack:payload",
+                target_node="table:a",
+            ),
+            actor_id=1,
+        )
+    assert repo.upsert_calls == []
+
+
+async def test_add_manual_edge_rejects_bare_node() -> None:
+    """无前缀节点拒绝。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    with pytest.raises(ValidationError):
+        await svc.add_manual_edge(
+            ManualEdgeCreateRequest(source_node="orders", target_node="table:a"),
+            actor_id=1,
+        )
+
+
+async def test_add_manual_edge_rejects_self_loop() -> None:
+    """自环拒绝（上游==下游无意义）。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    with pytest.raises(ValidationError):
+        await svc.add_manual_edge(
+            ManualEdgeCreateRequest(
+                source_node="table:a", target_node="table:a"
+            ),
+            actor_id=1,
+        )
+
+
+async def test_add_manual_edge_rejects_invalid_edge_type() -> None:
+    """非法边类型拒绝。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    with pytest.raises(ValidationError):
+        await svc.add_manual_edge(
+            ManualEdgeCreateRequest(
+                source_node="table:a",
+                target_node="table:b",
+                edge_type="NOT_A_TYPE",
+            ),
+            actor_id=1,
+        )
+    assert repo.upsert_calls == []
+
+
+async def test_add_manual_edge_sets_owner() -> None:
+    """登记人写入 owner（人工边归属）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    result = await svc.add_manual_edge(
+        ManualEdgeCreateRequest(
+            source_node="dimension:store",
+            target_node="metric:gmv_total",
+            edge_type="USES_DIMENSION",
+        ),
+        actor_id=42,
+    )
+    # FakeRepo 返回 SimpleNamespace，owner 写入直接反映在返回对象
+    assert result.edge is not None
+    assert repo.upsert_calls[-1]["granularity"] == "L3"
+
+
+async def test_delete_edge_by_id_delegates() -> None:
+    """单边删除：委托 repo.soft_delete_edge，返回被删边两端。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    edge = SimpleNamespace(id=9, source_node="table:a", target_node="table:b")
+    repo.edges.append(edge)
+    result = await svc.delete_edge_by_id(9)
+    assert result.edge_id == 9
+    assert result.source_node == "table:a"
+    assert result.target_node == "table:b"
+
+
+async def test_delete_edge_by_id_not_found() -> None:
+    """单边删除：边不存在抛 NotFoundError。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    with pytest.raises(NotFoundError):
+        await svc.delete_edge_by_id(999)
