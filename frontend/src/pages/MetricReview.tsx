@@ -214,7 +214,7 @@ export function MetricReview() {
         </Button>
       ),
     },
-    { title: "名称", dataIndex: "name", key: "name" },
+    { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
     { title: "域", dataIndex: "domain", key: "domain" },
     {
       title: "PII",
