@@ -56,6 +56,7 @@ import {
   submitReview,
   suggestRenameName,
   updateMetric,
+  updateMetricDescription,
   upsertSubscription,
   UnisenseApiError,
 } from "../api";
@@ -413,6 +414,9 @@ export function MetricDetail() {
   const [metric, setMetric] = useState<MetricResponse | null>(null);
   // 业务描述 LLM 推断 loading（第 8 轮：详情页补描述生成入口）
   const [descInferring, setDescInferring] = useState(false);
+  const [descEditOpen, setDescEditOpen] = useState(false);
+  const [descDraft, setDescDraft] = useState("");
+  const [descSaving, setDescSaving] = useState(false);
   // 仲裁作废指标（METRIC_ARCHIVED）：软删 + successor 的历史链接直访时，
   // 展示「醒目引导 + 历史详情 + 跳转权威指标」，而非仅一张错误卡片
   const [archived, setArchived] = useState<{
@@ -919,29 +923,43 @@ export function MetricDetail() {
         style={{ marginBottom: 16 }}
         title="业务描述"
         extra={
-          canInferDesc ? (
-            <Button
-              size="small"
-              icon={<RobotOutlined />}
-              loading={descInferring}
-              onClick={async () => {
-                setDescInferring(true);
-                try {
-                  const updated = await inferMetricDescription(metric.metric_code);
-                  message.success(updated.description ? "AI 已生成业务描述" : "暂无可用信息生成描述");
-                  if (updated.description) setMetric(updated);
-                } catch (err) {
-                  message.error(
-                    err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "生成描述失败",
-                  );
-                } finally {
-                  setDescInferring(false);
-                }
-              }}
-            >
-              AI 生成描述
-            </Button>
-          ) : null
+          <Space size={8}>
+            {isOwnerOrAdmin && (
+              <Button
+                size="small"
+                icon={<EditOutlined />}
+                onClick={() => {
+                  setDescDraft(metric.description ?? "");
+                  setDescEditOpen(true);
+                }}
+              >
+                编辑描述
+              </Button>
+            )}
+            {canInferDesc ? (
+              <Button
+                size="small"
+                icon={<RobotOutlined />}
+                loading={descInferring}
+                onClick={async () => {
+                  setDescInferring(true);
+                  try {
+                    const updated = await inferMetricDescription(metric.metric_code);
+                    message.success(updated.description ? "AI 已生成业务描述" : "暂无可用信息生成描述");
+                    if (updated.description) setMetric(updated);
+                  } catch (err) {
+                    message.error(
+                      err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "生成描述失败",
+                    );
+                  } finally {
+                    setDescInferring(false);
+                  }
+                }}
+              >
+                AI 生成描述
+              </Button>
+            ) : null}
+          </Space>
         }
       >
         {metric.description ? (
@@ -1076,6 +1094,42 @@ export function MetricDetail() {
         <p className="muted" style={{ marginTop: 8 }}>
           留空表示该指标无替代（直接废弃下线）；填写后废弃指标的消费方会看到「替代指标」引导。
         </p>
+      </Modal>
+
+      {/* 编辑业务描述弹窗：复用 updateMetricDescription（已发布指标也可维护非口径描述） */}
+      <Modal
+        title="编辑业务描述"
+        open={descEditOpen}
+        confirmLoading={descSaving}
+        onCancel={() => setDescEditOpen(false)}
+        okText="保存描述"
+        onOk={async () => {
+          setDescSaving(true);
+          try {
+            const updated = await updateMetricDescription(metric.metric_code, descDraft.trim());
+            message.success("业务描述已更新");
+            setMetric(updated);
+            setDescEditOpen(false);
+          } catch (err) {
+            message.error(
+              err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "保存描述失败",
+            );
+          } finally {
+            setDescSaving(false);
+          }
+        }}
+      >
+        <Input.TextArea
+          rows={4}
+          value={descDraft}
+          onChange={(e) => setDescDraft(e.target.value)}
+          placeholder="填写指标的业务定义、口径背景或使用场景说明"
+          maxLength={2000}
+          showCount
+        />
+        <Paragraph type="secondary" style={{ marginTop: 8 }}>
+          描述为治理补充字段，不触发版本变更；传空串可清除描述。
+        </Paragraph>
       </Modal>
 
       {/* 提交评审弹窗（TD §13）：可指派评审用户或域评审组，审批页仅被指派者可评审 */}

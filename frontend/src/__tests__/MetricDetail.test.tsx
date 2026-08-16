@@ -28,6 +28,7 @@ vi.mock("../api", () => ({
   rollbackMetric: vi.fn(),
   submitReview: vi.fn(),
   updateMetric: vi.fn(),
+  updateMetricDescription: vi.fn(),
   suggestRenameName: vi.fn(),
   inferMetricDescription: vi.fn(),
   upsertSubscription: vi.fn(),
@@ -63,6 +64,7 @@ import {
   listSubscriptions,
   fetchRelatedMetrics,
   updateMetric,
+  updateMetricDescription,
   suggestRenameName,
   inferMetricDescription,
   submitReview,
@@ -72,6 +74,7 @@ import {
   UnisenseApiError,
 } from "../api";
 const mockedUpdateMetric = vi.mocked(updateMetric);
+const mockedUpdateDesc = vi.mocked(updateMetricDescription);
 const mockedSuggestRename = vi.mocked(suggestRenameName);
 const mockedInferDesc = vi.mocked(inferMetricDescription);
 const mockedGetMetric = vi.mocked(getMetric);
@@ -692,5 +695,21 @@ describe("MetricDetail 按钮级权限过滤", () => {
     fireEvent.click(await screen.findByText("AI 生成描述"));
     await waitFor(() => expect(mockedInferDesc).toHaveBeenCalledWith("sales_gmv_sum_d"));
     expect(await screen.findByText("由 AI 生成的业务描述")).toBeInTheDocument();
+  });
+
+  it("Owner 可「编辑描述」：弹窗修改后保存调用 updateMetricDescription 并刷新", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, description: "原描述" });
+    mockedUpdateDesc.mockResolvedValue({ ...metric, description: "修改后的描述" });
+    renderWithPerms(["metric:create"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    // 打开编辑弹窗
+    fireEvent.click(await screen.findByText("编辑描述"));
+    const textarea = document.querySelector(".ant-modal textarea") as HTMLTextAreaElement;
+    expect(textarea).toBeTruthy();
+    fireEvent.change(textarea, { target: { value: "修改后的描述" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存描述/ }));
+    await waitFor(() => expect(mockedUpdateDesc).toHaveBeenCalledWith("sales_gmv_sum_d", "修改后的描述"));
+    // 保存后描述区展示新值（Modal 未销毁时 textarea 仍保留旧值，故用 getAllByText 断言描述区存在）
+    expect(screen.getAllByText("修改后的描述").length).toBeGreaterThanOrEqual(1);
   });
 });
