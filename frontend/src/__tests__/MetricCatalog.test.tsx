@@ -654,10 +654,10 @@ describe("MetricCatalog 已应用筛选回显（非空态可感知子集）", ()
     expect(screen.getByText("已应用筛选：")).toBeTruthy();
     expect(screen.getByText(/状态：已发布/)).toBeTruthy();
     expect(screen.getByText(/分级：T1/)).toBeTruthy();
-    // 关闭分级 Tag 后，后续请求不再携带 tier
-    fireEvent.click(screen.getByText(/分级：T1/).closest(".ant-tag") as Element);
+    // 关闭分级 Tag（antd closable 的 × 关闭图标）后，后续请求不再携带 tier
+    fireEvent.click(screen.getByText(/分级：T1/).closest(".ant-tag")?.querySelector(".ant-tag-close-icon") as Element);
     await waitFor(() => {
-      const call = mockedList.mock.calls.find((c) => c[0]?.tier === undefined || c[0]?.tier === "");
+      const call = mockedList.mock.calls.find((c) => c[0]?.metric_tier === undefined || c[0]?.metric_tier === "");
       expect(call).toBeTruthy();
     });
   });

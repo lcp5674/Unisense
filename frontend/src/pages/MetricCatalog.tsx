@@ -350,6 +350,9 @@ export function MetricCatalog() {
   // 批量操作失败明细：超 3 条时提供「查看明细」弹窗（避免 message 截断导致用户看不到全部失败）
   const [batchErrors, setBatchErrors] = useState<string[]>([]);
   const [batchErrorsOpen, setBatchErrorsOpen] = useState(false);
+  // 批量操作失败项的 metric_code（供「重试失败项」一键重选；batchRetryActionRef 记住原操作类型）
+  const [batchFailedCodes, setBatchFailedCodes] = useState<string[]>([]);
+  const batchRetryActionRef = useRef<"submit" | "delete" | "approve" | "reject" | "deprecate" | null>(null);
   // 批量提交审核的评审指派（TD §13）
   const [batchReviewerType, setBatchReviewerType] = useState<"user" | "domain" | null>(null);
   const [batchReviewerId, setBatchReviewerId] = useState<number | null>(null);
@@ -583,9 +586,11 @@ export function MetricCatalog() {
   // 批量操作执行：逐条提交审核 / 删除，收集成功与失败明细
   async function runBatch() {
     if (!batchAction || !selected.length) return;
+    batchRetryActionRef.current = batchAction;
     setBatchBusy(true);
     let ok = 0;
     const errors: string[] = [];
+    const failedCodes: string[] = [];
     try {
       if (batchAction === "approve") {
         const codes = selected.filter((m) => m.status === "REVIEW").map((m) => m.metric_code);
@@ -595,7 +600,7 @@ export function MetricCatalog() {
         }
         const res = await batchApproveMetrics(codes);
         ok = res.ok_count;
-        res.results.filter((r) => !r.ok).forEach((r) => errors.push(`${r.metric_code}: ${r.message}`));
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.metric_code}: ${r.message}`); failedCodes.push(r.metric_code); });
       } else if (batchAction === "reject") {
         if (!batchRejectReason.trim() || batchRejectReason.trim().length < 4) {
           message.warning("请填写驳回原因（至少 4 字）");
@@ -608,7 +613,7 @@ export function MetricCatalog() {
         }
         const res = await batchRejectMetrics(codes, batchRejectReason.trim());
         ok = res.ok_count;
-        res.results.filter((r) => !r.ok).forEach((r) => errors.push(`${r.metric_code}: ${r.message}`));
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.metric_code}: ${r.message}`); failedCodes.push(r.metric_code); });
       } else if (batchAction === "deprecate") {
         const items = selected
           .filter((m) => m.status === "PUBLISHED" && batchSuccessors[m.metric_code])
@@ -619,7 +624,7 @@ export function MetricCatalog() {
         }
         const res = await batchDeprecateMetrics(items);
         ok = res.ok_count;
-        res.results.filter((r) => !r.ok).forEach((r) => errors.push(`${r.metric_code}: ${r.message}`));
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.metric_code}: ${r.message}`); failedCodes.push(r.metric_code); });
       } else {
         // submit / delete：逐条处理（submit 带评审指派）
         const targets = selected.filter((m) => m.status === "DRAFT");
@@ -648,6 +653,7 @@ export function MetricCatalog() {
             errors.push(
               `${m.metric_code}: ${err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "失败"}`,
             );
+            failedCodes.push(m.metric_code);
           }
         }
       }
@@ -658,6 +664,7 @@ export function MetricCatalog() {
     } finally {
       setBatchBusy(false);
       setBatchAction(null);
+      setBatchFailedCodes(failedCodes);
       if (ok) message.success(`${BATCH_ACTION_LABEL[batchAction] ?? "操作"}成功 ${ok} 个`);
       if (errors.length) {
         setBatchErrors(errors);
@@ -1325,13 +1332,27 @@ export function MetricCatalog() {
         )}
       </Modal>
 
-      {/* 批量操作失败明细弹窗：完整展示所有失败项，避免 message 截断 */}
+      {/* 批量操作失败明细弹窗：完整展示所有失败项，避免 message 截断；可一键重试失败项 */}
       <Modal
         title="批量操作失败明细"
         open={batchErrorsOpen}
         onCancel={() => setBatchErrorsOpen(false)}
         footer={
-          <Button onClick={() => setBatchErrorsOpen(false)}>关闭</Button>
+          <>
+            {batchFailedCodes.length > 0 && (
+              <Button
+                onClick={() => {
+                  // 把失败项重新选入 selected，并恢复原操作类型（重新打开确认弹窗）
+                  setSelected(items.filter((m) => batchFailedCodes.includes(m.metric_code)));
+                  setBatchErrorsOpen(false);
+                  setBatchAction(batchRetryActionRef.current);
+                }}
+              >
+                重试失败项
+              </Button>
+            )}
+            <Button onClick={() => setBatchErrorsOpen(false)}>关闭</Button>
+          </>
         }
       >
         <ul style={{ maxHeight: 320, overflow: "auto", paddingLeft: 18 }}>
