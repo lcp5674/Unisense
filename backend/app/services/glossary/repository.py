@@ -43,7 +43,7 @@ class GlossaryRepository:
         offset: int,
         owner_id: int | None = None,
     ) -> tuple[Iterable[Term], int]:
-        conditions = []
+        conditions = [Term.deleted_at.is_(None)]
         if domain:
             conditions.append(Term.domain == domain)
         if status:

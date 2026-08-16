@@ -40,6 +40,7 @@ class DimensionRepository:
             select(Dimension, func.count(MetricDimension.id))
             .outerjoin(MetricDimension, MetricDimension.dim_code == Dimension.dim_code)
             .group_by(Dimension.id)
+            .where(Dimension.deleted_at.is_(None))
         )
         if domain:
             stmt = stmt.where(Dimension.domain == domain)

@@ -81,6 +81,13 @@ class TestDimensionCRUD:
         stmt = _first_stmt(session)
         assert "dimension" in stmt
 
+    async def test_list_dimensions_filters_deleted(self, repo, session) -> None:
+        """软删维度不出现在列表（deleted_at IS NULL 过滤）。"""
+        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
+        await repo.list_dimensions(None, None)
+        stmt = _first_stmt(session)
+        assert "deleted_at IS NULL" in stmt
+
     async def test_list_dimensions_with_domain_and_status(self, repo, session) -> None:
         session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
         await repo.list_dimensions("sales", "PUBLISHED")
