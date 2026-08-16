@@ -6,6 +6,7 @@ import {
   Card,
   Checkbox,
   Descriptions,
+  Form,
   Input,
   message,
   Modal,
@@ -45,6 +46,7 @@ import {
   getMetric,
   getMetricHealth,
   inferMetricDescription,
+  listDictItems,
   listDomainTree,
   listFavorites,
   listSubscriptions,
@@ -72,6 +74,7 @@ import type {
   RecommendItem,
   RenameSuggestItem,
   SubscriptionPref,
+  SystemDictItem,
   UserBrief,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
@@ -482,10 +485,36 @@ export function MetricDetail() {
   // 仲裁改名建议：LLM 生成区分性名称候选（TD §12.4，用户抉择或编辑后提交）
   const [suggesting, setSuggesting] = useState(false);
   const [renameSuggestions, setRenameSuggestions] = useState<RenameSuggestItem[]>([]);
+  // 指标编辑弹窗（TD §13）：DRAFT/REVIEW 草稿可修改名称/粒度/单位/口径后重提，
+  // 消除"驳回后只能原样重提或删了重建"的闭环缺口（变更原因必填 + 乐观锁 row_version）
+  const [editOpen, setEditOpen] = useState(false);
+  const [editForm] = Form.useForm();
+  const [editSaving, setEditSaving] = useState(false);
+  const [editGranularityOptions, setEditGranularityOptions] = useState<
+    Array<{ value: string; label: string }>
+  >([]);
+  const [editUnitOptions, setEditUnitOptions] = useState<Array<{ value: string; label: string }>>(
+    [],
+  );
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const { track } = useTracking();
+
+  // 编辑弹窗字典（粒度/单位）：挂载时加载一次，失败静默（编辑弹窗下拉降级为手输）
+  useEffect(() => {
+    Promise.all([
+      listDictItems("granularity").catch(() => [] as SystemDictItem[]),
+      listDictItems("unit").catch(() => [] as SystemDictItem[]),
+    ]).then(([g, u]) => {
+      const opts = (items: SystemDictItem[]) =>
+        items
+          .filter((it) => it.status === "active")
+          .map((it) => ({ value: it.code, label: `${it.label} (${it.code})` }));
+      setEditGranularityOptions(opts(g));
+      setEditUnitOptions(opts(u));
+    });
+  }, []);
 
   // 来源感知返回：来自仪表盘/推荐 → 返回仪表盘；来自待办中心 → 返回待办中心；其他回退浏览器历史（无上页兜底仪表盘）。
   // 说明：SPA 中 window.history.length 跨站点累计不可靠，来源标记优先于 history.length 判断。
@@ -641,6 +670,55 @@ export function MetricDetail() {
     setRenameOpen(false);
     setRenameValue("");
     setRenameReason("");
+  }
+
+  // 编辑弹窗（TD §13）：打开时回填当前值（口径 JSON 序列化），保存走 updateMetric
+  // （乐观锁 row_version + 变更原因必填）。DRAFT/REVIEW 草稿借此可修改后重提。
+  function openEdit() {
+    if (!metric) return;
+    const def = metric.definition_json ?? {};
+    editForm.setFieldsValue({
+      name: metric.name,
+      granularity: metric.granularity,
+      unit: metric.unit,
+      definition_json: Object.keys(def).length ? JSON.stringify(def, null, 2) : "",
+    });
+    setEditOpen(true);
+  }
+
+  async function handleSubmitEdit() {
+    if (!metric) return;
+    try {
+      const values = await editForm.validateFields();
+      let definitionJson: Record<string, unknown> | undefined;
+      const rawDef = String(values.definition_json ?? "").trim();
+      if (rawDef) {
+        try {
+          definitionJson = JSON.parse(rawDef);
+        } catch {
+          message.error("口径定义不是合法 JSON，请修正后重试");
+          return;
+        }
+      }
+      const req: MetricUpdateRequest = {
+        name: String(values.name).trim(),
+        granularity: values.granularity,
+        unit: values.unit,
+        definition_json: definitionJson,
+        change_reason: String(values.change_reason ?? "").trim(),
+        row_version: metric.row_version, // 跨请求乐观锁：他人已改则 409 拒绝
+      };
+      setEditSaving(true);
+      await updateMetric(metric.metric_code, req);
+      message.success("指标已更新");
+      setEditOpen(false);
+      await load();
+    } catch (err) {
+      if (err instanceof Error && "errorFields" in err) return; // 表单校验错误，已高亮
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
+    } finally {
+      setEditSaving(false);
+    }
   }
 
   // 仲裁改名建议：调后端 LLM 生成区分性名称候选（best-effort，LLM 不可用降级规则），
@@ -823,6 +901,13 @@ export function MetricDetail() {
           }}
         >
           {metric.status === "DEPRECATED" ? "重新提交评审" : "提交评审"}
+        </Button>
+      )}
+      {/* 编辑入口（TD §13）：DRAFT/REVIEW 草稿可修改名称/粒度/单位/口径后重提——
+          消除"驳回后只能原样重提或删了重建"的闭环缺口（仅 owner/admin + 创建权限） */}
+      {(metric.status === "DRAFT" || metric.status === "REVIEW") && canCreate && isOwnerOrAdmin && (
+        <Button icon={<EditOutlined />} loading={busy} onClick={openEdit}>
+          编辑
         </Button>
       )}
       {metric.status === "REVIEW" && canApprove && (
@@ -1387,6 +1472,80 @@ export function MetricDetail() {
             </Tag>
           ))}
         </Space>
+      </Modal>
+      {/* 指标编辑弹窗（TD §13）：DRAFT/REVIEW 草稿修改名称/粒度/单位/口径后重提，
+          变更原因必填 + 乐观锁 row_version（他人已改则 409） */}
+      <Modal
+        title="编辑指标"
+        open={editOpen}
+        onOk={handleSubmitEdit}
+        confirmLoading={editSaving}
+        onCancel={() => setEditOpen(false)}
+        okText="保存"
+        width={560}
+      >
+        <Form form={editForm} layout="vertical" scrollToFirstError>
+          <Form.Item
+            name="name"
+            label="指标名称"
+            rules={[{ required: true, message: "请输入指标名称" }]}
+          >
+            <Input maxLength={128} placeholder="指标名称" />
+          </Form.Item>
+          <Space size={16} style={{ width: "100%" }}>
+            <Form.Item name="granularity" label="粒度" style={{ marginBottom: 8, flex: 1 }}>
+              <Select
+                allowClear
+                placeholder="选择粒度"
+                options={editGranularityOptions}
+                showSearch
+                optionFilterProp="label"
+              />
+            </Form.Item>
+            <Form.Item name="unit" label="单位" style={{ marginBottom: 8, flex: 1 }}>
+              <Select
+                allowClear
+                placeholder="选择单位"
+                options={editUnitOptions}
+                showSearch
+                optionFilterProp="label"
+              />
+            </Form.Item>
+          </Space>
+          <Form.Item
+            name="definition_json"
+            label="口径定义（JSON）"
+            extra="留空表示不修改口径。修改口径将触发破坏性变更校验与版本递增。"
+            style={{ marginBottom: 8 }}
+          >
+            <Input.TextArea rows={6} className="mono" placeholder={'{"expression": "sum(amount)", "source_tables": ["dwd.sales_detail"]}'} />
+          </Form.Item>
+          <Form.Item
+            name="change_reason"
+            label="变更原因"
+            rules={[{ required: true, min: 4, message: "变更原因至少 4 字" }]}
+            style={{ marginBottom: 8 }}
+          >
+            <Input.TextArea rows={2} placeholder="请填写变更原因（至少 4 字，将写入版本记录）" />
+          </Form.Item>
+          <Space wrap size={4}>
+            <span className="muted" style={{ fontSize: 12 }}>快捷原因：</span>
+            {COMMON_CHANGE_REASONS.map((r) => (
+              <Tag
+                key={r}
+                style={{ cursor: "pointer" }}
+                onClick={() =>
+                  editForm.setFieldValue(
+                    "change_reason",
+                    (editForm.getFieldValue("change_reason") || "") ? `${editForm.getFieldValue("change_reason")}，${r}` : r,
+                  )
+                }
+              >
+                {r}
+              </Tag>
+            ))}
+          </Space>
+        </Form>
       </Modal>
     </div>
   );

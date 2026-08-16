@@ -13,6 +13,7 @@ vi.mock("../api", () => ({
   fetchMyPermissions: vi.fn(),
   listFavorites: vi.fn(),
   getMetricHealth: vi.fn(),
+  listDictItems: vi.fn(),
   listDomainTree: vi.fn(),
   listUsers: vi.fn(),
   listSubscriptions: vi.fn(),
@@ -60,6 +61,7 @@ import {
   fetchCurrentUser,
   fetchMyPermissions,
   listDomainTree,
+  listDictItems,
   listFavorites,
   getMetricHealth,
   listUsers,
@@ -85,6 +87,7 @@ const mockedListVersions = vi.mocked(listVersions);
 const mockedMyPerms = vi.mocked(fetchMyPermissions);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 const mockedDomainTree = vi.mocked(listDomainTree);
+const mockedDictItems = vi.mocked(listDictItems);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedHealth = vi.mocked(getMetricHealth);
 const mockedUsers = vi.mocked(listUsers);
@@ -167,6 +170,7 @@ describe("MetricDetail", () => {
     vi.clearAllMocks();
     mockedGetMetric.mockResolvedValue(metric);
     mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
     mockedDomainTree.mockResolvedValue([
       { id: 1, code: "sales", name: "销售域", parent_id: null, level: 1, sort_order: 0, status: "active", metric_count: 0, children: [] },
     ]);
@@ -810,6 +814,60 @@ describe("MetricDetail 按钮级权限过滤", () => {
     expect(screen.queryByText("AI 生成描述")).toBeNull();
   });
 
+  it("DRAFT 草稿显示编辑按钮，保存后调用 updateMetric（含乐观锁 row_version）", async () => {
+    // 第二个 describe 无 beforeEach，显式补全 Promise.all 依赖（防继承脆弱）
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT" });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([
+      { id: 1, code: "sales", name: "销售域", parent_id: null, level: 1, sort_order: 0, status: "active", metric_count: 0, children: [] },
+    ]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "zhangsan",
+      display_name: "张三",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    // metric_owner + metric:create → canCreate && isOwnerOrAdmin 均满足，显示编辑按钮
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    // 编辑按钮在 DRAFT 状态显示
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    // 弹窗回填当前名称
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    const nameInput = document.querySelector('.ant-modal input[id="name"]') as HTMLInputElement;
+    expect(nameInput?.value).toBe("销售 GMV");
+    // 填变更原因并保存 → 调用 updateMetric（含 row_version）
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "修正口径描述" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      expect(mockedUpdateMetric).toHaveBeenCalledWith(
+        "sales_gmv_sum_d",
+        expect.objectContaining({ name: "销售 GMV", change_reason: "修正口径描述", row_version: metric.row_version }),
+      );
+    });
+  });
 
 });
-
