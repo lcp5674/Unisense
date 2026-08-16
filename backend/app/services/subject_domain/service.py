@@ -26,6 +26,20 @@ MAX_LEVEL = 3
 _MAX_CODE_LEN = 64
 #: 自动生成编码冲突自增后缀上限
 _MAX_CODE_ATTEMPTS = 100
+#: 域默认值字段 → 字典类型映射（对齐前端 DICT_FIELD_MAPS）。
+#: 仅这些字典枚举字段做合法性校验；description 等自由文本字段不校验。
+_DEFAULT_FIELD_DICT_TYPES: dict[str, str] = {
+    "granularity": "granularity",
+    "unit": "unit",
+    "aggregation": "aggregation",
+    "time_semantics": "time_semantics",
+    "freshness": "freshness",
+    "dw_layer": "dw_layer",
+    "metric_tier": "metric_tier",
+    "serving_mode": "serving_mode",
+    "additivity": "additivity",
+    "type": "metric_type",
+}
 
 
 class SubjectDomainService:
@@ -271,6 +285,26 @@ class SubjectDomainService:
         return domain.defaults_json or {}
 
     async def update_defaults(self, code: str, data: SubjectDomainDefaultsUpdate) -> SubjectDomain:
+        """更新域默认值预设；字典枚举字段校验值合法（防配置非法枚举致注册预填失效）。"""
+        # 延迟导入避免循环依赖
+        from app.services.system_dict.repository import SystemDictRepository
+
+        invalid: list[str] = []
+        for field, value in (data.defaults_json or {}).items():
+            dict_type = _DEFAULT_FIELD_DICT_TYPES.get(field)
+            if dict_type is None or value is None:
+                continue
+            if not isinstance(value, str) or not await SystemDictRepository(self._db).item_exists(
+                dict_type, value
+            ):
+                invalid.append(f"{field}={value!r}")
+        if invalid:
+            raise BusinessError(
+                "域默认值含非法字典枚举值: "
+                + "；".join(invalid)
+                + "。请从字典项中选择合法值。",
+                error_code="VALIDATION_ERROR",
+            )
         domain = await self.get_domain(code)
         domain.defaults_json = data.defaults_json
         domain = await self._repo.update(domain)

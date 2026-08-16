@@ -422,12 +422,52 @@ class TestUpdateDefaults:
         domain.code = "sales"
         svc._repo.get_by_code = AsyncMock(return_value=domain)
         svc._repo.update = AsyncMock(return_value=domain)
+        # 字典校验：item_exists 经 db.execute().scalar() 判定，mock 返回存在
+        result = MagicMock()
+        result.scalar.return_value = 1
+        svc._db.execute = AsyncMock(return_value=result)
 
         from app.services.subject_domain.schemas import SubjectDomainDefaultsUpdate
 
         data = SubjectDomainDefaultsUpdate(defaults_json={"granularity": "day"})
         await svc.update_defaults("sales", data)
         assert domain.defaults_json == {"granularity": "day"}
+
+    async def test_update_defaults_rejects_invalid_dict_value(self, svc) -> None:
+        """域默认值含非法字典枚举值时拒绝保存（防注册预填下拉空值）。"""
+        domain = MagicMock()
+        domain.code = "sales"
+        svc._repo.get_by_code = AsyncMock(return_value=domain)
+        # 字典校验：item_exists 返回 0 → 值不存在 → 拒绝
+        result = MagicMock()
+        result.scalar.return_value = 0
+        svc._db.execute = AsyncMock(return_value=result)
+
+        from app.core.exceptions import BusinessError
+        from app.services.subject_domain.schemas import SubjectDomainDefaultsUpdate
+
+        data = SubjectDomainDefaultsUpdate(defaults_json={"granularity": "daily"})
+        with pytest.raises(BusinessError) as exc:
+            await svc.update_defaults("sales", data)
+        assert "非法字典枚举值" in str(exc.value)
+
+    async def test_update_defaults_allows_free_text_field(self, svc) -> None:
+        """非字典字段（如 description）不校验，自由文本可保存。"""
+        domain = MagicMock()
+        domain.code = "sales"
+        svc._repo.get_by_code = AsyncMock(return_value=domain)
+        svc._repo.update = AsyncMock(return_value=domain)
+        result = MagicMock()
+        result.scalar.return_value = 1
+        svc._db.execute = AsyncMock(return_value=result)
+
+        from app.services.subject_domain.schemas import SubjectDomainDefaultsUpdate
+
+        data = SubjectDomainDefaultsUpdate(
+            defaults_json={"granularity": "day", "description": "自定义说明"}
+        )
+        await svc.update_defaults("sales", data)
+        assert domain.defaults_json["description"] == "自定义说明"
 
 
 class TestGetDomainMetrics:
