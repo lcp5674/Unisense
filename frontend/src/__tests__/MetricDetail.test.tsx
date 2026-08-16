@@ -440,10 +440,10 @@ describe("MetricDetail 按钮级权限过滤", () => {
     );
   }
 
-  it("有 metric:approve 权限点时 REVIEW 状态显示正式/灰度发布按钮", async () => {
+  it("有 metric:approve 权限点时 REVIEW 状态显示审批/灰度发布按钮", async () => {
     mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: false });
     renderWithPerms(["metric:approve", "metric:emergency-publish"]);
-    expect(await screen.findByText("正式发布")).toBeInTheDocument();
+    expect(await screen.findByText("审批通过")).toBeInTheDocument();
     expect(screen.getByText("灰度发布")).toBeInTheDocument();
     expect(screen.getByText("紧急发布")).toBeInTheDocument();
   });
@@ -453,7 +453,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     renderWithPerms(["metric:view"]);
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
     // 等待权限快照加载后断言按钮隐藏
-    await waitFor(() => expect(screen.queryByText("正式发布")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("审批通过")).not.toBeInTheDocument());
     expect(screen.queryByText("灰度发布")).not.toBeInTheDocument();
     expect(screen.queryByText("紧急发布")).not.toBeInTheDocument();
   });

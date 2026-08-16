@@ -737,10 +737,10 @@ export function MetricDetail() {
         <Button
           type="primary"
           loading={busy}
-          onClick={() => runAction(() => approveMetric(metric.metric_code, {}), "正式发布")}
+          onClick={() => runAction(() => approveMetric(metric.metric_code, {}), "审批通过")}
           disabled={piiUnreviewed}
         >
-          正式发布{piiUnreviewed ? "（需先 PII 复核）" : ""}
+          审批通过{piiUnreviewed ? "（需先 PII 复核）" : ""}
         </Button>
       )}
       {metric.status === "REVIEW" && canApprove && (
