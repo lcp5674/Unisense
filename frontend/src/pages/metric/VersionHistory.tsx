@@ -52,11 +52,13 @@ export function VersionHistory({
   versions,
   effectiveVersion,
   onChanged,
+  canConfirm,
 }: {
   metricCode: string;
   versions: MetricVersionResponse[];
   effectiveVersion?: number | null;
   onChanged: () => void;
+  canConfirm?: boolean;
 }) {
   const [rejecting, setRejecting] = useState<MetricVersionResponse | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -126,7 +128,7 @@ export function VersionHistory({
       key: "action",
       width: 210,
       render: (_: unknown, v: MetricVersionResponse) =>
-        v.status === "PENDING_CONFIRMATION" ? (
+        v.status === "PENDING_CONFIRMATION" && canConfirm ? (
           <>
             <Button size="small" type="primary" loading={busy} onClick={() => confirm(v)}>确认</Button>
             <Button size="small" style={{ marginLeft: 8 }} loading={busy} onClick={() => { setRejecting(v); setRejectReason(""); }}>
