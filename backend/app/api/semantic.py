@@ -344,6 +344,12 @@ async def instantiate_template(
     merged = {**defaults, **body}
     merged["template_id"] = template_id
 
+    # definition_json 特殊处理：body 传空对象（前端实例化弹窗未填口径）时
+    # 不覆盖模板默认口径——否则 `{**defaults, **body}` 会把空对象顶替掉模板口径，
+    # 实例化出"空心"指标（无 L3 血缘、口径丢失）。
+    if not merged.get("definition_json") and defaults.get("definition_json"):
+        merged["definition_json"] = defaults["definition_json"]
+
     # 3. 必填字段校验（对齐 merged：模板默认值亦满足必填——
     #    仅查 body 会误拒"模板默认已提供"的必填字段）
     required = template.required_fields or []

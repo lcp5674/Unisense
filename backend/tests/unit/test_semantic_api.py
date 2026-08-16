@@ -241,3 +241,54 @@ async def test_template_active_toggle_and_errors() -> None:
             user=user, template_id=1, request=req, body={"is_active": "yes"}, db=db
         )
     assert exc.value.status_code == 422
+
+
+async def test_instantiate_empty_definition_falls_back_to_template_default() -> None:
+    """body 传空 definition_json（前端未填口径）时不覆盖模板默认口径（防空心指标）。"""
+    from unittest.mock import patch
+
+    from app.api.semantic import instantiate_template
+
+    template = MagicMock()
+    template.id = 1
+    template.is_active = True
+    template.defaults_json = {
+        "granularity": "day",
+        "definition_json": {"expression": "sum(x)", "source_tables": ["dwd.orders"]},
+    }
+    template.required_fields = []
+    for f, v in (
+        ("type", "atomic"), ("unit", "元"), ("aggregation", "SUM"),
+        ("time_semantics", "PERIOD"), ("freshness", "T1"), ("dw_layer", "DWS"),
+        ("serving_mode", "BATCH_ONLY"), ("additivity", "ADDITIVE"), ("metric_tier", "T3"),
+    ):
+        setattr(template, f, v)
+
+    db = MagicMock()
+    r = MagicMock()
+    r.scalar_one_or_none.return_value = template
+    db.execute = AsyncMock(return_value=r)
+    db.commit = AsyncMock()
+
+    fake_metric = MagicMock()
+    fake_metric.metric_code = "sales_gmv_day"
+    fake_metric.to_dict = MagicMock(return_value={"metric_code": "sales_gmv_day"})
+    svc_instance = MagicMock()
+    svc_instance.create_metric = AsyncMock(return_value=fake_metric)
+
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch("app.api.semantic.MetricService", return_value=svc_instance):
+        await instantiate_template(
+            user=user,
+            template_id=1,
+            request=req,
+            body={"name": "测试", "domain": "sales", "definition_json": {}},
+            db=db,
+        )
+    # create_metric 收到的口径应回退为模板默认（而非空对象覆盖）
+    call_kwargs = svc_instance.create_metric.call_args[0][0]
+    assert call_kwargs.definition_json == {
+        "expression": "sum(x)",
+        "source_tables": ["dwd.orders"],
+    }
