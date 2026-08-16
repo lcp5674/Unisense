@@ -175,7 +175,12 @@ async def list_metrics(
         item = MetricResponse.model_validate(m)
         if item.pii_flag and not sensitive:
             item = item.model_copy(
-                update={"definition_json": redact_definition(item.definition_json)}
+                update={
+                    "definition_json": redact_definition(item.definition_json),
+                    # PII 业务描述同样脱敏（AI 生成描述可能引用敏感字段/口径上下文，
+                    # 非敏感角色不可见，与口径定义同级脱敏保护）
+                    "description": None,
+                }
             )
         items.append(item)
     response = MetricListResponse(
@@ -282,7 +287,11 @@ async def get_metric(
     data: MetricResponse = metric
     if metric.pii_flag and user.role not in _SENSITIVE_ROLES:
         data = metric.model_copy(
-            update={"definition_json": redact_definition(metric.definition_json)}
+            update={
+                "definition_json": redact_definition(metric.definition_json),
+                # PII 业务描述脱敏（与口径同级），非敏感角色不可见
+                "description": None,
+            }
         )
     return ok(data=data, trace_id=trace_id)
 
@@ -329,7 +338,11 @@ async def get_archived_metric(
         data = {
             **data,
             "metric": metric.model_copy(
-                update={"definition_json": redact_definition(metric.definition_json)}
+                update={
+                    "definition_json": redact_definition(metric.definition_json),
+                    # PII 业务描述脱敏（与口径同级），非敏感角色不可见
+                    "description": None,
+                }
             ),
         }
     return ok(data=data, trace_id=trace_id)

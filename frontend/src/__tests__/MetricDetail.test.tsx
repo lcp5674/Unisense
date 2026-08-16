@@ -448,10 +448,10 @@ describe("MetricDetail", () => {
 });
 
 describe("MetricDetail 按钮级权限过滤", () => {
-  function renderWithPerms(ui_actions: string[]) {
+  function renderWithPerms(ui_actions: string[], role = "custom") {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
-      role: "custom",
+      role,
       home_domain: "sales",
       allowed_actions: ["read", "write"],
       ui_actions,
@@ -467,7 +467,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
           <Route
             path="/detail/:code"
             element={
-              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: "sales", org_id: 1 }}>
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role, domain: "sales", org_id: 1 }}>
                 <MetricDetail />
               </PermissionProvider>
             }
@@ -711,9 +711,19 @@ describe("MetricDetail 按钮级权限过滤", () => {
   });
 
   it("有 infer-description 权限时显示「AI 生成描述」，点击调用接口并展示生成描述", async () => {
+    // PII 指标 + 敏感角色（合规官）：piiMasked=false，描述可见、AI 生成功能完整验证。
+    // 非敏感角色触发 AI 生成描述属越权场景（canInferDesc=false），不在此用例。
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "管理员",
+      role: "compliance_officer",
+      domain: "sales",
+      org_id: 1,
+    });
     mockedGetMetric.mockResolvedValue(metric);
     mockedInferDesc.mockResolvedValue({ ...metric, description: "由 AI 生成的业务描述" });
-    renderWithPerms(["metric:infer-description"]);
+    renderWithPerms(["metric:infer-description"], "compliance_officer");
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
     fireEvent.click(await screen.findByText("AI 生成描述"));
     await waitFor(() => expect(mockedInferDesc).toHaveBeenCalledWith("sales_gmv_sum_d", undefined));
@@ -721,6 +731,16 @@ describe("MetricDetail 按钮级权限过滤", () => {
   });
 
   it("Owner 可「编辑描述」：弹窗修改后保存调用 updateMetricDescription 并刷新", async () => {
+    // 按钮级权限过滤 describe 不继承外层 beforeEach 的 currentUser mock，
+    // 编辑按钮依赖 currentUser.role（isOwnerOrAdmin）——显式设为 metric_owner。
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "zhangsan",
+      display_name: "张三",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
     mockedGetMetric.mockResolvedValue({ ...metric, description: "原描述" });
     mockedUpdateDesc.mockResolvedValue({ ...metric, description: "修改后的描述" });
     renderWithPerms(["metric:create"]);

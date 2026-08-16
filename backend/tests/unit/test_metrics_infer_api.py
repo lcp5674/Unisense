@@ -64,3 +64,65 @@ async def test_infer_metric_description_inflight_conflict(
     assert "owner" in kwargs
     # 未获得锁 → 直接抛 409，不进入 try，release 不被调用
     mock_guard.release.assert_not_awaited()
+
+
+async def test_get_metric_redacts_description_for_pii_non_sensitive(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """PII 合规：非敏感角色读取 PII 指标时，业务描述与口径同级脱敏。
+
+    此前仅 definition_json 脱敏，业务描述（AI 生成可能引用敏感字段/口径上下文）
+    原样返回——非敏感角色可绕过读分级看到敏感描述。修复后 description=None。
+    """
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=2, role="viewer", domain=None
+    )
+    from app.services.semantic.schemas import MetricResponse
+
+    pii_metric = MetricResponse(
+        id=1,
+        metric_code="sales_pii_daily",
+        name="PII 测试",
+        domain="sales",
+        type="atomic",
+        granularity="day",
+        unit="元",
+        currency=None,
+        aggregation="SUM",
+        time_semantics="PERIOD",
+        freshness="T1",
+        sla=None,
+        dw_layer="DWS",
+        metric_tier="T1",
+        serving_mode="BATCH_ONLY",
+        additivity="ADDITIVE",
+        non_additive_dimensions=None,
+        definition_json={"expression": "sum(mobile)"},
+        version=1,
+        row_version=1,
+        status="PUBLISHED",
+        owner_id=1,
+        backup_owner_id=None,
+        description="统计用户手机号与收货地址的敏感描述",
+        pii_flag=True,
+        compliance_reviewed=True,
+        effective_version=1,
+        consumption_guide=None,
+        successor_code=None,
+        deprecated_at=None,
+        sunset_until=None,
+        created_at="2026-08-01T00:00:00",
+        updated_at="2026-08-01T00:00:00",
+    )
+    with patch(
+        "app.api.metrics.MetricService.get_metric_public",
+        new=AsyncMock(return_value=pii_metric),
+    ) as mocked_get:
+        resp = await metrics_client.get("/api/v1/metric-definitions/sales_pii_daily")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    # 口径脱敏保留键结构（叶子值 ***）
+    assert data["definition_json"] == {"expression": "***"}
+    # 业务描述与口径同级脱敏
+    assert data["description"] is None
+    mocked_get.assert_awaited_once()

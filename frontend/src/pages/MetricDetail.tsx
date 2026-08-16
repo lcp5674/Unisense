@@ -1060,7 +1060,9 @@ export function MetricDetail() {
           </Space>
         }
       >
-        {metric.description ? (
+        {piiMasked ? (
+          <span className="muted">该指标含个人信息，业务描述已隐藏（与口径定义同级别脱敏保护）。</span>
+        ) : metric.description ? (
           <Paragraph style={{ margin: 0, whiteSpace: "pre-wrap" }}>{metric.description}</Paragraph>
         ) : (
           <span className="muted">暂无业务描述{canInferDesc ? "，可点击右上角「AI 生成描述」自动生成" : ""}</span>
