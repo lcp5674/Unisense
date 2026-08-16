@@ -88,6 +88,23 @@ class TestTermRepo:
         )
         assert len(rows) == 1
 
+    async def test_list_terms_search_escapes_wildcards(self, repo: GlossaryRepository) -> None:
+        """LIKE 通配符（% / _）须转义，防模糊放大（对齐 FR-035）。"""
+        from sqlalchemy.dialects import mysql
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_result.scalar.return_value = 0
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        await repo.list_terms(domain=None, status=None, search="100%_x", limit=10, offset=0)
+        stmt = repo._session.execute.call_args_list[1].args[0]
+        literal_sql = str(
+            stmt.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True})
+        )
+        # 生成 ESCAPE 子句；未转义的原始关键词（含裸 %/_）不得出现在 SQL 中
+        assert "ESCAPE '/'" in literal_sql
+        assert "100%_x" not in literal_sql
+
     async def test_delete_term(self, repo: GlossaryRepository) -> None:
         term = Term(term_code="T1")
         await repo.delete_term(term)

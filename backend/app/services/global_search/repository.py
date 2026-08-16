@@ -261,7 +261,7 @@ class GlobalSearchRepository:
             select(DBCatalog)
             .where(
                 DBCatalog.deleted_at.is_(None),
-                cast(DBCatalog.schema_json, String).ilike(needle),
+                cast(DBCatalog.schema_json, String).ilike(needle, escape="/"),
             )
             .limit(limit * 3)
         )

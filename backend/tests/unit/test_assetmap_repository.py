@@ -776,8 +776,8 @@ class TestAggregations:
 
 class TestEscapeLike:
     def test_escapes_wildcards(self) -> None:
-        assert AssetMapRepository._escape_like("100%_ok") == "100\\%\\_ok"
-        assert AssetMapRepository._escape_like("a\\b") == "a\\\\b"
+        assert AssetMapRepository._escape_like("100%_ok") == "100/%/_ok"
+        assert AssetMapRepository._escape_like("a/b") == "a//b"
 
     def test_plain_text_unchanged(self) -> None:
         assert AssetMapRepository._escape_like("sales") == "sales"

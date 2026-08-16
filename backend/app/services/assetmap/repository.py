@@ -965,8 +965,13 @@ class AssetMapRepository:
 
     @staticmethod
     def _escape_like(text: str) -> str:
-        """转义 LIKE 通配符，防止用户输入 `%`/`_` 做全表模糊放大。"""
-        return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        """转义 LIKE 通配符，防止用户输入 `%`/`_` 做全表模糊放大。
+
+        修复前：转义为 \\% 但调用方 like() 无 escape 参数不生成 ESCAPE 子句，
+        MySQL 默认把 \\ 当普通字符、%/_ 仍当通配符 → 转义实际失效。
+        现用 / 作转义符（转义 //、/% 和 /_），配合 like(..., escape="/")。
+        """
+        return text.replace("/", "//").replace("%", "/%").replace("_", "/_")
 
     async def search_assets(
         self, q: str, entity_type: str | None, limit: int
@@ -1003,7 +1008,7 @@ class AssetMapRepository:
     ) -> list[dict[str, Any]]:
         """表/视图级搜索结果（含源/责任人/描述/字段数富集）。"""
         stmt = select(DBCatalog).where(
-            DBCatalog.deleted_at.is_(None), DBCatalog.entity_name.like(needle)
+            DBCatalog.deleted_at.is_(None), DBCatalog.entity_name.like(needle, escape="/")
         )
         if entity_type:
             stmt = stmt.where(DBCatalog.entity_type == entity_type)
@@ -1079,7 +1084,7 @@ class AssetMapRepository:
         """指标级搜索结果（含治理一等字段：类型/粒度/单位/聚合/新鲜度/分级/分层）。"""
         stmt = select(Metric).where(
             Metric.deleted_at.is_(None),
-            or_(Metric.metric_code.like(needle), Metric.name.like(needle)),
+            or_(Metric.metric_code.like(needle, escape="/"), Metric.name.like(needle, escape="/")),
         )
         rows = (await self._session.execute(stmt.limit(limit))).scalars().all()
         owner_ids = {m.owner_id for m in rows if m.owner_id is not None}

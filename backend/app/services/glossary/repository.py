@@ -51,9 +51,13 @@ class GlossaryRepository:
         if owner_id is not None:
             conditions.append(Term.owner_id == owner_id)
         if search:
-            like = f"%{search}%"
+            # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
+            escaped = search.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            like = f"%{escaped}%"
             conditions.append(
-                (Term.name.like(like)) | (Term.definition.like(like)) | (Term.term_code.like(like))
+                (Term.name.like(like, escape="/"))
+                | (Term.definition.like(like, escape="/"))
+                | (Term.term_code.like(like, escape="/"))
             )
         stmt = select(Term)
         if conditions:
