@@ -71,7 +71,7 @@ import type {
   UserBrief,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
-import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL, RULING_DECISION_LABEL } from "../utils/enums";
+import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL, UNIT_LABEL, RULING_DECISION_LABEL } from "../utils/enums";
 import { formatCnTime, formatCnDate } from "../utils/timeCn";
 import { HealthCard } from "./metric/HealthCard";
 import { QualitySnapshot } from "./metric/QualitySnapshot";
@@ -877,7 +877,7 @@ export function MetricDetail() {
           <Descriptions.Item label="分级">{enumLabel(METRIC_TIER_LABEL, metric.metric_tier)}</Descriptions.Item>
           <Descriptions.Item label="聚合">{enumLabel(AGGREGATION_LABEL, metric.aggregation)}</Descriptions.Item>
           <Descriptions.Item label="粒度">{enumLabel(GRANULARITY_LABEL, metric.granularity)}</Descriptions.Item>
-          <Descriptions.Item label="单位">{metric.unit}</Descriptions.Item>
+          <Descriptions.Item label="单位">{UNIT_LABEL[metric.unit] ?? metric.unit}</Descriptions.Item>
           <Descriptions.Item label="币种">{metric.currency || <span className="muted">—</span>}</Descriptions.Item>
           <Descriptions.Item label="数据分层">{enumLabel(DW_LAYER_LABEL, metric.dw_layer)}</Descriptions.Item>
           <Descriptions.Item label="时间语义">{enumLabel(TIME_SEMANTICS_LABEL, metric.time_semantics)}</Descriptions.Item>

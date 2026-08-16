@@ -110,7 +110,7 @@ import type {
 import { useTracking } from "../hooks/useTracking";
 import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { SchemaTable } from "../components/SchemaTable";
-import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
+import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL, UNIT_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
 import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
@@ -171,13 +171,6 @@ const METRIC_TIER_LABEL: Record<string, string> = {
   T1: "T1",
   T2: "T2",
   T3: "T3",
-};
-const UNIT_LABEL: Record<string, string> = {
-  CNY: "元",
-  cnt: "次",
-  PERSON: "人",
-  PERCENT: "%",
-  MINUTE: "分钟",
 };
 const AGG_LABEL: Record<string, string> = {
   SUM: "求和",

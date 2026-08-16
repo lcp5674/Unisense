@@ -45,6 +45,7 @@ import {
   METRIC_TYPE_LABEL,
   METRIC_TIER_LABEL,
   TIME_SEMANTICS_LABEL,
+  UNIT_LABEL,
 } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
 
@@ -115,7 +116,8 @@ function flattenDomains(nodes: SubjectDomainTreeNode[], acc: Map<string, string>
 function calibreSummary(r: MetricResponse): string {
   const agg = AGGREGATION_LABEL[r.aggregation] ?? r.aggregation;
   const gran = GRANULARITY_LABEL[r.granularity] ?? r.granularity;
-  return `${agg} · ${gran} · ${r.unit}`;
+  const unit = UNIT_LABEL[r.unit] ?? r.unit;
+  return `${agg} · ${gran} · ${unit}`;
 }
 
 // 展开行：完整口径定义 + 治理追溯
@@ -547,7 +549,7 @@ export function MetricCatalog() {
         STATUS_LABEL[m.status] ?? m.status,
         AGGREGATION_LABEL[m.aggregation] ?? m.aggregation,
         GRANULARITY_LABEL[m.granularity] ?? m.granularity,
-        m.unit, DW_LAYER_LABEL[m.dw_layer] ?? m.dw_layer, METRIC_TIER_LABEL[m.metric_tier] ?? m.metric_tier,
+        m.unit && UNIT_LABEL[m.unit] ? UNIT_LABEL[m.unit] : m.unit, DW_LAYER_LABEL[m.dw_layer] ?? m.dw_layer, METRIC_TIER_LABEL[m.metric_tier] ?? m.metric_tier,
         m.pii_flag ? "PII" : "", m.version, formatCnTime(m.created_at), formatCnTime(m.updated_at),
       ]
         .map((c) => `"${String(c).replace(/"/g, '""')}"`)

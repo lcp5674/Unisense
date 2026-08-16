@@ -101,6 +101,19 @@ export const GRANULARITY_LABEL: Record<string, string> = {
   year: "年",
 };
 
+/** 单位中文映射（跨模块统一：指标详情/目录/资产地图均复用，避免一处中文一处英文 code） */
+export const UNIT_LABEL: Record<string, string> = {
+  CNY: "元",
+  cnt: "次",
+  PERSON: "人",
+  PERCENT: "%",
+  MINUTE: "分钟",
+  HOUR: "小时",
+  DAY: "天",
+  MONTH: "月",
+  YEAR: "年",
+};
+
 // ---- 数据源 ----
 
 export const SOURCE_HEALTH_LABEL: Record<string, string> = {
