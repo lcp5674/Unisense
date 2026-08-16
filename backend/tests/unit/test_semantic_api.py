@@ -123,3 +123,68 @@ async def test_list_templates_escapes_wildcards_and_sorts_stably() -> None:
     assert "ESCAPE '/'" in literal_sql
     assert "100%_x" not in literal_sql  # 原始关键词（含裸 %/_）不得出现
     assert "metric_template.id" in literal_sql  # 主键次级排序（排序确定性）
+
+
+async def test_instantiate_required_fields_satisfied_by_template_default() -> None:
+    """required_fields 校验应对齐 merged：模板 defaults_json 提供的必填字段应算已满足（仅查 body 会误拒）。"""
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.api.semantic import instantiate_template
+    from app.core.exceptions import ValidationError
+
+    template = MagicMock()
+    template.id = 1
+    template.is_active = True
+    template.defaults_json = {"granularity": "day", "definition_json": {"expression": "sum(x)"}}
+    template.required_fields = ["granularity"]
+    for f, v in (
+        ("type", "atomic"), ("unit", "元"), ("aggregation", "SUM"),
+        ("time_semantics", "PERIOD"), ("freshness", "T1"), ("dw_layer", "DWS"),
+        ("serving_mode", "BATCH_ONLY"), ("additivity", "ADDITIVE"), ("metric_tier", "T3"),
+    ):
+        setattr(template, f, v)
+
+    def _db_with_query(return_template):
+        db = MagicMock()
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = return_template
+        db.execute = AsyncMock(return_value=r)
+        db.commit = AsyncMock()
+        return db
+
+    fake_metric = MagicMock()
+    fake_metric.metric_code = "sales_gmv_day"
+    fake_metric.to_dict = MagicMock(return_value={"metric_code": "sales_gmv_day"})
+    svc_instance = MagicMock()
+    svc_instance.create_metric = AsyncMock(return_value=fake_metric)
+
+    # 场景 1：required 的 granularity 由模板默认提供（body 不传）→ 通过并创建
+    db = _db_with_query(template)
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch("app.api.semantic.MetricService", return_value=svc_instance):
+        resp = await instantiate_template(
+            user=user, template_id=1, request=req, body={"name": "测试", "domain": "sales"}, db=db
+        )
+    assert resp.data["metric_code"] == "sales_gmv_day"
+    svc_instance.create_metric.assert_awaited_once()
+
+    # 场景 2：required 的 source_table 在 body 与模板默认均缺失 → 拒绝
+    template2 = MagicMock()
+    template2.id = 2
+    template2.is_active = True
+    template2.defaults_json = {}
+    template2.required_fields = ["source_table"]
+    for f, v in (
+        ("type", "atomic"), ("unit", "元"), ("aggregation", "SUM"),
+        ("time_semantics", "PERIOD"), ("freshness", "T1"), ("dw_layer", "DWS"),
+        ("serving_mode", "BATCH_ONLY"), ("additivity", "ADDITIVE"), ("metric_tier", "T3"),
+    ):
+        setattr(template2, f, v)
+    db2 = _db_with_query(template2)
+    with pytest.raises(ValidationError):
+        await instantiate_template(
+            user=user, template_id=2, request=req, body={"name": "x", "domain": "s"}, db=db2
+        )

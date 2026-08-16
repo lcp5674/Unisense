@@ -299,9 +299,10 @@ async def instantiate_template(
     merged = {**defaults, **body}
     merged["template_id"] = template_id
 
-    # 3. 必填字段校验
+    # 3. 必填字段校验（对齐 merged：模板默认值亦满足必填——
+    #    仅查 body 会误拒"模板默认已提供"的必填字段）
     required = template.required_fields or []
-    missing = [f for f in required if f not in body or not body[f]]
+    missing = [f for f in required if f not in merged or not merged[f]]
     if missing:
         from app.core.exceptions import ValidationError
 
