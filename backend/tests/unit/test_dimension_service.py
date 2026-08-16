@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -682,6 +682,7 @@ async def test_preview_column_values_queries_source() -> None:
 def _metric_with_dims(status: str, dims: list[str], metric_id: int = 42) -> Metric:
     m = Metric()
     m.id = metric_id
+    m.metric_code = "sales_gmv_daily"
     m.status = status
     m.definition_json = {
         "expression": "SUM(x)",
@@ -758,6 +759,57 @@ async def test_bind_metric_dimension_published_also_writes_back() -> None:
 
     assert metric.definition_json["dimensions"] == ["region", "city"]
     repo.commit.assert_awaited()
+
+
+async def test_bind_metric_dimension_registers_lineage_edge() -> None:
+    """绑定成功后即时注册血缘 USES_DIMENSION 边（对称于 unbind 的即时移除）。
+
+    血缘注册是追加语义（指标创建/编辑/发布时全量重注册），bind 若不同步建边，
+    新绑定维度的指标血缘图要等下次编辑/发布才出现「指标↔维度」边——不对称。
+    """
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
+    repo.get_member = AsyncMock(return_value=None)
+    repo.save_metric_dimension = AsyncMock(side_effect=lambda b: b)
+    metric = _metric_with_dims("DRAFT", ["existing_dim"])
+    svc._session.execute = AsyncMock(return_value=_bind_result(metric))
+
+    with patch(
+        "app.services.lineage.repository.LineageRepository.upsert_metric_dimension_edge",
+        new=AsyncMock(return_value=None),
+    ) as mock_edge:
+        await svc.bind_metric_dimension(
+            MetricDimensionBind(metric_id=42, dim_code="region", role="FILTER")
+        )
+        mock_edge.assert_awaited_once_with(
+            metric_code="sales_gmv_daily",
+            dim_node="dimension:region",
+            change_reason="metric_dimension_binding",
+        )
+
+
+async def test_bind_metric_dimension_lineage_failure_is_best_effort() -> None:
+    """血缘注册失败不阻断绑定主流程（best-effort，与 unbind 清理的容错一致）。"""
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="region"))
+    repo.get_member = AsyncMock(return_value=None)
+    repo.save_metric_dimension = AsyncMock(side_effect=lambda b: b)
+    metric = _metric_with_dims("DRAFT", [])
+    svc._session.execute = AsyncMock(return_value=_bind_result(metric))
+
+    with patch(
+        "app.services.lineage.repository.LineageRepository.upsert_metric_dimension_edge",
+        new=AsyncMock(side_effect=RuntimeError("lineage store down")),
+    ):
+        # 不应抛异常——血缘注册失败仅告警
+        binding = await svc.bind_metric_dimension(
+            MetricDimensionBind(metric_id=42, dim_code="region", role="FILTER")
+        )
+
+    assert isinstance(binding, MetricDimension)
+    # 声明维度已回写（绑定主流程不受血缘故障影响）
+    assert metric.definition_json["dimensions"] == ["region"]
+
 
 
 async def test_bind_metric_dimension_missing_metric_rejected() -> None:

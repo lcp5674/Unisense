@@ -607,7 +607,26 @@ class DimensionService(BaseService):
         # 单向打通：绑定成功后回写指标声明维度（definition_json.dimensions），
         # 使「维度管理-绑定指标」对消费链路真正生效（此前 metric_dimension 是信息孤岛，
         # 绑定只对绑定表生效，消费查询实际校验的是 definition_json.dimensions）。
-        await self._sync_dimension_to_metric(data.metric_id, data.dim_code)
+        metric = await self._sync_dimension_to_metric(data.metric_id, data.dim_code)
+        # 跨服务一致：即时注册血缘 USES_DIMENSION 边（对称于 unbind 的即时移除）。
+        # 血缘注册是追加语义（指标创建/编辑/发布时全量重注册），bind 若不同步建边，
+        # 新绑定维度的指标血缘图要等下次编辑/发布才出现「指标↔维度」边——不对称。
+        if metric is not None:
+            try:
+                from app.services.lineage.parser import node_dimension
+                from app.services.lineage.repository import LineageRepository
+
+                await LineageRepository(self._session).upsert_metric_dimension_edge(
+                    metric_code=metric.metric_code,
+                    dim_node=node_dimension(data.dim_code),
+                    change_reason="metric_dimension_binding",
+                )
+            except Exception:  # noqa: BLE001 - 血缘注册失败不阻断绑定主流程
+                logger.warning(
+                    "bind_metric_dimension_lineage_register_failed",
+                    metric_id=data.metric_id,
+                    dim_code=data.dim_code,
+                )
         return saved
 
     async def list_metric_dimensions(self, metric_id: int) -> list[MetricDimension]:
@@ -717,7 +736,7 @@ class DimensionService(BaseService):
         await self._repo.commit()
         return rec
 
-    async def _sync_dimension_to_metric(self, metric_id: int, dim_code: str) -> None:
+    async def _sync_dimension_to_metric(self, metric_id: int, dim_code: str) -> Metric | None:
         """回写指标声明维度：让绑定关系对消费链路生效（打通信息孤岛）。
 
         消费查询（consume 服务）真正校验的是 ``metric.definition_json.dimensions``，
@@ -728,6 +747,10 @@ class DimensionService(BaseService):
         - DRAFT / EXPERIMENTAL 指标：直接回写，无版本影响。
         - PUBLISHED 等已发布口径：属口径变更，理想应走版本审批流（pending_version）；
           此处不过度设计——仅回写并告警，生产环境应经版本审批（TD §12.6 FR）。
+
+        Returns:
+            回写后的 Metric（供 bind 复用 metric_code 注册血缘边）；
+            指标不存在时返回 None。
         """
         stmt = select(Metric).where(Metric.id == metric_id)
         result = await self._session.execute(stmt)
@@ -735,11 +758,11 @@ class DimensionService(BaseService):
         if metric is None:
             # 绑定表已存指标引用，但指标查不到：仅告警跳过回写，不阻断绑定本身
             logger.warning("bind_metric_dimension_metric_missing", metric_id=metric_id)
-            return
+            return None
         defn = dict(metric.definition_json or {})
         dims = list(defn.get("dimensions") or [])
         if dim_code in dims:
-            return  # 幂等：已在声明维度中，跳过
+            return metric  # 幂等：已在声明维度中，跳过（指标存在，返回供血缘注册）
         dims.append(dim_code)
         defn["dimensions"] = dims
         metric.definition_json = defn
@@ -752,6 +775,7 @@ class DimensionService(BaseService):
                 status=metric.status,
             )
         await self._repo.commit()
+        return metric
 
     async def _rename_dimension_in_metric_definitions(
         self, old_code: str, new_code: str
