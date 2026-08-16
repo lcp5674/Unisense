@@ -691,10 +691,11 @@ export function MetricCatalog() {
   }
 
   function exportCsv() {
+    // 表头与表格中文列标题对齐（业务术语化，值列已用中文标签）
     const header = [
-      "metric_code", "name", "domain", "owner_id", "type", "status",
-      "aggregation", "granularity", "unit", "dw_layer", "metric_tier",
-      "pii_flag", "version", "created_at", "updated_at",
+      "指标编码", "名称", "业务域", "责任人", "类型", "状态",
+      "聚合", "粒度", "单位", "数仓层", "分级",
+      "PII", "版本", "创建时间", "更新时间",
     ];
     // CSV 注入防护（OWASP）：单元格以 = / + / - / @ 开头时，Excel/WPS 会当作公式执行。
     // 指标名/域名等用户可写字段可能被注入恶意公式，导出时统一前缀单引号消毒。
