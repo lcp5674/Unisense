@@ -965,6 +965,17 @@ export function MetricDetail() {
 
       <DeprecatedChain metric={metric} />
 
+      {/* 非发布状态引导：DRAFT/REVIEW/EXPERIMENTAL 尚未成为可消费口径（对齐作废/废弃横幅） */}
+      {(metric.status === "DRAFT" || metric.status === "REVIEW" || metric.status === "EXPERIMENTAL") && (
+        <Alert
+          type="info"
+          showIcon
+          message={`该指标当前为「${STATUS_LABEL[metric.status] ?? metric.status}」，尚未发布为可消费口径`}
+          description="请勿在生产消费中使用该口径；发布后（或从「待办中心」处理该指标后）方可对外消费。"
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
       {health && <HealthCard health={health} />}
 
       <Card size="small" style={{ marginBottom: 16 }}>
