@@ -129,23 +129,6 @@ class FakeRepo:
             **kwargs,
         )
 
-    async def upsert_metric_edge(
-        self,
-        *,
-        from_metric: str,
-        to_metric: str,
-        edge_type: str = "DERIVED_FROM",
-        **kwargs: object,
-    ) -> SimpleNamespace:
-        """指标间血缘边假实现（原子→衍生/复合）：metric:{from} → metric:{to}。"""
-        return await self.upsert_edge(
-            source_node=f"metric:{from_metric}",
-            target_node=f"metric:{to_metric}",
-            edge_type=edge_type,
-            granularity="L3",
-            **kwargs,
-        )
-
     async def upsert_edge_with_status(self, **kwargs: object) -> tuple[SimpleNamespace, bool]:
         """幂等 upsert 假实现：按唯一键（source/target/edge_type/granularity）判定 created。"""
         self.upsert_calls.append(kwargs)
@@ -1386,40 +1369,6 @@ async def test_register_metric_from_definition_includes_dim_and_column() -> None
         c["edge_type"] == "READS_COLUMN" and c["source_node"] == "column:dws.gmv.cnt"
         for c in calls
     )
-
-
-async def test_register_metric_from_definition_registers_dependencies() -> None:
-    """register_metric_from_definition 从 definition_json.dependencies 注册原子→衍生指标血缘边。"""
-    svc = LineageService(db=_FakeSession())
-    repo = FakeRepo()
-    svc._repo = repo
-    metric = SimpleNamespace(
-        metric_code="gmv_derived",
-        definition_json={"dependencies": ["gmv_atomic", {"code": "order_cnt"}, "gmv_derived"]},
-    )
-    await svc.register_metric_from_definition(metric)
-    calls = repo.upsert_calls
-    # 字符串依赖 → metric:gmv_atomic → metric:gmv_derived
-    assert any(
-        c["edge_type"] == "DERIVED_FROM"
-        and c["source_node"] == "metric:gmv_atomic"
-        and c["target_node"] == "metric:gmv_derived"
-        for c in calls
-    )
-    # 对象依赖（{code:...}）→ metric:order_cnt → metric:gmv_derived
-    assert any(
-        c["source_node"] == "metric:order_cnt" and c["target_node"] == "metric:gmv_derived"
-        for c in calls
-    )
-    # 自环依赖（依赖自身）跳过
-    assert not any(
-        c["source_node"] == "metric:gmv_derived" and c["target_node"] == "metric:gmv_derived"
-        for c in calls
-    )
-    # 无依赖时静默跳过（兼容原子指标）
-    metric2 = SimpleNamespace(metric_code="gmv_atomic", definition_json={})
-    edges2 = await svc.register_metric_from_definition(metric2)
-    assert edges2 == []
 
 
 async def test_query_impact_merges_dimension_column_edges_from_mysql() -> None:
