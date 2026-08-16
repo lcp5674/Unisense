@@ -106,6 +106,7 @@ function DimensionsTab() {
     urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
   );
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   // 维度收藏（C 层多资产收藏：DIMENSION）
   const [favCodes, setFavCodes] = useState<Set<string>>(new Set());
@@ -245,6 +246,8 @@ function DimensionsTab() {
   }, [keyword, status, ownerId]);
 
   async function handleCreate(values: Record<string, unknown>) {
+    if (saving) return;
+    setSaving(true);
     try {
       await createDimension({
         dim_code: values.dim_code ? String(values.dim_code) : undefined,
@@ -259,6 +262,8 @@ function DimensionsTab() {
       load();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -480,7 +485,7 @@ function DimensionsTab() {
         })}
       />
 
-      <Modal title="新建维度" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
+      <Modal title="新建维度" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={saving}>
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="dim_code" label="维度编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>}>
             <Input className="mono" placeholder="留空自动生成" />
@@ -755,6 +760,7 @@ function MembersTab() {
   const [editTarget, setEditTarget] = useState<DimensionMember | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [editForm] = Form.useForm();
   // 从表自动获取枚举值：数据源列表 + 弹窗 + 预览结果
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
@@ -788,7 +794,8 @@ function MembersTab() {
   }
 
   async function handleCreate(values: Record<string, unknown>) {
-    if (!dimCode) return;
+    if (!dimCode || saving) return;
+    setSaving(true);
     try {
       await createDimensionMember({
         dim_code: dimCode,
@@ -803,6 +810,8 @@ function MembersTab() {
       reload();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -1005,7 +1014,7 @@ function MembersTab() {
         ]}
       />
 
-      <Modal title="新增维度成员" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
+      <Modal title="新增维度成员" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={saving}>
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="member_code" label="成员编码" extra={<span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>}>
             <Input className="mono" placeholder="留空自动生成" />
@@ -1188,6 +1197,7 @@ function MappingsTab() {
   const [editTarget, setEditTarget] = useState<DimensionMapping | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [editForm] = Form.useForm();
 
   async function load() {
@@ -1209,6 +1219,8 @@ function MappingsTab() {
   }, []);
 
   async function handleCreate(values: Record<string, unknown>) {
+    if (saving) return;
+    setSaving(true);
     try {
       await createDimensionMapping({
         source_dim_code: String(values.source_dim_code),
@@ -1222,6 +1234,8 @@ function MappingsTab() {
       load();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -1325,7 +1339,7 @@ function MappingsTab() {
       </div>
       <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }} locale={{ emptyText: "暂无维度映射" }} />
 
-      <Modal title="新建维度映射" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
+      <Modal title="新建维度映射" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={saving}>
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="source_dim_code" label="源维度" rules={[{ required: true }]}>
             <Select
@@ -1400,6 +1414,7 @@ function ReconciliationsTab() {
   const [metrics, setMetrics] = useState<MetricResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
   // 复核需治理角色（对齐后端 _GOV_DEPS = domain_admin/platform_admin）；
   // 提交对账用 dimension:reconcile（metric_owner 等可提交，但不能复核他人对账）
@@ -1429,6 +1444,8 @@ function ReconciliationsTab() {
   }, []);
 
   async function handleCreate(values: Record<string, unknown>) {
+    if (saving) return;
+    setSaving(true);
     try {
       await submitReconciliation({
         metric_id: Number(values.metric_id),
@@ -1442,6 +1459,8 @@ function ReconciliationsTab() {
       load();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交失败");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -1523,7 +1542,7 @@ function ReconciliationsTab() {
       </div>
       <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }} locale={{ emptyText: "暂无对账记录" }} />
 
-      <Modal title="提交维度对账" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="提交">
+      <Modal title="提交维度对账" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="提交" confirmLoading={saving}>
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="metric_id" label="指标" rules={[{ required: true }]}>
             <Select showSearch options={metrics.map((m) => ({ value: m.id, label: `${m.metric_code} · ${m.name}` }))} placeholder="选择指标" />
