@@ -571,6 +571,22 @@ describe("MetricCatalog - 按钮级权限点过滤", () => {
       expect(btn.disabled).toBe(false);
     });
   });
+
+  it("无 metric:export 权限时导出按钮禁用（CSV 客户端生成，权限点仅前端生效）", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    renderWithPerm(["metric:create"]);
+    await screen.findByText("sales_gmv_sum_d");
+    const btn = screen.getByRole("button", { name: /导出/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
+
+  it("具备 metric:export 权限时导出按钮可用", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    renderWithPerm(["metric:create", "metric:export"]);
+    await screen.findByText("sales_gmv_sum_d");
+    const btn = screen.getByRole("button", { name: /导出/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+  });
 });
 
 describe("MetricCatalog URL 筛选直达（分享/刷新保持）", () => {

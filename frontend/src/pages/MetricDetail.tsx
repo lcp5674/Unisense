@@ -776,6 +776,9 @@ export function MetricDetail() {
   const canEmergency = permReady && can("metric:emergency-publish");
   const canCreate = permReady && can("metric:create");
   const canInferDesc = permReady && can("metric:infer-description");
+  // 回滚是高风险操作（灰度→退回上一 PUBLISHED 版本），用专用权限点 metric:rollback 门禁
+  // （而非笼统的 metric:edit），与后端 _WRITE_DEPS + PDP owner 校验形成前后端双边界。
+  const canRollback = permReady && can("metric:rollback");
   const piiUnreviewed = metric.pii_flag && !metric.compliance_reviewed;
 
   const headerActions = (
@@ -849,9 +852,11 @@ export function MetricDetail() {
           <Button icon={<RiseOutlined />} loading={busy} onClick={() => runAction(() => promoteMetric(metric.metric_code), "全量发布")}>
             全量发布
           </Button>
-          <Button icon={<RollbackOutlined />} loading={busy} onClick={() => runAction(() => rollbackMetric(metric.metric_code), "回滚")}>
-            回滚
-          </Button>
+          {canRollback && (
+            <Button icon={<RollbackOutlined />} loading={busy} onClick={() => runAction(() => rollbackMetric(metric.metric_code), "回滚")}>
+              回滚
+            </Button>
+          )}
         </>
       )}
       {canPii && piiUnreviewed && (

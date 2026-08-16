@@ -540,7 +540,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
 
   it("EXPERIMENTAL（灰度）状态不显示「废弃」与「提交评审」——后端状态机仅支持 promote/rollback，防止 409 拒绝", async () => {
     mockedGetMetric.mockResolvedValue({ ...metric, status: "EXPERIMENTAL", pii_flag: false });
-    renderWithPerms(["metric:deprecate", "metric:create", "metric:edit"]);
+    renderWithPerms(["metric:deprecate", "metric:create", "metric:edit", "metric:rollback"]);
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
     await waitFor(() => {
       expect(screen.queryByText("废弃")).not.toBeInTheDocument();

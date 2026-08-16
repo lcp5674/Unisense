@@ -341,6 +341,9 @@ export function MetricCatalog() {
   const canDeprecate = can("metric:deprecate");
   // 空态引导权限感知：无创建权限的用户不显示「创建/从模板创建」（点击后会被后端 403），改为引导联系管理员
   const canCreate = can("metric:create");
+  // 导出权限：metric:export 仅前端生效（CSV 为客户端生成，无后端端点拦截），
+  // 无权限则禁用导出按钮，防止 viewer/analyst 等角色导出含 PII 口径的指标清单（数据导出权限缺口）。
+  const canExport = can("metric:export");
   // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除 /
   // approve=批量通过 / reject=批量打回 / deprecate=批量下线
   const [batchAction, setBatchAction] = useState<
@@ -959,8 +962,12 @@ export function MetricCatalog() {
               </Button>
             </>
           )}
-          <Tooltip title="将当前筛选结果导出为 CSV">
-            <Button icon={<DownloadOutlined />} onClick={exportCsv} disabled={!items.length}>
+          <Tooltip title={canExport ? "将当前筛选结果导出为 CSV" : "无导出权限（metric:export）"}>
+            <Button
+              icon={<DownloadOutlined />}
+              onClick={exportCsv}
+              disabled={!items.length || !canExport}
+            >
               导出
             </Button>
           </Tooltip>
