@@ -1614,7 +1614,12 @@ class MetricService(BaseService):
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
 
         updated = await self._repo.update_with_optimistic_lock(
-            metric.id, metric.row_version, status="DRAFT"
+            metric.id,
+            metric.row_version,
+            status="DRAFT",
+            reject_reason=(request.reason or "").strip()[:500],
+            reject_reviewer_id=actor_id,
+            rejected_at=datetime.now(UTC).replace(tzinfo=None),
         )
         await self._cache.invalidate(metric_code)
 

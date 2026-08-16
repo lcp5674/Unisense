@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    DateTime,
     Enum,
     ForeignKey,
     Index,
@@ -187,6 +188,23 @@ class Metric(Base, BaseModel):
         BigInteger,
         nullable=True,
         comment="提交评审人 ID（approve/reject 时禁止自审）",
+    )
+    # 驳回可追溯（FR-005 闭环）：reject 时落库驳回原因/审核人/时间，
+    # DRAFT 详情页展示"上次驳回原因"引导提交人修改后重提（历史原因不丢失）。
+    reject_reason: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="最近一次审核驳回原因（REVIEW→DRAFT 时写入，用于详情页引导修改）",
+    )
+    reject_reviewer_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment="驳回审核人 ID（reject 时写入）",
+    )
+    rejected_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        comment="驳回时间（REVIEW→DRAFT 时写入）",
     )
     # 评审指派（TD §13 治理闭环）：提交评审时可指定评审用户或域评审组；
     # approve/reject 仅被指派评审人（或 platform_admin 兜底）可操作。

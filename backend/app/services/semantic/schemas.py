@@ -468,6 +468,10 @@ class MetricResponse(BaseModel):
     reviewer_id: int | None = None
     reviewer_type: str | None = None
     reviewer_domain: str | None = None
+    # 驳回可追溯（FR-005 闭环）：DRAFT 详情页展示"上次驳回原因"引导提交人修改后重提
+    reject_reason: str | None = None
+    reject_reviewer_id: int | None = None
+    rejected_at: str | None = None
     # 指标业务描述（TD §12.1 治理补充，独立于口径/版本，资产地图抽屉展示/编辑）
     description: str | None = None
     description_source: str | None = None

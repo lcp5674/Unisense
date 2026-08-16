@@ -49,6 +49,10 @@ export interface MetricResponse {
   reviewer_id?: number | null;
   reviewer_type?: "user" | "domain" | null;
   reviewer_domain?: string | null;
+  /** 驳回可追溯（FR-005 闭环）：DRAFT 详情页展示"上次驳回原因"引导提交人修改后重提 */
+  reject_reason?: string | null;
+  reject_reviewer_id?: number | null;
+  rejected_at?: string | null;
   pii_flag: boolean;
   compliance_reviewed: boolean;
   effective_version: number | null;

@@ -449,6 +449,35 @@ describe("MetricDetail", () => {
       }),
     );
   });
+
+  it("DRAFT 且存在 reject_reason 时展示驳回原因引导横幅（FR-005 可追溯）", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      reject_reason: "粒度 day 与口径定义不符，请改为 order 粒度",
+      rejected_at: "2026-08-14T10:00:00",
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/detail/sales_gmv_sum_d" }]}>
+        <Routes>
+          <Route
+            path="/detail/:code"
+            element={
+              <PermissionProvider
+                user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}
+              >
+                <MetricDetail />
+              </PermissionProvider>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("该指标上次评审被驳回")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/粒度 day 与口径定义不符/)).toBeInTheDocument();
+  });
 });
 
 describe("MetricDetail 按钮级权限过滤", () => {

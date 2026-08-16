@@ -1061,6 +1061,26 @@ export function MetricDetail() {
         />
       )}
 
+      {/* 驳回原因引导（FR-005 闭环）：REVIEW→DRAFT 落库的驳回原因，引导提交人修改后重提 */}
+      {metric.status === "DRAFT" && metric.reject_reason && (
+        <Alert
+          type="warning"
+          showIcon
+          message="该指标上次评审被驳回"
+          description={
+            <span>
+              驳回原因：{metric.reject_reason}
+              {metric.rejected_at && (
+                <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                  （{formatCnTime(metric.rejected_at)}）
+                </span>
+              )}
+            </span>
+          }
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
       {health && <HealthCard health={health} />}
 
       <Card size="small" style={{ marginBottom: 16 }}>
