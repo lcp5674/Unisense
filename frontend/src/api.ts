@@ -485,6 +485,10 @@ export async function listMetrics(params: {
   owner_id?: number;
   /** PII 过滤：true=仅 PII，false=仅非 PII（热力指标视角下钻） */
   pii_flag?: boolean;
+  /** 生命周期快筛：仅返回 created_at 晚于该时间（ISO）的指标 */
+  created_after?: string;
+  /** 生命周期快筛：仅返回 updated_at 早于该时间（ISO）的指标 */
+  updated_before?: string;
   sort_by?: "updated_at" | "created_at" | "version" | "metric_code" | "name";
   sort_order?: "asc" | "desc";
   page?: number;
@@ -497,6 +501,8 @@ export async function listMetrics(params: {
     keyword: params.keyword,
     owner_id: params.owner_id,
     pii_flag: params.pii_flag === undefined ? undefined : String(params.pii_flag),
+    created_after: params.created_after,
+    updated_before: params.updated_before,
     sort_by: params.sort_by,
     sort_order: params.sort_order,
     page: params.page ?? 1,

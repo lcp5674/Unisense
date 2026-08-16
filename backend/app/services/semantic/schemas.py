@@ -399,6 +399,11 @@ class MetricListParams(BaseModel):
     owner_id: int | None = Field(None, ge=1, description="责任人（Owner）ID 过滤")
     # PII 过滤（热力指标视角下钻：PII 格子 / 非 PII 格子）
     pii_flag: bool | None = Field(None, description="仅 PII / 仅非 PII 指标")
+    # 生命周期快筛（TD §13）：按创建/更新时间区间过滤（ISO 日期或 datetime）
+    created_after: datetime | None = Field(None, description="创建时间 ≥ 该值（生命周期快筛）")
+    created_before: datetime | None = Field(None, description="创建时间 ≤ 该值")
+    updated_after: datetime | None = Field(None, description="更新时间 ≥ 该值")
+    updated_before: datetime | None = Field(None, description="更新时间 ≤ 该值")
     sort_by: Literal["updated_at", "created_at", "version", "metric_code", "name"] = "updated_at"
     sort_order: Literal["asc", "desc"] = "desc"
     page: int = Field(1, ge=1, le=1000)

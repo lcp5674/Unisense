@@ -354,6 +354,24 @@ async def test_list_metrics_pagination_offset():
     assert called["offset"] == 20  # (page-1)*page_size
 
 
+async def test_list_metrics_passes_lifecycle_date_filters():
+    """生命周期快筛日期参数透传（TD §13）：created_after/updated_before 传给 repository。"""
+    from datetime import UTC, datetime
+
+    svc, repo = _svc_with_repo()
+    repo.list_metrics = AsyncMock(return_value=([make_metric()], 1))
+    created_after = datetime(2026, 8, 1, tzinfo=UTC)
+    updated_before = datetime(2026, 7, 1, tzinfo=UTC)
+
+    await svc.list_metrics(
+        MetricListParams(created_after=created_after, updated_before=updated_before)
+    )
+
+    called = repo.list_metrics.call_args.kwargs
+    assert called["created_after"] == created_after
+    assert called["updated_before"] == updated_before
+
+
 async def test_is_breaking_change_detection():
     svc, _ = _svc_with_repo()
     old = {"expression": "SUM(a)", "dependencies": ["t1"]}

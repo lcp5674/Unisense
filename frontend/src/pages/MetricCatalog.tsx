@@ -260,6 +260,8 @@ export function MetricCatalog() {
   const [currentUserId, setCurrentUserId] = useState<number | undefined>(undefined);
   const [myMetricsOnly, setMyMetricsOnly] = useState(false);
   const [lifecycleFilter, setLifecycleFilter] = useState<string | null>(null);
+  // 生命周期快筛的真实日期区间（TD §13）：created_7d=7 天前起 / stale_30d=30 天前止
+  const [lifecycleDate, setLifecycleDate] = useState<{ created_after?: string; updated_before?: string }>({});
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   // 只看收藏：客户端过滤当前页（后端 list 无收藏过滤参数）
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -342,6 +344,8 @@ export function MetricCatalog() {
         domain: domain || undefined,
         metric_tier: tier || undefined,
         owner_id: ownerFilter ? Number(ownerFilter) : myMetricsOnly ? currentUserId : undefined,
+        created_after: lifecycleDate.created_after,
+        updated_before: lifecycleDate.updated_before,
         sort_by: sortBy,
         sort_order: sortOrder,
         page,
@@ -363,7 +367,7 @@ export function MetricCatalog() {
 
   useEffect(() => {
     load();
-  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, currentUserId, ownerFilter]);
+  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, currentUserId, ownerFilter, lifecycleDate]);
 
   function handleSearch() {
     if (keyword) {
@@ -388,22 +392,27 @@ export function MetricCatalog() {
   }
 
   function handleLifecycle(key: string) {
+    const now = new Date();
     if (key === "created_7d") {
+      const from = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
       setKeyword("");
       setStatus("");
+      setLifecycleDate({ created_after: from.toISOString() });
       setLifecycleFilter(key);
-      // 后端不支持按创建时间筛，用排序引导
       setSortBy("created_at");
       setSortOrder("desc");
     } else if (key === "stale_30d") {
+      const until = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
       setKeyword("");
       setStatus("");
+      setLifecycleDate({ updated_before: until.toISOString() });
       setLifecycleFilter(key);
       setSortBy("updated_at");
       setSortOrder("asc");
     } else if (key === "deprecating") {
       setKeyword("");
       setStatus("DEPRECATED");
+      setLifecycleDate({});
       setLifecycleFilter(key);
     }
     setPage(1);
@@ -529,8 +538,11 @@ export function MetricCatalog() {
     ];
     const rows = items.map((m) =>
       [
-        m.metric_code, m.name, m.domain, m.owner_id, m.type, m.status,
-        m.aggregation, m.granularity, m.unit, m.dw_layer, m.metric_tier,
+        m.metric_code, m.name, domainName(m.domain), userName(m.owner_id), m.type,
+        STATUS_LABEL[m.status] ?? m.status,
+        AGGREGATION_LABEL[m.aggregation] ?? m.aggregation,
+        GRANULARITY_LABEL[m.granularity] ?? m.granularity,
+        m.unit, DW_LAYER_LABEL[m.dw_layer] ?? m.dw_layer, METRIC_TIER_LABEL[m.metric_tier] ?? m.metric_tier,
         m.pii_flag ? "PII" : "", m.version, formatCnTime(m.created_at), formatCnTime(m.updated_at),
       ]
         .map((c) => `"${String(c).replace(/"/g, '""')}"`)
@@ -806,6 +818,7 @@ export function MetricCatalog() {
             { value: "REVIEW", label: "审核" },
             { value: "PUBLISHED", label: "已发布" },
             { value: "DEPRECATED", label: "已废弃" },
+            { value: "DATA_SOURCE_DROPPED", label: "数据源下线" },
           ]}
         />
         <Select
@@ -838,13 +851,15 @@ export function MetricCatalog() {
             {myMetricsOnly ? "我的指标" : "全部指标"}
           </Button>
         )}
-        <Button
-          type={favoritesOnly ? "primary" : "default"}
-          icon={favoritesOnly ? <HeartFilled style={{ color: "#eb2f96" }} /> : <HeartOutlined />}
-          onClick={() => setFavoritesOnly(!favoritesOnly)}
-        >
-          {favoritesOnly ? "只看收藏" : "我的收藏"}
-        </Button>
+        <Tooltip title={favoritesOnly ? "仅过滤当前页命中的收藏，可在搜索框输入关键字缩小范围" : "只看我收藏的指标（当前页内过滤）"}>
+          <Button
+            type={favoritesOnly ? "primary" : "default"}
+            icon={favoritesOnly ? <HeartFilled style={{ color: "#eb2f96" }} /> : <HeartOutlined />}
+            onClick={() => setFavoritesOnly(!favoritesOnly)}
+          >
+            {favoritesOnly ? "只看收藏" : "我的收藏"}
+          </Button>
+        </Tooltip>
         {LIFECYCLE_PRESETS.map((p) => (
           <Button
             key={p.key}
@@ -855,6 +870,7 @@ export function MetricCatalog() {
               if (lifecycleFilter === p.key) {
                 setLifecycleFilter(null);
                 setStatus("");
+                setLifecycleDate({});
                 setSortBy("updated_at");
                 setPage(1);
               } else {
@@ -865,7 +881,9 @@ export function MetricCatalog() {
             {p.label}
           </Button>
         ))}
-        <span className="muted">共 {total} 条</span>
+        <span className="muted">
+          {favoritesOnly ? `当前页命中 ${displayItems.length} 条（全量 ${total} 条）` : `共 ${total} 条`}
+        </span>
       </Space>
 
       <Table
