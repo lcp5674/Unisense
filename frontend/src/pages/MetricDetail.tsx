@@ -678,6 +678,17 @@ export function MetricDetail() {
   const isAdmin = role === "platform_admin" || role === "domain_admin";
   const isOwnerOrAdmin = isAdmin || role === "metric_owner";
   const piiMasked = metric.pii_flag && !SENSITIVE_ROLES.includes(role);
+  // 评审指派校验（对齐审批页）：仅被指派评审人可审批/灰度。
+  // user 指派 → 须为被指派人本人；domain 指派 → 须为域评审角色（platform_admin/domain_admin/reviewer）；
+  // 未指派 → 后端按域管理员兜底，前端不设限。最终裁决由后端 _assert_reviewer_authorized 兜底。
+  const canActAsReviewer =
+    isAdmin ||
+    (metric?.reviewer_type === "user"
+      ? metric.reviewer_id != null && metric.reviewer_id === currentUser?.id
+      : metric?.reviewer_type === "domain"
+        ? role === "domain_admin" || role === "reviewer"
+        : true);
+  const notAssignedReviewer = metric?.status === "REVIEW" && !canActAsReviewer;
 
   // 按钮级权限点（细粒度管控，方案 C）：与后端 require_roles 对齐——
   // 提交评审=metric:create、发布/灰度=metric:approve、PII 复核=pii:review、
@@ -743,13 +754,20 @@ export function MetricDetail() {
           type="primary"
           loading={busy}
           onClick={() => runAction(() => approveMetric(metric.metric_code, {}), "审批通过")}
-          disabled={piiUnreviewed}
+          disabled={piiUnreviewed || notAssignedReviewer}
+          title={notAssignedReviewer ? "您未被指定为该指标的评审人" : undefined}
         >
-          审批通过{piiUnreviewed ? "（需先 PII 复核）" : ""}
+          审批通过{notAssignedReviewer ? "（未被指派评审）" : piiUnreviewed ? "（需先 PII 复核）" : ""}
         </Button>
       )}
       {metric.status === "REVIEW" && canApprove && (
-        <Button icon={<ExperimentOutlined />} loading={busy} onClick={() => setGrayOpen(true)}>
+        <Button
+          icon={<ExperimentOutlined />}
+          loading={busy}
+          onClick={() => setGrayOpen(true)}
+          disabled={notAssignedReviewer}
+          title={notAssignedReviewer ? "您未被指定为该指标的评审人" : undefined}
+        >
           灰度发布
         </Button>
       )}
