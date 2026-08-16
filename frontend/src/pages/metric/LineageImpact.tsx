@@ -40,7 +40,7 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await lineageImpact({ node: metricCode, direction: dir, max_hops: 5, page_size: 50 });
+      const res = await lineageImpact({ node: `metric:${metricCode}`, direction: dir, max_hops: 5, page_size: 50 });
       setEdges(res.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : "血缘加载失败");
@@ -89,7 +89,7 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
         <Button
           type="link"
           size="small"
-          onClick={() => window.open(`/lineage?node=${encodeURIComponent(metricCode)}`, "_blank")}
+          onClick={() => window.open(`/lineage?node=${encodeURIComponent(`metric:${metricCode}`)}`, "_blank")}
         >
           在图谱中查看 →
         </Button>
