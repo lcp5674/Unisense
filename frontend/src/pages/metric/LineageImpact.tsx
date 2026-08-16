@@ -9,6 +9,8 @@ const EDGE_COLOR: Record<string, string> = {
   TABLE_TO_FIELD: "cyan",
   FIELD_TO_TABLE: "geekblue",
   SQL_PARSE: "default",
+  USES_DIMENSION: "gold",
+  READS_COLUMN: "magenta",
 };
 
 const EDGE_TYPE_LABEL: Record<string, string> = {
@@ -22,6 +24,8 @@ const EDGE_TYPE_LABEL: Record<string, string> = {
   TABLE_TO_FIELD: "表到字段",
   FIELD_TO_TABLE: "字段到表",
   SQL_PARSE: "SQL 解析",
+  USES_DIMENSION: "使用维度",
+  READS_COLUMN: "读取字段",
 };
 
 const PROVENANCE_LABEL: Record<string, string> = {
