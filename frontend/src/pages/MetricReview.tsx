@@ -395,9 +395,14 @@ export function MetricReview() {
             showSizeChanger: true,
             pageSizeOptions: [10, 20, 50],
             onChange: (p, ps) => { setPage(p); onShowSizeChange(p, ps); },
-            showTotal: (t) => `共 ${t} 条待评审`,
+            showTotal: (t) => (view === "pending" ? `共 ${t} 条待评审` : `共 ${t} 条已评审`),
           }}
-          locale={{ emptyText: "暂无待评审指标" }}
+          locale={{
+            emptyText:
+              view === "pending"
+                ? "当前无待您评审的指标（已全部处理或暂无指派）"
+                : "您还没有评审过指标",
+          }}
         />
       </Card>
     </div>
