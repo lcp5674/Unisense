@@ -28,11 +28,11 @@ function openReviewModal(
         <p style={{ marginBottom: 12 }}>
           {approved
             ? "通过后该指标将进入已发布状态。"
-            : "驳回后该指标将退回草稿状态。"}
+            : "驳回后该指标将退回草稿状态，请填写驳回原因（提交人据此修改重提）。"}
         </p>
         <Input.TextArea
           rows={3}
-          placeholder="变更原因（可选）"
+          placeholder={approved ? "变更原因（可选）" : "驳回原因（必填，至少 4 字）"}
           onChange={(e) => {
             reason = e.target.value;
           }}
@@ -42,7 +42,16 @@ function openReviewModal(
     okText: approved ? "通过" : "驳回",
     cancelText: "取消",
     okButtonProps: approved ? { type: "primary" as const } : { danger: true },
-    onOk: () => onOk(reason),
+    // 驳回必须填原因：返回 Promise，拒绝时 Modal 不关闭（不提交）
+    onOk: () =>
+      new Promise<void>((resolve, reject) => {
+        if (!approved && reason.trim().length < 4) {
+          message.warning("驳回原因至少 4 字，请补充说明");
+          reject();
+          return;
+        }
+        resolve();
+      }).then(() => onOk(reason)),
   });
 }
 
