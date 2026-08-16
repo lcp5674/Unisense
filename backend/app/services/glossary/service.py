@@ -291,6 +291,20 @@ class GlossaryService(BaseService):
                 error_code="SELF_RELATION",
                 ctx={"term_code": term_code, "term_id": term.id},
             )
+        # 重复关系预检：同对（源/目标/类型）已存在时 409，而非触达 uk_term_pair 抛 500
+        existing = await self._repo.get_term_relation(
+            term.id, target.id, TermRelationType(data.relation_type).value
+        )
+        if existing is not None:
+            raise ConflictError(
+                "该术语关系已存在",
+                error_code="DUPLICATE_TERM_RELATION",
+                ctx={
+                    "term_code": term_code,
+                    "target_term_id": target.id,
+                    "relation_type": data.relation_type,
+                },
+            )
         relation = TermRelation(
             source_term_id=term.id,
             target_term_id=target.id,

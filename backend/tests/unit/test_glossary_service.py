@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from app.models.glossary import GlossaryConflict, TermRelation, TermVersion
 from app.models.term import Term
 from app.services.glossary.schemas import (
@@ -472,3 +474,39 @@ async def test_list_term_relations_outgoing_and_incoming() -> None:
     assert out[1]["direction"] == "incoming"  # 对端是 source → 本术语是 target
     assert out[1]["relation_type"] == "BROADER_THAN"
     assert out[1]["peer"]["name"] == "源头术语"
+
+
+async def test_create_term_relation_duplicate_raises_conflict() -> None:
+    """同对（源/目标/类型）关系重复创建时 409（预检拦截，而非 uk_term_pair 500）。"""
+    from unittest.mock import MagicMock
+
+    from app.core.exceptions import ConflictError
+    from app.models.glossary import TermRelation
+    from app.services.glossary.schemas import TermRelationCreate
+
+    db = MagicMock()
+    svc = GlossaryService(db)
+    repo = MagicMock()
+
+    term = _make_term()
+    term.id = 1
+    target = _make_term()
+    target.id = 2
+
+    repo.get_term = AsyncMock(return_value=term)
+    repo.get_term_by_id = AsyncMock(return_value=target)
+    # 同对关系已存在 → 预检命中 → 409
+    repo.get_term_relation = AsyncMock(return_value=TermRelation())
+    repo.save_term_relation = AsyncMock()
+    svc._repo = repo
+
+    payload = TermRelationCreate(
+        target_term_id=2,
+        relation_type="RELATED_TO",
+        source_type="MANUAL",
+        declared_by=1,
+    )
+    with pytest.raises(ConflictError) as exc:
+        await svc.create_term_relation("c1", payload)
+    assert exc.value.error_code == "DUPLICATE_TERM_RELATION"
+    repo.save_term_relation.assert_not_awaited()

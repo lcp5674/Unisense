@@ -110,6 +110,17 @@ class GlossaryRepository:
         await self._session.flush()
         return relation
 
+    async def get_term_relation(
+        self, source_term_id: int, target_term_id: int, relation_type: str
+    ) -> TermRelation | None:
+        """查同对（源/目标/类型）关系是否已存在，供创建预检（防 uk_term_pair 500）。"""
+        stmt = select(TermRelation).where(
+            TermRelation.source_term_id == source_term_id,
+            TermRelation.target_term_id == target_term_id,
+            TermRelation.relation_type == relation_type,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def list_term_relations(self, term_id: int) -> list[dict[str, Any]]:
         """查某术语的全部关系（作为源或目标），带对端术语信息（名称/编码）。
 
