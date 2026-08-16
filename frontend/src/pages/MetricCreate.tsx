@@ -701,7 +701,12 @@ export function MetricCreate() {
         style={{ minHeight: 320 }}
       >
         <Card>
-        <Form form={form} layout="vertical" scrollToFirstError onFinish={handleSubmit} initialValues={{
+        <Form form={form} layout="vertical" scrollToFirstError onFinish={handleSubmit}
+          onValuesChange={() => {
+            // 表单字段变化即旧预检结果失效（避免「无冲突」结果在改口径后仍误导提交）
+            if (precheckResult) setPrecheckResult(null);
+          }}
+          initialValues={{
           type: "atomic", granularity: "day", aggregation: "SUM",
           time_semantics: "PERIOD", freshness: "T1", dw_layer: "DWD",
           metric_tier: "T3", serving_mode: "BATCH_ONLY", additivity: "ADDITIVE",
