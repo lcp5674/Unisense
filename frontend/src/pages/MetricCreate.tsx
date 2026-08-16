@@ -5,7 +5,7 @@ import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, listDimensions, listMetrics, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, listDimensions, listMetrics, getDomainDefaults, UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog, SuggestionField, AutoSuggestResponse, Dimension } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
@@ -388,6 +388,27 @@ export function MetricCreate() {
     setSuggestedCode(null);
     setInferred({});
     setInferredDefinition({ json: null, mode: null });
+    // 域默认值预填（TD §3.8 主题域默认值）：选域后将该域配置的默认粒度/单位/聚合等
+    // 预填到表单（用户可覆盖），打通「主题域配置 → 注册指标预填」的跨服务闭环。
+    // 用 isFieldTouched 区分「用户手动输入」与「initialValues 全局默认」：
+    // 域默认值覆盖全局 initialValues（域配置优先），但尊重用户已手动修改的字段。
+    try {
+      const defaults = await getDomainDefaults(domainCode);
+      const prefill: Record<string, unknown> = {};
+      const DEFAULT_FIELDS = [
+        "granularity", "unit", "aggregation", "time_semantics", "freshness",
+        "dw_layer", "metric_tier", "serving_mode", "additivity", "type",
+      ] as const;
+      for (const f of DEFAULT_FIELDS) {
+        const v = defaults[f];
+        if (v !== undefined && v !== null && v !== "" && !form.isFieldTouched(f)) {
+          prefill[f] = v;
+        }
+      }
+      if (Object.keys(prefill).length) form.setFieldsValue(prefill);
+    } catch {
+      // 域默认值拉取失败不阻断选域流程（推断仍进行）
+    }
     setSuggesting(true);
     try {
       const sourceTable = form.getFieldValue("source_table");
