@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined } from "@ant-design/icons";
 import {
-  Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
+  Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
   createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, listDimensions, listMetrics, getDomainDefaults, UnisenseApiError,
@@ -652,7 +652,7 @@ export function MetricCreate() {
       source_table: String(values.source_table).trim(),
       measure_columns: measureColumns,
       domain: String(values.domain),
-      llm_prefill: Boolean(values.llm_prefill),
+      llm_prefill: true,
       dimension_mapping: dimensionMapping,
     };
     setBatchResult(null);
@@ -1270,9 +1270,6 @@ export function MetricCreate() {
                   </>
                 )}
               </Form.List>
-            </Form.Item>
-            <Form.Item name="llm_prefill" label="LLM 预填" valuePropName="checked" initialValue={true}>
-              <Switch checkedChildren="开启" unCheckedChildren="手动" />
             </Form.Item>
             <Space>
               <Button type="primary" htmlType="submit" loading={batchSubmitting}>

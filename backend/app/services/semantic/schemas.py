@@ -373,7 +373,9 @@ class MetricBatchRegisterRequest(BaseModel):
     source_table: str = Field(..., description="源宽表名")
     measure_columns: list[str] = Field(..., min_length=1, description="度量列列表")
     dimension_mapping: dict[str, str] | None = Field(None, description="维度列映射")
-    llm_prefill: bool = Field(True, description="是否使用 LLM 预填（False=手动模式）")
+    # 兼容保留参数（True/False 行为一致）：批量注册固定走 auto_fill 规则引擎自动推断
+    # （与单条注册一致）；LLM 命名预填（auto_fill 的 llm_name 入参）为后续增强，当前未接线。
+    llm_prefill: bool = Field(True, description="是否启用自动推断预填（规则引擎，兼容保留）")
     domain: str = Field(..., max_length=64, description="所属域")
 
 
