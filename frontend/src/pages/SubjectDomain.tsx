@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Button, Card, Col, Row, Tree, Descriptions, Modal, Form, Input, InputNumber,
+  Button, Card, Col, Row, Tree, Descriptions, Modal, Form, Input, InputNumber, Popconfirm,
   Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip, Alert, Select,
 } from "antd";
 import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, SettingOutlined, BranchesOutlined, ArrowLeftOutlined } from "@ant-design/icons";
@@ -536,6 +536,21 @@ export function SubjectDomain() {
             );
           })}
         </Form>
+        <Space style={{ marginTop: 8 }}>
+          <Popconfirm
+            title="清空全部默认值"
+            description="将清除该域的所有默认值配置（恢复为未配置状态），注册指标时将不再预填。"
+            okText="清空"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => {
+              defaultsForm.resetFields();
+              handleSaveDefaults({});
+            }}
+          >
+            <Button danger size="small">清空全部默认值</Button>
+          </Popconfirm>
+          <span className="muted" style={{ fontSize: 12 }}>单个字段可点清除图标；清空后注册指标不再预填该域默认值</span>
+        </Space>
       </Modal>
     </div>
   );
