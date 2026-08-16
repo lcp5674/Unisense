@@ -625,7 +625,7 @@ export function MetricCreate() {
             </Card>
 
             {/* Step 1.5: 粘贴 SQL 智能推断（独立入口） */}
-            <Card type="inner" title="①½ 粘贴 SQL 智能推断" size="small" extra={sqlInferring && <Spin size="small" />}>
+            <Card type="inner" title="①⑤ 粘贴 SQL 智能推断" size="small" extra={sqlInferring && <Spin size="small" />}>
               <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
                 粘贴一段指标定义 SQL（含 SELECT + 聚合 + GROUP BY + 时间过滤），系统用 sqlglot 解析并自动推断类型、名称、粒度、单位、聚合、时间语义、新鲜度、数仓层、可加性、服务模式与分级，并生成口径定义。
                 该 SQL 仅用于推断，与下方「口径定义」相互独立，最终口径可另行编写。
@@ -702,8 +702,23 @@ export function MetricCreate() {
             <Card type="inner" title="③ 确认/覆盖字段" size="small">
               <Row gutter={16}>
                 <Col span={12}>
-                  <Form.Item name="metric_code" label="指标编码" extra={<span>{suggestedCode ? <Tag color="blue" style={{ marginTop: 4 }}>系统建议: {suggestedCode}</Tag> : <span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>}</span>}>
-                    <Input placeholder="4段式: 域_业务对象_度量_周期（留空自动生成）" />
+                  <Form.Item
+                    name="metric_code"
+                    label="指标编码"
+                    extra={
+                      suggestedCode ? (
+                        <span style={{ marginTop: 4 }}>
+                          <Tag color="blue">系统建议: {suggestedCode}</Tag>
+                          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => form.setFieldValue("metric_code", suggestedCode)}>
+                            一键采纳
+                          </Button>
+                        </span>
+                      ) : (
+                        <span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>
+                      )
+                    }
+                  >
+                    <Input placeholder={suggestedCode ? `点击右侧「一键采纳」使用 ${suggestedCode}` : "4段式: 域_业务对象_度量_周期（留空自动生成）"} />
                   </Form.Item>
                 </Col>
                 <Col span={12}>

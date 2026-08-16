@@ -399,6 +399,32 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     );
   });
 
+  it("SQL 推断后「一键采纳」将系统建议编码填入输入框（惰性设计）", async () => {
+    mockedSuggest.mockResolvedValue({
+      fields: {
+        source_table: { source: "sql_parse", value: "dwd.sales_detail", confidence: 1, reason: "" },
+        measure_column: { source: "sql_parse", value: "gmv", confidence: 1, reason: "" },
+        name: { source: "rule", value: "订单销售额", confidence: 0.9, reason: "" },
+      },
+      metric_code_suggestion: "sales_order_gmv_day",
+      suggested: [],
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "SELECT SUM(amount) AS gmv FROM dwd.sales_detail GROUP BY dt" },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+    await waitFor(() => {
+      expect(screen.getByText(/系统建议: sales_order_gmv_day/)).toBeTruthy();
+    });
+    // 点「一键采纳」→ 编码输入框填入建议编码
+    fireEvent.click(screen.getByText("一键采纳"));
+    const codeInput = document.querySelector('input[id="metric_code"]') as HTMLInputElement;
+    expect(codeInput?.value).toBe("sales_order_gmv_day");
+  });
+
   it("SQL 推断进行中：页面中心展示大旋转图标（Spin 遮罩）", async () => {
     // 手动控制 promise，让推断停留在"进行中"状态以便断言遮罩
     let resolveSuggest!: (v: unknown) => void;
