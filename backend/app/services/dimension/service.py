@@ -536,6 +536,24 @@ class DimensionService(BaseService):
                     metric_id=metric_id,
                     dim_code=dim_code,
                 )
+        # 跨服务一致：即时移除血缘 USES_DIMENSION 边（register 是追加语义，
+        # 解绑后不删除则血缘残留"指标仍使用已解绑维度"的陈旧边）。best-effort 不阻断解绑。
+        if metric is not None:
+            try:
+                from app.services.lineage.parser import node_dimension, node_metric
+                from app.services.lineage.repository import LineageRepository
+
+                await LineageRepository(self._session).soft_delete_edge_by_key(
+                    node_metric(metric.metric_code),
+                    node_dimension(dim_code),
+                    "USES_DIMENSION",
+                )
+            except Exception:  # noqa: BLE001 - 血缘清理失败不阻断解绑主流程
+                logger.warning(
+                    "unbind_metric_dimension_lineage_cleanup_failed",
+                    metric_id=metric_id,
+                    dim_code=dim_code,
+                )
         await self._session.flush()
 
     async def list_dimension_metrics(

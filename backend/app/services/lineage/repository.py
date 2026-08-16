@@ -737,6 +737,27 @@ class LineageRepository:
         await self._db.flush()
         return edge
 
+    async def soft_delete_edge_by_key(
+        self, source_node: str, target_node: str, edge_type: str
+    ) -> LineageEdge | None:
+        """按 (source, target, edge_type) 软删单条血缘边（跨服务关系撤销联动用）。
+
+        解绑指标-维度等"明确撤销关系"动作时调用，即时移除陈旧血缘边，
+        避免 register 的追加语义在关系解除后残留 USES_DIMENSION 等边。
+        """
+        stmt = select(LineageEdge).where(
+            LineageEdge.source_node == source_node,
+            LineageEdge.target_node == target_node,
+            LineageEdge.edge_type == edge_type,
+            LineageEdge.deleted_at.is_(None),
+        )
+        edge = (await self._db.execute(stmt)).scalar_one_or_none()
+        if edge is None:
+            return None
+        edge.deleted_at = datetime.now(UTC)
+        await self._db.flush()
+        return edge
+
     async def confirm_stale(self, edge: LineageEdge) -> None:
         """确认失效边：软删（置 deleted_at），不再参与血缘查询。"""
         edge.deleted_at = datetime.now(UTC)

@@ -916,3 +916,21 @@ async def test_update_dimension_rename_rewrites_metric_definitions() -> None:
     await svc.update_dimension("dim_old", DimensionUpdate(dim_code="dim_new"))
     assert m1.definition_json["dimensions"] == ["dim_new", "dim_region"]
     assert repo.list_metrics_by_dimension.await_args.args[0] == "dim_old"
+
+
+async def test_unbind_removes_lineage_dimension_edge() -> None:
+    """解绑指标-维度联动删除血缘 USES_DIMENSION 边（register 追加语义下防陈旧边残留）。"""
+    svc, repo = await _svc()
+    m = SimpleNamespace(id=1, metric_code="gmv_day", status="DRAFT",
+                        definition_json={"dimensions": ["dim_old"]})
+    repo.delete_metric_dimension = AsyncMock(return_value=SimpleNamespace())
+    stmt_result = MagicMock()
+    stmt_result.scalar_one_or_none.return_value = m
+    svc._session.execute = AsyncMock(return_value=stmt_result)
+    svc._session.flush = AsyncMock()
+    from app.services.lineage.repository import LineageRepository
+    with __import__("unittest").mock.patch.object(
+        LineageRepository, "soft_delete_edge_by_key", new=AsyncMock(return_value=None)
+    ):
+        await svc.unbind_metric_dimension(1, "dim_old")
+    assert m.definition_json["dimensions"] == []
