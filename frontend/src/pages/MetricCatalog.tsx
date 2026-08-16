@@ -105,11 +105,18 @@ const LIFECYCLE_PRESETS = [
   { key: "deprecating", label: "即将废弃", icon: <ExclamationCircleOutlined /> },
 ];
 
-// 递归展平主题域树 → code → 中文名 映射
+// 递归展平主题域树 → code → 中文名 映射（同时记录 status 供停用域标识）
 function flattenDomains(nodes: SubjectDomainTreeNode[], acc: Map<string, string>) {
   for (const n of nodes) {
     acc.set(n.code, n.name);
     if (n.children?.length) flattenDomains(n.children, acc);
+  }
+}
+// 递归收集 code → status（active/inactive），供域下拉标识停用域
+function collectDomainStatus(nodes: SubjectDomainTreeNode[], acc: Map<string, string>) {
+  for (const n of nodes) {
+    if (n.status) acc.set(n.code, n.status);
+    if (n.children?.length) collectDomainStatus(n.children, acc);
   }
 }
 
@@ -254,6 +261,8 @@ export function MetricCatalog() {
   const [sortBy, setSortBy] = useState<"updated_at" | "created_at" | "version" | "metric_code" | "name">("updated_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 主题域 code → status（active/inactive），供域下拉标识停用域
+  const [domainStatusMap, setDomainStatusMap] = useState<Map<string, string>>(new Map());
   const [page, setPage] = useState(1);
   // 每页条数持久化（对齐 AssetMap/Dimensions 的 usePersistentPageSize 跨页记忆）
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.catalog.pageSize", 20);
@@ -309,6 +318,9 @@ export function MetricCatalog() {
         const m = new Map<string, string>();
         flattenDomains(tree, m);
         setDomainMap(m);
+        const st = new Map<string, string>();
+        collectDomainStatus(tree, st);
+        setDomainStatusMap(st);
       }),
       fetchCurrentUser().then((u) => { setCurrentUserId(u.id); setCurrentUserRole(u.role); }).catch(() => {}),
       listFavorites()
@@ -330,13 +342,14 @@ export function MetricCatalog() {
     [domainMap],
   );
   // 域筛选下拉选项也使用中文名；dashboard 域集合与 domain_tree 不一致时兜底保留原 code（避免空 label）
+  // 停用域（inactive）加「（已停用）」标识，避免用户误以为该域仍活跃
   const domainFilterOptions = useMemo(
     () =>
       domainOptions.map((d) => ({
         value: d.value,
-        label: domainName(d.value) || d.value,
+        label: domainStatusMap.get(d.value) === "inactive" ? `${domainName(d.value) || d.value}（已停用）` : domainName(d.value) || d.value,
       })),
-    [domainOptions, domainName],
+    [domainOptions, domainName, domainStatusMap],
   );
 
   useEffect(() => {
