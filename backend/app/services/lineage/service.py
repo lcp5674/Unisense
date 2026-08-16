@@ -438,42 +438,32 @@ class LineageService(BaseService):
                     change_reason="metric_definition",
                 )
             )
-        # 指标↔维度：definition_json.dimensions（字符串数组或 {code,role} 对象数组）
+        # 指标↔维度：definition_json.dimensions（字符串数组或 {code,role} 对象数组）——
+        # 差异同步（软删不再声明的维度边 + 注册新增），编辑减维度/清空不留残留
+        dim_codes: list[str] = []
         for dim in definition.get("dimensions") or []:
             dim_code = dim.get("code") or dim.get("dim_code") if isinstance(dim, dict) else dim
             if isinstance(dim_code, str) and dim_code:
-                edges.append(
-                    await self._repo.upsert_metric_dimension_edge(
-                        metric_code=metric_code,
-                        dim_node=node_dimension(dim_code),
-                        change_reason="metric_definition",
-                    )
-                )
-        # 指标↔字段：measure_column + measures + source_table → column 节点
-        measure_column = definition.get("measure_column")
-        if (
-            isinstance(source_table, str)
-            and source_table
-            and isinstance(measure_column, str)
-            and measure_column
-        ):
-            edges.append(
-                await self._repo.upsert_metric_column_edge(
-                    metric_code=metric_code,
-                    column_node=node_column(source_table, measure_column),
-                    change_reason="metric_definition",
-                )
+                dim_codes.append(dim_code)
+        await self._repo.sync_metric_dimension_edges(metric_code, dim_codes)
+        # 指标↔字段：measure_column + measures + source_table → column 节点（差异同步）
+        current_fields: list[tuple[str, str]] = []
+        if isinstance(source_table, str) and source_table:
+            measure_column = definition.get("measure_column")
+            if isinstance(measure_column, str) and measure_column:
+                current_fields.append((source_table, measure_column))
+            for m in definition.get("measures") or []:
+                col = m.get("name") or m.get("column") if isinstance(m, dict) else m
+                if isinstance(col, str) and col:
+                    current_fields.append((source_table, col))
+        deleted, added = await self._repo.sync_metric_column_edges(metric_code, current_fields)
+        if deleted or added:
+            logger.info(
+                "metric_column_edges_synced",
+                metric_code=metric_code,
+                deleted=deleted,
+                added=added,
             )
-        for m in definition.get("measures") or []:
-            col = m.get("name") or m.get("column") if isinstance(m, dict) else m
-            if isinstance(col, str) and col and isinstance(source_table, str) and source_table:
-                edges.append(
-                    await self._repo.upsert_metric_column_edge(
-                        metric_code=metric_code,
-                        column_node=node_column(source_table, col),
-                        change_reason="metric_definition",
-                    )
-                )
         if commit and edges:
             await self._db.commit()
         return edges

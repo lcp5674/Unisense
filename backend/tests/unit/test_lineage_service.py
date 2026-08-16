@@ -90,6 +90,32 @@ class FakeRepo:
             **kwargs,
         )
 
+    async def sync_metric_dimension_edges(
+        self, metric_code: str, current_dim_codes: list[str]
+    ) -> tuple[int, int]:
+        """差异同步假实现：记录声明集，返回 (0, 新增数)。"""
+        self.upsert_calls.append(
+            {
+                "op": "sync_metric_dimension_edges",
+                "metric_code": metric_code,
+                "codes": current_dim_codes,
+            }
+        )
+        return 0, len([c for c in current_dim_codes if isinstance(c, str) and c])
+
+    async def sync_metric_column_edges(
+        self, metric_code: str, current_fields: list[tuple[str, str]]
+    ) -> tuple[int, int]:
+        """字段边差异同步假实现：记录声明字段集。"""
+        self.upsert_calls.append(
+            {
+                "op": "sync_metric_column_edges",
+                "metric_code": metric_code,
+                "fields": current_fields,
+            }
+        )
+        return 0, len([(t, c) for t, c in current_fields if t and c])
+
     async def upsert_metric_column_edge(
         self,
         *,
@@ -1337,7 +1363,7 @@ async def test_register_metric_column_edge_skips_empty() -> None:
 
 
 async def test_register_metric_from_definition_includes_dim_and_column() -> None:
-    """register_metric_from_definition 从 definition_json 解析维度/字段边。"""
+    """register_metric_from_definition 注册表血缘，维度/字段边走差异同步。"""
     svc = LineageService(db=_FakeSession())
     repo = FakeRepo()
     svc._repo = repo
@@ -1351,24 +1377,17 @@ async def test_register_metric_from_definition_includes_dim_and_column() -> None
         },
     )
     edges = await svc.register_metric_from_definition(metric)
-    assert len(edges) == 5  # 1 落地表 + 2 维度 + 2 字段(measure_column + measures[0])
+    # 表血缘：1 条落地表 downstream 边（维度/字段走差异同步，不入 edges）
+    assert len(edges) == 1
+    assert edges[0].edge_type == "DERIVED_FROM"
     calls = repo.upsert_calls
-    assert any(
-        c["edge_type"] == "USES_DIMENSION" and c["target_node"] == "dimension:store"
-        for c in calls
-    )
-    assert any(
-        c["edge_type"] == "USES_DIMENSION" and c["target_node"] == "dimension:region"
-        for c in calls
-    )
-    assert any(
-        c["edge_type"] == "READS_COLUMN" and c["source_node"] == "column:dws.gmv.amount"
-        for c in calls
-    )
-    assert any(
-        c["edge_type"] == "READS_COLUMN" and c["source_node"] == "column:dws.gmv.cnt"
-        for c in calls
-    )
+    # 维度差异同步：声明集含 store + region
+    dim_sync = [c for c in calls if c.get("op") == "sync_metric_dimension_edges"]
+    assert dim_sync and dim_sync[0]["codes"] == ["store", "region"]
+    # 字段差异同步：声明字段集含 (dws.gmv, amount) + (dws.gmv, cnt)
+    col_sync = [c for c in calls if c.get("op") == "sync_metric_column_edges"]
+    assert col_sync
+    assert sorted(col_sync[0]["fields"]) == [("dws.gmv", "amount"), ("dws.gmv", "cnt")]
 
 
 async def test_query_impact_merges_dimension_column_edges_from_mysql() -> None:

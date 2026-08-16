@@ -980,3 +980,42 @@ async def test_sync_metric_dimension_edges_empty_current_clears_all() -> None:
     assert deleted == 2
     assert added == 0
     assert not [r for r in db._rows if r.source_node == "metric:m"]
+
+
+async def test_sync_metric_column_edges_removes_stale_and_adds_new() -> None:
+    """sync_metric_column_edges 差异同步：软删不再声明的字段边、注册新增字段边。"""
+    db = _FakeDB(
+        [
+            # 入边：column:{table}.{col} → metric:m（READS_COLUMN）
+            _Row(1, "column:dws.gmv.amount", "metric:m", "READS_COLUMN", "L3"),
+            _Row(2, "column:dws.gmv.cnt", "metric:m", "READS_COLUMN", "L3"),
+            # 其他边类型不受影响
+            _Row(3, "metric:other", "metric:m", "DERIVED_FROM", "L3"),
+        ]
+    )
+    repo = LineageRepository(db)
+    deleted, added = await repo.sync_metric_column_edges(
+        "m", [("dws.gmv", "amount"), ("dws.gmv", "revenue")]
+    )
+    assert deleted == 1  # cnt 不再声明 → 软删
+    assert added == 1  # revenue 新增（amount 已存在不计）
+    remaining = [r for r in db._rows if r.target_node == "metric:m"]
+    sources = sorted(r.source_node for r in remaining)
+    assert sources == ["column:dws.gmv.amount", "column:dws.gmv.revenue", "metric:other"]
+
+
+async def test_sync_metric_column_edges_empty_current_clears_all() -> None:
+    """sync 空字段集：清理全部残留字段边（指标不再声明任何字段）。"""
+    db = _FakeDB(
+        [
+            _Row(1, "column:dws.gmv.amount", "metric:m", "READS_COLUMN", "L3"),
+            _Row(2, "column:dws.gmv.cnt", "metric:m", "READS_COLUMN", "L3"),
+        ]
+    )
+    repo = LineageRepository(db)
+    deleted, added = await repo.sync_metric_column_edges("m", [])
+    assert deleted == 2
+    assert added == 0
+    assert not [
+        r for r in db._rows if r.target_node == "metric:m" and r.edge_type == "READS_COLUMN"
+    ]

@@ -17,7 +17,7 @@ from app.models.consume import ApiClient, ApiClientStatus
 from app.models.data_source import DataSource, DBCatalog
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 from app.models.metric import Metric
-from app.services.lineage.parser import node_dimension
+from app.services.lineage.parser import node_column, node_dimension
 
 #: 系统内置血缘采集通道：无论当前是否有边都展示，保证「采集通道」视图来源全景完整
 #: （SQL 解析=sqlglot / DP 同步=dp_csv；其余动态来源如 metric_definition 有边时自动出现）。
@@ -334,6 +334,58 @@ class LineageRepository:
                 source_node=f"metric:{metric_code}",
                 target_node=node_dimension(code),
                 edge_type="USES_DIMENSION",
+                granularity="L3",
+                confidence=1.0,
+                provenance="metric_definition",
+                change_reason="metric_definition",
+            )
+            if created:
+                added += 1
+        return deleted, added
+
+    async def sync_metric_column_edges(
+        self, metric_code: str, current_fields: list[tuple[str, str]]
+    ) -> tuple[int, int]:
+        """差异同步「指标↔字段」血缘边（软删缺失 + 注册新增，返回 (删除数, 新增数)）。
+
+        与 ``sync_metric_dimension_edges`` 同款：``register_metric_from_definition``
+        的字段边是纯追加语义，指标编辑改度量列/源表后，旧 READS_COLUMN 边会残留，
+        血缘图仍显示指标来源于已不使用的字段。本方法以当前声明字段集为唯一事实源：
+        软删不再声明的字段边、注册新增字段边。
+
+        Args:
+            metric_code: 指标编码。
+            current_fields: 当前声明的 ``(source_table, column)`` 列表
+                （来自 definition_json.measure_column 与 measures）。
+
+        Returns:
+            ``(deleted_count, added_count)``。
+        """
+        current = {
+            (t, c)
+            for t, c in current_fields
+            if isinstance(t, str) and t and isinstance(c, str) and c
+        }
+        node = f"metric:{metric_code}"
+        deleted = 0
+        # 1) 软删不再声明的字段边（column:{table}.{col} → metric:{code}）
+        for edge in await self.edges_for_node(node, direction="upstream"):
+            if edge.edge_type != "READS_COLUMN" or not edge.source_node.startswith("column:"):
+                continue
+            # node_column 构造为 column:{table}.{column}（table 可能含点如 db.table）
+            parts = edge.source_node[len("column:") :].rsplit(".", 1)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                continue
+            if (parts[0], parts[1]) not in current:
+                await self.soft_delete_edge_by_key(edge.source_node, node, edge.edge_type)
+                deleted += 1
+        # 2) 注册新增的字段边（created 标记真正新增，已存在不计）
+        added = 0
+        for table, col in current:
+            _, created = await self._upsert_with_created(
+                source_node=node_column(table, col),
+                target_node=node,
+                edge_type="READS_COLUMN",
                 granularity="L3",
                 confidence=1.0,
                 provenance="metric_definition",
