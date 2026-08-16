@@ -955,6 +955,24 @@ async def test_submit_metric_success():
     assert result.status == "REVIEW"
     assert repo.update_with_optimistic_lock.call_args.kwargs["submitted_by"] == 1
 
+async def test_submit_metric_blocked_when_definition_empty():
+    """空心指标（无表达式/无SQL/无源表）提交评审被拦截——口径完整性校验（FR-012）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", owner_id=1, definition_json={})
+    )
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.submit_metric(
+            "sales_gmv_daily",
+            MetricSubmitRequest(change_reason="提交审核"),
+            actor_id=1,
+            role="metric_owner",
+            user_domain="sales",
+        )
+    assert exc.value.error_code == "DEFINITION_INCOMPLETE"
+    repo.update_with_optimistic_lock.assert_not_called()
+
 
 async def test_submit_metric_blocked_by_pdp_decision():
     """PDP 拒绝 → submit_metric 不提交审核。"""

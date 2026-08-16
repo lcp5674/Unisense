@@ -1219,6 +1219,19 @@ class MetricService(BaseService):
         if invalid is not None:
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
 
+        # 口径完整性校验（FR-012 数据完整性）：提交评审的指标必须可被评审，
+        # 空心指标（无表达式/无 SQL/无源表）进入 REVIEW 将导致评审人无法判断，
+        # 且发布后血缘无 L3 边。DRAFT 允许骨架，REVIEW 前必须完整。
+        _defn = metric.definition_json or {}
+        _has_expr = bool(str(_defn.get("expression") or "").strip())
+        _has_sql = bool(str(_defn.get("sql") or "").strip())
+        _has_tables = bool(_defn.get("source_tables")) or bool(_defn.get("source_table"))
+        if not (_has_expr or _has_sql or _has_tables):
+            raise BusinessError(
+                "指标口径尚未定义，请先在编辑中完善表达式/源表后提交评审",
+                error_code="DEFINITION_INCOMPLETE",
+            )
+
         # 评审指派解析与校验（TD §13）：user 类型须带 reviewer_id；domain 类型
         # 缺省用指标自身域；均不传则未指派（域管理员兜底评审）。
         reviewer_updates: dict[str, Any] = {

@@ -262,6 +262,7 @@ const ERROR_CODE_ZH: Record<string, string> = {
   INVALID_RELATION_TYPE: "关系类型不合法",
   INVALID_DIM_TYPE: "维度类型不合法",
   DIM_EXISTS: "维度编码已存在",
+  DEFINITION_INCOMPLETE: "指标口径尚未定义，请完善表达式/源表后提交评审",
   QUERY_TIMEOUT: "查询超时，请缩小范围后重试",
   RECONCILIATION_ALERT: "存在对账异常告警，请及时处理",
   STALE_DATA: "数据已过期，请刷新后重试",
