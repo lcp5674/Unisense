@@ -124,6 +124,9 @@ const ROLE_LABEL: Record<string, string> = {
 
 const SENSITIVE_ROLES = ["platform_admin", "domain_admin", "compliance_officer"];
 
+// 常用变更原因快捷选项：高频操作（改名/紧急发布）的原因输入可一键填充再编辑，避免每次手写
+const COMMON_CHANGE_REASONS = ["口径修正", "字段调整", "粒度调整", "单位变更", "逻辑优化", "需求变更"];
+
 // Owner 责任链：将 owner_id 渲染为可读的用户名 + 角色
 function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrief[] }) {
   const byId = new Map(users.map((u) => [u.id, u]));
@@ -1084,6 +1087,14 @@ export function MetricDetail() {
           onChange={(e) => setEmergencyReason(e.target.value)}
           rows={3}
         />
+        <Space wrap size={4} style={{ marginTop: 8 }}>
+          <span className="muted" style={{ fontSize: 12 }}>快捷原因：</span>
+          {COMMON_CHANGE_REASONS.map((r) => (
+            <Tag key={r} style={{ cursor: "pointer" }} onClick={() => setEmergencyReason((v) => (v ? `${v}，${r}` : r))}>
+              {r}
+            </Tag>
+          ))}
+        </Space>
       </Modal>
 
       <Modal
@@ -1291,6 +1302,14 @@ export function MetricDetail() {
           rows={2}
           style={{ marginTop: 8 }}
         />
+        <Space wrap size={4} style={{ marginTop: 6 }}>
+          <span className="muted" style={{ fontSize: 12 }}>快捷原因：</span>
+          {COMMON_CHANGE_REASONS.map((r) => (
+            <Tag key={r} style={{ cursor: "pointer" }} onClick={() => setRenameReason((v) => (v ? `${v}，${r}` : r))}>
+              {r}
+            </Tag>
+          ))}
+        </Space>
       </Modal>
     </div>
   );
