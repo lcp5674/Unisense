@@ -483,7 +483,13 @@ function DimensionsTab() {
         columns={columns}
         rowKey="dim_code"
         loading={loading}
-        pagination={{ pageSize, showSizeChanger: true, onShowSizeChange }}
+        pagination={{
+          pageSize,
+          showSizeChanger: true,
+          onShowSizeChange,
+          pageSizeOptions: [10, 20, 50, 100],
+          showTotal: (t: number) => `共 ${t} 条`,
+        }}
         locale={{ emptyText: "暂无维度" }}
         onRow={(d) => ({
           onClick: (e) => {
