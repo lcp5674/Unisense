@@ -20,6 +20,7 @@ import {
 import { aiNl2Sql, UnisenseApiError } from "../api";
 import type { NL2SQLResult } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { usePermission } from "../hooks/usePermission";
 import { kvText } from "../utils/display";
 import { formatSql } from "../utils/sqlFormat";
 
@@ -61,6 +62,8 @@ export function AiAssistant() {
   const [error, setError] = useState<string | null>(null);
   const { track } = useTracking();
   const navigate = useNavigate();
+  // 按钮级权限点：无 ai:nl2sql 时禁用问数入口（后端强制仍兜底）
+  const canNl2Sql = usePermission().can("ai:nl2sql");
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -135,6 +138,7 @@ export function AiAssistant() {
               icon={<RobotOutlined />}
               loading={loading}
               onClick={handleSubmit}
+              disabled={!canNl2Sql}
               style={{ marginLeft: 12 }}
             >
               生成 SQL

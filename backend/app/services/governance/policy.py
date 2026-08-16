@@ -207,6 +207,7 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "metric:emergency-publish": {"module": "指标", "label": "紧急发布", "description": "跳过常规流程紧急发布"},  # noqa: E501
     "metric:rollback": {"module": "指标", "label": "指标回滚", "description": "回滚已发布指标版本"},
     "metric:import": {"module": "指标", "label": "批量导入", "description": "批量注册 / 导入指标"},
+    "metric:infer-description": {"module": "指标", "label": "指标描述 AI 推断", "description": "用 LLM 生成 / 重新生成指标描述与改名建议"},  # noqa: E501
     # ---- 资产地图 / 血缘
     "assetmap:view": {"module": "资产地图", "label": "查看资产地图", "description": "访问资产地图"},
     "assetmap:edit": {"module": "资产地图", "label": "编辑资产", "description": "修改资产描述 / 元数据"},  # noqa: E501
@@ -220,8 +221,10 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     # ---- 查询 / AI / 维度 / 术语
     "query:view": {"module": "分析", "label": "指标查询", "description": "访问指标查询工作台"},
     "ai:view": {"module": "分析", "label": "AI 助手", "description": "访问 AI 助手"},
+    "ai:nl2sql": {"module": "分析", "label": "AI 问数", "description": "用自然语言查询指标（NL2SQL）"},  # noqa: E501
     "dimensions:view": {"module": "分析", "label": "查看维度", "description": "访问维度管理"},
     "glossary:view": {"module": "分析", "label": "查看术语表", "description": "访问术语表"},
+    "glossary:infer": {"module": "分析", "label": "术语 AI 推断", "description": "用 LLM 推断业务术语定义"},  # noqa: E501
     # ---- 数据源 / 采集
     "data-sources:view": {"module": "采集", "label": "查看数据源", "description": "访问数据源管理"},
     "data-source:create": {"module": "采集", "label": "新增数据源", "description": "创建数据源连接"},  # noqa: E501
@@ -234,6 +237,7 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "collection-history:view": {"module": "采集", "label": "查看采集记录", "description": "访问采集历史"},  # noqa: E501
     "catalog:deprecate": {"module": "采集", "label": "废弃目录", "description": "废弃采集到的目录表"},  # noqa: E501
     "catalog:edit-description": {"module": "采集", "label": "编辑字段描述", "description": "编辑目录字段描述"},  # noqa: E501
+    "catalog:infer-description": {"module": "采集", "label": "目录描述 AI 推断", "description": "用 LLM 推断 / 批量推断表与字段描述"},  # noqa: E501
     # ---- 用户 / 组织
     "users:view": {"module": "账号", "label": "查看用户管理", "description": "访问用户管理页"},
     "user:create": {"module": "账号", "label": "创建用户", "description": "新增用户账号"},
@@ -282,13 +286,15 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "catalog:view", "compare:view", "templates:view", "metric:create", "metric:edit",
             "metric:approve", "metric:deprecate", "metric:export", "metric:review",
             "metric:emergency-publish", "metric:rollback", "metric:import",
+            "metric:infer-description",
             "assetmap:view", "assetmap:edit", "assetmap:export", "lineage:view",
             "quality:view", "quality:run-check", "quality:config-rule", "review:view",
-            "query:view", "ai:view", "dimensions:view", "glossary:view",
+            "query:view", "ai:view", "ai:nl2sql", "dimensions:view", "glossary:view",
+            "glossary:infer",
             "data-sources:view", "data-source:create", "data-source:edit",
             "data-source:delete", "data-source:test-connection", "data-source:collect",
             "catalogs:view", "collection-tasks:view", "collection-history:view",
-            "catalog:deprecate", "catalog:edit-description",
+            "catalog:deprecate", "catalog:edit-description", "catalog:infer-description",
             "organizations:view", "org:create", "org:edit", "org:disable",
             "governance:view", "grant:create", "grant:revoke", "grant:export",
             "audit:view", "domains:view", "domain:create", "dicts:view", "dict:create",
@@ -302,8 +308,10 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "dashboard:view", "todo:view", "notifications:view", "favorites:view",
             "catalog:view", "compare:view", "metric:create", "metric:edit",
             "metric:deprecate", "metric:export", "metric:review",
+            "metric:infer-description",
             "assetmap:view", "lineage:view", "quality:view", "review:view",
-            "query:view", "ai:view", "dimensions:view", "glossary:view",
+            "query:view", "ai:view", "ai:nl2sql", "dimensions:view", "glossary:view",
+            "glossary:infer",
             "data-sources:view", "catalogs:view", "collection-tasks:view",
             "collection-history:view", "feedback:view", "guide:view",
         }

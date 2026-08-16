@@ -691,6 +691,7 @@ export function MetricDetail() {
   const canPii = permReady && can("pii:review");
   const canEmergency = permReady && can("metric:emergency-publish");
   const canCreate = permReady && can("metric:create");
+  const canInferDesc = permReady && can("metric:infer-description");
   const piiUnreviewed = metric.pii_flag && !metric.compliance_reviewed;
 
   const headerActions = (
@@ -1081,9 +1082,11 @@ export function MetricDetail() {
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
           />
-          <Button icon={<RobotOutlined />} loading={suggesting} onClick={handleSuggestRename}>
-            AI 生成名称建议
-          </Button>
+          {canInferDesc && (
+            <Button icon={<RobotOutlined />} loading={suggesting} onClick={handleSuggestRename}>
+              AI 生成名称建议
+            </Button>
+          )}
         </Space.Compact>
         {renameSuggestLoaded && renameSuggestions.length > 0 && (
           <div style={{ marginTop: 10 }}>

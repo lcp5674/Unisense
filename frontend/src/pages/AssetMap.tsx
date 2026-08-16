@@ -85,6 +85,7 @@ import {
   updateMetricDescription,
   updateTableDescription,
 } from "../api";
+import { usePermission } from "../hooks/usePermission";
 import type {
   AssetCatalogSummary,
   AssetChangeItem,
@@ -1348,6 +1349,9 @@ function OverviewTab() {
 
 function GraphTab() {
   const navigate = useNavigate();
+  // 按钮级权限点：无对应权限点时隐藏 LLM 推断按钮（后端强制兜底）
+  const canInferCatalog = usePermission().can("catalog:infer-description");
+  const canInferMetric = usePermission().can("metric:infer-description");
   const [graphData, setGraphData] = useState<{
     nodes: AssetGraphNode[];
     edges: AssetGraphEdge[];
@@ -1856,18 +1860,20 @@ function GraphTab() {
                     >
                       补充描述
                     </Button>
-                    <Button
-                      size="small"
-                      icon={<ThunderboltOutlined />}
-                      loading={metricInferring}
-                      onClick={handleMetricDescInfer}
-                    >
-                      {metricInferring
-                        ? `AI 推断中… ${inferElapsed}s`
-                        : metricData.description_source === "llm"
-                          ? "重新生成"
-                          : "AI 推断"}
-                    </Button>
+                    {canInferMetric && (
+                      <Button
+                        size="small"
+                        icon={<ThunderboltOutlined />}
+                        loading={metricInferring}
+                        onClick={handleMetricDescInfer}
+                      >
+                        {metricInferring
+                          ? `AI 推断中… ${inferElapsed}s`
+                          : metricData.description_source === "llm"
+                            ? "重新生成"
+                            : "AI 推断"}
+                      </Button>
+                    )}
                     {descriptionSourceTag(metricData.description_source)}
                     {metricData.description_updated_at ? (
                       <span className="muted" style={{ fontSize: 12 }}>
@@ -2059,16 +2065,18 @@ function GraphTab() {
                           编辑
                         </Button>
                       </Tooltip>
-                      <Tooltip title="LLM 推断表级描述">
-                        <Button
-                          size="small"
-                          icon={<ThunderboltOutlined />}
-                          loading={tableInferring}
-                          onClick={handleTableDescInfer}
-                        >
-                          推断
-                        </Button>
-                      </Tooltip>
+                      {canInferCatalog && (
+                        <Tooltip title="LLM 推断表级描述">
+                          <Button
+                            size="small"
+                            icon={<ThunderboltOutlined />}
+                            loading={tableInferring}
+                            onClick={handleTableDescInfer}
+                          >
+                            推断
+                          </Button>
+                        </Tooltip>
+                      )}
                     </Space>
                   </Space>
                 )}
@@ -2078,6 +2086,7 @@ function GraphTab() {
                   columns={Array.isArray(detail.schema_summary) ? detail.schema_summary : []}
                   editable
                   inferable
+                  canInfer={canInferCatalog}
                   onEdit={handleFieldEdit}
                   onInfer={handleFieldInfer}
                   onBatchInfer={handleBatchInfer}

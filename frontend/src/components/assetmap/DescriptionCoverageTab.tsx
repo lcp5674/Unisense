@@ -47,6 +47,7 @@ import { ResizableDrawer } from "../ResizableDrawer";
 import { ENTITY_TYPE_LABEL } from "../../utils/enums";
 import { formatCnTime } from "../../utils/timeCn";
 import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../../hooks/usePersistentPageSize";
+import { usePermission } from "../../hooks/usePermission";
 
 /**
  * 概览指标 → 明细下钻的口径标识。
@@ -367,6 +368,8 @@ export function DescriptionCoverageTab() {
   const [coverage, setCoverage] = useState<DescriptionCoverage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 按钮级权限点：无 catalog:infer-description 时隐藏 LLM 推断按钮（后端强制兜底）
+  const canInferCatalog = usePermission().can("catalog:infer-description");
 
   // 详情抽屉
   const [detailOpen, setDetailOpen] = useState(false);
@@ -807,6 +810,7 @@ export function DescriptionCoverageTab() {
                 columns={schemaColumns}
                 editable
                 inferable
+                canInfer={canInferCatalog}
                 onEdit={handleFieldEdit}
                 onInfer={handleFieldInfer}
                 onBatchInfer={handleBatchInfer}

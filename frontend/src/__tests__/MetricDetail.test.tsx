@@ -173,7 +173,7 @@ describe("MetricDetail", () => {
       role: "metric_owner",
       home_domain: "sales",
       allowed_actions: ["read", "write"],
-      ui_actions: ["metric:create", "metric:edit", "metric:deprecate", "catalog:view"],
+      ui_actions: ["metric:create", "metric:edit", "metric:deprecate", "catalog:view", "metric:infer-description"],
       granted_domains: [],
       metric_whitelist: [],
       row_level_restricted: false,
@@ -550,5 +550,101 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: false });
     renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
     expect(await screen.findByText("审核中")).toBeInTheDocument();
+  });
+
+  it("有 metric:infer-description 权限点时仲裁改名弹窗显示「AI 生成名称建议」", async () => {
+    const renameMetric: MetricResponse = {
+      ...metric,
+      status: "PUBLISHED",
+      pii_flag: false,
+      arbitration_mark: {
+        status: "coexist",
+        conflict_id: "C-1",
+        decision: "keep_diff",
+        ruled_at: "2026-08-15T04:00:00Z",
+        opposite_code: "sales_gmv_d",
+        rename_required: true,
+      },
+    };
+    mockedGetMetric.mockResolvedValue(renameMetric);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:infer-description", "metric:edit"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/detail/sales_gmv_sum_d" }]}>
+        <Routes>
+          <Route
+            path="/detail/:code"
+            element={
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}>
+                <MetricDetail />
+              </PermissionProvider>
+            }
+          />
+          <Route path="/catalog" element={<div>catalog-page</div>} />
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    fireEvent.click(await screen.findByText("去改名"));
+    expect(await screen.findByText("AI 生成名称建议")).toBeInTheDocument();
+  });
+
+  it("无 metric:infer-description 权限点时仲裁改名弹窗不显示「AI 生成名称建议」", async () => {
+    const renameMetric: MetricResponse = {
+      ...metric,
+      status: "PUBLISHED",
+      pii_flag: false,
+      arbitration_mark: {
+        status: "coexist",
+        conflict_id: "C-1",
+        decision: "keep_diff",
+        ruled_at: "2026-08-15T04:00:00Z",
+        opposite_code: "sales_gmv_d",
+        rename_required: true,
+      },
+    };
+    mockedGetMetric.mockResolvedValue(renameMetric);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:edit"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/detail/sales_gmv_sum_d" }]}>
+        <Routes>
+          <Route
+            path="/detail/:code"
+            element={
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}>
+                <MetricDetail />
+              </PermissionProvider>
+            }
+          />
+          <Route path="/catalog" element={<div>catalog-page</div>} />
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    fireEvent.click(await screen.findByText("去改名"));
+    await waitFor(() => expect(screen.queryByText("AI 生成名称建议")).not.toBeInTheDocument());
   });
 });

@@ -8,6 +8,7 @@ import type { DescriptionCoverage } from "../api";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 import { SchemaTable } from "../components/SchemaTable";
 import { useResizableColumns } from "../components/ResizableTable";
+import { usePermission } from "../hooks/usePermission";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -75,6 +76,8 @@ function isInferInProgress(err: unknown): boolean {
 
 export function Catalogs() {
   const navigate = useNavigate();
+  // 按钮级权限点：无 catalog:infer-description 时隐藏 LLM 推断按钮（后端强制兜底）
+  const canInferCatalog = usePermission().can("catalog:infer-description");
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw= / ?source_id=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
@@ -979,6 +982,7 @@ export function Catalogs() {
                   columns={fieldColumns}
                   editable={true}
                   inferable={true}
+                  canInfer={canInferCatalog}
                   onEdit={handleEdit}
                   onInfer={handleInfer}
                   onBatchInfer={handleBatchInfer}

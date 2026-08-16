@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { AiAssistant } from "../pages/AiAssistant";
+import { PermissionProvider } from "../hooks/usePermission";
 
 vi.mock("../api", () => {
   class UnisenseApiError extends Error {
@@ -23,11 +24,12 @@ vi.mock("../api", () => {
     getLlmConfig: vi.fn(),
     saveLlmConfig: vi.fn(),
     testLlmConfig: vi.fn(),
+    fetchMyPermissions: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { aiNl2Sql } from "../api";
+import { aiNl2Sql, fetchMyPermissions } from "../api";
 
 const mockNl2Sql = vi.mocked(aiNl2Sql);
 
@@ -109,5 +111,42 @@ describe("AiAssistant 自然语言查询", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+});
+
+describe("AiAssistant ai:nl2sql 按钮级权限点", () => {
+  const mockedPerms = vi.mocked(fetchMyPermissions);
+  function renderAiWithPerms(ui_actions: string[]) {
+    mockedPerms.mockResolvedValue({
+      user_id: 1,
+      role: "custom",
+      home_domain: null,
+      allowed_actions: [],
+      ui_actions,
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    return render(
+      <MemoryRouter initialEntries={["/ai"]}>
+        <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: null, org_id: 1 }}>
+          <AiAssistant />
+        </PermissionProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("无 ai:nl2sql 权限点时「生成 SQL」按钮禁用", async () => {
+    renderAiWithPerms(["ai:view"]);
+    const btn = (await screen.findByRole("button", { name: /生成 SQL/ })) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
+
+  it("具备 ai:nl2sql 权限点时「生成 SQL」按钮可用", async () => {
+    renderAiWithPerms(["ai:view", "ai:nl2sql"]);
+    const btn = (await screen.findByRole("button", { name: /生成 SQL/ })) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
   });
 });

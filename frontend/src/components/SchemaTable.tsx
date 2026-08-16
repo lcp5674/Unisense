@@ -26,6 +26,8 @@ interface SchemaTableProps {
   editable?: boolean;
   /** 是否可推断（LLM 推断按钮） */
   inferable?: boolean;
+  /** 是否可 LLM 推断（权限点控制按钮显隐，默认 true 兼容既有调用/测试） */
+  canInfer?: boolean;
   /** 编辑回调 */
   onEdit?: (col: SchemaColumn, newDesc: string) => void | Promise<void>;
   /** 单字段推断回调 */
@@ -39,6 +41,7 @@ export function SchemaTable({
   loading = false,
   editable = false,
   inferable = false,
+  canInfer = true,
   onEdit,
   onInfer,
   onBatchInfer,
@@ -174,7 +177,7 @@ export function SchemaTable({
                 />
               </Tooltip>
             )}
-            {inferable && !desc && onInfer && (
+            {inferable && canInfer && !desc && onInfer && (
               <Tooltip title="LLM 推断描述">
                 <Button
                   type="text"
@@ -195,7 +198,7 @@ export function SchemaTable({
 
   return (
     <Spin spinning={loading}>
-      {inferable && onBatchInfer && emptyDescCount > 0 && (
+      {inferable && canInfer && onBatchInfer && emptyDescCount > 0 && (
         <div style={{ marginBottom: 8 }}>
           <Button
             icon={<ThunderboltOutlined />}
