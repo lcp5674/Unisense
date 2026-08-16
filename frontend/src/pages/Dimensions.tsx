@@ -668,12 +668,18 @@ function DimensionsTab() {
               allowClear
               showSearch
               optionFilterProp="label"
-              placeholder="选择该维度下的成员"
-              notFoundContent={bindMembers.length === 0 ? "该维度暂无成员" : "无匹配成员"}
-              options={bindMembers.map((mem) => ({
-                value: mem.member_code,
-                label: mem.path ? `${mem.path}（${mem.member_name}）` : `${mem.member_code} · ${mem.member_name}`,
-              }))}
+              placeholder="选择该维度下已发布的成员"
+              notFoundContent={
+                bindMembers.length === 0
+                  ? "该维度暂无成员"
+                  : "无已发布成员（须先发布成员才能绑定为默认值）"
+              }
+              options={bindMembers
+                .filter((mem) => mem.status === "PUBLISHED")
+                .map((mem) => ({
+                  value: mem.member_code,
+                  label: mem.path ? `${mem.path}（${mem.member_name}）` : `${mem.member_code} · ${mem.member_name}`,
+                }))}
             />
           </Form.Item>
         </Form>
