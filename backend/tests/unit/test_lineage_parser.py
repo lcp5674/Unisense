@@ -683,3 +683,46 @@ def test_ctas_with_column_list_field_mapping() -> None:
     mapped2 = {(e.source_column, e.target_column) for e in edges2}
     assert ("x", "a") in mapped2
     assert ("y", "b") in mapped2
+
+
+def test_update_with_cte_not_leaked_as_table() -> None:
+    """PG ``WITH s AS (...) UPDATE ... FROM s``：CTE 引用不被误判为伪源表。"""
+    sql = (
+        "WITH s AS (SELECT id, v FROM ods_src) "
+        "UPDATE dws.tgt SET v = s.v FROM s WHERE dws.tgt.id = s.id"
+    )
+    table_edges = extract_table_lineage(sql, dialect="postgres")
+    assert [(e.source, e.target) for e in table_edges] == [("ods_src", "dws.tgt")]
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    assert [(e.source_table, e.source_column, e.target_column) for e in field_edges] == [
+        ("ods_src", "v", "v")
+    ]
+    assert all(e.source_table != "s" for e in field_edges)
+
+
+def test_create_table_like_no_lineage() -> None:
+    """CREATE TABLE ... LIKE ... 是结构复制（无数据流转），不产血缘边。"""
+    sql = "CREATE TABLE dws.tgt LIKE ods.src"
+    assert extract_table_lineage(sql, dialect="mysql") == []
+    assert extract_field_lineage(sql, dialect="mysql") == []
+
+
+def test_upstream_deps_ignores_non_select_statements() -> None:
+    """非血缘读取语句（DDL/DML/COPY/USE 等）不产上游依赖，避免目标表被误收为来源。"""
+    cases = [
+        "ALTER TABLE dws.tgt ADD COLUMN c INT",
+        "DROP TABLE IF EXISTS dws.tgt",
+        "TRUNCATE TABLE dws.tgt",
+        "DELETE FROM dws.tgt WHERE id = 1",
+        "COPY dws.tgt (id, v) FROM '/tmp/data.csv' WITH (FORMAT csv)",
+        "USE db1",
+        "CREATE INDEX idx ON ods.a (id)",
+    ]
+    for sql in cases:
+        ud = extract_upstream_deps(sql, dialect="mysql")
+        assert ud.tables == (), f"[{sql}] tables 应为空: {ud.tables}"
+        assert ud.fields == (), f"[{sql}] fields 应为空: {ud.fields}"
+    # 对照组：纯 SELECT 仍正常收集
+    ud = extract_upstream_deps("SELECT id FROM ods.a", dialect="mysql")
+    assert ud.tables == ("ods.a",)
+    assert ud.fields == ("ods.a.id",)

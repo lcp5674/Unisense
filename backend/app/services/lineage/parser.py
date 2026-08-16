@@ -198,6 +198,10 @@ def _table_edges(ast: Any) -> list[TableEdge]:
     if target_name is None:
         # 纯查询语句无写入目标，无成边条件
         return edges
+    if isinstance(ast, exp.Create) and not isinstance(ast.expression, (exp.Select, exp.Union)):
+        # CREATE TABLE ... LIKE ...（结构复制，无数据流转）与纯 DDL（无 AS SELECT）：
+        # 无 SELECT 数据源，不构成血缘边（LIKE 的源表仅是结构模板）
+        return edges
     cte_names = _collect_ctes(ast)
     seen: set[tuple[str, str]] = set()
     for tbl in ast.find_all(exp.Table):
@@ -314,12 +318,22 @@ def _branch_queries(query: exp.Expression) -> list[exp.Select]:
 
 
 def _collect_ctes(query: exp.Expression) -> dict[str, exp.CTE]:
-    """收集整棵查询树中的 CTE 定义（cte 别名 -> CTE 节点），支持链式 CTE。"""
+    """收集整棵查询树中的 CTE 定义（cte 别名 -> CTE 节点），支持链式 CTE。
+
+    sqlglot 双版本兼容：Insert/Select 的 ``ctes`` property 直接暴露 WITH 列表，但
+    Update/Merge 无该 property（``WITH ... UPDATE`` / ``WITH ... MERGE`` 是生产高频
+    增量回刷语法），需从 ``With.expressions`` 中取——否则 CTE 引用（``FROM s``）会
+    被误判为伪源表（``s->dws_tgt``）。
+    """
     ctes: dict[str, exp.CTE] = {}
     for node in query.walk():
         if hasattr(node, "ctes"):
-            for cte in node.ctes:
+            for cte in node.ctes or []:
                 ctes[cte.alias] = cte
+        if isinstance(node, exp.With):
+            for cte in node.expressions or []:
+                if isinstance(cte, exp.CTE):
+                    ctes[cte.alias] = cte
     return ctes
 
 
@@ -656,9 +670,13 @@ def _extract_update_edges(
     - PG ``UPDATE tgt SET v = s.v FROM src s``（FROM 子句表为来源）
     - MySQL ``UPDATE tgt JOIN src ON ... SET tgt.v = src.v``（JOIN 表为来源）
     - ``SET v = (SELECT MAX(x) FROM src ...)`` 子查询值：解析子查询内部投影列
+    - ``WITH s AS (...) UPDATE tgt SET v = s.v FROM s``（CTE 来源）：穿透 CTE 定义
+      解析到真实表（``s.v`` → ``ods_src.v``），不产生伪表 ``s``
     自引用（值列与目标同属目标表 / 无来源表限定的列）不产生跨表字段边。
     """
     amap = _build_alias_map(update)
+    # CTE 引用（``FROM s`` 的 ``s``）不是真实表：从别名映射中剔除，避免伪表边
+    amap = {k: v for k, v in amap.items() if k not in cte_map}
     target_alias = update.this.alias_or_name if isinstance(update.this, exp.Table) else ""
     for eq in getattr(update, "expressions", None) or []:
         if not isinstance(eq, exp.EQ):
@@ -687,6 +705,27 @@ def _extract_update_edges(
         expr_sql = None if is_bare else val.sql(dialect=dialect)
         for leaf in val.find_all(exp.Column):
             if not leaf.table or leaf.table == target_alias:
+                continue
+            if leaf.table in cte_map:
+                # 穿透 CTE：进入定义 SELECT 找同名投影列，解析到真实来源表
+                cte_select = cte_map[leaf.table].this
+                inner = _try_build_scope(cte_select)
+                if inner is None:
+                    continue
+                for p in getattr(cte_select, "selects", None) or []:
+                    if _projection_name(p) != leaf.name:
+                        continue
+                    for rt, rc in _resolve_projection(inner, p, cte_map, dialect, 0):
+                        edges.append(
+                            FieldEdge(
+                                source_table=rt,
+                                source_column=rc,
+                                target_table=target_name,
+                                target_column=target_col,
+                                expression=expr_sql,
+                            )
+                        )
+                    break
                 continue
             src_t = amap.get(leaf.table)
             if not src_t or src_t == target_name:
@@ -824,6 +863,10 @@ def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
         if _find_target(ast) is not None:
             # 写入语句（INSERT/UPDATE/MERGE/CREATE）不是「纯 SELECT 无落点」场景：
             # 其目标表不属上游依赖，直接跳过（避免把写入目标误收为读取来源）
+            continue
+        if not isinstance(ast, (exp.Select, exp.Union)):
+            # 非查询语句（ALTER/DROP/TRUNCATE/DELETE/COPY/USE 等）不是血缘读取：
+            # 不产上游依赖，避免把 DDL/DML 的目标表（如 DELETE FROM t 的 t）误收为来源
             continue
         cte_map = _collect_ctes(ast)
         for tbl in ast.find_all(exp.Table):
