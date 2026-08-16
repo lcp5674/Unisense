@@ -31,6 +31,21 @@ function treeToCascaderOptions(nodes: SubjectDomainTreeNode[]): any[] {
   }));
 }
 
+/** 递归查找叶子域编码的完整路径（根→叶，供 Cascader 预填）。
+ * 模板 domain 是叶子码（如 "sales_order"），Cascader value 须为完整路径
+ * （["sales", "sales_order"]）——只包单元素会显示空（多级域下）。
+ */
+function findDomainPath(options: any[], leafCode: string): string[] | undefined {
+  for (const opt of options) {
+    if (opt.value === leafCode) return [opt.value];
+    if (opt.children?.length) {
+      const sub = findDomainPath(opt.children, leafCode);
+      if (sub) return [opt.value, ...sub];
+    }
+  }
+  return undefined;
+}
+
 // 字典项 → Select 选项（对齐注册指标页：粒度/单位等从字典下拉选择，避免手输漂移）
 function dictToOptions(items: Array<{ code: string; label: string; status: string }>) {
   return items
@@ -314,8 +329,9 @@ export function Templates() {
     form.setFieldsValue({
       metric_code: tpl.code,
       name: tpl.name,
-      // Cascader 值须为路径数组（叶子在最末）；模板域为叶子码
-      domain: tpl.domain ? [tpl.domain] : undefined,
+      // Cascader 值须为根→叶完整路径数组；模板域为叶子码，须解析为完整路径
+      // （多级域下包单元素 [leafCode] 会显示空——findDomainPath 递归补全路径）
+      domain: tpl.domain ? findDomainPath(domainOptions, tpl.domain) ?? [tpl.domain] : undefined,
       type: tpl.type ?? "atomic",
       granularity: tpl.granularity ?? "day",
       unit: tpl.unit ?? "",
