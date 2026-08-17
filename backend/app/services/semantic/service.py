@@ -23,6 +23,7 @@ from app.core.exceptions import (
     BusinessError,
     ConflictError,
     NotFoundError,
+    public_error_message,
 )
 from app.db.redis import get_redis
 from app.models.metric import Metric
@@ -3388,7 +3389,7 @@ class MetricService(BaseService):
                     {
                         "metric_code": code,
                         "status": "VALIDATION_ERROR",
-                        "validation_errors": str(exc),
+                        "validation_errors": public_error_message(exc),
                     }
                 )
 

@@ -126,3 +126,23 @@ class ExternalDependencyError(SystemError):
         """
         super().__init__(message, trace_id=trace_id, ctx=ctx)
         self.retryable = retryable
+
+
+def public_error_message(exc: Exception) -> str:
+    """把异常转换为可安全返回给客户端的脱敏消息。
+
+    已知业务异常（``UnisenseError`` / FastAPI ``HTTPException``）的消息是人工编写的
+    用户可读文本，可直接透传；未知异常（DB/连接/底层库）的 ``str(exc)`` 可能含 SQL、
+    连接串、文件路径等内部细节，一律泛化为通用提示，避免信息泄漏。
+
+    用于批量端点逐条容错（``message=str(exc)`` → ``message=public_error_message(exc)``），
+    内部审计/日志仍保留原始异常详情（日志侧不脱敏）。
+    """
+
+    from fastapi import HTTPException
+
+    if isinstance(exc, UnisenseError):
+        return exc.message or "操作失败，请稍后重试"
+    if isinstance(exc, HTTPException):
+        return str(exc.detail) or "操作失败，请稍后重试"
+    return "操作失败，请稍后重试"

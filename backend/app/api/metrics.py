@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.exceptions import ConflictError
+from app.core.exceptions import ConflictError, public_error_message
 from app.core.guard import guard_against_injection
 from app.core.logging import get_logger
 from app.db.mysql import get_db_session
@@ -1457,7 +1457,11 @@ async def batch_submit_metrics(
             results.append(MetricBatchItemResult(metric_code=item.metric_code, ok=True))
         except Exception as exc:  # noqa: BLE001 - 批量逐条容错，单条失败不整体回滚
             results.append(
-                MetricBatchItemResult(metric_code=item.metric_code, ok=False, message=str(exc))
+                MetricBatchItemResult(
+                    metric_code=item.metric_code,
+                    ok=False,
+                    message=public_error_message(exc),
+                )
             )
     await write_audit(
         db,
@@ -1506,7 +1510,9 @@ async def batch_approve_metrics(
             )
             results.append(MetricBatchItemResult(metric_code=code, ok=True))
         except Exception as exc:  # noqa: BLE001 - 批量逐条容错
-            results.append(MetricBatchItemResult(metric_code=code, ok=False, message=str(exc)))
+            results.append(
+                MetricBatchItemResult(metric_code=code, ok=False, message=public_error_message(exc))
+            )
     await write_audit(
         db,
         actor_id=user.id,
@@ -1552,7 +1558,9 @@ async def batch_reject_metrics(
             )
             results.append(MetricBatchItemResult(metric_code=code, ok=True))
         except Exception as exc:  # noqa: BLE001 - 批量逐条容错
-            results.append(MetricBatchItemResult(metric_code=code, ok=False, message=str(exc)))
+            results.append(
+                MetricBatchItemResult(metric_code=code, ok=False, message=public_error_message(exc))
+            )
     await write_audit(
         db,
         actor_id=user.id,
@@ -1598,7 +1606,11 @@ async def batch_deprecate_metrics(
             results.append(MetricBatchItemResult(metric_code=item.metric_code, ok=True))
         except Exception as exc:  # noqa: BLE001 - 批量逐条容错
             results.append(
-                MetricBatchItemResult(metric_code=item.metric_code, ok=False, message=str(exc))
+                MetricBatchItemResult(
+                    metric_code=item.metric_code,
+                    ok=False,
+                    message=public_error_message(exc),
+                )
             )
     await write_audit(
         db,

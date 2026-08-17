@@ -65,6 +65,35 @@ async def test_batch_submit_mixed_results(client):
     assert "指标不存在" in by_code["bad_metric"]["message"]
 
 
+async def test_batch_submit_sanitizes_unknown_exception(client):
+    """P0-3: 未知异常（内部细节）→ 脱敏为通用提示，不泄漏连接串/路径等内部信息。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.submit_metric = AsyncMock(
+            side_effect=RuntimeError(
+                "Connection to mysql://root:secret@db.internal:3306/universe failed (file:///etc/config)"
+            )
+        )
+
+        resp = await client.post(
+            "/api/v1/metric-definitions/batch-submit",
+            json={
+                "items": [{"metric_code": "sales_gmv_daily", "change_reason": "首次提交审核"}]
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["fail_count"] == 1
+    message = body["results"][0]["message"]
+    # 内部细节不泄漏
+    assert "root:secret" not in message
+    assert "db.internal" not in message
+    assert "/etc/config" not in message
+    # 业务失败仍带可读通用提示
+    assert "操作失败" in message
+
+
 async def test_batch_submit_passes_reviewer_assignment(client):
     """批量提交透传评审指派字段（reviewer_id/reviewer_type）。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
