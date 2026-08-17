@@ -15,7 +15,7 @@
 | 后端并发模型 | 纯 I/O（HTTP/DB/Redis）全异步 `async def`；Neo4j 用官方驱动**异步 session（async Bolt）**，事件循环内直接 await；若环境强制同步驱动则包 `run_in_threadpool` 隔离（避免阻塞事件循环）；CPU 密集（口径 AST 翻译）走进程池 |
 | 关系存储 | MySQL 8.0（业务/配置/审计主库），InnoDB；连接池 `SQLAlchemy async` `pool_size=20`/`max_overflow=10`/`pool_pre_ping=true` |
 | 图存储 | Neo4j 5.x（血缘 L1/L2、影响面、资产地图图）；Bolt 协议，连接池 `max_connection_lifetime=1h` |
-| 检索 | Elasticsearch 8.x（指标/术语全文检索、同义词匹配、找数推荐召回）；中文 IK 分词器；索引 `metric_idx`/`term_idx` |
+| 检索 | MySQL LIKE 检索（指标/术语名称与别名模糊匹配、同义词匹配、找数推荐召回）——当前实现为 MySQL 集中式检索；ES 仅作健康探活，索引 `metric_idx`/`term_idx` 未落地（P2-13 文档漂移修正） |
 | 缓存/队列 | Redis 7（会话、查询缓存、LLM 批量任务队列、限流滑动窗口计数）；连接池 `max_connections=50`；查询缓存 TTL 按 `metric_version` 绑定失效（§12.0.2），会话 TTL=8h |
 | OLAP 下推引擎 | **部署期指定其一**（平台不重造）：Doris（MPP，MySQL 兼容 JDBC 直连 FE:9030，归入 MySQL 采集通道）/ Kylin/Kyligence（预聚合加速）/ Hive+SparkSQL（批路径）；接入经 `data_source.type` 适配，方言由口径翻译层生成（§12.3） |
 | 数据源采集通道 | 只读连接（不改动生产）；通道 A：平台任务库/MySQL 直连 `information_schema`；通道 B：ETL SQL + 字段注释 + 数据示例（供 LLM 解析）；分区感知（`dt`/`event_month`），增量以"新增/变更分区"为最小单位 |
@@ -562,7 +562,7 @@ POST   /llm/golden-set/calibrate    # Golden Set 校准（跑评测集→输出�
 ### 3.9 术语库（glossary · FR-08）
 ```
 POST   /terms                       # 建术语（DRAFT）
-GET    /terms?q=&domain=&status=    # 检索（ES term_idx + 同义词扩展）
+GET    /terms?q=&domain=&status=    # 检索（MySQL LIKE name/synonyms + 同义词扩展）
 GET    /terms/{code}                # 标准词/定义/边界/关联指标
 PUT    /terms/{code}                # 编辑（升 term_version）
 POST   /terms/{code}/submit         # → REVIEW
@@ -1353,11 +1353,12 @@ CREATE TABLE asset_claim (
 - **循环依赖检测**：`DERIVED_FROM` 上做环检测，成环在注册/更新时拦截（F3/F16）
 > 准确性门禁：进入影响面/废弃阻断/版本级联等关键链路的边**仅限已确认边**（Parser 确认 + 人工补全 + LLM 推断经人工确认）；实验性/待确认边显式排除（PRD 4.4 质量闭环）。
 
-### 4.3 ES 索引
-```
-metric_idx：{metric_code, name(ik_max_word), domain, status, tags, definition_text}  -- 全文+中文分词
-term_idx：{term, alias, definition}  -- 术语检索（FR-08）
-```
+### 4.3 检索实现（P2-13 文档漂移修正）
+
+> **实际实现：MySQL LIKE 集中式检索**，非 ES。全局搜索（`global_search`）索引 8 类资源含指标/术语，
+> 指标列表按关键词 LIKE 过滤（`contains(autoescape=True)` 转义防通配符放大）；`es_client.py` 仅用于
+> 健康探活，**无索引写入**。曾规划 ES 索引（metric_idx/term_idx + IK 中文分词），因检索规模与
+> 中文分词收益暂不落地——本文档与实现对齐，未来规模达到再评估 ES 接入。
 
 ---
 
@@ -1549,7 +1550,7 @@ CLOSED ──错误率超阈──▶ OPEN ──冷却期满──▶ HALF_OPEN
 
 | 场景 | 目标 | 手段 |
 |------|------|------|
-| 指标检索（ES） | P95 < 200ms | ES 索引 + 中文分词；列表分页游标 |
+| 指标检索（MySQL LIKE） | P95 < 200ms | MySQL 索引（code/name/domain/status）+ 关键词转义 LIKE；列表分页游标 |
 | 指标详情加载 | P95 < 500ms（R12-14） | MySQL 主键查 + ES 补充 + 缓存 |
 | 血缘影响面（Neo4j） | 千节点 P95 < 500ms | 图索引 + 深度限制（默认 ≤5 跳） |
 | 血缘图 L1→L2 展开渲染 | P95 < 3s（R12-14） | 按需加载字段级，超时降级表级概览 |
@@ -2535,13 +2536,14 @@ PUBLISHED --源表DROP/不可达--> DATA_SOURCE_DROPPED(异常子态, R5-01)
 
 **指标健康度评分（PRD 5.5.3，治理驾驶舱数据源）**
 - **模型**：单指标 0–100 分，五维加权（权重可配，默认：口径完整度 25% / 活跃度 20% / 质量 25% / Owner 响应 15% / 血缘覆盖 15%）。
-- **口径完整度**：一等字段（granularity/unit/aggregation/time_semantics/freshness/sla/source/dimensions）齐全率。
-- **活跃度**：近 30 天 consume 查询/消费次数归一化（源：`consume.queried` 事件 → observability 聚合）。
-- **质量**：近 30 天 `quality_event` 异常数反比 + 质量门禁通过率。
-- **Owner 响应**：反馈/审核平均时效（SLA 内比例，源：audit_log）。
-- **血缘覆盖**：上游解析率（物理表→字段覆盖，源：lineage）。
-- **刷新与分级**：每日凌晨批量重算 + 关键事件（质量异常/状态变更）实时增量；≥85 优（绿）/ 70–84 良（蓝）/ 55–69 警（橙）/ <55 危（红）；红橙指标自动进整改待办（notify.todo）。某维度数据缺失（如埋点未覆盖）→ 该维记 0 并标"数据不足"，不臆造分数。
+- **口径完整度**：一等字段（granularity/unit/aggregation/time_semantics/freshness/sla/dw_layer/serving_mode/additivity）齐全率——每缺失一个一等字段扣 12 分。
+- **活跃度**：近 30 天 `updated_at` 是否有更新（简化实现：未接 consume 查询事件聚合；无近期更新记 20 分，有更新记 80 分）。
+- **质量**：合规审核状态为基础分（含 PII 未审核 30 / 已审核 90 / 默认 70）+ 近 30 天未关闭 `quality_event` 异常反比扣分（P0 每件扣 45 / P1 扣 25 / P2 扣 12，P2-12 已接入）。
+- **Owner 响应**：是否配置 `backup_owner_id`（简化实现：配置 85 分 / 未配置 45 分，未接 audit 审核时效）。
+- **血缘覆盖**：`definition_json` 的 `dependencies`/`expression` 是否填充（有依赖+表达式 80 / 仅表达式 50 / 无 10，简化实现：未接 lineage 解析率）。
+- **刷新与分级**：每日凌晨批量重算（`check_emergency_review_overdue` 同轮次）；≥85 优（绿）/ 70–84 良（蓝）/ 55–69 警（橙）/ <55 危（红）；红橙指标每日任务定向通知 Owner（P1-5）+ 走整改待办。**关键事件实时增量刷新未实现**（仅读端点触发 `metric.health_critical` 事件）。某维度数据缺失 → 该维记 0 并标"数据不足"，不臆造分数。
 - **用途**：`GET /metrics/dashboard` 驾驶舱、治理红黑榜、指标退役建议（长期低活跃 + 低消费自动建议 DEPRECATED）。
+- **差异说明（P2-13 文档漂移修正）**：原文档称活跃度=consume 查询事件、Owner 响应=audit 时效、血缘=lineage 解析率、含反馈评分 5% 权重——代码为简化实现（updated_at / backup_owner / definition_json 字段），已按实际修订；质量维度已按 P2-12 接入 quality_event。
 
 **指标对比工具（PRD 4.5）**
 - `POST /metrics/compare`：入参 `{metric_codes: [code_a, code_b]}`（上限 2，一期；二期可扩多指标对比），返回两指标关键字段并排差异：

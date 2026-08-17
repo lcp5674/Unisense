@@ -195,7 +195,7 @@
 - **组件命名**：PascalCase；页面组件 `pages/XxxPage.tsx`；业务组件 `components/XxxCard.tsx`。
 - **无障碍**：所有交互元素可键盘访问（Tab + Enter/Space）；表单控件须 ARIA `role`/`label`；颜色对比度 WCAG AA。
 - **TypeScript 严格**：`tsconfig.json` 启用 `strict: true` + `noUncheckedIndexedAccess`；禁止 `any`（除第三方类型补丁）。
-- **前端门禁**：ESLint + Prettier + `tsc --noEmit`（加入 pre-commit 和 CI）。
+- **前端门禁**：CI 执行 `tsc --noEmit`（`npm run typecheck`）+ `vitest`（`npm test`），拦截类型错误与测试回归（P2-13 落地）；ESLint/Prettier 为建议格式规范（未作硬门禁，`printWidth=100`/`singleQuote` 与后端对齐）。
 - **状态流转**：每个页面须实现 5 态（加载→空→正常→错误→降级），对齐 TD §7.7。
 
 ---
