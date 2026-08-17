@@ -2299,16 +2299,45 @@ class MetricService(BaseService):
 
         now = datetime.now(UTC)
 
-        # 回退指标状态为 PUBLISHED + 清除灰度白名单 + 回退 effective_version
+        # 回退主表口径至上一 PUBLISHED 版本（镜像 _promote_pending_version 转正语义）。
+        # 旧实现仅回退 status/gray_tenant_ids/effective_version，主表 definition_json
+        # 仍是被回滚的灰度口径——消费端（consume 查 definition_json.source_table）与
+        # 血缘差异同步（走 definition_json）读到的是「已回滚的灰度口径」，回滚实际未生效。
+        # 此处同步恢复：口径快照 + 主表 version 回退 + top-level 破坏性字段取灰度 diff 的 before。
+        updates: dict[str, Any] = {
+            "status": "PUBLISHED",
+            "gray_tenant_ids": None,
+            "effective_version": prev_published.version,
+            "version": prev_published.version,
+        }
+        if prev_published.definition_json is not None:
+            updates["definition_json"] = prev_published.definition_json
+        # top-level 破坏性字段（granularity/unit）：灰度版本 diff_json 的 before 值回退主表
+        current_gray_version = await self._repo.get_version(metric.id, metric.version)
+        if current_gray_version is not None:
+            for field, diff in (current_gray_version.diff_json or {}).items():
+                if (
+                    field in BREAKING_TOP_LEVEL_FIELDS
+                    and isinstance(diff, dict)
+                    and "before" in diff
+                ):
+                    updates[field] = diff["before"]
+
         updated = await self._repo.update_with_optimistic_lock(
-            metric.id,
-            metric.row_version,
-            status="PUBLISHED",
-            gray_tenant_ids=None,
-            effective_version=prev_published.version,
+            metric.id, metric.row_version, **updates
         )
 
         await self._cache.invalidate(metric_code)
+
+        # 回滚后主表已恢复上一 PUBLISHED 口径 → 触发血缘差异同步（best-effort，镜像转正）
+        try:
+            await self._register_metric_lineage_full(updated)
+        except Exception as exc:  # noqa: BLE001 - best-effort 不阻断回滚
+            logger.warning(
+                "metric_rollback_lineage_failed",
+                metric_code=metric_code,
+                error=str(exc),
+            )
 
         # 发布 metric.rolled_back 事件（对齐 FR-020：notify+audit）
         await self._publish_event(

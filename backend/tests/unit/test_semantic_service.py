@@ -1286,15 +1286,31 @@ async def test_rollback_metric_success():
     svc, repo = _svc_with_repo()
     metric = make_metric(status="EXPERIMENTAL", owner_id=1, version=2, effective_version=2)
     repo.get_by_code = AsyncMock(return_value=metric)
-    repo.list_versions = AsyncMock(return_value=[MagicMock(version=1, status="PUBLISHED")])
+    prev_pub = MagicMock(version=1, status="PUBLISHED", definition_json={"expression": "sum(amount)"})
+    repo.list_versions = AsyncMock(return_value=[prev_pub])
+    # 当前灰度版本的 diff_json 记录 granularity 的 before（供回滚恢复 top-level 字段）
+    gray_diff = MagicMock(
+        version=2, status="EXPERIMENTAL", definition_json={"expression": "avg(amount)"},
+        diff_json={"granularity": {"before": "day", "after": "hour", "change_type": "breaking"}},
+    )
+    repo.get_version = AsyncMock(return_value=gray_diff)
     repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
     repo.mark_version_archived = AsyncMock()
     svc._db.execute = AsyncMock()
     svc._publish_event = AsyncMock()
+    svc._register_metric_lineage_full = AsyncMock()
 
     result = await svc.rollback_metric("sales_gmv_daily", actor_id=1)
     assert result.status == "PUBLISHED"
     assert svc._publish_event.call_args.args[0] == "metric.rolled_back"
+    # 回滚恢复上一 PUBLISHED 口径 + 版本号回退 + top-level before 值
+    _kw = repo.update_with_optimistic_lock.call_args.kwargs
+    assert _kw["definition_json"] == {"expression": "sum(amount)"}
+    assert _kw["version"] == 1
+    assert _kw["effective_version"] == 1
+    assert _kw["granularity"] == "day"
+    # 回滚后血缘按恢复口径差异同步
+    svc._register_metric_lineage_full.assert_awaited_once()
 
 
 async def test_delete_metric_success_and_reject():
