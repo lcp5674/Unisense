@@ -118,7 +118,7 @@ class DataSource(Base, BaseModel):
         JSON, nullable=False, comment="配额（max_concurrency/max_scan_rows）"
     )
     health_status: Mapped[str] = mapped_column(
-        Enum("healthy", "unhealthy", "unknown", name="health_status_enum"),
+        Enum("healthy", "unhealthy", "unknown", "degraded", name="health_status_enum"),
         nullable=False,
         default="unknown",
         comment="健康状态",

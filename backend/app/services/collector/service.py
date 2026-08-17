@@ -1613,6 +1613,10 @@ class CollectorService(BaseService):
         except Exception as exc:
             # P0-4: 健康状态更新必须落库——即使采集失败也要记录 unhealthy，
             # 否则 API/worker 上抛后被 get_db_session 回滚，健康状态永不更新。
+            # 采集异常可能已让 session 进入 PendingRollback（flush/commit 失败），
+            # 必须先 rollback 释放会话——否则 update_health_status 的 flush 会抛
+            # PendingRollbackError，掩盖原始异常且健康状态无法落库。
+            await self._db.rollback()
             await self._repo.update_health_status(source_id, "unhealthy", error=str(exc))
             await self._db.commit()
             # 三梯队通知：采集任务失败定向通知源 Owner（best-effort，独立 session）

@@ -177,6 +177,16 @@ async def run_collection_task(
     except Exception as exc:  # noqa: BLE001 - 任务失败需回写状态并上抛供 arq 重试
         logger.exception("采集任务失败 source=%s job=%s", source_id, job_id)
 
+        # 采集异常可能已让 session 进入 PendingRollback（flush/commit 失败）。
+        # 必须先 rollback 释放会话，否则 fail_collection_run / update_health_status
+        # 的 flush 会抛 PendingRollbackError——运行记录滞留 RUNNING、健康状态
+        # 不更新（副作用静默丢失），且掩盖原始异常。
+        if db is not None:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 - rollback 异常不影响后续副作用写入
+                logger.warning("采集失败路径 rollback 异常: source=%s", source_id, exc_info=True)
+
         # 采集运行历史：失败收尾 FAILED（记录错误 + 提交）
         if run_id is not None and svc is not None:
             try:

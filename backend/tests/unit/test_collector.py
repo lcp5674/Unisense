@@ -3260,6 +3260,49 @@ async def test_get_health_includes_degraded_info() -> None:
     assert health["uptime_check"] is False
 
 
+def test_health_status_enum_includes_degraded() -> None:
+    """模型 health_status Enum 含 degraded——与 0065 迁移一致。
+
+    防止未来删值导致健康状态机（_evaluate_health_after_collect 产出 degraded）
+    在 ORM/DB 层写崩（DataError 1265 Data truncated，采集整批失败）。
+    """
+    from app.models.data_source import DataSource
+
+    enums = DataSource.__table__.c.health_status.type.enums
+    assert "degraded" in enums
+    # 既有三值保留（存储序号不变，存量行语义不漂移）
+    assert set(enums) == {"healthy", "unhealthy", "unknown", "degraded"}
+
+
+async def test_collect_failure_path_rollbacks_then_writes_unhealthy() -> None:
+    """采集抛异常时先 rollback（清 PendingRollback）再写 unhealthy，不被掩盖。
+
+    回归背景：collect 异常可能已让 session 进入 PendingRollback，若直接
+    update_health_status + commit 会抛 PendingRollbackError——掩盖原始异常、
+    健康状态永不落库。
+    """
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(
+        return_value=MagicMock(enabled=True, source_type="mysql", connection_config="enc")
+    )
+    repo.update_health_status = AsyncMock()
+
+    class BoomCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            raise RuntimeError("collect boom")
+
+    with pytest.raises(RuntimeError, match="collect boom"):
+        await svc.collect_and_register("s", BoomCollector(), actor_id=1)
+
+    # 关键顺序：先 rollback 释放会话，再写 unhealthy，最后 commit
+    svc._db.rollback.assert_awaited_once()
+    repo.update_health_status.assert_awaited_once_with("s", "unhealthy", error="collect boom")
+    svc._db.commit.assert_awaited_once()
+
+
 async def test_get_source_overview_aggregates() -> None:
     """资产概览聚合返回实体/PII 分布、字段数、漂移、水位。"""
     svc, repo = _svc()
