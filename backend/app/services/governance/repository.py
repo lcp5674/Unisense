@@ -20,6 +20,7 @@ from app.models.governance import (
     Role,
     RolePermission,
     SensitivityLevel,
+    UserPermission,
 )
 from app.models.metric import Metric
 
@@ -48,6 +49,15 @@ class GovernanceRepository:
             select(Role)
             .where(Role.is_custom.is_(True), Role.deleted_at.is_(None))
             .order_by(Role.name)
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def list_all_roles(self) -> list[Role]:
+        """列出全部未删除角色行（内置登记 + 自定义），供授权下拉 id→name 映射。"""
+        stmt = (
+            select(Role)
+            .where(Role.deleted_at.is_(None))
+            .order_by(Role.is_custom, Role.name)
         )
         return list((await self._db.execute(stmt)).scalars().all())
 
@@ -109,6 +119,40 @@ class GovernanceRepository:
         await self._db.execute(stmt)
         await self._db.flush()
         return affected
+
+    # ------------------------------------------------------ user permission
+
+    async def list_user_ui_permissions(self, user_id: int) -> set[str]:
+        """返回某用户直挂的 UI 权限点集合（未删除行）。"""
+        stmt = (
+            select(UserPermission.action)
+            .where(UserPermission.user_id == user_id, UserPermission.deleted_at.is_(None))
+        )
+        rows = await self._db.execute(stmt)
+        return {str(r) for r in rows.scalars().all()}
+
+    async def replace_user_ui_permissions(
+        self,
+        user_id: int,
+        actions: list[str],
+        granted_by: int | None,
+        reason: str | None,
+    ) -> None:
+        """整表替换某用户直挂的 UI 权限点（先软删既有行，再插入新集合）。"""
+        now = datetime.now(UTC)
+        stmt = (
+            update(UserPermission)
+            .where(UserPermission.user_id == user_id, UserPermission.deleted_at.is_(None))
+            .values(deleted_at=now)
+        )
+        await self._db.execute(stmt)
+        for action in actions:
+            self._db.add(
+                UserPermission(
+                    user_id=user_id, action=action, granted_by=granted_by, reason=reason
+                )
+            )
+        await self._db.flush()
 
     # ----------------------------------------------------------------- grant
 

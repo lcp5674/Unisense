@@ -38,6 +38,9 @@ vi.mock("../api", () => {
     listUsers: vi.fn(),
     listDomainTree: vi.fn(),
     listMetrics: vi.fn(),
+    listRoleOptions: vi.fn(),
+    getUserPermissions: vi.fn(),
+    setUserPermissions: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -55,6 +58,9 @@ import {
   listUsers,
   listDomainTree,
   listMetrics,
+  listRoleOptions,
+  getUserPermissions,
+  setUserPermissions,
 } from "../api";
 
 const mockPerms = vi.mocked(fetchMyPermissions);
@@ -65,6 +71,9 @@ const mockResetRoles = vi.mocked(resetRolePermissions);
 const mockDeleteRole = vi.mocked(deleteRole);
 const mockCreateRole = vi.mocked(createRole);
 const mockActionRegistry = vi.mocked(listActionRegistry);
+const mockRoleOptions = vi.mocked(listRoleOptions);
+const mockGetUserPerms = vi.mocked(getUserPermissions);
+const mockSetUserPerms = vi.mocked(setUserPermissions);
 const mockBatch = vi.mocked(batchGrant);
 const mockUsers = vi.mocked(listUsers);
 const mockDomains = vi.mocked(listDomainTree);
@@ -134,6 +143,9 @@ describe("Governance 权限治理", () => {
     mockUsers.mockReset();
     mockDomains.mockReset();
     mockMetrics.mockReset();
+    mockRoleOptions.mockReset();
+    mockGetUserPerms.mockReset();
+    mockSetUserPerms.mockReset();
     mockPerms.mockResolvedValue({
       user_id: 1,
       role: "platform_admin",
@@ -154,6 +166,21 @@ describe("Governance 权限治理", () => {
     mockUsers.mockResolvedValue(USERS);
     mockDomains.mockResolvedValue([]);
     mockMetrics.mockResolvedValue({ total: 0, page: 1, page_size: 1000, items: [] });
+    mockRoleOptions.mockResolvedValue([{ id: 1, name: "viewer", is_custom: false }]);
+    mockGetUserPerms.mockResolvedValue({
+      user_id: 1,
+      role: "viewer",
+      role_actions: ["catalog:view"],
+      direct_actions: [],
+      effective_actions: ["catalog:view"],
+    });
+    mockSetUserPerms.mockResolvedValue({
+      user_id: 1,
+      role: "viewer",
+      role_actions: ["catalog:view"],
+      direct_actions: ["metric:create"],
+      effective_actions: ["catalog:view", "metric:create"],
+    });
   });
 
   it("角色管理：渲染权限点矩阵，platform_admin 受保护不可编辑", async () => {
@@ -563,5 +590,49 @@ describe("Governance Tab 级权限过滤", () => {
     await userEvent.click(screen.getByRole("tab", { name: "PII 复核" }));
     await waitFor(() => expect(screen.getByText("PII 人工复核")).toBeInTheDocument());
     expect(screen.queryByText("敏感度分类重扫")).not.toBeInTheDocument();
+  });
+});
+
+describe("Governance 授权管理 - 角色下拉与按用户授权矩阵", () => {
+  it("角色列显示角色名（非数字 ID）；授权弹窗角色为下拉选项", async () => {
+    const grant = {
+      id: 1, user_id: 1, role_id: 1, domain: "sales", metric_whitelist: null,
+      grant_type: "READ", row_level: false, status: "ACTIVE", expires_at: null,
+      created_at: "2026-08-01T00:00:00", granted_by: 1, reason: null,
+    };
+    mockGrants.mockResolvedValue({ items: [grant], total: 1, page: 1, page_size: 20 });
+    renderGov();
+    await clickTab("授权管理");
+    // 列表「角色」列显示角色名 viewer（而非裸 #1）
+    await waitFor(() => expect(screen.getByText("viewer")).toBeInTheDocument());
+    // 打开「新建授权」弹窗，角色字段为 Select（含「选择角色」placeholder）
+    await userEvent.click(screen.getByRole("button", { name: /新\s*建\s*授\s*权/ }));
+    await waitFor(() => expect(screen.getByText("角色（可留空）")).toBeInTheDocument());
+    expect(screen.getByText("选择角色")).toBeInTheDocument();
+  });
+
+  it("按钮权限矩阵：角色已含项只读标记、直挂可勾选并保存", async () => {
+    const grant = {
+      id: 1, user_id: 1, role_id: 1, domain: "sales", metric_whitelist: null,
+      grant_type: "READ", row_level: false, status: "ACTIVE", expires_at: null,
+      created_at: "2026-08-01T00:00:00", granted_by: 1, reason: null,
+    };
+    mockGrants.mockResolvedValue({ items: [grant], total: 1, page: 1, page_size: 20 });
+    renderGov();
+    await clickTab("授权管理");
+    await waitFor(() => expect(screen.getByText("viewer")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: /按\s*钮\s*权\s*限/ }));
+    await waitFor(() => expect(screen.getByText(/按用户授权：/)).toBeInTheDocument());
+    // 角色已含项 catalog:view 只读（disabled 证明不可在此收窄角色）
+    const viewCheckbox = screen.getByRole("checkbox", { name: /查看指标目录/ });
+    expect(viewCheckbox).toBeDisabled();
+    // 直挂区 metric:create（创建指标）可勾选并保存
+    const createCheckbox = screen.getByRole("checkbox", { name: /创建指标/ });
+    expect(createCheckbox).not.toBeDisabled();
+    await userEvent.click(createCheckbox);
+    await userEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() =>
+      expect(mockSetUserPerms).toHaveBeenCalledWith(1, expect.objectContaining({ actions: ["metric:create"] })),
+    );
   });
 });

@@ -77,6 +77,36 @@ class ActionRegistryItem(BaseModel):
     description: str = ""
 
 
+class UserPermissionResponse(BaseModel):
+    """用户按钮权限点视图（角色继承 + 直挂并集，供「按用户授权」矩阵）。
+
+    Attributes:
+        user_id: 用户 ID。
+        role: 用户当前角色。
+        role_actions: 角色继承的 UI 权限点（默认基线 + 覆盖）。
+        direct_actions: 用户直挂的 UI 权限点（``user_permission`` 表）。
+        effective_actions: 并集（前端矩阵回显勾选）。
+    """
+
+    user_id: int
+    role: str
+    role_actions: list[str] = Field(default_factory=list)
+    direct_actions: list[str] = Field(default_factory=list)
+    effective_actions: list[str] = Field(default_factory=list)
+
+
+class UserPermissionUpdateRequest(BaseModel):
+    """用户直挂按钮权限点更新请求。
+
+    Attributes:
+        actions: 直挂的 UI 权限点集合（整表替换，空=清空直挂）。
+        reason: 直挂授权事由（审计留痕）。
+    """
+
+    actions: list[str] = Field(default_factory=list)
+    reason: str | None = Field(default=None, max_length=512)
+
+
 class RolePermissionUpdate(BaseModel):
     """``PUT /roles/{role}/permissions`` 请求体：覆盖某角色的权限点集合。"""
 

@@ -46,6 +46,8 @@ from app.services.governance.schemas import (
     RolePermissionItem,
     RolePermissionUpdate,
     RoleResponse,
+    UserPermissionResponse,
+    UserPermissionUpdateRequest,
 )
 from app.services.governance.service import GovernanceService
 
@@ -133,6 +135,23 @@ async def list_action_registry(
     )
 
 
+@router.get("/roles/options", dependencies=_GRANT_ADMIN_DEPS)
+async def list_role_options(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """角色行下拉选项（id→name 映射，授权管理「角色」下拉数据源）。
+
+    返回 ``role`` 表全部未删除行（内置登记 + 自定义角色），供 ``grants.role_id``
+    以角色名而非数字 ID 呈现给授权者。
+    """
+    svc = _svc(db, request)
+    data = await svc.list_role_options()
+    return ok(data=data, trace_id=trace_id)
+
+
 @router.delete("/roles/{role}", dependencies=_ROLE_ADMIN_DEPS)
 async def delete_role(
     role: str,
@@ -210,6 +229,55 @@ async def set_role_permissions(
     )
     await db.commit()
     return ok(data=item, trace_id=trace_id)
+
+
+@router.get("/users/{user_id}/permissions", dependencies=_ROLE_ADMIN_DEPS)
+async def get_user_permissions(
+    user_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """查询用户按钮权限点（角色继承 + 直挂并集，供「按用户授权」矩阵回显）。
+
+    仅 ``platform_admin`` 可查。直挂权限点来自 ``user_permission`` 表（TD §12.5 增强）。
+    """
+    svc = _svc(db, request)
+    data = await svc.get_user_ui_permissions(user_id)
+    return ok(data=UserPermissionResponse.model_validate(data).model_dump(), trace_id=trace_id)
+
+
+@router.put("/users/{user_id}/permissions", dependencies=_ROLE_ADMIN_DEPS)
+async def set_user_permissions(
+    user_id: int,
+    payload: UserPermissionUpdateRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """整表替换用户直挂的按钮权限点（空列表=清空直挂，回退为仅角色继承）。
+
+    仅 ``platform_admin`` 可配；未知权限点返回 ``USER_PERMISSION_INVALID``。
+    写操作落审计。
+    """
+    svc = _svc(db, request)
+    data = await svc.set_user_ui_permissions(
+        user_id, payload.actions, actor_id=user.id, reason=payload.reason
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="USER_PERMISSION_UPDATE",
+        entity_type="user",
+        entity_id=str(user_id),
+        detail={"actions": payload.actions, "reason": payload.reason},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=UserPermissionResponse.model_validate(data).model_dump(), trace_id=trace_id)
 
 
 @router.delete("/roles/{role}/permissions", dependencies=_ROLE_ADMIN_DEPS)

@@ -199,6 +199,17 @@ class GovernanceService(BaseService):
         """列出全部自定义角色（用户管理角色下拉数据源）。"""
         return await self._repo.list_custom_roles()
 
+    async def list_role_options(self) -> list[dict[str, Any]]:
+        """列出全部角色行（内置登记 + 自定义），供授权下拉 id→name 映射。
+
+        Returns:
+            每项含 ``id``（grants.role_id 关联键）/ ``name`` / ``is_custom``。
+        """
+        roles = await self._repo.list_all_roles()
+        return [
+            {"id": r.id, "name": str(r.name), "is_custom": bool(r.is_custom)} for r in roles
+        ]
+
     async def action_registry(self) -> list[dict[str, str]]:
         """动作点注册表（前端角色管理可视化配置数据源）。
 
@@ -339,6 +350,51 @@ class GovernanceService(BaseService):
             if item["role"] == role:
                 return item
         raise NotFoundError("角色不存在", ctx={"role": role})
+
+    # ----------------------------------------------------- user permission
+
+    async def get_user_ui_permissions(self, user_id: int) -> dict[str, Any]:
+        """查询用户按钮权限点（角色继承 + 直挂并集，供「按用户授权」矩阵）。
+
+        Returns:
+            dict: ``user_id / role / role_actions / direct_actions / effective_actions``。
+        """
+        user = await self._ensure_user_exists(user_id)
+        role_s = _role_to_str(user.role)
+        ui_role_actions = await self.load_ui_role_actions()
+        role_actions = ui_role_actions.get(role_s, frozenset())
+        direct = await self._repo.list_user_ui_permissions(user_id)
+        return {
+            "user_id": user_id,
+            "role": role_s,
+            "role_actions": sorted(role_actions),
+            "direct_actions": sorted(direct),
+            "effective_actions": sorted(set(role_actions) | direct),
+        }
+
+    async def set_user_ui_permissions(
+        self,
+        user_id: int,
+        actions: list[str],
+        actor_id: int,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """整表替换某用户直挂的按钮权限点（支持清空）。
+
+        Raises:
+            ValidationError: 含未知权限点（不在 UI 动作注册表内）。
+        """
+        unknown = sorted(set(actions) - set(policy.all_configurable_actions()))
+        if unknown:
+            raise ValidationError(
+                f"包含未知权限点: {', '.join(unknown)}",
+                error_code="USER_PERMISSION_INVALID",
+                ctx={"user_id": user_id, "unknown": unknown},
+            )
+        await self._repo.replace_user_ui_permissions(
+            user_id, sorted(set(actions)), actor_id, reason
+        )
+        return await self.get_user_ui_permissions(user_id)
 
     # ----------------------------------------------------------------- grant
 
@@ -699,12 +755,14 @@ class GovernanceService(BaseService):
         role_s = _role_to_str(user.role)
         role_actions = await self.load_role_actions()
         ui_role_actions = await self.load_ui_role_actions()
+        direct_actions = await self._repo.list_user_ui_permissions(user.id)
+        ui_actions = set(ui_role_actions.get(role_s, frozenset())) | direct_actions
         return PermissionSnapshot(
             user_id=user.id,
             role=role_s,
             home_domain=user.domain,
             allowed_actions=sorted(role_actions.get(role_s, frozenset())),
-            ui_actions=sorted(ui_role_actions.get(role_s, frozenset())),
+            ui_actions=sorted(ui_actions),
             granted_domains=sorted(domains),
             metric_whitelist=sorted(whitelist),
             row_level_restricted=any(g.row_level for g in effective),

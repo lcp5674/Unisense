@@ -116,8 +116,10 @@ import {
   RecommendItem,
   Reconciliation,
   ReconciliationRecord,
+  RoleOption,
   RolePermissionItem,
   RoleResponse,
+  UserPermissionResponse,
   ActionRegistryItem,
   OrganizationView,
   RulingRecord,
@@ -1933,6 +1935,29 @@ export async function resetRolePermissions(role: string): Promise<RolePermission
     `${API_BASE}/roles/${encodeURIComponent(role)}/permissions`,
     { method: "DELETE" },
   );
+}
+
+/** 角色行下拉选项（backend GET /api/v1/roles/options；授权管理「角色」下拉 id→name）。 */
+export async function listRoleOptions(): Promise<RoleOption[]> {
+  return request<RoleOption[]>(`${API_BASE}/roles/options`);
+}
+
+/** 用户按钮权限点（角色继承 + 直挂并集；backend GET /api/v1/users/{id}/permissions）。 */
+export async function getUserPermissions(
+  userId: number,
+): Promise<UserPermissionResponse> {
+  return request<UserPermissionResponse>(`${API_BASE}/users/${userId}/permissions`);
+}
+
+/** 整表替换用户直挂按钮权限点（backend PUT /api/v1/users/{id}/permissions）。 */
+export async function setUserPermissions(
+  userId: number,
+  body: { actions: string[]; reason?: string | null },
+): Promise<UserPermissionResponse> {
+  return request<UserPermissionResponse>(`${API_BASE}/users/${userId}/permissions`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function listGrants(params?: {

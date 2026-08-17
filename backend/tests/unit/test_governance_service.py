@@ -121,6 +121,21 @@ class FakeRepo:
         self.role_permissions = [rp for rp in self.role_permissions if rp.role != role]
         return before - len(self.role_permissions)
 
+    # user permission（用户直挂按钮权限点）
+    async def list_user_ui_permissions(self, user_id: int) -> set[str]:
+        return set(getattr(self, "user_permissions", {}).get(user_id, set()))
+
+    async def replace_user_ui_permissions(
+        self,
+        user_id: int,
+        actions: list[str],
+        granted_by: int | None,
+        reason: str | None,
+    ) -> None:
+        if not hasattr(self, "user_permissions"):
+            self.user_permissions = {}
+        self.user_permissions[user_id] = set(actions)
+
     # grant
     async def create_grant(self, grant: Grant) -> Grant:
         self._seq += 1
@@ -1053,3 +1068,46 @@ async def test_custom_role_ui_actions_via_override() -> None:
     assert snap.ui_actions == ["catalog:view", "metric:create", "query:view"]
     # 自定义角色未配置资源级动词 → PDP 默认拒绝（fail-closed）
     assert snap.allowed_actions == []
+
+
+async def test_user_direct_permissions_merged_in_snapshot() -> None:
+    """用户直挂按钮权限点与角色继承 ui_actions 做并集返回（直挂为辅叠加）。"""
+    svc, repo, _ = _svc()
+    await repo.replace_user_ui_permissions(1, ["metric:create", "metric:deprecate"], 99, "专项授权")
+    snap = await svc.my_permissions(FakeUser(uid=1, role="viewer"))  # type: ignore[arg-type]
+    # viewer 基线含 catalog:view 等查看类；直挂叠加 metric:create/deprecate
+    assert "catalog:view" in snap.ui_actions
+    assert "metric:create" in snap.ui_actions
+    assert "metric:deprecate" in snap.ui_actions
+
+
+async def test_get_user_ui_permissions_matrix() -> None:
+    """按用户授权矩阵：返回角色继承 / 直挂 / 并集三态，供前端回显勾选。"""
+    svc, repo, _ = _svc()
+    await repo.replace_user_ui_permissions(1, ["metric:create"], 99, None)
+    data = await svc.get_user_ui_permissions(1)
+    assert data["user_id"] == 1
+    assert data["role"] == "viewer"
+    assert "catalog:view" in data["role_actions"]  # viewer 基线
+    assert data["direct_actions"] == ["metric:create"]
+    assert "metric:create" in data["effective_actions"]
+    assert "catalog:view" in data["effective_actions"]
+
+
+async def test_set_user_ui_permissions_unknown_rejected() -> None:
+    """直挂未知权限点 → USER_PERMISSION_INVALID（fail-closed）。"""
+    from app.core.exceptions import ValidationError
+
+    svc, _repo, _ = _svc()
+    with pytest.raises(ValidationError) as ei:
+        await svc.set_user_ui_permissions(1, ["ghost:perm"], 99)
+    assert ei.value.error_code == "USER_PERMISSION_INVALID"
+
+
+async def test_set_user_ui_permissions_empty_clears() -> None:
+    """空列表清空直挂，回退为仅角色继承（effective == role_actions）。"""
+    svc, repo, _ = _svc()
+    await repo.replace_user_ui_permissions(1, ["metric:create"], 99, None)
+    data = await svc.set_user_ui_permissions(1, [], 99, None)
+    assert data["direct_actions"] == []
+    assert data["effective_actions"] == data["role_actions"]

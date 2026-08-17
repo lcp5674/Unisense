@@ -131,6 +131,39 @@ class RolePermission(Base, BaseModel):
     )
 
 
+class UserPermission(Base, BaseModel):
+    """用户直挂按钮权限点表（TD §12.5 增强）。
+
+    记录对用户**直接挂载**的按钮级权限点（不经角色间接授权）。``(user_id, action)``
+    唯一，语义为「整表替换该用户直挂动作」（先删该用户全部行，再插入新集合）。
+
+    ``my_permissions`` 将「角色继承的 ui_actions」与「用户直挂的 ui_actions」做并集
+    返回给前端 ``usePermission``——支持「以角色间接授权为主 + 用户直挂按钮为辅」。
+
+    Attributes:
+        user_id: 用户 ID（关联 user.id）。
+        action: UI 权限点（``模块:功能``，取自 ``policy.UI_ACTION_REGISTRY`` 键）。
+        granted_by: 授权操作人 ID（审计留痕）。
+        reason: 直挂授权事由（审计留痕）。
+    """
+
+    __tablename__ = "user_permission"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="用户 ID")
+    action: Mapped[str] = mapped_column(  # noqa: E501
+        String(32), nullable=False, comment="UI 权限点（模块:功能）"
+    )
+    granted_by: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="授权操作人 ID"
+    )
+    reason: Mapped[str | None] = mapped_column(String(512), nullable=True, comment="直挂授权事由")
+
+    __table_args__ = (
+        Index("idx_user_permission_user", "user_id"),
+        UniqueConstraint("user_id", "action", name="uk_user_permission_user_action"),
+    )
+
+
 class Grant(Base, BaseModel):
     """授权表（TD §4.1 ``grants``；规避 MySQL 保留字 grant）。"""
 
@@ -202,3 +235,47 @@ class Classification(Base, BaseModel):
     )
 
     __table_args__ = (Index("idx_classification_catalog", "catalog_id"),)
+
+
+class PiiFieldOverride(Base, BaseModel):
+    """PII 字段级人工标注表（PII 合规增强：误报反馈/人工确认）。
+
+    采集规则引擎自动标注 PII 字段，治理人员可对**单个字段**做人工标注：
+    ``suppressed=True`` 表示「该列不是 PII」（误报，检测/展示时忽略）；
+    ``suppressed=False`` 表示「人工确认是 PII」（即使规则未命中也保留）。
+
+    Attributes:
+        catalog_id: 关联 db_catalog.id。
+        column_name: 字段名。
+        suppressed: True=标注非 PII（误报）；False=人工确认是 PII。
+        reason: 标注理由（必填，审计可读）。
+        created_by: 标注人 ID。
+    """
+
+    __tablename__ = "pii_field_override"
+
+    catalog_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        comment="关联 db_catalog.id",
+    )
+    column_name: Mapped[str] = mapped_column(
+        String(128), nullable=False, comment="字段名"
+    )
+    suppressed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        comment="True=标注非 PII（误报）；False=人工确认是 PII",
+    )
+    reason: Mapped[str | None] = mapped_column(
+        String(256), nullable=True, comment="标注理由"
+    )
+    created_by: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="标注人 ID"
+    )
+
+    __table_args__ = (
+        Index("idx_pii_override_catalog", "catalog_id"),
+        UniqueConstraint("catalog_id", "column_name", name="uk_pii_override_catalog_column"),
+    )

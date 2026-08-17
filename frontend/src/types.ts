@@ -1020,6 +1020,22 @@ export interface ActionRegistryItem {
   description: string;
 }
 
+/** 角色行下拉选项（GET /roles/options，授权管理「角色」下拉 id→name）。 */
+export interface RoleOption {
+  id: number;
+  name: string;
+  is_custom: boolean;
+}
+
+/** 用户按钮权限点视图（角色继承 + 直挂并集，GET /users/{id}/permissions）。 */
+export interface UserPermissionResponse {
+  user_id: number;
+  role: string;
+  role_actions: string[];
+  direct_actions: string[];
+  effective_actions: string[];
+}
+
 export interface OrganizationView {
   id: number;
   name: string;
