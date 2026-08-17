@@ -74,9 +74,28 @@ def fake_metric() -> MagicMock:
     m.updated_at = datetime.now(UTC)
     m.emergency_publish = False
     m.emergency_reason = None
+    m.emergency_reviewed_at = None
     m.pending_conflict = False
     m.pending_conflict_detail = None
     m.deleted_at = None
+    # 评审指派（TD §13）/ 治理追溯字段：MetricResponse 演进后新增，
+    # 缺省 MagicMock 值会令 model_validate 校验失败，故显式置 None
+    m.submitted_by = None
+    m.reviewer_id = None
+    m.reviewer_type = None
+    m.reviewer_domain = None
+    m.reject_reason = None
+    m.reject_reviewer_id = None
+    m.rejected_at = None
+    m.description = None
+    m.description_source = None
+    m.description_updated_by = None
+    m.description_updated_at = None
+    m.gray_tenant_ids = None
+    m.arbitration_mark = None
+    m.pending_version = False
+    m.health_score = None
+    m.health_level = None
     return m
 
 

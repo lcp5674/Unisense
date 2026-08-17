@@ -36,10 +36,11 @@ if str(_BACKEND) not in sys.path:
 
 import structlog  # noqa: E402
 
+# 复用现有 dp_csv 通道的持久化逻辑（ingest_batch 增量语义 + Neo4j best-effort）
+from scripts.import_dp_lineage import persist_edges, persist_graph  # noqa: E402
+
 from app.core.logging import configure_logging  # noqa: E402
 from app.db.mysql import async_session_factory  # noqa: E402
-# 复用现有 dp_csv 通道的持久化逻辑（ingest_batch 增量语义 + Neo4j best-effort）
-from scripts.import_dp_lineage import _PROVENANCE, persist_edges, persist_graph  # noqa: E402
 
 logger = structlog.get_logger("unisense.import_lineage_json")
 

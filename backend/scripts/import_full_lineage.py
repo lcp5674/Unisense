@@ -32,18 +32,19 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 import structlog  # noqa: E402
+from scripts.import_dp_lineage import collect_edges as _dp_collect_edges  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from app.core.logging import configure_logging  # noqa: E402
 from app.db.mysql import async_session_factory  # noqa: E402
 from app.services.lineage.graph import LineageGraphClient  # noqa: E402
 from app.services.lineage.service import LineageService  # noqa: E402
-from scripts.import_dp_lineage import collect_edges as _dp_collect_edges  # noqa: E402
 
 logger = structlog.get_logger("unisense.import_full_lineage")
 
-DEFAULT_CSV = Path(__file__).resolve().parent.parent.parent / "dp元数据.csv"
-DEFAULT_LINEAGE_JSON = Path(__file__).resolve().parent.parent.parent / "lineage_out" / "lineage.json"
+_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_CSV = _ROOT / "dp元数据.csv"
+DEFAULT_LINEAGE_JSON = _ROOT / "lineage_out" / "lineage.json"
 
 _EDGE_TYPE = "DERIVED_FROM"
 _PROVENANCE = "dp_csv"

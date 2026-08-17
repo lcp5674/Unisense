@@ -6,7 +6,8 @@
     直插 DB，与 scripts/seed_admin.py 一致），并对每类数据做 GET 冒烟断言。
 
 用法（backend 目录，venv 激活，后端已在 http://localhost:8100 运行）：
-    python scripts/seed_e2e_data.py [--base http://localhost:8100] [--admin-user admin] [--admin-pass changeme123]
+    python scripts/seed_e2e_data.py [--base http://localhost:8100] \
+        [--admin-user admin] [--admin-pass changeme123]
 
 幂等：可重复运行；已存在实体跳过，不产生重复数据。
 """
@@ -15,8 +16,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -103,7 +105,10 @@ METRICS: list[dict[str, Any]] = [
         "measure_column": "order_id",
         "period": "day",
         "definition_json": {
-            "sql": "SELECT COUNT(order_id) AS order_cnt, channel, dt FROM ods_e2e_order GROUP BY channel, dt",
+            "sql": (
+                "SELECT COUNT(order_id) AS order_cnt, channel, dt "
+                "FROM ods_e2e_order GROUP BY channel, dt"
+            ),
             "source_tables": ["ods_e2e_order"],
             "dimensions": ["channel"],
             "measures": [{"name": "order_cnt", "aggregation": "COUNT"}],
@@ -128,7 +133,10 @@ METRICS: list[dict[str, Any]] = [
         "measure_column": "user_id",
         "period": "day",
         "definition_json": {
-            "sql": "SELECT COUNT(DISTINCT user_id) AS active_user, dt FROM ods_e2e_user WHERE is_active = 1 GROUP BY dt",
+            "sql": (
+                "SELECT COUNT(DISTINCT user_id) AS active_user, dt FROM ods_e2e_user "
+                "WHERE is_active = 1 GROUP BY dt"
+            ),
             "source_tables": ["ods_e2e_user"],
             "dimensions": ["dt"],
             "measures": [{"name": "active_user", "aggregation": "COUNT_DISTINCT"}],
@@ -315,7 +323,9 @@ class Api:
             raise SeedError(f"{method} {path} -> {resp.status_code}: {msg}")
         return payload
 
-    def ok(self, method: str, path: str, body: dict[str, Any] | None = None, **kw) -> dict[str, Any]:
+    def ok(
+        self, method: str, path: str, body: dict[str, Any] | None = None, **kw
+    ) -> dict[str, Any]:
         """请求并取出统一信封的 data。"""
         return self.request(method, path, body, **kw).get("data", {})
 
@@ -332,7 +342,13 @@ class Api:
 def _fmt(obj: Any) -> str:
     """简短描述实体，便于日志。"""
     if isinstance(obj, dict):
-        return str(obj.get("metric_code") or obj.get("code") or obj.get("name") or obj.get("id") or obj)
+        return str(
+            obj.get("metric_code")
+            or obj.get("code")
+            or obj.get("name")
+            or obj.get("id")
+            or obj
+        )
     return str(obj)
 
 
@@ -495,8 +511,18 @@ CATALOGS: list[dict[str, Any]] = [
         "entity_type": "TABLE",
         "schema_json": {
             "columns": [
-                {"name": "order_id", "type": "bigint", "nullable": False, "comment": "订单ID"},
-                {"name": "order_amount", "type": "decimal", "nullable": False, "comment": "订单金额"},
+                {
+                    "name": "order_id",
+                    "type": "bigint",
+                    "nullable": False,
+                    "comment": "订单ID",
+                },
+                {
+                    "name": "order_amount",
+                    "type": "decimal",
+                    "nullable": False,
+                    "comment": "订单金额",
+                },
                 {"name": "channel", "type": "string", "nullable": False, "comment": "渠道"},
                 {"name": "store", "type": "string", "nullable": False, "comment": "门店"},
                 {"name": "dt", "type": "date", "nullable": False, "comment": "日期"},
@@ -651,7 +677,10 @@ def seed_conflicts(api: Api, metric_ids: dict[str, int]) -> None:
                     {
                         "metric_code": "sales_e2e_conflicta_day",
                         "domain": "finance",
-                        "definition": "SELECT SUM(amount) FROM completely_different_table GROUP BY region",
+                        "definition": (
+                            "SELECT SUM(amount) FROM completely_different_table "
+                            "GROUP BY region"
+                        ),
                         "source_tables": ["other_table"],
                         "has_pii": False,
                         "pii_authorized": False,
@@ -709,14 +738,17 @@ def seed_quality(api: Api, metric_ids: dict[str, int]) -> None:
             {"metric_id": gmv_id, "rule_type": "COMPLETENESS", "obs_value": 50.0},
         )
         if detect:
-            print(f"[quality] 触发事件 {detect.get('id') or detect.get('event_id')} status={detect.get('status')}")
+            print(
+                f"[quality] 触发事件 {detect.get('id') or detect.get('event_id')} "
+                f"status={detect.get('status')}"
+            )
         else:
             print("[quality] detect 未命中（已有 OPEN 事件）")
     except SeedError as e:
         print(f"[quality] detect: {e}")
 
     # 事件闭环：OPEN -> ACK -> RESOLVED -> CLOSED（若有 OPEN 事件）
-    events = api.get(f"/quality/events?status=OPEN&page_size=50")
+    events = api.get("/quality/events?status=OPEN&page_size=50")
     ev = (events.get("items") or [None])[0]
     if ev:
         eid = ev.get("id")
@@ -778,7 +810,10 @@ def seed_glossary(api: Api) -> None:
             print(f"[glossary] 术语已存在 {s['name']}")
             continue
         t = api.post("/terms", s)
-        print(f"[glossary] 创建术语 {t.get('name')} code={t.get('term_code')} status={t.get('status')}")
+        print(
+            f"[glossary] 创建术语 {t.get('name')} code={t.get('term_code')} "
+            f"status={t.get('status')}"
+        )
         # 发布一个正常术语（供推荐/搜索）
         if s["name"].endswith("销售额"):
             api.post(f"/terms/{t.get('term_code')}/submit")
@@ -818,7 +853,7 @@ def seed_dimensions(api: Api, metric_ids: dict[str, int]) -> None:
     bound = api.get(f"/dimensions/{metric_id}/metric-dimensions") or {}
     already = any(b.get("dim_code") == dim_code for b in (bound.get("items") or []))
     if already:
-        print(f"[dimension] 已绑定指标 sales_e2e_gmv_day，跳过")
+        print("[dimension] 已绑定指标 sales_e2e_gmv_day，跳过")
     else:
         api.post(
             f"/dimensions/{dim_code}/metrics",
@@ -851,16 +886,19 @@ def seed_governance(api: Api, user_ids: dict[str, int], metric_ids: dict[str, in
     # 权限校验（PDP）响应字段为 allow
     check = api.post(
         "/permissions/check",
-        {"user_id": user_ids["e2e_analyst"], "action": "read", "domain": "sales", "metric_code": "sales_e2e_gmv_day"},
+        {
+            "user_id": user_ids["e2e_analyst"],
+            "action": "read",
+            "domain": "sales",
+            "metric_code": "sales_e2e_gmv_day",
+        },
     )
     print(f"[governance] PDP check e2e_analyst read sales_e2e_gmv_day -> {check.get('allow')}")
 
     # 被遗忘权：先让 subject 用户产生审计行，再匿名化
     analyst_token = login(api.base, "e2e_analyst", "changeme123")
-    try:
+    with contextlib.suppress(SeedError):
         api.get("/terms", token=analyst_token)  # 产生审计读操作
-    except SeedError:
-        pass
     compliance_token = login(api.base, "e2e_compliance", "changeme123")
     erasure = api.post(
         "/erasure",
@@ -877,7 +915,12 @@ def seed_notify(api: Api) -> None:
     # 建立订阅（幂等 upsert）
     subs = api.get("/notify/subscriptions")
     if not (subs.get("items") or []):
-        for event_type in ["quality.anomaly", "conflict_open", "quality.alert", "reconciliation.alert"]:
+        for event_type in [
+            "quality.anomaly",
+            "conflict_open",
+            "quality.alert",
+            "reconciliation.alert",
+        ]:
             api.put(
                 "/notify/subscriptions",
                 {"channel": "IN_APP", "event_type": event_type, "enabled": True},
@@ -888,13 +931,24 @@ def seed_notify(api: Api) -> None:
     if not (notifs.get("items") or []):
         for event_type, payload in [
             ("quality.anomaly", {"metric_code": "sales_e2e_gmv_day", "message": "完整率低于阈值"}),
-            ("conflict_open", {"metric_code": "sales_e2e_conflicta_day", "message": "检测到口径冲突"}),
+            (
+                "conflict_open",
+                {"metric_code": "sales_e2e_conflicta_day", "message": "检测到口径冲突"},
+            ),
         ]:
             resp = api.post(
                 "/notify/events",
-                {"event_type": event_type, "source": "quality", "payload": payload, "level": "WARN"},
+                {
+                    "event_type": event_type,
+                    "source": "quality",
+                    "payload": payload,
+                    "level": "WARN",
+                },
             )
-            print(f"[notify] 发布 {event_type} -> notifications={len(resp.get('notifications') or [])}")
+            print(
+                f"[notify] 发布 {event_type} -> "
+                f"notifications={len(resp.get('notifications') or [])}"
+            )
     else:
         print("[notify] notification 已存在，跳过")
 
@@ -912,7 +966,12 @@ def seed_observability(api: Api) -> None:
     if fb is None:
         fb = api.post(
             "/observability/feedback",
-            {"target_type": "metric", "target_id": "sales_e2e_gmv_day", "rating": 5, "comment": "e2e 反馈：指标口径清晰"},
+            {
+                "target_type": "metric",
+                "target_id": "sales_e2e_gmv_day",
+                "rating": 5,
+                "comment": "e2e 反馈：指标口径清晰",
+            },
         )
         print(f"[observability] 提交反馈 id={fb.get('id') or fb.get('feedback_id')}")
     nps = api.post("/observability/nps", {"score": 9, "comment": "e2e NPS 反馈"})
@@ -982,15 +1041,23 @@ def seed_tracking(api: Api, metric_ids: dict[str, int]) -> None:
 # ---------------------------------------------------------------------------
 SMOKE_CHECKS = [
     ("指标目录", lambda a: _count(a.get("/metric-definitions?page_size=100"), "items") >= 8),
-    ("已发布指标", lambda a: _count(a.get("/metric-definitions?status=PUBLISHED&page_size=100"), "items") >= 5),
+    ("已发布指标", lambda a: _count(
+        a.get("/metric-definitions?status=PUBLISHED&page_size=100"), "items"
+    ) >= 5),
     ("数据源", lambda a: _count(a.get("/data-sources?page_size=50"), "items") >= 1),
     ("目录表", lambda a: _count(a.get("/catalogs?entity_type=TABLE&page_size=100"), "items") >= 4),
-    ("血缘边", lambda a: _count(a.get("/lineage/edges?node=table%3Aods_e2e_order&page_size=100"), "items") >= 1),
+    ("血缘边", lambda a: _count(
+        a.get("/lineage/edges?node=table%3Aods_e2e_order&page_size=100"), "items"
+    ) >= 1),
     ("冲突", lambda a: _count(a.get("/conflicts?page_size=100"), "items") >= 1),
     ("质量规则", lambda a: _count(a.get("/quality/rules?page_size=100"), "items") >= 1),
     ("质量事件", lambda a: _count(a.get("/quality/events?page_size=100"), "items") >= 1),
-    ("基准", lambda a: _count(a.get("/quality/benchmarks?metric_code=sales_e2e_gmv_day&page_size=100"), "items") >= 1),
-    ("对账记录", lambda a: _count(a.get("/quality/reconciliation-records?page_size=100"), "items") >= 1),
+    ("基准", lambda a: _count(
+        a.get("/quality/benchmarks?metric_code=sales_e2e_gmv_day&page_size=100"), "items"
+    ) >= 1),
+    ("对账记录", lambda a: _count(
+        a.get("/quality/reconciliation-records?page_size=100"), "items"
+    ) >= 1),
     ("术语", lambda a: _count(a.get("/terms?page_size=100"), "items") >= 3),
     ("术语冲突", lambda a: _count(a.get("/terms/conflicts?status=OPEN"), "items") >= 1),
     ("维度", lambda a: 1 if _first_dim_code(a) else 0),
@@ -1083,7 +1150,8 @@ def main() -> int:
     for spec in ALL_METRICS:
         m = ensure_metric(api, spec)
         metric_ids[spec["code"]] = m.get("id") or 0
-    # 发布：sales_e2e_gmv_day / sales_e2e_ordercnt_day / user_e2e_activeuser_day / user_e2e_piiuser_day / sales_e2e_deprecated_day
+    # 发布：sales_e2e_gmv_day / sales_e2e_ordercnt_day / user_e2e_activeuser_day /
+    #        user_e2e_piiuser_day / sales_e2e_deprecated_day
     publish_metric(api, "sales_e2e_gmv_day")
     publish_metric(api, "sales_e2e_ordercnt_day")
     publish_metric(api, "user_e2e_activeuser_day")
