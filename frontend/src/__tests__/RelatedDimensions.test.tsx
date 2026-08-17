@@ -32,12 +32,14 @@ describe("RelatedDimensions（指标详情-关联维度）", () => {
       expect(listMetricDimensions).toHaveBeenCalledWith(7);
     });
     expect(await screen.findByText("sales_channel")).toBeInTheDocument();
-    expect(screen.getByText("PARTITION 分区")).toBeInTheDocument();
+    // 角色标签中文优先（对齐 commit fa722be 与 Dimensions.tsx：PARTITION→分区 / FILTER→过滤）
+    expect(screen.getByText("分区")).toBeInTheDocument();
     expect(screen.getByText("sales_region")).toBeInTheDocument();
-    expect(screen.getByText("FILTER 过滤")).toBeInTheDocument();
+    expect(screen.getByText("过滤")).toBeInTheDocument();
     // 默认成员有值显示编码，无值显示占位
     expect(screen.getByText("all")).toBeInTheDocument();
-    expect(screen.getByText("—")).toBeInTheDocument();
+    // 无默认成员 + 无维度状态（mock 未返回 dim_status）均渲染「—」占位
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
   });
 
   it("加载失败时展示降级文案而非崩溃", async () => {
