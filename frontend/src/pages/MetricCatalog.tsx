@@ -40,6 +40,7 @@ import type { ColumnsType } from "antd/es/table";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
+import { MetricCompareModal } from "../components/MetricCompareModal";
 import {
   AGGREGATION_LABEL,
   DW_LAYER_LABEL,
@@ -265,6 +266,8 @@ export function MetricCatalog() {
   // 每页条数持久化（对齐 AssetMap/Dimensions 的 usePersistentPageSize 跨页记忆）
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.catalog.pageSize", 20);
   const [selected, setSelected] = useState<MetricResponse[]>([]);
+  // 指标矩阵对比弹窗（勾选 2~6 个后点「对比所选」在当前页内展开，不再跳转对比页）
+  const [compareOpen, setCompareOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   // 列表加载失败的错误信息（区别于空结果：失败显示重试空态，空结果显示原空态引导）
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1017,11 +1020,7 @@ export function MetricCatalog() {
               type="primary"
               icon={<ColumnWidthOutlined />}
               disabled={selected.length < 2 || selected.length > 6}
-              onClick={() =>
-                selected.length >= 2 &&
-                selected.length <= 6 &&
-                navigate(`/compare?codes=${selected.map((s) => s.metric_code).join(",")}`)
-              }
+              onClick={() => setCompareOpen(true)}
             >
               对比所选{selected.length > 1 ? ` (${selected.length})` : ""}
             </Button>
@@ -1448,6 +1447,11 @@ export function MetricCatalog() {
           ))}
         </ul>
       </Modal>
+      <MetricCompareModal
+        open={compareOpen}
+        codes={selected.map((s) => s.metric_code)}
+        onClose={() => setCompareOpen(false)}
+      />
     </div>
   );
 }

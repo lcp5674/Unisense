@@ -6,7 +6,6 @@ import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tool
 import {
   AppstoreOutlined,
   PlusCircleOutlined,
-  SwapOutlined,
   AuditOutlined,
   CheckSquareOutlined,
   ApartmentOutlined,
@@ -109,7 +108,6 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     label: "指标资产",
     children: [
       { key: "/catalog", label: "指标目录", icon: <AppstoreOutlined /> },
-      { key: "/compare", label: "指标对比", icon: <SwapOutlined /> },
       { key: "/templates", label: "指标模板", icon: <FileTextOutlined /> },
       { key: "/create", label: "注册指标", icon: <PlusCircleOutlined /> },
       { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },

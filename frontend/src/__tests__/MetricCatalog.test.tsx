@@ -17,6 +17,7 @@ vi.mock("../api", () => ({
   deleteMetric: vi.fn(),
   restoreMetric: vi.fn(),
   fetchMyPermissions: vi.fn(),
+  compareMetricsMatrix: vi.fn(),
 }));
 const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
@@ -36,6 +37,7 @@ import {
   deleteMetric,
   restoreMetric,
   fetchMyPermissions,
+  compareMetricsMatrix,
 } from "../api";
 import type { MetricResponse, MetricListResponse } from "../types";
 import { PermissionProvider } from "../hooks/usePermission";
@@ -50,6 +52,7 @@ const mockedRemoveFavorite = vi.mocked(removeFavorite);
 const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
 const mockedDeleteMetric = vi.mocked(deleteMetric);
 const mockedPermissions = vi.mocked(fetchMyPermissions);
+const mockedMatrix = vi.mocked(compareMetricsMatrix);
 
 const metric: MetricResponse = {
   id: 1,
@@ -457,6 +460,43 @@ describe("MetricCatalog", () => {
     // 对比按钮显示保留的 6 个
     expect(screen.getByRole("button", { name: /对比所选 \(6\)/ })).toBeTruthy();
     messageSpy.mockRestore();
+  });
+
+  it("勾选 2 个指标点「对比所选」：在当前页弹窗展示矩阵对比（不再跳转 /compare）", async () => {
+    const two = [
+      { ...metric, id: 1, metric_code: "sales_gmv_sum_d" },
+      { ...metric, id: 2, metric_code: "sales_gmv_cnt_d" },
+    ];
+    mockedList.mockResolvedValue({ items: two, total: 2, page: 1, page_size: 20 });
+    mockedMatrix.mockResolvedValue({
+      metrics: ["sales_gmv_sum_d", "sales_gmv_cnt_d"],
+      fields: {
+        granularity: {
+          values: { sales_gmv_sum_d: "day", sales_gmv_cnt_d: "day" },
+          difference_level: "all_identical",
+        },
+      },
+    } as never);
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    // 全选 2 个 → 对比按钮可用
+    const selectAll = document.querySelector(
+      ".ant-table-selection-column input[type=checkbox]",
+    ) as Element;
+    fireEvent.click(selectAll);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /对比所选 \(2\)/ })).toBeTruthy();
+    });
+    // 点「对比所选」→ 弹窗打开并请求矩阵，不跳转
+    fireEvent.click(screen.getByRole("button", { name: /对比所选 \(2\)/ }));
+    await waitFor(() => {
+      expect(mockedMatrix).toHaveBeenCalledWith(["sales_gmv_sum_d", "sales_gmv_cnt_d"]);
+    });
+    expect(screen.getByText(/指标对比 \(2\)/)).toBeTruthy();
+    // 矩阵表渲染（汇总条「共 1 项字段 · 2 个指标」）
+    expect(await screen.findByText(/共 1 项字段 · 2 个指标/)).toBeTruthy();
+    // 仍停留在指标目录（未跳转 /compare）
+    expect(screen.getByRole("button", { name: /对比所选 \(2\)/ })).toBeTruthy();
   });
 
   it("批量操作：勾选草稿指标提交审核（DRAFT → REVIEW，走 /batch-submit）", async () => {
