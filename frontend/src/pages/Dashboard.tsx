@@ -16,7 +16,7 @@ import {
 } from "@ant-design/icons";
 import { Pie, Bar } from "@ant-design/charts";
 import { fetchDashboard, fetchRecommendedMetrics, fetchRecommendedTerms } from "../api";
-import type { AssetStat, DashboardData, RecommendItem, GlossaryTerm } from "../types";
+import type { AssetStat, DashboardData, OwnerAssetStat, RecommendItem, GlossaryTerm } from "../types";
 import { useTracking } from "../hooks/useTracking";
 
 const EDGE_TYPE_LABEL: Record<string, string> = {
@@ -453,6 +453,16 @@ const PENDING_BREAKDOWN = [
   { key: "term", label: "术语草稿", cls: "oc-pending-term", href: "/glossary", status: "DRAFT" },
 ] as const;
 
+// 兼容旧版后端 by_owner 结构：新版为 { total, by_status }，旧版 metrics 是对象但
+// tables/sources/dimensions/terms/templates 是纯数字。API 升级有部署窗口期（后端镜像重建前
+// 前端 HMR 已先上线新代码），生产上不能假设结构已升级——统一归一化为 { total, by_status }。
+function normalizeOwnerStat(v: OwnerAssetStat): AssetStat {
+  if (typeof v === "object" && v !== null && "total" in v) {
+    return { total: v.total ?? 0, by_status: v.by_status ?? {} };
+  }
+  return { total: typeof v === "number" ? v : 0, by_status: {} };
+}
+
 // Owner 卡片头部「待处理 N」徽标：跨资产汇总（指标待审核+维度草稿+术语草稿），
 // 点击弹 Popover 列出分类明细，每项精确跳转对应目录并携带 status + owner_id 过滤。
 // 独立组件持有弹层开关状态；onClick 需 stopPropagation 防止冒泡到卡片触发 owner 下钻。
@@ -546,11 +556,20 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
     >
       <div className="owner-grid">
         {owners.map(([id, o]) => {
+          // 各资产先归一化（兼容旧版纯数字结构），再取状态分布——直接读 .by_status
+          // 会在旧结构数字上取属性 → undefined → 运行时崩溃
+          const assetStats = OWNER_ASSETS.reduce(
+            (acc, a) => {
+              acc[a.key] = normalizeOwnerStat(o[a.key]);
+              return acc;
+            },
+            {} as Record<(typeof OWNER_ASSETS)[number]["key"], AssetStat>,
+          );
           // 跨资产待处理：指标待审核（REVIEW）+ 维度草稿（DRAFT）+ 术语草稿（DRAFT）
           const pendingCounts = {
-            metric: o.metrics.by_status.REVIEW ?? 0,
-            dim: o.dimensions.by_status.DRAFT ?? 0,
-            term: o.terms.by_status.DRAFT ?? 0,
+            metric: assetStats.metrics.by_status.REVIEW ?? 0,
+            dim: assetStats.dimensions.by_status.DRAFT ?? 0,
+            term: assetStats.terms.by_status.DRAFT ?? 0,
           };
           const pending = pendingCounts.metric + pendingCounts.dim + pendingCounts.term;
           const hot = pending > 0;
@@ -558,7 +577,7 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
 // 让 Owner 一眼看清全维度资产分布（0 值段也能看到，确认该责任人确实没有此类资产）
 const mix = OWNER_ASSETS.map((a) => ({
             ...a,
-            count: o[a.key].total,
+            count: assetStats[a.key].total,
           }));
           const total = Math.max(o.total, 1);
           const initials = (o.name || "?").slice(0, 2);
@@ -641,7 +660,7 @@ className={`oc-seg ${m.cls}${isZero ? " oc-zero" : ""}`}
               </span>
               <span className="oc-life">
                 {OWNER_STATES.map((s) => {
-                  const count = o.metrics.by_status[s.key] ?? 0;
+                  const count = assetStats.metrics.by_status[s.key] ?? 0;
                   if (count <= 0) return null;
                   return (
                     <span

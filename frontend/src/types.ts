@@ -688,6 +688,13 @@ export interface AssetStat {
   by_status: Record<string, number>;
 }
 
+/**
+ * Owner 名下单类资产统计：新版后端返回 `{ total, by_status }`；
+ * 旧版后端仅返回纯数字（只有 metrics 是对象，其余资产是 count）。
+ * 兼容 union——Dashboard 消费时须经 normalizeOwnerStat 归一化，勿直接取 .by_status。
+ */
+export type OwnerAssetStat = AssetStat | number;
+
 export interface DashboardData {
   total: number;
   by_status: Record<string, number>;
@@ -702,12 +709,12 @@ export interface DashboardData {
       name: string;
       /** 跨资产总计（指标+数据表+数据源+维度+术语+模板） */
       total: number;
-      metrics: { total: number; by_status: Record<string, number> };
-      tables: { total: number; by_status: Record<string, number> };
-      sources: { total: number; by_status: Record<string, number> };
-      dimensions: { total: number; by_status: Record<string, number> };
-      terms: { total: number; by_status: Record<string, number> };
-      templates: { total: number; by_status: Record<string, number> };
+      metrics: OwnerAssetStat;
+      tables: OwnerAssetStat;
+      sources: OwnerAssetStat;
+      dimensions: OwnerAssetStat;
+      terms: OwnerAssetStat;
+      templates: OwnerAssetStat;
     }
   >;
   /** 质量健康：严重级分布 + 待处理（OPEN+ACK） */

@@ -368,6 +368,49 @@ describe("Dashboard", () => {
     expect(probe.location()?.search).toContain("owner_id=1");
   });
 
+  it("Owner 待处理徽标：兼容旧版纯数字 by_owner（维度/术语无 by_status 不崩溃，徽标仅统计指标待审）", async () => {
+    // 旧版后端 by_owner 结构：metrics 为 {total, by_status}，其余资产为纯数字。
+    // 前端新代码若直接读 o.dimensions.by_status.DRAFT 会在数字上取属性 → undefined → 崩溃。
+    mockedFetchDashboard.mockResolvedValue({
+      ...mockDashboardData,
+      by_owner: {
+        1: {
+          name: "Alice",
+          total: 82,
+          metrics: { total: 60, by_status: { DRAFT: 20, REVIEW: 4, PUBLISHED: 36 } },
+          tables: 8,
+          sources: 4,
+          dimensions: 3,
+          terms: 5,
+          templates: 2,
+        },
+      },
+    });
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    // 不崩溃，卡片正常渲染
+    const aliceCard = document.querySelector(".owner-card");
+    expect(aliceCard).toBeTruthy();
+
+    // 徽标「待处理 4」= 仅指标 REVIEW=4（维度/术语是数字无法取 by_status，回退为 0，不崩）
+    const hotBadge = aliceCard!.querySelector(".oc-hot");
+    expect(hotBadge).toBeTruthy();
+    expect(hotBadge!.textContent).toContain("待处理");
+    expect(hotBadge!.textContent).toContain("4");
+
+    // 点击徽标 → 分类明细仅含指标（维度/术语为纯数字时无草稿可列）
+    fireEvent.click(hotBadge!);
+    await waitFor(() => expect(document.querySelector(".oc-hot-pop")).toBeTruthy());
+    const items = Array.from(document.querySelectorAll(".oc-hot-pop-item"));
+    expect(items.length).toBe(1);
+    expect(items[0].textContent).toContain("指标待审核");
+    fireEvent.click(items[0]);
+    expect(probe.location()?.pathname).toBe("/catalog");
+    expect(probe.location()?.search).toContain("status=REVIEW");
+    expect(probe.location()?.search).toContain("owner_id=1");
+  });
+
   it("Owner 卡片：含 0 值资产类型仍完整渲染 6 段（数据表/数据源为 0 不被过滤）", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
