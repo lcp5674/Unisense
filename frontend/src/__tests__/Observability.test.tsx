@@ -44,6 +44,87 @@ const overview = {
     sources: 3,
   },
   clients: { total: 1, active: 1 },
+  system: {
+    dependencies: {
+      by_status: { HEALTHY: 1, DEGRADED: 2 },
+      circuit_open: 1,
+      total: 3,
+      items: [
+        {
+          dependency_type: "LLM",
+          dependency_id: "llm",
+          status: "DEGRADED",
+          circuit_state: "HALF_OPEN",
+          consecutive_failures: 5,
+          latency_p95_ms: null,
+          error_rate_pct: 0,
+          last_check_at: "2026-08-14T07:05:13",
+        },
+        {
+          dependency_type: "OLAP",
+          dependency_id: "olap",
+          status: "HEALTHY",
+          circuit_state: "CLOSED",
+          consecutive_failures: 0,
+          latency_p95_ms: null,
+          error_rate_pct: 0,
+          last_check_at: "2026-08-13T10:58:50",
+        },
+        {
+          dependency_type: "GRAPH",
+          dependency_id: "graph",
+          status: "DEGRADED",
+          circuit_state: "OPEN",
+          consecutive_failures: 5,
+          latency_p95_ms: null,
+          error_rate_pct: 0,
+          last_check_at: "2026-08-17T06:58:52",
+        },
+      ],
+    },
+    collection: {
+      by_status: { COMPLETED: 6, RUNNING: 2 },
+      total: 8,
+      running: 2,
+      failed: 0,
+      success_rate_pct: 100.0,
+      last_collected_at: "2026-08-17T07:20:13",
+    },
+  },
+  quality: {
+    metric_health: {
+      by_level: { GOOD: 1, WARNING: 8 },
+      total_scored: 9,
+      coverage_pct: 81.8,
+      avg_score: 66,
+      top_risk: [
+        { metric_id: 2, score: 55, level: "WARNING", missing_dimensions: ["sla", "lineage_coverage"] },
+      ],
+    },
+    lineage: { edges: 58, stale: 0, ingest_success: 58, last_ingest_at: "2026-08-17T14:31:42" },
+  },
+  risks: { pii_review_pending: 305, grants_expiring_soon: 0, schema_drift_7d: 3 },
+  trends: {
+    days: 7,
+    metrics_created: [
+      { date: "2026-08-11", count: 0 },
+      { date: "2026-08-12", count: 0 },
+      { date: "2026-08-13", count: 1 },
+      { date: "2026-08-14", count: 2 },
+      { date: "2026-08-15", count: 0 },
+      { date: "2026-08-16", count: 0 },
+      { date: "2026-08-17", count: 1 },
+    ],
+    collections: [
+      { date: "2026-08-11", count: 0 },
+      { date: "2026-08-12", count: 0 },
+      { date: "2026-08-13", count: 0 },
+      { date: "2026-08-14", count: 2 },
+      { date: "2026-08-15", count: 0 },
+      { date: "2026-08-16", count: 0 },
+      { date: "2026-08-17", count: 6 },
+    ],
+  },
 };
 
 beforeEach(() => {
@@ -83,31 +164,46 @@ describe("Observability 可观测中心", () => {
     await waitFor(() => expect(mockedOverview.mock.calls.length).toBeGreaterThan(afterManual));
   });
 
-  it("默认展示平台概览 Tab：数据源健康/治理积压/资产规模/消费接入，全部业务标签", async () => {
+  it("默认展示平台概览 Tab：系统健康/风险雷达/资产规模，全部业务标签", async () => {
     render(<Observability />);
-    await waitFor(() => expect(screen.getByText("数据源健康")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("核心依赖健康").length).toBeGreaterThan(0));
 
-    // 数据源健康：技术值 healthy/unhealthy 转中文
-    expect(screen.getByText("健康")).toBeInTheDocument();
-    expect(screen.getByText("不健康")).toBeInTheDocument();
-    expect(screen.getByText("数据源总数")).toBeInTheDocument();
+    // 顶部状态条
+    expect(screen.getAllByText("熔断开启").length).toBeGreaterThan(0);
+    expect(screen.getByText("采集运行中")).toBeInTheDocument();
+    expect(screen.getByText("数据新鲜度")).toBeInTheDocument();
+    // 降级依赖提示（含熔断开启的 GRAPH）
+    expect(screen.getByText(/降级\/不可用 2 个/)).toBeInTheDocument();
 
-    // 治理积压
-    expect(screen.getByText("治理积压")).toBeInTheDocument();
+    // 核心依赖健康卡：类型/状态/熔断 中文
+    expect(screen.getByText("AI 模型")).toBeInTheDocument();
+    expect(screen.getByText("图数据库")).toBeInTheDocument();
+    expect(screen.getAllByText("降级").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("半开恢复")).toBeInTheDocument();
+
+    // 采集链路健康
+    expect(screen.getByText("采集链路健康")).toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    expect(screen.getByText("运行中")).toBeInTheDocument();
+    expect(screen.getByText("采集成功率")).toBeInTheDocument();
+
+    // 风险雷达（治理积压并入）
+    expect(screen.getByText("治理风险雷达")).toBeInTheDocument();
     expect(screen.getByText("待处理冲突")).toBeInTheDocument();
     expect(screen.getByText("未关闭质量事件")).toBeInTheDocument();
     expect(screen.getByText("待审核指标")).toBeInTheDocument();
     expect(screen.getByText("未闭环升级")).toBeInTheDocument();
+    expect(screen.getByText("PII 待复核")).toBeInTheDocument();
 
-    // 资产规模：指标生命周期状态转中文
+    // 资产规模：指标生命周期状态转中文 + 数据源健康子块
     expect(screen.getByText("资产规模")).toBeInTheDocument();
     expect(screen.getByText("已发布")).toBeInTheDocument();
     expect(screen.getByText("草稿")).toBeInTheDocument();
     expect(screen.getByText("术语")).toBeInTheDocument();
     expect(screen.getByText("主题域")).toBeInTheDocument();
-
+    expect(screen.getByText("数据源健康")).toBeInTheDocument();
+    expect(screen.getByText("不健康")).toBeInTheDocument();
     // 消费接入
-    expect(screen.getByText("消费接入")).toBeInTheDocument();
     expect(screen.getByText("接入方总数")).toBeInTheDocument();
     expect(screen.getByText("活跃接入方")).toBeInTheDocument();
 
@@ -115,6 +211,36 @@ describe("Observability 可观测中心", () => {
     expect(screen.queryByText("healthy")).not.toBeInTheDocument();
     expect(screen.queryByText("PUBLISHED")).not.toBeInTheDocument();
     expect(screen.queryByText("DRAFT")).not.toBeInTheDocument();
+    expect(screen.queryByText("HEALTHY")).not.toBeInTheDocument();
+    expect(screen.queryByText("WARNING")).not.toBeInTheDocument();
+    expect(screen.queryByText("RUNNING")).not.toBeInTheDocument();
+  });
+
+  it("平台概览企业级：指标健康度/血缘健康/趋势 全业务标签展示", async () => {
+    render(<Observability />);
+    await waitFor(() => expect(screen.getAllByText("核心依赖健康").length).toBeGreaterThan(0));
+
+    // 指标健康度卡
+    expect(screen.getByText("指标健康度")).toBeInTheDocument();
+    expect(screen.getByText("警告")).toBeInTheDocument();
+    expect(screen.getByText("良好")).toBeInTheDocument();
+    expect(screen.getByText("健康覆盖率")).toBeInTheDocument();
+    expect(screen.getByText(/低健康指标 Top 1/)).toBeInTheDocument();
+    expect(screen.getByText(/sla、lineage_coverage/)).toBeInTheDocument();
+
+    // 血缘健康卡
+    expect(screen.getByText("血缘健康")).toBeInTheDocument();
+    expect(screen.getByText("失效边")).toBeInTheDocument();
+    expect(screen.getByText("接入成功")).toBeInTheDocument();
+    expect(screen.getByText("最近接入")).toBeInTheDocument();
+
+    // 风险雷达扩展项
+    expect(screen.getByText("授权即将到期")).toBeInTheDocument();
+    expect(screen.getByText("7 天 Schema 漂移")).toBeInTheDocument();
+
+    // 近 7 天趋势
+    expect(screen.getByText("近 7 天指标新增")).toBeInTheDocument();
+    expect(screen.getByText("近 7 天采集运行")).toBeInTheDocument();
   });
 
   it("运行指标 Tab 的 API 动作分布用中文标签而非技术 action", async () => {

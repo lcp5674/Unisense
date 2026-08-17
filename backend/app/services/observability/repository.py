@@ -6,20 +6,25 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLog
+from app.models.collector_models import CollectionRun, CollectionWatermark, SchemaDriftLog
 from app.models.conflict import Conflict, ConflictStatus
 from app.models.consume import ApiClient, ApiClientStatus
-from app.models.data_source import DataSource
+from app.models.data_source import DataSource, DBCatalog
+from app.models.dependency_health import DependencyHealth
 from app.models.dimension import Dimension
 from app.models.escalation import EscalationRecord, EscalationStatus
 from app.models.feedback import Feedback
-from app.models.lineage import LineageEdge
+from app.models.governance import Grant, GrantStatus
+from app.models.lineage import LineageEdge, LineageIngestRun
 from app.models.metric import Metric
+from app.models.metric_health import MetricHealthScore
 from app.models.notify import EventLog, Notification
 from app.models.quality import QualityEvent, QualityEventStatus
 from app.models.subject_domain import SubjectDomain
@@ -276,16 +281,30 @@ class ObservabilityRepository:
         return {"edges": edges}
 
     async def overview_stats(self) -> dict[str, Any]:
-        """平台运营总览聚合（生产视角：健康/积压/资产/消费一次拉齐）。
+        """平台运营总览聚合（企业级：系统健康 / 资产质量 / 风险雷达 / 近7天趋势 一次拉齐）。
 
         数据口径统一对齐各模块自身语义 + 软删过滤（deleted_at IS NULL）：
-        - 数据源健康 / 资产规模：仅统计存活（未软删）数据源——此前漏过滤会
-          把已软删数据源计入，导致平台概览与数据源管理页数字不一致；
-        - 治理积压的"待处理冲突"：对齐冲突模块的未决口径
-          （OPEN/NEGOTIATING/ESCALATED），且仅统计未软删冲突；
-        - 质量事件 / 升级：同样过滤软删，与 health_scorer / 升级模块口径一致。
+        - 资产存量快照：数据源健康 / 治理积压 / 资产规模 / 消费接入；
+        - 系统健康：核心依赖实时态（dependency_health）+ 采集链路健康（collection_run/watermark）；
+        - 资产质量：指标健康度分布（metric_health_score）+ 血缘健康（lineage_edge/ingest_run）；
+        - 风险雷达：PII 待复核、授权即将到期、近 7 天 Schema 漂移；
+        - 趋势：近 7 天指标新增 / 采集运行按天聚合。
         """
-        # 1. 数据源健康分布（仅未软删）
+        assets = await self._overview_assets()
+        system = await self._overview_system()
+        quality = await self._overview_quality()
+        risks = await self._overview_risks()
+        trends = await self._overview_trends()
+        # 指标健康度覆盖率：已评分指标 / 资产总指标（口径一致，软删过滤）
+        total_metrics = sum(assets["assets"]["metrics_by_status"].values())
+        scored = quality["metric_health"]["total_scored"]
+        quality["metric_health"]["coverage_pct"] = (
+            round(scored / total_metrics * 100, 1) if total_metrics else 0.0
+        )
+        return {**assets, "system": system, "quality": quality, "risks": risks, "trends": trends}
+
+    async def _overview_assets(self) -> dict[str, Any]:
+        """资产存量快照：数据源健康 / 治理积压 / 资产规模 / 消费接入（软删过滤）。"""
         src_rows = (
             await self._session.execute(
                 select(DataSource.health_status, func.count())
@@ -294,8 +313,7 @@ class ObservabilityRepository:
             )
         ).all()
         sources_by_health = dict(cast("Sequence[tuple[Any, Any]]", src_rows))
-        # 2. 治理积压：待处理冲突 / 未关闭质量事件 / 待审核指标 / 未闭环升级
-        #    冲突未决口径对齐冲突模块（count_open_for_metric）：OPEN/NEGOTIATING/ESCALATED
+        # 冲突未决口径对齐冲突模块：OPEN/NEGOTIATING/ESCALATED
         open_conflicts = (
             await self._session.execute(
                 select(func.count())
@@ -343,7 +361,6 @@ class ObservabilityRepository:
                 )
             )
         ).scalar() or 0
-        # 3. 资产规模（软删除过滤，反映真实存量）
         metrics_by_status_rows = (
             await self._session.execute(
                 select(Metric.status, func.count())
@@ -373,7 +390,6 @@ class ObservabilityRepository:
                 .where(SubjectDomain.deleted_at.is_(None))
             )
         ).scalar() or 0
-        # 4. 消费接入：接入方总数 / 活跃数
         clients_total = (
             await self._session.execute(
                 select(func.count()).select_from(ApiClient).where(
@@ -410,6 +426,212 @@ class ObservabilityRepository:
                 "sources": sum(sources_by_health.values()),
             },
             "clients": {"total": clients_total, "active": clients_active},
+        }
+
+    async def _overview_system(self) -> dict[str, Any]:
+        """系统健康：核心依赖实时态 + 采集链路健康（熔断/失败/新鲜度是运维第一信号）。"""
+        dep_rows = (await self._session.execute(select(DependencyHealth))).scalars().all()
+        by_status: dict[str, int] = {}
+        circuit_open = 0
+        items: list[dict[str, Any]] = []
+        for d in dep_rows:
+            by_status[d.status] = by_status.get(d.status, 0) + 1
+            if d.circuit_state == "OPEN":
+                circuit_open += 1
+            items.append(
+                {
+                    "dependency_type": d.dependency_type,
+                    "dependency_id": d.dependency_id,
+                    "status": d.status,
+                    "circuit_state": d.circuit_state,
+                    "consecutive_failures": d.consecutive_failures,
+                    "latency_p95_ms": d.latency_p95_ms,
+                    "error_rate_pct": d.error_rate_pct,
+                    "last_check_at": d.last_check_at,
+                }
+            )
+        run_rows = (
+            await self._session.execute(
+                select(CollectionRun.status, func.count())
+                .where(CollectionRun.deleted_at.is_(None))
+                .group_by(CollectionRun.status)
+            )
+        ).all()
+        by_run = dict(cast("Sequence[tuple[Any, Any]]", run_rows))
+        running = by_run.get("RUNNING", 0)
+        failed = by_run.get("FAILED", 0)
+        completed = by_run.get("COMPLETED", 0)
+        finished = completed + failed
+        success_rate = round(completed / finished * 100, 1) if finished else 0.0
+        latest_wm = (
+            await self._session.execute(
+                select(func.max(CollectionWatermark.last_collected_at)).where(
+                    CollectionWatermark.deleted_at.is_(None)
+                )
+            )
+        ).scalar()
+        return {
+            "dependencies": {
+                "by_status": by_status,
+                "circuit_open": circuit_open,
+                "total": len(items),
+                "items": items,
+            },
+            "collection": {
+                "by_status": by_run,
+                "total": running + failed + completed,
+                "running": running,
+                "failed": failed,
+                "success_rate_pct": success_rate,
+                "last_collected_at": latest_wm,
+            },
+        }
+
+    async def _overview_quality(self) -> dict[str, Any]:
+        """资产质量：指标健康度分布（EXCELLENT/GOOD/WARNING/CRITICAL）+ 血缘健康。"""
+        hs_rows = (
+            await self._session.execute(
+                select(
+                    MetricHealthScore.metric_id,
+                    MetricHealthScore.score,
+                    MetricHealthScore.level,
+                    MetricHealthScore.missing_dimensions,
+                ).where(MetricHealthScore.deleted_at.is_(None))
+            )
+        ).all()
+        by_level: dict[str, int] = {}
+        total_score = 0
+        risks: list[dict[str, Any]] = []
+        for mid, score, level, missing in hs_rows:
+            by_level[level] = by_level.get(level, 0) + 1
+            total_score += score
+            if level in ("WARNING", "CRITICAL"):
+                risks.append(
+                    {
+                        "metric_id": mid,
+                        "score": score,
+                        "level": level,
+                        "missing_dimensions": missing,
+                    }
+                )
+        risks.sort(key=lambda r: r["score"])
+        edges = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(LineageEdge)
+                .where(LineageEdge.deleted_at.is_(None))
+            )
+        ).scalar() or 0
+        stale = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(LineageEdge)
+                .where(
+                    LineageEdge.deleted_at.is_(None),
+                    LineageEdge.stale.is_(True),
+                )
+            )
+        ).scalar() or 0
+        ingest = (
+            await self._session.execute(
+                select(
+                    func.count(),
+                    func.max(LineageIngestRun.run_at),
+                ).where(LineageIngestRun.status == "success")
+            )
+        ).one()
+        return {
+            "metric_health": {
+                "by_level": by_level,
+                "total_scored": len(hs_rows),
+                "avg_score": round(total_score / len(hs_rows)) if hs_rows else 0,
+                "top_risk": risks[:5],
+            },
+            "lineage": {
+                "edges": edges,
+                "stale": stale,
+                "ingest_success": int(ingest[0] or 0),
+                "last_ingest_at": ingest[1],
+            },
+        }
+
+    async def _overview_risks(self) -> dict[str, Any]:
+        """风险雷达：PII 待复核 / 授权即将到期 / 近 7 天 Schema 漂移。"""
+        pii_pending = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(DBCatalog)
+                .where(
+                    DBCatalog.deleted_at.is_(None),
+                    DBCatalog.sensitivity_level.in_(["PII", "CONFIDENTIAL"]),
+                    DBCatalog.compliance_reviewed.is_(False),
+                )
+            )
+        ).scalar() or 0
+        expiring_cutoff = datetime.now(UTC) + timedelta(days=7)
+        expiring = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Grant)
+                .where(
+                    Grant.deleted_at.is_(None),
+                    Grant.status == GrantStatus.ACTIVE,
+                    Grant.expires_at.is_not(None),
+                    Grant.expires_at <= expiring_cutoff,
+                )
+            )
+        ).scalar() or 0
+        drift_since = datetime.now(UTC) - timedelta(days=7)
+        drift = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(SchemaDriftLog)
+                .where(
+                    SchemaDriftLog.deleted_at.is_(None),
+                    SchemaDriftLog.detected_at >= drift_since,
+                )
+            )
+        ).scalar() or 0
+        return {
+            "pii_review_pending": pii_pending,
+            "grants_expiring_soon": expiring,
+            "schema_drift_7d": drift,
+        }
+
+    async def _overview_trends(self, days: int = 7) -> dict[str, Any]:
+        """近 N 天趋势：指标新增 / 采集运行 按天聚合（缺失日期补 0）。"""
+        since = datetime.now(UTC) - timedelta(days=days - 1)
+        metric_rows = (
+            await self._session.execute(
+                select(func.date(Metric.created_at), func.count())
+                .where(
+                    Metric.deleted_at.is_(None),
+                    Metric.created_at >= since,
+                )
+                .group_by(func.date(Metric.created_at))
+            )
+        ).all()
+        collect_rows = (
+            await self._session.execute(
+                select(func.date(CollectionRun.started_at), func.count())
+                .where(
+                    CollectionRun.deleted_at.is_(None),
+                    CollectionRun.started_at >= since,
+                )
+                .group_by(func.date(CollectionRun.started_at))
+            )
+        ).all()
+        metric_map = dict(cast("Sequence[tuple[Any, Any]]", metric_rows))
+        collect_map = dict(cast("Sequence[tuple[Any, Any]]", collect_rows))
+        dates = [since.date() + timedelta(days=i) for i in range(days)]
+        return {
+            "days": days,
+            "metrics_created": [
+                {"date": str(d), "count": int(metric_map.get(d, 0))} for d in dates
+            ],
+            "collections": [
+                {"date": str(d), "count": int(collect_map.get(d, 0))} for d in dates
+            ],
         }
 
     async def commit(self) -> None:

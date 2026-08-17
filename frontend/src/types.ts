@@ -1459,6 +1459,65 @@ export interface ObsOverview {
     total: number;
     active: number;
   };
+  /** 系统健康：核心依赖实时态 + 采集链路（熔断/失败/新鲜度是运维第一信号） */
+  system: {
+    dependencies: {
+      by_status: Record<string, number>;
+      circuit_open: number;
+      total: number;
+      items: Array<{
+        dependency_type: string;
+        dependency_id: string;
+        status: string;
+        circuit_state: string;
+        consecutive_failures: number;
+        latency_p95_ms: number | null;
+        error_rate_pct: number;
+        last_check_at: string | null;
+      }>;
+    };
+    collection: {
+      by_status: Record<string, number>;
+      total: number;
+      running: number;
+      failed: number;
+      success_rate_pct: number;
+      last_collected_at: string | null;
+    };
+  };
+  /** 资产质量：指标健康度分布 + 血缘健康 */
+  quality: {
+    metric_health: {
+      by_level: Record<string, number>;
+      total_scored: number;
+      coverage_pct: number;
+      avg_score: number;
+      top_risk: Array<{
+        metric_id: number;
+        score: number;
+        level: string;
+        missing_dimensions: string[] | null;
+      }>;
+    };
+    lineage: {
+      edges: number;
+      stale: number;
+      ingest_success: number;
+      last_ingest_at: string | null;
+    };
+  };
+  /** 风险雷达：PII 待复核 / 授权即将到期 / 近 7 天 Schema 漂移 */
+  risks: {
+    pii_review_pending: number;
+    grants_expiring_soon: number;
+    schema_drift_7d: number;
+  };
+  /** 近 7 天趋势：指标新增 / 采集运行 按天聚合 */
+  trends: {
+    days: number;
+    metrics_created: Array<{ date: string; count: number }>;
+    collections: Array<{ date: string; count: number }>;
+  };
 }
 
 // ============================================================================

@@ -162,6 +162,35 @@ export const COLLECTION_MODE_LABEL: Record<string, string> = {
   INCREMENTAL: "增量采集",
 };
 
+// 核心依赖健康状态（dependency_health.status：HEALTHY/DEGRADED/UNAVAILABLE）
+export const DEP_STATUS_LABEL: Record<string, string> = {
+  HEALTHY: "健康",
+  DEGRADED: "降级",
+  UNAVAILABLE: "不可用",
+};
+
+// 熔断器状态（dependency_health.circuit_state：CLOSED/OPEN/HALF_OPEN）
+export const CIRCUIT_STATE_LABEL: Record<string, string> = {
+  CLOSED: "熔断闭合",
+  OPEN: "熔断开启",
+  HALF_OPEN: "半开恢复",
+};
+
+// 采集运行状态（collection_run.status：RUNNING/COMPLETED/FAILED）
+export const COLLECTION_RUN_STATUS_LABEL: Record<string, string> = {
+  RUNNING: "运行中",
+  COMPLETED: "已完成",
+  FAILED: "失败",
+};
+
+// 指标健康度分级（metric_health_score.level：EXCELLENT/GOOD/WARNING/CRITICAL）
+export const METRIC_HEALTH_LEVEL_LABEL: Record<string, string> = {
+  EXCELLENT: "优秀",
+  GOOD: "良好",
+  WARNING: "警告",
+  CRITICAL: "严重",
+};
+
 // ---- 质量 ----
 
 // 消息/事件「重要程度」（人工发送消息等 INFO/WARN/ERROR）

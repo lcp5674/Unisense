@@ -256,7 +256,21 @@ class TestObservabilityRepository:
             m.scalar.return_value = v
             return m
 
-        # 按 overview_stats 执行顺序：源健康/冲突/质量/指标/升级/指标状态/术语/维度/域/客户端
+        def one(v: Any) -> MagicMock:
+            m = MagicMock()
+            m.one.return_value = v
+            return m
+
+        def dep_obj(**kw: Any) -> MagicMock:
+            m = MagicMock()
+            for k, v in kw.items():
+                setattr(m, k, v)
+            return m
+
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        # 按 overview_stats 执行顺序：assets(11) → system(3) → quality(4) → risks(3) → trends(2)
         repo._session.execute = AsyncMock(
             side_effect=[
                 rows(("healthy", 2), ("unknown", 1)),  # sources by health
@@ -270,9 +284,28 @@ class TestObservabilityRepository:
                 scalar(2),  # domains
                 scalar(1),  # clients total
                 scalar(1),  # clients active
+                # ---- system ----
+                MagicMock(  # dependency_health scalars().all()
+                    scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+                ),
+                rows(("COMPLETED", 6), ("RUNNING", 2)),  # collection_run by status
+                scalar(now),  # watermark max last_collected_at
+                # ---- quality ----
+                rows((1, 70, "GOOD", None), (2, 65, "WARNING", ["sla"])),  # health rows
+                scalar(58),  # lineage edges
+                scalar(0),  # stale edges
+                one((58, now)),  # ingest (count, max run_at)
+                # ---- risks ----
+                scalar(305),  # pii review pending
+                scalar(0),  # grants expiring
+                scalar(3),  # schema drift 7d
+                # ---- trends ----
+                rows((now.date() - timedelta(days=1), 1), (now.date(), 2)),  # metric trend
+                rows((now.date(), 3)),  # collection trend
             ]
         )
         stats = await repo.overview_stats()
+        # 资产存量快照（原有字段保持不变）
         assert stats["sources"]["by_health"] == {"healthy": 2, "unknown": 1}
         assert stats["sources"]["total"] == 3
         assert stats["backlog"] == {
@@ -287,6 +320,42 @@ class TestObservabilityRepository:
         assert stats["assets"]["domains"] == 2
         assert stats["assets"]["sources"] == 3
         assert stats["clients"] == {"total": 1, "active": 1}
+        # 系统健康：依赖聚合 + 采集链路
+        assert stats["system"]["dependencies"] == {
+            "by_status": {},
+            "circuit_open": 0,
+            "total": 0,
+            "items": [],
+        }
+        assert stats["system"]["collection"]["by_status"] == {
+            "COMPLETED": 6,
+            "RUNNING": 2,
+        }
+        assert stats["system"]["collection"]["total"] == 8
+        assert stats["system"]["collection"]["running"] == 2
+        assert stats["system"]["collection"]["failed"] == 0
+        assert stats["system"]["collection"]["success_rate_pct"] == 100.0
+        assert stats["system"]["collection"]["last_collected_at"] == now
+        # 资产质量：指标健康度 + 血缘
+        assert stats["quality"]["metric_health"]["by_level"] == {"GOOD": 1, "WARNING": 1}
+        assert stats["quality"]["metric_health"]["total_scored"] == 2
+        assert stats["quality"]["metric_health"]["avg_score"] == 68
+        assert stats["quality"]["metric_health"]["coverage_pct"] == round(2 / 7 * 100, 1)
+        assert stats["quality"]["metric_health"]["top_risk"][0]["metric_id"] == 2
+        assert stats["quality"]["metric_health"]["top_risk"][0]["missing_dimensions"] == ["sla"]
+        assert stats["quality"]["lineage"]["edges"] == 58
+        assert stats["quality"]["lineage"]["stale"] == 0
+        assert stats["quality"]["lineage"]["ingest_success"] == 58
+        assert stats["quality"]["lineage"]["last_ingest_at"] == now
+        # 风险雷达
+        assert stats["risks"] == {
+            "pii_review_pending": 305,
+            "grants_expiring_soon": 0,
+            "schema_drift_7d": 3,
+        }
+        # 近 7 天趋势（缺失日期补 0）
+        assert len(stats["trends"]["metrics_created"]) == 7
+        assert stats["trends"]["collections"][-1]["count"] == 3
 
     async def test_overview_stats_filters_soft_deleted(
         self, repo: ObservabilityRepository
@@ -295,6 +364,7 @@ class TestObservabilityRepository:
 
         回归守护：此前数据源健康聚合漏过滤 deleted_at，把已软删数据源计入，
         导致平台概览数据源数（8）与数据源管理页真实数（2）不一致。
+        新增的 system/quality/risks 查询同样须带软删过滤。
         """
 
         def rows(*items: tuple[Any, int]) -> MagicMock:
@@ -307,22 +377,44 @@ class TestObservabilityRepository:
             m.scalar.return_value = v
             return m
 
+        def one(v: Any) -> MagicMock:
+            m = MagicMock()
+            m.one.return_value = v
+            return m
+
+        def dep_empty() -> MagicMock:
+            return MagicMock(
+                scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+            )
+
         captured: list[str] = []
 
         async def fake_execute(stmt, *a, **kw):  # type: ignore[no-untyped-def]
             captured.append(str(stmt))
             results = [
-                rows(("healthy", 1)),  # 数据源健康（仅存活）
-                scalar(1),  # 冲突未决
-                scalar(1),  # 质量事件
-                scalar(1),  # 指标 REVIEW
-                scalar(0),  # 升级
-                rows(("PUBLISHED", 7)),  # 指标状态
-                scalar(3),  # 术语
-                scalar(5),  # 维度
-                scalar(10),  # 域
-                scalar(1),  # 客户端总数
-                scalar(1),  # 客户端活跃
+                rows(("healthy", 1)),  # 1 数据源健康（仅存活）
+                scalar(1),  # 2 冲突未决
+                scalar(1),  # 3 质量事件
+                scalar(1),  # 4 指标 REVIEW
+                scalar(0),  # 5 升级
+                rows(("PUBLISHED", 7)),  # 6 指标状态
+                scalar(3),  # 7 术语
+                scalar(5),  # 8 维度
+                scalar(10),  # 9 域
+                scalar(1),  # 10 客户端总数
+                scalar(1),  # 11 客户端活跃
+                dep_empty(),  # 12 dependency_health
+                rows(("COMPLETED", 2)),  # 13 采集运行状态
+                scalar(None),  # 14 watermark max
+                rows((1, 70, "GOOD", None)),  # 15 指标健康度
+                scalar(58),  # 16 血缘边
+                scalar(0),  # 17 失效边
+                one((58, None)),  # 18 血缘接入
+                scalar(305),  # 19 PII 待复核
+                scalar(0),  # 20 授权到期
+                scalar(3),  # 21 schema 漂移
+                rows(("2026-08-11", 1)),  # 22 指标趋势
+                rows(("2026-08-11", 1)),  # 23 采集趋势
             ][len(captured) - 1]
             return results
 
@@ -346,7 +438,9 @@ class TestObservabilityRepository:
             ObservabilityRepository as _Repo,
         )
 
-        overview_src = inspect.getsource(_Repo.overview_stats)
+        overview_src = inspect.getsource(_Repo.overview_stats) + inspect.getsource(
+            _Repo._overview_assets
+        )
         assert "ConflictStatus.ESCALATED" in overview_src
         assert "QualityEventStatus.OPEN" in overview_src
         # 质量事件 / 升级计数过滤软删
@@ -354,6 +448,23 @@ class TestObservabilityRepository:
         assert "deleted_at IS NULL" in quality_sql
         escalation_sql = next(s for s in captured if "escalation_record" in s.lower())
         assert "deleted_at IS NULL" in escalation_sql
+        # 新增 system/quality/risks 查询同样带软删过滤
+        collection_run_sql = next(
+            s for s in captured if "collection_run" in s.lower() and "count" in s.lower()
+        )
+        assert "deleted_at IS NULL" in collection_run_sql
+        metric_health_sql = next(
+            s for s in captured if "metric_health_score" in s.lower()
+        )
+        assert "deleted_at IS NULL" in metric_health_sql
+        db_catalog_sql = next(s for s in captured if "db_catalog" in s.lower())
+        assert "deleted_at IS NULL" in db_catalog_sql
+        grants_sql = next(s for s in captured if "grants" in s.lower())
+        assert "deleted_at IS NULL" in grants_sql
+        schema_drift_sql = next(
+            s for s in captured if "schema_drift_log" in s.lower()
+        )
+        assert "deleted_at IS NULL" in schema_drift_sql
 
     async def test_commit(self, repo: ObservabilityRepository) -> None:
         await repo.commit()
