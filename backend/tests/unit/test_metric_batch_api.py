@@ -36,6 +36,7 @@ async def test_batch_submit_mixed_results(client):
     """批量提交：逐条收集，成功与失败并存（单条失败不阻断其余）。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         instance = mock_svc.return_value
+        instance.run_lineage_post_commit = AsyncMock()
         submitted = make_metric(status="REVIEW")
 
         async def fake_submit(code, request, **kwargs):
@@ -69,6 +70,7 @@ async def test_batch_submit_sanitizes_unknown_exception(client):
     """P0-3: 未知异常（内部细节）→ 脱敏为通用提示，不泄漏连接串/路径等内部信息。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         instance = mock_svc.return_value
+        instance.run_lineage_post_commit = AsyncMock()
         instance.submit_metric = AsyncMock(
             side_effect=RuntimeError(
                 "Connection to mysql://root:secret@db.internal:3306/universe failed (file:///etc/config)"
@@ -98,6 +100,7 @@ async def test_batch_submit_passes_reviewer_assignment(client):
     """批量提交透传评审指派字段（reviewer_id/reviewer_type）。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         instance = mock_svc.return_value
+        instance.run_lineage_post_commit = AsyncMock()
         instance.submit_metric = AsyncMock(return_value=make_metric(status="REVIEW"))
 
         resp = await client.post(
@@ -125,6 +128,7 @@ async def test_batch_approve_mixed_results(client):
     """批量通过：逐条收集，成功与失败并存。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         instance = mock_svc.return_value
+        instance.run_lineage_post_commit = AsyncMock()
         published = make_metric(status="PUBLISHED")
 
         async def fake_approve(code, request, **kwargs):
@@ -156,6 +160,7 @@ async def test_batch_approve_audit_includes_failed_codes(client):
         patch("app.api.metrics.write_audit") as mock_audit,
     ):
         instance = mock_svc.return_value
+        instance.run_lineage_post_commit = AsyncMock()
         published = make_metric(status="PUBLISHED")
 
         async def fake_approve(code, request, **kwargs):
@@ -183,6 +188,7 @@ async def test_batch_reject_mixed_results(client):
     """批量打回：逐条收集，成功与失败并存。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         instance = mock_svc.return_value
+        instance.run_lineage_post_commit = AsyncMock()
 
         async def fake_reject(code, request, **kwargs):
             if code == "x":
@@ -207,6 +213,7 @@ async def test_batch_deprecate_mixed_results(client):
     """批量下线：逐条收集，successor 未发布失败不影响其余。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         instance = mock_svc.return_value
+        instance.run_lineage_post_commit = AsyncMock()
 
         async def fake_deprecate(code, successor_code, **kwargs):
             if code == "no_successor":
