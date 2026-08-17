@@ -565,8 +565,10 @@ async def test_repo_upsert_concurrent_duplicate_falls_back_to_update():
     existing = MagicMock()
     existing.content_signature = "old_sig"
     existing.schema_json = {"columns": ["a"]}
-    # 首次 get_catalog 返回 None（MVCC 旧快照未见并发事务），重查返回真实行
-    repo.get_catalog = AsyncMock(side_effect=[None, existing])
+    # 首次活跃查询返回 None；含软删重查首次也 None（MVCC 旧快照未见并发事务），
+    # 撞键后再次重查返回并发事务已提交的行
+    repo.get_catalog = AsyncMock(return_value=None)
+    repo.get_catalog_any_status = AsyncMock(side_effect=[None, existing])
     cat, created, drift_info = await repo.upsert_catalog(
         source_id="s",
         entity_name="t",
@@ -577,7 +579,7 @@ async def test_repo_upsert_concurrent_duplicate_falls_back_to_update():
         owner_id=None,
     )
     assert created is False
-    assert repo.get_catalog.await_count == 2
+    assert repo.get_catalog_any_status.await_count == 2
     # 更新路径生效：schema 与内容指纹被刷新
     assert existing.schema_json == {"columns": ["a", "b"]}
     assert existing.content_signature == compute_content_signature(
@@ -585,6 +587,37 @@ async def test_repo_upsert_concurrent_duplicate_falls_back_to_update():
     )
     # SAVEPOINT 已回滚且会话未被污染（后续仍可正常 flush）
     assert s.begin_nested.call_count == 1
+
+
+async def test_repo_upsert_reactivates_soft_deleted():
+    """源端表重现：活跃行缺失但软删行占着幂等键 uk_db_catalog_entity。
+
+    应复用软删行（清 deleted_at 重新激活）走更新语义，而不是 INSERT 撞软删行
+    的唯一键抛 IntegrityError（回归：Duplicate entry ... for key 'uk_db_catalog_entity'）。
+    """
+    s = _session()
+    soft = MagicMock()
+    soft.deleted_at = datetime(2026, 8, 14, 10, 1, 40, tzinfo=UTC)
+    soft.content_signature = "old_sig"
+    soft.schema_json = {"columns": ["a"]}
+    repo = CollectorRepository(s)
+    # 主路径活跃查询返回 None；含软删查询返回软删行
+    repo.get_catalog = AsyncMock(return_value=None)
+    repo.get_catalog_any_status = AsyncMock(return_value=soft)
+    cat, created, drift_info = await repo.upsert_catalog(
+        source_id="s",
+        entity_name="t",
+        entity_type="TABLE",
+        schema_json={"columns": ["a", "b"]},
+        etl_sql=None,
+        sensitivity_level="INTERNAL",
+        owner_id=None,
+    )
+    assert created is False  # 复用而非新建
+    assert soft.deleted_at is None  # 软删标记已清除（重新激活）
+    assert cat.schema_json == {"columns": ["a", "b"]}
+    # 未走 INSERT 路径（无 SAVEPOINT），软删行直接复用
+    assert s.begin_nested.call_count == 0
 
 
 async def test_repo_bulk_deprecate_partial():

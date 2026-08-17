@@ -219,6 +219,24 @@ class CollectorRepository:
         )
         return res.scalar_one_or_none()
 
+    async def get_catalog_any_status(
+        self, source_id: str, entity_name: str
+    ) -> DBCatalog | None:
+        """按幂等键取目录实体（**含软删行**）。
+
+        唯一约束 ``uk_db_catalog_entity`` 仅含 (source_id, entity_name)、不含
+        deleted_at——软删实体仍占着幂等键。源端表重现时若只查活跃行会误判为
+        新建 → INSERT 撞软删行的唯一键。本方法供 upsert 复用软删行（清除
+        deleted_at 重新激活），替代失败重试。
+        """
+        res = await self._db.execute(
+            select(DBCatalog).where(
+                DBCatalog.source_id == source_id,
+                DBCatalog.entity_name == entity_name,
+            )
+        )
+        return res.scalar_one_or_none()
+
     async def get_catalog_by_id(self, catalog_id: int) -> DBCatalog | None:
         """按主键取目录实体（血缘图谱表节点下钻详情用）。"""
         res = await self._db.execute(
@@ -254,6 +272,15 @@ class CollectorRepository:
         drift_info: dict[str, Any] | None = None
 
         if existing is None:
+            # 源端表重现场景：活跃行不存在但可能有软删行占着幂等键。
+            # 直接复用软删行（清 deleted_at 重新激活），避免 INSERT 撞
+            # uk_db_catalog_entity（唯一键不含 deleted_at）。
+            soft_deleted = await self.get_catalog_any_status(source_id, entity_name)
+            if soft_deleted is not None and soft_deleted.deleted_at is not None:
+                existing = soft_deleted
+                existing.deleted_at = None
+
+        if existing is None:
             # 首次采集，检查空 schema
             schema_incomplete = not schema_json.get("columns")
             cat = DBCatalog(
@@ -280,9 +307,12 @@ class CollectorRepository:
                     await self._db.flush()
                 return cat, True, None
             except IntegrityError:
-                existing = await self.get_catalog(source_id, entity_name)
+                existing = await self.get_catalog_any_status(source_id, entity_name)
                 if existing is None:
                     raise
+                if existing.deleted_at is not None:
+                    # 软删实体在源端重现：复用恢复（清 deleted_at），继续走更新语义
+                    existing.deleted_at = None
 
         # 比对内容指纹检测 Drift
         old_signature = existing.content_signature
