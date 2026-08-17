@@ -131,13 +131,15 @@ async def test_mysql_collector_builds_specs():
         ["users", "orders"],
         {"users": [{"column_name": "user_name"}], "orders": [{"column_name": "order_id"}]},
     )
-    # FR-030：指定 database 时按单库采集（entity_name 为裸表名）
+    # FR-030 方案 A：连接库 database 为纯连接凭据；采集范围由 service 注入的
+    # 多目标库（set_databases）决定，entity_name 统一为 schema.table
     collector = InformationSchemaCollector(conn, database="db1")
+    collector.set_databases(["db1"])  # 模拟 service 层从 DataSource.databases 注入
     result = await collector.collect(MagicMock(source_id="s1", domain="db1"))
 
     assert isinstance(result, CollectResult)
     assert len(result.specs) == 2
-    assert result.specs[0].entity_name == "users"
+    assert result.specs[0].entity_name == "db1.users"
     # P1-1: schema_json.columns 为 {name,type,nullable} 字典列表
     cols = result.specs[0].schema_json["columns"]
     assert cols[0]["name"] == "user_name"
@@ -157,14 +159,15 @@ async def test_mysql_collector_single_table_failure_skips():
     """批量列查询下某表列缺失 → 该表产出空列，不阻断整批采集（FR-004 容错）。"""
     conn = _PartialFailConnector(["table1", "table2", "table3"], fail_at="table2")
     collector = InformationSchemaCollector(conn, database="db1")
+    collector.set_databases(["db1"])  # 模拟 service 层注入多目标库（方案 A）
     result = await collector.collect(MagicMock(source_id="s1", domain="db1"))
 
     assert len(result.specs) == 3  # 全部表仍产出
     assert len(result.failed_specs) == 0  # 批量查询部分缺失不视为失败
     by_name = {s.entity_name: s for s in result.specs}
-    assert by_name["table2"].schema_json["columns"] == []  # fail_at 表列缺失 → 空列
+    assert by_name["db1.table2"].schema_json["columns"] == []  # fail_at 表列缺失 → 空列
     # P1-1: 成功表列信息为 {name,type,nullable,comment,default} 字典
-    assert by_name["table1"].schema_json["columns"] == [
+    assert by_name["db1.table1"].schema_json["columns"] == [
         {
             "name": "table1_col1",
             "type": "unknown",
