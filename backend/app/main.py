@@ -195,6 +195,8 @@ _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "metric.health_critical",
     # 冲突仲裁「保留差异+指定一方改名」→ 定向通知指标 Owner 去详情页改名（TD §12.4）
     "metric.rename_required",
+    # PENDING_VERSION 确认期创建 → 定向通知消费方（Owner/备份 Owner）去「版本历史」确认（TD §12.3）
+    "metric.breaking_change_pending",
     # 冲突仲裁「选权威」→ 定向通知落败方指标 Owner：指标已废弃（DEPRECATED）或
     # 已作废（软删），后继=胜方（TD §12.4）
     "metric.voided",

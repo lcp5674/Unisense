@@ -49,6 +49,8 @@ def _svc_with_repo() -> tuple[MetricService, MagicMock]:
         # submit 路径会经 _notify_metric_stakeholders 开独立 DB 会话做定向通知，
         # 单元测试中会跨事件循环连库产生 RuntimeError——统一 mock 掉（通知行为另有集成测试）。
         svc._notify_metric_stakeholders = AsyncMock(return_value=None)
+        # PENDING 确认期创建后定向通知消费方（同样跨事件循环，统一 mock）
+        svc._notify_pending_consumers = AsyncMock(return_value=None)
         # PENDING 确认期检查（update_metric 破坏性变更前置）默认无待确认版本，
         # 个别测试覆盖为 True 验证防叠加。
         mock_repo_cls.return_value.has_pending_version = AsyncMock(return_value=False)
@@ -1899,6 +1901,52 @@ async def test_update_metric_published_second_breaking_blocked_during_pending():
     # 未创建版本记录、未创建新 PENDING（拒绝在创建前）
     repo.create_version.assert_not_called()
     repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_update_metric_pending_notifies_consumers():
+    """PUBLISHED 破坏性变更创建 PENDING 后，定向通知消费方（Owner/备份 Owner）。
+
+    修复前：create_pending 只建确认记录不通知（pending_version_manager TODO），
+    消费方在 14 天确认期内不知情只能被动等超时——确认期闭环断裂。
+    """
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="PUBLISHED",
+        row_version=1,
+        version=1,
+        owner_id=2,
+        backup_owner_id=3,
+        definition_json={"expression": "SUM(order_amount)"},
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    fake_pvm = MagicMock()
+    fake_pvm.create_pending = AsyncMock()
+
+    with patch(
+        "app.services.semantic.pending_version_manager.PendingVersionManager",
+        return_value=fake_pvm,
+    ):
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                definition_json={"expression": "SUM(refund_amount)"},
+                change_reason="破坏性口径变更",
+            ),
+            actor_id=2,  # owner 本人发起变更
+            role="metric_owner",
+        )
+
+    # 通知消费方（owner=2 + backup=3），跳过 actor 本人（2 已发起变更已知晓）
+    svc._notify_pending_consumers.assert_awaited_once_with(
+        metric_code="sales_gmv_daily",
+        version=2,
+        consumer_ids=[2, 3],
+        actor_id=2,
+    )
 
 
 async def test_update_metric_published_breaking_defers_lineage_registration():

@@ -835,6 +835,13 @@ class MetricService(BaseService):
                     consumers=consumer_ids,
                     reason="breaking_change_on_published",
                 )
+                # 定向通知消费方（Owner/备份 Owner）去「版本历史」确认（best-effort）
+                await self._notify_pending_consumers(
+                    metric_code=metric_code,
+                    version=new_version_num,
+                    consumer_ids=consumer_ids,
+                    actor_id=actor_id,
+                )
 
         # Top-level 破坏性变更但无 definition_json 提交时，仍需创建版本记录+PENDING
         elif top_level_breaking:
@@ -899,6 +906,13 @@ class MetricService(BaseService):
                     version=new_version_num,
                     consumers=consumer_ids,
                     reason="top_level_breaking_change_on_published",
+                )
+                # 定向通知消费方（Owner/备份 Owner）去「版本历史」确认（best-effort）
+                await self._notify_pending_consumers(
+                    metric_code=metric_code,
+                    version=new_version_num,
+                    consumer_ids=consumer_ids,
+                    actor_id=actor_id,
                 )
 
         # 注意：change_reason 仅写入 MetricVersion 快照（上方），metric 主表无该列，
@@ -1809,6 +1823,51 @@ class MetricService(BaseService):
                     logger.warning(
                         "metric_stakeholder_notify_failed event_type=%s metric=%s user=%s err=%s",
                         event_type,
+                        metric_code,
+                        uid,
+                        exc,
+                    )
+
+    async def _notify_pending_consumers(
+        self,
+        *,
+        metric_code: str,
+        version: int,
+        consumer_ids: list[int],
+        actor_id: int,
+    ) -> None:
+        """PENDING_VERSION 确认期创建 → 定向通知消费方去「版本历史」确认。
+
+        修复前：create_pending 只建确认记录、不通知（pending_version_manager.py 的
+        TODO），Owner 在 14 天确认期内若不知情只能被动等超时自动接受——确认期闭环断裂。
+
+        与 ``_notify_metric_stakeholders`` 同范式：IN_APP 定向送达，不依赖订阅偏好；
+        跳过发起变更的 actor 本人（其已知晓变更），通知其余消费方（备份 Owner 等）。
+        失败仅告警，不阻断变更创建。
+        """
+        from app.db.mysql import async_session_factory
+        from app.services.notify.service import NotifyService
+
+        for uid in consumer_ids:
+            if uid == actor_id:
+                continue
+            async with async_session_factory() as session:
+                try:
+                    await NotifyService(session).notify_user(
+                        user_id=uid,
+                        event_type="metric.breaking_change_pending",
+                        title="指标口径变更待确认",
+                        payload={
+                            "metric_code": metric_code,
+                            "version": version,
+                            "confirm_window": "14 天内",
+                            "action_hint": "请在指标详情页「版本历史」确认或拒绝，超时自动接受",
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "pending_consumer_notify_failed event_type=%s metric=%s user=%s err=%s",
+                        "metric.breaking_change_pending",
                         metric_code,
                         uid,
                         exc,

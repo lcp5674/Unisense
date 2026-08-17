@@ -61,6 +61,7 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "metric.emergency_published": "指标紧急发布",
     "metric.health_critical": "指标健康度严重",
     "metric.rename_required": "指标需要改名",
+    "metric.breaking_change_pending": "指标口径变更待确认",
     "conflict_open": "口径冲突待处理",
     "conflict_ruled": "口径冲突已裁决",
     "conflict_escalated": "口径冲突已升级",
