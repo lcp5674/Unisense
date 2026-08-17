@@ -136,7 +136,7 @@ describe("通知中心 - 列表与未读", () => {
 });
 
 describe("通知中心 - 已读与删除操作", () => {
-  it("单条标记已读调用 API 并刷新列表", async () => {
+  it("单条标记已读调用 API 并本地即时更新（不再整页刷新）", async () => {
     const n = notif({ id: 7, read_at: null, body: "指标编码：sales_gmv" });
     mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
 
@@ -147,7 +147,9 @@ describe("通知中心 - 已读与删除操作", () => {
     fireEvent.click(withinCard(card, "标记已读"));
 
     await waitFor(() => expect(mockedMarkRead).toHaveBeenCalledWith(7));
-    expect(mockedList).toHaveBeenCalledTimes(2); // 初始 + 操作后刷新
+    // 本地更新：不再整页刷新（列表请求停留 1 次），未读样式立即可取消
+    expect(mockedList).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(card.classList.contains("notif-unread")).toBe(false));
   });
 
   it("全部已读调用 read-all 并刷新", async () => {
@@ -160,7 +162,7 @@ describe("通知中心 - 已读与删除操作", () => {
     expect(mockedList).toHaveBeenCalledTimes(2);
   });
 
-  it("删除单条调用 API 并刷新", async () => {
+  it("删除单条调用 API 并本地即时移除（不再整页刷新）", async () => {
     const n = notif({ id: 9, body: "指标编码：sales_gmv" });
     mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
 
@@ -171,7 +173,9 @@ describe("通知中心 - 已读与删除操作", () => {
     fireEvent.click(withinCard(card, /删\s*除/));
 
     await waitFor(() => expect(mockedDelete).toHaveBeenCalledWith(9));
-    expect(mockedList).toHaveBeenCalledTimes(2);
+    // 本地即时移除：不再整页刷新，卡片从文档移除
+    expect(mockedList).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText("指标已通过")).not.toBeInTheDocument());
   });
 
   it("清空调用 DELETE /notifications 并刷新", async () => {

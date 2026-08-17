@@ -736,8 +736,17 @@ function NotifListTab() {
     if (n.read_at) return;
     try {
       await markNotificationRead(n.id);
-      message.success("已标记为已读");
-      load();
+      // 本地即时更新，避免整页刷新闪烁：
+      // - 若当前按「未读/仅待处理」过滤 → 该条不再匹配，从列表移除
+      // - 否则 → 仅更新该条 read_at（卡片立即变已读样式）
+      if (readFilter === "unread" || todoOnly) {
+        setItems((prev) => prev.filter((x) => x.id !== n.id));
+        setTotal((prev) => Math.max(0, prev - 1));
+      } else {
+        setItems((prev) =>
+          prev.map((x) => (x.id === n.id ? { ...x, read_at: new Date().toISOString() } : x)),
+        );
+      }
       notifyNotifChanged();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
@@ -758,9 +767,12 @@ function NotifListTab() {
   async function handleDelete(n: Notification) {
     try {
       await deleteNotification(n.id);
-      message.success("已删除该通知");
-      load();
+      // 本地即时移除，避免整页刷新闪烁
+      setItems((prev) => prev.filter((x) => x.id !== n.id));
+      setTotal((prev) => Math.max(0, prev - 1));
       notifyNotifChanged();
+      // 若当前页被删空且非第一页，回退一页（触发按 [page] 的 useEffect 重载）
+      if (items.length <= 1 && page > 1) setPage((p) => p - 1);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
     }
