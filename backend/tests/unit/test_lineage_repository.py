@@ -125,22 +125,54 @@ class _FakeDB:
         rows: list[_Row],
         meta_rows: list[_MetaRow] | None = None,
         history_rows: list[_HistRow] | None = None,
+        ingest_runs: list[LineageIngestRun] | None = None,
     ) -> None:
         self._rows: list[Any] = list(rows)
         self._meta_rows: list[Any] = list(meta_rows or [])
         self._history_rows: list[Any] = list(history_rows or [])
+        self._ingest_runs: list[Any] = list(ingest_runs or [])
         self.added: list[Any] = []
         self.flushed = False
 
     async def execute(self, stmt: object) -> _Result:
         # SQLAlchemy 编译产物含换行缩进：折叠空白以便按子串匹配分支
         sql = re.sub(r"\s+", " ", str(stmt.compile(compile_kwargs={"literal_binds": True})))
-        # 节点元数据：metric 表
+        # 节点元数据：metric 表（单值等值条件按 metric_code 过滤并给 scalar）
         if " FROM metric " in sql:
-            return _Result([r for r in self._meta_rows if r.table == "metric"])
-        # 节点元数据：db_catalog join data_source
+            rows = [r for r in self._meta_rows if r.table == "metric"]
+            code = _extract(sql, "metric_code")
+            if code is not None:
+                rows = [r for r in rows if getattr(r, "metric_code", None) == code]
+            return _Result(rows, scalar=rows[0] if len(rows) == 1 else None)
+        # 节点元数据：db_catalog join data_source（单值等值条件按 entity_name 过滤）
         if " FROM db_catalog " in sql or " JOIN data_source " in sql:
-            return _Result([r for r in self._meta_rows if r.table == "catalog"])
+            rows = [r for r in self._meta_rows if r.table == "catalog"]
+            name = _extract(sql, "entity_name")
+            if name is not None:
+                rows = [r for r in rows if getattr(r, "entity_name", None) == name]
+            return _Result(rows, scalar=rows[0] if len(rows) == 1 else None)
+        # 健康度聚合：stale_edge_count（count + stale 过滤）与全量 count
+        if " FROM lineage_edge " in sql and "count(" in sql.lower():
+            stale_only = "stale" in sql.lower()
+            n = sum(
+                1
+                for r in self._rows
+                if getattr(r, "deleted_at", None) is None
+                and (not stale_only or getattr(r, "stale", False))
+            )
+            return _Result([], scalar=n)
+        # 健康度表节点数：distinct table: 节点（source/target union，repository 端去重过滤）
+        if " FROM lineage_edge " in sql and "distinct" in sql.lower():
+            col = "source_node" if "source_node" in sql else "target_node"
+            return _Result([(getattr(r, col),) for r in self._rows])
+        # 健康度新鲜度：max(run_at) over lineage_ingest_run
+        if "from lineage_ingest_run" in sql.lower() and "max(" in sql.lower():
+            run_at: Any = None
+            for r in self._ingest_runs:
+                at = getattr(r, "run_at", None)
+                if at is not None and (run_at is None or at > run_at):
+                    run_at = at
+            return _Result([], scalar=run_at)
         # 边变更历史（Task D：edge_history_by_key）按唯一键过滤
         if " FROM lineage_edge_history " in sql:
             sn = _extract(sql, "source_node")
@@ -1223,3 +1255,139 @@ async def test_sync_metric_edges_preserves_manual_edges() -> None:
     assert deleted2 == 0  # 无自动维度边，manual 边保留
     targets = sorted(r.target_node for r in db._rows if r.source_node == "metric:m")
     assert targets == ["dimension:dim_manual", "table:dws.gmv_v2", "table:dws.legacy_manual"]
+
+
+# ---- 健康度（P2）与路径查询（P3）----
+
+
+def _ingest_run_with(*, run_at: Any) -> LineageIngestRun:
+    run = LineageIngestRun(source="sqlglot", status="success", run_at=run_at)
+    return run
+
+
+async def test_stale_edge_count_counts_only_stale() -> None:
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    db = _FakeDB(
+        [
+            _l1_edge("a", "b", last_seen=now, missing=2, stale=True),
+            _l1_edge("c", "d", last_seen=now, missing=0, stale=False),
+            _l1_edge("e", "f", last_seen=now, missing=1, stale=True),
+        ]
+    )
+    repo = LineageRepository(db)
+    assert await repo.stale_edge_count() == 2
+
+
+async def test_latest_ingest_run_time_returns_max() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    db = _FakeDB(
+        [],
+        ingest_runs=[
+            _ingest_run_with(run_at=now - timedelta(days=2)),
+            _ingest_run_with(run_at=now),
+            _ingest_run_with(run_at=now - timedelta(days=5)),
+        ],
+    )
+    repo = LineageRepository(db)
+    assert await repo.latest_ingest_run_time() == now
+
+
+async def test_latest_ingest_run_time_none_when_empty() -> None:
+    repo = LineageRepository(_FakeDB([]))
+    assert await repo.latest_ingest_run_time() is None
+
+
+async def test_find_paths_single_path() -> None:
+    db = _FakeDB([_l1_edge("a", "b"), _l1_edge("b", "c")])
+    repo = LineageRepository(db)
+    paths = await repo.find_paths("table:a", "table:c", max_hops=5)
+    assert len(paths) == 1
+    assert [e.source_node for e in paths[0]] == ["table:a", "table:b"]
+    assert [e.target_node for e in paths[0]] == ["table:b", "table:c"]
+
+
+async def test_find_paths_multiple_and_hops_limit() -> None:
+    db = _FakeDB(
+        [
+            _l1_edge("a", "b"),
+            _l1_edge("a", "c"),
+            _l1_edge("b", "d"),
+            _l1_edge("c", "d"),
+        ]
+    )
+    repo = LineageRepository(db)
+    paths = await repo.find_paths("table:a", "table:d", max_hops=5)
+    assert len(paths) == 2
+    # max_hops=1：a→d 需 2 跳，超出上限 → 无路径
+    assert await repo.find_paths("table:a", "table:d", max_hops=1) == []
+
+
+async def test_find_paths_no_path_and_cycle_safe() -> None:
+    # 环 a→b→a 不应死循环；a→c 仍有唯一路径
+    db = _FakeDB([_l1_edge("a", "b"), _l1_edge("b", "a"), _l1_edge("b", "c")])
+    repo = LineageRepository(db)
+    assert len(await repo.find_paths("table:a", "table:c", max_hops=5)) == 1
+    assert await repo.find_paths("table:a", "table:z", max_hops=5) == []
+
+
+async def test_find_terminals_finds_dead_ends() -> None:
+    db = _FakeDB([_l1_edge("a", "b"), _l1_edge("b", "c")])
+    repo = LineageRepository(db)
+    assert await repo.find_terminals("table:a", max_hops=5) == [
+        ("table:c", ["table:a", "table:b", "table:c"])
+    ]
+
+
+async def test_find_terminals_multiple_and_depth_limit() -> None:
+    db = _FakeDB(
+        [
+            _l1_edge("a", "b"),
+            _l1_edge("a", "c"),
+            _l1_edge("b", "d"),
+            _l1_edge("c", "e"),
+        ]
+    )
+    repo = LineageRepository(db)
+    terminals = sorted(t for t, _ in await repo.find_terminals("table:a", max_hops=5))
+    assert terminals == ["table:d", "table:e"]
+    # max_hops=1：a 一步到 b/c，但 b/c 有下游非死端 → 无终止节点
+    assert await repo.find_terminals("table:a", max_hops=1) == []
+
+
+async def test_entity_exists_metric_and_table() -> None:
+    db = _FakeDB(
+        [],
+        meta_rows=[
+            _MetaRow(table="metric", metric_code="gmv", domain="sales"),
+            _MetaRow(table="catalog", entity_name="dws.orders", catalog_id=1),
+        ],
+    )
+    repo = LineageRepository(db)
+    assert await repo.entity_exists("metric:gmv") is True
+    assert await repo.entity_exists("metric:nope") is False
+    assert await repo.entity_exists("table:dws.orders") is True
+    assert await repo.entity_exists("table:dws.zzz") is False
+    # field/external 等派生节点中性返回 True（不构成断链）
+    assert await repo.entity_exists("field:a.b.c") is True
+
+
+async def test_table_nodes_in_edges_unions_sources_and_targets() -> None:
+    db = _FakeDB(
+        [
+            _l1_edge("a", "b"),
+            _l1_edge("c", "d"),
+            _l1_edge("b", "e"),
+        ]
+    )
+    repo = LineageRepository(db)
+    # source: a/c/b、target: b/d/e → union {a,b,c,d,e} = 5
+    assert await repo.table_nodes_in_edges() == 5
+
+
+async def test_table_nodes_in_edges_empty() -> None:
+    repo = LineageRepository(_FakeDB([]))
+    assert await repo.table_nodes_in_edges() == 0

@@ -29,10 +29,13 @@ from app.services.lineage.schemas import (
     LineageCoverageResponse,
     LineageEdgeDetailResponse,
     LineageEdgeListParams,
+    LineageHealthResponse,
     LineageImpactParams,
     LineageParseBatchRequest,
     LineageParseRequest,
+    LineagePathResponse,
     LineageStaleParams,
+    LineageTerminalsResponse,
     ManualEdgeCreateRequest,
     ManualEdgeCreateResponse,
 )
@@ -410,6 +413,64 @@ async def coverage_broken(
     """断链边明细：source 节点对应的目录/指标实体已不存在（供人工修复跳转）。"""
     broken = await _svc(db).coverage_broken_edges(limit=limit)
     return ok(data=[b.model_dump(mode="json") for b in broken], trace_id=trace_id)
+
+
+# ---- 血缘平台健康度（P2 企业级治理综合评分）----
+
+
+@router.get("/health", dependencies=_READ_DEPS)
+async def lineage_health(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[LineageHealthResponse]:
+    """血缘平台综合健康度：覆盖/断链/失效/新鲜度/对账偏差五维评分 + 总分 + 等级。"""
+    health = await _svc(db).health_score()
+    return ok(data=health.model_dump(mode="json"), trace_id=trace_id)
+
+
+# ---- 血缘路径查询（P3：A→B 链路 + 断链定位）----
+
+
+@router.get("/path", dependencies=_READ_DEPS)
+async def lineage_path(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    source: str = Query(..., description="起点节点（可带 metric:/table:/field: 前缀）"),
+    target: str = Query(..., description="终点节点（同上）"),
+    max_hops: int = Query(5, ge=1, le=10, description="最大跳数"),
+    limit: int = Query(50, ge=1, le=200, description="返回路径条数上限"),
+) -> ApiResponse[LineagePathResponse]:
+    """A→B 血缘路径查询：返回全部可达链路（Neo4j 优先、MySQL DFS 兜底）。
+
+    用于回答「A 的数据如何流转到 B」「A→B 之间经过哪些中间层」；``shortest_hops``
+    给最短链路，``paths`` 给全部链路（含跳数）。
+    """
+    result = await _svc(db).path_query(
+        source=source, target=target, max_hops=max_hops, limit=limit
+    )
+    return ok(data=result.model_dump(mode="json"), trace_id=trace_id)
+
+
+@router.get("/path/terminals", dependencies=_READ_DEPS)
+async def lineage_path_terminals(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    node: str = Query(..., description="起点节点（可带 metric:/table:/field: 前缀）"),
+    max_hops: int = Query(5, ge=1, le=10, description="最大搜索深度（跳数）"),
+    limit: int = Query(100, ge=1, le=500, description="返回终止节点数上限"),
+) -> ApiResponse[LineageTerminalsResponse]:
+    """下游终止节点（断链定位）：从起点下游可达的无下游死端。
+
+    每个终止节点标注对应实体是否存在（``entity_exists=False`` 即断链嫌疑——
+    实体已删但历史边残留），供治理定位断链链路。
+    """
+    result = await _svc(db).terminal_nodes(
+        node=node, max_hops=max_hops, limit=limit
+    )
+    return ok(data=result.model_dump(mode="json"), trace_id=trace_id)
 
 
 # ---- 血缘采集通道（增量采集运维，TD §12.2）----

@@ -428,3 +428,94 @@ class LineageParseBatchResponse(BaseModel):
     statements: list[BatchParseStatementResult] = Field(
         default_factory=list, description="逐条解析结果"
     )
+
+
+# ---- 血缘平台健康度（P2：企业级治理综合评分）----
+
+
+class HealthDimension(BaseModel):
+    """健康度单一维度评分（0-100，值越高越健康）。
+
+    每个维度独立可解释：coverage=覆盖完整度、broken=断链率、stale=失效率、
+    freshness=采集新鲜度、reconciliation=图-库对账偏差。``detail`` 携带该维度
+    的原始指标，供前端 tooltip 下钻。
+    """
+
+    score: float = Field(description="该维度得分 0-100")
+    weight: float = Field(description="该维度在总分中的权重 0-1")
+    detail: dict[str, Any] = Field(default_factory=dict, description="该维度原始指标明细")
+
+
+class LineageHealthResponse(BaseModel):
+    """血缘平台综合健康度（企业级治理看板核心指标）。
+
+    五维加权总分 0-100：coverage 40% / broken 20% / stale 15% / freshness 15% /
+    reconciliation 10%。图存储不可达时 reconciliation 维度为 ``None`` 且不参与
+    总分（其余维度权重归一化）。``grade`` 按总分分档：excellent≥90 / good≥75 /
+    fair≥60 / poor<60。
+    """
+
+    overall_score: float = Field(description="综合健康度总分 0-100")
+    grade: str = Field(description="健康等级：excellent/good/fair/poor")
+    dimensions: dict[str, HealthDimension] = Field(
+        description="五维评分明细（coverage/broken/stale/freshness/reconciliation）"
+    )
+    edge_total: int = Field(description="血缘边总数")
+    metric_total: int = Field(description="指标总数")
+    table_total: int = Field(description="表总数")
+    evaluated_at: str = Field(description="评估时间（ISO8601 UTC）")
+
+
+# ---- 血缘路径查询（P3：A→B 链路 + 断链定位）----
+
+
+class LineagePathEdge(BaseModel):
+    """路径中的一条血缘边（有向：source 上游 → target 下游）。"""
+
+    source: str = Field(description="上游节点 id")
+    target: str = Field(description="下游节点 id")
+    edge_type: str = Field(description="边类型（DERIVED_FROM/READS_COLUMN/...）")
+
+
+class LineagePathItem(BaseModel):
+    """A→B 的一条完整血缘链路。"""
+
+    nodes: list[str] = Field(description="路径节点序列（source → ... → target）")
+    edges: list[LineagePathEdge] = Field(description="路径边序列（与 nodes 对应）")
+    hops: int = Field(description="跳数（边数）")
+
+
+class LineagePathResponse(BaseModel):
+    """A→B 路径查询结果（Neo4j 优先、MySQL 兜底）。"""
+
+    source: str = Field(description="起点节点 id")
+    target: str = Field(description="终点节点 id")
+    has_path: bool = Field(description="是否存在至少一条可达路径")
+    path_count: int = Field(description="路径条数（可能因 limit 截断）")
+    shortest_hops: int | None = Field(default=None, description="最短路径跳数；不可达为 None")
+    paths: list[LineagePathItem] = Field(default_factory=list, description="路径列表")
+    truncated: bool = Field(default=False, description="是否因 limit 截断（实际路径多于返回）")
+
+
+class LineageTerminalItem(BaseModel):
+    """下游终止节点（断链定位：从起点沿下游可达、但无继续下游的节点）。
+
+    终止节点分两类：合理边界（如 ADS 结果表）与断链嫌疑（对应实体已不存在
+    但仍被边引用）。``entity_exists`` 仅对 metric:/table: 节点判定权威库存在性，
+    其余类型中性为 True。
+    """
+
+    node: str = Field(description="终止节点 id")
+    path: list[str] = Field(description="从起点到该节点的最短路径节点序列")
+    hops: int = Field(description="到达该节点的跳数")
+    node_type: str = Field(description="节点类型：table/metric/field/external/other")
+    entity_exists: bool = Field(description="对应实体在权威库中是否存在（断链嫌疑标记）")
+
+
+class LineageTerminalsResponse(BaseModel):
+    """从指定节点下游展开的终止节点清单（断链定位）。"""
+
+    node: str = Field(description="起点节点 id")
+    terminal_count: int = Field(description="终止节点数（可能因 limit 截断）")
+    terminals: list[LineageTerminalItem] = Field(default_factory=list, description="终止节点列表")
+    truncated: bool = Field(default=False, description="是否因 limit 截断")

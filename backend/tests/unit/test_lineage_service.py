@@ -65,8 +65,17 @@ class FakeRepo:
         self.table_no_downstream: int = 0
         self.metric_rows: list[tuple[str, str | None]] = []
         self.broken_edges: list[dict[str, Any]] = []
+        # 健康度（P2）假数据
+        self.table_nodes_in_edges_count: int = 0
         # 边详情（Task D）假数据
         self.history: list[SimpleNamespace] = []
+        # 健康度（P2）假数据
+        self.stale_count: int = 0
+        self.latest_run_at: Any | None = None
+        # 路径查询（P3）假数据
+        self.repo_paths: list[list[Any]] = []
+        self.repo_terminals: list[tuple[str, list[str]]] = []
+        self.missing_entities: set[str] = set()
 
     async def upsert_edge(self, **kwargs: object) -> SimpleNamespace:
         self.upsert_calls.append(kwargs)
@@ -290,6 +299,9 @@ class FakeRepo:
     async def table_no_downstream_count(self) -> int:
         return self.table_no_downstream
 
+    async def table_nodes_in_edges(self) -> int:
+        return self.table_nodes_in_edges_count
+
     async def edge_total(self) -> int:
         return len(self.edges)
 
@@ -341,6 +353,26 @@ class FakeRepo:
             }
         return out
 
+    # ---- 健康度（P2）与路径查询（P3）假实现 ----
+    async def stale_edge_count(self) -> int:
+        return self.stale_count
+
+    async def latest_ingest_run_time(self) -> Any | None:
+        return self.latest_run_at
+
+    async def find_paths(
+        self, source: str, target: str, max_hops: int = 5, limit: int = 50
+    ) -> list[list[Any]]:
+        return list(self.repo_paths)
+
+    async def find_terminals(
+        self, node: str, max_hops: int = 5, limit: int = 100
+    ) -> list[tuple[str, list[str]]]:
+        return list(self.repo_terminals)
+
+    async def entity_exists(self, node: str) -> bool:
+        return node not in self.missing_entities
+
 
 class FakeGraph:
     """模拟 Neo4j 图读；result=None 表示图不可用降级。"""
@@ -356,6 +388,10 @@ class FakeGraph:
         self.calls: list[tuple[str, str, int, int]] = []
         self.deleted: list[tuple[str, str, str]] = []
         self.written: list[tuple[str, str, str]] = []
+        # P2/P3 图能力（默认不可用/无结果，与 result=None 降级语义一致）
+        self.edge_count: int | None = None
+        self.paths: list[tuple[list[str], list[tuple[str, str, str]]]] | None = None
+        self.terminals: list[tuple[str, list[str]]] | None = None
 
     async def query_impact(
         self, node: str, direction: str, max_hops: int, max_edges: int
@@ -370,6 +406,20 @@ class FakeGraph:
     async def delete_edges(self, edges: list[tuple[str, str, str]]) -> bool:
         self.deleted.extend(edges)
         return True
+
+    # ---- P2/P3 图能力假实现 ----
+    async def count_edges(self) -> int | None:
+        return self.edge_count
+
+    async def query_paths(
+        self, source: str, target: str, max_hops: int, limit: int
+    ) -> list[tuple[list[str], list[tuple[str, str, str]]]] | None:
+        return self.paths
+
+    async def query_terminals(
+        self, node: str, max_hops: int, limit: int
+    ) -> list[tuple[str, list[str]]] | None:
+        return self.terminals
 
 
 class FakeRedis:
@@ -1967,3 +2017,232 @@ async def test_parse_batch_empty_no_op() -> None:
     assert res.total_edges == 0
     assert res.succeeded == 0
     assert res.failed == 0
+
+
+# ---- 血缘平台健康度（P2）----
+
+
+async def test_health_score_computes_grade_and_dimensions() -> None:
+    """五维加权评分：覆盖率/断链/失效/新鲜度/对账一致时总分高、等级优。"""
+    repo = FakeRepo()
+    repo.metric_total_count = 100
+    repo.codes_with_lineage = [f"m{i}" for i in range(80)]  # 指标覆盖率 80%
+    repo.table_total_count = 50
+    repo.table_no_downstream = 5  # 表端到端 90%
+    repo.table_nodes_in_edges_count = 50  # 与 no_downstream 同口径（血缘边内 table 节点）
+    repo.edges = [SimpleNamespace() for _ in range(10)]
+    repo.broken_edges = [{}]  # 断链 1/10
+    repo.stale_count = 1  # 失效 1/10
+    repo.latest_run_at = datetime.now(UTC)  # 新鲜（0 天）
+    graph = FakeGraph()
+    graph.edge_count = 10  # 图-库一致
+    svc = LineageService(db=_FakeSession(), graph=graph)
+    svc._repo = repo
+
+    health = await svc.health_score()
+
+    # 各维度分：coverage 84 / broken 90 / stale 90 / freshness 100 / reconciliation 100
+    assert health.dimensions["coverage"].score == 84.0
+    assert health.dimensions["broken"].score == 90.0
+    assert health.dimensions["stale"].score == 90.0
+    assert health.dimensions["freshness"].score == 100.0
+    assert health.dimensions["reconciliation"].score == 100.0
+    # 总分 = 84*0.4 + 90*0.2 + 90*0.15 + 100*0.15 + 100*0.1 = 90.1
+    assert health.overall_score == 90.1
+    assert health.grade == "excellent"
+
+
+async def test_health_score_graph_unavailable_normalizes() -> None:
+    """图存储不可达：reconciliation 维度权重 0，其余维度权重归一化不惩罚。"""
+    repo = FakeRepo()
+    repo.metric_total_count = 100
+    repo.codes_with_lineage = [f"m{i}" for i in range(100)]
+    repo.table_total_count = 10
+    repo.table_no_downstream = 0
+    repo.table_nodes_in_edges_count = 10  # 与 no_downstream 同口径
+    repo.edges = [SimpleNamespace() for _ in range(5)]
+    repo.broken_edges = []
+    repo.stale_count = 0
+    repo.latest_run_at = datetime.now(UTC)
+    graph = FakeGraph()
+    graph.edge_count = None  # 图不可达
+    svc = LineageService(db=_FakeSession(), graph=graph)
+    svc._repo = repo
+
+    health = await svc.health_score()
+
+    assert health.dimensions["reconciliation"].weight == 0.0
+    assert health.dimensions["reconciliation"].detail == {"reason": "graph_unavailable"}
+    # coverage/broken/stale/freshness 全 100 → 归一化总分 100
+    assert health.overall_score == 100.0
+    assert health.grade == "excellent"
+
+
+async def test_health_score_freshness_decays_without_runs() -> None:
+    """无采集运行记录但有边：新鲜度 0 分，拉低总分。"""
+
+    repo = FakeRepo()
+    repo.metric_total_count = 100
+    repo.codes_with_lineage = [f"m{i}" for i in range(100)]
+    repo.table_total_count = 10
+    repo.table_no_downstream = 0
+    repo.table_nodes_in_edges_count = 10  # 与 no_downstream 同口径
+    repo.edges = [SimpleNamespace() for _ in range(10)]
+    repo.broken_edges = []
+    repo.stale_count = 0
+    repo.latest_run_at = None  # 有边但无运行记录
+    graph = FakeGraph()
+    graph.edge_count = 10
+    svc = LineageService(db=_FakeSession(), graph=graph)
+    svc._repo = repo
+
+    health = await svc.health_score()
+
+    assert health.dimensions["freshness"].score == 0.0
+    # 总分 = 100*0.4 + 100*0.2 + 100*0.15 + 0*0.15 + 100*0.1 = 85
+    assert health.overall_score == 85.0
+    assert health.grade == "good"
+
+
+async def test_health_score_freshness_neutral_when_empty_platform() -> None:
+    """全新平台（无边、无运行）：新鲜度中性满分，整体健康。"""
+    repo = FakeRepo()
+    svc = LineageService(db=_FakeSession(), graph=FakeGraph())
+    svc._repo = repo
+    health = await svc.health_score()
+    assert health.dimensions["freshness"].score == 100.0
+    assert health.overall_score == 100.0
+
+
+async def test_health_score_handles_naive_ingest_run_time() -> None:
+    """MySQL DATETIME 返回 offset-naive 时新鲜度不崩（生产真实时区场景回归）。"""
+    from datetime import timedelta
+
+    repo = FakeRepo()
+    repo.metric_total_count = 100
+    repo.codes_with_lineage = [f"m{i}" for i in range(100)]
+    repo.table_total_count = 10
+    repo.table_no_downstream = 0
+    repo.table_nodes_in_edges_count = 10  # 与 no_downstream 同口径
+    repo.edges = [SimpleNamespace() for _ in range(10)]
+    repo.broken_edges = []
+    repo.stale_count = 0
+    # offset-naive 时间（无 tzinfo，与 MySQL DATETIME 一致）
+    repo.latest_run_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=15)
+    graph = FakeGraph()
+    graph.edge_count = 10
+    svc = LineageService(db=_FakeSession(), graph=graph)
+    svc._repo = repo
+
+    health = await svc.health_score()
+
+    # 15 天 → 50 分（30 天衰减到 0）
+    assert health.dimensions["freshness"].score == 50.0
+    # 总分 = 100*0.4 + 100*0.2 + 100*0.15 + 50*0.15 + 100*0.1 = 92.5
+    assert health.overall_score == 92.5
+    assert health.grade == "excellent"
+
+
+# ---- 血缘路径查询（P3）----
+
+
+async def test_path_query_uses_graph_paths() -> None:
+    """图返回路径：直接采用，含最短跳数。"""
+    repo = FakeRepo()
+    graph = FakeGraph()
+    graph.paths = [
+        (
+            ["table:a", "table:m", "table:b"],
+            [("table:a", "table:m", "DERIVED_FROM"), ("table:m", "table:b", "DERIVED_FROM")],
+        ),
+        (["table:a", "table:b"], [("table:a", "table:b", "DERIVED_FROM")]),
+    ]
+    svc = LineageService(db=_FakeSession(), graph=graph)
+    svc._repo = repo
+
+    res = await svc.path_query(source="table:a", target="table:b")
+
+    assert res.has_path is True
+    assert res.path_count == 2
+    assert res.shortest_hops == 1
+    # 按边数升序：最短（1 跳）在前
+    assert res.paths[0].nodes == ["table:a", "table:b"]
+    assert res.paths[0].hops == 1
+    assert res.paths[1].nodes == ["table:a", "table:m", "table:b"]
+    assert res.paths[1].hops == 2
+    assert res.truncated is False
+
+
+async def test_path_query_falls_back_to_mysql_when_graph_none() -> None:
+    """图不可达（query_paths=None）：回退 MySQL DFS。"""
+    repo = FakeRepo()
+    graph = FakeGraph()
+    graph.paths = None
+    edge = make_edge()
+    edge.source_node = "table:a"
+    edge.target_node = "table:b"
+    repo.repo_paths = [[edge]]
+    svc = LineageService(db=_FakeSession(), graph=graph)
+    svc._repo = repo
+
+    res = await svc.path_query(source="table:a", target="table:b")
+
+    assert res.has_path is True
+    assert res.path_count == 1
+    assert res.paths[0].nodes == ["table:a", "table:b"]
+    assert res.paths[0].edges[0].source == "table:a"
+
+
+async def test_path_query_no_path() -> None:
+    """图与 MySQL 均无路径：has_path=False、shortest_hops=None。"""
+    repo = FakeRepo()
+    graph = FakeGraph()
+    graph.paths = []
+    svc = LineageService(db=_FakeSession(), graph=graph)
+    svc._repo = repo
+
+    res = await svc.path_query(source="table:a", target="table:z")
+
+    assert res.has_path is False
+    assert res.path_count == 0
+    assert res.shortest_hops is None
+    assert res.paths == []
+
+
+async def test_terminal_nodes_uses_graph_and_entity_exists() -> None:
+    """图终止节点 + 实体存在性标注（断链嫌疑）。"""
+    repo = FakeRepo()
+    repo.missing_entities = {"table:ghost"}
+    graph = FakeGraph()
+    graph.terminals = [
+        ("table:ghost", ["table:a", "table:ghost"]),
+        ("table:ads", ["table:a", "table:m", "table:ads"]),
+    ]
+    svc = LineageService(db=_FakeSession(), graph=graph)
+    svc._repo = repo
+
+    res = await svc.terminal_nodes(node="table:a")
+
+    assert res.terminal_count == 2
+    ghost = next(t for t in res.terminals if t.node == "table:ghost")
+    assert ghost.entity_exists is False  # 断链嫌疑
+    assert ghost.hops == 1
+    ads = next(t for t in res.terminals if t.node == "table:ads")
+    assert ads.entity_exists is True
+    assert ads.hops == 2
+
+
+async def test_terminal_nodes_falls_back_to_mysql() -> None:
+    """图不可达（query_terminals=None）：回退 MySQL DFS。"""
+    repo = FakeRepo()
+    graph = FakeGraph()
+    graph.terminals = None
+    repo.repo_terminals = [("table:end", ["table:a", "table:end"])]
+    svc = LineageService(db=_FakeSession(), graph=graph)
+    svc._repo = repo
+
+    res = await svc.terminal_nodes(node="table:a")
+
+    assert res.terminal_count == 1
+    assert res.terminals[0].node == "table:end"
+    assert res.terminals[0].node_type == "table"

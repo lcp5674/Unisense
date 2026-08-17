@@ -287,3 +287,148 @@ class LineageGraphClient:
             with contextlib.suppress(Exception):
                 await self._driver.close()
             self._driver = None
+
+    async def query_paths(
+        self, source: str, target: str, max_hops: int = 5, limit: int = 50
+    ) -> list[tuple[list[str], list[tuple[str, str, str]]]] | None:
+        """图路径查询（P3）：``source`` → ``target`` 的全部有向路径（Neo4j 读路径）。
+
+        Args:
+            source: 起点节点 id。
+            target: 终点节点 id。
+            max_hops: 最大跳数（可变长关系上界；小于 1 返回空列表）。
+            limit: 返回路径条数上限。
+
+        Returns:
+            每条路径 ``(nodes, edges)``：``nodes`` 为 ``[source, ..., target]`` 节点
+            id 序列，``edges`` 为 ``(src, tgt, edge_type)`` 边序列；未配置 URI /
+            熔断 / 不可达时返回 None（调用方降级 MySQL DFS）。
+        """
+        if max_hops < 1:
+            return []
+        if not self._uri:
+            return None
+        if not neo4j_breaker.allow():
+            logger.warning("lineage_graph_breaker_open")
+            return None
+        try:
+            from neo4j import AsyncGraphDatabase
+        except Exception:  # pragma: no cover - 依赖缺失时降级
+            return None
+
+        # 可变长关系上界必须是字面量（Neo4j 禁止参数），max_hops 由服务层校验无注入面。
+        hops = int(max_hops)
+        query = (
+            f"MATCH p = (a:Asset {{id:$source}})-[:LINEAGE*1..{hops}]->"
+            "(b:Asset {id:$target}) "
+            "RETURN [n IN nodes(p) | n.id] AS nodes, "
+            "[r IN relationships(p) | "
+            "{src: startNode(r).id, tgt: endNode(r).id, type: r.type}] AS edges "
+            "LIMIT $limit"
+        )
+        try:
+            if self._driver is None:
+                self._driver = AsyncGraphDatabase.driver(
+                    self._uri, auth=(self._user, self._password)
+                )
+            paths: list[tuple[list[str], list[tuple[str, str, str]]]] = []
+            async with self._driver.session() as session:
+                records = await session.run(query, source=source, target=target, limit=limit)
+                async for record in records:
+                    nodes = list(record["nodes"])
+                    edges = [(r["src"], r["tgt"], r["type"]) for r in record["edges"]]
+                    paths.append((nodes, edges))
+                    if len(paths) >= limit:
+                        break
+            neo4j_breaker.record_success()
+            return paths
+        except Exception as exc:  # 图存储不可达，降级 MySQL
+            neo4j_breaker.record_failure()
+            logger.warning("lineage_graph_paths_failed", error=str(exc))
+            return None
+
+    async def query_terminals(
+        self, node: str, max_hops: int = 5, limit: int = 100
+    ) -> list[tuple[str, list[str]]] | None:
+        """图终止节点查询（P3 断链定位）：从 ``node`` 下游可达的无下游死端（Neo4j）。
+
+        Args:
+            node: 起点节点 id。
+            max_hops: 最大跳数（可变长关系上界；小于 1 返回空列表）。
+            limit: 返回终止节点数上限。
+
+        Returns:
+            ``[(terminal_node, path_nodes)]``，``path_nodes`` 为 ``shortestPath``
+            的最短节点序列（含起点）；未配置 / 熔断 / 不可达时返回 None（调用方
+            降级 MySQL DFS）。
+        """
+        if max_hops < 1:
+            return []
+        if not self._uri:
+            return None
+        if not neo4j_breaker.allow():
+            logger.warning("lineage_graph_breaker_open")
+            return None
+        try:
+            from neo4j import AsyncGraphDatabase
+        except Exception:  # pragma: no cover - 依赖缺失时降级
+            return None
+
+        hops = int(max_hops)
+        query = (
+            f"MATCH p = shortestPath((s:Asset {{id:$node}})"
+            f"-[:LINEAGE*1..{hops}]->(t:Asset)) "
+            "WHERE NOT (t)-[:LINEAGE]->(:Asset) "
+            "RETURN t.id AS terminal, [n IN nodes(p) | n.id] AS path "
+            "LIMIT $limit"
+        )
+        try:
+            if self._driver is None:
+                self._driver = AsyncGraphDatabase.driver(
+                    self._uri, auth=(self._user, self._password)
+                )
+            terminals: list[tuple[str, list[str]]] = []
+            async with self._driver.session() as session:
+                records = await session.run(query, node=node, limit=limit)
+                async for record in records:
+                    terminals.append((record["terminal"], list(record["path"])))
+                    if len(terminals) >= limit:
+                        break
+            neo4j_breaker.record_success()
+            return terminals
+        except Exception as exc:  # 图存储不可达，降级 MySQL
+            neo4j_breaker.record_failure()
+            logger.warning("lineage_graph_terminals_failed", error=str(exc))
+            return None
+
+    async def count_edges(self) -> int | None:
+        """统计图内血缘边总数（P2 健康度「图-库对账偏差」维度原料）。
+
+        Returns:
+            图内 ``LINEAGE`` 关系总数；未配置 / 熔断 / 不可达时返回 None
+            （健康度对该维度降级为 unknown，不参与总分）。
+        """
+        if not self._uri:
+            return None
+        if not neo4j_breaker.allow():
+            logger.warning("lineage_graph_breaker_open")
+            return None
+        try:
+            from neo4j import AsyncGraphDatabase
+        except Exception:  # pragma: no cover - 依赖缺失时降级
+            return None
+        try:
+            if self._driver is None:
+                self._driver = AsyncGraphDatabase.driver(
+                    self._uri, auth=(self._user, self._password)
+                )
+            async with self._driver.session() as session:
+                record = await session.run("MATCH ()-[r:LINEAGE]->() RETURN count(r) AS n")
+                row = await record.single()
+                count = int(row["n"]) if row is not None else 0
+            neo4j_breaker.record_success()
+            return count
+        except Exception as exc:  # 图存储不可达，降级
+            neo4j_breaker.record_failure()
+            logger.warning("lineage_graph_count_failed", error=str(exc))
+            return None

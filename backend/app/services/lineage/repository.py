@@ -1270,6 +1270,22 @@ class LineageRepository:
         targets = {str(r[0]) for r in tgt_rows}
         return len(targets - sources)
 
+    async def table_nodes_in_edges(self) -> int:
+        """血缘边中出现的去重 ``table:`` 节点数（source ∪ target，软删过滤）。
+
+        用于健康度「表端到端完整度」分母：与 ``table_no_downstream_count`` 同口径
+        （均来自血缘边），避免与采集目录 ``table_total``（口径不同）混算。
+        """
+        src_q = select(func.distinct(LineageEdge.source_node)).where(
+            LineageEdge.deleted_at.is_(None), LineageEdge.source_node.like("table:%")
+        )
+        tgt_q = select(func.distinct(LineageEdge.target_node)).where(
+            LineageEdge.deleted_at.is_(None), LineageEdge.target_node.like("table:%")
+        )
+        src_rows = (await self._db.execute(src_q)).all()
+        tgt_rows = (await self._db.execute(tgt_q)).all()
+        return len({str(r[0]) for r in src_rows} | {str(r[0]) for r in tgt_rows})
+
     async def edge_total(self) -> int:
         """血缘边总数（soft 删除过滤）。"""
         n = await self._db.execute(
@@ -1378,3 +1394,147 @@ class LineageRepository:
             .scalars()
             .all()
         )
+
+    # ---- 健康度（P2）与路径查询（P3）----
+
+    async def stale_edge_count(self) -> int:
+        """当前失效（stale=True 且未删除）边总数（健康度失效率维度原料）。"""
+        n = await self._db.execute(
+            select(func.count(LineageEdge.id)).where(
+                LineageEdge.stale.is_(True), LineageEdge.deleted_at.is_(None)
+            )
+        )
+        return int(n.scalar_one_or_none() or 0)
+
+    async def latest_ingest_run_time(self) -> datetime | None:
+        """全部通道最近一次采集运行时间（健康度新鲜度维度原料）。
+
+        跨 ``lineage_ingest_run`` 取 ``run_at`` 最大值；无任何运行记录返回 None。
+        """
+        row = (
+            await self._db.execute(select(func.max(LineageIngestRun.run_at)))
+        ).scalar_one_or_none()
+        return row if isinstance(row, datetime) else None
+
+    async def find_paths(
+        self, source: str, target: str, max_hops: int = 5, limit: int = 50
+    ) -> list[list[LineageEdge]]:
+        """DFS 找 ``source`` → ``target`` 的全部有向路径（MySQL 兜底，图不可达时用）。
+
+        边方向即血缘方向（source 上游 → target 下游）；沿 ``_edges_from`` 展开，
+        不回溯（跳过已访问节点防环），跳数上限 ``max_hops``、路径条数上限 ``limit``。
+
+        Args:
+            source: 起点节点 id。
+            target: 终点节点 id。
+            max_hops: 最大跳数（边数），小于 1 时返回空。
+            limit: 返回路径条数上限。
+
+        Returns:
+            每条路径为 ``[LineageEdge, ...]``（source 起 → target 止）。
+        """
+        if max_hops < 1:
+            return []
+        adj: dict[str, list[LineageEdge]] = {}
+
+        async def _downstream(n: str) -> list[LineageEdge]:
+            if n not in adj:
+                adj[n] = await self._edges_from(n)
+            return adj[n]
+
+        paths: list[list[LineageEdge]] = []
+
+        async def _dfs(node: str, current: list[LineageEdge], visited: set[str]) -> None:
+            if len(paths) >= limit:
+                return
+            for e in await _downstream(node):
+                if e.target_node in visited:
+                    continue
+                nxt = current + [e]
+                if e.target_node == target:
+                    paths.append(nxt)
+                    if len(paths) >= limit:
+                        return
+                elif len(nxt) < max_hops:
+                    visited.add(e.target_node)
+                    await _dfs(e.target_node, nxt, visited)
+                    visited.remove(e.target_node)
+
+        await _dfs(source, [], {source})
+        return paths
+
+    async def find_terminals(
+        self, node: str, max_hops: int = 5, limit: int = 100
+    ) -> list[tuple[str, list[str]]]:
+        """从 ``node`` 沿下游 DFS 找终止节点（无下游边的死端，断链定位用）。
+
+        语义：从起点沿血缘方向展开，深度 ≤ ``max_hops``，收集所有「无下游边」
+        的节点——它们是合理边界（如 ADS 结果表）或断链嫌疑点（对应实体已不存在
+        但仍被边引用，实体存在性由上层结合权威库判定）。
+
+        Args:
+            node: 起点节点 id。
+            max_hops: 最大搜索深度（跳数），小于 1 时返回空。
+            limit: 返回终止节点数上限。
+
+        Returns:
+            ``[(terminal_node, path_nodes)]``，``path_nodes`` 为从起点到该节点的
+            最短节点序列（含起点）。
+        """
+        if max_hops < 1:
+            return []
+        adj: dict[str, list[LineageEdge]] = {}
+        best: dict[str, list[str]] = {}
+        terminals: list[tuple[str, list[str]]] = []
+
+        async def _downstream(n: str) -> list[LineageEdge]:
+            if n not in adj:
+                adj[n] = await self._edges_from(n)
+            return adj[n]
+
+        async def _dfs(n: str, path: list[str], visited: set[str]) -> None:
+            if len(terminals) >= limit:
+                return
+            edges = await _downstream(n)
+            if not edges:
+                if n not in best or len(path) < len(best[n]):
+                    best[n] = list(path)
+                if all(t[0] != n for t in terminals):
+                    terminals.append((n, list(path)))
+                return
+            if len(path) >= max_hops:
+                return  # 达到搜索深度上限：非死端，不深入
+            for e in edges:
+                if e.target_node in visited:
+                    continue
+                visited.add(e.target_node)
+                await _dfs(e.target_node, path + [e.target_node], visited)
+                visited.remove(e.target_node)
+
+        await _dfs(node, [node], {node})
+        return terminals
+
+    async def entity_exists(self, node: str) -> bool:
+        """节点对应实体在权威库中是否存在（断链嫌疑判定）。
+
+        仅判定 ``metric:``（metrics 表）与 ``table:``（db_catalog 表，含 soft 删除
+        过滤）；``field:``/``external:``/``consumer:`` 等派生或约定占位节点中性
+        返回 True（不构成断链）。
+        """
+        if node.startswith("metric:"):
+            code = node[len("metric:") :]
+            row = await self._db.execute(
+                select(Metric.metric_code).where(
+                    Metric.metric_code == code, Metric.deleted_at.is_(None)
+                )
+            )
+            return row.scalar_one_or_none() is not None
+        if node.startswith("table:"):
+            name = node[len("table:") :]
+            row = await self._db.execute(
+                select(DBCatalog.entity_name).where(
+                    DBCatalog.entity_name == name, DBCatalog.deleted_at.is_(None)
+                )
+            )
+            return row.scalar_one_or_none() is not None
+        return True

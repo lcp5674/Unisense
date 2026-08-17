@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,12 +43,14 @@ from app.services.lineage.schemas import (
     CoverageOrphanItem,
     EdgeDeleteResult,
     FieldLineageItem,
+    HealthDimension,
     ImpactPreviewResponse,
     LineageChannelResponse,
     LineageCoverageResponse,
     LineageEdgeDetailResponse,
     LineageEdgeHistoryResponse,
     LineageEdgeResponse,
+    LineageHealthResponse,
     LineageImpactParams,
     LineageIngestRunResponse,
     LineageNodeInfo,
@@ -56,6 +59,11 @@ from app.services.lineage.schemas import (
     LineageParseBatchResponse,
     LineageParseRequest,
     LineageParseResponse,
+    LineagePathEdge,
+    LineagePathItem,
+    LineagePathResponse,
+    LineageTerminalItem,
+    LineageTerminalsResponse,
     ManualEdgeCreateRequest,
     ManualEdgeCreateResponse,
     PiiImpactItem,
@@ -83,6 +91,8 @@ _INGEST_COMMIT_BATCH = 500
 _DETAIL_EDGE_SAMPLE = 200
 #: 覆盖率断链校验的边扫描上限（治理端点，避免超大批边集全量拉取）。
 _MAX_COVERAGE_BROKEN_SCAN = 2000
+#: 健康度「采集新鲜度」维度的满分新鲜天数：距最近采集超过该天数即线性衰减到 0 分。
+_FRESHNESS_FULL_DAYS = 30
 
 
 def node_consumer(client_id: str) -> str:
@@ -503,6 +513,146 @@ class LineageService(BaseService):
         if not node or ":" in node:
             return [node]
         return [f"metric:{node}", f"table:{node}", f"field:{node}"]
+
+    async def path_query(
+        self, source: str, target: str, max_hops: int = 5, limit: int = 50
+    ) -> LineagePathResponse:
+        """A→B 血缘路径查询（P3）：图(Neo4j)全路径优先，空/不可达回退 MySQL DFS。
+
+        无前缀输入（如裸指标编码）自动展开为 ``metric:/table:/field:`` 候选节点
+        对逐个尝试（与影响分析读侧容错一致）；带前缀则只查单对。返回路径按边数
+        升序，``shortest_hops`` 为最短路径跳数。
+
+        Args:
+            source: 起点节点（可带 ``metric:/table:/field:`` 前缀）。
+            target: 终点节点（同上）。
+            max_hops: 最大跳数。
+            limit: 返回路径条数上限。
+
+        Returns:
+            ``LineagePathResponse``（has_path/path_count/shortest_hops/paths/truncated）。
+        """
+        sources = self._resolve_query_nodes(source)
+        targets = self._resolve_query_nodes(target)
+        collected: list[tuple[list[str], list[LineagePathEdge]]] = []
+        for s in sources:
+            if len(collected) >= limit:
+                break
+            for t in targets:
+                if len(collected) >= limit:
+                    break
+                paths = await self._path_between(s, t, max_hops, limit - len(collected))
+                for nodes, edges in paths:
+                    if len(collected) >= limit:
+                        break
+                    collected.append((nodes, edges))
+        collected.sort(key=lambda item: len(item[1]))
+        items = [
+            LineagePathItem(nodes=nodes, edges=edges, hops=len(edges)) for nodes, edges in collected
+        ]
+        return LineagePathResponse(
+            source=source,
+            target=target,
+            has_path=bool(items),
+            path_count=len(items),
+            shortest_hops=min((len(edges) for _, edges in collected), default=None),
+            paths=items,
+            truncated=len(collected) >= limit,
+        )
+
+    async def _path_between(
+        self, source: str, target: str, max_hops: int, limit: int
+    ) -> list[tuple[list[str], list[LineagePathEdge]]]:
+        """单节点对 A→B 路径：Neo4j 全路径优先，空/不可达回退 MySQL DFS。
+
+        Neo4j 可能只同步了部分边（L1 表级 + 指标边），``field:``/``external:``
+        等 L2/L3 边仅 MySQL 权威存储——图返回空结果同样回退 MySQL 兜底。
+        """
+        if self._graph is not None:
+            graph_paths = await self._graph.query_paths(source, target, max_hops, limit)
+            if graph_paths:
+                return [
+                    (
+                        nodes,
+                        [
+                            LineagePathEdge(source=s, target=t, edge_type=etype)
+                            for s, t, etype in edges
+                        ],
+                    )
+                    for nodes, edges in graph_paths
+                ]
+        edge_paths = await self._repo.find_paths(source, target, max_hops, limit)
+        result: list[tuple[list[str], list[LineagePathEdge]]] = []
+        for ep in edge_paths:
+            nodes = [ep[0].source_node] + [e.target_node for e in ep]
+            edges = [
+                LineagePathEdge(source=e.source_node, target=e.target_node, edge_type=e.edge_type)
+                for e in ep
+            ]
+            result.append((nodes, edges))
+        return result
+
+    async def terminal_nodes(
+        self, node: str, max_hops: int = 5, limit: int = 100
+    ) -> LineageTerminalsResponse:
+        """下游终止节点（P3 断链定位）：从节点下游可达的无下游死端。
+
+        图(Neo4j)优先，空/不可达回退 MySQL DFS。每个终止节点标注对应实体在
+        权威库中的存在性（``entity_exists``）——实体已不存在但仍有边引用即为
+        断链嫌疑（如采集目录已删、指标已删但历史边残留）。
+
+        Args:
+            node: 起点节点（可带前缀；无前缀自动展开候选，取首个有结果的）。
+            max_hops: 最大搜索深度（跳数）。
+            limit: 返回终止节点数上限。
+
+        Returns:
+            ``LineageTerminalsResponse``（terminals + terminal_count + truncated）。
+        """
+        candidates = self._resolve_query_nodes(node)
+        terminals: list[tuple[str, list[str]]] = []
+        for cand in candidates:
+            if self._graph is not None:
+                graph_terminals = await self._graph.query_terminals(cand, max_hops, limit)
+                if graph_terminals is not None and graph_terminals:
+                    terminals = graph_terminals
+                    break
+        if not terminals:
+            for cand in candidates:
+                rows = await self._repo.find_terminals(cand, max_hops, limit)
+                if rows:
+                    terminals = rows
+                    break
+        items: list[LineageTerminalItem] = []
+        for tnode, path in terminals:
+            items.append(
+                LineageTerminalItem(
+                    node=tnode,
+                    path=path,
+                    hops=max(0, len(path) - 1),
+                    node_type=self._node_type_of(tnode),
+                    entity_exists=await self._repo.entity_exists(tnode),
+                )
+            )
+        return LineageTerminalsResponse(
+            node=node,
+            terminal_count=len(items),
+            terminals=items,
+            truncated=len(items) >= limit,
+        )
+
+    @staticmethod
+    def _node_type_of(node: str) -> str:
+        """从节点 id 前缀判定类型（table/metric/field/external/other）。"""
+        for prefix, ntype in (
+            ("table:", "table"),
+            ("metric:", "metric"),
+            ("field:", "field"),
+            ("external:", "external"),
+        ):
+            if node.startswith(prefix):
+                return ntype
+        return "other"
 
     async def list_edges(self, node: str, direction: str = "both") -> list[LineageEdgeResponse]:
         """列出与某节点直接相关的血缘边（一跳，含 ``pii_inherited``）。
@@ -1163,6 +1313,146 @@ class LineageService(BaseService):
         """
         rows = await self._repo.coverage_broken_edges(limit=limit)
         return [CoverageBrokenEdgeItem.model_validate(r) for r in rows]
+
+    async def health_score(self) -> LineageHealthResponse:
+        """血缘平台综合健康度（P2 企业级治理看板核心）。
+
+        五维评分（各 0-100，权重见 docstring）加权总分，维度独立可解释：
+        - ``coverage``（40%）：指标血缘完整度 × 0.6 + 表端到端完整度 × 0.4
+        - ``broken``（20%）：1 - 断链边数 / 边总数
+        - ``stale``（15%）：1 - 失效边数 / 边总数
+        - ``freshness``（15%）：距最近采集的天数线性衰减（30 天满分→0），无记录为 0
+        - ``reconciliation``（10%）：图-库边数偏差（|差|/较大者），图不可达时该维度
+          不参与总分（其余维度权重归一化）
+        """
+        cov = await self.coverage_stats()
+        stale_count = await self._repo.stale_edge_count()
+        latest_run = await self._repo.latest_ingest_run_time()
+
+        metric_ratio = cov.metric_with_lineage / cov.metric_total if cov.metric_total else 1.0
+        # 表端到端完整度：分母用血缘边内的 table 节点数（与 no_downstream 同口径），
+        # 不用采集目录 table_total（不同口径，如血缘边含大量历史/外部表时会产生负值）。
+        table_ratio = 1.0
+        table_in_edges = await self._repo.table_nodes_in_edges()
+        if table_in_edges:
+            table_ratio = 1 - cov.table_no_downstream / table_in_edges
+        coverage_score = 100.0 * (metric_ratio * 0.6 + table_ratio * 0.4)
+
+        broken_score = 100.0 * (1 - cov.broken_edges / cov.edge_total) if cov.edge_total else 100.0
+        stale_score = 100.0 * (1 - stale_count / cov.edge_total) if cov.edge_total else 100.0
+
+        freshness_score = 100.0
+        if latest_run is None and cov.edge_total == 0:
+            pass  # 全新平台无采集活动：中性满分，不视为瑕疵
+        elif latest_run is None:
+            freshness_score = 0.0  # 有边但无任何采集运行记录
+        else:
+            # MySQL DATETIME 返回 offset-naive：统一按 UTC 解释后再与 now(UTC) 相减
+            if latest_run.tzinfo is None:
+                latest_run = latest_run.replace(tzinfo=UTC)
+            days = max(0.0, (datetime.now(UTC) - latest_run).total_seconds() / 86400)
+            freshness_score = max(0.0, 100.0 - days * (100.0 / _FRESHNESS_FULL_DAYS))
+
+        dimensions: dict[str, HealthDimension] = {
+            "coverage": HealthDimension(
+                score=round(coverage_score, 1),
+                weight=0.4,
+                detail={
+                    "metric_total": cov.metric_total,
+                    "metric_with_lineage": cov.metric_with_lineage,
+                    "metric_ratio": round(metric_ratio, 4),
+                    "table_total": cov.table_total,
+                    "table_no_downstream": cov.table_no_downstream,
+                    "table_ratio": round(table_ratio, 4),
+                },
+            ),
+            "broken": HealthDimension(
+                score=round(broken_score, 1),
+                weight=0.2,
+                detail={"broken_edges": cov.broken_edges, "edge_total": cov.edge_total},
+            ),
+            "stale": HealthDimension(
+                score=round(stale_score, 1),
+                weight=0.15,
+                detail={"stale_edges": stale_count, "edge_total": cov.edge_total},
+            ),
+            "freshness": HealthDimension(
+                score=round(freshness_score, 1),
+                weight=0.15,
+                detail={
+                    "latest_run_at": latest_run.isoformat() if latest_run else None,
+                    "days_since_run": (
+                        round(
+                            max(
+                                0.0,
+                                (datetime.now(UTC) - latest_run.replace(tzinfo=UTC)).total_seconds()
+                                / 86400,
+                            ),
+                            1,
+                        )
+                        if latest_run
+                        else None
+                    ),
+                },
+            ),
+        }
+
+        reconciliation_score: float | None = None
+        if self._graph is not None:
+            graph_edges = await self._graph.count_edges()
+            if graph_edges is not None:
+                denom = max(cov.edge_total, graph_edges)
+                drift = abs(cov.edge_total - graph_edges) / denom if denom else 0.0
+                reconciliation_score = max(0.0, 100.0 - drift * 100.0)
+                dimensions["reconciliation"] = HealthDimension(
+                    score=round(reconciliation_score, 1),
+                    weight=0.1,
+                    detail={
+                        "mysql_edges": cov.edge_total,
+                        "graph_edges": graph_edges,
+                        "drift": round(drift, 4),
+                    },
+                )
+            else:
+                dimensions["reconciliation"] = HealthDimension(
+                    score=0.0, weight=0.0, detail={"reason": "graph_unavailable"}
+                )
+        else:
+            dimensions["reconciliation"] = HealthDimension(
+                score=0.0, weight=0.0, detail={"reason": "graph_not_configured"}
+            )
+
+        if reconciliation_score is not None:
+            total = sum(dimensions[k].score * dimensions[k].weight for k in dimensions)
+        else:
+            # 图不可达：reconciliation 权重 0.1 从分母剔除，其余权重归一化
+            weighted = 0.4 + 0.2 + 0.15 + 0.15
+            total = (
+                sum(
+                    dimensions[k].score * dimensions[k].weight
+                    for k in ("coverage", "broken", "stale", "freshness")
+                )
+                / weighted
+            )
+        overall = round(total, 1)
+        grade = (
+            "excellent"
+            if overall >= 90
+            else "good"
+            if overall >= 75
+            else "fair"
+            if overall >= 60
+            else "poor"
+        )
+        return LineageHealthResponse(
+            overall_score=overall,
+            grade=grade,
+            dimensions=dimensions,
+            edge_total=cov.edge_total,
+            metric_total=cov.metric_total,
+            table_total=cov.table_total,
+            evaluated_at=datetime.now(UTC).isoformat(),
+        )
 
     # ---- 血缘边详情（Task D）----
 
