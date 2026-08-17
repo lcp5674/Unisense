@@ -2622,7 +2622,7 @@ async def test_confirm_version_lock_conflict_rolls_back():
 async def test_auto_accept_timeout_promotes_when_all_accepted():
     """超时自动接受：全部 PENDING 置 TIMEOUT_ACCEPTED 后转正。"""
     svc, repo = _svc_with_repo()
-    repo.get_by_id = AsyncMock(return_value=make_metric())
+    repo.get_by_id = AsyncMock(return_value=make_metric(status="PUBLISHED"))
     repo.get_pending_confirmations = AsyncMock(
         side_effect=[
             [MagicMock(id=1, status="PENDING")],  # 首次读取：有 PENDING
@@ -2645,7 +2645,7 @@ async def test_auto_accept_timeout_promotes_when_all_accepted():
 async def test_auto_accept_timeout_all_confirmed_promotes():
     """无 PENDING 可标记但全部已确认 → 直接转正（返回更新后指标）。"""
     svc, repo = _svc_with_repo()
-    repo.get_by_id = AsyncMock(return_value=make_metric())
+    repo.get_by_id = AsyncMock(return_value=make_metric(status="PUBLISHED"))
     repo.get_pending_confirmations = AsyncMock(return_value=[MagicMock(id=1, status="CONFIRMED")])
     repo.update_confirmation_status = AsyncMock()
     repo.get_version = AsyncMock(
@@ -2664,7 +2664,7 @@ async def test_auto_accept_timeout_all_confirmed_promotes():
 async def test_auto_accept_timeout_no_confirmations_returns_none():
     """版本无待确认记录 → 返回 None（不抛错）。"""
     svc, repo = _svc_with_repo()
-    repo.get_by_id = AsyncMock(return_value=make_metric())
+    repo.get_by_id = AsyncMock(return_value=make_metric(status="PUBLISHED"))
     repo.get_pending_confirmations = AsyncMock(return_value=[])
     result = await svc.auto_accept_timeout(metric_id=1, version=1)
     assert result is None
@@ -2789,7 +2789,9 @@ async def test_auto_accept_promote_passes_timeout_trigger():
     """超时自动转正：_promote_pending_version 以 timeout 触发 + owner 为 actor
     调用（审计可追溯超时自动生效，非用户操作）。"""
     svc, repo = _svc_with_repo()
-    metric = make_metric(row_version=1, version=2, owner_id=2, backup_owner_id=3)
+    metric = make_metric(
+        row_version=1, version=2, owner_id=2, backup_owner_id=3, status="PUBLISHED"
+    )
     repo.get_by_id = AsyncMock(return_value=metric)
     repo.get_pending_confirmations = AsyncMock(
         return_value=[
@@ -3064,7 +3066,7 @@ async def test_auto_accept_timeout_partial_rejected_returns_none():
     TIMEOUT_ACCEPTED 后重读，仍存在 REJECTED 记录时不转正。
     """
     svc, repo = _svc_with_repo()
-    repo.get_by_id = AsyncMock(return_value=make_metric())
+    repo.get_by_id = AsyncMock(return_value=make_metric(status="PUBLISHED"))
     repo.get_pending_confirmations = AsyncMock(
         side_effect=[
             [
@@ -3084,6 +3086,29 @@ async def test_auto_accept_timeout_partial_rejected_returns_none():
     # PENDING 记录被置 TIMEOUT_ACCEPTED
     assert repo.update_confirmation_status.call_args.args[1] == "TIMEOUT_ACCEPTED"
     # 未触发转正
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_auto_accept_timeout_skips_deprecated_metric():
+    """PENDING 确认期指标被废弃（DEPRECATED）后超时任务不得转正其版本。
+
+    修复前：auto_accept_timeout 不检查指标状态——废弃指标 14 天后仍被转正
+    PENDING 版本（口径悄然变更 + 通知"新口径已生效"，语义矛盾：废弃指标
+    不应再发生口径变更）；get_by_id 只过滤软删（deleted_at），DEPRECATED
+    状态此前未被识别。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_id = AsyncMock(return_value=make_metric(status="DEPRECATED"))
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[MagicMock(id=1, status="PENDING")]
+    )
+    repo.update_confirmation_status = AsyncMock()
+
+    result = await svc.auto_accept_timeout(metric_id=1, version=1)
+
+    assert result is None
+    # 未触发确认记录终结、未触发转正——废弃指标版本保持不变
+    repo.update_confirmation_status.assert_not_called()
     repo.update_with_optimistic_lock.assert_not_called()
 
 

@@ -2662,6 +2662,18 @@ class MetricService(BaseService):
         metric = await self._repo.get_by_id(metric_id)
         if metric is None:
             raise NotFoundError(f"指标不存在: id={metric_id}")
+        # PENDING 确认期指标被废弃/下线/灰度回退后，不得转正其 PENDING 版本：
+        # 废弃（DEPRECATED/DATA_SOURCE_DROPPED）指标不应再发生口径变更，
+        # 灰度（EXPERIMENTAL）指标未走确认期语义——仅 PUBLISHED 可超时转正。
+        # 修复前：超时任务 14 天后仍转正废弃指标版本并通知"新口径已生效"（语义矛盾）。
+        if metric.status != "PUBLISHED":
+            logger.info(
+                "pending_version_skip_non_published",
+                metric_id=metric_id,
+                version=version,
+                status=metric.status,
+            )
+            return None
         confirmations = await self._repo.get_pending_confirmations(metric_id, version)
         if not confirmations:
             return None
