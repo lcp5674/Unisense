@@ -105,7 +105,9 @@ async def refresh_health_scores(ctx: dict[str, Any]) -> int:
                 await repo.save_health_score(health)
                 count += 1
 
-                # CRITICAL/WARNING 进整改待办
+                # CRITICAL/WARNING → 定向告警指标 Owner/备份 Owner（P1-5：
+                # 此前仅 log 不通知——每日刷新是发现健康恶化的主路径，恰恰不通知。
+                # notify_user 为定向投递，不依赖订阅偏好，保证 Owner 必达。）
                 if health.level in ("WARNING", "CRITICAL"):
                     logger.info(
                         "health_critical_detected",
@@ -113,6 +115,7 @@ async def refresh_health_scores(ctx: dict[str, Any]) -> int:
                         score=health.score,
                         level=health.level,
                     )
+                    await _notify_health_degraded(db, metric, health)
             except Exception:
                 logger.warning(
                     "health_refresh_failed",
@@ -123,6 +126,45 @@ async def refresh_health_scores(ctx: dict[str, Any]) -> int:
 
     logger.info("health_scores_refreshed", count=count)
     return count
+
+
+async def _notify_health_degraded(db: Any, metric: Any, health: Any) -> None:
+    """健康恶化（WARNING/CRITICAL）→ 定向通知指标 Owner + 备份 Owner。
+
+    复用已注册的 ``metric.health_critical`` 模板（标题映射见 notify/service.py），
+    与读端点事件一致；best-effort，通知失败仅记日志不阻断每日刷新。
+    """
+    from app.services.notify.service import NotifyService
+
+    level_cn = {"WARNING": "预警", "CRITICAL": "严重"}.get(health.level, health.level)
+    targets = [metric.owner_id]
+    if getattr(metric, "backup_owner_id", None) and metric.backup_owner_id != metric.owner_id:
+        targets.append(metric.backup_owner_id)
+    missing = getattr(health, "missing_dimensions", None) or []
+    for uid in targets:
+        try:
+            await NotifyService(db).notify_user(
+                user_id=uid,
+                event_type="metric.health_critical",
+                title=f"指标 {metric.metric_code} 健康度{level_cn}",
+                body=(
+                    f"{metric.metric_code} 健康评分 {health.score:.0f} 分（{level_cn}），"
+                    f"缺失维度 {len(missing)} 项，请及时关注修复。"
+                ),
+                payload={
+                    "metric_code": metric.metric_code,
+                    "score": health.score,
+                    "level": health.level,
+                    "missing_dimensions": missing,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort 不阻断刷新
+            logger.warning(
+                "health_notify_failed metric=%s user=%s err=%s",
+                metric.metric_code,
+                uid,
+                exc,
+            )
 
 
 async def check_emergency_review_overdue(ctx: dict[str, Any]) -> list[int]:
