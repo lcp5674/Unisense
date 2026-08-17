@@ -14,8 +14,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from sqlalchemy.exc import IntegrityError
+
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.services.collector.classifier import SensitivityClassifier
+from app.services.collector.drift_detector import compute_content_signature
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.schemas import (
     BulkDeprecateItem,
@@ -483,6 +486,16 @@ async def test_collect_and_register_no_deprecate_in_incremental_mode():
 # ---------- 仓储层（mock session） ----------
 
 
+class _AsyncCM:
+    """异步上下文管理器桩（begin_nested 成功路径：__aexit__ 不抛异常）。"""
+
+    async def __aenter__(self) -> "_AsyncCM":
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool:
+        return False
+
+
 def _session(scalar_one_or_none=None, all_rows=None, scalar=None) -> MagicMock:
     s = MagicMock()
     res = MagicMock()
@@ -493,6 +506,7 @@ def _session(scalar_one_or_none=None, all_rows=None, scalar=None) -> MagicMock:
     s.scalar = AsyncMock(return_value=scalar)
     s.add = MagicMock()
     s.flush = AsyncMock()
+    s.begin_nested = MagicMock(return_value=_AsyncCM())
     return s
 
 
@@ -534,6 +548,43 @@ async def test_repo_upsert_updates_when_exists():
     )
     assert created is False
     assert cat.schema_json == {"columns": ["a", "b"]}
+
+
+async def test_repo_upsert_concurrent_duplicate_falls_back_to_update():
+    """并发采集竞态：两个事务都读到 existing=None，INSERT 撞唯一键 uk_db_catalog_entity。
+
+    SAVEPOINT 回滚后应重查走更新语义（created=False），而不是抛 IntegrityError
+    污染会话致整批采集失败（回归：Duplicate entry ... for key 'uk_db_catalog_entity'）。
+    """
+    s = _session()
+    # INSERT flush 撞唯一键（仅首次；savepoint 回滚后更新路径 flush 正常）
+    s.flush = AsyncMock(
+        side_effect=[IntegrityError("INSERT", {}, Exception("duplicate key")), None]
+    )
+    repo = CollectorRepository(s)
+    existing = MagicMock()
+    existing.content_signature = "old_sig"
+    existing.schema_json = {"columns": ["a"]}
+    # 首次 get_catalog 返回 None（MVCC 旧快照未见并发事务），重查返回真实行
+    repo.get_catalog = AsyncMock(side_effect=[None, existing])
+    cat, created, drift_info = await repo.upsert_catalog(
+        source_id="s",
+        entity_name="t",
+        entity_type="TABLE",
+        schema_json={"columns": ["a", "b"]},
+        etl_sql=None,
+        sensitivity_level="INTERNAL",
+        owner_id=None,
+    )
+    assert created is False
+    assert repo.get_catalog.await_count == 2
+    # 更新路径生效：schema 与内容指纹被刷新
+    assert existing.schema_json == {"columns": ["a", "b"]}
+    assert existing.content_signature == compute_content_signature(
+        {"columns": ["a", "b"]}
+    )
+    # SAVEPOINT 已回滚且会话未被污染（后续仍可正常 flush）
+    assert s.begin_nested.call_count == 1
 
 
 async def test_repo_bulk_deprecate_partial():

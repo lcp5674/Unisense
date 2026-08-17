@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import String, case, cast, func, or_, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -269,9 +270,19 @@ class CollectorRepository:
             )
             if schema_incomplete:
                 logger.warning("catalog_schema_incomplete: %s/%s", source_id, entity_name)
-            self._db.add(cat)
-            await self._db.flush()
-            return cat, True, None
+            try:
+                # 竞态防护：并发采集同源/种子脚本直插时，两事务可能都读到 existing=None
+                # 双双 INSERT 撞唯一键 uk_db_catalog_entity。用 SAVEPOINT 包裹 flush，
+                # 撞键时仅回滚该 SAVEPOINT（新增对象被 expunge，不会污染外层事务），
+                # 再重查走更新语义——避免 PendingRollback 拖垮整批采集。
+                async with self._db.begin_nested():
+                    self._db.add(cat)
+                    await self._db.flush()
+                return cat, True, None
+            except IntegrityError:
+                existing = await self.get_catalog(source_id, entity_name)
+                if existing is None:
+                    raise
 
         # 比对内容指纹检测 Drift
         old_signature = existing.content_signature
