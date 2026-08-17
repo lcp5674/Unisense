@@ -26,7 +26,7 @@ import {
   RULE_TYPE_LABEL,
 } from "../utils/enums";
 import { auditActionLabel } from "../utils/auditI18n";
-import { formatCnTime, timeAgoCn } from "../utils/timeCn";
+import { formatCnTime, parseBackendTime, timeAgoCn } from "../utils/timeCn";
 
 const rowStyle = {
   display: "flex",
@@ -35,6 +35,26 @@ const rowStyle = {
   borderBottom: "1px solid var(--line-soft)",
 };
 
+/** 上海时区精确到秒的时间（含日期），供「数据更新于」展示——秒级变化让刷新前后肉眼可见 */
+function formatCnTimeSec(value: string): string {
+  const d = parseBackendTime(value);
+  if (!d) return "—";
+  const date = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(d);
+  const time = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(d);
+  return `${date} ${time}`;
+}
+
 function MetricsTab() {
   const [quality, setQuality] = useState<{ by_level: Record<string, number>; by_status: Record<string, number>; total: number } | null>(null);
   const [api, setApi] = useState<Record<string, number> | null>(null);
@@ -42,30 +62,64 @@ function MetricsTab() {
   const [lineage, setLineage] = useState<{ edges: number } | null>(null);
   const [events, setEvents] = useState<QualityEventItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+
+  async function load(silent = false) {
+    if (silent) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+    try {
+      const [q, a, n, l, e] = await Promise.all([
+        fetchObsMetricsQuality(),
+        fetchObsMetricsApi(),
+        fetchObsMetricsNotifications(),
+        fetchObsMetricsLineage(),
+        fetchObsQualityEvents(),
+      ]);
+      setQuality(q);
+      setApi(a);
+      setNotif(n);
+      setLineage(l);
+      setEvents(e.items ?? []);
+      setLastUpdatedAt(new Date().toISOString());
+    } catch {
+      // 保留旧数据，静默失败不打断页面
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }
 
   useEffect(() => {
-    Promise.all([
-      fetchObsMetricsQuality(),
-      fetchObsMetricsApi(),
-      fetchObsMetricsNotifications(),
-      fetchObsMetricsLineage(),
-      fetchObsQualityEvents(),
-    ])
-      .then(([q, a, n, l, e]) => {
-        setQuality(q);
-        setApi(a);
-        setNotif(n);
-        setLineage(l);
-        setEvents(e.items ?? []);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (loading) return null;
 
   return (
     <div>
+      {/* 数据获取时间 + 手动刷新（刷新前后秒级时间变化即反馈） */}
+      <Row justify="space-between" align="middle" style={{ marginBottom: 12 }}>
+        <span className="muted" style={{ fontSize: 12 }}>
+          {lastUpdatedAt ? (
+            <Tooltip title={formatCnTime(lastUpdatedAt)}>
+              <span>
+                数据更新于 <span className="mono" style={{ color: "var(--ink)" }}>{formatCnTimeSec(lastUpdatedAt)}</span>（上海时区）
+              </span>
+            </Tooltip>
+          ) : (
+            "尚未获取数据"
+          )}
+        </span>
+        <Button size="small" icon={<ReloadOutlined />} loading={refreshing} onClick={() => load(true)}>
+          刷新
+        </Button>
+      </Row>
+
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col span={6}>
           <Statistic title="质量事件" value={quality?.total ?? 0} />
@@ -574,6 +628,7 @@ function OverviewTab({ active }: { active?: boolean }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
 
   async function load(silent = false) {
     if (silent) {
@@ -585,6 +640,7 @@ function OverviewTab({ active }: { active?: boolean }) {
       const data = await fetchObsOverview();
       setOverview(data);
       setError(null);
+      setLastUpdatedAt(new Date().toISOString());
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -619,7 +675,19 @@ function OverviewTab({ active }: { active?: boolean }) {
 
   return (
     <div>
-      <Row justify="end" style={{ marginBottom: 12 }}>
+      {/* 数据获取时间 + 手动刷新（刷新前后秒级时间变化即反馈） */}
+      <Row justify="space-between" align="middle" style={{ marginBottom: 12 }}>
+        <span className="muted" style={{ fontSize: 12 }}>
+          {lastUpdatedAt ? (
+            <Tooltip title={formatCnTime(lastUpdatedAt)}>
+              <span>
+                数据更新于 <span className="mono" style={{ color: "var(--ink)" }}>{formatCnTimeSec(lastUpdatedAt)}</span>（上海时区）
+              </span>
+            </Tooltip>
+          ) : (
+            "尚未获取数据"
+          )}
+        </span>
         <Button
           size="small"
           icon={<ReloadOutlined />}

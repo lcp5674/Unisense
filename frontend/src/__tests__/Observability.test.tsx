@@ -405,4 +405,39 @@ describe("Observability 可观测中心", () => {
     // 原始 pattern/action 英文不应直出
     expect(screen.queryByText("static_threshold_breach")).not.toBeInTheDocument();
   });
+
+  it("平台概览展示数据获取时间（上海时区精确到秒），刷新后时间更新", async () => {
+    render(<Observability />);
+    await waitFor(() => expect(screen.getByText("数据源健康")).toBeInTheDocument());
+    // 数据获取时间展示（上海时区 + 精确到秒的完整时间，非 ISO 串）
+    expect(screen.getByText(/数据更新于/)).toBeInTheDocument();
+    expect(screen.getByText(/上海时区/)).toBeInTheDocument();
+    // 秒级完整时间已渲染（2026年8月17日 22:59:01 这类格式）
+    expect(screen.getByText(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}:\d{2}/)).toBeInTheDocument();
+
+    // 点击刷新后重新拉取数据（时间戳为秒级，同秒内文本不变，故以 API 调用次数为准）
+    const callsBefore = mockedOverview.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: /刷\s*新/ }));
+    await waitFor(() => expect(mockedOverview.mock.calls.length).toBeGreaterThan(callsBefore));
+    // 刷新后数据获取时间仍展示（已重新拉取）
+    expect(screen.getByText(/数据更新于/)).toBeInTheDocument();
+  });
+
+  it("运行指标 Tab 也提供刷新按钮与数据获取时间（一致的数据时效反馈）", async () => {
+    render(<Observability />);
+    await waitFor(() => expect(screen.getByText("平台概览")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("运行指标"));
+    await waitFor(() => expect(screen.getByText("API 动作分布")).toBeInTheDocument());
+
+    // 运行指标同样有「数据更新于」时间与刷新按钮
+    expect(screen.getAllByText(/数据更新于/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}:\d{2}/).length).toBeGreaterThanOrEqual(1);
+    const refreshButtons = screen.getAllByRole("button", { name: /刷\s*新/ });
+    expect(refreshButtons.length).toBeGreaterThanOrEqual(1);
+
+    // 点击运行指标区的刷新按钮触发其数据重新拉取（质量事件端点被再次调用）
+    const before = mockedQualityEvents.mock.calls.length;
+    fireEvent.click(refreshButtons[refreshButtons.length - 1]);
+    await waitFor(() => expect(mockedQualityEvents.mock.calls.length).toBeGreaterThan(before));
+  });
 });
