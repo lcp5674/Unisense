@@ -489,6 +489,8 @@ class ObservabilityRepository:
 
     async def _overview_quality(self) -> dict[str, Any]:
         """资产质量：指标健康度分布（EXCELLENT/GOOD/WARNING/CRITICAL）+ 血缘健康。"""
+        # 仅统计健康评分对应指标仍存活（未软删）的记录——覆盖率与资产指标数同口径，
+        # 避免历史评分记录（对应指标已删除）导致 coverage_pct > 100% 的数据失真。
         hs_rows = (
             await self._session.execute(
                 select(
@@ -496,7 +498,12 @@ class ObservabilityRepository:
                     MetricHealthScore.score,
                     MetricHealthScore.level,
                     MetricHealthScore.missing_dimensions,
-                ).where(MetricHealthScore.deleted_at.is_(None))
+                )
+                .join(Metric, Metric.id == MetricHealthScore.metric_id)
+                .where(
+                    MetricHealthScore.deleted_at.is_(None),
+                    Metric.deleted_at.is_(None),
+                )
             )
         ).all()
         by_level: dict[str, int] = {}
