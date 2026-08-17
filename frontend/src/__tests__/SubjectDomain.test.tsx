@@ -83,7 +83,7 @@ describe("SubjectDomain 页面", () => {
     mockedCreate.mockResolvedValue({ id: 4, code: "risk", name: "风控", parent_id: null, level: 1, path: "4", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 0, created_at: "", updated_at: "" });
     mockedGet.mockResolvedValue({ id: 1, code: "sales", name: "销售", parent_id: null, level: 1, path: "1", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 3, created_at: "", updated_at: "" });
     mockedDefaults.mockResolvedValue({});
-    mockedUpdateDefaults.mockResolvedValue(undefined);
+    mockedUpdateDefaults.mockResolvedValue(undefined as never);
     // 域默认值字典：默认返回空（下拉回退输入框），不影响既有测试
     mockedDictItems.mockResolvedValue([]);
   });
