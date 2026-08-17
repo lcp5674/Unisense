@@ -483,7 +483,26 @@ const mix = OWNER_ASSETS.map((a) => ({
               <span className="oc-head">
                 <span className="oc-avatar">{initials}</span>
                 <span className="oc-name">{o.name}</span>
-                {hot && <span className="oc-hot">待审 {review}</span>}
+                {hot && (
+                  <span
+                    className="oc-hot"
+                    role="button"
+                    tabIndex={0}
+                    title={`${review} 个指标待审核，点击查看该责任人名下审核中指标`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/catalog?status=REVIEW&owner_id=${id}`);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.stopPropagation();
+                        navigate(`/catalog?status=REVIEW&owner_id=${id}`);
+                      }
+                    }}
+                  >
+                    待审 {review}
+                  </span>
+                )}
                 <span className="oc-total">共 {o.total} 项</span>
               </span>
               <span className="oc-bar" role="img" aria-label={`${o.name} 资产构成`}>

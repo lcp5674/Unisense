@@ -310,6 +310,21 @@ describe("Dashboard", () => {
     expect(probe.location()?.search).toContain("owner_id=1");
   });
 
+  it("Owner 待审徽标：点击「待审 N」高亮徽标跳 /catalog 并携带 status=REVIEW + owner_id 过滤（对齐生命周期色点）", async () => {
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    // Alice 卡片头部「待审 4」高亮徽标（REVIEW=4 > 0）
+    const aliceCard = document.querySelectorAll(".owner-card")[0];
+    const hotBadge = aliceCard!.querySelector(".oc-hot");
+    expect(hotBadge).toBeTruthy();
+    expect(hotBadge!.textContent).toContain("待审");
+    fireEvent.click(hotBadge!);
+    expect(probe.location()?.pathname).toBe("/catalog");
+    expect(probe.location()?.search).toContain("status=REVIEW");
+    expect(probe.location()?.search).toContain("owner_id=1");
+  });
+
   it("Owner 卡片：含 0 值资产类型仍完整渲染 6 段（数据表/数据源为 0 不被过滤）", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
