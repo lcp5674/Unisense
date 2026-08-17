@@ -33,7 +33,6 @@ from app.services.semantic.schemas import (
     MetricBatchRejectRequest,
     MetricBatchResponse,
     MetricBatchSubmitRequest,
-    MetricCompareMatrixRequest,
     MetricCompareRequest,
     MetricCreateRequest,
     MetricDeprecateRequest,
@@ -1320,30 +1319,6 @@ async def compare_metrics(
                     defn = field_data["definition"].get(side)
                     if isinstance(defn, dict) and defn.get("pii"):
                         field_data["definition"][side] = redact_definition(defn)
-    return ok(data=result, trace_id=trace_id)
-
-
-@router.post(
-    "/compare/matrix",
-    response_model=ApiResponse,
-    summary="多指标关键字段矩阵对比（2~6 个）",
-    dependencies=_READ_DEPS,
-)
-async def compare_metrics_matrix(
-    request: MetricCompareMatrixRequest,
-    db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: CurrentUser,
-    trace_id: Annotated[str, Depends(get_trace_id)],
-) -> ApiResponse[Any]:
-    """多指标矩阵 diff + 行级差异标记（每行字段、每列指标）。"""
-    service = MetricService(db)
-    result = await service.compare_matrix(request.metric_codes)
-    # PII 脱敏：非合规角色对比 PII 指标时，口径定义脱敏（对齐 T049）
-    if user.role not in _SENSITIVE_ROLES:
-        defn = result.get("fields", {}).get("definition", {})
-        for code, definition in (defn.get("values") or {}).items():
-            if isinstance(definition, dict) and definition.get("pii"):
-                defn["values"][code] = redact_definition(definition)
     return ok(data=result, trace_id=trace_id)
 
 

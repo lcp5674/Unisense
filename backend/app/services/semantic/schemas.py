@@ -404,14 +404,6 @@ class MetricCompareRequest(BaseModel):
     )
 
 
-class MetricCompareMatrixRequest(BaseModel):
-    """多指标矩阵对比请求（2~6 个，去重保序）。"""
-
-    metric_codes: list[str] = Field(
-        ..., min_length=2, max_length=6, description="待对比的指标编码（2~6 个）"
-    )
-
-
 class MetricAutoSuggestRequest(BaseModel):
     """指标注册自动推断请求（对齐 FR-010/FR-011）。
 

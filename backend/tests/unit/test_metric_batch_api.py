@@ -243,3 +243,84 @@ async def test_batch_submit_empty_items_422(client):
         "/api/v1/metric-definitions/batch-submit", json={"items": []}
     )
     assert resp.status_code == 422
+
+
+# ---- P3-18: _run_batch 内部助手（DB 级异常回滚 + 逐条容错）----
+
+
+async def test_run_batch_all_success():
+    """全部成功 → 逐条 ok，不触发回滚。"""
+    from app.api.metrics import _run_batch
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    units = [{"code": "a"}, {"code": "b"}]
+    run = AsyncMock()
+    results = await _run_batch(
+        db, units=units, code_of=lambda u: u["code"], run=run, abort_message="aborted"
+    )
+    assert [r.metric_code for r in results] == ["a", "b"]
+    assert all(r.ok for r in results)
+    assert run.await_count == 2
+    db.rollback.assert_not_awaited()
+
+
+async def test_run_batch_business_error_continues():
+    """业务异常（非 SQLAlchemy）→ 单条失败，其余继续，不整体回滚。"""
+    from app.api.metrics import _run_batch
+    from app.core.exceptions import BusinessError
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    units = [{"code": "a"}, {"code": "b"}, {"code": "c"}]
+
+    async def run(unit):
+        if unit["code"] == "b":
+            raise BusinessError("指标不存在", error_code="NOT_FOUND")
+
+    results = await _run_batch(
+        db, units=units, code_of=lambda u: u["code"], run=run, abort_message="aborted"
+    )
+    assert [r.ok for r in results] == [True, False, True]
+    assert results[1].message == "指标不存在"
+    # 业务失败不污染会话：不回滚
+    db.rollback.assert_not_awaited()
+
+
+async def test_run_batch_db_error_rolls_back_and_marks_rest():
+    """SQLAlchemyError → 回滚会话 + 剩余项统一标记失败（abort_message）+ 中止。"""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.api.metrics import _run_batch
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    units = [{"code": "a"}, {"code": "b"}, {"code": "c"}]
+
+    async def run(unit):
+        if unit["code"] == "b":
+            raise SQLAlchemyError("connection lost")
+
+    results = await _run_batch(
+        db, units=units, code_of=lambda u: u["code"], run=run, abort_message="DB 异常中止批量"
+    )
+    # a 成功；b 触发 DB 异常 → b（自身）与 c（未处理）统一标记 abort_message 失败后中止
+    assert [r.metric_code for r in results] == ["a", "b", "c"]
+    assert results[0].ok is True
+    assert results[1].ok is False
+    assert results[2].ok is False
+    assert results[1].message == "DB 异常中止批量"
+    assert results[2].message == "DB 异常中止批量"
+    db.rollback.assert_awaited_once()
+
+
+def test_batch_audit_action_levels():
+    """审计动作名区分全成功/部分失败/全失败。"""
+    from app.api.metrics import _batch_audit_action
+    from app.services.semantic.schemas import MetricBatchItemResult
+
+    ok = MetricBatchItemResult(metric_code="a", ok=True)
+    fail = MetricBatchItemResult(metric_code="b", ok=False, message="x")
+    assert _batch_audit_action("BATCH_SUBMIT", [ok, ok]) == "BATCH_SUBMIT"
+    assert _batch_audit_action("BATCH_SUBMIT", [fail, fail]) == "BATCH_SUBMIT_FAILED"
+    assert _batch_audit_action("BATCH_SUBMIT", [ok, fail]) == "BATCH_SUBMIT_PARTIAL"

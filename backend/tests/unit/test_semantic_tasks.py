@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -262,3 +263,82 @@ async def test_check_experimental_expiry_no_overage_no_action(_patch_gray_expiry
 
     assert recycled == []
     svc.recycle_expired_gray.assert_not_awaited()
+
+
+# ---- P3-14: DSD 7 天超期升级提醒 ----
+
+
+@pytest.fixture
+def _patch_dsd_overdue_env() -> None:
+    """check_dsd_overdue 依赖替换为可控 mock（函数体内 import）。"""
+    patches = [
+        patch("app.db.mysql.async_session_factory"),
+        patch("app.services.notify.service.NotifyService"),
+    ]
+    for p in patches:
+        p.start()
+    yield
+    for p in patches:
+        p.stop()
+
+
+def _dsd_metric(overdue: bool) -> SimpleNamespace:
+    """构造 DATA_SOURCE_DROPPED 指标；overdue=True 时 updated_at 早于 7 天前。"""
+    old = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=8)
+    recent = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)
+    return SimpleNamespace(
+        id=7,
+        metric_code="dsd_gmv_d",
+        owner_id=11,
+        backup_owner_id=12,
+        status="DATA_SOURCE_DROPPED",
+        deleted_at=None,
+        domain="sales",
+        updated_at=old if overdue else recent,
+    )
+
+
+async def test_check_dsd_overdue_notifies_owner_on_overage(_patch_dsd_overdue_env) -> None:
+    """P3-14: DSD 超 7 天 → 定向升级提醒 Owner + 备份 Owner（metric.source_dropped）。"""
+    from app.db.mysql import async_session_factory
+    from app.services.notify.service import NotifyService
+    from app.tasks.semantic_tasks import check_dsd_overdue
+
+    metric = _dsd_metric(overdue=True)
+    db = _mock_db([metric])
+    async_session_factory.return_value = _AsyncCM(db)
+
+    notif_svc = MagicMock()
+    notif_svc.notify_user = AsyncMock()
+    NotifyService.return_value = notif_svc
+
+    reminded = await check_dsd_overdue({})
+
+    assert reminded == [metric.id]
+    # Owner + 备份 Owner 均收到升级提醒
+    assert notif_svc.notify_user.await_count == 2
+    calls = notif_svc.notify_user.await_args_list
+    assert {c.kwargs["user_id"] for c in calls} == {11, 12}
+    for c in calls:
+        assert c.kwargs["event_type"] == "metric.source_dropped"
+        assert c.kwargs["payload"]["reason"] == "dsd_overdue"
+        assert c.kwargs["payload"]["metric_code"] == "dsd_gmv_d"
+
+
+async def test_check_dsd_overdue_no_metrics_no_notify(_patch_dsd_overdue_env) -> None:
+    """P3-14: 查询无命中 DSD 指标 → 不提醒（updated_at 过滤由 DB WHERE 负责）。"""
+    from app.db.mysql import async_session_factory
+    from app.services.notify.service import NotifyService
+    from app.tasks.semantic_tasks import check_dsd_overdue
+
+    db = _mock_db([])
+    async_session_factory.return_value = _AsyncCM(db)
+
+    notif_svc = MagicMock()
+    notif_svc.notify_user = AsyncMock()
+    NotifyService.return_value = notif_svc
+
+    reminded = await check_dsd_overdue({})
+
+    assert reminded == []
+    notif_svc.notify_user.assert_not_awaited()

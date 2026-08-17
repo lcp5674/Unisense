@@ -1012,20 +1012,14 @@ export function MetricCatalog() {
               {deletedView ? "返回列表" : "回收站"}
             </Button>
           </Tooltip>
-          <Tooltip title="勾选 2~6 个指标进行矩阵对比（每行字段、每列指标）">
-            <Button
-              type="primary"
-              icon={<ColumnWidthOutlined />}
-              disabled={selected.length < 2 || selected.length > 6}
-              onClick={() =>
-                selected.length >= 2 &&
-                selected.length <= 6 &&
-                navigate(`/compare?codes=${selected.map((s) => s.metric_code).join(",")}`)
-              }
-            >
-              对比所选{selected.length > 1 ? ` (${selected.length})` : ""}
-            </Button>
-          </Tooltip>
+          <Button
+            type="primary"
+            icon={<ColumnWidthOutlined />}
+            disabled={selected.length !== 2}
+            onClick={() => selected.length === 2 && navigate(`/compare?a=${selected[0].metric_code}&b=${selected[1].metric_code}`)}
+          >
+            对比所选
+          </Button>
           <Dropdown
             menu={{
               items: [
