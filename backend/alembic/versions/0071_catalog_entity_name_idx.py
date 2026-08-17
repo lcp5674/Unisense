@@ -25,11 +25,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # 前缀索引：utf8mb4 下 191 字符 = 764 字节（InnoDB 单列索引上限 3072 字节内）
-    op.create_index(
-        "idx_db_catalog_entity_name",
-        "db_catalog",
-        ["source_id", "entity_name(191)"],
+    # 前缀索引：utf8mb4 下 191 字符 = 764 字节（InnoDB 单列索引上限 3072 字节内）。
+    # 用原生 SQL 而非 op.create_index——alembic 会把 ``"entity_name(191)"`` 当字面
+    # 列名反引号引用（MySQL 报 Key column doesn't exist）；原生 SQL 保留前缀长度语义。
+    op.execute(
+        "CREATE INDEX idx_db_catalog_entity_name "
+        "ON db_catalog (source_id, entity_name(191))"
     )
 
 
