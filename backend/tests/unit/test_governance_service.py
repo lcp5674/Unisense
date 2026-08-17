@@ -67,11 +67,14 @@ class FakeMetric:
 
 
 class FakeCatalog:
-    def __init__(self, cid: int, name: str, schema: dict[str, Any], level: str) -> None:
+    def __init__(
+        self, cid: int, name: str, schema: dict[str, Any], level: str, source_id: str | None = None
+    ) -> None:
         self.id = cid
         self.entity_name = name
         self.schema_json = schema
         self.sensitivity_level = level
+        self.source_id = source_id
 
 
 class FakeRepo:
@@ -220,9 +223,15 @@ class FakeRepo:
 
     # catalog / classification
     async def list_catalog(
-        self, source_id: str | None, catalog_ids: list[int] | None, limit: int
+        self,
+        source_id: str | None,
+        catalog_ids: list[int] | None,
+        limit: int,
+        source_ids: list[str] | None = None,
     ) -> list[FakeCatalog]:
         rows = self.catalogs
+        if source_ids:
+            rows = [c for c in rows if getattr(c, "source_id", None) in source_ids]
         if catalog_ids:
             rows = [c for c in rows if c.id in catalog_ids]
         return rows[:limit]
@@ -631,6 +640,20 @@ async def test_classification_rescan_detects_pii_and_updates_catalog() -> None:
     assert len(repo.classifications) == 2
     assert "classification.changed" in events.types()
     assert "classification.done" in events.types()
+
+
+async def test_classification_rescan_filters_by_source_ids() -> None:
+    """重扫支持 source_ids 多选：只扫指定数据源的资产（前端多选）。"""
+    svc, repo, _ = _svc()
+    repo.catalogs = [
+        FakeCatalog(1, "a", {"columns": [{"name": "phone"}]}, "INTERNAL", source_id="ds1"),
+        FakeCatalog(2, "b", {"columns": [{"name": "gmv"}]}, "INTERNAL", source_id="ds2"),
+    ]
+    result = await svc.classification_rescan(
+        ClassificationRescanRequest(source_ids=["ds1"])
+    )
+    assert result.scanned == 1
+    assert result.items[0].catalog_id == 1
 
 
 async def test_classification_rescan_filters_by_ids() -> None:

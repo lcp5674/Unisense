@@ -247,12 +247,20 @@ class ClassificationRescanRequest(BaseModel):
     """``POST /classification/rescan`` 请求体（COMPL-2 分级重扫）。"""
 
     source_id: str | None = Field(default=None, max_length=64, description="按数据源重扫")
+    source_ids: list[str] | None = Field(
+        default=None, max_length=10, description="按多个数据源重扫（前端多选）"
+    )
     catalog_ids: list[int] | None = Field(default=None, description="按资产 ID 重扫")
     limit: int = Field(default=200, ge=1, le=1000, description="单次扫描上限")
 
     @field_validator("catalog_ids")
     @classmethod
     def _dedup_ids(cls, v: list[int] | None) -> list[int] | None:
+        return sorted(set(v)) if v else None
+
+    @field_validator("source_ids")
+    @classmethod
+    def _dedup_source_ids(cls, v: list[str] | None) -> list[str] | None:
         return sorted(set(v)) if v else None
 
 

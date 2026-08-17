@@ -310,6 +310,43 @@ class SensitiveRuleService:
             updated_at=item.updated_at,
         )
 
+    async def batch_set_confidence(
+        self, rule_ids: list[str], confidence: float
+    ) -> dict[str, Any]:
+        """批量设置置信度（保留规则其余字段；逐条容错）。"""
+        succeeded: list[str] = []
+        failed: list[dict[str, str]] = []
+        for rule_id in rule_ids:
+            try:
+                current = await self.get_rule(rule_id)
+                await self.update_rule(
+                    rule_id,
+                    SensitiveRuleUpsert(
+                        label=current.label,
+                        category=current.category,
+                        name_re=current.name_re,
+                        sample_re=current.sample_re or None,
+                        confidence=confidence,
+                        pii=current.pii,
+                    ),
+                )
+                succeeded.append(rule_id)
+            except Exception as exc:  # noqa: BLE001 - 批量逐条容错
+                failed.append({"rule_id": rule_id, "error": str(exc)})
+        return {"confidence": confidence, "succeeded": succeeded, "failed": failed}
+
+    async def batch_set_status(self, rule_ids: list[str], action: str) -> dict[str, Any]:
+        """批量启用 / 停用（逐条容错，返回成功数与失败明细，部分失败不阻断）。"""
+        succeeded: list[str] = []
+        failed: list[dict[str, str]] = []
+        for rule_id in rule_ids:
+            try:
+                await self.set_status(rule_id, action)
+                succeeded.append(rule_id)
+            except Exception as exc:  # noqa: BLE001 - 批量逐条容错
+                failed.append({"rule_id": rule_id, "error": str(exc)})
+        return {"action": action, "succeeded": succeeded, "failed": failed}
+
     async def delete_rule(self, rule_id: str) -> None:
         """删除规则配置（回退内置默认）；无 DB 项时 404。"""
         await self._dict_svc.delete_item("pii_rule", rule_id)

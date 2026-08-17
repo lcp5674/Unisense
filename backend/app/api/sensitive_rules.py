@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -199,6 +199,98 @@ async def set_rule_status(
     )
     await db.commit()
     return ok(data=item, trace_id=trace_id)
+
+
+@router.post(
+    "/batch-status",
+    response_model=ApiResponse[dict[str, Any]],
+    dependencies=_WRITE_DEPS,
+)
+async def batch_set_rule_status(
+    body: dict[str, Any],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    request: Request,
+    svc: SensitiveRuleService = Depends(_svc),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[dict[str, Any]]:
+    """批量启用 / 停用（逐条容错，部分失败不阻断；前端批量操作栏调用）。"""
+    rule_ids = body.get("rule_ids") or []
+    action = str(body.get("action") or "")
+    if action not in ("activate", "deactivate"):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=422, detail="action 仅支持 activate/deactivate")
+    if not isinstance(rule_ids, list) or not rule_ids:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=422, detail="rule_ids 不能为空")
+    if len(rule_ids) > 100:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=422, detail="单次批量操作不超过 100 条")
+    result = await svc.batch_set_status([str(r) for r in rule_ids], action)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="SENSITIVE_RULE_BATCH_STATUS",
+        entity_type="sensitive_rule",
+        entity_id=f"count={len(rule_ids)}",
+        detail={"action": action, "succeeded": result["succeeded"], "failed": result["failed"]},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/batch-confidence",
+    response_model=ApiResponse[dict[str, Any]],
+    dependencies=_WRITE_DEPS,
+)
+async def batch_set_rule_confidence(
+    body: dict[str, Any],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    request: Request,
+    svc: SensitiveRuleService = Depends(_svc),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[dict[str, Any]]:
+    """批量设置置信度（保留规则其余字段；前端批量编辑调用）。"""
+    rule_ids = body.get("rule_ids") or []
+    confidence = body.get("confidence")
+    if not isinstance(rule_ids, list) or not rule_ids:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=422, detail="rule_ids 不能为空")
+    if len(rule_ids) > 100:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=422, detail="单次批量操作不超过 100 条")
+    try:
+        conf_val = float(confidence)
+    except (TypeError, ValueError):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=422, detail="confidence 必须是 0-1 的数值")
+    if not 0.0 <= conf_val <= 1.0:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=422, detail="confidence 必须在 0-1 之间")
+    result = await svc.batch_set_confidence([str(r) for r in rule_ids], conf_val)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="SENSITIVE_RULE_BATCH_CONFIDENCE",
+        entity_type="sensitive_rule",
+        entity_id=f"count={len(rule_ids)}",
+        detail={"confidence": conf_val, "succeeded": result["succeeded"], "failed": result["failed"]},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
 
 
 @router.delete(

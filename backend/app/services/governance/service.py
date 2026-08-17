@@ -1030,7 +1030,7 @@ class GovernanceService(BaseService):
         规则引擎对单个资产失败时按 TD §5.5 降级：标记 ``UNKNOWN`` 并继续，不阻断整批。
         """
         catalogs = await self._repo.list_catalog(
-            payload.source_id, payload.catalog_ids, payload.limit
+            payload.source_id, payload.catalog_ids, payload.limit, payload.source_ids
         )
         # 使用 DB 可配置规则（合并内置）——敏感规则配置台改规则后重扫即时生效
         from app.services.collector.classifier import SensitivityClassifier

@@ -228,6 +228,44 @@ async def test_set_status_unknown_rule_not_found() -> None:
         await svc.set_status("nonexistent", "activate")
 
 
+async def test_batch_set_status_partial_failure() -> None:
+    """批量启停逐条容错：成功项计入 succeeded，失败项计入 failed 不阻断。"""
+    svc = _make_svc()
+
+    async def _fake_set(rule_id: str, action: str) -> SimpleNamespace:
+        if rule_id == "bad":
+            raise NotFoundError("不存在")
+        return SimpleNamespace()
+
+    svc.set_status = AsyncMock(side_effect=_fake_set)  # type: ignore[method-assign]
+    result = await svc.batch_set_status(["phone", "bad", "email"], "deactivate")
+    assert result["action"] == "deactivate"
+    assert result["succeeded"] == ["phone", "email"]
+    assert len(result["failed"]) == 1
+    assert result["failed"][0]["rule_id"] == "bad"
+
+
+async def test_batch_set_confidence_keeps_other_fields() -> None:
+    """批量改置信度：保留规则其余字段（label/正则/类别），逐条 update。"""
+    svc = _make_svc()
+    current = SimpleNamespace(
+        label="手机号",
+        category="PHONE",
+        name_re=r"(phone|手机)",
+        sample_re=None,
+        pii=True,
+    )
+    svc.get_rule = AsyncMock(return_value=current)  # type: ignore[method-assign]
+    svc.update_rule = AsyncMock(return_value=SimpleNamespace())  # type: ignore[method-assign]
+    result = await svc.batch_set_confidence(["phone", "email"], 0.95)
+    assert result["succeeded"] == ["phone", "email"]
+    assert svc.update_rule.await_count == 2
+    first_call = svc.update_rule.await_args_list[0]
+    assert first_call.args[0] == "phone"
+    assert first_call.args[1].confidence == 0.95
+    assert first_call.args[1].name_re == r"(phone|手机)"  # 其余字段保留
+
+
 async def test_delete_rule_delegates() -> None:
     svc = _make_svc()
     svc._dict_svc.delete_item = AsyncMock()

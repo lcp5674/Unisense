@@ -301,9 +301,12 @@ class GovernanceRepository:
         source_id: str | None,
         catalog_ids: list[int] | None,
         limit: int,
+        source_ids: list[str] | None = None,
     ) -> list[DBCatalog]:
         conditions: list[Any] = [DBCatalog.deleted_at.is_(None)]
-        if source_id is not None:
+        if source_ids:
+            conditions.append(DBCatalog.source_id.in_(source_ids))
+        elif source_id is not None:
             conditions.append(DBCatalog.source_id == source_id)
         if catalog_ids:
             conditions.append(DBCatalog.id.in_(catalog_ids))
