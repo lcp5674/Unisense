@@ -45,29 +45,14 @@ import {
   DW_LAYER_LABEL,
   FRESHNESS_LABEL,
   GRANULARITY_LABEL,
+  METRIC_STATUS_COLOR,
+  METRIC_STATUS_LABEL,
   METRIC_TYPE_LABEL,
   METRIC_TIER_LABEL,
   TIME_SEMANTICS_LABEL,
   UNIT_LABEL,
 } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
-
-const STATUS_COLOR: Record<string, string> = {
-  DRAFT: "default",
-  EXPERIMENTAL: "processing",
-  REVIEW: "warning",
-  PUBLISHED: "success",
-  DEPRECATED: "error",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  DRAFT: "草稿",
-  EXPERIMENTAL: "实验",
-  REVIEW: "审核中",
-  PUBLISHED: "已发布",
-  DEPRECATED: "已废弃",
-  DATA_SOURCE_DROPPED: "数据源下线",
-};
 
 // 批量操作动作中文名（结果提示用）
 const BATCH_ACTION_LABEL: Record<string, string> = {
@@ -733,7 +718,7 @@ export function MetricCatalog() {
     const rows = items.map((m) =>
       [
         m.metric_code, m.name, domainName(m.domain), userName(m.owner_id), m.type,
-        STATUS_LABEL[m.status] ?? m.status,
+        METRIC_STATUS_LABEL[m.status] ?? m.status,
         AGGREGATION_LABEL[m.aggregation] ?? m.aggregation,
         GRANULARITY_LABEL[m.granularity] ?? m.granularity,
         m.unit && UNIT_LABEL[m.unit] ? UNIT_LABEL[m.unit] : m.unit, DW_LAYER_LABEL[m.dw_layer] ?? m.dw_layer, METRIC_TIER_LABEL[m.metric_tier] ?? m.metric_tier,
@@ -836,14 +821,14 @@ export function MetricCatalog() {
       render: (s: string, r: MetricResponse) =>
         s === "DATA_SOURCE_DROPPED" ? (
           <Tooltip title="该指标的数据源已下线，可在指标详情页「源已恢复」或「确认退役」处理">
-            <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>
+            <Tag color={METRIC_STATUS_COLOR[s]}>{METRIC_STATUS_LABEL[s] ?? s}</Tag>
           </Tooltip>
         ) : s === "DRAFT" && r.reject_reason ? (
           <Tooltip title={`上次评审被驳回：${r.reject_reason}`}>
             <Tag color="orange">被驳回</Tag>
           </Tooltip>
         ) : (
-          <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>
+          <Tag color={METRIC_STATUS_COLOR[s]}>{METRIC_STATUS_LABEL[s] ?? s}</Tag>
         ),
     },
     {
@@ -1200,7 +1185,7 @@ export function MetricCatalog() {
         <Space wrap size={[6, 4]} style={{ margin: "8px 0", width: "100%" }}>
           <span className="muted" style={{ fontSize: 12 }}>已应用筛选：</span>
           {keyword && <Tag closable onClose={() => { setKeyword(""); setInputValue(""); setPage(1); }}>关键词：{keyword}</Tag>}
-          {status && <Tag closable onClose={() => { setStatus(""); setPage(1); }}>状态：{STATUS_LABEL[status] ?? status}</Tag>}
+          {status && <Tag closable onClose={() => { setStatus(""); setPage(1); }}>状态：{METRIC_STATUS_LABEL[status] ?? status}</Tag>}
           {domain && <Tag closable onClose={() => { setDomain(""); setPage(1); }}>域：{domainName(domain)}</Tag>}
           {tier && <Tag closable onClose={() => { setTier(""); setPage(1); }}>分级：{METRIC_TIER_LABEL[tier] ?? tier}</Tag>}
           {lifecycleFilter && (

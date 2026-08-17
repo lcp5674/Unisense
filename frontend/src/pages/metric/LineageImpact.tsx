@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Button, Empty, Segmented, Table, Tag } from "antd";
 import { lineageImpact } from "../../api";
 import type { LineageEdge } from "../../types";
+import { LINEAGE_EDGE_TYPE_LABEL } from "../../utils/enums";
 
 const EDGE_COLOR: Record<string, string> = {
   METRIC_DERIVES: "blue",
@@ -11,21 +12,6 @@ const EDGE_COLOR: Record<string, string> = {
   SQL_PARSE: "default",
   USES_DIMENSION: "gold",
   READS_COLUMN: "magenta",
-};
-
-const EDGE_TYPE_LABEL: Record<string, string> = {
-  DERIVED_FROM: "派生自",
-  LINEAGE_UP: "上游依赖",
-  LINEAGE_DOWN: "下游影响",
-  CONSUMED_BY: "被消费",
-  EXTERNAL_BREAK: "外部断链",
-  METRIC_DERIVES: "指标派生",
-  METRIC_DEPENDS_ON: "指标依赖",
-  TABLE_TO_FIELD: "表到字段",
-  FIELD_TO_TABLE: "字段到表",
-  SQL_PARSE: "SQL 解析",
-  USES_DIMENSION: "使用维度",
-  READS_COLUMN: "读取字段",
 };
 
 const PROVENANCE_LABEL: Record<string, string> = {
@@ -72,7 +58,7 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
       dataIndex: "edge_type",
       key: "edge_type",
       width: 160,
-      render: (v: string) => <Tag color={EDGE_COLOR[v] ?? "default"}>{EDGE_TYPE_LABEL[v] ?? v}</Tag>,
+      render: (v: string) => <Tag color={EDGE_COLOR[v] ?? "default"}>{LINEAGE_EDGE_TYPE_LABEL[v] ?? v}</Tag>,
     },
     { title: "置信度", dataIndex: "confidence", key: "conf", width: 100, render: (v: number) => `${Math.round(v * 100)}%` },
     { title: "来源", dataIndex: "provenance", key: "prov", width: 110, render: (v: string) => PROVENANCE_LABEL[v] ?? v },

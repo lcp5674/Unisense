@@ -77,6 +77,40 @@ export const METRIC_STATUS_LABEL: Record<string, string> = {
   DATA_SOURCE_DROPPED: "数据源下线",
 };
 
+/** 指标状态 → Ant Tag 颜色（P2-14 收敛：MetricCatalog/MetricDetail 共用） */
+export const METRIC_STATUS_COLOR: Record<string, string> = {
+  DRAFT: "default",
+  EXPERIMENTAL: "processing",
+  REVIEW: "warning",
+  PUBLISHED: "success",
+  DEPRECATED: "error",
+};
+
+// ---- 指标关联/推荐边类型（详情页「看过此指标的人还看了」等）----
+export const METRIC_RELATION_EDGE_LABEL: Record<string, string> = {
+  DERIVED_FROM: "派生自",
+  CONSUMED_BY: "被消费",
+  LINEAGE: "关联",
+  POPULAR: "热门",
+  RECENT: "最新",
+};
+
+// ---- 血缘图边类型（LineageImpact 血缘影响面）----
+export const LINEAGE_EDGE_TYPE_LABEL: Record<string, string> = {
+  DERIVED_FROM: "派生自",
+  LINEAGE_UP: "上游依赖",
+  LINEAGE_DOWN: "下游影响",
+  CONSUMED_BY: "被消费",
+  EXTERNAL_BREAK: "外部断链",
+  METRIC_DERIVES: "指标派生",
+  METRIC_DEPENDS_ON: "指标依赖",
+  TABLE_TO_FIELD: "表到字段",
+  FIELD_TO_TABLE: "字段到表",
+  SQL_PARSE: "SQL 解析",
+  USES_DIMENSION: "使用维度",
+  READS_COLUMN: "读取字段",
+};
+
 // ---- 查询消费 ----
 
 export const DATE_RANGE_LABEL: Record<string, string> = {

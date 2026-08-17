@@ -90,7 +90,7 @@ import type {
   UserBrief,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
-import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL, UNIT_LABEL, RULING_DECISION_LABEL } from "../utils/enums";
+import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL, UNIT_LABEL, RULING_DECISION_LABEL, METRIC_STATUS_COLOR, METRIC_STATUS_LABEL, METRIC_RELATION_EDGE_LABEL } from "../utils/enums";
 import { formatCnTime, formatCnDate } from "../utils/timeCn";
 import { HealthCard } from "./metric/HealthCard";
 import { QualitySnapshot } from "./metric/QualitySnapshot";
@@ -100,32 +100,6 @@ import { AuditTimeline } from "./metric/AuditTimeline";
 import { RelatedDimensions } from "./metric/RelatedDimensions";
 
 const { Paragraph } = Typography;
-
-const STATUS_COLOR: Record<string, string> = {
-  DRAFT: "default",
-  EXPERIMENTAL: "processing",
-  REVIEW: "warning",
-  PUBLISHED: "success",
-  DEPRECATED: "error",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  DRAFT: "草稿",
-  EXPERIMENTAL: "实验",
-  REVIEW: "审核中",
-  PUBLISHED: "已发布",
-  DEPRECATED: "已废弃",
-  DATA_SOURCE_DROPPED: "数据源下线",
-};
-
-// 推荐/血缘边类型 → 中文（与 Dashboard 的推荐流展示口径一致）
-const EDGE_TYPE_LABEL: Record<string, string> = {
-  DERIVED_FROM: "派生自",
-  CONSUMED_BY: "被消费",
-  LINEAGE: "关联",
-  POPULAR: "热门",
-  RECENT: "最新",
-};
 
 const ROLE_LABEL: Record<string, string> = {
   platform_admin: "平台管理员",
@@ -1545,7 +1519,7 @@ export function MetricDetail() {
           <div className="page-kicker">Assets / Detail</div>
           <h2>
             {metric.name}{" "}
-            <Tag color={STATUS_COLOR[metric.status]}>{STATUS_LABEL[metric.status] ?? metric.status}</Tag>
+            <Tag color={METRIC_STATUS_COLOR[metric.status]}>{METRIC_STATUS_LABEL[metric.status] ?? metric.status}</Tag>
             {metric.metric_tier && <Tag>{METRIC_TIER_LABEL[metric.metric_tier] ?? metric.metric_tier}</Tag>}
             {badgeArea}
           </h2>
@@ -1577,7 +1551,7 @@ export function MetricDetail() {
         <Alert
           type="info"
           showIcon
-          message={`该指标当前为「${STATUS_LABEL[metric.status] ?? metric.status}」，尚未发布为可消费口径`}
+          message={`该指标当前为「${METRIC_STATUS_LABEL[metric.status] ?? metric.status}」，尚未发布为可消费口径`}
           description="请勿在生产消费中使用该口径；发布后（或从「待办中心」处理该指标后）方可对外消费。"
           style={{ marginBottom: 16 }}
         />
@@ -1796,7 +1770,7 @@ export function MetricDetail() {
               >
                 <span className="mono" style={{ fontWeight: 600 }}>{r.metric_id}</span>
                 <span className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {r.reason ? r.reason : `血缘 · ${EDGE_TYPE_LABEL[r.edge_type] ?? r.edge_type}`}
+                  {r.reason ? r.reason : `血缘 · ${METRIC_RELATION_EDGE_LABEL[r.edge_type] ?? r.edge_type}`}
                 </span>
               </div>
             ))}
