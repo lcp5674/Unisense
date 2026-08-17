@@ -213,3 +213,122 @@ async def test_mark_source_dropped_owner_forbidden(
         )
     assert resp.status_code == 403
     mock_svc.return_value.mark_source_dropped.assert_not_awaited()
+
+
+# ---- E1: 补齐 8 条零 API 测试路由（description/submit/approve/reject/版本三端点/health）----
+
+
+async def test_update_metric_description(metrics_client: httpx.AsyncClient) -> None:
+    """PUT /{code}/description → 200（治理补充，不触发版本）。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.update_metric_description = AsyncMock(return_value=_metric())
+        resp = await metrics_client.put(
+            "/api/v1/metric-definitions/sales_gmv_d/description",
+            json={"description": "日订单金额口径"},
+        )
+    assert resp.status_code == 200
+    mock_svc.return_value.update_metric_description.assert_awaited_once()
+
+
+async def test_submit_metric_api(metrics_client: httpx.AsyncClient) -> None:
+    """POST /{code}/submit → 200（DRAFT→REVIEW）。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.submit_metric = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sales_gmv_d/submit",
+            json={"change_reason": "首次提交评审"},
+        )
+    assert resp.status_code == 200
+    mock_svc.return_value.submit_metric.assert_awaited_once()
+
+
+async def test_approve_metric_api(metrics_client: httpx.AsyncClient) -> None:
+    """POST /{code}/approve → 200（REVIEW→PUBLISHED，标准发布）。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.approve_metric = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sales_gmv_d/approve",
+            json={"mode": "standard"},
+        )
+    assert resp.status_code == 200
+    mock_svc.return_value.approve_metric.assert_awaited_once()
+
+
+async def test_reject_metric_api(metrics_client: httpx.AsyncClient) -> None:
+    """POST /{code}/reject → 200（REVIEW→DRAFT）。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.reject_metric = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sales_gmv_d/reject",
+            json={"reason": "口径与粒度不符，请修改后重提"},
+        )
+    assert resp.status_code == 200
+    mock_svc.return_value.reject_metric.assert_awaited_once()
+
+
+async def test_confirm_version_api(metrics_client: httpx.AsyncClient) -> None:
+    """POST /{code}/confirm-version → 200（消费方确认 PENDING_VERSION）。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.confirm_version = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sales_gmv_d/confirm-version",
+            json={"version": 1},
+        )
+    assert resp.status_code == 200
+    mock_svc.return_value.confirm_version.assert_awaited_once_with(
+        "sales_gmv_d", 1, consumer_id=1
+    )
+
+
+async def test_reject_version_api(metrics_client: httpx.AsyncClient) -> None:
+    """POST /{code}/reject-version → 200（消费方拒绝 PENDING_VERSION）。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.reject_version = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sales_gmv_d/reject-version",
+            json={"version": 1, "reason": "新口径存在口径错误，拒绝确认"},
+        )
+    assert resp.status_code == 200
+    mock_svc.return_value.reject_version.assert_awaited_once_with(
+        "sales_gmv_d", 1, reason="新口径存在口径错误，拒绝确认", consumer_id=1
+    )
+
+
+async def test_extend_version_api(metrics_client: httpx.AsyncClient) -> None:
+    """POST /{code}/extend-version → 200（PENDING_VERSION 确认延期）。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.extend_version = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sales_gmv_d/extend-version",
+            json={"version": 1},
+        )
+    assert resp.status_code == 200
+    mock_svc.return_value.extend_version.assert_awaited_once_with("sales_gmv_d", 1)
+
+
+async def test_get_metric_health_api(metrics_client: httpx.AsyncClient) -> None:
+    """GET /{code}/health → 200（五维健康度评分）。"""
+    from datetime import UTC, datetime
+
+    from app.services.semantic.schemas import MetricHealthResponse
+
+    health = MetricHealthResponse(
+        metric_id=1,
+        score=88,
+        level="HEALTHY",
+        completeness_score=90,
+        activity_score=85,
+        quality_score=95,
+        owner_response_score=80,
+        lineage_coverage_score=90,
+        missing_dimensions=[],
+        calculated_at=datetime.now(UTC),
+    )
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.get_metric_health = AsyncMock(return_value=health)
+        resp = await metrics_client.get(
+            "/api/v1/metric-definitions/sales_gmv_d/health"
+        )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["level"] == "HEALTHY"
+    mock_svc.return_value.get_metric_health.assert_awaited_once_with("sales_gmv_d")
