@@ -118,6 +118,7 @@ export const UNIT_LABEL: Record<string, string> = {
 
 export const SOURCE_HEALTH_LABEL: Record<string, string> = {
   healthy: "健康",
+  degraded: "降级",
   unhealthy: "不健康",
   unknown: "未知",
 };
@@ -125,7 +126,6 @@ export const SOURCE_HEALTH_LABEL: Record<string, string> = {
 export const COLLECTION_MODE_LABEL: Record<string, string> = {
   FULL: "全量采集",
   INCREMENTAL: "增量采集",
-  CDC: "CDC 增量",
 };
 
 // ---- 质量 ----
