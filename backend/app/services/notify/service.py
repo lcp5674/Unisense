@@ -92,6 +92,8 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "catalog_schema_drifted": "目录 Schema 漂移",
     "lineage_parsed": "血缘已解析",
     "lineage_ingested": "血缘已接入",
+    # DDL 变更事件化（lineage/service.py 定向通知受影响资产 Owner 的模板标题）
+    "lineage.ddl_changed": "血缘变更影响",
     # 采集定向通知（collector/service.py 经 notify_user 直发源 Owner）
     "catalog.deprecated": "数据目录已废弃",
     "collect.degraded": "采集降级",
@@ -844,9 +846,7 @@ class NotifyService(BaseService):
     async def mark_failed(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
         return await self._transition(notif_id, NotifyStatus.FAILED.value, actor_id, role)
 
-    async def retry_delivery(
-        self, notif_id: int, actor_id: int, role: str = ""
-    ) -> Notification:
+    async def retry_delivery(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
         """重试投递失败的站内通知（送达失败处置）。
 
         仅 FAILED 状态可重试（PENDING/SENT 重试无意义）；按存储的渠道与 payload

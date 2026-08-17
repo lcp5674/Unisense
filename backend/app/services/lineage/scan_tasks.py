@@ -47,6 +47,10 @@ async def lineage_scan_task(ctx: dict[str, Any]) -> dict[str, Any]:
         async with async_session_factory() as db:
             svc = LineageService(db)
             resp = await svc.scan_directory(req, actor_id=None)
+            # P0-3：任务内显式 commit（async_session 上下文退出仅 close/回滚，不自动提交），
+            # 提交后再执行图写/缓存失效/事件副作用，保证扫描结果真正落库且时序正确。
+            await db.commit()
+            await svc.run_post_commit()
         result = {
             "enabled": True,
             "files": resp.files,

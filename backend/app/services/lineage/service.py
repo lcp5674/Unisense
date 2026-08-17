@@ -12,7 +12,7 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -28,6 +28,7 @@ from app.models.metric import Metric
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.parser import (
+    DDLEdge,
     extract_ddl_lineage,
     extract_field_lineage,
     extract_table_lineage,
@@ -91,6 +92,8 @@ logger = get_logger("unisense.lineage.service")
 _CACHE_TTL = 60
 #: 单次影响分析返回边数上限（图与 MySQL BFS 对齐）。
 _MAX_EDGES = 5000
+#: 库级扫描单文件大小上限（字节，5MB）——防超大文件整读耗尽内存（P1 加固）。
+_MAX_SCAN_FILE_BYTES = 5 * 1024 * 1024
 #: Redis 不可用的告警日志仅记一次，避免刷屏。
 _CACHE_KEY_PREFIX = "lineage:impact:"
 
@@ -163,6 +166,40 @@ class LineageService(BaseService):
         self._graph = graph
         self._events = events
         self._redis = redis
+
+    @staticmethod
+    def _post_commit_queue(session: AsyncSession) -> list[Callable[[], Awaitable[None]]]:
+        """取 session 上挂载的提交后副作用队列（P0-3）。
+
+        队列挂载在**共享 session** 而非 service 实例上：同一事务内可能创建多个
+        ``LineageService`` 实例（semantic/dimension 清理血缘时的临时实例），
+        共用同一队列保证 commit 后统一触发，不因实例析构而丢失副作用。
+        """
+        q = getattr(session, "_unisense_lineage_post_commit", None)
+        if q is None:
+            q = []
+            # B010 建议直接赋值，但 AsyncSession 未声明该属性会触发 mypy；setattr 绕开
+            setattr(session, "_unisense_lineage_post_commit", q)  # noqa: B010
+        return q
+
+    def _defer(self, coro_factory: Callable[[], Awaitable[None]]) -> None:
+        """注册提交后副作用（图写/缓存失效/事件），由调用方在 commit 后触发。"""
+        self._post_commit_queue(self._db).append(coro_factory)
+
+    async def run_post_commit(self) -> None:
+        """执行已注册的提交后副作用（幂等：执行后清空；单侧失败不阻断其余）。
+
+        调用约定：每个调用方在 ``await db.commit()`` 之后调用本方法，确保
+        图/缓存/事件仅在事务成功落库后发生（P0-3 幽灵边根治）。
+        """
+        q = self._post_commit_queue(self._db)
+        pending, q[:] = q[:], []
+        for factory in pending:
+            try:
+                await factory()
+            except Exception as exc:  # noqa: BLE001 - 提交后副作用 best-effort，不阻断调用方
+                logger.warning("lineage_post_commit_side_effect_failed", error=str(exc))
+
 
     async def parse_and_store(
         self, req: LineageParseRequest, actor_id: int
@@ -347,18 +384,33 @@ class LineageService(BaseService):
                 )
             )
 
-        graph_written = await self._sync_graph(
-            graph_edges, delete=False, context=f"parse_and_store:{req.provenance}"
+        # P0-3：图写/缓存失效/事件延迟到事务提交后执行（调用方 commit 后调 run_post_commit）
+        graph_written = self._graph is not None and bool(graph_edges)
+        _edges_snapshot = list(graph_edges)
+        _ddl_snapshot = list(ddl_edges)
+        self._defer(
+            lambda: self._sync_graph(
+                _edges_snapshot, delete=False, context=f"parse_and_store:{req.provenance}"
+            )
         )
-        # m5: SQL 解析新增边后失效两端影响缓存（图路径立即反映本次血缘）
-        for sn, tn, _etype in graph_edges:
-            await self._invalidate_impact_cache(sn)
-            await self._invalidate_impact_cache(tn)
+        for sn, tn, _etype in _edges_snapshot:
+            self._defer(lambda sn=sn: self._invalidate_impact_cache(sn))
+            self._defer(lambda tn=tn: self._invalidate_impact_cache(tn))
+        # DDL 变更事件化：破坏性 DDL（重命名/DROP）定向通知受影响资产 Owner
+        self._defer(lambda: self._notify_ddl_change(_ddl_snapshot))
         # 双发：保留 Redis 裸通道（历史兼容），同时发 EventBus 供通知中心消费（best-effort）
         parsed_payload = {"table_edges": stored_table, "field_edges": stored_field}
         if self._events is not None:
-            await self._events.publish("lineage_parsed", parsed_payload)
-        await self._eventbus.publish("lineage_parsed", parsed_payload)
+            self._defer(
+                lambda payload=parsed_payload: self._events.publish(
+                    "lineage_parsed", payload
+                )
+            )
+        self._defer(
+            lambda payload=parsed_payload: self._eventbus.publish(
+                "lineage_parsed", payload
+            )
+        )
         detail = {
             "kind": "sql_parse",
             "sql": req.sql,
@@ -417,12 +469,17 @@ class LineageService(BaseService):
                 table_edges, field_edges, req.provenance
             )
             total = added + updated
-            graph_written = await self._sync_graph(
-                graph_edges, delete=False, context=f"parse_batch:{req.provenance}"
+            # P0-3：图写/缓存失效/事件延迟到事务提交后执行
+            graph_written = self._graph is not None and bool(graph_edges)
+            _edges_snapshot = list(graph_edges)
+            self._defer(
+                lambda: self._sync_graph(
+                    _edges_snapshot, delete=False, context=f"parse_batch:{req.provenance}"
+                )
             )
-            for sn, tn, _etype in graph_edges:
-                await self._invalidate_impact_cache(sn)
-                await self._invalidate_impact_cache(tn)
+            for sn, tn, _etype in _edges_snapshot:
+                self._defer(lambda sn=sn: self._invalidate_impact_cache(sn))
+                self._defer(lambda tn=tn: self._invalidate_impact_cache(tn))
             succeeded = sum(
                 1 for r in results if r.error is None and (r.table_edges or r.field_edges)
             )
@@ -436,8 +493,10 @@ class LineageService(BaseService):
                 "skipped": skipped,
             }
             if self._events is not None:
-                await self._events.publish("lineage_batch_parsed", payload)
-            await self._eventbus.publish("lineage_batch_parsed", payload)
+                self._defer(
+                    lambda p=payload: self._events.publish("lineage_batch_parsed", p)
+                )
+            self._defer(lambda p=payload: self._eventbus.publish("lineage_batch_parsed", p))
             # 运行详情快照：只保留前 N 条语句明细（detail_json 为 TEXT 列，防 64KB 超限）
             detail = {
                 "kind": "batch_parse",
@@ -589,13 +648,25 @@ class LineageService(BaseService):
             raise ValidationError(
                 f"扫描路径无效或不存在: {req.path}", error_code=ErrorCode.VALIDATION_ERROR
             )
-        abs_path = os.path.abspath(req.path)
+        # P1 加固：以 realpath 确立沙箱根，防止树内符号链接指向目录外文件（信息泄露/越权读取）
+        sandbox_root = os.path.realpath(req.path)
+        if not os.path.isdir(sandbox_root):
+            raise ValidationError(
+                f"扫描路径无效或不存在: {req.path}", error_code=ErrorCode.VALIDATION_ERROR
+            )
         exts = {e.strip().lower() for e in req.extensions.split(",") if e.strip()}
         files: list[str] = []
-        for root, _dirs, names in os.walk(abs_path):
+        for root, _dirs, names in os.walk(sandbox_root):
             for name in sorted(names):
-                if any(name.lower().endswith(e) for e in exts):
-                    files.append(os.path.join(root, name))
+                full = os.path.join(root, name)
+                if not any(name.lower().endswith(e) for e in exts):
+                    continue
+                # 符号链接沙箱：文件 realpath 必须在沙箱根内，否则跳过（防链接逃逸）
+                real = os.path.realpath(full)
+                if not (real == sandbox_root or real.startswith(sandbox_root + os.sep)):
+                    logger.warning("lineage_scan_skip_outside_symlink", path=full)
+                    continue
+                files.append(full)
                 if len(files) >= req.limit:
                     break
             if len(files) >= req.limit:
@@ -609,6 +680,14 @@ class LineageService(BaseService):
         succeeded = 0
         for path in files:
             try:
+                # P1 加固：文件大小上限，防止超大文件整读耗尽内存（CPU DoS）
+                if os.path.getsize(path) > _MAX_SCAN_FILE_BYTES:
+                    file_results.append(
+                        LineageScanFileResult(
+                            path=path, error=f"文件超限（>{_MAX_SCAN_FILE_BYTES} 字节），已跳过"
+                        )
+                    )
+                    continue
                 with open(path, encoding="utf-8", errors="replace") as fh:
                     content = fh.read()
             except OSError as exc:
@@ -724,12 +803,20 @@ class LineageService(BaseService):
                 elif d.ddl_type == "drop_table" and d.table:
                     await self._repo.invalidate_dropped_table(node_table(d.table))
             total = added + updated
-            graph_written = await self._sync_graph(
-                graph_edges, delete=False, context="scan_directory"
+            # P0-3：图写/缓存失效/事件延迟到事务提交后执行
+            graph_written = self._graph is not None and bool(graph_edges)
+            _edges_snapshot = list(graph_edges)
+            _ddl_snapshot = list(ddl_edges)
+            self._defer(
+                lambda: self._sync_graph(
+                    _edges_snapshot, delete=False, context="scan_directory"
+                )
             )
-            for sn, tn, _etype in graph_edges:
-                await self._invalidate_impact_cache(sn)
-                await self._invalidate_impact_cache(tn)
+            for sn, tn, _etype in _edges_snapshot:
+                self._defer(lambda sn=sn: self._invalidate_impact_cache(sn))
+                self._defer(lambda tn=tn: self._invalidate_impact_cache(tn))
+            # DDL 变更事件化：扫描到的破坏性 DDL 定向通知受影响资产 Owner
+            self._defer(lambda: self._notify_ddl_change(_ddl_snapshot))
             detail = {
                 "kind": "scan",
                 "actor_id": actor_id,
@@ -1310,12 +1397,16 @@ class LineageService(BaseService):
         deleted = await self._repo.soft_delete_by_node(node)
         await self._db.flush()
         if deleted and active:
-            await self._sync_graph(
-                [(e.source_node, e.target_node, e.edge_type) for e in active],
-                delete=True,
-                context=f"delete_by_node:{node}",
+            # P0-3：图删除延迟到事务提交后执行
+            _active_snapshot = [(e.source_node, e.target_node, e.edge_type) for e in active]
+            self._defer(
+                lambda: self._sync_graph(
+                    _active_snapshot,
+                    delete=True,
+                    context=f"delete_by_node:{node}",
+                )
             )
-        await self._invalidate_impact_cache(node)
+        self._defer(lambda: self._invalidate_impact_cache(node))
         return deleted
 
     async def restore_by_node(self, node: str) -> int:
@@ -1328,12 +1419,18 @@ class LineageService(BaseService):
         restored = await self._repo.restore_by_node(node)
         await self._db.flush()
         if restored and soft_deleted:
-            await self._sync_graph(
-                [(e.source_node, e.target_node, e.edge_type) for e in soft_deleted],
-                delete=False,
-                context=f"restore_by_node:{node}",
+            # P0-3：图重建延迟到事务提交后执行
+            _deleted_snapshot = [
+                (e.source_node, e.target_node, e.edge_type) for e in soft_deleted
+            ]
+            self._defer(
+                lambda: self._sync_graph(
+                    _deleted_snapshot,
+                    delete=False,
+                    context=f"restore_by_node:{node}",
+                )
             )
-        await self._invalidate_impact_cache(node)
+        self._defer(lambda: self._invalidate_impact_cache(node))
         return restored
 
     # ---- 人工治理：手动登记 / 单边删除（TD §12.2）----
@@ -1403,14 +1500,17 @@ class LineageService(BaseService):
         if getattr(edge, "owner", None) != str(actor_id):
             edge.owner = str(actor_id)
         await self._db.flush()
-        # M1: 人工登记边同步写图 + 失效两端影响缓存（人工边此前不在图存储）
-        await self._sync_graph(
-            [(req.source_node, req.target_node, req.edge_type)],
-            delete=False,
-            context=f"add_manual_edge:{req.source_node}->{req.target_node}",
+        # M1: 人工登记边写图 + 失效两端影响缓存——P0-3 延迟到事务提交后执行
+        _pair = [(req.source_node, req.target_node, req.edge_type)]
+        self._defer(
+            lambda: self._sync_graph(
+                _pair,
+                delete=False,
+                context=f"add_manual_edge:{req.source_node}->{req.target_node}",
+            )
         )
-        await self._invalidate_impact_cache(req.source_node)
-        await self._invalidate_impact_cache(req.target_node)
+        self._defer(lambda: self._invalidate_impact_cache(req.source_node))
+        self._defer(lambda: self._invalidate_impact_cache(req.target_node))
         return ManualEdgeCreateResponse(
             edge=LineageEdgeResponse.model_validate(edge), created=created
         )
@@ -1424,6 +1524,21 @@ class LineageService(BaseService):
             return "L3"
         return "L1"
 
+    async def edge_domains(self, edge_id: int) -> set[str]:
+        """解析某条血缘边两端节点的业务域（P1 IDOR 归属校验用）。
+
+        边本身无 domain 列，按节点解析：``metric:`` → metric 域、``table:`` →
+        数据源继承域、``field:`` → 所属表继承域、external 等无目录实体不产生域。
+        返回空集表示两端均无解析域（无法判属，调用方按不阻断处理）。
+        """
+        edge = await self._repo.get_edge(edge_id)
+        if edge is None:
+            raise NotFoundError(f"血缘边不存在或已删除: id={edge_id}")
+        metas = await self._repo.resolve_node_meta(
+            {edge.source_node, edge.target_node}
+        )
+        return {m.get("domain") for m in metas.values() if m.get("domain")}
+
     async def delete_edge_by_id(self, edge_id: int) -> EdgeDeleteResult:
         """按主键软删单条血缘边（人工治理：误登记/断链修复的单边删除）。
 
@@ -1433,13 +1548,17 @@ class LineageService(BaseService):
         if edge is None:
             raise NotFoundError(f"血缘边不存在或已删除: id={edge_id}")
         await self._db.flush()
-        await self._sync_graph(
-            [(edge.source_node, edge.target_node, edge.edge_type)],
-            delete=True,
-            context=f"delete_edge_by_id:{edge_id}",
+        # P0-3：图删除延迟到事务提交后执行
+        _pair = [(edge.source_node, edge.target_node, edge.edge_type)]
+        self._defer(
+            lambda: self._sync_graph(
+                _pair,
+                delete=True,
+                context=f"delete_edge_by_id:{edge_id}",
+            )
         )
-        await self._invalidate_impact_cache(edge.source_node)
-        await self._invalidate_impact_cache(edge.target_node)
+        self._defer(lambda: self._invalidate_impact_cache(edge.source_node))
+        self._defer(lambda: self._invalidate_impact_cache(edge.target_node))
         return EdgeDeleteResult(
             edge_id=edge.id,
             source_node=edge.source_node,
@@ -2242,6 +2361,85 @@ class LineageService(BaseService):
                 await redis.delete(*keys)
         except Exception as exc:
             logger.warning("lineage_impact_cache_invalidate_failed", node=node, error=str(exc))
+
+    async def _notify_ddl_change(self, ddl_edges: list[DDLEdge]) -> None:
+        """DDL 变更事件化：破坏性 DDL（重命名/DROP）定向通知受影响资产 Owner。
+
+        治理闭环：表/列重命名、DROP TABLE 会让下游资产血缘断裂/失效，仅靠缓存
+        失效用户感知不到。对每条破坏性 DDL 收集「变更对象自身 + 下游受影响资产」
+        的 Owner，经 ``NotifyService.notify_user`` 定向送达（IN_APP，不依赖订阅
+        偏好），并把 ``lineage.ddl_changed`` 事件发布到 EventBus 供通知中心记录/
+        订阅扇出。best-effort：Owner 解析/通知失败均不阻断血缘写入主流程。
+        """
+        impacted: list[dict[str, Any]] = []
+        for d in ddl_edges:
+            changed: str | None = None
+            desc = ""
+            if d.ddl_type == "rename_table" and d.source and d.target:
+                changed = node_table(d.source)
+                desc = f"表 {d.source} 重命名为 {d.target}"
+            elif d.ddl_type == "rename_column" and d.table and d.source_column and d.target_column:
+                changed = node_table(d.table)
+                desc = f"表 {d.table} 列 {d.source_column} 重命名为 {d.target_column}"
+            elif d.ddl_type == "drop_table" and d.table:
+                changed = node_table(d.table)
+                desc = f"表 {d.table} 已删除（DROP）"
+            if not changed:
+                continue
+            try:
+                owners = await self._repo.affected_asset_owners(changed)
+            except Exception as exc:
+                logger.warning("lineage_ddl_owner_resolve_failed", node=changed, error=str(exc))
+                continue
+            if not owners:
+                continue
+            impacted.append(
+                {"owners": sorted(owners), "desc": desc, "node": changed, "ddl_type": d.ddl_type}
+            )
+        if not impacted:
+            return
+        owner_count = sum(len(i["owners"]) for i in impacted)
+        title = f"血缘变更：{'；'.join(i['desc'] for i in impacted[:3])}"
+        body = (
+            f"本次 DDL 变更影响 {owner_count} 个资产 Owner，下游血缘可能断裂。"
+            f"请到血缘视图查看受影响资产并核对依赖关系。"
+        )
+        payload = {
+            "impacted": [
+                {"ddl_type": i["ddl_type"], "node": i["node"], "desc": i["desc"]} for i in impacted
+            ],
+        }
+        # 定向通知每个受影响资产 Owner（best-effort；notify 不 commit，不影响血缘事务）
+        try:
+            from app.services.notify.service import NotifyService
+
+            svc = NotifyService(self._db)
+            seen: set[int] = set()
+            for item in impacted:
+                for owner_id in item["owners"]:
+                    oid = int(owner_id)
+                    if oid in seen:
+                        continue
+                    seen.add(oid)
+                    try:
+                        await svc.notify_user(
+                            user_id=oid,
+                            event_type="lineage.ddl_changed",
+                            title=title,
+                            body=body,
+                            payload=payload,
+                        )
+                    except Exception as exc:
+                        logger.warning("lineage_ddl_notify_failed", owner_id=oid, error=str(exc))
+        except Exception as exc:
+            logger.warning("lineage_ddl_notify_service_failed", error=str(exc))
+        # 发布事件（通知中心记录 + 订阅扇出；best-effort）
+        try:
+            if self._events is not None:
+                await self._events.publish("lineage.ddl_changed", payload)
+            await self._eventbus.publish("lineage.ddl_changed", payload)
+        except Exception as exc:
+            logger.warning("lineage_ddl_event_publish_failed", error=str(exc))
 
     async def _impact_cache_get(self, key: str) -> list[LineageEdgeResponse] | None:
         """读影响分析缓存；Redis 不可用/熔断/解析失败时返回 None（回源）。"""

@@ -428,6 +428,95 @@ async def test_record_edge_history_direct() -> None:
     assert history.confidence == 1.0
 
 
+class _ReviveDB:
+    """保留软删行的假 db（模拟真实 MySQL：软删行留存于表内，SELECT 按 deleted_at 过滤）。
+
+    ``_FakeDB.flush`` 会把软删行从集合移除，无法覆盖「软删行残留在唯一索引、
+    重新解析须复活」的 P0-2 场景，故本测试用此专用 fake。
+    """
+
+    def __init__(self, active: list[_Row], tombstones: list[_Row]) -> None:
+        self._active = list(active)
+        self._tombstones = list(tombstones)
+        self.added: list[Any] = []
+        self.flushed = False
+
+    async def execute(self, stmt: object) -> _Result:
+        sql = re.sub(r"\s+", " ", str(stmt.compile(compile_kwargs={"literal_binds": True})))
+        src = _extract(sql, "source_node")
+        dst = _extract(sql, "target_node")
+        etype = _extract(sql, "edge_type")
+        gran = _extract(sql, "granularity")
+
+        def _match(r: _Row) -> bool:
+            return (
+                r.source_node == src
+                and r.target_node == dst
+                and r.edge_type == etype
+                and r.granularity == gran
+            )
+
+        if "deleted_at IS NOT NULL" in sql:
+            rows = [r for r in self._tombstones if _match(r)]
+            return _Result(rows, scalar=rows[0] if len(rows) == 1 else None)
+        if "deleted_at IS NULL" in sql:
+            rows = [r for r in self._active if _match(r)]
+            return _Result(rows, scalar=rows[0] if len(rows) == 1 else None)
+        return _Result([])
+
+    def add(self, obj: Any) -> None:
+        self.added.append(obj)
+
+    async def flush(self) -> None:
+        self.flushed = True
+
+
+async def test_upsert_revives_soft_deleted_edge() -> None:
+    """P0-2：软删边重新解析/扫描时应复活而非重插，避免撞 uq_lineage_edge 1062。"""
+    tombstone = _Row(
+        7,
+        "table:a",
+        "table:t",
+        edge_type="DERIVED_FROM",
+        granularity="L1",
+        confidence=0.8,
+        deleted_at=datetime.now(),
+    )
+    db = _ReviveDB(active=[], tombstones=[tombstone])
+    repo = LineageRepository(db)
+    edge, created = await repo._upsert_with_created(
+        source_node="table:a",
+        target_node="table:t",
+        edge_type="DERIVED_FROM",
+        granularity="L1",
+        confidence=0.95,
+        change_reason="reparse",
+    )
+    assert created is False  # 复用软删行，非新插入
+    assert edge is tombstone  # 同一行复活
+    assert edge.deleted_at is None  # 软删标记清除
+    assert edge.confidence == 0.95  # 新值应用
+    histories = [a for a in db.added if isinstance(a, LineageEdgeHistory)]
+    assert len(histories) == 1
+    assert histories[0].change_reason == "revive:reparse"
+    assert histories[0].confidence == 0.8  # 复活前快照
+
+
+async def test_upsert_inserts_when_no_tombstone() -> None:
+    """无活跃行也无软删行时仍走新建路径（created=True）。"""
+    db = _ReviveDB(active=[], tombstones=[])
+    repo = LineageRepository(db)
+    edge, created = await repo._upsert_with_created(
+        source_node="table:a",
+        target_node="table:t",
+        edge_type="DERIVED_FROM",
+        granularity="L1",
+    )
+    assert created is True
+    assert len(db.added) == 1
+    assert edge.source_node == "table:a"
+
+
 async def test_would_create_cycle_returns_true() -> None:
     rows = [
         _Row(1, "table:a", "table:b"),
@@ -1482,3 +1571,49 @@ async def test_invalidate_dropped_table_soft_deletes_edges() -> None:
     assert n == 2  # 边 1（dws.t 是目标）+ 边 2（dws.t 是源）
     remaining = [r.id for r in db._rows]
     assert remaining == [3]
+
+
+async def test_affected_asset_owners_collects_downstream_owners() -> None:
+    """``affected_asset_owners``：沿下游收集受影响资产（表/指标）的 Owner 去重，无 Owner 排除。"""
+    rows = [
+        _Row(1, "table:ods.t", "table:dwd.b"),
+        _Row(2, "table:dwd.b", "metric:m1"),
+        _Row(3, "table:dwd.b", "table:dm.c"),
+    ]
+    meta = [
+        _MetaRow(table="catalog", entity_name="ods.t", owner_id=10),
+        _MetaRow(table="catalog", entity_name="dwd.b", owner_id=20),
+        _MetaRow(table="metric", metric_code="m1", owner_id=30),
+        _MetaRow(table="catalog", entity_name="dm.c", owner_id=None),  # 无 Owner 不计入
+    ]
+    repo = LineageRepository(_FakeDB(rows, meta_rows=meta))
+    owners = await repo.affected_asset_owners("table:ods.t")
+    # 自身(10) + 下游 dwd.b(20) + metric:m1(30)；dm.c 无 Owner 排除
+    assert owners == {"10", "20", "30"}
+
+
+async def test_affected_asset_owners_respects_max_hops() -> None:
+    """深度限制：max_hops=1 只收集直接下游（含自身）。"""
+    rows = [
+        _Row(1, "table:ods.t", "table:dwd.b"),
+        _Row(2, "table:dwd.b", "metric:m1"),
+    ]
+    meta = [
+        _MetaRow(table="catalog", entity_name="ods.t", owner_id=10),
+        _MetaRow(table="catalog", entity_name="dwd.b", owner_id=20),
+        _MetaRow(table="metric", metric_code="m1", owner_id=30),
+    ]
+    repo = LineageRepository(_FakeDB(rows, meta_rows=meta))
+    owners = await repo.affected_asset_owners("table:ods.t", max_hops=1)
+    assert owners == {"10", "20"}
+
+
+async def test_affected_asset_owners_empty_when_no_owners() -> None:
+    """无 Owner 且无下游有 Owner 资产 → 空集合（不产生通知）。"""
+    rows = [_Row(1, "table:ods.t", "table:dwd.b")]
+    meta = [
+        _MetaRow(table="catalog", entity_name="ods.t", owner_id=None),
+        _MetaRow(table="catalog", entity_name="dwd.b", owner_id=None),
+    ]
+    repo = LineageRepository(_FakeDB(rows, meta_rows=meta))
+    assert await repo.affected_asset_owners("table:ods.t") == set()

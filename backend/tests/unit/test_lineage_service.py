@@ -82,6 +82,8 @@ class FakeRepo:
         self.missing_entities: set[str] = set()
         # 标准导出（P4）假数据
         self.export_edges: list[Any] = []
+        # DDL 变更事件化：node -> 受影响资产 Owner 集合（affected_asset_owners 假实现）
+        self.affected_owners: dict[str, set[str]] = {}
 
     async def upsert_edge(self, **kwargs: object) -> SimpleNamespace:
         self.upsert_calls.append(kwargs)
@@ -409,6 +411,13 @@ class FakeRepo:
             }
         return out
 
+    # ---- DDL 变更事件化：受影响资产 Owner（假实现，可配置） ----
+    async def affected_asset_owners(
+        self, node: str, max_hops: int = 3, limit: int = 50
+    ) -> set[str]:
+        """受影响资产 Owner 假实现：按 ``affected_owners`` 配置返回（供通知测试）。"""
+        return set(self.affected_owners.get(node, set()))
+
     # ---- 健康度（P2）与路径查询（P3）假实现 ----
     async def stale_edge_count(self) -> int:
         return self.stale_count
@@ -548,9 +557,42 @@ async def test_parse_and_store_dual_publishes_eventbus() -> None:
     await svc.parse_and_store(
         LineageParseRequest(sql="INSERT INTO t SELECT a.id FROM a"), actor_id=1
     )
+    # P0-3：事件延迟到事务提交后发布（调用方 commit 后触发）
+    await svc.run_post_commit()
     eventbus.publish.assert_awaited_once_with(
         "lineage_parsed", {"table_edges": 1, "field_edges": 1}
     )
+
+
+async def test_parse_and_store_no_side_effects_before_post_commit() -> None:
+    """P0-3 核心不变量：事务提交前不得产生图写/事件/缓存失效副作用。
+
+    若 commit 失败，MySQL 回滚而图/事件已发生即产生幽灵边——此测试锁定
+    「副作用仅在 run_post_commit()（commit 后）触发」的时序。
+    """
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    graph = FakeGraph(result=None)
+    svc._graph = graph
+    redis = FakeRedis()
+    svc._redis = redis
+    eventbus = AsyncMock()
+    svc._eventbus = eventbus
+
+    await svc.parse_and_store(
+        LineageParseRequest(sql="INSERT INTO t SELECT a.id FROM a"), actor_id=1
+    )
+    # 提交前：图未写、事件未发、缓存未失效
+    assert graph.written == []
+    assert graph.deleted == []
+    eventbus.publish.assert_not_awaited()
+
+    # 提交后（调用方 commit 成功后触发）：图写 + 事件发布
+    await svc.run_post_commit()
+    assert ("table:a", "table:t", "DERIVED_FROM") in graph.written
+    assert ("field:a.id", "field:t.id", "DERIVED_FROM") in graph.written
+    assert eventbus.publish.await_count == 1  # _events(legacy) 未配置，仅 EventBus 一次
+
 
 
 async def test_parse_and_store_returns_edge_detail() -> None:
@@ -898,6 +940,8 @@ async def test_delete_by_node_syncs_graph_and_invalidates_cache() -> None:
 
     assert await svc.delete_by_node("table:a") == 1
 
+    # P0-3：图写/缓存失效延迟到事务提交后执行
+    await svc.run_post_commit()
     assert graph.deleted == [("table:a", "table:b", "DERIVED_FROM")]
     assert "lineage:impact:table:a:downstream:5" not in redis.store
 
@@ -921,6 +965,8 @@ async def test_restore_by_node_rebuilds_graph_and_invalidates_cache() -> None:
 
     assert await svc.restore_by_node("table:x") == 1
 
+    # P0-3：图写/缓存失效延迟到事务提交后执行
+    await svc.run_post_commit()
     assert graph.written == [("table:x", "table:y", "DERIVED_FROM")]
     assert "lineage:impact:table:x:upstream:3" not in redis.store
 
@@ -1826,6 +1872,8 @@ async def test_delete_edge_by_id_syncs_graph_and_invalidates_cache() -> None:
 
     await svc.delete_edge_by_id(9)
 
+    # P0-3：图写/缓存失效延迟到事务提交后执行
+    await svc.run_post_commit()
     assert graph.deleted == [("table:a", "table:b", "DERIVED_FROM")]
     assert "lineage:impact:table:a:downstream:5" not in redis.store
     assert "lineage:impact:table:b:upstream:5" not in redis.store
@@ -1981,6 +2029,8 @@ async def test_parse_batch_writes_all_edges() -> None:
         provenance="sqlglot_batch",
     )
     res = await svc.parse_batch(req, actor_id=1)
+    # P0-3：事件延迟到事务提交后发布
+    await svc.run_post_commit()
     assert res.total_statements == 2
     assert res.succeeded == 2
     assert res.failed == 0
@@ -2524,10 +2574,10 @@ async def test_scan_directory_dry_run_stats() -> None:
         assert res.field_edges == 1
         assert res.ddl_edges == 1
         assert res.graph_written is False
-        # 逐文件明细存在
+        # 逐文件明细存在（scan_directory 以 realpath 确立沙箱根，macOS /var→/private/var 需对齐）
         assert {f.path for f in res.files_detail} >= {
-            os.path.join(td, "a.sql"),
-            os.path.join(td, "b.hql"),
+            os.path.join(os.path.realpath(td), "a.sql"),
+            os.path.join(os.path.realpath(td), "b.hql"),
         }
         # dry_run 不写库
         assert svc._repo.upsert_calls == []
@@ -2572,3 +2622,86 @@ async def test_scan_directory_infers_hive_dialect() -> None:
         svc._repo = FakeRepo()
         res = await svc.scan_directory(LineageScanRequest(path=td, dry_run=True), actor_id=1)
         assert res.field_edges == 1  # hive EXPLODE 展开列正确解析（hive 方言推断生效）
+
+
+async def test_notify_ddl_change_notifies_affected_owners(monkeypatch) -> None:
+    """DDL 变更事件化：破坏性 DDL（重命名/DROP）定向通知受影响资产 Owner + 发布事件。"""
+    from app.services.lineage.parser import DDLEdge
+
+    calls: list[dict[str, Any]] = []
+
+    class _FakeNotify:
+        def __init__(self, db: object) -> None:
+            pass
+
+        async def notify_user(self, **kw: Any) -> object:
+            calls.append(kw)
+            return SimpleNamespace(id=len(calls))
+
+    monkeypatch.setattr("app.services.notify.service.NotifyService", _FakeNotify)
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.affected_owners = {"table:ods.s": {"1", "2"}}
+    svc._repo = repo
+    eventbus = AsyncMock()
+    svc._eventbus = eventbus
+    await svc._notify_ddl_change(
+        [DDLEdge(ddl_type="rename_table", source="ods.s", target="dws.new")]
+    )
+    # 通知两个受影响资产 Owner，事件类型/标题正确
+    assert [c["user_id"] for c in calls] == [1, 2]
+    assert all(c["event_type"] == "lineage.ddl_changed" for c in calls)
+    assert "重命名" in calls[0]["title"]
+    # 事件发布到 EventBus（通知中心记录/订阅扇出）
+    eventbus.publish.assert_awaited_once()
+    assert eventbus.publish.await_args.args[0] == "lineage.ddl_changed"
+
+
+async def test_notify_ddl_change_skips_non_breaking_ddl(monkeypatch) -> None:
+    """非破坏性 DDL（create_like 结构复制）不触发定向通知。"""
+    from app.services.lineage.parser import DDLEdge
+
+    called = False
+
+    class _FakeNotify:
+        def __init__(self, db: object) -> None:
+            pass
+
+        async def notify_user(self, **kw: Any) -> object:
+            nonlocal called
+            called = True
+            return SimpleNamespace(id=1)
+
+    monkeypatch.setattr("app.services.notify.service.NotifyService", _FakeNotify)
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    eventbus = AsyncMock()
+    svc._eventbus = eventbus
+    await svc._notify_ddl_change([DDLEdge(ddl_type="create_like", source="ods.s", target="dws.u")])
+    assert called is False
+    eventbus.publish.assert_not_awaited()
+
+
+async def test_notify_ddl_change_skips_when_no_owners(monkeypatch) -> None:
+    """受影响资产无 Owner → 不通知、不发事件。"""
+    from app.services.lineage.parser import DDLEdge
+
+    called = False
+
+    class _FakeNotify:
+        def __init__(self, db: object) -> None:
+            pass
+
+        async def notify_user(self, **kw: Any) -> object:
+            nonlocal called
+            called = True
+            return SimpleNamespace(id=1)
+
+    monkeypatch.setattr("app.services.notify.service.NotifyService", _FakeNotify)
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()  # affected_owners 为空
+    eventbus = AsyncMock()
+    svc._eventbus = eventbus
+    await svc._notify_ddl_change([DDLEdge(ddl_type="drop_table", table="ods.s")])
+    assert called is False
+    eventbus.publish.assert_not_awaited()

@@ -78,6 +78,12 @@ class LineageRepository:
 
         created=True 表示新插入（用于增量采集的 added 计数）；created=False
         表示命中既有边并覆盖值（updated 计数）。既有边值有变化时先落快照。
+
+        软删复活（P0-2）：唯一索引 ``uq_lineage_edge`` 不含 ``deleted_at``，
+        软删行残留在索引中；若此处直接 INSERT 新行会撞 MySQL 1062 使整个
+        parse_batch/ingest_batch 回滚。因此活跃行不存在时先查软删行，命中则
+        **复活**（清 deleted_at/失效标记 + 应用新值 + 落复活快照），这正是
+        「确认失效 → 重新采集」应恢复边的语义。
         """
         existing = (
             await self._db.execute(
@@ -91,7 +97,7 @@ class LineageRepository:
             )
         ).scalar_one_or_none()
         if existing is None:
-            edge = LineageEdge(
+            edge, created = await self._revive_or_insert(
                 source_node=source_node,
                 target_node=target_node,
                 edge_type=edge_type,
@@ -99,10 +105,9 @@ class LineageRepository:
                 confidence=confidence,
                 provenance=provenance,
                 pii_inherited=pii_inherited,
+                change_reason=change_reason,
                 owner=owner,
             )
-            self._db.add(edge)
-            created = True
         else:
             changes: dict[str, object] = {}
             if existing.confidence != confidence:
@@ -121,6 +126,57 @@ class LineageRepository:
             created = False
         await self._db.flush()
         return edge, created
+
+    async def _revive_or_insert(
+        self,
+        *,
+        source_node: str,
+        target_node: str,
+        edge_type: str,
+        granularity: str,
+        confidence: float,
+        provenance: str,
+        pii_inherited: bool,
+        change_reason: str,
+        owner: str | None,
+    ) -> tuple[LineageEdge, bool]:
+        """活跃边不存在时：优先复活软删行，否则新建（P0-2 软删冲突根治）。"""
+        tombstone = (
+            await self._db.execute(
+                select(LineageEdge).where(
+                    LineageEdge.source_node == source_node,
+                    LineageEdge.target_node == target_node,
+                    LineageEdge.edge_type == edge_type,
+                    LineageEdge.granularity == granularity,
+                    LineageEdge.deleted_at.is_not(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if tombstone is not None:
+            # 复活：落复活快照，清除软删/失效标记，再应用新值
+            await self.record_edge_history(tombstone, f"revive:{change_reason}")
+            tombstone.deleted_at = None
+            tombstone.stale = False
+            tombstone.stale_since = None
+            tombstone.missing_count = 0
+            tombstone.confidence = confidence
+            tombstone.provenance = provenance
+            tombstone.pii_inherited = pii_inherited
+            if owner is not None:
+                tombstone.owner = owner
+            return tombstone, False
+        edge = LineageEdge(
+            source_node=source_node,
+            target_node=target_node,
+            edge_type=edge_type,
+            granularity=granularity,
+            confidence=confidence,
+            provenance=provenance,
+            pii_inherited=pii_inherited,
+            owner=owner,
+        )
+        self._db.add(edge)
+        return edge, True
 
     async def upsert_edge_with_status(
         self,
@@ -1606,3 +1662,59 @@ class LineageRepository:
             )
             return row.scalar_one_or_none() is not None
         return True
+
+    async def affected_asset_owners(
+        self, node: str, max_hops: int = 3, limit: int = 50
+    ) -> set[str]:
+        """收集 ``node`` 及其下游受影响资产（``table:``/``metric:``）的 Owner 集合。
+
+        DDL 变更事件化用：表/列重命名、DROP TABLE 会让下游资产血缘断裂/失效，
+        仅靠缓存失效用户感知不到，需定向通知受影响资产 Owner（治理闭环）。
+
+        沿血缘边下游 DFS（复用 ``_edges_from``），收集 ``table:``/``metric:``
+        节点（含起点自身）后经权威库解析 owner_id：``table:`` 查 db_catalog
+        join data_source、``metric:`` 查 metric，软删过滤；无 Owner 的资产不计入。
+
+        Args:
+            node: 起点节点 id。
+            max_hops: 下游最大搜索深度（跳数）。
+            limit: 收集的受影响资产节点数上限（防超大下游刷屏）。
+
+        Returns:
+            Owner user_id 集合（去重）。
+        """
+        if max_hops < 1:
+            return set()
+        adj: dict[str, list[LineageEdge]] = {}
+        affected: set[str] = set()
+
+        async def _downstream(n: str) -> list[LineageEdge]:
+            if n not in adj:
+                adj[n] = await self._edges_from(n)
+            return adj[n]
+
+        async def _dfs(n: str, depth: int, visited: set[str]) -> None:
+            if len(affected) >= limit or depth >= max_hops:
+                return
+            for e in await _downstream(n):
+                t = e.target_node
+                if t in visited:
+                    continue
+                visited.add(t)
+                if t.startswith("table:") or t.startswith("metric:"):
+                    affected.add(t)
+                    if len(affected) >= limit:
+                        return
+                await _dfs(t, depth + 1, visited)
+
+        await _dfs(node, 0, {node})
+        if node.startswith("table:") or node.startswith("metric:"):
+            affected.add(node)
+        if not affected:
+            return set()
+        meta = await self.resolve_node_meta(affected)
+        owners: set[str] = set()
+        for m in meta.values():
+            if m.get("owner") is not None:
+                owners.add(str(m["owner"]))
+        return owners
