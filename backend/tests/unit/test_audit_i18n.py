@@ -20,6 +20,9 @@ class TestEntityLabel:
     def test_unknown_entity_fallback(self) -> None:
         assert entity_label("unknown_entity_xyz") == "unknown_entity_xyz"
 
+    def test_column_description_entity(self) -> None:
+        assert entity_label("column_description") == "字段"
+
     def test_none_entity(self) -> None:
         assert entity_label(None) == "记录"
 
@@ -71,6 +74,42 @@ class TestDescribeAudit:
     def test_list_detail_summary(self) -> None:
         desc = describe_audit("BULK_DEPRECATE", "metric_definition", {"metric_codes": ["a", "b"]})
         assert "批量废弃了指标定义" in desc
+
+    def test_data_source_actions(self) -> None:
+        """数据源生命周期/采集/批量/描述动作应产出业务中文描述句。"""
+        assert describe_audit("TEST_CONNECTION", "data_source") == "测试了数据源连接"
+        assert describe_audit("BATCH_ENABLE", "data_source") == "批量启用了数据源"
+        assert describe_audit("BATCH_DISABLE", "data_source") == "批量停用了数据源"
+        assert describe_audit("BATCH_DELETE", "data_source") == "批量删除了数据源"
+        assert describe_audit("BATCH_PROBE", "data_source") == "批量探活了数据源连接"
+        assert describe_audit("BATCH_SCHEDULE", "data_source") == "批量配置了数据源调度"
+        assert describe_audit("REFRESH", "db_catalog") == "刷新了数据表目录元数据"
+        assert describe_audit("COLLECT_ASYNC", "data_source") == "异步采集了数据源元数据"
+        assert describe_audit("COLLECT_NOW", "data_source") == "立即采集了数据源元数据"
+
+    def test_description_actions(self) -> None:
+        """字段/表级描述推断与编辑动作应以业务术语呈现。"""
+        assert describe_audit("INFER_DESCRIPTION", "column_description") == "推断字段描述"
+        assert (
+            describe_audit("INFER_DESCRIPTIONS_BATCH", "column_description") == "批量推断字段描述"
+        )
+        assert describe_audit("UPDATE_DESCRIPTION", "column_description") == "更新了字段描述"
+        assert describe_audit("UPDATE_TABLE_DESCRIPTION", "catalog") == "更新了资产目录表级描述"
+        assert describe_audit("INFER_TABLE_DESCRIPTION", "catalog") == "推断资产目录表级描述"
+
+    def test_data_source_collect_detail_summary(self) -> None:
+        desc = describe_audit(
+            "COLLECT", "data_source", {"scanned": 270, "registered": 260, "failed_count": 0}
+        )
+        assert "采集了数据源元数据" in desc
+        assert "扫描数=270" in desc
+        assert "失败数=0" in desc
+
+    def test_batch_detail_summary(self) -> None:
+        desc = describe_audit("BATCH_ENABLE", "data_source", {"succeeded": 3, "failed": 1})
+        assert "批量启用了数据源" in desc
+        assert "成功=3" in desc
+        assert "失败=1" in desc
 
     def test_summarize_detail_list_value(self) -> None:
         """detail 中命中摘要键的 list/tuple 值应转为逗号串（对齐 210 行转换分支）。"""

@@ -20,7 +20,6 @@ import {
   getSourceOverview,
   getSourceWatermark,
   listCollectionRuns,
-  listAudit,
   listDataSourceTypes,
   listDomainTree,
   testDataSourceConnection,
@@ -30,12 +29,13 @@ import {
   listUsers,
   UnisenseApiError,
 } from "../api";
-import type { DataSource, SourceHealth, SourceOverview, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest, CollectionProgress, BatchSourceResult, CollectionRun, UserBrief, AuditEntry } from "../types";
+import type { DataSource, SourceHealth, SourceOverview, Watermark, CollectResult, SourceTypeInfo, TestConnectionResult, SourceType, SubjectDomainTreeNode, DataSourceCreateRequest, DataSourceUpdateRequest, CollectionProgress, BatchSourceResult, CollectionRun, UserBrief } from "../types";
 import type { DriftLogItem } from "../api";
 import { ObjectView } from "../utils/display";
 import { COLLECTION_MODE_LABEL, SOURCE_HEALTH_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
 import { useResizableColumns } from "../components/ResizableTable";
+import { AuditTimeline } from "./metric/AuditTimeline";
 import { usePermission } from "../hooks/usePermission";
 
 const FALLBACK_TYPES: SourceTypeInfo[] = [
@@ -145,7 +145,6 @@ function SourceDetailModal({
   const [driftLogs, setDriftLogs] = useState<DriftLogItem[]>([]);
   const [overview, setOverview] = useState<SourceOverview | null>(null);
   const [runs, setRuns] = useState<CollectionRun[]>([]);
-  const [audits, setAudits] = useState<AuditEntry[]>([]);
 
   useEffect(() => {
     getSourceHealth(source.source_id).then(setHealth).catch(() => {});
@@ -154,9 +153,6 @@ function SourceDetailModal({
     listCollectionRuns({ source_id: source.source_id, page: 1, page_size: 5 })
       .then((res) => setRuns(res.items))
       .catch(() => setRuns([]));
-    listAudit({ entity_type: "data_source", entity_id: source.source_id, page: 1, page_size: 8 })
-      .then((res) => setAudits(res.items))
-      .catch(() => setAudits([]));
     listDriftLogs(source.source_id, { page: 1, page_size: 10 })
       .then((res) => setDriftLogs(res.items))
       .catch(() => setDriftLogs([]));
@@ -460,55 +456,45 @@ function SourceDetailModal({
         </Card>
       )}
 
-      {(runs.length > 0 || audits.length > 0) && (
-        <Collapse
-          size="small"
-          style={{ marginBottom: 12 }}
-          items={[
-            ...(runs.length > 0
-              ? [{
-                  key: "runs",
-                  label: `采集运行历史（${runs.length}）`,
-                  children: (
-                    <Table
-                      size="small"
-                      rowKey="id"
-                      pagination={false}
-                      dataSource={runs}
-                      columns={[
-                        { title: "触发", dataIndex: "trigger", width: 70, render: (v: string) => (v === "manual" ? "手动" : v === "scheduled" ? "定时" : v) },
-                        { title: "状态", dataIndex: "status", width: 90, render: (v: string) => <Tag color={v === "COMPLETED" ? "success" : v === "FAILED" ? "error" : "processing"}>{v === "COMPLETED" ? "成功" : v === "FAILED" ? "失败" : "进行中"}</Tag> },
-                        { title: "扫描", dataIndex: "scanned", width: 60 },
-                        { title: "注册", dataIndex: "registered", width: 60 },
-                        { title: "耗时", dataIndex: "duration_seconds", width: 80, render: (v: number | null) => (v != null ? `${v}s` : "—") },
-                        { title: "时间", dataIndex: "started_at", render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
-                      ]}
-                    />
-                  ),
-                }]
-              : []),
-            ...(audits.length > 0
-              ? [{
-                  key: "audits",
-                  label: `操作审计时间线（${audits.length}）`,
-                  children: (
-                    <Table
-                      size="small"
-                      rowKey="id"
-                      pagination={false}
-                      dataSource={audits}
-                      columns={[
-                        { title: "操作", dataIndex: "action", width: 120, render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
-                        { title: "操作人", dataIndex: "actor_name", width: 90, render: (v: string | null) => v ?? "—" },
-                        { title: "时间", dataIndex: "created_at", render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
-                      ]}
-                    />
-                  ),
-                }]
-              : []),
+      <Collapse
+        size="small"
+        style={{ marginBottom: 12 }}
+        items={[
+          ...(runs.length > 0
+            ? [{
+                key: "runs",
+                label: `采集运行历史（${runs.length}）`,
+                children: (
+                  <Table
+                    size="small"
+                    rowKey="id"
+                    pagination={false}
+                    dataSource={runs}
+                    columns={[
+                      { title: "触发", dataIndex: "trigger", width: 70, render: (v: string) => (v === "manual" ? "手动" : v === "scheduled" ? "定时" : v) },
+                      { title: "状态", dataIndex: "status", width: 90, render: (v: string) => <Tag color={v === "COMPLETED" ? "success" : v === "FAILED" ? "error" : "processing"}>{v === "COMPLETED" ? "成功" : v === "FAILED" ? "失败" : "进行中"}</Tag> },
+                      { title: "扫描", dataIndex: "scanned", width: 60 },
+                      { title: "注册", dataIndex: "registered", width: 60 },
+                      { title: "耗时", dataIndex: "duration_seconds", width: 80, render: (v: number | null) => (v != null ? `${v}s` : "—") },
+                      { title: "时间", dataIndex: "started_at", render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
+                    ]}
+                  />
+                ),
+              }]
+            : []),
+          {
+            key: "audits",
+            label: "操作审计时间线",
+            children: (
+              <AuditTimeline
+                entityType="data_source"
+                entityId={source.source_id}
+                emptyText="暂无该数据源的操作记录"
+              />
+            ),
+          },
           ]}
         />
-      )}
 
       <Space wrap>
         {can("data-source:edit") && (
