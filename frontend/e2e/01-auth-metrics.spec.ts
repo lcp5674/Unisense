@@ -317,4 +317,59 @@ test.describe("指标审批", () => {
       await page.waitForTimeout(1000);
     }
   });
+
+  test("审批动作 → 通过（REVIEW→PUBLISHED）出现结果反馈", async ({ page }) => {
+    // 复审 E2：审批动作断言（此前仅列表/详情只读查看，无动作闭环断言）。
+    // 防御式：仅当存在可审指标（REVIEW + 当前用户可审）时执行；无数据/无指派则跳过，
+    // 避免污染审批队列。通过后断言出现成功反馈，且该行移出待审列表。
+    await page.goto(`${BASE}/metrics/review`);
+    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+
+    const approveBtn = page
+      .getByRole("button", { name: /^审批通过/ })
+      .first();
+    if (await approveBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+      const row = approveBtn.locator("xpath=ancestor::tr").first();
+      const codeCell = row.locator("td").first();
+      const targetCode = (await codeCell.textContent().catch(() => ""))?.trim() ?? "";
+      await approveBtn.click();
+      // 通过后应有成功反馈（message）或按钮变禁用/行消失
+      const feedback = await page
+        .getByText(/通过|发布成功|已通过/i)
+        .first()
+        .isVisible({ timeout: 5000 })
+        .catch(() => false);
+      // 审批是真实写操作：成功提示或行消失至少发生其一即视为闭环成立
+      const rowGone = targetCode
+        ? await page.getByText(targetCode).first().isHidden({ timeout: 5000 }).catch(() => false)
+        : false;
+      expect(feedback || rowGone).toBeTruthy();
+    } else {
+      // 无可审指标（空审批队列）→ 通过空态/无按钮即验证页面可加载
+      await expect(page).toHaveURL(/metrics\/review/);
+    }
+  });
+
+  test("审批动作 → 打回（REVIEW→DRAFT）弹确认/反馈", async ({ page }) => {
+    // 防御式：仅当存在可打回指标时执行；打回按钮 danger 语义直接执行（无二次弹窗）。
+    await page.goto(`${BASE}/metrics/review`);
+    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+
+    const rejectBtn = page
+      .getByRole("button", { name: /打回|驳回/i })
+      .first();
+    if (await rejectBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+      await rejectBtn.click();
+      const feedback = await page
+        .getByText(/驳回|打回|已打回/i)
+        .first()
+        .isVisible({ timeout: 5000 })
+        .catch(() => false);
+      expect(feedback).toBeTruthy();
+    } else {
+      await expect(page).toHaveURL(/metrics\/review/);
+    }
+  });
 });

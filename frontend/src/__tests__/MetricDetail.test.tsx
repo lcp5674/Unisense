@@ -31,6 +31,9 @@ vi.mock("../api", () => ({
   piiReview: vi.fn(),
   promoteMetric: vi.fn(),
   rollbackMetric: vi.fn(),
+  // P2-11 术语绑定写路径：listTerms 搜索 + bindMetricTerm 绑定/解绑
+  listTerms: vi.fn(),
+  bindMetricTerm: vi.fn(),
   submitReview: vi.fn(),
   updateMetric: vi.fn(),
   updateMetricDescription: vi.fn(),
@@ -83,6 +86,10 @@ import {
   emergencyPublishMetric,
   recoverSourceDropped,
   confirmDeprecateDropped,
+  promoteMetric,
+  rollbackMetric,
+  listTerms,
+  bindMetricTerm,
   verifyDictValues,
   notifyUnknownDictValues,
   UnisenseApiError,
@@ -767,6 +774,111 @@ describe("MetricDetail 按钮级权限过滤", () => {
       expect(screen.getByText("全量发布")).toBeTruthy();
       expect(screen.getByText("回滚")).toBeTruthy();
     });
+  });
+
+  it("P2-10: 灰度全量发布前弹确认框——确认后调用 promoteMetric", async () => {
+    // 「按钮级权限过滤」为独立 describe，不继承外层 beforeEach 的 mock 泄漏（隔离运行时
+    // 需自足）：显式补齐 load() 所需全部依赖，避免「指标加载失败」假失败。
+    mockedListVersions.mockResolvedValue([]);
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "zhangsan",
+      display_name: "张三",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "EXPERIMENTAL", pii_flag: false });
+    renderWithPerms(["metric:edit", "metric:rollback"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    // 点击「全量发布」→ 出现确认弹窗
+    await waitFor(() => expect(screen.getByText("全量发布")).toBeTruthy());
+    fireEvent.click(screen.getByText("全量发布"));
+    await waitFor(() => expect(screen.getAllByText(/确认全量发布/).length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByText("确认发布"));
+    await waitFor(() => expect(vi.mocked(promoteMetric)).toHaveBeenCalledWith("sales_gmv_sum_d"));
+  });
+
+  it("P2-10: 灰度回滚前弹高风险确认框——确认后调用 rollbackMetric", async () => {
+    mockedListVersions.mockResolvedValue([]);
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "zhangsan",
+      display_name: "张三",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "EXPERIMENTAL", pii_flag: false });
+    renderWithPerms(["metric:edit", "metric:rollback"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText("回滚")).toBeTruthy());
+    fireEvent.click(screen.getByText("回滚"));
+    await waitFor(() => expect(screen.getAllByText(/确认回滚灰度版本/).length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByText("确认回滚"));
+    await waitFor(() => expect(vi.mocked(rollbackMetric)).toHaveBeenCalledWith("sales_gmv_sum_d"));
+  });
+
+  it("P2-11: 关联术语可搜索并绑定——选中术语调用 bindMetricTerm", async () => {
+    mockedListVersions.mockResolvedValue([]);
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "zhangsan",
+      display_name: "张三",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    vi.mocked(listTerms).mockResolvedValue({
+      items: [
+        {
+          id: 7,
+          term_code: "CJ_AMT",
+          name: "成交金额",
+          definition: "订单成交金额",
+          domain: "sales",
+          synonyms: [],
+          boundary: null,
+          status: "PUBLISHED",
+          owner_id: 1,
+          created_at: null,
+          updated_at: null,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "PUBLISHED", pii_flag: false, term_id: null });
+    renderWithPerms(["metric:edit"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    // 打开术语下拉并搜索（antd Select placeholder 是 span 文本，非 input 属性）
+    const termSelect = await screen.findByText("搜索并绑定业务术语");
+    fireEvent.mouseDown(termSelect.closest(".ant-select") as HTMLElement);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "成交" } });
+    await waitFor(() => expect(listTerms).toHaveBeenCalled());
+    // 选中「成交金额」→ 触发绑定（选项标签为「名称（term_code）」）
+    const option = await screen.findByText(/成交金额（CJ_AMT）/);
+    fireEvent.click(option);
+    await waitFor(() => expect(vi.mocked(bindMetricTerm)).toHaveBeenCalledWith("sales_gmv_sum_d", 7));
   });
 
   it("权限快照加载完成前不显示「审批通过」按钮（fail-open 消除）", async () => {

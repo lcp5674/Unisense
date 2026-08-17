@@ -82,6 +82,7 @@ import type {
   CurrentUser,
   Dimension,
   MetricHealth,
+  MetricListResponse,
   MetricResponse,
   MetricUpdateRequest,
   MetricVersionResponse,
@@ -558,23 +559,47 @@ export function MetricDetail() {
   const { track } = useTracking();
 
   // 编辑弹窗字典（粒度/单位/治理/币种）+ 平台维度清单 + 已发布指标（依赖选项）：挂载时加载一次
+  // 防御式加载：编辑弹窗辅助数据失败/返回 undefined 绝不拖垮详情页主体——每个查询独立降级为空值。
   useEffect(() => {
+    const safeDict = async (code: string): Promise<SystemDictItem[]> => {
+      try {
+        return (await listDictItems(code)) ?? [];
+      } catch {
+        return [] as SystemDictItem[];
+      }
+    };
+    const safeDims = async (): Promise<{ items: Dimension[] }> => {
+      try {
+        return (await listDimensions({ page_size: 100 })) ?? { items: [] as Dimension[] };
+      } catch {
+        return { items: [] as Dimension[] };
+      }
+    };
+    const safeMetrics = async (): Promise<MetricListResponse> => {
+      try {
+        return (
+          (await listMetrics({ page_size: 100, status: "PUBLISHED" })) ?? {
+            items: [] as MetricResponse[],
+            total: 0,
+            page: 1,
+            page_size: 100,
+          }
+        );
+      } catch {
+        return { items: [] as MetricResponse[], total: 0, page: 1, page_size: 100 };
+      }
+    };
     Promise.all([
-      listDictItems("granularity").catch(() => [] as SystemDictItem[]),
-      listDictItems("unit").catch(() => [] as SystemDictItem[]),
-      listDictItems("dw_layer").catch(() => [] as SystemDictItem[]),
-      listDictItems("freshness").catch(() => [] as SystemDictItem[]),
-      listDictItems("time_semantics").catch(() => [] as SystemDictItem[]),
-      listDictItems("metric_tier").catch(() => [] as SystemDictItem[]),
-      listDictItems("aggregation").catch(() => [] as SystemDictItem[]),
-      listDictItems("currency").catch(() => [] as SystemDictItem[]),
-      listDimensions({ page_size: 100 }).catch(() => ({ items: [] as Dimension[] })),
-      listMetrics({ page_size: 100, status: "PUBLISHED" }).catch(() => ({
-        items: [] as MetricResponse[],
-        total: 0,
-        page: 1,
-        page_size: 100,
-      })),
+      safeDict("granularity"),
+      safeDict("unit"),
+      safeDict("dw_layer"),
+      safeDict("freshness"),
+      safeDict("time_semantics"),
+      safeDict("metric_tier"),
+      safeDict("aggregation"),
+      safeDict("currency"),
+      safeDims(),
+      safeMetrics(),
     ]).then(([g, u, dl, fr, ts, mt, ag, cur, dims, metrics]) => {
       const opts = (items: SystemDictItem[]) =>
         items
