@@ -121,20 +121,50 @@ class TestCompleteness:
 
 
 class TestQuality:
-    def test_pii_not_reviewed(self, scorer: HealthScorer) -> None:
+    @pytest.mark.asyncio
+    async def test_pii_not_reviewed(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
+        # P2-12: _calc_quality 查询近 30 天 quality_event；无异常事件时维持合规基础分
+        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
         metric = _make_metric(pii_flag=True, compliance_reviewed=False)
-        score, _ = scorer._calc_quality(metric)
+        score, _ = await scorer._calc_quality(metric)
         assert score == 30
 
-    def test_compliance_reviewed(self, scorer: HealthScorer) -> None:
+    @pytest.mark.asyncio
+    async def test_compliance_reviewed(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
+        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
         metric = _make_metric(compliance_reviewed=True)
-        score, _ = scorer._calc_quality(metric)
+        score, _ = await scorer._calc_quality(metric)
         assert score == 90
 
-    def test_default_quality(self, scorer: HealthScorer) -> None:
+    @pytest.mark.asyncio
+    async def test_default_quality(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
+        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
         metric = _make_metric(pii_flag=False, compliance_reviewed=False)
-        score, _ = scorer._calc_quality(metric)
+        score, _ = await scorer._calc_quality(metric)
         assert score == 70
+
+    @pytest.mark.asyncio
+    async def test_open_p0_event_deducts(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
+        """P2-12: 近 30 天未关闭 P0 异常 → 质量分按等级扣减。"""
+        mock_db.execute = AsyncMock(
+            return_value=MagicMock(all=lambda: [("P0", 1), ("P1", 2)])
+        )
+        metric = _make_metric(pii_flag=False, compliance_reviewed=True)
+        score, _ = await scorer._calc_quality(metric)
+        # 90 - 45*1 - 25*2 = 90 - 45 - 50 = -5 → 0
+        assert score == 0
+
+    @pytest.mark.asyncio
+    async def test_open_minor_event_deducts_light(
+        self, scorer: HealthScorer, mock_db: AsyncMock
+    ) -> None:
+        """P2-12: 单个 P2 异常轻扣。"""
+        mock_db.execute = AsyncMock(
+            return_value=MagicMock(all=lambda: [("P2", 1)])
+        )
+        metric = _make_metric(pii_flag=False, compliance_reviewed=True)
+        score, _ = await scorer._calc_quality(metric)
+        assert score == 90 - 12
 
 
 class TestOwnerResponse:
@@ -177,6 +207,8 @@ class TestCalculate:
     async def test_excellent_metric(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
         metric = _make_metric(pii_flag=False, compliance_reviewed=True)
         mock_db.get = AsyncMock(return_value=metric)
+        # P2-12: 质量维度查询 quality_event，无异常事件
+        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
 
         # mock db.merge + flush（calculate不持久化，只返回对象）
         mock_db.merge = AsyncMock()
@@ -199,6 +231,7 @@ class TestCalculate:
             aggregation=None,
         )
         mock_db.get = AsyncMock(return_value=metric)
+        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
         mock_db.merge = AsyncMock()
         mock_db.flush = AsyncMock()
 
@@ -223,6 +256,7 @@ class TestBatchCalculate:
     async def test_batch_partial_success(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
         metric_ok = _make_metric()
         mock_db.get = AsyncMock(side_effect=[metric_ok, None])
+        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
         mock_db.merge = AsyncMock()
         mock_db.flush = AsyncMock()
 

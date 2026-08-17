@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +52,10 @@ _ACTIVITY_STALE = 20  # 无近期更新
 _QUALITY_PII_UNREVIEWED = 30  # 含 PII 但未合规审核
 _QUALITY_REVIEWED = 90  # 已合规审核
 _QUALITY_DEFAULT = 70  # 无 PII 且未审核
+# 近 30 天 quality_event 未关闭异常反比扣分（TD §12.3：异常越多质量分越低）
+_QUALITY_CRITICAL_DEDUCT = 45  # P0 每件扣 45
+_QUALITY_MAJOR_DEDUCT = 25  # P1 每件扣 25
+_QUALITY_MINOR_DEDUCT = 12  # P2 每件扣 12
 
 # Owner 响应评分
 _OWNER_HAS_BACKUP = 85  # 配置了 backup_owner
@@ -105,8 +109,8 @@ class HealthScorer:
         if act_missing:
             missing_dimensions.append("activity")
 
-        # 3. 质量（简化：基于 compliance_reviewed 和 pii_flag 状态）
-        scores["quality"], qual_missing = self._calc_quality(metric)
+        # 3. 质量（合规状态 + 近 30 天 quality_event 异常反比，TD §12.3）
+        scores["quality"], qual_missing = await self._calc_quality(metric)
         if qual_missing:
             missing_dimensions.append("quality")
 
@@ -190,14 +194,53 @@ class HealthScorer:
                 return _ACTIVITY_RECENT_UPDATE, None
         return _ACTIVITY_STALE, None
 
-    @staticmethod
-    def _calc_quality(metric: Metric) -> tuple[int, list[str] | None]:
-        """质量：基于合规审核状态。"""
+    async def _calc_quality(self, metric: Metric) -> tuple[int, list[str] | None]:
+        """质量：合规审核状态为基础，近 30 天未关闭 quality_event 异常反比扣分。
+
+        修复前（P2-12）：仅看 pii/compliance 状态，quality 服务写入的异常事件
+        不影响健康度——"质量"维度与 quality_event 脱节。现按 TD §12.3 接入：
+        近 30 天 OPEN/ACK 的质量异常按等级扣分（P0 重 / P1 中 / P2 轻），
+        异常越多质量分越低；无异常时维持合规基础分。
+        """
+        # 基础分：合规审核状态
         if metric.pii_flag and not metric.compliance_reviewed:
-            return _QUALITY_PII_UNREVIEWED, None
-        if metric.compliance_reviewed:
-            return _QUALITY_REVIEWED, None
-        return _QUALITY_DEFAULT, None
+            base = _QUALITY_PII_UNREVIEWED
+        elif metric.compliance_reviewed:
+            base = _QUALITY_REVIEWED
+        else:
+            base = _QUALITY_DEFAULT
+
+        # 近 30 天未关闭质量异常 → 按等级反比扣分
+        from sqlalchemy import func, select
+
+        from app.models.quality import (
+            QualityEvent,
+            QualityEventStatus,
+            QualitySeverity,
+        )
+
+        since = datetime.now(UTC) - timedelta(days=30)
+        stmt = (
+            select(QualityEvent.level, func.count())
+            .where(
+                QualityEvent.metric_id == metric.id,
+                QualityEvent.created_at >= since,
+                QualityEvent.status.in_(
+                    [QualityEventStatus.OPEN, QualityEventStatus.ACK]
+                ),
+            )
+            .group_by(QualityEvent.level)
+        )
+        rows = (await self._db.execute(stmt)).all()
+        deductions = {
+            QualitySeverity.P0: _QUALITY_CRITICAL_DEDUCT,
+            QualitySeverity.P1: _QUALITY_MAJOR_DEDUCT,
+            QualitySeverity.P2: _QUALITY_MINOR_DEDUCT,
+        }
+        deduction = sum(
+            deductions.get(level, 0) * int(count) for level, count in rows
+        )
+        return max(0, base - deduction), None
 
     @staticmethod
     def _calc_owner_response(metric: Metric) -> tuple[int, list[str] | None]:
