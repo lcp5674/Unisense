@@ -216,7 +216,9 @@ class CollectorService(BaseService):
             health_status=src.health_status or "unknown",
             connection_config_present=bool(src.connection_config),
             connection_config=config,
+            databases=getattr(src, "databases", None),
             schedule_cron=src.schedule_cron,
+            schedule_enabled=bool(getattr(src, "schedule_enabled", True)),
             collection_mode=src.collection_mode or "FULL",
             enabled=bool(getattr(src, "enabled", True)),
             created_by=src.created_by,
@@ -262,6 +264,7 @@ class CollectorService(BaseService):
             name=req.name,
             source_type=source_type_value,
             connection_config=encrypted,
+            databases=req.databases or None,
             domain=req.domain,
             cluster_id=req.cluster_id,
             coverage=0.0,
@@ -481,6 +484,9 @@ class CollectorService(BaseService):
             src.cluster_id = req.cluster_id
         if req.enabled is not None:
             src.enabled = req.enabled
+        # 多目标库（PATCH 语义：[] 表示清空回全部库/单库配置）
+        if req.databases is not None:
+            src.databases = req.databases or None
         # 治理字段：owner_id / description / include / exclude patterns（PATCH 语义）
         if (
             req.owner_id is not None
@@ -699,6 +705,8 @@ class CollectorService(BaseService):
                     )
                     continue
                 src.schedule_cron = schedule_cron
+                # 批量设置调度视为显式启用调度（与单源 /schedule 语义一致）
+                src.schedule_enabled = True
                 await self._db.flush()
                 succeeded.append(
                     BatchSourceItem(source_id=sid, name=src.name, ok=True)
@@ -1513,6 +1521,8 @@ class CollectorService(BaseService):
         *,
         mode: str = "FULL",
         progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
     ) -> dict[str, Any]:
         src = await self._repo.get_source(source_id)
         if src is None:
@@ -1604,11 +1614,23 @@ class CollectorService(BaseService):
         try:
             # P0-6: 注入增量上下文——增量模式且水位有效时连接器只采变更实体
             collector.set_incremental_context(effective_mode, watermark_ts)
-            # 治理：表级 include/exclude 过滤（从 DataSource 读取，注入连接器）
-            if hasattr(src, "include_patterns") and (src.include_patterns or src.exclude_patterns):
+            # 治理：表级 include/exclude 过滤（数据源配置为基线；本次临时过滤覆盖时
+            # 仅本次生效，不污染数据源配置——collect-now 弹窗的临时白/黑名单）
+            effective_include = (
+                src.include_patterns if include_patterns is None else include_patterns
+            )
+            effective_exclude = (
+                src.exclude_patterns if exclude_patterns is None else exclude_patterns
+            )
+            if effective_include or effective_exclude:
                 setter = getattr(collector, "set_table_filter", None)
                 if setter is not None:
-                    setter(src.include_patterns, src.exclude_patterns)
+                    setter(effective_include, effective_exclude)
+            # 多目标库：数据源配置了目标库列表时注入连接器（逐库扫描）
+            if getattr(src, "databases", None):
+                db_setter = getattr(collector, "set_databases", None)
+                if db_setter is not None:
+                    db_setter(src.databases)
             result: CollectResult = await collector.collect(src)
         except Exception as exc:
             # P0-4: 健康状态更新必须落库——即使采集失败也要记录 unhealthy，
@@ -1788,6 +1810,9 @@ class CollectorService(BaseService):
             "drift_events": drift_events,
             "deprecated_count": deprecated_count,
             "entities": entities,
+            # 表级过滤跳过（方案 B：采集结果/记录展示被白黑名单过滤掉的表）
+            "filtered_count": getattr(result, "filtered_count", 0),
+            "filtered_names": getattr(result, "filtered_names", []),
         }
 
     async def refresh_entity(
@@ -1863,11 +1888,15 @@ class CollectorService(BaseService):
         queue: CollectionQueue | None = None,
         *,
         mode: str = "FULL",
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
     ) -> str:
         """将采集任务投递到异步队列，立即返回 job_id（请求内不再同步执行）。
 
         ``mode`` 透传到 worker（FULL/INCREMENTAL）——collect-now 前端选择的
         INCREMENTAL 必须实际执行，不能静默降级为全量（跨链路一致性，M4）。
+        ``include_patterns`` / ``exclude_patterns`` 为本次临时表级过滤（仅本次生效），
+        随任务投递到 worker；None 时 worker 回退到数据源配置的白黑名单。
 
         当 ``queue`` 未提供时，根据配置自动选择：
         - ``settings.redis_url`` 非空 → ArqCollectionQueue（Redis 持久化）
@@ -1887,7 +1916,13 @@ class CollectorService(BaseService):
         from app.core.config import settings as _settings
 
         q = queue or create_collection_queue(redis_url=_settings.redis_url)
-        return await q.enqueue(source_id, actor_id, mode=mode)
+        return await q.enqueue(
+            source_id,
+            actor_id,
+            mode=mode,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
 
     async def get_job_status(
         self, job_id: str, queue: CollectionQueue | None = None
@@ -1970,13 +2005,20 @@ class CollectorService(BaseService):
             counts[status] = counts.get(status, 0) + 1
         return counts
 
-    async def update_schedule(self, source_id: str, cron: str, mode: str) -> None:
-        """US3: 更新数据源的定时调度配置（schedule_cron + collection_mode）。"""
+    async def update_schedule(
+        self, source_id: str, cron: str, mode: str, schedule_enabled: bool | None = None
+    ) -> None:
+        """US3: 更新数据源的定时调度配置（schedule_cron + collection_mode [+ 调度启停]）。
+
+        ``schedule_enabled`` 为 None 时保持当前状态（兼容仅改 cron/mode 的旧调用）。
+        """
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         src.schedule_cron = cron
         src.collection_mode = mode
+        if schedule_enabled is not None:
+            src.schedule_enabled = schedule_enabled
         await self._db.flush()
 
     async def get_watermark(self, source_id: str) -> dict[str, Any]:

@@ -125,8 +125,11 @@ class HiveCollector(BaseCollector):
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
 
-        # 生产语义：database 为空时枚举全部库
-        if self._database:
+        # 目标库优先级：DataSource.databases（多库）→ connection_config.database（单库）
+        # → 枚举全部非系统库
+        if getattr(self, "_databases", None):
+            schemas = list(self._databases)
+        elif self._database:
             schemas = [self._database]
         else:
             try:
@@ -152,7 +155,8 @@ class HiveCollector(BaseCollector):
                 if not tbl:
                     continue
                 tbl = tbl.strip()
-                entity_name = f"{schema}.{tbl}" if not self._database else tbl
+                single_db = bool(self._database) and not getattr(self, "_databases", None)
+                entity_name = f"{schema}.{tbl}" if not single_db else tbl
                 try:
                     desc_rows = await self._execute(
                         f"DESCRIBE {safe_schema}.{self._safe_ident(tbl)}"

@@ -75,7 +75,39 @@ async def test_collect_now_triggers_immediate_collection(
     assert body["job_id"] == "job-immediate-1"
     assert body["status"] == "QUEUED"
     assert body["mode"] == "FULL"
-    mock_schedule.assert_awaited_once_with("s1", 1)
+    mock_schedule.assert_awaited_once_with(
+        "s1", 1, mode="FULL", include_patterns=None, exclude_patterns=None
+    )
+
+
+async def test_collect_now_passes_temp_filters(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """A 方案：/collect-now 携带本次临时白/黑名单透传 schedule_collection。"""
+    with patch(
+        "app.api.collector.CollectorService.schedule_collection",
+        new_callable=AsyncMock,
+        return_value="job-immediate-2",
+    ) as mock_schedule:
+        resp = await collector_client.post(
+            "/api/v1/data-sources/s1/collect-now",
+            json={
+                "mode": "INCREMENTAL",
+                "include_patterns": ["ods_*"],
+                "exclude_patterns": ["tmp_*"],
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["include_patterns"] == ["ods_*"]
+    assert body["exclude_patterns"] == ["tmp_*"]
+    mock_schedule.assert_awaited_once_with(
+        "s1",
+        1,
+        mode="INCREMENTAL",
+        include_patterns=["ods_*"],
+        exclude_patterns=["tmp_*"],
+    )
 
 
 async def test_drift_logs_endpoint_returns_paged(

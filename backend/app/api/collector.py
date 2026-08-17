@@ -667,20 +667,32 @@ async def schedule_collection(
     """
     svc = _svc(db)
     # P1-7: 仅保存 cron+mode 到 DataSource，不投递采集任务
-    await svc.update_schedule(source_id, body.cron, body.mode)
+    await svc.update_schedule(
+        source_id, body.cron, body.mode, schedule_enabled=body.schedule_enabled
+    )
     await write_audit(
         db,
         actor_id=user.id,
         action="COLLECT_SCHEDULE",
         entity_type="data_source",
         entity_id=source_id,
-        detail={"cron": body.cron, "mode": body.mode, "scheduled": True},
+        detail={
+            "cron": body.cron,
+            "mode": body.mode,
+            "schedule_enabled": body.schedule_enabled,
+            "scheduled": True,
+        },
         ip=client_ip(request),
         trace_id=trace_id,
     )
     await db.commit()
     return ok(
-        data={"scheduled": True, "cron": body.cron, "mode": body.mode},
+        data={
+            "scheduled": True,
+            "cron": body.cron,
+            "mode": body.mode,
+            "schedule_enabled": body.schedule_enabled,
+        },
         trace_id=trace_id,
     )
 
@@ -732,20 +744,37 @@ async def collect_now(
     不影响已配置的 cron 调度。mode 经由 CollectRequest 指定（默认 FULL）。
     """
     svc = _svc(db)
-    job_id = await svc.schedule_collection(source_id, user.id, mode=body.mode)
+    job_id = await svc.schedule_collection(
+        source_id,
+        user.id,
+        mode=body.mode,
+        include_patterns=body.include_patterns,
+        exclude_patterns=body.exclude_patterns,
+    )
     await write_audit(
         db,
         actor_id=user.id,
         action="COLLECT_NOW",
         entity_type="data_source",
         entity_id=source_id,
-        detail={"job_id": job_id, "mode": body.mode},
+        detail={
+            "job_id": job_id,
+            "mode": body.mode,
+            "include_patterns": body.include_patterns,
+            "exclude_patterns": body.exclude_patterns,
+        },
         ip=client_ip(request),
         trace_id=trace_id,
     )
     await db.commit()
     return ok(
-        data={"job_id": job_id, "status": "QUEUED", "mode": body.mode},
+        data={
+            "job_id": job_id,
+            "status": "QUEUED",
+            "mode": body.mode,
+            "include_patterns": body.include_patterns,
+            "exclude_patterns": body.exclude_patterns,
+        },
         trace_id=trace_id,
     )
 

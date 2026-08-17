@@ -46,6 +46,7 @@ const source: DataSource = {
   health_status: "healthy",
   connection_config_present: true,
   schedule_cron: null,
+  schedule_enabled: true,
   collection_mode: "FULL",
   created_by: 1,
   created_at: "2026-08-01T00:00:00",

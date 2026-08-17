@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from typing import Any, Protocol, runtime_checkable
 
@@ -23,8 +24,19 @@ from typing import Any, Protocol, runtime_checkable
 class CollectionQueue(Protocol):
     """采集任务入队协议。"""
 
-    async def enqueue(self, source_id: str, actor_id: int, mode: str = "FULL") -> str:
-        """入队一次采集任务（mode 指定 FULL/INCREMENTAL），返回 job_id。"""
+    async def enqueue(
+        self,
+        source_id: str,
+        actor_id: int,
+        mode: str = "FULL",
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+    ) -> str:
+        """入队一次采集任务（mode 指定 FULL/INCREMENTAL），返回 job_id。
+
+        ``include_patterns`` / ``exclude_patterns`` 为本次临时表级过滤
+        （仅本次采集生效，None=worker 回退到数据源配置的白黑名单）。
+        """
         ...
 
 
@@ -61,16 +73,32 @@ class InMemoryCollectionQueue:
     def __init__(self) -> None:
         self._jobs: dict[str, dict[str, Any]] = {}
 
-    async def enqueue(self, source_id: str, actor_id: int, mode: str = "FULL") -> str:
+    async def enqueue(
+        self,
+        source_id: str,
+        actor_id: int,
+        mode: str = "FULL",
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+    ) -> str:
         from datetime import UTC, datetime
 
         job_id = f"job-{uuid.uuid4().hex[:12]}"
+        detail: dict[str, Any] = {
+            "source_id": source_id,
+            "actor_id": actor_id,
+            "mode": mode,
+        }
+        if include_patterns is not None:
+            detail["include_patterns"] = include_patterns
+        if exclude_patterns is not None:
+            detail["exclude_patterns"] = exclude_patterns
         self._jobs[job_id] = {
             "job_id": job_id,
             "source_id": source_id,
             "actor_id": actor_id,
             "status": "QUEUED",
-            "detail": {"source_id": source_id, "actor_id": actor_id, "mode": mode},
+            "detail": detail,
             "created_at": datetime.now(UTC).isoformat(),
         }
         return job_id
@@ -333,28 +361,52 @@ class ArqCollectionQueue:
         self._redis_url = redis_url
         self._redis = redis
 
-    async def enqueue(self, source_id: str, actor_id: int, mode: str = "FULL") -> str:
+    async def enqueue(
+        self,
+        source_id: str,
+        actor_id: int,
+        mode: str = "FULL",
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+    ) -> str:
         from app.core.config import settings
 
         redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
         # run_collection_task 以 job_id 作第 4 位置参数（幂等键 + 状态回写）；
-        # mode 为关键字参数透传（arq 0.28 会把普通 kwargs 原样传给任务函数）。
+        # mode 与临时过滤为关键字参数透传（arq 0.28 会把普通 kwargs 原样传给任务函数）。
         # arq 0.28 的 enqueue_job 不支持 _max_tries/_timeout（会被当普通 kwargs 透传给
         # 任务函数导致 TypeError），任务超时由内部 collect_and_register 的 asyncio 保护兜底。
         job_id = f"collect:{source_id}:{uuid.uuid4().hex}"
-        job = await redis.enqueue_job(
-            "run_collection_task",
-            source_id,
-            actor_id,
-            job_id,
-            mode=mode,
-            _job_id=job_id,
-        )
+        enqueue_kwargs: dict[str, Any] = {"mode": mode}
+        if include_patterns is not None:
+            enqueue_kwargs["include_patterns"] = include_patterns
+        if exclude_patterns is not None:
+            enqueue_kwargs["exclude_patterns"] = exclude_patterns
         # P1-4: 初始状态落 RedisJobStore（worker 完成后由 tasks.py 更新）；
         # mode 写入 detail 供任务中心展示「实际执行模式」。
-        await RedisJobStore(redis).set(
-            job_id, "QUEUED", {"source_id": source_id, "actor_id": actor_id, "mode": mode}
-        )
+        detail: dict[str, Any] = {"source_id": source_id, "actor_id": actor_id, "mode": mode}
+        if include_patterns is not None:
+            detail["include_patterns"] = include_patterns
+        if exclude_patterns is not None:
+            detail["exclude_patterns"] = exclude_patterns
+        store = RedisJobStore(redis)
+        # m1: 先落 QUEUED 再投递任务——避免 arq worker 极快完成（如任务即刻失败）
+        # 写终态（COMPLETED/FAILED）后，QUEUED 再把状态打回，掩盖真实结果。
+        await store.set(job_id, "QUEUED", detail)
+        try:
+            job = await redis.enqueue_job(
+                "run_collection_task",
+                source_id,
+                actor_id,
+                job_id,
+                **enqueue_kwargs,
+                _job_id=job_id,
+            )
+        except Exception:
+            # 入队失败：清理孤儿 QUEUED 状态（非终态无 TTL，会永久堆积）
+            with contextlib.suppress(Exception):
+                await redis.delete(f"collect_job:{job_id}")
+            raise
         # arq enqueue_job 返回 Job 对象，其 job_id 即传入的 _job_id；显式标注为 str
         # 以满足 mypy --strict 的 no-any-return（redis 为 Any 类型，job.job_id 被推断为 Any）。
         arq_job_id: str = job.job_id

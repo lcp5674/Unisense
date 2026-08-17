@@ -74,6 +74,7 @@ import {
   streamCollectionJob,
   getCollectionJob,
   listDataSourceDatabases,
+  scheduleSource,
 } from "../api";
 
 const mockedList = vi.mocked(listDataSources);
@@ -100,6 +101,7 @@ const mockedAudits = vi.mocked(listAudit);
 const mockedUsers = vi.mocked(listUsers);
 const mockedBatchTest = vi.mocked(batchTestDataSources);
 const mockedBatchSchedule = vi.mocked(batchScheduleDataSources);
+const mockedSchedule = vi.mocked(scheduleSource);
 const TYPES: SourceTypeInfo[] = [
   { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
   { source_type: "postgres", label: "PostgreSQL", default_port: 5432, supports_database: true, supports_schema: true, description: "关系型数据库" },
@@ -123,6 +125,7 @@ const source: DataSource = {
   health_status: "healthy",
   connection_config_present: true,
   schedule_cron: null,
+  schedule_enabled: true,
   collection_mode: "FULL",
   created_by: 1,
   created_at: "2026-08-01T00:00:00",
@@ -194,6 +197,7 @@ describe("DataSources", () => {
     mockedUsers.mockResolvedValue([]);
     mockedBatchTest.mockResolvedValue({ succeeded: [], failed: [] });
     mockedBatchSchedule.mockResolvedValue({ succeeded: [], failed: [] });
+    mockedSchedule.mockResolvedValue({ scheduled: true, cron: "0 3 * * *", mode: "FULL", schedule_enabled: true });
   });
 
   it("动态拉取类型元信息并展示中文标签", async () => {
@@ -236,9 +240,9 @@ describe("DataSources", () => {
       expect(mockedListDatabases).toHaveBeenCalled();
     });
     expect(mockedListDatabases.mock.calls[0][0].connection_config.host).toBe("10.0.0.1");
-    // 连接通过后 database 字段变为选择框（枚举结果渲染为选项）
-    await screen.findByText(/Database（选择目标库）/);
-    fireEvent.mouseDown(screen.getByText("全部库（默认）"));
+    // 连接通过后「目标数据库」多选字段变为选择框（枚举结果渲染为选项）
+    await screen.findByText(/选择目标库（可多选，留空=全部库）/);
+    fireEvent.mouseDown(screen.getByText(/选择目标库（可多选，留空=全部库）/));
     await screen.findByRole("option", { name: "finance" });
     expect(screen.getByRole("option", { name: "orders" })).toBeTruthy();
   });
@@ -250,9 +254,16 @@ describe("DataSources", () => {
     });
     fireEvent.click(screen.getByText("管理"));
     await screen.findByText(/数据源：财务库/);
+    // 立即采集 → 弹窗选择模式 → 开始采集（本次临时过滤留空=按数据源配置）
     fireEvent.click(screen.getByText("立即采集"));
+    await screen.findByText(/立即采集：财务库/);
+    fireEvent.click(screen.getByText("开始采集"));
     await waitFor(() => {
-      expect(mockedCollectNow).toHaveBeenCalledWith("mysql_finance", "FULL");
+      expect(mockedCollectNow).toHaveBeenCalledWith(
+        "mysql_finance",
+        "FULL",
+        { include_patterns: undefined, exclude_patterns: undefined },
+      );
     });
     expect(mockedStream).toHaveBeenCalledWith("job-1", expect.any(Object));
     // 模拟 SSE 进度事件 + 终态事件
@@ -417,6 +428,7 @@ describe("DataSources", () => {
     await screen.findByText("连接配置已变更");
     fireEvent.click(screen.getByText("立即重新采集"));
     await waitFor(() => {
+      // 重新采集引导直接触发（无临时过滤）
       expect(mockedCollectNow).toHaveBeenCalledWith("mysql_finance", "FULL");
     });
   });
@@ -735,5 +747,68 @@ describe("DataSources", () => {
         expect.objectContaining({ description: "财务域主库" }),
       );
     });
+  });
+
+  it("立即采集弹窗：填写本次临时白名单后透传 collect-now（仅本次生效）", async () => {
+    mockedCollectNow.mockResolvedValue({ job_id: "job-2", status: "QUEUED", mode: "FULL" });
+    renderSources();
+    await screen.findByText("mysql_finance");
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    fireEvent.click(screen.getByText("立即采集"));
+    await screen.findByText(/立即采集：财务库/);
+    // 填写本次临时白名单（仅本次采集生效；第一个 textarea=白名单）
+    fireEvent.change(screen.getAllByPlaceholderText(/每行一个模式，如：/)[0], { target: { value: "ods_*\ndwd_*" } });
+    fireEvent.click(screen.getByText("开始采集"));
+    await waitFor(() => {
+      expect(mockedCollectNow).toHaveBeenCalledWith(
+        "mysql_finance",
+        "FULL",
+        { include_patterns: ["ods_*", "dwd_*"], exclude_patterns: undefined },
+      );
+    });
+  });
+
+  it("调度启停开关：关停后保存调度透传 schedule_enabled=false", async () => {
+    mockedSchedule.mockResolvedValue({ scheduled: true, cron: "0 3 * * *", mode: "FULL", schedule_enabled: false });
+    renderSources();
+    await screen.findByText("mysql_finance");
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    // 调度默认开（source.schedule_enabled=true）；关停开关后保存
+    fireEvent.click(screen.getByRole("switch"));
+    fireEvent.click(screen.getByText("保存调度"));
+    await waitFor(() => {
+      expect(mockedSchedule).toHaveBeenCalledWith("mysql_finance", "0 3 * * *", "FULL", false);
+    });
+  });
+
+  it("创建时选择多目标库后提交 databases（多库采集）", async () => {
+    await openCreateModal();
+    fireEvent.change(screen.getByPlaceholderText("如 财务 MySQL"), { target: { value: "财务库" } });
+    await selectDomain("财务（finance）");
+    fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), { target: { value: "10.0.0.1" } });
+    await selectType("MySQL（mysql）");
+    // 测试连接 → 枚举目标库 → 选择 finance
+    fireEvent.click(screen.getByText("测试连接"));
+    await screen.findByText(/选择目标库（可多选，留空=全部库）/);
+    fireEvent.mouseDown(screen.getByText(/选择目标库（可多选，留空=全部库）/));
+    // 必须点击 .ant-select-item-option 本体（title=选项文本）才能触发选中（antd 虚拟列表）
+    await waitFor(() => {
+      const dropdown = document.querySelector(
+        ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+      ) as HTMLElement | null;
+      const opt = dropdown?.querySelector(
+        '.ant-select-item-option[title="finance"]',
+      ) as HTMLElement | null;
+      expect(opt).toBeTruthy();
+      if (opt) fireEvent.click(opt);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /创\s*建/ }));
+    await waitFor(() => {
+      expect(mockedCreate).toHaveBeenCalled();
+    });
+    const payload = mockedCreate.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.databases).toEqual(["finance"]);
   });
 });

@@ -51,6 +51,50 @@ class TestArqQueuePersistence:
 
         assert job_id == "test-job-123"
 
+    @pytest.mark.asyncio
+    async def test_arq_enqueue_writes_queued_before_dispatch(self):
+        """m1: 先落 QUEUED 再投递——worker 快失败写终态后不被 QUEUED 打回。"""
+        queue = ArqCollectionQueue(redis_url="redis://localhost:6379/0")
+        mock_job = MagicMock()
+        mock_job.job_id = "job-1"
+        calls: list[str] = []
+
+        mock_redis = AsyncMock()
+
+        async def record_enqueue(*args: object, **kwargs: object) -> MagicMock:
+            calls.append("enqueue_job")
+            return mock_job
+
+        async def record_hset(*args: object, **kwargs: object) -> int:
+            calls.append("hset")
+            return 1
+
+        mock_redis.enqueue_job = AsyncMock(side_effect=record_enqueue)
+        mock_redis.hset = AsyncMock(side_effect=record_hset)
+        queue._redis = mock_redis  # 显式注入，避免模块级单例跨测试污染
+
+        await queue.enqueue("source-1", actor_id=1)
+
+        assert calls == ["hset", "enqueue_job"]
+
+    @pytest.mark.asyncio
+    async def test_arq_enqueue_failure_cleans_orphan_queued(self):
+        """m1: 入队失败时清理孤儿 QUEUED 状态，避免非终态无 TTL 永久堆积。"""
+        queue = ArqCollectionQueue(redis_url="redis://localhost:6379/0")
+
+        mock_redis = AsyncMock()
+        mock_redis.enqueue_job = AsyncMock(side_effect=RuntimeError("arq down"))
+        mock_redis.close = AsyncMock()
+        queue._redis = mock_redis  # 显式注入，避免模块级单例跨测试污染
+
+        with pytest.raises(RuntimeError, match="arq down"):
+            await queue.enqueue("source-1", actor_id=1)
+
+        # QUEUED 已先写入，入队失败后清理 collect_job:* key
+        mock_redis.delete.assert_awaited_once()
+        key = mock_redis.delete.await_args.args[0]
+        assert key.startswith("collect_job:collect:source-1:")
+
 
 class TestServiceRestartRecovery:
     """服务重启后任务恢复测试。"""

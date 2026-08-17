@@ -220,7 +220,11 @@ class InformationSchemaCollector(BaseCollector):
         )
         watermark_ts = getattr(self, "_incremental_watermark", None)
         try:
-            if self._database:
+            # 目标库优先级：DataSource.databases（多库）→ connection_config.database（单库）
+            # → 枚举全部非系统库
+            if getattr(self, "_databases", None):
+                schemas = list(self._databases)
+            elif self._database:
                 schemas = [self._database]
             else:
                 schemas = await self._list_schemas()
@@ -292,8 +296,9 @@ class InformationSchemaCollector(BaseCollector):
                 tbl = row.get("table_name")
                 if not tbl:
                     continue
-                # 多库采集时以 库.表 命名，避免跨库同名表冲突
-                entity_name = f"{schema}.{tbl}" if not self._database else tbl
+                # 单库采集（URL 已限定库）用 表名；多库/全部库用 库.表 命名避免跨库同名冲突
+                single_db = bool(self._database) and not getattr(self, "_databases", None)
+                entity_name = f"{schema}.{tbl}" if not single_db else tbl
                 cols = columns_by_table.get(tbl, [])
                 schema_json = {"columns": cols}
                 specs.append(
@@ -304,10 +309,24 @@ class InformationSchemaCollector(BaseCollector):
                     )
                 )
 
-        # 治理：按 include/exclude 白黑名单过滤扫描到的表（include 优先）
-        specs = [s for s in specs if self._keep_table(s.entity_name)]
+        # 治理：按 include/exclude 白黑名单过滤扫描到的表（include 优先），
+        # 并统计被过滤的表（方案 B：采集结果展示「过滤跳过 N 张表」）。
+        kept_specs: list[CatalogSpec] = []
+        filtered_names: list[str] = []
+        for s in specs:
+            if self._keep_table(s.entity_name):
+                kept_specs.append(s)
+            else:
+                filtered_names.append(s.entity_name)
+        specs = kept_specs
 
-        return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
+        return CollectResult(
+            specs=specs,
+            failed_specs=failed_specs,
+            source_id=source_id,
+            filtered_count=len(filtered_names),
+            filtered_names=filtered_names,
+        )
 
     async def probe(self) -> ProbeResult:
         """轻量探活：SELECT 1（FR-030 连接测试）。"""

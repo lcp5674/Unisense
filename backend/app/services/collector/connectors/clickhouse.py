@@ -172,8 +172,11 @@ class ClickHouseCollector(BaseCollector):
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
 
-        # 生产语义：database 为空时枚举全部非系统库
-        if self._database:
+        # 目标库优先级：DataSource.databases（多库）→ connection_config.database（单库）
+        # → 枚举全部非系统库
+        if getattr(self, "_databases", None):
+            databases = list(self._databases)
+        elif self._database:
             databases = [self._database]
         else:
             try:
@@ -223,7 +226,8 @@ class ClickHouseCollector(BaseCollector):
             for tbl in table_names:
                 if not tbl:
                     continue
-                entity_name = f"{database}.{tbl}" if not self._database else tbl
+                single_db = bool(self._database) and not getattr(self, "_databases", None)
+                entity_name = f"{database}.{tbl}" if not single_db else tbl
                 try:
                     # P0: 补列注释（comment）和默认值（default_kind/default_expression），
                     # 完整 schema_json 供 PII 分类与下游消费。

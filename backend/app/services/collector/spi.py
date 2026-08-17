@@ -43,6 +43,9 @@ class CollectResult:
     specs: list[CatalogSpec] = field(default_factory=list)
     failed_specs: list[FailedSpec] = field(default_factory=list)
     source_id: str = ""
+    # 表级过滤统计（治理白/黑名单跳过；方案 B：采集结果/记录展示被过滤的表）
+    filtered_count: int = 0
+    filtered_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -74,6 +77,7 @@ class BaseCollector(ABC):
         self._classifier = classifier or SensitivityClassifier()
         self._include_patterns: list[str] | None = None
         self._exclude_patterns: list[str] | None = None
+        self._databases: list[str] | None = None
 
     @abstractmethod
     async def collect(self, source: Any) -> CollectResult:
@@ -126,6 +130,15 @@ class BaseCollector(ABC):
         """
         self._include_patterns = include_patterns
         self._exclude_patterns = exclude_patterns
+
+    def set_databases(self, databases: list[str] | None = None) -> None:
+        """注入目标数据库列表（多库采集：逐库扫描指定库，None=按连接配置/全部库）。
+
+        由 service 层在 collect 前从 ``DataSource.databases`` 读取并注入；
+        连接器在 ``collect`` 时优先采用该列表，否则回退到 connection_config.database
+        （单库）或枚举全部非系统库。
+        """
+        self._databases = databases
 
     async def list_databases(self) -> list[str]:
         """枚举该实例下可采集的非系统数据库（创建数据源时选择目标库）。

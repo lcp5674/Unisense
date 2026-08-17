@@ -33,6 +33,10 @@ class DataSourceCreateRequest(BaseModel):
     connection_config: dict[str, Any]
     domain: str = Field(max_length=64)
     cluster_id: str | None = Field(default=None, max_length=64)
+    databases: list[str] | None = Field(
+        default=None,
+        description="目标数据库列表（None=按连接配置/全部非系统库）",
+    )
 
     @model_validator(mode="after")
     def _validate_connection_config(self) -> DataSourceCreateRequest:
@@ -84,6 +88,10 @@ class DataSourceUpdateRequest(BaseModel):
     quota: dict[str, Any] | None = Field(
         default=None,
         description="资源配额（max_concurrency/max_scan_rows，None=不修改）",
+    )
+    databases: list[str] | None = Field(
+        default=None,
+        description="目标数据库列表；[] 表示清空（采集全部库/单库配置），None 表示不修改",
     )
 
     @model_validator(mode="after")
@@ -166,7 +174,9 @@ class DataSourceResponse(BaseModel):
     health_status: str
     connection_config_present: bool
     connection_config: dict[str, Any] | None = None
+    databases: list[str] | None = None
     schedule_cron: str | None = None
+    schedule_enabled: bool = True
     collection_mode: str = "FULL"
     enabled: bool = True
     created_by: int | None = None
@@ -359,6 +369,13 @@ class CollectRequest(BaseModel):
 
     collector_type: str = Field(default="information_schema", max_length=32)
     mode: str = Field(default="FULL", max_length=16, pattern=r"^(FULL|INCREMENTAL)$")
+    # 本次临时表级过滤（仅本次采集生效，不污染数据源配置；None=按数据源既有规则）
+    include_patterns: list[str] | None = Field(
+        default=None, description="本次临时白名单（fnmatch 风格），None=按数据源配置"
+    )
+    exclude_patterns: list[str] | None = Field(
+        default=None, description="本次临时黑名单（fnmatch 风格），None=按数据源配置"
+    )
 
 
 class ScheduleRequest(BaseModel):
@@ -366,6 +383,9 @@ class ScheduleRequest(BaseModel):
 
     cron: str = Field(max_length=100, description="定时调度 cron 表达式")
     mode: str = Field(default="FULL", max_length=16, pattern=r"^(FULL|INCREMENTAL)$")
+    schedule_enabled: bool | None = Field(
+        default=None, description="是否启用定时调度；None=保持当前状态"
+    )
 
 
 class DriftLogResponse(BaseModel):

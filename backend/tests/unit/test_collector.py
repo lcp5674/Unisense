@@ -2346,7 +2346,33 @@ async def test_schedule_collection_passes_mode_to_queue() -> None:
     job_id = await svc.schedule_collection("s1", 1, queue=queue, mode="INCREMENTAL")
 
     assert job_id == "job-1"
-    queue.enqueue.assert_awaited_once_with("s1", 1, mode="INCREMENTAL")
+    queue.enqueue.assert_awaited_once_with(
+        "s1", 1, mode="INCREMENTAL", include_patterns=None, exclude_patterns=None
+    )
+
+
+async def test_schedule_collection_passes_temp_filters_to_queue() -> None:
+    """A 方案：collect-now 临时白/黑名单透传到队列（仅本次生效）。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.enabled = True
+    repo.get_source = AsyncMock(return_value=src)
+
+    queue = MagicMock()
+    queue.enqueue = AsyncMock(return_value="job-2")
+
+    await svc.schedule_collection(
+        "s1",
+        1,
+        queue=queue,
+        mode="FULL",
+        include_patterns=["ods_*"],
+        exclude_patterns=["tmp_*"],
+    )
+
+    queue.enqueue.assert_awaited_once_with(
+        "s1", 1, mode="FULL", include_patterns=["ods_*"], exclude_patterns=["tmp_*"]
+    )
 
 
 async def test_update_source_toggles_enabled() -> None:
@@ -3107,6 +3133,37 @@ async def test_collector_collect_empty_patterns_no_filter():
     collector = InformationSchemaCollector(connector, database="finance")
     result = await collector.collect(MagicMock(source_id="s"))
     assert sorted(s.entity_name for s in result.specs) == ["orders", "users"]
+
+
+async def test_collector_collect_multi_db_via_set_databases():
+    """多目标库：set_databases 注入后逐库扫描，实体以 库.表 命名避免跨库冲突。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _IncludeExcludeConnector(["orders", "users"])
+    collector = InformationSchemaCollector(connector)
+    collector.set_databases(["finance", "sales"])
+    result = await collector.collect(MagicMock(source_id="s"))
+    assert sorted(s.entity_name for s in result.specs) == [
+        "finance.orders",
+        "finance.users",
+        "sales.orders",
+        "sales.users",
+    ]
+
+
+async def test_collector_collect_filtered_stats_and_multi_db():
+    """方案 B：表级过滤统计——filtered_count / filtered_names 在 CollectResult 透出。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _IncludeExcludeConnector(["orders", "tmp_backup"])
+    collector = InformationSchemaCollector(connector)
+    collector.set_databases(["finance", "sales"])
+    collector.set_table_filter(include_patterns=["*orders"], exclude_patterns=["tmp_*"])
+    result = await collector.collect(MagicMock(source_id="s"))
+    # 仅 include 命中的表进入 specs；tmp_backup 跨两个库都被过滤
+    assert sorted(s.entity_name for s in result.specs) == ["finance.orders", "sales.orders"]
+    assert result.filtered_count == 2
+    assert sorted(result.filtered_names) == ["finance.tmp_backup", "sales.tmp_backup"]
 
 
 # ---------- repository.set_source_governance ----------

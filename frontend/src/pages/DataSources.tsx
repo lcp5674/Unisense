@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm, Switch, Divider } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm, Switch, Divider, Tooltip, Radio } from "antd";
 import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined, DeleteOutlined, StopOutlined, PlayCircleOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   listDataSources,
@@ -109,6 +109,15 @@ function previewSourceId(sourceType: string | undefined, cfg: Record<string, unk
   return `${sourceType || "?"}_${norm}`.slice(0, 64);
 }
 
+/** 解析「目标数据库」表单值 → 数组（多选数组 / 逗号分隔输入串 / 空 → []）。 */
+function parseDatabases(raw: unknown): string[] {
+  if (Array.isArray(raw)) return (raw as unknown[]).filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
+  if (typeof raw === "string" && raw.trim()) {
+    return raw.split(/[\n,，]/).map((s) => s.trim()).filter(Boolean);
+  }
+  return [];
+}
+
 function SourceDetailModal({
   source,
   types,
@@ -140,6 +149,13 @@ function SourceDetailModal({
   const abortRef = useRef<(() => void) | null>(null);
   const [cron, setCron] = useState("0 3 * * *");
   const [scheduleMode, setScheduleMode] = useState("FULL");
+  // 调度启停（独立于数据源 enabled：停用调度仅暂停自动定时，源仍可手动采集）
+  const [scheduleEnabled, setScheduleEnabled] = useState(source.schedule_enabled ?? true);
+  // 立即采集弹窗：模式 + 本次临时白/黑名单（仅本次生效，不污染数据源配置）
+  const [collectModalOpen, setCollectModalOpen] = useState(false);
+  const [collectMode, setCollectMode] = useState("FULL");
+  const [collectInclude, setCollectInclude] = useState("");
+  const [collectExclude, setCollectExclude] = useState("");
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<TestConnectionResult | null>(null);
   const [driftLogs, setDriftLogs] = useState<DriftLogItem[]>([]);
@@ -187,6 +203,8 @@ function SourceDetailModal({
       drift_events: (detail.drift_events as CollectResult["drift_events"]) ?? [],
       deprecated_count: Number(detail.deprecated_count ?? 0),
       entities: (detail.entities as CollectResult["entities"]) ?? [],
+      filtered_count: Number(detail.filtered_count ?? 0),
+      filtered_names: (detail.filtered_names as CollectResult["filtered_names"]) ?? [],
     };
     setCollectResult(result);
     // 进度兜底拉满：SSE 为 1s 快照，终态到达时最后一帧 RUNNING 进度可能停在中间值
@@ -206,13 +224,24 @@ function SourceDetailModal({
 
   async function handleCollect() {
     if (collecting) return;
+    // 本次临时过滤：白/黑名单留空 = 不传（worker 回退到数据源配置）
+    const include = collectInclude.trim()
+      ? collectInclude.split(/[\n,，]/).map((s) => s.trim()).filter(Boolean)
+      : undefined;
+    const exclude = collectExclude.trim()
+      ? collectExclude.split(/[\n,，]/).map((s) => s.trim()).filter(Boolean)
+      : undefined;
     setCollecting(true);
     setCollectResult(null);
     setProgress(null);
     setProgressMessages([]);
     setJobId(null);
+    setCollectModalOpen(false);
     try {
-      const { job_id } = await collectSourceNow(source.source_id, "FULL");
+      const { job_id } = await collectSourceNow(source.source_id, collectMode, {
+        include_patterns: include,
+        exclude_patterns: exclude,
+      });
       setJobId(job_id);
       // 订阅 SSE 实时进度；终态事件含完整结果（entities 明细）
       abortRef.current = streamCollectionJob(job_id, {
@@ -265,9 +294,13 @@ function SourceDetailModal({
 
   async function handleSchedule() {
     try {
-      const res = await scheduleSource(source.source_id, cron, scheduleMode);
+      const res = await scheduleSource(source.source_id, cron, scheduleMode, scheduleEnabled);
       if (res?.scheduled) {
-        message.success(`已保存定时调度：${res.cron}（${res.mode}）`);
+        if (scheduleEnabled) {
+          message.success(`已启用定时调度：${res.cron}（${res.mode}）`);
+        } else {
+          message.success("已停用定时调度（cron 保留，源仍可手动采集）");
+        }
       } else {
         message.success("调度配置已保存");
       }
@@ -363,7 +396,7 @@ function SourceDetailModal({
           type="success"
           showIcon
           style={{ marginBottom: 12 }}
-          message={`采集结果：注册 ${collectResult.registered} · PII ${collectResult.pii_registered} · 漂移 ${collectResult.drift_count}`}
+          message={`采集结果：注册 ${collectResult.registered} · PII ${collectResult.pii_registered} · 漂移 ${collectResult.drift_count}${(collectResult.filtered_count ?? 0) > 0 ? ` · 过滤跳过 ${collectResult.filtered_count} 张表` : ""}`}
           description={
             <div>
               <div style={{ marginBottom: 4 }}>
@@ -371,6 +404,13 @@ function SourceDetailModal({
                   ? collectResult.drift_events.slice(0, 5).map((d) => `${d.entity_name} (${DRIFT_CHANGE_LABEL[d.change_type] ?? d.change_type})`).join("、")
                   : "无 schema 漂移"}
               </div>
+              {(collectResult.filtered_count ?? 0) > 0 && (
+                <div style={{ marginBottom: 4, color: "var(--muted)" }}>
+                  被白/黑名单过滤跳过的表（{collectResult.filtered_count} 张）：
+                  {collectResult.filtered_names?.slice(0, 8).join("、")}
+                  {(collectResult.filtered_count ?? 0) > 8 ? " …" : ""}
+                </div>
+              )}
               <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate(`/catalogs?source_id=${encodeURIComponent(source.source_id)}`)}>
                 在采集目录中查看 →
               </Button>
@@ -520,7 +560,17 @@ function SourceDetailModal({
           </Popconfirm>
         )}
         {can("data-source:collect") && (
-          <Button type="primary" icon={<ThunderboltOutlined />} loading={collecting} onClick={handleCollect}>
+          <Button
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            loading={collecting}
+            onClick={() => {
+              setCollectMode(source.collection_mode === "INCREMENTAL" ? "INCREMENTAL" : "FULL");
+              setCollectInclude("");
+              setCollectExclude("");
+              setCollectModalOpen(true);
+            }}
+          >
             立即采集
           </Button>
         )}
@@ -536,9 +586,17 @@ function SourceDetailModal({
           style={{ width: 150 }}
           placeholder="cron"
         />
-        <Select value={scheduleMode} onChange={setScheduleMode} style={{ width: 130 }} options={[{ value: "FULL", label: "全量" }, { value: "INCREMENTAL", label: "增量" }]} />
+        <Select value={scheduleMode} onChange={setScheduleMode} style={{ width: 110 }} options={[{ value: "FULL", label: "全量" }, { value: "INCREMENTAL", label: "增量" }]} />
+        <Tooltip title="停用调度后保留 cron 配置但不自动触发，源仍可手动采集">
+          <Switch
+            checked={scheduleEnabled}
+            onChange={setScheduleEnabled}
+            checkedChildren="调度开"
+            unCheckedChildren="调度关"
+          />
+        </Tooltip>
         {can("data-source:collect") && (
-          <Button icon={<ScheduleOutlined />} onClick={handleSchedule}>设置调度</Button>
+          <Button icon={<ScheduleOutlined />} onClick={handleSchedule}>保存调度</Button>
         )}
         <Button type="link" onClick={() => navigate(`/collection-tasks?source_id=${encodeURIComponent(source.source_id)}`)}>
           采集任务 →
@@ -559,6 +617,58 @@ function SourceDetailModal({
           </Popconfirm>
         )}
       </Space>
+
+      {/* 立即采集弹窗：选择模式 + 本次临时白/黑名单（仅本次生效，不污染数据源配置） */}
+      <Modal
+        title={`立即采集：${source.name}`}
+        open={collectModalOpen}
+        onCancel={() => setCollectModalOpen(false)}
+        onOk={handleCollect}
+        confirmLoading={collecting}
+        okText="开始采集"
+        cancelText="取消"
+        width={560}
+      >
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Form layout="vertical" style={{ marginTop: 4 }}>
+            <Form.Item label="采集模式">
+              <Radio.Group
+                value={collectMode}
+                onChange={(e) => setCollectMode(e.target.value)}
+                options={[
+                  { value: "FULL", label: "全量（扫描全部匹配表）" },
+                  { value: "INCREMENTAL", label: "增量（仅变更表）" },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item
+              label="本次临时白名单（仅采集匹配的表，留空=按数据源配置）"
+              tooltip="fnmatch 风格，每行一个，如 ods_*、dim_*；仅本次采集生效，不修改数据源保存的规则"
+            >
+              <Input.TextArea
+                rows={2}
+                value={collectInclude}
+                onChange={(e) => setCollectInclude(e.target.value)}
+                placeholder={"每行一个模式，如：\nods_*\ndwd_*"}
+              />
+            </Form.Item>
+            <Form.Item
+              label="本次临时黑名单（命中即排除，留空=按数据源配置）"
+              tooltip="fnmatch 风格，每行一个，如 tmp_*、*_bak；白名单优先于黑名单；仅本次采集生效"
+            >
+              <Input.TextArea
+                rows={2}
+                value={collectExclude}
+                onChange={(e) => setCollectExclude(e.target.value)}
+                placeholder={"每行一个模式，如：\ntmp_*\n*_bak"}
+              />
+            </Form.Item>
+          </Form>
+          <span className="muted" style={{ fontSize: 12 }}>
+            本次临时过滤仅对这次采集生效，数据源保存的采集规则不会被修改。
+          </span>
+        </Space>
+      </Modal>
     </Modal>
   );
 }
@@ -599,7 +709,6 @@ export function DataSources() {
   // 数据库枚举（测试连接通过后自动列出，供选择目标库）
   const [dbOptions, setDbOptions] = useState<string[]>([]);
   const [dbLoading, setDbLoading] = useState(false);
-  const [dbEnumerated, setDbEnumerated] = useState(false);
   // Owner 选择：用户列表（GET /auth/users）
   const [userOptions, setUserOptions] = useState<UserBrief[]>([]);
   const [form] = Form.useForm();
@@ -689,7 +798,6 @@ export function DataSources() {
       form.setFieldValue("port", info.default_port);
     }
     setDbOptions([]);
-    setDbEnumerated(false);
   }
 
   /** 枚举实例下可采集的非系统数据库（需 host/类型已填）。 */
@@ -701,7 +809,6 @@ export function DataSources() {
     }
     if (!typeInfo(types, String(values.source_type))?.supports_database) {
       setDbOptions([]);
-      setDbEnumerated(false);
       message.info("该类型不支持枚举数据库（可手填）");
       return;
     }
@@ -713,7 +820,6 @@ export function DataSources() {
         connection_config: cfg,
       });
       setDbOptions(res.databases);
-      setDbEnumerated(true);
       if (res.databases.length === 0) {
         message.info("未发现可采集的数据库（可留空采集全部库）");
       } else {
@@ -721,7 +827,6 @@ export function DataSources() {
       }
     } catch (err) {
       setDbOptions([]);
-      setDbEnumerated(false);
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "枚举数据库失败");
     } finally {
       setDbLoading(false);
@@ -759,7 +864,6 @@ export function DataSources() {
       } else {
         message.error(`连接失败：${res.error ?? "未知错误"}`);
         setDbOptions([]);
-        setDbEnumerated(false);
       }
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "测试失败");
@@ -769,9 +873,8 @@ export function DataSources() {
   function openCreate() {
     setEditTarget(null);
     form.resetFields();
-    form.setFieldsValue({ source_type: undefined, port: 3306 });
+    form.setFieldsValue({ source_type: undefined, port: 3306, databases: [] });
     setDbOptions([]);
-    setDbEnumerated(false);
     setModalOpen(true);
   }
 
@@ -914,13 +1017,14 @@ export function DataSources() {
       port: typeInfo(types, source.source_type)?.default_port ?? undefined,
     });
     setDbOptions([]);
-    setDbEnumerated(false);
     setModalOpen(true);
     // 治理字段回显（创建时留空）
     if (source.description != null) form.setFieldsValue({ description: source.description });
     if (source.owner_id != null) form.setFieldsValue({ owner_id: source.owner_id });
     if (source.include_patterns?.length) form.setFieldsValue({ include_patterns: source.include_patterns.join("\n") });
     if (source.exclude_patterns?.length) form.setFieldsValue({ exclude_patterns: source.exclude_patterns.join("\n") });
+    // 多目标库回显（数组；枚举库后 Select multiple 展示 tags，未枚举时 Input 逗号展示）
+    form.setFieldsValue({ databases: source.databases ? [...source.databases] : [] });
     if (source.quota) {
       form.setFieldsValue({
         quota_max_concurrency: (source.quota as Record<string, unknown>).max_concurrency,
@@ -943,7 +1047,6 @@ export function DataSources() {
             user: cfg.user != null ? String(cfg.user) : undefined,
             password: cfg.password != null ? String(cfg.password) : undefined,
           });
-          setDbEnumerated(Boolean(cfg.database));
         }
       })
       .catch(() => {
@@ -981,6 +1084,12 @@ export function DataSources() {
         const excludePatterns = parsePatterns(values.exclude_patterns);
         if (includePatterns) payload.include_patterns = includePatterns;
         if (excludePatterns) payload.exclude_patterns = excludePatterns;
+        // 多目标库（PATCH 语义：仅当与原有配置不同才提交；[] 表示清空回全部库）
+        const dbList = parseDatabases(values.databases);
+        const prevDbs = editTarget.databases ?? [];
+        if (JSON.stringify(dbList) !== JSON.stringify(prevDbs)) {
+          payload.databases = dbList;
+        }
         if (values.quota_max_concurrency != null || values.quota_max_scan_rows != null) {
           payload.quota = {
             max_concurrency: values.quota_max_concurrency != null ? Number(values.quota_max_concurrency) : undefined,
@@ -1009,6 +1118,9 @@ export function DataSources() {
           cluster_id: values.cluster_id ? String(values.cluster_id) : null,
           connection_config: cfg,
         };
+        // 多目标库：选择/输入了目标库则提交（多库采集），否则留空按连接库/全部非系统库
+        const dbList = parseDatabases(values.databases);
+        if (dbList.length) payload.databases = dbList;
         // source_id 不传 → 后端按 类型_库|域 自动生成
         await createDataSource(payload);
         message.success(`数据源已创建（${previewSourceId(String(values.source_type), cfg, String(values.domain))}）`);
@@ -1111,7 +1223,22 @@ export function DataSources() {
       width: 96,
       render: (v: string) => <Tag color={v === "FULL" ? "blue" : "purple"}>{COLLECTION_MODE_LABEL[v] ?? v}</Tag>,
     },
-    { title: "调度", dataIndex: "schedule_cron", key: "schedule", width: 110, render: (v: string | null) => (v ? <span className="mono">{v}</span> : <span className="muted">—</span>) },
+    {
+      title: "调度",
+      key: "schedule",
+      width: 130,
+      render: (_: unknown, s: DataSource) => {
+        if (!s.schedule_cron) return <span className="muted">—</span>;
+        return (
+          <div>
+            <div className="mono">{s.schedule_cron}</div>
+            <Tag color={s.schedule_enabled ? "green" : "default"} style={{ marginTop: 2 }}>
+              {s.schedule_enabled ? "已启用" : "已停用"}
+            </Tag>
+          </div>
+        );
+      },
+    },
     {
       title: "状态",
       dataIndex: "enabled",
@@ -1342,12 +1469,7 @@ export function DataSources() {
             </Form.Item>
           </Space>
           <Space size={16} style={{ width: "100%" }} align="start">
-            <Form.Item
-              name="database"
-              label={dbEnumerated && dbOptions.length ? "Database（选择目标库）" : "Database（留空=采集全部库）"}
-              style={{ width: "100%" }}
-              tooltip="测试连接通过后可枚举实例下的非系统库；选择指定库则只采集该库，留空则采集全部"
-            >
+            <Form.Item name="database" label="连接库（可选）" style={{ width: "100%" }} tooltip="连接时使用的默认库；留空=采集实例下全部非系统库。多目标库请在下方「目标数据库」选择">
               {dbOptions.length ? (
                 <Select
                   showSearch
@@ -1372,6 +1494,33 @@ export function DataSources() {
               </Form.Item>
             )}
           </Space>
+          <Form.Item
+            name="databases"
+            label="目标数据库（多选，留空=全部库）"
+            tooltip="测试连接通过后可在下方多选实例下的库；选择后仅采集这些库。留空=按连接库/全部非系统库采集"
+            getValueFromEvent={(e) => (e?.target ? e.target.value : e)}
+            normalize={(v: string | string[] | undefined) =>
+              Array.isArray(v)
+                ? v
+                : v && typeof v === "string" && v.trim()
+                  ? v.split(/[\n,，]/).map((s) => s.trim()).filter(Boolean)
+                  : []
+            }
+          >
+            {dbOptions.length ? (
+              <Select
+                mode="multiple"
+                allowClear
+                showSearch
+                placeholder="选择目标库（可多选，留空=全部库）"
+                optionFilterProp="label"
+                loading={dbLoading}
+                options={dbOptions.map((d) => ({ value: d, label: d }))}
+              />
+            ) : (
+              <Input className="mono" placeholder="多个库用逗号分隔，留空=全部库" />
+            )}
+          </Form.Item>
           <Space size={16} style={{ width: "100%" }} align="start">
             <Form.Item name="user" label="User" style={{ width: "100%" }}>
               <Input className="mono" placeholder="连接账号" />

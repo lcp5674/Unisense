@@ -112,6 +112,11 @@ class DataSource(Base, BaseModel):
     connection_config: Mapped[str] = mapped_column(
         Text, nullable=False, comment="连接配置（Fernet 加密存储的令牌）"
     )
+    databases: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="目标数据库列表（None=采集全部库/单库配置；多库采集时逐库扫描）",
+    )
     domain: Mapped[str] = mapped_column(String(64), nullable=False, comment="所属域")
     coverage: Mapped[float] = mapped_column(nullable=False, default=0.0, comment="资产覆盖率")
     quota: Mapped[dict[str, Any]] = mapped_column(
@@ -137,6 +142,13 @@ class DataSource(Base, BaseModel):
     )
     schedule_cron: Mapped[str | None] = mapped_column(
         String(100), nullable=True, comment="定时调度 cron 表达式"
+    )
+    schedule_enabled: Mapped[bool] = mapped_column(
+        BOOLEAN,
+        nullable=False,
+        default=True,
+        server_default="1",
+        comment="是否启用定时调度（停用后仅保留 cron 配置不触发，源仍可手动采集）",
     )
     collection_mode: Mapped[str] = mapped_column(
         String(16), nullable=False, default="FULL", comment="采集模式（FULL/INCREMENTAL）"

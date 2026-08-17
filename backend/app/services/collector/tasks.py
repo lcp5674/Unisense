@@ -10,7 +10,7 @@
 
 增强（工业级修复）：
 - US3: 支持 mode 参数，采集完成后更新采集水位
-- US4: job_id 幂等检查（Redis SET NX）
+- US4: job_id 幂等（成功后标记，崩溃/失败可重试同 job_id；TTL 与终态对齐）
 - US5: 成功/失败后更新 health_status
 """
 
@@ -29,6 +29,8 @@ logger = logging.getLogger("unisense.collector.tasks")
 
 #: 进度日志保留上限（避免长任务在 Redis/内存中无限膨胀）
 _MAX_PROGRESS_MESSAGES = 300
+#: 幂等键 TTL（秒）——与 JobStore 终态 TTL（7 天）对齐，避免键生命周期短于任务记录
+_IDEMPOTENT_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def _make_progress_cb(
@@ -72,28 +74,54 @@ def _make_progress_cb(
 
 
 async def _check_idempotency(redis: Any | None, job_id: str) -> bool:
-    """US4: 幂等检查——Redis SET NX 判断 collect_job:{job_id} 是否已 COMPLETED。
+    """US4: 幂等检查——同 job_id 已成功完成（幂等键存在）时跳过执行。
+
+    幂等键只在任务**成功后**写入（``_mark_idempotent_completed``）：任务崩溃/
+    失败不写键，arq 重试同一 job_id 可重新执行；已成功完成的任务被重复投递
+    （网络重放）则被短路。区别于旧的「任务开始时 SET NX 认领」——后者崩溃
+    任务在 TTL 内永久阻塞同 job_id 重试，且认领值（COMPLETED）语义失真。
 
     Args:
         redis: Redis 客户端（可选）。
         job_id: 任务 ID。
 
     Returns:
-        True 如果任务可以执行（未完成过），False 如果任务已 COMPLETED。
+        True 如果任务可以执行（同 job_id 尚未成功完成过），否则 False。
     """
     if redis is None:
         return True
     try:
         key = f"collect_job_idempotent:{job_id}"
-        result = await redis.set(key, "COMPLETED", nx=True, ex=86400)  # 24h TTL
-        return result is not None  # SET NX 成功=首次执行
-    except Exception as exc:
+        # 幂等键仅在成功完成后存在；EXISTS 只读不认领，崩溃/失败任务可重试
+        return not bool(await redis.exists(key))
+    except Exception as exc:  # Redis 不可用时放行（幂等是优化，不阻塞采集）
         logger.warning("idempotency_check_failed: %s, 允许执行", exc)
         return True
 
 
+async def _mark_idempotent_completed(redis: Any | None, job_id: str) -> None:
+    """US4: 任务成功完成后标记幂等键（TTL 7 天与终态对齐）。
+
+    仅成功路径写入：失败/崩溃不标记，允许 arq 重试同一 job_id。
+    """
+    if redis is None:
+        return
+    try:
+        key = f"collect_job_idempotent:{job_id}"
+        await redis.set(key, "COMPLETED", ex=_IDEMPOTENT_TTL_SECONDS)
+    except Exception as exc:
+        logger.warning("idempotent_mark_failed: %s", exc)
+
+
 async def run_collection_task(
-    ctx: dict[str, Any], source_id: str, actor_id: int, job_id: str, *, mode: str = "FULL"
+    ctx: dict[str, Any],
+    source_id: str,
+    actor_id: int,
+    job_id: str,
+    *,
+    mode: str = "FULL",
+    include_patterns: list[str] | None = None,
+    exclude_patterns: list[str] | None = None,
 ) -> dict[str, Any]:
     """执行一次采集任务，并将状态回写 ``ctx["job_store"]``。
 
@@ -103,6 +131,8 @@ async def run_collection_task(
         actor_id: 触发者 ID。
         job_id: 任务 ID。
         mode: 采集模式（FULL/INCREMENTAL）。
+        include_patterns: 本次临时白名单（None=按数据源配置）。
+        exclude_patterns: 本次临时黑名单（None=按数据源配置）。
 
     Returns:
         采集结果字典。
@@ -166,7 +196,13 @@ async def run_collection_task(
             else None
         )
         result = await svc.collect_and_register(
-            source_id, collector, actor_id, mode=mode, progress_cb=progress_cb
+            source_id,
+            collector,
+            actor_id,
+            mode=mode,
+            progress_cb=progress_cb,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
         )
         # P0-4: 成功路径必须提交——worker 会话无外部调用方 commit，
         # 否则 upsert 的 catalogs / watermark / health 全部不落库（采集等于没执行）。
@@ -180,6 +216,8 @@ async def run_collection_task(
         # US5: 成功 → 更新健康状态（service 层已处理）
         if store is not None:
             await store.set(job_id, "COMPLETED", result)
+        # US4: 成功后才标记幂等键（不在任务开始认领——崩溃/失败可重试同 job_id）
+        await _mark_idempotent_completed(redis, job_id)
         return result
     except Exception as exc:  # noqa: BLE001 - 任务失败需回写状态并上抛供 arq 重试
         logger.exception("采集任务失败 source=%s job=%s", source_id, job_id)

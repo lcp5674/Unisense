@@ -195,14 +195,17 @@ class CollectorRepository:
         return res.scalars().all(), total
 
     async def list_scheduled_sources(self) -> list[DataSource]:
-        """列出配置了定时调度（schedule_cron 非空）且启用中的活跃数据源（P0-7 调度器扫描用）。
+        """列出配置了定时调度（schedule_cron 非空 + schedule_enabled）且启用中的活跃数据源。
 
-        停用（enabled=False）的数据源不参与定时调度，避免维护窗口期被自动触发。
+        数据源停用（enabled=False）或调度停用（schedule_enabled=False）时不参与
+        定时调度：前者避免维护窗口期被自动触发，后者是独立的「调度启停」开关
+        （源仍可手动采集，仅暂停自动定时）。
         """
         res = await self._db.execute(
             select(DataSource).where(
                 DataSource.deleted_at.is_(None),
                 DataSource.enabled.is_(True),
+                DataSource.schedule_enabled.is_(True),
                 DataSource.schedule_cron.isnot(None),
                 DataSource.schedule_cron != "",
             )

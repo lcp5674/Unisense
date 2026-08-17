@@ -1525,7 +1525,11 @@ export interface DataSource {
   connection_config_present: boolean;
   /** 明文连接配置：仅详情接口返回（供编辑回显）；列表接口为 null（脱敏） */
   connection_config?: Record<string, unknown> | null;
+  /** 目标数据库列表（多库采集；null=全部库/单库配置） */
+  databases?: string[] | null;
   schedule_cron: string | null;
+  /** 是否启用定时调度（停用后保留 cron 配置但不触发，源仍可手动采集） */
+  schedule_enabled: boolean;
   collection_mode: string;
   enabled: boolean;
   created_by: number | null;
@@ -1587,6 +1591,8 @@ export interface DataSourceCreateRequest {
   connection_config: Record<string, unknown>;
   domain: string;
   cluster_id?: string | null;
+  /** 目标数据库列表（多库采集；null/空=全部库/单库配置） */
+  databases?: string[] | null;
 }
 
 export interface DataSourceUpdateRequest {
@@ -1605,6 +1611,8 @@ export interface DataSourceUpdateRequest {
   exclude_patterns?: string[] | null;
   /** 资源配额（max_concurrency/max_scan_rows） */
   quota?: Record<string, unknown>;
+  /** 目标数据库列表；[] 表示清空（采集全部库），undefined 表示不修改 */
+  databases?: string[] | null;
 }
 
 /** 数据源资产规模概览（GET /data-sources/{id}/overview） */
@@ -1668,6 +1676,10 @@ export interface CollectResult {
   drift_count: number;
   drift_events: Array<{ entity_name: string; change_type: string }>;
   deprecated_count?: number;
+  /** 本次临时/数据源白黑名单过滤跳过的表数（方案 B） */
+  filtered_count?: number;
+  /** 被过滤跳过的表名（方案 B） */
+  filtered_names?: string[];
   /** 本次采集到的实体明细（表名 + 敏感度 + 漂移标记） */
   entities?: Array<{
     entity_name: string;
@@ -1706,6 +1718,8 @@ export interface ScheduleResult {
   scheduled: boolean;
   cron: string;
   mode: string;
+  /** 是否启用定时调度（缺省时保持当前状态） */
+  schedule_enabled?: boolean;
 }
 
 export interface JobStatus {

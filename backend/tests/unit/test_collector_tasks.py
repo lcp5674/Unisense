@@ -16,7 +16,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.collector.tasks import _check_idempotency, _make_progress_cb, run_collection_task
+from app.services.collector.tasks import (
+    _check_idempotency,
+    _make_progress_cb,
+    _mark_idempotent_completed,
+    run_collection_task,
+)
 
 # ---------- US4: 幂等检查 ----------
 
@@ -41,26 +46,40 @@ async def test_check_idempotency_no_redis_returns_true():
 
 async def test_check_idempotency_first_run_returns_true():
     redis = MagicMock()
-    redis.set = AsyncMock(return_value="OK")
+    redis.exists = AsyncMock(return_value=0)  # 幂等键不存在 → 首次可执行
 
     assert await _check_idempotency(redis, "job1") is True
-    redis.set.assert_awaited_once_with(
-        "collect_job_idempotent:job1", "COMPLETED", nx=True, ex=86400
-    )
+    redis.exists.assert_awaited_once_with("collect_job_idempotent:job1")
 
 
 async def test_check_idempotency_already_completed_returns_false():
     redis = MagicMock()
-    redis.set = AsyncMock(return_value=None)  # SET NX 返回 None → 已存在
+    redis.exists = AsyncMock(return_value=1)  # 幂等键存在 → 已成功完成，跳过
 
     assert await _check_idempotency(redis, "job1") is False
 
 
 async def test_check_idempotency_redis_error_allows_execution():
     redis = MagicMock()
-    redis.set = AsyncMock(side_effect=RuntimeError("redis down"))
+    redis.exists = AsyncMock(side_effect=RuntimeError("redis down"))
 
     assert await _check_idempotency(redis, "job1") is True
+
+
+async def test_mark_idempotent_completed_sets_7d_ttl():
+    """m2: 成功后标记幂等键，TTL 与终态（7 天）对齐而非 24h。"""
+    redis = MagicMock()
+    redis.set = AsyncMock()
+
+    await _mark_idempotent_completed(redis, "job1")
+
+    redis.set.assert_awaited_once_with(
+        "collect_job_idempotent:job1", "COMPLETED", ex=7 * 24 * 60 * 60
+    )
+
+
+async def test_mark_idempotent_completed_no_redis_is_noop():
+    assert await _mark_idempotent_completed(None, "job1") is None
 
 
 # ---------- 幂等跳过 ----------
@@ -70,7 +89,7 @@ async def test_run_idempotent_skip_returns_existing_detail():
     store = MagicMock()
     store.get = AsyncMock(return_value={"detail": {"status": "COMPLETED", "scanned": 4}})
     redis = MagicMock()
-    redis.set = AsyncMock(return_value=None)
+    redis.exists = AsyncMock(return_value=1)  # 已成功完成 → 跳过执行
 
     result = await run_collection_task({"job_store": store, "redis": redis}, "src1", 1, "job1")
 
@@ -82,7 +101,7 @@ async def test_run_idempotent_skip_non_dict_detail_returns_empty():
     store = MagicMock()
     store.get = AsyncMock(return_value={"detail": "legacy"})
     redis = MagicMock()
-    redis.set = AsyncMock(return_value=None)
+    redis.exists = AsyncMock(return_value=1)  # 已成功完成 → 跳过执行
 
     result = await run_collection_task({"job_store": store, "redis": redis}, "src1", 1, "job1")
 
@@ -93,7 +112,7 @@ async def test_run_idempotent_skip_without_existing_returns_flag():
     store = MagicMock()
     store.get = AsyncMock(return_value=None)
     redis = MagicMock()
-    redis.set = AsyncMock(return_value=None)
+    redis.exists = AsyncMock(return_value=1)  # 已成功完成 → 跳过执行
 
     result = await run_collection_task({"job_store": store, "redis": redis}, "src1", 1, "job1")
 
@@ -102,7 +121,7 @@ async def test_run_idempotent_skip_without_existing_returns_flag():
 
 async def test_run_idempotent_skip_without_store_returns_flag():
     redis = MagicMock()
-    redis.set = AsyncMock(return_value=None)
+    redis.exists = AsyncMock(return_value=1)  # 已成功完成 → 跳过执行
 
     result = await run_collection_task({"redis": redis}, "src1", 1, "job1")
 
@@ -223,7 +242,8 @@ async def test_run_success_production_path_builds_session_and_collector():
     store.set = AsyncMock()
 
     redis = MagicMock()
-    redis.set = AsyncMock(return_value="OK")
+    redis.exists = AsyncMock(return_value=0)  # 首次执行（幂等键不存在）
+    redis.set = AsyncMock()
 
     with (
         patch("app.services.collector.tasks.async_session_factory", return_value=db) as m_fac,
@@ -426,3 +446,64 @@ async def test_run_raises_when_collector_unavailable():
     store.set.assert_awaited_once_with(
         "job1", "FAILED", {"source_id": "src1", "actor_id": 1, "error": "采集器不可用: src1"}
     )
+
+
+# ---------- m2: 成功后才标记幂等 ----------
+
+
+async def test_run_success_marks_idempotent_key():
+    """m2: 成功路径在 COMPLETED 回写后标记幂等键（7 天 TTL）；崩溃/失败不标记。"""
+    svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
+    svc.collect_and_register = AsyncMock(return_value={"scanned": 2})
+    db = MagicMock()
+    db.commit = AsyncMock()
+    collector = MagicMock()
+    store = MagicMock()
+    store.set = AsyncMock()
+    redis = MagicMock()
+    redis.exists = AsyncMock(return_value=0)
+    redis.set = AsyncMock()
+
+    await run_collection_task(
+        {"svc": svc, "db": db, "collector": collector, "job_store": store, "redis": redis},
+        "src1",
+        1,
+        "job1",
+    )
+
+    redis.set.assert_awaited_once_with(
+        "collect_job_idempotent:job1", "COMPLETED", ex=7 * 24 * 60 * 60
+    )
+
+
+async def test_run_failure_does_not_mark_idempotent():
+    """m2: 失败路径不标记幂等键——arq 重试同一 job_id 可重新执行。"""
+    svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
+    svc.collect_and_register = AsyncMock(side_effect=RuntimeError("boom"))
+    db = MagicMock()
+    db.commit = AsyncMock()
+    repo = MagicMock()
+    repo.update_health_status = AsyncMock()
+    store = MagicMock()
+    store.set = AsyncMock()
+    redis = MagicMock()
+    redis.exists = AsyncMock(return_value=0)
+    redis.set = AsyncMock()
+
+    with patch("app.services.collector.tasks.CollectorRepository", return_value=repo):
+        with pytest.raises(RuntimeError, match="boom"):
+            await run_collection_task(
+                {"svc": svc, "db": db, "job_store": store, "redis": redis, "collector": MagicMock()},
+                "src1",
+                1,
+                "job1",
+            )
+
+    # 失败只回写 FAILED，不写幂等键
+    redis.set.assert_not_called()
