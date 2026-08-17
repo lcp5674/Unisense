@@ -1964,6 +1964,26 @@ export interface AssetEntityDetail {
   };
   /** 是否含 PII */
   pii_flag?: boolean;
+  // ---- PII 合规增强：字段级明细 / 合规状态 / 脱敏 / 保留期 ----
+  /** 字段级 PII 命中明细（列名/类别/规则/置信度/人工标注） */
+  pii_fields?: AssetPiiField[];
+  /** 活跃 PII 字段数（排除误报标注） */
+  pii_field_count?: number;
+  pii_categories?: string[];
+  /** 字段级人工标注列表 */
+  pii_overrides?: AssetPiiOverride[];
+  /** 表级合规复核状态 */
+  compliance_reviewed?: boolean;
+  compliance_reviewed_by?: number | null;
+  compliance_reviewed_at?: string | null;
+  /** 脱敏策略（none/mask/hash/deny） */
+  masking_policy?: string | null;
+  /** 保留期（天）与合法性基础 */
+  retention_days?: number | null;
+  legal_basis?: string | null;
+  retention_expires_at?: string | null;
+  /** 保留期是否临近到期（30 天内） */
+  retention_expiring?: boolean;
   etl_sql?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -2066,12 +2086,65 @@ export interface AssetHealthSummary {
   deprecated_without_successor: Array<{ metric_code: string; name: string }>;
 }
 
-// PII 合规视图（GET /assetmap/pii）
+// PII 合规视图（GET /assetmap/pii）——增强：类别分布 + 风险计数（无主/待复核/已复核）
 export interface AssetPiiOverview {
   by_sensitivity: Record<string, number>;
   by_domain: Record<string, number>;
   pii_metric_count: number;
   pii_catalog_count: number;
+  /** 字段级 PII 类别分布（ID_CARD/PHONE/...） */
+  by_category: Record<string, number>;
+  /** 无主 PII 目录数（最高优先级合规风险） */
+  unowned_pii: number;
+  /** 待复核 PII 总数（目录 + 指标） */
+  unreviewed_pii: number;
+  unreviewed_catalog: number;
+  unreviewed_metric: number;
+  /** 已复核 PII 目录数 */
+  reviewed_pii: number;
+}
+
+// PII 合规增强：PII 资产明细 / 字段级命中 / 人工标注 / 行业模板
+export interface AssetPiiField {
+  column: string;
+  category: string;
+  rule: string;
+  confidence: number;
+  matched_by: string;
+  /** 人工标注：True=误报非 PII；False=确认是 PII */
+  suppressed?: boolean;
+  override_reason?: string | null;
+}
+
+export interface AssetPiiAssetItem {
+  id: number;
+  entity_name: string;
+  entity_type: string;
+  source_id: string;
+  source_name?: string | null;
+  domain?: string | null;
+  sensitivity_level: string;
+  owner_id: number | null;
+  owner_name?: string | null;
+  compliance_reviewed: boolean;
+  masking_policy?: string | null;
+  pii_field_count: number;
+  categories: string[];
+  pii_fields?: AssetPiiField[];
+  updated_at: string;
+}
+
+export interface AssetPiiTemplate {
+  id: string;
+  name: string;
+  description: string;
+  sensitive_categories: string[];
+}
+
+export interface AssetPiiOverride {
+  column: string;
+  suppressed: boolean;
+  reason?: string | null;
 }
 
 // 变更追踪（GET /assetmap/changes）——富化：变更类型/责任人/版本 + drift 明细

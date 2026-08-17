@@ -43,6 +43,15 @@ class TestGetEntityDetail:
             "description": None,
             "description_source": None,
             "description_updated_at": None,
+            # PII 合规增强：表级复核/脱敏/保留期
+            "compliance_reviewed": False,
+            "compliance_reviewed_by": None,
+            "compliance_reviewed_at": None,
+            "masking_policy": None,
+            "retention_days": None,
+            "legal_basis": None,
+            "retention_expires_at": None,
+            "retention_notified_at": None,
         }
         base.update(kw)
         return SimpleNamespace(**base)
@@ -83,7 +92,14 @@ class TestGetEntityDetail:
         # 责任人展示名：_owner_display_name 查询（owner_id=5）
         r7 = MagicMock()
         r7.first.return_value = ("李四", "lisi")
-        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5, r6, r7])
+        # PII 合规增强：classification 明细查询（无记录 → None，走实时检测）
+        r8 = MagicMock()
+        r8.scalar_one_or_none.return_value = None
+        # PII 合规增强：字段级人工标注查询（无标注）
+        r9 = MagicMock()
+        r9.scalars.return_value.all.return_value = []
+        # 执行顺序：pii_fields 计算（classification → override）在 owner_name 之前
+        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5, r6, r8, r9, r7])
 
         out = await repo.get_entity_detail(1)
 
@@ -153,7 +169,10 @@ class TestGetEntityDetail:
         # ColumnDescription 查询（并行会话新增）
         r6 = MagicMock()
         r6.scalars.return_value.all.return_value = []
-        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5, r6])
+        # PII 合规增强：字段级人工标注查询（INTERNAL 无 PII 明细，仅查标注表）
+        r7 = MagicMock()
+        r7.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(side_effect=[r1, r2, r3, r4, r5, r6, r7])
 
         out = await AssetMapRepository(s).get_entity_detail(2)
 
@@ -1162,7 +1181,19 @@ class TestPiiOverview:
         r_sens.all.return_value = [("PII", 3)]
         r_domain = MagicMock()
         r_domain.all.return_value = [("sales", 2)]
-        s.execute = AsyncMock(side_effect=[r_sens, r_domain])
+        # PII 合规增强：无主/待复核/已复核计数（scalar 返回数字）
+        r_unowned = MagicMock()
+        r_unowned.scalar.return_value = 1
+        r_unreviewed = MagicMock()
+        r_unreviewed.scalar.return_value = 1
+        r_unreviewed_metric = MagicMock()
+        r_unreviewed_metric.scalar.return_value = 1
+        # 字段类别分布（scalars().all 返回空）
+        r_cat = MagicMock()
+        r_cat.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(
+            side_effect=[r_sens, r_domain, r_unowned, r_unreviewed, r_unreviewed_metric, r_cat]
+        )
 
         out = await repo.pii_overview()
 
@@ -1170,6 +1201,13 @@ class TestPiiOverview:
         assert out["pii_metric_count"] == 2
         assert out["by_sensitivity"] == {"PII": 3}
         assert out["by_domain"] == {"sales": 2}
+        # PII 合规增强扩展字段
+        assert out["unowned_pii"] == 1
+        assert out["unreviewed_pii"] == 2  # 1 目录 + 1 指标
+        assert out["unreviewed_catalog"] == 1
+        assert out["unreviewed_metric"] == 1
+        assert out["reviewed_pii"] == 2  # 3 总 - 1 未复核
+        assert out["by_category"] == {}
 
 
 class TestRecentChanges:

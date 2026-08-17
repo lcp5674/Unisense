@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.models.collector_models import CollectionRun, CollectionWatermark, SchemaDriftLog
 from app.models.data_source import ColumnDescription, DataSource, DBCatalog
+from app.models.governance import Classification
 from app.models.user import User
 from app.services.collector.drift_detector import DriftDetector, compute_content_signature
 from app.services.collector.schemas import BulkDeprecateItem
@@ -363,6 +364,51 @@ class CollectorRepository:
             existing.owner_id = owner_id
         await self._db.flush()
         return existing, False, drift_info
+
+    async def upsert_classification(
+        self,
+        catalog_id: int,
+        sensitivity_level: str,
+        pii_columns: list[dict[str, Any]],
+        classified_by: str = "rule_engine",
+        model_version: str = "rules-v2",
+    ) -> None:
+        """写/更新字段级 PII 命中明细到 classification 表（采集时随分级落库）。
+
+        Args:
+            catalog_id: db_catalog.id。
+            sensitivity_level: 敏感级别（PII/CONFIDENTIAL/...）。
+            pii_columns: ``detect_pii_fields`` 的命中明细（列名/类别/规则/置信度）。
+            classified_by: 分级来源（默认规则引擎）。
+            model_version: 规则版本（默认 rules-v2）。
+        """
+        existing = (
+            await self._db.execute(
+                select(Classification).where(
+                    Classification.catalog_id == catalog_id,
+                    Classification.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        # classification.sensitivity_level 枚举（SensitivityLevel）不含 NEEDS_REVIEW——
+        # 待复核统一落 UNKNOWN（与 db_catalog 的 NEEDS_REVIEW 列语义等价）。
+        level = "UNKNOWN" if sensitivity_level == "NEEDS_REVIEW" else sensitivity_level
+        if existing is not None:
+            existing.sensitivity_level = level
+            existing.pii_columns = pii_columns
+            existing.classified_by = classified_by
+            existing.model_version = model_version
+        else:
+            self._db.add(
+                Classification(
+                    catalog_id=catalog_id,
+                    sensitivity_level=level,
+                    pii_columns=pii_columns,
+                    classified_by=classified_by,
+                    model_version=model_version,
+                )
+            )
+        await self._db.flush()
 
     async def list_catalogs(self, params: Any) -> tuple[Sequence[DBCatalog], int]:
         # "all" 时退化为普通查询（不过滤删除状态，不过滤 source_id）

@@ -13,7 +13,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
@@ -54,6 +53,8 @@ def _svc() -> tuple[CollectorService, MagicMock]:
         # P1-5: 对账相关方法默认 mock（空存活实体 → 不过期任何表）
         repo.list_active_entity_names = AsyncMock(return_value=[])
         repo.deprecate_catalog = AsyncMock(return_value=False)
+        # PII 合规增强：字段级命中明细落库方法默认 AsyncMock
+        repo.upsert_classification = AsyncMock()
         return svc, repo
 
 
@@ -580,7 +581,7 @@ async def test_collect_and_register_no_deprecate_in_incremental_mode():
 class _AsyncCM:
     """异步上下文管理器桩（begin_nested 成功路径：__aexit__ 不抛异常）。"""
 
-    async def __aenter__(self) -> "_AsyncCM":
+    async def __aenter__(self) -> _AsyncCM:
         return self
 
     async def __aexit__(self, *args: Any) -> bool:

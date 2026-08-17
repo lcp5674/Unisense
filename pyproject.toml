@@ -89,6 +89,10 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM"]
 # B008: FastAPI 依赖注入标准写法（Depends(...) 作默认参数），属误报，按社区惯例忽略
 ignore = ["B008"]
 
+# 迁移文件含大量 DDL/种子长行（与既有 0066 等一致），豁免 E501
+[tool.ruff.lint.per-file-ignores]
+"backend/alembic/versions/*.py" = ["E501"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
 

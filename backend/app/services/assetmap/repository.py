@@ -19,7 +19,7 @@ from app.models.collector_models import SchemaDriftLog
 from app.models.consume import MetricValueSnapshot
 from app.models.data_source import ColumnDescription, DataSource, DBCatalog
 from app.models.enums import SensitivityLevelEnum
-from app.models.governance import Classification
+from app.models.governance import Classification, PiiFieldOverride
 from app.models.lineage import LineageEdge
 from app.models.metric import Metric
 from app.models.user import User
@@ -261,6 +261,19 @@ class AssetMapRepository:
             desc_list = descriptions.scalars().all()
             schema_summary = self._merge_descriptions(schema_summary, desc_list)
 
+        # PII 合规增强：字段级命中明细（classification.pii_columns + 人工标注）
+        # 其中 _entity_pii_fields 内部已合并人工标注（一次查询）
+        pii_fields = await self._entity_pii_fields(row)
+        pii_overrides = [
+            {
+                "column": f["column"],
+                "suppressed": f["suppressed"],
+                "reason": f.get("override_reason"),
+            }
+            for f in pii_fields
+            if f.get("override_reason") is not None or f.get("suppressed")
+        ]
+
         return {
             "id": row.id,
             "entity_name": row.entity_name,
@@ -287,9 +300,130 @@ class AssetMapRepository:
             "created_at": row.created_at,
             "updated_at": row.updated_at,
             "pii_flag": "PII" in sens,
+            # PII 合规增强字段
+            "pii_fields": pii_fields,
+            "pii_field_count": sum(1 for f in pii_fields if not f.get("suppressed")),
+            "pii_categories": sorted(
+                {f["category"] for f in pii_fields if not f.get("suppressed")}
+            ),
+            "pii_overrides": pii_overrides,
+            "compliance_reviewed": bool(row.compliance_reviewed),
+            "compliance_reviewed_by": row.compliance_reviewed_by,
+            "compliance_reviewed_at": row.compliance_reviewed_at,
+            "masking_policy": row.masking_policy,
+            "retention_days": row.retention_days,
+            "legal_basis": row.legal_basis,
+            "retention_expires_at": row.retention_expires_at,
+            "retention_expiring": await self._retention_expiring(row),
             # etl_sql 属敏感字段（可能内嵌连接串），详情接口不返回
             "etl_sql": None,
         }
+
+    async def _entity_pii_fields(self, row: DBCatalog) -> list[dict[str, Any]]:
+        """资产字段级 PII 命中明细（classification.pii_columns 为主，缺失时实时检测）。
+
+        返回结构 ``[{column, category, rule, confidence, matched_by, suppressed,
+        override_reason}]``，并按 ``pii_field_override`` 合并人工标注
+        （suppressed=True 标注误报非 PII）。
+        """
+        fields: list[dict[str, Any]] = []
+        row_data = row.schema_json if isinstance(row.schema_json, dict) else {}
+        if row.sensitivity_level and "PII" in row.sensitivity_level.upper():
+            classification = (
+                await self._session.execute(
+                    select(Classification)
+                    .where(
+                        Classification.catalog_id == row.id,
+                        Classification.deleted_at.is_(None),
+                    )
+                    .order_by(Classification.created_at.desc())
+                )
+            ).scalar_one_or_none()
+            if classification is not None and isinstance(classification.pii_columns, list):
+                for item in classification.pii_columns:
+                    if isinstance(item, dict) and item.get("column"):
+                        fields.append(
+                            {
+                                "column": str(item["column"]),
+                                "category": str(item.get("category") or "PII"),
+                                "rule": str(item.get("rule") or ""),
+                                "confidence": float(item.get("confidence") or 0),
+                                "matched_by": str(item.get("matched_by") or "name"),
+                            }
+                        )
+            if not fields:
+                # 旧数据无 pii_columns 明细：实时检测补齐（best-effort）
+                from app.services.collector.classifier import SensitivityClassifier
+
+                for hit in SensitivityClassifier().detect_pii_fields(row.entity_name, row_data):
+                    fields.append(
+                        {
+                            "column": hit.column,
+                            "category": hit.category,
+                            "rule": hit.rule,
+                            "confidence": hit.confidence,
+                            "matched_by": hit.matched_by,
+                        }
+                    )
+        # 合并人工标注（suppressed 覆盖规则判定）
+        overrides = await self._entity_pii_overrides(row.id)
+        override_map = {o["column"]: o for o in overrides}
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for f in fields:
+            seen.add(f["column"])
+            ov = override_map.get(f["column"])
+            if ov is not None:
+                f["suppressed"] = ov["suppressed"]
+                f["override_reason"] = ov["reason"]
+            else:
+                f["suppressed"] = False
+                f["override_reason"] = None
+            merged.append(f)
+        # 人工确认是 PII 但规则未命中的字段（suppressed=False 覆盖）
+        for col, ov in override_map.items():
+            if col not in seen and not ov["suppressed"]:
+                merged.append(
+                    {
+                        "column": col,
+                        "category": "MANUAL",
+                        "rule": "manual_confirm",
+                        "confidence": 1.0,
+                        "matched_by": "manual",
+                        "suppressed": False,
+                        "override_reason": ov["reason"],
+                    }
+                )
+        return merged
+
+    async def _entity_pii_overrides(self, catalog_id: int) -> list[dict[str, Any]]:
+        """查询资产字段级人工标注列表（含软删过滤）。"""
+        rows = (
+            await self._session.execute(
+                select(PiiFieldOverride).where(
+                    PiiFieldOverride.catalog_id == catalog_id,
+                    PiiFieldOverride.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "column": r.column_name,
+                "suppressed": bool(r.suppressed),
+                "reason": r.reason,
+                "created_by": r.created_by,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ]
+
+    async def _retention_expiring(self, row: DBCatalog) -> bool:
+        """保留期是否临近到期（30 天内）或已到期。"""
+        if row.retention_expires_at is None:
+            return False
+        horizon = datetime.now(UTC) + timedelta(days=30)
+        return bool(row.retention_expires_at <= horizon)
 
     @staticmethod
     def _lineage_variants(entity_name: str) -> list[str]:
@@ -1439,10 +1573,15 @@ class AssetMapRepository:
 
 
     async def pii_overview(self) -> dict[str, Any]:
-        """PII 合规资产视图：按敏感级/域聚合 PII 资产。
+        """PII 合规资产视图：按敏感级/域/类别聚合 + 风险计数。
+
+        PII 合规增强：新增 ``by_category``（字段类别分布）、``unowned_pii``
+        （无主 PII 目录）、``unreviewed_pii``（待复核目录+指标）、
+        ``reviewed_pii``（已复核目录）。
 
         Returns:
-            ``{by_sensitivity, by_domain, pii_metric_count, pii_catalog_count}``
+            ``{by_sensitivity, by_domain, pii_metric_count, pii_catalog_count,
+            by_category, unowned_pii, unreviewed_pii, reviewed_pii}``
         """
         # 目录 PII 分布（敏感级含 PII）
         sens_rows = (
@@ -1464,12 +1603,350 @@ class AssetMapRepository:
         ).all()
         pii_metric_count = sum(int(r[1] or 0) for r in domain_rows)
 
+        # 风险计数：无主 PII / 待复核 PII（目录）/ 已复核 PII（目录）
+        unowned_pii = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(DBCatalog)
+                .where(
+                    DBCatalog.deleted_at.is_(None),
+                    DBCatalog.owner_id.is_(None),
+                    DBCatalog.sensitivity_level.like("%PII%"),
+                )
+            )
+        ).scalar() or 0
+        unreviewed_catalog = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(DBCatalog)
+                .where(
+                    DBCatalog.deleted_at.is_(None),
+                    DBCatalog.sensitivity_level.like("%PII%"),
+                    DBCatalog.compliance_reviewed.is_(False),
+                )
+            )
+        ).scalar() or 0
+        reviewed_catalog = max(pii_catalog_count - int(unreviewed_catalog), 0)
+        # 待复核指标（复用指标合规复核字段）
+        unreviewed_metric = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Metric)
+                .where(
+                    Metric.deleted_at.is_(None),
+                    Metric.pii_flag.is_(True),
+                    Metric.compliance_reviewed.is_(False),
+                )
+            )
+        ).scalar() or 0
+
+        # 字段类别分布：展开 classification.pii_columns（PII 目录各字段类别）
+        by_category = await self._pii_category_stats()
+
         return {
             "by_sensitivity": dict(cast("Sequence[tuple[Any, Any]]", sens_rows)),
             "by_domain": dict(cast("Sequence[tuple[Any, Any]]", domain_rows)),
             "pii_metric_count": int(pii_metric_count),
             "pii_catalog_count": int(pii_catalog_count),
+            "by_category": by_category,
+            "unowned_pii": int(unowned_pii),
+            "unreviewed_pii": int(unreviewed_catalog) + int(unreviewed_metric),
+            "unreviewed_catalog": int(unreviewed_catalog),
+            "unreviewed_metric": int(unreviewed_metric),
+            "reviewed_pii": int(reviewed_catalog),
         }
+
+    async def _pii_category_stats(self) -> dict[str, int]:
+        """字段级 PII 类别分布（展开 classification.pii_columns，含人工标注过滤）。
+
+        返回 ``{类别: 命中字段数}``；classification 缺失或损坏时 best-effort 跳过，
+        不阻断 PII 概览。
+        """
+        rows = (
+            await self._session.execute(
+                select(Classification.pii_columns).where(
+                    Classification.deleted_at.is_(None),
+                    Classification.pii_columns.isnot(None),
+                )
+            )
+        ).scalars().all()
+        stats: dict[str, int] = {}
+        for cols in rows:
+            if not isinstance(cols, list):
+                continue
+            for item in cols:
+                if isinstance(item, dict) and item.get("category"):
+                    cat = str(item["category"]).upper()
+                    stats[cat] = stats.get(cat, 0) + 1
+        return stats
+
+    async def list_pii_assets(
+        self,
+        *,
+        keyword: str | None = None,
+        source_id: str | None = None,
+        domain: str | None = None,
+        owner_id: int | None = None,
+        review_status: str | None = None,
+        category: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """PII 资产明细列表（分页 + 多维度筛选），供 PII 合规 Tab 可下钻。
+
+        筛选：关键字 / 数据源 / 业务域（经 data_source 继承）/ 责任人
+        （0=无主）/ 复核状态（unreviewed|reviewed）/ PII 类别（经 classification）。
+
+        Returns:
+            ``(items, total)``；items 含源名/域/责任人/命中字段数/类别/合规状态。
+        """
+        base = select(DBCatalog).where(
+            DBCatalog.deleted_at.is_(None), DBCatalog.sensitivity_level.like("%PII%")
+        )
+        count_base = select(func.count()).select_from(DBCatalog).where(
+            DBCatalog.deleted_at.is_(None), DBCatalog.sensitivity_level.like("%PII%")
+        )
+        if source_id:
+            base = base.where(DBCatalog.source_id == source_id)
+            count_base = count_base.where(DBCatalog.source_id == source_id)
+        if owner_id == 0:
+            base = base.where(DBCatalog.owner_id.is_(None))
+            count_base = count_base.where(DBCatalog.owner_id.is_(None))
+        elif owner_id is not None:
+            base = base.where(DBCatalog.owner_id == owner_id)
+            count_base = count_base.where(DBCatalog.owner_id == owner_id)
+        if review_status == "unreviewed":
+            base = base.where(DBCatalog.compliance_reviewed.is_(False))
+            count_base = count_base.where(DBCatalog.compliance_reviewed.is_(False))
+        elif review_status == "reviewed":
+            base = base.where(DBCatalog.compliance_reviewed.is_(True))
+            count_base = count_base.where(DBCatalog.compliance_reviewed.is_(True))
+        if domain:
+            base = base.join(DataSource, DataSource.source_id == DBCatalog.source_id).where(
+                DataSource.deleted_at.is_(None),
+                DataSource.domain == domain,
+            )
+            count_base = count_base.join(
+                DataSource, DataSource.source_id == DBCatalog.source_id
+            ).where(
+                DataSource.deleted_at.is_(None),
+                DataSource.domain == domain,
+            )
+        if keyword:
+            escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            base = base.where(
+                or_(
+                    DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"),
+                    DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
+                )
+            )
+            count_base = count_base.where(
+                or_(
+                    DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"),
+                    DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
+                )
+            )
+        total = int((await self._session.execute(count_base)).scalar() or 0)
+        rows = (
+            (
+                await self._session.execute(
+                    base.order_by(DBCatalog.updated_at.desc())
+                    .offset(max(page - 1, 0) * page_size)
+                    .limit(page_size)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        items = [await self._pii_asset_item(r) for r in rows]
+        if category:
+            cat = category.upper()
+            items = [it for it in items if cat in it.get("categories", [])]
+        return items, total
+
+    async def _pii_asset_item(self, row: DBCatalog) -> dict[str, Any]:
+        """单条 PII 资产列表项：元信息 + 命中字段数/类别 + 合规状态。"""
+        base = {
+            "id": row.id,
+            "entity_name": row.entity_name,
+            "entity_type": row.entity_type,
+            "source_id": row.source_id,
+            "sensitivity_level": row.sensitivity_level,
+            "owner_id": row.owner_id,
+            "compliance_reviewed": bool(row.compliance_reviewed),
+            "masking_policy": row.masking_policy,
+            "updated_at": row.updated_at,
+            "pii_field_count": 0,
+            "categories": [],
+        }
+        fields = await self._entity_pii_fields(row)
+        active = [f for f in fields if not f.get("suppressed")]
+        base["pii_field_count"] = len(active)
+        base["categories"] = sorted({str(f["category"]) for f in active})
+        base["pii_fields"] = fields
+        enriched = await self.enrich_catalog_items([base])
+        return enriched[0]
+
+    # ----------------------------------------------------------------
+    # 写能力（PII 合规增强）：表级复核 / 脱敏策略 / 字段误报标注 / 保留期
+    # 全部写操作仅由治理角色触发（API 层 RBAC），此处只做数据变更与 flush。
+    # ----------------------------------------------------------------
+
+    async def review_catalog(
+        self, entity: DBCatalog, decision: str, reviewer_id: int
+    ) -> DBCatalog:
+        """表级 PII 合规复核（APPROVE 置已复核；REJECT 保持未复核并记录理由）。
+
+        禁自审由 service 层校验（owner 不得复核本人资产）。复核通过后按敏感级
+        推导默认脱敏策略（缺省）。
+        """
+        entity.compliance_reviewed = decision == "APPROVE"
+        entity.compliance_reviewed_by = reviewer_id
+        entity.compliance_reviewed_at = datetime.now(UTC)
+        if entity.masking_policy is None:
+            from app.services.governance.policy import masking_for
+
+            entity.masking_policy = masking_for(entity.sensitivity_level or "PII")
+        self._session.add(entity)
+        await self._session.flush()
+        return entity
+
+    async def set_masking_policy(self, entity: DBCatalog, policy: str) -> DBCatalog:
+        """设置资产脱敏策略（none/mask/hash/deny，合法值由 schema 校验）。"""
+        entity.masking_policy = policy
+        self._session.add(entity)
+        await self._session.flush()
+        return entity
+
+    async def upsert_pii_override(
+        self,
+        catalog_id: int,
+        column: str,
+        suppressed: bool,
+        reason: str | None,
+        actor_id: int,
+    ) -> PiiFieldOverride:
+        """字段级人工标注 upsert（同列重复标注覆盖，保留最新理由）。"""
+        existing = (
+            await self._session.execute(
+                select(PiiFieldOverride).where(
+                    PiiFieldOverride.catalog_id == catalog_id,
+                    PiiFieldOverride.column_name == column,
+                    PiiFieldOverride.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.suppressed = suppressed
+            existing.reason = reason
+            existing.created_by = actor_id
+            row = existing
+        else:
+            row = PiiFieldOverride(
+                catalog_id=catalog_id,
+                column_name=column,
+                suppressed=suppressed,
+                reason=reason,
+                created_by=actor_id,
+            )
+            self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def delete_pii_override(self, catalog_id: int, column: str) -> bool:
+        """撤销字段级人工标注（软删），恢复规则引擎判定。"""
+        existing = (
+            await self._session.execute(
+                select(PiiFieldOverride).where(
+                    PiiFieldOverride.catalog_id == catalog_id,
+                    PiiFieldOverride.column_name == column,
+                    PiiFieldOverride.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            return False
+        existing.deleted_at = datetime.now(UTC)
+        self._session.add(existing)
+        await self._session.flush()
+        return True
+
+    async def set_retention(
+        self, entity: DBCatalog, retention_days: int | None, legal_basis: str | None
+    ) -> DBCatalog:
+        """设置保留期与合法性基础；到期时间按「最近更新时间 + 保留期」推算。"""
+        entity.retention_days = retention_days
+        entity.legal_basis = legal_basis
+        if retention_days is not None:
+            entity.retention_expires_at = (entity.updated_at or datetime.now(UTC)) + timedelta(
+                days=retention_days
+            )
+            entity.retention_notified_at = None
+        else:
+            entity.retention_expires_at = None
+            entity.retention_notified_at = None
+        self._session.add(entity)
+        await self._session.flush()
+        return entity
+
+    async def apply_sensitivity_template(
+        self, entity: DBCatalog, template: dict[str, Any]
+    ) -> dict[str, Any]:
+        """按行业分级模板对单资产升级敏感级（命中模板敏感类别字段 → PII）。
+
+        模板升级基于**实时字段类别检测**（不依赖当前敏感级标记），并合并人工标注
+        （标注误报非 PII 的字段不计入升级类别）。
+
+        Args:
+            entity: 目录资产。
+            template: 模板字典（含 ``sensitive_categories`` 列表）。
+
+        Returns:
+            ``{entity_id, entity_name, changed, applied_categories}``。
+        """
+        sensitive_categories = set(template.get("sensitive_categories") or [])
+        from app.services.collector.classifier import SensitivityClassifier
+
+        overrides = await self._entity_pii_overrides(entity.id)
+        suppressed_cols = {o["column"] for o in overrides if o["suppressed"]}
+        schema = entity.schema_json if isinstance(entity.schema_json, dict) else {}
+        hits = SensitivityClassifier().detect_pii_fields(entity.entity_name, schema)
+        applied = sorted(
+            {str(h.category).upper() for h in hits if h.column not in suppressed_cols}
+            & sensitive_categories
+        )
+        changed = False
+        if applied and not (entity.sensitivity_level and "PII" in entity.sensitivity_level.upper()):
+            entity.sensitivity_level = "PII"
+            self._session.add(entity)
+            changed = True
+        await self._session.flush()
+        return {
+            "entity_id": entity.id,
+            "entity_name": entity.entity_name,
+            "changed": changed,
+            "applied_categories": applied,
+        }
+
+    async def list_catalog_ids_for_scope(
+        self,
+        *,
+        catalog_ids: list[int] | None,
+        source_id: str | None,
+        all_pii: bool,
+    ) -> list[DBCatalog]:
+        """按作用域解析待应用模板的资产列表（模板应用范围收敛）。"""
+        stmt = select(DBCatalog).where(DBCatalog.deleted_at.is_(None))
+        if catalog_ids:
+            stmt = stmt.where(DBCatalog.id.in_(catalog_ids))
+        elif source_id:
+            stmt = stmt.where(DBCatalog.source_id == source_id)
+        elif all_pii:
+            stmt = stmt.where(DBCatalog.sensitivity_level.like("%PII%"))
+        else:
+            return []
+        rows = (await self._session.execute(stmt.limit(500))).scalars().all()
+        return list(rows)
 
     async def recent_changes(self, days: int, limit: int) -> dict[str, Any]:
         """变更追踪流：最近 N 天新增/变更的目录与指标。

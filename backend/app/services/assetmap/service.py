@@ -18,11 +18,36 @@ from typing import Any, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
-from app.core.exceptions import NotFoundError, UnisenseError
+from app.core.exceptions import BusinessError, NotFoundError, UnisenseError
 from app.core.resilience import CircuitBreaker
 from app.services.assetmap.repository import AssetMapRepository
 
 logger = logging.getLogger(__name__)
+
+#: 行业分级模板（PII 合规增强 C：个保法敏感个人信息 / 金融行业 / 标准分级）。
+#: ``sensitive_categories`` 为该模板下须升级为 PII 的字段类别集合；
+#: 应用时命中这些类别的资产（且当前非 PII）升级为 PII。
+PII_TEMPLATES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "pipil-sensitive",
+        "name": "个保法·敏感个人信息",
+        "description": "《个保法》第28条敏感个人信息：生物识别、医疗健康、金融账户、"
+        "行踪轨迹一律判 PII",
+        "sensitive_categories": ["BIOMETRIC", "HEALTH", "FINANCIAL", "GPS"],
+    },
+    {
+        "id": "financial-industry",
+        "name": "金融行业分级",
+        "description": "金融数据分级：银行卡、账户余额等强敏感判 PII，其余按内置规则",
+        "sensitive_categories": ["BANK_CARD", "FINANCIAL"],
+    },
+    {
+        "id": "standard",
+        "name": "标准分级（内置规则）",
+        "description": "沿用内置规则引擎判定，不额外升级",
+        "sensitive_categories": [],
+    },
+)
 
 # Neo4j 调用熔断器
 _NEO4J_BREAKER = CircuitBreaker(failure_threshold=5, reset_timeout=30.0)
@@ -453,3 +478,186 @@ class AssetMapService(BaseService):
             raise NotFoundError("指定实体均不存在或已删除")
         affected = await self._repo.batch_reclassify(entities, level)
         return {"affected": affected, "sensitivity_level": level, "total": len(entity_ids)}
+
+    # ----------------------------------------------------------------
+    # 写能力（PII 合规增强）：表级复核 / 脱敏策略 / 字段误报标注 / 保留期 / 模板
+    # ----------------------------------------------------------------
+
+    async def list_pii_assets(
+        self,
+        *,
+        keyword: str | None = None,
+        source_id: str | None = None,
+        domain: str | None = None,
+        owner_id: int | None = None,
+        review_status: str | None = None,
+        category: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        """PII 资产明细列表（分页 + 筛选，PII 合规 Tab 数据源）。"""
+        items, total = await self._repo.list_pii_assets(
+            keyword=keyword,
+            source_id=source_id,
+            domain=domain,
+            owner_id=owner_id,
+            review_status=review_status,
+            category=category,
+            page=page,
+            page_size=page_size,
+        )
+        return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    async def review_catalog(
+        self, entity_id: int, decision: str, reviewer_id: int
+    ) -> dict[str, Any]:
+        """表级 PII 合规复核（APPROVE/REJECT）。
+
+        禁自审：资产责任人不得复核本人负责的资产（职责分离，对齐指标级
+        ``MetricService.review_compliance`` 的 SELF_REVIEW_BLOCKED）。
+        """
+        entity = await self._repo.get_catalog_entity(entity_id)
+        if entity is None:
+            raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
+        if entity.owner_id is not None and entity.owner_id == reviewer_id:
+            raise BusinessError(
+                "资产责任人不得复核本人负责的资产（职责分离）",
+                error_code="SELF_REVIEW_BLOCKED",
+                ctx={"entity_id": entity_id, "owner_id": entity.owner_id},
+            )
+        updated = await self._repo.review_catalog(entity, decision, reviewer_id)
+        return {
+            "entity_id": updated.id,
+            "decision": decision,
+            "compliance_reviewed": bool(updated.compliance_reviewed),
+            "masking_policy": updated.masking_policy,
+        }
+
+    async def set_masking_policy(self, entity_id: int, policy: str) -> dict[str, Any]:
+        """设置资产脱敏策略（none/mask/hash/deny）。"""
+        entity = await self._repo.get_catalog_entity(entity_id)
+        if entity is None:
+            raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
+        updated = await self._repo.set_masking_policy(entity, policy)
+        return {"entity_id": updated.id, "masking_policy": updated.masking_policy}
+
+    async def upsert_pii_override(
+        self,
+        entity_id: int,
+        column: str,
+        suppressed: bool,
+        reason: str | None,
+        actor_id: int,
+    ) -> dict[str, Any]:
+        """字段级人工标注（误报反馈/人工确认，upsert 语义）。"""
+        entity = await self._repo.get_catalog_entity(entity_id)
+        if entity is None:
+            raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
+        row = await self._repo.upsert_pii_override(
+            entity_id, column, suppressed, reason, actor_id
+        )
+        return {
+            "catalog_id": entity_id,
+            "column": column,
+            "suppressed": bool(row.suppressed),
+            "reason": row.reason,
+        }
+
+    async def delete_pii_override(self, entity_id: int, column: str) -> dict[str, Any]:
+        """撤销字段级人工标注（恢复规则引擎判定）。"""
+        entity = await self._repo.get_catalog_entity(entity_id)
+        if entity is None:
+            raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
+        removed = await self._repo.delete_pii_override(entity_id, column)
+        return {"catalog_id": entity_id, "column": column, "removed": removed}
+
+    async def set_retention(
+        self, entity_id: int, retention_days: int | None, legal_basis: str | None
+    ) -> dict[str, Any]:
+        """设置资产保留期与合法性基础。"""
+        entity = await self._repo.get_catalog_entity(entity_id)
+        if entity is None:
+            raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
+        updated = await self._repo.set_retention(entity, retention_days, legal_basis)
+        return {
+            "entity_id": updated.id,
+            "retention_days": updated.retention_days,
+            "legal_basis": updated.legal_basis,
+            "retention_expires_at": updated.retention_expires_at,
+        }
+
+    async def pii_templates(self) -> list[dict[str, Any]]:
+        """行业分级模板列表（PII 合规盘点与批量升级）。"""
+        return [
+            {
+                "id": t["id"],
+                "name": t["name"],
+                "description": t["description"],
+                "sensitive_categories": t["sensitive_categories"],
+            }
+            for t in PII_TEMPLATES
+        ]
+
+    async def apply_pii_template(
+        self,
+        template_id: str,
+        *,
+        catalog_ids: list[int] | None,
+        source_id: str | None,
+        all_pii: bool,
+    ) -> dict[str, Any]:
+        """应用行业分级模板：按字段类别升级资产敏感级。
+
+        幂等：已为 PII 的资产不再重复标记（changed=False）。
+        """
+        template = next((t for t in PII_TEMPLATES if t["id"] == template_id), None)
+        if template is None:
+            raise NotFoundError(f"模板不存在: {template_id}", ctx={"template_id": template_id})
+        entities = await self._repo.list_catalog_ids_for_scope(
+            catalog_ids=catalog_ids, source_id=source_id, all_pii=all_pii
+        )
+        if not entities:
+            return {"template_id": template_id, "applied": 0, "changed": 0, "items": []}
+        results: list[dict[str, Any]] = []
+        changed = 0
+        for entity in entities:
+            res = await self._repo.apply_sensitivity_template(entity, template)
+            if res["changed"]:
+                changed += 1
+            results.append(res)
+        return {
+            "template_id": template_id,
+            "applied": len(results),
+            "changed": changed,
+            "items": results,
+        }
+
+    async def export_pii_rows(
+        self,
+        *,
+        keyword: str | None = None,
+        source_id: str | None = None,
+        domain: str | None = None,
+        owner_id: int | None = None,
+        review_status: str | None = None,
+        category: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """PII 合规盘点导出数据（分页拉全量，供 CSV 序列化）。"""
+        all_items: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            items, total = await self._repo.list_pii_assets(
+                keyword=keyword,
+                source_id=source_id,
+                domain=domain,
+                owner_id=owner_id,
+                review_status=review_status,
+                category=category,
+                page=page,
+                page_size=500,
+            )
+            all_items.extend(items)
+            if len(all_items) >= total or not items:
+                break
+            page += 1
+        return all_items

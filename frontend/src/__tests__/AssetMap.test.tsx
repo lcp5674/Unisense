@@ -22,6 +22,15 @@ vi.mock("../api", () => ({
   fetchAssetMyAssets: vi.fn(),
   fetchAssetHealth: vi.fn(),
   fetchAssetPiiOverview: vi.fn(),
+  fetchAssetPiiAssets: vi.fn(),
+  fetchAssetPiiTemplates: vi.fn(),
+  applyAssetPiiTemplate: vi.fn(),
+  reviewAssetEntity: vi.fn(),
+  setAssetMaskingPolicy: vi.fn(),
+  overrideAssetPiiField: vi.fn(),
+  removeAssetPiiOverride: vi.fn(),
+  setAssetRetention: vi.fn(),
+  downloadPiiExport: vi.fn(),
   lineageGraph: vi.fn(),
   assignAssetOwner: vi.fn(),
   reclassifyAssetSensitivity: vi.fn(),
@@ -106,6 +115,8 @@ vi.mock("../hooks/useTracking", () => ({
 }));
 
 import {
+  applyAssetPiiTemplate,
+  downloadPiiExport,
   fetchAssetGraph,
   fetchAssetHeatmapMatrix,
   fetchAssetOwnerView,
@@ -139,6 +150,14 @@ import {
   updateMetricDescription,
   inferMetricDescription,
   fetchCurrentUser,
+  fetchAssetPiiOverview,
+  fetchAssetPiiAssets,
+  fetchAssetPiiTemplates,
+  reviewAssetEntity,
+  setAssetMaskingPolicy,
+  overrideAssetPiiField,
+  removeAssetPiiOverride,
+  setAssetRetention,
 } from "../api";
 
 const mockGraphData = {
@@ -246,6 +265,53 @@ describe("AssetMap", () => {
     });
     vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
     vi.mocked(fetchAssetOrphans).mockResolvedValue({ items: [], total: 0 });
+    // PII 合规增强：概览 + 明细列表 + 操作函数默认 mock
+    vi.mocked(fetchAssetPiiOverview).mockResolvedValue({
+      by_sensitivity: { PUBLIC: 6, PII: 4 },
+      by_domain: { sales: 2 },
+      pii_metric_count: 2,
+      pii_catalog_count: 3,
+      by_category: { PHONE: 2, ID_CARD: 1 },
+      unowned_pii: 1,
+      unreviewed_pii: 2,
+      unreviewed_catalog: 1,
+      unreviewed_metric: 1,
+      reviewed_pii: 2,
+    });
+    vi.mocked(fetchAssetPiiAssets).mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 10,
+    });
+    vi.mocked(fetchAssetPiiTemplates).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(applyAssetPiiTemplate).mockResolvedValue({
+      template_id: "standard",
+      applied: 0,
+      changed: 0,
+      items: [],
+    });
+    vi.mocked(reviewAssetEntity).mockResolvedValue({
+      entity_id: 1,
+      decision: "APPROVE",
+      compliance_reviewed: true,
+      masking_policy: "hash",
+    });
+    vi.mocked(setAssetMaskingPolicy).mockResolvedValue({ entity_id: 1, masking_policy: "hash" });
+    vi.mocked(overrideAssetPiiField).mockResolvedValue({
+      catalog_id: 1,
+      column: "phone",
+      suppressed: true,
+      reason: "误报",
+    });
+    vi.mocked(removeAssetPiiOverride).mockResolvedValue({ catalog_id: 1, column: "phone", removed: true });
+    vi.mocked(setAssetRetention).mockResolvedValue({
+      entity_id: 1,
+      retention_days: 180,
+      legal_basis: "user_consent",
+      retention_expires_at: "2027-01-01T00:00:00Z",
+    });
+    vi.mocked(downloadPiiExport).mockResolvedValue(undefined);
     // 孤儿资产认领：当前登录用户
     vi.mocked(fetchCurrentUser).mockResolvedValue({
       id: 1,
@@ -2229,6 +2295,168 @@ describe("AssetMap", () => {
 
     await waitFor(() => {
       expect(assignAssetOwner).toHaveBeenCalledWith(5, 1);
+    });
+  });
+
+  // ---- PII 合规增强（A/B/C）：风险卡 / 明细列表 / 下钻详情 / 复核 / 模板 ----
+
+  it("PII 合规：风险卡 + 类别分布 + 明细列表渲染", async () => {
+    vi.mocked(fetchAssetPiiAssets).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          entity_name: "sales.user_info",
+          entity_type: "TABLE",
+          source_id: "s1",
+          source_name: "销售库",
+          domain: "sales",
+          sensitivity_level: "PII",
+          owner_id: null,
+          owner_name: null,
+          compliance_reviewed: false,
+          masking_policy: null,
+          pii_field_count: 2,
+          categories: ["PHONE", "ID_CARD"],
+          updated_at: "2026-08-01T00:00:00Z",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 10,
+    });
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByRole("tab", { name: /PII 合规/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /PII 合规/ }));
+
+    // 风险卡
+    await waitFor(() => expect(screen.getByText("无主 PII")).toBeInTheDocument());
+    expect(screen.getByText("待复核 PII")).toBeInTheDocument();
+    expect(screen.getByText("PII 目录数")).toBeInTheDocument();
+    // 类别分布 Tag（PHONE / ID_CARD）
+    expect(screen.getByText(/手机\/电话 · 2/)).toBeInTheDocument();
+    // 明细列表行
+    await waitFor(() => expect(screen.getByText("sales.user_info")).toBeInTheDocument());
+    expect(screen.getByText("销售库（s1）")).toBeInTheDocument();
+    expect(screen.getByText("无主")).toBeInTheDocument();
+    expect(screen.getByText("待复核")).toBeInTheDocument();
+  });
+
+  it("PII 合规：复核状态筛选触发请求", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByRole("tab", { name: /PII 合规/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /PII 合规/ }));
+    await waitFor(() => expect(screen.getByText("复核状态")).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByText("复核状态"));
+    await user.click(await screen.findByText("仅待复核"));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetchAssetPiiAssets).mock.calls;
+      const lastCall = calls[calls.length - 1]?.[0] as { review_status?: string } | undefined;
+      expect(lastCall?.review_status).toBe("unreviewed");
+    });
+  });
+
+  it("PII 合规：行点击打开详情抽屉展示字段明细并可复核", async () => {
+    vi.mocked(fetchAssetPiiAssets).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          entity_name: "sales.user_info",
+          entity_type: "TABLE",
+          source_id: "s1",
+          source_name: "销售库",
+          domain: "sales",
+          sensitivity_level: "PII",
+          owner_id: null,
+          owner_name: null,
+          compliance_reviewed: false,
+          masking_policy: null,
+          pii_field_count: 1,
+          categories: ["PHONE"],
+          updated_at: "2026-08-01T00:00:00Z",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 10,
+    });
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "sales.user_info",
+      entity_type: "TABLE",
+      source_id: "s1",
+      source_name: "销售库",
+      domain: "sales",
+      sensitivity_level: "PII",
+      owner_id: null,
+      owner_name: null,
+      schema_incomplete: false,
+      content_signature: null,
+      pii_flag: true,
+      pii_fields: [
+        {
+          column: "phone",
+          category: "PHONE",
+          rule: "phone",
+          confidence: 0.9,
+          matched_by: "name",
+          suppressed: false,
+        },
+      ],
+      pii_field_count: 1,
+      pii_categories: ["PHONE"],
+      compliance_reviewed: false,
+      masking_policy: null,
+      retention_days: null,
+      legal_basis: null,
+      retention_expires_at: null,
+    } as never);
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByRole("tab", { name: /PII 合规/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /PII 合规/ }));
+    await waitFor(() => expect(screen.getByText("sales.user_info")).toBeInTheDocument());
+    await user.click(screen.getByText("sales.user_info"));
+
+    // 详情抽屉：PII 字段命中明细 + 复核按钮
+    await waitFor(() => expect(screen.getByText(/PII 资产详情/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("phone").length).toBeGreaterThan(0));
+    expect(screen.getByText("复核通过")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /复核通过/ }));
+    await waitFor(() => {
+      expect(reviewAssetEntity).toHaveBeenCalledWith(1, { decision: "APPROVE" });
+    });
+  });
+
+  it("PII 合规：应用分级模板弹窗", async () => {
+    vi.mocked(fetchAssetPiiTemplates).mockResolvedValue({
+      items: [
+        {
+          id: "pipil-sensitive",
+          name: "个保法·敏感个人信息",
+          description: "生物识别、医疗健康、金融账户、行踪轨迹一律判 PII",
+          sensitive_categories: ["BIOMETRIC", "HEALTH", "FINANCIAL", "GPS"],
+        },
+      ],
+      total: 1,
+    });
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByRole("tab", { name: /PII 合规/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /PII 合规/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /应用分级模板/ })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /应用分级模板/ }));
+
+    await waitFor(() => expect(screen.getByText("个保法·敏感个人信息")).toBeInTheDocument());
+    // 默认作用范围 = 全部 PII 资产，点应用（Modal 确认按钮「应 用」）
+    await user.click(screen.getByRole("button", { name: "应 用" }));
+    await waitFor(() => {
+      expect(applyAssetPiiTemplate).toHaveBeenCalledWith({
+        template_id: "pipil-sensitive",
+        all_pii: true,
+      });
     });
   });
 });

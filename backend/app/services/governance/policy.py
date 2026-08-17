@@ -12,33 +12,33 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from app.models.governance import GrantType, RoleName, SensitivityLevel
+from app.services.collector.classifier import (
+    DEFAULT_PII_RULES,
+    PII_CONFIDENCE_THRESHOLD,
+    SensitivityClassifier,
+)
 
 # ---------------------------------------------------------------- 敏感识别规则
+#
+# 规则引擎已统一到 ``app/services/collector/classifier.py``（类别化 + 字段级明细 +
+# DB 可配置），本模块通过 ``SensitivityClassifier`` 委托同一规则源，避免双引擎漂移。
 
-#: 规则字典：``(规则名, 字段名正则, 取值样本正则 | None, 置信度)``。
-#: 字段名命中即判 PII；若同时提供样本正则且样本命中，置信度提升。
-PII_RULES: tuple[tuple[str, str, str | None, float], ...] = (
-    ("id_card", r"(id_?card|identity_?no|shenfen|sfz)", r"^\d{17}[\dXx]$", 0.95),
-    ("phone", r"(phone|mobile|tel|telephone)", r"^1[3-9]\d{9}$", 0.9),
-    ("email", r"(email|mail_?addr)", r"^[^@\s]+@[^@\s]+\.[^@\s]+$", 0.9),
-    ("bank_card", r"(bank_?card|card_?no|account_?no)", r"^\d{16,19}$", 0.9),
-    ("real_name", r"(real_?name|user_?name|cust_?name|full_?name)", None, 0.7),
-    ("address", r"(addr|address|location_detail)", None, 0.7),
-    ("passport", r"(passport)", None, 0.85),
-    ("gps", r"(lat|lng|longitude|latitude|geo_?point)", None, 0.6),
+#: 规则字典兼容视图：``(规则名, 字段名正则, 取值样本正则 | None, 置信度)``。
+#: 由 ``DEFAULT_PII_RULES`` 派生，保留旧引用兼容；实际识别以 classifier 为准。
+PII_RULES: tuple[tuple[str, str, str | None, float], ...] = tuple(
+    (r.rule_id, r.name_re, r.sample_re, r.confidence) for r in DEFAULT_PII_RULES
 )
 
 #: 规则版本号，随规则字典变更递增，落库到 ``classification.model_version``。
-RULES_VERSION = "rules-v1"
+RULES_VERSION = "rules-v2"
 
-#: PII 命中判定阈值：低于该置信度仅记录不升级敏感级。
-PII_CONFIDENCE_THRESHOLD = 0.7
+#: 模块级无状态分类器（纯函数；DB 可配置规则时由调用方注入自定义 rules 实例）。
+_CLASSIFIER = SensitivityClassifier()
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,11 +48,11 @@ class PiiHit:
     column: str
     rule: str
     confidence: float
-    matched_by: str  # name | name+sample
+    matched_by: str  # name | name+sample | comment
 
 
 def detect_pii_columns(schema_json: dict[str, Any]) -> list[PiiHit]:
-    """从表结构中识别 PII 字段。
+    """从表结构中识别 PII 字段（委托 classifier 统一规则源）。
 
     Args:
         schema_json: ``db_catalog.schema_json``，期望形如
@@ -62,46 +62,16 @@ def detect_pii_columns(schema_json: dict[str, Any]) -> list[PiiHit]:
     Returns:
         命中列表，按置信度倒序；无命中返回空列表。
     """
-    columns = _extract_columns(schema_json)
-    hits: list[PiiHit] = []
-    for col in columns:
-        name = str(col.get("name", "")).strip()
-        if not name:
-            continue
-        sample = str(col.get("sample", "") or "")
-        lowered = name.lower()
-        for rule, name_re, sample_re, base_conf in PII_RULES:
-            if not re.search(name_re, lowered):
-                continue
-            confidence = base_conf
-            matched_by = "name"
-            if sample_re and sample and re.match(sample_re, sample):
-                confidence = min(1.0, base_conf + 0.05)
-                matched_by = "name+sample"
-            hits.append(
-                PiiHit(column=name, rule=rule, confidence=confidence, matched_by=matched_by)
-            )
-            break
-    hits.sort(key=lambda h: (-h.confidence, h.column))
-    return hits
-
-
-def _extract_columns(schema_json: dict[str, Any]) -> list[dict[str, Any]]:
-    """归一化列定义结构，容忍多种上游写法。"""
-    raw: Any = None
-    for key in ("columns", "fields"):
-        if isinstance(schema_json, dict) and isinstance(schema_json.get(key), list):
-            raw = schema_json[key]
-            break
-    if raw is None:
-        return []
-    normalized: list[dict[str, Any]] = []
-    for item in raw:
-        if isinstance(item, str):
-            normalized.append({"name": item})
-        elif isinstance(item, dict):
-            normalized.append(item)
-    return normalized
+    hits = _CLASSIFIER.detect_pii_fields("", schema_json)
+    return [
+        PiiHit(
+            column=h.column,
+            rule=h.rule,
+            confidence=h.confidence,
+            matched_by=h.matched_by,
+        )
+        for h in hits
+    ]
 
 
 def infer_sensitivity(hits: list[PiiHit], current: str | None = None) -> SensitivityLevel:

@@ -14,7 +14,9 @@ import {
   AssetMetricDimensionSummary,
   AssetMyAssets,
   AssetOwnerView,
+  AssetPiiAssetItem,
   AssetPiiOverview,
+  AssetPiiTemplate,
   AssetSearchItem,
   AssetTableItem,
   AuditEntry,
@@ -3373,6 +3375,157 @@ export async function fetchAssetHealth(): Promise<AssetHealthSummary> {
 // PII 合规资产视图
 export async function fetchAssetPiiOverview(): Promise<AssetPiiOverview> {
   return request<AssetPiiOverview>(`${API_BASE}/assetmap/pii`);
+}
+
+// ---- PII 合规增强（A/B/C）：明细列表 / 模板 / 表级复核 / 脱敏 / 标注 / 保留期 / 导出 ----
+
+/** PII 资产明细列表（分页 + 多维度筛选，PII 合规 Tab 可下钻） */
+export async function fetchAssetPiiAssets(params?: {
+  keyword?: string;
+  source_id?: string;
+  domain?: string;
+  /** 0=无主 PII（最高优先级合规风险） */
+  owner_id?: number;
+  /** unreviewed / reviewed */
+  review_status?: string;
+  /** PII 类别（ID_CARD/PHONE/...） */
+  category?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: AssetPiiAssetItem[]; total: number; page: number; page_size: number }> {
+  const qs = pageQs({
+    keyword: params?.keyword,
+    source_id: params?.source_id,
+    domain: params?.domain,
+    owner_id: params?.owner_id,
+    review_status: params?.review_status,
+    category: params?.category,
+    page: params?.page ?? 1,
+    page_size: params?.page_size ?? 20,
+  });
+  return request(`${API_BASE}/assetmap/pii-assets?${qs}`);
+}
+
+/** 行业分级模板列表（PII 合规盘点与批量升级） */
+export async function fetchAssetPiiTemplates(): Promise<{ items: AssetPiiTemplate[]; total: number }> {
+  return request(`${API_BASE}/assetmap/pii/templates`);
+}
+
+/** 应用行业分级模板（按字段类别升级资产敏感级，个保法/金融等） */
+export async function applyAssetPiiTemplate(body: {
+  template_id: string;
+  catalog_ids?: number[];
+  source_id?: string;
+  all_pii?: boolean;
+}): Promise<{
+  template_id: string;
+  applied: number;
+  changed: number;
+  items: Array<{ entity_id: number; entity_name: string; changed: boolean; applied_categories: string[] }>;
+}> {
+  return request(`${API_BASE}/assetmap/pii/templates/apply`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 表级 PII 合规复核（APPROVE/REJECT；禁自审） */
+export async function reviewAssetEntity(
+  entityId: number,
+  body: { decision: "APPROVE" | "REJECT"; comment?: string },
+): Promise<{ entity_id: number; decision: string; compliance_reviewed: boolean; masking_policy: string | null }> {
+  return request(`${API_BASE}/assetmap/entities/${entityId}/review`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 设置资产脱敏策略（none/mask/hash/deny） */
+export async function setAssetMaskingPolicy(
+  entityId: number,
+  policy: string,
+): Promise<{ entity_id: number; masking_policy: string }> {
+  return request(`${API_BASE}/assetmap/entities/${entityId}/masking`, {
+    method: "POST",
+    body: JSON.stringify({ policy }),
+  });
+}
+
+/** 字段级人工标注（suppressed=True 误报非 PII；False 人工确认是 PII） */
+export async function overrideAssetPiiField(
+  entityId: number,
+  body: { column: string; suppressed: boolean; reason?: string },
+): Promise<{ catalog_id: number; column: string; suppressed: boolean; reason: string | null }> {
+  return request(`${API_BASE}/assetmap/entities/${entityId}/pii-overrides`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 撤销字段级人工标注（恢复规则引擎判定） */
+export async function removeAssetPiiOverride(
+  entityId: number,
+  column: string,
+): Promise<{ catalog_id: number; column: string; removed: boolean }> {
+  return request(`${API_BASE}/assetmap/entities/${entityId}/pii-overrides/remove`, {
+    method: "POST",
+    body: JSON.stringify({ column }),
+  });
+}
+
+/** 设置资产保留期与合法性基础（合规留存期限） */
+export async function setAssetRetention(
+  entityId: number,
+  body: { retention_days?: number | null; legal_basis?: string | null },
+): Promise<{
+  entity_id: number;
+  retention_days: number | null;
+  legal_basis: string | null;
+  retention_expires_at: string | null;
+}> {
+  return request(`${API_BASE}/assetmap/entities/${entityId}/retention`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+/** PII 合规盘点 CSV 导出（含字段明细/类别/复核/脱敏状态） */
+export async function downloadPiiExport(params?: {
+  keyword?: string;
+  source_id?: string;
+  domain?: string;
+  owner_id?: number;
+  review_status?: string;
+  category?: string;
+}): Promise<void> {
+  const qs = pageQs({
+    keyword: params?.keyword,
+    source_id: params?.source_id,
+    domain: params?.domain,
+    owner_id: params?.owner_id,
+    review_status: params?.review_status,
+    category: params?.category,
+  });
+  const headers: Record<string, string> = {
+    "X-Api-Key": SEMANTIC_API_KEY,
+  };
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE_URL}${API_BASE}/assetmap/pii-export.csv${qs ? `?${qs}` : ""}`, {
+    headers,
+  });
+  if (!res.ok) {
+    throw new UnisenseApiError(`导出失败 (HTTP ${res.status})`, "HTTP_ERROR", res.status, "");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "pii_compliance_export.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // 变更追踪流

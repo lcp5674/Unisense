@@ -163,6 +163,29 @@ class CollectorService(BaseService):
         self._secrets = secrets or SecretManager
         self._events = events or CatalogEventPublisher(get_redis() if _redis_available() else None)
         self._classifier = classifier or SensitivityClassifier()
+        # DB 规则加载仅执行一次（惰性；无 pii_rule 配置时回退内置默认）
+        self._db_rules_loaded = False
+
+    async def _maybe_load_db_rules(self) -> None:
+        """从 system_dict 加载可配置敏感规则（仅首次执行；失败回退内置默认）。
+
+        PII 合规增强 C-1：管理员在系统字典「PII 规则」配置的规则覆盖内置默认。
+        best-effort：DB 无配置/读取异常均保持内置规则，不阻断采集。
+        """
+        if self._db_rules_loaded:
+            return
+        self._db_rules_loaded = True
+        try:
+            from app.services.collector.rules import load_pii_rules
+
+            pii_rules, conf_rules = await load_pii_rules(self._db)
+            if pii_rules:
+                self._classifier = SensitivityClassifier(
+                    rules=pii_rules, confidential_rules=conf_rules
+                )
+                logger.info("collector_use_db_pii_rules count=%d", len(pii_rules))
+        except Exception as exc:  # noqa: BLE001 - 规则加载失败不阻断采集
+            logger.warning("collector_db_rules_load_failed: %s", exc)
         self._settings = Settings()
 
     # ---- 健康状态机（PRD §4.13：ACTIVE → DEGRADED → UNAVAILABLE）----
@@ -748,6 +771,8 @@ class CollectorService(BaseService):
     async def register_catalog(
         self, req: DBCatalogCreateRequest, actor_id: int
     ) -> DBCatalogResponse:
+        # 可配置敏感规则（system_dict pii_rule）惰性加载
+        await self._maybe_load_db_rules()
         # source_id 是下游唯一键，缺失时服务层防御性拒绝
         # （API 层会按路径回填，但 worker/任务路径直接调用服务时需自行保证）
         if req.source_id is None:
@@ -1548,6 +1573,8 @@ class CollectorService(BaseService):
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
     ) -> dict[str, Any]:
+        # 可配置敏感规则（system_dict pii_rule）惰性加载
+        await self._maybe_load_db_rules()
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
@@ -1924,6 +1951,7 @@ class CollectorService(BaseService):
         if spec is None:
             raise NotFoundError(f"源端不存在实体: {entity_name}")
 
+        await self._maybe_load_db_rules()
         sensitivity = self._classifier.classify(spec.entity_name, spec.schema_json)
         _cat, _created, drift_info = await self._repo.upsert_catalog(
             source_id=source_id,

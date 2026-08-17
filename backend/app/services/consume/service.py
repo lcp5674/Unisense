@@ -35,6 +35,7 @@ from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion, PendingVersionConfirmation
 from app.models.term import Term
 from app.models.user import User
+from app.services.consume.masking import mask_rows
 from app.services.consume.rate_limiter import (
     get_rate_limiter,
 )
@@ -363,6 +364,10 @@ class ConsumeService(BaseService):
         result, engine_used = await self._execute_with_fallback(req, sql, params)
         if row_grant is not None:
             result = self._filter_restricted_rows(result, row_grant)
+        # PII 数据值脱敏（合规增强 C-3）：PII 指标查询结果中的 PII 维度列
+        # 按 masking 策略 hash/mask，防止原始个人数据经消费链路明文外泄。
+        if self.is_pii(metric):
+            result.rows = self._mask_result_rows(metric, result.rows)
         plan = {
             "metric_code": req.metric_code,
             "dimensions": [d.model_dump() for d in req.dimensions],
@@ -545,6 +550,16 @@ class ConsumeService(BaseService):
         self, metric_code: str, limit: int, offset: int
     ) -> list[SnapshotResponse]:
         rows = await self._snapshots.list_by_metric(metric_code, limit, offset)
+        metric = await self._get_metric(metric_code)
+        # PII 数据值脱敏（C-3）：快照含 PII 维度列时同样脱敏，防止历史明文外泄
+        if metric is not None and self.is_pii(metric):
+            pii_cols = self._metric_pii_columns(metric)
+            policy = self._metric_masking_policy(metric)
+            for r in rows:
+                vj = r.value_json if isinstance(r.value_json, dict) else {}
+                if isinstance(vj.get("rows"), list):
+                    vj["rows"] = mask_rows(vj["rows"], pii_cols, policy)
+                    r.value_json = vj
         return [self._to_snap(r) for r in rows]
 
     # ---- 收藏（通用多资产，TD §5.4 favorite）----
@@ -827,6 +842,43 @@ class ConsumeService(BaseService):
         """
         dj = metric.definition_json or {}
         return bool(dj.get("pii", False)) or bool(metric.pii_flag)
+
+    @staticmethod
+    def _metric_pii_columns(metric: Metric) -> list[str]:
+        """指标口径声明的 PII 列名（definition_json.pii_fields，兼容字符串/字典两种形态）。"""
+        dj = metric.definition_json or {}
+        fields = dj.get("pii_fields") or []
+        columns: list[str] = []
+        for f in fields:
+            if isinstance(f, dict):
+                col = f.get("column") or f.get("name")
+                if col:
+                    columns.append(str(col))
+            elif isinstance(f, str):
+                columns.append(f)
+        return columns
+
+    @staticmethod
+    def _metric_masking_policy(metric: Metric) -> str:
+        """指标脱敏策略：口径显式声明优先，缺省按 PII 敏感级推导（hash）。"""
+        dj = metric.definition_json or {}
+        explicit = (dj.get("masking_policy") or "").strip().lower()
+        if explicit in ("none", "mask", "hash", "deny"):
+            return explicit
+        return "hash"
+
+    @classmethod
+    def _mask_result_rows(
+        cls, metric: Metric, rows: list[dict[str, Any]] | None
+    ) -> list[dict[str, Any]] | None:
+        """对指标查询结果中的 PII 列应用脱敏（mask/hash/deny，none 原样）。"""
+        from app.services.consume.masking import mask_rows
+
+        return mask_rows(
+            rows,
+            cls._metric_pii_columns(metric),
+            cls._metric_masking_policy(metric),
+        )
 
     @classmethod
     def _assert_authorized(cls, client: ApiClient, metric: Metric) -> None:

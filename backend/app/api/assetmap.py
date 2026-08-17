@@ -21,10 +21,15 @@ from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.assetmap.schemas import (
+    ApplyPiiTemplateRequest,
     AssignOwnerRequest,
     BatchOwnerRequest,
     BatchSensitivityRequest,
+    CatalogReviewRequest,
+    PiiFieldOverrideRequest,
     ReclassifySensitivityRequest,
+    SetMaskingPolicyRequest,
+    SetRetentionRequest,
 )
 from app.services.assetmap.service import AssetMapService
 
@@ -36,6 +41,10 @@ _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_inject
 # 写能力仅限治理角色（认领/重分类/批量会影响资产归属与合规口径）
 _WRITE_ROLES = ("platform_admin", "domain_admin")
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+
+# PII 合规治理角色（表级复核/脱敏/标注/模板：职责分离，须合规官或平台管理员）
+_COMPLIANCE_ROLES = ("compliance_officer", "platform_admin")
+_COMPLIANCE_DEPS = [Depends(require_roles(*_COMPLIANCE_ROLES)), Depends(guard_against_injection)]
 
 
 @router.get("/summary", dependencies=_READ_DEPS)
@@ -470,3 +479,294 @@ async def batch_reclassify(
     )
     await db.commit()
     return ok(data=data, trace_id=trace_id)
+
+
+# ----------------------------------------------------------------
+# PII 合规增强（A/B/C）：明细列表 / 概览增强 / 表级复核 / 脱敏 / 标注 / 保留期 / 模板 / 导出
+# ----------------------------------------------------------------
+
+
+@router.get("/pii-assets", dependencies=_READ_DEPS)
+async def list_pii_assets(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    keyword: str | None = Query(None, description="关键字：实体名或数据源模糊搜索"),
+    source_id: str | None = Query(None, description="数据源 ID 过滤"),
+    domain: str | None = Query(None, description="业务域（经数据源继承过滤）"),
+    owner_id: int | None = Query(
+        None, description="责任人 ID 过滤；0 表示无主 PII（最高优先级合规风险）"
+    ),
+    review_status: str | None = Query(
+        None, description="复核状态：unreviewed / reviewed"
+    ),
+    category: str | None = Query(None, description="PII 类别过滤（ID_CARD/PHONE/...）"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+) -> Any:
+    """PII 资产明细列表（分页 + 多维度筛选），PII 合规 Tab 可下钻。"""
+    data = await AssetMapService(db).list_pii_assets(
+        keyword=keyword,
+        source_id=source_id,
+        domain=domain,
+        owner_id=owner_id,
+        review_status=review_status,
+        category=category,
+        page=page,
+        page_size=page_size,
+    )
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.get("/pii/templates", dependencies=_READ_DEPS)
+async def list_pii_templates(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """行业分级模板列表（PII 合规盘点与批量升级）。"""
+    data = await AssetMapService(db).pii_templates()
+    return ok(data={"items": data, "total": len(data)}, trace_id=trace_id)
+
+
+@router.post("/pii/templates/apply", dependencies=_COMPLIANCE_DEPS)
+async def apply_pii_template(
+    payload: ApplyPiiTemplateRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """应用行业分级模板：按字段类别升级资产敏感级（个保法/金融等）。"""
+    data = await AssetMapService(db).apply_pii_template(
+        payload.template_id,
+        catalog_ids=payload.catalog_ids,
+        source_id=payload.source_id,
+        all_pii=payload.all_pii,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_APPLY_PII_TEMPLATE",
+        entity_type="db_catalog",
+        entity_id=payload.template_id,
+        detail={"applied": data.get("applied"), "changed": data.get("changed")},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.post("/entities/{entity_id}/review", dependencies=_COMPLIANCE_DEPS)
+async def review_catalog_entity(
+    entity_id: int,
+    payload: CatalogReviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """表级 PII 合规复核（APPROVE/REJECT；禁自审：资产责任人不得复核本人资产）。"""
+    data = await AssetMapService(db).review_catalog(
+        entity_id, payload.decision, reviewer_id=user.id
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_PII_REVIEW",
+        entity_type="db_catalog",
+        entity_id=str(entity_id),
+        detail={"decision": payload.decision, "comment": payload.comment},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.post("/entities/{entity_id}/masking", dependencies=_COMPLIANCE_DEPS)
+async def set_masking_policy(
+    entity_id: int,
+    payload: SetMaskingPolicyRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """设置资产脱敏策略（none/mask/hash/deny）。"""
+    data = await AssetMapService(db).set_masking_policy(entity_id, payload.policy)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_SET_MASKING",
+        entity_type="db_catalog",
+        entity_id=str(entity_id),
+        detail={"masking_policy": payload.policy},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.post("/entities/{entity_id}/pii-overrides", dependencies=_COMPLIANCE_DEPS)
+async def upsert_pii_override(
+    entity_id: int,
+    payload: PiiFieldOverrideRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """字段级人工标注（suppressed=True 误报非 PII；False 人工确认是 PII）。"""
+    data = await AssetMapService(db).upsert_pii_override(
+        entity_id, payload.column, payload.suppressed, payload.reason, actor_id=user.id
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_PII_OVERRIDE",
+        entity_type="db_catalog",
+        entity_id=str(entity_id),
+        detail={"column": payload.column, "suppressed": payload.suppressed},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.post("/entities/{entity_id}/pii-overrides/remove", dependencies=_COMPLIANCE_DEPS)
+async def remove_pii_override(
+    entity_id: int,
+    payload: PiiFieldOverrideRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """撤销字段级人工标注（恢复规则引擎判定）。"""
+    data = await AssetMapService(db).delete_pii_override(entity_id, payload.column)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_PII_OVERRIDE_REMOVE",
+        entity_type="db_catalog",
+        entity_id=str(entity_id),
+        detail={"column": payload.column},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.put("/entities/{entity_id}/retention", dependencies=_COMPLIANCE_DEPS)
+async def set_retention(
+    entity_id: int,
+    payload: SetRetentionRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """设置资产保留期与合法性基础（合规留存期限）。"""
+    data = await AssetMapService(db).set_retention(
+        entity_id, payload.retention_days, payload.legal_basis
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="ASSET_SET_RETENTION",
+        entity_type="db_catalog",
+        entity_id=str(entity_id),
+        detail={"retention_days": payload.retention_days, "legal_basis": payload.legal_basis},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=data, trace_id=trace_id)
+
+
+@router.get("/pii-export.csv", dependencies=_READ_DEPS)
+async def export_pii_csv(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    keyword: str | None = Query(None),
+    source_id: str | None = Query(None),
+    domain: str | None = Query(None),
+    owner_id: int | None = Query(None),
+    review_status: str | None = Query(None),
+    category: str | None = Query(None),
+) -> Response:
+    """PII 合规盘点 CSV 导出（含字段明细/类别/复核/脱敏状态，交合规盘点）。"""
+    items = await AssetMapService(db).export_pii_rows(
+        keyword=keyword,
+        source_id=source_id,
+        domain=domain,
+        owner_id=owner_id,
+        review_status=review_status,
+        category=category,
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    def _sanitize(v: object) -> str:
+        s = "" if v is None else str(v)
+        if s.startswith(("=", "+", "-", "@")):
+            return "'" + s
+        return s
+
+    writer.writerow(
+        [
+            "entity_name",
+            "entity_type",
+            "source_id",
+            "sensitivity_level",
+            "owner_id",
+            "owner_name",
+            "domain",
+            "compliance_reviewed",
+            "masking_policy",
+            "pii_field_count",
+            "pii_categories",
+            "pii_fields",
+            "updated_at",
+        ]
+    )
+    for it in items:
+        pii_fields = it.get("pii_fields") or []
+        writer.writerow(
+            [
+                _sanitize(it.get("entity_name", "")),
+                _sanitize(it.get("entity_type", "")),
+                _sanitize(it.get("source_id", "")),
+                _sanitize(it.get("sensitivity_level", "")),
+                _sanitize(it.get("owner_id", "")),
+                _sanitize(it.get("owner_name", "")),
+                _sanitize(it.get("domain", "")),
+                _sanitize(it.get("compliance_reviewed", "")),
+                _sanitize(it.get("masking_policy", "")),
+                _sanitize(it.get("pii_field_count", "")),
+                _sanitize(",".join(it.get("categories") or [])),
+                _sanitize(
+                    ";".join(
+                        f"{f.get('column')}:{f.get('category')}:{f.get('confidence')}"
+                        for f in pii_fields
+                        if not f.get("suppressed")
+                    )
+                ),
+                _sanitize(it.get("updated_at", "")),
+            ]
+        )
+    body = "\ufeff" + output.getvalue()
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="pii_compliance_export.csv"',
+        },
+    )

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert,
@@ -10,6 +10,7 @@ import {
   Empty,
   Form,
   Input,
+  InputNumber,
   Modal,
   Popconfirm,
   Progress,
@@ -50,11 +51,13 @@ import {
 } from "@ant-design/icons";
 import { Bar, Pie } from "@ant-design/charts";
 import {
+  applyAssetPiiTemplate,
   assignAssetOwner,
   batchAssignAssetOwner,
   batchReclassifyAssetSensitivity,
   bulkDeprecateCatalogs,
   downloadAssetExport,
+  downloadPiiExport,
   fetchAssetChanges,
   fetchAssetEntityDetail,
   fetchAssetGraph,
@@ -65,7 +68,9 @@ import {
   fetchAssetMyAssets,
   fetchAssetOrphans,
   fetchAssetOwnerView,
+  fetchAssetPiiAssets,
   fetchAssetPiiOverview,
+  fetchAssetPiiTemplates,
   fetchAssetSearch,
   fetchAssetSummary,
   fetchAssetTables,
@@ -81,8 +86,13 @@ import {
   listMetrics,
   listSnapshots,
   listUsers,
+  overrideAssetPiiField,
   queryMetricInternal,
   reclassifyAssetSensitivity,
+  removeAssetPiiOverride,
+  reviewAssetEntity,
+  setAssetMaskingPolicy,
+  setAssetRetention,
   updateColumnDescription,
   updateMetricDescription,
   updateTableDescription,
@@ -101,7 +111,10 @@ import type {
   AssetMetricDimensionSummary,
   AssetMyAssets,
   AssetOwnerView,
+  AssetPiiAssetItem,
+  AssetPiiField,
   AssetPiiOverview,
+  AssetPiiTemplate,
   AssetSearchItem,
   AssetTableItem,
   MetricResponse,
@@ -137,6 +150,59 @@ const SENSITIVITY_COLOR: Record<string, string> = {
   NEEDS_REVIEW: "gold",
   UNKNOWN: "default",
 };
+
+// PII 字段类别中文标签（PII 合规增强：字段级明细/类别分布展示）
+const PII_CATEGORY_LABEL: Record<string, string> = {
+  ID_CARD: "身份证",
+  PHONE: "手机/电话",
+  EMAIL: "邮箱",
+  NAME: "姓名",
+  ADDRESS: "地址",
+  BANK_CARD: "银行卡",
+  DOCUMENT: "证件号",
+  PASSPORT: "护照",
+  GPS: "定位",
+  HEALTH: "健康医疗",
+  BIOMETRIC: "生物特征",
+  FINANCIAL: "金融敏感",
+  MANUAL: "人工确认",
+};
+
+const PII_CATEGORY_COLOR: Record<string, string> = {
+  ID_CARD: "red",
+  PHONE: "volcano",
+  EMAIL: "orange",
+  NAME: "gold",
+  ADDRESS: "lime",
+  BANK_CARD: "magenta",
+  DOCUMENT: "purple",
+  PASSPORT: "geekblue",
+  GPS: "cyan",
+  HEALTH: "green",
+  BIOMETRIC: "blue",
+  FINANCIAL: "magenta",
+  MANUAL: "default",
+};
+
+const MASKING_POLICY_LABEL: Record<string, string> = {
+  none: "不脱敏",
+  mask: "打码",
+  hash: "哈希",
+  deny: "拒绝",
+};
+
+const REVIEW_STATUS_OPTIONS = [
+  { value: "unreviewed", label: "仅待复核" },
+  { value: "reviewed", label: "仅已复核" },
+];
+
+const LEGAL_BASIS_OPTIONS = [
+  { value: "user_consent", label: "用户同意" },
+  { value: "contract", label: "合同必需" },
+  { value: "law", label: "法定职责" },
+  { value: "legitimate_interest", label: "正当利益" },
+  { value: "public_interest", label: "公共利益" },
+];
 
 /** 业务域树扁平化：把 SubjectDomainTreeNode 递归展开为 {label, value} 选择项。 */
 function flattenDomainTree(
@@ -4725,82 +4791,930 @@ function HealthTab() {
 }
 
 function PiiTab() {
-  const [data, setData] = useState<AssetPiiOverview | null>(null);
+  const { can } = usePermission();
+  const [overview, setOverview] = useState<AssetPiiOverview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [listLoading, setListLoading] = useState(false);
+  const [items, setItems] = useState<AssetPiiAssetItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [error, setError] = useState<string | null>(null);
+  // 筛选状态（仿 OrphansTab）
+  const [keyword, setKeyword] = useState("");
+  const [keywordDraft, setKeywordDraft] = useState("");
+  const [sourceId, setSourceId] = useState<string | undefined>();
+  const [domain, setDomain] = useState<string | undefined>();
+  const [ownerId, setOwnerId] = useState<number | undefined>();
+  const [reviewStatus, setReviewStatus] = useState<string | undefined>();
+  const [category, setCategory] = useState<string | undefined>();
+  // 数据源/域/责任人选项
+  const [sourceOptions, setSourceOptions] = useState<{ value: string; label: string }[]>([]);
+  const [domainOptions, setDomainOptions] = useState<{ value: string; label: string }[]>([]);
+  const [userOptions, setUserOptions] = useState<{ value: number; label: string }[]>([]);
+  // 详情抽屉 + 模板应用
+  const [detailItem, setDetailItem] = useState<AssetPiiAssetItem | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
+
+  const activeFilterCount = [
+    keyword,
+    sourceId,
+    domain,
+    ownerId,
+    reviewStatus,
+    category,
+  ].filter((v) => v !== undefined && v !== "").length;
+
+  const loadOverview = () => {
+    fetchAssetPiiOverview()
+      .then(setOverview)
+      .catch(() => undefined);
+  };
+
+  const loadList = useCallback(
+    (
+      p: number,
+      ps: number,
+      filters?: {
+        keyword?: string;
+        sourceId?: string;
+        domain?: string;
+        ownerId?: number;
+        reviewStatus?: string;
+        category?: string;
+      },
+    ) => {
+      setListLoading(true);
+      fetchAssetPiiAssets({
+        keyword: filters?.keyword ?? keyword,
+        source_id: filters?.sourceId ?? sourceId,
+        domain: filters?.domain ?? domain,
+        owner_id: filters?.ownerId ?? ownerId,
+        review_status: filters?.reviewStatus ?? reviewStatus,
+        category: filters?.category ?? category,
+        page: p,
+        page_size: ps,
+      })
+        .then((res) => {
+          setItems(res.items);
+          setTotal(res.total);
+        })
+        .catch((err) => setError(err instanceof Error ? err.message : "加载 PII 资产失败"))
+        .finally(() => setListLoading(false));
+    },
+    [keyword, sourceId, domain, ownerId, reviewStatus, category],
+  );
 
   useEffect(() => {
-    fetchAssetPiiOverview()
-      .then(setData)
-      .catch((err) => setError(err instanceof Error ? err.message : "加载 PII 视图失败"))
+    loadOverview();
+    fetchAssetPiiAssets({ page: 1, page_size: 10 })
+      .then((res) => {
+        setItems(res.items);
+        setTotal(res.total);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "加载 PII 资产失败"))
       .finally(() => setLoading(false));
+    // 筛选选项
+    listDataSources({ page_size: 200 }).then((res) =>
+      setSourceOptions((res.items ?? []).map((s) => ({ value: s.source_id, label: s.name ?? s.source_id }))),
+    );
+    listDomainTree().then((tree) => {
+      const flat: { value: string; label: string }[] = [];
+      const walk = (nodes: SubjectDomainTreeNode[]) => {
+        nodes.forEach((n) => {
+          flat.push({ value: n.code, label: n.name });
+          if (n.children?.length) walk(n.children);
+        });
+      };
+      walk(tree);
+      setDomainOptions(flat);
+    });
+    listUsers().then((users) =>
+      setUserOptions((users ?? []).map((u) => ({ value: u.id, label: u.display_name || u.username }))),
+    );
   }, []);
 
-  if (loading) return <Spin />;
-  if (error) return <Alert type="error" message={error} />;
-  if (!data) return <Empty />;
+  const resetFilters = () => {
+    setKeyword("");
+    setKeywordDraft("");
+    setSourceId(undefined);
+    setDomain(undefined);
+    setOwnerId(undefined);
+    setReviewStatus(undefined);
+    setCategory(undefined);
+    setPage(1);
+    loadList(1, pageSize, { keyword: "", sourceId: undefined });
+  };
 
-  const sensRows = Object.entries(data.by_sensitivity).map(([k, v]) => ({ key: k, count: v }));
-  const domainRows = Object.entries(data.by_domain).map(([k, v]) => ({ key: k, count: v }));
+  const applySearch = (kw: string) => {
+    setKeyword(kw);
+    setPage(1);
+    loadList(1, pageSize, { keyword: kw, sourceId });
+  };
+
+  const openDetail = (item: AssetPiiAssetItem) => {
+    setDetailItem(item);
+    setDetailOpen(true);
+  };
+
+  const catRows = Object.entries(overview?.by_category ?? {}).map(([k, v]) => ({
+    key: k,
+    count: v,
+  }));
+  const catTotal = catRows.reduce((sum, r) => sum + r.count, 0);
+
+  if (loading) return <Spin />;
+  if (error && !overview && items.length === 0)
+    return <Alert type="error" message={error} />;
+
+  const canGovern = can("pii:review") || can("classification:rescan");
 
   return (
     <div>
+      {/* 风险卡：合规风险一眼可见 */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={6}>
+        <Col span={4}>
           <Card size="small">
-            <Statistic
-              title="PII 指标数"
-              value={data.pii_metric_count}
-              valueStyle={{ color: "#cf1322" }}
-            />
+            <Statistic title="PII 目录数" value={overview?.pii_catalog_count ?? 0} valueStyle={{ color: "#cf1322" }} />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col span={4}>
+          <Card size="small">
+            <Statistic title="PII 指标数" value={overview?.pii_metric_count ?? 0} valueStyle={{ color: "#d46b08" }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small">
+            <Statistic title="无主 PII" value={overview?.unowned_pii ?? 0} valueStyle={{ color: "#cf1322" }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small">
+            <Statistic title="待复核 PII" value={overview?.unreviewed_pii ?? 0} valueStyle={{ color: "#d46b08" }} />
+          </Card>
+        </Col>
+        <Col span={4}>
+          <Card size="small">
+            <Statistic title="已复核目录" value={overview?.reviewed_pii ?? 0} valueStyle={{ color: "#389e0d" }} />
+          </Card>
+        </Col>
+        <Col span={4}>
           <Card size="small">
             <Statistic
-              title="PII 目录数"
-              value={data.pii_catalog_count}
-              valueStyle={{ color: "#cf1322" }}
+              title="字段命中"
+              value={catTotal}
+              suffix="列"
+              valueStyle={{ color: "#096dd9" }}
             />
           </Card>
         </Col>
       </Row>
-      <Row gutter={16}>
+
+      {/* 操作区：模板应用 + 盘点导出 */}
+      <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={12}>
-          <Card title="按敏感级分布" size="small">
-            <Table
-              dataSource={sensRows}
-              rowKey="key"
-              size="small"
-              pagination={false}
-              columns={[
-                {
-                  title: "敏感级",
-                  dataIndex: "key",
-                  key: "key",
-                  render: (k: string) => sensitivityTag(k),
-                },
-                { title: "数量", dataIndex: "count", key: "count", align: "right" },
-              ]}
-            />
+          <Card title="PII 类别分布" size="small" extra={canGovern && (
+            <Space>
+              <Button
+                size="small"
+                icon={<ThunderboltOutlined />}
+                onClick={() => setTemplateOpen(true)}
+                disabled={!can("classification:rescan")}
+              >
+                应用分级模板
+              </Button>
+              <Button
+                size="small"
+                icon={<DownloadOutlined />}
+                onClick={() => downloadPiiExport().catch(() => message.error("导出失败"))}
+              >
+                盘点导出
+              </Button>
+            </Space>
+          )}>
+            {catRows.length === 0 ? (
+              <Empty description="暂无字段级 PII 命中明细（采集后自动生成）" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {catRows.map((r) => (
+                  <Tag
+                    key={r.key}
+                    color={PII_CATEGORY_COLOR[r.key] ?? "default"}
+                    style={{ padding: "2px 10px", fontSize: 13 }}
+                  >
+                    {PII_CATEGORY_LABEL[r.key] ?? r.key} · {r.count}
+                  </Tag>
+                ))}
+              </div>
+            )}
           </Card>
         </Col>
         <Col span={12}>
           <Card title="按业务域分布" size="small">
-            <Table
-              dataSource={domainRows}
-              rowKey="key"
-              size="small"
-              pagination={false}
-              columns={[
-                { title: "域", dataIndex: "key", key: "key" },
-                { title: "数量", dataIndex: "count", key: "count", align: "right" },
-              ]}
-            />
+            {Object.keys(overview?.by_domain ?? {}).length === 0 ? (
+              <Empty description="暂无 PII 指标域分布" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : (
+              <Table
+                dataSource={Object.entries(overview?.by_domain ?? {}).map(([k, v]) => ({ key: k, count: v }))}
+                rowKey="key"
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "域", dataIndex: "key", key: "key" },
+                  { title: "数量", dataIndex: "count", key: "count", align: "right" },
+                ]}
+              />
+            )}
           </Card>
         </Col>
       </Row>
+
+      {/* 筛选栏 + PII 资产明细列表 */}
+      <Card
+        title={`PII 资产明细（${total}）`}
+        size="small"
+        extra={
+          <Space>
+            {activeFilterCount > 0 && (
+              <Tag color="blue">{activeFilterCount} 个筛选</Tag>
+            )}
+            {activeFilterCount > 0 && (
+              <Button size="small" type="link" onClick={resetFilters}>
+                重置
+              </Button>
+            )}
+          </Space>
+        }
+      >
+        <Row gutter={[8, 8]} align="middle" style={{ marginBottom: 12 }}>
+          <Col>
+            <Input.Search
+              allowClear
+              style={{ width: 210 }}
+              placeholder="搜索实体名 / 数据源"
+              value={keywordDraft}
+              onChange={(e) => {
+                setKeywordDraft(e.target.value);
+                if (!e.target.value) {
+                  setKeyword("");
+                  setPage(1);
+                  loadList(1, pageSize, { keyword: "", sourceId });
+                }
+              }}
+              onSearch={(v) => applySearch(v.trim())}
+            />
+          </Col>
+          <Col>
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="数据源"
+              style={{ width: 170 }}
+              value={sourceId}
+              onChange={(v) => {
+                setSourceId(v);
+                setPage(1);
+                loadList(1, pageSize, { sourceId: v });
+              }}
+              options={sourceOptions}            />
+          </Col>
+          <Col>
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="业务域"
+              style={{ width: 140 }}
+              value={domain}
+              onChange={(v) => {
+                setDomain(v);
+                setPage(1);
+                loadList(1, pageSize, { domain: v });
+              }}
+              options={domainOptions}
+            />
+          </Col>
+          <Col>
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="责任人"
+              style={{ width: 150 }}
+              value={ownerId}
+              onChange={(v) => {
+                setOwnerId(v);
+                setPage(1);
+                loadList(1, pageSize, { ownerId: v });
+              }}
+              options={userOptions}
+            />
+          </Col>
+          <Col>
+            <Select
+              allowClear
+              placeholder="复核状态"
+              style={{ width: 130 }}
+              value={reviewStatus}
+              onChange={(v) => {
+                setReviewStatus(v);
+                setPage(1);
+                loadList(1, pageSize, { reviewStatus: v });
+              }}
+              options={REVIEW_STATUS_OPTIONS}
+            />
+          </Col>
+          <Col>
+            <Select
+              allowClear
+              placeholder="PII 类别"
+              style={{ width: 150 }}
+              value={category}
+              onChange={(v) => {
+                setCategory(v);
+                setPage(1);
+                loadList(1, pageSize, { category: v });
+              }}
+              options={Object.keys(PII_CATEGORY_LABEL).map((k) => ({
+                value: k,
+                label: PII_CATEGORY_LABEL[k],
+              }))}
+            />
+          </Col>
+        </Row>
+        <Table
+          dataSource={items}
+          rowKey="id"
+          size="small"
+          loading={listLoading}
+          pagination={{
+            current: page,
+            pageSize,
+            total,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50],
+            onChange: (p, ps) => {
+              setPage(p);
+              setPageSize(ps);
+              loadList(p, ps);
+            },
+          }}
+          onRow={(r) => ({ onClick: () => openDetail(r), style: { cursor: "pointer" } })}
+          columns={[
+            {
+              title: "实体",
+              dataIndex: "entity_name",
+              key: "name",
+              ellipsis: true,
+              render: (v: string, r) => (
+                <Space>
+                  <SafetyOutlined style={{ color: "#cf1322" }} />
+                  <span>{v}</span>
+                  {r.entity_type === "TABLE" && <Tag color="blue">表</Tag>}
+                  {r.entity_type === "VIEW" && <Tag color="cyan">视图</Tag>}
+                </Space>
+              ),
+            },
+            {
+              title: "数据源",
+              key: "source",
+              width: 150,
+              ellipsis: true,
+              render: (_, r) => (r.source_name ? `${r.source_name}（${r.source_id}）` : r.source_id),
+            },
+            {
+              title: "业务域",
+              dataIndex: "domain",
+              key: "domain",
+              width: 100,
+              render: (v: string | null) => v ?? <Tag>未归属</Tag>,
+            },
+            {
+              title: "责任人",
+              key: "owner",
+              width: 110,
+              render: (_, r) =>
+                r.owner_name ?? (r.owner_id != null ? `#${r.owner_id}` : <Tag color="red">无主</Tag>),
+            },
+            {
+              title: "命中字段",
+              dataIndex: "pii_field_count",
+              key: "fields",
+              width: 90,
+              align: "right",
+              render: (v: number) => <b style={{ color: "#cf1322" }}>{v}</b>,
+            },
+            {
+              title: "类别",
+              key: "categories",
+              width: 180,
+              render: (_, r) =>
+                (r.categories ?? []).slice(0, 3).map((c) => (
+                  <Tag key={c} color={PII_CATEGORY_COLOR[c] ?? "default"} style={{ marginRight: 4 }}>
+                    {PII_CATEGORY_LABEL[c] ?? c}
+                  </Tag>
+                )),
+            },
+            {
+              title: "合规复核",
+              dataIndex: "compliance_reviewed",
+              key: "review",
+              width: 110,
+              render: (v: boolean) =>
+                v ? (
+                  <Tag color="green" icon={<CheckOutlined />}>已复核</Tag>
+                ) : (
+                  <Tag color="gold" icon={<CloseOutlined />}>待复核</Tag>
+                ),
+            },
+            {
+              title: "脱敏",
+              dataIndex: "masking_policy",
+              key: "masking",
+              width: 90,
+              render: (v: string | null) =>
+                v && v !== "none" ? (
+                  <Tag color="volcano">{MASKING_POLICY_LABEL[v] ?? v}</Tag>
+                ) : (
+                  <Tag>未设</Tag>
+                ),
+            },
+          ]}
+        />
+      </Card>
+
+      <PiiDetailDrawer
+        open={detailOpen}
+        item={detailItem}
+        onClose={() => setDetailOpen(false)}
+        onChanged={() => {
+          loadOverview();
+          loadList(page, pageSize);
+        }}
+      />
+      <PiiTemplateModal
+        open={templateOpen}
+        onClose={() => setTemplateOpen(false)}
+        onApplied={() => {
+          loadOverview();
+          loadList(page, pageSize);
+        }}
+      />
     </div>
+  );
+}
+
+// PII 行业分级模板应用弹窗（个保法敏感个人信息 / 金融行业 / 标准）
+function PiiTemplateModal({
+  open,
+  onClose,
+  onApplied,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onApplied: () => void;
+}) {
+  const [templates, setTemplates] = useState<AssetPiiTemplate[]>([]);
+  const [templateId, setTemplateId] = useState<string>("");
+  const [scope, setScope] = useState<"all_pii" | "source" | "ids">("all_pii");
+  const [sourceId, setSourceId] = useState<string | undefined>();
+  const [catalogIds, setCatalogIds] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      fetchAssetPiiTemplates()
+        .then((res) => {
+          setTemplates(res.items);
+          if (res.items.length) setTemplateId(res.items[0].id);
+        })
+        .catch(() => message.error("加载模板失败"));
+    }
+  }, [open]);
+
+  const apply = async () => {
+    if (!templateId) {
+      message.warning("请选择模板");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const body: {
+        template_id: string;
+        all_pii?: boolean;
+        source_id?: string;
+        catalog_ids?: number[];
+      } = { template_id: templateId, all_pii: scope === "all_pii" };
+      if (scope === "source") body.source_id = sourceId;
+      if (scope === "ids")
+        body.catalog_ids = catalogIds
+          .split(",")
+          .map((s) => Number(s.trim()))
+          .filter((n) => Number.isFinite(n) && n > 0);
+      const res = await applyAssetPiiTemplate(body);
+      message.success(`模板应用完成：处理 ${res.applied} 项，升级 ${res.changed} 项`);
+      onApplied();
+      onClose();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "应用模板失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="应用行业分级模板"
+      open={open}
+      onCancel={onClose}
+      onOk={apply}
+      confirmLoading={submitting}
+      okText="应用"
+      width={520}
+    >
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="模板按字段类别升级资产敏感级"
+        description="例：个保法敏感个人信息模板将含生物识别/健康医疗/金融账户/行踪轨迹字段的资产升级为 PII。"
+      />
+      <Form layout="vertical">
+        <Form.Item label="分级模板" required>
+          <Select value={templateId} onChange={setTemplateId} options={templates.map((t) => ({ value: t.id, label: t.name }))} />
+        </Form.Item>
+        {templates.find((t) => t.id === templateId) && (
+          <Form.Item label="模板说明">
+            <div style={{ color: "#888", fontSize: 12 }}>
+              {templates.find((t) => t.id === templateId)?.description}
+            </div>
+          </Form.Item>
+        )}
+        <Form.Item label="作用范围" required>
+          <Select
+            value={scope}
+            onChange={setScope}
+            options={[
+              { value: "all_pii", label: "全部 PII 资产" },
+              { value: "source", label: "指定数据源" },
+              { value: "ids", label: "指定资产 ID（逗号分隔）" },
+            ]}
+          />
+        </Form.Item>
+        {scope === "source" && (
+          <Form.Item label="数据源">
+            <Input placeholder="source_id" value={sourceId} onChange={(e) => setSourceId(e.target.value)} />
+          </Form.Item>
+        )}
+        {scope === "ids" && (
+          <Form.Item label="资产 ID">
+            <Input placeholder="如 1,2,3" value={catalogIds} onChange={(e) => setCatalogIds(e.target.value)} />
+          </Form.Item>
+        )}
+      </Form>
+    </Modal>
+  );
+}
+
+// PII 资产详情抽屉：字段级明细 + 合规复核/脱敏/标注/保留期操作闭环
+function PiiDetailDrawer({
+  open,
+  item,
+  onClose,
+  onChanged,
+}: {
+  open: boolean;
+  item: AssetPiiAssetItem | null;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const { can } = usePermission();
+  const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [masking, setMasking] = useState<string>("none");
+  const [retentionDays, setRetentionDays] = useState<number | null>(null);
+  const [legalBasis, setLegalBasis] = useState<string | undefined>();
+  // 字段标注弹窗
+  const [overrideField, setOverrideField] = useState<AssetPiiField | null>(null);
+  const [overrideSuppressed, setOverrideSuppressed] = useState(true);
+  const [overrideReason, setOverrideReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (open && item) {
+      setLoading(true);
+      setDetail(null);
+      fetchAssetEntityDetail(item.id)
+        .then((d) => {
+          setDetail(d);
+          setMasking(d.masking_policy ?? (d.sensitivity_level ?? "").includes("PII") ? "hash" : "none");
+          setRetentionDays(d.retention_days ?? null);
+          setLegalBasis(d.legal_basis ?? undefined);
+        })
+        .catch((err) => message.error(err instanceof Error ? err.message : "加载详情失败"))
+        .finally(() => setLoading(false));
+    }
+  }, [open, item]);
+
+  const canGovern = can("pii:review") || can("classification:rescan");
+
+  const review = async (decision: "APPROVE" | "REJECT") => {
+    if (!item) return;
+    setSubmitting(true);
+    try {
+      await reviewAssetEntity(item.id, { decision });
+      message.success(decision === "APPROVE" ? "复核通过" : "已驳回（保持待复核）");
+      onChanged();
+      fetchAssetEntityDetail(item.id).then(setDetail).catch(() => undefined);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "复核失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const saveMasking = async () => {
+    if (!item) return;
+    setSubmitting(true);
+    try {
+      await setAssetMaskingPolicy(item.id, masking);
+      message.success("脱敏策略已更新");
+      onChanged();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "设置失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const saveRetention = async () => {
+    if (!item) return;
+    setSubmitting(true);
+    try {
+      await setAssetRetention(item.id, { retention_days: retentionDays, legal_basis: legalBasis ?? null });
+      message.success("保留期已更新");
+      onChanged();
+      fetchAssetEntityDetail(item.id).then(setDetail).catch(() => undefined);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "设置失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const submitOverride = async () => {
+    if (!item || !overrideField) return;
+    setSubmitting(true);
+    try {
+      await overrideAssetPiiField(item.id, {
+        column: overrideField.column,
+        suppressed: overrideSuppressed,
+        reason: overrideReason || undefined,
+      });
+      message.success(overrideSuppressed ? "已标注为非 PII（误报）" : "已人工确认为 PII");
+      setOverrideField(null);
+      setOverrideReason("");
+      onChanged();
+      fetchAssetEntityDetail(item.id).then(setDetail).catch(() => undefined);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "标注失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const removeOverride = async (field: AssetPiiField) => {
+    if (!item) return;
+    try {
+      await removeAssetPiiOverride(item.id, field.column);
+      message.success("已撤销标注，恢复规则判定");
+      onChanged();
+      fetchAssetEntityDetail(item.id).then(setDetail).catch(() => undefined);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "撤销失败");
+    }
+  };
+
+  const piiFields = (detail?.pii_fields ?? []).filter((f) => !f.suppressed);
+  const suppressedFields = (detail?.pii_fields ?? []).filter((f) => f.suppressed);
+
+  return (
+    <ResizableDrawer
+      open={open}
+      onClose={onClose}
+      storageKey="unisense.drawer.pii.width"
+      defaultWidth={820}
+      minWidth={620}
+      title={
+        <Space>
+          <SafetyOutlined style={{ color: "#cf1322" }} />
+          <span>PII 资产详情：{detail?.entity_name ?? item?.entity_name}</span>
+          {detail?.sensitivity_level ? sensitivityTag(detail.sensitivity_level) : null}
+        </Space>
+      }
+      destroyOnClose={false}
+    >
+      {loading || !detail ? (
+        <Spin />
+      ) : (
+        <div>
+          {/* 基础信息 */}
+          <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+            <Descriptions.Item label="实体类型">{ENTITY_TYPE_LABEL[detail.entity_type] ?? detail.entity_type}</Descriptions.Item>
+            <Descriptions.Item label="数据源">
+              {detail.source_name ? `${detail.source_name}（${detail.source_id}）` : detail.source_id}
+            </Descriptions.Item>
+            <Descriptions.Item label="业务域">{detail.domain ?? <Tag>未归属</Tag>}</Descriptions.Item>
+            <Descriptions.Item label="责任人">
+              {detail.owner_name ?? (detail.owner_id != null ? `#${detail.owner_id}` : <Tag color="red">无主</Tag>)}
+            </Descriptions.Item>
+            <Descriptions.Item label="敏感度">{sensitivityTag(detail.sensitivity_level)}</Descriptions.Item>
+            <Descriptions.Item label="合规复核">
+              {detail.compliance_reviewed ? (
+                <Space>
+                  <Tag color="green" icon={<CheckOutlined />}>已复核</Tag>
+                  {detail.compliance_reviewed_at && (
+                    <span style={{ fontSize: 12, color: "#888" }}>{formatCnTime(detail.compliance_reviewed_at)}</span>
+                  )}
+                </Space>
+              ) : (
+                <Tag color="gold" icon={<CloseOutlined />}>待复核</Tag>
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="保留期">
+              {detail.retention_days ? (
+                <Space>
+                  <span>{detail.retention_days} 天</span>
+                  {detail.legal_basis && <Tag>{detail.legal_basis}</Tag>}
+                  {detail.retention_expiring && <Tag color="red">临近到期</Tag>}
+                </Space>
+              ) : (
+                <Tag>未设置</Tag>
+              )}
+            </Descriptions.Item>
+          </Descriptions>
+
+          {/* 合规操作区 */}
+          {canGovern && (
+            <Card size="small" title="合规处置" style={{ marginBottom: 16 }}>
+              <Row gutter={16} align="middle">
+                <Col span={8}>
+                  <Space>
+                    <Button
+                      type="primary"
+                      danger={false}
+                      icon={<CheckOutlined />}
+                      loading={submitting}
+                      disabled={Boolean(detail.compliance_reviewed)}
+                      onClick={() => review("APPROVE")}
+                    >
+                      复核通过
+                    </Button>
+                    <Button
+                      icon={<CloseOutlined />}
+                      loading={submitting}
+                      disabled={!detail.compliance_reviewed}
+                      onClick={() => review("REJECT")}
+                    >
+                      驳回
+                    </Button>
+                  </Space>
+                </Col>
+                <Col span={10}>
+                  <Space>
+                    <span style={{ color: "#888" }}>脱敏策略</span>
+                    <Select
+                      style={{ width: 120 }}
+                      value={masking}
+                      onChange={setMasking}
+                      options={Object.keys(MASKING_POLICY_LABEL).map((k) => ({ value: k, label: MASKING_POLICY_LABEL[k] }))}
+                    />
+                    <Button size="small" loading={submitting} onClick={saveMasking}>
+                      保存
+                    </Button>
+                  </Space>
+                </Col>
+              </Row>
+            </Card>
+          )}
+
+          {/* PII 字段级命中明细 */}
+          <Card
+            size="small"
+            title={`PII 字段命中明细（${piiFields.length}）`}
+            style={{ marginBottom: 16 }}
+          >
+            {piiFields.length === 0 && suppressedFields.length === 0 ? (
+              <Empty description="该资产无字段级 PII 命中（人工复核或旧数据未生成明细）" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : (
+              <Table
+                dataSource={piiFields}
+                rowKey={(f) => f.column}
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "字段名", dataIndex: "column", key: "column", width: 160 },
+                  {
+                    title: "类别",
+                    dataIndex: "category",
+                    key: "category",
+                    width: 110,
+                    render: (c: string) => (
+                      <Tag color={PII_CATEGORY_COLOR[c] ?? "default"}>{PII_CATEGORY_LABEL[c] ?? c}</Tag>
+                    ),
+                  },
+                  { title: "命中规则", dataIndex: "rule", key: "rule", width: 110 },
+                  {
+                    title: "置信度",
+                    dataIndex: "confidence",
+                    key: "confidence",
+                    width: 90,
+                    align: "right",
+                    render: (v: number) => `${Math.round(v * 100)}%`,
+                  },
+                  {
+                    title: "操作",
+                    key: "action",
+                    width: 160,
+                    render: (_, f: AssetPiiField) =>
+                      canGovern && (
+                        <Popconfirm
+                          title="标注该列为非 PII（误报）？"
+                          description="撤销后由规则引擎重新判定"
+                          okText="标注误报"
+                          onConfirm={() => {
+                            setOverrideField(f);
+                            setOverrideSuppressed(true);
+                            setOverrideReason("");
+                            submitOverride();
+                          }}
+                        >
+                          <Button size="small" type="link" danger>
+                            误报标注
+                          </Button>
+                        </Popconfirm>
+                      ),
+                  },
+                ]}
+              />
+            )}
+            {suppressedFields.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <Divider orientation="left" plain style={{ margin: "8px 0" }}>
+                  已人工标注字段（不计入 PII）
+                </Divider>
+                {suppressedFields.map((f) => (
+                  <Tag key={f.column} closable={canGovern} onClose={() => removeOverride(f)} style={{ marginBottom: 4 }}>
+                    {f.column}
+                    {f.override_reason ? `（${f.override_reason}）` : ""}
+                  </Tag>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          {/* 保留期设置 */}
+          {canGovern && (
+            <Card size="small" title="保留期与合法性" style={{ marginBottom: 16 }}>
+              <Row gutter={16} align="middle">
+                <Col span={6}>
+                  <InputNumber
+                    style={{ width: "100%" }}
+                    placeholder="保留天数"
+                    min={1}
+                    value={retentionDays}
+                    onChange={(v) => setRetentionDays(v ?? null)}
+                  />
+                </Col>
+                <Col span={10}>
+                  <Select
+                    allowClear
+                    style={{ width: "100%" }}
+                    placeholder="合法性基础"
+                    value={legalBasis}
+                    onChange={setLegalBasis}
+                    options={LEGAL_BASIS_OPTIONS}
+                  />
+                </Col>
+                <Col span={8}>
+                  <Button loading={submitting} onClick={saveRetention}>
+                    保存保留期
+                  </Button>
+                </Col>
+              </Row>
+              {detail.retention_expires_at && (
+                <div style={{ marginTop: 8, fontSize: 12, color: "#888" }}>
+                  到期时间：{formatCnTime(detail.retention_expires_at)}
+                </div>
+              )}
+            </Card>
+          )}
+        </div>
+      )}
+    </ResizableDrawer>
   );
 }
 

@@ -9,7 +9,7 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.mysql import BOOLEAN, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -274,9 +274,53 @@ class DBCatalog(Base, BaseModel):
         nullable=True,
         comment="表级描述更新时间（UTC）",
     )
+    # ---- PII 合规治理（表级复核 / 脱敏策略 / 保留期，TD §12.5 / PII 合规增强）----
+    compliance_reviewed: Mapped[bool] = mapped_column(
+        BOOLEAN,
+        nullable=False,
+        default=False,
+        comment="PII 合规是否已复核（表级，区别于指标级）",
+    )
+    compliance_reviewed_by: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", name="fk_db_catalog_review_user"),
+        nullable=True,
+        comment="合规复核人 ID（禁自审：资产责任人不得复核本人资产）",
+    )
+    compliance_reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="合规复核时间（UTC）",
+    )
+    masking_policy: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+        comment="脱敏策略（none/mask/hash/deny，缺省由敏感级推导）",
+    )
+    retention_days: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="保留期（天，合法合规留存期限）",
+    )
+    legal_basis: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="合法性基础（如 user_consent/contract/law 等）",
+    )
+    retention_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="保留期到期时间（UTC，基于最近更新时间推算）",
+    )
+    retention_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="到期提醒时间（非空=已提醒过，避免重复告警）",
+    )
 
     __table_args__ = (
         UniqueConstraint("source_id", "entity_name", name="uk_db_catalog_entity"),
         Index("idx_db_catalog_owner", "owner_id"),
         Index("idx_db_catalog_sens", "sensitivity_level"),
+        Index("idx_db_catalog_review", "compliance_reviewed"),
+        Index("idx_db_catalog_retention", "retention_expires_at"),
     )

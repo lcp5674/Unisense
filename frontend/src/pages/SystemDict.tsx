@@ -24,6 +24,9 @@ const DICT_TYPE_LABELS: Record<string, string> = {
   serving_mode: "服务模式",
   metric_tier: "指标分级",
   currency: "币种",
+  // PII 合规增强：敏感规则类别与规则配置（供敏感分级规则引擎 DB 可配置）
+  pii_category: "PII 类别",
+  pii_rule: "PII 规则",
 };
 
 // 打开新增弹窗时静默刷新的最小间隔（毫秒）：TTL 内重复打开直接用缓存，避免
