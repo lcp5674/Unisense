@@ -515,6 +515,7 @@ async def test_delete_member_cascades_subtree() -> None:
     repo.get_member = AsyncMock(return_value=root)
     repo.list_members = AsyncMock(return_value=[root, child, grand, other])
     repo.delete_members = AsyncMock()
+    repo.count_bindings_by_default_member = AsyncMock(return_value=0)
     deleted = await svc.delete_member("geo_region", "root")
     codes = {m.member_code for m in deleted}
     # 级联删除 root + 全部后代；旁支不受影响
@@ -1250,3 +1251,29 @@ async def test_publish_all_members_no_draft_no_commit() -> None:
     result = await svc.publish_all_members("dim_c")
     assert result == {"published": 0, "skipped": 1}
     repo.commit.assert_not_awaited()
+
+
+async def test_delete_member_rejected_when_bound_by_metric() -> None:
+    """删除被指标绑定为默认值的成员被拒（跨服务一致性，对称于 deprecate_member 保护）。"""
+    svc, repo = await _svc()
+    root = DimensionMember(
+        id=1, dim_code="geo", member_code="root", member_name="根",
+        parent_code=None, path="/root", status="PUBLISHED",
+    )
+    child = DimensionMember(
+        id=2, dim_code="geo", member_code="sub", member_name="子",
+        parent_code="root", path="/root/sub", status="PUBLISHED",
+    )
+    repo.get_member = AsyncMock(return_value=root)
+    repo.list_members = AsyncMock(return_value=[root, child])
+    repo.delete_members = AsyncMock()
+    # 子树内任一成员被绑定（此处子成员 sub 被绑定）→ 拒绝删除
+    async def _count(dim_code, member_code):
+        return 1 if member_code == "sub" else 0
+    repo.count_bindings_by_default_member = AsyncMock(side_effect=_count)
+    try:
+        await svc.delete_member("geo", "root")
+        raise AssertionError("应拒绝删除含被绑定成员的子树")
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "MEMBER_BOUND_BY_METRICS"
+    repo.delete_members.assert_not_awaited()

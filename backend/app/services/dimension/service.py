@@ -512,6 +512,19 @@ class DimensionService(BaseService):
             seen.add(cur.member_code)
             to_delete.append(cur)
             stack.extend(children.get(cur.member_code, []))
+        # 绑定引用保护（跨服务一致性，对称于 deprecate_member 的 MEMBER_BOUND_BY_METRICS）：
+        # 被指标绑定为默认值的成员（含子树内任一成员）禁止物理删除——否则指标绑定
+        # default_member 悬空。逐成员计数（子树规模通常小，非批量场景无需聚合优化）。
+        for doomed in to_delete:
+            bound = await self._repo.count_bindings_by_default_member(
+                dim_code, doomed.member_code
+            )
+            if bound > 0:
+                raise BusinessError(
+                    f"成员 {doomed.member_code} 正被 {bound} 个指标绑定为默认值，无法删除；"
+                    f"请先解绑相关指标",
+                    error_code="MEMBER_BOUND_BY_METRICS",
+                )
         await self._repo.delete_members(to_delete)
         return to_delete
 
