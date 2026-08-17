@@ -1117,6 +1117,137 @@ describe("MetricDetail 按钮级权限过滤", () => {
   });
 
 
+  it("SQL 模式指标打开编辑弹窗自动落 SQL 模式，编辑 SQL 保存携带 definition_json.sql", async () => {
+    // SQL 模式指标（definition_json 含 sql）→ 打开弹窗自动选中「SQL 模式」并预填 SQL；
+    // 修改 SQL 保存 → definition_json.sql 更新且保留原口径非 sql 字段（不丢字段）
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      definition_json: {
+        sql: "SELECT SUM(amount) AS gmv FROM dwd_sales",
+        expression: "sum(amount)",
+        source_tables: ["dwd_sales"],
+      },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 自动落 SQL 模式：Segmented 选中「SQL 模式」，SQL 框预填原 SQL，JSON 框不渲染
+    await waitFor(() => {
+      const selected = document.querySelector(".ant-modal .ant-segmented-item-selected");
+      expect(selected?.textContent).toContain("SQL 模式");
+    });
+    const sqlArea = document.querySelector('[data-testid="editSqlText"]') as HTMLTextAreaElement | null;
+    expect(sqlArea).toBeTruthy();
+    expect((sqlArea as HTMLTextAreaElement).value).toBe("SELECT SUM(amount) AS gmv FROM dwd_sales");
+    expect(document.querySelector('.ant-modal textarea[id="definition_json"]')).toBeNull();
+    // 修改 SQL 并保存 → definition_json.sql 更新，原非 sql 字段保留（expression/source_tables）
+    fireEvent.change(sqlArea as HTMLTextAreaElement, { target: { value: "SELECT SUM(amount) AS gmv FROM dwd_sales WHERE channel = 'APP'" } });
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "口径增加 APP 渠道过滤" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
+      expect(lastCall).toMatchObject({
+        definition_json: {
+          expression: "sum(amount)",
+          source_tables: ["dwd_sales"],
+          sql: "SELECT SUM(amount) AS gmv FROM dwd_sales WHERE channel = 'APP'",
+        },
+      });
+    });
+  });
+
+  it("编辑弹窗口径定义支持表达式模式切 SQL 模式并保存（Segmented 双向切换）", async () => {
+    // 表达式模式指标（definition_json 无 sql）→ 打开弹窗默认表达式模式；
+    // 切「SQL 模式」出现 SQL 框，输入 SQL 保存 → definition_json 合入 sql（保留原字段）
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      definition_json: { expression: "sum(amount)", source_tables: ["dwd_sales"] },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 默认表达式模式：JSON 框存在，SQL 框不渲染
+    expect(document.querySelector('.ant-modal textarea[id="definition_json"]')).toBeTruthy();
+    expect(document.querySelector('[data-testid="editSqlText"]')).toBeNull();
+    // 切到 SQL 模式：无存量 sql 字段 → 空框，用户手输 SQL
+    const segItems = Array.from(document.querySelectorAll(".ant-modal .ant-segmented-item")) as HTMLElement[];
+    const sqlSeg = segItems.find((el) => (el.textContent ?? "").includes("SQL 模式"));
+    fireEvent.click(sqlSeg as HTMLElement);
+    const sqlArea = document.querySelector('[data-testid="editSqlText"]') as HTMLTextAreaElement | null;
+    await waitFor(() => {
+      expect(sqlArea).toBeTruthy();
+    });
+    fireEvent.change(sqlArea as HTMLTextAreaElement, { target: { value: "SELECT SUM(amount) FROM dwd_sales" } });
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "改为 SQL 口径" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
+      expect(lastCall).toMatchObject({
+        definition_json: {
+          expression: "sum(amount)",
+          source_tables: ["dwd_sales"],
+          sql: "SELECT SUM(amount) FROM dwd_sales",
+        },
+      });
+    });
+  });
+
   it("编辑弹窗治理字段回填（数仓层/时效/分级/币种），未改保存不传（dirty 机制保留原值）", async () => {
     // 指标治理字段（dw_layer/freshness/metric_tier/currency）在 openEdit 回填；
     // 未修改时保存 payload 不含治理字段（dirty 未改不传 → 后端保留原值，防误覆盖）

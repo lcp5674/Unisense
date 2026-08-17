@@ -12,6 +12,7 @@ import {
   message,
   Modal,
   Radio,
+  Segmented,
   Select,
   Space,
   Tag,
@@ -532,6 +533,11 @@ export function MetricDetail() {
   >({});
   // 编辑弹窗口径 JSON 即时校验（对齐注册页惰性设计）：输入即报错，避免提交时才发现语法问题
   const [editDefinitionError, setEditDefinitionError] = useState<string | null>(null);
+  // 编辑弹窗口径定义编辑模式：expression（表达式/JSON）↔ sql（SQL 模式，对齐注册页）。
+  // 开发人员可直接以 SQL 描述口径（后端 sqlglot 校验语法，sql 变更与表达式同级触发版本确认）；
+  // 存量 SQL 模式指标（definition_json 含 sql/etl_sql）打开弹窗时自动落到 SQL 模式。
+  const [editDefMode, setEditDefMode] = useState<"expression" | "sql">("expression");
+  const [editSqlText, setEditSqlText] = useState("");
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -778,12 +784,18 @@ export function MetricDetail() {
     }
     setEditGovValues(govInit);
     setEditGovDirty(new Set());
+    // 口径定义编辑模式：存量 SQL 模式指标（definition_json 含 sql/etl_sql）自动落 SQL 模式，
+    // 预填 SQL 文本；表达式模式预填完整 JSON（表达式/来源字段等结构化口径）。
+    const rawSql = typeof def.sql === "string" ? def.sql : typeof def.etl_sql === "string" ? def.etl_sql : "";
+    const isSqlMode = rawSql.trim().length > 0;
+    setEditDefMode(isSqlMode ? "sql" : "expression");
+    setEditSqlText(rawSql);
     editForm.setFieldsValue({
       name: metric.name,
       granularity: metric.granularity,
       unit: metric.unit,
       aggregation: metric.aggregation, // 聚合方式属口径变更，与粒度/单位同级回填
-      definition_json: Object.keys(def).length ? JSON.stringify(def, null, 2) : "",
+      definition_json: isSqlMode ? "" : Object.keys(def).length ? JSON.stringify(def, null, 2) : "",
     });
     setEditDims(rawDims);
     setEditDeps(
@@ -802,13 +814,30 @@ export function MetricDetail() {
     try {
       const values = await editForm.validateFields();
       let definitionJson: Record<string, unknown> | undefined;
-      const rawDef = String(values.definition_json ?? "").trim();
-      if (rawDef) {
-        try {
-          definitionJson = JSON.parse(rawDef);
-        } catch {
-          message.error("口径定义不是合法 JSON，请修正后重试");
+      if (editDefMode === "sql") {
+        // SQL 模式：口径主体为 { sql }（后端 sqlglot 校验语法），保留原口径中
+        // 非 sql/etl_sql 的结构化字段（measure_column/source_fields/period 等），
+        // 避免切换编辑模式导致字段丢失。
+        const sql = editSqlText.trim();
+        if (!sql) {
+          message.error("口径 SQL 模式请输入 SQL 语句");
           return;
+        }
+        const base: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(metric.definition_json ?? {})) {
+          if (k === "sql" || k === "etl_sql") continue;
+          base[k] = v;
+        }
+        definitionJson = { ...base, sql };
+      } else {
+        const rawDef = String(values.definition_json ?? "").trim();
+        if (rawDef) {
+          try {
+            definitionJson = JSON.parse(rawDef);
+          } catch {
+            message.error("口径定义不是合法 JSON，请修正后重试");
+            return;
+          }
         }
       }
       // 关联维度选择器合入 definition_json.dimensions（对齐注册页，血缘生成指标↔维度边）：
@@ -933,6 +962,35 @@ export function MetricDetail() {
     } catch {
       setEditDefinitionError("口径定义不是合法 JSON，无法格式化");
     }
+  }
+
+  // 口径定义编辑模式切换（表达式/JSON ↔ SQL，对齐注册页）：双向迁移已编辑内容——
+  // 表达式→SQL 提取 json.sql/etl_sql 填入 SQL 框（无则留空）；SQL→表达式将 SQL 包为
+  // { sql } 写回 JSON 框。独立选择器管理的 dimensions/dependencies/source_table 不受影响。
+  function handleEditDefModeChange(mode: "expression" | "sql") {
+    if (mode === editDefMode) return;
+    if (mode === "sql") {
+      // 表达式 → SQL：从当前 JSON 提取 SQL 口径（sql/etl_sql 兼容键），其余字段保留在
+      // 各独立选择器（维度/依赖/落地表），切换后 SQL 框为口径主体。
+      let sql = "";
+      const raw = String(editForm.getFieldValue("definition_json") ?? "").trim();
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          sql = typeof parsed.sql === "string" ? parsed.sql : typeof parsed.etl_sql === "string" ? parsed.etl_sql : "";
+        } catch {
+          // 非法 JSON 不阻断切换：SQL 框留空，用户自行输入（提交时后端/前端校验兜底）
+        }
+      }
+      setEditSqlText(sql);
+      setEditDefinitionError(null);
+    } else {
+      // SQL → 表达式：将 SQL 包为 { sql } 写回 JSON 框（格式化展示，用户可继续手工调整）
+      const sql = editSqlText.trim();
+      editForm.setFieldValue("definition_json", sql ? JSON.stringify({ sql }, null, 2) : "");
+      setEditDefinitionError(null);
+    }
+    setEditDefMode(mode);
   }
 
   // 仲裁改名建议：调后端 LLM 生成区分性名称候选（best-effort，LLM 不可用降级规则），
@@ -1922,27 +1980,68 @@ export function MetricDetail() {
               />
             </Form.Item>
           )}
+          {/* 口径定义编辑模式（对齐注册页）：开发人员可直接以 SQL 描述口径，
+              后端 sqlglot 校验语法；SQL 模式口径变更与表达式同级触发版本确认 */}
           <Form.Item
-            name="definition_json"
-            label="口径定义（JSON）"
-            validateStatus={editDefinitionError ? "error" : undefined}
-            help={editDefinitionError || "留空表示不修改口径。修改口径将触发破坏性变更校验与版本递增。"}
-            extra={
-              <Space wrap size={8}>
-                <Button size="small" icon={<RobotOutlined />} onClick={handleFormatEditJson}>
-                  格式化 JSON
-                </Button>
-              </Space>
-            }
+            label="口径定义模式"
             style={{ marginBottom: 8 }}
+            extra="SQL 模式对开发人员更便捷：直接编写口径 SQL，后端将用 sqlglot 校验语法。"
           >
-            <Input.TextArea
-              rows={6}
-              className="mono"
-              onChange={handleEditJsonChange}
-              placeholder={'{"expression": "sum(amount)", "source_tables": ["dwd.sales_detail"]}'}
+            <Segmented
+              block
+              value={editDefMode}
+              onChange={(v) => handleEditDefModeChange(v as "expression" | "sql")}
+              options={[
+                { value: "expression", label: "表达式（JSON）" },
+                { value: "sql", label: "SQL 模式" },
+              ]}
             />
           </Form.Item>
+          {editDefMode === "sql" ? (
+            <Form.Item
+              label="口径 SQL"
+              validateStatus={editDefinitionError ? "error" : undefined}
+              help={
+                editDefinitionError ||
+                "留空表示不修改口径。SQL 口径变更与表达式同级触发版本确认；后端将用 sqlglot 校验 SQL 语法。"
+              }
+              style={{ marginBottom: 8 }}
+            >
+              <Input.TextArea
+                rows={6}
+                className="mono"
+                data-testid="editSqlText"
+                value={editSqlText}
+                onChange={(e) => {
+                  setEditSqlText(e.target.value);
+                  if (editDefinitionError) setEditDefinitionError(null);
+                }}
+                placeholder={"SELECT SUM(amount) AS gmv\nFROM dwd.sales_detail"}
+              />
+            </Form.Item>
+          ) : (
+            <Form.Item
+              name="definition_json"
+              label="口径定义（JSON）"
+              validateStatus={editDefinitionError ? "error" : undefined}
+              help={editDefinitionError || "留空表示不修改口径。修改口径将触发破坏性变更校验与版本递增。"}
+              extra={
+                <Space wrap size={8}>
+                  <Button size="small" icon={<RobotOutlined />} onClick={handleFormatEditJson}>
+                    格式化 JSON
+                  </Button>
+                </Space>
+              }
+              style={{ marginBottom: 8 }}
+            >
+              <Input.TextArea
+                rows={6}
+                className="mono"
+                onChange={handleEditJsonChange}
+                placeholder={'{"expression": "sum(amount)", "source_tables": ["dwd.sales_detail"]}'}
+              />
+            </Form.Item>
+          )}
           <Form.Item
             name="change_reason"
             label="变更原因"
