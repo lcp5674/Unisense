@@ -1,29 +1,101 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { MetricCompare } from "../pages/MetricCompare";
-import type { MetricCompareResult } from "../types";
+import type { MetricCompareMatrixResult, MetricListResponse, MetricResponse } from "../types";
 
 vi.mock("../api", () => ({
-  compareMetrics: vi.fn(),
+  listMetrics: vi.fn(),
+  compareMetricsMatrix: vi.fn(),
 }));
 
-import { compareMetrics } from "../api";
-const mockedCompare = vi.mocked(compareMetrics);
+import { compareMetricsMatrix, listMetrics } from "../api";
+const mockedMatrix = vi.mocked(compareMetricsMatrix);
+const mockedList = vi.mocked(listMetrics);
 
-const compareResult: MetricCompareResult = {
+const candidates: MetricResponse[] = [
+  {
+    metric_code: "sales_gmv_day",
+    name: "每日 GMV",
+    granularity: "day",
+    unit: "元",
+    currency: "CNY",
+    aggregation: "SUM",
+    time_semantics: "PERIOD",
+    status: "PUBLISHED",
+    version: 1,
+    owner_id: 1,
+    type: "atomic",
+    metric_tier: "T3",
+    dw_layer: "DWD",
+    serving_mode: "BATCH_ONLY",
+    freshness: "T1",
+    additivity: "ADDITIVE",
+    definition_json: {},
+    created_at: "",
+    updated_at: "",
+  } as MetricResponse,
+  {
+    metric_code: "sales_gmv_d",
+    name: "GMV 明细",
+    granularity: "d",
+    unit: "元",
+    currency: "CNY",
+    aggregation: "SUM",
+    time_semantics: "PERIOD",
+    status: "PUBLISHED",
+    version: 1,
+    owner_id: 1,
+    type: "atomic",
+    metric_tier: "T3",
+    dw_layer: "DWD",
+    serving_mode: "BATCH_ONLY",
+    freshness: "T1",
+    additivity: "ADDITIVE",
+    definition_json: {},
+    created_at: "",
+    updated_at: "",
+  } as MetricResponse,
+];
+
+const listResponse: MetricListResponse = {
+  total: 2,
+  page: 1,
+  page_size: 100,
+  items: candidates,
+};
+
+const matrixResult: MetricCompareMatrixResult = {
   metrics: ["sales_gmv_day", "sales_gmv_d"],
   fields: {
-    granularity: { a: "day", b: "d", difference_level: "similar" },
-    unit: { a: "元", b: "元", difference_level: "identical" },
-    definition: { a: { expression: "sum(gmv)" }, b: { expression: "sum(amount)" }, difference_level: "different" },
-    dependencies: { a: ["ods_order"], b: ["ods_order"], intersection: ["ods_order"], only_a: [], only_b: [], difference_level: "identical" },
+    granularity: {
+      values: { sales_gmv_day: "day", sales_gmv_d: "d" },
+      difference_level: "partial",
+    },
+    unit: {
+      values: { sales_gmv_day: "元", sales_gmv_d: "元" },
+      difference_level: "all_identical",
+    },
+    definition: {
+      values: {
+        sales_gmv_day: { expression: "sum(gmv)" },
+        sales_gmv_d: { expression: "sum(amount)" },
+      },
+      difference_level: "all_different",
+    },
+    dependencies: {
+      values: { sales_gmv_day: ["ods_order"], sales_gmv_d: ["ods_order"] },
+      intersection: ["ods_order"],
+      only: { sales_gmv_day: [], sales_gmv_d: [] },
+      difference_level: "all_identical",
+    },
   },
 };
 
-function renderCompare() {
+function renderCompare(entry = "/compare?codes=sales_gmv_day,sales_gmv_d") {
   return render(
-    <MemoryRouter initialEntries={["/compare?a=sales_gmv_day&b=sales_gmv_d"]}>
+    <MemoryRouter initialEntries={[entry]}>
       <MetricCompare />
     </MemoryRouter>,
   );
@@ -32,32 +104,66 @@ function renderCompare() {
 describe("MetricCompare 指标对比", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedCompare.mockResolvedValue(compareResult);
+    mockedList.mockResolvedValue(listResponse);
+    mockedMatrix.mockResolvedValue(matrixResult);
   });
 
-  it("加载并展示对比结果", async () => {
+  it("新入口 codes=a,b：加载候选并自动发起矩阵对比", async () => {
     renderCompare();
-    await waitFor(() => expect(mockedCompare).toHaveBeenCalledWith("sales_gmv_day", "sales_gmv_d"));
-    expect((await screen.findAllByText("sales_gmv_day")).length).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(mockedMatrix).toHaveBeenCalledWith(["sales_gmv_day", "sales_gmv_d"]),
+    );
+    // 矩阵表头展示两个指标编码
+    expect(await screen.findAllByText("sales_gmv_day")).toBeTruthy();
+    expect((await screen.findAllByText("sales_gmv_d")).length).toBeGreaterThan(0);
+  });
+
+  it("兼容旧入口 a=/b=（两两）", async () => {
+    renderCompare("/compare?a=sales_gmv_day&b=sales_gmv_d");
+    await waitFor(() =>
+      expect(mockedMatrix).toHaveBeenCalledWith(["sales_gmv_day", "sales_gmv_d"]),
+    );
+  });
+
+  it("无 URL 参数：显示内置选择器引导（不自动对比）", async () => {
+    renderCompare("/compare");
+    await waitFor(() => expect(mockedList).toHaveBeenCalled());
+    expect(mockedMatrix).not.toHaveBeenCalled();
+    // 引导文案（Empty 描述含「从上方选择」）
+    expect(await screen.findByText(/从上方选择至少 2 个指标/)).toBeTruthy();
+  });
+
+  it("手动选择 2 个指标触发矩阵对比并更新 URL", async () => {
+    const user = userEvent.setup();
+    renderCompare("/compare");
+    const select = await screen.findByRole("combobox");
+    await user.click(select);
+    await user.click(await screen.findByText("sales_gmv_day · 每日 GMV"));
+    await user.click(await screen.findByText("sales_gmv_d · GMV 明细"));
+    await waitFor(() =>
+      expect(mockedMatrix).toHaveBeenCalledWith(["sales_gmv_day", "sales_gmv_d"]),
+    );
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {
     renderCompare();
-    await waitFor(() => expect(mockedCompare).toHaveBeenCalled());
+    await waitFor(() => expect(mockedMatrix).toHaveBeenCalled());
     expect(screen.getByRole("button", { name: /返\s*回/ })).toBeTruthy();
   });
 
   it("点击返回：历史栈有上一页时回退到上一入口（不限于总览仪表）", async () => {
     const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(3);
     render(
-      <MemoryRouter initialEntries={["/catalog", "/compare?a=sales_gmv_day&b=sales_gmv_d"]}>
+      <MemoryRouter
+        initialEntries={["/catalog", "/compare?codes=sales_gmv_day,sales_gmv_d"]}
+      >
         <Routes>
           <Route path="/catalog" element={<div>catalog-page</div>} />
           <Route path="/compare" element={<MetricCompare />} />
         </Routes>
       </MemoryRouter>,
     );
-    await waitFor(() => expect(mockedCompare).toHaveBeenCalled());
+    await waitFor(() => expect(mockedMatrix).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("catalog-page");
     lengthSpy.mockRestore();
@@ -65,14 +171,14 @@ describe("MetricCompare 指标对比", () => {
 
   it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
     render(
-      <MemoryRouter initialEntries={["/compare?a=sales_gmv_day&b=sales_gmv_d"]}>
+      <MemoryRouter initialEntries={["/compare?codes=sales_gmv_day,sales_gmv_d"]}>
         <Routes>
           <Route path="/dashboard" element={<div>dashboard-page</div>} />
           <Route path="/compare" element={<MetricCompare />} />
         </Routes>
       </MemoryRouter>,
     );
-    await waitFor(() => expect(mockedCompare).toHaveBeenCalled());
+    await waitFor(() => expect(mockedMatrix).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
   });
