@@ -1100,6 +1100,36 @@ async def test_publish_member_deprecated_rejected() -> None:
         assert getattr(exc, "error_code", None) == "INVALID_STATE"
 
 
+async def test_publish_member_rejected_when_parent_deprecated() -> None:
+    """父级已废弃时禁止发布子级（层级一致性，对称于子成员保护）。"""
+    svc, repo = await _svc()
+    child = SimpleNamespace(dim_code="dim_c", member_code="c2", member_name="线下",
+                            status="DRAFT", parent_code="c1")
+    parent = SimpleNamespace(dim_code="dim_c", member_code="c1", member_name="父级",
+                             status="DEPRECATED", parent_code=None)
+    repo.get_member = AsyncMock(return_value=child)
+    repo.list_members = AsyncMock(return_value=[parent, child])
+    try:
+        await svc.publish_member("dim_c", "c2")
+        raise AssertionError("应拒绝发布废弃父级下的子级")
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "INVALID_STATE"
+        assert child.status == "DRAFT"  # 未误改状态
+
+
+async def test_publish_member_allowed_when_parent_published() -> None:
+    """父级已发布（非废弃）时允许发布子级（父子可各自发布）。"""
+    svc, repo = await _svc()
+    child = SimpleNamespace(dim_code="dim_c", member_code="c2", member_name="线下",
+                            status="DRAFT", parent_code="c1")
+    parent = SimpleNamespace(dim_code="dim_c", member_code="c1", member_name="父级",
+                             status="PUBLISHED", parent_code=None)
+    repo.get_member = AsyncMock(return_value=child)
+    repo.list_members = AsyncMock(return_value=[parent, child])
+    await svc.publish_member("dim_c", "c2")
+    assert child.status == "PUBLISHED"
+
+
 async def test_deprecate_member_with_children_rejected() -> None:
     """存在子成员时禁止废弃（层级权威保护）。"""
     svc, repo = await _svc()

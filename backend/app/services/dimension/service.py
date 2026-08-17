@@ -362,6 +362,22 @@ class DimensionService(BaseService):
             )
         if member.status == DimensionStatus.PUBLISHED.value:
             return member
+        # 父级状态保护（层级一致性）：父级已废弃时禁止发布子级——否则树形中
+        # 出现"废弃父级下的已发布子级"，层级消费语义矛盾（对称于 deprecate_member 的子成员保护）。
+        # 父级 DRAFT/PUBLISHED 均可（父子可各自发布），仅废弃父级拦截。
+        if member.parent_code:
+            siblings = await self._repo.list_members(dim_code)
+            parent = next(
+                (m for m in siblings if m.member_code == member.parent_code), None
+            )
+            if (
+                parent is not None
+                and parent.status == DimensionStatus.DEPRECATED.value
+            ):
+                raise UnisenseError(
+                    f"父成员已废弃，无法发布子级: {dim_code}/{member_code}；请先处理父级层级",
+                    error_code="INVALID_STATE",
+                )
         member.status = DimensionStatus.PUBLISHED.value
         await self._repo.commit()
         return member
