@@ -1496,6 +1496,7 @@ CLOSED ──错误率超阈──▶ OPEN ──冷却期满──▶ HALF_OPEN
 422  ROLE_NAME_RESERVED          自定义角色名与内置角色重名（创建/删除，§12.5）
 422  ROLE_NAME_INVALID           自定义角色名格式非法（须 [a-z][a-z0-9_]{2,32}，§12.5）
 422  ROLE_IN_USE                 自定义角色仍被用户占用不可删除（删除前须改派，§12.5）
+422  USER_PERMISSION_INVALID     用户直挂按钮权限点含未知动作（按用户授权矩阵，§12.5）
 422  ORG_PROTECTED              默认组织（code=default）不可删除（组织管理，§4.1）
 422  ORG_SELF_LOCK              不能停用/删除当前管理员所属组织（防自锁）
 409  ORG_EXISTS                 组织编码已被占用（组织管理，§4.1）
