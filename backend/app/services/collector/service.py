@@ -50,6 +50,29 @@ from app.services.llm.client import (
 
 logger = get_logger("unisense.collector.service")
 
+#: 连接配置中的敏感凭据键名提示（编辑回显「二次确认」时保留未提交的旧值）。
+#: 覆盖各连接器：mysql/postgres/clickhouse 的 ``password``，kafka 的
+#: ``sasl_password``/``registry_password``/``auth_password`` 等。
+_SECRET_KEY_HINTS = (
+    "password",
+    "passwd",
+    "pwd",
+    "sasl_password",
+    "registry_password",
+    "auth_password",
+    "access_key",
+    "api_key",
+    "secret",
+    "token",
+    "credential",
+)
+
+
+def _is_secret_key(key: str) -> bool:
+    """判断配置键是否为敏感凭据键（命中任一提示词子串）。"""
+    lowered = key.lower()
+    return any(hint in lowered for hint in _SECRET_KEY_HINTS)
+
 
 def _hit_to_dict(hit: Any) -> dict[str, Any]:
     """PiiFieldHit → classification.pii_columns 存储结构（列名/类别/规则/置信度/途径）。"""
@@ -442,7 +465,8 @@ class CollectorService(BaseService):
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         try:
-            collector = registry.build(src.source_type, src.connection_config)
+            # 已存数据源探活：放行私有网段（内网库），仍拒回环/链路本地/保留
+            collector = registry.build(src.source_type, src.connection_config, allow_private=True)
             try:
                 probe = await collector.probe()
             finally:
@@ -499,12 +523,43 @@ class CollectorService(BaseService):
             item.failed_count = sig.get("failed_count")
         return items, total
 
-    async def get_source(self, source_id: str) -> DataSourceResponse:
+    async def get_source(self, source_id: str, include_config: bool = False) -> DataSourceResponse:
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
-        # 详情/编辑回显需要明文连接配置（列表保持脱敏）
-        return self._to_source_response(src, include_config=True)
+        # 明文连接配置仅平台管理员可读（由 API 层按角色决定 include_config）；
+        # 其余角色保持脱敏（connection_config=None，仅 connection_config_present 标记）。
+        return self._to_source_response(src, include_config=include_config)
+
+    @staticmethod
+    def _merge_preserved_secrets(
+        existing_encrypted: str | None, incoming: dict[str, Any]
+    ) -> dict[str, Any]:
+        """编辑态「二次确认」：合并新配置时保留未提交的敏感凭据。
+
+        非平台管理员无法读取明文密码（脱敏），编辑弹窗中密码字段为空表示
+        「保持原密码」——将新配置与解密后的旧配置合并，敏感键在传入值为空/
+        缺失时沿用旧值，避免编辑其他字段时把凭据清空或覆盖。
+
+        Args:
+            existing_encrypted: 现有加密配置（Fernet 密文，可能为 None）。
+            incoming: 前端提交的新配置。
+
+        Returns:
+            合并后的明文配置（由调用方整体加密落库）。
+        """
+        if not existing_encrypted:
+            return incoming
+        try:
+            existing = SecretManager.decrypt(existing_encrypted)
+        except Exception:
+            # 密钥漂移等导致无法解密旧配置：按新配置落库（不阻断编辑）
+            return incoming
+        merged = dict(incoming)
+        for key, value in existing.items():
+            if _is_secret_key(key) and not merged.get(key):
+                merged[key] = value
+        return merged
 
     async def update_source(
         self, source_id: str, req: DataSourceUpdateRequest, actor_id: int
@@ -542,7 +597,8 @@ class CollectorService(BaseService):
             src.source_type = source_type_value
 
         if req.connection_config is not None:
-            src.connection_config = self._secrets.encrypt(req.connection_config)
+            merged = self._merge_preserved_secrets(src.connection_config, req.connection_config)
+            src.connection_config = self._secrets.encrypt(merged)
         if req.name is not None:
             src.name = req.name
         if req.domain is not None:
@@ -713,7 +769,8 @@ class CollectorService(BaseService):
                     )
                     continue
                 cfg = self._secrets.decrypt(src.connection_config)
-                collector = registry.build_from_cfg(src.source_type, cfg)
+                # 已存数据源批量探活：放行私有网段（内网库），仍拒回环/链路本地/保留
+                collector = registry.build_from_cfg(src.source_type, cfg, allow_private=True)
                 try:
                     probe = await collector.probe()
                 finally:

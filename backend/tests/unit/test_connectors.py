@@ -284,7 +284,9 @@ async def test_spark_collector_default_port_and_register():
     from app.services.collector.connectors import registry
 
     assert "spark" in registry.list_types()
-    built = registry.build_from_cfg("spark", {"host": "spark-host", "port": 10001})
+    # SSRF 校验：mock DNS 解析为公网 IP（探活/枚举严格模式放行）
+    with patch("app.core.ssrf.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("8.8.8.8", 0))]):
+        built = registry.build_from_cfg("spark", {"host": "spark-host", "port": 10001})
     assert isinstance(built, SparkCollector)
     assert built._port == 10001
 

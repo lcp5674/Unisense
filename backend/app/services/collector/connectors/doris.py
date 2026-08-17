@@ -32,7 +32,10 @@ def _build_doris_url(cfg: dict[str, Any]) -> URL:
 
 @registry.register("doris")
 def create_doris_collector(cfg: dict[str, Any]) -> InformationSchemaCollector:
-    """Doris 采集器工厂函数（MySQL 协议兼容，复用 InformationSchemaCollector）。"""
-    db_url = cfg.get("db_url") or _build_doris_url(cfg)
+    """Doris 采集器工厂函数（MySQL 协议兼容，复用 InformationSchemaCollector）。
+
+    SSRF 防护：URL 一律由受控字段构建，禁止任意 ``db_url`` 覆盖。
+    """
+    db_url = _build_doris_url(cfg)
     connector = SqlalchemyConnector(db_url, connect_timeout=10, query_timeout=60)
     return InformationSchemaCollector(connector, database=cfg.get("database"))

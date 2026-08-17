@@ -375,7 +375,11 @@ def _build_mysql_url(cfg: dict[str, Any]) -> URL:
 
 @registry.register("mysql")
 def create_mysql_collector(cfg: dict[str, Any]) -> InformationSchemaCollector:
-    """MySQL 采集器工厂函数。"""
-    db_url = cfg.get("db_url") or _build_mysql_url(cfg)
+    """MySQL 采集器工厂函数。
+
+    SSRF 防护：URL 一律由受控字段（host/port/user/password）构建，
+    禁止任意 ``db_url`` 覆盖（防连接串内嵌任意主机）。
+    """
+    db_url = _build_mysql_url(cfg)
     connector = SqlalchemyConnector(db_url, connect_timeout=10, query_timeout=60)
     return InformationSchemaCollector(connector, database=cfg.get("database"))

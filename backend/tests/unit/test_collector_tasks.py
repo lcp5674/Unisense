@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -499,7 +500,13 @@ async def test_run_failure_does_not_mark_idempotent():
     with patch("app.services.collector.tasks.CollectorRepository", return_value=repo):
         with pytest.raises(RuntimeError, match="boom"):
             await run_collection_task(
-                {"svc": svc, "db": db, "job_store": store, "redis": redis, "collector": MagicMock()},
+                {
+                    "svc": svc,
+                    "db": db,
+                    "job_store": store,
+                    "redis": redis,
+                    "collector": MagicMock(),
+                },
                 "src1",
                 1,
                 "job1",
@@ -507,3 +514,37 @@ async def test_run_failure_does_not_mark_idempotent():
 
     # 失败只回写 FAILED，不写幂等键
     redis.set.assert_not_called()
+
+
+async def test_run_cancelled_writes_failed_and_reraises():
+    """P0-3: arq 超时（CancelledError 是 BaseException）也补写 FAILED 终态并重抛。"""
+    svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.fail_collection_run = AsyncMock()
+    svc.collect_and_register = AsyncMock(side_effect=asyncio.CancelledError())
+    db = MagicMock()
+    db.commit = AsyncMock()
+    repo = MagicMock()
+    repo.update_health_status = AsyncMock()
+    store = MagicMock()
+    store.set = AsyncMock()
+
+    with patch("app.services.collector.tasks.CollectorRepository", return_value=repo):
+        with pytest.raises(asyncio.CancelledError):
+            await run_collection_task(
+                {"svc": svc, "db": db, "job_store": store, "collector": MagicMock()},
+                "src1",
+                1,
+                "job1",
+            )
+
+    # 副作用收尾全部执行（运行记录 FAILED + 健康 unhealthy + JobStore 终态）
+    svc.fail_collection_run.assert_awaited_once_with(1, "采集超时或任务取消")
+    repo.update_health_status.assert_awaited_once_with(
+        "src1", "unhealthy", error="采集超时或任务取消"
+    )
+    store.set.assert_awaited_once_with(
+        "job1",
+        "FAILED",
+        {"source_id": "src1", "actor_id": 1, "error": "采集超时或任务取消"},
+    )

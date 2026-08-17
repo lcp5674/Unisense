@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -111,6 +112,65 @@ async def _mark_idempotent_completed(redis: Any | None, job_id: str) -> None:
         await redis.set(key, "COMPLETED", ex=_IDEMPOTENT_TTL_SECONDS)
     except Exception as exc:
         logger.warning("idempotent_mark_failed: %s", exc)
+
+
+async def _record_task_failure(
+    *,
+    db: Any,
+    svc: CollectorService | None,
+    run_id: int | None,
+    source_id: str,
+    job_id: str,
+    actor_id: int,
+    store: Any,
+    error: str,
+) -> None:
+    """采集任务失败/超时的副作用收尾（except Exception 与 CancelledError 共用）。
+
+    统一处理：释放 PendingRollback 会话 + 运行记录 FAILED + 健康状态 + JobStore
+    终态——避免超时（``asyncio.CancelledError`` 是 BaseException 不落入
+    ``except Exception``）导致 JobStore 与 collection_run 永久卡 RUNNING。
+
+    Args:
+        db: 数据库会话（可为 None）。
+        svc: 采集服务（可为 None）。
+        run_id: 采集运行记录 ID（创建失败时为 None）。
+        source_id: 数据源标识。
+        job_id: 任务 ID。
+        actor_id: 触发者 ID。
+        store: JobStore（可为 None）。
+        error: 失败原因文本。
+    """
+    # 采集异常可能已让 session 进入 PendingRollback（flush/commit 失败）。
+    # 必须先 rollback 释放会话，否则 fail_collection_run / update_health_status
+    # 的 flush 会抛 PendingRollbackError——运行记录滞留 RUNNING、健康状态不更新，
+    # 且掩盖原始异常。
+    if db is not None:
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001 - rollback 异常不影响后续副作用写入
+            logger.warning("采集失败路径 rollback 异常: source=%s", source_id, exc_info=True)
+    # 采集运行历史：失败收尾 FAILED（记录错误 + 提交）
+    if run_id is not None and svc is not None:
+        try:
+            await svc.fail_collection_run(run_id, error)
+        except Exception:  # noqa: BLE001 - 失败收尾异常不影响上抛
+            logger.warning("collection_run_fail_commit_failed: run=%s", run_id)
+    # 失败 → 更新健康状态
+    try:
+        if db is not None:
+            repo = CollectorRepository(db)
+            await repo.update_health_status(source_id, "unhealthy", error=error)
+            await db.commit()
+    except Exception:  # noqa: BLE001 - 健康状态更新失败不影响主流程
+        logger.warning("更新健康状态失败: source=%s", source_id)
+    # 失败回写保留 source_id/actor_id（任务中心需按源标识展示）
+    if store is not None:
+        await store.set(
+            job_id,
+            "FAILED",
+            {"source_id": source_id, "actor_id": actor_id, "error": error},
+        )
 
 
 async def run_collection_task(
@@ -221,42 +281,33 @@ async def run_collection_task(
         return result
     except Exception as exc:  # noqa: BLE001 - 任务失败需回写状态并上抛供 arq 重试
         logger.exception("采集任务失败 source=%s job=%s", source_id, job_id)
-
-        # 采集异常可能已让 session 进入 PendingRollback（flush/commit 失败）。
-        # 必须先 rollback 释放会话，否则 fail_collection_run / update_health_status
-        # 的 flush 会抛 PendingRollbackError——运行记录滞留 RUNNING、健康状态
-        # 不更新（副作用静默丢失），且掩盖原始异常。
-        if db is not None:
-            try:
-                await db.rollback()
-            except Exception:  # noqa: BLE001 - rollback 异常不影响后续副作用写入
-                logger.warning("采集失败路径 rollback 异常: source=%s", source_id, exc_info=True)
-
-        # 采集运行历史：失败收尾 FAILED（记录错误 + 提交）
-        if run_id is not None and svc is not None:
-            try:
-                await svc.fail_collection_run(run_id, str(exc))
-            except Exception:  # noqa: BLE001 - 失败收尾异常不影响上抛
-                logger.warning("collection_run_fail_commit_failed: run=%s", run_id)
-
-        # US5: 失败 → 更新健康状态
-        try:
-            if db is not None:
-                repo = CollectorRepository(db)
-                await repo.update_health_status(source_id, "unhealthy", error=str(exc))
-                # P0-4: 失败路径同样提交 unhealthy，避免回滚丢失
-                await db.commit()
-        except Exception:
-            logger.warning("更新健康状态失败: source=%s", source_id)
-
-        if store is not None:
-            # 失败回写保留 source_id/actor_id（任务中心需按源标识展示），
-            # 避免仅存 error 导致任务列表 source_id 列变空。
-            await store.set(
-                job_id,
-                "FAILED",
-                {"source_id": source_id, "actor_id": actor_id, "error": str(exc)},
-            )
+        await _record_task_failure(
+            db=db,
+            svc=svc,
+            run_id=run_id,
+            source_id=source_id,
+            job_id=job_id,
+            actor_id=actor_id,
+            store=store,
+            error=str(exc),
+        )
+        raise
+    except asyncio.CancelledError:
+        # arq job_timeout 超时/取消：CancelledError 是 BaseException，不落入上方
+        # except Exception——若不处理，JobStore 与 collection_run 永久卡 RUNNING
+        # （非终态无 TTL 回收）。补写 FAILED 终态后重新抛出，保持取消语义
+        # （arq 按自身策略处理取消任务，如标记 aborted/丢弃）。
+        logger.warning("采集任务超时/取消 source=%s job=%s", source_id, job_id)
+        await _record_task_failure(
+            db=db,
+            svc=svc,
+            run_id=run_id,
+            source_id=source_id,
+            job_id=job_id,
+            actor_id=actor_id,
+            store=store,
+            error="采集超时或任务取消",
+        )
         raise
     finally:
         if own_session and db is not None:

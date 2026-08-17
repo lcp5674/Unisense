@@ -169,6 +169,9 @@ class BaseCollector(ABC):
 def build_collector(collector_type: str, encrypted_config: str) -> BaseCollector:
     """按类型构建采集器（委托 CollectorRegistry）。
 
+    已落库数据源的采集/探活路径：放行私有网段（生产库就在内网），
+    但仍拒绝回环/链路本地/保留地址（SSRF 纵深防御）。
+
     Args:
         collector_type: 采集器类型（如 "mysql", "postgres" 等）。
         encrypted_config: DataSource.connection_config 密文。
@@ -177,9 +180,9 @@ def build_collector(collector_type: str, encrypted_config: str) -> BaseCollector
         采集器实例。
 
     Raises:
-        BusinessError: 类型未注册。
+        BusinessError: 类型未注册，或连接目标命中 SSRF 禁区。
     """
     # 惰性导入以确保连接器模块已注册
     from app.services.collector.connectors import registry  # noqa: F401
 
-    return registry.build(collector_type, encrypted_config)
+    return registry.build(collector_type, encrypted_config, allow_private=True)

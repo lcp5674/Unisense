@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
+from app.core.secrets import SecretManager
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.drift_detector import compute_content_signature
 from app.services.collector.repository import CollectorRepository
@@ -1210,7 +1211,7 @@ async def test_check_connection_updates_health():
         return_value=ProbeOkCollector(),
     ) as mock_build:
         result = await svc.check_connection("s1")
-    mock_build.assert_called_once_with("mysql", "enc")
+    mock_build.assert_called_once_with("mysql", "enc", allow_private=True)
     repo.update_health_status.assert_awaited_once_with("s1", "healthy", error=None)
     assert result.ok is True
     assert result.detail == {"version": "8.0"}
@@ -1454,7 +1455,9 @@ async def test_registry_build_from_cfg_and_type_info():
     """registry.build_from_cfg 支持明文构建；list_type_info 兜底插件类型。"""
     from app.services.collector.connectors import registry
 
-    collector = registry.build_from_cfg("mysql", {"host": "h", "user": "u"})
+    # SSRF 校验：mock DNS 解析为公网 IP，探活/枚举严格模式放行
+    with patch("app.core.ssrf.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("8.8.8.8", 0))]):
+        collector = registry.build_from_cfg("mysql", {"host": "db.pub", "user": "u"})
     from app.services.collector.connectors.mysql import InformationSchemaCollector
 
     assert isinstance(collector, InformationSchemaCollector)
@@ -2416,8 +2419,8 @@ def _make_src_with_config(cfg: dict[str, Any]) -> Any:
     )
 
 
-async def test_get_source_returns_plaintext_config() -> None:
-    """详情接口返回明文连接配置（供编辑回显），解密值与加密前一致。"""
+async def test_get_source_redacts_config_by_default() -> None:
+    """P0-1: get_source 默认脱敏（非平台管理员路径）——connection_config=None。"""
     svc, repo = _svc()
     repo.get_source = AsyncMock(
         return_value=_make_src_with_config(
@@ -2427,8 +2430,58 @@ async def test_get_source_returns_plaintext_config() -> None:
 
     resp = await svc.get_source("s1")
 
+    assert resp.connection_config is None
+    assert resp.connection_config_present is True
+
+
+async def test_get_source_include_config_returns_plaintext() -> None:
+    """P0-1: include_config=True（平台管理员路径）返回解密后的明文配置。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(
+        return_value=_make_src_with_config(
+            {"host": "h", "port": 3306, "user": "u", "password": "p"}
+        )
+    )
+
+    resp = await svc.get_source("s1", include_config=True)
+
     assert resp.connection_config == {"host": "h", "port": 3306, "user": "u", "password": "p"}
     assert resp.connection_config_present is True
+
+
+async def test_update_source_preserves_password_when_omitted() -> None:
+    """P0-1: 编辑态「二次确认」——新配置未提交密码时保留旧密码。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(
+        return_value=_make_src_with_config({"host": "h", "password": "old_pw"})
+    )
+
+    await svc.update_source(
+        "s1",
+        DataSourceUpdateRequest(connection_config={"host": "h2"}),
+        actor_id=1,
+    )
+
+    stored = SecretManager.decrypt(repo.get_source.return_value.connection_config)
+    assert stored["host"] == "h2"
+    assert stored["password"] == "old_pw"
+
+
+async def test_update_source_overrides_password_when_provided() -> None:
+    """P0-1: 新配置显式提交密码时覆盖旧密码。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(
+        return_value=_make_src_with_config({"host": "h", "password": "old_pw"})
+    )
+
+    await svc.update_source(
+        "s1",
+        DataSourceUpdateRequest(connection_config={"host": "h2", "password": "new_pw"}),
+        actor_id=1,
+    )
+
+    stored = SecretManager.decrypt(repo.get_source.return_value.connection_config)
+    assert stored["password"] == "new_pw"
 
 
 async def test_list_data_sources_redacts_config() -> None:

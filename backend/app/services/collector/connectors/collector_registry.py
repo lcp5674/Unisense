@@ -17,6 +17,7 @@ from typing import Any
 
 from app.core.exceptions import BusinessError
 from app.core.secrets import SecretManager
+from app.core.ssrf import validate_connection_host
 from app.services.collector.schemas import DataSourceTypeInfo
 from app.services.collector.spi import BaseCollector
 
@@ -130,18 +131,25 @@ class CollectorRegistry:
 
         return decorator
 
-    def build(self, collector_type: str, encrypted_config: str) -> BaseCollector:
+    def build(
+        self, collector_type: str, encrypted_config: str, *, allow_private: bool = False
+    ) -> BaseCollector:
         """按类型构建采集器（从加密连接配置还原源库连接信息）。
+
+        SSRF 防护：构建前校验连接目标主机（``allow_private`` 仅对**已落库
+        数据源**的采集/探活放行私有网段——生产库就在内网，属平台管理员授权
+        的连接目标；回环/链路本地/保留地址始终拒绝）。
 
         Args:
             collector_type: 采集器类型标识。
             encrypted_config: DataSource.connection_config 密文。
+            allow_private: True 放行私有网段（已存源采集路径）。
 
         Returns:
             采集器实例。
 
         Raises:
-            BusinessError: 类型未注册。
+            BusinessError: 类型未注册，或连接目标命中 SSRF 禁区。
         """
         factory = self._registry.get(collector_type)
         if factory is None:
@@ -151,20 +159,32 @@ class CollectorRegistry:
                 error_code="UNSUPPORTED_COLLECTOR",
             )
         cfg = SecretManager.decrypt(encrypted_config)
+        validate_connection_host(cfg, allow_private=allow_private)
         return factory(cfg)
 
-    def build_from_cfg(self, collector_type: str, cfg: dict[str, Any]) -> BaseCollector:
+    def build_from_cfg(
+        self,
+        collector_type: str,
+        cfg: dict[str, Any],
+        *,
+        allow_private: bool = False,
+    ) -> BaseCollector:
         """按类型构建采集器（明文连接配置，用于连接预检，不落库）。
+
+        SSRF 防护：构建前严格校验连接目标主机——探活/枚举接受任意配置，
+        是 SSRF 主向量，默认拒绝私有/回环/链路本地/保留地址；仅**已落库
+        数据源**的批量探活显式传 ``allow_private=True``。
 
         Args:
             collector_type: 采集器类型。
             cfg: 解密后的 connection_config 明文。
+            allow_private: True 放行私有网段（已存源批量探活）。
 
         Returns:
             采集器实例。
 
         Raises:
-            BusinessError: 类型未注册。
+            BusinessError: 类型未注册，或连接目标命中 SSRF 禁区。
         """
         factory = self._registry.get(collector_type)
         if factory is None:
@@ -173,6 +193,7 @@ class CollectorRegistry:
                 f"不支持的采集器类型: {collector_type}，已注册类型: [{available}]",
                 error_code="UNSUPPORTED_COLLECTOR",
             )
+        validate_connection_host(cfg, allow_private=allow_private)
         return factory(cfg)
 
     def list_types(self) -> list[str]:

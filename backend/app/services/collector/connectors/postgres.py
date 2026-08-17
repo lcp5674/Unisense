@@ -256,10 +256,13 @@ def _build_postgres_url(cfg: dict[str, Any]) -> URL:
 
 @registry.register("postgres")
 def create_postgres_collector(cfg: dict[str, Any]) -> PostgresCollector:
-    """PostgreSQL 采集器工厂函数。"""
+    """PostgreSQL 采集器工厂函数。
+
+    SSRF 防护：URL 一律由受控字段构建，禁止任意 ``db_url`` 覆盖。
+    """
     from app.services.collector.connectors.mysql import SqlalchemyConnector
 
-    db_url = cfg.get("db_url") or _build_postgres_url(cfg)
+    db_url = _build_postgres_url(cfg)
     connector = SqlalchemyConnector(db_url, connect_timeout=10, query_timeout=60)
     # P1-2: schema 为空（且未配 database）→ 全库枚举
     return PostgresCollector(connector, schema=cfg.get("schema") or cfg.get("database"))
