@@ -303,6 +303,14 @@ class SubjectDomainService:
                 error_code="HAS_REFERENCED_METRICS",
             )
 
+        # 校验关联维度（与指标保护对称：域下维度存在时删除将产生孤儿维度）
+        dim_count = await self._repo.get_dimension_count(code)
+        if dim_count > 0:
+            raise BusinessError(
+                f"该域下存在 {dim_count} 个关联维度，请先迁移或废弃",
+                error_code="HAS_REFERENCED_DIMENSIONS",
+            )
+
         # 校验子域
         child_count = await self._repo.count_children(domain.id)
         if child_count > 0:

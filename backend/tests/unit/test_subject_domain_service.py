@@ -200,6 +200,20 @@ class TestDeleteDomain:
         with pytest.raises(BusinessError, match="子域"):
             await svc.delete_domain("sales")
 
+    async def test_delete_with_dimensions_rejected(self, svc) -> None:
+        """有关联维度的域不可删除（与指标保护对称，防孤儿维度）。"""
+        domain = MagicMock()
+        domain.code = "sales"
+        domain.id = 1
+        svc._repo.get_by_code = AsyncMock(return_value=domain)
+        svc._repo.get_metric_count = AsyncMock(return_value=0)
+        svc._repo.get_dimension_count = AsyncMock(return_value=3)
+        svc._repo.soft_delete = AsyncMock()
+
+        with pytest.raises(BusinessError, match="关联维度"):
+            await svc.delete_domain("sales")
+        svc._repo.soft_delete.assert_not_awaited()
+
 
 class TestToggleDomain:
     async def test_activate_child_with_inactive_parent(self, svc) -> None:
