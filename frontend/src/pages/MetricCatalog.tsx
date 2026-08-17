@@ -27,12 +27,12 @@ import {
   listFavorites,
   addFavorite,
   removeFavorite,
-  submitReview,
   deleteMetric,
   restoreMetric,
   batchApproveMetrics,
   batchRejectMetrics,
   batchDeprecateMetrics,
+  batchSubmitMetrics,
   UnisenseApiError,
 } from "../api";
 import type { MetricResponse, SubjectDomainTreeNode } from "../types";
@@ -646,8 +646,32 @@ export function MetricCatalog() {
         const res = await batchDeprecateMetrics(items);
         ok = res.ok_count;
         res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.metric_code}: ${r.message}`); failedCodes.push(r.metric_code); });
+      } else if (batchAction === "submit") {
+        // 批量提交：走后端原子 /batch-submit（逐条收集结果、单条失败不整体回滚），
+        // 不再 N 次 submitReview 循环（P2-9 接线）
+        const targets = selected.filter((m) => m.status === "DRAFT");
+        if (!targets.length) {
+          message.warning("勾选的指标中没有草稿状态可操作");
+          return;
+        }
+        // 双保险：指定评审用户但未选用户（按钮已禁用，此处兜底防程序化触发）
+        if (batchReviewerType === "user" && !batchReviewerId) {
+          message.warning("已选择「指定评审用户」，请先选择具体评审人");
+          return;
+        }
+        const res = await batchSubmitMetrics(
+          targets.map((m) => ({
+            metric_code: m.metric_code,
+            change_reason: "批量提交审核",
+            reviewer_id: batchReviewerType === "user" ? batchReviewerId : null,
+            reviewer_type: batchReviewerType,
+            reviewer_domain: m.domain,
+          })),
+        );
+        ok = res.ok_count;
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.metric_code}: ${r.message}`); failedCodes.push(r.metric_code); });
       } else {
-        // submit / delete：逐条处理（submit 带评审指派）
+        // delete：逐条处理（无批量删除端点）
         const targets = selected.filter((m) => m.status === "DRAFT");
         if (!targets.length) {
           message.warning("勾选的指标中没有草稿状态可操作");
@@ -655,20 +679,7 @@ export function MetricCatalog() {
         }
         for (const m of targets) {
           try {
-            if (batchAction === "submit") {
-              // 双保险：指定评审用户但未选用户（按钮已禁用，此处兜底防程序化触发）
-              if (batchReviewerType === "user" && !batchReviewerId) {
-                message.warning("已选择「指定评审用户」，请先选择具体评审人");
-                return;
-              }
-              await submitReview(m.metric_code, "批量提交审核", {
-                reviewer_id: batchReviewerType === "user" ? batchReviewerId : null,
-                reviewer_type: batchReviewerType,
-                reviewer_domain: m.domain,
-              });
-            } else {
-              await deleteMetric(m.metric_code);
-            }
+            await deleteMetric(m.metric_code);
             ok += 1;
           } catch (err) {
             errors.push(

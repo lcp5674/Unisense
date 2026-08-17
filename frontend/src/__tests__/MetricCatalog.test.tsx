@@ -12,7 +12,7 @@ vi.mock("../api", () => ({
   listFavorites: vi.fn(),
   addFavorite: vi.fn(),
   removeFavorite: vi.fn(),
-  submitReview: vi.fn(),
+  batchSubmitMetrics: vi.fn(),
   deleteMetric: vi.fn(),
   restoreMetric: vi.fn(),
   fetchMyPermissions: vi.fn(),
@@ -31,7 +31,7 @@ import {
   listFavorites,
   addFavorite,
   removeFavorite,
-  submitReview,
+  batchSubmitMetrics,
   deleteMetric,
   restoreMetric,
   fetchMyPermissions,
@@ -46,7 +46,7 @@ const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedAddFavorite = vi.mocked(addFavorite);
 const mockedRemoveFavorite = vi.mocked(removeFavorite);
-const mockedSubmitReview = vi.mocked(submitReview);
+const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
 const mockedDeleteMetric = vi.mocked(deleteMetric);
 const mockedPermissions = vi.mocked(fetchMyPermissions);
 
@@ -92,6 +92,7 @@ const metric: MetricResponse = {
   sunset_until: null,
   emergency_publish: true,
   emergency_reason: "hotfix",
+  emergency_reviewed_at: null,
   gray_tenant_ids: [101, 102],
   pending_conflict: false,
   pending_conflict_detail: null,
@@ -431,10 +432,14 @@ describe("MetricCatalog", () => {
     expect(screen.getByRole("button", { name: "收藏" })).toBeTruthy();
   });
 
-  it("批量操作：勾选草稿指标提交审核（DRAFT → REVIEW）", async () => {
+  it("批量操作：勾选草稿指标提交审核（DRAFT → REVIEW，走 /batch-submit）", async () => {
     const draft = { ...metric, status: "DRAFT" as const };
     mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
-    mockedSubmitReview.mockResolvedValue({} as never);
+    mockedBatchSubmit.mockResolvedValue({
+      ok_count: 1,
+      fail_count: 0,
+      results: [{ metric_code: "sales_gmv_sum_d", ok: true, message: "" }],
+    } as never);
     renderCatalog();
     await screen.findByText("sales_gmv_sum_d");
     // 勾选表头全选
@@ -447,15 +452,15 @@ describe("MetricCatalog", () => {
     await screen.findByText(/将勾选的/);
     fireEvent.click(screen.getByRole("button", { name: /提\s*交/ }));
     await waitFor(() => {
-      expect(mockedSubmitReview).toHaveBeenCalledWith(
-        "sales_gmv_sum_d",
-        "批量提交审核",
+      expect(mockedBatchSubmit).toHaveBeenCalledWith([
         expect.objectContaining({
+          metric_code: "sales_gmv_sum_d",
+          change_reason: "批量提交审核",
           reviewer_id: null,
           reviewer_type: null,
           reviewer_domain: "sales",
         }),
-      );
+      ]);
     });
   });
 

@@ -268,11 +268,6 @@ export interface RenameSuggestResponse {
   current_name: string;
 }
 
-export interface MetricPublishRequest {
-  version?: number;
-  change_reason: string; // 必填，min_length=4
-}
-
 // 批量注册指标（backend POST /metric-definitions/batch-register，对齐 FR-030）
 // 请求体对齐 backend/app/services/semantic/schemas.py MetricBatchRegisterRequest
 export interface MetricBatchRegisterRequest {

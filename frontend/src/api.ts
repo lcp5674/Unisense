@@ -88,7 +88,6 @@ import {
   DimensionMetricBinding,
   MetricCompareResult,
   MetricHealth,
-  MetricPublishRequest,
   MetricResponse,
   MetricTemplate,
   MetricUpdateRequest,
@@ -636,18 +635,8 @@ export async function inferMetricDescription(
   );
 }
 
-export async function publishMetric(
-  code: string,
-  req: MetricPublishRequest,
-): Promise<MetricResponse> {
-  return request<MetricResponse>(
-    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/publish`,
-    {
-      method: "POST",
-      body: JSON.stringify(req),
-    },
-  );
-}
+// 注：publishMetric 死代码已删除（P2-9 发布语义统一）——发布实际走 approve
+// （REVIEW→PUBLISHED），前端无独立「发布」动作；后端 /publish 端点亦无调用方。
 
 export async function deprecateMetric(
   code: string,
