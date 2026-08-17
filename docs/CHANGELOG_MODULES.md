@@ -118,6 +118,33 @@
 
 | 2026-08-12 | — | frontend | **前端生产级扩展（15+ 页面 + 测试体系）**：新增 AiAssistant/QueryWorkspace/QualityCenter/Governance/Glossary/Dimensions/DataSources/Catalogs/Notifications/Observability/AuditLog/ApiClients/Templates/MetricReview/AssetMap/ConsumptionGuide/Dashboard 页面 + 统一 Layout/theme；血缘分页 + what-if 预览 + PII 列适配；测试体系 Vitest（AssetMap/ConsumptionGuide/Dashboard 12 passed）+ Playwright e2e 脚手架 + typecheck 0 error + production build 通过。提交 8ab4739 | 前端全部路由 | released（前端生产级扩展） |
 
+---
+
+## 2026-08-17 补充条目：指标模块全维度修复完整提交清单（P0–P3 + 遗留清理）
+
+> 本条目为上方 2026-08-17「指标模块全维度审查修复（P0-P2 全量落地，P3 验证）」的**提交清单补充**——按提交顺序补登该次修复的全部 18 个提交（含 2 项遗留清理），便于追溯每条变更的落点。
+
+| # | 提交 | 提交信息 |
+|---|------|----------|
+| 1 | `e102261` | [semantic] fix: mark-source-dropped 越权收紧——仅管理角色可批量置 DSD（P0-1） |
+| 2 | `e314c3c` | [semantic] fix: LLM 额度防护——suggest-rename/auto-suggest 读角色收紧为写角色 + auto-suggest 显式 schema 防非字符串 sql→500（P0-2） |
+| 3 | `daf3ddc` | [semantic] fix: 批量端点异常信息脱敏——public_error_message 助手透传业务消息、未知异常泛化防泄漏（P0-3） |
+| 4 | `ce96d4c` | [collector+semantic] feat: 采集触发 DSD 闭环——全量采集检测源表 DROP 沿血缘置下游指标 DATA_SOURCE_DROPPED + mark_source_dropped 支持按表名精确过滤 + 前端采集结果展示下线指标数（P1-4） |
+| 5 | `73da8fc` | [semantic] feat: 健康恶化每日告警闭环——每日刷新发现 WARNING/CRITICAL 定向通知指标 Owner+备份 Owner（P1-5） |
+| 6 | `327eee6` | [semantic] feat: 紧急发布补审闭环——新增 emergency-review 端点写 emergency_reviewed_at + 服务层 complete_emergency_review + 前端详情页补审入口（P1-6） |
+| 7 | `0e38b2c` | [semantic] feat: 灰度超期强制回收——每日巡检超30天 EXPERIMENTAL 通知 Owner+回收至 DRAFT（状态机新增 expiry_recycle 跃迁 + metric.gray_recycled 事件；reject 通道收紧仅 REVIEW）（P1-7） |
+| 8 | `fbe6922` | [semantic] refactor: 合并 PendingVersionManager 双实现——删除 manager 死方法（confirm/reject/extend/check_timeouts/pause_on_drift），确认/拒绝/延期/超时规则唯一实现在 MetricService（P1-8） |
+| 9 | `682c40b` | [consume] refactor: 前端发布语义统一——删除 publishMetric 死代码（发布实际走 approve）+ 批量提交改走原子 /batch-submit（替代 N 次 submitReview 循环）（P2-9） |
+| 10 | `e63da57` | [consume] fix: rollback/promote 加确认弹窗——全量发布确认灰度转正式；回滚标注高风险，危险按钮二次确认（P2-10） |
+| 11 | `8be8391` | [semantic+glossary] feat: 术语绑定写路径 + 冲突关联指标——新增 PUT /{code}/term 写 metric.term_id + 前端搜索绑定/解绑；GlossaryConflict.ref_metric_id 填充绑定术语的指标（P2-11） |
+| 12 | `88ce00b` | [semantic] feat: 健康度质量维度接入 quality_event——近30天未关闭质量异常按等级反比扣分（P0重/P1中/P2轻），兑现 TD §12.3（P2-12） |
+| 13 | `514704d` | [governance] docs+ci: 文档漂移修复 + 前端门禁落地——TD 检索架构改 MySQL LIKE（ES 未落地）、TD §12.3 健康度模型对齐实际、DEV_GUIDE §8 前端门禁改 tsc+vitest；CI 新增 frontend-gateways job（typecheck+vitest）（P2-13） |
+| 14 | `401bd67` | [consume] refactor: 前端重复常量收敛——STATUS_COLOR/LABEL 归入 enums.ts，EDGE_TYPE_LABEL 按语义拆分 METRIC_RELATION_EDGE_LABEL（推荐关联）与 LINEAGE_EDGE_TYPE_LABEL（血缘图）（P2-14） |
+| 15 | `3b5f7df` | [semantic] test: 补齐生命周期零 API 测试——archived/归档/restore/promote/rollback/emergency-publish/compare/batch-register/DSD 三端点契约测试 + mark-source-dropped 越权门禁（P3-15a） |
+| 16 | `d9e8791` | [governance] docs: CHANGELOG 追加指标模块 P0-P2 全量修复 + P3 验证记录（P3-15b） |
+| 17 | `ce3aff0` | fix(test): 修复 semantic_cache 测试债务（fake_metric 补齐 MetricResponse 演进字段）+ 清理 scripts/ ruff 违规（E501 断行/import 排序/SIM105）（遗留清理 1） |
+| 18 | `9ac9a33` | fix(test): 同步 list_catalogs 转义断言到 / 转义实现（repository.py 已改 ESCAPE '/'，测试断言仍为反斜杠）（遗留清理 2） |
+
 | 2026-08-12 | — | (db) | **Alembic 迁移链收敛**：0019_lineage_edge_history（血缘历史快照）+ 0019_semantic_state_machine 顺延为 0020（消除多头）+ 0021_metric_submitted_by（metric.submitted_by）；0018_collector_drift_watermark 先行；单链升级 0017→0021 在真实 MySQL 验证通过 | — | released（迁移收敛） |
 
 
