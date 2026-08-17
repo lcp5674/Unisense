@@ -22,6 +22,29 @@ def svc(mock_db):
 
 
 class TestCreateDomain:
+
+
+    async def test_create_domain_defaults_validated(self, svc, monkeypatch) -> None:
+        """创建域 defaults_json 校验枚举（与 update/update_defaults 三路径一致）。"""
+        import app.services.system_dict.repository as sdr
+        from app.services.subject_domain.schemas import SubjectDomainCreate
+
+        async def _fake_exists(self, dict_type: str, value: str) -> bool:
+            return False
+        monkeypatch.setattr(sdr.SystemDictRepository, "item_exists", _fake_exists)
+        # 前置校验 mock（对齐既有 create 测试模式：真实 repo 包装 mock_db 时须显式覆盖）
+        svc._repo.code_exists = AsyncMock(return_value=False)
+        svc._repo.name_exists = AsyncMock(return_value=False)
+        with pytest.raises(BusinessError) as exc:
+            await svc.create_domain(
+                SubjectDomainCreate(
+                    code="risk", name="风控", owner_id=1,
+                    defaults_json={"granularity": "daily"},
+                )
+            )
+        assert exc.value.error_code == "VALIDATION_ERROR"
+
+
     async def test_create_root_domain(self, svc) -> None:
         """创建根域：level=1, path=自身id。"""
         svc._repo.code_exists = AsyncMock(return_value=False)
@@ -271,8 +294,6 @@ class TestGetDomainWithCount:
         resp = await svc.get_domain_with_count("sales")
         assert resp.code == "sales"
         assert resp.metric_count == 7
-
-
 class TestListTree:
     async def test_list_tree_builds_hierarchy(self, svc) -> None:
         root = MagicMock()

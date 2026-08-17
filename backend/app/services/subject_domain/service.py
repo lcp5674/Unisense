@@ -176,6 +176,9 @@ class SubjectDomainService:
                 error_code="DUPLICATE_NAME",
             )
 
+        # 域默认值字典枚举校验（对齐 update_domain/update_defaults 两处写路径，三条路径一致）
+        await _validate_defaults_json(self._db, data.defaults_json)
+
         domain = SubjectDomain(
             code=code,
             name=data.name,
