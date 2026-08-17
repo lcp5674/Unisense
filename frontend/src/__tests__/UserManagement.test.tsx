@@ -145,8 +145,15 @@ describe("UserManagement 用户管理", () => {
       role: "platform_admin",
       role_actions: ["*"],
       direct_actions: [],
+      effective_actions: ["*"],
     });
-    mockSetUserPerm.mockResolvedValue({ ok: true });
+    mockSetUserPerm.mockResolvedValue({
+      user_id: 1,
+      role: "platform_admin",
+      role_actions: ["*"],
+      direct_actions: [],
+      effective_actions: ["*"],
+    });
     mockActionRegistry.mockResolvedValue([
       { action: "metric:create", module: "指标", label: "创建指标", description: "新增指标" },
     ]);
