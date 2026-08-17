@@ -29,6 +29,9 @@ vi.mock("../api", () => {
     setUserStatus: vi.fn(),
     batchSetUserStatus: vi.fn(),
     resetUserPassword: vi.fn(),
+    getUserPermissions: vi.fn(),
+    setUserPermissions: vi.fn(),
+    listActionRegistry: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -45,6 +48,9 @@ import {
   setUserStatus,
   batchSetUserStatus,
   resetUserPassword,
+  getUserPermissions,
+  setUserPermissions,
+  listActionRegistry,
 } from "../api";
 
 const mockMe = vi.mocked(fetchCurrentUser);
@@ -58,6 +64,9 @@ const mockUpdate = vi.mocked(updateUser);
 const mockStatus = vi.mocked(setUserStatus);
 const mockBatchStatus = vi.mocked(batchSetUserStatus);
 const mockReset = vi.mocked(resetUserPassword);
+const mockGetUserPerm = vi.mocked(getUserPermissions);
+const mockSetUserPerm = vi.mocked(setUserPermissions);
+const mockActionRegistry = vi.mocked(listActionRegistry);
 
 /** 在可见 antd 下拉中点击指定选项：虚拟列表渲染同名包裹节点，须点 .ant-select-item-option 本体才触发选中。 */
 async function clickSelectOption(title: string) {
@@ -125,9 +134,22 @@ describe("UserManagement 用户管理", () => {
     mockStatus.mockReset();
     mockBatchStatus.mockReset();
     mockReset.mockReset();
+    mockGetUserPerm.mockReset();
+    mockSetUserPerm.mockReset();
+    mockActionRegistry.mockReset();
     mockDomains.mockResolvedValue([]);
     mockOrgs.mockResolvedValue({ total: 0, page: 1, page_size: 200, items: [] });
     mockRoles.mockResolvedValue([]);
+    mockGetUserPerm.mockResolvedValue({
+      user_id: 1,
+      role: "platform_admin",
+      role_actions: ["*"],
+      direct_actions: [],
+    });
+    mockSetUserPerm.mockResolvedValue({ ok: true });
+    mockActionRegistry.mockResolvedValue([
+      { action: "metric:create", module: "指标", label: "创建指标", description: "新增指标" },
+    ]);
   });
 
   it("platform_admin：渲染用户列表与全部管理操作", async () => {
@@ -399,5 +421,25 @@ describe("UserManagement 用户管理", () => {
     await waitFor(() =>
       expect(screen.getAllByText("data_analyst（自定义）").length).toBeGreaterThan(0),
     );
+  });
+
+  it("操作列「授权」：直达该用户的按钮权限矩阵（角色已含只读 + 直挂可勾选）", async () => {
+    mockMe.mockResolvedValue(ADMIN);
+    mockList.mockResolvedValue(USERS);
+    render(<UserManagement />);
+    await screen.findByText("alice");
+
+    // 点第一行（admin）的「授权」按钮 → 打开按用户授权矩阵
+    fireEvent.click(screen.getAllByText(/授\s*权/)[0]);
+    await screen.findByText(/按用户授权：admin/);
+    // 拉取该用户权限 + 动作点注册表
+    expect(mockGetUserPerm).toHaveBeenCalledWith(1);
+    expect(mockActionRegistry).toHaveBeenCalled();
+
+    // 关闭矩阵（antd 默认 locale 下取消按钮为 Cancel，用右上角关闭图标）
+    const closeIcon = document.querySelector(".ant-modal-close") as HTMLElement | null;
+    expect(closeIcon).toBeTruthy();
+    if (closeIcon) fireEvent.click(closeIcon);
+    await waitFor(() => expect(screen.queryByText(/按用户授权：admin/)).toBeNull());
   });
 });

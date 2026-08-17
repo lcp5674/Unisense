@@ -21,13 +21,13 @@ import {
   listDomainTree,
   listMetrics,
   listRoleOptions,
-  getUserPermissions,
-  setUserPermissions,
   UnisenseApiError,
 } from "../api";
-import type { ActionRegistryItem, GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RoleOption, RolePermissionItem, SubjectDomainTreeNode, UserBrief, UserPermissionResponse } from "../types";
+import type { ActionRegistryItem, GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RoleOption, RolePermissionItem, SubjectDomainTreeNode, UserBrief } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import { UserPermModal, groupRegistry, categoryOf, UI_CATEGORIES } from "../components/governance/UserPermModal";
+import type { UiCategory } from "../components/governance/UserPermModal";
 
 // 主题域树 → 扁平化下拉选项（保留层级缩进，与用户管理/数据源页「业务域」下拉同款实现）
 function flattenDomains(
@@ -660,45 +660,149 @@ const ROLE_LABEL: Record<string, string> = {
 
 const ACTION_ORDER = ["read", "write", "approve", "export", "review"];
 
-/** 动作点注册表按模块分组（可视化配置弹窗渲染用）。 */
-function groupRegistry(
-  registry: ActionRegistryItem[],
-): Array<{ module: string; items: ActionRegistryItem[] }> {
-  const byModule = new Map<string, ActionRegistryItem[]>();
-  for (const item of registry) {
-    const arr = byModule.get(item.module) ?? [];
-    arr.push(item);
-    byModule.set(item.module, arr);
-  }
-  return Array.from(byModule.entries())
-    .map(([module, moduleItems]) => ({
-      module,
-      items: moduleItems.sort((a, b) => a.action.localeCompare(b.action)),
-    }))
-    .sort((a, b) => a.module.localeCompare(b.module));
-}
-
-/** 权限点动作类型分类（按钮级配置「先模块后类型」筛选用）。 */
-type UiCategory = "all" | "view" | "write" | "export" | "llm" | "other";
-
-const UI_CATEGORIES: Array<{ key: UiCategory; label: string }> = [
-  { key: "all", label: "全部" },
-  { key: "view", label: "查看" },
-  { key: "write", label: "写操作" },
-  { key: "export", label: "导出" },
-  { key: "llm", label: "LLM 推断" },
-  { key: "other", label: "其他" },
+// 业务只读 view 集合（「常用组合」预设的公共基础）：数据消费侧页面，不含账号/治理/审计等管理视图
+const VIEW_BASE = [
+  "dashboard:view",
+  "todo:view",
+  "notifications:view",
+  "favorites:view",
+  "catalog:view",
+  "compare:view",
+  "templates:view",
+  "assetmap:view",
+  "lineage:view",
+  "quality:view",
+  "review:view",
+  "query:view",
+  "ai:view",
+  "dimensions:view",
+  "glossary:view",
+  "data-sources:view",
+  "catalogs:view",
+  "collection-tasks:view",
+  "collection-history:view",
+  "feedback:view",
+  "guide:view",
 ];
 
-function categoryOf(action: string): Exclude<UiCategory, "all"> {
-  if (action.endsWith(":view")) return "view";
-  if (action.includes("export")) return "export";
-  if (action.includes("infer") || action.includes("nl2sql")) return "llm";
-  const writeRe =
-    /(create|edit|delete|deprecate|manage|assign|review|arbitrate|escalate|close|reopen|revoke|config|rescan|collect|test-connection|disable|batch-status|instantiate|reconcile|mapping|publish|reset-password|validate|execute|pii)/;
-  if (writeRe.test(action)) return "write";
-  return "other";
-}
+/** 角色「常用组合」预设：一键勾选常用权限点组合（可在此基础上微调再保存）。
+ *
+ * 引用注册表真实权限点；应用时仅合并注册表中存在的点（防未来权限点删除导致后端 422）。
+ * 供批量建角色的授权者快速套用，避免从 90+ 按钮逐个勾选。
+ */
+const ROLE_PRESETS: Array<{ key: string; name: string; description: string; actions: string[] }> = [
+  {
+    key: "readonly_analyst",
+    name: "只读分析师",
+    description: "数据消费：浏览指标/资产/血缘/质量/维度/术语/查询并可执行查询，无任何写权限",
+    actions: [...VIEW_BASE, "query:execute"],
+  },
+  {
+    key: "metric_ops",
+    name: "指标运营",
+    description: "在只读基础上可创建/编辑/评审/废弃指标、批量导入、实例化模板、AI 推断描述",
+    actions: [
+      ...VIEW_BASE,
+      "query:execute",
+      "metric:create",
+      "metric:edit",
+      "metric:deprecate",
+      "metric:export",
+      "metric:review",
+      "metric:import",
+      "metric:infer-description",
+      "template:instantiate",
+      "template:assign-owner",
+    ],
+  },
+  {
+    key: "domain_admin",
+    name: "域管理员",
+    description:
+      "业务全写：数据源/采集/资产/血缘/质量/维度/术语/用户组织/域授权/主题域字典的管理能力（含评审、导出、LLM 推断）",
+    actions: [
+      ...VIEW_BASE,
+      "query:execute",
+      "ai:nl2sql",
+      "metric:create",
+      "metric:edit",
+      "metric:approve",
+      "metric:deprecate",
+      "metric:export",
+      "metric:review",
+      "metric:emergency-publish",
+      "metric:import",
+      "metric:infer-description",
+      "template:instantiate",
+      "template:assign-owner",
+      "assetmap:edit",
+      "assetmap:export",
+      "lineage:write",
+      "lineage:manage-edge",
+      "quality:run-check",
+      "quality:config-rule",
+      "review:arbitrate",
+      "review:escalate",
+      "review:close",
+      "review:reopen",
+      "dimension:create",
+      "dimension:edit",
+      "dimension:deprecate",
+      "dimension:mapping",
+      "dimension:reconcile",
+      "glossary:infer",
+      "glossary:create",
+      "glossary:edit",
+      "glossary:deprecate",
+      "data-source:create",
+      "data-source:edit",
+      "data-source:delete",
+      "data-source:test-connection",
+      "data-source:collect",
+      "catalog:deprecate",
+      "catalog:edit-description",
+      "catalog:infer-description",
+      "user:create",
+      "user:edit",
+      "user:disable",
+      "user:reset-password",
+      "user:batch-status",
+      "org:create",
+      "org:edit",
+      "org:disable",
+      "grant:create",
+      "grant:revoke",
+      "grant:export",
+      "role:create",
+      "role:edit",
+      "role:delete",
+      "domain:create",
+      "dict:create",
+      "governance:view",
+      "users:view",
+      "organizations:view",
+      "domains:view",
+      "dicts:view",
+      "audit:view",
+      "audit:export",
+    ],
+  },
+  {
+    key: "compliance",
+    name: "合规复核员",
+    description: "PII 合规复核/校验、分级重扫、被遗忘权执行、审计查看导出 + 业务只读",
+    actions: [
+      ...VIEW_BASE,
+      "governance:view",
+      "audit:view",
+      "audit:export",
+      "pii:review",
+      "pii:validate",
+      "classification:rescan",
+      "erasure:execute",
+    ],
+  },
+];
 
 function RolesTab() {
   const { can } = usePermission();
@@ -733,6 +837,15 @@ function RolesTab() {
 
   function checkedUiActions(role: string): string[] {
     return uiDraft[role] ?? items.find((i) => i.role === role)?.ui_effective_actions ?? [];
+  }
+
+  // 「常用组合」一键套用：将预设权限点合并进当前勾选（仅应用注册表中真实存在的点，防删点后 422）
+  function applyPreset(role: string, preset: (typeof ROLE_PRESETS)[number]) {
+    const valid = new Set(registry.map((r) => r.action));
+    const current = new Set(checkedUiActions(role));
+    for (const a of preset.actions) if (valid.has(a)) current.add(a);
+    setUiDraft((prev) => ({ ...prev, [role]: [...current] }));
+    message.info(`已套用「${preset.name}」：合并 ${[...current].filter((a) => preset.actions.includes(a)).length} 项权限点，可在此基础上微调后保存`);
   }
 
   // 提交时合并资源动作 + UI 权限点（后端 role_permission 整表替换，二者须一并写入）
@@ -1027,6 +1140,20 @@ function RolesTab() {
           style={{ marginBottom: 12 }}
           message="按模块勾选按钮级权限点（菜单显隐 / 页面按钮 / 组件）。可搜索按钮名/权限点并按类型筛选，快速定位；保存后写入 role_permission 覆盖表并即时生效；资源级本域权限点在上一列配置，二者保存时一并提交。"
         />
+        <div style={{ marginBottom: 12 }}>
+          <span className="muted" style={{ fontSize: 12, marginRight: 8 }}>
+            常用组合（一键套用后仍可微调）：
+          </span>
+          <Space wrap>
+            {ROLE_PRESETS.map((p) => (
+              <Tooltip key={p.key} title={p.description}>
+                <Button size="small" onClick={() => uiConfigRole && applyPreset(uiConfigRole, p)}>
+                  {p.name}
+                </Button>
+              </Tooltip>
+            ))}
+          </Space>
+        </div>
         <Space direction="vertical" style={{ width: "100%", marginBottom: 12 }} size={8}>
           <Input.Search
             placeholder="搜索按钮名称或权限点（如：导出 / audit:export）"
@@ -1076,167 +1203,6 @@ function RolesTab() {
         </div>
       </Modal>
     </div>
-  );
-}
-
-/** 「按用户授权」按钮权限矩阵：角色已含（只读）+ 可直挂叠加（可勾选）。
- *
- * 授权者无需记忆按钮名——可搜索按钮名/权限点、按动作类型筛选，快速定位后勾选。
- * 角色已含项（``role_actions``）为灰色只读（由角色管理配置，直挂不可收窄角色）；
- * 其余按钮为「直挂叠加」区，保存仅写 ``user_permission`` 表（角色继承不受影响）。
- */
-function UserPermModal({
-  userId,
-  userName,
-  open,
-  onClose,
-}: {
-  userId: number;
-  userName: string;
-  open: boolean;
-  onClose: () => void;
-}) {
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [snap, setSnap] = useState<UserPermissionResponse | null>(null);
-  const [registry, setRegistry] = useState<ActionRegistryItem[]>([]);
-  // 直挂草稿（可勾选集合；角色已含项不可改，仅叠加）
-  const [directDraft, setDirectDraft] = useState<Set<string>>(new Set());
-  const [uiSearch, setUiSearch] = useState("");
-  const [uiCategory, setUiCategory] = useState<UiCategory>("all");
-
-  useEffect(() => {
-    if (!open) return;
-    setLoading(true);
-    Promise.all([getUserPermissions(userId), listActionRegistry()])
-      .then(([snapRes, reg]) => {
-        setSnap(snapRes);
-        setRegistry(reg);
-        setDirectDraft(new Set(snapRes.direct_actions));
-      })
-      .catch((err) => {
-        message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
-      })
-      .finally(() => setLoading(false));
-  }, [open, userId]);
-
-  const roleSet = useMemo(() => new Set(snap?.role_actions ?? []), [snap]);
-  const grouped = useMemo(() => {
-    const kw = uiSearch.trim().toLowerCase();
-    return groupRegistry(registry)
-      .map((g) => ({
-        module: g.module,
-        items: g.items.filter((it) => {
-          if (uiCategory !== "all" && categoryOf(it.action) !== uiCategory) return false;
-          if (
-            kw &&
-            !it.label.toLowerCase().includes(kw) &&
-            !it.action.toLowerCase().includes(kw)
-          ) {
-            return false;
-          }
-          return true;
-        }),
-      }))
-      .filter((g) => g.items.length > 0);
-  }, [registry, uiSearch, uiCategory]);
-
-  function toggleDirect(action: string, checked: boolean) {
-    setDirectDraft((prev) => {
-      const next = new Set(prev);
-      if (checked) next.add(action);
-      else next.delete(action);
-      return next;
-    });
-  }
-
-  async function handleSave() {
-    if (!snap) return;
-    setSaving(true);
-    try {
-      await setUserPermissions(snap.user_id, {
-        actions: [...directDraft],
-        reason: "按用户授权矩阵配置",
-      });
-      message.success(`已更新「${userName}」的直挂按钮权限`);
-      onClose();
-    } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "保存失败");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <Modal
-      title={`按用户授权：${userName}${snap ? `（角色 ${snap.role}）` : ""}`}
-      open={open}
-      onCancel={onClose}
-      onOk={handleSave}
-      okText="保存"
-      okButtonProps={{ loading: saving }}
-      width={840}
-    >
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="矩阵展示该用户生效的按钮权限点：灰色勾选=角色已含（由角色管理配置，不可在此收窄）；其余为「直挂叠加」区，勾选保存后即时生效（后端写接口仍按内置角色强制兜底）。"
-      />
-      <Space direction="vertical" style={{ width: "100%", marginBottom: 12 }} size={8}>
-        <Input.Search
-          placeholder="搜索按钮名称或权限点（如：导出 / audit:export）"
-          allowClear
-          value={uiSearch}
-          onChange={(e) => setUiSearch(e.target.value)}
-        />
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <Tabs
-            size="small"
-            activeKey={uiCategory}
-            onChange={(k) => setUiCategory(k as UiCategory)}
-            items={UI_CATEGORIES.map((c) => ({ key: c.key, label: c.label }))}
-            tabBarStyle={{ marginBottom: 0, flex: 1 }}
-          />
-          <span className="muted" style={{ whiteSpace: "nowrap", fontSize: 12 }}>
-            直挂已选 {directDraft.size} 项
-          </span>
-        </div>
-      </Space>
-      <div style={{ maxHeight: 440, overflow: "auto" }}>
-        {loading ? (
-          <div className="muted" style={{ textAlign: "center", padding: 24 }}>加载中…</div>
-        ) : grouped.length === 0 ? (
-          <div className="muted" style={{ textAlign: "center", padding: 24 }}>无匹配的按钮权限点</div>
-        ) : (
-          grouped.map((g) => (
-            <div key={g.module} style={{ marginBottom: 14 }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>{g.module}</div>
-              <Space wrap>
-                {g.items.map((it) =>
-                  roleSet.has(it.action) ? (
-                    <Tooltip key={it.action} title={`${it.description}（${it.action}）`}>
-                      <Checkbox checked disabled>
-                        {it.label} <Tag style={{ marginLeft: 2 }}>角色</Tag>
-                      </Checkbox>
-                    </Tooltip>
-                  ) : (
-                    <Tooltip key={it.action} title={`${it.description}（${it.action}）`}>
-                      <Checkbox
-                        checked={directDraft.has(it.action)}
-                        onChange={(e) => toggleDirect(it.action, e.target.checked)}
-                      >
-                        {it.label}
-                      </Checkbox>
-                    </Tooltip>
-                  ),
-                )}
-              </Space>
-            </div>
-          ))
-        )}
-      </div>
-    </Modal>
   );
 }
 

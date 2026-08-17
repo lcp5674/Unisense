@@ -635,4 +635,32 @@ describe("Governance 授权管理 - 角色下拉与按用户授权矩阵", () =>
       expect(mockSetUserPerms).toHaveBeenCalledWith(1, expect.objectContaining({ actions: ["metric:create"] })),
     );
   });
+
+  it("角色管理：常用组合预设一键套用（域管理员预设勾选 metric:create，仅合并注册表内点）", async () => {
+    mockRoles.mockResolvedValue(ROLE_PERMISSIONS);
+    renderGov();
+    await clickTab("角色管理");
+    await screen.findByText("只读用户");
+
+    // 打开 viewer 行（第一行，非受保护）的「配置」→ 按钮级权限点弹窗
+    const configBtns = screen.getAllByRole("button", { name: /配\s*置/ });
+    await userEvent.click(configBtns[0]);
+    await screen.findByText("创建指标");
+
+    // 「常用组合」预设按钮可见（名称 + tooltip 描述）
+    expect(screen.getByRole("button", { name: /只读分析师/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /域管理员/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /合规复核员/ })).toBeTruthy();
+
+    // 点「域管理员」→ 预设含 metric:create（在注册表内）被合并勾选
+    await userEvent.click(screen.getByRole("button", { name: /域管理员/ }));
+    await waitFor(() => {
+      const wrapper = Array.from(
+        document.querySelectorAll<HTMLElement>(".ant-checkbox-wrapper"),
+      ).find((el) => el.textContent?.includes("创建指标"));
+      const cb = wrapper?.querySelector("input.ant-checkbox-input") as HTMLInputElement | null;
+      expect(cb?.checked).toBe(true);
+    });
+    // 预设中不在注册表的权限点被过滤（applyPreset 仅合并 registry 内点）——此处注册表无 query:execute，不抛错即可
+  });
 });

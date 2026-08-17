@@ -19,6 +19,7 @@ import {
   PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SafetyCertificateOutlined,
   StopOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
@@ -43,6 +44,7 @@ import type {
 } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import { UserPermModal } from "../components/governance/UserPermModal";
 
 const ROLE_LABEL: Record<string, string> = {
   platform_admin: "平台管理员",
@@ -120,6 +122,8 @@ export function UserManagement() {
   // 批量启用/停用：多选行 + 请求进行中标记
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [batchLoading, setBatchLoading] = useState(false);
+  // 「按用户授权」直挂按钮权限矩阵目标用户（复用 Governance 授权矩阵，用户管理直达）
+  const [permUser, setPermUser] = useState<AdminUser | null>(null);
 
   // 监听团队选择（方案 B：所属域由团队自动继承，提示所选团队绑定的域）
   const createOrgId = Form.useWatch("org_id", createForm);
@@ -372,6 +376,11 @@ export function UserManagement() {
           <Space size={4}>
             {can("user:edit") && (
               <Button size="small" onClick={() => openEdit(u)}>编辑</Button>
+            )}
+            {can("user:edit") && (
+              <Button size="small" icon={<SafetyCertificateOutlined />} onClick={() => setPermUser(u)}>
+                授权
+              </Button>
             )}
             {can("user:reset-password") && (
               <Button size="small" icon={<LockOutlined />} onClick={() => { setResetTarget(u); resetForm.resetFields(); }}>
@@ -736,6 +745,16 @@ export function UserManagement() {
           {createdResult?.password}
         </div>
       </Modal>
+
+      {/* 按用户授权：直挂按钮权限矩阵（复用 Governance 授权矩阵，用户管理直达） */}
+      {permUser && (
+        <UserPermModal
+          userId={permUser.id}
+          userName={permUser.username}
+          open
+          onClose={() => setPermUser(null)}
+        />
+      )}
     </div>
   );
 }
