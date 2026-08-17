@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Layout } from "../components/Layout";
 import { NOTIF_CHANGED_EVENT } from "../utils/notifBus";
@@ -149,4 +149,32 @@ describe("Layout 顶栏通知角标", () => {
       expect(container.querySelector(".ant-badge-count")).toBeNull();
     });
   });
+
+  it("每 30 秒轮询未读数（跨标签页/跨用户新通知实时性，无需手动刷新）", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(fetchUnreadCount).mockResolvedValue(3);
+      const { container } = renderLayout();
+
+      // flush 微任务：初始 effect 拉取并更新角标
+      await act(async () => {});
+      expect(fetchUnreadCount).toHaveBeenCalledTimes(1);
+      expect(container.querySelector(".ant-badge-count")?.textContent).toContain("3");
+
+      // 推进 30s → 轮询再拉取；角标随新未读数更新（模拟他人/后台生成了新通知）
+      vi.mocked(fetchUnreadCount).mockResolvedValue(5);
+      act(() => {
+        vi.advanceTimersByTime(30_000);
+      });
+      await act(async () => {});
+      expect(fetchUnreadCount).toHaveBeenCalledTimes(2);
+      expect(container.querySelector(".ant-badge-count")?.textContent).toContain("5");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });

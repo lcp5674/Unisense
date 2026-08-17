@@ -68,6 +68,10 @@ const { Header, Sider, Content } = AntLayout;
 const SIDER_UI_KEY = "ui"; // user_preference.preference_key
 const SIDER_FIELD = "sider_collapsed"; // ui.value 内的字段
 
+// 未读角标轮询间隔（毫秒）：30s 低频轮询覆盖「跨标签页 / 跨用户」的新通知实时性——
+// 他人/后台进程生成了发给当前用户的通知时，角标无需手动刷新即可感知（秒级不必要，30s 足够且零压力）。
+const NOTIF_POLL_MS = 30_000;
+
 function siderStorageKey(userId: number): string {
   return `unisense.sider.collapsed.${userId}`;
 }
@@ -399,7 +403,7 @@ export function Layout({ user }: { user: CurrentUser }) {
   }, [location.pathname]);
 
   // 未读角标：后端精确 COUNT（unread-count），避免拉列表近似在 >100 条时不准。
-  // 路由切换时刷新；通知中心内已读/删除/清空后由变更事件驱动刷新（同页无路由变化）。
+  // 刷新时机：路由切换 + 通知中心变更事件（同页即时）+ 30s 轮询（跨标签页/跨用户实时性）。
   useEffect(() => {
     let cancelled = false;
     const refresh = () => {
@@ -411,9 +415,11 @@ export function Layout({ user }: { user: CurrentUser }) {
     };
     refresh();
     const off = onNotifChanged(refresh);
+    const timer = window.setInterval(refresh, NOTIF_POLL_MS);
     return () => {
       cancelled = true;
       off();
+      window.clearInterval(timer);
     };
   }, [location.pathname]);
 
