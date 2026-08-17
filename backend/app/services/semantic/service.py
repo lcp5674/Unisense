@@ -3045,7 +3045,7 @@ class MetricService(BaseService):
         for c in confirmations:
             if c.id != mine.id and c.status == "PENDING":
                 await self._repo.update_confirmation_status(c.id, "REJECTED", reason=reason)
-        # 与 PendingVersionManager.reject 语义对齐：被拒版本置 CANCELLED，
+        # 被拒版本置 CANCELLED（P1-8 后 reject 唯一实现在本方法）：
         # 防止后续被确认/超时逻辑错误处理（旧实现只改确认状态，版本滞留 PENDING）
         from sqlalchemy import update as sa_update
 
