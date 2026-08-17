@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Alert, Card, Tag, Tabs, Statistic, Row, Col, Space, Tooltip } from "antd";
+import { Alert, Button, Card, Tag, Tabs, Statistic, Row, Col, Space, Tooltip } from "antd";
+import { ReloadOutlined } from "@ant-design/icons";
 import {
   fetchObsMetricsQuality,
   fetchObsMetricsApi,
@@ -229,17 +230,42 @@ function MetricsTab() {
 }
 
 /** 平台概览：数据源健康 / 治理积压 / 资产规模 / 消费接入（生产视角一次拉齐） */
-function OverviewTab() {
+function OverviewTab({ active }: { active?: boolean }) {
   const [overview, setOverview] = useState<ObsOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  async function load(silent = false) {
+    if (silent) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+    try {
+      const data = await fetchObsOverview();
+      setOverview(data);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加载失败");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }
 
   useEffect(() => {
-    fetchObsOverview()
-      .then(setOverview)
-      .catch((err) => setError(err instanceof Error ? err.message : "加载失败"))
-      .finally(() => setLoading(false));
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 时效性：每次切回「平台概览」Tab 时静默刷新，反映最新聚合（停留其他 Tab 期间数据可能已变化）
+  useEffect(() => {
+    if (active) {
+      load(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
 
   if (loading) {
     return (
@@ -254,6 +280,16 @@ function OverviewTab() {
 
   return (
     <div>
+      <Row justify="end" style={{ marginBottom: 12 }}>
+        <Button
+          size="small"
+          icon={<ReloadOutlined />}
+          loading={refreshing}
+          onClick={() => load(true)}
+        >
+          刷新
+        </Button>
+      </Row>
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col xs={24} lg={12}>
           <Card title="数据源健康" size="small">
@@ -328,8 +364,13 @@ function OverviewTab() {
 }
 
 export function Observability() {
+  const [activeTab, setActiveTab] = useState("overview");
   const tabItems = [
-    { key: "overview", label: "平台概览", children: <OverviewTab /> },
+    {
+      key: "overview",
+      label: "平台概览",
+      children: <OverviewTab active={activeTab === "overview"} />,
+    },
     { key: "metrics", label: "运行指标", children: <MetricsTab /> },
   ];
 
@@ -343,7 +384,7 @@ export function Observability() {
         </div>
       </div>
       <Card styles={{ body: { paddingTop: 8 } }}>
-        <Tabs items={tabItems} />
+        <Tabs items={tabItems} activeKey={activeTab} onChange={setActiveTab} />
       </Card>
     </div>
   );

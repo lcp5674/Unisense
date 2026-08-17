@@ -276,25 +276,39 @@ class ObservabilityRepository:
         return {"edges": edges}
 
     async def overview_stats(self) -> dict[str, Any]:
-        """平台运营总览聚合（生产视角：健康/积压/资产/消费一次拉齐）。"""
-        # 1. 数据源健康分布
+        """平台运营总览聚合（生产视角：健康/积压/资产/消费一次拉齐）。
+
+        数据口径统一对齐各模块自身语义 + 软删过滤（deleted_at IS NULL）：
+        - 数据源健康 / 资产规模：仅统计存活（未软删）数据源——此前漏过滤会
+          把已软删数据源计入，导致平台概览与数据源管理页数字不一致；
+        - 治理积压的"待处理冲突"：对齐冲突模块的未决口径
+          （OPEN/NEGOTIATING/ESCALATED），且仅统计未软删冲突；
+        - 质量事件 / 升级：同样过滤软删，与 health_scorer / 升级模块口径一致。
+        """
+        # 1. 数据源健康分布（仅未软删）
         src_rows = (
             await self._session.execute(
-                select(DataSource.health_status, func.count()).group_by(
-                    DataSource.health_status
-                )
+                select(DataSource.health_status, func.count())
+                .where(DataSource.deleted_at.is_(None))
+                .group_by(DataSource.health_status)
             )
         ).all()
         sources_by_health = dict(cast("Sequence[tuple[Any, Any]]", src_rows))
         # 2. 治理积压：待处理冲突 / 未关闭质量事件 / 待审核指标 / 未闭环升级
+        #    冲突未决口径对齐冲突模块（count_open_for_metric）：OPEN/NEGOTIATING/ESCALATED
         open_conflicts = (
             await self._session.execute(
                 select(func.count())
                 .select_from(Conflict)
                 .where(
+                    Conflict.deleted_at.is_(None),
                     Conflict.status.in_(
-                        [ConflictStatus.OPEN, ConflictStatus.NEGOTIATING]
-                    )
+                        [
+                            ConflictStatus.OPEN,
+                            ConflictStatus.NEGOTIATING,
+                            ConflictStatus.ESCALATED,
+                        ]
+                    ),
                 )
             )
         ).scalar() or 0
@@ -303,9 +317,10 @@ class ObservabilityRepository:
                 select(func.count())
                 .select_from(QualityEvent)
                 .where(
+                    QualityEvent.deleted_at.is_(None),
                     QualityEvent.status.in_(
                         [QualityEventStatus.OPEN, QualityEventStatus.ACK]
-                    )
+                    ),
                 )
             )
         ).scalar() or 0
@@ -321,9 +336,10 @@ class ObservabilityRepository:
                 select(func.count())
                 .select_from(EscalationRecord)
                 .where(
+                    EscalationRecord.deleted_at.is_(None),
                     EscalationRecord.status.in_(
                         [EscalationStatus.ESCALATED, EscalationStatus.ACKNOWLEDGED]
-                    )
+                    ),
                 )
             )
         ).scalar() or 0

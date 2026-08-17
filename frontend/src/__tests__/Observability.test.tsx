@@ -65,6 +65,24 @@ beforeEach(() => {
 });
 
 describe("Observability 可观测中心", () => {
+  it("平台概览支持手动刷新与切回 Tab 自动刷新（时效性）", async () => {
+    render(<Observability />);
+    await waitFor(() => expect(screen.getByText("数据源健康")).toBeInTheDocument());
+    const callsAfterMount = mockedOverview.mock.calls.length;
+    expect(callsAfterMount).toBeGreaterThanOrEqual(1);
+
+    // 手动刷新按钮触发重新拉取
+    fireEvent.click(screen.getByRole("button", { name: /刷\s*新/ }));
+    await waitFor(() => expect(mockedOverview.mock.calls.length).toBeGreaterThan(callsAfterMount));
+
+    // 切到运行指标再切回平台概览 → 自动静默刷新
+    const afterManual = mockedOverview.mock.calls.length;
+    fireEvent.click(screen.getByText("运行指标"));
+    await waitFor(() => expect(screen.getByText("API 动作分布")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("平台概览"));
+    await waitFor(() => expect(mockedOverview.mock.calls.length).toBeGreaterThan(afterManual));
+  });
+
   it("默认展示平台概览 Tab：数据源健康/治理积压/资产规模/消费接入，全部业务标签", async () => {
     render(<Observability />);
     await waitFor(() => expect(screen.getByText("数据源健康")).toBeInTheDocument());

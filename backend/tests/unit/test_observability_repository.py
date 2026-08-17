@@ -288,6 +288,73 @@ class TestObservabilityRepository:
         assert stats["assets"]["sources"] == 3
         assert stats["clients"] == {"total": 1, "active": 1}
 
+    async def test_overview_stats_filters_soft_deleted(
+        self, repo: ObservabilityRepository
+    ) -> None:
+        """平台概览所有计数均过滤软删数据，且冲突未决含 ESCALATED（对齐冲突模块口径）。
+
+        回归守护：此前数据源健康聚合漏过滤 deleted_at，把已软删数据源计入，
+        导致平台概览数据源数（8）与数据源管理页真实数（2）不一致。
+        """
+
+        def rows(*items: tuple[Any, int]) -> MagicMock:
+            m = MagicMock()
+            m.all.return_value = list(items)
+            return m
+
+        def scalar(v: int) -> MagicMock:
+            m = MagicMock()
+            m.scalar.return_value = v
+            return m
+
+        captured: list[str] = []
+
+        async def fake_execute(stmt, *a, **kw):  # type: ignore[no-untyped-def]
+            captured.append(str(stmt))
+            results = [
+                rows(("healthy", 1)),  # 数据源健康（仅存活）
+                scalar(1),  # 冲突未决
+                scalar(1),  # 质量事件
+                scalar(1),  # 指标 REVIEW
+                scalar(0),  # 升级
+                rows(("PUBLISHED", 7)),  # 指标状态
+                scalar(3),  # 术语
+                scalar(5),  # 维度
+                scalar(10),  # 域
+                scalar(1),  # 客户端总数
+                scalar(1),  # 客户端活跃
+            ][len(captured) - 1]
+            return results
+
+        repo._session.execute = AsyncMock(side_effect=fake_execute)
+        stats = await repo.overview_stats()
+
+        assert stats["sources"]["by_health"] == {"healthy": 1}
+        assert stats["sources"]["total"] == 1
+        assert stats["assets"]["sources"] == 1
+
+        # 数据源健康查询必须过滤软删（修复核心）
+        src_sql = next(s for s in captured if "data_source" in s.lower())
+        assert "deleted_at IS NULL" in src_sql
+        # 冲突未决查询过滤软删；ESCALATED 口径从实现源码守护
+        # （IN 列表在 str(stmt) 为 POSTCOMPILE 占位，无法从编译串断言）
+        conflict_sql = next(s for s in captured if "conflict" in s.lower())
+        assert "deleted_at IS NULL" in conflict_sql
+        import inspect
+
+        from app.services.observability.repository import (
+            ObservabilityRepository as _Repo,
+        )
+
+        overview_src = inspect.getsource(_Repo.overview_stats)
+        assert "ConflictStatus.ESCALATED" in overview_src
+        assert "QualityEventStatus.OPEN" in overview_src
+        # 质量事件 / 升级计数过滤软删
+        quality_sql = next(s for s in captured if "quality_event" in s.lower())
+        assert "deleted_at IS NULL" in quality_sql
+        escalation_sql = next(s for s in captured if "escalation_record" in s.lower())
+        assert "deleted_at IS NULL" in escalation_sql
+
     async def test_commit(self, repo: ObservabilityRepository) -> None:
         await repo.commit()
         repo._session.commit.assert_called_once()
