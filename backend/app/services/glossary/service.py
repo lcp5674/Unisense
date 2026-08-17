@@ -472,10 +472,28 @@ class GlossaryService(BaseService):
     async def _add_conflict(
         self, term: Term, ctype: GlossaryConflictType, ref_term_id: int
     ) -> None:
+        # P2-11：冲突行关联指标——若该术语已绑定指标（metric.term_id），
+        # 填充 ref_metric_id，前端「关联指标」列展示该冲突影响的指标（此前恒空）。
+        from sqlalchemy import select
+
+        from app.models.metric import Metric
+
+        ref_metric_id: int | None = None
+        row = (
+            await self._session.execute(
+                select(Metric.id)
+                .where(Metric.term_id == term.id, Metric.deleted_at.is_(None))
+                .limit(1)
+            )
+        ).first()
+        if row is not None:
+            ref_metric_id = int(row[0])
+
         conflict = GlossaryConflict(
             term_id=term.id,
             conflict_type=ctype.value,
             ref_term_id=ref_term_id,
+            ref_metric_id=ref_metric_id,
             status=GlossaryConflictStatus.OPEN.value,
         )
         await self._repo.save_conflict(conflict)

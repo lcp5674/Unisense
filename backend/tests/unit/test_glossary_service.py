@@ -101,6 +101,8 @@ async def test_create_term_persists_and_snapshots() -> None:
 
 async def test_create_term_detects_alias_overlap() -> None:
     db = MagicMock()
+    # P2-11: _add_conflict 会查询绑定到术语的指标（ref_metric_id 填充）；无绑定时 first()=None
+    db.execute = AsyncMock(return_value=MagicMock(first=lambda: None))
     svc = GlossaryService(db)
     other = _make_term()
     repo = MagicMock()
@@ -126,6 +128,39 @@ async def test_create_term_detects_alias_overlap() -> None:
     repo.save_conflict.assert_awaited()
     conflict: GlossaryConflict = repo.save_conflict.call_args.args[0]
     assert conflict.conflict_type in ("alias_overlap", "name_overlap")
+    # 无绑定指标 → ref_metric_id 为 None
+    assert conflict.ref_metric_id is None
+
+
+async def test_add_conflict_sets_ref_metric_id_when_term_bound() -> None:
+    """P2-11: 术语已绑定指标（metric.term_id）→ 冲突行 ref_metric_id 填充。"""
+    db = MagicMock()
+    # 绑定到该术语的指标 id=77
+    db.execute = AsyncMock(return_value=MagicMock(first=lambda: (77,)))
+    svc = GlossaryService(db)
+    other = _make_term()
+    repo = MagicMock()
+    repo.get_term = AsyncMock(return_value=None)
+    repo.save_term = AsyncMock(side_effect=lambda t: _persist(t))
+    repo.count_term_versions = AsyncMock(return_value=0)
+    repo.save_term_version = AsyncMock()
+    repo.all_terms = AsyncMock(return_value=[other])
+    repo.save_conflict = AsyncMock()
+    repo.commit = AsyncMock()
+    svc._repo = repo
+
+    payload = TermCreate(
+        term_code="c2",
+        name="活跃用户",
+        definition="d",
+        domain="user",
+        synonyms=["au", "active_user", "x"],
+        owner_id=1,
+    )
+    await svc.create_term(payload, 1)
+
+    conflict: GlossaryConflict = repo.save_conflict.call_args.args[0]
+    assert conflict.ref_metric_id == 77
 
 
 async def test_create_term_auto_generates_code() -> None:

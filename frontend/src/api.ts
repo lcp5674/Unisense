@@ -621,6 +621,17 @@ export async function updateMetricDescription(
   );
 }
 
+// 绑定/解绑指标↔业务术语（P2-11：术语治理归属写路径；termId=null 解绑）
+export async function bindMetricTerm(code: string, termId: number | null): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/term`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ term_id: termId }),
+    },
+  );
+}
+
 // LLM 推断指标业务描述（治理补充 TD §12.1，source=llm，不触发版本）
 // force=true 强制重新生成；默认已存在 LLM 描述时后端短路返回（避免重复调 LLM）
 export async function inferMetricDescription(

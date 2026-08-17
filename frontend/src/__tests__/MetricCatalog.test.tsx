@@ -85,6 +85,7 @@ const metric: MetricResponse = {
   submitted_by: 1,
   pii_flag: true,
   compliance_reviewed: true,
+  term_id: null,
   effective_version: 2,
   consumption_guide: null,
   successor_code: null,

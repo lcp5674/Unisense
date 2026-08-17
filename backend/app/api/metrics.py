@@ -46,6 +46,7 @@ from app.services.semantic.schemas import (
     MetricResponse,
     MetricSourceDroppedRequest,
     MetricSubmitRequest,
+    MetricTermBindRequest,
     MetricUpdateRequest,
     MetricVersionResponse,
     VersionConfirmRequest,
@@ -568,6 +569,46 @@ async def update_metric_description(
         entity_type="metric_description",
         entity_id=metric.metric_code,
         detail={"cleared": not (request.description or "").strip()},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+@router.put(
+    "/{metric_code}/term",
+    response_model=ApiResponse[MetricResponse],
+    summary="绑定/解绑指标↔业务术语（P2-11：术语治理归属写路径，不触发版本）",
+    dependencies=_WRITE_DEPS,
+)
+async def bind_metric_term(
+    metric_code: str,
+    request: MetricTermBindRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """写 metric.term_id（传 null 解绑）；校验术语存在；写审计同事务提交。"""
+    service = MetricService(db)
+    metric = await service.bind_metric_term(
+        metric_code,
+        request.term_id,
+        actor_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="UPDATE",
+        entity_type="metric_term",
+        entity_id=metric.metric_code,
+        detail={"term_id": request.term_id, "bound": request.term_id is not None},
         ip=client_ip(http_req),
         trace_id=trace_id,
     )

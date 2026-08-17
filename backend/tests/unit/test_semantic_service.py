@@ -3443,6 +3443,78 @@ async def test_update_metric_description_not_owner_raises_auth():
     repo.update_with_optimistic_lock.assert_not_called()
 
 
+# bind_metric_term（P2-11：指标↔术语绑定写路径）
+# ---------------------------------------------------------------------------
+
+
+async def test_bind_metric_term_success():
+    """P2-11: 绑定术语 → 写 metric.term_id，不触发版本。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="PUBLISHED", row_version=3, version=2, term_id=None)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    # 术语存在性校验通过：Term.id 查询返回 1
+    svc._db.execute = AsyncMock(
+        return_value=MagicMock(scalar_one_or_none=lambda: 1)
+    )
+    updated = make_metric(status="PUBLISHED", row_version=4, version=2, term_id=55)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+
+    result = await svc.bind_metric_term(
+        "sales_gmv_daily", 55, actor_id=1, role="metric_owner", user_domain="sales"
+    )
+
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["term_id"] == 55
+    assert "version" not in kwargs  # 绑定不触发版本
+    assert result is updated
+
+
+async def test_bind_metric_term_unbind():
+    """P2-11: term_id=None 解绑，不校验术语存在性。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", term_id=55))
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", term_id=None)
+    )
+    # 解绑不应发起术语查询
+    svc._db.execute = AsyncMock(side_effect=AssertionError("不应查询术语"))
+
+    await svc.bind_metric_term(
+        "sales_gmv_daily", None, actor_id=1, role="metric_owner", user_domain="sales"
+    )
+
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["term_id"] is None
+
+
+async def test_bind_metric_term_term_not_found():
+    """P2-11: 术语不存在 → NotFoundError，不更新指标。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    svc._db.execute = AsyncMock(
+        return_value=MagicMock(scalar_one_or_none=lambda: None)
+    )
+
+    with pytest.raises(NotFoundError) as exc:
+        await svc.bind_metric_term(
+            "sales_gmv_daily", 999, actor_id=1, role="metric_owner", user_domain="sales"
+        )
+    assert exc.value.error_code == "NOT_FOUND"
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_bind_metric_term_not_owner_raises_auth():
+    """P2-11: 非 Owner 操作他人指标 → AuthError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(owner_id=1))
+
+    with pytest.raises(AuthError):
+        await svc.bind_metric_term(
+            "sales_gmv_daily", 55, actor_id=99, role="analyst", user_domain="sales"
+        )
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
 # infer_metric_description（TD §12.1 LLM 推断指标业务描述，source=llm）
 # ---------------------------------------------------------------------------
 

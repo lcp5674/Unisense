@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
@@ -44,6 +44,7 @@ import {
   confirmDeprecateDropped,
   emergencyPublishMetric,
   completeEmergencyReview,
+  bindMetricTerm,
   fetchArchivedMetric,
   fetchCurrentUser,
   fetchRelatedMetrics,
@@ -57,6 +58,7 @@ import {
   listFavorites,
   listMetrics,
   listSubscriptions,
+  listTerms,
   listUsers,
   listVersions,
   piiReview,
@@ -483,6 +485,10 @@ export function MetricDetail() {
   const [descEditOpen, setDescEditOpen] = useState(false);
   const [descDraft, setDescDraft] = useState("");
   const [descSaving, setDescSaving] = useState(false);
+  // 关联术语（P2-11 术语绑定写路径）：搜索式 Select 选项 + 防抖搜索
+  const [termOptions, setTermOptions] = useState<Array<{ value: number; label: string }>>([]);
+  const [termSearching, setTermSearching] = useState(false);
+  const termSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 仲裁作废指标（METRIC_ARCHIVED）：软删 + successor 的历史链接直访时，
   // 展示「醒目引导 + 历史详情 + 跳转权威指标」，而非仅一张错误卡片
   const [archived, setArchived] = useState<{
@@ -745,6 +751,30 @@ export function MetricDetail() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // 关联术语搜索（P2-11 术语绑定写路径）：防抖调用 listTerms（仅 PUBLISHED 可绑定）
+  function handleTermSearch(q: string) {
+    if (termSearchTimer.current) clearTimeout(termSearchTimer.current);
+    termSearchTimer.current = setTimeout(async () => {
+      setTermSearching(true);
+      try {
+        const res = await listTerms({ search: q.trim() || undefined, status: "PUBLISHED", page_size: 20 });
+        setTermOptions(
+          (res.items ?? []).map((t) => ({ value: t.id, label: `${t.name}（${t.term_code}）` })),
+        );
+      } catch {
+        // 术语搜索失败不阻断绑定流程
+      } finally {
+        setTermSearching(false);
+      }
+    }, 300);
+  }
+
+  // 绑定/解绑术语（termId=null 解绑）
+  function bindTerm(termId: number | null) {
+    if (!metric) return;
+    void runAction(() => bindMetricTerm(metric.metric_code, termId), termId ? "术语绑定" : "术语解绑");
   }
 
   // 响应仲裁「保留差异+指定改名」：修改指标名称并清除 rename_required 标记
@@ -1681,6 +1711,45 @@ export function MetricDetail() {
           <Paragraph style={{ margin: 0, whiteSpace: "pre-wrap" }}>{metric.description}</Paragraph>
         ) : (
           <span className="muted">暂无业务描述{canInferDesc ? "，可点击右上角「AI 生成描述」自动生成" : ""}</span>
+        )}
+      </Card>
+
+      {/* 关联术语（P2-11 术语绑定写路径）：指标归属业务术语治理，Owner/管理可搜索绑定 */}
+      <Card
+        size="small"
+        style={{ marginBottom: 16 }}
+        title="关联术语"
+        extra={
+          isOwnerOrAdmin && canEdit && !piiMasked && metric.term_id ? (
+            <Button size="small" danger onClick={() => bindTerm(null)}>
+              解绑
+            </Button>
+          ) : null
+        }
+      >
+        {piiMasked ? (
+          <span className="muted">该指标含个人信息，术语绑定已隐藏。</span>
+        ) : isOwnerOrAdmin && canEdit ? (
+          <Select
+            showSearch
+            allowClear
+            style={{ width: 320 }}
+            placeholder="搜索并绑定业务术语"
+            value={metric.term_id ?? undefined}
+            filterOption={false}
+            onSearch={handleTermSearch}
+            onChange={(v) => bindTerm(v ?? null)}
+            options={termOptions}
+            loading={termSearching}
+            notFoundContent={termSearching ? "搜索中…" : "未找到匹配术语"}
+          />
+        ) : metric.term_id ? (
+          <span>
+            已绑定术语{" "}
+            {termOptions.find((t) => t.value === metric.term_id)?.label ?? `#${metric.term_id}`}
+          </span>
+        ) : (
+          <span className="muted">未绑定业务术语</span>
         )}
       </Card>
 

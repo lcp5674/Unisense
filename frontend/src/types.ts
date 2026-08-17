@@ -55,6 +55,8 @@ export interface MetricResponse {
   rejected_at?: string | null;
   pii_flag: boolean;
   compliance_reviewed: boolean;
+  /** 关联业务术语 ID（P2-11：术语治理归属，null=未绑定） */
+  term_id: number | null;
   effective_version: number | null;
   consumption_guide: Record<string, unknown> | null;
   successor_code: string | null;

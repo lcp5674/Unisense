@@ -201,6 +201,18 @@ class MetricDescriptionUpdateRequest(BaseModel):
     )
 
 
+class MetricTermBindRequest(BaseModel):
+    """指标↔术语绑定请求（P2-11：术语绑定写路径）。
+
+    绑定指标到已存在的业务术语（``metric.term_id``），传 None 解绑。
+    仅 metric_owner / 域管理员 / 平台管理员可操作。
+    """
+
+    term_id: int | None = Field(
+        None, ge=1, description="术语 ID（传 null 解绑）"
+    )
+
+
 class MetricPublishRequest(BaseModel):
     """发布指标请求（DRAFT → PUBLISHED）。"""
 
@@ -506,6 +518,8 @@ class MetricResponse(BaseModel):
     status: str
     owner_id: int
     backup_owner_id: int | None
+    # 关联业务术语（P2-11：术语绑定，度量口径归属术语治理）
+    term_id: int | None = None
     # 治理追溯：审批人 / 提交人，DB 模型已有，响应透出供目录页显示
     approver_id: int | None = None
     submitted_by: int | None = None

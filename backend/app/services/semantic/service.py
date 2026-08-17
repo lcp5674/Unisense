@@ -1055,6 +1055,73 @@ class MetricService(BaseService):
         )
         return updated
 
+    async def bind_metric_term(
+        self,
+        metric_code: str,
+        term_id: int | None,
+        actor_id: int,
+        role: str,
+        user_domain: str | None = None,
+    ) -> Metric:
+        """绑定/解绑指标↔业务术语（P2-11：术语绑定写路径）。
+
+        写 ``metric.term_id``（术语治理归属），不触发版本/不参与口径变更；
+        与描述更新同语义——运营层治理补充。传 ``None`` 解绑。
+
+        Args:
+            metric_code: 指标编码。
+            term_id: 术语 ID（None=解绑）。
+            actor_id: 操作人 ID。
+            role: 操作人角色。
+            user_domain: 操作人所属域。
+
+        Raises:
+            NotFoundError: 指标/术语不存在。
+            AuthError: metric_owner 操作他人指标（越权）。
+            BusinessError: PDP 无 write 权限。
+        """
+        metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+
+        # 术语存在性校验（跨服务：术语在 glossary 域，指标在 semantic 域）
+        if term_id is not None:
+            from sqlalchemy import select
+
+            from app.models.term import Term
+
+            term = (
+                await self._db.execute(select(Term.id).where(Term.id == term_id))
+            ).scalar_one_or_none()
+            if term is None:
+                raise NotFoundError(f"术语不存在: {term_id}", ctx={"term_id": term_id})
+
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权绑定该指标术语",
+                error_code=decision.error_code or "FORBIDDEN",
+                ctx={"metric_code": metric_code, "actor_id": actor_id},
+            )
+
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id, metric.row_version, term_id=term_id
+        )
+        await self._cache.invalidate(metric_code)
+
+        logger.info(
+            "metric_term_bound",
+            metric_code=metric_code,
+            term_id=term_id,
+            actor_id=actor_id,
+        )
+        return updated
+
     async def infer_metric_description(
         self,
         metric_code: str,
