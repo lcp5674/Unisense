@@ -3773,7 +3773,7 @@ async def test_mark_source_dropped_marks_published_metrics():
         svc._publish_event = AsyncMock(return_value=None)
         svc._cache.invalidate = AsyncMock(return_value=None)
 
-        count = await svc.mark_source_dropped(["mysql_orders"], actor_id=1)
+        count = await svc.mark_source_dropped(["mysql_orders"], actor_id=1, role="platform_admin")
 
     assert count == 2
     assert repo.update_with_optimistic_lock.await_count == 2
@@ -3781,6 +3781,19 @@ async def test_mark_source_dropped_marks_published_metrics():
     calls = repo.update_with_optimistic_lock.call_args_list
     for c in calls:
         assert c.kwargs["status"] == "DATA_SOURCE_DROPPED"
+
+
+async def test_mark_source_dropped_rejects_non_admin():
+    """越权防护：非管理角色调 mark_source_dropped → AuthError，不得批量变更他人指标状态。"""
+    from app.core.exceptions import AuthError
+
+    svc, repo = _svc_with_repo()
+    # 不 mock 任何血缘/DB 查询：角色校验须在副作用发生前拦截
+    with pytest.raises(AuthError) as exc:
+        await svc.mark_source_dropped(["mysql_orders"], actor_id=1, role="metric_owner")
+    assert exc.value.error_code == "FORBIDDEN"
+    # 未触碰任何指标状态更新
+    repo.update_with_optimistic_lock.assert_not_called()
 
 
 async def test_recover_source_dropped_returns_to_published():

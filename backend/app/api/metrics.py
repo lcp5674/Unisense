@@ -1691,7 +1691,10 @@ async def confirm_deprecate_dropped(
     "/mark-source-dropped",
     response_model=ApiResponse[dict[str, int]],
     summary="数据源 DROP → 血缘下游指标批量置 DATA_SOURCE_DROPPED（采集侧触发）",
-    dependencies=_WRITE_DEPS,
+    # 越权收紧：该操作会批量变更任意指标状态，仅限管理角色（platform_admin/domain_admin）。
+    # 原实现挂 _WRITE_DEPS（含 metric_owner），任意指标 Owner 可对任意 source_ids
+    # 把他人的 PUBLISHED 指标批量置 DSD——越权面。service 层另有同角色兜底校验。
+    dependencies=[Depends(require_roles("platform_admin", "domain_admin")), Depends(guard_against_injection)],
 )
 async def mark_source_dropped(
     request: MetricSourceDroppedRequest,
@@ -1703,7 +1706,7 @@ async def mark_source_dropped(
     """采集检测到源表 DROP 后批量标记下游指标（owner 生成 7 天待办）。"""
     service = MetricService(db)
     count = await service.mark_source_dropped(
-        source_ids=request.source_ids, actor_id=user.id
+        source_ids=request.source_ids, actor_id=user.id, role=user.role
     )
     await write_audit(
         db,

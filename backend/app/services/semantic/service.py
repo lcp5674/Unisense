@@ -3485,7 +3485,7 @@ class MetricService(BaseService):
     #   DSD → PUBLISHED（源恢复/确认误报）；DSD → DEPRECATED（确认退役）。
     # ------------------------------------------------------------------
 
-    async def mark_source_dropped(self, source_ids: list[str], actor_id: int) -> int:
+    async def mark_source_dropped(self, source_ids: list[str], actor_id: int, role: str) -> int:
         """数据源 DROP/不可达 → 血缘下游 PUBLISHED 指标批量置 DATA_SOURCE_DROPPED。
 
         对齐 PRD R3-04④：采集检测到源表 DROP 后调用本方法，沿血缘把引用该
@@ -3495,14 +3495,27 @@ class MetricService(BaseService):
         Args:
             source_ids: 已 DROP 的数据源 ID 集合（采集侧确认不可达的源）。
             actor_id: 触发人 ID（采集/运维）。
+            role: 触发人角色。该操作会批量变更他人指标状态，仅限管理角色
+                （platform_admin/domain_admin）——任意 metric_owner 不得借
+                采集侧接口对任意数据源把他人 PUBLISHED 指标批量置 DSD（越权面）。
 
         Returns:
             被标记为 DSD 的指标数（0 表示无血缘下游指标或均已处理）。
+
+        Raises:
+            AuthError: 非管理角色调用（服务层兜底，API 角色门禁之外防御直调）。
 
         实现：查血缘 ``table:`` 下游节点，再按 source_id 关联 DBCatalog 过滤——
         精确到「该数据源表」的下游指标，避免误伤同域其他源。best-effort，
         血缘缺失不影响已发布指标继续可用。
         """
+        if role not in ("platform_admin", "domain_admin"):
+            raise AuthError(
+                "批量标记数据源下线仅平台/域管理员可执行",
+                error_code="FORBIDDEN",
+                ctx={"role": role, "actor_id": actor_id},
+            )
+
         from sqlalchemy import select
 
         from app.models.data_source import DBCatalog
