@@ -963,6 +963,31 @@ class LineageRepository:
         edge.missing_count = 0
         await self._db.flush()
 
+    async def invalidate_dropped_table(self, table_node: str) -> int:
+        """表删除（``DROP TABLE``）依赖失效：软删除以该表为源或目标的血缘边。
+
+        表实体已不存在，其上下游血缘边均失去意义（依赖失效）；软删除保留审计
+        痕迹与历史快照，可追踪「该表被 DROP 后哪些边随之失效」。
+
+        Args:
+            table_node: 表节点标识（``table:db.name``）。
+
+        Returns:
+            失效（软删除）的边数。
+        """
+        result = await self._db.execute(
+            update(LineageEdge)
+            .where(
+                or_(
+                    LineageEdge.source_node == table_node,
+                    LineageEdge.target_node == table_node,
+                ),
+                LineageEdge.deleted_at.is_(None),
+            )
+            .values(deleted_at=datetime.now(UTC))
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
     async def list_nodes(self, kw: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
         """血缘候选节点：聚合血缘边两端节点（源∪目标去重，软删过滤）。
 

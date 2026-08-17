@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from tests.eval.golden_dataset import GOLDEN, GoldenCase
 
 from app.services.lineage.parser import (
+    extract_ddl_lineage,
     extract_field_lineage,
     extract_table_lineage,
     extract_upstream_deps,
@@ -44,6 +45,8 @@ class CaseMetrics:
     fe_recall: float | None = None
     ud_precision: float | None = None
     ud_recall: float | None = None
+    ddl_precision: float | None = None
+    ddl_recall: float | None = None
     #: 诊断明细：多余/缺失的边（用于失败定位）。
     extra_te: frozenset[str] = frozenset()
     missing_te: frozenset[str] = frozenset()
@@ -51,6 +54,8 @@ class CaseMetrics:
     missing_fe: frozenset[str] = frozenset()
     extra_ud: frozenset[str] = frozenset()
     missing_ud: frozenset[str] = frozenset()
+    extra_ddl: frozenset[str] = frozenset()
+    missing_ddl: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -66,6 +71,8 @@ class EvalReport:
     fe_recall: float | None = None
     ud_precision: float | None = None
     ud_recall: float | None = None
+    ddl_precision: float | None = None
+    ddl_recall: float | None = None
 
     @property
     def exact_rate(self) -> float:
@@ -108,6 +115,27 @@ def _fmt_ud(deps: object) -> tuple[set[str], set[str]]:
     return set(deps.tables), set(deps.fields)
 
 
+def _fmt_ddl(edges: object) -> set[str]:
+    """DDL 血缘边 → 紧凑规范化集合（区分结构依赖与列级变更标记）。
+
+    - 结构依赖（create_like/create_as_copy/rename_table）：``{type}:{src}->{tgt}``
+    - 列重命名（rename_column）：``rename_column:{table}.{old}->{table}.{new}``
+    - 列级标记（add/drop/alter column）：``{type}:{table}.{col}``
+    - 表删除（drop_table）：``drop_table:{table}``
+    """
+    out: set[str] = set()
+    for e in edges:
+        if e.ddl_type == "rename_column":
+            out.add(f"rename_column:{e.table}.{e.source_column}->{e.table}.{e.target_column}")
+        elif e.ddl_type in ("add_column", "drop_column", "alter_column"):
+            out.add(f"{e.ddl_type}:{e.table}.{e.column}")
+        elif e.ddl_type == "drop_table":
+            out.add(f"drop_table:{e.table}")
+        else:
+            out.add(f"{e.ddl_type}:{e.source}->{e.target}")
+    return out
+
+
 def evaluate_case(case: GoldenCase) -> CaseMetrics:
     """运行解析器并对比期望，产出单条用例指标。
 
@@ -136,6 +164,21 @@ def evaluate_case(case: GoldenCase) -> CaseMetrics:
             | frozenset(pred_fields - case.expected_ud_fields),
             missing_ud=frozenset(case.expected_ud_tables - pred_tables)
             | frozenset(case.expected_ud_fields - pred_fields),
+        )
+
+    if case.expected_ddl:
+        pred_ddl = _fmt_ddl(extract_ddl_lineage(case.sql, case.dialect))
+        ddl_prec = _precision(pred_ddl, case.expected_ddl)
+        ddl_rec = _recall(pred_ddl, case.expected_ddl)
+        exact = pred_ddl == case.expected_ddl
+        return CaseMetrics(
+            case_id=case.case_id,
+            dialect=case.dialect,
+            exact=exact,
+            ddl_precision=ddl_prec,
+            ddl_recall=ddl_rec,
+            extra_ddl=frozenset(pred_ddl - case.expected_ddl),
+            missing_ddl=frozenset(case.expected_ddl - pred_ddl),
         )
 
     pred_te = _fmt_te(extract_table_lineage(case.sql, case.dialect, target_table=case.target_table))
@@ -174,6 +217,8 @@ def run_eval() -> EvalReport:
     fe_r = [m.fe_recall for m in cases if m.fe_recall is not None]
     ud_p = [m.ud_precision for m in cases if m.ud_precision is not None]
     ud_r = [m.ud_recall for m in cases if m.ud_recall is not None]
+    ddl_p = [m.ddl_precision for m in cases if m.ddl_precision is not None]
+    ddl_r = [m.ddl_recall for m in cases if m.ddl_recall is not None]
     return EvalReport(
         total=len(cases),
         exact_count=sum(1 for m in cases if m.exact),
@@ -184,6 +229,8 @@ def run_eval() -> EvalReport:
         fe_recall=_macro_avg(fe_r),
         ud_precision=_macro_avg(ud_p),
         ud_recall=_macro_avg(ud_r),
+        ddl_precision=_macro_avg(ddl_p),
+        ddl_recall=_macro_avg(ddl_r),
     )
 
 
@@ -204,6 +251,7 @@ def format_report(report: EvalReport) -> str:
         f"表级 TE   {_pct(report.te_precision):<8} {_pct(report.te_recall)}",
         f"字段级 FE {_pct(report.fe_precision):<8} {_pct(report.fe_recall)}",
         f"上游 UD   {_pct(report.ud_precision):<8} {_pct(report.ud_recall)}",
+        f"DDL      {_pct(report.ddl_precision):<8} {_pct(report.ddl_recall)}",
     ]
     failures = [m for m in report.cases if not m.exact]
     if failures:
@@ -223,6 +271,10 @@ def format_report(report: EvalReport) -> str:
                 lines.append(f"      多余上游依赖: {sorted(m.extra_ud)}")
             if m.missing_ud:
                 lines.append(f"      缺失上游依赖: {sorted(m.missing_ud)}")
+            if m.extra_ddl:
+                lines.append(f"      多余 DDL 边: {sorted(m.extra_ddl)}")
+            if m.missing_ddl:
+                lines.append(f"      缺失 DDL 边: {sorted(m.missing_ddl)}")
     else:
         lines.append("")
         lines.append("无失败用例，全部精确匹配。")

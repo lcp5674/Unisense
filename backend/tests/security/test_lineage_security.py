@@ -14,7 +14,11 @@ from httpx import ASGITransport
 
 from app.api import deps
 from app.main import app
-from app.services.lineage.schemas import LineageParseBatchResponse, LineageParseResponse
+from app.services.lineage.schemas import (
+    LineageParseBatchResponse,
+    LineageParseResponse,
+    LineageScanResponse,
+)
 
 
 @pytest.fixture
@@ -208,3 +212,37 @@ async def test_export_accepts_legit_node(owner_client, monkeypatch):
     )
     assert resp.status_code == 200
     svc.export_lineage.assert_awaited_once()
+
+
+async def test_scan_accepts_path_with_dash(owner_client, monkeypatch):
+    """/scan 的 path 是文件系统路径（非 SQL 文本），豁免注入扫描：
+    含 ``--`` 的合法路径不应被注释正则误伤为 400。"""
+    client, _ = owner_client
+    svc = AsyncMock()
+    svc.scan_directory.return_value = LineageScanResponse(
+        files=1, statements=2, table_edges=1, field_edges=1, ddl_edges=0,
+        succeeded=1, failed=0, dry_run=True, graph_written=False,
+    )
+    monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)
+    resp = await client.post(
+        "/api/v1/lineage/scan",
+        json={"path": "/data/sqls -- 2026", "dry_run": True},
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["files"] == 1
+    svc.scan_directory.assert_awaited_once()
+
+
+async def test_scan_still_blocks_injection_in_extensions(owner_client, monkeypatch):
+    """/scan 仅豁免 path；extensions 等其他字段命中注入仍 400 拦截。"""
+    client, _ = owner_client
+    svc = AsyncMock()
+    monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)
+    resp = await client.post(
+        "/api/v1/lineage/scan",
+        json={"path": "/data/sqls", "extensions": ".sql OR 1=1 --"},
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 400
+    svc.scan_directory.assert_not_awaited()

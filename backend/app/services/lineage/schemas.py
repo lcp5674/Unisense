@@ -70,6 +70,20 @@ class UpstreamDeps(BaseModel):
     )
 
 
+class DDLEdgeItem(BaseModel):
+    """DDL 血缘边明细（结构变更/依赖，区别于 DML 数据流转边）。"""
+
+    ddl_type: str = Field(
+        description="DDL 类型：create_like/create_as_copy/rename_table/rename_column/…"
+    )
+    source: str | None = Field(default=None, description="源表/旧表")
+    target: str | None = Field(default=None, description="目标表/新表")
+    table: str | None = Field(default=None, description="列变更所在表")
+    source_column: str | None = Field(default=None, description="旧列名（rename_column）")
+    target_column: str | None = Field(default=None, description="新列名（rename_column）")
+    column: str | None = Field(default=None, description="受影响列（add/drop/alter column）")
+
+
 class LineageParseResponse(BaseModel):
     """血缘解析结果。"""
 
@@ -85,6 +99,9 @@ class LineageParseResponse(BaseModel):
     upstream_deps: UpstreamDeps | None = Field(
         default=None,
         description="纯 SELECT 无落点时的上游依赖清单（只读展示，不写图谱）",
+    )
+    ddl_edges: list[DDLEdgeItem] = Field(
+        default_factory=list, description="本次解析的 DDL 血缘边明细（结构变更/依赖）"
     )
 
 
@@ -612,3 +629,39 @@ class LineageJsonExportResponse(BaseModel):
     edges: list[dict[str, Any]] = Field(
         default_factory=list, description="边明细（id/source_node/target_node/edge_type/...）"
     )
+
+
+class LineageScanRequest(BaseModel):
+    """库级扫描请求（企业级血缘重建：扫描 SQL 目录批量解析）。"""
+
+    path: str = Field(description="待扫描目录（容器内绝对路径）")
+    dialect: str | None = Field(default=None, description="强制方言；None=按文件内容启发式推断")
+    dry_run: bool = Field(default=True, description="True 仅统计不落库；False 批量幂等写入血缘")
+    extensions: str = Field(default=".sql,.hql,.ddl", description="逗号分隔的文件扩展名过滤")
+    limit: int = Field(default=500, ge=1, le=5000, description="最大扫描文件数")
+
+
+class LineageScanFileResult(BaseModel):
+    """单文件扫描明细。"""
+
+    path: str = Field(description="文件路径")
+    statements: int = Field(default=0, description="语句数")
+    table_edges: int = Field(default=0, description="表级边数")
+    field_edges: int = Field(default=0, description="字段级边数")
+    ddl_edges: int = Field(default=0, description="DDL 血缘边数")
+    error: str | None = Field(default=None, description="解析异常（整文件失败时）")
+
+
+class LineageScanResponse(BaseModel):
+    """库级扫描结果汇总。"""
+
+    files: int = Field(description="扫描文件数")
+    statements: int = Field(description="总语句数")
+    table_edges: int = Field(description="表级血缘边总数")
+    field_edges: int = Field(description="字段级血缘边总数")
+    ddl_edges: int = Field(description="DDL 血缘边总数")
+    succeeded: int = Field(description="成功文件数")
+    failed: int = Field(description="失败文件数")
+    dry_run: bool = Field(description="是否仅统计（未落库）")
+    graph_written: bool = Field(default=False, description="非 dry_run 时图谱是否写入")
+    files_detail: list[LineageScanFileResult] = Field(default_factory=list)

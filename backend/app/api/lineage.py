@@ -35,6 +35,7 @@ from app.services.lineage.schemas import (
     LineageParseBatchRequest,
     LineageParseRequest,
     LineagePathResponse,
+    LineageScanRequest,
     LineageStaleParams,
     LineageTerminalsResponse,
     ManualEdgeCreateRequest,
@@ -61,6 +62,12 @@ _PARSE_DEPS = [
 _PARSE_BATCH_DEPS = [
     Depends(require_roles(*_WRITE_ROLES)),
     Depends(guard_against_injection_exempt("statements", "text")),
+]
+# /scan 的 path 是容器内文件系统路径（非 SQL 文本，也不进 DB 查询），豁免注入扫描
+# （避免 ``/tmp/x -- 2026`` 这类合法路径被 ``--`` 注释正则误伤）；其余字段仍全量扫描。
+_SCAN_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt("path")),
 ]
 
 # Neo4j 驱动持连接池，每请求新建 LineageGraphClient 且从不 dispose 会让 driver
@@ -154,6 +161,43 @@ async def parse_lineage_batch(
             "added": result.added,
             "updated": result.updated,
             "skipped": result.skipped,
+            "graph_written": result.graph_written,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result.model_dump(), trace_id=trace_id)
+
+
+@router.post("/scan", dependencies=_SCAN_DEPS)
+async def scan_lineage_directory(
+    body: LineageScanRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """库级扫描：递归扫描 SQL 目录并解析血缘（企业级批量重建）。
+
+    ``dry_run=True``（默认）仅统计返回逐文件明细，不落库；False 批量幂等写入
+    血缘（含结构性 DDL 边）并同步图谱。方言未指定时按文件内容启发式推断。
+    """
+    svc = _svc(db)
+    result = await svc.scan_directory(body, actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="LINEAGE_SCAN",
+        entity_type="lineage",
+        entity_id=body.path,
+        detail={
+            "files": result.files,
+            "statements": result.statements,
+            "table_edges": result.table_edges,
+            "field_edges": result.field_edges,
+            "ddl_edges": result.ddl_edges,
+            "dry_run": result.dry_run,
             "graph_written": result.graph_written,
         },
         ip=client_ip(request),

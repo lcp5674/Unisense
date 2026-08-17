@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +23,7 @@ from app.services.lineage.schemas import (
     LineageImpactParams,
     LineageParseBatchRequest,
     LineageParseRequest,
+    LineageScanRequest,
     ManualEdgeCreateRequest,
     PiiImpactItem,
 )
@@ -248,6 +251,17 @@ class FakeRepo:
     async def would_create_cycle(self, edge: object) -> bool:
         """环检假实现：默认不成环（供 parse_and_store 建边前调用）。"""
         return False
+
+    async def invalidate_dropped_table(self, table_node: str) -> int:
+        """DROP TABLE 依赖失效假实现：从 self.edges 移除触及该表节点的边。"""
+        before = len(self.edges)
+        self.edges = [
+            e
+            for e in self.edges
+            if getattr(e, "source_node", None) != table_node
+            and getattr(e, "target_node", None) != table_node
+        ]
+        return before - len(self.edges)
 
     async def edges_for_node(self, node: str, direction: str = "both") -> list[Any]:
         """按节点返回血缘边；返回 self.edges_for_node_result（默认空）。"""
@@ -2409,3 +2423,152 @@ async def test_export_filters_applied() -> None:
 
     assert len(result) == 1
     assert result[0]["inputs"][0]["name"] == "ods.a"
+
+
+# ---- DDL 血缘集成（企业级：结构变更/依赖写入）----
+
+
+async def test_parse_and_store_ddl_create_like_writes_edge() -> None:
+    """``CREATE TABLE t LIKE s``：DDL 边写入图谱 + 响应 ddl_edges 明细。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    res = await svc.parse_and_store(
+        LineageParseRequest(sql="CREATE TABLE dws.t LIKE ods.s", dialect="mysql"),
+        actor_id=1,
+    )
+    assert [i.model_dump() for i in res.ddl_edges] == [
+        {
+            "ddl_type": "create_like",
+            "source": "ods.s",
+            "target": "dws.t",
+            "table": None,
+            "source_column": None,
+            "target_column": None,
+            "column": None,
+        }
+    ]
+    # 结构性 DDL 边按表级边写入图谱
+    assert any(
+        c.get("source_node") == "table:ods.s" and c.get("target_node") == "table:dws.t"
+        for c in svc._repo.upsert_calls
+    )
+    assert any(i.source == "table:ods.s" and i.target == "table:dws.t" for i in res.table_lineage)
+
+
+async def test_parse_and_store_ddl_rename_column_writes_field_edge() -> None:
+    """``ALTER TABLE t RENAME COLUMN a TO b``：列重命名按字段级边写入。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    res = await svc.parse_and_store(
+        LineageParseRequest(sql="ALTER TABLE dws.t RENAME COLUMN a TO b", dialect="postgres"),
+        actor_id=1,
+    )
+    assert [i.ddl_type for i in res.ddl_edges] == ["rename_column"]
+    assert any(
+        c.get("source_node") == "field:dws.t.a" and c.get("target_node") == "field:dws.t.b"
+        for c in svc._repo.upsert_calls
+    )
+
+
+async def test_parse_and_store_ddl_drop_table_invalidates() -> None:
+    """``DROP TABLE``：标记 drop_table 并触发依赖失效（软删触及该表的边）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    repo.edges = [SimpleNamespace(id=1, source_node="table:ods.s", target_node="table:dws.t")]
+    res = await svc.parse_and_store(
+        LineageParseRequest(sql="DROP TABLE IF EXISTS ods.s", dialect="mysql"), actor_id=1
+    )
+    assert [i.ddl_type for i in res.ddl_edges] == ["drop_table"]
+    # 触及 ods.s 的边被软删（依赖失效）
+    assert repo.edges == []
+
+
+async def test_parse_and_store_ddl_add_column_marker_no_edge() -> None:
+    """``ALTER TABLE ADD COLUMN``：仅标记不产数据流转边。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    res = await svc.parse_and_store(
+        LineageParseRequest(sql="ALTER TABLE dws.t ADD COLUMN c INT", dialect="mysql"),
+        actor_id=1,
+    )
+    assert [i.ddl_type for i in res.ddl_edges] == ["add_column"]
+    assert res.table_edges == 0 and res.field_edges == 0
+    assert svc._repo.upsert_calls == []
+
+
+# ---- 库级扫描（企业级批量重建）----
+
+
+def _write_scan_file(dirpath: str, name: str, content: str) -> str:
+    path = os.path.join(dirpath, name)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    return path
+
+
+async def test_scan_directory_dry_run_stats() -> None:
+    """库级扫描 dry_run：递归收集文件 + 表级/字段级/DDL 边统计，不落库。"""
+    with tempfile.TemporaryDirectory() as td:
+        _write_scan_file(td, "a.sql", "INSERT INTO dws.t SELECT a.id FROM ods.a")
+        _write_scan_file(td, "b.hql", "CREATE TABLE dws.u LIKE ods.s")
+        _write_scan_file(td, "c.sql", "SELECT 1")  # 无血缘边
+        svc = LineageService(db=_FakeSession())
+        svc._repo = FakeRepo()
+        res = await svc.scan_directory(LineageScanRequest(path=td, dry_run=True), actor_id=1)
+        assert res.files == 3
+        assert res.succeeded == 3
+        assert res.failed == 0
+        assert res.dry_run is True
+        assert res.table_edges == 1  # a.sql 1 表级（b.hql 的 LIKE 只产 DDL 边）
+        assert res.field_edges == 1
+        assert res.ddl_edges == 1
+        assert res.graph_written is False
+        # 逐文件明细存在
+        assert {f.path for f in res.files_detail} >= {
+            os.path.join(td, "a.sql"),
+            os.path.join(td, "b.hql"),
+        }
+        # dry_run 不写库
+        assert svc._repo.upsert_calls == []
+
+
+async def test_scan_directory_persist_writes_edges() -> None:
+    """库级扫描非 dry_run：批量写入 DML 边 + 结构性 DDL 边 + 图同步。"""
+    with tempfile.TemporaryDirectory() as td:
+        _write_scan_file(td, "a.sql", "INSERT INTO dws.t SELECT a.id FROM ods.a")
+        _write_scan_file(td, "b.sql", "CREATE TABLE dws.u LIKE ods.s")
+        svc = LineageService(db=_FakeSession())
+        svc._repo = FakeRepo()
+        res = await svc.scan_directory(LineageScanRequest(path=td, dry_run=False), actor_id=1)
+        assert res.dry_run is False
+        assert res.table_edges == 1  # a.sql 的 DML 表级边（b.sql LIKE 计入 ddl_edges）
+        assert res.ddl_edges == 1
+        # DML 表级边 + DDL 表级边均写入
+        written = {(c.get("source_node"), c.get("target_node")) for c in svc._repo.upsert_calls}
+        assert ("table:ods.a", "table:dws.t") in written
+        assert ("table:ods.s", "table:dws.u") in written
+        # 运行记录落一条（kind=scan）
+        assert any(getattr(r, "source", None) == "scan" for r in svc._repo.runs)
+
+
+async def test_scan_directory_rejects_path_traversal() -> None:
+    """路径沙箱：拒绝 ``..`` 相对路径穿越。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    with pytest.raises(ValidationError):
+        await svc.scan_directory(LineageScanRequest(path="/tmp/../etc"), actor_id=1)
+
+
+async def test_scan_directory_infers_hive_dialect() -> None:
+    """方言启发式：含 LATERAL VIEW 的 .hql 按 hive 解析（字段级正确）。"""
+    with tempfile.TemporaryDirectory() as td:
+        _write_scan_file(
+            td,
+            "e.hql",
+            "INSERT INTO dws.t SELECT e.tag FROM ods.a LATERAL VIEW EXPLODE(a.tags) e AS tag",
+        )
+        svc = LineageService(db=_FakeSession())
+        svc._repo = FakeRepo()
+        res = await svc.scan_directory(LineageScanRequest(path=td, dry_run=True), actor_id=1)
+        assert res.field_edges == 1  # hive EXPLODE 展开列正确解析（hive 方言推断生效）

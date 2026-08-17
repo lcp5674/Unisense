@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     # 在「采集通道」视图确认删除或恢复。
     lineage_stale_observation_runs: int = 3
 
+    # ---- 血缘库级扫描（企业级批量重建，TD §12.2）----
+    # 定时扫描的 SQL 目录（空=禁用定时扫描任务）；方言：空=按文件内容启发式推断。
+    # worker 每日按 lineage_scan_cron 触发 scan_tasks.lineage_scan_task。
+    lineage_scan_dir: str = ""
+    lineage_scan_dialect: str | None = None
+
     model_config = SettingsConfigDict(
         env_prefix="UNISENSE_",
         env_file=".env",

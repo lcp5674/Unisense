@@ -1446,6 +1446,176 @@ def extract_upstream_deps(
     )
 
 
+@dataclass(frozen=True)
+class DDLEdge:
+    """DDL 血缘边（结构变更/依赖关系，区别于 DML 数据流转边）。
+
+    DDL 血缘表达**结构层依赖**：
+    - ``create_like`` / ``create_as_copy``：结构复制依赖 源表 → 目标表
+    - ``rename_table``：表/视图重命名 旧表 → 新表
+    - ``rename_column``：列重命名 表.旧列 → 表.新列
+    - ``alter_column``：列类型/默认值变更（无重命名，仅标记）
+    - ``add_column`` / ``drop_column``：新增/删除列（仅标记，下游字段血缘随之失效）
+    - ``drop_table``：删除表（仅标记，下游血缘随之失效）
+    """
+
+    ddl_type: str
+    source: str | None = None
+    target: str | None = None
+    table: str | None = None
+    source_column: str | None = None
+    target_column: str | None = None
+    column: str | None = None
+
+
+#: DDL 正则兜底（sqlglot 25.x 不支持/降级 Command 的方言变体）。
+_DDL_RE_RENAME_TABLE = re.compile(
+    r"\bALTER\s+(?:TABLE|VIEW)\s+(\S+)\s+RENAME\s+TO\s+(\S+)", re.IGNORECASE
+)
+_DDL_RE_RENAME_COL = re.compile(
+    r"\bALTER\s+TABLE\s+(\S+)\s+(?:CHANGE)\s+(\S+)\s+(\S+)", re.IGNORECASE
+)
+_DDL_RE_COPY_OF = re.compile(r"\bCREATE\s+TABLE\s+(\S+)\s+AS\s+COPY\s+OF\s+(\S+)", re.IGNORECASE)
+_DDL_RE_DROP_TABLE = re.compile(
+    r"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w.]+(?:\s*,\s*[\w.]+)*)",
+    re.IGNORECASE,
+)
+
+
+def _ddl_regex_fallback(stmt: str) -> list[DDLEdge]:
+    """sqlglot 25.x 解析失败/降级 Command 的 DDL 语句正则兜底。
+
+    覆盖生产高频方言变体（血缘语义等价，仅标记结构变更）：
+    - 表/视图重命名：``ALTER TABLE old RENAME TO new``
+    - MySQL 列重命名：``ALTER TABLE t CHANGE a b ...``（a → b）
+    - PG 结构复制：``CREATE TABLE t AS COPY OF s``（复制结构不复制数据）
+    - 多表 DROP：``DROP TABLE [IF EXISTS] a, b``（逐表标记依赖失效）
+    """
+    edges: list[DDLEdge] = []
+    m = _DDL_RE_RENAME_TABLE.search(stmt)
+    if m:
+        edges.append(DDLEdge("rename_table", source=m.group(1), target=m.group(2)))
+        return edges
+    m = _DDL_RE_RENAME_COL.search(stmt)
+    if m:
+        edges.append(
+            DDLEdge(
+                "rename_column",
+                table=m.group(1),
+                source_column=m.group(2),
+                target_column=m.group(3),
+            )
+        )
+        return edges
+    m = _DDL_RE_COPY_OF.search(stmt)
+    if m:
+        edges.append(DDLEdge("create_as_copy", source=m.group(2), target=m.group(1)))
+        return edges
+    if not re.search(r"\bDROP\s+COLUMN\b", stmt, re.IGNORECASE):
+        m = _DDL_RE_DROP_TABLE.search(stmt)
+        if m:
+            for part in m.group(1).split(","):
+                name = part.strip()
+                if name:
+                    edges.append(DDLEdge("drop_table", table=name))
+    return edges
+
+
+def extract_ddl_lineage(sql: str, dialect: str | None = None) -> list[DDLEdge]:
+    """抽取 DDL 血缘（结构变更/依赖），区别于 DML 数据流转血缘。
+
+    基于 sqlglot 25.x 实测 AST（每类语句的节点形态均已验证）：
+    - ``CREATE TABLE t LIKE s`` / ``(LIKE s ...)`` → ``create_like``（``s`` → ``t``）
+    - ``ALTER TABLE old RENAME TO new``（含 ALTER VIEW）→ ``rename_table``
+    - ``ALTER TABLE t RENAME COLUMN a TO b`` → ``rename_column``（``t.a`` → ``t.b``）
+    - ``ALTER TABLE t ADD [COLUMN] c`` / ``DROP [COLUMN] c`` / ``MODIFY [COLUMN] v``
+      → ``add_column`` / ``drop_column`` / ``alter_column`` 标记（列级变更）
+    - ``DROP TABLE t`` → ``drop_table`` 标记（依赖失效，含多表 DROP）
+
+    sqlglot 25.x 降级为 ``Command`` 的方言变体用正则兜底（血缘语义等价）：
+    - PG ``CREATE TABLE t AS COPY OF s``（复制结构不复制数据）→ ``create_as_copy``
+    - MySQL ``ALTER TABLE t CHANGE a b ...``（列重命名）→ ``rename_column``
+    - 多表 ``DROP TABLE IF EXISTS a, b``（解析报错）→ 逐表 ``drop_table``
+
+    Args:
+        sql: SQL 文本（支持注释/多语句，自动净化）。
+        dialect: sqlglot dialect（可选）。
+
+    Returns:
+        ``DDLEdge`` 列表；解析失败降级为空（不抛异常，与血缘其余入口一致）。
+    """
+    edges: list[DDLEdge] = []
+    sql = _preprocess_dialect(sql, dialect)
+    for stmt in _split_statements(sql):
+        try:
+            ast: Any = sqlglot.parse_one(stmt, dialect=dialect)
+        except Exception:
+            edges.extend(_ddl_regex_fallback(stmt))
+            continue
+        if isinstance(ast, exp.Create):
+            if ast.kind and ast.kind.upper() == "TABLE" and not _is_query_node(ast.expression):
+                # CREATE TABLE ... LIKE ...（结构复制，无数据流转）：LIKE 源表 → 目标表
+                target = _find_target(ast)
+                target_name = _norm_table(target) if target is not None else None
+                for tbl in ast.find_all(exp.Table):
+                    src = _norm_table(tbl)
+                    if src and src != target_name:
+                        edges.append(DDLEdge("create_like", source=src, target=target_name))
+        elif isinstance(ast, exp.Alter):
+            table = _norm_table(ast.this) if isinstance(ast.this, exp.Table) else None
+            for action in ast.args.get("actions") or []:
+                if (
+                    isinstance(action, exp.AlterRename)
+                    and isinstance(action.this, exp.Table)
+                    and table
+                ):
+                    edges.append(
+                        DDLEdge("rename_table", source=table, target=_norm_table(action.this))
+                    )
+                elif isinstance(action, exp.RenameColumn) and table:
+                    src_col = action.this
+                    dst_col = action.args.get("to")
+                    if isinstance(src_col, exp.Column) and isinstance(dst_col, exp.Column):
+                        edges.append(
+                            DDLEdge(
+                                "rename_column",
+                                table=table,
+                                source_column=src_col.name,
+                                target_column=dst_col.name,
+                            )
+                        )
+                elif isinstance(action, exp.ColumnDef) and table:
+                    name = getattr(action.this, "name", None)
+                    if name:
+                        edges.append(DDLEdge("add_column", table=table, column=name))
+                elif isinstance(action, exp.AlterColumn) and table:
+                    name = getattr(action.this, "name", None)
+                    if name:
+                        edges.append(DDLEdge("alter_column", table=table, column=name))
+                elif (
+                    isinstance(action, exp.Drop)
+                    and action.kind
+                    and action.kind.upper() == "COLUMN"
+                    and table
+                ):
+                    col = action.this
+                    if isinstance(col, exp.Column):
+                        edges.append(DDLEdge("drop_column", table=table, column=col.name))
+        elif isinstance(ast, exp.Drop) and ast.kind and ast.kind.upper() == "TABLE":
+            names: list[str] = []
+            if isinstance(ast.this, exp.Table):
+                names.append(_norm_table(ast.this))
+            for e in ast.args.get("expressions") or []:
+                if isinstance(e, exp.Table):
+                    names.append(_norm_table(e))
+            for n in names:
+                if n:
+                    edges.append(DDLEdge("drop_table", table=n))
+        elif isinstance(ast, exp.Command):
+            edges.extend(_ddl_regex_fallback(stmt))
+    return edges
+
+
 def node_table(name: str) -> str:
     """构造表节点标识。"""
     return f"table:{name}"

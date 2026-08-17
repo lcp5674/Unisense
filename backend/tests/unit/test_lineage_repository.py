@@ -1467,3 +1467,18 @@ async def test_list_export_edges_node_direction() -> None:
     # limit 截断
     limited = await repo.list_export_edges(node="table:dws.t", direction="upstream", limit=1)
     assert [e.id for e in limited] == [1]
+
+
+async def test_invalidate_dropped_table_soft_deletes_edges() -> None:
+    """``invalidate_dropped_table``：DROP TABLE 依赖失效——软删除以该表为源或目标的边。"""
+    rows = [
+        _Row(1, "table:ods.s", "table:dws.t"),
+        _Row(2, "table:dws.t", "table:dws.u"),
+        _Row(3, "table:ods.x", "table:dws.y"),  # 无关边保留
+    ]
+    db = _FakeDB(rows)
+    repo = LineageRepository(db)
+    n = await repo.invalidate_dropped_table("table:dws.t")
+    assert n == 2  # 边 1（dws.t 是目标）+ 边 2（dws.t 是源）
+    remaining = [r.id for r in db._rows]
+    assert remaining == [3]

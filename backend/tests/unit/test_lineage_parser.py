@@ -8,6 +8,7 @@ from sqlglot import exp
 from app.services.lineage.parser import (
     _branch_queries,
     expand_variables,
+    extract_ddl_lineage,
     extract_field_lineage,
     extract_table_lineage,
     extract_upstream_deps,
@@ -1320,3 +1321,80 @@ def test_expand_variables_hiveconf_and_bare() -> None:
     assert "${unknown}" in expanded
     # 非 hive 方言直接原样返回
     assert expand_variables("${x}", dialect="mysql") == "${x}"
+
+
+# ---- DDL 血缘追踪（企业级：结构变更/依赖，区别于 DML 数据流转）----
+
+
+def _ddl_types(sql: str, dialect: str | None = None) -> list[str]:
+    return [e.ddl_type for e in extract_ddl_lineage(sql, dialect)]
+
+
+def test_ddl_create_like_mysql() -> None:
+    """``CREATE TABLE t LIKE s``：结构复制依赖 s → t。"""
+    edges = extract_ddl_lineage("CREATE TABLE dws.t LIKE ods.s", "mysql")
+    assert len(edges) == 1
+    assert edges[0].ddl_type == "create_like"
+    assert (edges[0].source, edges[0].target) == ("ods.s", "dws.t")
+
+
+def test_ddl_create_like_postgres() -> None:
+    """``CREATE TABLE t (LIKE s ...)``（PG 带 INCLUDING）：同样识别。"""
+    edges = extract_ddl_lineage("CREATE TABLE dws.t (LIKE ods.s INCLUDING ALL)", "postgres")
+    assert len(edges) == 1
+    assert (edges[0].source, edges[0].target) == ("ods.s", "dws.t")
+
+
+def test_ddl_create_as_copy_of_regex_fallback() -> None:
+    """``CREATE TABLE t AS COPY OF s``（PG，25.x 降级 Command）：正则兜底。"""
+    edges = extract_ddl_lineage("CREATE TABLE dws.t AS COPY OF ods.s", "postgres")
+    assert len(edges) == 1
+    assert edges[0].ddl_type == "create_as_copy"
+    assert (edges[0].source, edges[0].target) == ("ods.s", "dws.t")
+
+
+def test_ddl_rename_table() -> None:
+    """``ALTER TABLE old RENAME TO new``：表重命名 old → new。"""
+    edges = extract_ddl_lineage("ALTER TABLE dws.old RENAME TO dws.new", "mysql")
+    assert len(edges) == 1
+    assert edges[0].ddl_type == "rename_table"
+    assert (edges[0].source, edges[0].target) == ("dws.old", "dws.new")
+
+
+def test_ddl_rename_column_postgres() -> None:
+    """``ALTER TABLE t RENAME COLUMN a TO b``：列重命名 t.a → t.b。"""
+    edges = extract_ddl_lineage("ALTER TABLE dws.old RENAME COLUMN a TO b", "postgres")
+    assert len(edges) == 1
+    assert edges[0].ddl_type == "rename_column"
+    assert edges[0].table == "dws.old"
+    assert (edges[0].source_column, edges[0].target_column) == ("a", "b")
+
+
+def test_ddl_change_column_mysql_regex_fallback() -> None:
+    """``ALTER TABLE t CHANGE a b INT``（MySQL，25.x 降级 Command）：正则兜底。"""
+    edges = extract_ddl_lineage("ALTER TABLE dws.t CHANGE a b INT NOT NULL", "mysql")
+    assert len(edges) == 1
+    assert edges[0].ddl_type == "rename_column"
+    assert (edges[0].source_column, edges[0].target_column) == ("a", "b")
+
+
+def test_ddl_add_drop_alter_column_markers() -> None:
+    """ADD/DROP/MODIFY COLUMN：仅标记（不产数据流转边）。"""
+    assert _ddl_types("ALTER TABLE dws.t ADD COLUMN c VARCHAR(10)", "mysql") == ["add_column"]
+    assert _ddl_types("ALTER TABLE dws.t DROP COLUMN c", "mysql") == ["drop_column"]
+    assert _ddl_types("ALTER TABLE dws.t DROP COLUMN IF EXISTS c", "postgres") == ["drop_column"]
+    assert _ddl_types("ALTER TABLE dws.t MODIFY COLUMN v BIGINT", "mysql") == ["alter_column"]
+
+
+def test_ddl_drop_table_single_and_multi() -> None:
+    """``DROP TABLE``：单表 + 多表（IF EXISTS）逐表标记依赖失效。"""
+    assert _ddl_types("DROP TABLE dws.t", "mysql") == ["drop_table"]
+    edges = extract_ddl_lineage("DROP TABLE IF EXISTS ods.s, dws.t", "mysql")
+    assert {e.table for e in edges} == {"ods.s", "dws.t"}
+
+
+def test_ddl_ignores_dml_statements() -> None:
+    """DML 语句（INSERT/CTAS/CREATE VIEW AS SELECT）不产 DDL 边（数据流转由 DML 覆盖）。"""
+    assert extract_ddl_lineage("INSERT INTO dws.t SELECT id FROM ods.s", "mysql") == []
+    assert extract_ddl_lineage("CREATE TABLE dws.t AS SELECT id FROM ods.s", "mysql") == []
+    assert extract_ddl_lineage("CREATE VIEW dws.v AS SELECT id FROM ods.s", "mysql") == []

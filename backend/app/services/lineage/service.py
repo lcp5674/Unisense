@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -26,6 +28,7 @@ from app.models.metric import Metric
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.parser import (
+    extract_ddl_lineage,
     extract_field_lineage,
     extract_table_lineage,
     extract_upstream_deps,
@@ -42,6 +45,7 @@ from app.services.lineage.schemas import (
     BatchParseStatementResult,
     CoverageBrokenEdgeItem,
     CoverageOrphanItem,
+    DDLEdgeItem,
     EdgeDeleteResult,
     FieldLineageItem,
     HealthDimension,
@@ -64,6 +68,9 @@ from app.services.lineage.schemas import (
     LineagePathEdge,
     LineagePathItem,
     LineagePathResponse,
+    LineageScanFileResult,
+    LineageScanRequest,
+    LineageScanResponse,
     LineageTerminalItem,
     LineageTerminalsResponse,
     ManualEdgeCreateRequest,
@@ -176,7 +183,8 @@ class LineageService(BaseService):
         """
         table_edges = extract_table_lineage(req.sql, req.dialect, target_table=req.target_table)
         field_edges = extract_field_lineage(req.sql, req.dialect, target_table=req.target_table)
-        if not table_edges and not field_edges:
+        ddl_edges = extract_ddl_lineage(req.sql, req.dialect)
+        if not table_edges and not field_edges and not ddl_edges:
             # 纯 SELECT 无落点：不构成血缘边，仅返回上游依赖（方案 B），不写图谱/运行记录
             deps = extract_upstream_deps(req.sql, req.dialect)
             return LineageParseResponse(
@@ -259,6 +267,86 @@ class LineageService(BaseService):
             )
             graph_edges.append((sn, tn, "DERIVED_FROM"))
 
+        # DDL 血缘（结构变更/依赖，区别于 DML 数据流转）：结构复制/表重命名按表级边写入、
+        # 列重命名按字段级边写入；DROP TABLE 触发依赖失效（软删该表上下游边），
+        # ADD/DROP/MODIFY COLUMN 仅标记（响应 ddl_edges 展示，不产伪数据流转边）。
+        ddl_items: list[DDLEdgeItem] = []
+        for d in ddl_edges:
+            if d.ddl_type in ("create_like", "create_as_copy", "rename_table"):
+                if not (d.source and d.target):
+                    continue
+                sn = node_table(d.source)
+                tn = node_table(d.target)
+                probe = LineageEdge(
+                    source_node=sn, target_node=tn, edge_type="DERIVED_FROM", granularity="L1"
+                )
+                if await self._repo.would_create_cycle(probe):
+                    raise ConflictError(
+                        f"血缘边 {sn} → {tn} 将形成循环依赖，已拒绝",
+                        ctx={"source_node": sn, "target_node": tn},
+                    )
+                _, created = await self._repo.upsert_edge_with_status(
+                    source_node=sn,
+                    target_node=tn,
+                    edge_type="DERIVED_FROM",
+                    granularity="L1",
+                    provenance="ddl",
+                    change_reason="ddl",
+                )
+                stored_table += 1
+                if created:
+                    added += 1
+                else:
+                    updated += 1
+                table_lineage.append(TableLineageItem(source=sn, target=tn))
+                graph_edges.append((sn, tn, "DERIVED_FROM"))
+            elif d.ddl_type == "rename_column" and d.table and d.source_column and d.target_column:
+                sn = node_field(d.table, d.source_column)
+                tn = node_field(d.table, d.target_column)
+                probe = LineageEdge(
+                    source_node=sn, target_node=tn, edge_type="DERIVED_FROM", granularity="L2"
+                )
+                if await self._repo.would_create_cycle(probe):
+                    raise ConflictError(
+                        f"血缘边 {sn} → {tn} 将形成循环依赖，已拒绝",
+                        ctx={"source_node": sn, "target_node": tn},
+                    )
+                _, created = await self._repo.upsert_edge_with_status(
+                    source_node=sn,
+                    target_node=tn,
+                    edge_type="DERIVED_FROM",
+                    granularity="L2",
+                    provenance="ddl",
+                    change_reason="ddl",
+                )
+                stored_field += 1
+                if created:
+                    added += 1
+                else:
+                    updated += 1
+                field_lineage.append(
+                    FieldLineageItem(
+                        source_table=d.table,
+                        source_column=d.source_column,
+                        target_table=d.table,
+                        target_column=d.target_column,
+                    )
+                )
+                graph_edges.append((sn, tn, "DERIVED_FROM"))
+            elif d.ddl_type == "drop_table" and d.table:
+                await self._repo.invalidate_dropped_table(node_table(d.table))
+            ddl_items.append(
+                DDLEdgeItem(
+                    ddl_type=d.ddl_type,
+                    source=d.source,
+                    target=d.target,
+                    table=d.table,
+                    source_column=d.source_column,
+                    target_column=d.target_column,
+                    column=d.column,
+                )
+            )
+
         graph_written = await self._sync_graph(
             graph_edges, delete=False, context=f"parse_and_store:{req.provenance}"
         )
@@ -280,6 +368,7 @@ class LineageService(BaseService):
             "actor_id": actor_id,
             "table_lineage": [i.model_dump() for i in table_lineage],
             "field_lineage": [i.model_dump() for i in field_lineage],
+            "ddl_edges": [i.model_dump() for i in ddl_items],
         }
         await self._repo.finish_ingest_run(
             run,
@@ -295,6 +384,7 @@ class LineageService(BaseService):
             graph_written=graph_written,
             table_lineage=table_lineage,
             field_lineage=field_lineage,
+            ddl_edges=ddl_items,
         )
 
     async def parse_batch(
@@ -474,6 +564,196 @@ class LineageService(BaseService):
                 updated += 1
             graph_edges.append((sn, tn, "DERIVED_FROM"))
         return added, updated, skipped, graph_edges
+
+    async def scan_directory(
+        self, req: LineageScanRequest, actor_id: int | None = None
+    ) -> LineageScanResponse:
+        """库级扫描：递归扫描 SQL 目录并解析血缘（企业级批量重建）。
+
+        - 遍历目录下匹配扩展名的文件（上限 ``limit``），逐文件解析表级/字段级/DDL 血缘；
+        - 方言：显式给定则全量使用，否则按文件内容启发式推断（LATERAL VIEW→hive、
+          ARRAY JOIN/SETTINGS→clickhouse、DISTRIBUTED BY/WITH LABEL→doris 等）；
+        - ``dry_run=True`` 仅统计不落库（返回逐文件明细）；False 批量幂等写入血缘
+          （单事务 + 图同步 + 失效两端缓存 + 写 ``kind=scan`` 运行记录），
+          结构性 DDL 边（LIKE/COPY OF/RENAME）一并写入，DROP TABLE 触发依赖失效。
+
+        Args:
+            req: 扫描请求（path/dialect/dry_run/extensions/limit）。
+            actor_id: 执行人（定时任务传 None，归因 NULL）。
+
+        Returns:
+            ``LineageScanResponse`` 汇总（文件/语句/边数/成功失败/逐文件明细）。
+        """
+        # 路径沙箱：先查原始路径含 ``..`` 组件（abspath 会归一化掉它），再确认目录存在
+        if ".." in re.split(r"[\\/]", req.path) or not os.path.isdir(req.path):
+            raise ValidationError(
+                f"扫描路径无效或不存在: {req.path}", error_code=ErrorCode.VALIDATION_ERROR
+            )
+        abs_path = os.path.abspath(req.path)
+        exts = {e.strip().lower() for e in req.extensions.split(",") if e.strip()}
+        files: list[str] = []
+        for root, _dirs, names in os.walk(abs_path):
+            for name in sorted(names):
+                if any(name.lower().endswith(e) for e in exts):
+                    files.append(os.path.join(root, name))
+                if len(files) >= req.limit:
+                    break
+            if len(files) >= req.limit:
+                break
+        files = files[: req.limit]
+
+        table_edges: list[Any] = []
+        field_edges: list[Any] = []
+        ddl_all: list[Any] = []
+        file_results: list[LineageScanFileResult] = []
+        succeeded = 0
+        for path in files:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except OSError as exc:
+                file_results.append(LineageScanFileResult(path=path, error=f"读取失败: {exc}"))
+                continue
+            stmts = self._count_statements(content)
+            dialect = req.dialect or self._infer_scan_dialect(content)
+            try:
+                te = extract_table_lineage(content, dialect)
+                fe = extract_field_lineage(content, dialect)
+                de = extract_ddl_lineage(content, dialect)
+            except Exception as exc:  # pragma: no cover - 防御（parser 内部已降级）
+                file_results.append(
+                    LineageScanFileResult(path=path, statements=stmts, error=str(exc))
+                )
+                continue
+            table_edges.extend(te)
+            field_edges.extend(fe)
+            ddl_all.extend(de)
+            file_results.append(
+                LineageScanFileResult(
+                    path=path,
+                    statements=stmts,
+                    table_edges=len(te),
+                    field_edges=len(fe),
+                    ddl_edges=len(de),
+                )
+            )
+            succeeded += 1
+
+        graph_written = False
+        if not req.dry_run and (table_edges or field_edges or ddl_all):
+            graph_written = await self._scan_persist(
+                table_edges, field_edges, ddl_all, actor_id=actor_id
+            )
+        return LineageScanResponse(
+            files=len(files),
+            statements=sum(r.statements for r in file_results),
+            table_edges=len(table_edges),
+            field_edges=len(field_edges),
+            ddl_edges=len(ddl_all),
+            succeeded=succeeded,
+            failed=len(files) - succeeded,
+            dry_run=req.dry_run,
+            graph_written=graph_written,
+            files_detail=file_results,
+        )
+
+    @staticmethod
+    def _count_statements(sql: str) -> int:
+        """统计语句数（剥注释 + 分号拆分；异常回退为 1）。"""
+        try:
+            import sqlparse
+
+            cleaned = sqlparse.format(sql, strip_comments=True, reindent=False)
+            return len([s for s in sqlparse.split(cleaned) if s and s.strip()])
+        except Exception:  # noqa: BLE001 - 统计失败不影响主流程
+            return 1
+
+    @staticmethod
+    def _infer_scan_dialect(sql: str) -> str | None:
+        """按文件内容启发式推断方言（显式指定时不走此逻辑）。"""
+        low = sql.lower()
+        if "lateral view" in low:
+            return "hive"
+        if "array join" in low or re.search(r"\bsettings\b", low):
+            return "clickhouse"
+        if "distributed by" in low or "with label" in low or "properties(" in low:
+            return "doris"
+        if re.search(r"\binsert\s+top\s*\(", low):
+            return "tsql"
+        return None
+
+    async def _scan_persist(
+        self,
+        table_edges: list[Any],
+        field_edges: list[Any],
+        ddl_edges: list[Any],
+        actor_id: int | None,
+    ) -> bool:
+        """扫描结果落库：批量写入 DML 边 + 结构性 DDL 边 + DROP 依赖失效 + 图同步。"""
+        run = await self._repo.begin_ingest_run("scan")
+        try:
+            added, updated, skipped, graph_edges = await self._store_batch_edges(
+                table_edges, field_edges, "scan"
+            )
+            for d in ddl_edges:
+                if d.ddl_type in ("create_like", "create_as_copy", "rename_table"):
+                    if not (d.source and d.target):
+                        continue
+                    sn = node_table(d.source)
+                    tn = node_table(d.target)
+                    probe = LineageEdge(
+                        source_node=sn,
+                        target_node=tn,
+                        edge_type="DERIVED_FROM",
+                        granularity="L1",
+                    )
+                    if await self._repo.would_create_cycle(probe):
+                        skipped += 1
+                        continue
+                    _, created = await self._repo.upsert_edge_with_status(
+                        source_node=sn,
+                        target_node=tn,
+                        edge_type="DERIVED_FROM",
+                        granularity="L1",
+                        provenance="ddl",
+                        change_reason="scan",
+                    )
+                    added += 1 if created else 0
+                    updated += 0 if created else 1
+                    graph_edges.append((sn, tn, "DERIVED_FROM"))
+                elif d.ddl_type == "drop_table" and d.table:
+                    await self._repo.invalidate_dropped_table(node_table(d.table))
+            total = added + updated
+            graph_written = await self._sync_graph(
+                graph_edges, delete=False, context="scan_directory"
+            )
+            for sn, tn, _etype in graph_edges:
+                await self._invalidate_impact_cache(sn)
+                await self._invalidate_impact_cache(tn)
+            detail = {
+                "kind": "scan",
+                "actor_id": actor_id,
+                "total_edges": total,
+                "table_edges": len(table_edges),
+                "field_edges": len(field_edges),
+                "ddl_edges": [e.ddl_type for e in ddl_edges],
+            }
+            await self._repo.finish_ingest_run(
+                run,
+                status="success",
+                total_edges=total,
+                added=added,
+                updated=updated,
+                skipped=skipped,
+                detail=detail,
+            )
+            await self._db.commit()
+            return graph_written
+        except Exception as exc:
+            await self._db.rollback()
+            await self._repo.finish_ingest_run(run, status="failed", error=str(exc))
+            await self._db.commit()
+            raise
 
     async def query_impact(self, params: LineageImpactParams) -> list[LineageEdgeResponse]:
         """影响分析：图(Neo4j)优先读，图不可用时回退 MySQL；结果 cache-aside。
