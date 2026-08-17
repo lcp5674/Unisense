@@ -801,8 +801,8 @@ async def test_repo_list_catalogs_keyword_table_and_field_level():
     stmt = s.execute.call_args_list[0].args[0]
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "schema_json" in compiled
-    # 关键词含 _ 通配符，转义后为 order\_id（防模糊放大）
-    assert "order\\_id" in compiled
+    # 关键词含 _ 通配符，转义后为 order/_id（防模糊放大，escape="/" 生成 ESCAPE '/'）
+    assert "order/_id" in compiled
 
 
 async def test_repo_list_catalogs_keyword_escapes_wildcards():
@@ -820,7 +820,7 @@ async def test_repo_list_catalogs_keyword_escapes_wildcards():
     await repo.list_catalogs(params)
     stmt = s.execute.call_args_list[0].args[0]
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-    assert "100\\%\\_x" in compiled
+    assert "100/%/_x" in compiled
 
 
 async def test_repo_list_catalogs_filters_by_database_prefix():
@@ -839,8 +839,8 @@ async def test_repo_list_catalogs_filters_by_database_prefix():
     await repo.list_catalogs(params)
     stmt = s.execute.call_args_list[0].args[0]
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-    # 库名转义后为 sales\_\%，并带前缀匹配 sales\_.%（防模糊放大）
-    assert "sales\\_\\%" in compiled
+    # 库名转义后为 sales/_/%，并带前缀匹配 sales/_/%.%（防模糊放大，escape="/"）
+    assert "sales/_/%" in compiled
     assert ".%" in compiled
 
 
