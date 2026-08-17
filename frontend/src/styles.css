@@ -799,6 +799,54 @@ body {
   white-space: nowrap;
 }
 
+/* 待处理徽标 Popover 明细：跨资产分类下钻（指标待审核 / 维度草稿 / 术语草稿） */
+.oc-hot-popover .ant-popover-inner {
+  padding: 10px 8px;
+}
+.oc-hot-pop {
+  min-width: 216px;
+}
+.oc-hot-pop-title {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 2px 6px 8px;
+  border-bottom: 1px dashed var(--line);
+  margin-bottom: 4px;
+}
+.oc-hot-pop-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+}
+.oc-hot-pop-item:hover {
+  background: var(--line-soft);
+  color: var(--ink);
+}
+.oc-hot-pop-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.oc-hot-pop-item.oc-pending-metric .oc-hot-pop-dot {
+  background: var(--data);
+}
+.oc-hot-pop-item.oc-pending-dim .oc-hot-pop-dot {
+  background: #8b6fd8;
+}
+.oc-hot-pop-item.oc-pending-term .oc-hot-pop-dot {
+  background: #b07a1f;
+}
+
 .owner-card .oc-total {
   margin-left: auto;
   flex: none;

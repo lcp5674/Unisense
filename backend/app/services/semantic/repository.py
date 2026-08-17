@@ -756,16 +756,16 @@ class MetricRepository:
         owner_table_rows = (await self._db.execute(owner_table_stmt)).all()
 
         owner_dim_stmt = (
-            select(Dimension.owner_id, func.count().label("cnt"))
+            select(Dimension.owner_id, Dimension.status, func.count().label("cnt"))
             .where(Dimension.deleted_at.is_(None))
-            .group_by(Dimension.owner_id)
+            .group_by(Dimension.owner_id, Dimension.status)
         )
         owner_dim_rows = (await self._db.execute(owner_dim_stmt)).all()
 
         owner_term_stmt = (
-            select(Term.owner_id, func.count().label("cnt"))
+            select(Term.owner_id, Term.status, func.count().label("cnt"))
             .where(Term.deleted_at.is_(None))
-            .group_by(Term.owner_id)
+            .group_by(Term.owner_id, Term.status)
         )
         owner_term_rows = (await self._db.execute(owner_term_stmt)).all()
 
@@ -800,15 +800,17 @@ class MetricRepository:
             owner_names = dict((await self._db.execute(owner_name_stmt)).all())
 
         def _owner_entry(owner_id_: int) -> dict[str, Any]:
+            # 统一 AssetStat 结构 {total, by_status}：指标/维度/术语有真实状态；
+            # 数据表/数据源/模板无状态概念，by_status 留空但结构一致便于前端统一读取。
             return {
                 "name": owner_names.get(owner_id_, f"用户 #{owner_id_}"),
                 "total": 0,
                 "metrics": {"total": 0, "by_status": {}},
-                "tables": 0,
-                "sources": 0,
-                "dimensions": 0,
-                "terms": 0,
-                "templates": 0,
+                "tables": {"total": 0, "by_status": {}},
+                "sources": {"total": 0, "by_status": {}},
+                "dimensions": {"total": 0, "by_status": {}},
+                "terms": {"total": 0, "by_status": {}},
+                "templates": {"total": 0, "by_status": {}},
             }
 
         by_owner: dict[int, dict[str, Any]] = {}
@@ -819,23 +821,32 @@ class MetricRepository:
                 entry["metrics"]["by_status"].get(status_, 0) + cnt
             )
         for owner_id_, cnt in owner_table_rows:
-            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["tables"] = cnt
-        for owner_id_, cnt in owner_dim_rows:
-            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["dimensions"] = cnt
-        for owner_id_, cnt in owner_term_rows:
-            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["terms"] = cnt
+            entry = by_owner.setdefault(owner_id_, _owner_entry(owner_id_))
+            entry["tables"]["total"] += cnt
+        for owner_id_, status_, cnt in owner_dim_rows:
+            entry = by_owner.setdefault(owner_id_, _owner_entry(owner_id_))
+            entry["dimensions"]["total"] += cnt
+            entry["dimensions"]["by_status"][status_] = (
+                entry["dimensions"]["by_status"].get(status_, 0) + cnt
+            )
+        for owner_id_, status_, cnt in owner_term_rows:
+            entry = by_owner.setdefault(owner_id_, _owner_entry(owner_id_))
+            entry["terms"]["total"] += cnt
+            entry["terms"]["by_status"][status_] = (
+                entry["terms"]["by_status"].get(status_, 0) + cnt
+            )
         for owner_id_, cnt in owner_tpl_rows:
-            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["templates"] = cnt
+            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["templates"]["total"] += cnt
         for owner_id_, cnt in owner_source_rows:
-            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["sources"] = cnt
+            by_owner.setdefault(owner_id_, _owner_entry(owner_id_))["sources"]["total"] += cnt
         for entry in by_owner.values():
             entry["total"] = (
                 entry["metrics"]["total"]
-                + entry["tables"]
-                + entry["sources"]
-                + entry["dimensions"]
-                + entry["terms"]
-                + entry["templates"]
+                + entry["tables"]["total"]
+                + entry["sources"]["total"]
+                + entry["dimensions"]["total"]
+                + entry["terms"]["total"]
+                + entry["templates"]["total"]
             )
 
         # 2) 质量健康：质量事件按严重级分布 + 待处理（OPEN+ACK）

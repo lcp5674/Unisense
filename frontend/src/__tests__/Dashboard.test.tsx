@@ -37,32 +37,32 @@ const mockDashboardData = {
       name: "Alice",
       total: 82,
       metrics: { total: 60, by_status: { DRAFT: 20, REVIEW: 4, PUBLISHED: 36 } },
-      tables: 8,
-      sources: 4,
-      dimensions: 3,
-      terms: 5,
-      templates: 2,
+      tables: { total: 8, by_status: {} },
+      sources: { total: 4, by_status: {} },
+      dimensions: { total: 3, by_status: { DRAFT: 1, PUBLISHED: 2 } },
+      terms: { total: 5, by_status: { DRAFT: 2, PUBLISHED: 3 } },
+      templates: { total: 2, by_status: {} },
     },
     2: {
       name: "Bob",
       total: 52,
       metrics: { total: 40, by_status: { DRAFT: 5, REVIEW: 3, PUBLISHED: 24, EXPERIMENTAL: 3, DEPRECATED: 5 } },
-      tables: 5,
-      sources: 3,
-      dimensions: 1,
-      terms: 2,
-      templates: 1,
+      tables: { total: 5, by_status: {} },
+      sources: { total: 3, by_status: {} },
+      dimensions: { total: 1, by_status: { DRAFT: 1 } },
+      terms: { total: 2, by_status: { PUBLISHED: 2 } },
+      templates: { total: 1, by_status: {} },
     },
     // Charlie 名下仅 5 条指标，无数据表/数据源/维度/术语/模板——验证 0 值资产段不被过滤
     3: {
       name: "Charlie",
       total: 5,
       metrics: { total: 5, by_status: { DRAFT: 5 } },
-      tables: 0,
-      sources: 0,
-      dimensions: 0,
-      terms: 0,
-      templates: 0,
+      tables: { total: 0, by_status: {} },
+      sources: { total: 0, by_status: {} },
+      dimensions: { total: 0, by_status: {} },
+      terms: { total: 0, by_status: {} },
+      templates: { total: 0, by_status: {} },
     },
   },
   quality: { total: 9, by_severity: { P0: 2, P1: 3, P2: 4 }, pending: 5 },
@@ -215,7 +215,7 @@ describe("Dashboard", () => {
 
     expect(screen.getByText("Alice")).toBeInTheDocument();
     expect(screen.getByText("Bob")).toBeInTheDocument();
-    // 待审积压 > 0 的 Owner 卡片高亮（Alice REVIEW=4 / Bob REVIEW=3 都有）
+    // 待处理积压 > 0 的 Owner 卡片高亮（Alice 7 / Bob 4 都有，跨资产：指标待审核+维度草稿+术语草稿）
     expect(document.querySelectorAll(".owner-card.owner-hot").length).toBeGreaterThan(0);
   });
 
@@ -310,18 +310,61 @@ describe("Dashboard", () => {
     expect(probe.location()?.search).toContain("owner_id=1");
   });
 
-  it("Owner 待审徽标：点击「待审 N」高亮徽标跳 /catalog 并携带 status=REVIEW + owner_id 过滤（对齐生命周期色点）", async () => {
+  it("Owner 待处理徽标：跨资产汇总（指标待审核+维度草稿+术语草稿），点「指标待审核」下钻 /catalog?status=REVIEW&owner_id", async () => {
     const probe = renderWithLocation();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
-    // Alice 卡片头部「待审 4」高亮徽标（REVIEW=4 > 0）
+    // Alice 卡片头部「待处理 7」高亮徽标：指标 REVIEW=4 + 维度草稿 1 + 术语草稿 2 = 7（跨资产汇总，非仅指标）
     const aliceCard = document.querySelectorAll(".owner-card")[0];
     const hotBadge = aliceCard!.querySelector(".oc-hot");
     expect(hotBadge).toBeTruthy();
-    expect(hotBadge!.textContent).toContain("待审");
+    expect(hotBadge!.textContent).toContain("待处理");
+    expect(hotBadge!.textContent).toContain("7");
+    expect(hotBadge!.textContent).not.toContain("待审");
+
+    // 点击徽标 → 弹 Popover 分类明细（3 类：指标待审核 / 维度草稿 / 术语草稿）
     fireEvent.click(hotBadge!);
+    await waitFor(() => expect(document.querySelector(".oc-hot-pop")).toBeTruthy());
+    const items = Array.from(document.querySelectorAll(".oc-hot-pop-item"));
+    expect(items.length).toBe(3);
+    expect(items[0].textContent).toContain("指标待审核");
+    expect(items[0].textContent).toContain("4");
+
+    // 点「指标待审核 4」→ 精确跳转指标目录并携带 status=REVIEW + owner_id 过滤
+    fireEvent.click(items[0]);
     expect(probe.location()?.pathname).toBe("/catalog");
     expect(probe.location()?.search).toContain("status=REVIEW");
+    expect(probe.location()?.search).toContain("owner_id=1");
+  });
+
+  it("Owner 待处理分类下钻：维度草稿→/dimensions?status=DRAFT、术语草稿→/glossary?status=DRAFT（均带 owner_id）", async () => {
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+
+    const aliceCard = document.querySelectorAll(".owner-card")[0];
+    const hotBadge = aliceCard!.querySelector(".oc-hot");
+    expect(hotBadge).toBeTruthy();
+
+    // 维度草稿 1 → /dimensions?status=DRAFT&owner_id=1
+    fireEvent.click(hotBadge!);
+    await waitFor(() => expect(document.querySelector(".oc-hot-pop")).toBeTruthy());
+    let items = Array.from(document.querySelectorAll(".oc-hot-pop-item"));
+    expect(items[1].textContent).toContain("维度草稿");
+    expect(items[1].textContent).toContain("1");
+    fireEvent.click(items[1]);
+    expect(probe.location()?.pathname).toBe("/dimensions");
+    expect(probe.location()?.search).toContain("status=DRAFT");
+    expect(probe.location()?.search).toContain("owner_id=1");
+
+    // 术语草稿 2 → /glossary?status=DRAFT&owner_id=1
+    fireEvent.click(hotBadge!);
+    await waitFor(() => expect(document.querySelector(".oc-hot-pop")).toBeTruthy());
+    items = Array.from(document.querySelectorAll(".oc-hot-pop-item"));
+    expect(items[2].textContent).toContain("术语草稿");
+    expect(items[2].textContent).toContain("2");
+    fireEvent.click(items[2]);
+    expect(probe.location()?.pathname).toBe("/glossary");
+    expect(probe.location()?.search).toContain("status=DRAFT");
     expect(probe.location()?.search).toContain("owner_id=1");
   });
 
@@ -386,7 +429,8 @@ describe("Dashboard", () => {
     expect(screen.getByText("P0")).toBeInTheDocument();
     expect(screen.getByText("P1")).toBeInTheDocument();
     expect(screen.getByText("P2")).toBeInTheDocument();
-    expect(screen.getByText(/待处理/)).toBeInTheDocument();
+    // 「待处理 5 项」限定质量健康卡（Owner 徽标是「待处理 N」不带「项」，避免歧义）
+    expect(screen.getByText(/待处理 5 项/)).toBeInTheDocument();
   });
 
   it("治理指标卡：合规渲染复核率", async () => {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Popconfirm, Row, Col, Spin, Alert, Tag, Empty, Tooltip, message } from "antd";
+import { Button, Card, Popconfirm, Popover, Row, Col, Spin, Alert, Tag, Empty, Tooltip, message } from "antd";
 import {
   AppstoreOutlined,
   PlusCircleOutlined,
@@ -444,6 +444,90 @@ const OWNER_ASSETS = [
   { key: "templates", label: "模板", cls: "oc-tpl", href: "/templates" },
 ] as const;
 
+// 跨资产待处理分类明细（方案 A）：指标待审核（REVIEW）+ 维度草稿（DRAFT）+ 术语草稿（DRAFT）。
+// 模板/数据表/数据源无审核或草稿状态概念，不纳入待处理统计。
+// href 为该类资产目录页路由，status 为下钻过滤状态（跳转时拼接 status + owner_id）。
+const PENDING_BREAKDOWN = [
+  { key: "metric", label: "指标待审核", cls: "oc-pending-metric", href: "/catalog", status: "REVIEW" },
+  { key: "dim", label: "维度草稿", cls: "oc-pending-dim", href: "/dimensions", status: "DRAFT" },
+  { key: "term", label: "术语草稿", cls: "oc-pending-term", href: "/glossary", status: "DRAFT" },
+] as const;
+
+// Owner 卡片头部「待处理 N」徽标：跨资产汇总（指标待审核+维度草稿+术语草稿），
+// 点击弹 Popover 列出分类明细，每项精确跳转对应目录并携带 status + owner_id 过滤。
+// 独立组件持有弹层开关状态；onClick 需 stopPropagation 防止冒泡到卡片触发 owner 下钻。
+function OwnerHotBadge({
+  ownerId,
+  ownerName,
+  counts,
+  navigate,
+}: {
+  ownerId: string;
+  ownerName: string;
+  counts: Record<(typeof PENDING_BREAKDOWN)[number]["key"], number>;
+  navigate: (to: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const pending = PENDING_BREAKDOWN.reduce((sum, p) => sum + (counts[p.key] ?? 0), 0);
+  const items = PENDING_BREAKDOWN.map((p) => ({ ...p, count: counts[p.key] ?? 0 })).filter(
+    (i) => i.count > 0,
+  );
+  const content = (
+    <div className="oc-hot-pop">
+      <div className="oc-hot-pop-title">{ownerName} 名下待处理资产</div>
+      {items.map((p) => (
+        <button
+          key={p.key}
+          type="button"
+          className={`oc-hot-pop-item ${p.cls}`}
+          onClick={(e) => {
+            // portal 弹层的事件沿 React 组件树（fiber）向上冒泡，若不阻断会触发
+            // 卡片 <button> 的 owner 下钻（navigate /catalog?owner_id=…）覆盖本次精确跳转
+            e.stopPropagation();
+            setOpen(false);
+            navigate(`${p.href}?status=${p.status}&owner_id=${ownerId}`);
+          }}
+        >
+          <i className="oc-hot-pop-dot" />
+          {p.label} {p.count}
+        </button>
+      ))}
+    </div>
+  );
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(v) => {
+        if (!v) setOpen(false);
+      }}
+      trigger="click"
+      placement="bottomRight"
+      arrow={false}
+      content={content}
+      rootClassName="oc-hot-popover"
+    >
+      <span
+        className="oc-hot"
+        role="button"
+        tabIndex={0}
+        title={`${ownerName}：${pending} 项资产待处理（指标待审核 ${counts.metric ?? 0} / 维度草稿 ${counts.dim ?? 0} / 术语草稿 ${counts.term ?? 0}），点击查看分类明细`}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.stopPropagation();
+            setOpen((v) => !v);
+          }
+        }}
+      >
+        待处理 {pending}
+      </span>
+    </Popover>
+  );
+}
+
 function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: (to: string) => void }) {
   const owners = Object.entries(data.by_owner ?? {}).sort((a, b) => b[1].total - a[1].total);
   if (owners.length === 0) return null;
@@ -462,13 +546,19 @@ function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: 
     >
       <div className="owner-grid">
         {owners.map(([id, o]) => {
-          const review = o.metrics.by_status.REVIEW ?? 0;
-          const hot = review > 0;
+          // 跨资产待处理：指标待审核（REVIEW）+ 维度草稿（DRAFT）+ 术语草稿（DRAFT）
+          const pendingCounts = {
+            metric: o.metrics.by_status.REVIEW ?? 0,
+            dim: o.dimensions.by_status.DRAFT ?? 0,
+            term: o.terms.by_status.DRAFT ?? 0,
+          };
+          const pending = pendingCounts.metric + pendingCounts.dim + pendingCounts.term;
+          const hot = pending > 0;
 // 资产构成：完整渲染 6 类（指标/数据表/数据源/维度/术语/模板）——即使 count=0 也保留为窄灰段，
 // 让 Owner 一眼看清全维度资产分布（0 值段也能看到，确认该责任人确实没有此类资产）
 const mix = OWNER_ASSETS.map((a) => ({
             ...a,
-            count: a.key === "metrics" ? o.metrics.total : (o as never)[a.key],
+            count: o[a.key].total,
           }));
           const total = Math.max(o.total, 1);
           const initials = (o.name || "?").slice(0, 2);
@@ -478,30 +568,18 @@ const mix = OWNER_ASSETS.map((a) => ({
               type="button"
               className={`owner-card${hot ? " owner-hot" : ""}`}
               onClick={() => navigate(`/catalog?owner_id=${id}`)}
-              title={`${o.name}：共 ${o.total} 项资产，待审 ${review}。点击查看其指标目录`}
+              title={`${o.name}：共 ${o.total} 项资产，待处理 ${pending}。点击查看其指标目录`}
             >
               <span className="oc-head">
                 <span className="oc-avatar">{initials}</span>
                 <span className="oc-name">{o.name}</span>
                 {hot && (
-                  <span
-                    className="oc-hot"
-                    role="button"
-                    tabIndex={0}
-                    title={`${review} 个指标待审核，点击查看该责任人名下审核中指标`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigate(`/catalog?status=REVIEW&owner_id=${id}`);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.stopPropagation();
-                        navigate(`/catalog?status=REVIEW&owner_id=${id}`);
-                      }
-                    }}
-                  >
-                    待审 {review}
-                  </span>
+                  <OwnerHotBadge
+                    ownerId={id}
+                    ownerName={o.name}
+                    counts={pendingCounts}
+                    navigate={navigate}
+                  />
                 )}
                 <span className="oc-total">共 {o.total} 项</span>
               </span>

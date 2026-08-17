@@ -423,7 +423,7 @@ modules:
     verified_at: "2026-08-12"
     pr: ""
     owner: ""
-    note: "生产级扩展（2026-08-12）：15+ 功能页面（指标目录/注册/详情/审核工作台 MetricReview/待办中心/血缘视图/资产地图/仪表盘/消费指南/AI 助手 AiAssistant/查询工作台 QueryWorkspace/质量中心/治理/术语/维度/数据源/目录/通知/可观测/审计日志/API 客户端/模板）、统一布局与主题、血缘分页+what-if 预览+PII 列适配。测试体系：Vitest（12 passed：AssetMap/ConsumptionGuide/Dashboard）+ Playwright e2e 脚手架 + typecheck 0 error + production build 通过。提交 8ab4739。"
+    note: "生产级扩展（2026-08-12）：15+ 功能页面（指标目录/注册/详情/审核工作台 MetricReview/待办中心/血缘视图/资产地图/仪表盘/消费指南/AI 助手 AiAssistant/查询工作台 QueryWorkspace/质量中心/治理/术语/维度/数据源/目录/通知/可观测/审计日志/API 客户端/模板）、统一布局与主题、血缘分页+what-if 预览+PII 列适配。测试体系：Vitest（12 passed：AssetMap/ConsumptionGuide/Dashboard）+ Playwright e2e 脚手架 + typecheck 0 error + production build 通过。提交 8ab4739。Owner 责任分布跨资产待处理（2026-08-17）：后端 by_owner 每类资产统一 {total, by_status} 结构（指标/维度/术语带真实状态，表/源/模板 by_status 留空），前端「待审」徽标升级为跨资产「待处理」——汇总指标待审核（REVIEW）+维度草稿（DRAFT）+术语草稿（DRAFT），点击弹 Popover 分类明细（指标待审核/维度草稿/术语草稿），每类精确跳转对应目录（/catalog?status=REVIEW、/dimensions?status=DRAFT、/glossary?status=DRAFT）并携带 owner_id 过滤；弹层项 onClick stopPropagation 阻断 React fiber 冒泡防卡片默认下钻被覆盖。验证：后端 repository 聚合 37 项全绿；前端 Dashboard 29 项全绿（新增待处理徽标/分类下钻 2 项）+ 全量 702 全绿 + tsc 0。"
 
 # ─────────────────────────────────────────────────────────────
 # §6.3 双视角漏洞审查汇总（2026-08-09，独立第三方 code-explorer，非自审）

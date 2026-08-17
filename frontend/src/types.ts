@@ -703,11 +703,11 @@ export interface DashboardData {
       /** 跨资产总计（指标+数据表+数据源+维度+术语+模板） */
       total: number;
       metrics: { total: number; by_status: Record<string, number> };
-      tables: number;
-      sources: number;
-      dimensions: number;
-      terms: number;
-      templates: number;
+      tables: { total: number; by_status: Record<string, number> };
+      sources: { total: number; by_status: Record<string, number> };
+      dimensions: { total: number; by_status: Record<string, number> };
+      terms: { total: number; by_status: Record<string, number> };
+      templates: { total: number; by_status: Record<string, number> };
     }
   >;
   /** 质量健康：严重级分布 + 待处理（OPEN+ACK） */

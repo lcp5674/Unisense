@@ -594,8 +594,8 @@ async def test_aggregate_dashboard_with_filters():
         # Owner 责任分布（跨资产）：指标 / 数据表 / 维度 / 术语 / 模板 / 数据源 / 显示名
         _result(all_=[(1, "PUBLISHED", 3), (1, "DRAFT", 2)]),  # owner_metric
         _result(all_=[(1, 5)]),  # owner_table
-        _result(all_=[(1, 2)]),  # owner_dim
-        _result(all_=[(1, 3)]),  # owner_term
+        _result(all_=[(1, "PUBLISHED", 2)]),  # owner_dim (owner_id, status, count)
+        _result(all_=[(1, "PUBLISHED", 3)]),  # owner_term (owner_id, status, count)
         _result(all_=[(1, 1)]),  # owner_tpl
         _result(all_=[(1, 2)]),  # owner_source
         _result(all_=[(1, "Alice")]),  # owner_names
@@ -629,11 +629,11 @@ async def test_aggregate_dashboard_with_filters():
             "name": "Alice",
             "total": 18,
             "metrics": {"total": 5, "by_status": {"PUBLISHED": 3, "DRAFT": 2}},
-            "tables": 5,
-            "sources": 2,
-            "dimensions": 2,
-            "terms": 3,
-            "templates": 1,
+            "tables": {"total": 5, "by_status": {}},
+            "sources": {"total": 2, "by_status": {}},
+            "dimensions": {"total": 2, "by_status": {"PUBLISHED": 2}},
+            "terms": {"total": 3, "by_status": {"PUBLISHED": 3}},
+            "templates": {"total": 1, "by_status": {}},
         }
     }
     # 资产总览：指标复用顶层聚合；其余资产按各自状态列分组
@@ -721,8 +721,8 @@ async def test_aggregate_dashboard_governance_indicators():
             (2, "DRAFT", 3),
         ]),  # owner_metric (owner_id, status, count)
         _result(all_=[(1, 6), (2, 2)]),  # owner_table
-        _result(all_=[(1, 3), (2, 1)]),  # owner_dim
-        _result(all_=[(1, 4), (2, 2)]),  # owner_term
+        _result(all_=[(1, "PUBLISHED", 3), (2, "PUBLISHED", 1)]),  # owner_dim
+        _result(all_=[(1, "PUBLISHED", 4), (2, "PUBLISHED", 2)]),  # owner_term
         _result(all_=[(1, 2)]),  # owner_tpl
         _result(all_=[(1, 1), (2, 1)]),  # owner_source
         _result(all_=[(1, "Alice"), (2, "Bob")]),  # owner_names
@@ -750,21 +750,21 @@ async def test_aggregate_dashboard_governance_indicators():
             "name": "Alice",
             "total": 21,
             "metrics": {"total": 5, "by_status": {"PUBLISHED": 4, "REVIEW": 1}},
-            "tables": 6,
-            "sources": 1,
-            "dimensions": 3,
-            "terms": 4,
-            "templates": 2,
+            "tables": {"total": 6, "by_status": {}},
+            "sources": {"total": 1, "by_status": {}},
+            "dimensions": {"total": 3, "by_status": {"PUBLISHED": 3}},
+            "terms": {"total": 4, "by_status": {"PUBLISHED": 4}},
+            "templates": {"total": 2, "by_status": {}},
         },
         2: {
             "name": "Bob",
             "total": 11,
             "metrics": {"total": 5, "by_status": {"PUBLISHED": 2, "DRAFT": 3}},
-            "tables": 2,
-            "sources": 1,
-            "dimensions": 1,
-            "terms": 2,
-            "templates": 0,
+            "tables": {"total": 2, "by_status": {}},
+            "sources": {"total": 1, "by_status": {}},
+            "dimensions": {"total": 1, "by_status": {"PUBLISHED": 1}},
+            "terms": {"total": 2, "by_status": {"PUBLISHED": 2}},
+            "templates": {"total": 0, "by_status": {}},
         },
     }
     # 质量健康：按严重级分布 + 待处理（OPEN+ACK）
