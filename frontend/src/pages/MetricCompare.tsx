@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Alert, Button, Card, Empty, Select, Spin } from "antd";
+import { Alert, Button, Card, Empty, message, Select, Spin } from "antd";
 import { ArrowLeftOutlined, SwapOutlined } from "@ant-design/icons";
 import { compareMetricsMatrix, listMetrics } from "../api";
 import type { MetricCompareMatrixResult, MetricResponse } from "../types";
@@ -57,6 +57,14 @@ export function MetricCompare() {
   // URL codes 就绪后初始化已选并自动对比
   useEffect(() => {
     if (codesFromUrl.length >= MIN_COMPARE) {
+      // URL 直达超限（如手改 ?codes=a,b,c,d,e,f,g）：截断到前 MAX_COMPARE 个并同步 URL，
+      // 避免请求直接打到后端触发 422；截断后 return，等 URL 变化驱动完整流程
+      if (codesFromUrl.length > MAX_COMPARE) {
+        const trimmed = codesFromUrl.slice(0, MAX_COMPARE);
+        message.warning(`对比最多支持 ${MAX_COMPARE} 个指标，已自动保留前 ${MAX_COMPARE} 个`);
+        setSearchParams({ codes: trimmed.join(",") }, { replace: true });
+        return;
+      }
       setSelected(codesFromUrl);
       let alive = true;
       setLoading(true);
@@ -87,6 +95,11 @@ export function MetricCompare() {
 
   // 手动调整选择 → 同步 URL（replace，可分享），URL 变更驱动重跑对比
   function handleSelectChange(codes: string[]) {
+    // 兜底：Select 已用 maxCount 在 UI 层拦截超选，此分支仅防程序化/极端路径误传
+    if (codes.length > MAX_COMPARE) {
+      message.warning(`最多对比 ${MAX_COMPARE} 个指标`);
+      return;
+    }
     setSelected(codes);
     if (codes.length >= MIN_COMPARE) {
       setSearchParams({ codes: codes.join(",") }, { replace: true });
@@ -149,10 +162,16 @@ export function MetricCompare() {
             loading={searching}
             showSearch
             optionFilterProp="label"
+            maxCount={MAX_COMPARE}
             maxTagCount={6}
             maxTagTextLength={24}
             filterOption={false}
           />
+          {selected.length === MAX_COMPARE && (
+            <span style={{ fontSize: 12, color: "var(--warning, #faad14)" }}>
+              已达上限 {MAX_COMPARE} 个，如需更换请先移除一个
+            </span>
+          )}
           {selected.length < MIN_COMPARE && selected.length > 0 && (
             <span className="muted" style={{ fontSize: 12 }}>
               至少选择 {MIN_COMPARE} 个指标

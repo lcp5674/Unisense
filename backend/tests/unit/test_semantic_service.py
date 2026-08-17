@@ -17,6 +17,7 @@ from app.core.exceptions import (
     BusinessError,
     ConflictError,
     NotFoundError,
+    ValidationError,
 )
 from app.models.metric import Metric
 from app.services.governance.policy import Decision
@@ -654,6 +655,26 @@ async def test_compare_matrix_archived_metric_raises():
         await svc.compare_matrix(["m2", "m1"])
     assert exc_info.value.error_code == ErrorCode.METRIC_ARCHIVED
     assert exc_info.value.ctx["successor_code"] == "m1"
+
+
+async def test_compare_matrix_too_many_raises():
+    """多指标矩阵：超过 6 个 → 抛中文 ValidationError（而非裸 Pydantic 422）。"""
+    svc, repo = _svc_with_repo()
+    with pytest.raises(ValidationError) as exc_info:
+        await svc.compare_matrix([f"m{i}" for i in range(7)])
+    assert "2~6 个" in exc_info.value.message
+    assert "7" in exc_info.value.message
+    # 校验发生在查询前：不应访问 repository
+    repo.get_by_code.assert_not_called()
+
+
+async def test_compare_matrix_too_few_raises():
+    """多指标矩阵：少于 2 个 → 抛中文 ValidationError。"""
+    svc, repo = _svc_with_repo()
+    with pytest.raises(ValidationError) as exc_info:
+        await svc.compare_matrix(["m1"])
+    assert "2~6 个" in exc_info.value.message
+    repo.get_by_code.assert_not_called()
 
 
 async def test_batch_register_success():

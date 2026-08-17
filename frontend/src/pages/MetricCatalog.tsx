@@ -1230,7 +1230,15 @@ export function MetricCatalog() {
         loading={loading}
         rowSelection={{
           selectedRowKeys: selected.map((s) => s.metric_code),
-          onChange: (_, rows) => setSelected(rows),
+          // 对比上限 6 个：超选（含全选/批量勾选）时拦截并保留前 6 个，避免静默 disabled 让用户困惑
+          onChange: (_, rows) => {
+            if (rows.length > 6) {
+              message.warning("指标对比最多支持 6 个，已保留前 6 个（如需更换请先取消勾选）");
+              setSelected(rows.slice(0, 6));
+              return;
+            }
+            setSelected(rows);
+          },
         }}
         expandable={{
           expandedRowRender: (r) => <ExpandContent r={r} userName={userName} domainName={domainName} />,

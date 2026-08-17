@@ -405,10 +405,15 @@ class MetricCompareRequest(BaseModel):
 
 
 class MetricCompareMatrixRequest(BaseModel):
-    """多指标矩阵对比请求（2~6 个，去重保序）。"""
+    """多指标矩阵对比请求（2~6 个，去重保序）。
+
+    超限数量（>6）不在 schema 层用 max_length 拦截，改由 service 层
+    ``compare_matrix`` 显式校验并抛中文 ``ValidationError``——否则 Pydantic
+    返回无 message 的 422（前端只见「HTTP 422」，体验差）。
+    """
 
     metric_codes: list[str] = Field(
-        ..., min_length=2, max_length=6, description="待对比的指标编码（2~6 个）"
+        ..., min_length=2, description="待对比的指标编码（2~6 个，超限由 service 校验）"
     )
 
 

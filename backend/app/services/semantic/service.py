@@ -24,6 +24,7 @@ from app.core.exceptions import (
     BusinessError,
     ConflictError,
     NotFoundError,
+    ValidationError,
     public_error_message,
 )
 from app.db.redis import get_redis
@@ -3392,8 +3393,13 @@ class MetricService(BaseService):
             矩阵对比结果，含行级差异标记。
 
         Raises:
+            ValidationError: 指标数量不在 2~6 范围（超限/过少，去重前判定）。
             NotFoundError: 任一指标不存在（METRIC_ARCHIVED 表示已因仲裁作废）。
         """
+        if not 2 <= len(metric_codes) <= 6:
+            raise ValidationError(
+                f"指标对比需 2~6 个指标，当前 {len(metric_codes)} 个（请减少勾选数量）"
+            )
         metrics: list[Metric] = []
         seen: set[str] = set()
         for code in metric_codes:

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { message } from "antd";
 import { MetricCompare } from "../pages/MetricCompare";
 import type { MetricCompareMatrixResult, MetricListResponse, MetricResponse } from "../types";
 
@@ -131,6 +132,28 @@ describe("MetricCompare 指标对比", () => {
     expect(mockedMatrix).not.toHaveBeenCalled();
     // 引导文案（Empty 描述含「从上方选择」）
     expect(await screen.findByText(/从上方选择至少 2 个指标/)).toBeTruthy();
+  });
+
+  it("URL 直达超过 6 个：截断到前 6 个并提示，不向后端发超限请求", async () => {
+    const messageSpy = vi
+      .spyOn(message, "warning")
+      .mockImplementation(() => undefined as never);
+    renderCompare("/compare?codes=c1,c2,c3,c4,c5,c6,c7");
+    await waitFor(() => {
+      const calls = mockedMatrix.mock.calls.map((c) => c[0]);
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.every((codes) => codes.length <= 6)).toBe(true);
+    });
+    // 请求只带前 6 个（截断后的 URL 二次触发也应是 6 个）
+    expect(mockedMatrix).toHaveBeenCalledWith(["c1", "c2", "c3", "c4", "c5", "c6"]);
+    // 友好提示而非 422
+    expect(messageSpy).toHaveBeenCalledWith(expect.stringContaining("最多支持 6"));
+    messageSpy.mockRestore();
+  });
+
+  it("已选满 6 个显示上限提示", async () => {
+    renderCompare("/compare?codes=c1,c2,c3,c4,c5,c6");
+    expect(await screen.findByText(/已达上限 6 个/)).toBeTruthy();
   });
 
   it("手动选择 2 个指标触发矩阵对比并更新 URL", async () => {

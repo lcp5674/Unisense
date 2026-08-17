@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { message } from "antd";
 import { MetricCatalog } from "../pages/MetricCatalog";
 
 vi.mock("../api", () => ({
@@ -431,6 +432,31 @@ describe("MetricCatalog", () => {
       expect(mockedRemoveFavorite).toHaveBeenCalledWith("METRIC", "sales_gmv_sum_d");
     });
     expect(screen.getByRole("button", { name: "收藏" })).toBeTruthy();
+  });
+
+  it("勾选超过 6 个：拦截并保留前 6 个，友好提示而非 422", async () => {
+    const messageSpy = vi
+      .spyOn(message, "warning")
+      .mockImplementation(() => undefined as never);
+    const many = Array.from({ length: 8 }, (_, i) => ({
+      ...metric,
+      id: i + 1,
+      metric_code: `metric_${i + 1}`,
+    }));
+    mockedList.mockResolvedValue({ items: many, total: 8, page: 1, page_size: 20 });
+    renderCatalog();
+    await screen.findByText("metric_1");
+    // 全选 8 个 → onChange 收到 8 行 → 拦截保留前 6 个 + 提示
+    const selectAll = document.querySelector(
+      ".ant-table-selection-column input[type=checkbox]",
+    ) as Element;
+    fireEvent.click(selectAll);
+    await waitFor(() => {
+      expect(messageSpy).toHaveBeenCalledWith(expect.stringContaining("最多支持 6"));
+    });
+    // 对比按钮显示保留的 6 个
+    expect(screen.getByRole("button", { name: /对比所选 \(6\)/ })).toBeTruthy();
+    messageSpy.mockRestore();
   });
 
   it("批量操作：勾选草稿指标提交审核（DRAFT → REVIEW，走 /batch-submit）", async () => {
