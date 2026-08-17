@@ -1940,12 +1940,12 @@ async def test_update_metric_pending_notifies_consumers():
             role="metric_owner",
         )
 
-    # 通知消费方（owner=2 + backup=3），跳过 actor 本人（2 已发起变更已知晓）
+    # 通知消费方（owner=2 + backup=3），跳过发起变更的 actor（2 已发起已知晓）
     svc._notify_pending_consumers.assert_awaited_once_with(
         metric_code="sales_gmv_daily",
         version=2,
         consumer_ids=[2, 3],
-        actor_id=2,
+        skip_actor=2,
     )
 
 
@@ -2671,6 +2671,39 @@ async def test_promote_pending_version_applies_top_level_after():
     assert kwargs["definition_json"]["expression"] == "SUM(refund_amount)"
     assert kwargs["granularity"] == "hourly"  # top-level diff after 回写
     assert result.version == 2
+
+
+async def test_promote_pending_version_notifies_all_consumers():
+    """转正（确认/超时默认接受）后全量通知消费方新口径已生效（skip_actor=None）。
+
+    修复前：auto_accept_timeout 超时默认接受后新口径悄然生效，消费方无通知
+    ——与"创建 PENDING 通知"不对称（超时场景消费方未主动确认、最需要被告知）。
+    """
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        row_version=1, version=1, owner_id=2, backup_owner_id=3
+    )
+    repo.get_version = AsyncMock(
+        return_value=MagicMock(
+            definition_json={"expression": "SUM(refund_amount)"},
+            diff_json={},
+        )
+    )
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(version=2))
+    repo.mark_version_published = AsyncMock()
+    svc._cache.invalidate = AsyncMock()
+
+    await svc._promote_pending_version(metric, version=2)
+
+    svc._notify_pending_consumers.assert_awaited_once_with(
+        metric_code=metric.metric_code,
+        version=2,
+        consumer_ids=[2, 3],  # owner + backup，全量通知（含未主动确认者）
+        skip_actor=None,
+        event_type="metric.breaking_change_promoted",
+        title="指标口径变更已生效",
+        extra_payload={"effective_version": 2},
+    )
 
 
 async def test_promote_pending_version_not_found():

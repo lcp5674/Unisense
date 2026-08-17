@@ -197,6 +197,8 @@ _BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "metric.rename_required",
     # PENDING_VERSION 确认期创建 → 定向通知消费方（Owner/备份 Owner）去「版本历史」确认（TD §12.3）
     "metric.breaking_change_pending",
+    # PENDING_VERSION 全部确认/超时接受转正 → 定向通知消费方新口径已生效（TD §12.3）
+    "metric.breaking_change_promoted",
     # 冲突仲裁「选权威」→ 定向通知落败方指标 Owner：指标已废弃（DEPRECATED）或
     # 已作废（软删），后继=胜方（TD §12.4）
     "metric.voided",

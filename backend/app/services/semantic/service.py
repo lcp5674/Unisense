@@ -840,7 +840,7 @@ class MetricService(BaseService):
                     metric_code=metric_code,
                     version=new_version_num,
                     consumer_ids=consumer_ids,
-                    actor_id=actor_id,
+                    skip_actor=actor_id,
                 )
 
         # Top-level 破坏性变更但无 definition_json 提交时，仍需创建版本记录+PENDING
@@ -912,7 +912,7 @@ class MetricService(BaseService):
                     metric_code=metric_code,
                     version=new_version_num,
                     consumer_ids=consumer_ids,
-                    actor_id=actor_id,
+                    skip_actor=actor_id,
                 )
 
         # 注意：change_reason 仅写入 MetricVersion 快照（上方），metric 主表无该列，
@@ -1834,7 +1834,10 @@ class MetricService(BaseService):
         metric_code: str,
         version: int,
         consumer_ids: list[int],
-        actor_id: int,
+        skip_actor: int | None = None,
+        event_type: str = "metric.breaking_change_pending",
+        title: str = "指标口径变更待确认",
+        extra_payload: dict[str, Any] | None = None,
     ) -> None:
         """PENDING_VERSION 确认期创建 → 定向通知消费方去「版本历史」确认。
 
@@ -1842,32 +1845,36 @@ class MetricService(BaseService):
         TODO），Owner 在 14 天确认期内若不知情只能被动等超时自动接受——确认期闭环断裂。
 
         与 ``_notify_metric_stakeholders`` 同范式：IN_APP 定向送达，不依赖订阅偏好；
-        跳过发起变更的 actor 本人（其已知晓变更），通知其余消费方（备份 Owner 等）。
-        失败仅告警，不阻断变更创建。
+        ``skip_actor`` 非空时跳过发起变更者本人（其已知晓变更）；转正场景（None）
+        全量通知消费方（超时默认接受后新口径悄然生效，消费方须被告知）。
+        失败仅告警，不阻断变更创建/转正。
         """
         from app.db.mysql import async_session_factory
         from app.services.notify.service import NotifyService
 
         for uid in consumer_ids:
-            if uid == actor_id:
+            if skip_actor is not None and uid == skip_actor:
                 continue
             async with async_session_factory() as session:
                 try:
+                    payload: dict[str, Any] = {
+                        "metric_code": metric_code,
+                        "version": version,
+                        **({"confirm_window": "14 天内"} if event_type.endswith("pending") else {}),
+                        **({"action_hint": "请在指标详情页「版本历史」确认或拒绝，超时自动接受"}
+                           if event_type.endswith("pending") else {}),
+                        **(extra_payload or {}),
+                    }
                     await NotifyService(session).notify_user(
                         user_id=uid,
-                        event_type="metric.breaking_change_pending",
-                        title="指标口径变更待确认",
-                        payload={
-                            "metric_code": metric_code,
-                            "version": version,
-                            "confirm_window": "14 天内",
-                            "action_hint": "请在指标详情页「版本历史」确认或拒绝，超时自动接受",
-                        },
+                        event_type=event_type,
+                        title=title,
+                        payload=payload,
                     )
                 except Exception as exc:
                     logger.warning(
                         "pending_consumer_notify_failed event_type=%s metric=%s user=%s err=%s",
-                        "metric.breaking_change_pending",
+                        event_type,
                         metric_code,
                         uid,
                         exc,
@@ -2725,6 +2732,19 @@ class MetricService(BaseService):
             metric_code=metric.metric_code,
             version=version,
             definition_synced=version_obj.definition_json is not None,
+        )
+        # 转正（确认/超时默认接受）后新口径已生效 → 全量通知消费方。
+        # 超时默认接受场景消费方未主动确认、新口径悄然生效——须被告知已生效。
+        await self._notify_pending_consumers(
+            metric_code=metric.metric_code,
+            version=version,
+            consumer_ids=[
+                uid for uid in (metric.owner_id, metric.backup_owner_id) if uid is not None
+            ],
+            skip_actor=None,
+            event_type="metric.breaking_change_promoted",
+            title="指标口径变更已生效",
+            extra_payload={"effective_version": version},
         )
         return updated
 
