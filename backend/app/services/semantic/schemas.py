@@ -556,6 +556,8 @@ class MetricVersionResponse(BaseModel):
     created_by: int
     published_at: datetime | None
     created_at: datetime
+    # PENDING_CONFIRMATION 版本的确认截止时间（14 天 + 延期），前端展示超时语义
+    pending_deadline: datetime | None = None
 
     model_config = {"from_attributes": True}
 

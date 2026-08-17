@@ -20,16 +20,21 @@ function makeVersion(overrides: Partial<MetricVersionResponse> = {}): MetricVers
     diff_json: null,
     status: "PENDING_CONFIRMATION",
     created_by: 1,
+    published_at: null,
     created_at: "2026-08-01T00:00:00",
     ...overrides,
   };
 }
 
-function renderHistory(canConfirm: boolean | undefined, status = "PENDING_CONFIRMATION") {
+function renderHistory(
+  canConfirm: boolean | undefined,
+  status = "PENDING_CONFIRMATION",
+  overrides: Partial<MetricVersionResponse> = {},
+) {
   return render(
     <VersionHistory
       metricCode="sales_gmv_sum_d"
-      versions={[makeVersion({ status }) as MetricVersionResponse]}
+      versions={[makeVersion({ status, ...overrides }) as MetricVersionResponse]}
       effectiveVersion={1}
       onChanged={() => {}}
       canConfirm={canConfirm}
@@ -68,5 +73,21 @@ describe("VersionHistory 确认/拒绝权限门禁", () => {
     renderHistory(true, "PUBLISHED");
     await screen.findByText("v2");
     expect(screen.queryByRole("button", { name: /确认/ })).toBeNull();
+  });
+
+  it("PENDING 版本展示确认截止时间（超时自动接受语义）", async () => {
+    renderHistory(true, "PENDING_CONFIRMATION", {
+      pending_deadline: "2026-08-15T00:00:00",
+    });
+    // fixture 带 pending_deadline → 状态列下方展示截止提示（formatCnTime 输出中文格式）
+    expect(await screen.findByText(/超时自动接受/)).toBeTruthy();
+    expect(screen.getByText(/将于.*8月15日/)).toBeTruthy();
+  });
+
+  it("PENDING 版本无 pending_deadline（旧数据）：不显示截止提示", async () => {
+    renderHistory(true);
+    await screen.findByText("v2");
+    // 版本无 deadline → 无超时提示
+    expect(screen.queryByText(/超时自动接受/)).toBeNull();
   });
 });

@@ -119,7 +119,14 @@ export function VersionHistory({
         r.version === effectiveVersion ? (
           <Tag color="green" icon={<CheckCircleOutlined />}>生效中</Tag>
         ) : (
-          <Tag color={VERSION_STATUS_META[s]?.color}>{VERSION_STATUS_META[s]?.label ?? s}</Tag>
+          <span>
+            <Tag color={VERSION_STATUS_META[s]?.color}>{VERSION_STATUS_META[s]?.label ?? s}</Tag>
+            {s === "PENDING_CONFIRMATION" && r.pending_deadline && (
+              <span className="muted" style={{ fontSize: 11, display: "block", marginTop: 2 }}>
+                将于 {formatCnTime(r.pending_deadline)} 超时自动接受
+              </span>
+            )}
+          </span>
         ),
     },
     { title: "时间", dataIndex: "created_at", key: "created", width: 170, render: (v: string | null) => (v ? <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span> : "—") },
