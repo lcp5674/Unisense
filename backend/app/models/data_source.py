@@ -119,6 +119,11 @@ class DataSource(Base, BaseModel):
     )
     domain: Mapped[str] = mapped_column(String(64), nullable=False, comment="所属域")
     coverage: Mapped[float] = mapped_column(nullable=False, default=0.0, comment="资产覆盖率")
+    source_total_entities: Mapped[int] = mapped_column(
+        nullable=False,
+        default=0,
+        comment="源端实体总数（最近一次采集扫描数，coverage 分母基线）",
+    )
     quota: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, comment="配额（max_concurrency/max_scan_rows）"
     )

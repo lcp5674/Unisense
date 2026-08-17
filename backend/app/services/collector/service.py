@@ -1861,7 +1861,9 @@ class CollectorService(BaseService):
                         exc,
                     )
 
-        coverage = await self._repo.recompute_coverage(source_id)
+        coverage = await self._repo.recompute_coverage(
+            source_id, total_entities=len(result.specs)
+        )
 
         # P0-4: 合并 collector 层 failed_specs 与 catalog 层 failed_specs
         all_failed_specs = [

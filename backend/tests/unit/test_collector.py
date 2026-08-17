@@ -444,6 +444,41 @@ async def test_collect_and_register_deprecates_dropped_tables_full_mode():
     repo.deprecate_catalog.assert_awaited_once_with("s", "legacy_table")
 
 
+async def test_collect_and_register_refreshes_coverage_baseline():
+    """采集完成后 coverage 基线刷新为本次扫描实体数（TD §2051 分母）。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock())
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+    repo.list_active_entity_names = AsyncMock(return_value=["users"])
+    repo.deprecate_catalog = AsyncMock(return_value=False)
+
+    class TwoTablesCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="t1", entity_type="TABLE", schema_json={"columns": ["a"]}
+                    ),
+                    CatalogSpec(
+                        entity_name="t2", entity_type="TABLE", schema_json={"columns": ["b"]}
+                    ),
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    await svc.collect_and_register("s", TwoTablesCollector(), actor_id=1, mode="FULL")
+    repo.recompute_coverage.assert_awaited_once_with("s", total_entities=2)
+
+
 async def test_collect_and_register_triggers_dsd_on_dropped_tables():
     """P1-4: 全量采集检测到源表 DROP → 沿血缘把下游指标置 DSD（PRD R3-04④ 接线）。
 
@@ -739,17 +774,28 @@ async def test_repo_set_source_enabled_not_found():
     assert await repo.set_source_enabled("s", True) is None
 
 
-async def test_repo_recompute_coverage_dict_quota():
+async def test_repo_recompute_coverage_uses_total_entities():
+    """TD §2051: coverage = 已采集实体 / 源端实体总数基线。"""
     src = MagicMock()
-    src.quota = {"max_scan_rows": 2}
+    src.source_total_entities = 4
     repo = CollectorRepository(_session(scalar_one_or_none=src, scalar=3))
-    assert await repo.recompute_coverage("s") == 1.0
+    assert await repo.recompute_coverage("s") == 0.75
 
 
-async def test_repo_recompute_coverage_zero_expected():
-    """P2-3: expected<=0（无配额基线）时 coverage=0.0（覆盖率未知，非误导性 1.0）。"""
+async def test_repo_recompute_coverage_refreshes_baseline():
+    """提供 total_entities 时（采集完成）刷新基线并计算。"""
     src = MagicMock()
-    src.quota = {"max_scan_rows": 0}
+    src.source_total_entities = 4
+    repo = CollectorRepository(_session(scalar_one_or_none=src, scalar=3))
+    assert await repo.recompute_coverage("s", total_entities=10) == 0.3
+    assert src.source_total_entities == 10
+    assert src.coverage == 0.3
+
+
+async def test_repo_recompute_coverage_zero_baseline():
+    """基线<=0（从未采集/源端扫描数为 0）时 coverage=0.0（覆盖率未知）。"""
+    src = MagicMock()
+    src.source_total_entities = 0
     repo = CollectorRepository(_session(scalar_one_or_none=src, scalar=5))
     assert await repo.recompute_coverage("s") == 0.0
 
@@ -1840,10 +1886,10 @@ async def test_clickhouse_async_context_manager_closes_client():
 # ---------- P2-3: coverage 无配额语义 ----------
 
 
-async def test_repo_recompute_coverage_no_quota_is_unknown():
-    """无 quota 基线时 coverage=0.0（覆盖率未知），非误导性 1.0。"""
+async def test_repo_recompute_coverage_no_baseline_is_unknown():
+    """无基线（source_total_entities=0）时 coverage=0.0（覆盖率未知），非误导性 1.0。"""
     src = MagicMock()
-    src.quota = {}
+    src.source_total_entities = 0
     repo = CollectorRepository(_session(scalar_one_or_none=src, scalar=5))
     assert await repo.recompute_coverage("s") == 0.0
 

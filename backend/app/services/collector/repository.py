@@ -611,26 +611,32 @@ class CollectorRepository:
                 failed.append({"item": it.model_dump(), "reason": str(exc)})
         return succeeded, failed
 
-    async def recompute_coverage(self, source_id: str) -> float:
-        scanned = await self._db.scalar(
+    async def recompute_coverage(
+        self, source_id: str, total_entities: int | None = None
+    ) -> float:
+        """重算资产覆盖率（TD §2051：已采集实体 / 源端实体总数）。
+
+        - ``total_entities`` 提供时（采集完成后）：先刷新源端实体总数基线再计算；
+        - 未提供时（单实体注册等增量路径）：沿用已存基线；
+        - 无基线（从未采集/源端扫描数为 0）时 coverage=0.0（覆盖率未知，
+          非误导性的 1.0）。
+        """
+        total = await self._db.scalar(
             select(func.count())
             .select_from(DBCatalog)
             .where(DBCatalog.source_id == source_id, DBCatalog.deleted_at.is_(None))
         )
-        total = int(scanned) if scanned is not None else 0
+        registered = int(total) if total is not None else 0
+
         src = await self.get_source(source_id)
-        quota = getattr(src, "quota", None)
-        expected = 0
-        if isinstance(quota, dict):
-            expected = int(quota.get("max_scan_rows", 0) or 0)
-        elif isinstance(quota, int):
-            expected = quota
-        # P2-3: 无配额基线时 coverage=0.0（表示"覆盖率未知"），
-        # 而非旧的 1.0（"无配额=全覆盖"是误导性数据）。
-        coverage = 0.0 if expected <= 0 else min(1.0, total / expected)
-        if src is not None:
-            src.coverage = coverage
-            await self._db.flush()
+        if src is None:
+            return 0.0
+        if total_entities is not None:
+            src.source_total_entities = max(0, int(total_entities))
+        expected = int(getattr(src, "source_total_entities", 0) or 0)
+        coverage = 0.0 if expected <= 0 else min(1.0, registered / expected)
+        src.coverage = coverage
+        await self._db.flush()
         return float(coverage)
 
     # ---- Schema Drift 相关方法 ----
