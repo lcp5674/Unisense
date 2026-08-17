@@ -46,6 +46,12 @@ _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_inje
 _COMPLIANCE_ROLES = ("compliance_officer", "platform_admin")
 _COMPLIANCE_DEPS = [Depends(require_roles(*_COMPLIANCE_ROLES)), Depends(guard_against_injection)]
 
+# PII 合规数据读取角色：治理域角色（domain_admin 负责本域 PII 复核；
+# compliance_officer/platform_admin 全局）。区别于 _READ_DEPS——低权限角色
+# viewer/analyst 一律不可见 PII（P0-1：防合规数据泄露）。
+_PII_READ_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
+_PII_READ_DEPS = [Depends(require_roles(*_PII_READ_ROLES)), Depends(guard_against_injection)]
+
 
 @router.get("/summary", dependencies=_READ_DEPS)
 async def catalog_summary(
@@ -257,14 +263,28 @@ async def health_summary(
     return ok(data=data, trace_id=trace_id)
 
 
-@router.get("/pii", dependencies=_READ_DEPS)
+@router.get("/pii", dependencies=_PII_READ_DEPS)
 async def pii_overview(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
+    request: Request,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """PII 合规资产视图：按敏感级/域聚合 PII 资产（面向 compliance_officer）。"""
     data = await AssetMapService(db).pii_overview()
+    # 合规敏感数据访问留痕：PII 概览属敏感数据读取，须可追溯（P0-1）
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="asset.pii_view",
+        entity_type="asset_pii",
+        entity_id="overview",
+        detail={"categories": data.get("by_category", {}) if isinstance(data, dict) else {}},
+        ip=client_ip(request),
+        pii_access=True,
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(data=data, trace_id=trace_id)
 
 
@@ -385,7 +405,7 @@ async def assign_owner(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_ASSIGN_OWNER",
+        action="asset.assign_owner",
         entity_type="db_catalog",
         entity_id=str(entity_id),
         detail={"owner_id": payload.owner_id},
@@ -412,7 +432,7 @@ async def reclassify_sensitivity(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_RECLASSIFY",
+        action="asset.reclassify",
         entity_type="db_catalog",
         entity_id=str(entity_id),
         detail={"sensitivity_level": str(payload.sensitivity_level)},
@@ -436,7 +456,7 @@ async def batch_assign_owner(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_BATCH_ASSIGN_OWNER",
+        action="asset.batch_assign_owner",
         entity_type="db_catalog",
         entity_id="batch",
         detail={
@@ -466,7 +486,7 @@ async def batch_reclassify(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_BATCH_RECLASSIFY",
+        action="asset.batch_reclassify",
         entity_type="db_catalog",
         entity_id="batch",
         detail={
@@ -486,10 +506,11 @@ async def batch_reclassify(
 # ----------------------------------------------------------------
 
 
-@router.get("/pii-assets", dependencies=_READ_DEPS)
+@router.get("/pii-assets", dependencies=_PII_READ_DEPS)
 async def list_pii_assets(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
+    request: Request,
     trace_id: Annotated[str, Depends(get_trace_id)],
     keyword: str | None = Query(None, description="关键字：实体名或数据源模糊搜索"),
     source_id: str | None = Query(None, description="数据源 ID 过滤"),
@@ -515,17 +536,49 @@ async def list_pii_assets(
         page=page,
         page_size=page_size,
     )
+    # 合规敏感数据访问留痕：PII 明细属敏感数据读取，须可追溯（P0-1）
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="asset.pii_list",
+        entity_type="asset_pii",
+        entity_id=f"page={page}&size={page_size}",
+        detail={
+            "total": data.get("total", 0) if isinstance(data, dict) else 0,
+            "category": category,
+            "owner_id": owner_id,
+            "review_status": review_status,
+        },
+        ip=client_ip(request),
+        pii_access=True,
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(data=data, trace_id=trace_id)
 
 
-@router.get("/pii/templates", dependencies=_READ_DEPS)
+@router.get("/pii/templates", dependencies=_PII_READ_DEPS)
 async def list_pii_templates(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
+    request: Request,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """行业分级模板列表（PII 合规盘点与批量升级）。"""
     data = await AssetMapService(db).pii_templates()
+    # 合规敏感数据访问留痕：分级模板属 PII 合规配置，读取须可追溯（P0-1）
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="asset.pii_templates",
+        entity_type="asset_pii",
+        entity_id="templates",
+        detail={"count": len(data)},
+        ip=client_ip(request),
+        pii_access=True,
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(data={"items": data, "total": len(data)}, trace_id=trace_id)
 
 
@@ -547,7 +600,7 @@ async def apply_pii_template(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_APPLY_PII_TEMPLATE",
+        action="asset.apply_pii_template",
         entity_type="db_catalog",
         entity_id=payload.template_id,
         detail={"applied": data.get("applied"), "changed": data.get("changed")},
@@ -574,7 +627,7 @@ async def review_catalog_entity(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_PII_REVIEW",
+        action="asset.review_pii",
         entity_type="db_catalog",
         entity_id=str(entity_id),
         detail={"decision": payload.decision, "comment": payload.comment},
@@ -599,7 +652,7 @@ async def set_masking_policy(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_SET_MASKING",
+        action="asset.set_masking",
         entity_type="db_catalog",
         entity_id=str(entity_id),
         detail={"masking_policy": payload.policy},
@@ -626,7 +679,7 @@ async def upsert_pii_override(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_PII_OVERRIDE",
+        action="asset.override_pii",
         entity_type="db_catalog",
         entity_id=str(entity_id),
         detail={"column": payload.column, "suppressed": payload.suppressed},
@@ -651,7 +704,7 @@ async def remove_pii_override(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_PII_OVERRIDE_REMOVE",
+        action="asset.remove_pii_override",
         entity_type="db_catalog",
         entity_id=str(entity_id),
         detail={"column": payload.column},
@@ -678,7 +731,7 @@ async def set_retention(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ASSET_SET_RETENTION",
+        action="asset.set_retention",
         entity_type="db_catalog",
         entity_id=str(entity_id),
         detail={"retention_days": payload.retention_days, "legal_basis": payload.legal_basis},
@@ -689,10 +742,11 @@ async def set_retention(
     return ok(data=data, trace_id=trace_id)
 
 
-@router.get("/pii-export.csv", dependencies=_READ_DEPS)
+@router.get("/pii-export.csv", dependencies=_PII_READ_DEPS)
 async def export_pii_csv(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
+    request: Request,
     trace_id: Annotated[str, Depends(get_trace_id)],
     keyword: str | None = Query(None),
     source_id: str | None = Query(None),
@@ -763,6 +817,19 @@ async def export_pii_csv(
             ]
         )
     body = "\ufeff" + output.getvalue()
+    # 合规敏感数据导出留痕：PII 盘点 CSV 属最高敏感级别数据导出，须强制审计（P0-1）
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="asset.pii_export",
+        entity_type="asset_pii",
+        entity_id="csv",
+        detail={"rows": len(items), "category": category, "review_status": review_status},
+        ip=client_ip(request),
+        pii_access=True,
+        trace_id=trace_id,
+    )
+    await db.commit()
     return Response(
         content=body,
         media_type="text/csv; charset=utf-8",

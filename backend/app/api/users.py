@@ -462,7 +462,7 @@ async def create_user(
     await write_audit(
         db,
         actor_id=user.id,
-        action="USER_CREATE",
+        action="user.create",
         entity_type="user",
         entity_id=str(row.id),
         detail={
@@ -545,7 +545,7 @@ async def batch_set_user_status(
     await write_audit(
         db,
         actor_id=user.id,
-        action="USER_STATUS_BATCH",
+        action="user.batch_update_status",
         entity_type="user",
         entity_id=f"items:{len(payload.user_ids)}",
         detail={"status": payload.status, "succeeded": len(succeeded), "failed": len(failed)},
@@ -600,7 +600,7 @@ async def change_my_password(
     await write_audit(
         db,
         actor_id=user.id,
-        action="USER_PASSWORD_CHANGE",
+        action="user.change_password",
         entity_type="user",
         entity_id=str(user.id),
         detail={"username": user.username},
@@ -661,7 +661,7 @@ async def update_user(
     await write_audit(
         db,
         actor_id=user.id,
-        action="USER_UPDATE",
+        action="user.update",
         entity_type="user",
         entity_id=str(row.id),
         detail={
@@ -702,7 +702,7 @@ async def set_user_status(
     await write_audit(
         db,
         actor_id=user.id,
-        action="USER_STATUS",
+        action="user.update_status",
         entity_type="user",
         entity_id=str(row.id),
         detail={"username": row.username, "status": row.status},
@@ -748,7 +748,7 @@ async def reset_password(
     await write_audit(
         db,
         actor_id=user.id,
-        action="USER_RESET_PASSWORD",
+        action="user.reset_password",
         entity_type="user",
         entity_id=str(row.id),
         detail={"username": row.username},

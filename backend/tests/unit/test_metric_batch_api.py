@@ -321,6 +321,15 @@ def test_batch_audit_action_levels():
 
     ok = MetricBatchItemResult(metric_code="a", ok=True)
     fail = MetricBatchItemResult(metric_code="b", ok=False, message="x")
-    assert _batch_audit_action("BATCH_SUBMIT", [ok, ok]) == "BATCH_SUBMIT"
-    assert _batch_audit_action("BATCH_SUBMIT", [fail, fail]) == "BATCH_SUBMIT_FAILED"
-    assert _batch_audit_action("BATCH_SUBMIT", [ok, fail]) == "BATCH_SUBMIT_PARTIAL"
+    assert (
+        _batch_audit_action("metric_definition.batch_submit", [ok, ok])
+        == "metric_definition.batch_submit"
+    )
+    assert (
+        _batch_audit_action("metric_definition.batch_submit", [fail, fail])
+        == "metric_definition.batch_submit_failed"
+    )
+    assert (
+        _batch_audit_action("metric_definition.batch_submit", [ok, fail])
+        == "metric_definition.batch_submit_partial"
+    )

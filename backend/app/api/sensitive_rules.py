@@ -99,7 +99,7 @@ async def test_rule(
     await write_audit(
         db,
         actor_id=user.id,
-        action="SENSITIVE_RULE_TEST",
+        action="sensitive_rule.test",
         entity_type="sensitive_rule",
         entity_id=payload.column_name,
         detail={"sensitivity_level": result.sensitivity_level, "hits": len(result.hits)},
@@ -128,7 +128,7 @@ async def create_rule(
     await write_audit(
         db,
         actor_id=user.id,
-        action="SENSITIVE_RULE_CREATE",
+        action="sensitive_rule.create",
         entity_type="sensitive_rule",
         entity_id=item.rule_id,
         detail={"label": item.label, "category": item.category, "pii": item.pii},
@@ -157,7 +157,7 @@ async def update_rule(
     await write_audit(
         db,
         actor_id=user.id,
-        action="SENSITIVE_RULE_UPDATE",
+        action="sensitive_rule.update",
         entity_type="sensitive_rule",
         entity_id=item.rule_id,
         detail={"label": item.label, "category": item.category, "pii": item.pii},
@@ -190,7 +190,7 @@ async def set_rule_status(
     await write_audit(
         db,
         actor_id=user.id,
-        action="SENSITIVE_RULE_STATUS",
+        action="sensitive_rule.update_status",
         entity_type="sensitive_rule",
         entity_id=rule_id,
         detail={"action": action, "status": item.status},
@@ -233,7 +233,7 @@ async def batch_set_rule_status(
     await write_audit(
         db,
         actor_id=user.id,
-        action="SENSITIVE_RULE_BATCH_STATUS",
+        action="sensitive_rule.batch_update_status",
         entity_type="sensitive_rule",
         entity_id=f"count={len(rule_ids)}",
         detail={"action": action, "succeeded": result["succeeded"], "failed": result["failed"]},
@@ -282,7 +282,7 @@ async def batch_set_rule_confidence(
     await write_audit(
         db,
         actor_id=user.id,
-        action="SENSITIVE_RULE_BATCH_CONFIDENCE",
+        action="sensitive_rule.batch_update_confidence",
         entity_type="sensitive_rule",
         entity_id=f"count={len(rule_ids)}",
         detail={"confidence": conf_val, "succeeded": result["succeeded"], "failed": result["failed"]},
@@ -310,7 +310,7 @@ async def delete_rule(
     await write_audit(
         db,
         actor_id=user.id,
-        action="SENSITIVE_RULE_DELETE",
+        action="sensitive_rule.delete",
         entity_type="sensitive_rule",
         entity_id=rule_id,
         detail={},

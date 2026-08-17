@@ -188,7 +188,7 @@ async def toggle_domain_status(
         await write_audit(
             svc._db,
             actor_id=user.id,
-            action="subject_domain.status",
+            action="subject_domain.update_status",
             entity_type="subject_domain",
             entity_id=code,
             detail={"code": code, "action": action, "status": domain.status},

@@ -182,6 +182,17 @@ class MetricService(BaseService):
             else MetricCache.from_defaults(get_redis() if _redis_available() else None)
         )
         self._governance_svc = governance_svc
+        # 血缘清理临时实例（P0-3）：其延迟副作用（图写/缓存失效）须在事务提交后
+        # 由 API 层经 run_lineage_post_commit() 统一触发。
+        self._lineage_svc: Any | None = None
+
+    async def run_lineage_post_commit(self) -> None:
+        """触发血缘清理的提交后副作用（P0-3）：commit 后调用，防止幽灵边。"""
+        if self._lineage_svc is not None:
+            try:
+                await self._lineage_svc.run_post_commit()
+            finally:
+                self._lineage_svc = None
 
     def _gov_svc(self) -> GovernanceService:
         """获取治理服务实例（延迟创建，支持测试注入 mock）。"""
@@ -1956,7 +1967,8 @@ class MetricService(BaseService):
         from app.services.lineage.service import LineageService
 
         try:
-            deleted = await LineageService(self._db).delete_by_node(f"metric:{metric_code}")
+            self._lineage_svc = LineageService(self._db)
+            deleted = await self._lineage_svc.delete_by_node(f"metric:{metric_code}")
             logger.info(
                 "metric_lineage_cleaned",
                 metric_code=metric_code,
@@ -1981,7 +1993,8 @@ class MetricService(BaseService):
         from app.services.lineage.service import LineageService
 
         try:
-            restored = await LineageService(self._db).restore_by_node(f"metric:{metric_code}")
+            self._lineage_svc = LineageService(self._db)
+            restored = await self._lineage_svc.restore_by_node(f"metric:{metric_code}")
             logger.info(
                 "metric_lineage_restored",
                 metric_code=metric_code,
@@ -2538,7 +2551,7 @@ class MetricService(BaseService):
         # 审计 EMERGENCY_PUBLISH 标记
         await self._write_audit(
             actor_id=actor_id,
-            action="EMERGENCY_PUBLISH",
+            action="metric_definition.emergency_publish",
             entity_type="metric_definition",
             entity_id=metric_code,
             detail={
@@ -2978,7 +2991,7 @@ class MetricService(BaseService):
         # 转正（定时任务、无用户操作）此前零审计——14 天后口径悄然生效不可追溯。
         await self._write_audit(
             actor_id=actor_id if actor_id is not None else (metric.owner_id or 0),
-            action="PROMOTE_VERSION",
+            action="metric_definition.promote_version",
             entity_type="metric_definition",
             entity_id=metric.metric_code,
             detail={

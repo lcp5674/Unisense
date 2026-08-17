@@ -2639,6 +2639,7 @@ export async function fetchLlmModels(body?: {
 // ---- 审计 ----
 export async function listAudit(params?: {
   actor_id?: number;
+  actor_keyword?: string;
   entity_type?: string;
   entity_id?: string;
   trace_id?: string;
@@ -2648,6 +2649,7 @@ export async function listAudit(params?: {
 }): Promise<{ items: AuditEntry[]; total: number; page: number; page_size: number }> {
   const qs = pageQs({
     actor_id: params?.actor_id,
+    actor_keyword: params?.actor_keyword,
     entity_type: params?.entity_type,
     entity_id: params?.entity_id,
     trace_id_filter: params?.trace_id,
@@ -2661,6 +2663,7 @@ export async function listAudit(params?: {
 // 审计日志导出（CSV/JSON，合规留档；下载文件）
 export async function exportAudit(params?: {
   actor_id?: number;
+  actor_keyword?: string;
   entity_type?: string;
   entity_id?: string;
   trace_id?: string;
@@ -2670,6 +2673,7 @@ export async function exportAudit(params?: {
 }): Promise<void> {
   const qs = pageQs({
     actor_id: params?.actor_id,
+    actor_keyword: params?.actor_keyword,
     entity_type: params?.entity_type,
     entity_id: params?.entity_id,
     trace_id_filter: params?.trace_id,

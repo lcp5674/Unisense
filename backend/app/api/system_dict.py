@@ -141,7 +141,7 @@ async def notify_unknown_dict_values(
     await write_audit(
         svc._db,
         actor_id=user.id,
-        action="DICT_UNKNOWN_NOTIFY",
+        action="dict.notify_unknown",
         entity_type="system_dict",
         entity_id=data.metric_code or "-",
         detail={
@@ -182,7 +182,7 @@ async def reject_unknown_dict_value(
     await write_audit(
         svc._db,
         actor_id=user.id,
-        action="DICT_UNKNOWN_REJECT",
+        action="dict.reject_unknown",
         entity_type="notification",
         entity_id=str(data.notification_id),
         detail={"reason": data.reason},
@@ -217,7 +217,7 @@ async def create_dict_item(
         await write_audit(
             svc._db,
             actor_id=user.id,
-            action="DICT_CREATE",
+            action="dict.create",
             entity_type="dict_item",
             entity_id=f"{dict_type}:{item.code}",
             detail={"dict_type": dict_type, "code": item.code, "label": item.label},
@@ -252,7 +252,7 @@ async def update_dict_item(
         await write_audit(
             svc._db,
             actor_id=user.id,
-            action="DICT_UPDATE",
+            action="dict.update",
             entity_type="dict_item",
             entity_id=f"{dict_type}:{code}",
             detail={"dict_type": dict_type, "code": code, "label": item.label},
@@ -290,7 +290,7 @@ async def toggle_dict_item_status(
         await write_audit(
             svc._db,
             actor_id=user.id,
-            action="DICT_STATUS",
+            action="dict.update_status",
             entity_type="dict_item",
             entity_id=f"{dict_type}:{code}",
             detail={"dict_type": dict_type, "code": code, "action": action, "status": item.status},
@@ -323,7 +323,7 @@ async def delete_dict_item(
         await write_audit(
             svc._db,
             actor_id=user.id,
-            action="DICT_DELETE",
+            action="dict.delete",
             entity_type="dict_item",
             entity_id=f"{dict_type}:{code}",
             detail={"dict_type": dict_type, "code": code},

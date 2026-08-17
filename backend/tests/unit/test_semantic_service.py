@@ -3017,7 +3017,7 @@ async def test_promote_pending_version_writes_promote_audit():
         metric, version=2, trigger="timeout", actor_id=metric.owner_id
     )
     _, kwargs = svc._write_audit.call_args
-    assert kwargs["action"] == "PROMOTE_VERSION"
+    assert kwargs["action"] == "metric_definition.promote_version"
     assert kwargs["entity_type"] == "metric_definition"
     assert kwargs["entity_id"] == metric.metric_code
     assert kwargs["actor_id"] == 2

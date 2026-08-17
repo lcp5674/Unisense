@@ -305,7 +305,7 @@ async def confirm_repair(
     await write_audit(
         db,
         actor_id=user.id,
-        action="quality_event.repair_confirm",
+        action="quality_event.confirm_repair",
         entity_type="quality_event",
         entity_id=str(event_id),
         detail={"confirmed_by": user.id},

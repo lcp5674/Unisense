@@ -210,6 +210,26 @@ export function entityTypeLabel(v: string | null | undefined): string {
   return enumLabel(ENTITY_TYPE_LABEL, v);
 }
 
+/**
+ * 审计实体类型全集（对齐后端全部 entity_type，2026-08 根治）。
+ * 集中管理避免页面硬编码漂移；此前仅 12 个硬编码导致 29 个类型无法筛选，
+ * 且 `grant` 与后端实际存储的 `grants` 复数不一致（选中即空结果）。
+ */
+export const AUDIT_ENTITY_TYPES: string[] = [
+  "metric_definition", "metric", "metric_version", "metric_template",
+  "metric_description", "metric_term", "metric_dimension",
+  "data_source", "db_catalog", "catalog", "column_description",
+  "conflict", "lineage", "lineage_edge",
+  "grant", "grants", "role", "user", "organization",
+  "term", "glossary_conflict", "term_relation",
+  "dimension", "dimension_mapping", "dimension_member",
+  "quality_rule", "quality_event", "quality_observation",
+  "external_benchmark", "reconciliation", "reconciliation_record",
+  "notification", "event_log", "feedback", "audit_log", "erasure_request",
+  "api_client", "sensitive_rule", "system_dict", "dict_item",
+  "subject_domain", "llm_config", "nl_query", "quickbi_report",
+];
+
 /** 审计动作 → 中文 */
 export const AUDIT_ACTION_LABEL: Record<string, string> = {
   "metric.created": "创建指标",
@@ -347,19 +367,194 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
   "LOGOUT": "退出登录",
 };
 
-/** 审计动作 → 格式化中文显示（命中返回中文，未命中用拆词兜底） */
+/**
+ * 统一动词中文表（对齐后端 audit_i18n._VERB_TEMPLATES，2026-08 根治）。
+ * 新产生动作统一为 {entity}.{verb} 点号小写，任何 verb 命中即可翻译，
+ * 无需逐条维护完整 action 字符串（此前 173 个 key 人工堆导致覆盖不全/漂移）。
+ * 仅作 action_desc 缺失时的兜底；正常路径后端已 enrich 完整中文句子。
+ */
+export const AUDIT_VERB_LABEL: Record<string, string> = {
+  // 基础 CRUD / 读
+  create: "创建",
+  update: "更新",
+  delete: "删除",
+  read: "查看",
+  list: "查询列表",
+  export: "导出",
+  // 审核流
+  submit: "提交审核",
+  approve: "审核通过",
+  reject: "驳回",
+  review: "复核",
+  confirm: "确认",
+  resubmit: "重新提交",
+  confirm_version: "确认版本",
+  reject_version: "拒绝版本",
+  extend_version: "延长确认期限",
+  // 生命周期 / 发布
+  publish: "发布",
+  deprecate: "废弃",
+  promote: "全量发布",
+  rollback: "回滚",
+  restore: "恢复",
+  recover: "恢复",
+  activate: "激活",
+  deactivate: "停用",
+  emergency_publish: "紧急发布",
+  emergency_review: "紧急复核",
+  promote_version: "版本全量发布",
+  recover_source_dropped: "源恢复",
+  confirm_deprecate_dropped: "确认退役",
+  mark_source_dropped: "源下线",
+  // 采集 / 连接 / 调度
+  register: "注册",
+  collect: "采集",
+  collect_now: "立即采集",
+  collect_async: "异步采集",
+  refresh: "刷新",
+  schedule: "配置调度",
+  enable: "启用",
+  disable: "停用",
+  test: "测试",
+  test_connection: "测试连接",
+  check: "检查",
+  check_connection: "检查连接",
+  probe: "探活",
+  sync: "同步",
+  collect_schedule: "配置定时采集",
+  bulk_deprecate: "批量废弃",
+  update_term: "更新术语",
+  bind_dimension: "绑定维度",
+  unbind_dimension: "解绑维度",
+  update_status: "更新状态",
+  query_internal: "内部查询",
+  submit_nps: "提交评分",
+  // 描述 / LLM
+  infer: "推断",
+  infer_description: "推断描述",
+  infer_descriptions: "批量推断描述",
+  update_description: "更新描述",
+  // 关系 / 归属
+  bind: "绑定",
+  unbind: "解绑",
+  assign: "变更责任人",
+  assign_owner: "变更责任人",
+  reassign: "变更责任人",
+  reclassify: "重新分级",
+  create_relation: "创建关联",
+  // 治理 / 安全 / 合规
+  grant: "授予权限",
+  revoke: "收回权限",
+  review_pii: "PII 复核",
+  secondary_validate_pii: "PII 二次校验",
+  rescan: "敏感分级重扫",
+  rescan_classification: "敏感分级重扫",
+  override_pii: "PII 覆盖",
+  remove_pii_override: "移除 PII 覆盖",
+  set_masking: "配置脱敏",
+  set_retention: "配置保留期",
+  apply_pii_template: "应用 PII 模板",
+  anonymize: "PII 匿名化",
+  execute: "执行",
+  reveal: "查看密钥",
+  reveal_secret: "查看密钥",
+  pii_view: "查看 PII 信息",
+  pii_list: "查询 PII 列表",
+  pii_templates: "查看 PII 模板",
+  pii_export: "导出 PII 清单",
+  // 冲突 / 任务
+  resolve: "解决",
+  resolve_conflict: "解决冲突",
+  escalate: "升级",
+  close: "关闭",
+  reopen: "重新打开",
+  arbitrate: "裁决",
+  // 血缘
+  parse: "解析血缘",
+  parse_batch: "批量解析血缘",
+  scan: "扫描",
+  preview_impact: "预览影响",
+  add_edge: "新增边",
+  delete_edge: "删除边",
+  sync_consumer: "同步消费关系",
+  confirm_stale: "确认失效",
+  restore_stale: "恢复",
+  // 用户 / 组织 / 认证
+  change_password: "修改密码",
+  reset_password: "重置密码",
+  update_permissions: "更新权限",
+  reset_permissions: "重置权限",
+  login: "登录系统",
+  logout: "退出登录",
+  login_failed: "登录失败",
+  // 通知
+  mark_read: "标记已读",
+  mark_all_read: "全部已读",
+  mark_sent: "标记已送达",
+  mark_failed: "标记失败",
+  retry_delivery: "重试投递",
+  mark_handled: "标记已处理",
+  // 质量 / 对账 / 模板
+  record: "记录",
+  detect: "检测异常",
+  ack: "确认异常",
+  confirm_repair: "确认修复",
+  import: "导入",
+  run: "执行",
+  query: "查询",
+  instantiate: "实例化",
+  set_active: "启用",
+  get_ticket: "获取票据",
+  update_defaults: "更新默认配置",
+  notify_unknown: "通知未知词",
+  reject_unknown: "驳回未知词",
+  // 批量动作
+  batch_register: "批量注册",
+  batch_submit: "批量提交",
+  batch_approve: "批量审核通过",
+  batch_reject: "批量驳回",
+  batch_deprecate: "批量废弃",
+  batch_publish: "批量发布",
+  batch_enable: "批量启用",
+  batch_disable: "批量停用",
+  batch_delete: "批量删除",
+  batch_probe: "批量探活",
+  batch_schedule: "批量调度",
+  batch_update_status: "批量更新状态",
+  batch_update_confidence: "批量更新置信度",
+  batch_assign_owner: "批量变更责任人",
+  batch_reclassify: "批量重新分级",
+  batch_grant: "批量授权",
+  batch_revoke: "批量回收",
+  batch_submit_partial: "部分提交成功",
+  batch_submit_failed: "批量提交失败",
+  batch_approve_partial: "部分审核通过",
+  batch_approve_failed: "批量审核失败",
+  batch_reject_partial: "部分驳回",
+  batch_reject_failed: "批量驳回失败",
+  batch_deprecate_partial: "部分废弃",
+  batch_deprecate_failed: "批量废弃失败",
+};
+
+/** 审计动作 → 格式化中文显示（精确表 → 新命名动词表 → 拆词兜底） */
 export function auditActionLabel(action: string | null | undefined): string {
   if (!action) return "—";
   const known = AUDIT_ACTION_LABEL[action];
   if (known) return known;
-  // 兜底：域.动作 拆词
+  // 新命名 {prefix}.{verb}：verb 命中统一动词表，前缀实体翻译为「实体·动作」
   const dot = action.indexOf(".");
   if (dot > 0) {
+    const prefix = action.slice(0, dot);
     const verb = action.slice(dot + 1);
+    const verbCn = AUDIT_VERB_LABEL[verb];
+    if (verbCn) {
+      const prefixCn = entityTypeLabel(prefix) || prefix;
+      return prefixCn ? `${prefixCn}·${verbCn}` : verbCn;
+    }
     const domainMap: Record<string, string> = {
-      "ai-config": "AI 配置", "ai.config": "AI 配置", "llm_config": "AI 配置",
+      "ai-config": "AI 配置", "ai.config": "AI 配置", "llm_config": "AI 配置", ai_config: "AI 配置",
     };
-    const cnDomain = domainMap[action.slice(0, dot)] || entityTypeLabel(action.slice(0, dot)) || action.slice(0, dot);
+    const cnDomain = domainMap[prefix] || entityTypeLabel(prefix) || prefix;
     const verbMap: Record<string, string> = {
       created: "创建", updated: "更新", deleted: "删除",
       published: "发布", deprecated: "废弃", submitted: "提交审核",
@@ -398,12 +593,23 @@ export function formatAuditTime(v: string | null | undefined): string {
   return formatCnTime(v);
 }
 
+/** 剥离 entity_id 的技术前缀（batch:/items:/metric:/source:/pii_list:/count= 等数量/批次/类型标记；
+ * 业务标识如 dim:member、source/entity、a->b 保留）。 */
+export function cleanEntityId(entityId: string | null | undefined): string {
+  if (!entityId) return "—";
+  const cleaned = String(entityId)
+    .replace(/^(?:metric|batch|items|pii_list|source|count|job|token|version|node|graph|table):/i, "")
+    .replace(/^count=/, "")
+    .replace(/^#/, "");
+  return cleaned || "—";
+}
+
 /** 实体 ID 加业务前缀（把 metric#123 转为「指标 #123」） */
 export function entityIdWithLabel(entityType: string | null | undefined, entityId: string | null | undefined): string {
-  if (!entityId) return "—";
-  if (entityType) {
+  const cleaned = cleanEntityId(entityId);
+  if (entityType && cleaned !== "—") {
     const label = entityTypeLabel(entityType);
-    if (label) return `${label} #${entityId.replace(/^[^#]*#?/, "")}`;
+    if (label) return `${label} #${cleaned}`;
   }
-  return entityId;
+  return cleaned;
 }

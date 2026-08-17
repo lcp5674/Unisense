@@ -4,8 +4,10 @@ import { listAudit } from "../../api";
 import type { AuditEntry } from "../../types";
 import {
   AUDIT_FIELD_LABEL,
+  AUDIT_VERB_LABEL,
   auditActionLabel,
   auditValueText,
+  cleanEntityId,
   entityTypeLabel,
 } from "../../utils/auditI18n";
 import { formatCnTime, timeAgoCn } from "../../utils/timeCn";
@@ -92,6 +94,19 @@ const ACTION_CATEGORY: Record<string, string> = {
   INFER_TABLE_DESCRIPTION: "描述",
 };
 
+/** 动作 → 业务分类（对齐 auditI18n 动词表：点号动作拆 verb 取动词中文，
+ * 避免分类 Tag 显示完整句子「创建术语」；新动作随 auditI18n 自动覆盖，不再双字典漂移）。 */
+function actionCategory(action: string): string {
+  const known = ACTION_CATEGORY[action];
+  if (known) return known;
+  const dot = action.indexOf(".");
+  if (dot > 0) {
+    const verbCn = AUDIT_VERB_LABEL[action.slice(dot + 1)];
+    if (verbCn) return verbCn;
+  }
+  return auditActionLabel(action);
+}
+
 // 将 detail_json 渲染为「中文字段名: 值」可读摘要，避免用户直面原始 JSON
 function DetailSummary({ detail }: { detail: Record<string, unknown> }) {
   const entries = Object.entries(detail).filter(([, v]) => v !== null && v !== undefined);
@@ -165,13 +180,13 @@ export function AuditTimeline({ entityType, entityId, entityLabel, emptyText }: 
               {/* 优先展示后端 enrich 的业务中文描述；缺省回退 auditI18n 中文动作 */}
               {it.action_desc ?? auditActionLabel(it.action)}
               <Tag color={ACTION_COLOR[it.action] ?? "default"} style={{ marginLeft: 8 }}>
-                {ACTION_CATEGORY[it.action] ?? auditActionLabel(it.action)}
+                {actionCategory(it.action)}
               </Tag>
             </Typography.Text>
             <div className="muted" style={{ fontSize: 12 }}>
               <span>{entityLabel ?? entityTypeLabel(it.entity_type)}</span>
               <span> · </span>
-              <span className="mono">{it.entity_id}</span>
+              <span className="mono">{cleanEntityId(it.entity_id)}</span>
               <span> · 操作人 {it.actor_display ?? `#${it.actor_id}`}</span>
               <span> · {timeAgoCn(it.created_at)}（{formatCnTime(it.created_at)}）</span>
             </div>

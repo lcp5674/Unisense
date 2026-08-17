@@ -499,7 +499,7 @@ async def _issue_quickbi_ticket(
     await write_audit(
         db,
         actor_id=actor.id,
-        action="quickbi.ticket",
+        action="quickbi.get_ticket",
         entity_type="quickbi_report",
         entity_id=report_id,
         detail={"dashboard_id": str(dashboard_id) if dashboard_id else None},

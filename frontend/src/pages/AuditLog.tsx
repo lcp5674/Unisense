@@ -3,9 +3,19 @@ import { Card, Table, Tag, Input, Select, Button, Space, Tooltip, message } from
 import { DownloadOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { exportAudit, listAudit, UnisenseApiError } from "../api";
 import type { AuditEntry } from "../types";
-import { AUDIT_FIELD_LABEL, auditValueText, entityTypeLabel, auditActionLabel } from "../utils/auditI18n";
+import {
+  AUDIT_ENTITY_TYPES,
+  AUDIT_FIELD_LABEL,
+  auditValueText,
+  entityTypeLabel,
+  auditActionLabel,
+  cleanEntityId,
+} from "../utils/auditI18n";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+
+// 实体类型筛选选项：集中常量对齐后端全部 entity_type（见 auditI18n.AUDIT_ENTITY_TYPES）
+const AUDIT_ENTITY_OPTIONS = AUDIT_ENTITY_TYPES.map((v) => ({ value: v, label: entityTypeLabel(v) }));
 
 export function AuditLog() {
   const { can } = usePermission();
@@ -13,7 +23,8 @@ export function AuditLog() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [entityType, setEntityType] = useState("");
-  const [actorId, setActorId] = useState("");
+  const [actorKeyword, setActorKeyword] = useState("");
+  const [traceId, setTraceId] = useState("");
   const [piiOnly, setPiiOnly] = useState<boolean | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -23,7 +34,8 @@ export function AuditLog() {
     try {
       const res = await listAudit({
         entity_type: entityType || undefined,
-        actor_id: actorId ? Number(actorId) : undefined,
+        actor_keyword: actorKeyword.trim() || undefined,
+        trace_id: traceId.trim() || undefined,
         pii_access: piiOnly,
         page,
         page_size: pageSize,
@@ -42,7 +54,8 @@ export function AuditLog() {
     try {
       await exportAudit({
         entity_type: entityType || undefined,
-        actor_id: actorId ? Number(actorId) : undefined,
+        actor_keyword: actorKeyword.trim() || undefined,
+        trace_id: traceId.trim() || undefined,
         pii_access: piiOnly,
         format: "csv",
         limit: 5000,
@@ -75,9 +88,10 @@ export function AuditLog() {
       title: "操作内容",
       dataIndex: "action",
       key: "action",
-      render: (v: string, _r: AuditEntry) => (
+      render: (v: string, r: AuditEntry) => (
         <Tooltip title={v}>
-          <span>{auditActionLabel(v)}</span>
+          {/* 优先展示后端 enrich 的业务中文描述（覆盖全部命名）；缺省回退前端字典 */}
+          <span>{r.action_desc ?? auditActionLabel(v)}</span>
         </Tooltip>
       ),
     },
@@ -85,11 +99,11 @@ export function AuditLog() {
       title: "操作对象",
       key: "entity",
       width: 200,
-      render: (_: unknown, _r: AuditEntry) => (
+      render: (_: unknown, r: AuditEntry) => (
         <span>
-          <Tag>{entityTypeLabel(_r.entity_type)}</Tag>
+          <Tag>{entityTypeLabel(r.entity_type)}</Tag>
           <span className="mono" style={{ fontSize: 12, marginLeft: 4 }}>
-            #{String(_r.entity_id || "").replace(/^[^#]*#?/, "") || "—"}
+            {cleanEntityId(r.entity_id)}
           </span>
         </span>
       ),
@@ -134,6 +148,15 @@ export function AuditLog() {
       key: "ip",
       width: 130,
       render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v || "—"}</span>,
+    },
+    {
+      title: "追踪编号",
+      dataIndex: "trace_id",
+      key: "trace",
+      width: 150,
+      render: (v: string) => (
+        <span className="mono" style={{ fontSize: 12 }}>{v ? v.slice(0, 16) : "—"}</span>
+      ),
     },
     {
       title: "敏感数据",
@@ -184,15 +207,26 @@ export function AuditLog() {
             style={{ width: 200 }}
             value={entityType || undefined}
             onChange={(v) => { setEntityType(v || ""); setPage(1); }}
-            options={["metric_definition", "metric_template", "metric_version", "conflict", "lineage_edge", "grant", "term", "dimension", "quality_rule", "notification", "data_source", "db_catalog"].map((v) => ({ value: v, label: entityTypeLabel(v) }))}
+            options={AUDIT_ENTITY_OPTIONS}
           />
           <Input
-            placeholder="操作人"
+            allowClear
+            placeholder="按操作人姓名搜索"
             className="mono"
-            style={{ width: 140 }}
+            style={{ width: 160 }}
             prefix={<SearchOutlined />}
-            value={actorId}
-            onChange={(e) => setActorId(e.target.value)}
+            value={actorKeyword}
+            onChange={(e) => setActorKeyword(e.target.value)}
+            onPressEnter={() => { setPage(1); load(); }}
+          />
+          <Input
+            allowClear
+            placeholder="按追踪编号搜索"
+            className="mono"
+            style={{ width: 180 }}
+            prefix={<SearchOutlined />}
+            value={traceId}
+            onChange={(e) => setTraceId(e.target.value)}
             onPressEnter={() => { setPage(1); load(); }}
           />
           <Select
@@ -210,7 +244,7 @@ export function AuditLog() {
           columns={columns}
           rowKey="id"
           loading={loading}
-          pagination={{ current: page, pageSize, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条（后端返回近似值）` }}
+          pagination={{ current: page, pageSize, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
           locale={{ emptyText: "暂无审计记录" }}
           size="small"
         />

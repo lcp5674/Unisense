@@ -1161,8 +1161,8 @@ class GovernanceService(BaseService):
         await write_audit(
             self._db,
             actor_id=operator_id,
-            action="PII_ANONYMIZED",
-            entity_type="audit_log",
+            action="erasure.anonymize",
+            entity_type="erasure_request",
             entity_id=str(subject_user_id),
             detail={"token_prefix": token[:12], "affected_rows": affected},
             trace_id="",

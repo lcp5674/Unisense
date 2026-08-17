@@ -126,7 +126,7 @@ async def test_grant_writes_audit_record(
 
     assert len(audit_sink) == 1
     record = audit_sink[0]
-    assert record["action"] == "GRANT_CREATE"
+    assert record["action"] == "grant.create"
     assert record["entity_type"] == "grants"
     assert record["actor_id"] == 1
     assert record["trace_id"]
@@ -158,7 +158,7 @@ async def test_pii_review_audit_marks_pii_access(
         assert resp.status_code == 200
 
     record = audit_sink[0]
-    assert record["action"] == "PII_REVIEW"
+    assert record["action"] == "metric.review_pii"
     assert record["pii_access"] is True
     assert record["entity_id"] == "m1"
 
@@ -178,7 +178,7 @@ async def test_rescan_audit_carries_counters(
         assert resp.json()["data"]["degraded"] == 1
 
     record = audit_sink[0]
-    assert record["action"] == "CLASSIFICATION_RESCAN"
+    assert record["action"] == "db_catalog.rescan_classification"
     assert record["detail"]["scanned"] == 3
     assert record["detail"]["degraded"] == 1
 

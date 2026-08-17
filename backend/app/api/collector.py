@@ -37,6 +37,7 @@ from app.core.audit import client_ip, write_audit
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.core.logging import get_logger
+from app.core.probe_throttle import check_probe_rate
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
 from app.models.data_source import DBCatalog
@@ -138,7 +139,7 @@ async def create_data_source(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CREATE",
+        action="data_source.create",
         entity_type="data_source",
         entity_id=resp.source_id,
         detail={"name": resp.name, "source_type": resp.source_type},
@@ -200,6 +201,8 @@ async def test_connection(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[TestConnectionResult]:
     """FR-030: 创建前连接预检（明文配置轻量探活，不落库、不写审计）。"""
+    # P0-2: 探活限流（防 SSRF 端口扫描滥用）
+    await check_probe_rate(f"user:{user.id}")
     svc = _svc(db)
     source_type_value = (
         body.source_type.value if hasattr(body.source_type, "value") else str(body.source_type)
@@ -208,7 +211,7 @@ async def test_connection(
     await write_audit(
         db,
         actor_id=user.id,
-        action="TEST_CONNECTION",
+        action="data_source.test_connection",
         entity_type="data_source",
         entity_id=f"{source_type_value}:{body.connection_config.get('host', '')}",
         detail={"ok": result.ok, "latency_ms": result.latency_ms},
@@ -231,6 +234,8 @@ async def list_databases(
 
     与 test-connection 同构（明文配置，不落库）；连接器不支持枚举时返回空列表。
     """
+    # P0-2: 探活限流（防 SSRF 端口扫描滥用）
+    await check_probe_rate(f"user:{user.id}")
     svc = _svc(db)
     source_type_value = (
         body.source_type.value if hasattr(body.source_type, "value") else str(body.source_type)
@@ -252,6 +257,8 @@ async def list_tables(
     与 list_databases 同构（明文配置，不落库）；连接器不支持枚举表时
     返回空字典，前端隐藏表级选择区。
     """
+    # P0-2: 探活限流（防 SSRF 端口扫描滥用）
+    await check_probe_rate(f"user:{user.id}")
     svc = _svc(db)
     source_type_value = (
         body.source_type.value if hasattr(body.source_type, "value") else str(body.source_type)
@@ -281,7 +288,7 @@ async def batch_toggle_data_sources(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BATCH_ENABLE" if body.enabled else "BATCH_DISABLE",
+        action="data_source.batch_enable" if body.enabled else "data_source.batch_disable",
         entity_type="data_source",
         entity_id=f"items:{len(body.source_ids)}",
         detail={
@@ -310,7 +317,7 @@ async def batch_delete_data_sources(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BATCH_DELETE",
+        action="data_source.batch_delete",
         entity_type="data_source",
         entity_id=f"items:{len(body.source_ids)}",
         detail={"succeeded": len(result.succeeded), "failed": len(result.failed)},
@@ -335,7 +342,7 @@ async def batch_test_data_sources(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BATCH_PROBE",
+        action="data_source.batch_probe",
         entity_type="data_source",
         entity_id=f"items:{len(body.source_ids)}",
         detail={"succeeded": len(result.succeeded), "failed": len(result.failed)},
@@ -360,7 +367,7 @@ async def batch_schedule_data_sources(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BATCH_SCHEDULE",
+        action="data_source.batch_schedule",
         entity_type="data_source",
         entity_id=f"items:{len(body.source_ids)}",
         detail={
@@ -414,7 +421,13 @@ async def get_data_source(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[DataSourceResponse]:
     svc = _svc(db)
-    return ok(data=await svc.get_source(source_id), trace_id=trace_id)
+    # 明文连接配置（含密码）仅平台管理员可读；其余角色脱敏
+    # （connection_config=None，仅 connection_config_present 标记，
+    # 前端掩码回显）。
+    role = user.role.value if hasattr(user.role, "value") else user.role
+    include_config = str(role) == "platform_admin"
+    resp = await svc.get_source(source_id, include_config=include_config)
+    return ok(data=resp, trace_id=trace_id)
 
 
 @source_router.put("/{source_id}", dependencies=_WRITE_DEPS)
@@ -432,7 +445,7 @@ async def update_data_source(
     await write_audit(
         db,
         actor_id=user.id,
-        action="UPDATE",
+        action="data_source.update",
         entity_type="data_source",
         entity_id=source_id,
         detail={
@@ -461,7 +474,7 @@ async def check_source_connection(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CHECK_CONNECTION",
+        action="data_source.check_connection",
         entity_type="data_source",
         entity_id=source_id,
         detail={"ok": result.ok, "latency_ms": result.latency_ms},
@@ -485,7 +498,7 @@ async def delete_data_source(
     await write_audit(
         db,
         actor_id=user.id,
-        action="DELETE",
+        action="data_source.delete",
         entity_type="data_source",
         entity_id=source_id,
         detail={},
@@ -514,7 +527,7 @@ async def register_catalog(
     await write_audit(
         db,
         actor_id=user.id,
-        action="REGISTER",
+        action="db_catalog.register",
         entity_type="db_catalog",
         entity_id=f"{source_id}/{body.entity_name}",
         detail={
@@ -578,7 +591,7 @@ async def refresh_entity(
     await write_audit(
         db,
         actor_id=user.id,
-        action="REFRESH",
+        action="db_catalog.refresh",
         entity_type="db_catalog",
         entity_id=f"{source_id}/{entity_name}",
         detail={
@@ -658,7 +671,7 @@ async def collect_source(
     await write_audit(
         db,
         actor_id=user.id,
-        action="COLLECT",
+        action="data_source.collect",
         entity_type="data_source",
         entity_id=source_id,
         detail={
@@ -697,7 +710,7 @@ async def schedule_collection(
     await write_audit(
         db,
         actor_id=user.id,
-        action="COLLECT_SCHEDULE",
+        action="data_source.collect_schedule",
         entity_type="data_source",
         entity_id=source_id,
         detail={
@@ -739,7 +752,7 @@ async def collect_source_async(
     await write_audit(
         db,
         actor_id=user.id,
-        action="COLLECT_ASYNC",
+        action="data_source.collect_async",
         entity_type="data_source",
         entity_id=source_id,
         detail={"job_id": job_id},
@@ -778,7 +791,7 @@ async def collect_now(
     await write_audit(
         db,
         actor_id=user.id,
-        action="COLLECT_NOW",
+        action="data_source.collect_now",
         entity_type="data_source",
         entity_id=source_id,
         detail={
@@ -1025,7 +1038,7 @@ async def bulk_deprecate(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BULK_DEPRECATE",
+        action="db_catalog.bulk_deprecate",
         entity_type="db_catalog",
         entity_id=f"items:{len(body.items)}",
         detail={
@@ -1103,7 +1116,7 @@ async def infer_column_description(
         await write_audit(
             db,
             actor_id=user.id,
-            action="INFER_DESCRIPTION",
+            action="column.infer_description",
             entity_type="column_description",
             entity_id=f"{catalog_id}/{column_name}",
             detail={"description": result["description"], "confidence": result["confidence"]},
@@ -1218,7 +1231,7 @@ async def infer_descriptions_batch(
             await write_audit(
                 db,
                 actor_id=user.id,
-                action="INFER_DESCRIPTIONS_BATCH",
+                action="column.infer_descriptions",
                 entity_type="column_description",
                 entity_id=str(catalog_id),
                 detail={"inferred": len(inferred), "skipped": len(skipped), "failed": len(failed)},
@@ -1262,7 +1275,7 @@ async def update_column_description(
     await write_audit(
         db,
         actor_id=user.id,
-        action="UPDATE_DESCRIPTION",
+        action="column.update_description",
         entity_type="column_description",
         entity_id=f"{catalog_id}/{column_name}",
         detail={"description": body.description, "source": "manual"},
@@ -1305,7 +1318,7 @@ async def update_table_description(
     await write_audit(
         db,
         actor_id=user.id,
-        action="UPDATE_TABLE_DESCRIPTION",
+        action="catalog.update_description",
         entity_type="catalog",
         entity_id=str(catalog_id),
         detail={"description": body.description, "source": "manual"},
@@ -1385,7 +1398,7 @@ async def infer_table_description(
         await write_audit(
             db,
             actor_id=user.id,
-            action="INFER_TABLE_DESCRIPTION",
+            action="catalog.infer_description",
             entity_type="catalog",
             entity_id=str(catalog_id),
             detail={"description": result["description"], "confidence": result["confidence"]},

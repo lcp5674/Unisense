@@ -162,7 +162,7 @@ async def get_llm_config_secret(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ai.config.secret.reveal",
+        action="ai_config.reveal_secret",
         entity_type="llm_config",
         entity_id=str(instance_id),
         detail={"name": row.name},
@@ -188,7 +188,7 @@ async def create_llm_config(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ai.config.create",
+        action="ai_config.create",
         entity_type="llm_config",
         entity_id=str(row.id),
         detail={"name": payload.name, "provider": payload.provider, "enabled": payload.enabled},
@@ -214,7 +214,7 @@ async def update_llm_config(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ai.config.update",
+        action="ai_config.update",
         entity_type="llm_config",
         entity_id=str(row.id),
         detail={"name": payload.name, "provider": payload.provider, "enabled": payload.enabled},
@@ -239,7 +239,7 @@ async def delete_llm_config(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ai.config.delete",
+        action="ai_config.delete",
         entity_type="llm_config",
         entity_id=str(instance_id),
         detail={},

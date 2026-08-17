@@ -248,7 +248,7 @@ async def create_organization(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ORG_CREATE",
+        action="organization.create",
         entity_type="organization",
         entity_id=str(row.id),
         detail={"name": row.name, "code": row.code},
@@ -328,7 +328,7 @@ async def update_organization(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ORG_UPDATE",
+        action="organization.update",
         entity_type="organization",
         entity_id=str(row.id),
         detail={

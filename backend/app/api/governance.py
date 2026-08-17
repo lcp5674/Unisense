@@ -108,7 +108,7 @@ async def create_role(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ROLE_CREATE",
+        action="role.create",
         entity_type="role",
         entity_id=str(role.id),
         detail={"name": str(role.name), "is_custom": bool(getattr(role, "is_custom", False))},
@@ -169,7 +169,7 @@ async def delete_role(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ROLE_DELETE",
+        action="role.delete",
         entity_type="role",
         entity_id=role,
         detail={"role": role, "is_custom": True},
@@ -220,7 +220,7 @@ async def set_role_permissions(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ROLE_PERMISSION_UPDATE",
+        action="role.update_permissions",
         entity_type="role",
         entity_id=role,
         detail={"actions": payload.actions},
@@ -269,7 +269,7 @@ async def set_user_permissions(
     await write_audit(
         db,
         actor_id=user.id,
-        action="USER_PERMISSION_UPDATE",
+        action="user.update_permissions",
         entity_type="user",
         entity_id=str(user_id),
         detail={"actions": payload.actions, "reason": payload.reason},
@@ -298,7 +298,7 @@ async def reset_role_permissions(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ROLE_PERMISSION_RESET",
+        action="role.reset_permissions",
         entity_type="role",
         entity_id=role,
         detail={"reset": True},
@@ -323,7 +323,7 @@ async def create_grant(
     await write_audit(
         db,
         actor_id=user.id,
-        action="GRANT_CREATE",
+        action="grant.create",
         entity_type="grants",
         entity_id=str(row.id),
         detail={
@@ -383,7 +383,7 @@ async def batch_grants(
         await write_audit(
             db,
             actor_id=user.id,
-            action=f"GRANT_BATCH_{payload.operation.upper()}",
+            action=f"grant.batch_{payload.operation}",
             entity_type="grants",
             entity_id=str(item.user_id),
             detail={"domain": item.domain, "detail": item.detail},
@@ -428,7 +428,7 @@ async def revoke_grant(
     await write_audit(
         db,
         actor_id=user.id,
-        action="GRANT_REVOKE",
+        action="grant.revoke",
         entity_type="grants",
         entity_id=str(grant_id),
         detail={"user_id": row.user_id, "reason": reason},
@@ -453,7 +453,7 @@ async def pii_review(
     await write_audit(
         db,
         actor_id=user.id,
-        action="PII_REVIEW",
+        action="metric.review_pii",
         entity_type="metric",
         entity_id=payload.metric_code,
         detail={
@@ -495,7 +495,7 @@ async def pii_validate(
     await write_audit(
         db,
         actor_id=user.id,
-        action="PII_SECONDARY_VALIDATION",
+        action="metric.secondary_validate_pii",
         entity_type="metric",
         entity_id=payload.metric_code,
         detail={"passed": result.passed, "findings": result.findings},
@@ -521,7 +521,7 @@ async def classification_rescan(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CLASSIFICATION_RESCAN",
+        action="db_catalog.rescan_classification",
         entity_type="db_catalog",
         entity_id=payload.source_id or "batch",
         detail={

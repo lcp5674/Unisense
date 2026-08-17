@@ -40,6 +40,7 @@ def _apply_filters(
     count_stmt: Any,
     *,
     actor_id: int | None,
+    actor_keyword: str | None,
     entity_type: str | None,
     entity_id: str | None,
     trace_id_filter: str | None,
@@ -49,6 +50,14 @@ def _apply_filters(
     if actor_id is not None:
         stmt = stmt.where(AuditLog.actor_id == actor_id)
         count_stmt = count_stmt.where(AuditLog.actor_id == actor_id)
+    if actor_keyword:
+        # 操作人姓名/用户名模糊搜索（企业级检索：用户记姓名而非数字 ID）。
+        # autoescape=True 转义 %/_ 并生成 ESCAPE 子句（对齐 repo 的 LIKE 转义教训）。
+        cond = User.display_name.contains(actor_keyword, autoescape=True) | User.username.contains(
+            actor_keyword, autoescape=True
+        )
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
     if entity_type is not None:
         stmt = stmt.where(AuditLog.entity_type == entity_type)
         count_stmt = count_stmt.where(AuditLog.entity_type == entity_type)
@@ -70,6 +79,7 @@ async def list_audit_logs(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     actor_id: int | None = Query(None, description="操作人 ID"),
+    actor_keyword: str | None = Query(None, description="操作人姓名/用户名模糊搜索"),
     entity_type: str | None = Query(None, description="实体类型"),
     entity_id: str | None = Query(None, description="实体 ID（精确匹配，如指标编码）"),
     trace_id_filter: str | None = Query(None, description="链路追踪 ID"),
@@ -77,7 +87,7 @@ async def list_audit_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> Any:
-    """查询审计日志（支持按 actor/entity/trace_id/PII 过滤，分页）。
+    """查询审计日志（支持按 actor/actor_keyword/entity/trace_id/PII 过滤，分页）。
 
     返回前为每条记录 enrich 两个可读字段（不修改 WORM 表）：
     - ``actor_display``：操作人显示名（联查 user.display_name，查无则回退 #id）。
@@ -87,12 +97,15 @@ async def list_audit_logs(
     stmt = select(AuditLog, User.display_name).join(
         User, User.id == AuditLog.actor_id, isouter=True
     )
-    count_stmt = select(func.count()).select_from(AuditLog)
+    count_stmt = select(func.count()).select_from(AuditLog).outerjoin(
+        User, User.id == AuditLog.actor_id
+    )
 
     stmt, count_stmt = _apply_filters(
         stmt,
         count_stmt,
         actor_id=actor_id,
+        actor_keyword=actor_keyword,
         entity_type=entity_type,
         entity_id=entity_id,
         trace_id_filter=trace_id_filter,
@@ -128,6 +141,7 @@ async def export_audit_logs(
     request: Request,
     trace_id: Annotated[str, Depends(get_trace_id)],
     actor_id: int | None = Query(None, description="操作人 ID"),
+    actor_keyword: str | None = Query(None, description="操作人姓名/用户名模糊搜索"),
     entity_type: str | None = Query(None, description="实体类型"),
     entity_id: str | None = Query(None, description="实体 ID（精确匹配，如指标编码）"),
     trace_id_filter: str | None = Query(None, description="链路追踪 ID"),
@@ -147,8 +161,11 @@ async def export_audit_logs(
     )
     stmt, _ = _apply_filters(
         stmt,
-        select(func.count()).select_from(AuditLog),
+        select(func.count()).select_from(AuditLog).outerjoin(
+            User, User.id == AuditLog.actor_id
+        ),
         actor_id=actor_id,
+        actor_keyword=actor_keyword,
         entity_type=entity_type,
         entity_id=entity_id,
         trace_id_filter=trace_id_filter,
@@ -168,7 +185,7 @@ async def export_audit_logs(
     await write_audit(
         db,
         actor_id=user.id,
-        action="AUDIT_EXPORT",
+        action="audit.export",
         entity_type="audit_log",
         entity_id=f"items:{len(records)}",
         detail={"format": export_format, "rows": len(records)},

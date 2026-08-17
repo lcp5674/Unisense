@@ -103,7 +103,7 @@ async def create_mapping(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.mapping.create",
+        action="dimension_mapping.create",
         entity_type="dimension_mapping",
         entity_id=f"{payload.source_dim_code}:{payload.target_dim_code}",
         detail={},
@@ -137,7 +137,7 @@ async def update_mapping(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.mapping.update",
+        action="dimension_mapping.update",
         entity_type="dimension_mapping",
         entity_id=str(mapping_id),
         detail=payload.model_dump(exclude_none=True),
@@ -158,7 +158,7 @@ async def delete_mapping(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.mapping.delete",
+        action="dimension_mapping.delete",
         entity_type="dimension_mapping",
         entity_id=str(mapping_id),
         detail={},
@@ -339,7 +339,7 @@ async def create_member(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.member.create",
+        action="dimension_member.create",
         entity_type="dimension_member",
         entity_id=f"{payload.dim_code}:{payload.member_code}",
         detail={},
@@ -376,7 +376,7 @@ async def update_member(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.member.update",
+        action="dimension_member.update",
         entity_type="dimension_member",
         entity_id=f"{dim_code}:{member_code}",
         detail={},
@@ -399,7 +399,7 @@ async def delete_member(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.member.delete",
+        action="dimension_member.delete",
         entity_type="dimension_member",
         entity_id=f"{dim_code}:{member_code}",
         detail={"cascade_count": len(deleted)},
@@ -425,7 +425,7 @@ async def publish_member(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.member.publish",
+        action="dimension_member.publish",
         entity_type="dimension_member",
         entity_id=f"{dim_code}:{member_code}",
         detail={"status": resp.status},
@@ -450,7 +450,7 @@ async def publish_all_members(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.member.batch_publish",
+        action="dimension_member.batch_publish",
         entity_type="dimension_member",
         entity_id=dim_code,
         detail=result,
@@ -476,7 +476,7 @@ async def deprecate_member(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.member.deprecate",
+        action="dimension_member.deprecate",
         entity_type="dimension_member",
         entity_id=f"{dim_code}:{member_code}",
         detail={"status": resp.status},
@@ -501,7 +501,7 @@ async def bind_metric_dimension(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.metric.bind",
+        action="metric.bind_dimension",
         entity_type="metric_dimension",
         entity_id=f"{payload.metric_id}:{payload.dim_code}",
         detail={},
@@ -527,7 +527,7 @@ async def unbind_metric_dimension(
     await write_audit(
         db,
         actor_id=user.id,
-        action="dimension.metric.unbind",
+        action="metric.unbind_dimension",
         entity_type="metric_dimension",
         entity_id=f"{metric_id}:{dim_code}",
         detail={},

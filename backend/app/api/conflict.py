@@ -425,7 +425,7 @@ async def arbitrate_conflict(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CONFLICT_ARBITRATE",
+        action="conflict.arbitrate",
         entity_type="conflict",
         entity_id=conflict_id,
         detail={
@@ -461,7 +461,7 @@ async def escalate_conflict(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CONFLICT_ESCALATE",
+        action="conflict.escalate",
         entity_type="conflict",
         entity_id=conflict_id,
         detail={"note": payload.note},
@@ -488,7 +488,7 @@ async def close_conflict(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CONFLICT_CLOSE",
+        action="conflict.close",
         entity_type="conflict",
         entity_id=conflict_id,
         detail={},
@@ -515,7 +515,7 @@ async def reopen_conflict(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CONFLICT_REOPEN",
+        action="conflict.reopen",
         entity_type="conflict",
         entity_id=conflict_id,
         detail={},

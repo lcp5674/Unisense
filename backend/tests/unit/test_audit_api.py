@@ -81,6 +81,22 @@ async def test_list_audit_logs_with_filters(audit_client: httpx.AsyncClient) -> 
     assert resp.json()["data"]["page_size"] == 20
 
 
+async def test_list_audit_logs_with_actor_keyword(audit_client: httpx.AsyncClient) -> None:
+    """操作人姓名/用户名模糊搜索（企业级检索：记姓名而非数字 ID）。"""
+    resp = await audit_client.get("/api/v1/audit", params={"actor_keyword": "管理员"})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total"] == 1
+    assert data["items"][0]["actor_display"] == "平台管理员"
+
+
+async def test_list_audit_logs_with_trace_id_filter(audit_client: httpx.AsyncClient) -> None:
+    """trace_id 过滤（跨服务链路追踪入口）。"""
+    resp = await audit_client.get("/api/v1/audit", params={"trace_id_filter": "t1"})
+    assert resp.status_code == 200
+    assert resp.json()["data"]["total"] == 1
+
+
 # ------------------------------------------------------------------- 导出（合规留档）
 
 def _export_session() -> MagicMock:
@@ -116,7 +132,7 @@ async def test_export_audit_csv() -> None:
     assert "创建了指标定义" in resp.text
     # 导出动作本身落审计
     entry = session.add.call_args.args[0]
-    assert entry.action == "AUDIT_EXPORT"
+    assert entry.action == "audit.export"
 
 
 async def test_export_audit_json() -> None:
@@ -248,7 +264,7 @@ class TestWriteAudit:
         await write_audit(
             session,
             actor_id=7,
-            action="CONFLICT_ARBITRATE",
+            action="conflict.arbitrate",
             entity_type="conflict",
             entity_id="conflict-42",
             detail={"decision": "alias", "canonical": "c"},
@@ -260,7 +276,7 @@ class TestWriteAudit:
         entry = session.add.call_args.args[0]
         assert isinstance(entry, AuditLog)
         assert entry.actor_id == 7
-        assert entry.action == "CONFLICT_ARBITRATE"
+        assert entry.action == "conflict.arbitrate"
         assert entry.entity_type == "conflict"
         assert entry.entity_id == "conflict-42"
         assert entry.detail_json == {"decision": "alias", "canonical": "c"}

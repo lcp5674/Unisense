@@ -162,7 +162,7 @@ async def create_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CREATE",
+        action="metric_definition.create",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"domain": metric.domain, "type": metric.type, "pii_flag": metric.pii_flag},
@@ -223,7 +223,7 @@ async def list_metrics(
         await write_audit(
             db,
             actor_id=user.id,
-            action="LIST",
+            action="metric_definition.list",
             entity_type="metric_definition",
             entity_id=f"pii_list:{len(pii_codes)}",
             detail={
@@ -300,7 +300,7 @@ async def get_metric(
         await write_audit(
             db,
             actor_id=user.id,
-            action="READ",
+            action="metric.read",
             entity_type="metric",
             entity_id=metric_code,
             detail={"data_classification": "PII", "metric_code": metric_code},
@@ -350,7 +350,7 @@ async def get_archived_metric(
         await write_audit(
             db,
             actor_id=user.id,
-            action="READ",
+            action="metric.read",
             entity_type="metric",
             entity_id=metric_code,
             detail={"data_classification": "PII", "metric_code": metric_code, "archived": True},
@@ -551,7 +551,7 @@ async def update_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="UPDATE",
+        action="metric_definition.update",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail=detail,
@@ -590,7 +590,7 @@ async def update_metric_description(
     await write_audit(
         db,
         actor_id=user.id,
-        action="UPDATE",
+        action="metric_definition.update",
         entity_type="metric_description",
         entity_id=metric.metric_code,
         detail={"cleared": not (request.description or "").strip()},
@@ -630,7 +630,7 @@ async def bind_metric_term(
     await write_audit(
         db,
         actor_id=user.id,
-        action="UPDATE",
+        action="metric_definition.update",
         entity_type="metric_term",
         entity_id=metric.metric_code,
         detail={"term_id": request.term_id, "bound": request.term_id is not None},
@@ -676,7 +676,7 @@ async def infer_metric_description(
     await write_audit(
         db,
         actor_id=user.id,
-        action="UPDATE",
+        action="metric_definition.update",
         entity_type="metric_description",
         entity_id=metric.metric_code,
         detail={"source": "llm"},
@@ -716,7 +716,7 @@ async def publish_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="PUBLISH",
+        action="metric_definition.publish",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"version": request.version, "pii_flag": metric.pii_flag},
@@ -756,7 +756,7 @@ async def deprecate_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="DEPRECATE",
+        action="metric_definition.deprecate",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"successor_code": request.successor_code},
@@ -764,6 +764,7 @@ async def deprecate_metric(
         trace_id=trace_id,
     )
     await db.commit()
+    await service.run_lineage_post_commit()
     return ok(
         data=MetricResponse.model_validate(metric),
         trace_id=trace_id,
@@ -792,7 +793,7 @@ async def submit_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="SUBMIT",
+        action="metric_definition.submit",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"change_reason": request.change_reason},
@@ -828,7 +829,7 @@ async def approve_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="APPROVE",
+        action="metric_definition.approve",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"mode": request.mode, "target_version": request.target_version},
@@ -864,7 +865,7 @@ async def reject_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="REJECT",
+        action="metric_definition.reject",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"reason": request.reason},
@@ -898,7 +899,7 @@ async def confirm_version(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CONFIRM_VERSION",
+        action="metric_definition.confirm_version",
         entity_type="metric_definition",
         entity_id=metric_code,
         detail={"version": request.version},
@@ -934,7 +935,7 @@ async def reject_version(
     await write_audit(
         db,
         actor_id=user.id,
-        action="REJECT_VERSION",
+        action="metric_definition.reject_version",
         entity_type="metric_definition",
         entity_id=metric_code,
         detail={"version": request.version, "reason": request.reason},
@@ -968,7 +969,7 @@ async def extend_version(
     await write_audit(
         db,
         actor_id=user.id,
-        action="EXTEND_VERSION",
+        action="metric_definition.extend_version",
         entity_type="metric_definition",
         entity_id=metric_code,
         detail={"version": request.version},
@@ -1001,7 +1002,7 @@ async def delete_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="DELETE",
+        action="metric_definition.delete",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"status": metric.status},
@@ -1010,6 +1011,7 @@ async def delete_metric(
     )
     # PLAT-3: 业务写入 + 审计同事务原子提交
     await db.commit()
+    await service.run_lineage_post_commit()
     return ok(data=None, trace_id=trace_id)
 
 
@@ -1032,7 +1034,7 @@ async def restore_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="RESTORE",
+        action="metric_definition.restore",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"status": metric.status, "actor_role": user.role},
@@ -1041,6 +1043,7 @@ async def restore_metric(
     )
     # PLAT-3: 业务写入 + 审计同事务原子提交
     await db.commit()
+    await service.run_lineage_post_commit()
     return ok(data=MetricResponse.model_validate(metric), trace_id=trace_id)
 
 
@@ -1063,7 +1066,7 @@ async def promote_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="PROMOTE",
+        action="metric_definition.promote",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"from_status": "EXPERIMENTAL", "to_status": "PUBLISHED"},
@@ -1096,7 +1099,7 @@ async def rollback_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="ROLLBACK",
+        action="metric_definition.rollback",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"from_status": "EXPERIMENTAL", "action": "rollback_to_previous_published"},
@@ -1145,7 +1148,7 @@ async def review_metric_compliance(
     await write_audit(
         db,
         actor_id=user.id,
-        action="PII_REVIEW",
+        action="metric_definition.review_pii",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"compliance_reviewed": metric.compliance_reviewed},
@@ -1203,7 +1206,7 @@ async def emergency_publish_metric(
     await write_audit(
         db,
         actor_id=user.id,
-        action="EMERGENCY_PUBLISH",
+        action="metric_definition.emergency_publish",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={
@@ -1251,7 +1254,7 @@ async def complete_emergency_review(
     await write_audit(
         db,
         actor_id=user.id,
-        action="EMERGENCY_REVIEW",
+        action="metric_definition.emergency_review",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={
@@ -1370,7 +1373,7 @@ async def batch_register_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BATCH_REGISTER",
+        action="metric_definition.batch_register",
         entity_type="metric_definition",
         entity_id=f"batch:{result['batch_id']}",
         detail={"count": len(result["candidates"]), "domain": request.domain},
@@ -1618,8 +1621,8 @@ def _batch_audit_action(base: str, results: list[MetricBatchItemResult]) -> str:
     if ok == len(results):
         return base
     if ok == 0:
-        return f"{base}_FAILED"
-    return f"{base}_PARTIAL"
+        return f"{base}_failed"
+    return f"{base}_partial"
 
 
 @router.post(
@@ -1658,7 +1661,7 @@ async def batch_submit_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action=_batch_audit_action("BATCH_SUBMIT", results),
+        action=_batch_audit_action("metric_definition.batch_submit", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.items)}",
         detail={
@@ -1704,7 +1707,7 @@ async def batch_approve_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action=_batch_audit_action("BATCH_APPROVE", results),
+        action=_batch_audit_action("metric_definition.batch_approve", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.metric_codes)}",
         detail={
@@ -1750,7 +1753,7 @@ async def batch_reject_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action=_batch_audit_action("BATCH_REJECT", results),
+        action=_batch_audit_action("metric_definition.batch_reject", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.metric_codes)}",
         detail={
@@ -1795,7 +1798,7 @@ async def batch_deprecate_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action=_batch_audit_action("BATCH_DEPRECATE", results),
+        action=_batch_audit_action("metric_definition.batch_deprecate", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.items)}",
         detail={
@@ -1806,6 +1809,7 @@ async def batch_deprecate_metrics(
         trace_id=trace_id,
     )
     await db.commit()
+    await service.run_lineage_post_commit()
     return ok(data=_batch_response(results), trace_id=trace_id)
 
 
@@ -1838,7 +1842,7 @@ async def recover_source_dropped(
     await write_audit(
         db,
         actor_id=user.id,
-        action="RECOVER_SOURCE_DROPPED",
+        action="metric_definition.recover_source_dropped",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"from": "DATA_SOURCE_DROPPED", "to": "PUBLISHED"},
@@ -1874,7 +1878,7 @@ async def confirm_deprecate_dropped(
     await write_audit(
         db,
         actor_id=user.id,
-        action="CONFIRM_DEPRECATE_DROPPED",
+        action="metric_definition.confirm_deprecate_dropped",
         entity_type="metric_definition",
         entity_id=metric.metric_code,
         detail={"successor_code": request.successor_code},
@@ -1882,6 +1886,7 @@ async def confirm_deprecate_dropped(
         trace_id=trace_id,
     )
     await db.commit()
+    await service.run_lineage_post_commit()
     return ok(data=MetricResponse.model_validate(metric), trace_id=trace_id)
 
 
@@ -1912,7 +1917,7 @@ async def mark_source_dropped(
     await write_audit(
         db,
         actor_id=user.id,
-        action="MARK_SOURCE_DROPPED",
+        action="metric_definition.mark_source_dropped",
         entity_type="metric_definition",
         entity_id=f"source:{len(request.source_ids)}",
         detail={"source_ids": request.source_ids, "metrics_marked": count},

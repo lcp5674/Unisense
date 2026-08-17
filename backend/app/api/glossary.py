@@ -242,7 +242,7 @@ async def resolve_conflict(
     await write_audit(
         db,
         actor_id=user.id,
-        action="glossary_conflict.resolve",
+        action="glossary.resolve_conflict",
         entity_type="glossary_conflict",
         entity_id=str(conflict_id),
         detail={},
@@ -264,7 +264,7 @@ async def create_relation(
     await write_audit(
         db,
         actor_id=user.id,
-        action="term.relation.create",
+        action="term.create_relation",
         entity_type="term_relation",
         entity_id=f"{term_code}->{payload.target_term_id}",
         detail={},

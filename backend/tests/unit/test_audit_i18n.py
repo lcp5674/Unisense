@@ -115,3 +115,91 @@ class TestDescribeAudit:
         """detail 中命中摘要键的 list/tuple 值应转为逗号串（对齐 210 行转换分支）。"""
         desc = describe_audit("LINEAGE_PARSE", "lineage_edge", {"table_edges": ["a", "b"]})
         assert "表级血缘边=a,b" in desc
+
+
+class TestNewDotNaming:
+    """统一点号命名（2026-08 根治）：{entity}.{verb} 经动词模板翻译，历史旧名兼容。"""
+
+    def test_basic_crud_new_naming(self) -> None:
+        assert describe_audit("metric_definition.create", "metric_definition") == "创建了指标定义"
+        assert describe_audit("data_source.update", "data_source") == "更新了数据源"
+        assert describe_audit("user.delete", "user") == "删除了用户"
+
+    def test_batch_new_naming(self) -> None:
+        assert describe_audit("data_source.batch_enable", "data_source") == "批量启用了数据源"
+        assert describe_audit("data_source.batch_probe", "data_source") == "批量探活了数据源连接"
+        assert describe_audit("db_catalog.bulk_deprecate", "db_catalog") == "批量废弃了数据表目录"
+
+    def test_special_metric_actions(self) -> None:
+        assert (
+            describe_audit("metric_definition.mark_source_dropped", "metric_definition")
+            == "标记指标定义数据源下线"
+        )
+        assert (
+            describe_audit("metric_definition.recover_source_dropped", "metric_definition")
+            == "恢复了指标定义（数据源已恢复）"
+        )
+        assert (
+            describe_audit("metric_definition.confirm_deprecate_dropped", "metric_definition")
+            == "确认退役了指标定义"
+        )
+        assert (
+            describe_audit("metric_definition.batch_submit_partial", "metric_definition")
+            == "部分提交指标定义评审成功（存在失败项）"
+        )
+
+    def test_auth_actions(self) -> None:
+        assert describe_audit("auth.login", "user") == "登录了系统"
+        assert describe_audit("auth.logout", "user") == "退出了系统"
+        assert describe_audit("auth.login_failed", "user") == "登录失败"
+
+    def test_audit_export(self) -> None:
+        assert describe_audit("audit.export", "audit_log") == "导出了审计日志"
+
+    def test_legacy_screaming_still_works(self) -> None:
+        """历史 WORM 记录（旧 SCREAMING 命名）仍可翻译，不受命名统一影响。"""
+        assert describe_audit("CREATE", "metric_definition") == "创建了指标定义"
+        assert describe_audit("COLLECT", "data_source") == "采集了数据源元数据"
+        assert describe_audit("LINEAGE_PARSE", "lineage") == "解析并写入数据血缘"
+
+    def test_legacy_dot_still_works(self) -> None:
+        """历史点号命名（term.create 等）与新旧名同名，仍可翻译。"""
+        assert describe_audit("term.create", "term") == "创建了业务术语"
+        assert describe_audit("quality_event.detect", "quality_event") == "检测到质量事件异常"
+
+    def test_verb_coverage_for_all_actions(self) -> None:
+        """全仓所有静态审计 action 均能经动词模板/旧表翻译（不落兜底英文）。"""
+        import pathlib
+        import re
+
+        from app.core.audit_i18n import _DOT_ACTION_TEMPLATES, _VERB_TEMPLATES
+
+        pat = re.compile(r"await\s+(?:\w+\.)?_?write_audit\s*\(")
+        actions: set[str] = set()
+        for p in pathlib.Path("app").rglob("*.py"):
+            src = p.read_text()
+            for m in pat.finditer(src):
+                seg = src[m.end() : m.end() + 600]
+                a = re.search(r'action\s*=\s*"([A-Za-z_.]+)"', seg)
+                if a:
+                    actions.add(a.group(1))
+
+        uncovered: list[str] = []
+        for a in actions:
+            if a in _DOT_ACTION_TEMPLATES:
+                continue
+            verb = a.rsplit(".", 1)[-1].lower()
+            if verb not in _VERB_TEMPLATES:
+                uncovered.append(a)
+        assert not uncovered, f"以下 action 无中文模板: {uncovered}"
+
+    def test_verbose_wording_no_redundancy(self) -> None:
+        """翻译不应出现连续重复词（如「指标冲突冲突」「用户反馈反馈」的措辞冗余）。"""
+        import re
+
+        for action, entity in (
+            ("conflict.check", "conflict"),
+            ("feedback.submit", "feedback"),
+            ("glossary.resolve_conflict", "glossary_conflict"),
+        ):
+            assert not re.search(r"([\u4e00-\u9fa5]{2,4})\1", describe_audit(action, entity))

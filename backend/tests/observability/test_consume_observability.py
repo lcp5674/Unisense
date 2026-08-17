@@ -105,6 +105,6 @@ async def test_query_writes_audit_record(
         headers={"X-Api-Key": "cli_obs:secret"},
     )
     assert resp.status_code == 200
-    assert ("consume.query", "M1") in calls
+    assert ("metric.query", "M1") in calls
     # 审计必须标注数据分级（非 PII 指标为 INTERNAL，PII 指标为 PII）
     assert details[0]["data_classification"] in ("PII", "INTERNAL")

@@ -177,7 +177,7 @@ async def submit_nps(
     await write_audit(
         db,
         actor_id=user.id,
-        action="nps.submit",
+        action="feedback.submit_nps",
         entity_type="feedback",
         entity_id=str(resp.id),
         detail={"score": payload.score},
@@ -221,7 +221,7 @@ async def update_feedback_status(
     await write_audit(
         db,
         actor_id=user.id,
-        action="feedback.status_update",
+        action="feedback.update_status",
         entity_type="feedback",
         entity_id=str(feedback_id),
         detail={"status": payload.status, "note": payload.resolution_note},

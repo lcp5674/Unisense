@@ -86,7 +86,7 @@ async def test_publish_event_writes_audit_record(
     assert resp.status_code == 201
     assert len(audit_sink) == 1
     record = audit_sink[0]
-    assert record["action"] == "notify.publish"
+    assert record["action"] == "notification.publish"
     assert record["entity_type"] == "event_log"
     assert record["actor_id"] == 9
     assert record["trace_id"]

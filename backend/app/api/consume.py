@@ -139,7 +139,7 @@ async def query(
     await write_audit(
         db,
         actor_id=client.id,
-        action="consume.query",
+        action="metric.query",
         entity_type="metric",
         entity_id=req.metric_code,
         detail={
@@ -178,7 +178,7 @@ async def query_metric_internal(
     await write_audit(
         db,
         actor_id=user.id,
-        action="consume.query.internal",
+        action="metric.query_internal",
         entity_type="metric",
         entity_id=code,
         detail={"data_classification": "PII" if is_pii else "INTERNAL"},
@@ -226,7 +226,7 @@ async def create_client(
     await write_audit(
         db,
         actor_id=user.id,
-        action="consume.api_client.create",
+        action="api_client.create",
         entity_type="api_client",
         entity_id=created.client_id,
         detail={"scope_domain": created.scope_domain},
@@ -374,7 +374,7 @@ async def confirm_version(
     await write_audit(
         db,
         actor_id=user.id,
-        action="consume.version.confirm",
+        action="metric_version.confirm",
         entity_type="metric_version",
         entity_id=str(version_id),
         detail={},
@@ -397,7 +397,7 @@ async def reject_version(
     await write_audit(
         db,
         actor_id=user.id,
-        action="consume.version.reject",
+        action="metric_version.reject",
         entity_type="metric_version",
         entity_id=str(version_id),
         detail={"reason": req.reason},

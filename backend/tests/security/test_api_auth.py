@@ -261,3 +261,55 @@ async def test_login_different_users_do_not_kick_each_other(auth_client):
     # analyst 登录不应拉黑 viewer 的会话 → viewer 旧 refresh 仍可无感续期
     resp3 = await c.post("/api/v1/auth/refresh", json={"refresh_token": viewer_refresh})
     assert resp3.status_code == 200
+
+
+# ---- 登录/登出审计（GB/T 35273 认证事件留痕）----
+
+
+async def test_login_success_writes_auth_audit(auth_client):
+    """登录成功落 auth.login 审计（谁、何时、从哪 IP）。"""
+    c, session = auth_client
+    session.execute.return_value = _result_with(
+        await _mock_user("secret", id=1, role="platform_admin", org_id=1)
+    )
+
+    resp = await c.post("/api/v1/auth/login", json={"username": "admin", "password": "secret"})
+    assert resp.status_code == 200
+
+    assert session.add.called
+    entries = [a.args[0] for a in session.add.call_args_list if a.args]
+    assert any(getattr(e, "action", None) == "auth.login" for e in entries)
+
+
+async def test_login_failure_writes_auth_failed_audit(auth_client):
+    """登录失败落 auth.login_failed 审计（actor_id=0，entity_id 记录尝试用户名）。"""
+    c, session = auth_client
+    session.execute.return_value = _result_with(None)
+
+    resp = await c.post("/api/v1/auth/login", json={"username": "ghost", "password": "x"})
+    assert resp.status_code == 401
+
+    assert session.add.called
+    entries = [a.args[0] for a in session.add.call_args_list if a.args]
+    failed = [e for e in entries if getattr(e, "action", None) == "auth.login_failed"]
+    assert failed
+    assert failed[0].actor_id == 0
+    assert failed[0].entity_id == "ghost"
+
+
+async def test_logout_writes_auth_logout_audit(auth_client):
+    """登出落 auth.logout 审计。"""
+    c, session = auth_client
+    user = MagicMock()
+    user.id = 7
+    user.username = "alice"
+    app.dependency_overrides[deps.get_current_user] = lambda: user
+
+    resp = await c.post(
+        "/api/v1/auth/logout", headers={"Authorization": "Bearer dummy"}
+    )
+    assert resp.status_code == 200
+
+    assert session.add.called
+    entries = [a.args[0] for a in session.add.call_args_list if a.args]
+    assert any(getattr(e, "action", None) == "auth.logout" for e in entries)

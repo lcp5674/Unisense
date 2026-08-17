@@ -44,7 +44,7 @@ async def publish_event(
     await write_audit(
         db,
         actor_id=user.id,
-        action="notify.publish",
+        action="notification.publish",
         entity_type="event_log",
         entity_id=str(resp["event_id"]),
         detail={},
@@ -109,7 +109,7 @@ async def mark_read(
     await write_audit(
         db,
         actor_id=user.id,
-        action="notify.mark_read",
+        action="notification.mark_read",
         entity_type="notification",
         entity_id=str(notif_id),
         detail={},
@@ -132,7 +132,7 @@ async def mark_all_read(
     await write_audit(
         db,
         actor_id=user.id,
-        action="notify.mark_all_read",
+        action="notification.mark_all_read",
         entity_type="notification",
         entity_id="",
         detail={"updated": updated},
@@ -156,7 +156,7 @@ async def delete_notification(
     await write_audit(
         db,
         actor_id=user.id,
-        action="notify.delete",
+        action="notification.delete",
         entity_type="notification",
         entity_id=str(notif_id),
         detail={},
@@ -179,7 +179,7 @@ async def delete_all_notifications(
     await write_audit(
         db,
         actor_id=user.id,
-        action="notify.delete_all",
+        action="notification.delete_all",
         entity_type="notification",
         entity_id="",
         detail={"deleted": deleted},
@@ -203,7 +203,7 @@ async def mark_sent(
     await write_audit(
         db,
         actor_id=user.id,
-        action="notify.mark_sent",
+        action="notification.mark_sent",
         entity_type="notification",
         entity_id=str(notif_id),
         detail={},
@@ -227,7 +227,7 @@ async def mark_failed(
     await write_audit(
         db,
         actor_id=user.id,
-        action="notify.mark_failed",
+        action="notification.mark_failed",
         entity_type="notification",
         entity_id=str(notif_id),
         detail={},
@@ -252,7 +252,7 @@ async def retry_delivery(
     await write_audit(
         db,
         actor_id=user.id,
-        action="notify.retry_delivery",
+        action="notification.retry_delivery",
         entity_type="notification",
         entity_id=str(notif_id),
         detail={"status": resp.status},
@@ -277,7 +277,7 @@ async def mark_handled(
     await write_audit(
         db,
         actor_id=user.id,
-        action="notify.mark_handled",
+        action="notification.mark_handled",
         entity_type="notification",
         entity_id=str(notif_id),
         detail={},

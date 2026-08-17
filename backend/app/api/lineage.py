@@ -117,7 +117,7 @@ async def parse_lineage(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_PARSE",
+        action="lineage.parse",
         entity_type="lineage",
         entity_id=body.source_node or "sql",
         detail={
@@ -129,6 +129,7 @@ async def parse_lineage(
         trace_id=trace_id,
     )
     await db.commit()
+    await svc.run_post_commit()
     return ok(data=result.model_dump(), trace_id=trace_id)
 
 
@@ -151,7 +152,7 @@ async def parse_lineage_batch(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_PARSE_BATCH",
+        action="lineage.parse_batch",
         entity_type="lineage",
         entity_id=body.source_node or "batch",
         detail={
@@ -167,6 +168,7 @@ async def parse_lineage_batch(
         trace_id=trace_id,
     )
     await db.commit()
+    await svc.run_post_commit()
     return ok(data=result.model_dump(), trace_id=trace_id)
 
 
@@ -188,7 +190,7 @@ async def scan_lineage_directory(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_SCAN",
+        action="lineage.scan",
         entity_type="lineage",
         entity_id=body.path,
         detail={
@@ -204,6 +206,7 @@ async def scan_lineage_directory(
         trace_id=trace_id,
     )
     await db.commit()
+    await svc.run_post_commit()
     return ok(data=result.model_dump(), trace_id=trace_id)
 
 
@@ -227,7 +230,7 @@ async def impact_preview(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_IMPACT_PREVIEW",
+        action="lineage.preview_impact",
         entity_type="lineage",
         entity_id=f"metric:{body.metric_code}",
         detail=result.model_dump(),
@@ -297,7 +300,7 @@ async def delete_edges_by_node(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_DELETE",
+        action="lineage.delete",
         entity_type="lineage",
         entity_id=params.node,
         detail={"deleted_edges": deleted},
@@ -305,6 +308,7 @@ async def delete_edges_by_node(
         trace_id=trace_id,
     )
     await db.commit()
+    await svc.run_post_commit()
     return ok(data={"deleted": deleted}, trace_id=trace_id)
 
 
@@ -345,7 +349,7 @@ async def add_manual_edge(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_MANUAL_ADD",
+        action="lineage.add_edge",
         entity_type="lineage",
         entity_id=f"{result.edge.source_node}->{result.edge.target_node}",
         detail={
@@ -358,6 +362,7 @@ async def add_manual_edge(
         trace_id=trace_id,
     )
     await db.commit()
+    await svc.run_post_commit()
     return ok(data=result, trace_id=trace_id)
 
 
@@ -381,7 +386,7 @@ async def delete_single_edge(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_EDGE_DELETE",
+        action="lineage.delete_edge",
         entity_type="lineage",
         entity_id=f"{result.source_node}->{result.target_node}",
         detail={"edge_id": edge_id},
@@ -389,6 +394,7 @@ async def delete_single_edge(
         trace_id=trace_id,
     )
     await db.commit()
+    await svc.run_post_commit()
     return ok(data=result, trace_id=trace_id)
 
 
@@ -412,7 +418,7 @@ async def sync_metric_consumers(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_CONSUMER_SYNC",
+        action="lineage.sync_consumer",
         entity_type="lineage",
         entity_id=f"metric:{metric_code}",
         detail={"registered_edges": registered},
@@ -668,7 +674,7 @@ async def confirm_stale(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_STALE_CONFIRM",
+        action="lineage.confirm_stale",
         entity_type="lineage_edge",
         entity_id=str(edge_id),
         detail={
@@ -700,7 +706,7 @@ async def restore_stale(
     await write_audit(
         db,
         actor_id=user.id,
-        action="LINEAGE_STALE_RESTORE",
+        action="lineage.restore_stale",
         entity_type="lineage_edge",
         entity_id=str(edge_id),
         detail={

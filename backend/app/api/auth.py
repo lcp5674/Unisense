@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, ok
+from app.core.audit import client_ip, write_audit
 from app.core.config import settings
 from app.core.exceptions import AuthError
 from app.core.guard import guard_against_injection
@@ -102,8 +103,8 @@ async def login(
             （统一返回 AUTH_INVALID_CREDENTIALS）。
     """
     # 登录防撞库（TD §5）：按 username+IP 固定窗口限流失败次数，Redis 不可用降级内存，不阻断登录。
-    client_ip = request.client.host if request.client else ""
-    throttle_key = f"{body.username}:{client_ip}"
+    remote_ip = request.client.host if request.client else ""
+    throttle_key = f"{body.username}:{remote_ip}"
     if await is_login_blocked(throttle_key):
         raise AuthError("登录失败次数过多，请稍后再试", error_code="AUTH_RATE_LIMITED")
 
@@ -115,10 +116,32 @@ async def login(
     # 用户不存在与密码错误返回相同错误码，避免用户枚举。
     if user is None or not await verify_password(body.password, user.password_hash):
         await record_login_failure(throttle_key)
+        # 登录失败留痕（安全审计核心事件，GB/T 35273 认证事件要求）；
+        # actor_id=0（无对应用户），entity_id 记录尝试的用户名，detail 区分凭据错误/锁定。
+        await write_audit(
+            db,
+            actor_id=0,
+            action="auth.login_failed",
+            entity_type="user",
+            entity_id=body.username,
+            detail={"reason": "invalid_credentials", "username": body.username},
+            ip=client_ip(request),
+        )
+        await db.commit()
         raise AuthError("用户名或密码错误", error_code="AUTH_INVALID_CREDENTIALS")
 
     await reset_login_failures(throttle_key)
     user.last_login_at = datetime.now(UTC)
+    # 登录成功留痕：谁、何时、从哪 IP 登录（认证审计事件）。
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="auth.login",
+        entity_type="user",
+        entity_id=body.username,
+        detail={"username": body.username},
+        ip=client_ip(request),
+    )
     await db.commit()
 
     token = create_access_token(sub=user.id, role=user.role, org_id=user.org_id)
@@ -206,13 +229,25 @@ async def list_users(
 async def logout(
     user: CurrentUser,
     request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ApiResponse[dict[str, str]]:
-    """登出：将当前 JWT 的 jti 加入黑名单。
+    """登出：将当前 JWT 的 jti 加入黑名单，并落登出审计。
 
     从请求 Bearer Token 中提取 jti，计算剩余有效期，加入黑名单。
+    登出事件（auth.logout）与业务同事务原子提交。
     """
     jti, remaining_ttl = _decode_jti_and_ttl(request)
     await blacklist_token(jti, remaining_ttl)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="auth.logout",
+        entity_type="user",
+        entity_id=str(user.id),
+        detail={"username": user.username, "jti": jti[:12]},
+        ip=client_ip(request),
+    )
+    await db.commit()
     return ok({"status": "logged_out", "jti": jti})
 
 
