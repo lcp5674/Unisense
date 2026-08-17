@@ -298,7 +298,7 @@ function SourceDetailModal({
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col span={8}>
-          <Statistic title="最近采集" value={watermark?.last_collected_at ?? "从未"} valueStyle={{ fontSize: 16 }} />
+          <Statistic title="最近采集" value={watermark?.last_collected_at ? formatCnTime(watermark.last_collected_at) : "从未"} valueStyle={{ fontSize: 16 }} />
         </Col>
         <Col span={8}>
           <Statistic title="累计扫描" value={watermark?.scanned_count ?? 0} />

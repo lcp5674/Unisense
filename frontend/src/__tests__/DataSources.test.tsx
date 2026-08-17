@@ -319,6 +319,27 @@ describe("DataSources", () => {
     expect(screen.getAllByText(/连接正常/).length).toBeGreaterThan(0);
   });
 
+  it("详情弹窗「最近采集」按上海时区中文格式展示（不暴露原始 ISO）", async () => {
+    // UTC 落库时间 2026-08-17T01:31:20 → 上海 2026-08-17 09:31
+    mockedWatermark.mockResolvedValue({
+      source_id: "mysql_finance",
+      last_collected_at: "2026-08-17T01:31:20",
+      mode: "FULL",
+      scanned_count: 10,
+      failed_count: 0,
+    });
+    renderSources();
+    await waitFor(() => {
+      expect(screen.getByText("管理")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    await waitFor(() => {
+      expect(screen.getByText("2026年8月17日 09:31")).toBeTruthy();
+    });
+    expect(screen.queryByText("2026-08-17T01:31:20")).toBeNull();
+  });
+
   it("编辑数据源：回显明文连接配置，仅改名不提交 connection_config", async () => {
     renderSources();
     await waitFor(() => {
