@@ -45,6 +45,11 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "metric.rolled_back": "指标已回滚",
   "metric.emergency_published": "指标紧急发布",
   "metric.health_critical": "指标健康告警",
+  // 指标重评审 / 灰度发布 / 口径变更（与后端 _EVENT_TITLE_CN 对齐，避免拆词兜底显示英文）
+  "metric.resubmitted": "指标重评审待审核",
+  "metric.gray_published": "指标灰度发布",
+  "metric.breaking_change_pending": "指标口径变更待确认",
+  "metric.breaking_change_promoted": "指标口径变更已生效",
   "conflict_open": "口径冲突待处理",
   "conflict_ruled": "口径冲突已裁决",
   "conflict_escalated": "口径冲突已升级",
@@ -69,6 +74,8 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "catalog_schema_drifted": "目录 Schema 漂移",
   "lineage_parsed": "血缘已解析",
   "lineage_ingested": "血缘已接入",
+  // 血缘变更影响（semantic 变更指标血缘时定向通知受影响指标 Owner）
+  "lineage.change_impacted": "血缘变更影响",
   // 采集定向通知（collector 经 notify_user 直发源 Owner）
   "catalog.deprecated": "数据目录已废弃",
   "collect.degraded": "采集降级",
@@ -120,6 +127,12 @@ const EVENT_ACTION_CN: Record<string, string> = {
   rolled_back: "回滚",
   emergency_published: "紧急发布",
   health_critical: "健康告警",
+  // 指标重评审/灰度/口径变更/血缘影响兜底（与 EVENT_TYPE_LABEL 互补，覆盖未知派生类型）
+  resubmitted: "重评审待审核",
+  gray_published: "灰度发布",
+  breaking_change_pending: "口径变更待确认",
+  breaking_change_promoted: "口径变更已生效",
+  change_impacted: "变更影响",
   detected: "检测",
   alert: "告警",
   open: "待处理",
@@ -440,6 +453,10 @@ const IMPACT_TEXT: Record<string, string> = {
   "metric.emergency_published": "指标已紧急发布，请注意补审确认。",
   "metric.health_critical": "指标健康度偏低，请及时补充缺失治理项。",
   "metric.rename_required": "指标命名不合规，请尽快修改编码。",
+  "metric.resubmitted": "指标已重新提交审核，等待审批结果。",
+  "metric.gray_published": "指标已灰度发布，请在灰度环境验证口径。",
+  "metric.breaking_change_pending": "指标口径将变更，请在确认期内核对消费影响。",
+  "metric.breaking_change_promoted": "指标新口径已生效，消费方请关注口径变化。",
   conflict_open: "有新的口径冲突待处理，请及时仲裁。",
   conflict_ruled: "口径冲突已裁决，请以权威口径为准。",
   conflict_escalated: "口径冲突已升级，需上级介入裁决。",
@@ -464,6 +481,7 @@ const IMPACT_TEXT: Record<string, string> = {
   catalog_schema_drifted: "目录结构发生漂移，请核对字段映射。",
   lineage_parsed: "血缘关系已解析，可查看影响链路。",
   lineage_ingested: "血缘关系已接入，影响链路已更新。",
+  "lineage.change_impacted": "您的指标受血缘变更影响，请评估口径影响范围。",
   "catalog.deprecated": "数据目录已废弃，相关消费请迁移。",
   "collect.degraded": "采集降级，数据时效可能受影响。",
   "collect.failed": "采集任务失败，请检查数据源连接。",
@@ -479,8 +497,12 @@ const IMPACT_TEXT: Record<string, string> = {
 // 这类通知卡片加「待处理」标记 + 行动按钮；也可用「仅看待处理」筛选聚焦。
 const NEEDS_ACTION = new Set<string>([
   "metric.submitted",
+  "metric.resubmitted",
+  "metric.gray_published",
   "metric.rename_required",
   "metric.health_critical",
+  "metric.breaking_change_pending",
+  "lineage.change_impacted",
   "conflict_open",
   "conflict_escalated",
   "conflict_reopened",
@@ -504,7 +526,14 @@ function actionFor(templateCode: string, payload: Record<string, unknown>): { la
   const code = payload.metric_code ? `/detail/${encodeURIComponent(String(payload.metric_code))}` : null;
   switch (templateCode) {
     case "metric.submitted":
+    case "metric.resubmitted":
       return { label: "去审批", target: code ?? "/metrics/review" };
+    case "metric.gray_published":
+      return { label: "去验证", target: code ?? "/detail" };
+    case "metric.breaking_change_pending":
+      return { label: "去确认", target: code ?? "/detail" };
+    case "lineage.change_impacted":
+      return { label: "去评估", target: "/lineage" };
     case "metric.rename_required":
     case "metric.health_critical":
       return { label: "去处理", target: code ?? "/detail" };
@@ -558,6 +587,13 @@ export const EVENT_TYPES = [
   "metric.rolled_back",
   "metric.emergency_published",
   "metric.health_critical",
+  // 指标重评审/灰度/改名/口径变更/作废（与后端 _BUSINESS_EVENT_TYPES 全量对齐）
+  "metric.resubmitted",
+  "metric.gray_published",
+  "metric.rename_required",
+  "metric.breaking_change_pending",
+  "metric.breaking_change_promoted",
+  "metric.voided",
   "quality.anomaly",
   "reconciliation.alert",
   "benchmark.imported",
@@ -570,6 +606,8 @@ export const EVENT_TYPES = [
   "grant.expired",
   "pii.reviewed",
   "pii.propagated",
+  "grant.expiring_soon",
+  "pii.review_pending",
   "classification.changed",
   "classification.done",
   "escalation.triggered",
@@ -581,15 +619,25 @@ export const EVENT_TYPES = [
   "catalog_schema_drifted",
   "lineage_parsed",
   "lineage_ingested",
+  "lineage.change_impacted",
+  "catalog.deprecated",
+  "collect.degraded",
+  "collect.failed",
+  "catalog.connection_failed",
   "degradation.state_changed",
   "conflict_reopened",
+  // 账号安全/组织（users.py/organizations.py 定向通知，可订阅）
+  "user.created",
+  "user.status_changed",
+  "user.password_reset",
+  "org.status_changed",
 ];
 
 // 订阅消息类型按业务模块分组（新增订阅弹窗下拉用 OptGroup，避免 35 项平铺难找）
 export const EVENT_TYPE_GROUPS: { label: string; options: { value: string; label: string }[] }[] = [
   {
     label: "指标生命周期",
-    options: ["metric.created", "metric.submitted", "metric.approved", "metric.rejected", "metric.deprecated", "metric.promoted", "metric.rolled_back", "metric.emergency_published", "metric.health_critical"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+    options: ["metric.created", "metric.submitted", "metric.resubmitted", "metric.gray_published", "metric.approved", "metric.rejected", "metric.deprecated", "metric.voided", "metric.promoted", "metric.rolled_back", "metric.emergency_published", "metric.rename_required", "metric.health_critical", "metric.breaking_change_pending", "metric.breaking_change_promoted"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
   {
     label: "口径冲突",
@@ -601,11 +649,11 @@ export const EVENT_TYPE_GROUPS: { label: string; options: { value: string; label
   },
   {
     label: "权限与安全",
-    options: ["grant.granted", "grant.revoked", "grant.expired", "pii_conflict", "pii.reviewed", "pii.propagated", "classification.changed", "classification.done", "escalation.triggered"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+    options: ["grant.granted", "grant.revoked", "grant.expired", "grant.expiring_soon", "pii_conflict", "pii.reviewed", "pii.propagated", "pii.review_pending", "classification.changed", "classification.done", "escalation.triggered"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
   {
     label: "采集与血缘",
-    options: ["catalog_registered", "catalog_schema_drifted", "lineage_parsed", "lineage_ingested"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+    options: ["catalog_registered", "catalog_schema_drifted", "lineage_parsed", "lineage_ingested", "lineage.change_impacted", "catalog.deprecated", "collect.degraded", "collect.failed", "catalog.connection_failed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
   {
     label: "反馈与满意度",
@@ -614,6 +662,10 @@ export const EVENT_TYPE_GROUPS: { label: string; options: { value: string; label
   {
     label: "系统",
     options: ["degradation.state_changed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+  },
+  {
+    label: "账号与组织",
+    options: ["user.created", "user.status_changed", "user.password_reset", "org.status_changed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
 ];
 

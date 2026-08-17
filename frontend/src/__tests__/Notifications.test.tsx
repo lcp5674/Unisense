@@ -810,3 +810,50 @@ describe("通知中心 - 送达失败处置 / 待办闭环 / 对象聚焦", () =
     );
   });
 });
+
+describe("通知中心 - 前后端事件类型中文映射一致性", () => {
+  it("EVENT_TYPES 覆盖后端 _BUSINESS_EVENT_TYPES 全部可订阅事件（不遗漏导致订阅不了/筛选不到）", () => {
+    // 与 backend/app/main.py _BUSINESS_EVENT_TYPES 对齐：指标重评审/灰度/改名/口径变更/作废
+    for (const ev of [
+      "metric.resubmitted",
+      "metric.gray_published",
+      "metric.rename_required",
+      "metric.breaking_change_pending",
+      "metric.breaking_change_promoted",
+      "metric.voided",
+      "lineage.change_impacted",
+      "catalog.deprecated",
+      "collect.degraded",
+      "collect.failed",
+      "catalog.connection_failed",
+      "user.created",
+      "user.status_changed",
+      "user.password_reset",
+      "org.status_changed",
+      "grant.expiring_soon",
+      "pii.review_pending",
+    ]) {
+      expect(EVENT_TYPES).toContain(ev);
+    }
+  });
+
+  it("新增订阅弹窗：后段新增事件显示中文业务术语而非英文事件码", async () => {
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: "订阅设置" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /新增订阅/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /新增订阅/ }));
+    fireEvent.mouseDown(screen.getByLabelText("消息类型"));
+    await waitFor(() => {
+      const dropdown = document.querySelector(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
+      expect(dropdown).toBeTruthy();
+    });
+    // 新接入事件的中文标题（与后端 _EVENT_TITLE_CN 一致），英文事件码不应直出。
+    // 注意：antd Select 虚拟滚动只渲染首屏约 10 项，断言首屏内的新事件（resubmitted/gray_published），
+    // 深位事件（breaking_change_* 等）由 EVENT_TYPE_LABEL 数据 + EVENT_TYPES 包含性断言共同保障。
+    expect(screen.getByText("指标重评审待审核")).toBeInTheDocument();
+    expect(screen.getByText("指标灰度发布")).toBeInTheDocument();
+    expect(screen.queryByText("metric.resubmitted")).not.toBeInTheDocument();
+    expect(screen.queryByText("lineage.change_impacted")).not.toBeInTheDocument();
+  });
+});
