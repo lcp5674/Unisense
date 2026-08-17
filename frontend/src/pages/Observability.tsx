@@ -425,7 +425,17 @@ function MetricHealthCard({ h }: { h: ObsOverview["quality"]["metric_health"] })
           {h.top_risk.map((r) => (
             <div key={r.metric_id} style={{ ...rowStyle, padding: "4px 0" }}>
               <span>
-                指标 #{r.metric_id} <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.score} 分</span>
+                {r.metric_name ? (
+                  <Tooltip title={r.metric_code ?? undefined}>
+                    <span style={{ fontWeight: 600 }}>{r.metric_name}</span>
+                    {r.metric_code ? <span className="mono muted" style={{ marginLeft: 4, fontSize: 12 }}>{r.metric_code}</span> : null}
+                  </Tooltip>
+                ) : r.metric_code ? (
+                  <span className="mono">{r.metric_code}</span>
+                ) : (
+                  <span>指标 #{r.metric_id}</span>
+                )}{" "}
+                <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.score} 分</span>
               </span>
               <span className="muted" style={{ fontSize: 12 }}>{r.missing_dimensions?.join("、") ?? "—"}</span>
             </div>

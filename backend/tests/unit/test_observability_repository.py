@@ -291,7 +291,10 @@ class TestObservabilityRepository:
                 rows(("COMPLETED", 6), ("RUNNING", 2)),  # collection_run by status
                 scalar(now),  # watermark max last_collected_at
                 # ---- quality ----
-                rows((1, 70, "GOOD", None), (2, 65, "WARNING", ["sla"])),  # health rows
+                rows(
+                    (1, 70, "GOOD", None, "指标A", "metric_a"),
+                    (2, 65, "WARNING", ["sla"], "指标B", "metric_b"),
+                ),  # health rows: (mid, score, level, missing, name, code)
                 scalar(58),  # lineage edges
                 scalar(0),  # stale edges
                 one((58, now)),  # ingest (count, max run_at)
@@ -342,6 +345,8 @@ class TestObservabilityRepository:
         assert stats["quality"]["metric_health"]["avg_score"] == 68
         assert stats["quality"]["metric_health"]["coverage_pct"] == round(2 / 7 * 100, 1)
         assert stats["quality"]["metric_health"]["top_risk"][0]["metric_id"] == 2
+        assert stats["quality"]["metric_health"]["top_risk"][0]["metric_name"] == "指标B"
+        assert stats["quality"]["metric_health"]["top_risk"][0]["metric_code"] == "metric_b"
         assert stats["quality"]["metric_health"]["top_risk"][0]["missing_dimensions"] == ["sla"]
         assert stats["quality"]["lineage"]["edges"] == 58
         assert stats["quality"]["lineage"]["stale"] == 0
@@ -406,7 +411,7 @@ class TestObservabilityRepository:
                 dep_empty(),  # 12 dependency_health
                 rows(("COMPLETED", 2)),  # 13 采集运行状态
                 scalar(None),  # 14 watermark max
-                rows((1, 70, "GOOD", None)),  # 15 指标健康度
+                rows((1, 70, "GOOD", None, "指标A", "metric_a")),  # 15 指标健康度
                 scalar(58),  # 16 血缘边
                 scalar(0),  # 17 失效边
                 one((58, None)),  # 18 血缘接入

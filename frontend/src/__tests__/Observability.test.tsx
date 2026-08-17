@@ -98,7 +98,7 @@ const overview = {
       coverage_pct: 81.8,
       avg_score: 66,
       top_risk: [
-        { metric_id: 2, score: 55, level: "WARNING", missing_dimensions: ["sla", "lineage_coverage"] },
+        { metric_id: 2, metric_name: "低健康GMV日", metric_code: "low_health_gmv_day", score: 55, level: "WARNING", missing_dimensions: ["sla", "lineage_coverage"] },
       ],
     },
     lineage: { edges: 58, stale: 0, ingest_success: 58, last_ingest_at: "2026-08-17T14:31:42" },
@@ -226,6 +226,10 @@ describe("Observability 可观测中心", () => {
     expect(screen.getByText("良好")).toBeInTheDocument();
     expect(screen.getByText("健康覆盖率")).toBeInTheDocument();
     expect(screen.getByText(/低健康指标 Top 1/)).toBeInTheDocument();
+    // 低健康指标展示指标名（编码）+ 分数 + 缺失维度，而非裸 ID
+    expect(screen.getByText("低健康GMV日")).toBeInTheDocument();
+    expect(screen.getByText("low_health_gmv_day")).toBeInTheDocument();
+    expect(screen.getByText(/55 分/)).toBeInTheDocument();
     expect(screen.getByText(/sla、lineage_coverage/)).toBeInTheDocument();
 
     // 血缘健康卡

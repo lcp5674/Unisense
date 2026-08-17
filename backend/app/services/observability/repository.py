@@ -498,6 +498,8 @@ class ObservabilityRepository:
                     MetricHealthScore.score,
                     MetricHealthScore.level,
                     MetricHealthScore.missing_dimensions,
+                    Metric.name,
+                    Metric.metric_code,
                 )
                 .join(Metric, Metric.id == MetricHealthScore.metric_id)
                 .where(
@@ -509,13 +511,16 @@ class ObservabilityRepository:
         by_level: dict[str, int] = {}
         total_score = 0
         risks: list[dict[str, Any]] = []
-        for mid, score, level, missing in hs_rows:
+        for mid, score, level, missing, mname, mcode in hs_rows:
             by_level[level] = by_level.get(level, 0) + 1
             total_score += score
             if level in ("WARNING", "CRITICAL"):
                 risks.append(
                     {
                         "metric_id": mid,
+                        # 指标名/编码随行返回，前端「低健康指标」直接展示业务名称而非裸 ID
+                        "metric_name": mname,
+                        "metric_code": mcode,
                         "score": score,
                         "level": level,
                         "missing_dimensions": missing,

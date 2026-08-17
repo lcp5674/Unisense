@@ -1494,6 +1494,9 @@ export interface ObsOverview {
       avg_score: number;
       top_risk: Array<{
         metric_id: number;
+        /** 指标名/编码（后端 JOIN Metric 随行返回，供「低健康指标」展示业务名称而非裸 ID） */
+        metric_name: string | null;
+        metric_code: string | null;
         score: number;
         level: string;
         missing_dimensions: string[] | null;
