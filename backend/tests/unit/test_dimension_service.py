@@ -377,6 +377,30 @@ async def test_update_member_reparent_resolves_path() -> None:
     assert out.path == "/parent/child"
 
 
+async def test_update_member_reparent_cascades_descendant_path() -> None:
+    """改父级后级联重算全部后代 path——移动 B 到根后，C 的 path 前缀须同步（防层级断裂）。"""
+    svc, repo = await _svc()
+    root = DimensionMember(
+        id=1, dim_code="geo", member_code="root", member_name="根",
+        parent_code=None, path="/root", status="DRAFT",
+    )
+    child = DimensionMember(
+        id=2, dim_code="geo", member_code="child", member_name="子",
+        parent_code="root", path="/root/child", status="DRAFT",
+    )
+    grand = DimensionMember(
+        id=3, dim_code="geo", member_code="grand", member_name="孙",
+        parent_code="child", path="/root/child/grand", status="DRAFT",
+    )
+    repo.get_member = AsyncMock(return_value=child)
+    repo.list_members = AsyncMock(return_value=[root, child, grand])
+    out = await svc.update_member("geo", "child", DimensionMemberUpdate(parent_code=""))
+    assert out.parent_code is None
+    assert out.path == "/child"
+    # 级联核心：后代 grand 的 path 前缀须从 /root/child 同步为 /child（与父级 parent_code 链一致）
+    assert grand.path == "/child/grand"
+
+
 async def test_update_member_clear_parent_to_root() -> None:
     """编辑成员置为根：parent_code="" → parent 清空，path 重算为 /{member_code}。"""
     svc, repo = await _svc()

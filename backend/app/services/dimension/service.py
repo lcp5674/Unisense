@@ -414,6 +414,9 @@ class DimensionService(BaseService):
         if new_parent_code is None:
             member.parent_code = None
             member.path = self._resolve_member_path(None, member.member_code)
+            # 置根后级联重算全部后代 path（父级为唯一事实源，子树 path 前缀须同步）
+            members = await self._repo.list_members(dim_code)
+            self._cascade_repath(member, members)
             return
         members = await self._repo.list_members(dim_code)
         parent = next((m for m in members if m.member_code == new_parent_code), None)
@@ -440,6 +443,28 @@ class DimensionService(BaseService):
             )
         member.parent_code = new_parent_code
         member.path = self._resolve_member_path(parent, member.member_code)
+        # 改父后级联重算全部后代 path（parent_code 为唯一事实源，子树 path 前缀须同步）
+        self._cascade_repath(member, members)
+
+    def _cascade_repath(
+        self, moved: DimensionMember, members: list[DimensionMember]
+    ) -> None:
+        """移动父级后级联重算该成员全部后代的 path。
+
+        path 是服务端派生的层级权威来源，须始终与 parent_code 链一致；
+        只重算被移动成员自身会导致后代 path 前缀与父级断裂（前端树形错乱、
+        血缘/消费的层级引用失效）。BFS 沿 parent_code 树传播新 path。
+        """
+        by_parent: dict[str, list[DimensionMember]] = {}
+        for m in members:
+            if m.parent_code and m.member_code != moved.member_code:
+                by_parent.setdefault(m.parent_code, []).append(m)
+        stack: list[DimensionMember] = [moved]
+        while stack:
+            cur = stack.pop()
+            for child in by_parent.get(cur.member_code, []):
+                child.path = f"{cur.path}/{child.member_code}"
+                stack.append(child)
 
     async def delete_member(self, dim_code: str, member_code: str) -> list[DimensionMember]:
         """删除维度成员（工业级语义：级联删除其全部后代，保留孤儿引用不落库）。
