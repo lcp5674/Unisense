@@ -2051,18 +2051,20 @@ function GraphTab() {
                       {descriptionSourceTag(detail.description_source)}
                     </Space>
                     <Space>
-                      <Tooltip title="编辑表级描述">
-                        <Button
-                          size="small"
-                          icon={<EditOutlined />}
-                          onClick={() => {
-                            setTableDescDraft(detail.description ?? "");
-                            setTableDescEditing(true);
-                          }}
-                        >
-                          编辑
-                        </Button>
-                      </Tooltip>
+                      {canEditDesc && (
+                        <Tooltip title="编辑表级描述">
+                          <Button
+                            size="small"
+                            icon={<EditOutlined />}
+                            onClick={() => {
+                              setTableDescDraft(detail.description ?? "");
+                              setTableDescEditing(true);
+                            }}
+                          >
+                            编辑
+                          </Button>
+                        </Tooltip>
+                      )}
                       {canInferCatalog && (
                         <Tooltip title="LLM 推断表级描述">
                           <Button

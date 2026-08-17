@@ -2,11 +2,14 @@ import { useEffect, useState } from "react";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, message, Space, Typography } from "antd";
 import { PlusOutlined, KeyOutlined, CopyOutlined, ReloadOutlined } from "@ant-design/icons";
 import { createApiClient, listApiClients, mintClientToken, UnisenseApiError } from "../api";
+import { usePermission } from "../hooks/usePermission";
 import type { ClientResponse } from "../types";
 
 const { Paragraph } = Typography;
 
 export function ApiClients() {
+  const { can } = usePermission();
+  const canManage = can("api-clients:manage");
   const [items, setItems] = useState<ClientResponse[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -85,7 +88,7 @@ export function ApiClients() {
       key: "actions",
       width: 160,
       render: (_: unknown, r: ClientResponse) => (
-        <Button size="small" icon={<KeyOutlined />} disabled={r.status !== "ACTIVE"} onClick={() => handleMint(r.client_id)}>
+        <Button size="small" icon={<KeyOutlined />} disabled={r.status !== "ACTIVE" || !canManage} onClick={() => handleMint(r.client_id)}>
           签发令牌
         </Button>
       ),
@@ -100,9 +103,9 @@ export function ApiClients() {
           <h2>API 客户端</h2>
           <p>管理消费查询的 API 客户端——每个客户端持有独立密钥、域与指标白名单。</p>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>
+        {canManage && <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>
           新建客户端
-        </Button>
+        </Button>}
       </div>
 
       <Card extra={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>

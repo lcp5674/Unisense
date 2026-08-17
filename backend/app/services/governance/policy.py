@@ -193,6 +193,7 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "dashboard:view": {"module": "总览", "label": "查看总览", "description": "访问总览仪表盘"},
     "todo:view": {"module": "总览", "label": "查看待办", "description": "访问待办列表"},
     "notifications:view": {"module": "总览", "label": "查看通知", "description": "访问通知中心"},
+    "notifications:publish": {"module": "总览", "label": "广播通知", "description": "向订阅用户手动发布通知"},  # noqa: E501
     "favorites:view": {"module": "总览", "label": "查看收藏", "description": "访问我的收藏"},
     # ---- 指标
     "catalog:view": {"module": "指标", "label": "查看指标目录", "description": "访问指标目录列表"},
@@ -226,6 +227,7 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "review:reopen": {"module": "质量中心", "label": "重开冲突", "description": "重新打开已关闭冲突"},  # noqa: E501
     # ---- 查询 / AI / 维度 / 术语
     "query:view": {"module": "分析", "label": "指标查询", "description": "访问指标查询工作台"},
+    "query:execute": {"module": "分析", "label": "执行查询", "description": "执行指标查询 / 签发消费令牌"},  # noqa: E501
     "ai:view": {"module": "分析", "label": "AI 助手", "description": "访问 AI 助手"},
     "ai:nl2sql": {"module": "分析", "label": "AI 问数", "description": "用自然语言查询指标（NL2SQL）"},  # noqa: E501
     "dimensions:view": {"module": "分析", "label": "查看维度", "description": "访问维度管理"},
@@ -284,11 +286,13 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "dicts:view": {"module": "治理", "label": "查看系统字典", "description": "访问系统字典"},
     "dict:create": {"module": "治理", "label": "管理字典", "description": "新增 / 编辑字典项"},
     "api-clients:view": {"module": "治理", "label": "查看接入方", "description": "访问 API 客户端"},
+    "api-clients:manage": {"module": "治理", "label": "管理接入方", "description": "新建 API 客户端 / 签发令牌"},  # noqa: E501
     "system-config:view": {"module": "治理", "label": "查看系统配置", "description": "访问系统配置"},  # noqa: E501
     "system-config:edit": {"module": "治理", "label": "编辑系统配置", "description": "修改系统配置（LLM Key 等）"},  # noqa: E501
     "observability:view": {"module": "治理", "label": "查看可观测", "description": "访问可观测性"},
     "tracking-stats:view": {"module": "治理", "label": "查看埋点统计", "description": "访问埋点统计"},  # noqa: E501
     "feedback:view": {"module": "总览", "label": "查看用户反馈", "description": "访问用户反馈"},
+    "feedback:manage": {"module": "总览", "label": "处置用户反馈", "description": "跟进 / 采纳 / 驳回反馈"},  # noqa: E501
     "guide:view": {"module": "总览", "label": "查看使用指南", "description": "访问使用指南"},
 }
 
@@ -298,7 +302,8 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
     RoleName.PLATFORM_ADMIN.value: frozenset(UI_ACTION_REGISTRY.keys()),
     RoleName.DOMAIN_ADMIN.value: frozenset(
         {
-            "dashboard:view", "todo:view", "notifications:view", "favorites:view",
+            "dashboard:view", "todo:view", "notifications:view", "notifications:publish",
+            "favorites:view",
             "catalog:view", "compare:view", "templates:view", "metric:create", "metric:edit",
             "metric:approve", "metric:deprecate", "metric:export", "metric:review",
             "metric:emergency-publish", "metric:rollback", "metric:import",
@@ -307,7 +312,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "lineage:write", "lineage:manage-edge",
             "quality:view", "quality:run-check", "quality:config-rule", "review:view",
             "review:arbitrate", "review:escalate", "review:close", "review:reopen",
-            "query:view", "ai:view", "ai:nl2sql", "dimensions:view",
+            "query:view", "query:execute", "ai:view", "ai:nl2sql", "dimensions:view",
             "dimension:create", "dimension:edit", "dimension:deprecate",
             "dimension:mapping", "dimension:reconcile",
             "glossary:view", "glossary:infer", "glossary:create", "glossary:edit",
@@ -320,8 +325,8 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "organizations:view", "org:create", "org:edit", "org:disable",
             "governance:view", "grant:create", "grant:revoke", "grant:export",
             "audit:view", "domains:view", "domain:create", "dicts:view", "dict:create",
-            "api-clients:view", "system-config:view", "observability:view",
-            "tracking-stats:view", "feedback:view", "guide:view",
+            "api-clients:view", "api-clients:manage", "system-config:view", "observability:view",
+            "tracking-stats:view", "feedback:view", "feedback:manage", "guide:view",
             "pii:review",
         }
     ),

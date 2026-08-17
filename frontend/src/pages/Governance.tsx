@@ -210,6 +210,7 @@ function PermissionsTab() {
 }
 
 function GrantsTab() {
+  const { can } = usePermission();
   const [items, setItems] = useState<GrantResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -424,7 +425,7 @@ function GrantsTab() {
       render: (_: unknown, g: GrantResponse) => (
         <Space size={4}>
           <Button size="small" icon={<TeamOutlined />} onClick={() => openGrantForUser(g.user_id)}>给该用户授权</Button>
-          {g.status === "ACTIVE" ? <Button size="small" danger onClick={() => handleRevoke(g)}>回收</Button> : null}
+          {g.status === "ACTIVE" && can("grant:revoke") ? <Button size="small" danger onClick={() => handleRevoke(g)}>回收</Button> : null}
         </Space>
       ),
     },
@@ -634,6 +635,7 @@ function groupRegistry(
 }
 
 function RolesTab() {
+  const { can } = usePermission();
   const [items, setItems] = useState<RolePermissionItem[]>([]);
   const [registry, setRegistry] = useState<ActionRegistryItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -854,7 +856,7 @@ function RolesTab() {
               okButtonProps={{ danger: true }}
               onConfirm={() => handleDelete(r.role)}
             >
-              <Button size="small" danger icon={<DeleteOutlined />} disabled={!r.is_custom}>
+              <Button size="small" danger icon={<DeleteOutlined />} disabled={!r.is_custom || !can("role:delete")}>
                 删除
               </Button>
             </Popconfirm>
@@ -962,6 +964,7 @@ function RolesTab() {
 }
 
 function PiiReviewTab() {
+  const { can } = usePermission();
   const [modalOpen, setModalOpen] = useState(false);
   const [rescanLoading, setRescanLoading] = useState(false);
   const [form] = Form.useForm();
@@ -1015,8 +1018,8 @@ function PiiReviewTab() {
   return (
     <div>
       <Space style={{ marginBottom: 12 }}>
-        <Button type="primary" icon={<SafetyCertificateOutlined />} onClick={() => setModalOpen(true)}>PII 人工复核</Button>
-        <Button icon={<ExperimentOutlined />} loading={rescanLoading} onClick={handleRescan}>敏感度分类重扫</Button>
+        {can("pii:review") && <Button type="primary" icon={<SafetyCertificateOutlined />} onClick={() => setModalOpen(true)}>PII 人工复核</Button>}
+        {can("classification:rescan") && <Button icon={<ExperimentOutlined />} loading={rescanLoading} onClick={handleRescan}>敏感度分类重扫</Button>}
       </Space>
       <Alert type="warning" showIcon message="PII 复核与分类重扫仅 compliance_officer / platform_admin 可执行；复核结果写入治理审计。" />
 

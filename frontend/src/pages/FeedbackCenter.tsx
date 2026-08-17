@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Rate, message, Tabs, Space, Alert, Tooltip, Row, Col } from "antd";
 import { StarOutlined } from "@ant-design/icons";
 import { listFeedback, submitFeedback, updateFeedbackStatus, submitNps, fetchNpsStats, listUsers, UnisenseApiError } from "../api";
+import { usePermission } from "../hooks/usePermission";
 import type { Feedback, NpsStats } from "../types";
 import { formatCnTime, timeAgoCn, parseBackendTime } from "../utils/timeCn";
 
@@ -96,6 +97,7 @@ interface ProcessDraft {
 }
 
 function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
+  const { can } = usePermission();
   const [items, setItems] = useState<Feedback[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -294,6 +296,9 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
         // 终态（已采纳/已驳回）：处理结果已由状态列展示，操作列留空避免重复
         if (f.status === "adopted" || f.status === "rejected") {
           return <span className="muted">—</span>;
+        }
+        if (!can("feedback:manage")) {
+          return <span className="muted">无处置权限</span>;
         }
         return (
           <Space>

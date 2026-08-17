@@ -17,6 +17,7 @@ import {
 } from "../api";
 import type { DimensionExpr, DryRunResponse, QueryResponse, SnapshotResponse, ClientResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { usePermission } from "../hooks/usePermission";
 import { ObjectView, kvText } from "../utils/display";
 import { DATE_RANGE_LABEL, GRANULARITY_LABEL } from "../utils/enums";
 import { formatCnRange } from "../utils/timeCn";
@@ -72,6 +73,8 @@ function QueryResultTable({ data }: { data: Record<string, unknown> }) {
 }
 
 export function QueryWorkspace() {
+  const { can } = usePermission();
+  const canExecute = can("query:execute");
   const [metricOptions, setMetricOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [metricCode, setMetricCode] = useState<string | undefined>(undefined);
   const [dateRange, setDateRange] = useState("last_30d");
@@ -288,7 +291,7 @@ export function QueryWorkspace() {
               )
             }
             action={
-              !tokenOk && (
+              !tokenOk && canExecute && (
                 <Button size="small" onClick={handleMintToken}>从客户端签发令牌</Button>
               )
             }

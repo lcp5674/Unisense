@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { FeedbackCenter } from "../pages/FeedbackCenter";
+import { PermissionProvider } from "../hooks/usePermission";
 import type { Feedback } from "../types";
 
 vi.mock("../api", () => ({
@@ -12,15 +13,17 @@ vi.mock("../api", () => ({
   fetchNpsStats: vi.fn(),
   listUsers: vi.fn(),
   getMetric: vi.fn(),
+  fetchMyPermissions: vi.fn(),
   UnisenseApiError: class extends Error {},
 }));
 
-import { listFeedback, updateFeedbackStatus, listUsers, getMetric, submitFeedback } from "../api";
+import { listFeedback, updateFeedbackStatus, listUsers, getMetric, submitFeedback, fetchMyPermissions } from "../api";
 const mockedList = vi.mocked(listFeedback);
 const mockedUpdate = vi.mocked(updateFeedbackStatus);
 const mockedUsers = vi.mocked(listUsers);
 const mockedGetMetric = vi.mocked(getMetric);
 const mockedSubmit = vi.mocked(submitFeedback);
+const mockedPerms = vi.mocked(fetchMyPermissions);
 
 const feedbacks: Feedback[] = [
   {
@@ -93,6 +96,13 @@ beforeEach(() => {
   mockedGetMetric.mockResolvedValue({
     metric_code: "sales_gmv",
     name: "销售GMV",
+  } as never);
+  // 权限快照默认全放行（fail-open 语义）；gate 测试单独覆盖为受限集合
+  mockedPerms.mockResolvedValue({
+    user_id: 1, role: "platform_admin", home_domain: null,
+    allowed_actions: ["read", "write", "approve", "export", "review"],
+    ui_actions: ["*"], granted_domains: [], metric_whitelist: [],
+    row_level_restricted: false, grants: [], expiring_soon: [],
   } as never);
 });
 
@@ -227,5 +237,42 @@ describe("FeedbackCenter 用户反馈", () => {
     // 提交成功 → 切回「用户反馈」Tab 并刷新列表
     await waitFor(() => expect(mockedSubmit).toHaveBeenCalled());
     await waitFor(() => expect(mockedList.mock.calls.length).toBeGreaterThan(submitCountBefore));
+  });
+});
+
+describe("FeedbackCenter 处置权限 gate", () => {
+  function renderWithPerms(ui_actions: string[]) {
+    mockedPerms.mockResolvedValue({
+      user_id: 1, role: "custom", home_domain: null,
+      allowed_actions: ["read"],
+      ui_actions, granted_domains: [], metric_whitelist: [],
+      row_level_restricted: false, grants: [], expiring_soon: [],
+    } as never);
+    return render(
+      <MemoryRouter>
+        <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: null, org_id: 1 }}>
+          <FeedbackCenter />
+        </PermissionProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("无 feedback:manage 时，反馈行不提供跟进/采纳/驳回按钮", async () => {
+    renderWithPerms(["feedback:view"]);
+    await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
+    const row = screen.getByText(/销售GMV/).closest("tr") as HTMLElement;
+    expect(within(row).queryByText(/跟\s*进/)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/采\s*纳/)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/驳\s*回/)).not.toBeInTheDocument();
+    expect(within(row).getByText("无处置权限")).toBeInTheDocument();
+  });
+
+  it("有 feedback:manage 时，反馈行提供跟进/采纳/驳回按钮", async () => {
+    renderWithPerms(["feedback:view", "feedback:manage"]);
+    await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
+    const row = screen.getByText(/销售GMV/).closest("tr") as HTMLElement;
+    expect(within(row).getByText(/跟\s*进/)).toBeInTheDocument();
+    expect(within(row).getByText(/采\s*纳/)).toBeInTheDocument();
+    expect(within(row).getByText(/驳\s*回/)).toBeInTheDocument();
   });
 });

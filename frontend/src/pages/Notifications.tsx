@@ -20,6 +20,7 @@ import type { Notification, NotifyEventLog, SubscriptionPref } from "../types";
 import { NOTIFY_STATUS_LABEL, QUALITY_LEVEL_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
 import { notifyNotifChanged } from "../utils/notifBus";
+import { usePermission } from "../hooks/usePermission";
 
 // 渠道 = 消息送达方式（面向业务用户，不用 webhook/sms 等英文码）
 const CHANNEL_LABEL: Record<string, string> = {
@@ -1250,11 +1251,12 @@ function PublishTab() {
 }
 
 export function Notifications() {
+  const { can } = usePermission();
   const tabItems = [
     { key: "list", label: "我的通知", children: <NotifListTab /> },
     { key: "subs", label: "订阅设置", children: <SubscriptionsTab /> },
     { key: "events", label: "消息记录", children: <EventLogTab /> },
-    { key: "publish", label: "发送消息", children: <PublishTab /> },
+    ...(can("notifications:publish") ? [{ key: "publish", label: "发送消息", children: <PublishTab /> }] : []),
   ];
 
   return (

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { Governance } from "../pages/Governance";
 import { PermissionProvider } from "../hooks/usePermission";
+import type { GrantResponse } from "../types";
 
 vi.mock("../api", () => {
   class UnisenseApiError extends Error {
@@ -471,7 +472,7 @@ describe("Governance 权限治理", () => {
 });
 
 describe("Governance Tab 级权限过滤", () => {
-  function renderWithPerms(ui_actions: string[]) {
+  function renderWithPerms(ui_actions: string[], grantsItems: GrantResponse[] = []) {
     mockPerms.mockResolvedValue({
       user_id: 1,
       role: "custom",
@@ -484,6 +485,11 @@ describe("Governance Tab 级权限过滤", () => {
       grants: [],
       expiring_soon: [],
     });
+    // GrantsTab 挂载时并行拉取 grants/users/域/指标，测试须显式提供完整依赖
+    mockGrants.mockResolvedValue({ items: grantsItems, total: grantsItems.length, page: 1, page_size: 20 });
+    mockUsers.mockResolvedValue(USERS);
+    mockDomains.mockResolvedValue([]);
+    mockMetrics.mockResolvedValue({ total: 0, page: 1, page_size: 1000, items: [] });
     return render(
       <MemoryRouter>
         <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: null, org_id: 1 }}>
@@ -521,5 +527,41 @@ describe("Governance Tab 级权限过滤", () => {
     renderWithPerms(["governance:view", "erasure:execute"]);
     await waitFor(() => expect(screen.getByRole("tab", { name: "我的权限" })).toBeInTheDocument());
     expect(screen.getByRole("tab", { name: "数据擦除" })).toBeInTheDocument();
+  });
+
+  it("按钮级：仅 grant:create 无 grant:revoke 时，授权管理不显示回收按钮", async () => {
+    const grant = {
+      id: 1, user_id: 1, role_id: null, domain: "sales", metric_whitelist: null,
+      grant_type: "READ", row_level: false, status: "ACTIVE", expires_at: null,
+      created_at: "2026-08-01T00:00:00", granted_by: 1, reason: null,
+    };
+    renderWithPerms(["governance:view", "grant:create"], [grant]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "授权管理" })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: "授权管理" }));
+    // 「给该用户授权」可见（grant:create），「回收」不显示（缺 grant:revoke）
+    await waitFor(() => expect(screen.getByText("给该用户授权")).toBeInTheDocument());
+    expect(screen.queryByText(/回\s*收/)).not.toBeInTheDocument();
+  });
+
+  it("按钮级：有 grant:revoke 时显示回收按钮", async () => {
+    const grant = {
+      id: 1, user_id: 1, role_id: null, domain: "sales", metric_whitelist: null,
+      grant_type: "READ", row_level: false, status: "ACTIVE", expires_at: null,
+      created_at: "2026-08-01T00:00:00", granted_by: 1, reason: null,
+    };
+    renderWithPerms(["governance:view", "grant:create", "grant:revoke"], [grant]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "授权管理" })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: "授权管理" }));
+    // 先确认列表行已渲染（「给该用户授权」按钮），再断言「回收」出现
+    await waitFor(() => expect(screen.getByText("给该用户授权")).toBeInTheDocument());
+    expect(screen.getByText(/回\s*收/)).toBeInTheDocument();
+  });
+
+  it("按钮级：仅 pii:review 无 classification:rescan 时，PII 复核不显示分类重扫按钮", async () => {
+    renderWithPerms(["governance:view", "pii:review"]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "PII 复核" })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("tab", { name: "PII 复核" }));
+    await waitFor(() => expect(screen.getByText("PII 人工复核")).toBeInTheDocument());
+    expect(screen.queryByText("敏感度分类重扫")).not.toBeInTheDocument();
   });
 });

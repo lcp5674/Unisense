@@ -748,7 +748,7 @@ function DimensionsTab() {
                       cancelText="取消"
                       onConfirm={() => handleUnbindMetric(r.metric_id, r.metric_code)}
                     >
-                      <Button size="small" type="link" danger>解绑</Button>
+                      {can("dimension:edit") ? <Button size="small" type="link" danger>解绑</Button> : null}
                     </Popconfirm>
                   ),
                 },

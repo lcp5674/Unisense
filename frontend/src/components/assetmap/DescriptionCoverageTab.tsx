@@ -370,6 +370,8 @@ export function DescriptionCoverageTab() {
   const [error, setError] = useState<string | null>(null);
   // 按钮级权限点：无 catalog:infer-description 时隐藏 LLM 推断按钮（后端强制兜底）
   const canInferCatalog = usePermission().can("catalog:infer-description");
+  // 编辑描述侧门修复：表级/字段级人工编辑也受 catalog:edit-description 管控
+  const canEditDesc = usePermission().can("catalog:edit-description");
 
   // 详情抽屉
   const [detailOpen, setDetailOpen] = useState(false);
@@ -778,28 +780,32 @@ export function DescriptionCoverageTab() {
                       {descriptionSourceTag(detail.description_source)}
                     </Space>
                     <Space>
-                      <Tooltip title="编辑表级描述">
-                        <Button
-                          size="small"
-                          icon={<EditOutlined />}
-                          onClick={() => {
-                            setTableDescDraft(detail.description ?? "");
-                            setTableDescEditing(true);
-                          }}
-                        >
-                          编辑
-                        </Button>
-                      </Tooltip>
-                      <Tooltip title="LLM 推断表级描述">
-                        <Button
-                          size="small"
-                          icon={<ThunderboltOutlined />}
-                          loading={tableInferring}
-                          onClick={handleTableDescInfer}
-                        >
-                          推断
-                        </Button>
-                      </Tooltip>
+                      {canEditDesc && (
+                        <Tooltip title="编辑表级描述">
+                          <Button
+                            size="small"
+                            icon={<EditOutlined />}
+                            onClick={() => {
+                              setTableDescDraft(detail.description ?? "");
+                              setTableDescEditing(true);
+                            }}
+                          >
+                            编辑
+                          </Button>
+                        </Tooltip>
+                      )}
+                      {canInferCatalog && (
+                        <Tooltip title="LLM 推断表级描述">
+                          <Button
+                            size="small"
+                            icon={<ThunderboltOutlined />}
+                            loading={tableInferring}
+                            onClick={handleTableDescInfer}
+                          >
+                            推断
+                          </Button>
+                        </Tooltip>
+                      )}
                     </Space>
                   </Space>
                 )}
@@ -808,8 +814,8 @@ export function DescriptionCoverageTab() {
             <Card title="字段描述" size="small" style={{ marginTop: 16 }}>
               <SchemaTable
                 columns={schemaColumns}
-                editable
-                inferable
+                editable={canEditDesc}
+                inferable={canInferCatalog}
                 canInfer={canInferCatalog}
                 onEdit={handleFieldEdit}
                 onInfer={handleFieldInfer}

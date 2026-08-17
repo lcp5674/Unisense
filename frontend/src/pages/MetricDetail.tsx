@@ -1417,7 +1417,7 @@ export function MetricDetail() {
         title="业务描述"
         extra={
           <Space size={8}>
-            {isOwnerOrAdmin && !piiMasked && (
+            {isOwnerOrAdmin && canEdit && !piiMasked && (
               <Button
                 size="small"
                 icon={<EditOutlined />}
@@ -1502,7 +1502,7 @@ export function MetricDetail() {
           items={[
             { key: "quality", label: "质量快照", children: <QualitySnapshot metricId={metric.id} metricCode={metric.metric_code} /> },
             { key: "lineage", label: "血缘影响", children: <LineageImpact key={`${metric.metric_code}-v${metric.row_version ?? 0}`} metricCode={metric.metric_code} /> },
-            { key: "versions", label: `版本历史 (${versions.length})`, children: <VersionHistory metricCode={metric.metric_code} versions={versions} effectiveVersion={metric.effective_version} onChanged={load} canConfirm={isOwnerOrAdmin} /> },
+            { key: "versions", label: `版本历史 (${versions.length})`, children: <VersionHistory metricCode={metric.metric_code} versions={versions} effectiveVersion={metric.effective_version} onChanged={load} canConfirm={canCreate} /> },
             { key: "dims", label: "关联维度", children: <RelatedDimensions key={`dims-${metric.row_version ?? 0}`} metricId={metric.id} /> },
             { key: "audit", label: "变更审计", children: <AuditTimeline entityType="metric_definition" entityId={metric.metric_code} emptyText="暂无该指标的变更审计记录" /> },
           ]}
