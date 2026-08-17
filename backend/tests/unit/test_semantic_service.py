@@ -1865,6 +1865,80 @@ async def test_update_metric_published_breaking_def_creates_pending():
     assert result.row_version == 2
 
 
+async def test_update_metric_published_breaking_defers_lineage_registration():
+    """PUBLISHED + 口径破坏性变更 → PENDING 期不立即注册血缘（延迟到转正后）。
+
+    修复前：update_metric 无条件按新口径注册血缘 → PENDING 期血缘图显示"未来口径"
+    （误导影响分析），且消费方拒绝后被拒口径的边已注册/旧边已删（错误残留）。
+    """
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="PUBLISHED",
+        row_version=1,
+        version=1,
+        backup_owner_id=2,
+        definition_json={"expression": "SUM(order_amount)"},
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    fake_pvm = MagicMock()
+    fake_pvm.create_pending = AsyncMock()
+
+    with (
+        patch(
+            "app.services.semantic.pending_version_manager.PendingVersionManager",
+            return_value=fake_pvm,
+        ),
+        patch.object(
+            MetricService, "_register_metric_lineage_full", AsyncMock()
+        ) as mock_lineage,
+    ):
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                definition_json={"expression": "SUM(refund_amount)"},
+                change_reason="破坏性口径变更",
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+    # PENDING 期新口径未生效 → 不应注册血缘（由 _promote_pending_version 转正后注册）
+    mock_lineage.assert_not_awaited()
+
+
+async def test_update_metric_draft_breaking_registers_lineage_immediately():
+    """DRAFT + 破坏性口径变更（不触发 PENDING，立即生效）→ 立即注册血缘。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="DRAFT",
+        row_version=1,
+        version=1,
+        definition_json={"expression": "SUM(order_amount)"},
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=2)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    with patch.object(
+        MetricService, "_register_metric_lineage_full", AsyncMock()
+    ) as mock_lineage:
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                definition_json={"expression": "SUM(refund_amount)"},
+                change_reason="草稿口径修正",
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+    # DRAFT 变更立即生效 → 立即注册血缘
+    mock_lineage.assert_awaited_once()
+
+
 async def test_update_metric_published_top_level_breaking_creates_pending():
     """PUBLISHED + top-level 破坏性字段（granularity）变更且无
     definition_json → PENDING + 结构化 diff。"""

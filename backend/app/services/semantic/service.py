@@ -921,7 +921,12 @@ class MetricService(BaseService):
 
         # 口径变更时刷新指标间依赖血缘（表血缘通常不变，但 dependencies 解析需重跑）；
         # 仅当提交 definition_json 时触发，best-effort 不阻断更新。
-        if request.definition_json is not None:
+        # PUBLISHED 破坏性变更（触发 PENDING_VERSION，新口径未生效）**不立即注册**——
+        # 否则血缘图显示"未来口径"误导影响分析、且消费方拒绝后被拒口径边已注册残留。
+        # 此类变更由转正路径（_promote_pending_version）在新口径生效后注册血缘。
+        if request.definition_json is not None and not (
+            metric.status == "PUBLISHED" and is_breaking
+        ):
             await self._register_metric_lineage_full(metric)
 
         logger.info(
@@ -2628,6 +2633,17 @@ class MetricService(BaseService):
         )
         await self._repo.mark_version_published(metric.id, version, datetime.now(UTC))
         await self._cache.invalidate(metric.metric_code)
+        # 转正后新口径已生效 → 触发血缘差异同步（PENDING 期 update_metric 已延迟注册，
+        # 由本处在新口径生效时按版本口径注册——保证血缘始终与「生效口径」一致）
+        try:
+            await self._register_metric_lineage_full(updated)
+        except Exception as exc:  # noqa: BLE001 - best-effort 不阻断转正
+            logger.warning(
+                "pending_promote_lineage_failed",
+                metric_code=metric.metric_code,
+                version=version,
+                error=str(exc),
+            )
         logger.info(
             "pending_version_promoted",
             metric_id=metric.id,
