@@ -42,6 +42,33 @@ _DEFAULT_FIELD_DICT_TYPES: dict[str, str] = {
 }
 
 
+async def _validate_defaults_json(db: Any, defaults_json: dict[str, Any]) -> None:
+    """校验域默认值：字典枚举字段值必须合法（防配置非法枚举致注册预填失效）。
+
+    ``update_defaults`` 与 ``update_domain``（编辑域时携带 defaults_json）共用，
+    消除两处写路径校验不一致（此前仅 update_defaults 校验，update_domain 可绕过）。
+    """
+    # 延迟导入避免循环依赖
+    from app.services.system_dict.repository import SystemDictRepository
+
+    invalid: list[str] = []
+    for field, value in (defaults_json or {}).items():
+        dict_type = _DEFAULT_FIELD_DICT_TYPES.get(field)
+        if dict_type is None or value is None:
+            continue
+        if not isinstance(value, str) or not await SystemDictRepository(db).item_exists(
+            dict_type, value
+        ):
+            invalid.append(f"{field}={value!r}")
+    if invalid:
+        raise BusinessError(
+            "域默认值含非法字典枚举值: "
+            + "；".join(invalid)
+            + "。请从字典项中选择合法值。",
+            error_code="VALIDATION_ERROR",
+        )
+
+
 class SubjectDomainService:
     """主题域服务。"""
 
@@ -228,6 +255,8 @@ class SubjectDomainService:
         if data.owner_id is not None:
             domain.owner_id = data.owner_id
         if data.defaults_json is not None:
+            # 与 update_defaults 同款字典枚举校验（消除两处写路径校验不一致）
+            await _validate_defaults_json(self._db, data.defaults_json)
             domain.defaults_json = data.defaults_json
         domain = await self._repo.update(domain)
         logger.info("domain_updated", code=code)
@@ -291,25 +320,7 @@ class SubjectDomainService:
 
     async def update_defaults(self, code: str, data: SubjectDomainDefaultsUpdate) -> SubjectDomain:
         """更新域默认值预设；字典枚举字段校验值合法（防配置非法枚举致注册预填失效）。"""
-        # 延迟导入避免循环依赖
-        from app.services.system_dict.repository import SystemDictRepository
-
-        invalid: list[str] = []
-        for field, value in (data.defaults_json or {}).items():
-            dict_type = _DEFAULT_FIELD_DICT_TYPES.get(field)
-            if dict_type is None or value is None:
-                continue
-            if not isinstance(value, str) or not await SystemDictRepository(self._db).item_exists(
-                dict_type, value
-            ):
-                invalid.append(f"{field}={value!r}")
-        if invalid:
-            raise BusinessError(
-                "域默认值含非法字典枚举值: "
-                + "；".join(invalid)
-                + "。请从字典项中选择合法值。",
-                error_code="VALIDATION_ERROR",
-            )
+        await _validate_defaults_json(self._db, data.defaults_json)
         domain = await self.get_domain(code)
         domain.defaults_json = data.defaults_json
         domain = await self._repo.update(domain)

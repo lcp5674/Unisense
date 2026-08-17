@@ -509,3 +509,61 @@ class TestValidateDomainActive:
         svc._repo.get_by_code = AsyncMock(return_value=domain)
         with pytest.raises(BusinessError):
             await svc.validate_domain_active("sales")
+
+
+class TestUpdateDomainDefaultsValidation:
+    """编辑域携带 defaults_json 时校验字典枚举——update_defaults/update_domain 两处写路径一致。"""
+
+    def _domain(self):
+        return SubjectDomain(
+            id=1, code="sales", name="销售域", parent_id=None, level=1,
+            path="/sales", sort_order=0, status="active",
+            defaults_json=None, owner_id=None,
+        )
+
+    async def test_invalid_enum_rejected(self, svc, monkeypatch) -> None:
+        import app.services.system_dict.repository as sdr
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        domain = self._domain()
+        svc._repo.get_by_code = AsyncMock(return_value=domain)
+        svc._repo.update = AsyncMock(return_value=domain)
+        monkeypatch.setattr(sdr.SystemDictRepository, "item_exists", _item_exists_false)
+        with pytest.raises(BusinessError) as exc:
+            await svc.update_domain(
+                "sales",
+                SubjectDomainUpdate(
+                    name="销售域", defaults_json={"granularity": "daily"}
+                ),
+            )
+        assert exc.value.error_code == "VALIDATION_ERROR"
+        # 校验失败不得落库
+        svc._repo.update.assert_not_awaited()
+
+    async def test_valid_enum_passes(self, svc, monkeypatch) -> None:
+        import app.services.system_dict.repository as sdr
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        domain = self._domain()
+        svc._repo.get_by_code = AsyncMock(return_value=domain)
+        svc._repo.update = AsyncMock(return_value=domain)
+        monkeypatch.setattr(
+            sdr.SystemDictRepository, "item_exists", _item_exists_for("day")
+        )
+        out = await svc.update_domain(
+            "sales",
+            SubjectDomainUpdate(
+                name="销售域", defaults_json={"granularity": "day"}
+            ),
+        )
+        assert out is domain
+
+
+async def _item_exists_false(self, dict_type: str, value: str) -> bool:
+    return False
+
+
+def _item_exists_for(allowed: str):
+    async def _impl(self, dict_type: str, value: str) -> bool:
+        return value == allowed
+    return _impl
