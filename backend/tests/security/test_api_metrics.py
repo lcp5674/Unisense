@@ -162,14 +162,15 @@ async def test_get_metric_versions_success(client):
     )
     with patch("app.api.metrics.MetricService") as mock_svc:
         instance = mock_svc.return_value
-        instance.get_versions = AsyncMock(return_value=[version])
+        # 端点当前调用 service.get_version_responses（返回序列化版本响应）
+        instance.get_version_responses = AsyncMock(return_value=[version])
 
         resp = await client.get("/api/v1/metric-definitions/sales_gmv_daily/versions")
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["code"] == "OK"
-    instance.get_versions.assert_awaited_once_with("sales_gmv_daily")
+    instance.get_version_responses.assert_awaited_once_with("sales_gmv_daily")
     assert body["data"][0]["version"] == 1
 
 

@@ -87,14 +87,16 @@ async def test_list_notifications_ignores_client_subscriber_id(
     """PLAT-2: 即使 client 传入 subscriber_id=999，服务端也只查当前认证用户(9)。"""
     captured: dict[str, int] = {}
 
-    async def fake_list(self, subscriber_id: int, status):
+    # 端点当前调用 list_notifications_page（分页版，返回 (notifs, total)）；
+    # 此前 patch 了 list_notifications 导致真实分页方法撞 MagicMock 会话报 500
+    async def fake_list_page(self, subscriber_id: int, *args, **kwargs):
         captured["subscriber_id"] = subscriber_id
-        return []
+        return [], 0
 
     monkeypatch.setattr(
         __import__("app.services.notify.service", fromlist=["NotifyService"]).NotifyService,
-        "list_notifications",
-        fake_list,
+        "list_notifications_page",
+        fake_list_page,
     )
     resp = await writer_client.get("/api/v1/notify/notifications", params={"subscriber_id": 999})
     assert resp.status_code == 200

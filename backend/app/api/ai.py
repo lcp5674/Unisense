@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
 from app.core.audit import write_audit
-from app.core.exceptions import AuthError
+from app.core.exceptions import AuthError, UnisenseError
 from app.core.feature_flags import is_feature_enabled_or_default
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
@@ -61,6 +61,13 @@ async def nl2sql(
             "AI 问数能力已被平台管理员关闭",
             error_code="FEATURE_DISABLED",
             ctx={"feature_flag": "ai.nl2sql"},
+        )
+    # 危险问句在构建 LLM 客户端之前即拒绝——既避免无谓的 LLM 调用（滥用防护），
+    # 也保证未配置 LLM 时危险问句仍被安全拦截（守卫不依赖 LLM 可用性）。
+    if AiService._is_unsafe(payload.nl_query):
+        raise UnisenseError(
+            "查询包含危险语句，已拒绝",
+            error_code="UNSAFE_QUERY",
         )
     cfg = LlmConfigService(db)
     llm = await cfg.build_client()

@@ -111,11 +111,15 @@ class AiService(BaseService):
         self._repo = AiRepository(session)
         self._llm = llm or build_llm_client()
 
-    def _is_unsafe(self, text: str) -> bool:
+    @staticmethod
+    def _is_unsafe(text: str) -> bool:
         """检查文本是否包含危险模式。
 
         先剥离 SQL 注释并把连续空白归一为单空格，再做子串匹配——纯子串匹配
         可被 ``UNION/**/SELECT``、``union  select``、换行等绕过（D2）。
+
+        静态方法：端点在构建 LLM 客户端之前即可复用同一守卫拒绝危险问句
+        （守卫不依赖 LLM 可用性，未配置 LLM 时危险 NL 仍被安全拦截）。
         """
         normalized = re.sub(r"\s+", " ", _strip_sql_comments(text)).lower()
         return any(pattern in normalized for pattern in _BANNED_PATTERNS)

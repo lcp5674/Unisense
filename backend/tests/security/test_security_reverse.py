@@ -148,6 +148,12 @@ async def test_pii_access_writes_audit_with_data_classification(security_session
 async def test_list_pii_metrics_writes_bulk_audit(security_session, monkeypatch):
     # 列表返回 PII 指标 -> 写一条批量 PII 访问审计（闭合列表批量暴露 PII 漏洞）
     session = security_session
+    # 列表端点后续的版本待确认/健康度批量查询走 db.execute().scalars().all()：
+    # AsyncMock.return_value 默认是 AsyncMock（其 .scalars() 返回协程），须配置同步返回空列表
+    exec_result = MagicMock()
+    exec_result.scalars.return_value.all.return_value = []
+    exec_result.all.return_value = []
+    session.execute.return_value = exec_result
     pii_a = _make_metric(code="fin_pii_a", pii=True)
     pii_b = _make_metric(code="fin_pii_b", pii=True)
     normal = _make_metric(code="metric_x", pii=False)

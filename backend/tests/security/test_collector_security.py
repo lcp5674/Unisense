@@ -73,6 +73,13 @@ async def test_normal_user_cannot_create_source_403(analyst_client):
 
 async def test_register_pii_catalog_writes_audit(owner_client, monkeypatch):
     client, session = owner_client
+    # catalog 注册端点写角色已收窄为 platform_admin/domain_admin（并行会话 FR-035），
+    # 本测试关注 PII 元数据审计落库而非角色语义 → 以平台管理员身份执行
+    from app.api import deps as _deps
+
+    app.dependency_overrides[_deps.get_current_user] = lambda: MagicMock(
+        id=5, role="platform_admin"
+    )
     pii_resp = DBCatalogResponse(
         id=1,
         source_id="s",

@@ -170,7 +170,8 @@ async def test_export_csv_returns_csv(
     """CSV 导出端点返回 text/csv 与表头。"""
     from app.models.data_source import DBCatalog
 
-    async def fake_export(self: AssetMapService, source_id, sensitivity) -> list[dict]:
+    async def fake_export(self: AssetMapService, source_id, sensitivity, **kwargs) -> list[dict]:
+        # export_tables 后续演进新增 domain/owner_id/schema_status/keyword 过滤参数（**kwargs 兼容）
         row = DBCatalog(
             source_id="s", entity_name="catalog.db.t", entity_type="table", schema_json={}
         )
