@@ -437,7 +437,7 @@ describe("MetricCatalog", () => {
     expect(screen.getByRole("button", { name: "收藏" })).toBeTruthy();
   });
 
-  it("勾选超过 6 个：拦截并保留前 6 个，友好提示而非 422", async () => {
+  it("勾选超过 6 个：勾选不限量（可做批量操作），点「对比所选」时才提示并拦截", async () => {
     const messageSpy = vi
       .spyOn(message, "warning")
       .mockImplementation(() => undefined as never);
@@ -449,16 +449,23 @@ describe("MetricCatalog", () => {
     mockedList.mockResolvedValue({ items: many, total: 8, page: 1, page_size: 20 });
     renderCatalog();
     await screen.findByText("metric_1");
-    // 全选 8 个 → onChange 收到 8 行 → 拦截保留前 6 个 + 提示
+    // 全选 8 个 → 勾选不再被拦截（保留全部 8 个，供批量操作使用）
     const selectAll = document.querySelector(
       ".ant-table-selection-column input[type=checkbox]",
     ) as Element;
     fireEvent.click(selectAll);
     await waitFor(() => {
-      expect(messageSpy).toHaveBeenCalledWith(expect.stringContaining("最多支持 6"));
+      // 对比按钮显示完整勾选数 8，且可用（不再因超 6 禁用）
+      const btn = screen.getByRole("button", { name: /对比所选 \(8\)/ }) as HTMLButtonElement;
+      expect(btn.disabled).toBe(false);
     });
-    // 对比按钮显示保留的 6 个
-    expect(screen.getByRole("button", { name: /对比所选 \(6\)/ })).toBeTruthy();
+    // 点「对比所选」→ 超 6 提示，弹窗不打开、勾选保持 8
+    fireEvent.click(screen.getByRole("button", { name: /对比所选 \(8\)/ }));
+    await waitFor(() => {
+      expect(messageSpy).toHaveBeenCalledWith(expect.stringContaining("最多支持 6 个"));
+    });
+    expect(mockedMatrix).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /对比所选 \(8\)/ })).toBeTruthy();
     messageSpy.mockRestore();
   });
 

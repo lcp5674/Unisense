@@ -1019,8 +1019,16 @@ export function MetricCatalog() {
             <Button
               type="primary"
               icon={<ColumnWidthOutlined />}
-              disabled={selected.length < 2 || selected.length > 6}
-              onClick={() => setCompareOpen(true)}
+              disabled={selected.length < 2}
+              onClick={() => {
+                // 对比上限 6：勾选不限数量（可能用于批量操作），仅在点对比时校验——
+                // 超 6 提示引导取消部分勾选，不清空不截断已选项，弹窗不打开
+                if (selected.length > 6) {
+                  message.warning(`指标对比最多支持 6 个，当前勾选 ${selected.length} 个，请取消部分勾选后再对比`);
+                  return;
+                }
+                setCompareOpen(true);
+              }}
             >
               对比所选{selected.length > 1 ? ` (${selected.length})` : ""}
             </Button>
@@ -1229,13 +1237,9 @@ export function MetricCatalog() {
         loading={loading}
         rowSelection={{
           selectedRowKeys: selected.map((s) => s.metric_code),
-          // 对比上限 6 个：超选（含全选/批量勾选）时拦截并保留前 6 个，避免静默 disabled 让用户困惑
+          // 勾选不限数量：批量操作（提交审核/通过/打回/下线/删除）可能一次选很多；
+          // 「最多 6 个」是对比专属限制，只在点击「对比所选」时校验（见按钮 onClick）
           onChange: (_, rows) => {
-            if (rows.length > 6) {
-              message.warning("指标对比最多支持 6 个，已保留前 6 个（如需更换请先取消勾选）");
-              setSelected(rows.slice(0, 6));
-              return;
-            }
             setSelected(rows);
           },
         }}
