@@ -21,10 +21,12 @@ from arq.connections import RedisSettings
 from croniter import croniter
 
 from app.core.config import settings
+from app.core.eventbus import init_eventbus
 from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
 from app.services.conflict.sla_tasks import auto_escalate_overdue
+from app.services.notify.consumers import register_notify_event_consumers
 from app.services.notify.escalation_tasks import check_escalation_retries
 from app.services.quality.tasks import run_quality_checks
 from app.tasks.audit_archive import audit_archive_task
@@ -40,10 +42,24 @@ logger = logging.getLogger("unisense.collector.worker")
 
 
 async def startup(ctx: dict[str, Any]) -> None:
-    """worker 启动：创建 ArqRedis（可 enqueue_job）与 JobStore 注入上下文。"""
+    """worker 启动：创建 ArqRedis（可 enqueue_job）与 JobStore 注入上下文。
+
+    C1：注入 Redis 版 EventBus + 注册通知消费者，使后台任务（定时采集/
+    质量巡检/审计归档/冲突 SLA 升级）触发的事件进入通知闭环——此前 worker
+    进程从不 ``init_eventbus`` 且不注册订阅者，worker 侧事件双链路全丢
+    （本地订阅为空 + Redis 未注入），导致「手动触发有通知、定时触发无通知」。
+    """
     redis = ArqRedis.from_url(settings.redis_url)
     ctx["redis"] = redis
     ctx["job_store"] = RedisJobStore(redis)
+
+    # C1: EventBus 注入 Redis（ArqRedis 兼容 publish/psubscribe）+ notify 消费者注册
+    try:
+        init_eventbus(redis)
+        register_notify_event_consumers()
+        logger.info("worker_eventbus_initialized")
+    except Exception:  # noqa: BLE001 - 事件总线初始化失败不应阻断 worker 主流程
+        logger.warning("worker_eventbus_init_failed", exc_info=True)
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:

@@ -133,10 +133,10 @@ async def test_humanize_event_title_fallback() -> None:
 
 async def test_event_title_contract_covers_subscription_list() -> None:
     """标题映射必须覆盖订阅清单全部事件（通知不直出英文码），且无幽灵项（无发布方的事件不映射）。"""
-    from app.main import _BUSINESS_EVENT_TYPES
+    from app.services.notify.consumers import BUSINESS_EVENT_TYPES
     from app.services.notify.service import _EVENT_TITLE_CN
 
-    subs = set(_BUSINESS_EVENT_TYPES)
+    subs = set(BUSINESS_EVENT_TYPES)
     for ev in subs:
         assert ev in _EVENT_TITLE_CN, f"订阅事件缺少标题映射: {ev}"
     for key in _EVENT_TITLE_CN:
@@ -145,11 +145,11 @@ async def test_event_title_contract_covers_subscription_list() -> None:
 
 async def test_event_title_covers_new_connectable_events() -> None:
     """反馈/满意度/审计容量告警（走 EventBus 的真实发布事件）须可接入通知闭环。"""
-    from app.main import _BUSINESS_EVENT_TYPES
+    from app.services.notify.consumers import BUSINESS_EVENT_TYPES
     from app.services.notify.service import _EVENT_TITLE_CN
 
     for ev in ("feedback.status_updated", "nps.submitted", "audit.capacity_warning"):
-        assert ev in _BUSINESS_EVENT_TYPES, f"新可接入事件未加入订阅清单: {ev}"
+        assert ev in BUSINESS_EVENT_TYPES, f"新可接入事件未加入订阅清单: {ev}"
         assert ev in _EVENT_TITLE_CN, f"新可接入事件缺少标题映射: {ev}"
 
 

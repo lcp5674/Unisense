@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
 
 import structlog
 from fastapi import FastAPI
@@ -48,7 +47,7 @@ from app.core.config import ConfigurationError, settings
 from app.core.degradation import ensure_dependency_health_seed, handle_circuit_signal
 from app.core.degradation_registry import init_degradation_registry
 from app.core.dlq import init_dlq
-from app.core.eventbus import get_eventbus, init_eventbus
+from app.core.eventbus import init_eventbus
 from app.core.feature_flags import get_feature_flag_manager, init_feature_flag_manager
 from app.core.logging import configure_logging
 from app.core.metrics import MetricsMiddleware
@@ -61,6 +60,7 @@ from app.core.middleware import (
 from app.core.resilience import init_circuit_breaker_store, register_degradation_listener
 from app.db.redis import close_redis_pool, init_redis_pool
 from app.services.consume.rate_limiter import init_rate_limiter
+from app.services.notify.consumers import register_notify_event_consumers
 
 logger = structlog.get_logger("unisense.main")
 
@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("feature_flags_initialized", count=len(ffm.get_all_flags()))
 
     # ---- 业务事件 → 通知闭环（TD §5.5）：quality/conflict/governance 事件落 notify 并投递 ----
-    _register_notify_event_consumers()
+    register_notify_event_consumers()
     logger.info("notify_event_consumers_registered")
 
     # ---- 降级事件上报（TD §5.2.4/§5.2.5）：熔断器 open/close 回调持久化 + 告警 ----
@@ -170,100 +170,6 @@ def _validate_config() -> None:
                 "生产环境 CORS 不允许通配符与 credentials=True 组合，请配置具体 Origin"
             )
     logger.info("config_validation_passed", env=settings.env)
-
-
-#: 业务事件类型（metric/quality/conflict/governance）→ 通知闭环订阅集合（TD §5.5）
-#: 必须与各服务 EventBus 实际发布的事件类型完全一致，否则事件永不进入通知闭环：
-#:   metric 发布 metric.created/submitted/approved/rejected/deprecated/promoted/
-#:     rolled_back/emergency_published/health_critical（services/semantic/service.py）
-#:   conflict 发布 conflict_open/conflict_ruled/conflict_escalated/pii_conflict
-#:   （services/conflict/service.py）
-#:   governance 发布 grant.*/classification.*/pii.*（services/governance/*）
-#:   quality 发布 quality.anomaly/reconciliation.alert/benchmark.imported
-#:   （services/quality/*）
-_BUSINESS_EVENT_TYPES: tuple[str, ...] = (
-    "metric.created",
-    "metric.submitted",
-    "metric.resubmitted",
-    "metric.approved",
-    "metric.gray_published",
-    "metric.rejected",
-    "metric.deprecated",
-    "metric.promoted",
-    "metric.rolled_back",
-    "metric.emergency_published",
-    "metric.health_critical",
-    # 冲突仲裁「保留差异+指定一方改名」→ 定向通知指标 Owner 去详情页改名（TD §12.4）
-    "metric.rename_required",
-    # PENDING_VERSION 确认期创建 → 定向通知消费方（Owner/备份 Owner）去「版本历史」确认（TD §12.3）
-    "metric.breaking_change_pending",
-    # PENDING_VERSION 全部确认/超时接受转正 → 定向通知消费方新口径已生效（TD §12.3）
-    "metric.breaking_change_promoted",
-    # 冲突仲裁「选权威」→ 定向通知落败方指标 Owner：指标已废弃（DEPRECATED）或
-    # 已作废（软删），后继=胜方（TD §12.4）
-    "metric.voided",
-    "quality.anomaly",
-    "reconciliation.alert",
-    "benchmark.imported",
-    "conflict_open",
-    "conflict_ruled",
-    "conflict_escalated",
-    "pii_conflict",
-    "grant.granted",
-    "grant.revoked",
-    "grant.expired",
-    "pii.reviewed",
-    "pii.propagated",
-    "classification.changed",
-    "classification.done",
-    "escalation.triggered",
-    # observability / audit（走 EventBus 的可接入业务事件，TD §5.5）
-    "feedback.status_updated",
-    "nps.submitted",
-    "audit.capacity_warning",
-    # 采集/血缘断链修复：collector/lineage 双发 EventBus 的目录血缘事件（TD §5.5）
-    "catalog_registered",
-    "catalog_schema_drifted",
-    "lineage_parsed",
-    "lineage_ingested",
-    # 血缘变更影响（semantic/service.py 变更指标血缘时发布，标题映射见 notify/service.py）
-    "lineage.change_impacted",
-    # 采集定向通知（collector/service.py 经 notify_user 直发源 Owner，模板注册）
-    "catalog.deprecated",
-    "collect.degraded",
-    "collect.failed",
-    "catalog.connection_failed",
-    # 核心依赖降级（core/degradation.py 已发布 EventBus，供 notify 消费告警）
-    "degradation.state_changed",
-    # 冲突重开（conflict/service.py 经 _safe_publish 发布，原仅存于失效旧 HTTP 通道）
-    "conflict_reopened",
-    # 账号安全/组织（users.py/organizations.py 经 notify_user 定向通知，模板注册）
-    "user.created",
-    "user.status_changed",
-    "user.password_reset",
-    "org.status_changed",
-    # 授权到期提醒 / PII 复核待办（定向通知，模板注册）
-    "grant.expiring_soon",
-    "pii.review_pending",
-)
-
-
-def _register_notify_event_consumers() -> None:
-    """注册业务事件 → 通知闭环消费者（best-effort，异常不阻断业务主流程）。
-
-    事件经 EventBus 本地订阅者消费，写入 notify 的 EventLog 并按订阅扇出投递
-    （Webhook/钉钉/SMTP/console）。单体进程内同步执行，Redis 仅作跨进程广播。
-    """
-    from app.db.mysql import async_session_factory
-    from app.services.notify.service import NotifyService
-
-    async def _consume(event: dict[str, Any]) -> None:
-        async with async_session_factory() as session:
-            await NotifyService(session).handle_business_event(event)
-
-    bus = get_eventbus()
-    for event_type in _BUSINESS_EVENT_TYPES:
-        bus.subscribe(event_type, _consume)
 
 
 def create_app() -> FastAPI:

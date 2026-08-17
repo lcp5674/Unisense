@@ -1,7 +1,7 @@
 """P0-1/P0-2：metric.* 事件接入通知闭环 + 命名统一。
 
 验收：
-1. ``main._BUSINESS_EVENT_TYPES``（通知订阅集合）包含全部 9 种真实 metric.* 事件；
+1. ``notify.consumers.BUSINESS_EVENT_TYPES``（通知订阅集合）包含全部 9 种真实 metric.* 事件；
 2. 幽灵事件 ``metric.published`` 不得出现在订阅集合 / notify 标题映射中；
 3. notify 标题映射覆盖全部 9 种真实事件（_humanize_event_title 命中业务标题）；
 4. metric.approved 事件经 handle_business_event 走通 notify 扇出（落 EventLog + Notification）。
@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-from app.main import _BUSINESS_EVENT_TYPES
 from app.models.notify import EventLog, SubscriptionPref
+from app.services.notify.consumers import BUSINESS_EVENT_TYPES
 from app.services.notify.service import _EVENT_TITLE_CN, NotifyService, _humanize_event_title
 
 #: 语义服务真实发布的全部 metric.* 事件（services/semantic/service.py）
@@ -31,13 +31,13 @@ _REAL_METRIC_EVENTS = (
 
 def test_all_real_metric_events_in_subscription_set() -> None:
     """9 种真实 metric.* 事件全部进入通知订阅集合（EventBus 精确匹配，缺一不可）。"""
-    missing = [e for e in _REAL_METRIC_EVENTS if e not in _BUSINESS_EVENT_TYPES]
+    missing = [e for e in _REAL_METRIC_EVENTS if e not in BUSINESS_EVENT_TYPES]
     assert missing == [], f"以下 metric.* 事件未订阅，事件发布后无人消费: {missing}"
 
 
 def test_ghost_metric_published_not_in_subscription_set() -> None:
     """幽灵事件 metric.published 后端从不发布，不得出现在订阅集合。"""
-    assert "metric.published" not in _BUSINESS_EVENT_TYPES
+    assert "metric.published" not in BUSINESS_EVENT_TYPES
 
 
 def test_ghost_metric_published_not_in_title_map() -> None:
@@ -75,6 +75,8 @@ def _svc() -> tuple[NotifyService, MagicMock]:
             )
         ]
     )
+    # 去重防风暴（344ef47 引入）：窗口内无同类型通知 → 放行
+    repo.find_recent_notification = AsyncMock(return_value=None)
     repo.save_notification = AsyncMock(side_effect=lambda n: n)
     repo.get_user_display_name = AsyncMock(return_value="审核员")
     repo.commit = AsyncMock()
