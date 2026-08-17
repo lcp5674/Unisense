@@ -755,11 +755,15 @@ export function MetricDetail() {
     if (!metric) return;
     // 遗留值兜底：存量指标的粒度/单位可能是字典未收录的历史值（如 granularity="daily"），
     // 若不在选项中将作为兜底选项加入——避免 Select 显示空、保存时被静默清空（数据丢失）。
+    // 方案 B：兜底选项 label 追加「(不在字典中)」提示，value 保留原值——既不让用户误选为正常选项，
+    // 也能让治理者一眼识别历史脏数据、决策是否补录字典。
     const ensureInOptions = (
       opts: Array<{ value: string; label: string }>,
       val: string | undefined,
     ) =>
-      val && !opts.some((o) => o.value === val) ? [{ value: val, label: val }, ...opts] : opts;
+      val && !opts.some((o) => o.value === val)
+        ? [{ value: val, label: `${val} (不在字典中)` }, ...opts]
+        : opts;
     setEditGranularityOptions((prev) => ensureInOptions(prev, metric.granularity));
     setEditUnitOptions((prev) => ensureInOptions(prev, metric.unit));
     const def = metric.definition_json ?? {};

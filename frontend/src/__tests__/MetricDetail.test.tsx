@@ -527,6 +527,26 @@ describe("MetricDetail", () => {
     });
   });
 
+  it("编辑弹窗单位遗留值兜底：字典未收录的历史值 label 追加「(不在字典中)」提示", async () => {
+    // 方案 B：unit=cnt 不在字典返回里（历史脏数据）→ 兜底选项 value 保留 cnt（防静默清空）、
+    // label 追加「(不在字典中)」提示，治理者一眼识别并可决策补录字典。
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT", unit: "cnt" });
+    // 单位字典 mock 含 CNY/CNT 但不含 cnt → 触发兜底
+    mockedDictItems.mockResolvedValue([
+      { code: "CNY", label: "人民币元 (CNY)", status: "active" } as SystemDictItem,
+      { code: "CNT", label: "计数 (CNT)", status: "active" } as SystemDictItem,
+    ]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    fireEvent.click(await screen.findByText("编辑"));
+    await screen.findByText("编辑指标");
+    // 单位选中项显示「cnt (不在字典中)」（value 仍为 cnt，保存不回传别名）
+    await waitFor(() => {
+      const items = Array.from(document.querySelectorAll(".ant-modal .ant-select-selection-item")) as HTMLElement[];
+      const unitItem = items.find((e) => (e.textContent ?? "").includes("cnt (不在字典中)"));
+      expect(unitItem).toBeTruthy();
+    });
+  });
+
 });
 
 
@@ -826,7 +846,8 @@ describe("MetricDetail 按钮级权限过滤", () => {
     });
     mockedGetMetric.mockResolvedValue({ ...metric, pii_flag: false, description: "原描述" });
     mockedUpdateDesc.mockResolvedValue({ ...metric, description: "修改后的描述" });
-    renderWithPerms(["metric:create"]);
+    // 编辑描述按钮受 canEdit 门禁（metric:edit 权限点）——显式带上，匹配安全加固后的契约
+    renderWithPerms(["metric:create", "metric:edit"]);
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
     // 打开编辑弹窗
     fireEvent.click(await screen.findByText("编辑描述"));
