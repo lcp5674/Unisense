@@ -364,3 +364,56 @@ async def test_dispose_noop_without_driver() -> None:
     client = _make_client()
     client._driver = None
     await client.dispose()  # 不抛异常
+
+
+class _FakeIdRecord:
+    """模拟只含 ``id`` 字段的图记录（list_asset_ids 用）。"""
+
+    def __init__(self, nid: str) -> None:
+        self._id = nid
+
+    def __getitem__(self, key: str) -> str:
+        assert key == "id"
+        return self._id
+
+
+async def test_list_asset_ids_returns_empty_when_unconfigured() -> None:
+    client = _make_client()
+    client._uri = ""
+    assert await client.list_asset_ids() == []
+
+
+async def test_list_asset_ids_returns_empty_when_breaker_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_breaker(monkeypatch, allow=False)
+    client = _make_client()
+    assert await client.list_asset_ids() == []
+
+
+async def test_list_asset_ids_returns_empty_on_driver_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    breaker = _patch_breaker(monkeypatch)
+    client = _make_client()
+    client._driver = _RaisingDriver()
+    assert await client.list_asset_ids() == []
+    assert breaker.failures == 1
+
+
+async def test_list_asset_ids_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    breaker = _patch_breaker(monkeypatch)
+    from neo4j import AsyncGraphDatabase
+
+    fake_driver = _FakeDriver(
+        _FakeResult([_FakeIdRecord("table:a"), _FakeIdRecord("metric:m1")])
+    )
+
+    def _factory(*args: object, **kwargs: object) -> _FakeDriver:
+        return fake_driver
+
+    monkeypatch.setattr(AsyncGraphDatabase, "driver", _factory)
+    client = _make_client()
+    ids = await client.list_asset_ids()
+    assert ids == ["table:a", "metric:m1"]
+    assert breaker.successes == 1

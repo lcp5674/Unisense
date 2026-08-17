@@ -203,6 +203,43 @@ class LineageGraphClient:
             logger.warning("lineage_graph_query_failed", error=str(exc))
             return None
 
+    async def list_asset_ids(self, limit: int = 100000) -> list[str]:
+        """列出图内全部 Asset 节点 id（对账/同步用）。
+
+        供定时对账任务（``neo4j_sync.sync_neo4j_assets_task``）枚举图现状，
+        以决定节点属性补全范围与指标边表端存在性。
+
+        Returns:
+            Asset 节点 id 列表；未配置/不可达/熔断时返回空列表（调用方降级）。
+        """
+        if not self._uri:
+            return []
+        if not neo4j_breaker.allow():
+            logger.warning("lineage_graph_breaker_open")
+            return []
+        try:
+            from neo4j import AsyncGraphDatabase
+        except Exception:  # pragma: no cover - 依赖缺失时降级
+            return []
+        try:
+            if self._driver is None:
+                self._driver = AsyncGraphDatabase.driver(
+                    self._uri, auth=(self._user, self._password)
+                )
+            ids: list[str] = []
+            async with self._driver.session() as session:
+                result = await session.run(
+                    "MATCH (n:Asset) RETURN n.id AS id LIMIT $limit", limit=limit
+                )
+                async for record in result:
+                    ids.append(record["id"])
+            neo4j_breaker.record_success()
+            return ids
+        except Exception as exc:  # 图存储不可达，降级
+            neo4j_breaker.record_failure()
+            logger.warning("lineage_graph_list_ids_failed", error=str(exc))
+            return []
+
     async def delete_edges(self, edges: list[tuple[str, str, str]]) -> bool:
         """从 Neo4j 删除血缘边（确认失效边时同步图存储，best-effort）。
 

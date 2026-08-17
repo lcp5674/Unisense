@@ -26,6 +26,7 @@ from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
 from app.services.conflict.sla_tasks import auto_escalate_overdue
+from app.services.lineage.neo4j_sync import sync_neo4j_assets_task
 from app.services.notify.consumers import register_notify_event_consumers
 from app.services.notify.escalation_tasks import check_escalation_retries
 from app.services.quality.tasks import run_quality_checks
@@ -135,12 +136,13 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
 
 
 class WorkerSettings:
-    """统一 arq worker 配置：采集 + 语义定时 + 质量自动检测。
+    """统一 arq worker 配置：采集 + 语义定时 + 质量自动检测 + 血缘图对账。
 
     承载全部后台定时任务，避免为每个模块单独起 worker：
     - 采集：run_collection_task（入队任务）+ collect_scheduler（每分钟扫 cron）
     - 语义：PENDING 超时（每分钟）/ 健康度（每日 3 点）/ 紧急补审（每小时）/ 灰度超期（每日 4 点）
     - 质量：run_quality_checks（每 5 分钟用最近观测自动评估启用规则）
+    - 血缘：sync_neo4j_assets_task（每日 2 点对账 MySQL 权威血缘 → Neo4j 图存储）
     """
 
     functions = [
@@ -155,6 +157,7 @@ class WorkerSettings:
         audit_archive_task,
         notify_purge_task,
         auto_escalate_overdue,
+        sync_neo4j_assets_task,
     ]
     # 任务级超时（秒）：源库挂起/慢查询拖死 worker 的最终防线。
     # 单查询超时由连接器 query_timeout 兜底（60s），此处约束整个任务上限——
@@ -231,6 +234,13 @@ class WorkerSettings:
             hour=6,
             minute=0,
             run_at_startup=True,
+        ),
+        cron(
+            sync_neo4j_assets_task,
+            name="neo4j-assets-sync",
+            hour=2,
+            minute=30,
+            run_at_startup=False,
         ),
     ]
     on_startup = startup
