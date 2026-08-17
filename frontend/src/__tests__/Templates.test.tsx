@@ -386,3 +386,19 @@ describe("Templates 页面", () => {
     fireEvent.click(screen.getByRole("button", { name: "停 用" }));
     await waitFor(() => expect(mockedSetActive).toHaveBeenCalledWith(TPLS[0].id, false));
   });
+
+  it("停用模板（is_active=false）的实例化指标按钮禁用并提示", async () => {
+    const inactiveTpl = { ...TPLS[0], is_active: false };
+    mockedList.mockResolvedValueOnce({ items: [inactiveTpl], total: 1 });
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText(inactiveTpl.code);
+    const row = screen.getByText(inactiveTpl.code).closest("tr") as HTMLElement;
+    const btn = within(row).getByRole("button", { name: /实例化指标/ });
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
+    // Tooltip 提示"已停用"（hover 触发，按钮禁用为核心断言）
+    expect(within(row).getByText(/实例化指标/)).toBeTruthy();
+  });

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip } from "antd";
 import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined } from "@ant-design/icons";
 import {
   listTemplates,
@@ -416,7 +416,9 @@ export function Templates() {
           </Button>
           <Button type="link" icon={<ReadOutlined />} onClick={() => setDetailTpl(t)}>详情</Button>
           {can("template:instantiate") && (
-            <Button type="link" onClick={() => openInstantiate(t)}>实例化指标</Button>
+            <Tooltip title={t.is_active ? undefined : "模板已停用，暂不可实例化"}>
+              <Button type="link" disabled={!t.is_active} onClick={() => openInstantiate(t)}>实例化指标</Button>
+            </Tooltip>
           )}
         </Space>
       ),
