@@ -1072,6 +1072,7 @@ async def test_publish_member_draft_to_published() -> None:
     svc, repo = await _svc()
     m = SimpleNamespace(dim_code="dim_c", member_code="c1", member_name="线上",
                         status="DRAFT", parent_code=None)
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(status="active"))
     repo.get_member = AsyncMock(return_value=m)
     await svc.publish_member("dim_c", "c1")
     assert m.status == "PUBLISHED"
@@ -1083,6 +1084,7 @@ async def test_publish_member_already_published_idempotent() -> None:
     svc, repo = await _svc()
     m = SimpleNamespace(dim_code="dim_c", member_code="c1", status="PUBLISHED",
                         parent_code=None)
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(status="active"))
     repo.get_member = AsyncMock(return_value=m)
     await svc.publish_member("dim_c", "c1")
     assert m.status == "PUBLISHED"
@@ -1093,6 +1095,7 @@ async def test_publish_member_deprecated_rejected() -> None:
     svc, repo = await _svc()
     m = SimpleNamespace(dim_code="dim_c", member_code="c1", status="DEPRECATED",
                         parent_code=None)
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(status="active"))
     repo.get_member = AsyncMock(return_value=m)
     try:
         await svc.publish_member("dim_c", "c1")
@@ -1108,6 +1111,7 @@ async def test_publish_member_rejected_when_parent_deprecated() -> None:
                             status="DRAFT", parent_code="c1")
     parent = SimpleNamespace(dim_code="dim_c", member_code="c1", member_name="父级",
                              status="DEPRECATED", parent_code=None)
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(status="active"))
     repo.get_member = AsyncMock(return_value=child)
     repo.list_members = AsyncMock(return_value=[parent, child])
     try:
@@ -1125,6 +1129,7 @@ async def test_publish_member_allowed_when_parent_published() -> None:
                             status="DRAFT", parent_code="c1")
     parent = SimpleNamespace(dim_code="dim_c", member_code="c1", member_name="父级",
                              status="PUBLISHED", parent_code=None)
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(status="active"))
     repo.get_member = AsyncMock(return_value=child)
     repo.list_members = AsyncMock(return_value=[parent, child])
     await svc.publish_member("dim_c", "c2")
@@ -1134,6 +1139,7 @@ async def test_publish_member_allowed_when_parent_published() -> None:
 async def test_deprecate_member_with_children_rejected() -> None:
     """存在子成员时禁止废弃（层级权威保护）。"""
     svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(status="active"))
     repo.get_member = AsyncMock(return_value=SimpleNamespace(
         dim_code="dim_c", member_code="c1", status="PUBLISHED", parent_code=None))
     repo.list_members = AsyncMock(return_value=[
@@ -1150,6 +1156,7 @@ async def test_deprecate_member_with_children_rejected() -> None:
 async def test_deprecate_member_leaf_ok() -> None:
     """叶子成员可废弃；DEPRECATED 幂等。"""
     svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(status="active"))
     repo.get_member = AsyncMock(return_value=SimpleNamespace(
         dim_code="dim_c", member_code="c1", status="PUBLISHED", parent_code=None))
     repo.list_members = AsyncMock(return_value=[
@@ -1213,6 +1220,7 @@ async def test_bind_allows_published_default_member() -> None:
 async def test_deprecate_member_bound_as_default_rejected() -> None:
     """成员被指标绑定为默认值时禁止废弃（对称于 deprecate_dimension 绑定保护）。"""
     svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(status="active"))
     repo.get_member = AsyncMock(return_value=SimpleNamespace(
         dim_code="dim_c", member_code="c1", status="PUBLISHED", parent_code=None))
     repo.list_members = AsyncMock(return_value=[
@@ -1277,3 +1285,40 @@ async def test_delete_member_rejected_when_bound_by_metric() -> None:
     except Exception as exc:
         assert getattr(exc, "error_code", None) == "MEMBER_BOUND_BY_METRICS"
     repo.delete_members.assert_not_awaited()
+
+
+async def test_member_ops_rejected_when_dimension_deprecated() -> None:
+    """废弃维度下禁止成员写操作（维度终态，成员字典不应再活跃——状态一致）。"""
+    from app.services.dimension.schemas import DimensionMemberCreate
+
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(status="DEPRECATED"))
+    repo.get_member = AsyncMock(return_value=SimpleNamespace(
+        dim_code="dim_c", member_code="c1", member_name="线上", status="DRAFT",
+        parent_code=None, path="/c1"))
+    # 1) 新建成员被拒
+    try:
+        await svc.create_member(
+            DimensionMemberCreate(dim_code="dim_c", member_code="c2", member_name="线下")
+        )
+        raise AssertionError("废弃维度下应拒绝新建成员")
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "INVALID_STATE"
+    # 2) 发布成员被拒
+    try:
+        await svc.publish_member("dim_c", "c1")
+        raise AssertionError("废弃维度下应拒绝发布成员")
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "INVALID_STATE"
+    # 3) 废弃成员被拒（维度已废弃，成员状态操作无意义）
+    try:
+        await svc.deprecate_member("dim_c", "c1")
+        raise AssertionError("废弃维度下应拒绝成员废弃操作")
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "INVALID_STATE"
+    # 4) 批量发布被拒
+    try:
+        await svc.publish_all_members("dim_c")
+        raise AssertionError("废弃维度下应拒绝批量发布")
+    except Exception as exc:
+        assert getattr(exc, "error_code", None) == "INVALID_STATE"

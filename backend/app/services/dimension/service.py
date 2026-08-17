@@ -236,7 +236,7 @@ class DimensionService(BaseService):
         return f"/{parent.member_code}/{member_code}"
 
     async def create_member(self, data: DimensionMemberCreate) -> DimensionMember:
-        await self._require(data.dim_code)
+        await self._require_active(data.dim_code)
 
         members = await self._repo.list_members(data.dim_code)
 
@@ -349,6 +349,7 @@ class DimensionService(BaseService):
 
         仅 DRAFT 可发布；DEPRECATED 为终态不可复活，PUBLISHED 幂等放行。
         """
+        await self._require_active(dim_code)
         member = await self._repo.get_member(dim_code, member_code)
         if member is None:
             raise NotFoundError(
@@ -387,6 +388,7 @@ class DimensionService(BaseService):
 
         废弃保护：存在子成员时禁止废弃——否则子树成员父级悬空（层级权威来源失效）。
         """
+        await self._require_active(dim_code)
         member = await self._repo.get_member(dim_code, member_code)
         if member is None:
             raise NotFoundError(
@@ -538,6 +540,7 @@ class DimensionService(BaseService):
         一次性将 DRAFT 成员置 PUBLISHED（DEPRECATED 终态跳过、PUBLISHED 幂等），
         返回 ``{"published": n, "skipped": m}``。
         """
+        await self._require_active(dim_code)
         await self._require(dim_code)
         members = await self._repo.list_members(dim_code)
         published = 0
@@ -866,6 +869,20 @@ class DimensionService(BaseService):
         dim = await self._repo.get_dimension(dim_code)
         if dim is None:
             raise NotFoundError(f"维度不存在: {dim_code}")
+        return dim
+
+    async def _require_active(self, dim_code: str) -> Dimension:
+        """校验维度存在且未废弃——废弃维度（终态）下禁止成员/映射写操作。
+
+        与成员 DEPRECATED 终态禁更新的语义一致：维度主体已下线，其成员字典
+        不应再被新建/发布（否则"废弃维度下仍活跃成员字典"状态矛盾）。
+        """
+        dim = await self._require(dim_code)
+        if dim.status == DimensionStatus.DEPRECATED.value:
+            raise UnisenseError(
+                f"维度已废弃，不可再操作其成员: {dim_code}",
+                error_code="INVALID_STATE",
+            )
         return dim
 
     async def preview_column_values(
