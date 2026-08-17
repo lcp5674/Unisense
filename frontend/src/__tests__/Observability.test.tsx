@@ -132,8 +132,48 @@ describe("Observability 可观测中心", () => {
   it("运行指标 Tab 展示最近质量事件明细：级别/规则/状态中文 + 指标名 + 观测值/阈值", async () => {
     mockedQualityEvents.mockResolvedValue({
       items: [
-        { id: 11, level: "P0", status: "OPEN", rule_type: "ACCURACY", obs_value: 85.2, threshold: 99.0, metric_id: 5, metric_name: "销售GMV", metric_code: "sales_gmv", created_at: "2026-08-12T03:00:00" },
-        { id: 12, level: "P2", status: "CLOSED", rule_type: "TIMELINESS", obs_value: null, threshold: null, metric_id: 6, metric_name: null, metric_code: null, created_at: "2026-08-11T02:00:00" },
+        {
+          id: 11,
+          level: "P0",
+          status: "OPEN",
+          rule_type: "ACCURACY",
+          obs_value: 85.2,
+          threshold: 99.0,
+          metric_id: 5,
+          metric_name: "销售GMV",
+          metric_code: "sales_gmv",
+          metric_domain: "交易域",
+          ack_by: null,
+          ack_at: null,
+          resolved_by: null,
+          resolved_at: null,
+          closed_by: null,
+          closed_at: null,
+          repair_suggestion: null,
+          created_at: "2026-08-12T03:00:00",
+        },
+        {
+          id: 12,
+          level: "P2",
+          status: "CLOSED",
+          rule_type: "TIMELINESS",
+          obs_value: null,
+          threshold: null,
+          metric_id: 6,
+          metric_name: null,
+          metric_code: null,
+          ack_by: 3,
+          ack_by_name: "李仲裁",
+          ack_at: "2026-08-11T02:30:00",
+          resolved_by: 3,
+          resolved_by_name: "李仲裁",
+          resolved_at: "2026-08-11T03:00:00",
+          closed_by: 3,
+          closed_by_name: "李仲裁",
+          closed_at: "2026-08-11T04:00:00",
+          repair_suggestion: null,
+          created_at: "2026-08-11T02:00:00",
+        },
       ],
       total: 2,
     } as never);
@@ -154,11 +194,67 @@ describe("Observability 可观测中心", () => {
     // 指标名（有名称显示名称，无名称回退 ID）
     expect(screen.getByText("销售GMV")).toBeInTheDocument();
     expect(screen.getByText("指标 #6")).toBeInTheDocument();
+    // 资产归属域
+    expect(screen.getByText("交易域")).toBeInTheDocument();
+    // 影响风险：严重级影响说明（P0 紧急 → 核心指标异常）
+    expect(screen.getByText(/核心指标异常/)).toBeInTheDocument();
     // 观测值/阈值展示
     expect(screen.getByText("85.2 / 99")).toBeInTheDocument();
+    // 处理留痕：谁在何时 ACK/RESOLVE/CLOSE（六要素之"谁/何时"）
+    expect(screen.getAllByText("李仲裁").length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText(/确认：/)).toBeInTheDocument();
+    expect(screen.getByText(/解决：/)).toBeInTheDocument();
+    expect(screen.getByText(/关闭：/)).toBeInTheDocument();
     // 原始技术值不应直出
     expect(screen.queryByText("OPEN")).not.toBeInTheDocument();
     expect(screen.queryByText("CLOSED")).not.toBeInTheDocument();
     expect(screen.queryByText("ACCURACY")).not.toBeInTheDocument();
+  });
+
+  it("质量事件含修复建议时展示解决建议（责任方/处置动作/诊断 SQL）", async () => {
+    mockedQualityEvents.mockResolvedValue({
+      items: [
+        {
+          id: 21,
+          level: "P1",
+          status: "OPEN",
+          rule_type: "COMPLETENESS",
+          obs_value: 50.0,
+          threshold: 90.0,
+          metric_id: 1,
+          metric_name: "E2E销售额",
+          metric_code: "sales_e2e_gmv_day",
+          metric_domain: "交易域",
+          ack_by: null,
+          ack_at: null,
+          resolved_by: null,
+          resolved_at: null,
+          closed_by: null,
+          closed_at: null,
+          repair_suggestion: {
+            pattern: "static_threshold_breach",
+            suggested_action: "核查上游采集/ETL 是否成功产出，补跑缺失分区并校验行数",
+            owner_hint: "指标 Owner 或上游采集任务责任人",
+            suggested_sql: "SELECT COUNT(*) AS cnt FROM {src} WHERE dt = :dt;",
+            upstream_task: "collector_job:metric:1",
+          },
+          created_at: "2026-08-14T06:19:00",
+        },
+      ],
+      total: 1,
+    } as never);
+    render(<Observability />);
+    await waitFor(() => expect(screen.getByText("平台概览")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("运行指标"));
+
+    await waitFor(() => expect(screen.getByText("最近质量事件")).toBeInTheDocument());
+    // 异常模式中文 + 解决建议
+    expect(screen.getByText("静态阈值越界")).toBeInTheDocument();
+    expect(screen.getByText("解决建议")).toBeInTheDocument();
+    expect(screen.getByText(/核查上游采集/)).toBeInTheDocument();
+    expect(screen.getByText(/指标 Owner 或上游采集任务责任人/)).toBeInTheDocument();
+    expect(screen.getByText(/SELECT COUNT\(\*\) AS cnt/)).toBeInTheDocument();
+    // 原始 pattern/action 英文不应直出
+    expect(screen.queryByText("static_threshold_breach")).not.toBeInTheDocument();
   });
 });

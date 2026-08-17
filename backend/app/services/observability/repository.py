@@ -24,6 +24,7 @@ from app.models.notify import EventLog, Notification
 from app.models.quality import QualityEvent, QualityEventStatus
 from app.models.subject_domain import SubjectDomain
 from app.models.term import Term
+from app.models.user import User
 
 
 class ObservabilityRepository:
@@ -96,7 +97,7 @@ class ObservabilityRepository:
                     )
                 )
             ).all()
-            names = {code: name for code, name in rows}
+            names = dict(rows)
         return {
             f.id: (names.get(f.target_id) if f.target_type == "metric" and f.target_id else None)
             for f in items
@@ -164,17 +165,37 @@ class ObservabilityRepository:
         metric_ids = {e.metric_id for e in events if e.metric_id}
         metric_names: dict[int, str] = {}
         metric_codes: dict[int, str] = {}
+        metric_domains: dict[int, str] = {}
         if metric_ids:
             metric_rows = (
                 await self._session.execute(
-                    select(Metric.id, Metric.name, Metric.metric_code).where(
+                    select(Metric.id, Metric.name, Metric.metric_code, Metric.domain).where(
                         Metric.id.in_(metric_ids), Metric.deleted_at.is_(None)
                     )
                 )
             ).all()
-            for mid, mname, mcode in metric_rows:
+            for mid, mname, mcode, mdomain in metric_rows:
                 metric_names[mid] = mname
                 metric_codes[mid] = mcode
+                metric_domains[mid] = mdomain
+        # 批量解析处理人用户名（ACK/RESOLVE/CLOSE 留痕的负责人，数字 ID → 可读用户名）
+        user_ids = {
+            uid
+            for e in events
+            for uid in (e.ack_by, e.resolved_by, e.closed_by)
+            if uid
+        }
+        user_names: dict[int, str] = {}
+        if user_ids:
+            user_rows = (
+                await self._session.execute(
+                    select(User.id, User.display_name, User.username).where(User.id.in_(user_ids))
+                )
+            ).all()
+            user_names = {
+                uid: (display_name if display_name else username)
+                for uid, display_name, username in user_rows
+            }
         return [
             {
                 "id": e.id,
@@ -186,12 +207,16 @@ class ObservabilityRepository:
                 "metric_id": e.metric_id,
                 "metric_name": metric_names.get(e.metric_id),
                 "metric_code": metric_codes.get(e.metric_id),
+                "metric_domain": metric_domains.get(e.metric_id),
                 "ack_note": e.ack_note,
                 "ack_by": e.ack_by,
+                "ack_by_name": user_names.get(e.ack_by) if e.ack_by else None,
                 "ack_at": e.ack_at,
                 "resolved_by": e.resolved_by,
+                "resolved_by_name": user_names.get(e.resolved_by) if e.resolved_by else None,
                 "resolved_at": e.resolved_at,
                 "closed_by": e.closed_by,
+                "closed_by_name": user_names.get(e.closed_by) if e.closed_by else None,
                 "closed_at": e.closed_at,
                 "repair_suggestion": e.repair_suggestion,
                 "created_at": e.created_at,

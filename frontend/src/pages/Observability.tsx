@@ -11,6 +11,9 @@ import {
 import type { ObsOverview, QualityEventItem } from "../types";
 import {
   QUALITY_SEVERITY_LABEL,
+  QUALITY_SEVERITY_IMPACT,
+  QUALITY_RULE_RISK,
+  QUALITY_PATTERN_LABEL,
   QUALITY_EVENT_STATUS_LABEL,
   NOTIFY_STATUS_LABEL,
   SOURCE_HEALTH_LABEL,
@@ -119,8 +122,20 @@ function MetricsTab() {
                     : e.obs_value != null
                       ? String(e.obs_value)
                       : null;
+                const rs = e.repair_suggestion as Record<string, unknown> | null;
+                const pattern = rs?.pattern ? String(rs.pattern) : null;
+                const suggestedAction = rs?.suggested_action ? String(rs.suggested_action) : null;
+                const ownerHint = rs?.owner_hint ? String(rs.owner_hint) : null;
+                const suggestedSql = rs?.suggested_sql ? String(rs.suggested_sql) : null;
+                // 处理留痕：谁在何时 ACK/RESOLVE/CLOSE（六要素之"谁/何时"）
+                const traces = [
+                  { label: "确认", who: e.ack_by_name, at: e.ack_at, note: e.ack_note },
+                  { label: "解决", who: e.resolved_by_name, at: e.resolved_at },
+                  { label: "关闭", who: e.closed_by_name, at: e.closed_at },
+                ].filter((t) => t.who || t.at);
                 return (
-                  <div key={e.id} style={{ ...rowStyle, flexDirection: "column", alignItems: "stretch", gap: 4 }}>
+                  <div key={e.id} style={{ ...rowStyle, flexDirection: "column", alignItems: "stretch", gap: 6, padding: "10px 0" }}>
+                    {/* 资产 + 状态 + 时间 */}
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                       <Space size={6} wrap>
                         <Tag color={e.level === "P0" ? "error" : e.level === "P1" ? "orange" : "default"}>
@@ -132,11 +147,12 @@ function MetricsTab() {
                         </Tag>
                         {e.metric_name ? (
                           <Tooltip title={e.metric_code}>
-                            <span style={{ fontSize: 13, fontWeight: 500 }}>{e.metric_name}</span>
+                            <span style={{ fontSize: 13, fontWeight: 600 }}>{e.metric_name}</span>
                           </Tooltip>
                         ) : (
                           <span style={{ fontSize: 12 }} className="muted">指标 #{e.metric_id}</span>
                         )}
+                        {e.metric_domain ? <Tag color="geekblue">{e.metric_domain}</Tag> : null}
                       </Space>
                       {e.created_at ? (
                         <span className="mono" style={{ fontSize: 12, flex: "0 0 auto" }}>
@@ -146,12 +162,61 @@ function MetricsTab() {
                         <span className="muted">—</span>
                       )}
                     </div>
-                    {violation && (
+                    {/* 影响风险：严重级影响说明 + 规则风险 */}
+                    <div style={{ fontSize: 12 }}>
+                      <span style={{ color: e.level === "P0" ? "var(--danger)" : e.level === "P1" ? "var(--warn)" : "var(--muted)" }}>
+                        {QUALITY_SEVERITY_IMPACT[e.level] ?? ""}
+                      </span>
+                      <span style={{ color: "var(--muted)", marginLeft: 8 }}>
+                        {QUALITY_RULE_RISK[e.rule_type] ?? ""}
+                      </span>
+                    </div>
+                    {/* 事件：异常模式 + 观测值 vs 阈值 */}
+                    {pattern || violation ? (
                       <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                        观测值 / 阈值：<span className="mono" style={{ color: e.level === "P0" || e.level === "P1" ? "var(--danger)" : undefined }}>{violation}</span>
-                        {e.ack_note ? <span> · 处理说明：{e.ack_note}</span> : null}
+                        {pattern ? <Tag style={{ marginRight: 4 }}>{QUALITY_PATTERN_LABEL[pattern] ?? pattern}</Tag> : null}
+                        {violation ? (
+                          <span>
+                            观测值 / 阈值：<span className="mono" style={{ color: e.level === "P0" || e.level === "P1" ? "var(--danger)" : undefined }}>{violation}</span>
+                          </span>
+                        ) : null}
                       </div>
-                    )}
+                    ) : null}
+                    {/* 处理留痕：谁在何时 ACK/RESOLVE/CLOSE */}
+                    {traces.length > 0 ? (
+                      <div style={{ fontSize: 12, color: "var(--muted)", display: "flex", flexWrap: "wrap", gap: 12 }}>
+                        {traces.map((t) => (
+                          <span key={t.label}>
+                            {t.label}：<span style={{ color: "var(--ink)" }}>{t.who ?? "—"}</span>
+                            {t.at ? (
+                              <span className="mono" style={{ marginLeft: 4 }}>
+                                <Tooltip title={formatCnTime(t.at)}>{timeAgoCn(t.at)}</Tooltip>
+                              </span>
+                            ) : null}
+                            {t.note ? <span style={{ marginLeft: 4 }}>（{t.note}）</span> : null}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {/* 解决建议：责任方 + 处置动作 + 诊断 SQL */}
+                    {suggestedAction ? (
+                      <div style={{ fontSize: 12, background: "var(--signal-soft)", borderRadius: 6, padding: "8px 12px", marginTop: 2 }}>
+                        <div style={{ fontWeight: 600, marginBottom: 4, color: "var(--ink)" }}>解决建议</div>
+                        <div>{suggestedAction}</div>
+                        {ownerHint ? (
+                          <div style={{ marginTop: 4, color: "var(--muted)" }}>
+                            责任方：{ownerHint}
+                            {rs?.upstream_task ? <span className="mono" style={{ marginLeft: 6 }}>（{String(rs.upstream_task)}）</span> : null}
+                          </div>
+                        ) : null}
+                        {suggestedSql ? (
+                          <div style={{ marginTop: 4 }}>
+                            <span style={{ color: "var(--muted)" }}>诊断 SQL：</span>
+                            <pre className="mono" style={{ margin: "4px 0 0", fontSize: 11, whiteSpace: "pre-wrap" }}>{suggestedSql}</pre>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 );
               })

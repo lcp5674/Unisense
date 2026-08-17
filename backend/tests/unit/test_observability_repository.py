@@ -150,19 +150,60 @@ class TestObservabilityRepository:
         assert stats["score"] == 0.0
 
     async def test_quality_events(self, repo: ObservabilityRepository) -> None:
-        mock_result = MagicMock()
-        mock_result.scalars.return_value = iter(
-            [MagicMock(id=1, level=MagicMock(value="P0"), status=MagicMock(value="OPEN"),
-                       metric_id=5, created_at=None)]
+        """质量事件明细应补全指标名/域/处理人用户名，且批量查询避免 N+1。"""
+        from decimal import Decimal
+
+        event = MagicMock(
+            id=1,
+            level=MagicMock(value="P0"),
+            status=MagicMock(value="OPEN"),
+            rule_type=MagicMock(value="ACCURACY"),
+            obs_value=Decimal("85.2"),
+            threshold=Decimal("99.0"),
+            metric_id=5,
+            ack_by=3,
+            resolved_by=None,
+            closed_by=None,
+            ack_note="已确认处理",
+            ack_at=None,
+            resolved_at=None,
+            closed_at=None,
+            repair_suggestion=None,
+            created_at=None,
         )
-        repo._session.execute = AsyncMock(return_value=mock_result)
+        mock_events = MagicMock()
+        mock_events.scalars.return_value = iter([event])
+        mock_metrics = MagicMock()
+        mock_metrics.all.return_value = [(5, "销售GMV", "sales_gmv", "交易域")]
+        mock_users = MagicMock()
+        mock_users.all.return_value = [(3, "李仲裁", "lzc")]
+        repo._session.execute = AsyncMock(
+            side_effect=[mock_events, mock_metrics, mock_users]
+        )
         events = await repo.quality_events(20)
         assert events == [
             {
                 "id": 1,
                 "level": "P0",
                 "status": "OPEN",
+                "rule_type": "ACCURACY",
+                "obs_value": 85.2,
+                "threshold": 99.0,
                 "metric_id": 5,
+                "metric_name": "销售GMV",
+                "metric_code": "sales_gmv",
+                "metric_domain": "交易域",
+                "ack_note": "已确认处理",
+                "ack_by": 3,
+                "ack_by_name": "李仲裁",
+                "ack_at": None,
+                "resolved_by": None,
+                "resolved_by_name": None,
+                "resolved_at": None,
+                "closed_by": None,
+                "closed_by_name": None,
+                "closed_at": None,
+                "repair_suggestion": None,
                 "created_at": None,
             }
         ]

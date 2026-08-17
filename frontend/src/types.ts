@@ -1407,12 +1407,18 @@ export interface QualityEventItem {
   metric_id: number;
   metric_name: string | null;
   metric_code: string | null;
+  /** 指标所属域（资产归属上下文） */
+  metric_domain?: string | null;
   ack_note: string | null;
   ack_by: number | null;
+  /** 确认人用户名（display_name 优先回落 username） */
+  ack_by_name?: string | null;
   ack_at: string | null;
   resolved_by: number | null;
+  resolved_by_name?: string | null;
   resolved_at: string | null;
   closed_by: number | null;
+  closed_by_name?: string | null;
   closed_at: string | null;
   repair_suggestion: Record<string, unknown> | null;
   created_at: string | null;

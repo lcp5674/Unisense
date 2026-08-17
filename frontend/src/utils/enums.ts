@@ -203,6 +203,36 @@ export const QUALITY_EVENT_STATUS_LABEL: Record<string, string> = {
   CLOSED: "已关闭",
 };
 
+// ---- 质量事件影响风险（对齐 QualitySeverity：P0/P1/P2）----
+
+/** 严重级 → 业务影响与风险说明（运营一眼看懂"这事有多严重、影响什么"） */
+export const QUALITY_SEVERITY_IMPACT: Record<string, string> = {
+  P0: "核心指标异常，直接影响对外报表或高层决策，须立即响应",
+  P1: "重要指标出现偏差，可能影响业务分析结论，须尽快处理",
+  P2: "一般指标轻微偏差，影响有限，按常规流程处理",
+};
+
+/** 规则类型 → 数据质量风险描述（解释"这条规则在防什么"） */
+export const QUALITY_RULE_RISK: Record<string, string> = {
+  COMPLETENESS: "数据缺失/空值，指标值可能被低估",
+  ACCURACY: "数据不准确，口径或取值有误",
+  TIMELINESS: "数据时效延迟，影响实时性",
+  CONSISTENCY: "多源口径不一致，同指标不同结果",
+  UNIQUENESS: "存在重复数据，计数被放大",
+  VALIDITY: "数据不合规/非法值，超出业务允许范围",
+  WAVE_DIFF: "波动超历史基线，可能为业务突变或采集异常",
+  CROSS_SOURCE: "跨源结果不一致，需定位异常来源",
+};
+
+/** 异常模式（repair_suggestion.pattern）→ 中文描述 */
+export const QUALITY_PATTERN_LABEL: Record<string, string> = {
+  static_threshold_breach: "静态阈值越界",
+  dynamic_baseline_deviation: "动态基线偏离",
+  period_over_period_delta: "同环比波动",
+  cross_source_spread: "跨源差异",
+  threshold_breach: "阈值越界",
+};
+
 export const RECONCILIATION_STATUS_LABEL: Record<string, string> = {
   // 质量对账（models/quality.py：OK/WARN/ALERT/CONFIRMED）
   OK: "正常",
