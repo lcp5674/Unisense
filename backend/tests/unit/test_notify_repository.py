@@ -251,3 +251,36 @@ class TestNotifyRepository:
         sql = str(select_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "collect.degraded" in sql
         assert "handled_at IS NULL" in sql
+
+    async def test_purge_old_notifications_read_and_handled(self, repo: NotifyRepository) -> None:
+        """purge_old_notifications → 只删已读/已办结且非 FAILED 的过期通知。"""
+        mock = MagicMock()
+        mock.rowcount = 3
+        repo._session.execute = AsyncMock(return_value=mock)
+        from datetime import UTC, datetime
+
+        n = await repo.purge_old_notifications(datetime(2026, 1, 1, tzinfo=UTC))
+        assert n == 3
+        sql = str(repo._session.execute.call_args.args[0].compile(
+            compile_kwargs={"literal_binds": True}
+        ))
+        assert "DELETE FROM notification" in sql
+        assert "created_at <" in sql
+        assert "status != 'FAILED'" in sql
+        assert "read_at IS NOT NULL" in sql
+        assert "handled_at IS NOT NULL" in sql
+
+    async def test_purge_old_event_logs(self, repo: NotifyRepository) -> None:
+        """purge_old_event_logs → 物理删除超期事件日志（无条件状态限制）。"""
+        mock = MagicMock()
+        mock.rowcount = 5
+        repo._session.execute = AsyncMock(return_value=mock)
+        from datetime import UTC, datetime
+
+        n = await repo.purge_old_event_logs(datetime(2026, 1, 1, tzinfo=UTC))
+        assert n == 5
+        sql = str(repo._session.execute.call_args.args[0].compile(
+            compile_kwargs={"literal_binds": True}
+        ))
+        assert "DELETE FROM event_log" in sql
+        assert "created_at <" in sql

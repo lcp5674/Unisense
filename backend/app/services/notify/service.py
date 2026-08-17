@@ -15,7 +15,7 @@ import asyncio
 import enum
 import json
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -951,6 +951,24 @@ class NotifyService(BaseService):
 
     async def list_event_logs(self, event_type: str | None, limit: int) -> list[Any]:
         return await self._repo.list_event_logs(event_type, limit)
+
+    async def purge_expired(
+        self,
+        notify_retention_days: int,
+        event_log_retention_days: int,
+    ) -> dict[str, int]:
+        """按保留策略物理清理过期通知与事件日志（每日定时任务调用）。
+
+        通知：已读/已办结且非 FAILED 且超过保留期 → 删除（未读与待重试保留）；
+        事件日志：超过保留期 → 删除。返回两类删除条数。
+        """
+        now = datetime.now(UTC)
+        notify_cutoff = now - timedelta(days=notify_retention_days)
+        event_cutoff = now - timedelta(days=event_log_retention_days)
+        notifications = await self._repo.purge_old_notifications(notify_cutoff)
+        event_logs = await self._repo.purge_old_event_logs(event_cutoff)
+        await self._repo.commit()
+        return {"notifications": notifications, "event_logs": event_logs}
 
     async def close(self) -> None:
         """关闭共享 HTTP 客户端（应用关停时调用一次即可，幂等）。"""

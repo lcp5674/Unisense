@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     notify_smtp_user: str = ""
     notify_smtp_password: str = ""
 
+    # ---- 通知/事件日志保留策略（每日凌晨清理）----
+    # 已读/已办结通知超过该天数软删；未读与 FAILED 永不清理（用户未看/待重试）
+    notify_retention_days: int = 90
+    # 事件日志为审计留痕，保留期独立且更长
+    event_log_retention_days: int = 180
+
     # ---- JWT ----
     jwt_secret: str
     jwt_algorithm: str = "HS256"

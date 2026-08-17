@@ -28,6 +28,7 @@ from app.services.conflict.sla_tasks import auto_escalate_overdue
 from app.services.notify.escalation_tasks import check_escalation_retries
 from app.services.quality.tasks import run_quality_checks
 from app.tasks.audit_archive import audit_archive_task
+from app.tasks.notify_purge import notify_purge_task
 from app.tasks.semantic_tasks import (
     check_emergency_review_overdue,
     check_experimental_expiry,
@@ -133,6 +134,7 @@ class WorkerSettings:
         run_quality_checks,
         check_escalation_retries,
         audit_archive_task,
+        notify_purge_task,
         auto_escalate_overdue,
     ]
     # 任务级超时（秒）：源库挂起/慢查询拖死 worker 的最终防线。
@@ -195,6 +197,13 @@ class WorkerSettings:
             name="audit-archive",
             hour=2,
             minute=0,
+            run_at_startup=False,
+        ),
+        cron(
+            notify_purge_task,
+            name="notify-purge",
+            hour=1,
+            minute=30,
             run_at_startup=False,
         ),
         cron(

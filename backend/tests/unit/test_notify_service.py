@@ -387,3 +387,24 @@ async def test_publish_event_dedup_skips_recent() -> None:
     assert out["notifications"] == 0
     assert out["delivered"] == 0
     repo.save_notification.assert_not_called()
+
+
+async def test_purge_expired_delegates_to_repo() -> None:
+    """purge_expired → 按保留期计算 cutoff 并委托 repository，提交事务。"""
+    svc, repo = _svc()
+    repo.purge_old_notifications = AsyncMock(return_value=12)
+    repo.purge_old_event_logs = AsyncMock(return_value=34)
+    out = await svc.purge_expired(notify_retention_days=90, event_log_retention_days=180)
+    assert out == {"notifications": 12, "event_logs": 34}
+    # cutoff 由 now - retention 计算：90 天前
+    import math
+    from datetime import datetime
+
+    cutoff = repo.purge_old_notifications.call_args.args[0]
+    assert math.isclose((datetime.now().timestamp() - cutoff.timestamp()) / 86400, 90, abs_tol=0.01)
+    # 事件日志保留期独立（180 天）
+    event_cutoff = repo.purge_old_event_logs.call_args.args[0]
+    assert math.isclose(
+        (datetime.now().timestamp() - event_cutoff.timestamp()) / 86400, 180, abs_tol=0.01
+    )
+    repo.commit.assert_awaited()

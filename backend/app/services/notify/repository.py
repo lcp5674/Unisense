@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.notify import EventLog, Notification, SubscriptionPref
+from app.models.notify import EventLog, Notification, NotifyStatus, SubscriptionPref
 from app.models.user import User
 
 # 待处理类事件（TD §12.9 通知闭环：接收者需要采取行动，而非仅被告知）。
@@ -244,6 +244,33 @@ class NotifyRepository:
             .all()
         )
         return list(rows)
+
+    async def purge_old_notifications(self, cutoff: datetime) -> int:
+        """物理删除已读/已办结且非 FAILED 的过期通知（未读与待重试保留）。
+
+        返回删除条数。通知为"已读即完成使命"的临时消息，超期后物理清理以控制
+        存储增长；未读（用户未看）与 FAILED（待重试）永不删除。
+        """
+        stmt = delete(Notification).where(
+            Notification.created_at < cutoff,
+            Notification.status != NotifyStatus.FAILED.value,
+            or_(
+                Notification.read_at.is_not(None),
+                Notification.handled_at.is_not(None),
+            ),
+        )
+        res = await self._session.execute(stmt)
+        return int(res.rowcount or 0)
+
+    async def purge_old_event_logs(self, cutoff: datetime) -> int:
+        """物理删除超过保留期的事件日志（审计性质的业务事件流留痕）。
+
+        与 ``audit_log`` 独立——audit_log 有专门的 MinIO 归档机制，此处事件日志
+        仅服务于通知投递与问题排查，超期直接清理。
+        """
+        stmt = delete(EventLog).where(EventLog.created_at < cutoff)
+        res = await self._session.execute(stmt)
+        return int(res.rowcount or 0)
 
     async def commit(self) -> None:
         await self._session.commit()
