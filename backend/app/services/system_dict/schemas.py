@@ -63,3 +63,37 @@ class DictTypeListResponse(BaseModel):
 
     dict_type: str
     items: list[DictItemResponse]
+
+
+class DictValueCheckItem(BaseModel):
+    """字典值校验项（dict_type + value）。"""
+
+    dict_type: str = Field(..., max_length=64, description="字典类型（如 currency/unit）")
+    value: str = Field(..., max_length=64, description="待校验取值")
+
+
+class DictValuesVerifyRequest(BaseModel):
+    """批量校验字典值是否未收录请求。"""
+
+    values: list[DictValueCheckItem] = Field(..., min_length=1, max_length=50)
+
+
+class DictValuesVerifyResponse(BaseModel):
+    """未收录字典值响应。"""
+
+    unknown: list[DictValueCheckItem]
+
+
+class DictUnknownNotifyRequest(BaseModel):
+    """无收录权限用户保存未收录值时，通知管理员收录/打回请求。"""
+
+    metric_code: str | None = Field(None, max_length=64, description="指标编码")
+    values: list[DictValueCheckItem] = Field(..., min_length=1, max_length=50)
+    note: str | None = Field(None, max_length=500, description="提交说明")
+
+
+class DictUnknownRejectRequest(BaseModel):
+    """管理员打回字典收录申请请求。"""
+
+    notification_id: int = Field(..., gt=0, description="原待办通知 ID")
+    reason: str | None = Field(None, max_length=500, description="打回原因")

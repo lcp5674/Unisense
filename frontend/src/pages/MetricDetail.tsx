@@ -66,6 +66,8 @@ import {
   updateMetric,
   updateMetricDescription,
   upsertSubscription,
+  notifyUnknownDictValues,
+  verifyDictValues,
   UnisenseApiError,
 } from "../api";
 import type {
@@ -142,6 +144,18 @@ const COMMON_CHANGE_REASONS = ["口径修正", "字段调整", "粒度调整", "
 const DROPDOWN_FULL_WIDTH = {
   popupMatchSelectWidth: false,
   styles: { popup: { root: { minWidth: 280 } } },
+};
+
+// 字典未收录值引导弹窗的字典类型中文名（对齐参照数据管理 DICT_TYPE_LABELS）
+const EDIT_DICT_TYPE_LABEL: Record<string, string> = {
+  granularity: "粒度",
+  unit: "单位",
+  aggregation: "聚合方式",
+  currency: "币种",
+  dw_layer: "数仓层",
+  freshness: "新鲜度",
+  time_semantics: "时间语义",
+  metric_tier: "指标分级",
 };
 
 // Owner 责任链：将 owner_id 渲染为可读的用户名 + 角色
@@ -541,6 +555,14 @@ export function MetricDetail() {
   >({});
   // 编辑弹窗口径 JSON 即时校验（对齐注册页惰性设计）：输入即报错，避免提交时才发现语法问题
   const [editDefinitionError, setEditDefinitionError] = useState<string | null>(null);
+  // 编辑弹窗保存前「字典未收录值」治理引导：收集到未收录值后暂存待保存请求并弹引导，
+  // 有收录权限（dict:create）引导前往参照数据管理收录、无权限确认后通知管理员收录/打回。
+  // 不直接静默保存脏值——治理者能第一时间发现并处置（对齐方案 B 的「(不在字典中)」标记）。
+  const [editUnknownValues, setEditUnknownValues] = useState<
+    Array<{ dict_type: string; value: string }> | null
+  >(null);
+  const [pendingEditReq, setPendingEditReq] = useState<MetricUpdateRequest | null>(null);
+  const [editUnknownNotifySaving, setEditUnknownNotifySaving] = useState(false);
   // 编辑弹窗口径定义编辑模式：expression（表达式/JSON）↔ sql（SQL 模式，对齐注册页）。
   // 开发人员可直接以 SQL 描述口径（后端 sqlglot 校验语法，sql 变更与表达式同级触发版本确认）；
   // 存量 SQL 模式指标（definition_json 含 sql/etl_sql）打开弹窗时自动落到 SQL 模式。
@@ -551,7 +573,7 @@ export function MetricDetail() {
   const [busy, setBusy] = useState(false);
   const { track } = useTracking();
 
-  // 编辑弹窗字典（粒度/单位/治理）+ 平台维度清单 + 已发布指标（依赖选项）：挂载时加载一次
+  // 编辑弹窗字典（粒度/单位/治理/币种）+ 平台维度清单 + 已发布指标（依赖选项）：挂载时加载一次
   useEffect(() => {
     Promise.all([
       listDictItems("granularity").catch(() => [] as SystemDictItem[]),
@@ -561,6 +583,7 @@ export function MetricDetail() {
       listDictItems("time_semantics").catch(() => [] as SystemDictItem[]),
       listDictItems("metric_tier").catch(() => [] as SystemDictItem[]),
       listDictItems("aggregation").catch(() => [] as SystemDictItem[]),
+      listDictItems("currency").catch(() => [] as SystemDictItem[]),
       listDimensions({ page_size: 100 }).catch(() => ({ items: [] as Dimension[] })),
       listMetrics({ page_size: 100, status: "PUBLISHED" }).catch(() => ({
         items: [] as MetricResponse[],
@@ -568,7 +591,7 @@ export function MetricDetail() {
         page: 1,
         page_size: 100,
       })),
-    ]).then(([g, u, dl, fr, ts, mt, ag, dims, metrics]) => {
+    ]).then(([g, u, dl, fr, ts, mt, ag, cur, dims, metrics]) => {
       const opts = (items: SystemDictItem[]) =>
         items
           .filter((it) => it.status === "active")
@@ -581,6 +604,7 @@ export function MetricDetail() {
         time_semantics: opts(ts),
         metric_tier: opts(mt),
         aggregation: opts(ag),
+        currency: opts(cur),
       });
       setEditDimensionOptions(
         (dims.items ?? [])
@@ -785,7 +809,13 @@ export function MetricDetail() {
         }));
       }
     }
-    if (metric.currency) govInit.currency = metric.currency;
+    if (metric.currency) {
+      govInit.currency = metric.currency;
+      setEditGovOptions((prev) => ({
+        ...prev,
+        currency: ensureInOptions(prev.currency ?? [], metric.currency ?? undefined),
+      }));
+    }
     // 聚合方式独立字段（口径变更，与粒度/单位同级）：其选项也需当前值兜底
     // （字典未收录的历史聚合值可显示可保留，防静默清空——对齐治理字段 ensureInOptions）
     if (metric.aggregation) {
@@ -910,7 +940,79 @@ export function MetricDetail() {
         change_reason: String(values.change_reason ?? "").trim(),
         row_version: metric.row_version, // 跨请求乐观锁：他人已改则 409 拒绝
       };
-      setEditSaving(true);
+      // 字典未收录值治理引导：保存前检测本次请求中的字典字段是否含未收录值。
+      // 含未收录 → 不直接静默保存：有收录权限引导收录、无权限确认后通知管理员收录/打回。
+      const unknown = collectUnknownDictValues(req);
+      if (unknown.length > 0) {
+        // 后端 DB 复核（前端字典快照可能过期），仅保留确实未收录的值
+        try {
+          const verified = await verifyDictValues(unknown);
+          if (verified.unknown.length > 0) {
+            setPendingEditReq(req);
+            setEditUnknownValues(verified.unknown);
+            return;
+          }
+        } catch {
+          // 复核失败（网络等）：不阻断流程——按本地检测结果引导
+          setPendingEditReq(req);
+          setEditUnknownValues(unknown);
+          return;
+        }
+      }
+      await doSaveEdit(req);
+    } catch (err) {
+      if (err instanceof Error && "errorFields" in err) return; // 表单校验错误，已高亮
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  // 收集本次保存将写入指标的字典未收录值（前端已加载字典判定，引导弹窗二次经后端复核）。
+  // 覆盖粒度/单位/聚合/币种/治理五属性——存量脏值（如 unit=cnt）也在保存时被识别提醒。
+  function collectUnknownDictValues(req: MetricUpdateRequest) {
+    // known 集合只取「字典真实收录」的选项：ensureInOptions 加入的兜底选项
+    // （label 以「(不在字典中)」结尾）代表当前值本就是未收录脏值，必须排除——
+    // 否则脏值永远命中 known，引导弹窗形同虚设。
+    const dictValues = (opts: Array<{ value: string; label: string }>) =>
+      new Set(
+        opts.filter((o) => !o.label.endsWith("(不在字典中)")).map((o) => o.value),
+      );
+    const known: Record<string, Set<string>> = {
+      granularity: dictValues(editGranularityOptions),
+      unit: dictValues(editUnitOptions),
+      aggregation: dictValues(editGovOptions.aggregation ?? []),
+      currency: dictValues(editGovOptions.currency ?? []),
+      dw_layer: dictValues(editGovOptions.dw_layer ?? []),
+      freshness: dictValues(editGovOptions.freshness ?? []),
+      time_semantics: dictValues(editGovOptions.time_semantics ?? []),
+      metric_tier: dictValues(editGovOptions.metric_tier ?? []),
+    };
+    const checks: Array<{ dict_type: string; value: string | null | undefined }> = [
+      { dict_type: "granularity", value: req.granularity },
+      { dict_type: "unit", value: req.unit },
+      { dict_type: "aggregation", value: req.aggregation },
+      { dict_type: "currency", value: req.currency },
+      { dict_type: "dw_layer", value: req.dw_layer },
+      { dict_type: "freshness", value: req.freshness },
+      { dict_type: "time_semantics", value: req.time_semantics },
+      { dict_type: "metric_tier", value: req.metric_tier },
+    ];
+    const unknown: Array<{ dict_type: string; value: string }> = [];
+    for (const c of checks) {
+      if (c.value == null) continue;
+      const v = String(c.value).trim();
+      if (!v) continue;
+      if (!known[c.dict_type].has(v)) unknown.push({ dict_type: c.dict_type, value: v });
+    }
+    return unknown;
+  }
+
+  // 实际执行保存（含状态提示）：引导弹窗「仍按原值保存 / 通知管理员并保存」均走此路径。
+  async function doSaveEdit(req: MetricUpdateRequest) {
+    if (!metric) return;
+    setEditSaving(true);
+    try {
       await updateMetric(metric.metric_code, req);
       if (metric.status === "REVIEW") {
         message.success("修改已保存，指标已退回草稿，请重新提交评审");
@@ -926,11 +1028,44 @@ export function MetricDetail() {
       setEditOpen(false);
       await load();
     } catch (err) {
-      if (err instanceof Error && "errorFields" in err) return; // 表单校验错误，已高亮
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
     } finally {
       setEditSaving(false);
     }
+  }
+
+  // 未收录值引导弹窗确认：notifyAdmin=true 先通知平台管理员收录/打回（仅无收录权限时）再按原值保存；
+  // notifyAdmin=false 直接按原值保存（有收录权限者可选稍后自行收录）。值不自动进字典——受控词表
+  // 由治理者统一维护，脏值写入同时提醒，避免静默污染字典。
+  async function handleUnknownValueConfirm(notifyAdmin: boolean) {
+    if (!metric || !pendingEditReq) return;
+    const req = pendingEditReq;
+    const unknown = editUnknownValues ?? [];
+    setPendingEditReq(null);
+    setEditUnknownValues(null);
+    if (notifyAdmin && unknown.length > 0) {
+      setEditUnknownNotifySaving(true);
+      try {
+        await notifyUnknownDictValues({
+          metric_code: metric.metric_code,
+          values: unknown,
+          note: String(req.change_reason ?? "").trim() || undefined,
+        });
+      } catch {
+        message.warning("通知管理员失败，仍按原值保存（可在参照数据管理手动收录）");
+      } finally {
+        setEditUnknownNotifySaving(false);
+      }
+    }
+    await doSaveEdit(req);
+  }
+
+  // 有收录权限者选择「前往收录」：放弃本次保存，跳转参照数据管理补充词条后回来重提。
+  function handleGoManageDict() {
+    setPendingEditReq(null);
+    setEditUnknownValues(null);
+    setEditOpen(false);
+    navigate("/dicts");
   }
 
   // 落地表搜索（对齐注册页②源表惰性搜索）：空关键词展开加载平台已采集表，输入即按关键词过滤
@@ -1144,6 +1279,9 @@ export function MetricDetail() {
   // 回滚是高风险操作（灰度→退回上一 PUBLISHED 版本），用专用权限点 metric:rollback 门禁
   // （而非笼统的 metric:edit），与后端 _WRITE_DEPS + PDP owner 校验形成前后端双边界。
   const canRollback = permReady && can("metric:rollback");
+  // 字典收录权限（dict:create）：保存未收录字典值时，有权限者可引导前往参照数据管理
+  // 自行收录；无权限者确认后通知平台管理员收录/打回（后端 DICT_UNKNOWN_NOTIFY）。
+  const canManageDict = permReady && can("dict:create");
   const piiUnreviewed = metric.pii_flag && !metric.compliance_reviewed;
 
   const headerActions = (
@@ -1896,14 +2034,23 @@ export function MetricDetail() {
           {/* 治理属性（非破坏性变更，不触发版本递增）：创建后治理字段此前不可改，
               现可编辑——币种修正/数仓层纠正/时效调整/时间语义变更/分级晋升/聚合调整 */}
           <Space wrap size={12} style={{ width: "100%" }}>
-            <Form.Item label="币种" style={{ marginBottom: 8, flex: 1, minWidth: 140 }}>
-              <Input
-                placeholder="如 CNY / USD（留空清除）"
-                value={editGovValues.currency ?? ""}
-                onChange={(e) => {
-                  setEditGovValues((p) => ({ ...p, currency: e.target.value }));
+            <Form.Item
+              label="币种"
+              style={{ marginBottom: 8, flex: 1, minWidth: 140 }}
+              tooltip="ISO 4217 标准币种（受控词表，参照数据管理维护）；留空表示不设币种"
+            >
+              <Select
+                allowClear
+                placeholder="选择币种（留空清除）"
+                options={editGovOptions.currency ?? []}
+                showSearch
+                optionFilterProp="label"
+                value={editGovValues.currency}
+                onChange={(v) => {
+                  setEditGovValues((p) => ({ ...p, currency: v ?? "" }));
                   setEditGovDirty((p) => new Set(p).add("currency"));
                 }}
+                {...DROPDOWN_FULL_WIDTH}
               />
             </Form.Item>
             {(
@@ -2094,6 +2241,58 @@ export function MetricDetail() {
             ))}
           </Space>
         </Form>
+      </Modal>
+
+      {/* 字典未收录值治理引导弹窗：保存前发现本次请求含字典未收录值时的分流处置。
+          原则：受控词表不自动新增——有收录权限者引导前往参照数据管理收录；
+          无权限者确认后通知平台管理员收录/打回（值仍原样保存，不静默进字典） */}
+      <Modal
+        title="发现字典未收录值"
+        open={editUnknownValues != null}
+        onCancel={() => {
+          setPendingEditReq(null);
+          setEditUnknownValues(null);
+        }}
+        footer={
+          canManageDict ? (
+            [
+              <Button key="save" onClick={() => handleUnknownValueConfirm(false)}>仍按原值保存</Button>,
+              <Button key="dict" type="primary" onClick={handleGoManageDict}>前往参照数据管理收录</Button>,
+            ]
+          ) : (
+            [
+              <Button key="cancel" onClick={() => { setPendingEditReq(null); setEditUnknownValues(null); }}>暂不保存</Button>,
+              <Button
+                key="notify"
+                type="primary"
+                loading={editUnknownNotifySaving}
+                onClick={() => handleUnknownValueConfirm(true)}
+              >
+                通知管理员收录/打回并保存
+              </Button>,
+            ]
+          )
+        }
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="以下取值不在系统字典（受控词表）中，保存后将以原值写入指标"
+          description={
+            canManageDict
+              ? "你拥有收录权限：可前往参照数据管理补充词条后重新提交，或暂按原值保存。"
+              : "你无收录权限：可通知平台管理员收录/打回，或暂不保存。字典由治理者统一维护，不会自动新增。"
+          }
+        />
+        <div style={{ maxHeight: 240, overflow: "auto" }}>
+          {(editUnknownValues ?? []).map((u, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, padding: "4px 0", alignItems: "baseline" }}>
+              <Tag color="orange">{EDIT_DICT_TYPE_LABEL[u.dict_type] ?? u.dict_type}</Tag>
+              <span className="mono">{u.value}</span>
+            </div>
+          ))}
+        </div>
       </Modal>
     </div>
   );

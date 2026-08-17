@@ -23,6 +23,7 @@ const DICT_TYPE_LABELS: Record<string, string> = {
   additivity: "可加性",
   serving_mode: "服务模式",
   metric_tier: "指标分级",
+  currency: "币种",
 };
 
 // 打开新增弹窗时静默刷新的最小间隔（毫秒）：TTL 内重复打开直接用缓存，避免

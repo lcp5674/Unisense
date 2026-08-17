@@ -79,6 +79,18 @@ DICT_SEEDS: dict[str, list[dict[str, Any]]] = {
         {"code": "HOUR", "label": "小时", "sort_order": 11},
         {"code": "MINUTE", "label": "分钟", "sort_order": 12},
     ],
+    # 币种独立字典（ISO 4217 常用 + 万元/亿元）：币种字段从自由 Input 改为
+    # 受控 Select 的标准依据。unit 字典中的 CNY/USD 等为历史语义重叠，保留不动。
+    "currency": [
+        {"code": "CNY", "label": "人民币", "sort_order": 1},
+        {"code": "USD", "label": "美元", "sort_order": 2},
+        {"code": "EUR", "label": "欧元", "sort_order": 3},
+        {"code": "JPY", "label": "日元", "sort_order": 4},
+        {"code": "HKD", "label": "港币", "sort_order": 5},
+        {"code": "GBP", "label": "英镑", "sort_order": 6},
+        {"code": "CNY_WAN", "label": "万元", "sort_order": 7},
+        {"code": "CNY_YI", "label": "亿元", "sort_order": 8},
+    ],
     "aggregation": [
         {"code": "SUM", "label": "求和", "sort_order": 1},
         {"code": "AVG", "label": "平均", "sort_order": 2},

@@ -129,6 +129,7 @@ _SOURCE_CN: dict[str, str] = {
     "user": "账号",
     "org": "组织",
     "degradation": "系统依赖",
+    "dict": "系统字典",
 }
 
 _ACTION_CN: dict[str, str] = {
@@ -180,6 +181,9 @@ _PAYLOAD_LABEL: dict[str, str] = {
     "notify_targets": "通知对象",
     "reviewer_id": "审核人ID",
     "reviewer": "审核人",
+    "dict_type": "字典类型",
+    "value": "未收录值",
+    "value_key": "值指纹",
 }
 
 _RULE_TYPE_CN: dict[str, str] = {

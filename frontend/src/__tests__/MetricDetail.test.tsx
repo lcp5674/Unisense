@@ -37,6 +37,8 @@ vi.mock("../api", () => ({
   suggestRenameName: vi.fn(),
   inferMetricDescription: vi.fn(),
   upsertSubscription: vi.fn(),
+  verifyDictValues: vi.fn(),
+  notifyUnknownDictValues: vi.fn(),
   // 详情页子组件依赖
   listQualityEvents: vi.fn().mockResolvedValue({ items: [] }),
   listQualityRules: vi.fn().mockResolvedValue({ items: [] }),
@@ -81,6 +83,8 @@ import {
   emergencyPublishMetric,
   recoverSourceDropped,
   confirmDeprecateDropped,
+  verifyDictValues,
+  notifyUnknownDictValues,
   UnisenseApiError,
 } from "../api";
 const mockedUpdateMetric = vi.mocked(updateMetric);
@@ -102,6 +106,8 @@ const mockedHealth = vi.mocked(getMetricHealth);
 const mockedUsers = vi.mocked(listUsers);
 const mockedSubs = vi.mocked(listSubscriptions);
 const mockedRelated = vi.mocked(fetchRelatedMetrics);
+const mockedVerifyDictValues = vi.mocked(verifyDictValues);
+const mockedNotifyUnknownDictValues = vi.mocked(notifyUnknownDictValues);
 const mockedSubmitReview = vi.mocked(submitReview);
 
 const metric: MetricResponse = {
@@ -168,6 +174,7 @@ function renderDetail(initialEntry: { pathname: string; state?: { from?: string 
         />
         <Route path="/catalog" element={<div>catalog-page</div>} />
         <Route path="/dashboard" element={<div>dashboard-page</div>} />
+        <Route path="/dicts" element={<div>dicts-page</div>} />
         <Route path="/todo" element={<div>todo-page</div>} />
       </Routes>
     </MemoryRouter>,
@@ -212,6 +219,10 @@ describe("MetricDetail", () => {
       grants: [],
       expiring_soon: [],
     });
+    // 字典未收录值治理引导：默认后端复核「全部已收录」→ 不阻断保存；
+    // 引导流程测试单独覆盖 verifyDictValues 返回实际未收录值。
+    mockedVerifyDictValues.mockResolvedValue({ unknown: [] });
+    mockedNotifyUnknownDictValues.mockResolvedValue({ notified: 0, unknown: 0 });
   });
 
   it("提供统一的返回按钮，从指标目录进入（历史栈有上一页）时回退到指标目录", async () => {
@@ -547,10 +558,110 @@ describe("MetricDetail", () => {
     });
   });
 
+  it("保存含字典未收录值时弹治理引导：无收录权限者「通知管理员收录/打回并保存」", async () => {
+    // 无 dict:create 权限：保存 unit=cnt（字典未收录脏值）→ 前端检测 + 后端复核确认未收录 →
+    // 引导弹窗出现；确认后通知全部管理员收录/打回，并按原值保存（受控词表不自动新增）。
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT", unit: "cnt" });
+    mockedDictItems.mockResolvedValue([
+      { code: "CNY", label: "人民币元 (CNY)", status: "active" } as SystemDictItem,
+      { code: "CNT", label: "计数 (CNT)", status: "active" } as SystemDictItem,
+    ]);
+    // 后端复核：确认 unit=cnt 确实未收录（beforeEach 默认返回空 unknown 不触发引导）
+    mockedVerifyDictValues.mockResolvedValue({ unknown: [{ dict_type: "unit", value: "cnt" }] });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    fireEvent.click(await screen.findByText("编辑"));
+    await screen.findByText("编辑指标");
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "修正口径" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    // 引导弹窗出现（列出未收录值 cnt）
+    await screen.findByText("发现字典未收录值");
+    expect(screen.getByText("cnt", { exact: true })).toBeInTheDocument();
+    // 确认 → 通知管理员 + 按原值保存
+    fireEvent.click(screen.getByRole("button", { name: /通知管理员收录\/打回并保存/ }));
+    await waitFor(() => {
+      expect(mockedNotifyUnknownDictValues).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metric_code: "sales_gmv_sum_d",
+          values: [{ dict_type: "unit", value: "cnt" }],
+        }),
+      );
+    });
+    await waitFor(() => {
+      const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
+      expect(lastCall).toMatchObject({ unit: "cnt", change_reason: expect.any(String) });
+    });
+  });
+
+  it("有收录权限者保存未收录值时引导前往参照数据管理收录（跳转 /dicts，不保存）", async () => {
+    // 有 dict:create 权限：引导弹窗主操作变为「前往参照数据管理收录」——
+    // 放弃本次保存跳转 /dicts 补词条（受控词表由治理者维护，不自动新增）。
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT", unit: "cnt" });
+    mockedDictItems.mockResolvedValue([
+      { code: "CNY", label: "人民币元 (CNY)", status: "active" } as SystemDictItem,
+      { code: "CNT", label: "计数 (CNT)", status: "active" } as SystemDictItem,
+    ]);
+    mockedVerifyDictValues.mockResolvedValue({ unknown: [{ dict_type: "unit", value: "cnt" }] });
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "sales",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create", "metric:edit", "dict:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    fireEvent.click(await screen.findByText("编辑"));
+    await screen.findByText("编辑指标");
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "修正口径" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await screen.findByText("发现字典未收录值");
+    fireEvent.click(screen.getByRole("button", { name: /前往参照数据管理收录/ }));
+    await screen.findByText("dicts-page"); // 已跳转参照数据管理
+    expect(mockedUpdateMetric).not.toHaveBeenCalled();
+    expect(mockedNotifyUnknownDictValues).not.toHaveBeenCalled();
+  });
+
+  it("无收录权限者点「暂不保存」→ 不保存不通知，编辑弹窗保留", async () => {
+    // 「暂不保存」放弃本次保存：既不写指标也不打扰管理员，编辑弹窗保留供修改取值后重提。
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT", unit: "cnt" });
+    mockedDictItems.mockResolvedValue([
+      { code: "CNY", label: "人民币元 (CNY)", status: "active" } as SystemDictItem,
+      { code: "CNT", label: "计数 (CNT)", status: "active" } as SystemDictItem,
+    ]);
+    mockedVerifyDictValues.mockResolvedValue({ unknown: [{ dict_type: "unit", value: "cnt" }] });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    fireEvent.click(await screen.findByText("编辑"));
+    await screen.findByText("编辑指标");
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "修正口径" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await screen.findByText("发现字典未收录值");
+    fireEvent.click(screen.getByRole("button", { name: /暂不保存/ }));
+    await waitFor(() => {
+      expect(mockedUpdateMetric).not.toHaveBeenCalled();
+      expect(mockedNotifyUnknownDictValues).not.toHaveBeenCalled();
+    });
+    expect(screen.getByText("编辑指标")).toBeInTheDocument(); // 编辑弹窗保留
+  });
+
 });
 
 
 describe("MetricDetail 按钮级权限过滤", () => {
+  // 该 describe 无顶层 beforeEach（历史沿革依赖前序 describe 的 mock 泄漏）。
+  // 治理引导涉及的新 mock 必须在此显式重置——否则上个 describe 末尾测试设置的
+  // verifyDictValues（返回 unknown）会泄漏进来，把本 describe 的保存测试全阻断。
+  beforeEach(() => {
+    mockedVerifyDictValues.mockResolvedValue({ unknown: [] });
+    mockedNotifyUnknownDictValues.mockResolvedValue({ notified: 0, unknown: 0 });
+  });
+
   function renderWithPerms(ui_actions: string[], role = "custom") {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
@@ -1307,10 +1418,11 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() => {
       expect(document.querySelector(".ant-modal")).toBeTruthy();
     });
-    // 币种输入框回填 CNY（治理字段回填）
-    const currencyInput = document.querySelector('.ant-modal input[placeholder*="CNY"]') as HTMLInputElement;
-    expect(currencyInput).toBeTruthy();
-    expect(currencyInput.value).toBe("CNY");
+    // 币种回填 CNY（治理字段回填；字典 mock 为空 → 兜底 label 带「不在字典中」）
+    await waitFor(() => {
+      const selected = Array.from(document.querySelectorAll(".ant-modal .ant-select-selection-item"));
+      expect(selected.some((el) => el.textContent?.includes("CNY"))).toBeTruthy();
+    });
     // 未改治理字段 → 保存 payload 不含治理字段（dirty 未改不传，后端保留原值）
     const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
     fireEvent.change(reasonArea, { target: { value: "仅调整名称，治理字段不动" } });
@@ -1363,11 +1475,19 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() => {
       expect(document.querySelector(".ant-modal")).toBeTruthy();
     });
-    // 币种回填 CNY
-    const currencyInput = document.querySelector('.ant-modal input[placeholder*="CNY"]') as HTMLInputElement;
-    expect(currencyInput).toBeTruthy();
-    // 清空币种（allowClear 语义）→ dirty 标记 currency
-    fireEvent.change(currencyInput, { target: { value: "" } });
+    // 币种回填 CNY（Select 选中项；字典 mock 为空 → 兜底 label 带「不在字典中」）
+    await waitFor(() => {
+      const selected = Array.from(document.querySelectorAll(".ant-modal .ant-select-selection-item"));
+      expect(selected.some((el) => el.textContent?.includes("CNY"))).toBeTruthy();
+    });
+    // 清空币种（allowClear 点击清除图标）→ dirty 标记 currency
+    const currencySelect = Array.from(document.querySelectorAll(".ant-modal .ant-select")).find((el) =>
+      el.textContent?.includes("CNY"),
+    );
+    const clearBtn = currencySelect?.querySelector(".ant-select-clear") as HTMLElement;
+    expect(clearBtn).toBeTruthy();
+    fireEvent.mouseDown(clearBtn);
+    fireEvent.click(clearBtn);
     const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
     fireEvent.change(reasonArea, { target: { value: "清空币种（该指标非币种口径）" } });
     fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);

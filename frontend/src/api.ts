@@ -44,6 +44,10 @@ import {
   DBCatalog,
   DictItemCreateRequest,
   DictItemUpdateRequest,
+  DictUnknownNotifyRequest,
+  DictUnknownRejectRequest,
+  DictValueCheckItem,
+  DictValuesVerifyResponse,
   Dimension,
   DimensionMapping,
   DimensionMember,
@@ -3490,6 +3494,39 @@ export async function listDictTypes(): Promise<string[]> {
 
 export async function listDictItems(dictType: string): Promise<SystemDictItem[]> {
   return request<SystemDictItem[]>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}`);
+}
+
+/** 批量校验字典值是否未收录（指标保存前权威检测，DB 实时判定）。 */
+export async function verifyDictValues(
+  values: DictValueCheckItem[],
+): Promise<DictValuesVerifyResponse> {
+  return request<DictValuesVerifyResponse>(`${API_BASE}/dicts/verify-values`, {
+    method: "POST",
+    body: JSON.stringify({ values }),
+  });
+}
+
+/** 无收录权限用户保存未收录值时，通知管理员收录/打回（返回通知条数）。 */
+export async function notifyUnknownDictValues(
+  data: DictUnknownNotifyRequest,
+): Promise<{ notified: number; unknown: number }> {
+  return request<{ notified: number; unknown: number }>(`${API_BASE}/dicts/unknown/notify`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+/** 管理员打回字典收录申请（通知提交人改用字典内值，并办结原待办）。 */
+export async function rejectUnknownDictValue(
+  data: DictUnknownRejectRequest,
+): Promise<{ notification_id: number; handled: boolean }> {
+  return request<{ notification_id: number; handled: boolean }>(
+    `${API_BASE}/dicts/unknown/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify(data),
+    },
+  );
 }
 
 export async function listAllDictItems(dictType: string): Promise<SystemDictItem[]> {

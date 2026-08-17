@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.models.system_dict import SystemDict
+from app.services.notify.service import NotifyService
 from app.services.system_dict.repository import SystemDictRepository
 from app.services.system_dict.schemas import DictItemCreate, DictItemUpdate
 
 logger = structlog.get_logger("unisense.system_dict.service")
+
+# 字典未收录值通知去重窗口（秒）：同一未收录值在窗口内对同一管理员只通知一次，
+# 防止反复保存同一脏值刷屏（对齐 notify 服务 _DEDUP_WINDOW_SECONDS 的治理口径）。
+_NOTIFY_DEDUP_WINDOW_SECONDS = 60
 
 
 class SystemDictService:
@@ -181,6 +188,7 @@ class SystemDictService:
         field_map: dict[str, str] = {
             "granularity": "granularity",
             "unit": "unit",
+            "currency": "currency",
             "aggregation": "aggregation",
             "time_semantics": "time_semantics",
             "freshness": "freshness",
@@ -224,3 +232,148 @@ class SystemDictService:
                 error_code="DICT_VALUE_INACTIVE",
             )
         return item
+
+    async def verify_values(self, values: list[dict[str, str]]) -> list[dict[str, str]]:
+        """批量检测字典值是否未收录（供指标保存前权威校验）。
+
+        ``values`` 形如 ``[{"dict_type": "currency", "value": "XXX"}]``；返回其中
+        **确实未收录** 的去重列表（DB 实时判定，避免前端字典快照过期导致误报）。
+        """
+        seen: set[tuple[str, str]] = set()
+        unknown: list[dict[str, str]] = []
+        for item in values:
+            dict_type = str(item.get("dict_type") or "").strip()
+            value = str(item.get("value") or "").strip()
+            if not dict_type or not value:
+                continue
+            key = (dict_type, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not await self._repo.item_exists(dict_type, value):
+                unknown.append({"dict_type": dict_type, "value": value})
+        return unknown
+
+    async def notify_unknown_values(
+        self,
+        *,
+        metric_code: str | None,
+        values: list[dict[str, str]],
+        actor_id: int,
+        actor_name: str | None,
+        note: str | None = None,
+    ) -> dict[str, int]:
+        """无收录权限用户保存未收录字典值时，通知全部平台管理员「收录或打回」。
+
+        - 服务端复核 ``values`` 确实未收录（防伪造 / 字典刚被收录后的过期提交）
+        - 逐值定向通知（``dict.unknown_pending``），payload 落 ``value_key`` 指纹，
+          窗口内同一未收录值不重复打扰（防风暴）
+        - 返回 ``{"notified": 通知条数, "unknown": 复核后未收录值数}``
+        """
+        unknown = await self.verify_values(values)
+        if not unknown:
+            return {"notified": 0, "unknown": 0}
+        admin_ids = await self._repo.list_admin_ids()
+        if not admin_ids:
+            logger.info("dict_unknown_notify_no_admin", metric_code=metric_code)
+            return {"notified": 0, "unknown": len(unknown)}
+        notify_svc = NotifyService(self._db)
+        notified = 0
+        for item in unknown:
+            dict_type = item["dict_type"]
+            value = item["value"]
+            value_key = f"{dict_type}:{value}"
+            body_lines = [
+                f"指标编码：{metric_code or '—'}",
+                f"字典类型：{dict_type}",
+                f"未收录值：{value}",
+            ]
+            if note:
+                body_lines.append(f"提交说明：{note}")
+            body_lines.append("请收录到系统字典，或打回让提交人改用字典内值。")
+            for admin_id in admin_ids:
+                recent = await notify_svc._repo.find_recent_notification_by_value_key(
+                    admin_id,
+                    "dict.unknown_pending",
+                    value_key,
+                    _NOTIFY_DEDUP_WINDOW_SECONDS,
+                )
+                if recent is not None:
+                    logger.info(
+                        "dict_unknown_notify_dedup_skipped",
+                        admin_id=admin_id,
+                        value_key=value_key,
+                    )
+                    continue
+                await notify_svc.notify_user(
+                    admin_id,
+                    "dict.unknown_pending",
+                    "字典未收录值待收录",
+                    body="\n".join(body_lines),
+                    payload={
+                        "metric_code": metric_code,
+                        "dict_type": dict_type,
+                        "value": value,
+                        "value_key": value_key,
+                        "note": note,
+                        "actor_id": actor_id,
+                        "actor_name": actor_name,
+                    },
+                )
+                notified += 1
+        return {"notified": notified, "unknown": len(unknown)}
+
+    async def reject_unknown_value(
+        self,
+        *,
+        notification_id: int,
+        reason: str | None,
+        actor_id: int,
+        actor_name: str | None,
+    ) -> Any:
+        """管理员打回字典收录申请：通知提交人改用字典内值，并办结原待办通知。
+
+        仅 platform_admin 可调用（API 层 ``require_roles`` 强制）；通知提交人
+        从原通知 payload 的 ``actor_id`` 反查（即提交时的操作人）。
+        """
+        notify_svc = NotifyService(self._db)
+        notif = await notify_svc.get_notification(notification_id)
+        if notif.template_code != "dict.unknown_pending":
+            raise BusinessError(
+                "该通知不是字典收录待办，无法打回",
+                error_code="INVALID_NOTIFY_TYPE",
+            )
+        payload = notif.payload or {}
+        metric_code = payload.get("metric_code")
+        dict_type = payload.get("dict_type")
+        value = payload.get("value")
+        try:
+            submitter_id = int(payload.get("actor_id") or 0) or None
+        except (TypeError, ValueError):
+            submitter_id = None
+        if submitter_id:
+            body_lines = [
+                f"指标编码：{metric_code or '—'}",
+                f"字典类型：{dict_type or '—'}",
+                f"未收录值：{value or '—'}",
+                "请改用系统字典内已有的取值后重新保存。",
+            ]
+            if reason:
+                body_lines.append(f"打回原因：{reason}")
+            await notify_svc.notify_user(
+                submitter_id,
+                "dict.unknown_rejected",
+                "字典收录申请已被打回",
+                body="\n".join(body_lines),
+                payload={
+                    "metric_code": metric_code,
+                    "dict_type": dict_type,
+                    "value": value,
+                    "reason": reason,
+                    "actor_id": actor_id,
+                    "actor_name": actor_name,
+                },
+            )
+        # 办结原待办通知（不再出现在「仅待处理」；已处理可追溯）
+        await notify_svc.mark_handled(notification_id, actor_id, "platform_admin")
+        return notif

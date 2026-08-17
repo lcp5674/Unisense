@@ -2200,6 +2200,30 @@ export interface DictItemUpdateRequest {
   description?: string | null;
 }
 
+/** 字典值校验项（dict_type + value） */
+export interface DictValueCheckItem {
+  dict_type: string;
+  value: string;
+}
+
+/** 批量校验字典值响应：未收录列表 */
+export interface DictValuesVerifyResponse {
+  unknown: DictValueCheckItem[];
+}
+
+/** 无收录权限用户保存未收录值时，通知管理员收录/打回请求 */
+export interface DictUnknownNotifyRequest {
+  metric_code?: string | null;
+  values: DictValueCheckItem[];
+  note?: string | null;
+}
+
+/** 字典收录申请打回请求（管理员操作） */
+export interface DictUnknownRejectRequest {
+  notification_id: number;
+  reason?: string | null;
+}
+
 // ============================================================================
 // 自动推断（backend /api/v1/metric-definitions/auto-suggest）
 // ============================================================================

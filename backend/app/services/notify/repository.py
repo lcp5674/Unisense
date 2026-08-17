@@ -32,6 +32,7 @@ TODO_EVENT_TYPES = frozenset(
         "catalog.connection_failed",
         "grant.expiring_soon",
         "grant.expired",
+        "dict.unknown_pending",
     }
 )
 
@@ -249,6 +250,44 @@ class NotifyRepository:
             return None
         display_name, username = row
         return display_name or username
+
+    async def list_admin_ids(self) -> list[int]:
+        """查询全部启用的 platform_admin 用户 ID（字典未收录值待收录通知的收件人）。"""
+        stmt = (
+            select(User.id)
+            .where(
+                User.role == "platform_admin",
+                User.status == "active",
+            )
+            .order_by(User.id)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def find_recent_notification_by_value_key(
+        self,
+        subscriber_id: int,
+        template_code: str,
+        value_key: str,
+        window_seconds: int,
+    ) -> Notification | None:
+        """查询订阅者近 N 秒内是否已有同「字典值键」的未处理通知（精确去重）。
+
+        字典未收录值通知按 ``(dict_type:value)`` 指纹去重：同一未收录值反复提交
+        时不重复打扰管理员（payload 落 ``value_key`` 字段供检索）。
+        """
+        since = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        stmt = (
+            select(Notification)
+            .where(
+                Notification.subscriber_id == subscriber_id,
+                Notification.template_code == template_code,
+                Notification.created_at >= since,
+                Notification.handled_at.is_(None),
+                Notification.payload["value_key"].as_string() == value_key,
+            )
+            .order_by(Notification.id.desc())
+        )
+        return (await self._session.execute(stmt)).scalars().first()
 
     async def list_event_logs(self, event_type: str | None, limit: int) -> list[EventLog]:
         stmt = select(EventLog)

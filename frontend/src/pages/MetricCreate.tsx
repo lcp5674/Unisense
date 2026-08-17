@@ -54,6 +54,7 @@ const BATCH_RESULT_COLUMNS = [
 const DICT_FIELD_MAP: Array<{ dictType: string; field: string; label: string }> = [
   { dictType: "granularity", field: "granularity", label: "粒度" },
   { dictType: "unit", field: "unit", label: "单位" },
+  { dictType: "currency", field: "currency", label: "币种" },
   { dictType: "aggregation", field: "aggregation", label: "聚合" },
   { dictType: "time_semantics", field: "time_semantics", label: "时间语义" },
   { dictType: "freshness", field: "freshness", label: "新鲜度" },
@@ -670,6 +671,7 @@ export function MetricCreate() {
   const dictSelect = (dictType: string, _field: string, placeholder: string) => (
     <Select
       showSearch
+      allowClear
       placeholder={placeholder}
       options={dictOptions[dictType] || []}
       optionFilterProp="label"
@@ -850,8 +852,12 @@ export function MetricCreate() {
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="currency" label="币种（选填）" extra="如 CNY（人民币）/ USD（美元），仅交易类指标需要">
-                    <Input placeholder="CNY" maxLength={16} allowClear />
+                  <Form.Item
+                    name="currency"
+                    label="币种（选填）"
+                    extra="ISO 4217 标准币种，仅交易类指标需要"
+                  >
+                    {dictSelect("currency", "currency", "选择币种")}
                   </Form.Item>
                 </Col>
               </Row>

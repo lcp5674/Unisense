@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -226,3 +226,151 @@ class TestDeleteMore:
 
     async def test_get_ref_count_unknown_type(self, svc) -> None:
         assert await svc.get_ref_count("unknown_type", "x") == 0
+
+    async def test_get_ref_count_currency(self, svc) -> None:
+        """currency 字典参与引用保护（field_map 已映射 Metric.currency）。"""
+        result = MagicMock()
+        result.scalar.return_value = 2
+        svc._db.execute = AsyncMock(return_value=result)
+        assert await svc.get_ref_count("currency", "CNY") == 2
+
+
+class TestUnknownValueGovernance:
+    """字典未收录值治理：校验 / 通知管理员收录打回 / 打回闭环。"""
+
+    async def test_verify_values_filters_unknown(self, svc) -> None:
+        """DB 实时判定：已收录值不返回，未收录值返回。"""
+        svc._repo.item_exists = AsyncMock(
+            side_effect=lambda dict_type, value: not (dict_type == "currency" and value == "XXX")
+        )
+        unknown = await svc.verify_values(
+            [
+                {"dict_type": "currency", "value": "CNY"},
+                {"dict_type": "currency", "value": "XXX"},
+            ]
+        )
+        assert unknown == [{"dict_type": "currency", "value": "XXX"}]
+
+    async def test_verify_values_dedups(self, svc) -> None:
+        """同 (dict_type, value) 重复提交只返回一条。"""
+        svc._repo.item_exists = AsyncMock(return_value=False)
+        unknown = await svc.verify_values(
+            [
+                {"dict_type": "unit", "value": "cnt"},
+                {"dict_type": "unit", "value": "cnt"},
+            ]
+        )
+        assert len(unknown) == 1
+
+    async def test_notify_unknown_values_notifies_all_admins(self, svc) -> None:
+        """无收录权限用户保存未收录值：通知全部 platform_admin。"""
+        svc._repo.item_exists = AsyncMock(return_value=False)
+        svc._repo.list_admin_ids = AsyncMock(return_value=[1, 2])
+        mock_notify = AsyncMock()
+        mock_notify._repo.find_recent_notification_by_value_key = AsyncMock(return_value=None)
+        with patch("app.services.system_dict.service.NotifyService", return_value=mock_notify):
+            result = await svc.notify_unknown_values(
+                metric_code="m1",
+                values=[{"dict_type": "currency", "value": "XXX"}],
+                actor_id=9,
+                actor_name="张三",
+                note="历史存量",
+            )
+        assert result == {"notified": 2, "unknown": 1}
+        assert mock_notify.notify_user.await_count == 2
+        first_kwargs = mock_notify.notify_user.await_args_list[0].kwargs
+        assert mock_notify.notify_user.await_args_list[0].args[0] == 1  # user_id（位置参数）
+        assert mock_notify.notify_user.await_args_list[0].args[1] == "dict.unknown_pending"
+        assert first_kwargs["payload"]["value_key"] == "currency:XXX"
+        assert first_kwargs["payload"]["actor_id"] == 9
+
+    async def test_notify_unknown_values_skips_known(self, svc) -> None:
+        """值已被收录：不通知（服务端复核兜底，防过期提交误报）。"""
+        svc._repo.item_exists = AsyncMock(return_value=True)
+        svc._repo.list_admin_ids = AsyncMock(return_value=[1])
+        with patch("app.services.system_dict.service.NotifyService") as mock_cls:
+            result = await svc.notify_unknown_values(
+                metric_code="m1",
+                values=[{"dict_type": "currency", "value": "CNY"}],
+                actor_id=9,
+                actor_name="张三",
+            )
+        assert result == {"notified": 0, "unknown": 0}
+        mock_cls.assert_not_called()
+
+    async def test_notify_unknown_values_no_admin(self, svc) -> None:
+        """无 platform_admin 用户：不通知，返回 unknown 数（不阻断）。"""
+        svc._repo.item_exists = AsyncMock(return_value=False)
+        svc._repo.list_admin_ids = AsyncMock(return_value=[])
+        with patch("app.services.system_dict.service.NotifyService") as mock_cls:
+            result = await svc.notify_unknown_values(
+                metric_code="m1",
+                values=[{"dict_type": "currency", "value": "XXX"}],
+                actor_id=9,
+                actor_name="张三",
+            )
+        assert result == {"notified": 0, "unknown": 1}
+        mock_cls.assert_not_called()
+
+    async def test_notify_unknown_values_dedup_skips(self, svc) -> None:
+        """窗口内同一未收录值已通知过某管理员：跳过（防刷屏）。"""
+        svc._repo.item_exists = AsyncMock(return_value=False)
+        svc._repo.list_admin_ids = AsyncMock(return_value=[1, 2])
+        mock_notify = AsyncMock()
+        # admin1 已收到（返回非 None）→ 跳过；admin2 未收到 → 通知
+        mock_notify._repo.find_recent_notification_by_value_key = AsyncMock(
+            side_effect=[object(), None]
+        )
+        with patch("app.services.system_dict.service.NotifyService", return_value=mock_notify):
+            result = await svc.notify_unknown_values(
+                metric_code="m1",
+                values=[{"dict_type": "unit", "value": "cnt"}],
+                actor_id=9,
+                actor_name="张三",
+            )
+        assert result == {"notified": 1, "unknown": 1}
+        assert mock_notify.notify_user.await_count == 1
+        assert mock_notify.notify_user.await_args.args[0] == 2  # 仅 admin2 收到通知
+
+    async def test_reject_unknown_value_invalid_notify_type(self, svc) -> None:
+        """打回非字典收录待办通知：拒绝。"""
+        notif = MagicMock()
+        notif.template_code = "metric.created"
+        mock_notify = AsyncMock()
+        mock_notify.get_notification = AsyncMock(return_value=notif)
+        with patch(
+            "app.services.system_dict.service.NotifyService", return_value=mock_notify
+        ), pytest.raises(BusinessError, match="字典收录待办"):
+            await svc.reject_unknown_value(
+                notification_id=1, reason="r", actor_id=5, actor_name="管理员"
+            )
+        mock_notify.notify_user.assert_not_called()
+
+    async def test_reject_unknown_value_success(self, svc) -> None:
+        """打回成功：通知提交人改用字典内值 + 办结原待办。"""
+        notif = MagicMock()
+        notif.template_code = "dict.unknown_pending"
+        notif.payload = {
+            "metric_code": "m1",
+            "dict_type": "currency",
+            "value": "XXX",
+            "actor_id": 9,
+        }
+        mock_notify = AsyncMock()
+        mock_notify.get_notification = AsyncMock(return_value=notif)
+        with patch("app.services.system_dict.service.NotifyService", return_value=mock_notify):
+            result = await svc.reject_unknown_value(
+                notification_id=1,
+                reason="请用 ISO 4217 标准币种",
+                actor_id=5,
+                actor_name="管理员",
+            )
+        assert result is notif
+        # 通知提交人（原通知 payload.actor_id = 9）
+        assert mock_notify.notify_user.await_args.args[0] == 9  # user_id（位置参数）
+        assert mock_notify.notify_user.await_args.args[1] == "dict.unknown_rejected"
+        kwargs = mock_notify.notify_user.await_args.kwargs
+        assert "请用 ISO 4217 标准币种" in kwargs["body"]
+        assert kwargs["payload"]["value"] == "XXX"
+        # 原待办办结（不再出现在「仅待处理」）
+        mock_notify.mark_handled.assert_awaited_once_with(1, 5, "platform_admin")

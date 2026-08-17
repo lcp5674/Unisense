@@ -20,7 +20,15 @@ from app.core.audit import client_ip, write_audit
 from app.core.exceptions import BusinessError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session as get_session
-from app.services.system_dict.schemas import DictItemCreate, DictItemResponse, DictItemUpdate
+from app.services.system_dict.schemas import (
+    DictItemCreate,
+    DictItemResponse,
+    DictItemUpdate,
+    DictUnknownNotifyRequest,
+    DictUnknownRejectRequest,
+    DictValuesVerifyRequest,
+    DictValuesVerifyResponse,
+)
 from app.services.system_dict.service import SystemDictService
 
 logger = structlog.get_logger("unisense.api.system_dict")
@@ -81,6 +89,111 @@ async def list_all_dict_items(
     data = await svc.list_all_by_type(dict_type)
     items = [_item_response(item, await svc.get_ref_count(dict_type, item.code)) for item in data]
     return ok(data=items, trace_id=trace_id)
+
+
+@router.post(
+    "/verify-values",
+    response_model=ApiResponse[DictValuesVerifyResponse],
+    summary="批量校验字典值是否未收录（指标保存前权威检测）",
+    dependencies=_READ_DEPS,
+)
+async def verify_dict_values(
+    data: DictValuesVerifyRequest,
+    svc: SystemDictService = Depends(_get_service),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[DictValuesVerifyResponse]:
+    """批量检测 (dict_type, value) 中哪些未收录于系统字典。
+
+    指标编辑弹窗保存前调用：前端字典快照可能过期，以 DB 实时判定为准。
+    仅读操作，不落审计。
+    """
+    unknown = await svc.verify_values(
+        [{"dict_type": v.dict_type, "value": v.value} for v in data.values]
+    )
+    return ok(data=DictValuesVerifyResponse(unknown=unknown), trace_id=trace_id)
+
+
+@router.post(
+    "/unknown/notify",
+    response_model=ApiResponse[dict[str, int]],
+    summary="无收录权限用户保存未收录值时，通知管理员收录/打回",
+    dependencies=_READ_DEPS,
+)
+async def notify_unknown_dict_values(
+    data: DictUnknownNotifyRequest,
+    user: CurrentUser,
+    request: Request,
+    svc: SystemDictService = Depends(_get_service),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[dict[str, int]]:
+    """提交人无收录权限（非 platform_admin）时，把未收录值定向通知全部平台管理员。
+
+    服务端复核确实未收录（防伪造）；同一未收录值窗口内对同一管理员去重。
+    返回 ``{"notified": 通知条数, "unknown": 未收录值数}``。
+    """
+    result = await svc.notify_unknown_values(
+        metric_code=data.metric_code,
+        values=[{"dict_type": v.dict_type, "value": v.value} for v in data.values],
+        actor_id=user.id,
+        actor_name=user.display_name or user.username,
+        note=data.note,
+    )
+    await write_audit(
+        svc._db,
+        actor_id=user.id,
+        action="DICT_UNKNOWN_NOTIFY",
+        entity_type="system_dict",
+        entity_id=data.metric_code or "-",
+        detail={
+            "values": [v.model_dump() for v in data.values],
+            "note": data.note,
+            "result": result,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await svc._db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/unknown/reject",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="管理员打回字典收录申请（通知提交人改用字典内值）",
+    dependencies=_ADMIN_DEPS,
+)
+async def reject_unknown_dict_value(
+    data: DictUnknownRejectRequest,
+    user: CurrentUser,
+    request: Request,
+    svc: SystemDictService = Depends(_get_service),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[dict[str, Any]]:
+    """平台管理员把「字典未收录值待收录」通知打回：通知提交人改用字典内值。
+
+    仅 platform_admin 可调用（``_ADMIN_DEPS``）；原通知办结（不再出现在待处理）。
+    """
+    notif = await svc.reject_unknown_value(
+        notification_id=data.notification_id,
+        reason=data.reason,
+        actor_id=user.id,
+        actor_name=user.display_name or user.username,
+    )
+    await write_audit(
+        svc._db,
+        actor_id=user.id,
+        action="DICT_UNKNOWN_REJECT",
+        entity_type="notification",
+        entity_id=str(data.notification_id),
+        detail={"reason": data.reason},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await svc._db.commit()
+    return ok(
+        data={"notification_id": notif.id, "handled": notif.handled_at is not None},
+        trace_id=trace_id,
+    )
 
 
 @router.post(
