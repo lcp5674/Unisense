@@ -2333,6 +2333,22 @@ async def test_schedule_collection_rejects_disabled_source() -> None:
     assert ei.value.error_code == "SOURCE_DISABLED"
 
 
+async def test_schedule_collection_passes_mode_to_queue() -> None:
+    """M4: collect-now 选择的 mode 透传到队列（不静默降级为全量）。"""
+    svc, repo = _svc()
+    src = _make_src_with_config({"host": "h"})
+    src.enabled = True
+    repo.get_source = AsyncMock(return_value=src)
+
+    queue = MagicMock()
+    queue.enqueue = AsyncMock(return_value="job-1")
+
+    job_id = await svc.schedule_collection("s1", 1, queue=queue, mode="INCREMENTAL")
+
+    assert job_id == "job-1"
+    queue.enqueue.assert_awaited_once_with("s1", 1, mode="INCREMENTAL")
+
+
 async def test_update_source_toggles_enabled() -> None:
     """update_source 支持停用/启用（enabled 字段）。"""
     from app.services.collector.schemas import DataSourceUpdateRequest

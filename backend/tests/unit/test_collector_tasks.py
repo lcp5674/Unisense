@@ -16,9 +16,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.collector.tasks import _check_idempotency, run_collection_task
+from app.services.collector.tasks import _check_idempotency, _make_progress_cb, run_collection_task
 
 # ---------- US4: 幂等检查 ----------
+
+
+async def test_make_progress_cb_detail_keeps_mode():
+    """M4: RUNNING 进度 detail 保留真实执行模式（不被进度字段覆盖）。"""
+    store = MagicMock()
+    store.set = AsyncMock()
+
+    cb = _make_progress_cb(store, "job1", "src1", 1, mode="INCREMENTAL")
+    await cb({"phase": "registering", "message": "注册 1/3", "index": 1, "total": 3})
+
+    detail = store.set.call_args.args[2]
+    assert detail["mode"] == "INCREMENTAL"
+    assert detail["source_id"] == "src1"
+    assert detail["progress"]["phase"] == "registering"
 
 
 async def test_check_idempotency_no_redis_returns_true():

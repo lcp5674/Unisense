@@ -732,7 +732,7 @@ async def collect_now(
     不影响已配置的 cron 调度。mode 经由 CollectRequest 指定（默认 FULL）。
     """
     svc = _svc(db)
-    job_id = await svc.schedule_collection(source_id, user.id)
+    job_id = await svc.schedule_collection(source_id, user.id, mode=body.mode)
     await write_audit(
         db,
         actor_id=user.id,

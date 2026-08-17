@@ -1857,9 +1857,17 @@ class CollectorService(BaseService):
         }
 
     async def schedule_collection(
-        self, source_id: str, actor_id: int, queue: CollectionQueue | None = None
+        self,
+        source_id: str,
+        actor_id: int,
+        queue: CollectionQueue | None = None,
+        *,
+        mode: str = "FULL",
     ) -> str:
-        """将全量采集任务投递到异步队列，立即返回 job_id（请求内不再同步执行）。
+        """将采集任务投递到异步队列，立即返回 job_id（请求内不再同步执行）。
+
+        ``mode`` 透传到 worker（FULL/INCREMENTAL）——collect-now 前端选择的
+        INCREMENTAL 必须实际执行，不能静默降级为全量（跨链路一致性，M4）。
 
         当 ``queue`` 未提供时，根据配置自动选择：
         - ``settings.redis_url`` 非空 → ArqCollectionQueue（Redis 持久化）
@@ -1879,7 +1887,7 @@ class CollectorService(BaseService):
         from app.core.config import settings as _settings
 
         q = queue or create_collection_queue(redis_url=_settings.redis_url)
-        return await q.enqueue(source_id, actor_id)
+        return await q.enqueue(source_id, actor_id, mode=mode)
 
     async def get_job_status(
         self, job_id: str, queue: CollectionQueue | None = None

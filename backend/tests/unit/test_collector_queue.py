@@ -133,6 +133,15 @@ class TestFallbackToInMemory:
         assert len(job_id) > 4
 
     @pytest.mark.asyncio
+    async def test_inmemory_enqueue_stores_mode(self):
+        """M4: InMemory 入队把 mode 写入 detail（任务中心可读真实执行模式）。"""
+        queue = InMemoryCollectionQueue()
+        job_id = await queue.enqueue("source-1", actor_id=1, mode="INCREMENTAL")
+        status = await queue.get(job_id)
+        assert status is not None
+        assert status["detail"]["mode"] == "INCREMENTAL"
+
+    @pytest.mark.asyncio
     async def test_inmemory_set_and_get(self):
         """InMemory 队列支持状态更新和查询。"""
         queue = InMemoryCollectionQueue()

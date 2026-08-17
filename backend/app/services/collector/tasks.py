@@ -32,12 +32,17 @@ _MAX_PROGRESS_MESSAGES = 300
 
 
 def _make_progress_cb(
-    store: Any, job_id: str, source_id: str, actor_id: int
+    store: Any,
+    job_id: str,
+    source_id: str,
+    actor_id: int,
+    mode: str = "FULL",
 ) -> Callable[[dict[str, Any]], Awaitable[None]]:
     """构造写入 JobStore 的采集进度回调（供 SSE 实时推送）。
 
     每次回调把最新进度快照写入 ``store.set(job_id, "RUNNING", {...})``；
-    消息列表保留最近 N 条，Redis/内存中不无限增长。
+    消息列表保留最近 N 条，Redis/内存中不无限增长。``mode`` 写入 detail，
+    保证任务中心在 RUNNING 期间也能展示真实执行模式（不被进度覆盖）。
     """
     messages: list[str] = []
 
@@ -60,7 +65,7 @@ def _make_progress_cb(
         await store.set(
             job_id,
             "RUNNING",
-            {"source_id": source_id, "actor_id": actor_id, "progress": progress},
+            {"source_id": source_id, "actor_id": actor_id, "mode": mode, "progress": progress},
         )
 
     return cb
@@ -156,7 +161,9 @@ async def run_collection_task(
 
         # 构造进度回调：worker 侧把 RUNNING 进度写入 JobStore，供 SSE 实时推送
         progress_cb = (
-            _make_progress_cb(store, job_id, source_id, actor_id) if store is not None else None
+            _make_progress_cb(store, job_id, source_id, actor_id, mode=mode)
+            if store is not None
+            else None
         )
         result = await svc.collect_and_register(
             source_id, collector, actor_id, mode=mode, progress_cb=progress_cb

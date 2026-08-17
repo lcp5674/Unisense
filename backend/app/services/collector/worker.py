@@ -90,12 +90,15 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
                 if (next_run - now) <= timedelta(minutes=1):
                     job_id = f"collect:sched:{src.source_id}:{int(next_run.timestamp())}"
                     # run_collection_task 以 job_id 作第 4 位置参数（幂等键 + 状态回写）；
-                    # arq 0.28 的 enqueue_job 不支持 _max_tries/_timeout，任务超时由内部兜底。
+                    # mode 读取源配置的 collection_mode（/schedule 保存），定时链路同样
+                    # 尊重 INCREMENTAL 而非静默全量（跨链路一致性，M4）。
+                    # actor_id 传 None：collection_run 约定定时调度归因 NULL，不归因给源创建人。
                     await redis.enqueue_job(
                         "run_collection_task",
                         src.source_id,
-                        src.created_by,
+                        None,
                         job_id,
+                        mode=getattr(src, "collection_mode", None) or "FULL",
                         _job_id=job_id,
                     )
                     triggered += 1

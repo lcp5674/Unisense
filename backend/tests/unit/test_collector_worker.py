@@ -45,6 +45,7 @@ async def test_scheduler_triggers_source_in_window():
     src.source_id = "src1"
     src.schedule_cron = "*/5 * * * *"
     src.created_by = 7
+    src.collection_mode = "INCREMENTAL"
 
     redis = MagicMock()
     redis.enqueue_job = AsyncMock()
@@ -67,10 +68,13 @@ async def test_scheduler_triggers_source_in_window():
     args = redis.enqueue_job.call_args
     assert args.args[0] == "run_collection_task"
     assert args.args[1] == "src1"
-    assert args.args[2] == 7
+    # 定时调度 actor 语义为 NULL（collection_run 约定），不归因给源创建人
+    assert args.args[2] is None
     # job_id 必须作为第 4 位置参数（幂等键 + 状态回写），且与 _job_id 一致
     assert args.args[3] == args.kwargs["_job_id"]
     assert args.kwargs["_job_id"].startswith("collect:sched:src1:")
+    # mode 读取源配置的 collection_mode，定时链路同样尊重 INCREMENTAL（M4）
+    assert args.kwargs["mode"] == "INCREMENTAL"
     # arq 0.28 不支持 _max_tries/_timeout，不得透传
     assert "_max_tries" not in args.kwargs
     assert "_timeout" not in args.kwargs
@@ -152,6 +156,26 @@ async def test_arq_queue_enqueue_writes_initial_status():
     assert job_id == "j1"
     redis.hset.assert_awaited_once()
     assert redis.hset.call_args.kwargs["mapping"]["status"] == "QUEUED"
+
+
+async def test_arq_queue_enqueue_passes_mode():
+    """M4: arq 入队把 mode 透传给 worker 并写入 QUEUED detail（任务中心可读真实模式）。"""
+    redis = MagicMock()
+    job = MagicMock()
+    job.job_id = "j1"
+    redis.enqueue_job = AsyncMock(return_value=job)
+    redis.hset = AsyncMock()
+    redis.hsetnx = AsyncMock()
+
+    q = ArqCollectionQueue(redis=redis)
+    await q.enqueue("src1", 1, mode="INCREMENTAL")
+
+    # mode 作为关键字参数透传给 run_collection_task（跨链路一致性的关键）
+    enqueue_kwargs = redis.enqueue_job.call_args.kwargs
+    assert enqueue_kwargs["mode"] == "INCREMENTAL"
+    # QUEUED detail 含 mode，任务中心 RUNNING 前即可展示真实模式
+    detail = redis.hset.call_args.kwargs["mapping"]["detail"]
+    assert '"mode": "INCREMENTAL"' in detail
 
 
 async def test_arq_queue_get_returns_job_status():
