@@ -292,7 +292,7 @@ class CollectorService(BaseService):
         )
 
     async def create_source(
-        self, req: DataSourceCreateRequest, actor_id: int
+        self, req: DataSourceCreateRequest, actor_id: int, org_id: int | None = None
     ) -> DataSourceResponse:
         # 验证 source_type 在 CollectorRegistry 中已注册
         from app.services.collector.connectors import registry
@@ -330,6 +330,7 @@ class CollectorService(BaseService):
             health_status="unknown",
             quota={},
             created_by=actor_id,
+            org_id=org_id,  # 多租户隔离：创建时归属当前用户组织（P1 加固）
         )
         try:
             await self._repo.create_source(src)
@@ -2344,8 +2345,10 @@ class CollectorService(BaseService):
                 "change_type": log.change_type,
                 "before_signature": log.before_signature,
                 "after_signature": log.after_signature,
-                "before_schema": log.before_schema,
-                "after_schema": log.after_schema,
+                # P2-17: 列表不返回全量 schema（仅 diff_json 摘要）——大字段由
+                # repository load_only 排除，此处置 None 避免触发懒加载
+                "before_schema": None,
+                "after_schema": None,
                 "diff_json": log.diff_json,
                 "detected_at": log.detected_at.isoformat() if log.detected_at else None,
             }

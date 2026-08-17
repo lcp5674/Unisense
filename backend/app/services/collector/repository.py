@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import String, case, cast, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.core.logging import get_logger
 from app.models.collector_models import CollectionRun, CollectionWatermark, SchemaDriftLog
@@ -655,8 +656,27 @@ class CollectorRepository:
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[Sequence[SchemaDriftLog], int]:
-        """查询 Schema 变更日志。"""
-        base = select(SchemaDriftLog).where(SchemaDriftLog.source_id == source_id)
+        """查询 Schema 变更日志。
+
+        P2-17: 列表只加载列表所需列（``load_only`` 排除 before/after_schema
+        大 JSON——列表仅展示 diff_json 摘要），避免全列传输/解析大字段。
+        """
+        base = (
+            select(SchemaDriftLog)
+            .options(
+                load_only(
+                    SchemaDriftLog.id,
+                    SchemaDriftLog.source_id,
+                    SchemaDriftLog.entity_name,
+                    SchemaDriftLog.change_type,
+                    SchemaDriftLog.before_signature,
+                    SchemaDriftLog.after_signature,
+                    SchemaDriftLog.diff_json,
+                    SchemaDriftLog.detected_at,
+                )
+            )
+            .where(SchemaDriftLog.source_id == source_id)
+        )
         if entity_name:
             base = base.where(SchemaDriftLog.entity_name == entity_name)
         count = await self._db.scalar(select(func.count()).select_from(base.subquery()))
@@ -1005,30 +1025,87 @@ class CollectorRepository:
         await self._db.flush()
         return cat
 
-    async def get_description_coverage(self) -> dict[str, Any]:
-        """描述缺失统计：表/字段覆盖率 + 按表列缺失字段数（治理优先级）。
+    async def get_description_coverage(
+        self, page: int = 1, page_size: int | None = None
+    ) -> dict[str, Any]:
+        """描述缺失统计：汇总指标 SQL 端聚合 + per_table 服务端分页。
+
+        优化（P1-8）：此前一次性拉全部 db_catalog（含 schema_json 大字段）+
+        全部字段描述内存聚合，表量大时每次进页面全表装载。现改为：
+        - 汇总指标（表数/有描述表数/字段数/有描述字段数）全部 SQL 端聚合
+          （COUNT / SUM(json_length)），不装载 ORM 大字段；
+        - per_table 明细按 page/page_size 服务端分页（page_size=None 返回
+          全量，向后兼容旧前端契约）。
+
+        Args:
+            page: 页码（≥1）。
+            page_size: 每页条数；None 表示全量（向后兼容）。
 
         Returns:
-            {
-                "total_tables": 表总数,
-                "tables_with_desc": 有表级描述数,
-                "tables_missing_desc": 缺表级描述数,
-                "total_fields": 字段总数,
-                "fields_with_desc": 有字段描述数,
-                "fields_missing_desc": 缺字段描述数,
-                "per_table": 按表列明细（可排序）,
-            }
+            汇总 + per_table（分页后）+ per_table_total/page/page_size。
         """
-        cats = (
-            await self._db.execute(
-                select(DBCatalog).where(DBCatalog.deleted_at.is_(None))
+        # —— 汇总指标：SQL 端聚合（不装载 db_catalog 大字段）——
+        total_tables = int(
+            await self._db.scalar(
+                select(func.count(DBCatalog.id)).where(DBCatalog.deleted_at.is_(None))
             )
-        ).scalars().all()
-        descs = (
-            await self._db.execute(
-                select(ColumnDescription).where(ColumnDescription.deleted_at.is_(None))
+            or 0
+        )
+        tables_with_desc = int(
+            await self._db.scalar(
+                select(func.count(DBCatalog.id)).where(
+                    DBCatalog.deleted_at.is_(None),
+                    DBCatalog.description.is_not(None),
+                    DBCatalog.description != "",
+                )
             )
-        ).scalars().all()
+            or 0
+        )
+        total_fields_row = await self._db.execute(
+            select(
+                func.coalesce(
+                    func.sum(func.json_length(DBCatalog.schema_json["columns"])), 0
+                )
+            ).where(DBCatalog.deleted_at.is_(None))
+        )
+        total_fields = int(total_fields_row.scalar() or 0)
+        fields_with_desc = int(
+            await self._db.scalar(
+                select(func.count(ColumnDescription.id)).where(
+                    ColumnDescription.deleted_at.is_(None),
+                    ColumnDescription.source.in_(("manual", "llm")),
+                )
+            )
+            or 0
+        )
+
+        # —— per_table 明细：服务端分页 ——
+        base = (
+            select(DBCatalog)
+            .where(DBCatalog.deleted_at.is_(None))
+            .order_by(DBCatalog.id)
+        )
+        per_table_total = int(
+            await self._db.scalar(select(func.count()).select_from(base.subquery()))
+            or 0
+        )
+        if page_size is not None and page_size > 0:
+            stmt = base.offset((page - 1) * page_size).limit(page_size)
+        else:
+            stmt = base
+        cats = (await self._db.execute(stmt)).scalars().all()
+        cat_ids = [c.id for c in cats]
+        # 仅装载当前页表的字段描述（缩小装载量）
+        descs: Sequence[ColumnDescription] = []
+        if cat_ids:
+            descs = (
+                await self._db.execute(
+                    select(ColumnDescription).where(
+                        ColumnDescription.deleted_at.is_(None),
+                        ColumnDescription.catalog_id.in_(cat_ids),
+                    )
+                )
+            ).scalars().all()
         srcs = (
             await self._db.execute(
                 select(DataSource.source_id, DataSource.domain, DataSource.name)
@@ -1043,9 +1120,7 @@ class CollectorRepository:
         domain_map = {row.source_id: row.domain for row in srcs}
         src_name_map = {row.source_id: row.name for row in srcs}
         # 责任人展示名：display_name 优先，缺省回退 username
-        owner_map = {
-            row.id: (row.display_name or row.username) for row in users
-        }
+        owner_map = {row.id: (row.display_name or row.username) for row in users}
         # 仅 manual/llm 记录计入已描述（schema 来源与 comment 等价，避免重复计）
         desc_keys: set[tuple[int, str]] = {
             (d.catalog_id, d.column_name)
@@ -1054,14 +1129,10 @@ class CollectorRepository:
         }
 
         per_table: list[dict[str, Any]] = []
-        total_fields = 0
-        fields_with_desc = 0
         for cat in cats:
             columns = _catalog_columns(cat.schema_json)
             total = len(columns)
             covered = sum(1 for c in columns if _column_has_desc(c, cat.id, desc_keys))
-            total_fields += total
-            fields_with_desc += covered
             per_table.append(
                 {
                     "catalog_id": cat.id,
@@ -1089,18 +1160,19 @@ class CollectorRepository:
                 }
             )
 
-        tables_with_desc = sum(1 for t in per_table if t["table_desc"])
         return {
-            "total_tables": len(per_table),
+            "total_tables": total_tables,
             "tables_with_desc": tables_with_desc,
-            "tables_missing_desc": len(per_table) - tables_with_desc,
+            "tables_missing_desc": total_tables - tables_with_desc,
             "total_fields": total_fields,
             "fields_with_desc": fields_with_desc,
             "fields_missing_desc": total_fields - fields_with_desc,
             "per_table": per_table,
+            "per_table_total": per_table_total,
+            "page": page,
+            "page_size": page_size,
         }
 
-    # ---- 三期：资产规模概览 / 列表信号 ----
 
     async def get_source_overview(self, source_id: str) -> dict[str, Any]:
         """资产规模概览聚合（详情页头部）。

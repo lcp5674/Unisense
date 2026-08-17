@@ -638,7 +638,11 @@ class TableCoverageItem(BaseModel):
 
 
 class DescriptionCoverageResponse(BaseModel):
-    """描述缺失统计响应。"""
+    """描述缺失统计响应。
+
+    汇总指标（total_tables 等）为 SQL 端聚合；``per_table`` 为分页明细
+    （page_size=None 时全量，向后兼容旧契约），分页元信息可选携带。
+    """
 
     total_tables: int
     tables_with_desc: int
@@ -647,3 +651,6 @@ class DescriptionCoverageResponse(BaseModel):
     fields_with_desc: int
     fields_missing_desc: int
     per_table: list[TableCoverageItem]
+    per_table_total: int | None = None
+    page: int | None = None
+    page_size: int | None = None

@@ -3007,8 +3007,10 @@ async def test_repo_update_table_description_not_found() -> None:
 
 
 def _coverage_session() -> MagicMock:
-    """构造 coverage 统计用 session：三次 execute 返回 catalog/desc/source。"""
+    """构造 coverage 统计用 session：SQL 聚合（scalar）+ execute 返回分页明细。"""
     s = MagicMock()
+    # scalar 顺序：total_tables / tables_with_desc / fields_with_desc / per_table_total
+    s.scalar = AsyncMock(side_effect=[2, 1, 2, 2])
 
     cat1 = MagicMock()
     cat1.id = 1
@@ -3063,7 +3065,11 @@ def _coverage_session() -> MagicMock:
         SimpleNamespace(id=5, display_name="张三", username="zhangsan"),
     ]
 
-    s.execute = AsyncMock(side_effect=[res_cats, res_descs, res_srcs, res_users])
+    res_fields = MagicMock()
+    res_fields.scalar.return_value = 4
+    s.execute = AsyncMock(
+        side_effect=[res_fields, res_cats, res_descs, res_srcs, res_users]
+    )
     return s
 
 
@@ -3079,6 +3085,10 @@ async def test_repo_get_description_coverage_stats() -> None:
     # cat1.name(schema comment) + cat2.email(manual 记录) = 2
     assert cov["fields_with_desc"] == 2
     assert cov["fields_missing_desc"] == 2
+    # P1-8: 分页元信息（默认 page_size=None 全量）
+    assert cov["per_table_total"] == 2
+    assert cov["page"] == 1
+    assert cov["page_size"] is None
 
     by_name = {t["entity_name"]: t for t in cov["per_table"]}
     assert by_name["ods_order"]["missing_fields"] == 1
@@ -3856,3 +3866,21 @@ async def test_batch_schedule_sources_success() -> None:
     result = await svc.batch_schedule_sources(["s1"], "0 2 * * *", actor_id=1)
     assert len(result.succeeded) == 1
     assert src.schedule_cron == "0 2 * * *"
+
+
+async def test_repo_get_description_coverage_pagination() -> None:
+    """P1-8: per_table 服务端分页——page_size 构造 limit/offset，元信息透传。"""
+    s = _coverage_session()
+    repo = CollectorRepository(s)
+    cov = await repo.get_description_coverage(page=2, page_size=1)
+
+    assert cov["per_table_total"] == 2
+    assert cov["page"] == 2
+    assert cov["page_size"] == 1
+    # 分页明细语句带 offset/limit（第二条 execute 为分页表查询）
+    page_stmt = s.execute.call_args_list[1].args[0]
+    assert page_stmt._limit == 1
+    assert page_stmt._offset == 1
+    # 汇总指标不受分页影响（SQL 端聚合，全量口径）
+    assert cov["total_tables"] == 2
+    assert cov["fields_with_desc"] == 2

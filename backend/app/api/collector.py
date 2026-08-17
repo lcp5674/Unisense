@@ -1036,14 +1036,17 @@ async def list_catalog_databases(
 async def get_description_coverage(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    page: int = Query(1, ge=1),
+    page_size: int | None = Query(None, ge=1, le=500, description="每页条数；缺省全量"),
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[DescriptionCoverageResponse]:
     """描述缺失统计：表/字段覆盖率 + 按表列缺失字段数（治理优先级排序依据）。
 
     供资产地图「描述缺失」tab 与采集目录概览卡使用。
+    P1-8: 汇总指标 SQL 端聚合；per_table 支持服务端分页。
     """
     svc = _svc(db)
-    coverage = await svc._repo.get_description_coverage()
+    coverage = await svc._repo.get_description_coverage(page=page, page_size=page_size)
     return ok(data=DescriptionCoverageResponse(**coverage), trace_id=trace_id)
 
 
