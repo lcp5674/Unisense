@@ -1036,9 +1036,9 @@ async def list_catalog_databases(
 async def get_description_coverage(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
     page: int = Query(1, ge=1),
     page_size: int | None = Query(None, ge=1, le=500, description="每页条数；缺省全量"),
-    trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[DescriptionCoverageResponse]:
     """描述缺失统计：表/字段覆盖率 + 按表列缺失字段数（治理优先级排序依据）。
 
