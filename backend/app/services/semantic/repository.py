@@ -374,6 +374,25 @@ class MetricRepository:
         )
         return result.scalar_one_or_none()
 
+    async def has_pending_version(self, metric_id: int) -> bool:
+        """是否存在未完成的破坏性变更确认期（PENDING_CONFIRMATION）版本。
+
+        PENDING 确认期内禁止再次发起破坏性变更——否则多个 PENDING 版本并存，
+        转正低版本号时会把主表 version 回退并覆盖高版本口径（版本历史倒挂）。
+
+        Returns:
+            True 如果存在未转正的 PENDING_CONFIRMATION 版本。
+        """
+        result = await self._db.execute(
+            select(MetricVersion.id).where(
+                MetricVersion.metric_id == metric_id,
+                MetricVersion.status == "PENDING_CONFIRMATION",
+                MetricVersion.deleted_at.is_(None),
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def mark_version_published(
         self, metric_id: int, version: int, published_at: datetime, *, status: str = "PUBLISHED"
     ) -> None:

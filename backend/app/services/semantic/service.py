@@ -777,6 +777,15 @@ class MetricService(BaseService):
 
             # S-02 修复：PUBLISHED 状态口径变更走 PENDING_VERSION 期，不直接生效
             if metric.status == "PUBLISHED" and is_breaking:
+                # PENDING 确认期内禁止再次发起破坏性变更——多个 PENDING 版本并存时，
+                # 转正低版本号会把主表 version 回退并覆盖高版本口径（版本历史倒挂，
+                # 已确认的高版本变更丢失）。须先完成当前确认期（确认/拒绝/超时）。
+                if await self._repo.has_pending_version(metric.id):
+                    raise ConflictError(
+                        f"该指标存在待确认的破坏性变更（版本 {metric.version}），"
+                        "请先完成确认或等待超时后再发起新变更",
+                        error_code="METRIC_PENDING_VERSION_EXISTS",
+                    )
                 # 破坏性变更：创建 PENDING 版本，不更新 metric 主表口径；
                 # 同时收敛 top-level 破坏性字段（granularity/unit），
                 # 防止组合请求绕过确认期直写主表（与 elif 分支一致）。
@@ -834,6 +843,13 @@ class MetricService(BaseService):
 
             # PUBLISHED 状态 → PENDING_CONFIRMATION（不直接生效 top-level 破坏性字段）
             if metric.status == "PUBLISHED":
+                # PENDING 确认期内禁止再次发起破坏性变更（与 definition_json 分支同款防叠加）
+                if await self._repo.has_pending_version(metric.id):
+                    raise ConflictError(
+                        f"该指标存在待确认的破坏性变更（版本 {metric.version}），"
+                        "请先完成确认或等待超时后再发起新变更",
+                        error_code="METRIC_PENDING_VERSION_EXISTS",
+                    )
                 # 移除破坏性 top-level 字段，不直接更新 metric 主表
                 for field in BREAKING_TOP_LEVEL_FIELDS:
                     updates.pop(field, None)

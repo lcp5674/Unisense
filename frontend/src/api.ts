@@ -237,6 +237,7 @@ const ERROR_CODE_ZH: Record<string, string> = {
   COMPLIANCE_BLOCKED: "该指标含个人信息，需先完成合规复核",
   CONCURRENT_MODIFICATION: "数据已被他人修改，请刷新后重试",
   OPTIMISTIC_LOCK_CONFLICT: "数据已被他人修改，请刷新后重试",
+  METRIC_PENDING_VERSION_EXISTS: "该指标存在待确认的破坏性变更，请先完成确认或等待超时后再发起新变更",
   DEPENDENCY_DEGRADED_GRAPH: "血缘图服务暂不可用，已降级为库表查询",
   DEPENDENCY_DEGRADED_LLM: "AI 服务暂不可用，请稍后再试",
   DRIFT_DETECTED: "检测到数据表结构漂移，请核查上游",

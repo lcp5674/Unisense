@@ -49,6 +49,9 @@ def _svc_with_repo() -> tuple[MetricService, MagicMock]:
         # submit 路径会经 _notify_metric_stakeholders 开独立 DB 会话做定向通知，
         # 单元测试中会跨事件循环连库产生 RuntimeError——统一 mock 掉（通知行为另有集成测试）。
         svc._notify_metric_stakeholders = AsyncMock(return_value=None)
+        # PENDING 确认期检查（update_metric 破坏性变更前置）默认无待确认版本，
+        # 个别测试覆盖为 True 验证防叠加。
+        mock_repo_cls.return_value.has_pending_version = AsyncMock(return_value=False)
         return svc, mock_repo_cls.return_value
 
 
@@ -1863,6 +1866,39 @@ async def test_update_metric_published_breaking_def_creates_pending():
     # create_pending(metric, version, consumer_ids) 位置参数
     assert fake_pvm.create_pending.call_args.args[2] == [1, 2]
     assert result.row_version == 2
+
+
+async def test_update_metric_published_second_breaking_blocked_during_pending():
+    """PENDING 确认期内再次发起破坏性变更 → 拒绝（METRIC_PENDING_VERSION_EXISTS）。
+
+    修复前：多个 PENDING 版本并存，转正低版本号会把主表 version 回退并覆盖
+    高版本口径（版本历史倒挂、已确认的高版本变更丢失）。
+    """
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="PUBLISHED",
+        row_version=1,
+        version=2,  # 主表 version 已在第一次 PENDING 时递增预留
+        definition_json={"expression": "SUM(order_amount)"},
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    # 已有未转正的 PENDING_CONFIRMATION 版本
+    repo.has_pending_version = AsyncMock(return_value=True)
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                definition_json={"expression": "SUM(refund_amount)"},
+                change_reason="PENDING 期内二次破坏性变更",
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+    assert exc.value.error_code == "METRIC_PENDING_VERSION_EXISTS"
+    # 未创建版本记录、未创建新 PENDING（拒绝在创建前）
+    repo.create_version.assert_not_called()
+    repo.update_with_optimistic_lock.assert_not_called()
 
 
 async def test_update_metric_published_breaking_defers_lineage_registration():

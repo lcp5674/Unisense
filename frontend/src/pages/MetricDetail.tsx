@@ -1746,16 +1746,28 @@ export function MetricDetail() {
       >
         {metric.status === "PUBLISHED" && (
           <Alert
-            type="warning"
+            type={metric.pending_version ? "error" : "warning"}
             showIcon
             style={{ marginBottom: 12 }}
-            message="该指标已发布：变更可能触发口径版本确认"
+            message={
+              metric.pending_version
+                ? "存在待确认的破坏性变更：当前不可再次发起破坏性变更"
+                : "该指标已发布：变更可能触发口径版本确认"
+            }
             description={
-              <span>
-                修改<b>粒度/单位/聚合方式/口径定义</b>（破坏性变更）将进入{" "}
-                <b>PENDING 确认期</b>，需消费方确认后新口径才生效；仅修改治理属性
-                （数仓层/时效/分级/币种等）与名称将直接生效、不触发版本确认。
-              </span>
+              metric.pending_version ? (
+                <span>
+                  该指标存在<b>待确认的破坏性变更</b>（版本 {metric.version}），
+                  修改<b>粒度/单位/聚合方式/口径定义</b>将被拒绝；请先在
+                  「版本历史」完成确认或等待超时后再发起新变更。治理属性与名称仍可直接修改。
+                </span>
+              ) : (
+                <span>
+                  修改<b>粒度/单位/聚合方式/口径定义</b>（破坏性变更）将进入{" "}
+                  <b>PENDING 确认期</b>，需消费方确认后新口径才生效；仅修改治理属性
+                  （数仓层/时效/分级/币种等）与名称将直接生效、不触发版本确认。
+                </span>
+              )
             }
           />
         )}
