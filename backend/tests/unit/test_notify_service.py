@@ -408,3 +408,12 @@ async def test_purge_expired_delegates_to_repo() -> None:
         (datetime.now().timestamp() - event_cutoff.timestamp()) / 86400, 180, abs_tol=0.01
     )
     repo.commit.assert_awaited()
+
+
+async def test_unread_count_delegates_to_repo() -> None:
+    """unread_count → 委托 repository 精确计数（全局角标）。"""
+    svc, repo = _svc()
+    repo.count_unread = AsyncMock(return_value=5)
+    count = await svc.unread_count(3)
+    assert count == 5
+    repo.count_unread.assert_awaited_with(3)

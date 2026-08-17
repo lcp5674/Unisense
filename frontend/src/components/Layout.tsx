@@ -46,7 +46,7 @@ import {
   clearAuthTokens,
   fetchGlobalSearch,
   fetchPreferences,
-  listNotifications,
+  fetchUnreadCount,
   setPreference,
   UnisenseApiError,
 } from "../api";
@@ -398,14 +398,14 @@ export function Layout({ user }: { user: CurrentUser }) {
     contentRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [location.pathname]);
 
-  // 未读角标：按 read_at 统计未读（请求较大分页以覆盖常见未读量，已读后可清零）。
+  // 未读角标：后端精确 COUNT（unread-count），避免拉列表近似在 >100 条时不准。
   // 路由切换时刷新；通知中心内已读/删除/清空后由变更事件驱动刷新（同页无路由变化）。
   useEffect(() => {
     let cancelled = false;
     const refresh = () => {
-      listNotifications({ page: 1, page_size: 100 })
-        .then((res) => {
-          if (!cancelled) setNotifCount(res.items.filter((n) => !n.read_at).length);
+      fetchUnreadCount()
+        .then((count) => {
+          if (!cancelled) setNotifCount(count);
         })
         .catch(() => {});
     };

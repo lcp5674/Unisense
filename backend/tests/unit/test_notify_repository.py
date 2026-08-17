@@ -202,6 +202,18 @@ class TestNotifyRepository:
         assert "conflict_open" in sql  # 待处理集中事件出现
         assert "metric.approved" not in sql  # 非待处理事件不出现
 
+    async def test_count_unread(self, repo: NotifyRepository) -> None:
+        """count_unread → 精确 COUNT(* WHERE subscriber_id=? AND read_at IS NULL)。"""
+        mock_result = MagicMock()
+        mock_result.scalar_one.return_value = 7
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        count = await repo.count_unread(3)
+        assert count == 7
+        stmt = repo._session.execute.call_args.args[0]
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "subscriber_id" in sql
+        assert "read_at IS NULL" in sql
+
     async def test_list_page_days_filter(self, repo: NotifyRepository) -> None:
         """days=N → created_at 近 N 天过滤。"""
         repo._session.execute = self._page_mocks()

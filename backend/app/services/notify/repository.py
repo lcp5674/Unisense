@@ -164,6 +164,22 @@ class NotifyRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def count_unread(self, subscriber_id: int) -> int:
+        """订阅者未读通知总数（全局角标用，精确计数而非列表近似）。
+
+        与 ``list_notifications_page`` 的未读口径一致（``read_at IS NULL``），
+        供 Header 角标 / 通知中心入口展示，避免前端拉列表近似导致 >100 条时不准。
+        """
+        stmt = (
+            select(func.count())
+            .select_from(Notification)
+            .where(
+                Notification.subscriber_id == subscriber_id,
+                Notification.read_at.is_(None),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one() or 0)
+
     async def mark_all_read(self, subscriber_id: int) -> int:
         """将订阅者全部未读通知置为已读，返回更新条数。"""
         now = datetime.now(UTC)

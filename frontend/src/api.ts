@@ -2259,6 +2259,12 @@ export async function listNotifications(params?: {
   return request(`${API_BASE}/notify/notifications${qs ? `?${qs}` : ""}`);
 }
 
+/** 当前用户未读通知总数（GET /notify/notifications/unread-count，Header 角标精确计数）。 */
+export async function fetchUnreadCount(): Promise<number> {
+  const res = await request<{ count: number }>(`${API_BASE}/notify/notifications/unread-count`);
+  return res.count;
+}
+
 /** 单条标记已读（POST /notify/notifications/{id}/read），返回更新后的通知。 */
 export async function markNotificationRead(id: number): Promise<Notification> {
   return request<Notification>(`${API_BASE}/notify/notifications/${id}/read`, {

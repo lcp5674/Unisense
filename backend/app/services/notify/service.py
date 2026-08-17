@@ -892,6 +892,10 @@ class NotifyService(BaseService):
         """当前用户全部通知标记已读，返回更新条数。"""
         return await self._repo.mark_all_read(actor_id)
 
+    async def unread_count(self, actor_id: int) -> int:
+        """当前用户未读通知总数（全局角标，精确计数而非列表近似）。"""
+        return await self._repo.count_unread(actor_id)
+
     async def delete_notification(self, notif_id: int, actor_id: int, role: str = "") -> None:
         """删除单条通知（物理删除；仅通知归属者本人或平台管理员可操作）。"""
         notif = await self.get_notification(notif_id)
