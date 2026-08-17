@@ -163,6 +163,9 @@ def _preprocess_dialect(sql: str, dialect: str | None) -> str:
       sqlglot 25.x 对 ``CREATE TABLE t DISTRIBUTED BY HASH(id) BUCKETS 10 AS SELECT``
       整体降级为 Command 致血缘全丢；这些子句仅描述物理布局，不影响 SELECT 源与
       目标表，剥离后血缘语义不变。
+    - tsql/mssql：INSERT TOP (n) INTO t SELECT ... → 剥离 TOP (n) 行数限定
+      （sqlglot 25.x 不支持该语法抛 ParseError 致血缘全丢；限行不影响来源表与列映射，
+      血缘语义不变）。
     """
     if not sql or not sql.strip():
         return sql
@@ -180,6 +183,11 @@ def _preprocess_dialect(sql: str, dialect: str | None) -> str:
         sql = re.sub(r"\bPROPERTIES\s*\(.*?\)", " ", sql, flags=re.IGNORECASE | re.DOTALL)
         sql = re.sub(r"\bENGINE\s*=\s*\w+", " ", sql, flags=re.IGNORECASE)
         sql = re.sub(r"\bBUCKETS\s+\d+", " ", sql, flags=re.IGNORECASE)
+    if d in ("tsql", "mssql"):
+        # tsql ``INSERT TOP (n) INTO t SELECT ...``：sqlglot 25.x 不支持该语法直接抛
+        # ParseError 致血缘全丢；剥离 TOP (n) 行数限定（不影响来源表与列映射，血缘
+        # 语义不变——仅限制插入行数）。
+        sql = re.sub(r"\bINSERT\s+TOP\s*\([^)]*\)", "INSERT", sql, flags=re.IGNORECASE)
     return sql
 
 
@@ -657,6 +665,10 @@ def _emit_leaf_edges(
         return
     expr_sql = None if is_bare else source_expr.sql(dialect=dialect)
     for source_table, source_column in resolved:
+        # 自环边跳过：源表与目标表相同（如 ``INSERT INTO t SELECT id FROM t`` 是
+        # 覆盖式更新，``t.id→t.id`` 不构成血缘流转），自环边会造成图谱节点自连。
+        if source_table == target_name:
+            continue
         edges.append(
             FieldEdge(
                 source_table=source_table,
@@ -809,6 +821,87 @@ def _extract_merge_edges(
                 )
 
 
+def _emit_update_pair(
+    lhs: exp.Expression,
+    val: exp.Expression,
+    amap: dict[str, str],
+    target_name: str,
+    cte_map: dict[str, exp.CTE],
+    dialect: str | None,
+    edges: list[FieldEdge],
+) -> None:
+    """为 UPDATE 的单个 SET 赋值（lhs ← val）解析字段血缘。
+
+    ``lhs`` 是目标列（单列 or 多列合并分出的单列）、``val`` 是其值表达式。
+    目标表按 LHS 列所属表独立判定（多表 UPDATE 跨 SET 时各被更新表都是目标，不能
+    全局取首表）；LHS 无表限定（单表 UPDATE）时用主目标兜底。处理子查询值 /
+    CTE 穿透 / 普通表达式三种来源。
+    """
+    target_col = _column_name(lhs)
+    if not target_col:
+        return
+    lhs_alias = lhs.table if isinstance(lhs, exp.Column) else None
+    item_target = amap.get(lhs_alias) if lhs_alias else target_name
+    if not item_target:
+        item_target = target_name
+    if isinstance(val, exp.Subquery):
+        # SET 值为子查询：子查询 SELECT 的投影列 → 目标列（无别名时用目标列名）
+        sub = _try_build_scope(val.this)
+        if sub is None:
+            return
+        star_ast = lhs.parent or lhs
+        for projection in getattr(val.this, "selects", None) or []:
+            if _projection_has_star(projection):
+                edges.append(_star_edge(projection, sub, star_ast, item_target))
+                continue
+            sub_col = _projection_name(projection) or target_col
+            is_bare = _is_bare_column_projection(projection)
+            _emit_leaf_edges(
+                sub, projection, cte_map, dialect, item_target, sub_col, is_bare, edges
+            )
+        return
+    # 普通表达式：逐个解析值中的列引用到来源表
+    is_bare = isinstance(val, exp.Column)
+    expr_sql = None if is_bare else val.sql(dialect=dialect)
+    for leaf in val.find_all(exp.Column):
+        # 自引用：源列与 LHS 同属一张被更新表（如 ``t1.v = t1.v * 2``）→ 跳过
+        if not leaf.table or leaf.table == lhs_alias:
+            continue
+        if leaf.table in cte_map:
+            # 穿透 CTE：进入定义 SELECT 找同名投影列，解析到真实来源表
+            cte_select = cte_map[leaf.table].this
+            inner = _try_build_scope(cte_select)
+            if inner is None:
+                continue
+            for p in getattr(cte_select, "selects", None) or []:
+                if _projection_name(p) != leaf.name:
+                    continue
+                for rt, rc in _resolve_projection(inner, p, cte_map, dialect, 0):
+                    edges.append(
+                        FieldEdge(
+                            source_table=rt,
+                            source_column=rc,
+                            target_table=item_target,
+                            target_column=target_col,
+                            expression=expr_sql,
+                        )
+                    )
+                break
+            continue
+        src_t = amap.get(leaf.table)
+        if not src_t or src_t == item_target:
+            continue
+        edges.append(
+            FieldEdge(
+                source_table=src_t,
+                source_column=leaf.name,
+                target_table=item_target,
+                target_column=target_col,
+                expression=expr_sql,
+            )
+        )
+
+
 def _extract_update_edges(
     update: exp.Update,
     target_name: str,
@@ -836,72 +929,14 @@ def _extract_update_edges(
     for eq in getattr(update, "expressions", None) or []:
         if not isinstance(eq, exp.EQ):
             continue
-        lhs = eq.this
-        target_col = _column_name(lhs)
-        if not target_col:
-            continue
-        # 目标表按 SET 项独立判定：LHS 列所属表（多表 UPDATE 跨 SET 时各被更新表
-        # 都是目标，不能全局取首表）；LHS 无表限定（单表 UPDATE）时用主目标兜底
-        lhs_alias = lhs.table if isinstance(lhs, exp.Column) else None
-        item_target = amap.get(lhs_alias) if lhs_alias else target_name
-        if not item_target:
-            item_target = target_name
-        val = eq.expression
-        if isinstance(val, exp.Subquery):
-            # SET 值为子查询：子查询 SELECT 的投影列 → 目标列（无别名时用目标列名）
-            sub = _try_build_scope(val.this)
-            if sub is None:
-                continue
-            for projection in getattr(val.this, "selects", None) or []:
-                if _projection_has_star(projection):
-                    edges.append(_star_edge(projection, sub, update, item_target))
-                    continue
-                sub_col = _projection_name(projection) or target_col
-                is_bare = _is_bare_column_projection(projection)
-                _emit_leaf_edges(
-                    sub, projection, cte_map, dialect, item_target, sub_col, is_bare, edges
-                )
-            continue
-        # 普通表达式：逐个解析值中的列引用到来源表
-        is_bare = isinstance(val, exp.Column)
-        expr_sql = None if is_bare else val.sql(dialect=dialect)
-        for leaf in val.find_all(exp.Column):
-            # 自引用：源列与 LHS 同属一张被更新表（如 ``t1.v = t1.v * 2``）→ 跳过
-            if not leaf.table or leaf.table == lhs_alias:
-                continue
-            if leaf.table in cte_map:
-                # 穿透 CTE：进入定义 SELECT 找同名投影列，解析到真实来源表
-                cte_select = cte_map[leaf.table].this
-                inner = _try_build_scope(cte_select)
-                if inner is None:
-                    continue
-                for p in getattr(cte_select, "selects", None) or []:
-                    if _projection_name(p) != leaf.name:
-                        continue
-                    for rt, rc in _resolve_projection(inner, p, cte_map, dialect, 0):
-                        edges.append(
-                            FieldEdge(
-                                source_table=rt,
-                                source_column=rc,
-                                target_table=item_target,
-                                target_column=target_col,
-                                expression=expr_sql,
-                            )
-                        )
-                    break
-                continue
-            src_t = amap.get(leaf.table)
-            if not src_t or src_t == item_target:
-                continue
-            edges.append(
-                FieldEdge(
-                    source_table=src_t,
-                    source_column=leaf.name,
-                    target_table=item_target,
-                    target_column=target_col,
-                    expression=expr_sql,
-                )
-            )
+        # 单列赋值 ``col = val`` 与 PG 多列合并赋值 ``(a,b) = (x,y)`` 统一展开为
+        # 单列组按位置处理——多列合并时目标列组与值组逐列 zip 映射
+        if isinstance(eq.this, exp.Tuple) and isinstance(eq.expression, exp.Tuple):
+            pairs = list(zip(eq.this.expressions, eq.expression.expressions, strict=False))
+        else:
+            pairs = [(eq.this, eq.expression)]
+        for lhs, val in pairs:
+            _emit_update_pair(lhs, val, amap, target_name, cte_map, dialect, edges)
 
 
 def _extract_field_edges(ast: Any, dialect: str | None) -> list[FieldEdge]:

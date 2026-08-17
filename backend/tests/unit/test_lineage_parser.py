@@ -1013,3 +1013,41 @@ def test_derived_union_positional_fallback() -> None:
         ("ods.a", "v", "y"),
         ("ods.b", "w", "y"),
     } == {(e.source_table, e.source_column, e.target_column) for e in field_edges}
+
+
+def test_tsql_insert_top_stripped() -> None:
+    """tsql INSERT TOP 剥离限行后正常产血缘（sqlglot 25.x 不支持该语法）。"""
+    sql = "INSERT TOP (10) INTO dws.t SELECT id, v FROM ods.s"
+    table_edges = extract_table_lineage(sql, dialect="tsql")
+    assert [(e.source, e.target) for e in table_edges] == [("ods.s", "dws.t")]
+    field_edges = extract_field_lineage(sql, dialect="tsql")
+    assert {("ods.s", "id", "id"), ("ods.s", "v", "v")} == {
+        (e.source_table, e.source_column, e.target_column) for e in field_edges
+    }
+
+
+def test_pg_multi_column_update() -> None:
+    """PG 多列合并赋值 ``SET (a, b) = (s.a, s.b)``：按位置 zip 映射列组。"""
+    sql = "UPDATE dws.t SET (a, b) = (s.a, s.b) FROM ods.s WHERE t.id = s.id"
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    assert {("ods.s", "a", "dws.t", "a"), ("ods.s", "b", "dws.t", "b")} == {
+        (e.source_table, e.source_column, e.target_table, e.target_column) for e in field_edges
+    }
+    table_edges = extract_table_lineage(sql, dialect="postgres")
+    assert [(e.source, e.target) for e in table_edges] == [("ods.s", "dws.t")]
+
+
+def test_insert_self_reference_no_self_loop() -> None:
+    """INSERT 同表自引用（``INSERT INTO t SELECT ... FROM t``）不产自环字段边（t.id→t.id）。"""
+    sql = "INSERT INTO dws.t SELECT id, v FROM dws.t WHERE dt = '2026'"
+    field_edges = extract_field_lineage(sql, dialect="hive")
+    assert all(e.source_table != e.target_table for e in field_edges), (
+        "不应产出源==目标的自环字段边"
+    )
+    assert extract_table_lineage(sql, dialect="hive") == []
+    # 对照：跨表正常产边
+    sql2 = "INSERT INTO dws.t SELECT id, v FROM ods.s"
+    assert {("ods.s", "id", "id"), ("ods.s", "v", "v")} == {
+        (e.source_table, e.source_column, e.target_column)
+        for e in extract_field_lineage(sql2, "hive")
+    }
