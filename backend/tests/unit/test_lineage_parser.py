@@ -1180,3 +1180,72 @@ def test_oracle_insert_first_conditional() -> None:
         ("ods.s", "id", "dws.t2", "id"),
         ("ods.s", "v", "dws.t2", "v"),
     } == {(e.source_table, e.source_column, e.target_table, e.target_column) for e in field_edges}
+
+
+# ---- 第十三轮：命名窗口 / 标量子查询 scope / UNPIVOT 输出列 ----
+
+
+def test_named_window_derivation_columns() -> None:
+    """命名窗口引用（``OVER w``）：PARTITION/ORDER 列按 WINDOW 子句解析为派生源。
+
+    对照内联窗口行为——``rn`` 应同时得 ``g`` 与 ``ts`` 两个派生源，而非仅 id 边。
+    """
+    sql = (
+        "INSERT INTO dws.t SELECT id, ROW_NUMBER() OVER w AS rn FROM ods.s "
+        "WINDOW w AS (PARTITION BY g ORDER BY ts)"
+    )
+    edges = extract_field_lineage(sql, dialect="postgres")
+    rn_sources = {
+        (e.source_table, e.source_column)
+        for e in edges
+        if e.target_column == "rn" and not e.degraded
+    }
+    assert rn_sources == {("ods.s", "g"), ("ods.s", "ts")}
+
+
+def test_scalar_subquery_field_lineage_correct_scope() -> None:
+    """CASE 分支标量子查询：子查询内部列在自身 scope 解析——得 ``d.v`` 且无 ``s.v`` 伪边。"""
+    sql = (
+        "INSERT INTO dws.t SELECT id, "
+        "CASE WHEN flag = 1 THEN (SELECT max(v) FROM ods.d WHERE d.id = s.id) "
+        "ELSE 0 END AS calc FROM ods.s s"
+    )
+    edges = extract_field_lineage(sql, dialect="postgres")
+    calc_sources = {
+        (e.source_table, e.source_column)
+        for e in edges
+        if e.target_column == "calc" and not e.degraded
+    }
+    # 子查询自身表的聚合列 d.v 必须出现；不得出现 SQL 中不存在的 s.v 伪边
+    assert ("ods.d", "v") in calc_sources
+    assert not any(src_table == "ods.s" and src_col == "v" for src_table, src_col in calc_sources)
+
+
+def test_select_list_scalar_subquery_correct_scope() -> None:
+    """SELECT 列表标量子查询的 sv 归属 ``ods.d.v``，而非伪 ``s.v``。"""
+    sql = "INSERT INTO dws.t SELECT id, (SELECT v FROM ods.d WHERE d.id = s.id) AS sv FROM ods.s s"
+    edges = extract_field_lineage(sql, dialect="postgres")
+    sv_sources = {
+        (e.source_table, e.source_column)
+        for e in edges
+        if e.target_column == "sv" and not e.degraded
+    }
+    assert ("ods.d", "v") in sv_sources
+    assert not any(src_table == "ods.s" and src_col == "v" for src_table, src_col in sv_sources)
+
+
+def test_unpivot_value_column_multi_source() -> None:
+    """UNPIVOT 值列：``u.v`` 归 In 列表源列（多源）；名列 ``u.k`` 是列名字面量不产数据边。"""
+    sql = (
+        "INSERT INTO dws.t (id, k, v) "
+        "SELECT s.id, u.k, u.v FROM ods.s s UNPIVOT (v FOR k IN (a, b, c)) u"
+    )
+    edges = extract_field_lineage(sql, dialect="tsql")
+    v_sources = {
+        (e.source_table, e.source_column)
+        for e in edges
+        if e.target_column == "v" and not e.degraded
+    }
+    # 值列来自被展开的 a/b/c 三列，而非不存在的 s.v/s.k
+    assert v_sources == {("ods.s", "a"), ("ods.s", "b"), ("ods.s", "c")}
+    assert not any(e.source_column in ("k", "v") and e.source_table == "ods.s" for e in edges)

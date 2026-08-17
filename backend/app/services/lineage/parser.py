@@ -569,12 +569,116 @@ def _resolve_projection(
     dialect: str | None,
     depth: int,
 ) -> list[tuple[str, str]]:
-    """递归解析某个投影表达式，返回其所有叶子列的 (真实表名, 列名)。"""
+    """递归解析某个投影表达式，返回其所有叶子列的 (真实表名, 列名)。
+
+    覆盖三类结构：
+    - 普通叶子列：直接按当前 scope 解析；
+    - 标量子查询（SELECT 列表 / CASE 分支的 ``(SELECT ...)``）：子查询内部列须在
+      子查询自身 scope 内解析——未限定列归子查询表（``(SELECT max(v) FROM ods.d)``
+      的 ``v`` 归 ``ods.d``），相关引用（``s.id``）回退外层 scope；
+    - 命名窗口引用（``ROW_NUMBER() OVER w``）：PARTITION/ORDER 列定义在 Select 的
+      ``WINDOW w AS (...)`` 子句而非投影表达式内，按名查窗口定义补充派生源。
+    """
     if depth > _MAX_DEPTH:
         return []
     out: list[tuple[str, str]] = []
+    select_windows = getattr(getattr(scope, "expression", None), "args", {}).get("windows") or []
+    for wnd in projection.find_all(exp.Window):
+        ref = getattr(wnd.args.get("alias"), "name", None)
+        if not ref:
+            continue
+        for wdef in select_windows:
+            if getattr(wdef, "alias_or_name", None) != ref:
+                continue
+            for col in wdef.find_all(exp.Column):
+                out.extend(_resolve_column(scope, col, cte_map, dialect, depth + 1))
+            break
     for leaf in projection.find_all(exp.Column):
-        out.extend(_resolve_column(scope, leaf, cte_map, dialect, depth))
+        out.extend(_resolve_leaf_scope(scope, leaf, cte_map, dialect, depth))
+    return out
+
+
+def _innermost_subquery(leaf: exp.Column) -> exp.Subquery | None:
+    """返回包含 ``leaf`` 的最内层标量子查询节点（沿 parent 链向上查找）。"""
+    node = leaf.parent
+    while node is not None:
+        if isinstance(node, exp.Subquery):
+            return node
+        node = node.parent
+    return None
+
+
+def _resolve_leaf_scope(
+    scope: Any,
+    leaf: exp.Column,
+    cte_map: dict[str, exp.CTE],
+    dialect: str | None,
+    depth: int,
+) -> list[tuple[str, str]]:
+    """解析投影中的单个叶子列——若位于标量子查询内部，用子查询自身 scope。
+
+    子查询内部列有三种形态，需区分 scope：
+    - 限定列命中子查询自身表（``d.id``）→ 子查询 scope 内解析（``ods.d.id``）；
+    - 未限定列（``max(v)`` 的 ``v``）→ 子查询 scope 优先（``ods.d.v``），未命中
+      再回退外层（避免误归属外层表产生 ``s.v`` 伪边）；
+    - 限定列不在子查询来源（``s.id`` 相关引用）→ 外层 scope 解析。
+    """
+    subq = _innermost_subquery(leaf)
+    if subq is None:
+        return _resolve_column(scope, leaf, cte_map, dialect, depth)
+    inner = _try_build_scope(subq.this)
+    if inner is None:
+        return _resolve_column(scope, leaf, cte_map, dialect, depth)
+    inner_sources = getattr(inner, "sources", {}) or {}
+    if not inner_sources:
+        return _resolve_column(scope, leaf, cte_map, dialect, depth)
+    if leaf.table and leaf.table in inner_sources:
+        return _resolve_column(inner, leaf, cte_map, dialect, depth)
+    if not leaf.table:
+        resolved = _resolve_column(inner, leaf, cte_map, dialect, depth)
+        if resolved:
+            return resolved
+    return _resolve_column(scope, leaf, cte_map, dialect, depth)
+
+
+def _matching_unpivot(table: exp.Table, alias: str) -> exp.Pivot | None:
+    """在源表节点上查找别名匹配的 UNPIVOT（``UNPIVOT (...) AS u``）。
+
+    sqlglot 把 ``UNPIVOT`` 解析为挂在源表上的 ``exp.Pivot``（``unpivot=True``），
+    其别名（``u``）不在 scope 的 sources 中，需按源表逐个匹配。
+    """
+    for piv in table.find_all(exp.Pivot):
+        if not piv.args.get("unpivot"):
+            continue
+        p_alias = piv.args.get("alias")
+        if isinstance(p_alias, exp.TableAlias) and p_alias.alias_or_name == alias:
+            return piv
+    return None
+
+
+def _unpivot_output_sources(
+    scope: Any,
+    piv: exp.Pivot,
+    col: exp.Column,
+    cte_map: dict[str, exp.CTE],
+    dialect: str | None,
+    depth: int,
+) -> list[tuple[str, str]]:
+    """UNPIVOT 输出列解析。
+
+    值列（``expressions`` 命名的列，如 ``UNPIVOT (v FOR ...)`` 的 ``v``）的血缘来源
+    是 ``FOR ... IN (a, b, c)`` 列表里的源列（``s.a/s.b/s.c``，多源）；名列
+    （``field.this``，如 ``k``）是列名字面量（元数据），不构成数据血缘，返回空。
+    """
+    field = piv.args.get("field")
+    if not isinstance(field, exp.In):
+        return []
+    value_cols = [e.name for e in (piv.args.get("expressions") or [])]
+    if col.name not in value_cols:
+        return []
+    out: list[tuple[str, str]] = []
+    for src_col in field.expressions:
+        out.extend(_resolve_column(scope, exp.column(src_col.name), cte_map, dialect, depth + 1))
     return out
 
 
@@ -599,6 +703,16 @@ def _resolve_column(
     sources = getattr(scope, "sources", {}) or {}
     if qualifier:
         src = sources.get(qualifier)
+    if src is None and qualifier:
+        # UNPIVOT 输出列（``UNPIVOT (v FOR k IN (a, b, c)) AS u``）：qualifier ``u``
+        # 是挂在源表节点上的 Pivot 别名（不出现在 sources）。值列 ``u.v`` 的血缘来源
+        # 是 In 列表的源列（``s.a/s.b/s.c``）；名列 ``u.k`` 是列名字面量，无数据血缘。
+        for _name, s in sources.items():
+            if not isinstance(s, exp.Table):
+                continue
+            piv = _matching_unpivot(s, qualifier)
+            if piv is not None:
+                return _unpivot_output_sources(scope, piv, col, cte_map, dialect, depth)
     if src is None:
         # 未限定列：**优先** UNNEST/LATERAL VIEW 展开表的显式列名声明
         # （PG ``UNNEST(a.items) AS u`` / Hive ``EXPLODE(a.tags) e AS tag`` 明确声明
@@ -832,7 +946,13 @@ def _extract_branch_edges(
         if not target_col:
             continue
         leaf_cols = list(projection.find_all(exp.Column))
-        if not leaf_cols:
+        # 命名窗口引用（``ROW_NUMBER() OVER w``）的 PARTITION/ORDER 列在 Select 的
+        # WINDOW 子句而非投影内，``leaf_cols`` 为空但仍有派生源（``_resolve_projection``
+        # 会按名补解析）——不能仅因无内联列就跳过。
+        named_window = any(
+            getattr(w.args.get("alias"), "name", None) for w in projection.find_all(exp.Window)
+        )
+        if not leaf_cols and not named_window:
             continue
         is_bare = _is_bare_column_projection(projection)
         _emit_leaf_edges(
