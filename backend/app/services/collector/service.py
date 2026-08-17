@@ -1814,6 +1814,25 @@ class CollectorService(BaseService):
             },
         )
 
+        # P1-4: 资源配额——max_scan_rows 按表数截断注册清单。
+        # 源端实体数超过配额时仅注册前 N 个（配额=0/未配置表示不限制），
+        # 防止超大表清单一次性拖垮注册/内存（服务可用性保护）。
+        quota_truncated = 0
+        quota = src.quota or {}
+        max_scan_rows = (
+            int(quota.get("max_scan_rows") or 0) if isinstance(quota, dict) else 0
+        )
+        if max_scan_rows > 0 and len(result.specs) > max_scan_rows:
+            quota_truncated = len(result.specs) - max_scan_rows
+            logger.warning(
+                "collect_quota_truncated: source=%s scanned=%s limit=%s truncated=%s",
+                source_id,
+                len(result.specs),
+                max_scan_rows,
+                quota_truncated,
+            )
+            result.specs = result.specs[:max_scan_rows]
+
         registered = 0
         pii_registered = 0
         batch_payloads: list[dict[str, Any]] = []
@@ -2011,6 +2030,7 @@ class CollectorService(BaseService):
             # 表级过滤跳过（方案 B：采集结果/记录展示被白黑名单过滤掉的表）
             "filtered_count": getattr(result, "filtered_count", 0),
             "filtered_names": getattr(result, "filtered_names", []),
+            "quota_truncated": quota_truncated,
         }
 
     async def refresh_entity(

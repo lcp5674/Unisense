@@ -467,6 +467,7 @@ async def test_run_success_marks_idempotent_key():
     redis = MagicMock()
     redis.exists = AsyncMock(return_value=0)
     redis.set = AsyncMock()
+    redis.eval = AsyncMock(return_value=1)
 
     await run_collection_task(
         {"svc": svc, "db": db, "collector": collector, "job_store": store, "redis": redis},
@@ -475,7 +476,8 @@ async def test_run_success_marks_idempotent_key():
         "job1",
     )
 
-    redis.set.assert_awaited_once_with(
+    # 幂等标记为最后一次 redis.set（此前 acquire 同源锁也用 redis.set(nx=True)）
+    redis.set.assert_awaited_with(
         "collect_job_idempotent:job1", "COMPLETED", ex=7 * 24 * 60 * 60
     )
 
@@ -496,6 +498,7 @@ async def test_run_failure_does_not_mark_idempotent():
     redis = MagicMock()
     redis.exists = AsyncMock(return_value=0)
     redis.set = AsyncMock()
+    redis.eval = AsyncMock(return_value=1)
 
     with patch("app.services.collector.tasks.CollectorRepository", return_value=repo):
         with pytest.raises(RuntimeError, match="boom"):
@@ -512,8 +515,9 @@ async def test_run_failure_does_not_mark_idempotent():
                 "job1",
             )
 
-    # 失败只回写 FAILED，不写幂等键
-    redis.set.assert_not_called()
+    # 失败只回写 FAILED，不写幂等键（acquire 锁的 set 不含 COMPLETED 标记）
+    idempotent_calls = [c for c in redis.set.call_args_list if "COMPLETED" in (c.args or ())]
+    assert idempotent_calls == []
 
 
 async def test_run_cancelled_writes_failed_and_reraises():
@@ -548,3 +552,150 @@ async def test_run_cancelled_writes_failed_and_reraises():
         "FAILED",
         {"source_id": "src1", "actor_id": 1, "error": "采集超时或任务取消"},
     )
+
+
+async def test_run_concurrent_lock_skips_when_acquire_fails():
+    """P1-5: 同源已有采集任务（锁被占用）→ 任务 SKIPPED，不执行采集。"""
+    svc = MagicMock()
+    svc.collect_and_register = AsyncMock()
+    db = MagicMock()
+    store = MagicMock()
+    store.set = AsyncMock()
+    redis = MagicMock()
+    # acquire 用 SET NX：返回 None 表示锁被占用（未获取）
+    redis.set = AsyncMock(return_value=None)
+    redis.eval = AsyncMock(return_value=1)
+
+    result = await run_collection_task(
+        {"svc": svc, "db": db, "job_store": store, "redis": redis, "collector": MagicMock()},
+        "src1",
+        1,
+        "job1",
+    )
+
+    assert result == {"status": "SKIPPED_CONCURRENT"}
+    svc.collect_and_register.assert_not_called()
+    store.set.assert_awaited_once_with(
+        "job1",
+        "SKIPPED",
+        {"source_id": "src1", "actor_id": 1, "error": "同源已有采集任务在运行"},
+    )
+
+
+async def test_run_concurrent_lock_released_on_success():
+    """P1-5: 成功路径 finally 释放同源锁（仅 owner 可释放）。"""
+    svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.collect_and_register = AsyncMock(return_value={"scanned": 2})
+    db = MagicMock()
+    db.commit = AsyncMock()
+    store = MagicMock()
+    store.set = AsyncMock()
+    redis = MagicMock()
+    redis.exists = AsyncMock(return_value=0)
+    redis.set = AsyncMock(return_value=True)  # acquire 成功
+    redis.eval = AsyncMock(return_value=1)
+
+    await run_collection_task(
+        {"svc": svc, "db": db, "collector": MagicMock(), "job_store": store, "redis": redis},
+        "src1",
+        1,
+        "job1",
+    )
+
+    # 锁已释放：eval 释放脚本被调用（key=collect_lock:src1，owner=job1）
+    release_calls = [
+        c for c in redis.eval.call_args_list if "collect_lock:src1" in (c.args or ())
+    ]
+    assert release_calls, "同源锁应在 finally 中释放"
+
+
+async def test_run_retries_transient_error_then_succeeds():
+    """P1-7: 瞬时错误（ExternalDependencyError）自动重试后成功。"""
+    from app.core.exceptions import ExternalDependencyError
+
+    svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.complete_collection_run = AsyncMock()
+    svc.fail_collection_run = AsyncMock()
+    # 第一次抛瞬时错误，第二次成功
+    svc.collect_and_register = AsyncMock(
+        side_effect=[ExternalDependencyError("db down"), {"scanned": 2, "registered": 2}]
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+    store = MagicMock()
+    store.set = AsyncMock()
+
+    with patch("app.services.collector.tasks.asyncio.sleep", AsyncMock()):
+        result = await run_collection_task(
+            {"svc": svc, "db": db, "job_store": store, "collector": MagicMock()},
+            "src1",
+            1,
+            "job1",
+        )
+
+    assert result["registered"] == 2
+    assert svc.collect_and_register.await_count == 2  # 重试 1 次
+
+
+async def test_run_retry_exhausted_raises():
+    """P1-7: 瞬时错误重试耗尽后上抛，任务最终 FAILED。"""
+    from app.core.exceptions import ExternalDependencyError
+
+    svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.fail_collection_run = AsyncMock()
+    svc.collect_and_register = AsyncMock(
+        side_effect=ExternalDependencyError("db down")
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+    repo = MagicMock()
+    repo.update_health_status = AsyncMock()
+    store = MagicMock()
+    store.set = AsyncMock()
+
+    with patch("app.services.collector.tasks.CollectorRepository", return_value=repo):
+        with patch("app.services.collector.tasks.asyncio.sleep", AsyncMock()):
+            with pytest.raises(ExternalDependencyError):
+                await run_collection_task(
+                    {"svc": svc, "db": db, "job_store": store, "collector": MagicMock()},
+                    "src1",
+                    1,
+                    "job1",
+                )
+
+    # 首次 + 2 次重试 = 3 次尝试
+    assert svc.collect_and_register.await_count == 3
+    store.set.assert_awaited_once_with(
+        "job1",
+        "FAILED",
+        {"source_id": "src1", "actor_id": 1, "error": "db down"},
+    )
+
+
+async def test_run_does_not_retry_business_error():
+    """P1-7: 业务错误（非瞬时）不重试，直接失败。"""
+    svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.fail_collection_run = AsyncMock()
+    svc.collect_and_register = AsyncMock(side_effect=ValueError("bad config"))
+    db = MagicMock()
+    db.commit = AsyncMock()
+    repo = MagicMock()
+    repo.update_health_status = AsyncMock()
+    store = MagicMock()
+    store.set = AsyncMock()
+
+    with patch("app.services.collector.tasks.CollectorRepository", return_value=repo):
+        with pytest.raises(ValueError, match="bad config"):
+            await run_collection_task(
+                {"svc": svc, "db": db, "job_store": store, "collector": MagicMock()},
+                "src1",
+                1,
+                "job1",
+            )
+
+    assert svc.collect_and_register.await_count == 1  # 不重试

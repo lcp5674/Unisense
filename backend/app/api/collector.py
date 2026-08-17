@@ -831,6 +831,40 @@ async def get_collection_job(
     return ok(data=status, trace_id=trace_id)
 
 
+@source_router.post("/jobs/{job_id}/cancel", dependencies=_WRITE_DEPS)
+async def cancel_collection_job(
+    job_id: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """P1-7: 取消异步采集任务（任务中心取消能力）。
+
+    - 已入队未运行：取消投递；
+    - 运行中：请求取消（worker 收到 CancelledError 补写 FAILED 终态）；
+    - 任务不存在或已终态：幂等返回 ``canceled=False``（不报 404）。
+    """
+    from app.core.config import settings as _settings
+    from app.services.collector.queue import create_collection_queue
+
+    q = create_collection_queue(redis_url=_settings.redis_url)
+    cancelled = await q.cancel(job_id)
+    if cancelled:
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="data_source.cancel_job",
+            entity_type="data_source",
+            entity_id=job_id,
+            detail={"job_id": job_id},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
+        await db.commit()
+    return ok(data={"job_id": job_id, "canceled": cancelled}, trace_id=trace_id)
+
+
 def _sse_event(event: str, data: dict[str, Any]) -> str:
     """构造一条 SSE 消息（event + JSON data）。"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"

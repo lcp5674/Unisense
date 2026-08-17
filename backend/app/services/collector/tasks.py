@@ -21,7 +21,9 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.core.exceptions import ExternalDependencyError
 from app.db.mysql import async_session_factory
+from app.services.collector.distributed_lock import CollectionLock
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.service import CollectorService
 from app.services.collector.spi import build_collector
@@ -32,6 +34,17 @@ logger = logging.getLogger("unisense.collector.tasks")
 _MAX_PROGRESS_MESSAGES = 300
 #: 幂等键 TTL（秒）——与 JobStore 终态 TTL（7 天）对齐，避免键生命周期短于任务记录
 _IDEMPOTENT_TTL_SECONDS = 7 * 24 * 60 * 60
+#: P1-7 失败自动重试：瞬时错误类型（源库连接/超时/外部依赖类）
+_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    ExternalDependencyError,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+#: 瞬时失败最大尝试次数（首次 + 2 次退避重试）
+_MAX_RETRIES = 3
+#: 退避基数（秒）：第 N 次重试前等待 base * N（asyncio.sleep 不阻塞事件循环）
+_RETRY_BACKOFF_SECONDS = 5
 
 
 def _make_progress_cb(
@@ -173,6 +186,56 @@ async def _record_task_failure(
         )
 
 
+async def _collect_with_retry(
+    svc: CollectorService,
+    source_id: str,
+    collector: Any,
+    actor_id: int,
+    *,
+    mode: str,
+    progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    include_patterns: list[str] | None,
+    exclude_patterns: list[str] | None,
+) -> dict[str, Any]:
+    """带退避重试的采集执行（P1-7）。
+
+    源库连接/超时/外部依赖类瞬时错误（``ExternalDependencyError`` /
+    ``ConnectionError`` / ``TimeoutError`` / ``OSError``）自动退避重试
+    （首次 + 最多 2 次重试，间隔 5s * N）；业务错误（源不存在、数据格式等）
+    直接上抛，不消耗重试配额。upsert 幂等保证重试不产生重复实体。
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return await svc.collect_and_register(
+                source_id,
+                collector,
+                actor_id,
+                mode=mode,
+                progress_cb=progress_cb,
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+            )
+        except _RETRYABLE_EXCEPTIONS as exc:
+            if attempt >= _MAX_RETRIES:
+                logger.warning(
+                    "collect_retry_exhausted: source=%s attempts=%d err=%s",
+                    source_id,
+                    attempt,
+                    exc,
+                )
+                raise
+            logger.warning(
+                "collect_retryable_failure: source=%s attempt=%d/%d err=%s",
+                source_id,
+                attempt,
+                _MAX_RETRIES,
+                exc,
+            )
+            await asyncio.sleep(_RETRY_BACKOFF_SECONDS * attempt)
+
+
 async def run_collection_task(
     ctx: dict[str, Any],
     source_id: str,
@@ -204,6 +267,9 @@ async def run_collection_task(
     own_session = False
     # 采集运行历史记录 ID（创建失败时为 None，不阻断采集主流程）
     run_id: int | None = None
+    # P1-5: 同源并发锁（acquire 成功才置 True，finally 按需 release）
+    lock: CollectionLock | None = None
+    lock_acquired = False
 
     # US4: 幂等检查
     if not await _check_idempotency(redis, job_id):
@@ -216,6 +282,29 @@ async def run_collection_task(
         return {"status": "IDEMPOTENT_SKIP"}
 
     try:
+        # P1-5: 异步链路并发锁——同源串行化（防定时+手动/多次触发并发采集，
+        # 造成水位/DSD 竞态）。获取失败说明同源已有采集任务在运行，本次跳过。
+        lock = CollectionLock(redis)
+        if not await lock.acquire(source_id, job_id, ttl=1800):
+            logger.warning(
+                "collect_concurrent_skip: source=%s job=%s 同源已有采集任务在运行",
+                source_id,
+                job_id,
+            )
+            if store is not None:
+                await store.set(
+                    job_id,
+                    "SKIPPED",
+                    {
+                        "source_id": source_id,
+                        "actor_id": actor_id,
+                        "error": "同源已有采集任务在运行",
+                    },
+                )
+            # SKIPPED 非成功完成，不标记幂等键
+            return {"status": "SKIPPED_CONCURRENT"}
+        lock_acquired = True
+
         svc = ctx.get("svc")
         if svc is None:
             # 生产默认路径：自行为任务构建会话与采集器
@@ -255,7 +344,9 @@ async def run_collection_task(
             if store is not None
             else None
         )
-        result = await svc.collect_and_register(
+        # P1-7: 瞬时错误（源库连接/超时/外部依赖）自动退避重试
+        result = await _collect_with_retry(
+            svc,
             source_id,
             collector,
             actor_id,
@@ -310,6 +401,14 @@ async def run_collection_task(
         )
         raise
     finally:
+        # P1-5: 释放同源并发锁（仅 owner 可释放；Redis 不可用时 no-op）
+        if lock_acquired and lock is not None:
+            try:
+                await lock.release(source_id, job_id)
+            except Exception:  # noqa: BLE001 - 锁释放失败不影响任务收尾
+                logger.warning(
+                    "collect_lock_release_failed: source=%s job=%s", source_id, job_id
+                )
         if own_session and db is not None:
             try:
                 await db.close()

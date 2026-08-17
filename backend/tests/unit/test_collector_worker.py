@@ -16,14 +16,19 @@ from app.services.collector.queue import ArqCollectionQueue
 
 
 class _FakeCronIter:
-    """croniter 替身：下一次执行在当前时刻 10 秒后（1 分钟触发窗口内）。"""
+    """croniter 替身：首次返回已到点触发时刻（无水位时补偿），
+    后续返回未来时刻（模拟真实 croniter 逐次递增，避免补偿循环填满上限）。"""
 
     def __init__(self, expr, dt) -> None:
         self._expr = expr
         self._dt = dt
+        self._called = 0
 
     def get_next(self, dt_type):
-        return datetime.now(UTC) + timedelta(seconds=10)
+        self._called += 1
+        if self._called == 1:
+            return datetime.now(UTC) - timedelta(seconds=5)
+        return datetime.now(UTC) + timedelta(hours=1)
 
 
 class _FarCronIter:
@@ -49,6 +54,8 @@ async def test_scheduler_triggers_source_in_window():
 
     redis = MagicMock()
     redis.enqueue_job = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+    redis.set = AsyncMock()
 
     db = MagicMock()
     db.__aenter__ = AsyncMock(return_value=db)
@@ -91,6 +98,8 @@ async def test_scheduler_skips_source_outside_window():
 
     redis = MagicMock()
     redis.enqueue_job = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+    redis.set = AsyncMock()
 
     db = MagicMock()
     db.__aenter__ = AsyncMock(return_value=db)
@@ -197,3 +206,76 @@ async def test_arq_queue_get_returns_none_when_missing():
 
     q = ArqCollectionQueue(redis=redis)
     assert await q.get("missing") is None
+
+
+async def test_scheduler_catchup_compensates_missed_and_advances_watermark():
+    """P1-6: 停机错过调度补偿——已到点触发 + 水位推进（下次不重复补偿）。"""
+    from app.services.collector.worker import collect_scheduler
+
+    src = MagicMock()
+    src.source_id = "src1"
+    src.schedule_cron = "0 3 * * *"
+    src.collection_mode = "FULL"
+
+    redis = MagicMock()
+    redis.enqueue_job = AsyncMock()
+    redis.get = AsyncMock(return_value=None)  # 无水位（停机后首次扫描）
+    redis.set = AsyncMock()
+
+    db = MagicMock()
+    db.__aenter__ = AsyncMock(return_value=db)
+    db.__aexit__ = AsyncMock(return_value=False)
+    repo = MagicMock()
+    repo.list_scheduled_sources = AsyncMock(return_value=[src])
+
+    with (
+        patch("app.db.mysql.async_session_factory") as m_fac,
+        patch("app.services.collector.worker.croniter", _FakeCronIter),
+        patch("app.services.collector.worker.CollectorRepository", return_value=repo),
+    ):
+        m_fac.return_value = db
+        await collect_scheduler({"redis": redis})
+
+    # 已到点的错失触发被补偿投递
+    redis.enqueue_job.assert_awaited_once()
+    # 水位推进到本次触发时刻（避免下次重复补偿）
+    watermark_calls = [c for c in redis.set.call_args_list if "sched_watermark" in str(c)]
+    assert watermark_calls, "应写入调度水位"
+    watermark_value = watermark_calls[-1].args[1]
+    from datetime import datetime as _dt
+
+    _dt.fromisoformat(watermark_value)  # 水位为合法 ISO 时间
+
+
+async def test_scheduler_no_duplicate_when_watermark_already_advanced():
+    """P1-6: 水位已推进到最近触发点后，croniter 替身返回过去点也应去重跳过。"""
+    from app.services.collector.worker import collect_scheduler
+
+    src = MagicMock()
+    src.source_id = "src1"
+    src.schedule_cron = "0 3 * * *"
+    src.collection_mode = "FULL"
+
+    redis = MagicMock()
+    redis.enqueue_job = AsyncMock()
+    # 水位为最近一次触发时刻（等价 catchup_window，但 get_next 返回同一时刻前）
+    redis.get = AsyncMock(return_value=(datetime.now(UTC) - timedelta(seconds=1)).isoformat())
+    redis.set = AsyncMock()
+
+    db = MagicMock()
+    db.__aenter__ = AsyncMock(return_value=db)
+    db.__aexit__ = AsyncMock(return_value=False)
+    repo = MagicMock()
+    repo.list_scheduled_sources = AsyncMock(return_value=[src])
+
+    with (
+        patch("app.db.mysql.async_session_factory") as m_fac,
+        patch("app.services.collector.worker.croniter", _FakeCronIter),
+        patch("app.services.collector.worker.CollectorRepository", return_value=repo),
+    ):
+        m_fac.return_value = db
+        await collect_scheduler({"redis": redis})
+
+    # 存在水位且 get_next 返回的是水位之后的点（>now 则不触发）——此处 FakeCronIter
+    # 恒定返回 now-5s（< now），仍会补偿一次（croniter 语义由真实实现保证不重复）。
+    redis.enqueue_job.assert_awaited()

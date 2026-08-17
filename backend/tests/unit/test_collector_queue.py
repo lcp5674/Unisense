@@ -390,3 +390,75 @@ class TestRedisJobStoreBytesDecode:
         # 分页：offset 越过第一条
         page2 = await q.list(limit=10, offset=1)
         assert len(page2) == 1
+
+
+# ---------- P1-7: 取消任务 ----------
+
+
+class TestJobCancel:
+
+    @pytest.mark.asyncio
+    async def test_arq_cancel_calls_cancel_job(self):
+        """Arq 取消委托给 ArqRedis.cancel_job，并落 CANCELLED 终态。"""
+        mock_redis = AsyncMock()
+        mock_redis.hgetall = AsyncMock(
+            return_value={"status": "RUNNING", "detail": '{"source_id": "s1"}'}
+        )
+        mock_redis.cancel_job = AsyncMock(return_value=True)
+        # 显式注入 redis 实例（不走模块级单例，避免测试间污染）
+        queue = ArqCollectionQueue(redis=mock_redis)
+
+        cancelled = await queue.cancel("job-1")
+
+        assert cancelled is True
+        mock_redis.cancel_job.assert_awaited_once_with("job-1")
+        # 取消后落 CANCELLED 终态（hset 到 JobStore）
+        mock_redis.hset.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_arq_cancel_terminal_job_returns_false(self):
+        """终态任务不可取消（返回 False，不调 cancel_job）。"""
+        mock_redis = AsyncMock()
+        mock_redis.hgetall = AsyncMock(
+            return_value={"status": "COMPLETED", "detail": "{}"}
+        )
+        mock_redis.cancel_job = AsyncMock()
+        queue = ArqCollectionQueue(redis=mock_redis)
+
+        cancelled = await queue.cancel("job-done")
+
+        assert cancelled is False
+        mock_redis.cancel_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_arq_cancel_nonexistent_returns_false(self):
+        """不存在的任务不可取消（返回 False）。"""
+        mock_redis = AsyncMock()
+        mock_redis.hgetall = AsyncMock(return_value={})
+        mock_redis.cancel_job = AsyncMock()
+        queue = ArqCollectionQueue(redis=mock_redis)
+
+        cancelled = await queue.cancel("job-ghost")
+
+        assert cancelled is False
+        mock_redis.cancel_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_inmemory_cancel_marks_cancelled(self):
+        """内存队列取消：QUEUED → CANCELLED，终态不可取消。"""
+        q = InMemoryCollectionQueue()
+        job_id = await q.enqueue("s1", 1, mode="FULL")
+        assert await q.cancel(job_id) is True
+        job = await q.get(job_id)
+        assert job["status"] == "CANCELLED"
+        # 已终态（CANCELLED）不可重复取消
+        assert await q.cancel(job_id) is False
+
+    @pytest.mark.asyncio
+    async def test_inmemory_cancel_completed_returns_false(self):
+        """内存队列：已 COMPLETED 的任务不可取消。"""
+        q = InMemoryCollectionQueue()
+        job_id = await q.enqueue("s1", 1)
+        await q.set(job_id, "COMPLETED", {"source_id": "s1", "actor_id": 1})
+        assert await q.cancel(job_id) is False
+        assert (await q.get(job_id))["status"] == "COMPLETED"

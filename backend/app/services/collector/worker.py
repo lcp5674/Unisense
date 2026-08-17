@@ -42,6 +42,13 @@ from app.tasks.semantic_tasks import (
 
 logger = logging.getLogger("unisense.collector.worker")
 
+#: P1-6 错过调度补偿：每个源的上次触发水位 key 前缀 / 补偿上限 / 补偿窗口。
+_SCHED_WATERMARK_PREFIX = "collect:sched_watermark:"
+#: 单次扫描最多补偿的错失触发次数（防停机很久导致积压风暴）。
+_SCHED_CATCHUP_MAX = 5
+#: 首次（无水位）或停机恢复时的补偿窗口：只补偿最近 24h 内的错失触发。
+_SCHED_CATCHUP_WINDOW_HOURS = 24
+
 
 async def startup(ctx: dict[str, Any]) -> None:
     """worker 启动：创建 ArqRedis（可 enqueue_job）与 JobStore 注入上下文。
@@ -98,15 +105,32 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
             return
 
         triggered = 0
+        catchup_window = now - timedelta(hours=_SCHED_CATCHUP_WINDOW_HOURS)
         for src in sources:
             cron_expr = src.schedule_cron
             if not cron_expr:
                 continue
             try:
-                itr = croniter(cron_expr, now)
-                next_run = itr.get_next(datetime)
-                if (next_run - now) <= timedelta(minutes=1):
-                    job_id = f"collect:sched:{src.source_id}:{int(next_run.timestamp())}"
+                # P1-6: 错过调度补偿——记录每个源的上次触发水位，停机期间到点的
+                # cron 在恢复后补触发（最多补最近 CATCHUP_MAX 次 / 24h 窗口），
+                # 消除「worker 停机错过调度直接丢失」。
+                watermark_key = f"{_SCHED_WATERMARK_PREFIX}{src.source_id}"
+                raw = await redis.get(watermark_key)
+                base = (
+                    datetime.fromisoformat(raw.decode() if isinstance(raw, bytes) else raw)
+                    if raw
+                    else catchup_window
+                )
+                itr = croniter(cron_expr, base)
+                # 收集 base 之后已到点（≤ now）的所有触发时刻，最多 CATCHUP_MAX 次
+                missed: list[datetime] = []
+                while len(missed) < _SCHED_CATCHUP_MAX:
+                    candidate = itr.get_next(datetime)
+                    if candidate > now:
+                        break
+                    missed.append(candidate)
+                for ts in missed:
+                    job_id = f"collect:sched:{src.source_id}:{int(ts.timestamp())}"
                     # run_collection_task 以 job_id 作第 4 位置参数（幂等键 + 状态回写）；
                     # mode 读取源配置的 collection_mode（/schedule 保存），定时链路同样
                     # 尊重 INCREMENTAL 而非静默全量（跨链路一致性，M4）。
@@ -121,10 +145,14 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
                     )
                     triggered += 1
                     logger.info(
-                        "scheduler_trigger: source=%s next_run=%s",
+                        "scheduler_trigger: source=%s run_at=%s catchup=%s",
                         src.source_id,
-                        next_run.isoformat(),
+                        ts.isoformat(),
+                        ts < now,
                     )
+                if missed:
+                    # 水位推进到本次最后一个触发时刻（避免重复补偿同一时间点）
+                    await redis.set(watermark_key, missed[-1].isoformat())
             except Exception as exc:
                 logger.warning(
                     "scheduler_parse_failed: source=%s cron=%r err=%s",
@@ -166,6 +194,9 @@ class WorkerSettings:
     # 单查询超时由连接器 query_timeout 兜底（60s），此处约束整个任务上限——
     # 避免采集/扫描任务无限期占用 worker 事件循环。
     job_timeout = 1800
+    # P1-4: 全局并发采集任务上限（保护 worker 资源；同源串行由 CollectionLock 保证，
+    # 跨副本并发由部署副本数约束）。
+    max_jobs = 4
     # max_tries 保持默认（1）：幂等键在任务开头 SET NX 占位，失败重试会命中
     # 已占位而跳过，故不引入重试，避免与幂等语义冲突。
     cron_jobs = [

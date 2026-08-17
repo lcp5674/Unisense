@@ -373,6 +373,109 @@ async def test_collect_and_register_uses_classifier_and_counts():
     assert result["failed_count"] == 0
 
 
+async def test_collect_and_register_quota_truncates_specs():
+    """P1-4: max_scan_rows 配额按表数截断注册清单（防超大源端拖垮注册）。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    src = MagicMock(source_type="mysql", quota={"max_scan_rows": 2})
+    src.include_patterns = None
+    src.exclude_patterns = None
+    src.databases = None
+    src.health_metrics = None
+    repo.get_source = AsyncMock(return_value=src)
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=1.0)
+    repo.update_watermark_after_collection = AsyncMock(return_value=MagicMock(mode="FULL"))
+    repo.list_active_entity_names = AsyncMock(return_value=[])
+    repo.update_health_status = AsyncMock()
+
+    class ThreeTablesCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="t1",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["x"]},
+                    ),
+                    CatalogSpec(
+                        entity_name="t2",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["x"]},
+                    ),
+                    CatalogSpec(
+                        entity_name="t3",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["x"]},
+                    ),
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    result = await svc.collect_and_register("s", ThreeTablesCollector(), actor_id=1)
+
+    # 源端 3 个实体，配额 2 → 截断 1 个，仅注册前 2 个
+    assert result["quota_truncated"] == 1
+    assert result["scanned"] == 2
+    assert result["registered"] == 2
+    assert result["failed_count"] == 0
+
+
+async def test_collect_and_register_no_quota_no_truncation():
+    """P1-4: 未配置配额（quota={}）不截断——全部注册。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    src = MagicMock(source_type="mysql", quota={})
+    src.include_patterns = None
+    src.exclude_patterns = None
+    src.databases = None
+    src.health_metrics = None
+    repo.get_source = AsyncMock(return_value=src)
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=1.0)
+    repo.update_watermark_after_collection = AsyncMock(return_value=MagicMock(mode="FULL"))
+    repo.list_active_entity_names = AsyncMock(return_value=[])
+    repo.update_health_status = AsyncMock()
+
+    class TwoTablesCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="t1",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["x"]},
+                    ),
+                    CatalogSpec(
+                        entity_name="t2",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["x"]},
+                    ),
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    result = await svc.collect_and_register("s", TwoTablesCollector(), actor_id=1)
+
+    assert result["quota_truncated"] == 0
+    assert result["scanned"] == 2
+    assert result["registered"] == 2
+
+
 async def test_collect_and_register_handles_failed_specs():
     """FR-004: collect_and_register 正确报告 failed_specs。"""
     svc, repo = _svc()

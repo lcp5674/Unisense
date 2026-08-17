@@ -16,8 +16,11 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import uuid
 from typing import Any, Protocol, runtime_checkable
+
+logger = logging.getLogger("unisense.collector.queue")
 
 
 @runtime_checkable
@@ -36,6 +39,17 @@ class CollectionQueue(Protocol):
 
         ``include_patterns`` / ``exclude_patterns`` 为本次临时表级过滤
         （仅本次采集生效，None=worker 回退到数据源配置的白黑名单）。
+        """
+        ...
+
+    async def cancel(self, job_id: str) -> bool:
+        """取消一次采集任务（P1-7：任务中心取消能力）。
+
+        对已入队未运行的任务：取消投递；对运行中的任务：请求取消
+        （worker 收到 CancelledError 补写 FAILED 终态）。
+
+        Returns:
+            True 表示已请求取消；False 表示任务不存在/已终态无法取消。
         """
         ...
 
@@ -102,6 +116,17 @@ class InMemoryCollectionQueue:
             "created_at": datetime.now(UTC).isoformat(),
         }
         return job_id
+
+    async def cancel(self, job_id: str) -> bool:
+        """取消一次采集任务（内存版：终态不可取消，其余标记 CANCELLED）。"""
+        job = self._jobs.get(job_id)
+        if job is None or job.get("status") in ("COMPLETED", "FAILED", "CANCELLED"):
+            return False
+        job["status"] = "CANCELLED"
+        detail = dict(job.get("detail") or {})
+        detail["error"] = "任务已被用户取消"
+        job["detail"] = detail
+        return True
 
     async def set(self, job_id: str, status: str, detail: dict[str, Any]) -> None:
         from datetime import UTC, datetime
@@ -412,6 +437,28 @@ class ArqCollectionQueue:
         arq_job_id: str = job.job_id
         # 复用模块级共享连接池（不 aclose）
         return arq_job_id
+
+    async def cancel(self, job_id: str) -> bool:
+        """取消一次采集任务（arq 版：终态不可取消，其余调 ArqRedis.cancel_job）。"""
+        from app.core.config import settings
+
+        redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
+        store = RedisJobStore(redis)
+        existing = await store.get(job_id)
+        if existing is None or existing.get("status") in ("COMPLETED", "FAILED", "CANCELLED"):
+            return False
+        try:
+            cancelled = await redis.cancel_job(job_id)
+        except Exception as exc:
+            logger.warning("collect_job_cancel_failed: job=%s err=%s", job_id, exc)
+            return False
+        if cancelled:
+            # 主动落 CANCELLED 终态：arq 对「已入队未运行」的任务取消后不保证回写
+            # JobStore，而任务中心按 JobStore 展示——避免任务列表滞留 QUEUED。
+            detail = dict(existing.get("detail") or {})
+            detail["error"] = "任务已被用户取消"
+            await store.set(job_id, "CANCELLED", detail)
+        return bool(cancelled)
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
         from app.core.config import settings
