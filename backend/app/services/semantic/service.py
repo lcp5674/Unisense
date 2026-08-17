@@ -2639,7 +2639,9 @@ class MetricService(BaseService):
         )
         if all_confirmed:
             try:
-                return await self._promote_pending_version(metric, version)
+                return await self._promote_pending_version(
+                    metric, version, trigger="consumer_confirm", actor_id=consumer_id
+                )
             except ConflictError:
                 # 乐观锁冲突 → 回滚确认状态，让调用方重试
                 await self._repo.update_confirmation_status(mine.id, "PENDING")
@@ -2670,10 +2672,19 @@ class MetricService(BaseService):
         # （含无 PENDING 可标记但已全部确认的恢复场景：旧缺陷遗留未转正的版本）
         confirmations = await self._repo.get_pending_confirmations(metric_id, version)
         if all(c.status in ("CONFIRMED", "TIMEOUT_ACCEPTED") for c in confirmations):
-            return await self._promote_pending_version(metric, version)
+            return await self._promote_pending_version(
+                metric, version, trigger="timeout", actor_id=metric.owner_id
+            )
         return None
 
-    async def _promote_pending_version(self, metric: Metric, version: int) -> Metric:
+    async def _promote_pending_version(
+        self,
+        metric: Metric,
+        version: int,
+        *,
+        trigger: str = "consumer_confirm",
+        actor_id: int | None = None,
+    ) -> Metric:
         """PENDING_VERSION 全部确认/超时接受后的转正：把版本口径同步到主表。
 
         旧实现仅置 ``effective_version`` 并标记版本发布，主表 ``definition_json`` /
@@ -2745,6 +2756,20 @@ class MetricService(BaseService):
             event_type="metric.breaking_change_promoted",
             title="指标口径变更已生效",
             extra_payload={"effective_version": version},
+        )
+        # 转正审计（合规可追溯）：新口径何时正式生效、由谁确认或超时触发。
+        # 消费方主动确认的转正（端点已有 CONFIRM_VERSION 审计）之外，超时自动
+        # 转正（定时任务、无用户操作）此前零审计——14 天后口径悄然生效不可追溯。
+        await self._write_audit(
+            actor_id=actor_id if actor_id is not None else (metric.owner_id or 0),
+            action="PROMOTE_VERSION",
+            entity_type="metric_definition",
+            entity_id=metric.metric_code,
+            detail={
+                "version": version,
+                "trigger": trigger,
+                "effective_version": version,
+            },
         )
         return updated
 

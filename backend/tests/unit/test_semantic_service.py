@@ -2706,6 +2706,79 @@ async def test_promote_pending_version_notifies_all_consumers():
     )
 
 
+async def test_promote_pending_version_writes_promote_audit():
+    """转正（新口径正式生效）写审计——修复前转正动作零审计，
+    超时自动转正（定时任务、无用户操作）14 天后口径悄然生效不可追溯。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(row_version=1, version=1, owner_id=2)
+    repo.get_version = AsyncMock(
+        return_value=MagicMock(
+            definition_json={"expression": "SUM(refund_amount)"},
+            diff_json={},
+        )
+    )
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(version=2))
+    repo.mark_version_published = AsyncMock()
+    svc._cache.invalidate = AsyncMock()
+    svc._write_audit = AsyncMock()
+
+    # 超时触发场景：actor 为指标 owner，trigger=timeout
+    await svc._promote_pending_version(
+        metric, version=2, trigger="timeout", actor_id=metric.owner_id
+    )
+    _, kwargs = svc._write_audit.call_args
+    assert kwargs["action"] == "PROMOTE_VERSION"
+    assert kwargs["entity_type"] == "metric_definition"
+    assert kwargs["entity_id"] == metric.metric_code
+    assert kwargs["actor_id"] == 2
+    assert kwargs["detail"]["version"] == 2
+    assert kwargs["detail"]["trigger"] == "timeout"
+
+
+async def test_confirm_version_promote_passes_consumer_trigger():
+    """消费方全部确认触发转正：_promote_pending_version 以 consumer_confirm +
+    最后确认的消费方为 actor 调用（审计可追溯谁触发了生效）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(row_version=1, version=2)
+    svc.get_metric = AsyncMock(return_value=metric)
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[
+            MagicMock(id=1, consumer_id=2, status="CONFIRMED"),
+            MagicMock(id=2, consumer_id=3, status="PENDING"),
+        ]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    svc._promote_pending_version = AsyncMock(return_value=metric)
+
+    await svc.confirm_version(metric.metric_code, 2, consumer_id=3)
+
+    svc._promote_pending_version.assert_awaited_once_with(
+        metric, 2, trigger="consumer_confirm", actor_id=3
+    )
+
+
+async def test_auto_accept_promote_passes_timeout_trigger():
+    """超时自动转正：_promote_pending_version 以 timeout 触发 + owner 为 actor
+    调用（审计可追溯超时自动生效，非用户操作）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(row_version=1, version=2, owner_id=2, backup_owner_id=3)
+    repo.get_by_id = AsyncMock(return_value=metric)
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[
+            MagicMock(id=1, consumer_id=2, status="TIMEOUT_ACCEPTED"),
+            MagicMock(id=2, consumer_id=3, status="TIMEOUT_ACCEPTED"),
+        ]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    svc._promote_pending_version = AsyncMock(return_value=metric)
+
+    await svc.auto_accept_timeout(metric.id, 2)
+
+    svc._promote_pending_version.assert_awaited_once_with(
+        metric, 2, trigger="timeout", actor_id=2
+    )
+
+
 async def test_promote_pending_version_not_found():
     """_promote_pending_version 版本不存在 → NotFoundError。"""
     svc, repo = _svc_with_repo()
