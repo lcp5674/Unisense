@@ -159,41 +159,96 @@ async def is_token_blacklisted(jti: str) -> bool:
     return jti in _memory_blacklist
 
 
-async def _get_active_refresh(user_id: int) -> str | None:
-    """读取用户当前活跃的 refresh token jti（Redis 优先，内存降级）。"""
-    redis_key = f"unisense:active_refresh:{user_id}"
-    try:
-        from app.db.redis import get_redis
+#: 活跃 refresh 存储值分隔符："{jti}:{exp_ts}"（exp_ts 供旧会话拉黑时计算剩余有效期）。
+_ACTIVE_VAL_SEP = ":"
 
-        redis_client = get_redis()
-        val = await redis_client.get(redis_key)
-        if val is not None:
-            return str(val)
-    except Exception:
-        pass
 
+def _parse_active_val(val: str) -> tuple[str, int]:
+    """解析活跃 refresh 存储值（"{jti}:{exp_ts}"）。
+
+    兼容升级前写入的旧格式（纯 jti，无 exp）——返回 exp=0，调用方以默认 TTL 兜底。
+    """
+    if _ACTIVE_VAL_SEP in val:
+        jti, exp_part = val.rsplit(_ACTIVE_VAL_SEP, 1)
+        try:
+            return jti, int(exp_part)
+        except ValueError:
+            return val, 0
+    return val, 0
+
+
+def _format_active_val(jti: str, exp_ts: int) -> str:
+    """编码活跃 refresh 存储值（"{jti}:{exp_ts}"）。"""
+    return f"{jti}{_ACTIVE_VAL_SEP}{exp_ts}"
+
+
+async def _get_active_refresh_memory(user_id: int) -> tuple[str, int] | None:
+    """读取用户当前活跃 refresh (jti, exp_ts)——仅进程内存降级路径。"""
     entry = _memory_active_refresh.get(user_id)
-    if entry is not None:
-        jti, expiry_ts = entry
-        if expiry_ts > time.time():
-            return jti
-        _memory_active_refresh.pop(user_id, None)
+    if entry is None:
+        return None
+    jti, exp_ts = entry
+    if exp_ts > time.time():
+        return jti, int(exp_ts)
+    _memory_active_refresh.pop(user_id, None)
     return None
 
 
-async def _set_active_refresh(user_id: int, jti: str, ttl_seconds: int) -> None:
-    """记录用户当前活跃的 refresh token jti（Redis 优先，内存降级）。"""
-    redis_key = f"unisense:active_refresh:{user_id}"
-    try:
-        from app.db.redis import get_redis
+#: 单端登录原子轮换 Lua 脚本。Redis 单线程保证「读旧→拉黑旧→写新」原子性，
+#: 消除并发双登录下旧会话未被拉黑的竞态（TD §5）。旧 jti 拉黑 TTL = 其剩余有效期，
+#: 仅旧格式（无 exp）回退默认 TTL。
+_ROTATE_ACTIVE_REFRESH_LUA = """
+local key = KEYS[1]
+local new_jti = ARGV[1]
+local new_exp = tonumber(ARGV[2])
+local blacklist_prefix = ARGV[3]
+local now = tonumber(ARGV[4])
+local default_ttl = tonumber(ARGV[5])
 
-        redis_client = get_redis()
-        await redis_client.set(redis_key, jti, ex=ttl_seconds)
+local old_val = redis.call('GET', key)
+if old_val then
+  local old_jti = old_val
+  local old_exp = 0
+  local sep = string.find(old_val, ':', 1, true)
+  if sep then
+    old_jti = string.sub(old_val, 1, sep - 1)
+    old_exp = tonumber(string.sub(old_val, sep + 1)) or 0
+  end
+  if old_jti ~= new_jti then
+    local ttl = 0
+    if old_exp > 0 then
+      ttl = old_exp - now
+    else
+      ttl = default_ttl
+    end
+    if ttl > 0 then
+      redis.call('SET', blacklist_prefix .. old_jti, '1', 'EX', math.floor(ttl))
+    end
+  end
+end
+
+local active_ttl = new_exp - now
+if active_ttl < 1 then active_ttl = 1 end
+redis.call('SET', key, new_jti .. ':' .. new_exp, 'EX', math.floor(active_ttl))
+return 1
+"""
+
+#: 内存降级告警限频窗口（秒）：同一 user 在窗口内只告警一次，避免多登录刷日志。
+_MEM_FALLBACK_WARN_WINDOW = 60.0
+_last_mem_fallback_warn: dict[int, float] = {}
+
+
+def _warn_memory_fallback_once(user_id: int) -> None:
+    """记录单端登录内存降级告警（限频），提示多 worker 下互踢仅本进程生效。"""
+    now = time.time()
+    if now - _last_mem_fallback_warn.get(user_id, 0.0) < _MEM_FALLBACK_WARN_WINDOW:
         return
-    except Exception:
-        pass
-
-    _memory_active_refresh[user_id] = (jti, time.time() + ttl_seconds)
+    _last_mem_fallback_warn[user_id] = now
+    logger.warning(
+        "single_login_memory_fallback",
+        user_id=user_id,
+        detail="单端登录降级为进程内存（多 worker 下仅本进程生效）；生产环境请确保 Redis 可用",
+    )
 
 
 async def rotate_active_refresh(
@@ -203,29 +258,63 @@ async def rotate_active_refresh(
 ) -> None:
     """单端登录（TD §5）：新签发的 refresh token 使该用户旧会话失效。
 
-    记录该用户当前有效的 refresh jti；签发新 refresh token（登录/刷新轮换）时，
-    把旧 jti 加入黑名单——旧会话的 refresh 即被吊销，其 access token 短效
-    （jwt_expire_minutes，默认 15 分钟）过期后无法无感续期，即被踢下线。
+    记录该用户当前有效的 refresh jti（含过期时间戳）；签发新 refresh token
+    （登录/刷新轮换）时，把旧 jti 加入黑名单（TTL = 旧 refresh 剩余有效期）——
+    旧会话的 refresh 即被吊销，其 access token 短效（jwt_expire_minutes，
+    默认 15 分钟）过期后无法无感续期，即被踢下线。
+
+    原子性：Redis 路径经 Lua 脚本原子执行「读旧→拉黑旧→写新」，并发双登录下
+    后执行的登录必然拉黑先执行的 jti，杜绝「两个新会话都未被拉黑」的竞态；
+    内存降级路径在单进程 asyncio 内无真实 await 让出，天然原子（多 worker 下
+    仅本进程生效，见 ``_warn_memory_fallback_once``）。
 
     语义：同账号同时只能有一处活跃会话；旧会话最长存活 access token 的
     剩余有效期（短效容忍窗口），避免极端并发下自身刷新被误踢。
 
     Args:
         user_id: 用户 ID。
-        refresh_token: 新签发的 refresh token（解码取其 jti）。
-        ttl_seconds: 活跃映射保留秒数（= refresh 有效期）。
+        refresh_token: 新签发的 refresh token（解码取其 jti/exp）。
+        ttl_seconds: 活跃映射保留秒数（= refresh 有效期），旧格式无 exp 时兜底。
     """
     try:
         payload = jwt.decode(
             refresh_token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
         )
         new_jti = str(payload.get("jti", ""))
+        new_exp = int(payload.get("exp", 0))
     except jwt.InvalidTokenError:
         return
     if not new_jti:
         return
 
-    old_jti = await _get_active_refresh(user_id)
-    if old_jti and old_jti != new_jti:
-        await blacklist_token(old_jti, ttl_seconds)
-    await _set_active_refresh(user_id, new_jti, ttl_seconds)
+    now = int(time.time())
+    redis_key = f"unisense:active_refresh:{user_id}"
+    try:
+        from app.db.redis import get_redis
+
+        redis_client = get_redis()
+        # redis.asyncio 的 eval 类型注解为 Awaitable[str] | str（装饰器推断缺陷），
+        # 实际恒为协程；mypy misc 精确豁免，与 db/redis.py 的 ignore 风格一致。
+        await redis_client.eval(  # type: ignore[misc]
+            _ROTATE_ACTIVE_REFRESH_LUA,
+            1,
+            redis_key,
+            new_jti,
+            str(new_exp),
+            "unisense:jwt_blacklist:",
+            str(now),
+            str(ttl_seconds),
+        )
+        return
+    except Exception:
+        _warn_memory_fallback_once(user_id)
+
+    # 内存降级（单进程原子；多 worker 下仅本进程生效，生产须 Redis）
+    old = await _get_active_refresh_memory(user_id)
+    if old is not None:
+        old_jti, old_exp_ts = old
+        if old_jti != new_jti:
+            old_ttl = (old_exp_ts - now) if old_exp_ts > 0 else ttl_seconds
+            if old_ttl > 0:
+                await blacklist_token(old_jti, old_ttl)
+    _memory_active_refresh[user_id] = (new_jti, new_exp or now + ttl_seconds)

@@ -235,3 +235,29 @@ async def test_login_kicks_previous_session(auth_client):
     # 新 refresh 仍有效（不被自身误踢）
     resp4 = await c.post("/api/v1/auth/refresh", json={"refresh_token": new_refresh})
     assert resp4.status_code == 200
+
+
+async def test_login_different_users_do_not_kick_each_other(auth_client):
+    """跨用户隔离（API 层）：viewer 登录后 analyst 登录，不踢 viewer 的会话。"""
+    c, session = auth_client
+    viewer = await _mock_user("secret", id=2, role="viewer", org_id=1)
+    analyst = await _mock_user("secret", id=3, role="analyst", org_id=1)
+
+    # 第 1 次查询返回 viewer、第 2 次返回 analyst，其后（refresh 查用户）返回 viewer
+    results = [_result_with(viewer), _result_with(analyst)]
+
+    def _side_effect(_stmt: object) -> MagicMock:
+        return results.pop(0) if results else _result_with(viewer)
+
+    session.execute.side_effect = _side_effect
+
+    resp_viewer = await c.post("/api/v1/auth/login", json={"username": "v", "password": "secret"})
+    assert resp_viewer.status_code == 200
+    viewer_refresh = resp_viewer.json()["data"]["refresh_token"]
+
+    resp_analyst = await c.post("/api/v1/auth/login", json={"username": "a", "password": "secret"})
+    assert resp_analyst.status_code == 200
+
+    # analyst 登录不应拉黑 viewer 的会话 → viewer 旧 refresh 仍可无感续期
+    resp3 = await c.post("/api/v1/auth/refresh", json={"refresh_token": viewer_refresh})
+    assert resp3.status_code == 200
