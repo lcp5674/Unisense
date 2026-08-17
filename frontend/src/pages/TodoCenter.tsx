@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Button, List, Tag, Space, message } from "antd";
-import { getMe, listConflicts, listMetrics, listQualityEvents, UnisenseApiError } from "../api";
+import { fetchCurrentUser, listConflicts, listMetrics, listQualityEvents, UnisenseApiError } from "../api";
 import { useTracking } from "../hooks/useTracking";
 
 const CONFLICT_TYPE_LABEL: Record<string, string> = {
@@ -49,7 +49,7 @@ const KIND_META: Record<Todo["kind"], { label: string; color: string; action: st
   dsd: {
     label: "数据源下线",
     color: "purple",
-    action: "去处理",
+    action: "去恢复",
     target: (t) => `/detail/${t.code}`,
   },
 };
@@ -64,7 +64,7 @@ export function TodoCenter() {
     setLoading(true);
     try {
       // DSD 待办按当前登录用户的 Owner 维度收敛（源表下线 7 天处理期）
-      const me = await getMe();
+      const me = await fetchCurrentUser();
       const [conflicts, drafts, reviews, qualityAlerts, dropped] = await Promise.all([
         listConflicts({ status: "OPEN", page_size: 50 }),
         listMetrics({ status: "DRAFT", page_size: 50 }),

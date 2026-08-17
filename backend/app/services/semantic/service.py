@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
@@ -37,7 +38,6 @@ from app.services.semantic.schemas import (
     MetricDescriptionUpdateRequest,
     MetricEmergencyPublishRequest,
     MetricListParams,
-    MetricPublishRequest,
     MetricRejectRequest,
     MetricResponse,
     MetricSubmitRequest,
@@ -1296,39 +1296,6 @@ class MetricService(BaseService):
                 with suppress(Exception):  # 释放失败不阻断
                     await client.close()
 
-    async def publish_metric(
-        self,
-        metric_code: str,
-        request: MetricPublishRequest,
-        actor_id: int,
-        role: str,
-    ) -> Metric:
-        """发布指标（内部兼容，已废弃）。
-
-        .. deprecated::
-            使用 ``submit_metric`` + ``approve_metric`` 替代。
-            本方法保留为内部兼容，标记 deprecated。
-            DRAFT→REVIEW→PUBLISHED 不再跳步，须先 submit 再 approve。
-
-        原有行为：DRAFT/REVIEW → PUBLISHED。
-        新行为：路由到 approve_metric(mode="standard")。
-
-        Args:
-            metric_code: 指标编码。
-            request: 发布请求。
-            actor_id: 操作人 ID。
-            role: 操作人角色。
-
-        Returns:
-            发布后的指标。
-        """
-        # 路由到 approve_metric（内部兼容）
-        approve_req = MetricApproveRequest(
-            mode="standard",
-            target_version=request.version,
-        )
-        return await self.approve_metric(metric_code, approve_req, actor_id, role)
-
     async def submit_metric(
         self,
         metric_code: str,
@@ -1484,75 +1451,6 @@ class MetricService(BaseService):
             "metric_submitted",
             metric_code=metric_code,
             actor_id=actor_id,
-        )
-        return updated
-
-    async def review_metric(
-        self,
-        metric_code: str,
-        *,
-        approved: bool,
-        actor_id: int,
-        role: str,
-        change_reason: str,
-    ) -> Metric:
-        """评审指标（approve → PUBLISHED / reject → DRAFT）。
-
-        Args:
-            metric_code: 指标编码。
-            approved: 是否通过评审。
-            actor_id: 操作人 ID。
-            role: 操作人角色。
-            change_reason: 评审意见。
-
-        Returns:
-            评审后的指标。
-
-        Raises:
-            NotFoundError: 指标不存在。
-            AuthError: metric_owner 操作他人指标（越权）。
-            BusinessError: Owner 自审 / 指标不在评审中。
-            ConflictError: 非法状态跃迁。
-        """
-        metric = await self.get_metric(metric_code)
-        self._assert_owner_or_admin(metric, actor_id, role)
-        # 评审者不能是 Owner（对齐 review_compliance 的 SELF_REVIEW_BLOCKED 逻辑）
-        if metric.owner_id == actor_id:
-            raise BusinessError(
-                "评审禁止指标 Owner 自审",
-                error_code="SELF_REVIEW_BLOCKED",
-            )
-        if metric.status != "REVIEW":
-            raise BusinessError(
-                f"指标状态 {metric.status} 不在评审中",
-                error_code="VALIDATION_ERROR",
-            )
-
-        if approved:
-            # 通过评审 = 发布（复用发布逻辑，含 PII 合规闸门）
-            updated = await self._publish(metric, metric.version, actor_id)
-            logger.info(
-                "metric_review_approved",
-                metric_code=metric_code,
-                actor_id=actor_id,
-                change_reason=change_reason,
-            )
-            return updated
-
-        invalid = MetricStateMachine.validate_transition("REVIEW", "DRAFT")
-        if invalid is not None:  # pragma: no cover - REVIEW→DRAFT 在状态机矩阵中恒合法，防御分支
-            raise ConflictError(invalid, error_code="INVALID_TRANSITION")
-
-        updated = await self._repo.update_with_optimistic_lock(
-            metric.id, metric.row_version, status="DRAFT"
-        )
-        await self._cache.invalidate(metric_code)
-
-        logger.info(
-            "metric_review_rejected",
-            metric_code=metric_code,
-            actor_id=actor_id,
-            change_reason=change_reason,
         )
         return updated
 
@@ -2022,12 +1920,22 @@ class MetricService(BaseService):
                     provenance="metric_definition",
                     change_reason="metric_dependency",
                 )
-        except Exception:  # noqa: BLE001 - 血缘注册失败绝不阻断指标主流程
+        except Exception as exc:  # noqa: BLE001 - 血缘注册失败绝不阻断指标主流程
             logger.warning(
                 "metric_lineage_register_failed",
                 metric_code=metric.metric_code,
                 metric_type=metric.type,
                 exc_info=True,
+            )
+            # C7：血缘静默缺失不再无声——发布失败事件进通知闭环（运维/管理员可订阅）
+            await self._eventbus.publish(
+                "lineage.metric_register_failed",
+                {
+                    "metric_code": metric.metric_code,
+                    "metric_type": metric.type,
+                    "reason": "dependency_lineage",
+                    "error": str(exc)[:200],
+                },
             )
 
     async def _cleanup_metric_lineage(self, metric_code: str) -> None:
@@ -3258,56 +3166,6 @@ class MetricService(BaseService):
                 ctx={"metric_code": metric.metric_code, "role": role},
             )
 
-    async def _publish(self, metric: Metric, target_version: int, actor_id: int) -> Metric:
-        """执行发布落库：PII 合规闸门 + 状态/生效版本转正 + 版本标记 + 缓存失效。
-
-        供 publish_metric 与 review_metric(approved=True) 复用，保证评审通过
-        与直接发布走同一套发布语义（含 PII 合规闸门）。
-
-        Args:
-            metric: 已加载的指标对象。
-            target_version: 待发布版本（须等于当前版本，由调用方保证）。
-            actor_id: 操作人 ID。
-
-        Returns:
-            发布后的指标。
-
-        Raises:
-            BusinessError: PII 指标未过合规审核。
-            NotFoundError: 版本不存在。
-            ConflictError: 乐观锁冲突。
-        """
-        # PII 指标须先过合规审核
-        if metric.pii_flag and not metric.compliance_reviewed:
-            raise BusinessError(
-                "PII 指标须先通过合规审核",
-                error_code="COMPLIANCE_BLOCKED",
-            )
-
-        # 校验版本存在
-        version = await self._repo.get_version(metric.id, target_version)
-        if version is None:
-            raise NotFoundError(f"版本不存在: {target_version}")
-
-        updated = await self._repo.update_with_optimistic_lock(
-            metric.id,
-            metric.row_version,
-            status="PUBLISHED",
-            approver_id=actor_id,
-            effective_version=target_version,
-            # 发布即清空历史驳回原因（生命周期闭环）：指标一经发布不再残留
-            # "被驳回"历史状态，避免已发布指标仍显示驳回标识。
-            reject_reason=None,
-            reject_reviewer_id=None,
-            rejected_at=None,
-        )
-
-        # 版本转正：将指定版本标记为 PUBLISHED 并记录发布时间
-        await self._repo.mark_version_published(metric.id, target_version, datetime.now(UTC))
-
-        await self._cache.invalidate(metric.metric_code)
-        return updated
-
     @staticmethod
     def _is_breaking_change(old_def: dict[str, Any], new_def: dict[str, Any]) -> bool:
         """判断口径变更是否为破坏性变更。
@@ -3595,6 +3453,28 @@ class MetricService(BaseService):
                         "validation_errors": public_error_message(exc),
                     }
                 )
+            except SQLAlchemyError:
+                # DB 级异常（如重复编码 IntegrityError）：会话污染后继续 flush 必失败。
+                # 回滚清理会话，把剩余未处理列统一标记失败，返回部分结果而非 500 整体回滚。
+                await self._db.rollback()
+                for rest in request.measure_columns[len(candidates):]:
+                    rest_code = f"{request.domain}_entity_{rest.replace('_', '')}_day"
+                    candidates.append(
+                        {
+                            "metric_code": rest_code,
+                            "status": "VALIDATION_ERROR",
+                            "validation_errors": "批量注册内部错误，已中止后续列",
+                        }
+                    )
+                logger.warning(
+                    "batch_register_aborted_on_db_error",
+                    batch_id=batch_id,
+                    source_table=request.source_table,
+                    processed=len(candidates),
+                    total=len(request.measure_columns),
+                    exc_info=True,
+                )
+                break
 
         return {"batch_id": batch_id, "candidates": candidates}
 

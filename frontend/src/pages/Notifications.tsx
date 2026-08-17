@@ -81,6 +81,8 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "lineage_ingested": "血缘已接入",
   // 血缘变更影响（semantic 变更指标血缘时定向通知受影响指标 Owner）
   "lineage.change_impacted": "血缘变更影响",
+  // 指标血缘注册失败（metrics.py/semantic best-effort 路径，C7 运维告警）
+  "lineage.metric_register_failed": "指标血缘注册失败",
   // 采集定向通知（collector 经 notify_user 直发源 Owner）
   "catalog.deprecated": "数据目录已废弃",
   "collect.degraded": "采集降级",
@@ -495,6 +497,7 @@ const IMPACT_TEXT: Record<string, string> = {
   lineage_parsed: "血缘关系已解析，可查看影响链路。",
   lineage_ingested: "血缘关系已接入，影响链路已更新。",
   "lineage.change_impacted": "您的指标受血缘变更影响，请评估口径影响范围。",
+  "lineage.metric_register_failed": "指标血缘注册失败，血缘可能缺失，请检查并补注册。",
   "catalog.deprecated": "数据目录已废弃，相关消费请迁移。",
   "collect.degraded": "采集降级，数据时效可能受影响。",
   "collect.failed": "采集任务失败，请检查数据源连接。",
@@ -643,6 +646,7 @@ export const EVENT_TYPES = [
   "lineage_parsed",
   "lineage_ingested",
   "lineage.change_impacted",
+  "lineage.metric_register_failed",
   "catalog.deprecated",
   "collect.degraded",
   "collect.failed",
@@ -676,7 +680,7 @@ export const EVENT_TYPE_GROUPS: { label: string; options: { value: string; label
   },
   {
     label: "采集与血缘",
-    options: ["catalog_registered", "catalog_schema_drifted", "lineage_parsed", "lineage_ingested", "lineage.change_impacted", "catalog.deprecated", "collect.degraded", "collect.failed", "catalog.connection_failed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+    options: ["catalog_registered", "catalog_schema_drifted", "lineage_parsed", "lineage_ingested", "lineage.change_impacted", "lineage.metric_register_failed", "catalog.deprecated", "collect.degraded", "collect.failed", "catalog.connection_failed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
   {
     label: "反馈与满意度",

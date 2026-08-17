@@ -23,6 +23,7 @@ vi.mock("../api", () => {
     listConflicts: vi.fn(),
     listMetrics: vi.fn(),
     listQualityEvents: vi.fn(),
+    fetchCurrentUser: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -31,11 +32,12 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: vi.fn() }),
 }));
 
-import { listConflicts, listMetrics, listQualityEvents } from "../api";
+import { fetchCurrentUser, listConflicts, listMetrics, listQualityEvents } from "../api";
 
 const mockedConflicts = vi.mocked(listConflicts);
 const mockedMetrics = vi.mocked(listMetrics);
 const mockedQuality = vi.mocked(listQualityEvents);
+const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 
 function PathSpy() {
   const loc = useLocation();
@@ -55,12 +57,36 @@ function renderPage() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedCurrentUser.mockResolvedValue({
+    id: 1,
+    username: "alice",
+    display_name: "Alice",
+    role: "domain_admin",
+    domain: "finance",
+    org_id: 1,
+  });
   mockedConflicts.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
   mockedQuality.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
   mockedMetrics.mockImplementation((params) => {
     if (params?.status === "REVIEW") {
       return Promise.resolve({
         items: [{ id: 1, metric_code: "GMV_REV", name: "待审核指标", domain: "finance", status: "REVIEW" }],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      } as MetricListResponse);
+    }
+    if (params?.status === "DATA_SOURCE_DROPPED") {
+      return Promise.resolve({
+        items: [
+          {
+            id: 3,
+            metric_code: "GMV_DSD",
+            name: "源下线指标",
+            domain: "finance",
+            status: "DATA_SOURCE_DROPPED",
+          },
+        ],
         total: 1,
         page: 1,
         page_size: 50,
@@ -200,5 +226,24 @@ describe("待办中心 - 聚合与跳转", () => {
     const item = await screen.findByTestId("todo-item-conflict");
     fireEvent.click(item);
     await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/review"));
+  });
+
+  it("展示数据源下线待办并按当前用户 Owner 维度查询", async () => {
+    renderPage();
+    await screen.findByText(/源下线指标/);
+    expect(mockedCurrentUser).toHaveBeenCalled();
+    // DSD 查询带当前用户 owner_id
+    const dsdCall = mockedMetrics.mock.calls.find(
+      (params) => params?.[0]?.status === "DATA_SOURCE_DROPPED",
+    );
+    expect(dsdCall?.[0]?.owner_id).toBe(1);
+    expect(screen.getByTestId("todo-count-dsd").textContent).toContain("1");
+  });
+
+  it("数据源下线项点「去恢复」跳转指标详情", async () => {
+    renderPage();
+    await screen.findByText(/源下线指标/);
+    fireEvent.click(screen.getByRole("button", { name: /去恢复/ }));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/detail/GMV_DSD"));
   });
 });

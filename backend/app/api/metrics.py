@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -65,15 +65,35 @@ async def _register_metric_l3_lineage(db: AsyncSession, metric: Any) -> None:
     """指标创建/更新后注册 L3 指标血缘边（``metric:{code} ↔ table:{t}``，幂等）。
 
     让指标节点进入血缘体系，与 DP 血缘（dp_csv）/ SQL 解析（sqlglot）表级血缘
-    衔接成「源表 → 指标 → 落地表」完整链路。注册失败仅记日志、不阻断主流程
-    （血缘为辅助能力，可事后用 ``scripts/register_metric_lineage.py`` 补注册）。
+    衔接成「源表 → 指标 → 落地表」完整链路。注册失败不阻断主流程（血缘为辅助
+    能力，可事后用 ``scripts/register_metric_lineage.py`` 补注册），但发布
+    ``lineage.metric_register_failed`` 事件进入通知闭环——运维/管理员可订阅感知
+    血缘静默缺失，而非仅记日志（C7 修复：不再静默吞异常）。
     """
     try:
         from app.services.lineage.service import LineageService
 
         await LineageService(db).register_metric_from_definition(metric, commit=False)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - 血缘注册失败不阻断指标主流程
         logger.exception("metric_lineage_register_failed", metric_code=metric.metric_code)
+        try:
+            from app.core.eventbus import get_eventbus
+
+            await get_eventbus().publish(
+                "lineage.metric_register_failed",
+                {
+                    "metric_code": metric.metric_code,
+                    "domain": getattr(metric, "domain", None),
+                    "source_tables": getattr(metric, "source_tables", None),
+                    "error": str(exc)[:200],
+                },
+            )
+        except Exception:  # noqa: BLE001 - 事件发布失败不影响主流程（已记日志）
+            logger.warning(
+                "metric_lineage_fail_event_publish_failed",
+                metric_code=metric.metric_code,
+                exc_info=True,
+            )
 
 
 @contextlib.asynccontextmanager
@@ -1507,6 +1527,59 @@ def _batch_failed_codes(results: list[MetricBatchItemResult]) -> list[str]:
     return [f"{r.metric_code}: {r.message}" for r in results if not r.ok][:20]
 
 
+async def _run_batch(
+    db: AsyncSession,
+    *,
+    units: Sequence[Any],
+    code_of: Callable[[Any], str],
+    run: Callable[[Any], Awaitable[None]],
+    abort_message: str,
+) -> list[MetricBatchItemResult]:
+    """批量逐条执行：业务失败逐条收集（不整体回滚）；DB 级异常回滚会话并中止后续。
+
+    幂等语义：单条业务异常（UnisenseError 等）只记该条失败，其余继续——这是
+    批量治理端点的既定契约（TD §13）。但 SQLAlchemy 的 DB 级异常（如
+    IntegrityError/OperationalError）会**污染会话**：flush 失败后会话处于
+    rolled-back 态，后续任何操作与最终 commit 都会抛 InvalidRequestError，
+    导致本可成功的项也全部失败、最终 500 整体回滚（C5 健壮性修复）。
+
+    因此对 SQLAlchemyError 单独处理：回滚清理会话，把剩余未执行项统一标记
+    失败（返回部分成功语义，不再 500），并把中止原因记日志供排查。
+    """
+    from sqlalchemy.exc import SQLAlchemyError
+
+    results: list[MetricBatchItemResult] = []
+    for unit in units:
+        code = code_of(unit)
+        try:
+            await run(unit)
+            results.append(MetricBatchItemResult(metric_code=code, ok=True))
+        except SQLAlchemyError:
+            # DB 级异常：会话污染，后续操作/commit 必失败 → 回滚 + 剩余项标记失败
+            await db.rollback()
+            for rest in units[len(results):]:
+                results.append(
+                    MetricBatchItemResult(
+                        metric_code=code_of(rest),
+                        ok=False,
+                        message=abort_message,
+                    )
+                )
+            logger.warning(
+                "batch_aborted_on_db_error",
+                action=abort_message,
+                processed=len(results),
+                total=len(units),
+                exc_info=True,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001 - 批量逐条容错，业务失败不整体回滚
+            results.append(
+                MetricBatchItemResult(metric_code=code, ok=False, message=public_error_message(exc))
+            )
+    return results
+
+
 @router.post(
     "/batch-submit",
     response_model=ApiResponse[MetricBatchResponse],
@@ -1522,30 +1595,24 @@ async def batch_submit_metrics(
 ) -> ApiResponse[MetricBatchResponse]:
     """逐条 DRAFT→REVIEW；单条失败不阻断其余（返回逐条结果）。"""
     service = MetricService(db)
-    results: list[MetricBatchItemResult] = []
-    for item in request.items:
-        try:
-            await service.submit_metric(
-                item.metric_code,
-                MetricSubmitRequest(
-                    change_reason=item.change_reason,
-                    reviewer_id=item.reviewer_id,
-                    reviewer_type=item.reviewer_type,
-                    reviewer_domain=item.reviewer_domain,
-                ),
-                actor_id=user.id,
-                role=user.role,
-                user_domain=user.domain,
-            )
-            results.append(MetricBatchItemResult(metric_code=item.metric_code, ok=True))
-        except Exception as exc:  # noqa: BLE001 - 批量逐条容错，单条失败不整体回滚
-            results.append(
-                MetricBatchItemResult(
-                    metric_code=item.metric_code,
-                    ok=False,
-                    message=public_error_message(exc),
-                )
-            )
+    results = await _run_batch(
+        db,
+        units=request.items,
+        code_of=lambda item: item.metric_code,
+        run=lambda item: service.submit_metric(
+            item.metric_code,
+            MetricSubmitRequest(
+                change_reason=item.change_reason,
+                reviewer_id=item.reviewer_id,
+                reviewer_type=item.reviewer_type,
+                reviewer_domain=item.reviewer_domain,
+            ),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量提交内部错误，已中止后续项",
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -1579,23 +1646,19 @@ async def batch_approve_metrics(
 ) -> ApiResponse[MetricBatchResponse]:
     """逐条 REVIEW→PUBLISHED/EXPERIMENTAL；评审人指派校验由 service 层逐条执行。"""
     service = MetricService(db)
-    results: list[MetricBatchItemResult] = []
-    for code in request.metric_codes:
-        try:
-            await service.approve_metric(
-                code,
-                MetricApproveRequest(
-                    mode=request.mode, gray_tenant_ids=request.gray_tenant_ids
-                ),
-                actor_id=user.id,
-                role=user.role,
-                user_domain=user.domain,
-            )
-            results.append(MetricBatchItemResult(metric_code=code, ok=True))
-        except Exception as exc:  # noqa: BLE001 - 批量逐条容错
-            results.append(
-                MetricBatchItemResult(metric_code=code, ok=False, message=public_error_message(exc))
-            )
+    results = await _run_batch(
+        db,
+        units=request.metric_codes,
+        code_of=lambda code: code,
+        run=lambda code: service.approve_metric(
+            code,
+            MetricApproveRequest(mode=request.mode, gray_tenant_ids=request.gray_tenant_ids),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量通过内部错误，已中止后续项",
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -1629,21 +1692,19 @@ async def batch_reject_metrics(
 ) -> ApiResponse[MetricBatchResponse]:
     """逐条 REVIEW→DRAFT；评审人指派校验由 service 层逐条执行。"""
     service = MetricService(db)
-    results: list[MetricBatchItemResult] = []
-    for code in request.metric_codes:
-        try:
-            await service.reject_metric(
-                code,
-                MetricRejectRequest(reason=request.reason),
-                actor_id=user.id,
-                role=user.role,
-                user_domain=user.domain,
-            )
-            results.append(MetricBatchItemResult(metric_code=code, ok=True))
-        except Exception as exc:  # noqa: BLE001 - 批量逐条容错
-            results.append(
-                MetricBatchItemResult(metric_code=code, ok=False, message=public_error_message(exc))
-            )
+    results = await _run_batch(
+        db,
+        units=request.metric_codes,
+        code_of=lambda code: code,
+        run=lambda code: service.reject_metric(
+            code,
+            MetricRejectRequest(reason=request.reason),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量驳回内部错误，已中止后续项",
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -1676,25 +1737,19 @@ async def batch_deprecate_metrics(
 ) -> ApiResponse[MetricBatchResponse]:
     """逐条 PUBLISHED→DEPRECATED（每项须带替代指标）；单条失败不阻断其余。"""
     service = MetricService(db)
-    results: list[MetricBatchItemResult] = []
-    for item in request.items:
-        try:
-            await service.deprecate_metric(
-                item.metric_code,
-                item.successor_code,
-                actor_id=user.id,
-                role=user.role,
-                user_domain=user.domain,
-            )
-            results.append(MetricBatchItemResult(metric_code=item.metric_code, ok=True))
-        except Exception as exc:  # noqa: BLE001 - 批量逐条容错
-            results.append(
-                MetricBatchItemResult(
-                    metric_code=item.metric_code,
-                    ok=False,
-                    message=public_error_message(exc),
-                )
-            )
+    results = await _run_batch(
+        db,
+        units=request.items,
+        code_of=lambda item: item.metric_code,
+        run=lambda item: service.deprecate_metric(
+            item.metric_code,
+            item.successor_code,
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量下线内部错误，已中止后续项",
+    )
     await write_audit(
         db,
         actor_id=user.id,

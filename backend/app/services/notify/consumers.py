@@ -84,6 +84,9 @@ BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "lineage_ingested",
     # 血缘变更影响（semantic/service.py 变更指标血缘时发布，标题映射见 notify/service.py）
     "lineage.change_impacted",
+    # 指标血缘注册失败（metrics.py / semantic/service.py best-effort 路径，C7：
+    # 血缘静默缺失不再无声——运维/管理员订阅感知，可补注册修复）
+    "lineage.metric_register_failed",
     # 采集定向通知（collector/service.py 经 notify_user 直发源 Owner，模板注册）
     "catalog.deprecated",
     "collect.degraded",
