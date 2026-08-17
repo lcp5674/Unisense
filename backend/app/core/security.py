@@ -159,29 +159,6 @@ async def is_token_blacklisted(jti: str) -> bool:
     return jti in _memory_blacklist
 
 
-#: 活跃 refresh 存储值分隔符："{jti}:{exp_ts}"（exp_ts 供旧会话拉黑时计算剩余有效期）。
-_ACTIVE_VAL_SEP = ":"
-
-
-def _parse_active_val(val: str) -> tuple[str, int]:
-    """解析活跃 refresh 存储值（"{jti}:{exp_ts}"）。
-
-    兼容升级前写入的旧格式（纯 jti，无 exp）——返回 exp=0，调用方以默认 TTL 兜底。
-    """
-    if _ACTIVE_VAL_SEP in val:
-        jti, exp_part = val.rsplit(_ACTIVE_VAL_SEP, 1)
-        try:
-            return jti, int(exp_part)
-        except ValueError:
-            return val, 0
-    return val, 0
-
-
-def _format_active_val(jti: str, exp_ts: int) -> str:
-    """编码活跃 refresh 存储值（"{jti}:{exp_ts}"）。"""
-    return f"{jti}{_ACTIVE_VAL_SEP}{exp_ts}"
-
-
 async def _get_active_refresh_memory(user_id: int) -> tuple[str, int] | None:
     """读取用户当前活跃 refresh (jti, exp_ts)——仅进程内存降级路径。"""
     entry = _memory_active_refresh.get(user_id)
@@ -264,9 +241,12 @@ async def rotate_active_refresh(
     默认 15 分钟）过期后无法无感续期，即被踢下线。
 
     原子性：Redis 路径经 Lua 脚本原子执行「读旧→拉黑旧→写新」，并发双登录下
-    后执行的登录必然拉黑先执行的 jti，杜绝「两个新会话都未被拉黑」的竞态；
-    内存降级路径在单进程 asyncio 内无真实 await 让出，天然原子（多 worker 下
-    仅本进程生效，见 ``_warn_memory_fallback_once``）。
+    后执行的登录必然拉黑先执行的 jti，杜绝「两个新会话都未被拉黑」的竞态。
+    内存降级路径为 best-effort：单进程 + Redis 连接池未初始化（get_redis 同步抛错）
+    时无真实 await 让出、天然原子；若池已建但 Redis 不可达，blacklist_token 内
+    await 会让出事件循环，极端并发下存在读-改-写理论窗口——该场景属故障降级，
+    以限频告警提示（``_warn_memory_fallback_once``），生产多 worker 必须依赖 Redis
+    保证跨进程互踢。
 
     语义：同账号同时只能有一处活跃会话；旧会话最长存活 access token 的
     剩余有效期（短效容忍窗口），避免极端并发下自身刷新被误踢。
