@@ -73,7 +73,11 @@ async def _register_metric_l3_lineage(db: AsyncSession, metric: Any) -> None:
     try:
         from app.services.lineage.service import LineageService
 
-        await LineageService(db).register_metric_from_definition(metric, commit=False)
+        # savepoint 隔离：L3 血缘注册失败时只回滚本 savepoint，不污染外层业务事务
+        # （业务写入 + 审计已在外层事务中，裸异常会让会话进入"必须回滚"状态，
+        # 导致随后的 commit 抛 PendingRollbackError、业务写入被意外回滚）。
+        async with db.begin_nested():
+            await LineageService(db).register_metric_from_definition(metric, commit=False)
     except Exception as exc:  # noqa: BLE001 - 血缘注册失败不阻断指标主流程
         logger.exception("metric_lineage_register_failed", metric_code=metric.metric_code)
         try:
@@ -1580,6 +1584,19 @@ async def _run_batch(
     return results
 
 
+def _batch_audit_action(base: str, results: list[MetricBatchItemResult]) -> str:
+    """根据批量结果返回审计动作名：全成功/部分失败/全失败。
+
+    生产合规场景下审计 action 须区分部分失败（此前部分失败仍记成功动作，误导审计）。
+    """
+    ok = sum(1 for r in results if r.ok)
+    if ok == len(results):
+        return base
+    if ok == 0:
+        return f"{base}_FAILED"
+    return f"{base}_PARTIAL"
+
+
 @router.post(
     "/batch-submit",
     response_model=ApiResponse[MetricBatchResponse],
@@ -1616,7 +1633,7 @@ async def batch_submit_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BATCH_SUBMIT",
+        action=_batch_audit_action("BATCH_SUBMIT", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.items)}",
         detail={
@@ -1662,7 +1679,7 @@ async def batch_approve_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BATCH_APPROVE",
+        action=_batch_audit_action("BATCH_APPROVE", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.metric_codes)}",
         detail={
@@ -1708,7 +1725,7 @@ async def batch_reject_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BATCH_REJECT",
+        action=_batch_audit_action("BATCH_REJECT", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.metric_codes)}",
         detail={
@@ -1753,7 +1770,7 @@ async def batch_deprecate_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action="BATCH_DEPRECATE",
+        action=_batch_audit_action("BATCH_DEPRECATE", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.items)}",
         detail={

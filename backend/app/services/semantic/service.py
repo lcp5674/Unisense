@@ -1895,31 +1895,35 @@ class MetricService(BaseService):
         from app.services.lineage.service import LineageService
 
         try:
-            lineage_svc = LineageService(self._db)
-            # 1) 表级血缘（指标 ↔ 物理底表），不在此提交，交由外层事务统一提交
-            await lineage_svc.register_metric_from_definition(metric, commit=False)
+            # savepoint 隔离：血缘写入失败只回滚本 savepoint，不污染外层业务事务
+            # （create/update/publish 的外层事务若已被 SQLAlchemyError 弄脏，
+            # 随后的 commit 会抛 PendingRollbackError、业务写入被意外回滚）。
+            async with self._db.begin_nested():
+                lineage_svc = LineageService(self._db)
+                # 1) 表级血缘（指标 ↔ 物理底表），不在此提交，交由外层事务统一提交
+                await lineage_svc.register_metric_from_definition(metric, commit=False)
 
-            # 2) 指标间依赖血缘（仅 derived/composite 有 dependencies）——
-            # 表/维度/字段血缘已由 register_metric_from_definition 差异同步处理
-            definition = metric.definition_json or {}
-            if not isinstance(definition, dict):
-                return
-            dependencies = definition.get("dependencies") or []
-            if not isinstance(dependencies, list) or metric.type == "atomic" or not dependencies:
-                return
-            edge_type = _METRIC_DEP_EDGE_TYPE.get(metric.type, "DERIVED_FROM")
-            repo = LineageRepository(self._db)
-            for dep_code in dependencies:
-                if not isinstance(dep_code, str) or not dep_code:
-                    continue
-                await repo.upsert_edge(
-                    source_node=f"metric:{dep_code}",
-                    target_node=f"metric:{metric.metric_code}",
-                    edge_type=edge_type,
-                    granularity="L3",
-                    provenance="metric_definition",
-                    change_reason="metric_dependency",
-                )
+                # 2) 指标间依赖血缘（仅 derived/composite 有 dependencies）——
+                # 表/维度/字段血缘已由 register_metric_from_definition 差异同步处理
+                definition = metric.definition_json or {}
+                if not isinstance(definition, dict):
+                    return
+                dependencies = definition.get("dependencies") or []
+                if not isinstance(dependencies, list) or metric.type == "atomic" or not dependencies:
+                    return
+                edge_type = _METRIC_DEP_EDGE_TYPE.get(metric.type, "DERIVED_FROM")
+                repo = LineageRepository(self._db)
+                for dep_code in dependencies:
+                    if not isinstance(dep_code, str) or not dep_code:
+                        continue
+                    await repo.upsert_edge(
+                        source_node=f"metric:{dep_code}",
+                        target_node=f"metric:{metric.metric_code}",
+                        edge_type=edge_type,
+                        granularity="L3",
+                        provenance="metric_definition",
+                        change_reason="metric_dependency",
+                    )
         except Exception as exc:  # noqa: BLE001 - 血缘注册失败绝不阻断指标主流程
             logger.warning(
                 "metric_lineage_register_failed",
