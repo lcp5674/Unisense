@@ -1233,6 +1233,21 @@ class CollectorService(BaseService):
                 "change_type": drift_info["change_type"],
             },
         )
+        # 血缘影响通知：schema 结构变更 → 沿下游血缘定向通知受影响指标 Owner
+        # （P1-4 闭环：notify_lineage_impacted_owners 由采集侧 schema drift 触发，
+        # 兑现 docstring 声称的「collector 的 schema drift 处理」触发点）。
+        # best-effort：通知失败/血缘查询失败不阻断采集主流程。
+        try:
+            from app.services.semantic.service import MetricService
+
+            await MetricService(self._db).notify_lineage_impacted_owners(f"table:{entity_name}")
+        except Exception:  # noqa: BLE001 - 血缘影响通知 best-effort
+            logger.warning(
+                "lineage_impact_notify_failed",
+                source_id=source_id,
+                entity_name=entity_name,
+                exc_info=True,
+            )
         # 记录变更历史到 SchemaDriftLog
         drift_log = SchemaDriftLog(
             source_id=source_id,

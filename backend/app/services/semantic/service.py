@@ -2706,6 +2706,8 @@ class MetricService(BaseService):
                 "domain": metric.domain,
                 "emergency_reason": metric.emergency_reason,
                 "emergency_reviewed_at": now.isoformat(),
+                # 定向送达指标 Owner：补审完成确认（发布方/Owner 可感知闭环）
+                "recipient_user_id": metric.owner_id,
             },
             actor_id=str(actor_id),
         )
@@ -3784,7 +3786,13 @@ class MetricService(BaseService):
             await self._cache.invalidate(code)
             await self._publish_event(
                 "metric.source_dropped",
-                {"metric_code": code, "domain": metric.domain, "source_ids": source_ids},
+                {
+                    "metric_code": code,
+                    "domain": metric.domain,
+                    "source_ids": source_ids,
+                    # 定向送达指标 Owner：DSD 需 7 天内处理（恢复/确认退役），TodoCenter 展示待办
+                    "recipient_user_id": metric.owner_id,
+                },
                 actor_id=str(actor_id),
             )
             count += 1
@@ -3813,7 +3821,12 @@ class MetricService(BaseService):
         await self._cache.invalidate(metric_code)
         await self._publish_event(
             "metric.source_recovered",
-            {"metric_code": metric_code, "domain": metric.domain},
+            {
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                # 定向送达指标 Owner：源恢复/误报确认，指标已回 PUBLISHED
+                "recipient_user_id": metric.owner_id,
+            },
             actor_id=str(actor_id),
         )
         return updated

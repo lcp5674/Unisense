@@ -18,6 +18,8 @@ TODO_EVENT_TYPES = frozenset(
         "metric.rename_required",
         "metric.health_critical",
         "metric.gray_recycled",
+        # 数据源 DROP：Owner 需处理（恢复或确认退役），7 天处理期超期由每日巡检升级提醒
+        "metric.source_dropped",
         "conflict_open",
         "conflict_escalated",
         "conflict_reopened",

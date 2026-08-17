@@ -39,6 +39,14 @@ BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "metric.rolled_back",
     "metric.emergency_published",
     "metric.health_critical",
+    # 紧急发布补审完成（P1-6）：complete_emergency_review 写 emergency_reviewed_at 后发布，
+    # 定向通知补审执行人/指标 Owner（TD §12.3 紧急发布闭环）
+    "metric.emergency_reviewed",
+    # 数据源 DROP → 下游指标置 DATA_SOURCE_DROPPED（P1-4）：定向通知指标 Owner 去处理
+    # （恢复/确认退役，7 天处理期见 TodoCenter 待办与每日超期巡检）
+    "metric.source_dropped",
+    # DSD 源恢复/误报 → 指标回 PUBLISHED：通知 Owner 确认与消费方
+    "metric.source_recovered",
     # 灰度超期强制回收（P1-7）：check_experimental_expiry 每日巡检触发
     "metric.gray_recycled",
     # 冲突仲裁「保留差异+指定一方改名」→ 定向通知指标 Owner 去详情页改名（TD §12.4）

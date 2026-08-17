@@ -45,6 +45,11 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "metric.rolled_back": "指标已回滚",
   "metric.emergency_published": "指标紧急发布",
   "metric.health_critical": "指标健康告警",
+  // 紧急补审 / 数据源下线/恢复 / 灰度回收（P1-4/P1-6/P1-7 通知闭环）
+  "metric.emergency_reviewed": "紧急发布已补审",
+  "metric.source_dropped": "指标数据源已下线",
+  "metric.source_recovered": "指标数据源已恢复",
+  "metric.gray_recycled": "灰度超期已回收",
   // 指标重评审 / 灰度发布 / 口径变更（与后端 _EVENT_TITLE_CN 对齐，避免拆词兜底显示英文）
   "metric.resubmitted": "指标重评审待审核",
   "metric.gray_published": "指标灰度发布",
@@ -127,6 +132,10 @@ const EVENT_ACTION_CN: Record<string, string> = {
   rolled_back: "回滚",
   emergency_published: "紧急发布",
   health_critical: "健康告警",
+  emergency_reviewed: "已补审",
+  source_dropped: "数据源下线",
+  source_recovered: "数据源恢复",
+  recycled: "已回收",
   // 指标重评审/灰度/口径变更/血缘影响兜底（与 EVENT_TYPE_LABEL 互补，覆盖未知派生类型）
   resubmitted: "重评审待审核",
   gray_published: "灰度发布",
@@ -451,7 +460,11 @@ const IMPACT_TEXT: Record<string, string> = {
   "metric.promoted": "指标已升级发布，口径版本已更新。",
   "metric.rolled_back": "指标已回滚至上一生效版本。",
   "metric.emergency_published": "指标已紧急发布，请注意补审确认。",
+  "metric.emergency_reviewed": "指标紧急发布已完成补审，闭环确认。",
   "metric.health_critical": "指标健康度偏低，请及时补充缺失治理项。",
+  "metric.gray_recycled": "指标灰度超期未转正，已回收为草稿，请重新梳理后提交。",
+  "metric.source_dropped": "指标数据源已下线，请在 7 天内处理（恢复或确认退役）。",
+  "metric.source_recovered": "指标数据源已恢复，指标已回到发布状态。",
   "metric.rename_required": "指标命名不合规，请尽快修改编码。",
   "metric.resubmitted": "指标已重新提交审核，等待审批结果。",
   "metric.gray_published": "指标已灰度发布，请在灰度环境验证口径。",
@@ -502,6 +515,8 @@ const NEEDS_ACTION = new Set<string>([
   "metric.rename_required",
   "metric.health_critical",
   "metric.breaking_change_pending",
+  "metric.source_dropped",
+  "metric.gray_recycled",
   "lineage.change_impacted",
   "conflict_open",
   "conflict_escalated",
@@ -536,7 +551,10 @@ function actionFor(templateCode: string, payload: Record<string, unknown>): { la
       return { label: "去评估", target: "/lineage" };
     case "metric.rename_required":
     case "metric.health_critical":
+    case "metric.source_dropped":
       return { label: "去处理", target: code ?? "/detail" };
+    case "metric.gray_recycled":
+      return { label: "去重新提交", target: code ?? "/detail" };
     case "conflict_open":
     case "conflict_escalated":
     case "conflict_reopened":
@@ -594,6 +612,11 @@ export const EVENT_TYPES = [
   "metric.breaking_change_pending",
   "metric.breaking_change_promoted",
   "metric.voided",
+  // 紧急补审 / 数据源下线恢复 / 灰度回收（订阅闭环）
+  "metric.emergency_reviewed",
+  "metric.source_dropped",
+  "metric.source_recovered",
+  "metric.gray_recycled",
   "quality.anomaly",
   "reconciliation.alert",
   "benchmark.imported",
@@ -637,7 +660,7 @@ export const EVENT_TYPES = [
 export const EVENT_TYPE_GROUPS: { label: string; options: { value: string; label: string }[] }[] = [
   {
     label: "指标生命周期",
-    options: ["metric.created", "metric.submitted", "metric.resubmitted", "metric.gray_published", "metric.approved", "metric.rejected", "metric.deprecated", "metric.voided", "metric.promoted", "metric.rolled_back", "metric.emergency_published", "metric.rename_required", "metric.health_critical", "metric.breaking_change_pending", "metric.breaking_change_promoted"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+    options: ["metric.created", "metric.submitted", "metric.resubmitted", "metric.gray_published", "metric.approved", "metric.rejected", "metric.deprecated", "metric.voided", "metric.promoted", "metric.rolled_back", "metric.emergency_published", "metric.emergency_reviewed", "metric.rename_required", "metric.health_critical", "metric.breaking_change_pending", "metric.breaking_change_promoted", "metric.source_dropped", "metric.source_recovered", "metric.gray_recycled"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
   {
     label: "口径冲突",

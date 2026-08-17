@@ -292,12 +292,99 @@ async def _notify_gray_recycled(db: Any, metric: Any) -> None:
             )
 
 
+async def _notify_dsd_overdue(db: Any, metric: Any) -> None:
+    """DSD 处理超期 → 定向升级提醒指标 Owner + 备份 Owner（IN_APP，不依赖订阅偏好）。
+
+    best-effort，通知失败仅记日志；复用 ``metric.source_dropped`` 模板，
+    正文标注「已超 7 天处理期」，与初次 DSD 通知区分开。
+    """
+    from app.services.notify.service import NotifyService
+
+    targets = [metric.owner_id]
+    if getattr(metric, "backup_owner_id", None) and metric.backup_owner_id != metric.owner_id:
+        targets.append(metric.backup_owner_id)
+    for uid in targets:
+        try:
+            await NotifyService(db).notify_user(
+                user_id=uid,
+                event_type="metric.source_dropped",
+                title=f"指标 {metric.metric_code} 数据源下线超期待处理",
+                body=(
+                    f"{metric.metric_code} 数据源下线已超过 7 天处理期仍未处理，"
+                    "请尽快恢复发布或确认退役，避免消费方持续受影响。"
+                ),
+                payload={
+                    "metric_code": metric.metric_code,
+                    "domain": metric.domain,
+                    "reason": "dsd_overdue",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort 不阻断巡检
+            logger.warning(
+                "dsd_overdue_notify_failed metric=%s user=%s err=%s",
+                metric.metric_code,
+                uid,
+                exc,
+            )
+
+
+async def check_dsd_overdue(ctx: dict[str, Any]) -> list[int]:
+    """DSD 处理超期升级提醒（每日 cron，P1-4 闭环）。
+
+    数据源下线后 Owner 有 7 天处理期（恢复发布 / 确认退役）。超过 7 天仍未
+    处理的 DATA_SOURCE_DROPPED 指标，定向升级提醒 Owner+备份 Owner（复用
+    ``metric.source_dropped`` 模板），驱动闭环完成；处理（恢复/退役）后
+    状态离开 DSD，巡检自然不再命中。
+
+    Returns:
+        已发送超期提醒的 DSD 指标 metric_id 列表。
+    """
+    from sqlalchemy import select
+
+    from app.db.mysql import async_session_factory
+    from app.models.metric import Metric
+
+    reminded: list[int] = []
+    now = datetime.now(UTC)
+    deadline = now - timedelta(days=7)
+
+    async with async_session_factory() as db:
+        stmt = select(Metric).where(
+            Metric.status == "DATA_SOURCE_DROPPED",
+            Metric.updated_at < deadline,
+            Metric.deleted_at.is_(None),
+        )
+        result = await db.execute(stmt)
+        metrics = result.scalars().all()
+
+        for metric in metrics:
+            try:
+                await _notify_dsd_overdue(db, metric)
+                reminded.append(metric.id)
+                logger.warning(
+                    "dsd_overdue_reminded",
+                    metric_code=metric.metric_code,
+                    metric_id=metric.id,
+                )
+            except Exception:
+                logger.warning(
+                    "dsd_overdue_check_failed",
+                    metric_id=metric.id,
+                    exc_info=True,
+                )
+
+        await db.commit()
+
+    return reminded
+
+
 # Arq Worker 注册
 functions = [
     check_pending_version_timeouts,
     refresh_health_scores,
     check_emergency_review_overdue,
     check_experimental_expiry,
+    check_dsd_overdue,
 ]
 
 # Cron 调度配置（供 arq worker 使用）
@@ -306,4 +393,5 @@ cron_jobs = [
     {"func": refresh_health_scores, "cron": "0 3 * * *"},  # 每日凌晨3点
     {"func": check_emergency_review_overdue, "cron": "0 * * * *"},  # 每小时
     {"func": check_experimental_expiry, "cron": "0 4 * * *"},  # 每日凌晨4点
+    {"func": check_dsd_overdue, "cron": "30 3 * * *"},  # 每日凌晨3点30分（健康刷新后）
 ]

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Button, List, Tag, Space, message } from "antd";
-import { listConflicts, listMetrics, listQualityEvents, UnisenseApiError } from "../api";
+import { getMe, listConflicts, listMetrics, listQualityEvents, UnisenseApiError } from "../api";
 import { useTracking } from "../hooks/useTracking";
 
 const CONFLICT_TYPE_LABEL: Record<string, string> = {
@@ -14,7 +14,7 @@ const CONFLICT_TYPE_LABEL: Record<string, string> = {
 };
 
 interface Todo {
-  kind: "conflict" | "draft" | "review" | "quality";
+  kind: "conflict" | "draft" | "review" | "quality" | "dsd";
   title: string;
   meta: string;
   code?: string;
@@ -46,6 +46,12 @@ const KIND_META: Record<Todo["kind"], { label: string; color: string; action: st
     action: "去处理",
     target: () => "/quality",
   },
+  dsd: {
+    label: "数据源下线",
+    color: "purple",
+    action: "去处理",
+    target: (t) => `/detail/${t.code}`,
+  },
 };
 
 export function TodoCenter() {
@@ -57,11 +63,14 @@ export function TodoCenter() {
   async function load() {
     setLoading(true);
     try {
-      const [conflicts, drafts, reviews, qualityAlerts] = await Promise.all([
+      // DSD 待办按当前登录用户的 Owner 维度收敛（源表下线 7 天处理期）
+      const me = await getMe();
+      const [conflicts, drafts, reviews, qualityAlerts, dropped] = await Promise.all([
         listConflicts({ status: "OPEN", page_size: 50 }),
         listMetrics({ status: "DRAFT", page_size: 50 }),
         listMetrics({ status: "REVIEW", page_size: 50 }),
         listQualityEvents({ status: "OPEN", page_size: 50 }),
+        listMetrics({ status: "DATA_SOURCE_DROPPED", owner_id: me.id, page_size: 50 }),
       ]);
       const list: Todo[] = [];
       for (const c of conflicts.items) {
@@ -94,6 +103,14 @@ export function TodoCenter() {
           meta: `事件 #${q.id} · 指标 #${q.metric_id} · ${q.status}`,
         });
       }
+      for (const m of dropped.items) {
+        list.push({
+          kind: "dsd",
+          title: `数据源下线待处理：${m.name}`,
+          meta: `${m.metric_code} · ${m.domain} · 7 天内恢复或确认退役`,
+          code: m.metric_code,
+        });
+      }
       setTodos(list);
       track("todo_center_view", undefined, "todo");
     } catch (err) {
@@ -117,7 +134,7 @@ export function TodoCenter() {
     <div>
       <Card title="待办中心">
       <Space size={[8, 8]} wrap style={{ marginBottom: 16 }}>
-        {(["conflict", "draft", "review", "quality"] as const).map((kind) => (
+        {(["conflict", "draft", "review", "quality", "dsd"] as const).map((kind) => (
           <Tag key={kind} color={KIND_META[kind].color} data-testid={`todo-count-${kind}`}>
             {KIND_META[kind].label} {countByKind(kind)}
           </Tag>
