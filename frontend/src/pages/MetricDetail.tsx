@@ -1366,11 +1366,43 @@ export function MetricDetail() {
       )}
       {metric.status === "EXPERIMENTAL" && isOwnerOrAdmin && canEdit && (
         <>
-          <Button icon={<RiseOutlined />} loading={busy} onClick={() => runAction(() => promoteMetric(metric.metric_code), "全量发布")}>
+          <Button
+            icon={<RiseOutlined />}
+            loading={busy}
+            onClick={() =>
+              Modal.confirm({
+                title: "确认全量发布？",
+                content: `「${metric.name}」将从灰度（EXPERIMENTAL）转为全量发布（PUBLISHED），对所有租户开放消费。确认继续？`,
+                okText: "确认发布",
+                cancelText: "取消",
+                onOk: () =>
+                  runAction(() => promoteMetric(metric.metric_code), "全量发布").then(() => {
+                    message.success("已全量发布");
+                  }),
+              })
+            }
+          >
             全量发布
           </Button>
           {canRollback && (
-            <Button icon={<RollbackOutlined />} loading={busy} onClick={() => runAction(() => rollbackMetric(metric.metric_code), "回滚")}>
+            <Button
+              danger
+              icon={<RollbackOutlined />}
+              loading={busy}
+              onClick={() =>
+                Modal.confirm({
+                  title: "确认回滚灰度版本？",
+                  content: `「${metric.name}」回滚为高风险操作：当前灰度版本将被归档，指标口径回退至上一发布版本，灰度租户将不可再消费新口径。确认继续？`,
+                  okText: "确认回滚",
+                  cancelText: "取消",
+                  okButtonProps: { danger: true },
+                  onOk: () =>
+                    runAction(() => rollbackMetric(metric.metric_code), "回滚").then(() => {
+                      message.success("已回滚");
+                    }),
+                })
+              }
+            >
               回滚
             </Button>
           )}
