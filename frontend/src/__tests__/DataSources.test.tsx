@@ -35,6 +35,7 @@ vi.mock("../api", () => {
     streamCollectionJob: vi.fn(),
     getCollectionJob: vi.fn(),
     listDataSourceDatabases: vi.fn(),
+    listDataSourceTables: vi.fn(),
     scheduleSource: vi.fn(),
     getSourceHealth: vi.fn(),
     getSourceWatermark: vi.fn(),
@@ -74,6 +75,7 @@ import {
   streamCollectionJob,
   getCollectionJob,
   listDataSourceDatabases,
+  listDataSourceTables,
   scheduleSource,
 } from "../api";
 
@@ -95,6 +97,7 @@ const mockedCollectNow = vi.mocked(collectSourceNow);
 const mockedStream = vi.mocked(streamCollectionJob);
 const mockedGetJob = vi.mocked(getCollectionJob);
 const mockedListDatabases = vi.mocked(listDataSourceDatabases);
+const mockedListTables = vi.mocked(listDataSourceTables);
 const mockedOverview = vi.mocked(getSourceOverview);
 const mockedRuns = vi.mocked(listCollectionRuns);
 const mockedAudits = vi.mocked(listAudit);
@@ -155,6 +158,36 @@ async function selectDomain(label: string) {
   fireEvent.click(screen.getByText(label));
 }
 
+/** 打开 antd Select 下拉：mousedown 须命中 .ant-select-selector（根元素不触发）。 */
+function openSelectDropdown(testId: string) {
+  const el = screen.getByTestId(testId);
+  const selector = el.querySelector<HTMLElement>(".ant-select-selector");
+  if (selector) fireEvent.mouseDown(selector);
+  else fireEvent.mouseDown(el);
+}
+
+/** 在打开的 antd 下拉中点击指定 title 的选项。 */
+async function clickOptionByTitle(title: string) {
+  await waitFor(() => {
+    const dropdown = document.querySelector(
+      ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+    ) as HTMLElement | null;
+    const opt = dropdown?.querySelector(
+      `.ant-select-item-option[title="${title}"]`,
+    ) as HTMLElement | null;
+    if (!opt) {
+      const titles = dropdown
+        ? Array.from(dropdown.querySelectorAll(".ant-select-item-option")).map(
+            (el) => el.getAttribute("title") ?? "",
+          )
+        : [];
+      console.log(`[clickOptionByTitle] "${title}" not found; dropdown titles=`, titles);
+    }
+    expect(opt).toBeTruthy();
+    if (opt) fireEvent.click(opt);
+  });
+}
+
 function renderSources() {
   return render(<MemoryRouter><DataSources /></MemoryRouter>);
 }
@@ -179,6 +212,10 @@ describe("DataSources", () => {
     mockedStream.mockReturnValue(() => {});
     mockedGetJob.mockResolvedValue({ job_id: "job-1", status: "COMPLETED", detail: {} });
     mockedListDatabases.mockResolvedValue({ databases: ["finance", "orders"], source_type: "mysql" });
+    mockedListTables.mockResolvedValue({
+      tables: { finance: ["orders", "gmv"], orders: ["items"] },
+      source_type: "mysql",
+    });
     mockedBatchToggle.mockResolvedValue({ succeeded: [], failed: [] });
     mockedBatchDelete.mockResolvedValue({ succeeded: [], failed: [] });
     mockedOverview.mockResolvedValue({
@@ -843,5 +880,90 @@ describe("DataSources", () => {
     });
     const payload = mockedCreate.mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(payload.databases).toEqual(["finance"]);
+  });
+
+  it("选择目标库后自动枚举表并展示采集范围表（库→表级联）", async () => {
+    await openCreateModal();
+    fireEvent.change(screen.getByPlaceholderText("如 财务 MySQL"), { target: { value: "财务库" } });
+    await selectDomain("财务（finance）");
+    fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), { target: { value: "10.0.0.1" } });
+    await selectType("MySQL（mysql）");
+    fireEvent.click(screen.getByText("测试连接"));
+    await screen.findByText(/选择目标库（可多选，留空=全部库）/);
+    // 选择 finance 目标库 → 触发枚举该库下的表
+    openSelectDropdown("target-db-select");
+    await clickOptionByTitle("finance");
+    await waitFor(() => {
+      expect(mockedListTables).toHaveBeenCalledWith(
+        expect.objectContaining({ databases: ["finance"] }),
+      );
+    });
+    // 表级联下拉出现，含 finance.orders / finance.gmv 选项
+    await screen.findByText(/选择要采集的表（不选=整库）/);
+    openSelectDropdown("target-table-select");
+    await screen.findByRole("option", { name: "finance.orders" });
+    expect(screen.getByRole("option", { name: "finance.gmv" })).toBeTruthy();
+  });
+
+  it("勾选部分表后提交生成 include_patterns（库.表），未选表库生成 库.*", async () => {
+    await openCreateModal();
+    fireEvent.change(screen.getByPlaceholderText("如 财务 MySQL"), { target: { value: "财务库" } });
+    await selectDomain("财务（finance）");
+    fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), { target: { value: "10.0.0.1" } });
+    await selectType("MySQL（mysql）");
+    fireEvent.click(screen.getByText("测试连接"));
+    await screen.findByText(/选择目标库（可多选，留空=全部库）/);
+    // 选中 finance + orders 两个目标库（antd multiple 打开后下拉保持展开，无需重开）
+    openSelectDropdown("target-db-select");
+    await clickOptionByTitle("finance");
+    await clickOptionByTitle("orders");
+    await screen.findByText(/选择要采集的表（不选=整库）/);
+    // 勾选 finance.orders（finance 选部分表；orders 库不选=整库 → orders.*）
+    openSelectDropdown("target-table-select");
+    await screen.findByRole("option", { name: "finance.orders" });
+    await clickOptionByTitle("finance.orders");
+    fireEvent.click(screen.getByRole("button", { name: /创\s*建/ }));
+    await waitFor(() => {
+      expect(mockedCreate).toHaveBeenCalled();
+    });
+    const payload = mockedCreate.mock.calls[0][0] as unknown as Record<string, unknown>;
+    // finance 选了 orders → finance.orders；orders 库未选表 → orders.*（整库）
+    expect(payload.databases).toEqual(["finance", "orders"]);
+    expect(payload.include_patterns).toEqual(["finance.orders", "orders.*"]);
+  });
+
+  it("编辑回显：从 include_patterns 反解已选表（库.表），库.* 不勾选", async () => {
+    const sourceWithScope = {
+      ...source,
+      databases: ["finance", "orders"],
+      include_patterns: ["finance.orders", "orders.*"],
+    };
+    mockedList.mockResolvedValue({ items: [sourceWithScope], total: 1, page: 1, page_size: 20 });
+    mockedGet.mockResolvedValue({
+      ...sourceWithScope,
+      connection_config: { host: "10.0.0.1", port: 3306, database: "finance", user: "root", password: "secret" },
+    });
+    renderSources();
+    await waitFor(() => {
+      expect(screen.getByText("管理")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    fireEvent.click(screen.getByText(/编\s*辑/));
+    // 编辑会自动枚举库与表；表级联回显 finance.orders（orders.* 整库不勾选）
+    await waitFor(() => {
+      expect(mockedListDatabases).toHaveBeenCalled();
+      expect(mockedListTables).toHaveBeenCalled();
+    });
+    // 表级联 Select 已渲染且选中 finance.orders（回显值使 placeholder 消失）
+    const tableSelect = await screen.findByTestId("target-table-select");
+    expect(tableSelect).toBeTruthy();
+    const tableItems = tableSelect.querySelectorAll(".ant-select-selection-item");
+    const tableTexts = Array.from(tableItems).map((el) => el.textContent ?? "");
+    expect(tableTexts).toContain("finance.orders");
+    // orders.* 整库不勾选（不出现 orders.* 表项）
+    expect(tableTexts).not.toContain("orders.items");
+    // 目标库回显两个 tag
+    expect(document.querySelectorAll(".ant-select-selection-item").length).toBeGreaterThanOrEqual(3);
   });
 });

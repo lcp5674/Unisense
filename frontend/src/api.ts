@@ -77,6 +77,7 @@ import {
   ManualLineageEdgeResult,
   ParseLineageResult,
   ListDatabasesResult,
+  ListTablesResult,
   ArchivedMetricResponse,
   MetricBatchRegisterRequest,
   MetricBatchRegisterResult,
@@ -2822,6 +2823,18 @@ export async function listDataSourceDatabases(req: {
   connection_config: Record<string, unknown>;
 }): Promise<ListDatabasesResult> {
   return request<ListDatabasesResult>(`${API_BASE}/data-sources/databases`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+/** 枚举指定库下的表（按库分组，创建数据源时级联选表）。 */
+export async function listDataSourceTables(req: {
+  source_type: SourceType;
+  connection_config: Record<string, unknown>;
+  databases: string[];
+}): Promise<ListTablesResult> {
+  return request<ListTablesResult>(`${API_BASE}/data-sources/tables`, {
     method: "POST",
     body: JSON.stringify(req),
   });

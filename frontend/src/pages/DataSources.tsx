@@ -25,6 +25,7 @@ import {
   testDataSourceConnection,
   checkDataSourceConnection,
   listDataSourceDatabases,
+  listDataSourceTables,
   listDriftLogs,
   listUsers,
   UnisenseApiError,
@@ -718,6 +719,9 @@ export function DataSources() {
   // 数据库枚举（测试连接通过后自动列出，供选择目标库）
   const [dbOptions, setDbOptions] = useState<string[]>([]);
   const [dbLoading, setDbLoading] = useState(false);
+  // 表级联枚举（选中目标库后按库分组列出表，供选择采集范围）
+  const [tableOptions, setTableOptions] = useState<Record<string, string[]>>({});
+  const [tableLoading, setTableLoading] = useState(false);
   // Owner 选择：用户列表（GET /auth/users）
   const [userOptions, setUserOptions] = useState<UserBrief[]>([]);
   const [form] = Form.useForm();
@@ -800,13 +804,15 @@ export function DataSources() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyword, health, ownerId]);
 
-  // 类型切换时自动带出默认端口，并清空已枚举的数据库列表
+  // 类型切换时自动带出默认端口，并清空已枚举的数据库/表列表
   function handleTypeChange(t: string) {
     const info = typeInfo(types, t);
     if (info?.default_port) {
       form.setFieldValue("port", info.default_port);
     }
     setDbOptions([]);
+    setTableOptions({});
+    form.setFieldValue("selected_tables", []);
   }
 
   /** 枚举实例下可采集的非系统数据库（需 host/类型已填）。 */
@@ -840,6 +846,67 @@ export function DataSources() {
     } finally {
       setDbLoading(false);
     }
+  }
+
+  /** 枚举选中目标库下的表（按库分组），供表级联选（防旧请求覆盖新选择）。 */
+  async function loadTables(dbs: string[]) {
+    const values = form.getFieldsValue();
+    if (!values.source_type || !values.host || !dbs.length) {
+      setTableOptions({});
+      return;
+    }
+    const cfg = buildConnectionConfig(values);
+    setTableLoading(true);
+    try {
+      const res = await listDataSourceTables({
+        source_type: String(values.source_type) as SourceType,
+        connection_config: cfg,
+        databases: dbs,
+      });
+      const currentDbs = parseDatabases(form.getFieldValue("databases"));
+      const kept: Record<string, string[]> = {};
+      for (const db of dbs) {
+        if (currentDbs.includes(db) && res.tables[db]) kept[db] = res.tables[db];
+      }
+      setTableOptions(kept);
+    } catch (err) {
+      setTableOptions({});
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "枚举表失败");
+    } finally {
+      setTableLoading(false);
+    }
+  }
+
+  /** 目标库变化：清空表级联选择并重新枚举新库下的表。 */
+  function handleDatabasesChange(dbs: string[]) {
+    setTableOptions({});
+    form.setFieldValue("selected_tables", []);
+    if (dbs.length) loadTables(dbs);
+  }
+
+  /** 表选择变化：为每个目标库生成 include_patterns（选表库→库.表；未选表库→库.* 整库）。 */
+  function handleTablesChange(tables: string[]) {
+    const dbs = parseDatabases(form.getFieldValue("databases"));
+    if (!dbs.length) return;
+    const patterns = dbs.map((db) => {
+      const sel = tables.filter((t) => t.startsWith(`${db}.`));
+      return sel.length ? sel : [`${db}.*`];
+    });
+    form.setFieldValue("include_patterns", patterns.flat().join("\n"));
+  }
+
+  /** 从 include_patterns 反解可视化选表（库.表 → 选表；库.* 与裸模式 → 跳过）。 */
+  function parsePatternsToTables(patterns: string[] | null | undefined): string[] {
+    if (!patterns?.length) return [];
+    const tables: string[] = [];
+    for (const p of patterns) {
+      const dot = p.indexOf(".");
+      if (dot <= 0) continue;
+      const rest = p.slice(dot + 1);
+      if (rest === "*" || rest.includes("*") || rest.includes("?")) continue;
+      tables.push(`${p.slice(0, dot)}.${rest}`);
+    }
+    return tables;
   }
 
   function buildConnectionConfig(values: Record<string, unknown>): Record<string, unknown> {
@@ -884,6 +951,8 @@ export function DataSources() {
     form.resetFields();
     form.setFieldsValue({ source_type: undefined, port: 3306, databases: [], collection_mode: "FULL" });
     setDbOptions([]);
+    setTableOptions({});
+    form.setFieldValue("selected_tables", []);
     setModalOpen(true);
   }
 
@@ -1034,6 +1103,8 @@ export function DataSources() {
     if (source.exclude_patterns?.length) form.setFieldsValue({ exclude_patterns: source.exclude_patterns.join("\n") });
     // 多目标库回显（数组；枚举库后 Select multiple 展示 tags，未枚举时 Input 逗号展示）
     form.setFieldsValue({ databases: source.databases ? [...source.databases] : [] });
+    // 表级联回显：从 include_patterns 反解已选表（库.表 → 选中；库.*/裸模式 → 整库不选）
+    form.setFieldValue("selected_tables", parsePatternsToTables(source.include_patterns));
     // 默认采集模式回显
     form.setFieldsValue({ collection_mode: source.collection_mode || "FULL" });
     if (source.quota) {
@@ -1059,6 +1130,11 @@ export function DataSources() {
             password: cfg.password != null ? String(cfg.password) : undefined,
           });
         }
+        // 连接配置就绪（host 可读）后自动枚举库与表，使级联选表立即可见（best-effort）
+        if (source.databases?.length) {
+          loadDatabases();
+          loadTables(source.databases);
+        }
       })
       .catch(() => {
         // 拉取失败（如密钥漂移）：保持连接字段留空，沿用"留空=保持原配置"兜底
@@ -1069,6 +1145,14 @@ export function DataSources() {
     setLoading(true);
     // 编辑保存时连接配置是否发生变更（决定是否引导重新采集）
     let configChanged = false;
+    const parsePatterns = (raw: unknown): string[] | undefined => {
+      if (typeof raw !== "string" || !raw.trim()) return undefined;
+      return raw.split(/[\n,，]/).map((s) => s.trim()).filter(Boolean);
+    };
+    // 高级连接选项折叠面板内的字段（include/exclude）不在 onFinish values 中，
+    // 须从表单 store 读取（forceRender 保证 DOM 挂载，但 onFinish 不收集折叠面板字段）
+    const includePatterns = parsePatterns(form.getFieldValue("include_patterns"));
+    const excludePatterns = parsePatterns(form.getFieldValue("exclude_patterns"));
     try {
       const cfg = buildConnectionConfig(values);
       if (editTarget) {
@@ -1087,12 +1171,6 @@ export function DataSources() {
         if (values.owner_id != null && values.owner_id !== "") {
           payload.owner_id = Number(values.owner_id);
         }
-        const parsePatterns = (raw: unknown): string[] | undefined => {
-          if (typeof raw !== "string" || !raw.trim()) return undefined;
-          return raw.split(/[\n,，]/).map((s) => s.trim()).filter(Boolean);
-        };
-        const includePatterns = parsePatterns(values.include_patterns);
-        const excludePatterns = parsePatterns(values.exclude_patterns);
         if (includePatterns) payload.include_patterns = includePatterns;
         if (excludePatterns) payload.exclude_patterns = excludePatterns;
         // 多目标库（PATCH 语义：仅当与原有配置不同才提交；[] 表示清空回全部库）
@@ -1137,6 +1215,9 @@ export function DataSources() {
         // 多目标库：选择/输入了目标库则提交（多库采集），否则留空按连接库/全部非系统库
         const dbList = parseDatabases(values.databases);
         if (dbList.length) payload.databases = dbList;
+        // 表级白/黑名单（可视化选表自动生成，亦可高级模式手填）
+        if (includePatterns) payload.include_patterns = includePatterns;
+        if (excludePatterns) payload.exclude_patterns = excludePatterns;
         // 默认采集模式
         payload.collection_mode = String(values.collection_mode ?? "FULL");
         // source_id 不传 → 后端按 类型_库|域 自动生成
@@ -1470,7 +1551,7 @@ export function DataSources() {
             showIcon
             style={{ marginBottom: 16 }}
             message={`Source ID 将由系统自动生成：${generated}`}
-            description="不填 Database 时采集该实例下全部非系统库；填了则只采集指定库。"
+            description="连接库为纯连接凭据，采集范围由下方「目标数据库」决定；留空=采集该实例下全部非系统库。"
           />
           <Space size={16} style={{ width: "100%" }} align="start">
             <Form.Item
@@ -1485,37 +1566,16 @@ export function DataSources() {
             <Form.Item name="port" label="Port" initialValue={3306} style={{ width: 130 }}>
               <Input type="number" className="mono" />
             </Form.Item>
-          </Space>
-          <Space size={16} style={{ width: "100%" }} align="start">
-            <Form.Item name="database" label="连接库（可选）" style={{ width: "100%" }} tooltip="连接时使用的默认库；留空=采集实例下全部非系统库。多目标库请在下方「目标数据库」选择">
-              {dbOptions.length ? (
-                <Select
-                  showSearch
-                  allowClear
-                  placeholder="全部库（默认）"
-                  optionFilterProp="label"
-                  loading={dbLoading}
-                  options={dbOptions.map((d) => ({ value: d, label: d }))}
-                />
-              ) : (
-                <Input className="mono" placeholder="留空则采集全部库" />
-              )}
-            </Form.Item>
             <Form.Item label=" " style={{ width: 120 }}>
               <Button icon={<DatabaseOutlined />} loading={dbLoading} onClick={loadDatabases} block>
                 枚举库
               </Button>
             </Form.Item>
-            {selType?.supports_schema && (
-              <Form.Item name="schema" label="Schema" style={{ width: "100%" }} tooltip="PostgreSQL 库内 schema，默认 public">
-                <Input className="mono" placeholder="public" />
-              </Form.Item>
-            )}
           </Space>
           <Form.Item
             name="databases"
             label="目标数据库（多选，留空=全部库）"
-            tooltip="测试连接通过后可在下方多选实例下的库；选择后仅采集这些库。留空=按连接库/全部非系统库采集"
+            tooltip="点「枚举库」后可在此多选实例下的库；仅采集所选库，其余库不在采集范围。留空=采集全部非系统库"
             getValueFromEvent={(e) => (e?.target ? e.target.value : e)}
             normalize={(v: string | string[] | undefined) =>
               Array.isArray(v)
@@ -1527,6 +1587,7 @@ export function DataSources() {
           >
             {dbOptions.length ? (
               <Select
+                data-testid="target-db-select"
                 mode="multiple"
                 allowClear
                 showSearch
@@ -1534,9 +1595,35 @@ export function DataSources() {
                 optionFilterProp="label"
                 loading={dbLoading}
                 options={dbOptions.map((d) => ({ value: d, label: d }))}
+                onChange={handleDatabasesChange}
               />
             ) : (
               <Input className="mono" placeholder="多个库用逗号分隔，留空=全部库" />
+            )}
+          </Form.Item>
+          <Form.Item
+            name="selected_tables"
+            label="采集范围表（可选）"
+            tooltip="选中目标库后自动枚举其下的表；不选=该库全部表（生成 库.*），勾选部分表则仅采集所选表（生成 库.表）。所选表自动写入「高级连接选项 → 表级白名单」"
+            getValueFromEvent={(e) => (e?.target ? e.target.value : e)}
+          >
+            {Object.keys(tableOptions).length ? (
+              <Select
+                data-testid="target-table-select"
+                mode="multiple"
+                allowClear
+                showSearch
+                placeholder="选择要采集的表（不选=整库）"
+                optionFilterProp="label"
+                loading={tableLoading}
+                options={Object.entries(tableOptions).map(([db, tables]) => ({
+                  label: db,
+                  options: tables.map((t) => ({ value: `${db}.${t}`, label: `${db}.${t}` })),
+                }))}
+                onChange={handleTablesChange}
+              />
+            ) : (
+              <Input className="mono" placeholder="选择目标库后自动枚举表；不选=该库全部表" disabled />
             )}
           </Form.Item>
           <Form.Item
@@ -1560,6 +1647,63 @@ export function DataSources() {
               <Input.Password className="mono" placeholder="连接密码" />
             </Form.Item>
           </Space>
+          <Collapse
+            ghost
+            style={{ marginBottom: 16 }}
+            items={[
+              {
+                key: "advanced",
+                label: "高级连接选项",
+                // 面板默认折叠但内容必须常驻挂载：折叠时 Form.Item 不渲染会丢字段值
+                // （database/include_patterns 编辑回显与提交读取依赖其注册）
+                forceRender: true,
+                children: (
+                  <Space direction="vertical" style={{ width: "100%" }}>
+                    <Form.Item
+                      name="database"
+                      label="连接库（纯连接凭据）"
+                      style={{ width: "100%" }}
+                      tooltip="连接实例时使用的默认库，仅作连接凭据、不影响采集范围；采集范围由上方「目标数据库」决定"
+                    >
+                      {dbOptions.length ? (
+                        <Select
+                          showSearch
+                          allowClear
+                          placeholder="全部库（默认）"
+                          optionFilterProp="label"
+                          loading={dbLoading}
+                          options={dbOptions.map((d) => ({ value: d, label: d }))}
+                        />
+                      ) : (
+                        <Input className="mono" placeholder="连接默认库（可选）" />
+                      )}
+                    </Form.Item>
+                    {selType?.supports_schema && (
+                      <Form.Item name="schema" label="Schema" style={{ width: "100%" }} tooltip="PostgreSQL 库内 schema，默认 public">
+                        <Input className="mono" placeholder="public" />
+                      </Form.Item>
+                    )}
+                    <Form.Item
+                      name="include_patterns"
+                      label="表级白名单（高级模式）"
+                      tooltip="fnmatch 风格，每行一个；填写后仅采集匹配的表（如 库.orders_*）。上方「采集范围表」勾选会自动生成此处。留空=采集全部"
+                      style={{ width: "100%" }}
+                    >
+                      <Input.TextArea rows={2} placeholder={"每行一个模式，如：\n库名.orders_*\n库名.dim_*}".replace("}*", "*}")} />
+                    </Form.Item>
+                    <Form.Item
+                      name="exclude_patterns"
+                      label="表级黑名单（高级模式）"
+                      tooltip="fnmatch 风格，每行一个；命中即排除（如 库.tmp_*）。白名单优先于黑名单"
+                      style={{ width: "100%" }}
+                    >
+                      <Input.TextArea rows={2} placeholder={"每行一个模式，如：\n库名.tmp_*".replace("_*}", "")} />
+                    </Form.Item>
+                  </Space>
+                ),
+              },
+            ]}
+          />
           <Divider style={{ margin: "8px 0" }} />
           <Form.Item name="description" label="用途描述" style={{ width: "100%" }}>
             <Input.TextArea rows={2} placeholder="该数据源的业务用途、责任范围（治理信息，不参与采集）" maxLength={2000} showCount />
@@ -1583,22 +1727,6 @@ export function DataSources() {
               <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
             </Form.Item>
           </Space>
-          <Form.Item
-            name="include_patterns"
-            label="表级白名单"
-            tooltip="fnmatch 风格，每行一个；填写后仅采集匹配的表（如 orders_*, dim_*）。留空=采集全部"
-            style={{ width: "100%" }}
-          >
-            <Input.TextArea rows={2} placeholder={"每行一个模式，如：\nods_*\ndwd_*\ndim_*}".replace("}*", "*}")} />
-          </Form.Item>
-          <Form.Item
-            name="exclude_patterns"
-            label="表级黑名单"
-            tooltip="fnmatch 风格，每行一个；命中即排除（如 tmp_*, *_bak）。白名单优先于黑名单"
-            style={{ width: "100%" }}
-          >
-            <Input.TextArea rows={2} placeholder={"每行一个模式，如：\ntmp_*\n*_bak".replace("_*}", "")} />
-          </Form.Item>
           <Space style={{ marginBottom: 8 }}>
             {can("data-source:test-connection") && (
               <Button icon={<ApiOutlined />} onClick={handleTest}>

@@ -1670,6 +1670,10 @@ export interface DataSourceCreateRequest {
   databases?: string[] | null;
   /** 默认采集模式（FULL 全量 / INCREMENTAL 增量），默认 FULL */
   collection_mode?: string;
+  /** 表级白名单（fnmatch；可视化选表自动生成 库.表/库.*，亦可高级模式手填） */
+  include_patterns?: string[];
+  /** 表级黑名单（fnmatch） */
+  exclude_patterns?: string[];
 }
 
 export interface DataSourceUpdateRequest {
@@ -1773,6 +1777,12 @@ export interface CollectResult {
 /** 数据源实例下的非系统数据库列表。 */
 export interface ListDatabasesResult {
   databases: string[];
+  source_type: string;
+}
+
+/** 数据源实例下按库分组的表名列表（级联选表）。 */
+export interface ListTablesResult {
+  tables: Record<string, string[]>;
   source_type: string;
 }
 
