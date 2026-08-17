@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -492,6 +492,31 @@ async def test_is_breaking_change_detection():
 
     assert svc._is_breaking_change(old, same) is False
     assert svc._is_breaking_change(old, diff) is True
+
+
+async def test_is_breaking_change_sql_mode():
+    """SQL 模式口径变更与表达式同级触发破坏性判定（PENDING 确认期）。
+
+    修复前 BREAKING_DEF_FIELDS 不含 sql/etl_sql：SQL 模式指标改口径被当
+    非破坏性 UPDATE 直接生效，绕过 14 天消费方确认（治理漏洞）。
+    """
+    svc, _ = _svc_with_repo()
+    old = {"sql": "SELECT SUM(amount) FROM sales", "source_tables": ["sales"]}
+    same = {"sql": "SELECT SUM(amount) FROM sales", "source_tables": ["sales"]}
+    diff = {
+        "sql": "SELECT SUM(amount) FROM sales WHERE channel = 'APP'",
+        "source_tables": ["sales"],
+    }
+    etl_old = {"etl_sql": "SELECT COUNT(*) FROM orders"}
+
+    assert svc._is_breaking_change(old, same) is False
+    assert svc._is_breaking_change(old, diff) is True
+    assert (
+        svc._is_breaking_change(
+            etl_old, {"etl_sql": "SELECT COUNT(DISTINCT id) FROM orders"}
+        )
+        is True
+    )
 
 
 async def test_review_compliance_blocks_owner_self_review():
@@ -1286,7 +1311,9 @@ async def test_rollback_metric_success():
     svc, repo = _svc_with_repo()
     metric = make_metric(status="EXPERIMENTAL", owner_id=1, version=2, effective_version=2)
     repo.get_by_code = AsyncMock(return_value=metric)
-    prev_pub = MagicMock(version=1, status="PUBLISHED", definition_json={"expression": "sum(amount)"})
+    prev_pub = MagicMock(
+        version=1, status="PUBLISHED", definition_json={"expression": "sum(amount)"}
+    )
     repo.list_versions = AsyncMock(return_value=[prev_pub])
     # 当前灰度版本的 diff_json 记录 granularity 的 before（供回滚恢复 top-level 字段）
     gray_diff = MagicMock(
@@ -2566,7 +2593,7 @@ async def test_approve_derived_metric_emits_dependencies():
 
 
 async def test_approve_metric_version_not_found():
-    """approve 时目标版本不存在 → NotFoundError。"""
+    """approve 时目标版本（当前待审核版本）记录缺失 → NotFoundError。"""
     svc, repo = _svc_with_repo()
     metric = make_metric(status="REVIEW", owner_id=1, pii_flag=False)
     repo.get_by_code = AsyncMock(return_value=metric)
@@ -2574,7 +2601,7 @@ async def test_approve_metric_version_not_found():
     with pytest.raises(NotFoundError):
         await svc.approve_metric(
             "sales_gmv_daily",
-            MetricApproveRequest(target_version=99),
+            MetricApproveRequest(target_version=1),
             actor_id=1,
             role="platform_admin",
         )
@@ -2598,7 +2625,7 @@ async def test_emergency_publish_invalid_status():
 
 
 async def test_emergency_publish_version_not_found():
-    """紧急发布时目标版本不存在 → NotFoundError。"""
+    """紧急发布时目标版本（当前版本）记录缺失 → NotFoundError。"""
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", pii_flag=False))
     repo.get_version = AsyncMock(return_value=None)
@@ -2606,11 +2633,46 @@ async def test_emergency_publish_version_not_found():
         await svc.emergency_publish_metric(
             "sales_gmv_daily",
             MetricEmergencyPublishRequest(
-                reason="生产系统故障需立即紧急发布处理", target_version=99
+                reason="生产系统故障需立即紧急发布处理", target_version=1
             ),
             actor_id=1,
             role="domain_admin",
         )
+
+
+async def test_approve_metric_rejects_historical_target_version():
+    """审批经 API 直调传历史版本号 → ConflictError INVALID_TARGET_VERSION（防版本历史篡改）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="REVIEW", owner_id=1, pii_flag=False, version=2)
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=None)
+    with pytest.raises(ConflictError) as exc:
+        await svc.approve_metric(
+            "sales_gmv_daily",
+            MetricApproveRequest(target_version=1),
+            actor_id=1,
+            role="platform_admin",
+        )
+    assert exc.value.error_code == "INVALID_TARGET_VERSION"
+
+
+async def test_emergency_publish_rejects_historical_target_version():
+    """紧急发布传历史版本号 → ConflictError INVALID_TARGET_VERSION（防口径/版本矛盾）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", pii_flag=False, version=2)
+    )
+    repo.get_version = AsyncMock(return_value=None)
+    with pytest.raises(ConflictError) as exc:
+        await svc.emergency_publish_metric(
+            "sales_gmv_daily",
+            MetricEmergencyPublishRequest(
+                reason="生产系统故障需立即紧急发布处理", target_version=1
+            ),
+            actor_id=1,
+            role="domain_admin",
+        )
+    assert exc.value.error_code == "INVALID_TARGET_VERSION"
 
 
 # ---- confirm_version 边界 ----

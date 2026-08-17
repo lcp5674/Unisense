@@ -81,7 +81,17 @@ def _redis_available() -> bool:
 # 口径层破坏性变更字段：这些字段变更会破坏下游消费方
 # 同时用于 _is_breaking_change 与 _compute_diff，保证判定一致（修复原实现中二者对
 # dependencies 的判定互相矛盾的问题）。
-BREAKING_DEF_FIELDS = ("expression", "aggregation", "granularity", "dependencies")
+# sql/etl_sql（SQL 模式口径，注册页可选 SQL 模式写入 definition_json.sql，后端 sqlglot 校验）：
+# 修改 SQL 口径与表达式（expression）同级——同样破坏下游消费方，必须触发 PENDING 确认期。
+# 修复前 SQL 模式指标改口径被当非破坏性 UPDATE 静默生效，绕过 14 天消费方确认（治理漏洞）。
+BREAKING_DEF_FIELDS = (
+    "expression",
+    "aggregation",
+    "granularity",
+    "dependencies",
+    "sql",
+    "etl_sql",
+)
 
 # Top-level 破坏性变更字段：直接修改 metric 表上的这些字段等同于口径变更
 # （对齐 TD §12 metric_version：granularity/unit 变更触发 PENDING_VERSION）
@@ -1594,6 +1604,15 @@ class MetricService(BaseService):
 
         # 定位待发布版本
         target_version = request.target_version or metric.version
+        # target_version 越权防护：审批只允许发布「当前待审核版本」（metric.version）。
+        # 旧实现不校验——有 approve 权限的角色经 API 直调可传任意历史版本号，
+        # mark_version_published 会把历史版本重新标 PUBLISHED（版本历史篡改），
+        # 且主表 effective_version 指向旧版本而 definition_json 保持最新（口径矛盾）。
+        if target_version != metric.version:
+            raise ConflictError(
+                f"待发布版本 {target_version} 不是当前待审核版本 {metric.version}",
+                error_code="INVALID_TARGET_VERSION",
+            )
         version_obj = await self._repo.get_version(metric.id, target_version)
         if version_obj is None:
             raise NotFoundError(f"版本不存在: {target_version}")
@@ -2432,6 +2451,13 @@ class MetricService(BaseService):
 
         # 定位待发布版本
         target_version = request.target_version or metric.version
+        # target_version 越权防护（同 approve）：紧急发布只允许发布「当前版本」，
+        # 禁止经 API 直调把历史版本重新标 PUBLISHED / 造成 effective_version 与口径矛盾。
+        if target_version != metric.version:
+            raise ConflictError(
+                f"待发布版本 {target_version} 不是当前版本 {metric.version}",
+                error_code="INVALID_TARGET_VERSION",
+            )
         version_obj = await self._repo.get_version(metric.id, target_version)
         if version_obj is None:
             raise NotFoundError(f"版本不存在: {target_version}")
