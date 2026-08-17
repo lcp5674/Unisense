@@ -50,6 +50,18 @@ from app.services.llm.client import (
 
 logger = get_logger("unisense.collector.service")
 
+
+def _hit_to_dict(hit: Any) -> dict[str, Any]:
+    """PiiFieldHit → classification.pii_columns 存储结构（列名/类别/规则/置信度/途径）。"""
+    return {
+        "column": hit.column,
+        "category": hit.category,
+        "rule": hit.rule,
+        "confidence": round(float(hit.confidence), 4),
+        "matched_by": hit.matched_by,
+    }
+
+
 # PRD §4.13 健康状态机参数：滑动窗口上限与降级成功率阈值
 _HEALTH_WINDOW = 20
 _HEALTH_DEGRADED_RATE = 0.95
@@ -265,6 +277,7 @@ class CollectorService(BaseService):
             source_type=source_type_value,
             connection_config=encrypted,
             databases=req.databases or None,
+            collection_mode=req.collection_mode or "FULL",
             domain=req.domain,
             cluster_id=req.cluster_id,
             coverage=0.0,
@@ -487,6 +500,9 @@ class CollectorService(BaseService):
         # 多目标库（PATCH 语义：[] 表示清空回全部库/单库配置）
         if req.databases is not None:
             src.databases = req.databases or None
+        # 默认采集模式（PATCH 语义：None 不修改）
+        if req.collection_mode is not None:
+            src.collection_mode = req.collection_mode
         # 治理字段：owner_id / description / include / exclude patterns（PATCH 语义）
         if (
             req.owner_id is not None
@@ -736,8 +752,11 @@ class CollectorService(BaseService):
         # （API 层会按路径回填，但 worker/任务路径直接调用服务时需自行保证）
         if req.source_id is None:
             raise ValidationError("source_id 缺失：必须由路径参数或请求体提供")
-        # 规则引擎分类（确定性基线）
-        rule_sensitivity = self._classifier.classify(req.entity_name, req.schema_def)
+        # 规则引擎分类（确定性基线）：先做字段级命中明细，再判级（避免重复检测）
+        pii_hits = self._classifier.detect_pii_fields(req.entity_name, req.schema_def)
+        rule_sensitivity = self._classifier.classify(
+            req.entity_name, req.schema_def, hits=pii_hits
+        )
         sensitivity = rule_sensitivity
 
         # US6: 空 schema 告警
@@ -785,6 +804,11 @@ class CollectorService(BaseService):
             sensitivity_level=sensitivity,
             owner_id=req.owner_id,
         )
+        # PII 合规增强：随分级把字段级命中明细落 classification（含类别/规则/置信度）
+        if pii_hits:
+            await self._repo.upsert_classification(
+                cat.id, sensitivity, [_hit_to_dict(h) for h in pii_hits]
+            )
         await self._repo.recompute_coverage(req.source_id)
         await self._events.publish(
             "catalog_registered",
@@ -1668,7 +1692,10 @@ class CollectorService(BaseService):
         catalog_failed_specs: list[dict[str, str]] = []
         entities: list[dict[str, Any]] = []
         for spec in result.specs:
-            sensitivity = self._classifier.classify(spec.entity_name, spec.schema_json)
+            pii_hits = self._classifier.detect_pii_fields(spec.entity_name, spec.schema_json)
+            sensitivity = self._classifier.classify(
+                spec.entity_name, spec.schema_json, hits=pii_hits
+            )
             if sensitivity == "PII":
                 pii_registered += 1
 
@@ -1701,6 +1728,19 @@ class CollectorService(BaseService):
                 )
                 catalog_failed_specs.append({"entity_name": spec.entity_name, "error": str(exc)})
                 continue
+            # PII 合规增强：随分级把字段级命中明细落 classification
+            if pii_hits:
+                try:
+                    await self._repo.upsert_classification(
+                        _cat.id, sensitivity, [_hit_to_dict(h) for h in pii_hits]
+                    )
+                except Exception as exc:  # noqa: BLE001 - 明细落库失败不阻断采集
+                    logger.warning(
+                        "collect_classification_failed: source=%s entity=%s error=%s",
+                        source_id,
+                        spec.entity_name,
+                        exc,
+                    )
             # P2-4: 回填实体级内容指纹（供增量判断与审计追溯）
             signature = _cat.content_signature
             if signature:
@@ -1868,6 +1908,12 @@ class CollectorService(BaseService):
             sensitivity_level=sensitivity,
             owner_id=None,
         )
+        # PII 合规增强：单表采集同样落字段级命中明细
+        pii_hits = self._classifier.detect_pii_fields(spec.entity_name, spec.schema_json)
+        if pii_hits:
+            await self._repo.upsert_classification(
+                _cat.id, sensitivity, [_hit_to_dict(h) for h in pii_hits]
+            )
         if drift_info is not None:
             await self._handle_drift(source_id, spec.entity_name, drift_info)
         # 刷新成功视为健康信号
@@ -2006,17 +2052,24 @@ class CollectorService(BaseService):
         return counts
 
     async def update_schedule(
-        self, source_id: str, cron: str, mode: str, schedule_enabled: bool | None = None
+        self,
+        source_id: str,
+        cron: str,
+        mode: str | None = None,
+        schedule_enabled: bool | None = None,
     ) -> None:
-        """US3: 更新数据源的定时调度配置（schedule_cron + collection_mode [+ 调度启停]）。
+        """US3: 更新数据源的定时调度配置（schedule_cron [+ collection_mode] [+ 调度启停]）。
 
-        ``schedule_enabled`` 为 None 时保持当前状态（兼容仅改 cron/mode 的旧调用）。
+        ``mode`` 为 None 时保持数据源现有 ``collection_mode`` 不变——采集模式由
+        数据源自身的默认采集模式决定（编辑表单设置），调度只负责 cron 与启停。
+        ``schedule_enabled`` 为 None 时保持当前状态（兼容仅改 cron 的旧调用）。
         """
         src = await self._repo.get_source(source_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         src.schedule_cron = cron
-        src.collection_mode = mode
+        if mode is not None:
+            src.collection_mode = mode
         if schedule_enabled is not None:
             src.schedule_enabled = schedule_enabled
         await self._db.flush()

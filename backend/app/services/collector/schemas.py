@@ -37,6 +37,12 @@ class DataSourceCreateRequest(BaseModel):
         default=None,
         description="目标数据库列表（None=按连接配置/全部非系统库）",
     )
+    collection_mode: str = Field(
+        default="FULL",
+        max_length=16,
+        pattern=r"^(FULL|INCREMENTAL)$",
+        description="默认采集模式：FULL 全量 / INCREMENTAL 增量（定时调度与手动采集默认按此模式）",
+    )
 
     @model_validator(mode="after")
     def _validate_connection_config(self) -> DataSourceCreateRequest:
@@ -92,6 +98,12 @@ class DataSourceUpdateRequest(BaseModel):
     databases: list[str] | None = Field(
         default=None,
         description="目标数据库列表；[] 表示清空（采集全部库/单库配置），None 表示不修改",
+    )
+    collection_mode: str | None = Field(
+        default=None,
+        max_length=16,
+        pattern=r"^(FULL|INCREMENTAL)$",
+        description="默认采集模式（FULL/INCREMENTAL），None 表示不修改",
     )
 
     @model_validator(mode="after")
@@ -379,10 +391,19 @@ class CollectRequest(BaseModel):
 
 
 class ScheduleRequest(BaseModel):
-    """定时调度配置请求（US3）。"""
+    """定时调度配置请求（US3）。
+
+    ``mode`` 为 None 时保持数据源当前的 ``collection_mode`` 不变——调度只负责
+    cron 与启停，采集模式由数据源自身的默认采集模式决定（编辑表单设置）。
+    """
 
     cron: str = Field(max_length=100, description="定时调度 cron 表达式")
-    mode: str = Field(default="FULL", max_length=16, pattern=r"^(FULL|INCREMENTAL)$")
+    mode: str | None = Field(
+        default=None,
+        max_length=16,
+        pattern=r"^(FULL|INCREMENTAL)$",
+        description="采集模式覆盖；None=保持数据源现有 collection_mode",
+    )
     schedule_enabled: bool | None = Field(
         default=None, description="是否启用定时调度；None=保持当前状态"
     )

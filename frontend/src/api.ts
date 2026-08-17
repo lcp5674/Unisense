@@ -2824,10 +2824,9 @@ export function streamCollectionJob(
 export async function scheduleSource(
   sourceId: string,
   cron: string,
-  mode = "FULL",
   scheduleEnabled?: boolean,
 ): Promise<ScheduleResult> {
-  const body: Record<string, unknown> = { cron, mode };
+  const body: Record<string, unknown> = { cron };
   if (scheduleEnabled !== undefined) body.schedule_enabled = scheduleEnabled;
   return request<ScheduleResult>(
     `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/schedule`,

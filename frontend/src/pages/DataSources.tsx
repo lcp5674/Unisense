@@ -125,6 +125,7 @@ function SourceDetailModal({
   onEdit,
   onDelete,
   onToggleEnabled,
+  onScheduleSaved,
   deleting,
   toggling,
 }: {
@@ -134,6 +135,8 @@ function SourceDetailModal({
   onEdit: (source: DataSource) => void;
   onDelete: (source: DataSource) => void;
   onToggleEnabled: (source: DataSource) => void;
+  /** 调度配置保存成功后触发（主列表刷新，保证「调度」列状态即时一致） */
+  onScheduleSaved?: () => void;
   deleting: boolean;
   toggling: boolean;
 }) {
@@ -148,7 +151,6 @@ function SourceDetailModal({
   const [progressMessages, setProgressMessages] = useState<string[]>([]);
   const abortRef = useRef<(() => void) | null>(null);
   const [cron, setCron] = useState("0 3 * * *");
-  const [scheduleMode, setScheduleMode] = useState("FULL");
   // 调度启停（独立于数据源 enabled：停用调度仅暂停自动定时，源仍可手动采集）
   const [scheduleEnabled, setScheduleEnabled] = useState(source.schedule_enabled ?? true);
   // 立即采集弹窗：模式 + 本次临时白/黑名单（仅本次生效，不污染数据源配置）
@@ -294,16 +296,18 @@ function SourceDetailModal({
 
   async function handleSchedule() {
     try {
-      const res = await scheduleSource(source.source_id, cron, scheduleMode, scheduleEnabled);
+      const res = await scheduleSource(source.source_id, cron, scheduleEnabled);
       if (res?.scheduled) {
         if (scheduleEnabled) {
-          message.success(`已启用定时调度：${res.cron}（${res.mode}）`);
+          message.success(`已启用定时调度：${res.cron}（${COLLECTION_MODE_LABEL[source.collection_mode] ?? source.collection_mode}）`);
         } else {
           message.success("已停用定时调度（cron 保留，源仍可手动采集）");
         }
       } else {
         message.success("调度配置已保存");
       }
+      // 刷新主列表，保证「调度」列启停状态与详情弹窗即时一致
+      onScheduleSaved?.();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "调度失败");
     }
@@ -579,14 +583,15 @@ function SourceDetailModal({
             测试连接
           </Button>
         )}
-        <Input
-          className="mono"
-          value={cron}
-          onChange={(e) => setCron(e.target.value)}
-          style={{ width: 150 }}
-          placeholder="cron"
-        />
-        <Select value={scheduleMode} onChange={setScheduleMode} style={{ width: 110 }} options={[{ value: "FULL", label: "全量" }, { value: "INCREMENTAL", label: "增量" }]} />
+        <Tooltip title="定时采集按数据源的默认采集模式执行（可在编辑表单修改）">
+          <Input
+            className="mono"
+            value={cron}
+            onChange={(e) => setCron(e.target.value)}
+            style={{ width: 150 }}
+            placeholder="cron"
+          />
+        </Tooltip>
         <Tooltip title="停用调度后保留 cron 配置但不自动触发，源仍可手动采集">
           <Switch
             checked={scheduleEnabled}
@@ -631,7 +636,10 @@ function SourceDetailModal({
       >
         <Space direction="vertical" style={{ width: "100%" }}>
           <Form layout="vertical" style={{ marginTop: 4 }}>
-            <Form.Item label="采集模式">
+            <Form.Item
+              label="本次采集模式"
+              tooltip="默认跟随数据源的默认采集模式，可临时覆盖本次；不修改数据源保存的模式"
+            >
               <Radio.Group
                 value={collectMode}
                 onChange={(e) => setCollectMode(e.target.value)}
@@ -873,7 +881,7 @@ export function DataSources() {
   function openCreate() {
     setEditTarget(null);
     form.resetFields();
-    form.setFieldsValue({ source_type: undefined, port: 3306, databases: [] });
+    form.setFieldsValue({ source_type: undefined, port: 3306, databases: [], collection_mode: "FULL" });
     setDbOptions([]);
     setModalOpen(true);
   }
@@ -1025,6 +1033,8 @@ export function DataSources() {
     if (source.exclude_patterns?.length) form.setFieldsValue({ exclude_patterns: source.exclude_patterns.join("\n") });
     // 多目标库回显（数组；枚举库后 Select multiple 展示 tags，未枚举时 Input 逗号展示）
     form.setFieldsValue({ databases: source.databases ? [...source.databases] : [] });
+    // 默认采集模式回显
+    form.setFieldsValue({ collection_mode: source.collection_mode || "FULL" });
     if (source.quota) {
       form.setFieldsValue({
         quota_max_concurrency: (source.quota as Record<string, unknown>).max_concurrency,
@@ -1090,6 +1100,11 @@ export function DataSources() {
         if (JSON.stringify(dbList) !== JSON.stringify(prevDbs)) {
           payload.databases = dbList;
         }
+        // 默认采集模式（PATCH 语义：仅当与原有配置不同才提交）
+        const newMode = String(values.collection_mode ?? "FULL");
+        if (newMode !== (editTarget.collection_mode || "FULL")) {
+          payload.collection_mode = newMode;
+        }
         if (values.quota_max_concurrency != null || values.quota_max_scan_rows != null) {
           payload.quota = {
             max_concurrency: values.quota_max_concurrency != null ? Number(values.quota_max_concurrency) : undefined,
@@ -1121,6 +1136,8 @@ export function DataSources() {
         // 多目标库：选择/输入了目标库则提交（多库采集），否则留空按连接库/全部非系统库
         const dbList = parseDatabases(values.databases);
         if (dbList.length) payload.databases = dbList;
+        // 默认采集模式
+        payload.collection_mode = String(values.collection_mode ?? "FULL");
         // source_id 不传 → 后端按 类型_库|域 自动生成
         await createDataSource(payload);
         message.success(`数据源已创建（${previewSourceId(String(values.source_type), cfg, String(values.domain))}）`);
@@ -1521,6 +1538,19 @@ export function DataSources() {
               <Input className="mono" placeholder="多个库用逗号分隔，留空=全部库" />
             )}
           </Form.Item>
+          <Form.Item
+            name="collection_mode"
+            label="默认采集模式"
+            tooltip="定时调度与手动采集默认按此模式执行；立即采集可临时覆盖本次，不修改此配置"
+            style={{ width: "100%" }}
+          >
+            <Radio.Group
+              options={[
+                { value: "FULL", label: "全量（扫描全部匹配表）" },
+                { value: "INCREMENTAL", label: "增量（仅变更表）" },
+              ]}
+            />
+          </Form.Item>
           <Space size={16} style={{ width: "100%" }} align="start">
             <Form.Item name="user" label="User" style={{ width: "100%" }}>
               <Input className="mono" placeholder="连接账号" />
@@ -1589,6 +1619,7 @@ export function DataSources() {
           onEdit={(s) => { setDetail(null); openEdit(s); }}
           onDelete={handleDeleteSource}
           onToggleEnabled={handleToggleEnabled}
+          onScheduleSaved={() => load()}
         />
       )}
 

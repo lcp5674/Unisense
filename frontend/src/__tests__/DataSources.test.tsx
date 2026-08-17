@@ -779,7 +779,40 @@ describe("DataSources", () => {
     fireEvent.click(screen.getByRole("switch"));
     fireEvent.click(screen.getByText("保存调度"));
     await waitFor(() => {
-      expect(mockedSchedule).toHaveBeenCalledWith("mysql_finance", "0 3 * * *", "FULL", false);
+      expect(mockedSchedule).toHaveBeenCalledWith("mysql_finance", "0 3 * * *", false);
+    });
+  });
+
+  it("保存调度后刷新列表（调度列启停状态即时一致）", async () => {
+    mockedSchedule.mockResolvedValue({ scheduled: true, cron: "0 3 * * *", mode: "FULL", schedule_enabled: false });
+    renderSources();
+    await screen.findByText("mysql_finance");
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    const before = mockedList.mock.calls.length;
+    fireEvent.click(screen.getByRole("switch"));
+    fireEvent.click(screen.getByText("保存调度"));
+    await waitFor(() => {
+      // 保存成功后触发列表刷新（onScheduleSaved → load）
+      expect(mockedList.mock.calls.length).toBeGreaterThan(before);
+    });
+  });
+
+  it("编辑表单可修改默认采集模式并随保存提交（仅当变化时提交）", async () => {
+    renderSources();
+    await waitFor(() => expect(screen.getByText("mysql_finance")).toBeTruthy());
+    fireEvent.click(screen.getByText("管理"));
+    fireEvent.click(screen.getByText("编辑"));
+    // 编辑表单出现「默认采集模式」字段（回显 FULL）
+    await screen.findByText("默认采集模式");
+    // 切换为增量
+    fireEvent.click(screen.getByText("增量（仅变更表）"));
+    fireEvent.click(await screen.findByRole("button", { name: "保 存" }));
+    await waitFor(() => {
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        "mysql_finance",
+        expect.objectContaining({ collection_mode: "INCREMENTAL" }),
+      );
     });
   });
 

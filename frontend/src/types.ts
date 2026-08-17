@@ -1593,6 +1593,8 @@ export interface DataSourceCreateRequest {
   cluster_id?: string | null;
   /** 目标数据库列表（多库采集；null/空=全部库/单库配置） */
   databases?: string[] | null;
+  /** 默认采集模式（FULL 全量 / INCREMENTAL 增量），默认 FULL */
+  collection_mode?: string;
 }
 
 export interface DataSourceUpdateRequest {
@@ -1613,6 +1615,8 @@ export interface DataSourceUpdateRequest {
   quota?: Record<string, unknown>;
   /** 目标数据库列表；[] 表示清空（采集全部库），undefined 表示不修改 */
   databases?: string[] | null;
+  /** 默认采集模式（FULL/INCREMENTAL），undefined 表示不修改 */
+  collection_mode?: string;
 }
 
 /** 数据源资产规模概览（GET /data-sources/{id}/overview） */
@@ -1717,7 +1721,8 @@ export interface CollectionProgress {
 export interface ScheduleResult {
   scheduled: boolean;
   cron: string;
-  mode: string;
+  /** 采集模式（未传时可能为 null，保持数据源现有模式） */
+  mode?: string | null;
   /** 是否启用定时调度（缺省时保持当前状态） */
   schedule_enabled?: boolean;
 }
