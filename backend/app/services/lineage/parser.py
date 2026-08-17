@@ -435,6 +435,22 @@ def _unnest_outputs_column(unnest: exp.Unnest, col_name: str) -> bool:
     return alias.name == col_name
 
 
+def _lateral_outputs_column(lateral: exp.Lateral, col_name: str) -> bool:
+    """LATERAL VIEW 展开表是否输出指定列名。
+
+    Hive ``LATERAL VIEW EXPLODE(a.tags) e AS tag`` 的别名（``TableAlias``）挂在
+    ``Lateral`` 节点上、列清单是 ``[tag]``；无列清单时展开列名默认等于表别名。
+    展开列的字段血缘来源是 EXPLODE 表达式内的叶子列（``a.tags``）。
+    """
+    alias = lateral.args.get("alias")
+    if not isinstance(alias, exp.TableAlias):
+        return False
+    cols = alias.args.get("columns") or []
+    if cols:
+        return any(c.name == col_name for c in cols)
+    return alias.name == col_name
+
+
 def _resolve_setop_column(
     expr: exp.SetOperation,
     col_name: str,
@@ -512,14 +528,22 @@ def _resolve_column(
     if qualifier:
         src = sources.get(qualifier)
     if src is None:
-        # 未限定列：**优先** UNNEST 展开表的显式列名声明（PG ``UNNEST(a.items) AS u``
-        # 明确声明展开列名 u，``SELECT u`` 即数组元素列）。真实表的命中仅是"表存在"
-        # 猜测（可能指向不存在的列），故排在 Unnest 显式声明之后。
+        # 未限定列：**优先** UNNEST/LATERAL VIEW 展开表的显式列名声明
+        # （PG ``UNNEST(a.items) AS u`` / Hive ``EXPLODE(a.tags) e AS tag`` 明确声明
+        # 展开列名，``SELECT u``/``SELECT tag`` 即数组元素列）。真实表的命中仅是
+        # "表存在"猜测（可能指向不存在的列），故排在展开表显式声明之后。
         for _name, s in sources.items():
             if (
                 isinstance(s, Scope)
                 and isinstance(s.expression, exp.Unnest)
                 and _unnest_outputs_column(s.expression, col.name)
+            ):
+                src = s
+                break
+            if (
+                isinstance(s, Scope)
+                and isinstance(s.expression, exp.Lateral)
+                and _lateral_outputs_column(s.expression, col.name)
             ):
                 src = s
                 break
@@ -575,6 +599,11 @@ def _resolve_column(
             # UNNEST 展开表（PG 数组展开）：展开列的血缘来源是 Unnest 表达式
             # 的叶子列——``UNNEST(a.items) AS u(v)`` 的 ``u.v`` 应归属 ``a.items``，
             # 而非当作 ``a`` 的真实列或丢弃。
+            return _resolve_projection(scope, src.expression, cte_map, dialect, depth + 1)
+        if isinstance(src.expression, exp.Lateral):
+            # LATERAL VIEW 展开表（Hive ``EXPLODE(a.tags) e AS tag``）：展开列的
+            # 血缘来源是 Lateral 表达式内 EXPLODE 的叶子列（``a.tags``）——
+            # ``e.tag`` 应归属 ``a.tags``，而非当作 ``a`` 的真实列或丢弃。
             return _resolve_projection(scope, src.expression, cte_map, dialect, depth + 1)
         if isinstance(src.expression, exp.SetOperation):
             # 集合运算子查询（``SELECT x FROM (... UNION ...) u``）：Union scope

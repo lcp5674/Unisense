@@ -892,6 +892,47 @@ def test_unnest_no_column_alias_defaults_to_table_alias() -> None:
     assert ("ods.a", "items", "u") in mapped
 
 
+def test_explode_field_lineage_resolves_to_array_column() -> None:
+    """Hive LATERAL VIEW EXPLODE 展开列血缘：``e.tag`` 归属 ``a.tags``。
+
+    第十一轮核查发现：EXPLODE 的别名（TableAlias）挂在 Lateral 节点上而非 Explode，
+    Scope 分支只处理 Unnest，导致 ``SELECT e.tag`` 字段级为 0（表级正确）。
+    修复后展开列来源取 Lateral 内 EXPLODE 表达式的叶子列。
+    """
+    sql = "INSERT INTO dws.t SELECT e.tag, a.id FROM ods.a LATERAL VIEW EXPLODE(a.tags) e AS tag"
+    edges = extract_field_lineage(sql, dialect="hive")
+    mapped = {(e.source_table, e.source_column, e.target_column) for e in edges}
+    assert ("ods.a", "tags", "tag") in mapped
+    assert ("ods.a", "id", "id") in mapped
+
+
+def test_explode_no_column_alias_defaults_to_table_alias() -> None:
+    """EXPLODE 无列清单（``EXPLODE(a.tags) tag AS tag_name``）：展开列归属表达式叶子列。
+
+    别名列清单缺省时展开列名取列别名（tag_name），未限定列引用也应命中展开表。
+    """
+    sql = (
+        "INSERT INTO dws.t SELECT tag_name FROM ods.a LATERAL VIEW EXPLODE(a.tags) tag AS tag_name"
+    )
+    edges = extract_field_lineage(sql, dialect="hive")
+    mapped = {(e.source_table, e.source_column, e.target_column) for e in edges}
+    assert ("ods.a", "tags", "tag_name") in mapped
+
+
+def test_explode_function_wrapped_array_column() -> None:
+    """EXPLODE 表达式被函数包裹（``explode(split(a.tags, ','))``）：叶子列穿透解析。
+
+    生产高频写法：先 split 再 explode，展开列血缘仍应归属原始数组列 a.tags。
+    """
+    sql = (
+        "INSERT INTO dws.t SELECT t.tag FROM ods.a "
+        "LATERAL VIEW explode(split(a.tags, ',')) t AS tag"
+    )
+    edges = extract_field_lineage(sql, dialect="hive")
+    mapped = {(e.source_table, e.source_column, e.target_column) for e in edges}
+    assert ("ods.a", "tags", "tag") in mapped
+
+
 def test_constant_projection_no_field_lineage() -> None:
     """无源表常量投影：INSERT 纯常量不产字段边、纯 SELECT 常量上游依赖为空。"""
     assert extract_field_lineage("INSERT INTO dws.t SELECT 1 AS a, 'x' AS b") == []
