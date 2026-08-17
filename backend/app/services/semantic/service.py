@@ -1733,7 +1733,14 @@ class MetricService(BaseService):
                 ctx={"metric_code": metric_code, "submitted_by": metric.submitted_by},
             )
 
-        # 状态机校验：REVIEW→DRAFT
+        # 状态机校验：REVIEW→DRAFT。显式限定仅 REVIEW 可驳回——P1-7 为灰度超期回收
+        # 新增 EXPERIMENTAL→DRAFT 跃迁（expiry_recycle），reject 语义不随之放宽，
+        # 避免评审人借 reject 通道把灰度指标打回（回收应走 check_experimental_expiry 系统路径）。
+        if metric.status != "REVIEW":
+            raise ConflictError(
+                f"仅 REVIEW 状态可驳回，当前 {metric.status}",
+                error_code="INVALID_TRANSITION",
+            )
         invalid = MetricStateMachine.validate_transition(metric.status, "DRAFT")
         if invalid is not None:
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
@@ -2260,6 +2267,60 @@ class MetricService(BaseService):
 
         logger.info(
             "metric_promoted",
+            metric_code=metric_code,
+            actor_id=actor_id,
+        )
+        return updated
+
+    async def recycle_expired_gray(self, metric_code: str, actor_id: int) -> Metric:
+        """灰度超期强制回收（EXPERIMENTAL → DRAFT，对齐 P1-7）。
+
+        ``check_experimental_expiry`` 每日巡检发现超 30 天未决策的 EXPERIMENTAL
+        指标后调用：清除灰度白名单并回收到 DRAFT，避免灰度无限滞留。指标口径/
+        版本历史保留，Owner 可重新提交评审继续推进。
+
+        Args:
+            metric_code: 指标编码。
+            actor_id: 触发人 ID（后台任务传 0 表示系统）。
+
+        Returns:
+            回收后的指标（状态 DRAFT）。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            ConflictError: 非法状态跃迁（非 EXPERIMENTAL）。
+        """
+        metric = await self.get_metric(metric_code)
+        if metric is None:
+            raise NotFoundError(f"指标不存在: {metric_code}")
+
+        # 状态机校验：EXPERIMENTAL→DRAFT (expiry_recycle)
+        invalid = MetricStateMachine.validate_transition(metric.status, "DRAFT")
+        if invalid is not None:
+            raise ConflictError(invalid, error_code="INVALID_TRANSITION")
+
+        now = datetime.now(UTC)
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id,
+            metric.row_version,
+            status="DRAFT",
+            gray_tenant_ids=None,
+            effective_version=None,
+        )
+        await self._cache.invalidate(metric_code)
+
+        await self._publish_event(
+            "metric.gray_recycled",
+            {
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                "reason": "gray_expiry",
+                "recycled_at": now.isoformat(),
+            },
+            actor_id=str(actor_id),
+        )
+        logger.info(
+            "metric_gray_recycled",
             metric_code=metric_code,
             actor_id=actor_id,
         )

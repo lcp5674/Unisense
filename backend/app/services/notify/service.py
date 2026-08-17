@@ -60,6 +60,7 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "metric.rolled_back": "指标已回滚",
     "metric.emergency_published": "指标紧急发布",
     "metric.health_critical": "指标健康度严重",
+    "metric.gray_recycled": "灰度超期已回收",
     "metric.rename_required": "指标需要改名",
     "metric.breaking_change_pending": "指标口径变更待确认",
     "metric.breaking_change_promoted": "指标口径变更已生效",

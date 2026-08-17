@@ -2,7 +2,7 @@
 
 对齐 TD §12.3 / spec FR-001/FR-002：完整 6 态状态机
 (DRAFT/REVIEW/PUBLISHED/EXPERIMENTAL/DEPRECATED/DATA_SOURCE_DROPPED)
-含 10 种合法跃迁，非法跃迁返回 409。
+含 11 种合法跃迁，非法跃迁返回 409。
 
 跃迁矩阵::
 
@@ -13,7 +13,7 @@
     PUBLISHED         → DEPRECATED          (deprecate)
     PUBLISHED         → PENDING_CONFIRMATION(breaking_change)
     EXPERIMENTAL      → PUBLISHED           (promote)
-    EXPERIMENTAL      → PUBLISHED           (rollback)
+    EXPERIMENTAL      → DRAFT               (expiry_recycle)  # P1-7 灰度超期强制回收
     DATA_SOURCE_DROPPED → PUBLISHED         (source_recovered)
     DATA_SOURCE_DROPPED → DEPRECATED        (confirm_deprecated)
     DEPRECATED        → REVIEW              (resubmit)  # 状态闭环：废弃后可重评审
@@ -49,7 +49,7 @@ class MetricStateMachine:
     """
 
     # 合法跃迁矩阵: {from_state: {to_state: action_name}}
-    # 共 9 种合法跃迁（metric 级别）；PENDING_CONFIRMATION 是 version 级别状态
+    # 共 11 种合法跃迁（metric 级别）；PENDING_CONFIRMATION 是 version 级别状态
     TRANSITIONS: dict[str, dict[str, str]] = {
         MetricState.DRAFT: {
             MetricState.REVIEW: "submit",
@@ -70,6 +70,9 @@ class MetricStateMachine:
         },
         MetricState.EXPERIMENTAL: {
             MetricState.PUBLISHED: "promote",
+            # P1-7 灰度超期强制回收：EXPERIMENTAL 超 30 天未决策 → 回收到 DRAFT
+            # （由 check_experimental_expiry 每日巡检触发，避免灰度无限滞留）
+            MetricState.DRAFT: "expiry_recycle",
         },
         MetricState.DATA_SOURCE_DROPPED: {
             MetricState.PUBLISHED: "source_recovered",

@@ -204,17 +204,22 @@ async def check_emergency_review_overdue(ctx: dict[str, Any]) -> list[int]:
 
 
 async def check_experimental_expiry(ctx: dict[str, Any]) -> list[int]:
-    """检查灰度指标超 30 天未决策（每日 cron）。
+    """灰度超期强制回收（每日 cron，P1-7）。
+
+    查找超 30 天未决策的 EXPERIMENTAL 指标：定向通知 Owner+备份 Owner 后，
+    强制回收到 DRAFT（``metric.gray_recycled`` 事件 + 审计）。
+    回收避免灰度无限滞留——Owner 可重新提交评审继续推进。
 
     Returns:
-        超期灰度指标的 metric_id 列表。
+        被回收的 EXPERIMENTAL 指标 metric_id 列表。
     """
     from sqlalchemy import select
 
     from app.db.mysql import async_session_factory
     from app.models.metric import Metric
+    from app.services.semantic.service import MetricService
 
-    expired: list[int] = []
+    recycled: list[int] = []
     now = datetime.now(UTC)
     deadline = now - timedelta(days=30)
 
@@ -227,15 +232,64 @@ async def check_experimental_expiry(ctx: dict[str, Any]) -> list[int]:
         result = await db.execute(stmt)
         metrics = result.scalars().all()
 
+        svc = MetricService(db)
         for metric in metrics:
-            logger.warning(
-                "experimental_metric_expired",
-                metric_code=metric.metric_code,
-                metric_id=metric.id,
-            )
-            expired.append(metric.id)
+            try:
+                # 1) 定向告警 Owner/备份 Owner：灰度超期将被回收
+                await _notify_gray_recycled(db, metric)
+                # 2) 强制回收 EXPERIMENTAL → DRAFT（系统触发）
+                await svc.recycle_expired_gray(metric.metric_code, actor_id=0)
+                recycled.append(metric.id)
+                logger.warning(
+                    "experimental_metric_recycled",
+                    metric_code=metric.metric_code,
+                    metric_id=metric.id,
+                )
+            except Exception:
+                logger.warning(
+                    "experimental_recycle_failed",
+                    metric_id=metric.id,
+                    exc_info=True,
+                )
 
-    return expired
+        await db.commit()
+
+    return recycled
+
+
+async def _notify_gray_recycled(db: Any, metric: Any) -> None:
+    """灰度超期回收 → 定向通知指标 Owner + 备份 Owner（IN_APP，不依赖订阅偏好）。
+
+    复用已注册的 ``metric.gray_recycled`` 模板；best-effort，通知失败仅记日志。
+    """
+    from app.services.notify.service import NotifyService
+
+    targets = [metric.owner_id]
+    if getattr(metric, "backup_owner_id", None) and metric.backup_owner_id != metric.owner_id:
+        targets.append(metric.backup_owner_id)
+    for uid in targets:
+        try:
+            await NotifyService(db).notify_user(
+                user_id=uid,
+                event_type="metric.gray_recycled",
+                title=f"指标 {metric.metric_code} 灰度超期已回收",
+                body=(
+                    f"{metric.metric_code} 灰度发布超过 30 天未决策，已强制回收至草稿。"
+                    "如需继续发布，请重新提交评审。"
+                ),
+                payload={
+                    "metric_code": metric.metric_code,
+                    "reason": "gray_expiry",
+                    "domain": metric.domain,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort 不阻断回收
+            logger.warning(
+                "gray_recycle_notify_failed metric=%s user=%s err=%s",
+                metric.metric_code,
+                uid,
+                exc,
+            )
 
 
 # Arq Worker 注册

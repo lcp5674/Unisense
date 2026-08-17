@@ -28,14 +28,17 @@ class _AsyncCM:
 
 
 def _metric(
-    code: str = "sales_gmv_d", owner_id: int = 11, backup_owner_id: int | None = 12
+    code: str = "sales_gmv_d",
+    owner_id: int = 11,
+    backup_owner_id: int | None = 12,
+    status: str = "PUBLISHED",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=1,
         metric_code=code,
         owner_id=owner_id,
         backup_owner_id=backup_owner_id,
-        status="PUBLISHED",
+        status=status,
         deleted_at=None,
         domain="sales",
     )
@@ -191,3 +194,71 @@ async def test_refresh_health_notify_failure_does_not_break(_patch_health_refres
 
     assert count == 1
     repo.save_health_score.assert_awaited_once()
+
+
+# ---- P1-7: 灰度超期强制回收 ----
+
+
+@pytest.fixture
+def _patch_gray_expiry_env() -> None:
+    """check_experimental_expiry 依赖替换为可控 mock（函数体内 import）。"""
+    patches = [
+        patch("app.db.mysql.async_session_factory"),
+        patch("app.services.semantic.service.MetricService"),
+        patch("app.services.notify.service.NotifyService"),
+    ]
+    for p in patches:
+        p.start()
+    yield
+    for p in patches:
+        p.stop()
+
+
+async def test_check_experimental_expiry_recycles_overage(_patch_gray_expiry_env) -> None:
+    """P1-7: 超期 EXPERIMENTAL → 通知 Owner + 强制回收 EXPERIMENTAL→DRAFT。"""
+    from app.db.mysql import async_session_factory
+    from app.services.notify.service import NotifyService
+    from app.services.semantic.service import MetricService
+    from app.tasks.semantic_tasks import check_experimental_expiry
+
+    metric = _metric(status="EXPERIMENTAL", owner_id=11, backup_owner_id=12)
+    db = _mock_db([metric])
+    async_session_factory.return_value = _AsyncCM(db)
+
+    svc = MagicMock()
+    svc.recycle_expired_gray = AsyncMock(return_value=metric)
+    MetricService.return_value = svc
+
+    notif_svc = MagicMock()
+    notif_svc.notify_user = AsyncMock()
+    NotifyService.return_value = notif_svc
+
+    recycled = await check_experimental_expiry({})
+
+    assert recycled == [metric.id]
+    # 通知 Owner + 备份 Owner
+    assert notif_svc.notify_user.await_count == 2
+    assert {c.kwargs["user_id"] for c in notif_svc.notify_user.await_args_list} == {11, 12}
+    # 系统触发回收
+    svc.recycle_expired_gray.assert_awaited_once_with(metric.metric_code, actor_id=0)
+
+
+async def test_check_experimental_expiry_no_overage_no_action(_patch_gray_expiry_env) -> None:
+    """无超期灰度指标 → 不通知不回收。"""
+    from app.db.mysql import async_session_factory
+    from app.services.notify.service import NotifyService
+    from app.services.semantic.service import MetricService
+    from app.tasks.semantic_tasks import check_experimental_expiry
+
+    db = _mock_db([])
+    async_session_factory.return_value = _AsyncCM(db)
+
+    svc = MagicMock()
+    svc.recycle_expired_gray = AsyncMock()
+    MetricService.return_value = svc
+    NotifyService.return_value = MagicMock(notify_user=AsyncMock())
+
+    recycled = await check_experimental_expiry({})
+
+    assert recycled == []
+    svc.recycle_expired_gray.assert_not_awaited()

@@ -39,6 +39,8 @@ BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "metric.rolled_back",
     "metric.emergency_published",
     "metric.health_critical",
+    # 灰度超期强制回收（P1-7）：check_experimental_expiry 每日巡检触发
+    "metric.gray_recycled",
     # 冲突仲裁「保留差异+指定一方改名」→ 定向通知指标 Owner 去详情页改名（TD §12.4）
     "metric.rename_required",
     # PENDING_VERSION 确认期创建 → 定向通知消费方（Owner/备份 Owner）去「版本历史」确认（TD §12.3）

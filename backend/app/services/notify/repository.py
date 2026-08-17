@@ -17,6 +17,7 @@ TODO_EVENT_TYPES = frozenset(
         "metric.submitted",
         "metric.rename_required",
         "metric.health_critical",
+        "metric.gray_recycled",
         "conflict_open",
         "conflict_escalated",
         "conflict_reopened",

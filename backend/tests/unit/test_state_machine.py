@@ -103,7 +103,8 @@ class TestGetAllowedTransitions:
     def test_experimental_allows_published(self) -> None:
         allowed = MetricStateMachine.get_allowed_transitions("EXPERIMENTAL")
         assert MetricState.PUBLISHED in allowed
-        assert len(allowed) == 1
+        assert MetricState.DRAFT in allowed  # P1-7 灰度超期强制回收
+        assert len(allowed) == 2
 
     def test_data_source_dropped_allows_published_and_deprecated(self) -> None:
         allowed = MetricStateMachine.get_allowed_transitions("DATA_SOURCE_DROPPED")
@@ -145,10 +146,10 @@ class TestExperimentalTransitions:
         result = MetricStateMachine.validate_transition("EXPERIMENTAL", "PUBLISHED")
         assert result is None
 
-    def test_experimental_to_draft_is_illegal(self) -> None:
-        """EXPERIMENTAL→DRAFT 是非法跃迁。"""
+    def test_experimental_to_draft_is_legal(self) -> None:
+        """EXPERIMENTAL→DRAFT 是合法跃迁（P1-7 灰度超期强制回收 expiry_recycle）。"""
         result = MetricStateMachine.validate_transition("EXPERIMENTAL", "DRAFT")
-        assert result is not None
+        assert result is None
 
     def test_experimental_to_deprecated_is_illegal(self) -> None:
         """EXPERIMENTAL→DEPRECATED 是非法跃迁（须先 promote→PUBLISHED→DEPRECATED）。"""
@@ -165,8 +166,13 @@ class TestExperimentalTransitions:
         action = MetricStateMachine.get_action_name("EXPERIMENTAL", "PUBLISHED")
         assert action == "promote"
 
-    def test_experimental_only_allows_published(self) -> None:
-        """EXPERIMENTAL 状态只允许跃迁到 PUBLISHED。"""
+    def test_expiry_recycle_action_name(self) -> None:
+        """EXPERIMENTAL→DRAFT 的动作名为 expiry_recycle（P1-7）。"""
+        action = MetricStateMachine.get_action_name("EXPERIMENTAL", "DRAFT")
+        assert action == "expiry_recycle"
+
+    def test_experimental_allows_published_and_draft(self) -> None:
+        """EXPERIMENTAL 状态允许跃迁到 PUBLISHED 与 DRAFT（P1-7 灰度超期回收）。"""
         allowed = MetricStateMachine.get_allowed_transitions("EXPERIMENTAL")
-        assert len(allowed) == 1
         assert MetricState.PUBLISHED in allowed
+        assert MetricState.DRAFT in allowed

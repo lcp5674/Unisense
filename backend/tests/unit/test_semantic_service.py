@@ -2536,6 +2536,50 @@ async def test_rollback_metric_no_previous_published():
     assert exc.value.error_code == "NO_PREVIOUS_PUBLISHED_VERSION"
 
 
+async def test_recycle_expired_gray_success():
+    """P1-7: 灰度超期回收——EXPERIMENTAL → DRAFT，清灰度白名单，发布事件。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="EXPERIMENTAL", gray_tenant_ids=[1, 2])
+    )
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", gray_tenant_ids=None)
+    )
+    svc._publish_event = AsyncMock()
+
+    result = await svc.recycle_expired_gray("sales_gmv_daily", actor_id=0)
+
+    assert result.status == "DRAFT"
+    kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert kwargs["status"] == "DRAFT"
+    assert kwargs["gray_tenant_ids"] is None
+    svc._publish_event.assert_awaited_once()
+    assert svc._publish_event.await_args.args[0] == "metric.gray_recycled"
+
+
+async def test_recycle_expired_gray_non_experimental_rejected():
+    """非 EXPERIMENTAL 状态回收 → ConflictError（INVALID_TRANSITION）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    with pytest.raises(ConflictError) as exc:
+        await svc.recycle_expired_gray("sales_gmv_daily", actor_id=0)
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+async def test_reject_metric_experimental_still_blocked():
+    """P1-7: EXPERIMENTAL→DRAFT 虽入状态机，reject 通道仍仅限 REVIEW（回收走系统路径）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="EXPERIMENTAL"))
+    with pytest.raises(ConflictError) as exc:
+        await svc.reject_metric(
+            "sales_gmv_daily",
+            MetricRejectRequest(reason="口径不符"),
+            actor_id=1,
+            role="platform_admin",
+        )
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
 async def test_deprecate_metric_invalid_transition():
     """非 PUBLISHED 状态废弃（如 DRAFT）→ ConflictError。"""
     svc, repo = _svc_with_repo()
