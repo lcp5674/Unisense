@@ -27,6 +27,8 @@ export interface PermissionApi {
   canAll: (perms: string[]) => boolean;
   snapshot: PermissionSnapshot | null;
   loading: boolean;
+  /** 快照拉取是否失败（失败时 can() 仍 fail-open 放行、后端强制兜底） */
+  error: boolean;
   /** 重新拉取权限快照（角色权限点被管理员调整后调用） */
   refresh: () => Promise<void>;
 }
@@ -37,6 +39,7 @@ const PermissionContext = createContext<PermissionApi>({
   canAll: () => true,
   snapshot: null,
   loading: true,
+  error: false,
   refresh: async () => undefined,
 });
 
@@ -49,14 +52,17 @@ export function PermissionProvider({
 }) {
   const [snapshot, setSnapshot] = useState<PermissionSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
       const snap = await fetchMyPermissions();
       setSnapshot(snap);
+      setError(false);
     } catch {
       // 快照拉取失败不阻断主流程：UI 兜底放行，后端强制仍生效
       setSnapshot(null);
+      setError(true);
     } finally {
       setLoading(false);
     }
@@ -77,9 +83,10 @@ export function PermissionProvider({
         snapshot === null ? true : permsList.every((p) => perms.has(p)),
       snapshot,
       loading,
+      error,
       refresh,
     };
-  }, [snapshot, loading, refresh]);
+  }, [snapshot, loading, error, refresh]);
 
   return <PermissionContext.Provider value={value}>{children}</PermissionContext.Provider>;
 }

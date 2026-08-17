@@ -166,3 +166,61 @@ async def test_cross_domain_and_pii_fail_closed() -> None:
             _api_client(whitelist=None),
         )
     assert exc2.value.error_code == ErrorCode.FORBIDDEN_PII
+
+
+async def test_internal_query_rejects_viewer_403() -> None:
+    """内部查询端点（/consume/metrics/{code}/query）RBAC 对齐 query:execute：
+    viewer/analyst 无执行权限（仅登录态+PDP 数据闸门不足以支撑特权执行+快照写副作用），
+    须经 consume 客户端令牌通道消费数据。"""
+    app.dependency_overrides[deps.get_db_session] = _fake_db_session()
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=2, role="viewer", domain="sales"
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/consume/metrics/M1/query",
+                json={"metric_code": "M1", "date_range": "2024-01~2024-03"},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 403
+        assert r.json()["code"] == "FORBIDDEN"
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_internal_query_allowed_for_metric_owner(monkeypatch) -> None:
+    """metric_owner（前端 query:execute 默认基线角色）可执行内部查询。"""
+    app.dependency_overrides[deps.get_db_session] = _fake_db_session()
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=3, role="metric_owner", domain="sales"
+    )
+    monkeypatch.setattr(
+        ConsumeService,
+        "execute_query",
+        AsyncMock(return_value=QueryResponse(metric_code="M1", meta={})),
+    )
+    monkeypatch.setattr("app.api.consume.write_audit", AsyncMock())
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/consume/metrics/M1/query",
+                json={"metric_code": "M1", "date_range": "2024-01~2024-03"},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+def _fake_db_session():
+    """内部查询端点测试用的假 DB session（mock 会话避免真实连接）。"""
+
+    async def fake_db():
+        session = MagicMock()
+        session.commit = AsyncMock()
+        yield session
+
+    return fake_db

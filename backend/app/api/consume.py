@@ -157,7 +157,7 @@ async def query(
 async def query_metric_internal(
     code: str,
     req: QueryRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_roles("platform_admin", "domain_admin", "metric_owner")),
     db: AsyncSession = Depends(get_db_session),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[QueryResponse]:
@@ -165,6 +165,10 @@ async def query_metric_internal(
 
     真实执行指标口径（OLAP 优先、MySQL 降级），成功后自动落 WORM 快照；
     保留指标状态与 PII 合规复核闸门，跳过接入方白名单/域校验（平台内读操作）。
+
+    RBAC 与前端 ``query:execute`` 权限点对齐（platform_admin/domain_admin/metric_owner）：
+    「执行查询」是特权动作（真实 OLAP 执行 + 快照写副作用），viewer/analyst 需通过
+    consume 客户端令牌通道（POST /consume/query）消费数据，而非内部查询端点。
     """
     merged = req.model_copy(update={"metric_code": code})
     svc = ConsumeService(db)

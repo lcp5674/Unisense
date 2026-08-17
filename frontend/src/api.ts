@@ -109,7 +109,6 @@ import {
   QualityBenchmark,
   QualityEvent,
   QualityEventItem,
-  QualityObservation,
   QualityRule,
   QualityRuleCreate,
   QueryRequest,
@@ -1471,19 +1470,6 @@ export async function mintClientToken(clientId: string): Promise<{ access_token:
   );
 }
 
-export async function confirmVersion(versionId: number): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(`${API_BASE}/consume/versions/${versionId}/confirm`, {
-    method: "POST",
-  });
-}
-
-export async function rejectVersion(versionId: number, reason?: string): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(`${API_BASE}/consume/versions/${versionId}/reject`, {
-    method: "POST",
-    body: JSON.stringify({ reason: reason ?? null }),
-  });
-}
-
 // ---- 维度 ----
 export async function listDimensions(params?: {
   domain?: string;
@@ -2138,20 +2124,6 @@ export async function qualityEventDetect(body: {
 // Owner 确认已线下修复（POST /quality/events/{event_id}/repair，仅 OPEN 状态可确认）
 export async function qualityEventConfirmRepair(eventId: number): Promise<QualityEvent> {
   return request<QualityEvent>(`${API_BASE}/quality/events/${eventId}/repair`, { method: "POST" });
-}
-
-export async function submitQualityObservation(body: {
-  metric_id: number;
-  metric_code: string;
-  value: number;
-  obs_time: string;
-  source_id?: string | null;
-  dims?: Record<string, unknown> | null;
-}): Promise<QualityObservation> {
-  return request<QualityObservation>(`${API_BASE}/quality/observe`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
 }
 
 export async function importBenchmark(body: {

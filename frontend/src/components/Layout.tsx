@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { onNotifChanged } from "../utils/notifBus";
 import { ROUTE_PERM, usePermission } from "../hooks/usePermission";
-import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme, AutoComplete, Spin, Modal, Form, App as AntApp } from "antd";
+import { Layout as AntLayout, Menu, Button, Avatar, Dropdown, Badge, Input, Tooltip, theme, AutoComplete, Spin, Modal, Form, App as AntApp, Alert } from "antd";
 import {
   AppstoreOutlined,
   PlusCircleOutlined,
@@ -543,7 +543,7 @@ export function Layout({ user }: { user: CurrentUser }) {
   // 按权限点过滤导航菜单（细粒度管控：替代原 ADMIN_ONLY 角色二值过滤）：
   // 菜单项映射到 ``ROUTE_PERM[path]`` 权限点，用户无该权限点则隐藏；
   // 某组过滤后为空则整组隐藏。无映射的菜单项默认放行（保持向后兼容）。
-  const { can } = usePermission();
+  const { can, error: permError } = usePermission();
   const menuItems = useMemo(() => {
     return NAV_GROUPS.map((g) => ({
       type: "group" as const,
@@ -737,6 +737,16 @@ export function Layout({ user }: { user: CurrentUser }) {
         </Header>
 
         <Content ref={contentRef} style={{ padding: 24, overflow: "auto" }} className="app-content">
+          {permError && (
+            <Alert
+              type="warning"
+              showIcon
+              closable
+              style={{ marginBottom: 16 }}
+              message="权限数据加载失败"
+              description="您的权限点未能从服务端获取，部分操作按钮可能未按权限隐藏（实际执行仍以后端校验为准）。请刷新页面重试。"
+            />
+          )}
           <Outlet />
         </Content>
       </AntLayout>
