@@ -387,9 +387,15 @@ export function SubjectDomain() {
   async function handleSaveDefaults(values: Record<string, string>) {
     if (!selectedCode) return;
     if (saving) return;
+    // 只提交用户填写的字段（过滤 undefined/null）——后端 update_defaults 是全量替换，
+    // 若把未填字段（antd Form 值为 undefined，序列化被省略）提交会把未配置字段清空。
+    // 「清空全部」由独立按钮提交空对象承载，部分填写保存应为"只更新填写项、保留其余"。
+    const payload = Object.fromEntries(
+      Object.entries(values).filter(([, v]) => v !== undefined && v !== null),
+    );
     setSaving(true);
     try {
-      await updateDomainDefaults(selectedCode, values);
+      await updateDomainDefaults(selectedCode, payload);
       message.success("默认值已保存");
       setDefaultsOpen(false);
       loadDetail(selectedCode);

@@ -18,7 +18,7 @@ vi.mock("../api", () => ({
   listDictItems: vi.fn(),
 }));
 
-import { listDomainTree, createDomain, getDomain, getDomainDefaults, updateDomain, listDictItems } from "../api";
+import { listDomainTree, createDomain, getDomain, getDomainDefaults, updateDomain, listDictItems, updateDomainDefaults } from "../api";
 
 const mockedList = vi.mocked(listDomainTree);
 const mockedCreate = vi.mocked(createDomain);
@@ -26,6 +26,7 @@ const mockedGet = vi.mocked(getDomain);
 const mockedDefaults = vi.mocked(getDomainDefaults);
 const mockedUpdate = vi.mocked(updateDomain);
 const mockedDictItems = vi.mocked(listDictItems);
+const mockedUpdateDefaults = vi.mocked(updateDomainDefaults);
 
 /** 组件依赖 AntApp.useApp() 的 message/modal，渲染时需包 <App> 提供真实 context；组件用 useNavigate 需配路由。 */
 function renderPage() {
@@ -82,6 +83,7 @@ describe("SubjectDomain 页面", () => {
     mockedCreate.mockResolvedValue({ id: 4, code: "risk", name: "风控", parent_id: null, level: 1, path: "4", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 0, created_at: "", updated_at: "" });
     mockedGet.mockResolvedValue({ id: 1, code: "sales", name: "销售", parent_id: null, level: 1, path: "1", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 3, created_at: "", updated_at: "" });
     mockedDefaults.mockResolvedValue({});
+    mockedUpdateDefaults.mockResolvedValue(undefined);
     // 域默认值字典：默认返回空（下拉回退输入框），不影响既有测试
     mockedDictItems.mockResolvedValue([]);
   });
@@ -279,5 +281,23 @@ describe("SubjectDomain 页面", () => {
     // 确认字典项以「日（day）」标签出现（仅当下拉展开时可见；此处验证 Select 已渲染而非 Input）
     expect(document.querySelectorAll(".ant-select").length).toBeGreaterThan(0);
     expect(document.querySelector("input[placeholder*='默认粒度值']")).toBeNull();
+  });
+
+  it("默认值弹窗部分字段保存只提交有值字段（未填字段保留，不全量清空）", async () => {
+    // 预置当前默认值：仅粒度已配置，其余字段未填
+    mockedDefaults.mockResolvedValue({ granularity: "day" });
+    renderPage();
+    fireEvent.click(await screen.findByText("销售"));
+    await screen.findByRole("button", { name: /默\s*认\s*值/ });
+    fireEvent.click(screen.getByRole("button", { name: /默\s*认\s*值/ }));
+    await screen.findByText("配置域默认值");
+    // 直接点确定保存（不改动任何字段——未填字段为 undefined）
+    const okBtn = document.querySelector(".ant-modal-footer .ant-btn-primary") as HTMLElement;
+    fireEvent.click(okBtn);
+    await waitFor(() => {
+      expect(mockedUpdateDefaults).toHaveBeenCalledTimes(1);
+      // 只提交有值字段 { granularity: "day" }，未填字段（undefined）被过滤，不全量清空
+      expect(mockedUpdateDefaults).toHaveBeenCalledWith("sales", { granularity: "day" });
+    });
   });
 });
