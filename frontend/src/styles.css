@@ -1782,3 +1782,21 @@ body {
   padding-top: 12px;
   padding-bottom: 12px;
 }
+
+/* ==========================================================================
+   指标编辑弹窗（发起变更申请）：Select/AutoComplete 选中值完整展示
+   ==========================================================================
+   弹窗内每个选项框的值（粒度/单位/聚合方式/治理属性/维度/依赖/落地表）必须
+   完整可见，不允许被省略号截断——口径相关取值是治理关键信息。
+   配合组件的 popupMatchSelectWidth=false：下拉面板也按内容自适应宽度完整展示。 */
+.metric-edit-modal .ant-select-selection-item,
+.metric-edit-modal .ant-select-selection-item-content {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-all;
+}
+.metric-edit-modal .ant-select-selection-item {
+  height: auto;
+  line-height: 1.5;
+}

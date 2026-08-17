@@ -136,6 +136,14 @@ const SENSITIVE_ROLES = ["platform_admin", "domain_admin", "compliance_officer"]
 // 常用变更原因快捷选项：高频操作（改名/紧急发布）的原因输入可一键填充再编辑，避免每次手写
 const COMMON_CHANGE_REASONS = ["口径修正", "字段调整", "粒度调整", "单位变更", "逻辑优化", "需求变更"];
 
+// 弹窗内 Select/AutoComplete 下拉面板自适应内容宽度（popupMatchSelectWidth=false）：
+// 长选项（如「去重计数 (COUNT_DISTINCT)」「供应商粒度 (supplier)」）不再被截断为省略号，
+// 下拉选项完整展示；minWidth 保证窄触发框下下拉仍可读
+const DROPDOWN_FULL_WIDTH = {
+  popupMatchSelectWidth: false,
+  styles: { popup: { root: { minWidth: 280 } } },
+};
+
 // Owner 责任链：将 owner_id 渲染为可读的用户名 + 角色
 function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrief[] }) {
   const byId = new Map(users.map((u) => [u.id, u]));
@@ -1611,6 +1619,7 @@ export function MetricDetail() {
           onChange={(v) => setSuccessor(v ?? "")}
           options={editDepOptions.filter((o) => o.value !== metric.metric_code)}
           notFoundContent="无已发布指标可作替代"
+          {...DROPDOWN_FULL_WIDTH}
         />
         <p className="muted" style={{ marginTop: 8 }}>
           留空表示该指标无替代（直接废弃下线）；填写后废弃指标的消费方会看到「替代指标」引导。可从已发布指标搜索选择，无需手输编码。
@@ -1697,6 +1706,7 @@ export function MetricDetail() {
               { value: "user", label: "指定评审用户" },
               { value: "domain", label: "域评审组" },
             ]}
+            {...DROPDOWN_FULL_WIDTH}
           />
           {submitReviewerType === "user" && (
             <Select
@@ -1707,6 +1717,7 @@ export function MetricDetail() {
               value={submitReviewerId ?? undefined}
               onChange={(v) => setSubmitReviewerId(v ?? null)}
               options={users.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
+              {...DROPDOWN_FULL_WIDTH}
             />
           )}
           {submitReviewerType === "domain" && (
@@ -1803,7 +1814,8 @@ export function MetricDetail() {
         confirmLoading={editSaving}
         onCancel={() => setEditOpen(false)}
         okText="保存"
-        width={560}
+        width={760}
+        className="metric-edit-modal"
       >
         {metric.status === "PUBLISHED" && (
           <Alert
@@ -1848,6 +1860,7 @@ export function MetricDetail() {
                 options={editGranularityOptions}
                 showSearch
                 optionFilterProp="label"
+                {...DROPDOWN_FULL_WIDTH}
               />
             </Form.Item>
             <Form.Item name="unit" label="单位" style={{ marginBottom: 8, flex: 1 }}>
@@ -1857,6 +1870,7 @@ export function MetricDetail() {
                 options={editUnitOptions}
                 showSearch
                 optionFilterProp="label"
+                {...DROPDOWN_FULL_WIDTH}
               />
             </Form.Item>
             <Form.Item
@@ -1871,6 +1885,7 @@ export function MetricDetail() {
                 options={editGovOptions.aggregation ?? []}
                 showSearch
                 optionFilterProp="label"
+                {...DROPDOWN_FULL_WIDTH}
               />
             </Form.Item>
           </Space>
@@ -1907,6 +1922,7 @@ export function MetricDetail() {
                     setEditGovValues((p) => ({ ...p, [field]: v ?? "" }));
                     setEditGovDirty((p) => new Set(p).add(field));
                   }}
+                  {...DROPDOWN_FULL_WIDTH}
                 />
               </Form.Item>
             ))}
@@ -1941,6 +1957,7 @@ export function MetricDetail() {
               placeholder="搜索或输入落地表（如 dwd.sales_detail）"
               allowClear
               style={{ width: "100%" }}
+              {...DROPDOWN_FULL_WIDTH}
             />
           </Form.Item>
           <Form.Item
@@ -1960,6 +1977,7 @@ export function MetricDetail() {
               showSearch
               optionFilterProp="label"
               allowClear
+              {...DROPDOWN_FULL_WIDTH}
             />
           </Form.Item>
           {metric?.type !== "atomic" && (
@@ -1980,6 +1998,7 @@ export function MetricDetail() {
                 showSearch
                 optionFilterProp="label"
                 allowClear
+                {...DROPDOWN_FULL_WIDTH}
               />
             </Form.Item>
           )}
