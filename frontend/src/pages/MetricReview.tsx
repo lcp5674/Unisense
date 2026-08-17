@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Input, Modal, Radio, Segmented, Space, Table, Tag, Tooltip, message } from "antd";
+import { Button, Card, Input, Modal, Radio, Segmented, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import { ArrowLeftOutlined, CheckCircleOutlined, ClockCircleOutlined } from "@ant-design/icons";
 import {
   listMetrics,
@@ -151,6 +151,9 @@ export function MetricReview() {
   // 审批工作台视角：pending=待我审（REVIEW）；reviewed=我审过的（按 reviewed_by 过滤，
   // 命中审批通过或驳回——评审历史完整不丢驳回记录）
   const [view, setView] = useState<"pending" | "reviewed">("pending");
+  // 审批筛选（复审 D4）：关键词（编码/名称）与域过滤，缓解审批积压时翻页找目标
+  const [keyword, setKeyword] = useState("");
+  const [domain, setDomain] = useState<string | undefined>(undefined);
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果（对齐目录/Dimensions/Templates）
   const loadSeq = useRef(0);
   const [page, setPage] = useState(1);
@@ -177,6 +180,8 @@ export function MetricReview() {
               status: "REVIEW",
               page,
               page_size: pageSize,
+              keyword: keyword || undefined,
+              domain: domain || undefined,
               // 审批工作台 FIFO：最旧待审优先，避免积压（默认后端 updated_at desc 会新单优先）
               sort_by: "updated_at",
               sort_order: "asc",
@@ -185,6 +190,8 @@ export function MetricReview() {
               reviewed_by: currentUser?.id,
               page,
               page_size: pageSize,
+              keyword: keyword || undefined,
+              domain: domain || undefined,
               sort_by: "updated_at",
               sort_order: "desc",
             },
@@ -448,6 +455,32 @@ export function MetricReview() {
           </Space>
         }
       >
+        {/* 审批筛选栏（复审 D4）：关键词 + 域，变更即回第 1 页重查 */}
+        <Space style={{ marginBottom: 16 }} wrap>
+          <Input.Search
+            allowClear
+            placeholder="搜索指标编码 / 名称"
+            style={{ width: 240 }}
+            onSearch={(v) => {
+              setKeyword(v.trim());
+              setPage(1);
+            }}
+          />
+          <Select
+            allowClear
+            placeholder="按域筛选"
+            style={{ width: 180 }}
+            value={domain}
+            onChange={(v) => {
+              setDomain(v || undefined);
+              setPage(1);
+            }}
+            options={Object.entries(domainMap).map(([code, name]) => ({
+              value: code,
+              label: `${name}（${code}）`,
+            }))}
+          />
+        </Space>
         <Table
           dataSource={items}
           columns={columns}

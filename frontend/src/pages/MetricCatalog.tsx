@@ -1128,6 +1128,24 @@ export function MetricCatalog() {
         >
           {sortOrder === "asc" ? "升序 ↑" : "降序 ↓"}
         </Button>
+        {/* 责任人（Owner）筛选：此前仅支持资产地图 URL 下钻（?owner_id=），无独立控件；
+            补 UI 入口（复审 D4），选择责任人即按 owner_id 过滤 */}
+        <Select
+          showSearch
+          value={ownerFilter ? Number(ownerFilter) : undefined}
+          onChange={(v) => {
+            setOwnerFilter(v ? String(v) : "");
+            setPage(1);
+          }}
+          style={{ width: 160 }}
+          allowClear
+          placeholder="责任人"
+          optionFilterProp="label"
+          options={[...userMap.entries()].map(([id, name]) => ({
+            value: id,
+            label: `${name}（#${id}）`,
+          }))}
+        />
         {currentUserId && (
           <Button
             type={myMetricsOnly ? "primary" : "default"}

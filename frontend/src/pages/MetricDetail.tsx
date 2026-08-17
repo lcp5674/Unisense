@@ -34,12 +34,14 @@ import {
   EditOutlined,
   RobotOutlined,
   CheckCircleOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import { usePermission } from "../hooks/usePermission";
 import {
   addFavorite,
   approveMetric,
   deprecateMetric,
+  deleteMetric,
   recoverSourceDropped,
   confirmDeprecateDropped,
   emergencyPublishMetric,
@@ -1282,6 +1284,8 @@ export function MetricDetail() {
   const canEmergency = permReady && can("metric:emergency-publish");
   const canCreate = permReady && can("metric:create");
   const canInferDesc = permReady && can("metric:infer-description");
+  // 删除 DRAFT 草稿（软删）：仅平台管理员（后端 DELETE 端点 platform_admin-only）
+  const canDelete = permReady && can("metric:delete");
   // 回滚是高风险操作（灰度→退回上一 PUBLISHED 版本），用专用权限点 metric:rollback 门禁
   // （而非笼统的 metric:edit），与后端 _WRITE_DEPS + PDP owner 校验形成前后端双边界。
   const canRollback = permReady && can("metric:rollback");
@@ -1346,6 +1350,31 @@ export function MetricDetail() {
             {metric.status === "PUBLISHED" ? "发起变更申请" : "编辑"}
           </Button>
         )}
+      {/* 删除 DRAFT 草稿（软删）：仅平台管理员；删除后指标进回收站（archived 列表可恢复）。
+          详情页删除入口消除「DRAFT 单删需回目录批量删」的闭环缺口（复审 D2） */}
+      {metric.status === "DRAFT" && canDelete && (
+        <Button
+          danger
+          icon={<DeleteOutlined />}
+          loading={busy}
+          onClick={() =>
+            Modal.confirm({
+              title: "确认删除草稿指标？",
+              content: `「${metric.name}」（${metric.metric_code}）为 DRAFT 草稿，删除后进入回收站（可在已归档列表恢复），不可被提交评审。确认继续？`,
+              okText: "确认删除",
+              cancelText: "取消",
+              okButtonProps: { danger: true },
+              onOk: () =>
+                runAction(() => deleteMetric(metric.metric_code), "删除草稿").then(() => {
+                  message.success("草稿已删除");
+                  navigate("/metrics");
+                }),
+            })
+          }
+        >
+          删除
+        </Button>
+      )}
       {metric.status === "REVIEW" && canApprove && (
         <Button
           type="primary"

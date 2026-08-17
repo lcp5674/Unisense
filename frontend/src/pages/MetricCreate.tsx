@@ -5,9 +5,9 @@ import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, listDimensions, listMetrics, getDomainDefaults, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, DBCatalog, SuggestionField, AutoSuggestResponse, Dimension } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, Dimension } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { usePermission } from "../hooks/usePermission";
 
@@ -156,7 +156,6 @@ export function MetricCreate() {
   // 源表搜索（自动推断区）
   const [srcTableSearchOptions, setSrcTableSearchOptions] = useState<{ value: string; label: string }[]>([]);
   const [srcTableSearchLoading, setSrcTableSearchLoading] = useState(false);
-  const [_selectedTableCatalog, setSelectedTableCatalog] = useState<DBCatalog | null>(null);
   const [columnOptions, setColumnOptions] = useState<{ value: string; label: string }[]>([]);
   const srcTableSearchTimer = useRef<ReturnType<typeof setTimeout>>();
   // 域默认值预填字段集合（TD §3.8）：选域触发 autoSuggest 时这些字段不被推断覆盖
@@ -181,6 +180,8 @@ export function MetricCreate() {
   const [batchForm] = Form.useForm();
   const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [batchResult, setBatchResult] = useState<MetricBatchRegisterResult | null>(null);
+  // 批量注册成功 → 「批量提交评审」直达（复用 /batch-submit，复审 D1）
+  const [batchSubmitLoading, setBatchSubmitLoading] = useState(false);
   // 批量弹窗：当前源表对应的列选项（选源表后加载，供度量列点选）
   const [batchColumnOptions, setBatchColumnOptions] = useState<{ value: string; label: string }[]>([]);
   const [batchColLoading, setBatchColLoading] = useState(false);
@@ -316,7 +317,6 @@ export function MetricCreate() {
   // 选了源表后：1) 加载该表列信息  2) 触发自动推断（含依赖表）
   async function handleSrcTableSelect(entityName: string) {
     if (!entityName) {
-      setSelectedTableCatalog(null);
       setColumnOptions([]);
       handleAutoSuggest();
       return;
@@ -1169,7 +1169,36 @@ export function MetricCreate() {
             />
             <Space style={{ marginTop: 16 }}>
               <Button onClick={() => setBatchResult(null)}>继续注册</Button>
-              <Button type="primary" onClick={() => setBatchOpen(false)}>
+              {/* 批量提交直达：把本次成功注册的 DRAFT 指标一键送审（复用原子 /batch-submit，
+                  消除「批量注册成功仅弹窗即结束、需回目录手动勾选提交」的闭环断点，复审 D1） */}
+              <Button
+                type="primary"
+                loading={batchSubmitLoading}
+                disabled={batchResult.candidates.filter((c) => c.status === "DRAFT").length === 0}
+                onClick={async () => {
+                  const codes = batchResult.candidates
+                    .filter((c) => c.status === "DRAFT")
+                    .map((c) => c.metric_code);
+                  if (codes.length === 0) return;
+                  setBatchSubmitLoading(true);
+                  try {
+                    const res = await batchSubmitMetrics(
+                      codes.map((metric_code) => ({ metric_code, change_reason: "批量注册后提交评审" })),
+                    );
+                    message.success(`批量提交完成：成功 ${res.ok_count} / 失败 ${res.fail_count}`);
+                    setBatchOpen(false);
+                  } catch (err) {
+                    message.error(
+                      err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量提交失败",
+                    );
+                  } finally {
+                    setBatchSubmitLoading(false);
+                  }
+                }}
+              >
+                批量提交评审
+              </Button>
+              <Button onClick={() => setBatchOpen(false)}>
                 关闭
               </Button>
             </Space>
