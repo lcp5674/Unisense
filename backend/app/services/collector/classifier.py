@@ -51,6 +51,30 @@ class ConfidentialCategory(enum.StrEnum):
     BUSINESS = "BUSINESS"  # 工资/成本/价格等商业敏感
 
 
+#: PII 类别中文标签（敏感规则配置台/明细列表展示用）。
+PII_CATEGORY_LABELS: dict[str, str] = {
+    PiiCategory.ID_CARD: "身份证号",
+    PiiCategory.PHONE: "手机/电话",
+    PiiCategory.EMAIL: "邮箱",
+    PiiCategory.NAME: "姓名/用户名",
+    PiiCategory.ADDRESS: "地址",
+    PiiCategory.BANK_CARD: "银行卡",
+    PiiCategory.DOCUMENT: "证件号",
+    PiiCategory.PASSPORT: "护照",
+    PiiCategory.GPS: "行踪定位",
+    PiiCategory.HEALTH: "健康医疗",
+    PiiCategory.BIOMETRIC: "生物特征",
+    PiiCategory.FINANCIAL: "金融敏感",
+}
+
+#: 机密类别中文标签（敏感规则配置台展示用）。
+CONFIDENTIAL_CATEGORY_LABELS: dict[str, str] = {
+    ConfidentialCategory.CREDENTIAL: "密码/密钥",
+    ConfidentialCategory.TAX: "税务/发票",
+    ConfidentialCategory.BUSINESS: "商业敏感",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class PiiRule:
     """一条敏感识别规则。

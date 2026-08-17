@@ -40,6 +40,7 @@ import { CollectionTasks } from "./pages/CollectionTasks";
 import { CollectionHistory } from "./pages/CollectionHistory";
 import { SubjectDomain } from "./pages/SubjectDomain";
 import { SystemDict } from "./pages/SystemDict";
+import { SensitiveRules } from "./pages/SensitiveRules";
 import { Account } from "./pages/Account";
 import { TrackingProvider } from "./components/TrackingProvider";
 
@@ -226,6 +227,7 @@ export default function App() {
               <Route path="/collection-history" element={<CollectionHistory />} />
               <Route path="/domains" element={<SubjectDomain />} />
               <Route path="/dicts" element={<SystemDict />} />
+              <Route path="/sensitive-rules" element={<RequirePerm perm={ROUTE_PERM["/sensitive-rules"]}><SensitiveRules /></RequirePerm>} />
               <Route path="/account" element={<Account />} />
               <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
               <Route path="/" element={<Navigate to="/dashboard" replace />} />

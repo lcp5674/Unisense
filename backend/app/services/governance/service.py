@@ -1032,6 +1032,12 @@ class GovernanceService(BaseService):
         catalogs = await self._repo.list_catalog(
             payload.source_id, payload.catalog_ids, payload.limit
         )
+        # 使用 DB 可配置规则（合并内置）——敏感规则配置台改规则后重扫即时生效
+        from app.services.collector.classifier import SensitivityClassifier
+        from app.services.collector.rules import load_pii_rules
+
+        pii_rules, conf_rules = await load_pii_rules(self._db)
+        classifier = SensitivityClassifier(rules=pii_rules, confidential_rules=conf_rules)
         items: list[ClassificationItem] = []
         changed = 0
         pii_found = 0
@@ -1040,7 +1046,9 @@ class GovernanceService(BaseService):
         for cat in catalogs:
             before = str(cat.sensitivity_level)
             try:
-                hits = policy.detect_pii_columns(cat.schema_json or {})
+                hits = policy.detect_pii_columns(
+                    cat.schema_json or {}, classifier=classifier
+                )
                 after = policy.infer_sensitivity(hits, current=before)
                 degraded = False
             except Exception as exc:  # noqa: BLE001 - 单资产失败降级，不阻断整批

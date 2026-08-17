@@ -1099,6 +1099,66 @@ export interface PiiReviewResult {
   secondary_validation: Record<string, unknown> | null;
 }
 
+// ---- 敏感规则配置台（backend /api/v1/sensitive-rules/*）----
+export interface SensitiveRuleItem {
+  rule_id: string;
+  label: string;
+  category: string;
+  category_label: string;
+  name_re: string;
+  sample_re: string | null;
+  confidence: number;
+  pii: boolean;
+  source: "builtin" | "custom";
+  status: "active" | "inactive";
+  updated_at: string | null;
+}
+
+export interface SensitiveRuleCategory {
+  category: string;
+  label: string;
+  pii: boolean;
+}
+
+export interface SensitiveRuleCreate {
+  rule_id?: string | null;
+  label: string;
+  category: string;
+  name_re: string;
+  sample_re?: string | null;
+  confidence?: number;
+  pii?: boolean;
+}
+
+export type SensitiveRuleUpdate = Omit<SensitiveRuleCreate, "rule_id">;
+
+export interface RegexCheckResult {
+  valid: boolean;
+  error: string | null;
+}
+
+export interface SensitiveRuleTestRequest {
+  entity_name?: string;
+  column_name: string;
+  sample_value?: string | null;
+  comment?: string | null;
+}
+
+export interface SensitiveRuleTestHit {
+  column: string;
+  category: string;
+  category_label: string;
+  rule: string;
+  confidence: number;
+  matched_by: string;
+  pii: boolean;
+}
+
+export interface SensitiveRuleTestResponse {
+  sensitivity_level: string;
+  hits: SensitiveRuleTestHit[];
+}
+
 export interface PermissionSnapshot {
   user_id: number;
   role: string;

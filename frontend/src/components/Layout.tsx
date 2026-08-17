@@ -156,6 +156,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/governance", label: "权限治理", icon: <SafetyCertificateOutlined /> },
       { key: "/audit", label: "审计日志", icon: <FileSearchOutlined /> },
       { key: "/dicts", label: "数据字典", icon: <TagsOutlined /> },
+      { key: "/sensitive-rules", label: "敏感规则", icon: <SafetyCertificateOutlined /> },
       { key: "/system-config", label: "系统配置", icon: <SettingOutlined /> },
     ],
   },

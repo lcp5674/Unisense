@@ -39,6 +39,7 @@ from app.api.recommend import router as recommend_router
 from app.api.search import router as search_router
 from app.api.semantic import quickbi_compat_router as semantic_quickbi_compat_router
 from app.api.semantic import router as semantic_router
+from app.api.sensitive_rules import router as sensitive_rules_router
 from app.api.subject_domain import router as subject_domain_router
 from app.api.system_dict import router as system_dict_router
 from app.api.tracking import router as tracking_router
@@ -241,6 +242,7 @@ def create_app() -> FastAPI:
     app.include_router(semantic_quickbi_compat_router, prefix="/api/v1")
     app.include_router(subject_domain_router, prefix="/api/v1")
     app.include_router(system_dict_router, prefix="/api/v1")
+    app.include_router(sensitive_rules_router, prefix="/api/v1")
     app.include_router(feature_flags_router, prefix="/api/v1")
     app.include_router(admin_key_rotation_router, prefix="/api/v1")
     app.include_router(users_router, prefix="/api/v1")

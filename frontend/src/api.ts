@@ -117,6 +117,7 @@ import {
   RecommendItem,
   Reconciliation,
   ReconciliationRecord,
+  RegexCheckResult,
   RoleOption,
   RolePermissionItem,
   RoleResponse,
@@ -139,6 +140,12 @@ import {
   SubjectDomainTreeNode,
   SubjectDomainUpdateRequest,
   SystemDictItem,
+  SensitiveRuleCategory,
+  SensitiveRuleCreate,
+  SensitiveRuleItem,
+  SensitiveRuleTestRequest,
+  SensitiveRuleTestResponse,
+  SensitiveRuleUpdate,
   TermRelation,
   TermRelationView,
   TestConnectionResult,
@@ -2046,6 +2053,67 @@ export async function classificationRescan(body: {
   limit?: number;
 }): Promise<unknown> {
   return request(`${API_BASE}/classification/rescan`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ---- 敏感规则配置台（backend /api/v1/sensitive-rules/*）----
+export async function listSensitiveRules(): Promise<SensitiveRuleItem[]> {
+  return request<SensitiveRuleItem[]>(`${API_BASE}/sensitive-rules`);
+}
+
+export async function listSensitiveRuleCategories(): Promise<SensitiveRuleCategory[]> {
+  return request<SensitiveRuleCategory[]>(`${API_BASE}/sensitive-rules/categories`);
+}
+
+export async function createSensitiveRule(
+  body: SensitiveRuleCreate,
+): Promise<SensitiveRuleItem> {
+  return request<SensitiveRuleItem>(`${API_BASE}/sensitive-rules`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateSensitiveRule(
+  ruleId: string,
+  body: SensitiveRuleUpdate,
+): Promise<SensitiveRuleItem> {
+  return request<SensitiveRuleItem>(
+    `${API_BASE}/sensitive-rules/${encodeURIComponent(ruleId)}`,
+    { method: "PUT", body: JSON.stringify(body) },
+  );
+}
+
+export async function setSensitiveRuleStatus(
+  ruleId: string,
+  action: "activate" | "deactivate",
+): Promise<SensitiveRuleItem> {
+  return request<SensitiveRuleItem>(
+    `${API_BASE}/sensitive-rules/${encodeURIComponent(ruleId)}/status?action=${action}`,
+    { method: "PATCH" },
+  );
+}
+
+export async function deleteSensitiveRule(ruleId: string): Promise<{ detail: string }> {
+  return request<{ detail: string }>(
+    `${API_BASE}/sensitive-rules/${encodeURIComponent(ruleId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function validateSensitiveRegex(pattern: string): Promise<RegexCheckResult> {
+  return request<RegexCheckResult>(`${API_BASE}/sensitive-rules/validate-regex`, {
+    method: "POST",
+    body: JSON.stringify({ pattern }),
+  });
+}
+
+export async function testSensitiveRule(
+  body: SensitiveRuleTestRequest,
+): Promise<SensitiveRuleTestResponse> {
+  return request<SensitiveRuleTestResponse>(`${API_BASE}/sensitive-rules/test`, {
     method: "POST",
     body: JSON.stringify(body),
   });

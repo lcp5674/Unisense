@@ -134,6 +134,7 @@ export const ROUTE_PERM: Record<string, string> = {
   "/collection-history": "collection-history:view",
   "/domains": "domains:view",
   "/dicts": "dicts:view",
+  "/sensitive-rules": "sensitive-rules:view",
   "/users": "users:view",
   "/organizations": "organizations:view",
   "/governance": "governance:view",

@@ -51,18 +51,21 @@ class PiiHit:
     matched_by: str  # name | name+sample | comment
 
 
-def detect_pii_columns(schema_json: dict[str, Any]) -> list[PiiHit]:
+def detect_pii_columns(
+    schema_json: dict[str, Any],
+    *,
+    classifier: SensitivityClassifier | None = None,
+) -> list[PiiHit]:
     """从表结构中识别 PII 字段（委托 classifier 统一规则源）。
 
     Args:
         schema_json: ``db_catalog.schema_json``，期望形如
             ``{"columns": [{"name": "phone", "type": "varchar", "sample": "13800000000"}]}``。
             兼容 ``{"fields": [...]}`` 与纯字符串列表。
-
-    Returns:
-        命中列表，按置信度倒序；无命中返回空列表。
+        classifier: 可选注入的分类器（含 DB 可配置规则）；缺省用模块级内置规则实例。
     """
-    hits = _CLASSIFIER.detect_pii_fields("", schema_json)
+    clf = classifier or _CLASSIFIER
+    hits = clf.detect_pii_fields("", schema_json)
     return [
         PiiHit(
             column=h.column,
@@ -259,6 +262,8 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "api-clients:manage": {"module": "治理", "label": "管理接入方", "description": "新建 API 客户端 / 签发令牌"},  # noqa: E501
     "system-config:view": {"module": "治理", "label": "查看系统配置", "description": "访问系统配置"},  # noqa: E501
     "system-config:edit": {"module": "治理", "label": "编辑系统配置", "description": "修改系统配置（LLM Key 等）"},  # noqa: E501
+    "sensitive-rules:view": {"module": "治理", "label": "查看敏感规则", "description": "访问敏感规则配置台"},  # noqa: E501
+    "sensitive-rules:edit": {"module": "治理", "label": "配置敏感规则", "description": "创建/编辑/启停/删除敏感识别规则并测试"},  # noqa: E501
     "observability:view": {"module": "治理", "label": "查看可观测", "description": "访问可观测性"},
     "tracking-stats:view": {"module": "治理", "label": "查看埋点统计", "description": "访问埋点统计"},  # noqa: E501
     "feedback:view": {"module": "总览", "label": "查看用户反馈", "description": "访问用户反馈"},
@@ -295,7 +300,8 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "organizations:view", "org:create", "org:edit", "org:disable",
             "governance:view", "grant:create", "grant:revoke", "grant:export",
             "audit:view", "domains:view", "domain:create", "dicts:view", "dict:create",
-            "api-clients:view", "api-clients:manage", "system-config:view", "observability:view",
+            "api-clients:view", "api-clients:manage", "system-config:view",
+            "sensitive-rules:view", "sensitive-rules:edit", "observability:view",
             "tracking-stats:view", "feedback:view", "feedback:manage", "guide:view",
             "pii:review",
         }
@@ -335,6 +341,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "review:view", "review:arbitrate",
             "governance:view", "pii:review", "pii:validate", "classification:rescan",
             "erasure:execute", "audit:view", "audit:export",
+            "sensitive-rules:view", "sensitive-rules:edit",
             "feedback:view", "guide:view",
         }
     ),
