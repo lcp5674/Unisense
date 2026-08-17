@@ -1349,18 +1349,53 @@ async def test_info_schema_collector_all_databases_enumerates():
     assert col["nullable"] is False
 
 
-async def test_info_schema_collector_single_database_keeps_plain_name():
-    """指定 database 时只采该库，entity_name 保持表名（向后兼容）。"""
+async def test_info_schema_collector_connection_db_is_not_collection_scope():
+    """连接库为纯凭据：指定 database 不再限定采集范围，仍枚举全部非系统库。"""
     from app.services.collector.connectors.mysql import InformationSchemaCollector
 
     connector = _MultiSchemaConnector(
-        schemas=["finance", "sales"],
-        tables_by_schema={"finance": ["orders"]},
-        columns={"orders": ["order_id"]},
+        schemas=["finance", "sales", "information_schema", "mysql"],
+        tables_by_schema={
+            "finance": ["orders"],
+            "sales": ["gmv"],
+            "information_schema": ["TABLES"],
+            "mysql": ["user"],
+        },
+        columns={"orders": ["order_id"], "gmv": ["amount"]},
     )
     collector = InformationSchemaCollector(connector, database="finance")
     result = await collector.collect(MagicMock(source_id="s1"))
-    assert [s.entity_name for s in result.specs] == ["orders"]
+    # 连接库不影响采集范围：仍枚举全部非系统库，entity_name 带库前缀
+    assert {s.entity_name for s in result.specs} == {"finance.orders", "sales.gmv"}
+    assert len(result.specs) == 2
+
+
+async def test_info_schema_collector_list_tables_grouped_by_db():
+    """list_tables 按库分组返回 BASE TABLE（仅指定库，不含系统库查询）。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _MultiSchemaConnector(
+        schemas=["finance", "sales", "information_schema"],
+        tables_by_schema={"finance": ["orders", "users"], "sales": ["gmv"]},
+        columns={},
+    )
+    collector = InformationSchemaCollector(connector)
+    tables = await collector.list_tables(["finance", "sales"])
+    assert tables == {"finance": ["orders", "users"], "sales": ["gmv"]}
+
+
+async def test_info_schema_collector_list_tables_empty_db_fallback_all():
+    """list_tables 未指定库时回退枚举全部非系统库（系统库被排除）。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    connector = _MultiSchemaConnector(
+        schemas=["finance", "information_schema", "mysql"],
+        tables_by_schema={"finance": ["orders"], "information_schema": ["TABLES"]},
+        columns={},
+    )
+    collector = InformationSchemaCollector(connector)
+    tables = await collector.list_tables()
+    assert tables == {"finance": ["orders"]}
 
 
 async def test_mysql_probe_returns_ok():
@@ -2022,8 +2057,8 @@ class _EntityConnector:
         return None
 
 
-async def test_collect_entity_mysql_single_database():
-    """MySQL 单库模式：collect_entity 精确返回目标表列元数据（含注释）。"""
+async def test_collect_entity_mysql_connection_db_not_scope():
+    """连接库为纯凭据：collect_entity 需显式 库.表 定位（不再按连接库隐式解析）。"""
     from app.services.collector.connectors.mysql import InformationSchemaCollector
 
     connector = _EntityConnector(
@@ -2041,14 +2076,15 @@ async def test_collect_entity_mysql_single_database():
         }
     )
     collector = InformationSchemaCollector(connector, database="finance")
-    spec = await collector.collect_entity(MagicMock(source_id="s1"), "orders")
+    spec = await collector.collect_entity(MagicMock(source_id="s1"), "finance.orders")
     assert spec is not None
-    assert spec.entity_name == "orders"
+    assert spec.entity_name == "finance.orders"
     col = spec.schema_json["columns"][0]
     assert col["name"] == "order_id"
     assert col["comment"] == "订单ID"
     assert col["default"] == "0"
-    # 单库模式：entity_name 含库名不属于本实例 → None（回退全量）
+    # 裸表名无法定位 schema → None（回退全量）；连接库不参与隐式解析
+    assert await collector.collect_entity(MagicMock(source_id="s1"), "orders") is None
     assert await collector.collect_entity(MagicMock(source_id="s1"), "other.orders") is None
 
 
@@ -2281,6 +2317,35 @@ async def test_list_databases_failure_returns_empty():
     ):
         dbs = await svc.list_databases("mysql", {"host": "h"})
     assert dbs == []
+
+
+async def test_list_tables_delegates_to_connector():
+    """list_tables 用明文配置构建采集器并委托 list_tables（透传库列表）。"""
+    svc, _repo = _svc()
+    fake_collector = MagicMock()
+    fake_collector.list_tables = AsyncMock(
+        return_value={"finance": ["orders", "users"], "sales": ["gmv"]}
+    )
+    fake_collector.dispose = AsyncMock()
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg",
+        return_value=fake_collector,
+    ):
+        tables = await svc.list_tables("mysql", {"host": "h"}, ["finance", "sales"])
+    assert tables == {"finance": ["orders", "users"], "sales": ["gmv"]}
+    fake_collector.list_tables.assert_awaited_once_with(["finance", "sales"])
+    fake_collector.dispose.assert_awaited_once()
+
+
+async def test_list_tables_failure_returns_empty():
+    """连接器构建/枚举失败时返回空字典（不抛出，前端隐藏表级选择区）。"""
+    svc, _repo = _svc()
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg",
+        side_effect=RuntimeError("down"),
+    ):
+        tables = await svc.list_tables("mysql", {"host": "h"}, ["finance"])
+    assert tables == {}
 
 
 async def test_repo_list_catalogs_source_status_active_uses_join():
@@ -3219,14 +3284,15 @@ def test_include_priority_overrides_exclude():
 
 
 class _IncludeExcludeConnector:
-    """仅返回表名清单的假连接器（采集端到端过滤验证）。"""
+    """按 schema 返回表清单的假连接器（多库采集端到端过滤验证）。"""
 
-    def __init__(self, tables: list[str]) -> None:
-        self._tables = tables
+    def __init__(self, tables_by_schema: dict[str, list[str]]) -> None:
+        self._tables_by_schema = tables_by_schema
 
     async def query(self, sql: str, params: dict | None = None) -> list[dict]:
         if "information_schema.tables" in sql:
-            return [{"table_name": t} for t in self._tables]
+            schema = (params or {}).get("schema")
+            return [{"table_name": t} for t in self._tables_by_schema.get(schema, [])]
         return []
 
     async def dispose(self) -> None:
@@ -3237,47 +3303,50 @@ async def test_collector_collect_applies_include_exclude_patterns():
     """采集端到端：仅 include 命中的表进入 specs（exclude 冗余亦无碍）。"""
     from app.services.collector.connectors.mysql import InformationSchemaCollector
 
-    connector = _IncludeExcludeConnector(["orders", "users", "legacy_table"])
+    connector = _IncludeExcludeConnector({"finance": ["orders", "users", "legacy_table"]})
     collector = InformationSchemaCollector(
         connector,
-        database="finance",
-        include_patterns=["orders"],
-        exclude_patterns=["users"],
+        include_patterns=["finance.orders"],
+        exclude_patterns=["finance.users"],
     )
+    collector.set_databases(["finance"])
     result = await collector.collect(MagicMock(source_id="s"))
-    assert [s.entity_name for s in result.specs] == ["orders"]
+    assert [s.entity_name for s in result.specs] == ["finance.orders"]
 
 
 async def test_collector_collect_include_priority_in_collect():
     """采集端到端验证 include 优先：users 虽命中黑名单仍被保留。"""
     from app.services.collector.connectors.mysql import InformationSchemaCollector
 
-    connector = _IncludeExcludeConnector(["orders", "users"])
+    connector = _IncludeExcludeConnector({"finance": ["orders", "users"]})
     collector = InformationSchemaCollector(
         connector,
-        database="finance",
-        include_patterns=["orders", "users"],
-        exclude_patterns=["users"],
+        include_patterns=["finance.orders", "finance.users"],
+        exclude_patterns=["finance.users"],
     )
+    collector.set_databases(["finance"])
     result = await collector.collect(MagicMock(source_id="s"))
-    assert sorted(s.entity_name for s in result.specs) == ["orders", "users"]
+    assert sorted(s.entity_name for s in result.specs) == ["finance.orders", "finance.users"]
 
 
 async def test_collector_collect_empty_patterns_no_filter():
     """采集端到端：未传 patterns 时不过滤（全量）。"""
     from app.services.collector.connectors.mysql import InformationSchemaCollector
 
-    connector = _IncludeExcludeConnector(["orders", "users"])
-    collector = InformationSchemaCollector(connector, database="finance")
+    connector = _IncludeExcludeConnector({"finance": ["orders", "users"]})
+    collector = InformationSchemaCollector(connector)
+    collector.set_databases(["finance"])
     result = await collector.collect(MagicMock(source_id="s"))
-    assert sorted(s.entity_name for s in result.specs) == ["orders", "users"]
+    assert sorted(s.entity_name for s in result.specs) == ["finance.orders", "finance.users"]
 
 
 async def test_collector_collect_multi_db_via_set_databases():
     """多目标库：set_databases 注入后逐库扫描，实体以 库.表 命名避免跨库冲突。"""
     from app.services.collector.connectors.mysql import InformationSchemaCollector
 
-    connector = _IncludeExcludeConnector(["orders", "users"])
+    connector = _IncludeExcludeConnector(
+        {"finance": ["orders", "users"], "sales": ["orders", "users"]}
+    )
     collector = InformationSchemaCollector(connector)
     collector.set_databases(["finance", "sales"])
     result = await collector.collect(MagicMock(source_id="s"))
@@ -3293,7 +3362,9 @@ async def test_collector_collect_filtered_stats_and_multi_db():
     """方案 B：表级过滤统计——filtered_count / filtered_names 在 CollectResult 透出。"""
     from app.services.collector.connectors.mysql import InformationSchemaCollector
 
-    connector = _IncludeExcludeConnector(["orders", "tmp_backup"])
+    connector = _IncludeExcludeConnector(
+        {"finance": ["orders", "tmp_backup"], "sales": ["orders", "tmp_backup"]}
+    )
     collector = InformationSchemaCollector(connector)
     collector.set_databases(["finance", "sales"])
     collector.set_table_filter(include_patterns=["*orders"], exclude_patterns=["tmp_*"])

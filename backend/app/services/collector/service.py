@@ -403,6 +403,37 @@ class CollectorService(BaseService):
             logger.warning("list_databases_failed: type=%s err=%s", source_type, exc)
             return []
 
+    async def list_tables(
+        self,
+        source_type: str,
+        cfg: dict[str, Any],
+        databases: list[str] | None = None,
+    ) -> dict[str, list[str]]:
+        """枚举指定库下的表（按库分组，创建数据源时级联选表）。
+
+        与 ``list_databases`` 同构（明文配置不落库）；连接器不支持枚举表
+        （如 Kafka）或任何异常均返回空字典，前端隐藏表级选择区。
+
+        Args:
+            source_type: 采集器类型。
+            cfg: 明文连接配置（不落库）。
+            databases: 要枚举表的库列表；空则由连接器回退全部非系统库。
+
+        Returns:
+            按库分组的表名映射 ``{库: [表名...]}``。
+        """
+        from app.services.collector.connectors import registry
+
+        try:
+            collector = registry.build_from_cfg(source_type, cfg)
+            try:
+                return await collector.list_tables(databases)
+            finally:
+                await collector.dispose()
+        except Exception as exc:
+            logger.warning("list_tables_failed: type=%s dbs=%s err=%s", source_type, databases, exc)
+            return {}
+
     async def check_connection(self, source_id: str) -> TestConnectionResult:
         """存量数据源实时探活：解密配置 → 轻量连接 → 更新健康状态与探活时间。"""
         from app.services.collector.connectors import registry

@@ -157,6 +157,23 @@ class InformationSchemaCollector(BaseCollector):
         """枚举实例下全部非系统数据库（复用 _list_schemas，供创建时选择目标库）。"""
         return await self._list_schemas()
 
+    async def list_tables(self, databases: list[str] | None = None) -> dict[str, list[str]]:
+        """枚举指定库（或全部非系统库）下的 BASE TABLE，按库分组（供前端级联选表）。
+
+        ``databases`` 为空时回退枚举全部非系统库；连接器不支持枚举表（如 Kafka）
+        由基类返回空字典，前端隐藏表级选择区。
+        """
+        schemas = list(databases) if databases else await self._list_schemas()
+        tables_by_db: dict[str, list[str]] = {}
+        for schema in schemas:
+            rows = await self._connector.query(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = :schema AND table_type = :ttype ORDER BY table_name",
+                {"schema": schema, "ttype": "BASE TABLE"},
+            )
+            tables_by_db[schema] = [str(r["table_name"]) for r in rows if r.get("table_name")]
+        return tables_by_db
+
     async def query(
         self, sql: str, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -169,15 +186,12 @@ class InformationSchemaCollector(BaseCollector):
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
         """单表元数据刷新：仅查询目标表的列元数据，不触发全源扫描。
 
-        ``entity_name`` 在单库模式为 ``table``；多库模式为 ``schema.table``。
-        表不存在或实体名无法定位 schema 时返回 None（由调用方回退全量采集）。
+        ``entity_name`` 恒为 ``schema.table``（连接库为纯凭据，不再按连接库隐式解析
+        schema）；裸表名无法定位 schema 时返回 None（由调用方回退全量采集）。
         """
-        if self._database:
-            schema, tbl = self._database, entity_name
-        else:
-            if "." not in entity_name:
-                return None
-            schema, tbl = entity_name.rsplit(".", 1)
+        if "." not in entity_name:
+            return None
+        schema, tbl = entity_name.rsplit(".", 1)
         if not schema or not tbl:
             return None
         try:
@@ -220,12 +234,11 @@ class InformationSchemaCollector(BaseCollector):
         )
         watermark_ts = getattr(self, "_incremental_watermark", None)
         try:
-            # 目标库优先级：DataSource.databases（多库）→ connection_config.database（单库）
-            # → 枚举全部非系统库
-            if getattr(self, "_databases", None):
-                schemas = list(self._databases)
-            elif self._database:
-                schemas = [self._database]
+            # 采集范围优先级：DataSource.databases（多目标库）→ 枚举全部非系统库。
+            # 连接库 database 为纯连接凭据，不再隐式决定采集范围（方案 A）。
+            target_dbs = getattr(self, "_databases", None)
+            if target_dbs:
+                schemas = list(target_dbs)
             else:
                 schemas = await self._list_schemas()
         except Exception as exc:  # 外部依赖失败 -> 转化为重试型错误（不静默）
@@ -296,9 +309,8 @@ class InformationSchemaCollector(BaseCollector):
                 tbl = row.get("table_name")
                 if not tbl:
                     continue
-                # 单库采集（URL 已限定库）用 表名；多库/全部库用 库.表 命名避免跨库同名冲突
-                single_db = bool(self._database) and not getattr(self, "_databases", None)
-                entity_name = f"{schema}.{tbl}" if not single_db else tbl
+                # 统一 库.表 命名避免跨库同名冲突（连接库为纯凭据，无单库裸表名模式）
+                entity_name = f"{schema}.{tbl}"
                 cols = columns_by_table.get(tbl, [])
                 schema_json = {"columns": cols}
                 specs.append(

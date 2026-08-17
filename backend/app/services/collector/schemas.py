@@ -169,6 +169,44 @@ class TestConnectionResult(BaseModel):
     detail: dict[str, Any] | None = None
 
 
+class ListTablesRequest(BaseModel):
+    """枚举指定库下的表请求（明文配置不落库，与 list_databases 同构）。
+
+    ``databases`` 为空时由连接器回退枚举全部非系统库；连接器不支持枚举表
+    （如 Kafka）时返回空字典，前端隐藏表级选择区。
+    """
+
+    source_type: SourceType
+    connection_config: dict[str, Any]
+    databases: list[str] = Field(
+        default_factory=list, description="要枚举表的库列表；空=全部非系统库"
+    )
+
+    @model_validator(mode="after")
+    def _validate_connection_config(self) -> ListTablesRequest:
+        cfg = self.connection_config
+        if not isinstance(cfg, dict):
+            raise ValueError("connection_config 必须是对象")
+        source_type_value = (
+            self.source_type.value
+            if self.source_type is not None and hasattr(self.source_type, "value")
+            else str(self.source_type)
+        )
+        if source_type_value == "kafka":
+            if "bootstrap_servers" not in cfg and "host" not in cfg:
+                raise ValueError("kafka 的 connection_config 必须包含 bootstrap_servers 或 host")
+        elif "host" not in cfg:
+            raise ValueError("connection_config 必须包含 host 字段")
+        return self
+
+
+class ListTablesResult(BaseModel):
+    """按库分组的表名列表（级联选表数据源）。"""
+
+    tables: dict[str, list[str]]
+    source_type: str
+
+
 class DataSourceResponse(BaseModel):
     """数据源响应。
 

@@ -132,11 +132,11 @@ class BaseCollector(ABC):
         self._exclude_patterns = exclude_patterns
 
     def set_databases(self, databases: list[str] | None = None) -> None:
-        """注入目标数据库列表（多库采集：逐库扫描指定库，None=按连接配置/全部库）。
+        """注入目标数据库列表（多库采集：逐库扫描指定库，None=采集全部非系统库）。
 
         由 service 层在 collect 前从 ``DataSource.databases`` 读取并注入；
-        连接器在 ``collect`` 时优先采用该列表，否则回退到 connection_config.database
-        （单库）或枚举全部非系统库。
+        连接器在 ``collect`` 时优先采用该列表，否则枚举全部非系统库。
+        连接库 ``connection_config.database`` 为纯连接凭据，不参与采集范围。
         """
         self._databases = databases
 
@@ -146,6 +146,13 @@ class BaseCollector(ABC):
         连接器不支持枚举（如 Kafka）时返回空列表，前端可回退为手填。
         """
         return []
+
+    async def list_tables(self, databases: list[str] | None = None) -> dict[str, list[str]]:
+        """枚举指定库下的表（按库分组，创建数据源时级联选表）。
+
+        连接器不支持枚举表（如 Kafka）时返回空字典，前端隐藏表级选择区。
+        """
+        return {}
 
     async def probe(self) -> ProbeResult:
         """轻量连接探活（SELECT 1 或等价最小查询），供「测试连接 / 健康检查」使用。

@@ -69,6 +69,7 @@ from app.services.collector.schemas import (
     InferDescriptionResponse,
     InferTableDescriptionRequest,
     InferTableDescriptionResponse,
+    ListTablesRequest,
     ScheduleRequest,
     TableDescriptionRequest,
     TableDescriptionResponse,
@@ -236,6 +237,29 @@ async def list_databases(
     )
     databases = await svc.list_databases(source_type_value, body.connection_config)
     return ok(data={"databases": databases, "source_type": source_type_value}, trace_id=trace_id)
+
+
+@source_router.post("/tables", dependencies=_WRITE_DEPS)
+async def list_tables(
+    body: ListTablesRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """FR-030: 枚举指定库下的表（按库分组，创建数据源时级联选表）。
+
+    与 list_databases 同构（明文配置，不落库）；连接器不支持枚举表时
+    返回空字典，前端隐藏表级选择区。
+    """
+    svc = _svc(db)
+    source_type_value = (
+        body.source_type.value if hasattr(body.source_type, "value") else str(body.source_type)
+    )
+    tables = await svc.list_tables(
+        source_type_value, body.connection_config, body.databases or None
+    )
+    return ok(data={"tables": tables, "source_type": source_type_value}, trace_id=trace_id)
 
 
 @source_router.post("/batch-toggle", dependencies=_WRITE_DEPS)
