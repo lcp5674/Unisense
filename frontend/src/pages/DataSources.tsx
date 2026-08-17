@@ -204,6 +204,7 @@ function SourceDetailModal({
       drift_count: Number(detail.drift_count ?? 0),
       drift_events: (detail.drift_events as CollectResult["drift_events"]) ?? [],
       deprecated_count: Number(detail.deprecated_count ?? 0),
+      dsd_count: Number(detail.dsd_count ?? 0),
       entities: (detail.entities as CollectResult["entities"]) ?? [],
       filtered_count: Number(detail.filtered_count ?? 0),
       filtered_names: (detail.filtered_names as CollectResult["filtered_names"]) ?? [],
@@ -400,7 +401,7 @@ function SourceDetailModal({
           type="success"
           showIcon
           style={{ marginBottom: 12 }}
-          message={`采集结果：注册 ${collectResult.registered} · PII ${collectResult.pii_registered} · 漂移 ${collectResult.drift_count}${(collectResult.filtered_count ?? 0) > 0 ? ` · 过滤跳过 ${collectResult.filtered_count} 张表` : ""}`}
+          message={`采集结果：注册 ${collectResult.registered} · PII ${collectResult.pii_registered} · 漂移 ${collectResult.drift_count}${(collectResult.dsd_count ?? 0) > 0 ? ` · 下线指标 ${collectResult.dsd_count}` : ""}${(collectResult.filtered_count ?? 0) > 0 ? ` · 过滤跳过 ${collectResult.filtered_count} 张表` : ""}`}
           description={
             <div>
               <div style={{ marginBottom: 4 }}>

@@ -260,6 +260,7 @@ export function CollectionHistory() {
     },
     { title: "漂移", dataIndex: "drift_count", key: "drift", width: 56, align: "right" as const, render: (v: number) => (v ? <Tag color="gold">{v}</Tag> : v ?? 0) },
     { title: "废弃", dataIndex: "deprecated_count", key: "deprecated", width: 56, align: "right" as const, render: (v: number) => v ?? 0 },
+    { title: "下线指标", dataIndex: "dsd_count", key: "dsd", width: 72, align: "right" as const, render: (v?: number) => (v ? <Tag color="orange">{v}</Tag> : v ?? 0) },
     { title: "耗时", dataIndex: "duration_seconds", key: "duration", width: 84, render: (v?: number | null) => durationText(v) },
     {
       title: "操作",
@@ -501,6 +502,7 @@ export function CollectionHistory() {
                     <span>失败 <b style={{ color: "#cf1322" }}>{detail.failed_count}</b></span>
                     <span>漂移 <b>{detail.drift_count}</b></span>
                     <span>废弃 <b>{detail.deprecated_count}</b></span>
+                    <span>下线指标 <b>{detail.dsd_count ?? 0}</b></span>
                     <span>覆盖率 <b>{detail.coverage != null ? `${Math.round(detail.coverage * 100)}%` : "—"}</b></span>
                   </Space>
                 )},

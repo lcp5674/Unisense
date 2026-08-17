@@ -3486,7 +3486,13 @@ class MetricService(BaseService):
     #   DSD → PUBLISHED（源恢复/确认误报）；DSD → DEPRECATED（确认退役）。
     # ------------------------------------------------------------------
 
-    async def mark_source_dropped(self, source_ids: list[str], actor_id: int, role: str) -> int:
+    async def mark_source_dropped(
+        self,
+        source_ids: list[str],
+        actor_id: int,
+        role: str,
+        entity_names: list[str] | None = None,
+    ) -> int:
         """数据源 DROP/不可达 → 血缘下游 PUBLISHED 指标批量置 DATA_SOURCE_DROPPED。
 
         对齐 PRD R3-04④：采集检测到源表 DROP 后调用本方法，沿血缘把引用该
@@ -3499,6 +3505,8 @@ class MetricService(BaseService):
             role: 触发人角色。该操作会批量变更他人指标状态，仅限管理角色
                 （platform_admin/domain_admin）——任意 metric_owner 不得借
                 采集侧接口对任意数据源把他人 PUBLISHED 指标批量置 DSD（越权面）。
+            entity_names: 精确到表名（采集侧仅部分表 DROP 时传入，避免把同源
+                未 DROP 表的下游指标一并误置 DSD）；缺省表示整源处理。
 
         Returns:
             被标记为 DSD 的指标数（0 表示无血缘下游指标或均已处理）。
@@ -3534,6 +3542,8 @@ class MetricService(BaseService):
                 DBCatalog.entity_type.in_(["TABLE", "VIEW"]),
             )
         )
+        if entity_names:
+            stmt = stmt.where(DBCatalog.entity_name.in_(entity_names))
         table_rows = (await self._db.execute(stmt)).scalars().all()
         if not table_rows:
             return 0

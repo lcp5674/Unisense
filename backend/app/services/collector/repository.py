@@ -675,6 +675,7 @@ class CollectorRepository:
             "failed_specs": result.get("failed_specs", []),
             "drift_events": result.get("drift_events", []),
             "degrade_reason": result.get("degrade_reason"),
+            "dsd_count": int(result.get("dsd_count") or 0),
         }
         await self._db.flush()
         return run

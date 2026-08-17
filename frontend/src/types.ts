@@ -1680,6 +1680,8 @@ export interface CollectResult {
   drift_count: number;
   drift_events: Array<{ entity_name: string; change_type: string }>;
   deprecated_count?: number;
+  /** 源表 DROP → 血缘下游指标置 DATA_SOURCE_DROPPED 的数量（采集侧自动触发） */
+  dsd_count?: number;
   /** 本次临时/数据源白黑名单过滤跳过的表数（方案 B） */
   filtered_count?: number;
   /** 被过滤跳过的表名（方案 B） */
@@ -1792,6 +1794,8 @@ export interface CollectionRun {
   failed_count: number;
   drift_count: number;
   deprecated_count: number;
+  /** 源表 DROP → 血缘下游指标置 DATA_SOURCE_DROPPED 的数量（采集侧自动触发） */
+  dsd_count?: number;
   coverage?: number | null;
   error?: string | null;
   /** 明细（详情接口返回）：failed_specs / drift_events / degrade_reason */
@@ -1799,6 +1803,7 @@ export interface CollectionRun {
     failed_specs?: Array<{ entity_name: string; error: string }>;
     drift_events?: Array<{ entity_name: string; change_type: string }>;
     degrade_reason?: string | null;
+    dsd_count?: number;
   } | null;
 }
 

@@ -1790,24 +1790,49 @@ class CollectorService(BaseService):
             for item in batch_payloads:
                 await self._eventbus.publish("catalog_registered", item)
 
-        # P1-5: 废弃表自动对账——仅在全量采集后执行（增量仅覆盖变更实体，不可对未采集实体误废）。
-        # 对比 catalog 中仍存活的实体与本次源端扫描到的实体名，源端已 drop 的标记为 DEPRECATED。
+        # P1-5: 废弃表自动对账 + DSD 闭环——仅在全量采集后执行（增量仅覆盖变更实体，
+        # 不可对未采集实体误废）。对比 catalog 中仍存活的实体与本次源端扫描到的实体名，
+        # 源端已 drop 的：① 沿血缘把下游 PUBLISHED 指标置 DATA_SOURCE_DROPPED（P1-4 接线，
+        # 兑现 PRD R3-04④「采集检测到源表 DROP 后调用」）；② 目录实体标 DEPRECATED。
+        # 顺序关键：mark_source_dropped 只查活跃表（deleted_at IS NULL），须在
+        # deprecate_catalog 置 deleted_at 之前调用，否则查不到已 drop 表。
         deprecated_count = 0
+        dsd_count = 0
         if effective_mode == "FULL":
             collected_names = {spec.entity_name for spec in result.specs}
             active_names = await self._repo.list_active_entity_names(source_id)
-            for name in active_names:
-                if name not in collected_names:
-                    try:
-                        if await self._repo.deprecate_catalog(source_id, name):
-                            deprecated_count += 1
-                    except Exception as exc:
-                        logger.warning(
-                            "collect_deprecate_failed: source=%s entity=%s error=%s",
-                            source_id,
-                            name,
-                            exc,
-                        )
+            dropped_names = [name for name in active_names if name not in collected_names]
+            if dropped_names:
+                # 源表 DROP → 血缘下游指标置 DSD。采集侧是可信系统组件：DSD 翻转是
+                # 事实检测（表确实从源端消失），非用户授权决策，故以管理角色触发；
+                # 按 entity_names 精确到本次 drop 的表，避免误伤同源未 drop 表的下游。
+                try:
+                    from app.services.semantic.service import MetricService
+
+                    dsd_count = await MetricService(self._db).mark_source_dropped(
+                        [source_id],
+                        actor_id=actor_id,
+                        role="platform_admin",
+                        entity_names=dropped_names,
+                    )
+                except Exception as exc:  # noqa: BLE001 - best-effort 不阻断采集主流程
+                    logger.warning(
+                        "collect_dsd_mark_failed: source=%s dropped=%d error=%s",
+                        source_id,
+                        len(dropped_names),
+                        exc,
+                    )
+            for name in dropped_names:
+                try:
+                    if await self._repo.deprecate_catalog(source_id, name):
+                        deprecated_count += 1
+                except Exception as exc:
+                    logger.warning(
+                        "collect_deprecate_failed: source=%s entity=%s error=%s",
+                        source_id,
+                        name,
+                        exc,
+                    )
 
         coverage = await self._repo.recompute_coverage(source_id)
 
@@ -1849,6 +1874,7 @@ class CollectorService(BaseService):
             "drift_count": len(drift_events),
             "drift_events": drift_events,
             "deprecated_count": deprecated_count,
+            "dsd_count": dsd_count,
             "entities": entities,
             # 表级过滤跳过（方案 B：采集结果/记录展示被白黑名单过滤掉的表）
             "filtered_count": getattr(result, "filtered_count", 0),
@@ -2225,6 +2251,7 @@ class CollectorService(BaseService):
             "failed_count": run.failed_count,
             "drift_count": run.drift_count,
             "deprecated_count": run.deprecated_count,
+            "dsd_count": (run.detail_json or {}).get("dsd_count", 0),
             "coverage": run.coverage,
             "error": run.error,
             "detail": run.detail_json if include_detail else None,

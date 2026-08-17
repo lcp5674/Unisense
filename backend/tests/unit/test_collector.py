@@ -443,6 +443,97 @@ async def test_collect_and_register_deprecates_dropped_tables_full_mode():
     repo.deprecate_catalog.assert_awaited_once_with("s", "legacy_table")
 
 
+async def test_collect_and_register_triggers_dsd_on_dropped_tables():
+    """P1-4: 全量采集检测到源表 DROP → 沿血缘把下游指标置 DSD（PRD R3-04④ 接线）。
+
+    断言以管理角色、精确到 drop 表名调用 mark_source_dropped，且 dsd_count 进结果。
+    """
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock())
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+    # 源端现有 users，但 catalog 中还残留已删除的 legacy_table
+    repo.list_active_entity_names = AsyncMock(return_value=["users", "legacy_table"])
+    repo.deprecate_catalog = AsyncMock(return_value=True)
+
+    class OnlyUsersCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="users",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["user_name"]},
+                    )
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    with patch("app.services.semantic.service.MetricService") as mock_metric_svc:
+        mock_metric_svc.return_value.mark_source_dropped = AsyncMock(return_value=2)
+        result = await svc.collect_and_register(
+            "s", OnlyUsersCollector(), actor_id=7, mode="FULL"
+        )
+
+    assert result["dsd_count"] == 2
+    # 以管理角色、仅精确到本次 drop 的表名触发（不误伤同源未 drop 表的下游）
+    mock_metric_svc.return_value.mark_source_dropped.assert_awaited_once_with(
+        ["s"], actor_id=7, role="platform_admin", entity_names=["legacy_table"]
+    )
+
+
+async def test_collect_and_register_dsd_failure_does_not_break_collect():
+    """P1-4: DSD 标记失败（血缘不可用/服务异常）不阻断采集主流程，dsd_count 归 0。"""
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    repo.get_source = AsyncMock(return_value=MagicMock())
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+    repo.list_active_entity_names = AsyncMock(return_value=["users", "legacy_table"])
+    repo.deprecate_catalog = AsyncMock(return_value=True)
+
+    class OnlyUsersCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                        entity_name="users",
+                        entity_type="TABLE",
+                        schema_json={"columns": ["user_name"]},
+                    )
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    with patch("app.services.semantic.service.MetricService") as mock_metric_svc:
+        mock_metric_svc.return_value.mark_source_dropped = AsyncMock(
+            side_effect=RuntimeError("lineage down")
+        )
+        result = await svc.collect_and_register(
+            "s", OnlyUsersCollector(), actor_id=1, mode="FULL"
+        )
+
+    # 采集主流程不中断：废弃照常、DSD 计数归 0
+    assert result["dsd_count"] == 0
+    assert result["deprecated_count"] == 1
+    repo.deprecate_catalog.assert_awaited_once_with("s", "legacy_table")
+
+
 async def test_collect_and_register_no_deprecate_in_incremental_mode():
     """P1-5: 增量模式不触发对账废弃（仅覆盖变更实体，避免误废未扫描实体）。"""
     svc, repo = _svc()
