@@ -6,8 +6,10 @@
 进程从不注册消费者，worker 侧事件双链路（本地订阅 + Redis 发布）全丢（C1）。
 
 事件经 EventBus 本地订阅者消费，写入 notify 的 EventLog 并按订阅扇出投递
-（Webhook/钉钉/SMTP/console）。进程内同步执行；跨进程广播由 Redis 承担
-（带 origin 去重的消费循环，见 app/core/eventbus.py 的 RedisConsumer）。
+（Webhook/钉钉/SMTP/console）。一致性模型：API 与 worker **各进程处理
+本进程发布的事件**（本地订阅者），不依赖 Redis 跨进程再分发——这使后台
+任务事件即使 API 短暂不可用也不会丢失（C1/C2）。Redis 广播仅作 best-effort
+冗余，供未来可选的跨进程下游消费。
 """
 
 from __future__ import annotations

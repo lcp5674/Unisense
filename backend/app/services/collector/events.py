@@ -1,8 +1,14 @@
 """采集事件发布（对齐 TD §12.1「Redis 发布」/ DEV_GUIDE §17.2）。
 
+一致性模型（C1/C2 澄清）：采集事件进入通知闭环的**主通道**是 EventBus 本地
+订阅者——API 与 worker 两个进程各自注册 notify 消费者，各自处理本进程发布
+的事件（worker 侧此前从未注册导致事件全丢，C1 已修复）。本 Redis 裸通道
+（``collector_events``）为 **best-effort 冗余广播**，供未来可选的跨进程
+下游（影响分析刷新、采集编排）消费，当前无消费方，允许丢失——不作为一致性
+保障，不阻断采集主流程。
+
 Redis 属可选依赖；发布经 CircuitBreaker 包裹：Redis 不可用时熔断打开，
 发布静默降级（返回 False），**不**阻断主流程（舱壁隔离）。
-事件通道：``collector_events``。
 """
 
 from __future__ import annotations

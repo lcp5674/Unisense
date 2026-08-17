@@ -1,7 +1,9 @@
 """血缘事件发布器（Redis 发布/订阅，CircuitBreaker 降级）。
 
-对齐 collector.events 的事件总线模式：事件总线不可用时经熔断器降级，
-不阻塞主流程。事件仅供下游（影响分析刷新、采集编排）消费，允许丢失。
+对齐 collector.events 的事件发布模式：事件总线不可用时经熔断器降级，
+不阻塞主流程。本通道（``lineage_events``）为 best-effort 冗余广播，
+当前无消费方，允许丢失——血缘变更的跨进程一致性由各进程本地订阅
+（EventBus）与 MySQL 主库保证，不依赖本 Redis 通道。
 """
 
 from __future__ import annotations
