@@ -1,0 +1,76 @@
+语义领域（semantic）生产级门禁验证证据（2026-08-17 更新）
+========================================================
+
+验证日期：2026-08-17（承接 08-07 基线 + 08-12 工业级整改后的复审更新）
+分析标的：Unisense 指标语义中台 / semantic 领域服务
+数据来源：本地 venv（MySQL 8.0 / Redis 7 / Neo4j 5 组合验证）
+分析方法：13 道 CI 门禁（CI/.gateways.yml）+ 真实单元测试/契约测试
+
+----------------------------------------------------------------------
+一、门禁通过清单（gateways_verify 全部 ✅）
+----------------------------------------------------------------------
+[lint]          ruff check backend/app backend/tests -> All checks passed!
+[type]          mypy --strict backend/app（语义域 0 错误）
+[unit]          pytest backend/tests 全量 2939 passed / 0 failed
+                （其中语义域测试文件 405 项，含服务层/状态机/契约/任务/缓存/脱敏）
+[contract]      指标生命周期契约测试 12 项 + auto-suggest/emergency-review/term-bind/batch 全覆盖
+[security_reverse] 越权 403 / 注入拦截 / PII 审计 / mark-source-dropped 角色门禁
+[observability] 日志含 trace_id / /metrics 非零 RED / trace 透传
+[perf_baseline] 语义查询下推 P95 < 3s（小表）
+[frontend]      frontend-gateways（typecheck + vitest 753 项全绿，含 MetricDetail 49 项）
+
+----------------------------------------------------------------------
+二、2026-08-12 工业级整改已复核落地（复审确认）
+----------------------------------------------------------------------
+1) 状态机独立模块 MetricStateMachine（6 态 10 跃迁）+ 非法跃迁拦截
+2) 破坏性变更 PENDING_VERSION（14 天确认期 + 延期 + 超时默认接受）
+3) 依赖校验 DFS 三色标记环检测；冲突预检命名规范（4 段 + 保留词）
+4) PII 合规复核 fail-closed 闸门（发布前须 compliance_reviewed）
+5) 乐观锁 row_version 全覆盖；SQL 参数化无注入面；API 层写 ORM
+
+----------------------------------------------------------------------
+三、2026-08-17 复审修复（P0-P2 全量 + 遗留清理 + A-F 类问题）
+----------------------------------------------------------------------
+P0 安全（3 项）：
+- P0-1 mark-source-dropped 越权修复（API+服务层双兜底，仅管理角色）
+- P0-2 suggest-rename/auto-suggest LLM 额度防护（写角色）+ auto-suggest 类型化 schema
+- P0-3 批量端点异常信息脱敏（public_error_message 助手，5 处 str(exc) 替换）
+
+P1 闭环治理（5 项）：
+- P1-4 collector 采集触发 DSD 闭环（mark_source_dropped + entity_names 精确过滤 + dsd_count 透传）
+- P1-5 健康恶化每日任务定向告警 Owner/备份 Owner
+- P1-6 紧急发布补审端点（/emergency-review 写 emergency_reviewed_at）
+- P1-7 灰度超期强制回收（EXPERIMENTAL→DRAFT + reject 收紧仅 REVIEW）
+- P1-8 PendingVersionManager 双实现合并（规则唯一实现在 MetricService）
+
+P2 体验/一致性（6 项）：
+- P2-9 publishMetric 死代码删除 + 批量提交走 /batch-submit
+- P2-10 rollback/promote 确认弹窗
+- P2-11 术语绑定写路径（PUT /{code}/term）+ GlossaryConflict.ref_metric_id 填充
+- P2-12 健康度质量维度接入 quality_event
+- P2-13 文档漂移修复 + 前端门禁落地（frontend-gateways CI job）
+- P2-14 前端重复常量收敛（enums.ts）
+
+复审 A-F 类修复（本轮）：
+- B 类闭环断线：DSD 通知闭环（source_dropped/source_recovered/emergency_reviewed 注册
+  消费者+模板+定向 Owner）+ DSD 待办（TodoCenter 数据源下线 + 7 天超期巡检）+
+  灰度回收前端渲染 + 血缘影响通知接线（collector schema drift 触发）
+- C 类健壮性：批量端点 DB 异常回滚（_run_batch 助手）+ 僵尸方法清理（review_metric/
+  publish_metric/_publish）+ 血缘注册失败告警（lineage.metric_register_failed 事件）
+- D 类体验：批量注册直达批量提交 + 详情页 DRAFT 删除入口（metric:delete 权限点）+
+  审批页搜索/域筛选 + 目录页责任人筛选 + 死代码清理
+- E 类测试：8 条零 API 测试路由补测（description/submit/approve/reject/版本三端点/health）+
+  E2E 审批动作断言 + P2-10/11 前端断言 + 编辑弹窗辅助数据加载防御式降级
+- F 类核验：sensitive_rules 部署风险已消除（已提交跟踪）
+
+----------------------------------------------------------------------
+四、测试规模对比
+----------------------------------------------------------------------
+08-07：72 passed（含语义集成 5 + 接口 7）
+08-12：全量 1004 unit
+08-17：全量后端 2939 passed / 0 failed；语义域测试文件 405 项；
+       前端 vitest 753 项全绿；tsc 0 错误
+
+遗留说明：
+- 全量 0 failed（list_catalogs 转义断言已随 9ac9a33 同步、semantic_cache 测试债务已随 ce3aff0 修复）
+- 并行会话在途改动（llm/parse.py、MetricCreate.test.tsx 等）非本报告标的
