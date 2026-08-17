@@ -2050,6 +2050,7 @@ export async function piiReviewAction(body: {
 
 export async function classificationRescan(body: {
   source_id?: string | null;
+  source_ids?: string[] | null;
   catalog_ids?: number[] | null;
   limit?: number;
 }): Promise<unknown> {
@@ -2095,6 +2096,30 @@ export async function setSensitiveRuleStatus(
     `${API_BASE}/sensitive-rules/${encodeURIComponent(ruleId)}/status?action=${action}`,
     { method: "PATCH" },
   );
+}
+
+export async function batchSetSensitiveRuleStatus(
+  ruleIds: string[],
+  action: "activate" | "deactivate",
+): Promise<{ action: string; succeeded: string[]; failed: { rule_id: string; error: string }[] }> {
+  return request(`${API_BASE}/sensitive-rules/batch-status`, {
+    method: "POST",
+    body: JSON.stringify({ rule_ids: ruleIds, action }),
+  });
+}
+
+export async function batchSetSensitiveRuleConfidence(
+  ruleIds: string[],
+  confidence: number,
+): Promise<{
+  confidence: number;
+  succeeded: string[];
+  failed: { rule_id: string; error: string }[];
+}> {
+  return request(`${API_BASE}/sensitive-rules/batch-confidence`, {
+    method: "POST",
+    body: JSON.stringify({ rule_ids: ruleIds, confidence }),
+  });
 }
 
 export async function deleteSensitiveRule(ruleId: string): Promise<{ detail: string }> {
