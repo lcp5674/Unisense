@@ -825,7 +825,10 @@ export function MetricDetail() {
         }
         const base: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(metric.definition_json ?? {})) {
-          if (k === "sql" || k === "etl_sql") continue;
+          // SQL 模式口径主体为 { sql }：排除 sql/etl_sql（旧 SQL 被新 SQL 取代），
+          // 并排除 expression——旧表达式是表达式模式的遗留，与 sql 并存即两个矛盾口径主体
+          // （DefinitionCard 会同时展示「计算口径」与「口径 SQL」，误导消费者）。
+          if (k === "sql" || k === "etl_sql" || k === "expression") continue;
           base[k] = v;
         }
         definitionJson = { ...base, sql };

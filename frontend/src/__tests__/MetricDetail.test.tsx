@@ -1176,7 +1176,6 @@ describe("MetricDetail 按钮级权限过滤", () => {
       const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
       expect(lastCall).toMatchObject({
         definition_json: {
-          expression: "sum(amount)",
           source_tables: ["dwd_sales"],
           sql: "SELECT SUM(amount) AS gmv FROM dwd_sales WHERE channel = 'APP'",
         },
@@ -1240,7 +1239,6 @@ describe("MetricDetail 按钮级权限过滤", () => {
       const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
       expect(lastCall).toMatchObject({
         definition_json: {
-          expression: "sum(amount)",
           source_tables: ["dwd_sales"],
           sql: "SELECT SUM(amount) FROM dwd_sales",
         },
