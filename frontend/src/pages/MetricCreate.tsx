@@ -5,7 +5,7 @@ import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, Dimension } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
@@ -182,6 +182,10 @@ export function MetricCreate() {
   const [batchResult, setBatchResult] = useState<MetricBatchRegisterResult | null>(null);
   // 批量注册成功 → 「批量提交评审」直达（复用 /batch-submit，复审 D1）
   const [batchSubmitLoading, setBatchSubmitLoading] = useState(false);
+  // 批量提交评审指派（复审 P2-10）：默认域评审组，可指定评审用户（对齐单指标提交的 reviewer_type/id）
+  const [batchReviewerType, setBatchReviewerType] = useState<"domain" | "user">("domain");
+  const [batchReviewerId, setBatchReviewerId] = useState<number | undefined>(undefined);
+  const [batchUsers, setBatchUsers] = useState<Array<{ id: number; username: string; display_name?: string | null }>>([]);
   // 批量弹窗：当前源表对应的列选项（选源表后加载，供度量列点选）
   const [batchColumnOptions, setBatchColumnOptions] = useState<{ value: string; label: string }[]>([]);
   const [batchColLoading, setBatchColLoading] = useState(false);
@@ -1167,6 +1171,41 @@ export function MetricCreate() {
               style={{ marginTop: 16 }}
               locale={{ emptyText: "无注册结果" }}
             />
+            {/* 提交评审指派（复审 P2-10）：默认域评审组；选「指定用户」后须选人，否则提交被拦 */}
+            <Space style={{ marginTop: 12 }} wrap>
+              <span className="muted" style={{ fontSize: 12 }}>提交评审指派</span>
+              <Segmented
+                size="small"
+                value={batchReviewerType}
+                onChange={(v) => {
+                  setBatchReviewerType(v as "domain" | "user");
+                  if (v === "user" && batchUsers.length === 0) {
+                    listUsers()
+                      .then(setBatchUsers)
+                      .catch(() => {});
+                  }
+                }}
+                options={[
+                  { label: "域评审组（默认）", value: "domain" },
+                  { label: "指定用户", value: "user" },
+                ]}
+              />
+              {batchReviewerType === "user" && (
+                <Select
+                  size="small"
+                  style={{ width: 220 }}
+                  placeholder="选择评审用户"
+                  showSearch
+                  optionFilterProp="label"
+                  value={batchReviewerId}
+                  onChange={setBatchReviewerId}
+                  options={batchUsers.map((u) => ({
+                    value: u.id,
+                    label: `${u.display_name || u.username}（#${u.id}）`,
+                  }))}
+                />
+              )}
+            </Space>
             <Space style={{ marginTop: 16 }}>
               <Button onClick={() => setBatchResult(null)}>继续注册</Button>
               {/* 批量提交直达：把本次成功注册的 DRAFT 指标一键送审（复用原子 /batch-submit，
@@ -1180,10 +1219,20 @@ export function MetricCreate() {
                     .filter((c) => c.status === "DRAFT")
                     .map((c) => c.metric_code);
                   if (codes.length === 0) return;
+                  // 指定用户模式未选人：提示并中止（避免 reviewer_type=user 但无 id 被后端拒绝）
+                  if (batchReviewerType === "user" && batchReviewerId == null) {
+                    message.warning("请先选择评审用户，或切换回域评审组");
+                    return;
+                  }
                   setBatchSubmitLoading(true);
                   try {
                     const res = await batchSubmitMetrics(
-                      codes.map((metric_code) => ({ metric_code, change_reason: "批量注册后提交评审" })),
+                      codes.map((metric_code) => ({
+                        metric_code,
+                        change_reason: "批量注册后提交评审",
+                        reviewer_type: batchReviewerType,
+                        reviewer_id: batchReviewerType === "user" ? batchReviewerId : undefined,
+                      })),
                     );
                     message.success(`批量提交完成：成功 ${res.ok_count} / 失败 ${res.fail_count}`);
                     setBatchOpen(false);

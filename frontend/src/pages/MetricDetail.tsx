@@ -1391,7 +1391,8 @@ export function MetricDetail() {
               okButtonProps: { danger: true },
               onOk: () =>
                 runAction(() => deleteMetric(metric.metric_code), "删除草稿").then(() => {
-                  message.success("草稿已删除");
+                  // 删除后提示恢复路径：软删指标进回收站，可在目录页「已归档」视图恢复（复审 P2-9）
+                  message.success("草稿已删除，可在指标目录『已归档』视图中恢复");
                   navigate("/metrics");
                 }),
             })

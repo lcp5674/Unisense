@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button, Card, Input, Modal, Radio, Segmented, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import { ArrowLeftOutlined, CheckCircleOutlined, ClockCircleOutlined } from "@ant-design/icons";
 import {
@@ -152,8 +152,12 @@ export function MetricReview() {
   // 命中审批通过或驳回——评审历史完整不丢驳回记录）
   const [view, setView] = useState<"pending" | "reviewed">("pending");
   // 审批筛选（复审 D4）：关键词（编码/名称）与域过滤，缓解审批积压时翻页找目标
-  const [keyword, setKeyword] = useState("");
-  const [domain, setDomain] = useState<string | undefined>(undefined);
+  // URL 同步（复审 P2-8）：刷新/分享保留筛选视图，对齐目录页 ownerFilter 的 URL 驱动模式
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [keyword, setKeyword] = useState(searchParams.get("keyword") ?? "");
+  const [domain, setDomain] = useState<string | undefined>(
+    searchParams.get("domain") ?? undefined,
+  );
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果（对齐目录/Dimensions/Templates）
   const loadSeq = useRef(0);
   const [page, setPage] = useState(1);
@@ -162,6 +166,16 @@ export function MetricReview() {
   const navigate = useNavigate();
   const { can } = usePermission();
   const canApprove = can("metric:approve");
+
+  // 筛选变更写回 URL query（合并保留其它参数，replace 避免堆历史）——刷新/分享不丢筛选视图
+  function syncFilter(nextKeyword: string, nextDomain: string | undefined) {
+    const next = new URLSearchParams(searchParams);
+    if (nextKeyword) next.set("keyword", nextKeyword);
+    else next.delete("keyword");
+    if (nextDomain) next.set("domain", nextDomain);
+    else next.delete("domain");
+    setSearchParams(next, { replace: true });
+  }
 
   // 统一返回上一入口：优先回退浏览器历史，无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -214,6 +228,15 @@ export function MetricReview() {
     }
   }
 
+  // 浏览器前进/后退改 URL 时回读筛选状态（仅在值不同时写，避免与 syncFilter 相互触发死循环）
+  useEffect(() => {
+    const urlKeyword = searchParams.get("keyword") ?? "";
+    const urlDomain = searchParams.get("domain") ?? undefined;
+    if (urlKeyword !== keyword) setKeyword(urlKeyword);
+    if (urlDomain !== domain) setDomain(urlDomain);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   useEffect(() => {
     fetchCurrentUser().then(setCurrentUser).catch(() => {});
     // 「我审过的」视角依赖 currentUser 过滤：未就绪时不发无 approver 过滤的全量首查
@@ -237,7 +260,7 @@ export function MetricReview() {
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, view, currentUser?.id]);
+  }, [page, pageSize, view, currentUser?.id, keyword, domain]);
 
   async function handleReview(
     metric: MetricResponse,
@@ -462,8 +485,10 @@ export function MetricReview() {
             placeholder="搜索指标编码 / 名称"
             style={{ width: 240 }}
             onSearch={(v) => {
-              setKeyword(v.trim());
+              const kw = v.trim();
+              setKeyword(kw);
               setPage(1);
+              syncFilter(kw, domain);
             }}
           />
           <Select
@@ -472,8 +497,10 @@ export function MetricReview() {
             style={{ width: 180 }}
             value={domain}
             onChange={(v) => {
-              setDomain(v || undefined);
+              const d = v || undefined;
+              setDomain(d);
               setPage(1);
+              syncFilter(keyword, d);
             }}
             options={Object.entries(domainMap).map(([code, name]) => ({
               value: code,
