@@ -656,6 +656,18 @@ class LineageRepository:
         await self._db.flush()
         return int(getattr(result, "rowcount", 0) or 0)
 
+    async def soft_deleted_edges_for_node(self, node: str) -> list[LineageEdge]:
+        """取某节点相关的全部软删血缘边（恢复节点时重建图存储用）。
+
+        与 ``edges_for_node`` 对称，但过滤 ``deleted_at IS NOT NULL``——恢复路径
+        需要知道哪些边将重新激活，才能把图存储（Neo4j）中的对应边重建回来。
+        """
+        stmt = select(LineageEdge).where(
+            (LineageEdge.source_node == node) | (LineageEdge.target_node == node),
+            LineageEdge.deleted_at.is_not(None),
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
     # ---- 增量采集与失效管理（TD §12.2 血缘采集通道）----
 
     async def _source_l1_edges(self, source: str) -> list[LineageEdge]:

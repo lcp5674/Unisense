@@ -232,8 +232,8 @@ class FakeRepo:
         return False
 
     async def edges_for_node(self, node: str, direction: str = "both") -> list[Any]:
-        """按节点返回血缘边（图路径合并 MySQL 新类型边时使用）；默认返回空。"""
-        return []
+        """按节点返回血缘边；返回 self.edges_for_node_result（默认空）。"""
+        return list(getattr(self, "edges_for_node_result", []))
 
     async def query_impact(
         self, node: str, direction: str, max_hops: int, max_edges: int = 5000
@@ -248,6 +248,14 @@ class FakeRepo:
 
     async def soft_delete_by_node(self, node: str) -> int:
         return self.deleted_count
+
+    async def restore_by_node(self, node: str) -> int:
+        """级联恢复假实现：与 soft_delete_by_node 对称返回计数。"""
+        return self.deleted_count
+
+    async def soft_deleted_edges_for_node(self, node: str) -> list[Any]:
+        """软删边假实现：返回 self.soft_deleted（默认空）。"""
+        return list(getattr(self, "soft_deleted", []))
 
     async def soft_delete_edge(self, edge_id: int) -> object | None:
         """单条边软删假实现：按 id 从 self.edges 中移除并返回；不存在返回 None。"""
@@ -331,10 +339,17 @@ class FakeRepo:
 class FakeGraph:
     """模拟 Neo4j 图读；result=None 表示图不可用降级。"""
 
-    def __init__(self, result: list[tuple[str, str, str]] | None | None = None) -> None:
+    def __init__(
+        self,
+        result: list[tuple[str, str, str]] | None | None = None,
+        *,
+        write_ok: bool = True,
+    ) -> None:
         self.result = result
+        self.write_ok = write_ok
         self.calls: list[tuple[str, str, int, int]] = []
         self.deleted: list[tuple[str, str, str]] = []
+        self.written: list[tuple[str, str, str]] = []
 
     async def query_impact(
         self, node: str, direction: str, max_hops: int, max_edges: int
@@ -342,17 +357,22 @@ class FakeGraph:
         self.calls.append((node, direction, max_hops, max_edges))
         return self.result
 
+    async def write_edges(self, edges: list[tuple[str, str, str]]) -> bool:
+        self.written.extend(edges)
+        return self.write_ok
+
     async def delete_edges(self, edges: list[tuple[str, str, str]]) -> bool:
         self.deleted.extend(edges)
         return True
 
 
 class FakeRedis:
-    """内存假 Redis（cache-aside 验证用）。"""
+    """内存假 Redis（cache-aside + 前缀失效验证用）。"""
 
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
         self.calls: list[tuple[str, str]] = []
+        self.deleted_keys: list[str] = []
 
     async def get(self, key: str) -> str | None:
         return self.store.get(key)
@@ -361,6 +381,21 @@ class FakeRedis:
         self.store[key] = value
         self.calls.append((key, value))
         return True
+
+    async def scan(self, cursor: int, match: str = "", count: int = 100) -> tuple[int, list[str]]:
+        """内存假 SCAN：按前缀匹配一次返回全部键（cursor 恒 0=一次结束）。"""
+        prefix = match.replace("*", "")
+        keys = [k for k in self.store if k.startswith(prefix)]
+        return 0, keys
+
+    async def delete(self, *keys: str) -> int:
+        n = 0
+        for k in keys:
+            if k in self.store:
+                del self.store[k]
+                n += 1
+            self.deleted_keys.append(k)
+        return n
 
 
 class _FakeSession:
@@ -730,6 +765,52 @@ async def test_delete_by_node_delegates() -> None:
     repo.deleted_count = 3
     svc._repo = repo
     assert await svc.delete_by_node("table:a") == 3
+
+
+async def test_delete_by_node_syncs_graph_and_invalidates_cache() -> None:
+    """C3/m5: 级联删除回写图存储并失效影响分析缓存。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.deleted_count = 1
+    repo.edges_for_node_result = [
+        SimpleNamespace(
+            id=1, source_node="table:a", target_node="table:b", edge_type="DERIVED_FROM"
+        )
+    ]
+    svc._repo = repo
+    graph = FakeGraph()
+    svc._graph = graph
+    redis = FakeRedis()
+    redis.store["lineage:impact:table:a:downstream:5"] = "[]"
+    svc._redis = redis
+
+    assert await svc.delete_by_node("table:a") == 1
+
+    assert graph.deleted == [("table:a", "table:b", "DERIVED_FROM")]
+    assert "lineage:impact:table:a:downstream:5" not in redis.store
+
+
+async def test_restore_by_node_rebuilds_graph_and_invalidates_cache() -> None:
+    """C3/m5: 级联恢复重建图存储并失效影响分析缓存。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.deleted_count = 1
+    repo.soft_deleted = [
+        SimpleNamespace(
+            id=2, source_node="table:x", target_node="table:y", edge_type="DERIVED_FROM"
+        )
+    ]
+    svc._repo = repo
+    graph = FakeGraph()
+    svc._graph = graph
+    redis = FakeRedis()
+    redis.store["lineage:impact:table:x:upstream:3"] = "[]"
+    svc._redis = redis
+
+    assert await svc.restore_by_node("table:x") == 1
+
+    assert graph.written == [("table:x", "table:y", "DERIVED_FROM")]
+    assert "lineage:impact:table:x:upstream:3" not in redis.store
 
 
 async def test_query_graph_reuses_assetmap_assembly(monkeypatch: Any) -> None:
@@ -1573,12 +1654,37 @@ async def test_delete_edge_by_id_delegates() -> None:
     svc = LineageService(db=_FakeSession())
     repo = FakeRepo()
     svc._repo = repo
-    edge = SimpleNamespace(id=9, source_node="table:a", target_node="table:b")
+    edge = SimpleNamespace(
+        id=9, source_node="table:a", target_node="table:b", edge_type="DERIVED_FROM"
+    )
     repo.edges.append(edge)
     result = await svc.delete_edge_by_id(9)
     assert result.edge_id == 9
     assert result.source_node == "table:a"
     assert result.target_node == "table:b"
+
+
+async def test_delete_edge_by_id_syncs_graph_and_invalidates_cache() -> None:
+    """C3/m5: 单边删除回写图存储并失效两端影响缓存。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    edge = SimpleNamespace(
+        id=9, source_node="table:a", target_node="table:b", edge_type="DERIVED_FROM"
+    )
+    repo.edges.append(edge)
+    svc._repo = repo
+    graph = FakeGraph()
+    svc._graph = graph
+    redis = FakeRedis()
+    redis.store["lineage:impact:table:a:downstream:5"] = "[]"
+    redis.store["lineage:impact:table:b:upstream:5"] = "[]"
+    svc._redis = redis
+
+    await svc.delete_edge_by_id(9)
+
+    assert graph.deleted == [("table:a", "table:b", "DERIVED_FROM")]
+    assert "lineage:impact:table:a:downstream:5" not in redis.store
+    assert "lineage:impact:table:b:upstream:5" not in redis.store
 
 
 async def test_delete_edge_by_id_not_found() -> None:
@@ -1629,3 +1735,85 @@ async def test_list_edges_without_prefix_expands_candidates() -> None:
     edges = await svc.list_edges("gmv_day", direction="downstream")
     assert len(edges) == 1
     assert edges[0].target_node == "consumer:app_a"
+
+
+# ---------- M1: 批量入库写图 + m5 缓存失效 ----------
+
+
+async def test_ingest_batch_writes_graph_and_invalidates_added_cache() -> None:
+    """M1/m5: 批量入库写图存储；新增边两端失效影响缓存。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeIngestRepo()
+    repo.mark_seen_result = (0, 0)
+    repo.mark_missing_result = (0, 0)
+    svc._repo = repo
+    graph = FakeGraph()
+    svc._graph = graph
+    redis = FakeRedis()
+    redis.store["lineage:impact:table:a_new:downstream:5"] = "[]"
+    redis.store["lineage:impact:table:a:upstream:5"] = "[]"
+    svc._redis = redis
+
+    await svc.ingest_batch("dp_csv", {("a", "b"), ("a_new", "c")}, threshold=2)
+
+    # 全量 seen 写图（含更新与新增，幂等 MERGE）
+    assert ("table:a", "table:b", "DERIVED_FROM") in graph.written
+    assert ("table:a_new", "table:c", "DERIVED_FROM") in graph.written
+    # 仅新增边两端失效缓存（更新边图里已有，无需刷新）
+    assert "lineage:impact:table:a_new:downstream:5" not in redis.store
+    assert "lineage:impact:table:a:upstream:5" in redis.store
+
+
+# ---------- M2: 写图失败告警 ----------
+
+
+async def test_sync_graph_failure_publishes_alert() -> None:
+    """M2: 写图失败发布告警事件（不再静默吞掉）。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    svc._graph = FakeGraph(write_ok=False)
+    eventbus = AsyncMock()
+    svc._eventbus = eventbus
+
+    ok = await svc._sync_graph(
+        [("table:a", "table:b", "DERIVED_FROM")], context="ingest_batch:dp_csv"
+    )
+
+    assert ok is False
+    eventbus.publish.assert_awaited_once()
+    event, payload = eventbus.publish.await_args.args
+    assert event == "lineage.graph_sync_failed"
+    assert payload["context"] == "ingest_batch:dp_csv"
+    assert payload["action"] == "write"
+    assert payload["edge_count"] == 1
+
+
+async def test_sync_graph_delete_failure_publishes_alert() -> None:
+    """M2: 删图失败同样发布告警事件。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+
+    class FailDeleteGraph(FakeGraph):
+        async def delete_edges(self, edges: list[tuple[str, str, str]]) -> bool:
+            return False
+
+    svc._graph = FailDeleteGraph()
+    eventbus = AsyncMock()
+    svc._eventbus = eventbus
+
+    ok = await svc._sync_graph(
+        [("table:a", "table:b", "DERIVED_FROM")], delete=True, context="delete_edge_by_id:9"
+    )
+
+    assert ok is False
+    event, payload = eventbus.publish.await_args.args
+    assert payload["action"] == "delete"
+
+
+# ---------- m5: 缓存失效辅助 ----------
+
+
+async def test_invalidate_impact_cache_without_redis_is_noop() -> None:
+    """m5: 未注入 Redis 时缓存失效为 no-op（不阻塞主流程）。"""
+    svc = LineageService(db=_FakeSession())
+    assert await svc._invalidate_impact_cache("table:a") is None

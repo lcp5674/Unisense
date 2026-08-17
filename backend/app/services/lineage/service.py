@@ -235,9 +235,13 @@ class LineageService(BaseService):
             )
             graph_edges.append((sn, tn, "DERIVED_FROM"))
 
-        graph_written = False
-        if self._graph is not None:
-            graph_written = await self._graph.write_edges(graph_edges)
+        graph_written = await self._sync_graph(
+            graph_edges, delete=False, context=f"parse_and_store:{req.provenance}"
+        )
+        # m5: SQL 解析新增边后失效两端影响缓存（图路径立即反映本次血缘）
+        for sn, tn, _etype in graph_edges:
+            await self._invalidate_impact_cache(sn)
+            await self._invalidate_impact_cache(tn)
         # 双发：保留 Redis 裸通道（历史兼容），同时发 EventBus 供通知中心消费（best-effort）
         parsed_payload = {"table_edges": stored_table, "field_edges": stored_field}
         if self._events is not None:
@@ -548,12 +552,40 @@ class LineageService(BaseService):
         return edge
 
     async def delete_by_node(self, node: str) -> int:
-        """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。"""
-        return await self._repo.soft_delete_by_node(node)
+        """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。
+
+        删除后 best-effort 同步删除图存储（Neo4j）中的对应边，并失效该节点的
+        影响分析缓存——避免删除后图/缓存仍残留已失效血缘（C3/m5）。
+        """
+        active = await self._repo.edges_for_node(node, "both")
+        deleted = await self._repo.soft_delete_by_node(node)
+        await self._db.flush()
+        if deleted and active:
+            await self._sync_graph(
+                [(e.source_node, e.target_node, e.edge_type) for e in active],
+                delete=True,
+                context=f"delete_by_node:{node}",
+            )
+        await self._invalidate_impact_cache(node)
+        return deleted
 
     async def restore_by_node(self, node: str) -> int:
-        """级联恢复某节点相关的全部软删血缘边（指标回收站恢复时对称重建）。"""
-        return await self._repo.restore_by_node(node)
+        """级联恢复某节点相关的全部软删血缘边（指标回收站恢复时对称重建）。
+
+        恢复后 best-effort 重建图存储（Neo4j）中的对应边，并失效影响分析缓存，
+        保证恢复的指标血缘立即可见（C3/m5）。
+        """
+        soft_deleted = await self._repo.soft_deleted_edges_for_node(node)
+        restored = await self._repo.restore_by_node(node)
+        await self._db.flush()
+        if restored and soft_deleted:
+            await self._sync_graph(
+                [(e.source_node, e.target_node, e.edge_type) for e in soft_deleted],
+                delete=False,
+                context=f"restore_by_node:{node}",
+            )
+        await self._invalidate_impact_cache(node)
+        return restored
 
     # ---- 人工治理：手动登记 / 单边删除（TD §12.2）----
 
@@ -623,6 +655,14 @@ class LineageService(BaseService):
         if getattr(edge, "owner", None) != str(actor_id):
             edge.owner = str(actor_id)
         await self._db.flush()
+        # M1: 人工登记边同步写图 + 失效两端影响缓存（人工边此前不在图存储）
+        await self._sync_graph(
+            [(req.source_node, req.target_node, req.edge_type)],
+            delete=False,
+            context=f"add_manual_edge:{req.source_node}->{req.target_node}",
+        )
+        await self._invalidate_impact_cache(req.source_node)
+        await self._invalidate_impact_cache(req.target_node)
         return ManualEdgeCreateResponse(
             edge=LineageEdgeResponse.model_validate(edge), created=created
         )
@@ -637,10 +677,21 @@ class LineageService(BaseService):
         return "L1"
 
     async def delete_edge_by_id(self, edge_id: int) -> EdgeDeleteResult:
-        """按主键软删单条血缘边（人工治理：误登记/断链修复的单边删除）。"""
+        """按主键软删单条血缘边（人工治理：误登记/断链修复的单边删除）。
+
+        删除后 best-effort 同步删除图存储中的对应边，并失效两端影响缓存（C3/m5）。
+        """
         edge = await self._repo.soft_delete_edge(edge_id)
         if edge is None:
             raise NotFoundError(f"血缘边不存在或已删除: id={edge_id}")
+        await self._db.flush()
+        await self._sync_graph(
+            [(edge.source_node, edge.target_node, edge.edge_type)],
+            delete=True,
+            context=f"delete_edge_by_id:{edge_id}",
+        )
+        await self._invalidate_impact_cache(edge.source_node)
+        await self._invalidate_impact_cache(edge.target_node)
         return EdgeDeleteResult(
             edge_id=edge.id,
             source_node=edge.source_node,
@@ -1046,6 +1097,17 @@ class LineageService(BaseService):
                 detail=detail,
             )
             await self._db.commit()
+            # M1: 批量入库边同步写图（幂等 MERGE）——此前 ingest_batch 只落 MySQL，
+            # 图存储完全缺失这批边，影响分析图路径长期回退 MySQL BFS。
+            await self._sync_graph(
+                [(s, t, "DERIVED_FROM") for s, t in sorted(seen)],
+                delete=False,
+                context=f"ingest_batch:{provenance}",
+            )
+            # m5: 新增边两端失效影响缓存，导入血缘立即在影响分析中可见
+            for src, tgt in added_edges:
+                await self._invalidate_impact_cache(src)
+                await self._invalidate_impact_cache(tgt)
             # 双发：保留 Redis 裸通道（历史兼容），同时发 EventBus 供通知中心消费（best-effort）
             ingested_payload = {
                 "source": provenance,
@@ -1137,23 +1199,38 @@ class LineageService(BaseService):
         return LineageNodeResponse(id=node, label=node, type="other", count=count)
 
     async def confirm_stale_edge(self, edge_id: int) -> StaleEdgeResponse:
-        """确认失效边：软删权威存储，并 best-effort 同步删除图存储。"""
+        """确认失效边：软删权威存储，并 best-effort 同步删除图存储 + 失效两端缓存。"""
         edge = await self._repo.get_edge(edge_id)
         if edge is None:
             raise NotFoundError(f"血缘边不存在或已删除: {edge_id}")
         await self._repo.confirm_stale(edge)
         await self._db.commit()
-        if self._graph is not None:
-            await self._graph.delete_edges([(edge.source_node, edge.target_node, edge.edge_type)])
+        await self._sync_graph(
+            [(edge.source_node, edge.target_node, edge.edge_type)],
+            delete=True,
+            context=f"confirm_stale_edge:{edge_id}",
+        )
+        await self._invalidate_impact_cache(edge.source_node)
+        await self._invalidate_impact_cache(edge.target_node)
         return StaleEdgeResponse.model_validate(edge)
 
     async def restore_stale_edge(self, edge_id: int) -> StaleEdgeResponse:
-        """恢复失效边：清除失效标记与观察期计数，重新参与血缘查询。"""
+        """恢复失效边：清除失效标记与观察期计数，重新参与血缘查询。
+
+        恢复后 best-effort 重建图存储中的对应边 + 失效两端影响缓存（C3/m5）。
+        """
         edge = await self._repo.get_edge(edge_id)
         if edge is None:
             raise NotFoundError(f"血缘边不存在或已删除: {edge_id}")
         await self._repo.restore_stale(edge)
         await self._db.commit()
+        await self._sync_graph(
+            [(edge.source_node, edge.target_node, edge.edge_type)],
+            delete=False,
+            context=f"restore_stale_edge:{edge_id}",
+        )
+        await self._invalidate_impact_cache(edge.source_node)
+        await self._invalidate_impact_cache(edge.target_node)
         return StaleEdgeResponse.model_validate(edge)
 
     # ---- 内部方法 ----
@@ -1212,6 +1289,75 @@ class LineageService(BaseService):
     @staticmethod
     def _impact_cache_key(node: str, direction: str, hops: int) -> str:
         return f"{_CACHE_KEY_PREFIX}{node}:{direction}:{hops}"
+
+    async def _sync_graph(
+        self,
+        edges: list[tuple[str, str, str]],
+        *,
+        delete: bool = False,
+        context: str = "",
+    ) -> bool:
+        """best-effort 同步图存储，失败时记告警日志 + 发布事件（M2）。
+
+        所有血缘变更路径统一经此写/删 Neo4j——此前 write_edges 失败静默降级、
+        不告警、不入队，图存储长期漂移无人察觉。
+
+        Args:
+            edges: ``(source_node, target_node, edge_type)`` 三元组列表。
+            delete: True=删除图边，False=写入（MERGE）图边。
+            context: 调用场景标记（如 ``delete_by_node:table:a``），供告警定位。
+
+        Returns:
+            图可用且同步成功返回 True；图未配置/不可达/熔断返回 False（降级）。
+        """
+        if self._graph is None or not edges:
+            return False
+        ok = (
+            await self._graph.delete_edges(edges)
+            if delete
+            else await self._graph.write_edges(edges)
+        )
+        if not ok:
+            logger.error(
+                "lineage_graph_sync_failed",
+                context=context,
+                action="delete" if delete else "write",
+                edge_count=len(edges),
+            )
+            await self._eventbus.publish(
+                "lineage.graph_sync_failed",
+                {
+                    "context": context,
+                    "action": "delete" if delete else "write",
+                    "edge_count": len(edges),
+                },
+            )
+        return ok
+
+    async def _invalidate_impact_cache(self, node: str) -> None:
+        """失效某节点的全部影响分析缓存（按 ``lineage:impact:{node}:*`` 前缀）。
+
+        m5: 血缘变更（删除/恢复/新增）后立即失效，避免 TTL（60s）内读到已变更
+        的边。Redis 不可用时静默跳过，不阻塞主流程。
+        """
+        redis = self._redis
+        if redis is None:
+            return
+        try:
+            keys: list[Any] = []
+            cursor = 0
+            pattern = f"{_CACHE_KEY_PREFIX}{node}:*"
+            while True:
+                cursor, batch = await redis.scan(cursor, match=pattern, count=200)
+                keys.extend(batch)
+                if not cursor:
+                    break
+            if keys:
+                await redis.delete(*keys)
+        except Exception as exc:
+            logger.warning(
+                "lineage_impact_cache_invalidate_failed", node=node, error=str(exc)
+            )
 
     async def _impact_cache_get(self, key: str) -> list[LineageEdgeResponse] | None:
         """读影响分析缓存；Redis 不可用/熔断/解析失败时返回 None（回源）。"""
