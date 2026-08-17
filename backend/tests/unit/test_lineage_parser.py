@@ -958,3 +958,58 @@ def test_nested_except_derived_column() -> None:
     assert {("ods.a", "id", "x"), ("ods.b", "uid", "x")} == {
         (e.source_table, e.source_column, e.target_column) for e in field_edges
     }
+
+
+def test_cte_union_column_lineage() -> None:
+    """CTE 定义为 UNION 时外层列血缘穿透到各分支真实源（第九轮）。
+
+    ``WITH x AS (SELECT id FROM ods.a UNION ALL SELECT id FROM ods.b)
+    INSERT INTO dws.t SELECT id FROM x`` —— CTE 引用 x.id 应同时归属两分支。
+    """
+    sql = (
+        "WITH x AS (SELECT id FROM ods.a UNION ALL SELECT id FROM ods.b) "
+        "INSERT INTO dws.t SELECT id FROM x"
+    )
+    field_edges = extract_field_lineage(sql, dialect="hive")
+    assert {("ods.a", "id", "id"), ("ods.b", "id", "id")} == {
+        (e.source_table, e.source_column, e.target_column) for e in field_edges
+    }
+    # 表级血缘两分支源表均保留、无 CTE 伪表
+    table_edges = extract_table_lineage(sql, dialect="hive")
+    assert {e.source for e in table_edges} == {"ods.a", "ods.b"}
+    assert all(e.target == "dws.t" for e in table_edges)
+
+
+def test_cte_union_positional_fallback() -> None:
+    """UNION 分支列名不同时按位置回退（输出列名取自首分支）。
+
+    ``WITH x AS (SELECT id, v FROM ods.a UNION ALL SELECT uid, w FROM ods.b)``
+    的 ``x.id`` 位置对应第二分支 ``uid``、``x.v`` 对应 ``w``。
+    """
+    sql = (
+        "WITH x AS (SELECT id, v FROM ods.a UNION ALL SELECT uid, w FROM ods.b) "
+        "INSERT INTO dws.t SELECT id, v FROM x"
+    )
+    field_edges = extract_field_lineage(sql, dialect="hive")
+    assert {
+        ("ods.a", "id", "id"),
+        ("ods.b", "uid", "id"),
+        ("ods.a", "v", "v"),
+        ("ods.b", "w", "v"),
+    } == {(e.source_table, e.source_column, e.target_column) for e in field_edges}
+
+
+def test_derived_union_positional_fallback() -> None:
+    """派生表 UNION 分支列名不同同样按位置回退（与 CTE 分支一致）。"""
+    sql = (
+        "INSERT INTO dws.t SELECT u.x, u.y FROM "
+        "(SELECT a.id AS x, a.v AS y FROM ods.a "
+        "UNION ALL SELECT b.uid, b.w FROM ods.b) u"
+    )
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    assert {
+        ("ods.a", "id", "x"),
+        ("ods.b", "uid", "x"),
+        ("ods.a", "v", "y"),
+        ("ods.b", "w", "y"),
+    } == {(e.source_table, e.source_column, e.target_column) for e in field_edges}

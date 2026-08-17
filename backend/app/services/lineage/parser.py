@@ -427,6 +427,45 @@ def _unnest_outputs_column(unnest: exp.Unnest, col_name: str) -> bool:
     return alias.name == col_name
 
 
+def _resolve_setop_column(
+    expr: exp.SetOperation,
+    col_name: str,
+    cte_map: dict[str, exp.CTE],
+    dialect: str | None,
+    depth: int,
+) -> list[tuple[str, str]]:
+    """集合运算输出列解析：逐分支找同名投影递归解析，收集所有分支来源。
+
+    分支列名不同时按位置回退——UNION 输出列名取自首分支，
+    ``SELECT id FROM (SELECT id FROM a UNION SELECT uid FROM b) u`` 的 ``u.id``
+    位置对应第二分支的 ``uid``，应同时解析到 ``a.id`` 与 ``b.uid``。
+    """
+    branches = _branch_queries(expr)
+    if not branches:
+        return []
+    ref_idx = -1
+    for i, p in enumerate(getattr(branches[0], "selects", None) or []):
+        if _projection_name(p) == col_name:
+            ref_idx = i
+            break
+    out: list[tuple[str, str]] = []
+    for branch in branches:
+        branch_scope = _try_build_scope(branch)
+        if branch_scope is None:
+            continue
+        projs = getattr(branch, "selects", None) or []
+        target: exp.Expression | None = None
+        for p in projs:
+            if _projection_name(p) == col_name:
+                target = p
+                break
+        if target is None and 0 <= ref_idx < len(projs):
+            target = projs[ref_idx]
+        if target is not None:
+            out.extend(_resolve_projection(branch_scope, target, cte_map, dialect, depth + 1))
+    return out
+
+
 def _resolve_projection(
     scope: Any,
     projection: exp.Expression,
@@ -507,8 +546,13 @@ def _resolve_column(
         name = _norm_table(src)
         cte = cte_map.get(src.name)
         if cte is not None:
-            # 进入 CTE 定义：找同名投影并递归解析
+            # 进入 CTE 定义：找同名投影并递归解析。
+            # CTE 定义为集合运算（``WITH x AS (SELECT ... UNION ...)``）时，Union
+            # scope 不聚合分支 sources，需逐分支找含该列的投影递归解析；UNION 合并列
+            # 同时来自多个分支（``a.id AS x`` / ``b.uid AS x``），收集所有分支来源。
             cte_select = cte.this
+            if isinstance(cte_select, exp.SetOperation):
+                return _resolve_setop_column(cte_select, col.name, cte_map, dialect, depth + 1)
             inner = build_scope(cte_select)
             if inner is None:
                 return []
@@ -528,18 +572,7 @@ def _resolve_column(
             # 集合运算子查询（``SELECT x FROM (... UNION ...) u``）：Union scope
             # 不聚合分支 sources，需逐分支找含该列的投影递归解析。UNION 合并列同时
             # 来自多个分支（``a.id AS x`` / ``b.uid AS x``），收集所有分支的来源。
-            out: list[tuple[str, str]] = []
-            for branch in _branch_queries(src.expression):
-                branch_scope = _try_build_scope(branch)
-                if branch_scope is None:
-                    continue
-                for p in getattr(branch, "selects", None) or []:
-                    if _projection_name(p) == col.name:
-                        out.extend(
-                            _resolve_projection(branch_scope, p, cte_map, dialect, depth + 1)
-                        )
-                        break
-            return out
+            return _resolve_setop_column(src.expression, col.name, cte_map, dialect, depth + 1)
         for p in getattr(src.expression, "selects", []):
             if _projection_name(p) == col.name:
                 return _resolve_projection(src, p, cte_map, dialect, depth + 1)
