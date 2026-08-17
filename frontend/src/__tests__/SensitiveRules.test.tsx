@@ -15,12 +15,18 @@ vi.mock("../api", () => ({
   validateSensitiveRegex: vi.fn(),
   testSensitiveRule: vi.fn(),
   classificationRescan: vi.fn(),
+  batchSetSensitiveRuleStatus: vi.fn(),
+  batchSetSensitiveRuleConfidence: vi.fn(),
+  listDataSources: vi.fn(),
+  fetchAssetTables: vi.fn(),
+  fetchAssetEntityDetail: vi.fn(),
 }));
 
 import {
   listSensitiveRules, listSensitiveRuleCategories, createSensitiveRule,
   updateSensitiveRule, setSensitiveRuleStatus,
-  validateSensitiveRegex, testSensitiveRule,
+  validateSensitiveRegex, testSensitiveRule, classificationRescan,
+  listDataSources, fetchAssetTables, fetchAssetEntityDetail,
 } from "../api";
 const mockedList = vi.mocked(listSensitiveRules);
 const mockedCats = vi.mocked(listSensitiveRuleCategories);
@@ -65,6 +71,9 @@ beforeEach(() => {
   mockedList.mockResolvedValue(RULES);
   mockedCats.mockResolvedValue(CATS);
   mockedRegex.mockResolvedValue({ valid: true, error: null });
+  vi.mocked(listDataSources).mockResolvedValue({
+    items: [], total: 0, page: 1, page_size: 20,
+  });
 });
 
 function renderPage() {
@@ -75,6 +84,17 @@ function renderPage() {
       </MemoryRouter>
     </AntApp>,
   );
+}
+
+// antd Select 可见选项（role=option 会匹配到隐藏无障碍 listbox，必须点 .ant-select-item-option-content）
+async function pickVisibleOption(text: string) {
+  const el = await waitFor(() => {
+    const opts = Array.from(document.querySelectorAll<HTMLElement>(".ant-select-item-option-content"));
+    const found = opts.find((e) => e.textContent?.trim() === text);
+    expect(found).toBeTruthy();
+    return found as HTMLElement;
+  });
+  fireEvent.click(el);
 }
 
 describe("SensitiveRules 配置台", () => {
@@ -182,7 +202,14 @@ describe("SensitiveRules 配置台", () => {
     expect(builtinDanger.length).toBe(0);
   });
 
-  it("规则测试台：输入字段名识别出 PII 并展示命中明细", async () => {
+  it("规则测试台：选择表→字段联动识别出 PII 并展示命中明细", async () => {
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [{ id: 1, entity_name: "ods_user", source_name: "MySQL主库" }],
+      total: 1,
+    } as never);
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      schema_summary: [{ name: "mobile", comment: "客户手机号" }],
+    } as never);
     mockedTest.mockResolvedValue({
       sensitivity_level: "PII",
       hits: [
@@ -196,25 +223,162 @@ describe("SensitiveRules 配置台", () => {
     await screen.findByText("身份证号规则");
     fireEvent.click(screen.getByRole("button", { name: /规则测试台/ }));
     await screen.findByText("运行识别");
-    fireEvent.change(screen.getByPlaceholderText("如 mobile / 手机号"), { target: { value: "mobile" } });
-    fireEvent.change(screen.getByPlaceholderText("如 13812345678"), { target: { value: "13812345678" } });
+    // 表/视图下拉：选表 → 触发字段加载
+    const modal = screen.getByRole("dialog");
+    const combos = within(modal).getAllByRole("combobox");
+    fireEvent.mouseDown(combos[0]);
+    await pickVisibleOption("ods_user（MySQL主库）");
+    await waitFor(() => expect(fetchAssetEntityDetail).toHaveBeenCalledWith(1));
+    // 等字段 Select 变为可用再点开（React 状态刷新时序）
+    await waitFor(() => {
+      expect(within(modal).getAllByRole("combobox")[1]).not.toBeDisabled();
+    });
+    fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
+    await pickVisibleOption("mobile（客户手机号）");
+    // 取值样本
+    fireEvent.change(within(modal).getByPlaceholderText("如 13812345678"), { target: { value: "13812345678" } });
     fireEvent.click(screen.getByRole("button", { name: /运行识别/ }));
     await screen.findByText("PII（个人可识别）");
     expect(screen.getByText("命中规则 phone")).toBeInTheDocument();
     expect(screen.getByText("字段名+样本命中")).toBeInTheDocument();
     expect(mockedTest).toHaveBeenCalledWith(
-      expect.objectContaining({ column_name: "mobile", sample_value: "13812345678" }),
+      expect.objectContaining({ entity_name: "ods_user", column_name: "mobile", sample_value: "13812345678" }),
     );
   });
 
   it("测试台未命中时显示内部数据", async () => {
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [{ id: 1, entity_name: "ods_user", source_name: "MySQL主库" }],
+      total: 1,
+    } as never);
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      schema_summary: [{ name: "amount", comment: null }],
+    } as never);
     mockedTest.mockResolvedValue({ sensitivity_level: "INTERNAL", hits: [] });
     renderPage();
     await screen.findByText("身份证号规则");
     fireEvent.click(screen.getByRole("button", { name: /规则测试台/ }));
     await screen.findByText("运行识别");
-    fireEvent.change(screen.getByPlaceholderText("如 mobile / 手机号"), { target: { value: "amount" } });
+    const modal = screen.getByRole("dialog");
+    const combos = within(modal).getAllByRole("combobox");
+    fireEvent.mouseDown(combos[0]);
+    await pickVisibleOption("ods_user（MySQL主库）");
+    await waitFor(() => expect(fetchAssetEntityDetail).toHaveBeenCalledWith(1));
+    await waitFor(() => {
+      expect(within(modal).getAllByRole("combobox")[1]).not.toBeDisabled();
+    });
+    fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
+    await pickVisibleOption("amount");
     fireEvent.click(screen.getByRole("button", { name: /运行识别/ }));
     await screen.findByText("内部");
+    expect(mockedTest).toHaveBeenCalledWith(
+      expect.objectContaining({ entity_name: "ods_user", column_name: "amount" }),
+    );
+  });
+
+  it("规则搜索：按规则名/标识/类别/正则过滤", async () => {
+    renderPage();
+    await screen.findByText("身份证号规则");
+    // 全部 4 条规则可见
+    expect(screen.getByText("诊所规则")).toBeInTheDocument();
+    // 搜索「诊所」→ 只留 1 条
+    fireEvent.change(screen.getByPlaceholderText("搜索规则名 / 标识 / 类别 / 正则"), {
+      target: { value: "诊所" },
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("身份证号规则")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("诊所规则")).toBeInTheDocument();
+    // 按标识搜 phone（匹配规则名 phone 的标识列）
+    fireEvent.change(screen.getByPlaceholderText("搜索规则名 / 标识 / 类别 / 正则"), {
+      target: { value: "phone" },
+    });
+    await waitFor(() => {
+      expect(screen.getByText("手机号规则")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("诊所规则")).not.toBeInTheDocument();
+  });
+
+  it("批量停用：勾选多行 → 调用 batchSetSensitiveRuleStatus", async () => {
+    const mockedBatchStatus = vi.mocked(
+      (await import("../api")).batchSetSensitiveRuleStatus,
+    );
+    mockedBatchStatus.mockResolvedValue({ action: "deactivate", succeeded: ["phone", "clinic"], failed: [] });
+    renderPage();
+    await screen.findByText("身份证号规则");
+    // 勾选 phone 与 clinic 两行
+    const rows = screen.getAllByRole("row");
+    const phoneRow = rows.find((r) => within(r).queryByText("手机号规则"));
+    const clinicRow = rows.find((r) => within(r).queryByText("诊所规则"));
+    fireEvent.click(within(phoneRow!).getByRole("checkbox"));
+    fireEvent.click(within(clinicRow!).getByRole("checkbox"));
+    await screen.findByText("已选 2 条");
+    fireEvent.click(screen.getByRole("button", { name: /批量停用/ }));
+    await waitFor(() => {
+      expect(mockedBatchStatus).toHaveBeenCalledWith(["phone", "clinic"], "deactivate");
+    });
+  });
+
+  it("批量启用：勾选停用行 → 调用 batchSetSensitiveRuleStatus(activate)", async () => {
+    const mockedBatchStatus = vi.mocked(
+      (await import("../api")).batchSetSensitiveRuleStatus,
+    );
+    mockedBatchStatus.mockResolvedValue({ action: "activate", succeeded: ["password"], failed: [] });
+    renderPage();
+    await screen.findByText("身份证号规则");
+    const rows = screen.getAllByRole("row");
+    const pwdRow = rows.find((r) => within(r).queryByText("密码/密钥规则"));
+    fireEvent.click(within(pwdRow!).getByRole("checkbox"));
+    await screen.findByText("已选 1 条");
+    fireEvent.click(screen.getByRole("button", { name: /批量启用/ }));
+    await waitFor(() => {
+      expect(mockedBatchStatus).toHaveBeenCalledWith(["password"], "activate");
+    });
+  });
+
+  it("批量置信度：弹窗设置 → 调用 batchSetSensitiveRuleConfidence", async () => {
+    const mockedBatchConf = vi.mocked(
+      (await import("../api")).batchSetSensitiveRuleConfidence,
+    );
+    mockedBatchConf.mockResolvedValue({ confidence: 0.85, succeeded: ["phone"], failed: [] });
+    renderPage();
+    await screen.findByText("身份证号规则");
+    const rows = screen.getAllByRole("row");
+    const phoneRow = rows.find((r) => within(r).queryByText("手机号规则"));
+    fireEvent.click(within(phoneRow!).getByRole("checkbox"));
+    await screen.findByText("已选 1 条");
+    fireEvent.click(screen.getByRole("button", { name: /批量置信度/ }));
+    await screen.findByText("批量设置置信度（1 条）");
+    fireEvent.click(screen.getByRole("button", { name: /应\s*用/ }));
+    await waitFor(() => {
+      expect(mockedBatchConf).toHaveBeenCalledWith(["phone"], 0.85);
+    });
+  });
+
+  it("按新规则重扫：数据源多选 → 调用 classificationRescan(source_ids)", async () => {
+    const mockedRescan = vi.mocked(classificationRescan);
+    vi.mocked(listDataSources).mockResolvedValue({
+      items: [
+        { source_id: "ds1", name: "MySQL主库", source_type: "mysql" },
+        { source_id: "ds2", name: "PG仓", source_type: "postgres" },
+      ],
+      total: 2,
+    } as never);
+    mockedRescan.mockResolvedValue({ scanned: 10, changed: 2, pii_found: 3, degraded: 0 });
+    renderPage();
+    await screen.findByText("身份证号规则");
+    fireEvent.click(screen.getByRole("button", { name: /按新规则重扫/ }));
+    await screen.findByText("数据源（可多选，留空重扫全部）");
+    const modal = screen.getByRole("dialog");
+    fireEvent.mouseDown(within(modal).getAllByRole("combobox")[0]);
+    await pickVisibleOption("MySQL主库（mysql）");
+    await pickVisibleOption("PG仓（postgres）");
+    fireEvent.click(screen.getByRole("button", { name: /开始重扫/ }));
+    await waitFor(() => {
+      expect(mockedRescan).toHaveBeenCalledWith(
+        expect.objectContaining({ source_ids: ["ds1", "ds2"] }),
+      );
+    });
+    await screen.findByText(/扫描 10/);
   });
 });

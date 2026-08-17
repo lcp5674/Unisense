@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   App as AntApp, Button, Card, Col, Form, Input, Modal, Progress,
   Radio, Row, Select, Slider, Space, Table, Tag, Typography,
@@ -6,15 +6,18 @@ import {
 import {
   ApiOutlined, CheckCircleOutlined, DeleteOutlined,
   EditOutlined, ExperimentOutlined, PlusOutlined, ReloadOutlined,
-  SafetyCertificateOutlined, StopOutlined,
+  SafetyCertificateOutlined, SearchOutlined, StopOutlined,
 } from "@ant-design/icons";
 import {
   createSensitiveRule, deleteSensitiveRule, listSensitiveRuleCategories,
   listSensitiveRules, setSensitiveRuleStatus, testSensitiveRule,
   updateSensitiveRule, validateSensitiveRegex, classificationRescan,
+  batchSetSensitiveRuleStatus, batchSetSensitiveRuleConfidence,
+  listDataSources, fetchAssetTables, fetchAssetEntityDetail,
 } from "../api";
 import type {
   SensitiveRuleCategory, SensitiveRuleItem, SensitiveRuleTestResponse,
+  DataSource,
 } from "../types";
 import { usePermission } from "../hooks/usePermission";
 
@@ -72,6 +75,19 @@ export function SensitiveRules() {
   const [rescanLoading, setRescanLoading] = useState(false);
   const [rescanResult, setRescanResult] = useState<Record<string, unknown> | null>(null);
   const [rescanForm] = Form.useForm();
+  const [dataSources, setDataSources] = useState<DataSource[]>([]);
+
+  // 规则搜索 + 批量选择
+  const [search, setSearch] = useState("");
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchConfOpen, setBatchConfOpen] = useState(false);
+  const [batchConfValue, setBatchConfValue] = useState(0.85);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+
+  // 测试台：表/字段联动下拉
+  const [testTables, setTestTables] = useState<{ value: number; label: string }[]>([]);
+  const [testColumns, setTestColumns] = useState<{ name: string; comment?: string | null }[]>([]);
+  const [testLoadingTables, setTestLoadingTables] = useState(false);
 
   const loadRules = useCallback(() => {
     setLoading(true);
@@ -86,7 +102,23 @@ export function SensitiveRules() {
     listSensitiveRuleCategories()
       .then(setCategories)
       .catch(() => {});
+    listDataSources({ page_size: 200 })
+      .then((res) => setDataSources(res.items))
+      .catch(() => {});
   }, [loadRules]);
+
+  // 搜索过滤：规则名 / 标识 / 类别标签 / 正则
+  const filteredRules = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return rules;
+    return rules.filter(
+      (r) =>
+        r.label.toLowerCase().includes(q) ||
+        r.rule_id.toLowerCase().includes(q) ||
+        r.category_label.toLowerCase().includes(q) ||
+        r.name_re.toLowerCase().includes(q),
+    );
+  }, [rules, search]);
 
   // 类别选项按 PII / 机密分组
   const piiCategories = useMemo(() => categories.filter((c) => c.pii), [categories]);
@@ -194,8 +226,10 @@ export function SensitiveRules() {
     setTestLoading(true);
     setTestResult(null);
     try {
+      // Select 的 value 是表 id，反查表名传给后端（后端按表名/字段名匹配规则）
+      const table = testTables.find((t) => t.value === values.entity_name);
       const result = await testSensitiveRule({
-        entity_name: values.entity_name || "",
+        entity_name: table ? table.label.split("（")[0] : "",
         column_name: values.column_name,
         sample_value: values.sample_value || null,
         comment: values.comment || null,
@@ -208,6 +242,84 @@ export function SensitiveRules() {
     }
   }
 
+  // ---- 测试台：选表 → 加载字段 ----
+  const openTester = useCallback(() => {
+    setTestResult(null);
+    setTestColumns([]);
+    setTestTables([]);
+    testForm.resetFields();
+    setTestOpen(true);
+    setTestLoadingTables(true);
+    fetchAssetTables({ limit: 200 })
+      .then((res) =>
+        setTestTables(
+          res.items
+            .filter((t) => t.id != null)
+            .map((t) => ({ value: t.id as number, label: `${t.entity_name}（${t.source_name ?? t.source_id}）` })),
+        ),
+      )
+      .catch(() => message.error("加载表清单失败"))
+      .finally(() => setTestLoadingTables(false));
+  }, [message, testForm]);
+
+  async function handleTestTableChange(entityId?: number) {
+    testForm.setFieldValue("column_name", undefined);
+    setTestColumns([]);
+    if (!entityId) return;
+    try {
+      const detail = await fetchAssetEntityDetail(entityId);
+      const cols = Array.isArray(detail.schema_summary) ? detail.schema_summary : [];
+      setTestColumns(cols.map((c) => ({ name: c.name, comment: c.comment ?? null })));
+    } catch {
+      message.error("加载字段列表失败");
+    }
+  }
+
+  // ---- 批量操作 ----
+  async function handleBatchToggle(action: "activate" | "deactivate") {
+    if (selectedRowKeys.length === 0) return;
+    try {
+      const res = await batchSetSensitiveRuleStatus(selectedRowKeys.map(String), action);
+      if (res.failed.length > 0) {
+        message.warning(`已${action === "activate" ? "启用" : "停用"} ${res.succeeded.length} 条，${res.failed.length} 条失败`);
+      } else {
+        message.success(`已批量${action === "activate" ? "启用" : "停用"} ${res.succeeded.length} 条规则`);
+      }
+      setSelectedRowKeys([]);
+      loadRules();
+    } catch (err: any) {
+      message.error(err?.message || "批量操作失败");
+    }
+  }
+
+  function openBatchConfidence() {
+    if (selectedRowKeys.length === 0) return;
+    setBatchConfValue(0.85);
+    setBatchConfOpen(true);
+  }
+
+  async function submitBatchConfidence() {
+    setBatchSubmitting(true);
+    try {
+      const res = await batchSetSensitiveRuleConfidence(
+        selectedRowKeys.map(String),
+        batchConfValue,
+      );
+      if (res.failed.length > 0) {
+        message.warning(`已更新 ${res.succeeded.length} 条，${res.failed.length} 条失败`);
+      } else {
+        message.success(`已批量更新 ${res.succeeded.length} 条规则的置信度`);
+      }
+      setSelectedRowKeys([]);
+      setBatchConfOpen(false);
+      loadRules();
+    } catch (err: any) {
+      message.error(err?.message || "批量操作失败");
+    } finally {
+      setBatchSubmitting(false);
+    }
+  }
+
   // ---- 重扫 ----
   async function handleRescan() {
     const values = await rescanForm.validateFields().catch(() => null);
@@ -216,7 +328,7 @@ export function SensitiveRules() {
     setRescanResult(null);
     try {
       const result = await classificationRescan({
-        source_id: values.source_id || null,
+        source_ids: values.source_ids?.length ? values.source_ids : null,
         limit: 1000,
       }) as Record<string, unknown>;
       setRescanResult(result);
@@ -338,7 +450,7 @@ export function SensitiveRules() {
       }
       extra={
         <Space>
-          <Button icon={<ExperimentOutlined />} onClick={() => { setTestResult(null); testForm.resetFields(); setTestOpen(true); }}>
+          <Button icon={<ExperimentOutlined />} onClick={openTester}>
             规则测试台
           </Button>
           {canRescan && (
@@ -383,14 +495,99 @@ export function SensitiveRules() {
         </Col>
       </Row>
 
+      {/* 搜索 + 批量操作栏 */}
+      <Row gutter={12} style={{ marginBottom: 12 }}>
+        <Col flex="auto">
+          <Input
+            allowClear
+            prefix={<SearchOutlined />}
+            placeholder="搜索规则名 / 标识 / 类别 / 正则"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            style={{ maxWidth: 360 }}
+          />
+        </Col>
+        {canEdit && (
+          <Col>
+            <Space>
+              <Text type="secondary">
+                {selectedRowKeys.length > 0 ? `已选 ${selectedRowKeys.length} 条` : "勾选行可批量操作"}
+              </Text>
+              <Button
+                size="small"
+                icon={<CheckCircleOutlined />}
+                disabled={selectedRowKeys.length === 0}
+                onClick={() => handleBatchToggle("activate")}
+              >
+                批量启用
+              </Button>
+              <Button
+                size="small"
+                icon={<StopOutlined />}
+                disabled={selectedRowKeys.length === 0}
+                onClick={() => handleBatchToggle("deactivate")}
+              >
+                批量停用
+              </Button>
+              <Button
+                size="small"
+                icon={<SafetyCertificateOutlined />}
+                disabled={selectedRowKeys.length === 0}
+                onClick={openBatchConfidence}
+              >
+                批量置信度
+              </Button>
+            </Space>
+          </Col>
+        )}
+      </Row>
+
       <Table
         columns={columns}
-        dataSource={rules}
+        dataSource={filteredRules}
         rowKey="rule_id"
         loading={loading}
         size="small"
+        rowSelection={canEdit ? {
+          selectedRowKeys,
+          onChange: setSelectedRowKeys,
+          preserveSelectedRowKeys: false,
+        } : undefined}
         pagination={{ pageSize: 20, showSizeChanger: false }}
       />
+
+      {/* 批量设置置信度 */}
+      <Modal
+        title={`批量设置置信度（${selectedRowKeys.length} 条）`}
+        open={batchConfOpen}
+        onCancel={() => setBatchConfOpen(false)}
+        onOk={submitBatchConfidence}
+        confirmLoading={batchSubmitting}
+        okText="应用"
+        cancelText="取消"
+        width={440}
+        destroyOnClose
+      >
+        <div style={{ padding: "8px 0 4px" }}>
+          <Space style={{ justifyContent: "space-between" }}>
+            <Text type="secondary">置信度</Text>
+            <Tag color={batchConfValue >= 0.85 ? "green" : batchConfValue >= 0.7 ? "orange" : "default"}>
+              {Math.round(batchConfValue * 100)}%
+            </Tag>
+          </Space>
+          <Slider
+            min={0.5}
+            max={1}
+            step={0.01}
+            value={batchConfValue}
+            onChange={setBatchConfValue}
+            marks={{ 0.5: "50%", 0.7: "70%", 0.85: "85%", 1: "100%" }}
+          />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            批量将所选规则的置信度统一设为该值，规则其余字段保持不变；建议 ≥70% 判定敏感，{`<70%`} 可能标记待复核。
+          </Text>
+        </div>
+      </Modal>
 
       {/* 新增 / 编辑弹窗 */}
       <Modal
@@ -533,13 +730,39 @@ export function SensitiveRules() {
         <Form form={testForm} layout="vertical">
           <Row gutter={12}>
             <Col span={12}>
-              <Form.Item name="entity_name" label="表 / 视图名（可选）">
-                <Input placeholder="如 ods_user" />
+              <Form.Item
+                name="entity_name"
+                label="表 / 视图"
+                rules={[{ required: true, message: "请选择表/视图" }]}
+              >
+                <Select
+                  showSearch
+                  allowClear
+                  placeholder="选择表 / 视图"
+                  loading={testLoadingTables}
+                  options={testTables}
+                  optionFilterProp="label"
+                  onChange={(v?: number) => handleTestTableChange(v)}
+                />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="column_name" label="字段名" rules={[{ required: true, message: "请输入字段名" }]}>
-                <Input placeholder="如 mobile / 手机号" />
+              <Form.Item
+                name="column_name"
+                label="字段名"
+                rules={[{ required: true, message: "请选择字段名" }]}
+              >
+                <Select
+                  showSearch
+                  allowClear
+                  placeholder={testColumns.length === 0 ? "先选表，再选择字段" : "选择字段"}
+                  options={testColumns.map((c) => ({
+                    value: c.name,
+                    label: c.comment ? `${c.name}（${c.comment}）` : c.name,
+                  }))}
+                  optionFilterProp="label"
+                  disabled={testColumns.length === 0}
+                />
               </Form.Item>
             </Col>
           </Row>
@@ -618,8 +841,19 @@ export function SensitiveRules() {
         destroyOnClose
       >
         <Form form={rescanForm} onFinish={handleRescan} layout="vertical">
-          <Form.Item name="source_id" label="数据源（可选）">
-            <Input placeholder="留空重扫全部已采集资产（上限 1000 张）" />
+          <Form.Item name="source_ids" label="数据源（可多选，留空重扫全部）">
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              placeholder="选择数据源，留空重扫全部已采集资产（上限 1000 张）"
+              options={dataSources.map((d) => ({
+                value: d.source_id,
+                label: `${d.name}（${d.source_type ?? "未知类型"}）`,
+              }))}
+              optionFilterProp="label"
+              loading={dataSources.length === 0}
+            />
           </Form.Item>
           <Text type="secondary" style={{ fontSize: 12 }}>
             使用当前生效的规则集（含你刚配置的自定义规则）重新计算敏感级别，仅升不降，并回写字段级 PII 明细。
