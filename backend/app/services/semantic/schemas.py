@@ -532,6 +532,7 @@ class MetricResponse(BaseModel):
     sunset_until: date | None
     emergency_publish: bool = False
     emergency_reason: str | None = None
+    emergency_reviewed_at: datetime | None = None
     gray_tenant_ids: list[int] | None = None
     pending_conflict: bool = False
     pending_conflict_detail: dict[str, Any] | None = None

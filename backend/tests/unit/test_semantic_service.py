@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1944,6 +1944,64 @@ async def test_emergency_publish_pii_non_internal_blocked(monkeypatch):
             role="domain_admin",
         )
     assert exc.value.error_code == "COMPLIANCE_UNREACHABLE_DOWNGRADE"
+
+
+async def test_complete_emergency_review_success():
+    """P1-6: 紧急发布补审——写 emergency_reviewed_at，发布事件。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="PUBLISHED", emergency_publish=True, emergency_reviewed_at=None
+        )
+    )
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", emergency_publish=True)
+    )
+    svc._publish_event = AsyncMock()
+
+    result = await svc.complete_emergency_review("sales_gmv_daily", actor_id=1, role="domain_admin")
+
+    assert result.status == "PUBLISHED"
+    kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert kwargs["emergency_reviewed_at"] is not None
+    svc._publish_event.assert_awaited_once()
+    event_type = svc._publish_event.await_args.args[0]
+    assert event_type == "metric.emergency_reviewed"
+
+
+async def test_complete_emergency_review_forbidden_role():
+    """非管理角色补审 → 拒绝（与紧急发布同角色门禁）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", emergency_publish=True)
+    )
+    with pytest.raises(AuthError) as exc:
+        await svc.complete_emergency_review("sales_gmv_daily", actor_id=1, role="metric_owner")
+    assert exc.value.error_code == "FORBIDDEN"
+
+
+async def test_complete_emergency_review_not_emergency():
+    """非紧急发布指标 → 拒绝补审。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", emergency_publish=False)
+    )
+    with pytest.raises(ConflictError) as exc:
+        await svc.complete_emergency_review("sales_gmv_daily", actor_id=1, role="domain_admin")
+    assert exc.value.error_code == "NOT_EMERGENCY_PUBLISHED"
+
+
+async def test_complete_emergency_review_already_done():
+    """已完成补审 → 拒绝重复补审。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="PUBLISHED", emergency_publish=True, emergency_reviewed_at=datetime.now(UTC)
+        )
+    )
+    with pytest.raises(ConflictError) as exc:
+        await svc.complete_emergency_review("sales_gmv_daily", actor_id=1, role="domain_admin")
+    assert exc.value.error_code == "EMERGENCY_ALREADY_REVIEWED"
 
 
 async def test_has_active_compliance_officer():

@@ -2515,6 +2515,79 @@ class MetricService(BaseService):
         )
         return updated
 
+    async def complete_emergency_review(
+        self,
+        metric_code: str,
+        actor_id: int,
+        role: str,
+    ) -> Metric:
+        """紧急发布补审（FR-022 闭环）：审批人确认紧急发布的指标，写补审时间。
+
+        紧急发布跳过常规 REVIEW，发布后须由管理角色完成补审
+        （``check_emergency_review_overdue`` 每小时巡检超时）。补审只写
+        ``emergency_reviewed_at`` 时间戳，不改变状态/口径——标记"已完成补审"后
+        巡检不再告警超时；``emergency_publish`` 保留为历史标记。
+
+        Args:
+            metric_code: 指标编码。
+            actor_id: 补审人 ID。
+            role: 补审人角色。
+
+        Returns:
+            补审后的指标。
+
+        Raises:
+            AuthError: 非管理角色。
+            NotFoundError: 指标不存在。
+            ConflictError: 非紧急发布 / 已完成补审。
+        """
+        # 角色校验：与紧急发布同角色（平台/域管理员）
+        if role not in ("platform_admin", "domain_admin"):
+            raise AuthError(
+                "紧急发布补审仅 platform_admin / domain_admin 可执行",
+                error_code="FORBIDDEN",
+                ctx={"role": role},
+            )
+
+        metric = await self.get_metric(metric_code)
+        if metric is None:
+            raise NotFoundError(f"指标不存在: {metric_code}")
+        if not metric.emergency_publish:
+            raise ConflictError(
+                "该指标非紧急发布，无需补审",
+                error_code="NOT_EMERGENCY_PUBLISHED",
+            )
+        if metric.emergency_reviewed_at is not None:
+            raise ConflictError(
+                "该指标已完成紧急发布补审",
+                error_code="EMERGENCY_ALREADY_REVIEWED",
+            )
+
+        now = datetime.now(UTC)
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id,
+            metric.row_version,
+            emergency_reviewed_at=now,
+        )
+        await self._cache.invalidate(metric_code)
+
+        await self._publish_event(
+            "metric.emergency_reviewed",
+            {
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                "emergency_reason": metric.emergency_reason,
+                "emergency_reviewed_at": now.isoformat(),
+            },
+            actor_id=str(actor_id),
+        )
+        logger.info(
+            "metric_emergency_reviewed",
+            metric_code=metric_code,
+            actor_id=actor_id,
+        )
+        return updated
+
     async def delete_metric(self, metric_code: str, actor_id: int) -> Metric:
         """软删除指标（仅 DRAFT 状态）。
 

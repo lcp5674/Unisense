@@ -62,6 +62,8 @@ export interface MetricResponse {
   sunset_until: string | null;
   emergency_publish: boolean;
   emergency_reason: string | null;
+  /** 紧急发布补审时间（null=未补审；紧急发布须 24h 内补审，FR-022 闭环） */
+  emergency_reviewed_at: string | null;
   gray_tenant_ids: number[] | null;
   pending_conflict: boolean;
   pending_conflict_detail: Record<string, unknown> | null;

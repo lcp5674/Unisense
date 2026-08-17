@@ -857,6 +857,13 @@ export async function emergencyPublishMetric(
   );
 }
 
+export async function completeEmergencyReview(code: string): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/emergency-review`,
+    { method: "POST" },
+  );
+}
+
 export async function promoteMetric(code: string): Promise<MetricResponse> {
   return request<MetricResponse>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/promote`,

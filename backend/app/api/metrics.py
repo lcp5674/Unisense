@@ -1155,9 +1155,51 @@ async def emergency_publish_metric(
     )
 
 
-# ----------------------------------------------------------------
-# 健康度评分
-# ----------------------------------------------------------------
+@router.post(
+    "/{metric_code}/emergency-review",
+    response_model=ApiResponse[MetricResponse],
+    summary="紧急发布补审（FR-022 闭环：写 emergency_reviewed_at，巡检不再告警超时）",
+    dependencies=[
+        Depends(require_roles("platform_admin", "domain_admin")),
+        Depends(guard_against_injection),
+    ],
+)
+async def complete_emergency_review(
+    metric_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """管理角色完成紧急发布补审：标记补审时间，不改变状态/口径。
+
+    紧急发布跳过常规 REVIEW，发布后 24h 内须补审（check_emergency_review_overdue
+    每小时巡检）；本端点把 ``emergency_reviewed_at`` 落库，闭环补审链路。
+    """
+    service = MetricService(db)
+    metric = await service.complete_emergency_review(
+        metric_code,
+        actor_id=user.id,
+        role=user.role,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="EMERGENCY_REVIEW",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={
+            "emergency_reason": metric.emergency_reason,
+            "skipped_review": True,
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
 
 
 @router.get(

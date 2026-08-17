@@ -152,6 +152,7 @@ const metric: MetricResponse = {
   sunset_until: null,
   emergency_publish: false,
   emergency_reason: null,
+  emergency_reviewed_at: null,
   gray_tenant_ids: null,
   pending_conflict: false,
   pending_conflict_detail: null,

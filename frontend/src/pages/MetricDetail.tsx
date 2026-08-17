@@ -33,6 +33,7 @@ import {
   ArrowRightOutlined,
   EditOutlined,
   RobotOutlined,
+  CheckCircleOutlined,
 } from "@ant-design/icons";
 import { usePermission } from "../hooks/usePermission";
 import {
@@ -42,6 +43,7 @@ import {
   recoverSourceDropped,
   confirmDeprecateDropped,
   emergencyPublishMetric,
+  completeEmergencyReview,
   fetchArchivedMetric,
   fetchCurrentUser,
   fetchRelatedMetrics,
@@ -1382,6 +1384,29 @@ export function MetricDetail() {
       {(metric.status === "DRAFT" || metric.status === "REVIEW") && canEmergency && (
         <Button danger icon={<ThunderboltOutlined />} loading={busy} onClick={() => setEmergencyOpen(true)}>
           紧急发布
+        </Button>
+      )}
+      {/* 紧急发布补审（FR-022 闭环）：紧急发布跳过 REVIEW，须由管理角色 24h 内补审；
+          补审后 emergency_reviewed_at 落库，每日巡检不再告警超时 */}
+      {metric.emergency_publish && !metric.emergency_reviewed_at && canEmergency && (
+        <Button
+          type="primary"
+          icon={<CheckCircleOutlined />}
+          loading={busy}
+          onClick={() =>
+            Modal.confirm({
+              title: "完成紧急发布补审",
+              content: `确认已完成对「${metric.name}」的紧急发布补审？补审后巡检将不再对该指标告警超时。`,
+              okText: "确认补审",
+              cancelText: "取消",
+              onOk: () =>
+                runAction(() => completeEmergencyReview(metric.metric_code), "补审").then(() => {
+                  message.success("紧急发布补审完成");
+                }),
+            })
+          }
+        >
+          紧急补审
         </Button>
       )}
       {/* 废弃仅对 PUBLISHED：后端状态机 EXPERIMENTAL 无 →DEPRECATED 跃迁（只有 promote 转正式），
