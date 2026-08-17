@@ -126,6 +126,13 @@ export function VersionHistory({
                 将于 {formatCnTime(r.pending_deadline)} 超时自动接受
               </span>
             )}
+            {s === "PENDING_CONFIRMATION" &&
+              typeof r.consumer_count === "number" &&
+              r.consumer_count > 0 && (
+                <span className="muted" style={{ fontSize: 11, display: "block", marginTop: 2 }}>
+                  已确认 {r.confirmed_count ?? 0}/{r.consumer_count} 个消费方
+                </span>
+              )}
           </span>
         ),
     },

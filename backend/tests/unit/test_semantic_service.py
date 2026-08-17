@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1353,6 +1354,73 @@ async def test_get_versions():
     repo.list_versions = AsyncMock(return_value=[MagicMock(version=1)])
     versions = await svc.get_versions("sales_gmv_daily")
     assert len(versions) == 1
+
+
+async def test_get_version_responses_injects_confirm_progress():
+    """版本历史响应注入多消费方确认进度（已确认 X/N）——修复前无进度字段，
+    一方确认后另一方未确认、版本迟迟不转正时无法判断还差谁。"""
+    from app.models.metric_version import MetricVersion
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    pending = MetricVersion(
+        id=1,
+        metric_id=5,
+        version=2,
+        status="PENDING_CONFIRMATION",
+        change_type="breaking",
+        definition_json={"expression": "SUM(x)"},
+        change_reason="口径调整",
+        created_by=9,
+        created_at=datetime(2026, 8, 1, 10, 0, 0),
+    )
+    published = MetricVersion(
+        id=2,
+        metric_id=5,
+        version=1,
+        status="PUBLISHED",
+        change_type="initial",
+        definition_json={"expression": "SUM(x)"},
+        change_reason="初版",
+        created_by=9,
+        created_at=datetime(2026, 7, 1, 10, 0, 0),
+    )
+    repo.list_versions = AsyncMock(return_value=[pending, published])
+    repo.count_confirmations_by_versions = AsyncMock(
+        return_value={2: (1, 2)}  # 版本 2：1/2 消费方已确认
+    )
+    responses = await svc.get_version_responses("sales_gmv_daily")
+    assert len(responses) == 2
+    # PENDING 版本带进度；已发布版本不带
+    by_version = {r.version: r for r in responses}
+    assert by_version[2].confirmed_count == 1
+    assert by_version[2].consumer_count == 2
+    assert by_version[1].confirmed_count is None
+    assert by_version[1].consumer_count is None
+
+
+async def test_get_version_responses_no_pending_skips_progress_query():
+    """无 PENDING 版本时不做进度查询（避免无谓 DB 调用）。"""
+    from app.models.metric_version import MetricVersion
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    published = MetricVersion(
+        id=2,
+        metric_id=5,
+        version=1,
+        status="PUBLISHED",
+        change_type="initial",
+        definition_json={"expression": "SUM(x)"},
+        change_reason="初版",
+        created_by=9,
+        created_at=datetime(2026, 7, 1, 10, 0, 0),
+    )
+    repo.list_versions = AsyncMock(return_value=[published])
+    repo.count_confirmations_by_versions = AsyncMock()
+    responses = await svc.get_version_responses("sales_gmv_daily")
+    assert len(responses) == 1
+    repo.count_confirmations_by_versions.assert_not_called()
 
 
 async def test_confirm_version_success():

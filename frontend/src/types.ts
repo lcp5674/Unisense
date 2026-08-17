@@ -207,6 +207,9 @@ export interface MetricVersionResponse {
   created_at: string;
   /** PENDING_CONFIRMATION 版本的确认截止时间（14 天 + 延期），超时自动接受 */
   pending_deadline?: string | null;
+  /** 多消费方确认进度：已确认 X / 共 N 个消费方（仅待确认版本填充） */
+  confirmed_count?: number | null;
+  consumer_count?: number | null;
 }
 
 export interface MetricCreateRequest {

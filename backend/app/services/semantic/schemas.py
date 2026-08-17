@@ -558,6 +558,9 @@ class MetricVersionResponse(BaseModel):
     created_at: datetime
     # PENDING_CONFIRMATION 版本的确认截止时间（14 天 + 延期），前端展示超时语义
     pending_deadline: datetime | None = None
+    # 多消费方确认进度：已确认 X / 共 N 个消费方（仅待确认版本填充，其余为 None）
+    confirmed_count: int | None = None
+    consumer_count: int | None = None
 
     model_config = {"from_attributes": True}
 

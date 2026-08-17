@@ -1054,9 +1054,7 @@ async def get_metric_versions(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[list[MetricVersionResponse]]:
     service = MetricService(db)
-    versions = await service.get_versions(metric_code)
-    response = [MetricVersionResponse.model_validate(v) for v in versions]
-    return ok(data=response, trace_id=trace_id)
+    return ok(data=await service.get_version_responses(metric_code), trace_id=trace_id)
 
 
 @router.post(

@@ -439,6 +439,56 @@ class MetricRepository:
         )
         return list(result.scalars().all())
 
+    async def count_confirmations_by_versions(
+        self, metric_id: int, versions: list[int]
+    ) -> dict[int, tuple[int, int]]:
+        """按版本号批量统计确认进度（一次 IN 查询，避免 N+1）。
+
+        Returns:
+            ``{version: (confirmed_count, total_count)}``。
+            total_count 含已确认（CONFIRMED）/已超时接受（TIMEOUT_ACCEPTED）
+            的记录；confirmed_count 仅计明确确认（CONFIRMED）——用于版本历史
+            展示「已确认 X/N」进度。
+        """
+        if not versions:
+            return {}
+        confirmed = (
+            select(
+                PendingVersionConfirmation.version,
+                func.count().label("n"),
+            )
+            .where(
+                PendingVersionConfirmation.metric_id == metric_id,
+                PendingVersionConfirmation.version.in_(versions),
+                PendingVersionConfirmation.status == "CONFIRMED",
+                PendingVersionConfirmation.deleted_at.is_(None),
+            )
+            .group_by(PendingVersionConfirmation.version)
+        )
+        total = (
+            select(
+                PendingVersionConfirmation.version,
+                func.count().label("n"),
+            )
+            .where(
+                PendingVersionConfirmation.metric_id == metric_id,
+                PendingVersionConfirmation.version.in_(versions),
+                PendingVersionConfirmation.deleted_at.is_(None),
+            )
+            .group_by(PendingVersionConfirmation.version)
+        )
+        confirmed_map = {
+            row[0]: int(row[1]) for row in (await self._db.execute(confirmed)).all()
+        }
+        total_map = {
+            row[0]: int(row[1]) for row in (await self._db.execute(total)).all()
+        }
+        return {
+            v: (confirmed_map.get(v, 0), total_map.get(v, 0))
+            for v in versions
+            if total_map.get(v, 0) > 0
+        }
+
     async def update_confirmation_status(
         self,
         confirmation_id: int,

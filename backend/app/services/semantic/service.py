@@ -41,6 +41,7 @@ from app.services.semantic.schemas import (
     MetricResponse,
     MetricSubmitRequest,
     MetricUpdateRequest,
+    MetricVersionResponse,
 )
 from app.services.semantic.state_machine import MetricStateMachine
 
@@ -2592,6 +2593,37 @@ class MetricService(BaseService):
         # 并行加载 versions 时若裸 404 会覆盖友好引导（跨服务一致性）。
         metric = await self._get_metric_for_compare(metric_code)
         return await self._repo.list_versions(metric.id)
+
+    async def get_version_responses(self, metric_code: str) -> list[MetricVersionResponse]:
+        """获取版本列表（含多消费方确认进度，供版本历史 Tab 展示）。
+
+        与 ``get_versions`` 的区别：PENDING_CONFIRMATION 版本附带确认进度
+        （confirmed_count/consumer_count），使发起人/消费方看到「已确认 X/N」——
+        否则一方确认后另一方未确认、版本迟迟不转正时，用户无法判断还差谁。
+
+        Returns:
+            版本响应列表（按版本号降序，与 get_versions 一致）。
+        """
+        versions = await self.get_versions(metric_code)
+        if not versions:
+            return []
+        pending = [v for v in versions if v.status == "PENDING_CONFIRMATION"]
+        progress: dict[int, tuple[int, int]] = {}
+        if pending:
+            progress = await self._repo.count_confirmations_by_versions(
+                pending[0].metric_id,
+                [v.version for v in pending],
+            )
+        responses: list[MetricVersionResponse] = []
+        for v in versions:
+            resp = MetricVersionResponse.model_validate(v)
+            if v.status == "PENDING_CONFIRMATION":
+                confirmed, total = progress.get(v.version, (0, 0))
+                if total > 0:
+                    resp.confirmed_count = confirmed
+                    resp.consumer_count = total
+            responses.append(resp)
+        return responses
 
     # ---- PENDING_VERSION 版本确认期（FR-007/FR-008）----
 

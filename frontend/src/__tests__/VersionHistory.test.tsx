@@ -90,4 +90,20 @@ describe("VersionHistory 确认/拒绝权限门禁", () => {
     // 版本无 deadline → 无超时提示
     expect(screen.queryByText(/超时自动接受/)).toBeNull();
   });
+
+  it("PENDING 版本展示多消费方确认进度（已确认 X/N）", async () => {
+    renderHistory(true, "PENDING_CONFIRMATION", {
+      confirmed_count: 1,
+      consumer_count: 2,
+    });
+    await screen.findByText("v2");
+    // fixture 带进度 → 状态列展示「已确认 1/2 个消费方」
+    expect(screen.getByText(/已确认 1\/2 个消费方/)).toBeTruthy();
+  });
+
+  it("PENDING 版本无进度数据（consumer_count 空）：不显示进度", async () => {
+    renderHistory(true, "PENDING_CONFIRMATION", {});
+    await screen.findByText("v2");
+    expect(screen.queryByText(/个消费方/)).toBeNull();
+  });
 });
