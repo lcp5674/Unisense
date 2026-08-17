@@ -28,6 +28,7 @@ vi.mock("../api", () => ({
   recoverSourceDropped: vi.fn(),
   confirmDeprecateDropped: vi.fn(),
   emergencyPublishMetric: vi.fn(),
+  completeEmergencyReview: vi.fn(),
   piiReview: vi.fn(),
   promoteMetric: vi.fn(),
   rollbackMetric: vi.fn(),
@@ -84,6 +85,7 @@ import {
   inferMetricDescription,
   submitReview,
   emergencyPublishMetric,
+  completeEmergencyReview,
   recoverSourceDropped,
   confirmDeprecateDropped,
   promoteMetric,
@@ -752,6 +754,60 @@ describe("MetricDetail 按钮级权限过滤", () => {
     fireEvent.click(screen.getByText("确认紧急发布"));
     await waitFor(() => expect(screen.getByText(/至少 10 字/)).toBeInTheDocument());
     expect(emergencySpy).not.toHaveBeenCalled();
+  });
+
+  it("P3-15: 紧急发布未补审时显示补审按钮，确认后调用 completeEmergencyReview", async () => {
+    // 「按钮级权限过滤」为独立 describe，隔离运行时需自足设置 load() 依赖（防 mock 泄漏缺失）
+    mockedListVersions.mockResolvedValue([]);
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "u",
+      display_name: "U",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    const reviewSpy = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(completeEmergencyReview).mockImplementation(reviewSpy);
+    mockedGetMetric.mockResolvedValue({ ...metric, emergency_publish: true, emergency_reviewed_at: null });
+    renderWithPerms(["metric:emergency-publish", "metric:approve"]);
+    await screen.findByText("紧急补审");
+    fireEvent.click(screen.getByText("紧急补审"));
+    await screen.findByText("确认补审");
+    fireEvent.click(screen.getByText("确认补审"));
+    await waitFor(() => expect(reviewSpy).toHaveBeenCalledWith("sales_gmv_sum_d"));
+  });
+
+  it("P3-15: 紧急发布已补审（emergency_reviewed_at 有值）时不显示补审按钮", async () => {
+    mockedListVersions.mockResolvedValue([]);
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "u",
+      display_name: "U",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      emergency_publish: true,
+      emergency_reviewed_at: "2026-08-10T00:00:00Z",
+    });
+    renderWithPerms(["metric:emergency-publish", "metric:approve"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText("紧急补审")).not.toBeInTheDocument());
   });
 
   it("REVIEW 状态不显示「废弃」按钮（产品语义：仅已发布/灰度可废弃）", async () => {

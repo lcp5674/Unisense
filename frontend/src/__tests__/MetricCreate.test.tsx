@@ -13,18 +13,23 @@ vi.mock("../api", async () => {
     listDictItems: vi.fn(),
     listCatalogs: vi.fn(),
     batchRegisterMetrics: vi.fn(),
+    batchSubmitMetrics: vi.fn(),
+    listUsers: vi.fn(),
     autoSuggestMetric: vi.fn(),
+    getDomainDefaults: vi.fn(),
     checkConflict: vi.fn(),
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, autoSuggestMetric, checkConflict } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, checkConflict } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
 const mockedDict = vi.mocked(listDictItems);
 const mockedCatalogs = vi.mocked(listCatalogs);
 const mockedBatch = vi.mocked(batchRegisterMetrics);
+const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
+const mockedUsers = vi.mocked(listUsers);
 const mockedSuggest = vi.mocked(autoSuggestMetric);
 const mockedCheckConflict = vi.mocked(checkConflict);
 
@@ -233,6 +238,55 @@ describe("MetricCreate 批量注册指标", () => {
       expect(screen.getByText("sales_gmv_day")).toBeTruthy();
       expect(screen.getByText("sales_order_cnt_day")).toBeTruthy();
     });
+  });
+
+  it("P3-16: 批量注册成功后点「批量提交评审」调用 batchSubmitMetrics（默认域评审组）", async () => {
+    mockedBatch.mockResolvedValue({
+      batch_id: "batch_submit1",
+      candidates: [
+        { metric_code: "sales_gmv_day", status: "DRAFT", validation_errors: null },
+        { metric_code: "sales_order_cnt_day", status: "DRAFT", validation_errors: null },
+      ],
+    });
+    mockedBatchSubmit.mockResolvedValue({
+      results: [
+        { metric_code: "sales_gmv_day", ok: true, message: "" },
+        { metric_code: "sales_order_cnt_day", ok: true, message: "" },
+      ],
+      ok_count: 2,
+      fail_count: 0,
+    });
+    renderPage();
+    const modal = await openBatchModal();
+    await fillBatchForm(modal, "gmv\norder_cnt");
+    fireEvent.click(within(modal).getByText("提交批量注册"));
+    await waitFor(() => expect(screen.getByText("sales_gmv_day")).toBeTruthy());
+    fireEvent.click(within(modal).getByText("批量提交评审"));
+    await waitFor(() => {
+      expect(mockedBatchSubmit).toHaveBeenCalledWith([
+        { metric_code: "sales_gmv_day", change_reason: "批量注册后提交评审", reviewer_type: "domain", reviewer_id: undefined },
+        { metric_code: "sales_order_cnt_day", change_reason: "批量注册后提交评审", reviewer_type: "domain", reviewer_id: undefined },
+      ]);
+    });
+    await waitFor(() => expect(screen.getByText(/批量提交完成：成功 2 \/ 失败 0/)).toBeTruthy());
+  });
+
+  it("P3-16: 指定用户评审未选人时前端拦截，不调用 batchSubmitMetrics", async () => {
+    mockedBatch.mockResolvedValue({
+      batch_id: "batch_submit2",
+      candidates: [{ metric_code: "sales_gmv_day", status: "DRAFT", validation_errors: null }],
+    });
+    mockedUsers.mockResolvedValue([{ id: 7, username: "reviewer", display_name: "评审员" }]);
+    renderPage();
+    const modal = await openBatchModal();
+    await fillBatchForm(modal, "gmv");
+    fireEvent.click(within(modal).getByText("提交批量注册"));
+    await waitFor(() => expect(screen.getByText("sales_gmv_day")).toBeTruthy());
+    // 切换到「指定用户」但未选人 → 提交被前端拦截并提示
+    fireEvent.click(within(modal).getByText("指定用户"));
+    fireEvent.click(within(modal).getByText("批量提交评审"));
+    await waitFor(() => expect(screen.getByText(/请先选择评审用户/)).toBeTruthy());
+    expect(mockedBatchSubmit).not.toHaveBeenCalled();
   });
 
   it("维度列映射以可视化键值对填写并组装为对象", async () => {
