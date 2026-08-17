@@ -300,6 +300,7 @@ describe("AssetMap", () => {
           health_status: "healthy",
           connection_config_present: false,
           schedule_cron: null,
+          schedule_enabled: false,
           collection_mode: "manual",
           enabled: true,
           created_by: 1,
