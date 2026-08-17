@@ -764,7 +764,7 @@ export function MetricCatalog() {
               <Button
                 type="link"
                 size="small"
-                disabled={restoring === r.metric_code}
+                disabled={restoring === r.metric_code || !can("metric:create")}
                 onClick={(e) => {
                   e.stopPropagation();
                   handleRestore(r.metric_code);

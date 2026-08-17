@@ -384,10 +384,10 @@ export function QueryWorkspace() {
             </Form.Item>
 
             <Space>
-              <Button icon={<SafetyCertificateOutlined />} onClick={handleDryRun} loading={busy === "dry"}>
+              <Button icon={<SafetyCertificateOutlined />} onClick={handleDryRun} loading={busy === "dry"} disabled={!canExecute}>
                 语义校验（dry-run）
               </Button>
-              <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleQuery} loading={busy === "query"}>
+              <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleQuery} loading={busy === "query"} disabled={!canExecute}>
                 执行查询
               </Button>
               <Button icon={<DatabaseOutlined />} onClick={handleSnapshots} loading={busy === "snap"}>

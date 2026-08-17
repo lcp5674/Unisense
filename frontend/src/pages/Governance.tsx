@@ -424,7 +424,7 @@ function GrantsTab() {
       width: 150,
       render: (_: unknown, g: GrantResponse) => (
         <Space size={4}>
-          <Button size="small" icon={<TeamOutlined />} onClick={() => openGrantForUser(g.user_id)}>给该用户授权</Button>
+          {can("grant:create") && <Button size="small" icon={<TeamOutlined />} onClick={() => openGrantForUser(g.user_id)}>给该用户授权</Button>}
           {g.status === "ACTIVE" && can("grant:revoke") ? <Button size="small" danger onClick={() => handleRevoke(g)}>回收</Button> : null}
         </Space>
       ),
@@ -445,8 +445,8 @@ function GrantsTab() {
           onChange={(v) => { setStatus(v || ""); setPage(1); }}
           options={[{ value: "ACTIVE", label: "生效" }, { value: "EXPIRED", label: "过期" }, { value: "REVOKED", label: "已回收" }]}
         />
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => { setModalOpen(true); }}>新建授权</Button>
-        <Button icon={<AuditOutlined />} onClick={openBatchForSelection}>批量授权{selectedRowKeys.length ? `（${selectedRowKeys.length}）` : ""}</Button>
+        {can("grant:create") && <Button type="primary" icon={<PlusOutlined />} onClick={() => { setModalOpen(true); }}>新建授权</Button>}
+        {can("grant:create") && <Button icon={<AuditOutlined />} onClick={openBatchForSelection}>批量授权{selectedRowKeys.length ? `（${selectedRowKeys.length}）` : ""}</Button>}
       </Space>
       <Table
         dataSource={items}
@@ -836,7 +836,7 @@ function RolesTab() {
             <Button
               type="primary"
               size="small"
-              disabled={r.protected || !dirty}
+              disabled={r.protected || !dirty || !can("role:edit")}
               loading={savingRole === r.role}
               onClick={() => handleSave(r.role)}
             >
@@ -844,7 +844,7 @@ function RolesTab() {
             </Button>
             <Button
               size="small"
-              disabled={r.protected || (!dirty && r.custom_actions === null && r.ui_custom_actions === null)}
+              disabled={r.protected || (!dirty && r.custom_actions === null && r.ui_custom_actions === null) || !can("role:edit")}
               onClick={() => handleReset(r.role)}
             >
               恢复默认
@@ -877,9 +877,11 @@ function RolesTab() {
         message="细粒度权限管控：按模块/按钮勾选权限点并保存即生效（前端 usePermission 实时读取；后端写接口仍按内置角色强制，二者不互相替代）。platform_admin 为受保护角色（跨域运维直通，不可配置）；可新建自定义角色并为其分配按钮级权限点。"
       />
       <Space style={{ marginBottom: 12 }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-          新建自定义角色
-        </Button>
+        {can("role:create") && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+            新建自定义角色
+          </Button>
+        )}
       </Space>
       <Table
         dataSource={items}

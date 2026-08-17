@@ -1348,6 +1348,7 @@ function GraphTab() {
   const canDeprecate = usePermission().can("catalog:deprecate");
   const canEditDesc = usePermission().can("catalog:edit-description");
   const canEditMetric = usePermission().can("metric:edit");
+  const canQuery = usePermission().can("query:execute");
   const [graphData, setGraphData] = useState<{
     nodes: AssetGraphNode[];
     edges: AssetGraphEdge[];
@@ -1917,6 +1918,7 @@ function GraphTab() {
                     type="primary"
                     size="small"
                     loading={metricQuerying}
+                    disabled={!canQuery}
                     onClick={handleQueryLatest}
                   >
                     查询最新数据

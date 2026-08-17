@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Descriptions, Empty, Space, Spin, Tag, message } from "antd";
+import { Button, Card, Descriptions, Empty, Space, Spin, Tag, Tooltip, message } from "antd";
 import {
   ArrowRightOutlined,
   ArrowUpOutlined,
   ArrowDownOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
+import { usePermission } from "../../hooks/usePermission";
 import {
   fetchRelatedMetrics,
   getMetric,
@@ -134,6 +135,7 @@ interface MetricDetailDrawerProps {
  */
 export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDrawerProps) {
   const navigate = useNavigate();
+  const canLineageWrite = usePermission().can("lineage:write");
   const [metric, setMetric] = useState<MetricResponse | null>(null);
   const [health, setHealth] = useState<MetricHealth | null>(null);
   const [related, setRelated] = useState<RecommendItem[]>([]);
@@ -261,28 +263,36 @@ export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDr
             前往完整详情
           </Button>
           <Space style={{ marginTop: 12, display: "flex", flexWrap: "wrap" }}>
-            <Button
-              icon={<ArrowUpOutlined />}
-              onClick={() => {
-                setManualDirection("upstream");
-                setManualOpen(true);
-              }}
-            >
-              添加上游
-            </Button>
-            <Button
-              icon={<ArrowDownOutlined />}
-              onClick={() => {
-                setManualDirection("downstream");
-                setManualOpen(true);
-              }}
-            >
-              添加下游
-            </Button>
-            <Button
-              icon={<SyncOutlined />}
-              loading={syncing}
-              onClick={async () => {
+            <Tooltip title={canLineageWrite ? undefined : "无 lineage:write 权限，血缘边登记不可用"}>
+              <Button
+                icon={<ArrowUpOutlined />}
+                disabled={!canLineageWrite}
+                onClick={() => {
+                  setManualDirection("upstream");
+                  setManualOpen(true);
+                }}
+              >
+                添加上游
+              </Button>
+            </Tooltip>
+            <Tooltip title={canLineageWrite ? undefined : "无 lineage:write 权限，血缘边登记不可用"}>
+              <Button
+                icon={<ArrowDownOutlined />}
+                disabled={!canLineageWrite}
+                onClick={() => {
+                  setManualDirection("downstream");
+                  setManualOpen(true);
+                }}
+              >
+                添加下游
+              </Button>
+            </Tooltip>
+            <Tooltip title={canLineageWrite ? undefined : "无 lineage:write 权限，同步消费方不可用"}>
+              <Button
+                icon={<SyncOutlined />}
+                loading={syncing}
+                disabled={!canLineageWrite}
+                onClick={async () => {
                 setSyncing(true);
                 try {
                   const res = await syncMetricConsumers(metric.metric_code);
@@ -304,6 +314,7 @@ export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDr
             >
               同步消费方
             </Button>
+            </Tooltip>
           </Space>
           <ManualEdgeModal
             open={manualOpen}

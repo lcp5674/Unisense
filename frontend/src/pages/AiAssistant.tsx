@@ -64,6 +64,8 @@ export function AiAssistant() {
   const navigate = useNavigate();
   // 按钮级权限点：无 ai:nl2sql 时禁用问数入口（后端强制仍兜底）
   const canNl2Sql = usePermission().can("ai:nl2sql");
+  // 执行开关：仅查询执行权限者可将 NL2SQL 结果落库执行
+  const canQueryExecute = usePermission().can("query:execute");
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -130,8 +132,13 @@ export function AiAssistant() {
             />
           </Form.Item>
           <Space style={{ marginBottom: 12 }}>
-            <Form.Item label="执行查询" valuePropName="checked" style={{ marginBottom: 0 }}>
-              <Switch checked={execute} onChange={setExecute} />
+            <Form.Item
+              label="执行查询"
+              valuePropName="checked"
+              style={{ marginBottom: 0 }}
+              extra={canQueryExecute ? undefined : "无 query:execute 权限，仅生成 SQL 不执行"}
+            >
+              <Switch checked={execute} onChange={setExecute} disabled={!canQueryExecute} />
             </Form.Item>
             <Button
               type="primary"
