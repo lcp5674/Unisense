@@ -339,7 +339,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "assetmap:view", "lineage:view", "lineage:write", "lineage:manage-edge",
             "quality:view", "review:view", "review:escalate", "review:close",
             "review:reopen",
-            "query:view", "ai:view", "ai:nl2sql", "dimensions:view",
+            "query:view", "query:execute", "ai:view", "ai:nl2sql", "dimensions:view",
             "dimension:create", "dimension:edit", "dimension:deprecate",
             "dimension:mapping", "dimension:reconcile",
             "glossary:view", "glossary:infer", "glossary:create", "glossary:edit",
