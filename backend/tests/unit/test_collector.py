@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -3884,3 +3884,59 @@ async def test_repo_get_description_coverage_pagination() -> None:
     # 汇总指标不受分页影响（SQL 端聚合，全量口径）
     assert cov["total_tables"] == 2
     assert cov["fields_with_desc"] == 2
+
+
+# ---------- P2-10/12/13 ----------
+
+
+def test_sanitize_conn_error_redacts_credentials():
+    """P2-10: 连接错误脱敏——DSN/URL 内嵌凭据与 password= 值被掩码。"""
+    from app.services.collector.service import _sanitize_conn_error
+
+    raw = "Access denied for user 'root'@'10.0.0.5' (using password: YES) mysql://root:secret123@db.internal:3306/mydb"
+    out = _sanitize_conn_error(raw)
+    assert "secret123" not in out
+    assert "***:***@" in out
+    # 保留主机与错误语义
+    assert "db.internal" in out
+
+    raw2 = "connection failed password=abc123 user=admin; timeout"
+    out2 = _sanitize_conn_error(raw2)
+    assert "abc123" not in out2
+    assert "password=***" in out2
+
+    assert _sanitize_conn_error("") == ""
+    assert _sanitize_conn_error("普通错误") == "普通错误"
+
+
+def test_batch_schedule_cron_validation_rejects_invalid():
+    """P2-12: 非法 cron 表达式在写入口 422 拒绝（防调度静默失效）。"""
+    from pydantic import ValidationError
+
+    from app.services.collector.schemas import BatchScheduleRequest, ScheduleRequest
+
+    with pytest.raises(ValidationError):
+        BatchScheduleRequest(source_ids=["s1"], schedule_cron="not-a-cron")
+    with pytest.raises(ValidationError):
+        ScheduleRequest(cron="99 99 * * *")
+    # 合法 cron 通过
+    ok = BatchScheduleRequest(source_ids=["s1"], schedule_cron="0 3 * * *")
+    assert ok.schedule_cron == "0 3 * * *"
+
+
+async def test_repo_purge_collection_runs_terminal_only():
+    """P2-13: 清理仅删终态（COMPLETED/FAILED）且早于保留期的记录。"""
+    s = MagicMock()
+    result = MagicMock()
+    result.rowcount = 5
+    s.execute = AsyncMock(return_value=result)
+    repo = CollectorRepository(s)
+
+    before = datetime.now(UTC) - timedelta(days=90)
+    purged = await repo.purge_collection_runs(before)
+
+    assert purged == 5
+    # 删除条件包含终态过滤（RUNNING 永不清理）
+    stmt = s.execute.call_args.args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "COMPLETED" in sql and "FAILED" in sql

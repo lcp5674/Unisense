@@ -32,6 +32,7 @@ from app.services.notify.consumers import register_notify_event_consumers
 from app.services.notify.escalation_tasks import check_escalation_retries
 from app.services.quality.tasks import run_quality_checks
 from app.tasks.audit_archive import audit_archive_task
+from app.tasks.collection_run_purge import purge_collection_runs_task
 from app.tasks.notify_purge import notify_purge_task
 from app.tasks.semantic_tasks import (
     check_emergency_review_overdue,
@@ -186,6 +187,7 @@ class WorkerSettings:
         check_escalation_retries,
         audit_archive_task,
         notify_purge_task,
+        purge_collection_runs_task,
         auto_escalate_overdue,
         sync_neo4j_assets_task,
         lineage_scan_task,
@@ -281,6 +283,13 @@ class WorkerSettings:
             name="lineage-scan",
             hour=3,
             minute=30,
+            run_at_startup=False,
+        ),
+        cron(
+            purge_collection_runs_task,
+            name="collection-run-purge",
+            hour=3,
+            minute=0,
             run_at_startup=False,
         ),
     ]

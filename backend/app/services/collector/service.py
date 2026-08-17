@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -72,6 +73,25 @@ def _is_secret_key(key: str) -> bool:
     """判断配置键是否为敏感凭据键（命中任一提示词子串）。"""
     lowered = key.lower()
     return any(hint in lowered for hint in _SECRET_KEY_HINTS)
+
+
+def _sanitize_conn_error(message: str) -> str:
+    """连接错误脱敏：移除 DSN/URL 内嵌凭据（user:password@、password= 等）。
+
+    正常驱动错误串不含密码，但 DSN 或异常文本可能把账号密码带进
+    ``last_error`` / 探活响应 ``message``——统一脱敏防凭据回显（TD §13）。
+    """
+    if not message:
+        return message
+    # scheme://user:pass@host → scheme://***:***@host
+    text = re.sub(r"(://)([^/@:\s]+):([^/@\s]+)@", r"\1***:***@", message)
+    # password=xxx / passwd=xxx / api_key=xxx（值含非空白）
+    text = re.sub(
+        r"(?i)(password|passwd|pwd|sasl_password|api_key|secret)\s*=\s*[^\s&;\"']+",
+        r"\1=***",
+        text,
+    )
+    return text
 
 
 def _hit_to_dict(hit: Any) -> dict[str, Any]:
@@ -393,7 +413,11 @@ class CollectorService(BaseService):
                 await collector.dispose()
         except Exception as exc:  # 类型未注册 / 构建失败 / 探活异常
             logger.warning("test_connection_failed: type=%s err=%s", source_type, exc)
-            return TestConnectionResult(ok=False, source_type=source_type, error=str(exc))
+            return TestConnectionResult(
+                ok=False,
+                source_type=source_type,
+                error=_sanitize_conn_error(str(exc)),
+            )
         return TestConnectionResult(
             ok=probe.ok,
             source_type=source_type,
@@ -473,10 +497,13 @@ class CollectorService(BaseService):
             finally:
                 await collector.dispose()
         except Exception as exc:
-            # P1-3: 探活失败记录错误信息（供健康端点返回 last_error）
-            await self._repo.update_health_status(source_id, "unhealthy", error=str(exc))
+            # P1-3: 探活失败记录错误信息（供健康端点返回 last_error）；脱敏防凭据回显
+            err_text = _sanitize_conn_error(str(exc))
+            await self._repo.update_health_status(source_id, "unhealthy", error=err_text)
             logger.warning("check_connection_failed: source=%s err=%s", source_id, exc)
-            return TestConnectionResult(ok=False, source_type=src.source_type, error=str(exc))
+            return TestConnectionResult(
+                ok=False, source_type=src.source_type, error=err_text
+            )
         new_status = "healthy" if probe.ok else "unhealthy"
         # P1-3: 探活失败（probe.ok=False）时回填 probe.error 到健康状态
         await self._repo.update_health_status(
@@ -782,15 +809,17 @@ class CollectorService(BaseService):
                         BatchSourceItem(source_id=sid, name=src.name, ok=True)
                     )
                 else:
+                    # 脱敏防凭据回显（DSN/URL 内嵌 user:password 等）
+                    err_text = _sanitize_conn_error(str(probe.error))
                     await self._repo.update_health_status(
-                        sid, "unhealthy", error=probe.error
+                        sid, "unhealthy", error=err_text
                     )
                     # 三梯队通知：数据源连接失败定向通知源 Owner（best-effort）
                     await self._notify_source_owner_failure(
                         "catalog.connection_failed",
                         "数据源连接失败",
                         sid,
-                        reason=str(probe.error)[:500],
+                        reason=err_text[:500],
                         src=src,
                     )
                     failed.append(
@@ -799,7 +828,7 @@ class CollectorService(BaseService):
                             name=src.name,
                             ok=False,
                             error_code="PROBE_FAILED",
-                            message=probe.error,
+                            message=err_text,
                         )
                     )
             except Exception as exc:  # noqa: BLE001 - 批量单条失败不阻断其余（207 语义）

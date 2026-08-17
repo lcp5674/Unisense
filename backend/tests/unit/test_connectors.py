@@ -454,3 +454,31 @@ def test_starrocks_url_build():
     url_str = str(url)
     assert "mysql+aiomysql" in url_str
     assert "9030" in url_str
+
+
+async def test_hive_run_beeline_timeout_kills_process():
+    """P2-15: beeline 超时后终止子进程（不残留僵尸）。"""
+    from app.services.collector.connectors import hive as hive_mod
+
+    proc = MagicMock()
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock()
+
+    collector = HiveCollector(host="hive-host", database="test_db")
+    with (
+        patch.object(
+            hive_mod.asyncio,
+            "create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        ),
+        patch.object(
+            hive_mod.asyncio,
+            "wait_for",
+            side_effect=TimeoutError("timeout"),
+        ),pytest.raises(hive_mod.ExternalDependencyError, match="超时")
+    ):
+        await collector._execute("SELECT 1")
+
+    # 超时后子进程被 kill + 回收（不残留僵尸）
+    proc.kill.assert_called_once()
+    proc.wait.assert_awaited_once()

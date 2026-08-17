@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     notify_retention_days: int = 90
     # 事件日志为审计留痕，保留期独立且更长
     event_log_retention_days: int = 180
+    # 采集运行历史保留期（P2-13）：终态记录超过该天数物理清理（每日凌晨）
+    collection_run_retention_days: int = 90
 
     # ---- JWT ----
     jwt_secret: str

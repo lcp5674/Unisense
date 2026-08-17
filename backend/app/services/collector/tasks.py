@@ -169,6 +169,17 @@ async def _record_task_failure(
             await svc.fail_collection_run(run_id, error)
         except Exception:  # noqa: BLE001 - 失败收尾异常不影响上抛
             logger.warning("collection_run_fail_commit_failed: run=%s", run_id)
+    # P2-14: 任务失败定向通知源 Owner（best-effort；独立 session，不干扰失败主流程）
+    if svc is not None:
+        try:
+            await svc._notify_source_owner_failure(
+                "collect.failed",
+                "采集任务失败",
+                source_id,
+                reason=error[:500],
+            )
+        except Exception:  # noqa: BLE001 - 通知失败不影响主流程
+            logger.warning("采集失败通知异常: source=%s", source_id, exc_info=True)
     # 失败 → 更新健康状态
     try:
         if db is not None:

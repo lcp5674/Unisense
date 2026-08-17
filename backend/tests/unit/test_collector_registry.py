@@ -77,8 +77,12 @@ class TestCollectorRegistry:
         mock_factory = MagicMock(return_value=_StubCollector())
         reg.register("test_type", mock_factory)
         mock_decrypt.return_value = {"host": "localhost", "port": 3306}
-
-        collector = reg.build("test_type", "encrypted_token")
+        # SSRF 校验：mock DNS 解析为公网 IP（build 默认放行公网）
+        with patch(
+            "app.core.ssrf.socket.getaddrinfo",
+            return_value=[(2, 1, 6, "", ("8.8.8.8", 0))],
+        ):
+            collector = reg.build("test_type", "encrypted_token")
 
         mock_decrypt.assert_called_once_with("encrypted_token")
         mock_factory.assert_called_once_with({"host": "localhost", "port": 3306})

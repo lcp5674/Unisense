@@ -35,7 +35,7 @@ from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
-from app.core.guard import guard_against_injection
+from app.core.guard import guard_against_injection, guard_against_injection_exempt
 from app.core.logging import get_logger
 from app.core.probe_throttle import check_probe_rate
 from app.db.mysql import get_db_session
@@ -94,6 +94,12 @@ _READ_ROLES = ALL_ROLES
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+# P2-11: 连接配置豁免注入扫描——connection_config 仅用于构建连接（不进 SQL），
+# 密码含 -- / /* 等特殊字符是合法凭据，不应 422（注入守卫纵深防御不削弱）。
+_PROBE_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt("connection_config")),
+]
 
 
 def _svc(db: AsyncSession) -> CollectorService:
@@ -126,7 +132,7 @@ async def _infer_inflight(
         await guard.release(kind, catalog_id, column, owner=owner_id)
 
 
-@source_router.post("", dependencies=_WRITE_DEPS)
+@source_router.post("", dependencies=_PROBE_DEPS)
 async def create_data_source(
     body: DataSourceCreateRequest,
     request: Request,
@@ -192,7 +198,7 @@ async def list_source_types(
     return ok(data=await svc.list_source_types(), trace_id=trace_id)
 
 
-@source_router.post("/test-connection", dependencies=_WRITE_DEPS)
+@source_router.post("/test-connection", dependencies=_PROBE_DEPS)
 async def test_connection(
     body: TestConnectionRequest,
     request: Request,
@@ -222,7 +228,7 @@ async def test_connection(
     return ok(data=result, trace_id=trace_id)
 
 
-@source_router.post("/databases", dependencies=_WRITE_DEPS)
+@source_router.post("/databases", dependencies=_PROBE_DEPS)
 async def list_databases(
     body: TestConnectionRequest,
     request: Request,
@@ -241,10 +247,22 @@ async def list_databases(
         body.source_type.value if hasattr(body.source_type, "value") else str(body.source_type)
     )
     databases = await svc.list_databases(source_type_value, body.connection_config)
+    # P2-9: 枚举探活（携带明文密码探测主机）补审计——SSRF 探测路径留痕
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="data_source.list_databases",
+        entity_type="data_source",
+        entity_id=f"{source_type_value}:{body.connection_config.get('host', '')}",
+        detail={"count": len(databases)},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(data={"databases": databases, "source_type": source_type_value}, trace_id=trace_id)
 
 
-@source_router.post("/tables", dependencies=_WRITE_DEPS)
+@source_router.post("/tables", dependencies=_PROBE_DEPS)
 async def list_tables(
     body: ListTablesRequest,
     request: Request,
@@ -266,6 +284,18 @@ async def list_tables(
     tables = await svc.list_tables(
         source_type_value, body.connection_config, body.databases or None
     )
+    # P2-9: 表枚举探活补审计——与 list_databases 同构留痕
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="data_source.list_tables",
+        entity_type="data_source",
+        entity_id=f"{source_type_value}:{body.connection_config.get('host', '')}",
+        detail={"table_count": sum(len(v) for v in tables.values())},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(data={"tables": tables, "source_type": source_type_value}, trace_id=trace_id)
 
 
@@ -430,7 +460,7 @@ async def get_data_source(
     return ok(data=resp, trace_id=trace_id)
 
 
-@source_router.put("/{source_id}", dependencies=_WRITE_DEPS)
+@source_router.put("/{source_id}", dependencies=_PROBE_DEPS)
 async def update_data_source(
     source_id: str,
     body: DataSourceUpdateRequest,

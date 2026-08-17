@@ -790,6 +790,28 @@ class CollectorRepository:
         res = await self._db.execute(stmt)
         return res.scalars().all(), total
 
+    async def purge_collection_runs(self, before: datetime) -> int:
+        """P2-13: 物理清理指定时间前的终态采集运行历史（保留策略）。
+
+        仅清理 COMPLETED/FAILED 终态记录——RUNNING（采集中/崩溃未收尾）永不清理，
+        保留现场供排查。``before`` 为保留期边界（如 now - 90 天）。
+
+        Args:
+            before: 早于该时间且为终态的记录将被删除。
+
+        Returns:
+            删除的记录数。
+        """
+        from sqlalchemy import delete
+
+        result = await self._db.execute(
+            delete(CollectionRun).where(
+                CollectionRun.status.in_(("COMPLETED", "FAILED")),
+                CollectionRun.started_at < before,
+            )
+        )
+        return int(result.rowcount or 0)
+
     # ---- 采集水位相关方法 ----
 
     async def get_watermark(self, source_id: str) -> CollectionWatermark | None:

@@ -12,12 +12,25 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import EntityTypeEnum, SourceTypeEnum
 
 SourceType = SourceTypeEnum
 EntityType = EntityTypeEnum
+
+
+def _validate_cron(value: str) -> str:
+    """cron 表达式格式校验（croniter；非法返回 422，防调度静默失效）。
+
+    P2-12: 此前写入口仅限长度，非法 cron 只在 worker 每分钟扫描时告警、
+    调度静默永不触发——设置端应尽早反馈。
+    """
+    from croniter import croniter
+
+    if not croniter.is_valid(value):
+        raise ValueError(f"非法 cron 表达式: {value!r}")
+    return value
 
 
 class DataSourceCreateRequest(BaseModel):
@@ -312,6 +325,8 @@ class BatchScheduleRequest(BaseModel):
     source_ids: list[str] = Field(min_length=1, max_length=200)
     schedule_cron: str = Field(min_length=1, max_length=100, description="cron 表达式")
 
+    _validate_cron = field_validator("schedule_cron")(_validate_cron)
+
 
 class DBCatalogCreateRequest(BaseModel):
     """元数据实体注册请求。"""
@@ -445,6 +460,8 @@ class ScheduleRequest(BaseModel):
     schedule_enabled: bool | None = Field(
         default=None, description="是否启用定时调度；None=保持当前状态"
     )
+
+    _validate_cron = field_validator("cron")(_validate_cron)
 
 
 class DriftLogResponse(BaseModel):

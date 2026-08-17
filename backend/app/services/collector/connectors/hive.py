@@ -92,12 +92,16 @@ class HiveCollector(BaseCollector):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            except TimeoutError as exc:
+                # P2-15: 超时后终止子进程，避免 beeline 残留僵尸进程占用资源
+                proc.kill()
+                await proc.wait()
+                raise ExternalDependencyError(f"beeline 执行超时 (120s): {sql}") from exc
             if proc.returncode != 0:
                 err_msg = stderr.decode("utf-8", errors="replace").strip()
                 raise ExternalDependencyError(f"beeline 执行失败 (rc={proc.returncode}): {err_msg}")
-        except TimeoutError as exc:
-            raise ExternalDependencyError(f"beeline 执行超时 (120s): {sql}") from exc
         except FileNotFoundError as exc:
             raise ExternalDependencyError("beeline 命令不可用，请确认已安装 Hive 客户端") from exc
         finally:
