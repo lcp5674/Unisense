@@ -1385,7 +1385,20 @@ export interface QualityEventItem {
   id: number;
   level: string;
   status: string;
+  rule_type: string;
+  obs_value: number | null;
+  threshold: number | null;
   metric_id: number;
+  metric_name: string | null;
+  metric_code: string | null;
+  ack_note: string | null;
+  ack_by: number | null;
+  ack_at: string | null;
+  resolved_by: number | null;
+  resolved_at: string | null;
+  closed_by: number | null;
+  closed_at: string | null;
+  repair_suggestion: Record<string, unknown> | null;
   created_at: string | null;
 }
 

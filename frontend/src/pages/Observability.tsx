@@ -15,6 +15,7 @@ import {
   NOTIFY_STATUS_LABEL,
   SOURCE_HEALTH_LABEL,
   METRIC_STATUS_LABEL,
+  RULE_TYPE_LABEL,
 } from "../utils/enums";
 import { auditActionLabel } from "../utils/auditI18n";
 import { formatCnTime, timeAgoCn } from "../utils/timeCn";
@@ -111,24 +112,49 @@ function MetricsTab() {
             {events.length === 0 ? (
               <div style={{ ...rowStyle, borderBottom: "none" }}>暂无质量事件</div>
             ) : (
-              events.map((e) => (
-                <div key={e.id} style={rowStyle}>
-                  <Space size={8}>
-                    <Tag color={e.level === "P0" ? "error" : e.level === "P1" ? "orange" : "default"}>
-                      {QUALITY_SEVERITY_LABEL[e.level] ?? e.level}
-                    </Tag>
-                    <Tag>{QUALITY_EVENT_STATUS_LABEL[e.status] ?? e.status}</Tag>
-                    <span style={{ fontSize: 12 }}>指标 #{e.metric_id}</span>
-                  </Space>
-                  {e.created_at ? (
-                    <span className="mono" style={{ fontSize: 12 }}>
-                      <Tooltip title={formatCnTime(e.created_at)}>{timeAgoCn(e.created_at)}</Tooltip>
-                    </span>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </div>
-              ))
+              events.map((e) => {
+                const violation =
+                  e.obs_value != null && e.threshold != null
+                    ? `${e.obs_value} / ${e.threshold}`
+                    : e.obs_value != null
+                      ? String(e.obs_value)
+                      : null;
+                return (
+                  <div key={e.id} style={{ ...rowStyle, flexDirection: "column", alignItems: "stretch", gap: 4 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <Space size={6} wrap>
+                        <Tag color={e.level === "P0" ? "error" : e.level === "P1" ? "orange" : "default"}>
+                          {QUALITY_SEVERITY_LABEL[e.level] ?? e.level}
+                        </Tag>
+                        <Tag>{RULE_TYPE_LABEL[e.rule_type] ?? e.rule_type}</Tag>
+                        <Tag color={e.status === "OPEN" ? "red" : e.status === "ACK" ? "orange" : e.status === "RESOLVED" ? "blue" : "green"}>
+                          {QUALITY_EVENT_STATUS_LABEL[e.status] ?? e.status}
+                        </Tag>
+                        {e.metric_name ? (
+                          <Tooltip title={e.metric_code}>
+                            <span style={{ fontSize: 13, fontWeight: 500 }}>{e.metric_name}</span>
+                          </Tooltip>
+                        ) : (
+                          <span style={{ fontSize: 12 }} className="muted">指标 #{e.metric_id}</span>
+                        )}
+                      </Space>
+                      {e.created_at ? (
+                        <span className="mono" style={{ fontSize: 12, flex: "0 0 auto" }}>
+                          <Tooltip title={formatCnTime(e.created_at)}>{timeAgoCn(e.created_at)}</Tooltip>
+                        </span>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </div>
+                    {violation && (
+                      <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                        观测值 / 阈值：<span className="mono" style={{ color: e.level === "P0" || e.level === "P1" ? "var(--danger)" : undefined }}>{violation}</span>
+                        {e.ack_note ? <span> · 处理说明：{e.ack_note}</span> : null}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
             )}
           </Card>
         </Col>

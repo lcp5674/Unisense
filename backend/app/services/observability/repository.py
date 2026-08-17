@@ -145,21 +145,55 @@ class ObservabilityRepository:
         }
 
     async def quality_events(self, limit: int = 20) -> list[dict[str, Any]]:
-        """最近质量事件明细（供运营中心明细面板）。"""
-        rows = (
-            await self._session.execute(
-                select(QualityEvent)
-                .order_by(QualityEvent.created_at.desc(), QualityEvent.id.desc())
-                .limit(limit)
-            )
-        ).scalars()
-        events = list(rows)
+        """最近质量事件明细（供运营中心明细面板）。
+
+        字段对齐 QualityEvent 模型：补全观测值/阈值/规则类型/操作留痕/修复建议，
+        并批量 JOIN Metric 取得指标名（避免 N+1），让运营一眼看清"什么指标、
+        因为什么规则、观测值多少/阈值多少、当前谁在处理"。
+        """
+        events = list(
+            (
+                await self._session.execute(
+                    select(QualityEvent)
+                    .order_by(QualityEvent.created_at.desc(), QualityEvent.id.desc())
+                    .limit(limit)
+                )
+            ).scalars()
+        )
+        # 批量取关联指标名（一次 IN 查询，避免逐条查）
+        metric_ids = {e.metric_id for e in events if e.metric_id}
+        metric_names: dict[int, str] = {}
+        metric_codes: dict[int, str] = {}
+        if metric_ids:
+            metric_rows = (
+                await self._session.execute(
+                    select(Metric.id, Metric.name, Metric.metric_code).where(
+                        Metric.id.in_(metric_ids), Metric.deleted_at.is_(None)
+                    )
+                )
+            ).all()
+            for mid, mname, mcode in metric_rows:
+                metric_names[mid] = mname
+                metric_codes[mid] = mcode
         return [
             {
                 "id": e.id,
                 "level": e.level.value,
                 "status": e.status.value,
+                "rule_type": e.rule_type.value,
+                "obs_value": float(e.obs_value) if e.obs_value is not None else None,
+                "threshold": float(e.threshold) if e.threshold is not None else None,
                 "metric_id": e.metric_id,
+                "metric_name": metric_names.get(e.metric_id),
+                "metric_code": metric_codes.get(e.metric_id),
+                "ack_note": e.ack_note,
+                "ack_by": e.ack_by,
+                "ack_at": e.ack_at,
+                "resolved_by": e.resolved_by,
+                "resolved_at": e.resolved_at,
+                "closed_by": e.closed_by,
+                "closed_at": e.closed_at,
+                "repair_suggestion": e.repair_suggestion,
                 "created_at": e.created_at,
             }
             for e in events

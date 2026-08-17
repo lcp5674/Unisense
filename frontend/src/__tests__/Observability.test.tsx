@@ -129,11 +129,11 @@ describe("Observability 可观测中心", () => {
     expect(screen.queryByText("ERROR")).not.toBeInTheDocument();
   });
 
-  it("运行指标 Tab 展示最近质量事件明细：级别/状态中文 + 指标 ID + 时间", async () => {
+  it("运行指标 Tab 展示最近质量事件明细：级别/规则/状态中文 + 指标名 + 观测值/阈值", async () => {
     mockedQualityEvents.mockResolvedValue({
       items: [
-        { id: 11, level: "P0", status: "OPEN", metric_id: 5, created_at: "2026-08-12T03:00:00" },
-        { id: 12, level: "P2", status: "CLOSED", metric_id: 6, created_at: "2026-08-11T02:00:00" },
+        { id: 11, level: "P0", status: "OPEN", rule_type: "ACCURACY", obs_value: 85.2, threshold: 99.0, metric_id: 5, metric_name: "销售GMV", metric_code: "sales_gmv", created_at: "2026-08-12T03:00:00" },
+        { id: 12, level: "P2", status: "CLOSED", rule_type: "TIMELINESS", obs_value: null, threshold: null, metric_id: 6, metric_name: null, metric_code: null, created_at: "2026-08-11T02:00:00" },
       ],
       total: 2,
     } as never);
@@ -142,14 +142,23 @@ describe("Observability 可观测中心", () => {
     fireEvent.click(screen.getByText("运行指标"));
 
     await waitFor(() => expect(screen.getByText("最近质量事件")).toBeInTheDocument());
+    // 严重级别中文
     expect(screen.getByText("P0 紧急")).toBeInTheDocument();
     expect(screen.getByText("P2 一般")).toBeInTheDocument();
+    // 规则类型中文
+    expect(screen.getByText("准确性")).toBeInTheDocument();
+    expect(screen.getByText("及时性")).toBeInTheDocument();
+    // 状态中文
     expect(screen.getByText("待处理")).toBeInTheDocument();
     expect(screen.getByText("已关闭")).toBeInTheDocument();
-    expect(screen.getByText("指标 #5")).toBeInTheDocument();
+    // 指标名（有名称显示名称，无名称回退 ID）
+    expect(screen.getByText("销售GMV")).toBeInTheDocument();
     expect(screen.getByText("指标 #6")).toBeInTheDocument();
+    // 观测值/阈值展示
+    expect(screen.getByText("85.2 / 99")).toBeInTheDocument();
     // 原始技术值不应直出
     expect(screen.queryByText("OPEN")).not.toBeInTheDocument();
     expect(screen.queryByText("CLOSED")).not.toBeInTheDocument();
+    expect(screen.queryByText("ACCURACY")).not.toBeInTheDocument();
   });
 });
