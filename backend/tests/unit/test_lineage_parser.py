@@ -7,6 +7,7 @@ from sqlglot import exp
 
 from app.services.lineage.parser import (
     _branch_queries,
+    expand_variables,
     extract_field_lineage,
     extract_table_lineage,
     extract_upstream_deps,
@@ -1249,3 +1250,73 @@ def test_unpivot_value_column_multi_source() -> None:
     # 值列来自被展开的 a/b/c 三列，而非不存在的 s.v/s.k
     assert v_sources == {("ods.s", "a"), ("ods.s", "b"), ("ods.s", "c")}
     assert not any(e.source_column in ("k", "v") and e.source_table == "ods.s" for e in edges)
+
+
+# ---- P5：Hive 变量/宏展开（${hivevar:..}/${hiveconf:..}/${..}）----
+
+
+def test_hive_inline_set_var_expansion() -> None:
+    """内联 ``set hivevar:x=y;`` 声明 + ``${hivevar:x}`` 占位符：解析前展开，血缘正常。"""
+    sql = (
+        "set hivevar:date_id=2026-08-13;\n"
+        "INSERT INTO dws.t SELECT id, v FROM ods.s WHERE date_id = ${hivevar:date_id}"
+    )
+    edges = extract_table_lineage(sql, dialect="hive")
+    assert [(e.source, e.target) for e in edges] == [("ods.s", "dws.t")]
+    field_edges = extract_field_lineage(sql, dialect="hive")
+    assert {(e.source_table, e.target_table) for e in field_edges} == {("ods.s", "dws.t")}
+
+
+def test_hive_explicit_variables_expansion() -> None:
+    """显式传入 ``variables``：``${tbl}``/``${hiveconf:dt}`` 均展开为字面值。"""
+    sql = "INSERT INTO ${tbl} SELECT id, amount FROM ods.src WHERE dt = ${hiveconf:dt}"
+    edges = extract_table_lineage(
+        sql, dialect="hive", variables={"tbl": "dws.finance", "dt": "20260816"}
+    )
+    assert [(e.source, e.target) for e in edges] == [("ods.src", "dws.finance")]
+    field_edges = extract_field_lineage(
+        sql, dialect="hive", variables={"tbl": "dws.finance", "dt": "20260816"}
+    )
+    assert {(e.source_column, e.target_column) for e in field_edges} == {
+        ("id", "id"),
+        ("amount", "amount"),
+    }
+
+
+def test_hive_comment_var_expansion() -> None:
+    """注释行 ``--hivevar src=ods.orders``：变量声明行展开后不污染血缘。"""
+    sql = "--hivevar src=ods.orders\nINSERT INTO dws.t SELECT id FROM ${src}"
+    edges = extract_table_lineage(sql, dialect="hive")
+    assert [(e.source, e.target) for e in edges] == [("ods.orders", "dws.t")]
+
+
+def test_hive_unknown_var_graceful() -> None:
+    """未知变量保留占位符：不抛异常（sqlglot 能解析则照常产边，否则降级为空）。"""
+    sql = "INSERT INTO ${no_such_table} SELECT id FROM ods.s WHERE dt = ${hivevar:missing}"
+    # 未知占位符被 sqlglot 当作合法标识符解析（no_such_table 表）→ 不崩
+    edges = extract_table_lineage(sql, dialect="hive")
+    assert isinstance(edges, list)
+    assert any(e.source == "ods.s" for e in edges)
+    # 纯 SELECT 未知表名无法解析 → 降级为空且不崩
+    assert isinstance(extract_field_lineage(sql, dialect="hive"), list)
+
+
+def test_variables_ignored_for_non_hive() -> None:
+    """非 Hive/Spark 方言（且未显式传 variables）：不展开占位符（血缘降级为空）。"""
+    sql = "INSERT INTO ${tbl} SELECT id FROM ods.s"
+    assert extract_table_lineage(sql, dialect="mysql") == []
+    assert extract_table_lineage(sql, dialect="clickhouse") == []
+
+
+def test_expand_variables_hiveconf_and_bare() -> None:
+    """``expand_variables`` 纯函数：hiveconf 前缀 + 裸变量名均替换；未知保留原样。"""
+    expanded = expand_variables(
+        "SELECT * FROM ${hiveconf:db}.src WHERE dt = ${dt} AND a = ${unknown}",
+        dialect="hive",
+        variables={"db": "ods", "dt": "20260816"},
+    )
+    assert "ods.src" in expanded
+    assert "dt = 20260816" in expanded
+    assert "${unknown}" in expanded
+    # 非 hive 方言直接原样返回
+    assert expand_variables("${x}", dialect="mysql") == "${x}"

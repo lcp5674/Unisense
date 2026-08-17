@@ -180,3 +180,31 @@ async def test_parse_batch_still_blocks_injection_in_other_fields(owner_client, 
     assert resp.status_code == 400
     assert "INJECTION_DETECTED" in resp.text
     svc.parse_batch.assert_not_awaited()
+
+
+async def test_export_blocks_injection_in_node_query(owner_client, monkeypatch):
+    """/export 的 node query 参数仍受注入守卫（非 SQL 文本字段，与 /parse 的 sql 不同）。"""
+    client, _ = owner_client
+    svc = AsyncMock()
+    monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)
+    resp = await client.get(
+        "/api/v1/lineage/export?node=' OR 1=1 -- ",
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 400
+    assert "INJECTION_DETECTED" in resp.text
+    svc.export_lineage.assert_not_awaited()
+
+
+async def test_export_accepts_legit_node(owner_client, monkeypatch):
+    """合法节点 id（table:dws.orders）+ 过滤参数正常导出（200）。"""
+    client, _ = owner_client
+    svc = AsyncMock()
+    svc.export_lineage.return_value = []
+    monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)
+    resp = await client.get(
+        "/api/v1/lineage/export?format=json&node=table:dws.orders&granularity=L1",
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 200
+    svc.export_lineage.assert_awaited_once()

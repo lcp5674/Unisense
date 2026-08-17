@@ -519,3 +519,96 @@ class LineageTerminalsResponse(BaseModel):
     terminal_count: int = Field(description="终止节点数（可能因 limit 截断）")
     terminals: list[LineageTerminalItem] = Field(default_factory=list, description="终止节点列表")
     truncated: bool = Field(default=False, description="是否因 limit 截断")
+
+
+# ---- 标准血缘导出（P4：OpenLineage / JSON 开放 API）----
+
+
+LineageExportFormat = Literal["openlineage", "json"]
+
+
+class LineageExportParams(BaseModel):
+    """血缘导出查询参数（query）。
+
+    供治理/合规平台以开放格式消费血缘：OpenLineage 事件（L1+L2 表/字段级，
+    标准 RunEvent 结构）或通用 JSON（原始边明细 + 元数据）。可按节点/方向/
+    粒度/来源过滤后导出。
+    """
+
+    format: LineageExportFormat = "openlineage"
+    node: str | None = Field(
+        default=None, max_length=512, description="按节点过滤（仅返回该节点直接相关的边）"
+    )
+    direction: Literal["upstream", "downstream", "both"] = "both"
+    granularity: Literal["L1", "L2", "L3", "all"] = "all"
+    provenance: str | None = Field(default=None, max_length=32, description="按来源通道过滤")
+    limit: int = Field(default=10_000, ge=1, le=100_000, description="返回边数上限")
+
+
+class OpenLineageFieldLineage(BaseModel):
+    """OpenLineage SchemaFieldLineage：输出字段 → 输入字段（字段级血缘）。"""
+
+    name: str = Field(description="输出字段名")
+    input_fields: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="输入字段 [{namespace, name, field}]（来源数据集与列）",
+    )
+
+
+class OpenLineageSchemaFacet(BaseModel):
+    """OpenLineage SchemaDatasetFacet：数据集字段清单 + 字段级血缘（lineage 子 facet）。"""
+
+    fields: list[dict[str, str]] = Field(
+        default_factory=list, description="字段 [{name, type}]（类型未知时为 unknown）"
+    )
+    lineage: list[OpenLineageFieldLineage] | None = Field(
+        default=None, description="字段级血缘（存在 L2 边时填充）"
+    )
+
+
+class OpenLineageDataset(BaseModel):
+    """OpenLineage Dataset（RunEvent 的 input/output）。"""
+
+    namespace: str = Field(description="命名空间（如 unisense）")
+    name: str = Field(description="数据集名（去前缀的节点 id，如 db.tbl）")
+    facets: dict[str, OpenLineageSchemaFacet] = Field(default_factory=dict)
+
+
+class OpenLineageRunEvent(BaseModel):
+    """OpenLineage RunEvent：一次表级数据流转（源数据集 → 目标数据集）。
+
+    对齐 OpenLineage 2-0-0 规范（``schemaURL`` 指向官方 spec JSON）；每条 L1
+    表级边生成一个事件，L2 字段级血缘以 schema facet 的 ``lineage`` 子 facet
+    挂到目标数据集上。
+
+    规范字段为 camelCase（``eventType``/``eventTime``/``schemaURL``）：内部用
+    snake_case 属性 + ``alias`` 映射，序列化时 ``model_dump(by_alias=True)``
+    输出标准 OpenLineage 事件结构。
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    event_type: str = Field(default="COMPLETE", alias="eventType", description="OL 事件类型")
+    event_time: str = Field(alias="eventTime", description="事件时间（ISO8601 UTC）")
+    producer: str = Field(description="生产者标识（本平台 URI）")
+    schema_url: str = Field(
+        default="https://openlineage.io/spec/2-0-0/OpenLineage.json",
+        alias="schemaURL",
+        description="OpenLineage spec 版本 URL",
+    )
+    run: dict[str, Any] = Field(default_factory=lambda: {"runId": ""})
+    job: dict[str, Any] = Field(default_factory=dict)
+    inputs: list[OpenLineageDataset] = Field(default_factory=list)
+    outputs: list[OpenLineageDataset] = Field(default_factory=list)
+
+
+class LineageJsonExportResponse(BaseModel):
+    """通用 JSON 血缘导出（原始边明细 + 元数据，供开放 API 消费）。"""
+
+    format: str = Field(default="json")
+    producer: str = Field(description="生产者标识")
+    exported_at: str = Field(description="导出时间（ISO8601 UTC）")
+    edge_count: int = Field(description="导出边数")
+    edges: list[dict[str, Any]] = Field(
+        default_factory=list, description="边明细（id/source_node/target_node/edge_type/...）"
+    )

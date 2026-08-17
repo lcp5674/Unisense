@@ -29,6 +29,7 @@ from app.services.lineage.schemas import (
     LineageCoverageResponse,
     LineageEdgeDetailResponse,
     LineageEdgeListParams,
+    LineageExportParams,
     LineageHealthResponse,
     LineageImpactParams,
     LineageParseBatchRequest,
@@ -447,9 +448,7 @@ async def lineage_path(
     用于回答「A 的数据如何流转到 B」「A→B 之间经过哪些中间层」；``shortest_hops``
     给最短链路，``paths`` 给全部链路（含跳数）。
     """
-    result = await _svc(db).path_query(
-        source=source, target=target, max_hops=max_hops, limit=limit
-    )
+    result = await _svc(db).path_query(source=source, target=target, max_hops=max_hops, limit=limit)
     return ok(data=result.model_dump(mode="json"), trace_id=trace_id)
 
 
@@ -467,10 +466,29 @@ async def lineage_path_terminals(
     每个终止节点标注对应实体是否存在（``entity_exists=False`` 即断链嫌疑——
     实体已删但历史边残留），供治理定位断链链路。
     """
-    result = await _svc(db).terminal_nodes(
-        node=node, max_hops=max_hops, limit=limit
-    )
+    result = await _svc(db).terminal_nodes(node=node, max_hops=max_hops, limit=limit)
     return ok(data=result.model_dump(mode="json"), trace_id=trace_id)
+
+
+# ---- 标准血缘导出（P4：OpenLineage / JSON 开放 API）----
+
+
+@router.get("/export", dependencies=_READ_DEPS)
+async def lineage_export(
+    params: Annotated[LineageExportParams, Depends()],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """标准血缘导出（P4）：OpenLineage RunEvent 列表或通用 JSON 边明细。
+
+    供治理/合规平台以开放格式消费血缘：``format=openlineage`` 输出标准
+    RunEvent（L1 表级 inputs/outputs + L2 字段级 schema lineage facet）；
+    ``format=json`` 输出原始边明细 + 元数据。可按 ``node``/``direction``/
+    ``granularity``/``provenance`` 过滤后导出。
+    """
+    result = await _svc(db).export_lineage(params)
+    return ok(data=result, trace_id=trace_id)
 
 
 # ---- 血缘采集通道（增量采集运维，TD §12.2）----

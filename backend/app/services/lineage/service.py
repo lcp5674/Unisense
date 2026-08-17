@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
@@ -50,6 +51,7 @@ from app.services.lineage.schemas import (
     LineageEdgeDetailResponse,
     LineageEdgeHistoryResponse,
     LineageEdgeResponse,
+    LineageExportParams,
     LineageHealthResponse,
     LineageImpactParams,
     LineageIngestRunResponse,
@@ -66,6 +68,10 @@ from app.services.lineage.schemas import (
     LineageTerminalsResponse,
     ManualEdgeCreateRequest,
     ManualEdgeCreateResponse,
+    OpenLineageDataset,
+    OpenLineageFieldLineage,
+    OpenLineageRunEvent,
+    OpenLineageSchemaFacet,
     PiiImpactItem,
     StaleEdgeResponse,
     TableLineageItem,
@@ -93,6 +99,11 @@ _DETAIL_EDGE_SAMPLE = 200
 _MAX_COVERAGE_BROKEN_SCAN = 2000
 #: 健康度「采集新鲜度」维度的满分新鲜天数：距最近采集超过该天数即线性衰减到 0 分。
 _FRESHNESS_FULL_DAYS = 30
+#: 标准导出（P4）：OpenLineage 生产者标识（平台 URI）、默认 namespace 与 spec URL。
+#: producer 遵循 OpenLineage 规范要求（标识产生血缘事件的系统 URI）。
+_OL_PRODUCER = "https://openlineage.io/namespace/unisense"
+_OL_NAMESPACE = "unisense"
+_OL_SCHEMA_URL = "https://openlineage.io/spec/2-0-0/OpenLineage.json"
 
 
 def node_consumer(client_id: str) -> str:
@@ -670,6 +681,137 @@ class LineageService(BaseService):
                     seen.add(key)
                     merged.append(resp)
         return merged
+
+    async def export_lineage(self, params: LineageExportParams) -> Any:
+        """标准血缘导出（P4）：OpenLineage RunEvent 列表或通用 JSON 边明细。
+
+        供治理/合规平台以开放格式消费血缘。数据源为 MySQL 权威存储
+        （``list_export_edges`` 过滤查询），按节点/方向/粒度/来源过滤后：
+        - ``openlineage``：L1 表级边 → 每条一个 RunEvent（inputs=源数据集、
+          outputs=目标数据集，schema facet 携带字段清单与字段级血缘 lineage 子
+          facet）；L2 字段级边按目标表聚合；L3 指标/维度/消费方边是平台扩展
+          语义（数据集之外），保留在 JSON 导出中。
+        - ``json``：原始边明细（含 id/source_node/target_node/edge_type/...）+ 元数据
+          （导出时间/边数/生产者）。
+
+        Args:
+            params: 导出参数（format/node/direction/granularity/provenance/limit）。
+
+        Returns:
+            OpenLineage 格式返回 RunEvent dict 列表；JSON 格式返回
+            ``{format, producer, exported_at, edge_count, edges}``。
+        """
+        edges = await self._repo.list_export_edges(
+            node=params.node,
+            direction=params.direction,
+            granularity=None if params.granularity == "all" else params.granularity,
+            provenance=params.provenance,
+            limit=params.limit,
+        )
+        if params.format == "json":
+            return {
+                "format": "json",
+                "producer": _OL_PRODUCER,
+                "exported_at": datetime.now(UTC).isoformat(),
+                "edge_count": len(edges),
+                "edges": [self._repo._edge_dict(e) for e in edges],
+            }
+        return self._export_openlineage(edges)
+
+    @staticmethod
+    def _ol_dataset_from_node(node: str) -> tuple[str, str] | None:
+        """节点 id → ``(数据集名, 表名)``；仅 ``table:``/``field:`` 构成数据集。
+
+        ``table:db.tbl`` → ``("db.tbl", "db.tbl")``；``field:db.tbl.col`` →
+        ``("db.tbl", "db.tbl")``。``metric:``/``dimension:``/``consumer:``/
+        ``external:`` 等前缀非数据集语义（OpenLineage 数据集是物理表/字段），
+        返回 ``None``（不参与 OpenLineage 导出）。
+        """
+        prefix, _, value = node.partition(":")
+        if prefix == "table":
+            return value, value
+        if prefix == "field":
+            parts = value.split(".")
+            if len(parts) >= 2:
+                table = ".".join(parts[:-1])
+                return table, table
+        return None
+
+    def _export_openlineage(self, edges: list[LineageEdge]) -> list[dict[str, Any]]:
+        """血缘边 → OpenLineage RunEvent 列表（L1 表级 + L2 字段级血缘 facet）。"""
+        l1 = [e for e in edges if e.granularity == "L1"]
+        l2 = [e for e in edges if e.granularity == "L2"]
+        # L2 按目标表分组 → 字段级血缘（schema facet 的 lineage 子 facet）
+        field_lineage_by_table: dict[str, list[OpenLineageFieldLineage]] = {}
+        for e in l2:
+            src = self._ol_dataset_from_node(e.source_node)
+            tgt = self._ol_dataset_from_node(e.target_node)
+            if src is None or tgt is None:
+                continue
+            tgt_table, _ = tgt
+            field_lineage_by_table.setdefault(tgt_table, []).append(
+                OpenLineageFieldLineage(
+                    name=e.target_node.split(".")[-1],
+                    input_fields=[
+                        {
+                            "namespace": _OL_NAMESPACE,
+                            "name": src[0],
+                            "field": e.source_node.split(".")[-1],
+                        }
+                    ],
+                )
+            )
+        events: list[dict[str, Any]] = []
+        covered_targets: set[str] = set()
+        for e in l1:
+            src = self._ol_dataset_from_node(e.source_node)
+            tgt = self._ol_dataset_from_node(e.target_node)
+            if src is None or tgt is None:
+                continue
+            tgt_table, _ = tgt
+            covered_targets.add(tgt_table)
+            events.append(
+                self._ol_run_event({src[0]}, tgt_table, field_lineage_by_table.get(tgt_table))
+            )
+        # 仅有 L2 边而无对应 L1 表级边的目标表：输入为该表各字段边的源表集合（兜底）
+        for tgt_table, fls in field_lineage_by_table.items():
+            if tgt_table in covered_targets:
+                continue
+            sources = {i["name"] for fl in fls for i in fl.input_fields}
+            events.append(self._ol_run_event(sources, tgt_table, fls))
+        return events
+
+    @staticmethod
+    def _ol_run_event(
+        source_tables: set[str],
+        target_table: str,
+        fls: list[OpenLineageFieldLineage] | None,
+    ) -> dict[str, Any]:
+        """构造单条 RunEvent：输入数据集（源表集）+ 输出数据集（目标表 + schema 血缘）。
+
+        ``fls`` 非空时输出数据集携带 ``schema`` facet：``fields`` 为目标列清单
+        （类型未知标记 unknown），``lineage`` 为字段级血缘（输出列 → 输入列）。
+        """
+        facets: dict[str, OpenLineageSchemaFacet] = {}
+        if fls:
+            facets["schema"] = OpenLineageSchemaFacet(
+                fields=[{"name": fl.name, "type": "unknown"} for fl in fls],
+                lineage=fls,
+            )
+        return OpenLineageRunEvent(
+            event_time=datetime.now(UTC).isoformat(),
+            producer=_OL_PRODUCER,
+            schema_url=_OL_SCHEMA_URL,
+            run={"runId": uuid.uuid4().hex},
+            job={
+                "namespace": _OL_NAMESPACE,
+                "name": f"lineage:{','.join(sorted(source_tables))}->{target_table}",
+            },
+            inputs=[
+                OpenLineageDataset(namespace=_OL_NAMESPACE, name=t) for t in sorted(source_tables)
+            ],
+            outputs=[OpenLineageDataset(namespace=_OL_NAMESPACE, name=target_table, facets=facets)],
+        ).model_dump(by_alias=True)
 
     async def node_meta(self, node_ids: Iterable[str]) -> list[LineageNodeInfo]:
         """批量解析血缘节点基础信息（影响分析/边列表响应的 ``nodes`` 字段）。

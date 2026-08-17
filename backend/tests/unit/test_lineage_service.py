@@ -17,6 +17,7 @@ from app.services.lineage.schemas import (
     LineageCoverageResponse,
     LineageEdgeDetailResponse,
     LineageEdgeResponse,
+    LineageExportParams,
     LineageImpactParams,
     LineageParseBatchRequest,
     LineageParseRequest,
@@ -76,6 +77,8 @@ class FakeRepo:
         self.repo_paths: list[list[Any]] = []
         self.repo_terminals: list[tuple[str, list[str]]] = []
         self.missing_entities: set[str] = set()
+        # 标准导出（P4）假数据
+        self.export_edges: list[Any] = []
 
     async def upsert_edge(self, **kwargs: object) -> SimpleNamespace:
         self.upsert_calls.append(kwargs)
@@ -286,6 +289,45 @@ class FakeRepo:
     # ---- 覆盖率治理（Task B）假实现 ----
     async def coverage_broken_edges(self, limit: int = 200) -> list[dict[str, Any]]:
         return list(self.broken_edges[:limit])
+
+    # ---- 标准导出（P4）假实现 ----
+    async def list_export_edges(
+        self,
+        *,
+        node: str | None = None,
+        direction: str = "both",
+        granularity: str | None = None,
+        provenance: str | None = None,
+        limit: int = 10_000,
+    ) -> list[Any]:
+        """导出过滤假实现（对齐真实 repository 语义，软删过滤）。"""
+        rows = [e for e in self.export_edges if getattr(e, "deleted_at", None) is None]
+        if granularity:
+            rows = [e for e in rows if getattr(e, "granularity", None) == granularity]
+        if provenance:
+            rows = [e for e in rows if getattr(e, "provenance", None) == provenance]
+        if node:
+            if direction == "upstream":
+                rows = [e for e in rows if e.target_node == node]
+            elif direction == "downstream":
+                rows = [e for e in rows if e.source_node == node]
+            else:
+                rows = [e for e in rows if e.source_node == node or e.target_node == node]
+        return list(rows[:limit])
+
+    @staticmethod
+    def _edge_dict(e: Any) -> dict[str, Any]:
+        """边 → 导出字典（对齐真实 repository._edge_dict 字段）。"""
+        return {
+            "id": getattr(e, "id", None),
+            "source_node": e.source_node,
+            "target_node": e.target_node,
+            "edge_type": getattr(e, "edge_type", "DERIVED_FROM"),
+            "granularity": getattr(e, "granularity", "L1"),
+            "confidence": getattr(e, "confidence", 1.0),
+            "provenance": getattr(e, "provenance", "sqlglot"),
+            "pii_inherited": getattr(e, "pii_inherited", False),
+        }
 
     async def metric_total(self) -> int:
         return self.metric_total_count
@@ -2246,3 +2288,124 @@ async def test_terminal_nodes_falls_back_to_mysql() -> None:
     assert res.terminal_count == 1
     assert res.terminals[0].node == "table:end"
     assert res.terminals[0].node_type == "table"
+
+
+# ---- P4：标准血缘导出（OpenLineage / JSON）----
+
+
+def _export_edge(
+    eid: int,
+    source: str,
+    target: str,
+    *,
+    granularity: str = "L1",
+    provenance: str = "dp_csv",
+) -> SimpleNamespace:
+    """构造导出边假数据（SimpleNamespace，对齐 LineageEdge 属性）。"""
+    return SimpleNamespace(
+        id=eid,
+        source_node=source,
+        target_node=target,
+        edge_type="DERIVED_FROM",
+        granularity=granularity,
+        confidence=1.0,
+        provenance=provenance,
+        pii_inherited=False,
+        deleted_at=None,
+    )
+
+
+async def test_export_openlineage_builds_run_events() -> None:
+    """OpenLineage：L1 表级边 → RunEvent（inputs/outputs + schema 血缘 facet），L3 排除。"""
+    repo = FakeRepo()
+    repo.export_edges = [
+        _export_edge(1, "table:ods.a", "table:dws.t"),
+        _export_edge(2, "field:ods.a.id", "field:dws.t.id", granularity="L2"),
+        _export_edge(3, "metric:gmv", "table:dws.ads", granularity="L3"),
+    ]
+    svc = LineageService(db=_FakeSession())
+    svc._repo = repo
+
+    result = await svc.export_lineage(LineageExportParams(format="openlineage"))
+
+    # 仅 L1 边生成事件；L2 聚合为 schema facet；L3 排除
+    assert isinstance(result, list)
+    assert len(result) == 1
+    ev = result[0]
+    assert ev["eventType"] == "COMPLETE"
+    assert ev["eventTime"]
+    assert ev["producer"] == "https://openlineage.io/namespace/unisense"
+    assert ev["schemaURL"].startswith("https://openlineage.io/spec")
+    assert ev["run"]["runId"]
+    # inputs=源表 ods.a、outputs=目标表 dws.t
+    assert ev["inputs"] == [{"namespace": "unisense", "name": "ods.a", "facets": {}}]
+    output = ev["outputs"][0]
+    assert output["name"] == "dws.t"
+    # schema facet：字段清单 + 字段级血缘（id ← ods.a.id）
+    schema = output["facets"]["schema"]
+    assert schema["fields"] == [{"name": "id", "type": "unknown"}]
+    assert schema["lineage"] == [
+        {
+            "name": "id",
+            "input_fields": [{"namespace": "unisense", "name": "ods.a", "field": "id"}],
+        }
+    ]
+
+
+async def test_export_openlineage_l2_only_fallback_event() -> None:
+    """仅有 L2 字段级边（无对应 L1）：兜底生成独立 RunEvent，输入=各源表集合。"""
+    repo = FakeRepo()
+    repo.export_edges = [
+        _export_edge(1, "field:ods.a.id", "field:dws.u.id", granularity="L2"),
+        _export_edge(2, "field:ods.b.uid", "field:dws.u.uid", granularity="L2"),
+    ]
+    svc = LineageService(db=_FakeSession())
+    svc._repo = repo
+
+    result = await svc.export_lineage(LineageExportParams(format="openlineage"))
+
+    assert len(result) == 1
+    ev = result[0]
+    assert {d["name"] for d in ev["inputs"]} == {"ods.a", "ods.b"}
+    assert ev["outputs"][0]["name"] == "dws.u"
+    schema = ev["outputs"][0]["facets"]["schema"]
+    assert {fl["name"] for fl in schema["lineage"]} == {"id", "uid"}
+
+
+async def test_export_json_returns_raw_edges() -> None:
+    """JSON：原始边明细 + 元数据（导出时间/边数/生产者），含全部粒度。"""
+    repo = FakeRepo()
+    repo.export_edges = [
+        _export_edge(1, "table:ods.a", "table:dws.t"),
+        _export_edge(2, "metric:gmv", "table:dws.ads", granularity="L3"),
+    ]
+    svc = LineageService(db=_FakeSession())
+    svc._repo = repo
+
+    result = await svc.export_lineage(LineageExportParams(format="json"))
+
+    assert result["format"] == "json"
+    assert result["edge_count"] == 2
+    assert result["exported_at"]
+    assert len(result["edges"]) == 2
+    assert result["edges"][0]["source_node"] == "table:ods.a"
+    assert result["edges"][1]["granularity"] == "L3"
+
+
+async def test_export_filters_applied() -> None:
+    """过滤参数透传：按粒度+来源过滤后导出。"""
+    repo = FakeRepo()
+    repo.export_edges = [
+        _export_edge(1, "table:ods.a", "table:dws.t"),
+        _export_edge(2, "table:ods.b", "table:dws.t", provenance="sqlglot"),
+        _export_edge(3, "metric:gmv", "table:dws.ads", granularity="L3"),
+    ]
+    svc = LineageService(db=_FakeSession())
+    svc._repo = repo
+
+    result = await svc.export_lineage(
+        LineageExportParams(format="openlineage", granularity="L1", provenance="dp_csv")
+    )
+
+    assert len(result) == 1
+    assert result[0]["inputs"][0]["name"] == "ods.a"

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Any
 
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
@@ -200,6 +201,28 @@ class _FakeDB:
             eid = int(m.group(1)) if m else None
             matched = [r for r in self._rows if getattr(r, "id", None) == eid]
             return _Result(matched, scalar=matched[0] if matched else None)
+        # 血缘导出/全量列表（P4 list_export_edges / list_all_edges）：
+        # SELECT ... FROM lineage_edge WHERE deleted_at IS NULL [AND 过滤] ORDER BY id
+        if " FROM lineage_edge " in sql and "order by lineage_edge.id" in sql.lower():
+            rows = [r for r in self._rows if getattr(r, "deleted_at", None) is None]
+            gran = _extract(sql, "granularity")
+            if gran is not None:
+                rows = [r for r in rows if getattr(r, "granularity", None) == gran]
+            prov = _extract(sql, "provenance")
+            if prov is not None:
+                rows = [r for r in rows if getattr(r, "provenance", None) == prov]
+            src = _extract(sql, "source_node")
+            dst = _extract(sql, "target_node")
+            if src is not None and dst is not None:
+                rows = [r for r in rows if r.source_node == src or r.target_node == src]
+            elif src is not None:
+                rows = [r for r in rows if r.source_node == src]
+            elif dst is not None:
+                rows = [r for r in rows if r.target_node == dst]
+            m_limit = re.search(r"\blimit\s+(\d+)", sql, re.IGNORECASE)
+            if m_limit:
+                rows = rows[: int(m_limit.group(1))]
+            return _Result(list(rows))
         if sql.lstrip().upper().startswith("DELETE"):
             node = _extract(sql, "source_node")
             matched = [
@@ -1391,3 +1414,56 @@ async def test_table_nodes_in_edges_unions_sources_and_targets() -> None:
 async def test_table_nodes_in_edges_empty() -> None:
     repo = LineageRepository(_FakeDB([]))
     assert await repo.table_nodes_in_edges() == 0
+
+
+# ---- P4：血缘导出过滤查询（list_export_edges）----
+
+
+def _export_rows() -> list[_Row]:
+    """导出测试数据：2 张表级边 + 1 张字段级边 + 1 张软删边 + 1 张其他来源。"""
+    return [
+        _Row(1, "table:ods.a", "table:dws.t", granularity="L1", provenance="dp_csv"),
+        _Row(2, "field:ods.a.id", "field:dws.t.id", granularity="L2", provenance="dp_csv"),
+        _Row(3, "table:ods.b", "table:dws.t", granularity="L1", provenance="sqlglot"),
+        _Row(4, "table:ods.c", "table:dws.u", granularity="L1", provenance="dp_csv"),
+        _Row(5, "table:ods.old", "table:dws.t", granularity="L1", deleted_at=datetime(2026, 1, 1)),
+    ]
+
+
+async def test_list_export_edges_all_filters_none() -> None:
+    """无过滤：返回全部未删除边（按 id 升序，软删排除）。"""
+    repo = LineageRepository(_FakeDB(_export_rows()))
+    edges = await repo.list_export_edges()
+    assert [e.id for e in edges] == [1, 2, 3, 4]
+    assert all(e.deleted_at is None for e in edges)
+
+
+async def test_list_export_edges_granularity_filter() -> None:
+    """按粒度过滤：L1 只留表级边。"""
+    repo = LineageRepository(_FakeDB(_export_rows()))
+    edges = await repo.list_export_edges(granularity="L1")
+    assert [e.id for e in edges] == [1, 3, 4]
+    assert all(e.granularity == "L1" for e in edges)
+
+
+async def test_list_export_edges_provenance_filter() -> None:
+    """按来源过滤：sqlglot 只留 SQL 解析通道边。"""
+    repo = LineageRepository(_FakeDB(_export_rows()))
+    edges = await repo.list_export_edges(provenance="sqlglot")
+    assert [e.id for e in edges] == [3]
+
+
+async def test_list_export_edges_node_direction() -> None:
+    """按节点+方向过滤：downstream=源为该节点 / upstream=目标为该节点 / both=任一。"""
+    repo = LineageRepository(_FakeDB(_export_rows()))
+    # downstream：source_node == table:dws.t 无（dws.t 是目标）
+    assert await repo.list_export_edges(node="table:dws.t", direction="downstream") == []
+    # upstream：target_node == table:dws.t → id 1、3（软删的 5 排除）
+    up = await repo.list_export_edges(node="table:dws.t", direction="upstream")
+    assert [e.id for e in up] == [1, 3]
+    # both：source 或 target 为该节点（边 2 是 field 节点，不匹配 table:ods.a）
+    both = await repo.list_export_edges(node="table:ods.a", direction="both")
+    assert [e.id for e in both] == [1]
+    # limit 截断
+    limited = await repo.list_export_edges(node="table:dws.t", direction="upstream", limit=1)
+    assert [e.id for e in limited] == [1]

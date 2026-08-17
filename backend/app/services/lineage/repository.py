@@ -10,7 +10,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.consume import ApiClient, ApiClientStatus
@@ -1298,6 +1298,49 @@ class LineageRepository:
         stmt = select(LineageEdge).where(LineageEdge.deleted_at.is_(None)).order_by(LineageEdge.id)
         if limit is not None:
             stmt = stmt.limit(limit)
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def list_export_edges(
+        self,
+        *,
+        node: str | None = None,
+        direction: str = "both",
+        granularity: str | None = None,
+        provenance: str | None = None,
+        limit: int = 10_000,
+    ) -> list[LineageEdge]:
+        """血缘导出查询：按节点/方向/粒度/来源过滤全部未删除边（P4 标准导出）。
+
+        与影响分析（图优先/分页）不同，导出是全量开放 API 的数据源：无节点过滤时
+        返回全部边（按 id 升序、limit 截断），带节点时仅返回该节点直接相关边
+        （``direction`` 控制上游/下游/双向，与 ``edges_for_node`` 语义一致）。
+
+        Args:
+            node: 可选节点 id（带前缀，如 ``table:db.tbl``）。
+            direction: 节点过滤方向（upstream=目标为该节点 / downstream=源为该节点 /
+                both=任一方向）。
+            granularity: 可选粒度过滤（L1/L2/L3）。
+            provenance: 可选来源通道过滤。
+            limit: 返回边数上限。
+
+        Returns:
+            过滤后的未删除血缘边列表（按 id 升序）。
+        """
+        stmt = select(LineageEdge).where(LineageEdge.deleted_at.is_(None))
+        if granularity:
+            stmt = stmt.where(LineageEdge.granularity == granularity)
+        if provenance:
+            stmt = stmt.where(LineageEdge.provenance == provenance)
+        if node:
+            if direction == "upstream":
+                stmt = stmt.where(LineageEdge.target_node == node)
+            elif direction == "downstream":
+                stmt = stmt.where(LineageEdge.source_node == node)
+            else:
+                stmt = stmt.where(
+                    or_(LineageEdge.source_node == node, LineageEdge.target_node == node)
+                )
+        stmt = stmt.order_by(LineageEdge.id).limit(limit)
         return list((await self._db.execute(stmt)).scalars().all())
 
     async def coverage_broken_edges(self, limit: int = 200) -> list[dict[str, Any]]:

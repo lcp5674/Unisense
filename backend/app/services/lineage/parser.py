@@ -148,11 +148,81 @@ def _build_alias_map(ast: exp.Expression) -> dict[str, str]:
     return amap
 
 
-def _preprocess_dialect(sql: str, dialect: str | None) -> str:
+#: Hive/Spark 变量占位符：``${hivevar:name}`` / ``${hiveconf:name}`` / ``${name}``。
+#: 仅匹配合法变量名（字母/数字/下划线/点），避免误伤 SQL 中的其他 ``${...}`` 片段。
+_HIVE_VAR_PATTERN = re.compile(
+    r"\$\{(?:hivevar|hiveconf):([A-Za-z_][A-Za-z0-9_.]*)\}|\$\{([A-Za-z_][A-Za-z0-9_.]*)\}"
+)
+#: Hive ``set`` 命令：``set hivevar:name=value;`` / ``set hiveconf:name=value;``（可无分号）。
+_HIVE_SET_PATTERN = re.compile(
+    r"^\s*set\s+(?:hivevar|hiveconf):([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*([^;]+?)\s*;?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+#: Hive 注释行变量声明：``--hivevar name=value`` / ``-- hivevar:name=value``。
+_HIVEVAR_COMMENT_PATTERN = re.compile(
+    r"^\s*--\s*(?:hivevar|hiveconf)\s*:?\s*([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _collect_hive_vars(sql: str, variables: dict[str, str] | None) -> dict[str, str]:
+    """收集待展开的 Hive 变量表（优先级低→高：显式传入 < set 命令 < 注释行）。
+
+    显式传入的 ``variables`` 作为基线，SQL 文本内的 ``set hivevar:x=y;`` 与
+    ``--hivevar x=y`` 声明逐行覆盖（SQL 内的声明更贴近本次任务）。
+    """
+    merged = dict(variables or {})
+    for m in _HIVE_SET_PATTERN.finditer(sql):
+        merged[m.group(1)] = m.group(2).strip()
+    for m in _HIVEVAR_COMMENT_PATTERN.finditer(sql):
+        merged[m.group(1)] = m.group(2).strip()
+    return merged
+
+
+def expand_variables(
+    sql: str, dialect: str | None = None, variables: dict[str, str] | None = None
+) -> str:
+    """展开 Hive/Spark 变量占位符（解析前文本归一化，血缘语义不变）。
+
+    生产模板 SQL 常以 ``${hivevar:date_id}`` / ``${hiveconf:dt}`` / ``${tbl}`` 引用
+    变量；sqlglot 无法解析这些占位符会抛 ParseError 致血缘全丢。本函数在解析前
+    把已知变量替换为字面值，未知占位符**保留原样**（sqlglot 解析失败时血缘降级
+    为空而不崩——与整体降级策略一致）。
+
+    仅对 Hive/Spark 方言展开（``${var}`` 是 Hive 模板语法），或调用方显式传入
+    ``variables`` 时对任意方言展开。变量值来自：
+    - 调用方显式 ``variables``（如批处理/API 参数）；
+    - SQL 文本内的 ``set hivevar:name=value;`` / ``set hiveconf:name=value;`` 命令；
+    - SQL 文本内的 ``--hivevar name=value`` 注释行。
+
+    ``set`` 声明行本身保留（不影响血缘解析；sqlglot 对非查询语句降级为空）。
+    """
+    if not sql or not sql.strip():
+        return sql
+    d = (dialect or "").lower()
+    if d not in ("hive", "spark") and not variables:
+        return sql
+    vars_ = _collect_hive_vars(sql, variables)
+    if not vars_:
+        return sql
+
+    def _sub(m: re.Match[str]) -> str:
+        name = m.group(1) or m.group(2)
+        # 未知变量保留占位符原样（解析失败降级，不伪造血缘）
+        return vars_.get(name, m.group(0))
+
+    return _HIVE_VAR_PATTERN.sub(_sub, sql)
+
+
+def _preprocess_dialect(
+    sql: str, dialect: str | None, variables: dict[str, str] | None = None
+) -> str:
     """方言级语法归一化（解析前预处理，血缘语义不变）。
 
     sqlglot 30.x 对部分生产高频方言语法不支持（降级为 ``Command`` 或抛解析异常），
     这里在解析前做等价改写：
+    - hive/spark：先展开 ``${var}`` 变量占位符（``expand_variables``）——模板 SQL
+      不展开 sqlglot 无法解析，血缘全丢；展开后血缘语义不变。
     - mysql/doris/starrocks：``REPLACE INTO ... SELECT`` → ``INSERT INTO ... SELECT``
       （sqlglot 不支持 REPLACE；血缘语义等价——REPLACE 即覆盖式插入，来源表/列映射
       完全一致，仅写入动作不同）。
@@ -171,6 +241,8 @@ def _preprocess_dialect(sql: str, dialect: str | None) -> str:
     if not sql or not sql.strip():
         return sql
     d = (dialect or "").lower()
+    if d in ("hive", "spark") or variables:
+        sql = expand_variables(sql, dialect, variables)
     if d in ("mysql", "doris", "starrocks"):
         sql = re.sub(r"\bREPLACE\s+INTO\b", "INSERT INTO", sql, flags=re.IGNORECASE)
     if d in ("doris", "starrocks"):
@@ -335,7 +407,10 @@ def _select_table_edges(ast: Any, target_name: str) -> list[TableEdge]:
 
 
 def extract_table_lineage(
-    sql: str, dialect: str | None = None, target_table: str | None = None
+    sql: str,
+    dialect: str | None = None,
+    target_table: str | None = None,
+    variables: dict[str, str] | None = None,
 ) -> list[TableEdge]:
     """抽取表级血缘。
 
@@ -346,13 +421,15 @@ def extract_table_lineage(
         target_table: 可选落点表（方案 A+B）。SQL 自身无写入目标（纯 SELECT）但指定
             了该值时，把 FROM/JOIN 源表 → ``target_table`` 生成表级边；未指定时纯
             SELECT 保持无成边（返回空，由调用方降级展示上游依赖）。
+        variables: 可选 Hive/Spark 变量表（``${hivevar:name}`` 占位符展开用，
+            P5 宏展开；仅对 hive/spark 方言或显式传入时生效）。
 
     Returns:
         表级血缘边列表（source -> target）；解析失败或非法 SQL 时返回空列表（降级）。
     """
     edges: list[TableEdge] = []
     seen: set[tuple[str, str]] = set()
-    sql = _preprocess_dialect(sql, dialect)
+    sql = _preprocess_dialect(sql, dialect, variables)
     for stmt in _split_statements(sql):
         try:
             ast = sqlglot.parse_one(stmt, dialect=dialect)
@@ -1254,7 +1331,10 @@ def _select_field_edges(ast: Any, target_name: str, dialect: str | None) -> list
 
 
 def extract_field_lineage(
-    sql: str, dialect: str | None = None, target_table: str | None = None
+    sql: str,
+    dialect: str | None = None,
+    target_table: str | None = None,
+    variables: dict[str, str] | None = None,
 ) -> list[FieldEdge]:
     """抽取字段级血缘（深度解析：CTE / 子查询 / 表达式 / MERGE / UNION）。
 
@@ -1270,13 +1350,14 @@ def extract_field_lineage(
         target_table: 可选落点表（方案 A+B）。SQL 自身无写入目标（纯 SELECT）但指定
             了该值时，把 SELECT 投影列 → ``target_table`` 对应列生成字段级边；未指定
             时纯 SELECT 保持无成边（返回空，由调用方降级展示上游依赖）。
+        variables: 可选 Hive/Spark 变量表（P5 宏展开，同 ``extract_table_lineage``）。
 
     Returns:
         字段级血缘边列表（含降级标记）；解析不可用或失败时返回空列表（降级）。
     """
     edges: list[FieldEdge] = []
     seen: set[tuple[object, ...]] = set()
-    sql = _preprocess_dialect(sql, dialect)
+    sql = _preprocess_dialect(sql, dialect, variables)
     for stmt in _split_statements(sql):
         try:
             ast = sqlglot.parse_one(stmt, dialect=dialect)
@@ -1302,7 +1383,9 @@ def extract_field_lineage(
     return edges
 
 
-def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
+def extract_upstream_deps(
+    sql: str, dialect: str | None = None, variables: dict[str, str] | None = None
+) -> UpstreamDeps:
     """提取只读查询（纯 SELECT 无落点）读取的上游表与字段清单。
 
     血缘边要求下游落点；纯 SELECT 不构成边。本函数返回该查询读取的源表
@@ -1317,13 +1400,14 @@ def extract_upstream_deps(sql: str, dialect: str | None = None) -> UpstreamDeps:
     Args:
         sql: SQL 文本（支持注释/多语句，自动净化）。
         dialect: sqlglot dialect（可选）。
+        variables: 可选 Hive/Spark 变量表（P5 宏展开，同 ``extract_table_lineage``）。
 
     Returns:
         ``UpstreamDeps``：去重排序的 ``tables`` / ``fields``；解析失败降级为空。
     """
     tables: set[str] = set()
     fields: set[str] = set()
-    sql = _preprocess_dialect(sql, dialect)
+    sql = _preprocess_dialect(sql, dialect, variables)
     for stmt in _split_statements(sql):
         try:
             ast: Any = sqlglot.parse_one(stmt, dialect=dialect)

@@ -32,7 +32,7 @@ modules:
     runbook_path: "docs/runbooks/collector.md"
     ratify_pending: "§1.5 人工 ratify 待补（agent 不可代签）"
     verified_at: "2026-08-08"
-    note_20260815: "血缘图谱支持全通道表级血缘 + 来源通道筛选：新增 GET /lineage/graph provenance 参数（dp_csv/sqlglot/metric_definition/all/空），指定通道时经 repo.graph_from_edges 从 lineage_edge 直接构建表级血缘（节点=边两端 table/metric/field 去重 + resolve_node_meta 富集），不再受采集目录交集限制；前端血缘图谱 Tab 新增来源通道筛选（默认全部血缘），血缘图谱默认展示完整表级血缘。修复：血缘图谱看不到 DP 血缘（db_catalog 与血缘边表交集仅 4 张）。"
+    note_20260815: "血缘图谱支持全通道表级血缘 + 来源通道筛选：新增 GET /lineage/graph provenance 参数（dp_csv/sqlglot/metric_definition/all/空），指定通道时经 repo.graph_from_edges 从 lineage_edge 直接构建表级血缘（节点=边两端 table/metric/field 去重 + resolve_node_meta 富集），不再受采集目录交集限制；前端血缘图谱 Tab 新增来源通道筛选（默认全部血缘），血缘图谱默认展示完整表级血缘。修复：血缘图谱看不到 DP 血缘（db_catalog 与血缘边表交集仅 4 张）。P4 标准血缘导出 + P5 Hive 变量展开（2026-08-17）：P4 新增 GET /lineage/export 开放 API（OpenLineage 2-0-0 RunEvent 标准导出——L1 表级边 inputs/outputs + L2 字段级 schema lineage facet；通用 JSON 原始边明细 + 元数据），可按节点/方向/粒度/来源过滤（repo.list_export_edges），注入守卫对 node 等 query 参数仍全量扫描；P5 解析器新增 expand_variables 宏/变量展开——${hivevar:x}/${hiveconf:x}/${x} 占位符+ set hivevar:x=y; 与 --hivevar x=y 内联声明，仅 hive/spark 方言或显式传 variables 时展开，未知占位符保留（降级不崩），血缘语义不变，三个解析入口统一接入。验证：parser 101 项 + repository 58 项 + service 92 项 + 全量 2968 passed（7 失败全为并行会话 collector 在途改动）+ ruff/format/mypy 0 + security 8 项全绿。"
     post_verify_review:
       standard: "DEV_GUIDE §6.3 (2026-08-07 新增约束：开发+验证完成后双视角漏洞审查)"
       performed_at: "2026-08-07"
