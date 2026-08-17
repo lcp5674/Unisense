@@ -127,6 +127,22 @@ export interface MetricCompareResult {
   fields: Record<string, MetricCompareField | MetricCompareDeps | undefined>;
 }
 
+// 多指标矩阵对比（backend compare_matrix：行级 all_identical/partial/all_different）
+export interface MetricCompareMatrixField {
+  values: Record<string, unknown>;
+  difference_level: "all_identical" | "partial" | "all_different";
+}
+export interface MetricCompareMatrixDeps {
+  values: Record<string, string[]>;
+  intersection: string[];
+  only: Record<string, string[]>;
+  difference_level: "all_identical" | "partial" | "all_different";
+}
+export interface MetricCompareMatrixResult {
+  metrics: string[];
+  fields: Record<string, MetricCompareMatrixField | MetricCompareMatrixDeps | undefined>;
+}
+
 // 只读用户摘要（backend GET /auth/users，Owner 责任链渲染用）
 export interface UserBrief {
   id: number;

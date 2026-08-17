@@ -88,6 +88,7 @@ import {
   MetricDimension,
   DimensionMetricBinding,
   MetricCompareResult,
+  MetricCompareMatrixResult,
   MetricHealth,
   MetricResponse,
   MetricTemplate,
@@ -850,6 +851,13 @@ export async function compareMetrics(codeA: string, codeB: string): Promise<Metr
   return request<MetricCompareResult>(`${API_BASE}/metric-definitions/compare`, {
     method: "POST",
     body: JSON.stringify({ metric_codes: [codeA, codeB] }),
+  });
+}
+
+export async function compareMetricsMatrix(codes: string[]): Promise<MetricCompareMatrixResult> {
+  return request<MetricCompareMatrixResult>(`${API_BASE}/metric-definitions/compare/matrix`, {
+    method: "POST",
+    body: JSON.stringify({ metric_codes: codes }),
   });
 }
 

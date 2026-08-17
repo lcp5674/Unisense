@@ -3373,6 +3373,95 @@ class MetricService(BaseService):
 
         return result
 
+    async def compare_matrix(self, metric_codes: list[str]) -> dict[str, Any]:
+        """多指标关键字段矩阵对比（2~6 个）。
+
+        两两对比的 only_a/only_b 语义在 3+ 指标时失效，故矩阵模式改为：
+        每行一个字段、每列一个指标，行级汇总差异等级：
+
+        - ``all_identical``：所有指标取值一致
+        - ``partial``：取值存在部分一致、部分不同（>1 种取值但非全部互异）
+        - ``all_different``：每个指标取值都不同
+
+        依赖对比给出全体交集 + 各指标独有（相对全体交集）。
+
+        Args:
+            metric_codes: 待对比的指标编码（2~6 个，去重保序）。
+
+        Returns:
+            矩阵对比结果，含行级差异标记。
+
+        Raises:
+            NotFoundError: 任一指标不存在（METRIC_ARCHIVED 表示已因仲裁作废）。
+        """
+        metrics: list[Metric] = []
+        seen: set[str] = set()
+        for code in metric_codes:
+            if code in seen:
+                continue
+            seen.add(code)
+            metrics.append(await self._get_metric_for_compare(code))
+
+        def _level(values: list[Any]) -> str:
+            distinct = len({repr(v) for v in values})
+            if distinct <= 1:
+                return "all_identical"
+            if distinct == len(values):
+                return "all_different"
+            return "partial"
+
+        fields = [
+            "granularity",
+            "unit",
+            "currency",
+            "aggregation",
+            "time_semantics",
+            "additivity",
+            "dw_layer",
+            "metric_tier",
+            "serving_mode",
+            "freshness",
+        ]
+        result: dict[str, Any] = {
+            "metrics": [m.metric_code for m in metrics],
+            "fields": {},
+        }
+
+        for field in fields:
+            result["fields"][field] = {
+                "values": {m.metric_code: getattr(m, field, None) for m in metrics},
+                "difference_level": _level([getattr(m, field, None) for m in metrics]),
+            }
+
+        # 口径定义对比：表达式为代表值（含 pii 标记的完整定义整体展示）
+        defs = [m.definition_json or {} for m in metrics]
+        result["fields"]["definition"] = {
+            "values": {
+                m.metric_code: d for m, d in zip(metrics, defs, strict=True)
+            },
+            "difference_level": _level([d.get("expression", "") for d in defs]),
+        }
+
+        # 依赖对比：全体交集 + 各指标独有（相对全体交集）
+        dep_sets = [set(d.get("dependencies", []) or []) for d in defs]
+        if len(dep_sets) > 1:
+            inter = set.intersection(*dep_sets)
+        else:
+            inter = dep_sets[0] if dep_sets else set()
+        result["fields"]["dependencies"] = {
+            "values": {
+                m.metric_code: sorted(ds) for m, ds in zip(metrics, dep_sets, strict=True)
+            },
+            "intersection": sorted(inter),
+            "only": {
+                m.metric_code: sorted(ds - inter)
+                for m, ds in zip(metrics, dep_sets, strict=True)
+            },
+            "difference_level": _level([sorted(ds) for ds in dep_sets]),
+        }
+
+        return result
+
     # ---- US10: 批量注册 ----
 
     async def batch_register_metrics(
