@@ -1092,3 +1092,91 @@ def test_insert_self_reference_no_self_loop() -> None:
         (e.source_table, e.source_column, e.target_column)
         for e in extract_field_lineage(sql2, "hive")
     }
+
+
+def test_pg_lateral_subquery_column_resolved_to_inner() -> None:
+    """PG ``LATERAL (SELECT ...) x`` 相关子查询：``x.v`` 须解析到内层来源表而非外层。
+
+    旧实现把 LATERAL 当 Hive LATERAL VIEW 处理，对 Lateral 整体 find_all 列，
+    导致 ``x.v`` 误归属外层表 ``ods.s`` 并多产相关性伪边。
+    """
+    sql = (
+        "INSERT INTO dws.t SELECT s.id, x.v FROM ods.s, "
+        "LATERAL (SELECT v FROM ods.d WHERE d.id = s.id) x"
+    )
+    field_edges = extract_field_lineage(sql, dialect="postgres")
+    mapping = {(e.target_column, e.source_table): e.source_column for e in field_edges}
+    assert mapping.get(("id", "ods.s")) == "id"
+    assert mapping.get(("v", "ods.d")) == "v", "x.v 应归属内层 ods.d.v"
+    # 不得把外层表当作 x.v 的来源（无伪边）
+    assert all(e.target_column != "v" or e.source_table == "ods.d" for e in field_edges)
+    # Hive LATERAL VIEW EXPLODE 回归不受影响
+    sql2 = "INSERT INTO dws.t SELECT e.tag FROM ods.a LATERAL VIEW EXPLODE(a.tags) e AS tag"
+    assert {("ods.a", "tags", "tag")} == {
+        (e.source_table, e.source_column, e.target_column)
+        for e in extract_field_lineage(sql2, dialect="hive")
+    }
+
+
+def test_doris_aggregate_key_column_agg_type_stripped() -> None:
+    """Doris ``CREATE TABLE ... (v INT SUM) AGGREGATE KEY(...) AS SELECT``：血缘不丢。
+
+    sqlglot 25.x 不支持列级聚合类型（SUM）与 AGGREGATE KEY 子句，剥离后血缘等价。
+    """
+    sql = (
+        "CREATE TABLE dws.t (id INT, v INT SUM) AGGREGATE KEY(id) "
+        "DISTRIBUTED BY HASH(id) AS SELECT id, v FROM ods.s"
+    )
+    table_edges = extract_table_lineage(sql, dialect="doris")
+    assert [(e.source, e.target) for e in table_edges] == [("ods.s", "dws.t")]
+    field_edges = extract_field_lineage(sql, dialect="doris")
+    assert {("ods.s", "id", "id"), ("ods.s", "v", "v")} == {
+        (e.source_table, e.source_column, e.target_column) for e in field_edges
+    }
+
+
+def test_doris_unique_key_and_decimal_agg_type() -> None:
+    """Doris ``UNIQUE KEY`` + ``DECIMAL(10,2) SUM`` 组合列定义：血缘仍正常。"""
+    sql = (
+        "CREATE TABLE dws.t (id INT, v DECIMAL(10,2) SUM) UNIQUE KEY(id) AS SELECT id, v FROM ods.s"
+    )
+    assert [(e.source, e.target) for e in extract_table_lineage(sql, "doris")] == [
+        ("ods.s", "dws.t")
+    ]
+    # SELECT 中的 SUM(v) 不受剥离正则影响（仅剥离「类型 + 聚合类型」组合）
+    sql2 = "INSERT INTO dws.t SELECT SUM(v), MAX(x) FROM ods.s"
+    assert extract_table_lineage(sql2, "doris")
+
+
+def test_oracle_insert_all_multi_target() -> None:
+    """Oracle ``INSERT ALL`` 多目标：每个目标表均产边，且不得产 t2->t1 伪边。"""
+    sql = (
+        "INSERT ALL INTO dws.t1 (id, v) VALUES (s.id, s.v) "
+        "INTO dws.t2 (id) VALUES (s.id) SELECT id, v FROM ods.s"
+    )
+    table_edges = extract_table_lineage(sql, dialect="oracle")
+    assert {("ods.s", "dws.t1"), ("ods.s", "dws.t2")} == {(e.source, e.target) for e in table_edges}
+    assert not any(e.source.startswith("dws.t2") for e in table_edges), "不得产 t2->t1 伪边"
+    field_edges = extract_field_lineage(sql, dialect="oracle")
+    assert {
+        ("ods.s", "id", "dws.t1", "id"),
+        ("ods.s", "v", "dws.t1", "v"),
+        ("ods.s", "id", "dws.t2", "id"),
+    } == {(e.source_table, e.source_column, e.target_table, e.target_column) for e in field_edges}
+
+
+def test_oracle_insert_first_conditional() -> None:
+    """Oracle ``INSERT FIRST`` 条件多目标：逐分支产边。"""
+    sql = (
+        "INSERT FIRST WHEN s.v > 100 THEN INTO dws.t1 (id,v) VALUES (s.id,s.v) "
+        "ELSE INTO dws.t2 (id,v) VALUES (s.id,s.v) SELECT id, v FROM ods.s"
+    )
+    table_edges = extract_table_lineage(sql, dialect="oracle")
+    assert {("ods.s", "dws.t1"), ("ods.s", "dws.t2")} == {(e.source, e.target) for e in table_edges}
+    field_edges = extract_field_lineage(sql, dialect="oracle")
+    assert {
+        ("ods.s", "id", "dws.t1", "id"),
+        ("ods.s", "v", "dws.t1", "v"),
+        ("ods.s", "id", "dws.t2", "id"),
+        ("ods.s", "v", "dws.t2", "v"),
+    } == {(e.source_table, e.source_column, e.target_table, e.target_column) for e in field_edges}

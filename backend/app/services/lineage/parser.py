@@ -159,10 +159,11 @@ def _preprocess_dialect(sql: str, dialect: str | None) -> str:
     - doris/starrocks：剥离 ``INSERT INTO t WITH LABEL 'xxx' SELECT ...`` 中的
       ``WITH LABEL 'xxx'`` 片段（sqlglot 不支持 Doris 的 LABEL 标记）。
     - doris/starrocks：剥离 ``CREATE TABLE ... AS SELECT`` 的物理分布/副本属性
-      （``DISTRIBUTED BY ... [BUCKETS n]``、``PROPERTIES(...)``、``ENGINE=``）——
+      （``DISTRIBUTED BY ... [BUCKETS n]``、``PROPERTIES(...)``、``ENGINE=``）与
+      AGGREGATE KEY 列定义的列级聚合类型后缀（``v INT SUM``）——
       sqlglot 25.x 对 ``CREATE TABLE t DISTRIBUTED BY HASH(id) BUCKETS 10 AS SELECT``
-      整体降级为 Command 致血缘全丢；这些子句仅描述物理布局，不影响 SELECT 源与
-      目标表，剥离后血缘语义不变。
+      或 ``v INT SUM`` 整体降级为 Command/抛 ParseError 致血缘全丢；这些子句仅描述
+      物理布局/聚合方式，不影响 SELECT 源与目标表，剥离后血缘语义不变。
     - tsql/mssql：INSERT TOP (n) INTO t SELECT ... → 剥离 TOP (n) 行数限定
       （sqlglot 25.x 不支持该语法抛 ParseError 致血缘全丢；限行不影响来源表与列映射，
       血缘语义不变）。
@@ -183,6 +184,30 @@ def _preprocess_dialect(sql: str, dialect: str | None) -> str:
         sql = re.sub(r"\bPROPERTIES\s*\(.*?\)", " ", sql, flags=re.IGNORECASE | re.DOTALL)
         sql = re.sub(r"\bENGINE\s*=\s*\w+", " ", sql, flags=re.IGNORECASE)
         sql = re.sub(r"\bBUCKETS\s+\d+", " ", sql, flags=re.IGNORECASE)
+        # 剥离 AGGREGATE KEY / UNIQUE KEY 表键子句（``AGGREGATE KEY(id)``）：
+        # sqlglot 25.x 仅支持 DUPLICATE KEY / PRIMARY KEY，遇 AGGREGATE/UNIQUE KEY
+        # 降级为 Command 致血缘全丢；表键仅描述排序/去重语义，不影响 SELECT 源与
+        # 目标表，剥离后血缘语义不变。
+        sql = re.sub(
+            r"\b(?:AGGREGATE|UNIQUE)\s+KEY\s*\([^)]*\)",
+            " ",
+            sql,
+            flags=re.IGNORECASE,
+        )
+        # 剥离 AGGREGATE KEY 列定义的列级聚合类型后缀（``v INT SUM`` → ``v INT``）：
+        # sqlglot 25.x 不支持列定义里的聚合类型（SUM/MAX/MIN/REPLACE/HLL_UNION 等）
+        # 抛 ParseError 致血缘全丢；聚合类型仅描述列级聚合方式，不影响 SELECT 源与
+        # 目标表，剥离后血缘语义不变。仅匹配「类型名 + 聚合类型」组合，不会误伤
+        # SELECT 中的 ``SUM(v)``。
+        sql = re.sub(
+            r"\b(BOOLEAN|TINYINT|SMALLINT|INT|BIGINT|LARGEINT|FLOAT|DOUBLE|"
+            r"DECIMAL(?:\([^)]*\))?|CHAR(?:\([^)]*\))?|VARCHAR(?:\([^)]*\))?|"
+            r"STRING|DATE|DATETIME|TIMESTAMP)\s+"
+            r"(SUM|MAX|MIN|REPLACE|HLL_UNION|BITMAP_UNION|PERCENTILE_UNION)\b",
+            r"\1",
+            sql,
+            flags=re.IGNORECASE,
+        )
     if d in ("tsql", "mssql"):
         # tsql ``INSERT TOP (n) INTO t SELECT ...``：sqlglot 25.x 不支持该语法直接抛
         # ParseError 致血缘全丢；剥离 TOP (n) 行数限定（不影响来源表与列映射，血缘
@@ -212,8 +237,55 @@ def _split_statements(sql: str) -> list[str]:
     return [s for s in stmts if s]
 
 
+def _multitable_branches(ast: exp.MultitableInserts) -> list[tuple[str, exp.Insert]]:
+    """提取 Oracle ``INSERT ALL/FIRST`` 的各目标分支 ``(目标表名, Insert 分支)``。
+
+    ``MultitableInserts.expressions`` 是 ``ConditionalInsert``（多目标/条件插入），
+    每个 ``.this`` 是真正的 ``Insert``（``this`` 为 ``Schema``：目标表 + 列清单，
+    ``args["expression"]`` 为 ``Values`` 行）。``_find_target`` 只认单目标，多目标
+    需逐分支处理——否则非首目标表会被 ``find_all(exp.Table)`` 误当作源表，产生
+    ``dws.t2->dws.t1`` 伪边污染血缘图。
+    """
+    out: list[tuple[str, exp.Insert]] = []
+    for cond in ast.args.get("expressions", []) or []:
+        ins = cond.this if isinstance(cond, exp.ConditionalInsert) else cond
+        if not isinstance(ins, exp.Insert):
+            continue
+        if isinstance(ins.this, exp.Schema) and isinstance(ins.this.this, exp.Table):
+            out.append((_norm_table(ins.this.this), ins))
+    return out
+
+
+def _multitable_table_edges(ast: exp.MultitableInserts) -> list[TableEdge]:
+    """Oracle ``INSERT ALL/FIRST`` 表级血缘：source 查询的源表 → 每个目标表。"""
+    source = ast.args.get("source")
+    if not isinstance(source, (exp.Select, exp.SetOperation)):
+        return []
+    cte_names = _collect_ctes(ast)
+    src_tables: set[str] = set()
+    for tbl in source.find_all(exp.Table):
+        src = _norm_table(tbl)
+        if src and not _is_cte_ref(tbl, cte_names):
+            src_tables.add(src)
+    edges: list[TableEdge] = []
+    seen: set[tuple[str, str]] = set()
+    for target_name, _ins in _multitable_branches(ast):
+        for src in src_tables:
+            if src == target_name:
+                continue
+            key = (src, target_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append(TableEdge(source=src, target=target_name))
+    return edges
+
+
 def _table_edges(ast: Any) -> list[TableEdge]:
     """单条已解析语句的表级血缘边（source -> target）。"""
+    if isinstance(ast, exp.MultitableInserts):
+        # Oracle INSERT ALL/FIRST 多目标：逐分支处理（见 _multitable_table_edges）
+        return _multitable_table_edges(ast)
     target = _find_target(ast)
     target_name = _norm_table(target) if target is not None else None
     edges: list[TableEdge] = []
@@ -601,9 +673,20 @@ def _resolve_column(
             # 而非当作 ``a`` 的真实列或丢弃。
             return _resolve_projection(scope, src.expression, cte_map, dialect, depth + 1)
         if isinstance(src.expression, exp.Lateral):
-            # LATERAL VIEW 展开表（Hive ``EXPLODE(a.tags) e AS tag``）：展开列的
-            # 血缘来源是 Lateral 表达式内 EXPLODE 的叶子列（``a.tags``）——
-            # ``e.tag`` 应归属 ``a.tags``，而非当作 ``a`` 的真实列或丢弃。
+            # LATERAL 有两种形态，需区分处理：
+            # - PG/SQL Server 相关子查询（``LATERAL (SELECT v FROM d WHERE ...) x``）：
+            #   ``Lateral.this`` 是 Subquery，``x.v`` 应进入内层 Select 解析（其 scope
+            #   只含内层来源表，外层 ``s`` 不参与，避免 ``v`` 误归属外层表产生伪边）。
+            # - Hive ``LATERAL VIEW EXPLODE(a.tags) e AS tag``：``Lateral.this`` 是
+            #   Explode/UDTF，展开列的血缘来源是表达式内 EXPLODE 的叶子列（``a.tags``）。
+            lateral_inner = src.expression.this
+            if isinstance(lateral_inner, exp.Subquery):
+                inner = lateral_inner.this
+                inner_scope = build_scope(inner) or src
+                for p in getattr(inner, "selects", []):
+                    if _projection_name(p) == col.name:
+                        return _resolve_projection(inner_scope, p, cte_map, dialect, depth + 1)
+                return []
             return _resolve_projection(scope, src.expression, cte_map, dialect, depth + 1)
         if isinstance(src.expression, exp.SetOperation):
             # 集合运算子查询（``SELECT x FROM (... UNION ...) u``）：Union scope
@@ -968,11 +1051,50 @@ def _extract_update_edges(
             _emit_update_pair(lhs, val, amap, target_name, cte_map, dialect, edges)
 
 
+def _extract_multitable_edges(
+    ast: exp.MultitableInserts,
+    cte_map: dict[str, exp.CTE],
+    dialect: str | None,
+    edges: list[FieldEdge],
+) -> None:
+    """Oracle ``INSERT ALL/FIRST`` 字段级血缘：每个目标分支 VALUES 列 → 目标列。
+
+    ``MultitableInserts`` 无单一 SELECT 投影——各分支的列引用在 ``Values`` 行中
+    （``INTO dws.t1 (id) VALUES (s.id)``）。以 source 查询为作用域解析各分支
+    VALUES 列的叶子列，按分支列清单映射目标列。
+    """
+    source = ast.args.get("source")
+    if not isinstance(source, (exp.Select, exp.SetOperation)):
+        return
+    scope = _try_build_scope(source)
+    if scope is None:
+        return
+    for target_name, ins in _multitable_branches(ast):
+        cols = _insert_column_list(ins)
+        values = ins.args.get("expression")
+        if not isinstance(values, exp.Values):
+            continue
+        for row in values.expressions:
+            items = row.expressions if isinstance(row, exp.Tuple) else [row]
+            for i, val in enumerate(items):
+                target_col = cols[i] if i < len(cols) else _column_name(val)
+                if not target_col:
+                    continue
+                is_bare = _is_bare_column_projection(val)
+                _emit_leaf_edges(
+                    scope, val, cte_map, dialect, target_name, target_col, is_bare, edges
+                )
+
+
 def _extract_field_edges(ast: Any, dialect: str | None) -> list[FieldEdge]:
     """单条已解析语句的字段级血缘边（含 MERGE 专用路径与星号降级标记）。"""
+    edges: list[FieldEdge] = []
+    if isinstance(ast, exp.MultitableInserts):
+        # Oracle INSERT ALL/FIRST 多目标：逐分支处理（见 _extract_multitable_edges）
+        _extract_multitable_edges(ast, _collect_ctes(ast), dialect, edges)
+        return edges
     target = _find_target(ast)
     target_name = _norm_table(target) if target is not None else ""
-    edges: list[FieldEdge] = []
     if target is None and isinstance(ast, (exp.Insert, exp.Update, exp.Merge, exp.Create)):
         # 写入语句但目标非表（如 Hive INSERT OVERWRITE DIRECTORY）：无表目标，不产字段边
         return edges
