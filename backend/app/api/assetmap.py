@@ -85,9 +85,25 @@ async def list_tables(
     trace_id: Annotated[str, Depends(get_trace_id)],
     source_id: str | None = Query(None),
     sensitivity: str | None = Query(None),
+    domain: str | None = Query(None, description="业务域（经数据源继承过滤）"),
+    owner_id: int | None = Query(
+        None, description="责任人（Owner）ID 过滤；0 表示无责任人（未分配）"
+    ),
+    schema_status: str | None = Query(
+        None, description="Schema 完整性：complete / incomplete"
+    ),
+    keyword: str | None = Query(None, description="关键字：表名或数据源模糊搜索"),
     limit: int = Query(100, ge=1, le=200),
 ) -> Any:
-    items = await AssetMapService(db).list_tables(source_id, sensitivity, limit)
+    items = await AssetMapService(db).list_tables(
+        source_id,
+        sensitivity,
+        limit,
+        domain=domain,
+        owner_id=owner_id,
+        schema_status=schema_status,
+        keyword=keyword,
+    )
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
 
 
@@ -96,8 +112,25 @@ async def orphan_assets(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
+    keyword: str | None = Query(None, description="关键字：实体名或数据源模糊搜索"),
+    source_id: str | None = Query(None, description="数据源 ID 过滤"),
+    domain: str | None = Query(None, description="业务域（经数据源继承过滤）"),
+    entity_type: str | None = Query(None, description="实体类型：table / view / field 等"),
+    sensitivity: str | None = Query(None, description="敏感度等级过滤"),
+    schema_status: str | None = Query(
+        None, description="Schema 完整性：complete / incomplete"
+    ),
+    limit: int = Query(200, ge=1, le=500),
 ) -> Any:
-    items = await AssetMapService(db).orphan_assets()
+    items = await AssetMapService(db).orphan_assets(
+        keyword=keyword,
+        source_id=source_id,
+        domain=domain,
+        entity_type=entity_type,
+        sensitivity=sensitivity,
+        schema_status=schema_status,
+        limit=limit,
+    )
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
 
 
@@ -257,9 +290,24 @@ async def export_tables(
     user: CurrentUser,
     source_id: str | None = Query(None),
     sensitivity: str | None = Query(None),
+    domain: str | None = Query(None, description="业务域（经数据源继承过滤）"),
+    owner_id: int | None = Query(
+        None, description="责任人（Owner）ID 过滤；0 表示无责任人（未分配）"
+    ),
+    schema_status: str | None = Query(
+        None, description="Schema 完整性：complete / incomplete"
+    ),
+    keyword: str | None = Query(None, description="关键字：表名或数据源模糊搜索"),
 ) -> Response:
-    """资产 CSV 导出：目录资产（表/视图）清单，供盘点/审计。"""
-    items = await AssetMapService(db).export_tables(source_id, sensitivity)
+    """资产 CSV 导出：目录资产（表/视图）清单，供盘点/审计（与列表同过滤条件）。"""
+    items = await AssetMapService(db).export_tables(
+        source_id,
+        sensitivity,
+        domain=domain,
+        owner_id=owner_id,
+        schema_status=schema_status,
+        keyword=keyword,
+    )
 
     output = io.StringIO()
     writer = csv.writer(output)

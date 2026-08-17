@@ -65,6 +65,54 @@ async def test_list_tables() -> None:
     repo.list_tables.assert_awaited()
 
 
+async def test_list_tables_passes_multi_dimension_filters() -> None:
+    """多维度过滤透传：domain/owner_id/schema_status/keyword 原样转发到 repository。"""
+    svc, repo = await _svc()
+    items = await svc.list_tables(
+        None,
+        None,
+        100,
+        domain="sales",
+        owner_id=7,
+        schema_status="incomplete",
+        keyword="ods",
+    )
+    assert len(items) == 1
+    repo.list_tables.assert_awaited_once_with(
+        None,
+        None,
+        100,
+        domain="sales",
+        owner_id=7,
+        schema_status="incomplete",
+        keyword="ods",
+    )
+
+
+async def test_orphan_assets_passes_filters() -> None:
+    """孤儿资产过滤透传：keyword/source_id/domain/entity_type/sensitivity/schema_status 转发。"""
+    svc, repo = await _svc()
+    items = await svc.orphan_assets(
+        keyword="ods",
+        source_id="s1",
+        domain="sales",
+        entity_type="table",
+        sensitivity="PII",
+        schema_status="incomplete",
+        limit=50,
+    )
+    assert items == []
+    repo.orphan_assets.assert_awaited_once_with(
+        keyword="ods",
+        source_id="s1",
+        domain="sales",
+        entity_type="table",
+        sensitivity="PII",
+        schema_status="incomplete",
+        limit=50,
+    )
+
+
 async def test_get_entity_detail_passthrough() -> None:
     """详情端点编排：透传 repository 结果；实体不存在返回 None。"""
     svc, repo = await _svc()

@@ -2753,13 +2753,24 @@ export async function listDataSourceDatabases(req: {
   });
 }
 
-/** 异步立即采集（返回 job_id，进度走 SSE / 轮询任务状态）。 */
-export async function collectSourceNow(sourceId: string, mode = "FULL"): Promise<CollectNowResult> {
+/** 异步立即采集（返回 job_id，进度走 SSE / 轮询任务状态）。
+ *
+ * ``filters`` 为本次临时表级过滤（仅本次采集生效，不污染数据源配置）；
+ * 不传/空时 worker 回退到数据源配置的白黑名单。
+ */
+export async function collectSourceNow(
+  sourceId: string,
+  mode = "FULL",
+  filters?: { include_patterns?: string[]; exclude_patterns?: string[] },
+): Promise<CollectNowResult> {
+  const body: Record<string, unknown> = { collector_type: "information_schema", mode };
+  if (filters?.include_patterns?.length) body.include_patterns = filters.include_patterns;
+  if (filters?.exclude_patterns?.length) body.exclude_patterns = filters.exclude_patterns;
   return request<CollectNowResult>(
     `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/collect-now`,
     {
       method: "POST",
-      body: JSON.stringify({ collector_type: "information_schema", mode }),
+      body: JSON.stringify(body),
     },
   );
 }
@@ -2842,12 +2853,15 @@ export async function scheduleSource(
   sourceId: string,
   cron: string,
   mode = "FULL",
+  scheduleEnabled?: boolean,
 ): Promise<ScheduleResult> {
+  const body: Record<string, unknown> = { cron, mode };
+  if (scheduleEnabled !== undefined) body.schedule_enabled = scheduleEnabled;
   return request<ScheduleResult>(
     `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/schedule`,
     {
       method: "POST",
-      body: JSON.stringify({ cron, mode }),
+      body: JSON.stringify(body),
     },
   );
 }
@@ -3187,18 +3201,50 @@ export async function fetchAssetMetricDimensions(): Promise<AssetMetricDimension
 export async function fetchAssetTables(params?: {
   source_id?: string;
   sensitivity?: string;
+  /** 业务域（经数据源继承过滤） */
+  domain?: string;
+  /** 责任人（Owner）ID 过滤 */
+  owner_id?: number;
+  /** Schema 完整性：complete / incomplete */
+  schema_status?: "complete" | "incomplete";
+  /** 关键字：表名或数据源模糊搜索 */
+  keyword?: string;
   limit?: number;
 }): Promise<{ items: AssetTableItem[]; total: number }> {
   const qs = pageQs({
     source_id: params?.source_id,
     sensitivity: params?.sensitivity,
+    domain: params?.domain,
+    owner_id: params?.owner_id,
+    schema_status: params?.schema_status,
+    keyword: params?.keyword,
     limit: params?.limit ?? 100,
   });
   return request(`${API_BASE}/assetmap/tables?${qs}`);
 }
 
-export async function fetchAssetOrphans(): Promise<{ items: AssetTableItem[]; total: number }> {
-  return request(`${API_BASE}/assetmap/orphans`);
+export async function fetchAssetOrphans(params?: {
+  keyword?: string;
+  source_id?: string;
+  /** 业务域（经数据源继承过滤） */
+  domain?: string;
+  /** 实体类型：table / view / field 等 */
+  entity_type?: string;
+  sensitivity?: string;
+  /** Schema 完整性：complete / incomplete */
+  schema_status?: "complete" | "incomplete";
+  limit?: number;
+}): Promise<{ items: AssetTableItem[]; total: number }> {
+  const qs = pageQs({
+    keyword: params?.keyword,
+    source_id: params?.source_id,
+    domain: params?.domain,
+    entity_type: params?.entity_type,
+    sensitivity: params?.sensitivity,
+    schema_status: params?.schema_status,
+    limit: params?.limit ?? 200,
+  });
+  return request(`${API_BASE}/assetmap/orphans?${qs}`);
 }
 
 export async function fetchAssetGraph(params?: {
@@ -3344,10 +3390,22 @@ export async function fetchAssetMyAssets(limit = 50): Promise<AssetMyAssets> {
 export async function downloadAssetExport(params?: {
   source_id?: string;
   sensitivity?: string;
+  /** 业务域（经数据源继承过滤） */
+  domain?: string;
+  /** 责任人（Owner）ID 过滤 */
+  owner_id?: number;
+  /** Schema 完整性：complete / incomplete */
+  schema_status?: "complete" | "incomplete";
+  /** 关键字：表名或数据源模糊搜索 */
+  keyword?: string;
 }): Promise<void> {
   const qs = pageQs({
     source_id: params?.source_id,
     sensitivity: params?.sensitivity,
+    domain: params?.domain,
+    owner_id: params?.owner_id,
+    schema_status: params?.schema_status,
+    keyword: params?.keyword,
   });
   const headers: Record<string, string> = {
     "X-Api-Key": SEMANTIC_API_KEY,

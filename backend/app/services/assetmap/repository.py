@@ -69,8 +69,20 @@ class AssetMapRepository:
         self._session = session
 
     async def list_tables(
-        self, source_id: str | None, sensitivity: str | None, limit: int
+        self,
+        source_id: str | None,
+        sensitivity: str | None,
+        limit: int,
+        domain: str | None = None,
+        owner_id: int | None = None,
+        schema_status: str | None = None,
+        keyword: str | None = None,
     ) -> list[DBCatalog]:
+        """数据表目录多维度过滤（数据表 Tab / CSV 导出共用）。
+
+        支持：数据源 / 敏感度 / 业务域（经 data_source 继承）/ 责任人 /
+        Schema 完整性（complete|incomplete）/ 关键字（表名或数据源模糊）。
+        """
         stmt = select(DBCatalog).where(
             DBCatalog.entity_type == "table", DBCatalog.deleted_at.is_(None)
         )
@@ -78,11 +90,77 @@ class AssetMapRepository:
             stmt = stmt.where(DBCatalog.source_id == source_id)
         if sensitivity:
             stmt = stmt.where(DBCatalog.sensitivity_level == sensitivity)
+        if owner_id == 0:
+            # 约定：owner_id=0 表示「无责任人」（未分配，孤儿表）
+            stmt = stmt.where(DBCatalog.owner_id.is_(None))
+        elif owner_id is not None:
+            stmt = stmt.where(DBCatalog.owner_id == owner_id)
+        if schema_status == "incomplete":
+            stmt = stmt.where(DBCatalog.schema_incomplete.is_(True))
+        elif schema_status == "complete":
+            stmt = stmt.where(DBCatalog.schema_incomplete.is_(False))
+        if domain:
+            # db_catalog 无 domain 列，经数据源继承过滤（仅活跃源归属明确）
+            stmt = stmt.join(DataSource, DataSource.source_id == DBCatalog.source_id).where(
+                DataSource.deleted_at.is_(None),
+                DataSource.domain == domain,
+            )
+        if keyword:
+            # LIKE 通配符转义（对齐 collector.list_catalogs：% / _ 须转义防模糊放大）
+            escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            stmt = stmt.where(
+                or_(
+                    DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"),
+                    DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
+                )
+            )
         return list((await self._session.execute(stmt.limit(limit))).scalars().all())
 
-    async def orphan_assets(self) -> list[DBCatalog]:
-        stmt = select(DBCatalog).where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
-        return list((await self._session.execute(stmt)).scalars().all())
+    async def orphan_assets(
+        self,
+        keyword: str | None = None,
+        source_id: str | None = None,
+        domain: str | None = None,
+        entity_type: str | None = None,
+        sensitivity: str | None = None,
+        schema_status: str | None = None,
+        limit: int = 200,
+    ) -> list[DBCatalog]:
+        """孤儿资产（无责任人）多维度过滤，镜像 ``list_tables``。
+
+        支持：关键字 / 数据源 / 业务域（经 data_source 继承）/ 实体类型 /
+        敏感度 / Schema 完整性（complete|incomplete）。无参调用返回全部
+        （概览下钻「孤儿资产明细」兼容）。
+        """
+        stmt = select(DBCatalog).where(
+            DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None)
+        )
+        if source_id:
+            stmt = stmt.where(DBCatalog.source_id == source_id)
+        if entity_type:
+            stmt = stmt.where(DBCatalog.entity_type == entity_type)
+        if sensitivity:
+            stmt = stmt.where(DBCatalog.sensitivity_level == sensitivity)
+        if schema_status == "incomplete":
+            stmt = stmt.where(DBCatalog.schema_incomplete.is_(True))
+        elif schema_status == "complete":
+            stmt = stmt.where(DBCatalog.schema_incomplete.is_(False))
+        if domain:
+            # db_catalog 无 domain 列，经数据源继承过滤（仅活跃源归属明确）
+            stmt = stmt.join(DataSource, DataSource.source_id == DBCatalog.source_id).where(
+                DataSource.deleted_at.is_(None),
+                DataSource.domain == domain,
+            )
+        if keyword:
+            # LIKE 通配符转义（对齐 collector.list_catalogs：% / _ 须转义防模糊放大）
+            escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            stmt = stmt.where(
+                or_(
+                    DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"),
+                    DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
+                )
+            )
+        return list((await self._session.execute(stmt.limit(limit))).scalars().all())
 
     @staticmethod
     def _summarize_schema(schema_json: Any) -> Any:

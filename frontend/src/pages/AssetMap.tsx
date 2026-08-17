@@ -69,12 +69,14 @@ import {
   fetchAssetSearch,
   fetchAssetSummary,
   fetchAssetTables,
+  fetchCurrentUser,
   getMetric,
   inferColumnDescription,
   inferDescriptions,
   inferMetricDescription,
   inferTableDescription,
   listCatalogs,
+  listDataSources,
   listDomainTree,
   listMetrics,
   listSnapshots,
@@ -135,6 +137,21 @@ const SENSITIVITY_COLOR: Record<string, string> = {
   NEEDS_REVIEW: "gold",
   UNKNOWN: "default",
 };
+
+/** 业务域树扁平化：把 SubjectDomainTreeNode 递归展开为 {label, value} 选择项。 */
+function flattenDomainTree(
+  nodes: SubjectDomainTreeNode[],
+): Array<{ label: string; value: string }> {
+  const out: Array<{ label: string; value: string }> = [];
+  const walk = (list: SubjectDomainTreeNode[]) => {
+    for (const n of list) {
+      out.push({ label: n.name || n.code, value: n.code });
+      if (n.children?.length) walk(n.children);
+    }
+  };
+  walk(nodes);
+  return out;
+}
 
 /** 单实体废弃：复用批量废弃接口传单项（资产地图「单实体下线」治理入口）。
  *  成功返回 true；失败抛错由调用方 message 展示。 */
@@ -2937,25 +2954,490 @@ function OwnerTab() {
   );
 }
 
+/** 实体类型中文标签（兼容 DB 大写枚举 TABLE/VIEW/FIELD 与枚举表小写键）。 */
+function entityTypeLabel(v: string | null | undefined) {
+  if (!v) return <span className="muted">-</span>;
+  return ENTITY_TYPE_LABEL[v] ?? ENTITY_TYPE_LABEL[String(v).toLowerCase()] ?? v;
+}
+
+// 孤儿资产 Tab：无责任人资产的消化工作台（认领闭环 + 多维度过滤 + 合规统计）。
 function OrphansTab() {
   const [items, setItems] = useState<AssetTableItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // ---- 多维度筛选（关键字/数据源/业务域/实体类型/敏感度/Schema 状态）----
+  const [keyword, setKeyword] = useState("");
+  const [keywordDraft, setKeywordDraft] = useState("");
+  const [sourceId, setSourceId] = useState<string | undefined>(undefined);
+  const [domain, setDomain] = useState<string | undefined>(undefined);
+  const [entityType, setEntityType] = useState<string | undefined>(undefined);
+  const [sensitivity, setSensitivity] = useState<string | undefined>(undefined);
+  const [schemaStatus, setSchemaStatus] = useState<
+    "complete" | "incomplete" | undefined
+  >(undefined);
+  // 筛选候选（数据源 / 业务域 / 责任人）
+  const [sourceOptions, setSourceOptions] = useState<Array<{ label: string; value: string }>>([]);
+  const [domainOptions, setDomainOptions] = useState<Array<{ label: string; value: string }>>([]);
+  const [ownerOptions, setOwnerOptions] = useState<Array<{ label: string; value: number }>>([]);
+  // 合规统计（不受筛选影响，认领后刷新）——孤儿总数 / PII 孤儿 / 机密级孤儿
+  const [stats, setStats] = useState({ total: 0, pii: 0, confidential: 0 });
+  // 认领 / 转交：currentUserId 来自 /auth/me（认领 = 指定当前用户为责任人）
+  const [currentUserId, setCurrentUserId] = useState<number | undefined>(undefined);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [claiming, setClaiming] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferIds, setTransferIds] = useState<number[]>([]);
+  const [transferSaving, setTransferSaving] = useState(false);
+  const [transferForm] = Form.useForm();
+  // 实体详情抽屉（认领前查看 schema/PII/血缘）
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.orphans.pageSize", 20);
+  const canEdit = usePermission().can("assetmap:edit");
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await fetchAssetOrphans({
+        sensitivity,
+        source_id: sourceId,
+        domain,
+        entity_type: entityType,
+        schema_status: schemaStatus,
+        keyword: keyword || undefined,
+        limit: 200,
+      });
+      setItems(r.items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加载孤儿资产失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadStats() {
+    try {
+      const r = await fetchAssetOrphans({ limit: 500 });
+      const all = r.items;
+      setStats({
+        total: all.length,
+        pii: all.filter((i) => (i.sensitivity_level ?? "").includes("PII")).length,
+        confidential: all.filter((i) => i.sensitivity_level === "CONFIDENTIAL").length,
+      });
+    } catch {
+      // 统计加载失败不阻断列表展示
+    }
+  }
 
   useEffect(() => {
-    fetchAssetOrphans()
-      .then((r) => setItems(r.items))
-      .catch((err) => setError(err instanceof Error ? err.message : "加载孤儿资产失败"))
-      .finally(() => setLoading(false));
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sensitivity, sourceId, domain, entityType, schemaStatus, keyword]);
+
+  useEffect(() => {
+    loadStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 当前登录用户：认领 = 一键把孤儿资产挂到当前用户名下
+  useEffect(() => {
+    fetchCurrentUser()
+      .then((u) => setCurrentUserId(u.id))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    listDataSources({ page_size: 200 })
+      .then((res) =>
+        setSourceOptions(
+          res.items.map((s) => ({
+            label: s.name ? `${s.name}（${s.source_id}）` : s.source_id,
+            value: s.source_id,
+          })),
+        ),
+      )
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    listDomainTree()
+      .then((tree) => setDomainOptions(flattenDomainTree(tree)))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    listUsers()
+      .then((users) =>
+        setOwnerOptions(
+          users
+            .filter((u) => u.status === "active")
+            .map((u) => ({ label: `${u.display_name || u.username} (#${u.id})`, value: u.id })),
+        ),
+      )
+      .catch(() => {});
+  }, []);
+
+  const activeFilterCount = [
+    keyword,
+    sourceId,
+    domain,
+    entityType,
+    sensitivity,
+    schemaStatus,
+  ].filter((v) => v !== undefined && v !== "").length;
+
+  function resetFilters() {
+    setKeyword("");
+    setKeywordDraft("");
+    setSourceId(undefined);
+    setDomain(undefined);
+    setEntityType(undefined);
+    setSensitivity(undefined);
+    setSchemaStatus(undefined);
+  }
+
+  // 认领：将选中孤儿资产归属给当前登录用户（一键消化孤儿债），成功后从池中移除
+  async function claimIds(ids: number[]) {
+    if (currentUserId == null) {
+      message.warning("无法获取当前用户信息，请刷新后重试或使用「转交」指定责任人");
+      return;
+    }
+    setClaiming(true);
+    try {
+      await (ids.length > 1
+        ? batchAssignAssetOwner(ids, currentUserId)
+        : assignAssetOwner(ids[0], currentUserId));
+      message.success(`已认领 ${ids.length} 项孤儿资产`);
+      setSelectedRowKeys([]);
+      await Promise.all([load(), loadStats()]);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "认领失败");
+    } finally {
+      setClaiming(false);
+    }
+  }
+
+  function openTransfer(ids: number[]) {
+    setTransferIds(ids);
+    transferForm.resetFields();
+    setTransferOpen(true);
+  }
+
+  async function handleTransferSubmit() {
+    const values = transferForm.getFieldsValue();
+    const ownerId = values.owner_id as number | undefined;
+    if (ownerId == null) {
+      message.warning("请选择责任人");
+      return;
+    }
+    setTransferSaving(true);
+    try {
+      await (transferIds.length > 1
+        ? batchAssignAssetOwner(transferIds, ownerId)
+        : assignAssetOwner(transferIds[0], ownerId));
+      message.success(`已转交 ${transferIds.length} 项资产给责任人`);
+      setTransferOpen(false);
+      transferForm.resetFields();
+      setSelectedRowKeys([]);
+      await Promise.all([load(), loadStats()]);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "转交失败");
+    } finally {
+      setTransferSaving(false);
+    }
+  }
+
+  async function openDetail(item: AssetTableItem) {
+    if (item.id == null) {
+      message.warning("该实体缺少详情标识（id），暂无法查看详情");
+      return;
+    }
+    setDetailOpen(true);
+    setDetailLoading(true);
+    setDetail(null);
+    try {
+      setDetail(await fetchAssetEntityDetail(item.id));
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载实体详情失败");
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  function selectedEntityIds(): number[] {
+    return items
+      .filter((r) => selectedRowKeys.includes(`${r.source_id}-${r.entity_name}`))
+      .map((r) => r.id)
+      .filter((v): v is number => v != null);
+  }
+
+  const entityTypeOptions = Object.keys(ENTITY_TYPE_LABEL)
+    .filter((k) => ["table", "view", "field"].includes(k))
+    .map((k) => ({ value: k, label: ENTITY_TYPE_LABEL[k] }));
+
+  const columns: ColumnsType<AssetTableItem> = [
+    {
+      title: "数据源",
+      dataIndex: "source_id",
+      key: "source_id",
+      width: 170,
+      ellipsis: true,
+      render: (v: string, r: AssetTableItem) =>
+        r.source_name && r.source_name !== v ? `${r.source_name}（${v}）` : v,
+    },
+    { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true },
+    {
+      title: "类型",
+      dataIndex: "entity_type",
+      key: "entity_type",
+      width: 90,
+      render: (v: string) => entityTypeLabel(v),
+    },
+    {
+      title: "业务域",
+      dataIndex: "domain",
+      key: "domain",
+      width: 110,
+      ellipsis: true,
+      render: (v: string | null | undefined) => v ?? <span className="muted">-</span>,
+    },
+    {
+      title: "敏感度",
+      dataIndex: "sensitivity_level",
+      key: "sensitivity",
+      width: 110,
+      render: (s: string | null | undefined) => sensitivityTag(s),
+    },
+    {
+      title: "Schema",
+      dataIndex: "schema_incomplete",
+      key: "schema",
+      width: 100,
+      render: (v: boolean) =>
+        v ? <Tag color="orange">不完整</Tag> : <Tag color="green">完整</Tag>,
+    },
+    {
+      title: "更新时间",
+      dataIndex: "updated_at",
+      key: "updated_at",
+      width: 150,
+      render: (v: string | null | undefined) =>
+        v ? formatCnTime(v) : <span className="muted">-</span>,
+    },
+    {
+      title: "操作",
+      key: "action",
+      width: 190,
+      render: (_: unknown, record: AssetTableItem) => (
+        <Space size={0} wrap>
+          <Button
+            type="link"
+            size="small"
+            icon={<EyeOutlined />}
+            disabled={record.id == null}
+            onClick={() => openDetail(record)}
+          >
+            详情
+          </Button>
+          {canEdit && (
+            <Popconfirm
+              title={`认领「${record.entity_name}」？`}
+              description="认领后你将作为该资产的责任人，从孤儿池移除。"
+              okText="确认认领"
+              okButtonProps={{ type: "primary" }}
+              onConfirm={() => {
+                if (record.id != null) void claimIds([record.id]);
+              }}
+            >
+              <Button
+                type="link"
+                size="small"
+                icon={<CheckOutlined />}
+                loading={claiming}
+                disabled={currentUserId == null}
+              >
+                认领
+              </Button>
+            </Popconfirm>
+          )}
+          {canEdit && (
+            <Button
+              type="link"
+              size="small"
+              icon={<SettingOutlined />}
+              disabled={record.id == null}
+              onClick={() => {
+                if (record.id != null) openTransfer([record.id]);
+              }}
+            >
+              转交
+            </Button>
+          )}
+        </Space>
+      ),
+    },
+  ];
 
   return (
     <Card
       title="孤儿资产（无责任人）"
       size="small"
-      extra={<Statistic title="数量" value={items.length} valueStyle={{ fontSize: 18 }} />}
+      extra={
+        <Space wrap>
+          {canEdit && (
+            <Popconfirm
+              title={`认领选中的 ${selectedRowKeys.length} 项孤儿资产？`}
+              description="认领后这些资产将归属当前登录用户。"
+              okText="确认认领"
+              onConfirm={() => {
+                const ids = selectedEntityIds();
+                if (ids.length === 0) {
+                  message.warning("所选资产缺少详情标识（id），无法批量认领");
+                  return;
+                }
+                void claimIds(ids);
+              }}
+            >
+              <Button
+                icon={<CheckOutlined />}
+                disabled={selectedRowKeys.length === 0 || currentUserId == null}
+                loading={claiming}
+              >
+                批量认领（给我）
+              </Button>
+            </Popconfirm>
+          )}
+          {canEdit && (
+            <Button
+              icon={<SettingOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              onClick={() => {
+                const ids = selectedEntityIds();
+                if (ids.length === 0) {
+                  message.warning("所选资产缺少详情标识（id），无法批量转交");
+                  return;
+                }
+                openTransfer(ids);
+              }}
+            >
+              批量转交
+            </Button>
+          )}
+        </Space>
+      }
     >
+      <Space size={28} wrap style={{ marginBottom: 12 }}>
+        <Statistic
+          title="孤儿资产"
+          value={stats.total}
+          valueStyle={{ fontSize: 20, color: stats.total > 0 ? "#d64545" : "#3f8600" }}
+        />
+        <Statistic
+          title="PII 孤儿"
+          value={stats.pii}
+          valueStyle={{ fontSize: 20, color: stats.pii > 0 ? "#d64545" : "#3f8600" }}
+        />
+        <Statistic
+          title="机密级孤儿"
+          value={stats.confidential}
+          valueStyle={{ fontSize: 20, color: stats.confidential > 0 ? "#d46b08" : "#3f8600" }}
+        />
+        <span className="muted" style={{ fontSize: 12, maxWidth: 260 }}>
+          PII / 机密级孤儿属合规优先级，建议尽快认领或转交业务责任人。
+        </span>
+      </Space>
+      <Row gutter={[8, 8]} style={{ marginBottom: 12 }} align="middle">
+        <Col>
+          <Input.Search
+            allowClear
+            placeholder="搜索实体名 / 数据源"
+            style={{ width: 210 }}
+            value={keywordDraft}
+            onChange={(e) => {
+              const v = e.target.value;
+              setKeywordDraft(v);
+              if (v === "") setKeyword("");
+            }}
+            onSearch={(v) => setKeyword(v.trim())}
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部数据源"
+            style={{ width: 190 }}
+            value={sourceId}
+            onChange={setSourceId}
+            options={sourceOptions}
+            optionFilterProp="label"
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部业务域"
+            style={{ width: 150 }}
+            value={domain}
+            onChange={setDomain}
+            options={domainOptions}
+            optionFilterProp="label"
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            placeholder="全部类型"
+            style={{ width: 110 }}
+            value={entityType}
+            onChange={setEntityType}
+            options={entityTypeOptions}
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            placeholder="全部敏感度"
+            style={{ width: 130 }}
+            value={sensitivity}
+            onChange={setSensitivity}
+            options={Object.keys(SENSITIVITY_LABEL).map((k) => ({
+              value: k,
+              label: SENSITIVITY_LABEL[k],
+            }))}
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            placeholder="Schema 状态"
+            style={{ width: 140 }}
+            value={schemaStatus}
+            onChange={setSchemaStatus}
+            options={[
+              { value: "complete", label: "Schema 完整" },
+              { value: "incomplete", label: "Schema 不完整" },
+            ]}
+          />
+        </Col>
+        {activeFilterCount > 0 && (
+          <>
+            <Col>
+              <Tag color="blue">
+                已筛选 {activeFilterCount} 项 · 共 {items.length} 个孤儿
+              </Tag>
+            </Col>
+            <Col>
+              <Button size="small" onClick={resetFilters}>
+                重置筛选
+              </Button>
+            </Col>
+          </>
+        )}
+      </Row>
       {loading ? (
         <Spin />
       ) : error ? (
@@ -2973,33 +3455,145 @@ function OrphansTab() {
             pageSizeOptions: [...PAGE_SIZE_OPTIONS],
             onShowSizeChange,
           }}
-          columns={[
-            { title: "数据源", dataIndex: "source_id", key: "source_id" },
-            { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true },
-            {
-              title: "类型",
-              dataIndex: "entity_type",
-              key: "entity_type",
-              width: 90,
-              render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
-            },
-            {
-              title: "敏感度",
-              dataIndex: "sensitivity_level",
-              key: "sensitivity",
-              width: 110,
-              render: (s: string | null | undefined) => sensitivityTag(s),
-            },
-          ]}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys) => setSelectedRowKeys(keys),
+          }}
+          columns={columns}
         />
       )}
+      <ResizableDrawer
+        title={detail ? `实体详情：${detail.entity_name}` : "实体详情"}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        storageKey="unisense.drawer.entity.width"
+        defaultWidth={860}
+        minWidth={600}
+        destroyOnClose={false}
+      >
+        {detailLoading ? (
+          <Spin tip="加载实体详情…" />
+        ) : detail ? (
+          <>
+            <Descriptions column={2} bordered size="small">
+              <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+              <Descriptions.Item label="实体类型">{entityTypeLabel(detail.entity_type)}</Descriptions.Item>
+              <Descriptions.Item label="数据源">
+                {detail.source_name ? `${detail.source_name}（${detail.source_id}）` : detail.source_id}
+              </Descriptions.Item>
+              <Descriptions.Item label="业务域">
+                {detail.domain ?? <span className="muted">-</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="敏感度">{sensitivityTag(detail.sensitivity_level)}</Descriptions.Item>
+              <Descriptions.Item label="责任人">
+                <Tag>无</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="字段数">
+                {detail.column_count ?? <span className="muted">-</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="Schema 状态">
+                {detail.schema_incomplete ? (
+                  <Tag color="orange">不完整</Tag>
+                ) : (
+                  <Tag color="green">完整</Tag>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="表级描述" span={2}>
+                {detail.description ? (
+                  <span>{detail.description}</span>
+                ) : (
+                  <span className="muted" style={{ fontStyle: "italic" }}>
+                    暂无表级描述
+                  </span>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="关联血缘">
+                <Button
+                  type="link"
+                  size="small"
+                  disabled={(detail.lineage_count ?? 0) <= 0}
+                  onClick={() =>
+                    message.info(`实体「${detail.entity_name}」关联血缘 ${detail.lineage_count} 条`)
+                  }
+                >
+                  关联血缘 {detail.lineage_count} 条
+                </Button>
+              </Descriptions.Item>
+              <Descriptions.Item label="新鲜度">
+                <div className="muted" style={{ fontSize: 12 }}>
+                  <div>创建：{detail.created_at ? formatCnTime(detail.created_at) : "-"}</div>
+                  <div>更新：{detail.updated_at ? formatCnTime(detail.updated_at) : "-"}</div>
+                </div>
+              </Descriptions.Item>
+            </Descriptions>
+            {canEdit && (
+              <Space style={{ marginTop: 12 }} wrap>
+                <Button
+                  type="primary"
+                  icon={<CheckOutlined />}
+                  loading={claiming}
+                  disabled={currentUserId == null}
+                  onClick={() => claimIds([detail.id])}
+                >
+                  认领此资产
+                </Button>
+                <Button
+                  icon={<SettingOutlined />}
+                  onClick={() => openTransfer([detail.id])}
+                >
+                  转交
+                </Button>
+              </Space>
+            )}
+          </>
+        ) : null}
+      </ResizableDrawer>
+      <Modal
+        title={transferIds.length > 1 ? `转交（${transferIds.length} 项资产）` : "转交资产归属"}
+        open={transferOpen}
+        onCancel={() => {
+          setTransferOpen(false);
+          transferForm.resetFields();
+        }}
+        onOk={handleTransferSubmit}
+        okText="确认转交"
+        confirmLoading={transferSaving}
+      >
+        <Form form={transferForm} layout="vertical" style={{ marginTop: 8 }}>
+          <Form.Item
+            name="owner_id"
+            label="指定责任人"
+            extra="转交后资产归属该责任人，并从孤儿池移除。"
+          >
+            <Select
+              allowClear
+              showSearch
+              placeholder="选择责任人"
+              options={ownerOptions}
+              optionFilterProp="label"
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
     </Card>
   );
 }
 
 function TablesTab() {
   const [items, setItems] = useState<AssetTableItem[]>([]);
+  // ---- 多维度筛选（数据表目录：关键字/数据源/业务域/敏感度/责任人/Schema 状态）----
+  const [keyword, setKeyword] = useState<string>("");
+  const [keywordDraft, setKeywordDraft] = useState<string>("");
+  const [sourceId, setSourceId] = useState<string | undefined>(undefined);
+  const [domain, setDomain] = useState<string | undefined>(undefined);
   const [sensitivity, setSensitivity] = useState<string | undefined>(undefined);
+  const [ownerId, setOwnerId] = useState<number | undefined>(undefined);
+  const [schemaStatus, setSchemaStatus] = useState<
+    "complete" | "incomplete" | undefined
+  >(undefined);
+  // 筛选选项候选（数据源 / 业务域）
+  const [sourceOptions, setSourceOptions] = useState<Array<{ label: string; value: string }>>([]);
+  const [domainOptions, setDomainOptions] = useState<Array<{ label: string; value: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -3026,7 +3620,15 @@ function TablesTab() {
     setLoading(true);
     setError(null);
     try {
-      const r = await fetchAssetTables({ sensitivity, limit: 200 });
+      const r = await fetchAssetTables({
+        sensitivity,
+        source_id: sourceId,
+        domain,
+        owner_id: ownerId,
+        schema_status: schemaStatus,
+        keyword: keyword || undefined,
+        limit: 200,
+      });
       setItems(r.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载数据表失败");
@@ -3038,7 +3640,28 @@ function TablesTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sensitivity]);
+  }, [sensitivity, sourceId, domain, ownerId, schemaStatus, keyword]);
+
+  // 数据源筛选候选（含名称，仅活跃源）
+  useEffect(() => {
+    listDataSources({ page_size: 200 })
+      .then((res) =>
+        setSourceOptions(
+          res.items.map((s) => ({
+            label: s.name ? `${s.name}（${s.source_id}）` : s.source_id,
+            value: s.source_id,
+          })),
+        ),
+      )
+      .catch(() => {});
+  }, []);
+
+  // 业务域筛选候选（域树扁平化）
+  useEffect(() => {
+    listDomainTree()
+      .then((tree) => setDomainOptions(flattenDomainTree(tree)))
+      .catch(() => {});
+  }, []);
 
   // 责任人候选：加载失败不阻塞治理入口（仅下拉无选项）
   useEffect(() => {
@@ -3052,6 +3675,26 @@ function TablesTab() {
       )
       .catch(() => {});
   }, []);
+
+  // 激活的筛选条件数（含关键字；用于「重置」入口与计数展示）
+  const activeFilterCount = [
+    keyword,
+    sourceId,
+    domain,
+    sensitivity,
+    ownerId,
+    schemaStatus,
+  ].filter((v) => v !== undefined && v !== "").length;
+
+  function resetFilters() {
+    setKeyword("");
+    setKeywordDraft("");
+    setSourceId(undefined);
+    setDomain(undefined);
+    setSensitivity(undefined);
+    setOwnerId(undefined);
+    setSchemaStatus(undefined);
+  }
 
   // 打开治理设置 Modal（single 传单个 entity_id；batch 传勾选 id 列表）
   function openGov(entityIds: number[], onSaved?: () => void) {
@@ -3143,7 +3786,14 @@ function TablesTab() {
 
   async function handleExport() {
     try {
-      await downloadAssetExport({ sensitivity });
+      await downloadAssetExport({
+        sensitivity,
+        source_id: sourceId,
+        domain,
+        owner_id: ownerId,
+        schema_status: schemaStatus,
+        keyword: keyword || undefined,
+      });
       message.success("资产清单已导出");
     } catch (err) {
       message.error(err instanceof Error ? err.message : "导出失败");
@@ -3156,17 +3806,6 @@ function TablesTab() {
       size="small"
       extra={
         <Space wrap>
-          <Select
-            allowClear
-            placeholder="全部敏感度"
-            style={{ width: 160 }}
-            value={sensitivity}
-            onChange={setSensitivity}
-            options={Object.keys(SENSITIVITY_LABEL).map((k) => ({
-              value: k,
-              label: SENSITIVITY_LABEL[k],
-            }))}
-          />
           {canExport && (
             <Button icon={<DownloadOutlined />} onClick={handleExport}>
               导出 CSV
@@ -3191,6 +3830,100 @@ function TablesTab() {
         </Space>
       }
     >
+      <Row gutter={[8, 8]} style={{ marginBottom: 12 }} align="middle">
+        <Col>
+          <Input.Search
+            allowClear
+            placeholder="搜索表名 / 数据源"
+            style={{ width: 220 }}
+            value={keywordDraft}
+            onChange={(e) => {
+              const v = e.target.value;
+              setKeywordDraft(v);
+              // 点清除（allowClear）后同时清空已应用关键字
+              if (v === "") setKeyword("");
+            }}
+            onSearch={(v) => setKeyword(v.trim())}
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部数据源"
+            style={{ width: 200 }}
+            value={sourceId}
+            onChange={setSourceId}
+            options={sourceOptions}
+            optionFilterProp="label"
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部业务域"
+            style={{ width: 160 }}
+            value={domain}
+            onChange={setDomain}
+            options={domainOptions}
+            optionFilterProp="label"
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            placeholder="全部敏感度"
+            style={{ width: 140 }}
+            value={sensitivity}
+            onChange={setSensitivity}
+            options={Object.keys(SENSITIVITY_LABEL).map((k) => ({
+              value: k,
+              label: SENSITIVITY_LABEL[k],
+            }))}
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部责任人"
+            style={{ width: 190 }}
+            value={ownerId}
+            onChange={setOwnerId}
+            options={[
+              { label: "无责任人（未分配）", value: 0 },
+              ...ownerOptions,
+            ]}
+            optionFilterProp="label"
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            placeholder="Schema 状态"
+            style={{ width: 150 }}
+            value={schemaStatus}
+            onChange={setSchemaStatus}
+            options={[
+              { value: "complete", label: "Schema 完整" },
+              { value: "incomplete", label: "Schema 不完整" },
+            ]}
+          />
+        </Col>
+        {activeFilterCount > 0 && (
+          <>
+            <Col>
+              <Tag color="blue">已筛选 {activeFilterCount} 项 · 共 {items.length} 表</Tag>
+            </Col>
+            <Col>
+              <Button size="small" onClick={resetFilters}>
+                重置筛选
+              </Button>
+            </Col>
+          </>
+        )}
+      </Row>
       {loading ? (
         <Spin />
       ) : error ? (
@@ -3211,7 +3944,15 @@ function TablesTab() {
             onChange: (keys) => setSelectedRowKeys(keys),
           }}
           columns={[
-            { title: "数据源", dataIndex: "source_id", key: "source_id" },
+            {
+              title: "数据源",
+              dataIndex: "source_id",
+              key: "source_id",
+              width: 170,
+              ellipsis: true,
+              render: (v: string, r: AssetTableItem) =>
+                r.source_name && r.source_name !== v ? `${r.source_name}（${v}）` : v,
+            },
             { title: "实体", dataIndex: "entity_name", key: "entity_name", ellipsis: true },
             {
               title: "类型",
@@ -3219,6 +3960,15 @@ function TablesTab() {
               key: "entity_type",
               width: 90,
               render: (v: string) => ENTITY_TYPE_LABEL[v] ?? v,
+            },
+            {
+              title: "业务域",
+              dataIndex: "domain",
+              key: "domain",
+              width: 110,
+              ellipsis: true,
+              render: (v: string | null | undefined) =>
+                v ?? <span className="muted">-</span>,
             },
             {
               title: "敏感度",
@@ -3231,8 +3981,22 @@ function TablesTab() {
               title: "责任人",
               dataIndex: "owner_id",
               key: "owner",
-              width: 90,
-              render: (v: number | null) => v ?? <Tag>无</Tag>,
+              width: 110,
+              ellipsis: true,
+              render: (v: number | null, r: AssetTableItem) =>
+                v == null ? <Tag>无</Tag> : r.owner_name || `#${v}`,
+            },
+            {
+              title: "Schema",
+              dataIndex: "schema_incomplete",
+              key: "schema",
+              width: 100,
+              render: (v: boolean) =>
+                v ? (
+                  <Tag color="orange">不完整</Tag>
+                ) : (
+                  <Tag color="green">完整</Tag>
+                ),
             },
             {
               title: "操作",

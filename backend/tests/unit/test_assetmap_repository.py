@@ -516,6 +516,78 @@ class TestListTablesAndOrphans:
 
         assert rows == []
 
+    async def test_list_tables_multi_dimension_filters(self) -> None:
+        """多维度过滤：责任人 / Schema 完整性 / 关键字同时生效（LIKE 转义防放大）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        rows = await repo.list_tables(
+            None,
+            None,
+            100,
+            owner_id=7,
+            schema_status="incomplete",
+            keyword="100%_表",
+        )
+
+        assert rows == []
+        stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "owner_id" in compiled and "= 7" in compiled
+        assert "schema_incomplete" in compiled
+        # LIKE 通配符已转义：% → /%、_ → /_，且显式 ESCAPE '/'
+        assert "100/%/_表" in compiled
+        assert "ESCAPE '/'" in compiled
+
+    async def test_list_tables_domain_joins_data_source(self) -> None:
+        """业务域过滤：经 data_source 继承 join（仅活跃源），SQL 含 JOIN 与 domain 条件。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        await repo.list_tables(None, None, 100, domain="sales")
+
+        stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "JOIN" in compiled
+        assert "data_source" in compiled
+        assert "domain" in compiled
+        assert "deleted_at" in compiled
+
+    async def test_list_tables_owner_zero_means_unassigned(self) -> None:
+        """owner_id=0 约定：过滤无责任人（owner_id IS NULL）的未分配表。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        await repo.list_tables(None, None, 100, owner_id=0)
+
+        stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "owner_id IS NULL" in compiled
+
+    async def test_list_tables_schema_status_complete(self) -> None:
+        """Schema 完整性 complete：过滤非 schema_incomplete 行。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        await repo.list_tables(None, None, 100, schema_status="complete")
+
+        stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "schema_incomplete" in compiled
+        assert "false" in compiled.lower() or "0" in compiled
+
     async def test_orphan_assets(self) -> None:
         s = _session()
         repo = AssetMapRepository(s)
@@ -529,6 +601,52 @@ class TestListTablesAndOrphans:
         stmt = s.execute.call_args_list[0].args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "owner_id IS NULL" in compiled
+
+    async def test_orphan_assets_multi_dimension_filters(self) -> None:
+        """孤儿资产多维度过滤：数据源/实体类型/敏感度/Schema/关键字同时生效。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        rows = await repo.orphan_assets(
+            keyword="ods_%",
+            source_id="s1",
+            entity_type="table",
+            sensitivity="PII",
+            schema_status="incomplete",
+            limit=50,
+        )
+
+        assert rows == []
+        stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "owner_id IS NULL" in compiled
+        assert "source_id" in compiled and "= 's1'" in compiled
+        assert "entity_type" in compiled and "= 'table'" in compiled
+        assert "sensitivity_level" in compiled and "= 'PII'" in compiled
+        assert "schema_incomplete" in compiled
+        # LIKE 通配符转义 + limit 收敛（ods_% → %ods/_/%%）
+        assert "ods/_/%%" in compiled and "ESCAPE '/'" in compiled
+        assert "LIMIT" in compiled and "50" in compiled
+
+    async def test_orphan_assets_domain_joins_data_source(self) -> None:
+        """孤儿资产业务域过滤：经 data_source 继承 JOIN（仅活跃源）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        rows = await repo.orphan_assets(domain="sales")
+
+        assert rows == []
+        stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "data_source" in compiled
+        assert "sales" in compiled
+        assert "deleted_at IS NULL" in compiled
 
 
 class TestAggregations:

@@ -136,16 +136,48 @@ class AssetMapService(BaseService):
         )
 
     async def list_tables(
-        self, source_id: str | None, sensitivity: str | None, limit: int
+        self,
+        source_id: str | None,
+        sensitivity: str | None,
+        limit: int,
+        domain: str | None = None,
+        owner_id: int | None = None,
+        schema_status: str | None = None,
+        keyword: str | None = None,
     ) -> list[dict[str, Any]]:
-        rows = await self._repo.list_tables(source_id, sensitivity, limit)
+        rows = await self._repo.list_tables(
+            source_id,
+            sensitivity,
+            limit,
+            domain=domain,
+            owner_id=owner_id,
+            schema_status=schema_status,
+            keyword=keyword,
+        )
         # assetmap T-2: 经 to_dict 剔除敏感字段（connection_config 等）
         items = [r.to_dict() for r in rows]
         # 生产化补充：源名称 / 业务域 / 责任人名（列表与下钻明细可读）
         return await self._repo.enrich_catalog_items(items)
 
-    async def orphan_assets(self) -> list[dict[str, Any]]:
-        rows = await self._repo.orphan_assets()
+    async def orphan_assets(
+        self,
+        keyword: str | None = None,
+        source_id: str | None = None,
+        domain: str | None = None,
+        entity_type: str | None = None,
+        sensitivity: str | None = None,
+        schema_status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        rows = await self._repo.orphan_assets(
+            keyword=keyword,
+            source_id=source_id,
+            domain=domain,
+            entity_type=entity_type,
+            sensitivity=sensitivity,
+            schema_status=schema_status,
+            limit=limit,
+        )
         items = [r.to_dict() for r in rows]
         return await self._repo.enrich_catalog_items(items)
 
@@ -360,10 +392,24 @@ class AssetMapService(BaseService):
         return await self._repo.my_assets(owner_id, limit)
 
     async def export_tables(
-        self, source_id: str | None, sensitivity: str | None
+        self,
+        source_id: str | None,
+        sensitivity: str | None,
+        domain: str | None = None,
+        owner_id: int | None = None,
+        schema_status: str | None = None,
+        keyword: str | None = None,
     ) -> list[dict[str, Any]]:
-        """导出目录资产（表/视图）为字典列表，供 CSV 序列化。"""
-        rows = await self._repo.list_tables(source_id, sensitivity, limit=5000)
+        """导出目录资产（表/视图）为字典列表，供 CSV 序列化（与列表同过滤条件）。"""
+        rows = await self._repo.list_tables(
+            source_id,
+            sensitivity,
+            limit=5000,
+            domain=domain,
+            owner_id=owner_id,
+            schema_status=schema_status,
+            keyword=keyword,
+        )
         return [r.to_dict() for r in rows]
 
     # ----------------------------------------------------------------

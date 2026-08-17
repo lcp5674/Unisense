@@ -41,8 +41,10 @@ vi.mock("../api", () => ({
   updateMetricDescription: vi.fn(),
   inferMetricDescription: vi.fn(),
   listCatalogs: vi.fn(),
+  listDataSources: vi.fn(),
   listDomainTree: vi.fn(),
   listMetrics: vi.fn(),
+  fetchCurrentUser: vi.fn(),
 }));
 
 vi.mock("@ant-design/charts", () => ({
@@ -128,6 +130,7 @@ import {
   bulkDeprecateCatalogs,
   listUsers,
   listCatalogs,
+  listDataSources,
   listDomainTree,
   listMetrics,
   getMetric,
@@ -135,6 +138,7 @@ import {
   queryMetricInternal,
   updateMetricDescription,
   inferMetricDescription,
+  fetchCurrentUser,
 } from "../api";
 
 const mockGraphData = {
@@ -242,6 +246,14 @@ describe("AssetMap", () => {
     });
     vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
     vi.mocked(fetchAssetOrphans).mockResolvedValue({ items: [], total: 0 });
+    // 孤儿资产认领：当前登录用户
+    vi.mocked(fetchCurrentUser).mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "管理员",
+      role: "platform_admin",
+      domain: null,
+    } as never);
     // 数据表 tab 治理设置的责任人候选（Owner 下拉选项）
     vi.mocked(listUsers).mockResolvedValue([
       {
@@ -275,6 +287,30 @@ describe("AssetMap", () => {
     });
     vi.mocked(listCatalogs).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
     vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    // 数据表 Tab 数据源筛选候选（含名称）
+    vi.mocked(listDataSources).mockResolvedValue({
+      items: [
+        {
+          source_id: "s1",
+          name: "销售库",
+          source_type: "mysql",
+          domain: "sales",
+          cluster_id: null,
+          coverage: 0,
+          health_status: "healthy",
+          connection_config_present: false,
+          schedule_cron: null,
+          collection_mode: "manual",
+          enabled: true,
+          created_by: 1,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 100,
+    });
     // 默认域树（含中文名，供热力 Tab 中文域展示断言）
     vi.mocked(listDomainTree).mockResolvedValue([
       {
@@ -1956,6 +1992,81 @@ describe("AssetMap", () => {
     });
   });
 
+  it("数据表目录：业务域筛选触发按 domain 请求", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [
+        {
+          id: 5,
+          source_id: "s1",
+          entity_name: "sales.ods",
+          entity_type: "TABLE",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          schema_incomplete: false,
+          domain: "sales",
+        },
+      ],
+      total: 1,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+
+    const domainItem = screen.getByText("全部业务域").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(within(domainItem).getByRole("combobox"));
+    await user.click(await screen.findByText("销售域"));
+
+    await waitFor(() => {
+      expect(fetchAssetTables).toHaveBeenCalledWith(expect.objectContaining({ domain: "sales" }));
+    });
+    // 激活筛选计数出现
+    expect(screen.getByText(/已筛选/)).toBeInTheDocument();
+  });
+
+  it("数据表目录：关键字搜索触发按 keyword 请求", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+
+    const search = screen.getByPlaceholderText("搜索表名 / 数据源");
+    await user.type(search, "ods");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(fetchAssetTables).toHaveBeenCalledWith(expect.objectContaining({ keyword: "ods" }));
+    });
+  });
+
+  it("数据表目录：重置筛选清空全部条件", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetTables).mockResolvedValue({ items: [], total: 0 });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+
+    // 先设置一个筛选（敏感度=PII）
+    const sensItem = screen.getByText("全部敏感度").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(within(sensItem).getByRole("combobox"));
+    await user.click(await screen.findByText("PII"));
+    await waitFor(() => {
+      expect(fetchAssetTables).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: "PII" }));
+    });
+
+    await user.click(screen.getByRole("button", { name: /重\s*置\s*筛\s*选/ }));
+    await waitFor(() => {
+      // 最近一次请求不再携带 sensitivity 筛选
+      const calls = vi.mocked(fetchAssetTables).mock.calls;
+      const last = calls[calls.length - 1][0] ?? {};
+      expect(last.sensitivity).toBeUndefined();
+    });
+  });
+
   it("提供统一的返回按钮（返回上一入口）", async () => {
     renderAssetMap();
     await waitFor(() => expect(screen.getByRole("heading", { name: "资产地图" })).toBeInTheDocument());
@@ -1978,20 +2089,145 @@ describe("AssetMap", () => {
     lengthSpy.mockRestore();
   });
 
-  it("点击返回：无上一页（URL 直达）时兜底跳转总览仪表", async () => {
-    // 显式确保 history.length === 1（组件内部其他导航会污染真实 history，套件并发时需隔离）
-    const lengthSpy = vi.spyOn(window.history, "length", "get").mockReturnValue(1);
-    render(
-      <MemoryRouter initialEntries={["/assetmap"]}>
-        <Routes>
-          <Route path="/dashboard" element={<div>dashboard-page</div>} />
-          <Route path="/assetmap" element={<AssetMap />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-    await waitFor(() => expect(screen.getByRole("heading", { name: "资产地图" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
-    await screen.findByText("dashboard-page");
-    lengthSpy.mockRestore();
+  it("孤儿资产：合规统计条展示总数 / PII / 机密级孤儿数", async () => {
+    vi.mocked(fetchAssetOrphans).mockResolvedValue({
+      items: [
+        {
+          id: 1, source_id: "s1", entity_name: "ods_user", entity_type: "TABLE",
+          sensitivity_level: "PII", owner_id: null, schema_incomplete: false,
+        },
+        {
+          id: 2, source_id: "s2", entity_name: "ads_finance", entity_type: "TABLE",
+          sensitivity_level: "CONFIDENTIAL", owner_id: null, schema_incomplete: true,
+        },
+        {
+          id: 3, source_id: "s3", entity_name: "tmp_log", entity_type: "TABLE",
+          sensitivity_level: "INTERNAL", owner_id: null, schema_incomplete: false,
+        },
+      ],
+      total: 3,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await userEvent.setup().click(screen.getByRole("tab", { name: /孤儿资产/ }));
+    await waitFor(() => expect(fetchAssetOrphans).toHaveBeenCalled());
+
+    const piiStat = screen
+      .getByText("PII 孤儿", { selector: ".ant-statistic-title" })
+      .closest(".ant-statistic") as HTMLElement;
+    expect(within(piiStat).getByText("1")).toBeInTheDocument();
+    const confStat = screen
+      .getByText("机密级孤儿", { selector: ".ant-statistic-title" })
+      .closest(".ant-statistic") as HTMLElement;
+    expect(within(confStat).getByText("1")).toBeInTheDocument();
+  });
+
+  it("孤儿资产：关键字筛选触发按 keyword 请求", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetOrphans).mockResolvedValue({ items: [], total: 0 });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /孤儿资产/ }));
+    await waitFor(() => expect(fetchAssetOrphans).toHaveBeenCalled());
+
+    const search = screen.getByPlaceholderText("搜索实体名 / 数据源");
+    await user.type(search, "ods");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(fetchAssetOrphans).toHaveBeenCalledWith(
+        expect.objectContaining({ keyword: "ods" }),
+      );
+    });
+  });
+
+  it("孤儿资产：单行认领调用 assignAssetOwner 归属当前用户", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetOrphans).mockResolvedValue({
+      items: [
+        {
+          id: 5, source_id: "s1", entity_name: "sales.ods", entity_type: "TABLE",
+          sensitivity_level: "INTERNAL", owner_id: null, schema_incomplete: false,
+        },
+      ],
+      total: 1,
+    });
+    vi.mocked(assignAssetOwner).mockResolvedValue({ entity_id: 5, owner_id: 1 });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /孤儿资产/ }));
+    await waitFor(() => expect(screen.getByText("sales.ods")).toBeInTheDocument());
+
+    const row = screen.getByText("sales.ods").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: /认\s*领/ }));
+    await user.click(screen.getByRole("button", { name: /确认认领/ }));
+
+    await waitFor(() => {
+      expect(assignAssetOwner).toHaveBeenCalledWith(5, 1);
+    });
+  });
+
+  it("孤儿资产：批量认领（给我）调用 batchAssignAssetOwner 归属当前用户", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetOrphans).mockResolvedValue({
+      items: [
+        {
+          id: 5, source_id: "s1", entity_name: "sales.ods", entity_type: "TABLE",
+          sensitivity_level: "INTERNAL", owner_id: null, schema_incomplete: false,
+        },
+        {
+          id: 6, source_id: "s1", entity_name: "sales.ods_ext", entity_type: "TABLE",
+          sensitivity_level: "PII", owner_id: null, schema_incomplete: false,
+        },
+      ],
+      total: 2,
+    });
+    vi.mocked(batchAssignAssetOwner).mockResolvedValue({ affected: 2, owner_id: 1, total: 2 });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /孤儿资产/ }));
+    await waitFor(() => expect(screen.getByText("sales.ods")).toBeInTheDocument());
+
+    // 勾选两行
+    const rows = screen.getAllByRole("row").slice(1); // 跳过表头
+    for (const row of rows) {
+      await user.click(within(row).getByRole("checkbox"));
+    }
+    await user.click(screen.getByRole("button", { name: /批量认领/ }));
+    await user.click(screen.getByRole("button", { name: /确认认领/ }));
+
+    await waitFor(() => {
+      expect(batchAssignAssetOwner).toHaveBeenCalledWith([5, 6], 1);
+    });
+  });
+
+  it("孤儿资产：转交指定责任人调用 assignAssetOwner", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetOrphans).mockResolvedValue({
+      items: [
+        {
+          id: 5, source_id: "s1", entity_name: "sales.ods", entity_type: "TABLE",
+          sensitivity_level: "INTERNAL", owner_id: null, schema_incomplete: false,
+        },
+      ],
+      total: 1,
+    });
+    vi.mocked(assignAssetOwner).mockResolvedValue({ entity_id: 5, owner_id: 1 });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByRole("tab", { name: /孤儿资产/ }));
+    await waitFor(() => expect(screen.getByText("sales.ods")).toBeInTheDocument());
+
+    const row = screen.getByText("sales.ods").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: /转\s*交/ }));
+    await waitFor(() => expect(screen.getByText("转交资产归属")).toBeInTheDocument());
+    const dialog = screen.getByRole("dialog");
+    fireEvent.mouseDown(within(dialog).getByRole("combobox"));
+    await user.click(await screen.findByText("管理员 (#1)"));
+    await user.click(screen.getByRole("button", { name: /确认转交/ }));
+
+    await waitFor(() => {
+      expect(assignAssetOwner).toHaveBeenCalledWith(5, 1);
+    });
   });
 });

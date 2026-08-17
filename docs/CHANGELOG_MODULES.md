@@ -5,6 +5,7 @@
 
 | 日期 | PR | 模块 | 变更点 | 影响接口 | 状态跃迁 |
 |------|-----|------|--------|----------|----------|
+| 2026-08-17 | — | assetmap | **数据表目录多维度过滤 + 孤儿资产增强（认领闭环 + 过滤筛选 + 合规统计）**：① 后端 `list_tables/orphan_assets` 支持 keyword/source_id/domain/entity_type/sensitivity/schema_status 过滤（orphan 无参调用兼容概览下钻）；`GET /assetmap/orphans` 增加过滤 Query；② 前端 `TablesTab` 增加多维度筛选栏（关键字/数据源/业务域/责任人/敏感度/Schema）+ 列增强（源名称/域/责任人/Schema/更新时间）+ 治理设置（责任人/敏感度）+ 实体详情抽屉 + 导出透传过滤；③ `OrphansTab` 从纯表格升级为「孤儿消化工作台」：多维度筛选栏、合规统计条（孤儿总数/PII/机密级孤儿）、单行认领（归属当前用户）/批量认领（给我）、转交 Modal（指定责任人）、实体详情抽屉（认领前查看 schema/PII/血缘）、认领后自动刷新；后端 98 单测 + 前端 57 AssetMap 单测全过，tsc 全绿 | /api/v1/assetmap/tables, /api/v1/assetmap/orphans | released（功能增强） |
 | 2026-08-06 | — | (全体) | 建立交付追踪底座：module-status.yaml / gateways.yml / pre-commit / 校验脚本 / TD §19§20 | — | planned → planned |
 | 2026-08-06 | — | (全体) | 修正 FR 编号与 td_section 映射：对齐 TD §2.1 权威 FR 和 TD §12.x 实际章节号（9 服务 FR 修正 + 6 服务 td_section 修正）；修正 contract_check.py TD_SERVICE_SECTIONS；新增 .gitignore / .env.example / docker-compose.yml / Makefile / README.md；DEV_GUIDE 补充前端/DB变更/API版本/分支策略/配置变更/安全/LLD 开发规范（§8-§14） | — | planned → planned |
 | 2026-08-06 | — | (全体) | 修复 GitHub 主分支 main→master 统一：DEV_GUIDE §6/§11（4处）、TD §19.6、.github/workflows/gateways.yml CI 触发分支 | — | planned → planned |
