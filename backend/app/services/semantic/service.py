@@ -2804,6 +2804,13 @@ class MetricService(BaseService):
                 "当前用户无该版本的待确认记录", error_code="NO_PENDING_CONFIRMATION"
             )
         await self._repo.update_confirmation_status(mine.id, "REJECTED", reason=reason)
+        # 终结该版本其他消费方的 PENDING 确认记录：任一消费方拒绝则版本取消
+        # （CANCELLED），其余记录若不终结会持续被 pending_version 计算字段
+        # （status=="PENDING"）识别为"待确认"——前端警示最长残留 14 天（直到
+        # 超时任务处理），且这些消费方仍可对已取消版本执行无效确认。
+        for c in confirmations:
+            if c.id != mine.id and c.status == "PENDING":
+                await self._repo.update_confirmation_status(c.id, "REJECTED", reason=reason)
         # 与 PendingVersionManager.reject 语义对齐：被拒版本置 CANCELLED，
         # 防止后续被确认/超时逻辑错误处理（旧实现只改确认状态，版本滞留 PENDING）
         from sqlalchemy import update as sa_update

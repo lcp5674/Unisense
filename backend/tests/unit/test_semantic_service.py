@@ -1393,6 +1393,34 @@ async def test_reject_version_success():
     svc._db.execute.assert_awaited_once()
 
 
+async def test_reject_version_terminates_other_confirmations():
+    """拒绝后终结该版本其他消费方的 PENDING 确认记录——修复前其他记录残留
+    PENDING，pending_version 计算字段（status==PENDING）持续识别为待确认，
+    前端警示最长残留 14 天；修复后全部确认记录终止，警示立即消失。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    # A 拒绝（mine）、B 仍 PENDING（应被终结）、C 已 CONFIRMED（保持）
+    repo.get_pending_confirmations = AsyncMock(
+        return_value=[
+            MagicMock(id=1, consumer_id=9, status="PENDING"),
+            MagicMock(id=2, consumer_id=10, status="PENDING"),
+            MagicMock(id=3, consumer_id=11, status="CONFIRMED"),
+        ]
+    )
+    repo.update_confirmation_status = AsyncMock()
+    svc._db.execute = AsyncMock()
+    svc._publish_event = AsyncMock()
+
+    await svc.reject_version("sales_gmv_daily", version=1, consumer_id=9, reason="口径变更")
+
+    # 当前拒绝者(id=1) + 其他 PENDING 记录(id=2) 被终结为 REJECTED；
+    # 已 CONFIRMED 的(id=3)保持不动（不覆盖已确认事实）
+    assert repo.update_confirmation_status.await_count == 2
+    assert repo.update_confirmation_status.await_args.args[0] == 2  # id=2 的记录被终结
+    assert repo.update_confirmation_status.await_args.args[1] == "REJECTED"
+
+
+
 async def test_extend_version_success():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric())
