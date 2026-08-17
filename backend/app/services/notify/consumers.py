@@ -82,6 +82,9 @@ BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "catalog_schema_drifted",
     "lineage_parsed",
     "lineage_ingested",
+    # DDL 变更事件化（lineage/service.py 经 notify_user 定向通知受影响资产 Owner，
+    # 同时发布本事件供通知中心记录/订阅扇出——表/列重命名、DROP 的下游治理闭环）
+    "lineage.ddl_changed",
     # 血缘变更影响（semantic/service.py 变更指标血缘时发布，标题映射见 notify/service.py）
     "lineage.change_impacted",
     # 指标血缘注册失败（metrics.py / semantic/service.py best-effort 路径，C7：

@@ -284,7 +284,7 @@ MATRIX: list[tuple[str, str, str, str | None, set[str], set[str]]] = [
         "WITH cte1 AS (SELECT id FROM ods.a) INSERT INTO dws.t SELECT c1.id FROM ods.cte1 c1 JOIN cte1 ON c1.id = cte1.id",
         None,
         {"ods.cte1->dws.t", "ods.a->dws.t"},
-        {"ods.a.id->dws.t.id"},
+        {"ods.cte1.id->dws.t.id"},
     ),
     (
         "cte_union_outer",

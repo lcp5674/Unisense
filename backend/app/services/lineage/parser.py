@@ -285,6 +285,30 @@ def _preprocess_dialect(
         # ParseError 致血缘全丢；剥离 TOP (n) 行数限定（不影响来源表与列映射，血缘
         # 语义不变——仅限制插入行数）。
         sql = re.sub(r"\bINSERT\s+TOP\s*\([^)]*\)", "INSERT", sql, flags=re.IGNORECASE)
+    if d in ("hive", "spark"):
+        # Hive/Spark CTAS 末尾存储属性（``STORED AS PARQUET`` 等）：sqlglot 25.x
+        # 不支持 CTAS 后置存储属性，整体降级为 Command 致血缘全丢；存储格式仅描述
+        # 物理落盘，不影响 SELECT 源与目标表，剥离后血缘语义不变。
+        sql = re.sub(
+            r"\s+STORED\s+AS\s+\w+(\s+$|$)",
+            "",
+            sql,
+            flags=re.IGNORECASE,
+        )
+    if d == "clickhouse":
+        # CK CTAS 物理引擎/排序属性（``ENGINE = MergeTree() [ORDER/PARTITION/PRIMARY/
+        # SAMPLE BY ...] AS SELECT``）：sqlglot 25.x 不支持，整体降级为 Command 致血缘
+        # 全丢；这些子句仅描述物理布局，不影响 SELECT 源与目标表，剥离后血缘语义不变。
+        # 只匹配 ENGINE 起始、AS SELECT 结束的物理属性段，不会误伤 SELECT 内部 ORDER BY。
+        sql = re.sub(
+            r"(CREATE\s+TABLE\s+[^;]+?)"
+            r"(\s+ENGINE\s*=\s*\w+(?:\s*\([^;]*?\))?"
+            r"(?:\s+(?:ORDER|PARTITION|PRIMARY|SAMPLE)\s+BY\s+[^;]+?)?)"
+            r"(?=\s+AS\s+SELECT)",
+            r"\1",
+            sql,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
     return sql
 
 
@@ -815,7 +839,7 @@ def _resolve_column(
         # 如 ``SELECT id FROM c1 JOIN ods.b USING(id)`` 里 ``max(v)`` 的 v 实际
         # 来自 ods.b，而 c1 只输出 id；若取第一个来源（CTE c1）会错误解析为空。
         for _name, s in sources.items():
-            if isinstance(s, exp.Table) and s.name not in cte_map:
+            if isinstance(s, exp.Table) and not _is_cte_ref(s, cte_map):
                 src = s
                 break
         if src is None:
@@ -823,7 +847,7 @@ def _resolve_column(
             for _name, s in sources.items():
                 if (
                     isinstance(s, exp.Table)
-                    and s.name in cte_map
+                    and _is_cte_ref(s, cte_map)
                     and _cte_outputs_column(cte_map[s.name], col.name)
                 ):
                     src = s
@@ -839,7 +863,10 @@ def _resolve_column(
 
     if isinstance(src, exp.Table):
         name = _norm_table(src)
-        cte = cte_map.get(src.name)
+        # 仅无 schema/db/catalog 前缀的裸表名命中 CTE 集合才是 CTE 引用：
+        # ``JOIN ods.cte1``（带 schema）是真实表（CTE 不携带库前缀），即使
+        # 名字与 CTE 相同也不应穿透定义（同名遮蔽——第四轮修复在字段级漏了此处）。
+        cte = cte_map.get(src.name) if _is_cte_ref(src, cte_map) else None
         if cte is not None:
             # 进入 CTE 定义：找同名投影并递归解析。
             # CTE 定义为集合运算（``WITH x AS (SELECT ... UNION ...)``）时，Union
