@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import jwt
 import pytest
@@ -826,12 +826,27 @@ async def test_load_asset_details_table_joins_source_domain() -> None:
 # ---- 版本消费方确认回调 ----
 async def test_confirm_version_success() -> None:
     svc = _svc(await _client())
-    mv = MetricVersion(id=1, status="PENDING_CONFIRMATION")
+    mv = MetricVersion(id=1, metric_id=5, version=2, status="PENDING_CONFIRMATION")
     svc._get_version = AsyncMock(return_value=mv)
+    svc._get_my_confirmation = AsyncMock(return_value=MagicMock(id=9, consumer_id=7))
+    svc._get_metric_by_id = AsyncMock(return_value=MagicMock(metric_code="sales_gmv_daily"))
     svc._db.flush = AsyncMock()
-    await svc.confirm_version(1, 7)
-    assert mv.status == "PUBLISHED"
-    svc._db.flush.assert_awaited_once()
+    with patch("app.services.semantic.service.MetricService") as ms:
+        instance = ms.return_value
+        instance.confirm_version = AsyncMock()
+        await svc.confirm_version(1, 7)
+    # 委托语义模块完整转正（主表口径同步 + 版本递增 + 血缘 + 通知 + 审计）
+    instance.confirm_version.assert_awaited_once_with("sales_gmv_daily", 2, consumer_id=7)
+
+
+async def test_confirm_version_not_confirmation_consumer_forbidden() -> None:
+    """非该版本的确认消费方确认被拒（IDOR 越权防护——此前 user_id 未使用）。"""
+    svc = _svc(await _client())
+    mv = MetricVersion(id=1, metric_id=5, version=2, status="PENDING_CONFIRMATION")
+    svc._get_version = AsyncMock(return_value=mv)
+    svc._get_my_confirmation = AsyncMock(return_value=None)  # 调用者不是确认消费方
+    with pytest.raises(ConflictError):
+        await svc.confirm_version(1, 7)
 
 
 async def test_confirm_version_not_found() -> None:
@@ -850,12 +865,29 @@ async def test_confirm_version_conflict() -> None:
 
 async def test_reject_version_success() -> None:
     svc = _svc(await _client())
-    mv = MetricVersion(id=1, status="PENDING_CONFIRMATION")
+    mv = MetricVersion(id=1, metric_id=5, version=2, status="PENDING_CONFIRMATION")
     svc._get_version = AsyncMock(return_value=mv)
+    svc._get_my_confirmation = AsyncMock(return_value=MagicMock(id=9, consumer_id=7))
+    svc._get_metric_by_id = AsyncMock(return_value=MagicMock(metric_code="sales_gmv_daily"))
     svc._db.flush = AsyncMock()
-    await svc.reject_version(1, 7, "口径有误")
-    assert mv.status == "ARCHIVED"
-    svc._db.flush.assert_awaited_once()
+    with patch("app.services.semantic.service.MetricService") as ms:
+        instance = ms.return_value
+        instance.reject_version = AsyncMock()
+        await svc.reject_version(1, 7, "口径有误")
+    # 委托语义模块完整拒绝（版本 CANCELLED + 终结该版本全部确认记录 + 审计）
+    instance.reject_version.assert_awaited_once_with(
+        "sales_gmv_daily", 2, "口径有误", consumer_id=7
+    )
+
+
+async def test_reject_version_not_confirmation_consumer_forbidden() -> None:
+    """非该版本的确认消费方拒绝被拒（IDOR 越权防护）。"""
+    svc = _svc(await _client())
+    mv = MetricVersion(id=1, metric_id=5, version=2, status="PENDING_CONFIRMATION")
+    svc._get_version = AsyncMock(return_value=mv)
+    svc._get_my_confirmation = AsyncMock(return_value=None)
+    with pytest.raises(ConflictError):
+        await svc.reject_version(1, 7, "no")
 
 
 async def test_reject_version_not_found() -> None:

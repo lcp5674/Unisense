@@ -32,7 +32,7 @@ from app.models.data_source import DataSource, DBCatalog
 from app.models.dimension import Dimension, MetricDimension
 from app.models.metric import Metric
 from app.models.metric_template import MetricTemplate
-from app.models.metric_version import MetricVersion
+from app.models.metric_version import MetricVersion, PendingVersionConfirmation
 from app.models.term import Term
 from app.models.user import User
 from app.services.consume.rate_limiter import (
@@ -709,25 +709,87 @@ class ConsumeService(BaseService):
         }
 
     # ---- 版本消费方确认回调 ----
+    async def _get_my_confirmation(
+        self, metric_id: int, version: int, user_id: int
+    ) -> PendingVersionConfirmation | None:
+        """按 (指标, 版本, 消费方) 查确认记录——归属校验的依据。
+
+        确认/拒绝 PENDING 版本前必须校验调用者是该版本的确认消费方，
+        否则任意用户可确认/拒绝他人的版本（IDOR 越权）。
+        """
+        stmt = select(PendingVersionConfirmation).where(
+            PendingVersionConfirmation.metric_id == metric_id,
+            PendingVersionConfirmation.version == version,
+            PendingVersionConfirmation.consumer_id == user_id,
+        )
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
+    async def _get_metric_by_id(self, metric_id: int) -> Metric | None:
+        stmt = select(Metric).where(
+            Metric.id == metric_id, Metric.deleted_at.is_(None)
+        )
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
     async def confirm_version(self, version_id: int, user_id: int) -> None:
+        """消费方确认版本（完整转正）。
+
+        修复前：仅简易直改版本状态 PUBLISHED（不应用版本口径到主表、不递增
+        版本、不清 PENDING、不更新血缘/通知），且不校验消费方归属（任意用户
+        可确认任意版本）——确认后新口径仍不生效（双实现不一致 + IDOR 越权）。
+
+        现委托语义模块 MetricService.confirm_version 走完整转正
+        （归属校验 + 主表口径同步 + 版本递增 + 血缘注册 + 通知 + 审计）。
+        """
         mv = await self._get_version(version_id)
         if mv is None:
             raise NotFoundError(f"版本 {version_id} 不存在")
         # 对齐语义模块 VersionStatusEnum（T002）：待确认状态为 PENDING_CONFIRMATION
         if mv.status != "PENDING_CONFIRMATION":
             raise ConflictError("版本不在待确认状态")
-        mv.status = "PUBLISHED"
-        await self._db.flush()
+        # 归属校验：仅该版本的确认消费方可确认（防 IDOR——此前 user_id 未使用）
+        if await self._get_my_confirmation(mv.metric_id, mv.version, user_id) is None:
+            raise ConflictError(
+                "您不是该版本的确认消费方，无权确认",
+                error_code="NO_PENDING_CONFIRMATION",
+            )
+        metric = await self._get_metric_by_id(mv.metric_id)
+        if metric is None:
+            raise NotFoundError(f"指标不存在: id={mv.metric_id}")
+        from app.services.semantic.service import MetricService
+
+        await MetricService(self._db).confirm_version(
+            metric.metric_code, mv.version, consumer_id=user_id
+        )
 
     async def reject_version(self, version_id: int, user_id: int, reason: str | None) -> None:
+        """消费方拒绝版本（完整取消）。
+
+        修复前：仅简易直改版本状态 ARCHIVED（不校验归属、不经完整拒绝流程）——
+        任意用户可拒绝任意版本（IDOR），且拒绝后版本滞留非 CANCELLED。
+
+        现委托语义模块 MetricService.reject_version 走完整拒绝流程
+        （归属校验 + 版本 CANCELLED + 终结该版本全部确认记录 + 审计）。
+        """
         mv = await self._get_version(version_id)
         if mv is None:
             raise NotFoundError(f"版本 {version_id} 不存在")
         # 对齐语义模块 VersionStatusEnum（T002）：待确认状态为 PENDING_CONFIRMATION
         if mv.status != "PENDING_CONFIRMATION":
             raise ConflictError("版本不在待确认状态")
-        mv.status = "ARCHIVED"
-        await self._db.flush()
+        # 归属校验：仅该版本的确认消费方可拒绝（防 IDOR）
+        if await self._get_my_confirmation(mv.metric_id, mv.version, user_id) is None:
+            raise ConflictError(
+                "您不是该版本的确认消费方，无权拒绝",
+                error_code="NO_PENDING_CONFIRMATION",
+            )
+        metric = await self._get_metric_by_id(mv.metric_id)
+        if metric is None:
+            raise NotFoundError(f"指标不存在: id={mv.metric_id}")
+        from app.services.semantic.service import MetricService
+
+        await MetricService(self._db).reject_version(
+            metric.metric_code, mv.version, reason or "", consumer_id=user_id
+        )
 
     # ---- helpers ----
     async def _get_bound_dimensions(self, metric_id: int | None) -> set[str]:
