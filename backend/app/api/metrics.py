@@ -25,6 +25,7 @@ from app.db.redis import get_redis
 from app.services.collector.infer_guard import InferInflightGuard
 from app.services.semantic.schemas import (
     MetricApproveRequest,
+    MetricAutoSuggestRequest,
     MetricBatchApproveRequest,
     MetricBatchDeprecateRequest,
     MetricBatchItemResult,
@@ -352,7 +353,9 @@ async def get_archived_metric(
     "/{metric_code}/suggest-rename",
     response_model=ApiResponse[Any],
     summary="仲裁改名建议（LLM 生成区分性名称候选，FR-010）",
-    dependencies=_READ_DEPS,
+    # LLM 额度防护：该端点触发 LLM 生成改名候选（不可用降级规则），且是"仲裁改名"的
+    # 治理操作。原挂 _READ_DEPS——只读角色可任意调用耗尽 LLM 额度，收紧为写角色。
+    dependencies=_WRITE_DEPS,
 )
 async def suggest_rename_metric(
     metric_code: str,
@@ -1249,10 +1252,13 @@ async def batch_register_metrics(
     "/auto-suggest",
     response_model=ApiResponse[Any],
     summary="指标注册自动推断（FR-010/FR-011）",
-    dependencies=_READ_DEPS,
+    # LLM 额度防护：该端点触发 LLM 命名（不可用时降级规则），是"注册指标"的创建辅助。
+    # 原挂 _READ_DEPS——viewer 等只读角色可任意调用耗尽 LLM 额度，收紧为写角色
+    # （platform_admin/domain_admin/metric_owner，与注册能力对齐）。
+    dependencies=_WRITE_DEPS,
 )
 async def auto_suggest_metric(
-    request_body: dict[str, Any],
+    request: MetricAutoSuggestRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
@@ -1266,11 +1272,11 @@ async def auto_suggest_metric(
     from app.services.semantic.auto_fill import auto_fill
     from app.services.semantic.sql_infer import parse_sql_profile
 
-    domain_code = request_body.get("domain_code", "")
-    source_table = request_body.get("source_table")
-    measure_column = request_body.get("measure_column")
-    period = request_body.get("period")
-    sql = request_body.get("sql")
+    domain_code = request.domain_code
+    source_table = request.source_table
+    measure_column = request.measure_column
+    period = request.period
+    sql = request.sql
 
     # 获取域默认值预设
     domain_defaults: dict[str, Any] = {}
@@ -1694,7 +1700,10 @@ async def confirm_deprecate_dropped(
     # 越权收紧：该操作会批量变更任意指标状态，仅限管理角色（platform_admin/domain_admin）。
     # 原实现挂 _WRITE_DEPS（含 metric_owner），任意指标 Owner 可对任意 source_ids
     # 把他人的 PUBLISHED 指标批量置 DSD——越权面。service 层另有同角色兜底校验。
-    dependencies=[Depends(require_roles("platform_admin", "domain_admin")), Depends(guard_against_injection)],
+    dependencies=[
+        Depends(require_roles("platform_admin", "domain_admin")),
+        Depends(guard_against_injection),
+    ],
 )
 async def mark_source_dropped(
     request: MetricSourceDroppedRequest,

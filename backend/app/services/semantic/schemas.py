@@ -392,6 +392,21 @@ class MetricCompareRequest(BaseModel):
     )
 
 
+class MetricAutoSuggestRequest(BaseModel):
+    """指标注册自动推断请求（对齐 FR-010/FR-011）。
+
+    显式 schema 校验（此前为裸 dict）：``sql`` 类型化为 ``str | None``，防非字符串
+    payload（数字/对象）进入 SQL 解析器触发 ``AttributeError`` → 500；FastAPI 对
+    类型不匹配返回 422，而非服务端异常。
+    """
+
+    domain_code: str = Field(default="", max_length=64, description="所属域编码")
+    source_table: str | None = Field(None, max_length=256, description="源表名")
+    measure_column: str | None = Field(None, max_length=128, description="度量列")
+    period: str | None = Field(None, max_length=16, description="统计周期")
+    sql: str | None = Field(None, max_length=16384, description="指标定义 SQL")
+
+
 class MetricBatchRegisterRequest(BaseModel):
     """批量注册请求（对齐 FR-030）。"""
 
