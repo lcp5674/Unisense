@@ -18,6 +18,7 @@ from app.services.lineage.schemas import (
     LineageEdgeDetailResponse,
     LineageEdgeResponse,
     LineageImpactParams,
+    LineageParseBatchRequest,
     LineageParseRequest,
     ManualEdgeCreateRequest,
     PiiImpactItem,
@@ -208,6 +209,7 @@ class FakeRepo:
         missing: int = 0,
         stale_flagged: int = 0,
         restored: int = 0,
+        skipped: int = 0,
         error: str | None = None,
         detail: dict[str, object] | None = None,
     ) -> None:
@@ -218,8 +220,12 @@ class FakeRepo:
         run.missing_count = missing
         run.stale_flagged_count = stale_flagged
         run.restored_count = restored
+        run.skipped_count = skipped
         run.error = error
-        run.detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
+        payload = dict(detail or {})
+        if skipped:
+            payload["skipped"] = skipped
+        run.detail_json = json.dumps(payload, ensure_ascii=False) if payload else None
 
     async def get_ingest_run(self, run_id: int) -> SimpleNamespace | None:
         for run in self.runs:
@@ -1341,16 +1347,31 @@ async def test_pii_impact_collects_downstream_with_consumers() -> None:
     repo = FakeRepo()
     repo.impact = [
         LineageEdgeResponse(
-            id=1, source_node="metric:m0", target_node="metric:m1",
-            edge_type="DERIVED_FROM", granularity="L3", confidence=1.0, provenance="x",
+            id=1,
+            source_node="metric:m0",
+            target_node="metric:m1",
+            edge_type="DERIVED_FROM",
+            granularity="L3",
+            confidence=1.0,
+            provenance="x",
         ),
         LineageEdgeResponse(
-            id=2, source_node="metric:m0", target_node="consumer:c1",
-            edge_type="CONSUMED_BY", granularity="L3", confidence=1.0, provenance="x",
+            id=2,
+            source_node="metric:m0",
+            target_node="consumer:c1",
+            edge_type="CONSUMED_BY",
+            granularity="L3",
+            confidence=1.0,
+            provenance="x",
         ),
         LineageEdgeResponse(
-            id=3, source_node="metric:m1", target_node="metric:m2",
-            edge_type="DERIVED_FROM", granularity="L3", confidence=1.0, provenance="x",
+            id=3,
+            source_node="metric:m1",
+            target_node="metric:m2",
+            edge_type="DERIVED_FROM",
+            granularity="L3",
+            confidence=1.0,
+            provenance="x",
         ),
     ]
     svc._repo = repo
@@ -1373,17 +1394,28 @@ async def test_edge_detail_returns_edge_and_history() -> None:
     repo = FakeRepo()
     repo.edges = [
         SimpleNamespace(
-            id=1, source_node="metric:m1", target_node="consumer:c1",
-            edge_type="CONSUMED_BY", granularity="L3", confidence=1.0,
-            provenance="metric_consumer", pii_inherited=False,
+            id=1,
+            source_node="metric:m1",
+            target_node="consumer:c1",
+            edge_type="CONSUMED_BY",
+            granularity="L3",
+            confidence=1.0,
+            provenance="metric_consumer",
+            pii_inherited=False,
         )
     ]
     repo.history = [
         SimpleNamespace(
-            id=1, source_node="metric:m1", target_node="consumer:c1",
-            edge_type="CONSUMED_BY", granularity="L3", confidence=0.9,
-            provenance="metric_consumer", pii_inherited=False,
-            change_reason="rename", created_at=datetime.now(UTC),
+            id=1,
+            source_node="metric:m1",
+            target_node="consumer:c1",
+            edge_type="CONSUMED_BY",
+            granularity="L3",
+            confidence=0.9,
+            provenance="metric_consumer",
+            pii_inherited=False,
+            change_reason="rename",
+            created_at=datetime.now(UTC),
         )
     ]
     svc._repo = repo
@@ -1493,21 +1525,29 @@ async def test_query_impact_merges_dimension_column_edges_from_mysql() -> None:
     svc = LineageService(db=_FakeSession())
     repo = FakeRepo()
     svc._repo = repo
-    svc._graph = FakeGraph(
-        result=[("metric:gmv_total", "metric:gmv_derived", "DERIVED_FROM")]
-    )
+    svc._graph = FakeGraph(result=[("metric:gmv_total", "metric:gmv_derived", "DERIVED_FROM")])
 
     async def _extra(node: str, direction: str = "both") -> list[Any]:
         return [
             SimpleNamespace(
-                id=1, source_node="metric:gmv_total", target_node="dimension:store",
-                edge_type="USES_DIMENSION", granularity="L3", confidence=1.0,
-                provenance="metric_definition", pii_inherited=False,
+                id=1,
+                source_node="metric:gmv_total",
+                target_node="dimension:store",
+                edge_type="USES_DIMENSION",
+                granularity="L3",
+                confidence=1.0,
+                provenance="metric_definition",
+                pii_inherited=False,
             ),
             SimpleNamespace(
-                id=2, source_node="column:dws.gmv.amount", target_node="metric:gmv_total",
-                edge_type="READS_COLUMN", granularity="L3", confidence=1.0,
-                provenance="metric_definition", pii_inherited=False,
+                id=2,
+                source_node="column:dws.gmv.amount",
+                target_node="metric:gmv_total",
+                edge_type="READS_COLUMN",
+                granularity="L3",
+                confidence=1.0,
+                provenance="metric_definition",
+                pii_inherited=False,
             ),
         ]
 
@@ -1607,9 +1647,7 @@ async def test_add_manual_edge_rejects_self_loop() -> None:
     svc._repo = FakeRepo()
     with pytest.raises(ValidationError):
         await svc.add_manual_edge(
-            ManualEdgeCreateRequest(
-                source_node="table:a", target_node="table:a"
-            ),
+            ManualEdgeCreateRequest(source_node="table:a", target_node="table:a"),
             actor_id=1,
         )
 
@@ -1817,3 +1855,115 @@ async def test_invalidate_impact_cache_without_redis_is_noop() -> None:
     """m5: 未注入 Redis 时缓存失效为 no-op（不阻塞主流程）。"""
     svc = LineageService(db=_FakeSession())
     assert await svc._invalidate_impact_cache("table:a") is None
+
+
+# ---------- 企业级批次解析（parse_batch）----------
+
+
+async def test_parse_batch_writes_all_edges() -> None:
+    """批次解析：多条 SQL 全部写入，变更摘要与逐条明细正确。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    eventbus = AsyncMock()
+    svc._eventbus = eventbus
+    req = LineageParseBatchRequest(
+        dialect="mysql",
+        statements=[
+            "INSERT INTO dws.t SELECT a.id, a.v FROM ods.a",
+            "INSERT INTO dws.u SELECT b.id FROM ods.b",
+        ],
+        provenance="sqlglot_batch",
+    )
+    res = await svc.parse_batch(req, actor_id=1)
+    assert res.total_statements == 2
+    assert res.succeeded == 2
+    assert res.failed == 0
+    # 表级 2 + 字段级 3（a.id/a.v/b.id）= 5 条边
+    assert res.total_edges == 5
+    assert res.added == 5
+    assert res.updated == 0
+    assert res.skipped == 0
+    assert len(res.statements) == 2
+    # 逐条明细：第一条 1 表级 + 2 字段级，第二条 1 表级 + 1 字段级
+    assert len(res.statements[0].table_edges) == 1
+    assert len(res.statements[0].field_edges) == 2
+    assert len(res.statements[1].table_edges) == 1
+    assert len(res.statements[1].field_edges) == 1
+    # 事件双发（lineage_batch_parsed）
+    eventbus.publish.assert_awaited_once()
+    event, payload = eventbus.publish.await_args.args
+    assert event == "lineage_batch_parsed"
+    assert payload["added"] == 5
+    # 写了一条批次运行记录（kind=batch_parse）
+    assert len(svc._repo.runs) == 1
+    assert svc._repo.runs[0].source == "sqlglot_batch"
+
+
+async def test_parse_batch_text_block_splits() -> None:
+    """text 多语句文本块按分号拆分（含注释剥离），等价 statements 数组。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    req = LineageParseBatchRequest(
+        dialect="hive",
+        text=(
+            "-- 上游加工\n"
+            "INSERT INTO dwd.dim_user SELECT user_id, user_name FROM ods.ods_user; "
+            "INSERT INTO dws.dws_user_stat SELECT user_id, COUNT(*) AS cnt FROM dwd.dim_user "
+            "GROUP BY user_id"
+        ),
+    )
+    res = await svc.parse_batch(req, actor_id=1)
+    assert res.total_statements == 2
+    assert res.succeeded == 2
+    # 表级 2 边 + 字段级 3（user_id/user_name + user_id；COUNT(*) 无源列不产边）
+    assert res.total_edges == 5
+    # 中间表 dwd.dim_user 正确成链（两语句均写边）
+    nodes = {e["source_node"] for e in svc._repo.upsert_calls}
+    assert "table:dwd.dim_user" in nodes
+
+
+class _PartialCycleRepo(FakeRepo):
+    """环检假仓库：仅对指定 (source, target) 判成环。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cycle_keys: set[tuple[str, str]] = set()
+
+    async def would_create_cycle(self, edge: object) -> bool:
+        return (edge.source_node, edge.target_node) in self.cycle_keys
+
+
+async def test_parse_batch_cycle_edge_skipped() -> None:
+    """批次解析：成环边跳过计数（不抛错），其余边正常写入。"""
+    svc = LineageService(db=_FakeSession())
+    repo = _PartialCycleRepo()
+    repo.cycle_keys = {("table:ods.b", "table:dws.u")}
+    svc._repo = repo
+    req = LineageParseBatchRequest(
+        dialect="mysql",
+        statements=[
+            "INSERT INTO dws.t SELECT a.id FROM ods.a",
+            "INSERT INTO dws.u SELECT b.id FROM ods.b",
+        ],
+    )
+    res = await svc.parse_batch(req, actor_id=1)
+    assert res.skipped == 1  # ods.b->dws.u 表级边成环跳过
+    assert res.added == 3  # a->t 表级 + a.id->t.id 字段 + b.id->u.id 字段
+    assert res.total_edges == 3
+    # 成环表级边未写入，字段级边正常写入
+    written = {(e["source_node"], e["target_node"]) for e in repo.upsert_calls}
+    assert ("table:ods.b", "table:dws.u") not in written
+    assert ("table:ods.a", "table:dws.t") in written
+    assert ("field:ods.b.id", "field:dws.u.id") in written
+
+
+async def test_parse_batch_empty_no_op() -> None:
+    """批次解析空输入（无 statements/text）：返回零结果、不写运行记录。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    req = LineageParseBatchRequest(dialect="mysql")
+    res = await svc.parse_batch(req, actor_id=1)
+    assert res.total_statements == 0
+    assert res.total_edges == 0
+    assert res.succeeded == 0
+    assert res.failed == 0

@@ -14,7 +14,7 @@ from httpx import ASGITransport
 
 from app.api import deps
 from app.main import app
-from app.services.lineage.schemas import LineageParseResponse
+from app.services.lineage.schemas import LineageParseBatchResponse, LineageParseResponse
 
 
 @pytest.fixture
@@ -113,3 +113,70 @@ async def test_parse_still_blocks_injection_in_other_fields(owner_client, monkey
     assert resp.status_code == 400
     assert "INJECTION_DETECTED" in resp.text
     svc.parse_and_store.assert_not_awaited()
+
+
+async def test_parse_batch_accepts_legit_sql_in_statements_and_text(owner_client, monkeypatch):
+    """/parse-batch 的 statements/text 字段与 /parse 的 sql 同理是待解析 SQL 文本：
+    含 -- 注释 / UNION ALL 的合法 SQL 不应被注入守卫误伤为 400。"""
+    client, _ = owner_client
+    svc = AsyncMock()
+    svc.parse_batch.return_value = LineageParseBatchResponse(
+        total_statements=2,
+        succeeded=2,
+        failed=0,
+        total_edges=3,
+        added=3,
+        updated=0,
+        skipped=0,
+        graph_written=False,
+        statements=[],
+    )
+    monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)
+    # statements 数组：第一条含 -- 注释，第二条含 UNION ALL
+    resp = await client.post(
+        "/api/v1/lineage/parse-batch",
+        json={
+            "dialect": "doris",
+            "statements": [
+                "INSERT INTO dws.t SELECT u.id FROM db1.users u -- 上游用户",
+                "INSERT INTO dws.t SELECT id FROM db1.a UNION ALL SELECT id FROM db2.b",
+            ],
+        },
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["total_edges"] == 3
+    svc.parse_batch.assert_awaited_once()
+    # text 多语句文本块（含分号多语句 + 注释）同样豁免
+    svc.reset_mock()
+    resp = await client.post(
+        "/api/v1/lineage/parse-batch",
+        json={
+            "dialect": "hive",
+            "text": (
+                "-- 批量 ETL\nINSERT INTO t1 SELECT id FROM s1; INSERT INTO t2 SELECT id FROM s2"
+            ),
+        },
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 200
+    svc.parse_batch.assert_awaited_once()
+
+
+async def test_parse_batch_still_blocks_injection_in_other_fields(owner_client, monkeypatch):
+    """豁免仅作用于 statements/text；provenance 等其他字段命中注入仍 400 拦截。"""
+    client, _ = owner_client
+    svc = AsyncMock()
+    monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)
+    resp = await client.post(
+        "/api/v1/lineage/parse-batch",
+        json={
+            "dialect": "mysql",
+            "statements": ["SELECT 1"],
+            "provenance": "x'; drop table users--",
+        },
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 400
+    assert "INJECTION_DETECTED" in resp.text
+    svc.parse_batch.assert_not_awaited()

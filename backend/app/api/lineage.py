@@ -30,6 +30,7 @@ from app.services.lineage.schemas import (
     LineageEdgeDetailResponse,
     LineageEdgeListParams,
     LineageImpactParams,
+    LineageParseBatchRequest,
     LineageParseRequest,
     LineageStaleParams,
     ManualEdgeCreateRequest,
@@ -50,6 +51,12 @@ _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_inje
 _PARSE_DEPS = [
     Depends(require_roles(*_WRITE_ROLES)),
     Depends(guard_against_injection_exempt("sql")),
+]
+# /parse-batch 的 statements/text 字段同样承载待解析 SQL 文本本身，豁免注入检测
+# （语义与 /parse 的 sql 字段一致：仅经 sqlglot 纯函数解析，不执行、不拼接查询）。
+_PARSE_BATCH_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt("statements", "text")),
 ]
 
 # Neo4j 驱动持连接池，每请求新建 LineageGraphClient 且从不 dispose 会让 driver
@@ -105,6 +112,44 @@ async def parse_lineage(
         detail={
             "table_edges": result.table_edges,
             "field_edges": result.field_edges,
+            "graph_written": result.graph_written,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result.model_dump(), trace_id=trace_id)
+
+
+@router.post("/parse-batch", dependencies=_PARSE_BATCH_DEPS)
+async def parse_lineage_batch(
+    body: LineageParseBatchRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """批量解析多条 SQL 并幂等写入血缘（企业级批量导入）。
+
+    ``statements``（数组）或 ``text``（多语句文本块）二选一；整批共用同一
+    ``dialect`` 与可选 ``target_table`` 落点。单条解析失败不阻断批次，响应含
+    逐条结果与变更摘要（added/updated/skipped）。
+    """
+    svc = _svc(db)
+    result = await svc.parse_batch(body, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="LINEAGE_PARSE_BATCH",
+        entity_type="lineage",
+        entity_id=body.source_node or "batch",
+        detail={
+            "total_statements": result.total_statements,
+            "succeeded": result.succeeded,
+            "failed": result.failed,
+            "added": result.added,
+            "updated": result.updated,
+            "skipped": result.skipped,
             "graph_written": result.graph_written,
         },
         ip=client_ip(request),

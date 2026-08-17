@@ -37,6 +37,7 @@ from app.services.lineage.repository import LineageRepository
 from app.services.lineage.schemas import (
     MANUAL_EDGE_TYPES,
     MANUAL_NODE_PREFIXES,
+    BatchParseStatementResult,
     CoverageBrokenEdgeItem,
     CoverageOrphanItem,
     EdgeDeleteResult,
@@ -51,6 +52,8 @@ from app.services.lineage.schemas import (
     LineageIngestRunResponse,
     LineageNodeInfo,
     LineageNodeResponse,
+    LineageParseBatchRequest,
+    LineageParseBatchResponse,
     LineageParseRequest,
     LineageParseResponse,
     ManualEdgeCreateRequest,
@@ -273,6 +276,184 @@ class LineageService(BaseService):
             field_lineage=field_lineage,
         )
 
+    async def parse_batch(
+        self, req: LineageParseBatchRequest, actor_id: int
+    ) -> LineageParseBatchResponse:
+        """批量解析多条 SQL 并幂等写入血缘（企业级批量导入）。
+
+        与 ``parse_and_store`` 单条语义对齐，但面向「一次导入一批 ETL 血缘」：
+        - 逐条**独立**解析——单条语法不支持/解析异常仅标记该条 ``error``，不阻断批次；
+        - 产出的边统一在**单个事务**内幂等 upsert（新增/更新计数）；
+        - 循环依赖的边**跳过计数**而非抛错（批量导入场景尽量多写入）；
+        - 整批写一条 ``lineage_ingest_run``（kind=batch_parse，含逐条明细快照），
+          同步图存储 + 失效两端影响缓存 + 发布 ``lineage_batch_parsed`` 事件。
+
+        ``text`` 多语句文本块与 ``statements`` 数组二选一；纯 SELECT 可经
+        ``target_table`` 指定整批共用落点（方案 A+B）。
+        """
+        statements = req.resolved_statements
+        results: list[BatchParseStatementResult] = []
+        table_edges: list[Any] = []
+        field_edges: list[Any] = []
+        for idx, sql in enumerate(statements):
+            result, te, fe = self._parse_batch_statement(idx, sql, req.dialect, req.target_table)
+            results.append(result)
+            table_edges.extend(te)
+            field_edges.extend(fe)
+        run = await self._repo.begin_ingest_run(req.provenance)
+        try:
+            added, updated, skipped, graph_edges = await self._store_batch_edges(
+                table_edges, field_edges, req.provenance
+            )
+            total = added + updated
+            graph_written = await self._sync_graph(
+                graph_edges, delete=False, context=f"parse_batch:{req.provenance}"
+            )
+            for sn, tn, _etype in graph_edges:
+                await self._invalidate_impact_cache(sn)
+                await self._invalidate_impact_cache(tn)
+            succeeded = sum(
+                1 for r in results if r.error is None and (r.table_edges or r.field_edges)
+            )
+            failed = sum(1 for r in results if r.error is not None)
+            payload = {
+                "statements": len(statements),
+                "succeeded": succeeded,
+                "failed": failed,
+                "added": added,
+                "updated": updated,
+                "skipped": skipped,
+            }
+            if self._events is not None:
+                await self._events.publish("lineage_batch_parsed", payload)
+            await self._eventbus.publish("lineage_batch_parsed", payload)
+            # 运行详情快照：只保留前 N 条语句明细（detail_json 为 TEXT 列，防 64KB 超限）
+            detail = {
+                "kind": "batch_parse",
+                "dialect": req.dialect,
+                "target_table": req.target_table,
+                "actor_id": actor_id,
+                "statement_count": len(statements),
+                "statements": [s.model_dump() for s in results][:_DETAIL_EDGE_SAMPLE],
+            }
+            await self._repo.finish_ingest_run(
+                run,
+                status="success",
+                total_edges=total,
+                added=added,
+                updated=updated,
+                skipped=skipped,
+                detail=detail,
+            )
+            await self._db.commit()
+            return LineageParseBatchResponse(
+                total_statements=len(statements),
+                succeeded=succeeded,
+                failed=failed,
+                total_edges=total,
+                added=added,
+                updated=updated,
+                skipped=skipped,
+                graph_written=graph_written,
+                statements=results,
+            )
+        except Exception as exc:
+            await self._db.rollback()
+            await self._repo.finish_ingest_run(run, status="failed", error=str(exc))
+            await self._db.commit()
+            raise
+
+    @staticmethod
+    def _parse_batch_statement(
+        idx: int, sql: str, dialect: str | None, target_table: str | None
+    ) -> tuple[BatchParseStatementResult, list[Any], list[Any]]:
+        """解析单条语句，返回（明细结果, 表级边, 字段级边）。
+
+        解析异常不抛出——降级为带 ``error`` 的明细，由调用方继续处理后续语句。
+        """
+        try:
+            te = extract_table_lineage(sql, dialect, target_table=target_table)
+            fe = extract_field_lineage(sql, dialect, target_table=target_table)
+        except Exception as exc:  # pragma: no cover - 防御（parser 内部已降级）
+            return BatchParseStatementResult(index=idx, sql=sql, error=str(exc)), [], []
+        t_items = [TableLineageItem(source=e.source, target=e.target) for e in te]
+        f_items = [
+            FieldLineageItem(
+                source_table=e.source_table,
+                source_column=e.source_column,
+                target_table=e.target_table,
+                target_column=e.target_column,
+                expression=e.expression,
+            )
+            for e in fe
+            if e.source_table and e.source_column and e.target_table and e.target_column
+        ]
+        result = BatchParseStatementResult(
+            index=idx, sql=sql, table_edges=t_items, field_edges=f_items
+        )
+        return result, te, fe
+
+    async def _store_batch_edges(
+        self,
+        table_edges: list[Any],
+        field_edges: list[Any],
+        provenance: str,
+    ) -> tuple[int, int, int, list[tuple[str, str, str]]]:
+        """事务内幂等写入批次边，返回 (added, updated, skipped, graph_edges)。
+
+        循环依赖边跳过计数（不抛错）；与 ``parse_and_store`` 的粒度/原因约定一致。
+        """
+        added = 0
+        updated = 0
+        skipped = 0
+        graph_edges: list[tuple[str, str, str]] = []
+        for e in table_edges:
+            sn, tn = node_table(e.source), node_table(e.target)
+            probe = LineageEdge(
+                source_node=sn, target_node=tn, edge_type="DERIVED_FROM", granularity="L1"
+            )
+            if await self._repo.would_create_cycle(probe):
+                skipped += 1
+                continue
+            _, created = await self._repo.upsert_edge_with_status(
+                source_node=sn,
+                target_node=tn,
+                edge_type="DERIVED_FROM",
+                granularity="L1",
+                provenance=provenance,
+                change_reason="reparse",
+            )
+            if created:
+                added += 1
+            else:
+                updated += 1
+            graph_edges.append((sn, tn, "DERIVED_FROM"))
+        for e in field_edges:
+            if not (e.source_table and e.source_column and e.target_table and e.target_column):
+                continue
+            sn = node_field(e.source_table, e.source_column)
+            tn = node_field(e.target_table, e.target_column)
+            probe = LineageEdge(
+                source_node=sn, target_node=tn, edge_type="DERIVED_FROM", granularity="L2"
+            )
+            if await self._repo.would_create_cycle(probe):
+                skipped += 1
+                continue
+            _, created = await self._repo.upsert_edge_with_status(
+                source_node=sn,
+                target_node=tn,
+                edge_type="DERIVED_FROM",
+                granularity="L2",
+                provenance=provenance,
+                change_reason="reparse",
+            )
+            if created:
+                added += 1
+            else:
+                updated += 1
+            graph_edges.append((sn, tn, "DERIVED_FROM"))
+        return added, updated, skipped, graph_edges
+
     async def query_impact(self, params: LineageImpactParams) -> list[LineageEdgeResponse]:
         """影响分析：图(Neo4j)优先读，图不可用时回退 MySQL；结果 cache-aside。
 
@@ -431,9 +612,7 @@ class LineageService(BaseService):
         upstream_tables = [
             t for t in (definition.get("source_tables") or []) if isinstance(t, str) and t
         ]
-        await self._repo.sync_metric_table_edges(
-            metric_code, source_table_clean, upstream_tables
-        )
+        await self._repo.sync_metric_table_edges(metric_code, source_table_clean, upstream_tables)
         if source_table_clean:
             edges.append(
                 await self._repo.upsert_metric_table_edge(
@@ -515,9 +694,7 @@ class LineageService(BaseService):
         Returns:
             ``(deleted_count, added_count)``（血缘变更不提交，交由调用方事务统一提交）。
         """
-        return await self._repo.sync_metric_dimension_edges(
-            metric_code, current_dim_codes
-        )
+        return await self._repo.sync_metric_dimension_edges(metric_code, current_dim_codes)
 
     async def register_metric_column_edge(
         self,
@@ -610,8 +787,7 @@ class LineageService(BaseService):
         prefix, _, value = node.partition(":")
         if prefix not in MANUAL_NODE_PREFIXES:
             raise ValidationError(
-                f"{field_name} 节点前缀 {prefix!r} 不受支持，允许："
-                f"{sorted(MANUAL_NODE_PREFIXES)}",
+                f"{field_name} 节点前缀 {prefix!r} 不受支持，允许：{sorted(MANUAL_NODE_PREFIXES)}",
                 error_code=ErrorCode.VALIDATION_ERROR,
             )
         if not value.strip():
@@ -697,7 +873,6 @@ class LineageService(BaseService):
             source_node=edge.source_node,
             target_node=edge.target_node,
         )
-
 
     async def query_graph(
         self,
@@ -1248,8 +1423,7 @@ class LineageService(BaseService):
             )
             if graph_edges is not None and graph_edges:
                 merged = [
-                    self._graph_edge_to_response(src, tgt, etype)
-                    for src, tgt, etype in graph_edges
+                    self._graph_edge_to_response(src, tgt, etype) for src, tgt, etype in graph_edges
                 ]
                 # 补充图存储未覆盖的「指标↔维度/字段」边（仅 MySQL 权威存储，L3）。
                 # 图边以表/指标/消费方为主；维度/字段边由指标定义/回填写入 MySQL，
@@ -1355,9 +1529,7 @@ class LineageService(BaseService):
             if keys:
                 await redis.delete(*keys)
         except Exception as exc:
-            logger.warning(
-                "lineage_impact_cache_invalidate_failed", node=node, error=str(exc)
-            )
+            logger.warning("lineage_impact_cache_invalidate_failed", node=node, error=str(exc))
 
     async def _impact_cache_get(self, key: str) -> list[LineageEdgeResponse] | None:
         """读影响分析缓存；Redis 不可用/熔断/解析失败时返回 None（回源）。"""

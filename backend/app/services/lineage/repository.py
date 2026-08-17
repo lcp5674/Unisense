@@ -425,9 +425,7 @@ class LineageRepository:
         """
         node = f"metric:{metric_code}"
         current_down = {node_table(downstream_table)} if downstream_table else set()
-        current_up = {
-            node_table(t) for t in upstream_tables if isinstance(t, str) and t
-        }
+        current_up = {node_table(t) for t in upstream_tables if isinstance(t, str) and t}
         deleted = 0
         # 1a) 软删不再声明的落地表边（metric:{code} → table:{tbl}，DERIVED_FROM）
         for edge in await self.edges_for_node(node, direction="downstream"):
@@ -777,6 +775,7 @@ class LineageRepository:
         missing: int = 0,
         stale_flagged: int = 0,
         restored: int = 0,
+        skipped: int = 0,
         error: str | None = None,
         detail: dict[str, Any] | None = None,
     ) -> None:
@@ -785,6 +784,7 @@ class LineageRepository:
         Args:
             detail: 本次运行详情快照（dict 序列化为 ``detail_json`` 文本列）。
                 SQL 解析存 SQL 原文/方言/落点/边明细；批量采集存变更边明细。
+            skipped: 因循环依赖被跳过的边数（批次解析等场景），并入详情快照。
         """
         run.status = status
         run.total_edges = total_edges
@@ -794,7 +794,10 @@ class LineageRepository:
         run.stale_flagged_count = stale_flagged
         run.restored_count = restored
         run.error = error
-        run.detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
+        payload = dict(detail or {})
+        if skipped:
+            payload["skipped"] = skipped
+        run.detail_json = json.dumps(payload, ensure_ascii=False) if payload else None
         await self._db.flush()
 
     async def get_ingest_run(self, run_id: int) -> LineageIngestRun | None:
@@ -1215,9 +1218,7 @@ class LineageRepository:
 
     async def metric_total(self) -> int:
         """指标总数（soft 删除过滤）。"""
-        n = await self._db.execute(
-            select(func.count(Metric.id)).where(Metric.deleted_at.is_(None))
-        )
+        n = await self._db.execute(select(func.count(Metric.id)).where(Metric.deleted_at.is_(None)))
         return int(n.scalar_one_or_none() or 0)
 
     async def metric_codes_with_lineage(self) -> set[str]:

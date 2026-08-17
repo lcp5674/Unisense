@@ -316,9 +316,7 @@ class LineageEdgeDetailResponse(BaseModel):
 #: - ``dimension:{code}``     维度编码（指标↔维度绑定）
 #: - ``consumer:{client_id}`` 数据消费方（报表/接口/接入方）
 #: - ``external:{name}``      外部依赖（文档/系统边界，仅登记不作处理）
-MANUAL_NODE_PREFIXES = frozenset(
-    {"metric", "table", "column", "dimension", "consumer", "external"}
-)
+MANUAL_NODE_PREFIXES = frozenset({"metric", "table", "column", "dimension", "consumer", "external"})
 
 #: 手动登记允许的边类型（对齐 lineage_edge_type 枚举，排除内部流转方向标记）。
 MANUAL_EDGE_TYPES = frozenset(
@@ -339,8 +337,7 @@ class ManualEdgeCreateRequest(BaseModel):
     edge_type: str = Field(
         default="DERIVED_FROM",
         description=(
-            "边类型：DERIVED_FROM / CONSUMED_BY / USES_DIMENSION / "
-            "READS_COLUMN / EXTERNAL_BREAK"
+            "边类型：DERIVED_FROM / CONSUMED_BY / USES_DIMENSION / READS_COLUMN / EXTERNAL_BREAK"
         ),
     )
     note: str | None = Field(
@@ -361,3 +358,73 @@ class EdgeDeleteResult(BaseModel):
     edge_id: int = Field(description="被删除的边 ID")
     source_node: str = Field(description="上游节点")
     target_node: str = Field(description="下游节点")
+
+
+class BatchParseStatementResult(BaseModel):
+    """批次解析单条语句的结果（含错误定位）。"""
+
+    index: int = Field(description="语句序号（从 0 开始）")
+    sql: str = Field(description="语句原文")
+    table_edges: list[TableLineageItem] = Field(
+        default_factory=list, description="该条产出的表级边明细"
+    )
+    field_edges: list[FieldLineageItem] = Field(
+        default_factory=list, description="该条产出的字段级边明细"
+    )
+    error: str | None = Field(default=None, description="解析异常信息（单条失败不阻断批次）")
+
+
+class LineageParseBatchRequest(BaseModel):
+    """血缘批次解析请求（企业级批量导入）。
+
+    ``statements``（多条独立 SQL）与 ``text``（多语句文本块，分号智能拆分）二选一，
+    至少提供一个。整批共用同一 ``dialect`` 与可选 ``target_table`` 落点。
+    """
+
+    dialect: str | None = Field(
+        default=None,
+        description="sqlglot dialect（对齐数据源类型；None=自动猜测）",
+    )
+    statements: list[str] = Field(
+        default_factory=list,
+        description="多条 SQL（每条独立解析产血缘）",
+    )
+    text: str | None = Field(
+        default=None,
+        max_length=1_000_000,
+        description="多语句文本块（按分号拆分，自动剥注释；与 statements 二选一）",
+    )
+    provenance: str = Field(default="sqlglot", max_length=32, description="来源通道")
+    target_table: str | None = Field(
+        default=None,
+        max_length=512,
+        description="可选整批共用落点（纯 SELECT 场景的方案 A+B 指定写入目标）",
+    )
+    source_node: str | None = Field(default=None, max_length=512, description="可选上游资产节点")
+
+    @property
+    def resolved_statements(self) -> list[str]:
+        """解析出待处理语句列表（statements 优先，其次 text 按分号拆分）。"""
+        if self.statements:
+            return [s for s in self.statements if s and s.strip()]
+        if self.text:
+            from app.services.lineage.parser import _split_statements
+
+            return _split_statements(self.text)
+        return []
+
+
+class LineageParseBatchResponse(BaseModel):
+    """血缘批次解析结果（变更摘要 + 逐条明细）。"""
+
+    total_statements: int = Field(description="待处理语句数（含失败/无血缘）")
+    succeeded: int = Field(description="解析成功且产出至少一条边的语句数")
+    failed: int = Field(description="解析失败（异常）的语句数")
+    total_edges: int = Field(description="本次写入的边总数（表级+字段级）")
+    added: int = Field(description="新增边数")
+    updated: int = Field(description="更新边数")
+    skipped: int = Field(default=0, description="因成环被跳过的边数")
+    graph_written: bool = Field(description="图谱（Neo4j）是否写入成功")
+    statements: list[BatchParseStatementResult] = Field(
+        default_factory=list, description="逐条解析结果"
+    )
