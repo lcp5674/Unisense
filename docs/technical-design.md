@@ -3387,6 +3387,7 @@ API → MySQL(同步写) → Redis Stream(XADD) → [Neo4j Sync Worker / ES Sync
 
 ### 15.3 访问控制
 - 外部 API：JWT Bearer Token（短期 access_token 15min + refresh_token 7天）或 api_client secret 签发 token
+- **单端登录（禁止共用账号）**：同账号同一时刻仅一处活跃会话——登录/刷新签发新 refresh token 时，将该用户旧 refresh jti 加入黑名单（复用 JWT 黑名单机制），旧会话 access token 短效（15min）过期后无法无感续期即被踢下线；防止多人共用同一账号导致审计无法定位到具体操作者
 - 内部服务：Service Account + RBAC，服务间调用鉴权 token 透传 `trace_id`/`actor_id`
 - 数据库：应用账号按最小权限（MySQL 只读/读写分离；Neo4j 读副本/写 Leader 分离）
 - 运维：跳板机 + 审计，禁止直连数据库

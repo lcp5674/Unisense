@@ -102,7 +102,7 @@ async def test_login_user_not_found_returns_same_code(auth_client):
 
 
 async def test_me_returns_current_user(auth_client):
-    c, _ = auth_client
+    c, session = auth_client
     user = MagicMock()
     user.id = 7
     user.username = "alice"
@@ -111,6 +111,9 @@ async def test_me_returns_current_user(auth_client):
     user.domain = "sales"
     user.org_id = 2
     app.dependency_overrides[deps.get_current_user] = lambda: user
+
+    # me 端点会查询 Organization 与 SubjectDomain 回填名称；mock 返回 None（无记录）即可。
+    session.execute.side_effect = lambda _stmt: _result_with(None)
 
     resp = await c.get("/api/v1/auth/me", headers={"Authorization": "Bearer dummy"})
 
@@ -205,3 +208,30 @@ async def test_refresh_user_not_found(auth_client):
 
     assert resp.status_code == 401
     assert resp.json()["code"] == "AUTH_TOKEN_INVALID"
+
+
+async def test_login_kicks_previous_session(auth_client):
+    """单端登录（TD §5）：同一用户二次登录后，旧会话 refresh 刷新被拒（互踢）。"""
+    c, session = auth_client
+    # 两次登录都查同一用户
+    user = await _mock_user("secret", id=1, role="platform_admin", org_id=1)
+    session.execute.return_value = _result_with(user)
+
+    resp1 = await c.post("/api/v1/auth/login", json={"username": "admin", "password": "secret"})
+    assert resp1.status_code == 200
+    old_refresh = resp1.json()["data"]["refresh_token"]
+
+    # 第二次登录（另一处会话）→ 旧 refresh 应被拉黑
+    resp2 = await c.post("/api/v1/auth/login", json={"username": "admin", "password": "secret"})
+    assert resp2.status_code == 200
+    new_refresh = resp2.json()["data"]["refresh_token"]
+    assert old_refresh != new_refresh
+
+    # 用旧 refresh 刷新 → 应被拒（AUTH_REFRESH_REVOKED）
+    resp3 = await c.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
+    assert resp3.status_code == 401
+    assert resp3.json()["code"] == "AUTH_REFRESH_REVOKED"
+
+    # 新 refresh 仍有效（不被自身误踢）
+    resp4 = await c.post("/api/v1/auth/refresh", json={"refresh_token": new_refresh})
+    assert resp4.status_code == 200

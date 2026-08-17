@@ -26,6 +26,7 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     is_token_blacklisted,
+    rotate_active_refresh,
     verify_password,
 )
 from app.db.mysql import get_db_session
@@ -122,6 +123,8 @@ async def login(
 
     token = create_access_token(sub=user.id, role=user.role, org_id=user.org_id)
     refresh = create_refresh_token(sub=user.id, role=user.role, org_id=user.org_id)
+    # 单端登录（TD §5）：新登录使该用户旧会话的 refresh token 失效（互踢）。
+    await rotate_active_refresh(user.id, refresh)
     return ok(
         TokenResponse(
             access_token=token,
@@ -261,6 +264,8 @@ async def refresh(
 
     new_access = create_access_token(sub=user.id, role=user.role, org_id=user.org_id)
     new_refresh = create_refresh_token(sub=user.id, role=user.role, org_id=user.org_id)
+    # 单端登录：刷新轮换后，把活跃 refresh 指向最新 jti（旧 jti 已被上方黑名单轮换拉黑）。
+    await rotate_active_refresh(user_id, new_refresh)
     return ok(TokenResponse(access_token=new_access, refresh_token=new_refresh))
 
 
