@@ -594,8 +594,13 @@ class DimensionService(BaseService):
         )
         return await self._repo.save_mapping(mapping)
 
-    async def list_mappings(self, source_dim_code: str | None) -> list[DimensionMapping]:
-        return await self._repo.list_mappings(source_dim_code)
+    async def list_mappings(
+        self, source_dim_code: str | None, *, page: int = 1, page_size: int = 20
+    ) -> tuple[list[DimensionMapping], int]:
+        """分页列出维度映射（P10 服务端分页，对齐主表分页模式）。"""
+        limit = min(max(page_size, 1), 200)
+        offset = (max(page, 1) - 1) * limit
+        return await self._repo.list_mappings(source_dim_code, limit=limit, offset=offset)
 
     async def get_mapping(self, mapping_id: int) -> DimensionMapping | None:
         return await self._repo.get_mapping(mapping_id)
@@ -805,9 +810,14 @@ class DimensionService(BaseService):
         return await self._repo.save_reconciliation(rec)
 
     async def list_reconciliations(
-        self, status: str | None
-    ) -> list[tuple[Reconciliation, Metric | None]]:
-        return await self._repo.list_reconciliations(status)
+        self, status: str | None, *, page: int = 1, page_size: int = 20
+    ) -> tuple[list[tuple[Reconciliation, Metric | None]], int]:
+        """分页列出对账记录（P10 服务端分页，防治理记录增长导致的全量拉取）。"""
+        limit = min(max(page_size, 1), 200)
+        offset = (max(page, 1) - 1) * limit
+        return await self._repo.list_reconciliations(
+            status, limit=limit, offset=offset
+        )
 
     async def review_reconciliation(
         self, rec_id: int, data: ReconciliationReview, reviewer_id: int | None = None
