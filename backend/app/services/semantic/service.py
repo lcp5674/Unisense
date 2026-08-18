@@ -821,6 +821,11 @@ class MetricService(BaseService):
                 version_status = "PENDING_CONFIRMATION"
             else:
                 version_status = "DRAFT"
+                # P8 非破坏性口径变更直接生效：主表 version 与 effective_version 同步，
+                # 消除「version 已递增但 effective_version 滞后 → 永不转正的 DRAFT 版本
+                # 与生效版本矛盾」的治理混乱（此前非破坏编辑不写 effective_version）。
+                if metric.status == "PUBLISHED":
+                    updates["effective_version"] = new_version_num
 
             # 合并定义 diff 与 top-level diff，供转正时回写主表
             merged_diff = self._compute_diff(old_def, new_def)
@@ -3543,27 +3548,34 @@ class MetricService(BaseService):
             defaults = suggested.get("defaults", {})
 
             try:
-                create_req = MetricCreateRequest(
-                    metric_code=code,
-                    name=col,
-                    domain=request.domain,
-                    type=defaults.get("type", "atomic"),
-                    granularity=defaults.get("granularity", "day"),
-                    unit=defaults.get("unit", "cnt"),
-                    aggregation=defaults.get("aggregation", "SUM"),
-                    time_semantics=defaults.get("time_semantics", "PERIOD"),
-                    freshness=defaults.get("freshness", "T1"),
-                    dw_layer=defaults.get("dw_layer", "DWD"),
-                    metric_tier=defaults.get("metric_tier", "T3"),
-                    serving_mode=defaults.get("serving_mode", "BATCH_ONLY"),
-                    additivity=defaults.get("additivity", "ADDITIVE"),
-                    definition_json={"expression": f"SUM({col})", "dependencies": []},
-                    source_table=request.source_table,
-                    measure_column=col,
-                    period="day",
-                    batch_id=batch_id,
-                )
-                await self.create_metric(create_req, owner_id=actor_id)
+                # P13 savepoint 隔离：每条候选独立嵌套事务——单列 DB 错误（如重复编码
+                # IntegrityError）只回滚本 savepoint，不污染此前已 flush 成功的候选。
+                # 修复前：SQLAlchemyError 走整会话 rollback，已 flush 未提交的指标被回滚
+                # 但 candidates 已记为 DRAFT 成功 → 部分结果与落库不一致（失真）。
+                async with self._db.begin_nested():
+                    create_req = MetricCreateRequest(
+                        metric_code=code,
+                        name=col,
+                        domain=request.domain,
+                        type=defaults.get("type", "atomic"),
+                        granularity=defaults.get("granularity", "day"),
+                        unit=defaults.get("unit", "cnt"),
+                        aggregation=defaults.get("aggregation", "SUM"),
+                        time_semantics=defaults.get("time_semantics", "PERIOD"),
+                        freshness=defaults.get("freshness", "T1"),
+                        dw_layer=defaults.get("dw_layer", "DWD"),
+                        metric_tier=defaults.get("metric_tier", "T3"),
+                        serving_mode=defaults.get("serving_mode", "BATCH_ONLY"),
+                        additivity=defaults.get("additivity", "ADDITIVE"),
+                        definition_json={"expression": f"SUM({col})", "dependencies": []},
+                        source_table=request.source_table,
+                        measure_column=col,
+                        period="day",
+                        batch_id=batch_id,
+                    )
+                    await self.create_metric(
+                        create_req, owner_id=actor_id, role=role, user_domain=user_domain
+                    )
                 candidates.append(
                     {
                         "metric_code": code,
