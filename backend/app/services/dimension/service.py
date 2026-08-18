@@ -40,6 +40,7 @@ from app.models.dimension import (
     ReconciliationStatus,
 )
 from app.models.metric import Metric
+from app.models.metric_version import MetricVersion
 from app.services.dimension.repository import DimensionRepository
 from app.services.dimension.schemas import (
     DimensionCreate,
@@ -596,6 +597,9 @@ class DimensionService(BaseService):
     async def list_mappings(self, source_dim_code: str | None) -> list[DimensionMapping]:
         return await self._repo.list_mappings(source_dim_code)
 
+    async def get_mapping(self, mapping_id: int) -> DimensionMapping | None:
+        return await self._repo.get_mapping(mapping_id)
+
     async def update_mapping(
         self, mapping_id: int, data: DimensionMappingUpdate
     ) -> DimensionMapping:
@@ -622,7 +626,9 @@ class DimensionService(BaseService):
             raise NotFoundError(f"维度映射不存在: {mapping_id}")
         await self._repo.delete_mapping(mapping)
 
-    async def bind_metric_dimension(self, data: MetricDimensionBind) -> MetricDimension:
+    async def bind_metric_dimension(
+        self, data: MetricDimensionBind, actor_id: int | None = None
+    ) -> MetricDimension:
         await self._require(data.dim_code)
         # 指标存在性校验（跨服务一致性，对齐 default_member 已校验存在性）：
         # metric_id 须指向未软删的指标，防孤儿绑定——此前裸 BigInteger 无外键、
@@ -675,7 +681,7 @@ class DimensionService(BaseService):
         # 单向打通：绑定成功后回写指标声明维度（definition_json.dimensions），
         # 使「维度管理-绑定指标」对消费链路真正生效（此前 metric_dimension 是信息孤岛，
         # 绑定只对绑定表生效，消费查询实际校验的是 definition_json.dimensions）。
-        metric = await self._sync_dimension_to_metric(data.metric_id, data.dim_code)
+        metric = await self._sync_dimension_to_metric(data.metric_id, data.dim_code, actor_id)
         # 跨服务一致：即时注册血缘 USES_DIMENSION 边（对称于 unbind 的即时移除）。
         # 血缘注册是追加语义（指标创建/编辑/发布时全量重注册），bind 若不同步建边，
         # 新绑定维度的指标血缘图要等下次编辑/发布才出现「指标↔维度」边——不对称。
@@ -705,21 +711,38 @@ class DimensionService(BaseService):
 
         绑定是单向关系，解绑是撤销误绑/改绑的唯一路径；解绑后消费链路
         （definition_json.dimensions）同步移除该维度，避免声明维度与绑定表不一致。
+
+        P1-8 来源保护：仅移除**由 bind 追加**（``_bound_dimensions`` 有来源标记）的
+        声明维度；用户**手工声明**的维度（无标记 / 存量数据）解绑时**保留**——
+        手工声明是用户口径的一部分，bind 幂等跳过时曾未追加来源标记，unbind 不应
+        静默抹掉用户原声明（口径丢失）。
         """
         binding = await self._repo.delete_metric_dimension(metric_id, dim_code)
         if binding is None:
             raise NotFoundError(f"绑定关系不存在: metric={metric_id}/dim={dim_code}")
-        # 反向同步：从指标声明维度移除 dim_code（绑定表与消费声明保持一致）
+        # 反向同步：仅移除来源标记的维度；手工声明保留（P1-8，防口径丢失）
         stmt = select(Metric).where(Metric.id == metric_id)
         metric = (await self._session.execute(stmt)).scalar_one_or_none()
         if metric is not None:
             defn = dict(metric.definition_json or {})
-            dims = [d for d in (defn.get("dimensions") or []) if d != dim_code]
-            defn["dimensions"] = dims
-            metric.definition_json = defn
-            if metric.status not in ("DRAFT", "EXPERIMENTAL"):
-                logger.warning(
-                    "unbind_metric_dimension_rewrites_published_metric",
+            bound_dims = list(defn.get("_bound_dimensions") or [])
+            if dim_code in bound_dims:
+                dims = [d for d in (defn.get("dimensions") or []) if d != dim_code]
+                defn["dimensions"] = dims
+                defn["_bound_dimensions"] = [
+                    d for d in bound_dims if d != dim_code
+                ]
+                metric.definition_json = defn
+                if metric.status not in ("DRAFT", "EXPERIMENTAL"):
+                    logger.warning(
+                        "unbind_metric_dimension_rewrites_published_metric",
+                        metric_id=metric_id,
+                        dim_code=dim_code,
+                    )
+            else:
+                # 无来源标记（手工声明/存量）→ 保留声明，避免误删用户口径
+                logger.info(
+                    "unbind_metric_dimension_keep_manual_declaration",
                     metric_id=metric_id,
                     dim_code=dim_code,
                 )
@@ -804,7 +827,9 @@ class DimensionService(BaseService):
         await self._repo.commit()
         return rec
 
-    async def _sync_dimension_to_metric(self, metric_id: int, dim_code: str) -> Metric | None:
+    async def _sync_dimension_to_metric(
+        self, metric_id: int, dim_code: str, actor_id: int | None = None
+    ) -> Metric | None:
         """回写指标声明维度：让绑定关系对消费链路生效（打通信息孤岛）。
 
         消费查询（consume 服务）真正校验的是 ``metric.definition_json.dimensions``，
@@ -813,8 +838,11 @@ class DimensionService(BaseService):
 
         - 幂等：``dim_code`` 已存在于声明维度则跳过，不重复追加。
         - DRAFT / EXPERIMENTAL 指标：直接回写，无版本影响。
-        - PUBLISHED 等已发布口径：属口径变更，理想应走版本审批流（pending_version）；
-          此处不过度设计——仅回写并告警，生产环境应经版本审批（TD §12.6 FR）。
+        - PUBLISHED 等已发布口径（P1-9）：属口径变更，**走 PENDING_VERSION 确认期**，
+          不再静默改写主表口径——否则消费方维度白名单/血缘边无声变化，绕过 14 天确认。
+          改为：创建 PENDING 版本快照（含新维度）+ 确认记录，live 口径保持原样直至转正。
+        - 来源标记（P1-8）：bind 追加的维度记录进 ``_bound_dimensions``，供 unbind
+          区分「绑定来源」与「用户手工声明」——解绑只删绑定来源，不抹手工声明。
 
         Returns:
             回写后的 Metric（供 bind 复用 metric_code 注册血缘边）；
@@ -833,28 +861,88 @@ class DimensionService(BaseService):
             return metric  # 幂等：已在声明维度中，跳过（指标存在，返回供血缘注册）
         dims.append(dim_code)
         defn["dimensions"] = dims
-        metric.definition_json = defn
+        # 来源标记：本次由 bind 追加 → 记入 _bound_dimensions，unbind 据此不误删手工声明
+        bound_dims = list(defn.get("_bound_dimensions") or [])
+        if dim_code not in bound_dims:
+            bound_dims.append(dim_code)
+        defn["_bound_dimensions"] = bound_dims
+        # 已发布口径变更（P1-9）：经版本审批流，不静默改写 live 口径
         if metric.status not in ("DRAFT", "EXPERIMENTAL"):
-            # 已发布口径变更：告警提示应走版本审批（此处仅回写，不触发版本流程）
-            logger.warning(
-                "bind_metric_dimension_rewrites_published_metric",
-                metric_id=metric_id,
-                dim_code=dim_code,
-                status=metric.status,
-            )
+            await self._create_bind_pending_version(metric, defn, dim_code, actor_id)
+            return metric
+        metric.definition_json = defn
         await self._repo.commit()
         return metric
+
+    async def _create_bind_pending_version(
+        self,
+        metric: Metric,
+        new_def: dict[str, Any],
+        dim_code: str,
+        actor_id: int | None,
+    ) -> None:
+        """已发布指标绑定新维度：创建 PENDING_VERSION 确认期快照（P1-9）。
+
+        不改动 live 口径；维度绑定记录（metric_dimension 表）已落库，
+        待版本确认期结束后由语义服务转正时回写 ``definition_json.dimensions``。
+        消费方在确认期内不会看到该维度（white-list 仍以旧口径为准），符合治理语义。
+        """
+        from app.services.semantic.pending_version_manager import PendingVersionManager
+        from app.services.semantic.repository import MetricRepository
+
+        metric_repo = MetricRepository(self._session)
+        # 防叠加：已存在待确认变更时不再叠 pending，提示用户先确认/等超时
+        if await metric_repo.has_pending_version(metric.id):
+            raise ConflictError(
+                f"指标 {metric.metric_code} 存在待确认的口径变更，"
+                "请先完成确认或等待超时后再绑定新维度",
+                error_code="METRIC_PENDING_VERSION_EXISTS",
+            )
+        new_version_num = metric.version + 1
+        version = MetricVersion(
+            metric_id=metric.id,
+            version=new_version_num,
+            change_type="UPDATE",
+            definition_json=new_def,
+            diff_json={"dimensions": {"added": [dim_code]}},
+            status="PENDING_CONFIRMATION",
+            change_reason=f"绑定维度 {dim_code}（待确认）",
+            created_by=actor_id if actor_id is not None else metric.owner_id,
+        )
+        await metric_repo.create_version(version)
+        consumer_ids = [metric.owner_id]
+        if metric.backup_owner_id is not None:
+            consumer_ids.append(metric.backup_owner_id)
+        pvm = PendingVersionManager(self._session)
+        await pvm.create_pending(metric, version, consumer_ids)
+        logger.info(
+            "bind_dimension_pending_version_created",
+            metric_id=metric.id,
+            metric_code=metric.metric_code,
+            version=new_version_num,
+            dim_code=dim_code,
+            consumers=consumer_ids,
+        )
 
     async def _rename_dimension_in_metric_definitions(
         self, old_code: str, new_code: str
     ) -> None:
-        """维度改编码后，同步更新绑定指标口径声明里的维度编码（旧→新）。
+        """维度改编码后，同步更新指标口径声明里的维度编码（旧→新）。
 
         消费校验与血缘 USES_DIMENSION 边的权威来源是 ``metric.definition_json.dimensions``
         （bind 时由 ``_sync_dimension_to_metric`` 写入）。维度改编码只更新了绑定表/成员/映射，
         若不同步指标口径，已发布指标的消费维度白名单与血缘边将指向旧码 → 悬空。
+
+        扫描两条来源（P1-7 加固）：绑定表 + ``definition_json.dimensions`` 手工声明
+        （手工声明未绑定的维度此前被遗漏 → 改码后消费 FORBIDDEN_DIMENSION、血缘边悬挂）。
+        两路按 metric_id 去重，全量替换旧码为新码。
         """
-        metrics = await self._repo.list_metrics_by_dimension(old_code)
+        bound = await self._repo.list_metrics_by_dimension(old_code)
+        declared = await self._repo.list_metrics_declaring_dimension(old_code)
+        seen: dict[int, Metric] = {}
+        for m in [*bound, *declared]:
+            seen[m.id] = m
+        metrics = list(seen.values())
         for metric in metrics:
             defn = dict(metric.definition_json or {})
             dims = list(defn.get("dimensions") or [])
