@@ -161,8 +161,6 @@ async def create_metric(
     metric = await service.create_metric(
         request,
         owner_id=user.id,
-        role=user.role,
-        user_domain=user.domain,
     )
     await write_audit(
         db,
@@ -199,7 +197,7 @@ async def list_metrics(
 ) -> ApiResponse[MetricListResponse]:
     """支持域/状态/分级/关键词过滤与分页。"""
     service = MetricService(db)
-    metrics, total = await service.list_metrics(params, actor_id=user.id, role=user.role)
+    metrics, total = await service.list_metrics(params)
     # PII 读分级：非敏感角色对 PII 指标脱敏口径（保留键结构，值替换为 ***）
     sensitive = user.role in _SENSITIVE_ROLES
     items: list[MetricResponse] = []
@@ -299,9 +297,7 @@ async def get_metric(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[MetricResponse]:
     service = MetricService(db)
-    metric = await service.get_metric_public(
-        metric_code, actor_id=user.id, role=user.role
-    )
+    metric = await service.get_metric_public(metric_code)
     # PII 访问审计（对齐 TD §15.4 审计合规，data_classification=PII）
     if metric.pii_flag:
         await write_audit(
@@ -975,9 +971,6 @@ async def extend_version(
     metric = await service.extend_version(
         metric_code,
         request.version,
-        actor_id=user.id,
-        role=user.role,
-        user_domain=user.domain,
     )
     await write_audit(
         db,
@@ -1078,8 +1071,6 @@ async def promote_metric(
     metric = await service.promote_metric(
         metric_code,
         actor_id=user.id,
-        role=user.role,
-        user_domain=user.domain,
     )
     await write_audit(
         db,
@@ -1116,8 +1107,6 @@ async def rollback_metric(
     metric = await service.rollback_metric(
         metric_code,
         actor_id=user.id,
-        role=user.role,
-        user_domain=user.domain,
     )
     await write_audit(
         db,
@@ -1371,8 +1360,6 @@ async def compare_metrics(
     result = await service.compare_metrics(
         request.metric_codes[0],
         request.metric_codes[1],
-        actor_id=user.id,
-        role=user.role,
     )
     # PII 脱敏：非合规角色对比 PII 指标时，口径定义脱敏
     if user.role not in _SENSITIVE_ROLES:
@@ -1401,7 +1388,7 @@ async def compare_metrics_matrix(
     """多指标矩阵 diff + 行级差异标记（每行字段、每列指标）。"""
     service = MetricService(db)
     result = await service.compare_matrix(
-        request.metric_codes, actor_id=user.id, role=user.role
+        request.metric_codes
     )
     # PII 脱敏：非合规角色对比 PII 指标时，口径定义脱敏（对齐 T049）
     if user.role not in _SENSITIVE_ROLES:
@@ -1432,7 +1419,7 @@ async def batch_register_metrics(
     """批量注册：LLM 预填 + 逐条校验 + 共享 batch_id。"""
     service = MetricService(db)
     result = await service.batch_register_metrics(
-        request, actor_id=user.id, role=user.role, user_domain=user.domain
+        request, actor_id=user.id
     )
     await write_audit(
         db,
