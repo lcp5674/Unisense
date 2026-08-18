@@ -198,6 +198,8 @@ export function MetricCreate() {
   const [batchReviewerType, setBatchReviewerType] = useState<"domain" | "user">("domain");
   const [batchReviewerId, setBatchReviewerId] = useState<number | undefined>(undefined);
   const [batchUsers, setBatchUsers] = useState<Array<{ id: number; username: string; display_name?: string | null }>>([]);
+  // 口径三方责任（产品需求方/技术方/数仓开发）用户选项：挂载时加载一次，供三个选人 Select
+  const [ownerUsers, setOwnerUsers] = useState<Array<{ id: number; username: string; display_name?: string | null }>>([]);
   // 批量弹窗：当前源表对应的列选项（选源表后加载，供度量列点选）
   const [batchColumnOptions, setBatchColumnOptions] = useState<{ value: string; label: string }[]>([]);
   const [batchColLoading, setBatchColLoading] = useState(false);
@@ -248,6 +250,10 @@ export function MetricCreate() {
       .then((res) => setDepOptions((res.items ?? []).map((m) => ({ value: m.metric_code, label: `${m.name} (${m.metric_code})` }))))
       .catch(() => setDepOptions([]))
       .finally(() => setDepSearching(false));
+    // 口径三方责任用户选项（产品需求方/技术方/数仓开发）
+    listUsers()
+      .then(setOwnerUsers)
+      .catch(() => setOwnerUsers([]));
   }, []);
 
   // 口径定义区：关联数据表搜索（与源表名一致的惰性交互——空关键词加载平台已采集的表，可关键词搜索）
@@ -634,6 +640,10 @@ export function MetricCreate() {
       additivity: String(values.additivity || "ADDITIVE") as MetricCreateRequest["additivity"],
       definition_json: definitionJson,
       pii_flag: Boolean(values.pii_flag),
+      // 口径三方责任（可选）：产品需求方/技术方/数仓开发
+      product_owner_id: values.product_owner_id ? Number(values.product_owner_id) : undefined,
+      tech_owner_id: values.tech_owner_id ? Number(values.tech_owner_id) : undefined,
+      dw_developer_id: values.dw_developer_id ? Number(values.dw_developer_id) : undefined,
     };
     try {
       const created = await createMetric(req);
@@ -1125,6 +1135,46 @@ export function MetricCreate() {
                   <Paragraph type="secondary" style={{ marginTop: 4, fontSize: 12 }}>后端将用 sqlglot 校验 SQL 语法；不合法将拒绝提交。</Paragraph>
                 </Form.Item>
               )}
+            </Card>
+
+            {/* Step 5: 口径三方责任（产品需求方/技术方/数仓开发，可选）——
+                指标口径从需求到落地分属三个责任主体，落到具体用户便于通知/指派/审计（PRD 4.5 补充） */}
+            <Card type="inner" title="⑤ 口径责任方（可选）" size="small">
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Form.Item name="product_owner_id" label="产品需求方" extra="口径业务语义提出人">
+                    <Select
+                      showSearch
+                      allowClear
+                      placeholder="选择产品/业务需求方"
+                      optionFilterProp="label"
+                      options={ownerUsers.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="tech_owner_id" label="技术方" extra="口径 ETL/SQL 实现人">
+                    <Select
+                      showSearch
+                      allowClear
+                      placeholder="选择技术方"
+                      optionFilterProp="label"
+                      options={ownerUsers.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="dw_developer_id" label="数仓开发" extra="数仓建模/血缘维护人">
+                    <Select
+                      showSearch
+                      allowClear
+                      placeholder="选择数仓开发"
+                      optionFilterProp="label"
+                      options={ownerUsers.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
+                    />
+                  </Form.Item>
+                </Col>
+              </Row>
             </Card>
 
             <Form.Item>

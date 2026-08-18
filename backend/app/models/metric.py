@@ -184,6 +184,24 @@ class Metric(Base, BaseModel):
         nullable=True,
         comment="审批人 ID",
     )
+    # ---- 口径三方责任（PRD 4.5 补充：指标口径从需求到落地的三个责任主体，均可空）----
+    # 与 owner_id 同模式（user FK）：可通知/指派/审计到具体用户。
+    # 产品需求方=口径业务语义提出人；技术方=口径 ETL/SQL 实现人；数仓开发=数仓建模/血缘维护人。
+    product_owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", name="fk_metric_product_owner"),
+        nullable=True,
+        comment="产品需求方用户 ID（口径业务需求提出人）",
+    )
+    tech_owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", name="fk_metric_tech_owner"),
+        nullable=True,
+        comment="技术方用户 ID（口径 ETL/SQL 实现人）",
+    )
+    dw_developer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", name="fk_metric_dw_developer"),
+        nullable=True,
+        comment="数仓开发用户 ID（数仓建模/血缘维护人）",
+    )
     submitted_by: Mapped[int | None] = mapped_column(
         BigInteger,
         nullable=True,

@@ -43,6 +43,10 @@ export interface MetricResponse {
   status: MetricStatus;
   owner_id: number;
   backup_owner_id: number | null;
+  /** 口径三方责任（PRD 4.5 补充）：产品需求方/技术方/数仓开发（user.id，均可空） */
+  product_owner_id?: number | null;
+  tech_owner_id?: number | null;
+  dw_developer_id?: number | null;
   approver_id: number | null;
   submitted_by: number | null;
   /** 评审指派（TD §13）：提交评审时指定的评审用户/域评审组，审批页据此校验与展示 */
@@ -253,6 +257,10 @@ export interface MetricCreateRequest {
   definition_json: Record<string, unknown>;
   pii_flag?: boolean;
   sla?: string | null;
+  /** 口径三方责任（PRD 4.5 补充，均可空）：产品需求方/技术方/数仓开发 */
+  product_owner_id?: number | null;
+  tech_owner_id?: number | null;
+  dw_developer_id?: number | null;
 }
 
 export interface MetricUpdateRequest {
@@ -272,6 +280,10 @@ export interface MetricUpdateRequest {
   sla?: string | null;
   consumption_guide?: Record<string, unknown>;
   backup_owner_id?: number | null;
+  /** 口径三方责任（非破坏性变更，不触发版本确认）：产品需求方/技术方/数仓开发 */
+  product_owner_id?: number | null;
+  tech_owner_id?: number | null;
+  dw_developer_id?: number | null;
   change_reason: string; // 必填，min_length=4
   row_version?: number; // 跨请求乐观锁：编辑时回传当前版本号，他人已改则 409 拒绝
 }

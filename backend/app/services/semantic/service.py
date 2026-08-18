@@ -86,6 +86,9 @@ def _redis_available() -> bool:
 # sql/etl_sql（SQL 模式口径，注册页可选 SQL 模式写入 definition_json.sql，后端 sqlglot 校验）：
 # 修改 SQL 口径与表达式（expression）同级——同样破坏下游消费方，必须触发 PENDING 确认期。
 # 修复前 SQL 模式指标改口径被当非破坏性 UPDATE 静默生效，绕过 14 天消费方确认（治理漏洞）。
+# source_table/source_tables/measure_column（来源表/度量列）：修改它们直接改变消费方
+# 读取的数据底座——换来源表或度量列等同于重写口径语义，必须与表达式同级触发 PENDING
+# 确认期（此前缺失，改来源表/度量列被当非破坏性静默生效，消费方口径被无声破坏）。
 BREAKING_DEF_FIELDS = (
     "expression",
     "aggregation",
@@ -93,6 +96,9 @@ BREAKING_DEF_FIELDS = (
     "dependencies",
     "sql",
     "etl_sql",
+    "source_table",
+    "source_tables",
+    "measure_column",
 )
 
 # Top-level 破坏性变更字段：直接修改 metric 表上的这些字段等同于口径变更
@@ -246,41 +252,57 @@ class MetricService(BaseService):
         except Exception:
             return {}
 
-    async def _validate_dict_fields(self, request: MetricCreateRequest) -> None:
-        """校验字典字段值存在于 SystemDict 且 active（应用层可选校验，对齐 D2）。
+    async def _validate_dict_field(self, dict_type: str, code: str) -> None:
+        """校验单个字典字段值（P1-5 共享逻辑）。
 
-        降级语义：字典项未配置（空表/未种子/查询异常）时放行，仅对"已配置但停用"
-        的值拦截——避免迁移 0025 空表导致存量指标创建全阻断。
+        语义：类型无任何 active 项（未种子/空表）→ 放行；类型已配置但值不在 →
+        拦截（DICT_VALUE_NOT_FOUND）；值已停用 → 拦截（DICT_VALUE_INACTIVE）；
+        DB 查询异常 → best-effort 放行（不阻断业务）。
         """
         from app.core.exceptions import BusinessError, NotFoundError
         from app.services.system_dict.service import SystemDictService
 
+        if not code:
+            return
         try:
             svc = SystemDictService(self._db)
-            # 需要校验的 dict_type → request 字段映射
-            dict_validations: list[tuple[str, str]] = [
-                ("granularity", request.granularity),
-                ("unit", request.unit),
-                ("aggregation", request.aggregation),
-                ("time_semantics", request.time_semantics),
-                ("freshness", request.freshness),
-                ("dw_layer", request.dw_layer),
-                ("metric_type", request.type),
-                ("additivity", request.additivity),
-                ("serving_mode", request.serving_mode),
-                ("metric_tier", request.metric_tier),
-            ]
-            for dict_type, code in dict_validations:
-                if code:
-                    await svc.validate_dict_value(dict_type, code)
+            if not await svc.list_by_type(dict_type, status="active"):
+                return  # 类型未配置（未种子/空表）→ 放行该类型
+            await svc.validate_dict_value(dict_type, code)
         except NotFoundError:
-            # 字典项未配置（空表/未种子环境）→ 放行，不阻断创建
-            return
+            raise  # 类型已配置但值不存在 → 非法字典值拦截
         except BusinessError:
-            raise  # 已配置但停用 → 拦截
+            raise  # 值已停用 → 拦截
         except Exception:
-            # 查询异常（表不存在/DB 抖动）→ best-effort 放行，不阻断创建
+            # DB 抖动/表不存在 → best-effort 放行，不阻断创建/更新
             return
+
+    async def _validate_dict_fields(self, request: MetricCreateRequest) -> None:
+        """校验字典字段值存在于 SystemDict 且 active（应用层可选校验，对齐 D2）。
+
+        加固语义（P1-5）：此前捕获 NotFoundError 直接放行——「字典类型完全未配置
+        （空表/未种子）」与「类型已配置但值不存在（脏值）」无法区分，非法字典值
+        （如 granularity=bogus）静默入库。现在按类型区分：
+        - 类型无任何 active 项（未种子/空表）→ 放行该类型（兼容迁移 0025 空表，
+          避免存量环境创建全阻断）；
+        - 类型已配置但值不在 → 拦截（DICT_VALUE_NOT_FOUND）；
+        - 值已停用 → 拦截（DICT_VALUE_INACTIVE）。
+        """
+        # 需要校验的 dict_type → request 字段映射
+        dict_validations: list[tuple[str, str]] = [
+            ("granularity", request.granularity),
+            ("unit", request.unit),
+            ("aggregation", request.aggregation),
+            ("time_semantics", request.time_semantics),
+            ("freshness", request.freshness),
+            ("dw_layer", request.dw_layer),
+            ("metric_type", request.type),
+            ("additivity", request.additivity),
+            ("serving_mode", request.serving_mode),
+            ("metric_tier", request.metric_tier),
+        ]
+        for dict_type, code in dict_validations:
+            await self._validate_dict_field(dict_type, code)
 
     async def _generate_metric_code(self, request: MetricCreateRequest) -> str:
         """自动生成唯一指标编码（4 段式：域_业务对象_度量_统计周期）。
@@ -317,7 +339,13 @@ class MetricService(BaseService):
                 ctx={"code": "CODE_EXHAUSTED", "metric_code": base},
             ) from exc
 
-    async def create_metric(self, request: MetricCreateRequest, owner_id: int) -> Metric:
+    async def create_metric(
+        self,
+        request: MetricCreateRequest,
+        owner_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> Metric:
         """创建指标（初始状态 DRAFT）。
 
         对齐 FR-012/FR-013：metric_code 校验委托 ConflictPrechecker.validate_code_format，
@@ -326,13 +354,34 @@ class MetricService(BaseService):
         Args:
             request: 创建请求。
             owner_id: 创建人（Owner）ID。
+            role: 创建人角色（P1-6：域管理员/Owner 仅可创建本域指标）。
+            user_domain: 创建人所属域（域作用域校验；None 表示未绑定域，不拦截）。
 
         Returns:
             创建的指标。
 
         Raises:
             ConflictError: 指标编码已存在。
+            BusinessError: 域管理员/Owner 跨域创建（P1-6 域门禁）。
         """
+        # P1-6 创建域门禁：域管理员/指标 Owner 仅可创建本域指标（对齐 PDP 本域
+        # write 语义——update/submit/approve 均有 check_metric_permission 域校验，
+        # 唯独 create 无校验，任意创建者可跨域建指标，owner 域与请求域不校验）。
+        if (
+            role in ("domain_admin", "metric_owner")
+            and user_domain
+            and request.domain != user_domain
+        ):
+            raise BusinessError(
+                f"{'域管理员' if role == 'domain_admin' else '指标 Owner'}仅可创建本域指标",
+                error_code="FORBIDDEN",
+                ctx={
+                    "request_domain": request.domain,
+                    "user_domain": user_domain,
+                    "role": role,
+                },
+            )
+
         # ---- 编码自动生成（FR-010：缺省时系统生成，非人为创造）----
         if not request.metric_code:
             request.metric_code = await self._generate_metric_code(request)
@@ -414,6 +463,10 @@ class MetricService(BaseService):
             owner_id=owner_id,
             pii_flag=pii_flag,
             compliance_reviewed=False,
+            # 口径三方责任（PRD 4.5 补充，均可空）
+            product_owner_id=request.product_owner_id,
+            tech_owner_id=request.tech_owner_id,
+            dw_developer_id=request.dw_developer_id,
         )
 
         metric = await self._repo.create(metric)
@@ -543,7 +596,12 @@ class MetricService(BaseService):
             raise NotFoundError(f"指标不存在: {metric_code}")
         return metric
 
-    async def get_metric_public(self, metric_code: str) -> MetricResponse:
+    async def get_metric_public(
+        self,
+        metric_code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> MetricResponse:
         """经缓存获取指标详情（API 读路径，含 cache-aside + 熔断降级）。
 
         Redis 命中直接返回；未命中/降级时回源 MySQL 并回写缓存。
@@ -552,16 +610,21 @@ class MetricService(BaseService):
 
         Args:
             metric_code: 指标编码。
+            actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用
+                （不过滤，端点层必传）。
+            role: 当前用户角色（配合 actor_id 判定管理角色/评审人放行）。
 
         Returns:
             指标详情响应。
 
         Raises:
-            NotFoundError: 指标不存在。
+            NotFoundError: 指标不存在，或未发布指标对当前用户不可见（按不存在处理）。
         """
         cached = await self._cache.get(metric_code)
         if cached is not None:
-            return MetricResponse.model_validate(cached)
+            resp = MetricResponse.model_validate(cached)
+            self._assert_metric_visible(resp, actor_id, role)
+            return resp
         metric = await self._repo.get_by_code(metric_code)
         if metric is None:
             # 详情直访的友好作废引导：指标因口径仲裁被软删（deleted_at + successor）时，
@@ -579,6 +642,7 @@ class MetricService(BaseService):
                     },
                 )
             raise NotFoundError(f"指标不存在: {metric_code}")
+        self._assert_metric_visible(metric, actor_id, role)
         await self._cache.set(metric)
         return MetricResponse.model_validate(metric)
 
@@ -607,11 +671,19 @@ class MetricService(BaseService):
             "arbitration_mark": archived.arbitration_mark,
         }
 
-    async def list_metrics(self, params: MetricListParams) -> tuple[list[Metric], int]:
+    async def list_metrics(
+        self,
+        params: MetricListParams,
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> tuple[list[Metric], int]:
         """分页查询指标列表。
 
         Args:
             params: 查询参数。
+            actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用
+                （不过滤，端点层必传）。
+            role: 当前用户角色（配合 actor_id 判定管理角色/评审人放行）。
 
         Returns:
             (指标列表, 总数)。
@@ -635,6 +707,8 @@ class MetricService(BaseService):
             sort_order=params.sort_order,
             offset=offset,
             limit=params.page_size,
+            visible_actor_id=actor_id,
+            visible_role=role,
         )
 
     async def update_metric(
@@ -750,10 +824,33 @@ class MetricService(BaseService):
             "sla",
             "consumption_guide",
             "backup_owner_id",
+            # 口径三方责任（非破坏性变更）：产品需求方/技术方/数仓开发
+            "product_owner_id",
+            "tech_owner_id",
+            "dw_developer_id",
         ):
             val = getattr(request, field, None)
             if val is not None:
                 updates[field] = val
+
+        # P1-5: update 路径字典校验——此前 update 不校验字典字段，可写入非字典的
+        # granularity/unit/aggregation 等脏值（仅 create 校验）。仅校验**实际改变**
+        # 的值（新值 != 指标当前值）：存量脏值（如 unit=cnt）未改时允许保留，避免
+        # 编辑其他字段被既有脏值误拦；主动改脏值则拦截（DICT_VALUE_NOT_FOUND）。
+        for dict_type, field in (
+            ("granularity", "granularity"),
+            ("unit", "unit"),
+            ("aggregation", "aggregation"),
+            ("time_semantics", "time_semantics"),
+            ("freshness", "freshness"),
+            ("dw_layer", "dw_layer"),
+            ("metric_tier", "metric_tier"),
+            ("serving_mode", "serving_mode"),
+            ("additivity", "additivity"),
+        ):
+            new_val = getattr(request, field, None)
+            if new_val is not None and new_val != getattr(metric, field, None):
+                await self._validate_dict_field(dict_type, new_val)
 
         # Top-level 破坏性字段变更检测（granularity/unit 直接修改等同口径变更）
         # 当 definition_json 未同时提交时，需独立判定是否触发 PENDING_VERSION
@@ -821,6 +918,11 @@ class MetricService(BaseService):
                 version_status = "PENDING_CONFIRMATION"
             else:
                 version_status = "DRAFT"
+                # P8 非破坏性口径变更直接生效：主表 version 与 effective_version 同步，
+                # 消除「version 已递增但 effective_version 滞后 → 永不转正的 DRAFT 版本
+                # 与生效版本矛盾」的治理混乱（此前非破坏编辑不写 effective_version）。
+                if metric.status == "PUBLISHED":
+                    updates["effective_version"] = new_version_num
 
             # 合并定义 diff 与 top-level diff，供转正时回写主表
             merged_diff = self._compute_diff(old_def, new_def)
@@ -1548,6 +1650,17 @@ class MetricService(BaseService):
             if request.gray_tenant_ids:
                 extra_updates["gray_tenant_ids"] = request.gray_tenant_ids
 
+        # 幂等门禁（P1-2）：已 PUBLISHED 指标不可重复 approve——状态机同状态跃迁
+        # 返回合法，若不显式拦截会对已发布指标重复发事件/审计/通知，灰度租户被覆盖。
+        # 对齐 reject_metric 的显式状态门禁：approve 仅允许 REVIEW（→PUBLISHED/
+        # EXPERIMENTAL）与 EXPERIMENTAL（→PUBLISHED 灰度转正）发起。
+        if metric.status == "PUBLISHED":
+            raise ConflictError(
+                "指标已发布，无需重复审核",
+                error_code="INVALID_TRANSITION",
+                ctx={"metric_code": metric_code, "status": metric.status},
+            )
+
         # 状态机校验
         invalid = MetricStateMachine.validate_transition(metric.status, target_status)
         if invalid is not None:
@@ -2194,7 +2307,13 @@ class MetricService(BaseService):
         )
         return updated
 
-    async def promote_metric(self, metric_code: str, actor_id: int) -> Metric:
+    async def promote_metric(
+        self,
+        metric_code: str,
+        actor_id: int,
+        role: str,
+        user_domain: str | None = None,
+    ) -> Metric:
         """灰度全量发布（EXPERIMENTAL → PUBLISHED，对齐 FR-020）。
 
         清除 gray_tenant_ids，将指标与版本状态从 EXPERIMENTAL 升为 PUBLISHED，
@@ -2203,15 +2322,36 @@ class MetricService(BaseService):
         Args:
             metric_code: 指标编码。
             actor_id: 操作人 ID。
+            role: 操作人角色（P0-2：灰度发布会修改主表口径生效状态，
+                须与废弃/恢复同级校验 Owner 归属 + PDP 域权限）。
+            user_domain: 操作人所属域（domain_admin 域作用域校验）。
 
         Returns:
             全量发布后的指标。
 
         Raises:
             NotFoundError: 指标不存在。
+            AuthError: metric_owner 操作他人指标（越权）。
+            BusinessError: PDP 域权限拒绝。
             ConflictError: 非法状态跃迁（非 EXPERIMENTAL）。
         """
         metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+        # PDP 域权限闸门：promote 为写操作，domain_admin 须同域（对齐 deprecate 的
+        # check_metric_permission 域校验，修复 domain_admin 可跨域全量发布的域隔离漏洞）
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+            skip_pii_gate=True,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权发布该指标",
+                error_code=decision.error_code or "FORBIDDEN",
+            )
 
         # PII 合规闸门（COMPL-1）：灰度全量发布到生产前，PII 指标必须已复核
         if metric.pii_flag and not metric.compliance_reviewed:
@@ -2319,7 +2459,13 @@ class MetricService(BaseService):
         )
         return updated
 
-    async def rollback_metric(self, metric_code: str, actor_id: int) -> Metric:
+    async def rollback_metric(
+        self,
+        metric_code: str,
+        actor_id: int,
+        role: str,
+        user_domain: str | None = None,
+    ) -> Metric:
         """灰度回滚（EXPERIMENTAL → 回退上一 PUBLISHED 版本，对齐 FR-020）。
 
         EXPERIMENTAL 版本标记 ARCHIVED，指标状态回到 PUBLISHED，
@@ -2329,15 +2475,35 @@ class MetricService(BaseService):
         Args:
             metric_code: 指标编码。
             actor_id: 操作人 ID。
+            role: 操作人角色（P0-2：回滚会改写主表口径，须与废弃/恢复同级
+                校验 Owner 归属 + PDP 域权限）。
+            user_domain: 操作人所属域（domain_admin 域作用域校验）。
 
         Returns:
             回滚后的指标。
 
         Raises:
             NotFoundError: 指标不存在。
+            AuthError: metric_owner 操作他人指标（越权）。
+            BusinessError: PDP 域权限拒绝。
             ConflictError: 非法状态跃迁 / 无上一 PUBLISHED 版本可回退。
         """
         metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+        # PDP 域权限闸门：rollback 为写操作，domain_admin 须同域（对齐 deprecate）
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+            skip_pii_gate=True,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权回滚该指标",
+                error_code=decision.error_code or "FORBIDDEN",
+            )
 
         # 状态机校验：EXPERIMENTAL→PUBLISHED (rollback)
         invalid = MetricStateMachine.validate_transition(metric.status, "PUBLISHED")
@@ -2761,11 +2927,18 @@ class MetricService(BaseService):
         )
         return updated
 
-    async def get_versions(self, metric_code: str) -> list[MetricVersion]:
+    async def get_versions(
+        self,
+        metric_code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> list[MetricVersion]:
         """获取指标的所有版本。
 
         Args:
             metric_code: 指标编码。
+            actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用。
+            role: 当前用户角色。
 
         Returns:
             版本列表。
@@ -2776,10 +2949,15 @@ class MetricService(BaseService):
         # 与详情/对比/健康读路径一致：命中「软删 + successor」的作废指标时返回
         # 结构化 METRIC_ARCHIVED（携带胜方指针），而非裸「指标不存在」——详情页
         # 并行加载 versions 时若裸 404 会覆盖友好引导（跨服务一致性）。
-        metric = await self._get_metric_for_compare(metric_code)
+        metric = await self._get_metric_for_compare(metric_code, actor_id, role)
         return await self._repo.list_versions(metric.id)
 
-    async def get_version_responses(self, metric_code: str) -> list[MetricVersionResponse]:
+    async def get_version_responses(
+        self,
+        metric_code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> list[MetricVersionResponse]:
         """获取版本列表（含多消费方确认进度，供版本历史 Tab 展示）。
 
         与 ``get_versions`` 的区别：PENDING_CONFIRMATION 版本附带确认进度
@@ -2789,9 +2967,27 @@ class MetricService(BaseService):
         Returns:
             版本响应列表（按版本号降序，与 get_versions 一致）。
         """
-        versions = await self.get_versions(metric_code)
+        _, responses = await self.get_version_responses_with_meta(
+            metric_code, actor_id, role
+        )
+        return responses
+
+    async def get_version_responses_with_meta(
+        self,
+        metric_code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> tuple[Metric, list[MetricVersionResponse]]:
+        """获取指标实体 + 版本响应列表（含确认进度）。
+
+        与 ``get_version_responses`` 的关系：后者仅返回版本列表（兼容既有调用方），
+        本方法额外返回指标实体——端点层需 ``metric.pii_flag`` 做 PII 读分级脱敏
+        与访问审计（读路径中唯一遗漏脱敏的接口，P0-1）。
+        """
+        metric = await self._get_metric_for_compare(metric_code, actor_id, role)
+        versions = await self._repo.list_versions(metric.id)
         if not versions:
-            return []
+            return metric, []
         pending = [v for v in versions if v.status == "PENDING_CONFIRMATION"]
         progress: dict[int, tuple[int, int]] = {}
         if pending:
@@ -2808,7 +3004,7 @@ class MetricService(BaseService):
                     resp.confirmed_count = confirmed
                     resp.consumer_count = total
             responses.append(resp)
-        return responses
+        return metric, responses
 
     # ---- PENDING_VERSION 版本确认期（FR-007/FR-008）----
 
@@ -2830,7 +3026,13 @@ class MetricService(BaseService):
             ConflictError: 无待确认记录或已确认。
         """
         metric = await self.get_metric(metric_code)
-        confirmations = await self._repo.get_pending_confirmations(metric.id, version)
+        # P1-3 并发竞态修复：对确认记录加行锁（SELECT ... FOR UPDATE）串行化
+        # 「全部确认→转正」判定。此前并发最后两名消费方各自读到对方 PENDING、
+        # 均不触发转正，版本滞留 PENDING_CONFIRMATION 仅靠定时任务兜底；加锁后
+        # 后到的确认者重读拿到对方已 CONFIRMED，可靠触发转正（锁随事务 commit 释放）。
+        confirmations = await self._repo.get_pending_confirmations(
+            metric.id, version, for_update=True
+        )
         if not confirmations:
             raise ConflictError(
                 f"该版本 {version} 无待确认记录", error_code="NO_PENDING_CONFIRMATION"
@@ -3056,20 +3258,50 @@ class MetricService(BaseService):
         )
         return metric
 
-    async def extend_version(self, metric_code: str, version: int) -> Metric:
+    async def extend_version(
+        self,
+        metric_code: str,
+        version: int,
+        actor_id: int,
+        role: str,
+        user_domain: str | None = None,
+    ) -> Metric:
         """Owner 请求版本确认延期（FR-008，+7 天，最多延期 1 次）。
 
         Args:
             metric_code: 指标编码。
             version: 待延期版本号。
+            actor_id: 操作人 ID。
+            role: 操作人角色（P1-1：延期会推迟他人消费方的确认期限，
+                须校验 Owner 归属 + PDP 域权限，否则任意 metric_owner/
+                domain_admin 可越权延后他人破坏性变更确认期）。
+            user_domain: 操作人所属域（domain_admin 域作用域校验）。
 
         Returns:
             更新后的指标。
 
         Raises:
+            NotFoundError: 指标不存在。
+            AuthError: 非 Owner/管理员操作（越权）。
+            BusinessError: PDP 域权限拒绝。
             ConflictError: 无待确认记录或已延期满 1 次。
         """
         metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+        # PDP 域权限闸门：延期为指标治理写操作，domain_admin 须同域
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+            skip_pii_gate=True,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权延后该指标的确认期限",
+                error_code=decision.error_code or "FORBIDDEN",
+            )
         confirmations = await self._repo.get_pending_confirmations(metric.id, version)
         if not confirmations:
             raise ConflictError(
@@ -3085,6 +3317,43 @@ class MetricService(BaseService):
         return metric
 
     # ---- 内部方法 ----
+
+    @staticmethod
+    def _is_public_metric_status(status: str) -> bool:
+        """读路径公开状态：已发布/灰度/已废弃均属可公开发现的资产目录。
+
+        仅 DRAFT/REVIEW（未发布工作区）是私有的——他人读取按「不存在」处理。
+        """
+        return status in ("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")
+
+    def _assert_metric_visible(
+        self, metric: Metric, actor_id: int | None, role: str | None
+    ) -> None:
+        """读路径可见性守卫（P0-3）：未发布指标仅本人/管理角色可见。
+
+        DRAFT/REVIEW 是指标 Owner 的私有工作区；他人读取一律按「不存在」处理
+        （不泄露指标存在性，避免攻击者枚举草稿编码）。管理角色与评审人
+        （REVIEW 待审，评审工作台需展示）放行。已发布/灰度/废弃公开。
+
+        Args:
+            metric: 指标对象（或含 status/owner_id 的响应对象）。
+            actor_id: 当前用户 ID；None 表示内部调用（不过滤，端点层必传）。
+            role: 当前用户角色。
+
+        Raises:
+            NotFoundError: 未发布指标对当前用户不可见。
+        """
+        if actor_id is None or role is None:
+            return  # 内部调用无鉴权上下文——端点层必传 actor/role
+        if self._is_public_metric_status(metric.status):
+            return
+        if role in ("platform_admin", "domain_admin"):
+            return
+        if metric.owner_id == actor_id or metric.backup_owner_id == actor_id:
+            return
+        if role == "reviewer" and metric.status == "REVIEW":
+            return
+        raise NotFoundError(f"指标不存在: {metric.metric_code}")
 
     def _assert_owner_or_admin(self, metric: Metric, actor_id: int, role: str) -> None:
         """越权守卫：metric_owner 仅可操作本人（或副 Owner）的指标。
@@ -3286,7 +3555,9 @@ class MetricService(BaseService):
 
     # ---- US9: 指标对比 ----
 
-    async def _get_metric_for_compare(self, metric_code: str) -> Metric:
+    async def _get_metric_for_compare(
+        self, metric_code: str, actor_id: int | None = None, role: str | None = None
+    ) -> Metric:
         """读取用于对比的指标；对已作废指标返回友好 METRIC_ARCHIVED。
 
         对比弹窗由冲突仲裁/差异查看触发，关联指标可能已被上一轮仲裁软删作废
@@ -3294,11 +3565,18 @@ class MetricService(BaseService):
         的 METRIC_ARCHIVED 错误码（携带胜方 successor），供前端渲染
         「已作废 → 查看权威」引导，保证冲突/指标跨服务状态一致可读。
 
+        Args:
+            metric_code: 指标编码。
+            actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用。
+            role: 当前用户角色。
+
         Raises:
-            NotFoundError: 指标不存在（METRIC_ARCHIVED 表示已因仲裁作废）。
+            NotFoundError: 指标不存在（METRIC_ARCHIVED 表示已因仲裁作废；
+                未发布指标对当前用户不可见也按不存在处理）。
         """
         metric = await self._repo.get_by_code(metric_code)
         if metric is not None:
+            self._assert_metric_visible(metric, actor_id, role)
             return metric
         archived = await self._repo.get_archived_by_code(metric_code)
         if archived is not None and archived.successor_code:
@@ -3313,12 +3591,20 @@ class MetricService(BaseService):
             )
         raise NotFoundError(f"指标不存在: {metric_code}")
 
-    async def compare_metrics(self, code_a: str, code_b: str) -> dict[str, Any]:
+    async def compare_metrics(
+        self,
+        code_a: str,
+        code_b: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> dict[str, Any]:
         """两指标关键字段并排对比。
 
         Args:
             code_a: 指标A编码。
             code_b: 指标B编码。
+            actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用。
+            role: 当前用户角色。
 
         Returns:
             并排对比结果，含差异标记。
@@ -3327,8 +3613,8 @@ class MetricService(BaseService):
             NotFoundError: 指标不存在（METRIC_ARCHIVED 表示已因仲裁作废）。
         """
         # 权限校验：需对两指标都有读权限（PII 指标需合规角色，对齐 T049）
-        a = await self._get_metric_for_compare(code_a)
-        b = await self._get_metric_for_compare(code_b)
+        a = await self._get_metric_for_compare(code_a, actor_id, role)
+        b = await self._get_metric_for_compare(code_b, actor_id, role)
 
         def _diff_level(va: Any, vb: Any) -> str:
             if va == vb:
@@ -3387,7 +3673,12 @@ class MetricService(BaseService):
 
         return result
 
-    async def compare_matrix(self, metric_codes: list[str]) -> dict[str, Any]:
+    async def compare_matrix(
+        self,
+        metric_codes: list[str],
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> dict[str, Any]:
         """多指标关键字段矩阵对比（2~6 个）。
 
         两两对比的 only_a/only_b 语义在 3+ 指标时失效，故矩阵模式改为：
@@ -3401,6 +3692,8 @@ class MetricService(BaseService):
 
         Args:
             metric_codes: 待对比的指标编码（2~6 个，去重保序）。
+            actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用。
+            role: 当前用户角色。
 
         Returns:
             矩阵对比结果，含行级差异标记。
@@ -3419,7 +3712,7 @@ class MetricService(BaseService):
             if code in seen:
                 continue
             seen.add(code)
-            metrics.append(await self._get_metric_for_compare(code))
+            metrics.append(await self._get_metric_for_compare(code, actor_id, role))
 
         def _level(values: list[Any]) -> str:
             distinct = len({repr(v) for v in values})
@@ -3501,6 +3794,8 @@ class MetricService(BaseService):
         self,
         request: Any,
         actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> dict[str, Any]:
         """批量注册指标。
 
@@ -3509,6 +3804,8 @@ class MetricService(BaseService):
         Args:
             request: 批量注册请求(含source_table+measure_columns+domain)。
             actor_id: 操作人ID。
+            role: 操作人角色（P1-6：域管理员/Owner 仅可批量注册本域指标）。
+            user_domain: 操作人所属域。
 
         Returns:
             {batch_id, candidates: [{metric_code, status, validation_errors}]}.
@@ -3519,6 +3816,22 @@ class MetricService(BaseService):
 
         batch_id = f"batch_{uuid.uuid4().hex[:12]}"
         candidates: list[dict[str, Any]] = []
+
+        # P1-6 批量注册域门禁：与单条 create 同级（域管理员/Owner 仅可本域批量注册）
+        if (
+            role in ("domain_admin", "metric_owner")
+            and user_domain
+            and request.domain != user_domain
+        ):
+            raise BusinessError(
+                f"{'域管理员' if role == 'domain_admin' else '指标 Owner'}仅可批量注册本域指标",
+                error_code="FORBIDDEN",
+                ctx={
+                    "request_domain": request.domain,
+                    "user_domain": user_domain,
+                    "role": role,
+                },
+            )
 
         # 校验 domain 存在且 active
         await self._validate_domain_active(request.domain)
@@ -3543,27 +3856,34 @@ class MetricService(BaseService):
             defaults = suggested.get("defaults", {})
 
             try:
-                create_req = MetricCreateRequest(
-                    metric_code=code,
-                    name=col,
-                    domain=request.domain,
-                    type=defaults.get("type", "atomic"),
-                    granularity=defaults.get("granularity", "day"),
-                    unit=defaults.get("unit", "cnt"),
-                    aggregation=defaults.get("aggregation", "SUM"),
-                    time_semantics=defaults.get("time_semantics", "PERIOD"),
-                    freshness=defaults.get("freshness", "T1"),
-                    dw_layer=defaults.get("dw_layer", "DWD"),
-                    metric_tier=defaults.get("metric_tier", "T3"),
-                    serving_mode=defaults.get("serving_mode", "BATCH_ONLY"),
-                    additivity=defaults.get("additivity", "ADDITIVE"),
-                    definition_json={"expression": f"SUM({col})", "dependencies": []},
-                    source_table=request.source_table,
-                    measure_column=col,
-                    period="day",
-                    batch_id=batch_id,
-                )
-                await self.create_metric(create_req, owner_id=actor_id)
+                # P13 savepoint 隔离：每条候选独立嵌套事务——单列 DB 错误（如重复编码
+                # IntegrityError）只回滚本 savepoint，不污染此前已 flush 成功的候选。
+                # 修复前：SQLAlchemyError 走整会话 rollback，已 flush 未提交的指标被回滚
+                # 但 candidates 已记为 DRAFT 成功 → 部分结果与落库不一致（失真）。
+                async with self._db.begin_nested():
+                    create_req = MetricCreateRequest(
+                        metric_code=code,
+                        name=col,
+                        domain=request.domain,
+                        type=defaults.get("type", "atomic"),
+                        granularity=defaults.get("granularity", "day"),
+                        unit=defaults.get("unit", "cnt"),
+                        aggregation=defaults.get("aggregation", "SUM"),
+                        time_semantics=defaults.get("time_semantics", "PERIOD"),
+                        freshness=defaults.get("freshness", "T1"),
+                        dw_layer=defaults.get("dw_layer", "DWD"),
+                        metric_tier=defaults.get("metric_tier", "T3"),
+                        serving_mode=defaults.get("serving_mode", "BATCH_ONLY"),
+                        additivity=defaults.get("additivity", "ADDITIVE"),
+                        definition_json={"expression": f"SUM({col})", "dependencies": []},
+                        source_table=request.source_table,
+                        measure_column=col,
+                        period="day",
+                        batch_id=batch_id,
+                    )
+                    await self.create_metric(
+                        create_req, owner_id=actor_id, role=role, user_domain=user_domain
+                    )
                 candidates.append(
                     {
                         "metric_code": code,
@@ -3572,6 +3892,7 @@ class MetricService(BaseService):
                     }
                 )
             except (BusinessError, ConflictError) as exc:
+                # savepoint 已回滚本列；标记业务失败，继续后续列
                 candidates.append(
                     {
                         "metric_code": code,
@@ -3580,24 +3901,20 @@ class MetricService(BaseService):
                     }
                 )
             except SQLAlchemyError:
-                # DB 级异常（如重复编码 IntegrityError）：会话污染后继续 flush 必失败。
-                # 回滚清理会话，把剩余未处理列统一标记失败，返回部分结果而非 500 整体回滚。
-                await self._db.rollback()
-                for rest in request.measure_columns[len(candidates):]:
-                    rest_code = f"{request.domain}_entity_{rest.replace('_', '')}_day"
-                    candidates.append(
-                        {
-                            "metric_code": rest_code,
-                            "status": "VALIDATION_ERROR",
-                            "validation_errors": "批量注册内部错误，已中止后续列",
-                        }
-                    )
+                # savepoint 已自动回滚本列（不影响已成功候选）；标记本列失败，继续。
+                # 与修复前「整会话 rollback + 中止剩余列」相比：逐列独立，单列失败不拖垮整批。
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "VALIDATION_ERROR",
+                        "validation_errors": "批量注册单列失败（DB 错误），已跳过该列",
+                    }
+                )
                 logger.warning(
-                    "batch_register_aborted_on_db_error",
+                    "batch_register_item_db_error_skipped",
                     batch_id=batch_id,
                     source_table=request.source_table,
-                    processed=len(candidates),
-                    total=len(request.measure_columns),
+                    column=col,
                     exc_info=True,
                 )
                 break

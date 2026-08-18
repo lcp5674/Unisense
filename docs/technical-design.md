@@ -487,6 +487,10 @@ GET    /me/recent                   # 最近浏览（前 20，前端记录指标
   "dw_layer": "DWS",
   "metric_tier": "T1",
   "term_id": 42,
+  // 口径三方责任（可选 user FK，PRD 4.5 补充）：产品需求方/技术方/数仓开发
+  "product_owner_id": 1001,
+  "tech_owner_id": 1002,
+  "dw_developer_id": 1003,
   "row_version": 0
 }
 ```
@@ -668,6 +672,8 @@ CREATE TABLE metric (
   status ENUM('DRAFT','REVIEW','PUBLISHED','EXPERIMENTAL','DEPRECATED','DATA_SOURCE_DROPPED'),  -- EXPERIMENTAL=灰度; DATA_SOURCE_DROPPED=PUBLISHED异常子态(源表DROP/不可达, PRD 5.5.1/R5-01)
   owner_id BIGINT, backup_owner_id BIGINT NULL,   -- 主/副 Owner（离职交接兜底，PRD 4.9.6）
   approver_id BIGINT NULL,
+  -- 口径三方责任（PRD 4.5 补充，均可空 user FK）：产品需求方=口径业务语义提出人；技术方=口径 ETL/SQL 实现人；数仓开发=数仓建模/血缘维护人
+  product_owner_id BIGINT NULL, tech_owner_id BIGINT NULL, dw_developer_id BIGINT NULL,
   pii_flag BOOLEAN, compliance_reviewed BOOLEAN DEFAULT FALSE,
   effective_version INT NULL,      -- 当前生效版本（PENDING_VERSION 场景下默认查询命中的版本）
   consumption_guide JSON NULL,    -- 消费指南（Owner维护：applicable/not_applicable/common_misuse/recommended_usage，PRD R3-20）

@@ -160,6 +160,9 @@ function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrie
       <Descriptions.Item label="有效版本">
         {metric.effective_version ? `v${metric.effective_version}` : <span className="muted">—</span>}
       </Descriptions.Item>
+      <Descriptions.Item label="产品需求方">{cell(metric.product_owner_id)}</Descriptions.Item>
+      <Descriptions.Item label="技术方">{cell(metric.tech_owner_id)}</Descriptions.Item>
+      <Descriptions.Item label="数仓开发">{cell(metric.dw_developer_id)}</Descriptions.Item>
     </Descriptions>
   );
 }
@@ -330,7 +333,9 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
     <Card title="口径定义" size="small" style={{ marginBottom: 16 }}>
       <Descriptions column={1} size="small" bordered>
         {expression && (
-          <Descriptions.Item label="表达式">
+          <Descriptions.Item
+            label={metric.type === "atomic" ? "聚合表达式" : "计算表达式"}
+          >
             <code className="mono">{expression}</code>
           </Descriptions.Item>
         )}
@@ -523,6 +528,16 @@ export function MetricDetail() {
   // 未改 → 保留原口径；清空（dirty + 空）→ 从口径移除对应键（与解绑能力对称）
   const [editDimsDirty, setEditDimsDirty] = useState(false);
   const [editDepsDirty, setEditDepsDirty] = useState(false);
+  // 编辑弹窗计算表达式（派生/复合指标）：独立输入框合入 definition_json.expression，
+  // 与注册页 calcExpression 对齐——非原子指标无需手写 JSON 表达式。
+  const [editCalcExpression, setEditCalcExpression] = useState("");
+  const [editCalcExpressionDirty, setEditCalcExpressionDirty] = useState(false);
+  // 编辑弹窗口径三方责任（产品需求方/技术方/数仓开发，非破坏性字段）：
+  // dirty 区分"未改保留"与"清空解除"（清空 → 传 null 解除责任方，与治理属性 dirty 语义一致）
+  const [editProductOwnerId, setEditProductOwnerId] = useState<number | undefined>(undefined);
+  const [editTechOwnerId, setEditTechOwnerId] = useState<number | undefined>(undefined);
+  const [editDwDeveloperId, setEditDwDeveloperId] = useState<number | undefined>(undefined);
+  const [editOwnerIdsDirty, setEditOwnerIdsDirty] = useState<Set<string>>(new Set());
   // 编辑弹窗「落地表（source_table）」可搜索选择：血缘差异同步建「指标↔落地表」边，
   // 注册页②有源表选择、编辑弹窗此前缺失——用户无法改指标落地表（只能手写 JSON）
   const [editSourceTable, setEditSourceTable] = useState("");
@@ -661,7 +676,9 @@ export function MetricDetail() {
     try {
       const [m, vs, me, favs, healthRes, userList, domainTree, subs, rel] = await Promise.all([
         getMetric(code),
-        listVersions(code),
+        // P5 版本历史失败不拖垮整页（其余 7 项均有 catch，唯独 listVersions 无——
+        // 版本接口偶发超时会整页白屏）
+        listVersions(code).catch(() => [] as MetricVersionResponse[]),
         fetchCurrentUser(),
         listFavorites().catch(() => [] as { asset_type: string; asset_id: string }[]),
         getMetricHealth(code).catch(() => null),
@@ -880,6 +897,14 @@ export function MetricDetail() {
     );
     setEditDimsDirty(false);
     setEditDepsDirty(false);
+    // 计算表达式回填（非原子指标）：从口径 expression 读入，独立输入框编辑
+    setEditCalcExpression(typeof def.expression === "string" ? def.expression : "");
+    setEditCalcExpressionDirty(false);
+    // 口径三方责任回填（非破坏性字段）
+    setEditProductOwnerId(metric.product_owner_id ?? undefined);
+    setEditTechOwnerId(metric.tech_owner_id ?? undefined);
+    setEditDwDeveloperId(metric.dw_developer_id ?? undefined);
+    setEditOwnerIdsDirty(new Set());
     setEditDefinitionError(null);
     setEditOpen(true);
   }
@@ -941,6 +966,18 @@ export function MetricDetail() {
           definitionJson = next;
         }
       }
+      // 计算表达式合入 definition_json.expression（非原子指标，表达式模式下）：
+      // 用户修改过才生效——写入表达式、清空则从口径移除（与依赖/维度 dirty 语义一致）
+      if (metric.type !== "atomic" && editDefMode === "expression" && editCalcExpressionDirty) {
+        if (editCalcExpression.trim()) {
+          definitionJson = { ...(definitionJson ?? {}), expression: editCalcExpression.trim() };
+        } else {
+          const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
+          const next = { ...base };
+          delete next.expression;
+          definitionJson = next;
+        }
+      }
       // 落地表（source_table）选择器合入 definition_json（血缘差异同步建「指标↔落地表」边）：
       // dirty 区分"未改保留"与"清空移除"（清空即解除指标↔落地表关系）
       if (editSourceTableDirty) {
@@ -973,6 +1010,37 @@ export function MetricDetail() {
         change_reason: String(values.change_reason ?? "").trim(),
         row_version: metric.row_version, // 跨请求乐观锁：他人已改则 409 拒绝
       };
+      // 类型化口径完整性校验（PRD 4.5 + 后端 schema 对齐）：派生/复合指标提交的最终口径
+      // 须有依赖指标 + 计算表达式（缺失则血缘断链、无法构建 DERIVED_FROM）；仅当本次提交
+      // 包含口径时校验——只改名称/治理属性、不动口径的存量不完整指标编辑不被阻塞。
+      if (definitionJson !== undefined && metric.type !== "atomic") {
+        const finalDeps = Array.isArray(definitionJson.dependencies)
+          ? definitionJson.dependencies
+          : [];
+        const finalExpr =
+          typeof definitionJson.expression === "string"
+            ? definitionJson.expression.trim()
+            : "";
+        const hasSql = typeof definitionJson.sql === "string" && Boolean(definitionJson.sql);
+        if (finalDeps.length === 0) {
+          message.warning("派生/复合指标必须声明至少 1 个依赖指标");
+          return;
+        }
+        if (!hasSql && !finalExpr) {
+          message.warning("派生/复合指标必须填写计算表达式（如 gmv / order_cnt）");
+          return;
+        }
+      }
+      // 口径三方责任（非破坏性字段）：用户修改过才合入——选人传 id、清空传 null（解除责任方）
+      for (const [field, value] of [
+        ["product_owner_id", editProductOwnerId],
+        ["tech_owner_id", editTechOwnerId],
+        ["dw_developer_id", editDwDeveloperId],
+      ] as const) {
+        if (editOwnerIdsDirty.has(field)) {
+          (req as unknown as Record<string, unknown>)[field] = value ?? null;
+        }
+      }
       // 字典未收录值治理引导：保存前检测本次请求中的字典字段是否含未收录值。
       // 含未收录 → 不直接静默保存：有收录权限引导收录、无权限确认后通知管理员收录/打回。
       const unknown = collectUnknownDictValues(req);
@@ -2233,6 +2301,47 @@ export function MetricDetail() {
               </Form.Item>
             ))}
           </Space>
+          {/* 口径三方责任（非破坏性字段）：产品需求方/技术方/数仓开发——指标口径从需求到落地
+              分属三个责任主体，落到具体用户便于通知/指派/审计（PRD 4.5 补充） */}
+          <Space wrap size={12} style={{ width: "100%" }}>
+            {(
+              [
+                ["product_owner_id", "产品需求方", "口径业务语义提出人"],
+                ["tech_owner_id", "技术方", "口径 ETL/SQL 实现人"],
+                ["dw_developer_id", "数仓开发", "数仓建模/血缘维护人"],
+              ] as const
+            ).map(([field, label, hint]) => {
+              const value =
+                field === "product_owner_id"
+                  ? editProductOwnerId
+                  : field === "tech_owner_id"
+                    ? editTechOwnerId
+                    : editDwDeveloperId;
+              const setter =
+                field === "product_owner_id"
+                  ? setEditProductOwnerId
+                  : field === "tech_owner_id"
+                    ? setEditTechOwnerId
+                    : setEditDwDeveloperId;
+              return (
+                <Form.Item key={field} label={label} tooltip={hint} style={{ marginBottom: 8, flex: 1, minWidth: 160 }}>
+                  <Select
+                    allowClear
+                    placeholder={`选择${label}`}
+                    showSearch
+                    optionFilterProp="label"
+                    value={value ?? null}
+                    onChange={(v) => {
+                      setter(v ?? undefined);
+                      setEditOwnerIdsDirty((p) => new Set(p).add(field));
+                    }}
+                    options={users.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
+                    {...DROPDOWN_FULL_WIDTH}
+                  />
+                </Form.Item>
+              );
+            })}
+          </Space>
           <Form.Item
             label="落地表（source_table）"
             extra="选择指标物理落地表，血缘图谱据此生成指标↔落地表边；可搜索平台已采集表或直接输入，清空则解除落地表关系。"
@@ -2287,26 +2396,43 @@ export function MetricDetail() {
             />
           </Form.Item>
           {metric?.type !== "atomic" && (
-            <Form.Item
-              label="依赖指标"
-              extra="派生/复合指标的上游（从已发布指标选择）；血缘图谱据此生成 原子→衍生 边。"
-              style={{ marginBottom: 8 }}
-            >
-              <Select
-                mode="multiple"
-                value={editDeps}
-                onChange={(v) => {
-                  setEditDeps(v);
-                  setEditDepsDirty(true);
-                }}
-                placeholder="选择依赖指标（可搜索）"
-                options={editDepOptions}
-                showSearch
-                optionFilterProp="label"
-                allowClear
-                {...DROPDOWN_FULL_WIDTH}
-              />
-            </Form.Item>
+            <>
+              <Form.Item
+                label="依赖指标"
+                extra="派生/复合指标的上游（从已发布指标选择）；血缘图谱据此生成 原子→衍生 边。"
+                style={{ marginBottom: 8 }}
+              >
+                <Select
+                  mode="multiple"
+                  value={editDeps}
+                  onChange={(v) => {
+                    setEditDeps(v);
+                    setEditDepsDirty(true);
+                  }}
+                  placeholder="选择依赖指标（可搜索）"
+                  options={editDepOptions}
+                  showSearch
+                  optionFilterProp="label"
+                  allowClear
+                  {...DROPDOWN_FULL_WIDTH}
+                />
+              </Form.Item>
+              <Form.Item
+                label="计算表达式"
+                extra="引用上方依赖指标编码的计算式（MEL 语法，如 gmv / order_cnt）；留空表示不修改口径表达式。"
+                style={{ marginBottom: 8 }}
+              >
+                <Input
+                  className="mono"
+                  placeholder="如 gmv / order_cnt"
+                  value={editCalcExpression}
+                  onChange={(e) => {
+                    setEditCalcExpression(e.target.value);
+                    setEditCalcExpressionDirty(true);
+                  }}
+                />
+              </Form.Item>
+            </>
           )}
           {/* 口径定义编辑模式（对齐注册页）：开发人员可直接以 SQL 描述口径，
               后端 sqlglot 校验语法；SQL 模式口径变更与表达式同级触发版本确认 */}

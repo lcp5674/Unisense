@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ---- 请求 Schema ----
 
@@ -95,6 +95,11 @@ class MetricCreateRequest(BaseModel):
     definition_json: dict[str, Any] = Field(..., description="口径定义")
     pii_flag: bool = Field(False, description="是否含 PII")
     sla: str | None = Field(None, max_length=128, description="SLA 契约")
+    # 口径三方责任（PRD 4.5 补充，均可空）：产品需求方/技术方/数仓开发（user.id）。
+    # 与 owner_id 同模式——从"指标归谁管"细化为"口径从需求到落地谁负责"。
+    product_owner_id: int | None = Field(None, description="产品需求方用户 ID（口径业务需求提出人）")
+    tech_owner_id: int | None = Field(None, description="技术方用户 ID（口径 ETL/SQL 实现人）")
+    dw_developer_id: int | None = Field(None, description="数仓开发用户 ID（数仓建模/血缘维护人）")
     # 自动推断辅助字段（FR-010/FR-011）：传入后由 Service 层 auto_fill 补全缺失字段
     source_table: str | None = Field(
         None, max_length=256, description="源表名（用于自动推断编码和数仓层）"
@@ -128,6 +133,53 @@ class MetricCreateRequest(BaseModel):
     def validate_definition(cls, v: dict[str, Any]) -> dict[str, Any]:
         """口径定义：SQL 语法校验 + source_tables 规范化。"""
         return _validate_definition_json(v)
+
+    @model_validator(mode="after")
+    def validate_definition_by_type(self) -> "MetricCreateRequest":
+        """按指标类型校验口径定义完整性（注册门禁，PRD 4.5 / TD §12.2）。
+
+        三类指标在生产中的配置差异：
+        - ``atomic``：须有计算主体——``expression`` / SQL 口径（``sql``），
+          或显式物理来源（来源表 + 度量列）。无主体的原子指标无法锚定血缘（DEFINED_BY）。
+        - ``derived`` / ``composite``：须声明依赖指标（``dependencies`` 非空）+
+          计算表达式（``expression``）。缺依赖则无法构建 ``DERIVED_FROM`` 血缘，
+          也无法在发布时做依赖 PUBLISHED 校验与环检测。
+
+        缺失关键配置的草稿无消费价值且血缘断链，注册即拦截（422）。
+        """
+        defn = self.definition_json or {}
+        if self.type == "atomic":
+            has_expression = (
+                isinstance(defn.get("expression"), str) and bool(defn["expression"].strip())
+            )
+            has_sql = bool(defn.get("sql"))
+            has_physical_source = bool(
+                defn.get("source_table") or defn.get("source_tables") or self.source_table
+            )
+            has_field = bool(
+                defn.get("measure_column")
+                or defn.get("source_field")
+                or defn.get("measures")
+                or self.measure_column
+            )
+            # 有表达式/SQL 即视为有计算主体；否则须同时提供来源表与度量列
+            if not (has_expression or has_sql or (has_physical_source and has_field)):
+                raise ValueError(
+                    "原子指标必须声明计算主体（expression / SQL 口径），"
+                    "或同时提供来源表（source_table / source_tables）与度量列"
+                )
+        else:
+            deps = defn.get("dependencies")
+            has_sql = bool(defn.get("sql"))
+            expr = defn.get("expression")
+            if not isinstance(deps, list) or not deps:
+                raise ValueError(
+                    "派生/复合指标必须声明至少 1 个依赖指标（definition_json.dependencies）"
+                )
+            # SQL 模式口径（sql）本身即计算主体，表达式可缺省
+            if not has_sql and (not isinstance(expr, str) or not expr.strip()):
+                raise ValueError("派生/复合指标必须填写计算表达式（definition_json.expression）")
+        return self
 
 
 class MetricUpdateRequest(BaseModel):
@@ -165,6 +217,10 @@ class MetricUpdateRequest(BaseModel):
     sla: str | None = Field(None, max_length=128)
     consumption_guide: dict[str, Any] | None = Field(None, description="消费指南")
     backup_owner_id: int | None = Field(None, description="副 Owner ID")
+    # 口径三方责任（非破坏性变更，不触发版本确认）：产品需求方/技术方/数仓开发（user.id）
+    product_owner_id: int | None = Field(None, description="产品需求方用户 ID（口径业务需求提出人）")
+    tech_owner_id: int | None = Field(None, description="技术方用户 ID（口径 ETL/SQL 实现人）")
+    dw_developer_id: int | None = Field(None, description="数仓开发用户 ID（数仓建模/血缘维护人）")
     change_reason: str = Field(..., min_length=4, description="变更原因")
     row_version: int | None = Field(
         None,
@@ -558,6 +614,10 @@ class MetricResponse(BaseModel):
     status: str
     owner_id: int
     backup_owner_id: int | None
+    # 口径三方责任（PRD 4.5 补充）：产品需求方/技术方/数仓开发（user.id，均可空）
+    product_owner_id: int | None = None
+    tech_owner_id: int | None = None
+    dw_developer_id: int | None = None
     # 关联业务术语（P2-11：术语绑定，度量口径归属术语治理）
     term_id: int | None = None
     # 治理追溯：审批人 / 提交人，DB 模型已有，响应透出供目录页显示

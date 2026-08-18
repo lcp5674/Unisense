@@ -16,7 +16,7 @@ vi.mock("../api", async () => {
     listMetrics: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 }),
     batchRegisterMetrics: vi.fn(),
     batchSubmitMetrics: vi.fn(),
-    listUsers: vi.fn(),
+    listUsers: vi.fn().mockResolvedValue([]),
     autoSuggestMetric: vi.fn(),
     getDomainDefaults: vi.fn(),
     checkConflict: vi.fn(),

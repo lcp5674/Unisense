@@ -149,6 +149,10 @@ function ExpandContent({
         <Descriptions.Item label="指标类型">{METRIC_TYPE_LABEL[r.type] ?? r.type}</Descriptions.Item>
         <Descriptions.Item label="责任人">{userName(r.owner_id)}</Descriptions.Item>
         <Descriptions.Item label="备份责任人">{userName(r.backup_owner_id)}</Descriptions.Item>
+        {/* 口径三方责任（PRD 4.5 补充）：产品需求方/技术方/数仓开发 */}
+        <Descriptions.Item label="产品需求方">{userName(r.product_owner_id)}</Descriptions.Item>
+        <Descriptions.Item label="技术方">{userName(r.tech_owner_id)}</Descriptions.Item>
+        <Descriptions.Item label="数仓开发">{userName(r.dw_developer_id)}</Descriptions.Item>
         <Descriptions.Item label="提交人">{userName(r.submitted_by)}</Descriptions.Item>
         <Descriptions.Item label="审批人">{userName(r.approver_id)}</Descriptions.Item>
         <Descriptions.Item label="创建时间">
