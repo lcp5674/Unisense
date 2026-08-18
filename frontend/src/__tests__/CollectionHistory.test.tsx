@@ -25,16 +25,18 @@ vi.mock("../api", () => {
     listDriftLogs: vi.fn(),
     listCollectionRuns: vi.fn(),
     getCollectionRunDetail: vi.fn(),
+    getCollectionRunSummary: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail } from "../api";
+import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail, getCollectionRunSummary } from "../api";
 
 const mockedSources = vi.mocked(listDataSources);
 const mockedRuns = vi.mocked(listCollectionRuns);
 const mockedDrift = vi.mocked(listDriftLogs);
 const mockedRunDetail = vi.mocked(getCollectionRunDetail);
+const mockedSummary = vi.mocked(getCollectionRunSummary);
 
 const source: DataSource = {
   source_id: "mysql_finance",
@@ -137,6 +139,13 @@ describe("CollectionHistory", () => {
     mockedRuns.mockResolvedValue({ items: runs, total: 2, page: 1, page_size: 10 });
     mockedDrift.mockResolvedValue({ items: driftLogs, total: 2, page: 1, page_size: 10 });
     mockedRunDetail.mockResolvedValue({ ...runs[0], detail: { failed_specs: [], drift_events: [] } });
+    mockedSummary.mockResolvedValue({
+      total: 2,
+      completed: 2,
+      failed: 0,
+      scanned: 100,
+      registered: 90,
+    });
   });
 
   it("采集记录 tab：展示统计摘要卡与运行历史表格", async () => {
