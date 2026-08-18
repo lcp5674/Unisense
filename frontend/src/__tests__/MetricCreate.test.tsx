@@ -12,16 +12,19 @@ vi.mock("../api", async () => {
     listDomainTree: vi.fn(),
     listDictItems: vi.fn(),
     listCatalogs: vi.fn(),
+    listDimensions: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 }),
+    listMetrics: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 }),
     batchRegisterMetrics: vi.fn(),
     batchSubmitMetrics: vi.fn(),
     listUsers: vi.fn(),
     autoSuggestMetric: vi.fn(),
     getDomainDefaults: vi.fn(),
     checkConflict: vi.fn(),
+    createMetric: vi.fn(),
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, checkConflict } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, checkConflict, createMetric, listMetrics } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -32,6 +35,8 @@ const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
 const mockedUsers = vi.mocked(listUsers);
 const mockedSuggest = vi.mocked(autoSuggestMetric);
 const mockedCheckConflict = vi.mocked(checkConflict);
+const mockedCreate = vi.mocked(createMetric);
+const mockedMetrics = vi.mocked(listMetrics);
 
 /** 构造完整 DBCatalog（源表搜索 mock 用），仅 entity_name/source_name 参与渲染。 */
 function makeCatalog(entityName: string, columns?: { name: string; type?: string }[]): DBCatalog {
@@ -94,13 +99,34 @@ function renderPage() {
   return render(
     <AntApp>
       <MemoryRouter initialEntries={["/create"]}>
-        <Routes>
-          <Route path="/create" element={<MetricCreate />} />
-          <Route path="/detail/:code" element={<div>detail</div>} />
-        </Routes>
-      </MemoryRouter>
+      <Routes>
+        <Route path="/create" element={<MetricCreate />} />
+        <Route path="/detail/:code" element={<div>detail</div>} />
+      </Routes>
+    </MemoryRouter>
     </AntApp>,
   );
+}
+
+/** 选择业务域（Cascader 弹出面板点第一层「销售 (sales)」）。模块级复用：粘贴 SQL 与类型级联块均依赖。 */
+async function pickDomain() {
+  const cascaderInput = document.querySelector(".ant-cascader input") as HTMLInputElement;
+  fireEvent.mouseDown(cascaderInput);
+  await waitFor(() => {
+    const item = document.querySelector(".ant-cascader-menu-item[title='销售 (sales)']");
+    expect(item).toBeTruthy();
+    if (item) fireEvent.click(item);
+  });
+}
+
+/** 选择单位（必填字典字段，测试 fixture 让其有可选项，避免 antd 表单校验卡住 onFinish）。 */
+async function pickUnit() {
+  const unitLabel = screen.getByText("单位");
+  const formItem = unitLabel.closest(".ant-form-item") as HTMLElement;
+  const unitInput = (formItem.querySelector(".ant-select-selection-search-input") ||
+    formItem.querySelector("input")) as HTMLInputElement;
+  fireEvent.mouseDown(unitInput);
+  await clickSelectOption("元 (CNY)");
 }
 
 /** 打开批量注册弹窗（点击页面右上角「批量注册指标」按钮）。 */
@@ -276,7 +302,7 @@ describe("MetricCreate 批量注册指标", () => {
       batch_id: "batch_submit2",
       candidates: [{ metric_code: "sales_gmv_day", status: "DRAFT", validation_errors: null }],
     });
-    mockedUsers.mockResolvedValue([{ id: 7, username: "reviewer", display_name: "评审员" }]);
+    mockedUsers.mockResolvedValue([{ id: 7, username: "reviewer", display_name: "评审员", role: "reviewer", domain: "sales", status: "active" }]);
     renderPage();
     const modal = await openBatchModal();
     await fillBatchForm(modal, "gmv");
@@ -412,17 +438,6 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
       page_size: 20,
     });
   });
-
-  /** 选择业务域（Cascader 弹出面板点第一层「销售 (sales)」）。 */
-  async function pickDomain() {
-    const cascaderInput = document.querySelector(".ant-cascader input") as HTMLInputElement;
-    fireEvent.mouseDown(cascaderInput);
-    await waitFor(() => {
-      const item = document.querySelector(".ant-cascader-menu-item[title='销售 (sales)']");
-      expect(item).toBeTruthy();
-      if (item) fireEvent.click(item);
-    });
-  }
 
   it("SQL 推断成功：回填源表/度量列 + 展示推断摘要（含来源徽标）", async () => {
     mockedSuggest.mockResolvedValue({
@@ -658,30 +673,100 @@ describe("MetricCreate 源表选择惰性化", () => {
   });
 });
 
-describe("MetricCreate 指标类型级联（atomic 禁用依赖指标）", () => {
-  it("选择 atomic 类型后，依赖指标选择器禁用并提示原子无需依赖", async () => {
-    // 类型字典返回 atomic 项（其他字典为空），便于在类型 Select 中选择
-    mockedDict.mockImplementation(async (dictType: string) => {
-      if (dictType === "metric_type") {
-        // 测试环境只关心 code/label；其余 SystemDictItem 字段以 any 放宽（列表接口运行时也只需这两字段渲染选项）
-        return [{ code: "atomic", label: "原子", status: "active" }] as any;
-      }
-      return [];
+describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.5）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedTree.mockResolvedValue(TREE);
+    mockedDict.mockResolvedValue([{ code: "CNY", label: "元" }] as never);
+    mockedCatalogs.mockResolvedValue({
+      items: [makeCatalog("dwd.sales_detail", [{ name: "gmv" }, { name: "order_cnt" }])],
+      total: 1,
+      page: 1,
+      page_size: 20,
     });
+    mockedMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
+  });
+
+  it("默认原子指标：展示源表/度量列/周期，隐藏依赖指标与计算表达式", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
+    // 原子来源配置区（源表/度量列/周期）展示
+    expect(screen.getByText("② 原子来源（源表/度量列/周期）")).toBeTruthy();
+    expect(screen.getByText("源表名")).toBeTruthy();
+    expect(screen.getByText("度量列")).toBeTruthy();
+    expect(screen.getByText("统计周期")).toBeTruthy();
+    // 依赖指标 / 计算表达式为派生/复合专属，原子下不出现
+    expect(screen.queryByText("② 依赖指标")).toBeNull();
+    expect(screen.queryByText("计算表达式")).toBeNull();
+  });
 
-    // 展开类型下拉（类型 Form.Item name="type" → 内部 input id="type"）并选择 atomic
-    const typeInput = document.querySelector('input[id="type"]') as HTMLInputElement;
-    fireEvent.mouseDown(typeInput);
-    await clickSelectOption("原子 (atomic)");
+  it("切换到派生指标：展示依赖指标（必填）与计算表达式，隐藏源表/度量列/周期", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    fireEvent.click(screen.getByText("派生指标"));
+    // 依赖指标配置区 + 计算表达式输入出现
+    expect(screen.getByText("② 依赖指标")).toBeTruthy();
+    expect(screen.getByText("计算表达式")).toBeTruthy();
+    // 原子专属配置隐藏
+    expect(screen.queryByText("② 原子来源（源表/度量列/周期）")).toBeNull();
+    expect(screen.queryByText("源表名")).toBeNull();
+    expect(screen.queryByText("度量列")).toBeNull();
+  });
 
-    // 依赖指标选择器应禁用，placeholder 提示"原子指标无需依赖指标"
-    // （antd 多选 Select 的 placeholder 渲染在 .ant-select-selection-placeholder 元素，用 getByText 断言）
-    await waitFor(() => {
-      expect(screen.getByText("原子指标无需依赖指标")).toBeTruthy();
-    });
-    // disabled 的多选 Select（依赖指标）应出现
-    expect(document.querySelectorAll(".ant-select-multiple.ant-select-disabled").length).toBeGreaterThan(0);
+  it("派生指标未选依赖指标提交 → 前端拦截并提示依赖必填", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    fireEvent.click(screen.getByText("派生指标"));
+    // 填必填名称后提交（依赖指标/计算表达式留空）
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "客单价" } });
+    await pickUnit();
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+    await waitFor(() =>
+      expect(screen.getByText("派生/复合指标必须选择至少 1 个依赖指标")).toBeTruthy()
+    );
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("派生指标已选依赖但缺计算表达式提交 → 前端拦截并提示表达式必填", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    // 依赖指标搜索返回已发布上游指标
+    mockedMetrics.mockResolvedValue({
+      items: [{ metric_code: "sales_gmv_amount_daily", name: "每日 GMV", type: "atomic", status: "PUBLISHED" }],
+    } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    fireEvent.click(screen.getByText("派生指标"));
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "客单价" } });
+    await pickUnit();
+    // 在依赖指标多选输入已发布指标编码，回车后从下拉选中
+    const depInput = document.querySelector(
+      ".ant-select-multiple .ant-select-selection-search-input"
+    ) as HTMLInputElement;
+    fireEvent.change(depInput, { target: { value: "sales_gmv_amount_daily" } });
+    await waitFor(() => expect(mockedMetrics).toHaveBeenCalled());
+    await clickSelectOption("每日 GMV (sales_gmv_amount_daily)");
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+    await waitFor(() =>
+      expect(screen.getByText("请填写计算表达式（如 gmv / order_cnt）")).toBeTruthy()
+    );
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("原子指标未选源表/度量列且未填口径提交 → 前端拦截并提示来源必填", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "GMV" } });
+    await pickUnit();
+    // 默认 atomic + 表达式模式：未选源表/度量列、口径 JSON 为空
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+    await waitFor(() =>
+      expect(screen.getByText("原子指标请选择源表与度量列（自动生成聚合表达式），或填写口径定义")).toBeTruthy()
+    );
+    expect(mockedCreate).not.toHaveBeenCalled();
   });
 });

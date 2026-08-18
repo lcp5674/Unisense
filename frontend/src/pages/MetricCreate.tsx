@@ -106,6 +106,14 @@ function InferBadge({ field }: { field: SuggestionField }) {
   );
 }
 
+// 三类指标生产配置差异引导（对齐 PRD 4.5：原子=绑定物理来源；派生=引用上游+表达式；复合=跨域聚合）。
+// 选类型后展示，说明该类型的核心配置，避免统一表单的认知负担。
+const TYPE_HINTS: Record<MetricType, string> = {
+  atomic: "基于物理表字段直接聚合（如 GMV = SUM(pay_amt)）。核心配置：源表、度量列、聚合方式与统计周期。",
+  derived: "引用已发布上游指标 + 计算表达式（如 客单价 = gmv / order_cnt）。核心配置：依赖指标与计算表达式。",
+  composite: "跨域 / 带过滤条件汇总多个指标（如 华东区GMV占比）。核心配置：多个依赖指标与聚合表达式。",
+};
+
 export function MetricCreate() {
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
@@ -119,6 +127,7 @@ export function MetricCreate() {
   // 指标类型联动：atomic（原子）基于源表直接聚合，不应有上游依赖指标；derived/composite 才有
   const metricType = Form.useWatch("type", form);
   const isAtomic = metricType === "atomic";
+  const isDerivedOrComposite = metricType === "derived" || metricType === "composite";
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -147,6 +156,9 @@ export function MetricCreate() {
 
   const [mode, setMode] = useState<"expression" | "sql">("expression");
   const [sqlText, setSqlText] = useState("");
+  // 派生/复合指标的计算表达式（MEL 语法，如 gmv / order_cnt），自动合入 definition_json.expression。
+  // 原子指标不展示此输入（其聚合表达式由 源表+度量列+聚合 生成）。
+  const [calcExpression, setCalcExpression] = useState("");
   // R5: 口径定义 JSON 即时校验（输入时实时检测语法，内联显示错误）
   const [definitionError, setDefinitionError] = useState<string | null>(null);
   const [sourceTables, setSourceTables] = useState<string[]>([]);
@@ -519,17 +531,16 @@ export function MetricCreate() {
 
   function buildDefinitionJson(values: Record<string, unknown>): Record<string, unknown> | null {
     const tables = sourceTables.length ? { source_tables: sourceTables } : {};
-    // ②自动推断区选定的源表/度量列 → 口径定义（血缘注册读 definition.source_table 建「指标↔落地表」边）
-    const src = String(values.source_table || "").trim();
-    const srcField = src ? { source_table: src } : {};
-    const measure = String(values.measure_column || "").trim();
-    const measureField = measure ? { measure_column: measure } : {};
     // 主表单选中的维度 → definition_json.dimensions（血缘注册指标↔维度边）
     const dimsField = selectedDims.length ? { dimensions: selectedDims } : {};
-    // 依赖指标 → definition_json.dependencies（血缘注册原子→衍生指标边）
-    // 原子指标基于源表直接聚合，不应携带上游依赖（后端血缘对 atomic 跳过）
+    // 依赖指标 → definition_json.dependencies（血缘注册上游→本指标边，仅 derived/composite）
     const depsField =
-      !isAtomic && selectedDeps.length ? { dependencies: selectedDeps } : {};
+      isDerivedOrComposite && selectedDeps.length ? { dependencies: selectedDeps } : {};
+    // 原子指标：源表/度量列 → 口径（血缘注册读 definition.source_table 建「指标↔落地表」边）
+    const src = String(values.source_table || "").trim();
+    const srcField = isAtomic && src ? { source_table: src } : {};
+    const measure = String(values.measure_column || "").trim();
+    const measureField = isAtomic && measure ? { measure_column: measure } : {};
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
@@ -538,7 +549,19 @@ export function MetricCreate() {
     let def: Record<string, unknown>;
     try { def = values.definition ? JSON.parse(String(values.definition)) : {}; }
     catch { message.error("口径定义需为合法 JSON"); return null; }
-    return { ...def, ...tables, ...srcField, ...measureField, ...dimsField, ...depsField };
+    if (isAtomic) {
+      // 用户未手写 expression 时自动生成「聚合(度量列)」，保证原子指标有计算主体（对齐后端类型化校验）
+      const hasManualExpression =
+        typeof def.expression === "string" && String(def.expression).trim();
+      const autoExpr =
+        measure && !hasManualExpression
+          ? { expression: `${String(values.aggregation || "SUM")}(${measure})` }
+          : {};
+      return { ...def, ...autoExpr, ...srcField, ...measureField, ...tables, ...dimsField };
+    }
+    // derived/composite：计算表达式输入 + 依赖指标 → 口径（不读源表/度量列）
+    const expr = calcExpression.trim() ? { expression: calcExpression.trim() } : {};
+    return { ...def, ...expr, ...tables, ...dimsField, ...depsField };
   }
 
   async function handlePrecheck() {
@@ -572,6 +595,25 @@ export function MetricCreate() {
   }
 
   async function handleSubmit(values: Record<string, unknown>) {
+    // 类型化必填校验（对齐后端 definition_json 类型校验 + PRD 4.5）：
+    // 派生/复合=须有依赖指标+计算表达式；原子=须有源表度量列或手写口径。
+    if (isDerivedOrComposite) {
+      if (selectedDeps.length === 0) {
+        message.warning("派生/复合指标必须选择至少 1 个依赖指标");
+        return;
+      }
+      if (!calcExpression.trim()) {
+        message.warning("请填写计算表达式（如 gmv / order_cnt）");
+        return;
+      }
+    } else if (isAtomic && mode === "expression") {
+      const measure = String(values.measure_column || "").trim();
+      const hasDefinition = String(values.definition || "").trim().length > 0;
+      if (!measure && !hasDefinition) {
+        message.warning("原子指标请选择源表与度量列（自动生成聚合表达式），或填写口径定义");
+        return;
+      }
+    }
     setLoading(true);
     const definitionJson = buildDefinitionJson(values);
     if (!definitionJson) { setLoading(false); return; }
@@ -735,10 +777,29 @@ export function MetricCreate() {
               </Form.Item>
             </Card>
 
+            {/* Step 1.25: 选择指标类型（前置：三类指标配置差异显著，先定类型再按类型渲染配置区） */}
+            <Card type="inner" title="①⑤ 选择指标类型" size="small">
+              <Form.Item
+                name="type"
+                label="指标类型"
+                rules={[{ required: true, message: "请选择指标类型" }]}
+                extra={TYPE_HINTS[(metricType ?? "atomic") as MetricType]}
+              >
+                <Segmented
+                  block
+                  options={[
+                    { value: "atomic", label: "原子指标" },
+                    { value: "derived", label: "派生指标" },
+                    { value: "composite", label: "复合指标" },
+                  ]}
+                />
+              </Form.Item>
+            </Card>
+
             {/* Step 1.5: 粘贴 SQL 智能推断（独立入口） */}
-            <Card type="inner" title="①⑤ 粘贴 SQL 智能推断" size="small" extra={sqlInferring && <Spin size="small" />}>
+            <Card type="inner" title="①⑥ 粘贴 SQL 智能推断（可选）" size="small" extra={sqlInferring && <Spin size="small" />}>
               <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
-                粘贴一段指标定义 SQL（含 SELECT + 聚合 + GROUP BY + 时间过滤），系统用 sqlglot 解析并自动推断类型、名称、粒度、单位、聚合、时间语义、新鲜度、数仓层、可加性、服务模式与分级，并生成口径定义。
+                主要面向原子指标：粘贴一段指标定义 SQL（含 SELECT + 聚合 + GROUP BY + 时间过滤），系统用 sqlglot 解析并自动推断类型、名称、粒度、单位、聚合、时间语义、新鲜度、数仓层、可加性、服务模式与分级，并生成口径定义。
                 该 SQL 仅用于推断，与下方「口径定义」相互独立，最终口径可另行编写。
               </Paragraph>
               <Form.Item label="指标 SQL">
@@ -762,51 +823,82 @@ export function MetricCreate() {
               )}
             </Card>
 
-            {/* Step 2: 自动推断 */}
-            <Card type="inner" title="② 自动推断" size="small" extra={suggesting && <Spin size="small" />}>
-              <Row gutter={16}>
-                <Col span={8}>
-                  <Form.Item name="source_table" label="源表名">
-                    <Select
-                      showSearch
-                      allowClear
-                      placeholder="选择或搜索源表（已接入的表可直接选，如 dwd.sales_detail）"
-                      onSearch={handleSrcTableSearch}
-                      onChange={handleSrcTableSelect}
-                      onOpenChange={handleSrcTableDropdown}
-                      loading={srcTableSearchLoading}
-                      notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
-                      options={srcTableSearchOptions}
-                      filterOption={false}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name="measure_column" label="度量列">
-                    <Select
-                      showSearch
-                      allowClear
-                      placeholder={columnOptions.length > 0 ? "选择度量列" : "请先选择源表"}
-                      onChange={handleColumnSelect}
-                      options={columnOptions}
-                      disabled={columnOptions.length === 0}
-                      filterOption={(input, option) =>
-                        (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
-                      }
-                    />
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name="period" label="统计周期">
-                    <Select
-                      allowClear
-                      placeholder="选择统计周期"
-                      onChange={handlePeriodSelect}
-                      options={PERIOD_OPTIONS}
-                    />
-                  </Form.Item>
-                </Col>
-              </Row>
+            {/* Step 2: 按类型的来源配置——原子=源表/度量列/周期（自动推断）；派生/复合=依赖指标 */}
+            <Card
+              type="inner"
+              title={isAtomic ? "② 原子来源（源表/度量列/周期）" : "② 依赖指标"}
+              size="small"
+              extra={suggesting && <Spin size="small" />}
+            >
+              {isAtomic ? (
+                <Row gutter={16}>
+                  <Col span={8}>
+                    <Form.Item name="source_table" label="源表名">
+                      <Select
+                        showSearch
+                        allowClear
+                        placeholder="选择或搜索源表（已接入的表可直接选，如 dwd.sales_detail）"
+                        onSearch={handleSrcTableSearch}
+                        onChange={handleSrcTableSelect}
+                        onOpenChange={handleSrcTableDropdown}
+                        loading={srcTableSearchLoading}
+                        notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
+                        options={srcTableSearchOptions}
+                        filterOption={false}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="measure_column" label="度量列">
+                      <Select
+                        showSearch
+                        allowClear
+                        placeholder={columnOptions.length > 0 ? "选择度量列" : "请先选择源表"}
+                        onChange={handleColumnSelect}
+                        options={columnOptions}
+                        disabled={columnOptions.length === 0}
+                        filterOption={(input, option) =>
+                          (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+                        }
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="period" label="统计周期">
+                      <Select
+                        allowClear
+                        placeholder="选择统计周期"
+                        onChange={handlePeriodSelect}
+                        options={PERIOD_OPTIONS}
+                      />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              ) : (
+                <Form.Item
+                  label="依赖指标"
+                  required
+                  extra={
+                    metricType === "composite"
+                      ? "复合指标跨域/多指标聚合：选择多个已发布上游指标（可跨域），血缘据此生成依赖边。"
+                      : "派生指标基于已发布上游指标计算：选择至少 1 个已发布指标，血缘据此生成依赖边。"
+                  }
+                >
+                  <Select
+                    mode="multiple"
+                    showSearch
+                    filterOption={false}
+                    onSearch={handleDepSearch}
+                    loading={depSearching}
+                    placeholder="搜索并选择依赖指标（仅已发布指标可选）"
+                    style={{ width: "100%" }}
+                    value={selectedDeps}
+                    onChange={setSelectedDeps}
+                    options={depOptions}
+                    allowClear
+                  />
+                </Form.Item>
+              )}
             </Card>
 
             {/* Step 3: 确认/覆盖 */}
@@ -840,11 +932,6 @@ export function MetricCreate() {
               </Row>
 
               <Row gutter={16}>
-                <Col span={8}>
-                  <Form.Item name="type" label={<span>类型{fieldBadge("type")}</span>}>
-                    {dictSelect("metric_type", "type", "选择类型")}
-                  </Form.Item>
-                </Col>
                 <Col span={8}>
                   <Form.Item name="granularity" label={<span>粒度{fieldBadge("granularity")}</span>} rules={[{ required: true, message: "请选择粒度" }]}>
                     {dictSelect("granularity", "granularity", "选择粒度")}
@@ -965,9 +1052,27 @@ export function MetricCreate() {
               </Form.Item>
               {mode === "expression" ? (
                 <>
+                  {isDerivedOrComposite && (
+                    <Form.Item
+                      label="计算表达式"
+                      required
+                      extra="引用上方依赖指标编码的计算式（MEL 语法，如 gmv / order_cnt；复合指标如 SUM(region_in_east_gmv) / SUM(total_gmv)）。"
+                    >
+                      <Input
+                        className="mono"
+                        placeholder="如 gmv / order_cnt"
+                        value={calcExpression}
+                        onChange={(e) => setCalcExpression(e.target.value)}
+                      />
+                    </Form.Item>
+                  )}
                   <Form.Item
                     label="关联维度（可选）"
-                    extra="从平台维度清单选择，将写入口径定义 dimensions；血缘图谱据此生成指标↔维度边。"
+                    extra={
+                      isAtomic
+                        ? "从平台维度清单选择，将写入口径定义 dimensions；血缘图谱据此生成指标↔维度边。"
+                        : "派生/复合指标继承来源指标维度，可在此增补；将写入口径定义 dimensions。"
+                    }
                   >
                     <Select
                       mode="multiple"
@@ -980,33 +1085,15 @@ export function MetricCreate() {
                     />
                   </Form.Item>
                   <Form.Item
-                    label="依赖指标（可选）"
-                    extra={
-                      isAtomic
-                        ? "原子指标基于源表直接聚合，无需依赖上游指标。请先在上方将类型改为「衍生/复合」以配置依赖。"
-                        : "选择该指标基于的上游指标（原子→衍生/复合血缘）；可输入关键词搜索已发布指标。"
-                    }
-                  >
-                    <Select
-                      mode="multiple"
-                      showSearch
-                      filterOption={false}
-                      onSearch={handleDepSearch}
-                      loading={depSearching}
-                      placeholder={isAtomic ? "原子指标无需依赖指标" : "搜索并选择依赖指标"}
-                      style={{ width: "100%" }}
-                      value={isAtomic ? [] : selectedDeps}
-                      onChange={isAtomic ? undefined : setSelectedDeps}
-                      options={depOptions}
-                      disabled={isAtomic}
-                      allowClear={!isAtomic}
-                    />
-                  </Form.Item>
-                  <Form.Item
                     name="definition"
                     label="口径定义 (JSON)"
                     validateStatus={definitionError ? "error" : undefined}
-                    help={definitionError || "结构：expression（聚合表达式）、dependencies（已在上方选择）、source_tables（来源表）、dimensions（已在上方选择）。"}
+                    help={
+                      definitionError ||
+                      (isAtomic
+                        ? "聚合表达式将基于 源表/度量列/聚合 自动生成；可在此手写 expression 覆盖。"
+                        : "结构：expression（计算表达式，已在上方填写）、dependencies（已在上方选择）、source_tables（来源表）、dimensions（已在上方选择）。")
+                    }
                     extra={
                       <Space size={8}>
                         <Button size="small" onClick={() => {
@@ -1021,7 +1108,7 @@ export function MetricCreate() {
                   >
                     <TextArea
                       rows={5}
-                      placeholder='{"expression": "sum(amount)", "dependencies": [], "source_tables": []}'
+                      placeholder={isAtomic ? '{"expression": "sum(amount)", "source_tables": []}' : '{"expression": "gmv / order_cnt", "dependencies": []}'}
                       className="mono"
                       onChange={(e) => {
                         const v = e.target.value.trim();
