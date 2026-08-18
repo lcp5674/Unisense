@@ -109,6 +109,33 @@ export function Catalogs() {
     urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
   );
   const [keyword, setKeyword] = useState(urlKw);
+  // C1 搜索防抖：sourceId/keyword 每击键触发 load effect（含分页查询）——
+  // 输入即时更新（inputValue），查询值延迟 350ms 提交并重置页码。
+  const [sourceIdInput, setSourceIdInput] = useState(urlSourceId);
+  const [keywordInput, setKeywordInput] = useState(urlKw);
+  const sourceIdRef = useRef(urlSourceId);
+  const keywordRef = useRef(urlKw);
+  const searchTimer = useRef<number | null>(null);
+  const commitSearchFilters = () => {
+    setSourceId(sourceIdRef.current);
+    setKeyword(keywordRef.current);
+    setPage(1);
+  };
+  const scheduleSearch = (field: "sourceId" | "keyword", value: string) => {
+    if (field === "sourceId") {
+      setSourceIdInput(value);
+      sourceIdRef.current = value;
+    } else {
+      setKeywordInput(value);
+      keywordRef.current = value;
+    }
+    if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
+    searchTimer.current = window.setTimeout(commitSearchFilters, 350);
+  };
+  // 卸载清理防抖定时器
+  useEffect(() => () => {
+    if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
+  }, []);
   // 目标行高亮（?focus=）：数据就绪后定位并短暂高亮，定位成功 3 秒后自动清除
   const [focusName, setFocusName] = useState(urlFocus);
   const focusDoneRef = useRef(false);
@@ -743,9 +770,12 @@ export function Catalogs() {
             placeholder="Source ID"
             className="mono"
             style={{ width: 150 }}
-            value={sourceId}
-            onChange={(e) => setSourceId(e.target.value)}
-            onPressEnter={() => { setPage(1); load(); }}
+            value={sourceIdInput}
+            onChange={(e) => scheduleSearch("sourceId", e.target.value)}
+            onPressEnter={() => {
+              if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
+              commitSearchFilters();
+            }}
           />
           <Select
             allowClear
@@ -788,9 +818,12 @@ export function Catalogs() {
           <Input.Search
             placeholder="搜索实体"
             style={{ width: 200 }}
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            onSearch={() => { setPage(1); load(); }}
+            value={keywordInput}
+            onChange={(e) => scheduleSearch("keyword", e.target.value)}
+            onSearch={() => {
+              if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
+              commitSearchFilters();
+            }}
           />
           {canDeprecateCatalog && selectedRowKeys.length > 0 && (
             <Button danger icon={<DeleteOutlined />} onClick={handleBulkDeprecate}>

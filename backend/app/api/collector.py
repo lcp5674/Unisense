@@ -168,8 +168,8 @@ async def list_data_sources(
     keyword: str | None = None,
     health_status: str | None = None,
     owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
-    page: int = 1,
-    page_size: int = 20,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> ApiResponse[DataSourceListResponse]:
     svc = _svc(db)
     items, total = await svc.list_sources(

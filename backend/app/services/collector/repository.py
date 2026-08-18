@@ -183,8 +183,15 @@ class CollectorRepository:
         if keyword:
             # 参数化 LIKE（值经绑定，无字符串拼接 SQL）
             # 通配符转义（对齐 FR-035）：keyword 含 %/_ 时须转义，否则模糊放大匹配
+            # Med 4: 同时匹配名称与 source_id——前端占位「搜索数据源名称 / ID」，
+            # 仅匹配 name 会让按 ID 搜索永远无结果（误导「数据源不存在」）。
             escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
-            base = base.where(DataSource.name.ilike(f"%{escaped}%", escape="/"))
+            base = base.where(
+                or_(
+                    DataSource.name.ilike(f"%{escaped}%", escape="/"),
+                    DataSource.source_id.ilike(f"%{escaped}%", escape="/"),
+                )
+            )
         if health_status:
             # 总览仪表「数据源」资产卡片按健康状态下钻（healthy/unhealthy/unknown）
             base = base.where(DataSource.health_status == health_status)

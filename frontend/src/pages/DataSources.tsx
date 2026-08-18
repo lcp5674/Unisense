@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm, Switch, Divider, Tooltip, Radio } from "antd";
 import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined, DeleteOutlined, StopOutlined, PlayCircleOutlined, ArrowLeftOutlined } from "@ant-design/icons";
@@ -708,6 +708,15 @@ export function DataSources() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [keyword, setKeyword] = useState(urlKw);
+  // 搜索输入防抖（Med 5）：inputValue 即时更新保证输入响应，keyword 延迟 350ms
+  // 更新触发查询，避免每击键发 load + listDataSourceTypes + listDomainTree 三个请求
+  const [keywordInput, setKeywordInput] = useState(urlKw);
+  const keywordTimer = useRef<number | null>(null);
+  const handleKeywordChange = useCallback((value: string) => {
+    setKeywordInput(value);
+    if (keywordTimer.current !== null) window.clearTimeout(keywordTimer.current);
+    keywordTimer.current = window.setTimeout(() => setKeyword(value), 350);
+  }, []);
   const [health, setHealth] = useState<string>(urlHealth);
   const [ownerId, setOwnerId] = useState<number | undefined>(
     urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
@@ -1397,9 +1406,15 @@ export function DataSources() {
             placeholder="搜索数据源名称 / ID"
             allowClear
             style={{ width: 260 }}
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            onSearch={() => { setPage(1); load(1, pageSize); }}
+            value={keywordInput}
+            onChange={(e) => handleKeywordChange(e.target.value)}
+            onSearch={() => {
+              // 回车/点搜索立即查询（绕过防抖），并清空待触发 timer
+              if (keywordTimer.current !== null) window.clearTimeout(keywordTimer.current);
+              setKeyword(keywordInput);
+              setPage(1);
+              load(1, pageSize);
+            }}
           />
           <Select
             allowClear
@@ -1409,6 +1424,7 @@ export function DataSources() {
             onChange={(v?: string) => { setHealth(v ?? ""); setPage(1); }}
             options={[
               { value: "healthy", label: "健康" },
+              { value: "degraded", label: "降级" },
               { value: "unhealthy", label: "异常" },
               { value: "unknown", label: "未知" },
             ]}
