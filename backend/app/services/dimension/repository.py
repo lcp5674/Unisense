@@ -108,11 +108,25 @@ class DimensionRepository:
         await self._session.flush()
         return obj
 
-    async def list_mappings(self, source_dim_code: str | None) -> list[DimensionMapping]:
-        stmt = select(DimensionMapping)
+    async def list_mappings(
+        self, source_dim_code: str | None, limit: int = 200, offset: int = 0
+    ) -> tuple[list[DimensionMapping], int]:
+        """分页列出维度映射，返回 (列表, total)（P10 服务端分页，防大映射集全量拉取）。"""
+        conditions = [DimensionMapping.deleted_at.is_(None)]
         if source_dim_code:
-            stmt = stmt.where(DimensionMapping.source_dim_code == source_dim_code)
-        return list((await self._session.execute(stmt)).scalars().all())
+            conditions.append(DimensionMapping.source_dim_code == source_dim_code)
+        count_stmt = (
+            select(func.count()).select_from(DimensionMapping).where(*conditions)
+        )
+        total = int((await self._session.execute(count_stmt)).scalar_one() or 0)
+        stmt = (
+            select(DimensionMapping)
+            .where(*conditions)
+            .order_by(DimensionMapping.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list((await self._session.execute(stmt)).scalars().all()), total
 
     async def get_mapping(self, mapping_id: int) -> DimensionMapping | None:
         stmt = select(DimensionMapping).where(DimensionMapping.id == mapping_id)
@@ -224,16 +238,32 @@ class DimensionRepository:
         return obj
 
     async def list_reconciliations(
-        self, status: str | None
-    ) -> list[tuple[Reconciliation, Metric | None]]:
-        """列出对账记录并 LEFT JOIN Metric 取指标编码/名称；metric 缺失时返回 None。"""
-        stmt = select(Reconciliation, Metric).outerjoin(
-            Metric, Metric.id == Reconciliation.metric_id
-        )
+        self,
+        status: str | None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> tuple[list[tuple[Reconciliation, Metric | None]], int]:
+        """分页列出对账记录并 LEFT JOIN Metric 取指标编码/名称，返回 (列表, total)。
+
+        P10 服务端分页：此前全量拉取（对账记录随治理动作增长，列表页可能 OOM）。
+        """
+        conditions = [Reconciliation.deleted_at.is_(None)]
         if status:
-            stmt = stmt.where(Reconciliation.status == status)
+            conditions.append(Reconciliation.status == status)
+        count_stmt = (
+            select(func.count()).select_from(Reconciliation).where(*conditions)
+        )
+        total = int((await self._session.execute(count_stmt)).scalar_one() or 0)
+        stmt = (
+            select(Reconciliation, Metric)
+            .outerjoin(Metric, Metric.id == Reconciliation.metric_id)
+            .where(*conditions)
+            .order_by(Reconciliation.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
         rows = (await self._session.execute(stmt)).all()
-        return [(rec, metric) for rec, metric in rows]
+        return [(rec, metric) for rec, metric in rows], total
 
     async def get_reconciliation(self, rec_id: int) -> Reconciliation | None:
         stmt = select(Reconciliation).where(Reconciliation.id == rec_id)
@@ -242,10 +272,12 @@ class DimensionRepository:
     async def rename_dimension_references(self, old_code: str, new_code: str) -> None:
         """级联重命名维度编码在引用表中的全部引用（事务内）。
 
-        维度编码被 3 张表引用（字符串外键，非 DB FK 约束）：
+        维度编码被 4 张表引用（字符串外键，非 DB FK 约束）：
         - ``dimension_member.dim_code``：维度成员归属
         - ``dimension_mapping.source_dim_code`` / ``target_dim_code``：映射两端
         - ``metric_dimension.dim_code``：指标-维度绑定
+        - ``reconciliation.dim_code``：口径对账记录（改码后若不级联，历史对账
+          仍指向旧码 → 治理追溯悬空）
 
         编辑维度编码时须同步更新这些引用，否则会留下悬挂引用。
         """
@@ -269,6 +301,11 @@ class DimensionRepository:
         await self._session.execute(
             update(MetricDimension)
             .where(MetricDimension.dim_code == old_code)
+            .values(dim_code=new_code)
+        )
+        await self._session.execute(
+            update(Reconciliation)
+            .where(Reconciliation.dim_code == old_code)
             .values(dim_code=new_code)
         )
 

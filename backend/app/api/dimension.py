@@ -182,10 +182,18 @@ async def list_mappings(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     source_dim_code: str | None = Query(None),
+    # P10 服务端分页（对齐主表分页模式，防大映射集全量拉取）
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
-    items = await DimensionService(db).list_mappings(source_dim_code)
+    items, total = await DimensionService(db).list_mappings(
+        source_dim_code, page=page, page_size=page_size
+    )
     converted = [DimensionMappingResponse.from_model(i) for i in items]
-    return ok(data={"items": converted, "total": len(items)}, trace_id=trace_id)
+    return ok(
+        data={"items": converted, "total": total, "page": page, "page_size": page_size},
+        trace_id=trace_id,
+    )
 
 
 @router.put("/mappings/{mapping_id}", dependencies=_MAPPING_SCOPED_DEPS)
@@ -263,8 +271,13 @@ async def list_reconciliations(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     status: str | None = Query(None),
+    # P10 服务端分页（防治理记录增长导致的全量拉取）
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
-    items = await DimensionService(db).list_reconciliations(status)
+    items, total = await DimensionService(db).list_reconciliations(
+        status, page=page, page_size=page_size
+    )
     converted = []
     for rec, metric in items:
         resp = ReconciliationResponse.from_model(rec)
@@ -273,7 +286,7 @@ async def list_reconciliations(
             resp.metric_name = metric.name
         converted.append(resp)
     return ok(
-        data={"items": converted, "total": len(converted)},
+        data={"items": converted, "total": total, "page": page, "page_size": page_size},
         trace_id=trace_id,
     )
 
