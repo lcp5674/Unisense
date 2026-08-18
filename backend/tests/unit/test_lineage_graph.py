@@ -152,7 +152,7 @@ async def test_query_impact_returns_edges(monkeypatch: pytest.MonkeyPatch) -> No
     query, params = session.runs[0]
     assert "(s:Asset {id:$node})-[:LINEAGE*1..5]->(t:Asset)" in query
     assert "LIMIT $max_edges" in query
-    assert params == {"node": "table:a", "max_edges": 5000}
+    assert params == {"node": "table:a", "max_edges": 5000, "timeout": 10}
 
 
 async def test_query_impact_empty_result_is_success(monkeypatch: pytest.MonkeyPatch) -> None:

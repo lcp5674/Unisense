@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
+from app.core.exceptions import AuthError
 from app.core.guard import guard_against_injection, guard_against_injection_exempt
 from app.core.resilience import CircuitBreaker
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
+from app.models.user import User
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.schemas import (
@@ -93,6 +95,18 @@ def _svc(db: Any) -> LineageService:
         events=LineageEventPublisher(redis, CircuitBreaker()),
         redis=redis,
     )
+
+
+def _assert_edge_domain(user: User, domains: set[str]) -> None:
+    """域归属校验（P1 IDOR 加固）：platform_admin 全局放行；
+    其余角色命中边任一解析域才允许；两端均无解析域时不阻断（无法判属）。
+    """
+    if user.role == "platform_admin" or not domains:
+        return
+    if user.domain not in domains:
+        raise AuthError(
+            f"无权操作域外血缘边（当前域: {user.domain}）", error_code="FORBIDDEN"
+        )
 
 
 async def dispose_graph_client() -> None:
@@ -320,7 +334,10 @@ async def edge_detail(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[LineageEdgeDetailResponse]:
     """单条血缘边详情：边当前值 + 变更历史（边元数据查询）。"""
-    detail = await _svc(db).edge_detail(edge_id)
+    svc = _svc(db)
+    # P1 IDOR 加固：边详情含变更历史（含 SQL 原文/actor），须校验域归属
+    _assert_edge_domain(user, await svc.edge_domains(edge_id))
+    detail = await svc.edge_detail(edge_id)
     return ok(data=detail.model_dump(mode="json"), trace_id=trace_id)
 
 
@@ -382,6 +399,8 @@ async def delete_single_edge(
 ) -> ApiResponse[EdgeDeleteResult]:
     """单条血缘边软删（人工治理：误登记/断链修复的单边删除，非整节点级联删）。"""
     svc = _svc(db)
+    # P1 IDOR 加固：删除前校验域归属（防 domain_admin 删他域边）
+    _assert_edge_domain(user, await svc.edge_domains(edge_id))
     result = await svc.delete_edge_by_id(edge_id)
     await write_audit(
         db,
@@ -670,6 +689,8 @@ async def confirm_stale(
 ) -> ApiResponse[Any]:
     """确认失效边：软删权威存储并同步清理图存储。"""
     svc = _svc(db)
+    # P1 IDOR 加固：确认失效前校验域归属（防 domain_admin 操作他域边）
+    _assert_edge_domain(user, await svc.edge_domains(edge_id))
     edge = await svc.confirm_stale_edge(edge_id)
     await write_audit(
         db,
@@ -702,6 +723,8 @@ async def restore_stale(
 ) -> ApiResponse[Any]:
     """恢复失效边：清除失效标记，重新参与血缘查询。"""
     svc = _svc(db)
+    # P1 IDOR 加固：恢复前校验域归属（防 domain_admin 操作他域边）
+    _assert_edge_domain(user, await svc.edge_domains(edge_id))
     edge = await svc.restore_stale_edge(edge_id)
     await write_audit(
         db,

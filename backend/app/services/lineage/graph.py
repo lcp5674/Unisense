@@ -21,6 +21,8 @@ logger = get_logger("unisense.lineage.graph")
 
 # 批量写图时分批大小（防单请求过大；语义与逐条 MERGE 等价）
 _WRITE_BATCH_SIZE = 2000
+#: 查询超时（秒）：Neo4j 慢而不抛错时熔断不触发，接口延迟会被图拖死（P1 加固）。
+_QUERY_TIMEOUT_S = 10
 
 
 class LineageGraphClient:
@@ -75,6 +77,7 @@ class LineageGraphClient:
                         "MERGE (t:Asset {id:row.tgt}) "
                         "MERGE (s)-[:LINEAGE {type:row.etype}]->(t)",
                         rows=rows[i : i + _WRITE_BATCH_SIZE],
+                        timeout=_QUERY_TIMEOUT_S,
                     )
             neo4j_breaker.record_success()
             return True
@@ -129,6 +132,7 @@ class LineageGraphClient:
                         "SET n.type = row.type, n.label = row.label, "
                         "n.pii = row.pii, n.domain = row.domain, n.owner = row.owner",
                         rows=rows[i : i + _WRITE_BATCH_SIZE],
+                        timeout=_QUERY_TIMEOUT_S,
                     )
             neo4j_breaker.record_success()
             return True
@@ -191,7 +195,9 @@ class LineageGraphClient:
                 )
             edges: list[tuple[str, str, str]] = []
             async with self._driver.session() as session:
-                records = await session.run(query, node=node, max_edges=max_edges)
+                records = await session.run(
+                    query, node=node, max_edges=max_edges, timeout=_QUERY_TIMEOUT_S
+                )
                 async for record in records:
                     edges.append((record["src"], record["tgt"], record["edge_type"]))
                     if len(edges) >= max_edges:
@@ -229,7 +235,8 @@ class LineageGraphClient:
             ids: list[str] = []
             async with self._driver.session() as session:
                 result = await session.run(
-                    "MATCH (n:Asset) RETURN n.id AS id LIMIT $limit", limit=limit
+                    "MATCH (n:Asset) RETURN n.id AS id LIMIT $limit", limit=limit,
+                    timeout=_QUERY_TIMEOUT_S
                 )
                 async for record in result:
                     ids.append(record["id"])
@@ -273,6 +280,7 @@ class LineageGraphClient:
                         "-[r:LINEAGE {type:row.etype}]->(t:Asset {id:row.tgt}) "
                         "DELETE r",
                         rows=rows[i : i + _WRITE_BATCH_SIZE],
+                        timeout=_QUERY_TIMEOUT_S,
                     )
             neo4j_breaker.record_success()
             return True
@@ -333,7 +341,10 @@ class LineageGraphClient:
                 )
             paths: list[tuple[list[str], list[tuple[str, str, str]]]] = []
             async with self._driver.session() as session:
-                records = await session.run(query, source=source, target=target, limit=limit)
+                records = await session.run(
+                    query, source=source, target=target, limit=limit,
+                    timeout=_QUERY_TIMEOUT_S,
+                )
                 async for record in records:
                     nodes = list(record["nodes"])
                     edges = [(r["src"], r["tgt"], r["type"]) for r in record["edges"]]
@@ -389,7 +400,9 @@ class LineageGraphClient:
                 )
             terminals: list[tuple[str, list[str]]] = []
             async with self._driver.session() as session:
-                records = await session.run(query, node=node, limit=limit)
+                records = await session.run(
+                    query, node=node, limit=limit, timeout=_QUERY_TIMEOUT_S
+                )
                 async for record in records:
                     terminals.append((record["terminal"], list(record["path"])))
                     if len(terminals) >= limit:
@@ -423,7 +436,10 @@ class LineageGraphClient:
                     self._uri, auth=(self._user, self._password)
                 )
             async with self._driver.session() as session:
-                record = await session.run("MATCH ()-[r:LINEAGE]->() RETURN count(r) AS n")
+                record = await session.run(
+                    "MATCH ()-[r:LINEAGE]->() RETURN count(r) AS n",
+                    timeout=_QUERY_TIMEOUT_S,
+                )
                 row = await record.single()
                 count = int(row["n"]) if row is not None else 0
             neo4j_breaker.record_success()
