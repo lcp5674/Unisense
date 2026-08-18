@@ -23,11 +23,14 @@ async def _svc() -> tuple[AssetMapService, MagicMock]:
         return_value={"by_domain": {"sales": 1}, "by_status": {"PUBLISHED": 1}}
     )
     repo.list_tables = AsyncMock(
-        return_value=[
-            DBCatalog(source_id="s", entity_name="t", entity_type="table", schema_json={})
-        ]
+        return_value=(
+            [
+                DBCatalog(source_id="s", entity_name="t", entity_type="table", schema_json={})
+            ],
+            1,
+        )
     )
-    repo.orphan_assets = AsyncMock(return_value=[])
+    repo.orphan_assets = AsyncMock(return_value=([], 0))
     # 生产化补充：列表/下钻条目富化（源名/业务域/责任人名）——透传不变
     repo.enrich_catalog_items = AsyncMock(side_effect=lambda items: items)
     repo.heatmap_aggregation = AsyncMock(return_value={})
@@ -60,15 +63,16 @@ async def test_classification_summary() -> None:
 
 async def test_list_tables() -> None:
     svc, repo = await _svc()
-    items = await svc.list_tables(None, None, 100)
+    items, total = await svc.list_tables(None, None, 100)
     assert len(items) == 1
+    assert total == 1
     repo.list_tables.assert_awaited()
 
 
 async def test_list_tables_passes_multi_dimension_filters() -> None:
     """多维度过滤透传：domain/owner_id/schema_status/keyword 原样转发到 repository。"""
     svc, repo = await _svc()
-    items = await svc.list_tables(
+    items, _total = await svc.list_tables(
         None,
         None,
         100,
@@ -87,13 +91,14 @@ async def test_list_tables_passes_multi_dimension_filters() -> None:
         schema_status="incomplete",
         keyword="ods",
         org_id=None,
+        offset=0,
     )
 
 
 async def test_orphan_assets_passes_filters() -> None:
     """孤儿资产过滤透传：keyword/source_id/domain/entity_type/sensitivity/schema_status 转发。"""
     svc, repo = await _svc()
-    items = await svc.orphan_assets(
+    items, total = await svc.orphan_assets(
         keyword="ods",
         source_id="s1",
         domain="sales",
@@ -103,6 +108,7 @@ async def test_orphan_assets_passes_filters() -> None:
         limit=50,
     )
     assert items == []
+    assert total == 0
     repo.orphan_assets.assert_awaited_once_with(
         keyword="ods",
         source_id="s1",
@@ -112,6 +118,7 @@ async def test_orphan_assets_passes_filters() -> None:
         schema_status="incomplete",
         limit=50,
         org_id=None,
+        offset=0,
     )
 
 
@@ -506,9 +513,12 @@ async def test_export_tables_builds_rows() -> None:
     """导出：透传 list_tables 并返回 to_dict 列表（敏感字段剥离）。"""
     svc, repo = await _svc()
     repo.list_tables = AsyncMock(
-        return_value=[
-            DBCatalog(source_id="s", entity_name="t", entity_type="table", schema_json={})
-        ]
+        return_value=(
+            [
+                DBCatalog(source_id="s", entity_name="t", entity_type="table", schema_json={})
+            ],
+            1,
+        )
     )
     items = await svc.export_tables(None, None)
     assert len(items) == 1

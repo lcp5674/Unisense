@@ -201,8 +201,14 @@ class AssetMapService(BaseService):
         owner_id: int | None = None,
         schema_status: str | None = None,
         keyword: str | None = None,
-    ) -> list[dict[str, Any]]:
-        rows = await self._repo.list_tables(
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """数据表目录多维度过滤（服务端分页：返回 ``(items, total)``）。
+
+        P2-1：repository 返回 ``(rows, total)``（真实总数 + offset 分页），此处
+        解包并富化；API 层据此做服务端分页，前端不再一次拉 200 静默截断。
+        """
+        rows, total = await self._repo.list_tables(
             source_id,
             sensitivity,
             limit,
@@ -211,11 +217,12 @@ class AssetMapService(BaseService):
             schema_status=schema_status,
             keyword=keyword,
             org_id=self._org_id,
+            offset=offset,
         )
         # assetmap T-2: 经 to_dict 剔除敏感字段（connection_config 等）
         items = [r.to_dict() for r in rows]
         # 生产化补充：源名称 / 业务域 / 责任人名（列表与下钻明细可读）
-        return await self._repo.enrich_catalog_items(items)
+        return await self._repo.enrich_catalog_items(items), int(total)
 
     async def orphan_assets(
         self,
@@ -226,8 +233,10 @@ class AssetMapService(BaseService):
         sensitivity: str | None = None,
         schema_status: str | None = None,
         limit: int = 200,
-    ) -> list[dict[str, Any]]:
-        rows = await self._repo.orphan_assets(
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """孤儿资产多维度过滤（服务端分页：返回 ``(items, total)``）。"""
+        rows, total = await self._repo.orphan_assets(
             keyword=keyword,
             source_id=source_id,
             domain=domain,
@@ -236,9 +245,10 @@ class AssetMapService(BaseService):
             schema_status=schema_status,
             limit=limit,
             org_id=self._org_id,
+            offset=offset,
         )
         items = [r.to_dict() for r in rows]
-        return await self._repo.enrich_catalog_items(items)
+        return await self._repo.enrich_catalog_items(items), int(total)
 
     async def get_entity_detail(self, entity_id: int) -> dict[str, Any] | None:
         """资产实体详情：元数据 + 敏感度 + PII + 血缘边数（TD §12.11 流程 #5）。"""
@@ -467,7 +477,7 @@ class AssetMapService(BaseService):
         keyword: str | None = None,
     ) -> list[dict[str, Any]]:
         """导出目录资产（表/视图）为字典列表，供 CSV 序列化（与列表同过滤条件）。"""
-        rows = await self._repo.list_tables(
+        rows, _total = await self._repo.list_tables(
             source_id,
             sensitivity,
             limit=5000,

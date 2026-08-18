@@ -156,9 +156,10 @@ async def list_tables(
     ),
     keyword: str | None = Query(None, description="关键字：表名或数据源模糊搜索"),
     limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0, description="偏移分页（与 total 配合服务端分页，P2-1）"),
 ) -> Any:
     _assert_enum(sensitivity, _VALID_SENSITIVITY, "敏感度")
-    items = await _svc(db, user).list_tables(
+    items, total = await _svc(db, user).list_tables(
         source_id,
         sensitivity,
         limit,
@@ -166,8 +167,9 @@ async def list_tables(
         owner_id=owner_id,
         schema_status=schema_status,
         keyword=keyword,
+        offset=offset,
     )
-    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+    return ok(data={"items": items, "total": total}, trace_id=trace_id)
 
 
 @router.get("/orphans", dependencies=_READ_DEPS)
@@ -184,10 +186,11 @@ async def orphan_assets(
         None, description="Schema 完整性：complete / incomplete"
     ),
     limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0, description="偏移分页（与 total 配合服务端分页，P2-1）"),
 ) -> Any:
     _assert_enum(entity_type, _VALID_ENTITY_TYPE, "实体类型")
     _assert_enum(sensitivity, _VALID_SENSITIVITY, "敏感度")
-    items = await _svc(db, user).orphan_assets(
+    items, total = await _svc(db, user).orphan_assets(
         keyword=keyword,
         source_id=source_id,
         domain=domain,
@@ -195,8 +198,9 @@ async def orphan_assets(
         sensitivity=sensitivity,
         schema_status=schema_status,
         limit=limit,
+        offset=offset,
     )
-    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+    return ok(data={"items": items, "total": total}, trace_id=trace_id)
 
 
 @router.get("/entities/{entity_id}", dependencies=_READ_DEPS)
