@@ -19,7 +19,7 @@ import {
 } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import type { Dayjs } from "dayjs";
-import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail } from "../api";
+import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail, getCollectionRunSummary } from "../api";
 import type { DataSource, CollectionRun } from "../types";
 import type { DriftLogItem } from "../api";
 import { formatCnTime } from "../utils/timeCn";
@@ -173,24 +173,21 @@ export function CollectionHistory() {
           page: runPage,
           page_size: runPageSize,
         }),
-        listCollectionRuns({
+        getCollectionRunSummary({
           source_id: runSourceId || undefined,
           status: runStatus || undefined,
           trigger: runTrigger || undefined,
           ...timeParams,
-          page: 1,
-          page_size: 200,
         }),
       ]);
       setRuns(pageRes.items);
       setRunsTotal(pageRes.total);
-      const agg = summaryRes.items;
       setSummary({
         total: summaryRes.total,
-        completed: agg.filter((r) => r.status === "COMPLETED").length,
-        failed: agg.filter((r) => r.status === "FAILED").length,
-        scanned: agg.reduce((acc, r) => acc + (r.scanned || 0), 0),
-        registered: agg.reduce((acc, r) => acc + (r.registered || 0), 0),
+        completed: summaryRes.completed,
+        failed: summaryRes.failed,
+        scanned: summaryRes.scanned,
+        registered: summaryRes.registered,
       });
     } catch {
       setRuns([]);
@@ -348,7 +345,7 @@ export function CollectionHistory() {
         <Col span={5}>
           <Card size="small">
             <Statistic title="采集次数" value={summary.total} />
-            <div className="muted" style={{ fontSize: 12 }}>{summary.total > 200 ? "统计近 200 次" : "含成功与失败"}</div>
+            <div className="muted" style={{ fontSize: 12 }}>含成功与失败（服务端全量聚合）</div>
           </Card>
         </Col>
         <Col span={5}>

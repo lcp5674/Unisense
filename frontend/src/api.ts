@@ -3098,6 +3098,35 @@ export async function listCollectionRuns(params?: {
   );
 }
 
+export async function getCollectionRunSummary(params?: {
+  source_id?: string;
+  status?: string;
+  trigger?: string;
+  started_after?: string;
+  started_before?: string;
+}): Promise<{
+  total: number;
+  completed: number;
+  failed: number;
+  scanned: number;
+  registered: number;
+}> {
+  const qs = pageQs({
+    source_id: params?.source_id ?? undefined,
+    status: params?.status ?? undefined,
+    trigger: params?.trigger ?? undefined,
+    started_after: params?.started_after ?? undefined,
+    started_before: params?.started_before ?? undefined,
+  });
+  return request<{
+    total: number;
+    completed: number;
+    failed: number;
+    scanned: number;
+    registered: number;
+  }>(`${API_BASE}/collection-runs/summary?${qs}`);
+}
+
 /** 采集运行详情（含失败实体 / 漂移事件 / 降级原因明细）。 */
 export async function getCollectionRunDetail(runId: number): Promise<CollectionRun> {
   return request<CollectionRun>(`${API_BASE}/collection-runs/${runId}`);

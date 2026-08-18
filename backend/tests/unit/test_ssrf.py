@@ -253,3 +253,35 @@ def test_validate_connection_host_rejects_metadata_registry() -> None:
                 {"registry_url": "http://169.254.169.254/latest/meta-data/"}
             )
         assert exc.value.error_code == "SSRF_TARGET_FORBIDDEN"
+
+
+async def test_collect_rate_limited_after_max() -> None:
+    """#24: 采集触发限流——超 MAX_COLLECTS 抛 COLLECT_RATE_LIMITED（独立 Redis 前缀）。"""
+    from app.core import probe_throttle
+    from app.core.probe_throttle import check_collect_rate
+
+    redis = MagicMock()
+    pipe = MagicMock()
+    # 前 MAX_COLLECTS 次放行，第 MAX+1 次超限
+    pipe.incr = MagicMock(side_effect=list(range(1, probe_throttle.MAX_COLLECTS + 2)))
+    pipe.expire = MagicMock()
+    pipe.execute = AsyncMock(return_value=(probe_throttle.MAX_COLLECTS + 1, 1))
+    redis.pipeline.return_value = pipe
+    with patch("app.db.redis.get_redis", return_value=redis):
+        with pytest.raises(BusinessError) as exc:
+            await check_collect_rate("user:99")
+        assert exc.value.error_code == "COLLECT_RATE_LIMITED"
+
+
+async def test_collect_rate_allows_within_window() -> None:
+    """#24: 窗口内未超限放行（Redis 计数 ≤ max）。"""
+    from app.core.probe_throttle import check_collect_rate
+
+    redis = MagicMock()
+    pipe = MagicMock()
+    pipe.incr = MagicMock(return_value=5)
+    pipe.expire = MagicMock()
+    pipe.execute = AsyncMock(return_value=(5, 1))
+    redis.pipeline.return_value = pipe
+    with patch("app.db.redis.get_redis", return_value=redis):
+        await check_collect_rate("user:100")  # 不抛异常

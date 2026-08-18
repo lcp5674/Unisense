@@ -4158,3 +4158,37 @@ async def test_repo_purge_collection_runs_terminal_only():
     stmt = s.execute.call_args.args[0]
     sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "COMPLETED" in sql and "FAILED" in sql
+
+
+async def test_repo_summarize_collection_runs_single_query():
+    """#23: 采集记录 summary 服务端聚合——单次 SQL 聚合 total/completed/failed/扫描/注册。
+
+    前端不再用 page_size=200 拉全量客户端聚合（总数>200 时口径矛盾）。
+    """
+    s = MagicMock()
+    row = MagicMock()
+    row.total = 120
+    row.completed = 100
+    row.failed = 15
+    row.scanned = 4000
+    row.registered = 3990
+    result = MagicMock()
+    result.one.return_value = row
+    s.execute = AsyncMock(return_value=result)
+    repo = CollectorRepository(s)
+
+    summary = await repo.summarize_collection_runs(
+        source_id="s1", status=None, trigger=None
+    )
+
+    assert summary == {
+        "total": 120,
+        "completed": 100,
+        "failed": 15,
+        "scanned": 4000,
+        "registered": 3990,
+    }
+    # 单次查询（非逐条拉取）
+    assert s.execute.await_count == 1
+    sql = str(s.execute.call_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "COMPLETED" in sql and "FAILED" in sql

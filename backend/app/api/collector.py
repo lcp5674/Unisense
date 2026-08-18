@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime
 import json
 import time
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -38,7 +38,7 @@ from app.core.audit import client_ip, write_audit
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.core.guard import guard_against_injection, guard_against_injection_exempt
 from app.core.logging import get_logger
-from app.core.probe_throttle import check_probe_rate
+from app.core.probe_throttle import check_collect_rate, check_probe_rate
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
 from app.models.data_source import DBCatalog
@@ -648,6 +648,7 @@ async def collect_source(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[dict[str, Any]]:
     svc = _svc(db)
+    await check_collect_rate(f"user:{user.id}")
     src = await svc.get_source_orm(source_id)
     # 根据 source_type 从 CollectorRegistry 构建采集器
     collector = build_collector(src.source_type, src.connection_config)
@@ -779,6 +780,7 @@ async def collect_source_async(
     适合大库采集（避免 300s 同步超时）。
     """
     svc = _svc(db)
+    await check_collect_rate(f"user:{user.id}")
     job_id = await svc.schedule_collection(source_id, user.id)
     await write_audit(
         db,
@@ -812,6 +814,7 @@ async def collect_now(
     不影响已配置的 cron 调度。mode 经由 CollectRequest 指定（默认 FULL）。
     """
     svc = _svc(db)
+    await check_collect_rate(f"user:{user.id}")
     job_id = await svc.schedule_collection(
         source_id,
         user.id,
@@ -1484,6 +1487,9 @@ async def infer_table_description(
         )
 
 
+# ---- 采集运行历史端点（采集记录页主视图，TD §12.1）----
+
+
 def _parse_run_time_param(value: str | None) -> datetime | None:
     """解析采集运行历史时间区间参数（ISO 8601）。
 
@@ -1495,9 +1501,6 @@ def _parse_run_time_param(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-# ---- 采集运行历史端点（采集记录页主视图，TD §12.1）----
 
 
 @collection_run_router.get("", dependencies=_READ_DEPS)
@@ -1529,6 +1532,33 @@ async def list_collection_runs(
         started_before=_parse_run_time_param(started_before),
     )
     return ok(data=CollectionRunListResponse(**result), trace_id=trace_id)
+
+
+@collection_run_router.get("/summary", dependencies=_READ_DEPS)
+async def collection_run_summary(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    source_id: str | None = None,
+    status: str | None = None,
+    trigger: str | None = None,
+    started_after: str | None = None,
+    started_before: str | None = None,
+) -> ApiResponse[dict[str, int]]:
+    """采集运行历史聚合统计（服务端 SQL 聚合，供前端统计摘要）。
+
+    与列表共用过滤条件，一次聚合出 total/completed/failed/scanned/registered，
+    前端无需用 ``page_size=200`` 拉全量再在客户端聚合（总数 > 200 时口径矛盾）。
+    """
+    svc = _svc(db)
+    result = await svc.get_collection_run_summary(
+        source_id=source_id,
+        status=status,
+        trigger=trigger,
+        started_after=_parse_run_time_param(started_after),
+        started_before=_parse_run_time_param(started_before),
+    )
+    return ok(data=result, trace_id=trace_id)
 
 
 @collection_run_router.get("/{run_id}", dependencies=_READ_DEPS)
