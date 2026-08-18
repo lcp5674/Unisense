@@ -26,6 +26,7 @@ class CatalogSpec:
     entity_type: str
     schema_json: dict[str, Any]
     etl_sql: str | None = None
+    description: str | None = None
 
 
 @dataclass

@@ -48,6 +48,14 @@ TYPE_INFO: dict[str, DataSourceTypeInfo] = {
         supports_schema=False,
         description="数据仓库，经 beeline 连接 HiveServer2",
     ),
+    "hive_metastore": DataSourceTypeInfo(
+        source_type="hive_metastore",
+        label="Hive Metastore",
+        default_port=3306,
+        supports_database=True,
+        supports_schema=False,
+        description="Hive 元数据直连（HMS backend 为 MySQL），采 DBS/TBLS/COLUMNS_V2 全量关联",
+    ),
     "spark": DataSourceTypeInfo(
         source_type="spark",
         label="Spark",

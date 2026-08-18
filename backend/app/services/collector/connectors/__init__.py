@@ -11,6 +11,7 @@ from app.services.collector.connectors.clickhouse import ClickHouseCollector  # 
 from app.services.collector.connectors.collector_registry import registry
 from app.services.collector.connectors.doris import create_doris_collector  # noqa: F401
 from app.services.collector.connectors.hive import HiveCollector  # noqa: F401
+from app.services.collector.connectors.hive_metastore import HiveMetastoreCollector  # noqa: F401
 from app.services.collector.connectors.kafka import KafkaCollector  # noqa: F401
 
 # 导入各连接器模块（触发 @registry.register 装饰器）
@@ -28,6 +29,7 @@ __all__ = [
     "SqlalchemyConnector",
     "PostgresCollector",
     "HiveCollector",
+    "HiveMetastoreCollector",
     "SparkCollector",
     "ClickHouseCollector",
     "KafkaCollector",

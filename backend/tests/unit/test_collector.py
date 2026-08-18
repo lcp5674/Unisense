@@ -851,6 +851,71 @@ async def test_repo_upsert_reactivates_soft_deleted():
     assert s.begin_nested.call_count == 0
 
 
+async def test_repo_upsert_creates_with_description():
+    """HMS 直连：首次采集带表描述 → 写入 description + description_source=schema。"""
+    repo = CollectorRepository(_session(scalar_one_or_none=None))
+    cat, created, _drift = await repo.upsert_catalog(
+        source_id="s",
+        entity_name="t",
+        entity_type="TABLE",
+        schema_json={"columns": ["a"]},
+        etl_sql=None,
+        sensitivity_level="INTERNAL",
+        owner_id=None,
+        description="订单明细表",
+    )
+    assert created is True
+    assert cat.description == "订单明细表"
+    assert cat.description_source == "schema"
+
+
+async def test_repo_upsert_updates_description_when_changed():
+    """表描述变化（非人工）→ 更新 description 并置 description_source=schema。"""
+    existing = MagicMock()
+    existing.content_signature = "old_sig"
+    existing.schema_json = {"columns": ["a"]}
+    existing.description = "旧描述"
+    existing.description_source = "schema"
+    repo = CollectorRepository(_session(scalar_one_or_none=existing))
+    cat, created, drift_info = await repo.upsert_catalog(
+        source_id="s",
+        entity_name="t",
+        entity_type="TABLE",
+        schema_json={"columns": ["a"]},
+        etl_sql=None,
+        sensitivity_level="INTERNAL",
+        owner_id=None,
+        description="新描述",
+    )
+    assert created is False
+    assert cat.description == "新描述"
+    assert cat.description_source == "schema"
+
+
+async def test_repo_upsert_does_not_overwrite_manual_description():
+    """人工编辑的表描述不被采集覆盖（desc_changed 判定 + 更新路径保护）。"""
+    existing = MagicMock()
+    existing.content_signature = "old_sig"
+    existing.schema_json = {"columns": ["a"]}
+    existing.description = "人工填写的描述"
+    existing.description_source = "manual"
+    repo = CollectorRepository(_session(scalar_one_or_none=existing))
+    cat, created, drift_info = await repo.upsert_catalog(
+        source_id="s",
+        entity_name="t",
+        entity_type="TABLE",
+        schema_json={"columns": ["a"]},
+        etl_sql=None,
+        sensitivity_level="INTERNAL",
+        owner_id=None,
+        description="采集到的描述",
+    )
+    # desc_changed=False（manual 保护）→ 短路，不写库、不覆盖
+    assert cat.description == "人工填写的描述"
+    assert cat.description_source == "manual"
+    assert created is False
+
+
 async def test_repo_bulk_deprecate_partial():
     repo = CollectorRepository(_session())
     repo.get_catalog = AsyncMock(side_effect=[MagicMock(), None])
@@ -1355,6 +1420,7 @@ async def test_list_source_types_returns_metadata():
         "clickhouse",
         "doris",
         "hive",
+        "hive_metastore",
         "kafka",
         "mysql",
         "postgres",
@@ -1365,6 +1431,8 @@ async def test_list_source_types_returns_metadata():
     assert types["kafka"].supports_database is False
     assert types["mysql"].default_port == 3306
     assert types["spark"].label == "Spark"
+    assert types["hive_metastore"].label == "Hive Metastore"
+    assert types["hive_metastore"].default_port == 3306
     assert types["spark"].default_port == 10000
 
 

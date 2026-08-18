@@ -262,6 +262,7 @@ class CollectorRepository:
         etl_sql: str | None,
         sensitivity_level: str,
         owner_id: int | None,
+        description: str | None = None,
     ) -> tuple[DBCatalog, bool, dict[str, Any] | None]:
         """幂等 upsert（按 source_id+entity_name）。
 
@@ -296,6 +297,8 @@ class CollectorRepository:
                 etl_sql=etl_sql,
                 sensitivity_level=sensitivity_level,
                 owner_id=owner_id,
+                description=description or None,
+                description_source=("schema" if description else None),
                 upstream_signature=_signature(source_id, entity_name),
                 content_signature=new_signature,
                 schema_incomplete=schema_incomplete,
@@ -348,11 +351,23 @@ class CollectorRepository:
                 drift_result.change_type,
             )
 
-        # 元数据增量短路：内容签名未变、无漂移且无归属变更 → 不写库。
+        # 元数据增量短路：内容签名未变、无漂移、无归属变更且表描述未变 → 不写库。
         # 这是 PostgreSQL 等无源端修改时间戳类型的关键增量机制——
         # information_schema 目录扫描本身廉价，真正代价是逐实体 UPDATE；
         # 短路后全量扫描退化为「仅变更落库」，大幅降低写放大。
-        if drift_result is None and old_signature == new_signature and owner_id is None:
+        # 表描述变化（采集值非空且不同于现值、且非人工编辑）纳入变更判定，
+        # 否则 HMS 直连的 TBL_COMMENT 更新会因签名未变被静默丢弃。
+        desc_changed = (
+            description is not None
+            and existing.description_source != "manual"
+            and (existing.description or "") != description
+        )
+        if (
+            drift_result is None
+            and old_signature == new_signature
+            and owner_id is None
+            and not desc_changed
+        ):
             return existing, False, None
 
         # 更新 catalog
@@ -363,6 +378,10 @@ class CollectorRepository:
         existing.schema_incomplete = not schema_json.get("columns")
         if owner_id is not None:
             existing.owner_id = owner_id
+        if desc_changed:
+            # 采集的表级描述（description_source=schema）写入；人工/LLM 描述不被覆盖
+            existing.description = description
+            existing.description_source = "schema"
         await self._db.flush()
         return existing, False, drift_info
 
@@ -816,7 +835,8 @@ class CollectorRepository:
                 CollectionRun.started_at < before,
             )
         )
-        return int(result.rowcount or 0)
+        # mypy: Result.rowcount 未在泛型中声明，运行时有效（与 notify 归档同模式）
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     # ---- 采集水位相关方法 ----
 

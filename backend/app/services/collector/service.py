@@ -1897,6 +1897,7 @@ class CollectorService(BaseService):
                     etl_sql=spec.etl_sql,
                     sensitivity_level=sensitivity,
                     owner_id=None,
+                    description=getattr(spec, "description", None),
                 )
             except Exception as exc:
                 logger.warning(
@@ -2116,6 +2117,7 @@ class CollectorService(BaseService):
             etl_sql=spec.etl_sql,
             sensitivity_level=sensitivity,
             owner_id=None,
+            description=getattr(spec, "description", None),
         )
         # PII 合规增强：单表采集同样落字段级命中明细
         pii_hits = self._classifier.detect_pii_fields(spec.entity_name, spec.schema_json)
