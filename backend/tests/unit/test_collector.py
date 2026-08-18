@@ -2786,6 +2786,25 @@ async def test_update_source_overrides_password_when_provided() -> None:
     assert stored["password"] == "new_pw"
 
 
+async def test_update_source_ignores_empty_host() -> None:
+    """Med 9: 非 admin 编辑提交空 host 时保留真实 host（防覆盖致源不可用）。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(
+        return_value=_make_src_with_config({"host": "real-host", "password": "old_pw"})
+    )
+
+    await svc.update_source(
+        "s1",
+        DataSourceUpdateRequest(connection_config={"host": "", "password": "new_pw"}),
+        actor_id=1,
+    )
+
+    stored = SecretManager.decrypt(repo.get_source.return_value.connection_config)
+    assert stored["host"] == "real-host"  # 空 host 被剔除，保留原值
+    assert stored["password"] == "new_pw"
+
+
+
 async def test_list_data_sources_redacts_config() -> None:
     """列表接口保持脱敏：connection_config 一律为 None（安全边界不扩大）。"""
     svc, repo = _svc()

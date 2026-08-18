@@ -625,7 +625,21 @@ class CollectorService(BaseService):
             src.source_type = source_type_value
 
         if req.connection_config is not None:
-            merged = self._merge_preserved_secrets(src.connection_config, req.connection_config)
+            cfg = dict(req.connection_config)
+            # Med 9 防御：空 host 视为「未提供」——非平台管理员编辑时 host 脱敏
+            # 不回显，若前端提交 host:"" 会覆盖真实 host 使源不可用。host 为连接
+            # 必需字段（创建时必填），空值合法场景不存在，故从旧配置保留真实 host。
+            if not str(cfg.get("host") or "").strip():
+                try:
+                    old_cfg = (
+                        SecretManager.decrypt(src.connection_config)
+                        if src.connection_config
+                        else {}
+                    )
+                except Exception:  # noqa: BLE001 - 旧配置解密失败按空处理
+                    old_cfg = {}
+                cfg["host"] = old_cfg.get("host") or ""
+            merged = self._merge_preserved_secrets(src.connection_config, cfg)
             src.connection_config = self._secrets.encrypt(merged)
         if req.name is not None:
             src.name = req.name

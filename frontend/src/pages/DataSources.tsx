@@ -152,7 +152,7 @@ function SourceDetailModal({
   const [progress, setProgress] = useState<CollectionProgress | null>(null);
   const [progressMessages, setProgressMessages] = useState<string[]>([]);
   const abortRef = useRef<(() => void) | null>(null);
-  const [cron, setCron] = useState("0 3 * * *");
+  const [cron, setCron] = useState(source.schedule_cron ?? "0 3 * * *");
   // 调度启停（独立于数据源 enabled：停用调度仅暂停自动定时，源仍可手动采集）
   const [scheduleEnabled, setScheduleEnabled] = useState(source.schedule_enabled ?? true);
   // 立即采集弹窗：模式 + 本次临时白/黑名单（仅本次生效，不污染数据源配置）
@@ -298,8 +298,17 @@ function SourceDetailModal({
   }
 
   async function handleSchedule() {
+    // 防静默覆盖：cron 已回显真实配置；空值/未变更时给出明确提示，不误提交默认值
+    if (!cron.trim()) {
+      message.warning("请填写 cron 表达式（如 0 3 * * *）");
+      return;
+    }
+    if (cron.trim() === (source.schedule_cron ?? "").trim() && scheduleEnabled === (source.schedule_enabled ?? true)) {
+      message.info("调度配置未变化");
+      return;
+    }
     try {
-      const res = await scheduleSource(source.source_id, cron, scheduleEnabled);
+      const res = await scheduleSource(source.source_id, cron.trim(), scheduleEnabled);
       if (res?.scheduled) {
         if (scheduleEnabled) {
           message.success(`已启用定时调度：${res.cron}（${COLLECTION_MODE_LABEL[source.collection_mode] ?? source.collection_mode}）`);
@@ -911,7 +920,12 @@ export function DataSources() {
   }
 
   function buildConnectionConfig(values: Record<string, unknown>): Record<string, unknown> {
-    const cfg: Record<string, unknown> = { host: String(values.host || "") };
+    const cfg: Record<string, unknown> = {};
+    // 空 host 剔除（Med 9）：编辑模式非 admin 未回显 host，提交空值会覆盖真实
+    // host 使源不可用；host 必填由表单校验保证（创建/测试连接时），此处仅为防御。
+    if (values.host && String(values.host).trim()) {
+      cfg.host = String(values.host).trim();
+    }
     if (values.port) cfg.port = Number(values.port);
     if (values.database) cfg.database = String(values.database);
     if (values.schema) cfg.schema = String(values.schema);
