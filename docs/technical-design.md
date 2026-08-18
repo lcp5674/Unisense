@@ -685,6 +685,25 @@ CREATE TABLE metric (
   INDEX idx_status (status), INDEX idx_domain (domain), INDEX idx_tier (metric_tier), INDEX idx_batch (batch_id)
 );
 
+-- OneData 扩展（界限文档 §2.3：原子不绑表、粒度属挂载层，TD §4.1 补充）
+-- 逻辑度量目录：原子指标 = 逻辑度量 + 聚合方式；度量格式/默认单位/小数位/源头系统/同义词在此定义，
+-- 原子指标经 metric.measure_id 引用继承（PRD FR-02-08）。状态机 DRAFT/PUBLISHED/DEPRECATED。
+CREATE TABLE measure_catalog (
+  id BIGINT PK, measure_code VARCHAR(64) UNIQUE, name VARCHAR(128),
+  measure_format ENUM('AMOUNT','RATIO','NUMERIC'),  -- 金额/比率/数值（决定默认单位/小数位）
+  default_unit VARCHAR(32), default_decimal_places INT NULL,  -- 金额:元/2，比率:小数/4，数值:按需
+  source_system JSON NULL, synonyms JSON NULL,      -- 源头系统（业务系统术语多值）/同义词
+  domain VARCHAR(64), owner_id BIGINT, status ENUM('DRAFT','PUBLISHED','DEPRECATED'),
+  created_at DATETIME, updated_at DATETIME, deleted_at DATETIME NULL
+);
+-- 指标挂载实体：粒度从 metric 下沉到此（一个派生指标一个挂载点），承载源表/源列/粒度/默认周期/域。
+CREATE TABLE metric_mount (
+  id BIGINT PK, metric_id BIGINT UNIQUE,   -- FK → metric.id（仅派生指标挂载；原子/复合不挂表）
+  source_table VARCHAR(255), source_column VARCHAR(255), granularity VARCHAR(64),
+  default_period VARCHAR(32) NULL, domain VARCHAR(64),
+  created_at DATETIME, updated_at DATETIME, deleted_at DATETIME NULL
+);
+
 -- 指标版本（溯源，US-DA-2；含破坏性判定与结构化 diff，PRD 4.5 版本化核心）
 CREATE TABLE metric_version (
   id BIGINT PK, metric_id BIGINT, version INT,
