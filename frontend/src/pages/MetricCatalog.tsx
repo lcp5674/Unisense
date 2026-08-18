@@ -269,6 +269,8 @@ export function MetricCatalog() {
   // 指标矩阵对比弹窗（勾选 2~6 个后点「对比所选」在当前页内展开，不再跳转对比页）
   const [compareOpen, setCompareOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  // P2-15 全量导出 loading：导出过程中禁用按钮 + 显示"正在导出全量"，防重复点击
+  const [exporting, setExporting] = useState(false);
   // 列表加载失败的错误信息（区别于空结果：失败显示重试空态，空结果显示原空态引导）
   const [loadError, setLoadError] = useState<string | null>(null);
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
@@ -704,39 +706,72 @@ export function MetricCatalog() {
     }
   }
 
-  function exportCsv() {
-    // 表头与表格中文列标题对齐（业务术语化，值列已用中文标签）
-    const header = [
-      "指标编码", "名称", "业务域", "责任人", "类型", "状态",
-      "聚合", "粒度", "单位", "数仓层", "分级",
-      "PII", "版本", "创建时间", "更新时间",
-    ];
-    // CSV 注入防护（OWASP）：单元格以 = / + / - / @ 开头时，Excel/WPS 会当作公式执行。
-    // 指标名/域名等用户可写字段可能被注入恶意公式，导出时统一前缀单引号消毒。
-    const sanitize = (v: unknown) => {
-      const s = String(v ?? "");
-      if (/^[=+\-@]/.test(s)) return `'${s}`;
-      return s;
-    };
-    const rows = items.map((m) =>
-      [
-        m.metric_code, m.name, domainName(m.domain), userName(m.owner_id), m.type,
-        METRIC_STATUS_LABEL[m.status] ?? m.status,
-        AGGREGATION_LABEL[m.aggregation] ?? m.aggregation,
-        GRANULARITY_LABEL[m.granularity] ?? m.granularity,
-        m.unit && UNIT_LABEL[m.unit] ? UNIT_LABEL[m.unit] : m.unit, DW_LAYER_LABEL[m.dw_layer] ?? m.dw_layer, METRIC_TIER_LABEL[m.metric_tier] ?? m.metric_tier,
-        m.pii_flag ? "PII" : "", m.version, formatCnTime(m.created_at), formatCnTime(m.updated_at),
-      ]
-        .map((c) => `"${sanitize(c).replace(/"/g, '""')}"`)
-        .join(","),
-    );
-    const blob = new Blob([[header.join(","), ...rows].join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `metric-catalog-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  async function exportCsv() {
+    // P2-15 全量导出：此前仅导出当前页 items（名不副实），大结果集导出残缺。
+    // 改为按当前筛选条件分页拉全量（复用 load() 的筛选参数，page_size=200 上限循环至 total），
+    // 再生成 CSV——「导出当前筛选结果」名副其实。
+    if (exporting) return; // 防重复点击
+    setExporting(true);
+    try {
+      const all: MetricResponse[] = [];
+      const pageSize = 200;
+      for (let p = 1; ; p += 1) {
+        const res = await listMetrics({
+          keyword,
+          status,
+          domain: domain || undefined,
+          metric_tier: tier || undefined,
+          owner_id: ownerFilter ? Number(ownerFilter) : myMetricsOnly ? currentUserId : undefined,
+          created_after: lifecycleDate.created_after,
+          updated_before: lifecycleDate.updated_before,
+          deleted: deletedView,
+          sort_by: sortBy,
+          sort_order: sortOrder,
+          page: p,
+          page_size: pageSize,
+        });
+        all.push(...res.items);
+        if (all.length >= res.total || res.items.length === 0) break;
+      }
+      // 表头与表格中文列标题对齐（业务术语化，值列已用中文标签）
+      const header = [
+        "指标编码", "名称", "业务域", "责任人", "类型", "状态",
+        "聚合", "粒度", "单位", "数仓层", "分级",
+        "PII", "版本", "创建时间", "更新时间",
+      ];
+      // CSV 注入防护（OWASP）：单元格以 = / + / - / @ 开头时，Excel/WPS 会当作公式执行。
+      // 指标名/域名等用户可写字段可能被注入恶意公式，导出时统一前缀单引号消毒。
+      const sanitize = (v: unknown) => {
+        const s = String(v ?? "");
+        if (/^[=+\-@]/.test(s)) return `'${s}`;
+        return s;
+      };
+      const rows = all.map((m) =>
+        [
+          m.metric_code, m.name, domainName(m.domain), userName(m.owner_id), m.type,
+          METRIC_STATUS_LABEL[m.status] ?? m.status,
+          AGGREGATION_LABEL[m.aggregation] ?? m.aggregation,
+          GRANULARITY_LABEL[m.granularity] ?? m.granularity,
+          m.unit && UNIT_LABEL[m.unit] ? UNIT_LABEL[m.unit] : m.unit, DW_LAYER_LABEL[m.dw_layer] ?? m.dw_layer, METRIC_TIER_LABEL[m.metric_tier] ?? m.metric_tier,
+          m.pii_flag ? "PII" : "", m.version, formatCnTime(m.created_at), formatCnTime(m.updated_at),
+        ]
+          .map((c) => `"${sanitize(c).replace(/"/g, '""')}"`)
+          .join(","),
+      );
+      const blob = new Blob([[header.join(","), ...rows].join("\n")], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `metric-catalog-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      message.success(`已导出 ${all.length} 条指标（全量筛选结果）`);
+    } catch (err) {
+      const e = err as { message?: string };
+      message.error(e?.message ? `导出失败：${e.message}` : "导出失败");
+    } finally {
+      setExporting(false);
+    }
   }
 
   const columns: ColumnsType<MetricResponse> = [
@@ -995,9 +1030,10 @@ export function MetricCatalog() {
             <Button
               icon={<DownloadOutlined />}
               onClick={exportCsv}
+              loading={exporting}
               disabled={!items.length || !canExport || deletedView}
             >
-              导出
+              {exporting ? "导出中" : "导出"}
             </Button>
           </Tooltip>
           <Tooltip title="刷新列表（其他用户的新发布/状态变更会在此同步）">

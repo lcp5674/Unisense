@@ -29,6 +29,7 @@ vi.mock("../api", () => {
     listUsers: vi.fn(),
     updateTemplateOwner: vi.fn(),
     setTemplateActive: vi.fn(),
+    updateMetricTemplate: vi.fn(),
     listDomainTree: vi.fn(),
     listDictItems: vi.fn(),
     UnisenseApiError,
@@ -38,8 +39,13 @@ const trackMock = vi.fn();
 vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
+// P2-13 编辑弹窗测试需要 can("template:assign-owner") 可见「编辑」按钮；
+// Templates 仅用 usePermission().can，无其他依赖，can 恒 true 不影响现有 URL/防竞态测试
+vi.mock("../hooks/usePermission", () => ({
+  usePermission: () => ({ can: () => true }),
+}));
 
-import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner, setTemplateActive, listDomainTree, listDictItems } from "../api";
+import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner, setTemplateActive, updateMetricTemplate, listDomainTree, listDictItems } from "../api";
 
 const mockedList = vi.mocked(listTemplates);
 const mockedCreate = vi.mocked(createMetric);
@@ -48,6 +54,7 @@ const mockedInstantiate = vi.mocked(instantiateTemplate);
 const mockedListUsers = vi.mocked(listUsers);
 const mockedUpdateOwner = vi.mocked(updateTemplateOwner);
 const mockedSetActive = vi.mocked(setTemplateActive);
+const mockedUpdateMetricTemplate = vi.mocked(updateMetricTemplate);
 const mockedDomainTree = vi.mocked(listDomainTree);
 const mockedDictItems = vi.mocked(listDictItems);
 
@@ -118,6 +125,7 @@ const TPLS: MetricTemplate[] = [
     is_active: true,
     owner_id: null,
     created_by: 1,
+    version: 1,
   },
   {
     id: 2,
@@ -140,6 +148,7 @@ const TPLS: MetricTemplate[] = [
     is_active: true,
     owner_id: null,
     created_by: 1,
+    version: 1,
   },
 ];
 
@@ -284,6 +293,34 @@ describe("Templates 页面", () => {
       );
     });
     expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("P2-13 编辑模板：打开编辑弹窗回填当前值，保存调用 updateMetricTemplate（PATCH 局部更新）", async () => {
+    const updated = { ...TPLS[0], name: "GMV 日汇总模板 V2", version: 2 };
+    mockedUpdateMetricTemplate.mockResolvedValue(updated as unknown as MetricTemplate);
+    render(
+      <MemoryRouter>
+        <Templates />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("tpl_gmv_daily");
+    // 打开编辑弹窗（can("template:assign-owner") 已 mock 为 true，编辑按钮可见）
+    fireEvent.click(screen.getAllByText("编辑")[0]);
+    await screen.findByText("编辑模板：tpl_gmv_daily");
+    // 回填当前名称（PATCH 语义：只改 name）
+    const nameInput = document.querySelector('.ant-modal input[id="name"]') as HTMLInputElement;
+    expect(nameInput?.value).toBe(TPLS[0].name);
+    fireEvent.change(nameInput, { target: { value: "GMV 日汇总模板 V2" } });
+    fireEvent.click(screen.getByText("保存修改"));
+    await waitFor(() => {
+      expect(mockedUpdateMetricTemplate).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ name: "GMV 日汇总模板 V2" }),
+      );
+    });
+    // 保存成功后刷新列表（重新拉取）
+    expect(mockedList).toHaveBeenCalled();
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

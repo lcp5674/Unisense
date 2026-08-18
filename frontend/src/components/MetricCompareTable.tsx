@@ -15,6 +15,13 @@ export const COMPARE_FIELD_LABELS: Record<string, string> = {
   freshness: "新鲜度",
   definition: "口径定义",
   dependencies: "依赖指标",
+  // P2-14 治理对比补全（compare_matrix 新增字段的标签）
+  pii_flag: "是否 PII",
+  compliance_reviewed: "合规复核",
+  owner_id: "责任人",
+  status: "状态",
+  version: "版本",
+  description: "指标描述",
 };
 
 // 差异等级 → 视觉：行底色 + 圆点 pill。色值用「仪表盘调色板」以契合设计语言。

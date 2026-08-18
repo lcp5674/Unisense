@@ -1402,6 +1402,35 @@ export async function setTemplateActive(
   });
 }
 
+// 编辑指标模板（PATCH /semantics/templates/{id}，全字段可选 PATCH 语义；code 不可改）
+export async function updateMetricTemplate(
+  templateId: number,
+  body: Partial<{
+    name: string;
+    domain: string;
+    description: string;
+    defaults_json: Record<string, unknown>;
+    required_fields: string[];
+    type: string;
+    granularity: string;
+    unit: string;
+    aggregation: string;
+    time_semantics: string;
+    freshness: string;
+    dw_layer: string;
+    serving_mode: string;
+    additivity: string;
+    metric_tier: string;
+    owner_id: number | null;
+    is_active: boolean;
+  }>,
+): Promise<MetricTemplate> {
+  return request<MetricTemplate>(`${API_BASE}/semantics/templates/${templateId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
 // 从模板实例化创建指标（POST /semantics/templates/{id}/instantiate，后端合并模板默认口径 + 用户覆盖）
 export async function instantiateTemplate(
   templateId: number,

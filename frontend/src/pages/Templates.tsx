@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip } from "antd";
-import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip, Switch } from "antd";
+import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined, EditOutlined } from "@ant-design/icons";
 import {
   listTemplates,
   createMetric,
@@ -12,6 +12,7 @@ import {
   listUsers,
   updateTemplateOwner,
   setTemplateActive,
+  updateMetricTemplate,
   listDomainTree,
   listDictItems,
   getDomainDefaults,
@@ -82,6 +83,10 @@ export function Templates() {
   // 责任人人选（模板「负责人」指派下拉）
   const [users, setUsers] = useState<UserBrief[]>([]);
   const [form] = Form.useForm();
+  // P2-13 模板编辑闭环：编辑弹窗 state + 独立表单（不复用实例化 form，语义分离）
+  const [editTpl, setEditTpl] = useState<MetricTemplate | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editForm] = Form.useForm();
   const navigate = useNavigate();
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
@@ -347,6 +352,83 @@ export function Templates() {
     setModalOpen(true);
   }
 
+  // P2-13 模板编辑闭环：打开编辑弹窗并回填当前值（code 不可改——消费端稳定引用）
+  function openEditTpl(tpl: MetricTemplate) {
+    setEditTpl(tpl);
+    editForm.resetFields();
+    editForm.setFieldsValue({
+      name: tpl.name,
+      domain: tpl.domain ? findDomainPath(domainOptions, tpl.domain) ?? [tpl.domain] : undefined,
+      description: tpl.description ?? "",
+      type: tpl.type,
+      granularity: tpl.granularity,
+      unit: tpl.unit,
+      aggregation: tpl.aggregation,
+      time_semantics: tpl.time_semantics,
+      freshness: tpl.freshness,
+      dw_layer: tpl.dw_layer,
+      serving_mode: tpl.serving_mode,
+      additivity: tpl.additivity,
+      metric_tier: tpl.metric_tier,
+      required_fields: tpl.required_fields ?? [],
+      owner_id: tpl.owner_id,
+      is_active: tpl.is_active,
+      definition_json: tpl.defaults_json?.definition_json
+        ? JSON.stringify(tpl.defaults_json.definition_json, null, 2)
+        : "",
+    });
+  }
+
+  // P2-13 提交模板编辑：仅发送实际变更字段（PATCH 语义），成功刷新列表
+  async function handleUpdateTpl(values: Record<string, unknown>) {
+    if (!editTpl) return;
+    setEditSaving(true);
+    try {
+      const payload: Record<string, unknown> = {};
+      // 域 Cascader 值（路径数组）→ 叶子码
+      if (values.domain) {
+        const path = Array.isArray(values.domain) ? values.domain : [values.domain];
+        payload.domain = path[path.length - 1];
+      }
+      for (const key of [
+        "name", "description", "type", "granularity", "unit", "aggregation",
+        "time_semantics", "freshness", "dw_layer", "serving_mode", "additivity",
+        "metric_tier", "owner_id", "is_active",
+      ]) {
+        if (values[key] !== undefined && values[key] !== null) payload[key] = values[key];
+      }
+      // required_fields（多选 tag）：空数组合法（清空必填约束）
+      if (values.required_fields !== undefined) {
+        payload.required_fields = Array.isArray(values.required_fields) ? values.required_fields : [];
+      }
+      // 口径 JSON：合法 JSON 才合并进 defaults_json（保留 defaults_json 其他键）
+      if (values.definition_json !== undefined) {
+        const raw = String(values.definition_json).trim();
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            payload.defaults_json = { ...editTpl.defaults_json, definition_json: parsed };
+          } catch {
+            message.error("口径 JSON 格式不正确，请检查后重试");
+            return;
+          }
+        } else {
+          const { definition_json: _drop, ...rest } = editTpl.defaults_json ?? {};
+          payload.defaults_json = rest;
+        }
+      }
+      const updated = await updateMetricTemplate(editTpl.id, payload);
+      message.success(`模板「${updated.name}」已更新（v${updated.version}）`);
+      track("template_edit", updated.code, "template");
+      setEditTpl(null);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "模板更新失败");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
   const columns = [
     { title: "模板编码", dataIndex: "code", key: "code", render: (v: string) => <span className="mono">{v}</span> },
     { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
@@ -415,6 +497,9 @@ export function Templates() {
             {favCodes.has(t.code) ? "已收藏" : "收藏"}
           </Button>
           <Button type="link" icon={<ReadOutlined />} onClick={() => setDetailTpl(t)}>详情</Button>
+          {can("template:assign-owner") && (
+            <Button type="link" icon={<EditOutlined />} onClick={() => openEditTpl(t)}>编辑</Button>
+          )}
           {can("template:instantiate") && (
             <Tooltip title={t.is_active ? undefined : "模板已停用，暂不可实例化"}>
               <Button type="link" disabled={!t.is_active} onClick={() => openInstantiate(t)}>实例化指标</Button>
@@ -620,6 +705,91 @@ export function Templates() {
             ) : null}
           </Space>
         ) : null}
+      </Modal>
+
+      {/* P2-13 模板编辑：全字段局部更新（code 只读展示——消费端稳定引用，不可改） */}
+      <Modal
+        title={editTpl ? `编辑模板：${editTpl.code}` : "编辑模板"}
+        open={!!editTpl}
+        onCancel={() => setEditTpl(null)}
+        onOk={() => editForm.submit()}
+        okText="保存修改"
+        okButtonProps={{ loading: editSaving }}
+        confirmLoading={editSaving}
+        width={640}
+        destroyOnHidden
+      >
+        <Form form={editForm} layout="vertical" scrollToFirstError onFinish={handleUpdateTpl} style={{ marginTop: 8 }}>
+          <Space style={{ width: "100%" }} wrap align="start">
+            <Form.Item name="name" label="模板名称" rules={[{ required: true, message: "请填写名称" }, { max: 128, message: "最长 128 字符" }]} style={{ width: 280 }}>
+              <Input maxLength={128} showCount />
+            </Form.Item>
+            <Form.Item name="domain" label="业务域" rules={[{ required: true, message: "请选择业务域" }]} style={{ width: 280 }}>
+              <Cascader options={domainOptions} placeholder="选择业务域（树形）" showSearch loading={!domainOptions.length} allowClear />
+            </Form.Item>
+            <Form.Item name="description" label="模板说明" style={{ width: "100%" }}>
+              <Input.TextArea rows={2} maxLength={500} showCount placeholder="模板用途、适用场景说明" />
+            </Form.Item>
+            <Form.Item name="required_fields" label="必填字段（实例化时强制填写）" style={{ width: "100%" }}>
+              <Select
+                mode="tags"
+                tokenSeparators={[",", "，"]}
+                placeholder="输入字段名后回车，如 metric_code、granularity"
+                maxTagCount={8}
+              />
+            </Form.Item>
+            <Form.Item name="type" label="指标类型预设" style={{ width: 196 }}>
+              <Select allowClear options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="granularity" label="粒度预设" style={{ width: 196 }}>
+              <Select allowClear options={granularityOptions} showSearch placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="unit" label="单位预设" style={{ width: 196 }}>
+              <Select allowClear options={unitOptions} showSearch placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="aggregation" label="聚合方式预设" style={{ width: 196 }}>
+              <Select allowClear options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }))} placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="time_semantics" label="时间语义预设" style={{ width: 196 }}>
+              <Select allowClear options={["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"].map((v) => ({ value: v, label: TIME_SEMANTICS_LABEL[v] ?? v }))} placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="freshness" label="新鲜度预设" style={{ width: 196 }}>
+              <Select allowClear options={["REALTIME", "T0", "T1", "HOURLY"].map((v) => ({ value: v, label: FRESHNESS_LABEL[v] ?? v }))} placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="dw_layer" label="数仓层预设" style={{ width: 196 }}>
+              <Select allowClear options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="serving_mode" label="服务模式预设" style={{ width: 196 }}>
+              <Select allowClear options={["BATCH_ONLY", "REALTIME"].map((v) => ({ value: v }))} placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="additivity" label="可加性预设" style={{ width: 196 }}>
+              <Select allowClear options={["ADDITIVE", "NON_ADDITIVE", "SEMI_ADDITIVE"].map((v) => ({ value: v }))} placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="metric_tier" label="分级预设" style={{ width: 196 }}>
+              <Select allowClear options={["T1", "T2", "T3"].map((v) => ({ value: v, label: METRIC_TIER_LABEL[v] ?? v }))} placeholder="（不预设）" />
+            </Form.Item>
+            <Form.Item name="owner_id" label="负责人" style={{ width: 196 }}>
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                placeholder="选择负责人"
+                options={users.map((u) => ({ value: u.id, label: `${u.display_name ?? u.username}（${u.role}）` }))}
+              />
+            </Form.Item>
+            <Form.Item name="is_active" label="状态" valuePropName="checked" style={{ width: 196 }}>
+              <Switch checkedChildren="启用" unCheckedChildren="停用" />
+            </Form.Item>
+            <Form.Item
+              name="definition_json"
+              label="默认口径（JSON，实例化时自动合并）"
+              extra="仅编辑口径子字段；JSON 非法将阻止保存"
+              style={{ width: "100%" }}
+            >
+              <Input.TextArea rows={3} placeholder='{"expression": "sum(amount)", "source_tables": ["dwd_order_di"]}' className="mono" />
+            </Form.Item>
+          </Space>
+        </Form>
       </Modal>
     </div>
   );

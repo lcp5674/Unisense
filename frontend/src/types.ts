@@ -141,6 +141,8 @@ export interface MetricCompareMatrixDeps {
 export interface MetricCompareMatrixResult {
   metrics: string[];
   fields: Record<string, MetricCompareMatrixField | MetricCompareMatrixDeps | undefined>;
+  /** owner_id → 责任人显示名（P2-14 治理对比可读化） */
+  owner_names?: Record<number, string>;
 }
 
 // 只读用户摘要（backend GET /auth/users，Owner 责任链渲染用）
@@ -774,6 +776,8 @@ export interface MetricTemplate {
   is_active: boolean;
   owner_id: number | null;
   created_by: number;
+  /** 模板版本号（内容变更递增，P2-13 编辑闭环） */
+  version: number;
 }
 
 export interface ConsumptionGuideResponse {

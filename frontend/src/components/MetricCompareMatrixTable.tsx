@@ -57,6 +57,43 @@ function renderValue(v: unknown) {
   return <span className="mono">{String(v)}</span>;
 }
 
+// 指标状态 → 中文标签（对齐 MetricDetail 口径）
+const STATUS_LABEL: Record<string, string> = {
+  DRAFT: "草稿",
+  EXPERIMENTAL: "实验",
+  REVIEW: "审核中",
+  PUBLISHED: "已发布",
+  DEPRECATED: "已废弃",
+  DATA_SOURCE_DROPPED: "数据源下线",
+};
+
+/**
+ * 治理字段友好渲染（P2-14）：PII/合规复核/状态/版本/责任人 需可读标签而非裸 bool/数字，
+ * 否则「责任人不同、敏感分级不同」等高价值治理信号被埋在 true/1/2 里。
+ */
+function renderGovernanceValue(
+  key: string,
+  v: unknown,
+  ownerNames: Record<number, string> | undefined,
+) {
+  switch (key) {
+    case "pii_flag":
+      return v ? <Tag color="red">PII</Tag> : <Tag>非 PII</Tag>;
+    case "compliance_reviewed":
+      return v ? <Tag color="green">已复核</Tag> : <Tag color="orange">未复核</Tag>;
+    case "status":
+      return <Tag>{STATUS_LABEL[String(v)] ?? String(v)}</Tag>;
+    case "version":
+      return <span className="mono">v{String(v)}</span>;
+    case "owner_id":
+      return ownerNames && typeof v === "number" && ownerNames[v]
+        ? <span>{ownerNames[v]}</span>
+        : renderValue(v);
+    default:
+      return renderValue(v);
+  }
+}
+
 /**
  * 多指标矩阵对比表（对比页专用）：每行一个字段、每列一个指标，行级汇总差异等级。
  * 输入 compareMetricsMatrix 的结果，纯展示，无副作用。
@@ -136,7 +173,7 @@ export function MetricCompareMatrixTable({ result }: { result: MetricCompareMatr
           );
         }
         return (
-          <div style={{ padding: "2px 0" }}>{renderValue(values[code])}</div>
+          <div style={{ padding: "2px 0" }}>{renderGovernanceValue(row.key, values[code], result.owner_names)}</div>
         );
       },
     })),
