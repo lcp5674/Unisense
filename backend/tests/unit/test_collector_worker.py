@@ -56,6 +56,8 @@ async def test_scheduler_triggers_source_in_window():
     redis.enqueue_job = AsyncMock()
     redis.get = AsyncMock(return_value=None)
     redis.set = AsyncMock()
+    redis.hsetnx = AsyncMock()
+    redis.lpush = AsyncMock()
 
     db = MagicMock()
     db.__aenter__ = AsyncMock(return_value=db)
@@ -100,6 +102,8 @@ async def test_scheduler_skips_source_outside_window():
     redis.enqueue_job = AsyncMock()
     redis.get = AsyncMock(return_value=None)
     redis.set = AsyncMock()
+    redis.hsetnx = AsyncMock()
+    redis.lpush = AsyncMock()
 
     db = MagicMock()
     db.__aenter__ = AsyncMock(return_value=db)
@@ -158,6 +162,7 @@ async def test_arq_queue_enqueue_writes_initial_status():
     redis.enqueue_job = AsyncMock(return_value=job)
     redis.hset = AsyncMock()
     redis.hsetnx = AsyncMock()
+    redis.lpush = AsyncMock()
 
     q = ArqCollectionQueue(redis=redis)
     job_id = await q.enqueue("src1", 1)
@@ -175,6 +180,7 @@ async def test_arq_queue_enqueue_passes_mode():
     redis.enqueue_job = AsyncMock(return_value=job)
     redis.hset = AsyncMock()
     redis.hsetnx = AsyncMock()
+    redis.lpush = AsyncMock()
 
     q = ArqCollectionQueue(redis=redis)
     await q.enqueue("src1", 1, mode="INCREMENTAL")

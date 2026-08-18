@@ -204,6 +204,8 @@ class RedisJobStore:
     # P1-6: 终态任务加固定 TTL，避免重试幂等键在 Redis 中永久堆积
     _TERMINAL_STATUSES: frozenset[str] = frozenset({"COMPLETED", "FAILED"})
     _TERMINAL_TTL_SECONDS: int = 7 * 24 * 60 * 60  # 7 天
+    # P2-16: 顺序索引（LPUSH：表头为最新任务）——list/count 避免 SCAN 全键空间
+    _ORDER_KEY = "collect_job_order"
 
     def __init__(self, redis: Any) -> None:
         self._redis = redis
@@ -230,7 +232,12 @@ class RedisJobStore:
         )
         # 任务中心创建时间：首次写入（任意状态，含定时调度直接 RUNNING 的路径）
         # 用 HSETNX 落 created_at，后续进度高频写入不覆盖。HSETNX 为 O(1)，开销可忽略。
-        await self._redis.hsetnx(self._key(job_id), "created_at", datetime.now(UTC).isoformat())
+        created = await self._redis.hsetnx(
+            self._key(job_id), "created_at", datetime.now(UTC).isoformat()
+        )
+        if created:
+            # P2-16: 首次创建时维护顺序索引（表头=最新任务）
+            await self._redis.lpush(self._ORDER_KEY, job_id)
         # P1-6: 终态（COMPLETED/FAILED）设置 7 天 TTL，过期后自动回收（重试幂等键可清理）
         if status in self._TERMINAL_STATUSES:
             await self._redis.expire(self._key(job_id), self._TERMINAL_TTL_SECONDS)
@@ -260,6 +267,37 @@ class RedisJobStore:
             "kind": self._kind(job_id),
         }
 
+    async def _scan_all_job_ids(self) -> list[str]:
+        """SCAN 全键 ``collect_job:*`` 收集 job_id（存量数据/索引缺失回退路径）。"""
+        keys: list[str] = []
+        cursor = 0
+        while True:
+            cursor, batch = await self._redis.scan(cursor, match="collect_job:*", count=200)
+            keys.extend(batch)
+            if not cursor:
+                break
+        job_ids: list[str] = []
+        for key in keys:
+            if isinstance(key, bytes):
+                key = key.decode("utf-8", errors="replace")
+            job_ids.append(key.split(":", 1)[1])
+        return job_ids
+
+    async def _order_job_ids(self) -> list[str]:
+        """读取顺序索引中的 job_id 列表；索引为空（存量数据）时回退 SCAN 并惰性回填。"""
+        raw_ids = await self._redis.lrange(self._ORDER_KEY, 0, -1)
+        job_ids = [
+            (v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v)
+            for v in raw_ids
+        ]
+        if job_ids:
+            return job_ids
+        # 存量数据（顺序索引尚不存在）：回退 SCAN 全键并惰性回填，后续 set 维护
+        job_ids = await self._scan_all_job_ids()
+        if job_ids:
+            await self._redis.lpush(self._ORDER_KEY, *job_ids)
+        return job_ids
+
     async def list(
         self,
         limit: int = 50,
@@ -269,23 +307,14 @@ class RedisJobStore:
     ) -> list[dict[str, Any]]:
         import json
 
-        # SCAN 遍历 collect_job:*（生产模式下任务状态由 worker 回写，带 7 天 TTL）
-        keys: list[str] = []
-        cursor = 0
-        while True:
-            cursor, batch = await self._redis.scan(cursor, match="collect_job:*", count=200)
-            keys.extend(batch)
-            if not cursor:
-                break
+        # P2-16: 顺序索引优先（避免 SCAN 遍历全键空间）；逐键 hgetall + 惰性清理过期
+        job_ids = await self._order_job_ids()
         jobs: list[dict[str, Any]] = []
-        for key in keys:
-            # redis.asyncio 的 SCAN/KEYS 返回 bytes；str(bytes) 会带 b'...' 包装，
-            # 必须显式 decode 后再按 "collect_job:" 前缀切出 job_id。
-            if isinstance(key, bytes):
-                key = key.decode("utf-8", errors="replace")
-            job_id = key.split(":", 1)[1]
+        for job_id in job_ids:
             raw = await self._redis.hgetall(self._key(job_id))
             if not raw:
+                # hash 已过期（终态 TTL 7 天）——从顺序索引惰性清理，防索引无限增长
+                await self._redis.lrem(self._ORDER_KEY, 0, job_id)
                 continue
             decoded = {
                 (k.decode("utf-8", errors="replace") if isinstance(k, bytes) else k): (
@@ -318,21 +347,14 @@ class RedisJobStore:
         return jobs[offset : offset + limit]
 
     async def count(self, source_id: str | None = None, status: str | None = None) -> int:
-        """统计匹配任务数（与 list 相同过滤，服务端分页 total 用）。"""
+        """统计匹配任务数（P2-16：无过滤时 O(1) 索引长度，避免 SCAN + 全量 hgetall）。"""
         import json
 
-        keys: list[str] = []
-        cursor = 0
-        while True:
-            cursor, batch = await self._redis.scan(cursor, match="collect_job:*", count=200)
-            keys.extend(batch)
-            if not cursor:
-                break
+        job_ids = await self._order_job_ids()
+        if source_id is None and status is None:
+            return len(job_ids)
         n = 0
-        for key in keys:
-            if isinstance(key, bytes):
-                key = key.decode("utf-8", errors="replace")
-            job_id = key.split(":", 1)[1]
+        for job_id in job_ids:
             raw = await self._redis.hgetall(self._key(job_id))
             if not raw:
                 continue

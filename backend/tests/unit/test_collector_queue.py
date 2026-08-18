@@ -224,7 +224,8 @@ class TestRedisJobStoreTtl:
 
         mock_redis = MagicMock()
         mock_redis.hset = AsyncMock()
-        mock_redis.hsetnx = AsyncMock()
+        mock_redis.hsetnx = AsyncMock(return_value=1)  # P2-16: 首次创建触发索引 LPUSH
+        mock_redis.lpush = AsyncMock()
         mock_redis.expire = AsyncMock()
         return RedisJobStore(mock_redis), mock_redis
 
@@ -273,7 +274,8 @@ class TestRedisJobStoreCreatedAtAndKind:
 
         mock_redis = MagicMock()
         mock_redis.hset = AsyncMock()
-        mock_redis.hsetnx = AsyncMock()
+        mock_redis.hsetnx = AsyncMock(return_value=1)
+        mock_redis.lpush = AsyncMock()
         mock_redis.expire = AsyncMock()
         store = RedisJobStore(mock_redis)
         await store.set("job-a", "RUNNING", {"source_id": "s1"})
@@ -320,13 +322,9 @@ class TestRedisJobStoreCreatedAtAndKind:
             return jobs.get(key, {})
 
         mock_redis = MagicMock()
-
-        def _scan(cursor: int, match: str = "", count: int = 0):
-            if cursor == 0:
-                return (1, [b"collect_job:collect:s1:aaa"])
-            return (0, [b"collect_job:collect:sched:s2:bbb"])
-
-        mock_redis.scan = AsyncMock(side_effect=_scan)
+        # P2-16: list 优先读顺序索引（job_id 无 collect_job: 前缀）
+        mock_redis.lrange = AsyncMock(return_value=[b"collect:s1:aaa", b"collect:sched:s2:bbb"])
+        mock_redis.lrem = AsyncMock()
         mock_redis.hgetall = AsyncMock(side_effect=_hgetall)
         store = RedisJobStore(mock_redis)
 
@@ -341,12 +339,13 @@ class TestRedisJobStoreCreatedAtAndKind:
 class TestRedisJobStoreBytesDecode:
     """redis.asyncio 未开 decode_responses 时 hgetall/scan 返回 bytes——get/list 必须解码。"""
 
-    def _bytes_store(self, hgetall_result: dict, scan_result: tuple = (0, [])):
+    def _bytes_store(self, hgetall_result: dict, lrange_result: list | None = None):
         from app.services.collector.queue import RedisJobStore
 
         mock_redis = MagicMock()
         mock_redis.hgetall = AsyncMock(return_value=hgetall_result)
-        mock_redis.scan = AsyncMock(return_value=scan_result)
+        mock_redis.lrange = AsyncMock(return_value=lrange_result or [])
+        mock_redis.lrem = AsyncMock()
         return RedisJobStore(mock_redis), mock_redis
 
     @pytest.mark.asyncio
@@ -360,17 +359,17 @@ class TestRedisJobStoreBytesDecode:
 
     @pytest.mark.asyncio
     async def test_list_decodes_bytes_keys_and_values(self):
-        """list() 对 bytes SCAN keys 解码切出 job_id，并解码 hgetall 值。"""
+        """list() 对 bytes 顺序索引 job_id 解码，并解码 hgetall 值。"""
         store, redis = self._bytes_store(
             {b"status": b"QUEUED", b"detail": b"{}"},
-            scan_result=(0, [b"collect_job:collect:sched:s1:123"]),
+            lrange_result=[b"collect:sched:s1:123"],
         )
         jobs = await store.list(limit=10, offset=0)
         assert len(jobs) == 1
         assert jobs[0]["job_id"] == "collect:sched:s1:123"
         assert jobs[0]["status"] == "QUEUED"
-        # 二次扫描（SCAN cursor 循环）被正确终止
-        redis.scan.assert_awaited_once()
+        # 顺序索引读取一次
+        redis.lrange.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_inmemory_list_returns_jobs(self):
@@ -462,3 +461,66 @@ class TestJobCancel:
         await q.set(job_id, "COMPLETED", {"source_id": "s1", "actor_id": 1})
         assert await q.cancel(job_id) is False
         assert (await q.get(job_id))["status"] == "COMPLETED"
+
+
+# ---------- P2-16: 顺序索引 ----------
+
+
+class TestRedisJobStoreOrderIndex:
+    """P2-16: set 维护顺序索引；list/count 读索引避免 SCAN 全键空间。"""
+
+    def _index_store(self):
+        from app.services.collector.queue import RedisJobStore
+
+        mock_redis = MagicMock()
+        mock_redis.hset = AsyncMock()
+        mock_redis.hsetnx = AsyncMock(return_value=1)
+        mock_redis.lpush = AsyncMock()
+        mock_redis.expire = AsyncMock()
+        mock_redis.lrange = AsyncMock(return_value=[])
+        mock_redis.lrem = AsyncMock()
+        return RedisJobStore(mock_redis), mock_redis
+
+    @pytest.mark.asyncio
+    async def test_set_pushes_order_index_on_first_create(self):
+        """set 首次创建（hsetnx=1）把 job_id 压入顺序索引；后续更新不重复。"""
+        store, redis = self._index_store()
+        await store.set("job-1", "QUEUED", {"source_id": "s1"})
+        redis.lpush.assert_awaited_once_with(store._ORDER_KEY, "job-1")
+
+        # 第二次更新（hsetnx=0）不重复压入
+        redis.hsetnx.return_value = 0
+        await store.set("job-1", "RUNNING", {"source_id": "s1"})
+        assert redis.lpush.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_count_without_filter_uses_index_length(self):
+        """count 无过滤时直接用索引长度（O(1)，不逐键 hgetall）。"""
+        from app.services.collector.queue import RedisJobStore
+
+        mock_redis = MagicMock()
+        mock_redis.lrange = AsyncMock(return_value=["a", "b", "c"])
+        mock_redis.hgetall = AsyncMock()
+        store = RedisJobStore(mock_redis)
+        n = await store.count()
+        assert n == 3
+        mock_redis.hgetall.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_list_cleans_stale_index_entries(self):
+        """list 对已过期（hash 缺失）的索引条目惰性 LREM 清理。"""
+        from app.services.collector.queue import RedisJobStore
+
+        mock_redis = MagicMock()
+        mock_redis.lrange = AsyncMock(return_value=["stale", "alive"])
+        mock_redis.lrem = AsyncMock()
+
+        def _hgetall(key: str):
+            return {b"status": b"COMPLETED", b"detail": b"{}"} if "alive" in str(key) else {}
+
+        mock_redis.hgetall = AsyncMock(side_effect=_hgetall)
+        store = RedisJobStore(mock_redis)
+        jobs = await store.list(limit=10, offset=0)
+        assert len(jobs) == 1
+        assert jobs[0]["job_id"] == "alive"
+        mock_redis.lrem.assert_awaited_once_with(store._ORDER_KEY, 0, "stale")
