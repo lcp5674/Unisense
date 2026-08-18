@@ -59,8 +59,10 @@ from app.models.governance import (
 )
 from app.models.lineage import LineageEdge, LineageEdgeHistory
 from app.models.llm_config import LlmConfig
+from app.models.measure_catalog import MeasureCatalog, MeasureFormat, MeasureStatus
 from app.models.metric import Metric
 from app.models.metric_health import MetricHealthScore
+from app.models.metric_mount import MetricMount
 from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion, PendingVersionConfirmation
 from app.models.notify import EventLog, Notification, SubscriptionPref
@@ -118,9 +120,13 @@ __all__ = [
     "LineageEdge",
     "LineageEdgeHistory",
     "LlmConfig",
+    "MeasureCatalog",
+    "MeasureFormat",
+    "MeasureStatus",
     "Metric",
     "MetricDimension",
     "MetricHealthScore",
+    "MetricMount",
     "MetricTemplate",
     "MetricValueSnapshot",
     "MetricVersion",

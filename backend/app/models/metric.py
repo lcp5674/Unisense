@@ -82,7 +82,19 @@ class Metric(Base, BaseModel):
     )
 
     # ---- 治理一等字段 ----
-    granularity: Mapped[str] = mapped_column(String(64), nullable=False, comment="粒度")
+    # OneData 重构：粒度下沉到挂载实体 metric_mount（界限文档 §2.3 第 3 条）。
+    # 本列保留可空——存量数据兼容 + 派生指标创建时由挂载冗余回填供列表展示；
+    # 新指标口径以 metric_mount.granularity 为准。
+    granularity: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="粒度（已下沉挂载实体 metric_mount，保留兼容）"
+    )
+    # 逻辑度量引用（OneData 原子层）：原子指标 = 逻辑度量 + 聚合方式，不绑物理表。
+    # 度量格式/默认单位/小数位/源头系统/同义词由度量目录继承；派生/复合继承自原子，可空。
+    measure_id: Mapped[int | None] = mapped_column(
+        ForeignKey("measure_catalog.id", name="fk_metric_measure"),
+        nullable=True,
+        comment="关联逻辑度量 ID（原子指标必填，派生/复合继承可空）",
+    )
     unit: Mapped[str] = mapped_column(String(32), nullable=False, comment="单位")
     currency: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="币种")
     # 与字典种子（aggregation 9 值）对齐：补充 MAX/MIN/MEDIAN/PERCENTILE
