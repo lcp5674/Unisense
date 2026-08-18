@@ -661,7 +661,9 @@ export function MetricDetail() {
     try {
       const [m, vs, me, favs, healthRes, userList, domainTree, subs, rel] = await Promise.all([
         getMetric(code),
-        listVersions(code),
+        // P5 版本历史失败不拖垮整页（其余 7 项均有 catch，唯独 listVersions 无——
+        // 版本接口偶发超时会整页白屏）
+        listVersions(code).catch(() => [] as MetricVersionResponse[]),
         fetchCurrentUser(),
         listFavorites().catch(() => [] as { asset_type: string; asset_id: string }[]),
         getMetricHealth(code).catch(() => null),
