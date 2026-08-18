@@ -107,11 +107,11 @@ class SubjectDomainService:
     async def list_tree(self, status: str | None = None) -> list[SubjectDomainTreeNode]:
         """获取域树（3层）。"""
         all_domains = await self._repo.list_all(status)
-        # P14 批量聚合：2N+1 → 3 次查询（list_all + 指标 GROUP BY + 维度 GROUP BY），
-        # 消除逐域 N 次 count 的 N+1 放大（域多时显著）。
-        codes = [d.code for d in all_domains]
-        count_map = await self._repo.count_metrics_by_domains(codes)
-        dim_count_map = await self._repo.count_dimensions_by_domains(codes)
+        count_map: dict[str, int] = {}
+        dim_count_map: dict[str, int] = {}
+        for d in all_domains:
+            count_map[d.code] = await self._repo.get_metric_count(d.code)
+            dim_count_map[d.code] = await self._repo.get_dimension_count(d.code)
 
         id_map: dict[int, SubjectDomainTreeNode] = {}
         for d in all_domains:

@@ -231,10 +231,10 @@ class TestRedisJobStoreTtl:
 
     @pytest.mark.asyncio
     async def test_terminal_status_sets_seven_day_ttl(self):
-        """COMPLETED/FAILED 终态设置 7 天 TTL，过期后自动回收幂等键。"""
+        """COMPLETED/FAILED/SKIPPED/CANCELLED 终态均设 7 天 TTL（HIGH-5/M1）。"""
         from app.services.collector.queue import RedisJobStore
 
-        for terminal in ("COMPLETED", "FAILED"):
+        for terminal in ("COMPLETED", "FAILED", "SKIPPED", "CANCELLED"):
             store, redis = self._make_store()
             await store.set("job-1", terminal, {"ok": True})
             redis.expire.assert_awaited_once_with(

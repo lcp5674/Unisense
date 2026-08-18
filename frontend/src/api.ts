@@ -1574,13 +1574,9 @@ export async function deprecateDimension(dimCode: string): Promise<Dimension> {
 
 export async function listDimensionMappings(
   sourceDimCode?: string,
-  pageSize = 200,
 ): Promise<{ items: DimensionMapping[]; total: number }> {
-  const params = new URLSearchParams();
-  if (sourceDimCode) params.set("source_dim_code", sourceDimCode);
-  params.set("page_size", String(pageSize));
-  const qs = params.toString();
-  return request(`${API_BASE}/dimensions/mappings${qs ? `?${qs}` : ""}`);
+  const qs = sourceDimCode ? `?source_dim_code=${encodeURIComponent(sourceDimCode)}` : "";
+  return request(`${API_BASE}/dimensions/mappings${qs}`);
 }
 
 export async function createDimensionMapping(body: {
@@ -1597,13 +1593,9 @@ export async function createDimensionMapping(body: {
 
 export async function listReconciliations(
   status?: string,
-  pageSize = 200,
 ): Promise<{ items: Reconciliation[]; total: number }> {
-  const params = new URLSearchParams();
-  if (status) params.set("status", status);
-  params.set("page_size", String(pageSize));
-  const qs = params.toString();
-  return request(`${API_BASE}/dimensions/reconciliations${qs ? `?${qs}` : ""}`);
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request(`${API_BASE}/dimensions/reconciliations${qs}`);
 }
 
 export async function submitReconciliation(body: {

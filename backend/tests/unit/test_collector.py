@@ -630,6 +630,114 @@ async def test_collect_and_register_triggers_dsd_on_dropped_tables():
     )
 
 
+async def test_collect_reconcile_excludes_filtered_and_truncated_tables():
+    """HIGH-1: include/exclude 过滤 + 配额截断的表不被误判为源端已 DROP。
+
+    仅真正从源端消失的表进入 dropped_names（DSD + 目录废弃），
+    避免假 DROP 批量废弃目录与下游指标置 DATA_SOURCE_DROPPED（数据事故）。
+    """
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    src = MagicMock(source_type="mysql", quota={"max_scan_rows": 1})
+    src.include_patterns = None
+    src.exclude_patterns = None
+    src.databases = None
+    src.health_metrics = None
+    repo.get_source = AsyncMock(return_value=src)
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=0.5)
+    # 源端活跃实体：t1(本次保留) t2/t3(配额截断) t4(include/exclude 过滤) t5(真正消失)
+    repo.list_active_entity_names = AsyncMock(return_value=["t1", "t2", "t3", "t4", "t5"])
+    repo.deprecate_catalog = AsyncMock(return_value=True)
+
+    class ReconcileCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                            entity_name="t1",
+                            entity_type="TABLE",
+                            schema_json={"columns": ["x"]},
+                        ),
+                    CatalogSpec(
+                            entity_name="t2",
+                            entity_type="TABLE",
+                            schema_json={"columns": ["x"]},
+                        ),
+                    CatalogSpec(
+                            entity_name="t3",
+                            entity_type="TABLE",
+                            schema_json={"columns": ["x"]},
+                        ),
+                ],
+                filtered_names=["t4"],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    with patch("app.services.semantic.service.MetricService") as mock_metric_svc:
+        mock_metric_svc.return_value.mark_source_dropped = AsyncMock(return_value=1)
+        result = await svc.collect_and_register("s", ReconcileCollector(), actor_id=7, mode="FULL")
+
+    # 仅 t5（真正消失）触发 DSD + 目录废弃；t2/t3(截断) t4(过滤) 不被误判
+    mock_metric_svc.return_value.mark_source_dropped.assert_awaited_once_with(
+        ["s"], actor_id=7, role="platform_admin", entity_names=["t5"]
+    )
+    repo.deprecate_catalog.assert_awaited_once_with("s", "t5")
+    assert result["quota_truncated"] == 2
+    assert result["dsd_count"] == 1
+
+
+async def test_collect_incremental_does_not_override_coverage_baseline():
+    """HIGH-2: 增量模式不覆盖 coverage 基线（total_entities=None），仅 FULL 刷新。
+
+    增量只采变更实体，若用变更数覆盖基线会把 coverage 压缩失真为 1.0。
+    """
+    svc, repo = _svc()
+    events = MagicMock()
+    events.publish = AsyncMock()
+    events.publish_batch = AsyncMock()
+    svc._events = events
+    src = MagicMock(source_type="clickhouse", quota={})
+    src.include_patterns = None
+    src.exclude_patterns = None
+    src.databases = None
+    src.health_metrics = None
+    repo.get_source = AsyncMock(return_value=src)
+    repo.get_watermark = AsyncMock(
+        return_value=MagicMock(last_collected_at=datetime(2026, 1, 1, tzinfo=UTC))
+    )
+    repo.upsert_catalog = AsyncMock(return_value=(MagicMock(content_signature="sig"), True, None))
+    repo.recompute_coverage = AsyncMock(return_value=1.0)
+
+    class SingleTableCollector:
+        def set_incremental_context(self, mode, watermark_ts=None):
+            return None
+
+        async def collect(self, source: object) -> CollectResult:
+            return CollectResult(
+                specs=[
+                    CatalogSpec(
+                            entity_name="t1",
+                            entity_type="TABLE",
+                            schema_json={"columns": ["x"]},
+                        ),
+                ],
+                failed_specs=[],
+                source_id="s",
+            )
+
+    await svc.collect_and_register("s", SingleTableCollector(), actor_id=1, mode="INCREMENTAL")
+    # 增量：total_entities=None → 沿用存量基线，不覆盖
+    repo.recompute_coverage.assert_awaited_once_with("s", total_entities=None)
+
+
 async def test_collect_and_register_dsd_failure_does_not_break_collect():
     """P1-4: DSD 标记失败（血缘不可用/服务异常）不阻断采集主流程，dsd_count 归 0。"""
     svc, repo = _svc()
@@ -1620,6 +1728,29 @@ async def test_sqlalchemy_connector_normalizes_uppercase_keys():
     connector._query_timeout = 60  # type: ignore[attr-defined]
     rows = await connector.query("SELECT schema_name, table_name FROM information_schema.tables")
     assert rows == [{"schema_name": "unisense", "table_name": "orders"}]
+
+
+def test_sqlalchemy_connector_connect_args_by_driver():
+    """HIGH-3: asyncpg 用 timeout，aiomysql 用 connect_timeout（驱动参数兼容）。
+
+    对 asyncpg 透传 connect_timeout 会 TypeError（asyncpg.connect 无此参数），
+    Postgres 采集/探活整体不可用——按 drivername 分支注入。
+    """
+    from sqlalchemy.engine import URL
+
+    from app.services.collector.connectors.mysql import SqlalchemyConnector
+
+    with patch("app.services.collector.connectors.mysql.create_async_engine") as mock_create:
+        SqlalchemyConnector(
+            URL.create("postgresql+asyncpg", host="h", username="u"), connect_timeout=10
+        )
+        assert mock_create.call_args.kwargs["connect_args"] == {"timeout": 10}
+
+    with patch("app.services.collector.connectors.mysql.create_async_engine") as mock_create:
+        SqlalchemyConnector(
+            URL.create("mysql+aiomysql", host="h", username="u"), connect_timeout=10
+        )
+        assert mock_create.call_args.kwargs["connect_args"] == {"connect_timeout": 10}
 
 
 async def test_registry_build_from_cfg_and_type_info():

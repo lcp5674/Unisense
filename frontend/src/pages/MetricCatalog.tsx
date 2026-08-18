@@ -326,12 +326,8 @@ export function MetricCatalog() {
   const [restoring, setRestoring] = useState<string | null>(null);
   // 批量操作权限点（方案 C 按钮级管控）：提交/删除=metric:create、通过/打回=metric:approve、
   // 下线=metric:deprecate。can() 控制批量操作按钮可用性；后端接口强制仍为最终边界。
-  // P6 防 fail-open：can() 在权限快照加载期（snapshot=null）返回 true（后端兜底），
-  // 但按钮若在此窗口可用会误导用户——permLoading 未就绪时禁用批量按钮。
-  const { can, loading: permLoading } = usePermission();
-  const canBatchManage =
-    !permLoading &&
-    (can("metric:create") || can("metric:approve") || can("metric:deprecate"));
+  const { can } = usePermission();
+  const canBatchManage = can("metric:create") || can("metric:approve") || can("metric:deprecate");
   // 批量操作菜单项级权限：各操作对应独立权限点，避免仅有部分权限的用户看到并点击无权限项（后端仍为最终边界）
   const canApprove = can("metric:approve");
   const canDeprecate = can("metric:deprecate");

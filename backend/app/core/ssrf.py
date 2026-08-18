@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import urllib.parse
 from collections.abc import Iterable
 from typing import Any
 
@@ -33,19 +34,36 @@ _FORBIDDEN_NETWORKS: list[Any] = [
 
 #: Kafka bootstrap_servers 用逗号分隔 host:port 对（bootstrap_servers 或 host 回退）。
 _KAFKA_BOOTSTRAP_KEY = "bootstrap_servers"
+#: Kafka Schema Registry 出站 URL 键（真实 HTTP GET，属 SSRF 向量）。
+_KAFKA_REGISTRY_KEY = "registry_url"
+
+
+def _collect_hostport(hosts: list[str], value: Any) -> None:
+    """把 str 或 list 型的 host[:port] 候选统一追加（HIGH-4：list 型不得绕过）。"""
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+    elif isinstance(value, (list, tuple)):
+        parts = [str(p).strip() for p in value if isinstance(p, str) and p.strip()]
+    else:
+        return
+    hosts.extend(_strip_port(p) for p in parts)
 
 
 def _extract_hosts(cfg: dict[str, Any]) -> list[str]:
-    """从连接配置提取候选 host 列表（不含端口）。"""
+    """从连接配置提取候选 host 列表（不含端口）。
+
+    覆盖：Kafka ``bootstrap_servers``（str 逗号分隔或 list）、``host``（str/list）、
+    ``registry_url``（Schema Registry 真实出站 URL 的 hostname）——任一遗漏都会
+    让 SSRF 校验被旁路（HIGH-4 回归防护）。
+    """
     hosts: list[str] = []
-    if isinstance(cfg.get(_KAFKA_BOOTSTRAP_KEY), str):
-        for part in cfg[_KAFKA_BOOTSTRAP_KEY].split(","):
-            part = part.strip()
-            if part:
-                hosts.append(_strip_port(part))
-    host = cfg.get("host")
-    if isinstance(host, str) and host.strip():
-        hosts.append(_strip_port(host.strip()))
+    _collect_hostport(hosts, cfg.get(_KAFKA_BOOTSTRAP_KEY))
+    _collect_hostport(hosts, cfg.get("host"))
+    registry = cfg.get(_KAFKA_REGISTRY_KEY)
+    if isinstance(registry, str) and registry.strip():
+        parsed = urllib.parse.urlparse(registry.strip())
+        if parsed.hostname:
+            hosts.append(parsed.hostname)
     return hosts
 
 

@@ -1847,13 +1847,17 @@ class CollectorService(BaseService):
         # P1-4: 资源配额——max_scan_rows 按表数截断注册清单。
         # 源端实体数超过配额时仅注册前 N 个（配额=0/未配置表示不限制），
         # 防止超大表清单一次性拖垮注册/内存（服务可用性保护）。
+        # 截断丢弃的表名必须记录：FULL 对账据此排除，否则被误判「源表已 DROP」
+        # 触发批量废弃目录 + 下游指标置 DSD（数据事故，HIGH-1 回归防护）。
         quota_truncated = 0
+        quota_truncated_names: list[str] = []
         quota = src.quota or {}
         max_scan_rows = (
             int(quota.get("max_scan_rows") or 0) if isinstance(quota, dict) else 0
         )
         if max_scan_rows > 0 and len(result.specs) > max_scan_rows:
             quota_truncated = len(result.specs) - max_scan_rows
+            quota_truncated_names = [s.entity_name for s in result.specs[max_scan_rows:]]
             logger.warning(
                 "collect_quota_truncated: source=%s scanned=%s limit=%s truncated=%s",
                 source_id,
@@ -1979,9 +1983,17 @@ class CollectorService(BaseService):
         deprecated_count = 0
         dsd_count = 0
         if effective_mode == "FULL":
+            # 对账排除集：include/exclude 过滤跳过的表 + 配额截断丢弃的表——
+            # 它们并非源端已 DROP，只是本次未采集。若不排除，会被误判为
+            # 「源表已消失」触发批量废弃目录 + 下游指标置 DSD（HIGH-1）。
+            skipped_names = set(result.filtered_names or []) | set(quota_truncated_names)
             collected_names = {spec.entity_name for spec in result.specs}
             active_names = await self._repo.list_active_entity_names(source_id)
-            dropped_names = [name for name in active_names if name not in collected_names]
+            dropped_names = [
+                name
+                for name in active_names
+                if name not in collected_names and name not in skipped_names
+            ]
             if dropped_names:
                 # 源表 DROP → 血缘下游指标置 DSD。采集侧是可信系统组件：DSD 翻转是
                 # 事实检测（表确实从源端消失），非用户授权决策，故以管理角色触发；
@@ -2014,8 +2026,18 @@ class CollectorService(BaseService):
                         exc,
                     )
 
+        # 覆盖率基线更新（HIGH-2）：仅 FULL 用「本次源端完整扫描数（含过滤/截断）」
+        # 刷新基线；增量只采变更实体，若用变更数覆盖基线会把 coverage 压缩失真为 1.0。
+        if effective_mode == "FULL":
+            total_entities = (
+                len(result.specs)
+                + len(result.filtered_names or [])
+                + len(quota_truncated_names)
+            )
+        else:
+            total_entities = None
         coverage = await self._repo.recompute_coverage(
-            source_id, total_entities=len(result.specs)
+            source_id, total_entities=total_entities
         )
 
         # P0-4: 合并 collector 层 failed_specs 与 catalog 层 failed_specs

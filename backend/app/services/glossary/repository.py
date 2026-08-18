@@ -25,20 +25,12 @@ class GlossaryRepository:
         return term
 
     async def get_term(self, term_code: str) -> Term | None:
-        # P2 软删一致性：对齐 list_terms，软删术语不可见（详情/查重/删除均查不到已删术语）
-        stmt = select(Term).where(
-            Term.term_code == term_code,
-            Term.deleted_at.is_(None),
-        )
+        stmt = select(Term).where(Term.term_code == term_code)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def get_term_by_id(self, term_id: int) -> Term | None:
-        # P2 软删一致性：对齐 list_terms
-        stmt = select(Term).where(
-            Term.id == term_id,
-            Term.deleted_at.is_(None),
-        )
+        stmt = select(Term).where(Term.id == term_id)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -86,8 +78,7 @@ class GlossaryRepository:
         await self._session.flush()
 
     async def all_terms(self) -> list[Term]:
-        # P2 软删一致性：对齐 list_terms，排除已软删
-        stmt = select(Term).where(Term.deleted_at.is_(None))
+        stmt = select(Term)
         return list((await self._session.execute(stmt)).scalars().all())
 
     async def save_conflict(self, conflict: GlossaryConflict) -> GlossaryConflict:

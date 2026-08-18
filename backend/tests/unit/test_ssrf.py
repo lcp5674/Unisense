@@ -215,3 +215,41 @@ async def test_probe_rate_redis_failure_memory_fallback() -> None:
         # 内存窗口过期后重置
         probe_throttle._memory["user:2"] = (0, 0)  # 模拟过期
         await check_probe_rate("user:2")
+
+
+def test_extract_hosts_covers_registry_url_and_list_bootstrap() -> None:
+    """HIGH-4: registry_url 与 list 型 bootstrap_servers/host 均被提取，不得绕过校验。"""
+    from app.core.ssrf import _extract_hosts
+
+    # registry_url 出站 URL 的 hostname + 逗号分隔 bootstrap + host
+    hosts = _extract_hosts(
+        {
+            "bootstrap_servers": "kafka1.internal:9092,kafka2.internal:9092",
+            "registry_url": "http://schema-registry.internal:8081",
+            "host": "10.0.0.5",
+        }
+    )
+    assert "schema-registry.internal" in hosts
+    assert "kafka1.internal" in hosts
+    assert "kafka2.internal" in hosts
+    assert "10.0.0.5" in hosts
+
+    # list 型 bootstrap_servers / host 不再被 isinstance(str) 判定旁路
+    hosts = _extract_hosts({"bootstrap_servers": ["192.168.1.10:9092"], "host": ["192.168.1.11"]})
+    assert "192.168.1.10" in hosts
+    assert "192.168.1.11" in hosts
+
+
+def test_validate_connection_host_rejects_metadata_registry() -> None:
+    """HIGH-4: registry_url 指向云 metadata 被拒绝（此前完全跳过校验）。"""
+    from app.core.ssrf import validate_connection_host
+
+    with patch(
+        "app.core.ssrf.socket.getaddrinfo",
+        return_value=[(2, 1, 6, "", ("169.254.169.254", 0))],
+    ):
+        with pytest.raises(BusinessError) as exc:
+            validate_connection_host(
+                {"registry_url": "http://169.254.169.254/latest/meta-data/"}
+            )
+        assert exc.value.error_code == "SSRF_TARGET_FORBIDDEN"

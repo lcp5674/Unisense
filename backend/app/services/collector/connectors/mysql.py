@@ -65,18 +65,24 @@ class SqlalchemyConnector:
         connect_timeout: int = 10,
         query_timeout: int = 60,
     ) -> None:
-        if isinstance(db_url, str):
-            self._engine: AsyncEngine = create_async_engine(
-                db_url,
-                pool_pre_ping=True,
-                connect_args={"connect_timeout": connect_timeout},
-            )
-        else:
-            self._engine = create_async_engine(
-                db_url,
-                pool_pre_ping=True,
-                connect_args={"connect_timeout": connect_timeout},
-            )
+        # 按驱动分支注入 connect_args（HIGH-3）：asyncpg.connect 无 connect_timeout
+        # 参数（用 timeout），aiomysql 接受 connect_timeout。若对 asyncpg 透传
+        # connect_timeout，首次建连即 TypeError，Postgres 采集/探活整体不可用。
+        drivername = ""
+        if isinstance(db_url, URL):
+            drivername = db_url.drivername or ""
+        elif isinstance(db_url, str):
+            drivername = db_url.split("://", 1)[0] if "://" in db_url else db_url
+        connect_args = (
+            {"timeout": connect_timeout}
+            if "asyncpg" in drivername
+            else {"connect_timeout": connect_timeout}
+        )
+        self._engine: AsyncEngine = create_async_engine(
+            db_url,
+            pool_pre_ping=True,
+            connect_args=connect_args,
+        )
         self._query_timeout = query_timeout
 
     async def query(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:

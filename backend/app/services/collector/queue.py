@@ -201,8 +201,12 @@ class InMemoryCollectionQueue:
 class RedisJobStore:
     """基于 Redis 的任务状态存储（生产实现，供 arq worker 与状态查询共用）。"""
 
-    # P1-6: 终态任务加固定 TTL，避免重试幂等键在 Redis 中永久堆积
-    _TERMINAL_STATUSES: frozenset[str] = frozenset({"COMPLETED", "FAILED"})
+    # P1-6: 终态任务加固定 TTL，避免在 Redis 中永久堆积。
+    # HIGH-5/M1: SKIPPED（同源并发冲突跳过）/CANCELLED（用户取消）同样是终态，
+    # 若不纳入 TTL 会无限堆积（顺序索引只增不减，list/count 越来越慢）。
+    _TERMINAL_STATUSES: frozenset[str] = frozenset(
+        {"COMPLETED", "FAILED", "SKIPPED", "CANCELLED"}
+    )
     _TERMINAL_TTL_SECONDS: int = 7 * 24 * 60 * 60  # 7 天
     # P2-16: 顺序索引（LPUSH：表头为最新任务）——list/count 避免 SCAN 全键空间
     _ORDER_KEY = "collect_job_order"

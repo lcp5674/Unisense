@@ -82,34 +82,6 @@ class SubjectDomainRepository:
         result = await self._db.execute(stmt)
         return result.scalar() or 0
 
-    async def count_metrics_by_domains(self, codes: list[str]) -> dict[str, int]:
-        """批量统计多域指标数（P14：list_tree 2N+1 → 一次 GROUP BY，消除逐域 N 次查询）。"""
-        if not codes:
-            return {}
-        stmt = (
-            select(Metric.domain, func.count())
-            .where(
-                Metric.domain.in_(codes),
-                Metric.deleted_at.is_(None),
-            )
-            .group_by(Metric.domain)
-        )
-        return {code: int(n) for code, n in (await self._db.execute(stmt)).all()}
-
-    async def count_dimensions_by_domains(self, codes: list[str]) -> dict[str, int]:
-        """批量统计多域维度数（P14：与指标数对称，一次 GROUP BY；排除已废弃维度）。"""
-        if not codes:
-            return {}
-        stmt = (
-            select(Dimension.domain, func.count())
-            .where(
-                Dimension.domain.in_(codes),
-                Dimension.status != "DEPRECATED",
-            )
-            .group_by(Dimension.domain)
-        )
-        return {code: int(n) for code, n in (await self._db.execute(stmt)).all()}
-
     async def create(self, domain: SubjectDomain) -> SubjectDomain:
         self._db.add(domain)
         await self._db.flush()

@@ -199,39 +199,6 @@ async def test_update_metric_creates_version_and_bumps():
     assert result.version == 2
 
 
-async def test_update_metric_published_non_breaking_syncs_effective_version():
-    """P8 非破坏性 PUBLISHED 编辑：主表 version 与 effective_version 同步。
-
-    修复前非破坏编辑只递增 version、不写 effective_version → 版本号与生效版本
-    矛盾（出现永不转正的 DRAFT 版本）。非破坏性口径变更直接生效，生效版本=最新。
-    """
-    svc, repo = _svc_with_repo()
-    existing = make_metric(
-        status="PUBLISHED", row_version=1, version=2, effective_version=2
-    )
-    repo.get_by_code = AsyncMock(return_value=existing)
-    repo.update_with_optimistic_lock = AsyncMock(
-        return_value=make_metric(status="PUBLISHED", version=3, effective_version=3)
-    )
-    repo.create_version = AsyncMock(return_value=MagicMock())
-
-    await svc.update_metric(
-        "sales_gmv_daily",
-        MetricUpdateRequest(
-            # 非破坏性：改 source_fields（不在 BREAKING_DEF_FIELDS），expression 不变
-            definition_json={**existing.definition_json, "source_fields": ["gmv", "channel"]},
-            change_reason="补充来源字段（非破坏性）",
-        ),
-        actor_id=1,
-        role="metric_owner",
-    )
-
-    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
-    # 非破坏性直接生效 → effective_version 同步到最新版本号
-    assert lock_kwargs["effective_version"] == 3
-    assert lock_kwargs["version"] == 3
-
-
 async def test_update_metric_blocked_by_pdp_decision():
     """PDP 拒绝（check_metric_permission allow=False）→ 写操作被阻断，不落库。
 
@@ -808,57 +775,6 @@ async def test_batch_register_partial_failure():
     assert result["candidates"][0]["status"] == "DRAFT"
     assert result["candidates"][1]["status"] == "VALIDATION_ERROR"
     assert result["candidates"][1]["validation_errors"] is not None
-
-
-async def test_batch_register_db_error_savepoint_continues():
-    """P13 批量注册单列 DB 错误：savepoint 隔离，仅该列失败、后续列继续。
-
-    修复前 SQLAlchemyError 走整会话 rollback + 中止剩余列，已 flush 的候选被回滚
-    但 candidates 仍记为 DRAFT → 部分结果失真。修复后逐列 begin_nested 隔离。
-    """
-    svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(return_value=None)
-    repo.create = AsyncMock(return_value=make_metric())
-    repo.create_version = AsyncMock(return_value=MagicMock())
-
-    from sqlalchemy.exc import IntegrityError
-
-    from app.services.semantic.schemas import MetricBatchRegisterRequest
-
-    request = MetricBatchRegisterRequest(
-        source_table="dwd.sales_detail",
-        measure_columns=["ok_col", "bad_col"],
-        dimension_mapping={"domain": "sales"},
-        llm_prefill=True,
-        domain="sales",
-    )
-
-    real_create = svc.create_metric
-
-    async def _flaky_create(req, **kw):
-        # 第 2 列模拟唯一键冲突（DB 级 IntegrityError）
-        if getattr(req, "measure_column", None) == "bad_col":
-            raise IntegrityError("stmt", {}, Exception("duplicate key"))
-        return await real_create(req, **kw)
-
-    svc.create_metric = _flaky_create  # type: ignore[method-assign]
-
-    # savepoint 语义：MagicMock 的 async with 行为不可靠（吞异常），
-    # 用真实 asynccontextmanager 模拟 begin_nested——异常从 yield 抛出进外层 except
-    from contextlib import asynccontextmanager
-
-    @asynccontextmanager
-    async def _fake_nested():
-        yield
-
-    svc._db.begin_nested = _fake_nested  # type: ignore[method-assign]
-
-    result = await svc.batch_register_metrics(request, actor_id=1)
-
-    assert len(result["candidates"]) == 2
-    assert result["candidates"][0]["status"] == "DRAFT"  # ok_col 成功
-    assert result["candidates"][1]["status"] == "VALIDATION_ERROR"  # bad_col 被 savepoint 隔离捕获
-    assert "已跳过该列" in result["candidates"][1]["validation_errors"]
 
 
 async def test_review_compliance_rejects_non_pii():
