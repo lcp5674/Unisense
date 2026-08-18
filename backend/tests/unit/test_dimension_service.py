@@ -616,6 +616,7 @@ async def test_update_dimension_renames_code_and_cascades() -> None:
     )
     repo.get_dimension = AsyncMock(side_effect=lambda code: dim if code == "dim_old" else None)
     repo.rename_dimension_references = AsyncMock()
+    repo.list_metrics_declaring_dimension = AsyncMock(return_value=[])
     payload = DimensionUpdate(dim_code="dim_new", name="渠道（新）")
     resp = await svc.update_dimension("dim_old", payload)
     assert resp.dim_code == "dim_new"
@@ -704,7 +705,9 @@ async def test_preview_column_values_queries_source() -> None:
 
 
 # ---- 跨服务打通：绑定指标后回写指标声明维度（方案③ 单向打通）----
-def _metric_with_dims(status: str, dims: list[str], metric_id: int = 42) -> Metric:
+def _metric_with_dims(
+    status: str, dims: list[str], metric_id: int = 42, bound: list[str] | None = None
+) -> Metric:
     m = Metric()
     m.id = metric_id
     m.metric_code = "sales_gmv_daily"
@@ -715,6 +718,9 @@ def _metric_with_dims(status: str, dims: list[str], metric_id: int = 42) -> Metr
         "dimensions": list(dims),
         "grain": "day",
     }
+    if bound is not None:
+        # _bound_dimensions：由 bind 追加的来源标记（P1-8 解绑来源保护）
+        m.definition_json["_bound_dimensions"] = list(bound)
     return m
 
 
@@ -769,21 +775,45 @@ async def test_bind_metric_dimension_idempotent_no_duplicate() -> None:
     repo.commit.assert_not_awaited()
 
 
-async def test_bind_metric_dimension_published_also_writes_back() -> None:
-    """PUBLISHED 指标（已发布口径）绑定：仍回写声明维度（告警由日志承载，不过度设计）。"""
+async def test_bind_metric_dimension_published_creates_pending_version() -> None:
+    """PUBLISHED 指标绑定新维度（P1-9）：不再静默回写 live 口径，
+
+    改为创建 PENDING_VERSION 确认期快照，live 口径保持原样直至转正；
+    消费方在确认期内仍以旧口径为准（治理语义：绕过 14 天确认 = 数据错误）。
+    """
+    from unittest.mock import MagicMock, patch
+
     svc, repo = await _svc()
     repo.get_dimension = AsyncMock(return_value=Dimension(dim_code="city"))
     repo.get_member = AsyncMock(return_value=None)
     repo.save_metric_dimension = AsyncMock(side_effect=lambda b: b)
     metric = _metric_with_dims("PUBLISHED", ["region"])
+    metric.version = 5
     svc._session.execute = AsyncMock(return_value=_bind_result(metric))
 
-    await svc.bind_metric_dimension(
-        MetricDimensionBind(metric_id=42, dim_code="city", role="SPLICE")
-    )
+    metric_repo = MagicMock()
+    metric_repo.has_pending_version = AsyncMock(return_value=False)
+    metric_repo.create_version = AsyncMock()
+    with patch(
+        "app.services.semantic.repository.MetricRepository",
+        return_value=metric_repo,
+    ), patch(
+        "app.services.semantic.pending_version_manager.PendingVersionManager.create_pending",
+        new=AsyncMock(),
+    ):
+        await svc.bind_metric_dimension(
+            MetricDimensionBind(metric_id=42, dim_code="city", role="SPLICE"),
+            actor_id=7,
+        )
 
-    assert metric.definition_json["dimensions"] == ["region", "city"]
-    repo.commit.assert_awaited()
+    # live 口径未被静默改写（旧行为会改成 ["region","city"]）
+    assert metric.definition_json["dimensions"] == ["region"]
+    # 已创建 PENDING 版本（确认期），而非直接回写主表
+    metric_repo.create_version.assert_awaited_once()
+    created = metric_repo.create_version.call_args.args[0]
+    assert created.status == "PENDING_CONFIRMATION"
+    assert created.definition_json["dimensions"] == ["region", "city"]
+    assert created.created_by == 7
 
 
 async def test_bind_metric_dimension_registers_lineage_edge() -> None:
@@ -866,10 +896,34 @@ async def test_bind_metric_dimension_missing_metric_rejected() -> None:
 
 
 async def test_unbind_metric_dimension_removes_binding_and_dim() -> None:
-    """解绑成功：删除绑定记录 + 从指标声明维度移除 dim_code（与 bind 对称反向）。"""
+    """解绑成功：删除绑定记录 + 从指标声明维度移除由 bind 追加的 dim_code（P1-8 来源保护）。"""
     svc, repo = await _svc()
     binding = MetricDimension(metric_id=42, dim_code="region", role="FILTER")
     repo.delete_metric_dimension = AsyncMock(return_value=binding)
+    # region 是 bind 追加（标记在 _bound_dimensions），解绑应移除；existing_dim 是手工声明保留
+    metric = _metric_with_dims("DRAFT", ["existing_dim", "region"], bound=["region"])
+    svc._session.execute = AsyncMock(return_value=_bind_result(metric))
+    svc._session.flush = AsyncMock()
+
+    await svc.unbind_metric_dimension(42, "region")
+
+    repo.delete_metric_dimension.assert_awaited_with(42, "region")
+    # 反向同步：移除来源标记的 region，保留手工声明 existing_dim
+    assert metric.definition_json["dimensions"] == ["existing_dim"]
+    assert metric.definition_json["_bound_dimensions"] == []
+    svc._session.flush.assert_awaited()
+
+
+async def test_unbind_metric_dimension_keeps_manual_declaration() -> None:
+    """解绑只删绑定来源维度，不抹用户手工声明（P1-8）：口径声明保留，避免误删用户口径。
+
+    此前 unbind 无条件删除 definition_json.dimensions 中的 dim_code，会静默抹掉
+    用户手工声明的维度（bind 幂等跳过时未追加来源标记）；现仅移除有来源标记的维度。
+    """
+    svc, repo = await _svc()
+    binding = MetricDimension(metric_id=42, dim_code="region", role="FILTER")
+    repo.delete_metric_dimension = AsyncMock(return_value=binding)
+    # region 无 _bound_dimensions 标记 → 视为手工声明，解绑应保留
     metric = _metric_with_dims("DRAFT", ["existing_dim", "region"])
     svc._session.execute = AsyncMock(return_value=_bind_result(metric))
     svc._session.flush = AsyncMock()
@@ -877,8 +931,8 @@ async def test_unbind_metric_dimension_removes_binding_and_dim() -> None:
     await svc.unbind_metric_dimension(42, "region")
 
     repo.delete_metric_dimension.assert_awaited_with(42, "region")
-    # 反向同步：声明维度移除 region，保留 existing_dim
-    assert metric.definition_json["dimensions"] == ["existing_dim"]
+    # 手工声明未受解绑影响：声明维度与口径完整保留
+    assert metric.definition_json["dimensions"] == ["existing_dim", "region"]
     svc._session.flush.assert_awaited()
 
 
@@ -1042,6 +1096,7 @@ async def test_update_dimension_rename_rewrites_metric_definitions() -> None:
     repo.rename_dimension_references = AsyncMock()
     m1 = SimpleNamespace(id=1, definition_json={"dimensions": ["dim_old", "dim_region"]})
     repo.list_metrics_by_dimension = AsyncMock(return_value=[m1])
+    repo.list_metrics_declaring_dimension = AsyncMock(return_value=[])
     from app.services.dimension.schemas import DimensionUpdate
 
     await svc.update_dimension("dim_old", DimensionUpdate(dim_code="dim_new"))
@@ -1049,11 +1104,34 @@ async def test_update_dimension_rename_rewrites_metric_definitions() -> None:
     assert repo.list_metrics_by_dimension.await_args.args[0] == "dim_old"
 
 
+async def test_update_dimension_rename_rewrites_manual_declared_dimension() -> None:
+    """维度改编码联动回写仅在 definition_json.dimensions 手工声明、未绑定的指标（P1-7 加固）。
+
+    此前仅扫绑定表，手工声明维度被遗漏 → 改码后消费 FORBIDDEN_DIMENSION、血缘边悬挂。
+    """
+    svc, repo = await _svc()
+    dim = Dimension(
+        id=1, dim_code="dim_old", name="渠道", domain="sales",
+        type="SCD1", owner_id=1, status="DRAFT",
+    )
+    repo.get_dimension = AsyncMock(side_effect=lambda code: dim if code == "dim_old" else None)
+    repo.rename_dimension_references = AsyncMock()
+    # 绑定表为空，但指标 A 手工声明了 dim_old（未建绑定）
+    m1 = SimpleNamespace(id=1, definition_json={"dimensions": ["dim_old", "dim_region"]})
+    repo.list_metrics_by_dimension = AsyncMock(return_value=[])
+    repo.list_metrics_declaring_dimension = AsyncMock(return_value=[m1])
+    await svc.update_dimension("dim_old", DimensionUpdate(dim_code="dim_new"))
+    # 未绑定但手工声明的维度也被级联改名（防悬挂）
+    assert m1.definition_json["dimensions"] == ["dim_new", "dim_region"]
+
+
 async def test_unbind_removes_lineage_dimension_edge() -> None:
     """解绑指标-维度联动删除血缘 USES_DIMENSION 边（register 追加语义下防陈旧边残留）。"""
     svc, repo = await _svc()
+    # dim_old 由 bind 追加（标记在 _bound_dimensions），解绑移除声明 + 血缘边
     m = SimpleNamespace(id=1, metric_code="gmv_day", status="DRAFT",
-                        definition_json={"dimensions": ["dim_old"]})
+                        definition_json={"dimensions": ["dim_old"],
+                                         "_bound_dimensions": ["dim_old"]})
     repo.delete_metric_dimension = AsyncMock(return_value=SimpleNamespace())
     stmt_result = MagicMock()
     stmt_result.scalar_one_or_none.return_value = m
@@ -1065,6 +1143,7 @@ async def test_unbind_removes_lineage_dimension_edge() -> None:
     ):
         await svc.unbind_metric_dimension(1, "dim_old")
     assert m.definition_json["dimensions"] == []
+    assert m.definition_json["_bound_dimensions"] == []
 
 
 async def test_publish_member_draft_to_published() -> None:

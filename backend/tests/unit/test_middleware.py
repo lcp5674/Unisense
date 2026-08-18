@@ -19,9 +19,12 @@ from starlette.responses import PlainTextResponse
 from app.core.exceptions import UnisenseError
 from app.core.middleware import (
     _ERROR_CODE_HTTP_STATUS,
+    _RATE_LIMIT_DEFAULT_LIMIT,
+    _RATE_LIMIT_DEFAULT_WINDOW,
     _SECURITY_HEADERS,
     DegradationMiddleware,
     ErrorHandlerMiddleware,
+    RateLimitMiddleware,
     SecurityHeadersMiddleware,
     TraceIdMiddleware,
 )
@@ -247,3 +250,106 @@ class TestDegradationMiddleware:
         response = await mw.dispatch(request, call_next)
         assert response.status_code == 200
         assert response.body == b"ok"
+
+
+class TestRateLimitMiddleware:
+    """API 限流中间件（P1-12）单测。
+
+    不依赖真实 Redis/全局计数状态：通过 monkeypatch 注入计数器返回值，断言
+    超限返回 429 信封、未超限透传、探活路径跳过、规则桶匹配正确。
+    """
+
+    def _req_with_path(self, path: str) -> Request:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "headers": [],
+            "server": ("test", 80),
+            "client": ("127.0.0.1", 1234),
+            "scheme": "http",
+        }
+        return Request(scope)
+
+    async def test_exceeded_returns_429_envelope(self, monkeypatch) -> None:
+        import app.core.middleware as mw_mod
+
+        # Redis 不可用 → 降级进程内；进程内计数返回 False（超限）
+        async def _redis_raise(*a, **k):
+            raise RuntimeError("redis down")
+
+        async def _inproc_false(*a, **k):
+            return False
+
+        monkeypatch.setattr(mw_mod, "_check_rate_redis", _redis_raise)
+        monkeypatch.setattr(mw_mod, "_check_rate_inproc", _inproc_false)
+
+        mw = RateLimitMiddleware(lambda *a, **k: None)
+        request = self._req_with_path("/api/v1/metric-definitions/compare/matrix")
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            return PlainTextResponse("ok")
+
+        response = await mw.dispatch(request, call_next)
+        assert response.status_code == 429
+        body = json.loads(response.body)
+        assert body["code"] == "RATE_LIMITED"
+        assert body["message"] == "请求过于频繁，请稍后重试"
+        assert response.headers.get("Retry-After") is not None
+
+    async def test_within_limit_passes_through(self, monkeypatch) -> None:
+        import app.core.middleware as mw_mod
+
+        async def _redis_raise(*a, **k):
+            raise RuntimeError("redis down")
+
+        async def _inproc_true(*a, **k):
+            return True
+
+        monkeypatch.setattr(mw_mod, "_check_rate_redis", _redis_raise)
+        monkeypatch.setattr(mw_mod, "_check_rate_inproc", _inproc_true)
+
+        mw = RateLimitMiddleware(lambda *a, **k: None)
+        request = self._req_with_path("/api/v1/metric-definitions/compare/matrix")
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            return PlainTextResponse("ok")
+
+        response = await mw.dispatch(request, call_next)
+        assert response.status_code == 200
+        assert response.body == b"ok"
+
+    async def test_health_path_skips_limiting(self, monkeypatch) -> None:
+        import app.core.middleware as mw_mod
+
+        # 即便计数器返回 False，探活路径也应跳过限流透传
+        async def _inproc_false(*a, **k):
+            return False
+
+        monkeypatch.setattr(mw_mod, "_check_rate_inproc", _inproc_false)
+
+        mw = RateLimitMiddleware(lambda *a, **k: None)
+        request = self._req_with_path("/api/v1/health")
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            return PlainTextResponse("ok")
+
+        response = await mw.dispatch(request, call_next)
+        assert response.status_code == 200
+
+    def test_bucket_rule_matching(self) -> None:
+        from app.core.middleware import _rate_limit_bucket
+
+        # LLM 生成类端点：60s 窗口 20 次
+        _, win, lim = _rate_limit_bucket(self._req_with_path("/api/v1/metric-definitions/infer-description"))
+        assert (win, lim) == (60, 20)
+        # 导出/批量/compare：60s 窗口 60 次
+        _, win, lim = _rate_limit_bucket(
+            self._req_with_path("/api/v1/metric-definitions/compare/matrix")
+        )
+        assert (win, lim) == (60, 60)
+        # 通用 API 默认
+        _, win, lim = _rate_limit_bucket(self._req_with_path("/api/v1/metric-definitions/"))
+        assert (win, lim) == (_RATE_LIMIT_DEFAULT_WINDOW, _RATE_LIMIT_DEFAULT_LIMIT)

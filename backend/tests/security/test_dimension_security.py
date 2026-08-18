@@ -127,3 +127,67 @@ async def test_review_reconciliation_ignores_client_reviewer_id(
         )
         assert resp.status_code == 200
         assert captured["reviewer_id"] == 9
+
+
+async def test_create_dimension_cross_domain_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P1-10：domain_admin 仅可在本域建维度，跨域创建被拒绝（403 FORBIDDEN）。"""
+    import app.services.dimension.service as dsvc
+
+    async for admin in _client(9, "domain_admin"):  # 固定 user.domain="sales"
+        resp = await admin.post(
+            "/api/v1/dimensions",
+            json={**_DIM_BODY, "domain": "finance"},  # 跨域：finance
+        )
+        assert resp.status_code == 403
+        assert resp.json()["code"] == "FORBIDDEN"
+
+
+async def test_domain_admin_cannot_update_other_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1-10：domain_admin 编辑他域维度被域作用域守卫拦截（403 FORBIDDEN）。"""
+    import app.services.dimension.service as dsvc
+    from app.models.dimension import Dimension
+
+    # 目标维度归属 finance（与 user.domain="sales" 不同）
+    foreign_dim = Dimension(
+        dim_code="D_REGION", name="区域", domain="finance",
+        type="SCD1", owner_id=1, status="DRAFT",
+    )
+
+    async def fake_get(self, code):
+        return foreign_dim
+
+    monkeypatch.setattr(dsvc.DimensionService, "get_dimension", fake_get)
+    async for admin in _client(9, "domain_admin"):
+        resp = await admin.put(
+            "/api/v1/dimensions/D_REGION",
+            json={"name": "区域（改名）"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["code"] == "FORBIDDEN"
+
+
+async def test_domain_admin_can_update_own_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1-10 反例：domain_admin 编辑本域维度不被域守卫拦截（非 403）。"""
+    import app.services.dimension.service as dsvc
+    from app.models.dimension import Dimension
+
+    own_dim = Dimension(
+        dim_code="D_REGION", name="区域", domain="sales",
+        type="SCD1", owner_id=1, status="DRAFT",
+    )
+
+    async def fake_get(self, code):
+        return own_dim
+
+    monkeypatch.setattr(dsvc.DimensionService, "get_dimension", fake_get)
+    async for admin in _client(9, "domain_admin"):  # user.domain="sales" == own_dim.domain
+        resp = await admin.put(
+            "/api/v1/dimensions/D_REGION",
+            json={"name": "区域（改名）"},
+        )
+        # 域守卫放行；后续失败属 DB mock 副作用，与域作用域无关
+        assert resp.status_code != 403

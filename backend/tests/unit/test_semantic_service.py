@@ -55,6 +55,8 @@ def _svc_with_repo() -> tuple[MetricService, MagicMock]:
         # PENDING 确认期检查（update_metric 破坏性变更前置）默认无待确认版本，
         # 个别测试覆盖为 True 验证防叠加。
         mock_repo_cls.return_value.has_pending_version = AsyncMock(return_value=False)
+        # P2-14 owner 名称映射：默认空（对比/治理路径不依赖 owner 解析）；个别测试覆盖
+        mock_repo_cls.return_value.get_user_display_names = AsyncMock(return_value={})
         return svc, mock_repo_cls.return_value
 
 
@@ -638,6 +640,51 @@ async def test_compare_matrix_dedup_preserves_order():
 
     result = await svc.compare_matrix(["m2", "m1", "m2"])
     assert result["metrics"] == ["m2", "m1"]
+
+
+async def test_compare_matrix_includes_governance_fields():
+    """矩阵对比治理字段补全（P2-14）：PII/合规复核/状态/版本/描述入矩阵，owner 名称可读化。
+
+    治理对比高价值信号（敏感分级不同、责任人不同）此前被挡在矩阵之外，本测试守护
+    pii_flag/compliance_reviewed/status/version/description 五类字段行 + owner_names 映射。
+    """
+    svc, repo = _svc_with_repo()
+    m1 = make_metric(
+        metric_code="m1", pii_flag=True, compliance_reviewed=True,
+        status="PUBLISHED", version=3, description="销售额", owner_id=1,
+    )
+    m2 = make_metric(
+        metric_code="m2", pii_flag=False, compliance_reviewed=False,
+        status="PUBLISHED", version=1, description="订单量", owner_id=1,
+    )
+    repo.get_by_code = AsyncMock(side_effect=[m1, m2])
+    # owner 名称映射：owner_id=1 → 张三（走 repository 解析）
+    repo.get_user_display_names = AsyncMock(return_value={1: "张三"})
+
+    result = await svc.compare_matrix(["m1", "m2"])
+    fields = result["fields"]
+    # 五类治理字段全部入矩阵
+    assert fields["pii_flag"]["values"] == {"m1": True, "m2": False}
+    assert fields["pii_flag"]["difference_level"] == "all_different"
+    assert fields["compliance_reviewed"]["values"] == {"m1": True, "m2": False}
+    assert fields["status"]["values"] == {"m1": "PUBLISHED", "m2": "PUBLISHED"}
+    assert fields["status"]["difference_level"] == "all_identical"
+    assert fields["version"]["values"] == {"m1": 3, "m2": 1}
+    assert fields["description"]["values"] == {"m1": "销售额", "m2": "订单量"}
+    # owner 可读化：owner_names 映射携带责任人姓名
+    assert result["owner_names"] == {1: "张三"}
+
+
+async def test_compare_matrix_owner_names_skip_when_no_owner():
+    """矩阵对比 owner 无责任人或无法解析：owner_names 为空映射，不阻断对比（P2-14）。"""
+    svc, repo = _svc_with_repo()
+    m1 = make_metric(metric_code="m1", owner_id=None)
+    m2 = make_metric(metric_code="m2", owner_id=None)
+    repo.get_by_code = AsyncMock(side_effect=[m1, m2])
+
+    result = await svc.compare_matrix(["m1", "m2"])
+    assert result["owner_names"] == {}
+    assert "granularity" in result["fields"]
 
 
 async def test_compare_matrix_archived_metric_raises():
@@ -1348,7 +1395,7 @@ async def test_promote_metric_success():
     repo.mark_version_published = AsyncMock()
     svc._publish_event = AsyncMock()
 
-    result = await svc.promote_metric("sales_gmv_daily", actor_id=1)
+    result = await svc.promote_metric("sales_gmv_daily", actor_id=1, role="metric_owner")
     assert result.status == "PUBLISHED"
     assert svc._publish_event.call_args.args[0] == "metric.promoted"
 
@@ -1373,7 +1420,7 @@ async def test_rollback_metric_success():
     svc._publish_event = AsyncMock()
     svc._register_metric_lineage_full = AsyncMock()
 
-    result = await svc.rollback_metric("sales_gmv_daily", actor_id=1)
+    result = await svc.rollback_metric("sales_gmv_daily", actor_id=1, role="metric_owner")
     assert result.status == "PUBLISHED"
     assert svc._publish_event.call_args.args[0] == "metric.rolled_back"
     # 回滚恢复上一 PUBLISHED 口径 + 版本号回退 + top-level before 值
@@ -1588,7 +1635,7 @@ async def test_extend_version_success():
     )
     repo.extend_confirmation_deadline = AsyncMock(return_value=MagicMock(version=1))
 
-    result = await svc.extend_version("sales_gmv_daily", version=1)
+    result = await svc.extend_version("sales_gmv_daily", version=1, actor_id=1, role="metric_owner")
     assert result is not None
 
 
@@ -1712,11 +1759,14 @@ async def test_get_domain_defaults_error_returns_empty(monkeypatch):
 
 
 async def test_validate_dict_fields_disabled_value_blocked(monkeypatch):
-    """字典项已配置但停用 → BusinessError 拦截。"""
+    """字典项已配置但停用 → BusinessError 拦截（P1-5 语义：类型有 active 项才校验）。"""
     svc, _ = _svc_with_repo()
     req = MetricCreateRequest(**make_create_payload())
 
     class _DictSvc:
+        async def list_by_type(self, dict_type, status="active"):
+            return [MagicMock()]  # 类型已配置（有 active 项）
+
         async def validate_dict_value(self, dict_type, code):
             raise BusinessError("字典项已停用", error_code="DICT_DISABLED")
 
@@ -1725,17 +1775,37 @@ async def test_validate_dict_fields_disabled_value_blocked(monkeypatch):
         await svc._validate_dict_fields(req)
 
 
-async def test_validate_dict_fields_not_found_degrades(monkeypatch):
-    """字典项未配置（NotFoundError）→ 放行。"""
+async def test_validate_dict_fields_configured_but_value_missing_blocked(monkeypatch):
+    """P1-5：类型已配置但值不存在 → NotFoundError 拦截（不再静默放行脏值）。"""
     svc, _ = _svc_with_repo()
     req = MetricCreateRequest(**make_create_payload())
 
     class _DictSvc:
+        async def list_by_type(self, dict_type, status="active"):
+            return [MagicMock()]  # 类型已配置
+
         async def validate_dict_value(self, dict_type, code):
-            raise NotFoundError("未配置")
+            raise NotFoundError("字典值不存在", error_code="DICT_VALUE_NOT_FOUND")
 
     monkeypatch.setattr("app.services.system_dict.service.SystemDictService", lambda db: _DictSvc())
-    await svc._validate_dict_fields(req)
+    with pytest.raises(NotFoundError):
+        await svc._validate_dict_fields(req)
+
+
+async def test_validate_dict_fields_unconfigured_type_passes(monkeypatch):
+    """P1-5：类型完全未配置（空表/未种子，无 active 项）→ 放行，不阻断创建。"""
+    svc, _ = _svc_with_repo()
+    req = MetricCreateRequest(**make_create_payload())
+
+    class _DictSvc:
+        async def list_by_type(self, dict_type, status="active"):
+            return []  # 类型未配置 → 该类型放行
+
+        async def validate_dict_value(self, dict_type, code):
+            raise AssertionError("类型未配置时不应走到值校验")
+
+    monkeypatch.setattr("app.services.system_dict.service.SystemDictService", lambda db: _DictSvc())
+    await svc._validate_dict_fields(req)  # 不应抛异常
 
 
 async def test_generate_metric_code_with_source_table(monkeypatch):
@@ -2527,7 +2597,7 @@ async def test_promote_metric_invalid_transition():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT"))
     with pytest.raises(ConflictError) as exc:
-        await svc.promote_metric("sales_gmv_daily", actor_id=1)
+        await svc.promote_metric("sales_gmv_daily", actor_id=1, role="metric_owner")
     assert exc.value.error_code == "INVALID_TRANSITION"
 
 
@@ -2536,7 +2606,7 @@ async def test_rollback_metric_invalid_transition():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT"))
     with pytest.raises(ConflictError) as exc:
-        await svc.rollback_metric("sales_gmv_daily", actor_id=1)
+        await svc.rollback_metric("sales_gmv_daily", actor_id=1, role="metric_owner")
     assert exc.value.error_code == "INVALID_TRANSITION"
 
 
@@ -2546,7 +2616,7 @@ async def test_rollback_metric_no_previous_published():
     repo.get_by_code = AsyncMock(return_value=make_metric(status="EXPERIMENTAL", version=2))
     repo.list_versions = AsyncMock(return_value=[MagicMock(status="EXPERIMENTAL", version=2)])
     with pytest.raises(ConflictError) as exc:
-        await svc.rollback_metric("sales_gmv_daily", actor_id=1)
+        await svc.rollback_metric("sales_gmv_daily", actor_id=1, role="metric_owner")
     assert exc.value.error_code == "NO_PREVIOUS_PUBLISHED_VERSION"
 
 
@@ -3105,7 +3175,7 @@ async def test_extend_version_no_pending():
     repo.get_by_code = AsyncMock(return_value=make_metric())
     repo.get_pending_confirmations = AsyncMock(return_value=[])
     with pytest.raises(ConflictError):
-        await svc.extend_version("sales_gmv_daily", version=1)
+        await svc.extend_version("sales_gmv_daily", version=1, actor_id=1, role="metric_owner")
 
 
 async def test_extend_version_limit_reached():
@@ -3118,7 +3188,7 @@ async def test_extend_version_limit_reached():
         ]
     )
     with pytest.raises(ConflictError) as exc:
-        await svc.extend_version("sales_gmv_daily", version=1)
+        await svc.extend_version("sales_gmv_daily", version=1, actor_id=1, role="metric_owner")
     assert exc.value.error_code == "EXTEND_LIMIT_REACHED"
 
 
