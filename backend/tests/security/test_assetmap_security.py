@@ -128,7 +128,8 @@ async def test_search_blocks_injection_400(writer_client: httpx.AsyncClient) -> 
 async def test_health_pii_changes_my_assets_200(
     reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """健康/PII/变更/我的资产四个新端点对读者返回 200。"""
+    """健康/PII/变更/我的资产端点权限分层：读者可看健康/变更/我的资产，
+    PII 合规数据仅治理域角色可见（P0-1：viewer 访问 /pii 应 403）。"""
 
     async def fake_health(self: AssetMapService) -> dict:
         return {
@@ -159,7 +160,10 @@ async def test_health_pii_changes_my_assets_200(
     monkeypatch.setattr(AssetMapService, "my_assets", fake_mine)
 
     assert (await reader_client.get("/api/v1/assetmap/health")).status_code == 200
-    assert (await reader_client.get("/api/v1/assetmap/pii")).status_code == 200
+    # P0-1: viewer 无 PII 合规数据访问权 → 403（不再返回 200）
+    assert (await reader_client.get("/api/v1/assetmap/pii")).status_code == 403
+    assert (await reader_client.get("/api/v1/assetmap/pii-assets")).status_code == 403
+    assert (await reader_client.get("/api/v1/assetmap/pii-export.csv")).status_code == 403
     assert (await reader_client.get("/api/v1/assetmap/changes?days=7")).status_code == 200
     assert (await reader_client.get("/api/v1/assetmap/my-assets")).status_code == 200
 

@@ -12,9 +12,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import ConflictError
 from app.models.collector_models import SchemaDriftLog
 from app.models.consume import MetricValueSnapshot
 from app.models.data_source import ColumnDescription, DataSource, DBCatalog
@@ -77,11 +78,16 @@ class AssetMapRepository:
         owner_id: int | None = None,
         schema_status: str | None = None,
         keyword: str | None = None,
-    ) -> list[DBCatalog]:
+        org_id: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[DBCatalog], int]:
         """数据表目录多维度过滤（数据表 Tab / CSV 导出共用）。
 
         支持：数据源 / 敏感度 / 业务域（经 data_source 继承）/ 责任人 /
         Schema 完整性（complete|incomplete）/ 关键字（表名或数据源模糊）。
+
+        P2-1：支持 offset 分页并返回真实总数（此前 total=len(items) 为静默
+        截断后的假总数）。``offset`` 缺省 0。
         """
         stmt = select(DBCatalog).where(
             DBCatalog.entity_type == "table", DBCatalog.deleted_at.is_(None)
@@ -99,12 +105,16 @@ class AssetMapRepository:
             stmt = stmt.where(DBCatalog.schema_incomplete.is_(True))
         elif schema_status == "complete":
             stmt = stmt.where(DBCatalog.schema_incomplete.is_(False))
-        if domain:
-            # db_catalog 无 domain 列，经数据源继承过滤（仅活跃源归属明确）
+        if domain or org_id is not None:
+            # db_catalog 无 domain/org 列，经数据源继承过滤（仅活跃源归属明确）
             stmt = stmt.join(DataSource, DataSource.source_id == DBCatalog.source_id).where(
                 DataSource.deleted_at.is_(None),
-                DataSource.domain == domain,
             )
+            if domain:
+                stmt = stmt.where(DataSource.domain == domain)
+            # 多租户隔离（P1 加固）：org_id 非 None 时仅返回本组织数据源资产
+            if org_id is not None:
+                stmt = stmt.where(DataSource.org_id == org_id)
         if keyword:
             # LIKE 通配符转义（对齐 collector.list_catalogs：% / _ 须转义防模糊放大）
             escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
@@ -114,7 +124,13 @@ class AssetMapRepository:
                     DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
                 )
             )
-        return list((await self._session.execute(stmt.limit(limit))).scalars().all())
+        total = (
+            await self._session.execute(select(func.count()).select_from(stmt.subquery()))
+        ).scalar() or 0
+        rows = (
+            await self._session.execute(stmt.limit(limit).offset(max(offset, 0)))
+        ).scalars().all()
+        return list(rows), int(total)
 
     async def orphan_assets(
         self,
@@ -125,12 +141,17 @@ class AssetMapRepository:
         sensitivity: str | None = None,
         schema_status: str | None = None,
         limit: int = 200,
-    ) -> list[DBCatalog]:
+        org_id: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[DBCatalog], int]:
         """孤儿资产（无责任人）多维度过滤，镜像 ``list_tables``。
 
         支持：关键字 / 数据源 / 业务域（经 data_source 继承）/ 实体类型 /
         敏感度 / Schema 完整性（complete|incomplete）。无参调用返回全部
         （概览下钻「孤儿资产明细」兼容）。
+
+        P2-1：支持 offset 分页并返回真实总数（此前 total=len(items) 为静默
+        截断后的假总数）。``offset`` 缺省 0。
         """
         stmt = select(DBCatalog).where(
             DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None)
@@ -145,12 +166,16 @@ class AssetMapRepository:
             stmt = stmt.where(DBCatalog.schema_incomplete.is_(True))
         elif schema_status == "complete":
             stmt = stmt.where(DBCatalog.schema_incomplete.is_(False))
-        if domain:
-            # db_catalog 无 domain 列，经数据源继承过滤（仅活跃源归属明确）
+        if domain or org_id is not None:
+            # db_catalog 无 domain/org 列，经数据源继承过滤（仅活跃源归属明确）
             stmt = stmt.join(DataSource, DataSource.source_id == DBCatalog.source_id).where(
                 DataSource.deleted_at.is_(None),
-                DataSource.domain == domain,
             )
+            if domain:
+                stmt = stmt.where(DataSource.domain == domain)
+            # 多租户隔离（P1 加固）：org_id 非 None 时仅返回本组织数据源资产
+            if org_id is not None:
+                stmt = stmt.where(DataSource.org_id == org_id)
         if keyword:
             # LIKE 通配符转义（对齐 collector.list_catalogs：% / _ 须转义防模糊放大）
             escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
@@ -160,7 +185,13 @@ class AssetMapRepository:
                     DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
                 )
             )
-        return list((await self._session.execute(stmt.limit(limit))).scalars().all())
+        total = (
+            await self._session.execute(select(func.count()).select_from(stmt.subquery()))
+        ).scalar() or 0
+        rows = (
+            await self._session.execute(stmt.limit(limit).offset(max(offset, 0)))
+        ).scalars().all()
+        return list(rows), int(total)
 
     @staticmethod
     def _summarize_schema(schema_json: Any) -> Any:
@@ -218,14 +249,17 @@ class AssetMapRepository:
                 field["description_source"] = None
         return summary
 
-    async def get_entity_detail(self, entity_id: int) -> dict[str, Any] | None:
+    async def get_entity_detail(
+        self, entity_id: int, org_id: int | None = None
+    ) -> dict[str, Any] | None:
         """资产实体详情：元数据 + 敏感度 + PII + 血缘边列表 + 关联指标 + 源健康/新鲜度。
 
         Args:
             entity_id: db_catalog 主键。
+            org_id: 当前用户组织 ID；非 None 时校验实体归属本组织（P1 多租户隔离）。
 
         Returns:
-            详情字典；实体不存在或已删除返回 ``None``。
+            详情字典；实体不存在/已删除/跨组织返回 ``None``。
         """
         row = (
             await self._session.execute(
@@ -234,6 +268,15 @@ class AssetMapRepository:
         ).scalar_one_or_none()
         if row is None:
             return None
+        # P1 多租户隔离：实体所属数据源非本组织时视为不可见（防跨组织读详情）
+        if org_id is not None:
+            src = (
+                await self._session.execute(
+                    select(DataSource).where(DataSource.source_id == row.source_id)
+                )
+            ).scalar_one_or_none()
+            if src is None or src.org_id != org_id:
+                return None
 
         variants = self._lineage_variants(row.entity_name)
         lineage_edges = await self._lineage_edges_for(variants, limit=50)
@@ -319,6 +362,40 @@ class AssetMapRepository:
             "etl_sql": None,
         }
 
+    @staticmethod
+    def _merge_pii_fields(
+        fields: list[dict[str, Any]], overrides: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """合并规则命中字段与人工标注（suppressed 覆盖规则判定；人工确认补入）。"""
+        override_map = {o["column"]: o for o in overrides}
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for f in fields:
+            seen.add(f["column"])
+            ov = override_map.get(f["column"])
+            if ov is not None:
+                f["suppressed"] = ov["suppressed"]
+                f["override_reason"] = ov["reason"]
+            else:
+                f["suppressed"] = False
+                f["override_reason"] = None
+            merged.append(f)
+        # 人工确认是 PII 但规则未命中的字段（suppressed=False 覆盖）
+        for col, ov in override_map.items():
+            if col not in seen and not ov["suppressed"]:
+                merged.append(
+                    {
+                        "column": col,
+                        "category": "MANUAL",
+                        "rule": "manual_confirm",
+                        "confidence": 1.0,
+                        "matched_by": "manual",
+                        "suppressed": False,
+                        "override_reason": ov["reason"],
+                    }
+                )
+        return merged
+
     async def _entity_pii_fields(self, row: DBCatalog) -> list[dict[str, Any]]:
         """资产字段级 PII 命中明细（classification.pii_columns 为主，缺失时实时检测）。
 
@@ -367,34 +444,7 @@ class AssetMapRepository:
                     )
         # 合并人工标注（suppressed 覆盖规则判定）
         overrides = await self._entity_pii_overrides(row.id)
-        override_map = {o["column"]: o for o in overrides}
-        merged: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for f in fields:
-            seen.add(f["column"])
-            ov = override_map.get(f["column"])
-            if ov is not None:
-                f["suppressed"] = ov["suppressed"]
-                f["override_reason"] = ov["reason"]
-            else:
-                f["suppressed"] = False
-                f["override_reason"] = None
-            merged.append(f)
-        # 人工确认是 PII 但规则未命中的字段（suppressed=False 覆盖）
-        for col, ov in override_map.items():
-            if col not in seen and not ov["suppressed"]:
-                merged.append(
-                    {
-                        "column": col,
-                        "category": "MANUAL",
-                        "rule": "manual_confirm",
-                        "confidence": 1.0,
-                        "matched_by": "manual",
-                        "suppressed": False,
-                        "override_reason": ov["reason"],
-                    }
-                )
-        return merged
+        return self._merge_pii_fields(fields, overrides)
 
     async def _entity_pii_overrides(self, catalog_id: int) -> list[dict[str, Any]]:
         """查询资产字段级人工标注列表（含软删过滤）。"""
@@ -1186,7 +1236,7 @@ class AssetMapRepository:
         return text.replace("/", "//").replace("%", "/%").replace("_", "/_")
 
     async def search_assets(
-        self, q: str, entity_type: str | None, limit: int
+        self, q: str, entity_type: str | None, limit: int, org_id: int | None = None
     ) -> list[dict[str, Any]]:
         """全局资产搜索：表/字段/指标三级，返回完整信息（源/责任人/口径/描述）。
 
@@ -1206,17 +1256,19 @@ class AssetMapRepository:
 
         # 表级（entity_name 模糊）
         if want_table:
-            results.extend(await self._search_catalog_tables(needle, entity_type, limit))
+            results.extend(
+                await self._search_catalog_tables(needle, entity_type, limit, org_id=org_id)
+            )
         # 字段级（schema_json 字段名模糊）
         if want_field:
-            results.extend(await self._search_fields(q, limit))
+            results.extend(await self._search_fields(q, limit, org_id=org_id))
         # 指标级（metric_code / name 模糊）
         if want_metric:
             results.extend(await self._search_metrics(needle, limit))
         return results
 
     async def _search_catalog_tables(
-        self, needle: str, entity_type: str | None, limit: int
+        self, needle: str, entity_type: str | None, limit: int, org_id: int | None = None
     ) -> list[dict[str, Any]]:
         """表/视图级搜索结果（含源/责任人/描述/字段数富集）。"""
         stmt = select(DBCatalog).where(
@@ -1224,6 +1276,12 @@ class AssetMapRepository:
         )
         if entity_type:
             stmt = stmt.where(DBCatalog.entity_type == entity_type)
+        # P1 多租户隔离：仅搜索本组织数据源资产
+        if org_id is not None:
+            stmt = (
+                stmt.join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+            )
         rows = (await self._session.execute(stmt.limit(limit))).scalars().all()
         items: list[dict[str, Any]] = []
         for r in rows:
@@ -1247,7 +1305,9 @@ class AssetMapRepository:
             )
         return await self.enrich_catalog_items(items)
 
-    async def _search_fields(self, q: str, limit: int) -> list[dict[str, Any]]:
+    async def _search_fields(
+        self, q: str, limit: int, org_id: int | None = None
+    ) -> list[dict[str, Any]]:
         """字段级搜索结果：扫 schema_json 字段名，返回 ``{table}.{field}`` 项。
 
         字段名匹配用原始关键词（不转义 LIKE 通配符），因为这里走内存包含判断
@@ -1256,11 +1316,20 @@ class AssetMapRepository:
         q_lower = q.strip().lower()
         if not q_lower:
             return []
-        rows = (
-            await self._session.execute(
-                select(DBCatalog).where(DBCatalog.deleted_at.is_(None)).limit(1000)
+        stmt = select(DBCatalog).where(DBCatalog.deleted_at.is_(None)).limit(1000)
+        # P1 多租户隔离：仅搜索本组织数据源资产
+        if org_id is not None:
+            stmt = (
+                select(DBCatalog)
+                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(
+                    DBCatalog.deleted_at.is_(None),
+                    DataSource.deleted_at.is_(None),
+                    DataSource.org_id == org_id,
+                )
+                .limit(1000)
             )
-        ).scalars().all()
+        rows = (await self._session.execute(stmt)).scalars().all()
         results: list[dict[str, Any]] = []
         for r in rows:
             schema = r.schema_json if isinstance(r.schema_json, dict) else {}
@@ -1337,7 +1406,7 @@ class AssetMapRepository:
             for m in rows
         ]
 
-    async def health_summary(self) -> dict[str, Any]:
+    async def health_summary(self, org_id: int | None = None) -> dict[str, Any]:
         """资产健康视图：9 项体检 + 健康评分。
 
         Returns:
@@ -1350,29 +1419,32 @@ class AssetMapRepository:
         score = 100
 
         # 体检 1：不健康数据源
-        unhealthy = await self._health_unhealthy_sources()
+        unhealthy = await self._health_unhealthy_sources(org_id)
         score -= min(len(unhealthy) * 5, 15)
         checks.append({"key": "unhealthy_sources", "count": len(unhealthy), "deduct": 0})
 
         # 体检 2：schema 不完整目录
-        incomplete = await self._health_schema_incomplete()
+        incomplete = await self._health_schema_incomplete(org_id)
         score -= min(len(incomplete) * 2, 10)
         checks.append({"key": "schema_incomplete", "count": len(incomplete), "deduct": 0})
 
         # 体检 3：孤儿资产
-        orphan_count = (
-            await self._session.execute(
-                select(func.count())
-                .select_from(DBCatalog)
-                .where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
-            )
-        ).scalar() or 0
+        orphan_stmt = (
+            select(func.count())
+            .select_from(DBCatalog)
+            .where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
+        )
+        if org_id is not None:
+            orphan_stmt = orphan_stmt.join(
+                DataSource, DataSource.source_id == DBCatalog.source_id
+            ).where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+        orphan_count = (await self._session.execute(orphan_stmt)).scalar() or 0
         score -= min(int(orphan_count) // 10, 10)
         checks.append({"key": "orphan_assets", "count": int(orphan_count), "deduct": 0})
 
         # 体检 4：陈旧资产（7 天未更新）
         stale_days = 7
-        stale = await self._health_stale_assets(stale_days)
+        stale = await self._health_stale_assets(stale_days, org_id)
         score -= min(len(stale), 10)
         checks.append({"key": "stale_assets", "count": len(stale), "deduct": 0})
 
@@ -1432,50 +1504,63 @@ class AssetMapRepository:
             return "fair"
         return "poor"
 
-    async def _health_unhealthy_sources(self) -> list[dict[str, Any]]:
-        """体检 1：健康状态为 unhealthy 的数据源列表。"""
-        rows = (
-            await self._session.execute(
-                select(DataSource.source_id, DataSource.name, DataSource.health_status).where(
-                    DataSource.health_status == "unhealthy", DataSource.deleted_at.is_(None)
-                )
-            )
-        ).all()
+    async def _health_unhealthy_sources(
+        self, org_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """体检 1：健康状态为 unhealthy 的数据源列表（P1：按组织隔离）。"""
+        stmt = select(
+            DataSource.source_id, DataSource.name, DataSource.health_status
+        ).where(DataSource.health_status == "unhealthy", DataSource.deleted_at.is_(None))
+        if org_id is not None:
+            stmt = stmt.where(DataSource.org_id == org_id)
+        rows = (await self._session.execute(stmt)).all()
         return [
             {"source_id": r.source_id, "name": r.name, "health_status": r.health_status}
             for r in rows
         ]
 
-    async def _health_schema_incomplete(self) -> list[dict[str, Any]]:
-        """体检 2：schema 不完整（缺列元数据）的目录列表。"""
-        rows = (
-            await self._session.execute(
-                select(DBCatalog.id, DBCatalog.entity_name, DBCatalog.source_id)
-                .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DBCatalog.schema_incomplete.is_(True),
-                )
-                .limit(100)
+    async def _health_schema_incomplete(
+        self, org_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """体检 2：schema 不完整（缺列元数据）的目录列表（P1：按组织隔离）。"""
+        stmt = (
+            select(DBCatalog.id, DBCatalog.entity_name, DBCatalog.source_id)
+            .where(
+                DBCatalog.deleted_at.is_(None),
+                DBCatalog.schema_incomplete.is_(True),
             )
-        ).all()
+            .limit(100)
+        )
+        if org_id is not None:
+            stmt = (
+                stmt.join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+            )
+        rows = (await self._session.execute(stmt)).all()
         return [
             {"id": r.id, "entity_name": r.entity_name, "source_id": r.source_id}
             for r in rows
         ]
 
-    async def _health_stale_assets(self, days: int) -> list[dict[str, Any]]:
-        """体检 4：N 天未更新的陈旧目录资产（数据源采集停滞信号）。"""
+    async def _health_stale_assets(
+        self, days: int, org_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """体检 4：N 天未更新的陈旧目录资产（数据源采集停滞信号，P1：按组织隔离）。"""
         stale_cutoff = datetime.now(UTC) - timedelta(days=days)
-        rows = (
-            await self._session.execute(
-                select(DBCatalog.id, DBCatalog.entity_name, DBCatalog.updated_at)
-                .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DBCatalog.updated_at < stale_cutoff,
-                )
-                .limit(100)
+        stmt = (
+            select(DBCatalog.id, DBCatalog.entity_name, DBCatalog.updated_at)
+            .where(
+                DBCatalog.deleted_at.is_(None),
+                DBCatalog.updated_at < stale_cutoff,
             )
-        ).all()
+            .limit(100)
+        )
+        if org_id is not None:
+            stmt = (
+                stmt.join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+            )
+        rows = (await self._session.execute(stmt)).all()
         return [
             {"id": r.id, "entity_name": r.entity_name, "updated_at": r.updated_at}
             for r in rows
@@ -1572,25 +1657,28 @@ class AssetMapRepository:
         return pii_unreviewed, no_snapshot, deprecated_orphan
 
 
-    async def pii_overview(self) -> dict[str, Any]:
+    async def pii_overview(self, org_id: int | None = None) -> dict[str, Any]:
         """PII 合规资产视图：按敏感级/域/类别聚合 + 风险计数。
 
         PII 合规增强：新增 ``by_category``（字段类别分布）、``unowned_pii``
         （无主 PII 目录）、``unreviewed_pii``（待复核目录+指标）、
-        ``reviewed_pii``（已复核目录）。
+        ``reviewed_pii``（已复核目录）。P1：目录口径按组织隔离。
 
         Returns:
             ``{by_sensitivity, by_domain, pii_metric_count, pii_catalog_count,
             by_category, unowned_pii, unreviewed_pii, reviewed_pii}``
         """
-        # 目录 PII 分布（敏感级含 PII）
-        sens_rows = (
-            await self._session.execute(
-                select(DBCatalog.sensitivity_level, func.count())
-                .where(DBCatalog.deleted_at.is_(None), DBCatalog.sensitivity_level.like("%PII%"))
-                .group_by(DBCatalog.sensitivity_level)
-            )
-        ).all()
+        # 目录 PII 分布（敏感级含 PII）——P1：按组织隔离
+        sens_stmt = (
+            select(DBCatalog.sensitivity_level, func.count())
+            .where(DBCatalog.deleted_at.is_(None), DBCatalog.sensitivity_level.like("%PII%"))
+            .group_by(DBCatalog.sensitivity_level)
+        )
+        if org_id is not None:
+            sens_stmt = sens_stmt.join(
+                DataSource, DataSource.source_id == DBCatalog.source_id
+            ).where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+        sens_rows = (await self._session.execute(sens_stmt)).all()
         pii_catalog_count = sum(int(r[1] or 0) for r in sens_rows)
 
         # 指标 PII 按域分布
@@ -1603,29 +1691,36 @@ class AssetMapRepository:
         ).all()
         pii_metric_count = sum(int(r[1] or 0) for r in domain_rows)
 
-        # 风险计数：无主 PII / 待复核 PII（目录）/ 已复核 PII（目录）
-        unowned_pii = (
-            await self._session.execute(
-                select(func.count())
-                .select_from(DBCatalog)
-                .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DBCatalog.owner_id.is_(None),
-                    DBCatalog.sensitivity_level.like("%PII%"),
-                )
+        # 风险计数：无主 PII / 待复核 PII（目录）/ 已复核 PII（目录）——P1：按组织隔离
+        unowned_stmt = (
+            select(func.count())
+            .select_from(DBCatalog)
+            .where(
+                DBCatalog.deleted_at.is_(None),
+                DBCatalog.owner_id.is_(None),
+                DBCatalog.sensitivity_level.like("%PII%"),
             )
-        ).scalar() or 0
-        unreviewed_catalog = (
-            await self._session.execute(
-                select(func.count())
-                .select_from(DBCatalog)
-                .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DBCatalog.sensitivity_level.like("%PII%"),
-                    DBCatalog.compliance_reviewed.is_(False),
-                )
+        )
+        if org_id is not None:
+            unowned_stmt = unowned_stmt.join(
+                DataSource, DataSource.source_id == DBCatalog.source_id
+            ).where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+        unowned_pii = (await self._session.execute(unowned_stmt)).scalar() or 0
+
+        unreviewed_stmt = (
+            select(func.count())
+            .select_from(DBCatalog)
+            .where(
+                DBCatalog.deleted_at.is_(None),
+                DBCatalog.sensitivity_level.like("%PII%"),
+                DBCatalog.compliance_reviewed.is_(False),
             )
-        ).scalar() or 0
+        )
+        if org_id is not None:
+            unreviewed_stmt = unreviewed_stmt.join(
+                DataSource, DataSource.source_id == DBCatalog.source_id
+            ).where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+        unreviewed_catalog = (await self._session.execute(unreviewed_stmt)).scalar() or 0
         reviewed_catalog = max(pii_catalog_count - int(unreviewed_catalog), 0)
         # 待复核指标（复用指标合规复核字段）
         unreviewed_metric = (
@@ -1641,7 +1736,7 @@ class AssetMapRepository:
         ).scalar() or 0
 
         # 字段类别分布：展开 classification.pii_columns（PII 目录各字段类别）
-        by_category = await self._pii_category_stats()
+        by_category = await self._pii_category_stats(org_id)
 
         return {
             "by_sensitivity": dict(cast("Sequence[tuple[Any, Any]]", sens_rows)),
@@ -1656,20 +1751,23 @@ class AssetMapRepository:
             "reviewed_pii": int(reviewed_catalog),
         }
 
-    async def _pii_category_stats(self) -> dict[str, int]:
+    async def _pii_category_stats(self, org_id: int | None = None) -> dict[str, int]:
         """字段级 PII 类别分布（展开 classification.pii_columns，含人工标注过滤）。
 
         返回 ``{类别: 命中字段数}``；classification 缺失或损坏时 best-effort 跳过，
-        不阻断 PII 概览。
+        不阻断 PII 概览。P1：按组织隔离（join data_source 过滤 org）。
         """
-        rows = (
-            await self._session.execute(
-                select(Classification.pii_columns).where(
-                    Classification.deleted_at.is_(None),
-                    Classification.pii_columns.isnot(None),
-                )
+        stmt = select(Classification.pii_columns).where(
+            Classification.deleted_at.is_(None),
+            Classification.pii_columns.isnot(None),
+        )
+        if org_id is not None:
+            stmt = (
+                stmt.join(DBCatalog, DBCatalog.id == Classification.catalog_id)
+                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
             )
-        ).scalars().all()
+        rows = (await self._session.execute(stmt)).scalars().all()
         stats: dict[str, int] = {}
         for cols in rows:
             if not isinstance(cols, list):
@@ -1679,6 +1777,36 @@ class AssetMapRepository:
                     cat = str(item["category"]).upper()
                     stats[cat] = stats.get(cat, 0) + 1
         return stats
+
+    async def _catalog_ids_with_category(
+        self, category: str, org_id: int | None = None
+    ) -> set[int]:
+        """返回含指定 PII 类别的目录 id 集合（类别过滤移到分页前，P1 修复）。
+
+        classification.pii_columns 为 JSON 列，无法直接 SQL 过滤，故展开内存匹配
+        得出 id 集合后用于主查询 ``id.in_``（配合 org 过滤保持隔离）。
+        """
+        stmt = select(Classification.catalog_id, Classification.pii_columns).where(
+            Classification.deleted_at.is_(None),
+            Classification.pii_columns.isnot(None),
+        )
+        if org_id is not None:
+            stmt = (
+                stmt.join(DBCatalog, DBCatalog.id == Classification.catalog_id)
+                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+            )
+        rows = (await self._session.execute(stmt)).all()
+        cat = category.upper()
+        result: set[int] = set()
+        for cid, cols in rows:
+            if not isinstance(cols, list):
+                continue
+            for item in cols:
+                if isinstance(item, dict) and str(item.get("category") or "").upper() == cat:
+                    result.add(int(cid))
+                    break
+        return result
 
     async def list_pii_assets(
         self,
@@ -1691,6 +1819,7 @@ class AssetMapRepository:
         category: str | None = None,
         page: int = 1,
         page_size: int = 20,
+        org_id: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """PII 资产明细列表（分页 + 多维度筛选），供 PII 合规 Tab 可下钻。
 
@@ -1721,17 +1850,20 @@ class AssetMapRepository:
         elif review_status == "reviewed":
             base = base.where(DBCatalog.compliance_reviewed.is_(True))
             count_base = count_base.where(DBCatalog.compliance_reviewed.is_(True))
-        if domain:
+        if domain or org_id is not None:
             base = base.join(DataSource, DataSource.source_id == DBCatalog.source_id).where(
                 DataSource.deleted_at.is_(None),
-                DataSource.domain == domain,
             )
             count_base = count_base.join(
                 DataSource, DataSource.source_id == DBCatalog.source_id
-            ).where(
-                DataSource.deleted_at.is_(None),
-                DataSource.domain == domain,
-            )
+            ).where(DataSource.deleted_at.is_(None))
+            if domain:
+                base = base.where(DataSource.domain == domain)
+                count_base = count_base.where(DataSource.domain == domain)
+            # P1 多租户隔离：仅本组织数据源 PII 资产
+            if org_id is not None:
+                base = base.where(DataSource.org_id == org_id)
+                count_base = count_base.where(DataSource.org_id == org_id)
         if keyword:
             escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
             base = base.where(
@@ -1746,6 +1878,12 @@ class AssetMapRepository:
                     DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
                 )
             )
+        # P1 修复：类别过滤移到分页前（此前在分页后内存过滤，total 不含类别条件，
+        # 导致翻页漏数据/页内不足）
+        if category:
+            cat_ids = await self._catalog_ids_with_category(category, org_id)
+            base = base.where(DBCatalog.id.in_(cat_ids))
+            count_base = count_base.where(DBCatalog.id.in_(cat_ids))
         total = int((await self._session.execute(count_base)).scalar() or 0)
         rows = (
             (
@@ -1758,11 +1896,8 @@ class AssetMapRepository:
             .scalars()
             .all()
         )
-        items = [await self._pii_asset_item(r) for r in rows]
-        if category:
-            cat = category.upper()
-            items = [it for it in items if cat in it.get("categories", [])]
-        return items, total
+        # P1 优化：批量构造列表项（一次取整页 classification/override，消除逐行 N+1）
+        return await self._batch_pii_items(rows), total
 
     async def _pii_asset_item(self, row: DBCatalog) -> dict[str, Any]:
         """单条 PII 资产列表项：元信息 + 命中字段数/类别 + 合规状态。"""
@@ -1786,6 +1921,104 @@ class AssetMapRepository:
         base["pii_fields"] = fields
         enriched = await self.enrich_catalog_items([base])
         return enriched[0]
+
+    async def _batch_pii_items(self, rows: list[DBCatalog]) -> list[dict[str, Any]]:
+        """批量构造 PII 资产列表项（消除逐行 N+1，P1 性能优化）。
+
+        原实现 ``[await _pii_asset_item(r) for r in rows]`` 每行 2 次查询
+        （classification + override），20 行/页即 40 次往返。此处一次取出整页
+        classification 与 override，内存组装；无明细的旧数据行实时检测补齐
+        （CPU，无额外查询）。语义与 ``_pii_asset_item`` 完全一致。
+        """
+        if not rows:
+            return []
+        ids = [r.id for r in rows]
+        # 1) 批量取 classification（每行取最新一条，对齐单条按 created_at desc）
+        class_rows = (
+            await self._session.execute(
+                select(Classification).where(
+                    Classification.catalog_id.in_(ids),
+                    Classification.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        class_map: dict[int, Classification] = {}
+        for c in sorted(class_rows, key=lambda x: x.created_at or datetime.min):
+            class_map[c.catalog_id] = c  # 后者覆盖 = 最新
+        # 2) 批量取 override
+        ov_rows = (
+            await self._session.execute(
+                select(PiiFieldOverride).where(
+                    PiiFieldOverride.catalog_id.in_(ids),
+                    PiiFieldOverride.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        ov_map: dict[int, list[dict[str, Any]]] = {}
+        for r in ov_rows:
+            ov_map.setdefault(r.catalog_id, []).append(
+                {
+                    "id": r.id,
+                    "column": r.column_name,
+                    "suppressed": bool(r.suppressed),
+                    "reason": r.reason,
+                    "created_by": r.created_by,
+                    "created_at": r.created_at,
+                }
+            )
+        from app.services.collector.classifier import SensitivityClassifier
+
+        classifier = SensitivityClassifier()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            fields: list[dict[str, Any]] = []
+            row_data = row.schema_json if isinstance(row.schema_json, dict) else {}
+            if row.sensitivity_level and "PII" in row.sensitivity_level.upper():
+                classification = class_map.get(row.id)
+                if classification is not None and isinstance(
+                    classification.pii_columns, list
+                ):
+                    for item in classification.pii_columns:
+                        if isinstance(item, dict) and item.get("column"):
+                            fields.append(
+                                {
+                                    "column": str(item["column"]),
+                                    "category": str(item.get("category") or "PII"),
+                                    "rule": str(item.get("rule") or ""),
+                                    "confidence": float(item.get("confidence") or 0),
+                                    "matched_by": str(item.get("matched_by") or "name"),
+                                }
+                            )
+                if not fields:
+                    for hit in classifier.detect_pii_fields(row.entity_name, row_data):
+                        fields.append(
+                            {
+                                "column": hit.column,
+                                "category": hit.category,
+                                "rule": hit.rule,
+                                "confidence": hit.confidence,
+                                "matched_by": hit.matched_by,
+                            }
+                        )
+            merged = self._merge_pii_fields(fields, ov_map.get(row.id, []))
+            active = [f for f in merged if not f.get("suppressed")]
+            items.append(
+                {
+                    "id": row.id,
+                    "entity_name": row.entity_name,
+                    "entity_type": row.entity_type,
+                    "source_id": row.source_id,
+                    "sensitivity_level": row.sensitivity_level,
+                    "owner_id": row.owner_id,
+                    "compliance_reviewed": bool(row.compliance_reviewed),
+                    "masking_policy": row.masking_policy,
+                    "updated_at": row.updated_at,
+                    "pii_field_count": len(active),
+                    "categories": sorted({str(f["category"]) for f in active}),
+                    "pii_fields": merged,
+                }
+            )
+        return await self.enrich_catalog_items(items)
 
     # ----------------------------------------------------------------
     # 写能力（PII 合规增强）：表级复核 / 脱敏策略 / 字段误报标注 / 保留期
@@ -1935,7 +2168,12 @@ class AssetMapRepository:
         source_id: str | None,
         all_pii: bool,
     ) -> list[DBCatalog]:
-        """按作用域解析待应用模板的资产列表（模板应用范围收敛）。"""
+        """按作用域解析待应用模板的资产列表（模板应用范围收敛）。
+
+        上限与平台批量标准一致（5000）：此前 ``limit(500)`` 会静默截断超量资产，
+        返回的 applied 计数误导（P1 修复）。超量场景由调用方（模板应用）以
+        ``truncated`` 提示用户分批。
+        """
         stmt = select(DBCatalog).where(DBCatalog.deleted_at.is_(None))
         if catalog_ids:
             stmt = stmt.where(DBCatalog.id.in_(catalog_ids))
@@ -1945,7 +2183,7 @@ class AssetMapRepository:
             stmt = stmt.where(DBCatalog.sensitivity_level.like("%PII%"))
         else:
             return []
-        rows = (await self._session.execute(stmt.limit(500))).scalars().all()
+        rows = (await self._session.execute(stmt.limit(5000))).scalars().all()
         return list(rows)
 
     async def recent_changes(self, days: int, limit: int) -> dict[str, Any]:
@@ -2290,31 +2528,82 @@ class AssetMapRepository:
         ).first() is not None
 
     async def assign_owner(self, entity: DBCatalog, owner_id: int | None) -> DBCatalog:
-        """认领/转让归属（owner_id=None 表示解除归属回到孤儿池）。"""
+        """认领/转让归属（owner_id=None 表示解除归属回到孤儿池）。
+
+        P1 乐观锁：条件 UPDATE（``WHERE id=? AND row_version=?``），并发用户
+        同时认领同一资产时后写方版本不匹配 → 409，避免 last-write-wins 静默覆盖。
+        """
+        result = await self._session.execute(
+            update(DBCatalog)
+            .where(DBCatalog.id == entity.id, DBCatalog.row_version == entity.row_version)
+            .values(owner_id=owner_id, row_version=DBCatalog.row_version + 1)
+        )
+        if int(getattr(result, "rowcount", 0) or 0) == 0:
+            raise ConflictError(
+                "资产归属已被其他用户修改，请刷新后重试",
+                error_code="OPTIMISTIC_LOCK_CONFLICT",
+                ctx={"entity_id": entity.id},
+            )
         entity.owner_id = owner_id
-        self._session.add(entity)
+        entity.row_version += 1
         await self._session.flush()
         return entity
 
     async def reclassify_sensitivity(self, entity: DBCatalog, level: str) -> DBCatalog:
-        """重分类敏感级（仅允许枚举值，校验在 service/API 层）。"""
+        """重分类敏感级（仅允许枚举值，校验在 service/API 层）。
+
+        P1 乐观锁：同 ``assign_owner``，防并发重分类互相覆盖。
+        """
+        result = await self._session.execute(
+            update(DBCatalog)
+            .where(DBCatalog.id == entity.id, DBCatalog.row_version == entity.row_version)
+            .values(sensitivity_level=level, row_version=DBCatalog.row_version + 1)
+        )
+        if int(getattr(result, "rowcount", 0) or 0) == 0:
+            raise ConflictError(
+                "资产敏感级已被其他用户修改，请刷新后重试",
+                error_code="OPTIMISTIC_LOCK_CONFLICT",
+                ctx={"entity_id": entity.id},
+            )
         entity.sensitivity_level = level
-        self._session.add(entity)
+        entity.row_version += 1
         await self._session.flush()
         return entity
 
     async def batch_assign_owner(self, entities: Sequence[DBCatalog], owner_id: int | None) -> int:
-        """批量认领/转让归属，返回受影响数量（同事务 flush，API 层统一 commit）。"""
+        """批量认领/转让归属，返回受影响数量（逐条乐观锁，单条冲突即中止并抛 409）。"""
         for e in entities:
+            result = await self._session.execute(
+                update(DBCatalog)
+                .where(DBCatalog.id == e.id, DBCatalog.row_version == e.row_version)
+                .values(owner_id=owner_id, row_version=DBCatalog.row_version + 1)
+            )
+            if int(getattr(result, "rowcount", 0) or 0) == 0:
+                raise ConflictError(
+                    f"资产 {e.entity_name} 已被其他用户修改，请刷新后重试",
+                    error_code="OPTIMISTIC_LOCK_CONFLICT",
+                    ctx={"entity_id": e.id},
+                )
             e.owner_id = owner_id
-            self._session.add(e)
+            e.row_version += 1
         await self._session.flush()
         return len(entities)
 
     async def batch_reclassify(self, entities: Sequence[DBCatalog], level: str) -> int:
-        """批量重分类敏感级，返回受影响数量。"""
+        """批量重分类敏感级，返回受影响数量（逐条乐观锁，单条冲突即中止并抛 409）。"""
         for e in entities:
+            result = await self._session.execute(
+                update(DBCatalog)
+                .where(DBCatalog.id == e.id, DBCatalog.row_version == e.row_version)
+                .values(sensitivity_level=level, row_version=DBCatalog.row_version + 1)
+            )
+            if int(getattr(result, "rowcount", 0) or 0) == 0:
+                raise ConflictError(
+                    f"资产 {e.entity_name} 敏感级已被其他用户修改，请刷新后重试",
+                    error_code="OPTIMISTIC_LOCK_CONFLICT",
+                    ctx={"entity_id": e.id},
+                )
             e.sensitivity_level = level
-            self._session.add(e)
+            e.row_version += 1
         await self._session.flush()
         return len(entities)

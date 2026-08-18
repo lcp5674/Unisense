@@ -24,6 +24,10 @@ from app.services.assetmap.repository import AssetMapRepository
 
 logger = logging.getLogger(__name__)
 
+#: 同步导出最大行数（P1 加固）：PII 盘点 CSV 为同步生成，大库无界拼接会 OOM；
+#: 超量时前端按筛选收敛后重导。与平台批量标准一致。
+_MAX_EXPORT_ROWS = 5000
+
 #: 行业分级模板（PII 合规增强 C：个保法敏感个人信息 / 金融行业 / 标准分级）。
 #: ``sensitive_categories`` 为该模板下须升级为 PII 的字段类别集合；
 #: 应用时命中这些类别的资产（且当前非 PII）升级为 PII。
@@ -107,6 +111,33 @@ async def _agg_cached(name: str, loader: Callable[[], Awaitable[dict[str, Any]]]
     return data
 
 
+async def _agg_cache_invalidate() -> None:
+    """写操作后主动失效聚合缓存（P2-4）：避免 summary/health 在 30s TTL 内陈旧。
+
+    用 SCAN 按前缀删除全部聚合 key，同时覆盖动态 key（如 owner_aggregation 按
+    owner_id 区分）。best-effort：Redis 不可用/熔断打开时静默跳过，下次 TTL 自然过期。
+    """
+    if not _CACHE_BREAKER.allow():
+        return
+    try:
+        from app.db.redis import get_redis
+
+        redis = get_redis()
+        cursor = 0
+        deleted = 0
+        while True:
+            cursor, keys = await redis.scan(cursor, match=f"{_CACHE_PREFIX}*", count=200)
+            if keys:
+                deleted += await redis.delete(*keys)
+            if cursor == 0:
+                break
+        if deleted:
+            logger.info("assetmap_agg_cache_invalidated", keys=deleted)
+    except Exception as exc:  # noqa: BLE001 - 缓存失效失败不阻断写主链路
+        _CACHE_BREAKER.record_failure()
+        logger.warning("assetmap_agg_cache_invalidate_failed: %s", exc)
+
+
 # Neo4j 异步 driver 单例：惰性创建并复用，避免每请求新建连接池导致泄漏（P2-1）。
 _NEO4J_DRIVER: Any | None = None
 
@@ -140,9 +171,10 @@ def _close_neo4j_driver() -> None:
 
 
 class AssetMapService(BaseService):
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, org_id: int | None = None) -> None:
         super().__init__(session)
         self._session = session
+        self._org_id = org_id  # 多租户隔离：数据源作用域读取按组织过滤（None=平台视角不过滤）
         self._repo = AssetMapRepository(session)
 
     async def catalog_summary(self) -> dict[str, Any]:
@@ -178,6 +210,7 @@ class AssetMapService(BaseService):
             owner_id=owner_id,
             schema_status=schema_status,
             keyword=keyword,
+            org_id=self._org_id,
         )
         # assetmap T-2: 经 to_dict 剔除敏感字段（connection_config 等）
         items = [r.to_dict() for r in rows]
@@ -202,13 +235,14 @@ class AssetMapService(BaseService):
             sensitivity=sensitivity,
             schema_status=schema_status,
             limit=limit,
+            org_id=self._org_id,
         )
         items = [r.to_dict() for r in rows]
         return await self._repo.enrich_catalog_items(items)
 
     async def get_entity_detail(self, entity_id: int) -> dict[str, Any] | None:
         """资产实体详情：元数据 + 敏感度 + PII + 血缘边数（TD §12.11 流程 #5）。"""
-        return await self._repo.get_entity_detail(entity_id)
+        return await self._repo.get_entity_detail(entity_id, org_id=self._org_id)
 
     # ----------------------------------------------------------------
     # P2 Enhancement: 图谱 / 热力 / 责任人视图
@@ -398,15 +432,22 @@ class AssetMapService(BaseService):
         self, q: str, entity_type: str | None = None, limit: int = 20
     ) -> list[dict[str, Any]]:
         """全局资产搜索：目录 + 指标统一结果。"""
-        return await self._repo.search_assets(q, entity_type, limit)
+        return await self._repo.search_assets(q, entity_type, limit, org_id=self._org_id)
 
     async def health_summary(self) -> dict[str, Any]:
         """资产健康视图：源健康/schema 不完整/孤儿/陈旧资产。"""
-        return await _agg_cached("health_summary", self._repo.health_summary)
+        # 缓存键含 org_id：多租户下健康度须按组织隔离，防跨组织缓存串读（P1 加固）
+        return await _agg_cached(
+            f"health_summary:{self._org_id or 'all'}",
+            lambda: self._repo.health_summary(org_id=self._org_id),
+        )
 
     async def pii_overview(self) -> dict[str, Any]:
         """PII 合规资产视图：按敏感级/域聚合 PII 资产。"""
-        return await _agg_cached("pii_overview", self._repo.pii_overview)
+        return await _agg_cached(
+            f"pii_overview:{self._org_id or 'all'}",
+            lambda: self._repo.pii_overview(org_id=self._org_id),
+        )
 
     async def recent_changes(self, days: int = 7, limit: int = 50) -> dict[str, Any]:
         """变更追踪流：最近 N 天新增/变更的目录与指标。"""
@@ -434,6 +475,7 @@ class AssetMapService(BaseService):
             owner_id=owner_id,
             schema_status=schema_status,
             keyword=keyword,
+            org_id=self._org_id,
         )
         return [r.to_dict() for r in rows]
 
@@ -449,6 +491,7 @@ class AssetMapService(BaseService):
         if owner_id is not None and not await self._repo.user_exists(owner_id):
             raise NotFoundError(f"目标用户不存在: {owner_id}", ctx={"owner_id": owner_id})
         updated = await self._repo.assign_owner(entity, owner_id)
+        await _agg_cache_invalidate()
         return {"entity_id": updated.id, "owner_id": updated.owner_id}
 
     async def reclassify_sensitivity(self, entity_id: int, level: str) -> dict[str, Any]:
@@ -457,6 +500,7 @@ class AssetMapService(BaseService):
         if entity is None:
             raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
         updated = await self._repo.reclassify_sensitivity(entity, level)
+        await _agg_cache_invalidate()
         return {"entity_id": updated.id, "sensitivity_level": updated.sensitivity_level}
 
     async def batch_assign_owner(
@@ -469,6 +513,7 @@ class AssetMapService(BaseService):
         if not entities:
             raise NotFoundError("指定实体均不存在或已删除")
         affected = await self._repo.batch_assign_owner(entities, owner_id)
+        await _agg_cache_invalidate()
         return {"affected": affected, "owner_id": owner_id, "total": len(entity_ids)}
 
     async def batch_reclassify(self, entity_ids: list[int], level: str) -> dict[str, Any]:
@@ -477,6 +522,7 @@ class AssetMapService(BaseService):
         if not entities:
             raise NotFoundError("指定实体均不存在或已删除")
         affected = await self._repo.batch_reclassify(entities, level)
+        await _agg_cache_invalidate()
         return {"affected": affected, "sensitivity_level": level, "total": len(entity_ids)}
 
     # ----------------------------------------------------------------
@@ -505,6 +551,7 @@ class AssetMapService(BaseService):
             category=category,
             page=page,
             page_size=page_size,
+            org_id=self._org_id,
         )
         return {"items": items, "total": total, "page": page, "page_size": page_size}
 
@@ -526,6 +573,7 @@ class AssetMapService(BaseService):
                 ctx={"entity_id": entity_id, "owner_id": entity.owner_id},
             )
         updated = await self._repo.review_catalog(entity, decision, reviewer_id)
+        await _agg_cache_invalidate()
         return {
             "entity_id": updated.id,
             "decision": decision,
@@ -539,6 +587,7 @@ class AssetMapService(BaseService):
         if entity is None:
             raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
         updated = await self._repo.set_masking_policy(entity, policy)
+        await _agg_cache_invalidate()
         return {"entity_id": updated.id, "masking_policy": updated.masking_policy}
 
     async def upsert_pii_override(
@@ -556,6 +605,7 @@ class AssetMapService(BaseService):
         row = await self._repo.upsert_pii_override(
             entity_id, column, suppressed, reason, actor_id
         )
+        await _agg_cache_invalidate()
         return {
             "catalog_id": entity_id,
             "column": column,
@@ -569,6 +619,7 @@ class AssetMapService(BaseService):
         if entity is None:
             raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
         removed = await self._repo.delete_pii_override(entity_id, column)
+        await _agg_cache_invalidate()
         return {"catalog_id": entity_id, "column": column, "removed": removed}
 
     async def set_retention(
@@ -579,6 +630,7 @@ class AssetMapService(BaseService):
         if entity is None:
             raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
         updated = await self._repo.set_retention(entity, retention_days, legal_basis)
+        await _agg_cache_invalidate()
         return {
             "entity_id": updated.id,
             "retention_days": updated.retention_days,
@@ -625,6 +677,7 @@ class AssetMapService(BaseService):
             if res["changed"]:
                 changed += 1
             results.append(res)
+        await _agg_cache_invalidate()
         return {
             "template_id": template_id,
             "applied": len(results),
@@ -642,7 +695,11 @@ class AssetMapService(BaseService):
         review_status: str | None = None,
         category: str | None = None,
     ) -> list[dict[str, Any]]:
-        """PII 合规盘点导出数据（分页拉全量，供 CSV 序列化）。"""
+        """PII 合规盘点导出数据（分页拉全量，供 CSV 序列化）。
+
+        P1：导出上限与平台批量标准一致（5000 行），防大库无界内存拼接 OOM；
+        超量时前端按筛选收敛后重导（导出接口是同步 CSV 生成，不做流式）。
+        """
         all_items: list[dict[str, Any]] = []
         page = 1
         while True:
@@ -655,9 +712,10 @@ class AssetMapService(BaseService):
                 category=category,
                 page=page,
                 page_size=500,
+                org_id=self._org_id,
             )
             all_items.extend(items)
-            if len(all_items) >= total or not items:
+            if len(all_items) >= total or not items or len(all_items) >= _MAX_EXPORT_ROWS:
                 break
             page += 1
-        return all_items
+        return all_items[:_MAX_EXPORT_ROWS]

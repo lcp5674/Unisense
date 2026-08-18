@@ -86,6 +86,7 @@ async def test_list_tables_passes_multi_dimension_filters() -> None:
         owner_id=7,
         schema_status="incomplete",
         keyword="ods",
+        org_id=None,
     )
 
 
@@ -110,6 +111,7 @@ async def test_orphan_assets_passes_filters() -> None:
         sensitivity="PII",
         schema_status="incomplete",
         limit=50,
+        org_id=None,
     )
 
 
@@ -121,7 +123,7 @@ async def test_get_entity_detail_passthrough() -> None:
     )
     out = await svc.get_entity_detail(1)
     assert out["lineage_count"] == 2
-    repo.get_entity_detail.assert_awaited_once_with(1)
+    repo.get_entity_detail.assert_awaited_once_with(1, org_id=None)
 
     repo.get_entity_detail = AsyncMock(return_value=None)
     assert await svc.get_entity_detail(999) is None
@@ -465,7 +467,7 @@ async def test_search_assets_passthrough() -> None:
     )
     out = await svc.search_assets("sales", entity_type="metric", limit=20)
     assert out[0]["name"] == "sales_gmv_amount_day"
-    repo.search_assets.assert_awaited_once_with("sales", "metric", 20)
+    repo.search_assets.assert_awaited_once_with("sales", "metric", 20, org_id=None)
 
 
 async def test_health_summary_passthrough() -> None:

@@ -9,6 +9,7 @@ GET /export.csv（资产导出）。
 from __future__ import annotations
 
 import csv
+import enum
 import io
 from typing import Annotated, Any
 
@@ -18,8 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
 from app.core.audit import client_ip, write_audit
+from app.core.exceptions import AuthError, ValidationError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
+from app.models.user import User
 from app.services.assetmap.schemas import (
     ApplyPiiTemplateRequest,
     AssignOwnerRequest,
@@ -34,6 +37,40 @@ from app.services.assetmap.schemas import (
 from app.services.assetmap.service import AssetMapService
 
 router = APIRouter(prefix="/assetmap", tags=["assetmap"])
+
+
+# P2-2：枚举过滤参数集中校验（任意字符串静默返回空 → 改为 422 明确报错）。
+_VALID_SENSITIVITY = {"PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "NEEDS_REVIEW"}
+_VALID_ENTITY_TYPE = {"TABLE", "VIEW", "FIELD"}
+_VALID_REVIEW_STATUS = {"reviewed", "unreviewed"}
+
+
+def _assert_enum(value: str | None, allowed: set[str], field: str) -> None:
+    """过滤参数为非法枚举值时返回 422（而非静默空结果）。
+
+    大小写兼容：合法值不论大小写均接受（如 ``table``/``TABLE``），仅拒绝
+    完全不匹配的垃圾输入（如 ``foobar``），避免既有小写过滤链路被误伤。
+    """
+    if value is None:
+        return
+    if value in allowed or value.upper() in allowed or value.lower() in allowed:
+        return
+    raise ValidationError(
+        f"非法的{field}过滤值: {value}",
+        error_code="INVALID_FILTER_VALUE",
+        ctx={"field": field, "value": value, "allowed": sorted(allowed)},
+    )
+
+
+def _is_platform_admin(user: User) -> bool:
+    """当前用户是否平台管理员（角色归一化兼容 enum 成员/字符串/多角色列表）。"""
+    role = user.role
+    if isinstance(role, (list, tuple, set)):
+        role_strs = [r.value if isinstance(r, enum.Enum) else str(r) for r in role]
+        return "platform_admin" in role_strs
+    role_val = role.value if isinstance(role, enum.Enum) else role
+    return str(role_val) == "platform_admin"
+
 
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
@@ -52,6 +89,11 @@ _COMPLIANCE_DEPS = [Depends(require_roles(*_COMPLIANCE_ROLES)), Depends(guard_ag
 _PII_READ_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
 _PII_READ_DEPS = [Depends(require_roles(*_PII_READ_ROLES)), Depends(guard_against_injection)]
 
+def _svc(db: AsyncSession, user: User) -> AssetMapService:
+    """构造资产地图服务（注入当前用户组织 ID 用于多租户隔离过滤，P1 加固）。"""
+    return AssetMapService(db, org_id=getattr(user, "org_id", None))
+
+
 
 @router.get("/summary", dependencies=_READ_DEPS)
 async def catalog_summary(
@@ -59,7 +101,7 @@ async def catalog_summary(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    return ok(data=await AssetMapService(db).catalog_summary(), trace_id=trace_id)
+    return ok(data=await _svc(db, user).catalog_summary(), trace_id=trace_id)
 
 
 @router.get("/classification", dependencies=_READ_DEPS)
@@ -68,7 +110,7 @@ async def classification_summary(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    return ok(data=await AssetMapService(db).classification_summary(), trace_id=trace_id)
+    return ok(data=await _svc(db, user).classification_summary(), trace_id=trace_id)
 
 
 @router.get("/metrics", dependencies=_READ_DEPS)
@@ -77,7 +119,7 @@ async def metric_summary(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    return ok(data=await AssetMapService(db).metric_summary(), trace_id=trace_id)
+    return ok(data=await _svc(db, user).metric_summary(), trace_id=trace_id)
 
 
 @router.get("/metric-dimensions", dependencies=_READ_DEPS)
@@ -90,7 +132,7 @@ async def metric_dimension_summary(
 
     概览 Tab「指标体系」区块数据源，每类分布可下钻对应指标明细。
     """
-    return ok(data=await AssetMapService(db).metric_dimension_summary(), trace_id=trace_id)
+    return ok(data=await _svc(db, user).metric_dimension_summary(), trace_id=trace_id)
 
 
 @router.get("/tables", dependencies=_READ_DEPS)
@@ -110,7 +152,8 @@ async def list_tables(
     keyword: str | None = Query(None, description="关键字：表名或数据源模糊搜索"),
     limit: int = Query(100, ge=1, le=200),
 ) -> Any:
-    items = await AssetMapService(db).list_tables(
+    _assert_enum(sensitivity, _VALID_SENSITIVITY, "敏感度")
+    items = await _svc(db, user).list_tables(
         source_id,
         sensitivity,
         limit,
@@ -137,7 +180,9 @@ async def orphan_assets(
     ),
     limit: int = Query(200, ge=1, le=500),
 ) -> Any:
-    items = await AssetMapService(db).orphan_assets(
+    _assert_enum(entity_type, _VALID_ENTITY_TYPE, "实体类型")
+    _assert_enum(sensitivity, _VALID_SENSITIVITY, "敏感度")
+    items = await _svc(db, user).orphan_assets(
         keyword=keyword,
         source_id=source_id,
         domain=domain,
@@ -162,7 +207,7 @@ async def get_entity_detail(
     """
     from app.core.exceptions import NotFoundError
 
-    data = await AssetMapService(db).get_entity_detail(entity_id)
+    data = await _svc(db, user).get_entity_detail(entity_id)
     if data is None:
         raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
     return ok(data=data, trace_id=trace_id)
@@ -183,7 +228,7 @@ async def get_graph(
     pii_only: bool = Query(False, description="仅返回含 PII 标记的节点"),
 ) -> Any:
     """资产图谱：返回节点+边数据，前端力导向图渲染。"""
-    data = await AssetMapService(db).get_graph(domain=domain, depth=depth, pii_only=pii_only)
+    data = await _svc(db, user).get_graph(domain=domain, depth=depth, pii_only=pii_only)
     return ok(data=data, trace_id=trace_id)
 
 
@@ -195,7 +240,7 @@ async def get_heatmap(
     dimension: str = Query("domain", description="聚合维度: domain/sensitivity/owner/dw_layer"),
 ) -> Any:
     """敏感分布热力图：按维度聚合返回分桶数据。"""
-    data = await AssetMapService(db).get_heatmap(dimension=dimension)
+    data = await _svc(db, user).get_heatmap(dimension=dimension)
     return ok(data=data, trace_id=trace_id)
 
 
@@ -215,7 +260,7 @@ async def get_heatmap_matrix(
     catalog 视角聚合 db_catalog（域经数据源继承）；metric 视角聚合指标表
     （PII / 内部两列）。
     """
-    data = await AssetMapService(db).heatmap_matrix(asset_type=asset_type)
+    data = await _svc(db, user).heatmap_matrix(asset_type=asset_type)
     return ok(data=data, trace_id=trace_id)
 
 
@@ -226,8 +271,26 @@ async def get_owner_view(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    """责任人视图：按 owner_id 聚合资产统计。"""
-    data = await AssetMapService(db).get_owner_view(owner_id=owner_id)
+    """责任人视图：按 owner_id 聚合资产统计。
+
+    P2-3 加固：跨组织越权枚举防护。非平台管理员仅可查看本组织内责任人的
+    资产视图；目标责任人不存在或被跨组织查询时返回 403/404。
+    """
+    target = await db.get(User, owner_id)
+    if target is None:
+        from app.core.exceptions import NotFoundError
+
+        raise NotFoundError("责任人不存在", ctx={"owner_id": owner_id})
+    if not _is_platform_admin(user):
+        user_org = getattr(user, "org_id", None)
+        target_org = getattr(target, "org_id", None)
+        if user_org != target_org:
+            raise AuthError(
+                "无权查看其他组织的责任人视图",
+                error_code="CROSS_ORG_OWNER_VIEW_FORBIDDEN",
+                ctx={"user_org": user_org, "target_org": target_org},
+            )
+    data = await _svc(db, user).get_owner_view(owner_id=owner_id)
     return ok(data=data, trace_id=trace_id)
 
 
@@ -248,7 +311,7 @@ async def search_assets(
     limit: int = Query(20, ge=1, le=200),
 ) -> Any:
     """全局资产搜索：目录 + 指标统一结果（资产地图核心工具能力）。"""
-    data = await AssetMapService(db).search_assets(q, entity_type=asset_type, limit=limit)
+    data = await _svc(db, user).search_assets(q, entity_type=asset_type, limit=limit)
     return ok(data={"items": data, "total": len(data)}, trace_id=trace_id)
 
 
@@ -259,7 +322,7 @@ async def health_summary(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """资产健康视图：不健康源/schema 不完整/孤儿/陈旧资产。"""
-    data = await AssetMapService(db).health_summary()
+    data = await _svc(db, user).health_summary()
     return ok(data=data, trace_id=trace_id)
 
 
@@ -271,7 +334,7 @@ async def pii_overview(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """PII 合规资产视图：按敏感级/域聚合 PII 资产（面向 compliance_officer）。"""
-    data = await AssetMapService(db).pii_overview()
+    data = await _svc(db, user).pii_overview()
     # 合规敏感数据访问留痕：PII 概览属敏感数据读取，须可追溯（P0-1）
     await write_audit(
         db,
@@ -297,7 +360,7 @@ async def recent_changes(
     limit: int = Query(50, ge=1, le=200),
 ) -> Any:
     """变更追踪流：最近 N 天新增/变更的目录与指标。"""
-    data = await AssetMapService(db).recent_changes(days=days, limit=limit)
+    data = await _svc(db, user).recent_changes(days=days, limit=limit)
     return ok(data=data, trace_id=trace_id)
 
 
@@ -309,7 +372,7 @@ async def my_assets(
     limit: int = Query(50, ge=1, le=200),
 ) -> Any:
     """我的资产：当前登录用户负责的目录与指标（个人工作台视角）。"""
-    data = await AssetMapService(db).my_assets(owner_id=user.id, limit=limit)
+    data = await _svc(db, user).my_assets(owner_id=user.id, limit=limit)
     return ok(data=data, trace_id=trace_id)
 
 
@@ -329,7 +392,7 @@ async def export_tables(
     keyword: str | None = Query(None, description="关键字：表名或数据源模糊搜索"),
 ) -> Response:
     """资产 CSV 导出：目录资产（表/视图）清单，供盘点/审计（与列表同过滤条件）。"""
-    items = await AssetMapService(db).export_tables(
+    items = await _svc(db, user).export_tables(
         source_id,
         sensitivity,
         domain=domain,
@@ -401,7 +464,7 @@ async def assign_owner(
     http_req: Request,
 ) -> Any:
     """认领/转让资产归属（owner_id=None 解除归属回到孤儿池）。"""
-    data = await AssetMapService(db).assign_owner(entity_id, payload.owner_id)
+    data = await _svc(db, user).assign_owner(entity_id, payload.owner_id)
     await write_audit(
         db,
         actor_id=user.id,
@@ -426,7 +489,7 @@ async def reclassify_sensitivity(
     http_req: Request,
 ) -> Any:
     """重分类资产敏感级（仅允许枚举值，影响 PII 合规口径）。"""
-    data = await AssetMapService(db).reclassify_sensitivity(
+    data = await _svc(db, user).reclassify_sensitivity(
         entity_id, str(payload.sensitivity_level)
     )
     await write_audit(
@@ -452,7 +515,7 @@ async def batch_assign_owner(
     http_req: Request,
 ) -> Any:
     """批量认领/转让归属（单次 ≤200，同事务原子提交）。"""
-    data = await AssetMapService(db).batch_assign_owner(payload.entity_ids, payload.owner_id)
+    data = await _svc(db, user).batch_assign_owner(payload.entity_ids, payload.owner_id)
     await write_audit(
         db,
         actor_id=user.id,
@@ -480,7 +543,7 @@ async def batch_reclassify(
     http_req: Request,
 ) -> Any:
     """批量重分类敏感级（单次 ≤200，同事务原子提交）。"""
-    data = await AssetMapService(db).batch_reclassify(
+    data = await _svc(db, user).batch_reclassify(
         payload.entity_ids, str(payload.sensitivity_level)
     )
     await write_audit(
@@ -526,7 +589,8 @@ async def list_pii_assets(
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     """PII 资产明细列表（分页 + 多维度筛选），PII 合规 Tab 可下钻。"""
-    data = await AssetMapService(db).list_pii_assets(
+    _assert_enum(review_status, _VALID_REVIEW_STATUS, "复核状态")
+    data = await _svc(db, user).list_pii_assets(
         keyword=keyword,
         source_id=source_id,
         domain=domain,
@@ -565,7 +629,7 @@ async def list_pii_templates(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """行业分级模板列表（PII 合规盘点与批量升级）。"""
-    data = await AssetMapService(db).pii_templates()
+    data = await _svc(db, user).pii_templates()
     # 合规敏感数据访问留痕：分级模板属 PII 合规配置，读取须可追溯（P0-1）
     await write_audit(
         db,
@@ -591,7 +655,7 @@ async def apply_pii_template(
     http_req: Request,
 ) -> Any:
     """应用行业分级模板：按字段类别升级资产敏感级（个保法/金融等）。"""
-    data = await AssetMapService(db).apply_pii_template(
+    data = await _svc(db, user).apply_pii_template(
         payload.template_id,
         catalog_ids=payload.catalog_ids,
         source_id=payload.source_id,
@@ -621,7 +685,7 @@ async def review_catalog_entity(
     http_req: Request,
 ) -> Any:
     """表级 PII 合规复核（APPROVE/REJECT；禁自审：资产责任人不得复核本人资产）。"""
-    data = await AssetMapService(db).review_catalog(
+    data = await _svc(db, user).review_catalog(
         entity_id, payload.decision, reviewer_id=user.id
     )
     await write_audit(
@@ -648,7 +712,7 @@ async def set_masking_policy(
     http_req: Request,
 ) -> Any:
     """设置资产脱敏策略（none/mask/hash/deny）。"""
-    data = await AssetMapService(db).set_masking_policy(entity_id, payload.policy)
+    data = await _svc(db, user).set_masking_policy(entity_id, payload.policy)
     await write_audit(
         db,
         actor_id=user.id,
@@ -673,7 +737,7 @@ async def upsert_pii_override(
     http_req: Request,
 ) -> Any:
     """字段级人工标注（suppressed=True 误报非 PII；False 人工确认是 PII）。"""
-    data = await AssetMapService(db).upsert_pii_override(
+    data = await _svc(db, user).upsert_pii_override(
         entity_id, payload.column, payload.suppressed, payload.reason, actor_id=user.id
     )
     await write_audit(
@@ -700,7 +764,7 @@ async def remove_pii_override(
     http_req: Request,
 ) -> Any:
     """撤销字段级人工标注（恢复规则引擎判定）。"""
-    data = await AssetMapService(db).delete_pii_override(entity_id, payload.column)
+    data = await _svc(db, user).delete_pii_override(entity_id, payload.column)
     await write_audit(
         db,
         actor_id=user.id,
@@ -725,7 +789,7 @@ async def set_retention(
     http_req: Request,
 ) -> Any:
     """设置资产保留期与合法性基础（合规留存期限）。"""
-    data = await AssetMapService(db).set_retention(
+    data = await _svc(db, user).set_retention(
         entity_id, payload.retention_days, payload.legal_basis
     )
     await write_audit(
@@ -756,7 +820,8 @@ async def export_pii_csv(
     category: str | None = Query(None),
 ) -> Response:
     """PII 合规盘点 CSV 导出（含字段明细/类别/复核/脱敏状态，交合规盘点）。"""
-    items = await AssetMapService(db).export_pii_rows(
+    _assert_enum(review_status, _VALID_REVIEW_STATUS, "复核状态")
+    items = await _svc(db, user).export_pii_rows(
         keyword=keyword,
         source_id=source_id,
         domain=domain,

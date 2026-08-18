@@ -243,6 +243,9 @@ async def test_repo_list_pii_assets_filters_review_status() -> None:
 async def test_repo_list_pii_assets_category_filter() -> None:
     s = _session()
     repo = AssetMapRepository(s)
+    # category 路径前置查询：_catalog_ids_with_category 返回含 PHONE 类别的 id 集
+    r_cat = MagicMock()
+    r_cat.all.return_value = [(1, [{"category": "PHONE"}])]
     r_count = MagicMock()
     r_count.scalar.return_value = 1
     r_rows = MagicMock()
@@ -253,13 +256,15 @@ async def test_repo_list_pii_assets_category_filter() -> None:
     r_ov.scalars.return_value.all.return_value = []
     r_src = MagicMock()
     r_src.all.return_value = [("s1", "源1", "sales")]
-    s.execute = AsyncMock(side_effect=[r_count, r_rows, r_cls, r_ov, r_src])
+    s.execute = AsyncMock(side_effect=[r_cat, r_count, r_rows, r_cls, r_ov, r_src])
     items, _total = await repo.list_pii_assets(category="PHONE", page=1, page_size=20)
     assert len(items) == 1
-    # 第二次调用：重新设置 execute mock（side_effect 已耗尽）
-    s.execute = AsyncMock(side_effect=[r_count, r_rows, r_cls, r_ov, r_src])
-    items2, _total2 = await repo.list_pii_assets(category="HEALTH", page=1, page_size=20)
-    assert items2 == []
+    # 类别不存在的语义：_catalog_ids_with_category 返回空 id 集 → 主查询 id IN (空) 过滤全部
+    r_cat2 = MagicMock()
+    r_cat2.all.return_value = [(1, [{"category": "PHONE"}])]
+    s.execute = AsyncMock(return_value=r_cat2)
+    cat_ids = await repo._catalog_ids_with_category("HEALTH")
+    assert cat_ids == set()
 
 
 async def test_repo_apply_sensitivity_template_upgrades() -> None:

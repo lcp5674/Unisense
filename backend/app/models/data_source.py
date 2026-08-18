@@ -170,6 +170,11 @@ class DataSource(Base, BaseModel):
         nullable=True,
         comment="数据源负责人（用户 ID）",
     )
+    org_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="所属组织 ID（多租户隔离：资产地图按 org 过滤数据源作用域资产）",
+    )
     description: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="用途描述"
     )
@@ -300,6 +305,13 @@ class DBCatalog(Base, BaseModel):
         String(16),
         nullable=True,
         comment="脱敏策略（none/mask/hash/deny，缺省由敏感级推导）",
+    )
+    row_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="乐观锁版本号（治理写操作条件 UPDATE 校验，防并发 last-write-wins）",
     )
     retention_days: Mapped[int | None] = mapped_column(
         Integer,

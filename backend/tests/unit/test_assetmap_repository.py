@@ -13,6 +13,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from app.models.data_source import DBCatalog
 from app.services.assetmap.repository import AssetMapRepository
 
@@ -510,15 +512,17 @@ class TestListTablesAndOrphans:
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
+        r.scalar.return_value = 1
         r.scalars.return_value.all.return_value = [
             SimpleNamespace(id=1, entity_name="catalog.db.t")
         ]
         s.execute = AsyncMock(return_value=r)
 
-        rows = await repo.list_tables(source_id="s1", sensitivity="PII", limit=50)
+        rows, total = await repo.list_tables(source_id="s1", sensitivity="PII", limit=50)
 
         assert len(rows) == 1
-        stmt = s.execute.call_args_list[0].args[0]
+        assert total == 1
+        stmt = s.execute.call_args_list[1].args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "entity_type" in compiled
         assert "source_id" in compiled
@@ -528,22 +532,25 @@ class TestListTablesAndOrphans:
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
+        r.scalar.return_value = 0
         r.scalars.return_value.all.return_value = []
         s.execute = AsyncMock(return_value=r)
 
-        rows = await repo.list_tables(None, None, 100)
+        rows, total = await repo.list_tables(None, None, 100)
 
         assert rows == []
+        assert total == 0
 
     async def test_list_tables_multi_dimension_filters(self) -> None:
         """多维度过滤：责任人 / Schema 完整性 / 关键字同时生效（LIKE 转义防放大）。"""
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
+        r.scalar.return_value = 0
         r.scalars.return_value.all.return_value = []
         s.execute = AsyncMock(return_value=r)
 
-        rows = await repo.list_tables(
+        rows, _total = await repo.list_tables(
             None,
             None,
             100,
@@ -553,7 +560,7 @@ class TestListTablesAndOrphans:
         )
 
         assert rows == []
-        stmt = s.execute.call_args_list[0].args[0]
+        stmt = s.execute.call_args_list[1].args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "owner_id" in compiled and "= 7" in compiled
         assert "schema_incomplete" in compiled
@@ -566,12 +573,13 @@ class TestListTablesAndOrphans:
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
+        r.scalar.return_value = 0
         r.scalars.return_value.all.return_value = []
         s.execute = AsyncMock(return_value=r)
 
-        await repo.list_tables(None, None, 100, domain="sales")
+        _rows, _total = await repo.list_tables(None, None, 100, domain="sales")
 
-        stmt = s.execute.call_args_list[0].args[0]
+        stmt = s.execute.call_args_list[1].args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "JOIN" in compiled
         assert "data_source" in compiled
@@ -583,12 +591,13 @@ class TestListTablesAndOrphans:
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
+        r.scalar.return_value = 0
         r.scalars.return_value.all.return_value = []
         s.execute = AsyncMock(return_value=r)
 
-        await repo.list_tables(None, None, 100, owner_id=0)
+        _rows, _total = await repo.list_tables(None, None, 100, owner_id=0)
 
-        stmt = s.execute.call_args_list[0].args[0]
+        stmt = s.execute.call_args_list[1].args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "owner_id IS NULL" in compiled
 
@@ -597,12 +606,13 @@ class TestListTablesAndOrphans:
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
+        r.scalar.return_value = 0
         r.scalars.return_value.all.return_value = []
         s.execute = AsyncMock(return_value=r)
 
-        await repo.list_tables(None, None, 100, schema_status="complete")
+        _rows, _total = await repo.list_tables(None, None, 100, schema_status="complete")
 
-        stmt = s.execute.call_args_list[0].args[0]
+        stmt = s.execute.call_args_list[1].args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "schema_incomplete" in compiled
         assert "false" in compiled.lower() or "0" in compiled
@@ -611,13 +621,15 @@ class TestListTablesAndOrphans:
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
+        r.scalar.return_value = 1
         r.scalars.return_value.all.return_value = [SimpleNamespace(id=1, owner_id=None)]
         s.execute = AsyncMock(return_value=r)
 
-        rows = await repo.orphan_assets()
+        rows, total = await repo.orphan_assets()
 
         assert len(rows) == 1
-        stmt = s.execute.call_args_list[0].args[0]
+        assert total == 1
+        stmt = s.execute.call_args_list[1].args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "owner_id IS NULL" in compiled
 
@@ -626,10 +638,11 @@ class TestListTablesAndOrphans:
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
+        r.scalar.return_value = 0
         r.scalars.return_value.all.return_value = []
         s.execute = AsyncMock(return_value=r)
 
-        rows = await repo.orphan_assets(
+        rows, _total = await repo.orphan_assets(
             keyword="ods_%",
             source_id="s1",
             entity_type="table",
@@ -639,7 +652,7 @@ class TestListTablesAndOrphans:
         )
 
         assert rows == []
-        stmt = s.execute.call_args_list[0].args[0]
+        stmt = s.execute.call_args_list[1].args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "owner_id IS NULL" in compiled
         assert "source_id" in compiled and "= 's1'" in compiled
@@ -655,13 +668,14 @@ class TestListTablesAndOrphans:
         s = _session()
         repo = AssetMapRepository(s)
         r = MagicMock()
+        r.scalar.return_value = 0
         r.scalars.return_value.all.return_value = []
         s.execute = AsyncMock(return_value=r)
 
-        rows = await repo.orphan_assets(domain="sales")
+        rows, _total = await repo.orphan_assets(domain="sales")
 
         assert rows == []
-        stmt = s.execute.call_args_list[0].args[0]
+        stmt = s.execute.call_args_list[1].args[0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "data_source" in compiled
         assert "sales" in compiled
@@ -1435,48 +1449,75 @@ class TestWriteOps:
 
     async def test_assign_owner(self) -> None:
         s = _session()
-        entity = DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=None)
+        s.execute.return_value.rowcount = 1
+        entity = DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=None, row_version=1)
         repo = AssetMapRepository(s)
         out = await repo.assign_owner(entity, owner_id=9)
         assert out is entity
         assert entity.owner_id == 9
-        s.add.assert_called_once_with(entity)
+        assert entity.row_version == 2
+        stmt = s.execute.call_args.args[0]
+        assert "UPDATE" in str(stmt) and "row_version" in str(stmt)
         s.flush.assert_awaited_once()
 
     async def test_assign_owner_release(self) -> None:
         s = _session()
-        entity = DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=9)
+        s.execute.return_value.rowcount = 1
+        entity = DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=9, row_version=1)
         repo = AssetMapRepository(s)
         await repo.assign_owner(entity, owner_id=None)
         assert entity.owner_id is None
 
+    async def test_assign_owner_conflict_raises_409(self) -> None:
+        """乐观锁：版本不匹配（rowcount=0）→ ConflictError(409)，不覆盖。"""
+        from app.core.exceptions import ConflictError
+
+        s = _session()
+        s.execute.return_value.rowcount = 0
+        entity = DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=None, row_version=1)
+        repo = AssetMapRepository(s)
+        with pytest.raises(ConflictError) as exc:
+            await repo.assign_owner(entity, owner_id=9)
+        assert exc.value.error_code == "OPTIMISTIC_LOCK_CONFLICT"
+        assert entity.owner_id is None  # 未覆盖
+
     async def test_reclassify_sensitivity(self) -> None:
         s = _session()
-        entity = DBCatalog(id=1, entity_name="catalog.sales.orders", sensitivity_level="INTERNAL")
+        s.execute.return_value.rowcount = 1
+        entity = DBCatalog(
+            id=1, entity_name="catalog.sales.orders", sensitivity_level="INTERNAL", row_version=1
+        )
         repo = AssetMapRepository(s)
         out = await repo.reclassify_sensitivity(entity, "PII")
         assert out is entity
         assert entity.sensitivity_level == "PII"
+        assert entity.row_version == 2
+        stmt = s.execute.call_args.args[0]
+        assert "UPDATE" in str(stmt) and "row_version" in str(stmt)
         s.flush.assert_awaited_once()
 
     async def test_batch_assign_owner(self) -> None:
         s = _session()
+        s.execute.return_value.rowcount = 1
         entities = [
-            DBCatalog(id=1, entity_name="catalog.sales.orders"),
-            DBCatalog(id=2, entity_name="catalog.sales.items"),
+            DBCatalog(id=1, entity_name="catalog.sales.orders", row_version=1),
+            DBCatalog(id=2, entity_name="catalog.sales.items", row_version=1),
         ]
         repo = AssetMapRepository(s)
         affected = await repo.batch_assign_owner(entities, owner_id=9)
         assert affected == 2
         assert all(e.owner_id == 9 for e in entities)
-        assert s.add.call_count == 2
+        assert all(e.row_version == 2 for e in entities)
+        assert s.execute.await_count == 2  # 逐条乐观锁 UPDATE
         s.flush.assert_awaited_once()
 
     async def test_batch_reclassify(self) -> None:
         s = _session()
-        entities = [DBCatalog(id=1, entity_name="catalog.sales.orders")]
+        s.execute.return_value.rowcount = 1
+        entities = [DBCatalog(id=1, entity_name="catalog.sales.orders", row_version=1)]
         repo = AssetMapRepository(s)
         affected = await repo.batch_reclassify(entities, "CONFIDENTIAL")
         assert affected == 1
         assert entities[0].sensitivity_level == "CONFIDENTIAL"
+        assert entities[0].row_version == 2
         s.flush.assert_awaited_once()
