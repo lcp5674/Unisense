@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
 from app.core.audit import write_audit
+from app.core.exceptions import AuthError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.dimension.schemas import (
@@ -43,6 +44,61 @@ _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_inject
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 _GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
 
+# 域作用域守卫（P1-10）：domain_admin/metric_owner 仅可操作本域资源，
+# 防跨域越权——此前 API 仅校验角色、无 user.domain 作用域，域管理员可任意增删改他域维度。
+_SCOPED_ROLES = ("domain_admin", "metric_owner")
+
+
+def _assert_domain_scope(user: CurrentUser, resource_domain: str) -> None:
+    if user.role in _SCOPED_ROLES and user.domain and resource_domain != user.domain:
+        raise AuthError(
+            f"无权限操作其他域的资源（资源域 {resource_domain}，当前域 {user.domain}）",
+            error_code="FORBIDDEN",
+        )
+
+
+async def _scope_dimension(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+) -> None:
+    """路径携带 dim_code 的写操作：加载维度并校验域作用域。"""
+    dim = await DimensionService(db).get_dimension(dim_code)
+    if dim is None:
+        raise NotFoundError(f"维度不存在: {dim_code}")
+    _assert_domain_scope(user, dim.domain)
+
+
+async def _scope_dimension_by_code(
+    code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+) -> None:
+    """body 携带 dim_code 的写操作：解析维度域并校验作用域。"""
+    dim = await DimensionService(db).get_dimension(code)
+    if dim is None:
+        raise NotFoundError(f"维度不存在: {code}")
+    _assert_domain_scope(user, dim.domain)
+
+
+async def _scope_mapping(
+    mapping_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+) -> None:
+    """映射按 id 写操作：解析源维度域并校验作用域。"""
+    mapping = await DimensionService(db).get_mapping(mapping_id)
+    if mapping is None:
+        raise NotFoundError(f"映射不存在: {mapping_id}")
+    dim = await DimensionService(db).get_dimension(mapping.source_dim_code)
+    if dim is not None:
+        _assert_domain_scope(user, dim.domain)
+
+
+# 写操作 + 域作用域守卫（P1-10）：域管理员/指标 Owner 仅可操作本域资源
+_WRITE_SCOPED_DEPS = _WRITE_DEPS + [Depends(_scope_dimension)]
+_MAPPING_SCOPED_DEPS = _WRITE_DEPS + [Depends(_scope_mapping)]
+
 
 @router.post("", status_code=201, dependencies=_WRITE_DEPS)
 async def create_dimension(
@@ -51,6 +107,8 @@ async def create_dimension(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
+    # 域作用域守卫（P1-10）：域管理员仅可在本域建维度
+    _assert_domain_scope(user, payload.domain)
     resp = await DimensionService(db).create_dimension(payload, actor_id=user.id)
     await write_audit(
         db,
@@ -99,6 +157,11 @@ async def create_mapping(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
+    # 域作用域守卫（P1-10）：映射源维度须在本域
+    _scope_resource = await DimensionService(db).get_dimension(payload.source_dim_code)
+    if _scope_resource is None:
+        raise NotFoundError(f"维度不存在: {payload.source_dim_code}")
+    _assert_domain_scope(user, _scope_resource.domain)
     resp = await DimensionService(db).create_mapping(payload, actor_id=user.id)
     await write_audit(
         db,
@@ -125,7 +188,7 @@ async def list_mappings(
     return ok(data={"items": converted, "total": len(items)}, trace_id=trace_id)
 
 
-@router.put("/mappings/{mapping_id}", dependencies=_WRITE_DEPS)
+@router.put("/mappings/{mapping_id}", dependencies=_MAPPING_SCOPED_DEPS)
 async def update_mapping(
     mapping_id: int,
     payload: DimensionMappingUpdate,
@@ -147,7 +210,7 @@ async def update_mapping(
     return ok(data=DimensionMappingResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.delete("/mappings/{mapping_id}", dependencies=_WRITE_DEPS)
+@router.delete("/mappings/{mapping_id}", dependencies=_MAPPING_SCOPED_DEPS)
 async def delete_mapping(
     mapping_id: int,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -175,6 +238,11 @@ async def submit_reconciliation(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
+    # 域作用域守卫（P1-10）：对账维度须在本域
+    _scope_resource = await DimensionService(db).get_dimension(payload.dim_code)
+    if _scope_resource is None:
+        raise NotFoundError(f"维度不存在: {payload.dim_code}")
+    _assert_domain_scope(user, _scope_resource.domain)
     resp = await DimensionService(db).submit_reconciliation(payload)
     await write_audit(
         db,
@@ -249,6 +317,17 @@ async def preview_dimension_values(
         column=payload.column,
         limit=payload.limit,
     )
+    # 审计（P1-11）：数据探测动作留痕，防任意用户对任意源任意表列无痕 SELECT DISTINCT
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.preview_values",
+        entity_type="data_source",
+        entity_id=f"{payload.source_id}:{payload.table}.{payload.column}",
+        detail={"row_count": resp.get("row_count")},
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(data=PreviewValuesResponse(**resp), trace_id=trace_id)
 
 
@@ -263,7 +342,7 @@ async def get_dimension(
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.put("/{dim_code}", dependencies=_WRITE_DEPS)
+@router.put("/{dim_code}", dependencies=_WRITE_DEPS + [Depends(_scope_dimension)])
 async def update_dimension(
     dim_code: str,
     payload: DimensionUpdate,
@@ -285,7 +364,7 @@ async def update_dimension(
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.post("/{dim_code}/deprecate", dependencies=_WRITE_DEPS)
+@router.post("/{dim_code}/deprecate", dependencies=_WRITE_DEPS + [Depends(_scope_dimension)])
 async def deprecate_dimension(
     dim_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -306,7 +385,7 @@ async def deprecate_dimension(
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.post("/{dim_code}/publish", dependencies=_WRITE_DEPS)
+@router.post("/{dim_code}/publish", dependencies=_WRITE_DEPS + [Depends(_scope_dimension)])
 async def publish_dimension(
     dim_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -327,7 +406,7 @@ async def publish_dimension(
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.post("/{dim_code}/members", dependencies=_WRITE_DEPS)
+@router.post("/{dim_code}/members", dependencies=_WRITE_DEPS + [Depends(_scope_dimension)])
 async def create_member(
     dim_code: str,
     payload: DimensionMemberCreate,
@@ -363,7 +442,7 @@ async def list_members(
     )
 
 
-@router.put("/{dim_code}/members/{member_code}", dependencies=_WRITE_DEPS)
+@router.put("/{dim_code}/members/{member_code}", dependencies=_WRITE_SCOPED_DEPS)
 async def update_member(
     dim_code: str,
     member_code: str,
@@ -386,7 +465,7 @@ async def update_member(
     return ok(data=DimensionMemberResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.delete("/{dim_code}/members/{member_code}", dependencies=_WRITE_DEPS)
+@router.delete("/{dim_code}/members/{member_code}", dependencies=_WRITE_SCOPED_DEPS)
 async def delete_member(
     dim_code: str,
     member_code: str,
@@ -411,7 +490,7 @@ async def delete_member(
 
 @router.post(
     "/{dim_code}/members/{member_code}/publish",
-    dependencies=_WRITE_DEPS,
+    dependencies=_WRITE_DEPS + [Depends(_scope_dimension)],
 )
 async def publish_member(
     dim_code: str,
@@ -437,7 +516,7 @@ async def publish_member(
 
 @router.post(
     "/{dim_code}/members/batch-publish",
-    dependencies=_WRITE_DEPS,
+    dependencies=_WRITE_DEPS + [Depends(_scope_dimension)],
 )
 async def publish_all_members(
     dim_code: str,
@@ -462,7 +541,7 @@ async def publish_all_members(
 
 @router.post(
     "/{dim_code}/members/{member_code}/deprecate",
-    dependencies=_WRITE_DEPS,
+    dependencies=_WRITE_DEPS + [Depends(_scope_dimension)],
 )
 async def deprecate_member(
     dim_code: str,
@@ -488,7 +567,7 @@ async def deprecate_member(
 
 @router.post(
     "/{dim_code}/metrics",
-    dependencies=_WRITE_DEPS,
+    dependencies=_WRITE_DEPS + [Depends(_scope_dimension)],
 )
 async def bind_metric_dimension(
     dim_code: str,
@@ -497,7 +576,7 @@ async def bind_metric_dimension(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await DimensionService(db).bind_metric_dimension(payload)
+    resp = await DimensionService(db).bind_metric_dimension(payload, actor_id=user.id)
     await write_audit(
         db,
         actor_id=user.id,
@@ -513,7 +592,7 @@ async def bind_metric_dimension(
 
 @router.delete(
     "/{dim_code}/metrics/{metric_id}",
-    dependencies=_WRITE_DEPS,
+    dependencies=_WRITE_DEPS + [Depends(_scope_dimension)],
 )
 async def unbind_metric_dimension(
     dim_code: str,

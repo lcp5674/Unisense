@@ -82,6 +82,30 @@ class MetricRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_user_display_names(self, user_ids: set[int]) -> dict[int, str]:
+        """批量查询用户显示名（P2-14 对比治理：owner_id → 责任人姓名映射）。
+
+        Args:
+            user_ids: 用户 ID 集合（空集直接返回空映射）。
+
+        Returns:
+            ``{user_id: display_name}``；display_name 缺失时回退 username，
+            两者皆缺回退 ``用户#{id}``（确保映射永远可读，不返回裸数字）。
+        """
+        if not user_ids:
+            return {}
+        from app.models.user import User
+
+        rows = (
+            await self._db.execute(
+                select(User.id, User.display_name, User.username).where(User.id.in_(user_ids))
+            )
+        ).all()
+        return {
+            uid: (display_name or username or f"用户#{uid}")
+            for uid, display_name, username in rows
+        }
+
     async def get_archived_by_code(self, metric_code: str) -> Metric | None:
         """根据编码查询已软删指标（含 deleted_at 置位的作废记录）。
 
@@ -136,6 +160,8 @@ class MetricRepository:
         sort_order: str = "desc",
         offset: int = 0,
         limit: int = 20,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> tuple[list[Metric], int]:
         """分页查询指标列表。
 
@@ -152,6 +178,11 @@ class MetricRepository:
             sort_order: 排序方向（asc/desc）。
             offset: 偏移量。
             limit: 每页数量。
+            visible_actor_id: 读路径行级隔离（P0-3）——非管理角色的可见性过滤：
+                仅公开状态（PUBLISHED/EXPERIMENTAL/DEPRECATED）+ 本人 Owner/副 Owner
+                （DRAFT/REVIEW）+ 评审角色（REVIEW 待审）可见；其余不可见。
+                管理角色（platform_admin/domain_admin）传 None 即不加过滤。
+            visible_role: 调用者角色（配合 visible_actor_id 判定 reviewer 放行）。
 
         Returns:
             (指标列表, 总数)。
@@ -159,6 +190,24 @@ class MetricRepository:
         conditions: list[ColumnElement[bool]] = (
             [Metric.deleted_at.is_not(None)] if deleted else [Metric.deleted_at.is_(None)]
         )
+        # P0-3 读路径行级隔离：非管理角色只可见公开资产 + 本人负责的未发布资产。
+        # 指标目录是数据资产公开目录（已发布/灰度/废弃均可被消费方发现），但
+        # 未发布草稿/审核中是指标 Owner 的私有工作区——他人不得窥探（域隔离在
+        # 写路径已有，读路径此前完全缺失，任意 viewer 可翻到 DRAFT 完整口径）。
+        if (
+            visible_actor_id is not None
+            and visible_role is not None
+            and visible_role not in ("platform_admin", "domain_admin")
+        ):
+            visibility: list[ColumnElement[bool]] = [
+                Metric.status.in_(("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")),
+                Metric.owner_id == visible_actor_id,
+                Metric.backup_owner_id == visible_actor_id,
+            ]
+            if visible_role == "reviewer":
+                # 评审人可看待审（REVIEW）指标——评审工作台需展示全部待审项
+                visibility.append(Metric.status == "REVIEW")
+            conditions.append(or_(*visibility))
         if domain:
             conditions.append(Metric.domain == domain)
         if status:
@@ -427,16 +476,29 @@ class MetricRepository:
         return confirmation
 
     async def get_pending_confirmations(
-        self, metric_id: int, version: int
+        self, metric_id: int, version: int, *, for_update: bool = False
     ) -> list[PendingVersionConfirmation]:
-        """获取指定版本的 PENDING 确认记录列表。"""
-        result = await self._db.execute(
-            select(PendingVersionConfirmation).where(
+        """获取指定版本的 PENDING 确认记录列表。
+
+        Args:
+            metric_id: 指标 ID。
+            version: 版本号。
+            for_update: 是否加行锁（``SELECT ... FOR UPDATE``）。confirm_version
+                的「全部确认→转正」判定需串行化（P1-3）：并发最后两名消费方各自
+                读到对方 PENDING 会都不转正、版本滞留。加锁后最后一个确认者
+                重读拿到对方已 CONFIRMED，可靠触发转正。
+        """
+        stmt = (
+            select(PendingVersionConfirmation)
+            .where(
                 PendingVersionConfirmation.metric_id == metric_id,
                 PendingVersionConfirmation.version == version,
                 PendingVersionConfirmation.deleted_at.is_(None),
             )
         )
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await self._db.execute(stmt)
         return list(result.scalars().all())
 
     async def count_confirmations_by_versions(

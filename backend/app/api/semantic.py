@@ -247,6 +247,114 @@ async def update_template_owner(
 
 
 @router.patch(
+    "/templates/{template_id}",
+    dependencies=_WRITE_DEPS,
+    response_model=ApiResponse,
+    summary="编辑指标模板（P2-13：模板编辑闭环）",
+)
+async def update_template(
+    user: CurrentUser,
+    template_id: int,
+    request: Request,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db_session),
+) -> Any:
+    """编辑模板字段（PATCH 语义，只更新传入字段）。
+
+    模板编辑闭环（P2-13）：模板一经创建此前不可修改（仅有创建/指派/上下架/实例化），
+    描述修正、预设字段调整、必填项增删只能删了重建。本端点支持全字段局部更新：
+    - 仅可编辑的预设字段（name/description/defaults_json/required_fields/type/
+      granularity/unit/aggregation/time_semantics/freshness/dw_layer/serving_mode/
+      additivity/metric_tier/owner_id/is_active）——code 不可改（编码是消费端稳定引用，
+      改码会破坏实例化历史与收藏）。
+    - 版本号随内容变更递增（对齐「模板版本号」语义，实例化时携带的 version 同步演进）。
+    - 写审计 template.update，内容变更记录变更字段清单。
+    """
+    from app.services.semantic.schemas import MetricTemplateUpdateRequest
+
+    q = select(MetricTemplate).where(MetricTemplate.id == template_id)
+    result = await db.execute(q)
+    template = result.scalar_one_or_none()
+    if template is None:
+        from app.core.exceptions import NotFoundError
+
+        raise NotFoundError(f"模板不存在: {template_id}")
+    validated = MetricTemplateUpdateRequest(**body)
+    if not body:
+        from app.core.exceptions import ValidationError
+
+        raise ValidationError("至少提供一个要更新的字段", error_code="EMPTY_UPDATE")
+    # 变更字段清单（供审计明细）
+    changed: list[str] = []
+    updates: dict[str, Any] = {}
+
+    def _apply(field: str, value: Any, attr: str | None = None) -> None:
+        nonlocal updates
+        if field not in body:
+            return
+        attr = attr or field
+        updates[attr] = value
+        changed.append(field)
+
+    _apply("name", validated.name)
+    _apply("domain", validated.domain)
+    _apply("description", validated.description)
+    _apply("defaults_json", validated.defaults_json)
+    _apply("required_fields", validated.required_fields)
+    _apply("type", validated.type)
+    _apply("granularity", validated.granularity)
+    _apply("unit", validated.unit)
+    _apply("aggregation", validated.aggregation)
+    _apply("time_semantics", validated.time_semantics)
+    _apply("freshness", validated.freshness)
+    _apply("dw_layer", validated.dw_layer)
+    _apply("serving_mode", validated.serving_mode)
+    _apply("additivity", validated.additivity)
+    _apply("metric_tier", validated.metric_tier)
+    _apply("owner_id", validated.owner_id)
+    _apply("is_active", validated.is_active)
+    if not updates:
+        from app.core.exceptions import ValidationError
+
+        raise ValidationError("无有效字段可更新", error_code="EMPTY_UPDATE")
+    # 域切换时校验目标域存在（跨服务一致性：模板域须指向有效域）
+    if "domain" in updates and updates["domain"] != template.domain:
+        from sqlalchemy import func as sa_func
+
+        from app.models.subject_domain import SubjectDomain
+
+        exists = await db.execute(
+            select(sa_func.count())
+            .select_from(SubjectDomain)
+            .where(SubjectDomain.code == updates["domain"])
+        )
+        if (exists.scalar_one() or 0) == 0:
+            from app.core.exceptions import ValidationError
+
+            raise ValidationError(
+                f"目标域不存在: {updates['domain']}", error_code="DOMAIN_NOT_FOUND"
+            )
+    for attr, value in updates.items():
+        setattr(template, attr, value)
+    # 内容变更 → 版本递增（is_active 上下架不算内容变更，不递增版本）
+    if changed and changed != ["is_active"]:
+        template.version = (template.version or 1) + 1
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="template.update",
+        entity_type="metric_template",
+        entity_id=str(template.code),
+        detail={"changed": changed, "version": template.version},
+        ip=client_ip(request),
+        trace_id=get_trace_id(request),
+    )
+    await db.commit()
+    await db.refresh(template)
+    return ok(data=template.to_dict(), trace_id=get_trace_id(request))
+
+
+@router.patch(
     "/templates/{template_id}/active",
     dependencies=_WRITE_DEPS,
     response_model=ApiResponse,

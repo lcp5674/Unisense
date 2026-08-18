@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 
 import structlog
@@ -243,3 +245,127 @@ class DegradationMiddleware(BaseHTTPMiddleware):
                 },
                 headers=headers,
             )
+
+
+# ---------------------------------------------------------------- API 限流（P1-12）
+#
+# 此前 main.py 注释声称有 RateLimit 中间件但从未实现注册（middleware.py:6 注释与
+# 实际不符）——导出（assetmap/audit/lineage export.csv）、LLM（auto-suggest/
+# suggest-rename/infer-description force=true）与 compare 均无限流，可被刷耗 LLM
+# 额度 / 批量拉取全量资产。此处落地统一限流中间件。
+
+# 限流规则：按顺序匹配第一个命中的端点类。
+# - LLM 生成类端点（消耗模型额度）：最严格——60 秒窗口 20 次，防刷耗 LLM 预算
+# - 导出/批量类端点（CSV 全量拉取）：60 秒窗口 60 次
+_RATE_LIMIT_RULES: list[tuple[tuple[str, ...], int, int]] = [
+    (
+        ("infer-description", "suggest-rename", "suggest-rename-name", "auto-suggest"),
+        60,
+        20,
+    ),
+    (("/export", "export.csv", "batch-register", "compare/matrix"), 60, 60),
+]
+# 通用 API 默认：60 秒窗口 600 次（防暴力刷，不干扰正常使用）
+_RATE_LIMIT_DEFAULT_WINDOW = 60
+_RATE_LIMIT_DEFAULT_LIMIT = 600
+# 不参与限流的路径（运维探活/健康检查）。按后缀匹配以兼容 /api/v1 前缀
+# （实际路由带前缀，裸名无法命中，否则健康检查/metrics 会被限流导致监控误判）。
+_RATE_LIMIT_SKIP_PATHS = ("/health", "/healthz", "/metrics", "/openapi.json", "/docs")
+
+
+def _rate_limit_bucket(request: Request) -> tuple[str, int, int]:
+    """计算限流桶：返回 (bucket_key, window_seconds, limit)。
+
+    bucket 键 = ``rl:{client_ip}:{path}``（同 IP 对同端点共享一个计数桶，
+    不同端点独立计数，避免单一端点刷量挤占全站额度）。
+    """
+    path = request.url.path
+    window, limit = _RATE_LIMIT_DEFAULT_WINDOW, _RATE_LIMIT_DEFAULT_LIMIT
+    for substrings, win, lim in _RATE_LIMIT_RULES:
+        if any(s in path for s in substrings):
+            return f"rl:{_client_key(request)}:{path}", win, lim
+    return f"rl:{_client_key(request)}:{path}", window, limit
+
+
+def _client_key(request: Request) -> str:
+    """客户端标识：优先真实客户端 IP（X-Forwarded-For 首跳），回退直连 IP。"""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else "unknown"
+
+
+async def _check_rate_redis(key: str, window: int, limit: int) -> bool:
+    """Redis 固定窗口计数（跨进程一致）。Redis 不可用时由调用方降级。"""
+    from app.db.redis import get_redis
+
+    redis = get_redis()
+    count = await redis.incr(key)
+    if count == 1:
+        await redis.expire(key, window)
+    return count <= limit
+
+
+# 进程内降级计数（Redis 不可用时的兜底，单进程语义；生产多 worker 依赖 Redis）
+_inproc_rates: dict[str, tuple[float, int]] = {}
+_inproc_lock = asyncio.Lock()
+
+
+async def _check_rate_inproc(key: str, window: int, limit: int) -> bool:
+    """进程内固定窗口计数（Redis 降级）。"""
+    async with _inproc_lock:
+        now = time.monotonic()
+        start, count = _inproc_rates.get(key, (0.0, 0))
+        if now - start >= window:
+            _inproc_rates[key] = (now, 1)
+            return True
+        if count >= limit:
+            return False
+        _inproc_rates[key] = (start, count + 1)
+        return True
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """API 限流中间件（P1-12）。
+
+    按 ``IP + 端点`` 固定窗口计数：Redis 计数（多 worker 一致），Redis 不可用
+    降级为进程内计数。LLM 生成类端点最严格（防刷耗模型额度），导出/批量次之，
+    通用 API 宽松。超限返回 429 + ``Retry-After``（对齐 ErrorHandler 信封，
+    前端 ``request()`` 统一解析 ``err.message`` 展示中文提示）。
+    """
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        path = request.url.path
+        if request.method == "OPTIONS" or path in _RATE_LIMIT_SKIP_PATHS or any(
+            path.endswith(p) for p in _RATE_LIMIT_SKIP_PATHS
+        ):
+            return await call_next(request)
+        key, window, limit = _rate_limit_bucket(request)
+        try:
+            allowed = await _check_rate_redis(key, window, limit)
+        except Exception:
+            allowed = await _check_rate_inproc(key, window, limit)
+        if not allowed:
+            trace_id = getattr(request.state, "trace_id", "") or request.headers.get(
+                "X-Trace-Id", ""
+            )
+            logger.warning(
+                "rate_limited",
+                path=request.url.path,
+                client=_client_key(request),
+                window=window,
+                limit=limit,
+            )
+            return JSONResponse(
+                status_code=429,
+                headers={"Retry-After": str(window)},
+                content={
+                    "code": "RATE_LIMITED",
+                    "message": "请求过于频繁，请稍后重试",
+                    "trace_id": trace_id,
+                    "detail": {"window_seconds": window, "limit": limit},
+                },
+            )
+        return await call_next(request)

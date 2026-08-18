@@ -151,6 +151,22 @@ class DimensionRepository:
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def list_metrics_declaring_dimension(self, dim_code: str) -> list[Metric]:
+        """扫描口径声明 ``definition_json.dimensions`` 含 dim_code 的全部指标。
+
+        维度改编码/废弃时，指标口径声明的权威来源有两处：
+        - ``metric_dimension`` 绑定表（``list_metrics_by_dimension``）
+        - ``definition_json.dimensions`` 用户**手工声明**（未必绑定）
+
+        消费校验与血缘 USES_DIMENSION 边都以 ``definition_json.dimensions`` 为准，
+        若只按绑定表回查，手工声明未绑定的维度会在改码后悬空 → 消费 FORBIDDEN_DIMENSION。
+        用 ``JSON_CONTAINS`` 精确匹配数组元素（避免 LIKE 误命中嵌套字符串）。
+        """
+        stmt = select(Metric).where(
+            func.json_contains(Metric.definition_json, f'"{dim_code}"', "$.dimensions")
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def delete_metric_dimension(
         self, metric_id: int, dim_code: str
     ) -> MetricDimension | None:

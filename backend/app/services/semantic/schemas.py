@@ -471,6 +471,33 @@ class MetricTemplateCreateRequest(BaseModel):
     owner_id: int | None = Field(None, ge=1, description="责任人（Owner）ID")
 
 
+class MetricTemplateUpdateRequest(BaseModel):
+    """模板更新请求（P2-13：模板编辑闭环，全字段可选 PATCH 语义）。
+
+    对齐 ``MetricTemplateCreateRequest`` 的字段集，但全部可选——只更新传入字段。
+    复用同一套 ``pattern``/``max_length`` 约束，保证编辑后的模板仍符合创建时的
+    校验强度（避免「创建严格、编辑松懈」的契约漂移）。
+    """
+
+    name: str | None = Field(None, max_length=128, description="模板名称")
+    domain: str | None = Field(None, max_length=64, description="适用域")
+    description: str | None = Field(None, description="模板说明")
+    defaults_json: dict[str, Any] | None = Field(None, description="预填字段默认值")
+    required_fields: list[str] | None = Field(None, description="必填字段列表")
+    type: Literal["atomic", "derived", "composite"] | None = Field(None, description="指标类型预设")
+    granularity: str | None = Field(None, max_length=64, description="粒度预设")
+    unit: str | None = Field(None, max_length=32, description="单位预设")
+    aggregation: str | None = Field(None, max_length=32, description="聚合方式预设")
+    time_semantics: str | None = Field(None, max_length=32, description="时间语义预设")
+    freshness: str | None = Field(None, max_length=32, description="数据新鲜度预设")
+    dw_layer: str | None = Field(None, max_length=32, description="数仓分层预设")
+    serving_mode: str | None = Field(None, max_length=32, description="服务模式预设")
+    additivity: str | None = Field(None, max_length=32, description="可加性预设")
+    metric_tier: str | None = Field(None, max_length=8, description="指标分级预设")
+    owner_id: int | None = Field(None, ge=1, description="责任人（Owner）ID（传 null 解除）")
+    is_active: bool | None = Field(None, description="是否启用（模板上/下架）")
+
+
 class MetricListParams(BaseModel):
     """指标列表查询参数。"""
 

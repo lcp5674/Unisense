@@ -312,6 +312,7 @@ _VERB_TEMPLATES: dict[str, str] = {
     "parse_batch": "批量解析并写入{entity}",
     "scan": "扫描了{entity}",
     "preview_impact": "预览了{entity}变更影响",
+    "preview_values": "预览了{entity}维度值",
     "add_edge": "新增了{entity}边",
     "delete_edge": "删除了{entity}边",
     "sync_consumer": "同步了{entity}消费关系",
