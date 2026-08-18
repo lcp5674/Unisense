@@ -158,7 +158,12 @@ async def create_metric(
 ) -> ApiResponse[MetricResponse]:
     """创建指标语义定义（默认 DRAFT 状态，并生成版本 1 快照）。"""
     service = MetricService(db)
-    metric = await service.create_metric(request, owner_id=user.id)
+    metric = await service.create_metric(
+        request,
+        owner_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -194,7 +199,7 @@ async def list_metrics(
 ) -> ApiResponse[MetricListResponse]:
     """支持域/状态/分级/关键词过滤与分页。"""
     service = MetricService(db)
-    metrics, total = await service.list_metrics(params)
+    metrics, total = await service.list_metrics(params, actor_id=user.id, role=user.role)
     # PII 读分级：非敏感角色对 PII 指标脱敏口径（保留键结构，值替换为 ***）
     sensitive = user.role in _SENSITIVE_ROLES
     items: list[MetricResponse] = []
@@ -294,7 +299,9 @@ async def get_metric(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[MetricResponse]:
     service = MetricService(db)
-    metric = await service.get_metric_public(metric_code)
+    metric = await service.get_metric_public(
+        metric_code, actor_id=user.id, role=user.role
+    )
     # PII 访问审计（对齐 TD §15.4 审计合规，data_classification=PII）
     if metric.pii_flag:
         await write_audit(
@@ -965,7 +972,13 @@ async def extend_version(
 ) -> ApiResponse[MetricResponse]:
     """Owner 请求延期确认：+7 天，最多延期 1 次。"""
     service = MetricService(db)
-    metric = await service.extend_version(metric_code, request.version)
+    metric = await service.extend_version(
+        metric_code,
+        request.version,
+        actor_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -1062,7 +1075,12 @@ async def promote_metric(
 ) -> ApiResponse[MetricResponse]:
     """灰度指标全量发布：清除灰度白名单，状态升为 PUBLISHED。"""
     service = MetricService(db)
-    metric = await service.promote_metric(metric_code, actor_id=user.id)
+    metric = await service.promote_metric(
+        metric_code,
+        actor_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -1095,7 +1113,12 @@ async def rollback_metric(
 ) -> ApiResponse[MetricResponse]:
     """灰度指标回滚：EXPERIMENTAL 版本标记 ARCHIVED，回退到上一 PUBLISHED 版本。"""
     service = MetricService(db)
-    metric = await service.rollback_metric(metric_code, actor_id=user.id)
+    metric = await service.rollback_metric(
+        metric_code,
+        actor_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -1121,12 +1144,47 @@ async def rollback_metric(
 )
 async def get_metric_versions(
     metric_code: str,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[list[MetricVersionResponse]]:
+    """查看指标版本历史（FR-05）。
+
+    PII 读分级（P0-1）：与列表/详情/对比一致——非敏感角色读取 PII 指标的
+    版本历史时，口径定义与差异均脱敏（保留键结构，值替换为 ***），并记录
+    PII 访问审计。此前版本接口是全读路径中唯一遗漏脱敏与审计的出口。
+    """
     service = MetricService(db)
-    return ok(data=await service.get_version_responses(metric_code), trace_id=trace_id)
+    metric, versions = await service.get_version_responses_with_meta(
+        metric_code, actor_id=user.id, role=user.role
+    )
+    # PII 访问审计（对齐详情/列表端点语义，TD §15.4）
+    if metric.pii_flag:
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="metric.read",
+            entity_type="metric",
+            entity_id=metric_code,
+            detail={
+                "data_classification": "PII",
+                "metric_code": metric_code,
+                "source": "versions",
+            },
+            ip=client_ip(request),
+            trace_id=trace_id,
+            pii_access=True,
+        )
+    # PLAT-3: PII 访问审计须提交持久化，否则随会话关闭被回滚（合规审计静默丢失）
+    await db.commit()
+    # PII 读分级：非敏感角色对 PII 指标的版本口径脱敏（与 get/list/compare 同级）
+    if metric.pii_flag and user.role not in _SENSITIVE_ROLES:
+        for v in versions:
+            v.definition_json = redact_definition(v.definition_json)
+            if v.diff_json:
+                v.diff_json = redact_definition(v.diff_json)
+    return ok(data=versions, trace_id=trace_id)
 
 
 @router.post(
@@ -1313,6 +1371,8 @@ async def compare_metrics(
     result = await service.compare_metrics(
         request.metric_codes[0],
         request.metric_codes[1],
+        actor_id=user.id,
+        role=user.role,
     )
     # PII 脱敏：非合规角色对比 PII 指标时，口径定义脱敏
     if user.role not in _SENSITIVE_ROLES:
@@ -1340,7 +1400,9 @@ async def compare_metrics_matrix(
 ) -> ApiResponse[Any]:
     """多指标矩阵 diff + 行级差异标记（每行字段、每列指标）。"""
     service = MetricService(db)
-    result = await service.compare_matrix(request.metric_codes)
+    result = await service.compare_matrix(
+        request.metric_codes, actor_id=user.id, role=user.role
+    )
     # PII 脱敏：非合规角色对比 PII 指标时，口径定义脱敏（对齐 T049）
     if user.role not in _SENSITIVE_ROLES:
         defn = result.get("fields", {}).get("definition", {})
@@ -1369,7 +1431,9 @@ async def batch_register_metrics(
 ) -> ApiResponse[Any]:
     """批量注册：LLM 预填 + 逐条校验 + 共享 batch_id。"""
     service = MetricService(db)
-    result = await service.batch_register_metrics(request, actor_id=user.id)
+    result = await service.batch_register_metrics(
+        request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,
