@@ -850,7 +850,21 @@ function GraphCanvas({
               const div = document.createElement("div");
               div.style.fontSize = "12px";
               div.style.lineHeight = "1.6";
-              div.innerHTML = `<b>${label}</b><br/>依赖 ${up} 项（上游）<br/>被 ${down} 项引用（下游）<br/><span style="color:#e65100">血缘度 ${total}</span>`;
+              // P0-4：label 来自 SQL 解析/DP 同步/手动登记，直接插 innerHTML 是存储型
+              // XSS 向量（节点名可含 HTML）。先转义再拼接；数字字段天然安全。
+              const esc = (s: string) =>
+                s.replace(
+                  /[&<>"']/g,
+                  (c) =>
+                    ({
+                      "&": "&amp;",
+                      "<": "&lt;",
+                      ">": "&gt;",
+                      '"': "&quot;",
+                      "'": "&#39;",
+                    })[c] as string,
+                );
+              div.innerHTML = `<b>${esc(label)}</b><br/>依赖 ${up} 项（上游）<br/>被 ${down} 项引用（下游）<br/><span style="color:#e65100">血缘度 ${total}</span>`;
               return div;
             },
           },

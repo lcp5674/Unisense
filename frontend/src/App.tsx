@@ -1,50 +1,112 @@
-import { useEffect, useState } from "react";
+import {
+  Component, lazy, Suspense, useEffect, useState, type ComponentType, type ReactNode,
+} from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Button, Input, App as AntApp } from "antd";
 import { apiLogin, clearAuthTokens, fetchCurrentUser, getToken, UnisenseApiError } from "./api";
 import type { CurrentUser } from "./types";
 import { Layout } from "./components/Layout";
 import { PermissionProvider, RequirePerm, ROUTE_PERM } from "./hooks/usePermission";
-import { MetricCatalog } from "./pages/MetricCatalog";
-import { GlobalSearch } from "./pages/GlobalSearch";
-import { MetricDetail } from "./pages/MetricDetail";
-import { MetricCompare } from "./pages/MetricCompare";
-import { MetricCreate } from "./pages/MetricCreate";
-import { ReviewWorkbench } from "./pages/ReviewWorkbench";
-import { MetricReview } from "./pages/MetricReview";
-import { TodoCenter } from "./pages/TodoCenter";
-import { LineageView } from "./pages/LineageView";
-import { Favorites } from "./pages/Favorites";
-import { Dashboard } from "./pages/Dashboard";
-import { ConsumptionGuide } from "./pages/ConsumptionGuide";
-import { AssetMap } from "./pages/AssetMap";
-import { Templates } from "./pages/Templates";
-import { QueryWorkspace } from "./pages/QueryWorkspace";
-import { ApiClients } from "./pages/ApiClients";
-import { Dimensions } from "./pages/Dimensions";
-import { Glossary } from "./pages/Glossary";
-import { Governance } from "./pages/Governance";
-import { QualityCenter } from "./pages/QualityCenter";
-import { Notifications } from "./pages/Notifications";
-import { Observability } from "./pages/Observability";
-import { FeedbackCenter } from "./pages/FeedbackCenter";
-import { TrackingStats } from "./pages/TrackingStats";
-import { AiAssistant } from "./pages/AiAssistant";
-import { SystemConfig } from "./pages/SystemConfig";
-import { UserManagement } from "./pages/UserManagement";
-import { OrgManagement } from "./pages/OrgManagement";
-import { AuditLog } from "./pages/AuditLog";
-import { DataSources } from "./pages/DataSources";
-import { Catalogs } from "./pages/Catalogs";
-import { CollectionTasks } from "./pages/CollectionTasks";
-import { CollectionHistory } from "./pages/CollectionHistory";
-import { SubjectDomain } from "./pages/SubjectDomain";
-import { SystemDict } from "./pages/SystemDict";
-import { SensitiveRules } from "./pages/SensitiveRules";
-import { Account } from "./pages/Account";
+
+//: 页面级代码分割（P0-4）：33 个页面含 G6/图表静态打进首屏包，改为 React.lazy 按需加载。
+//: 页面均为具名导出，用 lazyNamed 包装为 default 供 React.lazy 消费。
+const lazyNamed = (loader: () => Promise<Record<string, unknown>>, name: string) =>
+  lazy(() => loader().then((m) => ({ default: m[name] as ComponentType })));
+
+const MetricCatalog = lazyNamed(() => import("./pages/MetricCatalog"), "MetricCatalog");
+const GlobalSearch = lazyNamed(() => import("./pages/GlobalSearch"), "GlobalSearch");
+const MetricDetail = lazyNamed(() => import("./pages/MetricDetail"), "MetricDetail");
+const MetricCompare = lazyNamed(() => import("./pages/MetricCompare"), "MetricCompare");
+const MetricCreate = lazyNamed(() => import("./pages/MetricCreate"), "MetricCreate");
+const ReviewWorkbench = lazyNamed(() => import("./pages/ReviewWorkbench"), "ReviewWorkbench");
+const MetricReview = lazyNamed(() => import("./pages/MetricReview"), "MetricReview");
+const TodoCenter = lazyNamed(() => import("./pages/TodoCenter"), "TodoCenter");
+const LineageView = lazyNamed(() => import("./pages/LineageView"), "LineageView");
+const Favorites = lazyNamed(() => import("./pages/Favorites"), "Favorites");
+const Dashboard = lazyNamed(() => import("./pages/Dashboard"), "Dashboard");
+const ConsumptionGuide = lazyNamed(() => import("./pages/ConsumptionGuide"), "ConsumptionGuide");
+const AssetMap = lazyNamed(() => import("./pages/AssetMap"), "AssetMap");
+const Templates = lazyNamed(() => import("./pages/Templates"), "Templates");
+const QueryWorkspace = lazyNamed(() => import("./pages/QueryWorkspace"), "QueryWorkspace");
+const ApiClients = lazyNamed(() => import("./pages/ApiClients"), "ApiClients");
+const Dimensions = lazyNamed(() => import("./pages/Dimensions"), "Dimensions");
+const Glossary = lazyNamed(() => import("./pages/Glossary"), "Glossary");
+const Governance = lazyNamed(() => import("./pages/Governance"), "Governance");
+const QualityCenter = lazyNamed(() => import("./pages/QualityCenter"), "QualityCenter");
+const Notifications = lazyNamed(() => import("./pages/Notifications"), "Notifications");
+const Observability = lazyNamed(() => import("./pages/Observability"), "Observability");
+const FeedbackCenter = lazyNamed(() => import("./pages/FeedbackCenter"), "FeedbackCenter");
+const TrackingStats = lazyNamed(() => import("./pages/TrackingStats"), "TrackingStats");
+const AiAssistant = lazyNamed(() => import("./pages/AiAssistant"), "AiAssistant");
+const SystemConfig = lazyNamed(() => import("./pages/SystemConfig"), "SystemConfig");
+const UserManagement = lazyNamed(() => import("./pages/UserManagement"), "UserManagement");
+const OrgManagement = lazyNamed(() => import("./pages/OrgManagement"), "OrgManagement");
+const AuditLog = lazyNamed(() => import("./pages/AuditLog"), "AuditLog");
+const DataSources = lazyNamed(() => import("./pages/DataSources"), "DataSources");
+const Catalogs = lazyNamed(() => import("./pages/Catalogs"), "Catalogs");
+const CollectionTasks = lazyNamed(() => import("./pages/CollectionTasks"), "CollectionTasks");
+const CollectionHistory = lazyNamed(() => import("./pages/CollectionHistory"), "CollectionHistory");
+const SubjectDomain = lazyNamed(() => import("./pages/SubjectDomain"), "SubjectDomain");
+const SystemDict = lazyNamed(() => import("./pages/SystemDict"), "SystemDict");
+const SensitiveRules = lazyNamed(() => import("./pages/SensitiveRules"), "SensitiveRules");
+const Account = lazyNamed(() => import("./pages/Account"), "Account");
 import { TrackingProvider } from "./components/TrackingProvider";
 
 const { useApp } = AntApp;
+
+//: 全局错误边界（P0-4）：任一页面/组件运行时异常不再整站白屏，降级为可恢复的
+//: 错误提示页（含重新加载），并记录 console.error 便于排查。
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: { componentStack?: string | null }) {
+    console.error("Unisense UI ErrorBoundary:", error, info.componentStack);
+  }
+
+  handleReload = () => {
+    this.setState({ error: null });
+    window.location.reload();
+  };
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          style={{
+            display: "flex", flexDirection: "column", alignItems: "center",
+            justifyContent: "center", minHeight: "60vh", gap: 16, padding: 24,
+          }}
+        >
+          <div style={{ fontSize: 18, fontWeight: 600 }}>页面渲染出现异常</div>
+          <div className="muted" style={{ maxWidth: 520, textAlign: "center" }}>
+            {String(this.state.error.message || this.state.error)}
+          </div>
+          <Button type="primary" onClick={this.handleReload}>重新加载</Button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+//: 懒加载页面的加载占位（与登录加载态视觉一致）
+function PageLoading() {
+  return (
+    <div
+      style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        minHeight: "60vh", gap: 12, color: "#6b7280", fontSize: 14,
+      }}
+    >
+      <div className="brand-mark" style={{ width: 28, height: 28, fontSize: 14 }}>U</div>
+      正在加载模块…
+    </div>
+  );
+}
 
 // 登录页：左 55% 墨蓝机箱 + 发丝计量网格 + 品牌价值点；右 45% 纸上表单
 function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
@@ -191,8 +253,10 @@ export default function App() {
     <TrackingProvider user={user}>
       <PermissionProvider user={user}>
         <BrowserRouter>
-          <Routes>
-            <Route element={<Layout user={user} />}>
+          <Suspense fallback={<PageLoading />}>
+            <ErrorBoundary>
+              <Routes>
+                <Route element={<Layout user={user} />}>
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/todo" element={<TodoCenter />} />
               <Route path="/notifications" element={<Notifications />} />
@@ -232,8 +296,10 @@ export default function App() {
               <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
-            </Route>
-          </Routes>
+              </Route>
+              </Routes>
+            </ErrorBoundary>
+          </Suspense>
         </BrowserRouter>
       </PermissionProvider>
     </TrackingProvider>

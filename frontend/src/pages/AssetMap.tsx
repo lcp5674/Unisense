@@ -5409,7 +5409,11 @@ function PiiDetailDrawer({
       fetchAssetEntityDetail(item.id)
         .then((d) => {
           setDetail(d);
-          setMasking(d.masking_policy ?? (d.sensitivity_level ?? "").includes("PII") ? "hash" : "none");
+          // P0-4 修复：`??` 优先级高于 `?:`，原式被解析为 (policy ?? includes) ? "hash" : "none"，
+          // 已有策略(deny/mask/none)一律回显 "hash"，保存即覆盖原策略。加括号修正。
+          setMasking(
+            d.masking_policy ?? ((d.sensitivity_level ?? "").includes("PII") ? "hash" : "none"),
+          );
           setRetentionDays(d.retention_days ?? null);
           setLegalBasis(d.legal_basis ?? undefined);
         })
