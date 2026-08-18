@@ -227,11 +227,13 @@ class RedisJobStore:
         import json
         from datetime import UTC, datetime
 
+        # H1: updated_at 记录最近一次状态/进度写入（stale 清扫据此判断崩溃滞留任务）
         await self._redis.hset(
             self._key(job_id),
             mapping={
                 "status": status,
                 "detail": json.dumps(detail, ensure_ascii=False, default=str),
+                "updated_at": datetime.now(UTC).isoformat(),
             },
         )
         # 任务中心创建时间：首次写入（任意状态，含定时调度直接 RUNNING 的路径）
@@ -268,8 +270,44 @@ class RedisJobStore:
             "status": decoded.get("status"),
             "detail": detail,
             "created_at": decoded.get("created_at"),
+            "updated_at": decoded.get("updated_at"),
             "kind": self._kind(job_id),
         }
+
+    async def stale_jobs(self, now: Any, timeout_seconds: int) -> list[tuple[str, str]]:
+        """H1: 返回超时未更新的 RUNNING/QUEUED 任务（worker 崩溃滞留清扫）。
+
+        遍历顺序索引（避免 SCAN 全键空间），按 ``updated_at``（无则回退
+        ``created_at``）判断超过 ``timeout_seconds`` 未更新的非终态任务。
+
+        Args:
+            now: 当前时间（UTC）。
+            timeout_seconds: 视为滞留的超时阈值（应显著大于 job_timeout）。
+
+        Returns:
+            [(job_id, status)] 列表。
+        """
+        from datetime import datetime as _dt
+
+        stale: list[tuple[str, str]] = []
+        order = await self._redis.lrange(self._ORDER_KEY, 0, -1)
+        for raw in order:
+            job_id = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            job = await self.get(job_id)
+            if not job:
+                continue
+            if job.get("status") not in ("RUNNING", "QUEUED"):
+                continue
+            updated = job.get("updated_at") or job.get("created_at")
+            if not updated:
+                continue
+            try:
+                ts = _dt.fromisoformat(updated)
+            except ValueError:
+                continue
+            if (now - ts).total_seconds() > timeout_seconds:
+                stale.append((job_id, str(job.get("status"))))
+        return stale
 
     async def _scan_all_job_ids(self) -> list[str]:
         """SCAN 全键 ``collect_job:*`` 收集 job_id（存量数据/索引缺失回退路径）。"""

@@ -524,3 +524,53 @@ class TestRedisJobStoreOrderIndex:
         assert len(jobs) == 1
         assert jobs[0]["job_id"] == "alive"
         mock_redis.lrem.assert_awaited_once_with(store._ORDER_KEY, 0, "stale")
+
+
+class TestRedisJobStoreStaleSweep:
+    """H1: 崩溃滞留任务清扫——stale_jobs 判定 RUNNING/QUEUED 超时未更新。"""
+
+    @pytest.mark.asyncio
+    async def test_stale_jobs_flags_running_older_than_timeout(self):
+        from datetime import UTC, datetime, timedelta
+
+        from app.services.collector.queue import RedisJobStore
+
+        mock_redis = MagicMock()
+        now = datetime(2026, 8, 18, 12, 0, 0, tzinfo=UTC)
+        old = (now - timedelta(hours=2)).isoformat()  # 超过 3600s
+        fresh = now.isoformat()
+        mock_redis.lrange = AsyncMock(return_value=["j_running_old", "j_running_fresh", "j_done"])
+
+        def _hgetall(key: str):
+            jid = str(key)
+            if "old" in jid:
+                return {b"status": b"RUNNING", b"updated_at": old.encode()}
+            if "fresh" in jid:
+                return {b"status": b"RUNNING", b"updated_at": fresh.encode()}
+            return {b"status": b"COMPLETED", b"updated_at": old.encode()}
+
+        mock_redis.hgetall = AsyncMock(side_effect=_hgetall)
+        store = RedisJobStore(mock_redis)
+        stale = await store.stale_jobs(now, timeout_seconds=3600)
+        assert stale == [("j_running_old", "RUNNING")]  # 仅超时的 RUNNING
+
+    @pytest.mark.asyncio
+    async def test_stale_jobs_includes_queued_but_not_terminal(self):
+        from datetime import UTC, datetime, timedelta
+
+        from app.services.collector.queue import RedisJobStore
+
+        mock_redis = MagicMock()
+        now = datetime(2026, 8, 18, 12, 0, 0, tzinfo=UTC)
+        old = (now - timedelta(hours=2)).isoformat()
+        mock_redis.lrange = AsyncMock(return_value=["j_queued", "j_failed"])
+        mock_redis.hgetall = AsyncMock(
+            side_effect=lambda key: (
+                {b"status": b"QUEUED", b"updated_at": old.encode()}
+                if "queued" in str(key)
+                else {b"status": b"FAILED", b"updated_at": old.encode()}
+            )
+        )
+        store = RedisJobStore(mock_redis)
+        stale = await store.stale_jobs(now, timeout_seconds=3600)
+        assert stale == [("j_queued", "QUEUED")]  # 终态 FAILED 不参与

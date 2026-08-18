@@ -187,7 +187,32 @@ describe("CollectionTasks", () => {
     await screen.findByText("采集任务中心");
     fireEvent.click(screen.getAllByRole("button", { name: /重\s*试/ })[0]);
     await waitFor(() => {
-      expect(mockedCollectNow).toHaveBeenCalledWith("mysql_finance");
+      // H3: 重试保留原任务 mode（detail 无 mode → 默认 FULL）
+      expect(mockedCollectNow).toHaveBeenCalledWith(
+        "mysql_finance",
+        "FULL",
+        { include_patterns: undefined, exclude_patterns: undefined },
+      );
+    });
+  });
+
+  it("重试保留 INCREMENTAL 模式：detail.mode=INCREMENTAL 时不退化为全量", async () => {
+    const failedJob: CollectionJob = {
+      ...jobs[0],
+      job_id: "collect:mysql_finance:failed2",
+      status: "FAILED",
+      detail: { error: "boom", source_id: "mysql_finance", mode: "INCREMENTAL" },
+    };
+    mockedJobs.mockResolvedValue({ items: [failedJob], total: 1, page: 1, page_size: 10 });
+    render(<MemoryRouter><CollectionTasks /></MemoryRouter>);
+    await screen.findByText("采集任务中心");
+    fireEvent.click(screen.getAllByRole("button", { name: /重\s*试/ })[0]);
+    await waitFor(() => {
+      expect(mockedCollectNow).toHaveBeenCalledWith(
+        "mysql_finance",
+        "INCREMENTAL",
+        { include_patterns: undefined, exclude_patterns: undefined },
+      );
     });
   });
 });

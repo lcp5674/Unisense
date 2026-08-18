@@ -133,16 +133,28 @@ export function CollectionTasks() {
     }
   }
 
-  /** 失败任务重试：复用 collect-now 重新投递采集。 */
+  /** 失败任务重试：复用 collect-now 重新投递，保留原任务的 mode 与表级过滤（H3）。 */
   async function handleRetry(job: CollectionJob) {
     if (!job.source_id) {
       message.warning("该任务缺少数据源标识，无法重试");
       return;
     }
+    const detail = job.detail ?? {};
+    // 重试保留原任务真实模式：INCREMENTAL 失败任务不得退化为 FULL 全量重扫
+    const mode = detail.mode === "INCREMENTAL" ? "INCREMENTAL" : "FULL";
+    const includePatterns = Array.isArray(detail.include_patterns)
+      ? detail.include_patterns.filter((x): x is string => typeof x === "string")
+      : undefined;
+    const excludePatterns = Array.isArray(detail.exclude_patterns)
+      ? detail.exclude_patterns.filter((x): x is string => typeof x === "string")
+      : undefined;
     setRetrying(job.job_id);
     try {
-      await collectSourceNow(job.source_id);
-      message.success("已重新投递采集任务，可在列表中查看新任务");
+      await collectSourceNow(job.source_id, mode, {
+        include_patterns: includePatterns?.length ? includePatterns : undefined,
+        exclude_patterns: excludePatterns?.length ? excludePatterns : undefined,
+      });
+      message.success(`已重新投递采集任务（${mode}），可在列表中查看新任务`);
       load();
     } catch (err) {
       message.error(

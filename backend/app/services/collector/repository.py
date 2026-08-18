@@ -782,6 +782,18 @@ class CollectorRepository:
         await self._db.flush()
         return run
 
+    async def find_collection_run_by_job_id(self, job_id: str) -> CollectionRun | None:
+        """按 job_id 定位仍在 RUNNING 的采集运行记录（H1 stale 清扫收尾用）。"""
+        return (
+            await self._db.execute(
+                select(CollectionRun).where(
+                    CollectionRun.job_id == job_id,
+                    CollectionRun.deleted_at.is_(None),
+                    CollectionRun.status == "RUNNING",
+                )
+            )
+        ).scalar_one_or_none()
+
     async def list_collection_runs(
         self,
         *,

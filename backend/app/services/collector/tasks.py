@@ -397,9 +397,25 @@ async def run_collection_task(
     except asyncio.CancelledError:
         # arq job_timeout 超时/取消：CancelledError 是 BaseException，不落入上方
         # except Exception——若不处理，JobStore 与 collection_run 永久卡 RUNNING
-        # （非终态无 TTL 回收）。补写 FAILED 终态后重新抛出，保持取消语义
-        # （arq 按自身策略处理取消任务，如标记 aborted/丢弃）。
-        logger.warning("采集任务超时/取消 source=%s job=%s", source_id, job_id)
+        # （非终态无 TTL 回收）。补写 FAILED 终态后重新抛出，保持取消语义。
+        #
+        # H2 修正：用户主动取消（cancel API 已把 JobStore 置 CANCELLED）时**保持
+        # CANCELLED 终态**——不覆盖为 FAILED、不误发 collect.failed 失败通知；
+        # 仅收尾 collection_run（标 FAILED + 「任务已取消」）。仅 arq 超时
+        # （非用户取消）才走失败收尾 + 通知。
+        user_cancelled = False
+        if store is not None:
+            existing = await store.get(job_id)
+            user_cancelled = (existing or {}).get("status") == "CANCELLED"
+        if user_cancelled:
+            logger.info("采集任务已被用户取消 source=%s job=%s", source_id, job_id)
+            if run_id is not None and svc is not None:
+                try:
+                    await svc.fail_collection_run(run_id, "任务已取消")
+                except Exception:  # noqa: BLE001 - 取消收尾异常不影响上抛
+                    logger.warning("collection_run_cancel_commit_failed: run=%s", run_id)
+            raise
+        logger.warning("采集任务超时 source=%s job=%s", source_id, job_id)
         await _record_task_failure(
             db=db,
             svc=svc,

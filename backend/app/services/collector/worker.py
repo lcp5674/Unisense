@@ -40,6 +40,7 @@ from app.tasks.semantic_tasks import (
     check_pending_version_timeouts,
     refresh_health_scores,
 )
+from app.tasks.stale_collection_jobs import stale_collection_jobs_task
 
 logger = logging.getLogger("unisense.collector.worker")
 
@@ -188,6 +189,7 @@ class WorkerSettings:
         audit_archive_task,
         notify_purge_task,
         purge_collection_runs_task,
+        stale_collection_jobs_task,
         auto_escalate_overdue,
         sync_neo4j_assets_task,
         lineage_scan_task,
@@ -291,6 +293,13 @@ class WorkerSettings:
             hour=3,
             minute=0,
             run_at_startup=False,
+        ),
+        cron(
+            stale_collection_jobs_task,
+            name="stale-collection-jobs",
+            minute={0, 15, 30, 45},
+            second=0,
+            run_at_startup=True,
         ),
     ]
     on_startup = startup

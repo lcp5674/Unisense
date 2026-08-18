@@ -532,6 +532,7 @@ async def test_run_cancelled_writes_failed_and_reraises():
     repo.update_health_status = AsyncMock()
     store = MagicMock()
     store.set = AsyncMock()
+    store.get = AsyncMock(return_value=None)  # 非用户取消（超时）→ 走失败收尾
 
     with patch("app.services.collector.tasks.CollectorRepository", return_value=repo):
         with pytest.raises(asyncio.CancelledError):
@@ -552,6 +553,37 @@ async def test_run_cancelled_writes_failed_and_reraises():
         "FAILED",
         {"source_id": "src1", "actor_id": 1, "error": "采集超时或任务取消"},
     )
+
+
+async def test_run_user_cancelled_keeps_cancelled_no_failure_notify():
+    """H2: 用户主动取消（JobStore 已 CANCELLED）→ 保持 CANCELLED 终态，
+    不覆盖为 FAILED、不触发失败通知；仅收尾 collection_run。"""
+    svc = MagicMock()
+    svc.start_collection_run = AsyncMock(return_value=1)
+    svc.fail_collection_run = AsyncMock()
+    svc.collect_and_register = AsyncMock(side_effect=asyncio.CancelledError())
+    db = MagicMock()
+    db.commit = AsyncMock()
+    repo = MagicMock()
+    repo.update_health_status = AsyncMock()
+    store = MagicMock()
+    store.set = AsyncMock()
+    store.get = AsyncMock(return_value={"status": "CANCELLED"})  # cancel API 已写 CANCELLED
+
+    with patch("app.services.collector.tasks.CollectorRepository", return_value=repo):
+        with pytest.raises(asyncio.CancelledError):
+            await run_collection_task(
+                {"svc": svc, "db": db, "job_store": store, "collector": MagicMock()},
+                "src1",
+                1,
+                "job1",
+            )
+
+    # 保持 CANCELLED：不写 FAILED、不更新健康为 unhealthy、不触发失败通知
+    store.set.assert_not_awaited()
+    repo.update_health_status.assert_not_awaited()
+    # 仅收尾 collection_run（标 FAILED + 取消说明）
+    svc.fail_collection_run.assert_awaited_once_with(1, "任务已取消")
 
 
 async def test_run_concurrent_lock_skips_when_acquire_fails():
