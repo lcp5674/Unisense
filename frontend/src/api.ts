@@ -3366,6 +3366,8 @@ export async function fetchAssetTables(params?: {
   /** 关键字：表名或数据源模糊搜索 */
   keyword?: string;
   limit?: number;
+  /** 偏移分页（与后端 total 配合做服务端分页，P2-1） */
+  offset?: number;
 }): Promise<{ items: AssetTableItem[]; total: number }> {
   const qs = pageQs({
     source_id: params?.source_id,
@@ -3375,6 +3377,7 @@ export async function fetchAssetTables(params?: {
     schema_status: params?.schema_status,
     keyword: params?.keyword,
     limit: params?.limit ?? 100,
+    offset: params?.offset,
   });
   return request(`${API_BASE}/assetmap/tables?${qs}`);
 }
@@ -3390,6 +3393,8 @@ export async function fetchAssetOrphans(params?: {
   /** Schema 完整性：complete / incomplete */
   schema_status?: "complete" | "incomplete";
   limit?: number;
+  /** 偏移分页（与后端 total 配合做服务端分页，P2-1） */
+  offset?: number;
 }): Promise<{ items: AssetTableItem[]; total: number }> {
   const qs = pageQs({
     keyword: params?.keyword,
@@ -3399,6 +3404,7 @@ export async function fetchAssetOrphans(params?: {
     sensitivity: params?.sensitivity,
     schema_status: params?.schema_status,
     limit: params?.limit ?? 200,
+    offset: params?.offset,
   });
   return request(`${API_BASE}/assetmap/orphans?${qs}`);
 }

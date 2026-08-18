@@ -2157,22 +2157,34 @@ describe("AssetMap", () => {
   });
 
   it("孤儿资产：合规统计条展示总数 / PII / 机密级孤儿数", async () => {
-    vi.mocked(fetchAssetOrphans).mockResolvedValue({
-      items: [
-        {
-          id: 1, source_id: "s1", entity_name: "ods_user", entity_type: "TABLE",
-          sensitivity_level: "PII", owner_id: null, schema_incomplete: false,
-        },
-        {
-          id: 2, source_id: "s2", entity_name: "ads_finance", entity_type: "TABLE",
-          sensitivity_level: "CONFIDENTIAL", owner_id: null, schema_incomplete: true,
-        },
-        {
-          id: 3, source_id: "s3", entity_name: "tmp_log", entity_type: "TABLE",
-          sensitivity_level: "INTERNAL", owner_id: null, schema_incomplete: false,
-        },
-      ],
-      total: 3,
+    // 按参数返回：无 sensitivity=全部（total 3），CONFIDENTIAL 过滤=机密孤儿（total 1）
+    vi.mocked(fetchAssetOrphans).mockImplementation((params) => {
+      if (params?.sensitivity === "CONFIDENTIAL") {
+        return Promise.resolve({
+          items: [{
+            id: 2, source_id: "s2", entity_name: "ads_finance", entity_type: "TABLE",
+            sensitivity_level: "CONFIDENTIAL", owner_id: null, schema_incomplete: true,
+          }],
+          total: 1,
+        });
+      }
+      return Promise.resolve({
+        items: [
+          {
+            id: 1, source_id: "s1", entity_name: "ods_user", entity_type: "TABLE",
+            sensitivity_level: "PII", owner_id: null, schema_incomplete: false,
+          },
+          {
+            id: 2, source_id: "s2", entity_name: "ads_finance", entity_type: "TABLE",
+            sensitivity_level: "CONFIDENTIAL", owner_id: null, schema_incomplete: true,
+          },
+          {
+            id: 3, source_id: "s3", entity_name: "tmp_log", entity_type: "TABLE",
+            sensitivity_level: "INTERNAL", owner_id: null, schema_incomplete: false,
+          },
+        ],
+        total: 3,
+      });
     });
     renderAssetMap();
     await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());

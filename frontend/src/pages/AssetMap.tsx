@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert,
@@ -1472,25 +1472,32 @@ function GraphTab() {
   const [metricInferring, setMetricInferring] = useState(false);
   const [inferElapsed, setInferElapsed] = useState(0);
 
+  // 请求序号令牌（P1 竞态修复）：domain/PII 开关快速切换时旧响应不覆盖新图谱
+  const graphSeqRef = useRef(0);
+
   async function loadGraph() {
+    const seq = ++graphSeqRef.current;
     setLoading(true);
     setError(null);
     try {
       if (graphSource === "asset") {
         // 资产视角：depth=2 从指标出发 2 层收敛，避免 500+ 节点挤成一团（depth 越大展开越多）
         const data = await fetchAssetGraph({ domain, depth: 2, pii_only: piiOnly });
+        if (seq !== graphSeqRef.current) return; // 旧响应丢弃
         setGraphData(data);
       } else {
         // 血缘视角分支：方案A 已收敛为「资产视角」默认，通道切换/完整血缘移至血缘视图（/lineage）。
         // 此分支作为防御保留（历史 URL 可能带 graphSource 参数），非资产视角时提示跳转血缘视图。
+        if (seq !== graphSeqRef.current) return;
         message.info("完整血缘图谱已移至「血缘与影响」视图");
         navigate("/lineage");
         return;
       }
     } catch (err) {
+      if (seq !== graphSeqRef.current) return; // 旧请求失败不弹错
       setError(err instanceof Error ? err.message : "加载图谱数据失败");
     } finally {
-      setLoading(false);
+      if (seq === graphSeqRef.current) setLoading(false);
     }
   }
 
@@ -3029,6 +3036,9 @@ function entityTypeLabel(v: string | null | undefined) {
 // 孤儿资产 Tab：无责任人资产的消化工作台（认领闭环 + 多维度过滤 + 合规统计）。
 function OrphansTab() {
   const [items, setItems] = useState<AssetTableItem[]>([]);
+  // 服务端分页（P2-1：后端返回真实 total + offset，前端按页请求，不再一次拉 200 静默截断）
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // ---- 多维度筛选（关键字/数据源/业务域/实体类型/敏感度/Schema 状态）----
@@ -3073,9 +3083,11 @@ function OrphansTab() {
         entity_type: entityType,
         schema_status: schemaStatus,
         keyword: keyword || undefined,
-        limit: 200,
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
       });
       setItems(r.items);
+      setTotal(r.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载孤儿资产失败");
     } finally {
@@ -3085,12 +3097,18 @@ function OrphansTab() {
 
   async function loadStats() {
     try {
-      const r = await fetchAssetOrphans({ limit: 500 });
-      const all = r.items;
+      // 真实总数（后端 total，不再拉大样本算 length，避免 >N 孤儿截断统计）
+      const [allR, piiR, confR] = await Promise.all([
+        fetchAssetOrphans({ limit: 1 }),
+        fetchAssetPiiOverview(),
+        fetchAssetOrphans({ limit: 1, sensitivity: "CONFIDENTIAL" }),
+      ]);
       setStats({
-        total: all.length,
-        pii: all.filter((i) => (i.sensitivity_level ?? "").includes("PII")).length,
-        confidential: all.filter((i) => i.sensitivity_level === "CONFIDENTIAL").length,
+        total: allR.total,
+        // PII 孤儿来自 /assetmap/pii 概览的 unowned_pii（无主 PII 资产，真实计数）
+        pii: Number(piiR.unowned_pii ?? 0),
+        // 机密级孤儿：孤儿列表按 CONFIDENTIAL 过滤的真实 total
+        confidential: confR.total,
       });
     } catch {
       // 统计加载失败不阻断列表展示
@@ -3100,7 +3118,7 @@ function OrphansTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sensitivity, sourceId, domain, entityType, schemaStatus, keyword]);
+  }, [sensitivity, sourceId, domain, entityType, schemaStatus, keyword, page]);
 
   useEffect(() => {
     loadStats();
@@ -3162,6 +3180,7 @@ function OrphansTab() {
     setEntityType(undefined);
     setSensitivity(undefined);
     setSchemaStatus(undefined);
+    setPage(1);
   }
 
   // 认领：将选中孤儿资产归属给当前登录用户（一键消化孤儿债），成功后从池中移除
@@ -3516,9 +3535,12 @@ function OrphansTab() {
           rowKey={(r) => `${r.source_id}-${r.entity_name}`}
           size="small"
           pagination={{
+            current: page,
+            total,
             pageSize,
             showSizeChanger: true,
             pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+            onChange: (p) => setPage(p),
             onShowSizeChange,
           }}
           rowSelection={{
@@ -3647,6 +3669,9 @@ function OrphansTab() {
 
 function TablesTab() {
   const [items, setItems] = useState<AssetTableItem[]>([]);
+  // 服务端分页（P2-1：后端返回真实 total + offset，前端按页请求，不再一次拉 200 静默截断）
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   // ---- 多维度筛选（数据表目录：关键字/数据源/业务域/敏感度/责任人/Schema 状态）----
   const [keyword, setKeyword] = useState<string>("");
   const [keywordDraft, setKeywordDraft] = useState<string>("");
@@ -3693,9 +3718,11 @@ function TablesTab() {
         owner_id: ownerId,
         schema_status: schemaStatus,
         keyword: keyword || undefined,
-        limit: 200,
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
       });
       setItems(r.items);
+      setTotal(r.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载数据表失败");
     } finally {
@@ -3706,7 +3733,7 @@ function TablesTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sensitivity, sourceId, domain, ownerId, schemaStatus, keyword]);
+  }, [sensitivity, sourceId, domain, ownerId, schemaStatus, keyword, page]);
 
   // 数据源筛选候选（含名称，仅活跃源）
   useEffect(() => {
@@ -3760,6 +3787,7 @@ function TablesTab() {
     setSensitivity(undefined);
     setOwnerId(undefined);
     setSchemaStatus(undefined);
+    setPage(1);
   }
 
   // 打开治理设置 Modal（single 传单个 entity_id；batch 传勾选 id 列表）
@@ -3980,7 +4008,7 @@ function TablesTab() {
         {activeFilterCount > 0 && (
           <>
             <Col>
-              <Tag color="blue">已筛选 {activeFilterCount} 项 · 共 {items.length} 表</Tag>
+              <Tag color="blue">已筛选 {activeFilterCount} 项 · 共 {total} 表</Tag>
             </Col>
             <Col>
               <Button size="small" onClick={resetFilters}>
@@ -4000,9 +4028,12 @@ function TablesTab() {
           rowKey={(r) => `${r.source_id}-${r.entity_name}`}
           size="small"
           pagination={{
+            current: page,
+            total,
             pageSize,
             showSizeChanger: true,
             pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+            onChange: (p) => setPage(p),
             onShowSizeChange,
           }}
           rowSelection={{
@@ -4792,6 +4823,8 @@ function HealthTab() {
 
 function PiiTab() {
   const { can } = usePermission();
+  // 请求序号令牌（P1 竞态修复）：筛选/翻页快速切换时旧响应不覆盖新结果
+  const listSeqRef = useRef(0);
   const [overview, setOverview] = useState<AssetPiiOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [listLoading, setListLoading] = useState(false);
@@ -4845,6 +4878,7 @@ function PiiTab() {
         category?: string;
       },
     ) => {
+      const seq = ++listSeqRef.current;
       setListLoading(true);
       fetchAssetPiiAssets({
         keyword: filters?.keyword ?? keyword,
@@ -4857,11 +4891,17 @@ function PiiTab() {
         page_size: ps,
       })
         .then((res) => {
+          if (seq !== listSeqRef.current) return; // 旧响应丢弃
           setItems(res.items);
           setTotal(res.total);
         })
-        .catch((err) => setError(err instanceof Error ? err.message : "加载 PII 资产失败"))
-        .finally(() => setListLoading(false));
+        .catch((err) => {
+          if (seq !== listSeqRef.current) return;
+          setError(err instanceof Error ? err.message : "加载 PII 资产失败");
+        })
+        .finally(() => {
+          if (seq === listSeqRef.current) setListLoading(false);
+        });
     },
     [keyword, sourceId, domain, ownerId, reviewStatus, category],
   );

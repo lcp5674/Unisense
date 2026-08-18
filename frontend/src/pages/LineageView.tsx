@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert,
@@ -504,11 +504,16 @@ function GraphTab() {
   const { track } = useTracking();
   const { can } = usePermission();
 
+  // 请求序号令牌（P1 竞态修复）：provenance/聚焦切换时旧响应不覆盖新数据
+  const loadSeqRef = useRef(0);
+
   async function load() {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setFocusMiss(false);
     try {
       const d = await lineageGraph({ limit: 2000, provenance: provenance || undefined });
+      if (seq !== loadSeqRef.current) return; // 旧响应丢弃
       let nodes = d.nodes as AssetGraphNode[];
       let edges = d.edges as AssetGraphEdge[];
       if (focusNode) {
@@ -524,13 +529,15 @@ function GraphTab() {
         edges = sub.edges;
         if (nodes.length === 0) setFocusMiss(true);
       }
+      if (seq !== loadSeqRef.current) return; // 聚焦子图构建期间的竞态丢弃
       setData({ nodes, edges });
       track("lineage_graph_view");
     } catch (err) {
+      if (seq !== loadSeqRef.current) return; // 旧请求失败不弹错
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载血缘图谱失败");
       setData(null);
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   }
 
