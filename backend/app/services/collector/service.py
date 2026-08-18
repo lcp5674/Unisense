@@ -2548,6 +2548,24 @@ class CollectorService(BaseService):
             "page_size": page_size,
         }
 
+    async def get_collection_run_summary(
+        self,
+        *,
+        source_id: str | None = None,
+        status: str | None = None,
+        trigger: str | None = None,
+        started_after: datetime | None = None,
+        started_before: datetime | None = None,
+    ) -> dict[str, int]:
+        """采集运行历史聚合统计（服务端 SQL 聚合，供前端统计摘要）。"""
+        return await self._repo.summarize_collection_runs(
+            source_id=source_id,
+            status=status,
+            trigger=trigger,
+            started_after=started_after,
+            started_before=started_before,
+        )
+
     async def get_collection_run_detail(self, run_id: int) -> dict[str, Any]:
         """采集运行详情（含失败/漂移明细）。"""
         run = await self._repo.get_collection_run(run_id)

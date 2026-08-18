@@ -834,6 +834,51 @@ class CollectorRepository:
         res = await self._db.execute(stmt)
         return res.scalars().all(), total
 
+    async def summarize_collection_runs(
+        self,
+        *,
+        source_id: str | None,
+        status: str | None,
+        trigger: str | None,
+        started_after: datetime | None = None,
+        started_before: datetime | None = None,
+    ) -> dict[str, int]:
+        """采集运行历史聚合统计（服务端 SQL 聚合，替代前端分页拉全量）。
+
+        按与 ``list_collection_runs`` 相同的过滤条件一次性算出
+        total/completed/failed/scanned/registered。前端此前用 ``page_size=200``
+        拉全量在客户端聚合，总数 > 200 时成功/失败数只取前 200 条，与 ``total``
+        口径矛盾（TD §12.1 统计一致性）。服务端一次 ``GROUP BY`` 等价聚合消除该矛盾。
+        """
+        base = select(CollectionRun).where(CollectionRun.deleted_at.is_(None))
+        if source_id:
+            base = base.where(CollectionRun.source_id == source_id)
+        if status:
+            base = base.where(CollectionRun.status == status)
+        if trigger:
+            base = base.where(CollectionRun.trigger == trigger)
+        if started_after is not None:
+            base = base.where(CollectionRun.started_at >= started_after)
+        if started_before is not None:
+            base = base.where(CollectionRun.started_at <= started_before)
+        stmt = select(
+            func.count().label("total"),
+            func.sum(case((CollectionRun.status == "COMPLETED", 1), else_=0)).label(
+                "completed"
+            ),
+            func.sum(case((CollectionRun.status == "FAILED", 1), else_=0)).label("failed"),
+            func.sum(func.coalesce(CollectionRun.scanned, 0)).label("scanned"),
+            func.sum(func.coalesce(CollectionRun.registered, 0)).label("registered"),
+        ).select_from(base.subquery())
+        row = (await self._db.execute(stmt)).one()
+        return {
+            "total": int(row.total or 0),
+            "completed": int(row.completed or 0),
+            "failed": int(row.failed or 0),
+            "scanned": int(row.scanned or 0),
+            "registered": int(row.registered or 0),
+        }
+
     async def purge_collection_runs(self, before: datetime) -> int:
         """P2-13: 物理清理指定时间前的终态采集运行历史（保留策略）。
 
