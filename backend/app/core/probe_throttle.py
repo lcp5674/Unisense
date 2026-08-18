@@ -23,6 +23,10 @@ logger = get_logger("unisense.probe_throttle")
 MAX_PROBES = 15
 WINDOW_SECONDS = 60
 
+#: 采集触发限流（对源库压力远大于探活，故阈值更严格）。
+MAX_COLLECTS = 10
+COLLECT_WINDOW_SECONDS = 60
+
 #: 进程内存降级存储：key -> (次数, 窗口截止时间戳)。
 _memory: dict[str, tuple[int, float]] = {}
 
@@ -84,4 +88,40 @@ async def check_probe_rate(key: str, *, max_probes: int = MAX_PROBES) -> None:
             raise BusinessError(
                 "探活请求过于频繁，请稍后再试",
                 error_code="PROBE_RATE_LIMITED",
+            ) from None
+
+
+def _collect_redis_key(key: str) -> str:
+    return f"unisense:collect:{key}"
+
+
+async def check_collect_rate(key: str, *, max_collects: int = MAX_COLLECTS) -> None:
+    """校验 key（用户维度）当前窗口采集触发次数是否超限。
+
+    采集对源库压力远大于探活，故阈值更严格。超限抛
+    ``COLLECT_RATE_LIMITED``，防止单个用户高频触发对源库造成压力。
+    与探活共用降级内存字典，Redis 模式下因 key 前缀不同而隔离。
+    """
+    from app.core.exceptions import BusinessError
+    from app.db.redis import get_redis
+
+    try:
+        redis = get_redis()
+        pipe = redis.pipeline()
+        pipe.incr(_collect_redis_key(key))
+        pipe.expire(_collect_redis_key(key), COLLECT_WINDOW_SECONDS)
+        count, _ = await pipe.execute()
+        if int(count) > max_collects:
+            raise BusinessError(
+                "采集触发过于频繁，请稍后再试",
+                error_code="COLLECT_RATE_LIMITED",
+            )
+    except BusinessError:
+        raise
+    except Exception:
+        count = _memory_bump(key, now=time.time())
+        if count > max_collects:
+            raise BusinessError(
+                "采集触发过于频繁，请稍后再试",
+                error_code="COLLECT_RATE_LIMITED",
             ) from None
