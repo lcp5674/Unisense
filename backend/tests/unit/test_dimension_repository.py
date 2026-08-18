@@ -26,6 +26,11 @@ class _FakeResult:
     def scalar(self) -> object | None:
         return self._row
 
+    def scalar_one(self) -> object:
+        if self._row is None:
+            raise ValueError("scalar_one on empty result")
+        return self._row
+
     def scalars(self) -> _FakeResult:
         return self
 
@@ -165,15 +170,29 @@ class TestMappingCRUD:
         session.add.assert_called_once_with(mapping)
 
     async def test_list_mappings_no_filter(self, repo, session) -> None:
-        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
-        await repo.list_mappings(None)
-        stmt = _first_stmt(session)
-        assert "dimension_mapping" in stmt
+        # P10 分页：count 一次 + 列表一次，返回 (items, total)
+        session.execute = AsyncMock(
+            side_effect=[_FakeResult(row=3), _FakeResult(rows=[])]
+        )
+        items, total = await repo.list_mappings(None)
+        assert total == 3
+        assert items == []
+        # count 查询落在 dimension_mapping 上
+        assert "dimension_mapping" in _first_stmt(session)
 
     async def test_list_mappings_filter_by_source(self, repo, session) -> None:
-        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
-        await repo.list_mappings("src_dim")
-        assert "'src_dim'" in _first_stmt(session)
+        session.execute = AsyncMock(
+            side_effect=[_FakeResult(row=1), _FakeResult(rows=[])]
+        )
+        items, total = await repo.list_mappings("src_dim")
+        assert total == 1
+        # 列表查询含源维度过滤（第二次 execute）
+        stmt = str(
+            session.execute.await_args_list[1].args[0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "'src_dim'" in stmt
 
 
 class TestMetricDimensionCRUD:
@@ -199,14 +218,28 @@ class TestReconciliationCRUD:
         session.add.assert_called_once_with(rec)
 
     async def test_list_reconciliations_no_filter(self, repo, session) -> None:
-        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
-        await repo.list_reconciliations(None)
+        # P10 分页：count 一次 + 列表一次，返回 (items, total)
+        session.execute = AsyncMock(
+            side_effect=[_FakeResult(row=2), _FakeResult(rows=[])]
+        )
+        items, total = await repo.list_reconciliations(None)
+        assert total == 2
+        assert items == []
         assert "reconciliation" in _first_stmt(session)
 
     async def test_list_reconciliations_filter_by_status(self, repo, session) -> None:
-        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
-        await repo.list_reconciliations("APPROVED")
-        assert "'APPROVED'" in _first_stmt(session)
+        session.execute = AsyncMock(
+            side_effect=[_FakeResult(row=1), _FakeResult(rows=[])]
+        )
+        items, total = await repo.list_reconciliations("APPROVED")
+        assert total == 1
+        # 列表查询含状态过滤（第二次 execute）
+        stmt = str(
+            session.execute.await_args_list[1].args[0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "'APPROVED'" in stmt
 
     async def test_get_reconciliation_by_id(self, repo, session) -> None:
         rec = SimpleNamespace(id=7)
@@ -218,6 +251,25 @@ class TestReconciliationCRUD:
     async def test_get_reconciliation_returns_none(self, repo, session) -> None:
         session.execute = AsyncMock(return_value=_FakeResult(row=None))
         assert await repo.get_reconciliation(999) is None
+
+
+class TestRenameReferences:
+    async def test_rename_updates_reconciliation_dim_code(self, repo, session) -> None:
+        """P3 维度改码级联：reconciliation.dim_code 同步更新（对账记录不悬空）。
+
+        修复前 rename_dimension_references 只更新 member/mapping/metric_dimension
+        三表，reconciliation 对账记录仍指向旧码 → 治理追溯悬空。
+        """
+        await repo.rename_dimension_references("dim_old", "dim_new")
+        # 5 张引用表全部级联（member / mapping源 / mapping目标 / metric_dimension / reconciliation）
+        assert session.execute.await_count == 5
+        sqls = [
+            str(c.args[0].compile(compile_kwargs={"literal_binds": True}))
+            for c in session.execute.await_args_list
+        ]
+        # 最后一条 update 落到 reconciliation，且旧码→新码替换
+        assert "reconciliation" in sqls[-1].lower()
+        assert "dim_old" in sqls[-1] and "dim_new" in sqls[-1]
 
 
 class TestCommit:

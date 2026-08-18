@@ -315,8 +315,13 @@ class TestListTree:
         child.status = "active"
 
         svc._repo.list_all = AsyncMock(return_value=[root, child])
-        svc._repo.get_metric_count = AsyncMock(side_effect=[3, 5])
-        svc._repo.get_dimension_count = AsyncMock(side_effect=[2, 4])
+        # P14 批量聚合：一次 GROUP BY 返回 dict（替代逐域 N 次单查）
+        svc._repo.count_metrics_by_domains = AsyncMock(
+            return_value={"sales": 3, "sales_order": 5}
+        )
+        svc._repo.count_dimensions_by_domains = AsyncMock(
+            return_value={"sales": 2, "sales_order": 4}
+        )
 
         tree = await svc.list_tree()
         assert len(tree) == 1
