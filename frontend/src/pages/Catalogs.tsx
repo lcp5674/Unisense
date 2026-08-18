@@ -775,7 +775,7 @@ export function Catalogs() {
             style={{ width: 120 }}
             value={entityType || undefined}
             onChange={(v) => { setEntityType(v || ""); setPage(1); }}
-            options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: ENTITY_TYPE_LABEL[v] ?? v }))}
+            options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: enumLabel(ENTITY_TYPE_LABEL, v) }))}
           />
           <Select
             allowClear
@@ -856,7 +856,7 @@ export function Catalogs() {
             <Input className="mono" placeholder="如 dwd_finance_order" />
           </Form.Item>
           <Form.Item name="entity_type" label="类型" initialValue="TABLE">
-            <Select options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: ENTITY_TYPE_LABEL[v] ?? v }))} />
+            <Select options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: enumLabel(ENTITY_TYPE_LABEL, v) }))} />
           </Form.Item>
           <Form.Item name="etl_sql" label="ETL SQL（可选）">
             <Input.TextArea rows={3} className="mono" />

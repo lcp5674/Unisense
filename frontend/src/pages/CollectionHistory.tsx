@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
   Card,
   Col,
+  DatePicker,
   Descriptions,
   Drawer,
   Empty,
@@ -17,6 +18,7 @@ import {
   Tooltip,
 } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
+import type { Dayjs } from "dayjs";
 import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail } from "../api";
 import type { DataSource, CollectionRun } from "../types";
 import type { DriftLogItem } from "../api";
@@ -118,7 +120,9 @@ export function CollectionHistory() {
   const [runSourceId, setRunSourceId] = useState<string>("");
   const [runStatus, setRunStatus] = useState<string>("");
   const [runTrigger, setRunTrigger] = useState<string>("");
+  const [runTimeRange, setRunTimeRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [runsLoading, setRunsLoading] = useState(false);
+  const [runsError, setRunsError] = useState(false);
   // 统计摘要（近 200 次，随过滤联动）
   const [summary, setSummary] = useState({ total: 0, completed: 0, failed: 0, scanned: 0, registered: 0 });
   // 详情抽屉
@@ -128,11 +132,13 @@ export function CollectionHistory() {
   // ---- 变更追踪 tab 状态 ----
   const [driftSourceId, setDriftSourceId] = useState<string>("");
   const [driftEntity, setDriftEntity] = useState<string>("");
+  const [driftInput, setDriftInput] = useState<string>("");
   const [driftLogs, setDriftLogs] = useState<DriftLogItem[]>([]);
   const [driftTotal, setDriftTotal] = useState(0);
   const [driftPage, setDriftPage] = useState(1);
   const [driftPageSize, setDriftPageSize] = useState(10);
   const [driftLoading, setDriftLoading] = useState(false);
+  const [driftError, setDriftError] = useState(false);
 
   // 加载数据源列表（两 tab 共用）
   const loadSources = useCallback(async () => {
@@ -150,12 +156,20 @@ export function CollectionHistory() {
   // 加载采集运行历史（表格 + 统计摘要）
   const loadRuns = useCallback(async () => {
     setRunsLoading(true);
+    setRunsError(false);
     try {
+      const timeParams = runTimeRange
+        ? {
+            started_after: runTimeRange[0].startOf("day").toISOString(),
+            started_before: runTimeRange[1].endOf("day").toISOString(),
+          }
+        : {};
       const [pageRes, summaryRes] = await Promise.all([
         listCollectionRuns({
           source_id: runSourceId || undefined,
           status: runStatus || undefined,
           trigger: runTrigger || undefined,
+          ...timeParams,
           page: runPage,
           page_size: runPageSize,
         }),
@@ -163,6 +177,7 @@ export function CollectionHistory() {
           source_id: runSourceId || undefined,
           status: runStatus || undefined,
           trigger: runTrigger || undefined,
+          ...timeParams,
           page: 1,
           page_size: 200,
         }),
@@ -180,15 +195,17 @@ export function CollectionHistory() {
     } catch {
       setRuns([]);
       setRunsTotal(0);
+      setRunsError(true);
     } finally {
       setRunsLoading(false);
     }
-  }, [runSourceId, runStatus, runTrigger, runPage, runPageSize]);
+  }, [runSourceId, runStatus, runTrigger, runPage, runPageSize, runTimeRange]);
 
   // 加载漂移日志
   const loadDrift = useCallback(async () => {
     if (!driftSourceId) return;
     setDriftLoading(true);
+    setDriftError(false);
     try {
       const res = await listDriftLogs(driftSourceId, {
         entity_name: driftEntity || undefined,
@@ -200,10 +217,26 @@ export function CollectionHistory() {
     } catch {
       setDriftLogs([]);
       setDriftTotal(0);
+      setDriftError(true);
     } finally {
       setDriftLoading(false);
     }
   }, [driftSourceId, driftEntity, driftPage, driftPageSize]);
+
+  // drift 实体名输入防抖（300ms）：driftInput 即时更新，driftEntity 延迟写入查询值
+  const driftInputTimer = useRef<number | null>(null);
+  const handleDriftInputChange = useCallback((value: string) => {
+    setDriftInput(value);
+    if (driftInputTimer.current !== null) window.clearTimeout(driftInputTimer.current);
+    driftInputTimer.current = window.setTimeout(() => {
+      setDriftEntity(value);
+      setDriftPage(1);
+    }, 300);
+  }, []);
+  // 组件卸载时清理防抖定时器
+  useEffect(() => () => {
+    if (driftInputTimer.current !== null) window.clearTimeout(driftInputTimer.current);
+  }, []);
 
   useEffect(() => { loadSources(); }, [loadSources]);
   useEffect(() => { loadRuns(); }, [loadRuns]);
@@ -371,8 +404,24 @@ export function CollectionHistory() {
           onChange={(v) => { setRunTrigger(v ?? ""); setRunPage(1); }}
           options={["manual", "scheduled"].map((s) => ({ value: s, label: TRIGGER_LABEL[s].label }))}
         />
+        <DatePicker.RangePicker
+          placeholder={["开始日期", "结束日期"]}
+          value={runTimeRange}
+          onChange={(v) => { setRunTimeRange(v as [Dayjs, Dayjs] | null); setRunPage(1); }}
+          allowClear
+          style={{ width: 240 }}
+        />
         <Button icon={<ReloadOutlined />} onClick={loadRuns} loading={runsLoading}>刷新</Button>
       </Space>
+      {runsError && (
+        <Alert
+          type="error"
+          showIcon
+          message="采集运行记录加载失败"
+          description="请检查后端服务是否可用，或点击下方重试按钮重新加载。"
+          action={<Button size="small" onClick={loadRuns}>重试</Button>}
+        />
+      )}
       <Table<CollectionRun>
         rowKey="id"
         loading={runsLoading}
@@ -410,12 +459,21 @@ export function CollectionHistory() {
         />
         <input
           placeholder="按实体名过滤"
-          value={driftEntity}
-          onChange={(e) => { setDriftEntity(e.target.value); setDriftPage(1); }}
+          value={driftInput}
+          onChange={(e) => handleDriftInputChange(e.target.value)}
           style={{ width: 200, height: 32, padding: "0 11px", border: "1px solid #d9d9d9", borderRadius: 6 }}
         />
         <Button icon={<ReloadOutlined />} onClick={() => { setDriftPage(1); loadDrift(); }} loading={driftLoading}>刷新</Button>
       </Space>
+      {driftError && (
+        <Alert
+          type="error"
+          showIcon
+          message="Schema 变更记录加载失败"
+          description="请检查后端服务是否可用，或点击下方重试按钮重新加载。"
+          action={<Button size="small" onClick={() => { setDriftPage(1); loadDrift(); }}>重试</Button>}
+        />
+      )}
       {!driftSourceId ? (
         <Empty description="请在上方选择数据源，查看其 Schema 变更记录（新增列/删除列/类型变更）" image={Empty.PRESENTED_IMAGE_SIMPLE} />
       ) : (

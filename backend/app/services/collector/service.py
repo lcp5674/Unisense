@@ -2480,6 +2480,8 @@ class CollectorService(BaseService):
         trigger: str | None = None,
         page: int = 1,
         page_size: int = 20,
+        started_after: datetime | None = None,
+        started_before: datetime | None = None,
     ) -> dict[str, Any]:
         """采集运行历史分页列表（按开始时间倒序，批量回填源名/责任人）。"""
         runs, total = await self._repo.list_collection_runs(
@@ -2488,6 +2490,8 @@ class CollectorService(BaseService):
             trigger=trigger,
             page=page,
             page_size=page_size,
+            started_after=started_after,
+            started_before=started_before,
         )
         source_ids = {r.source_id for r in runs}
         src_names = await self._repo.get_sources_meta(list(source_ids)) if source_ids else {}

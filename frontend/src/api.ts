@@ -3050,6 +3050,8 @@ export async function listCollectionRuns(params?: {
   source_id?: string;
   status?: string;
   trigger?: string;
+  started_after?: string;
+  started_before?: string;
   page?: number;
   page_size?: number;
 }): Promise<{ items: CollectionRun[]; total: number; page: number; page_size: number }> {
@@ -3057,6 +3059,8 @@ export async function listCollectionRuns(params?: {
     source_id: params?.source_id ?? undefined,
     status: params?.status ?? undefined,
     trigger: params?.trigger ?? undefined,
+    started_after: params?.started_after ?? undefined,
+    started_before: params?.started_before ?? undefined,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 20,
   });

@@ -771,8 +771,10 @@ class CollectorRepository:
         trigger: str | None,
         page: int,
         page_size: int,
+        started_after: datetime | None = None,
+        started_before: datetime | None = None,
     ) -> tuple[Sequence[CollectionRun], int]:
-        """查询采集运行历史（按开始时间倒序，分页；可按 source/status/trigger 过滤）。"""
+        """查询采集运行历史（按开始时间倒序，分页；可按 source/status/trigger/时间区间过滤）。"""
         base = select(CollectionRun).where(CollectionRun.deleted_at.is_(None))
         if source_id:
             base = base.where(CollectionRun.source_id == source_id)
@@ -780,6 +782,10 @@ class CollectorRepository:
             base = base.where(CollectionRun.status == status)
         if trigger:
             base = base.where(CollectionRun.trigger == trigger)
+        if started_after is not None:
+            base = base.where(CollectionRun.started_at >= started_after)
+        if started_before is not None:
+            base = base.where(CollectionRun.started_at <= started_before)
         count = await self._db.scalar(select(func.count()).select_from(base.subquery()))
         total = int(count) if count is not None else 0
         stmt = (

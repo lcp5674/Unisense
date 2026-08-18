@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import datetime
 import json
 import time
 import uuid
@@ -1483,6 +1484,19 @@ async def infer_table_description(
         )
 
 
+def _parse_run_time_param(value: str | None) -> datetime | None:
+    """解析采集运行历史时间区间参数（ISO 8601）。
+
+    空值或非法格式静默忽略（返回 None），不阻断主查询——前端时间筛选为可选增强。
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 # ---- 采集运行历史端点（采集记录页主视图，TD §12.1）----
 
 
@@ -1494,10 +1508,12 @@ async def list_collection_runs(
     source_id: str | None = None,
     status: str | None = None,
     trigger: str | None = None,
+    started_after: str | None = None,
+    started_before: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> ApiResponse[CollectionRunListResponse]:
-    """采集运行历史分页列表（按开始时间倒序，可按源/状态/触发方式过滤）。
+    """采集运行历史分页列表（按开始时间倒序，可按源/状态/触发方式/时间区间过滤）。
 
     采集记录页主视图数据源：区别于 ephemeral 的 job（7 天 TTL），本表为
     持久化采集历史（含失败与排障明细），满足审计与运维可追溯。
@@ -1509,6 +1525,8 @@ async def list_collection_runs(
         trigger=trigger,
         page=page,
         page_size=page_size,
+        started_after=_parse_run_time_param(started_after),
+        started_before=_parse_run_time_param(started_before),
     )
     return ok(data=CollectionRunListResponse(**result), trace_id=trace_id)
 

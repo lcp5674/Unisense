@@ -1,10 +1,12 @@
 // 共享枚举中文映射 —— 统一各页面「枚举英文直出 → 中文 label」
 // 约定：value 保持英文（对接后端），label 为中文展示；未知值回退显示原值。
 
-/** 查表并兜底：value 不在映射中时原样返回 */
+/** 查表并兜底：value 不在映射中时原样返回。
+ *  大小写无关：后端枚举常为大写（TABLE/VIEW/FIELD），前端映射键为小写，
+ *  先精确匹配，再尝试小写/大写归一，避免标签回退裸露英文（P2-18）。 */
 export function enumLabel(map: Record<string, string>, value: string | null | undefined): string {
   if (value === null || value === undefined || value === "") return "";
-  return map[value] ?? value;
+  return map[value] ?? map[value.toLowerCase()] ?? map[value.toUpperCase()] ?? value;
 }
 
 // ---- 指标元数据 ----
