@@ -106,7 +106,8 @@ BREAKING_DEF_FIELDS = (
 # aggregation（聚合方式）语义上就是"怎么算"，SUM→AVG 是完全不同的口径——
 # 必须与 granularity/unit 同级触发 PENDING_VERSION（此前误归治理属性静默更新，
 # 与 definition_json 路径的 BREAKING_DEF_FIELDS 判定矛盾，R40 修复）。
-BREAKING_TOP_LEVEL_FIELDS = ("granularity", "unit", "aggregation")
+# OneData：measure_id（逻辑度量）变更 = 换了"度量什么"，同为破坏性口径变更。
+BREAKING_TOP_LEVEL_FIELDS = ("granularity", "unit", "aggregation", "measure_id")
 
 # 指标间依赖边的 edge_type 映射（register_metric_dependency 由血缘团队负责，
 # 此处按 metric.type 直接写 LineageEdge）。
@@ -428,12 +429,23 @@ class MetricService(BaseService):
         # measure_column 建「指标↔落地表」边——但批量注册/模板实例化等后端构造路径此前
         # 不写这两个键，导致请求传了 source_table 却无血缘边（与前端单条 buildDefinitionJson
         # 合入 ②源表/度量列的行为不一致）。此处后端统一兜底，覆盖全部创建路径。
-        if request.source_table or request.measure_column:
+        # OneData：派生指标携带 mount（挂载实体）时同样并入——mount 为权威结构化记录，
+        # definition_json 冗余一份供血缘/消费/冲突预检等旧读者读取（二者保持一致）。
+        if (
+            request.source_table
+            or request.measure_column
+            or (request.type == "derived" and request.mount)
+        ):
             _defn = dict(request.definition_json or {})
             if request.source_table and not _defn.get("source_table"):
                 _defn["source_table"] = request.source_table
             if request.measure_column and not _defn.get("measure_column"):
                 _defn["measure_column"] = request.measure_column
+            if request.type == "derived" and request.mount:
+                if not _defn.get("source_table") and request.mount.source_table:
+                    _defn["source_table"] = request.mount.source_table
+                if not _defn.get("measure_column") and request.mount.source_column:
+                    _defn["measure_column"] = request.mount.source_column
             request.definition_json = _defn
 
         # PII 双源归一化：definition_json.pii 与 pii_flag 保持一致（pii_flag 为权威源）
@@ -444,7 +456,14 @@ class MetricService(BaseService):
             name=request.name,
             domain=request.domain,
             type=request.type,
-            granularity=request.granularity,
+            # OneData：粒度下沉挂载实体——派生携带 mount 时由挂载回填（冗余供列表/排序展示），
+            # 原子/复合不设粒度（granularity 可空）
+            granularity=(
+                request.granularity
+                or (request.mount.granularity if request.type == "derived" and request.mount else None)
+            ),
+            # OneData 原子层：关联逻辑度量（原子必填，派生/复合继承可空）
+            measure_id=request.measure_id,
             unit=request.unit,
             currency=request.currency,
             aggregation=request.aggregation,
@@ -484,6 +503,25 @@ class MetricService(BaseService):
             published_at=None,
         )
         await self._repo.create_version(version)
+
+        # OneData 挂载层（界限文档 §2.3 第 3 条）：派生指标携带 mount 时，落 metric_mount
+        # 承载源表/粒度/周期/域——同一事务内 flush，粒度已由构造时回填到 metric。
+        # （mount 的 source_table/measure_column 已在 3b 并入 definition_json，
+        #   血缘/消费/冲突预检等旧读者无需改动；mount 为权威结构化记录。）
+        if request.type == "derived" and request.mount:
+            from app.models.metric_mount import MetricMount
+            from app.services.metric_mount.repository import MetricMountRepository
+
+            await MetricMountRepository(self._db).save(
+                MetricMount(
+                    metric_id=metric.id,
+                    source_table=request.mount.source_table,
+                    source_column=request.mount.source_column,
+                    granularity=request.mount.granularity,
+                    default_period=request.mount.default_period,
+                    domain=request.mount.domain,
+                )
+            )
 
         logger.info(
             "metric_created",
@@ -812,6 +850,7 @@ class MetricService(BaseService):
             "name",
             "granularity",
             "unit",
+            "measure_id",
             "currency",
             "aggregation",
             "time_semantics",
@@ -1068,6 +1107,41 @@ class MetricService(BaseService):
             updates["reviewer_id"] = None
             updates["reviewer_type"] = None
             updates["reviewer_domain"] = None
+
+        # OneData 挂载层（界限文档 §2.3 第 3 条）：派生指标携带 mount 时 upsert
+        # metric_mount（源表/粒度/周期/域），并回填 metric.granularity（冗余供列表展示）。
+        # 非派生指标提供 mount → 拒绝（原子=逻辑度量不挂表，复合=派生组合不直接挂表）。
+        # 注：PUBLISHED 状态经 mount 改粒度的 PENDING 确认联动，Phase 4 接入；本阶段直接生效。
+        if request.mount is not None:
+            if metric.type != "derived":
+                raise BusinessError(
+                    f"仅派生指标可挂载物理表，当前类型 {metric.type}",
+                    error_code="INVALID_MOUNT_TARGET",
+                )
+            updates["granularity"] = request.mount.granularity
+            from app.models.metric_mount import MetricMount
+            from app.services.metric_mount.repository import MetricMountRepository
+
+            _mrepo = MetricMountRepository(self._db)
+            existing_mount = await _mrepo.get_by_metric(metric.id)
+            if existing_mount is not None:
+                existing_mount.source_table = request.mount.source_table
+                existing_mount.source_column = request.mount.source_column
+                existing_mount.granularity = request.mount.granularity
+                existing_mount.default_period = request.mount.default_period
+                existing_mount.domain = request.mount.domain
+                await self._db.flush()
+            else:
+                await _mrepo.save(
+                    MetricMount(
+                        metric_id=metric.id,
+                        source_table=request.mount.source_table,
+                        source_column=request.mount.source_column,
+                        granularity=request.mount.granularity,
+                        default_period=request.mount.default_period,
+                        domain=request.mount.domain,
+                    )
+                )
 
         updated = await self._repo.update_with_optimistic_lock(
             metric.id, metric.row_version, **updates

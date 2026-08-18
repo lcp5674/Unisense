@@ -142,6 +142,8 @@ def make_create_payload(**overrides: object) -> dict:
         "name": "每日 GMV",
         "domain": "sales",
         "type": "atomic",
+        # OneData 原子层：原子指标关联逻辑度量（度量目录）
+        "measure_id": 1,
         "granularity": "daily",
         "unit": "yuan",
         "currency": "CNY",

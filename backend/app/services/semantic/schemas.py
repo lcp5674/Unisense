@@ -10,6 +10,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.services.metric_mount.schemas import MetricMountInput
+
 # ---- 请求 Schema ----
 
 
@@ -51,6 +53,8 @@ class MetricCreateRequest(BaseModel):
     """创建指标请求。
 
     对齐 TD §3 POST /api/v1/metric-definitions。
+    OneData（界限文档 §2.3）：原子指标 = 逻辑度量（measure_id）+ 聚合方式，不绑物理表；
+    粒度下沉挂载实体（granularity 可选，派生指标由 mount 承载）。
     """
 
     metric_code: str | None = Field(
@@ -63,7 +67,25 @@ class MetricCreateRequest(BaseModel):
     type: Literal["atomic", "derived", "composite"] = Field(
         ..., description="指标类型: atomic/derived/composite"
     )
-    granularity: str = Field(..., max_length=64, description="粒度")
+    # OneData 粒度下沉：granularity 不再必填——派生指标由 mount（挂载实体）承载粒度，
+    # 原子/复合不设粒度（界限文档 §2.3 第 3 条：粒度属挂载层，不进指标定义）。
+    granularity: str | None = Field(
+        None,
+        max_length=64,
+        description="粒度（已下沉挂载实体 metric_mount；派生创建时由 mount 回填）",
+    )
+    # OneData 原子层：原子指标关联逻辑度量目录（度量格式/单位/小数位/源头系统/同义词继承）。
+    # 派生/复合不直接关联（继承自原子），可空。
+    measure_id: int | None = Field(
+        None,
+        ge=1,
+        description="关联逻辑度量 ID（原子指标 OneData 必填；派生/复合继承可空）",
+    )
+    # 挂载实体（OneData 挂载层）：派生指标专用——源表/源列/粒度/默认周期/业务域。
+    # 创建后 service 自动落 metric_mount 并回填 metric.granularity。
+    mount: MetricMountInput | None = Field(
+        None, description="挂载实体（派生指标：源表/列/粒度/周期/域）"
+    )
     unit: str = Field(..., max_length=32, description="单位")
     currency: str | None = Field(None, max_length=16, description="币种")
     # 与字典种子对齐（9 值）：SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE + MAX/MIN/MEDIAN/PERCENTILE
@@ -136,23 +158,23 @@ class MetricCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_definition_by_type(self) -> "MetricCreateRequest":
-        """按指标类型校验口径定义完整性（注册门禁，PRD 4.5 / TD §12.2）。
+        """按指标类型校验口径定义完整性（注册门禁，PRD 4.5 / TD §12.2 / OneData）。
 
         三类指标在生产中的配置差异：
-        - ``atomic``：须有计算主体——``expression`` / SQL 口径（``sql``），
-          或显式物理来源（来源表 + 度量列）。无主体的原子指标无法锚定血缘（DEFINED_BY）。
+        - ``atomic``：OneData 原子层 = 逻辑度量 + 聚合方式，不绑物理表。注册须关联
+          逻辑度量（``measure_id``）——度量格式/单位/小数位/源头系统/同义词从度量目录
+          继承；技术口径（``expression``/``sql``）可选。兼容旧式物理来源（来源表 +
+          度量列，批量注册等存量路径），保证渐进迁移不破坏既有流。
         - ``derived`` / ``composite``：须声明依赖指标（``dependencies`` 非空）+
           计算表达式（``expression``）。缺依赖则无法构建 ``DERIVED_FROM`` 血缘，
-          也无法在发布时做依赖 PUBLISHED 校验与环检测。
+          也无法在发布时做依赖 PUBLISHED 校验与环检测。派生可携带 ``mount``（挂载实体，
+          承载源表/粒度），粒度不再进指标定义。
 
         缺失关键配置的草稿无消费价值且血缘断链，注册即拦截（422）。
         """
         defn = self.definition_json or {}
         if self.type == "atomic":
-            has_expression = (
-                isinstance(defn.get("expression"), str) and bool(defn["expression"].strip())
-            )
-            has_sql = bool(defn.get("sql"))
+            has_measure = self.measure_id is not None
             has_physical_source = bool(
                 defn.get("source_table") or defn.get("source_tables") or self.source_table
             )
@@ -162,11 +184,11 @@ class MetricCreateRequest(BaseModel):
                 or defn.get("measures")
                 or self.measure_column
             )
-            # 有表达式/SQL 即视为有计算主体；否则须同时提供来源表与度量列
-            if not (has_expression or has_sql or (has_physical_source and has_field)):
+            # OneData：原子须关联逻辑度量；兼容旧式物理来源（渐进迁移，批量注册等存量路径）
+            if not has_measure and not (has_physical_source and has_field):
                 raise ValueError(
-                    "原子指标必须声明计算主体（expression / SQL 口径），"
-                    "或同时提供来源表（source_table / source_tables）与度量列"
+                    "原子指标必须关联逻辑度量（measure_id，OneData 原子层），"
+                    "或兼容旧式物理来源（同时提供来源表 source_table 与度量列）"
                 )
         else:
             deps = defn.get("dependencies")
@@ -187,6 +209,15 @@ class MetricUpdateRequest(BaseModel):
 
     name: str | None = Field(None, max_length=128)
     granularity: str | None = Field(None, max_length=64)
+    # OneData 原子层：更换逻辑度量属口径变更（破坏性，触发版本确认）。
+    # 传 None 表示不修改；派生/复合可空（继承自原子）。
+    measure_id: int | None = Field(
+        None, ge=1, description="关联逻辑度量 ID（更换=破坏性口径变更）"
+    )
+    # 挂载实体（派生指标）：提供则 upsert metric_mount 并回填 granularity
+    mount: MetricMountInput | None = Field(
+        None, description="挂载实体（派生指标：源表/列/粒度/周期/域，提供即 upsert）"
+    )
     unit: str | None = Field(None, max_length=32)
     currency: str | None = Field(None, max_length=16, description="币种（治理属性，非破坏性变更）")
     # ---- 治理属性（TD §12.1 治理补充，非破坏性变更——不触发版本递增/PENDING 期）----
@@ -596,7 +627,10 @@ class MetricResponse(BaseModel):
     name: str
     domain: str
     type: str
-    granularity: str
+    # OneData：粒度已下沉挂载实体（metric_mount），存量/派生回填可空
+    granularity: str | None = None
+    # OneData 原子层：关联逻辑度量 ID（原子必填；派生/复合继承可空）
+    measure_id: int | None = None
     unit: str
     currency: str | None
     aggregation: str

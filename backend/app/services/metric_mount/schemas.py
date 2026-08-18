@@ -11,6 +11,25 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 
+class MetricMountInput(BaseModel):
+    """挂载实体输入（指标创建/更新请求内嵌用）：不含 metric_id——创建时指标尚不存在，
+    由 service 以新建 metric.id 落库；更新时以路径指标为准 upsert。"""
+
+    source_table: str = Field(..., max_length=255, description="源表（可带库前缀）")
+    source_column: str = Field(..., max_length=255, description="度量列（映射原子逻辑度量）")
+    #: 粒度从 metric.granularity 下沉到此（界限文档 §2.3 第 3 条）
+    granularity: str = Field(..., max_length=64, description="粒度（一行代表什么）")
+    default_period: str | None = Field(None, max_length=32, description="默认统计周期")
+    domain: str = Field(..., max_length=64, description="业务域")
+
+    @field_validator("source_table", "source_column", "granularity")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("字段不能为空")
+        return v
+
+
 class MetricMountCreate(BaseModel):
     metric_id: int = Field(..., gt=0, description="所属指标 ID（派生指标）")
     source_table: str = Field(..., max_length=255, description="源表（可带库前缀）")

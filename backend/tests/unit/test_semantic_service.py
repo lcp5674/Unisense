@@ -77,6 +77,92 @@ async def test_create_metric_happy_path():
     assert result.row_version == 1
 
 
+async def test_create_atomic_passes_measure_id():
+    """OneData：原子指标创建透传 measure_id（逻辑度量引用）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.create_metric(
+        MetricCreateRequest(**make_create_payload(measure_id=7)), owner_id=1
+    )
+
+    captured = repo.create.call_args[0][0]
+    assert captured.measure_id == 7
+
+
+async def test_create_derived_with_mount_creates_mount_and_backfills_granularity():
+    """OneData：派生指标携带 mount → 自动建 metric_mount + 粒度回填 metric.granularity。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric(type="derived")
+    created.id = 1
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.save = AsyncMock(side_effect=lambda m: m)
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(
+                    type="derived",
+                    measure_id=None,
+                    granularity=None,
+                    definition_json={
+                        "dependencies": ["sales_gmv_amount_daily"],
+                        "expression": "sales_gmv_amount_daily",
+                    },
+                    mount={
+                        "source_table": "dwd.sales_detail",
+                        "source_column": "gmv",
+                        "granularity": "日",
+                        "default_period": "day",
+                        "domain": "sales",
+                    },
+                )
+            ),
+            owner_id=1,
+        )
+
+    # 粒度由 mount 回填到 metric 主表（冗余供列表展示）
+    captured = repo.create.call_args[0][0]
+    assert captured.granularity == "日"
+    # mount 的 source_table/measure_column 并入 definition_json（血缘等旧读者读取）
+    assert captured.definition_json["source_table"] == "dwd.sales_detail"
+    assert captured.definition_json["measure_column"] == "gmv"
+    # metric_mount 落库（同事务 flush），metric_id 取新建指标 id
+    saved = mrepo_cls.return_value.save.await_args.args[0]
+    assert saved.metric_id == 1
+    assert saved.source_table == "dwd.sales_detail"
+    assert saved.granularity == "日"
+
+
+async def test_create_derived_without_mount_no_mount_created():
+    """派生指标未携带 mount → 不创建 metric_mount（挂载可后续经挂载 API 补充）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric(type="derived"))
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.save = AsyncMock()
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(
+                    type="derived",
+                    measure_id=None,
+                    definition_json={
+                        "dependencies": ["sales_gmv_amount_daily"],
+                        "expression": "sales_gmv_amount_daily",
+                    },
+                )
+            ),
+            owner_id=1,
+        )
+    mrepo_cls.return_value.save.assert_not_awaited()
+
+
 async def test_create_metric_merges_source_table_into_definition():
     """top-level source_table/measure_column 须合入 definition_json（血缘差异同步的消费键）。
 
@@ -197,6 +283,39 @@ async def test_update_metric_creates_version_and_bumps():
     assert version_arg.version == 2
     assert result.row_version == 2
     assert result.version == 2
+
+
+async def test_update_metric_published_non_breaking_syncs_effective_version():
+    """P8 非破坏性 PUBLISHED 编辑：主表 version 与 effective_version 同步。
+
+    修复前非破坏编辑只递增 version、不写 effective_version → 版本号与生效版本
+    矛盾（出现永不转正的 DRAFT 版本）。非破坏性口径变更直接生效，生效版本=最新。
+    """
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="PUBLISHED", row_version=1, version=2, effective_version=2
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", version=3, effective_version=3)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(
+            # 非破坏性：改 source_fields（不在 BREAKING_DEF_FIELDS），expression 不变
+            definition_json={**existing.definition_json, "source_fields": ["gmv", "channel"]},
+            change_reason="补充来源字段（非破坏性）",
+        ),
+        actor_id=1,
+        role="metric_owner",
+    )
+
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    # 非破坏性直接生效 → effective_version 同步到最新版本号
+    assert lock_kwargs["effective_version"] == 3
+    assert lock_kwargs["version"] == 3
 
 
 async def test_update_metric_blocked_by_pdp_decision():
@@ -775,6 +894,57 @@ async def test_batch_register_partial_failure():
     assert result["candidates"][0]["status"] == "DRAFT"
     assert result["candidates"][1]["status"] == "VALIDATION_ERROR"
     assert result["candidates"][1]["validation_errors"] is not None
+
+
+async def test_batch_register_db_error_savepoint_continues():
+    """P13 批量注册单列 DB 错误：savepoint 隔离，仅该列失败、后续列继续。
+
+    修复前 SQLAlchemyError 走整会话 rollback + 中止剩余列，已 flush 的候选被回滚
+    但 candidates 仍记为 DRAFT → 部分结果失真。修复后逐列 begin_nested 隔离。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.semantic.schemas import MetricBatchRegisterRequest
+
+    request = MetricBatchRegisterRequest(
+        source_table="dwd.sales_detail",
+        measure_columns=["ok_col", "bad_col"],
+        dimension_mapping={"domain": "sales"},
+        llm_prefill=True,
+        domain="sales",
+    )
+
+    real_create = svc.create_metric
+
+    async def _flaky_create(req, **kw):
+        # 第 2 列模拟唯一键冲突（DB 级 IntegrityError）
+        if getattr(req, "measure_column", None) == "bad_col":
+            raise IntegrityError("stmt", {}, Exception("duplicate key"))
+        return await real_create(req, **kw)
+
+    svc.create_metric = _flaky_create  # type: ignore[method-assign]
+
+    # savepoint 语义：MagicMock 的 async with 行为不可靠（吞异常），
+    # 用真实 asynccontextmanager 模拟 begin_nested——异常从 yield 抛出进外层 except
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_nested():
+        yield
+
+    svc._db.begin_nested = _fake_nested  # type: ignore[method-assign]
+
+    result = await svc.batch_register_metrics(request, actor_id=1)
+
+    assert len(result["candidates"]) == 2
+    assert result["candidates"][0]["status"] == "DRAFT"  # ok_col 成功
+    assert result["candidates"][1]["status"] == "VALIDATION_ERROR"  # bad_col 被 savepoint 隔离捕获
+    assert "已跳过该列" in result["candidates"][1]["validation_errors"]
 
 
 async def test_review_compliance_rejects_non_pii():

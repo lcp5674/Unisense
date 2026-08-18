@@ -14,6 +14,8 @@ def _base_payload(**overrides) -> dict:
         "name": "GMV",
         "domain": "fin",
         "type": "atomic",
+        # OneData 原子层：原子指标关联逻辑度量（度量目录）
+        "measure_id": 1,
         "granularity": "DAY",
         "unit": "元",
         "aggregation": "SUM",
@@ -162,3 +164,135 @@ def test_template_create_owner_id_validation():
     # 0 → 422
     with pytest.raises(ValidationError):
         MetricTemplateCreateRequest(name="GMV 模板", domain="fin", owner_id=0)
+
+
+# ---- 指标类型化口径校验（PRD 4.5：三类指标生产配置差异）----
+
+
+def test_atomic_with_expression_passes():
+    """原子指标关联逻辑度量（measure_id）+ 计算表达式 → 通过（OneData 原子层）。"""
+    req = MetricCreateRequest(**_base_payload(definition_json={"expression": "SUM(amount)"}))
+    assert req.definition_json["expression"] == "SUM(amount)"
+    assert req.measure_id == 1
+
+
+def test_atomic_requires_measure_id_or_physical_source():
+    """OneData：原子指标必须关联逻辑度量（measure_id），仅表达式不足以锚定度量。
+
+    - 有 measure_id → 通过（技术口径 expression 可选）
+    - 无 measure_id 但提供来源表+度量列 → 通过（兼容旧式/批量注册路径）
+    - 既无 measure_id 也无来源 → 422
+    """
+    # measure_id + 空 definition → 通过（原子=逻辑度量+聚合，不强制技术口径）
+    req = MetricCreateRequest(**_base_payload(definition_json={}))
+    assert req.measure_id == 1
+
+    # 无 measure_id，仅 expression → 422（OneData：表达式不替代逻辑度量）
+    with pytest.raises(ValidationError) as exc:
+        MetricCreateRequest(
+            **_base_payload(
+                measure_id=None, definition_json={"expression": "SUM(amount)"}
+            )
+        )
+    assert "逻辑度量" in str(exc.value)
+
+    # 无 measure_id，提供来源表+度量列（旧式）→ 通过
+    req = MetricCreateRequest(
+        **_base_payload(
+            measure_id=None,
+            definition_json={"source_table": "dwd.sales_detail", "measure_column": "amount"},
+        )
+    )
+    assert req.definition_json["measure_column"] == "amount"
+
+
+def test_atomic_with_physical_source_passes():
+    """原子指标无 measure_id 但提供来源表+度量列 → 通过（旧式/批量注册路径）。"""
+    req = MetricCreateRequest(
+        **_base_payload(
+            measure_id=None,
+            definition_json={"source_table": "dwd.sales_detail", "measure_column": "amount"},
+        )
+    )
+    assert req.definition_json["measure_column"] == "amount"
+
+
+def test_atomic_with_top_level_source_passes():
+    """原子指标 definition 为空但顶层 source_table/measure_column 提供来源 → 通过（自动推断路径）。"""
+    req = MetricCreateRequest(
+        **_base_payload(
+            definition_json={},
+            source_table="dwd.sales_detail",
+            measure_column="amount",
+        )
+    )
+    assert req.source_table == "dwd.sales_detail"
+
+
+def test_atomic_without_measure_or_source_rejected():
+    """原子指标既无 measure_id 也无来源表/度量列 → 422（OneData：原子须锚定逻辑度量）。"""
+    with pytest.raises(ValidationError) as exc:
+        MetricCreateRequest(
+            **_base_payload(
+                measure_id=None,
+                definition_json={"expression": "SUM(amount)"},
+            )
+        )
+    assert "逻辑度量" in str(exc.value)
+
+
+def test_atomic_sql_mode_passes():
+    """原子指标 SQL 模式口径（definition_json.sql）+ measure_id → 通过。"""
+    req = MetricCreateRequest(
+        **_base_payload(definition_json={"sql": "SELECT SUM(amount) FROM dwd.sales"})
+    )
+    assert req.definition_json["sql"]
+
+
+def test_derived_requires_dependencies_and_expression():
+    """派生指标缺依赖指标或计算表达式 → 422；齐备 → 通过。"""
+    with pytest.raises(ValidationError) as exc:
+        MetricCreateRequest(
+            **_base_payload(type="derived", definition_json={"expression": "gmv / order_cnt"})
+        )
+    assert "依赖指标" in str(exc.value)
+
+    with pytest.raises(ValidationError) as exc:
+        MetricCreateRequest(
+            **_base_payload(type="derived", definition_json={"dependencies": ["gmv"]})
+        )
+    assert "计算表达式" in str(exc.value)
+
+    req = MetricCreateRequest(
+        **_base_payload(
+            type="derived",
+            definition_json={
+                "expression": "gmv / order_cnt",
+                "dependencies": ["sales_gmv_amount_daily"],
+            },
+        )
+    )
+    assert req.type == "derived"
+
+
+def test_composite_requires_dependencies_and_expression():
+    """复合指标缺依赖（跨域多指标聚合的前提）或表达式 → 422；齐备 → 通过。"""
+    with pytest.raises(ValidationError) as exc:
+        MetricCreateRequest(
+            **_base_payload(
+                type="composite",
+                definition_json={"dependencies": [], "expression": "sum(a)/sum(b)"},
+            )
+        )
+    assert "依赖指标" in str(exc.value)
+
+    req = MetricCreateRequest(
+        **_base_payload(
+            type="composite",
+            definition_json={
+                "expression": "SUM(region_in_east_gmv) / SUM(total_gmv)",
+                "dependencies": ["east_gmv", "total_gmv"],
+            },
+        )
+    )
+    assert req.type == "composite"

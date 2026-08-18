@@ -135,7 +135,12 @@ async def test_instantiate_required_fields_satisfied_by_template_default() -> No
     template = MagicMock()
     template.id = 1
     template.is_active = True
-    template.defaults_json = {"granularity": "day", "definition_json": {"expression": "sum(x)"}}
+    template.defaults_json = {
+        "granularity": "day",
+        "definition_json": {"expression": "sum(x)"},
+        # OneData 原子层：模板实例化 atomic 须引用逻辑度量
+        "measure_id": 1,
+    }
     template.required_fields = ["granularity"]
     for f, v in (
         ("type", "atomic"), ("unit", "元"), ("aggregation", "SUM"),
@@ -255,6 +260,8 @@ async def test_instantiate_empty_definition_falls_back_to_template_default() -> 
     template.defaults_json = {
         "granularity": "day",
         "definition_json": {"expression": "sum(x)", "source_tables": ["dwd.orders"]},
+        # OneData 原子层：模板实例化 atomic 须引用逻辑度量
+        "measure_id": 1,
     }
     template.required_fields = []
     for f, v in (
