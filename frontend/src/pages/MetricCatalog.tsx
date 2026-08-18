@@ -112,7 +112,7 @@ function collectDomainStatus(nodes: SubjectDomainTreeNode[], acc: Map<string, st
 // 口径摘要：聚合(字段) · 粒度 · 单位
 function calibreSummary(r: MetricResponse): string {
   const agg = AGGREGATION_LABEL[r.aggregation] ?? r.aggregation;
-  const gran = GRANULARITY_LABEL[r.granularity] ?? r.granularity;
+  const gran = r.granularity ? (GRANULARITY_LABEL[r.granularity] ?? r.granularity) : "—";
   const unit = UNIT_LABEL[r.unit] ?? r.unit;
   return `${agg} · ${gran} · ${unit}`;
 }
@@ -760,7 +760,7 @@ export function MetricCatalog() {
           m.metric_code, m.name, domainName(m.domain), userName(m.owner_id), m.type,
           METRIC_STATUS_LABEL[m.status] ?? m.status,
           AGGREGATION_LABEL[m.aggregation] ?? m.aggregation,
-          GRANULARITY_LABEL[m.granularity] ?? m.granularity,
+          GRANULARITY_LABEL[m.granularity ?? ""] ?? (m.granularity ?? "—"),
           m.unit && UNIT_LABEL[m.unit] ? UNIT_LABEL[m.unit] : m.unit, DW_LAYER_LABEL[m.dw_layer] ?? m.dw_layer, METRIC_TIER_LABEL[m.metric_tier] ?? m.metric_tier,
           m.pii_flag ? "PII" : "", m.version, formatCnTime(m.created_at), formatCnTime(m.updated_at),
         ]

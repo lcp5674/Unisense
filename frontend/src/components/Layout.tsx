@@ -113,6 +113,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
       { key: "/domains", label: "主题域管理", icon: <ApartmentOutlined /> },
       { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
+      { key: "/measure-catalogs", label: "度量目录", icon: <TagsOutlined /> },
       { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
     ],
   },

@@ -299,7 +299,7 @@ function ArchivedDetailPanel({
           {domainName(m.domain)}
           {domainInactive(m.domain) && <Tag style={{ marginLeft: 6 }} color="default">已停用</Tag>}
         </Descriptions.Item>
-        <Descriptions.Item label="粒度">{GRANULARITY_LABEL[m.granularity] ?? m.granularity}</Descriptions.Item>
+        <Descriptions.Item label="粒度">{m.granularity ? (GRANULARITY_LABEL[m.granularity] ?? m.granularity) : "—"}</Descriptions.Item>
         <Descriptions.Item label="指标类型">{METRIC_TYPE_LABEL[m.type] ?? m.type}</Descriptions.Item>
         <Descriptions.Item label="状态">
           <Tag color="orange">已作废</Tag>
@@ -838,7 +838,7 @@ export function MetricDetail() {
       val && !opts.some((o) => o.value === val)
         ? [{ value: val, label: `${val} (不在字典中)` }, ...opts]
         : opts;
-    setEditGranularityOptions((prev) => ensureInOptions(prev, metric.granularity));
+    setEditGranularityOptions((prev) => ensureInOptions(prev, metric.granularity ?? undefined));
     setEditUnitOptions((prev) => ensureInOptions(prev, metric.unit));
     const def = metric.definition_json ?? {};
     const rawDims = Array.isArray(def.dimensions) ? def.dimensions.map((d) => String(d)) : [];

@@ -52,6 +52,8 @@ import {
   DictValuesVerifyResponse,
   Dimension,
   DimensionMapping,
+  MeasureCatalog,
+  MetricMount,
   DimensionMember,
   DimensionExpr,
   DryRunResponse,
@@ -1574,9 +1576,13 @@ export async function deprecateDimension(dimCode: string): Promise<Dimension> {
 
 export async function listDimensionMappings(
   sourceDimCode?: string,
+  pageSize = 200,
 ): Promise<{ items: DimensionMapping[]; total: number }> {
-  const qs = sourceDimCode ? `?source_dim_code=${encodeURIComponent(sourceDimCode)}` : "";
-  return request(`${API_BASE}/dimensions/mappings${qs}`);
+  const params = new URLSearchParams();
+  if (sourceDimCode) params.set("source_dim_code", sourceDimCode);
+  params.set("page_size", String(pageSize));
+  const qs = params.toString();
+  return request(`${API_BASE}/dimensions/mappings${qs ? `?${qs}` : ""}`);
 }
 
 export async function createDimensionMapping(body: {
@@ -1593,9 +1599,13 @@ export async function createDimensionMapping(body: {
 
 export async function listReconciliations(
   status?: string,
+  pageSize = 200,
 ): Promise<{ items: Reconciliation[]; total: number }> {
-  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
-  return request(`${API_BASE}/dimensions/reconciliations${qs}`);
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  params.set("page_size", String(pageSize));
+  const qs = params.toString();
+  return request(`${API_BASE}/dimensions/reconciliations${qs ? `?${qs}` : ""}`);
 }
 
 export async function submitReconciliation(body: {
@@ -1619,6 +1629,136 @@ export async function reviewReconciliation(
     method: "POST",
     body: JSON.stringify({ decision }),
   });
+}
+
+// ---- 逻辑度量目录（OneData 原子层，/api/v1/measure-catalogs）----
+export async function listMeasureCatalogs(params?: {
+  domain?: string;
+  status?: string;
+  keyword?: string;
+  owner_id?: number;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: MeasureCatalog[]; total: number }> {
+  const qs = pageQs({
+    domain: params?.domain,
+    status: params?.status,
+    keyword: params?.keyword,
+    owner_id: params?.owner_id,
+    page: params?.page,
+    page_size: params?.page_size ?? 50,
+  });
+  return request(`${API_BASE}/measure-catalogs?${qs}`);
+}
+
+export async function getMeasureCatalog(measureCode: string): Promise<MeasureCatalog> {
+  return request(`${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}`);
+}
+
+export async function createMeasureCatalog(body: {
+  measure_code?: string;
+  name: string;
+  domain: string;
+  description?: string | null;
+  measure_format: string;
+  default_unit?: string | null;
+  default_decimal_places?: number | null;
+  source_system?: string[] | null;
+  synonyms?: string[] | null;
+  owner_id?: number;
+}): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(`${API_BASE}/measure-catalogs`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateMeasureCatalog(
+  measureCode: string,
+  body: {
+    measure_code?: string;
+    name?: string;
+    domain?: string;
+    description?: string | null;
+    measure_format?: string;
+    default_unit?: string | null;
+    default_decimal_places?: number | null;
+    source_system?: string[] | null;
+    synonyms?: string[] | null;
+  },
+): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}`,
+    { method: "PUT", body: JSON.stringify(body) },
+  );
+}
+
+export async function publishMeasureCatalog(measureCode: string): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/publish`,
+    { method: "POST" },
+  );
+}
+
+export async function deprecateMeasureCatalog(measureCode: string): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/deprecate`,
+    { method: "POST" },
+  );
+}
+
+// ---- 指标挂载实体（OneData 挂载层，/api/v1/metric-mounts）----
+export async function listMetricMounts(params?: {
+  metric_id?: number;
+  domain?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ items: MetricMount[]; total: number }> {
+  const qs = pageQs({
+    metric_id: params?.metric_id,
+    domain: params?.domain,
+    page: params?.page,
+    page_size: params?.page_size ?? 50,
+  });
+  return request(`${API_BASE}/metric-mounts?${qs}`);
+}
+
+export async function getMetricMount(mountId: number): Promise<MetricMount> {
+  return request(`${API_BASE}/metric-mounts/${mountId}`);
+}
+
+export async function createMetricMount(body: {
+  metric_id: number;
+  source_table: string;
+  source_column: string;
+  granularity: string;
+  default_period?: string | null;
+  domain: string;
+}): Promise<MetricMount> {
+  return request<MetricMount>(`${API_BASE}/metric-mounts`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateMetricMount(
+  mountId: number,
+  body: {
+    source_table?: string;
+    source_column?: string;
+    granularity?: string;
+    default_period?: string | null;
+    domain?: string;
+  },
+): Promise<MetricMount> {
+  return request<MetricMount>(`${API_BASE}/metric-mounts/${mountId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteMetricMount(mountId: number): Promise<void> {
+  return request<void>(`${API_BASE}/metric-mounts/${mountId}`, { method: "DELETE" });
 }
 
 export async function listDimensionMembers(
@@ -3098,6 +3238,7 @@ export async function listCollectionRuns(params?: {
   );
 }
 
+/** 采集运行历史聚合统计（服务端 SQL 聚合：总数/成功/失败/扫描/注册）。 */
 export async function getCollectionRunSummary(params?: {
   source_id?: string;
   status?: string;

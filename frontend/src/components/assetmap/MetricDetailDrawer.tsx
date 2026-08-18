@@ -223,7 +223,7 @@ export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDr
             <Descriptions.Item label="所属域">{metric.domain}</Descriptions.Item>
             <Descriptions.Item label="类型">{metric.type}</Descriptions.Item>
             <Descriptions.Item label="聚合方式">{AGGREGATION_LABEL[metric.aggregation] ?? metric.aggregation}</Descriptions.Item>
-            <Descriptions.Item label="粒度">{GRANULARITY_LABEL[metric.granularity] ?? metric.granularity}</Descriptions.Item>
+            <Descriptions.Item label="粒度">{metric.granularity ? (GRANULARITY_LABEL[metric.granularity] ?? metric.granularity) : "—"}</Descriptions.Item>
             <Descriptions.Item label="单位">{metric.unit}</Descriptions.Item>
             <Descriptions.Item label="数仓层">{DW_LAYER_LABEL[metric.dw_layer] ?? metric.dw_layer}</Descriptions.Item>
             <Descriptions.Item label="新鲜度">{FRESHNESS_LABEL[metric.freshness] ?? metric.freshness}</Descriptions.Item>

@@ -5,10 +5,11 @@ import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, Dimension } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, Dimension, MeasureCatalog, MetricMountInput } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
+import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
 
 const { Title, Paragraph } = Typography;
@@ -151,6 +152,11 @@ export function MetricCreate() {
   const depSearchTimer = useRef<ReturnType<typeof setTimeout>>();
   const [selectedDeps, setSelectedDeps] = useState<string[]>([]);
 
+  // 逻辑度量目录选项（OneData 原子层）：原子指标选择逻辑度量——度量格式/默认单位/小数位/
+  // 源头系统/同义词从度量目录继承（PRD FR-02-08），注册页不再重复填写基础度量属性。
+  const [measureOptions, setMeasureOptions] = useState<Array<{ value: number; label: string; measure: MeasureCatalog }>>([]);
+  const [selectedMeasure, setSelectedMeasure] = useState<MeasureCatalog | null>(null);
+
   const [suggesting, setSuggesting] = useState(false);
   const [suggestedCode, setSuggestedCode] = useState<string | null>(null);
 
@@ -254,6 +260,18 @@ export function MetricCreate() {
     listUsers()
       .then(setOwnerUsers)
       .catch(() => setOwnerUsers([]));
+    // OneData 原子层：加载已发布逻辑度量（度量目录），供原子指标选择继承度量属性
+    listMeasureCatalogs({ status: "PUBLISHED", page_size: 200 })
+      .then((res) =>
+        setMeasureOptions(
+          (res.items ?? []).map((m) => ({
+            value: m.id,
+            label: `${m.name} (${m.measure_code})`,
+            measure: m,
+          })),
+        ),
+      )
+      .catch(() => setMeasureOptions([]));
   }, []);
 
   // 口径定义区：关联数据表搜索（与源表名一致的惰性交互——空关键词加载平台已采集的表，可关键词搜索）
@@ -615,20 +633,40 @@ export function MetricCreate() {
     } else if (isAtomic && mode === "expression") {
       const measure = String(values.measure_column || "").trim();
       const hasDefinition = String(values.definition || "").trim().length > 0;
-      if (!measure && !hasDefinition) {
-        message.warning("原子指标请选择源表与度量列（自动生成聚合表达式），或填写口径定义");
+      if (!selectedMeasure && !measure && !hasDefinition) {
+        message.warning("原子指标请选择逻辑度量（推荐）或源表与度量列，或填写口径定义");
         return;
       }
     }
     setLoading(true);
     const definitionJson = buildDefinitionJson(values);
     if (!definitionJson) { setLoading(false); return; }
+    // OneData 挂载层：派生指标收集挂载配置（源表/列/粒度/周期/域）→ 服务端自动落 metric_mount
+    let mount: MetricMountInput | undefined;
+    if (metricType === "derived") {
+      const ms = String(values.mount_source_table || "").trim();
+      const mc = String(values.mount_source_column || "").trim();
+      const mg = String(values.mount_granularity || "").trim();
+      if (ms && mc && mg) {
+        mount = {
+          source_table: ms,
+          source_column: mc,
+          granularity: mg,
+          default_period: String(values.mount_default_period || "") || null,
+          domain: selectedDomain,
+        };
+      }
+    }
     const req: MetricCreateRequest = {
       metric_code: values.metric_code ? String(values.metric_code) : undefined,
       name: String(values.name),
       domain: selectedDomain,
       type: String(values.type) as MetricType,
-      granularity: String(values.granularity),
+      // OneData：粒度下沉挂载——原子不设，派生由 mount 承载（主表冗余回填由服务端处理）
+      granularity: values.granularity ? String(values.granularity) : mount?.granularity ?? undefined,
+      // OneData 原子层：原子指标关联逻辑度量（度量格式/单位/小数位继承）
+      measure_id: isAtomic ? selectedMeasure?.id ?? undefined : undefined,
+      mount,
       unit: String(values.unit),
       currency: values.currency ? String(values.currency) : undefined,
       aggregation: String(values.aggregation) as MetricCreateRequest["aggregation"],
@@ -836,55 +874,78 @@ export function MetricCreate() {
             {/* Step 2: 按类型的来源配置——原子=源表/度量列/周期（自动推断）；派生/复合=依赖指标 */}
             <Card
               type="inner"
-              title={isAtomic ? "② 原子来源（源表/度量列/周期）" : "② 依赖指标"}
+              title={isAtomic ? "② 原子来源（逻辑度量 + 聚合方式）" : "② 依赖指标"}
               size="small"
               extra={suggesting && <Spin size="small" />}
             >
               {isAtomic ? (
-                <Row gutter={16}>
-                  <Col span={8}>
-                    <Form.Item name="source_table" label="源表名">
-                      <Select
-                        showSearch
-                        allowClear
-                        placeholder="选择或搜索源表（已接入的表可直接选，如 dwd.sales_detail）"
-                        onSearch={handleSrcTableSearch}
-                        onChange={handleSrcTableSelect}
-                        onOpenChange={handleSrcTableDropdown}
-                        loading={srcTableSearchLoading}
-                        notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
-                        options={srcTableSearchOptions}
-                        filterOption={false}
-                      />
-                    </Form.Item>
-                  </Col>
-                  <Col span={8}>
-                    <Form.Item name="measure_column" label="度量列">
-                      <Select
-                        showSearch
-                        allowClear
-                        placeholder={columnOptions.length > 0 ? "选择度量列" : "请先选择源表"}
-                        onChange={handleColumnSelect}
-                        options={columnOptions}
-                        disabled={columnOptions.length === 0}
-                        filterOption={(input, option) =>
-                          (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
-                        }
-                      />
-                    </Form.Item>
-                  </Col>
-                  <Col span={8}>
-                    <Form.Item name="period" label="统计周期">
-                      <Select
-                        allowClear
-                        placeholder="选择统计周期"
-                        onChange={handlePeriodSelect}
-                        options={PERIOD_OPTIONS}
-                      />
-                    </Form.Item>
-                  </Col>
-                </Row>
+                <>
+                  <Form.Item
+                    name="measure_id"
+                    label="逻辑度量（度量目录，OneData 原子层）"
+                    extra={
+                      selectedMeasure
+                        ? `继承：${MEASURE_FORMAT_LABEL[selectedMeasure.measure_format] ?? selectedMeasure.measure_format} · 单位 ${selectedMeasure.default_unit || "—"} · 小数位 ${selectedMeasure.default_decimal_places ?? "按需"}${selectedMeasure.source_system?.length ? ` · 源头系统 ${selectedMeasure.source_system.join("/")}` : ""}`
+                        : "原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由度量目录继承"
+                    }
+                  >
+                    <Select
+                      showSearch
+                      allowClear
+                      placeholder="选择或搜索逻辑度量（如 支付金额 pay_amt）"
+                      optionFilterProp="label"
+                      onChange={(id: number) =>
+                        setSelectedMeasure(measureOptions.find((o) => o.value === id)?.measure ?? null)
+                      }
+                      options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
+                    />
+                  </Form.Item>
+                  <Row gutter={16}>
+                    <Col span={8}>
+                      <Form.Item name="source_table" label="源表名（兼容旧式来源，可选）">
+                        <Select
+                          showSearch
+                          allowClear
+                          placeholder="选择或搜索源表（已接入的表可直接选，如 dwd.sales_detail）"
+                          onSearch={handleSrcTableSearch}
+                          onChange={handleSrcTableSelect}
+                          onOpenChange={handleSrcTableDropdown}
+                          loading={srcTableSearchLoading}
+                          notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
+                          options={srcTableSearchOptions}
+                          filterOption={false}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col span={8}>
+                      <Form.Item name="measure_column" label="度量列（兼容旧式来源，可选）">
+                        <Select
+                          showSearch
+                          allowClear
+                          placeholder={columnOptions.length > 0 ? "选择度量列" : "请先选择源表"}
+                          onChange={handleColumnSelect}
+                          options={columnOptions}
+                          disabled={columnOptions.length === 0}
+                          filterOption={(input, option) =>
+                            (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+                          }
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col span={8}>
+                      <Form.Item name="period" label="统计周期（兼容旧式推断，可选）">
+                        <Select
+                          allowClear
+                          placeholder="选择统计周期"
+                          onChange={handlePeriodSelect}
+                          options={PERIOD_OPTIONS}
+                        />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                </>
               ) : (
+                <>
                 <Form.Item
                   label="依赖指标"
                   required
@@ -908,6 +969,58 @@ export function MetricCreate() {
                     allowClear
                   />
                 </Form.Item>
+                {metricType === "derived" && (
+                  <Form.Item
+                    label="挂载实体（源表/粒度，OneData 挂载层）"
+                    extra="派生指标挂载物理表承载粒度/周期——粒度从指标下沉到挂载（界限文档 §2.3）；原子指标不挂载"
+                  >
+                    <Row gutter={12}>
+                      <Col span={8}>
+                        <Form.Item name="mount_source_table" noStyle>
+                          <Select
+                            showSearch
+                            allowClear
+                            placeholder="源表（如 dwd.sales_detail）"
+                            onSearch={handleSrcTableSearch}
+                            onOpenChange={handleSrcTableDropdown}
+                            loading={srcTableSearchLoading}
+                            notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
+                            options={srcTableSearchOptions}
+                            filterOption={false}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={6}>
+                        <Form.Item name="mount_source_column" noStyle>
+                          <Select
+                            showSearch
+                            allowClear
+                            placeholder="度量列"
+                            options={columnOptions}
+                            filterOption={(input, option) =>
+                              (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+                            }
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={5}>
+                        <Form.Item name="mount_granularity" noStyle>
+                          <Input placeholder="粒度（如 日/月）" maxLength={64} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={5}>
+                        <Form.Item name="mount_default_period" noStyle>
+                          <Select
+                            allowClear
+                            placeholder="默认周期"
+                            options={PERIOD_OPTIONS}
+                          />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                  </Form.Item>
+                )}
+                </>
               )}
             </Card>
 

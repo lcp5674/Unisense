@@ -17,6 +17,7 @@ vi.mock("../api", async () => {
     batchRegisterMetrics: vi.fn(),
     batchSubmitMetrics: vi.fn(),
     listUsers: vi.fn().mockResolvedValue([]),
+    listMeasureCatalogs: vi.fn().mockResolvedValue({ items: [], total: 0 }),
     autoSuggestMetric: vi.fn(),
     getDomainDefaults: vi.fn(),
     checkConflict: vi.fn(),
@@ -24,7 +25,7 @@ vi.mock("../api", async () => {
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, checkConflict, createMetric, listMetrics } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, listMeasureCatalogs, autoSuggestMetric, checkConflict, createMetric, listMetrics } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -33,6 +34,7 @@ const mockedCatalogs = vi.mocked(listCatalogs);
 const mockedBatch = vi.mocked(batchRegisterMetrics);
 const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
 const mockedUsers = vi.mocked(listUsers);
+const mockedMeasures = vi.mocked(listMeasureCatalogs);
 const mockedSuggest = vi.mocked(autoSuggestMetric);
 const mockedCheckConflict = vi.mocked(checkConflict);
 const mockedCreate = vi.mocked(createMetric);
@@ -687,20 +689,21 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     mockedMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
   });
 
-  it("默认原子指标：展示源表/度量列/周期，隐藏依赖指标与计算表达式", async () => {
+  it("默认原子指标：展示逻辑度量与源表/度量列/周期，隐藏依赖指标与计算表达式", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    // 原子来源配置区（源表/度量列/周期）展示
-    expect(screen.getByText("② 原子来源（源表/度量列/周期）")).toBeTruthy();
-    expect(screen.getByText("源表名")).toBeTruthy();
-    expect(screen.getByText("度量列")).toBeTruthy();
-    expect(screen.getByText("统计周期")).toBeTruthy();
+    // 原子来源配置区（逻辑度量 + 兼容旧式源表/度量列/周期）展示
+    expect(screen.getByText("② 原子来源（逻辑度量 + 聚合方式）")).toBeTruthy();
+    expect(screen.getByText("逻辑度量（度量目录，OneData 原子层）")).toBeTruthy();
+    expect(screen.getByText("源表名（兼容旧式来源，可选）")).toBeTruthy();
+    expect(screen.getByText("度量列（兼容旧式来源，可选）")).toBeTruthy();
+    expect(screen.getByText("统计周期（兼容旧式推断，可选）")).toBeTruthy();
     // 依赖指标 / 计算表达式为派生/复合专属，原子下不出现
     expect(screen.queryByText("② 依赖指标")).toBeNull();
     expect(screen.queryByText("计算表达式")).toBeNull();
   });
 
-  it("切换到派生指标：展示依赖指标（必填）与计算表达式，隐藏源表/度量列/周期", async () => {
+  it("切换到派生指标：展示依赖指标（必填）与计算表达式，隐藏原子来源", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     fireEvent.click(screen.getByText("派生指标"));
@@ -708,9 +711,9 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(screen.getByText("② 依赖指标")).toBeTruthy();
     expect(screen.getByText("计算表达式")).toBeTruthy();
     // 原子专属配置隐藏
-    expect(screen.queryByText("② 原子来源（源表/度量列/周期）")).toBeNull();
-    expect(screen.queryByText("源表名")).toBeNull();
-    expect(screen.queryByText("度量列")).toBeNull();
+    expect(screen.queryByText("② 原子来源（逻辑度量 + 聚合方式）")).toBeNull();
+    expect(screen.queryByText("源表名（兼容旧式来源，可选）")).toBeNull();
+    expect(screen.queryByText("度量列（兼容旧式来源，可选）")).toBeNull();
   });
 
   it("派生指标未选依赖指标提交 → 前端拦截并提示依赖必填", async () => {
@@ -762,10 +765,10 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await pickDomain();
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "GMV" } });
     await pickUnit();
-    // 默认 atomic + 表达式模式：未选源表/度量列、口径 JSON 为空
+    // 默认 atomic + 表达式模式：未选逻辑度量/源表度量列、口径 JSON 为空
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     await waitFor(() =>
-      expect(screen.getByText("原子指标请选择源表与度量列（自动生成聚合表达式），或填写口径定义")).toBeTruthy()
+      expect(screen.getByText("原子指标请选择逻辑度量（推荐）或源表与度量列，或填写口径定义")).toBeTruthy()
     );
     expect(mockedCreate).not.toHaveBeenCalled();
   });

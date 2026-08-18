@@ -25,7 +25,10 @@ export interface MetricResponse {
   name: string;
   domain: string;
   type: MetricType;
-  granularity: string;
+  /** OneData：粒度已下沉挂载实体（metric_mount），存量/派生回填可空 */
+  granularity: string | null;
+  /** OneData 原子层：关联逻辑度量 ID（原子必填；派生/复合继承可空；旧后端缺省） */
+  measure_id?: number | null;
   unit: string;
   currency: string | null;
   aggregation: string;
@@ -243,7 +246,6 @@ export interface MetricCreateRequest {
   name: string;
   domain: string;
   type: MetricType;
-  granularity: string;
   unit: string;
   currency?: string | null;
   aggregation: "SUM" | "AVG" | "COUNT" | "COUNT_DISTINCT" | "LAST_VALUE";
@@ -255,6 +257,12 @@ export interface MetricCreateRequest {
   additivity?: "ADDITIVE" | "SEMI_ADDITIVE" | "NON_ADDITIVE";
   non_additive_dimensions?: string[] | null;
   definition_json: Record<string, unknown>;
+  /** OneData：粒度已下沉挂载实体——原子/复合不设，派生由 mount 承载 */
+  granularity?: string | null;
+  /** OneData 原子层：关联逻辑度量 ID（原子指标必填，度量格式/单位/小数位继承） */
+  measure_id?: number | null;
+  /** OneData 挂载层：派生指标携带源表/列/粒度/周期/域，服务端自动落 metric_mount */
+  mount?: MetricMountInput | null;
   pii_flag?: boolean;
   sla?: string | null;
   /** 口径三方责任（PRD 4.5 补充，均可空）：产品需求方/技术方/数仓开发 */
@@ -265,8 +273,12 @@ export interface MetricCreateRequest {
 
 export interface MetricUpdateRequest {
   name?: string;
-  granularity?: string;
+  granularity?: string | null;
   unit?: string;
+  /** OneData 原子层：更换逻辑度量 = 破坏性口径变更 */
+  measure_id?: number | null;
+  /** OneData 挂载层：派生指标携带则 upsert metric_mount */
+  mount?: MetricMountInput | null;
   currency?: string; // 治理属性（非破坏性，不触发版本递增）
   aggregation?: string; // 治理属性：聚合方式
   time_semantics?: string; // 治理属性：时间语义
@@ -958,6 +970,71 @@ export interface DimensionMetricBinding {
   role: string;
   default_member: string | null;
   metric_status: string;
+}
+
+// ============================================================================
+// 逻辑度量目录（backend /api/v1/measure-catalogs/*，OneData 原子层）
+// 原子指标 = 逻辑度量 + 聚合方式，不绑物理表/粒度；度量格式/单位/小数位/源头系统/同义词
+// 由度量目录定义，原子指标继承（PRD FR-02-08）。
+// ============================================================================
+
+export type MeasureFormat = "AMOUNT" | "RATIO" | "NUMERIC";
+
+export interface MeasureCatalog {
+  id: number;
+  measure_code: string;
+  name: string;
+  description: string | null;
+  measure_format: MeasureFormat;
+  /** 默认单位（金额:元/比率:小数/数值:自定义） */
+  default_unit: string;
+  /** 默认小数位数（金额2/比率4/数值按需，null=未定） */
+  default_decimal_places: number | null;
+  /** 源头系统（业务系统术语多值） */
+  source_system: string[] | null;
+  synonyms: string[] | null;
+  domain: string;
+  owner_id: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 度量格式展示文案（对齐 PRD FR-02-08） */
+export const MEASURE_FORMAT_LABEL: Record<MeasureFormat, string> = {
+  AMOUNT: "金额",
+  RATIO: "比率",
+  NUMERIC: "数值",
+};
+
+// ============================================================================
+// 指标挂载实体（backend /api/v1/metric-mounts/*，OneData 挂载层）
+// 派生指标 = 原子 + 时间 + 业务限定 + 挂载；粒度从 metric 下沉到挂载（界限文档 §2.3 第 3 条）。
+// ============================================================================
+
+export interface MetricMount {
+  id: number;
+  metric_id: number;
+  source_table: string;
+  source_column: string;
+  granularity: string;
+  default_period: string | null;
+  domain: string;
+  /** 所属指标编码/名称/类型（列表接口 LEFT JOIN 回填） */
+  metric_code?: string | null;
+  metric_name?: string | null;
+  metric_type?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 挂载实体输入（指标创建/更新请求内嵌，不含 metric_id——由服务端以指标 id 落库） */
+export interface MetricMountInput {
+  source_table: string;
+  source_column: string;
+  granularity: string;
+  default_period?: string | null;
+  domain: string;
 }
 
 // ============================================================================
