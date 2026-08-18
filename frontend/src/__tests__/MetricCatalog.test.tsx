@@ -110,7 +110,27 @@ function renderCatalog() {
   return render(
     <MemoryRouter initialEntries={["/catalog"]}>
       <Routes>
-        <Route path="/catalog" element={<MetricCatalog />} />
+        <Route
+          path="/catalog"
+          element={
+            // P6 批量按钮依赖权限 loading 门控：无 Provider 时 usePermission 默认
+            // loading=true → 按钮永久禁用。包 Provider + beforeEach mock 权限快照。
+            <PermissionProvider
+              user={
+                {
+                  id: 1,
+                  username: "admin",
+                  display_name: "管理员",
+                  role: "platform_admin",
+                  domain: null,
+                  org_id: 1,
+                } as never
+              }
+            >
+              <MetricCatalog />
+            </PermissionProvider>
+          }
+        />
         <Route path="/detail/:code" element={<div>detail</div>} />
       </Routes>
     </MemoryRouter>,
@@ -120,6 +140,19 @@ function renderCatalog() {
 describe("MetricCatalog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // P6：renderCatalog 包 PermissionProvider，默认 admin 全权限（批量操作按钮可用）
+    mockedPermissions.mockResolvedValue({
+      user_id: 1,
+      role: "platform_admin",
+      home_domain: null,
+      allowed_actions: ["read", "write", "approve", "deprecate"],
+      ui_actions: ["metric:create", "metric:approve", "metric:deprecate"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
     mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
     mockedDashboard.mockResolvedValue({
       total: 1,
@@ -968,4 +1001,85 @@ describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
     expect(screen.getByText("被驳回")).toBeInTheDocument();
   });
 
+});
+
+describe("列宽拖拽（resizable columns）", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    mockedPermissions.mockResolvedValue({
+      user_id: 1,
+      role: "platform_admin",
+      home_domain: null,
+      allowed_actions: ["read", "write", "approve", "deprecate"],
+      ui_actions: ["metric:create", "metric:approve", "metric:deprecate"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    mockedDashboard.mockResolvedValue({
+      total: 1,
+      by_status: { PUBLISHED: 1 },
+      by_tier: { T1: 1 },
+      by_domain: { sales: 1 },
+      pii_count: 1,
+      pii_ratio: 1,
+    });
+    mockedUsers.mockResolvedValue([
+      { id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", status: "active" },
+      { id: 2, username: "lisi", display_name: "李四", role: "metric_owner", domain: "sales", status: "active" },
+      { id: 3, username: "wangwu", display_name: "王五", role: "platform_admin", domain: null, status: "active" },
+    ]);
+    mockedDomains.mockResolvedValue([
+      {
+        id: 1, code: "sales", name: "销售域", parent_id: null, level: 1,
+        sort_order: 0, status: "ACTIVE", metric_count: 1, children: [],
+      },
+    ]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    // jsdom 默认不触发 requestAnimationFrame（需 pretendToBeVisual），stub 成同步执行，
+    // 让 startResize 内的列宽更新即时生效，便于断言 localStorage 持久化。
+    vi.stubGlobal("requestAnimationFrame", (cb: (t: number) => void) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  });
+
+  it("拖拽手柄：mousedown+mousemove 持久化列宽到 localStorage，且重置按钮可清除偏好", async () => {
+    renderCatalog();
+    const handles = await screen.findAllByLabelText("拖拽调整列宽");
+    expect(handles.length).toBeGreaterThan(0);
+    const handle = handles[0];
+    fireEvent.mouseDown(handle, { clientX: 100 });
+    fireEvent.mouseMove(handle, { clientX: 240 }); // 右拖 140px（事件冒泡到 document 上的 mousemove 监听）
+    fireEvent.mouseUp(handle);
+    await waitFor(() => {
+      const stored = JSON.parse(localStorage.getItem("unisense.metric-catalog.colWidths") || "{}");
+      const keys = Object.keys(stored);
+      expect(keys.length).toBe(1);
+      expect(stored[keys[0]]).toBeGreaterThan(190); // 比默认 190 更宽
+    });
+    // 重置列宽按钮存在且可用（存在自定义列宽时）
+    const resetBtn = screen.getByRole("button", { name: /重置列宽/ }) as HTMLButtonElement;
+    expect(resetBtn.disabled).toBe(false);
+    fireEvent.click(resetBtn);
+    await waitFor(() => {
+      expect(localStorage.getItem("unisense.metric-catalog.colWidths")).toBe("{}");
+    });
+    expect((screen.getByRole("button", { name: /重置列宽/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("初始渲染从 localStorage 恢复记忆的列宽（重置按钮可用）", async () => {
+    localStorage.setItem("unisense.metric-catalog.colWidths", JSON.stringify({ metric_code: 320 }));
+    renderCatalog();
+    await waitFor(() => {
+      // 记忆的宽度被读入 state，重置按钮可点（说明存在自定义列宽偏好）
+      expect((screen.getByRole("button", { name: /重置列宽/ }) as HTMLButtonElement).disabled).toBe(false);
+    });
+  });
 });

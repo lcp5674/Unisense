@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal } from "antd";
 import {
@@ -16,6 +16,7 @@ import {
   ClockCircleOutlined,
   ExclamationCircleOutlined,
   ThunderboltOutlined,
+  ColumnHeightOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
 import {
@@ -326,8 +327,12 @@ export function MetricCatalog() {
   const [restoring, setRestoring] = useState<string | null>(null);
   // 批量操作权限点（方案 C 按钮级管控）：提交/删除=metric:create、通过/打回=metric:approve、
   // 下线=metric:deprecate。can() 控制批量操作按钮可用性；后端接口强制仍为最终边界。
-  const { can } = usePermission();
-  const canBatchManage = can("metric:create") || can("metric:approve") || can("metric:deprecate");
+  // P6 防 fail-open：can() 在权限快照加载期（snapshot=null）返回 true（后端兜底），
+  // 但按钮若在此窗口可用会误导用户——permLoading 未就绪时禁用批量按钮。
+  const { can, loading: permLoading } = usePermission();
+  const canBatchManage =
+    !permLoading &&
+    (can("metric:create") || can("metric:approve") || can("metric:deprecate"));
   // 批量操作菜单项级权限：各操作对应独立权限点，避免仅有部分权限的用户看到并点击无权限项（后端仍为最终边界）
   const canApprove = can("metric:approve");
   const canDeprecate = can("metric:deprecate");
@@ -774,6 +779,60 @@ export function MetricCatalog() {
     }
   }
 
+  // 列宽拖拽：零依赖实现（antd 5.x 的 Table 原生不支持 resizable 列）。
+  // 用户拖拽调整后的列宽持久化到 localStorage，刷新/重开浏览器后保留；
+  // 表头通过 onHeaderCell 注入相对定位，标题区渲染拖拽手柄，mousedown 后
+  // 监听 document 的 mousemove 实时改列宽，mouseup 还原光标与选区。
+  const COL_WIDTH_STORAGE_KEY = "unisense.metric-catalog.colWidths";
+  const DEFAULT_COL_WIDTH = 160;
+  const MIN_COL_WIDTH = 60;
+  const MAX_COL_WIDTH = 600;
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
+    try {
+      const raw = localStorage.getItem(COL_WIDTH_STORAGE_KEY);
+      return raw ? (JSON.parse(raw) as Record<string, number>) : {};
+    } catch {
+      return {};
+    }
+  });
+  const widthsRef = useRef(columnWidths);
+  widthsRef.current = columnWidths;
+  const [hoveredColKey, setHoveredColKey] = useState<string | null>(null);
+  useEffect(() => {
+    try {
+      localStorage.setItem(COL_WIDTH_STORAGE_KEY, JSON.stringify(columnWidths));
+    } catch {
+      // localStorage 不可用（隐私模式/被禁用）时静默降级：列宽仅当前会话生效
+    }
+  }, [columnWidths]);
+
+  const startResize = (e: ReactMouseEvent, key: string, baseWidth: number) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = widthsRef.current[key] ?? baseWidth;
+    let frame = 0;
+    const onMouseMove = (me: MouseEvent) => {
+      const delta = me.clientX - startX;
+      const next = Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.round(startWidth + delta)));
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        setColumnWidths((prev) => (prev[key] === next ? prev : { ...prev, [key]: next }));
+      });
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      cancelAnimationFrame(frame);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+
   const columns: ColumnsType<MetricResponse> = [
     {
       title: "编码",
@@ -948,6 +1007,56 @@ export function MetricCatalog() {
     },
   ];
 
+  // 把「记忆的列宽 + 默认列宽」合并成可拖拽表头：每列标题区渲染一个拖拽手柄，
+  // 通过 onHeaderCell 给 <th> 注入相对定位，手柄绝对定位在列右边缘，拖拽即改列宽。
+  const resizableColumns = useMemo(
+    () =>
+      columns.map((col) => {
+        const key = String(col.key);
+        const baseWidth = (col.width as number | undefined) ?? DEFAULT_COL_WIDTH;
+        const width = columnWidths[key] ?? baseWidth;
+        return {
+          ...col,
+          width,
+          onHeaderCell: () => ({ style: { position: "relative" as const } }),
+          title: (
+            <span
+              style={{ display: "block", position: "relative", paddingRight: 8 }}
+              onMouseEnter={() => setHoveredColKey(key)}
+              onMouseLeave={() => setHoveredColKey((k) => (k === key ? null : k))}
+            >
+              {col.title as ReactNode}
+              <span
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="拖拽调整列宽"
+                onMouseDown={(e) => startResize(e, key, baseWidth)}
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: hoveredColKey === key ? 3 : 6,
+                  transform: "translateX(50%)",
+                  cursor: "col-resize",
+                  userSelect: "none",
+                  touchAction: "none",
+                  background: hoveredColKey === key ? "rgba(24,144,255,0.7)" : "rgba(0,0,0,0.08)",
+                  transition: "background 0.12s",
+                }}
+              />
+            </span>
+          ),
+        };
+      }) as ColumnsType<MetricResponse>,
+    [columns, columnWidths, hoveredColKey],
+  );
+
+  const totalWidth = useMemo(
+    () => resizableColumns.reduce((sum, c) => sum + ((c.width as number | undefined) ?? DEFAULT_COL_WIDTH), 0),
+    [resizableColumns],
+  );
+
   const hasFilter = Boolean(
     keyword || status || domain || tier || ownerFilter || myMetricsOnly || lifecycleFilter || favoritesOnly,
   );
@@ -1068,9 +1177,18 @@ export function MetricCatalog() {
             >
               对比所选{selected.length > 1 ? ` (${selected.length})` : ""}
             </Button>
-          </Tooltip>
-          <Dropdown
-            menu={{
+        </Tooltip>
+        <Tooltip title="恢复默认列宽（清除本地保存的列宽偏好，下次进入按默认宽度展示）">
+          <Button
+            icon={<ColumnHeightOutlined />}
+            onClick={() => setColumnWidths({})}
+            disabled={Object.keys(columnWidths).length === 0}
+          >
+            重置列宽
+          </Button>
+        </Tooltip>
+        <Dropdown
+          menu={{
               items: [
                 {
                   key: "submit",
@@ -1268,7 +1386,7 @@ export function MetricCatalog() {
 
       <Table
         dataSource={displayItems}
-        columns={columns}
+        columns={resizableColumns}
         rowKey="metric_code"
         loading={loading}
         rowSelection={{
@@ -1282,7 +1400,7 @@ export function MetricCatalog() {
         expandable={{
           expandedRowRender: (r) => <ExpandContent r={r} userName={userName} domainName={domainName} />,
         }}
-        scroll={{ x: 1500 }}
+        scroll={{ x: totalWidth }}
         pagination={{
           current: page,
           pageSize,
