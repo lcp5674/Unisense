@@ -110,7 +110,27 @@ function renderCatalog() {
   return render(
     <MemoryRouter initialEntries={["/catalog"]}>
       <Routes>
-        <Route path="/catalog" element={<MetricCatalog />} />
+        <Route
+          path="/catalog"
+          element={
+            // P6 批量按钮依赖权限 loading 门控：无 Provider 时 usePermission 默认
+            // loading=true → 按钮永久禁用。包 Provider + beforeEach mock 权限快照。
+            <PermissionProvider
+              user={
+                {
+                  id: 1,
+                  username: "admin",
+                  display_name: "管理员",
+                  role: "platform_admin",
+                  domain: null,
+                  org_id: 1,
+                } as never
+              }
+            >
+              <MetricCatalog />
+            </PermissionProvider>
+          }
+        />
         <Route path="/detail/:code" element={<div>detail</div>} />
       </Routes>
     </MemoryRouter>,
@@ -120,6 +140,19 @@ function renderCatalog() {
 describe("MetricCatalog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // P6：renderCatalog 包 PermissionProvider，默认 admin 全权限（批量操作按钮可用）
+    mockedPermissions.mockResolvedValue({
+      user_id: 1,
+      role: "platform_admin",
+      home_domain: null,
+      allowed_actions: ["read", "write", "approve", "deprecate"],
+      ui_actions: ["metric:create", "metric:approve", "metric:deprecate"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
     mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
     mockedDashboard.mockResolvedValue({
       total: 1,
