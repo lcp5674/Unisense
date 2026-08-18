@@ -1511,13 +1511,32 @@ export function DataSources() {
                 placeholder="选择数据源类型"
                 onChange={handleTypeChange}
                 listHeight={400}
+                popupMatchSelectWidth={false}
+                dropdownStyle={{ width: 360 }}
                 options={types.map((t) => ({ value: t.source_type, label: `${t.label}（${t.source_type}）` }))}
                 optionRender={(opt) => {
                   const t = typeInfo(types, String(opt.value));
                   return (
-                    <div>
-                      <div>{opt.label}</div>
-                      {t?.description && <div style={{ fontSize: 12, color: "rgba(0,0,0,0.45)" }}>{t.description}</div>}
+                    <div style={{ padding: "3px 0" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontWeight: 500 }}>{opt.label}</span>
+                        {t?.default_port ? (
+                          <Tag style={{ marginInlineStart: "auto" }}>端口 {t.default_port}</Tag>
+                        ) : null}
+                      </div>
+                      {t?.description && (
+                        <div
+                          style={{
+                            fontSize: 12,
+                            color: "rgba(0,0,0,0.45)",
+                            marginTop: 2,
+                            whiteSpace: "normal",
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          {t.description}
+                        </div>
+                      )}
                     </div>
                   );
                 }}
