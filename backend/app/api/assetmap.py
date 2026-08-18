@@ -90,8 +90,13 @@ _PII_READ_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
 _PII_READ_DEPS = [Depends(require_roles(*_PII_READ_ROLES)), Depends(guard_against_injection)]
 
 def _svc(db: AsyncSession, user: User) -> AssetMapService:
-    """构造资产地图服务（注入当前用户组织 ID 用于多租户隔离过滤，P1 加固）。"""
-    return AssetMapService(db, org_id=getattr(user, "org_id", None))
+    """构造资产地图服务（注入当前用户组织 ID 用于多租户隔离过滤，P1 加固）。
+
+    platform_admin 豁免 org 过滤（org_id=None 全组织可见）；其余角色按
+    user.org_id 仅见本组织资产。
+    """
+    org_id = None if _is_platform_admin(user) else getattr(user, "org_id", None)
+    return AssetMapService(db, org_id=org_id)
 
 
 
