@@ -16,6 +16,7 @@ revision 挂 0072_data_source_org_id（当前线性链后继）。
 from __future__ import annotations
 
 from alembic import op
+import sqlalchemy as sa
 
 revision = "0073_db_catalog_row_version"
 down_revision = "0072_data_source_org_id"
@@ -26,7 +27,7 @@ depends_on = None
 def upgrade() -> None:
     op.add_column(
         "db_catalog",
-        op.Column("row_version", op.Integer(), nullable=False, server_default="1", comment="乐观锁版本号"),
+        sa.Column("row_version", sa.Integer(), nullable=False, server_default="1", comment="乐观锁版本号"),
     )
 
 

@@ -15,6 +15,7 @@ revision 挂 0071_catalog_entity_name_idx（当前线性链后继）。
 from __future__ import annotations
 
 from alembic import op
+import sqlalchemy as sa
 
 revision = "0072_data_source_org_id"
 down_revision = "0071_catalog_entity_name_idx"
@@ -25,7 +26,7 @@ depends_on = None
 def upgrade() -> None:
     op.add_column(
         "data_source",
-        op.Column("org_id", op.Integer(), nullable=True, comment="所属组织 ID（多租户隔离）"),
+        sa.Column("org_id", sa.Integer(), nullable=True, comment="所属组织 ID（多租户隔离）"),
     )
     # 历史数据回填默认组织 1（存量单组织部署保持全量可见）
     op.execute("UPDATE data_source SET org_id = 1 WHERE org_id IS NULL")
