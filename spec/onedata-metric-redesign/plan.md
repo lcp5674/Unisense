@@ -156,25 +156,34 @@ GET/PUT/DELETE /api/v1/metric-mounts/{id}
 
 ## Implementation Phases
 
-### Phase 1 — 后端新实体（本阶段交付）
-- [ ] 1. `models/measure_catalog.py` + `models/metric_mount.py`
-- [ ] 2. `services/measure_catalog/`（schemas/repository/service）+ `services/metric_mount/`
-- [ ] 3. `api/measure_catalog.py` + `api/metric_mount.py` + main.py 挂载
-- [ ] 4. migration 0075/0076/0077 + metric.py 变更（measure_id、granularity nullable）
-- [ ] 5. 单测（新模块 CRUD/状态机/分页）
+> 进度（2026-08-18）：Phase 1/2/3 已交付并提交（cda1897/9dc1f00/81a26bd），
+> 真实 DB 已跑 migration 至 0077、backend 镜像已重建、接口冒烟通过（eb9859f 文档同步）。
 
-### Phase 2 — 指标创建/更新 OneData 语义
-- [ ] 6. schemas.py 类型化校验重构（atomic=measure_id；derived=dependencies+period+挂载）
-- [ ] 7. service.py create/update：派生自动建 metric_mount；血缘/消费/冲突预检改读 mount
-- [ ] 8. 存量 metric 测试适配 + 新校验测试
+### Phase 1 — 后端新实体（✅ 已完成，commit cda1897）
+- [x] 1. `models/measure_catalog.py` + `models/metric_mount.py`
+- [x] 2. `services/measure_catalog/`（schemas/repository/service）+ `services/metric_mount/`
+- [x] 3. `api/measure_catalog.py` + `api/metric_mount.py` + main.py 挂载
+- [x] 4. migration 0075/0076/0077 + metric.py 变更（measure_id、granularity nullable）
+- [x] 5. 单测（新模块 CRUD/状态机/分页）
 
-### Phase 3 — 前端
-- [ ] 9. 度量目录管理页 MeasureCatalogs.tsx
-- [ ] 10. MetricCreate 重构：原子=选逻辑度量+聚合；派生=原子+挂载(表/列/粒度)+周期+限定
-- [ ] 11. MetricDetail/MetricCatalog 挂载与 P1 展示
-- [ ] 12. api.ts/types.ts 扩展 + 测试适配 + tsc + vitest 全量
+### Phase 2 — 指标创建/更新 OneData 语义（✅ 已完成，commit 9dc1f00）
+- [x] 6. schemas.py 类型化校验重构（atomic=measure_id；derived=dependencies+period+挂载）
+- [x] 7. service.py create/update：派生自动建 metric_mount + 粒度回填；mount 源表并入 definition_json 供血缘等旧读者
+- [x] 8. 存量 metric 测试适配 + 新校验测试
 
-### Phase 4 — 收尾
-- [ ] 13. 真实 DB 跑 migration（alembic upgrade head）+ 接口冒烟
-- [ ] 14. 界限文档补"平台扩展态/粒度下沉"说明 + TD 同步
-- [ ] 15. 提交（分批，每小任务一 commit）
+### Phase 3 — 前端（✅ 已完成，commit 81a26bd）
+- [x] 9. 度量目录管理页 MeasureCatalogs.tsx（/measure-catalogs）
+- [x] 10. MetricCreate 重构：原子=选逻辑度量+聚合（P1 继承）；派生=依赖+挂载(表/列/粒度/周期)
+- [x] 11. MetricDetail/MetricCatalog 粒度可空适配（挂载/P1 经 measure-catalogs、metric-mounts 接口取）
+- [x] 12. api.ts/types.ts 扩展 + 测试适配 + tsc + vitest 全量（789/789）
+
+### Phase 4 — 收尾（✅ 已完成，commit eb9859f + 真实 DB）
+- [x] 13. 真实 DB 跑 migration（alembic upgrade head → 0077）+ 接口冒烟（measure-catalogs/metric-mounts 200、指标列表恢复）
+- [x] 14. 界限文档补"平台扩展态/粒度下沉"说明 + TD §4.1 新表
+- [x] 15. 提交（每阶段一 commit）
+
+### 后续待办（下一阶段）
+- [ ] 复合指标发布时强校验公式 token 全为已发布派生 code、禁裸表字段（界限文档 §4.2）
+- [ ] 派生挂载改粒度在 PUBLISHED 状态接入 PENDING_VERSION 确认联动
+- [ ] 血缘/消费/冲突预检改读 metric_mount 为权威源（当前以 definition_json 冗余兜底）
+- [ ] 存量 atomic 指标 OneData 化引导（重建为逻辑度量 + 派生挂载）
