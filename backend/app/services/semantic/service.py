@@ -3440,6 +3440,15 @@ class MetricService(BaseService):
             "metric_tier",
             "serving_mode",
             "freshness",
+            # P2-14 治理对比补全：PII/合规复核/责任人/状态/版本/描述
+            # 对齐「指标对比用于口径治理」的诉求——责任归属与敏感分级不一致
+            # 恰是治理中最该一眼暴露的差异。
+            "pii_flag",
+            "compliance_reviewed",
+            "owner_id",
+            "status",
+            "version",
+            "description",
         ]
         result: dict[str, Any] = {
             "metrics": [m.metric_code for m in metrics],
@@ -3478,6 +3487,11 @@ class MetricService(BaseService):
             },
             "difference_level": _level([sorted(ds) for ds in dep_sets]),
         }
+
+        # P2-14 owner 可读化：字段值是 owner_id（机器可读），另附 owner_names 映射供前端
+        # 显示责任人姓名——「责任人不同」是治理对比的高价值信号，裸数字不可读。
+        owner_ids = {m.owner_id for m in metrics if m.owner_id is not None}
+        result["owner_names"] = await self._repo.get_user_display_names(owner_ids)
 
         return result
 
