@@ -62,6 +62,47 @@ E2E_USERS = [
     },
 ]
 
+# OneData 原子层：逻辑度量目录（原子指标 = 逻辑度量 + 聚合方式，不绑物理表）。
+# 度量格式联动默认单位/小数位（AMOUNT→元/2 位；NUMERIC→显式单位/0 位）。
+MEASURES: list[dict[str, Any]] = [
+    {
+        "code": "sales_payment_amount",
+        "name": "支付金额",
+        "description": "成交订单金额总和",
+        "measure_format": "AMOUNT",
+        "default_unit": "CNY",
+        "default_decimal_places": 2,
+        "domain": "sales",
+    },
+    {
+        "code": "sales_order_cnt",
+        "name": "订单数",
+        "description": "订单数量",
+        "measure_format": "NUMERIC",
+        "default_unit": "cnt",
+        "default_decimal_places": 0,
+        "domain": "sales",
+    },
+    {
+        "code": "user_active_user_cnt",
+        "name": "活跃用户数",
+        "description": "每日活跃去重用户数",
+        "measure_format": "NUMERIC",
+        "default_unit": "cnt",
+        "default_decimal_places": 0,
+        "domain": "user",
+    },
+    {
+        "code": "user_pii_user_cnt",
+        "name": "PII 用户数",
+        "description": "留存 PII 的用户数",
+        "measure_format": "NUMERIC",
+        "default_unit": "cnt",
+        "default_decimal_places": 0,
+        "domain": "user",
+    },
+]
+
 # 标准指标定义（definition_json 里 sql 会被 sqlglot 校验，必须是合法 SQL）
 METRICS: list[dict[str, Any]] = [
     {
@@ -69,23 +110,20 @@ METRICS: list[dict[str, Any]] = [
         "name": "E2E销售额",
         "domain": "sales",
         "type": "atomic",
-        "granularity": "day",
         "unit": "CNY",
         "aggregation": "SUM",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T1",
-        "source_table": "dws_metric_sales_e2e_gmv_day",
-        "measure_column": "gmv",
+        # OneData 原子层：引用逻辑度量（支付金额），不绑物理表
+        "measure_id_code": "sales_payment_amount",
         "period": "day",
         "definition_json": {
             "sql": "SELECT order_amount AS gmv, channel, dt FROM ods_e2e_order",
             "source_tables": ["ods_e2e_order"],
             "dimensions": ["channel", "store"],
             "measures": [{"name": "gmv", "aggregation": "SUM"}],
-            "source_table": "dws_metric_sales_e2e_gmv_day",
-            "measure_column": "gmv",
             "period": "day",
         },
     },
@@ -94,15 +132,14 @@ METRICS: list[dict[str, Any]] = [
         "name": "E2E订单量",
         "domain": "sales",
         "type": "atomic",
-        "granularity": "day",
         "unit": "cnt",
         "aggregation": "COUNT",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T2",
-        "source_table": "dws_metric_sales_e2e_ordercnt_day",
-        "measure_column": "order_id",
+        # OneData 原子层：引用逻辑度量（订单数），不绑物理表
+        "measure_id_code": "sales_order_cnt",
         "period": "day",
         "definition_json": {
             "sql": (
@@ -112,8 +149,6 @@ METRICS: list[dict[str, Any]] = [
             "source_tables": ["ods_e2e_order"],
             "dimensions": ["channel"],
             "measures": [{"name": "order_cnt", "aggregation": "COUNT"}],
-            "source_table": "dws_metric_sales_e2e_ordercnt_day",
-            "measure_column": "order_id",
             "period": "day",
         },
     },
@@ -122,15 +157,14 @@ METRICS: list[dict[str, Any]] = [
         "name": "E2E活跃用户数",
         "domain": "user",
         "type": "atomic",
-        "granularity": "day",
         "unit": "cnt",
         "aggregation": "COUNT_DISTINCT",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T1",
-        "source_table": "dws_metric_user_e2e_activeuser_day",
-        "measure_column": "user_id",
+        # OneData 原子层：引用逻辑度量（活跃用户数），不绑物理表
+        "measure_id_code": "user_active_user_cnt",
         "period": "day",
         "definition_json": {
             "sql": (
@@ -140,8 +174,6 @@ METRICS: list[dict[str, Any]] = [
             "source_tables": ["ods_e2e_user"],
             "dimensions": ["dt"],
             "measures": [{"name": "active_user", "aggregation": "COUNT_DISTINCT"}],
-            "source_table": "dws_metric_user_e2e_activeuser_day",
-            "measure_column": "user_id",
             "period": "day",
         },
     },
@@ -150,15 +182,14 @@ METRICS: list[dict[str, Any]] = [
         "name": "E2E用户电话留存指标",
         "domain": "user",
         "type": "atomic",
-        "granularity": "day",
         "unit": "cnt",
         "aggregation": "COUNT_DISTINCT",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T3",
-        "source_table": "dws_metric_user_e2e_piiuser_day",
-        "measure_column": "user_id",
+        # OneData 原子层：引用逻辑度量（PII 用户数），不绑物理表
+        "measure_id_code": "user_pii_user_cnt",
         "period": "day",
         "definition_json": {
             "sql": "SELECT COUNT(DISTINCT user_id) AS pii_user, dt FROM ods_e2e_user GROUP BY dt",
@@ -166,8 +197,6 @@ METRICS: list[dict[str, Any]] = [
             "dimensions": ["dt"],
             "measures": [{"name": "pii_user", "aggregation": "COUNT_DISTINCT"}],
             "source_fields": [{"name": "phone", "pii": True}],
-            "source_table": "dws_metric_user_e2e_piiuser_day",
-            "measure_column": "user_id",
             "period": "day",
         },
     },
@@ -176,23 +205,20 @@ METRICS: list[dict[str, Any]] = [
         "name": "E2E待废弃指标",
         "domain": "sales",
         "type": "atomic",
-        "granularity": "day",
         "unit": "CNY",
         "aggregation": "SUM",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T3",
-        "source_table": "dws_metric_sales_e2e_deprecated_day",
-        "measure_column": "amount",
+        # OneData 原子层：引用逻辑度量（支付金额），不绑物理表
+        "measure_id_code": "sales_payment_amount",
         "period": "day",
         "definition_json": {
             "sql": "SELECT amount, dt FROM ods_e2e_order",
             "source_tables": ["ods_e2e_order"],
             "dimensions": ["dt"],
             "measures": [{"name": "amount", "aggregation": "SUM"}],
-            "source_table": "dws_metric_sales_e2e_deprecated_day",
-            "measure_column": "amount",
             "period": "day",
         },
     },
@@ -201,15 +227,20 @@ METRICS: list[dict[str, Any]] = [
         "name": "E2E客单价（派生）",
         "domain": "sales",
         "type": "derived",
-        "granularity": "day",
         "unit": "CNY",
         "aggregation": "AVG",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "ADS",
         "metric_tier": "T1",
-        "source_table": "ads_sales_e2e_gmv_day",
-        "measure_column": "unit_price",
+        # OneData 挂载层：派生指标挂载数据集（源表/列/粒度/周期/域），granularity 由 service 从 mount 回填
+        "mount": {
+            "source_table": "ads_sales_e2e_gmv_day",
+            "source_column": "unit_price",
+            "granularity": "day",
+            "default_period": "day",
+            "domain": "sales",
+        },
         "period": "day",
         "definition_json": {
             "sql": "SELECT gmv / NULLIF(order_cnt, 0) AS unit_price, dt FROM ads_sales_e2e_gmv_day",
@@ -217,8 +248,6 @@ METRICS: list[dict[str, Any]] = [
             "dimensions": ["dt"],
             "measures": [{"name": "unit_price", "aggregation": "AVG"}],
             "dependencies": ["sales_e2e_gmv_day", "sales_e2e_ordercnt_day"],
-            "source_table": "ads_sales_e2e_gmv_day",
-            "measure_column": "unit_price",
             "period": "day",
         },
     },
@@ -232,23 +261,20 @@ CONFLICT_PAIR = [
         "name": "E2E冲突口径A",
         "domain": "sales",
         "type": "atomic",
-        "granularity": "day",
         "unit": "CNY",
         "aggregation": "SUM",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T3",
-        "source_table": "dws_metric_sales_e2e_conflicta_day",
-        "measure_column": "amount",
+        # OneData 原子层：引用逻辑度量（支付金额），不绑物理表
+        "measure_id_code": "sales_payment_amount",
         "period": "day",
         "definition_json": {
             "sql": CONFLICT_DEF,
             "source_tables": ["ods_e2e_order"],
             "dimensions": ["dt"],
             "measures": [{"name": "amount", "aggregation": "SUM"}],
-            "source_table": "dws_metric_sales_e2e_conflicta_day",
-            "measure_column": "amount",
             "period": "day",
         },
     },
@@ -257,23 +283,20 @@ CONFLICT_PAIR = [
         "name": "E2E冲突口径B",
         "domain": "sales",
         "type": "atomic",
-        "granularity": "day",
         "unit": "CNY",
         "aggregation": "SUM",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T3",
-        "source_table": "dws_metric_sales_e2e_conflictb_day",
-        "measure_column": "amount",
+        # OneData 原子层：引用逻辑度量（支付金额），不绑物理表
+        "measure_id_code": "sales_payment_amount",
         "period": "day",
         "definition_json": {
             "sql": CONFLICT_DEF,
             "source_tables": ["ods_e2e_order"],
             "dimensions": ["dt"],
             "measures": [{"name": "amount", "aggregation": "SUM"}],
-            "source_table": "dws_metric_sales_e2e_conflictb_day",
-            "measure_column": "amount",
             "period": "day",
         },
     },
@@ -412,10 +435,53 @@ def _fetch_user_ids() -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# 2. 指标生命周期
+# 2. OneData 原子层：逻辑度量目录 + 指标生命周期
 # ---------------------------------------------------------------------------
-def ensure_metric(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
-    """幂等创建指标，返回响应 dict。"""
+def ensure_measure(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
+    """幂等创建逻辑度量并发布，返回响应 dict。
+
+    OneData（界限文档 §2.1）：原子指标 = 逻辑度量 + 聚合方式。度量必须 PUBLISHED
+    才能被原子指标引用（create_metric 校验 measure 状态）。
+    """
+    code = spec["code"]
+    # 已存在则直接查（可能处于 DRAFT，确保发布后返回）
+    try:
+        existing = api.get(f"/measure-catalogs/{code}")
+        if existing.get("status") != "PUBLISHED":
+            published = api.post(f"/measure-catalogs/{code}/publish")
+            print(f"[measure] 已存在但未发布，补发布 {code} -> {published.get('status')}")
+            return published
+        print(f"[measure] 已存在 {code} status={existing.get('status')}")
+        return existing
+    except SeedError:
+        pass
+    body = {
+        "measure_code": code,
+        "name": spec["name"],
+        "description": spec.get("description"),
+        "measure_format": spec["measure_format"],
+        "domain": spec["domain"],
+    }
+    if spec.get("default_unit") is not None:
+        body["default_unit"] = spec["default_unit"]
+    if spec.get("default_decimal_places") is not None:
+        body["default_decimal_places"] = spec["default_decimal_places"]
+    created = api.post("/measure-catalogs", body)
+    print(f"[measure] 创建 {code} id={created.get('id')} status={created.get('status')}")
+    # 发布逻辑度量（DRAFT→PUBLISHED）
+    published = api.post(f"/measure-catalogs/{code}/publish")
+    print(f"[measure] 发布 {code} -> {published.get('status')}")
+    return published
+
+
+def ensure_metric(
+    api: Api, spec: dict[str, Any], measure_ids: dict[str, int] | None = None
+) -> dict[str, Any]:
+    """幂等创建指标，返回响应 dict。
+
+    OneData（界限文档 §2.3）：原子指标经 measure_id 引用逻辑度量（不绑物理表）；
+    派生指标携带 mount（挂载数据集，粒度由 service 从 mount 回填）。
+    """
     code = spec["code"]
     # 已存在则直接查
     try:
@@ -429,7 +495,6 @@ def ensure_metric(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
         "name": spec["name"],
         "domain": spec["domain"],
         "type": spec["type"],
-        "granularity": spec["granularity"],
         "unit": spec["unit"],
         "aggregation": spec["aggregation"],
         "time_semantics": spec["time_semantics"],
@@ -441,14 +506,25 @@ def ensure_metric(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
         "serving_mode": "BATCH_ONLY",
         "definition_json": spec["definition_json"],
     }
-    if spec.get("source_table"):
-        body["source_table"] = spec["source_table"]
-    if spec.get("measure_column"):
-        body["measure_column"] = spec["measure_column"]
+    # 原子指标：引用逻辑度量（measure_id_code → measure_ids 数值 id）
+    measure_code = spec.get("measure_id_code")
+    if measure_code and measure_ids and measure_ids.get(measure_code):
+        body["measure_id"] = measure_ids[measure_code]
+    # 派生指标：挂载数据集（source_table/source_column/granularity/period/domain）
+    if spec.get("mount"):
+        body["mount"] = spec["mount"]
+    # 粒度：原子可显式声明（兼容展示）；派生缺省由 service 从 mount 回填
+    if spec.get("granularity"):
+        body["granularity"] = spec["granularity"]
     if spec.get("period"):
         body["period"] = spec["period"]
-    created = api.post("/metric-definitions", body)
-    print(f"[metric] 创建 {code} id={created.get('id')} status={created.get('status')}")
+    # POST 幂等兜底：已存在的编码（含被口径裁决作废/归档的，其单条 GET 返回 404
+    # 导致上面的存在性检测 miss）会返回 409——此时视为已存在跳过，不抛错。
+    created = api.post("/metric-definitions", body, ok_status=(200, 201, 409))
+    if created.get("id"):
+        print(f"[metric] 创建 {code} id={created.get('id')} status={created.get('status')}")
+    else:
+        print(f"[metric] {code} 已存在（编码冲突/归档），跳过")
     return created
 
 
@@ -1040,6 +1116,7 @@ def seed_tracking(api: Api, metric_ids: dict[str, int]) -> None:
 # 冒烟验证
 # ---------------------------------------------------------------------------
 SMOKE_CHECKS = [
+    ("逻辑度量", lambda a: _count(a.get("/measure-catalogs?page_size=100"), "items") >= 4),
     ("指标目录", lambda a: _count(a.get("/metric-definitions?page_size=100"), "items") >= 8),
     ("已发布指标", lambda a: _count(
         a.get("/metric-definitions?status=PUBLISHED&page_size=100"), "items"
@@ -1145,10 +1222,17 @@ def main() -> int:
     print(f"[auth] 登录成功 {args.admin_user}")
     api = Api(args.base, token)
 
-    print("\n===== 3. 指标生命周期 =====")
+    print("\n===== 3. 逻辑度量（OneData 原子层）=====")
+    measure_ids: dict[str, int] = {}
+    for spec in MEASURES:
+        m = ensure_measure(api, spec)
+        measure_ids[spec["code"]] = m.get("id") or 0
+    print(f"[measure] 就绪: {measure_ids}")
+
+    print("\n===== 4. 指标生命周期 =====")
     metric_ids: dict[str, int] = {}
     for spec in ALL_METRICS:
-        m = ensure_metric(api, spec)
+        m = ensure_metric(api, spec, measure_ids=measure_ids)
         metric_ids[spec["code"]] = m.get("id") or 0
     # 发布：sales_e2e_gmv_day / sales_e2e_ordercnt_day / user_e2e_activeuser_day /
     #        user_e2e_piiuser_day / sales_e2e_deprecated_day
@@ -1173,37 +1257,37 @@ def main() -> int:
     publish_metric(api, "sales_e2e_unitprice_day")
     # 冲突对保持 DRAFT（用于冲突列表来源），不发布
 
-    print("\n===== 4. 数据源 + 目录 =====")
+    print("\n===== 5. 数据源 + 目录 =====")
     ensure_datasource(api)
 
-    print("\n===== 5. 血缘 =====")
+    print("\n===== 6. 血缘 =====")
     seed_lineage(api)
 
-    print("\n===== 6. 冲突 =====")
+    print("\n===== 7. 冲突 =====")
     seed_conflicts(api, metric_ids)
 
-    print("\n===== 7. 质量中心 =====")
+    print("\n===== 8. 质量中心 =====")
     seed_quality(api, metric_ids)
 
-    print("\n===== 8. 术语表 =====")
+    print("\n===== 9. 术语表 =====")
     seed_glossary(api)
 
-    print("\n===== 9. 维度 =====")
+    print("\n===== 10. 维度 =====")
     seed_dimensions(api, metric_ids)
 
-    print("\n===== 10. 治理 =====")
+    print("\n===== 11. 治理 =====")
     seed_governance(api, user_ids, metric_ids)
 
-    print("\n===== 11. 通知 =====")
+    print("\n===== 12. 通知 =====")
     seed_notify(api)
 
-    print("\n===== 12. 可观测 =====")
+    print("\n===== 13. 可观测 =====")
     seed_observability(api)
 
-    print("\n===== 13. 消费 =====")
+    print("\n===== 14. 消费 =====")
     seed_consume(api)
 
-    print("\n===== 14. 行为埋点 =====")
+    print("\n===== 15. 行为埋点 =====")
     seed_tracking(api, metric_ids)
 
     passed, failed = smoke_verify(api)

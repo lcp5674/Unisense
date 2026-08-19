@@ -20,6 +20,7 @@ from alembic.config import Config
 
 from app.core.security import hash_password
 from app.db.mysql import async_session_factory, engine
+from app.models.measure_catalog import MeasureCatalog
 from app.models.metric import Metric
 from app.models.user import Organization, User
 
@@ -80,6 +81,20 @@ async def _seed() -> None:
         session.add(user)
         await session.flush()
 
+        # OneData 原子层：逻辑度量目录（30 条原子指标复用同一逻辑度量，FK 需真实行）
+        measure = MeasureCatalog(
+            measure_code="perf_sales_amount",
+            name="Perf 销售额",
+            measure_format="AMOUNT",
+            default_unit="yuan",
+            default_decimal_places=2,
+            domain="sales",
+            owner_id=user.id,
+            status="PUBLISHED",
+        )
+        session.add(measure)
+        await session.flush()
+
         for i in range(30):
             session.add(
                 Metric(
@@ -88,6 +103,8 @@ async def _seed() -> None:
                     domain="sales",
                     type="atomic",
                     granularity="daily",
+                    # OneData 原子层：关联逻辑度量（不绑物理表）
+                    measure_id=measure.id,
                     unit="yuan",
                     currency="CNY",
                     aggregation="SUM",

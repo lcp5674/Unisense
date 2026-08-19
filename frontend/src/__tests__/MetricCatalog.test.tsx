@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { message } from "antd";
 import { MetricCatalog } from "../pages/MetricCatalog";
@@ -63,6 +63,8 @@ const metric: MetricResponse = {
   name: "销售 GMV",
   domain: "sales",
   type: "atomic",
+  // OneData 原子层：关联逻辑度量（度量目录）
+  measure_id: 1,
   granularity: "day",
   unit: "元",
   currency: null,
@@ -185,12 +187,16 @@ describe("MetricCatalog", () => {
         children: [],
       },
     ]);
+    // 按用户群体差异化：默认平台管理员视角（admin=全部列、无角色默认筛选），
+    // 避免 producer 群体默认列（无业务域/收藏/治理徽章）隐藏被断言列；同时清理
+    // localStorage 列偏好残留，保证各用例从角色默认列起步。
+    localStorage.clear();
     mockedCurrentUser.mockResolvedValue({
       id: 1,
-      username: "zhangsan",
-      display_name: "张三",
-      role: "metric_owner",
-      domain: "sales",
+      username: "admin",
+      display_name: "管理员",
+      role: "platform_admin",
+      domain: null,
       org_id: 1,
     });
     mockedFavorites.mockResolvedValue([]);
@@ -211,8 +217,8 @@ describe("MetricCatalog", () => {
     await waitFor(() => {
       expect(screen.getByText("sales_gmv_sum_d")).toBeTruthy();
     });
-    // 责任人 owner_id=1 → 张三；业务域 sales → 销售域
-    expect(screen.getByText("张三")).toBeTruthy();
+    // 责任人 owner_id=1 → 张三（提交人列同为此人时可能重复，用 getAllByText 容忍多命中）
+    expect(screen.getAllByText("张三").length).toBeGreaterThan(0);
     expect(screen.getByText("销售域")).toBeTruthy();
   });
 
@@ -1087,6 +1093,151 @@ describe("列宽拖拽（resizable columns）", () => {
     await waitFor(() => {
       // 记忆的宽度被读入 state，重置按钮可点（说明存在自定义列宽偏好）
       expect((screen.getByRole("button", { name: /重置列宽/ }) as HTMLButtonElement).disabled).toBe(false);
+    });
+  });
+});
+
+describe("MetricCatalog 按用户群体差异化（OneData 治理）", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    mockedPermissions.mockResolvedValue({
+      user_id: 1,
+      role: "platform_admin",
+      home_domain: null,
+      allowed_actions: ["read", "write", "approve", "deprecate"],
+      ui_actions: ["metric:create", "metric:approve", "metric:deprecate"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    mockedDashboard.mockResolvedValue({
+      total: 1,
+      by_status: { PUBLISHED: 1 },
+      by_tier: { T1: 1 },
+      by_domain: { sales: 1 },
+      pii_count: 1,
+      pii_ratio: 1,
+    });
+    mockedUsers.mockResolvedValue([
+      { id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", status: "active" },
+      { id: 2, username: "lisi", display_name: "李四", role: "metric_owner", domain: "sales", status: "active" },
+      { id: 3, username: "wangwu", display_name: "王五", role: "platform_admin", domain: null, status: "active" },
+    ]);
+    mockedMeasures.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
+    mockedDomains.mockResolvedValue([
+      { id: 1, code: "sales", name: "销售域", parent_id: null, level: 1, sort_order: 0, status: "ACTIVE", metric_count: 1, children: [] },
+    ]);
+    mockedFavorites.mockResolvedValue([]);
+  });
+
+  /** 覆盖 fetchCurrentUser 角色（列显隐/默认筛选以它为准），PermissionProvider 权限随之一致。 */
+  function renderWithRole(role: string, domain: string | null = null) {
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "u",
+      display_name: "用户",
+      role,
+      domain,
+      org_id: 1,
+    } as never);
+    return render(
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route
+            path="/catalog"
+            element={
+              <PermissionProvider
+                user={{ id: 1, username: "u", display_name: "用户", role, domain, org_id: 1 } as never}
+              >
+                <MetricCatalog />
+              </PermissionProvider>
+            }
+          />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("reviewer 默认筛选 REVIEW 且应用治理审核列（含提交人）", async () => {
+    renderWithRole("reviewer");
+    await waitFor(() => {
+      expect(
+        mockedList.mock.calls.some(([p]) => (p as { status?: string }).status === "REVIEW"),
+      ).toBe(true);
+    });
+    await screen.findByText("sales_gmv_sum_d");
+    // 治理审核默认列：表头含提交人，不含健康/业务域（生产者/消费者专属列）
+    const thead = document.querySelector(".ant-table-thead") as HTMLElement;
+    expect(within(thead).getByText("提交人")).toBeTruthy();
+    expect(within(thead).queryByText("健康")).toBeNull();
+    expect(within(thead).queryByText("业务域")).toBeNull();
+  });
+
+  it("compliance_officer 默认只看 PII 指标", async () => {
+    renderWithRole("compliance_officer");
+    await waitFor(() => {
+      expect(
+        mockedList.mock.calls.some(([p]) => (p as { pii_flag?: boolean }).pii_flag === true),
+      ).toBe(true);
+    });
+    expect(screen.getByText("只看PII")).toBeTruthy();
+  });
+
+  it("metric_owner 默认只看我的指标并应用生产者列（含健康）", async () => {
+    renderWithRole("metric_owner");
+    await waitFor(() => {
+      expect(
+        mockedList.mock.calls.some(([p]) => (p as { owner_id?: number }).owner_id === 1),
+      ).toBe(true);
+    });
+    await screen.findByText("sales_gmv_sum_d");
+    // 生产者默认列：表头含健康，不含业务域（消费者/治理列）
+    const thead = document.querySelector(".ant-table-thead") as HTMLElement;
+    expect(within(thead).getByText("健康")).toBeTruthy();
+    expect(within(thead).queryByText("业务域")).toBeNull();
+  });
+
+  it("domain_admin 默认按本人域过滤", async () => {
+    renderWithRole("domain_admin", "sales");
+    await waitFor(() => {
+      expect(
+        mockedList.mock.calls.some(([p]) => (p as { domain?: string }).domain === "sales"),
+      ).toBe(true);
+    });
+  });
+
+  it("平台管理员（admin）默认全量列", async () => {
+    renderWithRole("platform_admin");
+    await screen.findByText("sales_gmv_sum_d");
+    const thead = document.querySelector(".ant-table-thead") as HTMLElement;
+    expect(within(thead).getByText("业务域")).toBeTruthy();
+    expect(within(thead).getByText("健康")).toBeTruthy();
+    expect(within(thead).getByText("治理徽章")).toBeTruthy();
+    expect(within(thead).getByText("提交人")).toBeTruthy();
+  });
+
+  it("点击恢复角色默认恢复群体默认列", async () => {
+    renderWithRole("platform_admin");
+    await screen.findByText("sales_gmv_sum_d");
+    const thead = document.querySelector(".ant-table-thead") as HTMLElement;
+    expect(within(thead).getByText("健康")).toBeTruthy();
+    // 打开列设置，取消「健康」列 → 列隐藏（表头判断，避免 Dropdown 弹层选项文本干扰）
+    fireEvent.click(screen.getByRole("button", { name: /列设置/ }));
+    const popup = document.querySelector(".ant-dropdown:not(.ant-dropdown-hidden)") as HTMLElement;
+    expect(popup).toBeTruthy();
+    fireEvent.click(within(popup).getByText("健康"));
+    await waitFor(() => {
+      expect(within(thead).queryByText("健康")).toBeNull();
+    });
+    // 点击恢复角色默认 → 健康列回归（admin 默认全量列）
+    fireEvent.click(within(popup).getByText("恢复角色默认"));
+    await waitFor(() => {
+      expect(within(thead).getByText("健康")).toBeTruthy();
     });
   });
 });

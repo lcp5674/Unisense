@@ -959,6 +959,8 @@ class TestSearchAssets:
             status="PUBLISHED",
             type="atomic",
             granularity="day",
+            # OneData 原子层：关联逻辑度量（度量目录）
+            measure_id=1,
             unit="CNY",
             aggregation="SUM",
             time_semantics="PERIOD",

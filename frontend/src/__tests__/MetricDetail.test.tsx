@@ -125,6 +125,8 @@ const metric: MetricResponse = {
   name: "销售 GMV",
   domain: "sales",
   type: "atomic",
+  // OneData 原子层：关联逻辑度量（度量目录）
+  measure_id: 1,
   granularity: "day",
   unit: "元",
   currency: null,
@@ -261,7 +263,8 @@ describe("MetricDetail", () => {
   });
 
   it("存量原子指标未关联逻辑度量时展示 OneData 化引导", async () => {
-    // fixture 为 atomic 且无 measure_id（旧式物理来源）→ 引导在「度量目录」建逻辑度量后关联
+    // fixture 为 atomic 且显式无 measure_id（旧式物理来源）→ 引导在「度量目录」建逻辑度量后关联
+    mockedGetMetric.mockResolvedValue({ ...metric, measure_id: undefined });
     renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
     await waitFor(() => {
       expect(screen.getByText("该原子指标未关联逻辑度量（存量旧式来源）")).toBeTruthy();

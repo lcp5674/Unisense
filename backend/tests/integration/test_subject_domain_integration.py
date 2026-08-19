@@ -76,6 +76,8 @@ class TestDomainValidation:
                 domain="nonexistent",
                 type="atomic",
                 granularity="day",
+                # OneData 原子层：原子指标 = 逻辑度量 + 聚合方式（mock 场景，无需真实度量行）
+                measure_id=1,
                 unit="cnt",
                 aggregation="SUM",
                 time_semantics="PERIOD",

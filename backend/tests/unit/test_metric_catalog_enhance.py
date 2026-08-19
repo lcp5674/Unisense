@@ -179,6 +179,8 @@ def _metric_snapshot() -> SimpleNamespace:
         domain="sales",
         type="atomic",
         granularity="day",
+        # OneData 原子层：关联逻辑度量（度量目录）
+        measure_id=1,
         unit="元",
         currency=None,
         aggregation="SUM",

@@ -41,6 +41,8 @@ def fake_metric() -> MagicMock:
     m.name = "GMV"
     m.domain = "sales"
     m.type = "atomic"
+    # OneData 原子层：关联逻辑度量（度量目录）
+    m.measure_id = 1
     m.granularity = "daily"
     m.unit = "yuan"
     m.currency = "CNY"
@@ -91,6 +93,11 @@ def fake_metric() -> MagicMock:
     m.description_source = None
     m.description_updated_by = None
     m.description_updated_at = None
+    # 口径三方责任外部人员名称兜底（PRD 4.5）：MetricResponse 演进后新增，
+    # 缺省 MagicMock 值会令 model_validate 校验失败，故显式置 None
+    m.product_owner_name = None
+    m.tech_owner_name = None
+    m.dw_developer_name = None
     m.gray_tenant_ids = None
     m.arbitration_mark = None
     m.pending_version = False

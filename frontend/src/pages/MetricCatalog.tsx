@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal } from "antd";
+import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal, Checkbox } from "antd";
 import {
   ArrowLeftOutlined,
   SearchOutlined,
@@ -18,6 +18,8 @@ import {
   ThunderboltOutlined,
   ColumnHeightOutlined,
   ReloadOutlined,
+  UnorderedListOutlined,
+  SafetyCertificateOutlined,
 } from "@ant-design/icons";
 import {
   fetchCurrentUser,
@@ -95,6 +97,52 @@ const LIFECYCLE_PRESETS = [
   { key: "deprecating", label: "即将废弃", icon: <ExclamationCircleOutlined /> },
 ];
 
+// ---- 按用户群体差异化展示（OneData 治理：不同角色关注不同信息，避免统一列表的信息过载）----
+// 7 角色聚合为 4 群体（analyst/viewer、reviewer/compliance_officer 诉求高度重合）。
+type RoleGroup = "consumer" | "producer" | "governance" | "admin";
+const ROLE_GROUP: Record<string, RoleGroup> = {
+  analyst: "consumer",
+  viewer: "consumer",
+  metric_owner: "producer",
+  reviewer: "governance",
+  compliance_officer: "governance",
+  platform_admin: "admin",
+  domain_admin: "admin",
+};
+const GROUP_LABEL: Record<RoleGroup, string> = {
+  consumer: "业务消费者",
+  producer: "指标生产者",
+  governance: "治理审核",
+  admin: "平台管理",
+};
+// 列设置选项（restore 列仅回收站视图出现，不参与显隐）
+const COLUMN_OPTIONS = [
+  { value: "metric_code", label: "编码" },
+  { value: "name", label: "名称" },
+  { value: "fav", label: "收藏" },
+  { value: "domain", label: "业务域" },
+  { value: "owner", label: "责任人" },
+  { value: "type", label: "类型" },
+  { value: "status", label: "状态" },
+  { value: "calibre", label: "口径摘要" },
+  { value: "submitter", label: "提交人" },
+  { value: "dw_layer", label: "分层" },
+  { value: "tier", label: "分级" },
+  { value: "badges", label: "治理徽章" },
+  { value: "health", label: "健康" },
+  { value: "version", label: "版本" },
+  { value: "updated_at", label: "更新时间" },
+];
+// 各群体默认可见列（平台管理=全部；治理审核含提交人——审核追溯需要）
+const DEFAULT_VISIBLE_COLUMNS: Record<RoleGroup, string[]> = {
+  consumer: ["metric_code", "name", "fav", "domain", "owner", "calibre", "status"],
+  producer: ["metric_code", "name", "status", "calibre", "owner", "type", "health", "version", "updated_at"],
+  governance: ["metric_code", "name", "status", "submitter", "type", "version", "updated_at"],
+  admin: COLUMN_OPTIONS.map((c) => c.value),
+};
+// 列显隐 localStorage 前缀（按群体隔离，避免跨角色污染偏好）
+const VISIBLE_COLS_STORAGE_PREFIX = "unisense.catalog.visibleCols.";
+
 // 递归展平主题域树 → code → 中文名 映射（同时记录 status 供停用域标识）
 function flattenDomains(nodes: SubjectDomainTreeNode[], acc: Map<string, string>) {
   for (const n of nodes) {
@@ -131,6 +179,9 @@ function ExpandContent({
   measureName: (id: number | null | undefined) => string;
 }) {
   const def = r.definition_json ?? {};
+  // 责任方展示：平台用户 id 可解析优先；id 为空但有 name → 外部人员名称（非平台用户直接输入）
+  const ownerName = (id: number | null | undefined, name?: string | null) =>
+    id != null ? userName(id) : name || "—";
   const expression = typeof def.expression === "string" ? def.expression : undefined;
   const definition = typeof def.definition === "string" ? def.definition : undefined;
   const dependencies = Array.isArray(def.dependencies) ? def.dependencies.map((d) => String(d)) : [];
@@ -153,9 +204,10 @@ function ExpandContent({
         <Descriptions.Item label="责任人">{userName(r.owner_id)}</Descriptions.Item>
         <Descriptions.Item label="备份责任人">{userName(r.backup_owner_id)}</Descriptions.Item>
         {/* 口径三方责任（PRD 4.5 补充）：产品需求方/技术方/数仓开发 */}
-        <Descriptions.Item label="产品需求方">{userName(r.product_owner_id)}</Descriptions.Item>
-        <Descriptions.Item label="技术方">{userName(r.tech_owner_id)}</Descriptions.Item>
-        <Descriptions.Item label="数仓开发">{userName(r.dw_developer_id)}</Descriptions.Item>
+        {/* 口径三方责任（PRD 4.5 补充）：产品需求方/技术方/数仓开发（平台用户 id 或外部人员名称） */}
+        <Descriptions.Item label="产品需求方">{ownerName(r.product_owner_id, r.product_owner_name)}</Descriptions.Item>
+        <Descriptions.Item label="技术方">{ownerName(r.tech_owner_id, r.tech_owner_name)}</Descriptions.Item>
+        <Descriptions.Item label="数仓开发">{ownerName(r.dw_developer_id, r.dw_developer_name)}</Descriptions.Item>
         {/* OneData 原子层：逻辑度量（原子指标继承度量格式/单位/小数位；派生/复合继承自依赖，显示 "—"） */}
         <Descriptions.Item label="逻辑度量">{measureName(r.measure_id)}</Descriptions.Item>
         <Descriptions.Item label="提交人">{userName(r.submitted_by)}</Descriptions.Item>
@@ -289,7 +341,14 @@ export function MetricCatalog() {
   const [measureMap, setMeasureMap] = useState<Map<number, { name: string; default_unit?: string | null }>>(new Map());
   const [currentUserId, setCurrentUserId] = useState<number | undefined>(undefined);
   const [currentUserRole, setCurrentUserRole] = useState<string>("");
+  const [currentUserDomain, setCurrentUserDomain] = useState<string>("");
   const [myMetricsOnly, setMyMetricsOnly] = useState(false);
+  // 合规官默认只看 PII 指标（listMetrics 支持 pii_flag 过滤）
+  const [piiOnly, setPiiOnly] = useState(false);
+  // 按用户群体差异化的可见列（null=角色未就绪/未初始化，渲染全部列避免闪烁）
+  const [visibleCols, setVisibleCols] = useState<string[] | null>(null);
+  // 角色默认筛选仅应用一次（URL 参数优先，不覆盖用户手动选择）
+  const roleDefaultApplied = useRef(false);
   const [lifecycleFilter, setLifecycleFilter] = useState<string | null>(urlLifecycle || null);
   const [urlSynced, setUrlSynced] = useState(false);
   useEffect(() => {
@@ -409,7 +468,7 @@ export function MetricCatalog() {
         collectDomainStatus(tree, st);
         setDomainStatusMap(st);
       }),
-      fetchCurrentUser().then((u) => { setCurrentUserId(u.id); setCurrentUserRole(u.role); }).catch(() => {}),
+      fetchCurrentUser().then((u) => { setCurrentUserId(u.id); setCurrentUserRole(u.role); setCurrentUserDomain(u.domain ?? ""); }).catch(() => {}),
       listFavorites()
         .then((favs) => {
           setFavorites(
@@ -428,6 +487,56 @@ export function MetricCatalog() {
         .catch(() => setMeasureMap(new Map())),
     ]).catch(() => {});
   }, []);
+
+  // 按用户群体差异化（OneData 治理）：角色就绪后初始化默认列（localStorage 优先）+
+  // 应用角色默认筛选（URL 参数优先，不覆盖用户手动选择）
+  useEffect(() => {
+    if (!currentUserRole) return;
+    const group = ROLE_GROUP[currentUserRole] ?? "admin";
+    // 1) 可见列：本地保存优先，否则用群体默认
+    if (visibleCols === null) {
+      let initial: string[] | null = null;
+      const saved = localStorage.getItem(`${VISIBLE_COLS_STORAGE_PREFIX}${group}`);
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved) as string[];
+          if (Array.isArray(parsed) && parsed.length > 0) initial = parsed;
+        } catch {
+          initial = null;
+        }
+      }
+      setVisibleCols(initial ?? DEFAULT_VISIBLE_COLUMNS[group]);
+    }
+    // 2) 角色默认筛选（仅一次；URL 参数优先）
+    if (!roleDefaultApplied.current) {
+      roleDefaultApplied.current = true;
+      const hasUrlFilter = Boolean(
+        urlKw || urlStatus || urlOwnerId || urlDomain || urlTier || urlLifecycle,
+      );
+      if (!hasUrlFilter) {
+        if (currentUserRole === "reviewer") setStatus("REVIEW");
+        else if (currentUserRole === "compliance_officer") setPiiOnly(true);
+        else if (currentUserRole === "metric_owner") setMyMetricsOnly(true);
+        else if (currentUserRole === "domain_admin" && currentUserDomain) setDomain(currentUserDomain);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUserRole]);
+
+  // 可见列变更持久化（按群体隔离，避免跨角色污染偏好）
+  useEffect(() => {
+    if (!currentUserRole || visibleCols === null) return;
+    const group = ROLE_GROUP[currentUserRole] ?? "admin";
+    localStorage.setItem(`${VISIBLE_COLS_STORAGE_PREFIX}${group}`, JSON.stringify(visibleCols));
+  }, [visibleCols, currentUserRole]);
+
+  // 恢复角色默认视图：清除本地列偏好并应用群体默认列
+  function handleResetRoleView() {
+    const group = ROLE_GROUP[currentUserRole] ?? "admin";
+    localStorage.removeItem(`${VISIBLE_COLS_STORAGE_PREFIX}${group}`);
+    setVisibleCols(DEFAULT_VISIBLE_COLUMNS[group]);
+    message.success(`已恢复${GROUP_LABEL[group] ?? ""}默认列`);
+  }
 
   const userName = useMemo(
     () => (id: number | null | undefined) => (id == null ? "—" : (userMap.get(id) ?? `#${id}`)),
@@ -477,6 +586,7 @@ export function MetricCatalog() {
         domain: domain || undefined,
         metric_tier: tier || undefined,
         owner_id: ownerFilter ? Number(ownerFilter) : myMetricsOnly ? currentUserId : undefined,
+        pii_flag: piiOnly || undefined,
         created_after: lifecycleDate.created_after,
         updated_before: lifecycleDate.updated_before,
         deleted: deletedView,
@@ -532,7 +642,7 @@ export function MetricCatalog() {
 
   useEffect(() => {
     load();
-  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, currentUserId, ownerFilter, lifecycleDate, deletedView]);
+  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, piiOnly, currentUserId, ownerFilter, lifecycleDate, deletedView]);
 
   function handleSearch() {
     const kw = inputValue;
@@ -752,6 +862,7 @@ export function MetricCatalog() {
           domain: domain || undefined,
           metric_tier: tier || undefined,
           owner_id: ownerFilter ? Number(ownerFilter) : myMetricsOnly ? currentUserId : undefined,
+          pii_flag: piiOnly || undefined,
           created_after: lifecycleDate.created_after,
           updated_before: lifecycleDate.updated_before,
           deleted: deletedView,
@@ -970,6 +1081,14 @@ export function MetricCatalog() {
         ),
     },
     {
+      // 治理审核视角：待审指标追溯提交人（审核闭环 Who/When/Why）
+      title: "提交人",
+      key: "submitter",
+      width: 110,
+      ellipsis: true,
+      render: (_: unknown, r: MetricResponse) => userName(r.submitted_by),
+    },
+    {
       title: "口径摘要",
       key: "calibre",
       width: 180,
@@ -1048,11 +1167,17 @@ export function MetricCatalog() {
     },
   ];
 
+  // 按用户群体差异化：仅渲染可见列（restore 列仅回收站视图，始终保留；角色未就绪时渲染全部避免闪烁）
+  const filteredColumns = useMemo(() => {
+    const allowed = visibleCols ?? COLUMN_OPTIONS.map((c) => c.value);
+    return columns.filter((col) => col.key === "restore" || allowed.includes(String(col.key)));
+  }, [columns, visibleCols]);
+
   // 把「记忆的列宽 + 默认列宽」合并成可拖拽表头：每列标题区渲染一个拖拽手柄，
   // 通过 onHeaderCell 给 <th> 注入相对定位，手柄绝对定位在列右边缘，拖拽即改列宽。
   const resizableColumns = useMemo(
     () =>
-      columns.map((col) => {
+      filteredColumns.map((col) => {
         const key = String(col.key);
         const baseWidth = (col.width as number | undefined) ?? DEFAULT_COL_WIDTH;
         const width = columnWidths[key] ?? baseWidth;
@@ -1090,7 +1215,7 @@ export function MetricCatalog() {
           ),
         };
       }) as ColumnsType<MetricResponse>,
-    [columns, columnWidths, hoveredColKey],
+    [filteredColumns, columnWidths, hoveredColKey],
   );
 
   const totalWidth = useMemo(
@@ -1099,7 +1224,7 @@ export function MetricCatalog() {
   );
 
   const hasFilter = Boolean(
-    keyword || status || domain || tier || ownerFilter || myMetricsOnly || lifecycleFilter || favoritesOnly,
+    keyword || status || domain || tier || ownerFilter || myMetricsOnly || piiOnly || lifecycleFilter || favoritesOnly,
   );
   const emptyGuide = useMemo(
     () => (
@@ -1228,6 +1353,37 @@ export function MetricCatalog() {
             重置列宽
           </Button>
         </Tooltip>
+        <Dropdown
+          trigger={["click"]}
+          popupRender={() => (
+            <div
+              style={{
+                background: "#fff",
+                borderRadius: 8,
+                boxShadow: "0 3px 6px -4px rgba(0,0,0,.12), 0 6px 16px 0 rgba(0,0,0,.08)",
+                padding: 12,
+                width: 260,
+              }}
+            >
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  列设置（{currentUserRole ? GROUP_LABEL[ROLE_GROUP[currentUserRole] ?? "admin"] : "—"}视图默认）
+                </span>
+                <Checkbox.Group
+                  value={visibleCols ?? []}
+                  onChange={(vals) => setVisibleCols(vals as string[])}
+                  options={COLUMN_OPTIONS}
+                  style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 8px" }}
+                />
+                <Button size="small" onClick={handleResetRoleView} icon={<ReloadOutlined />}>
+                  恢复角色默认
+                </Button>
+              </Space>
+            </div>
+          )}
+        >
+          <Button icon={<UnorderedListOutlined />}>列设置</Button>
+        </Dropdown>
         <Dropdown
           menu={{
               items: [
@@ -1381,6 +1537,15 @@ export function MetricCatalog() {
             {favoritesOnly ? "只看收藏" : "我的收藏"}
           </Button>
         </Tooltip>
+        <Tooltip title="只看含 PII 的指标（合规官默认开启此视角）">
+          <Button
+            type={piiOnly ? "primary" : "default"}
+            icon={<SafetyCertificateOutlined />}
+            onClick={() => setPiiOnly(!piiOnly)}
+          >
+            {piiOnly ? "只看PII" : "PII指标"}
+          </Button>
+        </Tooltip>
         {LIFECYCLE_PRESETS.map((p) => (
           <Button
             key={p.key}
@@ -1421,7 +1586,17 @@ export function MetricCatalog() {
           )}
           {ownerFilter && <Tag closable onClose={() => { setOwnerFilter(""); setPage(1); }}>责任人下钻</Tag>}
           {myMetricsOnly && <Tag closable onClose={() => { setMyMetricsOnly(false); setPage(1); }}>我的指标</Tag>}
+          {piiOnly && <Tag closable onClose={() => { setPiiOnly(false); setPage(1); }}>只看 PII</Tag>}
           {favoritesOnly && <Tag closable onClose={() => { setFavoritesOnly(false); }}>只看收藏</Tag>}
+          {/* 按用户群体差异化：当前角色视图只读提示（静默生效，避免用户困惑列为何变化）+ 一键恢复默认 */}
+          {currentUserRole && visibleCols !== null && (
+            <Tag color="blue">
+              {GROUP_LABEL[ROLE_GROUP[currentUserRole] ?? "admin"] ?? ""}视图
+              <a style={{ marginLeft: 6, fontSize: 12 }} onClick={handleResetRoleView}>
+                恢复默认
+              </a>
+            </Tag>
+          )}
         </Space>
       )}
 

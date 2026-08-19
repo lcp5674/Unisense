@@ -90,6 +90,8 @@ def make_metric(**overrides: object) -> Metric:
         "domain": "sales",
         "type": "atomic",
         "granularity": "daily",
+        # OneData 原子层：默认关联逻辑度量（度量目录），对齐 make_create_payload
+        "measure_id": 1,
         "unit": "yuan",
         "currency": "CNY",
         "aggregation": "SUM",

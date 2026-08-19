@@ -40,6 +40,7 @@ from _app_db_guard import assert_not_app_db
 from sqlalchemy.exc import DataError, IntegrityError
 
 from app.core.exceptions import BusinessError, ConflictError
+from app.models.measure_catalog import MeasureCatalog
 from app.models.metric import Metric
 from app.models.user import Organization, User
 from app.services.semantic.repository import MetricRepository
@@ -97,6 +98,18 @@ def _seed(session_factory) -> tuple[int, int]:
                 status="active",
             )
             s.add(reviewer)
+            # OneData 原子层：逻辑度量目录（原子指标 measure_id 引用，FK 需真实行）
+            measure = MeasureCatalog(
+                measure_code="pay_amount",
+                name="支付金额",
+                measure_format="AMOUNT",
+                default_unit="元",
+                default_decimal_places=2,
+                domain="fin",
+                owner_id=owner.id,
+                status="PUBLISHED",
+            )
+            s.add(measure)
             await s.flush()
             await s.commit()
             return owner.id, reviewer.id
@@ -223,6 +236,8 @@ def _create_payload(**overrides) -> MetricCreateRequest:
         "domain": "fin",
         "type": "atomic",
         "granularity": "DAY",
+        # OneData 原子层：原子指标 = 逻辑度量 + 聚合方式（不绑物理表）
+        "measure_id": 1,
         "unit": "元",
         "aggregation": "SUM",
         "time_semantics": "PERIOD",
@@ -527,7 +542,9 @@ async def test_gray_release_and_promote_e2e(db_env):
         assert gray.status == "EXPERIMENTAL"
 
         # promote → PUBLISHED
-        promoted = await svc.promote_metric("fin_gray_flow_day", actor_id=owner_id)
+        promoted = await svc.promote_metric(
+            "fin_gray_flow_day", actor_id=owner_id, role="metric_owner", user_domain="fin"
+        )
         await session.commit()
         assert promoted.status == "PUBLISHED"
 

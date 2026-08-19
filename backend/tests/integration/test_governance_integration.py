@@ -33,6 +33,7 @@ from app.models.governance import (  # noqa: F401 - 注册模型供 drop_all
     SensitivityLevel,
 )
 from app.models.metric import Metric
+from app.models.measure_catalog import MeasureCatalog
 from app.models.user import Organization, User
 from app.services.governance.schemas import (
     ClassificationRescanRequest,
@@ -91,6 +92,19 @@ def _seed(session_factory: Any) -> dict[str, int]:
             )
             s.add_all([owner, officer, admin])
             await s.flush()
+            # OneData 原子层：逻辑度量目录（原子指标 measure_id 引用，FK 需真实行）
+            measure = MeasureCatalog(
+                measure_code="phone_cover",
+                name="手机号覆盖",
+                measure_format="NUMERIC",
+                default_unit="count",
+                default_decimal_places=0,
+                domain="sales",
+                owner_id=owner.id,
+                status="PUBLISHED",
+            )
+            s.add(measure)
+            await s.flush()
 
             metric = Metric(
                 metric_code="user_phone_cnt",
@@ -98,6 +112,8 @@ def _seed(session_factory: Any) -> dict[str, int]:
                 domain="sales",
                 type="atomic",
                 granularity="daily",
+                # OneData 原子层：关联逻辑度量（不绑物理表）
+                measure_id=measure.id,
                 unit="count",
                 aggregation="COUNT",
                 time_semantics="PERIOD",

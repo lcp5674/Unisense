@@ -42,6 +42,8 @@ def _make_metric(code: str = "m", pii: bool = False) -> Metric:
         domain="finance",
         type="atomic",
         granularity="day",
+        # OneData 原子层：关联逻辑度量（度量目录，mock 场景无需真实行）
+        measure_id=1,
         unit="次",
         currency=None,
         aggregation="SUM",

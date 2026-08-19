@@ -33,6 +33,7 @@ from app.core.security import create_access_token, hash_password
 from app.db.mysql import Base
 from app.main import app
 from app.models.consume import ApiClient, ApiClientStatus
+from app.models.measure_catalog import MeasureCatalog
 from app.models.metric import Metric, MetricVersion
 from app.models.user import Organization, User
 from app.services.consume.schemas import QueryRequest
@@ -69,12 +70,27 @@ def _seed(session_factory) -> dict[str, int]:
             )
             s.add_all([admin, owner])
             await s.flush()
+            # OneData 原子层：逻辑度量目录（原子指标 measure_id 引用，FK 需真实行）
+            measure = MeasureCatalog(
+                measure_code="revenue",
+                name="营收",
+                measure_format="AMOUNT",
+                default_unit="元",
+                default_decimal_places=2,
+                domain="finance",
+                owner_id=owner.id,
+                status="PUBLISHED",
+            )
+            s.add(measure)
+            await s.flush()
             m1 = Metric(
                 metric_code="M1",
                 name="营收",
                 domain="finance",
                 type="atomic",
                 granularity="day",
+                # OneData 原子层：关联逻辑度量（不绑物理表）
+                measure_id=measure.id,
                 unit="元",
                 aggregation="SUM",
                 time_semantics="PERIOD",
@@ -99,6 +115,8 @@ def _seed(session_factory) -> dict[str, int]:
                 domain="finance",
                 type="atomic",
                 granularity="day",
+                # OneData 原子层：关联逻辑度量（不绑物理表）
+                measure_id=measure.id,
                 unit="元",
                 aggregation="SUM",
                 time_semantics="PERIOD",
@@ -117,6 +135,8 @@ def _seed(session_factory) -> dict[str, int]:
                 domain="finance",
                 type="atomic",
                 granularity="day",
+                # OneData 原子层：关联逻辑度量（不绑物理表）
+                measure_id=measure.id,
                 unit="元",
                 aggregation="SUM",
                 time_semantics="PERIOD",
