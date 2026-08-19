@@ -934,7 +934,23 @@ export function MetricCatalog() {
       ellipsis: true,
       render: (_: unknown, r: MetricResponse) => userName(r.owner_id),
     },
-    { title: "类型", dataIndex: "type", key: "type", width: 90, render: (v: string) => METRIC_TYPE_LABEL[v] ?? v },
+    {
+      title: "类型",
+      dataIndex: "type",
+      key: "type",
+      width: 120,
+      render: (v: string, r: MetricResponse) => (
+        <span>
+          {METRIC_TYPE_LABEL[v] ?? v}
+          {/* 存量 atomic 未关联逻辑度量（OneData 引导，D3 决策：不自动迁移） */}
+          {v === "atomic" && r.measure_id == null && (
+            <Tooltip title="该原子指标未关联逻辑度量（存量旧式来源）。建议在「度量目录」创建逻辑度量后编辑关联，完成 OneData 化。">
+              <Tag color="gold" style={{ marginLeft: 4 }}>待治理</Tag>
+            </Tooltip>
+          )}
+        </span>
+      ),
+    },
     {
       title: "状态",
       dataIndex: "status",

@@ -1711,6 +1711,19 @@ export function MetricDetail() {
         />
       )}
 
+      {/* 存量原子指标 OneData 化引导（D3：不自动迁移，留人工重建）：
+          原子指标未关联逻辑度量（measure_id 为空）说明是旧式物理来源——原子=逻辑度量+聚合、
+          不绑物理表。引导数仓人员在「度量目录」先建逻辑度量，再编辑指标关联，避免口径资产滞留旧语义。 */}
+      {metric.type === "atomic" && metric.measure_id == null && (
+        <Alert
+          type="warning"
+          showIcon
+          message="该原子指标未关联逻辑度量（存量旧式来源）"
+          description="按 OneData 规范，原子指标应关联「指标资产 → 度量目录」中的逻辑度量（继承度量格式/单位/小数位），不直接绑定物理表。建议先创建逻辑度量，再编辑该指标关联。"
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
       {/* 驳回原因引导（FR-005 闭环）：REVIEW→DRAFT 落库的驳回原因，引导提交人修改后重提 */}
       {metric.status === "DRAFT" && metric.reject_reason && (
         <Alert

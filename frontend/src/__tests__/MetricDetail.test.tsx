@@ -260,6 +260,22 @@ describe("MetricDetail", () => {
     await screen.findByText("dashboard-page");
   });
 
+  it("存量原子指标未关联逻辑度量时展示 OneData 化引导", async () => {
+    // fixture 为 atomic 且无 measure_id（旧式物理来源）→ 引导在「度量目录」建逻辑度量后关联
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await waitFor(() => {
+      expect(screen.getByText("该原子指标未关联逻辑度量（存量旧式来源）")).toBeTruthy();
+    });
+  });
+
+  it("原子指标已关联逻辑度量时不展示 OneData 化引导", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, measure_id: 7 });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await waitFor(() => {
+      expect(screen.queryByText("该原子指标未关联逻辑度量（存量旧式来源）")).toBeNull();
+    });
+  });
+
   it("从总览仪表「为你推荐」进入时，返回按钮为统一文案并精确返回仪表盘", async () => {
     renderDetail({ pathname: "/detail/sales_gmv_sum_d", state: { from: "dashboard" } });
     // 来源感知影响跳转目标（仪表盘），文案统一为"返回"（与其他页面一致）
