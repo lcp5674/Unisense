@@ -1130,37 +1130,98 @@ class MetricService(BaseService):
         # OneData 挂载层（界限文档 §2.3 第 3 条）：派生指标携带 mount 时 upsert
         # metric_mount（源表/粒度/周期/域），并回填 metric.granularity（冗余供列表展示）。
         # 非派生指标提供 mount → 拒绝（原子=逻辑度量不挂表，复合=派生组合不直接挂表）。
-        # 注：PUBLISHED 状态经 mount 改粒度的 PENDING 确认联动，Phase 4 接入；本阶段直接生效。
+        # PUBLISHED 派生指标改挂载粒度/源表 = 破坏性变更 → PENDING_VERSION 确认流：
+        # 不直接生效，创建 BREAKING 版本 + 14 天消费方确认，确认/超时后由
+        # _promote_pending_version 同步主表 granularity 与 metric_mount（Phase 4 接入）。
         if request.mount is not None:
             if metric.type != "derived":
                 raise BusinessError(
                     f"仅派生指标可挂载物理表，当前类型 {metric.type}",
                     error_code="INVALID_MOUNT_TARGET",
                 )
-            updates["granularity"] = request.mount.granularity
             from app.models.metric_mount import MetricMount
             from app.services.metric_mount.repository import MetricMountRepository
 
             _mrepo = MetricMountRepository(self._db)
             existing_mount = await _mrepo.get_by_metric(metric.id)
+            # 挂载破坏性变更判定：粒度或源表变化（影响口径/血缘，须消费方确认）
+            mount_diff: dict[str, dict[str, Any]] = {}
             if existing_mount is not None:
-                existing_mount.source_table = request.mount.source_table
-                existing_mount.source_column = request.mount.source_column
-                existing_mount.granularity = request.mount.granularity
-                existing_mount.default_period = request.mount.default_period
-                existing_mount.domain = request.mount.domain
-                await self._db.flush()
-            else:
-                await _mrepo.save(
-                    MetricMount(
-                        metric_id=metric.id,
-                        source_table=request.mount.source_table,
-                        source_column=request.mount.source_column,
-                        granularity=request.mount.granularity,
-                        default_period=request.mount.default_period,
-                        domain=request.mount.domain,
+                for f, old_val, new_val in (
+                    ("granularity", existing_mount.granularity, request.mount.granularity),
+                    ("source_table", existing_mount.source_table, request.mount.source_table),
+                ):
+                    if old_val != new_val:
+                        mount_diff[f] = {
+                            "before": old_val,
+                            "after": new_val,
+                            "change_type": "BREAKING",
+                            "mount_change": True,
+                        }
+
+            if metric.status == "PUBLISHED" and mount_diff:
+                if await self._repo.has_pending_version(metric.id):
+                    raise ConflictError(
+                        f"该指标存在待确认的破坏性变更（版本 {metric.version}），"
+                        "请先完成确认或等待超时后再发起新变更",
+                        error_code="METRIC_PENDING_VERSION_EXISTS",
                     )
+                new_version_num = metric.version + 1
+                updates["version"] = new_version_num
+                # 挂载破坏性变更不直接生效：移除主表 granularity 回填、不更新 mount 实体，
+                # 等待确认后由 _promote_pending_version 应用（diff_json 携带 mount_change）。
+                updates.pop("granularity", None)
+                version = MetricVersion(
+                    metric_id=metric.id,
+                    version=new_version_num,
+                    change_type="BREAKING",
+                    definition_json=metric.definition_json,
+                    diff_json=mount_diff,
+                    status="PENDING_CONFIRMATION",
+                    change_reason=request.change_reason,
+                    created_by=actor_id,
                 )
+                await self._repo.create_version(version)
+
+                from app.services.semantic.pending_version_manager import PendingVersionManager
+
+                consumer_ids = [metric.owner_id]
+                if metric.backup_owner_id is not None:
+                    consumer_ids.append(metric.backup_owner_id)
+                pvm = PendingVersionManager(self._db)
+                await pvm.create_pending(metric, version, consumer_ids)
+                await self._notify_pending_consumers(
+                    metric_code=metric_code,
+                    version=new_version_num,
+                    consumer_ids=consumer_ids,
+                    skip_actor=actor_id,
+                )
+                logger.info(
+                    "mount_breaking_change_pending",
+                    metric_code=metric_code,
+                    version=new_version_num,
+                    fields=list(mount_diff.keys()),
+                )
+            else:
+                updates["granularity"] = request.mount.granularity
+                if existing_mount is not None:
+                    existing_mount.source_table = request.mount.source_table
+                    existing_mount.source_column = request.mount.source_column
+                    existing_mount.granularity = request.mount.granularity
+                    existing_mount.default_period = request.mount.default_period
+                    existing_mount.domain = request.mount.domain
+                    await self._db.flush()
+                else:
+                    await _mrepo.save(
+                        MetricMount(
+                            metric_id=metric.id,
+                            source_table=request.mount.source_table,
+                            source_column=request.mount.source_column,
+                            granularity=request.mount.granularity,
+                            default_period=request.mount.default_period,
+                            domain=request.mount.domain,
+                        )
+                    )
 
         updated = await self._repo.update_with_optimistic_lock(
             metric.id, metric.row_version, **updates
@@ -3250,8 +3311,12 @@ class MetricService(BaseService):
         }
         if version_obj.definition_json is not None:
             updates["definition_json"] = version_obj.definition_json
-        # top-level 破坏性字段：diff_json 的 after 值回写主表
+        # top-level 破坏性字段：diff_json 的 after 值回写主表；
+        # 挂载层破坏性变更（mount_change）额外收集，确认后同步 metric_mount 实体
+        mount_updates: dict[str, Any] = {}
         for field, diff in (version_obj.diff_json or {}).items():
+            if isinstance(diff, dict) and diff.get("mount_change") and "after" in diff:
+                mount_updates[field] = diff["after"]
             if field in BREAKING_TOP_LEVEL_FIELDS and isinstance(diff, dict) and "after" in diff:
                 updates[field] = diff["after"]
 
@@ -3259,6 +3324,18 @@ class MetricService(BaseService):
             metric.id, metric.row_version, **updates
         )
         await self._repo.mark_version_published(metric.id, version, datetime.now(UTC))
+        # 挂载破坏性变更确认生效：同步 metric_mount（粒度/源表）与主表一致
+        if mount_updates:
+            from app.services.metric_mount.repository import MetricMountRepository
+
+            _mrepo = MetricMountRepository(self._db)
+            mount = await _mrepo.get_by_metric(metric.id)
+            if mount is not None:
+                if "granularity" in mount_updates:
+                    mount.granularity = mount_updates["granularity"]
+                if "source_table" in mount_updates:
+                    mount.source_table = mount_updates["source_table"]
+                await self._db.flush()
         await self._cache.invalidate(metric.metric_code)
         # 转正后新口径已生效 → 触发血缘差异同步（PENDING 期 update_metric 已延迟注册，
         # 由本处在新口径生效时按版本口径注册——保证血缘始终与「生效口径」一致）

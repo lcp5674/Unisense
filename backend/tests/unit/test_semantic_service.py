@@ -431,6 +431,181 @@ async def test_update_metric_breaking_change():
     assert version_arg.version == 2
 
 
+# ---- OneData 挂载层：PUBLISHED 派生指标改挂载粒度/源表 → PENDING 确认流（Phase 4 接入）----
+
+
+def _mount_with(granularity: str = "日", source_table: str = "dwd.sales_detail") -> MagicMock:
+    """构造已有 metric_mount mock（默认日粒度挂载 dwd.sales_detail）。"""
+    m = MagicMock()
+    m.granularity = granularity
+    m.source_table = source_table
+    m.source_column = "gmv"
+    m.default_period = "day"
+    m.domain = "sales"
+    return m
+
+
+def _mount_update(granularity: str = "月") -> MetricUpdateRequest:
+    """构造派生指标挂载更新请求（默认把粒度从日改月）。"""
+    return MetricUpdateRequest(
+        mount={
+            "source_table": "dwd.sales_detail",
+            "source_column": "gmv",
+            "granularity": granularity,
+            "default_period": "month",
+            "domain": "sales",
+        },
+        change_reason="挂载粒度从日改月",
+    )
+
+
+async def test_update_published_derived_mount_granularity_pending():
+    """PUBLISHED 派生指标改挂载粒度 → 创建 PENDING_CONFIRMATION 版本，不直接生效。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="PUBLISHED", type="derived", granularity="日", version=3,
+        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "x"},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    existing_mount = _mount_with()
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=metric)
+    svc._cache.invalidate = AsyncMock()
+
+    with (
+        patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls,
+        patch("app.services.semantic.pending_version_manager.PendingVersionManager") as pvm_cls,
+    ):
+        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=existing_mount)
+        pvm_cls.return_value.create_pending = AsyncMock()
+        await svc.update_metric(
+            "sales_gmv_daily", _mount_update(), actor_id=1, role="metric_owner"
+        )
+
+    # 创建 BREAKING + PENDING_CONFIRMATION 版本，diff_json 携带 mount_change
+    version_arg = repo.create_version.call_args.args[0]
+    assert version_arg.change_type == "BREAKING"
+    assert version_arg.status == "PENDING_CONFIRMATION"
+    assert version_arg.version == 4
+    assert version_arg.diff_json["granularity"]["after"] == "月"
+    assert version_arg.diff_json["granularity"]["mount_change"] is True
+    # PendingVersionManager.create_pending 被调用（消费方确认流）
+    pvm_cls.return_value.create_pending.assert_awaited_once()
+    # 不直接更新主表 granularity / mount 实体（等确认后生效）
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert "granularity" not in lock_kwargs
+    assert existing_mount.granularity == "日"
+
+
+async def test_update_published_derived_mount_pending_exists():
+    """PENDING 确认期内再次改挂载粒度 → 拒绝（防叠加破坏性变更）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="PUBLISHED", type="derived", granularity="日", version=3,
+        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "x"},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.has_pending_version = AsyncMock(return_value=True)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with (
+        patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls,
+        pytest.raises(ConflictError) as exc,
+    ):
+        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=_mount_with())
+        await svc.update_metric(
+            "sales_gmv_daily", _mount_update(), actor_id=1, role="metric_owner"
+        )
+    assert exc.value.error_code == "METRIC_PENDING_VERSION_EXISTS"
+    repo.create_version.assert_not_awaited()
+
+
+async def test_update_draft_derived_mount_granularity_applies():
+    """DRAFT 派生指标改挂载粒度 → 直接应用（不触发 PENDING）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="DRAFT", type="derived", granularity="日", version=1,
+        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "x"},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    existing_mount = _mount_with()
+    repo.create_version = AsyncMock()
+    repo.update_with_optimistic_lock = AsyncMock(return_value=metric)
+    svc._cache.invalidate = AsyncMock()
+    svc._db.flush = AsyncMock()
+
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=existing_mount)
+        await svc.update_metric(
+            "sales_gmv_daily", _mount_update(), actor_id=1, role="metric_owner"
+        )
+
+    # 直接更新主表 granularity 与 mount 实体（无 PENDING 版本创建）
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert lock_kwargs["granularity"] == "月"
+    assert existing_mount.granularity == "月"
+    assert existing_mount.default_period == "month"
+    repo.create_version.assert_not_awaited()
+
+
+async def test_update_published_derived_mount_unchanged_applies():
+    """PUBLISHED 派生指标 mount 粒度/源表不变 → 直接应用（不触发 PENDING）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="PUBLISHED", type="derived", granularity="日", version=3,
+        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "x"},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    existing_mount = _mount_with()
+    repo.create_version = AsyncMock()
+    repo.update_with_optimistic_lock = AsyncMock(return_value=metric)
+    svc._cache.invalidate = AsyncMock()
+    svc._db.flush = AsyncMock()
+
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=existing_mount)
+        await svc.update_metric(
+            "sales_gmv_daily", _mount_update(granularity="日"), actor_id=1, role="metric_owner"
+        )
+
+    # 直接应用，未创建 PENDING 版本
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert lock_kwargs["granularity"] == "日"
+    repo.create_version.assert_not_awaited()
+
+
+async def test_promote_pending_version_applies_mount_change():
+    """PENDING 确认转正：主表 granularity 回写 + metric_mount 同步（挂载变更确认后生效）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="PUBLISHED", type="derived", granularity="日", row_version=5)
+    version_obj = MagicMock()
+    version_obj.definition_json = metric.definition_json
+    version_obj.diff_json = {
+        "granularity": {"before": "日", "after": "月", "change_type": "BREAKING", "mount_change": True},
+    }
+    repo.get_version = AsyncMock(return_value=version_obj)
+    updated = make_metric(status="PUBLISHED", type="derived", granularity="月", row_version=6)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+    repo.mark_version_published = AsyncMock()
+    svc._cache.invalidate = AsyncMock()
+    svc._register_metric_lineage_full = AsyncMock()
+    svc._db.flush = AsyncMock()
+
+    mount = _mount_with()
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=mount)
+        result = await svc._promote_pending_version(
+            metric, version=6, trigger="consumer_confirm", actor_id=1
+        )
+
+    # 主表 granularity 回写（BREAKING_TOP_LEVEL_FIELDS 机制）
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert lock_kwargs["granularity"] == "月"
+    # metric_mount.granularity 同步（挂载变更确认后生效）
+    assert mount.granularity == "月"
+    assert result is not None
+
+
 async def test_update_metric_invalid_status_rejected():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DEPRECATED"))
