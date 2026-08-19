@@ -187,3 +187,10 @@ GET/PUT/DELETE /api/v1/metric-mounts/{id}
 - [x] 派生挂载改粒度在 PUBLISHED 状态接入 PENDING_VERSION 确认联动——8d73a43
 - [x] 血缘/消费/冲突预检改读 metric_mount 为权威源（当前以 definition_json 冗余兜底）——28c0b93
 - [x] 存量 atomic 指标 OneData 化引导（重建为逻辑度量 + 派生挂载）——2eddf76
+
+### 存量 mock 订正 + 指标目录按用户群体差异化（✅ 已完成，commit 3ad9262，2026-08-19）
+- [x] seed_e2e_data.py：新增 `ensure_measure`（幂等创建 4 个逻辑度量 + publish），8 条指标订正——7 条原子经 `measure_id_code` 关联度量（移除顶层/内嵌 source_table/measure_column）、1 条派生携 `mount`（service 自动落 metric_mount 并回填粒度）；`ensure_metric` POST 幂等兜底（409 已存在/归档跳过）
+- [x] 测试 fixture OneData 化（约 15 文件）：conftest `make_metric` 加 `measure_id=1`；semantic/subject_domain 集成 `_create_payload` 加 measure_id；consume/governance 集成插 `MeasureCatalog` 行（InnoDB FK）+ ORM 关联；各单测构造器/ORM 对齐；`test_semantic_schemas` 旧式兼容用例有意保留
+- [x] 前端 mock：MetricCatalog/MetricDetail fixture 加 `measure_id`（存量引导用例显式 `measure_id:undefined` 保留）
+- [x] 指标目录按用户群体差异化（MetricCatalog.tsx）：7 角色聚合 4 群体（消费者/生产者/治理审核/平台管理）——群体默认列 + 角色默认筛选（reviewer=REVIEW、compliance_officer=piiOnly、metric_owner=myMetricsOnly、domain_admin=本域）+ 列设置 Dropdown（visibleCols + localStorage 按群体隔离 + 恢复角色默认）+ 新增提交人列 + URL 参数优先
+- [x] 验证：后端 418 单测全绿、前端 tsc + vitest 802/802（含 6 个角色差异化新用例）、seed 冒烟 20/20（真实后端 + 真实 DB）
