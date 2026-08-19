@@ -30,6 +30,7 @@ import httpx  # noqa: E402
 
 from app.core.security import hash_password  # noqa: E402
 from app.db.mysql import async_session_factory, engine  # noqa: E402
+from app.models.metric import Metric  # noqa: E402
 from app.models.user import User  # noqa: E402
 
 API_PREFIX = "/api/v1"
@@ -526,6 +527,52 @@ def ensure_metric(
     else:
         print(f"[metric] {code} 已存在（编码冲突/归档），跳过")
     return created
+
+
+def _backfill_legacy_metric_measures(measure_ids: dict[str, int]) -> None:
+    """OneData 存量订正：旧式原子指标（measure_id 为空）按度量编码补关联逻辑度量。
+
+    仅填 measure_id（数据订正，绕过业务版本流——避免已发布指标触发 PENDING_VERSION）；
+    派生指标不在此列（其 OneData 化 = 挂载，需重建，D3 决策留人工引导）。
+    幂等：仅命中 measure_id 为空的存量行，不重复覆盖。
+    """
+
+    async def _run() -> None:
+        from sqlalchemy import select, update
+
+        async with async_session_factory() as db:
+            for code, measure_code in legacy_metric_measure_map().items():
+                mid = measure_ids.get(measure_code)
+                if not mid:
+                    continue
+                result = await db.execute(
+                    select(Metric.id).where(
+                        Metric.metric_code == code,
+                        Metric.measure_id.is_(None),
+                    )
+                )
+                metric_id = result.scalar_one_or_none()
+                if metric_id is None:
+                    continue
+                await db.execute(update(Metric).where(Metric.id == metric_id).values(measure_id=mid))
+                print(f"[metric] 存量订正 {code} measure_id={mid}")
+            await db.commit()
+        await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def legacy_metric_measure_map() -> dict[str, str]:
+    """存量 E2E 原子指标 → 逻辑度量编码（与 METRICS spec 的 measure_id_code 一致）。"""
+    return {
+        "sales_e2e_gmv_day": "sales_payment_amount",
+        "sales_e2e_ordercnt_day": "sales_order_cnt",
+        "user_e2e_activeuser_day": "user_active_user_cnt",
+        "user_e2e_piiuser_day": "user_pii_user_cnt",
+        "sales_e2e_deprecated_day": "sales_payment_amount",
+        "sales_e2e_conflicta_day": "sales_payment_amount",
+        "sales_e2e_conflictb_day": "sales_payment_amount",
+    }
 
 
 def publish_metric(api: Api, code: str, *, pii_columns: list[str] | None = None) -> dict[str, Any]:
@@ -1234,6 +1281,8 @@ def main() -> int:
     for spec in ALL_METRICS:
         m = ensure_metric(api, spec, measure_ids=measure_ids)
         metric_ids[spec["code"]] = m.get("id") or 0
+    # OneData 存量订正：旧式原子指标（measure_id 为空）补关联逻辑度量（幂等）
+    _backfill_legacy_metric_measures(measure_ids)
     # 发布：sales_e2e_gmv_day / sales_e2e_ordercnt_day / user_e2e_activeuser_day /
     #        user_e2e_piiuser_day / sales_e2e_deprecated_day
     publish_metric(api, "sales_e2e_gmv_day")
