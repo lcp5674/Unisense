@@ -222,3 +222,74 @@ class TestNonMetricCodeDependency:
         assert result == []
         # 只查了一次指标编码
         checker._get_metric_by_code.assert_awaited_once_with("sales_gmv_amount_daily")
+
+
+class TestValidateCompositeFormula:
+    """复合指标公式强校验（界限文档 §1.2/§4.2：只引用派生/复合指标 code，禁裸表字段）。"""
+
+    def _derived(self, code: str = "sales_gmv_amount_daily") -> MagicMock:
+        m = _make_metric(code, "PUBLISHED")
+        m.type = "derived"
+        return m
+
+    async def test_valid_formula_passes(self) -> None:
+        """公式仅引用已存在派生指标 + 函数关键字/数字/操作符 → 无错误。"""
+        checker = _make_checker()
+        derived = self._derived()
+        checker._get_metric_by_code = AsyncMock(return_value=derived)
+
+        definition = {
+            "expression": "sum(sales_gmv_amount_daily) / sum(sales_order_cnt_daily) * 100",
+        }
+        result = await checker.validate_composite_formula(definition)
+
+        assert result == []
+        checker._get_metric_by_code.assert_awaited()
+
+    async def test_bare_field_rejected(self) -> None:
+        """公式引用裸表字段（非 4 段式标识符）→ 报错。"""
+        checker = _make_checker()
+
+        definition = {"expression": "amount / head_amount"}
+        result = await checker.validate_composite_formula(definition)
+
+        assert any("amount" in err and "非指标标识符" in err for err in result)
+
+    async def test_nonexistent_metric_rejected(self) -> None:
+        """公式引用不存在的指标 code → 报错。"""
+        checker = _make_checker()
+        checker._get_metric_by_code = AsyncMock(return_value=None)
+
+        definition = {"expression": "sales_gmv_amount_daily / sales_order_cnt_daily"}
+        result = await checker.validate_composite_formula(definition)
+
+        assert any("不存在" in err for err in result)
+
+    async def test_atomic_reference_rejected(self) -> None:
+        """公式引用原子指标（非派生/复合）→ 报错（复合层只能聚合派生指标）。"""
+        checker = _make_checker()
+        atomic = _make_metric("sales_gmv_amount_daily", "PUBLISHED")
+        atomic.type = "atomic"
+        checker._get_metric_by_code = AsyncMock(return_value=atomic)
+
+        definition = {"expression": "sales_gmv_amount_daily"}
+        result = await checker.validate_composite_formula(definition)
+
+        assert any("不是派生/复合指标" in err for err in result)
+
+    async def test_sql_mode_exempt(self) -> None:
+        """SQL 模式口径 → 豁免表达式 token 解析。"""
+        checker = _make_checker()
+
+        definition = {"sql": "SELECT SUM(amount) FROM fct_order", "expression": ""}
+        result = await checker.validate_composite_formula(definition)
+
+        assert result == []
+
+    async def test_missing_expression_rejected(self) -> None:
+        """复合指标既无 SQL 也无表达式 → 报错。"""
+        checker = _make_checker()
+
+        result = await checker.validate_composite_formula({"dependencies": ["a_b_c_d"]})
+
+        assert any("缺少计算表达式" in err for err in result)

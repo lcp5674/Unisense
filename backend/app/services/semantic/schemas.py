@@ -86,7 +86,11 @@ class MetricCreateRequest(BaseModel):
     mount: MetricMountInput | None = Field(
         None, description="挂载实体（派生指标：源表/列/粒度/周期/域）"
     )
-    unit: str = Field(..., max_length=32, description="单位")
+    unit: str | None = Field(
+        None,
+        max_length=32,
+        description="单位（OneData：原子指标由逻辑度量 default_unit 继承，缺省则继承；派生/复合缺省用默认）",
+    )
     currency: str | None = Field(None, max_length=16, description="币种")
     # 与字典种子对齐（9 值）：SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE + MAX/MIN/MEDIAN/PERCENTILE
     aggregation: Literal[
@@ -96,15 +100,15 @@ class MetricCreateRequest(BaseModel):
         description="聚合方式: SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE/MAX/MIN/MEDIAN/PERCENTILE",
     )
     # 与字典种子对齐（6 值）：PERIOD/YTD/TTM/AVG + MOM/YOY
-    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] = Field(
-        ..., description="时间语义: PERIOD/YTD/TTM/AVG/MOM/YOY"
+    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
+        None, description="时间语义（缺省 PERIOD）"
     )
     # 与字典种子对齐（4 值）：REALTIME/T0/T1/HOURLY
-    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] = Field(
-        ..., description="新鲜度: REALTIME/T0/T1/HOURLY"
+    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] | None = Field(
+        None, description="新鲜度（缺省 T1）"
     )
-    dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] = Field(
-        ..., description="数仓分层: ODS/DWD/DWS/ADS/DM"
+    dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] | None = Field(
+        None, description="数仓分层（缺省 DWD）"
     )
     metric_tier: Literal["T1", "T2", "T3"] = Field("T3", description="指标分级: T1/T2/T3")
     serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] = Field(

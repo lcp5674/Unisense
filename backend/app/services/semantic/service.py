@@ -424,6 +424,25 @@ class MetricService(BaseService):
         # 3. 校验字典字段值存在于 SystemDict（对齐 FR-009）
         await self._validate_dict_fields(request)
 
+        # 3a. OneData 类型化字段兜底（界限文档 §2.3）：原子指标 = 逻辑度量 + 聚合方式，
+        # 不绑物理表——单位由逻辑度量 default_unit 继承；派生/复合缺省用默认物理属性。
+        # 物理属性（time_semantics/freshness/dw_layer）对原子属挂载/数据语义层，缺省取默认。
+        if request.unit is None:
+            if request.type == "atomic" and request.measure_id is not None:
+                from app.services.measure_catalog.repository import MeasureCatalogRepository
+
+                measure = await MeasureCatalogRepository(self._db).get_by_id(request.measure_id)
+                if measure is not None and measure.default_unit:
+                    request.unit = measure.default_unit
+            if request.unit is None:
+                request.unit = "cnt"
+        if request.time_semantics is None:
+            request.time_semantics = "PERIOD"
+        if request.freshness is None:
+            request.freshness = "T1"
+        if request.dw_layer is None:
+            request.dw_layer = "DWD"
+
         # 3b. 口径完整性：把 top-level 的 source_table/measure_column 合入 definition_json。
         # 血缘差异同步（register_metric_from_definition）读 definition.source_table /
         # measure_column 建「指标↔落地表」边——但批量注册/模板实例化等后端构造路径此前
@@ -1766,6 +1785,16 @@ class MetricService(BaseService):
                     error_code="CYCLIC_DEPENDENCY",
                     ctx={"cycle_path": cycle},
                 )
+            # 复合指标公式强校验（界限文档 §1.2/§4.2）：公式仅允许引用派生/复合
+            # 指标 code，禁裸表字段与不存在指标——OneData 复合层 = 跨指标聚合。
+            if metric.type == "composite":
+                formula_errors = await checker.validate_composite_formula(metric.definition_json)
+                if formula_errors:
+                    raise BusinessError(
+                        "复合指标公式校验失败: " + "; ".join(formula_errors),
+                        error_code="INVALID_COMPOSITE_FORMULA",
+                        ctx={"formula_errors": formula_errors},
+                    )
 
         # 定位待发布版本
         target_version = request.target_version or metric.version

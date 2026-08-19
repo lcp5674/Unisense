@@ -195,6 +195,58 @@ async def test_create_metric_merges_source_table_into_definition():
     assert "source_tables" not in defn
 
 
+async def test_create_atomic_inherits_unit_from_measure():
+    """OneData（界限文档 §2.3）：原子指标关联逻辑度量且未传 unit 时，从度量目录 default_unit 继承。
+
+    原子 = 逻辑度量 + 聚合方式，不绑物理表；单位是逻辑度量的固有属性，注册原子指标
+    时无需手选，由度量目录 default_unit 继承。派生/复合缺省物理属性取默认值。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    fake_measure = MagicMock()
+    fake_measure.default_unit = "元"
+    with patch("app.services.measure_catalog.repository.MeasureCatalogRepository") as mock_mc:
+        mock_mc.return_value.get_by_id = AsyncMock(return_value=fake_measure)
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(measure_id=7, unit=None),
+            ),
+            owner_id=1,
+        )
+
+    captured = repo.create.call_args[0][0]
+    assert captured.unit == "元"
+    # 未显式传的物理属性取默认值
+    assert captured.time_semantics == "PERIOD"
+    assert captured.freshness == "T1"
+    assert captured.dw_layer == "DWD"
+
+
+async def test_create_atomic_defaults_unit_when_measure_missing():
+    """原子关联度量不存在时，unit 回退默认值 cnt（不阻断创建）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with patch("app.services.measure_catalog.repository.MeasureCatalogRepository") as mock_mc:
+        mock_mc.return_value.get_by_id = AsyncMock(return_value=None)
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(measure_id=999, unit=None),
+            ),
+            owner_id=1,
+        )
+
+    captured = repo.create.call_args[0][0]
+    assert captured.unit == "cnt"
+
+
 async def test_create_metric_duplicate_code_raises_conflict():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric())
@@ -2916,6 +2968,72 @@ async def test_approve_derived_metric_cycle():
             "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
         )
     assert exc.value.error_code == "CYCLIC_DEPENDENCY"
+
+
+async def test_approve_composite_metric_invalid_formula():
+    """复合指标发布时公式引用非指标标识符（裸表字段）→ INVALID_COMPOSITE_FORMULA。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="REVIEW",
+        owner_id=1,
+        pii_flag=False,
+        type="composite",
+        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "amount / head_amount"},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    fake_checker = MagicMock()
+    fake_checker.check_dependencies_published = AsyncMock(return_value=[])
+    fake_checker.detect_cycle = AsyncMock(return_value=None)
+    fake_checker.validate_composite_formula = AsyncMock(
+        return_value=["公式引用非指标标识符「amount」（复合公式仅允许派生/复合指标 code）"]
+    )
+    with (
+        patch(
+            "app.services.semantic.dependency_checker.DependencyChecker",
+            return_value=fake_checker,
+        ),
+        pytest.raises(BusinessError) as exc,
+    ):
+        await svc.approve_metric(
+            "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+        )
+    assert exc.value.error_code == "INVALID_COMPOSITE_FORMULA"
+    assert "amount" in exc.value.message
+
+
+async def test_approve_composite_metric_valid_formula_passes():
+    """复合指标公式仅引用已存在派生指标 code → 正常发布（不触发公式校验拦截）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="REVIEW",
+        owner_id=1,
+        pii_flag=False,
+        type="composite",
+        definition_json={
+            "dependencies": ["sales_gmv_amount_daily", "sales_order_cnt_daily"],
+            "expression": "sales_gmv_amount_daily / sales_order_cnt_daily",
+        },
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_published = AsyncMock()
+    svc._publish_event = AsyncMock()
+    fake_checker = MagicMock()
+    fake_checker.check_dependencies_published = AsyncMock(return_value=[])
+    fake_checker.detect_cycle = AsyncMock(return_value=None)
+    fake_checker.validate_composite_formula = AsyncMock(return_value=[])
+    with (
+        patch(
+            "app.services.semantic.dependency_checker.DependencyChecker",
+            return_value=fake_checker,
+        ),
+    ):
+        result = await svc.approve_metric(
+            "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+        )
+    fake_checker.validate_composite_formula.assert_awaited_once()
+    assert result is not None
 
 
 async def test_approve_derived_metric_emits_dependencies():

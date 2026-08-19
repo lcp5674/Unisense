@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import structlog
@@ -91,6 +92,55 @@ class DependencyChecker:
             metric_sub_deps = [d for d in sub_deps if self._is_metric_code(d)]
             if metric_sub_deps:
                 await self._check_recursive(metric_sub_deps, visited, unpublished)
+
+    # 复合公式允许的语法关键字（大小写不敏感，聚合/逻辑/空值等，非指标引用）
+    _FORMULA_KEYWORDS: frozenset[str] = frozenset({
+        "sum", "avg", "count", "count_distinct", "max", "min", "median", "percentile",
+        "distinct", "if", "case", "when", "then", "else", "end", "null", "true", "false",
+        "and", "or", "not", "in", "like", "between", "is", "as", "abs", "round", "floor",
+        "ceil", "ceiling", "coalesce", "nullif",
+    })
+
+    async def validate_composite_formula(self, definition_json: dict[str, Any]) -> list[str]:
+        """复合指标公式强校验（对齐界限文档 §1.2/§4.2）。
+
+        复合公式只允许引用已存在的**派生/复合指标 code**（4 段式），
+        禁止裸表字段（如 ``amount / head_amount`` 中的 ``amount``）与任意非指标标识符——
+        OneData 复合层 = 跨指标聚合，公式里出现物理字段即口径污染。
+
+        SQL 模式（``defn["sql"]``）豁免——完整查询语句不适用表达式 token 解析。
+
+        Returns:
+            错误信息列表（空列表 = 通过）。
+        """
+        if definition_json.get("sql"):
+            return []
+        expr = definition_json.get("expression")
+        if not isinstance(expr, str) or not expr.strip():
+            return ["复合指标缺少计算表达式（definition_json.expression）"]
+
+        # 剥离字符串字面量（'x' / "x"），避免引号内文本干扰 token 提取
+        text = re.sub(r"'[^']*'|\"[^\"]*\"", " ", expr)
+        # 提取所有标识符（字母/下划线开头，可含数字）
+        tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)
+
+        errors: list[str] = []
+        for tok in tokens:
+            # 函数/语法关键字（含大小写变体）→ 跳过
+            if tok.isupper() or tok.lower() in self._FORMULA_KEYWORDS:
+                continue
+            # 其余小写标识符必须是合法指标 code
+            if not self._is_metric_code(tok):
+                errors.append(
+                    f"公式引用非指标标识符「{tok}」（复合公式仅允许派生/复合指标 code）"
+                )
+                continue
+            metric = await self._get_metric_by_code(tok)
+            if metric is None:
+                errors.append(f"公式引用不存在的指标「{tok}」")
+            elif metric.type not in ("derived", "composite"):
+                errors.append(f"公式引用的「{tok}」不是派生/复合指标（当前为 {metric.type}）")
+        return errors
 
     async def detect_cycle(
         self, metric_code: str, definition_json: dict[str, Any]
