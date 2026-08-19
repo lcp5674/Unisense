@@ -106,15 +106,35 @@ class ConsumeService(BaseService):
         self._fav = FavoriteRepo(db)
 
     # ---- 真实物理口径 SQL 构建 ----
+    async def _resolve_mount_table(self, metric: Any) -> str | None:
+        """OneData 挂载层权威（界限文档 §2.3）：派生指标挂载可经挂载 API 独立更新，
+        definition_json 的 source_table 冗余可能过期——消费 SQL 以 metric_mount 为准。
+        查询失败或未挂载时返回 None（回退 definition_json）。
+        """
+        try:
+            from app.services.metric_mount.repository import MetricMountRepository
+
+            mount = await MetricMountRepository(self._db).get_by_metric(metric.id)
+            if mount is not None and isinstance(mount.source_table, str) and mount.source_table:
+                return mount.source_table
+        except Exception:  # noqa: BLE001 - best-effort：mount 查询失败回退 definition_json
+            pass
+        return None
+
     def _build_query_sql(
-        self, req: QueryRequest, metric: Any, bound_dims: set[str] | None = None
+        self,
+        req: QueryRequest,
+        metric: Any,
+        bound_dims: set[str] | None = None,
+        mount_table: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """将查询请求编译为参数化的 OLAP SQL。
 
         基于指标口径来源字段（definition_json.source_table，缺省用指标编码做表名），
         叠加日期区间与维度过滤，杜绝拼串注入（全部参数化）。
+        挂载层权威：``mount_table`` 由调用方经 ``_resolve_mount_table`` 解析（挂载优先）。
         """
-        table = (
+        table = mount_table or (
             metric.definition_json.get("source_table")
             if getattr(metric, "definition_json", None)
             else None
@@ -280,7 +300,8 @@ class ConsumeService(BaseService):
         # 构建真实物理口径 SQL（参数化），而非占位注释；维度授权收敛在 _build_query_sql 内。
         # 维度允许集补充 metric_dimension 绑定表来源（打通维度管理绑定到消费链路）。
         bound_dims = await self._get_bound_dimensions(metric.id)
-        sql, sql_params = self._build_query_sql(req, metric, bound_dims)
+        mount_table = await self._resolve_mount_table(metric)
+        sql, sql_params = self._build_query_sql(req, metric, bound_dims, mount_table=mount_table)
         plan = {
             "metric_code": req.metric_code,
             "expression_ast": {"raw": expr},
@@ -358,7 +379,8 @@ class ConsumeService(BaseService):
         # 构建执行 SQL（真实物理口径，而非占位查询）
         # 维度允许集补充 metric_dimension 绑定表来源（打通维度管理绑定到消费链路）。
         bound_dims = await self._get_bound_dimensions(metric.id)
-        sql, params = self._build_query_sql(req, metric, bound_dims)
+        mount_table = await self._resolve_mount_table(metric)
+        sql, params = self._build_query_sql(req, metric, bound_dims, mount_table=mount_table)
 
         # 引擎选择：OLAP 优先，失败/未配置时降级 MySQL 只读执行器
         result, engine_used = await self._execute_with_fallback(req, sql, params)

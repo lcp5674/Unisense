@@ -256,3 +256,25 @@ class TestPrecheck:
             "sales_gmv_amount_day", {"domain": "sales", "definition": "当日支付 GMV 总额"}
         )
         assert result is None
+
+
+class TestToCandidateMountAuthority:
+    """OneData 挂载层权威：extra_source_tables（挂载实体的 source_table）并入预检比对。"""
+
+    def test_to_candidate_merges_extra_source_tables(self) -> None:
+        """挂载源表并入 candidate.source_tables（挂载独立更新后预检基于最新物理来源）。"""
+        candidate = ConflictPrechecker._to_candidate(
+            "sales_gmv_amount_day",
+            {"domain": "sales", "definition": "GMV", "source_tables": ["dwd.sales"]},
+            extra_source_tables=["dwd.sales_detail"],
+        )
+        assert candidate["source_tables"] == ["dwd.sales", "dwd.sales_detail"]
+
+    def test_to_candidate_extra_source_tables_dedup(self) -> None:
+        """挂载源表与 definition 已有源表重复时去重，空值忽略。"""
+        candidate = ConflictPrechecker._to_candidate(
+            "sales_gmv_amount_day",
+            {"source_tables": ["dwd.sales_detail"]},
+            extra_source_tables=["dwd.sales_detail", "ods.order", "", None],
+        )
+        assert candidate["source_tables"] == ["dwd.sales_detail", "ods.order"]

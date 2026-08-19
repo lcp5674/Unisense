@@ -123,15 +123,28 @@ class ConflictPrechecker:
         return True, None
 
     @staticmethod
-    def _to_candidate(metric_code: str, definition_json: dict[str, Any]) -> dict[str, Any]:
-        """将指标编码 + 口径定义转为 conflict.similarity 期望的候选字典。"""
+    def _to_candidate(
+        metric_code: str,
+        definition_json: dict[str, Any],
+        extra_source_tables: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """将指标编码 + 口径定义转为 conflict.similarity 期望的候选字典。
+
+        ``extra_source_tables``：OneData 挂载层权威（挂载实体的 source_table），
+        由调用方在 async 上下文解析后传入——挂载独立更新后 definition_json 的
+        source_tables 冗余可能过期，合并挂载源表保证预检比对基于最新物理来源。
+        """
+        tables = list(definition_json.get("source_tables", []) or [])
+        for t in extra_source_tables or []:
+            if t and t not in tables:
+                tables.append(t)
         return {
             "metric_code": metric_code,
             "domain": definition_json.get("domain", ""),
             "definition": (
                 definition_json.get("definition") or definition_json.get("expression") or ""
             ),
-            "source_tables": definition_json.get("source_tables", []) or [],
+            "source_tables": tables,
             "has_pii": bool(definition_json.get("pii", False)),
             "pii_authorized": bool(definition_json.get("pii_authorized", False)),
         }
@@ -150,7 +163,11 @@ class ConflictPrechecker:
         }
 
     async def precheck(
-        self, metric_code: str, definition_json: dict[str, Any]
+        self,
+        metric_code: str,
+        definition_json: dict[str, Any],
+        *,
+        extra_source_tables: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """异步预检：相似口径 / 敏感级 / 依赖未发布。
 
@@ -160,6 +177,8 @@ class ConflictPrechecker:
         Args:
             metric_code: 指标编码。
             definition_json: 口径定义。
+            extra_source_tables: OneData 挂载层权威源表列表（挂载实体的 source_table），
+                独立更新后并入比对，避免 definition_json 冗余过期导致漏检。
 
         Returns:
             冲突详情或 None。
@@ -172,7 +191,9 @@ class ConflictPrechecker:
             )
             return None
 
-        candidate = self._to_candidate(metric_code, definition_json)
+        candidate = self._to_candidate(
+            metric_code, definition_json, extra_source_tables=extra_source_tables
+        )
         existing_list = await self._existing_loader()
         if not existing_list:
             return None

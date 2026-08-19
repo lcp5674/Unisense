@@ -1254,9 +1254,25 @@ class LineageService(BaseService):
             return []
         edges: list[LineageEdge] = []
         metric_code = metric.metric_code
-        # 指标↔表：差异同步（软删不再声明的落地表/源表边 + 注册新增），
-        # 编辑改 source_table/source_tables 后不留残留（纯追加此前导致旧表边残留）
+        # OneData 挂载层权威（界限文档 §2.3）：派生指标挂载实体可经挂载 API 独立更新，
+        # 此时 definition_json 的 source_table/measure_column 冗余可能过期——血缘以
+        # metric_mount 为准，definition_json 兜底（存量无挂载指标）。查询失败不阻断。
         source_table = definition.get("source_table")
+        measure_column = definition.get("measure_column")
+        try:
+            from app.services.metric_mount.repository import MetricMountRepository
+
+            mount = await MetricMountRepository(self._db).get_by_metric(metric.id)
+            if mount is not None and isinstance(mount.source_table, str) and mount.source_table:
+                source_table = mount.source_table
+                if isinstance(mount.source_column, str) and mount.source_column:
+                    measure_column = mount.source_column
+        except Exception:  # noqa: BLE001 - best-effort：mount 查询失败回退 definition_json
+            logger.warning(
+                "lineage_mount_resolve_failed",
+                metric_code=metric_code,
+                error="mount query failed, fallback to definition_json",
+            )
         source_table_clean = (
             source_table if isinstance(source_table, str) and source_table else None
         )
@@ -1282,9 +1298,9 @@ class LineageService(BaseService):
                 dim_codes.append(dim_code)
         await self._repo.sync_metric_dimension_edges(metric_code, dim_codes)
         # 指标↔字段：measure_column + measures + source_table → column 节点（差异同步）
+        # measure_column 已按挂载权威解析（mount.source_column 优先，definition 兜底）
         current_fields: list[tuple[str, str]] = []
         if isinstance(source_table, str) and source_table:
-            measure_column = definition.get("measure_column")
             if isinstance(measure_column, str) and measure_column:
                 current_fields.append((source_table, measure_column))
             for m in definition.get("measures") or []:

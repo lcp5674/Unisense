@@ -588,7 +588,20 @@ class MetricService(BaseService):
                 return rows
 
             prechecker = ConflictPrechecker(existing_loader=_load_existing_metrics)
-            conflict_detail = await prechecker.precheck(metric.metric_code, definition)
+            # OneData 挂载层权威：把挂载实体的 source_table 并入预检比对（挂载独立更新后
+            # definition_json 的 source_tables 冗余可能过期，预检须基于最新物理来源）
+            mount_extra: list[str] | None = None
+            try:
+                from app.services.metric_mount.repository import MetricMountRepository
+
+                _mount = await MetricMountRepository(self._db).get_by_metric(metric.id)
+                if _mount is not None and isinstance(_mount.source_table, str) and _mount.source_table:
+                    mount_extra = [_mount.source_table]
+            except Exception:  # noqa: BLE001 - best-effort：mount 查询失败仅跳过挂载源表
+                pass
+            conflict_detail = await prechecker.precheck(
+                metric.metric_code, definition, extra_source_tables=mount_extra
+            )
             if conflict_detail is not None:
                 metric = await self._repo.update_with_optimistic_lock(
                     metric.id,

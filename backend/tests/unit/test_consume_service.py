@@ -337,6 +337,42 @@ async def test_build_query_sql_parameterized_no_injection() -> None:
     assert "city" in sql and params["dim_0"] == "BJ' OR 1=1 --"
 
 
+async def test_build_query_sql_mount_table_authority() -> None:
+    """OneData 挂载层权威：mount_table 优先于 definition_json 冗余 source_table。"""
+    svc = _svc(await _client())
+    req = QueryRequest(metric_code="gmv", date_range="2026-01~2026-03")
+    m = _metric_with_source()
+    m.definition_json = {**m.definition_json, "source_table": "dws_gmv_old"}
+    sql, _ = svc._build_query_sql(req, m, mount_table="dws_gmv_new")
+    assert "dws_gmv_new" in sql
+    assert "dws_gmv_old" not in sql
+
+
+async def test_resolve_mount_table_returns_mount_source() -> None:
+    """_resolve_mount_table 查挂载实体返回 source_table（挂载独立更新后消费 SQL 基于最新物理表）。"""
+    svc = _svc(await _client())
+    m = _metric_with_source()
+    m.id = 7
+    mount = MagicMock()
+    mount.source_table = "dwd.sales_detail"
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=mount)
+        table = await svc._resolve_mount_table(m)
+    assert table == "dwd.sales_detail"
+    mrepo_cls.return_value.get_by_metric.assert_awaited_once_with(7)
+
+
+async def test_resolve_mount_table_falls_back_when_mount_query_fails() -> None:
+    """挂载查询异常/未挂载 → 返回 None（回退 definition_json，不阻断消费 SQL）。"""
+    svc = _svc(await _client())
+    m = _metric_with_source()
+    m.id = 7
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=None)
+        table = await svc._resolve_mount_table(m)
+    assert table is None
+
+
 async def test_build_query_sql_falls_back_to_metric_table() -> None:
     """缺省 source_table 时以指标编码推导表名，仍参数化日期与维度。"""
     svc = _svc(await _client())

@@ -8,7 +8,7 @@ import tempfile
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -1670,6 +1670,37 @@ async def test_register_metric_from_definition_includes_dim_and_column() -> None
     col_sync = [c for c in calls if c.get("op") == "sync_metric_column_edges"]
     assert col_sync
     assert sorted(col_sync[0]["fields"]) == [("dws.gmv", "amount"), ("dws.gmv", "cnt")]
+
+
+async def test_register_metric_from_definition_mount_authority() -> None:
+    """OneData 挂载层权威：挂载实体 source_table 优先于 definition_json 冗余。
+
+    挂载 API 独立更新挂载后 definition_json 的 source_table 可能过期，
+    血缘必须以 metric_mount 为准（否则注册/更新后血缘绑到旧表）。
+    """
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    metric = SimpleNamespace(
+        id=42,
+        metric_code="sales_gmv_daily",
+        definition_json={"source_table": "dws.gmv_old", "measure_column": "amount"},
+    )
+    mount = SimpleNamespace(source_table="dws.gmv_new", source_column="amount")
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=mount)
+        edges = await svc.register_metric_from_definition(metric)
+
+    # 表边差异同步使用挂载权威 source_table（而非 definition_json 旧值）
+    table_sync = [c for c in repo.upsert_calls if c.get("op") == "sync_metric_table_edges"]
+    assert table_sync and table_sync[0]["downstream"] == "dws.gmv_new"
+    # 字段边差异同步使用挂载权威 source_table + source_column
+    col_sync = [c for c in repo.upsert_calls if c.get("op") == "sync_metric_column_edges"]
+    assert col_sync and col_sync[0]["fields"] == [("dws.gmv_new", "amount")]
+    # 血缘边注册到挂载权威表节点
+    assert len(edges) == 1
+    assert edges[0].edge_type == "DERIVED_FROM"
+    assert edges[0].target_node == "table:dws.gmv_new"
 
 
 async def test_query_impact_merges_dimension_column_edges_from_mysql() -> None:
