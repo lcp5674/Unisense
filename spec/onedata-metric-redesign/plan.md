@@ -182,8 +182,8 @@ GET/PUT/DELETE /api/v1/metric-mounts/{id}
 - [x] 14. 界限文档补"平台扩展态/粒度下沉"说明 + TD §4.1 新表
 - [x] 15. 提交（每阶段一 commit）
 
-### 后续待办（下一阶段）
-- [ ] 复合指标发布时强校验公式 token 全为已发布派生 code、禁裸表字段（界限文档 §4.2）
-- [ ] 派生挂载改粒度在 PUBLISHED 状态接入 PENDING_VERSION 确认联动
-- [ ] 血缘/消费/冲突预检改读 metric_mount 为权威源（当前以 definition_json 冗余兜底）
-- [ ] 存量 atomic 指标 OneData 化引导（重建为逻辑度量 + 派生挂载）
+### 后续待办（✅ 已完成，commit 58d3004/8d73a43/28c0b93/2eddf76）
+- [x] 复合指标发布时强校验公式 token 全为已发布派生 code、禁裸表字段（界限文档 §4.2）——58d3004
+- [x] 派生挂载改粒度在 PUBLISHED 状态接入 PENDING_VERSION 确认联动——8d73a43
+- [x] 血缘/消费/冲突预检改读 metric_mount 为权威源（当前以 definition_json 冗余兜底）——28c0b93
+- [x] 存量 atomic 指标 OneData 化引导（重建为逻辑度量 + 派生挂载）——2eddf76
