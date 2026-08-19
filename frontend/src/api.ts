@@ -1639,7 +1639,7 @@ export async function listMeasureCatalogs(params?: {
   owner_id?: number;
   page?: number;
   page_size?: number;
-}): Promise<{ items: MeasureCatalog[]; total: number }> {
+}): Promise<{ items: MeasureCatalog[]; total: number; page: number; page_size: number }> {
   const qs = pageQs({
     domain: params?.domain,
     status: params?.status,

@@ -34,6 +34,7 @@ import {
   batchRejectMetrics,
   batchDeprecateMetrics,
   batchSubmitMetrics,
+  listMeasureCatalogs,
   UnisenseApiError,
 } from "../api";
 import type { MetricResponse, SubjectDomainTreeNode } from "../types";
@@ -122,10 +123,12 @@ function ExpandContent({
   r,
   userName,
   domainName,
+  measureName,
 }: {
   r: MetricResponse;
   userName: (id: number | null | undefined) => string;
   domainName: (code: string) => string;
+  measureName: (id: number | null | undefined) => string;
 }) {
   const def = r.definition_json ?? {};
   const expression = typeof def.expression === "string" ? def.expression : undefined;
@@ -153,6 +156,8 @@ function ExpandContent({
         <Descriptions.Item label="产品需求方">{userName(r.product_owner_id)}</Descriptions.Item>
         <Descriptions.Item label="技术方">{userName(r.tech_owner_id)}</Descriptions.Item>
         <Descriptions.Item label="数仓开发">{userName(r.dw_developer_id)}</Descriptions.Item>
+        {/* OneData 原子层：逻辑度量（原子指标继承度量格式/单位/小数位；派生/复合继承自依赖，显示 "—"） */}
+        <Descriptions.Item label="逻辑度量">{measureName(r.measure_id)}</Descriptions.Item>
         <Descriptions.Item label="提交人">{userName(r.submitted_by)}</Descriptions.Item>
         <Descriptions.Item label="审批人">{userName(r.approver_id)}</Descriptions.Item>
         <Descriptions.Item label="创建时间">
@@ -280,6 +285,8 @@ export function MetricCatalog() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
   const [domainMap, setDomainMap] = useState<Map<string, string>>(new Map());
+  // OneData 逻辑度量目录映射（id → 名称/单位）：原子指标展示继承的逻辑度量（目录名称 + 默认单位）
+  const [measureMap, setMeasureMap] = useState<Map<number, { name: string; default_unit?: string | null }>>(new Map());
   const [currentUserId, setCurrentUserId] = useState<number | undefined>(undefined);
   const [currentUserRole, setCurrentUserRole] = useState<string>("");
   const [myMetricsOnly, setMyMetricsOnly] = useState(false);
@@ -411,12 +418,26 @@ export function MetricCatalog() {
           setFavoritesError(false);
         })
         .catch(() => setFavoritesError(true)),
+      // OneData 逻辑度量目录：原子指标展示继承的逻辑度量名称/单位
+      listMeasureCatalogs({ page_size: 200 })
+        .then((res) =>
+          setMeasureMap(
+            new Map((res.items ?? []).map((m) => [m.id, { name: m.name, default_unit: m.default_unit }])),
+          ),
+        )
+        .catch(() => setMeasureMap(new Map())),
     ]).catch(() => {});
   }, []);
 
   const userName = useMemo(
     () => (id: number | null | undefined) => (id == null ? "—" : (userMap.get(id) ?? `#${id}`)),
     [userMap],
+  );
+  // OneData 逻辑度量名（原子指标展示继承的逻辑度量）
+  const measureName = useMemo(
+    () => (id: number | null | undefined) =>
+      id == null ? "—" : (measureMap.get(id)?.name ?? `#${id}`),
+    [measureMap],
   );
   const domainName = useMemo(
     () => (code: string) => (code ? (domainMap.get(code) ?? code) : "—"),
@@ -1402,7 +1423,7 @@ export function MetricCatalog() {
           },
         }}
         expandable={{
-          expandedRowRender: (r) => <ExpandContent r={r} userName={userName} domainName={domainName} />,
+          expandedRowRender: (r) => <ExpandContent r={r} userName={userName} domainName={domainName} measureName={measureName} />,
         }}
         scroll={{ x: totalWidth }}
         pagination={{
@@ -1437,7 +1458,7 @@ export function MetricCatalog() {
         }
       >
         {previewMetric && (
-          <ExpandContent r={previewMetric} userName={userName} domainName={domainName} />
+          <ExpandContent r={previewMetric} userName={userName} domainName={domainName} measureName={measureName} />
         )}
       </Drawer>
 

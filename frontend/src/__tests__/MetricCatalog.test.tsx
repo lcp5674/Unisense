@@ -8,6 +8,7 @@ vi.mock("../api", () => ({
   listMetrics: vi.fn(),
   fetchDashboard: vi.fn(),
   listUsers: vi.fn(),
+  listMeasureCatalogs: vi.fn(),
   listDomainTree: vi.fn(),
   fetchCurrentUser: vi.fn(),
   listFavorites: vi.fn(),
@@ -28,6 +29,7 @@ import {
   listMetrics,
   fetchDashboard,
   listUsers,
+  listMeasureCatalogs,
   listDomainTree,
   fetchCurrentUser,
   listFavorites,
@@ -44,6 +46,7 @@ import { PermissionProvider } from "../hooks/usePermission";
 const mockedList = vi.mocked(listMetrics);
 const mockedDashboard = vi.mocked(fetchDashboard);
 const mockedUsers = vi.mocked(listUsers);
+const mockedMeasures = vi.mocked(listMeasureCatalogs);
 const mockedDomains = vi.mocked(listDomainTree);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 const mockedFavorites = vi.mocked(listFavorites);
@@ -167,6 +170,8 @@ describe("MetricCatalog", () => {
       { id: 2, username: "lisi", display_name: "李四", role: "metric_owner", domain: "sales", status: "active" },
       { id: 3, username: "wangwu", display_name: "王五", role: "platform_admin", domain: null, status: "active" },
     ]);
+    // OneData 原子层：逻辑度量目录（明细抽屉"逻辑度量"行渲染用）
+    mockedMeasures.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
     mockedDomains.mockResolvedValue([
       {
         id: 1,
@@ -1033,6 +1038,8 @@ describe("列宽拖拽（resizable columns）", () => {
       { id: 2, username: "lisi", display_name: "李四", role: "metric_owner", domain: "sales", status: "active" },
       { id: 3, username: "wangwu", display_name: "王五", role: "platform_admin", domain: null, status: "active" },
     ]);
+    // OneData 原子层：逻辑度量目录（明细抽屉"逻辑度量"行渲染用）
+    mockedMeasures.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
     mockedDomains.mockResolvedValue([
       {
         id: 1, code: "sales", name: "销售域", parent_id: null, level: 1,

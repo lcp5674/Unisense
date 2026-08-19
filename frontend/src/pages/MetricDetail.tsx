@@ -17,6 +17,7 @@ import {
   Space,
   Tag,
   Tabs,
+  Timeline,
   Tooltip,
   Typography,
 } from "antd";
@@ -140,6 +141,8 @@ const EDIT_DICT_TYPE_LABEL: Record<string, string> = {
 };
 
 // Owner 责任链：将 owner_id 渲染为可读的用户名 + 角色
+// 工程责任链：按"需求提出 → 口径定义 → 数仓实现 → 指标注册 → 审核把关"串联，
+// 让一个指标上完整看到谁提需求、谁定口径、谁开发、谁注册、谁审核（PRD 4.5 治理闭环）。
 function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrief[] }) {
   const byId = new Map(users.map((u) => [u.id, u]));
   function cell(uid: number | null | undefined) {
@@ -153,17 +156,45 @@ function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrie
       </span>
     );
   }
+  // 工程链路节点：阶段 → 角色 → 用户 ID。注册人=指标 Owner（创建时默认当前用户）。
+  const chain = [
+    { stage: "需求提出", role: "产品需求方", uid: metric.product_owner_id },
+    { stage: "口径定义", role: "技术方", uid: metric.tech_owner_id },
+    { stage: "数仓实现", role: "数仓开发", uid: metric.dw_developer_id },
+    { stage: "指标注册", role: "指标 Owner", uid: metric.owner_id },
+    {
+      stage: "审核把关",
+      role: "提交人 / 审批人",
+      uid: null,
+      extra: (
+        <span>
+          {cell(metric.submitted_by)}
+          <span style={{ margin: "0 6px" }} className="muted">→</span>
+          {cell(metric.approver_id)}
+        </span>
+      ),
+    },
+  ];
   return (
-    <Descriptions column={3} size="small">
-      <Descriptions.Item label="指标 Owner">{cell(metric.owner_id)}</Descriptions.Item>
-      <Descriptions.Item label="备份 Owner">{cell(metric.backup_owner_id)}</Descriptions.Item>
-      <Descriptions.Item label="有效版本">
-        {metric.effective_version ? `v${metric.effective_version}` : <span className="muted">—</span>}
-      </Descriptions.Item>
-      <Descriptions.Item label="产品需求方">{cell(metric.product_owner_id)}</Descriptions.Item>
-      <Descriptions.Item label="技术方">{cell(metric.tech_owner_id)}</Descriptions.Item>
-      <Descriptions.Item label="数仓开发">{cell(metric.dw_developer_id)}</Descriptions.Item>
-    </Descriptions>
+    <div>
+      <Timeline
+        items={chain.map((c) => ({
+          children: (
+            <span>
+              <Tag color="blue" style={{ marginRight: 6 }}>{c.stage}</Tag>
+              <span className="muted">{c.role}：</span>
+              {c.extra ?? cell(c.uid)}
+            </span>
+          ),
+        }))}
+      />
+      <Descriptions column={3} size="small" style={{ marginTop: 12 }}>
+        <Descriptions.Item label="备份 Owner">{cell(metric.backup_owner_id)}</Descriptions.Item>
+        <Descriptions.Item label="有效版本">
+          {metric.effective_version ? `v${metric.effective_version}` : <span className="muted">—</span>}
+        </Descriptions.Item>
+      </Descriptions>
+    </div>
   );
 }
 
