@@ -680,6 +680,33 @@ describe("MetricDetail", () => {
     expect(screen.getByText("编辑指标")).toBeInTheDocument(); // 编辑弹窗保留
   });
 
+  it("治理审核（reviewer）默认聚焦「版本历史」Tab，而非质量快照", async () => {
+    mockedCurrentUser.mockResolvedValue({
+      id: 9,
+      username: "reviewer",
+      display_name: "评审人",
+      role: "reviewer",
+      domain: "sales",
+      org_id: 1,
+    } as any);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await waitFor(() => expect(document.querySelector(".ant-tabs")).toBeTruthy());
+    await waitFor(() => {
+      const activeTab = document.querySelector(".ant-tabs-tab-active");
+      expect(activeTab?.textContent).toContain("版本历史");
+    });
+  });
+
+  it("指标生产者（metric_owner）默认聚焦「血缘影响」Tab", async () => {
+    // beforeEach 已设 metric_owner（producer 群体）
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await waitFor(() => expect(document.querySelector(".ant-tabs")).toBeTruthy());
+    await waitFor(() => {
+      const activeTab = document.querySelector(".ant-tabs-tab-active");
+      expect(activeTab?.textContent).toContain("血缘影响");
+    });
+  });
+
 });
 
 
@@ -1850,5 +1877,4 @@ describe("MetricDetail 按钮级权限过滤", () => {
       );
     });
   });
-
 });

@@ -166,19 +166,23 @@ function calibreSummary(r: MetricResponse): string {
   return `${agg} · ${gran} · ${unit}`;
 }
 
-// 展开行：完整口径定义 + 治理追溯
+// 展开行：完整口径定义 + 治理追溯（按用户群体裁剪——业务消费者聚焦口径，治理/生产/管理全量）
 function ExpandContent({
   r,
   userName,
   domainName,
   measureName,
+  group,
 }: {
   r: MetricResponse;
   userName: (id: number | null | undefined) => string;
   domainName: (code: string) => string;
   measureName: (id: number | null | undefined) => string;
+  group: RoleGroup;
 }) {
   const def = r.definition_json ?? {};
+  // 业务消费者：聚焦"这是什么、谁负责、怎么算的"，隐藏治理/运营追溯（备份/提交/审批/时间/分层/时效/时间语义）
+  const isConsumer = group === "consumer";
   // 责任方展示：平台用户 id 可解析优先；id 为空但有 name → 外部人员名称（非平台用户直接输入）
   const ownerName = (id: number | null | undefined, name?: string | null) =>
     id != null ? userName(id) : name || "—";
@@ -202,22 +206,24 @@ function ExpandContent({
         <Descriptions.Item label="业务域">{domainName(r.domain)}</Descriptions.Item>
         <Descriptions.Item label="指标类型">{METRIC_TYPE_LABEL[r.type] ?? r.type}</Descriptions.Item>
         <Descriptions.Item label="责任人">{userName(r.owner_id)}</Descriptions.Item>
-        <Descriptions.Item label="备份责任人">{userName(r.backup_owner_id)}</Descriptions.Item>
-        {/* 口径三方责任（PRD 4.5 补充）：产品需求方/技术方/数仓开发 */}
+        {/* 治理/运营追溯：业务消费者聚焦口径，隐藏备份/提交/审批/时间/分层/时效/时间语义 */}
+        {!isConsumer && <Descriptions.Item label="备份责任人">{userName(r.backup_owner_id)}</Descriptions.Item>}
         {/* 口径三方责任（PRD 4.5 补充）：产品需求方/技术方/数仓开发（平台用户 id 或外部人员名称） */}
         <Descriptions.Item label="产品需求方">{ownerName(r.product_owner_id, r.product_owner_name)}</Descriptions.Item>
         <Descriptions.Item label="技术方">{ownerName(r.tech_owner_id, r.tech_owner_name)}</Descriptions.Item>
         <Descriptions.Item label="数仓开发">{ownerName(r.dw_developer_id, r.dw_developer_name)}</Descriptions.Item>
         {/* OneData 原子层：逻辑度量（原子指标继承度量格式/单位/小数位；派生/复合继承自依赖，显示 "—"） */}
         <Descriptions.Item label="逻辑度量">{measureName(r.measure_id)}</Descriptions.Item>
-        <Descriptions.Item label="提交人">{userName(r.submitted_by)}</Descriptions.Item>
-        <Descriptions.Item label="审批人">{userName(r.approver_id)}</Descriptions.Item>
-        <Descriptions.Item label="创建时间">
-          <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(r.created_at)}</span>
-        </Descriptions.Item>
-        <Descriptions.Item label="数据分层">{DW_LAYER_LABEL[r.dw_layer] ?? r.dw_layer}</Descriptions.Item>
-        <Descriptions.Item label="更新时效">{FRESHNESS_LABEL[r.freshness] ?? r.freshness}</Descriptions.Item>
-        <Descriptions.Item label="时间语义">{TIME_SEMANTICS_LABEL[r.time_semantics] ?? r.time_semantics}</Descriptions.Item>
+        {!isConsumer && <Descriptions.Item label="提交人">{userName(r.submitted_by)}</Descriptions.Item>}
+        {!isConsumer && <Descriptions.Item label="审批人">{userName(r.approver_id)}</Descriptions.Item>}
+        {!isConsumer && (
+          <Descriptions.Item label="创建时间">
+            <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(r.created_at)}</span>
+          </Descriptions.Item>
+        )}
+        {!isConsumer && <Descriptions.Item label="数据分层">{DW_LAYER_LABEL[r.dw_layer] ?? r.dw_layer}</Descriptions.Item>}
+        {!isConsumer && <Descriptions.Item label="更新时效">{FRESHNESS_LABEL[r.freshness] ?? r.freshness}</Descriptions.Item>}
+        {!isConsumer && <Descriptions.Item label="时间语义">{TIME_SEMANTICS_LABEL[r.time_semantics] ?? r.time_semantics}</Descriptions.Item>}
       </Descriptions>
       {definition && (
         <p style={{ margin: "0 0 8px" }}>
@@ -342,6 +348,8 @@ export function MetricCatalog() {
   const [currentUserId, setCurrentUserId] = useState<number | undefined>(undefined);
   const [currentUserRole, setCurrentUserRole] = useState<string>("");
   const [currentUserDomain, setCurrentUserDomain] = useState<string>("");
+  // 当前用户群体（consumer/producer/governance/admin）：决定列默认视图与明细抽屉信息密度
+  const roleGroup = ROLE_GROUP[currentUserRole] ?? "admin";
   const [myMetricsOnly, setMyMetricsOnly] = useState(false);
   // 合规官默认只看 PII 指标（listMetrics 支持 pii_flag 过滤）
   const [piiOnly, setPiiOnly] = useState(false);
@@ -1614,7 +1622,7 @@ export function MetricCatalog() {
           },
         }}
         expandable={{
-          expandedRowRender: (r) => <ExpandContent r={r} userName={userName} domainName={domainName} measureName={measureName} />,
+          expandedRowRender: (r) => <ExpandContent r={r} userName={userName} domainName={domainName} measureName={measureName} group={roleGroup} />,
         }}
         scroll={{ x: totalWidth }}
         pagination={{
@@ -1649,7 +1657,7 @@ export function MetricCatalog() {
         }
       >
         {previewMetric && (
-          <ExpandContent r={previewMetric} userName={userName} domainName={domainName} measureName={measureName} />
+          <ExpandContent r={previewMetric} userName={userName} domainName={domainName} measureName={measureName} group={roleGroup} />
         )}
       </Drawer>
 

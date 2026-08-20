@@ -97,6 +97,7 @@ import { useTracking } from "../hooks/useTracking";
 import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL, UNIT_LABEL, RULING_DECISION_LABEL, METRIC_STATUS_COLOR, METRIC_STATUS_LABEL, METRIC_RELATION_EDGE_LABEL } from "../utils/enums";
 import { formatCnTime, formatCnDate } from "../utils/timeCn";
 import { HealthCard } from "./metric/HealthCard";
+import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
 import { QualitySnapshot } from "./metric/QualitySnapshot";
 import { LineageImpact } from "./metric/LineageImpact";
 import { VersionHistory } from "./metric/VersionHistory";
@@ -116,6 +117,26 @@ const ROLE_LABEL: Record<string, string> = {
 };
 
 const SENSITIVE_ROLES = ["platform_admin", "domain_admin", "compliance_officer"];
+
+// 用户群体（对齐目录页 MetricCatalog）：7 角色聚合 4 群体，详情页按群体调整信息密度
+type RoleGroup = "consumer" | "producer" | "governance" | "admin";
+const ROLE_GROUP: Record<string, RoleGroup> = {
+  analyst: "consumer",
+  viewer: "consumer",
+  metric_owner: "producer",
+  reviewer: "governance",
+  compliance_officer: "governance",
+  platform_admin: "admin",
+  domain_admin: "admin",
+};
+// 各群体详情页 Tabs 默认聚焦项：消费者=关联维度（业务使用视角）、生产者=血缘影响（实现视角）、
+// 治理审核=版本历史（审核视角）、管理=质量快照（默认首项）
+const GROUP_DEFAULT_TAB: Record<RoleGroup, string> = {
+  consumer: "dims",
+  producer: "lineage",
+  governance: "versions",
+  admin: "quality",
+};
 
 // 常用变更原因快捷选项：高频操作（改名/紧急发布）的原因输入可一键填充再编辑，避免每次手写
 const COMMON_CHANGE_REASONS = ["口径修正", "字段调整", "粒度调整", "单位变更", "逻辑优化", "需求变更"];
@@ -156,16 +177,45 @@ function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrie
       </span>
     );
   }
-  // 工程链路节点：阶段 → 角色 → 用户 ID。注册人=指标 Owner（创建时默认当前用户）。
+  // 责任方展示：平台用户（id 可解析）优先；id 为空但有 name → 外部人员（非平台用户直接输入名称）
+  function cellOwner(uid: number | null | undefined, name?: string | null) {
+    if (uid != null) return cell(uid);
+    if (name) {
+      return (
+        <span>
+          <strong>{name}</strong>
+          <Tag style={{ marginLeft: 6 }}>外部人员</Tag>
+        </span>
+      );
+    }
+    return <span className="muted">未配置</span>;
+  }
+  // 工程链路节点：阶段 → 角色 → 责任方（平台用户 id + 外部人员名称）。注册人=指标 Owner。
   const chain = [
-    { stage: "需求提出", role: "产品需求方", uid: metric.product_owner_id },
-    { stage: "口径定义", role: "技术方", uid: metric.tech_owner_id },
-    { stage: "数仓实现", role: "数仓开发", uid: metric.dw_developer_id },
-    { stage: "指标注册", role: "指标 Owner", uid: metric.owner_id },
+    {
+      stage: "需求提出",
+      role: "产品需求方",
+      uid: metric.product_owner_id,
+      name: metric.product_owner_name,
+    },
+    {
+      stage: "口径定义",
+      role: "技术方",
+      uid: metric.tech_owner_id,
+      name: metric.tech_owner_name,
+    },
+    {
+      stage: "数仓实现",
+      role: "数仓开发",
+      uid: metric.dw_developer_id,
+      name: metric.dw_developer_name,
+    },
+    { stage: "指标注册", role: "指标 Owner", uid: metric.owner_id, name: null },
     {
       stage: "审核把关",
       role: "提交人 / 审批人",
       uid: null,
+      name: null,
       extra: (
         <span>
           {cell(metric.submitted_by)}
@@ -183,7 +233,7 @@ function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrie
             <span>
               <Tag color="blue" style={{ marginRight: 6 }}>{c.stage}</Tag>
               <span className="muted">{c.role}：</span>
-              {c.extra ?? cell(c.uid)}
+              {c.extra ?? cellOwner(c.uid, c.name)}
             </span>
           ),
         }))}
@@ -565,9 +615,9 @@ export function MetricDetail() {
   const [editCalcExpressionDirty, setEditCalcExpressionDirty] = useState(false);
   // 编辑弹窗口径三方责任（产品需求方/技术方/数仓开发，非破坏性字段）：
   // dirty 区分"未改保留"与"清空解除"（清空 → 传 null 解除责任方，与治理属性 dirty 语义一致）
-  const [editProductOwnerId, setEditProductOwnerId] = useState<number | undefined>(undefined);
-  const [editTechOwnerId, setEditTechOwnerId] = useState<number | undefined>(undefined);
-  const [editDwDeveloperId, setEditDwDeveloperId] = useState<number | undefined>(undefined);
+  const [editProductOwner, setEditProductOwner] = useState<RoleOwnerValue | undefined>(undefined);
+  const [editTechOwner, setEditTechOwner] = useState<RoleOwnerValue | undefined>(undefined);
+  const [editDwDeveloper, setEditDwDeveloper] = useState<RoleOwnerValue | undefined>(undefined);
   const [editOwnerIdsDirty, setEditOwnerIdsDirty] = useState<Set<string>>(new Set());
   // 编辑弹窗「落地表（source_table）」可搜索选择：血缘差异同步建「指标↔落地表」边，
   // 注册页②有源表选择、编辑弹窗此前缺失——用户无法改指标落地表（只能手写 JSON）
@@ -931,10 +981,22 @@ export function MetricDetail() {
     // 计算表达式回填（非原子指标）：从口径 expression 读入，独立输入框编辑
     setEditCalcExpression(typeof def.expression === "string" ? def.expression : "");
     setEditCalcExpressionDirty(false);
-    // 口径三方责任回填（非破坏性字段）
-    setEditProductOwnerId(metric.product_owner_id ?? undefined);
-    setEditTechOwnerId(metric.tech_owner_id ?? undefined);
-    setEditDwDeveloperId(metric.dw_developer_id ?? undefined);
+    // 口径三方责任回填（非破坏性字段）：平台用户 id + 外部人员名称兜底
+    setEditProductOwner(
+      metric.product_owner_id != null || metric.product_owner_name
+        ? { id: metric.product_owner_id ?? null, name: metric.product_owner_name ?? null }
+        : undefined,
+    );
+    setEditTechOwner(
+      metric.tech_owner_id != null || metric.tech_owner_name
+        ? { id: metric.tech_owner_id ?? null, name: metric.tech_owner_name ?? null }
+        : undefined,
+    );
+    setEditDwDeveloper(
+      metric.dw_developer_id != null || metric.dw_developer_name
+        ? { id: metric.dw_developer_id ?? null, name: metric.dw_developer_name ?? null }
+        : undefined,
+    );
     setEditOwnerIdsDirty(new Set());
     setEditDefinitionError(null);
     setEditOpen(true);
@@ -1062,14 +1124,17 @@ export function MetricDetail() {
           return;
         }
       }
-      // 口径三方责任（非破坏性字段）：用户修改过才合入——选人传 id、清空传 null（解除责任方）
-      for (const [field, value] of [
-        ["product_owner_id", editProductOwnerId],
-        ["tech_owner_id", editTechOwnerId],
-        ["dw_developer_id", editDwDeveloperId],
+      // 口径三方责任（非破坏性字段）：用户修改过才合入——平台用户传 id、外部人员传 name
+      // （id/name 成对提交：切换/解除时显式置空对应侧，后端以 model_fields_set 识别）
+      for (const [idField, nameField, value] of [
+        ["product_owner_id", "product_owner_name", editProductOwner],
+        ["tech_owner_id", "tech_owner_name", editTechOwner],
+        ["dw_developer_id", "dw_developer_name", editDwDeveloper],
       ] as const) {
-        if (editOwnerIdsDirty.has(field)) {
-          (req as unknown as Record<string, unknown>)[field] = value ?? null;
+        if (editOwnerIdsDirty.has(idField)) {
+          const v = value as RoleOwnerValue | undefined;
+          (req as unknown as Record<string, unknown>)[idField] = v?.id ?? null;
+          (req as unknown as Record<string, unknown>)[nameField] = v?.name ?? null;
         }
       }
       // 字典未收录值治理引导：保存前检测本次请求中的字典字段是否含未收录值。
@@ -1379,6 +1444,8 @@ export function MetricDetail() {
 
   const role = currentUser?.role || "";
   const isAdmin = role === "platform_admin" || role === "domain_admin";
+  // 用户群体（对齐目录页）：详情页 Tabs 默认聚焦项与信息密度按群体差异化
+  const group = ROLE_GROUP[role] ?? "admin";
   const isOwnerOrAdmin = isAdmin || role === "metric_owner";
   const piiMasked = metric.pii_flag && !SENSITIVE_ROLES.includes(role);
   // 评审指派校验（对齐审批页）：仅被指派评审人可审批/灰度。
@@ -1904,6 +1971,7 @@ export function MetricDetail() {
 
       <Card size="small">
         <Tabs
+          defaultActiveKey={GROUP_DEFAULT_TAB[group]}
           items={[
             { key: "quality", label: "质量快照", children: <QualitySnapshot metricId={metric.id} metricCode={metric.metric_code} /> },
             { key: "lineage", label: "血缘影响", children: <LineageImpact key={`${metric.metric_code}-v${metric.row_version ?? 0}`} metricCode={metric.metric_code} /> },
@@ -2346,40 +2414,37 @@ export function MetricDetail() {
             ))}
           </Space>
           {/* 口径三方责任（非破坏性字段）：产品需求方/技术方/数仓开发——指标口径从需求到落地
-              分属三个责任主体，落到具体用户便于通知/指派/审计（PRD 4.5 补充） */}
+              分属三个责任主体，落到具体用户便于通知/指派/审计（PRD 4.5 补充）；
+              责任方非平台用户时可直接输入名称（RoleOwnerSelect 自由文本兜底） */}
           <Space wrap size={12} style={{ width: "100%" }}>
             {(
               [
-                ["product_owner_id", "产品需求方", "口径业务语义提出人"],
-                ["tech_owner_id", "技术方", "口径 ETL/SQL 实现人"],
-                ["dw_developer_id", "数仓开发", "数仓建模/血缘维护人"],
+                ["product_owner", "产品需求方", "口径业务语义提出人"],
+                ["tech_owner", "技术方", "口径 ETL/SQL 实现人"],
+                ["dw_developer", "数仓开发", "数仓建模/血缘维护人"],
               ] as const
             ).map(([field, label, hint]) => {
               const value =
-                field === "product_owner_id"
-                  ? editProductOwnerId
-                  : field === "tech_owner_id"
-                    ? editTechOwnerId
-                    : editDwDeveloperId;
+                field === "product_owner"
+                  ? editProductOwner
+                  : field === "tech_owner"
+                    ? editTechOwner
+                    : editDwDeveloper;
               const setter =
-                field === "product_owner_id"
-                  ? setEditProductOwnerId
-                  : field === "tech_owner_id"
-                    ? setEditTechOwnerId
-                    : setEditDwDeveloperId;
+                field === "product_owner"
+                  ? setEditProductOwner
+                  : field === "tech_owner"
+                    ? setEditTechOwner
+                    : setEditDwDeveloper;
               return (
                 <Form.Item key={field} label={label} tooltip={hint} style={{ marginBottom: 8, flex: 1, minWidth: 160 }}>
-                  <Select
-                    allowClear
-                    placeholder={`选择${label}`}
-                    showSearch
-                    optionFilterProp="label"
-                    value={value ?? null}
+                  <RoleOwnerSelect
+                    users={users}
+                    value={value}
                     onChange={(v) => {
                       setter(v ?? undefined);
                       setEditOwnerIdsDirty((p) => new Set(p).add(field));
                     }}
-                    options={users.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
                     {...DROPDOWN_FULL_WIDTH}
                   />
                 </Form.Item>

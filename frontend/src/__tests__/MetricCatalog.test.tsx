@@ -256,6 +256,35 @@ describe("MetricCatalog", () => {
     });
   });
 
+  it("业务消费者（analyst）展开行隐藏治理追溯，保留口径与责任方", async () => {
+    // 角色差异化：consumer 群体明细抽屉聚焦"口径+责任方"，隐藏备份/提交/审批/时间/分层等治理追溯
+    mockedCurrentUser.mockResolvedValue({
+      id: 5,
+      username: "analyst",
+      display_name: "分析师",
+      role: "analyst",
+      domain: "sales",
+      org_id: 1,
+    });
+    renderCatalog();
+    await waitFor(() => {
+      expect(screen.getByText("sales_gmv_sum_d")).toBeTruthy();
+    });
+    const expandBtn = document.querySelector(".ant-table-row-expand-icon");
+    expect(expandBtn).toBeTruthy();
+    fireEvent.click(expandBtn as Element);
+    await waitFor(() => {
+      // 口径定义与责任方保留（消费者关注"怎么算的 + 找谁问"）
+      expect(screen.getByText("sum(gmv)")).toBeTruthy();
+      expect(screen.getByText("产品需求方")).toBeTruthy();
+      // 治理/运营追溯隐藏（备份责任人/提交人/审批人/创建时间/数据分层）
+      expect(screen.queryByText("备份责任人")).toBeNull();
+      expect(screen.queryByText("提交人")).toBeNull();
+      expect(screen.queryByText("审批人")).toBeNull();
+      expect(screen.queryByText("创建时间")).toBeNull();
+    });
+  });
+
   it("域筛选选项来自真实 dashboard by_domain（非硬编码）", async () => {
     renderCatalog();
     await waitFor(() => {
