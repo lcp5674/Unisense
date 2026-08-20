@@ -1106,14 +1106,14 @@ describe("列宽拖拽（resizable columns）", () => {
       expect(keys.length).toBe(1);
       expect(stored[keys[0]]).toBeGreaterThan(190); // 比默认 190 更宽
     });
-    // 重置列宽按钮存在且可用（存在自定义列宽时）
-    const resetBtn = screen.getByRole("button", { name: /重置列宽/ }) as HTMLButtonElement;
+    // 重置列布局按钮存在且可用（存在自定义列宽时）
+    const resetBtn = screen.getByRole("button", { name: /重置列布局/ }) as HTMLButtonElement;
     expect(resetBtn.disabled).toBe(false);
     fireEvent.click(resetBtn);
     await waitFor(() => {
       expect(localStorage.getItem("unisense.metric-catalog.colWidths")).toBe("{}");
     });
-    expect((screen.getByRole("button", { name: /重置列宽/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /重置列布局/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("初始渲染从 localStorage 恢复记忆的列宽（重置按钮可用）", async () => {
@@ -1121,7 +1121,50 @@ describe("列宽拖拽（resizable columns）", () => {
     renderCatalog();
     await waitFor(() => {
       // 记忆的宽度被读入 state，重置按钮可点（说明存在自定义列宽偏好）
-      expect((screen.getByRole("button", { name: /重置列宽/ }) as HTMLButtonElement).disabled).toBe(false);
+      expect((screen.getByRole("button", { name: /重置列布局/ }) as HTMLButtonElement).disabled).toBe(false);
+    });
+  });
+
+  it("拖拽列序柄：拖动列头实时重排并持久化 colOrder，重置按钮可清除", async () => {
+    renderCatalog();
+    const grips = await screen.findAllByLabelText("拖拽调整列顺序");
+    expect(grips.length).toBeGreaterThan(1);
+    const first = grips[0];
+    const second = grips[1];
+    // jsdom 未实现 elementFromPoint，stub 返回目标列头元素，让拖拽命中目标列（真实浏览器直接可用）
+    const origElFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => second;
+    try {
+      fireEvent.mouseDown(first, { clientX: 50, clientY: 10 });
+      fireEvent.mouseMove(second, { clientX: 300, clientY: 10 });
+      fireEvent.mouseUp(first);
+    } finally {
+      document.elementFromPoint = origElFromPoint;
+    }
+    await waitFor(() => {
+      const stored = JSON.parse(localStorage.getItem("unisense.metric-catalog.colOrder") || "[]") as string[];
+      expect(Array.isArray(stored)).toBe(true);
+      // 拖拽后应有自定义列序（两列顺序被交换）
+      expect(stored.length).toBeGreaterThan(1);
+      expect(stored[0]).not.toBe(stored[1]);
+    });
+    // 重置列布局同时清除列序偏好
+    const resetBtn = screen.getByRole("button", { name: /重置列布局/ }) as HTMLButtonElement;
+    fireEvent.click(resetBtn);
+    await waitFor(() => {
+      expect(localStorage.getItem("unisense.metric-catalog.colOrder")).toBe("[]");
+    });
+  });
+
+  it("初始渲染从 localStorage 恢复记忆的列序", async () => {
+    localStorage.setItem(
+      "unisense.metric-catalog.colOrder",
+      JSON.stringify(["name", "metric_code", "domain", "status", "updated_at"]),
+    );
+    renderCatalog();
+    await waitFor(() => {
+      // 记忆的列序被读入 state，重置按钮可用（存在自定义列序偏好）
+      expect((screen.getByRole("button", { name: /重置列布局/ }) as HTMLButtonElement).disabled).toBe(false);
     });
   });
 });

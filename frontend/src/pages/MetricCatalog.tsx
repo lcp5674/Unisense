@@ -17,6 +17,7 @@ import {
   ExclamationCircleOutlined,
   ThunderboltOutlined,
   ColumnHeightOutlined,
+  HolderOutlined,
   ReloadOutlined,
   UnorderedListOutlined,
   SafetyCertificateOutlined,
@@ -950,6 +951,33 @@ export function MetricCatalog() {
     }
   }, [columnWidths]);
 
+  // ---- 整列拖拽排序（与列宽同构：localStorage 持久化 + 重置）----
+  // colOrder 为 null 表示未自定义列序（用默认顺序）；非空数组为当前自定义顺序（仅含可排序列的 key）
+  const COL_ORDER_STORAGE_KEY = "unisense.metric-catalog.colOrder";
+  const [colOrder, setColOrder] = useState<string[] | null>(() => {
+    try {
+      const raw = localStorage.getItem(COL_ORDER_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) && parsed.length > 0 ? (parsed as string[]) : null;
+    } catch {
+      return null;
+    }
+  });
+  const orderRef = useRef(colOrder);
+  orderRef.current = colOrder;
+  useEffect(() => {
+    try {
+      localStorage.setItem(COL_ORDER_STORAGE_KEY, JSON.stringify(colOrder ?? []));
+    } catch {
+      // localStorage 不可用（隐私模式/被禁用）时静默降级：列序仅当前会话生效
+    }
+  }, [colOrder]);
+  // 拖拽过程中的工作列序（mousemove 高频触发，用 ref 持有最新顺序避免 state 滞后）
+  const dragWorkingOrderRef = useRef<string[] | null>(null);
+  const [dragCol, setDragCol] = useState<string | null>(null);
+  const [dragOverCol, setDragOverCol] = useState<string | null>(null);
+
   const startResize = (e: ReactMouseEvent, key: string, baseWidth: number) => {
     e.stopPropagation();
     e.preventDefault();
@@ -1181,25 +1209,124 @@ export function MetricCatalog() {
     return columns.filter((col) => col.key === "restore" || allowed.includes(String(col.key)));
   }, [columns, visibleCols]);
 
+  // 按用户自定义列序重排（colOrder 为空/未设置时保持默认；restore 等未参与排序的列置尾保持原相对顺序）
+  const orderedColumns = useMemo<ColumnsType<MetricResponse>>(() => {
+    if (!colOrder || colOrder.length === 0) return filteredColumns;
+    const byKey = new Map(filteredColumns.map((c) => [String(c.key), c] as const));
+    const ordered: ColumnsType<MetricResponse> = [];
+    const seen = new Set<string>();
+    for (const k of colOrder) {
+      const col = byKey.get(k);
+      if (col && !seen.has(k)) {
+        ordered.push(col);
+        seen.add(k);
+      }
+    }
+    for (const col of filteredColumns) {
+      const k = String(col.key);
+      if (!seen.has(k)) {
+        ordered.push(col);
+        seen.add(k);
+      }
+    }
+    return ordered;
+  }, [filteredColumns, colOrder]);
+  // 当前渲染列的有序 key（拖拽排序计算插入位置用；restore 操作列不参与排序）
+  const orderedKeysRef = useRef<string[]>([]);
+  orderedKeysRef.current = orderedColumns.map((c) => String(c.key)).filter((k) => k !== "restore");
+
+  // 整列拖拽排序：按下拖拽柄后监听 document mousemove，用 elementFromPoint 定位鼠标所在列，
+  // 把被拖列实时插入到目标列位置（live reorder 有即时预览效果），松开持久化到 localStorage。
+  const startDrag = (e: ReactMouseEvent, key: string) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setDragCol(key);
+    dragWorkingOrderRef.current = [...orderedKeysRef.current];
+    const onMouseMove = (me: MouseEvent) => {
+      const el = document.elementFromPoint(me.clientX, me.clientY);
+      const overKey =
+        (el?.closest?.("[data-col-key]") as HTMLElement | null)?.getAttribute("data-col-key") ?? null;
+      if (overKey && overKey !== key && overKey !== "restore") {
+        const list = dragWorkingOrderRef.current ?? [];
+        const from = list.indexOf(key);
+        const to = list.indexOf(overKey);
+        if (from !== -1 && to !== -1 && from !== to) {
+          const next = [...list];
+          next.splice(from, 1);
+          next.splice(to, 0, key);
+          dragWorkingOrderRef.current = next;
+          setColOrder(next);
+        }
+      }
+      setDragOverCol(overKey);
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      setDragCol(null);
+      setDragOverCol(null);
+      dragWorkingOrderRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    document.body.style.cursor = "grabbing";
+    document.body.style.userSelect = "none";
+  };
+
   // 把「记忆的列宽 + 默认列宽」合并成可拖拽表头：每列标题区渲染一个拖拽手柄，
   // 通过 onHeaderCell 给 <th> 注入相对定位，手柄绝对定位在列右边缘，拖拽即改列宽。
   const resizableColumns = useMemo(
     () =>
-      filteredColumns.map((col) => {
+      orderedColumns.map((col) => {
         const key = String(col.key);
         const baseWidth = (col.width as number | undefined) ?? DEFAULT_COL_WIDTH;
         const width = columnWidths[key] ?? baseWidth;
         return {
           ...col,
           width,
-          onHeaderCell: () => ({ style: { position: "relative" as const } }),
+          onHeaderCell: () => ({
+            style: { position: "relative" as const },
+            "data-col-key": key,
+          }),
           title: (
             <span
-              style={{ display: "block", position: "relative", paddingRight: 8 }}
+              style={{
+                display: "block",
+                position: "relative",
+                paddingRight: 8,
+                paddingLeft: 16,
+                background: dragCol === key ? "rgba(24,144,255,0.12)" : "transparent",
+                borderLeft: dragOverCol === key && dragCol ? "2px solid rgba(24,144,255,0.8)" : "2px solid transparent",
+                borderRadius: 2,
+              }}
               onMouseEnter={() => setHoveredColKey(key)}
               onMouseLeave={() => setHoveredColKey((k) => (k === key ? null : k))}
             >
+              {/* 整列拖拽排序柄：按住可把该列移动到其他列前/后 */}
+              <span
+                role="button"
+                aria-label="拖拽调整列顺序"
+                title="按住拖动可调整列顺序"
+                onMouseDown={(e) => startDrag(e, key)}
+                style={{
+                  position: "absolute",
+                  left: 2,
+                  top: 0,
+                  bottom: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  cursor: dragCol === key ? "grabbing" : "grab",
+                  color: dragCol === key || hoveredColKey === key ? "#1677ff" : "#c0c4cc",
+                  userSelect: "none",
+                  touchAction: "none",
+                }}
+              >
+                <HolderOutlined style={{ fontSize: 11 }} />
+              </span>
               {col.title as ReactNode}
+              {/* 列宽拖拽柄：按住可调整该列宽度 */}
               <span
                 role="separator"
                 aria-orientation="vertical"
@@ -1223,7 +1350,7 @@ export function MetricCatalog() {
           ),
         };
       }) as ColumnsType<MetricResponse>,
-    [filteredColumns, columnWidths, hoveredColKey],
+    [orderedColumns, columnWidths, hoveredColKey, dragCol, dragOverCol],
   );
 
   const totalWidth = useMemo(
@@ -1352,13 +1479,13 @@ export function MetricCatalog() {
               对比所选{selected.length > 1 ? ` (${selected.length})` : ""}
             </Button>
         </Tooltip>
-        <Tooltip title="恢复默认列宽（清除本地保存的列宽偏好，下次进入按默认宽度展示）">
+        <Tooltip title="恢复默认列宽与列顺序（清除本地保存的列布局偏好，下次进入按默认展示）">
           <Button
             icon={<ColumnHeightOutlined />}
-            onClick={() => setColumnWidths({})}
-            disabled={Object.keys(columnWidths).length === 0}
+            onClick={() => { setColumnWidths({}); setColOrder(null); }}
+            disabled={Object.keys(columnWidths).length === 0 && !colOrder}
           >
-            重置列宽
+            重置列布局
           </Button>
         </Tooltip>
         <Dropdown
