@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Button, Collapse, Empty, Segmented, Table, Tag, message } from "antd";
-import { lineageImpact } from "../../api";
-import type { LineageEdge, LineageNodeInfo } from "../../types";
+import { Alert, Button, Collapse, Empty, Segmented, Select, Space, Table, Tag, message } from "antd";
+import { lineageImpact, lineageImpactPreview } from "../../api";
+import type { ImpactPreview, LineageEdge, LineageNodeInfo } from "../../types";
 import { AssetGraph, AssetGraphEdge, AssetGraphNode } from "../../components/assetmap/AssetGraph";
 import { LINEAGE_EDGE_TYPE_LABEL } from "../../utils/enums";
 
@@ -20,6 +20,16 @@ const PROVENANCE_LABEL: Record<string, string> = {
   manual: "人工登记",
   neo4j: "图谱导入",
 };
+
+const RISK_LEVEL_LABEL: Record<string, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+  critical: "严重",
+};
+
+// 跳数选项：与后端 /lineage/impact max_hops(ge=1, le=10) 对齐
+const HOPS_OPTIONS = [1, 2, 3, 5, 8, 10].map((v) => ({ value: v, label: `${v} 跳` }));
 
 /**
  * 从血缘边列表构建图谱数据（与血缘影响分析页 edgesToGraphData 语义一致）：
@@ -66,15 +76,17 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
     nodes: AssetGraphNode[];
     edges: AssetGraphEdge[];
   } | null>(null);
-  const [direction, setDirection] = useState<"upstream" | "downstream">("downstream");
+  const [direction, setDirection] = useState<"upstream" | "downstream" | "both">("downstream");
+  const [maxHops, setMaxHops] = useState(5);
+  const [risk, setRisk] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function load(dir: "upstream" | "downstream") {
+  async function load(dir: "upstream" | "downstream" | "both", hops: number) {
     setLoading(true);
     setError(null);
     try {
-      const res = await lineageImpact({ node: `metric:${metricCode}`, direction: dir, max_hops: 5, page_size: 50 });
+      const res = await lineageImpact({ node: `metric:${metricCode}`, direction: dir, max_hops: hops, page_size: 50 });
       setEdges(res.items);
       // 边列表 → 图谱数据（节点元数据合并进图节点，供下钻/着色）
       setGraphData(res.items.length > 0 ? edgesToGraphData(res.items, res.nodes) : null);
@@ -88,9 +100,24 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
   }
 
   useEffect(() => {
-    load(direction);
+    load(direction, maxHops);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [metricCode, direction]);
+  }, [metricCode, direction, maxHops]);
+
+  /** 变更影响预览（what-if）：schema 漂移场景下受影响指标/物理表/消费方 + 风险等级。 */
+  async function previewImpact() {
+    setLoading(true);
+    try {
+      const p: ImpactPreview = await lineageImpactPreview(metricCode, "schema_drift");
+      setRisk(
+        `受影响指标 ${p.affected_metrics.length} · 物理表 ${p.affected_tables.length} · 消费方 ${p.affected_consumers.length} · 风险等级 ${RISK_LEVEL_LABEL[p.risk_level] ?? p.risk_level}`,
+      );
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "变更影响预览失败");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   /** 点击图谱节点：指标节点新开详情页查看，表/字段节点提示（不打断当前详情上下文）。 */
   function handleNodeClick(node: AssetGraphNode) {
@@ -111,7 +138,7 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
 
   const columns = [
     {
-      title: direction === "downstream" ? "下游节点" : "上游节点",
+      title: direction === "downstream" ? "下游节点" : direction === "upstream" ? "上游节点" : "关联节点",
       key: "node",
       render: (_: unknown, e: LineageEdge) => (
         <span className="mono">{direction === "downstream" ? e.target_node : e.source_node}</span>
@@ -137,15 +164,29 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
 
   return (
     <div>
-      <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <Segmented
-          value={direction}
-          onChange={(v) => setDirection(v as "upstream" | "downstream")}
-          options={[
-            { label: "下游影响（被谁消费）", value: "downstream" },
-            { label: "上游依赖（来自哪里）", value: "upstream" },
-          ]}
-        />
+      <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <Space wrap>
+          <Segmented
+            value={direction}
+            onChange={(v) => setDirection(v as "upstream" | "downstream" | "both")}
+            options={[
+              { label: "下游影响", value: "downstream" },
+              { label: "上游依赖", value: "upstream" },
+              { label: "双向", value: "both" },
+            ]}
+          />
+          <Select
+            size="small"
+            style={{ width: 84 }}
+            value={maxHops}
+            onChange={setMaxHops}
+            options={HOPS_OPTIONS}
+            title="血缘展开跳数（1-10）"
+          />
+          <Button size="small" onClick={previewImpact} loading={loading}>
+            变更影响预览
+          </Button>
+        </Space>
         <Button
           type="link"
           size="small"
@@ -154,6 +195,16 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
           在图谱中查看 →
         </Button>
       </div>
+
+      {risk && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="变更影响预览（what-if）"
+          description={risk}
+        />
+      )}
 
       {error ? (
         <Empty description={error} />

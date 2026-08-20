@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor, screen } from "@testing-library/react";
+import { render, waitFor, screen, fireEvent } from "@testing-library/react";
 import { LineageImpact } from "../pages/metric/LineageImpact";
 
 vi.mock("../api", async () => {
@@ -7,6 +7,7 @@ vi.mock("../api", async () => {
   return {
     ...actual,
     lineageImpact: vi.fn(),
+    lineageImpactPreview: vi.fn(),
   };
 });
 
@@ -30,23 +31,24 @@ vi.mock("@antv/g6", () => ({
 }));
 
 import { Graph } from "@antv/g6";
-import { lineageImpact } from "../api";
-import type { AssetGraphNode } from "../components/assetmap/AssetGraph";
+import { lineageImpact, lineageImpactPreview } from "../api";
+import type { AssetGraphEdge, AssetGraphNode } from "../components/assetmap/AssetGraph";
 
 const mockedImpact = vi.mocked(lineageImpact);
+const mockedPreview = vi.mocked(lineageImpactPreview);
 
 function lastGraphData(): {
   nodes: Array<{ id: string; data?: AssetGraphNode }>;
-  edges: Array<{ source: string; target: string; type: string }>;
+  edges: AssetGraphEdge[];
 } {
   const dataCalls = graphMock.setData.mock.calls as Array<
-    [{ nodes: Array<{ id: string; data?: AssetGraphNode }>; edges: Array<{ source: string; target: string; type: string }> }]
+    [{ nodes: Array<{ id: string; data?: AssetGraphNode }>; edges: AssetGraphEdge[] }]
   >;
   if (dataCalls.length > 0) return dataCalls[dataCalls.length - 1][0];
   const ctorCalls = vi.mocked(Graph).mock.calls;
   return ctorCalls[ctorCalls.length - 1][0].data as {
     nodes: Array<{ id: string; data?: AssetGraphNode }>;
-    edges: Array<{ source: string; target: string; type: string }>;
+    edges: AssetGraphEdge[];
   };
 }
 
@@ -138,6 +140,59 @@ describe("LineageImpact", () => {
     await waitFor(() => {
       expect(Graph).not.toHaveBeenCalled();
       expect(screen.getByText(/暂无血缘关系/)).toBeTruthy();
+    });
+  });
+
+  it("切换到「双向」方向时携带 direction=both", async () => {
+    const { container } = render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    await waitFor(() => expect(mockedImpact).toHaveBeenCalled());
+    const bothSeg = Array.from(container.querySelectorAll(".ant-segmented-item")).find(
+      (el) => el.textContent?.includes("双向"),
+    );
+    (bothSeg as HTMLElement | undefined)?.click();
+    await waitFor(() => {
+      expect(mockedImpact).toHaveBeenLastCalledWith(
+        expect.objectContaining({ node: "metric:sales_e2e_gmv_day", direction: "both" }),
+      );
+    });
+  });
+
+  it("调节跳数（max_hops）后重新查询携带新跳数", async () => {
+    const { container } = render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    await waitFor(() =>
+      expect(mockedImpact).toHaveBeenLastCalledWith(expect.objectContaining({ max_hops: 5 })),
+    );
+    // 打开跳数下拉选择「3 跳」（等 load 完成后 loading=false，Select 可交互）
+    const hopSel = container.querySelector(".ant-select .ant-select-selector") as HTMLElement;
+    fireEvent.mouseDown(hopSel);
+    await waitFor(() => {
+      const opt = Array.from(document.querySelectorAll(".ant-select-item-option")).find(
+        (el) => el.textContent?.includes("3 跳"),
+      );
+      expect(opt).toBeTruthy();
+      (opt as HTMLElement).click();
+    });
+    await waitFor(() =>
+      expect(mockedImpact).toHaveBeenLastCalledWith(expect.objectContaining({ max_hops: 3 })),
+    );
+  });
+
+  it("点击「变更影响预览」调用 lineageImpactPreview 并展示风险摘要", async () => {
+    mockedPreview.mockResolvedValue({
+      affected_metrics: [{ metric_code: "sales_e2e_unitprice_day", change_type: "schema_drift" }],
+      affected_tables: ["dwd_sales_detail"],
+      affected_consumers: ["看板A", "报表B"],
+      risk_level: "high",
+    } as any);
+    render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    // 等首次 load 完成（loading=false，按钮可点）
+    await waitFor(() => expect(mockedImpact).toHaveBeenCalled());
+    fireEvent.click(screen.getByText("变更影响预览"));
+    await waitFor(() => {
+      expect(mockedPreview).toHaveBeenCalledWith("sales_e2e_gmv_day", "schema_drift");
+      expect(screen.getByText("变更影响预览（what-if）")).toBeTruthy();
+      expect(screen.getByText(/受影响指标 1/)).toBeTruthy();
+      expect(screen.getByText(/风险等级 高/)).toBeTruthy();
     });
   });
 });

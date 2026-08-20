@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { MetricDetail } from "../pages/MetricDetail";
 import { PermissionProvider } from "../hooks/usePermission";
@@ -974,8 +974,10 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
     // 打开术语下拉并搜索（antd Select placeholder 是 span 文本，非 input 属性）
     const termSelect = await screen.findByText("搜索并绑定业务术语");
-    fireEvent.mouseDown(termSelect.closest(".ant-select") as HTMLElement);
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "成交" } });
+    // 限定在术语绑定 Select 内查询 combobox——血缘影响 Tab 内嵌 LineageImpact 有跳数 Select，全局 getByRole 会多匹配
+    const termBox = termSelect.closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(termBox);
+    fireEvent.change(within(termBox).getByRole("combobox"), { target: { value: "成交" } });
     await waitFor(() => expect(listTerms).toHaveBeenCalled());
     // 选中「成交金额」→ 触发绑定（选项标签为「名称（term_code）」）
     const option = await screen.findByText(/成交金额（CJ_AMT）/);
