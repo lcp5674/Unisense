@@ -214,6 +214,18 @@ class Metric(Base, BaseModel):
         nullable=True,
         comment="数仓开发用户 ID（数仓建模/血缘维护人）",
     )
+    # ---- 口径三方责任：外部人员名称兜底（PRD 4.5 补充，均可空）----
+    # 责任方可能是平台外人员（供应商/业务侧协作方），无 user.id 可引用时直接落名称。
+    # 展示优先级：id 可解析 → 平台用户；id 为空但 name 非空 → 外部人员名称。
+    product_owner_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="产品需求方名称（非平台用户直接填写）"
+    )
+    tech_owner_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="技术方名称（非平台用户直接填写）"
+    )
+    dw_developer_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="数仓开发名称（非平台用户直接填写）"
+    )
     submitted_by: Mapped[int | None] = mapped_column(
         BigInteger,
         nullable=True,

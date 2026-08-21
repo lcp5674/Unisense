@@ -142,10 +142,11 @@ async def test_pii_review_succeeds_for_domain_admin(client):
 
 
 async def test_get_metric_versions_success(client):
-    """版本历史接口：必须调用 service.get_versions（锁定此前误写为
-    get_metric_versions 的运行时 500 缺陷）。"""
+    """版本历史接口：调用 service.get_version_responses_with_meta（返回指标实体
+    供 PII 分级脱敏），并对非 PII 指标不做脱敏处理。"""
     from app.models.metric import MetricVersion
 
+    metric = make_metric(pii_flag=False)
     version = MetricVersion(
         id=1,
         metric_id=1,
@@ -162,15 +163,18 @@ async def test_get_metric_versions_success(client):
     )
     with patch("app.api.metrics.MetricService") as mock_svc:
         instance = mock_svc.return_value
-        # 端点当前调用 service.get_version_responses（返回序列化版本响应）
-        instance.get_version_responses = AsyncMock(return_value=[version])
+        instance.get_version_responses_with_meta = AsyncMock(
+            return_value=(metric, [version])
+        )
 
         resp = await client.get("/api/v1/metric-definitions/sales_gmv_daily/versions")
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["code"] == "OK"
-    instance.get_version_responses.assert_awaited_once_with("sales_gmv_daily")
+    instance.get_version_responses_with_meta.assert_awaited_once_with(
+        "sales_gmv_daily", actor_id=1, role="metric_owner"
+    )
     assert body["data"][0]["version"] == 1
 
 
@@ -197,6 +201,8 @@ async def test_metric_write_endpoints_commit():
             instance.approve_metric = AsyncMock(return_value=metric)
             instance.deprecate_metric = AsyncMock(return_value=metric)
             instance.review_compliance = AsyncMock(return_value=metric)
+            # 写端点 commit 后触发血缘后置任务（lineage_post_commit），mock 须可 await
+            instance.run_lineage_post_commit = AsyncMock()
 
             transport = ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:

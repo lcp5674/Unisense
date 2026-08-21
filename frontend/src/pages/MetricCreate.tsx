@@ -1,16 +1,17 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined } from "@ant-design/icons";
+import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined } from "@ant-design/icons";
 import {
-  Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Table, Tooltip, Typography, App as AntApp, Tag,
+  Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Drawer, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Steps, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, Dimension, MeasureCatalog, MetricMountInput } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
+import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
 
 const { Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -125,8 +126,22 @@ export function MetricCreate() {
   const canInferDesc = can("metric:infer-description");
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
+  // OneData 向导：当前步骤（0=业务域 1=指标定义 2=口径确认 3=治理/提交）。
+  // 分步一屏 + 底部导航，替代原先"编号打补丁"的平铺卡片流（方案 C 重构）。
+  const [currentStep, setCurrentStep] = useState(0);
+  // 当前用户角色（挂载时获取）：管理/数仓角色默认展开高级治理，业务角色默认折叠
+  const [currentRole, setCurrentRole] = useState<string>("");
+  useEffect(() => {
+    fetchCurrentUser()
+      .then((u) => setCurrentRole(u.role))
+      .catch(() => {});
+  }, []);
   // 指标类型联动：atomic（原子）基于源表直接聚合，不应有上游依赖指标；derived/composite 才有
-  const metricType = Form.useWatch("type", form);
+  // 用 state 而非 Form.useWatch：向导分步卸载 Form.Item 后，useWatch 与 getFieldsValue() 对未挂载字段
+  // 均返回 undefined（antd 仅保留 store，默认取值路径排除未挂载字段），导致跨步骤后
+  // isAtomic/isDerivedOrComposite 整体失效、提交校验跳过、payload 丢失 type。
+  // 通过 Form onValuesChange 同步所有写入路径（Segmented 点击/域默认预填/推断回填）。
+  const [metricType, setMetricType] = useState<MetricType>("atomic");
   const isAtomic = metricType === "atomic";
   const isDerivedOrComposite = metricType === "derived" || metricType === "composite";
 
@@ -162,6 +177,8 @@ export function MetricCreate() {
 
   const [mode, setMode] = useState<"expression" | "sql">("expression");
   const [sqlText, setSqlText] = useState("");
+  // OneData 向导：SQL 智能推断是"工具"而非主流程步骤（方案 C）——收敛为右上角抽屉入口
+  const [sqlInferOpen, setSqlInferOpen] = useState(false);
   // 派生/复合指标的计算表达式（MEL 语法，如 gmv / order_cnt），自动合入 definition_json.expression。
   // 原子指标不展示此输入（其聚合表达式由 源表+度量列+聚合 生成）。
   const [calcExpression, setCalcExpression] = useState("");
@@ -588,6 +605,34 @@ export function MetricCreate() {
     return { ...def, ...expr, ...tables, ...dimsField, ...depsField };
   }
 
+  // OneData 向导：下一步纯前进（不逐级硬校验——避免打断"先粗填再回头改"的构建式流程；
+  // 最终提交由 handleSubmit 的类型化必填校验统一兜底，保证错误在真正创建前被拦截）
+  function handleNext() {
+    setCurrentStep((s) => Math.min(s + 1, 3));
+  }
+
+  // 向导步骤导航：每步内容末尾常驻，形成"填完当前步 → 下一步"的引导流。
+  // Step0-2 显示「上一步 + 下一步」，Step3（最后一步）显示「上一步 + 冲突预检 + 创建草稿」。
+  const renderStepNav = () => (
+    <Form.Item style={{ marginBottom: 0 }}>
+      <Space>
+        {currentStep > 0 && (
+          <Button onClick={() => setCurrentStep(currentStep - 1)}>上一步</Button>
+        )}
+        {currentStep < 3 ? (
+          <Button type="primary" onClick={handleNext}>
+            {["下一步：指标定义", "下一步：治理与口径", "下一步：责任方与提交"][currentStep]}
+          </Button>
+        ) : (
+          <>
+            <Button onClick={handlePrecheck} loading={prechecking}>冲突预检</Button>
+            {canCreate && <Button type="primary" htmlType="submit" loading={loading}>创建草稿</Button>}
+          </>
+        )}
+      </Space>
+    </Form.Item>
+  );
+
   async function handlePrecheck() {
     const values = form.getFieldsValue();
     if (!selectedDomain) { message.warning("请先选择业务域"); return; }
@@ -618,7 +663,11 @@ export function MetricCreate() {
     }
   }
 
-  async function handleSubmit(values: Record<string, unknown>) {
+  async function handleSubmit(_values: Record<string, unknown>) {
+    // onFinish 的 values 仅含当前挂载字段；向导分步卸载上一步后 type/source_table 等字段不在其中。
+    // antd store 已 preserve（getFieldValue 可读），仅 getFieldsValue()/onFinish 默认排除未挂载字段——
+    // 用 getFieldsValue(true) 取含保留值的完整字段集，保证类型化校验与提交 payload 拿到全部字段。
+    const values = form.getFieldsValue(true) as Record<string, unknown>;
     // 类型化必填校验（对齐后端 definition_json 类型校验 + PRD 4.5）：
     // 派生/复合=须有依赖指标+计算表达式；原子=须有源表度量列或手写口径。
     if (isDerivedOrComposite) {
@@ -663,25 +712,33 @@ export function MetricCreate() {
       domain: selectedDomain,
       type: String(values.type) as MetricType,
       // OneData：粒度下沉挂载——原子不设，派生由 mount 承载（主表冗余回填由服务端处理）
-      granularity: values.granularity ? String(values.granularity) : mount?.granularity ?? undefined,
+      granularity: isAtomic
+        ? undefined
+        : values.granularity
+          ? String(values.granularity)
+          : mount?.granularity ?? undefined,
       // OneData 原子层：原子指标关联逻辑度量（度量格式/单位/小数位继承）
       measure_id: isAtomic ? selectedMeasure?.id ?? undefined : undefined,
       mount,
-      unit: String(values.unit),
-      currency: values.currency ? String(values.currency) : undefined,
+      // OneData：单位与物理属性——原子由逻辑度量继承/后端默认（不提交）；派生/复合缺省后端兜底
+      unit: isAtomic ? undefined : values.unit ? String(values.unit) : undefined,
+      currency: isAtomic ? undefined : values.currency ? String(values.currency) : undefined,
       aggregation: String(values.aggregation) as MetricCreateRequest["aggregation"],
-      time_semantics: String(values.time_semantics) as MetricCreateRequest["time_semantics"],
-      freshness: String(values.freshness) as MetricCreateRequest["freshness"],
-      dw_layer: String(values.dw_layer) as MetricCreateRequest["dw_layer"],
+      time_semantics: (isAtomic ? undefined : values.time_semantics ? String(values.time_semantics) : undefined) as MetricCreateRequest["time_semantics"],
+      freshness: (isAtomic ? undefined : values.freshness ? String(values.freshness) : undefined) as MetricCreateRequest["freshness"],
+      dw_layer: (isAtomic ? undefined : values.dw_layer ? String(values.dw_layer) : undefined) as MetricCreateRequest["dw_layer"],
       metric_tier: String(values.metric_tier || "T3") as MetricTier,
       serving_mode: String(values.serving_mode || "BATCH_ONLY") as MetricCreateRequest["serving_mode"],
       additivity: String(values.additivity || "ADDITIVE") as MetricCreateRequest["additivity"],
       definition_json: definitionJson,
       pii_flag: Boolean(values.pii_flag),
-      // 口径三方责任（可选）：产品需求方/技术方/数仓开发
-      product_owner_id: values.product_owner_id ? Number(values.product_owner_id) : undefined,
-      tech_owner_id: values.tech_owner_id ? Number(values.tech_owner_id) : undefined,
-      dw_developer_id: values.dw_developer_id ? Number(values.dw_developer_id) : undefined,
+      // 口径三方责任（可选）：平台用户 id 或外部人员名称兜底（RoleOwnerSelect 组合值拆分）
+      product_owner_id: (values.product_owner as RoleOwnerValue | undefined)?.id ?? undefined,
+      tech_owner_id: (values.tech_owner as RoleOwnerValue | undefined)?.id ?? undefined,
+      dw_developer_id: (values.dw_developer as RoleOwnerValue | undefined)?.id ?? undefined,
+      product_owner_name: (values.product_owner as RoleOwnerValue | undefined)?.name ?? undefined,
+      tech_owner_name: (values.tech_owner as RoleOwnerValue | undefined)?.name ?? undefined,
+      dw_developer_name: (values.dw_developer as RoleOwnerValue | undefined)?.name ?? undefined,
     };
     try {
       const created = await createMetric(req);
@@ -786,12 +843,30 @@ export function MetricCreate() {
       </Button>
       <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }} align="center">
         <Title level={3} style={{ margin: 0 }}>注册指标（草稿）</Title>
-        <Tooltip title={canBatchRegister ? "批量注册（宽表多度量列 → 批量 DRAFT）" : "仅平台/域管理员与指标 Owner 可批量注册"}>
-          <Button type="dashed" icon={<BarsOutlined />} onClick={openBatchModal} disabled={!canBatchRegister}>
-            批量注册指标
-          </Button>
-        </Tooltip>
+        <Space>
+          <Tooltip title="粘贴指标 SQL 智能推断并回填字段（独立工具，不占注册主流程）">
+            <Button icon={<RobotOutlined />} onClick={() => setSqlInferOpen(true)} disabled={!selectedDomain}>
+              SQL 智能推断
+            </Button>
+          </Tooltip>
+          <Tooltip title={canBatchRegister ? "批量注册（宽表多度量列 → 批量 DRAFT）" : "仅平台/域管理员与指标 Owner 可批量注册"}>
+            <Button type="dashed" icon={<BarsOutlined />} onClick={openBatchModal} disabled={!canBatchRegister}>
+              批量注册指标
+            </Button>
+          </Tooltip>
+        </Space>
       </Space>
+      <Steps
+        current={currentStep}
+        onChange={(c) => setCurrentStep(c)}
+        style={{ marginBottom: 20 }}
+        items={[
+          { title: "业务域", description: "选域并继承域默认值" },
+          { title: "指标定义", description: "类型 + 度量/依赖来源" },
+          { title: "口径确认", description: "自动生成 + 维度/表关联" },
+          { title: "治理/提交", description: "高级治理 + 创建草稿" },
+        ]}
+      />
       <Spin
         spinning={sqlInferring}
         size="large"
@@ -800,9 +875,12 @@ export function MetricCreate() {
       >
         <Card>
         <Form form={form} layout="vertical" scrollToFirstError onFinish={handleSubmit}
-          onValuesChange={() => {
+          onValuesChange={(changed) => {
             // 表单字段变化即旧预检结果失效（避免「无冲突」结果在改口径后仍误导提交）
             if (precheckResult) setPrecheckResult(null);
+            // 同步指标类型到 state（覆盖 Segmented 点击/域默认预填/推断回填等所有写入路径；
+            // 见 metricType 声明——useWatch 跨步骤卸载后失效，须由 state 持有）
+            if ("type" in changed) setMetricType(changed.type as MetricType);
           }}
           initialValues={{
           type: "atomic", granularity: "day", aggregation: "SUM",
@@ -811,7 +889,8 @@ export function MetricCreate() {
           pii_flag: false, period: "day",
         }}>
           <Space style={{ width: "100%" }} direction="vertical" size="middle">
-            {/* Step 1: 选域 */}
+            {/* Step 0: 选域（OneData 向导） */}
+            {currentStep === 0 && (<>
             <Card type="inner" title="① 选择业务域" size="small">
               <Form.Item name="domain_path" label="业务域" rules={[{ required: true, message: "请选择业务域" }]}>
                 <Cascader
@@ -824,9 +903,12 @@ export function MetricCreate() {
                 />
               </Form.Item>
             </Card>
+            {renderStepNav()}
+            </>)}
 
-            {/* Step 1.25: 选择指标类型（前置：三类指标配置差异显著，先定类型再按类型渲染配置区） */}
-            <Card type="inner" title="①⑤ 选择指标类型" size="small">
+            {/* Step 1: 类型 + 来源（OneData 向导） */}
+            {currentStep === 1 && (<>
+            <Card type="inner" title="② 选择指标类型" size="small">
               <Form.Item
                 name="type"
                 label="指标类型"
@@ -844,34 +926,7 @@ export function MetricCreate() {
               </Form.Item>
             </Card>
 
-            {/* Step 1.5: 粘贴 SQL 智能推断（独立入口） */}
-            <Card type="inner" title="①⑥ 粘贴 SQL 智能推断（可选）" size="small" extra={sqlInferring && <Spin size="small" />}>
-              <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
-                主要面向原子指标：粘贴一段指标定义 SQL（含 SELECT + 聚合 + GROUP BY + 时间过滤），系统用 sqlglot 解析并自动推断类型、名称、粒度、单位、聚合、时间语义、新鲜度、数仓层、可加性、服务模式与分级，并生成口径定义。
-                该 SQL 仅用于推断，与下方「口径定义」相互独立，最终口径可另行编写。
-              </Paragraph>
-              <Form.Item label="指标 SQL">
-                <TextArea
-                  rows={4}
-                  value={sqlInferText}
-                  onChange={(e) => setSqlInferText(e.target.value)}
-                  placeholder={"SELECT SUM(amount) AS gmv\nFROM dwd.sales_detail\nGROUP BY dt, shop_id"}
-                  className="mono"
-                />
-              </Form.Item>
-              {canInferDesc && (
-                <Button
-                  type="dashed"
-                  block
-                  onClick={handleSqlInfer}
-                  disabled={!selectedDomain || !sqlInferText.trim()}
-                >
-                  智能推断并回填字段
-                </Button>
-              )}
-            </Card>
-
-            {/* Step 2: 按类型的来源配置——原子=源表/度量列/周期（自动推断）；派生/复合=依赖指标 */}
+            {/* Step 2: 按类型的来源配置——原子=逻辑度量/源字段；派生/复合=依赖指标（SQL 推断已收敛为工具栏抽屉） */}
             <Card
               type="inner"
               title={isAtomic ? "② 原子来源（逻辑度量 + 聚合方式）" : "② 依赖指标"}
@@ -1023,9 +1078,13 @@ export function MetricCreate() {
                 </>
               )}
             </Card>
+            {renderStepNav()}
+            </>
+            )}
 
-            {/* Step 3: 确认/覆盖 */}
-            <Card type="inner" title="③ 确认/覆盖字段" size="small">
+            {/* Step 2: 治理确认 + 口径定义（OneData 向导） */}
+            {currentStep === 2 && (<>
+            <Card type="inner" title="③ 确认治理" size="small">
               <Row gutter={16}>
                 <Col span={12}>
                   <Form.Item
@@ -1054,76 +1113,100 @@ export function MetricCreate() {
                 </Col>
               </Row>
 
-              <Row gutter={16}>
-                <Col span={8}>
-                  <Form.Item name="granularity" label={<span>粒度{fieldBadge("granularity")}</span>} rules={[{ required: true, message: "请选择粒度" }]}>
-                    {dictSelect("granularity", "granularity", "选择粒度")}
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name="unit" label={<span>单位{fieldBadge("unit")}</span>} rules={[{ required: true, message: "请选择单位" }]}>
-                    {dictSelect("unit", "unit", "选择单位")}
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item
-                    name="currency"
-                    label="币种（选填）"
-                    extra="ISO 4217 标准币种，仅交易类指标需要"
-                  >
-                    {dictSelect("currency", "currency", "选择币种")}
-                  </Form.Item>
-                </Col>
-              </Row>
-
+              {/* OneData：聚合方式为原子指标核心（始终可见）；其余治理字段收敛为"高级设置"——
+                  由域默认值/度量目录/挂载层自动接管；管理/数仓角色默认展开、业务角色默认折叠 */}
               <Row gutter={16}>
                 <Col span={8}>
                   <Form.Item name="aggregation" label={<span>聚合{fieldBadge("aggregation")}</span>} rules={[{ required: true, message: "请选择聚合方式" }]}>
                     {dictSelect("aggregation", "aggregation", "选择聚合方式")}
                   </Form.Item>
                 </Col>
-                <Col span={8}>
-                  <Form.Item name="time_semantics" label={<span>时间语义{fieldBadge("time_semantics")}</span>} rules={[{ required: true, message: "请选择时间语义" }]}>
-                    {dictSelect("time_semantics", "time_semantics", "选择时间语义")}
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name="freshness" label={<span>新鲜度{fieldBadge("freshness")}</span>} rules={[{ required: true, message: "请选择新鲜度" }]}>
-                    {dictSelect("freshness", "freshness", "选择新鲜度")}
-                  </Form.Item>
-                </Col>
               </Row>
-
-              <Row gutter={16}>
-                <Col span={8}>
-                  <Form.Item name="dw_layer" label={<span>数仓层{fieldBadge("dw_layer")}</span>} rules={[{ required: true, message: "请选择数仓层" }]}>
-                    {dictSelect("dw_layer", "dw_layer", "选择数仓层")}
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name="additivity" label={<span>可加性{fieldBadge("additivity")}</span>}>
-                    {dictSelect("additivity", "additivity", "选择可加性")}
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name="serving_mode" label={<span>服务模式{fieldBadge("serving_mode")}</span>}>
-                    {dictSelect("serving_mode", "serving_mode", "选择服务模式")}
-                  </Form.Item>
-                </Col>
-              </Row>
-
-              <Row gutter={16}>
-                <Col span={8}>
-                  <Form.Item name="metric_tier" label={<span>分级{fieldBadge("metric_tier")}</span>}>
-                    {dictSelect("metric_tier", "metric_tier", "选择分级")}
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name="pii_flag" label="含 PII" valuePropName="checked">
-                    <Checkbox>含 PII</Checkbox>
-                  </Form.Item>
-                </Col>
-              </Row>
+              <Collapse
+                ghost
+                defaultActiveKey={["platform_admin", "domain_admin"].includes(currentRole) ? ["gov"] : []}
+                items={[
+                  {
+                    key: "gov",
+                    label: (
+                      <span>
+                        高级治理设置
+                        <Tag style={{ marginLeft: 8 }} color="blue">已由域默认/度量目录自动接管</Tag>
+                      </span>
+                    ),
+                    children: (
+                      <>
+                        {!isAtomic && (
+                          <>
+                            <Row gutter={16}>
+                              <Col span={8}>
+                                <Form.Item name="granularity" label="粒度" extra="缺省取挂载粒度（②挂载配置）">
+                                  {dictSelect("granularity", "granularity", "选择粒度")}
+                                </Form.Item>
+                              </Col>
+                              <Col span={8}>
+                                <Form.Item name="unit" label="单位" extra="缺省继承依赖指标单位">
+                                  {dictSelect("unit", "unit", "选择单位")}
+                                </Form.Item>
+                              </Col>
+                              <Col span={8}>
+                                <Form.Item
+                                  name="currency"
+                                  label="币种（选填）"
+                                  extra="ISO 4217 标准币种，仅交易类指标需要"
+                                >
+                                  {dictSelect("currency", "currency", "选择币种")}
+                                </Form.Item>
+                              </Col>
+                            </Row>
+                            <Row gutter={16}>
+                              <Col span={8}>
+                                <Form.Item name="time_semantics" label="时间语义">
+                                  {dictSelect("time_semantics", "time_semantics", "选择时间语义（缺省 PERIOD）")}
+                                </Form.Item>
+                              </Col>
+                              <Col span={8}>
+                                <Form.Item name="freshness" label="新鲜度">
+                                  {dictSelect("freshness", "freshness", "选择新鲜度（缺省 T1）")}
+                                </Form.Item>
+                              </Col>
+                              <Col span={8}>
+                                <Form.Item name="dw_layer" label="数仓层">
+                                  {dictSelect("dw_layer", "dw_layer", "选择数仓层（缺省 DWD）")}
+                                </Form.Item>
+                              </Col>
+                            </Row>
+                          </>
+                        )}
+                        <Row gutter={16}>
+                          <Col span={8}>
+                            <Form.Item name="additivity" label={<span>可加性{fieldBadge("additivity")}</span>}>
+                              {dictSelect("additivity", "additivity", "选择可加性")}
+                            </Form.Item>
+                          </Col>
+                          <Col span={8}>
+                            <Form.Item name="serving_mode" label={<span>服务模式{fieldBadge("serving_mode")}</span>}>
+                              {dictSelect("serving_mode", "serving_mode", "选择服务模式")}
+                            </Form.Item>
+                          </Col>
+                          <Col span={8}>
+                            <Form.Item name="metric_tier" label={<span>分级{fieldBadge("metric_tier")}</span>}>
+                              {dictSelect("metric_tier", "metric_tier", "选择分级")}
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Row gutter={16}>
+                          <Col span={8}>
+                            <Form.Item name="pii_flag" label="含 PII" valuePropName="checked">
+                              <Checkbox>含 PII</Checkbox>
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      </>
+                    ),
+                  },
+                ]}
+              />
             </Card>
 
             {/* 关联数据表 */}
@@ -1249,53 +1332,33 @@ export function MetricCreate() {
                 </Form.Item>
               )}
             </Card>
+            {renderStepNav()}
+            </>
+            )}
 
-            {/* Step 5: 口径三方责任（产品需求方/技术方/数仓开发，可选）——
-                指标口径从需求到落地分属三个责任主体，落到具体用户便于通知/指派/审计（PRD 4.5 补充） */}
-            <Card type="inner" title="⑤ 口径责任方（可选）" size="small">
+            {/* Step 3: 责任方（OneData 向导） */}
+            {currentStep === 3 && (<>
+            <Card type="inner" title="④ 口径责任方（可选）" size="small">
               <Row gutter={16}>
                 <Col span={8}>
-                  <Form.Item name="product_owner_id" label="产品需求方" extra="口径业务语义提出人">
-                    <Select
-                      showSearch
-                      allowClear
-                      placeholder="选择产品/业务需求方"
-                      optionFilterProp="label"
-                      options={ownerUsers.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
-                    />
+                  <Form.Item name="product_owner" label="产品需求方" extra="口径业务语义提出人">
+                    <RoleOwnerSelect users={ownerUsers} placeholder="选择平台用户或输入外部人员" />
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="tech_owner_id" label="技术方" extra="口径 ETL/SQL 实现人">
-                    <Select
-                      showSearch
-                      allowClear
-                      placeholder="选择技术方"
-                      optionFilterProp="label"
-                      options={ownerUsers.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
-                    />
+                  <Form.Item name="tech_owner" label="技术方" extra="口径 ETL/SQL 实现人">
+                    <RoleOwnerSelect users={ownerUsers} placeholder="选择平台用户或输入外部人员" />
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="dw_developer_id" label="数仓开发" extra="数仓建模/血缘维护人">
-                    <Select
-                      showSearch
-                      allowClear
-                      placeholder="选择数仓开发"
-                      optionFilterProp="label"
-                      options={ownerUsers.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
-                    />
+                  <Form.Item name="dw_developer" label="数仓开发" extra="数仓建模/血缘维护人">
+                    <RoleOwnerSelect users={ownerUsers} placeholder="选择平台用户或输入外部人员" />
                   </Form.Item>
                 </Col>
               </Row>
             </Card>
-
-            <Form.Item>
-              <Space>
-                {canCreate && <Button type="primary" htmlType="submit" loading={loading} size="large">创建草稿</Button>}
-                <Button onClick={handlePrecheck} loading={prechecking} size="large">冲突预检</Button>
-              </Space>
-            </Form.Item>
+            {renderStepNav()}
+            </>)}
 
             {precheckResult && precheckResult.detections.length > 0 && (
               <Alert
@@ -1317,10 +1380,52 @@ export function MetricCreate() {
                 }
               />
             )}
+
           </Space>
         </Form>
         </Card>
       </Spin>
+
+      {/* OneData 向导：SQL 智能推断收敛为抽屉工具（非主流程步骤，方案 C） */}
+      <Drawer
+        title="SQL 智能推断"
+        open={sqlInferOpen}
+        onClose={() => setSqlInferOpen(false)}
+        width={520}
+      >
+        <Paragraph type="secondary" style={{ fontSize: 12 }}>
+          面向原子指标：粘贴一段指标定义 SQL（含 SELECT + 聚合 + GROUP BY + 时间过滤），
+          系统用 sqlglot 解析并自动推断类型/名称/粒度/单位/聚合/时间语义/新鲜度/数仓层/
+          可加性/服务模式/分级，并生成口径定义。推断结果回填到向导各步骤，可确认或覆盖。
+        </Paragraph>
+        <TextArea
+          rows={6}
+          value={sqlInferText}
+          onChange={(e) => setSqlInferText(e.target.value)}
+          placeholder={"SELECT SUM(amount) AS gmv\nFROM dwd.sales_detail\nGROUP BY dt, shop_id"}
+          className="mono"
+        />
+        {canInferDesc && (
+        <Button
+          type="primary"
+          block
+          style={{ marginTop: 12 }}
+          onClick={handleSqlInfer}
+          disabled={!selectedDomain || !sqlInferText.trim() || sqlInferring}
+          loading={sqlInferring}
+        >
+          智能推断并回填字段
+        </Button>
+        )}
+        {inferSummary && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginTop: 12 }}
+            message="已根据 SQL 自动回填字段，可关闭抽屉到各步骤确认或覆盖"
+          />
+        )}
+      </Drawer>
 
       {/* 推断结果摘要：SQL 智能推断成功后展示，让用户明确知道识别出了什么（惰性设计：给反馈而非只默默回填） */}
       <Modal

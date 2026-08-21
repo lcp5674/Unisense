@@ -50,6 +50,10 @@ export interface MetricResponse {
   product_owner_id?: number | null;
   tech_owner_id?: number | null;
   dw_developer_id?: number | null;
+  /** 外部人员名称兜底（责任方非平台用户时直接填名称，id 为空）：展示优先级 id>name */
+  product_owner_name?: string | null;
+  tech_owner_name?: string | null;
+  dw_developer_name?: string | null;
   approver_id: number | null;
   submitted_by: number | null;
   /** 评审指派（TD §13）：提交评审时指定的评审用户/域评审组，审批页据此校验与展示 */
@@ -246,12 +250,14 @@ export interface MetricCreateRequest {
   name: string;
   domain: string;
   type: MetricType;
-  unit: string;
+  /** OneData：单位由逻辑度量继承/后端默认——原子不传，派生/复合可选 */
+  unit?: string | null;
   currency?: string | null;
   aggregation: "SUM" | "AVG" | "COUNT" | "COUNT_DISTINCT" | "LAST_VALUE";
-  time_semantics: "PERIOD" | "YTD" | "TTM" | "AVG";
-  freshness: "REALTIME" | "T1" | "HOURLY";
-  dw_layer: "ODS" | "DWD" | "DWS" | "ADS" | "DM";
+  /** OneData：物理属性由挂载/默认承载——原子不传，派生/复合可选 */
+  time_semantics?: "PERIOD" | "YTD" | "TTM" | "AVG" | null;
+  freshness?: "REALTIME" | "T1" | "HOURLY" | null;
+  dw_layer?: "ODS" | "DWD" | "DWS" | "ADS" | "DM" | null;
   metric_tier?: MetricTier;
   serving_mode?: "BATCH_ONLY" | "REALTIME_ONLY" | "BATCH_REALTIME_DUAL";
   additivity?: "ADDITIVE" | "SEMI_ADDITIVE" | "NON_ADDITIVE";
@@ -269,6 +275,10 @@ export interface MetricCreateRequest {
   product_owner_id?: number | null;
   tech_owner_id?: number | null;
   dw_developer_id?: number | null;
+  /** 外部人员名称兜底（责任方非平台用户时直接填名称，id 为空）：展示优先级 id>name */
+  product_owner_name?: string | null;
+  tech_owner_name?: string | null;
+  dw_developer_name?: string | null;
 }
 
 export interface MetricUpdateRequest {
@@ -296,6 +306,10 @@ export interface MetricUpdateRequest {
   product_owner_id?: number | null;
   tech_owner_id?: number | null;
   dw_developer_id?: number | null;
+  /** 外部人员名称兜底（责任方非平台用户时直接填名称，id 为空）：展示优先级 id>name */
+  product_owner_name?: string | null;
+  tech_owner_name?: string | null;
+  dw_developer_name?: string | null;
   change_reason: string; // 必填，min_length=4
   row_version?: number; // 跨请求乐观锁：编辑时回传当前版本号，他人已改则 409 拒绝
 }

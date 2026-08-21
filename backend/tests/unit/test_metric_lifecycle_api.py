@@ -70,6 +70,7 @@ async def test_archive_metric(metrics_client: httpx.AsyncClient) -> None:
     """归档（DELETE）→ 200。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         mock_svc.return_value.delete_metric = AsyncMock(return_value=_metric())
+        mock_svc.return_value.run_lineage_post_commit = AsyncMock()
         resp = await metrics_client.delete("/api/v1/metric-definitions/sales_gmv_d")
     assert resp.status_code == 200
 
@@ -78,6 +79,7 @@ async def test_restore_metric(metrics_client: httpx.AsyncClient) -> None:
     """恢复归档指标 → 200。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         mock_svc.return_value.restore_metric = AsyncMock(return_value=_metric())
+        mock_svc.return_value.run_lineage_post_commit = AsyncMock()
         resp = await metrics_client.post(
             "/api/v1/metric-definitions/sales_gmv_d/restore"
         )
@@ -95,7 +97,9 @@ async def test_promote_metric(metrics_client: httpx.AsyncClient) -> None:
             "/api/v1/metric-definitions/sales_gmv_d/promote"
         )
     assert resp.status_code == 200
-    mock_svc.return_value.promote_metric.assert_awaited_once_with("sales_gmv_d", actor_id=1)
+    mock_svc.return_value.promote_metric.assert_awaited_once_with(
+        "sales_gmv_d", actor_id=1, role="platform_admin", user_domain=None
+    )
 
 
 async def test_rollback_metric(metrics_client: httpx.AsyncClient) -> None:
@@ -106,7 +110,9 @@ async def test_rollback_metric(metrics_client: httpx.AsyncClient) -> None:
             "/api/v1/metric-definitions/sales_gmv_d/rollback"
         )
     assert resp.status_code == 200
-    mock_svc.return_value.rollback_metric.assert_awaited_once_with("sales_gmv_d", actor_id=1)
+    mock_svc.return_value.rollback_metric.assert_awaited_once_with(
+        "sales_gmv_d", actor_id=1, role="platform_admin", user_domain=None
+    )
 
 
 async def test_emergency_publish_metric(metrics_client: httpx.AsyncClient) -> None:
@@ -178,6 +184,7 @@ async def test_confirm_deprecate_dropped(metrics_client: httpx.AsyncClient) -> N
         mock_svc.return_value.confirm_deprecate_dropped = AsyncMock(
             return_value=_metric()
         )
+        mock_svc.return_value.run_lineage_post_commit = AsyncMock()
         resp = await metrics_client.post(
             "/api/v1/metric-definitions/sales_gmv_d/confirm-deprecate-dropped",
             json={"successor_code": None},
@@ -303,7 +310,9 @@ async def test_extend_version_api(metrics_client: httpx.AsyncClient) -> None:
             json={"version": 1},
         )
     assert resp.status_code == 200
-    mock_svc.return_value.extend_version.assert_awaited_once_with("sales_gmv_d", 1)
+    mock_svc.return_value.extend_version.assert_awaited_once_with(
+        "sales_gmv_d", 1, actor_id=1, role="platform_admin", user_domain=None
+    )
 
 
 async def test_get_metric_health_api(metrics_client: httpx.AsyncClient) -> None:

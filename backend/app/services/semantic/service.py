@@ -501,10 +501,13 @@ class MetricService(BaseService):
             owner_id=owner_id,
             pii_flag=pii_flag,
             compliance_reviewed=False,
-            # 口径三方责任（PRD 4.5 补充，均可空）
+            # 口径三方责任（PRD 4.5 补充，均可空）：平台用户 id + 外部人员名称兜底
             product_owner_id=request.product_owner_id,
             tech_owner_id=request.tech_owner_id,
             dw_developer_id=request.dw_developer_id,
+            product_owner_name=request.product_owner_name,
+            tech_owner_name=request.tech_owner_name,
+            dw_developer_name=request.dw_developer_name,
         )
 
         metric = await self._repo.create(metric)
@@ -895,14 +898,27 @@ class MetricService(BaseService):
             "sla",
             "consumption_guide",
             "backup_owner_id",
-            # 口径三方责任（非破坏性变更）：产品需求方/技术方/数仓开发
-            "product_owner_id",
-            "tech_owner_id",
-            "dw_developer_id",
+            # 口径三方责任 id 字段已从白名单移除——id/name 成对在下方专用块处理，
+            # 以支持显式置空（解除责任方/切换为外部人员）与清空后保留旧值的区分。
         ):
             val = getattr(request, field, None)
             if val is not None:
                 updates[field] = val
+
+        # 口径三方责任 id/name 成对处理（非破坏性变更，不触发版本确认）：
+        # 三个责任方支持"平台用户 id ↔ 外部人员名称"互相切换与完全解除，白名单循环
+        # `if val is not None` 会跳过显式 null 导致旧值残留，故单独用 model_fields_set
+        # 区分「未提交（保留旧值）」与「显式置空（解除/切换）」。任一字段被显式提交即
+        # 成对写入——id 设空而 name 非空 = 切换为外部人员；两者皆空 = 完全解除。
+        _responsibility_provided = set(request.model_fields_set)
+        for _id_field, _name_field in (
+            ("product_owner_id", "product_owner_name"),
+            ("tech_owner_id", "tech_owner_name"),
+            ("dw_developer_id", "dw_developer_name"),
+        ):
+            if _id_field in _responsibility_provided or _name_field in _responsibility_provided:
+                updates[_id_field] = getattr(request, _id_field, None)
+                updates[_name_field] = getattr(request, _name_field, None)
 
         # P1-5: update 路径字典校验——此前 update 不校验字典字段，可写入非字典的
         # granularity/unit/aggregation 等脏值（仅 create 校验）。仅校验**实际改变**

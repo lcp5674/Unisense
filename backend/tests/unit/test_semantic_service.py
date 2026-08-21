@@ -92,6 +92,32 @@ async def test_create_atomic_passes_measure_id():
     assert captured.measure_id == 7
 
 
+async def test_create_metric_persists_responsibility_names():
+    """创建时透传外部人员名称（id 为空，纯文本兜底——责任方非平台用户）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.create_metric(
+        MetricCreateRequest(
+            **make_create_payload(
+                product_owner_id=None,
+                product_owner_name="外部需求方A",
+                tech_owner_name="外部技术方B",
+                dw_developer_name="外部数仓C",
+            )
+        ),
+        owner_id=1,
+    )
+
+    captured = repo.create.call_args[0][0]
+    assert captured.product_owner_id is None
+    assert captured.product_owner_name == "外部需求方A"
+    assert captured.tech_owner_name == "外部技术方B"
+    assert captured.dw_developer_name == "外部数仓C"
+
+
 async def test_create_derived_with_mount_creates_mount_and_backfills_granularity():
     """OneData：派生指标携带 mount → 自动建 metric_mount + 粒度回填 metric.granularity。"""
     svc, repo = _svc_with_repo()
@@ -335,6 +361,97 @@ async def test_update_metric_creates_version_and_bumps():
     assert version_arg.version == 2
     assert result.row_version == 2
     assert result.version == 2
+
+
+# ---- 口径三方责任：外部人员名称兜底 + 显式置空（PRD 4.5 补充）----
+# 白名单循环 `if val is not None` 会跳过显式 null，故 id/name 成对走 model_fields_set 专用块。
+# 覆盖三态：平台用户→外部人员切换（置空 id 写 name）、完全解除（双 null）、未提交（保留旧值）。
+
+
+async def test_update_metric_switch_responsibility_to_external_name():
+    """平台用户 → 外部人员切换：显式置空 id、写入 name（白名单循环会跳过 null，须专用块生效）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=1, version=1, product_owner_id=3)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=1)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(
+            product_owner_id=None,
+            product_owner_name="外部需求方A",
+            change_reason="责任方改为外部人员",
+        ),
+        actor_id=1,
+        role="metric_owner",
+    )
+
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert lock_kwargs["product_owner_id"] is None
+    assert lock_kwargs["product_owner_name"] == "外部需求方A"
+
+
+async def test_update_metric_clear_responsibility():
+    """完全解除责任方：id/name 显式置空 → 两者都写入 None（旧值不残留）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="DRAFT",
+        row_version=1,
+        version=1,
+        product_owner_id=3,
+        product_owner_name="外部需求方A",
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=1)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(
+            product_owner_id=None,
+            product_owner_name=None,
+            change_reason="解除产品需求方责任",
+        ),
+        actor_id=1,
+        role="metric_owner",
+    )
+
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert lock_kwargs["product_owner_id"] is None
+    assert lock_kwargs["product_owner_name"] is None
+
+
+async def test_update_metric_untouched_responsibility_kept():
+    """未提交责任方字段 → 不进入 updates（保留旧值）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(
+        status="DRAFT",
+        row_version=1,
+        version=1,
+        product_owner_id=3,
+        product_owner_name="外部需求方A",
+    )
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=1)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(change_reason="仅改名称"),
+        actor_id=1,
+        role="metric_owner",
+    )
+
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert "product_owner_id" not in lock_kwargs
+    assert "product_owner_name" not in lock_kwargs
 
 
 async def test_update_metric_published_non_breaking_syncs_effective_version():

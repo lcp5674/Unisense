@@ -126,6 +126,16 @@ class MetricCreateRequest(BaseModel):
     product_owner_id: int | None = Field(None, description="产品需求方用户 ID（口径业务需求提出人）")
     tech_owner_id: int | None = Field(None, description="技术方用户 ID（口径 ETL/SQL 实现人）")
     dw_developer_id: int | None = Field(None, description="数仓开发用户 ID（数仓建模/血缘维护人）")
+    # 外部人员名称兜底（责任方非平台用户时直接填名称，id 为空）：展示优先级 id>name
+    product_owner_name: str | None = Field(
+        None, max_length=128, description="产品需求方名称（非平台用户直接填写）"
+    )
+    tech_owner_name: str | None = Field(
+        None, max_length=128, description="技术方名称（非平台用户直接填写）"
+    )
+    dw_developer_name: str | None = Field(
+        None, max_length=128, description="数仓开发名称（非平台用户直接填写）"
+    )
     # 自动推断辅助字段（FR-010/FR-011）：传入后由 Service 层 auto_fill 补全缺失字段
     source_table: str | None = Field(
         None, max_length=256, description="源表名（用于自动推断编码和数仓层）"
@@ -256,6 +266,16 @@ class MetricUpdateRequest(BaseModel):
     product_owner_id: int | None = Field(None, description="产品需求方用户 ID（口径业务需求提出人）")
     tech_owner_id: int | None = Field(None, description="技术方用户 ID（口径 ETL/SQL 实现人）")
     dw_developer_id: int | None = Field(None, description="数仓开发用户 ID（数仓建模/血缘维护人）")
+    # 外部人员名称兜底（责任方非平台用户时直接填名称，id 为空）：展示优先级 id>name
+    product_owner_name: str | None = Field(
+        None, max_length=128, description="产品需求方名称（非平台用户直接填写）"
+    )
+    tech_owner_name: str | None = Field(
+        None, max_length=128, description="技术方名称（非平台用户直接填写）"
+    )
+    dw_developer_name: str | None = Field(
+        None, max_length=128, description="数仓开发名称（非平台用户直接填写）"
+    )
     change_reason: str = Field(..., min_length=4, description="变更原因")
     row_version: int | None = Field(
         None,
@@ -656,6 +676,10 @@ class MetricResponse(BaseModel):
     product_owner_id: int | None = None
     tech_owner_id: int | None = None
     dw_developer_id: int | None = None
+    # 外部人员名称兜底（责任方非平台用户时直接填名称，id 为空）：展示优先级 id>name
+    product_owner_name: str | None = None
+    tech_owner_name: str | None = None
+    dw_developer_name: str | None = None
     # 关联业务术语（P2-11：术语绑定，度量口径归属术语治理）
     term_id: int | None = None
     # 治理追溯：审批人 / 提交人，DB 模型已有，响应透出供目录页显示

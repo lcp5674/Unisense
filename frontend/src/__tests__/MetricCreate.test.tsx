@@ -25,8 +25,8 @@ vi.mock("../api", async () => {
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, listMeasureCatalogs, autoSuggestMetric, checkConflict, createMetric, listMetrics } from "../api";
-import type { DBCatalog, SubjectDomainTreeNode } from "../types";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, checkConflict, createMetric, listMetrics } from "../api";
+import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
 const mockedDict = vi.mocked(listDictItems);
@@ -34,11 +34,19 @@ const mockedCatalogs = vi.mocked(listCatalogs);
 const mockedBatch = vi.mocked(batchRegisterMetrics);
 const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
 const mockedUsers = vi.mocked(listUsers);
-const mockedMeasures = vi.mocked(listMeasureCatalogs);
 const mockedSuggest = vi.mocked(autoSuggestMetric);
 const mockedCheckConflict = vi.mocked(checkConflict);
 const mockedCreate = vi.mocked(createMetric);
 const mockedMetrics = vi.mocked(listMetrics);
+
+/** 后端 auto-suggest 永不返回 undefined（auto_fill 兜底成完整对象）——"无建议"即空 fields/空 code 的合法响应。 */
+const NO_SUGGESTION: AutoSuggestResponse = {
+  metric_code_suggestion: null,
+  segments: { domain: "", biz_object: null, measure: null, period: null },
+  fields: {},
+  definition_json: null,
+  definition_mode: null,
+};
 
 /** 构造完整 DBCatalog（源表搜索 mock 用），仅 entity_name/source_name 参与渲染。 */
 function makeCatalog(entityName: string, columns?: { name: string; type?: string }[]): DBCatalog {
@@ -121,14 +129,33 @@ async function pickDomain() {
   });
 }
 
-/** 选择单位（必填字典字段，测试 fixture 让其有可选项，避免 antd 表单校验卡住 onFinish）。 */
-async function pickUnit() {
-  const unitLabel = screen.getByText("单位");
-  const formItem = unitLabel.closest(".ant-form-item") as HTMLElement;
-  const unitInput = (formItem.querySelector(".ant-select-selection-search-input") ||
-    formItem.querySelector("input")) as HTMLInputElement;
-  fireEvent.mouseDown(unitInput);
-  await clickSelectOption("元 (CNY)");
+/** 读取当前向导激活步骤（依据"下一步"按钮文案——Step0/1/2 各有唯一文案，Step3 无下一步）。 */
+function currentStepIndex(): number {
+  if (screen.queryByRole("button", { name: "下一步：指标定义" })) return 0;
+  if (screen.queryByRole("button", { name: "下一步：治理与口径" })) return 1;
+  if (screen.queryByRole("button", { name: "下一步：责任方与提交" })) return 2;
+  return 3;
+}
+
+/** OneData 向导：点击「下一步」前进到目标步骤（检测当前激活步骤，避免重复调用过度推进）。 */
+async function goToStep(target: number) {
+  let guard = 0;
+  while (currentStepIndex() < target && guard < 4) {
+    const btn = screen.queryByRole("button", { name: /下一步/ });
+    if (!btn) break;
+    fireEvent.click(btn);
+    // 给 React 并发渲染足够时间推进步骤
+    await new Promise((r) => setTimeout(r, 50));
+    guard++;
+  }
+}
+
+/** 打开右上角「SQL 智能推断」抽屉（OneData 向导：SQL 推断收敛为工具抽屉）。 */
+async function openSqlInfer() {
+  fireEvent.click(screen.getByRole("button", { name: /SQL 智能推断/ }));
+  await waitFor(() => {
+    expect(document.querySelector(".ant-drawer")).toBeTruthy();
+  });
 }
 
 /** 打开批量注册弹窗（点击页面右上角「批量注册指标」按钮）。 */
@@ -184,6 +211,7 @@ describe("MetricCreate 批量注册指标", () => {
     vi.clearAllMocks();
     mockedTree.mockResolvedValue(TREE);
     mockedDict.mockResolvedValue([]);
+    mockedSuggest.mockResolvedValue(NO_SUGGESTION);
     mockedCatalogs.mockResolvedValue({
       items: [
         makeCatalog("dwd.sales_detail", [
@@ -433,6 +461,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     vi.clearAllMocks();
     mockedTree.mockResolvedValue(TREE);
     mockedDict.mockResolvedValue([]);
+    mockedSuggest.mockResolvedValue(NO_SUGGESTION);
     mockedCatalogs.mockResolvedValue({
       items: [makeCatalog("dwd.sales_detail")],
       total: 1,
@@ -473,6 +502,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
+    await openSqlInfer();
 
     fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
       target: { value: "SELECT SUM(gmv) AS gmv FROM dwd.sales_detail GROUP BY dt, shop_id" },
@@ -488,7 +518,8 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     // 关闭摘要
     fireEvent.click(screen.getByText("知道了"));
 
-    // 源表/度量列已回填到②自动推断区（Select 显示选中值）
+    // 源表/度量列已回填到 Step1（指标定义 → 原子来源）——导航过去断言 Select 显示选中值
+    await goToStep(1);
     await waitFor(() => {
       const srcInput = document.querySelector('input[id="source_table"]');
       const container = srcInput?.closest(".ant-select") as HTMLElement | null;
@@ -513,10 +544,13 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
+    await openSqlInfer();
     fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
       target: { value: "SELECT SUM(amount) AS gmv FROM dwd.sales_detail GROUP BY dt" },
     });
     fireEvent.click(screen.getByText("智能推断并回填字段"));
+    // 编码字段在向导 Step2（治理确认）——推断完成后导航过去
+    await goToStep(2);
     await waitFor(() => {
       expect(screen.getByText(/系统建议: sales_order_gmv_day/)).toBeTruthy();
     });
@@ -537,6 +571,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
+    await openSqlInfer();
 
     fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
       target: { value: "SELECT SUM(gmv) AS gmv FROM dwd.sales_detail GROUP BY dt, shop_id" },
@@ -566,9 +601,17 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
   it("SQL 推断：未选域或未粘贴 SQL 时「智能推断」按钮禁用（惰性引导）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    // 未选域时按钮 disabled，点击不触发请求
-    const btn = screen.getByText("智能推断并回填字段").closest("button") as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
+    // 未选域时标题区「SQL 智能推断」按钮 disabled（无法打开抽屉触发推断）
+    const titleBtn = screen.getByRole("button", { name: /SQL 智能推断/ }) as HTMLButtonElement;
+    expect(titleBtn.disabled).toBe(true);
+    expect(mockedSuggest).not.toHaveBeenCalled();
+    // 选域后打开抽屉：SQL 为空时抽屉内「智能推断并回填字段」按钮 disabled
+    await pickDomain();
+    mockedSuggest.mockClear(); // 清掉 pickDomain 触发的域默认推断调用，仅验证抽屉按钮不触发
+    fireEvent.click(screen.getByRole("button", { name: /SQL 智能推断/ }));
+    await waitFor(() => expect(document.querySelector(".ant-drawer")).toBeTruthy());
+    const inferBtn = screen.getByText("智能推断并回填字段").closest("button") as HTMLButtonElement;
+    expect(inferBtn.disabled).toBe(true);
     expect(mockedSuggest).not.toHaveBeenCalled();
   });
 
@@ -577,6 +620,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
+    await openSqlInfer();
     fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
       target: { value: "SELECT FROM WHERE" },
     });
@@ -601,12 +645,14 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
 
-    // 填指标编码与口径定义（expression 模式默认），再点冲突预检
+    // 编码与口径定义在 Step2（治理+口径），预检按钮在 Step3（提交）
+    await goToStep(2);
     const codeInput = screen.getByLabelText("指标编码") as HTMLInputElement;
     fireEvent.change(codeInput, { target: { value: "sales_test" } });
     const defInput = screen.getByLabelText("口径定义 (JSON)") as HTMLTextAreaElement;
     fireEvent.change(defInput, { target: { value: '{"expr": "sum(amount)"}' } });
 
+    await goToStep(3);
     fireEvent.click(screen.getByRole("button", { name: /冲突预检/ }));
     // 正确映射：后端 ConflictType 值为 same_name_diff_def → 中文「同名不同义」
     await screen.findByText(/同名不同义/);
@@ -619,6 +665,7 @@ describe("MetricCreate 源表选择惰性化", () => {
     vi.clearAllMocks();
     mockedTree.mockResolvedValue(TREE);
     mockedDict.mockResolvedValue([]);
+    mockedSuggest.mockResolvedValue(NO_SUGGESTION);
     mockedCatalogs.mockResolvedValue({
       items: [
         makeCatalog("dwd.sales_detail"),
@@ -634,6 +681,8 @@ describe("MetricCreate 源表选择惰性化", () => {
   it("源表下拉展开时自动加载平台已采集的表（无需先输入关键词）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
+    // 源表在向导 Step1（指标定义）——导航过去
+    await goToStep(1);
     // 点击源表 Select 展开下拉（id 在内部 input 上）
     const srcInput = document.querySelector('input[id="source_table"]') as HTMLInputElement;
     fireEvent.mouseDown(srcInput);
@@ -648,6 +697,8 @@ describe("MetricCreate 源表选择惰性化", () => {
   it("关联数据表（口径定义区）下拉展开时同样自动加载平台已采集的表", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
+    // 口径定义在向导 Step2（治理+口径）——导航过去
+    await goToStep(2);
     // 展开「口径定义 → 关联数据表」多选下拉
     const relatedSelect = screen.getByText(/展开浏览已接入表/);
     fireEvent.mouseDown(relatedSelect);
@@ -662,6 +713,8 @@ describe("MetricCreate 源表选择惰性化", () => {
   it("关联数据表（口径定义区）支持关键词搜索加载", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
+    // 口径定义在向导 Step2（治理+口径）——导航过去
+    await goToStep(2);
     const relatedSelect = screen.getByText(/展开浏览已接入表/);
     fireEvent.mouseDown(relatedSelect);
     // 关联数据表是多选 Select（.ant-select-multiple），其搜索输入框在容器内；源表/度量列等单选不受影响
@@ -680,6 +733,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     vi.clearAllMocks();
     mockedTree.mockResolvedValue(TREE);
     mockedDict.mockResolvedValue([{ code: "CNY", label: "元" }] as never);
+    mockedSuggest.mockResolvedValue(NO_SUGGESTION);
     mockedCatalogs.mockResolvedValue({
       items: [makeCatalog("dwd.sales_detail", [{ name: "gmv" }, { name: "order_cnt" }])],
       total: 1,
@@ -692,6 +746,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
   it("默认原子指标：展示逻辑度量与源表/度量列/周期，隐藏依赖指标与计算表达式", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
+    await goToStep(1);
     // 原子来源配置区（逻辑度量 + 兼容旧式源表/度量列/周期）展示
     expect(screen.getByText("② 原子来源（逻辑度量 + 聚合方式）")).toBeTruthy();
     expect(screen.getByText("逻辑度量（度量目录，OneData 原子层）")).toBeTruthy();
@@ -701,19 +756,36 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     // 依赖指标 / 计算表达式为派生/复合专属，原子下不出现
     expect(screen.queryByText("② 依赖指标")).toBeNull();
     expect(screen.queryByText("计算表达式")).toBeNull();
+    // OneData（界限文档 §2.3）：原子不挂物理表——治理 Step2 粒度/单位/币种/时间语义/新鲜度/数仓层隐藏，
+    // 聚合方式保留（原子核心算法属性）
+    await goToStep(2);
+    expect(screen.queryByText("粒度")).toBeNull();
+    expect(screen.queryByText("单位")).toBeNull();
+    expect(screen.queryByText("币种（选填）")).toBeNull();
+    expect(screen.queryByText("时间语义")).toBeNull();
+    expect(screen.queryByText("新鲜度")).toBeNull();
+    expect(screen.queryByText("数仓层")).toBeNull();
+    expect(screen.getByText("聚合")).toBeTruthy();
+    // 展开「高级治理设置」：分级/可加性/服务模式可见
+    fireEvent.click(screen.getByText(/高级治理设置/));
+    await waitFor(() => expect(screen.getByText("分级")).toBeTruthy());
+    expect(screen.getByText("可加性")).toBeTruthy();
+    expect(screen.getByText("服务模式")).toBeTruthy();
   });
 
   it("切换到派生指标：展示依赖指标（必填）与计算表达式，隐藏原子来源", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
+    await goToStep(1);
     fireEvent.click(screen.getByText("派生指标"));
-    // 依赖指标配置区 + 计算表达式输入出现
+    // 依赖指标配置区（Step1）出现，原子专属配置隐藏
     expect(screen.getByText("② 依赖指标")).toBeTruthy();
-    expect(screen.getByText("计算表达式")).toBeTruthy();
-    // 原子专属配置隐藏
     expect(screen.queryByText("② 原子来源（逻辑度量 + 聚合方式）")).toBeNull();
     expect(screen.queryByText("源表名（兼容旧式来源，可选）")).toBeNull();
     expect(screen.queryByText("度量列（兼容旧式来源，可选）")).toBeNull();
+    // 计算表达式输入在 Step2（口径定义）——受控组件（Form.Item 无 name），label 无 htmlFor，须按文本查询
+    await goToStep(2);
+    await waitFor(() => expect(screen.getByText("计算表达式")).toBeTruthy());
   });
 
   it("派生指标未选依赖指标提交 → 前端拦截并提示依赖必填", async () => {
@@ -721,10 +793,12 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
+    await goToStep(1);
     fireEvent.click(screen.getByText("派生指标"));
-    // 填必填名称后提交（依赖指标/计算表达式留空）
+    // 名称在 Step2（治理确认）必填——先填名称再导航到 Step3 提交（依赖指标/计算表达式留空）
+    await goToStep(2);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "客单价" } });
-    await pickUnit();
+    await goToStep(3);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     await waitFor(() =>
       expect(screen.getByText("派生/复合指标必须选择至少 1 个依赖指标")).toBeTruthy()
@@ -741,9 +815,8 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
+    await goToStep(1);
     fireEvent.click(screen.getByText("派生指标"));
-    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "客单价" } });
-    await pickUnit();
     // 在依赖指标多选输入已发布指标编码，回车后从下拉选中
     const depInput = document.querySelector(
       ".ant-select-multiple .ant-select-selection-search-input"
@@ -751,6 +824,10 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.change(depInput, { target: { value: "sales_gmv_amount_daily" } });
     await waitFor(() => expect(mockedMetrics).toHaveBeenCalled());
     await clickSelectOption("每日 GMV (sales_gmv_amount_daily)");
+    // 名称在 Step2（治理确认）必填——先填名称再导航到 Step3 提交（计算表达式留空）
+    await goToStep(2);
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "客单价" } });
+    await goToStep(3);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     await waitFor(() =>
       expect(screen.getByText("请填写计算表达式（如 gmv / order_cnt）")).toBeTruthy()
@@ -758,14 +835,15 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(mockedCreate).not.toHaveBeenCalled();
   });
 
-  it("原子指标未选源表/度量列且未填口径提交 → 前端拦截并提示来源必填", async () => {
+  it("原子指标未选逻辑度量且未填口径提交 → 前端拦截并提示来源必填", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
+    // 名称在 Step2（治理确认）必填——先填名称再导航到 Step3 提交（默认 atomic：未选逻辑度量/源表度量列、口径为空）
+    await goToStep(2);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "GMV" } });
-    await pickUnit();
-    // 默认 atomic + 表达式模式：未选逻辑度量/源表度量列、口径 JSON 为空
+    await goToStep(3);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     await waitFor(() =>
       expect(screen.getByText("原子指标请选择逻辑度量（推荐）或源表与度量列，或填写口径定义")).toBeTruthy()
