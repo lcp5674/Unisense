@@ -255,6 +255,18 @@ export function MetricCreate() {
       .finally(() => setDictLoading(false));
   }, []);
 
+  // 可加性默认值不硬编码：字典加载后取第一个 active 值（ADDITIVE 即产品默认，sort_order=0）。
+  // 避免「initialValues 硬编码引用已停用字典值 → 后端 DICT_VALUE_INACTIVE 拦截 → 注册 400」。
+  // 用户已手动选择（isFieldTouched）或域默认已预填（getFieldValue 有值）时不覆盖。
+  const additivityOptions = dictOptions["additivity"] ?? [];
+  const defaultAdditivity = additivityOptions[0]?.value ?? "ADDITIVE";
+  useEffect(() => {
+    const opts = dictOptions["additivity"];
+    if (opts?.length && !form.isFieldTouched("additivity") && !form.getFieldValue("additivity")) {
+      form.setFieldValue("additivity", opts[0].value);
+    }
+  }, [dictOptions, form]);
+
   // 加载平台活跃维度（维度映射下拉的数据源，来自维度管理模块）
   useEffect(() => {
     listDimensions({ status: "active", page_size: 200 })
@@ -729,7 +741,7 @@ export function MetricCreate() {
       dw_layer: (isAtomic ? undefined : values.dw_layer ? String(values.dw_layer) : undefined) as MetricCreateRequest["dw_layer"],
       metric_tier: String(values.metric_tier || "T3") as MetricTier,
       serving_mode: String(values.serving_mode || "BATCH_ONLY") as MetricCreateRequest["serving_mode"],
-      additivity: String(values.additivity || "ADDITIVE") as MetricCreateRequest["additivity"],
+      additivity: String(values.additivity || defaultAdditivity) as MetricCreateRequest["additivity"],
       definition_json: definitionJson,
       pii_flag: Boolean(values.pii_flag),
       // 口径三方责任（可选）：平台用户 id 或外部人员名称兜底（RoleOwnerSelect 组合值拆分）
@@ -885,7 +897,7 @@ export function MetricCreate() {
           initialValues={{
           type: "atomic", granularity: "day", aggregation: "SUM",
           time_semantics: "PERIOD", freshness: "T1", dw_layer: "DWD",
-          metric_tier: "T3", serving_mode: "BATCH_ONLY", additivity: "ADDITIVE",
+          metric_tier: "T3", serving_mode: "BATCH_ONLY", // additivity 不硬编码——由字典 active 值动态预填（见上）
           pii_flag: false, period: "day",
         }}>
           <Space style={{ width: "100%" }} direction="vertical" size="middle">
