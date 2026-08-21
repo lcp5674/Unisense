@@ -21,6 +21,7 @@ def _mock_service() -> MagicMock:
     svc.approve_metric = AsyncMock(return_value=make_metric())
     svc.deprecate_metric = AsyncMock(return_value=make_metric())
     svc.review_compliance = AsyncMock(return_value=make_metric())
+    svc.run_lineage_post_commit = AsyncMock()
     return svc
 
 

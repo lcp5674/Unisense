@@ -1,0 +1,17 @@
+Unisense perf_baseline live 执行记录 —— 语义领域（k6 v1.1.0 @ 2026-08-21）
+执行环境：本地 macOS + docker backend:8100（真实容器，最新代码镜像）+ 真实 MySQL 主库（unisense）
+鉴权：domain_admin 用户 JWT（perf_k6），10 VU / 30s，带 JWT 压真实业务端点
+阈值：P95 < 800ms，失败率 < 0.5%（对齐 gateways 通用 perf_baseline 阈值）
+覆盖端点：指标语义定义列表 / 详情 / 版本历史 / 健康度评分 + 消费者仪表盘聚合
+======================================================================
+semantic（指标语义核心读路径）:
+  P95=131.63ms avg=37.26ms min=3.01ms med=24.27ms max=188.13ms
+  p(90)=107.2ms  reqs=1920  fail_rate=0.00%  checks=1920/1920 (100%)
+  细分端点均 200：list / detail / versions / health / dashboard
+
+对照 perf_contract（TD §12.3）：语义查询下推 P95 < 3s（小表）——本基线聚焦语义元数据读路径，
+OLAP 下推由 consume 基线（baseline_consume_v2.js）覆盖；元数据读 P95=131ms 远优于通用 800ms 阈值。
+======================================================================
+结论：语义领域核心只读端点 + 仪表盘聚合在 10 VU 并发下 P95=131.63ms、失败率 0.00%，
+全部 < 800ms 达标。此前 2026-08-13 live 报告未覆盖语义模块，本次补齐语义领域 live 基线证据，
+闭环 module-status 中 semantic 模块 perf_baseline 门禁的"真实 live 复测"缺口。
