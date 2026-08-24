@@ -46,14 +46,23 @@ class Feedback(Base, BaseModel):
     nps_score: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="NPS 评分 0-10", index=True
     )
-    #: 反馈处理状态（pending/adopted/rejected/in_progress）——此前仅写进 comment
+    #: 反馈处理状态（pending/adopted/rejected/in_progress/clarifying）——此前仅写进 comment
     #: 文本，状态不可查询/过滤，"反馈采纳闭环"未真正落地；现落库可筛。
+    #: clarifying = 待澄清（质疑→澄清→修订闭环：resolver 置 clarifying 后，反馈提交人
+    #: 经 clarify 接口补充分歧说明，状态回到 in_progress 继续处理）。
     status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
         default="pending",
         server_default="pending",
-        comment="处理状态：pending/adopted/rejected/in_progress",
+        comment="处理状态：pending/adopted/rejected/in_progress/clarifying",
+    )
+    #: 质疑澄清内容（质疑闭环）：反馈提交人在 clarifying 状态补充的口径分歧说明。
+    clarification: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="质疑澄清内容（提交人在 clarifying 状态补充）"
+    )
+    clarified_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="澄清提交时间"
     )
     resolution_note: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="处理说明（resolver 填写）"

@@ -161,6 +161,69 @@ async def test_update_feedback_status_idempotent_no_growth() -> None:
     assert fb.comment != first
 
 
+# ---- 质疑闭环（P2#19：质疑→澄清→修订）----
+
+
+async def test_clarify_feedback_valid() -> None:
+    """clarifying 状态本人澄清：内容落库、状态回 in_progress、clarified_at 置位。"""
+    svc, repo = await _svc()
+    fb = Feedback(
+        id=1,
+        user_id=3,
+        target_type="metric",
+        comment="口径冲突",
+        status="clarifying",
+        resolver_id=5,
+    )
+    repo.get_feedback = AsyncMock(return_value=fb)
+    out = await svc.clarify_feedback(1, "按门诊人次统计，含退号", user_id=3)
+    assert out.status == "in_progress"
+    assert out.clarification == "按门诊人次统计，含退号"
+    assert out.clarified_at is not None
+    repo.save_feedback.assert_awaited()
+    repo.commit.assert_awaited()
+
+
+async def test_clarify_feedback_rejects_non_clarifying() -> None:
+    """非 clarifying 状态不可澄清。"""
+    svc, repo = await _svc()
+    fb = Feedback(id=1, user_id=3, target_type="metric", status="pending")
+    repo.get_feedback = AsyncMock(return_value=fb)
+    with pytest.raises(UnisenseError) as exc:
+        await svc.clarify_feedback(1, "说明", user_id=3)
+    assert exc.value.error_code == "INVALID_FEEDBACK_STATUS"
+    repo.save_feedback.assert_not_awaited()
+
+
+async def test_clarify_feedback_rejects_non_owner() -> None:
+    """非提交人本人不可代答澄清（PLAT-2：防止他人污染口径说明）。"""
+    svc, repo = await _svc()
+    fb = Feedback(id=1, user_id=3, target_type="metric", status="clarifying")
+    repo.get_feedback = AsyncMock(return_value=fb)
+    with pytest.raises(UnisenseError) as exc:
+        await svc.clarify_feedback(1, "说明", user_id=99)
+    assert exc.value.error_code == "FORBIDDEN"
+    repo.save_feedback.assert_not_awaited()
+
+
+async def test_clarify_feedback_rejects_empty() -> None:
+    """空澄清内容拒绝。"""
+    svc, repo = await _svc()
+    fb = Feedback(id=1, user_id=3, target_type="metric", status="clarifying")
+    repo.get_feedback = AsyncMock(return_value=fb)
+    with pytest.raises(UnisenseError) as exc:
+        await svc.clarify_feedback(1, "   ", user_id=3)
+    assert exc.value.error_code == "INVALID_CLARIFICATION"
+
+
+async def test_clarify_feedback_missing_not_found() -> None:
+    """反馈不存在抛 NotFoundError。"""
+    svc, repo = await _svc()
+    repo.get_feedback = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.clarify_feedback(999, "说明", user_id=3)
+
+
 async def test_quality_stats_delegates() -> None:
     svc, repo = await _svc()
     repo.quality_stats = AsyncMock(return_value={"total": 3})

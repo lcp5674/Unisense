@@ -11,12 +11,17 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, require_roles
+from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.api.responses import get_trace_id, ok
 from app.core.audit import write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
-from app.services.observability.schemas import FeedbackCreate, FeedbackResponse
+from app.models.user import User
+from app.services.observability.schemas import (
+    FeedbackClarifyRequest,
+    FeedbackCreate,
+    FeedbackResponse,
+)
 from app.services.observability.service import ObservabilityService
 
 router = APIRouter(prefix="/observability", tags=["observability"])
@@ -40,7 +45,9 @@ class NpsSubmitRequest(BaseModel):
 class FeedbackStatusUpdateRequest(BaseModel):
     """反馈状态更新请求。"""
 
-    status: str = Field(..., pattern="^(adopted|rejected|in_progress)$", description="新状态")
+    status: str = Field(
+        ..., pattern="^(adopted|rejected|in_progress|clarifying)$", description="新状态"
+    )
     resolution_note: str | None = Field(None, description="处理说明")
 
 
@@ -225,6 +232,35 @@ async def update_feedback_status(
         entity_type="feedback",
         entity_id=str(feedback_id),
         detail={"status": payload.status, "note": payload.resolution_note},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=FeedbackResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post("/feedback/{feedback_id}/clarify", dependencies=[Depends(guard_against_injection)])
+async def clarify_feedback(
+    feedback_id: int,
+    payload: FeedbackClarifyRequest,
+    db: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> Any:
+    """质疑闭环：反馈提交人在 clarifying（待澄清）状态补充口径分歧说明。
+
+    仅反馈提交人本人可澄清（PLAT-2 服务端校验）；澄清后状态回到 in_progress
+    继续由处理人修订/采纳/驳回。
+    """
+    resp = await ObservabilityService(db).clarify_feedback(
+        feedback_id, payload.clarification, user.id
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="feedback.clarify",
+        entity_type="feedback",
+        entity_id=str(feedback_id),
+        detail={"clarification": payload.clarification[:200]},
         trace_id=trace_id,
     )
     await db.commit()

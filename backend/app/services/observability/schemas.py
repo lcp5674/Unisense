@@ -63,6 +63,9 @@ class FeedbackResponse(BaseModel):
     source_url: str | None = None
     comment: str | None = None
     status: str = "pending"
+    #: 质疑澄清（质疑→澄清→修订闭环）：clarifying 状态下提交人补充的口径分歧说明
+    clarification: str | None = None
+    clarified_at: datetime | None = None
     resolution_note: str | None = None
     resolver_id: int | None = None
     resolved_at: datetime | None = None
@@ -82,8 +85,16 @@ class FeedbackResponse(BaseModel):
             source_url=getattr(m, "source_url", None),
             comment=getattr(m, "comment", None),
             status=getattr(m, "status", "pending") or "pending",
+            clarification=getattr(m, "clarification", None),
+            clarified_at=getattr(m, "clarified_at", None),
             resolution_note=getattr(m, "resolution_note", None),
             resolver_id=getattr(m, "resolver_id", None),
             resolved_at=getattr(m, "resolved_at", None),
             created_at=getattr(m, "created_at", None),
         )
+
+
+class FeedbackClarifyRequest(BaseModel):
+    """质疑澄清提交（质疑→澄清→修订闭环）。"""
+
+    clarification: str

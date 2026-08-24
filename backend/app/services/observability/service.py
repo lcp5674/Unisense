@@ -23,7 +23,7 @@ from app.services.observability.schemas import FeedbackCreate
 
 # 反馈采纳闭环的合法状态（Feedback 表无独立 status 列，状态以 comment 内
 # 标记记录；此处白名单校验防止任意字符串注入 comment 并造成不可解析状态）。
-_ALLOWED_STATUSES = {"adopted", "rejected", "in_progress", "pending"}
+_ALLOWED_STATUSES = {"adopted", "rejected", "in_progress", "pending", "clarifying"}
 
 
 def _last_status_marker(comment: str) -> str | None:
@@ -214,4 +214,56 @@ class ObservabilityService(BaseService):
             actor_id=str(resolver_id or ""),
         )
 
+        return feedback
+
+    async def clarify_feedback(
+        self, feedback_id: int, clarification: str, user_id: int
+    ) -> Feedback:
+        """质疑闭环：反馈提交人补充澄清说明。
+
+        仅 ``clarifying``（待澄清）状态可澄清；澄清后状态回到 ``in_progress``
+        继续处理（质疑→澄清→修订链路），clarification/clarified_at 落库留存。
+
+        Args:
+            feedback_id: 反馈 ID。
+            clarification: 澄清内容（非空）。
+            user_id: 当前认证用户（须为反馈提交人本人，防他人代答污染口径）。
+
+        Raises:
+            UnisenseError: 状态非 clarifying / 澄清内容为空 / 非本人。
+            NotFoundError: 反馈不存在。
+        """
+        from app.core.exceptions import NotFoundError, UnisenseError
+
+        clarification = (clarification or "").strip()
+        if not clarification:
+            raise UnisenseError("澄清内容不能为空", error_code="INVALID_CLARIFICATION")
+        feedback = await self._repo.get_feedback(feedback_id)
+        if feedback is None:
+            raise NotFoundError(f"反馈不存在: {feedback_id}")
+        if feedback.status != "clarifying":
+            raise UnisenseError(
+                "仅待澄清（clarifying）状态的反馈可提交澄清",
+                error_code="INVALID_FEEDBACK_STATUS",
+            )
+        # PLAT-2: 仅反馈提交人本人可澄清（口径分歧由质疑方本人说明）
+        if feedback.user_id != user_id:
+            raise UnisenseError(
+                "仅反馈提交人本人可澄清", error_code="FORBIDDEN"
+            )
+        feedback.clarification = clarification
+        feedback.clarified_at = datetime.now(UTC)
+        feedback.status = "in_progress"  # 澄清完成 → 回到处理中，由 resolver 继续修订/采纳/驳回
+        await self._repo.save_feedback(feedback)
+        await self._repo.commit()
+        await self._publish_event(
+            "feedback.clarified",
+            {
+                "feedback_id": feedback_id,
+                "clarification": clarification[:200],
+                # 通知处理人（resolver）继续处理
+                "recipient_user_id": feedback.resolver_id,
+            },
+            actor_id=str(user_id),
+        )
         return feedback
