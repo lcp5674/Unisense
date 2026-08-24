@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { AuditLog } from "../pages/AuditLog";
 import { PermissionProvider } from "../hooks/usePermission";
 import type { AuditEntry } from "../types";
@@ -130,5 +130,88 @@ describe("AuditLog 表格页", () => {
         expect.objectContaining({ format: "csv", limit: 5000 }),
       );
     });
+  });
+});
+
+describe("AuditLog 合规报告", () => {
+  it("「合规报告」Tab 一键聚合：敏感访问按操作人汇总（同人多次合并计数）", async () => {
+    mockedListAudit.mockImplementation(async (params) => {
+      if (params?.pii_access) {
+        return {
+          items: [
+            { ...ENTRY, id: 10, actor_id: 9, actor_display: "李敏", pii_access: true, action: "metric.read", action_desc: "查看了敏感指标", created_at: "2026-08-18T02:00:00" },
+            { ...ENTRY, id: 11, actor_id: 9, actor_display: "李敏", pii_access: true, action: "consume.query", action_desc: "查询了敏感指标", created_at: "2026-08-18T05:00:00" },
+          ],
+          total: 2,
+          page: 1,
+          page_size: 100,
+        };
+      }
+      return {
+        items: [{ ...ENTRY, id: 20, action: "audit.export", entity_type: "audit_log", entity_id: "2026-08-18", action_desc: "导出了审计日志" }, ENTRY],
+        total: 2,
+        page: 1,
+        page_size: 100,
+      };
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "合规报告" })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "合规报告" }));
+    // 敏感访问聚合：李敏 2 次
+    await waitFor(() => {
+      expect(screen.getByText("敏感数据访问（1 位操作人）")).toBeTruthy();
+    });
+    const accessCard = screen.getByText("敏感数据访问（1 位操作人）").closest(".ant-card") as HTMLElement;
+    expect(within(accessCard).getByText("李敏")).toBeTruthy();
+    expect(within(accessCard).getByText("2")).toBeTruthy();
+  });
+
+  it("「合规报告」聚合审计导出记录（action 含 export），非导出条目不混入", async () => {
+    mockedListAudit.mockImplementation(async (params) => {
+      if (params?.pii_access) {
+        return { items: [], total: 0, page: 1, page_size: 100 };
+      }
+      return {
+        items: [
+          { ...ENTRY, id: 20, action: "audit.export", entity_type: "audit_log", entity_id: "2026-08-18", action_desc: "导出了审计日志" },
+          ENTRY,
+        ],
+        total: 2,
+        page: 1,
+        page_size: 100,
+      };
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "合规报告" })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "合规报告" }));
+    await waitFor(() => {
+      expect(screen.getByText("审计导出记录（1）")).toBeTruthy();
+    });
+    const exportCard = screen.getByText("审计导出记录（1）").closest(".ant-card") as HTMLElement;
+    // 导出人 + 导出内容实体类型中文
+    expect(within(exportCard).getByText("张伟")).toBeTruthy();
+    expect(within(exportCard).getByText("审计日志")).toBeTruthy();
+    // 非导出条目（data_source.create）不进入导出记录
+    expect(within(exportCard).queryByText("创建了数据源（名称=财务库）")).toBeNull();
+  });
+
+  it("敏感访问 API 失败时合规报告静默降级为空态（不崩溃）", async () => {
+    mockedListAudit.mockImplementation(async (params) => {
+      if (params?.pii_access) throw new Error("audit 不可用");
+      return { items: [ENTRY], total: 1, page: 1, page_size: 100 };
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "合规报告" })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "合规报告" }));
+    await waitFor(() => {
+      expect(screen.getByText("敏感数据访问（0 位操作人）")).toBeTruthy();
+    });
+    expect(screen.getByText("暂无敏感数据访问记录")).toBeTruthy();
   });
 });
