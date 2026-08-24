@@ -1386,6 +1386,43 @@ class LineageRepository:
         )
         return int(n.scalar_one_or_none() or 0)
 
+    async def metric_reuse_counts(self) -> dict[str, dict[str, int]]:
+        """按指标聚合被引用统计（复用度分析数据源，P0）。
+
+        统计以 ``metric:{code}`` 为 source_node 的**存活**血缘边（source 为被依赖方）：
+        - ``DERIVED_FROM`` → target 为派生该指标的派生指标（计派生引用数）
+        - ``CONSUMED_BY`` → target 为消费方节点（计报表/接入方引用数）
+
+        同一边类型下按 target 去重（同一派生指标/消费方可能有多条同类型边），
+        失效队列边（``stale=True``）不计入——「被引用」只统计当前生效的引用。
+
+        Returns:
+            ``{metric_code: {"derived_by": int, "consumed_by": int}}``；无引用边
+            的指标不出现在结果中（由上层以 0 兜底）。
+        """
+        rows = (
+            await self._db.execute(
+                select(
+                    LineageEdge.source_node,
+                    LineageEdge.edge_type,
+                    func.count(func.distinct(LineageEdge.target_node)),
+                )
+                .where(
+                    LineageEdge.deleted_at.is_(None),
+                    LineageEdge.stale.is_(False),
+                    LineageEdge.source_node.like("metric:%"),
+                    LineageEdge.edge_type.in_(["DERIVED_FROM", "CONSUMED_BY"]),
+                )
+                .group_by(LineageEdge.source_node, LineageEdge.edge_type)
+            )
+        ).all()
+        out: dict[str, dict[str, int]] = {}
+        for node, edge_type, cnt in rows:
+            code = str(node)[len("metric:") :]
+            bucket = out.setdefault(code, {"derived_by": 0, "consumed_by": 0})
+            bucket["derived_by" if edge_type == "DERIVED_FROM" else "consumed_by"] = int(cnt)
+        return out
+
     async def list_all_edges(self, limit: int | None = None) -> list[LineageEdge]:
         """取出全部未删除血缘边（断链校验用，按 id 升序）。"""
         stmt = select(LineageEdge).where(LineageEdge.deleted_at.is_(None)).order_by(LineageEdge.id)

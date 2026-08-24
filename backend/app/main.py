@@ -31,6 +31,7 @@ from app.api.health import router as health_router
 from app.api.lineage import router as lineage_router
 from app.api.measure_catalog import router as measure_catalog_router
 from app.api.metric_mount import router as metric_mount_router
+from app.api.metric_stats import router as metric_stats_router
 from app.api.metrics import router as metrics_router
 from app.api.notify import router as notify_router
 from app.api.observability import router as observability_router
@@ -225,6 +226,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
     app.include_router(metrics_router, prefix="/api/v1")
+    app.include_router(metric_stats_router, prefix="/api/v1")
     app.include_router(source_router, prefix="/api/v1")
     app.include_router(catalog_router, prefix="/api/v1")
     app.include_router(collection_run_router, prefix="/api/v1")
