@@ -3,8 +3,13 @@
 跨 8 类资源（指标/维度/术语/模板/数据源/采集目录表/采集目录字段/主题域）
 按关键词模糊匹配，统一返回结构化条目供前端顶栏下拉与全局搜索页消费。
 
+检索架构（TD §1.3 / §5.2 降级矩阵）：
+- 指标/术语两类优先走 Elasticsearch（metric_idx/term_idx，multi_match 含同义词字段，
+  相关度排序优于 MySQL LIKE）；ES 禁用/异常时自动降级 MySQL LIKE（TD 降级边界
+  "ES✗→退 MySQL"）。其余 6 类维持 MySQL（未建索引）。
+- 全部 MySQL 查询走 SQLAlchemy ORM 参数化（无字符串拼接 SQL）。
+
 安全约束：
-- 全部查询走 SQLAlchemy ORM 参数化（无字符串拼接 SQL）。
 - LIKE 通配符（%/_）转义，防用户输入放大模糊匹配面。
 - 字段级搜索对 schema_json 用 CAST(... AS CHAR) 粗匹配 + 内存精确提取列名，
   命中列以独立 ``field`` 条目返回。
@@ -18,6 +23,7 @@ from typing import Any
 from sqlalchemy import String, case, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.es_client import EsClient, get_es_client
 from app.models.data_source import DataSource, DBCatalog
 from app.models.dimension import Dimension
 from app.models.measure_catalog import MeasureCatalog
@@ -44,8 +50,15 @@ class GlobalSearchRepository:
     顶栏下拉场景足够），按类型分组组装为 ``{type: [item, ...]}``。
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, es_client: EsClient | None = None) -> None:
         self._session = session
+        # ES 客户端注入点：测试可注入 disabled/mock；None 时惰性取进程级单例。
+        self._es_client = es_client
+
+    def _es(self) -> EsClient:
+        if self._es_client is None:
+            self._es_client = get_es_client()
+        return self._es_client
 
     async def search(self, q: str, limit: int = 5) -> dict[str, list[dict[str, Any]]]:
         """跨 8 类资源聚合搜索，按类型分组返回。
@@ -84,9 +97,9 @@ class GlobalSearchRepository:
             groups["field"],
             groups["subject_domain"],
         ) = await asyncio.gather(
-            self._search_metrics(needle, limit),
+            self._search_metrics(needle, limit, raw_q=q.strip()),
             self._search_dimensions(needle, limit),
-            self._search_terms(needle, limit),
+            self._search_terms(needle, limit, raw_q=q.strip()),
             self._search_templates(needle, limit),
             self._search_data_sources(needle, limit),
             self._search_catalogs(needle, limit),
@@ -95,13 +108,19 @@ class GlobalSearchRepository:
         )
         return groups
 
-    async def _search_metrics(self, needle: str, limit: int) -> list[dict[str, Any]]:
-        """指标检索：metric_code/name/description 直接命中 + 关联逻辑度量同义词命中。
+    async def _search_metrics(
+        self, needle: str, limit: int, raw_q: str | None = None
+    ) -> list[dict[str, Any]]:
+        """指标检索：ES 优先（相关度排序），ES 禁用/异常/未命中时降级 MySQL LIKE。
 
         同义词（业务别名，如"支付金额"别名"pay"）存于 ``measure_catalog.synonyms``，
         经 ``metric.measure_id`` 外连接粗匹配；命中来源以 ``match_reason`` 标识
         （``synonym`` 供前端提示"您是不是想找…"，直接命中为 ``field``）。
         """
+        if raw_q:
+            es_items = await self._es_search_assets("metric", raw_q, limit)
+            if es_items is not None:
+                return es_items
         code_match = Metric.metric_code.like(needle, escape="/")
         name_match = Metric.name.like(needle, escape="/")
         desc_match = Metric.description.like(needle, escape="/")
@@ -163,7 +182,14 @@ class GlobalSearchRepository:
             for d in rows
         ]
 
-    async def _search_terms(self, needle: str, limit: int) -> list[dict[str, Any]]:
+    async def _search_terms(
+        self, needle: str, limit: int, raw_q: str | None = None
+    ) -> list[dict[str, Any]]:
+        """术语检索：ES 优先（相关度排序），ES 禁用/异常/未命中时降级 MySQL LIKE。"""
+        if raw_q:
+            es_items = await self._es_search_assets("term", raw_q, limit)
+            if es_items is not None:
+                return es_items
         stmt = (
             select(Term)
             .where(
@@ -190,6 +216,62 @@ class GlobalSearchRepository:
             }
             for t in rows
         ]
+
+    async def _es_search_assets(
+        self, asset_type: str, raw_q: str, limit: int
+    ) -> list[dict[str, Any]] | None:
+        """经 ES 检索指标/术语（multi_match 跨 code/name/description/synonyms，相关度排序）。
+
+        Returns:
+            命中条目列表；ES 禁用/未配置/异常/零命中时返回 ``None``，
+            由调用方降级 MySQL LIKE（TD §1.3 降级边界 "ES✗→退 MySQL"）。
+        """
+        es = self._es()
+        if not es.enabled:
+            return None
+        index = "metric_idx" if asset_type == "metric" else "term_idx"
+        try:
+            resp = await es.search(
+                index,
+                {
+                    "query": {
+                        "multi_match": {
+                            "query": raw_q,
+                            "fields": ["code^3", "name^2", "description", "synonyms"],
+                            "type": "best_fields",
+                            "fuzziness": "AUTO",
+                        }
+                    }
+                },
+                size=limit,
+            )
+            hits = ((resp or {}).get("hits") or {}).get("hits") or []
+            items = [self._es_hit_to_item(asset_type, h.get("_source") or {}) for h in hits]
+            return items or None
+        except Exception:  # noqa: BLE001 - ES 失败静默降级 MySQL，不阻断检索主流程
+            return None
+
+    def _es_hit_to_item(self, asset_type: str, src: dict[str, Any]) -> dict[str, Any]:
+        """将 ES 文档 _source 组装为与 MySQL 路径一致的条目结构（前端无感知）。"""
+        if asset_type == "metric":
+            return {
+                "type": "metric",
+                "id": src.get("id"),
+                "code": src.get("metric_code"),
+                "name": src.get("name"),
+                "domain": src.get("domain"),
+                "status": src.get("status"),
+                "pii_flag": bool(src.get("pii_flag")),
+                "match_reason": "field",
+            }
+        return {
+            "type": "term",
+            "id": src.get("id"),
+            "code": src.get("term_code"),
+            "name": src.get("name"),
+            "domain": src.get("domain"),
+            "status": src.get("status"),
+        }
 
     async def _search_templates(self, needle: str, limit: int) -> list[dict[str, Any]]:
         stmt = (

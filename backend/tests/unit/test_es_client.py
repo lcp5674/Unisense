@@ -168,8 +168,12 @@ async def test_es_client_constructor_failure_disables(monkeypatch):
     assert client.enabled is False
 
 
-async def test_es_client_search_when_disabled():
-    """客户端禁用时 search 抛 SearchUnavailableError（106 分支）。"""
+async def test_es_client_search_when_disabled(monkeypatch):
+    """客户端禁用时 search 抛 SearchUnavailableError（106 分支）。
+
+    模拟 es_url 未配置（无论环境是否安装 elasticsearch/aiohttp，保证确定性）。
+    """
+    monkeypatch.setattr(es_client.settings, "es_url", "")
     client = EsClient()  # 无 client 注入且未配置 → 禁用
     assert client.enabled is False
     with pytest.raises(SearchUnavailableError):
@@ -218,8 +222,9 @@ async def test_es_client_index_failure_opens_circuit():
         await client.index("m", {})
 
 
-async def test_es_client_health_when_disabled():
+async def test_es_client_health_when_disabled(monkeypatch):
     """客户端禁用时 health() 返回 False（144 分支）。"""
+    monkeypatch.setattr(es_client.settings, "es_url", "")
     client = EsClient()
     assert await client.health() is False
 
@@ -267,8 +272,9 @@ async def test_es_client_close_exception_best_effort():
     await client.close()  # 不应抛异常
 
 
-async def test_es_client_index_when_disabled():
+async def test_es_client_index_when_disabled(monkeypatch):
     """客户端禁用时 index 抛 SearchUnavailableError（130 行分支）。"""
+    monkeypatch.setattr(es_client.settings, "es_url", "")
     client = EsClient()
     with pytest.raises(SearchUnavailableError):
         await client.index("metrics", {"name": "gmv"})

@@ -28,6 +28,17 @@ def _session() -> MagicMock:
     return s
 
 
+def _disabled_es() -> MagicMock:
+    """ES 禁用客户端：本组单测专注 MySQL 路径，显式关闭 ES 保结果确定性（不连本地 ES）。"""
+    es = MagicMock()
+    es.enabled = False
+    return es
+
+
+def _repo(s: MagicMock) -> GlobalSearchRepository:
+    return GlobalSearchRepository(s, es_client=_disabled_es())
+
+
 def _rows_result(*rows: object) -> MagicMock:
     r = MagicMock()
     r.scalars.return_value.all.return_value = list(rows)
@@ -102,7 +113,7 @@ class TestGlobalSearchRepository:
     async def test_search_groups_each_type(self) -> None:
         """8 类资源各自查询，按类型分组返回。"""
         s = _session()
-        repo = GlobalSearchRepository(s)
+        repo = _repo(s)
         s.execute = AsyncMock(
             side_effect=[
                 _all_result((_metric(), "field")),  # metric（行含 match_reason）
@@ -135,14 +146,14 @@ class TestGlobalSearchRepository:
     async def test_search_blank_returns_all_empty(self) -> None:
         """空/纯空白关键词不触发任何查询，返回全空分组。"""
         s = _session()
-        groups = await GlobalSearchRepository(s).search("   ", limit=5)
+        groups = await _repo(s).search("   ", limit=5)
         assert all(v == [] for v in groups.values())
         s.execute.assert_not_awaited()
 
     async def test_field_search_extracts_matching_column(self) -> None:
         """字段级搜索：schema_json 中列名命中关键词 → 返回独立 field 条目（含表名）。"""
         s = _session()
-        repo = GlobalSearchRepository(s)
+        repo = _repo(s)
         s.execute = AsyncMock(
             return_value=_rows_result(
                 _catalog(
@@ -166,13 +177,13 @@ class TestGlobalSearchRepository:
 
     async def test_field_search_blank_returns_empty(self) -> None:
         s = _session()
-        assert await GlobalSearchRepository(s)._search_fields("", 5) == []
+        assert await _repo(s)._search_fields("", 5) == []
         s.execute.assert_not_awaited()
 
     async def test_search_escapes_like_wildcards(self) -> None:
         """LIKE 通配符被转义，防模糊放大。"""
         s = _session()
-        repo = GlobalSearchRepository(s)
+        repo = _repo(s)
         s.execute = AsyncMock(side_effect=[_rows_result()] * 8)
         await repo.search("100%", limit=5)
         metric_stmt = s.execute.call_args_list[0].args[0]
@@ -184,7 +195,7 @@ class TestGlobalSearchRepository:
     async def test_metric_synonym_hit_reports_match_reason(self) -> None:
         """指标经关联逻辑度量同义词命中 → match_reason=synonym（供前端"您是不是想找…"提示）。"""
         s = _session()
-        repo = GlobalSearchRepository(s)
+        repo = _repo(s)
         s.execute = AsyncMock(return_value=_all_result((_metric(), "synonym")))
 
         items = await repo._search_metrics("%pay%", limit=5)
@@ -196,7 +207,7 @@ class TestGlobalSearchRepository:
     async def test_metric_synonyms_join_in_sql(self) -> None:
         """指标检索 SQL 外连接 measure_catalog，同义词列参与 LIKE 匹配（参数化 + 转义）。"""
         s = _session()
-        repo = GlobalSearchRepository(s)
+        repo = _repo(s)
         s.execute = AsyncMock(return_value=_all_result())
 
         await repo.search("支付", limit=5)
@@ -212,7 +223,7 @@ class TestGlobalSearchRepository:
     async def test_metric_synonyms_case_prioritizes_direct_match(self) -> None:
         """同义词与直接字段都命中时 match_reason=field，避免"同义词匹配"标签噪音。"""
         s = _session()
-        repo = GlobalSearchRepository(s)
+        repo = _repo(s)
         s.execute = AsyncMock(return_value=_all_result((_metric(), "field")))
 
         items = await repo._search_metrics("%sales_gmv%", limit=5)
@@ -223,7 +234,7 @@ class TestGlobalSearchRepository:
     async def test_term_search_matches_synonyms(self) -> None:
         """术语同义词命中：term.synonyms（JSON）粗匹配参与检索。"""
         s = _session()
-        repo = GlobalSearchRepository(s)
+        repo = _repo(s)
         s.execute = AsyncMock(side_effect=[_rows_result()] * 8)
 
         await repo.search("成交", limit=5)
@@ -234,6 +245,94 @@ class TestGlobalSearchRepository:
         assert "synonyms" in compiled.lower()
         assert "ESCAPE '/'" in compiled
         assert "成交" in compiled
+
+    # ---- ES 检索接线（TD §1.3：ES 优先，降级 MySQL LIKE）----
+
+    def _enabled_es(self, hits: list[dict]) -> MagicMock:
+        es = MagicMock()
+        es.enabled = True
+        es.search = AsyncMock(return_value={"hits": {"hits": hits}})
+        return es
+
+    async def test_metric_search_uses_es_when_enabled(self) -> None:
+        """ES 启用时指标检索走 ES（multi_match），返回结构对齐 MySQL 路径。"""
+        s = _session()
+        es = self._enabled_es(
+            [
+                {
+                    "_source": {
+                        "id": 1,
+                        "metric_code": "sales_gmv_day",
+                        "name": "销售GMV",
+                        "domain": "sales",
+                        "status": "PUBLISHED",
+                        "pii_flag": False,
+                    }
+                }
+            ]
+        )
+        repo = GlobalSearchRepository(s, es_client=es)
+        items = await repo._search_metrics("%gmv%", limit=5, raw_q="gmv")
+        assert items[0]["code"] == "sales_gmv_day"
+        assert items[0]["match_reason"] == "field"
+        es.search.assert_awaited_once()
+        s.execute.assert_not_awaited()  # ES 命中不再走 MySQL
+
+    async def test_term_search_uses_es_when_enabled(self) -> None:
+        """ES 启用时术语检索走 ES。"""
+        s = _session()
+        es = self._enabled_es(
+            [
+                {
+                    "_source": {
+                        "id": 2,
+                        "term_code": "gmv",
+                        "name": "成交总额",
+                        "domain": "sales",
+                        "status": "ACTIVE",
+                    }
+                }
+            ]
+        )
+        repo = GlobalSearchRepository(s, es_client=es)
+        items = await repo._search_terms("%gmv%", limit=5, raw_q="gmv")
+        assert items[0]["code"] == "gmv"
+        es.search.assert_awaited_once()
+        s.execute.assert_not_awaited()
+
+    async def test_es_search_fallback_to_mysql(self) -> None:
+        """ES 异常（down/熔断）时降级 MySQL LIKE，不阻断检索。"""
+        s = _session()
+        es = MagicMock()
+        es.enabled = True
+        es.search = AsyncMock(side_effect=RuntimeError("es down"))
+        repo = GlobalSearchRepository(s, es_client=es)
+        s.execute = AsyncMock(return_value=_all_result((_metric(), "field")))
+        items = await repo._search_metrics("%gmv%", limit=5, raw_q="gmv")
+        assert items[0]["code"] == "sales_gmv_day"
+        s.execute.assert_awaited()
+
+    async def test_es_zero_hits_fallbacks_to_mysql(self) -> None:
+        """ES 零命中降级 MySQL（空结果不应短路成空列表）。"""
+        s = _session()
+        es = self._enabled_es([])
+        repo = GlobalSearchRepository(s, es_client=es)
+        s.execute = AsyncMock(return_value=_all_result((_metric(), "field")))
+        items = await repo._search_metrics("%gmv%", limit=5, raw_q="gmv")
+        assert items[0]["code"] == "sales_gmv_day"
+        s.execute.assert_awaited()
+
+    async def test_es_disabled_skips_es(self) -> None:
+        """ES 未配置/未启用（enabled=False）直接走 MySQL，不发起 ES 调用。"""
+        s = _session()
+        es = MagicMock()
+        es.enabled = False
+        es.search = AsyncMock()
+        repo = GlobalSearchRepository(s, es_client=es)
+        s.execute = AsyncMock(return_value=_all_result((_metric(), "field")))
+        items = await repo._search_metrics("%gmv%", limit=5, raw_q="gmv")
+        assert items[0]["code"] == "sales_gmv_day"
+        es.search.assert_not_awaited()
 
 
 class TestGlobalSearchService:

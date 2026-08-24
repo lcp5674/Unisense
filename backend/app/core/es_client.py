@@ -138,6 +138,24 @@ class EsClient:
             self._breaker.record_failure()
             raise SearchUnavailableError(f"es index failed: {exc}") from exc
 
+    async def create_index(self, index: str, body: dict[str, Any] | None = None) -> bool:
+        """幂等创建索引（含 mapping；已存在时静默返回 False，不报错）。"""
+        if not self._enabled or self._client is None:
+            raise SearchUnavailableError("elasticsearch client disabled")
+        if not self._breaker.allow():
+            raise CircuitOpenError("es circuit open")
+        try:
+            await self._client.indices.create(index=index, body=body)
+            self._breaker.record_success()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            # resource_already_exists（400）视为幂等成功；其余仍视为失败
+            if getattr(exc, "status_code", None) == 400 and "resource_already_exists" in str(exc):
+                self._breaker.record_success()
+                return False
+            self._breaker.record_failure()
+            raise SearchUnavailableError(f"es create_index failed: {exc}") from exc
+
     async def health(self) -> bool:
         """真实探活（供 /ready 探针），结果经熔断器统计。"""
         if not self._enabled or self._client is None:

@@ -18,6 +18,7 @@ from app.api.responses import get_trace_id, ok
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.global_search.service import GlobalSearchService
+from app.services.search.es_indexer import EsIndexer
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -31,6 +32,11 @@ _READ_ROLES = (
     "viewer",
 )
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# ES 索引管理（建映射/全量同步）：管理员专属写操作
+_INDEX_WRITE_DEPS = [
+    Depends(require_roles("platform_admin", "domain_admin")),
+    Depends(guard_against_injection),
+]
 
 
 @router.get("", dependencies=_READ_DEPS, summary="全局聚合搜索")
@@ -48,3 +54,30 @@ async def global_search(
     data = await GlobalSearchService(db).search(q.strip(), limit=limit)
     total = sum(len(items) for items in data.values())
     return ok(data={"groups": data, "total": total}, trace_id=trace_id)
+
+
+@router.post("/indexes/ensure", dependencies=_INDEX_WRITE_DEPS, summary="ES 索引映射幂等创建")
+async def ensure_indexes(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """创建 metric_idx / term_idx 索引映射（幂等：已存在返回 False 不报错）。
+
+    ES 未配置/不可用抛 503（SearchUnavailableError），检索路径自动降级 MySQL。
+    """
+    indexer = EsIndexer(db)
+    created = await indexer.ensure_indexes()
+    return ok(data={"created": created, "enabled": indexer.enabled}, trace_id=trace_id)
+
+
+@router.post("/indexes/sync", dependencies=_INDEX_WRITE_DEPS, summary="MySQL → ES 全量同步")
+async def sync_indexes(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """从 MySQL 全量灌入指标/术语到 ES（按业务编码 upsert，可重复执行）。"""
+    indexer = EsIndexer(db)
+    counts = await indexer.sync_all()
+    return ok(data={"counts": counts, "enabled": indexer.enabled}, trace_id=trace_id)
