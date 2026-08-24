@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Input, Select, Button, Space, Tooltip, message } from "antd";
+import { Alert, Card, Table, Tag, Input, Select, Button, Space, Tabs, Tooltip, message } from "antd";
 import { DownloadOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { exportAudit, listAudit, UnisenseApiError } from "../api";
 import type { AuditEntry } from "../types";
@@ -17,6 +17,113 @@ import { usePermission } from "../hooks/usePermission";
 // 实体类型筛选选项：集中常量对齐后端全部 entity_type（见 auditI18n.AUDIT_ENTITY_TYPES）
 const AUDIT_ENTITY_OPTIONS = AUDIT_ENTITY_TYPES.map((v) => ({ value: v, label: entityTypeLabel(v) }));
 
+// 合规报告辅助：导出动作判定（audit.export / pii_export 等一切含 export 的动作）
+function isExportEntry(e: AuditEntry): boolean {
+  return e.action.includes("export");
+}
+
+// 敏感数据访问按操作人聚合：谁访问过、访问次数、最近一次访问时间
+function groupSensitiveAccess(items: AuditEntry[]): Array<{ actor: string; count: number; last_at: string }> {
+  const map = new Map<string, { count: number; last_at: string }>();
+  for (const e of items) {
+    if (!e.pii_access) continue;
+    const actor = e.actor_display ?? `用户 #${e.actor_id}`;
+    const prev = map.get(actor);
+    if (!prev) {
+      map.set(actor, { count: 1, last_at: e.created_at });
+    } else {
+      prev.count += 1;
+      if (e.created_at > prev.last_at) prev.last_at = e.created_at;
+    }
+  }
+  return Array.from(map.entries()).map(([actor, v]) => ({ actor, count: v.count, last_at: v.last_at }));
+}
+
+// 合规报告视图：敏感指标访问留痕（谁访问过）+ 审计导出记录，一键聚合（前端基于现有 audit API 数据）
+const SENSITIVE_ACCESS_COLUMNS = [
+  { title: "操作人", dataIndex: "actor", key: "actor" },
+  { title: "访问次数", dataIndex: "count", key: "count", width: 110 },
+  {
+    title: "最近访问",
+    dataIndex: "last_at",
+    key: "last_at",
+    render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span>,
+  },
+];
+
+const EXPORT_RECORD_COLUMNS = [
+  {
+    title: "操作人",
+    dataIndex: "actor_display",
+    key: "actor",
+    render: (v: string, r: AuditEntry) => (
+      <span className="mono" style={{ fontSize: 12 }}>{v ?? `用户 #${r.actor_id}`}</span>
+    ),
+  },
+  {
+    title: "导出内容",
+    dataIndex: "entity_id",
+    key: "entity",
+    render: (v: string, r: AuditEntry) => (
+      <span>
+        <Tag>{entityTypeLabel(r.entity_type)}</Tag>
+        <span className="mono" style={{ fontSize: 12, marginLeft: 4 }}>{cleanEntityId(v)}</span>
+      </span>
+    ),
+  },
+  {
+    title: "操作时间",
+    dataIndex: "created_at",
+    key: "created",
+    render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{formatCnTime(v)}</span>,
+  },
+];
+
+function ComplianceReport({
+  sensitiveAccess,
+  exportRecords,
+  loading,
+}: {
+  sensitiveAccess: AuditEntry[];
+  exportRecords: AuditEntry[];
+  loading: boolean;
+}) {
+  const accessRows = groupSensitiveAccess(sensitiveAccess);
+  return (
+    <div>
+      <Alert
+        type="info"
+        showIcon
+        message="合规报告（一键聚合）"
+        description="基于审计日志 API 最近 100 条检索结果在前端汇总：敏感指标访问留痕（谁访问过）+ 审计导出记录。需要全量明细请在上方「操作日志」Tab 筛选后导出 CSV/JSON。"
+        style={{ marginBottom: 16 }}
+      />
+      <Card size="small" title={`敏感数据访问（${accessRows.length} 位操作人）`} style={{ marginBottom: 16 }}>
+        <Table
+          dataSource={accessRows}
+          rowKey="actor"
+          size="small"
+          loading={loading}
+          pagination={false}
+          locale={{ emptyText: "暂无敏感数据访问记录" }}
+          columns={SENSITIVE_ACCESS_COLUMNS}
+        />
+      </Card>
+      <Card size="small" title={`审计导出记录（${exportRecords.length}）`}>
+        <Table
+          dataSource={exportRecords}
+          rowKey="id"
+          size="small"
+          loading={loading}
+          pagination={false}
+          locale={{ emptyText: "暂无导出记录" }}
+          columns={EXPORT_RECORD_COLUMNS}
+        />
+      </Card>
+    </div>
+  );
+}
+
 export function AuditLog() {
   const { can } = usePermission();
   const [items, setItems] = useState<AuditEntry[]>([]);
@@ -28,6 +135,26 @@ export function AuditLog() {
   const [piiOnly, setPiiOnly] = useState<boolean | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  // 合规报告 Tab 状态：切换时拉取敏感访问 + 导出记录（现有 audit API，前端聚合）
+  const [activeTab, setActiveTab] = useState("log");
+  const [complianceLoading, setComplianceLoading] = useState(false);
+  const [sensitiveAccess, setSensitiveAccess] = useState<AuditEntry[]>([]);
+  const [exportRecords, setExportRecords] = useState<AuditEntry[]>([]);
+
+  // 合规报告聚合：敏感访问（pii_access=true）+ 导出动作（action 含 export），各取最近 100 条
+  async function loadCompliance() {
+    setComplianceLoading(true);
+    try {
+      const [pii, all] = await Promise.all([
+        listAudit({ pii_access: true, page_size: 100 }).catch(() => ({ items: [] as AuditEntry[] })),
+        listAudit({ page_size: 100 }).catch(() => ({ items: [] as AuditEntry[] })),
+      ]);
+      setSensitiveAccess(pii.items);
+      setExportRecords(all.items.filter(isExportEntry));
+    } finally {
+      setComplianceLoading(false);
+    }
+  }
 
   async function load() {
     setLoading(true);
@@ -72,6 +199,14 @@ export function AuditLog() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, entityType, piiOnly]);
+
+  // 切到「合规报告」Tab 时加载聚合数据（懒加载，避免无关请求）
+  useEffect(() => {
+    if (activeTab === "compliance") {
+      loadCompliance();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   const columns = [
     { title: "编号", dataIndex: "id", key: "id", width: 70 },
@@ -186,20 +321,28 @@ export function AuditLog() {
         </div>
       </div>
 
-      <Card
-        extra={
-          <Space>
-            {can("audit:export") && (
-              <Button icon={<DownloadOutlined />} onClick={handleExport} loading={exporting}>
-                导出 CSV
-              </Button>
-            )}
-            <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
-              刷新
-            </Button>
-          </Space>
-        }
-      >
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        items={[
+          {
+            key: "log",
+            label: "操作日志",
+            children: (
+              <Card
+                extra={
+                  <Space>
+                    {can("audit:export") && (
+                      <Button icon={<DownloadOutlined />} onClick={handleExport} loading={exporting}>
+                        导出 CSV
+                      </Button>
+                    )}
+                    <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
+                      刷新
+                    </Button>
+                  </Space>
+                }
+              >
         <Space style={{ marginBottom: 12 }} wrap>
           <Select
             allowClear
@@ -248,7 +391,22 @@ export function AuditLog() {
           locale={{ emptyText: "暂无审计记录" }}
           size="small"
         />
-      </Card>
+              </Card>
+            ),
+          },
+          {
+            key: "compliance",
+            label: "合规报告",
+            children: (
+              <ComplianceReport
+                sensitiveAccess={sensitiveAccess}
+                exportRecords={exportRecords}
+                loading={complianceLoading}
+              />
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }

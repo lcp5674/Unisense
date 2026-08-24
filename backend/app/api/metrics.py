@@ -23,6 +23,7 @@ from app.core.logging import get_logger
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
 from app.services.collector.infer_guard import InferInflightGuard
+from app.services.conflict.repository import ConflictRepository
 from app.services.semantic.schemas import (
     MetricApproveRequest,
     MetricAutoSuggestRequest,
@@ -283,6 +284,26 @@ async def list_metrics(
             if item.id in health_map:
                 item.health_score, item.health_level = health_map[item.id]
     return ok(data=response, trace_id=trace_id)
+
+
+@router.get(
+    "/consistency/stats",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="口径一致率统计（P1：总口径数/一致率/部门间冲突/平均解决时长）",
+    dependencies=_READ_DEPS,
+)
+async def consistency_stats(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """口径治理统计：一致率（口径定义无冲突比例）、部门间冲突数、平均争议解决时长。
+
+    基于 conflict 服务模型（created_at → resolved_at）与指标表聚合，供运营大盘量化
+    跨部门口径一致性与争议解决效率。
+    """
+    stats = await ConflictRepository(db).consistency_stats()
+    return ok(data=stats, trace_id=trace_id)
 
 
 @router.get(
@@ -731,8 +752,11 @@ async def publish_metric(
         trace_id=trace_id,
     )
     await db.commit()
+    # 术语绑定软提醒（P1 术语治理）：不硬卡发布，经响应 message 引导先绑定术语
+    reminder = service.term_binding_reminder(metric)
     return ok(
         data=MetricResponse.model_validate(metric),
+        message=reminder if isinstance(reminder, str) else "success",
         trace_id=trace_id,
     )
 
@@ -844,8 +868,11 @@ async def approve_metric(
         trace_id=trace_id,
     )
     await db.commit()
+    # 术语绑定软提醒（P1 术语治理）：不硬卡发布，经响应 message 引导先绑定术语
+    reminder = service.term_binding_reminder(metric)
     return ok(
         data=MetricResponse.model_validate(metric),
+        message=reminder if isinstance(reminder, str) else "success",
         trace_id=trace_id,
     )
 

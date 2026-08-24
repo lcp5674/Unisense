@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Select, Input, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col, Drawer, Empty } from "antd";
 import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
@@ -94,6 +94,7 @@ export function QueryWorkspace() {
   const [semanticData, setSemanticData] = useState<DryRunResponse | null>(null);
   const { track } = useTracking();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -124,6 +125,13 @@ export function QueryWorkspace() {
         return key; // 已是 YYYY-MM-DD,YYYY-MM-DD 格式原样返回
     }
   }
+
+  useEffect(() => {
+    // 支持详情页「试算」入口带参直达：?metric_code=xxx 初始化指标选择
+    const q = searchParams.get("metric_code");
+    if (q) setMetricCode(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     listMetrics({ page_size: 100 })

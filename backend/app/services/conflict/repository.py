@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models.conflict import Conflict, ConflictStatus, ConflictType, RulingRecord
 from app.models.metric import Metric
@@ -171,3 +172,69 @@ class ConflictRepository:
             )
         ).scalar_one_or_none()
         return row if row is not None else None
+
+    async def consistency_stats(self) -> dict[str, Any]:
+        """口径一致率统计（P1）：总口径数 / 一致率 / 部门间冲突数 / 平均争议解决时长。
+
+        聚合风格对齐 observability.repository（多 count + 派生比率）。一致率 =
+        未卷入冲突的口径数占比；部门间冲突 = 双方指标分属不同域；平均解决时长 =
+        已解决冲突 (resolved_at - created_at) 的小时均值。
+        """
+        total_defs = (
+            await self._db.execute(
+                select(func.count()).select_from(Metric).where(Metric.deleted_at.is_(None))
+            )
+        ).scalar() or 0
+        total_conflicts = (
+            await self._db.execute(
+                select(func.count()).select_from(Conflict).where(Conflict.deleted_at.is_(None))
+            )
+        ).scalar() or 0
+        cand = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.candidate"))
+        ext = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.existing"))
+        codes = select(cand.label("code")).where(
+            Conflict.deleted_at.is_(None), cand.is_not(None)
+        ).union(
+            select(ext.label("code")).where(Conflict.deleted_at.is_(None), ext.is_not(None))
+        ).subquery()
+        conflicted = (
+            await self._db.execute(select(func.count()).select_from(codes))
+        ).scalar() or 0
+        ma, mb = aliased(Metric), aliased(Metric)
+        cross_dept = (
+            await self._db.execute(
+                select(func.count())
+                .select_from(Conflict)
+                .join(ma, ma.id == Conflict.metric_a)
+                .join(mb, mb.id == Conflict.metric_b)
+                .where(
+                    Conflict.deleted_at.is_(None),
+                    ma.deleted_at.is_(None),
+                    mb.deleted_at.is_(None),
+                    ma.domain.is_not(None),
+                    mb.domain.is_not(None),
+                    ma.domain != mb.domain,
+                )
+            )
+        ).scalar() or 0
+        avg_sec = (
+            await self._db.execute(
+                select(
+                    func.avg(
+                        func.timestampdiff(
+                            text("SECOND"), Conflict.created_at, Conflict.resolved_at
+                        )
+                    )
+                ).where(Conflict.deleted_at.is_(None), Conflict.resolved_at.is_not(None))
+            )
+        ).scalar()
+        avg_hours = round(float(avg_sec) / 3600, 1) if avg_sec is not None else 0.0
+        rate = round((1 - conflicted / total_defs) * 100, 1) if total_defs else 100.0
+        return {
+            "total_definitions": total_defs,
+            "total_conflicts": total_conflicts,
+            "conflicted_metrics": conflicted,
+            "consistency_rate_pct": rate,
+            "cross_department_conflicts": cross_dept,
+            "avg_resolve_hours": avg_hours,
+        }

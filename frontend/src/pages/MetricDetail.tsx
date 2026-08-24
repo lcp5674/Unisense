@@ -1506,6 +1506,15 @@ export function MetricDetail() {
       >
         订阅通知
       </Button>
+      {/* 一键试算：跳查询工作台并带上本指标编码（QueryWorkspace 读 ?metric_code= 初始化） */}
+      <Button
+        type="primary"
+        ghost
+        icon={<ExperimentOutlined />}
+        onClick={() => navigate(`/query?metric_code=${encodeURIComponent(metric.metric_code)}`)}
+      >
+        试算
+      </Button>
       <Button icon={<ReadOutlined />} onClick={() => navigate(`/guide/${metric.metric_code}`)}>
         消费指南
       </Button>

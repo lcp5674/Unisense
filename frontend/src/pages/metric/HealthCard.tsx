@@ -1,5 +1,6 @@
 import { Card, Progress, Tag, Tooltip } from "antd";
 import type { MetricHealth } from "../../types";
+import { formatCnTime } from "../../utils/timeCn";
 
 // 五维权重（对齐后端 health_scorer._WEIGHTS）
 const DIMS: Array<{ key: keyof Omit<MetricHealth, "metric_id" | "score" | "level" | "missing_dimensions" | "calculated_at">; label: string; hint: string }> = [
@@ -54,6 +55,9 @@ export function HealthCard({ health }: { health: MetricHealth }) {
         <div className="g-sub">
           <Tag color={meta.color}>{meta.label}</Tag>
           <span className="muted">总分 / 100</span>
+        </div>
+        <div className="g-sub" style={{ fontSize: 12 }}>
+          <span className="muted">最近校验：{formatCnTime(health.calculated_at)}</span>
         </div>
       </div>
 

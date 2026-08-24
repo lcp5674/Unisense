@@ -715,6 +715,76 @@ body {
   color: var(--muted);
 }
 
+/* ---- 指标可信度卡（主 Dashboard）：复用 gov-card 骨架，加宽 + 健康度彩条 ----
+   顶部彩条用「绿→黄→红」渐变呼应健康度光谱，四档分布 pill 按档位着色 */
+.gov-card[data-tone="health"]::before {
+  background: linear-gradient(90deg, #67c23a, #f0ad4e, var(--danger));
+}
+
+.gov-card-wide {
+  width: 100%;
+}
+
+/* 健康度四档 pill：优秀/良好绿、警告黄、严重红（浅色底，与 P0/P1/P2 一致的浅底风格） */
+.gov-card .gov-sev[data-sev="EXCELLENT"] {
+  color: #1f7a3d;
+  background: rgba(103, 194, 58, 0.14);
+  border-color: rgba(103, 194, 58, 0.32);
+}
+.gov-card .gov-sev[data-sev="GOOD"] {
+  color: #2e6e46;
+  background: rgba(67, 160, 71, 0.12);
+  border-color: rgba(67, 160, 71, 0.28);
+}
+.gov-card .gov-sev[data-sev="WARNING"] {
+  color: #92600a;
+  background: rgba(240, 173, 78, 0.2);
+  border-color: rgba(240, 173, 78, 0.32);
+}
+.gov-card .gov-sev[data-sev="CRITICAL"] {
+  color: #b93a3a;
+  background: rgba(214, 69, 69, 0.12);
+  border-color: rgba(214, 69, 69, 0.28);
+}
+
+/* 低健康指标 Top 列表（指标可信度卡内）：按评分升序，风险聚焦 */
+.gov-card .gov-risks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+.gov-card .gov-risks-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--danger);
+}
+.gov-card .gov-risk-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+.gov-card .gov-risk-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--ink);
+}
+.gov-card .gov-risk-score {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--danger);
+}
+
 /* Owner 责任分布：责任人卡片网格——头像 + 资产构成条 + 生命周期色点 */
 .owner-grid {
   display: grid;

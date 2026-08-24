@@ -6,6 +6,7 @@ import { Dashboard } from "../pages/Dashboard";
 // Mock API
 vi.mock("../api", () => ({
   fetchDashboard: vi.fn(),
+  fetchObsOverview: vi.fn(),
   fetchRecommendedMetrics: vi.fn(),
   fetchRecommendedTerms: vi.fn(),
 }));
@@ -22,8 +23,14 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
-import { fetchDashboard, fetchRecommendedMetrics, fetchRecommendedTerms } from "../api";
+import {
+  fetchDashboard,
+  fetchObsOverview,
+  fetchRecommendedMetrics,
+  fetchRecommendedTerms,
+} from "../api";
 const mockedFetchDashboard = vi.mocked(fetchDashboard);
+const mockedFetchObsOverview = vi.mocked(fetchObsOverview);
 
 const mockDashboardData = {
   total: 100,
@@ -81,6 +88,22 @@ const mockDashboardData = {
   },
 };
 
+// 指标可信度数据：模拟 /observability/overview quality.metric_health（与可观测中心同源）
+const mockOverview = {
+  quality: {
+    metric_health: {
+      by_level: { EXCELLENT: 40, GOOD: 35, WARNING: 18, CRITICAL: 7 },
+      total_scored: 100,
+      coverage_pct: 100,
+      avg_score: 82,
+      top_risk: [
+        { metric_id: 1, metric_name: "坏账率", metric_code: "bad_debt_rate", score: 41, level: "CRITICAL", missing_dimensions: ["口径完整度"] },
+        { metric_id: 2, metric_name: null, metric_code: "stale_metric", score: 55, level: "WARNING", missing_dimensions: [] },
+      ],
+    },
+  },
+};
+
 function renderDashboard() {
   return render(
     <BrowserRouter>
@@ -111,6 +134,7 @@ describe("Dashboard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedFetchDashboard.mockResolvedValue(mockDashboardData);
+    mockedFetchObsOverview.mockResolvedValue(mockOverview as never);
     vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
     vi.mocked(fetchRecommendedTerms).mockResolvedValue([]);
   });
