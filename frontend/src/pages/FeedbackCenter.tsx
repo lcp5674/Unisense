@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Rate, message, Tabs, Space, Alert, Tooltip, Row, Col } from "antd";
 import { StarOutlined } from "@ant-design/icons";
-import { listFeedback, submitFeedback, updateFeedbackStatus, submitNps, fetchNpsStats, listUsers, UnisenseApiError } from "../api";
+import { listFeedback, submitFeedback, updateFeedbackStatus, clarifyFeedback, submitNps, fetchNpsStats, listUsers, fetchCurrentUser, UnisenseApiError } from "../api";
 import { usePermission } from "../hooks/usePermission";
-import type { Feedback, NpsStats } from "../types";
+import type { CurrentUser, Feedback, NpsStats } from "../types";
 import { formatCnTime, timeAgoCn, parseBackendTime } from "../utils/timeCn";
 
 // ---- 展示映射（value=英文对接后端，label=中文展示） ----
@@ -12,6 +12,7 @@ import { formatCnTime, timeAgoCn, parseBackendTime } from "../utils/timeCn";
 const STATUS_ZH: Record<string, { label: string; color: string }> = {
   pending: { label: "待处理", color: "default" },
   in_progress: { label: "跟进中", color: "blue" },
+  clarifying: { label: "待澄清", color: "orange" },
   adopted: { label: "已采纳", color: "green" },
   rejected: { label: "已驳回", color: "red" },
 };
@@ -86,6 +87,7 @@ function resolveDuration(createdAt: string, resolvedAt: string | null): string |
 const STATUS_FILTER_OPTIONS = [
   { value: "pending", label: "待处理" },
   { value: "in_progress", label: "跟进中" },
+  { value: "clarifying", label: "待澄清" },
   { value: "adopted", label: "已采纳" },
   { value: "rejected", label: "已驳回" },
 ];
@@ -94,6 +96,11 @@ interface ProcessDraft {
   feedback: Feedback;
   status: string;
   note: string;
+}
+
+interface ClarifyDraft {
+  feedback: Feedback;
+  text: string;
 }
 
 function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
@@ -107,9 +114,21 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
   const [status, setStatus] = useState<string | undefined>();
   const [draft, setDraft] = useState<ProcessDraft | null>(null);
   const [updateLoading, setUpdateLoading] = useState(false);
+  // 质疑闭环：澄清弹窗（clarifying 状态反馈由提交人补充说明）
+  const [clarifyDraft, setClarifyDraft] = useState<ClarifyDraft | null>(null);
+  const [clarifyLoading, setClarifyLoading] = useState(false);
+  // 当前登录用户（判断「提交人本人」以展示提交澄清入口）
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   // 业务化解析：user_id → 用户名（对象名称由服务端 target_name 直接提供，前端不再逐条探测）
   const [usersMap, setUsersMap] = useState<Record<number, string>>({});
   const navigate = useNavigate();
+
+  // 当前登录用户：反馈列表「提交澄清」入口仅提交人本人可见
+  useEffect(() => {
+    fetchCurrentUser()
+      .then((me) => setCurrentUser(me))
+      .catch(() => {});
+  }, []);
 
   // 加载用户名单：反馈列表「用户」列展示用户名而非数字 ID
   useEffect(() => {
@@ -164,6 +183,26 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
     } finally {
       setUpdateLoading(false);
+    }
+  }
+
+  // 质疑闭环：提交人补充澄清说明（clarifying → in_progress）
+  async function confirmClarify() {
+    if (!clarifyDraft) return;
+    if (!clarifyDraft.text.trim()) {
+      message.warning("请填写澄清说明");
+      return;
+    }
+    setClarifyLoading(true);
+    try {
+      await clarifyFeedback(clarifyDraft.feedback.id, clarifyDraft.text.trim());
+      message.success("澄清已提交");
+      setClarifyDraft(null);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交失败");
+    } finally {
+      setClarifyLoading(false);
     }
   }
 
@@ -235,14 +274,24 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
       dataIndex: "comment",
       key: "comment",
       ellipsis: true,
-      render: (v: string | null) =>
-        v ? (
-          <Tooltip title={v} placement="topLeft">
-            <span>{v}</span>
-          </Tooltip>
-        ) : (
-          <span className="muted">—</span>
-        ),
+      render: (v: string | null, f: Feedback) => {
+        const main = v ?? "—";
+        // 质疑闭环：展示已提交的澄清说明（clarifying/in_progress 期间可追溯）
+        const hasClarify = Boolean(f.clarification);
+        const full = hasClarify ? `${main}\n\n【澄清】${f.clarification}` : main;
+        return (
+          <div>
+            <Tooltip title={full} placement="topLeft">
+              <span>{main}</span>
+            </Tooltip>
+            {hasClarify && (
+              <div style={{ marginTop: 2 }}>
+                <Tag color="orange" style={{ marginRight: 0 }}>已澄清</Tag>
+              </div>
+            )}
+          </div>
+        );
+      },
     },
     {
       title: "状态",
@@ -291,11 +340,23 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
     {
       title: "处理",
       key: "actions",
-      width: 210,
+      width: 280,
       render: (_: unknown, f: Feedback) => {
         // 终态（已采纳/已驳回）：处理结果已由状态列展示，操作列留空避免重复
         if (f.status === "adopted" || f.status === "rejected") {
           return <span className="muted">—</span>;
+        }
+        // 质疑闭环：待澄清反馈由提交人本人补充说明（PLAT-2：他人不可代答）
+        if (f.status === "clarifying" && currentUser && f.user_id === currentUser.id) {
+          return (
+            <Button
+              size="small"
+              type="primary"
+              onClick={() => setClarifyDraft({ feedback: f, text: f.clarification ?? "" })}
+            >
+              提交澄清
+            </Button>
+          );
         }
         if (!can("feedback:manage")) {
           return <span className="muted">无处置权限</span>;
@@ -308,6 +369,12 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
               onClick={() => setDraft({ feedback: f, status: "in_progress", note: "" })}
             >
               跟进
+            </Button>
+            <Button
+              size="small"
+              onClick={() => setDraft({ feedback: f, status: "clarifying", note: "" })}
+            >
+              待澄清
             </Button>
             <Button size="small" type="primary" onClick={() => setDraft({ feedback: f, status: "adopted", note: "" })}>
               采纳
@@ -383,6 +450,40 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
           placeholder="请输入处理说明（如：已反馈产品，排期支持）"
           rows={3}
         />
+      </Modal>
+
+      <Modal
+        title={`提交澄清 · 反馈 #${clarifyDraft?.feedback.id ?? ""}`}
+        open={clarifyDraft !== null}
+        onCancel={() => setClarifyDraft(null)}
+        onOk={confirmClarify}
+        okText="提交澄清"
+        confirmLoading={clarifyLoading}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <span className="muted">反馈 #{clarifyDraft?.feedback.id}：{clarifyDraft?.feedback.comment ?? "（无内容）"}</span>
+        </div>
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="请补充口径分歧的澄清说明。提交后该反馈回到「跟进中」，由处理人继续修订/采纳/驳回。"
+        />
+        <div className="muted" style={{ marginBottom: 6 }}>澄清说明：</div>
+        <Input.TextArea
+          value={clarifyDraft?.text ?? ""}
+          onChange={(e) => setClarifyDraft((d) => (d ? { ...d, text: e.target.value } : d))}
+          placeholder="如：该指标按门诊人次口径统计（含退号），与药品处方口径不同……"
+          rows={4}
+        />
+        {clarifyDraft?.feedback.clarification && (
+          <div style={{ marginTop: 12 }}>
+            <div className="muted" style={{ marginBottom: 4 }}>已提交过的澄清：</div>
+            <div style={{ padding: "8px 12px", background: "var(--paper)", borderRadius: 4 }}>
+              {clarifyDraft.feedback.clarification}
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

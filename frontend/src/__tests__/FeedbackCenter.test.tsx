@@ -8,16 +8,18 @@ import type { Feedback } from "../types";
 vi.mock("../api", () => ({
   listFeedback: vi.fn(),
   updateFeedbackStatus: vi.fn(),
+  clarifyFeedback: vi.fn(),
   submitFeedback: vi.fn(),
   submitNps: vi.fn(),
   fetchNpsStats: vi.fn(),
   listUsers: vi.fn(),
   getMetric: vi.fn(),
   fetchMyPermissions: vi.fn(),
+  fetchCurrentUser: vi.fn(),
   UnisenseApiError: class extends Error {},
 }));
 
-import { listFeedback, updateFeedbackStatus, listUsers, getMetric, submitFeedback, fetchMyPermissions } from "../api";
+import { listFeedback, updateFeedbackStatus, clarifyFeedback, listUsers, getMetric, submitFeedback, fetchMyPermissions, fetchCurrentUser } from "../api";
 const mockedList = vi.mocked(listFeedback);
 const mockedUpdate = vi.mocked(updateFeedbackStatus);
 const mockedUsers = vi.mocked(listUsers);
@@ -65,6 +67,14 @@ const feedbacks: Feedback[] = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(fetchCurrentUser).mockResolvedValue({
+    id: 7,
+    username: "alice",
+    display_name: "Alice",
+    role: "platform_admin",
+    domain: null,
+    org_id: 1,
+  } as never);
   mockedList.mockResolvedValue({
     items: feedbacks,
     total: feedbacks.length,
@@ -274,5 +284,89 @@ describe("FeedbackCenter 处置权限 gate", () => {
     expect(within(row).getByText(/跟\s*进/)).toBeInTheDocument();
     expect(within(row).getByText(/采\s*纳/)).toBeInTheDocument();
     expect(within(row).getByText(/驳\s*回/)).toBeInTheDocument();
+  });
+});
+describe("FeedbackCenter 质疑闭环", () => {
+  it("clarifying 反馈由提交人本人可见「提交澄清」入口，提交后调用 clarifyFeedback", async () => {
+    const clarifying: Feedback = {
+      id: 5,
+      user_id: 7,
+      target_type: "metric",
+      target_id: "sales_gmv",
+      target_name: "销售GMV",
+      rating: null,
+      comment: "该指标口径与我的理解不一致",
+      category: "question",
+      priority: "medium",
+      source_url: null,
+      nps_score: null,
+      status: "clarifying",
+      resolution_note: null,
+      resolver_id: 4,
+      resolved_at: null,
+      created_at: "2026-08-12T09:00:00",
+    };
+    mockedList.mockResolvedValue({
+      items: [clarifying],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    } as never);
+    const mockedClarify = vi.mocked(clarifyFeedback);
+    mockedClarify.mockResolvedValue({ ...clarifying, status: "in_progress" } as never);
+    render(
+      <MemoryRouter>
+        <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: null, org_id: 1 }}>
+          <FeedbackCenter />
+        </PermissionProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText(/口径与我的理解不一致/)).toBeInTheDocument());
+    // 提交人本人可见「提交澄清」（行内按钮）
+    const clarifyBtns = screen.getAllByRole("button", { name: "提交澄清" });
+    fireEvent.click(clarifyBtns[0]);
+    // 弹窗中输入澄清并提交（Modal ok 按钮与行内按钮同名，取最后一个）
+    const textarea = await screen.findByPlaceholderText(/按门诊人次口径统计/);
+    fireEvent.change(textarea, { target: { value: "按门诊人次口径统计（含退号）" } });
+    const submitBtns = screen.getAllByRole("button", { name: "提交澄清" });
+    fireEvent.click(submitBtns[submitBtns.length - 1]);
+    await waitFor(() =>
+      expect(mockedClarify).toHaveBeenCalledWith(5, "按门诊人次口径统计（含退号）"),
+    );
+  });
+
+  it("非提交人本人不显示「提交澄清」入口（他人不可代答）", async () => {
+    const clarifying: Feedback = {
+      id: 6,
+      user_id: 99,
+      target_type: "metric",
+      target_id: "sales_gmv",
+      comment: "口径疑问",
+      category: "question",
+      priority: "medium",
+      source_url: null,
+      nps_score: null,
+      status: "clarifying",
+      resolution_note: null,
+      resolver_id: 4,
+      resolved_at: null,
+      created_at: "2026-08-12T09:00:00",
+    };
+    mockedList.mockResolvedValue({
+      items: [clarifying],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    } as never);
+    render(
+      <MemoryRouter>
+        <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: null, org_id: 1 }}>
+          <FeedbackCenter />
+        </PermissionProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText(/口径疑问/)).toBeInTheDocument());
+    // 当前用户 id=7 ≠ 提交人 99：不显示提交澄清；管理按钮需 feedback:manage
+    expect(screen.queryByRole("button", { name: /提交澄清/ })).not.toBeInTheDocument();
   });
 });
