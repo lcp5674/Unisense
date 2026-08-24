@@ -15,9 +15,9 @@ describe("formatSql SQL 美化", () => {
   });
 
   it("多列 SELECT：每列逐行缩进", () => {
-    const out = formatSql("SELECT order_amount AS gmv, channel, dt FROM ods_e2e_order");
+    const out = formatSql("SELECT total_fee AS fee, dept_id, dt FROM ods_his_receipt");
     expect(out).toBe(
-      ["SELECT", "  order_amount AS gmv,", "  channel,", "  dt", "FROM ods_e2e_order"].join("\n"),
+      ["SELECT", "  total_fee AS fee,", "  dept_id,", "  dt", "FROM ods_his_receipt"].join("\n"),
     );
   });
 

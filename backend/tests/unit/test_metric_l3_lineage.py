@@ -23,7 +23,7 @@ def _metric(code: str = "m1", definition: dict | None = None) -> MagicMock:
 class TestRegisterMetricL3Lineage:
     async def test_calls_service_with_commit_false(self) -> None:
         db = MagicMock()
-        metric = _metric("sales_e2e_gmv_day", {"source_table": "dws_x", "source_tables": ["ods_y"]})
+        metric = _metric("outp_e2e_fee_day", {"source_table": "dws_x", "source_tables": ["ods_y"]})
         with patch("app.services.lineage.service.LineageService") as ls_cls:
             svc = ls_cls.return_value
             svc.register_metric_from_definition = AsyncMock(return_value=[object()])

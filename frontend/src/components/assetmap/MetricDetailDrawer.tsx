@@ -123,7 +123,7 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
 
 interface MetricDetailDrawerProps {
   open: boolean;
-  /** 指标编码（metric 节点点击时传入，如 "sales_e2e_gmv_day"） */
+  /** 指标编码（metric 节点点击时传入，如 "outp_e2e_fee_day"） */
   metricCode: string | null;
   onClose: () => void;
 }

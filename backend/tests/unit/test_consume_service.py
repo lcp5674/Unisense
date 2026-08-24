@@ -1214,7 +1214,7 @@ async def test_projection_columns_supports_measures_object_array() -> None:
     m = _metric(dims=("channel", "store"))
     m.definition_json = {
         **m.definition_json,
-        "source_table": "dws_metric_sales_e2e_gmv_day",
+        "source_table": "dws_metric_outp_e2e_fee_day",
         "measures": [{"name": "gmv", "aggregation": "SUM"}],
     }
     req = QueryRequest(metric_code="gmv", date_range="")

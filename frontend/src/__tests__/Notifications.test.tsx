@@ -537,8 +537,8 @@ describe("通知中心 - 信息展示增强", () => {
       id: 30,
       template_code: "metric.health_critical",
       title: "指标健康度严重",
-      body: "指标编码：sales_e2e_gmv_day\nscore：64\n重要程度：WARNING\nmissing_dimensions：[\"sla\", \"lineage_coverage\"]",
-      payload: { level: "WARNING", score: 64, metric_code: "sales_e2e_gmv_day", missing_dimensions: ["sla", "lineage_coverage"] },
+      body: "指标编码：outp_e2e_fee_day\nscore：64\n重要程度：WARNING\nmissing_dimensions：[\"sla\", \"lineage_coverage\"]",
+      payload: { level: "WARNING", score: 64, metric_code: "outp_e2e_fee_day", missing_dimensions: ["sla", "lineage_coverage"] },
     });
     mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
 
