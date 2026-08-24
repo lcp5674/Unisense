@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Statistic, Row, Col, Descriptions, Dropdown, Checkbox } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Descriptions, Dropdown, Checkbox } from "antd";
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, SyncOutlined, ArrowLeftOutlined, HeartOutlined, SettingOutlined } from "@ant-design/icons";
-import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, refreshCatalogEntity, inferColumnDescription, inferDescriptions, updateColumnDescription, fetchDescriptionCoverage, listFavorites, addFavorite, removeFavorite, UnisenseApiError } from "../api";
+import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, refreshCatalogEntity, inferColumnDescription, inferDescriptions, updateColumnDescription, listFavorites, addFavorite, removeFavorite, UnisenseApiError } from "../api";
 import type { DBCatalog, DataSource, SchemaColumn } from "../types";
-import type { DescriptionCoverage } from "../api";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 import { SchemaTable } from "../components/SchemaTable";
+import { DescriptionCoveragePanel } from "../components/DescriptionCoveragePanel";
 import { useResizableColumns } from "../components/ResizableTable";
 import { usePermission } from "../hooks/usePermission";
 
@@ -181,9 +181,6 @@ export function Catalogs() {
   const [batchInferLoading, setBatchInferLoading] = useState(false);
   // 单表采集刷新
   const [refreshing, setRefreshing] = useState(false);
-  // 描述缺失概览统计卡（TD §12.1）
-  const [coverage, setCoverage] = useState<DescriptionCoverage | null>(null);
-  const [coverageLoading, setCoverageLoading] = useState(false);
 
   function openFieldDetail(record: DBCatalog) {
     setFieldDrawerCatalog(record);
@@ -436,22 +433,6 @@ export function Catalogs() {
       );
     }
   }
-
-  // 描述缺失统计（字段覆盖率 / 缺失表 / 缺失字段）
-  async function loadCoverage() {
-    setCoverageLoading(true);
-    try {
-      setCoverage(await fetchDescriptionCoverage());
-    } catch {
-      // 统计卡为增强信息，加载失败不阻塞主列表
-    } finally {
-      setCoverageLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    loadCoverage();
-  }, []);
 
   // 库名选项随数据源联动：切换数据源时刷新库名下拉并重置已选库名
   async function loadDatabases() {
@@ -709,54 +690,9 @@ export function Catalogs() {
         )}
       </div>
 
-      {coverage && (
-        <Row gutter={12} style={{ marginBottom: 16 }}>
-          <Col span={6}>
-            <Card size="small">
-              <Statistic
-                title="字段描述覆盖率"
-                value={coverage.total_fields > 0 ? Math.round((coverage.fields_with_desc / coverage.total_fields) * 100) : 0}
-                suffix="%"
-                valueStyle={{ color: coverage.fields_with_desc >= coverage.fields_missing_desc ? "#3f8600" : "#cf1322" }}
-                loading={coverageLoading}
-              />
-              <div className="muted" style={{ fontSize: 12 }}>
-                {coverage.fields_with_desc} / {coverage.total_fields} 字段有描述
-              </div>
-            </Card>
-          </Col>
-          <Col span={6}>
-            <Card size="small">
-              <Statistic
-                title="缺失字段数"
-                value={coverage.fields_missing_desc}
-                valueStyle={{ color: coverage.fields_missing_desc > 0 ? "#cf1322" : "#3f8600" }}
-                loading={coverageLoading}
-              />
-              <div className="muted" style={{ fontSize: 12 }}>可 LLM 推断或人工补全</div>
-            </Card>
-          </Col>
-          <Col span={6}>
-            <Card size="small">
-              <Statistic
-                title="缺表描述"
-                value={coverage.tables_missing_desc}
-                valueStyle={{ color: coverage.tables_missing_desc > 0 ? "#cf1322" : "#3f8600" }}
-                loading={coverageLoading}
-              />
-              <div className="muted" style={{ fontSize: 12 }}>
-                {coverage.tables_with_desc} / {coverage.total_tables} 表已补全
-              </div>
-            </Card>
-          </Col>
-          <Col span={6}>
-            <Card size="small">
-              <Statistic title="目录表总数" value={coverage.total_tables} loading={coverageLoading} />
-              <div className="muted" style={{ fontSize: 12 }}>含表 / 视图</div>
-            </Card>
-          </Col>
-        </Row>
-      )}
+      {/* 描述缺失治理工作台（TD §12.1）：统计卡可下钻 + 按表列缺失字段数治理表格
+          + 治理抽屉（表级/字段级编辑与 LLM 推断）。与资产地图 summary 总览共享同一组件。 */}
+      <DescriptionCoveragePanel variant="full" />
 
       <Card
         extra={

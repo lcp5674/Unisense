@@ -32,22 +32,22 @@ import {
   inferTableDescription,
   updateColumnDescription,
   updateTableDescription,
-} from "../../api";
+} from "../api";
 import type {
   DescriptionCoverage,
   TableCoverageItem,
-} from "../../api";
+} from "../api";
 import type {
   AssetEntityDetail,
   SchemaColumn,
-} from "../../types";
-import { SchemaTable } from "../SchemaTable";
-import { DrillDownDrawer } from "./DrillDownDrawer";
-import { ResizableDrawer } from "../ResizableDrawer";
-import { ENTITY_TYPE_LABEL } from "../../utils/enums";
-import { formatCnTime } from "../../utils/timeCn";
-import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../../hooks/usePersistentPageSize";
-import { usePermission } from "../../hooks/usePermission";
+} from "../types";
+import { SchemaTable } from "./SchemaTable";
+import { DrillDownDrawer } from "./assetmap/DrillDownDrawer";
+import { ResizableDrawer } from "./ResizableDrawer";
+import { ENTITY_TYPE_LABEL } from "../utils/enums";
+import { formatCnTime } from "../utils/timeCn";
+import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../hooks/usePersistentPageSize";
+import { usePermission } from "../hooks/usePermission";
 
 /**
  * 概览指标 → 明细下钻的口径标识。
@@ -58,6 +58,20 @@ type CoverageMetricKey =
   | "fieldsMissing"
   | "tablesMissing"
   | "totalTables";
+
+export type DescriptionCoveragePanelProps = {
+  /**
+   * full（默认）：完整治理工作台——统计卡下钻 + 按表列缺失字段数表格 + 治理抽屉
+   * （表级/字段级人工编辑与 LLM 推断）。采集目录嵌入使用。
+   * summary：只读总览——统计卡下钻明细保留，治理动作经 onGovern 引导跳转采集目录。
+   */
+  variant?: "full" | "summary";
+  /**
+   * summary 模式回调：点击「前往采集目录治理」或下钻明细行时触发；
+   * entityName 为待治理实体名（undefined 表示不指定具体表）。
+   */
+  onGovern?: (entityName?: string) => void;
+};
 
 /**
  * 模块级 in-flight 去重集合（FR-023）：key -> 进行中的推断 Promise。
@@ -359,12 +373,17 @@ function buildTableColumns(): ColumnsType<TableCoverageItem> {
 }
 
 /**
- * 描述缺失概览（资产地图「描述缺失」tab，TD §12.1）。
+ * 描述缺失治理面板（方案 A：采集目录与资产地图共享同一套展示组件）。
  *
- * 统计卡（字段覆盖率/缺失表/缺失字段）+ 按表列缺失字段数（治理优先级排序），
- * 点击表行 → 详情抽屉直达字段级/表级 LLM 推断与人工编辑。
+ * - full（采集目录）：统计卡下钻 + 按表列缺失字段数（治理优先级）+ 治理抽屉
+ *   （表级/字段级 LLM 推断与人工编辑），运维/管理视角的完整治理工作台。
+ * - summary（资产地图）：只读总览——统计卡下钻明细保留，治理动作引导跳转采集目录。
  */
-export function DescriptionCoverageTab() {
+export function DescriptionCoveragePanel({
+  variant = "full",
+  onGovern,
+}: DescriptionCoveragePanelProps) {
+  const isSummary = variant === "summary";
   const [coverage, setCoverage] = useState<DescriptionCoverage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -600,6 +619,18 @@ export function DescriptionCoverageTab() {
 
   return (
     <div>
+      {isSummary && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          <Button
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            onClick={() => onGovern?.()}
+          >
+            前往采集目录治理
+          </Button>
+        </div>
+      )}
+
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={6}>
           <Card size="small">
@@ -695,138 +726,144 @@ export function DescriptionCoverageTab() {
         </Col>
       </Row>
 
-      <Card
-        size="small"
-        title="按表列缺失字段数（点击行查看详情并补全）"
-        extra={
-          <Button size="small" icon={<ThunderboltOutlined />} onClick={load} loading={loading}>
-            刷新
-          </Button>
-        }
-      >
-        <Table<TableCoverageItem>
-          dataSource={coverage.per_table}
-          columns={tableCoverageCols}
-          rowKey={(r) => r.catalog_id}
+      {!isSummary && (
+        <Card
           size="small"
-          pagination={{
-            pageSize,
-            showSizeChanger: true,
-            pageSizeOptions: [...PAGE_SIZE_OPTIONS],
-            onShowSizeChange,
-            showTotal: (t) => `共 ${t} 张表`,
-          }}
-          onRow={(record) => ({
-            onClick: () => openDetail(record.catalog_id),
-            style: { cursor: "pointer" },
-          })}
-        />
-      </Card>
+          title="按表列缺失字段数（点击行查看详情并补全）"
+          style={{ marginBottom: 16 }}
+          extra={
+            <Button size="small" icon={<ThunderboltOutlined />} onClick={load} loading={loading}>
+              刷新
+            </Button>
+          }
+        >
+          <Table<TableCoverageItem>
+            dataSource={coverage.per_table}
+            columns={tableCoverageCols}
+            rowKey={(r) => r.catalog_id}
+            size="small"
+            pagination={{
+              pageSize,
+              showSizeChanger: true,
+              pageSizeOptions: [...PAGE_SIZE_OPTIONS],
+              onShowSizeChange,
+              showTotal: (t) => `共 ${t} 张表`,
+            }}
+            onRow={(record) => ({
+              onClick: () => openDetail(record.catalog_id),
+              style: { cursor: "pointer" },
+            })}
+          />
+        </Card>
+      )}
 
-      <ResizableDrawer
-        title={detail ? `详情：${detail.entity_name}` : "实体详情"}
-        open={detailOpen}
-        onClose={() => setDetailOpen(false)}
-        storageKey="unisense.drawer.desc-table.width"
-        defaultWidth={880}
-        minWidth={600}
-        zIndex={1050}
-      >
-        {detailLoading ? (
-          <Spin tip="加载实体详情…" />
-        ) : detail ? (
-          <>
-            <Descriptions column={2} bordered size="small">
-              <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
-              <Descriptions.Item label="实体类型">
-                {ENTITY_TYPE_LABEL[detail.entity_type] ?? detail.entity_type}
-              </Descriptions.Item>
-              <Descriptions.Item label="数据源">{detail.source_id}</Descriptions.Item>
-              <Descriptions.Item label="敏感度">{sensitivityTag(detail.sensitivity_level)}</Descriptions.Item>
-              <Descriptions.Item label="表级描述">
-                {tableDescEditing ? (
-                  <Space.Compact style={{ width: "100%" }}>
-                    <Input.TextArea
-                      value={tableDescDraft}
-                      onChange={(e) => setTableDescDraft(e.target.value)}
-                      autoSize={{ minRows: 2, maxRows: 5 }}
-                      disabled={tableDescSaving}
-                      style={{ flex: 1 }}
-                    />
-                    <Button
-                      type="primary"
-                      icon={<CheckOutlined />}
-                      aria-label="保存表描述"
-                      loading={tableDescSaving}
-                      onClick={handleTableDescSave}
-                    />
-                    <Button
-                      icon={<CloseOutlined />}
-                      aria-label="取消表描述编辑"
-                      disabled={tableDescSaving}
-                      onClick={() => setTableDescEditing(false)}
-                    />
-                  </Space.Compact>
-                ) : (
-                  <Space direction="vertical" style={{ width: "100%" }}>
-                    <Space size={4} wrap>
-                      {detail.description ? (
-                        <span>{detail.description}</span>
-                      ) : (
-                        <span className="muted" style={{ fontStyle: "italic" }}>
-                          暂无表级描述
-                        </span>
-                      )}
-                      {descriptionSourceTag(detail.description_source)}
+      {!isSummary && (
+        <ResizableDrawer
+          title={detail ? `详情：${detail.entity_name}` : "实体详情"}
+          open={detailOpen}
+          onClose={() => setDetailOpen(false)}
+          storageKey="unisense.drawer.desc-table.width"
+          defaultWidth={880}
+          minWidth={600}
+          zIndex={1050}
+        >
+          {detailLoading ? (
+            <Spin tip="加载实体详情…" />
+          ) : detail ? (
+            <>
+              <Descriptions column={2} bordered size="small">
+                <Descriptions.Item label="实体名称">{detail.entity_name}</Descriptions.Item>
+                <Descriptions.Item label="实体类型">
+                  {ENTITY_TYPE_LABEL[detail.entity_type] ?? detail.entity_type}
+                </Descriptions.Item>
+                <Descriptions.Item label="数据源">{detail.source_id}</Descriptions.Item>
+                <Descriptions.Item label="敏感度">{sensitivityTag(detail.sensitivity_level)}</Descriptions.Item>
+                <Descriptions.Item label="表级描述">
+                  {tableDescEditing ? (
+                    <Space.Compact style={{ width: "100%" }}>
+                      <Input.TextArea
+                        value={tableDescDraft}
+                        onChange={(e) => setTableDescDraft(e.target.value)}
+                        autoSize={{ minRows: 2, maxRows: 5 }}
+                        disabled={tableDescSaving}
+                        style={{ flex: 1 }}
+                      />
+                      <Button
+                        type="primary"
+                        icon={<CheckOutlined />}
+                        aria-label="保存表描述"
+                        loading={tableDescSaving}
+                        onClick={handleTableDescSave}
+                      />
+                      <Button
+                        icon={<CloseOutlined />}
+                        aria-label="取消表描述编辑"
+                        disabled={tableDescSaving}
+                        onClick={() => setTableDescEditing(false)}
+                      />
+                    </Space.Compact>
+                  ) : (
+                    <Space direction="vertical" style={{ width: "100%" }}>
+                      <Space size={4} wrap>
+                        {detail.description ? (
+                          <span>{detail.description}</span>
+                        ) : (
+                          <span className="muted" style={{ fontStyle: "italic" }}>
+                            暂无表级描述
+                          </span>
+                        )}
+                        {descriptionSourceTag(detail.description_source)}
+                      </Space>
+                      <Space>
+                        {canEditDesc && (
+                          <Tooltip title="编辑表级描述">
+                            <Button
+                              size="small"
+                              icon={<EditOutlined />}
+                              onClick={() => {
+                                setTableDescDraft(detail.description ?? "");
+                                setTableDescEditing(true);
+                              }}
+                            >
+                              编辑
+                            </Button>
+                          </Tooltip>
+                        )}
+                        {canInferCatalog && (
+                          <Tooltip title="LLM 推断表级描述">
+                            <Button
+                              size="small"
+                              icon={<ThunderboltOutlined />}
+                              loading={tableInferring}
+                              onClick={handleTableDescInfer}
+                            >
+                              推断
+                            </Button>
+                          </Tooltip>
+                        )}
+                      </Space>
                     </Space>
-                    <Space>
-                      {canEditDesc && (
-                        <Tooltip title="编辑表级描述">
-                          <Button
-                            size="small"
-                            icon={<EditOutlined />}
-                            onClick={() => {
-                              setTableDescDraft(detail.description ?? "");
-                              setTableDescEditing(true);
-                            }}
-                          >
-                            编辑
-                          </Button>
-                        </Tooltip>
-                      )}
-                      {canInferCatalog && (
-                        <Tooltip title="LLM 推断表级描述">
-                          <Button
-                            size="small"
-                            icon={<ThunderboltOutlined />}
-                            loading={tableInferring}
-                            onClick={handleTableDescInfer}
-                          >
-                            推断
-                          </Button>
-                        </Tooltip>
-                      )}
-                    </Space>
-                  </Space>
-                )}
-              </Descriptions.Item>
-            </Descriptions>
-            <Card title="字段描述" size="small" style={{ marginTop: 16 }}>
-              <SchemaTable
-                columns={schemaColumns}
-                editable={canEditDesc}
-                inferable={canInferCatalog}
-                canInfer={canInferCatalog}
-                onEdit={handleFieldEdit}
-                onInfer={handleFieldInfer}
-                onBatchInfer={handleBatchInfer}
-              />
-            </Card>
-          </>
-        ) : null}
-      </ResizableDrawer>
+                  )}
+                </Descriptions.Item>
+              </Descriptions>
+              <Card title="字段描述" size="small" style={{ marginTop: 16 }}>
+                <SchemaTable
+                  columns={schemaColumns}
+                  editable={canEditDesc}
+                  inferable={canInferCatalog}
+                  canInfer={canInferCatalog}
+                  onEdit={handleFieldEdit}
+                  onInfer={handleFieldInfer}
+                  onBatchInfer={handleBatchInfer}
+                />
+              </Card>
+            </>
+          ) : null}
+        </ResizableDrawer>
+      )}
 
-      {/* 概览指标下钻明细：点击指标数字展示该口径贡献的 per_table 子集，行点击可进一步下钻实体详情 */}
+      {/* 概览指标下钻明细：点击指标数字展示该口径贡献的 per_table 子集。
+          行点击在 full 模式继续下钻治理抽屉；summary 模式引导跳转采集目录治理。 */}
       <DrillDownDrawer
         open={metricDrillOpen}
         title={metricDrillTitle}
@@ -834,10 +871,17 @@ export function DescriptionCoverageTab() {
         rows={metricDrillRows as unknown as Record<string, unknown>[]}
         loading={false}
         onClose={() => setMetricDrillOpen(false)}
-        onRow={(record) => ({
-          onClick: () => openDetail(record.catalog_id as number),
-          style: { cursor: "pointer" },
-        })}
+        onRow={(record) =>
+          isSummary
+            ? {
+                onClick: () => onGovern?.(record.entity_name as string),
+                style: { cursor: "pointer" },
+              }
+            : {
+                onClick: () => openDetail(record.catalog_id as number),
+                style: { cursor: "pointer" },
+              }
+        }
       />
     </div>
   );

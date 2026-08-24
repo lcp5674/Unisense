@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { Catalogs } from "../pages/Catalogs";
 import type { DBCatalog, DataSource } from "../types";
@@ -29,6 +29,9 @@ vi.mock("../api", () => {
     inferColumnDescription: vi.fn(),
     inferDescriptions: vi.fn(),
     updateColumnDescription: vi.fn(),
+    inferTableDescription: vi.fn(),
+    updateTableDescription: vi.fn(),
+    fetchAssetEntityDetail: vi.fn(),
     fetchDescriptionCoverage: vi.fn(),
     listFavorites: vi.fn(),
     addFavorite: vi.fn(),
@@ -37,7 +40,7 @@ vi.mock("../api", () => {
   };
 });
 
-import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, fetchDescriptionCoverage, inferDescriptions, listFavorites } from "../api";
+import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, fetchDescriptionCoverage, fetchAssetEntityDetail, inferDescriptions, updateTableDescription, updateColumnDescription, listFavorites } from "../api";
 
 const mockedList = vi.mocked(listCatalogs);
 const mockedRegister = vi.mocked(registerCatalog);
@@ -99,7 +102,8 @@ const CATALOGS: DBCatalog[] = [
     domain: "sales",
     owner_name: "Alice",
     description: "订单事实表",
-    updated_at: "2026-08-15T10:00:00",
+    // 动态「1 小时前」：相对时间列断言不依赖真实时钟（避免跨 7 天阈值后显示日期导致脆弱）
+    updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
   },
 ];
 
@@ -403,12 +407,264 @@ describe("Catalogs 页面", () => {
       expect(screen.getByText("字段描述覆盖率")).toBeTruthy();
       expect(screen.getByText("缺失字段数")).toBeTruthy();
       expect(screen.getByText("缺表描述")).toBeTruthy();
-      expect(screen.getByText("目录表总数")).toBeTruthy();
+      expect(screen.getByText("表总数")).toBeTruthy();
     });
-    // 覆盖率 40 字段有 16 描述 → 副标题展示 16 / 40 字段有描述
-    expect(screen.getByText("16 / 40 字段有描述")).toBeTruthy();
-    expect(screen.getByText("3 / 10 表已补全")).toBeTruthy();
+    // 覆盖率 40 字段有 16 描述 → 副标题展示 16 / 40 字段有描述（统计卡可下钻）
+    expect(screen.getByText(/16 \/ 40 字段有描述/)).toBeTruthy();
+    expect(screen.getByText(/3 \/ 10 表已补全/)).toBeTruthy();
     expect(fetchDescriptionCoverage).toHaveBeenCalled();
+  });
+
+  it("描述缺失治理面板：统计卡可下钻字段描述覆盖率明细", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("字段描述覆盖率")).toBeTruthy());
+    const card = screen.getByText("字段描述覆盖率").closest(".ant-card") as HTMLElement;
+    fireEvent.click(within(card).getByText("查看明细"));
+    await waitFor(() =>
+      expect(screen.getByText(/字段描述覆盖率明细/)).toBeTruthy(),
+    );
+  });
+
+  it("描述缺失治理面板：主表格按表列缺失字段数，行点击打开治理抽屉", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 2,
+      tables_with_desc: 1,
+      tables_missing_desc: 1,
+      total_fields: 4,
+      fields_with_desc: 2,
+      fields_missing_desc: 2,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+        {
+          catalog_id: 2, entity_name: "dwd_user", source_id: "s2", source_name: "Platform MySQL",
+          entity_type: "TABLE", domain: "platform", sensitivity_level: "CONFIDENTIAL", table_desc: true,
+          description: "用户明细表", description_source: "manual", owner_name: "张三",
+          total_fields: 2, covered_fields: 2, missing_fields: 0,
+          missing_field_names: [], updated_at: "2026-08-14T03:00:00",
+        },
+      ],
+    });
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "ods_order",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: "sig1",
+      schema_summary: [
+        { name: "id", type: "bigint", description: "主键" },
+        { name: "name", type: "varchar" },
+      ],
+      description: null,
+      description_source: null,
+    } as never);
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 治理表格渲染 per_table 行（按表列缺失字段数）
+    await waitFor(() =>
+      expect(screen.getByText("按表列缺失字段数（点击行查看详情并补全）")).toBeTruthy(),
+    );
+    expect(screen.getByText("ods_order")).toBeTruthy();
+    expect(screen.getByText("dwd_user")).toBeTruthy();
+
+    // 行点击 → 治理抽屉（表级编辑/推断入口）
+    fireEvent.click(screen.getByText("ods_order"));
+    await waitFor(() => {
+      expect(screen.getByText("暂无表级描述")).toBeTruthy();
+      expect(screen.getByText("字段描述")).toBeTruthy();
+    });
+    expect(fetchAssetEntityDetail).toHaveBeenCalledWith(1);
+  });
+
+  it("描述缺失治理面板：治理抽屉表级描述编辑保存", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 1,
+      tables_with_desc: 0,
+      tables_missing_desc: 1,
+      total_fields: 2,
+      fields_with_desc: 1,
+      fields_missing_desc: 1,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+      ],
+    });
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "ods_order",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: "sig1",
+      schema_summary: [],
+      description: null,
+      description_source: null,
+    } as never);
+    vi.mocked(updateTableDescription).mockResolvedValue({
+      catalog_id: 1,
+      description: "新表描述",
+      source: "manual",
+      updated_by: 1,
+      updated_at: null,
+    });
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    fireEvent.click(screen.getByText("ods_order"));
+    await waitFor(() => expect(screen.getByText("暂无表级描述")).toBeTruthy());
+
+    // 表级「编辑」按钮（icon 会并入 accessible name，用正则匹配）
+    fireEvent.click(screen.getByRole("button", { name: /编\s*辑/ }));
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+    const textarea = within(drawer).getByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "新表描述" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存表描述" }));
+
+    await waitFor(() => {
+      expect(updateTableDescription).toHaveBeenCalledWith(1, "新表描述");
+    });
+  });
+
+  it("描述缺失治理面板：下钻明细行点击进入治理抽屉（非跳转）", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 2,
+      tables_with_desc: 1,
+      tables_missing_desc: 1,
+      total_fields: 4,
+      fields_with_desc: 2,
+      fields_missing_desc: 2,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+        {
+          catalog_id: 2, entity_name: "dwd_user", source_id: "s2", source_name: "Platform MySQL",
+          entity_type: "TABLE", domain: "platform", sensitivity_level: "CONFIDENTIAL", table_desc: true,
+          description: "用户明细表", description_source: "manual", owner_name: "张三",
+          total_fields: 2, covered_fields: 2, missing_fields: 0,
+          missing_field_names: [], updated_at: "2026-08-14T03:00:00",
+        },
+      ],
+    });
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "ods_order",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: "sig1",
+      schema_summary: [],
+      description: null,
+      description_source: null,
+    } as never);
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 打开「缺表描述明细」抽屉
+    await waitFor(() => expect(screen.getByText("缺表描述")).toBeTruthy());
+    const card = screen.getByText("缺表描述").closest(".ant-card") as HTMLElement;
+    fireEvent.click(within(card).getByText("查看明细"));
+    await waitFor(() => expect(screen.getByText(/缺表描述明细/)).toBeTruthy());
+    const drillDrawer = screen.getByRole("dialog") as HTMLElement;
+    expect(within(drillDrawer).getByText("ods_order")).toBeTruthy();
+
+    // 点击明细行 → full 模式打开治理抽屉（明细抽屉让位关闭）
+    fireEvent.click(within(drillDrawer).getByText("ods_order"));
+    await waitFor(() => expect(screen.getByText("暂无表级描述")).toBeTruthy());
+    expect(fetchAssetEntityDetail).toHaveBeenCalledWith(1);
+    expect(screen.queryByText(/缺表描述明细/)).not.toBeInTheDocument();
+  });
+
+  it("描述缺失治理面板：治理抽屉字段级描述编辑保存", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 1,
+      tables_with_desc: 0,
+      tables_missing_desc: 1,
+      total_fields: 2,
+      fields_with_desc: 1,
+      fields_missing_desc: 1,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+      ],
+    });
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "ods_order",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: "sig1",
+      schema_summary: [{ name: "id", type: "bigint" }],
+      description: null,
+      description_source: null,
+    } as never);
+    vi.mocked(updateColumnDescription).mockResolvedValue({} as never);
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    fireEvent.click(screen.getByText("ods_order"));
+    await waitFor(() => expect(screen.getByText("字段描述")).toBeTruthy());
+    const drawer = screen.getByRole("dialog") as HTMLElement;
+
+    // 字段行内编辑按钮（icon-only、无文字/aria-label）：定位「id」字段行，取该行第一个按钮
+    const fieldRow = within(drawer).getByText("id").closest("tr") as HTMLElement;
+    fireEvent.click(within(fieldRow).getAllByRole("button")[0]);
+    const input = within(fieldRow).getByRole("textbox");
+    fireEvent.change(input, { target: { value: "订单主键" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(updateColumnDescription).toHaveBeenCalledWith(1, "id", "订单主键");
+    });
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

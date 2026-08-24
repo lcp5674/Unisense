@@ -129,7 +129,7 @@ import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL, UNIT_LABEL } from "../utils/enu
 import { formatCnTime } from "../utils/timeCn";
 import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
-import { DescriptionCoverageTab } from "../components/assetmap/DescriptionCoverageTab";
+import { DescriptionCoveragePanel } from "../components/DescriptionCoveragePanel";
 import { DrillDownDrawer } from "../components/assetmap/DrillDownDrawer";
 import { ResizableDrawer } from "../components/ResizableDrawer";
 
@@ -6271,7 +6271,19 @@ export function AssetMap() {
           <FileTextOutlined /> 描述缺失
         </span>
       ),
-      children: <DescriptionCoverageTab />,
+      // summary 模式：只读总览（统计卡 + 明细下钻），治理动作跳转采集目录完成（方案 A）
+      children: (
+        <DescriptionCoveragePanel
+          variant="summary"
+          onGovern={(entityName) =>
+            navigate(
+              entityName
+                ? `/catalogs?focus=${encodeURIComponent(entityName)}&from=资产地图`
+                : `/catalogs?from=资产地图`,
+            )
+          }
+        />
+      ),
     },
     {
       key: "health",

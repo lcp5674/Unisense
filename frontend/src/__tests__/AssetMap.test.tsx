@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within, fireEvent, act } from "@testing-library/react";
+import { render, screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { BrowserRouter, MemoryRouter, Routes, Route } from "react-router-dom";
 import { AssetMap } from "../pages/AssetMap";
@@ -132,7 +132,6 @@ import {
   fetchAssetChanges,
   fetchAssetMyAssets,
   fetchDescriptionCoverage,
-  updateTableDescription,
   inferTableDescription,
   assignAssetOwner,
   reclassifyAssetSensitivity,
@@ -1619,7 +1618,7 @@ describe("AssetMap", () => {
     expect(screen.getByText(/Bob 指标明细（状态：PUBLISHED）/)).toBeInTheDocument();
   });
 
-  it("description coverage tab shows stats and per-table rows", async () => {
+  it("description coverage tab (summary) shows stats and 前往采集目录治理 button", async () => {
     const user = userEvent.setup();
     renderAssetMap();
 
@@ -1628,10 +1627,27 @@ describe("AssetMap", () => {
 
     await waitFor(() => {
       expect(screen.getByText("字段描述覆盖率")).toBeInTheDocument();
-      expect(screen.getByText("ods_order")).toBeInTheDocument();
-      expect(screen.getByText("dwd_user")).toBeInTheDocument();
+      expect(screen.getByText("前往采集目录治理")).toBeInTheDocument();
       expect(fetchDescriptionCoverage).toHaveBeenCalled();
     });
+    // summary 只读总览：治理表格不在此渲染（按表列缺失字段数），治理动作引导跳转采集目录
+    expect(
+      screen.queryByText("按表列缺失字段数（点击行查看详情并补全）"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("description coverage (summary) 前往采集目录治理按钮：跳转 /catalogs 并携带来源", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
+    await user.click(screen.getByText("描述缺失"));
+    await waitFor(() => expect(screen.getByText("前往采集目录治理")).toBeInTheDocument());
+
+    await user.click(screen.getByText("前往采集目录治理"));
+    await waitFor(() => expect(window.location.pathname).toBe("/catalogs"));
+    const qs = new URLSearchParams(window.location.search);
+    expect(qs.get("from")).toBe("资产地图");
   });
 
   it("description coverage 字段描述覆盖率明细：展示覆盖率进度列", async () => {
@@ -1717,52 +1733,8 @@ describe("AssetMap", () => {
     expect(within(drawer).getByText("2026年8月14日 10:30")).toBeInTheDocument();
   });
 
-  it("description coverage row click opens detail drawer with table description", async () => {
+  it("description coverage (summary) 下钻明细行点击：跳转采集目录治理（focus=表名）", async () => {
     const user = userEvent.setup();
-    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
-      id: 1,
-      entity_name: "ods_order",
-      entity_type: "TABLE",
-      source_id: "s1",
-      sensitivity_level: "INTERNAL",
-      owner_id: null,
-      schema_incomplete: false,
-      content_signature: "sig1",
-      schema_summary: [
-        { name: "id", type: "bigint", description: "主键" },
-        { name: "name", type: "varchar" },
-      ],
-      description: "订单明细表",
-      description_source: "manual",
-    } as any);
-    renderAssetMap();
-
-    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
-    await user.click(screen.getByText("描述缺失"));
-    await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
-
-    await user.click(screen.getByText("ods_order"));
-    await waitFor(() => {
-      expect(screen.getByText(/订单明细表/)).toBeInTheDocument();
-      expect(screen.getByText("主键")).toBeInTheDocument();
-    });
-  });
-
-  it("description coverage 下钻明细行点击：打开实体详情并关闭明细抽屉（防覆盖）", async () => {
-    const user = userEvent.setup();
-    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
-      id: 1,
-      entity_name: "ods_order",
-      entity_type: "TABLE",
-      source_id: "s1",
-      sensitivity_level: "INTERNAL",
-      owner_id: null,
-      schema_incomplete: false,
-      content_signature: "sig1",
-      schema_summary: [{ name: "id", type: "bigint", description: "主键" }],
-      description: "订单明细表",
-      description_source: "manual",
-    } as any);
     renderAssetMap();
 
     await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
@@ -1776,114 +1748,13 @@ describe("AssetMap", () => {
     const drillDrawer = screen.getByRole("dialog") as HTMLElement;
     expect(within(drillDrawer).getByText("ods_order")).toBeInTheDocument();
 
-    // 点击明细中的行 → 打开实体详情抽屉；明细抽屉应关闭（让位，避免详情被覆盖）
+    // summary 模式：点击明细中的行 → 跳转采集目录定位到该表治理，不再本页打开详情抽屉
     await user.click(within(drillDrawer).getByText("ods_order"));
-
-    await waitFor(() => {
-      expect(fetchAssetEntityDetail).toHaveBeenCalled();
-      expect(screen.getByText(/订单明细表/)).toBeInTheDocument();
-    });
-    // 明细抽屉已关闭（标题不再渲染），详情抽屉成为唯一可见抽屉
-    expect(screen.queryByText(/缺表描述明细/)).not.toBeInTheDocument();
-  });
-
-  it("description coverage edit table description saves", async () => {
-    const user = userEvent.setup();
-    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
-      id: 1,
-      entity_name: "ods_order",
-      entity_type: "TABLE",
-      source_id: "s1",
-      sensitivity_level: "INTERNAL",
-      owner_id: null,
-      schema_incomplete: false,
-      content_signature: "sig1",
-      schema_summary: [],
-      description: null,
-      description_source: null,
-    } as any);
-    vi.mocked(updateTableDescription).mockResolvedValue({
-      catalog_id: 1,
-      description: "新表描述",
-      source: "manual",
-      updated_by: 1,
-      updated_at: null,
-    });
-    renderAssetMap();
-
-    await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
-    await user.click(screen.getByText("描述缺失"));
-    await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
-    await user.click(screen.getByText("ods_order"));
-    await waitFor(() => expect(screen.getByText("暂无表级描述")).toBeInTheDocument());
-
-    await user.click(screen.getByRole("button", { name: /编辑/ }));
-    const textarea = screen.getByRole("textbox");
-    await user.clear(textarea);
-    await user.type(textarea, "新表描述");
-    await user.click(screen.getByRole("button", { name: "保存表描述" }));
-
-    await waitFor(() => {
-      expect(updateTableDescription).toHaveBeenCalledWith(1, "新表描述");
-    });
-  });
-
-  it("描述缺失 tab：推断进行中（退出再进）二次点击被模块级 in-flight 拦截", async () => {
-    const user = userEvent.setup();
-    let resolveInfer: (v: any) => void = () => {};
-    vi.mocked(inferTableDescription).mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolveInfer = resolve;
-        }),
-    );
-    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
-      id: 1,
-      entity_name: "ods_order",
-      entity_type: "TABLE",
-      source_id: "s1",
-      sensitivity_level: "INTERNAL",
-      owner_id: null,
-      schema_incomplete: false,
-      content_signature: "sig1",
-      schema_summary: [],
-      description: null,
-      description_source: null,
-    } as any);
-
-    try {
-      // 第一次进入：打开详情抽屉并触发表级推断（挂起，模拟 LLM 慢调用）
-      const first = renderAssetMap();
-      await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
-      await user.click(screen.getByText("描述缺失"));
-      await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
-      await user.click(screen.getByText("ods_order"));
-      await waitFor(() => expect(screen.getByText("暂无表级描述")).toBeInTheDocument());
-      await user.click(screen.getByRole("button", { name: /推\s*断/ }));
-      await waitFor(() => expect(inferTableDescription).toHaveBeenCalledTimes(1));
-
-      // 模拟退出页面：卸载组件（模块级 inferInflight 不随组件卸载重置）
-      first.unmount();
-
-      // 重新进入：再次触发表级推断，应被模块级 Map 拦截，不再发第二次请求
-      renderAssetMap();
-      await waitFor(() => expect(screen.getByText("描述缺失")).toBeInTheDocument());
-      await user.click(screen.getByText("描述缺失"));
-      await waitFor(() => expect(screen.getByText("ods_order")).toBeInTheDocument());
-      await user.click(screen.getByText("ods_order"));
-      await waitFor(() => expect(screen.getByText("暂无表级描述")).toBeInTheDocument());
-      await user.click(screen.getByRole("button", { name: /推\s*断/ }));
-
-      await waitFor(() => {
-        expect(inferTableDescription).toHaveBeenCalledTimes(1); // 仍为 1 次，第二次被拦截
-        expect(screen.getByText("该表的表级推断正在进行中，请稍候")).toBeInTheDocument();
-      });
-    } finally {
-      // 清理：resolve 挂起的推断，触发模块级 Map 清理，避免污染后续测试
-      await act(async () => {
-        resolveInfer({});
-      });
-    }
+    await waitFor(() => expect(window.location.pathname).toBe("/catalogs"));
+    const qs = new URLSearchParams(window.location.search);
+    expect(qs.get("focus")).toBe("ods_order");
+    expect(qs.get("from")).toBe("资产地图");
+    expect(fetchAssetEntityDetail).not.toHaveBeenCalled();
   });
 
   it("数据表行设置：单条重分类敏感度调用 reclassifyAssetSensitivity", async () => {
