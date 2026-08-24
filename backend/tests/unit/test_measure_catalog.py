@@ -65,6 +65,8 @@ def _m(measure_code: str = "pay_amt", **kw) -> MeasureCatalog:
         measure_format=kw.get("measure_format", "AMOUNT"),
         default_unit=kw.get("default_unit", "元"),
         default_decimal_places=kw.get("default_decimal_places", 2),
+        category=kw.get("category", "OTHER"),
+        stat_caliber=kw.get("stat_caliber"),
         domain=kw.get("domain", "sales"),
         owner_id=kw.get("owner_id", 1),
         status=kw.get("status", "DRAFT"),
@@ -169,6 +171,54 @@ class TestMeasureService:
             await svc.create_measure(
                 MeasureCreate(measure_code="pay_amt", name="x", domain="y")
             )
+
+    async def test_create_defaults_category_other(self) -> None:
+        """未指定分类时默认 OTHER（度量分类新增字段，存量语义不破坏）。"""
+        svc, repo = await _svc()
+        out = await svc.create_measure(
+            MeasureCreate(measure_code="m", name="度量", domain="outpatient")
+        )
+        assert out.category == "OTHER"
+        assert out.stat_caliber is None
+
+    async def test_create_persists_category_and_caliber(self) -> None:
+        """创建时透传度量分类与统计口径。"""
+        svc, repo = await _svc()
+        out = await svc.create_measure(
+            MeasureCreate(
+                measure_code="m",
+                name="门诊挂号人次",
+                domain="outpatient",
+                category="FLOW",
+                stat_caliber="挂号记录数去重后计数",
+            )
+        )
+        assert out.category == "FLOW"
+        assert out.stat_caliber == "挂号记录数去重后计数"
+
+    async def test_create_rejects_invalid_category(self) -> None:
+        from pydantic import ValidationError
+
+        svc, repo = await _svc()
+        with pytest.raises(ValidationError):
+            MeasureCreate(measure_code="m", name="x", domain="y", category="BOGUS")
+
+    async def test_update_category_and_caliber(self) -> None:
+        svc, repo = await _svc()
+        m = _m("amt", category="OTHER")
+        repo.get = AsyncMock(return_value=m)
+        await svc.update_measure(
+            "amt",
+            MeasureUpdate(category="DRUG", stat_caliber="处方明细按开方日期汇总"),
+        )
+        assert m.category == "DRUG"
+        assert m.stat_caliber == "处方明细按开方日期汇总"
+
+    async def test_update_rejects_invalid_category(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            MeasureUpdate(category="BOGUS")
 
     async def test_create_rejects_invalid_format(self) -> None:
         from pydantic import ValidationError

@@ -11,9 +11,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.models.measure_catalog import MeasureFormat
+from app.models.measure_catalog import MeasureCategory, MeasureFormat
 
 _VALID_FORMATS = {e.value for e in MeasureFormat}
+_VALID_CATEGORIES = {e.value for e in MeasureCategory}
 
 #: 度量格式 → 默认单位/默认小数位（PRD FR-02-08 单位与默认值联动）
 _FORMAT_DEFAULTS: dict[str, tuple[str, int | None]] = {
@@ -41,6 +42,10 @@ class MeasureCreate(BaseModel):
     )
     source_system: list[str] | None = None
     synonyms: list[str] | None = None
+    category: str = Field(
+        default=MeasureCategory.OTHER.value, description="度量分类（FLOW/FEE/DRUG/...）"
+    )
+    stat_caliber: str | None = Field(default=None, max_length=1000, description="统计口径")
     domain: str = Field(..., max_length=64)
     # PLAT-2: owner_id 允许客户端省略，服务端以认证身份覆盖（防越权指定责任人）。
     owner_id: int | None = None
@@ -50,6 +55,13 @@ class MeasureCreate(BaseModel):
     def _name_not_blank(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("度量名称不能为空")
+        return v
+
+    @field_validator("category")
+    @classmethod
+    def _category_valid(cls, v: str) -> str:
+        if v not in _VALID_CATEGORIES:
+            raise ValueError(f"未知度量分类: {v}（须为 {sorted(_VALID_CATEGORIES)}）")
         return v
 
     @field_validator("measure_format")
@@ -88,6 +100,8 @@ class MeasureUpdate(BaseModel):
     default_decimal_places: int | None = Field(None, ge=0, le=10)
     source_system: list[str] | None = None
     synonyms: list[str] | None = None
+    category: str | None = None
+    stat_caliber: str | None = Field(None, max_length=1000)
     domain: str | None = Field(None, max_length=64)
 
     @field_validator("measure_format")
@@ -95,6 +109,13 @@ class MeasureUpdate(BaseModel):
     def _format_valid(cls, v: str | None) -> str | None:
         if v is not None and v not in _VALID_FORMATS:
             raise ValueError(f"未知度量格式: {v}（须为 {sorted(_VALID_FORMATS)}）")
+        return v
+
+    @field_validator("category")
+    @classmethod
+    def _category_valid(cls, v: str | None) -> str | None:
+        if v is not None and v not in _VALID_CATEGORIES:
+            raise ValueError(f"未知度量分类: {v}（须为 {sorted(_VALID_CATEGORIES)}）")
         return v
 
 
@@ -108,6 +129,8 @@ class MeasureResponse(BaseModel):
     default_decimal_places: int | None = None
     source_system: list[str] | None = None
     synonyms: list[str] | None = None
+    category: str
+    stat_caliber: str | None = None
     domain: str
     owner_id: int
     status: str
@@ -126,6 +149,8 @@ class MeasureResponse(BaseModel):
             default_decimal_places=getattr(m, "default_decimal_places", None),
             source_system=getattr(m, "source_system", None),
             synonyms=getattr(m, "synonyms", None),
+            category=getattr(m, "category", "OTHER"),
+            stat_caliber=getattr(m, "stat_caliber", None),
             domain=m.domain,
             owner_id=m.owner_id,
             status=m.status,

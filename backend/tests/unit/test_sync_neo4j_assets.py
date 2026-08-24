@@ -28,80 +28,80 @@ from scripts.sync_neo4j_assets import (  # noqa: E402
 def test_parse_metric_edges_source_tables() -> None:
     """上游源表 -> 表派生指标边（source=表, target=指标）。"""
     edges = parse_metric_edges(
-        "sales_e2e_gmv_day",
-        {"source_tables": ["ods_e2e_order"]},
+        "outp_e2e_fee_day",
+        {"source_tables": ["ods_his_receipt"]},
     )
     assert edges == [
-        ("table:ods_e2e_order", "metric:sales_e2e_gmv_day", "DERIVED_FROM")
+        ("table:ods_his_receipt", "metric:outp_e2e_fee_day", "DERIVED_FROM")
     ]
 
 
 def test_parse_metric_edges_dependencies() -> None:
     """derived 指标依赖 -> 指标间依赖边（source=依赖指标, target=本指标）。"""
     edges = parse_metric_edges(
-        "sales_e2e_unitprice_day",
-        {"dependencies": ["sales_e2e_gmv_day", "sales_e2e_ordercnt_day"]},
+        "outp_e2e_avgfee_day",
+        {"dependencies": ["outp_e2e_fee_day", "outp_e2e_visit_day"]},
     )
     assert edges == [
-        ("metric:sales_e2e_gmv_day", "metric:sales_e2e_unitprice_day", "DERIVED_FROM"),
-        ("metric:sales_e2e_ordercnt_day", "metric:sales_e2e_unitprice_day", "DERIVED_FROM"),
+        ("metric:outp_e2e_fee_day", "metric:outp_e2e_avgfee_day", "DERIVED_FROM"),
+        ("metric:outp_e2e_visit_day", "metric:outp_e2e_avgfee_day", "DERIVED_FROM"),
     ]
 
 
 def test_parse_metric_edges_source_table() -> None:
     """落地物化表 -> 指标产出表边（source=指标, target=表）。"""
     edges = parse_metric_edges(
-        "sales_e2e_gmv_day",
-        {"source_table": "dws_metric_sales_e2e_gmv_day"},
+        "outp_e2e_fee_day",
+        {"source_table": "dws_metric_outp_e2e_fee_day"},
     )
     assert edges == [
-        ("metric:sales_e2e_gmv_day", "table:dws_metric_sales_e2e_gmv_day", "DERIVED_FROM")
+        ("metric:outp_e2e_fee_day", "table:dws_metric_outp_e2e_fee_day", "DERIVED_FROM")
     ]
 
 
 def test_parse_metric_edges_full() -> None:
     """三类血缘边一次性解析（顺序：上游表、依赖指标、落地表）。"""
     edges = parse_metric_edges(
-        "sales_e2e_unitprice_day",
+        "outp_e2e_avgfee_day",
         {
-            "source_tables": ["ads_sales_e2e_gmv_day"],
-            "dependencies": ["sales_e2e_gmv_day"],
-            "source_table": "ads_sales_e2e_gmv_day",
+            "source_tables": ["ads_outp_e2e_fee_day"],
+            "dependencies": ["outp_e2e_fee_day"],
+            "source_table": "ads_outp_e2e_fee_day",
         },
     )
     assert edges == [
-        ("table:ads_sales_e2e_gmv_day", "metric:sales_e2e_unitprice_day", "DERIVED_FROM"),
-        ("metric:sales_e2e_gmv_day", "metric:sales_e2e_unitprice_day", "DERIVED_FROM"),
-        ("metric:sales_e2e_unitprice_day", "table:ads_sales_e2e_gmv_day", "DERIVED_FROM"),
+        ("table:ads_outp_e2e_fee_day", "metric:outp_e2e_avgfee_day", "DERIVED_FROM"),
+        ("metric:outp_e2e_fee_day", "metric:outp_e2e_avgfee_day", "DERIVED_FROM"),
+        ("metric:outp_e2e_avgfee_day", "table:ads_outp_e2e_fee_day", "DERIVED_FROM"),
     ]
 
 
 def test_parse_metric_edges_downstream_tables() -> None:
     """下游使用表 -> 指标产出表边（source=指标, target=表，与落地表同向）。"""
     edges = parse_metric_edges(
-        "sales_e2e_gmv_day",
-        {"downstream_tables": ["ads.gmv_report", "dws.gmv_copy"]},
+        "outp_e2e_fee_day",
+        {"downstream_tables": ["ads.outp_fee_report", "dws.outp_fee_copy"]},
     )
     assert edges == [
-        ("metric:sales_e2e_gmv_day", "table:ads.gmv_report", "DERIVED_FROM"),
-        ("metric:sales_e2e_gmv_day", "table:dws.gmv_copy", "DERIVED_FROM"),
+        ("metric:outp_e2e_fee_day", "table:ads.outp_fee_report", "DERIVED_FROM"),
+        ("metric:outp_e2e_fee_day", "table:dws.outp_fee_copy", "DERIVED_FROM"),
     ]
 
 
 def test_parse_metric_edges_none_or_empty() -> None:
     """definition 为 None / 空字典 / 缺键时返回空列表。"""
-    assert parse_metric_edges("sales_e2e_gmv_day", None) == []
-    assert parse_metric_edges("sales_e2e_gmv_day", {}) == []
-    assert parse_metric_edges("sales_e2e_gmv_day", {"measures": []}) == []
+    assert parse_metric_edges("outp_e2e_fee_day", None) == []
+    assert parse_metric_edges("outp_e2e_fee_day", {}) == []
+    assert parse_metric_edges("outp_e2e_fee_day", {"measures": []}) == []
 
 
 def test_parse_metric_edges_ignores_non_string() -> None:
     """非字符串元素（脏数据）被忽略，不产生边。"""
     edges = parse_metric_edges(
-        "sales_e2e_gmv_day",
-        {"source_tables": ["ods_e2e_order", "", None, 42]},
+        "outp_e2e_fee_day",
+        {"source_tables": ["ods_his_receipt", "", None, 42]},
     )
-    assert edges == [("table:ods_e2e_order", "metric:sales_e2e_gmv_day", "DERIVED_FROM")]
+    assert edges == [("table:ods_his_receipt", "metric:outp_e2e_fee_day", "DERIVED_FROM")]
 
 
 # ---- build_metric_nodes ----
@@ -110,37 +110,37 @@ def test_build_metric_nodes_attributes() -> None:
     """指标节点属性：id=metric:{code}，属性与 MySQL 对齐。"""
     nodes = build_metric_nodes(
         {
-            "sales_e2e_gmv_day": {
+            "outp_e2e_fee_day": {
                 "type": "metric",
-                "label": "sales_e2e_gmv_day",
+                "label": "outp_e2e_fee_day",
                 "pii": False,
-                "domain": "sales",
+                "domain": "outpatient",
                 "owner": "1",
             },
-            "user_e2e_piiuser_day": {
+            "outp_e2e_piipatient_day": {
                 "type": "metric",
-                "label": "user_e2e_piiuser_day",
+                "label": "outp_e2e_piipatient_day",
                 "pii": True,
-                "domain": "user",
+                "domain": "patient",
                 "owner": None,
             },
         }
     )
     assert nodes == [
         {
-            "id": "metric:sales_e2e_gmv_day",
+            "id": "metric:outp_e2e_fee_day",
             "type": "metric",
-            "label": "sales_e2e_gmv_day",
+            "label": "outp_e2e_fee_day",
             "pii": False,
-            "domain": "sales",
+            "domain": "outpatient",
             "owner": "1",
         },
         {
-            "id": "metric:user_e2e_piiuser_day",
+            "id": "metric:outp_e2e_piipatient_day",
             "type": "metric",
-            "label": "user_e2e_piiuser_day",
+            "label": "outp_e2e_piipatient_day",
             "pii": True,
-            "domain": "user",
+            "domain": "patient",
             "owner": None,
         },
     ]
@@ -158,16 +158,16 @@ def test_build_metric_nodes_sorted_and_empty() -> None:
 def test_filter_metric_edges_keeps_existing_table_only() -> None:
     """表端在 existing_tables 的边保留，不在的丢弃；metric-metric 边始终保留。"""
     edges = [
-        ("table:ods_e2e_order", "metric:sales_e2e_gmv_day", "DERIVED_FROM"),
-        ("table:ghost_table", "metric:sales_e2e_gmv_day", "DERIVED_FROM"),
-        ("metric:sales_e2e_gmv_day", "table:dws_metric_sales_e2e_gmv_day", "DERIVED_FROM"),
-        ("metric:sales_e2e_gmv_day", "metric:sales_e2e_unitprice_day", "DERIVED_FROM"),
+        ("table:ods_his_receipt", "metric:outp_e2e_fee_day", "DERIVED_FROM"),
+        ("table:ghost_table", "metric:outp_e2e_fee_day", "DERIVED_FROM"),
+        ("metric:outp_e2e_fee_day", "table:dws_metric_outp_e2e_fee_day", "DERIVED_FROM"),
+        ("metric:outp_e2e_fee_day", "metric:outp_e2e_avgfee_day", "DERIVED_FROM"),
     ]
-    existing = {"table:ods_e2e_order", "table:dws_metric_sales_e2e_gmv_day"}
+    existing = {"table:ods_his_receipt", "table:dws_metric_outp_e2e_fee_day"}
     assert filter_metric_edges(edges, existing) == [
-        ("table:ods_e2e_order", "metric:sales_e2e_gmv_day", "DERIVED_FROM"),
-        ("metric:sales_e2e_gmv_day", "table:dws_metric_sales_e2e_gmv_day", "DERIVED_FROM"),
-        ("metric:sales_e2e_gmv_day", "metric:sales_e2e_unitprice_day", "DERIVED_FROM"),
+        ("table:ods_his_receipt", "metric:outp_e2e_fee_day", "DERIVED_FROM"),
+        ("metric:outp_e2e_fee_day", "table:dws_metric_outp_e2e_fee_day", "DERIVED_FROM"),
+        ("metric:outp_e2e_fee_day", "metric:outp_e2e_avgfee_day", "DERIVED_FROM"),
     ]
 
 

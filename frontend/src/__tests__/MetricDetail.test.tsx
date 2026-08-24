@@ -123,7 +123,7 @@ const metric: MetricResponse = {
   id: 1,
   metric_code: "sales_gmv_sum_d",
   name: "销售 GMV",
-  domain: "sales",
+  domain: "outpatient",
   type: "atomic",
   // OneData 原子层：关联逻辑度量（度量目录）
   measure_id: 1,
@@ -180,7 +180,7 @@ function renderDetail(initialEntry: { pathname: string; state?: { from?: string 
         <Route
           path="/detail/:code"
           element={
-            <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}>
+            <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "outpatient", org_id: 1 }}>
               <MetricDetail />
             </PermissionProvider>
           }
@@ -217,7 +217,7 @@ describe("MetricDetail", () => {
       username: "zhangsan",
       display_name: "张三",
       role: "metric_owner",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     mockedFavorites.mockResolvedValue([]);
@@ -229,7 +229,7 @@ describe("MetricDetail", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create", "metric:edit", "metric:deprecate", "catalog:view", "metric:infer-description"],
       granted_domains: [],
@@ -442,19 +442,19 @@ describe("MetricDetail", () => {
   it("仲裁作废指标（METRIC_ARCHIVED）直访时展示醒目引导 + 历史详情并可跳转权威指标", async () => {
     localStorage.removeItem("unisense:archived_banner_dismissed");
     const err = Object.assign(
-      new UnisenseApiError("指标已因口径裁决作废: sales_e2e_conflictb_day", "METRIC_ARCHIVED", 404, "test-trace"),
+      new UnisenseApiError("指标已因口径裁决作废: outp_e2e_conflictb_day", "METRIC_ARCHIVED", 404, "test-trace"),
       {
         code: "METRIC_ARCHIVED",
         codeZh: "该指标已因口径裁决作废，请查看权威指标",
         detail: {
-          metric_code: "sales_e2e_conflictb_day",
-          successor_code: "sales_e2e_conflicta_day",
+          metric_code: "outp_e2e_conflictb_day",
+          successor_code: "outp_e2e_conflicta_day",
           arbitration_mark: {
             status: "defeated",
             conflict_id: "CF-ABC",
             decision: "merge",
             ruled_at: "2026-08-15T04:00:00Z",
-            opposite_code: "sales_e2e_conflicta_day",
+            opposite_code: "outp_e2e_conflicta_day",
           },
         },
       },
@@ -462,24 +462,24 @@ describe("MetricDetail", () => {
     mockedGetMetric.mockRejectedValue(err);
     // 作废历史详情（供追溯面板）
     mockedFetchArchived.mockResolvedValue({
-      metric: { ...metric, metric_code: "sales_e2e_conflictb_day", name: "E2E 冲突指标 B" },
-      successor_code: "sales_e2e_conflicta_day",
+      metric: { ...metric, metric_code: "outp_e2e_conflictb_day", name: "门诊冲突指标 B" },
+      successor_code: "outp_e2e_conflicta_day",
       arbitration_mark: { decision: "merge" },
     });
-    renderDetail({ pathname: "/detail/sales_e2e_conflictb_day" });
+    renderDetail({ pathname: "/detail/outp_e2e_conflictb_day" });
 
     // 醒目引导（warning）而非裸「指标不存在」
-    expect(await screen.findByRole("button", { name: /sales_e2e_conflicta_day/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /outp_e2e_conflicta_day/ })).toBeInTheDocument();
     expect(screen.queryByText("指标不存在")).not.toBeInTheDocument();
     // 历史详情面板展示作废指标详情
     expect(await screen.findByText("作废指标历史详情（仅供追溯）")).toBeInTheDocument();
-    expect(screen.getByText("E2E 冲突指标 B")).toBeInTheDocument();
+    expect(screen.getByText("门诊冲突指标 B")).toBeInTheDocument();
     // 首次进入弹出醒目引导（标题「指标已作废」——page-head + Modal 两处）
     expect(screen.getAllByText("指标已作废").length).toBeGreaterThan(0);
     // 权威指标跳转按钮 → 点击后以新 code 重新拉取详情
-    const jump = screen.getByRole("button", { name: /sales_e2e_conflicta_day/ });
+    const jump = screen.getByRole("button", { name: /outp_e2e_conflicta_day/ });
     fireEvent.click(jump);
-    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalledWith("sales_e2e_conflicta_day"));
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalledWith("outp_e2e_conflicta_day"));
   });
 
   it("废弃指标显示「重新提交评审」，提交后走重评审闭环（DEPRECATED→REVIEW，TD §13）", async () => {
@@ -504,7 +504,7 @@ describe("MetricDetail", () => {
       expect(mockedSubmitReview).toHaveBeenCalledWith("sales_gmv_sum_d", "提交评审", {
         reviewer_id: null,
         reviewer_type: null,
-        reviewer_domain: "sales",
+        reviewer_domain: "outpatient",
       }),
     );
   });
@@ -523,7 +523,7 @@ describe("MetricDetail", () => {
             path="/detail/:code"
             element={
               <PermissionProvider
-                user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}
+                user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "outpatient", org_id: 1 }}
               >
                 <MetricDetail />
               </PermissionProvider>
@@ -641,7 +641,7 @@ describe("MetricDetail", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create", "metric:edit", "dict:create"],
       granted_domains: [],
@@ -692,7 +692,7 @@ describe("MetricDetail", () => {
       username: "reviewer",
       display_name: "评审人",
       role: "reviewer",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     } as any);
     renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
@@ -779,7 +779,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role,
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions,
       granted_domains: [],
@@ -794,7 +794,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
           <Route
             path="/detail/:code"
             element={
-              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role, domain: "sales", org_id: 1 }}>
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role, domain: "outpatient", org_id: 1 }}>
                 <MetricDetail />
               </PermissionProvider>
             }
@@ -872,7 +872,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       username: "u",
       display_name: "U",
       role: "metric_owner",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     const reviewSpy = vi.fn().mockResolvedValue(undefined);
@@ -899,7 +899,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       username: "u",
       display_name: "U",
       role: "metric_owner",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     mockedGetMetric.mockResolvedValue({
@@ -949,7 +949,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       username: "zhangsan",
       display_name: "张三",
       role: "metric_owner",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     mockedGetMetric.mockResolvedValue({ ...metric, status: "EXPERIMENTAL", pii_flag: false });
@@ -976,7 +976,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       username: "zhangsan",
       display_name: "张三",
       role: "metric_owner",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     mockedGetMetric.mockResolvedValue({ ...metric, status: "EXPERIMENTAL", pii_flag: false });
@@ -1002,7 +1002,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       username: "zhangsan",
       display_name: "张三",
       role: "metric_owner",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     vi.mocked(listTerms).mockResolvedValue({
@@ -1012,7 +1012,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
           term_code: "CJ_AMT",
           name: "成交金额",
           definition: "订单成交金额",
-          domain: "sales",
+          domain: "outpatient",
           synonyms: [],
           boundary: null,
           status: "PUBLISHED",
@@ -1051,7 +1051,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
           <Route
             path="/detail/:code"
             element={
-              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: "sales", org_id: 1 }}>
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "custom", domain: "outpatient", org_id: 1 }}>
                 <MetricDetail />
               </PermissionProvider>
             }
@@ -1091,7 +1091,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:infer-description", "metric:edit"],
       granted_domains: [],
@@ -1106,7 +1106,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
           <Route
             path="/detail/:code"
             element={
-              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}>
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "outpatient", org_id: 1 }}>
                 <MetricDetail />
               </PermissionProvider>
             }
@@ -1139,7 +1139,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:edit"],
       granted_domains: [],
@@ -1154,7 +1154,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
           <Route
             path="/detail/:code"
             element={
-              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}>
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "outpatient", org_id: 1 }}>
                 <MetricDetail />
               </PermissionProvider>
             }
@@ -1206,7 +1206,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       username: "admin",
       display_name: "管理员",
       role: "compliance_officer",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     mockedGetMetric.mockResolvedValue(metric);
@@ -1226,7 +1226,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       username: "zhangsan",
       display_name: "张三",
       role: "metric_owner",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     mockedGetMetric.mockResolvedValue({ ...metric, pii_flag: false, description: "原描述" });
@@ -1258,7 +1258,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
           <Route
             path="/detail/:code"
             element={
-              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}>
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "outpatient", org_id: 1 }}>
                 <MetricDetail />
               </PermissionProvider>
             }
@@ -1287,7 +1287,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       username: "zhangsan",
       display_name: "张三",
       role: "metric_owner",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     // pii_flag=true 保持默认：metric_owner 属非敏感角色 → piiMasked=true
@@ -1313,7 +1313,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       username: "zhangsan",
       display_name: "张三",
       role: "metric_owner",
-      domain: "sales",
+      domain: "outpatient",
       org_id: 1,
     });
     mockedFavorites.mockResolvedValue([]);
@@ -1325,7 +1325,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1366,12 +1366,12 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedListVersions.mockResolvedValue([]);
     mockedDictItems.mockResolvedValue([]);
     mockedDimensions.mockResolvedValue({
-      items: [{ id: 1, dim_code: "dim_channel", name: "渠道", domain: "sales", type: "SCD1", description: "渠道维度", owner_id: 1, status: "PUBLISHED", created_at: "", updated_at: "" }],
+      items: [{ id: 1, dim_code: "dim_channel", name: "渠道", domain: "outpatient", type: "SCD1", description: "渠道维度", owner_id: 1, status: "PUBLISHED", created_at: "", updated_at: "" }],
       total: 1,
     });
     mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1380,7 +1380,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1424,7 +1424,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       page_size: 100,
     });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1433,7 +1433,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1477,7 +1477,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       page_size: 20,
     });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1486,7 +1486,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1540,7 +1540,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedDimensions.mockResolvedValue({ items: [], total: 0 });
     mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1549,7 +1549,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1602,7 +1602,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedDimensions.mockResolvedValue({ items: [], total: 0 });
     mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1611,7 +1611,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1668,7 +1668,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedDimensions.mockResolvedValue({ items: [], total: 0 });
     mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1677,7 +1677,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1725,7 +1725,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedDimensions.mockResolvedValue({ items: [], total: 0 });
     mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1734,7 +1734,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1785,7 +1785,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedDimensions.mockResolvedValue({ items: [], total: 0 });
     mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1794,7 +1794,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1837,7 +1837,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedDimensions.mockResolvedValue({ items: [], total: 0 });
     mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1846,7 +1846,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],
@@ -1887,12 +1887,12 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedListVersions.mockResolvedValue([]);
     mockedDictItems.mockResolvedValue([]);
     mockedDimensions.mockResolvedValue({
-      items: [{ id: 1, dim_code: "dim_channel", name: "渠道", domain: "sales", type: "SCD1", description: "渠道维度", owner_id: 1, status: "PUBLISHED", created_at: "", updated_at: "" }],
+      items: [{ id: 1, dim_code: "dim_channel", name: "渠道", domain: "outpatient", type: "SCD1", description: "渠道维度", owner_id: 1, status: "PUBLISHED", created_at: "", updated_at: "" }],
       total: 1,
     });
     mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
     mockedDomainTree.mockResolvedValue([]);
-    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "sales", org_id: 1 });
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     mockedUsers.mockResolvedValue([]);
@@ -1901,7 +1901,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedMyPerms.mockResolvedValue({
       user_id: 1,
       role: "metric_owner",
-      home_domain: "sales",
+      home_domain: "outpatient",
       allowed_actions: ["read", "write"],
       ui_actions: ["metric:create"],
       granted_domains: [],

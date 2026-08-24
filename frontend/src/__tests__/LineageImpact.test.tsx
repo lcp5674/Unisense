@@ -60,16 +60,16 @@ describe("LineageImpact", () => {
   });
 
   it("查询时以 metric:{code} 前缀节点调用（对齐血缘图节点约定，避免裸 code 查空）", async () => {
-    render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    render(<LineageImpact metricCode="outp_e2e_fee_day" />);
     await waitFor(() => {
       expect(mockedImpact).toHaveBeenCalledWith(
-        expect.objectContaining({ node: "metric:sales_e2e_gmv_day", direction: "downstream" }),
+        expect.objectContaining({ node: "metric:outp_e2e_fee_day", direction: "downstream" }),
       );
     });
   });
 
   it("切换上游方向时同样携带 metric: 前缀", async () => {
-    const { container } = render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    const { container } = render(<LineageImpact metricCode="outp_e2e_fee_day" />);
     await waitFor(() => expect(mockedImpact).toHaveBeenCalled());
     // 点击「上游依赖」分段
     const upstreamSeg = Array.from(container.querySelectorAll(".ant-segmented-item")).find(
@@ -78,7 +78,7 @@ describe("LineageImpact", () => {
     (upstreamSeg as HTMLElement | undefined)?.click();
     await waitFor(() => {
       expect(mockedImpact).toHaveBeenLastCalledWith(
-        expect.objectContaining({ node: "metric:sales_e2e_gmv_day", direction: "upstream" }),
+        expect.objectContaining({ node: "metric:outp_e2e_fee_day", direction: "upstream" }),
       );
     });
   });
@@ -89,7 +89,7 @@ describe("LineageImpact", () => {
         {
           id: 1,
           source_node: "table:ods_orders",
-          target_node: "metric:sales_e2e_gmv_day",
+          target_node: "metric:outp_e2e_fee_day",
           edge_type: "METRIC_DERIVES",
           granularity: "day",
           confidence: 0.9,
@@ -97,7 +97,7 @@ describe("LineageImpact", () => {
         },
         {
           id: 2,
-          source_node: "metric:sales_e2e_gmv_day",
+          source_node: "metric:outp_e2e_fee_day",
           target_node: "table:ads_sales_gmv",
           edge_type: "METRIC_DERIVES",
           granularity: "day",
@@ -109,12 +109,12 @@ describe("LineageImpact", () => {
       page: 1,
       page_size: 50,
       nodes: [
-        { id: "metric:sales_e2e_gmv_day", type: "metric", label: "sales_e2e_gmv_day", domain: "sales" },
+        { id: "metric:outp_e2e_fee_day", type: "metric", label: "outp_e2e_fee_day", domain: "outpatient" },
         { id: "table:ods_orders", type: "table", label: "ods_orders", entity_id: 3 },
         { id: "table:ads_sales_gmv", type: "table", label: "ads_sales_gmv", entity_id: 5 },
       ],
     });
-    render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    render(<LineageImpact metricCode="outp_e2e_fee_day" />);
     // 图谱渲染：G6 Graph 实例化 + 数据含 3 业务节点 2 边（表→指标→表）；
     // lanes 泳道模式会附加 __lane_*__ 隐藏锚点节点，断言时过滤
     await waitFor(() => expect(Graph).toHaveBeenCalled());
@@ -122,7 +122,7 @@ describe("LineageImpact", () => {
     const realNodes = data.nodes.filter((n) => !(n.data as AssetGraphNode | undefined)?.anchor);
     expect(realNodes).toHaveLength(3);
     expect(realNodes.map((n) => n.id).sort()).toEqual([
-      "metric:sales_e2e_gmv_day",
+      "metric:outp_e2e_fee_day",
       "table:ads_sales_gmv",
       "table:ods_orders",
     ]);
@@ -135,7 +135,7 @@ describe("LineageImpact", () => {
   });
 
   it("无血缘数据时展示空态而非图谱", async () => {
-    render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    render(<LineageImpact metricCode="outp_e2e_fee_day" />);
     await waitFor(() => expect(mockedImpact).toHaveBeenCalled());
     await waitFor(() => {
       expect(Graph).not.toHaveBeenCalled();
@@ -144,7 +144,7 @@ describe("LineageImpact", () => {
   });
 
   it("切换到「双向」方向时携带 direction=both", async () => {
-    const { container } = render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    const { container } = render(<LineageImpact metricCode="outp_e2e_fee_day" />);
     await waitFor(() => expect(mockedImpact).toHaveBeenCalled());
     const bothSeg = Array.from(container.querySelectorAll(".ant-segmented-item")).find(
       (el) => el.textContent?.includes("双向"),
@@ -152,13 +152,13 @@ describe("LineageImpact", () => {
     (bothSeg as HTMLElement | undefined)?.click();
     await waitFor(() => {
       expect(mockedImpact).toHaveBeenLastCalledWith(
-        expect.objectContaining({ node: "metric:sales_e2e_gmv_day", direction: "both" }),
+        expect.objectContaining({ node: "metric:outp_e2e_fee_day", direction: "both" }),
       );
     });
   });
 
   it("调节跳数（max_hops）后重新查询携带新跳数", async () => {
-    const { container } = render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    const { container } = render(<LineageImpact metricCode="outp_e2e_fee_day" />);
     await waitFor(() =>
       expect(mockedImpact).toHaveBeenLastCalledWith(expect.objectContaining({ max_hops: 5 })),
     );
@@ -179,17 +179,17 @@ describe("LineageImpact", () => {
 
   it("点击「变更影响预览」调用 lineageImpactPreview 并展示风险摘要", async () => {
     mockedPreview.mockResolvedValue({
-      affected_metrics: [{ metric_code: "sales_e2e_unitprice_day", change_type: "schema_drift" }],
+      affected_metrics: [{ metric_code: "outp_e2e_avgfee_day", change_type: "schema_drift" }],
       affected_tables: ["dwd_sales_detail"],
       affected_consumers: ["看板A", "报表B"],
       risk_level: "high",
     } as any);
-    render(<LineageImpact metricCode="sales_e2e_gmv_day" />);
+    render(<LineageImpact metricCode="outp_e2e_fee_day" />);
     // 等首次 load 完成（loading=false，按钮可点）
     await waitFor(() => expect(mockedImpact).toHaveBeenCalled());
     fireEvent.click(screen.getByText("变更影响预览"));
     await waitFor(() => {
-      expect(mockedPreview).toHaveBeenCalledWith("sales_e2e_gmv_day", "schema_drift");
+      expect(mockedPreview).toHaveBeenCalledWith("outp_e2e_fee_day", "schema_drift");
       expect(screen.getByText("变更影响预览（what-if）")).toBeTruthy();
       expect(screen.getByText(/受影响指标 1/)).toBeTruthy();
       expect(screen.getByText(/风险等级 高/)).toBeTruthy();

@@ -18,7 +18,7 @@ from app.core.exceptions import (
     UnisenseError,
     ValidationError,
 )
-from app.models.measure_catalog import MeasureCatalog, MeasureFormat, MeasureStatus
+from app.models.measure_catalog import MeasureCatalog, MeasureCategory, MeasureFormat, MeasureStatus
 from app.services.measure_catalog.repository import MeasureCatalogRepository
 from app.services.measure_catalog.schemas import (
     MeasureCreate,
@@ -27,6 +27,7 @@ from app.services.measure_catalog.schemas import (
 )
 
 _VALID_FORMATS = {e.value for e in MeasureFormat}
+_VALID_CATEGORIES = {e.value for e in MeasureCategory}
 _VALID_STATUSES = {e.value for e in MeasureStatus}
 
 
@@ -84,6 +85,8 @@ class MeasureCatalogService(BaseService):
             ),
             source_system=data.source_system,
             synonyms=data.synonyms,
+            category=data.category or MeasureCategory.OTHER.value,
+            stat_caliber=data.stat_caliber,
             domain=data.domain,
             # PLAT-2: 认证身份优先，client 传入的 owner_id 仅作降级
             owner_id=actor_id if actor_id is not None else data.owner_id,
@@ -155,6 +158,16 @@ class MeasureCatalogService(BaseService):
             measure.source_system = data.source_system
         if data.synonyms is not None:
             measure.synonyms = data.synonyms
+        if data.category is not None:
+            if data.category not in _VALID_CATEGORIES:
+                raise ValidationError(
+                    f"未知度量分类: {data.category}",
+                    error_code="INVALID_MEASURE_CATEGORY",
+                    ctx={"category": data.category},
+                )
+            measure.category = data.category
+        if data.stat_caliber is not None:
+            measure.stat_caliber = data.stat_caliber
         await self._repo.commit()
         return measure
 

@@ -30,14 +30,18 @@ from app.models.system_dict import SystemDict  # noqa: E402
 
 logger = structlog.get_logger("unisense.seed")
 
-# ---- 标准主题域 ----
+# ---- 标准主题域（医疗业务：HIS 门诊数据驱动的度量域）----
+# 从电商演示（sales/finance/user/product/marketing/logistics）切换到医疗实际场景：
+# 平台采集的是 HIS 门诊数据（dp元数据.csv：tj_cf_drug_prescription / tj_cf_diagnosis /
+# tj_pharmacy_feebill_master 等），度量目录按门诊业务组织。
 STANDARD_DOMAINS: list[dict[str, Any]] = [
-    {"code": "sales", "name": "销售", "level": 1, "sort_order": 1},
-    {"code": "finance", "name": "财务", "level": 1, "sort_order": 2},
-    {"code": "user", "name": "用户", "level": 1, "sort_order": 3},
-    {"code": "product", "name": "产品", "level": 1, "sort_order": 4},
-    {"code": "marketing", "name": "营销", "level": 1, "sort_order": 5},
-    {"code": "logistics", "name": "物流", "level": 1, "sort_order": 6},
+    {"code": "outpatient", "name": "门诊", "level": 1, "sort_order": 1},
+    {"code": "medication", "name": "药品", "level": 1, "sort_order": 2},
+    {"code": "medical_fee", "name": "医疗费用", "level": 1, "sort_order": 3},
+    {"code": "medical_insurance", "name": "医保", "level": 1, "sort_order": 4},
+    {"code": "diagnosis", "name": "诊断", "level": 1, "sort_order": 5},
+    {"code": "quality", "name": "质控", "level": 1, "sort_order": 6},
+    {"code": "patient", "name": "患者", "level": 1, "sort_order": 7},
     {"code": "uncategorized", "name": "未分类", "level": 1, "sort_order": 99},
 ]
 
@@ -53,17 +57,16 @@ DICT_SEEDS: dict[str, list[dict[str, Any]]] = {
         {"code": "quarter", "label": "季", "sort_order": 5},
         {"code": "year", "label": "年", "sort_order": 6},
         {"code": "realtime", "label": "实时", "sort_order": 7},
-        # 业务实体粒度（生产场景：指标按业务主体统计，非仅时间维度）
-        {"code": "order", "label": "订单粒度", "sort_order": 20},
-        {"code": "merchant", "label": "商户粒度", "sort_order": 21},
-        {"code": "store", "label": "门店粒度", "sort_order": 22},
-        {"code": "user", "label": "用户粒度", "sort_order": 23},
-        {"code": "product", "label": "商品粒度", "sort_order": 24},
-        {"code": "supplier", "label": "供应商粒度", "sort_order": 25},
-        {"code": "employee", "label": "员工粒度", "sort_order": 26},
-        {"code": "warehouse", "label": "仓库粒度", "sort_order": 27},
-        {"code": "customer", "label": "客户粒度", "sort_order": 28},
-        {"code": "sku", "label": "SKU 粒度", "sort_order": 29},
+        # 业务实体粒度（医疗场景：指标按门诊业务主体统计）
+        {"code": "register", "label": "挂号粒度", "sort_order": 20},
+        {"code": "visit", "label": "就诊粒度", "sort_order": 21},
+        {"code": "patient", "label": "患者粒度", "sort_order": 22},
+        {"code": "doctor", "label": "医生粒度", "sort_order": 23},
+        {"code": "department", "label": "科室粒度", "sort_order": 24},
+        {"code": "disease", "label": "病种粒度", "sort_order": 25},
+        {"code": "prescription", "label": "处方粒度", "sort_order": 26},
+        {"code": "pharmacy", "label": "药房粒度", "sort_order": 27},
+        {"code": "yb_settle", "label": "医保结算粒度", "sort_order": 28},
     ],
     "unit": [
         {"code": "CNY", "label": "人民币元", "sort_order": 1},

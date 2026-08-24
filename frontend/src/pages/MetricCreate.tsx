@@ -86,6 +86,38 @@ interface ColumnInfo {
   comment?: string;
 }
 
+// 未采集表/字段手动输入：搜索关键词在当前选项里没有精确匹配时，下拉顶部注入
+// 「关键词」选项（下拉里以橙色标注“未采集，手动输入”提示），点选即录入，选中后仍显示
+// 干净表名。表/字段尚未被采集进平台时，注册流程仍可手动录入完整表名/列名
+//（后端无“必须已采集”校验，落库天然接受）。
+interface TableSelectOption {
+  value: string;
+  label: string;
+  uncollected?: boolean;
+}
+
+function withUncollectedOption(q: string, options: TableSelectOption[]): TableSelectOption[] {
+  const kw = (q ?? "").trim();
+  if (!kw) return options;
+  if (options.some((o) => o.value === kw)) return options;
+  return [{ value: kw, label: kw, uncollected: true }, ...options];
+}
+
+// 下拉里未采集项显示「（未采集，手动输入）」提示；选中后的 tag/选中文本仍是干净表名。
+// antd 5.22 optionRender 签名：(oriOption: FlattenOptionData, info) => ReactNode，直接返回渲染内容。
+function tableOptionRender(oriOption: { data?: TableSelectOption }) {
+  const opt = oriOption?.data;
+  if (opt?.uncollected) {
+    return (
+      <span>
+        {opt.label}
+        <span style={{ color: "#d46b08", marginLeft: 6 }}>（未采集，手动输入）</span>
+      </span>
+    );
+  }
+  return opt?.label ?? null;
+}
+
 // 推断来源 → 徽标样式（与后端 SuggestionField.source 对齐）
 const SOURCE_META: Record<string, { color: string; text: string }> = {
   sql_parse: { color: "geekblue", text: "SQL解析" },
@@ -196,6 +228,16 @@ export function MetricCreate() {
   const [srcTableSearchLoading, setSrcTableSearchLoading] = useState(false);
   const [columnOptions, setColumnOptions] = useState<{ value: string; label: string }[]>([]);
   const srcTableSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+  // 未采集表/字段手动输入：记录各 Select 最近搜索关键词，用于在选项顶部注入
+  // 「关键词（未采集，手动输入）」项——已采集表/列照常点选，未采集的也能手输录入。
+  // 独立 state 避免多个 Select 共用同一 onSearch 时关键词互相覆盖。
+  const [srcTableKw, setSrcTableKw] = useState("");        // 自动推断区源表名
+  const [mountSrcTableKw, setMountSrcTableKw] = useState(""); // 挂载源表
+  const [batchSrcTableKw, setBatchSrcTableKw] = useState(""); // 批量注册源表
+  const [depTableKw, setDepTableKw] = useState("");        // 依赖表（上游）
+  const [downTableKw, setDownTableKw] = useState("");      // 使用表（下游）
+  const [columnKw, setColumnKw] = useState("");            // 度量列
+  const [mountColumnKw, setMountColumnKw] = useState("");  // 挂载度量列
   // 域默认值预填字段集合（TD §3.8）：选域触发 autoSuggest 时这些字段不被推断覆盖
   // （管理员显式配置的域默认值优先于自动推断），SQL 推断等用户主动操作可正常覆盖。
   const domainPrefillRef = useRef<Set<string>>(new Set());
@@ -464,6 +506,26 @@ export function MetricCreate() {
     }
     if (Array.isArray(sugg.downstream_tables) && sugg.downstream_tables.length > 0) {
       setDownstreamTables((prev) => Array.from(new Set([...(prev || []), ...sugg.downstream_tables!])));
+    }
+    // 未采集表/列推断值补进 options：依赖表/使用表/度量列在下拉中可显示可再选
+    //（LLM 推断出的表/列可能尚未被采集进平台，不补进去下拉会没有对应项）
+    const inferredTables = [...upstream, ...(sugg.downstream_tables ?? [])];
+    if (inferredTables.length > 0) {
+      setTableOptions((prev) => {
+        const seen = new Set((prev ?? []).map((o) => o.value));
+        const added = inferredTables
+          .filter((t): t is string => Boolean(t) && !seen.has(t))
+          .map((t) => ({ value: t, label: t }));
+        return added.length ? [...(prev ?? []), ...added] : prev;
+      });
+    }
+    const inferredColumn = merged.measure_column;
+    if (typeof inferredColumn === "string" && inferredColumn) {
+      setColumnOptions((prev) =>
+        prev.some((o) => o.value === inferredColumn)
+          ? prev
+          : [...prev, { value: inferredColumn, label: inferredColumn }]
+      );
     }
     // 推断口径定义回填到实际表单（expression → definition JSON；sql → sqlText）
     const defJson = (defField?.value as Record<string, unknown>) ?? null;
@@ -994,13 +1056,17 @@ export function MetricCreate() {
                         <Select
                           showSearch
                           allowClear
-                          placeholder="选择或搜索源表（已接入的表可直接选，如 dwd.sales_detail）"
-                          onSearch={handleSrcTableSearch}
+                          placeholder="选择或搜索源表（已接入的可选；未采集的可输入完整表名）"
+                          onSearch={(q) => {
+                            setSrcTableKw(q);
+                            handleSrcTableSearch(q);
+                          }}
                           onChange={handleSrcTableSelect}
                           onOpenChange={handleSrcTableDropdown}
                           loading={srcTableSearchLoading}
-                          notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
-                          options={srcTableSearchOptions}
+                          notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                          options={withUncollectedOption(srcTableKw, srcTableSearchOptions)}
+                          optionRender={tableOptionRender}
                           filterOption={false}
                         />
                       </Form.Item>
@@ -1010,10 +1076,12 @@ export function MetricCreate() {
                         <Select
                           showSearch
                           allowClear
-                          placeholder={columnOptions.length > 0 ? "选择度量列" : "请先选择源表"}
+                          placeholder={columnOptions.length > 0 ? "选择度量列，或输入自定义列名" : "选择源表后自动带出列；也可直接输入列名"}
+                          onSearch={setColumnKw}
                           onChange={handleColumnSelect}
-                          options={columnOptions}
-                          disabled={columnOptions.length === 0}
+                          options={withUncollectedOption(columnKw, columnOptions)}
+                          optionRender={tableOptionRender}
+                          notFoundContent={columnOptions.length === 0 ? "未采集列，可直接输入列名" : "无匹配列，可直接输入"}
                           filterOption={(input, option) =>
                             (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
                           }
@@ -1068,12 +1136,16 @@ export function MetricCreate() {
                           <Select
                             showSearch
                             allowClear
-                            placeholder="源表（如 dwd.sales_detail）"
-                            onSearch={handleSrcTableSearch}
+                            placeholder="源表（如 dwd.sales_detail；未采集的可输入完整表名）"
+                            onSearch={(q) => {
+                              setMountSrcTableKw(q);
+                              handleSrcTableSearch(q);
+                            }}
                             onOpenChange={handleSrcTableDropdown}
                             loading={srcTableSearchLoading}
-                            notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
-                            options={srcTableSearchOptions}
+                            notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                            options={withUncollectedOption(mountSrcTableKw, srcTableSearchOptions)}
+                            optionRender={tableOptionRender}
                             filterOption={false}
                           />
                         </Form.Item>
@@ -1083,8 +1155,11 @@ export function MetricCreate() {
                           <Select
                             showSearch
                             allowClear
-                            placeholder="度量列"
-                            options={columnOptions}
+                            placeholder="度量列（可直接输入列名）"
+                            onSearch={setMountColumnKw}
+                            options={withUncollectedOption(mountColumnKw, columnOptions)}
+                            optionRender={tableOptionRender}
+                            notFoundContent={columnOptions.length === 0 ? "未采集列，可直接输入列名" : "无匹配列，可直接输入"}
                             filterOption={(input, option) =>
                               (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
                             }
@@ -1295,14 +1370,18 @@ export function MetricCreate() {
               >
                 <Select
                   mode="multiple" allowClear showSearch
-                  placeholder="展开浏览已接入表，或输入关键词搜索（支持多选）"
+                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
                   value={sourceTables}
                   onChange={(v: string[]) => setSourceTables(v)}
-                  onSearch={searchTables}
+                  onSearch={(q) => {
+                    setDepTableKw(q);
+                    searchTables(q);
+                  }}
                   onOpenChange={handleTableDropdown}
                   loading={tableSearching}
-                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表"}
-                  options={tableOptions}
+                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                  options={withUncollectedOption(depTableKw, tableOptions)}
+                  optionRender={tableOptionRender}
                   filterOption={false}
                 />
               </Form.Item>
@@ -1312,14 +1391,18 @@ export function MetricCreate() {
               >
                 <Select
                   mode="multiple" allowClear showSearch
-                  placeholder="展开浏览已接入表，或输入关键词搜索（支持多选）"
+                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
                   value={downstreamTables}
                   onChange={(v: string[]) => setDownstreamTables(v)}
-                  onSearch={searchTables}
+                  onSearch={(q) => {
+                    setDownTableKw(q);
+                    searchTables(q);
+                  }}
                   onOpenChange={handleTableDropdown}
                   loading={tableSearching}
-                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表"}
-                  options={tableOptions}
+                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                  options={withUncollectedOption(downTableKw, tableOptions)}
+                  optionRender={tableOptionRender}
                   filterOption={false}
                 />
               </Form.Item>
@@ -1734,13 +1817,17 @@ export function MetricCreate() {
               <Select
                 showSearch
                 allowClear
-                placeholder="选择或搜索源宽表（已接入的表可直接选，如 dwd.sales_detail）"
-                onSearch={handleSrcTableSearch}
+                placeholder="选择或搜索源宽表（已接入的可选；未采集的可输入完整表名）"
+                onSearch={(q) => {
+                  setBatchSrcTableKw(q);
+                  handleSrcTableSearch(q);
+                }}
                 onChange={handleBatchSrcTableChange}
                 onOpenChange={handleSrcTableDropdown}
                 loading={srcTableSearchLoading}
-                notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表"}
-                options={srcTableSearchOptions}
+                notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                options={withUncollectedOption(batchSrcTableKw, srcTableSearchOptions)}
+                optionRender={tableOptionRender}
                 filterOption={false}
               />
             </Form.Item>
@@ -1748,7 +1835,7 @@ export function MetricCreate() {
               name="measure_columns"
               label="度量列"
               rules={[{ required: true, message: "请至少选择一个度量列" }]}
-              extra={batchColumnOptions.length > 0 ? "从该表列中选择（可多选），或输入自定义列名" : "请先选择源表，可自动带出该表列"}
+              extra={batchColumnOptions.length > 0 ? "从该表列中选择（可多选），或输入自定义列名" : "可输入自定义列名（选择已采集源表后自动带出该表列）"}
             >
               <Select
                 mode="tags"

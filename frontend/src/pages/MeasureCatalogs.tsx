@@ -10,8 +10,8 @@ import {
   listDomainTree,
   UnisenseApiError,
 } from "../api";
-import type { MeasureCatalog, MeasureFormat, SubjectDomainTreeNode } from "../types";
-import { MEASURE_FORMAT_LABEL } from "../types";
+import type { MeasureCatalog, MeasureCategory, MeasureFormat, SubjectDomainTreeNode } from "../types";
+import { MEASURE_CATEGORY_LABEL, MEASURE_FORMAT_LABEL } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
 
@@ -30,6 +30,11 @@ const FORMAT_OPTIONS = [
   { value: "RATIO", label: "比率 (RATIO)" },
   { value: "NUMERIC", label: "数值 (NUMERIC)" },
 ];
+
+const CATEGORY_OPTIONS = (Object.keys(MEASURE_CATEGORY_LABEL) as MeasureCategory[]).map((v) => ({
+  value: v,
+  label: MEASURE_CATEGORY_LABEL[v],
+}));
 
 function flattenDomainNames(nodes: SubjectDomainTreeNode[], acc: Map<string, string>) {
   for (const n of nodes) {
@@ -92,7 +97,7 @@ export function MeasureCatalogs() {
   function openCreate() {
     setEditing(null);
     form.resetFields();
-    form.setFieldsValue({ measure_format: "AMOUNT" });
+    form.setFieldsValue({ measure_format: "AMOUNT", category: "OTHER" });
     setModalOpen(true);
   }
 
@@ -108,6 +113,8 @@ export function MeasureCatalogs() {
       default_decimal_places: row.default_decimal_places,
       source_system: row.source_system ?? [],
       synonyms: row.synonyms ?? [],
+      category: row.category ?? "OTHER",
+      stat_caliber: row.stat_caliber ?? undefined,
     });
     setModalOpen(true);
   }
@@ -141,6 +148,8 @@ export function MeasureCatalogs() {
           default_decimal_places: values.default_decimal_places ?? null,
           source_system: values.source_system ?? null,
           synonyms: values.synonyms ?? null,
+          category: values.category ?? "OTHER",
+          stat_caliber: values.stat_caliber ?? null,
         });
         message.success("度量已更新");
       } else {
@@ -154,6 +163,8 @@ export function MeasureCatalogs() {
           default_decimal_places: values.default_decimal_places ?? null,
           source_system: values.source_system ?? null,
           synonyms: values.synonyms ?? null,
+          category: values.category ?? "OTHER",
+          stat_caliber: values.stat_caliber ?? null,
         });
         message.success("逻辑度量已创建（草稿）");
       }
@@ -277,6 +288,16 @@ export function MeasureCatalogs() {
             render: (v: string[] | null) =>
               v?.length ? v.join("、") : <span className="muted">—</span>,
           },
+          {
+            title: "度量分类",
+            dataIndex: "category",
+            width: 110,
+            render: (v: MeasureCategory) => (
+              <Tag color={v === "FEE" ? "gold" : v === "DRUG" ? "geekblue" : v === "MEDICAL_INSURANCE" ? "purple" : "default"}>
+                {MEASURE_CATEGORY_LABEL[v] ?? v}
+              </Tag>
+            ),
+          },
           { title: "业务域", dataIndex: "domain", width: 120 },
           {
             title: "状态",
@@ -342,6 +363,21 @@ export function MeasureCatalogs() {
           </Form.Item>
           <Form.Item name="domain" label="业务域" rules={[{ required: true, message: "请选择业务域" }]}>
             <Select options={domainOptions} showSearch optionFilterProp="label" placeholder="选择业务域" />
+          </Form.Item>
+          <Form.Item
+            name="category"
+            label="度量分类"
+            rules={[{ required: true, message: "请选择度量分类" }]}
+            extra="按业务视角组织度量目录：流量/费用/药品/医保/效率/质量"
+          >
+            <Select options={CATEGORY_OPTIONS} placeholder="选择度量分类" />
+          </Form.Item>
+          <Form.Item
+            name="stat_caliber"
+            label="统计口径"
+            extra="业务侧如何计算该度量，如「收费明细按结算日期去重后求和」"
+          >
+            <Input.TextArea rows={2} maxLength={1000} placeholder="描述统计口径（可选）" />
           </Form.Item>
           <Form.Item
             name="measure_format"

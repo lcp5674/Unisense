@@ -18,13 +18,13 @@ if (!TOKEN) {
 
 // 轮询已发布的指标编码（live 库实测存在）
 const METRIC_CODES = [
-  "sales_e2e_gmv_day",
-  "sales_e2e_ordercnt_day",
-  "user_e2e_activeuser_day",
-  "user_e2e_piiuser_day",
-  "sales_e2e_unitprice_day",
-  "sales_e2e_conflicta_day",
-  "e2e_rev_assign_day",
+  "outp_e2e_fee_day",
+  "outp_e2e_visit_day",
+  "outp_e2e_register_day",
+  "outp_e2e_piipatient_day",
+  "outp_e2e_avgfee_day",
+  "outp_e2e_conflicta_day",
+  "outp_e2e_drugfee_day",
 ];
 
 export const options = {

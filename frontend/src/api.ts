@@ -1665,6 +1665,8 @@ export async function createMeasureCatalog(body: {
   default_decimal_places?: number | null;
   source_system?: string[] | null;
   synonyms?: string[] | null;
+  category?: string;
+  stat_caliber?: string | null;
   owner_id?: number;
 }): Promise<MeasureCatalog> {
   return request<MeasureCatalog>(`${API_BASE}/measure-catalogs`, {
@@ -1685,6 +1687,8 @@ export async function updateMeasureCatalog(
     default_decimal_places?: number | null;
     source_system?: string[] | null;
     synonyms?: string[] | null;
+    category?: string;
+    stat_caliber?: string | null;
   },
 ): Promise<MeasureCatalog> {
   return request<MeasureCatalog>(

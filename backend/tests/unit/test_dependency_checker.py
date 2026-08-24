@@ -35,44 +35,44 @@ class TestUnpublishedDependencyRejected:
 
     async def test_draft_dependency_rejected(self) -> None:
         checker = _make_checker()
-        dep_metric = _make_metric("sales_gmv_amount_daily", "DRAFT")
+        dep_metric = _make_metric("outp_fee_amount_daily", "DRAFT")
         checker._get_metric_by_code = AsyncMock(return_value=dep_metric)
 
-        definition = {"dependencies": ["sales_gmv_amount_daily"]}
+        definition = {"dependencies": ["outp_fee_amount_daily"]}
         result = await checker.check_dependencies_published(definition)
 
-        assert "sales_gmv_amount_daily" in result
+        assert "outp_fee_amount_daily" in result
 
     async def test_deprecated_dependency_rejected(self) -> None:
         checker = _make_checker()
-        dep_metric = _make_metric("sales_gmv_amount_daily", "DEPRECATED")
+        dep_metric = _make_metric("outp_fee_amount_daily", "DEPRECATED")
         checker._get_metric_by_code = AsyncMock(return_value=dep_metric)
 
-        definition = {"dependencies": ["sales_gmv_amount_daily"]}
+        definition = {"dependencies": ["outp_fee_amount_daily"]}
         result = await checker.check_dependencies_published(definition)
 
-        assert "sales_gmv_amount_daily" in result
+        assert "outp_fee_amount_daily" in result
 
     async def test_review_dependency_rejected(self) -> None:
         """REVIEW 状态的指标也不应被依赖。"""
         checker = _make_checker()
-        dep_metric = _make_metric("sales_gmv_amount_daily", "REVIEW")
+        dep_metric = _make_metric("outp_fee_amount_daily", "REVIEW")
         checker._get_metric_by_code = AsyncMock(return_value=dep_metric)
 
-        definition = {"dependencies": ["sales_gmv_amount_daily"]}
+        definition = {"dependencies": ["outp_fee_amount_daily"]}
         result = await checker.check_dependencies_published(definition)
 
-        assert "sales_gmv_amount_daily" in result
+        assert "outp_fee_amount_daily" in result
 
     async def test_nonexistent_dependency_rejected(self) -> None:
         """不存在的依赖应出现在未发布列表中。"""
         checker = _make_checker()
         checker._get_metric_by_code = AsyncMock(return_value=None)
 
-        definition = {"dependencies": ["sales_gmv_amount_daily"]}
+        definition = {"dependencies": ["outp_fee_amount_daily"]}
         result = await checker.check_dependencies_published(definition)
 
-        assert "sales_gmv_amount_daily" in result
+        assert "outp_fee_amount_daily" in result
 
 
 class TestCycleDetected:
@@ -83,24 +83,24 @@ class TestCycleDetected:
         checker = _make_checker()
 
         metric_a = _make_metric(
-            "sales_order_amount_daily", "PUBLISHED", dependencies=["sales_gmv_amount_daily"]
+            "outp_drug_amount_daily", "PUBLISHED", dependencies=["outp_fee_amount_daily"]
         )
         metric_b = _make_metric(
-            "sales_gmv_amount_daily", "PUBLISHED", dependencies=["sales_order_amount_daily"]
+            "outp_fee_amount_daily", "PUBLISHED", dependencies=["outp_drug_amount_daily"]
         )
 
         async def _get(code: str) -> MagicMock | None:
-            if code == "sales_order_amount_daily":
+            if code == "outp_drug_amount_daily":
                 return metric_a
-            if code == "sales_gmv_amount_daily":
+            if code == "outp_fee_amount_daily":
                 return metric_b
             return None
 
         checker._get_metric_by_code = AsyncMock(side_effect=_get)
 
         cycle = await checker.detect_cycle(
-            "sales_order_amount_daily",
-            {"dependencies": ["sales_gmv_amount_daily"]},
+            "outp_drug_amount_daily",
+            {"dependencies": ["outp_fee_amount_daily"]},
         )
 
         assert cycle is not None
@@ -116,14 +116,14 @@ class TestThreeLevelChainPasses:
         checker = _make_checker()
 
         metric_b = _make_metric(
-            "sales_gmv_amount_daily", "PUBLISHED", dependencies=["sales_order_cnt_daily"]
+            "outp_fee_amount_daily", "PUBLISHED", dependencies=["outp_prescription_cnt_daily"]
         )
-        metric_c = _make_metric("sales_order_cnt_daily", "PUBLISHED")
+        metric_c = _make_metric("outp_prescription_cnt_daily", "PUBLISHED")
 
         async def _get(code: str) -> MagicMock | None:
-            if code == "sales_gmv_amount_daily":
+            if code == "outp_fee_amount_daily":
                 return metric_b
-            if code == "sales_order_cnt_daily":
+            if code == "outp_prescription_cnt_daily":
                 return metric_c
             return None
 
@@ -131,14 +131,14 @@ class TestThreeLevelChainPasses:
 
         # 无环
         cycle = await checker.detect_cycle(
-            "sales_order_amount_daily",
-            {"dependencies": ["sales_gmv_amount_daily"]},
+            "outp_drug_amount_daily",
+            {"dependencies": ["outp_fee_amount_daily"]},
         )
         assert cycle is None
 
         # 全部发布
         unpublished = await checker.check_dependencies_published(
-            {"dependencies": ["sales_gmv_amount_daily"]}
+            {"dependencies": ["outp_fee_amount_daily"]}
         )
         assert unpublished == []
 
@@ -149,20 +149,20 @@ class TestCompositeMultiDepPasses:
     async def test_multi_dep_all_published(self) -> None:
         checker = _make_checker()
 
-        metric_b = _make_metric("sales_gmv_amount_daily", "PUBLISHED")
-        metric_c = _make_metric("sales_order_cnt_daily", "PUBLISHED")
+        metric_b = _make_metric("outp_fee_amount_daily", "PUBLISHED")
+        metric_c = _make_metric("outp_prescription_cnt_daily", "PUBLISHED")
 
         async def _get(code: str) -> MagicMock | None:
-            if code == "sales_gmv_amount_daily":
+            if code == "outp_fee_amount_daily":
                 return metric_b
-            if code == "sales_order_cnt_daily":
+            if code == "outp_prescription_cnt_daily":
                 return metric_c
             return None
 
         checker._get_metric_by_code = AsyncMock(side_effect=_get)
 
         unpublished = await checker.check_dependencies_published(
-            {"dependencies": ["sales_gmv_amount_daily", "sales_order_cnt_daily"]}
+            {"dependencies": ["outp_fee_amount_daily", "outp_prescription_cnt_daily"]}
         )
         assert unpublished == []
 
@@ -176,10 +176,10 @@ class TestPendingVersionDepAllowed:
         """
         checker = _make_checker()
         # metric.status = PUBLISHED，尽管 version 可能有 PENDING_CONFIRMATION 的版本
-        dep_metric = _make_metric("sales_gmv_amount_daily", "PUBLISHED")
+        dep_metric = _make_metric("outp_fee_amount_daily", "PUBLISHED")
         checker._get_metric_by_code = AsyncMock(return_value=dep_metric)
 
-        definition = {"dependencies": ["sales_gmv_amount_daily"]}
+        definition = {"dependencies": ["outp_fee_amount_daily"]}
         result = await checker.check_dependencies_published(definition)
 
         # PUBLISHED 指标不应出现在未发布列表中
@@ -188,10 +188,10 @@ class TestPendingVersionDepAllowed:
     async def test_experimental_dep_allowed(self) -> None:
         """EXPERIMENTAL 状态的指标也应允许被依赖。"""
         checker = _make_checker()
-        dep_metric = _make_metric("sales_gmv_amount_daily", "EXPERIMENTAL")
+        dep_metric = _make_metric("outp_fee_amount_daily", "EXPERIMENTAL")
         checker._get_metric_by_code = AsyncMock(return_value=dep_metric)
 
-        definition = {"dependencies": ["sales_gmv_amount_daily"]}
+        definition = {"dependencies": ["outp_fee_amount_daily"]}
         result = await checker.check_dependencies_published(definition)
 
         assert result == []
@@ -213,21 +213,21 @@ class TestNonMetricCodeDependency:
     async def test_mixed_metric_and_table_deps(self) -> None:
         """混合依赖：表名跳过，指标编码正常校验。"""
         checker = _make_checker()
-        dep_metric = _make_metric("sales_gmv_amount_daily", "PUBLISHED")
+        dep_metric = _make_metric("outp_fee_amount_daily", "PUBLISHED")
         checker._get_metric_by_code = AsyncMock(return_value=dep_metric)
 
-        definition = {"dependencies": ["fct_order", "sales_gmv_amount_daily"]}
+        definition = {"dependencies": ["fct_order", "outp_fee_amount_daily"]}
         result = await checker.check_dependencies_published(definition)
 
         assert result == []
         # 只查了一次指标编码
-        checker._get_metric_by_code.assert_awaited_once_with("sales_gmv_amount_daily")
+        checker._get_metric_by_code.assert_awaited_once_with("outp_fee_amount_daily")
 
 
 class TestValidateCompositeFormula:
     """复合指标公式强校验（界限文档 §1.2/§4.2：只引用派生/复合指标 code，禁裸表字段）。"""
 
-    def _derived(self, code: str = "sales_gmv_amount_daily") -> MagicMock:
+    def _derived(self, code: str = "outp_fee_amount_daily") -> MagicMock:
         m = _make_metric(code, "PUBLISHED")
         m.type = "derived"
         return m
@@ -239,7 +239,7 @@ class TestValidateCompositeFormula:
         checker._get_metric_by_code = AsyncMock(return_value=derived)
 
         definition = {
-            "expression": "sum(sales_gmv_amount_daily) / sum(sales_order_cnt_daily) * 100",
+            "expression": "sum(outp_fee_amount_daily) / sum(outp_prescription_cnt_daily) * 100",
         }
         result = await checker.validate_composite_formula(definition)
 
@@ -260,7 +260,7 @@ class TestValidateCompositeFormula:
         checker = _make_checker()
         checker._get_metric_by_code = AsyncMock(return_value=None)
 
-        definition = {"expression": "sales_gmv_amount_daily / sales_order_cnt_daily"}
+        definition = {"expression": "outp_fee_amount_daily / outp_prescription_cnt_daily"}
         result = await checker.validate_composite_formula(definition)
 
         assert any("不存在" in err for err in result)
@@ -268,11 +268,11 @@ class TestValidateCompositeFormula:
     async def test_atomic_reference_rejected(self) -> None:
         """公式引用原子指标（非派生/复合）→ 报错（复合层只能聚合派生指标）。"""
         checker = _make_checker()
-        atomic = _make_metric("sales_gmv_amount_daily", "PUBLISHED")
+        atomic = _make_metric("outp_fee_amount_daily", "PUBLISHED")
         atomic.type = "atomic"
         checker._get_metric_by_code = AsyncMock(return_value=atomic)
 
-        definition = {"expression": "sales_gmv_amount_daily"}
+        definition = {"expression": "outp_fee_amount_daily"}
         result = await checker.validate_composite_formula(definition)
 
         assert any("不是派生/复合指标" in err for err in result)
