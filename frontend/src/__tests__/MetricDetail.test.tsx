@@ -707,6 +707,34 @@ describe("MetricDetail", () => {
     });
   });
 
+  it("有健康数据时第一屏展示「最近校验」时间（让人信：最近一次校验时间）", async () => {
+    mockedHealth.mockResolvedValue({
+      metric_id: 1,
+      score: 88,
+      level: "EXCELLENT",
+      completeness_score: 90,
+      activity_score: 85,
+      quality_score: 95,
+      owner_response_score: 80,
+      lineage_coverage_score: 90,
+      missing_dimensions: null,
+      calculated_at: "2026-08-18T03:20:00",
+    });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await waitFor(() => {
+      expect(screen.getByText(/最近校验：/)).toBeTruthy();
+    });
+    // 校验时间走上海时区中文格式（后端 UTC → 上海 +08:00 偏移）
+    expect(screen.getByText(/最近校验：2026年8月18日 11:20/)).toBeTruthy();
+  });
+
+  it("健康数据缺失时不展示「最近校验」（空健康静默降级，不误导）", async () => {
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText("销售 GMV");
+    expect(screen.queryByText(/最近校验：/)).toBeNull();
+  });
+
 });
 
 
