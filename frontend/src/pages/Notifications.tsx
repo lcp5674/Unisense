@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination, Typography } from "antd";
 import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined, UserOutlined, StarOutlined, SearchOutlined } from "@ant-design/icons";
 import {
   listNotifications,
@@ -1211,7 +1211,24 @@ function SubscriptionsTab() {
 
   const columns = [
     { title: "送达方式", dataIndex: "channel", key: "channel", width: 130, render: (v: string) => <Tag>{CHANNEL_LABEL[(v ?? "").toLowerCase()] ?? v}</Tag> },
-    { title: "消息类型", dataIndex: "event_type", key: "event", render: (v: string) => eventTypeLabel(v) },
+    {
+      title: "消息类型",
+      dataIndex: "event_type",
+      key: "event",
+      render: (_: string | null, r: SubscriptionPref) => {
+        // 资产订阅（按指标/源表 watch）：展示「关注 [类型] id」
+        if (r.asset_type) {
+          const assetLabel = r.asset_type === "METRIC" ? "指标" : r.asset_type === "TABLE" ? "源表" : r.asset_type;
+          return (
+            <span>
+              <Tag color="blue">关注 {assetLabel}</Tag>
+              <Typography.Text code>{r.asset_id}</Typography.Text>
+            </span>
+          );
+        }
+        return eventTypeLabel(r.event_type ?? "");
+      },
+    },
     { title: "告警阈值", dataIndex: "threshold", key: "threshold", width: 100, render: (v: number | null) => v ?? <span className="muted">—</span> },
     { title: "是否启用", dataIndex: "enabled", key: "enabled", width: 90, render: (v: boolean) => <Tag color={v ? "success" : "default"}>{v ? "是" : "否"}</Tag> },
   ];
@@ -1225,7 +1242,7 @@ function SubscriptionsTab() {
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新增订阅</Button>
         </div>
       </div>
-      <Table dataSource={items} columns={columns} rowKey={(r) => `${r.user_id}-${r.channel}-${r.event_type}`} loading={loading} pagination={false} locale={{ emptyText: "暂无订阅" }} />
+      <Table dataSource={items} columns={columns} rowKey={(r) => (r.asset_type ? `${r.user_id}-${r.channel}-${r.asset_type}-${r.asset_id}` : `${r.user_id}-${r.channel}-${r.event_type}`)} loading={loading} pagination={false} locale={{ emptyText: "暂无订阅" }} />
 
       <Modal title="新增订阅" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="保存">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>

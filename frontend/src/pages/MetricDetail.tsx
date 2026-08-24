@@ -469,20 +469,26 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
   );
 }
 
-// 订阅变更通知：真实对接 notify 订阅（IN_APP 渠道 + 事件类型）
+// 订阅变更通知：真实对接 notify 订阅（IN_APP 渠道）
+// - 事件订阅：metric.update / quality.alert / lineage.change（按事件类型）
+// - 资产订阅（P2 按资产 watch）：asset_watch = 关注此指标（METRIC + code），
+//   后端 publish_event 按 payload 资产键匹配，该指标相关变更（如 DDL 影响）定向提醒。
 function SubscribeModal({
   open,
   onClose,
   onChanged,
+  metricCode,
 }: {
   open: boolean;
   onClose: () => void;
   onChanged: () => void;
+  metricCode: string;
 }) {
   const [checked, setChecked] = useState<Record<string, boolean>>({
     "metric.update": true,
     "quality.alert": true,
     "lineage.change": false,
+    "asset_watch": true,
   });
   const [busy, setBusy] = useState(false);
 
@@ -490,13 +496,23 @@ function SubscribeModal({
     "metric.update": "指标口径更新",
     "quality.alert": "质量告警",
     "lineage.change": "血缘变更",
+    "asset_watch": "关注此指标（资产级变更提醒）",
   };
 
   async function save() {
     setBusy(true);
     try {
       for (const [eventType, enabled] of Object.entries(checked)) {
-        await upsertSubscription({ channel: "IN_APP", event_type: eventType, enabled });
+        if (eventType === "asset_watch") {
+          await upsertSubscription({
+            channel: "IN_APP",
+            asset_type: "METRIC",
+            asset_id: metricCode,
+            enabled,
+          });
+        } else {
+          await upsertSubscription({ channel: "IN_APP", event_type: eventType, enabled });
+        }
       }
       onChanged();
       onClose();
@@ -776,7 +792,10 @@ export function MetricDetail() {
       setUsers(userList);
       setSubscribed(
         subs.items.some(
-          (s) => s.channel === "IN_APP" && ["metric.update", "quality.alert"].includes(s.event_type) && s.enabled,
+          (s) =>
+            s.enabled &&
+            (["metric.update", "quality.alert"].includes(s.event_type ?? "") ||
+              (s.asset_type === "METRIC" && s.asset_id === code)),
         ),
       );
       setRelated(rel);
@@ -2022,7 +2041,12 @@ export function MetricDetail() {
         </Card>
       )}
 
-      <SubscribeModal open={subscribeOpen} onClose={() => setSubscribeOpen(false)} onChanged={load} />
+      <SubscribeModal
+        open={subscribeOpen}
+        onClose={() => setSubscribeOpen(false)}
+        onChanged={load}
+        metricCode={code ?? ""}
+      />
 
       <Modal
         title="紧急发布（跳过评审，PII 门禁不可跳）"

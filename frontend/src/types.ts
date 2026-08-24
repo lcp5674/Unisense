@@ -1495,7 +1495,10 @@ export interface SubscriptionPref {
   id: number;
   user_id: number;
   channel: string;
-  event_type: string;
+  event_type: string | null;
+  /** 资产维度订阅（按指标/源表 watch）：asset_type 非空时 event_type 为 null */
+  asset_type?: string | null;
+  asset_id?: string | null;
   enabled: boolean;
   threshold: number | null;
   created_at: string;

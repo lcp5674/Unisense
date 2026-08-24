@@ -2631,7 +2631,10 @@ export async function listSubscriptions(): Promise<{ items: SubscriptionPref[]; 
 
 export async function upsertSubscription(body: {
   channel: string;
-  event_type: string;
+  event_type?: string | null;
+  /** 资产维度订阅（按指标/源表 watch）：与 event_type 二选一 */
+  asset_type?: string;
+  asset_id?: string;
   enabled?: boolean;
   threshold?: number | null;
 }): Promise<SubscriptionPref> {
