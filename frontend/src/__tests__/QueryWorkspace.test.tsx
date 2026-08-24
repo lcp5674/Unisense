@@ -45,9 +45,11 @@ vi.mock("../hooks/useTracking", () => ({
 }));
 
 import {
+  consumeDryRun,
   consumeSemantic,
   listMetrics,
 } from "../api";
+const mockedConsumeDryRun = vi.mocked(consumeDryRun);
 const mockedConsumeSemantic = vi.mocked(consumeSemantic);
 const mockedListMetrics = vi.mocked(listMetrics);
 
@@ -135,6 +137,13 @@ describe("QueryWorkspace", () => {
       page_size: 100,
     });
     mockedConsumeSemantic.mockResolvedValue(mockSemanticData);
+    mockedConsumeDryRun.mockResolvedValue({
+      metric_code: "gmv_net",
+      status: "ok",
+      checks: [],
+      execution_plan: { metric_code: "gmv_net" },
+      meta: {},
+    });
   });
 
   it("renders query workspace with action buttons", async () => {
@@ -233,5 +242,34 @@ describe("QueryWorkspace", () => {
     await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+
+  it("URL ?metric_code= 带参直达时自动选中该指标（详情页「试算」入口）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/query?metric_code=gmv_net"]}>
+        <QueryWorkspace />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    // 指标 Select 选中值显示为「编码 · 名称」，无需手动点选
+    await waitFor(() => {
+      expect(screen.getByText("gmv_net · 净GMV")).toBeInTheDocument();
+    });
+  });
+
+  it("带参直达后直接 dry-run：使用 URL 指标编码发起语义校验", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/query?metric_code=gmv_net"]}>
+        <QueryWorkspace />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /语义校验/ }));
+    await waitFor(() => {
+      expect(mockedConsumeDryRun).toHaveBeenCalledWith(
+        expect.objectContaining({ metric_code: "gmv_net" }),
+      );
+    });
   });
 });

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
-import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { MemoryRouter, Routes, Route, useSearchParams } from "react-router-dom";
 import { MetricDetail } from "../pages/MetricDetail";
 import { PermissionProvider } from "../hooks/usePermission";
 import type { MetricHealth, MetricResponse, SystemDictItem } from "../types";
@@ -192,6 +192,12 @@ function renderDetail(initialEntry: { pathname: string; state?: { from?: string 
       </Routes>
     </MemoryRouter>,
   );
+}
+
+// 试算跳转探针：渲染目标路由并回显 query 参数，验证「试算」按钮带码跳转
+function QueryProbe() {
+  const [sp] = useSearchParams();
+  return <div>{`query-page-${sp.get("metric_code") ?? "none"}`}</div>;
 }
 
 describe("MetricDetail", () => {
@@ -733,6 +739,28 @@ describe("MetricDetail", () => {
     renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
     await screen.findByText("销售 GMV");
     expect(screen.queryByText(/最近校验：/)).toBeNull();
+  });
+
+  it("头部「试算」按钮跳转查询工作台并携带本指标编码", async () => {
+    render(
+      <MemoryRouter initialEntries={["/detail/sales_gmv_sum_d"]}>
+        <Routes>
+          <Route
+            path="/detail/:code"
+            element={
+              <PermissionProvider user={{ id: 1, username: "u", display_name: "U", role: "metric_owner", domain: "sales", org_id: 1 }}>
+                <MetricDetail />
+              </PermissionProvider>
+            }
+          />
+          <Route path="/query" element={<QueryProbe />} />
+          <Route path="/dashboard" element={<div>dashboard-page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const btn = await screen.findByRole("button", { name: /试\s*算/ });
+    fireEvent.click(btn);
+    await screen.findByText("query-page-sales_gmv_sum_d");
   });
 
 });
