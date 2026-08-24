@@ -123,7 +123,11 @@ class SubscriptionUpsert(BaseModel):
     # PLAT-2: user_id 允许客户端省略，服务端以认证身份覆盖（防越权绑定他人订阅）。
     user_id: int | None = None
     channel: str
-    event_type: str
+    event_type: str | None = None
+    #: 资产维度订阅（按指标/源表 watch）：asset_type+asset_id 与 event_type 二选一。
+    #: asset_type 提供时 asset_id 必填，且二者组合须存在（服务端校验资产存在性）。
+    asset_type: str | None = None
+    asset_id: str | None = None
     enabled: bool = True
     threshold: int | None = None
 
@@ -147,12 +151,24 @@ class SubscriptionUpsert(BaseModel):
             except ValueError as exc:
                 raise ValueError(f"非法通知渠道: {v}") from exc
 
+    @field_validator("asset_type")
+    @classmethod
+    def _validate_asset_type(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip().upper()
+        if v not in ("METRIC", "TABLE"):
+            raise ValueError(f"非法资产类型: {v}（仅支持 METRIC/TABLE）")
+        return v
+
 
 class SubscriptionResponse(BaseModel):
     id: int
     user_id: int
     channel: str
-    event_type: str
+    event_type: str | None = None
+    asset_type: str | None = None
+    asset_id: str | None = None
     enabled: bool
     threshold: int | None = None
     created_at: datetime | None = None
@@ -163,7 +179,9 @@ class SubscriptionResponse(BaseModel):
             id=m.id,
             user_id=m.user_id,
             channel=m.channel,
-            event_type=m.event_type,
+            event_type=getattr(m, "event_type", None),
+            asset_type=getattr(m, "asset_type", None),
+            asset_id=getattr(m, "asset_id", None),
             enabled=getattr(m, "enabled", True),
             threshold=getattr(m, "threshold", None),
             created_at=getattr(m, "created_at", None),

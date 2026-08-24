@@ -131,8 +131,24 @@ class SubscriptionPref(Base, BaseModel):
         nullable=False,
         comment="通知渠道",
     )
-    event_type: Mapped[str] = mapped_column(String(64), nullable=False, comment="事件类型")
+    event_type: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="事件类型（按事件订阅；资产订阅时为 NULL）"
+    )
+    #: 资产维度订阅（P2 增强：按指标/源表 watch）——event_type 与 asset 二选一：
+    #: 资产订阅行 event_type 为 NULL，asset_type+asset_id 非空；事件订阅反之。
+    asset_type: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, comment="资产类型（METRIC/TABLE；NULL=按事件订阅）"
+    )
+    asset_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="资产业务编码（metric_code/entity_name；asset_type 非空时必填）",
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, comment="是否启用")
     threshold: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="阈值")
 
-    __table_args__ = (UniqueConstraint("user_id", "channel", "event_type", name="uk_sub_pref"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "channel", "event_type", name="uk_sub_pref"),
+        # 资产订阅唯一键：MySQL 唯一索引对 NULL 不比较，事件订阅行（asset 为 NULL）不受影响
+        UniqueConstraint("user_id", "channel", "asset_type", "asset_id", name="uk_sub_asset"),
+    )

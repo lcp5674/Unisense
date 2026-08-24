@@ -19,12 +19,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
 from app.core.config import settings
-from app.core.exceptions import AuthError, UnisenseError
+from app.core.error_codes import ErrorCode
+from app.core.exceptions import AuthError, BusinessError, UnisenseError
 from app.core.logging import get_logger
+from app.models.data_source import DBCatalog
+from app.models.metric import Metric
 from app.models.notify import (
     EventLevel,
     EventLog,
@@ -366,6 +370,19 @@ class NotifyService(BaseService):
         )
         await self._repo.save_event(event)
         subs = await self._repo.list_enabled_subscriptions(data.event_type)
+        # P2 资产订阅（按指标/源表 watch）：事件 payload 携带资产引用时，
+        # 额外匹配"关注了该资产"的用户，与事件订阅者合并（同用户×渠道去重，
+        # 事件订阅优先，避免同一通知重复投递）。
+        asset_subs: list[SubscriptionPref] = []
+        for asset_type, asset_id in self._extract_asset_keys(data.payload):
+            asset_subs.extend(await self._repo.list_asset_subscribers(asset_type, asset_id))
+        if asset_subs:
+            merged: dict[tuple[int, str], SubscriptionPref] = {}
+            for s in subs:
+                merged[(s.user_id, s.channel)] = s
+            for s in asset_subs:
+                merged.setdefault((s.user_id, s.channel), s)
+            subs = list(merged.values())
         created = 0
         delivered = 0
         for sub in subs:
@@ -447,6 +464,34 @@ class NotifyService(BaseService):
                         delivered += 1
         await self._repo.commit()
         return {"event_id": event.id, "notifications": created, "delivered": delivered}
+
+    @staticmethod
+    def _extract_asset_keys(payload: dict[str, Any] | None) -> list[tuple[str, str]]:
+        """从事件 payload 提取资产引用键（(type, id) 列表），供资产订阅匹配。
+
+        支持（优先级从高到低）：
+        - ``asset_keys``：显式多资产列表（[{"type": "TABLE", "id": "db.t"}...]，DDL 影响多表）；
+        - ``asset_type`` + ``asset_id``：显式单资产；
+        - ``metric_code`` → (METRIC, code)、``table``/``table_name`` → (TABLE, name) 常见单键。
+        无法识别时返回空列表（事件仍按 event_type 订阅匹配，行为不变）。
+        """
+        if not payload:
+            return []
+        keys: list[tuple[str, str]] = []
+        raw_keys = payload.get("asset_keys")
+        if isinstance(raw_keys, list):
+            for item in raw_keys:
+                if isinstance(item, dict) and item.get("type") and item.get("id"):
+                    keys.append((str(item["type"]).upper(), str(item["id"])))
+        if payload.get("asset_type") and payload.get("asset_id"):
+            keys.append((str(payload["asset_type"]).upper(), str(payload["asset_id"])))
+        if payload.get("metric_code"):
+            keys.append(("METRIC", str(payload["metric_code"])))
+        table = payload.get("table") or payload.get("table_name")
+        if table:
+            keys.append(("TABLE", str(table)))
+        seen: set[tuple[str, str]] = set()
+        return [k for k in keys if not (k in seen or seen.add(k))]
 
     async def handle_business_event(self, event: dict[str, Any]) -> dict[str, int]:
         """消费 EventBus 业务事件（quality/conflict/governance），落 EventLog 并按订阅扇出投递。
@@ -945,7 +990,26 @@ class NotifyService(BaseService):
         user_id = actor_id if actor_id is not None else data.user_id
         if user_id is None:
             raise ValueError("user_id 缺失：服务端认证身份与请求体均未提供")
-        existing = await self._repo.find_subscription(user_id, data.channel, data.event_type)
+        is_asset = bool(data.asset_type)
+        if is_asset:
+            # 资产订阅：event_type 与 asset 二选一（资产行 event_type 置 NULL）
+            if not data.asset_id:
+                raise BusinessError(
+                    "资产订阅必须提供 asset_id", error_code=ErrorCode.VALIDATION_ERROR
+                )
+            await self._assert_asset_exists(data.asset_type, data.asset_id)
+            existing = await self._repo.find_asset_subscription(
+                user_id, data.channel, data.asset_type, data.asset_id
+            )
+        else:
+            if not data.event_type:
+                raise BusinessError(
+                    "订阅必须提供 event_type 或 asset_type+asset_id",
+                    error_code=ErrorCode.VALIDATION_ERROR,
+                )
+            existing = await self._repo.find_subscription(
+                user_id, data.channel, data.event_type
+            )
         if existing is not None:
             existing.enabled = data.enabled
             existing.threshold = data.threshold
@@ -954,11 +1018,38 @@ class NotifyService(BaseService):
         sub = SubscriptionPref(
             user_id=user_id,
             channel=data.channel,
-            event_type=data.event_type,
+            event_type=None if is_asset else data.event_type,
+            asset_type=data.asset_type,
+            asset_id=data.asset_id,
             enabled=data.enabled,
             threshold=data.threshold,
         )
         return await self._repo.save_subscription(sub)
+
+    async def _assert_asset_exists(self, asset_type: str, asset_id: str) -> None:
+        """校验资产订阅的目标资产真实存在（防订阅幽灵资产）。
+
+        METRIC → Metric.metric_code；TABLE → DBCatalog.entity_name（库.表）。
+        不存在则拒绝创建订阅（4xx），避免「关注了不存在的东西」。
+        """
+        if asset_type == "METRIC":
+            stmt = select(Metric.id).where(
+                Metric.metric_code == asset_id, Metric.deleted_at.is_(None)
+            )
+        elif asset_type == "TABLE":
+            stmt = select(DBCatalog.id).where(
+                DBCatalog.entity_name == asset_id, DBCatalog.deleted_at.is_(None)
+            )
+        else:  # pragma: no cover - schema validator 已拦截
+            raise BusinessError(
+                f"非法资产类型: {asset_type}", error_code=ErrorCode.VALIDATION_ERROR
+            )
+        row = await self._db.execute(stmt)
+        if row.scalar_one_or_none() is None:
+            raise BusinessError(
+                f"资产不存在: {asset_type}:{asset_id}",
+                error_code=ErrorCode.NOT_FOUND,
+            )
 
     async def list_subscriptions(self, user_id: int) -> list[SubscriptionPref]:
         return await self._repo.list_subscriptions(user_id)

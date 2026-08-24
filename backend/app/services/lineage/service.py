@@ -2423,6 +2423,17 @@ class LineageService(BaseService):
                 {"ddl_type": i["ddl_type"], "node": i["node"], "desc": i["desc"]} for i in impacted
             ],
         }
+        # 资产订阅匹配键：从受影响节点提取 (TABLE/METRIC, id)，供"关注了该资产"的用户
+        # 也能收到 DDL 变更通知（P2 资产订阅，notify publish_event 解析）。
+        asset_keys: list[dict[str, str]] = []
+        for item in impacted:
+            node = item.get("node") or ""
+            if node.startswith("table:"):
+                asset_keys.append({"type": "TABLE", "id": node[len("table:"):]})
+            elif node.startswith("metric:"):
+                asset_keys.append({"type": "METRIC", "id": node[len("metric:"):]})
+        if asset_keys:
+            payload["asset_keys"] = asset_keys
         # 定向通知每个受影响资产 Owner（best-effort；notify 不 commit，不影响血缘事务）
         try:
             from app.services.notify.service import NotifyService

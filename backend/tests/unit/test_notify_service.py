@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from app.models.notify import EventLog, Notification, SubscriptionPref
 from app.services.notify.schemas import EventPublish, SubscriptionUpsert
 from app.services.notify.service import NotifyService
@@ -17,6 +19,7 @@ def _svc() -> tuple[NotifyService, MagicMock]:
     repo.list_enabled_subscriptions = AsyncMock(return_value=[])
     repo.save_notification = AsyncMock(side_effect=lambda n: n)
     repo.find_subscription = AsyncMock(return_value=None)
+    repo.find_asset_subscription = AsyncMock(return_value=None)
     repo.save_subscription = AsyncMock(side_effect=lambda s: s)
     repo.list_subscriptions = AsyncMock(return_value=[])
     repo.get_user_display_name = AsyncMock(return_value="操作者")
@@ -417,3 +420,120 @@ async def test_unread_count_delegates_to_repo() -> None:
     count = await svc.unread_count(3)
     assert count == 5
     repo.count_unread.assert_awaited_with(3)
+
+
+# ---- P2 资产订阅（按指标/源表 watch）----
+
+
+def test_extract_asset_keys_parses_variants() -> None:
+    """payload → 资产引用键解析：多资产/单资产/常见单键/无。"""
+    svc, _ = _svc()
+    keys = svc._extract_asset_keys(
+        {"asset_keys": [{"type": "TABLE", "id": "db.t"}, {"type": "METRIC", "id": "gmv"}]}
+    )
+    assert keys == [("TABLE", "db.t"), ("METRIC", "gmv")]
+    assert svc._extract_asset_keys(
+        {"asset_type": "metric", "asset_id": "gmv"}
+    ) == [("METRIC", "gmv")]
+    assert svc._extract_asset_keys({"metric_code": "gmv"}) == [("METRIC", "gmv")]
+    assert svc._extract_asset_keys({"table": "db.t"}) == [("TABLE", "db.t")]
+    assert svc._extract_asset_keys({"table_name": "db.t"}) == [("TABLE", "db.t")]
+    assert svc._extract_asset_keys({"level": "WARN"}) == []
+    assert svc._extract_asset_keys(None) == []
+
+
+async def test_upsert_asset_subscription_creates() -> None:
+    """资产订阅创建：event_type 置 NULL，asset 维度落库。"""
+    svc, repo = _svc()
+    svc._assert_asset_exists = AsyncMock()
+    out = await svc.upsert_subscription(
+        SubscriptionUpsert(
+            user_id=7, channel="IN_APP", asset_type="METRIC", asset_id="gmv", enabled=True
+        )
+    )
+    assert out.event_type is None
+    assert out.asset_type == "METRIC"
+    assert out.asset_id == "gmv"
+    repo.save_subscription.assert_awaited()
+    svc._assert_asset_exists.assert_awaited_with("METRIC", "gmv")
+
+
+async def test_upsert_asset_subscription_rejects_missing_asset() -> None:
+    """资产不存在：_assert_asset_exists 抛 NOT_FOUND，订阅不落库。"""
+    from app.core.exceptions import BusinessError
+
+    svc, repo = _svc()
+    svc._assert_asset_exists = AsyncMock(
+        side_effect=BusinessError("资产不存在: METRIC:ghost", error_code="NOT_FOUND")
+    )
+    with pytest.raises(BusinessError):
+        await svc.upsert_subscription(
+            SubscriptionUpsert(
+                user_id=7, channel="IN_APP", asset_type="METRIC", asset_id="ghost"
+            )
+        )
+    repo.save_subscription.assert_not_awaited()
+
+
+async def test_upsert_asset_subscription_requires_asset_id() -> None:
+    """asset_type 提供但 asset_id 缺失：校验拒绝。"""
+    from app.core.exceptions import BusinessError
+
+    svc, _ = _svc()
+    with pytest.raises(BusinessError):
+        await svc.upsert_subscription(
+            SubscriptionUpsert(user_id=7, channel="IN_APP", asset_type="METRIC")
+        )
+
+
+async def test_upsert_requires_event_or_asset() -> None:
+    """event_type 与 asset 均缺失：校验拒绝。"""
+    from app.core.exceptions import BusinessError
+
+    svc, _ = _svc()
+    with pytest.raises(BusinessError):
+        await svc.upsert_subscription(SubscriptionUpsert(user_id=7, channel="IN_APP"))
+
+
+async def test_publish_event_matches_asset_subscribers() -> None:
+    """事件 payload 携带 metric_code 时，资产订阅者收到通知（与事件订阅合并）。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(return_value=[])
+    repo.list_asset_subscribers = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=20, channel="IN_APP", asset_type="METRIC", asset_id="gmv", enabled=True
+            )
+        ]
+    )
+    out = await svc.publish_event(
+        EventPublish(
+            event_type="lineage.ddl_changed",
+            payload={"impacted": [], "asset_keys": [{"type": "METRIC", "id": "gmv"}]},
+        )
+    )
+    assert out["notifications"] == 1
+    repo.list_asset_subscribers.assert_awaited_with("METRIC", "gmv")
+
+
+async def test_publish_event_dedup_asset_and_event_subscriber() -> None:
+    """同一用户同时命中事件订阅与资产订阅：只投递一次（事件订阅优先）。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=20, channel="IN_APP", event_type="lineage.ddl_changed", enabled=True
+            )
+        ]
+    )
+    repo.list_asset_subscribers = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=20, channel="IN_APP", asset_type="METRIC", asset_id="gmv", enabled=True
+            )
+        ]
+    )
+    out = await svc.publish_event(
+        EventPublish(event_type="lineage.ddl_changed", payload={"metric_code": "gmv"})
+    )
+    assert out["notifications"] == 1  # 合并去重，只发一条

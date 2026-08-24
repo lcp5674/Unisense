@@ -218,6 +218,18 @@ class NotifyRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def find_asset_subscription(
+        self, user_id: int, channel: str, asset_type: str, asset_id: str
+    ) -> SubscriptionPref | None:
+        """按资产维度幂等查找订阅（P2 资产订阅：用户×渠道×资产唯一）。"""
+        stmt = select(SubscriptionPref).where(
+            SubscriptionPref.user_id == user_id,
+            SubscriptionPref.channel == channel,
+            SubscriptionPref.asset_type == asset_type,
+            SubscriptionPref.asset_id == asset_id,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def list_subscriptions(self, user_id: int) -> list[SubscriptionPref]:
         stmt = select(SubscriptionPref).where(SubscriptionPref.user_id == user_id)
         return list((await self._session.execute(stmt)).scalars().all())
@@ -225,6 +237,17 @@ class NotifyRepository:
     async def list_enabled_subscriptions(self, event_type: str) -> list[SubscriptionPref]:
         stmt = select(SubscriptionPref).where(
             SubscriptionPref.event_type == event_type,
+            SubscriptionPref.enabled.is_(True),
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_asset_subscribers(
+        self, asset_type: str, asset_id: str
+    ) -> list[SubscriptionPref]:
+        """按资产维度查找启用订阅者（P2 资产订阅：关注某指标/源表的用户）。"""
+        stmt = select(SubscriptionPref).where(
+            SubscriptionPref.asset_type == asset_type,
+            SubscriptionPref.asset_id == asset_id,
             SubscriptionPref.enabled.is_(True),
         )
         return list((await self._session.execute(stmt)).scalars().all())
