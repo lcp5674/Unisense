@@ -86,15 +86,17 @@ function TestResultBadge({ result }: { result: LlmConfigTestResult }) {
       : "";
     return (
       <Tag icon={<CheckCircleOutlined />} color="success">
-        连通成功 · {result.latency_ms} ms · {result.model}
+        连通成功 · 推理正常 · {result.latency_ms} ms · {result.model}
         {modelInfo}
       </Tag>
     );
   }
+  // chat=false：网关可达但模型真实推理失败（后端 error 已含具体原因）
+  const prefix = result.chat === false ? "推理失败" : "连通失败";
   return (
     <Tag icon={<CloseCircleOutlined />} color="error">
       <span>
-        连通失败：{result.error || "未知错误"}
+        {prefix}：{result.error || "未知错误"}
         {result.detail?.request_url ? (
           <span className="muted" style={{ fontSize: 11, marginLeft: 8 }}>
             （{String(result.detail.request_url)}）

@@ -123,10 +123,13 @@ class LlmConfigSecretResponse(BaseModel):
 
 
 class LlmConfigTestResult(BaseModel):
-    """LLM 连通性测试结果（方案 A'：仅 GET /models 快速验证，不触发真实推理）。
+    """LLM 连通性测试结果（方案 B'：GET /models 快速验证 + 真实 chat 探测）。
 
-    ok=True 表示地址可连、鉴权通过、模型列表可读（毫秒级反馈）；
-    ``models`` 为 /models 返回的可用模型 ID 列表（空列表表示网关未返回或结构异常）。
+    ok=True 表示地址可连、鉴权通过、模型列表可读（GET /models），且模型能真实
+    产出推理结果（POST /chat/completions，极小 max_tokens）——让「测试通过」
+    等价于「可推理」，避免仅 /models 可达但模型实际不可用（如 400 Model
+    unavailable）的假绿；``models`` 为 /models 返回的可用模型 ID 列表，
+    ``chat`` 标记真实推理探测是否通过（None=未执行，如 GET /models 已失败）。
     """
 
     ok: bool
@@ -135,6 +138,9 @@ class LlmConfigTestResult(BaseModel):
     error: str = ""
     detail: dict[str, Any] | None = None
     models: list[str] | None = None
+    chat: bool | None = Field(
+        None, description="真实推理探测是否通过（None=未执行/无法判定）"
+    )
 
 
 class LlmModelsRequest(BaseModel):

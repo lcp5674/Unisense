@@ -356,7 +356,7 @@ describe("SystemConfig LLM 路由配置", () => {
       expect(mockCreate).toHaveBeenCalled();
       expect(mockTest).toHaveBeenCalledWith({ instance_id: 2 });
     });
-    expect(await screen.findByText(/连通成功 · 88 ms/)).toBeTruthy();
+    expect(await screen.findByText(/连通成功 · 推理正常 · 88 ms/)).toBeTruthy();
   });
 
   it("P0 保存后一键启用流：连通失败 → 展示失败徽标 + 去编辑密钥入口", async () => {

@@ -289,7 +289,11 @@ class TestTestConnection:
         mock_models_resp = MagicMock()
         mock_models_resp.status_code = 200
         mock_models_resp.json.return_value = {"data": [{"id": "m1"}, {"id": "m2"}]}
+        mock_chat_resp = MagicMock()
+        mock_chat_resp.status_code = 200
+        mock_chat_resp.json.return_value = {"choices": [{"message": {"content": "pong"}}]}
         mock_client.get.return_value = mock_models_resp
+        mock_client.post.return_value = mock_chat_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
@@ -297,8 +301,12 @@ class TestTestConnection:
         assert result.ok is True
         assert result.model == "m1"
         assert result.models == ["m1", "m2"]
-        # 方案 A'：只做 GET /models，不触发真实推理（POST 不应被调用）
-        mock_client.post.assert_not_awaited()
+        assert result.chat is True
+        # 方案 B'：两步探测——GET /models 之后真实 POST 极小 chat 验证可推理
+        mock_client.post.assert_awaited_once()
+        post_body = mock_client.post.call_args.kwargs["json"]
+        assert post_body["max_tokens"] <= 5
+        assert "response_format" not in post_body
 
     async def test_http_error(self) -> None:
         """GET /models 返回 401 → 鉴权失败（毫秒级，不触发真实推理）。"""
@@ -390,7 +398,7 @@ class TestTestConnection:
         )
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = {"model": "deepseek-chat"}
+        mock_resp.json.return_value = {"choices": [{"message": {"content": "pong"}}]}
         mock_client = AsyncMock()
         mock_models_resp = MagicMock()
         mock_models_resp.status_code = 200
@@ -415,8 +423,11 @@ class TestTestConnection:
         mock_models_resp = MagicMock()
         mock_models_resp.status_code = 200
         mock_models_resp.json.return_value = {"data": [{"id": "gpt-4o-mini"}]}
+        mock_chat_resp = MagicMock()
+        mock_chat_resp.status_code = 200
+        mock_chat_resp.json.return_value = {"choices": [{"message": {"content": "pong"}}]}
         mock_client.get.return_value = mock_models_resp
-        mock_client.post = AsyncMock()
+        mock_client.post.return_value = mock_chat_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
@@ -425,7 +436,11 @@ class TestTestConnection:
         called_url = mock_client.get.call_args[0][0]
         assert called_url == "https://api.openai.com/v1/models"
         assert "/v1/v1/" not in called_url
-        mock_client.post.assert_not_awaited()
+        # 方案 B'：真实 chat 探测也走正确端点（不得拼成 /v1/v1/chat/completions）
+        mock_client.post.assert_awaited_once()
+        chat_url = mock_client.post.call_args[0][0]
+        assert chat_url == "https://api.openai.com/v1/chat/completions"
+        assert "/v1/v1/" not in chat_url
 
     async def test_test_instance_decrypt_and_probe(self) -> None:
         svc, s = await self._svc()
@@ -434,7 +449,11 @@ class TestTestConnection:
         mock_models_resp = MagicMock()
         mock_models_resp.status_code = 200
         mock_models_resp.json.return_value = {"data": [{"id": "deepseek-chat"}]}
+        mock_chat_resp = MagicMock()
+        mock_chat_resp.status_code = 200
+        mock_chat_resp.json.return_value = {"choices": [{"message": {"content": "pong"}}]}
         mock_client.get.return_value = mock_models_resp
+        mock_client.post.return_value = mock_chat_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
@@ -447,6 +466,54 @@ class TestTestConnection:
         result = await svc.test_instance(99)
         assert result.ok is False
         assert "不存在" in result.error
+
+    async def test_chat_probe_http_failure_marks_unavailable(self) -> None:
+        """GET /models 通过但真实 chat 探测返回 4xx（如 400 Model unavailable）→ 判不可推理。"""
+        svc, _ = await self._svc()
+        payload = LlmConfigPayload(
+            base_url="https://api.example.com", api_key="sk-x", model="m1", timeout=30
+        )
+        mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_models_resp.json.return_value = {"data": [{"id": "m1"}]}
+        mock_chat_resp = MagicMock()
+        mock_chat_resp.status_code = 400
+        mock_chat_resp.text = '{"error":"Model is unavailable"}'
+        mock_client.get.return_value = mock_models_resp
+        mock_client.post.return_value = mock_chat_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        assert result.ok is False
+        assert result.chat is False
+        assert "真实推理失败" in result.error
+        assert "400" in result.error
+        # 第一步（GET /models）通过，仍带回模型列表供排查
+        assert result.models == ["m1"]
+        mock_client.post.assert_awaited_once()
+
+    async def test_chat_probe_network_error_marks_unavailable(self) -> None:
+        """GET /models 通过但 chat 探测网络错误（如超时）→ 判不可推理。"""
+        svc, _ = await self._svc()
+        payload = LlmConfigPayload(
+            base_url="https://api.example.com", api_key="sk-x", model="m1", timeout=30
+        )
+        mock_client = AsyncMock()
+        mock_models_resp = MagicMock()
+        mock_models_resp.status_code = 200
+        mock_models_resp.json.return_value = {"data": [{"id": "m1"}]}
+        mock_client.get.return_value = mock_models_resp
+        mock_client.post.side_effect = httpx.ConnectError("timeout")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        assert result.ok is False
+        assert result.chat is False
+        assert "真实推理失败" in result.error
+        mock_client.post.assert_awaited_once()
 
 
 class TestFetchModels:
@@ -545,8 +612,8 @@ class TestFetchModels:
 
 
 class TestQuickProbe:
-    """方案 A'（仅 GET /models 探测）的快速失败路径：
-    连通/鉴权/网关错误/不支持 /models 均毫秒级返回，不触发真实推理。
+    """两步探测的第一步（GET /models）快速失败路径：
+    连通/鉴权/网关错误/不支持 /models 均毫秒级短路返回，不进入真实 chat 探测。
     """
 
     async def _svc(self) -> tuple[LlmConfigService, MagicMock]:

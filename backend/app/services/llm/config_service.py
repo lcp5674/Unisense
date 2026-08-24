@@ -25,6 +25,7 @@ from app.services.llm.client import (
     DeterministicFallbackLlmClient,
     LlmClient,
     LlmRouterClient,
+    chat_completions_url,
     models_url,
     normalize_base_url,
 )
@@ -333,11 +334,12 @@ class LlmConfigService:
         )
 
     async def test_connection(self, payload: LlmConfigPayload | None) -> LlmConfigTestResult:
-        """测试 OpenAI 协议连通性：base_url 可达 + 鉴权通过 + 模型可用。
+        """测试 OpenAI 协议连通性：base_url 可达 + 鉴权通过 + 模型可推理。
 
         payload 为空时使用已保存的生效配置；否则使用载荷临时测试（不落库）。
-        采用直接 POST /v1/chat/completions（短超时、无 response_format），
-        兼容不支持 json_object 约束的中小网关；不经过熔断器（测试应独立于运行态）。
+        两步探测：先 GET /models 验证连通与鉴权，再真实 POST /chat/completions
+        （短超时、无 response_format）验证模型可推理，兼容不支持 json_object
+        约束的中小网关；不经过熔断器（测试应独立于运行态）。
         """
         if payload is not None:
             base_url = payload.base_url.strip()
@@ -360,12 +362,16 @@ class LlmConfigService:
     async def _probe(
         self, base_url: str, api_key: str, model: str, timeout: float
     ) -> LlmConfigTestResult:
-        """连通性测试（方案 A'）：仅做轻量 GET /models 验证连通 + 鉴权。
+        """连通性测试（方案 B'）：GET /models 快速验证 + 真实 chat 探测。
 
-        不再触发真实推理——「连通成功」定义为地址可连、鉴权通过、模型列表可读，
-        毫秒级反馈；真实推理耗时属于模型性能指标（本地模型 prefill 可达数秒），
-        不阻塞连通性判断。网关不支持 /models 端点（404/405/501）时返回明确
-        失败提示，而非回退慢速推理。
+        两步探测：
+        1. GET /models 验证地址可连、鉴权通过、模型列表可读（毫秒级）；
+        2. 真实 POST /chat/completions（极小 max_tokens、无 response_format）
+           验证模型能真实产出推理结果——让「测试通过」等价于「可推理」，避免
+           仅 /models 可达但模型实际不可用（如 400 Model unavailable）的假绿。
+
+        第一步失败（鉴权/网络/网关不支持 /models）时直接返回，不触发第二步。
+        网关不支持 /models 端点（404/405/501）时返回明确失败提示。
         """
         if not base_url or not api_key:
             return LlmConfigTestResult(
@@ -373,16 +379,114 @@ class LlmConfigService:
                 error="未配置 base_url 或 api_key",
                 model=model,
             )
-        return await self._quick_probe(base_url, api_key, timeout, model=model)
+        # 第一步：GET /models 快速探测（连通 + 鉴权 + 模型列表）
+        quick = await self._quick_probe(base_url, api_key, timeout, model=model)
+        if not quick.ok:
+            return quick
+        # 第二步：真实 chat 探测（模型能否产出推理结果）
+        chat = await self._chat_probe(base_url, api_key, model, timeout)
+        total_ms = (quick.latency_ms or 0) + (chat.latency_ms or 0)
+        if not chat.ok:
+            return LlmConfigTestResult(
+                ok=False,
+                latency_ms=total_ms,
+                model=model,
+                error=(
+                    "网关可达且鉴权通过（GET /models 正常），但模型真实推理失败："
+                    f"{chat.error}"
+                ),
+                detail=chat.detail,
+                models=quick.models,
+                chat=False,
+            )
+        return LlmConfigTestResult(
+            ok=True,
+            latency_ms=total_ms,
+            model=model,
+            models=quick.models,
+            chat=True,
+        )
+
+    async def _chat_probe(
+        self, base_url: str, api_key: str, model: str, timeout: float
+    ) -> LlmConfigTestResult:
+        """真实 chat 探测：极小生成量（max_tokens=5）验证模型能产出推理结果。
+
+        不带 response_format 约束（兼容不支持 json_object 约束的中小网关），
+        短超时（上限 15 秒，覆盖本地模型 prefill 偏慢的场景）；成功定义为
+        HTTP 200 且响应含 ``choices[].message.content``（非 None）。
+        4xx/5xx（如 400 Model unavailable、401 无额度、404 模型下线）均判失败，
+        并携带网关返回的错误摘要供前端展示。
+        """
+        start = time.monotonic()
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5,
+            "temperature": 0,
+        }
+        req_url = chat_completions_url(base_url)
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(min(timeout, 15.0)),
+                headers={"Authorization": f"Bearer {api_key}"},
+            ) as client:
+                resp = await client.post(req_url, json=payload)
+        except httpx.HTTPError as exc:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            logger.warning("llm_chat_probe_failed: %s", exc)
+            return LlmConfigTestResult(
+                ok=False,
+                latency_ms=latency_ms,
+                model=model,
+                error=f"{type(exc).__name__}: {exc}{_loopback_hint(base_url)}",
+                detail={"status_code": None, "request_url": req_url},
+            )
+        latency_ms = int((time.monotonic() - start) * 1000)
+        if resp.status_code == 200:
+            try:
+                content = resp.json()["choices"][0]["message"].get("content")
+            except Exception:  # noqa: BLE001 - 响应结构异常按不可推理处理
+                content = None
+            if content is not None:
+                logger.info(
+                    "llm_chat_probe_ok: url=%s latency=%dms model=%s",
+                    req_url,
+                    latency_ms,
+                    model,
+                )
+                return LlmConfigTestResult(
+                    ok=True, latency_ms=latency_ms, model=model
+                )
+            return LlmConfigTestResult(
+                ok=False,
+                latency_ms=latency_ms,
+                model=model,
+                error="响应缺少 choices[].message.content（结构异常）",
+                detail={"status_code": 200, "request_url": req_url},
+            )
+        logger.warning(
+            "llm_chat_probe_failed: url=%s status=%d model=%s",
+            req_url,
+            resp.status_code,
+            model,
+        )
+        return LlmConfigTestResult(
+            ok=False,
+            latency_ms=latency_ms,
+            model=model,
+            error=f"HTTP {resp.status_code}（请求 {req_url}）: {resp.text[:120]}",
+            detail={"status_code": resp.status_code, "request_url": req_url},
+        )
 
     async def _quick_probe(
         self, base_url: str, api_key: str, timeout: float, model: str = ""
     ) -> LlmConfigTestResult:
-        """轻量快速探测：GET /models 验证连通 + 鉴权 + 模型可用（毫秒级）。
+        """两步探测的第一步：GET /models 验证连通 + 鉴权 + 模型可用（毫秒级）。
 
-        成功（HTTP 200）即判连通成功，并带回可用模型列表；连通失败 / 鉴权失败 /
+        成功（HTTP 200）即判第一步通过，并带回可用模型列表；连通失败 / 鉴权失败 /
         网关 5xx / 网关不支持 /models（404/405/501）均直接返回明确失败原因，
-        不再回退真实推理（避免本地模型 prefill 慢导致测试阻塞数秒）。
+        由 ``_probe`` 短路返回，不再进入真实 chat 探测。
         """
         start = time.monotonic()
         try:

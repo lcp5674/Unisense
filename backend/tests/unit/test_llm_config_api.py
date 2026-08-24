@@ -274,7 +274,7 @@ async def test_write_rejected_for_viewer() -> None:
 async def test_test_connection_success(llm_client: httpx.AsyncClient) -> None:
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    mock_resp.json.return_value = {"model": "m1"}
+    mock_resp.json.return_value = {"choices": [{"message": {"content": "pong"}}], "model": "m1"}
     # 两步探测：先 GET /models 快速探测（返回 200 通过），再 POST 真实推理
     mock_models_resp = MagicMock()
     mock_models_resp.status_code = 200
@@ -298,6 +298,7 @@ async def test_test_connection_success(llm_client: httpx.AsyncClient) -> None:
     assert resp.status_code == 200
     assert data["ok"] is True
     assert data["model"] == "m1"
+    assert data["chat"] is True
 
 
 async def test_test_instance_by_id() -> None:
@@ -311,7 +312,10 @@ async def test_test_instance_by_id() -> None:
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    mock_resp.json.return_value = {"model": "deepseek-chat"}
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"content": "pong"}}],
+        "model": "deepseek-chat",
+    }
     # 两步探测：GET /models 快速探测返回 200，再 POST 真实推理
     mock_models_resp = MagicMock()
     mock_models_resp.status_code = 200
