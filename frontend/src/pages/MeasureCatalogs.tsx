@@ -166,6 +166,7 @@ export function MeasureCatalogs() {
         synonyms: (f.synonyms?.value as string[]) || [],
         category: f.category?.value || "OTHER",
         stat_caliber: f.stat_caliber?.value || undefined,
+        description: f.description?.value || values.description,
         domain: f.domain?.value || values.domain,
       });
       setSuggestResult(res);
@@ -411,7 +412,7 @@ export function MeasureCatalogs() {
               loading={suggestLoading}
               disabled={!!editing}
             >
-              AI 推断（名称+描述 → 回填编码/格式/分类/口径）
+              AI 推断（自动回填全部字段，可修改）
             </Button>
             <span className="muted" style={{ fontSize: 12 }}>
               仅新建时可用；推断结果可修改后再提交
@@ -432,7 +433,9 @@ export function MeasureCatalogs() {
                     ["default_unit", "单位"],
                     ["default_decimal_places", "小数位"],
                     ["stat_caliber", "统计口径"],
+                    ["source_system", "源头系统"],
                     ["synonyms", "同义词"],
+                    ["description", "描述"],
                   ].map(([key, label]) => {
                     const sf = suggestResult.fields[key];
                     if (!sf) return null;

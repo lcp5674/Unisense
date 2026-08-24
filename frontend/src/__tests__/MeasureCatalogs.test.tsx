@@ -63,6 +63,7 @@ const suggestRes: MeasureSuggestResult = {
     stat_caliber: { value: "收费明细按结算日期去重后求和", source: "llm", confidence: 0.7, reason: "AI 推断" },
     synonyms: { value: ["门诊收入"], source: "llm", confidence: 0.7, reason: "AI 推断" },
     source_system: { value: ["HIS"], source: "rule", confidence: 0.6, reason: "医疗域推断" },
+    description: { value: "统计门诊收费总额，含药品/检查/检验费用", source: "llm", confidence: 0.7, reason: "AI 推断" },
     domain: { value: "medical_fee", source: "rule", confidence: 0.7, reason: "沿用输入" },
   },
 };
@@ -147,10 +148,14 @@ describe("MeasureCatalogs 度量目录 AI 推断", () => {
         "medical_fee_men_zhen_shou_fei_amount",
       );
     });
-    // 推断结果面板：AI 项（统计口径/同义词）与规则项（编码/单位）来源标注
+    // 推断结果面板：AI 项（统计口径/同义词/描述）与规则项（编码/单位）来源标注
     expect((await screen.findAllByText(/收费明细按结算日期去重后求和/)).length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText(/AI · 置信度 70%/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText(/规则 · 置信度 90%/).length).toBeGreaterThanOrEqual(1);
+    // 描述词由 LLM 精炼并回填到表单（覆盖用户输入的原始描述）
+    await waitFor(() => {
+      expect(within(modal).getByLabelText("描述")).toHaveValue("统计门诊收费总额，含药品/检查/检验费用");
+    });
   });
 
   it("提交携带推断回填的 category/stat_caliber", async () => {
@@ -172,6 +177,7 @@ describe("MeasureCatalogs 度量目录 AI 推断", () => {
           name: "门诊收费金额",
           category: "FEE",
           stat_caliber: "收费明细按结算日期去重后求和",
+          description: "统计门诊收费总额，含药品/检查/检验费用",
         }),
       ),
     );
