@@ -11,16 +11,24 @@ vi.mock("../api", () => ({
   updateMeasureCatalog: vi.fn(),
   publishMeasureCatalog: vi.fn(),
   deprecateMeasureCatalog: vi.fn(),
+  submitMeasureCatalog: vi.fn(),
+  approveMeasureCatalog: vi.fn(),
+  rejectMeasureCatalog: vi.fn(),
+  fetchCurrentUser: vi.fn(),
   listDomainTree: vi.fn(),
   autoSuggestMeasureCatalog: vi.fn(),
   UnisenseApiError: class extends Error {},
 }));
 
 import {
+  approveMeasureCatalog,
   autoSuggestMeasureCatalog,
   createMeasureCatalog,
+  fetchCurrentUser,
   listDomainTree,
   listMeasureCatalogs,
+  rejectMeasureCatalog,
+  submitMeasureCatalog,
 } from "../api";
 import { PermissionProvider } from "../hooks/usePermission";
 
@@ -28,6 +36,10 @@ const mockedList = vi.mocked(listMeasureCatalogs);
 const mockedDomains = vi.mocked(listDomainTree);
 const mockedSuggest = vi.mocked(autoSuggestMeasureCatalog);
 const mockedCreate = vi.mocked(createMeasureCatalog);
+const mockedSubmit = vi.mocked(submitMeasureCatalog);
+const mockedApprove = vi.mocked(approveMeasureCatalog);
+const mockedReject = vi.mocked(rejectMeasureCatalog);
+const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 
 const measure: MeasureCatalog = {
   id: 1,
@@ -114,6 +126,14 @@ describe("MeasureCatalogs 度量目录 AI 推断", () => {
         children: [],
       },
     ]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "管理员",
+      role: "platform_admin",
+      domain: null,
+      org_id: 1,
+    } as never);
   });
 
   it("渲染度量列表（含度量分类列）", async () => {
@@ -189,5 +209,88 @@ describe("MeasureCatalogs 度量目录 AI 推断", () => {
     fireEvent.click(within(modal).getByRole("button", { name: /AI 推断/ }));
     expect(await screen.findByText(/请先输入度量中文名/)).toBeInTheDocument();
     expect(mockedSuggest).not.toHaveBeenCalled();
+  });
+});
+
+describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDomains.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "管理员",
+      role: "platform_admin",
+      domain: null,
+      org_id: 1,
+    } as never);
+  });
+
+  it("DRAFT 度量显示「提交审核」，填写说明后调用 submitMeasureCatalog", async () => {
+    mockedList.mockResolvedValue({ items: [measure], total: 1, page: 1, page_size: 20 });
+    mockedSubmit.mockResolvedValue({ ...measure, status: "REVIEW" });
+    renderCatalogs();
+
+    fireEvent.click(await screen.findByRole("button", { name: /提交审核/ }));
+    const modal = await screen.findByRole("dialog");
+    fireEvent.change(within(modal).getByLabelText("提交说明"), {
+      target: { value: "门诊收费口径已与业务对齐" },
+    });
+    fireEvent.click(within(modal).getByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedSubmit).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei", {
+        change_reason: "门诊收费口径已与业务对齐",
+        reviewer_type: null,
+        reviewer_id: null,
+        reviewer_domain: null,
+      }),
+    );
+    expect(await screen.findByText(/已提交审核/)).toBeInTheDocument();
+  });
+
+  it("REVIEW 度量（platform_admin 可审）审核通过并发布", async () => {
+    const reviewRow = { ...measure, status: "REVIEW", submitted_by: 2 };
+    mockedList.mockResolvedValue({ items: [reviewRow], total: 1, page: 1, page_size: 20 });
+    mockedApprove.mockResolvedValue({ ...measure, status: "PUBLISHED" });
+    renderCatalogs();
+
+    fireEvent.click(await screen.findByRole("button", { name: "审核通过并发布" }));
+    await waitFor(() =>
+      expect(mockedApprove).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei", { comment: null }),
+    );
+    expect(await screen.findByText(/审核通过，已发布/)).toBeInTheDocument();
+  });
+
+  it("REVIEW 度量驳回：填写原因后调用 rejectMeasureCatalog", async () => {
+    const reviewRow = { ...measure, status: "REVIEW", submitted_by: 2 };
+    mockedList.mockResolvedValue({ items: [reviewRow], total: 1, page: 1, page_size: 20 });
+    mockedReject.mockResolvedValue({ ...measure, status: "DRAFT" });
+    renderCatalogs();
+
+    fireEvent.click(await screen.findByRole("button", { name: "驳回该度量" }));
+    const modal = await screen.findByRole("dialog");
+    fireEvent.change(within(modal).getByLabelText("驳回原因"), {
+      target: { value: "统计口径与业务实际不符" },
+    });
+    fireEvent.click(within(modal).getByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedReject).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei", {
+        reason: "统计口径与业务实际不符",
+      }),
+    );
+    expect(await screen.findByText(/已驳回，可修改后重新提交/)).toBeInTheDocument();
+  });
+
+  it("REVIEW 状态展示「审核中」且编辑按钮锁定", async () => {
+    const reviewRow = { ...measure, status: "REVIEW", submitted_by: 2 };
+    mockedList.mockResolvedValue({ items: [reviewRow], total: 1, page: 1, page_size: 20 });
+    renderCatalogs();
+
+    expect(await screen.findByText("审核中")).toBeInTheDocument();
+    // 编辑按钮 disabled（审核中锁定）
+    const editBtn = document.querySelector('button[disabled] .anticon-edit');
+    expect(editBtn).toBeTruthy();
   });
 });

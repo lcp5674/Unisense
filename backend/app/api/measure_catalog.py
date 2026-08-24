@@ -8,19 +8,22 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
-from app.core.audit import write_audit
+from app.core.audit import client_ip, write_audit
 from app.core.exceptions import AuthError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.measure_catalog.schemas import (
+    MeasureApproveRequest,
     MeasureAutoSuggestRequest,
     MeasureCreate,
+    MeasureRejectRequest,
     MeasureResponse,
+    MeasureSubmitRequest,
     MeasureUpdate,
 )
 from app.services.measure_catalog.service import MeasureCatalogService
@@ -29,9 +32,14 @@ router = APIRouter(prefix="/measure-catalogs", tags=["measure_catalog"])
 
 _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
+# 审核端点角色门禁（对齐指标审核流）：平台管理员/域管理员/评审员可审
+_REVIEW_ROLES = ("platform_admin", "domain_admin", "reviewer")
+# 直发通道仅平台管理员（系统/种子/管理员兜底），业务用户发布须走 submit+approve 审核流
+_ADMIN_ROLES = ("platform_admin",)
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+_REVIEW_DEPS = [Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)]
 
 # 域作用域守卫（P1-10）：domain_admin/metric_owner 仅可操作本域资源
 _SCOPED_ROLES = ("domain_admin", "metric_owner")
@@ -161,7 +169,11 @@ async def update_measure(
     return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.post("/{measure_code}/publish", dependencies=_SCOPED_DEPS)
+@router.post(
+    "/{measure_code}/publish",
+    # 直发通道仅平台管理员（系统/种子/管理员兜底）；业务用户发布须走 submit+approve 审核流
+    dependencies=_SCOPED_DEPS + [Depends(require_roles(*_ADMIN_ROLES))],
+)
 async def publish_measure(
     measure_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -180,6 +192,105 @@ async def publish_measure(
     )
     await db.commit()
     return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/{measure_code}/submit",
+    response_model=ApiResponse[MeasureResponse],
+    summary="提交逻辑度量审核（DRAFT → REVIEW）",
+    dependencies=_SCOPED_DEPS,
+)
+async def submit_measure(
+    measure_code: str,
+    request: MeasureSubmitRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """DRAFT → REVIEW，提交审核（度量是原子指标继承源，发布须先审）。"""
+    service = MeasureCatalogService(db)
+    measure = await service.submit_measure(
+        measure_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="measure_catalog.submit",
+        entity_type="measure_catalog",
+        entity_id=measure_code,
+        detail={"change_reason": request.change_reason},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=MeasureResponse.from_model(measure), trace_id=trace_id)
+
+
+@router.post(
+    "/{measure_code}/approve",
+    response_model=ApiResponse[MeasureResponse],
+    summary="审核通过逻辑度量（REVIEW → PUBLISHED）",
+    dependencies=_REVIEW_DEPS,
+)
+async def approve_measure(
+    measure_code: str,
+    request: MeasureApproveRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """REVIEW → PUBLISHED，审核通过（评审人身份校验 + 自审禁止）。"""
+    service = MeasureCatalogService(db)
+    measure = await service.approve_measure(
+        measure_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="measure_catalog.approve",
+        entity_type="measure_catalog",
+        entity_id=measure_code,
+        detail={"comment": request.comment},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=MeasureResponse.from_model(measure), trace_id=trace_id)
+
+
+@router.post(
+    "/{measure_code}/reject",
+    response_model=ApiResponse[MeasureResponse],
+    summary="审核驳回逻辑度量（REVIEW → DRAFT）",
+    dependencies=_REVIEW_DEPS,
+)
+async def reject_measure(
+    measure_code: str,
+    request: MeasureRejectRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """REVIEW → DRAFT，驳回审核（驳回原因落库并通知提交人）。"""
+    service = MeasureCatalogService(db)
+    measure = await service.reject_measure(
+        measure_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="measure_catalog.reject",
+        entity_type="measure_catalog",
+        entity_id=measure_code,
+        detail={"reason": request.reason},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=MeasureResponse.from_model(measure), trace_id=trace_id)
 
 
 @router.post("/{measure_code}/deprecate", dependencies=_SCOPED_DEPS)

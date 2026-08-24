@@ -15,8 +15,11 @@ from app.core.exceptions import ConflictError, NotFoundError, UnisenseError
 from app.models.measure_catalog import MeasureCatalog
 from app.services.measure_catalog.repository import MeasureCatalogRepository
 from app.services.measure_catalog.schemas import (
+    MeasureApproveRequest,
     MeasureAutoSuggestRequest,
     MeasureCreate,
+    MeasureRejectRequest,
+    MeasureSubmitRequest,
     MeasureUpdate,
 )
 from app.services.measure_catalog.service import MeasureCatalogService
@@ -74,6 +77,16 @@ def _m(measure_code: str = "pay_amt", **kw) -> MeasureCatalog:
         domain=kw.get("domain", "sales"),
         owner_id=kw.get("owner_id", 1),
         status=kw.get("status", "DRAFT"),
+        # 审核流字段（透传便于指派/自审用例构造）
+        submitted_by=kw.get("submitted_by"),
+        approver_id=kw.get("approver_id"),
+        reviewer_id=kw.get("reviewer_id"),
+        reviewer_type=kw.get("reviewer_type"),
+        reviewer_domain=kw.get("reviewer_domain"),
+        reject_reason=kw.get("reject_reason"),
+        reject_reviewer_id=kw.get("reject_reviewer_id"),
+        rejected_at=kw.get("rejected_at"),
+        reviewed_at=kw.get("reviewed_at"),
     )
 
 
@@ -293,6 +306,108 @@ class TestMeasureService:
         repo.count_metrics_by_measure = AsyncMock(return_value=0)
         out = await svc.deprecate_measure("amt")
         assert out.status == "DEPRECATED"
+
+
+# ---------- 审核流（submit/approve/reject，对齐指标审核流 TD §13） ----------
+
+
+async def _review_svc(measure: MeasureCatalog) -> tuple[MeasureCatalogService, MagicMock]:
+    """构造审核服务：mock repo.get 返回指定度量，notify 静默。"""
+    svc, repo = await _svc()
+    repo.get = AsyncMock(return_value=measure)
+    svc._notify_reviewers = AsyncMock()  # noqa: SLF001
+    svc._notify_submitter = AsyncMock()  # noqa: SLF001
+    return svc, repo
+
+
+class TestMeasureReviewFlow:
+    async def test_submit_requires_draft(self) -> None:
+        svc, _ = await _review_svc(_m("amt", status="PUBLISHED"))
+        with pytest.raises(UnisenseError):
+            await svc.submit_measure("amt", MeasureSubmitRequest(change_reason="发布新度量"), 1, "metric_owner")
+
+    async def test_submit_requires_stat_caliber(self) -> None:
+        svc, _ = await _review_svc(_m("amt", status="DRAFT", stat_caliber=None))
+        with pytest.raises(UnisenseError):
+            await svc.submit_measure("amt", MeasureSubmitRequest(change_reason="发布新度量"), 1, "metric_owner")
+
+    async def test_submit_sets_review_with_reviewer(self) -> None:
+        m = _m("amt", status="DRAFT", stat_caliber="收费明细求和")
+        svc, _ = await _review_svc(m)
+        out = await svc.submit_measure(
+            "amt", MeasureSubmitRequest(change_reason="发布新度量", reviewer_id=9, reviewer_type="user"), 1, "metric_owner"
+        )
+        assert out.status == "REVIEW"
+        assert out.submitted_by == 1
+        assert out.reviewer_id == 9
+        assert out.reviewer_type == "user"
+
+    async def test_submit_owner_only(self) -> None:
+        svc, _ = await _review_svc(_m("amt", owner_id=5, stat_caliber="x"))
+        with pytest.raises(UnisenseError):
+            await svc.submit_measure("amt", MeasureSubmitRequest(change_reason="越权提交"), 1, "metric_owner")
+
+    async def test_approve_requires_review(self) -> None:
+        svc, _ = await _review_svc(_m("amt", status="DRAFT"))
+        with pytest.raises(UnisenseError):
+            await svc.approve_measure("amt", MeasureApproveRequest(), 9, "domain_admin")
+
+    async def test_approve_self_review_blocked(self) -> None:
+        # 指派给提交人本人（自审场景）：评审人身份校验通过，自审禁止拦截
+        m = _m("amt", status="REVIEW", submitted_by=1, reviewer_type="user", reviewer_id=1)
+        svc, _ = await _review_svc(m)
+        with pytest.raises(UnisenseError) as exc:
+            await svc.approve_measure("amt", MeasureApproveRequest(), 1, "reviewer")
+        assert exc.value.error_code == "SELF_REVIEW_BLOCKED"
+
+    async def test_approve_sets_published(self) -> None:
+        m = _m("amt", status="REVIEW", submitted_by=1)
+        svc, _ = await _review_svc(m)
+        out = await svc.approve_measure("amt", MeasureApproveRequest(comment="口径合理"), 9, "domain_admin")
+        assert out.status == "PUBLISHED"
+        assert out.approver_id == 9
+        assert out.reviewed_at is not None
+
+    async def test_approve_assigned_reviewer_only(self) -> None:
+        m = _m("amt", status="REVIEW", submitted_by=1, reviewer_type="user", reviewer_id=9)
+        svc, _ = await _review_svc(m)
+        # 非被指派评审人（domain_admin 兜底不覆盖 user 指派）被拒
+        with pytest.raises(UnisenseError):
+            await svc.approve_measure("amt", MeasureApproveRequest(), 5, "domain_admin")
+        # 被指派者通过
+        out = await svc.approve_measure("amt", MeasureApproveRequest(), 9, "reviewer")
+        assert out.status == "PUBLISHED"
+
+    async def test_approve_domain_reviewer_scope(self) -> None:
+        m = _m("amt", status="REVIEW", submitted_by=1, reviewer_type="domain", reviewer_domain="medical_fee")
+        svc, _ = await _review_svc(m)
+        # 异域评审被拒
+        with pytest.raises(UnisenseError):
+            await svc.approve_measure("amt", MeasureApproveRequest(), 5, "reviewer", user_domain="sales")
+        # 同域评审通过
+        out = await svc.approve_measure("amt", MeasureApproveRequest(), 5, "reviewer", user_domain="medical_fee")
+        assert out.status == "PUBLISHED"
+
+    async def test_reject_requires_review(self) -> None:
+        svc, _ = await _review_svc(_m("amt", status="PUBLISHED"))
+        with pytest.raises(UnisenseError):
+            await svc.reject_measure("amt", MeasureRejectRequest(reason="口径不清"), 9, "domain_admin")
+
+    async def test_reject_sets_draft_with_reason(self) -> None:
+        m = _m("amt", status="REVIEW", submitted_by=1)
+        svc, _ = await _review_svc(m)
+        out = await svc.reject_measure("amt", MeasureRejectRequest(reason="统计口径与业务不符"), 9, "domain_admin")
+        assert out.status == "DRAFT"
+        assert out.reject_reason == "统计口径与业务不符"
+        assert out.reject_reviewer_id == 9
+        assert out.rejected_at is not None
+
+    async def test_review_blocks_update(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="REVIEW"))
+        with pytest.raises(UnisenseError):
+            await svc.update_measure("amt", MeasureUpdate(name="改名"))
+        assert repo.commit.await_count == 0
 
 
 # ---------- AI 推断（auto_suggest） ----------

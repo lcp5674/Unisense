@@ -1023,6 +1023,16 @@ export interface MeasureCatalog {
   domain: string;
   owner_id: number;
   status: string;
+  /** 审核流字段（对齐指标审核流 TD §13） */
+  submitted_by?: number | null;
+  approver_id?: number | null;
+  reviewer_id?: number | null;
+  reviewer_type?: string | null;
+  reviewer_domain?: string | null;
+  reject_reason?: string | null;
+  reject_reviewer_id?: number | null;
+  rejected_at?: string | null;
+  reviewed_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1525,8 +1535,11 @@ export interface Feedback {
   source_url: string | null;
   /** NPS 评分（0-10，仅 NPS 采集记录有值） */
   nps_score: number | null;
-  /** 采纳闭环状态：pending/in_progress/adopted/rejected */
+  /** 采纳闭环状态：pending/in_progress/adopted/rejected/clarifying */
   status: string;
+  /** 质疑澄清（质疑→澄清→修订闭环）：提交人在 clarifying 状态补充的说明 */
+  clarification?: string | null;
+  clarified_at?: string | null;
   resolution_note: string | null;
   resolver_id: number | null;
   resolved_at: string | null;
@@ -1751,6 +1764,8 @@ export interface LlmConfigTestResult {
   detail?: Record<string, unknown> | null;
   /** GET /models 返回的可用模型列表（连通成功时） */
   models?: string[];
+  /** 真实推理探测是否通过（true=可推理；false=网关可达但模型不可推理；undefined=未执行） */
+  chat?: boolean;
 }
 
 export interface LlmConfigSecret {

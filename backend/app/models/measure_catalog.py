@@ -12,9 +12,10 @@
 from __future__ import annotations
 
 import enum
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Enum, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, Enum, Integer, String, Text
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -43,9 +44,14 @@ class MeasureCategory(enum.StrEnum):
 
 
 class MeasureStatus(enum.StrEnum):
-    """逻辑度量状态机（照 dimension 发布式主数据）。"""
+    """逻辑度量状态机（对齐指标审核流：DRAFT → REVIEW → PUBLISHED → DEPRECATED）。
+
+    度量是原子指标的权威继承源（单位/格式/小数位/口径直接传播到下游指标），
+    故发布须先提交审核（DRAFT → REVIEW），审核通过才 PUBLISHED（对齐指标治理闭环）。
+    """
 
     DRAFT = "DRAFT"
+    REVIEW = "REVIEW"  # 待审核（已提交审核，审核通过才发布）
     PUBLISHED = "PUBLISHED"
     DEPRECATED = "DEPRECATED"
 
@@ -66,7 +72,10 @@ class MeasureCatalog(Base, BaseModel):
         comment="度量格式（AMOUNT/RATIO/NUMERIC）",
     )
     default_unit: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="元", comment="默认单位（金额:元/比率:小数/数值:自定义）"
+        String(32),
+        nullable=False,
+        default="元",
+        comment="默认单位（金额:元/比率:小数/数值:自定义）",
     )
     default_decimal_places: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="默认小数位数（金额2/比率4/数值按需，NULL=未定）"
@@ -87,5 +96,41 @@ class MeasureCatalog(Base, BaseModel):
         Enum(MeasureStatus, values_callable=lambda e: [m.value for m in e]),
         nullable=False,
         default=MeasureStatus.DRAFT.value,
-        comment="状态（DRAFT/PUBLISHED/DEPRECATED）",
+        comment="状态（DRAFT/REVIEW/PUBLISHED/DEPRECATED）",
+    )
+
+    # ---- 审核流字段（对齐指标审核流 TD §13：提交/指派/通过/驳回可追溯）----
+    #: 提交评审人 ID（approve/reject 时禁止自审，管理员豁免）
+    submitted_by: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="提交评审人 ID（approve/reject 时禁止自审）"
+    )
+    #: 审核通过人 ID（REVIEW→PUBLISHED 时写入）
+    approver_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="审核通过人 ID"
+    )
+    #: 评审指派（TD §13）：可指定评审用户或域评审组；未指派由域管理员兜底评审
+    reviewer_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="指定评审用户 ID（reviewer_type=user 时生效）"
+    )
+    reviewer_type: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, comment="评审指派类型: user(指定用户)/domain(域评审组)"
+    )
+    reviewer_domain: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="评审团队所在域（reviewer_type=domain 时生效）"
+    )
+    #: 驳回可追溯（对齐指标 FR-005）：reject 时落库驳回原因/审核人/时间，DRAFT 详情页展示引导修改
+    reject_reason: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+        comment="最近一次审核驳回原因（REVIEW→DRAFT 时写入，用于引导修改后重提）",
+    )
+    reject_reviewer_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="驳回审核人 ID（reject 时写入）"
+    )
+    rejected_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="驳回时间（REVIEW→DRAFT 时写入）"
+    )
+    #: 最近审核时间（approve/reject 时写入，审计可追溯）
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="最近审核时间（approve/reject 时写入）"
     )

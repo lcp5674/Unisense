@@ -1718,6 +1718,44 @@ export async function publishMeasureCatalog(measureCode: string): Promise<Measur
   );
 }
 
+/** 提交逻辑度量审核（DRAFT → REVIEW，发布须先审） */
+export async function submitMeasureCatalog(
+  measureCode: string,
+  body: {
+    change_reason: string;
+    reviewer_id?: number | null;
+    reviewer_type?: "user" | "domain" | null;
+    reviewer_domain?: string | null;
+  },
+): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/submit`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+/** 审核通过逻辑度量（REVIEW → PUBLISHED） */
+export async function approveMeasureCatalog(
+  measureCode: string,
+  body: { comment?: string | null },
+): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/approve`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+/** 审核驳回逻辑度量（REVIEW → DRAFT，驳回原因必填） */
+export async function rejectMeasureCatalog(
+  measureCode: string,
+  body: { reason: string },
+): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/reject`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
 export async function deprecateMeasureCatalog(measureCode: string): Promise<MeasureCatalog> {
   return request<MeasureCatalog>(
     `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/deprecate`,
@@ -2687,6 +2725,14 @@ export async function updateFeedbackStatus(
   return request<Feedback>(`${API_BASE}/observability/feedback/${feedbackId}/status`, {
     method: "PATCH",
     body: JSON.stringify({ status, resolution_note: resolutionNote ?? null }),
+  });
+}
+
+/** 质疑闭环：反馈提交人在 clarifying 状态提交澄清说明（仅本人可澄清） */
+export async function clarifyFeedback(feedbackId: number, clarification: string): Promise<Feedback> {
+  return request<Feedback>(`${API_BASE}/observability/feedback/${feedbackId}/clarify`, {
+    method: "POST",
+    body: JSON.stringify({ clarification }),
   });
 }
 

@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -17,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.base_service import BaseService
 from app.core.codegen import generate_unique_code, slugify_code
 from app.core.exceptions import (
+    AuthError,
     ConflictError,
     NotFoundError,
     UnisenseError,
@@ -27,12 +30,17 @@ from app.models.subject_domain import SubjectDomain
 from app.services.measure_catalog.repository import MeasureCatalogRepository
 from app.services.measure_catalog.schemas import (
     _FORMAT_DEFAULTS,
+    MeasureApproveRequest,
     MeasureAutoSuggestRequest,
     MeasureCreate,
+    MeasureRejectRequest,
+    MeasureSubmitRequest,
     MeasureSuggestResponse,
     MeasureUpdate,
     SuggestField,
 )
+
+logger = logging.getLogger(__name__)
 
 _VALID_FORMATS = {e.value for e in MeasureFormat}
 _VALID_CATEGORIES = {e.value for e in MeasureCategory}
@@ -160,6 +168,13 @@ class MeasureCatalogService(BaseService):
             raise UnisenseError(
                 f"已废弃逻辑度量不可更新: {measure_code}", error_code="INVALID_STATE"
             )
+        # 审核中锁定（REVIEW）：评审人基于当前定义审核，审核中改定义会造成评审失真；
+        # 驳回回 DRAFT 后即可修改重提（对齐指标 REVIEW 编辑即撤回的语义，这里更严格）。
+        if measure.status == MeasureStatus.REVIEW.value:
+            raise UnisenseError(
+                f"审核中的逻辑度量不可编辑（{measure_code}），请等待审核结果或驳回后修改",
+                error_code="INVALID_STATE",
+            )
         # 改编码：仅 DRAFT 状态允许（已发布度量被指标引用，改码会破坏引用）。
         if data.measure_code is not None and data.measure_code != measure_code:
             if measure.status != MeasureStatus.DRAFT.value:
@@ -213,6 +228,12 @@ class MeasureCatalogService(BaseService):
         return measure
 
     async def publish_measure(self, measure_code: str) -> MeasureCatalog:
+        """直接发布（DRAFT → PUBLISHED，平台管理员直发通道）。
+
+        业务用户发布度量须走审核流（submit_measure → approve_measure）；
+        本方法保留为系统/种子/平台管理员兜底直发（API 层已收紧为 platform_admin），
+        避免造数与迁移场景被迫走审核流程。
+        """
         measure = await self._require(measure_code)
         if measure.status != MeasureStatus.DRAFT.value:
             raise UnisenseError(
@@ -221,6 +242,325 @@ class MeasureCatalogService(BaseService):
         measure.status = MeasureStatus.PUBLISHED.value
         await self._repo.commit()
         return measure
+
+    async def submit_measure(
+        self,
+        measure_code: str,
+        request: MeasureSubmitRequest,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> MeasureCatalog:
+        """提交度量审核（DRAFT → REVIEW，对齐指标审核流 TD §13）。
+
+        度量是原子指标的权威继承源（单位/格式/小数位/口径直接传播到下游指标），
+        故发布须先提交审核；口径完整性校验保证评审人可判断。
+        """
+        measure = await self._require(measure_code)
+        self._assert_owner_or_admin(measure, actor_id, role or "")
+        if measure.status != MeasureStatus.DRAFT.value:
+            raise UnisenseError(
+                f"仅 DRAFT 状态可提交审核，当前 {measure.status}",
+                error_code="INVALID_STATE",
+            )
+        # 口径完整性校验：提交审核的度量必须有统计口径，否则评审人无法判断
+        # 度量定义合理性（对齐指标 submit 的空心指标拦截语义）。
+        if not (measure.stat_caliber or "").strip():
+            raise ValidationError(
+                f"逻辑度量 {measure_code} 尚未填写统计口径，请先编辑完善后再提交审核",
+                error_code="DEFINITION_INCOMPLETE",
+            )
+        # 评审指派解析（TD §13）：user 类型须带 reviewer_id；domain 类型缺省用度量自身域；
+        # 均不传则未指派（域管理员兜底评审）。
+        reviewer_updates: dict[str, Any] = {
+            "reviewer_id": None,
+            "reviewer_type": None,
+            "reviewer_domain": None,
+        }
+        rtype = request.reviewer_type
+        if rtype == "user":
+            if not request.reviewer_id:
+                raise ValidationError(
+                    "指定评审用户时须填写评审人",
+                    error_code="REVIEWER_ASSIGN_INVALID",
+                )
+            reviewer_updates["reviewer_id"] = request.reviewer_id
+            reviewer_updates["reviewer_type"] = "user"
+        elif rtype == "domain":
+            reviewer_updates["reviewer_type"] = "domain"
+            reviewer_updates["reviewer_domain"] = request.reviewer_domain or measure.domain
+        elif request.reviewer_id:
+            # 兼容旧调用：仅传 reviewer_id（未显式声明类型）按 user 处理
+            reviewer_updates["reviewer_id"] = request.reviewer_id
+            reviewer_updates["reviewer_type"] = "user"
+
+        measure.status = MeasureStatus.REVIEW.value
+        measure.submitted_by = actor_id
+        measure.reviewer_id = reviewer_updates["reviewer_id"]
+        measure.reviewer_type = reviewer_updates["reviewer_type"]
+        measure.reviewer_domain = reviewer_updates["reviewer_domain"]
+        # 重新提审即清空历史驳回原因（生命周期闭环）
+        measure.reject_reason = None
+        measure.reject_reviewer_id = None
+        measure.rejected_at = None
+        await self._repo.commit()
+        await self._notify_reviewers(
+            measure, "measure.submitted", "度量待审核",
+            reviewer_id=reviewer_updates["reviewer_id"],
+            reason=request.change_reason,
+        )
+        return measure
+
+    async def approve_measure(
+        self,
+        measure_code: str,
+        request: MeasureApproveRequest,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> MeasureCatalog:
+        """审核通过度量（REVIEW → PUBLISHED，对齐指标审核流 FR-004）。
+
+        评审人身份校验 + 自审禁止（管理员豁免）+ 状态机校验。
+        """
+        measure = await self._require(measure_code)
+        self._assert_reviewer_authorized(measure, actor_id, role or "", user_domain)
+        # 自审禁止：提交人与审核人不得为同一人；管理员豁免（小团队单管理员兜底）
+        if (
+            role not in ("platform_admin", "domain_admin")
+            and measure.submitted_by is not None
+            and measure.submitted_by == actor_id
+        ):
+            raise UnisenseError(
+                "提交人与审核人不得为同一人（禁止自审）",
+                error_code="SELF_REVIEW_BLOCKED",
+                ctx={"measure_code": measure_code, "submitted_by": measure.submitted_by},
+            )
+        if measure.status != MeasureStatus.REVIEW.value:
+            raise UnisenseError(
+                f"仅 REVIEW 状态可审核通过，当前 {measure.status}",
+                error_code="INVALID_STATE",
+            )
+        measure.status = MeasureStatus.PUBLISHED.value
+        measure.approver_id = actor_id
+        measure.reviewed_at = datetime.now(UTC).replace(tzinfo=None)
+        # 审核通过即清空历史驳回原因（生命周期闭环）
+        measure.reject_reason = None
+        measure.reject_reviewer_id = None
+        measure.rejected_at = None
+        await self._repo.commit()
+        await self._notify_submitter(
+            measure, "measure.approved", "度量已通过",
+            payload={"measure_code": measure_code, "domain": measure.domain},
+        )
+        return measure
+
+    async def reject_measure(
+        self,
+        measure_code: str,
+        request: MeasureRejectRequest,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> MeasureCatalog:
+        """审核驳回度量（REVIEW → DRAFT，对齐指标审核流 FR-005）。
+
+        驳回原因落库（可追溯），通知提交人引导修改后重提。
+        """
+        measure = await self._require(measure_code)
+        self._assert_reviewer_authorized(measure, actor_id, role or "", user_domain)
+        if (
+            role not in ("platform_admin", "domain_admin")
+            and measure.submitted_by is not None
+            and measure.submitted_by == actor_id
+        ):
+            raise UnisenseError(
+                "提交人与审核人不得为同一人（禁止自审）",
+                error_code="SELF_REVIEW_BLOCKED",
+                ctx={"measure_code": measure_code, "submitted_by": measure.submitted_by},
+            )
+        if measure.status != MeasureStatus.REVIEW.value:
+            raise UnisenseError(
+                f"仅 REVIEW 状态可驳回，当前 {measure.status}",
+                error_code="INVALID_STATE",
+            )
+        now = datetime.now(UTC).replace(tzinfo=None)
+        measure.status = MeasureStatus.DRAFT.value
+        measure.reject_reason = (request.reason or "").strip()[:500]
+        measure.reject_reviewer_id = actor_id
+        measure.rejected_at = now
+        measure.reviewed_at = now
+        await self._repo.commit()
+        await self._notify_submitter(
+            measure, "measure.rejected", "度量已驳回",
+            payload={
+                "measure_code": measure_code,
+                "domain": measure.domain,
+                "reason": request.reason,
+            },
+        )
+        return measure
+
+    def _assert_owner_or_admin(self, measure: MeasureCatalog, actor_id: int, role: str) -> None:
+        """越权守卫：metric_owner 仅可操作本人创建的度量。
+
+        platform_admin / domain_admin 放行；metric_owner 校验 owner_id == actor_id；
+        其余角色一律拒绝（对齐指标 _assert_owner_or_admin，度量无副 Owner）。
+        """
+        if role in ("platform_admin", "domain_admin"):
+            return
+        if role == "metric_owner":
+            if measure.owner_id == actor_id:
+                return
+            raise AuthError(
+                "无权操作他人逻辑度量",
+                error_code="FORBIDDEN",
+                ctx={
+                    "measure_code": measure.measure_code,
+                    "actor_id": actor_id,
+                    "owner_id": measure.owner_id,
+                },
+            )
+        raise AuthError(
+            "无权操作该逻辑度量",
+            error_code="FORBIDDEN",
+            ctx={"measure_code": measure.measure_code, "role": role},
+        )
+
+    def _assert_reviewer_authorized(
+        self,
+        measure: MeasureCatalog,
+        actor_id: int,
+        role: str,
+        user_domain: str | None,
+    ) -> None:
+        """评审人身份校验：仅被指派评审人可通过/打回度量（对齐指标 TD §13）。
+
+        - ``platform_admin``：始终可审（最终兜底）。
+        - ``reviewer_type=user``：仅 ``reviewer_id`` 指定的用户可审。
+        - ``reviewer_type=domain``：仅该域 ``domain_admin``/``reviewer`` 角色用户可审。
+        - 未指派：``domain_admin`` 兜底可审。
+        """
+        if role == "platform_admin":
+            return
+        if measure.reviewer_type == "user" and measure.reviewer_id is not None:
+            if actor_id != measure.reviewer_id:
+                raise AuthError(
+                    "该度量已指派给指定评审人，仅被指派者可通过/打回",
+                    error_code="FORBIDDEN_REVIEWER",
+                    ctx={"measure_code": measure.measure_code, "reviewer_id": measure.reviewer_id},
+                )
+            return
+        if measure.reviewer_type == "domain" and measure.reviewer_domain:
+            if role not in ("domain_admin", "reviewer"):
+                raise AuthError(
+                    "该度量已指派给域评审组，仅域管理员/评审员可通过/打回",
+                    error_code="FORBIDDEN_REVIEWER",
+                    ctx={
+                        "measure_code": measure.measure_code,
+                        "reviewer_domain": measure.reviewer_domain,
+                    },
+                )
+            if user_domain != measure.reviewer_domain:
+                raise AuthError(
+                    f"仅 {measure.reviewer_domain} 域评审组成员可评审该度量",
+                    error_code="FORBIDDEN_REVIEWER",
+                    ctx={"measure_code": measure.measure_code, "user_domain": user_domain},
+                )
+            return
+        # 未指派：域管理员兜底（保持"仅管理角色可审"语义）
+        if role != "domain_admin":
+            raise AuthError(
+                "未指派评审人，仅域管理员可评审该度量",
+                error_code="FORBIDDEN_REVIEWER",
+                ctx={"measure_code": measure.measure_code, "role": role},
+            )
+
+    async def _notify_reviewers(
+        self,
+        measure: MeasureCatalog,
+        event_type: str,
+        title: str,
+        *,
+        reviewer_id: int | None,
+        reason: str | None,
+    ) -> None:
+        """提交审核后通知评审人（独立 session，best-effort 不阻断主流程）。
+
+        - 已指派评审人：仅通知被指派者；
+        - 未指派：通知该域可审核角色（domain_admin/reviewer，active）。
+        """
+        from app.db.mysql import async_session_factory
+        from app.services.notify.service import NotifyService
+
+        targets: list[int] = []
+        if reviewer_id is not None:
+            targets = [reviewer_id]
+        else:
+            from sqlalchemy import select
+
+            from app.models.user import User
+
+            async with async_session_factory() as session:
+                stmt = select(User.id).where(
+                    User.status == "active",
+                    User.role.in_(("domain_admin", "reviewer")),
+                    User.domain == measure.domain,
+                )
+                result = await session.execute(stmt)
+                targets = [r[0] for r in result.all()]
+            # 排除提交人本人（自审已被禁止，通知列表亦不应包含自己）
+            if measure.submitted_by is not None:
+                targets = [uid for uid in targets if uid != measure.submitted_by]
+        for uid in targets:
+            async with async_session_factory() as session:
+                try:
+                    await NotifyService(session).notify_user(
+                        user_id=uid,
+                        event_type=event_type,
+                        title=title,
+                        payload={
+                            "measure_code": measure.measure_code,
+                            "domain": measure.domain,
+                            "reason": reason,
+                            "submitter_id": measure.submitted_by,
+                        },
+                    )
+                except Exception:  # noqa: BLE001 - 通知失败不阻断审核主流程
+                    logger.warning(
+                        "measure_reviewer_notify_failed event=%s measure=%s user=%s",
+                        event_type, measure.measure_code, uid,
+                    )
+        return None
+
+    async def _notify_submitter(
+        self,
+        measure: MeasureCatalog,
+        event_type: str,
+        title: str,
+        *,
+        payload: dict[str, Any],
+    ) -> None:
+        """审核结果通知提交人（独立 session，best-effort）。"""
+        from app.db.mysql import async_session_factory
+        from app.services.notify.service import NotifyService
+
+        if measure.submitted_by is None:
+            return
+        async with async_session_factory() as session:
+            try:
+                await NotifyService(session).notify_user(
+                    user_id=measure.submitted_by,
+                    event_type=event_type,
+                    title=title,
+                    payload=payload,
+                )
+            except Exception:  # noqa: BLE001 - 通知失败不阻断审核主流程
+                logger.warning(
+                    "measure_submitter_notify_failed event=%s measure=%s user=%s",
+                    event_type, measure.measure_code, measure.submitted_by,
+                )
+        return None
 
     async def deprecate_measure(self, measure_code: str) -> MeasureCatalog:
         measure = await self._require(measure_code)
